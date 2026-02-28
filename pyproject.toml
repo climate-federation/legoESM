@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "legoesm"
+version = "0.1.0"
+description = "legoESM: A Differentiable Earth System Model in JAX"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Pierre Gentine"},
+]
+keywords = ["earth-system-model", "jax", "differentiable", "weather", "climate"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Atmospheric Science",
+]
+dependencies = [
+    "jax>=0.4.35",
+    "jaxlib>=0.4.35",
+    "equinox>=0.11",
+    "optax>=0.2",
+    "xarray>=2024.0",
+    "zarr>=2.18",
+    "matplotlib>=3.9",
+    "cartopy>=0.23",
+    "pyyaml>=6.0",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+metal = ["jax-metal"]
+mpi = ["mpi4jax>=0.4"]
+dev = [
+    "pytest>=8.0",
+    "pytest-xdist",
+    "ruff",
+    "mypy",
+    "pre-commit",
+]
+docs = ["sphinx", "myst-parser"]
+
+[project.scripts]
+legoesm = "legoesm.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/legoesm"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
