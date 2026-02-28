@@ -133,34 +133,63 @@ class TracerTendencies(NamedTuple):
 
 
 # ==============================================================================
-# Full Atmosphere State (Future milestones)
+# Non-Hydrostatic Compressible Euler Equations
 # ==============================================================================
 
-class AtmosphereState(NamedTuple):
-    """State for the full 3D atmosphere.
+class NonHydrostaticState(NamedTuple):
+    """State for the fully compressible non-hydrostatic Euler equations.
 
-    Prognostic variables for the fully compressible non-hydrostatic equations.
-    Shape: (6, n, n, n_levels) for 3D fields.
+    Uses reference-state subtraction: prognostic variables are perturbations
+    from a 1D hydrostatically balanced reference state rho_0(z), theta_0(z).
+
+    3D fields at full levels: shape (6, n, n, nlev).
+    Vertical velocity at interfaces: shape (6, n, n, nlev+1).
+    2D surface fields: shape (6, n, n).
+    Tracers: shape (6, n, n, nlev, n_tracers).
+
+    Fields
+    ------
+    u : Field
+        Zonal wind [m/s]. Shape (6, n, n, nlev).
+    v : Field
+        Meridional wind [m/s]. Shape (6, n, n, nlev).
+    w : Field
+        Vertical velocity [m/s] at half (interface) levels.
+        Shape (6, n, n, nlev+1). Lorenz staggering.
+        Boundary conditions: w=0 at model top, w=v_h.grad(z_s) at surface.
+    theta_prime : Field
+        Potential temperature perturbation [K]. theta' = theta - theta_0(z).
+        Shape (6, n, n, nlev).
+    rho_prime : Field
+        Dry density perturbation [kg/m^3]. rho' = rho - rho_0(z).
+        Shape (6, n, n, nlev).
+    phis : Field
+        Surface geopotential [m^2/s^2]. Static (not time-stepped).
+        Shape (6, n, n).
+    tracers : Field
+        Tracer mixing ratios [kg/kg]. Shape (6, n, n, nlev, n_tracers).
+        For dry runs: n_tracers=0 (empty last axis).
+        For moist runs: tracers[...,0]=q_vapor, [..1]=q_cloud, [..2]=q_rain.
     """
-    rho: Field               # Dry air density [kg/m^3]
-    theta: Field             # Potential temperature [K]
-    u: Field                 # Zonal wind [m/s]
-    v: Field                 # Meridional wind [m/s]
-    w: Field                 # Vertical velocity [m/s]
-    q_vapor: Field           # Specific humidity [kg/kg]
-    q_cloud: Field           # Cloud water [kg/kg]
-    q_ice: Field             # Cloud ice [kg/kg]
-    p_surface: Field         # Surface pressure [Pa]
+    u: Field
+    v: Field
+    w: Field
+    theta_prime: Field
+    rho_prime: Field
+    phis: Field
+    tracers: Field
 
 
-class AtmosphereTendencies(NamedTuple):
-    """Tendencies for atmosphere prognostic variables."""
-    drho_dt: Field
-    dtheta_dt: Field
+class NonHydrostaticTendencies(NamedTuple):
+    """Tendencies (time derivatives) for the non-hydrostatic equations.
+
+    Same pytree structure as NonHydrostaticState so that SSP-RK3
+    tree_map works correctly. The phis tendency is always zero.
+    """
     du_dt: Field
     dv_dt: Field
     dw_dt: Field
-    dq_vapor_dt: Field
-    dq_cloud_dt: Field
-    dq_ice_dt: Field
-    dp_surface_dt: Field
+    dtheta_prime_dt: Field
+    drho_prime_dt: Field
+    dphis_dt: Field
+    dtracers_dt: Field

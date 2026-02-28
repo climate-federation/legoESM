@@ -129,7 +129,11 @@ class CubedSphereGrid(NamedTuple):
         return (jnp.pi / 2) * self.radius / (self.n * 1000.0)
 
 
-def create_cubed_sphere(n: int, radius: float = 6.371229e6) -> CubedSphereGrid:
+def create_cubed_sphere(
+    n: int,
+    radius: float = 6.371229e6,
+    omega: float = 7.292e-5,
+) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
     Parameters
@@ -139,6 +143,9 @@ def create_cubed_sphere(n: int, radius: float = 6.371229e6) -> CubedSphereGrid:
         C48 (~200km), C96 (~100km), C192 (~50km), C384 (~25km).
     radius : float
         Sphere radius in meters. Default: Earth radius.
+    omega : float
+        Planetary rotation rate [rad/s]. Default: Earth rotation rate.
+        Scale for small-Earth experiments.
 
     Returns
     -------
@@ -165,7 +172,6 @@ def create_cubed_sphere(n: int, radius: float = 6.371229e6) -> CubedSphereGrid:
     dx, dy = _compute_grid_spacing(lon, lat, n, radius)
 
     # Coriolis parameter
-    omega = 7.292e-5
     f = 2.0 * omega * sin_lat
 
     # Grid angle (rotation of local grid axes relative to east-north)

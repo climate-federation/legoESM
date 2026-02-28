@@ -1,15 +1,18 @@
-"""Sigma vertical coordinate for legoESM.
+"""Vertical coordinates for legoESM.
 
-The sigma coordinate is defined as σ = p / p_s, where p is pressure and
-p_s is surface pressure. It ranges from 0 at the model top to 1 at
-the surface, creating terrain-following coordinate surfaces.
+Two vertical coordinate systems are provided:
 
-This module provides:
-- SigmaCoordinate: vertical grid definition (levels, interfaces, thicknesses)
-- Pressure computation from sigma and surface pressure
-- Geopotential integration via the hydrostatic equation
-- Sigma-dot (vertical velocity in σ-coordinates) diagnosis from continuity
-- Vertical advection (first-order upwind)
+1. **SigmaCoordinate** (pressure-based, for hydrostatic primitive equations):
+   σ = p / p_s, terrain-following in pressure space.
+
+2. **HeightCoordinate** (height-based, for non-hydrostatic compressible Euler):
+   z* = H·(z - z_s)/(H - z_s), terrain-following in physical height space.
+   Includes 1D reference state profiles (rho_0, theta_0, pi_0) for
+   reference-state subtraction.
+
+3. **TerrainMetric**: 3D coordinate metric terms that depend on surface
+   elevation z_s(x, y). Used with HeightCoordinate for terrain-following
+   transformations.
 
 All functions are pure (no side effects) and compatible with jax.jit,
 jax.grad, jax.vmap, and jax.lax.scan.
@@ -18,11 +21,13 @@ References
 ----------
 - Simmons & Burridge (1981): An Energy and Angular-Momentum Conserving
   Vertical Finite-Difference Scheme and Hybrid Vertical Coordinates.
+- Klemp et al. (2007): A Terrain-Following Coordinate with Smoothed
+  Coordinate Surfaces.
 """
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -399,3 +404,287 @@ def compute_pressure_velocity(
     )
 
     return omega
+
+
+# ==============================================================================
+# Height-based vertical coordinate (non-hydrostatic)
+# ==============================================================================
+
+class HeightCoordinate(NamedTuple):
+    """Height-based terrain-following vertical coordinate (z-star).
+
+    The z-star coordinate is defined as:
+
+        z* = H · (z - z_s) / (H - z_s)
+
+    where H is the model top height and z_s is the surface elevation.
+    z* ranges from 0 at the surface to H at the model top.
+
+    Levels are indexed top-to-bottom: k=0 is the model top (z*=H),
+    k=n_levels-1 is the lowest level (z* near 0).
+
+    The reference state (rho_0, theta_0, pi_0) is a 1D hydrostatically
+    balanced profile used for reference-state subtraction in the
+    compressible Euler equations.
+
+    Fields
+    ------
+    n_levels : int
+        Number of full levels.
+    H : float
+        Model top height [m].
+    z_full : jax.Array
+        z* at full (mid-) levels [m], shape (nlev,). Top-to-bottom.
+    z_half : jax.Array
+        z* at half (interface) levels [m], shape (nlev+1,). Top-to-bottom.
+        z_half[0] = H (model top), z_half[-1] = 0 (surface).
+    dz : jax.Array
+        Layer thickness dz* [m], shape (nlev,).
+        dz[k] = z_half[k] - z_half[k+1] (positive since top-to-bottom).
+    dz_half : jax.Array
+        Distance between adjacent full levels [m], shape (nlev-1,).
+        dz_half[k] = z_full[k] - z_full[k+1].
+    rho_ref : jax.Array
+        Reference density at full levels [kg/m^3], shape (nlev,).
+    theta_ref : jax.Array
+        Reference potential temperature at full levels [K], shape (nlev,).
+    exner_ref : jax.Array
+        Reference Exner function at full levels [-], shape (nlev,).
+    exner_ref_half : jax.Array
+        Reference Exner function at half levels [-], shape (nlev+1,).
+    rho_ref_half : jax.Array
+        Reference density at half levels [kg/m^3], shape (nlev+1,).
+    """
+    n_levels: int
+    H: float
+    z_full: jax.Array
+    z_half: jax.Array
+    dz: jax.Array
+    dz_half: jax.Array
+    rho_ref: jax.Array
+    theta_ref: jax.Array
+    exner_ref: jax.Array
+    exner_ref_half: jax.Array
+    rho_ref_half: jax.Array
+
+
+class TerrainMetric(NamedTuple):
+    """Terrain-following coordinate metric terms.
+
+    These are 3D arrays that depend on horizontal position through
+    the surface elevation z_s(x, y).
+
+    The Jacobian J = dz/dz* = (H - z_s) / H maps between z* and
+    physical z. All vertical derivatives in z* must be divided by J
+    to get derivatives in physical z.
+
+    Fields
+    ------
+    z_s : jax.Array
+        Surface elevation [m], shape (6, n, n).
+    jacobian : jax.Array
+        dz/dz* = (H - z_s) / H, shape (6, n, n). Always > 0.
+    z_full_3d : jax.Array
+        Physical z at full levels [m], shape (6, n, n, nlev).
+    z_half_3d : jax.Array
+        Physical z at half levels [m], shape (6, n, n, nlev+1).
+    """
+    z_s: jax.Array
+    jacobian: jax.Array
+    z_full_3d: jax.Array
+    z_half_3d: jax.Array
+
+
+def _default_theta_ref(z: jax.Array) -> jax.Array:
+    """Default reference potential temperature: isothermal at 300 K.
+
+    For an isothermal atmosphere T=T0, the potential temperature is:
+        theta(z) = T0 * (p0/p(z))^kappa
+    But for simplicity, we use a constant theta_0 = 300 K.
+    """
+    return jnp.full_like(z, 300.0)
+
+
+def compute_reference_state(
+    z: jax.Array,
+    theta_ref_fn: Callable[[jax.Array], jax.Array],
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Compute 1D reference state by integrating hydrostatic balance.
+
+    Given theta_0(z), integrate the hydrostatic equation downward from
+    the model top:
+
+        d(pi_0)/dz = -g / (c_p · theta_0(z))
+
+    where pi = c_p · (p / p_0)^kappa is the Exner function.
+
+    Then recover density from the equation of state:
+
+        rho_0 = p_0 · pi_0^(c_v/R_d) / (R_d · theta_0)
+
+    Parameters
+    ----------
+    z : jax.Array
+        Height values [m], shape (n_points,). Must be sorted
+        top-to-bottom (decreasing).
+    theta_ref_fn : callable
+        Function theta_0(z) -> potential temperature [K].
+
+    Returns
+    -------
+    rho_0 : jax.Array
+        Reference density [kg/m^3], shape (n_points,).
+    theta_0 : jax.Array
+        Reference potential temperature [K], shape (n_points,).
+    exner_0 : jax.Array
+        Reference Exner function [-], shape (n_points,).
+    """
+    g = constants.g
+    c_p = constants.c_pd
+    c_v = constants.c_vd
+    R_d = constants.R_d
+    p_0 = constants.p_ref
+
+    theta_0 = theta_ref_fn(z)
+
+    # Integrate d(pi)/dz = -g / (c_p * theta_0) downward from top.
+    # Use trapezoidal rule: pi[k+1] = pi[k] + (-g/(c_p*theta_avg)) * (z[k+1]-z[k])
+    # Note: z is top-to-bottom, so z[k+1] < z[k], and dz = z[k+1]-z[k] < 0.
+    # This means pi increases downward (as expected).
+
+    # Start with pi at model top. Use a reasonable value:
+    # T_top = theta_top * pi_top => pi_top = T_top / theta_top
+    # For ~40km top, T ~ 250K, theta ~ 1000K => pi ~ 0.25
+    # Better: use standard atmosphere pressure at model top.
+    # p_top = p_0 * exp(-g * z_top / (R_d * T_avg))
+    z_top = z[0]
+    T_avg = 250.0  # rough average temperature for scale height
+    p_top = p_0 * jnp.exp(-g * z_top / (R_d * T_avg))
+    pi_top = c_p * (p_top / p_0) ** (R_d / c_p)
+
+    # Integrate downward level by level
+    n = z.shape[0]
+    dz_vals = jnp.diff(z)  # (n-1,) — negative since z decreasing
+
+    # Trapezoidal integration of -g / (c_p * theta_0)
+    integrand = -g / (c_p * theta_0)  # (n,)
+    integrand_avg = 0.5 * (integrand[:-1] + integrand[1:])  # (n-1,)
+    d_pi = integrand_avg * dz_vals  # (n-1,)
+
+    # Cumulative sum gives pi at each level
+    pi_increments = jnp.cumsum(d_pi)  # (n-1,)
+    exner_0 = jnp.concatenate([jnp.array([pi_top]), pi_top + pi_increments])
+
+    # Recover density from equation of state:
+    # p = p_0 * (pi / c_p)^(c_p/R_d)
+    # rho = p / (R_d * T) = p / (R_d * theta * pi / c_p)
+    pressure = p_0 * (exner_0 / c_p) ** (c_p / R_d)
+    rho_0 = pressure / (R_d * theta_0 * exner_0 / c_p)
+
+    return rho_0, theta_0, exner_0
+
+
+def create_height_coordinate(
+    n_levels: int,
+    H: float,
+    theta_ref_fn: Callable[[jax.Array], jax.Array] | None = None,
+) -> HeightCoordinate:
+    """Create a uniformly-spaced height-based (z-star) vertical coordinate.
+
+    Parameters
+    ----------
+    n_levels : int
+        Number of full vertical levels.
+    H : float
+        Model top height [m].
+    theta_ref_fn : callable, optional
+        Function theta_0(z) -> potential temperature [K].
+        Default: constant 300 K (isothermal reference).
+
+    Returns
+    -------
+    HeightCoordinate
+        The vertical coordinate with precomputed reference state.
+    """
+    if theta_ref_fn is None:
+        theta_ref_fn = _default_theta_ref
+
+    # z* grid: top-to-bottom (z_half[0] = H, z_half[-1] = 0)
+    z_half = jnp.linspace(H, 0.0, n_levels + 1, dtype=jnp.float32)
+    z_full = 0.5 * (z_half[:-1] + z_half[1:])  # (nlev,)
+    dz = z_half[:-1] - z_half[1:]  # (nlev,) positive
+    dz_half = z_full[:-1] - z_full[1:]  # (nlev-1,) positive
+
+    # Compute reference state at full and half levels
+    rho_ref, theta_ref, exner_ref = compute_reference_state(
+        z_full, theta_ref_fn
+    )
+    rho_ref_half, _, exner_ref_half = compute_reference_state(
+        z_half, theta_ref_fn
+    )
+
+    return HeightCoordinate(
+        n_levels=n_levels,
+        H=H,
+        z_full=z_full,
+        z_half=z_half,
+        dz=dz,
+        dz_half=dz_half,
+        rho_ref=rho_ref,
+        theta_ref=theta_ref,
+        exner_ref=exner_ref,
+        exner_ref_half=exner_ref_half,
+        rho_ref_half=rho_ref_half,
+    )
+
+
+def compute_terrain_metric(
+    z_s: jax.Array,
+    height_coord: HeightCoordinate,
+) -> TerrainMetric:
+    """Compute 3D terrain-following coordinate metrics.
+
+    The z-star to physical z transformation is:
+
+        z(z*, x, y) = z_s(x, y) + z* · (H - z_s(x, y)) / H
+
+    The Jacobian is:
+
+        J = dz/dz* = (H - z_s) / H
+
+    Parameters
+    ----------
+    z_s : jax.Array
+        Surface elevation [m], shape (6, n, n).
+    height_coord : HeightCoordinate
+        Vertical coordinate.
+
+    Returns
+    -------
+    TerrainMetric
+        3D coordinate metric terms.
+    """
+    H = height_coord.H
+
+    # Jacobian: J = (H - z_s) / H, shape (6, n, n)
+    jacobian = (H - z_s) / H
+
+    # Physical z at full levels: z = z_s + z* * (H - z_s) / H
+    # z_full is (nlev,), z_s is (6,n,n) -> z_full_3d is (6,n,n,nlev)
+    z_full_3d = (
+        z_s[..., None]
+        + height_coord.z_full[None, None, None, :] * jacobian[..., None]
+    )
+
+    # Physical z at half levels: same formula with z_half
+    z_half_3d = (
+        z_s[..., None]
+        + height_coord.z_half[None, None, None, :] * jacobian[..., None]
+    )
+
+    return TerrainMetric(
+        z_s=z_s,
+        jacobian=jacobian,
+        z_full_3d=z_full_3d,
+        z_half_3d=z_half_3d,
+    )

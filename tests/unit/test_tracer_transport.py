@@ -255,3 +255,155 @@ class TestSolverFactory:
         assert "tracer_transport" in AVAILABLE_SOLVERS
         assert "primitive_equations" in AVAILABLE_SOLVERS
         assert "spectral_shallow_water" in AVAILABLE_SOLVERS
+
+
+class TestSolverAxes:
+    """Test the two-axis (dynamics x discretization) solver selection."""
+
+    def test_resolve_hydrostatic_fv(self):
+        """dynamics=hydrostatic + discretization=finite_volume -> primitive_equations."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name(dynamics="hydrostatic", discretization="finite_volume")
+        assert name == "primitive_equations"
+
+    def test_resolve_nonhydrostatic_fv(self):
+        """dynamics=nonhydrostatic + discretization=finite_volume -> compressible_euler."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name(dynamics="nonhydrostatic", discretization="finite_volume")
+        assert name == "compressible_euler"
+
+    def test_resolve_shallow_water_fv(self):
+        """dynamics=shallow_water + discretization=finite_volume -> shallow_water."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name(dynamics="shallow_water", discretization="finite_volume")
+        assert name == "shallow_water"
+
+    def test_resolve_shallow_water_spectral(self):
+        """dynamics=shallow_water + discretization=spectral -> spectral_shallow_water."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name(dynamics="shallow_water", discretization="spectral")
+        assert name == "spectral_shallow_water"
+
+    def test_resolve_defaults_to_shallow_water_fv(self):
+        """No arguments default to shallow_water + finite_volume."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name()
+        assert name == "shallow_water"
+
+    def test_resolve_nonhydrostatic_default_discretization(self):
+        """dynamics=nonhydrostatic alone defaults to finite_volume."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name(dynamics="nonhydrostatic")
+        assert name == "compressible_euler"
+
+    def test_resolve_spectral_default_dynamics(self):
+        """discretization=spectral alone defaults to shallow_water dynamics."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name(discretization="spectral")
+        assert name == "spectral_shallow_water"
+
+    def test_resolve_invalid_dynamics_raises(self):
+        """Invalid dynamics value raises ValueError."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        with pytest.raises(ValueError, match="Unknown dynamics"):
+            resolve_solver_name(dynamics="invalid")
+
+    def test_resolve_invalid_discretization_raises(self):
+        """Invalid discretization value raises ValueError."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        with pytest.raises(ValueError, match="Unknown discretization"):
+            resolve_solver_name(discretization="invalid")
+
+    def test_resolve_unimplemented_combination_raises(self):
+        """Unimplemented combination raises ValueError."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        with pytest.raises(ValueError, match="not yet implemented"):
+            resolve_solver_name(dynamics="hydrostatic", discretization="spectral")
+
+    def test_resolve_legacy_equations_takes_precedence(self):
+        """Legacy equations key overrides default dynamics/discretization."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name(equations="primitive_equations")
+        assert name == "primitive_equations"
+
+    def test_resolve_explicit_axes_override_legacy(self):
+        """When dynamics is set explicitly, it overrides legacy equations."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name(
+            dynamics="nonhydrostatic",
+            equations="shallow_water",  # legacy, should be ignored
+        )
+        assert name == "compressible_euler"
+
+    def test_solver_axes_roundtrip(self):
+        """solver_axes() is the inverse of resolve_solver_name()."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name, solver_axes
+        for dyn in ["shallow_water", "hydrostatic", "nonhydrostatic"]:
+            for disc in ["finite_volume", "spectral"]:
+                try:
+                    name = resolve_solver_name(dynamics=dyn, discretization=disc)
+                except ValueError:
+                    continue  # unimplemented combination
+                axes = solver_axes(name)
+                assert axes == (dyn, disc), f"Roundtrip failed for {name}"
+
+    def test_create_model_from_config_hydrostatic(self, grid, sigma_coord):
+        """create_model with Config resolves hydrostatic FV correctly."""
+        from legoesm.atmosphere.dynamics import create_model, PrimitiveEquationModel
+        from legoesm.config import Config
+        cfg = Config.from_dict({
+            "atmosphere": {
+                "dynamics": "hydrostatic",
+                "discretization": "finite_volume",
+            }
+        })
+        model = create_model(legoesm_config=cfg, grid=grid, sigma_coord=sigma_coord)
+        assert isinstance(model, PrimitiveEquationModel)
+
+    def test_create_model_from_config_nonhydrostatic(self, grid):
+        """create_model with Config resolves nonhydrostatic FV correctly."""
+        from legoesm.atmosphere.dynamics import create_model, CompressibleEulerModel
+        from legoesm.config import Config
+        from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
+        hc = create_height_coordinate(10, 30000.0)
+        z_s = jnp.zeros((6, grid.lon.shape[1], grid.lon.shape[1]))
+        tm = compute_terrain_metric(z_s, hc)
+        cfg = Config.from_dict({
+            "atmosphere": {
+                "dynamics": "nonhydrostatic",
+                "discretization": "finite_volume",
+            }
+        })
+        model = create_model(
+            legoesm_config=cfg, grid=grid,
+            height_coord=hc, terrain_metric=tm,
+        )
+        assert isinstance(model, CompressibleEulerModel)
+
+    def test_create_model_from_config_shallow_water(self, grid):
+        """create_model with Config resolves shallow_water FV correctly."""
+        from legoesm.atmosphere.dynamics import create_model, ShallowWaterModel
+        from legoesm.config import Config
+        cfg = Config.from_dict({
+            "atmosphere": {
+                "dynamics": "shallow_water",
+                "discretization": "finite_volume",
+            }
+        })
+        model = create_model(legoesm_config=cfg, grid=grid)
+        assert isinstance(model, ShallowWaterModel)
+
+    def test_create_model_no_name_no_config_raises(self):
+        """create_model with neither name nor config raises ValueError."""
+        from legoesm.atmosphere.dynamics import create_model
+        with pytest.raises(ValueError, match="Either"):
+            create_model()
+
+    def test_dynamics_options_exported(self):
+        """DYNAMICS_OPTIONS and DISCRETIZATION_OPTIONS are accessible."""
+        from legoesm.atmosphere.dynamics import DYNAMICS_OPTIONS, DISCRETIZATION_OPTIONS
+        assert "hydrostatic" in DYNAMICS_OPTIONS
+        assert "nonhydrostatic" in DYNAMICS_OPTIONS
+        assert "shallow_water" in DYNAMICS_OPTIONS
+        assert "finite_volume" in DISCRETIZATION_OPTIONS
+        assert "spectral" in DISCRETIZATION_OPTIONS

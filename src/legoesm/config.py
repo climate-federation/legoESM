@@ -25,7 +25,21 @@ DEFAULT_CONFIG = {
         "vertical_coord": "none",  # "none" for shallow water
     },
     "atmosphere": {
-        "equations": "shallow_water",
+        # --- Two-axis solver selection ---
+        # dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
+        # discretization: "finite_volume" | "spectral"
+        #
+        # Mapping to solver implementations:
+        #   shallow_water  + finite_volume → ShallowWaterModel
+        #   shallow_water  + spectral      → SpectralShallowWaterModel
+        #   hydrostatic    + finite_volume → PrimitiveEquationModel
+        #   nonhydrostatic + finite_volume → CompressibleEulerModel
+        #
+        # The legacy "equations" key is still supported for backward
+        # compatibility and takes precedence when set explicitly.
+        "dynamics": "shallow_water",
+        "discretization": "finite_volume",
+        "equations": "shallow_water",   # legacy; use dynamics+discretization
         "advection": "centered",
         "time_integrator": "ssp_rk3",
         "dt_seconds": 600,          # 10 minutes
@@ -36,6 +50,14 @@ DEFAULT_CONFIG = {
         "tracer_transport": {
             "n_tracers": 4,
             "hyperdiffusion_coeff": 0.0,
+        },
+        "nonhydrostatic": {
+            "n_acoustic_substeps": 6,
+            "acoustic_off_centering": 0.5,
+            "sponge_width_m": 10000.0,
+            "sponge_coeff": 0.05,
+            "small_earth_factor": 1.0,
+            "model_top_m": 40000.0,
         },
     },
     "conservation": {
