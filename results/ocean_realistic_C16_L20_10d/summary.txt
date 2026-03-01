@@ -8,20 +8,20 @@ Hyperdiffusion: 1.00e+15
 Barotropic substeps: 30
 
 stommel_gyre:
-  SSH: [-27.9902, 150.7640] m
-  Max speed: 16.8826 m/s
+  SSH: [-0.0061, 0.0141] m
+  Max speed: 0.5210 m/s
   SST: [15.00, 15.00] degC
-  KE: 1.0037e+18
+  KE: 6.8097e+14
 
 baroclinic_adjustment:
-  SSH: [nan, nan] m
-  Max speed: nan m/s
-  SST: [nan, nan] degC
-  KE: nan
+  SSH: [-3.9183, 1.8677] m
+  Max speed: 8.2459 m/s
+  SST: [9.95, 23.22] degC
+  KE: 1.0265e+19
 
 kelvin_wave:
-  SSH: [-198.2336, 42.3150] m
-  Max speed: 8.7873 m/s
+  SSH: [0.0056, 0.0058] m
+  Max speed: 0.0000 m/s
   SST: [15.00, 15.00] degC
-  KE: 1.4935e+18
+  KE: 1.2384e+08
 
