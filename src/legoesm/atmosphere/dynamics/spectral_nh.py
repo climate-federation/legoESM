@@ -164,7 +164,7 @@ def spectral_nh_slow_tendencies(
     dz_half = height_coord.dz_half
     theta_0 = height_coord.theta_ref
     rho_0 = height_coord.rho_ref
-    H = float(height_coord.z_half[0])
+    H = height_coord.z_half[0]
     J = terrain_metric.jacobian   # (n_lat, n_lon)
 
     # --- 1. Transform to grid ---
@@ -291,10 +291,8 @@ def spectral_nh_slow_tendencies(
         im_over_a[:, None] * sh_analysis_oc2_3d(grid, rho_u_cos)
         - one_over_a * sh_analysis_dmu_3d(grid, rho_v_cos)
     )
-    drho_p_hat = -flux_rho_div / J[..., None]  # Wait, this doesn't work in spectral.
-    # Actually: d(rho')/dt_horiz = -(1/J)*div_h(J*rho*v)
-    # In spectral, div_h(J*rho*v) is computed as flux_rho_div above (in spectral space).
-    # Then we need to divide by J (grid-point operation), so we transform to grid first:
+    # d(rho')/dt_horiz = -(1/J)*div_h(J*rho*v)
+    # flux_rho_div is spectral div_h(J*rho*v); divide by J in grid space:
     rho_horiz_tend_grid = -sh_synthesis_3d(grid, flux_rho_div) / J[..., None]
 
     # Vertical divergence in grid space
@@ -307,16 +305,8 @@ def spectral_nh_slow_tendencies(
     drho_p_hat = sh_analysis_3d(grid, drho_p_grid)
 
     # --- 14. w tendency (slow part) ---
-    # Slow w: horizontal advection only (vertical PGF is in acoustic substeps)
-    vert_adv_w = vertical_advection_height(
-        w[..., 1:-1],  # interior half-levels treated as "full" for advection
-        w, dz[:-1] if len(dz) > 1 else dz,
-        dz_half[:-1] if len(dz_half) > 1 else dz_half,
-        J,
-    ) if w.shape[-1] > 2 else jnp.zeros((*w.shape[:-1], max(0, w.shape[-1] - 2)))
-
-    # For simplicity, slow w tendency is just zero
-    # (acoustic substeps handle all w updates)
+    # Slow w tendency is zero: vertical PGF, buoyancy, and w-divergence are
+    # all handled by the acoustic substeps (forward-backward scheme).
     dw_hat = jnp.zeros_like(state.w_hat.data)
 
     # --- 15. Tracer advection ---

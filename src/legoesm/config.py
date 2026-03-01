@@ -33,7 +33,9 @@ DEFAULT_CONFIG = {
         #   shallow_water  + finite_volume → ShallowWaterModel
         #   shallow_water  + spectral      → SpectralShallowWaterModel
         #   hydrostatic    + finite_volume → PrimitiveEquationModel
+        #   hydrostatic    + spectral      → SpectralPrimitiveEquationModel
         #   nonhydrostatic + finite_volume → CompressibleEulerModel
+        #   nonhydrostatic + spectral      → SpectralCompressibleEulerModel
         #
         # The legacy "equations" key is still supported for backward
         # compatibility and takes precedence when set explicitly.

@@ -314,11 +314,17 @@ class TestSolverAxes:
         with pytest.raises(ValueError, match="Unknown discretization"):
             resolve_solver_name(discretization="invalid")
 
-    def test_resolve_unimplemented_combination_raises(self):
-        """Unimplemented combination raises ValueError."""
+    def test_resolve_hydrostatic_spectral(self):
+        """dynamics=hydrostatic + discretization=spectral -> spectral_primitive_equations."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
-        with pytest.raises(ValueError, match="not yet implemented"):
-            resolve_solver_name(dynamics="hydrostatic", discretization="spectral")
+        name = resolve_solver_name(dynamics="hydrostatic", discretization="spectral")
+        assert name == "spectral_primitive_equations"
+
+    def test_resolve_nonhydrostatic_spectral(self):
+        """dynamics=nonhydrostatic + discretization=spectral -> spectral_compressible_euler."""
+        from legoesm.atmosphere.dynamics import resolve_solver_name
+        name = resolve_solver_name(dynamics="nonhydrostatic", discretization="spectral")
+        assert name == "spectral_compressible_euler"
 
     def test_resolve_legacy_equations_takes_precedence(self):
         """Legacy equations key overrides default dynamics/discretization."""

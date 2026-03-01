@@ -17,13 +17,16 @@ There are two ways to choose a dynamical core:
    ``shallow_water``         finite_volume   ShallowWaterModel
    ``shallow_water``         spectral        SpectralShallowWaterModel
    ``hydrostatic``           finite_volume   PrimitiveEquationModel
+   ``hydrostatic``           spectral        SpectralPrimitiveEquationModel
    ``nonhydrostatic``        finite_volume   CompressibleEulerModel
+   ``nonhydrostatic``        spectral        SpectralCompressibleEulerModel
    ========================  ==============  ===============================
 
 2. **Legacy flat name** (still supported)::
 
        "shallow_water", "spectral_shallow_water",
-       "primitive_equations", "compressible_euler",
+       "primitive_equations", "spectral_primitive_equations",
+       "compressible_euler", "spectral_compressible_euler",
        "tracer_transport"
 
 Use :func:`resolve_solver_name` to convert between the two, and
@@ -50,14 +53,24 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerModel,
     compressible_euler_slow_tendencies,
 )
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralPrimitiveEquationModel,
+    spectral_pe_tendencies,
+)
+from legoesm.atmosphere.dynamics.spectral_nh import (
+    SpectralCompressibleEulerModel,
+    spectral_nh_slow_tendencies,
+)
 
 # Available solver names for the factory (flat namespace)
 AVAILABLE_SOLVERS = [
     "shallow_water",
     "spectral_shallow_water",
     "primitive_equations",
+    "spectral_primitive_equations",
     "tracer_transport",
     "compressible_euler",
+    "spectral_compressible_euler",
 ]
 
 # Valid values for the two-axis config keys
@@ -69,7 +82,9 @@ _AXIS_TO_SOLVER = {
     ("shallow_water", "finite_volume"): "shallow_water",
     ("shallow_water", "spectral"): "spectral_shallow_water",
     ("hydrostatic", "finite_volume"): "primitive_equations",
+    ("hydrostatic", "spectral"): "spectral_primitive_equations",
     ("nonhydrostatic", "finite_volume"): "compressible_euler",
+    ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
 }
 
 # flat solver name -> (dynamics, discretization)
@@ -251,6 +266,14 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return TracerTransportModel(**kwargs)
     elif name == "compressible_euler":
         return CompressibleEulerModel(**kwargs)
+    elif name == "spectral_primitive_equations":
+        if legoesm_config is not None:
+            kwargs.setdefault("legoesm_config", legoesm_config)
+        return SpectralPrimitiveEquationModel(**kwargs)
+    elif name == "spectral_compressible_euler":
+        if legoesm_config is not None:
+            kwargs.setdefault("legoesm_config", legoesm_config)
+        return SpectralCompressibleEulerModel(**kwargs)
     else:
         raise ValueError(
             f"Unknown solver: {name!r}. "
