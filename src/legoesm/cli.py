@@ -48,6 +48,10 @@ def main():
     bench_parser.add_argument("--resolution", "-n", type=int, default=48)
     bench_parser.add_argument("--n-steps", type=int, default=100)
     bench_parser.add_argument("--dt", type=float, default=600.0)
+    bench_parser.add_argument(
+        "--multi-gpu", action="store_true",
+        help="Shard across multiple devices (GPUs/TPUs) via face-parallel mesh",
+    )
 
     args = parser.parse_args()
 
@@ -206,6 +210,15 @@ def cmd_benchmark(args):
     grid = create_cubed_sphere(args.resolution)
     model = ShallowWaterModel(grid)
     state = williamson_test2(grid)
+
+    # Multi-GPU sharding
+    if args.multi_gpu:
+        from legoesm.parallel.mesh import create_device_mesh, shard_pytree, replicate_pytree
+        dev_config = create_device_mesh()
+        print(f"  Sharding: {dev_config.n_devices} devices, "
+              f"face-parallel on {dev_config.backend}")
+        state = shard_pytree(state, dev_config)
+        grid = replicate_pytree(grid, dev_config)
 
     # Warmup (JIT compilation)
     print("Warmup (JIT compilation)...", end=" ", flush=True)

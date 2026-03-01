@@ -91,6 +91,7 @@ class SpectralNHConfig(NamedTuple):
     sponge_coeff: float = 0.05
     n_acoustic_substeps: int = 6
     small_earth_factor: float = 1.0
+    semi_implicit_acoustic: bool = False  # Use tridiagonal solve for acoustics
 
 
 # =============================================================================
@@ -462,6 +463,98 @@ def _acoustic_substeps_grid(
     )
 
 
+def _acoustic_substeps_grid_semi_implicit(
+    w_grid, theta_p_grid, rho_p_grid,
+    dt_s, n_substeps,
+    height_coord, terrain_metric, config,
+):
+    """Semi-implicit acoustic substeps in grid space (tridiagonal w solve).
+
+    Same structure as the explicit version but the vertical pressure
+    gradient in the w equation is treated implicitly via a tridiagonal
+    solve, removing the vertical acoustic CFL constraint.
+    """
+    from legoesm.timestepping.tridiagonal import thomas_solve_batched
+
+    g = config.g
+    c_p = constants.c_pd
+    R_d = constants.R_d
+    c_v = constants.c_vd
+    dz = height_coord.dz
+    dz_half = height_coord.dz_half
+    theta_0 = height_coord.theta_ref
+    rho_0 = height_coord.rho_ref
+    J = terrain_metric.jacobian
+
+    # Linearized sound speed squared
+    gamma = c_p / c_v
+    T_ref = theta_0 * height_coord.exner_ref
+    cs2 = gamma * R_d * T_ref
+    cs2_half = 0.5 * (cs2[:-1] + cs2[1:])
+    dz_inner = 0.5 * (dz[:-1] + dz[1:])
+    nlev = theta_p_grid.shape[-1]
+
+    def substep_body(i, carry):
+        w_c, theta_p_c, rho_p_c = carry
+
+        theta_total = theta_0 + theta_p_c
+        rho_total = rho_0 + rho_p_c
+
+        # --- Explicit RHS for w ---
+        pi_p = compute_exner_perturbation(rho_p_c, theta_p_c, height_coord)
+        dpi_dz_inner = (pi_p[..., :-1] - pi_p[..., 1:]) / dz_inner
+        theta_half_inner = 0.5 * (theta_total[..., :-1] + theta_total[..., 1:])
+        theta_p_half = 0.5 * (theta_p_c[..., :-1] + theta_p_c[..., 1:])
+        theta_0_half = 0.5 * (theta_0[:-1] + theta_0[1:])
+        buoyancy = -g * theta_p_half / theta_0_half
+
+        dw_dt_inner = (
+            -c_p * theta_half_inner * dpi_dz_inner / J[..., None]
+            + buoyancy
+        )
+
+        rhs = w_c[..., 1:-1] + dt_s * dw_dt_inner
+
+        # --- Tridiagonal coefficients ---
+        alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2
+
+        a_tri = jnp.zeros_like(alpha)
+        a_tri = a_tri.at[..., 1:].set(-alpha[..., 1:])
+
+        b_tri = 1.0 + 2.0 * alpha
+        b_tri = b_tri.at[..., 0].set(1.0 + alpha[..., 0])
+        b_tri = b_tri.at[..., -1].set(1.0 + alpha[..., -1])
+
+        c_tri = jnp.zeros_like(alpha)
+        c_tri = c_tri.at[..., :-1].set(-alpha[..., :-1])
+
+        w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
+        w_new = w_c.at[..., 1:-1].set(w_inner_new)
+
+        # --- Backward: update rho' ---
+        rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
+        rho_w = jnp.zeros_like(w_new)
+        rho_w = rho_w.at[..., 1:-1].set(rho_half * w_new[..., 1:-1])
+        vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
+        vert_div = vert_div / J[..., None]
+        rho_p_new = rho_p_c - dt_s * vert_div
+
+        # --- Backward: update theta' ---
+        w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
+        dtheta_dz = jnp.zeros_like(theta_total)
+        if nlev > 2:
+            dz_centered = dz_half[:-1] + dz_half[1:]
+            inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
+            dtheta_dz = dtheta_dz.at[..., 1:-1].set(inner_grad)
+        theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
+
+        return (w_new, theta_p_new, rho_p_new)
+
+    return jax.lax.fori_loop(
+        0, n_substeps, substep_body, (w_grid, theta_p_grid, rho_p_grid),
+    )
+
+
 # =============================================================================
 # Model class
 # =============================================================================
@@ -519,17 +612,8 @@ class SpectralCompressibleEulerModel:
                 allow_unsupported=allow_unsupported_backend,
             )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: SpectralNHState, dt: float) -> SpectralNHState:
-        """Advance one time step using split-explicit RK3.
-
-        Slow tendencies use spectral horizontal operators.
-        Acoustic substeps run in grid space (purely vertical).
-        """
-        se_config = SplitExplicitConfig(
-            n_substeps=self.config.n_acoustic_substeps,
-        )
-
+    def _build_se_functions(self):
+        """Build slow tendency and acoustic update functions for split-explicit."""
         def slow_tendency_fn(s):
             return spectral_nh_slow_tendencies(
                 s, self.grid, self.height_coord,
@@ -543,7 +627,12 @@ class SpectralCompressibleEulerModel:
             rho_p_grid = sh_synthesis_3d(self.grid, s.rho_prime_hat.data)
 
             # Run acoustic substeps in grid space
-            w_new, theta_p_new, rho_p_new = _acoustic_substeps_grid(
+            acoustic_fn = (
+                _acoustic_substeps_grid_semi_implicit
+                if self.config.semi_implicit_acoustic
+                else _acoustic_substeps_grid
+            )
+            w_new, theta_p_new, rho_p_new = acoustic_fn(
                 w_grid, theta_p_grid, rho_p_grid,
                 dt_s, n_sub,
                 self.height_coord, self.terrain_metric, self.config,
@@ -564,6 +653,20 @@ class SpectralCompressibleEulerModel:
                 tracers_hat=s.tracers_hat,
             )
 
+        return slow_tendency_fn, acoustic_update_fn
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self, state: SpectralNHState, dt: float) -> SpectralNHState:
+        """Advance one time step using split-explicit RK3.
+
+        Slow tendencies use spectral horizontal operators.
+        Acoustic substeps run in grid space (purely vertical).
+        """
+        se_config = SplitExplicitConfig(
+            n_substeps=self.config.n_acoustic_substeps,
+        )
+        slow_tendency_fn, acoustic_update_fn = self._build_se_functions()
+
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
             result_cpu = split_explicit_step(
@@ -576,6 +679,17 @@ class SpectralCompressibleEulerModel:
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
 
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_on_cpu(self, state: SpectralNHState, dt: float) -> SpectralNHState:
+        """Step without device transfers (for batched CPU integration on Metal)."""
+        se_config = SplitExplicitConfig(
+            n_substeps=self.config.n_acoustic_substeps,
+        )
+        slow_tendency_fn, acoustic_update_fn = self._build_se_functions()
+        return split_explicit_step(
+            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+        )
+
     def integrate(
         self,
         state: SpectralNHState,
@@ -583,21 +697,185 @@ class SpectralCompressibleEulerModel:
         dt: float,
         save_every: int = 1,
     ) -> tuple[SpectralNHState, list]:
-        """Integrate forward for a given duration (Python loop)."""
-        n_steps = int(duration / dt)
-        trajectory = [state]
+        """Integrate forward for a given duration (Python loop).
 
+        On Metal, batches CPU transfers: transfer state to CPU once,
+        run all steps on CPU, then transfer results back to Metal.
+        This avoids per-step CPU↔Metal round-trips.
+        """
+        n_steps = int(duration / dt)
+
+        if self._use_cpu_for_spectral:
+            return self._integrate_on_cpu(state, n_steps, dt, save_every)
+
+        trajectory = [state]
         for i in range(n_steps):
             state = self.step(state, dt)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
-
         return state, trajectory
+
+    def _integrate_on_cpu(self, state, n_steps, dt, save_every):
+        """Batch integration on CPU: transfer once, not per step."""
+        state_cpu = jax.device_put(state, self._cpu_device)
+        trajectory_cpu = [state_cpu]
+
+        for i in range(n_steps):
+            state_cpu = self._step_on_cpu(state_cpu, dt)
+            if (i + 1) % save_every == 0:
+                trajectory_cpu.append(state_cpu)
+
+        # Transfer back to Metal
+        state_out = jax.device_put(state_cpu, self._default_device)
+        trajectory_out = [
+            jax.device_put(s, self._default_device) for s in trajectory_cpu
+        ]
+        return state_out, trajectory_out
 
 
 # =============================================================================
 # Initialization helpers
 # =============================================================================
+
+def dcmip25_tc1_init_spectral(
+    grid: GaussianGrid,
+    n_levels: int = 40,
+    params: dict | None = None,
+) -> tuple['SpectralNHState', HeightCoordinate, 'TerrainMetric']:
+    """Initialize DCMIP-2025 TC1 (gravity waves) on Gaussian grid.
+
+    Evaluates the TC1 initial condition (piecewise lapse rate, uniform
+    horizontal wind u=u0*cos(lat), Schaer mountain topography) on the
+    Gaussian grid, then transforms to spectral space.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+        Gaussian grid with SH transform matrices.
+    n_levels : int
+        Number of vertical levels.
+    params : dict, optional
+        Override default parameters (see dcmip2025.test_case_1.TC1_PARAMS).
+
+    Returns
+    -------
+    state : SpectralNHState
+        Initial state in spectral space.
+    height_coord : HeightCoordinate
+        Vertical coordinate with reference state.
+    terrain_metric : TerrainMetric
+        Terrain metric on Gaussian grid.
+    """
+    from legoesm.atmosphere.dynamics.dcmip2025.common import (
+        piecewise_lapse_theta_ref,
+    )
+    from legoesm.atmosphere.dynamics.dcmip2025.test_case_1 import TC1_PARAMS
+    from legoesm.grids.vertical import (
+        create_height_coordinate,
+        compute_terrain_metric,
+    )
+
+    p = {**TC1_PARAMS, **(params or {})}
+
+    # Reference state with piecewise lapse rate
+    theta_fn = piecewise_lapse_theta_ref(
+        T_s=p["T_s"],
+        lapse_tropo=p["lapse_tropo"],
+        lapse_strato=p["lapse_strato"],
+        z_tropopause=p["z_tropopause"],
+    )
+
+    # Vertical coordinate
+    height_coord = create_height_coordinate(n_levels, p["H"], theta_fn)
+
+    # --- Topography on Gaussian grid ---
+    # Schaer mountain: z_s = h0 * exp(-(d/halfwidth)^2)
+    lat_2d = grid.lat[:, None] * jnp.ones(grid.n_lon)[None, :]  # (n_lat, n_lon)
+    lon_2d = grid.lon2d
+    lat0 = p["mountain_lat"]
+    lon0 = p["mountain_lon"]
+    h0 = p["mountain_height"]
+    halfwidth = p["mountain_halfwidth"]
+
+    dlat = lat_2d - lat0
+    dlon = lon_2d - lon0
+    a_hav = (
+        jnp.sin(dlat / 2) ** 2
+        + jnp.cos(lat_2d) * jnp.cos(lat0) * jnp.sin(dlon / 2) ** 2
+    )
+    angular_dist = 2.0 * jnp.arcsin(jnp.sqrt(jnp.clip(a_hav, 0.0, 1.0)))
+    dist = angular_dist * grid.radius
+    z_s = h0 * jnp.exp(-(dist / halfwidth) ** 2)
+
+    # Terrain metric
+    terrain_metric = compute_terrain_metric(z_s, height_coord)
+
+    # --- Initial conditions on Gaussian grid ---
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+    nlev = n_levels
+
+    # Horizontal wind: u = u0 * cos(lat), v = 0
+    u0 = p["u0"]
+    u_grid = jnp.ones((n_lat, n_lon, nlev), dtype=jnp.float64) * (
+        u0 * jnp.cos(grid.lat)
+    )[:, None, None]
+    v_grid = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
+
+    # Transform u,v to spectral vorticity/divergence
+    a_rad = grid.radius
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a_rad
+    one_over_a = 1.0 / a_rad
+
+    cos_lat_3d = grid.cos_lat[:, None, None]
+    u_cos = u_grid * cos_lat_3d
+    v_cos = v_grid * cos_lat_3d
+
+    vor_hat = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
+        + one_over_a * sh_analysis_dmu_3d(grid, u_cos)
+    )
+    div_hat = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
+        - one_over_a * sh_analysis_dmu_3d(grid, v_cos)
+    )
+
+    # w = 0, perturbations = 0
+    n_sh = grid.n_sh
+    w_hat = jnp.zeros((n_sh, nlev + 1), dtype=jnp.complex128)
+    theta_p_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
+    rho_p_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
+
+    # Surface geopotential
+    phis_grid = constants.g * z_s
+    phis_hat = sh_analysis(grid, phis_grid.astype(jnp.float64))
+
+    # No tracers for dry dynamics
+    tracers_hat = jnp.zeros((n_sh, nlev, 1), dtype=jnp.complex128)
+
+    dims_3d = ("spectral", "level")
+    dims_w = ("spectral", "level_half")
+    dims_2d = ("spectral",)
+    dims_tr = ("spectral", "level", "tracer")
+
+    state = SpectralNHState(
+        vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
+        div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
+        w_hat=Field(data=w_hat, name="w_hat", dims=dims_w, units="m/s"),
+        theta_prime_hat=Field(
+            data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K",
+        ),
+        rho_prime_hat=Field(
+            data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3",
+        ),
+        phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
+        tracers_hat=Field(
+            data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/kg",
+        ),
+    )
+
+    return state, height_coord, terrain_metric
+
 
 def nh_rest_state_spectral(
     grid: GaussianGrid,

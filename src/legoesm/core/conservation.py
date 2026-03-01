@@ -15,9 +15,23 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
-from legoesm.core.operators import global_integral
+from legoesm.core.operators import global_integral, _is_distributed
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.core.state import ShallowWaterState, HydrostaticState
+
+
+def _global_area_sum(array: jax.Array, grid: CubedSphereGrid) -> jax.Array:
+    """Area-weighted global sum of a raw array, MPI-aware.
+
+    Like ``global_integral`` but works on raw arrays instead of
+    ``Field`` objects.  Under MPI, local sums are combined via
+    ``allreduce(SUM)`` to produce the true global total.
+    """
+    local_sum = jnp.sum(array * grid.area)
+    if _is_distributed():
+        from legoesm.parallel.reductions import global_sum_mpi
+        return global_sum_mpi(local_sum)
+    return local_sum
 
 
 def fix_mass_shallow_water(
@@ -91,7 +105,7 @@ def fix_energy_shallow_water(
         h_s = state.h_s.data
         ke = 0.5 * h * (u**2 + v**2)
         pe = 0.5 * g * (h + h_s)**2
-        return jnp.sum((ke + pe) * grid.area)
+        return _global_area_sum(ke + pe, grid)
 
     E_old = total_energy(state_old)
     E_new = total_energy(state_new)
@@ -100,10 +114,10 @@ def fix_energy_shallow_water(
     h_new = state_new.h.data
     u_new = state_new.u.data
     v_new = state_new.v.data
-    KE_new = jnp.sum(0.5 * h_new * (u_new**2 + v_new**2) * grid.area)
+    KE_new = _global_area_sum(0.5 * h_new * (u_new**2 + v_new**2), grid)
 
     # PE is already set by h (which was fixed by mass fixer)
-    PE_new = jnp.sum(0.5 * g * (h_new + state_new.h_s.data)**2 * grid.area)
+    PE_new = _global_area_sum(0.5 * g * (h_new + state_new.h_s.data)**2, grid)
 
     # Scale KE to match target: KE_target = E_old - PE_new
     KE_target = E_old - PE_new
@@ -197,10 +211,10 @@ def compute_conservation_diagnostics(
     v = state.v.data
     h_s = state.h_s.data
 
-    total_mass = jnp.sum(h * grid.area)
+    total_mass = _global_area_sum(h, grid)
     ke = 0.5 * h * (u**2 + v**2)
     pe = 0.5 * g * (h + h_s)**2
-    total_energy = jnp.sum((ke + pe) * grid.area)
+    total_energy = _global_area_sum(ke + pe, grid)
 
     return {
         'total_mass': total_mass,

@@ -19,9 +19,18 @@ The halo exchange is set up once at initialization via
     set_halo_backend("mpi", topology)
 
 After that, all operators automatically use MPI halo exchange.
+
+Optimization
+------------
+Edges to the same neighbor rank are packed into a single send buffer,
+reducing the number of MPI messages from ~4 per face (one per edge)
+to ~2-3 per rank (one per unique neighbor rank).  This cuts MPI
+latency overhead significantly on high-latency interconnects.
 """
 
 from __future__ import annotations
+
+from collections import defaultdict
 
 import jax
 import jax.numpy as jnp
@@ -40,6 +49,19 @@ from legoesm.parallel.comm import CommTopology
 _EDGES = (WEST, EAST, SOUTH, NORTH)
 
 
+def _place_strip(padded: jax.Array, face: int, edge: int, strip: jax.Array) -> jax.Array:
+    """Place a received strip into the correct halo position."""
+    if edge == WEST:
+        padded = padded.at[face, 0, 1:-1].set(strip)
+    elif edge == EAST:
+        padded = padded.at[face, -1, 1:-1].set(strip)
+    elif edge == SOUTH:
+        padded = padded.at[face, 1:-1, 0].set(strip)
+    elif edge == NORTH:
+        padded = padded.at[face, 1:-1, -1].set(strip)
+    return padded
+
+
 def pad_halo_mpi(
     data: jax.Array,
     topology: CommTopology,
@@ -48,6 +70,9 @@ def pad_halo_mpi(
 
     This mirrors :func:`legoesm.grids.halo.pad_halo` but uses
     ``mpi4jax.sendrecv`` for edges that cross MPI rank boundaries.
+
+    Edges to the same neighbor rank are packed into a single buffer
+    to reduce the number of MPI messages (latency optimization).
 
     Parameters
     ----------
@@ -79,6 +104,10 @@ def pad_halo_mpi(
     # Token for MPI ordering inside JIT.
     token = jax.lax.create_token()
 
+    # --- Phase 1: Classify edges as local vs remote, group remote by rank ---
+    local_edges = []   # (face, edge, nbr_face, nbr_edge, is_reversed)
+    remote_by_rank = defaultdict(list)  # nbr_rank -> [(face, edge, nbr_face, nbr_edge, is_reversed), ...]
+
     for face in topology.local_face_ids:
         for edge in _EDGES:
             nbr_face, nbr_edge, is_reversed = topology.neighbor_info[
@@ -86,41 +115,54 @@ def pad_halo_mpi(
             ]
             nbr_rank = topology.neighbor_ranks[(face, edge)]
 
+            entry = (face, edge, nbr_face, nbr_edge, is_reversed)
             if nbr_rank == topology.rank:
-                # Local exchange — no MPI needed.
-                strip = _extract_edge_strip(data, nbr_face, nbr_edge)
+                local_edges.append(entry)
             else:
-                # Send our edge strip to the neighbor, receive theirs.
-                send_strip = _extract_edge_strip(data, face, edge)
-                recv_strip = jnp.zeros(n, dtype=data.dtype)
+                remote_by_rank[nbr_rank].append(entry)
 
-                # Unique tag from (face, edge, nbr_face, nbr_edge).
-                tag = face * 100 + edge * 10 + nbr_face
-                recv_strip, token = mpi4jax.sendrecv(
-                    send_strip,
-                    recv_strip,
-                    source=nbr_rank,
-                    dest=nbr_rank,
-                    sendtag=tag,
-                    recvtag=nbr_face * 100 + nbr_edge * 10 + face,
-                    comm=MPI.COMM_WORLD,
-                    token=token,
-                )
-                strip = recv_strip
+    # --- Phase 2: Handle local edges (no MPI) ---
+    for face, edge, nbr_face, nbr_edge, is_reversed in local_edges:
+        strip = _extract_edge_strip(data, nbr_face, nbr_edge)
+        if is_reversed:
+            strip = strip[::-1]
+        padded = _place_strip(padded, face, edge, strip)
 
-            # Reverse if needed.
+    # --- Phase 3: Handle remote edges, packed per neighbor rank ---
+    for nbr_rank in sorted(remote_by_rank):
+        edges = remote_by_rank[nbr_rank]
+        n_edges = len(edges)
+
+        # Pack all outgoing strips into one buffer.
+        send_strips = []
+        for face, edge, nbr_face, nbr_edge, is_reversed in edges:
+            send_strips.append(_extract_edge_strip(data, face, edge))
+        send_buf = jnp.concatenate(send_strips, axis=0)  # (n_edges * n,)
+
+        recv_buf = jnp.zeros(n_edges * n, dtype=data.dtype)
+
+        # Single sendrecv per neighbor rank.
+        # Tag encodes (sender_rank, receiver_rank) for uniqueness.
+        send_tag = topology.rank * 1000 + nbr_rank
+        recv_tag = nbr_rank * 1000 + topology.rank
+
+        recv_buf, token = mpi4jax.sendrecv(
+            send_buf,
+            recv_buf,
+            source=nbr_rank,
+            dest=nbr_rank,
+            sendtag=send_tag,
+            recvtag=recv_tag,
+            comm=MPI.COMM_WORLD,
+            token=token,
+        )
+
+        # Unpack received buffer and place strips.
+        for i, (face, edge, nbr_face, nbr_edge, is_reversed) in enumerate(edges):
+            strip = recv_buf[i * n : (i + 1) * n]
             if is_reversed:
                 strip = strip[::-1]
-
-            # Place in halo position.
-            if edge == WEST:
-                padded = padded.at[face, 0, 1:-1].set(strip)
-            elif edge == EAST:
-                padded = padded.at[face, -1, 1:-1].set(strip)
-            elif edge == SOUTH:
-                padded = padded.at[face, 1:-1, 0].set(strip)
-            elif edge == NORTH:
-                padded = padded.at[face, 1:-1, -1].set(strip)
+            padded = _place_strip(padded, face, edge, strip)
 
     return padded
 

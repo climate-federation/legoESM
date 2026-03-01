@@ -237,6 +237,13 @@ class SpectralShallowWaterModel:
 
         return ssp_rk3_step(state, tendency_fn, dt)
 
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_on_cpu(self, state: SpectralSWState, dt: float) -> SpectralSWState:
+        """Step without device transfers (for batched CPU integration on Metal)."""
+        def tendency_fn(s):
+            return spectral_sw_tendencies(s, self.grid, self.config)
+        return ssp_rk3_step(state, tendency_fn, dt)
+
     def integrate(
         self,
         state: SpectralSWState,
@@ -244,16 +251,40 @@ class SpectralShallowWaterModel:
         dt: float,
         save_every: int = 1,
     ) -> tuple[SpectralSWState, list]:
-        """Integrate forward for a given duration (Python loop)."""
-        n_steps = int(duration / dt)
-        trajectory = [state]
+        """Integrate forward for a given duration (Python loop).
 
+        On Metal, batches CPU transfers: transfer state to CPU once,
+        run all steps on CPU, then transfer results back to Metal.
+        This avoids per-step CPU↔Metal round-trips.
+        """
+        n_steps = int(duration / dt)
+
+        if self._use_cpu_for_spectral:
+            return self._integrate_on_cpu(state, n_steps, dt, save_every)
+
+        trajectory = [state]
         for i in range(n_steps):
             state = self.step(state, dt)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
-
         return state, trajectory
+
+    def _integrate_on_cpu(self, state, n_steps, dt, save_every):
+        """Batch integration on CPU: transfer once, not per step."""
+        state_cpu = jax.device_put(state, self._cpu_device)
+        trajectory_cpu = [state_cpu]
+
+        for i in range(n_steps):
+            state_cpu = self._step_on_cpu(state_cpu, dt)
+            if (i + 1) % save_every == 0:
+                trajectory_cpu.append(state_cpu)
+
+        # Transfer back to Metal
+        state_out = jax.device_put(state_cpu, self._default_device)
+        trajectory_out = [
+            jax.device_put(s, self._default_device) for s in trajectory_cpu
+        ]
+        return state_out, trajectory_out
 
 
 # =============================================================================

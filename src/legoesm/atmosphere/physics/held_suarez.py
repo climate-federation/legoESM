@@ -171,6 +171,120 @@ def held_suarez_forcing(
     )
 
 
+def held_suarez_forcing_spectral(
+    state,
+    grid,
+    sigma_coord,
+):
+    """Compute Held-Suarez physics tendencies for the spectral PE.
+
+    Transforms the spectral state to grid space, computes Newtonian
+    relaxation and Rayleigh friction on the Gaussian grid, then
+    transforms the wind tendencies back to spectral vorticity/divergence
+    tendencies.
+
+    Parameters
+    ----------
+    state : SpectralHydrostaticState
+        Current spectral model state.
+    grid : GaussianGrid
+        Gaussian grid with SH transform matrices.
+    sigma_coord : SigmaCoordinate
+        Vertical coordinate.
+
+    Returns
+    -------
+    SpectralHydrostaticState
+        Physics tendencies in spectral space (same pytree structure).
+    """
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        SpectralHydrostaticState,
+        spectral_pe_to_grid,
+    )
+    from legoesm.grids.gaussian import (
+        sh_analysis,
+        sh_analysis_3d,
+        sh_analysis_oc2_3d,
+        sh_analysis_dmu_3d,
+    )
+
+    # --- 1. Transform state to grid space ---
+    fields = spectral_pe_to_grid(state, grid, sigma_coord)
+    u = fields['u']         # (n_lat, n_lon, nlev)
+    v = fields['v']
+    T = fields['T']
+    p_s = fields['p_s']     # (n_lat, n_lon)
+
+    sigma_full = sigma_coord.sigma_full  # (nlev,)
+    lat = grid.lat  # (n_lat,)
+
+    # --- 2. Pressure at full levels ---
+    p_full = p_s[..., None] * sigma_full  # (n_lat, n_lon, nlev)
+
+    # --- 3. Equilibrium temperature ---
+    T_eq = held_suarez_equilibrium_temperature(
+        lat[:, None, None], p_full,
+    )  # (n_lat, n_lon, nlev)
+
+    # --- 4. Temperature relaxation coefficient k_T(sigma, phi) ---
+    sigma_factor = jnp.maximum(
+        0.0, (sigma_full - SIGMA_B) / (1.0 - SIGMA_B),
+    )  # (nlev,)
+    cos_lat_4 = jnp.cos(lat) ** 4  # (n_lat,)
+    k_T = K_A + (K_S - K_A) * sigma_factor[None, None, :] * cos_lat_4[:, None, None]
+
+    # --- 5. Newtonian relaxation ---
+    dT_dt_phys = -k_T * (T - T_eq)
+
+    # --- 6. Rayleigh friction coefficient k_v(sigma) ---
+    k_v = K_F * jnp.maximum(
+        0.0, (sigma_full - SIGMA_B) / (1.0 - SIGMA_B),
+    )  # (nlev,)
+
+    # --- 7. Rayleigh friction: du/dt = -k_v*u, dv/dt = -k_v*v ---
+    du_dt_phys = -k_v[None, None, :] * u
+    dv_dt_phys = -k_v[None, None, :] * v
+
+    # --- 8. Convert wind tendencies to spectral vor/div tendencies ---
+    # The physics tendency in (u,v) must be projected onto (vor,div) in
+    # spectral space using the same spectral operators as the PE model.
+    a = grid.radius
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    # Multiply by cos(lat) for the spectral transform
+    cos_lat_3d = grid.cos_lat[:, None, None]  # (n_lat, 1, 1)
+    du_cos = du_dt_phys * cos_lat_3d
+    dv_cos = dv_dt_phys * cos_lat_3d
+
+    # curl(du,dv) -> dvor_hat (vorticity tendency)
+    dvor_hat = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, dv_cos)
+        + one_over_a * sh_analysis_dmu_3d(grid, du_cos)
+    )
+
+    # div(du,dv) -> ddiv_hat (divergence tendency)
+    ddiv_hat = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, du_cos)
+        - one_over_a * sh_analysis_dmu_3d(grid, dv_cos)
+    )
+
+    # --- 9. Transform T tendency to spectral ---
+    dT_hat = sh_analysis_3d(grid, dT_dt_phys)
+
+    # --- 10. No surface pressure tendency from HS forcing ---
+    dlnps_hat = jnp.zeros_like(state.lnps_hat.data)
+
+    # Build physics tendency pytree
+    return SpectralHydrostaticState(
+        vor_hat=state.vor_hat.replace(data=dvor_hat),
+        div_hat=state.div_hat.replace(data=ddiv_hat),
+        T_hat=state.T_hat.replace(data=dT_hat),
+        lnps_hat=state.lnps_hat.replace(data=dlnps_hat),
+        phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+    )
+
+
 def held_suarez_init(
     grid: CubedSphereGrid,
     sigma_coord: SigmaCoordinate,

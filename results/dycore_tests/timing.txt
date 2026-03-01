@@ -1,0 +1,3 @@
+total_wall_time: 16.1s
+Held-Suarez 30d SI (Hydro Spec T21/L10 SI): 7.3s
+DCMIP TC2a 6min SI (NH FV C8/L20 SI): 5.8s

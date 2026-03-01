@@ -26,7 +26,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState
-from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.cubed_sphere import CubedSphereGrid, rotate_winds_geo_to_grid
 from legoesm.grids.vertical import (
     HeightCoordinate,
     TerrainMetric,
@@ -127,10 +127,16 @@ def dcmip25_tc1_init(
     shape_w = (6, grid.n, grid.n, n_levels + 1)
     shape_2d = (6, grid.n, grid.n)
 
-    # Horizontal wind: u = u0 * cos(lat)
+    # Horizontal wind: u_east = u0 * cos(lat), v_north = 0
+    # Rotate from geographic to grid-aligned coordinates on cubed sphere
     u0 = p["u0"]
-    u_data = jnp.ones(shape_3d) * (u0 * jnp.cos(grid.lat))[..., None]
-    v_data = jnp.zeros(shape_3d)
+    u_east = u0 * jnp.cos(grid.lat)  # (6, n, n)
+    v_north = jnp.zeros_like(u_east)
+    u_grid_2d, v_grid_2d = rotate_winds_geo_to_grid(
+        u_east, v_north, grid.angle,
+    )
+    u_data = jnp.broadcast_to(u_grid_2d[..., None], shape_3d).copy()
+    v_data = jnp.broadcast_to(v_grid_2d[..., None], shape_3d).copy()
 
     # Vertical velocity: w = 0
     w_data = jnp.zeros(shape_w)

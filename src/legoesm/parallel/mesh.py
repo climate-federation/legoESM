@@ -105,6 +105,14 @@ def create_device_mesh(
     all_count = len(devices)
     backend_name = jax.default_backend().upper()
 
+    # Guard: no devices available.
+    if all_count == 0:
+        raise RuntimeError(
+            f"No JAX devices found"
+            + (f" for backend '{backend}'" if backend is not None else "")
+            + ". Check your JAX installation and hardware."
+        )
+
     # Resolve n_devices.
     if n_devices == "auto":
         n_dev = min(all_count, _N_FACES)

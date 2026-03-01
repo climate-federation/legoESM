@@ -30,6 +30,8 @@ import jax.numpy as jnp
 from legoesm.parallel.comm import CommTopology, build_comm_topology
 from legoesm.parallel.mesh import DeviceConfig, create_device_mesh
 
+_active_topology: CommTopology | None = None
+
 
 def initialize_distributed() -> DeviceConfig:
     """Initialize JAX distributed runtime and set up MPI halo exchange.
@@ -45,11 +47,30 @@ def initialize_distributed() -> DeviceConfig:
     # Initialize JAX distributed runtime.
     jax.distributed.initialize()
 
-    rank = jax.process_index()
-    n_processes = jax.process_count()
+    # Use MPI as the authoritative source for rank/size,
+    # since halo_exchange.py uses MPI.COMM_WORLD for all communication.
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    n_processes = comm.Get_size()
+
+    # Validate JAX agrees with MPI.
+    jax_rank = jax.process_index()
+    jax_size = jax.process_count()
+    if jax_rank != rank or jax_size != n_processes:
+        import warnings
+        warnings.warn(
+            f"JAX process_index/count ({jax_rank}/{jax_size}) differs from "
+            f"MPI rank/size ({rank}/{n_processes}). Using MPI values.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    global _active_topology
 
     # Build communication topology for this rank.
     topology = build_comm_topology(rank, n_processes)
+    _active_topology = topology
 
     # Set up MPI halo exchange.
     from legoesm.grids.halo import set_halo_backend
@@ -71,7 +92,12 @@ def initialize_distributed() -> DeviceConfig:
     )
 
 
-def partition_state(state, topology: CommTopology):
+def get_active_topology() -> CommTopology | None:
+    """Return the active MPI communication topology, if initialized."""
+    return _active_topology
+
+
+def partition_state(state, topology: CommTopology | None = None):
     """Zero out non-local faces in a state pytree.
 
     Keeps the full ``(6, n, n)`` shape but sets non-local face data to
@@ -82,17 +108,25 @@ def partition_state(state, topology: CommTopology):
     ----------
     state
         Any JAX pytree (e.g., ``ShallowWaterState``).
-    topology : CommTopology
-        Communication topology for this rank.
+    topology : CommTopology, optional
+        Communication topology for this rank. If omitted, uses the
+        active topology set by :func:`initialize_distributed`.
 
     Returns
     -------
     Masked pytree with same structure.
     """
+    topology = topology or _active_topology
+    if topology is None:
+        raise ValueError(
+            "No CommTopology provided and no active topology is set. "
+            "Call initialize_distributed() first or pass topology explicitly."
+        )
+
     local_faces = set(topology.local_face_ids)
 
     def _mask_leaf(leaf):
-        if not isinstance(leaf, jnp.ndarray):
+        if not isinstance(leaf, (jax.Array, jnp.ndarray)):
             return leaf
         if leaf.ndim < 1 or leaf.shape[0] != 6:
             return leaf
@@ -109,7 +143,7 @@ def partition_state(state, topology: CommTopology):
     return jax.tree.map(_mask_leaf, state)
 
 
-def gather_state(local_state, topology: CommTopology):
+def gather_state(local_state, topology: CommTopology | None = None):
     """Gather a partitioned state from all MPI ranks.
 
     Since non-local faces are zero, ``allreduce(SUM)`` produces the
@@ -119,18 +153,26 @@ def gather_state(local_state, topology: CommTopology):
     ----------
     local_state
         Partitioned JAX pytree (non-local faces are zero).
-    topology : CommTopology
-        Communication topology.
+    topology : CommTopology, optional
+        Communication topology. If omitted, uses the active topology
+        set by :func:`initialize_distributed`.
 
     Returns
     -------
     Global state pytree with all faces populated.
     """
+    topology = topology or _active_topology
+    if topology is None:
+        raise ValueError(
+            "No CommTopology provided and no active topology is set. "
+            "Call initialize_distributed() first or pass topology explicitly."
+        )
+
     import mpi4jax
     from mpi4py import MPI
 
     def _allreduce_leaf(leaf):
-        if not isinstance(leaf, jnp.ndarray):
+        if not isinstance(leaf, (jax.Array, jnp.ndarray)):
             return leaf
         result, _ = mpi4jax.allreduce(
             leaf, op=MPI.SUM, comm=MPI.COMM_WORLD

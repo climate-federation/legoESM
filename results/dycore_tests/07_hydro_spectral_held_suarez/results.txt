@@ -1,0 +1,4 @@
+max_wind: 193.8
+mean_T: 279.1
+stable: True
+wall_time: 44.0

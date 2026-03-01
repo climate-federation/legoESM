@@ -26,7 +26,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState
-from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.cubed_sphere import CubedSphereGrid, rotate_winds_geo_to_grid
 from legoesm.grids.vertical import (
     HeightCoordinate,
     TerrainMetric,
@@ -170,10 +170,21 @@ def dcmip25_tc3_init(
     z_full = height_coord.z_full  # (nlev,)
     T_sounding, theta_sounding, p_sounding = _squall_line_sounding(z_full, p)
 
-    # Background wind shear: u(z) = U_c + U_s * min(z/z_s, 1)
+    # Background wind shear: u_east(z) = U_c + U_s * min(z/z_s, 1)
+    # Must rotate from geographic (east, north) to grid-aligned coordinates
     u_profile = p["U_c"] + p["U_s"] * jnp.minimum(z_full / p["z_s"], 1.0)
-    u_data = jnp.ones(shape_3d) * u_profile[None, None, None, :]
+
+    # Rotate geographic wind to grid-aligned at each level
+    u_data = jnp.zeros(shape_3d)
     v_data = jnp.zeros(shape_3d)
+    v_north_2d = jnp.zeros(shape_2d)
+    for k in range(n_levels):
+        u_east_2d = jnp.full(shape_2d, u_profile[k])
+        u_k, v_k = rotate_winds_geo_to_grid(
+            u_east_2d, v_north_2d, small_grid.angle,
+        )
+        u_data = u_data.at[..., k].set(u_k)
+        v_data = v_data.at[..., k].set(v_k)
     w_data = jnp.zeros(shape_w)
 
     # Moisture: relative humidity profile

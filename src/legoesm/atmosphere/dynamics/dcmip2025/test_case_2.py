@@ -29,7 +29,10 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState
-from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.cubed_sphere import (
+    CubedSphereGrid,
+    rotate_winds_geo_to_grid,
+)
 from legoesm.grids.vertical import (
     HeightCoordinate,
     TerrainMetric,
@@ -106,6 +109,64 @@ def dcmip25_tc2b_topography(
     )
 
 
+def _gradient_wind_balanced_rho_prime(
+    lat: jnp.ndarray,
+    u0: float,
+    height_coord: HeightCoordinate,
+) -> jnp.ndarray:
+    """Compute density perturbation for gradient-wind balance with u = u0·cos(lat).
+
+    For barotropic solid-body rotation u = u0·cos(lat) on a sphere, the
+    gradient-wind balance equation (momentum equation in steady state with v=0)
+    gives the required Exner function perturbation:
+
+        π'(lat, z) = (u₀² + 2·R_earth·Ω·u₀) / (2·cₚ·θ₀(z)) · cos²(lat)
+
+    The density perturbation is then recovered from the equation of state:
+
+        ρ' = ρ₀ · ((1 + π'/π₀)^(cᵥ/R_d) − 1)
+
+    Note: the formula is independent of the small-Earth factor because the
+    Coriolis (∝ X) and curvature metric (∝ 1/X) scaling cancel exactly.
+
+    Parameters
+    ----------
+    lat : jnp.ndarray
+        Latitude [rad], shape (6, n, n).
+    u0 : float
+        Solid-body rotation speed [m/s].
+    height_coord : HeightCoordinate
+        Vertical coordinate with reference state (rho_0, theta_0, pi_0).
+
+    Returns
+    -------
+    rho_prime : jnp.ndarray
+        Balanced density perturbation, shape (6, n, n, nlev).
+    """
+    c_p = constants.c_pd
+    c_v = constants.c_vd
+    R_d = constants.R_d
+    R_earth = constants.R_earth
+    Omega = constants.Omega
+
+    theta_0 = height_coord.theta_ref    # (nlev,)
+    pi_0 = height_coord.exner_ref       # (nlev,)
+    rho_0 = height_coord.rho_ref        # (nlev,)
+
+    cos_lat = jnp.cos(lat)  # (6, n, n)
+
+    # Exner perturbation from gradient-wind balance
+    # π' = (u0² + 2·a·Ω·u0) / (2·cp·θ0) · cos²(lat)
+    coeff = (u0**2 + 2.0 * R_earth * Omega * u0) / (2.0 * c_p)
+    pi_prime = coeff * cos_lat[..., None]**2 / theta_0  # (6,n,n,nlev)
+
+    # Invert equation of state: ρ' = ρ0·((1 + π'/π0)^(cv/Rd) − 1)
+    exponent = c_v / R_d
+    rho_prime = rho_0 * ((1.0 + pi_prime / pi_0) ** exponent - 1.0)
+
+    return rho_prime
+
+
 def dcmip25_tc2_init(
     grid: CubedSphereGrid,
     n_levels: int = 48,
@@ -156,12 +217,27 @@ def dcmip25_tc2_init(
     shape_3d = (6, small_grid.n, small_grid.n, n_levels)
     shape_w = (6, small_grid.n, small_grid.n, n_levels + 1)
 
-    # Solid-body rotation: u = u0 * cos(lat)
-    u_data = jnp.ones(shape_3d) * (p["u0"] * jnp.cos(small_grid.lat))[..., None]
-    v_data = jnp.zeros(shape_3d)
+    # Solid-body rotation: u_east = u0 * cos(lat), v_north = 0
+    # Must rotate from geographic to grid-aligned coordinates on cubed sphere
+    u_east = p["u0"] * jnp.cos(small_grid.lat)  # (6, n, n)
+    v_north = jnp.zeros_like(u_east)
+
+    u_grid_2d, v_grid_2d = rotate_winds_geo_to_grid(
+        u_east, v_north, small_grid.angle,
+    )
+    u_data = jnp.broadcast_to(u_grid_2d[..., None], shape_3d).copy()
+    v_data = jnp.broadcast_to(v_grid_2d[..., None], shape_3d).copy()
     w_data = jnp.zeros(shape_w)
     theta_prime_data = jnp.zeros(shape_3d)
+
+    # Density perturbation: start at rest (rho'=0).
+    # Note: _gradient_wind_balanced_rho_prime() is available for
+    # gradient-wind balanced initialization, but the explicit split-explicit
+    # time integrator does not maintain this balance well with isothermal
+    # reference states, leading to faster blowup than rho'=0. A semi-implicit
+    # time integrator would be needed for balanced long integrations.
     rho_prime_data = jnp.zeros(shape_3d)
+
     phis_data = constants.g * z_s
     tracers_data = jnp.zeros((*shape_3d, 0))
 

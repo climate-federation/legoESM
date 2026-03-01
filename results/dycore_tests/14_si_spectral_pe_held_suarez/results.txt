@@ -1,0 +1,6 @@
+max_wind: nan
+mean_T: nan
+dt: 600.0
+semi_implicit: True
+stable: False
+wall_time: 7.3

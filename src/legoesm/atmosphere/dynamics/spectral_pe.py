@@ -74,6 +74,9 @@ class SpectralPEConfig(NamedTuple):
     g: float = constants.g
     hyperdiff_coeff: float = 0.0
     hyperdiff_order: int = 2
+    semi_implicit: bool = False      # Use Hoskins-Simmons semi-implicit
+    si_T_ref: float = 300.0         # Reference temperature for linearization [K]
+    si_alpha: float = 0.5           # Implicitness (0.5 = Crank-Nicolson)
 
 
 # =============================================================================
@@ -365,6 +368,7 @@ class SpectralPrimitiveEquationModel:
         self._use_cpu_for_spectral = False
         self._cpu_device = None
         self._default_device = None
+        self._si_data = None
 
         if legoesm_config is not None:
             allow_unsupported_backend = bool(
@@ -387,18 +391,38 @@ class SpectralPrimitiveEquationModel:
                 allow_unsupported=allow_unsupported_backend,
             )
 
+    def _ensure_si_data(self, dt: float):
+        """Lazily precompute semi-implicit matrices (on first step)."""
+        if self._si_data is None and self.config.semi_implicit:
+            from legoesm.timestepping.semi_implicit import precompute_si_matrices
+            self._si_data = precompute_si_matrices(
+                self.grid, self.sigma_coord,
+                T_ref=self.config.si_T_ref,
+                alpha=self.config.si_alpha,
+                dt=dt,
+            )
+
+    def _do_step(self, state, dt, tendency_fn):
+        """Core step: explicit RK3 or semi-implicit RK3."""
+        if self.config.semi_implicit:
+            from legoesm.timestepping.semi_implicit import ssp_rk3_step_si
+            return ssp_rk3_step_si(state, tendency_fn, dt, self._si_data, self.grid)
+        return ssp_rk3_step(state, tendency_fn, dt)
+
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
-        """Advance one time step using SSP-RK3."""
+        """Advance one time step using SSP-RK3 (explicit or semi-implicit)."""
+        self._ensure_si_data(dt)
+
         def tendency_fn(s):
             return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
-            result_cpu = ssp_rk3_step(state_cpu, tendency_fn, dt)
+            result_cpu = self._do_step(state_cpu, dt, tendency_fn)
             return jax.device_put(result_cpu, self._default_device)
 
-        return ssp_rk3_step(state, tendency_fn, dt)
+        return self._do_step(state, dt, tendency_fn)
 
     @partial(jax.jit, static_argnums=(0, 3))
     def step_with_physics(
@@ -408,6 +432,8 @@ class SpectralPrimitiveEquationModel:
         physics_fn=None,
     ) -> SpectralHydrostaticState:
         """Advance one time step with physics forcing."""
+        self._ensure_si_data(dt)
+
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -418,10 +444,34 @@ class SpectralPrimitiveEquationModel:
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
-            result_cpu = ssp_rk3_step(state_cpu, tendency_fn, dt)
+            result_cpu = self._do_step(state_cpu, dt, tendency_fn)
             return jax.device_put(result_cpu, self._default_device)
 
-        return ssp_rk3_step(state, tendency_fn, dt)
+        return self._do_step(state, dt, tendency_fn)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_on_cpu(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
+        """Step without device transfers (for batched CPU integration on Metal)."""
+        def tendency_fn(s):
+            return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
+        return self._do_step(state, dt, tendency_fn)
+
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _step_on_cpu_with_physics(
+        self,
+        state: SpectralHydrostaticState,
+        dt: float,
+        physics_fn=None,
+    ) -> SpectralHydrostaticState:
+        """Step with physics, no device transfers (for batched CPU integration)."""
+        def tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                phys = physics_fn(s, self.grid, self.sigma_coord)
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+        return self._do_step(state, dt, tendency_fn)
 
     def integrate(
         self,
@@ -431,10 +481,19 @@ class SpectralPrimitiveEquationModel:
         save_every: int = 1,
         physics_fn=None,
     ) -> tuple[SpectralHydrostaticState, list]:
-        """Integrate forward for a given duration (Python loop)."""
-        n_steps = int(duration / dt)
-        trajectory = [state]
+        """Integrate forward for a given duration (Python loop).
 
+        On Metal, batches CPU transfers: transfer state to CPU once,
+        run all steps on CPU, then transfer results back to Metal.
+        This avoids per-step CPU↔Metal round-trips.
+        """
+        n_steps = int(duration / dt)
+        self._ensure_si_data(dt)
+
+        if self._use_cpu_for_spectral:
+            return self._integrate_on_cpu(state, n_steps, dt, save_every, physics_fn)
+
+        trajectory = [state]
         for i in range(n_steps):
             if physics_fn is not None:
                 state = self.step_with_physics(state, dt, physics_fn)
@@ -442,8 +501,27 @@ class SpectralPrimitiveEquationModel:
                 state = self.step(state, dt)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
-
         return state, trajectory
+
+    def _integrate_on_cpu(self, state, n_steps, dt, save_every, physics_fn=None):
+        """Batch integration on CPU: transfer once, not per step."""
+        state_cpu = jax.device_put(state, self._cpu_device)
+        trajectory_cpu = [state_cpu]
+
+        for i in range(n_steps):
+            if physics_fn is not None:
+                state_cpu = self._step_on_cpu_with_physics(state_cpu, dt, physics_fn)
+            else:
+                state_cpu = self._step_on_cpu(state_cpu, dt)
+            if (i + 1) % save_every == 0:
+                trajectory_cpu.append(state_cpu)
+
+        # Transfer back to Metal
+        state_out = jax.device_put(state_cpu, self._default_device)
+        trajectory_out = [
+            jax.device_put(s, self._default_device) for s in trajectory_cpu
+        ]
+        return state_out, trajectory_out
 
 
 # =============================================================================
@@ -484,6 +562,137 @@ def isothermal_rest_state_spectral(
 
     # No topography
     phis_hat = jnp.zeros(n_sh, dtype=jnp.complex128)
+
+    return SpectralHydrostaticState(
+        vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
+        div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
+        T_hat=Field(data=T_hat, name="T_hat", dims=dims_3d, units="K"),
+        lnps_hat=Field(data=lnps_hat, name="lnps_hat", dims=dims_2d, units=""),
+        phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
+    )
+
+
+# =============================================================================
+# Baroclinic wave initialization (spectral)
+# =============================================================================
+
+def baroclinic_wave_init_spectral(
+    grid: GaussianGrid,
+    sigma_coord: SigmaCoordinate,
+    perturbed: bool = True,
+) -> SpectralHydrostaticState:
+    """Initialize Jablonowski-Williamson baroclinic wave in spectral space.
+
+    Evaluates the analytic JW06 balanced state on Gaussian grid points,
+    then transforms u,v → vorticity/divergence via spectral analysis.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+        Gaussian grid with SH transform matrices.
+    sigma_coord : SigmaCoordinate
+        Vertical sigma coordinate.
+    perturbed : bool
+        If True, add the exponential perturbation to trigger instability.
+
+    Returns
+    -------
+    SpectralHydrostaticState
+        Initial state for the baroclinic wave test.
+    """
+    import numpy as np
+    from legoesm.atmosphere.physics.baroclinic_wave import (
+        evaluate_pressure_temperature,
+        find_z_for_pressure,
+        compute_zonal_wind,
+        exponential_perturbation,
+        P0,
+    )
+
+    nlev = sigma_coord.n_levels
+    n_sh = grid.n_sh
+
+    # Grid coordinates as numpy for the analytic solution
+    lat_np = np.array(grid.lat)        # (n_lat,)
+    lon_np = np.array(grid.lon2d[0])   # (n_lon,) — all rows same longitude
+    sigma_full = np.array(sigma_coord.sigma_full)  # (nlev,)
+
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+
+    # Create 2D lat/lon for each level
+    lat_2d = np.broadcast_to(lat_np[:, None], (n_lat, n_lon))
+    lon_2d = np.array(grid.lon2d)
+
+    # Allocate 3D fields (n_lat, n_lon, nlev)
+    u_3d = np.zeros((n_lat, n_lon, nlev))
+    v_3d = np.zeros((n_lat, n_lon, nlev))
+    T_3d = np.zeros((n_lat, n_lon, nlev))
+
+    # Compute initial conditions level by level
+    for k in range(nlev):
+        # Target pressure at this sigma level
+        p_target = np.full((n_lat, n_lon), sigma_full[k] * P0)
+
+        # Find height where p(z, lat) = p_target
+        z_k = find_z_for_pressure(p_target, lat_2d)
+
+        # Compute temperature at this height
+        _, T_k = evaluate_pressure_temperature(z_k, lat_2d)
+
+        # Compute zonal wind from gradient-wind balance
+        u_k = compute_zonal_wind(z_k, lat_2d, T_k)
+
+        # Add perturbation if requested
+        if perturbed:
+            u_k = u_k + exponential_perturbation(lat_2d, lon_2d, z_k)
+
+        u_3d[:, :, k] = u_k
+        T_3d[:, :, k] = T_k
+
+    # Convert to JAX float64
+    u_jax = jnp.array(u_3d, dtype=jnp.float64)
+    v_jax = jnp.array(v_3d, dtype=jnp.float64)
+    T_jax = jnp.array(T_3d, dtype=jnp.float64)
+
+    # --- Transform u,v to spectral vorticity/divergence ---
+    # The spectral PE uses vorticity = curl(v) and divergence = div(v).
+    # From (u, v) on the Gaussian grid, we compute:
+    #   vor_hat = curl operator applied to (u*cos, v*cos)
+    #   div_hat = div operator applied to (u*cos, v*cos)
+    a = grid.radius
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    cos_lat_3d = grid.cos_lat[:, None, None]
+    u_cos = u_jax * cos_lat_3d
+    v_cos = v_jax * cos_lat_3d
+
+    # vor_hat = (im/a) * SH{v*cos/cos^2} + (1/a) * SH_dmu{u*cos}
+    vor_hat = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
+        + one_over_a * sh_analysis_dmu_3d(grid, u_cos)
+    )
+    # div_hat = (im/a) * SH{u*cos/cos^2} - (1/a) * SH_dmu{v*cos}
+    div_hat = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
+        - one_over_a * sh_analysis_dmu_3d(grid, v_cos)
+    )
+
+    # Temperature to spectral
+    T_hat = sh_analysis_3d(grid, T_jax)
+
+    # Uniform surface pressure (no topography for JW06)
+    lnps_grid = jnp.full(
+        (n_lat, n_lon), jnp.log(P0), dtype=jnp.float64,
+    )
+    lnps_hat = sh_analysis(grid, lnps_grid)
+
+    # No topography
+    phis_hat = jnp.zeros(n_sh, dtype=jnp.complex128)
+
+    dims_3d = ("spectral", "level")
+    dims_2d = ("spectral",)
 
     return SpectralHydrostaticState(
         vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
