@@ -586,3 +586,125 @@ def spectral_hyperdiffusion(
     eig = nn * (nn + 1.0) / a2  # n(n+1)/a^2
     damping = (-1.0) ** (order + 1) * nu * eig ** order
     return damping * coeffs
+
+
+# =============================================================================
+# 3D (level-wise) transform wrappers via vmap
+# =============================================================================
+
+def sh_analysis_3d(grid: GaussianGrid, field_3d: jax.Array) -> jax.Array:
+    """Forward SH transform per vertical level.
+
+    Parameters
+    ----------
+    field_3d : (n_lat, n_lon, nlev) real array.
+
+    Returns
+    -------
+    (n_sh, nlev) complex array.
+    """
+    f_t = jnp.moveaxis(field_3d, -1, 0)  # (nlev, n_lat, n_lon)
+    result = jax.vmap(lambda f: sh_analysis(grid, f))(f_t)  # (nlev, n_sh)
+    return jnp.moveaxis(result, 0, -1)  # (n_sh, nlev)
+
+
+def sh_synthesis_3d(grid: GaussianGrid, coeffs_3d: jax.Array) -> jax.Array:
+    """Inverse SH transform per vertical level.
+
+    Parameters
+    ----------
+    coeffs_3d : (n_sh, nlev) complex array.
+
+    Returns
+    -------
+    (n_lat, n_lon, nlev) real array.
+    """
+    c_t = jnp.moveaxis(coeffs_3d, -1, 0)  # (nlev, n_sh)
+    result = jax.vmap(lambda c: sh_synthesis(grid, c))(c_t)  # (nlev, n_lat, n_lon)
+    return jnp.moveaxis(result, 0, -1)  # (n_lat, n_lon, nlev)
+
+
+def sh_analysis_oc2_3d(
+    grid: GaussianGrid, field_3d: jax.Array,
+) -> jax.Array:
+    """Forward SH transform with 1/cos^2 weighting, per level.
+
+    Parameters
+    ----------
+    field_3d : (n_lat, n_lon, nlev).
+
+    Returns
+    -------
+    (n_sh, nlev) complex.
+    """
+    f_t = jnp.moveaxis(field_3d, -1, 0)
+    result = jax.vmap(lambda f: sh_analysis_oc2(grid, f))(f_t)
+    return jnp.moveaxis(result, 0, -1)
+
+
+def sh_analysis_dmu_3d(
+    grid: GaussianGrid, field_3d: jax.Array,
+) -> jax.Array:
+    """Forward SH transform with dPnm/dmu weighting, per level.
+
+    Parameters
+    ----------
+    field_3d : (n_lat, n_lon, nlev).
+
+    Returns
+    -------
+    (n_sh, nlev) complex.
+    """
+    f_t = jnp.moveaxis(field_3d, -1, 0)
+    result = jax.vmap(lambda f: sh_analysis_dmu(grid, f))(f_t)
+    return jnp.moveaxis(result, 0, -1)
+
+
+def uv_from_vordiv_3d(
+    grid: GaussianGrid,
+    vor_hat_3d: jax.Array,
+    div_hat_3d: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Reconstruct (u*cos_lat, v*cos_lat) at all levels from spectral vor/div.
+
+    Parameters
+    ----------
+    vor_hat_3d, div_hat_3d : (n_sh, nlev) complex arrays.
+
+    Returns
+    -------
+    u_cos, v_cos : (n_lat, n_lon, nlev) real arrays.
+    """
+    vor_t = jnp.moveaxis(vor_hat_3d, -1, 0)  # (nlev, n_sh)
+    div_t = jnp.moveaxis(div_hat_3d, -1, 0)
+
+    def single_level(v, d):
+        return uv_from_vordiv(grid, v, d)
+
+    u_cos_t, v_cos_t = jax.vmap(single_level)(vor_t, div_t)
+    return jnp.moveaxis(u_cos_t, 0, -1), jnp.moveaxis(v_cos_t, 0, -1)
+
+
+def spectral_hyperdiffusion_3d(
+    grid: GaussianGrid,
+    coeffs_3d: jax.Array,
+    nu: float,
+    order: int = 2,
+) -> jax.Array:
+    """Apply spectral hyperdiffusion to 3D spectral field, per level.
+
+    Pointwise in spectral space -- no vmap needed.
+
+    Parameters
+    ----------
+    coeffs_3d : (n_sh, nlev) complex.
+
+    Returns
+    -------
+    (n_sh, nlev) complex.
+    """
+    a2 = grid.radius * grid.radius
+    nn = grid.ls.astype(jnp.float64)
+    eig = nn * (nn + 1.0) / a2
+    damping = (-1.0) ** (order + 1) * nu * eig ** order  # (n_sh,)
+    return damping[:, None] * coeffs_3d

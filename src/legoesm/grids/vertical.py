@@ -516,7 +516,7 @@ def compute_reference_state(
 
         d(pi_0)/dz = -g / (c_p · theta_0(z))
 
-    where pi = c_p · (p / p_0)^kappa is the Exner function.
+    where pi = (p / p_0)^kappa is the dimensionless Exner function.
 
     Then recover density from the equation of state:
 
@@ -560,7 +560,7 @@ def compute_reference_state(
     z_top = z[0]
     T_avg = 250.0  # rough average temperature for scale height
     p_top = p_0 * jnp.exp(-g * z_top / (R_d * T_avg))
-    pi_top = c_p * (p_top / p_0) ** (R_d / c_p)
+    pi_top = (p_top / p_0) ** (R_d / c_p)
 
     # Integrate downward level by level
     n = z.shape[0]
@@ -576,10 +576,10 @@ def compute_reference_state(
     exner_0 = jnp.concatenate([jnp.array([pi_top]), pi_top + pi_increments])
 
     # Recover density from equation of state:
-    # p = p_0 * (pi / c_p)^(c_p/R_d)
-    # rho = p / (R_d * T) = p / (R_d * theta * pi / c_p)
-    pressure = p_0 * (exner_0 / c_p) ** (c_p / R_d)
-    rho_0 = pressure / (R_d * theta_0 * exner_0 / c_p)
+    # p = p_0 * pi^(c_p/R_d)
+    # rho = p / (R_d * T) = p / (R_d * theta * pi)
+    pressure = p_0 * exner_0 ** (c_p / R_d)
+    rho_0 = pressure / (R_d * theta_0 * exner_0)
 
     return rho_0, theta_0, exner_0
 

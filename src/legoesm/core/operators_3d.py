@@ -253,7 +253,7 @@ def vertical_advection_height(
     # Backward difference (upward)
     df_bwd = field_full[..., :-1] - field_full[..., 1:]
     grad_bwd = jnp.concatenate(
-        [jnp.zeros((*field_full.shape[:3], 1)),
+        [jnp.zeros((*field_full.shape[:-1], 1)),
          df_bwd / dz_half],
         axis=-1,
     )
@@ -261,7 +261,7 @@ def vertical_advection_height(
     # Forward difference (downward)
     grad_fwd = jnp.concatenate(
         [df_bwd / dz_half,
-         jnp.zeros((*field_full.shape[:3], 1))],
+         jnp.zeros((*field_full.shape[:-1], 1))],
         axis=-1,
     )
 

@@ -31,18 +31,11 @@ from legoesm.parallel.comm import CommTopology, build_comm_topology
 from legoesm.parallel.mesh import DeviceConfig, create_device_mesh
 
 
-def initialize_distributed(
-    backend: str = "mpi",
-) -> DeviceConfig:
+def initialize_distributed() -> DeviceConfig:
     """Initialize JAX distributed runtime and set up MPI halo exchange.
 
-    Must be called before any JAX computation.
-
-    Parameters
-    ----------
-    backend : str
-        Distributed backend (default ``"mpi"``).  Passed to
-        ``jax.distributed.initialize()``.
+    Must be called before any JAX computation.  Uses MPI for inter-process
+    communication and halo exchange.
 
     Returns
     -------

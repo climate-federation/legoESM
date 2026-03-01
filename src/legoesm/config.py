@@ -53,7 +53,6 @@ DEFAULT_CONFIG = {
         },
         "nonhydrostatic": {
             "n_acoustic_substeps": 6,
-            "acoustic_off_centering": 0.5,
             "sponge_width_m": 10000.0,
             "sponge_coeff": 0.05,
             "small_earth_factor": 1.0,
@@ -100,7 +99,8 @@ class Config:
         with open(path, "r") as f:
             user_config = yaml.safe_load(f)
         config = copy.deepcopy(DEFAULT_CONFIG)
-        _deep_merge(config, user_config)
+        if user_config:  # safe_load returns None for empty files
+            _deep_merge(config, user_config)
         return cls(config)
 
     @classmethod
@@ -130,7 +130,8 @@ class Config:
         d[keys[-1]] = value
 
     def to_dict(self) -> dict:
-        return dict(self._data)
+        """Return a deep copy of the config data as a plain dict."""
+        return copy.deepcopy(self._data)
 
     def to_yaml(self, path: str) -> None:
         """Save configuration to a YAML file."""

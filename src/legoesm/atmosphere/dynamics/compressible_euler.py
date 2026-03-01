@@ -10,7 +10,7 @@ Solves the compressible Euler equations in height-based terrain-following
     d(rho')/dt   = -(1/J)·[div_h(J·rho·v_h) + d(rho·w)/dz*]
 
 where:
-    pi = c_p·(p/p_0)^kappa     Exner function
+    pi = (p/p_0)^kappa          Exner function (dimensionless)
     B = 0.5·(u^2 + v^2)        Bernoulli function (kinetic energy only)
     J = (H - z_s) / H          Jacobian of z* transform
     primes = perturbation from 1D reference state
@@ -60,7 +60,6 @@ class CompressibleEulerConfig(NamedTuple):
     sponge_width: float = 10000.0   # Sponge layer width from model top [m]
     sponge_coeff: float = 0.05      # Maximum Rayleigh damping rate [1/s]
     n_acoustic_substeps: int = 6
-    acoustic_off_centering: float = 0.5
     small_earth_factor: float = 1.0
     use_conservation_fixer: bool = True
 
@@ -76,8 +75,8 @@ def compute_exner_perturbation(
 ) -> jax.Array:
     """Compute Exner function perturbation from density and theta perturbations.
 
-    The full Exner function is:
-        pi = c_p · (R_d · rho · theta / p_0)^(R_d/c_v)
+    The full (dimensionless) Exner function is:
+        pi = (R_d · rho · theta / p_0)^(R_d/c_v)
 
     The perturbation is pi' = pi_total - pi_0.
 
@@ -103,7 +102,7 @@ def compute_exner_perturbation(
     pi_0 = height_coord.exner_ref  # (nlev,)
 
     # Ratio form to avoid catastrophic cancellation in pi_total - pi_0.
-    # Since pi = c_p*(R_d*rho*theta/p_0)^(R_d/c_v), we have:
+    # Since pi = (R_d*rho*theta/p_0)^(R_d/c_v), we have:
     #   pi_total/pi_0 = ((rho_0+rho')*(theta_0+theta') / (rho_0*theta_0))^(R_d/c_v)
     #                 = ((1 + rho'/rho_0)*(1 + theta'/theta_0))^(R_d/c_v)
     #   pi' = pi_0 * (ratio^exponent - 1)
@@ -520,7 +519,6 @@ class CompressibleEulerModel:
         """
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
-            off_centering=self.config.acoustic_off_centering,
         )
 
         def slow_tendency_fn(s):
@@ -566,7 +564,6 @@ class CompressibleEulerModel:
         """
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
-            off_centering=self.config.acoustic_off_centering,
         )
 
         def slow_tendency_fn(s):

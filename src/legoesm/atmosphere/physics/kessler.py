@@ -160,7 +160,16 @@ def kessler_tendencies(
         Tendencies from microphysics. Only dtheta_prime_dt and
         dtracers_dt are nonzero.
     """
-    tracers = state.tracers.data  # (6, n, n, nlev, 3)
+    tracers = state.tracers.data  # (6, n, n, nlev, >=3)
+
+    n_tracers = tracers.shape[-1] if tracers.ndim >= 5 else 0
+    if n_tracers < 3:
+        raise ValueError(
+            f"Kessler microphysics requires at least 3 tracers "
+            f"(vapor, cloud, rain), got {n_tracers}. "
+            f"Tracer shape: {tracers.shape}"
+        )
+
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
 

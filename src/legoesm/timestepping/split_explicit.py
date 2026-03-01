@@ -35,8 +35,6 @@ State = TypeVar("State")
 class SplitExplicitConfig(NamedTuple):
     """Configuration for split-explicit time integration."""
     n_substeps: int = 6
-    off_centering: float = 0.5
-    divergence_damping: float = 0.0
 
 
 def split_explicit_step(
