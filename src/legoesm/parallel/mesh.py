@@ -119,6 +119,11 @@ def create_device_mesh(
     else:
         n_dev = int(n_devices)
 
+    if n_dev < 1:
+        raise ValueError(
+            f"n_devices must be >= 1, got {n_dev!r}."
+        )
+
     # Validate.
     if n_dev > _N_FACES:
         warnings.warn(

@@ -20,8 +20,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-jax.config.update("jax_enable_x64", True)
-
 
 def run_tc1(resolution, n_levels, dt, duration_hours, output_dir):
     """Run DCMIP-2025 TC1: Mountain gravity waves."""
@@ -265,7 +263,15 @@ def main():
     parser.add_argument("--dt", type=float, default=10.0)
     parser.add_argument("--hours", type=float, default=None)
     parser.add_argument("--output", "-o", type=str, default=None)
+    parser.add_argument(
+        "--x64",
+        action="store_true",
+        help="Enable float64 mode. Off by default for better Metal/FV performance.",
+    )
     args = parser.parse_args()
+
+    if args.x64:
+        jax.config.update("jax_enable_x64", True)
 
     defaults = {"tc1": 3.0, "tc2a": 6.0, "tc3": 2.0}
     hours = args.hours or defaults[args.test]

@@ -1,6 +1,8 @@
-max_wind: nan
-mean_T: nan
+max_wind: 243.1
+mean_T: 270.7
 dt: 600.0
 semi_implicit: True
-stable: False
-wall_time: 7.3
+si_substeps: 5
+hyperdiff_mult: 14.0
+stable: True
+wall_time: 144.5

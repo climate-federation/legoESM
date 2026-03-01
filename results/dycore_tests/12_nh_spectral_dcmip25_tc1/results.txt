@@ -1,4 +1,4 @@
 max_w: 0.0446
 hours: 1.0
 stable: True
-wall_time: 10.9
+wall_time: 10.0

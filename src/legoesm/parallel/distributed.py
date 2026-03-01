@@ -33,16 +33,25 @@ from legoesm.parallel.mesh import DeviceConfig, create_device_mesh
 _active_topology: CommTopology | None = None
 
 
-def initialize_distributed() -> DeviceConfig:
+def initialize_distributed(
+    *,
+    return_topology: bool = False,
+) -> DeviceConfig | tuple[DeviceConfig, CommTopology]:
     """Initialize JAX distributed runtime and set up MPI halo exchange.
 
     Must be called before any JAX computation.  Uses MPI for inter-process
     communication and halo exchange.
 
+    Parameters
+    ----------
+    return_topology : bool
+        If ``True``, also return the resolved :class:`CommTopology`.
+
     Returns
     -------
-    DeviceConfig
-        Device configuration with ``is_distributed=True``.
+    DeviceConfig or (DeviceConfig, CommTopology)
+        Device configuration with ``is_distributed=True``. If
+        ``return_topology=True``, returns ``(config, topology)``.
     """
     # Initialize JAX distributed runtime.
     jax.distributed.initialize()
@@ -82,7 +91,7 @@ def initialize_distributed() -> DeviceConfig:
     )
 
     # Return a new config marking distributed mode.
-    return DeviceConfig(
+    config = DeviceConfig(
         mesh=local_config.mesh,
         face_sharding=local_config.face_sharding,
         replicated_sharding=local_config.replicated_sharding,
@@ -90,6 +99,9 @@ def initialize_distributed() -> DeviceConfig:
         backend=local_config.backend,
         is_distributed=True,
     )
+    if return_topology:
+        return config, topology
+    return config
 
 
 def get_active_topology() -> CommTopology | None:

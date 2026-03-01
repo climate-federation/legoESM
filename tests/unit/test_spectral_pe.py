@@ -380,6 +380,38 @@ class TestSpectralPEModel:
         assert len(trajectory) == 3  # initial + 6/3=2 saves
         assert jnp.all(jnp.isfinite(final.T_hat.data))
 
+    def test_invalid_si_substeps(self, grid, sigma_coord, config):
+        """si_substeps must be >= 1."""
+        bad = config._replace(semi_implicit=True, si_substeps=0)
+        with pytest.raises(ValueError):
+            SpectralPrimitiveEquationModel(
+                grid, sigma_coord, bad,
+                allow_unsupported_backend=True,
+            )
+
+    def test_si_substeps_stabilize_large_dt_step(self, grid, sigma_coord, config):
+        """SI substeps should keep large-dt updates finite."""
+        si_cfg = config._replace(
+            semi_implicit=True,
+            si_substeps=2,
+            si_hyperdiff_boost=8.0,
+        )
+        model = SpectralPrimitiveEquationModel(
+            grid, sigma_coord, si_cfg,
+            allow_unsupported_backend=True,
+        )
+        state = isothermal_rest_state_spectral(grid, sigma_coord)
+
+        dt = 600.0
+        for _ in range(10):
+            state = model.step(state, dt)
+
+        for field_name in ['vor_hat', 'div_hat', 'T_hat', 'lnps_hat']:
+            data = getattr(state, field_name).data
+            assert jnp.all(jnp.isfinite(data)), (
+                f"With SI substeps, {field_name} has non-finite values"
+            )
+
 
 # =============================================================================
 # Diagnostic Tests

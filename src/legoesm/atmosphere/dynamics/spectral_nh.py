@@ -312,15 +312,10 @@ def spectral_nh_slow_tendencies(
 
     # --- 15. Tracer advection ---
     if n_tracers > 0:
-        # Transform tracers to grid
-        # tracers_hat: (n_sh, nlev, n_tracers)
-        # Handle by looping over tracers
-        tracers_grid_list = []
-        dtracers_grid_list = []
-        for t_idx in range(n_tracers):
-            q_hat = state.tracers_hat.data[..., t_idx]  # (n_sh, nlev)
+        tracers_hat_t = jnp.moveaxis(state.tracers_hat.data, -1, 0)  # (n_tracers, n_sh, nlev)
+
+        def _single_tracer_tendency(q_hat):
             q = sh_synthesis_3d(grid, q_hat)  # (n_lat, n_lon, nlev)
-            tracers_grid_list.append(q)
 
             # Horizontal advection: -div(q*v) + q*div
             q_u_cos = q * u_cos
@@ -335,10 +330,10 @@ def spectral_nh_slow_tendencies(
             # Vertical advection
             vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
             dq_hat = dq_hat + sh_analysis_3d(grid, vert_adv_q)
+            return dq_hat
 
-            dtracers_grid_list.append(dq_hat)
-
-        dtracers_hat = jnp.stack(dtracers_grid_list, axis=-1)
+        dtracers_hat_t = jax.vmap(_single_tracer_tendency)(tracers_hat_t)
+        dtracers_hat = jnp.moveaxis(dtracers_hat_t, 0, -1)
     else:
         dtracers_hat = jnp.zeros_like(state.tracers_hat.data)
 

@@ -61,6 +61,9 @@ class TestDeviceMesh:
 
     def test_invalid_n_devices(self):
         """n_devices that doesn't divide 6 raises ValueError."""
+        with pytest.raises(ValueError, match="must be >= 1"):
+            create_device_mesh(n_devices=0)
+
         with pytest.raises(ValueError, match="does not evenly divide"):
             create_device_mesh(n_devices=4)
 

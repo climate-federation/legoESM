@@ -77,6 +77,8 @@ class SpectralPEConfig(NamedTuple):
     semi_implicit: bool = False      # Use Hoskins-Simmons semi-implicit
     si_T_ref: float = 300.0         # Reference temperature for linearization [K]
     si_alpha: float = 0.5           # Implicitness (0.5 = Crank-Nicolson)
+    si_substeps: int = 1            # Internal SI substeps per external model step
+    si_hyperdiff_boost: float = 1.0  # Multiply hyperdiffusion in SI mode
 
 
 # =============================================================================
@@ -309,15 +311,19 @@ def spectral_pe_tendencies(
     dlnps_hat = sh_analysis(grid, dlnps_dt_grid)
 
     # --- 16. Spectral hyperdiffusion ---
-    if config.hyperdiff_coeff > 0:
+    hyperdiff_coeff = config.hyperdiff_coeff
+    if config.semi_implicit and config.si_hyperdiff_boost != 1.0:
+        hyperdiff_coeff = hyperdiff_coeff * config.si_hyperdiff_boost
+
+    if hyperdiff_coeff > 0:
         dvor_hat = dvor_hat + spectral_hyperdiffusion_3d(
-            grid, state.vor_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
+            grid, state.vor_hat.data, hyperdiff_coeff, config.hyperdiff_order,
         )
         ddiv_hat = ddiv_hat + spectral_hyperdiffusion_3d(
-            grid, state.div_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
+            grid, state.div_hat.data, hyperdiff_coeff, config.hyperdiff_order,
         )
         dT_hat = dT_hat + spectral_hyperdiffusion_3d(
-            grid, state.T_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
+            grid, state.T_hat.data, hyperdiff_coeff, config.hyperdiff_order,
         )
 
     # --- 17. Add physics tendencies if provided ---
@@ -369,6 +375,12 @@ class SpectralPrimitiveEquationModel:
         self._cpu_device = None
         self._default_device = None
         self._si_data = None
+        self._si_dt = None
+
+        if self.config.si_substeps < 1:
+            raise ValueError(
+                f"si_substeps must be >= 1, got {self.config.si_substeps!r}",
+            )
 
         if legoesm_config is not None:
             allow_unsupported_backend = bool(
@@ -395,18 +407,32 @@ class SpectralPrimitiveEquationModel:
         """Lazily precompute semi-implicit matrices (on first step)."""
         if self._si_data is None and self.config.semi_implicit:
             from legoesm.timestepping.semi_implicit import precompute_si_matrices
+            dt_si = dt / float(self.config.si_substeps)
             self._si_data = precompute_si_matrices(
                 self.grid, self.sigma_coord,
                 T_ref=self.config.si_T_ref,
                 alpha=self.config.si_alpha,
-                dt=dt,
+                dt=dt_si,
             )
 
     def _do_step(self, state, dt, tendency_fn):
         """Core step: explicit RK3 or semi-implicit RK3."""
         if self.config.semi_implicit:
             from legoesm.timestepping.semi_implicit import ssp_rk3_step_si
-            return ssp_rk3_step_si(state, tendency_fn, dt, self._si_data, self.grid)
+            n_substeps = int(self.config.si_substeps)
+            dt_si = dt / float(n_substeps)
+
+            if n_substeps == 1:
+                return ssp_rk3_step_si(
+                    state, tendency_fn, dt_si, self._si_data, self.grid,
+                )
+
+            def si_substep(_, s):
+                return ssp_rk3_step_si(
+                    s, tendency_fn, dt_si, self._si_data, self.grid,
+                )
+
+            return jax.lax.fori_loop(0, n_substeps, si_substep, state)
         return ssp_rk3_step(state, tendency_fn, dt)
 
     @partial(jax.jit, static_argnums=(0,))

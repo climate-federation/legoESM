@@ -233,14 +233,17 @@ def compressible_euler_slow_tendencies(
     # --- 8. Tracer advection ---
     n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
     if n_tracers > 0:
-        dtracers_dt = jnp.zeros_like(tracers)
-        for t_idx in range(n_tracers):
-            q = tracers[..., t_idx]
+        tracers_t = jnp.moveaxis(tracers, -1, 0)  # (n_tracers, 6, n, n, nlev)
+
+        def _single_tracer_tendency(q):
             dq_dx = gradient_x_3d(q, grid)
             dq_dy = gradient_y_3d(q, grid)
             horiz_adv_q = -(u * dq_dx + v * dq_dy)
             vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
-            dtracers_dt = dtracers_dt.at[..., t_idx].set(horiz_adv_q + vert_adv_q)
+            return horiz_adv_q + vert_adv_q
+
+        dtracers_dt_t = jax.vmap(_single_tracer_tendency)(tracers_t)
+        dtracers_dt = jnp.moveaxis(dtracers_dt_t, 0, -1)
     else:
         dtracers_dt = jnp.zeros_like(tracers)
 

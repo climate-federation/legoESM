@@ -14,7 +14,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
 from legoesm.core.operators import global_integral, _is_distributed
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.core.state import ShallowWaterState, HydrostaticState
@@ -108,7 +107,6 @@ def fix_energy_shallow_water(
         return _global_area_sum(ke + pe, grid)
 
     E_old = total_energy(state_old)
-    E_new = total_energy(state_new)
 
     # Compute current kinetic energy
     h_new = state_new.h.data

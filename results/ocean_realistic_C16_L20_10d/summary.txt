@@ -1,0 +1,27 @@
+legoESM Ocean Realistic Experiments
+==================================================
+Resolution: C16, L20
+Time step: 1800 s
+Duration: 10.0 days (480 steps)
+A_h=3.95e+06, K_h=3.95e+05, A_v=1.00e-02, K_v=1.00e-03
+Hyperdiffusion: 1.00e+15
+Barotropic substeps: 30
+
+stommel_gyre:
+  SSH: [-27.9902, 150.7640] m
+  Max speed: 16.8826 m/s
+  SST: [15.00, 15.00] degC
+  KE: 1.0037e+18
+
+baroclinic_adjustment:
+  SSH: [nan, nan] m
+  Max speed: nan m/s
+  SST: [nan, nan] degC
+  KE: nan
+
+kelvin_wave:
+  SSH: [-198.2336, 42.3150] m
+  Max speed: 8.7873 m/s
+  SST: [15.00, 15.00] degC
+  KE: 1.4935e+18
+

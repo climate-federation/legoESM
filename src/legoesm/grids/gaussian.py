@@ -576,15 +576,18 @@ def spectral_hyperdiffusion(
     nu: float,
     order: int = 2,
 ) -> jax.Array:
-    """Apply spectral hyperdiffusion: (-1)^{p+1} * nu * [n(n+1)/a^2]^p * coeffs.
+    """Apply spectral hyperdiffusion: ``-nu * [n(n+1)/a^2]^p * coeffs``.
 
-    This damps small scales. For order=2 (nabla^4), the damping factor is
-    -nu * [n(n+1)/a^2]^2 (negative = dissipative).
+    This damps small scales.  The sign is always negative (dissipative)
+    for any positive order.
     """
+    if order < 1:
+        raise ValueError(f"order must be >= 1, got {order!r}")
+
     a2 = grid.radius * grid.radius
     nn = grid.ls.astype(jnp.float64)
     eig = nn * (nn + 1.0) / a2  # n(n+1)/a^2
-    damping = (-1.0) ** (order + 1) * nu * eig ** order
+    damping = -nu * eig ** order
     return damping * coeffs
 
 
@@ -703,8 +706,11 @@ def spectral_hyperdiffusion_3d(
     -------
     (n_sh, nlev) complex.
     """
+    if order < 1:
+        raise ValueError(f"order must be >= 1, got {order!r}")
+
     a2 = grid.radius * grid.radius
     nn = grid.ls.astype(jnp.float64)
     eig = nn * (nn + 1.0) / a2
-    damping = (-1.0) ** (order + 1) * nu * eig ** order  # (n_sh,)
+    damping = -nu * eig ** order  # (n_sh,)
     return damping[:, None] * coeffs_3d

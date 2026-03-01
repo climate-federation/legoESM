@@ -215,6 +215,20 @@ class TestSpectralOperators:
         expected_div = -jnp.sin(g.lon2d) / a
         np.testing.assert_allclose(div_grid, expected_div, atol=1e-6)
 
+    def test_hyperdiffusion_is_dissipative_for_order1(self, grid_t21):
+        """order=1 should still be dissipative (negative damping)."""
+        g = grid_t21
+        coeffs = jnp.ones((g.n_sh,), dtype=jnp.complex128)
+        diff = spectral_hyperdiffusion(g, coeffs, nu=1.0, order=1)
+        # n=1, m=0 mode (index 1) should be damped.
+        assert float(jnp.real(diff[1])) < 0.0
+
+    def test_hyperdiffusion_invalid_order_raises(self, grid_t21):
+        """Non-positive hyperdiffusion order should raise."""
+        coeffs = jnp.ones((grid_t21.n_sh,), dtype=jnp.complex128)
+        with pytest.raises(ValueError, match="order must be >= 1"):
+            spectral_hyperdiffusion(grid_t21, coeffs, nu=1.0, order=0)
+
 
 # =============================================================================
 # Velocity reconstruction tests
