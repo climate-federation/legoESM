@@ -1,0 +1,27 @@
+legoESM Ocean Model Standardized Tests
+================================================
+Resolution: C16, Levels: 20
+dt=3600s, days=5.00, steps=120
+Runtime checks: True
+Config: hyperdiff=5.015e+14, n_baro=10, baro_alpha=1.000e-02
+
+Case configs:
+  rest_state: A_h=1.000e+04, K_h=1.000e+03, A_v=1.000e-03, K_v=1.000e-04, n_baro=10, baro_alpha=1.000e-02
+  gravity_wave: A_h=1.000e+04, K_h=1.000e+03, A_v=1.000e-03, K_v=1.000e-04, n_baro=10, baro_alpha=1.000e-02
+  wind_gyre: A_h=1.000e+07, K_h=1.000e+06, A_v=1.000e-02, K_v=1.000e-03, n_baro=30, baro_alpha=5.000e-02
+
+rest_state
+  SSH=[0.0000e+00, 0.0000e+00] u_max=0.0000e+00 v_max=0.0000e+00 speed_max=0.0000e+00
+  heat_drift_rel=7.457e-08 salt_drift_rel=0.000e+00 eta_mean_drift=0.000e+00
+  all_finite=True land_zero=True
+
+gravity_wave
+  SSH=[-8.0399e-01, 3.3708e-01] u_max=5.5902e+00 v_max=9.8175e+00 speed_max=1.0128e+01
+  heat_drift_rel=-4.474e-07 salt_drift_rel=-2.596e-06 eta_mean_drift=1.376e-07
+  all_finite=True land_zero=True
+
+wind_gyre
+  SSH=[-6.6917e-04, 6.3905e-04] u_max=2.1713e+00 v_max=1.0392e+00 speed_max=2.2859e+00
+  heat_drift_rel=0.000e+00 salt_drift_rel=0.000e+00 eta_mean_drift=-2.295e-10
+  all_finite=True land_zero=True
+

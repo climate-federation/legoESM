@@ -1,0 +1,123 @@
+$ /Users/pierregentine/legoESM/.venv/bin/python scripts/run_ocean_tests.py --resolution 4 --levels 4 --dt 1800.0 --days 0.05 --test all --output results/_smoke_ocean_regression_casecfg/runs/ocean_tests_C4_L4 --runtime-checks
+/Users/pierregentine/.matplotlib is not a writable directory
+Matplotlib created a temporary cache directory at /var/folders/s5/tl9gjtt171j2qmsz9xfyq3xc0000gn/T/matplotlib-7e1n3w6r because there was an issue with the default path (/Users/pierregentine/.matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
+Matplotlib is building the font cache; this may take a moment.
+======================================================================
+legoESM — Ocean Model Standardized Tests
+======================================================================
+  Backend:      cpu
+  Devices:      1
+  Float dtype:  float32
+
+Creating C4 cubed-sphere grid...
+  Grid created in 1.3s
+  Resolution: ~2502 km
+  Total cells: 96
+
+Creating ocean z-star coordinate (4 levels)...
+  Surface dz: 131.0 m
+  Bottom dz:  2619.0 m
+  Total depth: 5500 m
+  Mean dx: 4599 km
+  Hyperdiffusion coeff: 2.49e+17
+  Barotropic wave speed: 232 m/s
+  Barotropic substeps: 10
+
+Integration: 0.05 days (2 steps, dt=1800s)
+
+======================================================================
+TEST 1: Rest-State Adjustment
+======================================================================
+  SST range: [18.9, 18.9] degC
+  Salinity: 35.0 PSU
+  Warming up JIT... done (2.0s)
+
+  Step     Day     SSH_max     |u|_max    SST_mean            KE
+----------------------------------------------------------------------
+     1     0.0    0.00e+00    0.00e+00     18.8592      0.00e+00
+     2     0.0    0.00e+00    0.00e+00     18.8591      0.00e+00
+
+Completed in 0.0s (1030 steps/s)
+
+======================================================================
+TEST 2: Barotropic Gravity Wave
+======================================================================
+  SSH perturbation: 0.291 m (Gaussian, sigma=10deg)
+  Expected wave speed: 232 m/s
+  Warming up JIT... done (1.7s)
+
+  Step     Day     SSH_min     SSH_max     |u|_max            KE
+----------------------------------------------------------------------
+     1    0.02      0.0015      0.1693      0.0006    7.4491e+10
+     2    0.04      0.0022      0.1106      0.0008    1.1006e+11
+
+Completed in 0.0s (1228 steps/s)
+
+======================================================================
+TEST 3: Wind-Driven Gyre
+======================================================================
+  Wind stress: tau_max = 0.01 N/m^2
+  Wind pattern: -tau_max * cos(2*pi*(lat-45)/60), 15N-75N
+  Linear drag timescale: 1.5 days
+  Gyre mixing: A_h=1.0e+07, K_h=1.0e+06, A_v=1.0e-02, K_v=1.0e-03
+  Warming up JIT... done (1.7s)
+
+  Step     Day     SSH_max     |u|_max    SST_mean            KE
+----------------------------------------------------------------------
+     1     0.0      0.0000      0.0001     15.0000    6.7296e+07
+     2     0.0      0.0000      0.0002     15.0000    2.6592e+08
+
+Completed in 0.1s (23 steps/s)
+
+
+======================================================================
+SUMMARY
+======================================================================
+  Resolution:  C4 x 4L (96 columns)
+  Duration:    0.05 days (2 steps, dt=1800s)
+  Runtime checks: True
+
+  --- rest_state ---
+    Final SSH range:  [0.0000e+00, 0.0000e+00] m
+    Final |u| max:    0.0000e+00 m/s
+    Final |v| max:    0.0000e+00 m/s
+    Final speed max:  0.0000e+00 m/s
+    Final SST mean:   18.8591 degC
+    Final KE:         0.0000e+00
+    Heat drift rel:   0.00e+00
+    Salt drift rel:   0.00e+00
+    Mean eta drift:   0.00e+00 m
+    All fields finite: True
+    Land cells zero:   True
+
+  --- gravity_wave ---
+    Final SSH range:  [2.1533e-03, 1.1064e-01] m
+    Final |u| max:    7.7550e-04 m/s
+    Final |v| max:    7.1110e-04 m/s
+    Final speed max:  7.9457e-04 m/s
+    Final SST mean:   18.8591 degC
+    Final KE:         1.1006e+11
+    Heat drift rel:   0.00e+00
+    Salt drift rel:   8.87e-08
+    Mean eta drift:   -7.13e-09 m
+    All fields finite: True
+    Land cells zero:   True
+
+  --- wind_gyre ---
+    Final SSH range:  [-1.0601e-06, 1.4686e-06] m
+    Final |u| max:    2.4396e-04 m/s
+    Final |v| max:    9.5938e-05 m/s
+    Final speed max:  2.6164e-04 m/s
+    Final SST mean:   15.0000 degC
+    Final KE:         2.6592e+08
+    Heat drift rel:   0.00e+00
+    Salt drift rel:   0.00e+00
+    Mean eta drift:   -2.72e-14 m
+    All fields finite: True
+    Land cells zero:   True
+
+  Output directory: results/_smoke_ocean_regression_casecfg/runs/ocean_tests_C4_L4/
+    rest_state/
+    gravity_wave/
+    wind_gyre/
+======================================================================

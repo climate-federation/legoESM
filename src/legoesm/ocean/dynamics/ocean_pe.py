@@ -76,14 +76,21 @@ def ocean_baroclinic_tendencies(
 
     g = config.g
     rho_0 = config.rho_0
+    min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
+    eta_floor = min_water_col - H_bathy
+    eta_safe = jnp.maximum(eta, eta_floor) * mask
 
     # --- 1. Layer thickness and Jacobian ---
-    J = compute_ocean_jacobian(eta, H_bathy, z_coord)      # (6, n, n)
-    h_k = compute_layer_thickness(eta, H_bathy, z_coord)   # (6, n, n, nlev)
+    J = compute_ocean_jacobian(
+        eta_safe, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
+    )      # (6, n, n)
+    h_k = compute_layer_thickness(
+        eta_safe, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
+    )   # (6, n, n, nlev)
 
     # --- 2. Density from EOS ---
     p_hydro = compute_hydrostatic_pressure(
-        jnp.full_like(T, rho_0), eta, z_coord.dz_ref, J, rho_0, g,
+        jnp.full_like(T, rho_0), eta_safe, z_coord.dz_ref, J, rho_0, g,
     )
     rho = wright_eos(T, S, p_hydro)
     rho_prime = rho - rho_0
@@ -118,7 +125,7 @@ def ocean_baroclinic_tendencies(
     # Planetary Coriolis is split: barotropic mode (depth-mean) is integrated
     # in substeps, while baroclinic shear (deviation from depth-mean) is
     # handled here to preserve full (zeta + f) dynamics without double counting.
-    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), 1.0)
+    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col)
     U_bar = jnp.sum(u * h_k, axis=-1) / H_total * mask
     V_bar = jnp.sum(v * h_k, axis=-1) / H_total * mask
     u_prime = (u - U_bar[..., jnp.newaxis]) * mask_3d
@@ -161,11 +168,21 @@ def ocean_baroclinic_tendencies(
     # across land/ocean boundaries; masking before Laplacian creates a
     # spurious jump that cascades into pressure gradient errors)
     if config.A_h > 0:
-        du_dt = du_dt + laplacian_viscosity_3d(u * mask_3d, grid, config.A_h)
-        dv_dt = dv_dt + laplacian_viscosity_3d(v * mask_3d, grid, config.A_h)
+        vel_masked = jnp.stack([u * mask_3d, v * mask_3d], axis=0)
+        vel_lap = jax.vmap(
+            lambda q: laplacian_viscosity_3d(q, grid, config.A_h),
+            in_axes=0, out_axes=0,
+        )(vel_masked)
+        du_dt = du_dt + vel_lap[0]
+        dv_dt = dv_dt + vel_lap[1]
     if config.A_v > 0:
-        du_dt = du_dt + vertical_diffusion(u, z_coord, J, config.A_v)
-        dv_dt = dv_dt + vertical_diffusion(v, z_coord, J, config.A_v)
+        vel = jnp.stack([u, v], axis=0)
+        vel_vdiff = jax.vmap(
+            lambda q: vertical_diffusion(q, z_coord, J, config.A_v),
+            in_axes=0, out_axes=0,
+        )(vel)
+        du_dt = du_dt + vel_vdiff[0]
+        dv_dt = dv_dt + vel_vdiff[1]
 
     # --- 11. Hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
@@ -236,7 +253,7 @@ def _diagnose_w(
     w_inner = -cumsum_rev[..., ::-1]  # (..., nlev)
 
     # w at interfaces: w[0]=surface, w[nlev]=0 (bottom)
-    zeros_bottom = jnp.zeros((*div_v.shape[:-1], 1))
+    zeros_bottom = jnp.zeros((*div_v.shape[:-1], 1), dtype=div_v.dtype)
     w = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
     return w
 

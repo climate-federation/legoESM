@@ -1,0 +1,190 @@
+$ /Users/pierregentine/legoESM/.venv/bin/python scripts/run_ocean_tests.py --resolution 8 --levels 10 --dt 3600.0 --days 1.0 --test all --output results/_smoke_ocean_regression_x64_corr8/runs/ocean_tests_C8_L10 --x64
+/Users/pierregentine/.matplotlib is not a writable directory
+Matplotlib created a temporary cache directory at /var/folders/s5/tl9gjtt171j2qmsz9xfyq3xc0000gn/T/matplotlib-4b4iv1o1 because there was an issue with the default path (/Users/pierregentine/.matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
+Matplotlib is building the font cache; this may take a moment.
+======================================================================
+legoESM — Ocean Model Standardized Tests
+======================================================================
+  Backend:      cpu
+  Devices:      1
+  Float dtype:  float64
+
+Creating C8 cubed-sphere grid...
+  Grid created in 1.9s
+  Resolution: ~1251 km
+  Total cells: 384
+
+Creating ocean z-star coordinate (10 levels)...
+  Surface dz: 52.4 m
+  Bottom dz:  1047.6 m
+  Total depth: 5500 m
+  Mean dx: 2310 km
+  Hyperdiffusion coeff: 7.91e+15
+  Barotropic wave speed: 232 m/s
+  Barotropic substeps: 10
+
+Integration: 1.0 days (24 steps, dt=3600s)
+
+======================================================================
+TEST 1: Rest-State Adjustment
+======================================================================
+  SST range: [19.5, 19.5] degC
+  Salinity: 35.0 PSU
+  Warming up JIT... /Users/pierregentine/legoESM/.venv/lib/python3.14/site-packages/jax/_src/ops/scatter.py:104: FutureWarning: scatter inputs have incompatible types: cannot safely cast value from dtype=float64 to dtype=float32 with jax_numpy_dtype_promotion=standard. In future JAX releases this will result in an error.
+  warnings.warn(
+Traceback (most recent call last):
+  File "/Users/pierregentine/legoESM/scripts/run_ocean_tests.py", line 900, in _run_case
+    out = fn()
+  File "/Users/pierregentine/legoESM/scripts/run_ocean_tests.py", line 919, in <lambda>
+    lambda: run_rest_state_test(
+            ~~~~~~~~~~~~~~~~~~~^
+        grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/pierregentine/legoESM/scripts/run_ocean_tests.py", line 274, in run_rest_state_test
+    _ = step_fn(state, dt)
+  File "/Users/pierregentine/legoESM/src/legoesm/ocean/dynamics/ocean_model.py", line 234, in step
+    state_new = barotropic_substeps(
+        state_mid,
+        dt_s, self.config.n_barotropic_substeps,
+        self.grid, self.z_coord, self.config,
+    )
+  File "/Users/pierregentine/legoESM/src/legoesm/ocean/dynamics/barotropic.py", line 191, in barotropic_substeps
+    eta_f, U_bar_f, V_bar_f = jax.lax.fori_loop(
+                              ~~~~~~~~~~~~~~~~~^
+        0, n_substeps, substep_body, (eta, U_bar, V_bar),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+
+  !!! CASE FAILED: rest_state -> TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+
+======================================================================
+TEST 2: Barotropic Gravity Wave
+======================================================================
+  SSH perturbation: 0.730 m (Gaussian, sigma=10deg)
+  Expected wave speed: 232 m/s
+  Warming up JIT... Traceback (most recent call last):
+  File "/Users/pierregentine/legoESM/scripts/run_ocean_tests.py", line 900, in _run_case
+    out = fn()
+  File "/Users/pierregentine/legoESM/scripts/run_ocean_tests.py", line 927, in <lambda>
+    lambda: run_gravity_wave_test(
+            ~~~~~~~~~~~~~~~~~~~~~^
+        grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/pierregentine/legoESM/scripts/run_ocean_tests.py", line 461, in run_gravity_wave_test
+    _ = step_fn(state, dt)
+  File "/Users/pierregentine/legoESM/src/legoesm/ocean/dynamics/ocean_model.py", line 234, in step
+    state_new = barotropic_substeps(
+        state_mid,
+        dt_s, self.config.n_barotropic_substeps,
+        self.grid, self.z_coord, self.config,
+    )
+  File "/Users/pierregentine/legoESM/src/legoesm/ocean/dynamics/barotropic.py", line 191, in barotropic_substeps
+    eta_f, U_bar_f, V_bar_f = jax.lax.fori_loop(
+                              ~~~~~~~~~~~~~~~~~^
+        0, n_substeps, substep_body, (eta, U_bar, V_bar),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+
+  !!! CASE FAILED: gravity_wave -> TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+
+======================================================================
+TEST 3: Wind-Driven Gyre
+======================================================================
+  Wind stress: tau_max = 0.01 N/m^2
+  Wind pattern: -tau_max * cos(2*pi*(lat-45)/60), 15N-75N
+  Linear drag timescale: 1.5 days
+  Gyre mixing: A_h=1.0e+07, K_h=1.0e+06, A_v=1.0e-02, K_v=1.0e-03
+  Warming up JIT... Traceback (most recent call last):
+  File "/Users/pierregentine/legoESM/scripts/run_ocean_tests.py", line 900, in _run_case
+    out = fn()
+  File "/Users/pierregentine/legoESM/scripts/run_ocean_tests.py", line 935, in <lambda>
+    lambda: run_wind_driven_gyre_test(
+            ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ),
+    ^
+  File "/Users/pierregentine/legoESM/scripts/run_ocean_tests.py", line 618, in run_wind_driven_gyre_test
+    _ = step_fn(state, dt)
+  File "/Users/pierregentine/legoESM/src/legoesm/ocean/dynamics/ocean_model.py", line 234, in step
+    state_new = barotropic_substeps(
+        state_mid,
+        dt_s, self.config.n_barotropic_substeps,
+        self.grid, self.z_coord, self.config,
+    )
+  File "/Users/pierregentine/legoESM/src/legoesm/ocean/dynamics/barotropic.py", line 191, in barotropic_substeps
+    eta_f, U_bar_f, V_bar_f = jax.lax.fori_loop(
+                              ~~~~~~~~~~~~~~~~~^
+        0, n_substeps, substep_body, (eta, U_bar, V_bar),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+
+  !!! CASE FAILED: wind_gyre -> TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+
+
+======================================================================
+SUMMARY
+======================================================================
+  Resolution:  C8 x 10L (384 columns)
+  Duration:    1.0 days (24 steps, dt=3600s)
+  Runtime checks: False
+
+  --- failed_cases ---
+    rest_state: TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+    gravity_wave: TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+    wind_gyre: TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+
+  Output directory: results/_smoke_ocean_regression_x64_corr8/runs/ocean_tests_C8_L10/
+======================================================================

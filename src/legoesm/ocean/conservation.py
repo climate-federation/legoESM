@@ -39,6 +39,7 @@ def fix_volume_ocean(
     state_new: OceanState,
     state_old: OceanState,
     grid: CubedSphereGrid,
+    min_water_column_m: float | None = None,
 ) -> OceanState:
     """Fix volume conservation via uniform eta correction.
 
@@ -54,8 +55,19 @@ def fix_volume_ocean(
     vol_old, vol_new, ocean_area = _ocean_global_sum(local_terms)
 
     correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
+    eta_candidate = state_new.eta.data + correction * mask
+    if min_water_column_m is not None:
+        if min_water_column_m <= 0.0:
+            raise ValueError(
+                f"min_water_column_m must be > 0, got {min_water_column_m!r}",
+            )
+        eta_floor = (
+            jnp.asarray(min_water_column_m, dtype=eta_candidate.dtype)
+            - state_new.H_bathy.data
+        )
+        eta_candidate = jnp.maximum(eta_candidate, eta_floor) * mask
     eta_fixed = state_new.eta.replace(
-        data=state_new.eta.data + correction * mask,
+        data=eta_candidate,
     )
     return state_new._replace(eta=eta_fixed)
 
@@ -65,6 +77,7 @@ def fix_heat_ocean(
     state_old: OceanState,
     grid: CubedSphereGrid,
     z_coord: OceanZStarCoordinate,
+    min_water_column_m: float | None = None,
 ) -> OceanState:
     """Fix heat conservation via uniform T correction.
 
@@ -72,11 +85,22 @@ def fix_heat_ocean(
     """
     mask = state_old.land_mask.data
 
+    if min_water_column_m is not None and min_water_column_m <= 0.0:
+        raise ValueError(
+            f"min_water_column_m must be > 0, got {min_water_column_m!r}",
+        )
+
     h_k_old = compute_layer_thickness(
-        state_old.eta.data, state_old.H_bathy.data, z_coord,
+        state_old.eta.data,
+        state_old.H_bathy.data,
+        z_coord,
+        min_water_column_m=min_water_column_m,
     )
     h_k_new = compute_layer_thickness(
-        state_new.eta.data, state_new.H_bathy.data, z_coord,
+        state_new.eta.data,
+        state_new.H_bathy.data,
+        z_coord,
+        min_water_column_m=min_water_column_m,
     )
 
     weighted_area = mask * grid.area
@@ -99,6 +123,7 @@ def fix_salt_ocean(
     state_old: OceanState,
     grid: CubedSphereGrid,
     z_coord: OceanZStarCoordinate,
+    min_water_column_m: float | None = None,
 ) -> OceanState:
     """Fix salt conservation via uniform S correction.
 
@@ -106,11 +131,22 @@ def fix_salt_ocean(
     """
     mask = state_old.land_mask.data
 
+    if min_water_column_m is not None and min_water_column_m <= 0.0:
+        raise ValueError(
+            f"min_water_column_m must be > 0, got {min_water_column_m!r}",
+        )
+
     h_k_old = compute_layer_thickness(
-        state_old.eta.data, state_old.H_bathy.data, z_coord,
+        state_old.eta.data,
+        state_old.H_bathy.data,
+        z_coord,
+        min_water_column_m=min_water_column_m,
     )
     h_k_new = compute_layer_thickness(
-        state_new.eta.data, state_new.H_bathy.data, z_coord,
+        state_new.eta.data,
+        state_new.H_bathy.data,
+        z_coord,
+        min_water_column_m=min_water_column_m,
     )
 
     weighted_area = mask * grid.area
@@ -140,9 +176,26 @@ def ocean_conservation_fixer(
     Order: volume first, then heat, then salt.
     """
     if config.fix_volume:
-        state_new = fix_volume_ocean(state_new, state_old, grid)
+        state_new = fix_volume_ocean(
+            state_new,
+            state_old,
+            grid,
+            min_water_column_m=config.min_water_column_m,
+        )
     if config.fix_heat:
-        state_new = fix_heat_ocean(state_new, state_old, grid, z_coord)
+        state_new = fix_heat_ocean(
+            state_new,
+            state_old,
+            grid,
+            z_coord,
+            min_water_column_m=config.min_water_column_m,
+        )
     if config.fix_salt:
-        state_new = fix_salt_ocean(state_new, state_old, grid, z_coord)
+        state_new = fix_salt_ocean(
+            state_new,
+            state_old,
+            grid,
+            z_coord,
+            min_water_column_m=config.min_water_column_m,
+        )
     return state_new

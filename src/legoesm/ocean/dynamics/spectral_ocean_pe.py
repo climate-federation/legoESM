@@ -85,6 +85,9 @@ def spectral_ocean_tendencies(
     eta = sh_synthesis(grid, state.eta_hat.data) * mask          # (n_lat, n_lon)
     H_bathy = sh_synthesis(grid, state.H_bathy_hat.data).real
     H_bathy = jnp.maximum(H_bathy, 1.0) * mask + 1.0 * (1.0 - mask)
+    min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.real.dtype)
+    eta_floor = min_water_col - H_bathy
+    eta_safe = jnp.maximum(eta.real, eta_floor) * mask
 
     # --- 2. Velocities ---
     u_cos, v_cos = uv_from_vordiv_3d(
@@ -95,15 +98,19 @@ def spectral_ocean_tendencies(
     v = v_cos / cos_lat_3d * mask_3d
 
     # --- 3. Layer thickness and Jacobian ---
-    J = compute_ocean_jacobian(eta.real, H_bathy.real, z_coord)
-    h_k = compute_layer_thickness(eta.real, H_bathy.real, z_coord)
+    J = compute_ocean_jacobian(
+        eta_safe, H_bathy.real, z_coord, min_water_column_m=config.min_water_column_m,
+    )
+    h_k = compute_layer_thickness(
+        eta_safe, H_bathy.real, z_coord, min_water_column_m=config.min_water_column_m,
+    )
 
     # --- 4. EOS and hydrostatic pressure ---
     T_real = T.real
     S_real = S.real
     p_hydro = compute_hydrostatic_pressure(
         jnp.full_like(T_real, rho_0),
-        eta.real,
+        eta_safe,
         z_coord.dz_ref,
         J.real,
         rho_0,
@@ -128,7 +135,7 @@ def spectral_ocean_tendencies(
     div_h_rev = div_h[..., ::-1]
     cumsum_rev = jnp.cumsum(div_h_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]
-    zeros_bottom = jnp.zeros((*div.shape[:-1], 1))
+    zeros_bottom = jnp.zeros((*div.shape[:-1], 1), dtype=div_h.dtype)
     w = jnp.concatenate([w_inner, zeros_bottom], axis=-1)  # (n_lat, n_lon, nlev+1)
 
     # --- 8. Spectral operators ---
@@ -186,8 +193,14 @@ def spectral_ocean_tendencies(
     dT_hat = dT_hat + sh_analysis_3d(grid, vert_adv_T)
 
     # Vertical diffusion of T
+    vdiff_TS = None
     if config.K_v > 0:
-        vdiff_T = vertical_diffusion(T.real, z_coord, J.real, config.K_v) * mask_3d
+        tracers_TS = jnp.stack([T.real, S.real], axis=0)
+        vdiff_TS = jax.vmap(
+            lambda q: vertical_diffusion(q, z_coord, J.real, config.K_v),
+            in_axes=0, out_axes=0,
+        )(tracers_TS)
+        vdiff_T = vdiff_TS[0] * mask_3d
         dT_hat = dT_hat + sh_analysis_3d(grid, vdiff_T)
 
     # --- 14. Salinity equation ---
@@ -204,7 +217,13 @@ def spectral_ocean_tendencies(
     dS_hat = dS_hat + sh_analysis_3d(grid, vert_adv_S)
 
     if config.K_v > 0:
-        vdiff_S = vertical_diffusion(S.real, z_coord, J.real, config.K_v) * mask_3d
+        if vdiff_TS is None:
+            tracers_TS = jnp.stack([T.real, S.real], axis=0)
+            vdiff_TS = jax.vmap(
+                lambda q: vertical_diffusion(q, z_coord, J.real, config.K_v),
+                in_axes=0, out_axes=0,
+            )(tracers_TS)
+        vdiff_S = vdiff_TS[1] * mask_3d
         dS_hat = dS_hat + sh_analysis_3d(grid, vdiff_S)
 
     # --- 15. Explicit viscosity/diffusion ---
@@ -218,8 +237,13 @@ def spectral_ocean_tendencies(
             dS_hat = dS_hat + config.K_h * lap * state.S_hat.data
 
     if config.A_v > 0:
-        vdiff_u = vertical_diffusion(u.real, z_coord, J.real, config.A_v) * mask_3d
-        vdiff_v = vertical_diffusion(v.real, z_coord, J.real, config.A_v) * mask_3d
+        vel_uv = jnp.stack([u.real, v.real], axis=0)
+        vdiff_uv = jax.vmap(
+            lambda q: vertical_diffusion(q, z_coord, J.real, config.A_v),
+            in_axes=0, out_axes=0,
+        )(vel_uv)
+        vdiff_u = vdiff_uv[0] * mask_3d
+        vdiff_v = vdiff_uv[1] * mask_3d
         vdiff_u_cos = vdiff_u * grid.cos_lat[:, jnp.newaxis, jnp.newaxis]
         vdiff_v_cos = vdiff_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis]
 
@@ -371,6 +395,11 @@ class SpectralOceanModel:
             raise ValueError(
                 "n_barotropic_substeps must be >= 1, got "
                 f"{config.n_barotropic_substeps!r}",
+            )
+        if config.min_water_column_m <= 0.0:
+            raise ValueError(
+                "min_water_column_m must be > 0, got "
+                f"{config.min_water_column_m!r}",
             )
 
     @partial(jax.jit, static_argnums=(0,))

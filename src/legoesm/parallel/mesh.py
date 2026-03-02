@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import NamedTuple
+from typing import NamedTuple, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -82,6 +82,7 @@ def set_active_config(config: DeviceConfig | None) -> None:
 def create_device_mesh(
     n_devices: int | str = "auto",
     backend: str | None = None,
+    devices: Sequence | None = None,
 ) -> DeviceConfig:
     """Create a JAX device mesh for cubed-sphere parallelism.
 
@@ -89,11 +90,16 @@ def create_device_mesh(
     ----------
     n_devices : int or ``"auto"``
         Number of devices to use.  ``"auto"`` uses all available.
-        Must divide 6 (i.e., 1, 2, 3, or 6).  If more than 6 devices
+        Under JAX distributed runtime (``process_count() > 1``), auto mode
+        uses local devices on this process. Must divide 6 (i.e., 1, 2, 3, or 6).
+        If more than 6 devices
         are available, 6 are used and the remainder is ignored.
     backend : str or None
         JAX backend to use (``"cpu"``, ``"gpu"``, ``"tpu"``).
         ``None`` auto-detects.
+    devices : sequence or None
+        Optional explicit device list. When provided, this exact list is
+        used as the candidate pool and ``backend`` is ignored.
 
     Returns
     -------
@@ -103,24 +109,41 @@ def create_device_mesh(
     global _active_config
 
     # Resolve devices, with fallback for unavailable backends.
-    if backend is not None:
-        try:
-            devices = jax.devices(backend)
-        except RuntimeError:
-            devices = []
-        if not devices:
+    if devices is not None:
+        if backend is not None:
             warnings.warn(
-                f"Requested backend '{backend}' has no devices. "
-                f"Falling back to default backend.",
+                "create_device_mesh received both explicit devices and a backend; "
+                "ignoring backend and using provided devices.",
                 RuntimeWarning,
                 stacklevel=2,
             )
-            devices = jax.devices()
+        devices = list(devices)
+        if not devices:
+            raise ValueError("devices must contain at least one JAX device")
     else:
-        devices = jax.devices()
+        if backend is None and jax.process_count() > 1:
+            # In multi-process runs, the per-rank mesh must be built from
+            # local devices only (not global process devices).
+            devices = jax.local_devices()
+        elif backend is not None:
+            try:
+                devices = jax.devices(backend)
+            except RuntimeError:
+                devices = []
+            if not devices:
+                warnings.warn(
+                    f"Requested backend '{backend}' has no devices. "
+                    f"Falling back to default backend.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                devices = jax.devices()
+        else:
+            devices = jax.devices()
 
     all_count = len(devices)
-    backend_name = jax.default_backend().upper()
+    first_platform = str(getattr(devices[0], "platform", "")) if devices else ""
+    backend_name = (first_platform or jax.default_backend()).upper()
 
     # Guard: no devices available at all.
     if all_count == 0:
@@ -229,7 +252,7 @@ def shard_pytree(pytree, config: DeviceConfig):
         return pytree  # single-device: nothing to do
 
     def _shard_leaf(leaf):
-        if not isinstance(leaf, jnp.ndarray):
+        if not isinstance(leaf, (jax.Array, jnp.ndarray)):
             return leaf
         if leaf.ndim >= 1 and leaf.shape[0] == _N_FACES:
             return jax.device_put(leaf, config.face_sharding)
@@ -259,7 +282,7 @@ def replicate_pytree(pytree, config: DeviceConfig):
         return pytree
 
     def _replicate_leaf(leaf):
-        if not isinstance(leaf, jnp.ndarray):
+        if not isinstance(leaf, (jax.Array, jnp.ndarray)):
             return leaf
         return jax.device_put(leaf, config.replicated_sharding)
 

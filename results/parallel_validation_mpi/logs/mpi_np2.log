@@ -1,0 +1,31 @@
+Command: /opt/homebrew/bin/mpirun --mca btl self,tcp --oversubscribe -np 2 /Users/pierregentine/legoESM/.venv/bin/python -m pytest -q tests/distributed/test_halo_mpi.py
+Status: pass
+Return code: 0
+Elapsed (s): 5.141
+
+=== STDOUT ===
+============================= test session starts ==============================
+============================= test session starts ==============================
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/pierregentine/legoESM
+configfile: pyproject.toml
+plugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5
+rootdir: /Users/pierregentine/legoESM
+configfile: pyproject.toml
+plugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5
+collecting ... collecting ... 
+collected 7 items                                                              
+
+collected 7 items                                                              
+
+tests/distributed/test_halo_mpi.py 
+tests/distributed/test_halo_mpi.py .............                               [100%]
+
+============================== 7 passed in 4.15s ===============================
+.                               [100%]
+
+============================== 7 passed in 4.19s ===============================
+
+
+=== STDERR ===

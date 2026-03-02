@@ -15,6 +15,8 @@ Tests cover:
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 import jax
 import jax.numpy as jnp
@@ -38,6 +40,8 @@ from legoesm.ocean.dynamics.ocean_pe import (
     ocean_baroclinic_tendencies,
     _vertical_advection_ocean,
 )
+from legoesm.ocean.physics.mixing import vertical_diffusion
+from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 from legoesm.ocean.dynamics.ocean_model import OceanModel
 from legoesm.ocean.conservation import (
     fix_volume_ocean,
@@ -203,6 +207,30 @@ class TestOceanZStar:
         J = compute_ocean_jacobian(eta, H_bathy, ocean_z_coord)
         assert float(J) == pytest.approx(1.0, abs=1e-6)
 
+    def test_jacobian_respects_min_water_column(self, ocean_z_coord):
+        """Jacobian helper should clip collapsed columns when requested."""
+        H_bathy = jnp.array(4000.0, dtype=jnp.float32)
+        eta = jnp.array(-3999.9, dtype=jnp.float32)
+        J = compute_ocean_jacobian(
+            eta,
+            H_bathy,
+            ocean_z_coord,
+            min_water_column_m=0.5,
+        )
+        assert float(J) == pytest.approx(0.5 / ocean_z_coord.H_max, rel=1e-6)
+
+    def test_layer_thickness_respects_min_water_column(self, ocean_z_coord):
+        """Layer thickness helper should not return non-positive layers."""
+        H_bathy = jnp.full((1, 1, 1), 4000.0, dtype=jnp.float32)
+        eta = jnp.full((1, 1, 1), -3999.9, dtype=jnp.float32)
+        h_k = compute_layer_thickness(
+            eta,
+            H_bathy,
+            ocean_z_coord,
+            min_water_column_m=0.5,
+        )
+        assert float(jnp.min(h_k)) > 0.0
+
     def test_input_validation(self):
         """Coordinate constructor should reject invalid values."""
         with pytest.raises(ValueError):
@@ -276,6 +304,31 @@ class TestOceanTendencies:
         """All tendencies should be finite."""
         tend = ocean_baroclinic_tendencies(
             ocean_state, ocean_grid, ocean_z_coord, ocean_config,
+        )
+        assert jnp.all(jnp.isfinite(tend.du_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dv_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dT_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dS_dt.data))
+        assert jnp.all(jnp.isfinite(tend.deta_dt.data))
+
+    def test_tendencies_finite_for_thin_columns(self, ocean_state, ocean_grid, ocean_z_coord):
+        """Tendency path should remain finite when eta approaches dry columns."""
+        state_thin = ocean_state._replace(
+            eta=ocean_state.eta.replace(
+                data=-ocean_state.H_bathy.data + 0.1,
+            ),
+        )
+        config = OceanConfig(
+            A_h=1e3,
+            K_h=1e2,
+            A_v=1e-3,
+            K_v=1e-4,
+            n_barotropic_substeps=10,
+            hyperdiff_coeff=0.0,
+            min_water_column_m=0.5,
+        )
+        tend = ocean_baroclinic_tendencies(
+            state_thin, ocean_grid, ocean_z_coord, config,
         )
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
         assert jnp.all(jnp.isfinite(tend.dv_dt.data))
@@ -371,6 +424,30 @@ class TestVerticalAdvection:
         assert float(adv[0, 0, 0, -1]) == pytest.approx(0.0, abs=1e-8)
 
 
+class TestVerticalMixing:
+    """Tests for vertical diffusion operator."""
+
+    def test_vertical_diffusion_no_scatter_dtype_warning(self, ocean_z_coord):
+        """vertical_diffusion should avoid mixed-dtype scatter updates."""
+        nlev = ocean_z_coord.n_levels
+        field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float32)[
+            jnp.newaxis, jnp.newaxis, jnp.newaxis, :
+        ]
+        jac_dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+        jac = jnp.ones((1, 1, 1), dtype=jac_dtype)
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "error",
+                message=".*scatter inputs have incompatible types.*",
+                category=FutureWarning,
+            )
+            tendency = vertical_diffusion(field, ocean_z_coord, jac, coeff=1.0e-4)
+
+        assert tendency.dtype == field.dtype
+        assert jnp.all(jnp.isfinite(tendency))
+
+
 # ==============================================================================
 # Model Tests
 # ==============================================================================
@@ -418,6 +495,32 @@ class TestOceanModel:
         T_min = float(jnp.min(jnp.where(mask > 0.5, T_ocean, 999)))
         assert T_min > -5.0, f"T_min = {T_min}"
         assert T_max < 40.0, f"T_max = {T_max}"
+
+    def test_barotropic_substeps_enforce_min_water_column(
+        self, ocean_grid, ocean_z_coord, ocean_state,
+    ):
+        """Barotropic mode should floor eta so wet columns stay positive."""
+        config = OceanConfig(
+            n_barotropic_substeps=2,
+            min_water_column_m=0.5,
+            use_conservation_fixer=False,
+        )
+        eta_bad = -ocean_state.H_bathy.data + 0.1
+        state_bad = ocean_state._replace(
+            eta=ocean_state.eta.replace(data=eta_bad),
+        )
+        state_new = barotropic_substeps(
+            state_bad,
+            dt_s=60.0,
+            n_substeps=config.n_barotropic_substeps,
+            grid=ocean_grid,
+            z_coord=ocean_z_coord,
+            config=config,
+        )
+        wet = state_new.land_mask.data > 0.5
+        water_col = state_new.eta.data + state_new.H_bathy.data
+        min_wet = float(jnp.min(jnp.where(wet, water_col, jnp.inf)))
+        assert min_wet >= config.min_water_column_m - 1.0e-6
 
     @pytest.mark.parametrize(
         ("kwargs", "match"),
@@ -481,6 +584,38 @@ class TestOceanModel:
         with pytest.raises(ValueError, match="integrate_scan"):
             model.integrate_scan(ocean_state, n_steps=1, dt=3600.0)
 
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"duration": -1.0, "dt": 3600.0, "save_every": 1}, "duration"),
+            ({"duration": 3600.0, "dt": 0.0, "save_every": 1}, "dt"),
+            ({"duration": 3600.0, "dt": 3600.0, "save_every": 0}, "save_every"),
+            ({"duration": 1.0, "dt": 3600.0, "save_every": 1}, "zero steps"),
+        ],
+    )
+    def test_integrate_validates_inputs(
+        self, ocean_grid, ocean_z_coord, ocean_state, kwargs, match,
+    ):
+        """integrate should reject invalid host-side control parameters."""
+        model = OceanModel(ocean_grid, ocean_z_coord, OceanConfig())
+        with pytest.raises(ValueError, match=match):
+            model.integrate(ocean_state, **kwargs)
+
+    @pytest.mark.parametrize(
+        ("n_steps", "dt", "match"),
+        [
+            (-1, 3600.0, "n_steps"),
+            (1, 0.0, "dt"),
+        ],
+    )
+    def test_integrate_scan_validates_inputs(
+        self, ocean_grid, ocean_z_coord, ocean_state, n_steps, dt, match,
+    ):
+        """integrate_scan should reject invalid host-side control parameters."""
+        model = OceanModel(ocean_grid, ocean_z_coord, OceanConfig())
+        with pytest.raises(ValueError, match=match):
+            model.integrate_scan(ocean_state, n_steps=n_steps, dt=dt)
+
 
 # ==============================================================================
 # Conservation Tests
@@ -506,6 +641,50 @@ class TestOceanConservation:
         # Check mean eta error is within float32 precision
         mean_eta_err = abs(vol_fixed - vol_old) / max(ocean_area, 1.0)
         assert mean_eta_err < 1e-6
+
+    def test_volume_fixer_respects_min_water_column(self, ocean_grid, ocean_state):
+        """Volume fixer should enforce optional wet-column lower bound."""
+        state_thin = ocean_state._replace(
+            eta=ocean_state.eta.replace(
+                data=-ocean_state.H_bathy.data + 0.1,
+            ),
+        )
+        state_fixed = fix_volume_ocean(
+            state_thin,
+            ocean_state,
+            ocean_grid,
+            min_water_column_m=0.5,
+        )
+        wet = state_fixed.land_mask.data > 0.5
+        water_col = state_fixed.eta.data + state_fixed.H_bathy.data
+        min_wet = float(jnp.min(jnp.where(wet, water_col, jnp.inf)))
+        assert min_wet >= 0.5 - 1.0e-6
+
+    def test_heat_salt_fixers_finite_for_thin_columns(
+        self, ocean_grid, ocean_z_coord, ocean_state,
+    ):
+        """Heat/salt fixers should remain finite with thin-column clipping."""
+        state_thin = ocean_state._replace(
+            eta=ocean_state.eta.replace(
+                data=-ocean_state.H_bathy.data + 0.1,
+            ),
+        )
+        state_heat = fix_heat_ocean(
+            state_thin,
+            ocean_state,
+            ocean_grid,
+            ocean_z_coord,
+            min_water_column_m=0.5,
+        )
+        state_salt = fix_salt_ocean(
+            state_heat,
+            ocean_state,
+            ocean_grid,
+            ocean_z_coord,
+            min_water_column_m=0.5,
+        )
+        assert jnp.all(jnp.isfinite(state_heat.T.data))
+        assert jnp.all(jnp.isfinite(state_salt.S.data))
 
 
 # ==============================================================================

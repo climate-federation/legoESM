@@ -19,7 +19,17 @@ MPI = pytest.importorskip("mpi4py.MPI")
 from legoesm.parallel.comm import build_comm_topology
 from legoesm.parallel.distributed import partition_state, gather_state
 from legoesm.parallel.reductions import global_sum_mpi
-from legoesm.grids.halo import pad_halo, set_halo_backend, _pad_halo_local
+from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.grids.halo import (
+    pad_halo,
+    pad_halo_vector,
+    set_halo_backend,
+    _pad_halo_local,
+)
+from legoesm.ocean.conservation import ocean_conservation_fixer
+from legoesm.ocean.init import rest_state_ocean
+from legoesm.ocean.state import OceanConfig
+from legoesm.ocean.vertical import create_ocean_z_star
 
 
 @pytest.fixture(autouse=True)
@@ -51,9 +61,11 @@ class TestMPIHaloExchange:
         # Reference: local halo exchange (no MPI).
         reference = _pad_halo_local(data)
 
-        # MPI halo exchange.
+        # Partition then apply MPI halo exchange on local faces only.
+        partitioned = partition_state(data, topology)
         set_halo_backend("mpi", topology)
-        result = pad_halo(data)
+        result_local = pad_halo(partitioned)
+        result = gather_state(result_local, topology)
 
         # Gather results to rank 0 for comparison.
         if topology.rank == 0:
@@ -70,11 +82,49 @@ class TestMPIHaloExchange:
 
         reference = _pad_halo_local(data)
 
+        partitioned = partition_state(data, topology)
         set_halo_backend("mpi", topology)
-        result = pad_halo(data)
+        result_local = pad_halo(partitioned)
+        result = gather_state(result_local, topology)
 
         if topology.rank == 0:
             assert jnp.allclose(result, reference, atol=1e-6)
+
+    def test_pad_halo_vector_mpi_matches_local(self, topology):
+        """MPI vector halo exchange matches local reference after gather."""
+        n = 8
+        grid = create_cubed_sphere(n)
+        key = jax.random.PRNGKey(123)
+        key_u, key_v = jax.random.split(key)
+        u_data = jax.random.normal(key_u, (6, n, n), dtype=jnp.float32)
+        v_data = jax.random.normal(key_v, (6, n, n), dtype=jnp.float32)
+
+        set_halo_backend("local")
+        ref_u, ref_v = pad_halo_vector(
+            u_data,
+            v_data,
+            grid.cos_angle,
+            grid.sin_angle,
+            grid.cos_angle_padded,
+            grid.sin_angle_padded,
+        )
+
+        u_part = partition_state(u_data, topology)
+        v_part = partition_state(v_data, topology)
+        set_halo_backend("mpi", topology)
+        out_u_local, out_v_local = pad_halo_vector(
+            u_part,
+            v_part,
+            grid.cos_angle,
+            grid.sin_angle,
+            grid.cos_angle_padded,
+            grid.sin_angle_padded,
+        )
+        out_u, out_v = gather_state((out_u_local, out_v_local), topology)
+
+        if topology.rank == 0:
+            assert jnp.allclose(out_u, ref_u, atol=1e-6)
+            assert jnp.allclose(out_v, ref_v, atol=1e-6)
 
 
 class TestMPIReductions:
@@ -115,3 +165,64 @@ class TestPartitionGather:
         gathered = gather_state(partitioned, topology)
 
         assert jnp.allclose(gathered, data)
+
+
+class TestMPIOceanConservation:
+    """MPI conservation-fixer behavior on partitioned ocean state."""
+
+    def test_ocean_conservation_fixer_matches_local(self, topology):
+        """MPI conservation fixers should match local-global reference."""
+        grid = create_cubed_sphere(8)
+        z_coord = create_ocean_z_star(n_levels=6, H_max=4000.0)
+        state_old = rest_state_ocean(
+            grid,
+            z_coord,
+            H_max=4000.0,
+            land_lat_threshold=70.0,
+        )
+        mask = state_old.land_mask.data
+
+        state_new = state_old._replace(
+            eta=state_old.eta.replace(
+                data=state_old.eta.data + 0.03 * mask,
+            ),
+            T=state_old.T.replace(
+                data=state_old.T.data + 0.2 * mask[..., jnp.newaxis],
+            ),
+            S=state_old.S.replace(
+                data=state_old.S.data - 0.1 * mask[..., jnp.newaxis],
+            ),
+        )
+
+        config = OceanConfig(
+            fix_volume=True,
+            fix_heat=True,
+            fix_salt=True,
+            min_water_column_m=0.5,
+        )
+
+        set_halo_backend("local")
+        ref_state = ocean_conservation_fixer(
+            state_new,
+            state_old,
+            grid,
+            z_coord,
+            config,
+        )
+
+        set_halo_backend("mpi", topology)
+        old_part = partition_state(state_old, topology)
+        new_part = partition_state(state_new, topology)
+        fixed_part = ocean_conservation_fixer(
+            new_part,
+            old_part,
+            grid,
+            z_coord,
+            config,
+        )
+        fixed_state = gather_state(fixed_part, topology)
+
+        if topology.rank == 0:
+            assert jnp.allclose(fixed_state.eta.data, ref_state.eta.data, atol=1e-6)
+            assert jnp.allclose(fixed_state.T.data, ref_state.T.data, atol=1e-6)
+            assert jnp.allclose(fixed_state.S.data, ref_state.S.data, atol=1e-6)

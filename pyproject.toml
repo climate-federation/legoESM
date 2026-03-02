@@ -36,7 +36,10 @@ dependencies = [
 
 [project.optional-dependencies]
 metal = ["jax-metal"]
-mpi = ["mpi4jax>=0.4"]
+mpi = [
+    "mpi4py>=4.1,<5",
+    "mpi4jax>=0.8,<0.9",
+]
 dev = [
     "pytest>=8.0",
     "pytest-xdist",

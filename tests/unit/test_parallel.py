@@ -24,6 +24,10 @@ from legoesm.parallel.comm import (
     _face_to_rank,
     _rank_to_faces,
 )
+from legoesm.parallel.reductions import (
+    _require_mpi_stack,
+    _validate_mpi_runtime_versions,
+)
 from legoesm.parallel.metal import get_metal_config, to_cpu
 from legoesm.core.hardware import detect_devices, get_backend
 from legoesm.core.field import Field
@@ -60,6 +64,17 @@ class TestDeviceMesh:
         assert config.n_devices >= 1
         assert config.n_devices <= _N_FACES
 
+    def test_create_device_mesh_explicit_devices(self):
+        """Explicit device list is accepted and used."""
+        config = create_device_mesh(n_devices=1, devices=jax.local_devices())
+        assert isinstance(config, DeviceConfig)
+        assert config.n_devices == 1
+
+    def test_create_device_mesh_empty_explicit_devices(self):
+        """Explicit empty device list raises a clear ValueError."""
+        with pytest.raises(ValueError, match="devices must contain at least one"):
+            create_device_mesh(n_devices=1, devices=[])
+
     def test_invalid_n_devices(self):
         """n_devices that doesn't divide 6 raises ValueError."""
         with pytest.raises(ValueError, match="must be >= 1"):
@@ -84,6 +99,19 @@ class TestDeviceMesh:
                 with pytest.warns(RuntimeWarning, match="Falling back to 3 device"):
                     config = create_device_mesh(n_devices="auto")
         assert config.n_devices == 3
+
+    def test_distributed_mode_uses_local_devices(self):
+        """When process_count>1 and no backend override, use local devices."""
+        local = jax.local_devices()
+        with patch("legoesm.parallel.mesh.jax.process_count", return_value=2):
+            with patch("legoesm.parallel.mesh.jax.local_devices", return_value=local):
+                with patch(
+                    "legoesm.parallel.mesh.jax.devices",
+                    side_effect=AssertionError("jax.devices should not be used"),
+                ):
+                    config = create_device_mesh(n_devices=1)
+        assert isinstance(config, DeviceConfig)
+        assert config.n_devices == 1
 
 
 class TestShardPytree:
@@ -252,6 +280,52 @@ class TestCommTopology:
                     sent_pairs = [(face, edge) for face, edge, *_ in send_order_a]
                     expected_pairs = [(nbr_face, nbr_edge) for _, _, nbr_face, nbr_edge, _ in recv_order_b]
                     assert sent_pairs == expected_pairs
+
+
+class TestMPIDependencyGuards:
+    """Tests for MPI dependency validation and fail-fast behavior."""
+
+    def test_validate_versions_rejects_legacy_mpi4jax(self):
+        """mpi4jax<0.8 should fail fast due incompatible token semantics."""
+        with pytest.raises(RuntimeError, match="requires mpi4jax"):
+            _validate_mpi_runtime_versions("0.9.0", "0.7.5")
+
+    def test_validate_versions_warns_outside_tested_range(self):
+        """Out-of-range versions should emit a clear runtime warning."""
+        with pytest.warns(RuntimeWarning, match="outside legoESM's tested MPI range"):
+            _validate_mpi_runtime_versions("0.10.0", "0.8.1")
+
+    def test_validate_versions_strict_mode_raises(self):
+        """Strict mode should convert compatibility warnings to errors."""
+        with pytest.raises(RuntimeError, match="outside legoESM's tested MPI range"):
+            _validate_mpi_runtime_versions("0.10.0", "0.8.1", strict=True)
+
+    def test_require_mpi_stack_reports_missing_modules(self):
+        """Missing mpi4jax/mpi4py should raise a clear ImportError."""
+        def _fake_find_spec(name):
+            if name in {"mpi4jax", "mpi4py"}:
+                return None
+            return object()
+
+        with patch("legoesm.parallel.reductions.importlib.util.find_spec", side_effect=_fake_find_spec):
+            with pytest.raises(ImportError, match="mpi4jax, mpi4py"):
+                _require_mpi_stack()
+
+    def test_initialize_distributed_checks_mpi_before_jax_init(self):
+        """initialize_distributed should fail before jax.distributed.initialize when MPI deps are absent."""
+        import legoesm.parallel.distributed as distributed_mod
+
+        distributed_mod._active_topology = None
+        with patch(
+            "legoesm.parallel.distributed._require_mpi_stack",
+            side_effect=ImportError("missing mpi stack"),
+        ):
+            with patch(
+                "legoesm.parallel.distributed.jax.distributed.initialize",
+                side_effect=AssertionError("jax.distributed.initialize should not run"),
+            ):
+                with pytest.raises(ImportError, match="missing mpi stack"):
+                    distributed_mod.initialize_distributed()
 
 
 # ==============================================================================

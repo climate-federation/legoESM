@@ -1,0 +1,39 @@
+name: MPI Nightly
+
+on:
+  schedule:
+    # Daily at 03:00 UTC
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  mpi-ocean-conservation-nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install OpenMPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openmpi-bin libopenmpi-dev
+          mpirun --version
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,mpi]"
+
+      - name: Run Nightly Long-Run MPI Ocean Conservation
+        env:
+          MPI4JAX_NO_WARN_JAX_VERSION: "1"
+        run: |
+          mpirun --oversubscribe -np 3 \
+            python -m pytest -q tests/distributed/test_ocean_mpi_conservation.py -k longrun

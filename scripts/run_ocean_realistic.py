@@ -26,12 +26,28 @@ Usage:
 import argparse
 import json
 import os
+import tempfile
 import time
+import traceback
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+def _ensure_mpl_config_dir() -> None:
+    """Ensure Matplotlib cache/config directory is writable."""
+    current = os.environ.get("MPLCONFIGDIR", "")
+    if current and os.path.isdir(current) and os.access(current, os.W_OK):
+        return
+    candidate = os.path.join(tempfile.gettempdir(), "legoesm_mplconfig")
+    os.makedirs(candidate, exist_ok=True)
+    os.environ["MPLCONFIGDIR"] = candidate
+
+
+_ensure_mpl_config_dir()
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -951,6 +967,16 @@ def main():
     parser.add_argument("--runtime-checks", action="store_true",
                         help="Enable host-side runtime invariant checks")
     args = parser.parse_args()
+
+    if args.resolution < 1:
+        raise ValueError(f"--resolution must be >= 1, got {args.resolution!r}")
+    if args.levels < 1:
+        raise ValueError(f"--levels must be >= 1, got {args.levels!r}")
+    if args.dt <= 0.0:
+        raise ValueError(f"--dt must be > 0, got {args.dt!r}")
+    if args.days <= 0.0:
+        raise ValueError(f"--days must be > 0, got {args.days!r}")
+
     jax.config.update("jax_enable_x64", bool(args.x64))
 
     output_dir = args.output or f"results/ocean_realistic_C{args.resolution}_L{args.levels}_{args.days:.0f}d"
@@ -1042,30 +1068,37 @@ def main():
     # Run tests
     # =====================================================================
     results = {}
+    case_errors = {}
+
+    def _run_case(case_name: str, fn) -> None:
+        try:
+            state, diag = fn()
+            results[case_name] = {
+                "metrics": summarize_case_metrics(state, diag, grid),
+            }
+        except Exception as exc:  # pragma: no cover - exercised in runtime matrix failures
+            msg = f"{type(exc).__name__}: {exc}"
+            case_errors[case_name] = msg
+            print(f"\n  !!! CASE FAILED: {case_name} -> {msg}")
+            traceback.print_exc()
 
     if args.test in ("all", "gyre"):
-        state, diag = stommel_gyre(args, grid, z_coord, config, output_dir, point_size)
-        results["stommel_gyre"] = {
-            "state": state,
-            "diagnostics": diag,
-            "metrics": summarize_case_metrics(state, diag, grid),
-        }
+        _run_case(
+            "stommel_gyre",
+            lambda: stommel_gyre(args, grid, z_coord, config, output_dir, point_size),
+        )
 
     if args.test in ("all", "front"):
-        state, diag = baroclinic_adjustment(args, grid, z_coord, config, output_dir, point_size)
-        results["baroclinic_adjustment"] = {
-            "state": state,
-            "diagnostics": diag,
-            "metrics": summarize_case_metrics(state, diag, grid),
-        }
+        _run_case(
+            "baroclinic_adjustment",
+            lambda: baroclinic_adjustment(args, grid, z_coord, config, output_dir, point_size),
+        )
 
     if args.test in ("all", "kelvin"):
-        state, diag = equatorial_kelvin_wave(args, grid, z_coord, config, output_dir, point_size)
-        results["kelvin_wave"] = {
-            "state": state,
-            "diagnostics": diag,
-            "metrics": summarize_case_metrics(state, diag, grid),
-        }
+        _run_case(
+            "kelvin_wave",
+            lambda: equatorial_kelvin_wave(args, grid, z_coord, config, output_dir, point_size),
+        )
 
     # =====================================================================
     # Summary
@@ -1094,6 +1127,11 @@ def main():
         print(f"    Land cells zero:  {d['land_zero']}")
         summary_cases[name] = d
 
+    if case_errors:
+        print("\n  --- failed_cases ---")
+        for name, msg in case_errors.items():
+            print(f"    {name}: {msg}")
+
     summary_payload = {
         "suite": "ocean_realistic",
         "meta": {
@@ -1118,6 +1156,7 @@ def main():
             "barotropic_diffusion_dt_ref": float(config.barotropic_diffusion_dt_ref),
         },
         "cases": summary_cases,
+        "case_errors": case_errors,
     }
     with open(Path(output_dir) / "summary.json", "w") as f:
         json.dump(summary_payload, f, indent=2, sort_keys=True)
@@ -1147,6 +1186,11 @@ def main():
             f.write(
                 f"  all_finite={d['all_finite']}, land_zero={d['land_zero']}\n\n",
             )
+        if case_errors:
+            f.write("failed_cases\n")
+            for name, msg in case_errors.items():
+                f.write(f"  {name}: {msg}\n")
+            f.write("\n")
 
     print(f"\n  Output: {output_dir}/")
     for name in results:
@@ -1155,7 +1199,8 @@ def main():
                   "kelvin_wave": "kelvin_wave"}[name]
         print(f"    {subdir}/")
     print("=" * 70)
+    return 1 if case_errors else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

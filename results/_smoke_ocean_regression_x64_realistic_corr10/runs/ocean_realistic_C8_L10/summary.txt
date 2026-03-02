@@ -1,0 +1,34 @@
+legoESM Ocean Realistic Experiments
+==================================================
+Resolution: C8, L10
+Time step: 1800 s
+Duration: 1.0 days (48 steps)
+Runtime checks: False
+A_h=1.11e+07, K_h=1.11e+06, A_v=1.00e-02, K_v=1.00e-03
+Hyperdiffusion: 1.58e+16
+Barotropic substeps: 30
+
+stommel_gyre:
+  SSH: [-0.0017, 0.0039] m
+  Max speed: 0.0519 m/s
+  SST: [15.00, 15.00] degC
+  KE: 3.1658e+12
+  heat_drift_rel=2.399e-08, salt_drift_rel=2.399e-08, eta_mean_drift=4.776e-10
+  all_finite=True, land_zero=True
+
+baroclinic_adjustment:
+  SSH: [-3.3622, 2.0033] m
+  Max speed: 0.4102 m/s
+  SST: [10.00, 20.00] degC
+  KE: 1.4031e+16
+  heat_drift_rel=2.549e-08, salt_drift_rel=2.601e-08, eta_mean_drift=1.561e-07
+  all_finite=True, land_zero=True
+
+kelvin_wave:
+  SSH: [0.0040, 0.0089] m
+  Max speed: 0.0002 m/s
+  SST: [15.00, 15.00] degC
+  KE: 4.6243e+09
+  heat_drift_rel=3.507e-08, salt_drift_rel=3.507e-08, eta_mean_drift=6.665e-09
+  all_finite=True, land_zero=True
+

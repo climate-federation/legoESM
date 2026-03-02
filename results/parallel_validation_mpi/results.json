@@ -1,0 +1,435 @@
+{
+  "timestamp_utc": "2026-03-02T12:09:42.909351+00:00",
+  "overall_pass": true,
+  "host": {
+    "jax_version": "0.9.0.1",
+    "backend": "cpu",
+    "process_count": 1,
+    "local_device_count": 1,
+    "local_devices": [
+      "cpu:0"
+    ],
+    "device_counts": {
+      "cpu": 1,
+      "gpu": 0,
+      "tpu": 0
+    },
+    "mpirun_path": "/opt/homebrew/bin/mpirun",
+    "mpiexec_path": "/opt/homebrew/bin/mpiexec",
+    "has_mpi4py": true,
+    "has_mpi4jax": true
+  },
+  "parallel_unit_tests": {
+    "status": "pass",
+    "returncode": 0,
+    "elapsed_s": 1.6088512500282377,
+    "log": "results/parallel_validation_mpi/logs/unit_test_parallel.log",
+    "stdout_tail": "============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollected 38 items\n\ntests/unit/test_parallel.py ......................................       [100%]\n\n============================== 38 passed in 0.61s ==============================\n",
+    "stderr_tail": ""
+  },
+  "mpi_validation": {
+    "status": "pass",
+    "launcher": "/opt/homebrew/bin/mpirun",
+    "launcher_args": [
+      "--oversubscribe"
+    ],
+    "interface": "",
+    "mca": {
+      "btl": "self,tcp"
+    },
+    "env_overrides": {
+      "MPI4JAX_NO_WARN_JAX_VERSION": "1"
+    },
+    "runs": [
+      {
+        "n_ranks": 2,
+        "status": "pass",
+        "returncode": 0,
+        "elapsed_s": 5.1406054579420015,
+        "log": "results/parallel_validation_mpi/logs/mpi_np2.log",
+        "stdout_tail": "============================= test session starts ==============================\n============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\nrootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... collecting ... \ncollected 7 items                                                              \n\ncollected 7 items                                                              \n\ntests/distributed/test_halo_mpi.py \ntests/distributed/test_halo_mpi.py .............                               [100%]\n\n============================== 7 passed in 4.15s ===============================\n.                               [100%]\n\n============================== 7 passed in 4.19s ===============================\n",
+        "stderr_tail": ""
+      },
+      {
+        "n_ranks": 3,
+        "status": "pass",
+        "returncode": 0,
+        "elapsed_s": 5.817214000038803,
+        "log": "results/parallel_validation_mpi/logs/mpi_np3.log",
+        "stdout_tail": "============================= test session starts ==============================\n============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\n============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... rootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... rootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... \ncollected 7 items                                                              \n\ncollected 7 items                                                              \n\ncollected 7 items                                                              \n\ntests/distributed/test_halo_mpi.py \ntests/distributed/test_halo_mpi.py \ntests/distributed/test_halo_mpi.py ....................                               [100%]                               [100%]\n\n\n============================== 7 passed in 4.77s ===============================\n\n============================== 7 passed in 4.77s ===============================\n.                               [100%]\n\n============================== 7 passed in 4.81s ===============================\n",
+        "stderr_tail": ""
+      },
+      {
+        "n_ranks": 6,
+        "status": "pass",
+        "returncode": 0,
+        "elapsed_s": 7.910342250019312,
+        "log": "results/parallel_validation_mpi/logs/mpi_np6.log",
+        "stdout_tail": "============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\n============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... rootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... ============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... ============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... ============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... ============================= test session starts ==============================\nplatform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0\nrootdir: /Users/pierregentine/legoESM\nconfigfile: pyproject.toml\nplugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5\ncollecting ... \ncollected 7 items                                                              \n\ntests/distributed/test_halo_mpi.py \ncollected 7 items                                                              \n\ntests/distributed/test_halo_mpi.py \ncollected 7 items                                                              \n\ntests/distributed/test_halo_mpi.py \ncollected 7 items                                                              \n\ncollected 7 items                                                              \n\ntests/distributed/test_halo_mpi.py \ntests/distributed/test_halo_mpi.py \ncollected 7 items                                                              \n\ntests/distributed/test_halo_mpi.py ........................................                               [100%]                               [100%]                               [100%]                               [100%].\n\n\n\n============================== 7 passed in 6.53s ===============================\n\n============================== 7 passed in 6.53s ===============================\n\n============================== 7 passed in 6.54s ===============================\n                               [100%]\n\n============================== 7 passed in 6.50s ===============================\n\n\n============================== 7 passed in 6.51s ===============================\n.                               [100%]\n\n============================== 7 passed in 6.59s ===============================\n",
+        "stderr_tail": ""
+      }
+    ]
+  },
+  "scaling_validation": {
+    "status": "pass",
+    "thresholds": {
+      "compile_time_max_s": 30.0,
+      "strong_min_efficiency": 0.12,
+      "weak_max_step_growth": 2.5,
+      "weak_min_per_device_throughput_ratio": 0.35
+    },
+    "backends": [
+      {
+        "backend": "cpu",
+        "available_devices": 1,
+        "requested_devices": [
+          1,
+          2,
+          3,
+          6
+        ],
+        "status": "pass",
+        "cases": [
+          {
+            "case_type": "strong",
+            "status": "pass",
+            "entries": [
+              {
+                "backend": "cpu",
+                "case_type": "strong",
+                "n_devices_requested": 1,
+                "grid_size": 256,
+                "command_status": "pass",
+                "command_returncode": 0,
+                "elapsed_s": 2.533728374983184,
+                "log": "results/parallel_validation_mpi/logs/scaling_cpu_strong_n1.log",
+                "worker": {
+                  "active_backend": "cpu",
+                  "backend_target": "cpu",
+                  "case_type": "strong",
+                  "cells_per_step": 393216.0,
+                  "compile_time_s": 0.08629254100378603,
+                  "grid_size": 256,
+                  "iterations": 20,
+                  "local_device_count": 1,
+                  "n_devices": 1,
+                  "process_count": 1,
+                  "status": "pass",
+                  "steady_ms_per_step": 89.64071664959192,
+                  "steady_total_s": 1.7928143329918385,
+                  "throughput_global_mcells_s": 4.386578049538497,
+                  "throughput_per_device_mcells_s": 4.386578049538497,
+                  "throughput_per_rank_mcells_s": 4.386578049538497,
+                  "warmup": 3
+                },
+                "status": "pass",
+                "checks": {
+                  "compile_time_ok": true,
+                  "case_scaling_ok": true
+                },
+                "derived": {
+                  "speedup_vs_baseline": 1.0,
+                  "efficiency_vs_baseline": 1.0,
+                  "step_growth_vs_baseline": 1.0,
+                  "per_device_throughput_ratio_vs_baseline": 1.0
+                }
+              },
+              {
+                "backend": "cpu",
+                "case_type": "strong",
+                "n_devices_requested": 2,
+                "grid_size": 256,
+                "command_status": "pass",
+                "command_returncode": 0,
+                "elapsed_s": 3.732138292049058,
+                "log": "results/parallel_validation_mpi/logs/scaling_cpu_strong_n2.log",
+                "worker": {
+                  "active_backend": "cpu",
+                  "backend_target": "cpu",
+                  "case_type": "strong",
+                  "cells_per_step": 393216.0,
+                  "compile_time_s": 0.1449595419690013,
+                  "grid_size": 256,
+                  "iterations": 20,
+                  "local_device_count": 2,
+                  "n_devices": 2,
+                  "process_count": 1,
+                  "status": "pass",
+                  "steady_ms_per_step": 138.43801459879614,
+                  "steady_total_s": 2.768760291975923,
+                  "throughput_global_mcells_s": 2.8403758977587894,
+                  "throughput_per_device_mcells_s": 1.4201879488793947,
+                  "throughput_per_rank_mcells_s": 2.8403758977587894,
+                  "warmup": 3
+                },
+                "status": "pass",
+                "checks": {
+                  "compile_time_ok": true,
+                  "case_scaling_ok": true
+                },
+                "derived": {
+                  "speedup_vs_baseline": 0.6475151851128284,
+                  "efficiency_vs_baseline": 0.3237575925564142,
+                  "step_growth_vs_baseline": 1.5443653260822783,
+                  "per_device_throughput_ratio_vs_baseline": 0.3237575925564142
+                }
+              },
+              {
+                "backend": "cpu",
+                "case_type": "strong",
+                "n_devices_requested": 3,
+                "grid_size": 256,
+                "command_status": "pass",
+                "command_returncode": 0,
+                "elapsed_s": 3.528097999980673,
+                "log": "results/parallel_validation_mpi/logs/scaling_cpu_strong_n3.log",
+                "worker": {
+                  "active_backend": "cpu",
+                  "backend_target": "cpu",
+                  "case_type": "strong",
+                  "cells_per_step": 393216.0,
+                  "compile_time_s": 0.1296095410361886,
+                  "grid_size": 256,
+                  "iterations": 20,
+                  "local_device_count": 3,
+                  "n_devices": 3,
+                  "process_count": 1,
+                  "status": "pass",
+                  "steady_ms_per_step": 130.35006250138395,
+                  "steady_total_s": 2.607001250027679,
+                  "throughput_global_mcells_s": 3.0166153544868854,
+                  "throughput_per_device_mcells_s": 1.0055384514956285,
+                  "throughput_per_rank_mcells_s": 3.0166153544868854,
+                  "warmup": 3
+                },
+                "status": "pass",
+                "checks": {
+                  "compile_time_ok": true,
+                  "case_scaling_ok": true
+                },
+                "derived": {
+                  "speedup_vs_baseline": 0.6876921646941304,
+                  "efficiency_vs_baseline": 0.22923072156471014,
+                  "step_growth_vs_baseline": 1.454139004833328,
+                  "per_device_throughput_ratio_vs_baseline": 0.22923072156471014
+                }
+              },
+              {
+                "backend": "cpu",
+                "case_type": "strong",
+                "n_devices_requested": 6,
+                "grid_size": 256,
+                "command_status": "pass",
+                "command_returncode": 0,
+                "elapsed_s": 2.783952333033085,
+                "log": "results/parallel_validation_mpi/logs/scaling_cpu_strong_n6.log",
+                "worker": {
+                  "active_backend": "cpu",
+                  "backend_target": "cpu",
+                  "case_type": "strong",
+                  "cells_per_step": 393216.0,
+                  "compile_time_s": 0.09480266703758389,
+                  "grid_size": 256,
+                  "iterations": 20,
+                  "local_device_count": 6,
+                  "n_devices": 6,
+                  "process_count": 1,
+                  "status": "pass",
+                  "steady_ms_per_step": 98.24003334506415,
+                  "steady_total_s": 1.964800666901283,
+                  "throughput_global_mcells_s": 4.0026045046100975,
+                  "throughput_per_device_mcells_s": 0.6671007507683496,
+                  "throughput_per_rank_mcells_s": 4.0026045046100975,
+                  "warmup": 3
+                },
+                "status": "pass",
+                "checks": {
+                  "compile_time_ok": true,
+                  "case_scaling_ok": true
+                },
+                "derived": {
+                  "speedup_vs_baseline": 0.9124662685601147,
+                  "efficiency_vs_baseline": 0.15207771142668577,
+                  "step_growth_vs_baseline": 1.095930923099234,
+                  "per_device_throughput_ratio_vs_baseline": 0.15207771142668577
+                }
+              }
+            ]
+          },
+          {
+            "case_type": "weak",
+            "status": "pass",
+            "entries": [
+              {
+                "backend": "cpu",
+                "case_type": "weak",
+                "n_devices_requested": 1,
+                "grid_size": 256,
+                "command_status": "pass",
+                "command_returncode": 0,
+                "elapsed_s": 2.5748590000439435,
+                "log": "results/parallel_validation_mpi/logs/scaling_cpu_weak_n1.log",
+                "worker": {
+                  "active_backend": "cpu",
+                  "backend_target": "cpu",
+                  "case_type": "weak",
+                  "cells_per_step": 393216.0,
+                  "compile_time_s": 0.09601658303290606,
+                  "grid_size": 256,
+                  "iterations": 20,
+                  "local_device_count": 1,
+                  "n_devices": 1,
+                  "process_count": 1,
+                  "status": "pass",
+                  "steady_ms_per_step": 91.43530000001192,
+                  "steady_total_s": 1.8287060000002384,
+                  "throughput_global_mcells_s": 4.30048351129103,
+                  "throughput_per_device_mcells_s": 4.30048351129103,
+                  "throughput_per_rank_mcells_s": 4.30048351129103,
+                  "warmup": 3
+                },
+                "status": "pass",
+                "checks": {
+                  "compile_time_ok": true,
+                  "case_scaling_ok": true
+                },
+                "derived": {
+                  "speedup_vs_baseline": 1.0,
+                  "efficiency_vs_baseline": 1.0,
+                  "step_growth_vs_baseline": 1.0,
+                  "per_device_throughput_ratio_vs_baseline": 1.0
+                }
+              },
+              {
+                "backend": "cpu",
+                "case_type": "weak",
+                "n_devices_requested": 2,
+                "grid_size": 362,
+                "command_status": "pass",
+                "command_returncode": 0,
+                "elapsed_s": 4.383971167029813,
+                "log": "results/parallel_validation_mpi/logs/scaling_cpu_weak_n2.log",
+                "worker": {
+                  "active_backend": "cpu",
+                  "backend_target": "cpu",
+                  "case_type": "weak",
+                  "cells_per_step": 786264.0,
+                  "compile_time_s": 0.14694062492344528,
+                  "grid_size": 362,
+                  "iterations": 20,
+                  "local_device_count": 2,
+                  "n_devices": 2,
+                  "process_count": 1,
+                  "status": "pass",
+                  "steady_ms_per_step": 164.85333539894782,
+                  "steady_total_s": 3.2970667079789564,
+                  "throughput_global_mcells_s": 4.769475838006117,
+                  "throughput_per_device_mcells_s": 2.3847379190030584,
+                  "throughput_per_rank_mcells_s": 4.769475838006117,
+                  "warmup": 3
+                },
+                "status": "pass",
+                "checks": {
+                  "compile_time_ok": true,
+                  "case_scaling_ok": true
+                },
+                "derived": {
+                  "speedup_vs_baseline": 0.5546463453635134,
+                  "efficiency_vs_baseline": 0.2773231726817567,
+                  "step_growth_vs_baseline": 1.8029506700248845,
+                  "per_device_throughput_ratio_vs_baseline": 0.5545278601212789
+                }
+              },
+              {
+                "backend": "cpu",
+                "case_type": "weak",
+                "n_devices_requested": 3,
+                "grid_size": 443,
+                "command_status": "pass",
+                "command_returncode": 0,
+                "elapsed_s": 4.756134791998193,
+                "log": "results/parallel_validation_mpi/logs/scaling_cpu_weak_n3.log",
+                "worker": {
+                  "active_backend": "cpu",
+                  "backend_target": "cpu",
+                  "case_type": "weak",
+                  "cells_per_step": 1177494.0,
+                  "compile_time_s": 0.17980316700413823,
+                  "grid_size": 443,
+                  "iterations": 20,
+                  "local_device_count": 3,
+                  "n_devices": 3,
+                  "process_count": 1,
+                  "status": "pass",
+                  "steady_ms_per_step": 177.09798334981315,
+                  "steady_total_s": 3.541959666996263,
+                  "throughput_global_mcells_s": 6.64882782811904,
+                  "throughput_per_device_mcells_s": 2.2162759427063468,
+                  "throughput_per_rank_mcells_s": 6.64882782811904,
+                  "warmup": 3
+                },
+                "status": "pass",
+                "checks": {
+                  "compile_time_ok": true,
+                  "case_scaling_ok": true
+                },
+                "derived": {
+                  "speedup_vs_baseline": 0.5162978045854094,
+                  "efficiency_vs_baseline": 0.17209926819513646,
+                  "step_growth_vs_baseline": 1.936866651608187,
+                  "per_device_throughput_ratio_vs_baseline": 0.5153550610966087
+                }
+              },
+              {
+                "backend": "cpu",
+                "case_type": "weak",
+                "n_devices_requested": 6,
+                "grid_size": 627,
+                "command_status": "pass",
+                "command_returncode": 0,
+                "elapsed_s": 3.1482871250482276,
+                "log": "results/parallel_validation_mpi/logs/scaling_cpu_weak_n6.log",
+                "worker": {
+                  "active_backend": "cpu",
+                  "backend_target": "cpu",
+                  "case_type": "weak",
+                  "cells_per_step": 2358774.0,
+                  "compile_time_s": 0.10954429197590798,
+                  "grid_size": 627,
+                  "iterations": 20,
+                  "local_device_count": 6,
+                  "n_devices": 6,
+                  "process_count": 1,
+                  "status": "pass",
+                  "steady_ms_per_step": 111.95651249727234,
+                  "steady_total_s": 2.239130249945447,
+                  "throughput_global_mcells_s": 21.06866271006314,
+                  "throughput_per_device_mcells_s": 3.5114437850105236,
+                  "throughput_per_rank_mcells_s": 21.06866271006314,
+                  "warmup": 3
+                },
+                "status": "pass",
+                "checks": {
+                  "compile_time_ok": true,
+                  "case_scaling_ok": true
+                },
+                "derived": {
+                  "speedup_vs_baseline": 0.8167037179033207,
+                  "efficiency_vs_baseline": 0.13611728631722012,
+                  "step_growth_vs_baseline": 1.2244342447310583,
+                  "per_device_throughput_ratio_vs_baseline": 0.8165230202118292
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "backend": "gpu",
+        "status": "skipped",
+        "reason": "No local GPU devices detected.",
+        "cases": []
+      }
+    ]
+  }
+}

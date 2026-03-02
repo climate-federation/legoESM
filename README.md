@@ -28,6 +28,21 @@ pytest tests/
 
 ## Platform Notes
 
+### Tested Compatibility Matrix
+
+| Path | Hardware / Backend | MPI Runtime | Tested JAX | Tested mpi4jax | Status / Notes |
+|---|---|---|---|---|---|
+| Finite-volume dycores + ocean (single-process) | CPU (`jax` CPU backend) | N/A | `>=0.8,<0.10` | N/A | Regular unit/regression path |
+| Finite-volume dycores + ocean (single-process) | Apple Silicon Metal (`jax-metal`) | N/A | `>=0.8,<0.10` | N/A | Supported for FV solvers (`float32`) |
+| Spectral solvers (atmosphere/ocean) | CPU (`JAX_PLATFORMS=cpu`) | N/A | `>=0.8,<0.10` | N/A | Requires `float64`/`complex128` |
+| Distributed MPI halo/reductions | CPU + OpenMPI (`mpirun`) | OpenMPI (4.x/5.x) | `>=0.8,<0.10` | `>=0.8,<0.9` | Validated with `mpirun -np 2/3/6` on `tests/distributed/test_halo_mpi.py` |
+| Nightly long-run MPI ocean conservation | CPU + OpenMPI (`mpirun`) | OpenMPI (4.x/5.x) | `>=0.8,<0.10` | `>=0.8,<0.9` | Validated on `tests/distributed/test_ocean_mpi_conservation.py` |
+| Multi-device scaling suite | CPU/GPU (if available) | Optional (for distributed checks) | `>=0.8,<0.10` | `>=0.8,<0.9` (MPI mode) | Use `scripts/run_parallel_validation.py` for strong/weak scaling and thresholds |
+
+`legoesm.parallel.reductions` enforces MPI compatibility guardrails:
+- Hard fail for legacy `mpi4jax<0.8` (incompatible token semantics).
+- Warning for versions outside tested range; set `LEGOESM_MPI_STRICT_COMPAT=1` to make this a hard fail.
+
 ### Apple Silicon (Metal/MPS backend)
 
 The **spectral solver** (Gaussian grid + spherical harmonic transforms) requires

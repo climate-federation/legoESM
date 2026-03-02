@@ -60,7 +60,6 @@ def _laplacian_raw(data: jnp.ndarray, grid: CubedSphereGrid) -> jnp.ndarray:
 
 def barotropic_substeps(
     state: OceanState,
-    slow_tend: OceanState,
     dt_s: float,
     n_substeps: int,
     grid: CubedSphereGrid,
@@ -79,8 +78,6 @@ def barotropic_substeps(
     ----------
     state : OceanState
         State after slow tendency application.
-    slow_tend : OceanState
-        Slow (baroclinic) tendencies (used as pytree, .data contains tendencies).
     dt_s : float
         Substep size [seconds].
     n_substeps : int
@@ -96,17 +93,25 @@ def barotropic_substeps(
     -------
     OceanState : State with updated eta and velocity correction.
     """
-    g = config.g
+    g = jnp.asarray(config.g)
     H_bathy = state.H_bathy.data
     mask = state.land_mask.data
     u = state.u.data
     v = state.v.data
-    eta = state.eta.data
+    eta_raw = state.eta.data
+    min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta_raw.dtype)
+    dt_s = jnp.asarray(dt_s, dtype=eta_raw.dtype)
+    g = g.astype(eta_raw.dtype)
+    eta_floor = min_water_col - H_bathy
+    eta = jnp.maximum(eta_raw, eta_floor) * mask
 
     # Compute depth-averaged velocity from current 3D state
-    h_k = compute_layer_thickness(eta, H_bathy, z_coord)
+    h_k = compute_layer_thickness(
+        eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
+    )
     H_total = jnp.sum(h_k, axis=-1)                        # (6, n, n)
-    H_total = jnp.maximum(H_total, 1.0)  # prevent division by zero on land
+    # Keep depth averages finite if a column becomes too thin.
+    H_total = jnp.maximum(H_total, min_water_col)
     U_bar = jnp.sum(u * h_k, axis=-1) / H_total * mask     # (6, n, n)
     V_bar = jnp.sum(v * h_k, axis=-1) / H_total * mask
 
@@ -114,15 +119,12 @@ def barotropic_substeps(
     # to u, v by _pytree_axpy in split_explicit_step before this function is
     # called. Including F_slow would double-count the depth-averaged part of
     # the slow tendency (once in U_bar initial condition, once via F_slow).
-    F_slow_u = jnp.zeros_like(U_bar)
-    F_slow_v = jnp.zeros_like(V_bar)
-
     # Semi-implicit (Crank-Nicolson) Coriolis.
     # Coriolis MUST be applied at the substep level (small rotations per
     # substep, f*dt_s ~ 0.01 rad) rather than at the baroclinic level
     # (large rotation, f*dt ~ 0.5 rad) to avoid time-splitting errors
     # that generate spurious gravity waves.
-    alpha = (0.5 * grid.f * dt_s).astype(eta.dtype)   # (6, n, n)
+    alpha = (0.5 * grid.f.astype(eta.dtype) * dt_s).astype(eta.dtype)   # (6, n, n)
     denom = 1.0 + alpha ** 2
 
     if config.barotropic_diffusion_alpha < 0.0:
@@ -137,8 +139,10 @@ def barotropic_substeps(
         )
     # Tunable, dt-scaled barotropic diffusion.
     # Per-substep coefficient is alpha * (dt_s / dt_ref) * area.
-    baro_alpha = config.barotropic_diffusion_alpha * (
-        dt_s / config.barotropic_diffusion_dt_ref
+    baro_alpha = jnp.asarray(
+        config.barotropic_diffusion_alpha, dtype=eta.dtype,
+    ) * (
+        dt_s / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype)
     )
     nu_dt = (baro_alpha * grid.area).astype(eta.dtype)
 
@@ -146,18 +150,18 @@ def barotropic_substeps(
     def substep_body(i, carry):
         eta_c, U_bar_c, V_bar_c = carry
 
-        H_total_c = (eta_c + H_bathy) * mask
+        H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
 
         # Forward: update eta from continuity
         # deta/dt = -div(H_total * U_bar, H_total * V_bar)
         flux_u = H_total_c * U_bar_c
         flux_v = H_total_c * V_bar_c
-        div_flux = _divergence_raw(flux_u, flux_v, grid)
-        eta_new = (eta_c - dt_s * div_flux) * mask
+        div_flux = _divergence_raw(flux_u, flux_v, grid).astype(eta.dtype)
+        eta_new = jnp.maximum(eta_c - dt_s * div_flux, eta_floor) * mask
 
         # Backward: update U_bar, V_bar with UPDATED eta
-        deta_dx = _gradient_x_raw(eta_new, grid)
-        deta_dy = _gradient_y_raw(eta_new, grid)
+        deta_dx = _gradient_x_raw(eta_new, grid).astype(eta.dtype)
+        deta_dy = _gradient_y_raw(eta_new, grid).astype(eta.dtype)
 
         # Semi-implicit Coriolis + backward PGF
         rhs_u = U_bar_c + alpha * V_bar_c - dt_s * g * deta_dx
@@ -168,9 +172,16 @@ def barotropic_substeps(
         if config.barotropic_diffusion_alpha > 0.0:
             # Compact Laplacian diffusion (damps modes amplified by
             # Coriolis-PGF interaction on non-adjoint cubed-sphere operators).
-            eta_new = (eta_new + nu_dt * _laplacian_raw(eta_new, grid)) * mask
-            U_bar_new = (U_bar_new + nu_dt * _laplacian_raw(U_bar_new, grid)) * mask
-            V_bar_new = (V_bar_new + nu_dt * _laplacian_raw(V_bar_new, grid)) * mask
+            eta_new = (
+                eta_new + nu_dt * _laplacian_raw(eta_new, grid).astype(eta.dtype)
+            ) * mask
+            eta_new = jnp.maximum(eta_new, eta_floor) * mask
+            U_bar_new = (
+                U_bar_new + nu_dt * _laplacian_raw(U_bar_new, grid).astype(eta.dtype)
+            ) * mask
+            V_bar_new = (
+                V_bar_new + nu_dt * _laplacian_raw(V_bar_new, grid).astype(eta.dtype)
+            ) * mask
 
         return (eta_new, U_bar_new, V_bar_new)
 

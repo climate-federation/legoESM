@@ -44,6 +44,7 @@ from legoesm.grids.halo import (
     _extract_edge_strip,
 )
 from legoesm.parallel.comm import CommTopology
+from legoesm.parallel.reductions import _mpi4jax_array_result
 
 
 _EDGES = (WEST, EAST, SOUTH, NORTH)
@@ -101,9 +102,6 @@ def pad_halo_mpi(
     # Place interior data.
     padded = padded.at[:, 1:-1, 1:-1].set(data)
 
-    # Token for MPI ordering inside JIT.
-    token = jax.lax.create_token()
-
     # --- Phase 1: Classify edges as local vs remote, group remote by rank ---
     local_edges = []   # (face, edge, nbr_face, nbr_edge, is_reversed)
     remote_by_rank = defaultdict(list)  # nbr_rank -> [(face, edge, nbr_face, nbr_edge, is_reversed), ...]
@@ -155,15 +153,16 @@ def pad_halo_mpi(
         send_tag = topology.rank * 1000 + nbr_rank
         recv_tag = nbr_rank * 1000 + topology.rank
 
-        recv_buf, token = mpi4jax.sendrecv(
-            send_buf,
-            recv_buf,
-            source=nbr_rank,
-            dest=nbr_rank,
-            sendtag=send_tag,
-            recvtag=recv_tag,
-            comm=MPI.COMM_WORLD,
-            token=token,
+        recv_buf = _mpi4jax_array_result(
+            mpi4jax.sendrecv(
+                send_buf,
+                recv_buf,
+                source=nbr_rank,
+                dest=nbr_rank,
+                sendtag=send_tag,
+                recvtag=recv_tag,
+                comm=MPI.COMM_WORLD,
+            ),
         )
 
         # Unpack received buffer and place strips.

@@ -1,7 +1,4 @@
 $ /Users/pierregentine/legoESM/.venv/bin/python scripts/run_ocean_realistic.py --resolution 8 --levels 10 --dt 1800.0 --days 10.0 --test all --output results/ocean_regression/runs/ocean_realistic_C8_L10 --runtime-checks
-/Users/pierregentine/.matplotlib is not a writable directory
-Matplotlib created a temporary cache directory at /var/folders/s5/tl9gjtt171j2qmsz9xfyq3xc0000gn/T/matplotlib-wusp84sh because there was an issue with the default path (/Users/pierregentine/.matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
-Matplotlib is building the font cache; this may take a moment.
 ======================================================================
 legoESM — Realistic Ocean Experiments
 ======================================================================
@@ -10,7 +7,7 @@ legoESM — Realistic Ocean Experiments
   Float dtype:  float32
 
 Creating C8 cubed-sphere grid...
-  Grid created in 1.2s
+  Grid created in 2.2s
   Resolution: ~1251 km
   Total cells: 384
 
@@ -37,11 +34,11 @@ TEST 1: Stommel Wind-Driven Double Gyre
   Wind: tau_x = -0.1 * cos(pi*(lat-15.0)/60)
   Band: 15.0N to 75.0N
   SST: 15 degC (uniform, barotropic test)
-  Warming up JIT... done (2.1s)
+  Warming up JIT... done (4.6s)
 
    Step      Day    SSH_min    SSH_max    |v|_max   SST_mean            KE    wall
 --------------------------------------------------------------------------------
-      9      0.2     -0.001      0.002     0.0271    15.0000    1.7383e+12     0.0
+      9      0.2     -0.001      0.002     0.0271    15.0000    1.7383e+12     0.1
      18      0.4     -0.001      0.003     0.0473    15.0000    4.0176e+12     0.0
      27      0.6     -0.001      0.003     0.0586    15.0000    4.6530e+12     0.0
      36      0.8     -0.002      0.004     0.0606    15.0000    5.0384e+12     0.0
@@ -96,7 +93,7 @@ TEST 1: Stommel Wind-Driven Double Gyre
     477      9.9     -2.853      2.323    91.0244    15.0000    7.2674e+18     0.0
     480     10.0     -3.401      2.566    96.9618    15.0000    8.3844e+18     0.0
 
-  Completed in 0.5s (1042 steps/s)
+  Completed in 0.9s (540 steps/s)
 
 ======================================================================
 TEST 2: Baroclinic Adjustment (Thermal Front)
@@ -104,7 +101,7 @@ TEST 2: Baroclinic Adjustment (Thermal Front)
   Front latitude: 30.0N (width 15.0 deg)
   South T: 20.0 degC, North T: 10.0 degC (depth-uniform)
   Density difference: ~2.19 kg/m^3
-  Warming up JIT... done (1.9s)
+  Warming up JIT... done (3.0s)
 
    Step      Day    SSH_min    SSH_max    |v|_max   SST_mean            KE    wall
 --------------------------------------------------------------------------------
@@ -163,7 +160,7 @@ TEST 2: Baroclinic Adjustment (Thermal Front)
     477      9.9    -11.438      2.145    40.7380    17.4586    2.2326e+19     0.0
     480     10.0    -12.586      2.138    42.9882    17.4589    2.5025e+19     0.0
 
-  Completed in 0.3s (1452 steps/s)
+  Completed in 0.9s (540 steps/s)
 
 ======================================================================
 TEST 3: Equatorial Kelvin Wave
@@ -173,7 +170,7 @@ TEST 3: Equatorial Kelvin Wave
   Barotropic wave speed: 232 m/s
   Equatorial crossing time: 1.0 days
   SST: 15 degC (uniform, barotropic test)
-  Warming up JIT... done (1.9s)
+  Warming up JIT... done (3.1s)
 
    Step      Day    SSH_min    SSH_max    |v|_max   SST_mean            KE    wall
 --------------------------------------------------------------------------------
@@ -232,7 +229,7 @@ TEST 3: Equatorial Kelvin Wave
     477      9.9      0.006      0.006     0.0621    15.0000    1.2988e+14     0.0
     480     10.0      0.006      0.006     0.0659    15.0000    1.4640e+14     0.0
 
-  Completed in 0.3s (1456 steps/s)
+  Completed in 0.8s (608 steps/s)
 
 
 ======================================================================

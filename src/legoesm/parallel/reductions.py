@@ -11,8 +11,118 @@ These functions are only called when the halo backend is set to
 
 from __future__ import annotations
 
+import importlib.util
+import os
+import re
+import warnings
+
 import jax
 import jax.numpy as jnp
+
+
+_TESTED_JAX_MIN = (0, 8, 0)
+_TESTED_JAX_MAX_EXCL = (0, 10, 0)
+_TESTED_MPI4JAX_MIN = (0, 8, 0)
+_TESTED_MPI4JAX_MAX_EXCL = (0, 9, 0)
+
+
+def _parse_version_triplet(version: str) -> tuple[int, int, int]:
+    """Parse a version string into (major, minor, patch) ints."""
+    parts = [int(token) for token in re.findall(r"\d+", version)]
+    if not parts:
+        return (0, 0, 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def _format_range(low: tuple[int, int, int], high_excl: tuple[int, int, int]) -> str:
+    """Format a half-open version range as text."""
+    return (
+        f">={low[0]}.{low[1]}.{low[2]}, "
+        f"<{high_excl[0]}.{high_excl[1]}.{high_excl[2]}"
+    )
+
+
+def _env_flag_true(name: str) -> bool:
+    """Interpret common truthy env values."""
+    value = os.environ.get(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_mpi_runtime_versions(
+    jax_version: str,
+    mpi4jax_version: str,
+    *,
+    strict: bool = False,
+) -> None:
+    """Validate JAX/mpi4jax runtime compatibility.
+
+    We hard-fail on clearly unsupported mpi4jax versions and warn (or fail in
+    strict mode) when versions fall outside the currently tested range.
+    """
+    jax_triplet = _parse_version_triplet(jax_version)
+    mpi4jax_triplet = _parse_version_triplet(mpi4jax_version)
+
+    if mpi4jax_triplet < _TESTED_MPI4JAX_MIN:
+        raise RuntimeError(
+            "legoESM distributed runtime requires mpi4jax "
+            f"{_format_range(_TESTED_MPI4JAX_MIN, _TESTED_MPI4JAX_MAX_EXCL)} "
+            f"because older versions use incompatible token semantics. "
+            f"Detected mpi4jax=={mpi4jax_version}.",
+        )
+
+    in_tested_jax = _TESTED_JAX_MIN <= jax_triplet < _TESTED_JAX_MAX_EXCL
+    in_tested_mpi4jax = _TESTED_MPI4JAX_MIN <= mpi4jax_triplet < _TESTED_MPI4JAX_MAX_EXCL
+    if in_tested_jax and in_tested_mpi4jax:
+        return
+
+    msg = (
+        "Detected JAX/mpi4jax versions outside legoESM's tested MPI range: "
+        f"jax=={jax_version} (tested {_format_range(_TESTED_JAX_MIN, _TESTED_JAX_MAX_EXCL)}), "
+        f"mpi4jax=={mpi4jax_version} (tested "
+        f"{_format_range(_TESTED_MPI4JAX_MIN, _TESTED_MPI4JAX_MAX_EXCL)}). "
+        "MPI execution may fail or produce incorrect results."
+    )
+    if strict:
+        raise RuntimeError(msg)
+    warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
+
+def _require_mpi_stack():
+    """Return (mpi4jax, MPI) or raise a clear ImportError."""
+    missing = []
+    if importlib.util.find_spec("mpi4jax") is None:
+        missing.append("mpi4jax")
+    if importlib.util.find_spec("mpi4py") is None:
+        missing.append("mpi4py")
+    if missing:
+        raise ImportError(
+            "MPI reductions require optional dependencies "
+            f"{', '.join(missing)}. Install them and run under an MPI launcher.",
+        )
+
+    import mpi4jax
+    from mpi4py import MPI
+    _validate_mpi_runtime_versions(
+        jax.__version__,
+        mpi4jax.__version__,
+        strict=_env_flag_true("LEGOESM_MPI_STRICT_COMPAT"),
+    )
+    return mpi4jax, MPI
+
+
+def _mpi4jax_array_result(result):
+    """Return the array payload from mpi4jax return values.
+
+    mpi4jax<0.8 commonly returned ``(array, token)`` while mpi4jax>=0.8
+    returns the array directly with automatic token management.
+    """
+    if isinstance(result, tuple):
+        if not result:
+            raise RuntimeError("mpi4jax operation returned an empty tuple.")
+        return result[0]
+    return result
 
 
 def global_sum_mpi(local_value: jax.Array) -> jax.Array:
@@ -28,11 +138,10 @@ def global_sum_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global sum across all processes.
     """
-    import mpi4jax
-    from mpi4py import MPI
+    mpi4jax, MPI = _require_mpi_stack()
 
-    global_val, _ = mpi4jax.allreduce(
-        local_value, op=MPI.SUM, comm=MPI.COMM_WORLD
+    global_val = _mpi4jax_array_result(
+        mpi4jax.allreduce(local_value, op=MPI.SUM, comm=MPI.COMM_WORLD),
     )
     return global_val
 
@@ -50,10 +159,9 @@ def global_max_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global maximum across all processes.
     """
-    import mpi4jax
-    from mpi4py import MPI
+    mpi4jax, MPI = _require_mpi_stack()
 
-    global_val, _ = mpi4jax.allreduce(
-        local_value, op=MPI.MAX, comm=MPI.COMM_WORLD
+    global_val = _mpi4jax_array_result(
+        mpi4jax.allreduce(local_value, op=MPI.MAX, comm=MPI.COMM_WORLD),
     )
     return global_val

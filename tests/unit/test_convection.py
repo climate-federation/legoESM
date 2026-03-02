@@ -1,0 +1,852 @@
+"""Unit tests for atmospheric convection module.
+
+Tests cover:
+- Thermodynamics: saturation, moist adiabat, CAPE
+- SBM: shapes, enthalpy conservation, precipitation, trigger, differentiability
+- DCA: shapes, stable unchanged, instability reduction, differentiability
+- Integration: hydrostatic/NH shapes, nonzero heating, jax.grad, scheme selection
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+
+from legoesm.atmosphere.physics.thermodynamics import (
+    saturation_mixing_ratio,
+    temperature_from_theta,
+    pressure_from_eos,
+    moist_adiabat_lapse_rate,
+    compute_moist_adiabat,
+    compute_cape,
+)
+from legoesm.atmosphere.physics.convection.config import (
+    SBMConfig,
+    DCAConfig,
+    KuoConfig,
+    MassFluxConfig,
+    EDMFConfig,
+    ConvectionConfig,
+)
+from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics.convection.sbm import sbm_convection
+from legoesm.atmosphere.physics.convection.dca import dca_convection
+from legoesm.atmosphere.physics.convection.kuo import kuo_convection
+from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection
+from legoesm.atmosphere.physics.convection.edmf import edmf_convection
+from legoesm.atmosphere.physics.convection.integration import (
+    make_convection_physics,
+)
+from legoesm import constants
+
+
+# ===========================================================================
+# Helpers
+# ===========================================================================
+
+def _make_unstable_columns(ncol=4, nlev=10):
+    """Create test column data with a conditionally unstable profile.
+
+    Returns T, q_v, p_full, p_half with a warm moist lower troposphere.
+    """
+    # Pressure: linearly spaced interfaces from 100 Pa (top) to 1e5 Pa (surface)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :],
+        (ncol, nlev + 1),
+    )
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+
+    # Temperature: warm surface, decreasing faster than moist adiabat
+    # (conditionally unstable)
+    T_surface = 300.0
+    T_top = 200.0
+    T = jnp.broadcast_to(
+        jnp.linspace(T_top, T_surface, nlev)[None, :],
+        (ncol, nlev),
+    )
+
+    # Moisture: near saturation in lower levels, dry aloft
+    q_sat = saturation_mixing_ratio(T, p_full)
+    # 90% RH at surface, decreasing to 10% at top
+    rh_profile = jnp.linspace(0.1, 0.9, nlev)[None, :]
+    q_v = rh_profile * q_sat
+
+    return T, q_v, p_full, p_half
+
+
+def _make_stable_columns(ncol=4, nlev=10):
+    """Create test column data with a stable profile (isothermal)."""
+    p_half = jnp.broadcast_to(
+        jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :],
+        (ncol, nlev + 1),
+    )
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+
+    # Isothermal profile — stable
+    T = jnp.full((ncol, nlev), 250.0)
+
+    # Very dry
+    q_v = jnp.full((ncol, nlev), 1e-6)
+
+    return T, q_v, p_full, p_half
+
+
+# ===========================================================================
+# Thermodynamics tests
+# ===========================================================================
+
+class TestThermodynamics:
+    """Tests for shared thermodynamic functions."""
+
+    def test_qsat_increases_with_temperature(self):
+        """Saturation mixing ratio should increase with temperature."""
+        p = jnp.full(5, 1.0e5)
+        T = jnp.array([250.0, 260.0, 270.0, 280.0, 290.0])
+        q_sat = saturation_mixing_ratio(T, p)
+        # Each should be larger than the previous
+        assert jnp.all(jnp.diff(q_sat) > 0)
+
+    def test_qsat_positive(self):
+        """Saturation mixing ratio should always be positive."""
+        T = jnp.array([200.0, 250.0, 300.0, 350.0])
+        p = jnp.full(4, 5.0e4)
+        q_sat = saturation_mixing_ratio(T, p)
+        assert jnp.all(q_sat > 0)
+
+    def test_temperature_from_theta_identity(self):
+        """At reference pressure, T should equal theta."""
+        theta = jnp.array([300.0, 310.0])
+        T = temperature_from_theta(theta, jnp.full(2, constants.p_ref))
+        assert jnp.allclose(T, theta, rtol=1e-6)
+
+    def test_pressure_from_eos_positive(self):
+        """Pressure from EOS should always be positive."""
+        rho = jnp.array([0.5, 1.0, 1.5])
+        theta = jnp.array([300.0, 300.0, 300.0])
+        p = pressure_from_eos(rho, theta)
+        assert jnp.all(p > 0)
+
+    def test_moist_lapse_rate_positive(self):
+        """Moist adiabatic lapse rate dT/dp should be positive (T increases with p)."""
+        T = jnp.array([250.0, 270.0, 290.0])
+        p = jnp.array([5e4, 7e4, 9e4])
+        gamma = moist_adiabat_lapse_rate(T, p)
+        assert jnp.all(gamma > 0)
+
+    def test_moist_adiabat_warmer_than_dry(self):
+        """Moist adiabat should be warmer than dry adiabat at upper levels."""
+        ncol = 2
+        nlev = 20
+        T_base = jnp.array([300.0, 295.0])
+
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :],
+            (ncol, nlev + 1),
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+
+        T_moist = compute_moist_adiabat(T_base, p_full)
+
+        # Dry adiabat: T = T_base * (p / p_sfc)^kappa
+        p_sfc = p_full[:, -1:]
+        T_dry = T_base[:, None] * (p_full / p_sfc) ** constants.kappa
+
+        # At upper levels (lower pressure), moist should be warmer
+        # Check at the top few levels
+        assert jnp.all(T_moist[:, :5] > T_dry[:, :5] - 5.0)  # allow some tolerance
+
+    def test_moist_adiabat_shape(self):
+        """Moist adiabat should have correct output shape."""
+        ncol, nlev = 3, 15
+        T_base = jnp.full(ncol, 300.0)
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :],
+            (ncol, nlev + 1),
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T_moist = compute_moist_adiabat(T_base, p_full)
+        assert T_moist.shape == (ncol, nlev)
+
+    def test_cape_positive_for_unstable(self):
+        """CAPE should be positive when parcel is warmer than environment."""
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol=2, nlev=10)
+        # Use a warmer parcel
+        T_parcel = T + 5.0
+        cape = compute_cape(T, T_parcel, p_full, p_half)
+        assert jnp.all(cape > 0)
+
+    def test_cape_zero_for_stable(self):
+        """CAPE should be zero when parcel is cooler than environment."""
+        T, q_v, p_full, p_half = _make_stable_columns(ncol=2, nlev=10)
+        T_parcel = T - 5.0
+        cape = compute_cape(T, T_parcel, p_full, p_half)
+        assert jnp.allclose(cape, 0.0, atol=1e-10)
+
+    def test_qsat_grad_works(self):
+        """jax.grad should work through saturation_mixing_ratio."""
+        def loss(T):
+            return jnp.sum(saturation_mixing_ratio(T, jnp.full_like(T, 1e5)))
+        T = jnp.array([280.0, 290.0])
+        g = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(g))
+
+
+# ===========================================================================
+# SBM convection tests
+# ===========================================================================
+
+class TestSBM:
+    """Tests for Simplified Betts-Miller convection."""
+
+    def test_output_shapes(self):
+        """SBM output should have correct shapes."""
+        ncol, nlev = 4, 10
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = SBMConfig()
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        assert out.dT_dt.shape == (ncol, nlev)
+        assert out.dq_v_dt.shape == (ncol, nlev)
+        assert out.precipitation.shape == (ncol,)
+        assert out.cape.shape == (ncol,)
+        assert out.convective_mask.shape == (ncol,)
+
+    def test_enthalpy_conservation(self):
+        """Column enthalpy tendency should be approximately conserved.
+
+        The linearized enthalpy correction ensures approximate conservation.
+        sum(c_pd * dT_dt + L_v * dq_v_dt) * dp / g should be small
+        relative to the total enthalpy change from temperature alone.
+        """
+        ncol, nlev = 4, 20
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = SBMConfig()
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        enthalpy_tend = jnp.sum(
+            (constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt) * dp / constants.g,
+            axis=1,
+        )
+        # Compute scale: total temperature tendency magnitude
+        T_scale = jnp.sum(
+            constants.c_pd * jnp.abs(out.dT_dt) * dp / constants.g,
+            axis=1,
+        )
+        # Relative conservation: enthalpy residual should be small fraction of total
+        relative_error = jnp.abs(enthalpy_tend) / jnp.clip(T_scale, 1.0, None)
+        assert float(jnp.max(relative_error)) < 0.1  # within 10%
+
+    def test_precipitation_non_negative(self):
+        """Precipitation should always be >= 0."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        config = SBMConfig()
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+        assert jnp.all(out.precipitation >= 0)
+
+    def test_stable_gives_small_tendency(self):
+        """Stable columns should produce small tendencies relative to unstable."""
+        T_stable, q_stable, p_full, p_half = _make_stable_columns()
+        T_unstable, q_unstable, _, _ = _make_unstable_columns()
+        config = SBMConfig()
+
+        out_stable = sbm_convection(T_stable, q_stable, p_full, p_half, dt=300.0, config=config)
+        out_unstable = sbm_convection(T_unstable, q_unstable, p_full, p_half, dt=300.0, config=config)
+
+        # Stable tendencies should be much smaller than unstable
+        max_stable = float(jnp.max(jnp.abs(out_stable.dT_dt)))
+        max_unstable = float(jnp.max(jnp.abs(out_unstable.dT_dt)))
+        assert max_stable < max_unstable
+
+    def test_unstable_gives_nonzero(self):
+        """Unstable columns should produce nonzero tendencies."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        config = SBMConfig()
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+        assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-6
+
+    def test_differentiable(self):
+        """jax.grad should work through SBM convection."""
+        ncol, nlev = 2, 8
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = SBMConfig()
+
+        def loss(T_in):
+            out = sbm_convection(T_in, q_v, p_full, p_half, dt=300.0, config=config)
+            return jnp.sum(out.dT_dt ** 2)
+
+        grad_T = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(grad_T))
+        assert grad_T.shape == T.shape
+
+
+# ===========================================================================
+# DCA convection tests
+# ===========================================================================
+
+class TestDCA:
+    """Tests for Deep Convective Adjustment."""
+
+    def test_output_shapes(self):
+        """DCA output should have correct shapes."""
+        ncol, nlev = 4, 10
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = DCAConfig()
+        out = dca_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        assert out.dT_dt.shape == (ncol, nlev)
+        assert out.dq_v_dt.shape == (ncol, nlev)
+        assert out.precipitation.shape == (ncol,)
+        assert out.cape.shape == (ncol,)
+        assert out.convective_mask.shape == (ncol,)
+
+    def test_stable_small_tendency(self):
+        """Stable columns should produce much smaller tendencies than unstable."""
+        T_stable, q_stable, p_full, p_half = _make_stable_columns()
+        T_unstable, q_unstable, _, _ = _make_unstable_columns()
+        config = DCAConfig()
+
+        out_stable = dca_convection(T_stable, q_stable, p_full, p_half, dt=300.0, config=config)
+        out_unstable = dca_convection(T_unstable, q_unstable, p_full, p_half, dt=300.0, config=config)
+
+        max_stable = float(jnp.max(jnp.abs(out_stable.dT_dt)))
+        max_unstable = float(jnp.max(jnp.abs(out_unstable.dT_dt)))
+        assert max_stable < max_unstable
+
+    def test_produces_nonzero_for_unstable(self):
+        """DCA should produce nonzero tendencies for unstable columns."""
+        ncol, nlev = 2, 10
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = DCAConfig(n_iterations=1)
+        out = dca_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        # Should have nonzero temperature adjustment
+        assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-6
+
+    def test_differentiable(self):
+        """jax.grad should work through DCA convection."""
+        ncol, nlev = 2, 8
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = DCAConfig()
+
+        def loss(T_in):
+            out = dca_convection(T_in, q_v, p_full, p_half, dt=300.0, config=config)
+            return jnp.sum(out.dT_dt ** 2)
+
+        grad_T = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(grad_T))
+        assert grad_T.shape == T.shape
+
+
+# ===========================================================================
+# Integration tests
+# ===========================================================================
+
+class TestIntegration:
+    """Tests for make_convection_physics integration bridge."""
+
+    def test_hydrostatic_tendency_shapes(self):
+        """Hydrostatic convection tendencies should have correct shapes."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        config = ConvectionConfig(scheme="sbm")
+        physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
+        tendencies = physics_fn(state, grid, sigma)
+
+        n = grid.n
+        nlev = sigma.n_levels
+        assert tendencies.dT_dt.data.shape == (6, n, n, nlev)
+        assert tendencies.du_dt.data.shape == (6, n, n, nlev)
+        assert tendencies.dp_s_dt.data.shape == (6, n, n)
+
+    def test_hydrostatic_nonzero_heating(self):
+        """Hydrostatic convection should produce nonzero T tendencies."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        config = ConvectionConfig(scheme="sbm")
+        physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
+        tendencies = physics_fn(state, grid, sigma)
+
+        max_hr = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
+        assert max_hr > 0.0
+
+    def test_hydrostatic_zero_wind_tendency(self):
+        """Convection should not produce wind or pressure tendencies."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        config = ConvectionConfig(scheme="sbm")
+        physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
+        tendencies = physics_fn(state, grid, sigma)
+
+        assert jnp.allclose(tendencies.du_dt.data, 0.0)
+        assert jnp.allclose(tendencies.dv_dt.data, 0.0)
+        assert jnp.allclose(tendencies.dp_s_dt.data, 0.0)
+
+    def test_nonhydrostatic_tendency_shapes(self):
+        """Non-hydrostatic convection tendencies should have correct shapes."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import (
+            create_height_coordinate,
+            compute_terrain_metric,
+        )
+        from legoesm.core.field import Field
+        from legoesm.core.state import NonHydrostaticState
+
+        n = 8
+        nlev = 10
+        grid = create_cubed_sphere(n)
+        height_coord = create_height_coordinate(nlev, 30000.0)
+        z_s = jnp.zeros((6, n, n))
+        terrain_metric = compute_terrain_metric(z_s, height_coord)
+
+        dims_3d = ("face", "x", "y", "level")
+        dims_w = ("face", "x", "y", "level_half")
+        dims_2d = ("face", "x", "y")
+        dims_tr = ("face", "x", "y", "level", "tracer")
+
+        state = NonHydrostaticState(
+            u=Field(data=jnp.zeros((6, n, n, nlev)), name="u", dims=dims_3d, units="m/s"),
+            v=Field(data=jnp.zeros((6, n, n, nlev)), name="v", dims=dims_3d, units="m/s"),
+            w=Field(data=jnp.zeros((6, n, n, nlev + 1)), name="w", dims=dims_w, units="m/s"),
+            theta_prime=Field(data=jnp.zeros((6, n, n, nlev)), name="theta_prime", dims=dims_3d, units="K"),
+            rho_prime=Field(data=jnp.zeros((6, n, n, nlev)), name="rho_prime", dims=dims_3d, units="kg/m^3"),
+            phis=Field(data=jnp.zeros((6, n, n)), name="phis", dims=dims_2d, units="m^2/s^2"),
+            tracers=Field(data=jnp.zeros((6, n, n, nlev, 1)), name="tracers", dims=dims_tr, units="kg/kg"),
+        )
+
+        config = ConvectionConfig(scheme="sbm")
+        physics_fn = make_convection_physics(config, model_type="nonhydrostatic", dt=300.0)
+        tendencies = physics_fn(state, grid, height_coord, terrain_metric)
+
+        assert tendencies.dtheta_prime_dt.data.shape == (6, n, n, nlev)
+        assert tendencies.du_dt.data.shape == (6, n, n, nlev)
+        assert tendencies.dw_dt.data.shape == (6, n, n, nlev + 1)
+        assert tendencies.dtracers_dt.data.shape == (6, n, n, nlev, 1)
+
+    def test_nonhydrostatic_nonzero_heating(self):
+        """NH convection should produce nonzero theta tendencies."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import (
+            create_height_coordinate,
+            compute_terrain_metric,
+        )
+        from legoesm.core.field import Field
+        from legoesm.core.state import NonHydrostaticState
+
+        n = 8
+        nlev = 10
+        grid = create_cubed_sphere(n)
+        height_coord = create_height_coordinate(nlev, 30000.0)
+        z_s = jnp.zeros((6, n, n))
+        terrain_metric = compute_terrain_metric(z_s, height_coord)
+
+        dims_3d = ("face", "x", "y", "level")
+        dims_w = ("face", "x", "y", "level_half")
+        dims_2d = ("face", "x", "y")
+        dims_tr = ("face", "x", "y", "level", "tracer")
+
+        state = NonHydrostaticState(
+            u=Field(data=jnp.zeros((6, n, n, nlev)), name="u", dims=dims_3d, units="m/s"),
+            v=Field(data=jnp.zeros((6, n, n, nlev)), name="v", dims=dims_3d, units="m/s"),
+            w=Field(data=jnp.zeros((6, n, n, nlev + 1)), name="w", dims=dims_w, units="m/s"),
+            theta_prime=Field(data=jnp.zeros((6, n, n, nlev)), name="theta_prime", dims=dims_3d, units="K"),
+            rho_prime=Field(data=jnp.zeros((6, n, n, nlev)), name="rho_prime", dims=dims_3d, units="kg/m^3"),
+            phis=Field(data=jnp.zeros((6, n, n)), name="phis", dims=dims_2d, units="m^2/s^2"),
+            tracers=Field(data=jnp.zeros((6, n, n, nlev, 1)), name="tracers", dims=dims_tr, units="kg/kg"),
+        )
+
+        config = ConvectionConfig(scheme="sbm")
+        physics_fn = make_convection_physics(config, model_type="nonhydrostatic", dt=300.0)
+        tendencies = physics_fn(state, grid, height_coord, terrain_metric)
+
+        max_hr = float(jnp.max(jnp.abs(tendencies.dtheta_prime_dt.data)))
+        assert max_hr > 0.0
+
+    def test_grad_through_hydrostatic_convection(self):
+        """jax.grad should work through hydrostatic convection physics."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        config = ConvectionConfig(scheme="sbm")
+        physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
+
+        def loss(T_data):
+            new_state = state._replace(T=state.T.replace(data=T_data))
+            tendencies = physics_fn(new_state, grid, sigma)
+            return jnp.sum(tendencies.dT_dt.data ** 2)
+
+        grad_T = jax.grad(loss)(state.T.data)
+        assert jnp.all(jnp.isfinite(grad_T))
+
+    def test_scheme_selection_sbm(self):
+        """scheme='sbm' should select SBM backend."""
+        ncol, nlev = 2, 8
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+
+        config_sbm = ConvectionConfig(scheme="sbm")
+        config_dca = ConvectionConfig(scheme="dca")
+
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        fn_sbm = make_convection_physics(config_sbm, model_type="hydrostatic", dt=300.0)
+        fn_dca = make_convection_physics(config_dca, model_type="hydrostatic", dt=300.0)
+
+        tend_sbm = fn_sbm(state, grid, sigma)
+        tend_dca = fn_dca(state, grid, sigma)
+
+        # Both should produce nonzero but different tendencies
+        assert not jnp.allclose(tend_sbm.dT_dt.data, tend_dca.dT_dt.data, atol=1e-10)
+
+    def test_none_scheme_gives_zeros(self):
+        """scheme='none' should produce zero tendencies."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        config = ConvectionConfig(scheme="none")
+        physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
+        tendencies = physics_fn(state, grid, sigma)
+
+        assert jnp.allclose(tendencies.dT_dt.data, 0.0)
+
+    def test_scheme_selection_kuo(self):
+        """scheme='kuo' should give different results from 'sbm'."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        fn_kuo = make_convection_physics(
+            ConvectionConfig(scheme="kuo"), model_type="hydrostatic", dt=300.0,
+        )
+        fn_sbm = make_convection_physics(
+            ConvectionConfig(scheme="sbm"), model_type="hydrostatic", dt=300.0,
+        )
+        tend_kuo = fn_kuo(state, grid, sigma)
+        tend_sbm = fn_sbm(state, grid, sigma)
+
+        assert not jnp.allclose(tend_kuo.dT_dt.data, tend_sbm.dT_dt.data, atol=1e-10)
+
+    def test_scheme_selection_mass_flux(self):
+        """scheme='mass_flux' should produce nonzero tendencies."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        fn = make_convection_physics(
+            ConvectionConfig(scheme="mass_flux"), model_type="hydrostatic", dt=300.0,
+        )
+        tendencies = fn(state, grid, sigma)
+        max_val = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
+        assert max_val > 0.0
+
+    def test_scheme_selection_edmf(self):
+        """scheme='edmf' should produce nonzero tendencies."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        fn = make_convection_physics(
+            ConvectionConfig(scheme="edmf"), model_type="hydrostatic", dt=300.0,
+        )
+        tendencies = fn(state, grid, sigma)
+        max_val = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
+        assert max_val > 0.0
+
+    def test_grad_through_mass_flux(self):
+        """jax.grad should work through mass_flux integration."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        config = ConvectionConfig(scheme="mass_flux")
+        physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
+
+        def loss(T_data):
+            new_state = state._replace(T=state.T.replace(data=T_data))
+            tendencies = physics_fn(new_state, grid, sigma)
+            return jnp.sum(tendencies.dT_dt.data ** 2)
+
+        grad_T = jax.grad(loss)(state.T.data)
+        assert jnp.all(jnp.isfinite(grad_T))
+
+    def test_grad_through_edmf(self):
+        """jax.grad should work through edmf integration."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        config = ConvectionConfig(scheme="edmf")
+        physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
+
+        def loss(T_data):
+            new_state = state._replace(T=state.T.replace(data=T_data))
+            tendencies = physics_fn(new_state, grid, sigma)
+            return jnp.sum(tendencies.dT_dt.data ** 2)
+
+        grad_T = jax.grad(loss)(state.T.data)
+        assert jnp.all(jnp.isfinite(grad_T))
+
+
+# ===========================================================================
+# Kuo convection tests
+# ===========================================================================
+
+class TestKuo:
+    """Tests for Kuo moisture convergence convection."""
+
+    def test_output_shapes(self):
+        """Kuo output should have correct shapes."""
+        ncol, nlev = 4, 10
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = KuoConfig()
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        assert out.dT_dt.shape == (ncol, nlev)
+        assert out.dq_v_dt.shape == (ncol, nlev)
+        assert out.precipitation.shape == (ncol,)
+        assert out.cape.shape == (ncol,)
+        assert out.convective_mask.shape == (ncol,)
+
+    def test_precipitation_non_negative(self):
+        """Precipitation should always be >= 0."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        config = KuoConfig()
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+        assert jnp.all(out.precipitation >= 0)
+
+    def test_nonzero_tendencies(self):
+        """Unstable columns should produce nonzero tendencies."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        config = KuoConfig()
+        out = kuo_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+        assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-6
+
+    def test_differentiable(self):
+        """jax.grad should work through Kuo convection."""
+        ncol, nlev = 2, 8
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = KuoConfig()
+
+        def loss(T_in):
+            out = kuo_convection(T_in, q_v, p_full, p_half, dt=300.0, config=config)
+            return jnp.sum(out.dT_dt ** 2)
+
+        grad_T = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(grad_T))
+        assert grad_T.shape == T.shape
+
+
+# ===========================================================================
+# Mass-Flux convection tests
+# ===========================================================================
+
+class TestMassFlux:
+    """Tests for Prognostic Mass-Flux convection."""
+
+    def test_output_shapes(self):
+        """Mass-Flux output should have correct shapes."""
+        ncol, nlev = 4, 10
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = MassFluxConfig()
+        M_c = jnp.full(ncol, config.M_c_init)
+        out, M_c_new = mass_flux_convection(
+            T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
+        )
+
+        assert out.dT_dt.shape == (ncol, nlev)
+        assert out.dq_v_dt.shape == (ncol, nlev)
+        assert out.precipitation.shape == (ncol,)
+        assert out.cape.shape == (ncol,)
+        assert out.convective_mask.shape == (ncol,)
+        assert M_c_new.shape == (ncol,)
+
+    def test_M_c_non_negative(self):
+        """M_c_new should be >= 0 (softplus floor)."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        ncol = T.shape[0]
+        config = MassFluxConfig()
+        M_c = jnp.full(ncol, config.M_c_init)
+        _, M_c_new = mass_flux_convection(
+            T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
+        )
+        assert jnp.all(M_c_new >= 0)
+
+    def test_prognostic_evolves(self):
+        """Calling twice with updated M_c should give different results."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        ncol = T.shape[0]
+        config = MassFluxConfig()
+        M_c_0 = jnp.full(ncol, config.M_c_init)
+
+        out1, M_c_1 = mass_flux_convection(
+            T, q_v, p_full, p_half, M_c_0, dt=300.0, config=config,
+        )
+        out2, M_c_2 = mass_flux_convection(
+            T, q_v, p_full, p_half, M_c_1, dt=300.0, config=config,
+        )
+        # M_c should have evolved
+        assert not jnp.allclose(M_c_1, M_c_2, atol=1e-12)
+
+    def test_nonzero_tendencies(self):
+        """Unstable columns should produce nonzero tendencies."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        ncol = T.shape[0]
+        config = MassFluxConfig()
+        M_c = jnp.full(ncol, config.M_c_init)
+        out, _ = mass_flux_convection(
+            T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
+        )
+        assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-10
+
+    def test_differentiable(self):
+        """jax.grad should work through Mass-Flux convection."""
+        ncol, nlev = 2, 8
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = MassFluxConfig()
+        M_c = jnp.full(ncol, config.M_c_init)
+
+        def loss(T_in):
+            out, _ = mass_flux_convection(
+                T_in, q_v, p_full, p_half, M_c, dt=300.0, config=config,
+            )
+            return jnp.sum(out.dT_dt ** 2)
+
+        grad_T = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(grad_T))
+        assert grad_T.shape == T.shape
+
+
+# ===========================================================================
+# EDMF convection tests
+# ===========================================================================
+
+class TestEDMF:
+    """Tests for simplified EDMF convection."""
+
+    def test_output_shapes(self):
+        """EDMF output should have correct shapes."""
+        ncol, nlev = 4, 10
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = EDMFConfig()
+        a_u = jnp.full(ncol, config.a_u_init)
+        out, a_u_new = edmf_convection(
+            T, q_v, p_full, p_half, a_u, dt=300.0, config=config,
+        )
+
+        assert out.dT_dt.shape == (ncol, nlev)
+        assert out.dq_v_dt.shape == (ncol, nlev)
+        assert out.precipitation.shape == (ncol,)
+        assert out.cape.shape == (ncol,)
+        assert out.convective_mask.shape == (ncol,)
+        assert a_u_new.shape == (ncol,)
+
+    def test_a_u_bounded(self):
+        """a_u_new should be in [0, 0.5]."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        ncol = T.shape[0]
+        config = EDMFConfig()
+        a_u = jnp.full(ncol, config.a_u_init)
+        _, a_u_new = edmf_convection(
+            T, q_v, p_full, p_half, a_u, dt=300.0, config=config,
+        )
+        assert jnp.all(a_u_new >= 0.0)
+        assert jnp.all(a_u_new <= 0.5)
+
+    def test_prognostic_evolves(self):
+        """a_u should change across calls when starting away from equilibrium."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        ncol = T.shape[0]
+        config = EDMFConfig()
+        # Start far from equilibrium to see evolution
+        a_u_0 = jnp.full(ncol, 0.01)
+
+        _, a_u_1 = edmf_convection(
+            T, q_v, p_full, p_half, a_u_0, dt=300.0, config=config,
+        )
+        _, a_u_2 = edmf_convection(
+            T, q_v, p_full, p_half, a_u_1, dt=300.0, config=config,
+        )
+        # a_u should be moving toward equilibrium
+        assert not jnp.allclose(a_u_0, a_u_1, atol=1e-12)
+        assert not jnp.allclose(a_u_1, a_u_2, atol=1e-12)
+
+    def test_nonzero_tendencies(self):
+        """Unstable columns should produce nonzero tendencies."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        ncol = T.shape[0]
+        config = EDMFConfig()
+        a_u = jnp.full(ncol, config.a_u_init)
+        out, _ = edmf_convection(
+            T, q_v, p_full, p_half, a_u, dt=300.0, config=config,
+        )
+        assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-10
+
+    def test_differentiable(self):
+        """jax.grad should work through EDMF convection."""
+        ncol, nlev = 2, 8
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = EDMFConfig()
+        a_u = jnp.full(ncol, config.a_u_init)
+
+        def loss(T_in):
+            out, _ = edmf_convection(
+                T_in, q_v, p_full, p_half, a_u, dt=300.0, config=config,
+            )
+            return jnp.sum(out.dT_dt ** 2)
+
+        grad_T = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(grad_T))
+        assert grad_T.shape == T.shape

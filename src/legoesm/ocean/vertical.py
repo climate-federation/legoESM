@@ -101,7 +101,7 @@ def create_ocean_z_star(
 
     # Interface depths from cumulative sum (surface=0, bottom=-H_max)
     z_half_ref = jnp.concatenate([
-        jnp.array([0.0]),
+        jnp.array([0.0], dtype=dz_ref.dtype),
         -jnp.cumsum(dz_ref),
     ])
 
@@ -128,6 +128,7 @@ def compute_layer_thickness(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
     z_coord: OceanZStarCoordinate,
+    min_water_column_m: float | None = None,
 ) -> jnp.ndarray:
     """Compute actual layer thickness incorporating eta and bathymetry.
 
@@ -144,12 +145,18 @@ def compute_layer_thickness(
         Local bathymetry depth [m], shape (...). Positive.
     z_coord : OceanZStarCoordinate
         Vertical coordinate.
+    min_water_column_m : float or None
+        Optional lower bound for local water-column thickness
+        ``eta + H_bathy`` [m]. When set, Jacobian/thickness values are
+        clipped to avoid dry or negative columns.
 
     Returns
     -------
     array : Layer thickness [m], shape (..., nlev). Positive.
     """
-    J = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    J = compute_ocean_jacobian(
+        eta, H_bathy, z_coord, min_water_column_m=min_water_column_m,
+    )
     return z_coord.dz_ref * J[..., jnp.newaxis]
 
 
@@ -157,6 +164,7 @@ def compute_ocean_jacobian(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,
     z_coord: OceanZStarCoordinate,
+    min_water_column_m: float | None = None,
 ) -> jnp.ndarray:
     """Compute the dynamic z-star Jacobian.
 
@@ -172,12 +180,19 @@ def compute_ocean_jacobian(
         Local bathymetry depth [m], shape (...). Positive.
     z_coord : OceanZStarCoordinate
         Vertical coordinate (provides H_max).
+    min_water_column_m : float or None
+        Optional lower bound for local water-column thickness
+        ``eta + H_bathy`` [m].
 
     Returns
     -------
     array : Jacobian, shape (...).
     """
-    return (eta + H_bathy) / z_coord.H_max
+    water_col = eta + H_bathy
+    if min_water_column_m is not None:
+        min_col = jnp.asarray(min_water_column_m, dtype=water_col.dtype)
+        water_col = jnp.maximum(water_col, min_col)
+    return water_col / z_coord.H_max
 
 
 def upwind_vertical_gradient(

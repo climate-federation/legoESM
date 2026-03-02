@@ -1,0 +1,75 @@
+Command: /opt/homebrew/bin/mpirun --mca btl self,tcp --oversubscribe -np 6 /Users/pierregentine/legoESM/.venv/bin/python -m pytest -q tests/distributed/test_halo_mpi.py
+Status: pass
+Return code: 0
+Elapsed (s): 7.910
+
+=== STDOUT ===
+============================= test session starts ==============================
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
+============================= test session starts ==============================
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/pierregentine/legoESM
+configfile: pyproject.toml
+plugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5
+collecting ... rootdir: /Users/pierregentine/legoESM
+configfile: pyproject.toml
+plugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5
+collecting ... ============================= test session starts ==============================
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/pierregentine/legoESM
+configfile: pyproject.toml
+plugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5
+collecting ... ============================= test session starts ==============================
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/pierregentine/legoESM
+configfile: pyproject.toml
+plugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5
+collecting ... ============================= test session starts ==============================
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/pierregentine/legoESM
+configfile: pyproject.toml
+plugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5
+collecting ... ============================= test session starts ==============================
+platform darwin -- Python 3.14.3, pytest-9.0.2, pluggy-1.6.0
+rootdir: /Users/pierregentine/legoESM
+configfile: pyproject.toml
+plugins: jaxtyping-0.3.9, xdist-3.8.0, zarr-3.1.5
+collecting ... 
+collected 7 items                                                              
+
+tests/distributed/test_halo_mpi.py 
+collected 7 items                                                              
+
+tests/distributed/test_halo_mpi.py 
+collected 7 items                                                              
+
+tests/distributed/test_halo_mpi.py 
+collected 7 items                                                              
+
+collected 7 items                                                              
+
+tests/distributed/test_halo_mpi.py 
+tests/distributed/test_halo_mpi.py 
+collected 7 items                                                              
+
+tests/distributed/test_halo_mpi.py ........................................                               [100%]                               [100%]                               [100%]                               [100%].
+
+
+
+============================== 7 passed in 6.53s ===============================
+
+============================== 7 passed in 6.53s ===============================
+
+============================== 7 passed in 6.54s ===============================
+                               [100%]
+
+============================== 7 passed in 6.50s ===============================
+
+
+============================== 7 passed in 6.51s ===============================
+.                               [100%]
+
+============================== 7 passed in 6.59s ===============================
+
+
+=== STDERR ===

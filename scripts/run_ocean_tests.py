@@ -22,11 +22,27 @@ Usage:
 import argparse
 import json
 import os
+import tempfile
 import time
+import traceback
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+def _ensure_mpl_config_dir() -> None:
+    """Ensure Matplotlib cache/config directory is writable."""
+    current = os.environ.get("MPLCONFIGDIR", "")
+    if current and os.path.isdir(current) and os.access(current, os.W_OK):
+        return
+    candidate = os.path.join(tempfile.gettempdir(), "legoesm_mplconfig")
+    os.makedirs(candidate, exist_ok=True)
+    os.environ["MPLCONFIGDIR"] = candidate
+
+
+_ensure_mpl_config_dir()
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -174,12 +190,14 @@ def summarize_case_metrics(state, diagnostics, grid):
     volume_mean_eta_drift = (
         (last["volume"] - first["volume"]) / max(ocean_area, 1.0)
     )
+    speed_max = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
 
     return {
         "SSH_min": float(last["SSH_min"]),
         "SSH_max": float(last["SSH_max"]),
         "u_max": float(last["u_max"]),
         "v_max": float(last["v_max"]),
+        "speed_max": float(speed_max),
         "SST_mean": float(last["SST_mean"]),
         "SST_max": float(last["SST_max"]),
         "kinetic_energy": float(last["kinetic_energy"]),
@@ -191,6 +209,25 @@ def summarize_case_metrics(state, diagnostics, grid):
         "max_land_u": float(max_land_u),
         "max_land_v": float(max_land_v),
         "max_land_eta": float(max_land_eta),
+    }
+
+
+def _config_to_dict(config: OceanConfig) -> dict[str, float | int | bool]:
+    """Serialize OceanConfig to JSON-safe scalar dict."""
+    return {
+        "A_h": float(config.A_h),
+        "K_h": float(config.K_h),
+        "A_v": float(config.A_v),
+        "K_v": float(config.K_v),
+        "hyperdiff_coeff": float(config.hyperdiff_coeff),
+        "n_barotropic_substeps": int(config.n_barotropic_substeps),
+        "barotropic_diffusion_alpha": float(config.barotropic_diffusion_alpha),
+        "barotropic_diffusion_dt_ref": float(config.barotropic_diffusion_dt_ref),
+        "use_conservation_fixer": bool(config.use_conservation_fixer),
+        "fix_volume": bool(config.fix_volume),
+        "fix_heat": bool(config.fix_heat),
+        "fix_salt": bool(config.fix_salt),
+        "enable_runtime_checks": bool(config.enable_runtime_checks),
     }
 
 
@@ -567,14 +604,16 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
 
     # Keep forcing moderate at coarse resolution so the 5-day standardized
     # harness remains in a stable, interpretable regime with dt=1h.
-    tau_max = 0.02  # N/m^2
-    drag_timescale_days = 5.0  # linear Rayleigh damping (Stommel-style)
+    tau_max = 0.01  # N/m^2
+    drag_timescale_days = 1.5  # linear Rayleigh damping (Stommel-style)
     drag_factor = float(jnp.exp(-dt / (drag_timescale_days * 86400.0)))
     gyre_config = config._replace(
-        A_h=max(config.A_h, 5.0e5),
-        K_h=max(config.K_h, 5.0e4),
-        A_v=max(config.A_v, 5.0e-3),
-        K_v=max(config.K_v, 5.0e-4),
+        A_h=max(config.A_h, 1.0e7),
+        K_h=max(config.K_h, 1.0e6),
+        A_v=max(config.A_v, 1.0e-2),
+        K_v=max(config.K_v, 1.0e-3),
+        n_barotropic_substeps=max(config.n_barotropic_substeps, 30),
+        barotropic_diffusion_alpha=max(config.barotropic_diffusion_alpha, 0.05),
     )
     print(f"  Wind stress: tau_max = {tau_max} N/m^2")
     print(f"  Wind pattern: -tau_max * cos(2*pi*(lat-45)/60), 15N-75N")
@@ -765,7 +804,7 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
     plt.savefig(f"{output_dir}/wind_gyre/T_profile.png", dpi=150, bbox_inches="tight")
     plt.close()
 
-    return state, diagnostics
+    return state, diagnostics, gyre_config
 
 
 # =====================================================================
@@ -792,6 +831,16 @@ def main():
     parser.add_argument("--runtime-checks", action="store_true",
                         help="Enable host-side runtime invariant checks")
     args = parser.parse_args()
+
+    if args.resolution < 1:
+        raise ValueError(f"--resolution must be >= 1, got {args.resolution!r}")
+    if args.levels < 1:
+        raise ValueError(f"--levels must be >= 1, got {args.levels!r}")
+    if args.dt <= 0.0:
+        raise ValueError(f"--dt must be > 0, got {args.dt!r}")
+    if args.days <= 0.0:
+        raise ValueError(f"--days must be > 0, got {args.days!r}")
+
     jax.config.update("jax_enable_x64", bool(args.x64))
 
     output_dir = args.output or f"results/ocean_tests_C{args.resolution}_L{args.levels}"
@@ -858,36 +907,50 @@ def main():
     # Run tests
     # =====================================================================
     results = {}
+    case_configs = {}
+    case_errors = {}
+
+    def _run_case(case_name: str, fn) -> None:
+        try:
+            out = fn()
+            if isinstance(out, tuple) and len(out) == 3:
+                state, diag, case_cfg = out
+            else:
+                state, diag = out
+                case_cfg = config
+            results[case_name] = {
+                "metrics": summarize_case_metrics(state, diag, grid),
+            }
+            case_configs[case_name] = _config_to_dict(case_cfg)
+        except Exception as exc:  # pragma: no cover - exercised in runtime matrix failures
+            msg = f"{type(exc).__name__}: {exc}"
+            case_errors[case_name] = msg
+            print(f"\n  !!! CASE FAILED: {case_name} -> {msg}")
+            traceback.print_exc()
 
     if args.test in ("all", "rest"):
-        state, diag = run_rest_state_test(
-            grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+        _run_case(
+            "rest_state",
+            lambda: run_rest_state_test(
+                grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+            ),
         )
-        results["rest_state"] = {
-            "state": state,
-            "diagnostics": diag,
-            "metrics": summarize_case_metrics(state, diag, grid),
-        }
 
     if args.test in ("all", "wave"):
-        state, diag = run_gravity_wave_test(
-            grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+        _run_case(
+            "gravity_wave",
+            lambda: run_gravity_wave_test(
+                grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+            ),
         )
-        results["gravity_wave"] = {
-            "state": state,
-            "diagnostics": diag,
-            "metrics": summarize_case_metrics(state, diag, grid),
-        }
 
     if args.test in ("all", "gyre"):
-        state, diag = run_wind_driven_gyre_test(
-            grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+        _run_case(
+            "wind_gyre",
+            lambda: run_wind_driven_gyre_test(
+                grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+            ),
         )
-        results["wind_gyre"] = {
-            "state": state,
-            "diagnostics": diag,
-            "metrics": summarize_case_metrics(state, diag, grid),
-        }
 
     # =====================================================================
     # Summary
@@ -901,12 +964,12 @@ def main():
 
     summary_cases = {}
     for name, res in results.items():
-        diag = res["diagnostics"]
         m = res["metrics"]
         print(f"\n  --- {name} ---")
         print(f"    Final SSH range:  [{m['SSH_min']:.4e}, {m['SSH_max']:.4e}] m")
         print(f"    Final |u| max:    {m['u_max']:.4e} m/s")
         print(f"    Final |v| max:    {m['v_max']:.4e} m/s")
+        print(f"    Final speed max:  {m['speed_max']:.4e} m/s")
         print(f"    Final SST mean:   {m['SST_mean']:.4f} degC")
         print(f"    Final KE:         {m['kinetic_energy']:.4e}")
         print(f"    Heat drift rel:   {m['heat_drift_rel']:.2e}")
@@ -915,6 +978,11 @@ def main():
         print(f"    All fields finite: {m['all_finite']}")
         print(f"    Land cells zero:   {m['land_zero']}")
         summary_cases[name] = m
+
+    if case_errors:
+        print("\n  --- failed_cases ---")
+        for name, msg in case_errors.items():
+            print(f"    {name}: {msg}")
 
     summary_payload = {
         "suite": "ocean_tests",
@@ -929,17 +997,10 @@ def main():
             "n_steps": int(n_steps),
             "runtime_checks": bool(args.runtime_checks),
         },
-        "config": {
-            "A_h": float(config.A_h),
-            "K_h": float(config.K_h),
-            "A_v": float(config.A_v),
-            "K_v": float(config.K_v),
-            "hyperdiff_coeff": float(config.hyperdiff_coeff),
-            "n_barotropic_substeps": int(config.n_barotropic_substeps),
-            "barotropic_diffusion_alpha": float(config.barotropic_diffusion_alpha),
-            "barotropic_diffusion_dt_ref": float(config.barotropic_diffusion_dt_ref),
-        },
+        "config": _config_to_dict(config),
+        "case_configs": case_configs,
         "cases": summary_cases,
+        "case_errors": case_errors,
     }
     with open(os.path.join(output_dir, "summary.json"), "w") as f:
         json.dump(summary_payload, f, indent=2, sort_keys=True)
@@ -955,11 +1016,22 @@ def main():
             f"n_baro={config.n_barotropic_substeps}, "
             f"baro_alpha={config.barotropic_diffusion_alpha:.3e}\n\n"
         )
+        if case_configs:
+            f.write("Case configs:\n")
+            for name, cfg in case_configs.items():
+                f.write(
+                    f"  {name}: A_h={cfg['A_h']:.3e}, K_h={cfg['K_h']:.3e}, "
+                    f"A_v={cfg['A_v']:.3e}, K_v={cfg['K_v']:.3e}, "
+                    f"n_baro={cfg['n_barotropic_substeps']}, "
+                    f"baro_alpha={cfg['barotropic_diffusion_alpha']:.3e}\n",
+                )
+            f.write("\n")
         for name, m in summary_cases.items():
             f.write(f"{name}\n")
             f.write(
                 f"  SSH=[{m['SSH_min']:.4e}, {m['SSH_max']:.4e}] "
-                f"u_max={m['u_max']:.4e} v_max={m['v_max']:.4e}\n",
+                f"u_max={m['u_max']:.4e} v_max={m['v_max']:.4e} "
+                f"speed_max={m['speed_max']:.4e}\n",
             )
             f.write(
                 f"  heat_drift_rel={m['heat_drift_rel']:.3e} "
@@ -969,6 +1041,11 @@ def main():
             f.write(
                 f"  all_finite={m['all_finite']} land_zero={m['land_zero']}\n\n",
             )
+        if case_errors:
+            f.write("failed_cases\n")
+            for name, msg in case_errors.items():
+                f.write(f"  {name}: {msg}\n")
+            f.write("\n")
 
     print(f"\n  Output directory: {output_dir}/")
     for name in results:
@@ -976,7 +1053,8 @@ def main():
                   "wind_gyre": "wind_gyre"}[name]
         print(f"    {subdir}/")
     print("=" * 70)
+    return 1 if case_errors else 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -229,11 +229,10 @@ class OceanModel:
 
         # --- 4. Barotropic substeps ---
         # eta is updated ONLY here (not by the slow tendency).
-        # The slow u/v tendency is already in state_mid, so F_slow=0
-        # in the barotropic solver to avoid double-counting.
+        # Slow u/v tendency is already included in state_mid.
         dt_s = dt / self.config.n_barotropic_substeps
         state_new = barotropic_substeps(
-            state_mid, state_mid,  # slow_tend unused (F_slow=0)
+            state_mid,
             dt_s, self.config.n_barotropic_substeps,
             self.grid, self.z_coord, self.config,
         )
@@ -279,7 +278,19 @@ class OceanModel:
         final_state : OceanState
         trajectory : list of OceanState
         """
+        if dt <= 0.0:
+            raise ValueError(f"dt must be > 0, got {dt!r}")
+        if duration < 0.0:
+            raise ValueError(f"duration must be >= 0, got {duration!r}")
+        if save_every < 1:
+            raise ValueError(f"save_every must be >= 1, got {save_every!r}")
+
         n_steps = int(duration / dt)
+        if duration > 0.0 and n_steps < 1:
+            raise ValueError(
+                "integration has zero steps; increase duration or reduce dt "
+                f"(duration={duration!r}, dt={dt!r})",
+            )
         trajectory = [state]
         step_fn = self.step_checked if self.config.enable_runtime_checks else self.step
 
@@ -317,6 +328,10 @@ class OceanModel:
                 "integrate_scan does not support host-side runtime checks. "
                 "Use integrate() or disable enable_runtime_checks.",
             )
+        if n_steps < 0:
+            raise ValueError(f"n_steps must be >= 0, got {n_steps!r}")
+        if dt <= 0.0:
+            raise ValueError(f"dt must be > 0, got {dt!r}")
 
         def scan_fn(state, _):
             new_state = self.step(state, dt)

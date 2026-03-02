@@ -33,6 +33,7 @@ from legoesm.parallel.mesh import (
     create_device_mesh,
     set_active_config,
 )
+from legoesm.parallel.reductions import _require_mpi_stack, _mpi4jax_array_result
 
 _active_topology: CommTopology | None = None
 
@@ -73,12 +74,14 @@ def initialize_distributed(
             return config, _active_topology
         return config
 
+    # Validate MPI dependencies before touching JAX distributed runtime.
+    _mpi4jax, MPI = _require_mpi_stack()
+
     # Initialize JAX distributed runtime.
     jax.distributed.initialize()
 
     # Use MPI as the authoritative source for rank/size,
     # since halo_exchange.py uses MPI.COMM_WORLD for all communication.
-    from mpi4py import MPI
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     n_processes = comm.Get_size()
@@ -104,8 +107,27 @@ def initialize_distributed(
     set_halo_backend("mpi", topology)
 
     # Create device mesh with local devices.
+    local_devices = list(jax.local_devices())
+    local_device_count = len(local_devices)
+    if local_device_count < 1:
+        raise RuntimeError("No local JAX devices found for this MPI rank.")
+    # Face-only sharding requires a divisor of 6. When local device count
+    # is not a divisor (e.g., 4), pick the largest supported local subset.
+    mesh_devices = next(
+        (d for d in (6, 3, 2, 1) if d <= local_device_count),
+        1,
+    )
+    if mesh_devices != local_device_count:
+        import warnings
+        warnings.warn(
+            "Local device count does not evenly divide 6 cubed-sphere faces. "
+            f"Using {mesh_devices} of {local_device_count} local devices.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     local_config = create_device_mesh(
-        n_devices=len(jax.local_devices()),
+        n_devices=mesh_devices,
+        devices=local_devices,
     )
 
     # Return a new config marking distributed mode.
@@ -199,8 +221,7 @@ def gather_state(local_state, topology: CommTopology | None = None):
             "Call initialize_distributed() first or pass topology explicitly."
         )
 
-    import mpi4jax
-    from mpi4py import MPI
+    mpi4jax, MPI = _require_mpi_stack()
 
     def _allreduce_leaf(leaf):
         if not isinstance(leaf, (jax.Array, jnp.ndarray)):
@@ -208,8 +229,8 @@ def gather_state(local_state, topology: CommTopology | None = None):
         if leaf.ndim < 1 or leaf.shape[0] != 6:
             # Non-face-leading leaves are replicated metadata/constants.
             return leaf
-        result, _ = mpi4jax.allreduce(
-            leaf, op=MPI.SUM, comm=MPI.COMM_WORLD
+        result = _mpi4jax_array_result(
+            mpi4jax.allreduce(leaf, op=MPI.SUM, comm=MPI.COMM_WORLD),
         )
         return result
 

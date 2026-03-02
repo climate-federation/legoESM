@@ -1,0 +1,497 @@
+{
+  "case_profiles_enabled": true,
+  "generated_utc": "2026-03-02T06:32:09Z",
+  "overall_has_warnings": false,
+  "overall_pass": true,
+  "runs": [
+    {
+      "cmd": [
+        "/Users/pierregentine/legoESM/.venv/bin/python",
+        "scripts/run_ocean_tests.py",
+        "--resolution",
+        "4",
+        "--levels",
+        "4",
+        "--dt",
+        "1800.0",
+        "--days",
+        "0.05",
+        "--test",
+        "all",
+        "--output",
+        "results/_smoke_ocean_regression_partial/runs/ocean_tests_C4_L4",
+        "--runtime-checks"
+      ],
+      "evaluation": {
+        "cases": {
+          "gravity_wave": {
+            "checks": {
+              "all_finite": true,
+              "eta_drift_ok": true,
+              "heat_drift_ok": true,
+              "land_zero": true,
+              "salt_drift_ok": true,
+              "speed_ok": true,
+              "ssh_abs_ok": true
+            },
+            "derived": {
+              "speed_max_mps": 0.0007945697288960218,
+              "ssh_abs_max_m": 0.11063984036445618
+            },
+            "has_warnings": false,
+            "limits": {
+              "speed_max_mps": 20.0,
+              "ssh_abs_max_m": 2.0
+            },
+            "metrics": {
+              "SSH_max": 0.11063984036445618,
+              "SSH_min": 0.0021532680839300156,
+              "SST_max": 18.859148025512695,
+              "SST_mean": 18.859142303466797,
+              "all_finite": true,
+              "heat_drift_rel": 0.0,
+              "kinetic_energy": 110064533504.0,
+              "land_zero": true,
+              "max_land_eta": 0.0,
+              "max_land_u": 0.0,
+              "max_land_v": 0.0,
+              "salt_drift_rel": 8.873520739725085e-08,
+              "speed_max": 0.0007945697288960218,
+              "u_max": 0.0007754980470053852,
+              "v_max": 0.0007110962178558111,
+              "volume_mean_eta_drift": -7.126988568277756e-09
+            },
+            "pass": true,
+            "warnings": []
+          },
+          "rest_state": {
+            "checks": {
+              "all_finite": true,
+              "eta_drift_ok": true,
+              "heat_drift_ok": true,
+              "land_zero": true,
+              "salt_drift_ok": true,
+              "speed_ok": true,
+              "ssh_abs_ok": true
+            },
+            "derived": {
+              "speed_max_mps": 0.0,
+              "ssh_abs_max_m": 0.0
+            },
+            "has_warnings": false,
+            "limits": {
+              "speed_max_mps": 0.1,
+              "ssh_abs_max_m": 0.1
+            },
+            "metrics": {
+              "SSH_max": 0.0,
+              "SSH_min": 0.0,
+              "SST_max": 18.859149932861328,
+              "SST_mean": 18.859148025512695,
+              "all_finite": true,
+              "heat_drift_rel": 0.0,
+              "kinetic_energy": 0.0,
+              "land_zero": true,
+              "max_land_eta": 0.0,
+              "max_land_u": 0.0,
+              "max_land_v": 0.0,
+              "salt_drift_rel": 0.0,
+              "speed_max": 0.0,
+              "u_max": 0.0,
+              "v_max": 0.0,
+              "volume_mean_eta_drift": 0.0
+            },
+            "pass": true,
+            "warnings": []
+          },
+          "wind_gyre": {
+            "checks": {
+              "all_finite": true,
+              "eta_drift_ok": true,
+              "heat_drift_ok": true,
+              "land_zero": true,
+              "salt_drift_ok": true,
+              "speed_ok": true,
+              "ssh_abs_ok": true
+            },
+            "derived": {
+              "speed_max_mps": 0.000261641078395769,
+              "ssh_abs_max_m": 1.4685964515592786e-06
+            },
+            "has_warnings": false,
+            "limits": {
+              "speed_max_mps": 20.0,
+              "ssh_abs_max_m": 5.0
+            },
+            "metrics": {
+              "SSH_max": 1.4685964515592786e-06,
+              "SSH_min": -1.0601428357404075e-06,
+              "SST_max": 15.0,
+              "SST_mean": 15.0,
+              "all_finite": true,
+              "heat_drift_rel": 0.0,
+              "kinetic_energy": 265924528.0,
+              "land_zero": true,
+              "max_land_eta": 0.0,
+              "max_land_u": 0.0,
+              "max_land_v": 0.0,
+              "salt_drift_rel": 0.0,
+              "speed_max": 0.000261641078395769,
+              "u_max": 0.0002439586096443236,
+              "v_max": 9.593763388693333e-05,
+              "volume_mean_eta_drift": -2.718730380354979e-14
+            },
+            "pass": true,
+            "warnings": []
+          }
+        },
+        "has_warnings": false,
+        "pass": true
+      },
+      "id": "ocean_tests_C4_L4",
+      "levels": 4,
+      "log_path": "results/_smoke_ocean_regression_partial/logs/ocean_tests_C4_L4.log",
+      "output_dir": "results/_smoke_ocean_regression_partial/runs/ocean_tests_C4_L4",
+      "resolution": 4,
+      "returncode": 0,
+      "status": "pass",
+      "suite": "ocean_tests",
+      "summary": {
+        "case_errors": {},
+        "cases": {
+          "gravity_wave": {
+            "SSH_max": 0.11063984036445618,
+            "SSH_min": 0.0021532680839300156,
+            "SST_max": 18.859148025512695,
+            "SST_mean": 18.859142303466797,
+            "all_finite": true,
+            "heat_drift_rel": 0.0,
+            "kinetic_energy": 110064533504.0,
+            "land_zero": true,
+            "max_land_eta": 0.0,
+            "max_land_u": 0.0,
+            "max_land_v": 0.0,
+            "salt_drift_rel": 8.873520739725085e-08,
+            "speed_max": 0.0007945697288960218,
+            "u_max": 0.0007754980470053852,
+            "v_max": 0.0007110962178558111,
+            "volume_mean_eta_drift": -7.126988568277756e-09
+          },
+          "rest_state": {
+            "SSH_max": 0.0,
+            "SSH_min": 0.0,
+            "SST_max": 18.859149932861328,
+            "SST_mean": 18.859148025512695,
+            "all_finite": true,
+            "heat_drift_rel": 0.0,
+            "kinetic_energy": 0.0,
+            "land_zero": true,
+            "max_land_eta": 0.0,
+            "max_land_u": 0.0,
+            "max_land_v": 0.0,
+            "salt_drift_rel": 0.0,
+            "speed_max": 0.0,
+            "u_max": 0.0,
+            "v_max": 0.0,
+            "volume_mean_eta_drift": 0.0
+          },
+          "wind_gyre": {
+            "SSH_max": 1.4685964515592786e-06,
+            "SSH_min": -1.0601428357404075e-06,
+            "SST_max": 15.0,
+            "SST_mean": 15.0,
+            "all_finite": true,
+            "heat_drift_rel": 0.0,
+            "kinetic_energy": 265924528.0,
+            "land_zero": true,
+            "max_land_eta": 0.0,
+            "max_land_u": 0.0,
+            "max_land_v": 0.0,
+            "salt_drift_rel": 0.0,
+            "speed_max": 0.000261641078395769,
+            "u_max": 0.0002439586096443236,
+            "v_max": 9.593763388693333e-05,
+            "volume_mean_eta_drift": -2.718730380354979e-14
+          }
+        },
+        "config": {
+          "A_h": 10000.0,
+          "A_v": 0.001,
+          "K_h": 1000.0,
+          "K_v": 0.0001,
+          "barotropic_diffusion_alpha": 0.01,
+          "barotropic_diffusion_dt_ref": 60.0,
+          "hyperdiff_coeff": 2.4861963746665168e+17,
+          "n_barotropic_substeps": 10
+        },
+        "meta": {
+          "backend": "cpu",
+          "days": 0.05,
+          "device_count": 1,
+          "dt": 1800.0,
+          "float_dtype": "float32",
+          "levels": 4,
+          "n_steps": 2,
+          "resolution": 4,
+          "runtime_checks": true
+        },
+        "suite": "ocean_tests"
+      },
+      "summary_error": null,
+      "summary_path": "results/_smoke_ocean_regression_partial/runs/ocean_tests_C4_L4/summary.json",
+      "wall_time_s": 21.67448616027832
+    },
+    {
+      "cmd": [
+        "/Users/pierregentine/legoESM/.venv/bin/python",
+        "scripts/run_ocean_realistic.py",
+        "--resolution",
+        "4",
+        "--levels",
+        "4",
+        "--dt",
+        "1800.0",
+        "--days",
+        "0.05",
+        "--test",
+        "all",
+        "--output",
+        "results/_smoke_ocean_regression_partial/runs/ocean_realistic_C4_L4",
+        "--runtime-checks"
+      ],
+      "evaluation": {
+        "cases": {
+          "baroclinic_adjustment": {
+            "checks": {
+              "all_finite": true,
+              "eta_drift_ok": true,
+              "heat_drift_ok": true,
+              "land_zero": true,
+              "salt_drift_ok": true,
+              "speed_ok": true,
+              "ssh_abs_ok": true
+            },
+            "derived": {
+              "speed_max_mps": 0.06938213855028152,
+              "ssh_abs_max_m": 0.14339260756969452
+            },
+            "has_warnings": false,
+            "limits": {
+              "speed_max_mps": 80.0,
+              "ssh_abs_max_m": 20.0
+            },
+            "metrics": {
+              "SSH_max": 0.08252669870853424,
+              "SSH_min": -0.14339260756969452,
+              "SST_max": 20.000150680541992,
+              "SST_mean": 17.380067825317383,
+              "SST_min": 10.000126838684082,
+              "all_finite": true,
+              "heat_drift_rel": -8.914230659997158e-08,
+              "kinetic_energy": 819094957850624.0,
+              "land_zero": true,
+              "max_land_eta": 0.0,
+              "max_land_u": 0.0,
+              "max_land_v": 0.0,
+              "salt_drift_rel": -8.873543574201237e-08,
+              "speed_max": 0.06938213855028152,
+              "u_max": 0.033096570521593094,
+              "v_max": 0.06903502345085144,
+              "volume_mean_eta_drift": -5.090706120198397e-10
+            },
+            "pass": true,
+            "warnings": []
+          },
+          "kelvin_wave": {
+            "checks": {
+              "all_finite": true,
+              "eta_drift_ok": true,
+              "heat_drift_ok": true,
+              "land_zero": true,
+              "salt_drift_ok": true,
+              "speed_ok": true,
+              "ssh_abs_ok": true
+            },
+            "derived": {
+              "speed_max_mps": 0.00017977027164306492,
+              "ssh_abs_max_m": 0.02655605785548687
+            },
+            "has_warnings": false,
+            "limits": {
+              "speed_max_mps": 5.0,
+              "ssh_abs_max_m": 1.0
+            },
+            "metrics": {
+              "SSH_max": 0.02655605785548687,
+              "SSH_min": -3.6489098420133814e-05,
+              "SST_max": 15.00000286102295,
+              "SST_mean": 15.000000953674316,
+              "SST_min": 15.00000286102295,
+              "all_finite": true,
+              "heat_drift_rel": 1.0352459847984479e-07,
+              "kinetic_energy": 5392927232.0,
+              "land_zero": true,
+              "max_land_eta": 0.0,
+              "max_land_u": 0.0,
+              "max_land_v": 0.0,
+              "salt_drift_rel": 0.0,
+              "speed_max": 0.00017977027164306492,
+              "u_max": 0.00016327956109307706,
+              "v_max": 0.00017743375792633742,
+              "volume_mean_eta_drift": 2.5453530600991986e-10
+            },
+            "pass": true,
+            "warnings": []
+          },
+          "stommel_gyre": {
+            "checks": {
+              "all_finite": true,
+              "eta_drift_ok": true,
+              "heat_drift_ok": true,
+              "land_zero": true,
+              "salt_drift_ok": true,
+              "speed_ok": true,
+              "ssh_abs_ok": true
+            },
+            "derived": {
+              "speed_max_mps": 0.0027204628568142653,
+              "ssh_abs_max_m": 0.00013507796393241733
+            },
+            "has_warnings": false,
+            "limits": {
+              "speed_max_mps": 150.0,
+              "ssh_abs_max_m": 10.0
+            },
+            "metrics": {
+              "SSH_max": 0.00013507796393241733,
+              "SSH_min": -0.0001106595664168708,
+              "SST_max": 15.0,
+              "SST_mean": 15.0,
+              "SST_min": 15.0,
+              "all_finite": true,
+              "heat_drift_rel": 0.0,
+              "kinetic_energy": 32364838912.0,
+              "land_zero": true,
+              "max_land_eta": 0.0,
+              "max_land_u": 0.0,
+              "max_land_v": 0.0,
+              "salt_drift_rel": 0.0,
+              "speed_max": 0.0027204628568142653,
+              "u_max": 0.0025307827163487673,
+              "v_max": 0.000998026574961841,
+              "volume_mean_eta_drift": -1.2040091684429194e-13
+            },
+            "pass": true,
+            "warnings": []
+          }
+        },
+        "has_warnings": false,
+        "pass": true
+      },
+      "id": "ocean_realistic_C4_L4",
+      "levels": 4,
+      "log_path": "results/_smoke_ocean_regression_partial/logs/ocean_realistic_C4_L4.log",
+      "output_dir": "results/_smoke_ocean_regression_partial/runs/ocean_realistic_C4_L4",
+      "resolution": 4,
+      "returncode": 0,
+      "status": "pass",
+      "suite": "ocean_realistic",
+      "summary": {
+        "case_errors": {},
+        "cases": {
+          "baroclinic_adjustment": {
+            "SSH_max": 0.08252669870853424,
+            "SSH_min": -0.14339260756969452,
+            "SST_max": 20.000150680541992,
+            "SST_mean": 17.380067825317383,
+            "SST_min": 10.000126838684082,
+            "all_finite": true,
+            "heat_drift_rel": -8.914230659997158e-08,
+            "kinetic_energy": 819094957850624.0,
+            "land_zero": true,
+            "max_land_eta": 0.0,
+            "max_land_u": 0.0,
+            "max_land_v": 0.0,
+            "salt_drift_rel": -8.873543574201237e-08,
+            "speed_max": 0.06938213855028152,
+            "u_max": 0.033096570521593094,
+            "v_max": 0.06903502345085144,
+            "volume_mean_eta_drift": -5.090706120198397e-10
+          },
+          "kelvin_wave": {
+            "SSH_max": 0.02655605785548687,
+            "SSH_min": -3.6489098420133814e-05,
+            "SST_max": 15.00000286102295,
+            "SST_mean": 15.000000953674316,
+            "SST_min": 15.00000286102295,
+            "all_finite": true,
+            "heat_drift_rel": 1.0352459847984479e-07,
+            "kinetic_energy": 5392927232.0,
+            "land_zero": true,
+            "max_land_eta": 0.0,
+            "max_land_u": 0.0,
+            "max_land_v": 0.0,
+            "salt_drift_rel": 0.0,
+            "speed_max": 0.00017977027164306492,
+            "u_max": 0.00016327956109307706,
+            "v_max": 0.00017743375792633742,
+            "volume_mean_eta_drift": 2.5453530600991986e-10
+          },
+          "stommel_gyre": {
+            "SSH_max": 0.00013507796393241733,
+            "SSH_min": -0.0001106595664168708,
+            "SST_max": 15.0,
+            "SST_mean": 15.0,
+            "SST_min": 15.0,
+            "all_finite": true,
+            "heat_drift_rel": 0.0,
+            "kinetic_energy": 32364838912.0,
+            "land_zero": true,
+            "max_land_eta": 0.0,
+            "max_land_u": 0.0,
+            "max_land_v": 0.0,
+            "salt_drift_rel": 0.0,
+            "speed_max": 0.0027204628568142653,
+            "u_max": 0.0025307827163487673,
+            "v_max": 0.000998026574961841,
+            "volume_mean_eta_drift": -1.2040091684429194e-13
+          }
+        },
+        "config": {
+          "A_h": 31192700.493549787,
+          "A_v": 0.01,
+          "K_h": 3119270.049354979,
+          "K_v": 0.001,
+          "barotropic_diffusion_alpha": 0.01,
+          "barotropic_diffusion_dt_ref": 60.0,
+          "hyperdiff_coeff": 2.4861963746665168e+17,
+          "n_barotropic_substeps": 30
+        },
+        "meta": {
+          "backend": "cpu",
+          "days": 0.05,
+          "device_count": 1,
+          "dt": 1800.0,
+          "float_dtype": "float32",
+          "levels": 4,
+          "n_steps": 2,
+          "resolution": 4,
+          "runtime_checks": true
+        },
+        "suite": "ocean_realistic"
+      },
+      "summary_error": null,
+      "summary_path": "results/_smoke_ocean_regression_partial/runs/ocean_realistic_C4_L4/summary.json",
+      "wall_time_s": 22.51061701774597
+    }
+  ],
+  "thresholds": {
+    "eta_mean_drift_m": 0.001,
+    "heat_drift_rel": 0.001,
+    "salt_drift_rel": 0.001,
+    "speed_max_mps": 200.0,
+    "ssh_abs_max_m": 50.0,
+    "use_case_profiles": true,
+    "warn_fraction": 0.8
+  }
+}

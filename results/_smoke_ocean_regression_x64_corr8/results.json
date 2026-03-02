@@ -1,0 +1,166 @@
+{
+  "case_profiles_enabled": true,
+  "generated_utc": "2026-03-02T08:45:02Z",
+  "overall_has_warnings": false,
+  "overall_pass": false,
+  "runs": [
+    {
+      "cmd": [
+        "/Users/pierregentine/legoESM/.venv/bin/python",
+        "scripts/run_ocean_tests.py",
+        "--resolution",
+        "8",
+        "--levels",
+        "10",
+        "--dt",
+        "3600.0",
+        "--days",
+        "1.0",
+        "--test",
+        "all",
+        "--output",
+        "results/_smoke_ocean_regression_x64_corr8/runs/ocean_tests_C8_L10",
+        "--x64"
+      ],
+      "evaluation": {
+        "cases": {
+          "gravity_wave": {
+            "checks": {
+              "all_finite": false,
+              "case_error": false,
+              "eta_drift_ok": false,
+              "heat_drift_ok": false,
+              "land_zero": false,
+              "salt_drift_ok": false,
+              "speed_ok": false,
+              "ssh_abs_ok": false
+            },
+            "derived": {
+              "speed_max_mps": null,
+              "ssh_abs_max_m": null
+            },
+            "error": "TypeError: scan body function carry input and carry output must have equal types, but they differ:\n\nThe input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.\n\nRevise the function so that all output types match the corresponding input types.",
+            "has_warnings": false,
+            "limits": {
+              "speed_max_mps": 20.0,
+              "ssh_abs_max_m": 2.0
+            },
+            "metrics": {},
+            "pass": false,
+            "warnings": []
+          },
+          "rest_state": {
+            "checks": {
+              "all_finite": false,
+              "case_error": false,
+              "eta_drift_ok": false,
+              "heat_drift_ok": false,
+              "land_zero": false,
+              "salt_drift_ok": false,
+              "speed_ok": false,
+              "ssh_abs_ok": false
+            },
+            "derived": {
+              "speed_max_mps": null,
+              "ssh_abs_max_m": null
+            },
+            "error": "TypeError: scan body function carry input and carry output must have equal types, but they differ:\n\nThe input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.\n\nRevise the function so that all output types match the corresponding input types.",
+            "has_warnings": false,
+            "limits": {
+              "speed_max_mps": 0.1,
+              "ssh_abs_max_m": 0.1
+            },
+            "metrics": {},
+            "pass": false,
+            "warnings": []
+          },
+          "wind_gyre": {
+            "checks": {
+              "all_finite": false,
+              "case_error": false,
+              "eta_drift_ok": false,
+              "heat_drift_ok": false,
+              "land_zero": false,
+              "salt_drift_ok": false,
+              "speed_ok": false,
+              "ssh_abs_ok": false
+            },
+            "derived": {
+              "speed_max_mps": null,
+              "ssh_abs_max_m": null
+            },
+            "error": "TypeError: scan body function carry input and carry output must have equal types, but they differ:\n\nThe input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.\n\nRevise the function so that all output types match the corresponding input types.",
+            "has_warnings": false,
+            "limits": {
+              "speed_max_mps": 20.0,
+              "ssh_abs_max_m": 5.0
+            },
+            "metrics": {},
+            "pass": false,
+            "warnings": []
+          }
+        },
+        "has_warnings": false,
+        "pass": false
+      },
+      "id": "ocean_tests_C8_L10",
+      "levels": 10,
+      "log_path": "results/_smoke_ocean_regression_x64_corr8/logs/ocean_tests_C8_L10.log",
+      "output_dir": "results/_smoke_ocean_regression_x64_corr8/runs/ocean_tests_C8_L10",
+      "resolution": 8,
+      "returncode": 1,
+      "status": "command_failed",
+      "suite": "ocean_tests",
+      "summary": {
+        "case_configs": {},
+        "case_errors": {
+          "gravity_wave": "TypeError: scan body function carry input and carry output must have equal types, but they differ:\n\nThe input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.\n\nRevise the function so that all output types match the corresponding input types.",
+          "rest_state": "TypeError: scan body function carry input and carry output must have equal types, but they differ:\n\nThe input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.\n\nRevise the function so that all output types match the corresponding input types.",
+          "wind_gyre": "TypeError: scan body function carry input and carry output must have equal types, but they differ:\n\nThe input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.\n\nRevise the function so that all output types match the corresponding input types."
+        },
+        "cases": {},
+        "config": {
+          "A_h": 10000.0,
+          "A_v": 0.001,
+          "K_h": 1000.0,
+          "K_v": 0.0001,
+          "barotropic_diffusion_alpha": 0.01,
+          "barotropic_diffusion_dt_ref": 60.0,
+          "enable_runtime_checks": false,
+          "fix_heat": true,
+          "fix_salt": true,
+          "fix_volume": true,
+          "hyperdiff_coeff": 7914023379819536.0,
+          "n_barotropic_substeps": 10,
+          "use_conservation_fixer": true
+        },
+        "meta": {
+          "backend": "cpu",
+          "days": 1.0,
+          "device_count": 1,
+          "dt": 3600.0,
+          "float_dtype": "float64",
+          "levels": 10,
+          "n_steps": 24,
+          "resolution": 8,
+          "runtime_checks": false
+        },
+        "suite": "ocean_tests"
+      },
+      "summary_error": null,
+      "summary_path": "results/_smoke_ocean_regression_x64_corr8/runs/ocean_tests_C8_L10/summary.json",
+      "timed_out": false,
+      "timeout_error": null,
+      "wall_time_s": 20.080575942993164
+    }
+  ],
+  "thresholds": {
+    "eta_mean_drift_m": 0.001,
+    "heat_drift_rel": 0.001,
+    "salt_drift_rel": 0.001,
+    "speed_max_mps": 200.0,
+    "ssh_abs_max_m": 50.0,
+    "use_case_profiles": true,
+    "warn_fraction": 0.8
+  }
+}

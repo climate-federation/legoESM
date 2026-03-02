@@ -142,3 +142,4 @@ class SpectralOceanConfig(NamedTuple):
     hyperdiff_coeff: float = 1.0e15
     hyperdiff_order: int = 2
     use_conservation_fixer: bool = True
+    min_water_column_m: float = 0.5

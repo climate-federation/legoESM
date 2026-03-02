@@ -73,6 +73,10 @@ def vertical_diffusion(
     -------
     array : Vertical diffusion tendency, shape (..., nlev).
     """
+    dtype = field.dtype
+    jacobian = jacobian.astype(dtype)
+    coeff = jnp.asarray(coeff, dtype=dtype)
+
     # Actual layer thickness and interface spacing
     dz = z_coord.dz_ref * jacobian[..., jnp.newaxis]         # (..., nlev)
     dz_half = 0.5 * (dz[..., :-1] + dz[..., 1:])  # (..., nlev-1)
@@ -81,18 +85,10 @@ def vertical_diffusion(
     df_dz = (field[..., :-1] - field[..., 1:]) / dz_half
     flux = coeff * df_dz  # (..., nlev-1)
 
-    # Tendency at full levels: d(flux)/dz
-    # Zero-flux BCs: flux = 0 at surface (above k=0) and bottom (below k=nlev-1)
-    tendency = jnp.zeros_like(field)
-    # Interior levels: (flux_above - flux_below) / dz
-    tendency = tendency.at[..., 0].set(
-        -flux[..., 0] / dz[..., 0]                    # surface: flux_above=0
-    )
-    tendency = tendency.at[..., 1:-1].set(
-        (flux[..., :-1] - flux[..., 1:]) / dz[..., 1:-1]  # interior
-    )
-    tendency = tendency.at[..., -1].set(
-        flux[..., -1] / dz[..., -1]                    # bottom: flux_below=0
-    )
-
-    return tendency
+    # Tendency at full levels: d(flux)/dz with zero-flux BCs.
+    # Using concatenate avoids scatter updates (better JIT lowering and
+    # no mixed-dtype scatter edge cases on strict x64 runs).
+    top = -flux[..., :1] / dz[..., :1]  # surface: flux_above = 0
+    interior = (flux[..., :-1] - flux[..., 1:]) / dz[..., 1:-1]
+    bottom = flux[..., -1:] / dz[..., -1:]  # bottom: flux_below = 0
+    return jnp.concatenate([top, interior, bottom], axis=-1)

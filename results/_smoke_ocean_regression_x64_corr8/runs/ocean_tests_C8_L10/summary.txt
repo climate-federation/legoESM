@@ -1,0 +1,24 @@
+legoESM Ocean Model Standardized Tests
+================================================
+Resolution: C8, Levels: 10
+dt=3600s, days=1.00, steps=24
+Runtime checks: False
+Config: hyperdiff=7.914e+15, n_baro=10, baro_alpha=1.000e-02
+
+failed_cases
+  rest_state: TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+  gravity_wave: TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+  wind_gyre: TypeError: scan body function carry input and carry output must have equal types, but they differ:
+
+The input carry component loop_carry[1][0] has type float32[6,8,8] but the corresponding output carry component has type float64[6,8,8], so the dtypes do not match.
+
+Revise the function so that all output types match the corresponding input types.
+
