@@ -8,6 +8,7 @@ requiring multiple devices or MPI.
 import jax
 import jax.numpy as jnp
 import pytest
+from unittest.mock import patch
 
 from legoesm.parallel.mesh import (
     DeviceConfig,
@@ -74,6 +75,15 @@ class TestDeviceMesh:
         """create_device_mesh sets the active config singleton."""
         config = create_device_mesh(n_devices=1)
         assert get_active_config() is config
+
+    def test_auto_falls_back_from_invalid_count(self):
+        """Auto mode should fall back to a valid face-partition count."""
+        fake_devices = [object(), object(), object(), object()]
+        with patch("legoesm.parallel.mesh.jax.devices", return_value=fake_devices):
+            with patch("legoesm.parallel.mesh.jax.default_backend", return_value="gpu"):
+                with pytest.warns(RuntimeWarning, match="Falling back to 3 device"):
+                    config = create_device_mesh(n_devices="auto")
+        assert config.n_devices == 3
 
 
 class TestShardPytree:
@@ -208,6 +218,40 @@ class TestCommTopology:
                 f"Reverse of ({face},{edge})→({nbr_face},{nbr_edge}) "
                 f"points to face {reverse[0]}, not {face}"
             )
+
+    def test_remote_edge_order_for_packed_exchange(self):
+        """Sender/receiver can agree on packed strip order for 2/3/6 ranks."""
+        for n_processes in (2, 3, 6):
+            topologies = [
+                build_comm_topology(rank=r, n_processes=n_processes)
+                for r in range(n_processes)
+            ]
+
+            for rank_a, topo_a in enumerate(topologies):
+                for rank_b in range(n_processes):
+                    if rank_a == rank_b:
+                        continue
+
+                    edges_a = [
+                        (face, edge, nbr_face, nbr_edge, is_reversed)
+                        for (face, edge), (nbr_face, nbr_edge, is_reversed) in topo_a.neighbor_info.items()
+                        if topo_a.neighbor_ranks[(face, edge)] == rank_b
+                    ]
+                    if not edges_a:
+                        continue
+
+                    topo_b = topologies[rank_b]
+                    edges_b = [
+                        (face, edge, nbr_face, nbr_edge, is_reversed)
+                        for (face, edge), (nbr_face, nbr_edge, is_reversed) in topo_b.neighbor_info.items()
+                        if topo_b.neighbor_ranks[(face, edge)] == rank_a
+                    ]
+
+                    send_order_a = sorted(edges_a, key=lambda e: (e[0], e[1]))
+                    recv_order_b = sorted(edges_b, key=lambda e: (e[2], e[3]))
+                    sent_pairs = [(face, edge) for face, edge, *_ in send_order_a]
+                    expected_pairs = [(nbr_face, nbr_edge) for _, _, nbr_face, nbr_edge, _ in recv_order_b]
+                    assert sent_pairs == expected_pairs
 
 
 # ==============================================================================

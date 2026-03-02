@@ -145,6 +145,16 @@ class TestMetalCompatibility:
         assert "config.A_v" in source
         assert "vertical_diffusion(u.real" in source
 
+    def test_spectral_ocean_rejects_invalid_hyperdiff_config(self, z_coord):
+        """Spectral ocean model should fail fast on invalid hyperdiff settings."""
+        from legoesm.ocean.dynamics.spectral_ocean_pe import SpectralOceanModel
+        from legoesm.ocean.state import SpectralOceanConfig
+
+        with pytest.raises(ValueError, match="hyperdiff_coeff"):
+            SpectralOceanModel(None, z_coord, SpectralOceanConfig(hyperdiff_coeff=-1.0))
+        with pytest.raises(ValueError, match="hyperdiff_order"):
+            SpectralOceanModel(None, z_coord, SpectralOceanConfig(hyperdiff_order=0))
+
 
 # ==============================================================================
 # Multi-Device Sharding

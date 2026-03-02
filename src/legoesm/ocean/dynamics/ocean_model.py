@@ -63,6 +63,122 @@ class OceanModel:
         self.grid = grid
         self.z_coord = z_coord
         self.config = config or OceanConfig()
+        self._validate_config(self.config)
+
+    @staticmethod
+    def _validate_config(config: OceanConfig) -> None:
+        """Validate configuration ranges early (fail fast)."""
+        nonnegative = {
+            "A_h": config.A_h,
+            "K_h": config.K_h,
+            "A_v": config.A_v,
+            "K_v": config.K_v,
+            "hyperdiff_coeff": config.hyperdiff_coeff,
+            "barotropic_diffusion_alpha": config.barotropic_diffusion_alpha,
+        }
+        for name, value in nonnegative.items():
+            if value < 0.0:
+                raise ValueError(f"{name} must be >= 0, got {value!r}")
+
+        if config.n_barotropic_substeps < 1:
+            raise ValueError(
+                "n_barotropic_substeps must be >= 1, got "
+                f"{config.n_barotropic_substeps!r}",
+            )
+        if config.barotropic_diffusion_dt_ref <= 0.0:
+            raise ValueError(
+                "barotropic_diffusion_dt_ref must be > 0, got "
+                f"{config.barotropic_diffusion_dt_ref!r}",
+            )
+        if config.min_water_column_m <= 0.0:
+            raise ValueError(
+                "min_water_column_m must be > 0, got "
+                f"{config.min_water_column_m!r}",
+            )
+        if config.max_abs_eta_m <= 0.0:
+            raise ValueError(f"max_abs_eta_m must be > 0, got {config.max_abs_eta_m!r}")
+        if config.temperature_min_c > config.temperature_max_c:
+            raise ValueError(
+                "temperature_min_c must be <= temperature_max_c, got "
+                f"{config.temperature_min_c!r} > {config.temperature_max_c!r}",
+            )
+        if config.salinity_min_psu > config.salinity_max_psu:
+            raise ValueError(
+                "salinity_min_psu must be <= salinity_max_psu, got "
+                f"{config.salinity_min_psu!r} > {config.salinity_max_psu!r}",
+            )
+
+    def _assert_runtime_invariants(self, state: OceanState) -> None:
+        """Host-side runtime checks for debugging/regression hardening."""
+        mask = state.land_mask.data
+        wet = mask > 0.5
+        land = ~wet
+
+        finite_ok = bool(
+            jnp.all(jnp.isfinite(state.u.data))
+            & jnp.all(jnp.isfinite(state.v.data))
+            & jnp.all(jnp.isfinite(state.T.data))
+            & jnp.all(jnp.isfinite(state.S.data))
+            & jnp.all(jnp.isfinite(state.eta.data))
+            & jnp.all(jnp.isfinite(state.H_bathy.data))
+        )
+        if not finite_ok:
+            raise FloatingPointError("Ocean runtime check failed: non-finite state detected")
+
+        water_col = state.eta.data + state.H_bathy.data
+        min_water_col = float(
+            jnp.min(jnp.where(wet, water_col, jnp.inf))
+        ) if bool(jnp.any(wet)) else float("inf")
+        if min_water_col < self.config.min_water_column_m:
+            raise ValueError(
+                "Ocean runtime check failed: water column too small. "
+                f"min(eta+H_bathy)={min_water_col:.6g} m, "
+                f"threshold={self.config.min_water_column_m:.6g} m",
+            )
+
+        eta_abs = float(
+            jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0)))
+        ) if bool(jnp.any(wet)) else 0.0
+        if eta_abs > self.config.max_abs_eta_m:
+            raise ValueError(
+                "Ocean runtime check failed: |eta| exceeded threshold. "
+                f"max|eta|={eta_abs:.6g} m, threshold={self.config.max_abs_eta_m:.6g} m",
+            )
+
+        if bool(jnp.any(wet)):
+            T_ocean = jnp.where(wet[..., jnp.newaxis], state.T.data, jnp.nan)
+            T_min = float(jnp.nanmin(T_ocean))
+            T_max = float(jnp.nanmax(T_ocean))
+            if T_min < self.config.temperature_min_c or T_max > self.config.temperature_max_c:
+                raise ValueError(
+                    "Ocean runtime check failed: temperature out of bounds. "
+                    f"range=[{T_min:.3f}, {T_max:.3f}] C, "
+                    f"bounds=[{self.config.temperature_min_c:.3f}, "
+                    f"{self.config.temperature_max_c:.3f}] C",
+                )
+
+            S_ocean = jnp.where(wet[..., jnp.newaxis], state.S.data, jnp.nan)
+            S_min = float(jnp.nanmin(S_ocean))
+            S_max = float(jnp.nanmax(S_ocean))
+            if S_min < self.config.salinity_min_psu or S_max > self.config.salinity_max_psu:
+                raise ValueError(
+                    "Ocean runtime check failed: salinity out of bounds. "
+                    f"range=[{S_min:.3f}, {S_max:.3f}] PSU, "
+                    f"bounds=[{self.config.salinity_min_psu:.3f}, "
+                    f"{self.config.salinity_max_psu:.3f}] PSU",
+                )
+
+        if bool(jnp.any(land)):
+            land_3d = jnp.broadcast_to(land[..., jnp.newaxis], state.u.data.shape)
+            max_land_u = float(jnp.max(jnp.abs(jnp.where(land_3d, state.u.data, 0.0))))
+            max_land_v = float(jnp.max(jnp.abs(jnp.where(land_3d, state.v.data, 0.0))))
+            max_land_eta = float(jnp.max(jnp.abs(jnp.where(land, state.eta.data, 0.0))))
+            if max(max_land_u, max_land_v, max_land_eta) > 1.0e-8:
+                raise ValueError(
+                    "Ocean runtime check failed: land cells are not zero. "
+                    f"max(|u_land|,|v_land|,|eta_land|)="
+                    f"{max(max_land_u, max_land_v, max_land_eta):.3e}",
+                )
 
     def tendencies(self, state: OceanState):
         """Compute baroclinic tendencies (pure function wrapper)."""
@@ -101,10 +217,6 @@ class OceanModel:
         S_new = state.S.data + dt * tend.dS_dt.data
 
         # --- 3. Update 3D velocity with slow tendency ---
-        # Planetary Coriolis (f*v) is NOT in the baroclinic tendency — it
-        # is applied at the barotropic substep level for stability. The
-        # tendency here contains only relative vorticity, PGF, advection,
-        # and mixing.
         u_new = state.u.data + dt * tend.du_dt.data
         v_new = state.v.data + dt * tend.dv_dt.data
 
@@ -135,6 +247,13 @@ class OceanModel:
 
         return state_new
 
+    def step_checked(self, state: OceanState, dt: float) -> OceanState:
+        """Advance one timestep and optionally apply host-side runtime checks."""
+        state_new = self.step(state, dt)
+        if self.config.enable_runtime_checks:
+            self._assert_runtime_invariants(state_new)
+        return state_new
+
     def integrate(
         self,
         state: OceanState,
@@ -162,9 +281,10 @@ class OceanModel:
         """
         n_steps = int(duration / dt)
         trajectory = [state]
+        step_fn = self.step_checked if self.config.enable_runtime_checks else self.step
 
         for i in range(n_steps):
-            state = self.step(state, dt)
+            state = step_fn(state, dt)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
 
@@ -192,6 +312,12 @@ class OceanModel:
         final_state : OceanState
         trajectory : OceanState (stacked, each leaf shape (n_steps, ...))
         """
+        if self.config.enable_runtime_checks:
+            raise ValueError(
+                "integrate_scan does not support host-side runtime checks. "
+                "Use integrate() or disable enable_runtime_checks.",
+            )
+
         def scan_fn(state, _):
             new_state = self.step(state, dt)
             return new_state, new_state

@@ -1,0 +1,45 @@
+{
+  "cases": {
+    "stommel_gyre": {
+      "SSH_max": 0.00013507796393241733,
+      "SSH_min": -0.0001106595664168708,
+      "SST_max": 15.0,
+      "SST_mean": 15.0,
+      "SST_min": 15.0,
+      "all_finite": true,
+      "heat_drift_rel": 0.0,
+      "kinetic_energy": 32364838912.0,
+      "land_zero": true,
+      "max_land_eta": 0.0,
+      "max_land_u": 0.0,
+      "max_land_v": 0.0,
+      "salt_drift_rel": 0.0,
+      "speed_max": 0.0027204628568142653,
+      "u_max": 0.0025307827163487673,
+      "v_max": 0.000998026574961841,
+      "volume_mean_eta_drift": -1.2040091684429194e-13
+    }
+  },
+  "config": {
+    "A_h": 31192700.493549787,
+    "A_v": 0.01,
+    "K_h": 3119270.049354979,
+    "K_v": 0.001,
+    "barotropic_diffusion_alpha": 0.01,
+    "barotropic_diffusion_dt_ref": 60.0,
+    "hyperdiff_coeff": 2.4861963746665168e+17,
+    "n_barotropic_substeps": 30
+  },
+  "meta": {
+    "backend": "cpu",
+    "days": 0.05,
+    "device_count": 1,
+    "dt": 1800.0,
+    "float_dtype": "float32",
+    "levels": 4,
+    "n_steps": 2,
+    "resolution": 4,
+    "runtime_checks": true
+  },
+  "suite": "ocean_realistic"
+}

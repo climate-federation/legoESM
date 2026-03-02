@@ -1,10 +1,10 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v1.0
+## Technical Specification v2.0
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-02-26
+**Date**: 2026-03-02 (updated from v1.0, 2026-02-26)
 
 ---
 
@@ -190,57 +190,78 @@ class Grid(Protocol):
     def interpolate_to(self, field: jax.Array, target_grid: 'Grid') -> jax.Array: ...
 ```
 
-#### 3.1.2 Supported Grids (Priority Order)
+#### 3.1.2 Implemented Grids
 
-| Grid | Milestone | Notes |
-|------|-----------|-------|
-| **Cubed-sphere** | M1 (primary) | 6 faces, regular arrays, refinement via panel nesting |
-| **Icosahedral** | M3+ | Voronoi dual, variable resolution |
-| **Lat-lon** | M3+ | Simple, good for testing; polar filtering needed |
-| **Spectral element** | M4+ | High-order accuracy, hp-refinement |
+| Grid | Status | Notes |
+|------|--------|-------|
+| **Cubed-sphere** | Implemented | 6 faces, gnomonic equidistant, FV operators |
+| **Gaussian (spectral)** | Implemented | Triangular-truncated spherical harmonics, dealiased |
 
-#### 3.1.3 Cubed-Sphere Specification (Milestone 1)
+#### 3.1.3 Cubed-Sphere Grid (`grids/cubed_sphere.py`)
 
-- **Gnomonic equidistant** projection on each face
+`CubedSphereGrid(NamedTuple)` — gnomonic equidistant projection, registered as JAX pytree.
+
 - 6 faces x N x N cells per face (N configurable)
-- **C-grid staggering**: scalars at cell centers, normal velocities at cell edges
-- Resolution examples:
-  - C48 (N=48): ~200 km
-  - C192 (N=192): ~50 km
-  - C384 (N=384): ~25 km (target)
-  - C768 (N=768): ~13 km
-  - C3072 (N=3072): ~3 km (stretch goal)
-- Ghost cells / halo regions for inter-face communication
-- All connectivity arrays (neighbors, edges, vertices) stored as static arrays in the pytree
+- Resolution examples: C8 (~500 km, testing), C48 (~200 km), C192 (~50 km), C384 (~25 km)
+- Ghost cells via halo padding for inter-face communication
+- All metric arrays are shape `(6, n, n)`:
+  - `lon, lat` — cell-center geographic coordinates
+  - `area, dx, dy` — cell areas and spacings
+  - `f` — Coriolis parameter
+  - `angle` — grid rotation angle (for vector halo exchange)
+  - `cos_angle_padded, sin_angle_padded` — padded rotation for vector halo
+  - `hx_ext, hy_ext` — extrapolated half-metrics for divergence operator
+  - `x_cart, y_cart, z_cart` — Cartesian coordinates
 
-#### 3.1.4 Vertical Coordinate
+#### 3.1.4 Gaussian Grid (`grids/gaussian.py`)
 
-**Hybrid sigma-pressure** for the atmosphere:
+`GaussianGrid(NamedTuple)` — for pseudospectral methods with spherical harmonic (SH) transforms.
+
+- Triangular truncation T_N: `n_max` spectral modes, `n_sh = (n_max+1)(n_max+2)/2` coefficients
+- Grid resolution: `n_lat = 3(n_max+1)/2` (dealiasing), `n_lon = 2*n_lat`
+- Precomputed SH matrices: `Pnm` (associated Legendre), `Hnm` (weighted), `Pnm_oc2` (cos²-weighted), `Dnm` (dP/dμ)
+- Spectral eigenvalues: `lap = -n(n+1)/a²`, `ilap` (inverse Laplacian)
+- Key transforms:
+  - `sh_analysis(grid, field)` → spectral coefficients (FFT + Legendre)
+  - `sh_synthesis(grid, coeffs)` → grid-space field (Legendre + IFFT)
+  - `uv_from_vordiv(grid, vor_hat, div_hat)` → (u·cosθ, v·cosθ) in grid space
+  - `sh_analysis_3d / sh_synthesis_3d` — batched over vertical levels via vmap
+  - `spectral_hyperdiffusion(coeffs, grid, coeff, order)` — scale-selective damping
+
+#### 3.1.5 Vertical Coordinates (`grids/vertical.py`, `ocean/vertical.py`)
+
+**Atmosphere — Sigma Coordinate** (`SigmaCoordinate`):
 
 ```
-p(k, i, j) = A(k) * p_top + B(k) * p_s(i, j)
+σ = p / p_s    (σ_top ≤ σ ≤ 1)
 ```
 
-where:
-- `A(k)`, `B(k)` are level-dependent coefficients (static)
-- `p_top` is model top pressure
-- `p_s(i, j)` is surface pressure (prognostic)
-- Near surface: terrain-following (B ~ 1)
-- Near top: pure pressure levels (A ~ 1)
+- `sigma_full` (nlev,), `sigma_half` (nlev+1,), `dsigma` (nlev,)
+- Simmons-Burridge coefficients: `ln_ratio`, `alpha`, `fractional_sigma`
+- Used by: hydrostatic PE (FV and spectral)
 
-**Default vertical level configurations:**
+**Atmosphere — Height Coordinate** (`HeightCoordinate`):
 
-| Name | Levels | Model Top | Use Case |
-|------|--------|-----------|----------|
-| L37 | 37 | 1 hPa | ERA5-like, testing |
-| L91 | 91 | 0.01 hPa | IFS-like, weather |
-| L137 | 137 | 0.01 hPa | HRES-like, high-resolution |
+```
+z* = H · (z − z_s) / (H − z_s)
+```
 
-#### 3.1.5 Grid Refinement
+- `z_full` (nlev,), `z_half` (nlev+1,), `dz` (nlev,), `dz_half` (nlev-1,)
+- Reference state: `rho_ref`, `theta_ref`, `exner_ref` (1D profiles at init)
+- `TerrainMetric`: Jacobian J = (H−z_s)/H, physical z at all levels
+- Used by: non-hydrostatic compressible Euler (FV and spectral)
 
-- **Static refinement**: Cubed-sphere with stretched grids (Schmidt transform)
-- **Panel nesting**: Higher resolution on selected faces
-- Future: adaptive mesh refinement via solution-dependent criteria
+**Ocean — z-star Coordinate** (`OceanZStarCoordinate`):
+
+```
+z* = H_max · (z + H) / (η + H)
+```
+
+- **Dynamic Jacobian**: J = (η + H_bathy) / H_max, recomputed every timestep
+- Stretched grid: ~10 m near surface, ~200 m at depth, default 50 levels over 5500 m
+- `z_full_ref` (nlev,), `z_half_ref` (nlev+1,), `dz_ref` (nlev,)
+- Level convention: k=0 is surface, k=nlev−1 is deepest; reference z values are negative
+- Layer thickness: h_k = dz_ref[k] · J
 
 ### 3.2 State Representation
 
@@ -291,28 +312,47 @@ For hydrostatic mode, `w` is diagnostic and `rho` is derived from the equation o
 
 ### 3.3 Discrete Operators
 
-All spatial operators are implemented as **pure functions** on the cubed-sphere C-grid:
+#### 3.3.1 2D Operators (`core/operators.py`)
+
+All spatial operators are pure functions operating on `(6, n, n)` cubed-sphere arrays:
 
 ```python
-# Finite-volume operators
-def divergence(flux_edge: Field, grid: CubedSphereGrid) -> Field: ...
-def gradient(scalar_cell: Field, grid: CubedSphereGrid) -> Field: ...
-def curl(vector_edge: Field, grid: CubedSphereGrid) -> Field: ...
-def laplacian(scalar_cell: Field, grid: CubedSphereGrid) -> Field: ...
-
-# Interpolation
-def cell_to_edge(cell_field: Field, grid: CubedSphereGrid) -> Field: ...
-def edge_to_cell(edge_field: Field, grid: CubedSphereGrid) -> Field: ...
-
-# Reconstruction (for finite-volume accuracy)
-def reconstruct_ppm(cell_field: Field, grid: CubedSphereGrid) -> Field:
-    """Piecewise Parabolic Method (PPM) reconstruction for high-order FV."""
-    ...
-
-def reconstruct_weno(cell_field: Field, grid: CubedSphereGrid, order: int = 5) -> Field:
-    """Weighted Essentially Non-Oscillatory reconstruction."""
-    ...
+gradient_x(field, grid)           # d/dx via centered differences
+gradient_y(field, grid)           # d/dy via centered differences
+divergence(u_field, v_field, grid) # div(u,v) with vector halo exchange
+curl_z(u_field, v_field, grid)    # vorticity: dv/dx − du/dy
+laplacian(field, grid)            # 2nd-order ∇²
+advect_upwind(q, u, v, grid)     # 1st-order upwind advection
+advect_centered(q, u, v, grid)   # 2nd-order centered advection
+hyperdiffusion(field, grid, coeff) # 4th-order ∇⁴ damping (two Laplacians)
+global_integral(field, grid)      # Area-weighted integral (MPI-aware via allreduce)
+global_mean(field, grid)          # Area-weighted mean
 ```
+
+#### 3.3.2 3D Operators (`core/operators_3d.py`)
+
+Vmapped over vertical levels, operating on `(6, n, n, nlev)` arrays:
+
+```python
+vorticity_3d(u_3d, v_3d, grid)
+gradient_x_3d(field_3d, grid)
+gradient_y_3d(field_3d, grid)
+divergence_3d(u_3d, v_3d, grid)
+hyperdiffusion_3d(field_3d, grid, coeff)
+vertical_gradient_half_to_full(field, dz, dz_half)
+vertical_gradient_full_to_half(field, dz_half)
+vertical_advection_height(field, w, dz, dz_half, J)
+vertical_divergence_height(flux, dz, J)
+```
+
+#### 3.3.3 Halo Exchange (`grids/halo.py`, `parallel/halo_exchange.py`)
+
+Inter-face boundary data exchange with pluggable backend:
+- **Local backend** (default): direct array indexing within single process
+- **MPI backend**: `mpi4jax.sendrecv` for multi-node; edges packed per neighbor rank to reduce MPI messages
+- `pad_halo(data)` → `(6, n+2, n+2)` — scalar halo padding
+- `pad_halo_vector(u, v, ...)` → vector halo with grid-angle rotation at face boundaries
+- Canonical edge ordering for packed exchange: sender sorts by `(face, edge)`, receiver by `(nbr_face, nbr_edge)`
 
 ### 3.4 Time Integration
 
@@ -328,31 +368,29 @@ class TimeIntegrator(Protocol):
     ) -> State: ...
 ```
 
-#### 3.4.2 Available Integrators
+#### 3.4.2 Implemented Integrators
 
-| Integrator | Type | Use Case |
+| Integrator | File | Use Case |
 |------------|------|----------|
-| **SSP-RK3** | Explicit, 3-stage Strong Stability Preserving | Default for advection |
-| **IMEX-ARK** | Additive Runge-Kutta (implicit-explicit) | Stiff terms (gravity waves) implicit, rest explicit |
-| **Split-explicit** | RK3 outer + forward-backward acoustic substeps | Non-hydrostatic: fast acoustic waves subcycled |
-| **Leapfrog + Robert-Asselin** | Classic, with filter | Comparison / legacy |
-| **Semi-implicit** | Crank-Nicolson for vertical diffusion | Vertical physics |
+| **SSP-RK3** | `ssp_rk3.py` | Shallow water, hydrostatic PE, ocean spectral |
+| **Split-explicit RK3** | `split_explicit.py` | Non-hydrostatic (acoustic substeps), ocean (barotropic substeps) |
+| **Semi-implicit** | `semi_implicit.py` | Hoskins-Simmons method for spectral PE |
+| **Tridiagonal solver** | `tridiagonal.py` | Semi-implicit acoustic substeps (vertical) |
 
-#### 3.4.3 IMEX Strategy (Primary)
+#### 3.4.3 SSP-RK3
 
-Following MPAS and NeuralGCM:
-- **Explicit part**: Horizontal advection, Coriolis, nonlinear pressure gradient
-- **Implicit part**: Vertical acoustic modes (fast gravity waves), vertical diffusion
-- The implicit solve is tridiagonal per column (embarrassingly parallel over columns)
-- Split-explicit subcycling option for full compressible: acoustic substeps at `dt_acoustic = dt / N_substeps`
-
-#### 3.4.4 Adaptive Timestepping
-
-CFL-based adaptive dt with configurable safety factor:
-
-```python
-dt = cfl_safety * min(dx / (|u| + c_s))  # c_s = speed of sound
 ```
+k1 = state + dt·F(state)
+k2 = ¾·state + ¼·(k1 + dt·F(k1))
+k3 = ⅓·state + ⅔·(k2 + dt·F(k2))
+```
+
+#### 3.4.4 Split-Explicit Strategy
+
+For non-hydrostatic atmosphere and ocean:
+- **Slow tendencies**: Coriolis, advection, horizontal PGF, diffusion (once per RK3 stage)
+- **Fast substeps**: Acoustic (atmosphere) or barotropic (ocean) modes via `fori_loop` or `scan`
+- `dt_fast = dt_slow / N_substeps` (atmosphere: N=6 default, ocean: N=30 default)
 
 ### 3.5 Conservation
 
@@ -421,104 +459,272 @@ def smooth_clamp(x: jax.Array, lo: float, hi: float, sharpness: float = 100.0) -
 
 ### 4.1 Atmosphere
 
-#### 4.1.1 Governing Equations (Fully Compressible Non-Hydrostatic)
+The atmosphere has six implemented dynamical cores spanning two discretization families (finite-volume on cubed-sphere, pseudospectral on Gaussian grid) and three equation sets (shallow water, hydrostatic PE, non-hydrostatic compressible Euler).
 
-The Euler equations on the rotating sphere:
+| Model | Grid | Equations | Time Integration |
+|-------|------|-----------|-----------------|
+| `ShallowWaterModel` | Cubed-sphere | Shallow water | SSP-RK3 |
+| `PrimitiveEquationModel` | Cubed-sphere | Hydrostatic PE (σ) | SSP-RK3 |
+| `CompressibleEulerModel` | Cubed-sphere | Non-hydrostatic (z*) | Split-explicit RK3 |
+| `SpectralShallowWaterModel` | Gaussian | Shallow water (vor-div) | SSP-RK3 |
+| `SpectralPrimitiveEquationModel` | Gaussian | Hydrostatic PE (vor-div-σ) | SSP-RK3 |
+| `SpectralCompressibleEulerModel` | Gaussian | Non-hydrostatic (vor-div-z*) | Split-explicit RK3 |
+
+All models follow the same API: `state = model.step(state, dt)`, with `integrate()` and `integrate_scan()` (differentiable via `lax.scan`) methods.
+
+#### 4.1.1 Shallow Water Equations (`atmosphere/dynamics/shallow_water.py`)
+
+Vector-invariant form on the cubed-sphere:
 
 ```
-d(rho)/dt     = -rho * div(v)                                    [continuity]
-d(theta)/dt   = Q_theta / (rho * c_p)                            [thermodynamic]
-d(v_h)/dt     = -theta * grad(pi') - f x v_h + F_h              [horizontal momentum]
-d(w)/dt       = -theta * d(pi')/dz - g * (theta'/theta_0) + F_w [vertical momentum]
-d(q_x)/dt     = S_x                                              [moisture species]
+dh/dt = −div(h·v)
+du/dt = (ζ+f)·v − ∂B/∂x + D_u
+dv/dt = −(ζ+f)·u − ∂B/∂y + D_v
 ```
 
-where:
-- `pi = c_p * (p / p_0)^(R/c_p)` is the Exner function
-- `theta` is potential temperature
-- `f` is the Coriolis parameter
-- `Q_theta`, `F_h`, `F_w`, `S_x` are source/tendency terms from physics
+where B = K + g(h + h_s), K = ½(u² + v²), ζ = ∂v/∂x − ∂u/∂y.
 
-**Hydrostatic option**: Set `dw/dt = 0`, diagnose `w` from continuity, use hydrostatic balance for vertical pressure gradient. Activated when grid spacing > ~10 km.
+**State**: `ShallowWaterState(h, u, v, h_s)` — all `(6, n, n)`.
+**Config**: `g=9.81`, `hyperdiff_coeff=0.0`, conservation fixer flags.
 
-**Anelastic option**: Filter acoustic waves by replacing `rho` with reference profile `rho_0(z)` in the continuity equation. Faster (no acoustic CFL constraint) but less accurate for deep convection.
+#### 4.1.2 Hydrostatic Primitive Equations (`atmosphere/dynamics/primitive_eq.py`)
 
-#### 4.1.2 Numerical Discretization
+σ-coordinate PE in vector-invariant form:
 
-- **Horizontal**: Finite-volume on cubed-sphere C-grid
-  - PPM (Piecewise Parabolic Method) for advection (3rd-order, monotone)
-  - WENO-5 option for higher accuracy
-  - Compatible discretization of gradient/divergence/curl for conservation
-- **Vertical**: Finite-volume in hybrid sigma-pressure with:
-  - PPM vertical advection
-  - Tridiagonal implicit solver for fast vertical modes
-
-#### 4.1.3 Physics Parameterizations (Placeholder Interface)
-
-Each parameterization follows the standard interface:
-
-```python
-class PhysicsModule(Protocol):
-    """Standard interface for all physics parameterizations."""
-
-    def __call__(
-        self,
-        state: AtmosphereState,
-        grid: Grid,
-        dt: float,
-        params: PyTree,          # Learnable or physical parameters
-    ) -> AtmosphereTendencies:
-        """Compute tendencies from this physics process.
-
-        Returns tendencies (rates of change) that will be summed
-        and applied by the time integrator.
-        """
-        ...
-
-    @property
-    def is_column_local(self) -> bool:
-        """Whether this module operates on independent columns."""
-        ...
+```
+dp_s/dt = −p_s · Σ[div(v_k)·Δσ_k] / (1−σ_top)
+du/dt   = (ζ+f)·v − ∂B/∂x − R_d·T·∂(ln p_s)/∂x
+dT/dt   = −v·∇T − σ̇·∂T/∂σ + κ·T·ω/p
 ```
 
-**Planned physics modules** (post-milestone 1):
+Geopotential via Simmons-Burridge hydrostatic integration with α_k correction.
+Sigma-dot diagnosed from continuity with proper BCs (σ̇=0 at top/bottom).
 
-| Module | Physics-based | AI-based |
-|--------|--------------|----------|
-| Radiation (LW/SW) | RRTMGP-like | Neural emulator |
-| Deep convection | Zhang-McFarlane or SAS | ML parameterization |
-| Shallow convection | CLUBB-like | ML parameterization |
-| Microphysics | Morrison 2-moment | ML parameterization |
-| Boundary layer | MYNN or TKE-based | ML parameterization |
-| Gravity wave drag | Orographic + non-orographic | ML parameterization |
-| Surface layer | Monin-Obukhov | ML parameterization |
+**State**: `HydrostaticState(u, v, T, p_s, phis)` — 3D fields `(6,n,n,nlev)`, surface fields `(6,n,n)`.
 
-Each module has both a physics and AI implementation, swappable at config time.
+#### 4.1.3 Non-Hydrostatic Compressible Euler (`atmosphere/dynamics/compressible_euler.py`)
+
+Height z* coordinates with reference-state subtraction to avoid cancellation:
+
+```
+dρ'/dt  = −(1/J)[div_h(J·ρ·v_h) + ∂(ρ·w)/∂z*]
+dθ'/dt  = −v·∇θ − (w/J)·∂θ/∂z*
+du/dt   = (ζ+f)·v − ∂K/∂x − c_p·θ·∂π'/∂x
+dw/dt   = −c_p·θ·(1/J)·∂π'/∂z* − g·θ'/θ₀
+```
+
+Exner perturbation: π' = π₀·[((1+ρ'/ρ₀)(1+θ'/θ₀))^(R_d/c_v) − 1] (ratio form).
+
+**Split-explicit time stepping**: RK3 outer loop (slow tendencies: Coriolis, horizontal PGF, advection, hyperdiffusion, sponge) with N acoustic substeps (vertical PGF, buoyancy, continuity). Options for explicit forward-backward or semi-implicit (tridiagonal solve for w).
+
+**State**: `NonHydrostaticState(u, v, w, theta_prime, rho_prime, phis, tracers)`.
+**Config**: `n_acoustic_substeps=6`, `sponge_width=10000m`, `sponge_coeff=0.05`.
+
+#### 4.1.4 Spectral Variants (`atmosphere/dynamics/spectral_sw.py`, `spectral_pe.py`, `spectral_nh.py`)
+
+Pseudospectral vorticity-divergence formulation on the Gaussian grid:
+
+```
+∂ζ/∂t = −div((ζ+f)·v) + curl(...)
+∂D/∂t = curl((ζ+f)·v) − ∇²(E+Φ+...) + div(...)
+```
+
+Workflow: SH synthesis → grid-space nonlinear products → SH analysis → spectral tendencies.
+Spectral hyperdiffusion: −ν·[n(n+1)/a²]^order per coefficient.
+Metal backend: automatic CPU fallback for complex128 SH transforms.
+
+#### 4.1.5 Physics Parameterizations
+
+Implemented physics modules:
+
+| Module | File | Description |
+|--------|------|-------------|
+| Held-Suarez | `physics/held_suarez.py` | Newtonian relaxation + Rayleigh friction |
+| Baroclinic wave | `physics/baroclinic_wave.py` | Jablonowski-Williamson initial conditions |
+| Kessler | `physics/kessler.py` | Warm-rain microphysics |
+
+Standard interface: `tendencies = physics_fn(state, grid, dt, config)`.
+Models support `step_with_physics()` for coupled dynamics+physics stepping.
 
 ### 4.2 Ocean
 
 #### 4.2.1 Overview
 
-3D primitive-equation ocean model inspired by Veros (JAX) and MOM6.
+Boussinesq hydrostatic ocean primitive equation solver with:
+- Wright (1997) equation of state
+- z-star vertical coordinate with dynamic Jacobian
+- Split-explicit barotropic/baroclinic time stepping
+- Both cubed-sphere FV and spectral (Gaussian grid) discretizations
+- Land masking via boolean mask + zero-fill
+- Global ocean support (C48 ~2°, 50 vertical levels)
 
-#### 4.2.2 Equations
+Architecture: `OceanModel` (FV on cubed-sphere), `SpectralOceanModel` (pseudospectral on Gaussian grid).
 
-Hydrostatic primitive equations in z-coordinates with free surface:
+#### 4.2.2 Governing Equations
+
+Boussinesq hydrostatic primitive equations in vector-invariant form:
 
 ```
-d(u)/dt = -u.grad(u) - f x u - (1/rho_0) * grad(p) + A_h * laplacian(u) + d/dz(A_v * du/dz)
-d(eta)/dt = -div(integral(u, dz))                    [free surface]
-d(T)/dt = -u.grad(T) + K_h * laplacian(T) + d/dz(K_v * dT/dz) + Q_T
-d(S)/dt = -u.grad(S) + K_h * laplacian(S) + d/dz(K_v * dS/dz) + Q_S
-rho = EOS(T, S, p)                                   [equation of state]
+du/dt = (ζ+f)·v − ∂B/∂x − (1/ρ₀)·∂p'/∂x + A_h·∇²u + ∂/∂z(A_v·∂u/∂z) − w·∂u/∂z
+dv/dt = −(ζ+f)·u − ∂B/∂y − (1/ρ₀)·∂p'/∂y + A_h·∇²v + ∂/∂z(A_v·∂v/∂z) − w·∂v/∂z
+dT/dt = −u·∇T − w·∂T/∂z + K_h·∇²T + ∂/∂z(K_v·∂T/∂z)
+dS/dt = −u·∇S − w·∂S/∂z + K_h·∇²S + ∂/∂z(K_v·∂S/∂z)
+dη/dt = −Σ_k div(h_k·v_k)
 ```
 
-#### 4.2.3 Design
+**Diagnostic relations:**
+- Density: ρ = wright_eos(T, S, p_hydro)
+- Hydrostatic pressure: p(z) = ρ₀gη + ∫₀^z ρ'g dz' (top-down cumsum)
+- Vertical velocity: w(z) = −∫_{-H}^z div(v) dz' (bottom-up, w=0 at floor)
+- Layer thickness: h_k = dz_ref[k] · J, where J = (η + H_bathy) / H_max
+- Kinetic energy: B = ½(u² + v²)
+- Vorticity: ζ = ∂v/∂x − ∂u/∂y
 
-- **Grid**: Same cubed-sphere infrastructure as atmosphere (shared `Grid` protocol)
-- **Vertical**: z-coordinates with partial bottom cells (future: ALE)
-- **Parameterizations**: Mesoscale eddy (GM90), submesoscale (Fox-Kemper), KPP mixing
-- **Milestone**: Prescribed SST initially, then slab ocean, then full 3D
+#### 4.2.3 Equation of State (`ocean/eos.py`)
+
+Wright (1997) 9-term polynomial EOS (J. Atmos. Oceanic Tech., 14(3), 735–740):
+
+```
+ρ = (p + p₀) / (λ + α₀·(p + p₀))
+```
+
+where α₀(T,S), p₀(T,S), λ(T,S) are polynomial functions of temperature and salinity.
+Reference values: T=25°C, S=35 PSU, p=0 → ρ ≈ 1023.3 kg/m³.
+
+Additional functions:
+- `density_perturbation(T, S, p)` → ρ' = ρ − ρ₀
+- `compute_hydrostatic_pressure(rho, eta, dz, jacobian)` — top-down cumulative integral
+- `compute_buoyancy_frequency(rho, dz, jacobian)` → N² = −(g/ρ₀)·dρ/dz
+
+Ocean constants: ρ₀ = 1025.0 kg/m³, c_sw = 3994.0 J/(kg·K).
+
+#### 4.2.4 State Containers (`ocean/state.py`)
+
+**FV Ocean State (cubed-sphere):**
+
+| Field | Shape | Units | Description |
+|-------|-------|-------|-------------|
+| u | (6,n,n,nlev) | m/s | Zonal velocity |
+| v | (6,n,n,nlev) | m/s | Meridional velocity |
+| T | (6,n,n,nlev) | °C | Potential temperature |
+| S | (6,n,n,nlev) | PSU | Salinity |
+| eta | (6,n,n) | m | Sea surface height |
+| H_bathy | (6,n,n) | m | Bathymetry depth (static, positive) |
+| land_mask | (6,n,n) | 0/1 | Ocean=1, land=0 (static) |
+
+**OceanConfig defaults:**
+
+| Parameter | Default | Units | Purpose |
+|-----------|---------|-------|---------|
+| g | 9.80616 | m/s² | Gravity |
+| rho_0 | 1025.0 | kg/m³ | Reference density |
+| A_h | 1.0e4 | m²/s | Horizontal viscosity |
+| K_h | 1.0e3 | m²/s | Horizontal tracer diffusivity |
+| A_v | 1.0e-3 | m²/s | Vertical viscosity |
+| K_v | 1.0e-4 | m²/s | Vertical tracer diffusivity |
+| n_barotropic_substeps | 30 | — | Barotropic subcycles per step |
+| barotropic_diffusion_alpha | 0.01 | — | Barotropic damping coefficient |
+| barotropic_diffusion_dt_ref | 60.0 | s | Reference dt for damping scaling |
+
+**Spectral Ocean State (Gaussian grid):**
+- 3D spectral fields `(n_sh, nlev)` complex: `vor_hat, div_hat, T_hat, S_hat`
+- 2D spectral fields `(n_sh,)` complex: `eta_hat, H_bathy_hat`
+- Grid-space field: `land_mask_grid` (masking applied in grid space)
+
+#### 4.2.5 Split-Explicit Time Stepping
+
+**Baroclinic (slow) step** (`ocean/dynamics/ocean_pe.py`):
+1. Compute layer thickness h_k and Jacobian J from η, H_bathy
+2. Density from Wright EOS and hydrostatic pressure (top-down cumsum)
+3. Diagnose w from continuity (bottom-up integral of div(v))
+4. Coriolis split: planetary f on baroclinic shear (u' = u − U_bar), relative ζ on full velocity
+5. Pressure gradient, vertical advection (upwind), tracer advection
+6. Horizontal/vertical mixing, optional hyperdiffusion
+7. Land masking of all tendencies
+8. Free-surface tendency from depth-integrated flux divergence
+
+**Barotropic (fast) substeps** (`ocean/dynamics/barotropic.py`):
+
+Forward-backward substeps for 2D free-surface gravity waves:
+
+```
+Forward:  η_new = η − dt_s · div(H_total · U_bar, H_total · V_bar)
+Backward: U_bar_new, V_bar_new from semi-implicit Coriolis + g·∇η_new + F_slow
+```
+
+Semi-implicit Coriolis at substep level:
+```
+α = 0.5·f·dt_s
+U_new = (U_c + α·V_c − dt_s·g·∂η/∂x + ...) / (1 + α²)
+V_new = (V_c − α·U_c − dt_s·g·∂η/∂y − ...) / (1 + α²)
+```
+
+After substeps: velocity correction u_new = (u − U_bar_old) + U_bar_new.
+Loop via `jax.lax.fori_loop` (fast) or `jax.lax.scan` (differentiable).
+Optional compact Laplacian diffusion with dt-scaled damping.
+
+#### 4.2.6 OceanModel (`ocean/dynamics/ocean_model.py`)
+
+```python
+class OceanModel:
+    def __init__(self, grid, z_coord, config=None)
+
+    def step(self, state, dt) -> OceanState           # JIT-compiled
+    def step_checked(self, state, dt) -> OceanState    # with runtime assertions
+    def integrate(self, state, duration, dt, save_every)
+    def integrate_scan(self, state, n_steps, dt)       # differentiable via lax.scan
+```
+
+Runtime checks (if enabled): finite state, water column thickness, |η| bounds, T/S bounds, land cells strictly zero.
+
+#### 4.2.7 Mixing (`ocean/physics/mixing.py`)
+
+- `laplacian_viscosity_3d(field_3d, grid, coeff)` — A_h·∇² vmapped over levels
+- `vertical_diffusion(field, z_coord, jacobian, coeff)` — ∂/∂z(K_v·∂f/∂z) with zero-flux BCs at surface and bottom
+
+#### 4.2.8 Spectral Ocean (`ocean/dynamics/spectral_ocean_pe.py`)
+
+Pseudospectral vorticity-divergence formulation, paralleling the atmospheric spectral PE:
+
+```
+∂ζ/∂t = −div((ζ+f)·v) + curl(vertical advection + mixing)
+∂D/∂t = curl((ζ+f)·v) − ∇²(K + p'/ρ₀) + div(vertical advection + mixing)
+∂T/∂t = −div(T·v) + T·D − w·∂T/∂z + K_h·∇²T + vertical diffusion
+∂S/∂t = −div(S·v) + S·D − w·∂S/∂z + K_h·∇²S + vertical diffusion
+∂η/∂t = −Σ_k(D·h_k)
+```
+
+Land masking in spectral: mask applied in grid space before every SH analysis call.
+Gibbs oscillations at coastlines controlled by spectral hyperdiffusion.
+
+`SpectralOceanModel`: same API as `OceanModel`, uses SSP-RK3.
+Auto-routes complex128 computation to CPU on Metal backend.
+
+#### 4.2.9 Conservation (`ocean/conservation.py`)
+
+| Quantity | Method |
+|----------|--------|
+| Volume | Uniform additive η correction: ∫∫ η·area = const |
+| Heat | Uniform additive T correction: ∫∫∫ T·h_k·area = const |
+| Salt | Uniform additive S correction: ∫∫∫ S·h_k·area = const |
+
+MPI-aware global sums via `global_sum_mpi()` in distributed mode.
+
+#### 4.2.10 Initialization (`ocean/init.py`)
+
+- `idealized_bathymetry(grid, H_max=5500, land_lat_threshold=80)` — land at high latitudes
+- `rest_state_ocean(grid, z_coord, T_surface=20, T_deep=2, S_uniform=35)` — exponential stratification
+- `wind_driven_gyre_init(...)` — double-gyre test case
+
+#### 4.2.11 Validated Test Cases
+
+| Test | Resolution | Duration | Validation |
+|------|-----------|----------|------------|
+| Stommel gyre | C16–C32 | 300 days | Steady western boundary current |
+| Baroclinic adjustment | C16–C32 | 300 days | Thermocline flattening |
+| Equatorial Kelvin wave | C16–C32 | 300 days | Eastward propagation |
+| Rest state | C8 | 50 steps | Tendencies < 1e-6, T/S bounded |
+| Differentiability | C8 | 1 step | `jax.grad` through model.step produces finite gradients |
 
 ### 4.3 Land
 
@@ -719,47 +925,45 @@ x0_optimal = optimize(cost_4dvar, grad_J, x0_initial)
 
 ### 6.2 Parallelism Strategy
 
-#### Phase 1: JAX Native Sharding (Milestone 1-4)
+#### 6.2.1 Single-Node: JAX Device Mesh (`parallel/mesh.py`)
+
+Face-dimension sharding across 1–6 devices:
 
 ```python
-from jax.sharding import NamedSharding, PartitionSpec as P, Mesh
-
-# Create device mesh
-devices = jax.devices()  # e.g., 4 GPUs
-mesh = Mesh(devices, axis_names=('x',))
-
-# Shard cubed-sphere faces across devices
-# 6 faces -> shard over face dimension
-state_sharding = NamedSharding(mesh, P('x', None, None))  # (face, i, j)
-
-# JIT with sharding constraints
-@jax.jit
-def step(state, dt):
-    ...
-
-step = jax.jit(step, in_shardings=(state_sharding, None),
-                      out_shardings=state_sharding)
+config = create_device_mesh(n_devices="auto")  # auto-detects, clamps to 1/2/3/6
 ```
 
-- **Domain decomposition**: Shard the face/horizontal dimensions across devices
-- **Vertical stays local**: Physics is column-local, no communication needed
-- **Halo exchange**: `jax.lax.ppermute` for neighbor communication between faces/shards
+- `DeviceConfig(mesh, face_sharding, replicated_sharding, n_devices, backend, is_distributed)`
+- Single device → `mesh=None`, no sharding overhead
+- Multi-device → `Mesh(devices, ("face",))`, `PartitionSpec("face")` on first axis
+- `shard_pytree(state, config)` — shards `(6,n,n,...)` arrays by face dimension
+- `replicate_pytree(data, config)` — replicates data across all devices (e.g., grid metrics)
+- Backend fallback: if requested backend unavailable, falls back to default with warning
 
-#### Phase 2: mpi4jax for Multi-Node (Milestone 5+)
+#### 6.2.2 Multi-Node: MPI via mpi4jax (`parallel/distributed.py`, `parallel/halo_exchange.py`)
 
 ```python
-import mpi4jax
-
-def halo_exchange(field, grid, comm):
-    """Exchange halo cells between MPI ranks."""
-    for neighbor_rank, send_buf, recv_buf in grid.halo_pairs:
-        recv_buf, token = mpi4jax.sendrecv(
-            send_buf, recv_buf,
-            source=neighbor_rank, dest=neighbor_rank,
-            comm=comm
-        )
-    return field.with_halos(recv_buf)
+config, topology = initialize_distributed(return_topology=True)
 ```
+
+Initializes JAX distributed runtime + MPI, builds `CommTopology` for this rank.
+Double-initialization guard returns existing config with warning.
+
+**CommTopology** (`parallel/comm.py`):
+- Deterministic face-to-rank mapping: `face_to_rank(face, n_processes) = face // (6 // n_processes)`
+- Valid decompositions: 1, 2, 3, or 6 MPI ranks (must divide 6 faces evenly)
+- `neighbor_ranks[(face, edge)]` — which rank owns each neighbor
+- `neighbor_info[(face, edge)]` → `(nbr_face, nbr_edge, is_reversed)` — full connectivity
+
+**MPI Halo Exchange** (`parallel/halo_exchange.py`):
+- Edges to same neighbor rank packed into single send buffer → reduces MPI messages from ~4/face to ~2–3/rank
+- Canonical edge ordering for packed correctness: sender sorts by `(face, edge)`, receiver by `(nbr_face, nbr_edge)`
+- Tag encoding: `send_tag = rank * 1000 + nbr_rank` for uniqueness
+- Local edges handled without MPI (direct array indexing)
+
+**State management**:
+- `partition_state(state, topology)` — zeros non-local faces, keeps full `(6,n,n)` shape
+- `gather_state(state, topology)` — `mpi4jax.allreduce(SUM)` reconstructs global state
 
 ### 6.3 Mixed Precision
 
@@ -783,22 +987,18 @@ def cast_for_dynamics(state: State) -> State:
     return jax.tree.map(lambda x: x.astype(dynamics_dtype), state)
 ```
 
-### 6.4 Apple Silicon Support
+### 6.4 Apple Silicon Support (`parallel/metal.py`, `core/hardware.py`)
 
-```python
-# Metal backend detection
-def get_backend():
-    available = jax.devices()
-    if any(d.platform == 'gpu' for d in available):
-        return 'gpu'          # NVIDIA or Metal
-    elif any(d.platform == 'tpu' for d in available):
-        return 'tpu'
-    return 'cpu'
+**Backend detection**: `detect_devices()` returns backend, n_devices, supports_f64, distributed status.
+Backend priority: METAL → GPU → TPU → CPU.
 
-# M-series specific: use jax-metal package
-# pip install jax-metal  (for macOS ARM)
-# Limitations: some ops may fall back to CPU
-```
+**Metal limitations**:
+- No float64 or complex128 support (MPS backend)
+- Spectral transforms require complex128 → automatically routed to CPU device
+- `get_metal_config()` → `MetalConfig(is_metal, metal_device, cpu_device)`
+- `to_cpu(array)` — transfers array to CPU device for unsupported operations
+
+**Spectral on Metal**: Grid and SH transforms batched on CPU device; state transferred once, all steps computed, result transferred back to avoid per-step GPU↔CPU overhead.
 
 ---
 
@@ -1285,190 +1485,112 @@ def check_conservation(trajectory, grid, tolerances):
 
 ---
 
-## 12. Repository Structure
+## 12. Repository Structure (Actual)
 
 ```
 legoESM/
-├── pyproject.toml                   # Project metadata, dependencies (uv)
-├── uv.lock                          # Locked dependencies
-├── Dockerfile                       # Multi-stage: base, dev, production
-├── docker-compose.yml               # Multi-GPU orchestration
-├── Makefile                         # Common commands (test, lint, run, benchmark)
-├── README.md
-├── LICENSE                          # MIT
-├── SPECIFICATION.md                 # This document
+├── pyproject.toml                     # Project metadata, dependencies (uv)
+├── SPECIFICATION.md                   # This document
+├── CLAUDE.md                          # AI assistant context
 │
-├── config/                          # Example YAML configurations
-│   ├── williamson_test2.yaml
-│   ├── williamson_test5.yaml
-│   ├── held_suarez.yaml
-│   ├── weather_forecast.yaml
-│   └── coupled_climate.yaml
+├── src/legoesm/
+│   ├── __init__.py                    # Public API
+│   ├── cli.py                         # Command-line interface
+│   ├── config.py                      # YAML config loading + validation
+│   ├── constants.py                   # Physical constants (g, R_d, c_p, Omega, etc.)
+│   │
+│   ├── core/                          # Core infrastructure
+│   │   ├── field.py                   # Field dataclass (JAX pytree leaf)
+│   │   ├── state.py                   # State containers (ShallowWaterState, etc.)
+│   │   ├── operators.py               # 2D FV operators (grad, div, curl, laplacian, advection)
+│   │   ├── operators_3d.py            # 3D operators (vmap over levels)
+│   │   ├── conservation.py            # Conservation fixers (mass, energy, enstrophy)
+│   │   ├── smooth.py                  # Smooth approximations (sigmoid_switch, etc.)
+│   │   └── hardware.py                # Device detection, backend info
+│   │
+│   ├── grids/                         # Grid implementations
+│   │   ├── cubed_sphere.py            # CubedSphereGrid (gnomonic equidistant, 6 faces)
+│   │   ├── gaussian.py                # GaussianGrid + spherical harmonic transforms
+│   │   ├── halo.py                    # Halo exchange (local backend, dispatch to MPI)
+│   │   └── vertical.py                # SigmaCoordinate, HeightCoordinate, TerrainMetric
+│   │
+│   ├── timestepping/                  # Time integration
+│   │   ├── ssp_rk3.py                # SSP-RK3 (3-stage strong stability preserving)
+│   │   ├── split_explicit.py          # Split-explicit RK3 + acoustic/barotropic substeps
+│   │   ├── semi_implicit.py           # Semi-implicit Hoskins-Simmons (spectral PE)
+│   │   └── tridiagonal.py             # Tridiagonal solver (semi-implicit acoustic)
+│   │
+│   ├── atmosphere/                    # Atmosphere component
+│   │   ├── dynamics/
+│   │   │   ├── shallow_water.py       # ShallowWaterModel (FV cubed-sphere)
+│   │   │   ├── primitive_eq.py        # PrimitiveEquationModel (FV hydrostatic σ)
+│   │   │   ├── compressible_euler.py  # CompressibleEulerModel (FV non-hydrostatic z*)
+│   │   │   ├── spectral_sw.py         # SpectralShallowWaterModel (Gaussian grid)
+│   │   │   ├── spectral_pe.py         # SpectralPrimitiveEquationModel (Gaussian grid σ)
+│   │   │   ├── spectral_nh.py         # SpectralCompressibleEulerModel (Gaussian grid z*)
+│   │   │   ├── tracer_transport.py    # Passive tracer advection
+│   │   │   ├── dcmip_transport.py     # DCMIP transport test cases
+│   │   │   ├── williamson.py          # Williamson shallow-water test cases
+│   │   │   └── dcmip2025/             # DCMIP-2025 test cases (1, 2, 3)
+│   │   └── physics/
+│   │       ├── held_suarez.py         # Held-Suarez forcing
+│   │       ├── baroclinic_wave.py     # Jablonowski-Williamson baroclinic wave
+│   │       └── kessler.py             # Kessler warm-rain microphysics
+│   │
+│   ├── ocean/                         # Ocean component
+│   │   ├── __init__.py                # Re-exports (OceanModel, SpectralOceanModel, etc.)
+│   │   ├── eos.py                     # Wright (1997) equation of state
+│   │   ├── vertical.py                # OceanZStarCoordinate, layer thickness, Jacobian
+│   │   ├── state.py                   # OceanState, OceanConfig, SpectralOceanState
+│   │   ├── init.py                    # Bathymetry, initial conditions, test cases
+│   │   ├── conservation.py            # Volume/heat/salt fixers (MPI-aware)
+│   │   ├── dynamics/
+│   │   │   ├── ocean_pe.py            # Baroclinic tendencies (FV cubed-sphere)
+│   │   │   ├── barotropic.py          # Barotropic substeps (forward-backward)
+│   │   │   ├── ocean_model.py         # OceanModel class (split-explicit step)
+│   │   │   └── spectral_ocean_pe.py   # SpectralOceanModel (Gaussian grid)
+│   │   └── physics/
+│   │       └── mixing.py              # Laplacian viscosity/diffusivity + vertical diffusion
+│   │
+│   ├── parallel/                      # Parallelism infrastructure
+│   │   ├── mesh.py                    # DeviceConfig, create_device_mesh, shard/replicate_pytree
+│   │   ├── comm.py                    # CommTopology, build_comm_topology
+│   │   ├── distributed.py             # MPI initialization, partition/gather state
+│   │   ├── halo_exchange.py           # MPI halo exchange (packed per neighbor rank)
+│   │   ├── metal.py                   # Apple Metal detection, CPU fallback
+│   │   └── reductions.py              # MPI-aware global reductions
+│   │
+│   ├── visualization/
+│   │   └── maps.py                    # Global maps (Cartopy + Mollweide projection)
+│   │
+│   ├── coupler/                       # Component coupling (placeholder)
+│   ├── da/                            # Data assimilation (placeholder)
+│   ├── diagnostics/                   # Online diagnostics (placeholder)
+│   ├── io/                            # I/O (placeholder)
+│   ├── land/                          # Land component (placeholder)
+│   ├── ice/                           # Cryosphere (placeholder)
+│   └── ml/                            # ML integration (placeholder)
 │
-├── src/
-│   └── legoesm/                   # Main package
-│       ├── __init__.py              # Public API
-│       ├── cli.py                   # Command-line interface
-│       ├── config.py                # YAML config loading + validation
-│       ├── constants.py             # Physical constants (g, R_d, c_p, etc.)
-│       ├── types.py                 # Type aliases, protocols
-│       │
-│       ├── core/                    # Core infrastructure
-│       │   ├── __init__.py
-│       │   ├── field.py             # Field dataclass (JAX pytree)
-│       │   ├── state.py             # State containers
-│       │   ├── operators.py         # Discrete operators (grad, div, curl, laplacian)
-│       │   ├── interpolation.py     # Spatial interpolation
-│       │   ├── conservation.py      # Conservation fixers
-│       │   ├── smooth.py            # Smooth approximations (sigmoid_switch, etc.)
-│       │   └── precision.py         # Mixed precision utilities
-│       │
-│       ├── grids/                   # Grid implementations
-│       │   ├── __init__.py
-│       │   ├── grid_protocol.py     # Abstract Grid protocol
-│       │   ├── cubed_sphere.py      # Cubed-sphere grid (primary)
-│       │   ├── latlon.py            # Lat-lon grid
-│       │   ├── icosahedral.py       # Icosahedral grid (future)
-│       │   ├── spectral.py          # Spectral element grid (future)
-│       │   └── vertical.py          # Vertical coordinate (hybrid sigma-pressure)
-│       │
-│       ├── timestepping/            # Time integration
-│       │   ├── __init__.py
-│       │   ├── integrator.py        # TimeIntegrator protocol
-│       │   ├── ssp_rk3.py           # Strong Stability Preserving RK3
-│       │   ├── imex_ark.py          # IMEX Additive Runge-Kutta
-│       │   ├── split_explicit.py    # Split-explicit (acoustic substeps)
-│       │   └── adaptive.py          # CFL-based adaptive dt
-│       │
-│       ├── atmosphere/              # Atmosphere component
-│       │   ├── __init__.py
-│       │   ├── component.py         # AtmosphereComponent (standalone runner)
-│       │   ├── state.py             # AtmosphereState, AtmosphereTendencies
-│       │   ├── dynamics/
-│       │   │   ├── __init__.py
-│       │   │   ├── shallow_water.py # Shallow-water equations (milestone 1)
-│       │   │   ├── primitive_eq.py  # Hydrostatic primitive equations
-│       │   │   ├── compressible.py  # Fully compressible non-hydrostatic
-│       │   │   └── anelastic.py     # Anelastic approximation
-│       │   └── physics/
-│       │       ├── __init__.py
-│       │       ├── interface.py     # PhysicsModule protocol
-│       │       ├── held_suarez.py   # Held-Suarez forcing (test)
-│       │       ├── radiation/       # Placeholder
-│       │       ├── convection/      # Placeholder
-│       │       ├── microphysics/    # Placeholder
-│       │       ├── boundary_layer/  # Placeholder
-│       │       └── gravity_wave/    # Placeholder
-│       │
-│       ├── ocean/                   # Ocean component
-│       │   ├── __init__.py
-│       │   ├── component.py         # OceanComponent
-│       │   ├── state.py             # OceanState
-│       │   ├── prescribed_sst.py    # Prescribed SST (milestone 1)
-│       │   ├── slab_ocean.py        # Slab / mixed-layer ocean
-│       │   └── primitive_eq.py      # Full 3D ocean (Veros-inspired)
-│       │
-│       ├── land/                    # Land component
-│       │   ├── __init__.py
-│       │   ├── component.py         # LandComponent
-│       │   ├── state.py             # LandState
-│       │   ├── bucket.py            # Simple bucket model + energy balance
-│       │   ├── soil.py              # Multi-layer soil T and moisture
-│       │   ├── snow.py              # Snow accumulation/melt
-│       │   ├── vegetation.py        # Vegetation dynamics
-│       │   └── carbon/              # Carbon cycling (DifferLand-inspired)
-│       │       ├── __init__.py
-│       │       ├── pools.py         # Carbon pool dynamics
-│       │       ├── photosynthesis.py # FvCB-Medlyn (from DifferLand)
-│       │       └── respiration.py   # Auto/heterotrophic respiration
-│       │
-│       ├── ice/                     # Cryosphere component
-│       │   ├── __init__.py
-│       │   ├── component.py         # IceComponent
-│       │   ├── sea_ice.py           # Thermodynamic sea ice
-│       │   ├── ice_dynamics.py      # EVP rheology
-│       │   ├── ice_sheet.py         # Ice sheet (future)
-│       │   └── permafrost.py        # Permafrost (future)
-│       │
-│       ├── coupler/                 # Component coupling
-│       │   ├── __init__.py
-│       │   ├── coupler.py           # Flux exchange mediator
-│       │   ├── regridder.py         # Grid-to-grid interpolation
-│       │   └── flux_calculator.py   # Surface flux computations
-│       │
-│       ├── da/                      # Data assimilation
-│       │   ├── __init__.py
-│       │   ├── cost_function.py     # 4D-Var cost function
-│       │   ├── observation.py       # Observation operators
-│       │   └── minimizer.py         # L-BFGS, gradient descent wrappers
-│       │
-│       ├── ml/                      # ML integration
-│       │   ├── __init__.py
-│       │   ├── neural_physics.py    # Equinox-based neural parameterization
-│       │   ├── training.py          # Online training loop
-│       │   └── architectures.py     # MLP, U-Net, attention for physics
-│       │
-│       ├── io/                      # Input/Output
-│       │   ├── __init__.py
-│       │   ├── zarr_io.py           # Zarr read/write
-│       │   ├── era5.py              # ERA5 initialization
-│       │   └── ifs.py               # IFS analysis initialization
-│       │
-│       ├── diagnostics/             # Online diagnostics
-│       │   ├── __init__.py
-│       │   ├── manager.py           # DiagnosticsManager
-│       │   ├── derived_fields.py    # T_2m, MSLP, etc.
-│       │   └── spectra.py           # Energy spectra
-│       │
-│       ├── visualization/           # Plotting tools
-│       │   ├── __init__.py
-│       │   ├── maps.py              # Global/regional maps (Cartopy)
-│       │   ├── cross_sections.py    # Vertical cross-sections
-│       │   ├── timeseries.py        # Time series plots
-│       │   └── conservation.py      # Conservation budget plots
-│       │
-│       └── parallel/               # Parallelism utilities
-│           ├── __init__.py
-│           ├── sharding.py          # JAX native sharding setup
-│           ├── halo.py              # Halo exchange
-│           └── mpi.py               # mpi4jax wrappers (Phase 2)
+├── tests/
+│   ├── conftest.py                    # Shared fixtures
+│   └── unit/
+│       ├── test_core.py               # Field, operators, conservation
+│       ├── test_grid.py               # Cubed-sphere grid creation, metrics
+│       ├── test_shallow_water.py      # SW model: Williamson tests, differentiability
+│       ├── test_primitive_eq.py       # PE model: Held-Suarez, conservation
+│       ├── test_compressible_euler.py # CE model: acoustic substeps, mountain waves
+│       ├── test_spectral.py           # Spectral: SH transforms, spectral SW/PE/NH
+│       ├── test_parallel.py           # Device mesh, comm topology, halo dispatch, Metal
+│       └── test_ocean.py              # Ocean: EOS, z-star, model step, conservation, spectral
 │
-├── tests/                           # Test suite
-│   ├── conftest.py                  # Shared fixtures
-│   ├── unit/
-│   │   ├── test_field.py
-│   │   ├── test_grid.py
-│   │   ├── test_operators.py
-│   │   ├── test_conservation.py
-│   │   ├── test_timestepping.py
-│   │   ├── test_smooth.py
-│   │   └── test_differentiability.py
-│   ├── integration/
-│   │   ├── test_shallow_water.py
-│   │   ├── test_williamson.py
-│   │   ├── test_held_suarez.py
-│   │   └── test_coupled.py
-│   └── validation/
-│       ├── test_era5_comparison.py
-│       └── test_benchmarks.py
+├── scripts/
+│   ├── run_williamson.py              # Williamson test case runner
+│   ├── run_held_suarez.py             # Held-Suarez experiment
+│   ├── run_dycore_tests.py            # Comprehensive dycore test suite
+│   ├── run_dcmip2025.py              # DCMIP-2025 intercomparison
+│   └── run_ocean_realistic.py         # Stommel gyre, baroclinic adj., Kelvin wave
 │
-├── notebooks/                       # Jupyter notebooks
-│   ├── 01_quickstart.ipynb
-│   ├── 02_williamson_tests.ipynb
-│   ├── 03_differentiable_demo.ipynb
-│   └── 04_ml_parameterization.ipynb
-│
-├── scripts/                         # Utility scripts
-│   ├── download_era5.py
-│   └── benchmark.py
-│
-└── docs/                            # Documentation (Sphinx)
-    ├── conf.py
-    ├── index.rst
-    ├── installation.rst
-    ├── quickstart.rst
-    ├── architecture.rst
-    └── api/
+└── notebooks/                         # Jupyter notebooks
 ```
 
 ---

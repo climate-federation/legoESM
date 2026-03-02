@@ -1,0 +1,77 @@
+{
+  "cases": {
+    "gravity_wave": {
+      "SSH_max": 0.03729962185025215,
+      "SSH_min": -0.11495470255613327,
+      "SST_max": 19.517047882080078,
+      "SST_mean": 19.515520095825195,
+      "all_finite": true,
+      "heat_drift_rel": 2.9901561070798825e-07,
+      "kinetic_energy": 6.460893877166408e+17,
+      "land_zero": true,
+      "max_land_eta": 0.0,
+      "max_land_u": 0.0,
+      "max_land_v": 0.0,
+      "salt_drift_rel": -4.468331549128546e-07,
+      "u_max": 3.327622175216675,
+      "v_max": 6.29960298538208,
+      "volume_mean_eta_drift": -7.690397507992927e-08
+    },
+    "rest_state": {
+      "SSH_max": 0.0,
+      "SSH_min": 0.0,
+      "SST_max": 19.520992279052734,
+      "SST_mean": 19.520994186401367,
+      "all_finite": true,
+      "heat_drift_rel": -7.475412620350405e-08,
+      "kinetic_energy": 0.0,
+      "land_zero": true,
+      "max_land_eta": 0.0,
+      "max_land_u": 0.0,
+      "max_land_v": 0.0,
+      "salt_drift_rel": 0.0,
+      "u_max": 0.0,
+      "v_max": 0.0,
+      "volume_mean_eta_drift": 0.0
+    },
+    "wind_gyre": {
+      "SSH_max": 23.5070743560791,
+      "SSH_min": -38.86745071411133,
+      "SST_max": 15.000005722045898,
+      "SST_mean": 15.000000953674316,
+      "all_finite": true,
+      "heat_drift_rel": -3.1278394917886393e-07,
+      "kinetic_energy": 2.0830569725220933e+20,
+      "land_zero": true,
+      "max_land_eta": 0.0,
+      "max_land_u": 0.0,
+      "max_land_v": 0.0,
+      "salt_drift_rel": 1.6086039578627981e-06,
+      "u_max": 557.4373168945312,
+      "v_max": 789.7490844726562,
+      "volume_mean_eta_drift": 4.3117495361480344e-07
+    }
+  },
+  "config": {
+    "A_h": 10000.0,
+    "A_v": 0.001,
+    "K_h": 1000.0,
+    "K_v": 0.0001,
+    "barotropic_diffusion_alpha": 0.01,
+    "barotropic_diffusion_dt_ref": 60.0,
+    "hyperdiff_coeff": 7914023379819536.0,
+    "n_barotropic_substeps": 10
+  },
+  "meta": {
+    "backend": "cpu",
+    "days": 5.0,
+    "device_count": 1,
+    "dt": 3600.0,
+    "float_dtype": "float32",
+    "levels": 10,
+    "n_steps": 120,
+    "resolution": 8,
+    "runtime_checks": true
+  },
+  "suite": "ocean_tests"
+}

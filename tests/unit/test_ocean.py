@@ -305,6 +305,33 @@ class TestOceanTendencies:
         assert float(jnp.max(jnp.abs(tend.dv_dt.data[land]))) == 0.0
         assert float(jnp.max(jnp.abs(tend.deta_dt.data[land]))) == 0.0
 
+    def test_coriolis_applies_to_baroclinic_shear(self, ocean_grid, ocean_z_coord):
+        """FV tendencies should include planetary Coriolis on shear flow."""
+        state = rest_state_ocean(
+            ocean_grid, ocean_z_coord, H_max=4000.0, land_lat_threshold=90.0,
+            T_surface=15.0, T_deep=15.0,
+        )
+        nlev = ocean_z_coord.n_levels
+        shear_profile = jnp.linspace(-1.0, 1.0, nlev, dtype=jnp.float32)
+        v_shear = jnp.broadcast_to(
+            shear_profile[jnp.newaxis, jnp.newaxis, jnp.newaxis, :],
+            state.v.data.shape,
+        )
+        state = state._replace(
+            u=state.u.replace(data=jnp.zeros_like(state.u.data)),
+            v=state.v.replace(data=v_shear),
+        )
+        config = OceanConfig(
+            A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0,
+            hyperdiff_coeff=0.0,
+        )
+        tend = ocean_baroclinic_tendencies(state, ocean_grid, ocean_z_coord, config)
+        # Exclude equatorial points where f=0 and bottom level where upwind BC can zero tendency.
+        off_equator = jnp.abs(ocean_grid.f) > 1.0e-8
+        shear_not_zero = jnp.max(jnp.abs(v_shear), axis=-1) > 1.0e-6
+        active = off_equator & shear_not_zero
+        assert float(jnp.max(jnp.abs(tend.du_dt.data[active]))) > 0.0
+
 
 class TestVerticalAdvection:
     """Tests for vertical upwind advection."""
@@ -330,6 +357,18 @@ class TestVerticalAdvection:
 
         assert float(adv[0, 0, 0, 0]) == pytest.approx(0.0, abs=1e-8)
         assert jnp.allclose(adv[..., 1:], 1.0, atol=1e-6)
+
+    def test_vertical_advection_jacobian_scaling(self, ocean_z_coord):
+        """Advection magnitude should use physical w and physical dz."""
+        J = 2.0
+        jac = jnp.full((1, 1, 1), J)
+        # Field linear in physical depth z = J * z*.
+        field = (J * ocean_z_coord.z_full_ref)[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+        w_half = jnp.ones((1, 1, 1, ocean_z_coord.n_levels + 1))
+
+        adv = _vertical_advection_ocean(field, w_half, ocean_z_coord, jac)
+        assert jnp.allclose(adv[..., :-1], -1.0, atol=1e-6)
+        assert float(adv[0, 0, 0, -1]) == pytest.approx(0.0, abs=1e-8)
 
 
 # ==============================================================================
@@ -379,6 +418,68 @@ class TestOceanModel:
         T_min = float(jnp.min(jnp.where(mask > 0.5, T_ocean, 999)))
         assert T_min > -5.0, f"T_min = {T_min}"
         assert T_max < 40.0, f"T_max = {T_max}"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"A_h": -1.0}, "A_h"),
+            ({"K_h": -1.0}, "K_h"),
+            ({"A_v": -1.0}, "A_v"),
+            ({"K_v": -1.0}, "K_v"),
+            ({"hyperdiff_coeff": -1.0}, "hyperdiff_coeff"),
+            ({"barotropic_diffusion_alpha": -1.0}, "barotropic_diffusion_alpha"),
+            ({"n_barotropic_substeps": 0}, "n_barotropic_substeps"),
+            ({"barotropic_diffusion_dt_ref": 0.0}, "barotropic_diffusion_dt_ref"),
+            ({"min_water_column_m": 0.0}, "min_water_column_m"),
+            ({"max_abs_eta_m": 0.0}, "max_abs_eta_m"),
+            (
+                {"temperature_min_c": 10.0, "temperature_max_c": 0.0},
+                "temperature_min_c",
+            ),
+            (
+                {"salinity_min_psu": 40.0, "salinity_max_psu": 30.0},
+                "salinity_min_psu",
+            ),
+        ],
+    )
+    def test_invalid_config_rejected(self, ocean_grid, ocean_z_coord, kwargs, match):
+        """OceanModel should fail fast on invalid config values."""
+        with pytest.raises(ValueError, match=match):
+            OceanModel(ocean_grid, ocean_z_coord, OceanConfig(**kwargs))
+
+    def test_step_checked_with_runtime_checks(self, ocean_grid, ocean_z_coord, ocean_state):
+        """Runtime-checked step should run and return finite state."""
+        config = OceanConfig(
+            n_barotropic_substeps=10,
+            enable_runtime_checks=True,
+            max_abs_eta_m=1.0e5,
+            temperature_min_c=-10.0,
+            temperature_max_c=50.0,
+            salinity_min_psu=-1.0,
+            salinity_max_psu=60.0,
+        )
+        model = OceanModel(ocean_grid, ocean_z_coord, config)
+        state_new = model.step_checked(ocean_state, 3600.0)
+        assert jnp.all(jnp.isfinite(state_new.u.data))
+        assert jnp.all(jnp.isfinite(state_new.eta.data))
+
+    def test_runtime_check_rejects_too_thin_water_column(self, ocean_grid, ocean_z_coord, ocean_state):
+        """Runtime checks should reject eta that collapses water column."""
+        config = OceanConfig(enable_runtime_checks=True, min_water_column_m=0.5)
+        model = OceanModel(ocean_grid, ocean_z_coord, config)
+        eta_bad = -ocean_state.H_bathy.data + 0.1
+        state_bad = ocean_state._replace(
+            eta=ocean_state.eta.replace(data=eta_bad),
+        )
+        with pytest.raises(ValueError, match="water column"):
+            model._assert_runtime_invariants(state_bad)
+
+    def test_integrate_scan_rejects_runtime_checks(self, ocean_grid, ocean_z_coord, ocean_state):
+        """integrate_scan should reject host runtime checks."""
+        config = OceanConfig(enable_runtime_checks=True)
+        model = OceanModel(ocean_grid, ocean_z_coord, config)
+        with pytest.raises(ValueError, match="integrate_scan"):
+            model.integrate_scan(ocean_state, n_steps=1, dt=3600.0)
 
 
 # ==============================================================================

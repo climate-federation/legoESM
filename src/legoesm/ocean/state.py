@@ -77,6 +77,19 @@ class OceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
+    # 2-D Laplacian damping used in barotropic subcycling.
+    # Per-substep coefficient is alpha * (dt_s / dt_ref) * area * laplacian(...),
+    # so the damping is explicitly dt-scaled and tunable.
+    barotropic_diffusion_alpha: float = 0.01
+    barotropic_diffusion_dt_ref: float = 60.0
+    # Optional runtime state checks for debugging/regression hardening.
+    enable_runtime_checks: bool = False
+    min_water_column_m: float = 0.5
+    max_abs_eta_m: float = 1.0e4
+    temperature_min_c: float = -5.0
+    temperature_max_c: float = 45.0
+    salinity_min_psu: float = 0.0
+    salinity_max_psu: float = 50.0
     differentiable_barotropic: bool = False  # Use lax.scan (grad-compatible) vs fori_loop (faster)
 
 

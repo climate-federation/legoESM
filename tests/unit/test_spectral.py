@@ -229,6 +229,18 @@ class TestSpectralOperators:
         with pytest.raises(ValueError, match="order must be >= 1"):
             spectral_hyperdiffusion(grid_t21, coeffs, nu=1.0, order=0)
 
+    def test_hyperdiffusion_negative_nu_raises(self, grid_t21):
+        """Negative hyperdiffusion coefficient should be rejected."""
+        coeffs = jnp.ones((grid_t21.n_sh,), dtype=jnp.complex128)
+        with pytest.raises(ValueError, match="nu must be >= 0"):
+            spectral_hyperdiffusion(grid_t21, coeffs, nu=-1.0, order=2)
+
+    def test_hyperdiffusion_zero_nu_returns_zero(self, grid_t21):
+        """Zero hyperdiffusion coefficient should return identically zero tendency."""
+        coeffs = jnp.ones((grid_t21.n_sh,), dtype=jnp.complex128)
+        diff = spectral_hyperdiffusion(grid_t21, coeffs, nu=0.0, order=2)
+        assert jnp.all(diff == 0.0)
+
 
 # =============================================================================
 # Velocity reconstruction tests

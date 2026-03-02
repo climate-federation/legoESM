@@ -69,6 +69,12 @@ def get_active_config() -> DeviceConfig | None:
     return _active_config
 
 
+def set_active_config(config: DeviceConfig | None) -> None:
+    """Set the active device configuration singleton."""
+    global _active_config
+    _active_config = config
+
+
 # ==============================================================================
 # Mesh creation
 # ==============================================================================
@@ -96,26 +102,46 @@ def create_device_mesh(
     """
     global _active_config
 
-    # Resolve devices.
+    # Resolve devices, with fallback for unavailable backends.
     if backend is not None:
-        devices = jax.devices(backend)
+        try:
+            devices = jax.devices(backend)
+        except RuntimeError:
+            devices = []
+        if not devices:
+            warnings.warn(
+                f"Requested backend '{backend}' has no devices. "
+                f"Falling back to default backend.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            devices = jax.devices()
     else:
         devices = jax.devices()
 
     all_count = len(devices)
     backend_name = jax.default_backend().upper()
 
-    # Guard: no devices available.
+    # Guard: no devices available at all.
     if all_count == 0:
         raise RuntimeError(
-            f"No JAX devices found"
-            + (f" for backend '{backend}'" if backend is not None else "")
-            + ". Check your JAX installation and hardware."
+            "No JAX devices found. Check your JAX installation and hardware."
         )
 
     # Resolve n_devices.
     if n_devices == "auto":
         n_dev = min(all_count, _N_FACES)
+        if _N_FACES % n_dev != 0:
+            # Auto mode should choose a usable face partition instead of failing
+            # on common counts like 4 or 5 GPUs.
+            valid = [d for d in (6, 3, 2, 1) if d <= all_count]
+            n_dev = valid[0] if valid else 1
+            warnings.warn(
+                "Auto-selected device count does not evenly divide 6 cubed-sphere "
+                f"faces. Falling back to {n_dev} device(s).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     else:
         n_dev = int(n_devices)
 

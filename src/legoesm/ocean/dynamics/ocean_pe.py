@@ -16,6 +16,7 @@ Time stepping: split-explicit barotropic/baroclinic (see barotropic.py).
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -105,11 +106,7 @@ def ocean_baroclinic_tendencies(
     div_v = divergence_3d(u * mask_3d, v * mask_3d, grid)  # (6, n, n, nlev)
     w = _diagnose_w(div_v, h_k)  # (6, n, n, nlev+1)
 
-    # --- 5. Vorticity (relative only; planetary f handled by barotropic) ---
-    # The planetary Coriolis f must be applied at the barotropic substep
-    # level (small rotations per substep, f*dt_s ~ 0.01 rad). Applying it
-    # here at the baroclinic level (f*dt ~ 0.5 rad) creates large velocity
-    # changes in one step that generate spurious gravity waves.
+    # --- 5. Vorticity ---
     zeta = vorticity_3d(u * mask_3d, v * mask_3d, grid)
 
     # --- 6. Bernoulli function (kinetic energy only for ocean) ---
@@ -117,24 +114,46 @@ def ocean_baroclinic_tendencies(
     dK_dx = gradient_x_3d(K, grid)
     dK_dy = gradient_y_3d(K, grid)
 
-    # --- 7. Vector-invariant momentum (ζ only, not ζ+f) ---
-    du_dt = zeta * v - dK_dx - dp_dx / rho_0
-    dv_dt = -zeta * u - dK_dy - dp_dy / rho_0
+    # --- 7. Vector-invariant momentum ---
+    # Planetary Coriolis is split: barotropic mode (depth-mean) is integrated
+    # in substeps, while baroclinic shear (deviation from depth-mean) is
+    # handled here to preserve full (zeta + f) dynamics without double counting.
+    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), 1.0)
+    U_bar = jnp.sum(u * h_k, axis=-1) / H_total * mask
+    V_bar = jnp.sum(v * h_k, axis=-1) / H_total * mask
+    u_prime = (u - U_bar[..., jnp.newaxis]) * mask_3d
+    v_prime = (v - V_bar[..., jnp.newaxis]) * mask_3d
+    f_3d = grid.f[..., jnp.newaxis]
+
+    du_dt = zeta * v + f_3d * v_prime - dK_dx - dp_dx / rho_0
+    dv_dt = -zeta * u - f_3d * u_prime - dK_dy - dp_dy / rho_0
 
     # --- 8. Vertical advection of u, v ---
     du_dt = du_dt + _vertical_advection_ocean(u, w, z_coord, J)
     dv_dt = dv_dt + _vertical_advection_ocean(v, w, z_coord, J)
 
-    # --- 9. Tracer advection (T, S) ---
-    dT_dx = gradient_x_3d(T, grid)
-    dT_dy = gradient_y_3d(T, grid)
-    dT_dt = -(u * dT_dx + v * dT_dy)
-    dT_dt = dT_dt + _vertical_advection_ocean(T, w, z_coord, J)
+    # --- 9. Tracer tendencies (vectorized over T,S) ---
+    # Avoid duplicated operator launches by treating tracers as a batch axis.
+    tracers = jnp.stack([T, S], axis=0)  # (2, 6, n, n, nlev)
 
-    dS_dx = gradient_x_3d(S, grid)
-    dS_dy = gradient_y_3d(S, grid)
-    dS_dt = -(u * dS_dx + v * dS_dy)
-    dS_dt = dS_dt + _vertical_advection_ocean(S, w, z_coord, J)
+    def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
+        dtr_dx = gradient_x_3d(tr, grid)
+        dtr_dy = gradient_y_3d(tr, grid)
+        dtr_dt = -(u * dtr_dx + v * dtr_dy)
+        dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
+
+        if config.K_h > 0:
+            dtr_dt = dtr_dt + laplacian_viscosity_3d(tr, grid, config.K_h)
+        if config.K_v > 0:
+            dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
+        if config.hyperdiff_coeff > 0:
+            dtr_dt = dtr_dt + hyperdiffusion_3d(tr, grid, config.hyperdiff_coeff)
+
+        return dtr_dt
+
+    tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
+    dT_dt = tracer_tend[0]
+    dS_dt = tracer_tend[1]
 
     # --- 10. Mixing ---
     # Velocity: masked before Laplacian (no-slip BC, u=0 on land)
@@ -144,22 +163,14 @@ def ocean_baroclinic_tendencies(
     if config.A_h > 0:
         du_dt = du_dt + laplacian_viscosity_3d(u * mask_3d, grid, config.A_h)
         dv_dt = dv_dt + laplacian_viscosity_3d(v * mask_3d, grid, config.A_h)
-    if config.K_h > 0:
-        dT_dt = dT_dt + laplacian_viscosity_3d(T, grid, config.K_h)
-        dS_dt = dS_dt + laplacian_viscosity_3d(S, grid, config.K_h)
     if config.A_v > 0:
         du_dt = du_dt + vertical_diffusion(u, z_coord, J, config.A_v)
         dv_dt = dv_dt + vertical_diffusion(v, z_coord, J, config.A_v)
-    if config.K_v > 0:
-        dT_dt = dT_dt + vertical_diffusion(T, z_coord, J, config.K_v)
-        dS_dt = dS_dt + vertical_diffusion(S, z_coord, J, config.K_v)
 
     # --- 11. Hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
         du_dt = du_dt + hyperdiffusion_3d(u * mask_3d, grid, config.hyperdiff_coeff)
         dv_dt = dv_dt + hyperdiffusion_3d(v * mask_3d, grid, config.hyperdiff_coeff)
-        dT_dt = dT_dt + hyperdiffusion_3d(T, grid, config.hyperdiff_coeff)
-        dS_dt = dS_dt + hyperdiffusion_3d(S, grid, config.hyperdiff_coeff)
 
     # --- 12. Land masking ---
     du_dt = du_dt * mask_3d
@@ -256,11 +267,9 @@ def _vertical_advection_ocean(
     # w at full levels (average of interfaces)
     w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
 
-    # Convert w to z* coordinates: w* = w / J
     jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
-    w_star = w_full / jac_safe
 
-    # Actual spacing between full levels
+    # Actual spacing between full levels (physical z spacing)
     dz_half = z_coord.dz_half_ref * jac_safe  # (..., nlev-1)
-    grad = upwind_vertical_gradient(field, dz_half, w_star)
-    return -w_star * grad
+    grad = upwind_vertical_gradient(field, dz_half, w_full)
+    return -w_full * grad

@@ -1,53 +1,56 @@
-"""Tests for backend compatibility guards (Metal / float64).
-
-Verifies that the spectral solver is blocked on unsupported backends
-(e.g., Apple Metal) and passes on supported ones (CPU, GPU, TPU).
-"""
+"""Tests for backend compatibility guards (Metal / float64)."""
 
 import warnings
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+import jax
 import pytest
 
 from legoesm.core.hardware import check_spectral_backend, get_backend
 
 
-# =============================================================================
-# check_spectral_backend — core guard function
-# =============================================================================
+def _require_x64() -> None:
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires JAX_ENABLE_X64=True")
+
+
+def _require_x32() -> None:
+    if jax.config.jax_enable_x64:
+        pytest.skip("requires JAX_ENABLE_X64=False")
+
 
 class TestCheckSpectralBackend:
     """Tests for check_spectral_backend()."""
 
     def test_cpu_backend_passes(self):
-        """CPU backend should pass without error."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="cpu"):
             check_spectral_backend()  # Should not raise
 
     def test_gpu_backend_passes(self):
-        """CUDA GPU backend should pass without error."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="gpu"):
             check_spectral_backend()  # Should not raise
 
     def test_tpu_backend_passes(self):
-        """TPU backend should pass without error."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="tpu"):
             check_spectral_backend()  # Should not raise
 
     def test_metal_backend_raises(self):
-        """Metal backend should raise ValueError."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="METAL"):
             with pytest.raises(ValueError, match="spectral solver requires float64"):
                 check_spectral_backend()
 
     def test_metal_case_insensitive(self):
-        """Metal detection should work regardless of case."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="metal"):
             with pytest.raises(ValueError, match="spectral solver requires float64"):
                 check_spectral_backend()
 
     def test_metal_allow_unsupported_warns(self):
-        """Metal with allow_unsupported=True should warn, not raise."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="METAL"):
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
@@ -60,33 +63,28 @@ class TestCheckSpectralBackend:
                 assert len(guard_warnings) == 1
 
     def test_error_message_has_remediation(self):
-        """Error message should include JAX_PLATFORMS hint."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="METAL"):
             with pytest.raises(ValueError, match="JAX_PLATFORMS=cpu"):
                 check_spectral_backend()
 
     def test_error_message_suggests_alternative(self):
-        """Error message should suggest the finite-volume alternative."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="METAL"):
             with pytest.raises(ValueError, match="finite-volume"):
                 check_spectral_backend()
 
     def test_error_message_mentions_config_override(self):
-        """Error message should mention the config override path."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="METAL"):
             with pytest.raises(ValueError, match="allow_unsupported"):
                 check_spectral_backend()
 
 
-# =============================================================================
-# get_backend
-# =============================================================================
-
 class TestGetBackend:
     """Tests for get_backend()."""
 
     def test_returns_uppercase(self):
-        """get_backend() should always return uppercase."""
         with patch("legoesm.core.hardware.jax.default_backend", return_value="cpu"):
             assert get_backend() == "CPU"
 
@@ -95,32 +93,35 @@ class TestGetBackend:
             assert get_backend() == "METAL"
 
 
-# =============================================================================
-# Integration: create_gaussian_grid guard
-# =============================================================================
-
 class TestGaussianGridGuard:
-    """Test that create_gaussian_grid calls the backend guard."""
+    """Test that create_gaussian_grid handles Metal guard/fallback paths."""
 
-    def test_metal_blocks_grid_creation(self):
-        """Creating a Gaussian grid on Metal should raise."""
+    def test_metal_without_x64_raises(self):
+        _require_x32()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="METAL"):
             from legoesm.grids.gaussian import create_gaussian_grid
-            with pytest.raises(ValueError, match="spectral solver requires float64"):
+            with pytest.raises(ValueError, match="requires JAX_ENABLE_X64=True"):
                 create_gaussian_grid(n_max=21)
 
-    def test_metal_grid_creation_with_override_warns(self):
-        """Creating a Gaussian grid on Metal with override should warn."""
+    def test_metal_auto_fallback_creates_cpu_grid(self):
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="METAL"):
             from legoesm.grids.gaussian import create_gaussian_grid
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                # The guard should warn (not raise), but float64 allocation
-                # may still fail. We only test the guard behavior here.
-                try:
-                    create_gaussian_grid(n_max=21, allow_unsupported_backend=True)
-                except Exception:
-                    pass  # Expected: float64 may fail on actual Metal
+                grid = create_gaussian_grid(n_max=21)
+            assert "CPU" in str(grid.lat.device).upper()
+            warn_text = "\n".join(str(x.message) for x in w)
+            assert "fallback" in warn_text.lower()
+            assert "unsupported backend" in warn_text.lower()
+
+    def test_metal_grid_creation_with_override_warns(self):
+        _require_x64()
+        with patch("legoesm.core.hardware.jax.default_backend", return_value="METAL"):
+            from legoesm.grids.gaussian import create_gaussian_grid
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                create_gaussian_grid(n_max=21, allow_unsupported_backend=True)
                 guard_warnings = [
                     x for x in w
                     if issubclass(x.category, RuntimeWarning)
@@ -129,21 +130,15 @@ class TestGaussianGridGuard:
                 assert len(guard_warnings) >= 1
 
 
-# =============================================================================
-# Integration: SpectralShallowWaterModel guard
-# =============================================================================
-
 class TestSpectralSWModelGuard:
-    """Test that SpectralShallowWaterModel.__init__ calls the backend guard."""
+    """Test that SpectralShallowWaterModel.__init__ applies backend guard."""
 
     def test_metal_auto_routes_to_cpu(self):
-        """On Metal, SpectralShallowWaterModel auto-routes to CPU."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="METAL"):
             from legoesm.atmosphere.dynamics.spectral_sw import (
                 SpectralShallowWaterModel,
             )
-            # Use a real tiny grid instead of MagicMock so device_put works.
-            import jax
             import jax.numpy as jnp
             from legoesm.grids.gaussian import GaussianGrid
             n_sh = 6
@@ -160,17 +155,14 @@ class TestSpectralSWModelGuard:
                 ms=jnp.zeros(n_sh, dtype=jnp.int32),
                 lap=jnp.zeros(n_sh), ilap=jnp.zeros(n_sh),
             )
-            # On Metal, model should construct without raising
-            # (auto-routing spectral to CPU).
             model = SpectralShallowWaterModel(dummy_grid)
             assert model._use_cpu_for_spectral is True
 
     def test_cpu_allows_model_creation(self):
-        """Constructing SpectralShallowWaterModel on CPU should not raise."""
+        _require_x64()
         with patch("legoesm.core.hardware.jax.default_backend", return_value="cpu"):
             from legoesm.atmosphere.dynamics.spectral_sw import (
                 SpectralShallowWaterModel,
             )
             mock_grid = MagicMock()
-            # Should not raise (the model stores grid/config, no float64 needed yet)
             SpectralShallowWaterModel(mock_grid)

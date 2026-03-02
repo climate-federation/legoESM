@@ -125,11 +125,22 @@ def barotropic_substeps(
     alpha = (0.5 * grid.f * dt_s).astype(eta.dtype)   # (6, n, n)
     denom = 1.0 + alpha ** 2
 
-    # Barotropic diffusion coefficient (controls Coriolis-PGF splitting
-    # errors from non-adjoint cubed-sphere operators).
-    # nu * dt_s / dx_cell^2 ~ baro_damp  (dimensionless CFL fraction)
-    baro_damp = 0.01
-    nu_dt = (baro_damp * grid.area).astype(eta.dtype)  # area ~ dx_cell^2
+    if config.barotropic_diffusion_alpha < 0.0:
+        raise ValueError(
+            "barotropic_diffusion_alpha must be >= 0, got "
+            f"{config.barotropic_diffusion_alpha!r}",
+        )
+    if config.barotropic_diffusion_dt_ref <= 0.0:
+        raise ValueError(
+            "barotropic_diffusion_dt_ref must be > 0, got "
+            f"{config.barotropic_diffusion_dt_ref!r}",
+        )
+    # Tunable, dt-scaled barotropic diffusion.
+    # Per-substep coefficient is alpha * (dt_s / dt_ref) * area.
+    baro_alpha = config.barotropic_diffusion_alpha * (
+        dt_s / config.barotropic_diffusion_dt_ref
+    )
+    nu_dt = (baro_alpha * grid.area).astype(eta.dtype)
 
     # Forward-backward substeps via fori_loop
     def substep_body(i, carry):
@@ -154,11 +165,12 @@ def barotropic_substeps(
         U_bar_new = (rhs_u + alpha * rhs_v) / denom * mask
         V_bar_new = (rhs_v - alpha * rhs_u) / denom * mask
 
-        # Compact Laplacian diffusion (damps modes amplified by
-        # Coriolis-PGF interaction on non-adjoint cubed-sphere operators)
-        eta_new = (eta_new + nu_dt * _laplacian_raw(eta_new, grid)) * mask
-        U_bar_new = (U_bar_new + nu_dt * _laplacian_raw(U_bar_new, grid)) * mask
-        V_bar_new = (V_bar_new + nu_dt * _laplacian_raw(V_bar_new, grid)) * mask
+        if config.barotropic_diffusion_alpha > 0.0:
+            # Compact Laplacian diffusion (damps modes amplified by
+            # Coriolis-PGF interaction on non-adjoint cubed-sphere operators).
+            eta_new = (eta_new + nu_dt * _laplacian_raw(eta_new, grid)) * mask
+            U_bar_new = (U_bar_new + nu_dt * _laplacian_raw(U_bar_new, grid)) * mask
+            V_bar_new = (V_bar_new + nu_dt * _laplacian_raw(V_bar_new, grid)) * mask
 
         return (eta_new, U_bar_new, V_bar_new)
 

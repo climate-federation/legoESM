@@ -276,11 +276,10 @@ def _vertical_advection_spectral(
     """Vertical advection -w * d(field)/dz with upwind scheme (grid-space)."""
     w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
     jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
-    w_star = w_full / jac_safe
 
     dz_half = z_coord.dz_half_ref * jac_safe
-    grad = upwind_vertical_gradient(field, dz_half, w_star)
-    return -w_star * grad
+    grad = upwind_vertical_gradient(field, dz_half, w_full)
+    return -w_full * grad
 
 
 # ==============================================================================
@@ -320,6 +319,7 @@ class SpectralOceanModel:
     ):
         self.z_coord = z_coord
         self.config = config or SpectralOceanConfig()
+        self._validate_config(self.config)
         self._use_cpu_for_spectral = False
         self._cpu_device = None
         self._default_device = None
@@ -346,6 +346,31 @@ class SpectralOceanModel:
             from legoesm.core.hardware import check_spectral_backend
             check_spectral_backend(
                 allow_unsupported=allow_unsupported_backend,
+            )
+
+    @staticmethod
+    def _validate_config(config: SpectralOceanConfig) -> None:
+        """Validate spectral-ocean configuration ranges early."""
+        nonnegative = {
+            "A_h": config.A_h,
+            "K_h": config.K_h,
+            "A_v": config.A_v,
+            "K_v": config.K_v,
+            "hyperdiff_coeff": config.hyperdiff_coeff,
+        }
+        for name, value in nonnegative.items():
+            if value < 0.0:
+                raise ValueError(f"{name} must be >= 0, got {value!r}")
+
+        if config.hyperdiff_order < 1:
+            raise ValueError(
+                "hyperdiff_order must be >= 1, got "
+                f"{config.hyperdiff_order!r}",
+            )
+        if config.n_barotropic_substeps < 1:
+            raise ValueError(
+                "n_barotropic_substeps must be >= 1, got "
+                f"{config.n_barotropic_substeps!r}",
             )
 
     @partial(jax.jit, static_argnums=(0,))

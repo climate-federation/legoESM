@@ -19,7 +19,9 @@ References
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
+import warnings
 
 import numpy as np
 import jax
@@ -91,8 +93,27 @@ def create_gaussian_grid(
             legoesm_config.get("atmosphere.spectral.allow_unsupported", False)
         )
 
+    from legoesm.core.hardware import check_spectral_backend, get_backend
+    backend = get_backend()
+
+    # On Metal we can still run spectral dynamics by hosting grid/transforms on
+    # CPU and routing the spectral model there. Keep strict x64 requirement.
+    if backend == "METAL":
+        if not jax.config.jax_enable_x64:
+            raise ValueError(
+                "Gaussian spectral grid on Metal requires JAX_ENABLE_X64=True "
+                "for CPU spectral fallback."
+            )
+        if not allow_unsupported_backend:
+            warnings.warn(
+                "Metal backend detected. Creating Gaussian spectral grid on CPU "
+                "for spectral fallback.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        allow_unsupported_backend = True
+
     # Guard: spectral code requires float64/complex128
-    from legoesm.core.hardware import check_spectral_backend
     check_spectral_backend(allow_unsupported=allow_unsupported_backend)
 
     # Grid dimensions (standard dealiasing: n_lat >= 3*(n_max+1)/2)
@@ -147,28 +168,36 @@ def create_gaussian_grid(
     lon2d_np, lat2d_np = np.meshgrid(lon_np, lat_np)
     f_np = 2.0 * constants.Omega * sin_lat_np[:, None] * np.ones((1, n_lon))
 
+    target_device = jax.devices("cpu")[0] if backend == "METAL" else None
+
+    def _to_jax(array, dtype):
+        np_arr = np.asarray(array, dtype=dtype)
+        if target_device is None:
+            return jnp.array(np_arr, dtype=dtype)
+        return jax.device_put(np_arr, target_device)
+
     return GaussianGrid(
         n_lat=n_lat,
         n_lon=n_lon,
         n_max=n_max,
         radius=float(radius),
-        lat=jnp.array(lat_np, dtype=jnp.float64),
-        lon=jnp.array(lon_np, dtype=jnp.float64),
-        lat2d=jnp.array(lat2d_np, dtype=jnp.float64),
-        lon2d=jnp.array(lon2d_np, dtype=jnp.float64),
-        cos_lat=jnp.array(cos_lat_np, dtype=jnp.float64),
-        sin_lat=jnp.array(sin_lat_np, dtype=jnp.float64),
-        f=jnp.array(f_np, dtype=jnp.float64),
-        weights=jnp.array(w_gauss, dtype=jnp.float64),
-        Pnm=jnp.array(Pnm_np, dtype=jnp.float64),
-        Hnm=jnp.array(Hnm_np, dtype=jnp.float64),
-        Pnm_oc2=jnp.array(Pnm_oc2_np, dtype=jnp.float64),
-        Dnm=jnp.array(Dnm_np, dtype=jnp.float64),
+        lat=_to_jax(lat_np, np.float64),
+        lon=_to_jax(lon_np, np.float64),
+        lat2d=_to_jax(lat2d_np, np.float64),
+        lon2d=_to_jax(lon2d_np, np.float64),
+        cos_lat=_to_jax(cos_lat_np, np.float64),
+        sin_lat=_to_jax(sin_lat_np, np.float64),
+        f=_to_jax(f_np, np.float64),
+        weights=_to_jax(w_gauss, np.float64),
+        Pnm=_to_jax(Pnm_np, np.float64),
+        Hnm=_to_jax(Hnm_np, np.float64),
+        Pnm_oc2=_to_jax(Pnm_oc2_np, np.float64),
+        Dnm=_to_jax(Dnm_np, np.float64),
         n_sh=n_sh,
-        ls=jnp.array(ls_np, dtype=jnp.int32),
-        ms=jnp.array(ms_np, dtype=jnp.int32),
-        lap=jnp.array(lap_np, dtype=jnp.float64),
-        ilap=jnp.array(ilap_np, dtype=jnp.float64),
+        ls=_to_jax(ls_np, np.int32),
+        ms=_to_jax(ms_np, np.int32),
+        lap=_to_jax(lap_np, np.float64),
+        ilap=_to_jax(ilap_np, np.float64),
     )
 
 
@@ -583,11 +612,18 @@ def spectral_hyperdiffusion(
     """
     if order < 1:
         raise ValueError(f"order must be >= 1, got {order!r}")
+    if nu < 0.0:
+        raise ValueError(f"nu must be >= 0, got {nu!r}")
+    if not math.isfinite(float(nu)):
+        raise ValueError(f"nu must be finite, got {nu!r}")
+    if nu == 0.0:
+        return jnp.zeros_like(coeffs)
 
     a2 = grid.radius * grid.radius
     nn = grid.ls.astype(jnp.float64)
     eig = nn * (nn + 1.0) / a2  # n(n+1)/a^2
     damping = -nu * eig ** order
+    damping = jnp.where(jnp.isfinite(damping), damping, 0.0)
     return damping * coeffs
 
 
@@ -708,9 +744,16 @@ def spectral_hyperdiffusion_3d(
     """
     if order < 1:
         raise ValueError(f"order must be >= 1, got {order!r}")
+    if nu < 0.0:
+        raise ValueError(f"nu must be >= 0, got {nu!r}")
+    if not math.isfinite(float(nu)):
+        raise ValueError(f"nu must be finite, got {nu!r}")
+    if nu == 0.0:
+        return jnp.zeros_like(coeffs_3d)
 
     a2 = grid.radius * grid.radius
     nn = grid.ls.astype(jnp.float64)
     eig = nn * (nn + 1.0) / a2
     damping = -nu * eig ** order  # (n_sh,)
+    damping = jnp.where(jnp.isfinite(damping), damping, 0.0)
     return damping[:, None] * coeffs_3d

@@ -1,0 +1,12 @@
+legoESM Ocean Model Standardized Tests
+================================================
+Resolution: C4, Levels: 4
+dt=1800s, days=0.05, steps=2
+Runtime checks: True
+Config: hyperdiff=2.486e+17, n_baro=10, baro_alpha=1.000e-02
+
+rest_state
+  SSH=[0.0000e+00, 0.0000e+00] u_max=0.0000e+00 v_max=0.0000e+00
+  heat_drift_rel=0.000e+00 salt_drift_rel=0.000e+00 eta_mean_drift=0.000e+00
+  all_finite=True land_zero=True
+

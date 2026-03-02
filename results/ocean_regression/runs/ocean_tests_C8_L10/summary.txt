@@ -1,0 +1,22 @@
+legoESM Ocean Model Standardized Tests
+================================================
+Resolution: C8, Levels: 10
+dt=3600s, days=5.00, steps=120
+Runtime checks: True
+Config: hyperdiff=7.914e+15, n_baro=10, baro_alpha=1.000e-02
+
+rest_state
+  SSH=[0.0000e+00, 0.0000e+00] u_max=0.0000e+00 v_max=0.0000e+00
+  heat_drift_rel=-7.475e-08 salt_drift_rel=0.000e+00 eta_mean_drift=0.000e+00
+  all_finite=True land_zero=True
+
+gravity_wave
+  SSH=[-1.1495e-01, 3.7300e-02] u_max=3.3276e+00 v_max=6.2996e+00
+  heat_drift_rel=2.990e-07 salt_drift_rel=-4.468e-07 eta_mean_drift=-7.690e-08
+  all_finite=True land_zero=True
+
+wind_gyre
+  SSH=[-3.8867e+01, 2.3507e+01] u_max=5.5744e+02 v_max=7.8975e+02
+  heat_drift_rel=-3.128e-07 salt_drift_rel=1.609e-06 eta_mean_drift=4.312e-07
+  all_finite=True land_zero=True
+

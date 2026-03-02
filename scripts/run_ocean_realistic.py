@@ -24,6 +24,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import time
 from pathlib import Path
@@ -144,6 +145,65 @@ def compute_diagnostics(state, grid, z_coord):
     }
 
 
+def summarize_case_metrics(state, diagnostics, grid):
+    """Build machine-readable summary metrics for a test case."""
+    first = diagnostics[0]
+    last = diagnostics[-1]
+    mask = state.land_mask.data
+
+    all_finite = bool(
+        jnp.all(jnp.isfinite(state.u.data))
+        & jnp.all(jnp.isfinite(state.v.data))
+        & jnp.all(jnp.isfinite(state.T.data))
+        & jnp.all(jnp.isfinite(state.S.data))
+        & jnp.all(jnp.isfinite(state.eta.data))
+    )
+
+    land = mask < 0.5
+    land_3d = jnp.broadcast_to(land[..., jnp.newaxis], state.u.data.shape)
+    if bool(jnp.any(land)):
+        max_land_u = float(jnp.max(jnp.abs(jnp.where(land_3d, state.u.data, 0.0))))
+        max_land_v = float(jnp.max(jnp.abs(jnp.where(land_3d, state.v.data, 0.0))))
+        max_land_eta = float(jnp.max(jnp.abs(jnp.where(land, state.eta.data, 0.0))))
+        land_zero = max(max_land_u, max_land_v, max_land_eta) <= 1.0e-10
+    else:
+        max_land_u = max_land_v = max_land_eta = 0.0
+        land_zero = True
+
+    ocean_area = float(jnp.sum(mask * grid.area))
+    heat_drift_rel = (
+        (last["heat"] - first["heat"]) / abs(first["heat"])
+        if abs(first["heat"]) > 1.0e-12 else 0.0
+    )
+    salt_drift_rel = (
+        (last["salt"] - first["salt"]) / abs(first["salt"])
+        if abs(first["salt"]) > 1.0e-12 else 0.0
+    )
+    volume_mean_eta_drift = (
+        (last["volume"] - first["volume"]) / max(ocean_area, 1.0)
+    )
+
+    return {
+        "SSH_min": float(last["SSH_min"]),
+        "SSH_max": float(last["SSH_max"]),
+        "u_max": float(last["u_max"]),
+        "v_max": float(last["v_max"]),
+        "speed_max": float(last["speed_max"]),
+        "SST_min": float(last["SST_min"]),
+        "SST_max": float(last["SST_max"]),
+        "SST_mean": float(last["SST_mean"]),
+        "kinetic_energy": float(last["kinetic_energy"]),
+        "heat_drift_rel": float(heat_drift_rel),
+        "salt_drift_rel": float(salt_drift_rel),
+        "volume_mean_eta_drift": float(volume_mean_eta_drift),
+        "all_finite": bool(all_finite),
+        "land_zero": bool(land_zero),
+        "max_land_u": float(max_land_u),
+        "max_land_v": float(max_land_v),
+        "max_land_eta": float(max_land_eta),
+    }
+
+
 def zonal_mean(field_2d, grid, n_bins=60):
     """Compute zonal mean of a 2D field."""
     lat_flat = np.asarray(grid.lat).flatten()
@@ -174,10 +234,11 @@ def run_integration(model, state, grid, z_coord, dt, n_steps,
     """Generic integration loop with diagnostics and snapshots."""
     diagnostics = [compute_diagnostics(state, grid, z_coord)]
     snapshots = {0: state}
+    step_fn = model.step_checked if model.config.enable_runtime_checks else model.step
 
     print(f"  Warming up JIT...", end=" ", flush=True)
     t0 = time.time()
-    _ = model.step(state, dt)
+    _ = step_fn(state, dt)
     jax.block_until_ready(_.eta.data)
     print(f"done ({time.time()-t0:.1f}s)")
 
@@ -192,7 +253,7 @@ def run_integration(model, state, grid, z_coord, dt, n_steps,
         if external_forcing_fn is not None:
             state = external_forcing_fn(state, dt)
 
-        state = model.step(state, dt)
+        state = step_fn(state, dt)
 
         if step % diag_interval == 0 or step == n_steps:
             jax.block_until_ready(state.eta.data)
@@ -216,7 +277,8 @@ def run_integration(model, state, grid, z_coord, dt, n_steps,
                 break
 
     total_time = time.time() - t_start
-    print(f"\n  Completed in {total_time:.1f}s ({n_steps/total_time:.0f} steps/s)")
+    steps_per_s = n_steps / max(total_time, 1.0e-12)
+    print(f"\n  Completed in {total_time:.1f}s ({steps_per_s:.0f} steps/s)")
 
     return state, diagnostics, snapshots, total_time
 
@@ -871,6 +933,8 @@ def main():
         description="Realistic ocean model experiments",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--x64", action="store_true",
+                        help="Enable float64 mode (default: float32)")
     parser.add_argument("--resolution", "-n", type=int, default=16,
                         help="Cubed-sphere resolution (default: 16)")
     parser.add_argument("--levels", "-l", type=int, default=20,
@@ -884,12 +948,20 @@ def main():
     parser.add_argument("--test", "-t", type=str, default="all",
                         choices=["all", "gyre", "front", "kelvin"],
                         help="Which test to run (default: all)")
+    parser.add_argument("--runtime-checks", action="store_true",
+                        help="Enable host-side runtime invariant checks")
     args = parser.parse_args()
+    jax.config.update("jax_enable_x64", bool(args.x64))
 
     output_dir = args.output or f"results/ocean_realistic_C{args.resolution}_L{args.levels}_{args.days:.0f}d"
     os.makedirs(output_dir, exist_ok=True)
 
     n_steps = int(args.days * 86400 / args.dt)
+    if n_steps < 1:
+        raise ValueError(
+            "Integration has zero steps. Increase --days or reduce --dt "
+            f"(got days={args.days}, dt={args.dt}).",
+        )
     point_size = max(1.0, 120 / args.resolution)
 
     # Banner
@@ -961,6 +1033,7 @@ def main():
         fix_volume=True,
         fix_heat=True,
         fix_salt=True,
+        enable_runtime_checks=args.runtime_checks,
     )
 
     print(f"\n  Integration: {args.days} days ({n_steps} steps, dt={args.dt:.0f}s)")
@@ -972,15 +1045,27 @@ def main():
 
     if args.test in ("all", "gyre"):
         state, diag = stommel_gyre(args, grid, z_coord, config, output_dir, point_size)
-        results["stommel_gyre"] = {"state": state, "diagnostics": diag}
+        results["stommel_gyre"] = {
+            "state": state,
+            "diagnostics": diag,
+            "metrics": summarize_case_metrics(state, diag, grid),
+        }
 
     if args.test in ("all", "front"):
         state, diag = baroclinic_adjustment(args, grid, z_coord, config, output_dir, point_size)
-        results["baroclinic_adjustment"] = {"state": state, "diagnostics": diag}
+        results["baroclinic_adjustment"] = {
+            "state": state,
+            "diagnostics": diag,
+            "metrics": summarize_case_metrics(state, diag, grid),
+        }
 
     if args.test in ("all", "kelvin"):
         state, diag = equatorial_kelvin_wave(args, grid, z_coord, config, output_dir, point_size)
-        results["kelvin_wave"] = {"state": state, "diagnostics": diag}
+        results["kelvin_wave"] = {
+            "state": state,
+            "diagnostics": diag,
+            "metrics": summarize_case_metrics(state, diag, grid),
+        }
 
     # =====================================================================
     # Summary
@@ -991,33 +1076,51 @@ def main():
     print(f"  Resolution:  C{args.resolution} x {args.levels}L ({grid.n_cells:,} columns)")
     print(f"  Duration:    {args.days} days ({n_steps} steps, dt={args.dt:.0f}s)")
     print(f"  Physics:     A_h={A_h:.0e}, K_h={K_h:.0e}, A_v={A_v:.0e}, K_v={K_v:.0e}")
+    print(f"  Runtime checks: {args.runtime_checks}")
 
+    summary_cases = {}
     for name, res in results.items():
-        diag = res["diagnostics"]
-        state = res["state"]
-        d = diag[-1]
+        d = res["metrics"]
         print(f"\n  --- {name} ---")
         print(f"    SSH range:        [{d['SSH_min']:.4f}, {d['SSH_max']:.4f}] m")
         print(f"    Max current:      {d['speed_max']:.4f} m/s")
         print(f"    SST range:        [{d['SST_min']:.2f}, {d['SST_max']:.2f}] degC")
         print(f"    Mean SST:         {d['SST_mean']:.4f} degC")
         print(f"    Kinetic energy:   {d['kinetic_energy']:.4e}")
+        print(f"    Heat drift rel:   {d['heat_drift_rel']:.2e}")
+        print(f"    Salt drift rel:   {d['salt_drift_rel']:.2e}")
+        print(f"    Mean eta drift:   {d['volume_mean_eta_drift']:.2e} m")
+        print(f"    All finite:       {d['all_finite']}")
+        print(f"    Land cells zero:  {d['land_zero']}")
+        summary_cases[name] = d
 
-        # Conservation
-        if abs(diag[0]["heat"]) > 1e-10:
-            heat_drift = (diag[-1]["heat"] - diag[0]["heat"]) / abs(diag[0]["heat"])
-            print(f"    Heat drift:       {heat_drift:.2e}")
-        if abs(diag[0]["salt"]) > 1e-10:
-            salt_drift = (diag[-1]["salt"] - diag[0]["salt"]) / abs(diag[0]["salt"])
-            print(f"    Salt drift:       {salt_drift:.2e}")
-
-        all_finite = bool(
-            jnp.all(jnp.isfinite(state.u.data)) &
-            jnp.all(jnp.isfinite(state.v.data)) &
-            jnp.all(jnp.isfinite(state.T.data)) &
-            jnp.all(jnp.isfinite(state.eta.data))
-        )
-        print(f"    All finite:       {all_finite}")
+    summary_payload = {
+        "suite": "ocean_realistic",
+        "meta": {
+            "backend": jax.default_backend(),
+            "device_count": int(jax.device_count()),
+            "float_dtype": str(jnp.zeros(1).dtype),
+            "resolution": int(args.resolution),
+            "levels": int(args.levels),
+            "dt": float(args.dt),
+            "days": float(args.days),
+            "n_steps": int(n_steps),
+            "runtime_checks": bool(args.runtime_checks),
+        },
+        "config": {
+            "A_h": float(config.A_h),
+            "K_h": float(config.K_h),
+            "A_v": float(config.A_v),
+            "K_v": float(config.K_v),
+            "hyperdiff_coeff": float(config.hyperdiff_coeff),
+            "n_barotropic_substeps": int(config.n_barotropic_substeps),
+            "barotropic_diffusion_alpha": float(config.barotropic_diffusion_alpha),
+            "barotropic_diffusion_dt_ref": float(config.barotropic_diffusion_dt_ref),
+        },
+        "cases": summary_cases,
+    }
+    with open(Path(output_dir) / "summary.json", "w") as f:
+        json.dump(summary_payload, f, indent=2, sort_keys=True)
 
     # Summary text file
     with open(Path(output_dir) / "summary.txt", "w") as f:
@@ -1026,16 +1129,24 @@ def main():
         f.write(f"Resolution: C{args.resolution}, L{args.levels}\n")
         f.write(f"Time step: {args.dt:.0f} s\n")
         f.write(f"Duration: {args.days} days ({n_steps} steps)\n")
+        f.write(f"Runtime checks: {args.runtime_checks}\n")
         f.write(f"A_h={A_h:.2e}, K_h={K_h:.2e}, A_v={A_v:.2e}, K_v={K_v:.2e}\n")
         f.write(f"Hyperdiffusion: {hyperdiff_coeff:.2e}\n")
         f.write(f"Barotropic substeps: {n_baro}\n\n")
-        for name, res in results.items():
-            d = res["diagnostics"][-1]
+        for name, d in summary_cases.items():
             f.write(f"{name}:\n")
             f.write(f"  SSH: [{d['SSH_min']:.4f}, {d['SSH_max']:.4f}] m\n")
             f.write(f"  Max speed: {d['speed_max']:.4f} m/s\n")
             f.write(f"  SST: [{d['SST_min']:.2f}, {d['SST_max']:.2f}] degC\n")
-            f.write(f"  KE: {d['kinetic_energy']:.4e}\n\n")
+            f.write(f"  KE: {d['kinetic_energy']:.4e}\n")
+            f.write(
+                f"  heat_drift_rel={d['heat_drift_rel']:.3e}, "
+                f"salt_drift_rel={d['salt_drift_rel']:.3e}, "
+                f"eta_mean_drift={d['volume_mean_eta_drift']:.3e}\n",
+            )
+            f.write(
+                f"  all_finite={d['all_finite']}, land_zero={d['land_zero']}\n\n",
+            )
 
     print(f"\n  Output: {output_dir}/")
     for name in results:

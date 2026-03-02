@@ -183,23 +183,25 @@ def compute_ocean_jacobian(
 def upwind_vertical_gradient(
     field: jnp.ndarray,
     dz_half: jnp.ndarray,
-    w_star: jnp.ndarray,
+    w: jnp.ndarray,
     *,
     eps: float = 1.0e-12,
 ) -> jnp.ndarray:
     """Compute first-order upwind d(field)/dz at full levels.
 
     Assumes levels are indexed surface-to-bottom (k=0 at surface).
+    Caller must use consistent coordinates: both ``dz_half`` and ``w``
+    should be in the same vertical coordinate (physical z or z*).
 
     Parameters
     ----------
     field : array
         Field at full levels, shape (..., nlev).
     dz_half : array
-        Full-level spacing, shape (..., nlev-1). Positive.
-    w_star : array
-        Vertical velocity in transformed coordinates, shape (..., nlev).
-        Positive means upward.
+        Full-level spacing [m], shape (..., nlev-1). Positive.
+    w : array
+        Vertical velocity [m/s], shape (..., nlev).
+        Only its sign is used (upwind direction). Positive = upward.
     eps : float
         Small denominator guard for spacing.
 
@@ -217,4 +219,4 @@ def upwind_vertical_gradient(
     # Downward flow (w<0): donor is shallower cell -> (f[k-1] - f[k]) / dz.
     grad_down = jnp.concatenate([zeros, df], axis=-1)
 
-    return jnp.where(w_star > 0.0, grad_up, grad_down)
+    return jnp.where(w > 0.0, grad_up, grad_down)

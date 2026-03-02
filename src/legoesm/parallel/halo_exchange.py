@@ -132,10 +132,19 @@ def pad_halo_mpi(
     for nbr_rank in sorted(remote_by_rank):
         edges = remote_by_rank[nbr_rank]
         n_edges = len(edges)
+        # Canonical edge ordering for packed buffer correctness.
+        # Both sides must iterate shared edges in the SAME order so
+        # that strip i on the sender matches strip i on the receiver.
+        # Canonical key = sender's (face, edge):
+        #   - Sender sorts by (face, edge)           [its local key]
+        #   - Receiver sorts by (nbr_face, nbr_edge) [= sender's key]
+        # Without this, 2-rank and 3-rank decompositions corrupt halos.
+        send_order = sorted(edges, key=lambda e: (e[0], e[1]))
+        recv_order = sorted(edges, key=lambda e: (e[2], e[3]))
 
         # Pack all outgoing strips into one buffer.
         send_strips = []
-        for face, edge, nbr_face, nbr_edge, is_reversed in edges:
+        for face, edge, nbr_face, nbr_edge, is_reversed in send_order:
             send_strips.append(_extract_edge_strip(data, face, edge))
         send_buf = jnp.concatenate(send_strips, axis=0)  # (n_edges * n,)
 
@@ -158,7 +167,7 @@ def pad_halo_mpi(
         )
 
         # Unpack received buffer and place strips.
-        for i, (face, edge, nbr_face, nbr_edge, is_reversed) in enumerate(edges):
+        for i, (face, edge, nbr_face, nbr_edge, is_reversed) in enumerate(recv_order):
             strip = recv_buf[i * n : (i + 1) * n]
             if is_reversed:
                 strip = strip[::-1]

@@ -28,7 +28,11 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.parallel.comm import CommTopology, build_comm_topology
-from legoesm.parallel.mesh import DeviceConfig, create_device_mesh
+from legoesm.parallel.mesh import (
+    DeviceConfig,
+    create_device_mesh,
+    set_active_config,
+)
 
 _active_topology: CommTopology | None = None
 
@@ -53,6 +57,22 @@ def initialize_distributed(
         Device configuration with ``is_distributed=True``. If
         ``return_topology=True``, returns ``(config, topology)``.
     """
+    global _active_topology
+
+    if _active_topology is not None:
+        import warnings
+        warnings.warn(
+            "initialize_distributed() called more than once. "
+            "Returning existing configuration.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        from legoesm.parallel.mesh import get_active_config
+        config = get_active_config()
+        if return_topology:
+            return config, _active_topology
+        return config
+
     # Initialize JAX distributed runtime.
     jax.distributed.initialize()
 
@@ -74,8 +94,6 @@ def initialize_distributed(
             RuntimeWarning,
             stacklevel=2,
         )
-
-    global _active_topology
 
     # Build communication topology for this rank.
     topology = build_comm_topology(rank, n_processes)
@@ -99,6 +117,7 @@ def initialize_distributed(
         backend=local_config.backend,
         is_distributed=True,
     )
+    set_active_config(config)
     if return_topology:
         return config, topology
     return config
@@ -185,6 +204,9 @@ def gather_state(local_state, topology: CommTopology | None = None):
 
     def _allreduce_leaf(leaf):
         if not isinstance(leaf, (jax.Array, jnp.ndarray)):
+            return leaf
+        if leaf.ndim < 1 or leaf.shape[0] != 6:
+            # Non-face-leading leaves are replicated metadata/constants.
             return leaf
         result, _ = mpi4jax.allreduce(
             leaf, op=MPI.SUM, comm=MPI.COMM_WORLD

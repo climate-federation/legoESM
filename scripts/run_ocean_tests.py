@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import time
 
@@ -136,6 +137,63 @@ def compute_ocean_diagnostics(state, grid, z_coord):
     }
 
 
+def summarize_case_metrics(state, diagnostics, grid):
+    """Build machine-readable summary metrics for a test case."""
+    first = diagnostics[0]
+    last = diagnostics[-1]
+    mask = state.land_mask.data
+
+    all_finite = bool(
+        jnp.all(jnp.isfinite(state.u.data))
+        & jnp.all(jnp.isfinite(state.v.data))
+        & jnp.all(jnp.isfinite(state.T.data))
+        & jnp.all(jnp.isfinite(state.S.data))
+        & jnp.all(jnp.isfinite(state.eta.data))
+    )
+
+    land = mask < 0.5
+    land_3d = jnp.broadcast_to(land[..., jnp.newaxis], state.u.data.shape)
+    if bool(jnp.any(land)):
+        max_land_u = float(jnp.max(jnp.abs(jnp.where(land_3d, state.u.data, 0.0))))
+        max_land_v = float(jnp.max(jnp.abs(jnp.where(land_3d, state.v.data, 0.0))))
+        max_land_eta = float(jnp.max(jnp.abs(jnp.where(land, state.eta.data, 0.0))))
+        land_zero = max(max_land_u, max_land_v, max_land_eta) <= 1.0e-10
+    else:
+        max_land_u = max_land_v = max_land_eta = 0.0
+        land_zero = True
+
+    ocean_area = float(jnp.sum(mask * grid.area))
+    heat_drift_rel = (
+        (last["heat"] - first["heat"]) / abs(first["heat"])
+        if abs(first["heat"]) > 1.0e-12 else 0.0
+    )
+    salt_drift_rel = (
+        (last["salt"] - first["salt"]) / abs(first["salt"])
+        if abs(first["salt"]) > 1.0e-12 else 0.0
+    )
+    volume_mean_eta_drift = (
+        (last["volume"] - first["volume"]) / max(ocean_area, 1.0)
+    )
+
+    return {
+        "SSH_min": float(last["SSH_min"]),
+        "SSH_max": float(last["SSH_max"]),
+        "u_max": float(last["u_max"]),
+        "v_max": float(last["v_max"]),
+        "SST_mean": float(last["SST_mean"]),
+        "SST_max": float(last["SST_max"]),
+        "kinetic_energy": float(last["kinetic_energy"]),
+        "heat_drift_rel": float(heat_drift_rel),
+        "salt_drift_rel": float(salt_drift_rel),
+        "volume_mean_eta_drift": float(volume_mean_eta_drift),
+        "all_finite": bool(all_finite),
+        "land_zero": bool(land_zero),
+        "max_land_u": float(max_land_u),
+        "max_land_v": float(max_land_v),
+        "max_land_eta": float(max_land_eta),
+    }
+
+
 def add_wind_stress_tendency(state, grid, z_coord, config, tau_max=0.1):
     """Compute wind stress tendency for wind-driven gyre.
 
@@ -177,6 +235,7 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
     print("=" * 70)
 
     model = OceanModel(grid, z_coord, config)
+    step_fn = model.step_checked if config.enable_runtime_checks else model.step
     state = _rest_state_all_ocean(grid, z_coord)
     _assert_all_ocean(state, "rest_state_test")
     state_init = state
@@ -190,7 +249,7 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
     # JIT warmup
     print("  Warming up JIT...", end=" ", flush=True)
     t0 = time.time()
-    _ = model.step(state, dt)
+    _ = step_fn(state, dt)
     jax.block_until_ready(_.eta.data)
     print(f"done ({time.time()-t0:.1f}s)")
 
@@ -205,7 +264,7 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
 
     t_start = time.time()
     for step in range(1, n_steps + 1):
-        state = model.step(state, dt)
+        state = step_fn(state, dt)
 
         if step % diag_interval == 0 or step == n_steps:
             jax.block_until_ready(state.eta.data)
@@ -217,7 +276,8 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
                   f"{diag['kinetic_energy']:12.2e}")
 
     total_time = time.time() - t_start
-    print(f"\nCompleted in {total_time:.1f}s ({n_steps/total_time:.0f} steps/s)")
+    steps_per_s = n_steps / max(total_time, 1.0e-12)
+    print(f"\nCompleted in {total_time:.1f}s ({steps_per_s:.0f} steps/s)")
 
     # --- Visualization ---
     os.makedirs(f"{output_dir}/rest_state", exist_ok=True)
@@ -371,11 +431,12 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
     print(f"  Expected wave speed: {c_wave:.0f} m/s")
 
     model = OceanModel(grid, z_coord, config)
+    step_fn = model.step_checked if config.enable_runtime_checks else model.step
 
     # JIT warmup
     print("  Warming up JIT...", end=" ", flush=True)
     t0 = time.time()
-    _ = model.step(state, dt)
+    _ = step_fn(state, dt)
     jax.block_until_ready(_.eta.data)
     print(f"done ({time.time()-t0:.1f}s)")
 
@@ -392,7 +453,7 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
 
     t_start = time.time()
     for step in range(1, n_steps + 1):
-        state = model.step(state, dt)
+        state = step_fn(state, dt)
 
         if step % diag_interval == 0 or step == n_steps:
             jax.block_until_ready(state.eta.data)
@@ -407,7 +468,8 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
             snapshots[step] = state
 
     total_time = time.time() - t_start
-    print(f"\nCompleted in {total_time:.1f}s ({n_steps/total_time:.0f} steps/s)")
+    steps_per_s = n_steps / max(total_time, 1.0e-12)
+    print(f"\nCompleted in {total_time:.1f}s ({steps_per_s:.0f} steps/s)")
 
     # --- Visualization ---
     os.makedirs(f"{output_dir}/gravity_wave", exist_ok=True)
@@ -498,20 +560,38 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
     print("TEST 3: Wind-Driven Gyre")
     print("=" * 70)
 
-    state = _rest_state_all_ocean(grid, z_coord)
+    # Use depth-uniform tracers for a predominantly barotropic gyre harness.
+    state = _rest_state_all_ocean(grid, z_coord, T_surface=15.0, T_deep=15.0)
     _assert_all_ocean(state, "wind_driven_gyre_test")
     state_init = state
 
-    tau_max = 0.1  # N/m^2
+    # Keep forcing moderate at coarse resolution so the 5-day standardized
+    # harness remains in a stable, interpretable regime with dt=1h.
+    tau_max = 0.02  # N/m^2
+    drag_timescale_days = 5.0  # linear Rayleigh damping (Stommel-style)
+    drag_factor = float(jnp.exp(-dt / (drag_timescale_days * 86400.0)))
+    gyre_config = config._replace(
+        A_h=max(config.A_h, 5.0e5),
+        K_h=max(config.K_h, 5.0e4),
+        A_v=max(config.A_v, 5.0e-3),
+        K_v=max(config.K_v, 5.0e-4),
+    )
     print(f"  Wind stress: tau_max = {tau_max} N/m^2")
     print(f"  Wind pattern: -tau_max * cos(2*pi*(lat-45)/60), 15N-75N")
+    print(f"  Linear drag timescale: {drag_timescale_days:.1f} days")
+    print(
+        "  Gyre mixing: "
+        f"A_h={gyre_config.A_h:.1e}, K_h={gyre_config.K_h:.1e}, "
+        f"A_v={gyre_config.A_v:.1e}, K_v={gyre_config.K_v:.1e}",
+    )
 
-    model = OceanModel(grid, z_coord, config)
+    model = OceanModel(grid, z_coord, gyre_config)
+    step_fn = model.step_checked if gyre_config.enable_runtime_checks else model.step
 
     # JIT warmup
     print("  Warming up JIT...", end=" ", flush=True)
     t0 = time.time()
-    _ = model.step(state, dt)
+    _ = step_fn(state, dt)
     jax.block_until_ready(_.eta.data)
     print(f"done ({time.time()-t0:.1f}s)")
 
@@ -529,13 +609,14 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
     t_start = time.time()
     for step in range(1, n_steps + 1):
         # Apply wind forcing to surface layer velocity
-        du_wind = add_wind_stress_tendency(state, grid, z_coord, config, tau_max)
+        du_wind = add_wind_stress_tendency(state, grid, z_coord, gyre_config, tau_max)
         state = state._replace(
-            u=state.u.replace(data=state.u.data + dt * du_wind),
+            u=state.u.replace(data=(state.u.data + dt * du_wind) * drag_factor),
+            v=state.v.replace(data=state.v.data * drag_factor),
         )
 
         # Model step (dynamics + barotropic + conservation)
-        state = model.step(state, dt)
+        state = step_fn(state, dt)
 
         if step % diag_interval == 0 or step == n_steps:
             jax.block_until_ready(state.eta.data)
@@ -550,7 +631,8 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
             snapshots[step] = state
 
     total_time = time.time() - t_start
-    print(f"\nCompleted in {total_time:.1f}s ({n_steps/total_time:.0f} steps/s)")
+    steps_per_s = n_steps / max(total_time, 1.0e-12)
+    print(f"\nCompleted in {total_time:.1f}s ({steps_per_s:.0f} steps/s)")
 
     # --- Visualization ---
     os.makedirs(f"{output_dir}/wind_gyre", exist_ok=True)
@@ -692,6 +774,8 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
 
 def main():
     parser = argparse.ArgumentParser(description="Ocean model standardized tests")
+    parser.add_argument("--x64", action="store_true",
+                        help="Enable float64 mode (default: float32)")
     parser.add_argument("--resolution", "-n", type=int, default=8,
                         help="Cubed-sphere resolution (default: 8)")
     parser.add_argument("--levels", "-l", type=int, default=10,
@@ -705,12 +789,20 @@ def main():
     parser.add_argument("--test", "-t", type=str, default="all",
                         choices=["all", "rest", "wave", "gyre"],
                         help="Which test to run (default: all)")
+    parser.add_argument("--runtime-checks", action="store_true",
+                        help="Enable host-side runtime invariant checks")
     args = parser.parse_args()
+    jax.config.update("jax_enable_x64", bool(args.x64))
 
     output_dir = args.output or f"results/ocean_tests_C{args.resolution}_L{args.levels}"
     os.makedirs(output_dir, exist_ok=True)
 
     n_steps = int(args.days * 86400 / args.dt)
+    if n_steps < 1:
+        raise ValueError(
+            "Integration has zero steps. Increase --days or reduce --dt "
+            f"(got days={args.days}, dt={args.dt}).",
+        )
     point_size = max(1.0, 120 / args.resolution)
 
     # Banner
@@ -757,6 +849,7 @@ def main():
         fix_volume=True,
         fix_heat=True,
         fix_salt=True,
+        enable_runtime_checks=args.runtime_checks,
     )
 
     print(f"\nIntegration: {args.days} days ({n_steps} steps, dt={args.dt:.0f}s)")
@@ -770,19 +863,31 @@ def main():
         state, diag = run_rest_state_test(
             grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
         )
-        results["rest_state"] = {"state": state, "diagnostics": diag}
+        results["rest_state"] = {
+            "state": state,
+            "diagnostics": diag,
+            "metrics": summarize_case_metrics(state, diag, grid),
+        }
 
     if args.test in ("all", "wave"):
         state, diag = run_gravity_wave_test(
             grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
         )
-        results["gravity_wave"] = {"state": state, "diagnostics": diag}
+        results["gravity_wave"] = {
+            "state": state,
+            "diagnostics": diag,
+            "metrics": summarize_case_metrics(state, diag, grid),
+        }
 
     if args.test in ("all", "gyre"):
         state, diag = run_wind_driven_gyre_test(
             grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
         )
-        results["wind_gyre"] = {"state": state, "diagnostics": diag}
+        results["wind_gyre"] = {
+            "state": state,
+            "diagnostics": diag,
+            "metrics": summarize_case_metrics(state, diag, grid),
+        }
 
     # =====================================================================
     # Summary
@@ -792,34 +897,78 @@ def main():
     print("=" * 70)
     print(f"  Resolution:  C{args.resolution} x {args.levels}L ({grid.n_cells:,} columns)")
     print(f"  Duration:    {args.days} days ({n_steps} steps, dt={args.dt:.0f}s)")
+    print(f"  Runtime checks: {args.runtime_checks}")
 
+    summary_cases = {}
     for name, res in results.items():
         diag = res["diagnostics"]
-        state = res["state"]
+        m = res["metrics"]
         print(f"\n  --- {name} ---")
-        print(f"    Final SSH range:  [{diag[-1]['SSH_min']:.4e}, {diag[-1]['SSH_max']:.4e}] m")
-        print(f"    Final |u| max:    {diag[-1]['u_max']:.4e} m/s")
-        print(f"    Final SST mean:   {diag[-1]['SST_mean']:.4f} degC")
-        print(f"    Final KE:         {diag[-1]['kinetic_energy']:.4e}")
+        print(f"    Final SSH range:  [{m['SSH_min']:.4e}, {m['SSH_max']:.4e}] m")
+        print(f"    Final |u| max:    {m['u_max']:.4e} m/s")
+        print(f"    Final |v| max:    {m['v_max']:.4e} m/s")
+        print(f"    Final SST mean:   {m['SST_mean']:.4f} degC")
+        print(f"    Final KE:         {m['kinetic_energy']:.4e}")
+        print(f"    Heat drift rel:   {m['heat_drift_rel']:.2e}")
+        print(f"    Salt drift rel:   {m['salt_drift_rel']:.2e}")
+        print(f"    Mean eta drift:   {m['volume_mean_eta_drift']:.2e} m")
+        print(f"    All fields finite: {m['all_finite']}")
+        print(f"    Land cells zero:   {m['land_zero']}")
+        summary_cases[name] = m
 
-        # Check finiteness
-        all_finite = bool(
-            jnp.all(jnp.isfinite(state.u.data)) &
-            jnp.all(jnp.isfinite(state.v.data)) &
-            jnp.all(jnp.isfinite(state.T.data)) &
-            jnp.all(jnp.isfinite(state.eta.data))
+    summary_payload = {
+        "suite": "ocean_tests",
+        "meta": {
+            "backend": jax.default_backend(),
+            "device_count": int(jax.device_count()),
+            "float_dtype": str(jnp.zeros(1).dtype),
+            "resolution": int(args.resolution),
+            "levels": int(args.levels),
+            "dt": float(args.dt),
+            "days": float(args.days),
+            "n_steps": int(n_steps),
+            "runtime_checks": bool(args.runtime_checks),
+        },
+        "config": {
+            "A_h": float(config.A_h),
+            "K_h": float(config.K_h),
+            "A_v": float(config.A_v),
+            "K_v": float(config.K_v),
+            "hyperdiff_coeff": float(config.hyperdiff_coeff),
+            "n_barotropic_substeps": int(config.n_barotropic_substeps),
+            "barotropic_diffusion_alpha": float(config.barotropic_diffusion_alpha),
+            "barotropic_diffusion_dt_ref": float(config.barotropic_diffusion_dt_ref),
+        },
+        "cases": summary_cases,
+    }
+    with open(os.path.join(output_dir, "summary.json"), "w") as f:
+        json.dump(summary_payload, f, indent=2, sort_keys=True)
+    with open(os.path.join(output_dir, "summary.txt"), "w") as f:
+        f.write("legoESM Ocean Model Standardized Tests\n")
+        f.write("=" * 48 + "\n")
+        f.write(f"Resolution: C{args.resolution}, Levels: {args.levels}\n")
+        f.write(f"dt={args.dt:.0f}s, days={args.days:.2f}, steps={n_steps}\n")
+        f.write(f"Runtime checks: {args.runtime_checks}\n")
+        f.write(
+            "Config: "
+            f"hyperdiff={config.hyperdiff_coeff:.3e}, "
+            f"n_baro={config.n_barotropic_substeps}, "
+            f"baro_alpha={config.barotropic_diffusion_alpha:.3e}\n\n"
         )
-        print(f"    All fields finite: {all_finite}")
-
-        # Land still zero
-        mask = state.land_mask.data
-        land = mask < 0.5
-        land_3d = jnp.broadcast_to(land[..., jnp.newaxis], state.u.data.shape)
-        land_zero = bool(
-            jnp.all(jnp.where(land_3d, state.u.data, 0.0) == 0) &
-            jnp.all(jnp.where(land, state.eta.data, 0.0) == 0)
-        ) if jnp.any(land) else True
-        print(f"    Land cells zero:   {land_zero}")
+        for name, m in summary_cases.items():
+            f.write(f"{name}\n")
+            f.write(
+                f"  SSH=[{m['SSH_min']:.4e}, {m['SSH_max']:.4e}] "
+                f"u_max={m['u_max']:.4e} v_max={m['v_max']:.4e}\n",
+            )
+            f.write(
+                f"  heat_drift_rel={m['heat_drift_rel']:.3e} "
+                f"salt_drift_rel={m['salt_drift_rel']:.3e} "
+                f"eta_mean_drift={m['volume_mean_eta_drift']:.3e}\n",
+            )
+            f.write(
+                f"  all_finite={m['all_finite']} land_zero={m['land_zero']}\n\n",
+            )
 
     print(f"\n  Output directory: {output_dir}/")
     for name in results:
