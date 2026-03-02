@@ -179,6 +179,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             dphis_dt=first.dphis_dt.replace(data=dphis_dt),
         )
 
+    def reset_state():
+        for fn in fns:
+            reset_fn = getattr(fn, "reset_state", None)
+            if callable(reset_fn):
+                reset_fn()
+
+    physics_fn.reset_state = reset_state
     return physics_fn
 
 
@@ -247,6 +254,13 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             dtracers_dt=first.dtracers_dt.replace(data=dtracers_dt),
         )
 
+    def reset_state():
+        for fn in fns:
+            reset_fn = getattr(fn, "reset_state", None)
+            if callable(reset_fn):
+                reset_fn()
+
+    physics_fn.reset_state = reset_state
     return physics_fn
 
 
@@ -270,6 +284,7 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     def physics_fn(state, grid, sigma_coord):
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
+            spectral_pe_to_grid,
         )
 
         if not fns:
@@ -283,7 +298,10 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             )
 
-        first = fns[0](state, grid, sigma_coord)
+        # Compute grid-space diagnostics once and reuse across all active modules.
+        shared_fields = spectral_pe_to_grid(state, grid, sigma_coord)
+
+        first = fns[0](state, grid, sigma_coord, grid_fields=shared_fields)
         vor_hat = first.vor_hat.data
         div_hat = first.div_hat.data
         T_hat = first.T_hat.data
@@ -291,7 +309,7 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         phis_hat = first.phis_hat.data
 
         for fn in fns[1:]:
-            t = fn(state, grid, sigma_coord)
+            t = fn(state, grid, sigma_coord, grid_fields=shared_fields)
             vor_hat = vor_hat + t.vor_hat.data
             div_hat = div_hat + t.div_hat.data
             T_hat = T_hat + t.T_hat.data
@@ -306,4 +324,11 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             phis_hat=first.phis_hat.replace(data=phis_hat),
         )
 
+    def reset_state():
+        for fn in fns:
+            reset_fn = getattr(fn, "reset_state", None)
+            if callable(reset_fn):
+                reset_fn()
+
+    physics_fn.reset_state = reset_state
     return physics_fn

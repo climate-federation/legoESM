@@ -1,0 +1,10 @@
+Command: /Users/pierregentine/legoESM/.venv/bin/python scripts/run_parallel_validation.py --scaling-worker --workload atmosphere_sw --backend-target cpu --case-type weak --n-devices 2 --grid-size 11 --iterations 1 --warmup 0 --dt 300.0
+Status: pass
+Return code: 0
+Elapsed (s): 12.077
+
+=== STDOUT ===
+{"active_backend": "cpu", "backend_target": "cpu", "case_type": "weak", "cells_per_step": 726.0, "compile_time_s": 3.4810412499355152, "dt_s": 300.0, "grid_size": 11, "iterations": 1, "local_device_count": 2, "n_devices": 2, "process_count": 1, "status": "pass", "steady_ms_per_step": 2902.675292105414, "steady_total_s": 2.902675292105414, "throughput_global_mcells_s": 0.000250114093703332, "throughput_per_device_mcells_s": 0.000125057046851666, "throughput_per_rank_mcells_s": 0.000250114093703332, "warmup": 0, "workload": "atmosphere_sw"}
+
+
+=== STDERR ===

@@ -3,5 +3,5 @@ max_qr: 0.000000
 hours: 0.05
 dt: 1.0
 stable: True
-wall_time: 3.1
+wall_time: 3.3
 use_coriolis: False

@@ -51,6 +51,10 @@ from legoesm.grids.vertical import SigmaCoordinate
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm import constants
 
+_LNPS_MIN = float(jnp.log(100.0))
+_LNPS_MAX = float(jnp.log(2.0e6))
+_COS_LAT_MIN = 1.0e-6
+
 
 # =============================================================================
 # State and config
@@ -190,14 +194,18 @@ def spectral_pe_tendencies(
     vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
     div = sh_synthesis_3d(grid, state.div_hat.data)
     T = sh_synthesis_3d(grid, state.T_hat.data)
-    lnps = sh_synthesis(grid, state.lnps_hat.data)    # (n_lat, n_lon)
+    lnps = jnp.clip(
+        sh_synthesis(grid, state.lnps_hat.data),
+        _LNPS_MIN,
+        _LNPS_MAX,
+    )    # (n_lat, n_lon)
     phis = sh_synthesis(grid, state.phis_hat.data)
 
     # --- 2. Velocities ---
     u_cos, v_cos = uv_from_vordiv_3d(
         grid, state.vor_hat.data, state.div_hat.data,
     )  # (n_lat, n_lon, nlev)
-    cos_lat_3d = grid.cos_lat[:, None, None]  # (n_lat, 1, 1)
+    cos_lat_3d = jnp.clip(grid.cos_lat[:, None, None], _COS_LAT_MIN, None)
     u = u_cos / cos_lat_3d
     v = v_cos / cos_lat_3d
 
@@ -277,9 +285,10 @@ def spectral_pe_tendencies(
     # Material derivative correction: kappa * T * v . grad(lnps)
     # Compute grad(lnps) on grid from spectral
     dfdlon = sh_synthesis(grid, 1j * grid.ms * state.lnps_hat.data)
-    dfdx = dfdlon / (a * grid.cos_lat[:, None])
+    cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
+    dfdx = dfdlon / (a * cos_lat_2d)
     dfdtheta_cos = _sh_synthesis_H(grid, state.lnps_hat.data)
-    dfdy = -dfdtheta_cos / (a * grid.cos_lat[:, None])
+    dfdy = -dfdtheta_cos / (a * cos_lat_2d)
     v_dot_grad_lnps = u * dfdx[..., None] + v * dfdy[..., None]
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
@@ -404,16 +413,21 @@ class SpectralPrimitiveEquationModel:
             )
 
     def _ensure_si_data(self, dt: float):
-        """Lazily precompute semi-implicit matrices (on first step)."""
-        if self._si_data is None and self.config.semi_implicit:
-            from legoesm.timestepping.semi_implicit import precompute_si_matrices
-            dt_si = dt / float(self.config.si_substeps)
+        """Lazily precompute semi-implicit matrices and refresh when dt changes."""
+        if not self.config.semi_implicit:
+            return
+
+        from legoesm.timestepping.semi_implicit import precompute_si_matrices
+
+        dt_si = float(dt) / float(self.config.si_substeps)
+        if self._si_data is None or self._si_dt != dt_si:
             self._si_data = precompute_si_matrices(
                 self.grid, self.sigma_coord,
                 T_ref=self.config.si_T_ref,
                 alpha=self.config.si_alpha,
                 dt=dt_si,
             )
+            self._si_dt = dt_si
 
     def _do_step(self, state, dt, tendency_fn):
         """Core step: explicit RK3 or semi-implicit RK3."""
@@ -435,7 +449,7 @@ class SpectralPrimitiveEquationModel:
             return jax.lax.fori_loop(0, n_substeps, si_substep, state)
         return ssp_rk3_step(state, tendency_fn, dt)
 
-    @partial(jax.jit, static_argnums=(0,))
+    @partial(jax.jit, static_argnums=(0, 2))
     def step(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
         """Advance one time step using SSP-RK3 (explicit or semi-implicit)."""
         self._ensure_si_data(dt)
@@ -450,7 +464,7 @@ class SpectralPrimitiveEquationModel:
 
         return self._do_step(state, dt, tendency_fn)
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, 2, 3))
     def step_with_physics(
         self,
         state: SpectralHydrostaticState,
@@ -475,14 +489,14 @@ class SpectralPrimitiveEquationModel:
 
         return self._do_step(state, dt, tendency_fn)
 
-    @partial(jax.jit, static_argnums=(0,))
+    @partial(jax.jit, static_argnums=(0, 2))
     def _step_on_cpu(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
         """Step without device transfers (for batched CPU integration on Metal)."""
         def tendency_fn(s):
             return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
         return self._do_step(state, dt, tendency_fn)
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_on_cpu_with_physics(
         self,
         state: SpectralHydrostaticState,
@@ -747,13 +761,17 @@ def spectral_pe_to_grid(
     vor = sh_synthesis_3d(grid, state.vor_hat.data)
     div = sh_synthesis_3d(grid, state.div_hat.data)
     T = sh_synthesis_3d(grid, state.T_hat.data)
-    lnps = sh_synthesis(grid, state.lnps_hat.data)
+    lnps = jnp.clip(
+        sh_synthesis(grid, state.lnps_hat.data),
+        _LNPS_MIN,
+        _LNPS_MAX,
+    )
     phis = sh_synthesis(grid, state.phis_hat.data)
 
     u_cos, v_cos = uv_from_vordiv_3d(
         grid, state.vor_hat.data, state.div_hat.data,
     )
-    cos_lat_3d = grid.cos_lat[:, None, None]
+    cos_lat_3d = jnp.clip(grid.cos_lat[:, None, None], _COS_LAT_MIN, None)
     u = u_cos / cos_lat_3d
     v = v_cos / cos_lat_3d
 

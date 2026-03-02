@@ -1,6 +1,8 @@
-max_wind: 143.8
+max_wind_all_levels: 143.8
+max_wind_jet_level: 47.9
+p99_wind_jet_level: 47.9
 ps_min_hPa: 854.2
 days: 1
 stable: True
-wall_time: 1.8
+wall_time: 1.9
 note: Explicit RK3 spectral PE requires semi-implicit for longer BW runs

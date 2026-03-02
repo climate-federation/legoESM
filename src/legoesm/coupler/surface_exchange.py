@@ -1,0 +1,158 @@
+"""Extract coupling fields from atmospheric state.
+
+These functions are the ONLY place where full atmospheric state is accessed.
+The coupler itself only ever sees AtmToSurface.
+"""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+
+from legoesm import constants
+from legoesm.coupler.config import CouplerConfig
+from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.state import HydrostaticState, NonHydrostaticState
+from legoesm.grids.vertical import SigmaCoordinate
+
+
+def extract_atm_to_surface(
+    state: HydrostaticState,
+    sigma_coord: SigmaCoordinate,
+    config: CouplerConfig,
+    sw_down: jnp.ndarray | None = None,
+    lw_down: jnp.ndarray | None = None,
+    precip_total: jnp.ndarray | None = None,
+    precip_snow: jnp.ndarray | None = None,
+    cos_zenith: jnp.ndarray | None = None,
+) -> AtmToSurface:
+    """Extract coupling fields from hydrostatic atmospheric state.
+
+    Reads only the lowest model level (index -1) plus surface pressure.
+    Radiation/precipitation fields are passed in from the physics
+    parameterizations that produce them.
+
+    Parameters
+    ----------
+    state : HydrostaticState
+        Current atmospheric state.
+    sigma_coord : SigmaCoordinate
+        Vertical coordinate for pressure reconstruction.
+    config : CouplerConfig
+        Coupler configuration.
+    sw_down, lw_down : optional arrays
+        Downward radiative fluxes at surface [W/m2]. Shape (6, n, n).
+    precip_total, precip_snow : optional arrays
+        Precipitation rates [kg/m2/s]. Shape (6, n, n).
+    cos_zenith : optional array
+        Cosine of solar zenith angle. Shape (6, n, n).
+    """
+    shape = state.p_s.data.shape  # (6, n, n)
+    p_s = state.p_s.data
+
+    # Lowest-level pressure from sigma coordinate
+    p_lowest = sigma_coord.sigma_full[-1] * p_s
+
+    # Lowest-level fields
+    T_lowest = state.T.data[..., -1]
+    u_lowest = state.u.data[..., -1]
+    v_lowest = state.v.data[..., -1]
+
+    # Humidity: assume dry if no tracers; use q=0
+    q_lowest = jnp.zeros(shape)
+
+    # Air density from ideal gas law
+    rho_lowest = p_lowest / (constants.R_d * T_lowest)
+
+    # Default unavailable fields to zero with flags
+    zero = jnp.zeros(shape)
+    has_rad = jnp.array(1.0) if sw_down is not None else jnp.array(0.0)
+    has_precip = jnp.array(1.0) if precip_total is not None else jnp.array(0.0)
+
+    return AtmToSurface(
+        sw_down=sw_down if sw_down is not None else zero,
+        lw_down=lw_down if lw_down is not None else zero,
+        precip_total=precip_total if precip_total is not None else zero,
+        precip_snow=precip_snow if precip_snow is not None else zero,
+        T_lowest=T_lowest,
+        q_lowest=q_lowest,
+        u_lowest=u_lowest,
+        v_lowest=v_lowest,
+        p_lowest=p_lowest,
+        p_surface=p_s,
+        rho_lowest=rho_lowest,
+        cos_zenith=cos_zenith if cos_zenith is not None else zero,
+        co2_ppmv=jnp.array(config.co2_ppmv_default),
+        has_radiation=has_rad,
+        has_precipitation=has_precip,
+    )
+
+
+def extract_atm_to_surface_nh(
+    state: NonHydrostaticState,
+    height_coord,
+    terrain_metric,
+    config: CouplerConfig,
+    sw_down: jnp.ndarray | None = None,
+    lw_down: jnp.ndarray | None = None,
+    precip_total: jnp.ndarray | None = None,
+    precip_snow: jnp.ndarray | None = None,
+    cos_zenith: jnp.ndarray | None = None,
+) -> AtmToSurface:
+    """Extract coupling fields from non-hydrostatic atmospheric state.
+
+    Reads only the lowest model level (index -1) plus surface fields.
+    """
+    from legoesm.atmosphere.physics.thermodynamics import (
+        pressure_from_eos,
+        temperature_from_theta,
+    )
+
+    shape = state.phis.data.shape  # (6, n, n)
+
+    # Lowest-level fields
+    theta_prime_low = state.theta_prime.data[..., -1]
+    rho_prime_low = state.rho_prime.data[..., -1]
+
+    theta_0_low = height_coord.theta_ref[-1]
+    rho_0_low = height_coord.rho_ref[-1]
+
+    theta_low = theta_prime_low + theta_0_low
+    rho_low = rho_prime_low + rho_0_low
+
+    p_lowest = pressure_from_eos(rho_low, theta_low)
+    T_lowest = temperature_from_theta(theta_low, p_lowest)
+
+    u_lowest = state.u.data[..., -1]
+    v_lowest = state.v.data[..., -1]
+
+    # Humidity from tracers if available
+    has_tracers = state.tracers.data.shape[-1] > 0
+    q_lowest = jnp.where(has_tracers, state.tracers.data[..., -1, 0], 0.0)
+
+    rho_lowest = rho_low
+
+    # Surface pressure: approximate from lowest-level via hydrostatic correction
+    dz_sfc = height_coord.z_half[-1] - height_coord.z_half[-2]
+    p_surface = p_lowest + constants.g * rho_low * jnp.abs(dz_sfc) * 0.5
+
+    zero = jnp.zeros(shape)
+    has_rad = jnp.array(1.0) if sw_down is not None else jnp.array(0.0)
+    has_precip = jnp.array(1.0) if precip_total is not None else jnp.array(0.0)
+
+    return AtmToSurface(
+        sw_down=sw_down if sw_down is not None else zero,
+        lw_down=lw_down if lw_down is not None else zero,
+        precip_total=precip_total if precip_total is not None else zero,
+        precip_snow=precip_snow if precip_snow is not None else zero,
+        T_lowest=T_lowest,
+        q_lowest=q_lowest,
+        u_lowest=u_lowest,
+        v_lowest=v_lowest,
+        p_lowest=p_lowest,
+        p_surface=p_surface,
+        rho_lowest=rho_lowest,
+        cos_zenith=cos_zenith if cos_zenith is not None else zero,
+        co2_ppmv=jnp.array(config.co2_ppmv_default),
+        has_radiation=has_rad,
+        has_precipitation=has_precip,
+    )

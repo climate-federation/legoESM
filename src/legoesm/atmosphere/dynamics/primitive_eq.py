@@ -113,6 +113,7 @@ def hydrostatic_tendencies(
     R_d = constants.R_d
     kappa = constants.kappa
     dsigma = sigma_coord.dsigma  # (nlev,)
+    p_s = jnp.clip(p_s, 100.0, 2.0e6)
 
     # --- 1. Pressure at full and half levels ---
     p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (6,n,n,nlev)

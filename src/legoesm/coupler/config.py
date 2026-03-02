@@ -1,0 +1,31 @@
+"""Coupler configuration."""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+import jax
+
+
+class TileConfig(NamedTuple):
+    """Surface tile fraction configuration.
+
+    f_land and f_lake are static masks from config/bathymetry, shape (6, n, n).
+    Water fraction = 1 - f_land - f_lake is split into ocean and ice
+    prognostically.
+    """
+    f_land: jax.Array      # Land fraction [0-1], shape (6, n, n)
+    f_lake: jax.Array      # Lake fraction [0-1], shape (6, n, n)
+
+
+class CouplerConfig(NamedTuple):
+    """Configuration for the surface coupler."""
+    coupling_dt: float = 3600.0       # Coupling interval [s]
+    U_min: float = 1.0                # Minimum wind speed floor [m/s]
+    ocean_albedo: float = 0.06        # Default ocean albedo
+    ocean_emissivity: float = 0.97    # Default ocean emissivity
+    ocean_z0: float = 1e-4            # Ocean roughness length [m]
+    co2_ppmv_default: float = 400.0   # Default CO2 concentration
+    blend_sharpness: float = 20.0     # Sigmoid sharpness for tile blending
+    Cd_ocean: float = 1.5e-3          # Ocean drag coefficient
+    Ch_ocean: float = 1.5e-3          # Ocean heat transfer coefficient

@@ -293,6 +293,15 @@ class TestExnerPerturbation:
         # Positive theta should increase Exner function
         assert float(jnp.mean(pi_p)) > 0
 
+    def test_large_negative_perturbations_remain_finite(self, height_coord, grid):
+        """Guarded Exner computation should stay finite for stressed states."""
+        n = 8
+        nlev = height_coord.n_levels
+        rho_p = jnp.ones((6, n, n, nlev)) * (-0.999 * height_coord.rho_ref)
+        theta_p = jnp.ones((6, n, n, nlev)) * (-0.999 * height_coord.theta_ref)
+        pi_p = compute_exner_perturbation(rho_p, theta_p, height_coord)
+        assert jnp.all(jnp.isfinite(pi_p))
+
 
 # ==============================================================================
 # CompressibleEulerModel tests

@@ -63,6 +63,13 @@ To check your current JAX backend:
 python -c "import jax; print(jax.default_backend())"
 ```
 
+## Acknowledgments
+
+legoESM bundles [jax-rrtmgp](https://github.com/climate-analytics-lab/jax-rrtmgp)
+(Apache 2.0 license) for correlated-k radiation. jax-rrtmgp was developed by
+Jeff Parker (Google), Duncan Watson-Parris (UCSD), and Juan Nathaniel (Columbia
+University).
+
 ## License
 
 MIT

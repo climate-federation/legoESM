@@ -38,8 +38,9 @@ from legoesm.atmosphere.physics.convection.kuo import kuo_convection
 from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection
 from legoesm.atmosphere.physics.convection.edmf import edmf_convection
 from legoesm.atmosphere.physics.thermodynamics import (
-    temperature_from_theta,
     pressure_from_eos,
+    reconstruct_half_level_pressure_hydrostatic,
+    sanitize_theta_rho,
 )
 
 
@@ -123,15 +124,21 @@ def _make_hydrostatic_convection(
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
     is_prognostic = scheme_name in ("mass_flux", "edmf")
-
-    # Persistent prognostic state for mass_flux (M_c) and edmf (a_u)
-    prog_state = {}
+    prog_key = None
+    prog_init = None
+    if is_prognostic:
+        if scheme_name == "mass_flux":
+            prog_key, prog_init = "M_c", scheme_config.M_c_init
+        else:  # edmf
+            prog_key, prog_init = "a_u", scheme_config.a_u_init
+    prog_col_state = None
 
     def physics_fn(
         state: HydrostaticState,
         grid: CubedSphereGrid,
         sigma_coord: SigmaCoordinate,
     ) -> HydrostaticTendencies:
+        nonlocal prog_col_state
         T = state.T.data          # (6, n, n, nlev)
         p_s = state.p_s.data      # (6, n, n)
 
@@ -156,20 +163,16 @@ def _make_hydrostatic_convection(
             # "none" scheme: return zero tendencies
             dT_dt = jnp.zeros(shape_3d)
         elif is_prognostic:
-            if scheme_name == "mass_flux":
-                key, init_val = 'M_c', scheme_config.M_c_init
-            else:  # edmf
-                key, init_val = 'a_u', scheme_config.a_u_init
-            if key not in prog_state or prog_state[key].shape != (ncol,):
-                prog_state[key] = jnp.full(ncol, init_val)
+            if prog_col_state is None or prog_col_state.shape != (ncol,):
+                prog_col_state = jnp.full(ncol, prog_init)
 
             conv_out, prog_new = conv_fn(
                 T=T_col, q_v=q_v_col,
                 p_full=p_full_col, p_half=p_half_col,
-                **{key: prog_state[key]},
+                **{prog_key: prog_col_state},
                 dt=dt, config=scheme_config,
             )
-            prog_state[key] = prog_new
+            prog_col_state = prog_new
             dT_dt = conv_out.dT_dt.reshape(shape_3d)
         else:
             conv_out = conv_fn(
@@ -205,6 +208,11 @@ def _make_hydrostatic_convection(
             ),
         )
 
+    def reset_state():
+        nonlocal prog_col_state
+        prog_col_state = None
+
+    physics_fn.reset_state = reset_state
     return physics_fn
 
 
@@ -225,8 +233,14 @@ def _make_nonhydrostatic_convection(
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
     is_prognostic = scheme_name in ("mass_flux", "edmf")
-
-    prog_state = {}
+    prog_key = None
+    prog_init = None
+    if is_prognostic:
+        if scheme_name == "mass_flux":
+            prog_key, prog_init = "M_c", scheme_config.M_c_init
+        else:  # edmf
+            prog_key, prog_init = "a_u", scheme_config.a_u_init
+    prog_col_state = None
 
     def physics_fn(
         state: NonHydrostaticState,
@@ -234,6 +248,7 @@ def _make_nonhydrostatic_convection(
         height_coord: HeightCoordinate,
         terrain_metric: TerrainMetric,
     ) -> NonHydrostaticTendencies:
+        nonlocal prog_col_state
         theta_p = state.theta_prime.data   # (6, n, n, nlev)
         rho_p = state.rho_prime.data       # (6, n, n, nlev)
         tracers = state.tracers.data       # (6, n, n, nlev, n_tracers)
@@ -243,8 +258,10 @@ def _make_nonhydrostatic_convection(
         rho_0 = height_coord.rho_ref
 
         # Total fields
-        theta_total = theta_0 + theta_p
-        rho_total = rho_0 + rho_p
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p,
+            rho_0 + rho_p,
+        )
 
         # Temperature and pressure
         p = pressure_from_eos(rho_total, theta_total)
@@ -257,12 +274,11 @@ def _make_nonhydrostatic_convection(
         shape_2d = state.phis.data.shape
         n_tracers = tracers.shape[-1] if tracers.ndim >= 5 else 0
 
-        # Approximate pressure at half levels from reference state
-        p_half_ref = constants.p_ref * height_coord.exner_ref_half ** (
-            constants.c_pd / constants.R_d
-        )
-        p_half = jnp.broadcast_to(
-            p_half_ref[None, None, None, :], (*shape_2d, nlev + 1)
+        # Interface pressure from evolving column state (not fixed reference).
+        p_half = reconstruct_half_level_pressure_hydrostatic(
+            p_full=p,
+            rho_full=rho_total,
+            z_half=terrain_metric.z_half_3d,
         )
 
         # Reshape to columns
@@ -294,20 +310,16 @@ def _make_nonhydrostatic_convection(
             )
 
         if is_prognostic:
-            if scheme_name == "mass_flux":
-                key, init_val = 'M_c', scheme_config.M_c_init
-            else:  # edmf
-                key, init_val = 'a_u', scheme_config.a_u_init
-            if key not in prog_state or prog_state[key].shape != (ncol,):
-                prog_state[key] = jnp.full(ncol, init_val)
+            if prog_col_state is None or prog_col_state.shape != (ncol,):
+                prog_col_state = jnp.full(ncol, prog_init)
 
             conv_out, prog_new = conv_fn(
                 T=T_col, q_v=q_v_col,
                 p_full=p_full_col, p_half=p_half_col,
-                **{key: prog_state[key]},
+                **{prog_key: prog_col_state},
                 dt=dt, config=scheme_config,
             )
-            prog_state[key] = prog_new
+            prog_col_state = prog_new
         else:
             conv_out = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -332,9 +344,14 @@ def _make_nonhydrostatic_convection(
             dtheta_prime_dt=Field(data=dtheta_prime_dt, name="dtheta_prime_dt_conv", dims=dims_3d, units="K/s"),
             drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_conv", dims=dims_3d, units="kg/m^3/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_conv", dims=dims_2d, units="m^2/s^3"),
-            dtracers_dt=Field(data=dtracers, name="dtracers_dt_conv", dims=dims_tr, units="1/s"),
-        )
+                dtracers_dt=Field(data=dtracers, name="dtracers_dt_conv", dims=dims_tr, units="1/s"),
+            )
 
+    def reset_state():
+        nonlocal prog_col_state
+        prog_col_state = None
+
+    physics_fn.reset_state = reset_state
     return physics_fn
 
 
@@ -355,10 +372,17 @@ def _make_spectral_pe_convection(
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
     is_prognostic = scheme_name in ("mass_flux", "edmf")
+    prog_key = None
+    prog_init = None
+    if is_prognostic:
+        if scheme_name == "mass_flux":
+            prog_key, prog_init = "M_c", scheme_config.M_c_init
+        else:  # edmf
+            prog_key, prog_init = "a_u", scheme_config.a_u_init
+    prog_col_state = None
 
-    prog_state = {}
-
-    def physics_fn(state, grid, sigma_coord):
+    def physics_fn(state, grid, sigma_coord, grid_fields=None):
+        nonlocal prog_col_state
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
             spectral_pe_to_grid,
@@ -366,7 +390,9 @@ def _make_spectral_pe_convection(
         from legoesm.grids.gaussian import sh_analysis_3d
 
         # 1. Transform spectral state to grid space
-        fields = spectral_pe_to_grid(state, grid, sigma_coord)
+        fields = grid_fields
+        if fields is None:
+            fields = spectral_pe_to_grid(state, grid, sigma_coord)
         T = fields['T']         # (n_lat, n_lon, nlev)
         p_s = fields['p_s']     # (n_lat, n_lon)
 
@@ -389,20 +415,16 @@ def _make_spectral_pe_convection(
         if conv_fn is None:
             dT_dt = jnp.zeros_like(T)
         elif is_prognostic:
-            if scheme_name == "mass_flux":
-                key, init_val = 'M_c', scheme_config.M_c_init
-            else:  # edmf
-                key, init_val = 'a_u', scheme_config.a_u_init
-            if key not in prog_state or prog_state[key].shape != (ncol,):
-                prog_state[key] = jnp.full(ncol, init_val)
+            if prog_col_state is None or prog_col_state.shape != (ncol,):
+                prog_col_state = jnp.full(ncol, prog_init)
 
             conv_out, prog_new = conv_fn(
                 T=T_col, q_v=q_v_col,
                 p_full=p_full_col, p_half=p_half_col,
-                **{key: prog_state[key]},
+                **{prog_key: prog_col_state},
                 dt=dt, config=scheme_config,
             )
-            prog_state[key] = prog_new
+            prog_col_state = prog_new
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
         else:
             conv_out = conv_fn(
@@ -424,7 +446,12 @@ def _make_spectral_pe_convection(
             div_hat=state.div_hat.replace(data=zero_3d),
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
-            phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
-        )
+                phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+            )
 
+    def reset_state():
+        nonlocal prog_col_state
+        prog_col_state = None
+
+    physics_fn.reset_state = reset_state
     return physics_fn

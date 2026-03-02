@@ -33,6 +33,12 @@ from legoesm.ocean.init import (
     idealized_bathymetry,
     wind_driven_gyre_init,
 )
+from legoesm.ocean.simple_ocean import (
+    SimpleOceanConfig,
+    SlabOceanState,
+    make_ocean,
+    init_slab_state,
+)
 
 __all__ = [
     "OceanModel",
@@ -52,4 +58,8 @@ __all__ = [
     "rest_state_spectral_ocean",
     "idealized_bathymetry",
     "wind_driven_gyre_init",
+    "SimpleOceanConfig",
+    "SlabOceanState",
+    "make_ocean",
+    "init_slab_state",
 ]

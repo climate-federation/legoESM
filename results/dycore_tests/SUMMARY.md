@@ -1,26 +1,26 @@
 # legoESM Dynamical Core Test Suite Results
 
-Generated: 2026-03-01 21:23:18
+Generated: 2026-03-02 16:28:03
 
 ## Solver Matrix
 
 | # | Test | Solver | Status | Key Metric | Value | Wall Time | Notes |
 |---|------|--------|--------|------------|-------|-----------|-------|
 | 1 | Williamson 2 | SW FV C16 | PASS | L2 error (5d) | 2.08e+02 | 1.5s |  |
-| 2 | Williamson 5 | SW FV C16 | PASS | mass drift (15d) | 5.25e-04 | 1.6s |  |
-| 3 | Williamson 2 | SW Spec T21 | PASS | L2 error (5d) | 2.32e-08 | 2.3s |  |
+| 2 | Williamson 5 | SW FV C16 | PASS | mass drift (15d) | 5.25e-04 | 1.7s |  |
+| 3 | Williamson 2 | SW Spec T21 | PASS | L2 error (5d) | 2.32e-08 | 2.2s |  |
 | 4 | Williamson 5 | SW Spec T21 | PASS | mass drift (15d) | 1.79e-16 | 6.3s |  |
 | 5 | Held-Suarez 30d | Hydro FV C16/L10 | PASS | mass drift | 6.02e-11 | 8.2s | max|v|=12.9 |
-| 6 | Baroclinic 10d | Hydro FV C16/L10 | PASS | ps min (hPa) | 982.4 | 8.1s | max|v|=21.4 |
-| 7 | Held-Suarez 30d | Hydro Spec T15/L10 | PASS | max |v| | 193.8 | 40.9s | <T>=279.1 |
-| 8 | Baroclinic 1d | Hydro Spec T15/L10 | PASS | ps min (hPa) | 854.2 | 1.8s | max|v|=143.8 |
-| 9 | DCMIP TC1 1h | NH FV C8/L20 | PASS | max |w| | 0.0636 | 6.2s |  |
-| 10 | DCMIP TC2a 3min | NH FV C8/L20 | PASS | max |w| | 0.2050 | 4.8s |  |
-| 11 | DCMIP TC3 3min | NH FV C8/L20 | PASS | max |w| | 0.6725 | 3.1s | f=0, max qr=0.000000 |
-| 12 | DCMIP TC1 1h | NH Spec T15/L20 | PASS | max |w| | 0.0446 | 10.0s |  |
-| 13 | DCMIP-2012 1-1 | Transport C16/L10 | PASS | L2 q1 | 1.11e+00 | 1.1s | Linf=1.03e+00 |
-| 14 | Held-Suarez 30d SI | Hydro Spec T21/L10 SI | PASS | max |v| | 243.1 | 144.5s | <T>=270.7, dt=600s, sub=5, nu=14.0x |
-| 15 | DCMIP TC2a 6min SI | NH FV C8/L20 SI | PASS | max |w| | 0.5962 | 6.2s | dt=1.0s |
+| 6 | Baroclinic 10d | Hydro FV C16/L10 | PASS | ps min (hPa) | 982.4 | 8.5s | max|v|=21.4 |
+| 7 | Held-Suarez 30d | Hydro Spec T15/L10 | PASS | p99 |v| @ jet | 52.6 | 43.2s | max_all=193.8, max_jet=52.6, <T>=279.1 |
+| 8 | Baroclinic 1d | Hydro Spec T15/L10 | PASS | p99 |v| @ jet | 47.9 | 1.9s | max_all=143.8, max_jet=47.9, ps_min=854.2hPa |
+| 9 | DCMIP TC1 1h | NH FV C8/L20 | PASS | max |w| | 0.0636 | 7.3s |  |
+| 10 | DCMIP TC2a 3min | NH FV C8/L20 | PASS | max |w| | 0.2050 | 5.6s |  |
+| 11 | DCMIP TC3 3min | NH FV C8/L20 | PASS | max |w| | 0.6725 | 3.3s | f=0, max qr=0.000000 |
+| 12 | DCMIP TC1 1h | NH Spec T15/L20 | PASS | max |w| | 0.0446 | 13.1s |  |
+| 13 | DCMIP-2012 1-1 | Transport C16/L10 | PASS | L2 q1 | 1.11e+00 | 1.2s | Linf=1.03e+00 |
+| 14 | Held-Suarez 30d SI | Hydro Spec T21/L10 SI | PASS | p99 |v| @ jet | 52.6 | 196.1s | max_all=246.5, max_jet=52.6, <T>=270.7, dt=600s, sub=5, nu=14.0x |
+| 15 | DCMIP TC2a 6min SI | NH FV C8/L20 SI | PASS | max |w| | 0.5962 | 8.2s | dt=1.0s |
 
 ## Summary
 
@@ -28,7 +28,7 @@ Generated: 2026-03-01 21:23:18
 - **Passed**: 15
 - **Failed**: 0
 - **Errors**: 0
-- **Total wall time**: 247s (4.1 min)
+- **Total wall time**: 308s (5.1 min)
 
 ## Solver Coverage
 

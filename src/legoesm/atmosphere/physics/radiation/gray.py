@@ -250,9 +250,17 @@ def _compute_heating_rate(
 ) -> jnp.ndarray:
     """Compute heating rate from net flux divergence.
 
-    dT/dt = (g / c_p) * (F_net(k+1/2) - F_net(k-1/2)) / (p(k+1/2) - p(k-1/2))
+    The standard radiative heating rate in pressure coordinates is:
 
-    where F_net = F_down - F_up (positive downward).
+        dT/dt = (g / c_p) * d(F_up - F_down) / dp
+
+    Using the net upward flux F_net↑ = F_up - F_down:
+
+        dT/dt_k = (g / c_p) * [F_net↑(k+1) - F_net↑(k)] / [p(k+1) - p(k)]
+
+    where interface k is at the top (low p) and k+1 at the bottom (high p)
+    of layer k. When more net upward flux exits the bottom than the top,
+    the layer has gained energy (positive heating).
 
     Parameters
     ----------
@@ -268,12 +276,14 @@ def _compute_heating_rate(
     jnp.ndarray
         Heating rate (ncol, nlev) [K/s].
     """
-    F_net = flux_down - flux_up  # positive downward (ncol, nlev+1)
-    # Net flux absorbed in each layer: F_net(k+1/2) - F_net(k-1/2)
-    # k-1/2 is the top interface (index k), k+1/2 is the bottom (index k+1)
-    dF = F_net[:, 1:] - F_net[:, :-1]  # (ncol, nlev)
-    dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
-    dp = jnp.clip(dp, 1.0, None)  # avoid division by zero
+    # Net upward flux at each interface
+    F_net_up = flux_up - flux_down  # (ncol, nlev+1)
+
+    # Flux divergence across each layer: F_net_up(bottom) - F_net_up(top)
+    # Interface k is the top of layer k, interface k+1 is the bottom.
+    dF = F_net_up[:, 1:] - F_net_up[:, :-1]  # (ncol, nlev)
+    dp = p_half[:, 1:] - p_half[:, :-1]       # (ncol, nlev)
+    dp = jnp.clip(dp, 1.0, None)
 
     return (constants.g / constants.c_pd) * dF / dp
 

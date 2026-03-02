@@ -37,6 +37,11 @@ from legoesm.atmosphere.physics.radiation.solar import (
     daily_mean_insolation,
     perpetual_equinox_insolation,
 )
+from legoesm.atmosphere.physics.thermodynamics import (
+    pressure_from_eos,
+    reconstruct_half_level_pressure_hydrostatic,
+    sanitize_theta_rho,
+)
 
 
 def _get_radiation_fn(config: RadiationConfig):
@@ -205,14 +210,13 @@ def _make_nonhydrostatic_radiation(
         rho_0 = height_coord.rho_ref       # (nlev,)
 
         # Total fields
-        theta_total = theta_0 + theta_p
-        rho_total = rho_0 + rho_p
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p,
+            rho_0 + rho_p,
+        )
 
         # Temperature: T = theta * exner
-        # Pressure from EOS: p = p_0 * (R_d * rho * theta / p_0)^(c_p/c_v)
-        p = constants.p_ref * (
-            constants.R_d * rho_total * theta_total / constants.p_ref
-        ) ** (constants.c_pd / constants.c_vd)
+        p = pressure_from_eos(rho_total, theta_total)
         exner = (p / constants.p_ref) ** constants.kappa
         T = theta_total * exner
 
@@ -221,13 +225,11 @@ def _make_nonhydrostatic_radiation(
         shape_w = state.w.data.shape  # (6, n, n, nlev+1)
         shape_2d = state.phis.data.shape  # (6, n, n)
 
-        # Pressure at half levels (approximate from full-level EOS)
-        # Use interface reference Exner * theta at nearest full level
-        p_half_ref = constants.p_ref * height_coord.exner_ref_half ** (
-            constants.c_pd / constants.R_d
-        )
-        p_half = jnp.broadcast_to(
-            p_half_ref[None, None, None, :], (*shape_2d, nlev + 1)
+        # Interface pressure from evolving column state (not fixed reference).
+        p_half = reconstruct_half_level_pressure_hydrostatic(
+            p_full=p,
+            rho_full=rho_total,
+            z_half=terrain_metric.z_half_3d,
         )
 
         # Surface temperature = lowest-level temperature
@@ -322,7 +324,7 @@ def _make_spectral_pe_radiation(
     """
     gray_config = radiation_config.gray
 
-    def physics_fn(state, grid, sigma_coord):
+    def physics_fn(state, grid, sigma_coord, grid_fields=None):
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
             spectral_pe_to_grid,
@@ -330,7 +332,9 @@ def _make_spectral_pe_radiation(
         from legoesm.grids.gaussian import sh_analysis_3d
 
         # 1. Transform spectral state to grid space
-        fields = spectral_pe_to_grid(state, grid, sigma_coord)
+        fields = grid_fields
+        if fields is None:
+            fields = spectral_pe_to_grid(state, grid, sigma_coord)
         T = fields['T']         # (n_lat, n_lon, nlev)
         p_s = fields['p_s']     # (n_lat, n_lon)
         lat = grid.lat          # (n_lat,)

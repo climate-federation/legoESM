@@ -4,7 +4,8 @@
 This script performs three checks:
 1. Parallel unit tests (no MPI required)
 2. MPI distributed test cases (if launcher + mpi4py + mpi4jax are available)
-3. Scaling benchmark suite (strong + weak scaling on CPU/GPU backends)
+3. Scaling benchmark suite (strong + weak scaling on CPU/GPU backends),
+   with optional MPI atmosphere scaling.
 
 Outputs:
   - <output>/results.json
@@ -87,6 +88,24 @@ def _tail(text: str, max_chars: int = 4000) -> str:
     if len(text) <= max_chars:
         return text
     return text[-max_chars:]
+
+
+def _is_mpi_runtime_restricted(run_result: dict[str, Any]) -> bool:
+    """Detect launcher failures caused by restricted runtime environments."""
+    text = (
+        (run_result.get("stdout", "") or "")
+        + "\n"
+        + (run_result.get("stderr", "") or "")
+    ).lower()
+    patterns = (
+        "operation not permitted",
+        "no network interfaces were found",
+        "no sockets were able to be opened",
+        "prte error",
+        "oob_tcp_component",
+        "bind() failed",
+    )
+    return any(token in text for token in patterns)
 
 
 def _merge_xla_flags(existing: str | None, n_devices: int) -> str:
@@ -202,13 +221,19 @@ def _run_scaling_worker(
     grid_size: int,
     iterations: int,
     warmup: int,
+    workload: str,
+    dt: float,
 ) -> dict[str, Any]:
     try:
         import jax
         import jax.numpy as jnp
 
         from legoesm.grids.halo import pad_halo, set_halo_backend
-        from legoesm.parallel.mesh import create_device_mesh, shard_pytree
+        from legoesm.parallel.mesh import (
+            create_device_mesh,
+            replicate_pytree,
+            shard_pytree,
+        )
 
         active_backend = jax.default_backend().lower()
         if backend_target and active_backend != backend_target:
@@ -236,39 +261,102 @@ def _run_scaling_worker(
                 ),
             }
 
-        key = jax.random.PRNGKey(0)
-        x = jax.random.normal(key, (6, grid_size, grid_size), dtype=jnp.float32)
-        x = shard_pytree(x, config)
-
-        @jax.jit
-        def kernel(field):
-            halo = pad_halo(field)
-            return 0.25 * (
-                halo
-                + jnp.roll(halo, shift=1, axis=1)
-                + jnp.roll(halo, shift=-1, axis=1)
-                + jnp.roll(halo, shift=1, axis=2)
+        def _block_ready(value):
+            if hasattr(value, "h") and hasattr(value.h, "data"):
+                value.h.data.block_until_ready()
+                return
+            if isinstance(value, (jax.Array, jnp.ndarray)):
+                value.block_until_ready()
+                return
+            # Generic fallback for pytrees.
+            jax.tree.map(
+                lambda leaf: leaf.block_until_ready()
+                if isinstance(leaf, (jax.Array, jnp.ndarray))
+                else leaf,
+                value,
             )
+
+        if workload == "halo":
+            key = jax.random.PRNGKey(0)
+            state0 = jax.random.normal(
+                key,
+                (6, grid_size, grid_size),
+                dtype=jnp.float32,
+            )
+            state0 = shard_pytree(state0, config)
+
+            @jax.jit
+            def step_fn(field):
+                halo = pad_halo(field)
+                center = halo[:, 1:-1, 1:-1]
+                north = halo[:, :-2, 1:-1]
+                south = halo[:, 2:, 1:-1]
+                west = halo[:, 1:-1, :-2]
+                east = halo[:, 1:-1, 2:]
+                return 0.2 * (center + north + south + west + east)
+
+            @jax.jit(static_argnums=(1,))
+            def step_many(field, n_steps):
+                def body(_, carry):
+                    return step_fn(carry)
+                return jax.lax.fori_loop(0, n_steps, body, field)
+
+            cells_per_step = 6.0 * float(grid_size) * float(grid_size)
+        elif workload == "atmosphere_sw":
+            from legoesm.grids.cubed_sphere import create_cubed_sphere
+            from legoesm.atmosphere.dynamics.shallow_water import (
+                ShallowWaterConfig,
+                ShallowWaterModel,
+            )
+            from legoesm.atmosphere.dynamics.williamson import williamson_test2
+
+            grid = create_cubed_sphere(grid_size)
+            state0 = williamson_test2(grid)
+            grid = replicate_pytree(grid, config)
+            state0 = shard_pytree(state0, config)
+
+            model = ShallowWaterModel(
+                grid,
+                ShallowWaterConfig(
+                    hyperdiff_coeff=0.0,
+                    use_conservation_fixer=False,
+                ),
+            )
+
+            @jax.jit
+            def step_fn(state):
+                return model.step(state, dt)
+
+            @jax.jit(static_argnums=(1,))
+            def step_many(state, n_steps):
+                def body(_, carry):
+                    return step_fn(carry)
+                return jax.lax.fori_loop(0, n_steps, body, state)
+
+            cells_per_step = 6.0 * float(grid_size) * float(grid_size)
+        else:
+            return {
+                "status": "fail",
+                "error": f"Unknown scaling workload: {workload!r}",
+            }
 
         # Compile + first execution cost.
         t_compile0 = time.perf_counter()
-        y = kernel(x)
-        y.block_until_ready()
+        state = step_fn(state0)
+        _block_ready(state)
         compile_time_s = time.perf_counter() - t_compile0
 
-        for _ in range(max(0, warmup)):
-            y = kernel(y)
-            y.block_until_ready()
-
-        t_steady0 = time.perf_counter()
-        for _ in range(max(1, iterations)):
-            y = kernel(y)
-        y.block_until_ready()
-        steady_total_s = time.perf_counter() - t_steady0
+        if warmup > 0:
+            state = step_many(state, max(0, warmup))
+            _block_ready(state)
 
         step_count = max(1, iterations)
+        t_steady0 = time.perf_counter()
+        state = step_many(state, step_count)
+        _block_ready(state)
+        steady_total_s = time.perf_counter() - t_steady0
+
         steady_ms_per_step = 1000.0 * steady_total_s / step_count
-        cells_per_step = 6.0 * float(grid_size) * float(grid_size)
         throughput_global_mcells_s = (
             (cells_per_step * step_count / steady_total_s) / 1.0e6
             if steady_total_s > 0.0
@@ -282,11 +370,13 @@ def _run_scaling_worker(
             "status": "pass",
             "backend_target": backend_target,
             "active_backend": active_backend,
+            "workload": workload,
             "case_type": case_type,
             "n_devices": int(config.n_devices),
             "process_count": process_count,
             "local_device_count": int(jax.local_device_count()),
             "grid_size": int(grid_size),
+            "dt_s": float(dt),
             "iterations": int(step_count),
             "warmup": int(max(0, warmup)),
             "compile_time_s": compile_time_s,
@@ -318,6 +408,8 @@ def _run_scaling_point(
         args.python,
         "scripts/run_parallel_validation.py",
         "--scaling-worker",
+        "--workload",
+        args.scaling_workload,
         "--backend-target",
         backend,
         "--case-type",
@@ -330,6 +422,8 @@ def _run_scaling_point(
         str(args.scaling_iterations),
         "--warmup",
         str(args.scaling_warmup),
+        "--dt",
+        str(args.scaling_dt),
     ]
 
     env = dict(os.environ)
@@ -455,6 +549,7 @@ def _run_scaling_suite(args: argparse.Namespace, output_dir: Path, host_info: di
     backends = _parse_str_list(args.scaling_backends)
     cpu_devices = _parse_int_list(args.scaling_cpu_devices, label="--scaling-cpu-devices")
     gpu_devices = _parse_int_list(args.scaling_gpu_devices, label="--scaling-gpu-devices")
+    workload = args.scaling_workload.strip().lower()
 
     thresholds = {
         "compile_time_max_s": float(args.scaling_compile_time_max_s),
@@ -572,15 +667,401 @@ def _run_scaling_suite(args: argparse.Namespace, output_dir: Path, host_info: di
 
     return {
         "status": status,
+        "workload": workload,
+        "dt_s": float(args.scaling_dt),
         "thresholds": thresholds,
         "backends": backend_results,
+    }
+
+
+def _run_mpi_scaling_worker(
+    workload: str,
+    case_type: str,
+    grid_size: int,
+    iterations: int,
+    warmup: int,
+    dt: float,
+) -> dict[str, Any]:
+    rank_for_error = 0
+    try:
+        import jax
+        from mpi4py import MPI
+
+        from legoesm.parallel.comm import build_comm_topology
+        from legoesm.parallel.distributed import partition_state
+        from legoesm.parallel.mesh import create_device_mesh, replicate_pytree, shard_pytree
+        from legoesm.grids.halo import set_halo_backend
+
+        comm = MPI.COMM_WORLD
+        rank_for_error = int(comm.Get_rank())
+
+        if workload != "atmosphere_sw":
+            return {
+                "status": "skipped",
+                "rank": rank_for_error,
+                "reason": f"MPI scaling workload {workload!r} is not supported.",
+            }
+
+        if 6 % max(1, int(comm.Get_size())) != 0:
+            return {
+                "status": "skipped",
+                "rank": rank_for_error,
+                "reason": "MPI ranks must evenly divide 6 cubed-sphere faces.",
+            }
+
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.shallow_water import (
+            ShallowWaterConfig,
+            ShallowWaterModel,
+        )
+        from legoesm.atmosphere.dynamics.williamson import williamson_test2
+
+        rank = int(comm.Get_rank())
+        n_ranks = int(comm.Get_size())
+        topology = build_comm_topology(rank, n_ranks)
+        set_halo_backend("mpi", topology)
+
+        local_devices = list(jax.local_devices())
+        local_device_count = len(local_devices)
+        if local_device_count < 1:
+            return {
+                "status": "fail",
+                "rank": rank,
+                "error": "No local JAX devices available on this MPI rank.",
+            }
+        mesh_devices = next(
+            (d for d in (6, 3, 2, 1) if d <= local_device_count),
+            1,
+        )
+        config = create_device_mesh(
+            n_devices=mesh_devices,
+            devices=local_devices,
+        )
+
+        grid = create_cubed_sphere(grid_size)
+        state0 = williamson_test2(grid)
+        state0 = partition_state(state0, topology)
+        grid = replicate_pytree(grid, config)
+        state0 = shard_pytree(state0, config)
+
+        model = ShallowWaterModel(
+            grid,
+            ShallowWaterConfig(
+                hyperdiff_coeff=0.0,
+                use_conservation_fixer=False,
+            ),
+        )
+
+        @jax.jit
+        def step_fn(state):
+            return model.step(state, dt)
+
+        @jax.jit(static_argnums=(1,))
+        def step_many(state, n_steps):
+            def body(_, carry):
+                return step_fn(carry)
+            return jax.lax.fori_loop(0, n_steps, body, state)
+
+        comm.Barrier()
+        t_compile0 = time.perf_counter()
+        state = step_fn(state0)
+        state.h.data.block_until_ready()
+        local_compile_s = time.perf_counter() - t_compile0
+        compile_time_s = float(comm.allreduce(local_compile_s, op=MPI.MAX))
+
+        if warmup > 0:
+            state = step_many(state, max(0, warmup))
+            state.h.data.block_until_ready()
+
+        step_count = max(1, iterations)
+        comm.Barrier()
+        t_steady0 = time.perf_counter()
+        state = step_many(state, step_count)
+        state.h.data.block_until_ready()
+        local_steady_s = time.perf_counter() - t_steady0
+        steady_total_s = float(comm.allreduce(local_steady_s, op=MPI.MAX))
+
+        total_devices = int(comm.allreduce(int(jax.local_device_count()), op=MPI.SUM))
+        cells_per_step = 6.0 * float(grid_size) * float(grid_size)
+        steady_ms_per_step = 1000.0 * steady_total_s / step_count
+        throughput_global_mcells_s = (
+            (cells_per_step * step_count / steady_total_s) / 1.0e6
+            if steady_total_s > 0.0
+            else 0.0
+        )
+        throughput_per_rank_mcells_s = throughput_global_mcells_s / float(max(1, n_ranks))
+        throughput_per_device_mcells_s = throughput_global_mcells_s / float(max(1, total_devices))
+
+        return {
+            "status": "pass",
+            "rank": rank,
+            "n_ranks": n_ranks,
+            "case_type": case_type,
+            "workload": workload,
+            "active_backend": jax.default_backend().lower(),
+            "grid_size": int(grid_size),
+            "dt_s": float(dt),
+            "iterations": int(step_count),
+            "warmup": int(max(0, warmup)),
+            "compile_time_s": compile_time_s,
+            "steady_total_s": steady_total_s,
+            "steady_ms_per_step": steady_ms_per_step,
+            "cells_per_step": cells_per_step,
+            "total_devices": total_devices,
+            "throughput_global_mcells_s": throughput_global_mcells_s,
+            "throughput_per_rank_mcells_s": throughput_per_rank_mcells_s,
+            "throughput_per_device_mcells_s": throughput_per_device_mcells_s,
+        }
+    except Exception as exc:  # pragma: no cover - integration path.
+        return {
+            "status": "fail",
+            "rank": rank_for_error,
+            "error": f"{type(exc).__name__}: {exc}",
+            "traceback": traceback.format_exc(),
+        }
+
+
+def _run_mpi_scaling_point(
+    *,
+    args: argparse.Namespace,
+    output_dir: Path,
+    base_mpi_cmd: list[str],
+    env_base: dict[str, str],
+    case_type: str,
+    n_ranks: int,
+    grid_size: int,
+) -> dict[str, Any]:
+    cmd = [
+        *base_mpi_cmd,
+        "-np",
+        str(n_ranks),
+        args.python,
+        "scripts/run_parallel_validation.py",
+        "--mpi-scaling-worker",
+        "--workload",
+        args.scaling_workload,
+        "--case-type",
+        case_type,
+        "--grid-size",
+        str(grid_size),
+        "--iterations",
+        str(args.mpi_scaling_iterations),
+        "--warmup",
+        str(args.mpi_scaling_warmup),
+        "--dt",
+        str(args.scaling_dt),
+    ]
+    env = dict(env_base)
+    if args.x64:
+        env["JAX_ENABLE_X64"] = "1"
+
+    run = _run_cmd(cmd, env=env, timeout_sec=args.timeout_sec)
+    log_path = output_dir / "logs" / f"mpi_scaling_{case_type}_np{n_ranks}.log"
+    _write_log(log_path, cmd, run)
+
+    if run["returncode"] != 0 and _is_mpi_runtime_restricted(run):
+        worker_payload = {
+            "status": "skipped",
+            "reason": "MPI launcher/socket access is restricted in this environment.",
+            "stdout_tail": _tail(run.get("stdout", "")),
+            "stderr_tail": _tail(run.get("stderr", "")),
+        }
+        return {
+            "case_type": case_type,
+            "n_ranks_requested": int(n_ranks),
+            "grid_size": int(grid_size),
+            "command_status": "skipped",
+            "command_returncode": run["returncode"],
+            "elapsed_s": run["elapsed_s"],
+            "log": str(log_path),
+            "worker": worker_payload,
+        }
+
+    worker_payload = _extract_json_line(run.get("stdout", ""))
+    if worker_payload is None:
+        worker_payload = {
+            "status": "fail",
+            "error": "No worker JSON payload found in stdout.",
+            "stdout_tail": _tail(run.get("stdout", "")),
+            "stderr_tail": _tail(run.get("stderr", "")),
+        }
+
+    return {
+        "case_type": case_type,
+        "n_ranks_requested": int(n_ranks),
+        "grid_size": int(grid_size),
+        "command_status": run["status"],
+        "command_returncode": run["returncode"],
+        "elapsed_s": run["elapsed_s"],
+        "log": str(log_path),
+        "worker": worker_payload,
+    }
+
+
+def _evaluate_mpi_scaling_case(
+    entries: list[dict[str, Any]],
+    *,
+    case_type: str,
+    compile_time_max_s: float,
+    strong_min_efficiency: float,
+    weak_max_step_growth: float,
+    weak_min_per_rank_throughput_ratio: float,
+) -> dict[str, Any]:
+    evaluated = []
+    baseline = None
+    baseline_ranks = None
+
+    for entry in sorted(entries, key=lambda e: e["n_ranks_requested"]):
+        worker = entry["worker"]
+        status = worker.get("status", "fail")
+        checks = {}
+        derived = {}
+
+        if status == "pass":
+            compile_time = float(worker["compile_time_s"])
+            step_ms = float(worker["steady_ms_per_step"])
+            per_rank = float(worker["throughput_per_rank_mcells_s"])
+            checks["compile_time_ok"] = compile_time <= compile_time_max_s
+
+            if baseline is None:
+                baseline = worker
+                baseline_ranks = max(1, int(worker["n_ranks"]))
+                derived["speedup_vs_baseline"] = 1.0
+                derived["efficiency_vs_baseline"] = 1.0
+                derived["step_growth_vs_baseline"] = 1.0
+                derived["per_rank_throughput_ratio_vs_baseline"] = 1.0
+                checks["case_scaling_ok"] = True
+            else:
+                base_step_ms = float(baseline["steady_ms_per_step"])
+                base_per_rank = float(baseline["throughput_per_rank_mcells_s"])
+                rank_ratio = max(1.0, float(worker["n_ranks"]) / float(baseline_ranks))
+                speedup = base_step_ms / max(step_ms, 1.0e-12)
+                efficiency = speedup / rank_ratio
+                step_growth = step_ms / max(base_step_ms, 1.0e-12)
+                per_rank_ratio = per_rank / max(base_per_rank, 1.0e-12)
+
+                derived["speedup_vs_baseline"] = speedup
+                derived["efficiency_vs_baseline"] = efficiency
+                derived["step_growth_vs_baseline"] = step_growth
+                derived["per_rank_throughput_ratio_vs_baseline"] = per_rank_ratio
+
+                if case_type == "strong":
+                    checks["case_scaling_ok"] = efficiency >= strong_min_efficiency
+                else:
+                    checks["case_scaling_ok"] = (
+                        step_growth <= weak_max_step_growth
+                        and per_rank_ratio >= weak_min_per_rank_throughput_ratio
+                    )
+
+            status = "pass" if all(bool(v) for v in checks.values()) else "fail"
+
+        evaluated.append(
+            {
+                **entry,
+                "status": status,
+                "checks": checks,
+                "derived": derived,
+            },
+        )
+
+    return {
+        "status": _case_status(evaluated),
+        "entries": evaluated,
+    }
+
+
+def _run_mpi_scaling_suite(
+    args: argparse.Namespace,
+    output_dir: Path,
+    *,
+    base_mpi_cmd: list[str],
+    env_base: dict[str, str],
+    ranks: list[int],
+) -> dict[str, Any]:
+    if not args.mpi_scaling:
+        return {
+            "status": "skipped",
+            "reason": "Disabled via --no-mpi-scaling.",
+            "thresholds": {},
+            "cases": [],
+        }
+
+    if not ranks:
+        return {
+            "status": "skipped",
+            "reason": "No MPI ranks configured.",
+            "thresholds": {},
+            "cases": [],
+        }
+
+    thresholds = {
+        "compile_time_max_s": float(args.scaling_compile_time_max_s),
+        "strong_min_efficiency": float(args.strong_min_efficiency),
+        "weak_max_step_growth": float(args.weak_max_step_growth),
+        "weak_min_per_rank_throughput_ratio": float(
+            args.weak_min_per_device_throughput_ratio,
+        ),
+    }
+
+    baseline_ranks = min(ranks)
+    case_results = []
+    for case_type in ("strong", "weak"):
+        raw_entries = []
+        for n_ranks in ranks:
+            if case_type == "strong":
+                grid_size = int(args.mpi_scaling_strong_grid)
+            else:
+                scale = (float(n_ranks) / float(baseline_ranks)) ** 0.5
+                grid_size = max(
+                    4,
+                    int(round(float(args.mpi_scaling_weak_base_grid) * scale)),
+                )
+
+            raw_entries.append(
+                _run_mpi_scaling_point(
+                    args=args,
+                    output_dir=output_dir,
+                    base_mpi_cmd=base_mpi_cmd,
+                    env_base=env_base,
+                    case_type=case_type,
+                    n_ranks=n_ranks,
+                    grid_size=grid_size,
+                ),
+            )
+
+        evaluated = _evaluate_mpi_scaling_case(
+            raw_entries,
+            case_type=case_type,
+            compile_time_max_s=thresholds["compile_time_max_s"],
+            strong_min_efficiency=thresholds["strong_min_efficiency"],
+            weak_max_step_growth=thresholds["weak_max_step_growth"],
+            weak_min_per_rank_throughput_ratio=thresholds[
+                "weak_min_per_rank_throughput_ratio"
+            ],
+        )
+        case_results.append(
+            {
+                "case_type": case_type,
+                "status": evaluated["status"],
+                "entries": evaluated["entries"],
+            },
+        )
+
+    return {
+        "status": _case_status(case_results),
+        "workload": args.scaling_workload,
+        "dt_s": float(args.scaling_dt),
+        "thresholds": thresholds,
+        "cases": case_results,
     }
 
 
 def _run_mpi_suite(args: argparse.Namespace, output_dir: Path, host_info: dict[str, Any]) -> dict[str, Any]:
     launcher_arg = args.mpi_launcher.strip()
     if launcher_arg and launcher_arg.lower() != "auto":
-        launcher = shutil.which(launcher_arg) or launcher_arg
+        launcher = shutil.which(launcher_arg)
+        if launcher is None and Path(launcher_arg).is_file():
+            launcher = launcher_arg
     else:
         launcher = host_info.get("mpirun_path") or host_info.get("mpiexec_path")
     missing = []
@@ -597,6 +1078,12 @@ def _run_mpi_suite(args: argparse.Namespace, output_dir: Path, host_info: dict[s
             "reason": "Missing MPI prerequisites.",
             "missing": missing,
             "runs": [],
+            "scaling": {
+                "status": "skipped",
+                "reason": "Missing MPI prerequisites.",
+                "thresholds": {},
+                "cases": [],
+            },
         }
 
     try:
@@ -608,6 +1095,12 @@ def _run_mpi_suite(args: argparse.Namespace, output_dir: Path, host_info: dict[s
             "launcher": launcher,
             "error": str(exc),
             "runs": [],
+            "scaling": {
+                "status": "skipped",
+                "reason": "MPI launcher options parsing failed.",
+                "thresholds": {},
+                "cases": [],
+            },
         }
 
     launcher_args = shlex.split(args.mpi_extra_args) if args.mpi_extra_args.strip() else []
@@ -624,7 +1117,14 @@ def _run_mpi_suite(args: argparse.Namespace, output_dir: Path, host_info: dict[s
 
     ranks = _parse_int_list(args.mpi_ranks, label="--mpi-ranks")
     runs = []
-    all_pass = True
+    any_pass = False
+    any_fail = False
+    env_base = dict(os.environ)
+    for key, value in env_overrides:
+        env_base[key] = value
+    if args.x64:
+        env_base["JAX_ENABLE_X64"] = "1"
+
     for n_ranks in ranks:
         cmd = [
             *base_mpi_cmd,
@@ -636,38 +1136,72 @@ def _run_mpi_suite(args: argparse.Namespace, output_dir: Path, host_info: dict[s
             "-q",
             "tests/distributed/test_halo_mpi.py",
         ]
-        env = dict(os.environ)
-        for key, value in env_overrides:
-            env[key] = value
-        if args.x64:
-            env["JAX_ENABLE_X64"] = "1"
-
-        run = _run_cmd(cmd, env=env, timeout_sec=args.timeout_sec)
+        run = _run_cmd(cmd, env=env_base, timeout_sec=args.timeout_sec)
         log_path = output_dir / "logs" / f"mpi_np{n_ranks}.log"
         _write_log(log_path, cmd, run)
 
-        passed = run["returncode"] == 0
-        all_pass = all_pass and passed
+        if run["returncode"] == 0:
+            run_status = "pass"
+            run_reason = None
+            any_pass = True
+        elif _is_mpi_runtime_restricted(run):
+            run_status = "skipped"
+            run_reason = "MPI launcher/socket access is restricted in this environment."
+        else:
+            run_status = run["status"]
+            run_reason = None
+            any_fail = True
+
         runs.append(
             {
                 "n_ranks": n_ranks,
-                "status": "pass" if passed else run["status"],
+                "status": run_status,
                 "returncode": run["returncode"],
                 "elapsed_s": run["elapsed_s"],
                 "log": str(log_path),
+                "reason": run_reason,
                 "stdout_tail": _tail(run.get("stdout", "")),
                 "stderr_tail": _tail(run.get("stderr", "")),
             },
         )
 
+    mpi_scaling = _run_mpi_scaling_suite(
+        args,
+        output_dir,
+        base_mpi_cmd=base_mpi_cmd,
+        env_base=env_base,
+        ranks=ranks,
+    )
+
+    if any_fail:
+        unit_status = "fail"
+    elif any_pass:
+        unit_status = "pass"
+    else:
+        unit_status = "skipped"
+    if unit_status == "fail" or mpi_scaling["status"] == "fail":
+        status = "fail"
+    elif unit_status == "pass" or mpi_scaling["status"] == "pass":
+        status = "pass"
+    else:
+        status = "skipped"
+    reason = None
+    if status == "skipped":
+        reason = (
+            "All MPI checks were skipped (launcher restrictions and/or "
+            "MPI scaling disabled)."
+        )
+
     return {
-        "status": "pass" if all_pass else "fail",
+        "status": status,
+        "reason": reason,
         "launcher": launcher,
         "launcher_args": launcher_args,
         "interface": interface,
         "mca": {k: v for k, v in mca_pairs},
         "env_overrides": {k: v for k, v in env_overrides},
         "runs": runs,
+        "scaling": mpi_scaling,
     }
 
 
@@ -744,14 +1278,77 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
     if mpi.get("error"):
         lines.append(f"- Error: {mpi['error']}")
     if mpi["status"] == "skipped":
-        lines.append(f"- Reason: {mpi.get('reason', 'N/A')}")
-        missing = ", ".join(mpi.get("missing", []))
-        lines.append(f"- Missing: {missing or 'N/A'}")
+        if mpi.get("reason"):
+            lines.append(f"- Reason: {mpi['reason']}")
+        missing_items = mpi.get("missing", [])
+        if missing_items:
+            missing = ", ".join(missing_items)
+            lines.append(f"- Missing: {missing}")
     for run in mpi.get("runs", []):
-        lines.append(
+        line = (
             f"- np={run['n_ranks']}: {run['status']} "
             f"(rc={run['returncode']}, {run['elapsed_s']:.2f}s) log=`{run['log']}`"
         )
+        if run.get("reason"):
+            line += f" reason={run['reason']}"
+        lines.append(line)
+
+    mpi_scaling = mpi.get("scaling", {})
+    lines.extend(
+        [
+            "",
+            "### MPI Scaling",
+            "",
+            f"- Status: {mpi_scaling.get('status', 'skipped')}",
+        ],
+    )
+    if mpi_scaling.get("workload"):
+        lines.append(f"- Workload: `{mpi_scaling['workload']}`")
+    if mpi_scaling.get("dt_s") is not None:
+        lines.append(f"- Model dt: {float(mpi_scaling['dt_s']):.1f}s")
+    if mpi_scaling.get("reason"):
+        lines.append(f"- Reason: {mpi_scaling['reason']}")
+    mpi_scaling_thresholds = mpi_scaling.get("thresholds", {})
+    if mpi_scaling_thresholds:
+        lines.append(
+            (
+                "- Thresholds: "
+                f"compile<= {mpi_scaling_thresholds.get('compile_time_max_s', 'N/A')}s, "
+                f"strong_eff>= {mpi_scaling_thresholds.get('strong_min_efficiency', 'N/A'):.3f}, "
+                f"weak_step_growth<= {mpi_scaling_thresholds.get('weak_max_step_growth', 'N/A'):.3f}, "
+                f"weak_per_rank_tput_ratio>= "
+                f"{mpi_scaling_thresholds.get('weak_min_per_rank_throughput_ratio', 'N/A'):.3f}"
+            ),
+        )
+    for case in mpi_scaling.get("cases", []):
+        lines.append(f"- Case `{case['case_type']}`: {case['status']}")
+        for run in case.get("entries", []):
+            worker = run.get("worker", {})
+            status = run.get("status", worker.get("status", "fail"))
+            line = f"  np={run['n_ranks_requested']} grid={run['grid_size']}: {status}"
+            if status == "pass":
+                line += (
+                    f", compile={worker['compile_time_s']:.3f}s, "
+                    f"steady={worker['steady_ms_per_step']:.3f}ms/step, "
+                    f"tput={worker['throughput_global_mcells_s']:.2f} Mcells/s, "
+                    f"per_rank={worker['throughput_per_rank_mcells_s']:.2f}, "
+                    f"per_device={worker['throughput_per_device_mcells_s']:.2f}"
+                )
+                derived = run.get("derived", {})
+                if derived:
+                    line += (
+                        f", speedup={derived.get('speedup_vs_baseline', 0.0):.2f}x, "
+                        f"eff={derived.get('efficiency_vs_baseline', 0.0):.2f}, "
+                        f"step_growth={derived.get('step_growth_vs_baseline', 0.0):.2f}, "
+                        f"per_rank_ratio="
+                        f"{derived.get('per_rank_throughput_ratio_vs_baseline', 0.0):.2f}"
+                    )
+            elif status == "skipped":
+                line += f", reason={worker.get('reason', 'N/A')}"
+            else:
+                line += f", error={worker.get('error', 'unknown')}"
+            line += f" (log=`{run['log']}`)"
+            lines.append(line)
 
     thresholds = scaling.get("thresholds", {})
     lines.extend(
@@ -760,6 +1357,8 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
             "## Scaling Validation",
             "",
             f"- Status: {scaling['status']}",
+            f"- Workload: `{scaling.get('workload', 'halo')}`",
+            f"- Model dt: {float(scaling.get('dt_s', 0.0)):.1f}s",
             (
                 "- Thresholds: "
                 f"compile<= {thresholds.get('compile_time_max_s', 'N/A')}s, "
@@ -833,8 +1432,23 @@ def _main(args: argparse.Namespace) -> int:
             grid_size=args.grid_size,
             iterations=args.iterations,
             warmup=args.warmup,
+            workload=args.workload,
+            dt=args.dt,
         )
         print(json.dumps(payload, sort_keys=True))
+        return 0 if payload.get("status") in {"pass", "skipped"} else 1
+
+    if args.mpi_scaling_worker:
+        payload = _run_mpi_scaling_worker(
+            workload=args.workload,
+            case_type=args.case_type,
+            grid_size=args.grid_size,
+            iterations=args.iterations,
+            warmup=args.warmup,
+            dt=args.dt,
+        )
+        if int(payload.get("rank", 0)) == 0:
+            print(json.dumps(payload, sort_keys=True))
         return 0 if payload.get("status") in {"pass", "skipped"} else 1
 
     output_dir = Path(args.output)
@@ -952,6 +1566,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated scaling benchmark backends (cpu,gpu).",
     )
     parser.add_argument(
+        "--scaling-workload",
+        type=str,
+        default="atmosphere_sw",
+        choices=("halo", "atmosphere_sw"),
+        help="Scaling workload: synthetic halo kernel or atmosphere shallow-water step.",
+    )
+    parser.add_argument(
+        "--scaling-dt",
+        type=float,
+        default=300.0,
+        help="Model timestep [s] for atmosphere scaling workload.",
+    )
+    parser.add_argument(
         "--scaling-cpu-devices",
         type=str,
         default="1,2,3,6",
@@ -1025,15 +1652,51 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run validation subprocesses with JAX_ENABLE_X64=1.",
     )
+    parser.add_argument(
+        "--mpi-scaling",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run MPI atmosphere strong/weak scaling benchmarks.",
+    )
+    parser.add_argument(
+        "--mpi-scaling-strong-grid",
+        type=int,
+        default=96,
+        help="Fixed grid size n for MPI strong scaling (field: 6 x n x n).",
+    )
+    parser.add_argument(
+        "--mpi-scaling-weak-base-grid",
+        type=int,
+        default=96,
+        help=(
+            "Baseline MPI weak-scaling grid size at minimum rank count; "
+            "scales as sqrt(rank_ratio)."
+        ),
+    )
+    parser.add_argument(
+        "--mpi-scaling-iterations",
+        type=int,
+        default=12,
+        help="Timed steady-state iterations per MPI scaling point.",
+    )
+    parser.add_argument(
+        "--mpi-scaling-warmup",
+        type=int,
+        default=2,
+        help="Warmup iterations before steady-state timing in MPI scaling.",
+    )
 
     # Internal worker mode.
     parser.add_argument("--scaling-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--mpi-scaling-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--backend-target", type=str, default="cpu", help=argparse.SUPPRESS)
+    parser.add_argument("--workload", type=str, default="atmosphere_sw", help=argparse.SUPPRESS)
     parser.add_argument("--case-type", type=str, default="strong", help=argparse.SUPPRESS)
     parser.add_argument("--n-devices", type=int, default=1, help=argparse.SUPPRESS)
     parser.add_argument("--grid-size", type=int, default=256, help=argparse.SUPPRESS)
     parser.add_argument("--iterations", type=int, default=20, help=argparse.SUPPRESS)
     parser.add_argument("--warmup", type=int, default=3, help=argparse.SUPPRESS)
+    parser.add_argument("--dt", type=float, default=300.0, help=argparse.SUPPRESS)
     return parser
 
 

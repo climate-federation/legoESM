@@ -19,6 +19,12 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
+# Numerical guardrails used across atmosphere dynamics/physics bridges.
+_THETA_MIN = 50.0       # [K]
+_RHO_MIN = 1.0e-9       # [kg m^-3]
+_P_MIN = 1.0            # [Pa]
+_P_MAX = 2.0e7          # [Pa]
+
 
 # ==============================================================================
 # Basic thermodynamic relations (extracted from kessler.py)
@@ -72,7 +78,26 @@ def temperature_from_theta(
     jax.Array
         Temperature [K].
     """
-    return theta * (p / constants.p_ref) ** constants.kappa
+    theta_pos = jnp.clip(theta, _THETA_MIN, None)
+    p_pos = jnp.clip(p, _P_MIN, _P_MAX)
+    return theta_pos * (p_pos / constants.p_ref) ** constants.kappa
+
+
+def sanitize_theta_rho(
+    theta: jax.Array,
+    rho: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Clip thermodynamic state to physically positive ranges.
+
+    Returns
+    -------
+    theta_pos, rho_pos : jax.Array
+        Potential temperature [K] and density [kg/m^3] clipped to
+        positive finite floors for robust EOS/exner evaluations.
+    """
+    theta_pos = jnp.clip(theta, _THETA_MIN, None)
+    rho_pos = jnp.clip(rho, _RHO_MIN, None)
+    return theta_pos, rho_pos
 
 
 def pressure_from_eos(
@@ -100,7 +125,53 @@ def pressure_from_eos(
     c_v = constants.c_vd
     p_0 = constants.p_ref
 
-    return p_0 * (R_d * rho * theta / p_0) ** (c_p / c_v)
+    theta_pos, rho_pos = sanitize_theta_rho(theta, rho)
+    base = jnp.clip(R_d * rho_pos * theta_pos / p_0, 1.0e-20, 1.0e20)
+    p = p_0 * base ** (c_p / c_v)
+    return jnp.clip(p, _P_MIN, _P_MAX)
+
+
+def reconstruct_half_level_pressure_hydrostatic(
+    p_full: jax.Array,
+    rho_full: jax.Array,
+    z_half: jax.Array,
+) -> jax.Array:
+    """Reconstruct interface pressure from full-level state via hydrostatic balance.
+
+    This is intended for non-hydrostatic column physics bridges where
+    full-level pressure comes from the local EOS but interface pressure is
+    needed by parameterizations. Using the evolving column state avoids
+    relying on a fixed reference half-level pressure profile.
+
+    Parameters
+    ----------
+    p_full : jax.Array
+        Full-level pressure [Pa], shape (..., nlev).
+    rho_full : jax.Array
+        Full-level density [kg/m^3], shape (..., nlev).
+    z_half : jax.Array
+        Interface height [m], shape (..., nlev+1), top-to-bottom ordering.
+
+    Returns
+    -------
+    jax.Array
+        Reconstructed half-level pressure [Pa], shape (..., nlev+1).
+    """
+    # Layer thicknesses are positive with top-to-bottom level indexing.
+    dz = jnp.abs(z_half[..., :-1] - z_half[..., 1:])
+    rho_pos = jnp.clip(rho_full, 1e-9, None)
+
+    # Hydrostatic increment across each full layer.
+    dp = constants.g * rho_pos * dz
+
+    # Top interface: centered estimate from top full level.
+    p_top = p_full[..., 0] - 0.5 * dp[..., 0]
+    p_top = jnp.clip(p_top, 1.0, None)
+
+    # Downward integration to all interfaces.
+    p_interfaces_inner = p_top[..., None] + jnp.cumsum(dp, axis=-1)
+    p_half = jnp.concatenate([p_top[..., None], p_interfaces_inner], axis=-1)
+    return jnp.clip(p_half, 1.0, None)
 
 
 # ==============================================================================

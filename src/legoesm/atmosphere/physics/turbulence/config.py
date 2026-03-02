@@ -120,10 +120,13 @@ class CLUBBLiteConfig(NamedTuple):
     ------
     C1 : float
         Placeholder tuning parameter (default 1.0).
+    tke_min : float
+        Minimum TKE [m^2/s^2] (default 1e-6).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
     C1: float = 1.0
+    tke_min: float = 1e-6
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

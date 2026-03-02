@@ -274,7 +274,7 @@ class TestGrayRadiation:
         # sum(hr * dp) = g/c_p * (F_net_sfc - F_net_toa)
         # i.e., c_p/g * sum(hr * dp) = F_net_sfc - F_net_toa
         col_flux_div = jnp.sum(out.heating_rate * dp, axis=1)  # sum of g/c_p * dF
-        expected_flux_div = (constants.g / constants.c_pd) * (F_net_sfc - F_net_toa)
+        expected_flux_div = (constants.g / constants.c_pd) * (F_net_toa - F_net_sfc)
 
         assert jnp.allclose(col_flux_div, expected_flux_div, rtol=1e-4)
 
@@ -459,26 +459,15 @@ class TestIntegration:
 
 
 # ===========================================================================
-# RRTMGP tests (skip if not installed)
+# RRTMGP tests (bundled)
 # ===========================================================================
 
 class TestRRTMGP:
-    """Tests for RRTMGP wrapper (skip if jax-rrtmgp not installed)."""
+    """Tests for bundled RRTMGP radiation wrapper."""
 
-    @pytest.fixture(autouse=True)
-    def check_rrtmgp(self):
-        try:
-            import jax_rrtmgp  # noqa: F401
-        except ImportError:
-            pytest.skip("jax-rrtmgp not installed")
-
-    def test_rrtmgp_import_guard(self):
-        """rrtmgp_wrapper should raise ImportError if not installed."""
-        from legoesm.atmosphere.physics.radiation.rrtmgp_wrapper import (
-            _RRTMGP_AVAILABLE,
-        )
-        # If we get here, it's installed
-        assert _RRTMGP_AVAILABLE
+    def test_rrtmgp_import(self):
+        """Bundled rrtmgp package should import successfully."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP  # noqa: F401
 
     def test_rrtmgp_clear_sky(self):
         """RRTMGP clear-sky heating rates should be finite."""

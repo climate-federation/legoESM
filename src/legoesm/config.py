@@ -43,7 +43,7 @@ DEFAULT_CONFIG = {
         "discretization": "finite_volume",
         "equations": "shallow_water",   # legacy; use dynamics+discretization
         "advection": "centered",
-        "time_integrator": "ssp_rk3",
+        "time_integrator": "ssp_rk3",   # "ssp_rk3" | "ssp_rk54"
         "dt_seconds": 600,          # 10 minutes
         "hyperdiffusion_coeff": 0.0,
         "spectral": {

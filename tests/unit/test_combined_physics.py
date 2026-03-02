@@ -469,6 +469,29 @@ class TestCombinedSpectralPE:
         assert jnp.allclose(tend.vor_hat.data, 0.0, atol=1e-15)
         assert jnp.allclose(tend.div_hat.data, 0.0, atol=1e-15)
 
+    def test_combined_reuses_single_spectral_transform(self, monkeypatch):
+        """Combined spectral physics should call spectral->grid transform once."""
+        state, grid, sigma = self._make_spectral_setup()
+        cfg = PhysicsConfig(
+            radiation=RadiationConfig(scheme="gray"),
+            convection=ConvectionConfig(scheme="sbm"),
+            turbulence=TurbulenceConfig(scheme="none"),
+        )
+        physics_fn = make_physics(cfg, "spectral_pe", dt=300.0)
+
+        import legoesm.atmosphere.dynamics.spectral_pe as spectral_pe_mod
+        original = spectral_pe_mod.spectral_pe_to_grid
+        n_calls = {"count": 0}
+
+        def wrapped(*args, **kwargs):
+            n_calls["count"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(spectral_pe_mod, "spectral_pe_to_grid", wrapped)
+        _ = physics_fn(state, grid, sigma)
+
+        assert n_calls["count"] == 1
+
 
 class TestInvalidModelType:
     """Tests for error handling."""

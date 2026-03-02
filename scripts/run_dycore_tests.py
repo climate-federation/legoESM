@@ -152,6 +152,27 @@ def _color_limits(panels: list[np.ndarray]) -> tuple[float, float]:
     return vmin, vmax
 
 
+def _format_sim_time(step: int, dt: float) -> str:
+    """Format simulation time in a human-readable unit for plot titles."""
+    t_sec = step * dt
+    if t_sec < 3600.0:
+        return f"{t_sec / 60.0:.1f} min"
+    if t_sec < 86400.0:
+        return f"{t_sec / 3600.0:.2f} h"
+    return f"{t_sec / 86400.0:.2f} d"
+
+
+def _sigma_index_nearest(sigma_full, target_sigma: float) -> int:
+    """Return index of sigma_full nearest to a target sigma value."""
+    sigma_arr = np.asarray(sigma_full)
+    return int(np.argmin(np.abs(sigma_arr - target_sigma)))
+
+
+def _zonal_anomaly(field_2d: np.ndarray) -> np.ndarray:
+    """Remove zonal mean (longitude mean) from a lat-lon 2D field."""
+    return field_2d - np.mean(field_2d, axis=1, keepdims=True)
+
+
 def _save_case_snapshots(
     test_dir: Path,
     case_name: str,
@@ -215,7 +236,7 @@ def _save_case_snapshots(
         for col, step in enumerate(snap_steps):
             ax = axes[row][col]
             panel = row_panels[col]
-            sim_days = step * dt / 86400.0
+            time_label = _format_sim_time(step, dt)
 
             if panel is None:
                 ax.text(0.5, 0.5, "N/A", ha="center", va="center", fontsize=10)
@@ -251,7 +272,7 @@ def _save_case_snapshots(
                     ax.set_xticks([])
                     ax.set_yticks([])
 
-            title = f"step {step}\nt={sim_days:.2f} d"
+            title = f"step {step}\nt={time_label}"
             ax.set_title(title, fontsize=9)
 
             if col == 0:
@@ -832,6 +853,8 @@ def run_hydro_spectral_tests(output_dir):
         sigma = create_sigma_coordinate(NLEV)
         config = SpectralPEConfig(hyperdiff_coeff=HYPERDIFF, hyperdiff_order=2)
         model = SpectralPrimitiveEquationModel(grid, sigma, config)
+        k_jet = _sigma_index_nearest(sigma.sigma_full, 0.25)
+        k_mid = _sigma_index_nearest(sigma.sigma_full, 0.55)
 
         state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
 
@@ -841,12 +864,13 @@ def run_hydro_spectral_tests(output_dir):
 
         def extract_fields_hydro_spec(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
-            u_sfc = np.asarray(fields["u"])[..., -1]
-            v_sfc = np.asarray(fields["v"])[..., -1]
+            u_jet = np.asarray(fields["u"])[..., k_jet]
+            v_jet = np.asarray(fields["v"])[..., k_jet]
+            p_s = np.asarray(fields["p_s"])
             return {
-                "wind_speed": np.sqrt(u_sfc * u_sfc + v_sfc * v_sfc),
-                "p_s": np.asarray(fields["p_s"]),
-                "T_sfc": np.asarray(fields["T"])[..., -1],
+                "wind_jet": np.sqrt(u_jet * u_jet + v_jet * v_jet),
+                "p_s_anom": _zonal_anomaly(p_s),
+                "T_mid": np.asarray(fields["T"])[..., k_mid],
             }
 
         _capture_snapshot(snapshots, snap_targets, 0, extract_fields_hydro_spec, state)
@@ -880,26 +904,37 @@ def run_hydro_spectral_tests(output_dir):
             snapshots,
             DT,
             [
-                ("wind_speed", "Surface wind speed (m/s)", "magma"),
-                ("p_s", "Surface pressure (Pa)", "viridis"),
-                ("T_sfc", "Surface temperature (K)", "coolwarm"),
+                ("wind_jet", f"Wind speed @ sigma={float(np.asarray(sigma.sigma_full)[k_jet]):.3f} (m/s)", "magma"),
+                ("p_s_anom", "Surface pressure anomaly (Pa)", "RdBu_r"),
+                ("T_mid", f"Temperature @ sigma={float(np.asarray(sigma.sigma_full)[k_mid]):.3f} (K)", "coolwarm"),
             ],
         )
 
         fields = spectral_pe_to_grid(state, grid, sigma)
+        jet_speed = jnp.sqrt(fields['u'][..., k_jet] ** 2 + fields['v'][..., k_jet] ** 2)
         max_wind = float(jnp.max(jnp.sqrt(fields['u'] ** 2 + fields['v'] ** 2)))
+        max_wind_jet = float(jnp.max(jet_speed))
+        p99_wind_jet = float(jnp.percentile(jet_speed, 99.0))
         mean_T = float(jnp.mean(fields['T']))
         stable = bool(jnp.all(jnp.isfinite(fields['u'])))
         status = "PASS" if stable else "FAIL"
 
         with open(test_dir / "results.txt", "w") as f:
-            f.write(f"max_wind: {max_wind:.1f}\nmean_T: {mean_T:.1f}\n")
+            f.write(
+                f"max_wind_all_levels: {max_wind:.1f}\n"
+                f"max_wind_jet_level: {max_wind_jet:.1f}\n"
+                f"p99_wind_jet_level: {p99_wind_jet:.1f}\n"
+                f"mean_T: {mean_T:.1f}\n"
+            )
             f.write(f"stable: {stable}\nwall_time: {wall:.1f}\n")
 
         record("Held-Suarez 30d", f"Hydro Spec T{T}/L{NLEV}", status,
-               "max |v|", f"{max_wind:.1f}", wall,
-               f"<T>={mean_T:.1f}")
-        print(f"    {status} | max|v|={max_wind:.1f} | <T>={mean_T:.1f} | {wall:.1f}s")
+               "p99 |v| @ jet", f"{p99_wind_jet:.1f}", wall,
+               f"max_all={max_wind:.1f}, max_jet={max_wind_jet:.1f}, <T>={mean_T:.1f}")
+        print(
+            f"    {status} | max|v|_all={max_wind:.1f} | "
+            f"max|v|_jet={max_wind_jet:.1f} | p99_jet={p99_wind_jet:.1f} | {wall:.1f}s"
+        )
 
     except Exception as e:
         record("Held-Suarez 30d", f"Hydro Spec T{T}/L{NLEV}", "ERROR", "error", str(e), 0)
@@ -919,6 +954,8 @@ def run_hydro_spectral_tests(output_dir):
         HYPERDIFF_BW = 1.0 / (0.1 * 3600.0 * eig_max_bw ** 2)
         config_bw = SpectralPEConfig(hyperdiff_coeff=HYPERDIFF_BW, hyperdiff_order=2)
         model_bw = SpectralPrimitiveEquationModel(grid, sigma, config_bw)
+        k_jet = _sigma_index_nearest(sigma.sigma_full, 0.25)
+        k_mid = _sigma_index_nearest(sigma.sigma_full, 0.55)
 
         state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True)
 
@@ -928,12 +965,13 @@ def run_hydro_spectral_tests(output_dir):
 
         def extract_fields_hydro_spec(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
-            u_sfc = np.asarray(fields["u"])[..., -1]
-            v_sfc = np.asarray(fields["v"])[..., -1]
+            u_jet = np.asarray(fields["u"])[..., k_jet]
+            v_jet = np.asarray(fields["v"])[..., k_jet]
+            p_s = np.asarray(fields["p_s"])
             return {
-                "wind_speed": np.sqrt(u_sfc * u_sfc + v_sfc * v_sfc),
-                "p_s": np.asarray(fields["p_s"]),
-                "T_sfc": np.asarray(fields["T"])[..., -1],
+                "wind_jet": np.sqrt(u_jet * u_jet + v_jet * v_jet),
+                "p_s_anom": _zonal_anomaly(p_s),
+                "T_mid": np.asarray(fields["T"])[..., k_mid],
             }
 
         _capture_snapshot(snapshots, snap_targets, 0, extract_fields_hydro_spec, state)
@@ -967,27 +1005,39 @@ def run_hydro_spectral_tests(output_dir):
             snapshots,
             DT,
             [
-                ("wind_speed", "Surface wind speed (m/s)", "magma"),
-                ("p_s", "Surface pressure (Pa)", "viridis"),
-                ("T_sfc", "Surface temperature (K)", "coolwarm"),
+                ("wind_jet", f"Wind speed @ sigma={float(np.asarray(sigma.sigma_full)[k_jet]):.3f} (m/s)", "magma"),
+                ("p_s_anom", "Surface pressure anomaly (Pa)", "RdBu_r"),
+                ("T_mid", f"Temperature @ sigma={float(np.asarray(sigma.sigma_full)[k_mid]):.3f} (K)", "coolwarm"),
             ],
         )
 
         fields = spectral_pe_to_grid(state, grid, sigma)
+        jet_speed = jnp.sqrt(fields['u'][..., k_jet] ** 2 + fields['v'][..., k_jet] ** 2)
         max_wind = float(jnp.max(jnp.sqrt(fields['u'] ** 2 + fields['v'] ** 2)))
+        max_wind_jet = float(jnp.max(jet_speed))
+        p99_wind_jet = float(jnp.percentile(jet_speed, 99.0))
         ps_min = float(jnp.min(fields['p_s'])) / 100
         stable = bool(jnp.all(jnp.isfinite(fields['u']))) and not blowup_detected
         status = "PASS" if stable else "FAIL"
 
         with open(test_dir / "results.txt", "w") as f:
-            f.write(f"max_wind: {max_wind:.1f}\nps_min_hPa: {ps_min:.1f}\n")
+            f.write(
+                f"max_wind_all_levels: {max_wind:.1f}\n"
+                f"max_wind_jet_level: {max_wind_jet:.1f}\n"
+                f"p99_wind_jet_level: {p99_wind_jet:.1f}\n"
+                f"ps_min_hPa: {ps_min:.1f}\n"
+            )
             f.write(f"days: {BW_DAYS}\nstable: {stable}\nwall_time: {wall:.1f}\n")
             f.write("note: Explicit RK3 spectral PE requires semi-implicit for longer BW runs\n")
 
         record(f"Baroclinic {BW_DAYS}d", f"Hydro Spec T{T}/L{NLEV}", status,
-               "ps min (hPa)", f"{ps_min:.1f}", wall,
-               f"max|v|={max_wind:.1f}")
-        print(f"    {status} | max|v|={max_wind:.1f} | ps_min={ps_min:.1f}hPa | {wall:.1f}s")
+               "p99 |v| @ jet", f"{p99_wind_jet:.1f}", wall,
+               f"max_all={max_wind:.1f}, max_jet={max_wind_jet:.1f}, ps_min={ps_min:.1f}hPa")
+        print(
+            f"    {status} | max|v|_all={max_wind:.1f} | "
+            f"max|v|_jet={max_wind_jet:.1f} | p99_jet={p99_wind_jet:.1f} | "
+            f"ps_min={ps_min:.1f}hPa | {wall:.1f}s"
+        )
 
     except Exception as e:
         record(f"Baroclinic {BW_DAYS}d", f"Hydro Spec T{T}/L{NLEV}", "ERROR", "error", str(e), 0)
@@ -1028,7 +1078,8 @@ def run_nh_fv_tests(output_dir):
         if tracers.ndim == 5 and tracers.shape[-1] > 0:
             out["q1"] = tracers[..., -1, 0]
         if tracers.ndim == 5 and tracers.shape[-1] >= 3:
-            out["q_rain"] = tracers[..., -1, 2]
+            # Rain mixing ratio is non-negative; clip tiny numerical undershoots.
+            out["q_rain"] = np.clip(tracers[..., -1, 2], 0.0, None)
         return out
 
     # --- TC1: Gravity waves (3 hours) ---
@@ -1364,10 +1415,21 @@ def run_nh_spectral_tests(output_dir):
             v = np.asarray(v_cos) / cos_lat_3d
             w = np.asarray(sh_synthesis_3d(grid, s.w_hat.data))
             rho_p = np.asarray(sh_synthesis_3d(grid, s.rho_prime_hat.data))
+            wind = np.sqrt(u * u + v * v)
+
+            # Use zonal anomalies to avoid the background zonal flow dominating
+            # level selection/visualization for TC1 perturbations.
+            wind_anom = wind - np.mean(wind, axis=1, keepdims=True)
+            rho_anom = rho_p - np.mean(rho_p, axis=1, keepdims=True)
+            w_anom = w - np.mean(w, axis=1, keepdims=True)
+
+            k_wind = int(np.argmax(np.mean(np.abs(wind_anom), axis=(0, 1))))
+            k_rho = int(np.argmax(np.mean(np.abs(rho_anom), axis=(0, 1))))
+            k_w = int(np.argmax(np.mean(np.abs(w_anom), axis=(0, 1))))
             return {
-                "wind_speed": np.sqrt(u[..., -1] * u[..., -1] + v[..., -1] * v[..., -1]),
-                "rho_prime": rho_p[..., -1],
-                "w_mid": w[..., w.shape[-1] // 2],
+                "wind_focus": wind_anom[..., k_wind],
+                "rho_focus": rho_anom[..., k_rho],
+                "w_focus": w_anom[..., k_w],
             }
 
         _capture_snapshot(snapshots, snap_targets, 0, extract_fields_nh_spec, state)
@@ -1397,9 +1459,9 @@ def run_nh_spectral_tests(output_dir):
             snapshots,
             DT_NH,
             [
-                ("wind_speed", "Low-level wind speed (m/s)", "magma"),
-                ("rho_prime", "Density perturbation (kg/m3)", "RdBu_r"),
-                ("w_mid", "Mid-level vertical w (m/s)", "RdBu_r"),
+                ("wind_focus", "Wind speed anomaly (max-activity level, m/s)", "RdBu_r"),
+                ("rho_focus", "Density perturbation anomaly (max-activity level, kg/m3)", "RdBu_r"),
+                ("w_focus", "Vertical w anomaly (max-activity level, m/s)", "RdBu_r"),
             ],
         )
 
@@ -1465,9 +1527,10 @@ def run_transport_tests(output_dir):
 
         def extract_fields_transport(s):
             tracers = np.asarray(s.tracers.data)
-            out = {"q1": tracers[..., -1, 0]}
+            # Tracers are positive-definite in these idealized transport tests.
+            out = {"q1": np.clip(tracers[..., -1, 0], 0.0, None)}
             if tracers.shape[-1] >= 2:
-                out["q2"] = tracers[..., -1, 1]
+                out["q2"] = np.clip(tracers[..., -1, 1], 0.0, None)
             return out
 
         t0 = time.time()
@@ -1570,6 +1633,8 @@ def run_semi_implicit_tests(output_dir):
             si_hyperdiff_boost=SI_HYPERDIFF_MULT,
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, config)
+        k_jet = _sigma_index_nearest(sigma.sigma_full, 0.25)
+        k_mid = _sigma_index_nearest(sigma.sigma_full, 0.55)
 
         state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
 
@@ -1579,12 +1644,13 @@ def run_semi_implicit_tests(output_dir):
 
         def extract_fields_si_spec(s):
             fields = spectral_pe_to_grid(s, grid, sigma)
-            u_sfc = np.asarray(fields["u"])[..., -1]
-            v_sfc = np.asarray(fields["v"])[..., -1]
+            u_jet = np.asarray(fields["u"])[..., k_jet]
+            v_jet = np.asarray(fields["v"])[..., k_jet]
+            p_s = np.asarray(fields["p_s"])
             return {
-                "wind_speed": np.sqrt(u_sfc * u_sfc + v_sfc * v_sfc),
-                "p_s": np.asarray(fields["p_s"]),
-                "T_sfc": np.asarray(fields["T"])[..., -1],
+                "wind_jet": np.sqrt(u_jet * u_jet + v_jet * v_jet),
+                "p_s_anom": _zonal_anomaly(p_s),
+                "T_mid": np.asarray(fields["T"])[..., k_mid],
             }
 
         _capture_snapshot(snapshots, snap_targets, 0, extract_fields_si_spec, state)
@@ -1619,20 +1685,28 @@ def run_semi_implicit_tests(output_dir):
             snapshots,
             DT_SI,
             [
-                ("wind_speed", "Surface wind speed (m/s)", "magma"),
-                ("p_s", "Surface pressure (Pa)", "viridis"),
-                ("T_sfc", "Surface temperature (K)", "coolwarm"),
+                ("wind_jet", f"Wind speed @ sigma={float(np.asarray(sigma.sigma_full)[k_jet]):.3f} (m/s)", "magma"),
+                ("p_s_anom", "Surface pressure anomaly (Pa)", "RdBu_r"),
+                ("T_mid", f"Temperature @ sigma={float(np.asarray(sigma.sigma_full)[k_mid]):.3f} (K)", "coolwarm"),
             ],
         )
 
         fields = spectral_pe_to_grid(state, grid, sigma)
+        jet_speed = jnp.sqrt(fields['u'][..., k_jet] ** 2 + fields['v'][..., k_jet] ** 2)
         max_wind = float(jnp.max(jnp.sqrt(fields['u'] ** 2 + fields['v'] ** 2)))
+        max_wind_jet = float(jnp.max(jet_speed))
+        p99_wind_jet = float(jnp.percentile(jet_speed, 99.0))
         mean_T = float(jnp.mean(fields['T']))
         stable = bool(jnp.all(jnp.isfinite(fields['u']))) and not blowup_detected
         status = "PASS" if stable else "FAIL"
 
         with open(test_dir / "results.txt", "w") as f:
-            f.write(f"max_wind: {max_wind:.1f}\nmean_T: {mean_T:.1f}\n")
+            f.write(
+                f"max_wind_all_levels: {max_wind:.1f}\n"
+                f"max_wind_jet_level: {max_wind_jet:.1f}\n"
+                f"p99_wind_jet_level: {p99_wind_jet:.1f}\n"
+                f"mean_T: {mean_T:.1f}\n"
+            )
             f.write(
                 f"dt: {DT_SI}\n"
                 f"semi_implicit: True\n"
@@ -1643,9 +1717,14 @@ def run_semi_implicit_tests(output_dir):
             )
 
         record("Held-Suarez 30d SI", f"Hydro Spec T{T_SI}/L{NLEV_SI} SI", status,
-               "max |v|", f"{max_wind:.1f}", wall,
-               f"<T>={mean_T:.1f}, dt={DT_SI:.0f}s, sub={SI_SUBSTEPS}, nu={SI_HYPERDIFF_MULT:.1f}x")
-        print(f"    {status} | max|v|={max_wind:.1f} | <T>={mean_T:.1f} | {wall:.1f}s")
+               "p99 |v| @ jet", f"{p99_wind_jet:.1f}", wall,
+               f"max_all={max_wind:.1f}, max_jet={max_wind_jet:.1f}, "
+               f"<T>={mean_T:.1f}, dt={DT_SI:.0f}s, sub={SI_SUBSTEPS}, "
+               f"nu={SI_HYPERDIFF_MULT:.1f}x")
+        print(
+            f"    {status} | max|v|_all={max_wind:.1f} | "
+            f"max|v|_jet={max_wind_jet:.1f} | p99_jet={p99_wind_jet:.1f} | {wall:.1f}s"
+        )
 
     except Exception as e:
         record("Held-Suarez 30d SI", f"Hydro Spec T{T_SI}/L{NLEV_SI} SI", "ERROR",

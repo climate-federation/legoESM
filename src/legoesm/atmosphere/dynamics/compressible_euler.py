@@ -50,6 +50,7 @@ from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
 )
+from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm import constants
 
 
@@ -110,8 +111,10 @@ def compute_exner_perturbation(
     #   pi' = pi_0 * (ratio^exponent - 1)
     # This is exact: zero when rho'=theta'=0, no large-value subtraction.
     exponent = R_d / c_v
-    ratio = (1.0 + rho_prime / rho_0) * (1.0 + theta_prime / theta_0)
-    return pi_0 * (ratio ** exponent - 1.0)
+    rho_rel = 1.0 + rho_prime / jnp.clip(rho_0, 1.0e-9, None)
+    theta_rel = 1.0 + theta_prime / jnp.clip(theta_0, 50.0, None)
+    ratio = jnp.clip(rho_rel * theta_rel, 1.0e-12, 1.0e12)
+    return pi_0 * jnp.expm1(exponent * jnp.log(ratio))
 
 
 # ==============================================================================
@@ -179,8 +182,10 @@ def compressible_euler_slow_tendencies(
     dz_half = height_coord.dz_half      # (nlev-1,)
     J = terrain_metric.jacobian         # (6, n, n)
 
-    theta_total = theta_0 + theta_p     # (6, n, n, nlev)
-    rho_total = rho_0 + rho_p
+    theta_total, rho_total = sanitize_theta_rho(
+        theta_0 + theta_p,
+        rho_0 + rho_p,
+    )
 
     # --- 1. Exner perturbation and horizontal pressure gradient ---
     pi_prime = compute_exner_perturbation(rho_p, theta_p, height_coord)
@@ -377,8 +382,10 @@ def acoustic_substeps(
     def substep_body(i, carry):
         w_c, theta_p_c, rho_p_c = carry
 
-        theta_total = theta_0 + theta_p_c
-        rho_total = rho_0 + rho_p_c
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p_c,
+            rho_0 + rho_p_c,
+        )
 
         # --- Forward: update w ---
         # Exner perturbation at full levels
@@ -544,8 +551,10 @@ def acoustic_substeps_semi_implicit(
     def substep_body(i, carry):
         w_c, theta_p_c, rho_p_c = carry
 
-        theta_total = theta_0 + theta_p_c
-        rho_total = rho_0 + rho_p_c
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p_c,
+            rho_0 + rho_p_c,
+        )
 
         # --- Explicit RHS for w (same as forward step) ---
         pi_p = compute_exner_perturbation(rho_p_c, theta_p_c, height_coord)

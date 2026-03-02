@@ -54,11 +54,14 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     compute_exner_perturbation,
     _sponge_profile,
 )
+from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
 )
 from legoesm import constants
+
+_COS_LAT_MIN = 1.0e-6
 
 
 # =============================================================================
@@ -120,8 +123,10 @@ def _spectral_gradient_3d(grid, coeffs_3d):
     c_t = jnp.moveaxis(coeffs_3d, -1, 0)  # (nlev, n_sh)
     ims = grid.ms.astype(jnp.float64)
 
+    cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
+
     def zonal_deriv(c):
-        return sh_synthesis(grid, 1j * ims * c) / (a * grid.cos_lat[:, None])
+        return sh_synthesis(grid, 1j * ims * c) / (a * cos_lat_2d)
 
     dfdx_t = jax.vmap(zonal_deriv)(c_t)  # (nlev, n_lat, n_lon)
     dfdx = jnp.moveaxis(dfdx_t, 0, -1)
@@ -130,7 +135,7 @@ def _spectral_gradient_3d(grid, coeffs_3d):
     # _sh_synthesis_H gives cos(lat) * d(f)/d(colatitude)
     # df/dy = -(1/a) * d(f)/d(colatitude) = -Hnm_synth / (a * cos(lat))
     def merid_deriv(c):
-        return -_sh_synthesis_H(grid, c) / (a * grid.cos_lat[:, None])
+        return -_sh_synthesis_H(grid, c) / (a * cos_lat_2d)
 
     dfdy_t = jax.vmap(merid_deriv)(c_t)
     dfdy = jnp.moveaxis(dfdy_t, 0, -1)
@@ -182,13 +187,15 @@ def spectral_nh_slow_tendencies(
     u_cos, v_cos = uv_from_vordiv_3d(
         grid, state.vor_hat.data, state.div_hat.data,
     )
-    cos_lat_3d = grid.cos_lat[:, None, None]
+    cos_lat_3d = jnp.clip(grid.cos_lat[:, None, None], _COS_LAT_MIN, None)
     u = u_cos / cos_lat_3d
     v = v_cos / cos_lat_3d
 
     # --- 3. Derived fields ---
-    theta_total = theta_0 + theta_p
-    rho_total = rho_0 + rho_p
+    theta_total, rho_total = sanitize_theta_rho(
+        theta_0 + theta_p,
+        rho_0 + rho_p,
+    )
 
     # --- 4. Exner perturbation ---
     pi_p = compute_exner_perturbation(rho_p, theta_p, height_coord)
@@ -409,8 +416,10 @@ def _acoustic_substeps_grid(
     def substep_body(i, carry):
         w_c, theta_p_c, rho_p_c = carry
 
-        theta_total = theta_0 + theta_p_c
-        rho_total = rho_0 + rho_p_c
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p_c,
+            rho_0 + rho_p_c,
+        )
 
         # --- Forward: update w ---
         pi_p = compute_exner_perturbation(rho_p_c, theta_p_c, height_coord)
@@ -492,8 +501,10 @@ def _acoustic_substeps_grid_semi_implicit(
     def substep_body(i, carry):
         w_c, theta_p_c, rho_p_c = carry
 
-        theta_total = theta_0 + theta_p_c
-        rho_total = rho_0 + rho_p_c
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p_c,
+            rho_0 + rho_p_c,
+        )
 
         # --- Explicit RHS for w ---
         pi_p = compute_exner_perturbation(rho_p_c, theta_p_c, height_coord)

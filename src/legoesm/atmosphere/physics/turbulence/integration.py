@@ -51,9 +51,10 @@ from legoesm.atmosphere.physics.turbulence.ml_emulator import (
     TurbulenceEmulator,
 )
 from legoesm.atmosphere.physics.thermodynamics import (
-    temperature_from_theta,
     pressure_from_eos,
     saturation_mixing_ratio,
+    reconstruct_half_level_pressure_hydrostatic,
+    sanitize_theta_rho,
 )
 
 
@@ -167,15 +168,15 @@ def _make_hydrostatic_turbulence(
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
     is_ml = scheme_name == "ml_emulator"
-
-    # Persistent state for prognostic/ML schemes
-    closure_state = {}
+    tke_col_state = None
+    ml_model = None
 
     def physics_fn(
         state: HydrostaticState,
         grid: CubedSphereGrid,
         sigma_coord: SigmaCoordinate,
     ) -> HydrostaticTendencies:
+        nonlocal tke_col_state, ml_model
         T = state.T.data          # (6, n, n, nlev)
         u = state.u.data
         v = state.v.data
@@ -221,9 +222,9 @@ def _make_hydrostatic_turbulence(
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
-            if 'tke' not in closure_state:
-                closure_state['tke'] = jnp.full((ncol, nlev), scheme_config.tke_min)
-            tke_in = closure_state['tke']
+            if tke_col_state is None:
+                tke_col_state = jnp.full((ncol, nlev), scheme_config.tke_min)
+            tke_in = tke_col_state
             # Ensure shape matches (ncol may differ on first call vs subsequent)
             if tke_in.shape != (ncol, nlev):
                 tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
@@ -233,11 +234,11 @@ def _make_hydrostatic_turbulence(
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
             )
-            closure_state['tke'] = tke_new
+            tke_col_state = tke_new
         elif is_ml:
-            if 'model' not in closure_state:
+            if ml_model is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
-                closure_state['model'] = TurbulenceEmulator(
+                ml_model = TurbulenceEmulator(
                     scheme_config.n_input, scheme_config.n_hidden,
                     scheme_config.n_layers, scheme_config.n_output,
                     key=key,
@@ -246,7 +247,7 @@ def _make_hydrostatic_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
-                closure_state['model'],
+                ml_model,
             )
         else:
             turb_out = turb_fn(
@@ -267,6 +268,12 @@ def _make_hydrostatic_turbulence(
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
         )
 
+    def reset_state():
+        nonlocal tke_col_state, ml_model
+        tke_col_state = None
+        ml_model = None
+
+    physics_fn.reset_state = reset_state
     return physics_fn
 
 
@@ -285,8 +292,8 @@ def _make_nonhydrostatic_turbulence(
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
     is_ml = scheme_name == "ml_emulator"
-
-    closure_state = {}
+    tke_col_state = None
+    ml_model = None
 
     def physics_fn(
         state: NonHydrostaticState,
@@ -294,6 +301,7 @@ def _make_nonhydrostatic_turbulence(
         height_coord: HeightCoordinate,
         terrain_metric: TerrainMetric,
     ) -> NonHydrostaticTendencies:
+        nonlocal tke_col_state, ml_model
         theta_p = state.theta_prime.data
         rho_p = state.rho_prime.data
         u_data = state.u.data
@@ -303,8 +311,10 @@ def _make_nonhydrostatic_turbulence(
         theta_0 = height_coord.theta_ref
         rho_0 = height_coord.rho_ref
 
-        theta_total = theta_0 + theta_p
-        rho_total = rho_0 + rho_p
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p,
+            rho_0 + rho_p,
+        )
 
         p = pressure_from_eos(rho_total, theta_total)
         exner = (p / constants.p_ref) ** constants.kappa
@@ -334,17 +344,16 @@ def _make_nonhydrostatic_turbulence(
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_turb", dims=dims_tr, units="1/s"),
             )
 
-        # Heights from height coordinate
-        z_full_1d = height_coord.z_full  # (nlev,)
-        z_half_1d = height_coord.z_half  # (nlev+1,)
-        z_full = jnp.broadcast_to(z_full_1d[None, :], (ncol, nlev))
-        z_half = jnp.broadcast_to(z_half_1d[None, :], (ncol, nlev + 1))
+        # Use terrain-aware heights for NH columns.
+        z_full = terrain_metric.z_full_3d.reshape(ncol, nlev)
+        z_half = terrain_metric.z_half_3d.reshape(ncol, nlev + 1)
 
-        # Pressure at half levels
-        p_half_ref = constants.p_ref * height_coord.exner_ref_half ** (
-            constants.c_pd / constants.R_d
-        )
-        p_half = jnp.broadcast_to(p_half_ref[None, :], (ncol, nlev + 1))
+        # Interface pressure from evolving column state (not fixed reference).
+        p_half = reconstruct_half_level_pressure_hydrostatic(
+            p_full=p,
+            rho_full=rho_total,
+            z_half=terrain_metric.z_half_3d,
+        ).reshape(ncol, nlev + 1)
 
         # Reshape to columns
         T_col = T.reshape(ncol, nlev)
@@ -361,9 +370,9 @@ def _make_nonhydrostatic_turbulence(
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
-            if 'tke' not in closure_state:
-                closure_state['tke'] = jnp.full((ncol, nlev), scheme_config.tke_min)
-            tke_in = closure_state['tke']
+            if tke_col_state is None:
+                tke_col_state = jnp.full((ncol, nlev), scheme_config.tke_min)
+            tke_in = tke_col_state
             if tke_in.shape != (ncol, nlev):
                 tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
             turb_out, tke_new = turb_fn(
@@ -371,11 +380,11 @@ def _make_nonhydrostatic_turbulence(
                 p_full_col, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho_col, dt, scheme_config,
             )
-            closure_state['tke'] = tke_new
+            tke_col_state = tke_new
         elif is_ml:
-            if 'model' not in closure_state:
+            if ml_model is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
-                closure_state['model'] = TurbulenceEmulator(
+                ml_model = TurbulenceEmulator(
                     scheme_config.n_input, scheme_config.n_hidden,
                     scheme_config.n_layers, scheme_config.n_output,
                     key=key,
@@ -384,7 +393,7 @@ def _make_nonhydrostatic_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho_col, dt, scheme_config,
-                closure_state['model'],
+                ml_model,
             )
         else:
             turb_out = turb_fn(
@@ -413,6 +422,12 @@ def _make_nonhydrostatic_turbulence(
             dtracers_dt=Field(data=dtracers, name="dtracers_dt_turb", dims=dims_tr, units="1/s"),
         )
 
+    def reset_state():
+        nonlocal tke_col_state, ml_model
+        tke_col_state = None
+        ml_model = None
+
+    physics_fn.reset_state = reset_state
     return physics_fn
 
 
@@ -434,10 +449,11 @@ def _make_spectral_pe_turbulence(
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
     is_ml = scheme_name == "ml_emulator"
+    tke_col_state = None
+    ml_model = None
 
-    closure_state = {}
-
-    def physics_fn(state, grid, sigma_coord):
+    def physics_fn(state, grid, sigma_coord, grid_fields=None):
+        nonlocal tke_col_state, ml_model
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
             spectral_pe_to_grid,
@@ -448,8 +464,10 @@ def _make_spectral_pe_turbulence(
             sh_analysis_dmu_3d,
         )
 
-        # Transform spectral state to grid space
-        fields = spectral_pe_to_grid(state, grid, sigma_coord)
+        # Transform spectral state to grid space (or reuse precomputed fields).
+        fields = grid_fields
+        if fields is None:
+            fields = spectral_pe_to_grid(state, grid, sigma_coord)
         u = fields['u']         # (n_lat, n_lon, nlev)
         v = fields['v']
         T = fields['T']
@@ -493,9 +511,9 @@ def _make_spectral_pe_turbulence(
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
-            if 'tke' not in closure_state:
-                closure_state['tke'] = jnp.full((ncol, nlev), scheme_config.tke_min)
-            tke_in = closure_state['tke']
+            if tke_col_state is None:
+                tke_col_state = jnp.full((ncol, nlev), scheme_config.tke_min)
+            tke_in = tke_col_state
             if tke_in.shape != (ncol, nlev):
                 tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
             turb_out, tke_new = turb_fn(
@@ -503,11 +521,11 @@ def _make_spectral_pe_turbulence(
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
             )
-            closure_state['tke'] = tke_new
+            tke_col_state = tke_new
         elif is_ml:
-            if 'model' not in closure_state:
+            if ml_model is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
-                closure_state['model'] = TurbulenceEmulator(
+                ml_model = TurbulenceEmulator(
                     scheme_config.n_input, scheme_config.n_hidden,
                     scheme_config.n_layers, scheme_config.n_output,
                     key=key,
@@ -516,7 +534,7 @@ def _make_spectral_pe_turbulence(
                 u_col, v_col, T_col, q_v_col,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
-                closure_state['model'],
+                ml_model,
             )
         else:
             turb_out = turb_fn(
@@ -563,4 +581,10 @@ def _make_spectral_pe_turbulence(
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
 
+    def reset_state():
+        nonlocal tke_col_state, ml_model
+        tke_col_state = None
+        ml_model = None
+
+    physics_fn.reset_state = reset_state
     return physics_fn
