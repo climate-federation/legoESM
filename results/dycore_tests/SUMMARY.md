@@ -1,15 +1,15 @@
 # legoESM Dynamical Core Test Suite Results
 
-Generated: 2026-03-03 22:13:29
+Generated: 2026-03-03 22:31:21
 
 ## Solver Matrix
 
 | # | Test | Solver | Status | Key Metric | Value | Wall Time | Notes |
 |---|------|--------|--------|------------|-------|-----------|-------|
-| 1 | Williamson 2 | SW FV C16 | PASS | L2 error (5d) | 1.67e+02 | 18.4s |  |
-| 2 | Williamson 5 | SW FV C16 | PASS | mass drift (15d) | 4.31e-04 | 25.4s |  |
-| 3 | Williamson 2 | SW Spec T21 ssp_rk3 | PASS | L2 error (5d) | 2.32e-08 | 11.3s |  |
-| 4 | Williamson 5 | SW Spec T21 ssp_rk3 | PASS | mass drift (15d) | 1.79e-16 | 33.4s |  |
+| 1 | Held-Suarez 30d | Hydro FV C16/L10 | PASS | mass drift | 8.50e-11 | 32.5s | max|v|=10.4 |
+| 2 | Baroclinic 10d | Hydro FV C16/L10 | PASS | ps min (hPa) | 984.0 | 36.7s | max|v|=16.6 |
+| 3 | Held-Suarez 30d | Hydro Spec T15/L10 | PASS | p99 |v| @ jet | 52.6 | 102.0s | max_all=193.8, max_jet=52.6, <T>=279.1 |
+| 4 | Baroclinic 1d | Hydro Spec T15/L10 | PASS | p99 |v| @ jet | 47.9 | 4.4s | max_all=143.8, max_jet=47.9, ps_min=854.2hPa |
 
 ## Summary
 
@@ -17,14 +17,14 @@ Generated: 2026-03-03 22:13:29
 - **Passed**: 4
 - **Failed**: 0
 - **Errors**: 0
-- **Total wall time**: 89s (1.5 min)
+- **Total wall time**: 176s (2.9 min)
 
 ## Solver Coverage
 
 | Solver Type | Tests Run | Status |
 |-------------|-----------|--------|
-| Shallow Water FV | 2 | All PASS |
-| Shallow Water Spectral | 2 | All PASS |
+| Hydrostatic FV (Primitive Eq.) | 2 | All PASS |
+| Hydrostatic Spectral (Spectral PE) | 2 | All PASS |
 
 ## Reference Test Suites Covered
 

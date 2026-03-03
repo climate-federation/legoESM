@@ -139,6 +139,10 @@ try:
         hyperdiff_ps_coeff=HYPERDIFF,
         use_conservation_fixer=True,
         fix_mass=True,
+        edge_blend_uv=0.15,
+        edge_blend_T=0.10,
+        edge_blend_p_s=0.20,
+        edge_blend_width=2,
     )
     model_pe = PrimitiveEquationModel(grid_cs, sigma, pe_config)
     state = held_suarez_init(grid_cs, sigma)
@@ -683,7 +687,7 @@ try:
 
         # Ocean energy balance
         sw_sfc = insol.reshape(shape_2d) * (1.0 - gray_config.sfc_albedo)
-        lw_net = rad_out.lw_flux_down_sfc.reshape(shape_2d) - rad_out.lw_flux_up_sfc.reshape(shape_2d)
+        lw_net = rad_out.lw_flux_down[:, -1].reshape(shape_2d) - rad_out.lw_flux_up[:, -1].reshape(shape_2d)
         Q_ocean = sw_sfc + lw_net - SH - LH
         sst_new = ocean_sst + Q_ocean * dt / _C_mix
         sst_new = jnp.maximum(sst_new, ocean_slab_config.T_freeze)

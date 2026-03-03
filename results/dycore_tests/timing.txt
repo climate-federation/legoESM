@@ -1,5 +1,5 @@
-total_wall_time: 115.4s
-Williamson 2 (SW FV C16): 18.4s
-Williamson 5 (SW FV C16): 25.4s
-Williamson 2 (SW Spec T21 ssp_rk3): 11.3s
-Williamson 5 (SW Spec T21 ssp_rk3): 33.4s
+total_wall_time: 196.7s
+Held-Suarez 30d (Hydro FV C16/L10): 32.5s
+Baroclinic 10d (Hydro FV C16/L10): 36.7s
+Held-Suarez 30d (Hydro Spec T15/L10): 102.0s
+Baroclinic 1d (Hydro Spec T15/L10): 4.4s

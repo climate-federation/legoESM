@@ -734,6 +734,12 @@ def run_hydro_fv_tests(output_dir):
     NLEV = 10
     DT = 600.0
     HYPERDIFF = 5e16 * (48 / N) ** 4
+    # Keep hydro edge blending active at coarse resolution as well.
+    # Zero blend reintroduces visible face-edge discontinuities in 3D fields.
+    EDGE_BLEND_HYDRO_UV = 0.12
+    EDGE_BLEND_HYDRO_T = 0.08
+    EDGE_BLEND_HYDRO_PS = 0.15
+    EDGE_BLEND_HYDRO_WIDTH = 2
 
     # --- Held-Suarez (30 days) ---
     test_dir = output_dir / "05_hydro_fv_held_suarez"
@@ -750,6 +756,10 @@ def run_hydro_fv_tests(output_dir):
             hyperdiff_ps_coeff=HYPERDIFF,
             use_conservation_fixer=True,
             fix_mass=True,
+            edge_blend_uv=EDGE_BLEND_HYDRO_UV,
+            edge_blend_T=EDGE_BLEND_HYDRO_T,
+            edge_blend_p_s=EDGE_BLEND_HYDRO_PS,
+            edge_blend_width=EDGE_BLEND_HYDRO_WIDTH,
         )
         model = PrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init(grid, sigma)
@@ -840,6 +850,10 @@ def run_hydro_fv_tests(output_dir):
             hyperdiff_ps_coeff=HYPERDIFF,
             use_conservation_fixer=True,
             fix_mass=True,
+            edge_blend_uv=EDGE_BLEND_HYDRO_UV,
+            edge_blend_T=EDGE_BLEND_HYDRO_T,
+            edge_blend_p_s=EDGE_BLEND_HYDRO_PS,
+            edge_blend_width=EDGE_BLEND_HYDRO_WIDTH,
         )
         model = PrimitiveEquationModel(grid, sigma, config)
 
@@ -1156,6 +1170,16 @@ def run_nh_fv_tests(output_dir):
     NLEV = 20
     DT_NH = 5.0  # Full-Earth tests (TC1)
     DT_NH_SMALL = 1.0  # Small-Earth tests (TC2a, TC3) need smaller dt for CFL
+    # Apply moderate edge blending for coarse-resolution NH runs to reduce
+    # cube-edge noise while preserving short-run stability.
+    EDGE_BLEND_NH_UV = 0.16
+    EDGE_BLEND_NH_W_TC1 = 0.10
+    EDGE_BLEND_NH_W_SMALL = 0.16
+    EDGE_BLEND_NH_THETA = 0.08
+    EDGE_BLEND_NH_RHO_TC1 = 0.12
+    EDGE_BLEND_NH_RHO_SMALL = 0.18
+    EDGE_BLEND_NH_TRACERS = 0.10
+    EDGE_BLEND_NH_WIDTH = 2
 
     def extract_fields_nh_fv(s):
         u_low = np.asarray(s.u.data)[..., -1]
@@ -1194,6 +1218,12 @@ def run_nh_fv_tests(output_dir):
             n_acoustic_substeps=6,
             sponge_width=10000.0,
             sponge_coeff=0.05,
+            edge_blend_uv=EDGE_BLEND_NH_UV,
+            edge_blend_w=EDGE_BLEND_NH_W_TC1,
+            edge_blend_theta=EDGE_BLEND_NH_THETA,
+            edge_blend_rho=EDGE_BLEND_NH_RHO_TC1,
+            edge_blend_tracers=EDGE_BLEND_NH_TRACERS,
+            edge_blend_width=EDGE_BLEND_NH_WIDTH,
         )
         model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
 
@@ -1285,6 +1315,12 @@ def run_nh_fv_tests(output_dir):
             sponge_width=15000.0,
             sponge_coeff=1.0 / (0.1 * 86400.0),
             small_earth_factor=20.0,
+            edge_blend_uv=EDGE_BLEND_NH_UV,
+            edge_blend_w=EDGE_BLEND_NH_W_SMALL,
+            edge_blend_theta=EDGE_BLEND_NH_THETA,
+            edge_blend_rho=EDGE_BLEND_NH_RHO_SMALL,
+            edge_blend_tracers=EDGE_BLEND_NH_TRACERS,
+            edge_blend_width=EDGE_BLEND_NH_WIDTH,
         )
         model = CompressibleEulerModel(
             small_grid, height_coord, terrain_metric, config,
@@ -1377,6 +1413,12 @@ def run_nh_fv_tests(output_dir):
             sponge_coeff=0.05,
             small_earth_factor=60.0,
             use_coriolis=False,  # TC3 is designed for f=0 (no Coriolis)
+            edge_blend_uv=EDGE_BLEND_NH_UV,
+            edge_blend_w=EDGE_BLEND_NH_W_SMALL,
+            edge_blend_theta=EDGE_BLEND_NH_THETA,
+            edge_blend_rho=EDGE_BLEND_NH_RHO_SMALL,
+            edge_blend_tracers=EDGE_BLEND_NH_TRACERS,
+            edge_blend_width=EDGE_BLEND_NH_WIDTH,
         )
         model = CompressibleEulerModel(
             small_grid, height_coord, terrain_metric, config,
