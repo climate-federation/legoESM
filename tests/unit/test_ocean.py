@@ -761,3 +761,215 @@ class TestBuoyancyFrequency:
             rho, ocean_z_coord.dz_ref, J,
         )
         assert jnp.all(N2 > 0)
+
+
+# ==============================================================================
+# Spectral Ocean Tests
+# ==============================================================================
+
+@pytest.mark.skipif(
+    not jax.config.jax_enable_x64,
+    reason="Spectral ocean path requires JAX x64 support.",
+)
+class TestSpectralOcean:
+    """Tests for spectral ocean model wiring and conservation."""
+
+    @staticmethod
+    def _cell_area(grid):
+        dlon = 2.0 * jnp.pi / grid.n_lon
+        return (grid.radius ** 2) * grid.weights[:, jnp.newaxis] * dlon
+
+    def _invariants(self, state, grid, z_coord, min_water_column_m):
+        from legoesm.grids.gaussian import sh_synthesis, sh_synthesis_3d
+
+        mask = state.land_mask_grid.data
+        area = self._cell_area(grid)
+        weighted_area = area * mask
+
+        H_bathy = sh_synthesis(grid, state.H_bathy_hat.data).real
+        eta = sh_synthesis(grid, state.eta_hat.data).real * mask
+        T = sh_synthesis_3d(grid, state.T_hat.data).real
+        S = sh_synthesis_3d(grid, state.S_hat.data).real
+
+        h_k = compute_layer_thickness(
+            eta, H_bathy, z_coord, min_water_column_m=min_water_column_m,
+        )
+        ocean_area = jnp.sum(weighted_area)
+        ocean_volume = jnp.sum(jnp.sum(h_k, axis=-1) * weighted_area)
+        vol = jnp.sum(eta * weighted_area)
+        heat = jnp.sum(jnp.sum(T * h_k, axis=-1) * weighted_area)
+        salt = jnp.sum(jnp.sum(S * h_k, axis=-1) * weighted_area)
+        return ocean_area, ocean_volume, vol, heat, salt
+
+    def test_conservation_fixer_restores_volume_heat_salt(self):
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid,
+            sh_analysis,
+            sh_analysis_3d,
+            sh_synthesis,
+            sh_synthesis_3d,
+        )
+        from legoesm.ocean.dynamics.spectral_ocean_pe import (
+            SpectralOceanConfig,
+            _spectral_conservation_fixer,
+            rest_state_spectral_ocean,
+        )
+
+        grid = create_gaussian_grid(8, allow_unsupported_backend=True)
+        z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
+        state = rest_state_spectral_ocean(
+            grid, z_coord, H_max=4000.0, land_lat_threshold=70.0,
+        )
+        cfg = SpectralOceanConfig(use_conservation_fixer=True, min_water_column_m=0.5)
+
+        mask = state.land_mask_grid.data
+        mask_3d = mask[..., jnp.newaxis]
+        eta_grid = sh_synthesis(grid, state.eta_hat.data).real
+        T_grid = sh_synthesis_3d(grid, state.T_hat.data).real
+        S_grid = sh_synthesis_3d(grid, state.S_hat.data).real
+
+        perturbed = state._replace(
+            eta_hat=state.eta_hat.replace(data=sh_analysis(grid, eta_grid + 0.15 * mask)),
+            T_hat=state.T_hat.replace(data=sh_analysis_3d(grid, T_grid + 1.2 * mask_3d)),
+            S_hat=state.S_hat.replace(data=sh_analysis_3d(grid, S_grid - 0.35 * mask_3d)),
+        )
+        fixed = _spectral_conservation_fixer(
+            perturbed, state, grid, z_coord, cfg,
+        )
+
+        area0, vol0, eta_int0, heat0, salt0 = self._invariants(
+            state, grid, z_coord, cfg.min_water_column_m,
+        )
+        _, volp, eta_intp, heatp, saltp = self._invariants(
+            perturbed, grid, z_coord, cfg.min_water_column_m,
+        )
+        area1, vol1, eta_int1, heat1, salt1 = self._invariants(
+            fixed, grid, z_coord, cfg.min_water_column_m,
+        )
+
+        mean_eta_drift_before = float(jnp.abs(eta_intp - eta_int0) / jnp.maximum(area0, 1.0))
+        mean_eta_drift = float(jnp.abs(eta_int1 - eta_int0) / jnp.maximum(area0, 1.0))
+        heat_rel_before = float(jnp.abs(heatp - heat0) / jnp.maximum(jnp.abs(heat0), 1.0))
+        heat_rel = float(jnp.abs(heat1 - heat0) / jnp.maximum(jnp.abs(heat0), 1.0))
+        salt_rel_before = float(jnp.abs(saltp - salt0) / jnp.maximum(jnp.abs(salt0), 1.0))
+        salt_rel = float(jnp.abs(salt1 - salt0) / jnp.maximum(jnp.abs(salt0), 1.0))
+        vol_rel = float(jnp.abs(vol1 - vol0) / jnp.maximum(jnp.abs(vol0), 1.0))
+
+        # The fixer should substantially reduce all global drifts.
+        assert mean_eta_drift < mean_eta_drift_before * 0.02
+        assert heat_rel < heat_rel_before * 0.02
+        assert salt_rel < salt_rel_before * 0.02
+        assert mean_eta_drift < 1e-3
+        assert heat_rel < 2e-4
+        assert salt_rel < 1e-5
+        assert vol_rel < 5e-7
+        assert vol1 < volp
+        assert area1 > 0.0
+
+    def test_integrate_validates_inputs(self):
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.ocean.dynamics.spectral_ocean_pe import (
+            SpectralOceanConfig,
+            SpectralOceanModel,
+            rest_state_spectral_ocean,
+        )
+
+        grid = create_gaussian_grid(8, allow_unsupported_backend=True)
+        z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
+        state = rest_state_spectral_ocean(
+            grid, z_coord, H_max=4000.0, land_lat_threshold=70.0,
+        )
+        model = SpectralOceanModel(
+            grid, z_coord, SpectralOceanConfig(use_conservation_fixer=False),
+            allow_unsupported_backend=True,
+        )
+
+        with pytest.raises(ValueError, match="dt"):
+            model.integrate(state, duration=3600.0, dt=0.0)
+        with pytest.raises(ValueError, match="duration"):
+            model.integrate(state, duration=-1.0, dt=600.0)
+        with pytest.raises(ValueError, match="save_every"):
+            model.integrate(state, duration=3600.0, dt=600.0, save_every=0)
+        with pytest.raises(ValueError, match="zero steps"):
+            model.integrate(state, duration=1.0, dt=600.0)
+
+    def test_rest_state_keeps_land_tracer_extension_smooth(self):
+        from legoesm.grids.gaussian import create_gaussian_grid, sh_synthesis_3d
+        from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
+
+        grid = create_gaussian_grid(8, allow_unsupported_backend=True)
+        z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
+        state = rest_state_spectral_ocean(
+            grid, z_coord, H_max=4000.0, land_lat_threshold=60.0,
+        )
+        land = state.land_mask_grid.data < 0.5
+        T_grid = sh_synthesis_3d(grid, state.T_hat.data).real
+        S_grid = sh_synthesis_3d(grid, state.S_hat.data).real
+
+        assert bool(jnp.any(land))
+        assert float(jnp.max(jnp.abs(T_grid[land]))) > 0.0
+        assert float(jnp.max(jnp.abs(S_grid[land]))) > 0.0
+
+    def test_rest_state_validates_inputs(self):
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
+
+        grid = create_gaussian_grid(8, allow_unsupported_backend=True)
+        z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
+
+        with pytest.raises(ValueError, match="H_max"):
+            rest_state_spectral_ocean(grid, z_coord, H_max=0.0)
+        with pytest.raises(ValueError, match="land_lat_threshold"):
+            rest_state_spectral_ocean(grid, z_coord, land_lat_threshold=-1.0)
+        with pytest.raises(ValueError, match="land_lat_threshold"):
+            rest_state_spectral_ocean(grid, z_coord, land_lat_threshold=91.0)
+        with pytest.raises(ValueError, match="T_surface"):
+            rest_state_spectral_ocean(grid, z_coord, T_surface=float("inf"))
+
+    def test_model_warns_for_ignored_barotropic_substeps(self):
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.ocean.dynamics.spectral_ocean_pe import (
+            SpectralOceanConfig,
+            SpectralOceanModel,
+        )
+
+        grid = create_gaussian_grid(8, allow_unsupported_backend=True)
+        z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
+
+        with pytest.warns(RuntimeWarning, match="n_barotropic_substeps.*ignored"):
+            SpectralOceanModel(
+                grid,
+                z_coord,
+                SpectralOceanConfig(n_barotropic_substeps=4),
+                allow_unsupported_backend=True,
+            )
+
+    def test_tendencies_finite_for_all_ocean_mask(self):
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.ocean.dynamics.spectral_ocean_pe import (
+            SpectralOceanConfig,
+            rest_state_spectral_ocean,
+            spectral_ocean_tendencies,
+        )
+
+        grid = create_gaussian_grid(8, allow_unsupported_backend=True)
+        z_coord = create_ocean_z_star(n_levels=8, H_max=4000.0)
+        state = rest_state_spectral_ocean(
+            grid,
+            z_coord,
+            H_max=4000.0,
+            land_lat_threshold=90.0,
+        )
+        config = SpectralOceanConfig(
+            A_h=0.0,
+            K_h=0.0,
+            A_v=0.0,
+            K_v=0.0,
+            hyperdiff_coeff=0.0,
+        )
+        tend = spectral_ocean_tendencies(state, grid, z_coord, config)
+
+        assert float(jnp.mean(state.land_mask_grid.data)) == pytest.approx(1.0, abs=1e-12)
+        for leaf in jax.tree.leaves(tend):
+            if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.inexact):
+                assert jnp.all(jnp.isfinite(leaf))

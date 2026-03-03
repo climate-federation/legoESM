@@ -138,7 +138,8 @@ class SpectralOceanConfig(NamedTuple):
     K_h: float = 1.0e3
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
-    n_barotropic_substeps: int = 30
+    # Reserved for future split-explicit spectral stepping; currently ignored.
+    n_barotropic_substeps: int = 1
     hyperdiff_coeff: float = 1.0e15
     hyperdiff_order: int = 2
     use_conservation_fixer: bool = True

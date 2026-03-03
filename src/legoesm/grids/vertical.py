@@ -148,8 +148,8 @@ def pressure_from_sigma(
     jax.Array
         Pressure, shape (6, n, n, nlev) or (6, n, n, nlev+1).
     """
-    # Broadcast: p_s[..., None] is (6,n,n,1), sigma is (nlev,) -> (6,n,n,nlev)
-    return p_s[..., None] * sigma[None, None, None, :]
+    # Broadcast: p_s[..., None] is (...,1), sigma is (nlev,) -> (...,nlev)
+    return p_s[..., None] * sigma
 
 
 def compute_geopotential(
@@ -205,7 +205,7 @@ def compute_geopotential(
 
     # Geopotential thickness of each full layer (interface to interface):
     # ΔΦ_k = R_d · T_k · ln(σ_{k+1/2} / σ_{k-1/2})
-    dPhi = R_d * T * ln_ratio[None, None, None, :]  # (6,n,n,nlev)
+    dPhi = R_d * T * ln_ratio  # (...,nlev)
 
     # Geopotential at the BOTTOM interface of each layer:
     # Φ_bottom_interface[k] = phis + Σ_{k'=k}^{nlev-1} ΔΦ_{k'}
@@ -228,7 +228,7 @@ def compute_geopotential(
         [Phi_above[..., 1:], phis[..., None]], axis=-1
     )  # (6,n,n,nlev) — bottom interface of each layer
 
-    Phi_full = Phi_below + alpha[None, None, None, :] * R_d * T  # (6,n,n,nlev)
+    Phi_full = Phi_below + alpha * R_d * T  # (...,nlev)
 
     return Phi_full
 
@@ -275,27 +275,27 @@ def compute_sigma_dot(
     dsigma = sigma_coord.dsigma  # (nlev,)
 
     # Weighted divergence: D_k * Δσ_k
-    div_dsigma = div_3d * dsigma[None, None, None, :]  # (6,n,n,nlev)
+    div_dsigma = div_3d * dsigma  # (...,nlev)
 
     # Column-integrated divergence: D_total = Σ D_k * Δσ_k
-    D_total = jnp.sum(div_dsigma, axis=-1, keepdims=True)  # (6,n,n,1)
+    D_total = jnp.sum(div_dsigma, axis=-1, keepdims=True)  # (...,1)
 
     # Cumulative sum from top: Σ_{k'=0}^{k} D_k' * Δσ_k'
-    cumsum_div = jnp.cumsum(div_dsigma, axis=-1)  # (6,n,n,nlev)
+    cumsum_div = jnp.cumsum(div_dsigma, axis=-1)  # (...,nlev)
 
     # σ̇ at interfaces 1..nlev:
     # σ̇_{k+1/2} = (σ_{k+1/2} - σ_top) / (1 - σ_top) · D_total - cumsum_div[k]
     # Use precomputed fractional_sigma
-    fractional_sigma = sigma_coord.fractional_sigma[None, None, None, :]  # (1,1,1,nlev)
+    fractional_sigma = sigma_coord.fractional_sigma  # (nlev,)
 
     sigma_dot_inner = (
         fractional_sigma * D_total - cumsum_div
-    )  # (6,n,n,nlev)
+    )  # (...,nlev)
 
     # Prepend top (σ̇=0)
-    shape_2d = div_3d.shape[:3]  # (6, n, n)
-    zero_top = jnp.zeros((*shape_2d, 1))
-    sigma_dot = jnp.concatenate([zero_top, sigma_dot_inner], axis=-1)  # (6,n,n,nlev+1)
+    shape_horiz = div_3d.shape[:-1]  # spatial dims
+    zero_top = jnp.zeros((*shape_horiz, 1))
+    sigma_dot = jnp.concatenate([zero_top, sigma_dot_inner], axis=-1)  # (...,nlev+1)
 
     # Force bottom boundary (should be zero by construction, enforce for safety)
     sigma_dot = sigma_dot.at[..., -1].set(0.0)
@@ -341,21 +341,22 @@ def vertical_advection(
     # Backward difference: ∂f/∂σ ≈ (f_k - f_{k-1}) / (σ_k - σ_{k-1})
     # Pad top with zero-gradient BC: f_{-1} = f_0
     dsigma_bwd = sigma_coord.dsigma_full  # (nlev-1,) precomputed diff(sigma_full)
-    df_bwd = jnp.diff(field, axis=-1)  # (6,n,n,nlev-1) f_{k+1} - f_k
+    df_bwd = jnp.diff(field, axis=-1)  # (...,nlev-1) f_{k+1} - f_k
     # At k=0 (top level): backward gradient = 0 (zero-gradient BC)
+    shape_horiz = field.shape[:-1]  # spatial dims
     grad_bwd = jnp.concatenate(
-        [jnp.zeros((*field.shape[:3], 1)),
-         df_bwd / dsigma_bwd[None, None, None, :]],
+        [jnp.zeros((*shape_horiz, 1)),
+         df_bwd / dsigma_bwd],
         axis=-1,
-    )  # (6,n,n,nlev)
+    )  # (...,nlev)
 
     # Forward difference: ∂f/∂σ ≈ (f_{k+1} - f_k) / (σ_{k+1} - σ_k)
     # At k=nlev-1 (bottom level): forward gradient = 0 (zero-gradient BC)
     grad_fwd = jnp.concatenate(
-        [df_bwd / dsigma_bwd[None, None, None, :],
-         jnp.zeros((*field.shape[:3], 1))],
+        [df_bwd / dsigma_bwd,
+         jnp.zeros((*shape_horiz, 1))],
         axis=-1,
-    )  # (6,n,n,nlev)
+    )  # (...,nlev)
 
     # Upwind selection: σ̇ > 0 (downward) → backward, σ̇ < 0 (upward) → forward
     grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
@@ -399,7 +400,7 @@ def compute_pressure_velocity(
 
     # ω = σ · dp_s/dt + p_s · σ̇
     omega = (
-        sigma_full[None, None, None, :] * dp_s_dt[..., None]
+        sigma_full * dp_s_dt[..., None]
         + p_s[..., None] * sigma_dot_full
     )
 

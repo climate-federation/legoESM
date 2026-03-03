@@ -61,6 +61,14 @@ from legoesm.atmosphere.dynamics.spectral_nh import (
     SpectralCompressibleEulerModel,
     spectral_nh_slow_tendencies,
 )
+from legoesm.atmosphere.dynamics.sfno_sw import (
+    SFNOShallowWaterModel,
+    SFNOShallowWaterConfig,
+)
+from legoesm.atmosphere.dynamics.sfno_pe import (
+    SFNOPrimitiveEquationModel,
+    SFNOPrimitiveEquationConfig,
+)
 
 # Available solver names for the factory (flat namespace)
 AVAILABLE_SOLVERS = [
@@ -71,18 +79,22 @@ AVAILABLE_SOLVERS = [
     "tracer_transport",
     "compressible_euler",
     "spectral_compressible_euler",
+    "sfno_shallow_water",
+    "sfno_primitive_equations",
 ]
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["finite_volume", "spectral"]
+DISCRETIZATION_OPTIONS = ["finite_volume", "spectral", "sfno"]
 
 # (dynamics, discretization) -> flat solver name
 _AXIS_TO_SOLVER = {
     ("shallow_water", "finite_volume"): "shallow_water",
     ("shallow_water", "spectral"): "spectral_shallow_water",
+    ("shallow_water", "sfno"): "sfno_shallow_water",
     ("hydrostatic", "finite_volume"): "primitive_equations",
     ("hydrostatic", "spectral"): "spectral_primitive_equations",
+    ("hydrostatic", "sfno"): "sfno_primitive_equations",
     ("nonhydrostatic", "finite_volume"): "compressible_euler",
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
 }
@@ -274,6 +286,10 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         if legoesm_config is not None:
             kwargs.setdefault("legoesm_config", legoesm_config)
         return SpectralCompressibleEulerModel(**kwargs)
+    elif name == "sfno_shallow_water":
+        return SFNOShallowWaterModel(**kwargs)
+    elif name == "sfno_primitive_equations":
+        return SFNOPrimitiveEquationModel(**kwargs)
     else:
         raise ValueError(
             f"Unknown solver: {name!r}. "

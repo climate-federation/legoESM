@@ -23,5 +23,6 @@ class SeaIceConfig(NamedTuple):
     rho_air_ref: float = 1.225      # Reference air density [kg/m3]
     rho_ocean_ref: float = 1025.0   # Reference ocean density [kg/m3]
     T_freeze_ocean: float = 271.35  # Ocean freezing point [K]
+    T_ice_min: float = 180.0        # Lower bound for numerical stability [K]
     # Concentration dynamics
     h_new_ice: float = 0.05         # Thickness for new ice formation [m]

@@ -52,6 +52,7 @@ from legoesm.core.operators import (
 from legoesm.core.conservation import apply_conservation_fixer
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 from legoesm import constants
 
 
@@ -63,6 +64,7 @@ class ShallowWaterConfig(NamedTuple):
     fix_mass: bool = True
     fix_energy: bool = True
     use_upwind_advection: bool = True       # Use upwind (True) or centered (False)
+    time_integrator: str = "ssp_rk3"        # "ssp_rk3" or "ssp_rk54"/"ssp45"
 
 
 def shallow_water_tendencies(
@@ -213,7 +215,13 @@ class ShallowWaterModel:
                 h_s=s.h_s.replace(data=jnp.zeros_like(s.h_s.data)),
             )
 
-        state_new = ssp_rk3_step(state, tendency_fn, dt)
+        integrator = self.config.time_integrator.lower()
+        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
+            state_new = ssp_rk54_step(state, tendency_fn, dt)
+        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
+            state_new = ssp_rk3_step(state, tendency_fn, dt)
+        else:
+            raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")
 
         # Apply conservation fixers
         if self.config.use_conservation_fixer:

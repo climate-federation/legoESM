@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.operators import _is_distributed
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
@@ -51,6 +52,88 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.state import SpectralOceanState, SpectralOceanConfig
 from legoesm.ocean.physics.mixing import vertical_diffusion
+
+
+def _spectral_cell_area(grid: GaussianGrid) -> jnp.ndarray:
+    """Per-cell area on the Gaussian grid (m^2), shape (n_lat, n_lon)."""
+    dlon = 2.0 * jnp.pi / grid.n_lon
+    return (grid.radius ** 2) * grid.weights[:, jnp.newaxis] * dlon
+
+
+def _spectral_global_sum(local_value: jnp.ndarray) -> jnp.ndarray:
+    """MPI-aware global sum for spectral ocean reductions."""
+    if _is_distributed():
+        from legoesm.parallel.reductions import global_sum_mpi
+        return global_sum_mpi(local_value)
+    return local_value
+
+
+def _spectral_conservation_fixer(
+    state_new: SpectralOceanState,
+    state_old: SpectralOceanState,
+    grid: GaussianGrid,
+    z_coord: OceanZStarCoordinate,
+    config: SpectralOceanConfig,
+) -> SpectralOceanState:
+    """Apply volume/heat/salt conservation corrections in grid space."""
+    mask = state_old.land_mask_grid.data
+    mask_3d = mask[..., jnp.newaxis]
+    area = _spectral_cell_area(grid)
+    weighted_area = mask * area
+    H_bathy = sh_synthesis(grid, state_old.H_bathy_hat.data).real
+    H_bathy = jnp.maximum(H_bathy, 1.0) * mask + 1.0 * (1.0 - mask)
+
+    eta_old = sh_synthesis(grid, state_old.eta_hat.data).real * mask
+    eta_new = sh_synthesis(grid, state_new.eta_hat.data).real * mask
+    eta_floor = jnp.asarray(config.min_water_column_m, dtype=eta_new.dtype) - H_bathy
+    eta_new = jnp.maximum(eta_new, eta_floor) * mask
+
+    local_vol_terms = jnp.stack(
+        [
+            jnp.sum(eta_old * weighted_area),
+            jnp.sum(eta_new * weighted_area),
+            jnp.sum(weighted_area),
+        ],
+    )
+    vol_old, vol_new, ocean_area = _spectral_global_sum(local_vol_terms)
+    eta_corr = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
+    eta_fixed = jnp.maximum(eta_new + eta_corr * mask, eta_floor) * mask
+
+    h_k_old = compute_layer_thickness(
+        eta_old, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
+    )
+    h_k_new = compute_layer_thickness(
+        eta_fixed, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
+    )
+
+    T_old = sh_synthesis_3d(grid, state_old.T_hat.data).real
+    T_new = sh_synthesis_3d(grid, state_new.T_hat.data).real
+    S_old = sh_synthesis_3d(grid, state_old.S_hat.data).real
+    S_new = sh_synthesis_3d(grid, state_new.S_hat.data).real
+
+    local_tracer_terms = jnp.stack(
+        [
+            jnp.sum(jnp.sum(T_old * h_k_old, axis=-1) * weighted_area),
+            jnp.sum(jnp.sum(T_new * h_k_new, axis=-1) * weighted_area),
+            jnp.sum(jnp.sum(S_old * h_k_old, axis=-1) * weighted_area),
+            jnp.sum(jnp.sum(S_new * h_k_new, axis=-1) * weighted_area),
+            jnp.sum(jnp.sum(h_k_new, axis=-1) * weighted_area),
+        ],
+    )
+    heat_old, heat_new, salt_old, salt_new, ocean_volume = _spectral_global_sum(
+        local_tracer_terms,
+    )
+    heat_corr = (heat_old - heat_new) / jnp.maximum(ocean_volume, 1.0)
+    T_fixed = T_new + heat_corr * mask_3d
+
+    salt_corr = (salt_old - salt_new) / jnp.maximum(ocean_volume, 1.0)
+    S_fixed = S_new + salt_corr * mask_3d
+
+    return state_new._replace(
+        eta_hat=state_new.eta_hat.replace(data=sh_analysis(grid, eta_fixed)),
+        T_hat=state_new.T_hat.replace(data=sh_analysis_3d(grid, T_fixed)),
+        S_hat=state_new.S_hat.replace(data=sh_analysis_3d(grid, S_fixed)),
+    )
 
 
 def spectral_ocean_tendencies(
@@ -80,8 +163,9 @@ def spectral_ocean_tendencies(
     # --- 1. Transform to grid space ---
     vor = sh_synthesis_3d(grid, state.vor_hat.data) * mask_3d   # (n_lat, n_lon, nlev)
     div = sh_synthesis_3d(grid, state.div_hat.data) * mask_3d
-    T = sh_synthesis_3d(grid, state.T_hat.data) * mask_3d
-    S = sh_synthesis_3d(grid, state.S_hat.data) * mask_3d
+    # Keep tracer extensions smooth across coastlines; apply mask on tendencies.
+    T = sh_synthesis_3d(grid, state.T_hat.data)
+    S = sh_synthesis_3d(grid, state.S_hat.data)
     eta = sh_synthesis(grid, state.eta_hat.data) * mask          # (n_lat, n_lon)
     H_bathy = sh_synthesis(grid, state.H_bathy_hat.data).real
     H_bathy = jnp.maximum(H_bathy, 1.0) * mask + 1.0 * (1.0 - mask)
@@ -94,8 +178,10 @@ def spectral_ocean_tendencies(
         grid, state.vor_hat.data, state.div_hat.data,
     )
     cos_lat_3d = grid.cos_lat[:, jnp.newaxis, jnp.newaxis]
-    u = u_cos / cos_lat_3d * mask_3d
-    v = v_cos / cos_lat_3d * mask_3d
+    # Guard against near-polar amplification when cos(lat) becomes tiny.
+    cos_lat_safe = jnp.maximum(cos_lat_3d, 1.0e-6)
+    u = u_cos / cos_lat_safe * mask_3d
+    v = v_cos / cos_lat_safe * mask_3d
 
     # --- 3. Layer thickness and Jacobian ---
     J = compute_ocean_jacobian(
@@ -179,52 +265,50 @@ def spectral_ocean_tendencies(
         - one_over_a * sh_analysis_dmu_3d(grid, vert_v_cos)
     )
 
-    # --- 13. Temperature equation ---
-    T_u_cos = T * u_cos * mask_3d
-    T_v_cos = T * v_cos * mask_3d
-    flux_T_div = (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, T_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, T_v_cos)
-    )
-    T_div = T * div * mask_3d
-    dT_hat = -flux_T_div + sh_analysis_3d(grid, T_div)
+    # --- 13. Tracer equations (vectorized over T, S) ---
+    tracers = jnp.stack([T.real, S.real], axis=0)  # (2, n_lat, n_lon, nlev)
+    tracers_hat = jnp.stack([state.T_hat.data, state.S_hat.data], axis=0)
 
-    vert_adv_T = _vertical_advection_spectral(T.real, w, z_coord, J.real) * mask_3d
-    dT_hat = dT_hat + sh_analysis_3d(grid, vert_adv_T)
+    tracer_u_cos = tracers * u_cos[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
+    tracer_v_cos = tracers * v_cos[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
+    tracer_flux_div = jax.vmap(
+        lambda q_u_cos, q_v_cos: (
+            im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, q_u_cos)
+            - one_over_a * sh_analysis_dmu_3d(grid, q_v_cos)
+        ),
+        in_axes=0,
+        out_axes=0,
+    )(tracer_u_cos, tracer_v_cos)
 
-    # Vertical diffusion of T
-    vdiff_TS = None
+    tracer_div = tracers * div.real[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
+    dtr_hat = -tracer_flux_div + jax.vmap(
+        lambda q_div: sh_analysis_3d(grid, q_div),
+        in_axes=0,
+        out_axes=0,
+    )(tracer_div)
+
+    tracer_vert_adv = jax.vmap(
+        lambda q: _vertical_advection_spectral(q, w, z_coord, J.real),
+        in_axes=0,
+        out_axes=0,
+    )(tracers) * mask_3d[jnp.newaxis, ...]
+    dtr_hat = dtr_hat + jax.vmap(
+        lambda q_adv: sh_analysis_3d(grid, q_adv),
+        in_axes=0,
+        out_axes=0,
+    )(tracer_vert_adv)
+
     if config.K_v > 0:
-        tracers_TS = jnp.stack([T.real, S.real], axis=0)
-        vdiff_TS = jax.vmap(
+        tracer_vdiff = jax.vmap(
             lambda q: vertical_diffusion(q, z_coord, J.real, config.K_v),
-            in_axes=0, out_axes=0,
-        )(tracers_TS)
-        vdiff_T = vdiff_TS[0] * mask_3d
-        dT_hat = dT_hat + sh_analysis_3d(grid, vdiff_T)
-
-    # --- 14. Salinity equation ---
-    S_u_cos = S * u_cos * mask_3d
-    S_v_cos = S * v_cos * mask_3d
-    flux_S_div = (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, S_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, S_v_cos)
-    )
-    S_div = S * div * mask_3d
-    dS_hat = -flux_S_div + sh_analysis_3d(grid, S_div)
-
-    vert_adv_S = _vertical_advection_spectral(S.real, w, z_coord, J.real) * mask_3d
-    dS_hat = dS_hat + sh_analysis_3d(grid, vert_adv_S)
-
-    if config.K_v > 0:
-        if vdiff_TS is None:
-            tracers_TS = jnp.stack([T.real, S.real], axis=0)
-            vdiff_TS = jax.vmap(
-                lambda q: vertical_diffusion(q, z_coord, J.real, config.K_v),
-                in_axes=0, out_axes=0,
-            )(tracers_TS)
-        vdiff_S = vdiff_TS[1] * mask_3d
-        dS_hat = dS_hat + sh_analysis_3d(grid, vdiff_S)
+            in_axes=0,
+            out_axes=0,
+        )(tracers)
+        dtr_hat = dtr_hat + jax.vmap(
+            lambda q_vdiff: sh_analysis_3d(grid, q_vdiff * mask_3d),
+            in_axes=0,
+            out_axes=0,
+        )(tracer_vdiff)
 
     # --- 15. Explicit viscosity/diffusion ---
     if config.A_h > 0 or config.K_h > 0:
@@ -233,8 +317,7 @@ def spectral_ocean_tendencies(
             dvor_hat = dvor_hat + config.A_h * lap * state.vor_hat.data
             ddiv_hat = ddiv_hat + config.A_h * lap * state.div_hat.data
         if config.K_h > 0:
-            dT_hat = dT_hat + config.K_h * lap * state.T_hat.data
-            dS_hat = dS_hat + config.K_h * lap * state.S_hat.data
+            dtr_hat = dtr_hat + config.K_h * lap[jnp.newaxis, ...] * tracers_hat
 
     if config.A_v > 0:
         vel_uv = jnp.stack([u.real, v.real], axis=0)
@@ -268,12 +351,16 @@ def spectral_ocean_tendencies(
         ddiv_hat = ddiv_hat + spectral_hyperdiffusion_3d(
             grid, state.div_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
         )
-        dT_hat = dT_hat + spectral_hyperdiffusion_3d(
-            grid, state.T_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
-        )
-        dS_hat = dS_hat + spectral_hyperdiffusion_3d(
-            grid, state.S_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
-        )
+        dtr_hat = dtr_hat + jax.vmap(
+            lambda coeffs: spectral_hyperdiffusion_3d(
+                grid, coeffs, config.hyperdiff_coeff, config.hyperdiff_order,
+            ),
+            in_axes=0,
+            out_axes=0,
+        )(tracers_hat)
+
+    dT_hat = dtr_hat[0]
+    dS_hat = dtr_hat[1]
 
     # Return as same pytree structure
     return SpectralOceanState(
@@ -313,8 +400,9 @@ def _vertical_advection_spectral(
 class SpectralOceanModel:
     """Spectral ocean model on the Gaussian grid.
 
-    Uses SSP-RK3 for time integration. Barotropic subcycling is
-    handled in grid space within the tendency function.
+    Uses SSP-RK3 for time integration of the full spectral tendencies.
+    Unlike the finite-volume ocean core, this path is currently not
+    split-explicit and does not apply barotropic subcycling.
 
     On Metal (Apple Silicon), SH transforms require complex128 which
     is unsupported on Metal GPU. The model auto-routes computation to
@@ -347,6 +435,13 @@ class SpectralOceanModel:
         self._use_cpu_for_spectral = False
         self._cpu_device = None
         self._default_device = None
+        if self.config.n_barotropic_substeps != 1:
+            warnings.warn(
+                "SpectralOceanConfig.n_barotropic_substeps is currently ignored "
+                "in SpectralOceanModel (unsplit spectral stepping).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         if not jax.config.jax_enable_x64:
             msg = (
@@ -415,9 +510,18 @@ class SpectralOceanModel:
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
             result_cpu = ssp_rk3_step(state_cpu, tendency_fn, dt)
+            if self.config.use_conservation_fixer:
+                result_cpu = _spectral_conservation_fixer(
+                    result_cpu, state_cpu, self.grid, self.z_coord, self.config,
+                )
             return jax.device_put(result_cpu, self._default_device)
 
-        return ssp_rk3_step(state, tendency_fn, dt)
+        result = ssp_rk3_step(state, tendency_fn, dt)
+        if self.config.use_conservation_fixer:
+            result = _spectral_conservation_fixer(
+                result, state, self.grid, self.z_coord, self.config,
+            )
+        return result
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_on_cpu(
@@ -428,7 +532,12 @@ class SpectralOceanModel:
             return spectral_ocean_tendencies(
                 s, self.grid, self.z_coord, self.config,
             )
-        return ssp_rk3_step(state, tendency_fn, dt)
+        result = ssp_rk3_step(state, tendency_fn, dt)
+        if self.config.use_conservation_fixer:
+            result = _spectral_conservation_fixer(
+                result, state, self.grid, self.z_coord, self.config,
+            )
+        return result
 
     def integrate(
         self,
@@ -442,7 +551,18 @@ class SpectralOceanModel:
         On Metal, batches CPU transfers: transfer state to CPU once,
         run all steps on CPU, then transfer results back to Metal.
         """
+        if dt <= 0.0:
+            raise ValueError(f"dt must be > 0, got {dt!r}")
+        if duration < 0.0:
+            raise ValueError(f"duration must be >= 0, got {duration!r}")
+        if save_every < 1:
+            raise ValueError(f"save_every must be >= 1, got {save_every!r}")
         n_steps = int(duration / dt)
+        if duration > 0.0 and n_steps < 1:
+            raise ValueError(
+                "integration has zero steps; increase duration or reduce dt "
+                f"(duration={duration!r}, dt={dt!r})",
+            )
 
         if self._use_cpu_for_spectral:
             return self._integrate_on_cpu(state, n_steps, dt, save_every)
@@ -501,6 +621,21 @@ def rest_state_spectral_ocean(
     land_lat_threshold : float
         Latitude threshold for land mask [degrees].
     """
+    if H_max <= 0.0:
+        raise ValueError(f"H_max must be > 0, got {H_max!r}")
+    if land_lat_threshold < 0.0 or land_lat_threshold > 90.0:
+        raise ValueError(
+            "land_lat_threshold must be in [0, 90] degrees, "
+            f"got {land_lat_threshold!r}",
+        )
+    for name, value in {
+        "T_surface": T_surface,
+        "T_deep": T_deep,
+        "S_uniform": S_uniform,
+    }.items():
+        if not bool(jnp.isfinite(jnp.asarray(value))):
+            raise ValueError(f"{name} must be finite, got {value!r}")
+
     nlev = z_coord.n_levels
     n_sh = grid.n_sh
 
@@ -520,12 +655,12 @@ def rest_state_spectral_ocean(
     T_grid = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, :],
         (grid.n_lat, grid.n_lon, nlev),
-    ) * mask[..., jnp.newaxis]
+    )
 
     # Salinity
     S_grid = jnp.full(
         (grid.n_lat, grid.n_lon, nlev), S_uniform,
-    ) * mask[..., jnp.newaxis]
+    )
 
     # Transform to spectral
     vor_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)

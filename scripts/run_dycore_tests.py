@@ -120,6 +120,57 @@ def _field_to_panel(field_data) -> np.ndarray:
     raise ValueError(f"Expected 2D lat-lon or (6,n,n) cubed-sphere field, got {arr.shape}")
 
 
+def _regrid_faces_to_latlon(
+    field_2d_faces: np.ndarray,
+    cube_lon_deg: np.ndarray,
+    cube_lat_deg: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Interpolate cubed-sphere face samples to a regular lat-lon grid."""
+    n = int(field_2d_faces.shape[1])
+    n_lon = max(180, 6 * n)
+    n_lat = n_lon // 2
+
+    lon = np.asarray(cube_lon_deg, dtype=np.float64).reshape(-1)
+    lat = np.asarray(cube_lat_deg, dtype=np.float64).reshape(-1)
+    val = np.asarray(field_2d_faces, dtype=np.float64).reshape(-1)
+
+    valid = np.isfinite(lon) & np.isfinite(lat) & np.isfinite(val)
+    lon = ((lon[valid] + 180.0) % 360.0) - 180.0
+    lat = np.clip(lat[valid], -90.0, 90.0)
+    val = val[valid]
+
+    lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
+    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
+
+    pts = np.column_stack([lon, lat])
+    pts_ext = np.vstack(
+        [
+            pts,
+            np.column_stack([lon + 360.0, lat]),
+            np.column_stack([lon - 360.0, lat]),
+        ],
+    )
+    val_ext = np.concatenate([val, val, val])
+
+    try:
+        from scipy.interpolate import griddata  # type: ignore
+
+        field_ll = griddata(pts_ext, val_ext, (lon2d, lat2d), method="linear")
+        if np.isnan(field_ll).any():
+            nn = griddata(pts_ext, val_ext, (lon2d, lat2d), method="nearest")
+            field_ll = np.where(np.isnan(field_ll), nn, field_ll)
+    except Exception:
+        lon_edges = np.linspace(-180.0, 180.0, n_lon + 1)
+        lat_edges = np.linspace(-90.0, 90.0, n_lat + 1)
+        sum_grid, _, _ = np.histogram2d(lat, lon, bins=(lat_edges, lon_edges), weights=val)
+        cnt_grid, _, _ = np.histogram2d(lat, lon, bins=(lat_edges, lon_edges))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            field_ll = np.where(cnt_grid > 0.0, sum_grid / cnt_grid, np.nan)
+
+    return lon2d, lat2d, field_ll
+
+
 def _color_limits(panels: list[np.ndarray]) -> tuple[float, float]:
     """Color limits shared across timesteps for one field.
 
@@ -244,19 +295,19 @@ def _save_case_snapshots(
                 ax.set_yticks([])
             else:
                 if use_projected_cube and panel.ndim == 3 and panel.shape[0] == 6:
-                    for face in range(6):
-                        im = ax.scatter(
-                            cube_lon_deg[face].ravel(),
-                            cube_lat_deg[face].ravel(),
-                            c=panel[face].ravel(),
-                            s=max(1.0, 90.0 / panel.shape[1]),
-                            cmap=cmap,
-                            vmin=vmin,
-                            vmax=vmax,
-                            transform=ccrs.PlateCarree(),
-                            edgecolors="none",
-                            alpha=0.92,
-                        )
+                    lon2d, lat2d, field_ll = _regrid_faces_to_latlon(
+                        panel, cube_lon_deg, cube_lat_deg,
+                    )
+                    im = ax.pcolormesh(
+                        lon2d,
+                        lat2d,
+                        field_ll,
+                        cmap=cmap,
+                        vmin=vmin,
+                        vmax=vmax,
+                        transform=ccrs.PlateCarree(),
+                        shading="auto",
+                    )
                     ax.set_global()
                     ax.coastlines(linewidth=0.35, color="0.35")
                     ax.gridlines(draw_labels=False, linewidth=0.2, color="0.6", alpha=0.35)

@@ -203,6 +203,21 @@ def test_sea_ice_concentration_bounds():
     assert jnp.all(new_state.concentration.data <= 1.0 + 1e-6)
 
 
+def test_sea_ice_no_spurious_growth_from_open_water():
+    """Cells without ice should not grow ice under net warming conditions."""
+    state = _make_ice_state(h=0.0, conc=0.0, T=271.35)
+    forcing = _make_forcing(T_lowest=280.0, sw=300.0, lw=350.0)
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 275.0)
+
+    new_state, _ = step_sea_ice(
+        state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT)
+
+    assert jnp.allclose(new_state.h_ice.data, 0.0, atol=1e-8)
+    assert jnp.allclose(new_state.concentration.data, 0.0, atol=1e-8)
+
+
 # ==============================================================================
 # Test lake
 # ==============================================================================
@@ -243,6 +258,22 @@ def test_tile_fractions_sum_to_one():
         f_lake=jnp.full(SHAPE, 0.1),
     )
     fracs = compute_tile_fractions(tile_cfg, ice_concentration=jnp.full(SHAPE, 0.2))
+
+    total = fracs.f_ocean + fracs.f_ice + fracs.f_land + fracs.f_lake
+    assert jnp.allclose(total, 1.0, atol=1e-10)
+
+
+def test_tile_fractions_sanitize_invalid_static_masks():
+    """Invalid static masks are clipped/rescaled to a conservative partition."""
+    tile_cfg = TileConfig(
+        f_land=jnp.full(SHAPE, 1.2),
+        f_lake=jnp.full(SHAPE, 0.7),
+    )
+    fracs = compute_tile_fractions(tile_cfg, ice_concentration=jnp.full(SHAPE, 1.5))
+
+    for frac in (fracs.f_ocean, fracs.f_ice, fracs.f_land, fracs.f_lake):
+        assert jnp.all(frac >= -1e-12)
+        assert jnp.all(frac <= 1.0 + 1e-12)
 
     total = fracs.f_ocean + fracs.f_ice + fracs.f_land + fracs.f_lake
     assert jnp.allclose(total, 1.0, atol=1e-10)
@@ -376,6 +407,95 @@ def test_coupler_multiple_steps():
 
     assert jnp.all(jnp.isfinite(blended.T_surface))
     assert jnp.allclose(sfc_state.accumulator.total_dt, 5 * DT, atol=1e-6)
+
+
+def test_coupler_flushes_at_coupling_interval():
+    """Accumulator should flush when coupling_dt is reached."""
+    coupler_cfg = CouplerConfig(coupling_dt=2 * DT)
+    step_fn = make_coupler(coupler_cfg, LandConfig(), SeaIceConfig(), LakeConfig())
+
+    sfc_state = init_surface_state(SHAPE)
+    forcing = _make_forcing()
+    tile_cfg = TileConfig(
+        f_land=jnp.full(SHAPE, 0.4),
+        f_lake=jnp.full(SHAPE, 0.0),
+    )
+    ocean_sst = jnp.full(SHAPE, 300.0)
+    zu = jnp.zeros(SHAPE)
+
+    sfc_state, _ = step_fn(sfc_state, forcing, tile_cfg, ocean_sst, zu, zu, DT)
+    assert jnp.allclose(sfc_state.accumulator.total_dt, DT, atol=1e-6)
+
+    sfc_state, _ = step_fn(sfc_state, forcing, tile_cfg, ocean_sst, zu, zu, DT)
+    assert jnp.allclose(sfc_state.accumulator.total_dt, 0.0, atol=1e-6)
+
+
+def test_coupler_carries_excess_dt_after_flush():
+    """If dt overshoots coupling_dt, residual dt should carry to next window."""
+    coupler_cfg = CouplerConfig(coupling_dt=900.0)
+    step_fn = make_coupler(coupler_cfg, LandConfig(), SeaIceConfig(), LakeConfig())
+
+    sfc_state = init_surface_state(SHAPE)
+    forcing = _make_forcing()
+    tile_cfg = TileConfig(
+        f_land=jnp.full(SHAPE, 0.4),
+        f_lake=jnp.full(SHAPE, 0.0),
+    )
+    ocean_sst = jnp.full(SHAPE, 300.0)
+    zu = jnp.zeros(SHAPE)
+
+    sfc_state, _ = step_fn(sfc_state, forcing, tile_cfg, ocean_sst, zu, zu, 600.0)
+    assert jnp.allclose(sfc_state.accumulator.total_dt, 600.0, atol=1e-6)
+
+    sfc_state, _ = step_fn(sfc_state, forcing, tile_cfg, ocean_sst, zu, zu, 600.0)
+    assert jnp.allclose(sfc_state.accumulator.total_dt, 300.0, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"coupling_dt": 0.0}, "coupling_dt"),
+        ({"U_min": -1.0}, "U_min"),
+        ({"ocean_albedo": -0.1}, "ocean_albedo"),
+        ({"ocean_albedo": 1.1}, "ocean_albedo"),
+        ({"ocean_emissivity": -0.1}, "ocean_emissivity"),
+        ({"ocean_emissivity": 1.1}, "ocean_emissivity"),
+        ({"ocean_z0": 0.0}, "ocean_z0"),
+        ({"Cd_ocean": -1.0e-3}, "Cd_ocean"),
+        ({"Ch_ocean": -1.0e-3}, "Ch_ocean"),
+    ],
+)
+def test_make_coupler_rejects_invalid_config(kwargs, match):
+    """Coupler factory should fail fast on invalid configuration."""
+    with pytest.raises(ValueError, match=match):
+        make_coupler(CouplerConfig(**kwargs), LandConfig(), SeaIceConfig(), LakeConfig())
+
+
+def test_make_coupler_warns_for_unused_blend_sharpness():
+    """Non-default blend_sharpness should surface an explicit warning."""
+    with pytest.warns(RuntimeWarning, match="blend_sharpness"):
+        make_coupler(
+            CouplerConfig(blend_sharpness=10.0),
+            LandConfig(),
+            SeaIceConfig(),
+            LakeConfig(),
+        )
+
+
+def test_coupler_step_validates_dt():
+    """Coupler step should reject non-positive dt."""
+    step_fn = make_coupler(CouplerConfig(), LandConfig(), SeaIceConfig(), LakeConfig())
+    sfc_state = init_surface_state(SHAPE)
+    forcing = _make_forcing()
+    tile_cfg = TileConfig(
+        f_land=jnp.full(SHAPE, 0.3),
+        f_lake=jnp.full(SHAPE, 0.05),
+    )
+    ocean_sst = jnp.full(SHAPE, 300.0)
+    zu = jnp.zeros(SHAPE)
+
+    with pytest.raises(ValueError, match="dt"):
+        step_fn(sfc_state, forcing, tile_cfg, ocean_sst, zu, zu, 0.0)
 
 
 # ==============================================================================

@@ -55,8 +55,9 @@ def step_sea_ice(
     T_ice = state.T_ice.data
     conc = state.concentration.data
 
-    # Effective thickness for smooth division
-    h_eff = h + config.h_ice_min
+    # Only existing ice supports conductive flux through the slab.
+    ice_mask = h > 0.0
+    h_eff = jnp.maximum(h, config.h_ice_min)
 
     # ---------- Surface fluxes ----------
     wind_speed = jnp.sqrt(
@@ -82,21 +83,34 @@ def step_sea_ice(
     Q_sfc = sw_net + lw_net - shflx - lhflx
 
     # ---------- Conductive flux ----------
-    F_cond = config.k_ice * (config.T_freeze_ocean - T_ice) / h_eff
+    F_cond = jnp.where(
+        ice_mask,
+        config.k_ice * (config.T_freeze_ocean - T_ice) / h_eff,
+        0.0,
+    )
 
     # ---------- Surface temperature evolution ----------
     # Only the thin surface layer responds: use rho_ice * c_ice * h_eff / 2
     skin_cap = config.rho_ice * config.c_ice * h_eff * 0.5
     dT_dt = (Q_sfc - F_cond) / skin_cap
-    T_ice_new = T_ice + dt * dT_dt
-
-    # Cap at freezing — surface melt doesn't superheat
-    T_ice_new = jnp.minimum(T_ice_new, config.T_freeze_ocean)
+    T_ice_trial = T_ice + dt * dT_dt
+    # Existing ice stays in physically plausible bounds; open water carries
+    # no ice-skin state and is pinned to freezing.
+    T_ice_new = jnp.where(
+        ice_mask,
+        jnp.clip(T_ice_trial, config.T_ice_min, config.T_freeze_ocean),
+        jnp.broadcast_to(jnp.array(config.T_freeze_ocean), T_ice.shape),
+    )
 
     # ---------- Growth / melt ----------
     # Ocean heat flux: when SST > T_freeze, ocean melts ice from below
     F_ocean = config.k_ice * jnp.maximum(ocean_sst - config.T_freeze_ocean, 0.0) / h_eff
-    dh_dt = (F_cond - F_ocean) / (config.rho_ice * config.L_f)
+    dh_dt_ice = (F_cond - F_ocean) / (config.rho_ice * config.L_f)
+    # For open-water cells (h=0), new ice forms only when the net surface
+    # energy budget extracts heat (Q_sfc < 0).
+    freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
+    dh_dt_open = freeze_flux_open / (config.rho_ice * config.L_f)
+    dh_dt = jnp.where(ice_mask, dh_dt_ice, dh_dt_open)
     h_new = jnp.maximum(h + dt * dh_dt, 0.0)
 
     # ---------- Concentration ----------

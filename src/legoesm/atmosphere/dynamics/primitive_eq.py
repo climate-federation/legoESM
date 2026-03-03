@@ -61,6 +61,7 @@ from legoesm.grids.vertical import (
     compute_pressure_velocity,
 )
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 from legoesm import constants
 
 
@@ -71,6 +72,7 @@ class PrimitiveEquationConfig(NamedTuple):
     hyperdiff_ps_coeff: float = 0.0  # Separate coefficient for p_s ∇⁴ diffusion
     use_conservation_fixer: bool = True
     fix_mass: bool = True
+    time_integrator: str = "ssp_rk3"  # "ssp_rk3" or "ssp_rk54"/"ssp45"
 
 
 # ==============================================================================
@@ -332,7 +334,13 @@ class PrimitiveEquationModel:
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
             )
 
-        state_new = ssp_rk3_step(state, tendency_fn, dt)
+        integrator = self.config.time_integrator.lower()
+        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
+            state_new = ssp_rk54_step(state, tendency_fn, dt)
+        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
+            state_new = ssp_rk3_step(state, tendency_fn, dt)
+        else:
+            raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")
 
         # Apply conservation fixers
         if self.config.use_conservation_fixer and self.config.fix_mass:
@@ -379,7 +387,13 @@ class PrimitiveEquationModel:
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
             )
 
-        state_new = ssp_rk3_step(state, tendency_fn, dt)
+        integrator = self.config.time_integrator.lower()
+        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
+            state_new = ssp_rk54_step(state, tendency_fn, dt)
+        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
+            state_new = ssp_rk3_step(state, tendency_fn, dt)
+        else:
+            raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")
 
         if self.config.use_conservation_fixer and self.config.fix_mass:
             from legoesm.core.conservation import fix_mass_hydrostatic

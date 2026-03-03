@@ -1,0 +1,28 @@
+{
+  "generated": "2026-03-03 13:02:32",
+  "configuration": {
+    "resolution": 36,
+    "hydro_levels": 10,
+    "nh_levels": 20,
+    "solver": "ssp45",
+    "mean_every": 20,
+    "dt_nh_tc1": 1.0,
+    "dt_nh_small": 0.2
+  },
+  "summary": {
+    "total_cases": 1,
+    "pass": 1,
+    "fail": 0,
+    "error": 0,
+    "total_wall_time_s": 8.656407117843628
+  },
+  "cases": [
+    {
+      "case": "SW Williamson 5",
+      "status": "PASS",
+      "metric": "mass_drift",
+      "value": 0.0009244455141015351,
+      "wall_time_s": 8.656407117843628
+    }
+  ]
+}

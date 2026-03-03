@@ -6,6 +6,7 @@ from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm, TileResp
 from legoesm.coupler.tile_fractions import TileFractions, compute_tile_fractions, blend_tiles
 from legoesm.coupler.accumulator import (
     FluxAccumulator, accumulate, mean_accumulator, reset_accumulator,
+    accumulator_from_flux,
 )
 from legoesm.coupler.surface_exchange import (
     extract_atm_to_surface, extract_atm_to_surface_nh,
@@ -35,6 +36,7 @@ __all__ = [
     "AtmToSurface", "SurfaceToAtm", "TileResponse",
     "TileFractions", "compute_tile_fractions", "blend_tiles",
     "FluxAccumulator", "accumulate", "mean_accumulator", "reset_accumulator",
+    "accumulator_from_flux",
     "extract_atm_to_surface", "extract_atm_to_surface_nh",
     "SurfaceState", "init_surface_state", "make_coupler", "ocean_tile_response",
     "LakeConfig", "LakeState", "step_lake",

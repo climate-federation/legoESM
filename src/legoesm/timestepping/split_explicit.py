@@ -35,6 +35,7 @@ State = TypeVar("State")
 class SplitExplicitConfig(NamedTuple):
     """Configuration for split-explicit time integration."""
     n_substeps: int = 6
+    outer_integrator: str = "ssp_rk3"  # "ssp_rk3" or "ssp_rk54"/"ssp45"
 
 
 def split_explicit_step(
@@ -67,6 +68,26 @@ def split_explicit_step(
     state : pytree
         State after one time step.
     """
+    integrator = config.outer_integrator.lower()
+    if integrator in ("ssp_rk3", "ssp3", "rk3"):
+        return _split_explicit_ssp_rk3(
+            state, slow_tendency_fn, acoustic_update_fn, dt, config,
+        )
+    if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
+        return _split_explicit_ssp_rk54(
+            state, slow_tendency_fn, acoustic_update_fn, dt, config,
+        )
+    raise ValueError(f"Unsupported outer_integrator={config.outer_integrator!r}")
+
+
+def _split_explicit_ssp_rk3(
+    state: State,
+    slow_tendency_fn: Callable[[State], State],
+    acoustic_update_fn: Callable,
+    dt: float,
+    config: SplitExplicitConfig,
+) -> State:
+    """SSP-RK3 outer integrator with acoustic substeps at each stage."""
     # Stage 1: k1 = state + dt * F(state) + acoustic_update
     tend_0 = slow_tendency_fn(state)
     k1 = _rk_stage_with_acoustics(
@@ -85,9 +106,66 @@ def split_explicit_step(
     k2_stepped = _rk_stage_with_acoustics(
         k2, tend_2, dt, 1.0, acoustic_update_fn, config,
     )
-    k3 = _pytree_linear_combination(state, k2_stepped, 1.0 / 3.0, 2.0 / 3.0)
+    return _pytree_linear_combination(state, k2_stepped, 1.0 / 3.0, 2.0 / 3.0)
 
-    return k3
+
+def _split_explicit_ssp_rk54(
+    state: State,
+    slow_tendency_fn: Callable[[State], State],
+    acoustic_update_fn: Callable,
+    dt: float,
+    config: SplitExplicitConfig,
+) -> State:
+    """SSP-RK(5,4) outer integrator with acoustic substeps at each stage."""
+    # Coefficients from Spiteri & Ruuth (2002), same as ssp_rk54_step.
+    a20, a21 = 0.444370493651235, 0.555629506348765
+    a30, a32 = 0.620101851488403, 0.379898148511597
+    a40, a43 = 0.178079954393132, 0.821920045606868
+    a52, a53, a54 = 0.517231671970585, 0.096059710526147, 0.386708617503269
+    b10 = 0.391752226571890
+    b21 = 0.368410593050371
+    b32 = 0.251891774271694
+    b43 = 0.544974750228521
+    b53 = 0.063692468666290
+    b54 = 0.226007483236906
+
+    # Stage 1
+    f0 = slow_tendency_fn(state)
+    u1 = _rk_stage_with_acoustics(
+        state, f0, dt, b10, acoustic_update_fn, config,
+    )
+
+    # Stage 2
+    f1 = slow_tendency_fn(u1)
+    u2_base = _pytree_linear_combination(state, u1, a20, a21)
+    u2 = _rk_stage_with_acoustics(
+        u2_base, f1, dt, b21, acoustic_update_fn, config,
+    )
+
+    # Stage 3
+    f2 = slow_tendency_fn(u2)
+    u3_base = _pytree_linear_combination(state, u2, a30, a32)
+    u3 = _rk_stage_with_acoustics(
+        u3_base, f2, dt, b32, acoustic_update_fn, config,
+    )
+
+    # Stage 4
+    f3 = slow_tendency_fn(u3)
+    u4_base = _pytree_linear_combination(state, u3, a40, a43)
+    u4 = _rk_stage_with_acoustics(
+        u4_base, f3, dt, b43, acoustic_update_fn, config,
+    )
+
+    # Stage 5
+    f4 = slow_tendency_fn(u4)
+    u5_base = jax.tree.map(
+        lambda s2, s3, s4: a52 * s2 + a53 * s3 + a54 * s4,
+        u2, u3, u4,
+    )
+    f54 = jax.tree.map(lambda ff3, ff4: b53 * ff3 + b54 * ff4, f3, f4)
+    return _rk_stage_with_acoustics(
+        u5_base, f54, dt, 1.0, acoustic_update_fn, config,
+    )
 
 
 def _rk_stage_with_acoustics(

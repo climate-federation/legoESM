@@ -95,26 +95,22 @@ def divergence(u_field: Field, v_field: Field, grid: CubedSphereGrid) -> Field:
     u = u_field.data
     v = v_field.data
 
-    # Form fluxes on the interior using correct local metrics.
-    # flux_x = u * h_y, flux_y = v * h_x, where h_x = dx/2, h_y = dy/2
-    # are single-cell edge lengths.
+    # Exchange velocity components with proper rotation, then apply
+    # locally extrapolated half-metrics on the padded stencil.
     #
-    # On the gnomonic equidistant cubed sphere, dx = dy everywhere, so
-    # (u*h, v*h) transforms as a vector under rotation. We exchange the
-    # flux vector (not velocity) across face boundaries, ensuring that
-    # halo cells carry the correct metric from the originating face.
-    # This eliminates the metric mismatch that caused grid-scale noise
-    # at face boundaries with the old extrapolate-metric approach.
-    flux_x = u * (grid.dy * 0.5)  # (6, n, n)
-    flux_y = v * (grid.dx * 0.5)  # (6, n, n)
-
-    flux_x_pad, flux_y_pad = pad_halo_vector(
-        flux_x, flux_y,
+    # This avoids assuming dx == dy across face boundaries; on this grid,
+    # anisotropy can be significant near edges/corners.
+    u_pad, v_pad = pad_halo_vector(
+        u, v,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
     )
 
-    # Centered differences of fluxes: d(u*h_y)/di ≈ (u*h_y)[i+1] - (u*h_y)[i-1]
+    flux_x_pad = u_pad * grid.hy_ext
+    flux_y_pad = v_pad * grid.hx_ext
+
+    # Centered differences of metric-weighted fluxes:
+    # d(u*h_y)/di ≈ (u*h_y)[i+1] - (u*h_y)[i-1]
     d_flux_x = flux_x_pad[:, 2:, 1:-1] - flux_x_pad[:, :-2, 1:-1]
     d_flux_y = flux_y_pad[:, 1:-1, 2:] - flux_y_pad[:, 1:-1, :-2]
 
@@ -154,10 +150,16 @@ def curl_z(u_field: Field, v_field: Field, grid: CubedSphereGrid) -> Field:
         grid.cos_angle_padded, grid.sin_angle_padded,
     )
 
-    dv_dx = (v_pad[:, 2:, 1:-1] - v_pad[:, :-2, 1:-1]) / grid.dx
-    du_dy = (u_pad[:, 1:-1, 2:] - u_pad[:, 1:-1, :-2]) / grid.dy
+    # Orthogonal-curvilinear finite-volume form:
+    # zeta = (1/area) * [d(v*h_y)/di - d(u*h_x)/dj] / 2
+    # with h_x = dx/2, h_y = dy/2 on the local (padded) stencil.
+    vort_x = v_pad * grid.hy_ext
+    vort_y = u_pad * grid.hx_ext
 
-    vort_data = dv_dx - du_dy
+    d_vort_x = vort_x[:, 2:, 1:-1] - vort_x[:, :-2, 1:-1]
+    d_vort_y = vort_y[:, 1:-1, 2:] - vort_y[:, 1:-1, :-2]
+
+    vort_data = (d_vort_x - d_vort_y) / (2.0 * grid.area)
 
     return Field(data=vort_data, name="vorticity", dims=u_field.dims,
                  units="1/s", staggering="cell")

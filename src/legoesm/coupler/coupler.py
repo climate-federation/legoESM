@@ -8,7 +8,9 @@ full atmospheric state — only AtmToSurface.
 from __future__ import annotations
 
 from typing import NamedTuple
+import warnings
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -17,6 +19,8 @@ from legoesm.core.field import Field
 from legoesm.coupler.accumulator import (
     FluxAccumulator,
     accumulate,
+    accumulator_from_flux,
+    mean_accumulator,
     reset_accumulator,
 )
 from legoesm.coupler.config import CouplerConfig, TileConfig
@@ -45,6 +49,36 @@ class SurfaceState(NamedTuple):
     ice: SeaIceState
     lake: LakeState
     accumulator: FluxAccumulator
+
+
+def _validate_coupler_config(config: CouplerConfig) -> None:
+    """Fail fast on clearly invalid coupler parameters."""
+    if config.coupling_dt <= 0.0:
+        raise ValueError(f"coupling_dt must be > 0, got {config.coupling_dt!r}")
+    if config.U_min < 0.0:
+        raise ValueError(f"U_min must be >= 0, got {config.U_min!r}")
+    if not 0.0 <= config.ocean_albedo <= 1.0:
+        raise ValueError(
+            "ocean_albedo must be in [0, 1], got "
+            f"{config.ocean_albedo!r}",
+        )
+    if not 0.0 <= config.ocean_emissivity <= 1.0:
+        raise ValueError(
+            "ocean_emissivity must be in [0, 1], got "
+            f"{config.ocean_emissivity!r}",
+        )
+    if config.ocean_z0 <= 0.0:
+        raise ValueError(f"ocean_z0 must be > 0, got {config.ocean_z0!r}")
+    if config.Cd_ocean < 0.0:
+        raise ValueError(f"Cd_ocean must be >= 0, got {config.Cd_ocean!r}")
+    if config.Ch_ocean < 0.0:
+        raise ValueError(f"Ch_ocean must be >= 0, got {config.Ch_ocean!r}")
+    if config.blend_sharpness != 20.0:
+        warnings.warn(
+            "CouplerConfig.blend_sharpness is currently unused in blend_tiles().",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
 
 def init_surface_state(
@@ -149,7 +183,9 @@ def make_coupler(
         (SurfaceState, AtmToSurface, TileConfig, ocean_sst, ocean_u,
          ocean_v, dt) -> (SurfaceState, SurfaceToAtm)
     """
+    _validate_coupler_config(coupler_config)
     U_min = coupler_config.U_min
+    coupling_dt = float(coupler_config.coupling_dt)
 
     def step_surface(
         sfc_state: SurfaceState,
@@ -161,6 +197,18 @@ def make_coupler(
         dt: float,
     ) -> tuple[SurfaceState, SurfaceToAtm]:
         """Step all surface tiles and return blended response."""
+        if dt <= 0.0:
+            raise ValueError(f"dt must be > 0, got {dt!r}")
+        if tile_config.f_land.shape != atm_forcing.sw_down.shape:
+            raise ValueError(
+                "tile_config.f_land shape must match forcing shape, got "
+                f"{tile_config.f_land.shape!r} vs {atm_forcing.sw_down.shape!r}",
+            )
+        if tile_config.f_lake.shape != atm_forcing.sw_down.shape:
+            raise ValueError(
+                "tile_config.f_lake shape must match forcing shape, got "
+                f"{tile_config.f_lake.shape!r} vs {atm_forcing.sw_down.shape!r}",
+            )
 
         # 1. Step land
         land_new, land_resp = step_land(
@@ -188,10 +236,38 @@ def make_coupler(
 
         # 7. Accumulate
         acc_new = accumulate(sfc_state.accumulator, blended, dt)
+        dt_arr = jnp.asarray(dt, dtype=acc_new.total_dt.dtype)
+        coupling_dt_arr = jnp.asarray(coupling_dt, dtype=acc_new.total_dt.dtype)
+
+        # If we crossed the coupling window, emit the window mean and carry any
+        # residual dt from this step into the next window.
+        def _on_flush(_):
+            dt_prev = sfc_state.accumulator.total_dt
+            dt_to_close = jnp.clip(coupling_dt_arr - dt_prev, 0.0, dt_arr)
+            acc_closed = accumulate(sfc_state.accumulator, blended, dt_to_close)
+            blended_out = mean_accumulator(acc_closed)
+
+            dt_excess = jnp.maximum(dt_arr - dt_to_close, 0.0)
+            acc_next = accumulator_from_flux(
+                blended,
+                dt_excess,
+                dtype=acc_new.total_dt.dtype,
+            )
+            return acc_next, blended_out
+
+        def _no_flush(_):
+            return acc_new, blended
+
+        acc_next, blended_out = jax.lax.cond(
+            acc_new.total_dt >= coupling_dt_arr,
+            _on_flush,
+            _no_flush,
+            operand=None,
+        )
 
         new_state = SurfaceState(
-            land=land_new, ice=ice_new, lake=lake_new, accumulator=acc_new)
+            land=land_new, ice=ice_new, lake=lake_new, accumulator=acc_next)
 
-        return new_state, blended
+        return new_state, blended_out
 
     return step_surface

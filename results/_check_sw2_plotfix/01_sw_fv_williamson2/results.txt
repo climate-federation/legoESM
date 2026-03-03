@@ -1,0 +1,7 @@
+solver: ssp45
+resolution: C16
+dt: 450.0
+n_steps: 960
+l2_error_h: 2.08356171e+02
+stable: True
+wall_time_s: 26.81

@@ -273,6 +273,21 @@ class TestMPIAwareness:
         fixed = fix_heat_ocean(perturbed, state, grid, z_coord)
         assert jnp.all(jnp.isfinite(fixed.T.data))
 
+    def test_spectral_conservation_uses_mpi_aware_reductions(self):
+        """Spectral conservation fixer should route totals through MPI-aware sums."""
+        import inspect
+        from legoesm.ocean.dynamics.spectral_ocean_pe import (
+            _spectral_global_sum,
+            _spectral_conservation_fixer,
+        )
+
+        global_source = inspect.getsource(_spectral_global_sum)
+        assert "_is_distributed" in global_source
+        assert "global_sum_mpi" in global_source
+
+        fixer_source = inspect.getsource(_spectral_conservation_fixer)
+        assert "_spectral_global_sum" in fixer_source
+
 
 # ==============================================================================
 # Differentiability

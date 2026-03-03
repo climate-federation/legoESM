@@ -190,6 +190,37 @@ def fix_mass_hydrostatic(
     return state_new._replace(p_s=p_s_fixed)
 
 
+def fix_mass_hydrostatic_latlon(
+    state_new: HydrostaticState,
+    state_old: HydrostaticState,
+    grid,
+) -> HydrostaticState:
+    """Fix mass conservation for the hydrostatic PE on a lat-lon grid.
+
+    Same logic as fix_mass_hydrostatic but uses lat-lon global integral.
+
+    Parameters
+    ----------
+    state_new : HydrostaticState
+        State after time integration.
+    state_old : HydrostaticState
+        State before time integration (reference mass).
+    grid : LatLonGrid
+        The lat-lon grid.
+
+    Returns
+    -------
+    HydrostaticState : Mass-conserving state.
+    """
+    mass_old = jnp.sum(state_old.p_s.data * grid.area)
+    mass_new = jnp.sum(state_new.p_s.data * grid.area)
+
+    correction = (mass_old - mass_new) / grid.total_area
+    p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
+
+    return state_new._replace(p_s=p_s_fixed)
+
+
 def compute_conservation_diagnostics(
     state: ShallowWaterState,
     grid: CubedSphereGrid,

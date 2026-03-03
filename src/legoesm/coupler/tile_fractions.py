@@ -29,9 +29,16 @@ def compute_tile_fractions(
     f_ice = f_water * ice_concentration
     f_ocean = f_water - f_ice
     """
-    f_land = tile_config.f_land
-    f_lake = tile_config.f_lake
-    f_water = jnp.clip(1.0 - f_land - f_lake, 0.0, 1.0)
+    # Keep static fractions physically valid and conservative even if input
+    # masks are slightly out of bounds due to interpolation/regridding noise.
+    f_land = jnp.clip(tile_config.f_land, 0.0, 1.0)
+    f_lake = jnp.clip(tile_config.f_lake, 0.0, 1.0)
+    total_static = f_land + f_lake
+    static_scale = jnp.where(total_static > 1.0, 1.0 / total_static, 1.0)
+    f_land = f_land * static_scale
+    f_lake = f_lake * static_scale
+
+    f_water = 1.0 - f_land - f_lake
     f_ice = f_water * jnp.clip(ice_concentration, 0.0, 1.0)
     f_ocean = f_water - f_ice
     return TileFractions(f_ocean=f_ocean, f_ice=f_ice,
