@@ -1,4 +1,0 @@
-L2_error: 2.315617e-08
-stable: True
-wall_time: 11.3
-solver: ssp_rk3

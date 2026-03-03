@@ -1,5 +1,0 @@
-total_wall_time: 196.7s
-Held-Suarez 30d (Hydro FV C16/L10): 32.5s
-Baroclinic 10d (Hydro FV C16/L10): 36.7s
-Held-Suarez 30d (Hydro Spec T15/L10): 102.0s
-Baroclinic 1d (Hydro Spec T15/L10): 4.4s

@@ -315,12 +315,11 @@ def pad_halo_vector(
 def compute_padded_angle(n: int) -> jax.Array:
     """Compute grid angle on extended (n+2) x (n+2) grid per face.
 
-    Extends the gnomonic coordinate range by one cell width on each side,
-    then computes the grid angle (rotation of grid x-axis relative to
-    geographic east) at the extended cell centers.
-
-    This provides exact angle values at halo cell locations for the
-    vector halo exchange.
+    Uses a further-extended (n+4) gnomonic grid internally so that
+    centred differences are available at every point of the (n+2) output
+    grid, matching the approach in ``compute_padded_half_metrics``.
+    This avoids the O(Δα) error from one-sided differences at halo
+    boundaries.
 
     Parameters
     ----------
@@ -331,44 +330,33 @@ def compute_padded_angle(n: int) -> jax.Array:
     -------
     angle_padded : jax.Array, shape (6, n+2, n+2)
     """
-    # Gnomonic coordinates on the extended grid
     dalpha = jnp.pi / (2 * n)
-    alpha = jnp.linspace(
-        -jnp.pi / 4 - dalpha,  # one cell before
-        jnp.pi / 4 + dalpha,   # one cell after
-        n + 2,
+
+    # (n+4) grid: 2 cells beyond interior on each side so that centred
+    # differences yield (n+2) output values with no boundary fallback.
+    alpha_big = jnp.linspace(
+        -jnp.pi / 4 - 2 * dalpha,
+        jnp.pi / 4 + 2 * dalpha,
+        n + 4,
         endpoint=False,
     )
-    # Shift to cell centers (same offset as main grid but for n+2 cells)
-    alpha = alpha + dalpha / 2.0
-
-    alpha_x, alpha_y = jnp.meshgrid(alpha, alpha, indexing='ij')
+    alpha_big = alpha_big + dalpha / 2.0
+    alpha_bx, alpha_by = jnp.meshgrid(alpha_big, alpha_big, indexing='ij')
 
     all_angle = []
     for face in range(6):
-        lon, lat = _face_gnomonic_to_lonlat(face, alpha_x, alpha_y)
+        lon, lat = _face_gnomonic_to_lonlat(face, alpha_bx, alpha_by)
 
-        # Grid angle: direction of grid x-axis relative to east
-        # Use finite differences of the (n+2) grid
-        dlon_dx = jnp.zeros_like(lon)
-        dlat_dx = jnp.zeros_like(lat)
-
-        # Interior: centered differences
-        dlon_dx = dlon_dx.at[1:-1, :].set(lon[2:, :] - lon[:-2, :])
-        dlat_dx = dlat_dx.at[1:-1, :].set(lat[2:, :] - lat[:-2, :])
-
-        # Boundaries: one-sided differences
-        dlon_dx = dlon_dx.at[0, :].set(lon[1, :] - lon[0, :])
-        dlat_dx = dlat_dx.at[0, :].set(lat[1, :] - lat[0, :])
-        dlon_dx = dlon_dx.at[-1, :].set(lon[-1, :] - lon[-2, :])
-        dlat_dx = dlat_dx.at[-1, :].set(lat[-1, :] - lat[-2, :])
+        # Centred differences on (n+4) → (n+2) output
+        dlon_dx = lon[2:, 1:-1] - lon[:-2, 1:-1]  # (n+2, n+2)
+        dlat_dx = lat[2:, 1:-1] - lat[:-2, 1:-1]
 
         # Handle longitude wrapping
         dlon_dx = jnp.where(dlon_dx > jnp.pi, dlon_dx - 2 * jnp.pi, dlon_dx)
         dlon_dx = jnp.where(dlon_dx < -jnp.pi, dlon_dx + 2 * jnp.pi, dlon_dx)
 
-        cos_lat = jnp.cos(lat)
-        face_angle = jnp.arctan2(dlat_dx, dlon_dx * cos_lat)
+        cos_lat_ext = jnp.cos(lat[1:-1, 1:-1])
+        face_angle = jnp.arctan2(dlat_dx, dlon_dx * cos_lat_ext)
         all_angle.append(face_angle)
 
     return jnp.stack(all_angle, axis=0)

@@ -1,4 +1,0 @@
-h_range: [4009, 6072]
-mass_drift: 4.31e-04
-stable: True
-wall_time: 25.4

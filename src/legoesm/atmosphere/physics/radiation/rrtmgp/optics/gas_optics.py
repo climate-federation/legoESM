@@ -366,9 +366,21 @@ def _compute_minor_optical_depth(
     return lambda: scaling
 
   # Optical depth will be aggregated over all the minor absorbers contributing
-  # to the frequency band.
-  def step_fn(i_and_tau_minor):
-    i, tau_minor = i_and_tau_minor
+  # to the frequency band.  We use fori_loop over the full static range and
+  # mask inactive iterations so that reverse-mode AD works (while_loop with
+  # dynamic stopping is not reverse-mode differentiable).
+  minor_start_idx = minor_bnd_start[ibnd]
+  i0 = jax.lax.cond(
+      minor_start_idx >= 0,
+      true_fun=lambda: minor_start_idx,
+      false_fun=lambda: jnp.array(
+          minor_absorber_intervals, dtype=jnp.int_
+      ),
+  )
+  bnd_end = minor_bnd_end[ibnd]
+
+  def body_fn(i, tau_minor):
+    active = jnp.logical_and(i >= i0, i <= bnd_end)
     # Map the minor contributor to the RRTMGP gas index.
     gas_idx = idx_gases_minor[i] * jnp.ones_like(tropo_idx)
     vmr_minor = get_vmr(lookup, vmr_lib, gas_idx, vmr_fields)
@@ -381,7 +393,7 @@ def _compute_minor_optical_depth(
     # Obtain the global contributor index needed to index into the `kminor`
     # table.
     k_loc = minor_gpt_shift[i] + loc_in_bnd
-    tau_minor += (
+    delta_tau = (
         optics_utils.interpolate(
             kminor[..., k_loc],
             collections.OrderedDict((
@@ -391,25 +403,11 @@ def _compute_minor_optical_depth(
         )
         * scaling
     )
-    return i + 1, tau_minor
+    return tau_minor + jnp.where(active, delta_tau, 0.0)
 
-  def cond_fn(i_and_tau_minor):
-    i, _ = i_and_tau_minor
-    return jnp.logical_and(
-        i <= minor_bnd_end[ibnd], i < minor_absorber_intervals
-    )
-
-  minor_start_idx = minor_bnd_start[ibnd]
-  i0 = jax.lax.cond(
-      minor_start_idx >= 0,
-      true_fun=lambda: minor_start_idx,
-      false_fun=lambda: jnp.array(
-          minor_absorber_intervals, dtype=jnp.int_
-      ),
-  )
   tau_minor_0 = jnp.zeros_like(temperature)
 
-  return jax.lax.while_loop(cond_fn, step_fn, (i0, tau_minor_0))[1]
+  return jax.lax.fori_loop(0, minor_absorber_intervals, body_fn, tau_minor_0)
 
 
 def compute_minor_optical_depth(
