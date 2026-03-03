@@ -81,9 +81,14 @@ def _regrid_faces_to_latlon(
     cube_lon_deg: np.ndarray,
     cube_lat_deg: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Interpolate cubed-sphere face samples to a regular lat-lon grid."""
+    """Interpolate cubed-sphere face samples to a regular lat-lon grid.
+
+    Uses inverse-distance weighting of nearest neighbors in 3D Cartesian
+    coordinates on the unit sphere. This avoids the Delaunay-triangulation
+    seam artifacts that appear when interpolating directly in lon-lat space.
+    """
     n = int(field_2d_faces.shape[1])
-    n_lon = max(180, 6 * n)
+    n_lon = max(360, 8 * n)
     n_lat = n_lon // 2
 
     lon = np.asarray(cube_lon_deg, dtype=np.float64).reshape(-1)
@@ -99,23 +104,33 @@ def _regrid_faces_to_latlon(
     lat_cent = np.linspace(-90.0, 90.0, n_lat)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
-    pts = np.column_stack([lon, lat])
-    pts_ext = np.vstack(
-        [
-            pts,
-            np.column_stack([lon + 360.0, lat]),
-            np.column_stack([lon - 360.0, lat]),
-        ],
-    )
-    val_ext = np.concatenate([val, val, val])
-
     try:
-        from scipy.interpolate import griddata  # type: ignore
+        from scipy.spatial import cKDTree  # type: ignore
 
-        field_ll = griddata(pts_ext, val_ext, (lon2d, lat2d), method="linear")
-        if np.isnan(field_ll).any():
-            nn = griddata(pts_ext, val_ext, (lon2d, lat2d), method="nearest")
-            field_ll = np.where(np.isnan(field_ll), nn, field_ll)
+        lon_rad = np.deg2rad(lon)
+        lat_rad = np.deg2rad(lat)
+        cos_lat = np.cos(lat_rad)
+        src_xyz = np.column_stack(
+            [cos_lat * np.cos(lon_rad), cos_lat * np.sin(lon_rad), np.sin(lat_rad)],
+        )
+
+        lon_t = np.deg2rad(lon2d.reshape(-1))
+        lat_t = np.deg2rad(lat2d.reshape(-1))
+        cos_lat_t = np.cos(lat_t)
+        tgt_xyz = np.column_stack(
+            [cos_lat_t * np.cos(lon_t), cos_lat_t * np.sin(lon_t), np.sin(lat_t)],
+        )
+
+        k = min(8, src_xyz.shape[0])
+        tree = cKDTree(src_xyz)
+        dist, idx = tree.query(tgt_xyz, k=k)
+        if k == 1:
+            field_ll = val[idx].reshape(lon2d.shape)
+        else:
+            dist = np.maximum(dist, 1.0e-12)
+            w = 1.0 / dist
+            w /= np.sum(w, axis=1, keepdims=True)
+            field_ll = np.sum(val[idx] * w, axis=1).reshape(lon2d.shape)
     except Exception:
         lon_edges = np.linspace(-180.0, 180.0, n_lon + 1)
         lat_edges = np.linspace(-90.0, 90.0, n_lat + 1)
@@ -225,18 +240,27 @@ def _save_case_snapshots(
                 ax.set_yticks([])
             else:
                 if use_projected_cube and panel.ndim == 3 and panel.shape[0] == 6:
-                    lon2d, lat2d, field_ll = _regrid_faces_to_latlon(
-                        panel, cube_lon_deg, cube_lat_deg,
+                    lon_pts = np.asarray(cube_lon_deg, dtype=np.float64).reshape(-1)
+                    lat_pts = np.asarray(cube_lat_deg, dtype=np.float64).reshape(-1)
+                    val_pts = np.asarray(panel, dtype=np.float64).reshape(-1)
+                    valid = (
+                        np.isfinite(lon_pts)
+                        & np.isfinite(lat_pts)
+                        & np.isfinite(val_pts)
                     )
-                    im = ax.pcolormesh(
-                        lon2d,
-                        lat2d,
-                        field_ll,
+                    n_face = int(panel.shape[1])
+                    marker_size = max(0.8, 2200.0 / float(n_face * n_face))
+                    im = ax.scatter(
+                        lon_pts[valid],
+                        lat_pts[valid],
+                        c=val_pts[valid],
                         cmap=cmap,
                         vmin=vmin,
                         vmax=vmax,
+                        s=marker_size,
+                        linewidths=0.0,
                         transform=ccrs.PlateCarree(),
-                        shading="auto",
+                        rasterized=True,
                     )
                     ax.set_global()
                     ax.coastlines(linewidth=0.35, color="0.35")
@@ -573,6 +597,10 @@ def _run_hydro_held_suarez(out_dir: Path, n: int, nlev: int, solver: str, mean_e
     area = np.asarray(grid.area)
     lon_deg = np.asarray(grid.lon) * 180.0 / np.pi
     lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
+    edge_uv = 0.15 if n >= 24 else 0.0
+    edge_T = 0.10 if n >= 24 else 0.0
+    edge_ps = 0.20 if n >= 24 else 0.0
+    edge_wd = 2 if n >= 24 else 1
 
     config = PrimitiveEquationConfig(
         hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
@@ -580,6 +608,10 @@ def _run_hydro_held_suarez(out_dir: Path, n: int, nlev: int, solver: str, mean_e
         use_conservation_fixer=True,
         fix_mass=True,
         time_integrator=solver,
+        edge_blend_uv=edge_uv,
+        edge_blend_T=edge_T,
+        edge_blend_p_s=edge_ps,
+        edge_blend_width=edge_wd,
     )
     model = PrimitiveEquationModel(grid, sigma, config)
     state = held_suarez_init(grid, sigma)
@@ -675,6 +707,10 @@ def _run_hydro_held_suarez(out_dir: Path, n: int, nlev: int, solver: str, mean_e
         f.write(f"solver: {solver}\n")
         f.write(f"resolution: C{n}\n")
         f.write(f"levels: {nlev}\n")
+        f.write(f"edge_blend_uv: {edge_uv:.2f}\n")
+        f.write(f"edge_blend_T: {edge_T:.2f}\n")
+        f.write(f"edge_blend_p_s: {edge_ps:.2f}\n")
+        f.write(f"edge_blend_width: {edge_wd}\n")
         f.write(f"dt: {dt}\n")
         f.write(f"n_steps: {n_steps}\n")
         f.write(f"mass_drift: {mass_drift:.8e}\n")
@@ -708,6 +744,10 @@ def _run_hydro_baroclinic(out_dir: Path, n: int, nlev: int, solver: str, mean_ev
     area = np.asarray(grid.area)
     lon_deg = np.asarray(grid.lon) * 180.0 / np.pi
     lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
+    edge_uv = 0.15 if n >= 24 else 0.0
+    edge_T = 0.10 if n >= 24 else 0.0
+    edge_ps = 0.20 if n >= 24 else 0.0
+    edge_wd = 2 if n >= 24 else 1
 
     config = PrimitiveEquationConfig(
         hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
@@ -715,6 +755,10 @@ def _run_hydro_baroclinic(out_dir: Path, n: int, nlev: int, solver: str, mean_ev
         use_conservation_fixer=True,
         fix_mass=True,
         time_integrator=solver,
+        edge_blend_uv=edge_uv,
+        edge_blend_T=edge_T,
+        edge_blend_p_s=edge_ps,
+        edge_blend_width=edge_wd,
     )
     model = PrimitiveEquationModel(grid, sigma, config)
     state = baroclinic_wave_init(grid, sigma, perturbed=True)
@@ -809,6 +853,10 @@ def _run_hydro_baroclinic(out_dir: Path, n: int, nlev: int, solver: str, mean_ev
         f.write(f"solver: {solver}\n")
         f.write(f"resolution: C{n}\n")
         f.write(f"levels: {nlev}\n")
+        f.write(f"edge_blend_uv: {edge_uv:.2f}\n")
+        f.write(f"edge_blend_T: {edge_T:.2f}\n")
+        f.write(f"edge_blend_p_s: {edge_ps:.2f}\n")
+        f.write(f"edge_blend_width: {edge_wd}\n")
         f.write(f"dt: {dt}\n")
         f.write(f"n_steps: {n_steps}\n")
         f.write(f"mass_drift: {mass_drift:.8e}\n")
@@ -841,11 +889,21 @@ def _run_nh_tc1(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int, 
     lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
 
     state, height_coord, terrain_metric = dcmip25_tc1_init(grid, n_levels=nlev)
+    edge_uv = 0.22 if n >= 24 else 0.0
+    edge_w = 0.14 if n >= 24 else 0.0
+    edge_theta = 0.12 if n >= 24 else 0.0
+    edge_rho = 0.18 if n >= 24 else 0.0
+    edge_wd = 3 if n >= 24 else 1
     config = CompressibleEulerConfig(
-        n_acoustic_substeps=6,
+        n_acoustic_substeps=8,
         sponge_width=10000.0,
-        sponge_coeff=0.05,
+        sponge_coeff=0.06,
         outer_integrator=solver,
+        edge_blend_uv=edge_uv,
+        edge_blend_w=edge_w,
+        edge_blend_theta=edge_theta,
+        edge_blend_rho=edge_rho,
+        edge_blend_width=edge_wd,
     )
     model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
 
@@ -936,6 +994,11 @@ def _run_nh_tc1(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int, 
         f.write(f"solver: {solver}\n")
         f.write(f"resolution: C{n}\n")
         f.write(f"levels: {nlev}\n")
+        f.write(f"edge_blend_uv: {edge_uv:.2f}\n")
+        f.write(f"edge_blend_w: {edge_w:.2f}\n")
+        f.write(f"edge_blend_theta: {edge_theta:.2f}\n")
+        f.write(f"edge_blend_rho: {edge_rho:.2f}\n")
+        f.write(f"edge_blend_width: {edge_wd}\n")
         f.write(f"dt: {dt}\n")
         f.write(f"n_steps: {n_steps}\n")
         f.write(f"max_abs_w: {w_max:.8e}\n")
@@ -968,6 +1031,11 @@ def _run_nh_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int,
     area = np.asarray(small_grid.area)
     lon_deg = np.asarray(small_grid.lon) * 180.0 / np.pi
     lat_deg = np.asarray(small_grid.lat) * 180.0 / np.pi
+    edge_uv = 0.22 if n >= 24 else 0.0
+    edge_w = 0.22 if n >= 24 else 0.0
+    edge_theta = 0.12 if n >= 24 else 0.0
+    edge_rho = 0.26 if n >= 24 else 0.0
+    edge_wd = 4 if n >= 24 else 1
 
     config = CompressibleEulerConfig(
         n_acoustic_substeps=6,
@@ -975,6 +1043,11 @@ def _run_nh_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int,
         sponge_coeff=1.0 / (0.1 * 86400.0),
         small_earth_factor=20.0,
         outer_integrator=solver,
+        edge_blend_uv=edge_uv,
+        edge_blend_w=edge_w,
+        edge_blend_theta=edge_theta,
+        edge_blend_rho=edge_rho,
+        edge_blend_width=edge_wd,
     )
     model = CompressibleEulerModel(small_grid, height_coord, terrain_metric, config)
 
@@ -1065,6 +1138,11 @@ def _run_nh_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int,
         f.write(f"solver: {solver}\n")
         f.write(f"resolution: C{n}\n")
         f.write(f"levels: {nlev}\n")
+        f.write(f"edge_blend_uv: {edge_uv:.2f}\n")
+        f.write(f"edge_blend_w: {edge_w:.2f}\n")
+        f.write(f"edge_blend_theta: {edge_theta:.2f}\n")
+        f.write(f"edge_blend_rho: {edge_rho:.2f}\n")
+        f.write(f"edge_blend_width: {edge_wd}\n")
         f.write(f"dt: {dt}\n")
         f.write(f"n_steps: {n_steps}\n")
         f.write(f"max_abs_w: {w_max:.8e}\n")

@@ -1,5 +1,0 @@
-mass_drift: 6.45e-11
-max_wind: 21.4
-ps_min_hPa: 982.4
-stable: True
-wall_time: 8.5

@@ -125,9 +125,14 @@ def _regrid_faces_to_latlon(
     cube_lon_deg: np.ndarray,
     cube_lat_deg: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Interpolate cubed-sphere face samples to a regular lat-lon grid."""
+    """Interpolate cubed-sphere face samples to a regular lat-lon grid.
+
+    Uses inverse-distance weighting of nearest neighbors in 3D Cartesian
+    coordinates on the unit sphere. This avoids lon-lat triangulation seam
+    artifacts near cube edges.
+    """
     n = int(field_2d_faces.shape[1])
-    n_lon = max(180, 6 * n)
+    n_lon = max(360, 8 * n)
     n_lat = n_lon // 2
 
     lon = np.asarray(cube_lon_deg, dtype=np.float64).reshape(-1)
@@ -143,23 +148,33 @@ def _regrid_faces_to_latlon(
     lat_cent = np.linspace(-90.0, 90.0, n_lat)
     lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
 
-    pts = np.column_stack([lon, lat])
-    pts_ext = np.vstack(
-        [
-            pts,
-            np.column_stack([lon + 360.0, lat]),
-            np.column_stack([lon - 360.0, lat]),
-        ],
-    )
-    val_ext = np.concatenate([val, val, val])
-
     try:
-        from scipy.interpolate import griddata  # type: ignore
+        from scipy.spatial import cKDTree  # type: ignore
 
-        field_ll = griddata(pts_ext, val_ext, (lon2d, lat2d), method="linear")
-        if np.isnan(field_ll).any():
-            nn = griddata(pts_ext, val_ext, (lon2d, lat2d), method="nearest")
-            field_ll = np.where(np.isnan(field_ll), nn, field_ll)
+        lon_rad = np.deg2rad(lon)
+        lat_rad = np.deg2rad(lat)
+        cos_lat = np.cos(lat_rad)
+        src_xyz = np.column_stack(
+            [cos_lat * np.cos(lon_rad), cos_lat * np.sin(lon_rad), np.sin(lat_rad)],
+        )
+
+        lon_t = np.deg2rad(lon2d.reshape(-1))
+        lat_t = np.deg2rad(lat2d.reshape(-1))
+        cos_lat_t = np.cos(lat_t)
+        tgt_xyz = np.column_stack(
+            [cos_lat_t * np.cos(lon_t), cos_lat_t * np.sin(lon_t), np.sin(lat_t)],
+        )
+
+        k = min(8, src_xyz.shape[0])
+        tree = cKDTree(src_xyz)
+        dist, idx = tree.query(tgt_xyz, k=k)
+        if k == 1:
+            field_ll = val[idx].reshape(lon2d.shape)
+        else:
+            dist = np.maximum(dist, 1.0e-12)
+            w = 1.0 / dist
+            w /= np.sum(w, axis=1, keepdims=True)
+            field_ll = np.sum(val[idx] * w, axis=1).reshape(lon2d.shape)
     except Exception:
         lon_edges = np.linspace(-180.0, 180.0, n_lon + 1)
         lat_edges = np.linspace(-90.0, 90.0, n_lat + 1)
@@ -295,18 +310,27 @@ def _save_case_snapshots(
                 ax.set_yticks([])
             else:
                 if use_projected_cube and panel.ndim == 3 and panel.shape[0] == 6:
-                    lon2d, lat2d, field_ll = _regrid_faces_to_latlon(
-                        panel, cube_lon_deg, cube_lat_deg,
+                    lon_pts = np.asarray(cube_lon_deg, dtype=np.float64).reshape(-1)
+                    lat_pts = np.asarray(cube_lat_deg, dtype=np.float64).reshape(-1)
+                    val_pts = np.asarray(panel, dtype=np.float64).reshape(-1)
+                    valid = (
+                        np.isfinite(lon_pts)
+                        & np.isfinite(lat_pts)
+                        & np.isfinite(val_pts)
                     )
-                    im = ax.pcolormesh(
-                        lon2d,
-                        lat2d,
-                        field_ll,
+                    n_face = int(panel.shape[1])
+                    marker_size = max(0.8, 2200.0 / float(n_face * n_face))
+                    im = ax.scatter(
+                        lon_pts[valid],
+                        lat_pts[valid],
+                        c=val_pts[valid],
                         cmap=cmap,
                         vmin=vmin,
                         vmax=vmax,
+                        s=marker_size,
+                        linewidths=0.0,
                         transform=ccrs.PlateCarree(),
-                        shading="auto",
+                        rasterized=True,
                     )
                     ax.set_global()
                     ax.coastlines(linewidth=0.35, color="0.35")
@@ -366,7 +390,9 @@ def run_sw_fv_tests(output_dir):
     N = 16
     DT = 600.0
     HYPERDIFF_SW = 5e16 * (48 / N) ** 4
-    EDGE_BLEND_SW = 0.25 if N >= 24 else 0.0
+    # Keep cube-edge continuity control active even at coarse C16.
+    # Disabling it reintroduces visible face-edge artifacts in W2/W5 snapshots.
+    EDGE_BLEND_SW = 0.25
 
     # --- Test 2: Steady geostrophic flow (5 days) ---
     test_dir = output_dir / "01_sw_fv_williamson2"

@@ -449,11 +449,14 @@ class SpectralPrimitiveEquationModel:
             return jax.lax.fori_loop(0, n_substeps, si_substep, state)
         return ssp_rk3_step(state, tendency_fn, dt)
 
-    @partial(jax.jit, static_argnums=(0, 2))
     def step(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
         """Advance one time step using SSP-RK3 (explicit or semi-implicit)."""
         self._ensure_si_data(dt)
+        return self._step_jit(state, dt)
 
+    @partial(jax.jit, static_argnums=(0, 2))
+    def _step_jit(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
+        """JIT-compiled inner step (SI matrices already precomputed)."""
         def tendency_fn(s):
             return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
 
@@ -464,7 +467,6 @@ class SpectralPrimitiveEquationModel:
 
         return self._do_step(state, dt, tendency_fn)
 
-    @partial(jax.jit, static_argnums=(0, 2, 3))
     def step_with_physics(
         self,
         state: SpectralHydrostaticState,
@@ -473,7 +475,16 @@ class SpectralPrimitiveEquationModel:
     ) -> SpectralHydrostaticState:
         """Advance one time step with physics forcing."""
         self._ensure_si_data(dt)
+        return self._step_with_physics_jit(state, dt, physics_fn)
 
+    @partial(jax.jit, static_argnums=(0, 2, 3))
+    def _step_with_physics_jit(
+        self,
+        state: SpectralHydrostaticState,
+        dt: float,
+        physics_fn=None,
+    ) -> SpectralHydrostaticState:
+        """JIT-compiled inner step with physics (SI matrices already precomputed)."""
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:

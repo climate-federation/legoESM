@@ -166,28 +166,18 @@ def curl_z(u_field: Field, v_field: Field, grid: CubedSphereGrid) -> Field:
 
 
 def laplacian(field: Field, grid: CubedSphereGrid) -> Field:
-    """Compute the Laplacian of a scalar field.
+    """Compute the Laplacian as div(grad(f)).
 
-    laplacian(f) = d^2f/dx^2 + d^2f/dy^2
-
-    Uses 2nd-order centered differences with halo exchange.
+    Composing the divergence and gradient operators guarantees metric
+    consistency: the Laplacian automatically inherits the covariant
+    metric factors (h_y/h_x, h_x/h_y) and the adjoint compatibility
+    of the constituent operators, giving a self-adjoint, negative-
+    semi-definite diffusion operator on the cubed sphere.
     """
-    data = field.data
-    padded = pad_halo(data)
-
-    # d^2f/dx^2: (f[i+1] - 2*f[i] + f[i-1]) / (dx/2)^2
-    d2f_dx2 = (
-        padded[:, 2:, 1:-1] - 2.0 * data + padded[:, :-2, 1:-1]
-    ) / (grid.dx**2 / 4.0)  # dx is the distance over 2 cells
-
-    # d^2f/dy^2
-    d2f_dy2 = (
-        padded[:, 1:-1, 2:] - 2.0 * data + padded[:, 1:-1, :-2]
-    ) / (grid.dy**2 / 4.0)
-
-    lap_data = d2f_dx2 + d2f_dy2
-
-    return field.replace(data=lap_data, name=f"laplacian_{field.name}")
+    gx = gradient_x(field, grid)
+    gy = gradient_y(field, grid)
+    lap = divergence(gx, gy, grid)
+    return field.replace(data=lap.data, name=f"laplacian_{field.name}")
 
 
 # ==============================================================================

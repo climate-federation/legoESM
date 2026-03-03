@@ -63,6 +63,10 @@ from legoesm.grids.vertical import (
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
+from legoesm.atmosphere.dynamics.edge_blending import (
+    blend_scalar_cube_edges,
+    blend_vector_cube_edges,
+)
 from legoesm import constants
 
 
@@ -74,6 +78,43 @@ class PrimitiveEquationConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
+    edge_blend_uv: float = 0.0
+    edge_blend_T: float = 0.0
+    edge_blend_p_s: float = 0.0
+    edge_blend_width: int = 1
+
+
+def _apply_hydro_edge_blend(
+    state: HydrostaticState,
+    grid: CubedSphereGrid,
+    config: PrimitiveEquationConfig,
+) -> HydrostaticState:
+    """Apply variable-specific cubed-sphere edge blending."""
+    u_data = state.u.data
+    v_data = state.v.data
+    T_data = state.T.data
+    p_s_data = state.p_s.data
+
+    if config.edge_blend_uv > 0.0:
+        u_data, v_data = blend_vector_cube_edges(
+            u_data, v_data, grid.cos_angle, grid.sin_angle,
+            config.edge_blend_uv, width=config.edge_blend_width,
+        )
+    if config.edge_blend_T > 0.0:
+        T_data = blend_scalar_cube_edges(
+            T_data, config.edge_blend_T, width=config.edge_blend_width
+        )
+    if config.edge_blend_p_s > 0.0:
+        p_s_data = blend_scalar_cube_edges(
+            p_s_data, config.edge_blend_p_s, width=config.edge_blend_width
+        )
+
+    return state._replace(
+        u=state.u.replace(data=u_data),
+        v=state.v.replace(data=v_data),
+        T=state.T.replace(data=T_data),
+        p_s=state.p_s.replace(data=p_s_data),
+    )
 
 
 # ==============================================================================
@@ -166,26 +207,33 @@ def hydrostatic_tendencies(
     dv_dt_data = -abs_vor * u - dB_dy - pg_corr_y
 
     # --- 5. Surface pressure tendency and sigma-dot ---
-    # For consistency, dp_s/dt and σ̇ must be derived from the SAME
-    # divergence. We use div(v) for both, which ensures the discrete
-    # continuity equation is satisfied exactly. This avoids the 1/p_s
-    # division that can amplify errors.
+    # Flux-form surface pressure tendency for exact mass conservation.
     #
-    # Continuity in sigma: ∂(ln p_s)/∂t + div(v) + ∂σ̇/∂σ = 0
-    # Integrating: ∂(ln p_s)/∂t = -Σ div(v_k) Δσ_k
-    # So: dp_s/dt = -p_s Σ div(v_k) Δσ_k / (1 - σ_top)
+    # The sigma-coordinate continuity equation is:
+    #   ∂p_s/∂t + ∫₀¹ div(p_s · v) dσ = 0
+    #
+    # Flux form:  dp_s/dt = -Σ div(p_s · v_k) Δσ_k / σ_range
+    #
+    # This is exactly conservative because ∫ div(p_s·v) dA = 0 on a
+    # closed surface when the divergence operator is telescoping.
+    #
+    # Sigma-dot uses div(v) (advective form) for internal consistency
+    # with the vertical advection terms.
     div_v = _divergence_3d(u, v, grid)  # (6,n,n,nlev)
 
     sigma_top = sigma_coord.sigma_half[0]
     sigma_range = 1.0 - sigma_top  # total sigma range
 
-    # Surface pressure tendency
-    D_vel_total = jnp.sum(
-        div_v * dsigma[None, None, None, :], axis=-1
-    )  # (6,n,n)
-    dp_s_dt_data = -p_s * D_vel_total / sigma_range  # (6,n,n)
+    # Flux-form divergence: div(p_s * v) at each level
+    div_ps_v = _divergence_3d(
+        p_s[..., None] * u, p_s[..., None] * v, grid,
+    )  # (6,n,n,nlev)
 
-    # Sigma-dot (from the same div_v, consistent with dp_s/dt)
+    dp_s_dt_data = -jnp.sum(
+        div_ps_v * dsigma[None, None, None, :], axis=-1,
+    ) / sigma_range  # (6,n,n)
+
+    # Sigma-dot (from div_v, consistent with vertical advection)
     sigma_dot = compute_sigma_dot(div_v, sigma_coord)  # (6,n,n,nlev+1)
 
     # --- 7. Vertical advection of T ---
@@ -292,6 +340,15 @@ class PrimitiveEquationModel:
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or PrimitiveEquationConfig()
+        for name in ("edge_blend_uv", "edge_blend_T", "edge_blend_p_s"):
+            value = float(getattr(self.config, name))
+            if not (0.0 <= value <= 1.0):
+                raise ValueError(f"{name} must be in [0, 1], got {value!r}")
+        if int(self.config.edge_blend_width) < 1:
+            raise ValueError(
+                "edge_blend_width must be >= 1, "
+                f"got {self.config.edge_blend_width!r}"
+            )
 
     def tendencies(
         self,
@@ -344,6 +401,13 @@ class PrimitiveEquationModel:
             state_new = ssp_rk3_step(state, tendency_fn, dt)
         else:
             raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")
+
+        if (
+            self.config.edge_blend_uv > 0.0
+            or self.config.edge_blend_T > 0.0
+            or self.config.edge_blend_p_s > 0.0
+        ):
+            state_new = _apply_hydro_edge_blend(state_new, self.grid, self.config)
 
         # Apply conservation fixers
         if self.config.use_conservation_fixer and self.config.fix_mass:
@@ -399,6 +463,13 @@ class PrimitiveEquationModel:
             state_new = ssp_rk3_step(state, tendency_fn, dt)
         else:
             raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")
+
+        if (
+            self.config.edge_blend_uv > 0.0
+            or self.config.edge_blend_T > 0.0
+            or self.config.edge_blend_p_s > 0.0
+        ):
+            state_new = _apply_hydro_edge_blend(state_new, self.grid, self.config)
 
         if self.config.use_conservation_fixer and self.config.fix_mass:
             from legoesm.core.conservation import fix_mass_hydrostatic

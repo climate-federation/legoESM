@@ -1,7 +1,0 @@
-max_w: 0.5962
-max_u: 20.0
-hours: 0.1
-dt: 1.0
-si_acoustic: True
-stable: True
-wall_time: 8.2

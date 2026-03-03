@@ -1,4 +1,5 @@
 h_range: [4021, 5928]
 mass_drift: 1.79e-16
 stable: True
-wall_time: 6.3
+wall_time: 33.4
+solver: ssp_rk3

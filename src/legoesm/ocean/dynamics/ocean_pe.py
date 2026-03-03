@@ -109,9 +109,18 @@ def ocean_baroclinic_tendencies(
     dp_dx = gradient_x_3d(p_prime, grid)
     dp_dy = gradient_y_3d(p_prime, grid)
 
-    # --- 4. Diagnose vertical velocity ---
+    # --- 4. Diagnose vertical velocity from flux divergence ---
+    # The layer continuity equation is  dh_k/dt + div(v_k * h_k) + w_{k-1/2} - w_{k+1/2} = 0.
+    # Vertical velocity must be diagnosed from div(v*h), NOT from div(v)*h,
+    # because h_k varies horizontally and div(v*h) ≠ h*div(v).
+    # This also makes w consistent with the free-surface tendency (step 13).
+    flux_div_k = divergence_3d(
+        u * h_k * mask_3d, v * h_k * mask_3d, grid,
+    )  # (6, n, n, nlev)
+    w = _diagnose_w_from_flux_div(flux_div_k)  # (6, n, n, nlev+1)
+
+    # Velocity divergence (needed for skew-symmetric momentum, step 7).
     div_v = divergence_3d(u * mask_3d, v * mask_3d, grid)  # (6, n, n, nlev)
-    w = _diagnose_w(div_v, h_k)  # (6, n, n, nlev+1)
 
     # --- 5. Vorticity ---
     zeta = vorticity_3d(u * mask_3d, v * mask_3d, grid)
@@ -121,7 +130,7 @@ def ocean_baroclinic_tendencies(
     dK_dx = gradient_x_3d(K, grid)
     dK_dy = gradient_y_3d(K, grid)
 
-    # --- 7. Vector-invariant momentum ---
+    # --- 7. Vector-invariant momentum (skew-symmetric / energy-preserving) ---
     # Planetary Coriolis is split: barotropic mode (depth-mean) is integrated
     # in substeps, while baroclinic shear (deviation from depth-mean) is
     # handled here to preserve full (zeta + f) dynamics without double counting.
@@ -132,8 +141,15 @@ def ocean_baroclinic_tendencies(
     v_prime = (v - V_bar[..., jnp.newaxis]) * mask_3d
     f_3d = grid.f[..., jnp.newaxis]
 
-    du_dt = zeta * v + f_3d * v_prime - dK_dx - dp_dx / rho_0
-    dv_dt = -zeta * u - f_3d * u_prime - dK_dy - dp_dy / rho_0
+    # Standard vector-invariant form is the advective form of momentum:
+    #   du/dt = (ζ+f)v − ∂K/∂x
+    # This conserves energy only when div(u)=0.  For divergent
+    # (free-surface) flow, the skew-symmetric correction −½ u div(u)
+    # restores the discrete energy identity  dK/dt = −div(K u):
+    du_dt = (zeta * v + f_3d * v_prime - dK_dx
+             - 0.5 * u * div_v - dp_dx / rho_0)
+    dv_dt = (-zeta * u - f_3d * u_prime - dK_dy
+             - 0.5 * v * div_v - dp_dy / rho_0)
 
     # --- 8. Vertical advection of u, v ---
     du_dt = du_dt + _vertical_advection_ocean(u, w, z_coord, J)
@@ -144,9 +160,15 @@ def ocean_baroclinic_tendencies(
     tracers = jnp.stack([T, S], axis=0)  # (2, 6, n, n, nlev)
 
     def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
+        # Skew-symmetric horizontal advection: average of advective and
+        # flux forms.  This conserves the tracer integral (from the flux
+        # part) and the tracer variance (from the advective part), and
+        # is exactly energy-neutral for tracer^2.
         dtr_dx = gradient_x_3d(tr, grid)
         dtr_dy = gradient_y_3d(tr, grid)
-        dtr_dt = -(u * dtr_dx + v * dtr_dy)
+        adv_form = -(u * dtr_dx + v * dtr_dy)
+        flux_form = -divergence_3d(u * tr * mask_3d, v * tr * mask_3d, grid)
+        dtr_dt = 0.5 * (adv_form + flux_form)
         dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
 
         if config.K_h > 0:
@@ -197,8 +219,9 @@ def ocean_baroclinic_tendencies(
 
     # --- 13. Free-surface tendency ---
     # deta/dt = -sum_k div(h_k * v_k)
-    flux_div = divergence_3d(u * h_k * mask_3d, v * h_k * mask_3d, grid)
-    deta_dt = -jnp.sum(flux_div, axis=-1) * mask
+    # Reuse flux_div_k from step 4 to guarantee exact consistency
+    # between the vertical velocity diagnosis and the surface tendency.
+    deta_dt = -jnp.sum(flux_div_k, axis=-1) * mask
 
     # --- Build tendency pytree ---
     dims_3d = ("face", "x", "y", "level")
@@ -221,39 +244,40 @@ def ocean_baroclinic_tendencies(
     )
 
 
-def _diagnose_w(
-    div_v: jnp.ndarray,
-    h_k: jnp.ndarray,
+def _diagnose_w_from_flux_div(
+    flux_div_k: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Diagnose vertical velocity from continuity.
+    """Diagnose vertical velocity from the flux divergence div(v*h_k).
 
-    w(z) = -integral_{-H}^{z} div(v) dz'
+    From the layer continuity equation:
+        dh_k/dt + div(v_k * h_k) + w_{k-1/2} - w_{k+1/2} = 0
 
-    Integrated bottom-up. w=0 at ocean floor.
+    Assuming w = 0 at the ocean floor and integrating bottom-up:
+        w_{k-1/2} = -sum_{k'=k}^{nlev-1} div(v_k' * h_k')
+
+    Using div(v*h) directly (rather than div(v)*h) ensures exact
+    consistency with the free-surface tendency  dη/dt = -Σ div(v*h_k)
+    and avoids the spurious source from the product rule on variable h.
 
     Parameters
     ----------
-    div_v : array
-        Horizontal divergence, shape (..., nlev).
-    h_k : array
-        Layer thickness [m], shape (..., nlev).
+    flux_div_k : array
+        Horizontal flux divergence div(v_k * h_k), shape (..., nlev).
 
     Returns
     -------
     array : Vertical velocity at interfaces [m/s], shape (..., nlev+1).
         w[..., 0] is at the surface, w[..., -1] = 0 at the bottom.
     """
-    # Mass flux per layer: div(v) * h_k
-    div_h = div_v * h_k  # (..., nlev)
-
     # Cumulative sum from bottom up: w at each interface
-    # w[k-1/2] = -sum_{k'=k}^{nlev-1} div_h[k']
-    div_h_rev = div_h[..., ::-1]
-    cumsum_rev = jnp.cumsum(div_h_rev, axis=-1)
+    fd_rev = flux_div_k[..., ::-1]
+    cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]  # (..., nlev)
 
     # w at interfaces: w[0]=surface, w[nlev]=0 (bottom)
-    zeros_bottom = jnp.zeros((*div_v.shape[:-1], 1), dtype=div_v.dtype)
+    zeros_bottom = jnp.zeros(
+        (*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype,
+    )
     w = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
     return w
 

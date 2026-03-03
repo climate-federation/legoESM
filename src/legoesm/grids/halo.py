@@ -421,3 +421,88 @@ def _face_gnomonic_to_lonlat(
     lat = jnp.arcsin(jnp.clip(z, -1.0, 1.0))
 
     return lon, lat
+
+
+# ==============================================================================
+# Padded metric computation (for divergence / curl operators)
+# ==============================================================================
+
+def compute_padded_half_metrics(
+    n: int, radius: float,
+) -> tuple[jax.Array, jax.Array]:
+    """Compute half-edge-length metrics on the extended (n+2) × (n+2) grid.
+
+    Each face's gnomonic coordinate range is extended by one cell on each
+    side.  Great-circle distances between cell centres two positions apart
+    are computed (the 2-cell span, matching ``_compute_grid_spacing`` in
+    ``cubed_sphere.py``), and halved to give the single-cell edge lengths
+    ``hx = dx/2`` and ``hy = dy/2``.
+
+    A further-extended (n+4) grid is used internally so that centred
+    differences are available at every point of the (n+2) output grid.
+
+    Parameters
+    ----------
+    n : int
+        Number of interior cells per face edge.
+    radius : float
+        Sphere radius [m].
+
+    Returns
+    -------
+    hx_ext : jax.Array, shape (6, n+2, n+2)
+        Half dx on the extended grid (single-cell x-edge length).
+    hy_ext : jax.Array, shape (6, n+2, n+2)
+        Half dy on the extended grid (single-cell y-edge length).
+    """
+    dalpha = jnp.pi / (2 * n)
+
+    # Build an (n+4) gnomonic grid: 2 cells beyond the interior on each
+    # side.  Centred differences of this grid yield (n+2) dx/dy values.
+    alpha_big = jnp.linspace(
+        -jnp.pi / 4 - 2 * dalpha,
+        jnp.pi / 4 + 2 * dalpha,
+        n + 4,
+        endpoint=False,
+    )
+    alpha_big = alpha_big + dalpha / 2.0
+    alpha_bx, alpha_by = jnp.meshgrid(alpha_big, alpha_big, indexing='ij')
+
+    all_hx: list[jax.Array] = []
+    all_hy: list[jax.Array] = []
+
+    for face in range(6):
+        lon, lat = _face_gnomonic_to_lonlat(face, alpha_bx, alpha_by)
+        cos_lat = jnp.cos(lat)
+        x = cos_lat * jnp.cos(lon)
+        y = cos_lat * jnp.sin(lon)
+        z = jnp.sin(lat)
+
+        # 2-cell chord in x: positions [i+1,j] – [i-1,j] on (n+4) grid
+        # → (n+2, n+2) result after slicing off the one-cell border
+        dx_chord = jnp.sqrt(
+            (x[2:, 1:-1] - x[:-2, 1:-1]) ** 2
+            + (y[2:, 1:-1] - y[:-2, 1:-1]) ** 2
+            + (z[2:, 1:-1] - z[:-2, 1:-1]) ** 2
+        )
+        dx_face = radius * 2.0 * jnp.arcsin(
+            jnp.clip(dx_chord / 2.0, 0.0, 1.0)
+        )
+
+        # 2-cell chord in y: positions [i,j+1] – [i,j-1]
+        dy_chord = jnp.sqrt(
+            (x[1:-1, 2:] - x[1:-1, :-2]) ** 2
+            + (y[1:-1, 2:] - y[1:-1, :-2]) ** 2
+            + (z[1:-1, 2:] - z[1:-1, :-2]) ** 2
+        )
+        dy_face = radius * 2.0 * jnp.arcsin(
+            jnp.clip(dy_chord / 2.0, 0.0, 1.0)
+        )
+
+        all_hx.append(dx_face * 0.5)
+        all_hy.append(dy_face * 0.5)
+
+    hx_ext = jnp.stack(all_hx, axis=0)  # (6, n+2, n+2)
+    hy_ext = jnp.stack(all_hy, axis=0)
+
+    return hx_ext, hy_ext

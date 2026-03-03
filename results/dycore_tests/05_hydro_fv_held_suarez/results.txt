@@ -1,5 +1,0 @@
-mass_drift: 6.02e-11
-max_wind: 12.9
-mean_T: 270.0
-stable: True
-wall_time: 8.2

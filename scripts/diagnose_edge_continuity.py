@@ -164,6 +164,65 @@ def _run_nh_tc2a(resolution: int, n_levels: int, solver: str) -> tuple[dict[int,
             sponge_coeff=1.0 / (0.1 * 86400.0),
             small_earth_factor=20.0,
             outer_integrator=solver,
+            edge_blend_uv=0.22 if resolution >= 24 else 0.0,
+            edge_blend_w=0.22 if resolution >= 24 else 0.0,
+            edge_blend_theta=0.12 if resolution >= 24 else 0.0,
+            edge_blend_rho=0.26 if resolution >= 24 else 0.0,
+            edge_blend_width=4 if resolution >= 24 else 1,
+        ),
+    )
+
+    captured: dict[int, dict[str, np.ndarray]] = {}
+
+    def _capture(step: int):
+        u = np.asarray(state.u.data)[..., -1]
+        v = np.asarray(state.v.data)[..., -1]
+        w = np.asarray(state.w.data)
+        captured[step] = {
+            "wind_low": np.sqrt(u * u + v * v),
+            "rho_prime": np.asarray(state.rho_prime.data)[..., -1],
+            "w_mid": w[..., w.shape[-1] // 2],
+        }
+
+    _capture(0)
+    for i in range(n_steps):
+        state = model.step(state, dt)
+        step = i + 1
+        if step in targets:
+            _capture(step)
+
+    jax.block_until_ready(state.u.data)
+    return captured, dt
+
+
+def _run_nh_tc1(resolution: int, n_levels: int, solver: str) -> tuple[dict[int, dict[str, np.ndarray]], float]:
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc1_init
+    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig, CompressibleEulerModel
+
+    dt = 1.0
+    n_steps = int(1.0 * 3600.0 / dt)  # 1 hour
+    targets = {0, n_steps // 2, n_steps}
+
+    grid = create_cubed_sphere(resolution)
+    state, height_coord, terrain_metric = dcmip25_tc1_init(
+        grid,
+        n_levels=n_levels,
+    )
+    model = CompressibleEulerModel(
+        grid,
+        height_coord,
+        terrain_metric,
+        CompressibleEulerConfig(
+            n_acoustic_substeps=8,
+            sponge_width=10000.0,
+            sponge_coeff=0.06,
+            outer_integrator=solver,
+            edge_blend_uv=0.22 if resolution >= 24 else 0.0,
+            edge_blend_w=0.14 if resolution >= 24 else 0.0,
+            edge_blend_theta=0.12 if resolution >= 24 else 0.0,
+            edge_blend_rho=0.18 if resolution >= 24 else 0.0,
+            edge_blend_width=3 if resolution >= 24 else 1,
         ),
     )
 
@@ -241,8 +300,8 @@ def main():
     parser.add_argument(
         "--cases",
         nargs="+",
-        default=["sw2", "nh_tc2a"],
-        choices=["sw2", "nh_tc2a"],
+        default=["sw2", "nh_tc1", "nh_tc2a"],
+        choices=["sw2", "nh_tc1", "nh_tc2a"],
         help="Cases to run",
     )
     args = parser.parse_args()
@@ -261,6 +320,11 @@ def main():
         snaps, _ = _run_nh_tc2a(args.resolution, args.nh_levels, args.solver)
         case_payloads.append(_compute_case("NH TC2a", snaps))
 
+    if "nh_tc1" in args.cases:
+        print("Running NH TC1 continuity diagnostics...")
+        snaps, _ = _run_nh_tc1(args.resolution, args.nh_levels, args.solver)
+        case_payloads.append(_compute_case("NH TC1", snaps))
+
     payload = {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "resolution": args.resolution,
@@ -274,4 +338,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

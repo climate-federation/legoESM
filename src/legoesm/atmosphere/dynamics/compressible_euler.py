@@ -50,6 +50,10 @@ from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
 )
+from legoesm.atmosphere.dynamics.edge_blending import (
+    blend_scalar_cube_edges,
+    blend_vector_cube_edges,
+)
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm import constants
 
@@ -58,6 +62,8 @@ class CompressibleEulerConfig(NamedTuple):
     """Configuration for the non-hydrostatic compressible Euler model."""
     g: float = constants.g
     hyperdiff_coeff: float = 0.0
+    hyperdiff_rho_coeff: float = 0.0
+    hyperdiff_w_coeff: float = 0.0
     sponge_width: float = 10000.0   # Sponge layer width from model top [m]
     sponge_coeff: float = 0.05      # Maximum Rayleigh damping rate [1/s]
     n_acoustic_substeps: int = 6
@@ -66,6 +72,57 @@ class CompressibleEulerConfig(NamedTuple):
     use_coriolis: bool = True       # Set False for f=0 tests (e.g. DCMIP TC3)
     semi_implicit_acoustic: bool = False  # Use tridiagonal solve for acoustic substeps
     outer_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
+    edge_blend_uv: float = 0.0
+    edge_blend_w: float = 0.0
+    edge_blend_theta: float = 0.0
+    edge_blend_rho: float = 0.0
+    edge_blend_tracers: float = 0.0
+    edge_blend_width: int = 1
+
+
+def _apply_nh_edge_blend(
+    state: NonHydrostaticState,
+    grid: CubedSphereGrid,
+    config: CompressibleEulerConfig,
+) -> NonHydrostaticState:
+    """Apply variable-specific cubed-sphere edge blending."""
+    u_data = state.u.data
+    v_data = state.v.data
+    w_data = state.w.data
+    theta_data = state.theta_prime.data
+    rho_data = state.rho_prime.data
+    tracers_data = state.tracers.data
+
+    if config.edge_blend_uv > 0.0:
+        u_data, v_data = blend_vector_cube_edges(
+            u_data, v_data, grid.cos_angle, grid.sin_angle,
+            config.edge_blend_uv, width=config.edge_blend_width,
+        )
+    if config.edge_blend_w > 0.0:
+        w_data = blend_scalar_cube_edges(
+            w_data, config.edge_blend_w, width=config.edge_blend_width
+        )
+    if config.edge_blend_theta > 0.0:
+        theta_data = blend_scalar_cube_edges(
+            theta_data, config.edge_blend_theta, width=config.edge_blend_width
+        )
+    if config.edge_blend_rho > 0.0:
+        rho_data = blend_scalar_cube_edges(
+            rho_data, config.edge_blend_rho, width=config.edge_blend_width
+        )
+    if config.edge_blend_tracers > 0.0 and tracers_data.ndim == 5 and tracers_data.shape[-1] > 0:
+        tracers_data = blend_scalar_cube_edges(
+            tracers_data, config.edge_blend_tracers, width=config.edge_blend_width
+        )
+
+    return state._replace(
+        u=state.u.replace(data=u_data),
+        v=state.v.replace(data=v_data),
+        w=state.w.replace(data=w_data),
+        theta_prime=state.theta_prime.replace(data=theta_data),
+        rho_prime=state.rho_prime.replace(data=rho_data),
+        tracers=state.tracers.replace(data=tracers_data),
+    )
 
 
 # ==============================================================================
@@ -260,6 +317,10 @@ def compressible_euler_slow_tendencies(
         dtheta_p_dt = dtheta_p_dt + hyperdiffusion_3d(
             theta_p, grid, config.hyperdiff_coeff
         )
+    if config.hyperdiff_rho_coeff > 0:
+        drho_p_dt = drho_p_dt + hyperdiffusion_3d(
+            rho_p, grid, config.hyperdiff_rho_coeff
+        )
 
     # --- 10. Sponge layer (Rayleigh damping toward reference state) ---
     sponge = _sponge_profile(
@@ -290,6 +351,10 @@ def compressible_euler_slow_tendencies(
     )
 
     dw_dt = horiz_adv_w_half - sponge_half * w
+    if config.hyperdiff_w_coeff > 0:
+        dw_dt = dw_dt + hyperdiffusion_3d(
+            w, grid, config.hyperdiff_w_coeff
+        )
 
     # --- 12. Add physics tendencies if provided ---
     if physics_tendency is not None:
@@ -673,6 +738,25 @@ class CompressibleEulerModel:
         self.height_coord = height_coord
         self.terrain_metric = terrain_metric
         self.config = config or CompressibleEulerConfig()
+        for name in ("hyperdiff_coeff", "hyperdiff_rho_coeff", "hyperdiff_w_coeff"):
+            value = float(getattr(self.config, name))
+            if value < 0.0:
+                raise ValueError(f"{name} must be >= 0, got {value!r}")
+        for name in (
+            "edge_blend_uv",
+            "edge_blend_w",
+            "edge_blend_theta",
+            "edge_blend_rho",
+            "edge_blend_tracers",
+        ):
+            value = float(getattr(self.config, name))
+            if not (0.0 <= value <= 1.0):
+                raise ValueError(f"{name} must be in [0, 1], got {value!r}")
+        if int(self.config.edge_blend_width) < 1:
+            raise ValueError(
+                "edge_blend_width must be >= 1, "
+                f"got {self.config.edge_blend_width!r}"
+            )
 
     def tendencies(
         self,
@@ -735,9 +819,18 @@ class CompressibleEulerModel:
                 self.height_coord, self.terrain_metric, self.config,
             )
 
-        return split_explicit_step(
+        state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
+        if (
+            self.config.edge_blend_uv > 0.0
+            or self.config.edge_blend_w > 0.0
+            or self.config.edge_blend_theta > 0.0
+            or self.config.edge_blend_rho > 0.0
+            or self.config.edge_blend_tracers > 0.0
+        ):
+            state_new = _apply_nh_edge_blend(state_new, self.grid, self.config)
+        return state_new
 
     @partial(jax.jit, static_argnums=(0, 3))
     def step_with_physics(
@@ -791,9 +884,18 @@ class CompressibleEulerModel:
                 self.height_coord, self.terrain_metric, self.config,
             )
 
-        return split_explicit_step(
+        state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
+        if (
+            self.config.edge_blend_uv > 0.0
+            or self.config.edge_blend_w > 0.0
+            or self.config.edge_blend_theta > 0.0
+            or self.config.edge_blend_rho > 0.0
+            or self.config.edge_blend_tracers > 0.0
+        ):
+            state_new = _apply_nh_edge_blend(state_new, self.grid, self.config)
+        return state_new
 
     def integrate(
         self,

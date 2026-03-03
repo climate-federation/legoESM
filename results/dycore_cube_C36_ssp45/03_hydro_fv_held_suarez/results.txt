@@ -1,8 +1,0 @@
-solver: ssp45
-resolution: C36
-levels: 10
-dt: 450.0
-n_steps: 5760
-mass_drift: 2.16557045e-04
-stable: True
-wall_time_s: 714.19

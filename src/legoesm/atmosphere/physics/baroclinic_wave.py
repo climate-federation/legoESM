@@ -33,7 +33,8 @@ References
 
 from __future__ import annotations
 
-import numpy as np
+import math
+
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -57,8 +58,8 @@ LAPSE = 0.005         # Background lapse rate [K/m]
 # Perturbation parameters (exponential type, as in DCMIP 2016)
 PERT_UP = 1.0         # Perturbation amplitude [m/s]
 PERT_EXPR = 0.1       # Perturbation radius [Earth radii]
-PERT_LON = np.pi / 9.0       # Perturbation center longitude [rad] (~20 deg)
-PERT_LAT = 2.0 * np.pi / 9.0  # Perturbation center latitude [rad] (~40 deg N)
+PERT_LON = math.pi / 9.0       # Perturbation center longitude [rad] (~20 deg)
+PERT_LAT = 2.0 * math.pi / 9.0  # Perturbation center latitude [rad] (~40 deg N)
 PERT_Z = 15000.0      # Perturbation height cap [m]
 
 # Reference surface pressure
@@ -85,13 +86,13 @@ def _scale_height() -> float:
 
 
 # ==============================================================================
-# Analytic solution functions (numpy, vectorized)
+# Analytic solution functions (JAX-native, vectorized)
 # ==============================================================================
 
 def evaluate_pressure_temperature(
-    z: np.ndarray,
-    lat: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+    z: jnp.ndarray,
+    lat: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute pressure and temperature at given height and latitude.
 
     These are the analytic steady-state fields that satisfy both
@@ -99,16 +100,16 @@ def evaluate_pressure_temperature(
 
     Parameters
     ----------
-    z : np.ndarray
+    z : jnp.ndarray
         Height [m]. Any shape.
-    lat : np.ndarray
+    lat : jnp.ndarray
         Latitude [rad]. Must broadcast with z.
 
     Returns
     -------
-    p : np.ndarray
+    p : jnp.ndarray
         Pressure [Pa].
-    T : np.ndarray
+    T : jnp.ndarray
         Temperature [K].
     """
     g = float(constants.g)
@@ -118,12 +119,12 @@ def evaluate_pressure_temperature(
     scaledZ = z / (B_PARAM * H)
 
     # Temperature factors (Eq. in DCMIP2016 test case document)
-    tau1 = (_constA * (LAPSE / _T0) * np.exp(LAPSE * z / _T0)
-            + _constB * (1.0 - 2.0 * scaledZ**2) * np.exp(-scaledZ**2))
-    tau2 = _constC * (1.0 - 2.0 * scaledZ**2) * np.exp(-scaledZ**2)
+    tau1 = (_constA * (LAPSE / _T0) * jnp.exp(LAPSE * z / _T0)
+            + _constB * (1.0 - 2.0 * scaledZ**2) * jnp.exp(-scaledZ**2))
+    tau2 = _constC * (1.0 - 2.0 * scaledZ**2) * jnp.exp(-scaledZ**2)
 
     # Latitude-dependent term
-    cos_lat = np.cos(lat)
+    cos_lat = jnp.cos(lat)
     inttermT = (cos_lat**K_PARAM
                 - (K_PARAM / (K_PARAM + 2.0)) * cos_lat**(K_PARAM + 2.0))
 
@@ -131,21 +132,21 @@ def evaluate_pressure_temperature(
     T = 1.0 / (tau1 - tau2 * inttermT)
 
     # Integrated hydrostatic terms for pressure
-    inttau1 = (_constA * (np.exp(LAPSE * z / _T0) - 1.0)
-               + _constB * z * np.exp(-scaledZ**2))
-    inttau2 = _constC * z * np.exp(-scaledZ**2)
+    inttau1 = (_constA * (jnp.exp(LAPSE * z / _T0) - 1.0)
+               + _constB * z * jnp.exp(-scaledZ**2))
+    inttau2 = _constC * z * jnp.exp(-scaledZ**2)
 
     # Pressure
-    p = P0 * np.exp(-(g / Rd) * (inttau1 - inttau2 * inttermT))
+    p = P0 * jnp.exp(-(g / Rd) * (inttau1 - inttau2 * inttermT))
 
     return p, T
 
 
 def find_z_for_pressure(
-    p_target: np.ndarray,
-    lat: np.ndarray,
+    p_target: jnp.ndarray,
+    lat: jnp.ndarray,
     n_iter: int = N_BISECT,
-) -> np.ndarray:
+) -> jnp.ndarray:
     """Find height z where pressure equals p_target via bisection.
 
     Since pressure decreases monotonically with height, bisection
@@ -154,37 +155,37 @@ def find_z_for_pressure(
 
     Parameters
     ----------
-    p_target : np.ndarray
+    p_target : jnp.ndarray
         Target pressure [Pa]. Any shape.
-    lat : np.ndarray
+    lat : jnp.ndarray
         Latitude [rad]. Must broadcast with p_target.
     n_iter : int
         Number of bisection iterations.
 
     Returns
     -------
-    z : np.ndarray
+    z : jnp.ndarray
         Height [m] where p(z, lat) = p_target.
     """
-    z_lo = np.zeros_like(p_target)
-    z_hi = np.full_like(p_target, Z_MAX)
+    z_lo = jnp.zeros_like(p_target)
+    z_hi = jnp.full_like(p_target, Z_MAX)
 
     for _ in range(n_iter):
         z_mid = 0.5 * (z_lo + z_hi)
         p_mid, _ = evaluate_pressure_temperature(z_mid, lat)
         # Pressure decreases with height: if p_mid < p_target, z is too high
         too_high = p_mid < p_target
-        z_hi = np.where(too_high, z_mid, z_hi)
-        z_lo = np.where(too_high, z_lo, z_mid)
+        z_hi = jnp.where(too_high, z_mid, z_hi)
+        z_lo = jnp.where(too_high, z_lo, z_mid)
 
     return 0.5 * (z_lo + z_hi)
 
 
 def compute_zonal_wind(
-    z: np.ndarray,
-    lat: np.ndarray,
-    T: np.ndarray,
-) -> np.ndarray:
+    z: jnp.ndarray,
+    lat: jnp.ndarray,
+    T: jnp.ndarray,
+) -> jnp.ndarray:
     """Compute zonal wind from gradient-wind balance.
 
     Solves the quadratic gradient-wind equation for the steady-state
@@ -196,16 +197,16 @@ def compute_zonal_wind(
 
     Parameters
     ----------
-    z : np.ndarray
+    z : jnp.ndarray
         Height [m].
-    lat : np.ndarray
+    lat : jnp.ndarray
         Latitude [rad].
-    T : np.ndarray
+    T : jnp.ndarray
         Temperature [K] (needed for the pressure gradient term).
 
     Returns
     -------
-    u : np.ndarray
+    u : jnp.ndarray
         Zonal wind [m/s].
     """
     a = float(constants.R_earth)
@@ -214,10 +215,10 @@ def compute_zonal_wind(
     H = _scale_height()
 
     scaledZ = z / (B_PARAM * H)
-    cos_lat = np.cos(lat)
+    cos_lat = jnp.cos(lat)
 
     # Integrated tau2 for wind
-    inttau2 = _constC * z * np.exp(-scaledZ**2)
+    inttau2 = _constC * z * jnp.exp(-scaledZ**2)
 
     # Latitude-dependent term for wind (different from temperature term!)
     inttermU = cos_lat**(K_PARAM - 1.0) - cos_lat**(K_PARAM + 1.0)
@@ -230,7 +231,7 @@ def compute_zonal_wind(
 
     # Quadratic formula: u = -b + sqrt(b^2 + c)
     # where b = omega*a*cos(lat), c = a*cos(lat)*bigU
-    u = -omegarcoslat + np.sqrt(np.maximum(
+    u = -omegarcoslat + jnp.sqrt(jnp.maximum(
         0.0, omegarcoslat**2 + rcoslat * bigU
     ))
 
@@ -238,10 +239,10 @@ def compute_zonal_wind(
 
 
 def exponential_perturbation(
-    lat: np.ndarray,
-    lon: np.ndarray,
-    z: np.ndarray,
-) -> np.ndarray:
+    lat: jnp.ndarray,
+    lon: jnp.ndarray,
+    z: jnp.ndarray,
+) -> jnp.ndarray:
     """Compute the exponential wind perturbation.
 
     A localized perturbation centered at (PERT_LON, PERT_LAT) in the
@@ -249,36 +250,36 @@ def exponential_perturbation(
 
     Parameters
     ----------
-    lat : np.ndarray
+    lat : jnp.ndarray
         Latitude [rad].
-    lon : np.ndarray
+    lon : jnp.ndarray
         Longitude [rad].
-    z : np.ndarray
+    z : jnp.ndarray
         Height [m].
 
     Returns
     -------
-    u_pert : np.ndarray
+    u_pert : jnp.ndarray
         Perturbation zonal wind [m/s].
     """
     # Great circle distance (in units of perturbation radius)
-    cos_angle = (np.sin(PERT_LAT) * np.sin(lat)
-                 + np.cos(PERT_LAT) * np.cos(lat) * np.cos(lon - PERT_LON))
-    cos_angle = np.clip(cos_angle, -1.0, 1.0)
-    r_gc = np.arccos(cos_angle) / PERT_EXPR
+    cos_angle = (jnp.sin(PERT_LAT) * jnp.sin(lat)
+                 + jnp.cos(PERT_LAT) * jnp.cos(lat) * jnp.cos(lon - PERT_LON))
+    cos_angle = jnp.clip(cos_angle, -1.0, 1.0)
+    r_gc = jnp.arccos(cos_angle) / PERT_EXPR
 
     # Vertical taper (cubic hermite: 1 at z=0, 0 at z=PERT_Z)
     zfrac = z / PERT_Z
-    taper = np.where(
+    taper = jnp.where(
         z < PERT_Z,
         1.0 - 3.0 * zfrac**2 + 2.0 * zfrac**3,
         0.0,
     )
 
     # Gaussian in great-circle distance, zero outside r_gc=1
-    u_pert = np.where(
+    u_pert = jnp.where(
         r_gc < 1.0,
-        PERT_UP * taper * np.exp(-r_gc**2),
+        PERT_UP * taper * jnp.exp(-r_gc**2),
         0.0,
     )
 
@@ -318,22 +319,22 @@ def baroclinic_wave_init(
     n = grid.n
     nlev = sigma_coord.n_levels
 
-    # Grid coordinates as numpy
-    lat = np.array(grid.lat)      # (6, n, n)
-    lon = np.array(grid.lon)      # (6, n, n)
-    sigma_full = np.array(sigma_coord.sigma_full)  # (nlev,)
+    # Grid coordinates (already JAX arrays)
+    lat = grid.lat                # (6, n, n)
+    lon = grid.lon                # (6, n, n)
+    sigma_full = sigma_coord.sigma_full  # (nlev,)
 
     # Surface pressure: constant everywhere (no topography)
-    p_s = np.full((6, n, n), P0)
+    p_s = jnp.full((6, n, n), P0)
 
     # Allocate 3D fields
-    u_3d = np.zeros((6, n, n, nlev))
-    T_3d = np.zeros((6, n, n, nlev))
+    u_3d = jnp.zeros((6, n, n, nlev))
+    T_3d = jnp.zeros((6, n, n, nlev))
 
     # Compute initial conditions level by level
     for k in range(nlev):
         # Target pressure at this sigma level
-        p_target = np.full((6, n, n), sigma_full[k] * P0)
+        p_target = jnp.full((6, n, n), float(sigma_full[k]) * P0)
 
         # Find height where p(z, lat) = p_target
         z_k = find_z_for_pressure(p_target, lat)
@@ -348,24 +349,23 @@ def baroclinic_wave_init(
         if perturbed:
             u_k = u_k + exponential_perturbation(lat, lon, z_k)
 
-        u_3d[:, :, :, k] = u_k
-        T_3d[:, :, :, k] = T_k
+        u_3d = u_3d.at[:, :, :, k].set(u_k)
+        T_3d = T_3d.at[:, :, :, k].set(T_k)
 
     # u_3d is the geographic EASTWARD wind; v_geo = 0 (no northward wind).
     # The model stores GRID-ALIGNED velocity components, so we must rotate
     # from geographic (east, north) to local cubed-sphere (x, y) coordinates.
     # This is essential: on faces where the grid x-axis is not aligned with
     # east, the geographic u_east projects onto both u_grid and v_grid.
-    u_east_jax = jnp.array(u_3d, dtype=jnp.float32)
-    v_north_jax = jnp.zeros((6, n, n, nlev), dtype=jnp.float32)
+    v_north = jnp.zeros((6, n, n, nlev))
 
     # Rotate at each level using the grid angle (angle between x-axis and east)
     # rotate_winds_geo_to_grid expects (6,n,n) arrays, so we loop over levels
-    u_grid = jnp.zeros_like(u_east_jax)
-    v_grid = jnp.zeros_like(u_east_jax)
+    u_grid = jnp.zeros_like(u_3d)
+    v_grid = jnp.zeros_like(u_3d)
     for k in range(nlev):
         u_k, v_k = rotate_winds_geo_to_grid(
-            u_east_jax[..., k], v_north_jax[..., k], grid.angle
+            u_3d[..., k], v_north[..., k], grid.angle
         )
         u_grid = u_grid.at[..., k].set(u_k)
         v_grid = v_grid.at[..., k].set(v_k)
@@ -377,10 +377,8 @@ def baroclinic_wave_init(
     return HydrostaticState(
         u=Field(data=u_grid, name="u", dims=dims_3d, units="m/s"),
         v=Field(data=v_grid, name="v", dims=dims_3d, units="m/s"),
-        T=Field(data=jnp.array(T_3d, dtype=jnp.float32),
-                name="T", dims=dims_3d, units="K"),
-        p_s=Field(data=jnp.array(p_s, dtype=jnp.float32),
-                  name="p_s", dims=dims_2d, units="Pa"),
-        phis=Field(data=jnp.zeros((6, n, n), dtype=jnp.float32),
+        T=Field(data=T_3d, name="T", dims=dims_3d, units="K"),
+        p_s=Field(data=p_s, name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(data=jnp.zeros((6, n, n)),
                    name="phis", dims=dims_2d, units="m^2/s^2"),
     )

@@ -1,6 +1,0 @@
-max_wind_all_levels: 193.8
-max_wind_jet_level: 52.6
-p99_wind_jet_level: 52.6
-mean_T: 279.1
-stable: True
-wall_time: 43.2
