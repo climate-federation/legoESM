@@ -16,14 +16,20 @@ from legoesm.ml.sfno import SFNO, SFNOConfig
 from legoesm.ml.channel_packing import (
     SWChannelSpec,
     PE3DChannelSpec,
+    OceanChannelSpec,
     WB2_PRESSURE_LEVELS,
     pack_sw_state,
     unpack_sw_output,
     pack_pe_state,
     unpack_pe_output,
+    pack_ocean_state,
+    unpack_ocean_output,
 )
 from legoesm.ml.conservation import (
     correct_dry_air_mass,
     correct_moisture,
     clip_humidity,
+    correct_ocean_volume,
+    correct_ocean_heat,
+    correct_ocean_salt,
 )

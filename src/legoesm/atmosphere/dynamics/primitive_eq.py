@@ -61,6 +61,7 @@ from legoesm.grids.vertical import (
     compute_pressure_velocity,
 )
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 from legoesm import constants
 
@@ -72,7 +73,7 @@ class PrimitiveEquationConfig(NamedTuple):
     hyperdiff_ps_coeff: float = 0.0  # Separate coefficient for p_s ∇⁴ diffusion
     use_conservation_fixer: bool = True
     fix_mass: bool = True
-    time_integrator: str = "ssp_rk3"  # "ssp_rk3" or "ssp_rk54"/"ssp45"
+    time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
 
 
 # ==============================================================================
@@ -337,6 +338,8 @@ class PrimitiveEquationModel:
         integrator = self.config.time_integrator.lower()
         if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
             state_new = ssp_rk54_step(state, tendency_fn, dt)
+        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
+            state_new = ssp_rk34_step(state, tendency_fn, dt)
         elif integrator in ("ssp_rk3", "ssp3", "rk3"):
             state_new = ssp_rk3_step(state, tendency_fn, dt)
         else:
@@ -390,6 +393,8 @@ class PrimitiveEquationModel:
         integrator = self.config.time_integrator.lower()
         if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
             state_new = ssp_rk54_step(state, tendency_fn, dt)
+        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
+            state_new = ssp_rk34_step(state, tendency_fn, dt)
         elif integrator in ("ssp_rk3", "ssp3", "rk3"):
             state_new = ssp_rk3_step(state, tendency_fn, dt)
         else:

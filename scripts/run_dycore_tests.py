@@ -366,6 +366,7 @@ def run_sw_fv_tests(output_dir):
     N = 16
     DT = 600.0
     HYPERDIFF_SW = 5e16 * (48 / N) ** 4
+    EDGE_BLEND_SW = 0.25 if N >= 24 else 0.0
 
     # --- Test 2: Steady geostrophic flow (5 days) ---
     test_dir = output_dir / "01_sw_fv_williamson2"
@@ -378,7 +379,10 @@ def run_sw_fv_tests(output_dir):
         cube_lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
         state_init = williamson_test2(grid)
         # Hyperdiffusion needed at C16 to prevent aliasing instability
-        config = ShallowWaterConfig(hyperdiff_coeff=HYPERDIFF_SW)
+        config = ShallowWaterConfig(
+            hyperdiff_coeff=HYPERDIFF_SW,
+            edge_blend_strength=EDGE_BLEND_SW,
+        )
         model = ShallowWaterModel(grid, config)
 
         state = state_init
@@ -442,6 +446,7 @@ def run_sw_fv_tests(output_dir):
         state_init = williamson_test5(grid)
         config = ShallowWaterConfig(
             hyperdiff_coeff=5e16 * (48 / N) ** 4,
+            edge_blend_strength=EDGE_BLEND_SW,
         )
         model = ShallowWaterModel(grid, config)
 
@@ -506,7 +511,7 @@ def run_sw_fv_tests(output_dir):
 # 2. Shallow Water Spectral Tests
 # =============================================================================
 
-def run_sw_spectral_tests(output_dir):
+def run_sw_spectral_tests(output_dir, solver: str = "ssp_rk3"):
     """Run Williamson Tests 2 and 5 with spectral shallow water."""
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.atmosphere.dynamics.spectral_sw import (
@@ -518,6 +523,17 @@ def run_sw_spectral_tests(output_dir):
         compute_spectral_diagnostics,
     )
     from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+    from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
+
+    solver_l = solver.lower()
+    if solver_l in ("ssp_rk34", "ssp34", "rk34"):
+        stepper = ssp_rk34_step
+        solver_tag = "ssp34"
+    elif solver_l in ("ssp_rk3", "ssp3", "rk3"):
+        stepper = ssp_rk3_step
+        solver_tag = "ssp_rk3"
+    else:
+        raise ValueError(f"Unsupported spectral SW solver={solver!r}")
 
     T = 21
     DT = 120.0
@@ -525,7 +541,7 @@ def run_sw_spectral_tests(output_dir):
     # --- Test 2: Steady geostrophic flow (5 days) ---
     test_dir = output_dir / "03_sw_spectral_williamson2"
     test_dir.mkdir(parents=True, exist_ok=True)
-    print("\n  [03] SW Spectral - Williamson Test 2 (T21, 5 days)...")
+    print(f"\n  [03] SW Spectral - Williamson Test 2 (T21, 5 days, {solver_tag})...")
 
     try:
         grid = create_gaussian_grid(T)
@@ -534,7 +550,7 @@ def run_sw_spectral_tests(output_dir):
 
         def tendency_fn(s):
             return spectral_sw_tendencies(s, grid, config)
-        step_jit = jax.jit(lambda s, dt: ssp_rk3_step(s, tendency_fn, dt))
+        step_jit = jax.jit(lambda s, dt: stepper(s, tendency_fn, dt))
 
         state = state_init
         n_steps = int(5 * 86400 / DT)
@@ -579,8 +595,9 @@ def run_sw_spectral_tests(output_dir):
 
         with open(test_dir / "results.txt", "w") as f:
             f.write(f"L2_error: {h_err:.6e}\nstable: {stable}\nwall_time: {wall:.1f}\n")
+            f.write(f"solver: {solver_tag}\n")
 
-        record("Williamson 2", f"SW Spec T{T}", status, "L2 error (5d)", f"{h_err:.2e}", wall)
+        record("Williamson 2", f"SW Spec T{T} {solver_tag}", status, "L2 error (5d)", f"{h_err:.2e}", wall)
         print(f"    {status} | L2 error={h_err:.2e} | {wall:.1f}s")
 
     except Exception as e:
@@ -591,7 +608,7 @@ def run_sw_spectral_tests(output_dir):
     # --- Test 5: Mountain flow (15 days) ---
     test_dir = output_dir / "04_sw_spectral_williamson5"
     test_dir.mkdir(parents=True, exist_ok=True)
-    print("\n  [04] SW Spectral - Williamson Test 5 (T21, 15 days)...")
+    print(f"\n  [04] SW Spectral - Williamson Test 5 (T21, 15 days, {solver_tag})...")
 
     try:
         state_init = williamson_test5_spectral(grid)
@@ -608,7 +625,7 @@ def run_sw_spectral_tests(output_dir):
 
         def tendency_fn5(s):
             return spectral_sw_tendencies(s, grid, config)
-        step_jit5 = jax.jit(lambda s, dt: ssp_rk3_step(s, tendency_fn5, dt))
+        step_jit5 = jax.jit(lambda s, dt: stepper(s, tendency_fn5, dt))
 
         state = state_init
         n_steps = int(15 * 86400 / DT)
@@ -657,8 +674,9 @@ def run_sw_spectral_tests(output_dir):
         with open(test_dir / "results.txt", "w") as f:
             f.write(f"h_range: [{h_min:.0f}, {h_max:.0f}]\n")
             f.write(f"mass_drift: {mass_drift:.2e}\nstable: {stable}\nwall_time: {wall:.1f}\n")
+            f.write(f"solver: {solver_tag}\n")
 
-        record("Williamson 5", f"SW Spec T{T}", status, "mass drift (15d)", f"{mass_drift:.2e}", wall)
+        record("Williamson 5", f"SW Spec T{T} {solver_tag}", status, "mass drift (15d)", f"{mass_drift:.2e}", wall)
         print(f"    {status} | h=[{h_min:.0f}, {h_max:.0f}] | mass drift={mass_drift:.2e} | {wall:.1f}s")
 
     except Exception as e:

@@ -14,6 +14,10 @@ from legoesm.ocean.dynamics.spectral_ocean_pe import (
     SpectralOceanModel,
     rest_state_spectral_ocean,
 )
+from legoesm.ocean.dynamics.sfno_ocean import (
+    SFNOOceanModel,
+    SFNOOceanConfig,
+)
 from legoesm.ocean.state import (
     OceanState,
     OceanTendencies,
@@ -43,6 +47,8 @@ from legoesm.ocean.simple_ocean import (
 __all__ = [
     "OceanModel",
     "SpectralOceanModel",
+    "SFNOOceanModel",
+    "SFNOOceanConfig",
     "OceanState",
     "OceanTendencies",
     "OceanConfig",

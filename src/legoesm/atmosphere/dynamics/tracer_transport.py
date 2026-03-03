@@ -33,6 +33,7 @@ from legoesm.core.operators_3d import (
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 
 
@@ -49,7 +50,7 @@ WindFn = Callable[
 class TracerTransportConfig(NamedTuple):
     """Configuration for tracer transport model."""
     hyperdiff_coeff: float = 0.0
-    time_integrator: str = "ssp_rk3"  # "ssp_rk3" or "ssp_rk54"/"ssp45"
+    time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
 
 
 def tracer_tendencies(
@@ -186,6 +187,8 @@ class TracerTransportModel:
         integrator = self.config.time_integrator.lower()
         if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
             return ssp_rk54_step(state, tendency_fn, dt)
+        if integrator in ("ssp_rk34", "ssp34", "rk34"):
+            return ssp_rk34_step(state, tendency_fn, dt)
         if integrator in ("ssp_rk3", "ssp3", "rk3"):
             return ssp_rk3_step(state, tendency_fn, dt)
         raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")

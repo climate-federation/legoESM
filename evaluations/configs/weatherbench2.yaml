@@ -1,0 +1,12 @@
+dataset: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+climatology: "gs://weatherbench2/datasets/era5-hourly-climatology/1990-2019_6h_1440x721.zarr"
+eval_period: ["2020-01-01", "2020-12-31"]
+lead_times_hours: [6, 12, 24, 48, 72, 120, 168, 240]
+variables:
+  - geopotential
+  - temperature
+  - u_component_of_wind
+  - v_component_of_wind
+  - specific_humidity
+levels: [500, 850, 250, 700, 1000]
+output_dir: "results/wb2_eval"

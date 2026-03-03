@@ -358,9 +358,11 @@ def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
     lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
 
     state0 = williamson_test2(grid)
+    edge_blend = 0.25 if n >= 24 else 0.0
     config = ShallowWaterConfig(
         hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
         time_integrator=solver,
+        edge_blend_strength=edge_blend,
     )
     model = ShallowWaterModel(grid, config)
 
@@ -429,6 +431,7 @@ def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
     with open(case_dir / "results.txt", "w") as f:
         f.write(f"solver: {solver}\n")
         f.write(f"resolution: C{n}\n")
+        f.write(f"edge_blend_strength: {edge_blend:.2f}\n")
         f.write(f"dt: {dt}\n")
         f.write(f"n_steps: {n_steps}\n")
         f.write(f"l2_error_h: {h_err:.8e}\n")
@@ -461,9 +464,11 @@ def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
     lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
 
     state0 = williamson_test5(grid)
+    edge_blend = 0.25 if n >= 24 else 0.0
     config = ShallowWaterConfig(
         hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
         time_integrator=solver,
+        edge_blend_strength=edge_blend,
     )
     model = ShallowWaterModel(grid, config)
 
@@ -534,6 +539,7 @@ def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
     with open(case_dir / "results.txt", "w") as f:
         f.write(f"solver: {solver}\n")
         f.write(f"resolution: C{n}\n")
+        f.write(f"edge_blend_strength: {edge_blend:.2f}\n")
         f.write(f"dt: {dt}\n")
         f.write(f"n_steps: {n_steps}\n")
         f.write(f"mass_drift: {mass_drift:.8e}\n")

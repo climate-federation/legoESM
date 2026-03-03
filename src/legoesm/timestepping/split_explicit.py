@@ -35,7 +35,7 @@ State = TypeVar("State")
 class SplitExplicitConfig(NamedTuple):
     """Configuration for split-explicit time integration."""
     n_substeps: int = 6
-    outer_integrator: str = "ssp_rk3"  # "ssp_rk3" or "ssp_rk54"/"ssp45"
+    outer_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
 
 
 def split_explicit_step(
@@ -71,6 +71,10 @@ def split_explicit_step(
     integrator = config.outer_integrator.lower()
     if integrator in ("ssp_rk3", "ssp3", "rk3"):
         return _split_explicit_ssp_rk3(
+            state, slow_tendency_fn, acoustic_update_fn, dt, config,
+        )
+    if integrator in ("ssp_rk34", "ssp34", "rk34"):
+        return _split_explicit_ssp_rk34(
             state, slow_tendency_fn, acoustic_update_fn, dt, config,
         )
     if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
@@ -165,6 +169,40 @@ def _split_explicit_ssp_rk54(
     f54 = jax.tree.map(lambda ff3, ff4: b53 * ff3 + b54 * ff4, f3, f4)
     return _rk_stage_with_acoustics(
         u5_base, f54, dt, 1.0, acoustic_update_fn, config,
+    )
+
+
+def _split_explicit_ssp_rk34(
+    state: State,
+    slow_tendency_fn: Callable[[State], State],
+    acoustic_update_fn: Callable,
+    dt: float,
+    config: SplitExplicitConfig,
+) -> State:
+    """SSP-RK(4,3) outer integrator with acoustic substeps at each stage."""
+    # Stage 1: u1 = u0 + 1/2 dt F(u0)
+    f0 = slow_tendency_fn(state)
+    u1 = _rk_stage_with_acoustics(
+        state, f0, dt, 0.5, acoustic_update_fn, config,
+    )
+
+    # Stage 2: u2 = u1 + 1/2 dt F(u1)
+    f1 = slow_tendency_fn(u1)
+    u2 = _rk_stage_with_acoustics(
+        u1, f1, dt, 0.5, acoustic_update_fn, config,
+    )
+
+    # Stage 3: u3 = 2/3 u0 + 1/3 u2 + 1/6 dt F(u2)
+    f2 = slow_tendency_fn(u2)
+    u3_base = _pytree_linear_combination(state, u2, 2.0 / 3.0, 1.0 / 3.0)
+    u3 = _rk_stage_with_acoustics(
+        u3_base, f2, dt, 1.0 / 6.0, acoustic_update_fn, config,
+    )
+
+    # Stage 4: u4 = u3 + 1/2 dt F(u3)
+    f3 = slow_tendency_fn(u3)
+    return _rk_stage_with_acoustics(
+        u3, f3, dt, 0.5, acoustic_update_fn, config,
     )
 
 

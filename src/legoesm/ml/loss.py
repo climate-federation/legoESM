@@ -137,3 +137,54 @@ def autoregressive_loss(
         state = pred  # Autoregressive: use prediction as next input
 
     return total_loss / n_steps
+
+
+def weighted_mae(
+    pred: jnp.ndarray,
+    target: jnp.ndarray,
+    weights: jnp.ndarray,
+) -> jnp.ndarray:
+    """Area-weighted mean absolute error.
+
+    Parameters
+    ----------
+    pred : array, shape (..., n_lat, n_lon, n_channels)
+        Predicted fields.
+    target : array, shape (..., n_lat, n_lon, n_channels)
+        Target fields.
+    weights : array, shape (n_lat,)
+        Gaussian quadrature weights for latitude.
+
+    Returns
+    -------
+    scalar
+        Area-weighted MAE averaged over all dimensions.
+    """
+    abs_err = jnp.abs(pred - target)
+    w = weights[:, None, None]
+    return jnp.mean(abs_err * w)
+
+
+def spectral_loss(
+    pred_hat: jnp.ndarray,
+    target_hat: jnp.ndarray,
+) -> jnp.ndarray:
+    """L2 loss in spectral space.
+
+    Optional regularizer that penalizes spectral coefficient mismatches,
+    encouraging accurate representation of large-scale patterns.
+
+    Parameters
+    ----------
+    pred_hat : complex array, shape (n_sh,) or (n_sh, nlev)
+        Predicted spectral coefficients.
+    target_hat : complex array, shape (n_sh,) or (n_sh, nlev)
+        Target spectral coefficients.
+
+    Returns
+    -------
+    scalar
+        Mean squared difference of spectral coefficients.
+    """
+    diff = pred_hat - target_hat
+    return jnp.mean(jnp.abs(diff) ** 2)

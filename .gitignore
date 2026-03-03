@@ -9,3 +9,13 @@ output/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
+
+# Data and results artifacts
+*.zarr
+*.zarr/
+*.nc
+*.nc4
+results/
+checkpoints/
+data/
+wandb/

@@ -1,0 +1,8 @@
+dataset: ""
+eval_period: ["2020-01-01", "2020-12-31"]
+lead_times_hours: [6, 24, 72, 120, 240]
+variables:
+  - sea_surface_temperature
+  - sea_surface_height
+levels: [0, 50, 100, 200, 500]
+output_dir: "results/ocean_eval"

@@ -65,7 +65,7 @@ class CompressibleEulerConfig(NamedTuple):
     use_conservation_fixer: bool = True
     use_coriolis: bool = True       # Set False for f=0 tests (e.g. DCMIP TC3)
     semi_implicit_acoustic: bool = False  # Use tridiagonal solve for acoustic substeps
-    outer_integrator: str = "ssp_rk3"  # "ssp_rk3" or "ssp_rk54"/"ssp45"
+    outer_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
 
 
 # ==============================================================================

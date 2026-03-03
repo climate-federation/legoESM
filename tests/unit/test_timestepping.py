@@ -5,6 +5,10 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step, integrate_scan
+from legoesm.timestepping.ssp_rk34 import (
+    ssp_rk34_step,
+    integrate_scan as integrate_scan_rk34,
+)
 from legoesm.timestepping.ssp_rk54 import (
     ssp_rk54_step,
     integrate_scan as integrate_scan_rk54,
@@ -81,6 +85,73 @@ class TestSSPRK3:
         y = state
         for _ in range(n_steps):
             y = ssp_rk3_step(y, tendency_fn, dt)
+
+        assert jnp.allclose(final_scan, y, atol=1e-6)
+
+
+class TestSSPRK34:
+    """Tests for the SSP-RK(4,3) time integrator."""
+
+    def test_constant_field_unchanged(self):
+        """Zero tendency should leave state unchanged."""
+        state = jnp.array([1.0, 2.0, 3.0])
+        tendency_fn = lambda s: jnp.zeros_like(s)
+        result = ssp_rk34_step(state, tendency_fn, dt=1.0)
+        assert jnp.allclose(result, state)
+
+    def test_linear_growth(self):
+        """For dy/dt = 1, after dt=1: y should increase by exactly 1."""
+        state = jnp.array([0.0])
+        tendency_fn = lambda s: jnp.ones_like(s)
+        result = ssp_rk34_step(state, tendency_fn, dt=1.0)
+        assert jnp.allclose(result, jnp.array([1.0]))
+
+    def test_exponential_growth(self):
+        """For dy/dt = y, exact: y(t) = y0 * exp(t)."""
+        y0 = jnp.array([1.0])
+        tendency_fn = lambda y: y
+        dt = 0.01
+        n_steps = 100
+
+        y = y0
+        for _ in range(n_steps):
+            y = ssp_rk34_step(y, tendency_fn, dt)
+
+        exact = y0 * jnp.exp(dt * n_steps)
+        assert jnp.allclose(y, exact, rtol=5e-6)
+
+    def test_higher_order_than_rk3(self):
+        """RK34 should be more accurate than RK3 for dy/dt = y."""
+        y0 = jnp.array([1.0])
+        tendency_fn = lambda y: y
+        dt = 0.1
+        n_steps = 10
+
+        y3 = y0
+        for _ in range(n_steps):
+            y3 = ssp_rk3_step(y3, tendency_fn, dt)
+
+        y34 = y0
+        for _ in range(n_steps):
+            y34 = ssp_rk34_step(y34, tendency_fn, dt)
+
+        exact = y0 * jnp.exp(dt * n_steps)
+        err3 = jnp.abs(y3 - exact)
+        err34 = jnp.abs(y34 - exact)
+        assert jnp.all(err34 < err3)
+
+    def test_integrate_scan(self):
+        """integrate_scan should produce the same result as a Python loop."""
+        state = jnp.array([1.0])
+        tendency_fn = lambda y: -0.1 * y
+        dt = 0.1
+        n_steps = 10
+
+        final_scan, _ = integrate_scan_rk34(state, tendency_fn, n_steps, dt)
+
+        y = state
+        for _ in range(n_steps):
+            y = ssp_rk34_step(y, tendency_fn, dt)
 
         assert jnp.allclose(final_scan, y, atol=1e-6)
 

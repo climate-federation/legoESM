@@ -51,9 +51,103 @@ from legoesm.core.operators import (
 )
 from legoesm.core.conservation import apply_conservation_fixer
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 from legoesm import constants
+
+
+def _build_unique_edge_pairs() -> tuple[tuple[int, int, int, int, bool], ...]:
+    pairs: list[tuple[int, int, int, int, bool]] = []
+    seen = set()
+    for face in range(6):
+        for edge, (nbr_face, nbr_edge, reversed_idx) in CONNECTIVITY[face].items():
+            key = tuple(sorted(((face, edge), (nbr_face, nbr_edge))))
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append((face, edge, nbr_face, nbr_edge, reversed_idx))
+    return tuple(pairs)
+
+
+_UNIQUE_EDGE_PAIRS = _build_unique_edge_pairs()
+
+
+def _edge_strip(arr: jax.Array, face: int, edge: int) -> jax.Array:
+    if edge == WEST:
+        return arr[face, 0, :]
+    if edge == EAST:
+        return arr[face, -1, :]
+    if edge == SOUTH:
+        return arr[face, :, 0]
+    if edge == NORTH:
+        return arr[face, :, -1]
+    raise ValueError(f"Unknown edge: {edge}")
+
+
+def _set_edge_strip(arr: jax.Array, face: int, edge: int, strip: jax.Array) -> jax.Array:
+    if edge == WEST:
+        return arr.at[face, 0, :].set(strip)
+    if edge == EAST:
+        return arr.at[face, -1, :].set(strip)
+    if edge == SOUTH:
+        return arr.at[face, :, 0].set(strip)
+    if edge == NORTH:
+        return arr.at[face, :, -1].set(strip)
+    raise ValueError(f"Unknown edge: {edge}")
+
+
+def _blend_scalar_cube_edges(arr: jax.Array, strength: float) -> jax.Array:
+    """Relax opposite face-edge values toward their shared mean."""
+    out = arr
+    w = jnp.asarray(strength, dtype=arr.dtype)
+    one_minus_w = 1.0 - w
+
+    for face, edge, nbr_face, nbr_edge, reversed_idx in _UNIQUE_EDGE_PAIRS:
+        a = _edge_strip(out, face, edge)
+        b = _edge_strip(out, nbr_face, nbr_edge)
+        if reversed_idx:
+            b = b[::-1]
+
+        avg = 0.5 * (a + b)
+        a_new = one_minus_w * a + w * avg
+        b_new = one_minus_w * b + w * avg
+
+        if reversed_idx:
+            b_new = b_new[::-1]
+
+        out = _set_edge_strip(out, face, edge, a_new)
+        out = _set_edge_strip(out, nbr_face, nbr_edge, b_new)
+
+    return out
+
+
+def _apply_edge_continuity_blend(
+    state: ShallowWaterState,
+    grid: CubedSphereGrid,
+    strength: float,
+) -> ShallowWaterState:
+    """Blend cube-edge values for scalar and geographic vector continuity."""
+    h_blend = _blend_scalar_cube_edges(state.h.data, strength)
+
+    # Blend winds in geographic components to avoid face-local orientation bias.
+    u = state.u.data
+    v = state.v.data
+    u_east = grid.cos_angle * u - grid.sin_angle * v
+    v_north = grid.sin_angle * u + grid.cos_angle * v
+
+    u_east_blend = _blend_scalar_cube_edges(u_east, strength)
+    v_north_blend = _blend_scalar_cube_edges(v_north, strength)
+
+    u_grid = grid.cos_angle * u_east_blend + grid.sin_angle * v_north_blend
+    v_grid = -grid.sin_angle * u_east_blend + grid.cos_angle * v_north_blend
+
+    return state._replace(
+        h=state.h.replace(data=h_blend),
+        u=state.u.replace(data=u_grid),
+        v=state.v.replace(data=v_grid),
+    )
 
 
 class ShallowWaterConfig(NamedTuple):
@@ -64,7 +158,8 @@ class ShallowWaterConfig(NamedTuple):
     fix_mass: bool = True
     fix_energy: bool = True
     use_upwind_advection: bool = True       # Use upwind (True) or centered (False)
-    time_integrator: str = "ssp_rk3"        # "ssp_rk3" or "ssp_rk54"/"ssp45"
+    time_integrator: str = "ssp_rk3"        # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
+    edge_blend_strength: float = 0.0        # 0..1 cube-edge continuity relaxation
 
 
 def shallow_water_tendencies(
@@ -183,6 +278,11 @@ class ShallowWaterModel:
     ):
         self.grid = grid
         self.config = config or ShallowWaterConfig()
+        if not (0.0 <= self.config.edge_blend_strength <= 1.0):
+            raise ValueError(
+                "edge_blend_strength must be in [0, 1], "
+                f"got {self.config.edge_blend_strength!r}"
+            )
 
     def tendencies(self, state: ShallowWaterState) -> ShallowWaterTendencies:
         """Compute tendencies (pure function wrapper)."""
@@ -218,10 +318,20 @@ class ShallowWaterModel:
         integrator = self.config.time_integrator.lower()
         if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
             state_new = ssp_rk54_step(state, tendency_fn, dt)
+        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
+            state_new = ssp_rk34_step(state, tendency_fn, dt)
         elif integrator in ("ssp_rk3", "ssp3", "rk3"):
             state_new = ssp_rk3_step(state, tendency_fn, dt)
         else:
             raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")
+
+        # Optional cubed-sphere edge continuity relaxation.
+        if self.config.edge_blend_strength > 0.0:
+            state_new = _apply_edge_continuity_blend(
+                state_new,
+                self.grid,
+                self.config.edge_blend_strength,
+            )
 
         # Apply conservation fixers
         if self.config.use_conservation_fixer:

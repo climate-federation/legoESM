@@ -2,9 +2,16 @@
 
 Neural operators do not enforce conservation laws by construction.
 These correctors adjust SFNO predictions to preserve:
+
+Atmosphere:
 - Global dry air mass (via uniform surface pressure correction)
 - Global moisture budget (via proportional humidity correction)
 - Non-negative humidity (clipping)
+
+Ocean:
+- Global ocean volume (via uniform eta correction)
+- Global heat content (via uniform T correction)
+- Global salt content (via uniform S correction)
 
 References
 ----------
@@ -114,3 +121,141 @@ def clip_humidity(q: jnp.ndarray) -> jnp.ndarray:
         Clipped humidity with q >= 0.
     """
     return jnp.maximum(q, 0.0)
+
+
+# ============================================================================
+# Ocean conservation correctors
+# ============================================================================
+
+def correct_ocean_volume(
+    eta_new: jnp.ndarray,
+    eta_old: jnp.ndarray,
+    grid: GaussianGrid,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Correct sea surface height to conserve global ocean volume.
+
+    Applies a spatially uniform additive correction to eta so that
+    the global integral of eta (over ocean cells) is preserved.
+
+    Parameters
+    ----------
+    eta_new : array, shape (n_lat, n_lon)
+        Predicted sea surface height [m].
+    eta_old : array, shape (n_lat, n_lon)
+        Original sea surface height [m].
+    grid : GaussianGrid
+        Grid with Gaussian quadrature weights.
+    mask : array, shape (n_lat, n_lon)
+        Ocean mask (1=ocean, 0=land).
+
+    Returns
+    -------
+    array, shape (n_lat, n_lon)
+        Corrected eta.
+    """
+    w = grid.weights[:, None]  # (n_lat, 1)
+    dlon = 2.0 * jnp.pi / grid.n_lon
+    area = (grid.radius ** 2) * w * dlon  # (n_lat, 1)
+    weighted_area = mask * area
+
+    ocean_area = jnp.sum(weighted_area)
+    vol_old = jnp.sum(eta_old * weighted_area)
+    vol_new = jnp.sum(eta_new * weighted_area)
+
+    correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
+    return eta_new + correction * mask
+
+
+def correct_ocean_heat(
+    T_new: jnp.ndarray,
+    T_old: jnp.ndarray,
+    h_k_new: jnp.ndarray,
+    h_k_old: jnp.ndarray,
+    grid: GaussianGrid,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Correct ocean temperature to conserve global heat content.
+
+    Applies a spatially uniform additive correction to T so that
+    the volume-integrated temperature is preserved.
+
+    Parameters
+    ----------
+    T_new : array, shape (n_lat, n_lon, nlev)
+        Predicted temperature [degC].
+    T_old : array, shape (n_lat, n_lon, nlev)
+        Original temperature [degC].
+    h_k_new : array, shape (n_lat, n_lon, nlev)
+        New layer thicknesses [m].
+    h_k_old : array, shape (n_lat, n_lon, nlev)
+        Old layer thicknesses [m].
+    grid : GaussianGrid
+        Grid for area weighting.
+    mask : array, shape (n_lat, n_lon)
+        Ocean mask (1=ocean, 0=land).
+
+    Returns
+    -------
+    array, shape (n_lat, n_lon, nlev)
+        Corrected temperature.
+    """
+    w = grid.weights[:, None]
+    dlon = 2.0 * jnp.pi / grid.n_lon
+    area = (grid.radius ** 2) * w * dlon
+    weighted_area = mask * area
+    mask_3d = mask[..., None]
+
+    # Volume-integrated heat
+    heat_old = jnp.sum(jnp.sum(T_old * h_k_old, axis=-1) * weighted_area)
+    heat_new = jnp.sum(jnp.sum(T_new * h_k_new, axis=-1) * weighted_area)
+    ocean_volume = jnp.sum(jnp.sum(h_k_new, axis=-1) * weighted_area)
+
+    correction = (heat_old - heat_new) / jnp.maximum(ocean_volume, 1.0)
+    return T_new + correction * mask_3d
+
+
+def correct_ocean_salt(
+    S_new: jnp.ndarray,
+    S_old: jnp.ndarray,
+    h_k_new: jnp.ndarray,
+    h_k_old: jnp.ndarray,
+    grid: GaussianGrid,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Correct ocean salinity to conserve global salt content.
+
+    Same approach as heat correction but for salinity.
+
+    Parameters
+    ----------
+    S_new : array, shape (n_lat, n_lon, nlev)
+        Predicted salinity [PSU].
+    S_old : array, shape (n_lat, n_lon, nlev)
+        Original salinity [PSU].
+    h_k_new : array, shape (n_lat, n_lon, nlev)
+        New layer thicknesses [m].
+    h_k_old : array, shape (n_lat, n_lon, nlev)
+        Old layer thicknesses [m].
+    grid : GaussianGrid
+        Grid for area weighting.
+    mask : array, shape (n_lat, n_lon)
+        Ocean mask (1=ocean, 0=land).
+
+    Returns
+    -------
+    array, shape (n_lat, n_lon, nlev)
+        Corrected salinity.
+    """
+    w = grid.weights[:, None]
+    dlon = 2.0 * jnp.pi / grid.n_lon
+    area = (grid.radius ** 2) * w * dlon
+    weighted_area = mask * area
+    mask_3d = mask[..., None]
+
+    salt_old = jnp.sum(jnp.sum(S_old * h_k_old, axis=-1) * weighted_area)
+    salt_new = jnp.sum(jnp.sum(S_new * h_k_new, axis=-1) * weighted_area)
+    ocean_volume = jnp.sum(jnp.sum(h_k_new, axis=-1) * weighted_area)
+
+    correction = (salt_old - salt_new) / jnp.maximum(ocean_volume, 1.0)
+    return S_new + correction * mask_3d

@@ -22,7 +22,7 @@ import equinox as eqx
 import optax
 
 from legoesm.grids.gaussian import GaussianGrid
-from legoesm.ml.loss import area_weighted_mse, autoregressive_loss
+from legoesm.ml.loss import area_weighted_mse, autoregressive_loss, weighted_mae
 
 
 class TrainingConfig(NamedTuple):
@@ -171,3 +171,126 @@ def load_checkpoint(
         Model with loaded weights.
     """
     return eqx.tree_deserialise_leaves(str(path), model_template)
+
+
+@eqx.filter_jit
+def validate_step(
+    model: eqx.Module,
+    batch_input: jnp.ndarray,
+    batch_target: jnp.ndarray,
+    grid: GaussianGrid,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """JIT-compiled validation step (no gradient).
+
+    Parameters
+    ----------
+    model : eqx.Module
+        Current model.
+    batch_input : array, shape (batch_size, n_lat, n_lon, n_channels)
+        Input batch.
+    batch_target : array, shape (batch_size, n_lat, n_lon, n_channels)
+        Target batch.
+    grid : GaussianGrid
+        Grid for area-weighted loss.
+
+    Returns
+    -------
+    (mse, mae)
+        Area-weighted MSE and MAE on the validation batch.
+    """
+    pred = jax.vmap(lambda x: model(x, grid))(batch_input)
+    w = grid.weights.astype(jnp.float32)
+    mse = area_weighted_mse(pred, batch_target, w)
+    mae = weighted_mae(pred, batch_target, w)
+    return mse, mae
+
+
+def train_sfno(
+    model: eqx.Module,
+    grid: GaussianGrid,
+    era5_config,
+    training_config: TrainingConfig,
+    val_era5_config=None,
+    log_every: int = 100,
+) -> eqx.Module:
+    """Full training loop for SFNO with ERA5 GCS streaming.
+
+    Parameters
+    ----------
+    model : eqx.Module
+        Initial SFNO model.
+    grid : GaussianGrid
+        Grid for area-weighted loss and model evaluation.
+    era5_config : ERA5Config
+        Training data configuration.
+    training_config : TrainingConfig
+        Training hyperparameters.
+    val_era5_config : ERA5Config, optional
+        Validation data configuration. If None, no validation.
+    log_every : int
+        Print loss every N steps.
+
+    Returns
+    -------
+    eqx.Module
+        Trained model.
+    """
+    from legoesm.ml.data.era5_loader import create_training_iterator
+
+    optimizer = create_optimizer(training_config)
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
+
+    train_iter = create_training_iterator(
+        era5_config,
+        batch_size=training_config.batch_size,
+        seed=0,
+    )
+
+    # Optional: validation iterator
+    val_iter = None
+    if val_era5_config is not None:
+        val_iter = create_training_iterator(
+            val_era5_config,
+            batch_size=training_config.batch_size,
+            seed=42,
+            shuffle=False,
+        )
+
+    for step in range(training_config.total_steps):
+        batch_input, batch_target = next(train_iter)
+        model, opt_state, loss = train_step(
+            model, opt_state, optimizer,
+            batch_input, batch_target, grid,
+        )
+
+        if step % log_every == 0:
+            print(f"Step {step:6d} | train_loss: {float(loss):.6f}")
+
+        # Periodic validation
+        if (
+            val_iter is not None
+            and step > 0
+            and step % training_config.checkpoint_every == 0
+        ):
+            val_input, val_target = next(val_iter)
+            val_mse, val_mae = validate_step(model, val_input, val_target, grid)
+            print(
+                f"Step {step:6d} | val_mse: {float(val_mse):.6f} "
+                f"| val_mae: {float(val_mae):.6f}"
+            )
+
+        # Checkpoint
+        if (
+            step > 0
+            and step % training_config.checkpoint_every == 0
+        ):
+            ckpt_path = Path(training_config.checkpoint_dir) / f"step_{step:06d}.eqx"
+            save_checkpoint(model, ckpt_path)
+            print(f"Saved checkpoint: {ckpt_path}")
+
+    # Final checkpoint
+    final_path = Path(training_config.checkpoint_dir) / "final.eqx"
+    save_checkpoint(model, final_path)
+    print(f"Training complete. Final checkpoint: {final_path}")
+
+    return model

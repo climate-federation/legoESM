@@ -37,6 +37,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+data = [
+    "gcsfs>=2024.2",
+    "fsspec>=2024.2",
+]
 metal = ["jax-metal"]
 mpi = [
     "mpi4py>=4.1,<5",

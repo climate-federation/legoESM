@@ -1,0 +1,95 @@
+"""Strong Stability Preserving Runge-Kutta (4,3) time integrator.
+
+Implements the 4-stage, 3rd-order SSPRK(4,3) scheme in Shu-Osher form.
+This method has a larger SSP CFL coefficient than SSP-RK3 while keeping
+third-order accuracy.
+
+Scheme:
+    u1 = u0 + 1/2 dt F(u0)
+    u2 = u1 + 1/2 dt F(u1)
+    u3 = 2/3 u0 + 1/3 u2 + 1/6 dt F(u2)
+    u4 = u3 + 1/2 dt F(u3)
+
+References
+----------
+- Gottlieb, S., Shu, C.-W., & Tadmor, E. (2001). Strong Stability-Preserving
+  High-Order Time Discretization Methods. SIAM Review.
+"""
+
+from __future__ import annotations
+
+from typing import Callable, TypeVar
+
+import jax
+
+State = TypeVar("State")
+
+
+def ssp_rk34_step(
+    state: State,
+    tendency_fn: Callable[[State], State],
+    dt: float,
+) -> State:
+    """Perform one SSP-RK(4,3) time step."""
+    # Stage 1
+    f0 = tendency_fn(state)
+    u1 = _pytree_axpy(state, f0, 0.5 * dt)
+
+    # Stage 2
+    f1 = tendency_fn(u1)
+    u2 = _pytree_axpy(u1, f1, 0.5 * dt)
+
+    # Stage 3
+    f2 = tendency_fn(u2)
+    u3 = _pytree_linear_combination(state, u2, 2.0 / 3.0, 1.0 / 3.0)
+    u3 = _pytree_axpy(u3, f2, (1.0 / 6.0) * dt)
+
+    # Stage 4
+    f3 = tendency_fn(u3)
+    u4 = _pytree_axpy(u3, f3, 0.5 * dt)
+
+    return u4
+
+
+def _pytree_axpy(x, y, alpha):
+    """Compute x + alpha * y for two pytrees with the same structure."""
+    return jax.tree.map(lambda xi, yi: xi + alpha * yi, x, y)
+
+
+def _pytree_linear_combination(x, y, a, b):
+    """Compute a * x + b * y for two pytrees with the same structure."""
+    return jax.tree.map(lambda xi, yi: a * xi + b * yi, x, y)
+
+
+def integrate_scan(
+    state: State,
+    tendency_fn: Callable[[State], State],
+    n_steps: int,
+    dt: float,
+    checkpoint_interval: int = 0,
+    return_trajectory: bool = True,
+) -> tuple[State, State | None]:
+    """Integrate forward in time using jax.lax.scan with SSP-RK(4,3)."""
+    if return_trajectory:
+        step_fn = lambda s, _: _scan_step(s, tendency_fn, dt)
+    else:
+        step_fn = lambda s, _: _scan_step_no_output(s, tendency_fn, dt)
+
+    if checkpoint_interval > 0:
+        step_fn = jax.checkpoint(step_fn)
+
+    final_state, trajectory = jax.lax.scan(step_fn, state, xs=None, length=n_steps)
+    return final_state, trajectory
+
+
+def _scan_step(state, tendency_fn, dt):
+    """Single step for use inside jax.lax.scan (stores output)."""
+    new_state = ssp_rk34_step(state, tendency_fn, dt)
+    return new_state, new_state
+
+
+def _scan_step_no_output(state, tendency_fn, dt):
+    """Single step for use inside jax.lax.scan (no output stacking)."""
+    new_state = ssp_rk34_step(state, tendency_fn, dt)
+    return new_state, None
+
