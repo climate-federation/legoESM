@@ -43,6 +43,9 @@ pytest tests/
 - Hard fail for legacy `mpi4jax<0.8` (incompatible token semantics).
 - Warning for versions outside tested range; set `LEGOESM_MPI_STRICT_COMPAT=1` to make this a hard fail.
 
+Detailed runbook for real hardware MPI/multi-GPU scaling:
+- [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md)
+
 ### Apple Silicon (Metal/MPS backend)
 
 The **spectral solver** (Gaussian grid + spherical harmonic transforms) requires

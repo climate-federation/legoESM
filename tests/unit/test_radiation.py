@@ -356,6 +356,24 @@ class TestIntegration:
         assert jnp.allclose(tendencies.dv_dt.data, 0.0)
         assert jnp.allclose(tendencies.dp_s_dt.data, 0.0)
 
+    def test_rrtmgp_backend_differs_from_gray(self):
+        """Integration path should honor scheme selection."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(4)
+        sigma = create_sigma_coordinate(8)
+        state = held_suarez_init(grid, sigma)
+
+        gray_fn = make_radiation_physics(RadiationConfig(scheme="gray"), "hydrostatic")
+        rrtmgp_fn = make_radiation_physics(RadiationConfig(scheme="rrtmgp"), "hydrostatic")
+
+        gray_tend = gray_fn(state, grid, sigma).dT_dt.data
+        rrtmgp_tend = rrtmgp_fn(state, grid, sigma).dT_dt.data
+        diff = float(jnp.max(jnp.abs(gray_tend - rrtmgp_tend)))
+        assert diff > 1e-8
+
     def test_nonhydrostatic_tendency_shapes(self):
         """Non-hydrostatic radiation tendencies should have correct shapes."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere

@@ -159,6 +159,7 @@ def morrison_microphysics(
 
     dT_dt = (
         L_v * condensation / c_pd
+        - L_v * evaporation / c_pd
         + L_s * dq_i_dep / c_pd
         - L_f * (melt_ice + melt_snow) / c_pd
     )

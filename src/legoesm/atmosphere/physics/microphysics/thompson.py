@@ -181,6 +181,7 @@ def thompson_microphysics(
     c_pd = constants.c_pd
     dT_dt = (
         L_v * condensation / c_pd
+        - L_v * evaporation / c_pd
         + L_s * dq_i_dep / c_pd
         - L_f * (melt_ice + melt_snow + melt_graupel) / c_pd
     )

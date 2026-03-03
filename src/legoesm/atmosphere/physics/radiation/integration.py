@@ -57,6 +57,59 @@ def _get_radiation_fn(config: RadiationConfig):
         raise ValueError(f"Unknown radiation scheme: {config.scheme!r}")
 
 
+def _compute_insolation(lat: jnp.ndarray, config: RadiationConfig) -> jnp.ndarray:
+    """Compute TOA insolation using shared geometry settings."""
+    gray_config = config.gray
+    if gray_config.perpetual_equinox:
+        return perpetual_equinox_insolation(lat, gray_config.S_0)
+    return daily_mean_insolation(
+        lat, 80.0, gray_config.S_0, gray_config.obliquity,
+    )
+
+
+def _call_radiation_backend(
+    radiation_config: RadiationConfig,
+    T: jnp.ndarray,
+    p_full: jnp.ndarray,
+    p_half: jnp.ndarray,
+    sfc_temperature: jnp.ndarray,
+    lat: jnp.ndarray,
+    q_v: jnp.ndarray | None,
+    insolation: jnp.ndarray,
+):
+    """Call configured radiation backend with a unified integration interface."""
+    radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
+
+    if radiation_config.scheme == "gray":
+        return radiation_fn(
+            T=T,
+            p_full=p_full,
+            p_half=p_half,
+            sfc_temperature=sfc_temperature,
+            lat=lat,
+            q_v=q_v,
+            insolation=insolation,
+            config=scheme_config,
+        )
+
+    # RRTMGP currently receives an effective daily-mean cosine zenith.
+    cos_zenith = jnp.clip(
+        insolation / jnp.clip(radiation_config.gray.S_0, 1.0e-6, None),
+        0.0,
+        1.0,
+    )
+    q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
+    return radiation_fn(
+        T=T,
+        p_full=p_full,
+        p_half=p_half,
+        sfc_temperature=sfc_temperature,
+        q_v=q_v_safe,
+        cos_zenith=cos_zenith,
+        config=scheme_config,
+    )
+
+
 def make_radiation_physics(
     radiation_config: RadiationConfig,
     model_type: str = "hydrostatic",
@@ -99,8 +152,6 @@ def _make_hydrostatic_radiation(
 
     Signature: (state, grid, sigma_coord) -> HydrostaticTendencies
     """
-    gray_config = radiation_config.gray
-
     def physics_fn(
         state: HydrostaticState,
         grid: CubedSphereGrid,
@@ -121,13 +172,8 @@ def _make_hydrostatic_radiation(
         # Surface temperature = lowest-level temperature
         T_sfc = T[..., -1]  # (6, n, n)
 
-        # Insolation
-        if gray_config.perpetual_equinox:
-            insol = perpetual_equinox_insolation(lat, gray_config.S_0)
-        else:
-            insol = daily_mean_insolation(
-                lat, 80.0, gray_config.S_0, gray_config.obliquity,
-            )
+        # Insolation for both gray and RRTMGP backends.
+        insol = _compute_insolation(lat, radiation_config)
 
         # Reshape cubed sphere to columns: (6,n,n,...) -> (ncol, ...)
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]  # 6*n*n
@@ -138,16 +184,18 @@ def _make_hydrostatic_radiation(
         lat_col = lat.reshape(ncol)
         insol_col = insol.reshape(ncol)
 
-        # Call gray radiation
-        rad_out = gray_radiation(
+        # Hydrostatic state is dry-only; pass zero vapor to moist-aware backends.
+        q_v_col = jnp.zeros_like(T_col)
+
+        rad_out = _call_radiation_backend(
+            radiation_config=radiation_config,
             T=T_col,
             p_full=p_full_col,
             p_half=p_half_col,
             sfc_temperature=T_sfc_col,
             lat=lat_col,
-            q_v=None,
+            q_v=q_v_col,
             insolation=insol_col,
-            config=gray_config,
         )
 
         # Reshape heating rate back to (6, n, n, nlev)
@@ -193,8 +241,6 @@ def _make_nonhydrostatic_radiation(
 
     Signature: (state, grid, height_coord, terrain_metric) -> NonHydrostaticTendencies
     """
-    gray_config = radiation_config.gray
-
     def physics_fn(
         state: NonHydrostaticState,
         grid: CubedSphereGrid,
@@ -235,13 +281,8 @@ def _make_nonhydrostatic_radiation(
         # Surface temperature = lowest-level temperature
         T_sfc = T[..., -1]
 
-        # Insolation
-        if gray_config.perpetual_equinox:
-            insol = perpetual_equinox_insolation(lat, gray_config.S_0)
-        else:
-            insol = daily_mean_insolation(
-                lat, 80.0, gray_config.S_0, gray_config.obliquity,
-            )
+        # Insolation for both gray and RRTMGP backends.
+        insol = _compute_insolation(lat, radiation_config)
 
         # Reshape to columns
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
@@ -252,16 +293,22 @@ def _make_nonhydrostatic_radiation(
         lat_col = lat.reshape(ncol)
         insol_col = insol.reshape(ncol)
 
-        # Call gray radiation
-        rad_out = gray_radiation(
+        # NH state stores water vapor in tracer slot 0 when moist tracers exist.
+        if state.tracers.data.shape[-1] > 0:
+            q_v = jnp.clip(state.tracers.data[..., 0], 0.0, None)
+        else:
+            q_v = jnp.zeros_like(T)
+        q_v_col = q_v.reshape(ncol, nlev)
+
+        rad_out = _call_radiation_backend(
+            radiation_config=radiation_config,
             T=T_col,
             p_full=p_full_col,
             p_half=p_half_col,
             sfc_temperature=T_sfc_col,
             lat=lat_col,
-            q_v=None,
+            q_v=q_v_col,
             insolation=insol_col,
-            config=gray_config,
         )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -322,8 +369,6 @@ def _make_spectral_pe_radiation(
     Transforms spectral state to Gaussian grid, computes radiation,
     then transforms temperature tendency back to spectral space.
     """
-    gray_config = radiation_config.gray
-
     def physics_fn(state, grid, sigma_coord, grid_fields=None):
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
@@ -351,15 +396,9 @@ def _make_spectral_pe_radiation(
         # Surface temperature = lowest level
         T_sfc = T[..., -1]  # (n_lat, n_lon)
 
-        # Insolation: broadcast lat to (n_lat, n_lon)
-        if gray_config.perpetual_equinox:
-            insol = perpetual_equinox_insolation(lat, gray_config.S_0)
-            insol = jnp.broadcast_to(insol[:, None], (n_lat, n_lon))
-        else:
-            insol = daily_mean_insolation(
-                lat, 80.0, gray_config.S_0, gray_config.obliquity,
-            )
-            insol = jnp.broadcast_to(insol[:, None], (n_lat, n_lon))
+        # Insolation: broadcast lat to (n_lat, n_lon).
+        insol_1d = _compute_insolation(lat, radiation_config)
+        insol = jnp.broadcast_to(insol_1d[:, None], (n_lat, n_lon))
 
         # Reshape to columns: (n_lat, n_lon, ...) -> (ncol, ...)
         ncol = n_lat * n_lon
@@ -370,16 +409,18 @@ def _make_spectral_pe_radiation(
         lat_col = jnp.broadcast_to(lat[:, None], (n_lat, n_lon)).reshape(ncol)
         insol_col = insol.reshape(ncol)
 
-        # Call gray radiation
-        rad_out = gray_radiation(
+        # Spectral PE state is dry-only in current formulation.
+        q_v_col = jnp.zeros_like(T_col)
+
+        rad_out = _call_radiation_backend(
+            radiation_config=radiation_config,
             T=T_col,
             p_full=p_full_col,
             p_half=p_half_col,
             sfc_temperature=T_sfc_col,
             lat=lat_col,
-            q_v=None,
+            q_v=q_v_col,
             insolation=insol_col,
-            config=gray_config,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)

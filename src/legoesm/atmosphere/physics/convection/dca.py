@@ -78,16 +78,16 @@ def _adjust_one_iteration(
     dp_rev = dp[:, ::-1]        # (ncol, nlev)
 
     def scan_step(carry, k):
-        """Adjust pair (k-1, k) where k is the upper level in reversed indexing.
+        """Adjust adjacent pair (k-1, k) using progressively updated profiles."""
+        T_work, q_work, precip_accum = carry
 
-        carry: (T_below, q_below, p_below, dp_below, precip_accum)
-        k indexes into reversed arrays for the upper level.
-        """
-        T_below, q_below, p_below, dp_below, precip_accum = carry
+        T_below = T_work[:, k - 1]
+        q_below = q_work[:, k - 1]
+        p_below = p_rev[:, k - 1]
+        dp_below = dp_rev[:, k - 1]
 
-        # Upper level values from reversed arrays
-        T_upper = T_rev[:, k]
-        q_upper = q_v_rev[:, k]
+        T_upper = T_work[:, k]
+        q_upper = q_work[:, k]
         p_upper = p_rev[:, k]
         dp_upper = dp_rev[:, k]
 
@@ -151,38 +151,17 @@ def _adjust_one_iteration(
         dq_below = (q_below - q_adj_below) * dp_below
         precip_new = precip_accum + (dq_upper + dq_below) / constants.g
 
-        new_carry = (T_adj_below, q_adj_below, p_below, dp_below, precip_new)
+        T_work = T_work.at[:, k - 1].set(T_adj_below)
+        T_work = T_work.at[:, k].set(T_adj_upper)
+        q_work = q_work.at[:, k - 1].set(q_adj_below)
+        q_work = q_work.at[:, k].set(q_adj_upper)
 
-        # Store the adjusted upper level values
-        return new_carry, (T_adj_upper, q_adj_upper)
+        return (T_work, q_work, precip_new), None
 
-    # Initial carry: bottom level values
-    init_carry = (
-        T_rev[:, 0],      # T_below (bottom level)
-        q_v_rev[:, 0],    # q_below
-        p_rev[:, 0],      # p_below
-        dp_rev[:, 0],     # dp_below
-        jnp.zeros(ncol),  # precipitation accumulator
-    )
-
-    # Scan over levels 1..nlev-1 (moving upward)
+    init_carry = (T_rev, q_v_rev, jnp.zeros(ncol))
     level_indices = jnp.arange(1, nlev)
-    final_carry, (T_upper_stack, q_upper_stack) = jax.lax.scan(
+    (T_adj_rev, q_adj_rev, precip_col), _ = jax.lax.scan(
         scan_step, init_carry, level_indices,
-    )
-    # T_upper_stack: (nlev-1, ncol) — levels 1..nlev-1 in reversed order
-    # final_carry contains the adjusted bottom level
-
-    T_adj_bottom, q_adj_bottom, _, _, precip_col = final_carry
-
-    # Reconstruct full arrays (still in reversed order)
-    T_adj_rev = jnp.concatenate(
-        [T_adj_bottom[:, None], T_upper_stack.T],  # (ncol, nlev)
-        axis=1,
-    )
-    q_adj_rev = jnp.concatenate(
-        [q_adj_bottom[:, None], q_upper_stack.T],
-        axis=1,
     )
 
     # Un-reverse to original top-to-bottom ordering

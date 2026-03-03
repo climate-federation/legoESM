@@ -102,7 +102,7 @@ def kessler_microphysics(
     sed_tend = sedimentation_tendency(q_r, rho, V_t, dz)
 
     # 6. Latent heating
-    dT_dt = constants.L_v * condensation / constants.c_pd
+    dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd
 
     # Combine tracer tendencies
     dq_v_dt = dq_v_sat + evaporation

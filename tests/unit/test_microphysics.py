@@ -111,6 +111,33 @@ def _make_cold_columns(ncol=4, nlev=10):
     return T, q_v, hydrometeors, p_full, p_half, rho, dz
 
 
+def _make_evaporation_columns(ncol=4, nlev=10):
+    """Create warm, subsaturated columns with rain to isolate evaporation."""
+    T = jnp.full((ncol, nlev), 290.0)
+    p_half = jnp.linspace(1e4, 1e5, nlev + 1)[None, :].repeat(ncol, axis=0)
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+
+    q_sat = saturation_mixing_ratio(T, p_full)
+    q_v = 0.2 * q_sat
+
+    q_r = jnp.full((ncol, nlev), 1e-3)
+    z = jnp.zeros((ncol, nlev))
+    hydrometeors = HydrometeorState(
+        q_c=z,
+        q_r=q_r,
+        q_i=z,
+        q_s=z,
+        q_g=z,
+        N_c=jnp.full((ncol, nlev), 1e8),
+        N_r=jnp.full((ncol, nlev), 1e4),
+        N_i=jnp.full((ncol, nlev), 1e3),
+    )
+
+    rho = p_full / (constants.R_d * T)
+    dz = jnp.full((ncol, nlev), 500.0)
+    return T, q_v, hydrometeors, p_full, p_half, rho, dz
+
+
 # ======================================================================
 # Output helpers
 # ======================================================================
@@ -189,6 +216,13 @@ class TestKessler:
 
         grad = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad))
+
+    def test_evaporation_enthalpy_balance(self):
+        """Evaporation cooling should balance vapor tendency latent energy."""
+        T, q_v, h, p_full, p_half, rho, dz = _make_evaporation_columns()
+        out = kessler_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
+        residual = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
+        assert float(jnp.max(jnp.abs(residual))) < 1e-6
 
 
 # ======================================================================
@@ -287,6 +321,13 @@ class TestSeifertBeheng:
         grad = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad))
 
+    def test_evaporation_enthalpy_balance(self):
+        """Evaporation cooling should balance vapor tendency latent energy."""
+        T, q_v, h, p_full, p_half, rho, dz = _make_evaporation_columns()
+        out = seifert_beheng_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
+        residual = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
+        assert float(jnp.max(jnp.abs(residual))) < 1e-6
+
 
 # ======================================================================
 # Morrison tests
@@ -340,6 +381,13 @@ class TestMorrison:
 
         grad = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad))
+
+    def test_evaporation_enthalpy_balance(self):
+        """Warm-rain evaporation cooling should close latent energy tendency."""
+        T, q_v, h, p_full, p_half, rho, dz = _make_evaporation_columns()
+        out = morrison_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
+        residual = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
+        assert float(jnp.max(jnp.abs(residual))) < 5e-3
 
 
 # ======================================================================
@@ -395,6 +443,13 @@ class TestThompson:
 
         grad = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad))
+
+    def test_evaporation_enthalpy_balance(self):
+        """Warm-rain evaporation cooling should close latent energy tendency."""
+        T, q_v, h, p_full, p_half, rho, dz = _make_evaporation_columns()
+        out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
+        residual = constants.c_pd * out.dT_dt + constants.L_v * out.dq_v_dt
+        assert float(jnp.max(jnp.abs(residual))) < 5e-3
 
 
 # ======================================================================

@@ -149,7 +149,8 @@ def edmf_turbulence(
     ustar = jnp.clip(ustar, 1e-4, None)
 
     # Potential temperature for updraft
-    theta = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    exner = (jnp.clip(p_full, 1.0, None) / constants.p_ref) ** constants.kappa
+    theta = T / jnp.clip(exner, 1.0e-8, None)
 
     # Initialize updraft at surface (bottom level = index nlev-1)
     w_u_init = jnp.maximum(jnp.full(ncol, config.w_updraft_min), 2.5 * ustar)
@@ -240,7 +241,8 @@ def edmf_turbulence(
         )
         return -dflux_dz / jnp.clip(rho, 0.01, None)
 
-    dT_dt_mf = _mf_tendency(theta, theta_u)
+    dtheta_dt_mf = _mf_tendency(theta, theta_u)
+    dT_dt_mf = dtheta_dt_mf * exner
     dq_dt_mf = _mf_tendency(q_v, q_u)
 
     # ===== ED tendencies via implicit diffusion =====

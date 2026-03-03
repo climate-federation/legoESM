@@ -99,7 +99,7 @@ def seifert_beheng_microphysics(
     sed_r = sedimentation_tendency(q_r, rho, V_t_r, dz)
 
     # 7. Latent heating
-    dT_dt = constants.L_v * condensation / constants.c_pd
+    dT_dt = constants.L_v * (condensation - evaporation) / constants.c_pd
 
     # Combine tendencies
     dq_v_dt = -condensation + evaporation

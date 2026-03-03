@@ -323,6 +323,25 @@ class TestDCA:
         # Should have nonzero temperature adjustment
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-6
 
+    def test_upward_pair_adjustment_uses_progressive_scan_carry(self):
+        """Upper-pair instability should adjust even if bottom pair is stable."""
+        T = jnp.array([[230.0, 290.0, 291.0]])  # top -> bottom
+        q_v = jnp.full_like(T, 1e-6)
+        p_half = jnp.array([[1.0e4, 4.0e4, 8.0e4, 1.1e5]])
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+
+        out = dca_convection(
+            T,
+            q_v,
+            p_full,
+            p_half,
+            dt=300.0,
+            config=DCAConfig(n_iterations=1, mixing_fraction=1.0),
+        )
+
+        # Top level (index 0) belongs only to the upper pair and should adjust.
+        assert float(jnp.abs(out.dT_dt[0, 0])) > 1e-4
+
     def test_differentiable(self):
         """jax.grad should work through DCA convection."""
         ncol, nlev = 2, 8
