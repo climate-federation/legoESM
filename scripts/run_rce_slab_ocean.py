@@ -161,6 +161,7 @@ from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.solar import perpetual_equinox_insolation
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
+from legoesm.core.operators_3d import hyperdiffusion_3d
 
 _RH_init = 0.6
 p_full_init = state.p_s.data[..., None] * sigma.sigma_full
@@ -290,6 +291,11 @@ def physics_step(T, p_s, q_v, u, v, ocean_sst, lat, dt):
 
     dq_v_dt = dq_v_dt_conv
     dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
+
+    # --- (f) Hyperdiffusion on q_v (damp 2Δx checkerboard) ---
+    # q_v is outside the dycore state — apply the same scale-selective
+    # damping that the dycore applies to T, u, v, p_s.
+    dq_v_dt = dq_v_dt + hyperdiffusion_3d(q_v, grid, HYPERDIFF)
 
     return dT_dt, dq_v_dt, sst_new, precip, sw_net_sfc, lw_net_sfc
 
