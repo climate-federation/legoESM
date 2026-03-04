@@ -1,0 +1,756 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+
+\pagestyle{fancy}
+\fancyhead[L]{\small legoESM Technical Documentation}
+\fancyhead[R]{\small\thepage}
+\fancyfoot{}
+
+\titleformat{\section}{\Large\bfseries}{}{0em}{}
+\titleformat{\subsection}{\large\bfseries}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{}{0em}{}
+
+\newcommand{\dd}{\mathrm{d}}
+\newcommand{\pp}{\partial}
+\newcommand{\half}{\tfrac{1}{2}}
+\newcommand{\Rd}{R_d}
+\newcommand{\cpd}{c_p}
+\newcommand{\Lv}{L_v}
+\newcommand{\Rv}{R_v}
+\newcommand{\pref}{p_0}
+\newcommand{\SB}{\sigma_{\mathrm{SB}}}
+
+\title{\textbf{legoESM: A Differentiable Earth System Model in JAX}\\[6pt]
+\large Technical Documentation of Equations and Implementations}
+\author{legoESM Development Team}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+%=============================================================================
+\section{Introduction}
+%=============================================================================
+
+legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, and sea-ice components on the sphere, with nine dynamical cores and over thirty physics parameterisations.
+
+\paragraph{Design principles.}
+\begin{itemize}[nosep]
+  \item Pure-JAX implementation: all components are compatible with \texttt{jit}, \texttt{grad}, and \texttt{vmap}.
+  \item Modular physics: each parameterisation follows a factory pattern returning a callable \texttt{physics\_fn(state, grid, coord) $\to$ Tendencies}.
+  \item Multiple dynamical cores share the same physics interface, enabling interchangeable experiments.
+  \item Neural-network components (SFNO) integrate seamlessly via the same JAX computational graph.
+\end{itemize}
+
+%=============================================================================
+\section{Grid Systems}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{Cubed-Sphere Grid}
+%-----------------------------------------------------------------------------
+
+Six faces of a cube are mapped to the sphere via \textbf{gnomonic (central) projection}.  Let $(\alpha_x,\alpha_y)\in[-\pi/4,\pi/4]^2$ be gnomonic coordinates on a face.
+
+\subsubsection{Face-to-Cartesian mapping}
+For face~0 ($+x$ face):
+\begin{equation}
+  (x,y,z) = \bigl(1,\;\tan\alpha_x,\;\tan\alpha_y\bigr),
+\end{equation}
+with analogous expressions for the remaining five faces.  Points are normalised to the unit sphere: $\hat{\bm r}=\bm r/|\bm r|$, and geographic coordinates follow as $\lambda=\mathrm{atan2}(\hat y,\hat x)$, $\phi=\arcsin(\hat z)$.
+
+\subsubsection{Cell area}
+The area element on the gnomonic equidistant grid is
+\begin{equation}
+  \Delta A = \frac{R^2\,\Delta\alpha^2}{\cos^2\!\alpha_x\,\cos^2\!\alpha_y\,D^3},
+  \qquad D = \sqrt{1+\tan^2\!\alpha_x+\tan^2\!\alpha_y},
+  \qquad \Delta\alpha=\frac{\pi}{2n}.
+\end{equation}
+
+\subsubsection{Grid spacing}
+Great-circle distances use the chord-to-arc formula:
+\begin{equation}
+  d = R\cdot 2\arcsin\!\Bigl(\frac{|\bm r_1-\bm r_2|}{2}\Bigr).
+\end{equation}
+Metric factors $\Delta x_{i,j}$ and $\Delta y_{i,j}$ are computed as two-cell spans for second-order centred differences.
+
+\subsubsection{Grid angle and wind rotation}
+The angle $\theta$ between the grid $x$-axis and geographic east is
+\begin{equation}
+  \theta = \mathrm{atan2}\!\Bigl(\frac{\pp\phi}{\pp i},\;\frac{\pp\lambda}{\pp i}\cos\phi\Bigr).
+\end{equation}
+Wind rotation between geographic $(u_E,v_N)$ and grid-aligned $(u_g,v_g)$:
+\begin{equation}
+  \begin{pmatrix}u_E\\v_N\end{pmatrix}
+  =\begin{pmatrix}\cos\theta&-\sin\theta\\\sin\theta&\cos\theta\end{pmatrix}
+  \begin{pmatrix}u_g\\v_g\end{pmatrix}.
+\end{equation}
+
+\subsubsection{Halo exchange}
+Scalar fields are exchanged directly across the six-face connectivity table.  Vector fields are first rotated to geographic components, padded as scalars, then rotated back using the padded grid angle.
+
+%-----------------------------------------------------------------------------
+\subsection{Gaussian Grid and Spectral Transforms}
+%-----------------------------------------------------------------------------
+
+The spectral dynamical cores use a Gaussian grid with triangular truncation at total wavenumber $n_{\max}$.
+
+\subsubsection{Grid dimensions}
+\begin{equation}
+  n_{\mathrm{lat}} = \lceil\tfrac{3}{2}(n_{\max}+1)\rceil_{\mathrm{even}},
+  \qquad n_{\mathrm{lon}} = 2\,n_{\mathrm{lat}},
+  \qquad n_{\mathrm{sh}} = \frac{(n_{\max}+1)(n_{\max}+2)}{2}.
+\end{equation}
+Latitudes are Gaussian quadrature points $\mu_k=\sin\phi_k$ with weights $w_k$; longitudes are equispaced.
+
+\subsubsection{Associated Legendre polynomials}
+Fully normalised ($4\pi$) polynomials $P_n^m(\mu)$ satisfy $\int|Y_n^m|^2\,\dd A=1$.  They are computed via the recursion
+\begin{align}
+  P_m^m &= -\sqrt{\frac{2m+1}{2m}}\;\sqrt{1-\mu^2}\;P_{m-1}^{m-1},\\
+  P_n^m &= \sqrt{\frac{4n^2-1}{n^2-m^2}}\Bigl(\mu\,P_{n-1}^m - \sqrt{\frac{(n-1)^2-m^2}{4(n-1)^2-1}}\;P_{n-2}^m\Bigr).
+\end{align}
+The derivative operator $H_n^m=-(1-\mu^2)\,\dd P_n^m/\dd\mu$ is used for meridional gradients.
+
+\subsubsection{Spherical harmonic transforms}
+\paragraph{Analysis (grid $\to$ spectral).}
+\begin{equation}
+  \hat f_{nm} = 2\pi\sum_k w_k\,P_n^m(\mu_k)\,\tilde f_m(\mu_k),
+  \qquad \tilde f_m = \frac{1}{n_{\mathrm{lon}}}\,\mathrm{FFT}[f]_m.
+\end{equation}
+
+\paragraph{Synthesis (spectral $\to$ grid).}
+\begin{equation}
+  f(\phi,\lambda) = \mathrm{iFFT}\Bigl[\sum_{n=m}^{n_{\max}}\hat f_{nm}\,P_n^m(\mu)\Bigr].
+\end{equation}
+
+\subsubsection{Spectral operators}
+Laplacian eigenvalue: $\nabla^2\hat f_{nm}=-n(n+1)/a^2\cdot\hat f_{nm}$.  Inverse Laplacian: $\nabla^{-2}\hat f_{nm}=-a^2/[n(n+1)]$ for $n>0$.  Hyperdiffusion: $-\nu[n(n+1)/a^2]^p\,\hat f_{nm}$.
+
+\subsubsection{Velocity from vorticity and divergence}
+Streamfunction $\psi=\nabla^{-2}\zeta$, velocity potential $\chi=\nabla^{-2}\delta$.  Velocity reconstruction:
+\begin{equation}
+  u\cos\phi = \frac{\pp\psi}{\pp\theta}+\frac{\pp\chi}{\pp\lambda},
+  \qquad
+  v\cos\phi = \frac{\pp\psi}{\pp\lambda}-\frac{\pp\chi}{\pp\theta},
+\end{equation}
+where $\theta$ is colatitude.
+
+%-----------------------------------------------------------------------------
+\subsection{Sigma Vertical Coordinate}
+%-----------------------------------------------------------------------------
+
+\begin{equation}
+  \sigma = p\,/\,p_s, \qquad \sigma\in[\sigma_{\mathrm{top}},\;1].
+\end{equation}
+Half-level interfaces $\sigma_{k+1/2}$ are uniformly spaced; full levels $\sigma_k=(\sigma_{k-1/2}+\sigma_{k+1/2})/2$.  Layer thickness $\Delta\sigma_k=\sigma_{k+1/2}-\sigma_{k-1/2}$.
+
+\subsubsection{Simmons--Burridge geopotential}
+The geopotential at full level $k$ is
+\begin{equation}
+  \Phi_k = \Phi_s + \Rd\!\sum_{k'=k+1}^{N-1}T_{k'}\ln\frac{\sigma_{k'+1/2}}{\sigma_{k'-1/2}}
+  + \alpha_k\,\Rd\,T_k,
+\end{equation}
+where the Simmons--Burridge coefficient is
+\begin{equation}
+  \alpha_k = 1 - \frac{\sigma_{k-1/2}}{\Delta\sigma_k}\ln\frac{\sigma_{k+1/2}}{\sigma_{k-1/2}}.
+\end{equation}
+
+\subsubsection{Sigma-dot}
+The vertical velocity in $\sigma$-space is obtained by integrating the continuity equation from the model top ($\dot\sigma=0$):
+\begin{equation}
+  \dot\sigma_{k+1/2} = \frac{\sigma_{k+1/2}-\sigma_{\mathrm{top}}}{1-\sigma_{\mathrm{top}}}\,D_{\mathrm{tot}} - \sum_{k'=0}^{k}\nabla\!\cdot\!\bm v_{k'}\,\Delta\sigma_{k'},
+  \qquad D_{\mathrm{tot}}=\sum_{k'=0}^{N-1}\nabla\!\cdot\!\bm v_{k'}\,\Delta\sigma_{k'}.
+\end{equation}
+
+\subsubsection{Pressure velocity}
+Since $p=\sigma\,p_s$, the material pressure tendency is
+\begin{equation}
+  \omega \equiv \frac{\dd p}{\dd t} = \sigma\,\frac{\dd p_s}{\dd t} + p_s\,\dot\sigma,
+\end{equation}
+where $\dd p_s/\dd t$ is the \emph{material} derivative of surface pressure (Eulerian tendency plus advection by the horizontal wind).
+
+%-----------------------------------------------------------------------------
+\subsection{Height and $z^*$ Coordinates}
+%-----------------------------------------------------------------------------
+
+The terrain-following $z^*$ coordinate:
+\begin{equation}
+  z^* = H\,\frac{z-z_s}{H-z_s}, \qquad J=\frac{\pp z}{\pp z^*}=\frac{H-z_s}{H}.
+\end{equation}
+Physical height: $z(z^*,x,y)=z_s+z^*\,(H-z_s)/H$.
+
+For the \textbf{ocean}, the $z^*$ coordinate has a dynamic Jacobian:
+\begin{equation}
+  J(\eta) = \frac{\eta+H}{H_{\max}},
+\end{equation}
+where $\eta$ is the free-surface elevation and $H$ the resting depth.
+
+%=============================================================================
+\section{Core Operators}
+%=============================================================================
+
+All finite-difference operators use second-order centred differences on the A-grid (collocated) with halo padding on the cubed sphere.  The discrete difference operators $\delta_i$ and $\delta_j$ are defined as centred differences of \emph{cell-centre} values on the padded grid:
+\begin{equation}
+  \delta_i[q]_{i,j} = q_{i+1,j}-q_{i-1,j}, \qquad \delta_j[q]_{i,j} = q_{i,j+1}-q_{i,j-1}.
+\end{equation}
+All metric-weighted fluxes ($u\,h_y$, $v\,h_x$) are evaluated at cell centres before differencing, consistent with the A-grid stencil.
+
+\subsection{Gradient}
+\begin{equation}
+  \frac{\pp f}{\pp x}\bigg|_{i,j}=\frac{f_{i+1,j}-f_{i-1,j}}{2\,\Delta x_{i,j}},
+  \qquad
+  \frac{\pp f}{\pp y}\bigg|_{i,j}=\frac{f_{i,j+1}-f_{i,j-1}}{2\,\Delta y_{i,j}}.
+\end{equation}
+
+\subsection{Divergence (flux form)}
+\begin{equation}
+  \nabla\!\cdot\!(u,v) = \frac{1}{2\,A_{i,j}}
+  \Bigl[\delta_i\bigl(u\,h_y\bigr)+\delta_j\bigl(v\,h_x\bigr)\Bigr],
+\end{equation}
+where $h_x=\Delta x/2$, $h_y=\Delta y/2$ are half-edge lengths and $A$ is the cell area.
+
+\subsection{Vorticity}
+\begin{equation}
+  \zeta = \frac{1}{2\,A_{i,j}}
+  \Bigl[\delta_i\bigl(v\,h_y\bigr)-\delta_j\bigl(u\,h_x\bigr)\Bigr].
+\end{equation}
+
+\subsection{Laplacian and Hyperdiffusion}
+\begin{equation}
+  \nabla^2 f = \nabla\!\cdot\!(\nabla f),
+  \qquad \text{Hyperdiffusion:}\quad -\nu\,\nabla^4 f = -\nu\,\nabla^2(\nabla^2 f).
+\end{equation}
+
+%=============================================================================
+\section{Atmospheric Dynamics}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{Shallow Water Equations}
+%-----------------------------------------------------------------------------
+
+In \textbf{vector-invariant form} on the cubed sphere:
+\begin{align}
+  \frac{\pp h}{\pp t} &= -\nabla\!\cdot\!(h\,\bm v), \label{eq:sw-mass}\\
+  \frac{\pp u}{\pp t} &= (\zeta+f)\,v - \frac{\pp B}{\pp x} + D_u, \label{eq:sw-u}\\
+  \frac{\pp v}{\pp t} &= -(\zeta+f)\,u - \frac{\pp B}{\pp y} + D_v, \label{eq:sw-v}
+\end{align}
+where the Bernoulli function is $B=\half(u^2+v^2)+g(h+h_s)$ and $D_u,D_v$ represent hyperdiffusion.
+
+%-----------------------------------------------------------------------------
+\subsection{Hydrostatic Primitive Equations ($\sigma$-coordinates)}
+%-----------------------------------------------------------------------------
+
+Prognostic variables: $u,v$ (winds), $T$ (temperature), $p_s$ (surface pressure).
+
+\begin{align}
+  \frac{\pp p_s}{\pp t} &= -\int_0^1 \nabla\!\cdot\!(p_s\,\bm v)\,\dd\sigma, \label{eq:pe-ps}\\
+  \frac{\pp u}{\pp t} &= (\zeta+f)\,v - \frac{\pp B}{\pp x} - \Rd T\,\frac{\pp\ln p_s}{\pp x} + D_u, \label{eq:pe-u}\\
+  \frac{\pp v}{\pp t} &= -(\zeta+f)\,u - \frac{\pp B}{\pp y} - \Rd T\,\frac{\pp\ln p_s}{\pp y} + D_v, \label{eq:pe-v}\\
+  \frac{\pp T}{\pp t} &= -\nabla\!\cdot\!(T\,\bm v)+T\,\nabla\!\cdot\!\bm v - \dot\sigma\,\frac{\pp T}{\pp\sigma} + \kappa\,T\,\frac{\omega}{p} + Q, \label{eq:pe-T}
+\end{align}
+where $B=K+\Phi$, $K=\half(u^2+v^2)$, and $\kappa=\Rd/\cpd$.
+
+%-----------------------------------------------------------------------------
+\subsection{Spectral Primitive Equations (Vorticity--Divergence)}
+%-----------------------------------------------------------------------------
+
+On the Gaussian grid, the momentum equations are recast in the vorticity--divergence form (Bourke, 1972):
+\begin{align}
+  \frac{\pp\hat\zeta}{\pp t} &= \widehat{\nabla\!\times\![(\zeta+f)\bm v]} + \widehat{\text{vert.\ adv.}} - \nu\nabla^{2p}\hat\zeta, \label{eq:spe-vor}\\
+  \frac{\pp\hat\delta}{\pp t} &= \widehat{\nabla\!\cdot\![(\zeta+f)\bm v]} - \nabla^2\widehat{(K+\Phi+\Rd T\ln p_s)} + \widehat{\text{vert.\ adv.}} - \nu\nabla^{2p}\hat\delta, \label{eq:spe-div}\\
+  \frac{\pp\hat T}{\pp t} &= \widehat{-\nabla\!\cdot\!(T\bm v)+T\nabla\!\cdot\!\bm v} - \widehat{\dot\sigma\,\pp T/\pp\sigma} + \widehat{\kappa T\omega/p}, \label{eq:spe-T}\\
+  \frac{\pp\widehat{\ln p_s}}{\pp t} &= -\int_0^1\hat\delta\,\dd\sigma. \label{eq:spe-lnps}
+\end{align}
+
+The spectral curl and divergence of flux vectors $(U,V)=(F_u\cos\phi,\,F_v\cos\phi)$ are
+\begin{equation}
+  \widehat{\text{curl}} = \frac{im}{a}\,\mathcal S\bigl[V/\cos^2\!\phi\bigr] + \frac{1}{a}\,\mathcal S_\mu[U],
+  \quad
+  \widehat{\text{div}} = \frac{im}{a}\,\mathcal S\bigl[U/\cos^2\!\phi\bigr] - \frac{1}{a}\,\mathcal S_\mu[V],
+\end{equation}
+where $\mathcal S$ and $\mathcal S_\mu$ denote the SH analysis with standard and $\dd P_n^m/\dd\mu$ Legendre matrices.
+
+%-----------------------------------------------------------------------------
+\subsection{Non-Hydrostatic Compressible Euler Equations}
+%-----------------------------------------------------------------------------
+
+In the $z^*$ terrain-following coordinate, the prognostic variables are $u,v,w,\theta',\rho'$ (perturbations from a reference state $\rho_0,\theta_0,\pi_0$).
+
+\begin{align}
+  \frac{\pp u}{\pp t} &= (\zeta+f)\,v - \frac{\pp K}{\pp x} - \cpd\theta\,\frac{\pp\pi'}{\pp x} + D_u - r\,u, \label{eq:nh-u}\\
+  \frac{\pp v}{\pp t} &= -(\zeta+f)\,u - \frac{\pp K}{\pp y} - \cpd\theta\,\frac{\pp\pi'}{\pp y} + D_v - r\,v, \label{eq:nh-v}\\
+  \frac{\pp w}{\pp t} &= -\frac{\cpd\theta}{J}\,\frac{\pp\pi'}{\pp z^*} - g\,\frac{\theta'}{\theta_0} - r\,w, \label{eq:nh-w}\\
+  \frac{\pp\theta'}{\pp t} &= -\nabla\!\cdot\!(\theta\,\bm v_h) - \frac{w}{J}\,\frac{\pp\theta}{\pp z^*} + D_\theta, \label{eq:nh-theta}\\
+  \frac{\pp\rho'}{\pp t} &= -\frac{1}{J}\Bigl[\nabla_h\!\cdot\!(J\rho\,\bm v_h) + \frac{\pp(\rho w)}{\pp z^*}\Bigr], \label{eq:nh-rho}
+\end{align}
+where $r(z)$ is the sponge-layer Rayleigh damping coefficient and the Exner function perturbation is
+\begin{equation}
+  \pi' = \pi_0\Bigl[\Bigl(1+\frac{\rho'}{\rho_0}\Bigr)\!\Bigl(1+\frac{\theta'}{\theta_0}\Bigr)\Bigr]^{R_d/c_v}-\pi_0.
+\end{equation}
+
+\subsubsection{Split-explicit time integration}
+
+The equations are integrated with an outer SSP-RK3 scheme for the slow tendencies (advection, Coriolis, horizontal pressure gradient, diffusion) and inner forward--backward acoustic substeps for the fast variables ($w,\theta',\rho'$).
+
+\paragraph{Forward step (w).}
+\begin{equation}
+  w^{n+1} = w^n + \Delta t_s\Bigl[-\frac{\cpd\theta}{J}\,\frac{\pp\pi'}{\pp z^*} - g\,\frac{\theta'}{\theta_0}\Bigr].
+\end{equation}
+
+\paragraph{Backward step ($\rho',\theta'$).}
+\begin{equation}
+  \rho'^{n+1} = \rho'^n - \Delta t_s\,\frac{\pp(\rho\,w^{n+1})}{\pp z^*},
+  \qquad
+  \theta'^{n+1} = \theta'^n - \Delta t_s\,\frac{w^{n+1}}{J}\,\frac{\pp\theta}{\pp z^*}.
+\end{equation}
+
+An optional \textbf{semi-implicit acoustic} solve replaces the forward Euler for $w$ with a tridiagonal system to remove the vertical acoustic CFL constraint.
+
+\subsubsection{Sponge layer}
+\begin{equation}
+  r(z) = r_{\max}\sin^2\!\Bigl(\frac{\pi}{2}\,\frac{\max(0,\,z-z_{\mathrm{bot}})}{z_{\mathrm{top}}-z_{\mathrm{bot}}}\Bigr).
+\end{equation}
+
+%=============================================================================
+\section{Atmospheric Physics}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{Gray Radiation (Frierson 2006)}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Longwave optical depth}
+\begin{equation}
+  \tau(\sigma,\phi) = \bigl[f_l\,\sigma+(1-f_l)\,\sigma^4\bigr]\bigl[\tau_e+(\tau_p-\tau_e)\sin^2\!\phi\bigr]
+  + \tau_{\mathrm{moist}}\,q_v,
+\end{equation}
+with $\tau_e=7.2$, $\tau_p=1.8$, $f_l=0.2$, $\tau_{\mathrm{moist}}=1150$.
+
+\subsubsection{Two-stream LW fluxes}
+Layer transmittance and emissivity:
+\begin{equation}
+  \mathcal T_k = e^{-D\,\Delta\tau_k}, \qquad \varepsilon_k = 1-\mathcal T_k, \qquad D=1.66.
+\end{equation}
+Upward sweep from surface ($F^\uparrow_{\mathrm{sfc}}=\varepsilon_s\,\SB\,T_s^4$):
+\begin{equation}
+  F^\uparrow_k = \mathcal T_k\,F^\uparrow_{k+1} + \varepsilon_k\,\SB\,T_k^4.
+\end{equation}
+Downward sweep from TOA ($F^\downarrow_0=0$):
+\begin{equation}
+  F^\downarrow_k = \mathcal T_k\,F^\downarrow_{k-1} + \varepsilon_k\,\SB\,T_k^4.
+\end{equation}
+
+\subsubsection{Shortwave (Beer--Lambert)}
+\begin{equation}
+  F^\downarrow_{\mathrm{SW}}(k) = \frac{S_0}{4}\,e^{-D\,\tau_{\mathrm{SW},0}\,\sigma_k}, \qquad
+  F^\uparrow_{\mathrm{SW}}(k) = \alpha_s\,F^\downarrow_{\mathrm{SW}}(\mathrm{sfc})\,e^{-D\,\tau_{\mathrm{SW},0}\,(1-\sigma_k)},
+\end{equation}
+with $\tau_{\mathrm{SW},0}=0.22$, $S_0=1360$~W\,m$^{-2}$, $\alpha_s=0.31$.
+
+\subsubsection{Heating rate}
+Defining $F_{\mathrm{net}}^\uparrow=F^\uparrow-F^\downarrow$ (upward positive) at each interface, the heating rate for layer~$k$ is
+\begin{equation}
+  \frac{\dd T}{\dd t}\bigg|_{\mathrm{rad},k} = \frac{g}{\cpd}\,\frac{F_{\mathrm{net},k+1/2}^\uparrow-F_{\mathrm{net},k-1/2}^\uparrow}{p_{k+1/2}-p_{k-1/2}},
+\end{equation}
+where $k+\half$ is the bottom interface and $k-\half$ the top (pressure increasing downward).  Positive divergence of upward flux warms the layer.
+
+%-----------------------------------------------------------------------------
+\subsection{RRTMGP Correlated-$k$ Radiation}
+%-----------------------------------------------------------------------------
+
+The RRTMGP wrapper calls JAX-RRTMGP with correlated-$k$ gaseous optics (128~LW and 112~SW $g$-points), a two-stream RTE solver, and optional cloud optics.  Default trace-gas concentrations: CO$_2$=415~ppmv, CH$_4$=1900~ppbv, N$_2$O=332~ppbv.
+
+%-----------------------------------------------------------------------------
+\subsection{SBM Convection (Frierson 2007)}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Moist adiabatic lapse rate}
+\begin{equation}
+  \Gamma_m = \frac{\Rd T}{\cpd p}\,\frac{1+\Lv q_s/(\Rd T)}{1+\Lv^2 q_s/(\cpd\Rv T^2)},
+\end{equation}
+integrated upward via a trapezoidal predictor--corrector.
+
+\subsubsection{Saturation mixing ratio (Tetens)}
+\begin{equation}
+  e_s = 611.2\exp\!\Bigl(\frac{17.67\,T_c}{T_c+243.5}\Bigr), \qquad
+  q_s = \frac{\varepsilon\,e_s}{p-e_s}, \qquad \varepsilon=\Rd/\Rv\approx 0.622.
+\end{equation}
+
+\subsubsection{CAPE and trigger}
+\begin{equation}
+  \mathrm{CAPE} = \Rd\sum_k \max\!\bigl(0,\;T_{\mathrm{parcel},k}-T_{\mathrm{env},k}\bigr)\,\frac{\Delta p_k}{p_k}.
+\end{equation}
+A smooth sigmoid trigger activates convection:
+\begin{equation}
+  \mathcal F = \sigma\!\bigl(\kappa_s(\mathrm{CAPE}-\mathrm{CAPE}_c)\bigr), \qquad \kappa_s=0.01\;\text{(J/kg)}^{-1}.
+\end{equation}
+
+\subsubsection{Enthalpy-conserving relaxation}
+The reference profile $T_{\mathrm{ref}}$ is obtained by adjusting the moist adiabat so that column-integrated moist enthalpy is conserved:
+\begin{equation}
+  \sum_k\bigl[\cpd(T_{\mathrm{ref},k}-T_k)+\Lv(q_{\mathrm{ref},k}-q_{v,k})\bigr]\,\Delta p_k = 0.
+\end{equation}
+Newton iteration (2 steps) solves for the temperature offset.  Tendencies:
+\begin{equation}
+  \frac{\dd T}{\dd t} = \mathcal F\,\frac{T_{\mathrm{ref}}-T}{\tau_c}, \qquad
+  \frac{\dd q_v}{\dd t} = \mathcal F\,\frac{q_{\mathrm{ref}}-q_v}{\tau_c}, \qquad \tau_c=7200\;\text{s}.
+\end{equation}
+
+\subsubsection{Precipitation}
+\begin{equation}
+  P = -\frac{1}{g}\sum_k \frac{\dd q_v}{\dd t}\,\Delta p_k.
+\end{equation}
+
+%-----------------------------------------------------------------------------
+\subsection{Held--Suarez Forcing}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Equilibrium temperature}
+\begin{equation}
+  T_{\mathrm{eq}} = \max\!\Bigl(200,\;\bigl[315-\Delta T_y\sin^2\!\phi - \Delta\theta_z\ln(p/\pref)\cos^2\!\phi\bigr](p/\pref)^\kappa\Bigr),
+\end{equation}
+with $\Delta T_y=60$~K, $\Delta\theta_z=10$~K.
+
+\subsubsection{Newtonian relaxation}
+\begin{equation}
+  \frac{\dd T}{\dd t} = -k_T(\sigma,\phi)\,(T-T_{\mathrm{eq}}), \qquad
+  k_T = k_a + (k_s-k_a)\max\!\Bigl(0,\frac{\sigma-\sigma_b}{1-\sigma_b}\Bigr)\cos^4\!\phi,
+\end{equation}
+with $k_a=1/(40\;\text{day})$, $k_s=1/(4\;\text{day})$, $\sigma_b=0.7$.
+
+\subsubsection{Rayleigh friction}
+\begin{equation}
+  \frac{\dd\bm v}{\dd t} = -k_v(\sigma)\,\bm v, \qquad
+  k_v = k_f\max\!\Bigl(0,\frac{\sigma-\sigma_b}{1-\sigma_b}\Bigr), \qquad k_f=1/(1\;\text{day}).
+\end{equation}
+
+%-----------------------------------------------------------------------------
+\subsection{Louis (1979) Turbulence}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Mixing length}
+\begin{equation}
+  l = \frac{\kappa_{\mathrm{vK}}\,z}{1+\kappa_{\mathrm{vK}}\,z/l_{\max}}, \qquad \kappa_{\mathrm{vK}}=0.4,\quad l_{\max}=100\;\text{m}.
+\end{equation}
+
+\subsubsection{Richardson number}
+\begin{equation}
+  \mathrm{Ri} = \frac{N^2}{S^2}, \qquad
+  N^2 = \frac{g}{\theta_v}\frac{\pp\theta_v}{\pp z}, \qquad
+  S^2 = \Bigl(\frac{\pp u}{\pp z}\Bigr)^2+\Bigl(\frac{\pp v}{\pp z}\Bigr)^2.
+\end{equation}
+
+\subsubsection{Stability functions}
+\begin{equation}
+  f_m(\mathrm{Ri}) = \begin{cases}
+    1-\dfrac{2b\,\mathrm{Ri}}{1+3bc\,l^2|\mathrm{Ri}|^{1/2}/\Delta z^2} & \mathrm{Ri}<0,\\[6pt]
+    \dfrac{1}{1+2b\,\mathrm{Ri}/\sqrt{1+d\,\mathrm{Ri}}} & \mathrm{Ri}\ge 0,
+  \end{cases}
+\end{equation}
+with $b=c=d=5$.  Eddy diffusivities: $K_m=l^2\,S\,f_m$, $K_h=K_m$.
+
+%-----------------------------------------------------------------------------
+\subsection{Vertical Diffusion (Implicit Thomas Algorithm)}
+%-----------------------------------------------------------------------------
+
+The backward-Euler system $-a_k\,\varphi_{k-1}+b_k\,\varphi_k-c_k\,\varphi_{k+1}=d_k$ is solved with the Thomas algorithm.
+
+\paragraph{Tridiagonal coefficients.}
+\begin{equation}
+  a_k = \frac{\Delta t\,K_{k-1/2}}{\rho_k\,\Delta z_k\,\Delta z_{k-1/2}}, \quad
+  c_k = \frac{\Delta t\,K_{k+1/2}}{\rho_k\,\Delta z_k\,\Delta z_{k+1/2}}, \quad
+  b_k = 1+a_k+c_k.
+\end{equation}
+
+\paragraph{Forward sweep.}
+\begin{equation}
+  w_k = \frac{a_k}{b'_{k-1}}, \quad b'_k = b_k-w_k\,c_{k-1}, \quad d'_k = d_k+w_k\,d'_{k-1}.
+\end{equation}
+
+\paragraph{Back substitution.}
+\begin{equation}
+  \varphi_k = \frac{d'_k+c_k\,\varphi_{k+1}}{b'_k}.
+\end{equation}
+
+%-----------------------------------------------------------------------------
+\subsection{Surface Fluxes (Bulk Aerodynamic)}
+%-----------------------------------------------------------------------------
+
+\begin{align}
+  \tau_x &= -\rho\,C_D\,|\bm V|\,u, \qquad \tau_y = -\rho\,C_D\,|\bm V|\,v, \\
+  \mathrm{SH} &= \rho\,\cpd\,C_H\,|\bm V|\,(T_s-T_a), \\
+  \mathrm{LH} &= \rho\,\Lv\,C_H\,|\bm V|\,(q_s-q_a),
+\end{align}
+with $C_D=C_H=1.5\times10^{-3}$ and $|\bm V|=\sqrt{u^2+v^2+10^{-4}}$.
+
+%=============================================================================
+\section{Ocean Dynamics}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{Boussinesq Hydrostatic Primitive Equations}
+%-----------------------------------------------------------------------------
+
+In vector-invariant form on the cubed sphere:
+\begin{align}
+  \frac{\pp u}{\pp t} &= (\zeta+f)\,v - \frac{\pp K}{\pp x} - \frac{1}{\rho_0}\frac{\pp p'}{\pp x} + A_h\nabla^2 u + \frac{\pp}{\pp z}\!\Bigl(A_v\frac{\pp u}{\pp z}\Bigr) - w\frac{\pp u}{\pp z}, \\
+  \frac{\pp v}{\pp t} &= -(\zeta+f)\,u - \frac{\pp K}{\pp y} - \frac{1}{\rho_0}\frac{\pp p'}{\pp y} + A_h\nabla^2 v + \frac{\pp}{\pp z}\!\Bigl(A_v\frac{\pp v}{\pp z}\Bigr) - w\frac{\pp v}{\pp z}.
+\end{align}
+The Coriolis force is split: depth-mean $f\bm v$ in the barotropic substeps, baroclinic shear $f\bm v'$ in the slow tendencies.
+
+\subsubsection{Tracer equations (skew-symmetric)}
+\begin{equation}
+  \frac{\pp\phi}{\pp t} = \half\Bigl[-\bm v\!\cdot\!\nabla\phi - \nabla\!\cdot\!(\phi\,\bm v)\Bigr]
+  - w\frac{\pp\phi}{\pp z} + K_h\nabla^2\phi + \frac{\pp}{\pp z}\!\Bigl(K_v\frac{\pp\phi}{\pp z}\Bigr).
+\end{equation}
+
+\subsubsection{Free-surface equation}
+\begin{equation}
+  \frac{\pp\eta}{\pp t} = -\sum_k \nabla\!\cdot\!(h_k\,\bm v_k).
+\end{equation}
+
+%-----------------------------------------------------------------------------
+\subsection{Barotropic Solver (Forward--Backward, Semi-Implicit Coriolis)}
+%-----------------------------------------------------------------------------
+
+The barotropic system is solved with split-explicit forward--backward substeps:
+\begin{equation}
+  \frac{\pp\eta}{\pp t} = -\nabla\!\cdot\!(H\,\bar{\bm V}),
+  \qquad
+  \frac{\pp\bar{\bm V}}{\pp t} = f\hat{\bm k}\times\bar{\bm V} - g\nabla\eta + \bm F_{\mathrm{slow}}.
+\end{equation}
+
+\paragraph{Semi-implicit Coriolis.} With $\alpha=\half f\,\Delta t_s$:
+\begin{equation}
+  \bar U^{n+1} = \frac{R_u+\alpha\,R_v}{1+\alpha^2}, \qquad
+  \bar V^{n+1} = \frac{R_v-\alpha\,R_u}{1+\alpha^2},
+\end{equation}
+where $R_u=\bar U^n+\alpha\bar V^n-\Delta t_s\,g\,\pp\eta/\pp x$ and $R_v=\bar V^n-\alpha\bar U^n-\Delta t_s\,g\,\pp\eta/\pp y$.
+
+%-----------------------------------------------------------------------------
+\subsection{Equation of State (Wright 1997)}
+%-----------------------------------------------------------------------------
+
+\begin{equation}
+  \rho = \frac{p+p_0(T,S)}{\lambda(T,S)+\alpha_0(T,S)\,(p+p_0)},
+\end{equation}
+where
+\begin{align}
+  \alpha_0 &= a_0+a_1 T+a_2 S, \\
+  p_0 &= (b_0+b_4 S)+T(b_1+T(b_2+b_3 T)+b_5 S), \\
+  \lambda &= (c_0+c_4 S)+T(c_1+T(c_2+c_3 T)+c_5 S).
+\end{align}
+Coefficients follow the MOM6 implementation.  The density perturbation is $\rho'=\rho(T,S,p)-\rho_0$.
+
+%-----------------------------------------------------------------------------
+\subsection{Hydrostatic Pressure and Vertical Velocity}
+%-----------------------------------------------------------------------------
+
+Baroclinic pressure by downward integration:
+\begin{equation}
+  p'_k = \rho_0 g\eta + \sum_{k'=0}^{k-1}\rho'_{k'}\,g\,\Delta z_{k'} + \half\rho'_k\,g\,\Delta z_k.
+\end{equation}
+
+Vertical velocity diagnosed bottom-up from $w(\text{floor})=0$:
+\begin{equation}
+  w_{k-1/2} = -\sum_{k'=k}^{N-1}\nabla\!\cdot\!(h_{k'}\,\bm v_{k'}).
+\end{equation}
+
+%=============================================================================
+\section{Time Integration}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{SSP-RK3 (Shu--Osher 1988)}
+%-----------------------------------------------------------------------------
+
+The three-stage strong-stability-preserving Runge--Kutta method:
+\begin{align}
+  \bm u^{(1)} &= \bm u^n + \Delta t\,F(\bm u^n), \\
+  \bm u^{(2)} &= \tfrac{3}{4}\bm u^n + \tfrac{1}{4}\bm u^{(1)} + \tfrac{1}{4}\Delta t\,F(\bm u^{(1)}), \\
+  \bm u^{n+1} &= \tfrac{1}{3}\bm u^n + \tfrac{2}{3}\bm u^{(2)} + \tfrac{2}{3}\Delta t\,F(\bm u^{(2)}).
+\end{align}
+SSP-RK(4,3) and SSP-RK(5,4) variants are also available.
+
+%-----------------------------------------------------------------------------
+\subsection{Split-Explicit Methods}
+%-----------------------------------------------------------------------------
+
+Each outer RK stage computes slow tendencies once, updates $u,v$ and tracers, then runs $N_s$ forward--backward acoustic substeps on the fast variables ($w,\theta',\rho'$) with substep size $\Delta t_s=\Delta t/N_s$.
+
+%=============================================================================
+\section{Land, Ice, and Coupler}
+%=============================================================================
+
+%-----------------------------------------------------------------------------
+\subsection{Slab Land Model}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Energy balance}
+\begin{equation}
+  C_s\,d_s\,\frac{\dd T_s}{\dd t} = (1-\alpha_l)\,\mathrm{SW}^\downarrow + \varepsilon_l(\mathrm{LW}^\downarrow-\SB T_s^4) - \mathrm{SH} - \mathrm{LH}.
+\end{equation}
+
+\subsubsection{Bucket hydrology}
+\begin{equation}
+  \frac{\dd W}{\dd t} = P - E, \qquad W\in[0,W_{\max}].
+\end{equation}
+Moisture availability $\beta=\beta_{\min}+(1-\beta_{\min})\,W/W_{\max}$ modulates evaporation via $q_{\mathrm{sfc}}=\beta\,q_s(T_s)$.
+
+%-----------------------------------------------------------------------------
+\subsection{Sea-Ice Model}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Surface temperature}
+\begin{equation}
+  \rho_i\,c_i\,\frac{h_{\mathrm{eff}}}{2}\,\frac{\dd T_i}{\dd t} = Q_{\mathrm{sfc}} - \frac{k_i(T_f-T_i)}{h_{\mathrm{eff}}},
+  \qquad h_{\mathrm{eff}}=\max(h_i,h_{\min}).
+\end{equation}
+
+\subsubsection{Growth and melt}
+\begin{equation}
+  \frac{\dd h_i}{\dd t} = \frac{F_{\mathrm{cond}}-F_{\mathrm{ocean}}}{\rho_i\,L_f}.
+\end{equation}
+
+\subsubsection{Concentration}
+\begin{equation}
+  \frac{\dd c}{\dd t} = \begin{cases}
+    (\dd h/\dd t)(1-c)/h_{\mathrm{new}} & \text{growing},\\
+    (\dd h/\dd t)\,c/h_{\mathrm{eff}} & \text{melting}.
+  \end{cases}
+\end{equation}
+
+%-----------------------------------------------------------------------------
+\subsection{Tile Coupler}
+%-----------------------------------------------------------------------------
+
+Surface fluxes are area-weighted blends over ocean, land, sea-ice, and lake tiles:
+\begin{equation}
+  X_{\mathrm{blend}} = f_{\mathrm{ocn}}\,X_{\mathrm{ocn}} + f_{\mathrm{land}}\,X_{\mathrm{land}} + f_{\mathrm{ice}}\,X_{\mathrm{ice}} + f_{\mathrm{lake}}\,X_{\mathrm{lake}}.
+\end{equation}
+Fluxes are time-averaged over each coupling window before being passed to the atmosphere.
+
+%=============================================================================
+\section{Machine Learning: Spherical Fourier Neural Operator}
+%=============================================================================
+
+The SFNO (ACE/FourCastNet v2 style) operates on the Gaussian grid.
+
+\subsection{Architecture}
+\begin{enumerate}[nosep]
+  \item \textbf{Encoder:} Pointwise linear $n_{\mathrm{in}}\to n_{\mathrm{emb}}$.
+  \item \textbf{$N$ processor blocks,} each containing:
+    \begin{itemize}[nosep]
+      \item Layer normalisation,
+      \item SH analysis $\to$ learned spectral convolution $\to$ SH synthesis,
+      \item GELU activation,
+      \item Pointwise MLP (two layers with expansion factor),
+      \item Skip connection.
+    \end{itemize}
+  \item \textbf{Decoder:} Pointwise linear $n_{\mathrm{emb}}\to n_{\mathrm{out}}$.
+  \item \textbf{Big-skip residual:} $\text{output}=\text{input}+\text{decoder}(\cdots)$.
+\end{enumerate}
+
+\subsection{Spectral convolution}
+In the SH coefficient space:
+\begin{equation}
+  \hat f_{nm}^{\mathrm{out}} = W_{nm}\,\hat f_{nm}^{\mathrm{in}},
+\end{equation}
+where $W_{nm}\in\mathbb R^{n_{\mathrm{emb}}\times n_{\mathrm{emb}}}$ is a learnable weight matrix per wavenumber pair.
+
+%=============================================================================
+\section{Conservation Corrections}
+%=============================================================================
+
+\subsection{Atmosphere}
+Dry-air mass is corrected by a uniform adjustment to $p_s$ that restores the area-weighted global integral:
+\begin{equation}
+  \Delta\bar p = \frac{\sum_i A_i\,p_{s,i}^{\mathrm{new}} - \sum_i A_i\,p_{s,i}^{\mathrm{old}}}{\sum_i A_i},
+  \qquad
+  p_{s,i}^{\mathrm{corr}} = p_{s,i}^{\mathrm{new}} - \Delta\bar p,
+\end{equation}
+so that $\sum_i A_i\,p_{s,i}^{\mathrm{corr}}=\sum_i A_i\,p_{s,i}^{\mathrm{old}}$ (global dry mass conserved exactly).
+Column moisture is rescaled: $q^{\mathrm{corr}}=q^{\mathrm{new}}\cdot Q_{\mathrm{old}}/Q_{\mathrm{new}}$.
+
+\subsection{Ocean}
+Volume conservation: $\eta^{\mathrm{corr}}=\eta^{\mathrm{new}}+(\sum\eta_{\mathrm{old}}\,A-\sum\eta_{\mathrm{new}}\,A)/\sum A$.\\
+Heat and salt conservation: uniform additive correction per unit volume.
+
+%=============================================================================
+\section{Physical Constants}
+%=============================================================================
+
+\begin{center}
+\begin{tabular}{llrl}
+\toprule
+Symbol & Name & Value & Unit \\
+\midrule
+$g$ & Gravitational acceleration & 9.80616 & m\,s$^{-2}$ \\
+$\Rd$ & Dry-air gas constant & 287.04 & J\,kg$^{-1}$\,K$^{-1}$ \\
+$\cpd$ & Dry-air heat capacity & 1005.0 & J\,kg$^{-1}$\,K$^{-1}$ \\
+$\Rv$ & Water-vapour gas constant & 461.5 & J\,kg$^{-1}$\,K$^{-1}$ \\
+$\Lv$ & Latent heat of vapourisation & $2.501\times10^6$ & J\,kg$^{-1}$ \\
+$\kappa$ & $\Rd/\cpd$ & 0.285 & --- \\
+$\pref$ & Reference pressure & $10^5$ & Pa \\
+$\SB$ & Stefan--Boltzmann constant & $5.67\times10^{-8}$ & W\,m$^{-2}$\,K$^{-4}$ \\
+$\kappa_{\mathrm{vK}}$ & von K\'arm\'an constant & 0.4 & --- \\
+$\Omega$ & Earth rotation rate & $7.292\times10^{-5}$ & rad\,s$^{-1}$ \\
+$R_{\oplus}$ & Earth radius & $6.371\times10^6$ & m \\
+$\rho_0$ & Ocean reference density & 1025 & kg\,m$^{-3}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%=============================================================================
+\section{References}
+%=============================================================================
+
+\begin{description}[style=nextline,font=\normalfont]
+\item[Bourke, W.\ (1972)]
+An efficient, one-level, primitive-equation spectral model.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{100}, 683--689.
+
+\item[Frierson, D.M.W., I.M.\ Held, and P.\ Zurita-Gotor (2006)]
+A gray-radiation aquaplanet moist GCM. Part~I: Static stability and eddy scale.
+\textit{J.\ Atmos.\ Sci.}, \textbf{63}, 2548--2566.
+
+\item[Frierson, D.M.W.\ (2007)]
+The dynamics of idealized convection schemes and their effect on the zonally averaged tropical circulation.
+\textit{J.\ Atmos.\ Sci.}, \textbf{64}, 1959--1976.
+
+\item[Held, I.M.\ and M.J.\ Suarez (1994)]
+A proposal for the intercomparison of the dynamical cores of atmospheric general circulation models.
+\textit{Bull.\ Amer.\ Meteor.\ Soc.}, \textbf{75}, 1825--1830.
+
+\item[Louis, J.-F.\ (1979)]
+A parametric model of vertical eddy fluxes in the atmosphere.
+\textit{Bound.-Layer Meteor.}, \textbf{17}, 187--202.
+
+\item[Shu, C.-W.\ and S.\ Osher (1988)]
+Efficient implementation of essentially non-oscillatory shock-capturing schemes.
+\textit{J.\ Comput.\ Phys.}, \textbf{77}, 439--471.
+
+\item[Simmons, A.J.\ and D.M.\ Burridge (1981)]
+An energy and angular-momentum conserving vertical finite-difference scheme and hybrid vertical coordinates.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{109}, 758--766.
+
+\item[Skamarock, W.C.\ and J.B.\ Klemp (2008)]
+A time-split nonhydrostatic atmospheric model for weather research and forecasting applications.
+\textit{J.\ Comput.\ Phys.}, \textbf{227}, 3465--3485.
+
+\item[Wright, D.G.\ (1997)]
+An equation of state for use in ocean models: Eckart's formula revisited.
+\textit{J.\ Atmos.\ Ocean.\ Tech.}, \textbf{14}, 735--740.
+\end{description}
+
+\end{document}

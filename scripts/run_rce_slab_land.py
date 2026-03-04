@@ -46,13 +46,13 @@ parser = argparse.ArgumentParser(description="Moist RCE with slab land")
 parser.add_argument("--days", type=int, default=100, help="Integration length [days]")
 parser.add_argument("--resolution", type=int, default=16, help="Cubed-sphere N")
 parser.add_argument("--nlev", type=int, default=20, help="Number of vertical levels")
-parser.add_argument("--dt", type=float, default=600.0, help="Time step [s]")
+parser.add_argument("--dt", type=float, default=None, help="Time step [s] (auto: 600 for C≤24, 300 for C>24)")
 parser.add_argument("--diag-days", type=int, default=5, help="Diagnostic interval [days]")
 args = parser.parse_args()
 
 N = args.resolution
 NLEV = args.nlev
-DT = args.dt
+DT = args.dt if args.dt is not None else (300.0 if N > 24 else 600.0)
 N_DAYS = args.days
 DIAG_DAYS = args.diag_days
 
@@ -92,11 +92,17 @@ from legoesm.atmosphere.dynamics.primitive_eq import (
 from legoesm.atmosphere.physics.held_suarez import held_suarez_init
 
 HYPERDIFF = 5e16 * (48 / N) ** 4
+# Edge blending prevents checkerboard noise at cubed-sphere edges (needed for N>16)
+_eb = N > 16
 dycore_config = PrimitiveEquationConfig(
     hyperdiff_coeff=HYPERDIFF,
     hyperdiff_ps_coeff=HYPERDIFF,
     use_conservation_fixer=True,
     fix_mass=True,
+    edge_blend_uv=0.15 if _eb else 0.0,
+    edge_blend_T=0.10 if _eb else 0.0,
+    edge_blend_p_s=0.20 if _eb else 0.0,
+    edge_blend_width=2 if _eb else 1,
 )
 model = PrimitiveEquationModel(grid, sigma, dycore_config)
 
