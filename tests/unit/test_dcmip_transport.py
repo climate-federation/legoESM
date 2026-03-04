@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.atmosphere.dynamics.dcmip_transport import (
+from tests.test_cases.dcmip_transport import (
     dcmip11_wind,
     dcmip11_init,
     dcmip12_wind,

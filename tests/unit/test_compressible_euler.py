@@ -346,7 +346,7 @@ class TestDCMIP2025:
 
     def test_tc1_init(self, grid):
         """Test Case 1 initializes without errors."""
-        from legoesm.atmosphere.dynamics.dcmip2025.test_case_1 import dcmip25_tc1_init
+        from tests.test_cases.dcmip2025.test_case_1 import dcmip25_tc1_init
         state, hc, tm = dcmip25_tc1_init(grid, n_levels=20)
         assert jnp.all(jnp.isfinite(state.u.data))
         assert jnp.all(jnp.isfinite(state.theta_prime.data))
@@ -354,14 +354,14 @@ class TestDCMIP2025:
 
     def test_tc1_topography(self, grid):
         """TC1 mountain has reasonable height."""
-        from legoesm.atmosphere.dynamics.dcmip2025.test_case_1 import dcmip25_tc1_topography
+        from tests.test_cases.dcmip2025.test_case_1 import dcmip25_tc1_topography
         z_s = dcmip25_tc1_topography(grid)
         assert float(jnp.max(z_s)) <= 2001.0  # peak ~2000m
         assert float(jnp.min(z_s)) >= 0.0
 
     def test_tc2_init(self, grid):
         """Test Case 2 initializes without errors."""
-        from legoesm.atmosphere.dynamics.dcmip2025.test_case_2 import dcmip25_tc2_init
+        from tests.test_cases.dcmip2025.test_case_2 import dcmip25_tc2_init
         state, hc, tm, small_grid = dcmip25_tc2_init(grid, n_levels=20, subcase="a")
         assert jnp.all(jnp.isfinite(state.u.data))
         # Check small-Earth scaling
@@ -369,7 +369,7 @@ class TestDCMIP2025:
 
     def test_tc3_init(self, grid):
         """Test Case 3 initializes without errors."""
-        from legoesm.atmosphere.dynamics.dcmip2025.test_case_3 import dcmip25_tc3_init
+        from tests.test_cases.dcmip2025.test_case_3 import dcmip25_tc3_init
         state, hc, tm, small_grid = dcmip25_tc3_init(grid, n_levels=20)
         assert jnp.all(jnp.isfinite(state.u.data))
         assert state.tracers.data.shape[-1] == 3  # vapor, cloud, rain

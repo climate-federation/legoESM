@@ -104,7 +104,7 @@ def _continuity_stats(arr: np.ndarray) -> dict[str, float | str]:
 def _run_sw2(resolution: int, solver: str) -> tuple[dict[int, dict[str, np.ndarray]], float]:
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterConfig, ShallowWaterModel
-    from legoesm.atmosphere.dynamics.williamson import williamson_test2
+    from tests.test_cases.williamson import williamson_test2
 
     dt = 450.0
     n_steps = int(5 * 86400 / dt)
@@ -141,7 +141,7 @@ def _run_sw2(resolution: int, solver: str) -> tuple[dict[int, dict[str, np.ndarr
 
 def _run_nh_tc2a(resolution: int, n_levels: int, solver: str) -> tuple[dict[int, dict[str, np.ndarray]], float]:
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc2_init
+    from tests.test_cases.dcmip2025 import dcmip25_tc2_init
     from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig, CompressibleEulerModel
 
     dt = 0.2
@@ -197,7 +197,7 @@ def _run_nh_tc2a(resolution: int, n_levels: int, solver: str) -> tuple[dict[int,
 
 def _run_nh_tc1(resolution: int, n_levels: int, solver: str) -> tuple[dict[int, dict[str, np.ndarray]], float]:
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc1_init
+    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
     from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig, CompressibleEulerModel
 
     dt = 1.0

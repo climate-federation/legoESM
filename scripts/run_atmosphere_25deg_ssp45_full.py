@@ -400,7 +400,7 @@ def _series_push(series: dict[str, list[float]], step: int, vals: dict[str, floa
 def _run_sw_fv_w2(out_dir: Path, n: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
-    from legoesm.atmosphere.dynamics.williamson import williamson_test2
+    from tests.test_cases.williamson import williamson_test2
 
     case_name = "SW FV Williamson 2"
     case_dir = out_dir / "01_sw_fv_williamson2"
@@ -507,7 +507,7 @@ def _run_sw_fv_w2(out_dir: Path, n: int, solver: str, mean_every: int):
 def _run_sw_fv_w5(out_dir: Path, n: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
-    from legoesm.atmosphere.dynamics.williamson import williamson_test5
+    from tests.test_cases.williamson import williamson_test5
 
     case_name = "SW FV Williamson 5"
     case_dir = out_dir / "02_sw_fv_williamson5"
@@ -914,7 +914,7 @@ def _run_hydro_fv_bw(out_dir: Path, n: int, nlev: int, solver: str, mean_every: 
 def _run_nh_fv_tc1(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerModel, CompressibleEulerConfig
-    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc1_init
+    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
 
     case_name = "NH FV DCMIP TC1"
     case_dir = out_dir / "05_nh_fv_dcmip_tc1"
@@ -1078,7 +1078,7 @@ def _run_nh_fv_tc1(out_dir: Path, n: int, nlev: int, solver: str, mean_every: in
 def _run_nh_fv_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerModel, CompressibleEulerConfig
-    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc2_init
+    from tests.test_cases.dcmip2025 import dcmip25_tc2_init
 
     case_name = "NH FV DCMIP TC2a"
     case_dir = out_dir / "06_nh_fv_dcmip_tc2a"
@@ -1241,7 +1241,7 @@ def _run_nh_fv_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: i
 def _run_nh_fv_tc3(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerModel, CompressibleEulerConfig
-    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc3_init
+    from tests.test_cases.dcmip2025 import dcmip25_tc3_init
 
     case_name = "NH FV DCMIP TC3"
     case_dir = out_dir / "07_nh_fv_dcmip_tc3"
@@ -1408,7 +1408,7 @@ def _run_nh_fv_tc3(out_dir: Path, n: int, nlev: int, solver: str, mean_every: in
 def _run_transport_fv(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.tracer_transport import TracerTransportModel, TracerTransportConfig
-    from legoesm.atmosphere.dynamics.dcmip_transport import (
+    from tests.test_cases.dcmip_transport import (
         dcmip11_wind,
         dcmip11_init,
         compute_tracer_error_norms,

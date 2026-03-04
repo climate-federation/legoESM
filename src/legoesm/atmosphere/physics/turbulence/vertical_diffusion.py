@@ -56,18 +56,20 @@ def implicit_vertical_diffusion(
         Diffused field, shape (ncol, nlev).
     """
     ncol, nlev = phi.shape
+    dtype = phi.dtype
+    dt = jnp.asarray(dt, dtype=dtype)
 
     # Build tridiagonal coefficients (all positive).
     # The system is: -a[k]*phi[k-1] + b[k]*phi[k] - c[k]*phi[k+1] = rhs[k]
 
     # a[k] = dt * K_half[k-1] / (rho[k] * dz[k] * dz_half[k-1])  for k=1..nlev-1
-    a = jnp.zeros((ncol, nlev))
+    a = jnp.zeros((ncol, nlev), dtype=dtype)
     a = a.at[:, 1:].set(
         dt * K_half / (rho[:, 1:] * dz[:, 1:] * dz_half)
     )
 
     # c[k] = dt * K_half[k] / (rho[k] * dz[k] * dz_half[k])  for k=0..nlev-2
-    c = jnp.zeros((ncol, nlev))
+    c = jnp.zeros((ncol, nlev), dtype=dtype)
     c = c.at[:, :-1].set(
         dt * K_half / (rho[:, :-1] * dz[:, :-1] * dz_half)
     )

@@ -66,7 +66,7 @@ try:
     from legoesm.atmosphere.dynamics.shallow_water import (
         ShallowWaterModel, ShallowWaterConfig,
     )
-    from legoesm.atmosphere.dynamics.williamson import williamson_test2, williamson_test5
+    from tests.test_cases.williamson import williamson_test2, williamson_test5
 
     grid_cs = create_cubed_sphere(N_CS)
     state_init = williamson_test2(grid_cs)
@@ -195,7 +195,7 @@ try:
     from legoesm.atmosphere.dynamics.compressible_euler import (
         CompressibleEulerModel, CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc1_init
+    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
 
     state, height_coord, terrain_metric = dcmip25_tc1_init(grid_cs, n_levels=NLEV)
     nh_config = CompressibleEulerConfig(

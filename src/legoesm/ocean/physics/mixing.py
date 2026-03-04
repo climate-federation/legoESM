@@ -92,3 +92,45 @@ def vertical_diffusion(
     interior = (flux[..., :-1] - flux[..., 1:]) / dz[..., 1:-1]
     bottom = flux[..., -1:] / dz[..., -1:]  # bottom: flux_below = 0
     return jnp.concatenate([top, interior, bottom], axis=-1)
+
+
+def vertical_diffusion_variable_K(
+    field: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    jacobian: jnp.ndarray,
+    K_half: jnp.ndarray,
+) -> jnp.ndarray:
+    """Compute d/dz(K(z) * d(field)/dz) with spatially varying diffusivity.
+
+    Same algorithm as ``vertical_diffusion`` but accepts a 3-D diffusivity
+    array at interior interfaces instead of a scalar.
+
+    Parameters
+    ----------
+    field : array
+        3D field, shape (..., nlev).
+    z_coord : OceanZStarCoordinate
+        Vertical coordinate.
+    jacobian : array
+        Dynamic Jacobian, shape (...).
+    K_half : array
+        Diffusivity at interior interfaces [m^2/s], shape (..., nlev-1).
+
+    Returns
+    -------
+    array : Vertical diffusion tendency, shape (..., nlev).
+    """
+    dtype = field.dtype
+    jacobian = jacobian.astype(dtype)
+    K_half = K_half.astype(dtype)
+
+    dz = z_coord.dz_ref * jacobian[..., jnp.newaxis]         # (..., nlev)
+    dz_half = 0.5 * (dz[..., :-1] + dz[..., 1:])  # (..., nlev-1)
+
+    df_dz = (field[..., :-1] - field[..., 1:]) / dz_half
+    flux = K_half * df_dz  # (..., nlev-1)
+
+    top = -flux[..., :1] / dz[..., :1]
+    interior = (flux[..., :-1] - flux[..., 1:]) / dz[..., 1:-1]
+    bottom = flux[..., -1:] / dz[..., -1:]
+    return jnp.concatenate([top, interior, bottom], axis=-1)

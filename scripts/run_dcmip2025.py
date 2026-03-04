@@ -28,7 +28,7 @@ def run_tc1(resolution, n_levels, dt, duration_hours, output_dir):
         CompressibleEulerModel,
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc1_init
+    from tests.test_cases.dcmip2025 import dcmip25_tc1_init
 
     print("  Creating grid and initial conditions...")
     grid = create_cubed_sphere(resolution)
@@ -107,7 +107,7 @@ def run_tc2a(resolution, n_levels, dt, duration_hours, output_dir):
         CompressibleEulerModel,
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc2_init
+    from tests.test_cases.dcmip2025 import dcmip25_tc2_init
 
     print("  Creating grid and initial conditions...")
     grid = create_cubed_sphere(resolution)
@@ -182,7 +182,7 @@ def run_tc3(resolution, n_levels, dt, duration_hours, output_dir):
         CompressibleEulerModel,
         CompressibleEulerConfig,
     )
-    from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc3_init
+    from tests.test_cases.dcmip2025 import dcmip25_tc3_init
 
     print("  Creating grid and initial conditions...")
     grid = create_cubed_sphere(resolution)

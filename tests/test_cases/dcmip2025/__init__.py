@@ -15,18 +15,18 @@ References
   Test Cases on a Reduced-Radius Sphere. JAMES.
 """
 
-from legoesm.atmosphere.dynamics.dcmip2025.test_case_1 import (
+from tests.test_cases.dcmip2025.test_case_1 import (
     dcmip25_tc1_init,
     dcmip25_tc1_topography,
 )
-from legoesm.atmosphere.dynamics.dcmip2025.test_case_2 import (
+from tests.test_cases.dcmip2025.test_case_2 import (
     dcmip25_tc2_init,
     dcmip25_tc2a_topography,
     dcmip25_tc2b_topography,
 )
-from legoesm.atmosphere.dynamics.dcmip2025.test_case_3 import (
+from tests.test_cases.dcmip2025.test_case_3 import (
     dcmip25_tc3_init,
 )
-from legoesm.atmosphere.dynamics.dcmip2025.common import (
+from tests.test_cases.dcmip2025.common import (
     apply_small_earth_scaling,
 )

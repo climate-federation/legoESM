@@ -772,10 +772,10 @@ def dcmip25_tc1_init_spectral(
     terrain_metric : TerrainMetric
         Terrain metric on Gaussian grid.
     """
-    from legoesm.atmosphere.dynamics.dcmip2025.common import (
+    from tests.test_cases.dcmip2025.common import (
         piecewise_lapse_theta_ref,
     )
-    from legoesm.atmosphere.dynamics.dcmip2025.test_case_1 import TC1_PARAMS
+    from tests.test_cases.dcmip2025.test_case_1 import TC1_PARAMS
     from legoesm.grids.vertical import (
         create_height_coordinate,
         compute_terrain_metric,

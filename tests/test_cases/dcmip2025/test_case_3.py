@@ -33,7 +33,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
 )
-from legoesm.atmosphere.dynamics.dcmip2025.common import (
+from tests.test_cases.dcmip2025.common import (
     apply_small_earth_scaling,
 )
 from legoesm.atmosphere.physics.kessler import saturation_mixing_ratio

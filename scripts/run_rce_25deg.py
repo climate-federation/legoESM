@@ -86,6 +86,7 @@ from legoesm.atmosphere.physics.convection.config import SBMConfig
 from legoesm.core.operators_3d import hyperdiffusion_3d
 from legoesm.core.operators import hyperdiffusion
 from legoesm.core.field import Field
+from legoesm.atmosphere.dynamics.edge_blending import blend_scalar_cube_edges
 
 sbm_config = SBMConfig(tau_c=7200.0, RH_ref=0.7)
 
@@ -385,6 +386,8 @@ q_v = q_v - excess
 new_T = new_T + constants.L_v * excess / constants.c_pd
 state = state._replace(T=state.T.replace(data=new_T))
 _precip_ls = jnp.sum(excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
+q_v = blend_scalar_cube_edges(q_v, 0.10, width=2)
+q_v = jnp.maximum(q_v, 0.0)
 state = state._replace(
     u=state.u.replace(data=state.u.data * _fric_decay),
     v=state.v.replace(data=state.v.data * _fric_decay))
@@ -408,6 +411,8 @@ for step in range(1, n_steps):
     new_T = new_T + constants.L_v * excess / constants.c_pd
     state = state._replace(T=state.T.replace(data=new_T))
     _precip_ls = jnp.sum(excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
+    q_v = blend_scalar_cube_edges(q_v, 0.10, width=2)
+    q_v = jnp.maximum(q_v, 0.0)
     state = state._replace(
         u=state.u.replace(data=state.u.data * _fric_decay),
         v=state.v.replace(data=state.v.data * _fric_decay))
@@ -574,11 +579,18 @@ def physics_land(T, p_s, q_v, u, v, T_land, W_bucket, lat, dt):
     dqv = dqv_conv
     dqv = dqv.at[..., -1].add(dq_BL)
 
-    # Hyperdiffusion on q_v and T_land
+    # Hyperdiffusion on q_v, T_land, and W_bucket
     dqv = dqv + hyperdiffusion_3d(q_v, grid, HYPERDIFF)
     _tl = Field(data=T_land, name="tl", dims=("face", "x", "y"), units="K")
     T_land_new = T_land_new + dt * hyperdiffusion(_tl, grid, HYPERDIFF).data
+    _wb = Field(data=W_bucket, name="W", dims=("face", "x", "y"), units="kg/m2")
+    W_new = W_new + dt * hyperdiffusion(_wb, grid, HYPERDIFF).data
+
+    # Edge blending on T_land and W_bucket (q_v blended in integration loop)
+    T_land_new = blend_scalar_cube_edges(T_land_new, 0.10, width=2)
     T_land_new = jnp.maximum(T_land_new, _T_min)
+    W_new = blend_scalar_cube_edges(W_new, 0.10, width=2)
+    W_new = jnp.clip(W_new, 0.0, _W_max)
 
     return dT, dqv, T_land_new, W_new, precip, sw_sfc, lw_sfc
 
@@ -609,6 +621,8 @@ q_v = q_v - excess
 new_T = new_T + constants.L_v * excess / constants.c_pd
 state = state._replace(T=state.T.replace(data=new_T))
 _precip_ls = jnp.sum(excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
+q_v = blend_scalar_cube_edges(q_v, 0.10, width=2)
+q_v = jnp.maximum(q_v, 0.0)
 state = state._replace(
     u=state.u.replace(data=state.u.data * _fric_decay),
     v=state.v.replace(data=state.v.data * _fric_decay))
@@ -632,6 +646,8 @@ for step in range(1, n_steps):
     new_T = new_T + constants.L_v * excess / constants.c_pd
     state = state._replace(T=state.T.replace(data=new_T))
     _precip_ls = jnp.sum(excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
+    q_v = blend_scalar_cube_edges(q_v, 0.10, width=2)
+    q_v = jnp.maximum(q_v, 0.0)
     state = state._replace(
         u=state.u.replace(data=state.u.data * _fric_decay),
         v=state.v.replace(data=state.v.data * _fric_decay))

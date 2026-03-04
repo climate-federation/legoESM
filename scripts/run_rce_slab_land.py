@@ -165,6 +165,7 @@ from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.core.field import Field
 from legoesm.core.operators import hyperdiffusion
 from legoesm.core.operators_3d import hyperdiffusion_3d
+from legoesm.atmosphere.dynamics.edge_blending import blend_scalar_cube_edges
 
 _RH_init = 0.6
 p_full_init = state.p_s.data[..., None] * sigma.sigma_full
@@ -303,15 +304,18 @@ def physics_step(T, p_s, q_v, u, v, T_land, W_bucket, lat, dt):
     dq_v_dt = dq_v_dt_conv
     dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
 
-    # --- (i) Hyperdiffusion on q_v and T_land (damp 2Δx checkerboard) ---
-    # q_v is outside the dycore state — apply the same scale-selective
-    # damping that the dycore applies to T, u, v, p_s.
+    # --- (i) Hyperdiffusion on q_v, T_land, and W_bucket ---
     dq_v_dt = dq_v_dt + hyperdiffusion_3d(q_v, grid, HYPERDIFF)
-    # T_land has no horizontal mixing; diffusion prevents the surface
-    # flux feedback from locking in a 2Δx computational mode.
     _tl = Field(data=T_land, name="tl", dims=("face", "x", "y"), units="K")
     T_land_new = T_land_new + dt * hyperdiffusion(_tl, grid, HYPERDIFF).data
+    _wb = Field(data=W_bucket, name="W", dims=("face", "x", "y"), units="kg/m2")
+    W_new = W_new + dt * hyperdiffusion(_wb, grid, HYPERDIFF).data
+
+    # --- (j) Edge blending on T_land and W_bucket (q_v blended in loop) ---
+    T_land_new = blend_scalar_cube_edges(T_land_new, 0.10, width=2)
     T_land_new = jnp.maximum(T_land_new, _T_min)
+    W_new = blend_scalar_cube_edges(W_new, 0.10, width=2)
+    W_new = jnp.clip(W_new, 0.0, _W_max)
 
     return dT_dt, dq_v_dt, T_land_new, W_new, precip, sw_net_sfc, lw_net_sfc
 
@@ -365,6 +369,9 @@ new_T = new_T + constants.L_v * _excess / constants.c_pd
 state = state._replace(T=state.T.replace(data=new_T))
 # Large-scale precipitation [kg/m2/s]
 _precip_ls = jnp.sum(_excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
+# Edge blending on q_v
+q_v = blend_scalar_cube_edges(q_v, 0.10, width=2)
+q_v = jnp.maximum(q_v, 0.0)
 
 # Rayleigh friction (BL + free-atmosphere drag)
 state = state._replace(
@@ -397,6 +404,9 @@ for step in range(1, n_steps):
     state = state._replace(T=state.T.replace(data=new_T))
     # Large-scale precipitation [kg/m2/s]
     _precip_ls = jnp.sum(_excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
+    # Edge blending on q_v
+    q_v = blend_scalar_cube_edges(q_v, 0.10, width=2)
+    q_v = jnp.maximum(q_v, 0.0)
 
     # (c) Rayleigh friction (BL + free-atmosphere drag)
     state = state._replace(

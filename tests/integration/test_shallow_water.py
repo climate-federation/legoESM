@@ -8,7 +8,7 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.atmosphere.dynamics.shallow_water import (
     ShallowWaterModel, ShallowWaterConfig, shallow_water_tendencies,
 )
-from legoesm.atmosphere.dynamics.williamson import (
+from tests.test_cases.williamson import (
     williamson_test2, williamson_test5, williamson_test2_exact,
     compute_error_norms,
 )

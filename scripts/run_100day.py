@@ -23,7 +23,7 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.atmosphere.dynamics.shallow_water import (
     ShallowWaterModel, ShallowWaterConfig,
 )
-from legoesm.atmosphere.dynamics.williamson import (
+from tests.test_cases.williamson import (
     williamson_test5, compute_error_norms,
 )
 from legoesm.core.conservation import compute_conservation_diagnostics

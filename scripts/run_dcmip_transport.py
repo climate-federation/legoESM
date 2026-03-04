@@ -26,7 +26,7 @@ from legoesm.atmosphere.dynamics.tracer_transport import (
     TracerTransportModel,
     TracerTransportConfig,
 )
-from legoesm.atmosphere.dynamics.dcmip_transport import (
+from tests.test_cases.dcmip_transport import (
     dcmip11_wind,
     dcmip11_init,
     dcmip12_wind,

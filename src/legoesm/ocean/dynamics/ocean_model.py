@@ -65,6 +65,13 @@ class OceanModel:
         self.config = config or OceanConfig()
         self._validate_config(self.config)
 
+        # Build physics function if configured
+        if self.config.physics is not None:
+            from legoesm.ocean.physics.combined import make_ocean_physics
+            self._physics_fn = make_ocean_physics(self.config.physics)
+        else:
+            self._physics_fn = None
+
     @staticmethod
     def _validate_config(config: OceanConfig) -> None:
         """Validate configuration ranges early (fail fast)."""
@@ -184,6 +191,7 @@ class OceanModel:
         """Compute baroclinic tendencies (pure function wrapper)."""
         return ocean_baroclinic_tendencies(
             state, self.grid, self.z_coord, self.config,
+            physics_fn=self._physics_fn,
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -210,6 +218,7 @@ class OceanModel:
         # --- 1. Baroclinic tendencies ---
         tend = ocean_baroclinic_tendencies(
             state, self.grid, self.z_coord, self.config,
+            physics_fn=self._physics_fn,
         )
 
         # --- 2. Update tracers (forward Euler) ---

@@ -308,7 +308,7 @@ def _run_scaling_worker(
                 ShallowWaterConfig,
                 ShallowWaterModel,
             )
-            from legoesm.atmosphere.dynamics.williamson import williamson_test2
+            from tests.test_cases.williamson import williamson_test2
 
             grid = create_cubed_sphere(grid_size)
             state0 = williamson_test2(grid)
@@ -714,7 +714,7 @@ def _run_mpi_scaling_worker(
             ShallowWaterConfig,
             ShallowWaterModel,
         )
-        from legoesm.atmosphere.dynamics.williamson import williamson_test2
+        from tests.test_cases.williamson import williamson_test2
 
         rank = int(comm.Get_rank())
         n_ranks = int(comm.Get_size())

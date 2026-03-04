@@ -91,6 +91,7 @@ class OceanConfig(NamedTuple):
     salinity_min_psu: float = 0.0
     salinity_max_psu: float = 50.0
     differentiable_barotropic: bool = False  # Use lax.scan (grad-compatible) vs fori_loop (faster)
+    physics: object = None  # OceanPhysicsConfig or None (legacy mode)
 
 
 # ==============================================================================

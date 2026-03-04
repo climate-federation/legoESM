@@ -381,7 +381,7 @@ def run_sw_fv_tests(output_dir):
         ShallowWaterModel,
         ShallowWaterConfig,
     )
-    from legoesm.atmosphere.dynamics.williamson import (
+    from tests.test_cases.williamson import (
         williamson_test2,
         williamson_test5,
     )
@@ -1207,7 +1207,7 @@ def run_nh_fv_tests(output_dir):
     print(f"\n  [09] NH FV - DCMIP-2025 TC1 Gravity Waves (C{N}/L{NLEV}, 3h)...")
 
     try:
-        from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc1_init
+        from tests.test_cases.dcmip2025 import dcmip25_tc1_init
 
         grid = create_cubed_sphere(N)
         cube_lon_deg = np.asarray(grid.lon) * 180.0 / np.pi
@@ -1301,7 +1301,7 @@ def run_nh_fv_tests(output_dir):
     print(f"\n  [10] NH FV - DCMIP-2025 TC2a Gap Flow (C{N}/L{NLEV}, {HOURS_TC2*60:.0f}min)...")
 
     try:
-        from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc2_init
+        from tests.test_cases.dcmip2025 import dcmip25_tc2_init
 
         grid = create_cubed_sphere(N)
         state, height_coord, terrain_metric, small_grid = dcmip25_tc2_init(
@@ -1398,7 +1398,7 @@ def run_nh_fv_tests(output_dir):
     print(f"\n  [11] NH FV - DCMIP-2025 TC3 Squall Line (C{N}/L{NLEV}, {HOURS_TC3*60:.0f}min, f=0)...")
 
     try:
-        from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc3_init
+        from tests.test_cases.dcmip2025 import dcmip25_tc3_init
 
         grid = create_cubed_sphere(N)
         state, height_coord, terrain_metric, small_grid = dcmip25_tc3_init(
@@ -1633,7 +1633,7 @@ def run_transport_tests(output_dir):
         TracerTransportModel,
         TracerTransportConfig,
     )
-    from legoesm.atmosphere.dynamics.dcmip_transport import (
+    from tests.test_cases.dcmip_transport import (
         dcmip11_wind,
         dcmip11_init,
         compute_tracer_error_norms,
@@ -1886,7 +1886,7 @@ def run_semi_implicit_tests(output_dir):
             CompressibleEulerModel,
             CompressibleEulerConfig,
         )
-        from legoesm.atmosphere.dynamics.dcmip2025 import dcmip25_tc2_init
+        from tests.test_cases.dcmip2025 import dcmip25_tc2_init
 
         grid = create_cubed_sphere(N_SI)
         state, height_coord, terrain_metric, small_grid = dcmip25_tc2_init(

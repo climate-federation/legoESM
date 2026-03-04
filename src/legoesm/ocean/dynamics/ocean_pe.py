@@ -44,6 +44,7 @@ def ocean_baroclinic_tendencies(
     grid: CubedSphereGrid,
     z_coord: OceanZStarCoordinate,
     config: OceanConfig = OceanConfig(),
+    physics_fn=None,
 ) -> OceanTendencies:
     """Compute 3D baroclinic tendencies (slow mode).
 
@@ -171,12 +172,13 @@ def ocean_baroclinic_tendencies(
         dtr_dt = 0.5 * (adv_form + flux_form)
         dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
 
-        if config.K_h > 0:
-            dtr_dt = dtr_dt + laplacian_viscosity_3d(tr, grid, config.K_h)
-        if config.K_v > 0:
-            dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
-        if config.hyperdiff_coeff > 0:
-            dtr_dt = dtr_dt + hyperdiffusion_3d(tr, grid, config.hyperdiff_coeff)
+        if physics_fn is None:
+            if config.K_h > 0:
+                dtr_dt = dtr_dt + laplacian_viscosity_3d(tr, grid, config.K_h)
+            if config.K_v > 0:
+                dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
+            if config.hyperdiff_coeff > 0:
+                dtr_dt = dtr_dt + hyperdiffusion_3d(tr, grid, config.hyperdiff_coeff)
 
         return dtr_dt
 
@@ -185,31 +187,40 @@ def ocean_baroclinic_tendencies(
     dS_dt = tracer_tend[1]
 
     # --- 10. Mixing ---
-    # Velocity: masked before Laplacian (no-slip BC, u=0 on land)
-    # Tracers: UNmasked to avoid coastline discontinuity (T, S are smooth
-    # across land/ocean boundaries; masking before Laplacian creates a
-    # spurious jump that cascades into pressure gradient errors)
-    if config.A_h > 0:
-        vel_masked = jnp.stack([u * mask_3d, v * mask_3d], axis=0)
-        vel_lap = jax.vmap(
-            lambda q: laplacian_viscosity_3d(q, grid, config.A_h),
-            in_axes=0, out_axes=0,
-        )(vel_masked)
-        du_dt = du_dt + vel_lap[0]
-        dv_dt = dv_dt + vel_lap[1]
-    if config.A_v > 0:
-        vel = jnp.stack([u, v], axis=0)
-        vel_vdiff = jax.vmap(
-            lambda q: vertical_diffusion(q, z_coord, J, config.A_v),
-            in_axes=0, out_axes=0,
-        )(vel)
-        du_dt = du_dt + vel_vdiff[0]
-        dv_dt = dv_dt + vel_vdiff[1]
+    if physics_fn is None:
+        # Legacy hardcoded mixing
+        # Velocity: masked before Laplacian (no-slip BC, u=0 on land)
+        # Tracers: UNmasked to avoid coastline discontinuity (T, S are smooth
+        # across land/ocean boundaries; masking before Laplacian creates a
+        # spurious jump that cascades into pressure gradient errors)
+        if config.A_h > 0:
+            vel_masked = jnp.stack([u * mask_3d, v * mask_3d], axis=0)
+            vel_lap = jax.vmap(
+                lambda q: laplacian_viscosity_3d(q, grid, config.A_h),
+                in_axes=0, out_axes=0,
+            )(vel_masked)
+            du_dt = du_dt + vel_lap[0]
+            dv_dt = dv_dt + vel_lap[1]
+        if config.A_v > 0:
+            vel = jnp.stack([u, v], axis=0)
+            vel_vdiff = jax.vmap(
+                lambda q: vertical_diffusion(q, z_coord, J, config.A_v),
+                in_axes=0, out_axes=0,
+            )(vel)
+            du_dt = du_dt + vel_vdiff[0]
+            dv_dt = dv_dt + vel_vdiff[1]
 
-    # --- 11. Hyperdiffusion ---
-    if config.hyperdiff_coeff > 0:
-        du_dt = du_dt + hyperdiffusion_3d(u * mask_3d, grid, config.hyperdiff_coeff)
-        dv_dt = dv_dt + hyperdiffusion_3d(v * mask_3d, grid, config.hyperdiff_coeff)
+        # --- 11. Hyperdiffusion ---
+        if config.hyperdiff_coeff > 0:
+            du_dt = du_dt + hyperdiffusion_3d(u * mask_3d, grid, config.hyperdiff_coeff)
+            dv_dt = dv_dt + hyperdiffusion_3d(v * mask_3d, grid, config.hyperdiff_coeff)
+    else:
+        # New physics module system
+        phys = physics_fn(state, grid, z_coord)
+        du_dt = du_dt + phys.du_dt.data
+        dv_dt = dv_dt + phys.dv_dt.data
+        dT_dt = dT_dt + phys.dT_dt.data
+        dS_dt = dS_dt + phys.dS_dt.data
 
     # --- 12. Land masking ---
     du_dt = du_dt * mask_3d

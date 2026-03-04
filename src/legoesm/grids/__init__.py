@@ -5,3 +5,10 @@ from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.grids.gaussian import GaussianGrid, create_gaussian_grid
 from legoesm.grids.latlon import LatLonGrid, create_latlon_grid
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
+from legoesm.grids.topography import (
+    gaussian_mountain,
+    zonal_ridge,
+    schaer_mountain,
+    land_mask_from_topography,
+    phis_from_topography,
+)
