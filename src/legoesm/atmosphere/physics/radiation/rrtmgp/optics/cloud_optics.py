@@ -145,16 +145,20 @@ def compute_optical_properties(
     optical_props.append(props)
 
   combined_props = jax.tree.map(jnp.add, *optical_props)
+  # Use safe denominators: jnp.where evaluates both branches so the division
+  # must never produce inf/NaN even on the "inactive" branch.
+  safe_tau = jnp.maximum(combined_props['tau'], 1e-30)
+  safe_tau_ssa = jnp.maximum(combined_props['tau_ssa'], 1e-30)
   return {
       'optical_depth': combined_props['tau'],
       'ssa': jnp.where(
-          combined_props['tau'] != 0,
-          combined_props['tau_ssa'] / combined_props['tau'],
+          combined_props['tau'] > 0,
+          combined_props['tau_ssa'] / safe_tau,
           0.0,
       ),
       'asymmetry_factor': jnp.where(
-          combined_props['tau_ssa'] != 0,
-          combined_props['tau_ssa_g'] / combined_props['tau_ssa'],
+          combined_props['tau_ssa'] > 0,
+          combined_props['tau_ssa_g'] / safe_tau_ssa,
           0.0,
       ),
   }

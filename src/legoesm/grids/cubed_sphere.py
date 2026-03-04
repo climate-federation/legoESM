@@ -170,45 +170,29 @@ def create_cubed_sphere(
     y_cart = cos_lat * sin_lon
     z_cart = sin_lat
 
-    # Grid spacings (great-circle distance between cell centers)
-    dx, dy = _compute_grid_spacing(lon, lat, n, radius)
-
-    # Cell areas: MUST be defined as hx*hy = (dx/2)*(dy/2) so that the
-    # discrete gradient–divergence adjoint  D = −Gᵀ M  holds exactly.
-    # Using the analytic gnomonic Jacobian (_compute_cell_areas) gives a
-    # slightly more accurate integral weight, but it breaks the discrete
-    # adjoint identity, curl(grad)=0, div(curl)=0, free-stream
-    # preservation, and geostrophic balance.  The difference is O(Δα⁴),
-    # well below the O(Δα²) truncation error of the 2nd-order stencils.
-    area = (dx * 0.5) * (dy * 0.5)
-
     # Coriolis parameter
     f = 2.0 * omega * sin_lat
 
-    # Grid angle (rotation of local grid axes relative to east-north)
-    angle = _compute_grid_angle(lon, lat, n)
-
-    # Padded grid angle for vector halo exchange
-    # Halo cells use extended gnomonic coordinates; interior is overwritten
-    # with the actual computed angle to ensure exact roundtrip consistency.
+    # Compute padded quantities from gnomonic extension (smooth across
+    # the interior-halo boundary).  All metrics and angles derive from a
+    # single source — the extended gnomonic grid — so there is no seam
+    # discontinuity at cube-face edges.  The O(Δα⁴) accuracy difference
+    # vs pad_halo-based interior values is well below the O(Δα²)
+    # truncation error of the 2nd-order stencils.
     angle_padded = compute_padded_angle(n)
-    angle_padded = angle_padded.at[:, 1:-1, 1:-1].set(angle)
+    hx_ext, hy_ext = compute_padded_half_metrics(n, radius)
+
+    # Extract interior from padded arrays (no override — single source)
+    angle = angle_padded[:, 1:-1, 1:-1]
+    dx = 2.0 * hx_ext[:, 1:-1, 1:-1]
+    dy = 2.0 * hy_ext[:, 1:-1, 1:-1]
+    area = hx_ext[:, 1:-1, 1:-1] * hy_ext[:, 1:-1, 1:-1]
 
     # Precompute trig of grid angle for vector halo exchange
     cos_angle_val = jnp.cos(angle)
     sin_angle_val = jnp.sin(angle)
     cos_angle_padded_val = jnp.cos(angle_padded)
     sin_angle_padded_val = jnp.sin(angle_padded)
-
-    # Compute half-metrics on the extended gnomonic grid.
-    # Unlike extrapolate_to_halo (which copies boundary values), this gives
-    # correct metric values at halo positions — essential for free-stream
-    # preservation and gradient-divergence adjoint compatibility.
-    hx_ext, hy_ext = compute_padded_half_metrics(n, radius)
-    # Overwrite interior with the values from _compute_grid_spacing to
-    # ensure exact roundtrip consistency with the interior grid.
-    hx_ext = hx_ext.at[:, 1:-1, 1:-1].set(dx * 0.5)
-    hy_ext = hy_ext.at[:, 1:-1, 1:-1].set(dy * 0.5)
 
     # Cast all arrays to float32. The cubed-sphere PE and tracer transport
     # models run in float32, so grid arrays must match to avoid scatter

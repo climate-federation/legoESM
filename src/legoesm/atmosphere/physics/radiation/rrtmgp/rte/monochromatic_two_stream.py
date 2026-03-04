@@ -77,7 +77,9 @@ def lw_combine_sources(planck_srcs: StatesMap) -> StatesMap:
   """
   planck_src_top = planck_srcs['planck_src_top']
   planck_src_bottom = planck_srcs['planck_src_bottom']
-  combined_src_top = jnp.sqrt(planck_src_top * _shift_down(planck_src_bottom))
+  combined_src_top = jnp.sqrt(jnp.maximum(
+      planck_src_top * _shift_down(planck_src_bottom), 0.0
+  ))
   combined_src_bottom = _shift_up(combined_src_top)
   return {
       'planck_src_top': combined_src_top,
@@ -110,12 +112,17 @@ def _rt_denominator_direct(
   denom = _rt_denominator_diffuse(gamma1, gamma2, tau)
   k_mu_squared = (k * jnp.cos(zenith)) ** 2
 
+  # Guard ssa against zero: clear-sky layers have ssa=0 and the direct
+  # reflectance/transmittance is zero there (handled by downstream clipping).
+  # Using safe_ssa keeps the denominator finite for reverse-mode AD.
+  safe_ssa = jnp.maximum(ssa, _EPSILON)
+
   # Equation 14, multiplying top and bottom by exp(-k*tau) and rearranging to
   # avoid division by 0.
   return jnp.where(
       jnp.abs(1.0 - k_mu_squared) >= _EPSILON,
-      denom * (1.0 - k_mu_squared) / ssa,
-      denom * _EPSILON / ssa,
+      denom * (1.0 - k_mu_squared) / safe_ssa,
+      denom * _EPSILON / safe_ssa,
   )
 
 
@@ -224,6 +231,12 @@ def lw_cell_source_and_properties(
       'src_up': A 3D variable containing the pointwise upwelling Planck source.
       'src_down': A 3D variable with the pointwise downwelling Planck source.
   """
+  # Clamp optical depth to non-negative values: halo extrapolation can produce
+  # negative tau which causes exp(+|tau|*k) to explode.  The halos are stripped
+  # before the recurrence, but backward-pass gradients still flow through the
+  # intermediate variables and must stay finite.
+  optical_depth = jnp.maximum(optical_depth, 0.0)
+
   # The coefficient of the parallel irradiance in the 2-stream RTE.
   gamma1 = _LW_DIFFUSIVE_FACTOR * (1 - 0.5 * ssa * (1 + asymmetry_factor))
   # The coefficient of the antiparallel irradiance in the 2-stream RTE.
@@ -234,8 +247,10 @@ def lw_cell_source_and_properties(
 
   # From Toon et al. (JGR 1989) Eqs 26-27, first-order coefficient of the
   # Taylor series expansion of the Planck function in terms of the optical
-  # depth.
-  b_1 = (level_src_bottom - level_src_top) / (optical_depth * (gamma1 + gamma2))
+  # depth.  Guard denominator for AD: when tau→0 the source is masked anyway,
+  # but jnp.where evaluates both branches so the division must stay finite.
+  safe_denom = jnp.maximum(optical_depth * (gamma1 + gamma2), _EPSILON)
+  b_1 = (level_src_bottom - level_src_top) / safe_denom
 
   # Compute longwave source function for upward and downward emission at cell
   # interfaces using linear-in-tau assumption.
@@ -311,6 +326,9 @@ def sw_cell_properties(
     't_dir': A 3D variable containing the direct transmittance.
     'r_dir': A 3D variable containing the direct reflectance.
   """
+  # Clamp optical depth to non-negative for AD stability (see lw comment).
+  optical_depth = jnp.maximum(optical_depth, 0.0)
+
   # Exchange rate coefficients from Zdunkowski et al. (1980).
   g = asymmetry_factor
   gamma1 = 0.25 * (8 - ssa * (5 + 3 * g))
@@ -379,6 +397,9 @@ def sw_cell_source(
         radiative flux at the bottom cell face.
       'sfc_src': A 2D field for the shortwave source emanating from the surface.
   """
+  # Clamp optical depth to non-negative for AD stability (see lw comment).
+  optical_depth = jnp.maximum(optical_depth, 0.0)
+
   # Transmittance of direct, unscattered beam.
   t_noscat = jnp.exp(-optical_depth / jnp.cos(zenith))
   mu = jnp.cos(zenith)
@@ -469,7 +490,8 @@ def _solve_rte_2stream(
   ) -> tuple[Array, Array]:
     """Recurrent formula for albedo solution, starting from the surface."""
     # Geometric series solution accounting for infinite reflection events.
-    beta = 1 / (1 - r_diff * albedo_below)
+    # Clamp denominator away from zero for AD stability.
+    beta = 1 / jnp.maximum(1 - r_diff * albedo_below, _EPSILON)
     out = r_diff + t_diff**2 * beta * albedo_below
     return out, out  # Carry and output are the same.
 
@@ -498,7 +520,7 @@ def _solve_rte_2stream(
   ) -> tuple[Array, Array]:
     """Recurrent formula for upward emission, starting from the surface."""
     # Geometric series solution accounting for infinite reflection events.
-    beta = 1 / (1 - r_diff * albedo)
+    beta = 1 / jnp.maximum(1 - r_diff * albedo, _EPSILON)
     out = src_up + t_diff * beta * (emission_from_below + src_down * albedo)
     return out, out  # Carry and output are the same.
 
@@ -532,7 +554,7 @@ def _solve_rte_2stream(
   ) -> tuple[Array, Array]:
     """Recurrent formula for downwelling flux initiating at top boundar."""
     # Geometric series solution accounting for infinite reflection events.
-    beta = 1 / (1 - r_diff * albedo)
+    beta = 1 / jnp.maximum(1 - r_diff * albedo, _EPSILON)
     out = (t_diff * flux_down_from_above + r_diff * emiss_up + src_down) * beta
     return out, out  # Carry and output are the same.
 

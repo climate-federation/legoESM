@@ -504,3 +504,45 @@ class TestRRTMGP:
 
         assert jnp.all(jnp.isfinite(out.heating_rate))
         assert out.heating_rate.shape == (ncol, nlev)
+
+    def test_rrtmgp_differentiable_temperature(self):
+        """jax.grad w.r.t. temperature should work through rrtmgp_radiation."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_wrapper import (
+            rrtmgp_radiation,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 4, 40
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 0.001)
+        cos_zen = jnp.full(ncol, 0.5)
+        config = RRTMGPConfig()
+
+        def loss(T_in):
+            out = rrtmgp_radiation(T_in, p_full, p_half, T_sfc, q_v, cos_zen, config)
+            return jnp.sum(out.heating_rate ** 2)
+
+        grad_T = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(grad_T))
+        assert grad_T.shape == T.shape
+
+    def test_rrtmgp_differentiable_cos_zenith(self):
+        """jax.grad w.r.t. cos_zenith should work through rrtmgp_radiation."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_wrapper import (
+            rrtmgp_radiation,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 4, 40
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 0.001)
+        cos_zen = jnp.full(ncol, 0.5)
+        config = RRTMGPConfig()
+
+        def loss(cz):
+            out = rrtmgp_radiation(T, p_full, p_half, T_sfc, q_v, cz, config)
+            return jnp.sum(out.heating_rate ** 2)
+
+        grad_cz = jax.grad(loss)(cos_zen)
+        assert jnp.all(jnp.isfinite(grad_cz))
+        assert grad_cz.shape == cos_zen.shape

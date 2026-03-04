@@ -190,7 +190,7 @@ def rrtmgp_radiation(
     atmos_state = AtmosphericState(
         sfc_emis=config.sfc_emissivity,
         sfc_alb=config.sfc_albedo,
-        zenith=float(zenith),
+        zenith=zenith,
         irrad=config.S_0,
         vmr=vmr_lib,
         toa_flux_lw=0.0,

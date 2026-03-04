@@ -16,6 +16,8 @@
 
 import dataclasses
 
+import jax
+
 from legoesm.atmosphere.physics.radiation.rrtmgp.config import radiative_transfer
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_volume_mixing_ratio
 
@@ -27,8 +29,8 @@ class AtmosphericState:
   sfc_emis: float
   # Surface albedo; the same for all bands.
   sfc_alb: float
-  # The solar zenith angle.
-  zenith: float
+  # The solar zenith angle (scalar; may be a JAX array for AD tracing).
+  zenith: float | jax.Array
   # The total solar irradiance (in W/m²).
   irrad: float
   # Volume mixing ratio lookup for each gas species. Only water vapor and ozone
