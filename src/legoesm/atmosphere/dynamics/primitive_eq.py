@@ -77,6 +77,7 @@ class PrimitiveEquationConfig(NamedTuple):
     hyperdiff_ps_coeff: float = 0.0  # Separate coefficient for p_s ∇⁴ diffusion
     use_conservation_fixer: bool = True
     fix_mass: bool = True
+    anchor_mass_to_initial: bool = False  # Anchor mass fixer to initial mass (prevents drift)
     time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
     edge_blend_uv: float = 0.0
     edge_blend_T: float = 0.0
@@ -214,15 +215,21 @@ def hydrostatic_tendencies(
 
     if config.discretization == "finite_volume":
         from legoesm.core.operators_3d import fv_flux_divergence_3d
+        from legoesm.core.conservation import zero_mean_tendency
         # FV continuity: divergence of mass flux per layer
         ps_layer = p_s[..., None] * dsigma[None, None, None, :]  # (6,n,n,nlev)
         mass_div = fv_flux_divergence_3d(
             ps_layer, u, v, grid, g=0.0, limiter=config.fv_limiter,
         )
+        # Zero-mean correction: enforce exact global mass conservation
+        mass_div = zero_mean_tendency(mass_div, grid)
         dp_s_dt_data = jnp.sum(mass_div, axis=-1) / sigma_range
 
-        # Sigma-dot still uses centered div for vertical coordinate consistency.
-        div_v = _divergence_3d(u, v, grid)
+        # Derive effective velocity divergence consistent with FV mass flux
+        # so that sigma_dot is consistent with dp_s/dt.
+        # mass_div_k = -div(p_s * dsigma_k * v_k), so
+        # div_eff_k = -mass_div_k / (p_s * dsigma_k)
+        div_v = -mass_div / (jnp.clip(p_s[..., None], 100.0) * dsigma[None, None, None, :])
         sigma_dot = compute_sigma_dot(div_v, sigma_coord)
     else:
         # Centered continuity (default).
@@ -343,6 +350,7 @@ class PrimitiveEquationModel:
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or PrimitiveEquationConfig()
+        self._target_mass = None  # Set on first step when anchor_mass_to_initial=True
         for name in ("edge_blend_uv", "edge_blend_T", "edge_blend_p_s"):
             value = float(getattr(self.config, name))
             if not (0.0 <= value <= 1.0):
@@ -414,8 +422,16 @@ class PrimitiveEquationModel:
 
         # Apply conservation fixers
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            from legoesm.core.conservation import fix_mass_hydrostatic
-            state_new = fix_mass_hydrostatic(state_new, state, self.grid)
+            if self.config.anchor_mass_to_initial:
+                from legoesm.core.conservation import fix_mass_hydrostatic_target
+                if self._target_mass is None:
+                    self._target_mass = global_integral(state.p_s, self.grid)
+                state_new = fix_mass_hydrostatic_target(
+                    state_new, self._target_mass, self.grid,
+                )
+            else:
+                from legoesm.core.conservation import fix_mass_hydrostatic
+                state_new = fix_mass_hydrostatic(state_new, state, self.grid)
 
         return state_new
 
@@ -475,8 +491,16 @@ class PrimitiveEquationModel:
             state_new = _apply_hydro_edge_blend(state_new, self.grid, self.config)
 
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            from legoesm.core.conservation import fix_mass_hydrostatic
-            state_new = fix_mass_hydrostatic(state_new, state, self.grid)
+            if self.config.anchor_mass_to_initial:
+                from legoesm.core.conservation import fix_mass_hydrostatic_target
+                if self._target_mass is None:
+                    self._target_mass = global_integral(state.p_s, self.grid)
+                state_new = fix_mass_hydrostatic_target(
+                    state_new, self._target_mass, self.grid,
+                )
+            else:
+                from legoesm.core.conservation import fix_mass_hydrostatic
+                state_new = fix_mass_hydrostatic(state_new, state, self.grid)
 
         return state_new
 

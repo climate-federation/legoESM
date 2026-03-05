@@ -78,6 +78,8 @@ class CompressibleEulerConfig(NamedTuple):
     edge_blend_width: int = 1
     discretization: str = "centered"  # "centered" | "finite_volume"
     fv_limiter: str = "mc"
+    fix_mass: bool = False            # Apply NH mass conservation fixer
+    anchor_mass_to_initial: bool = False  # Anchor to initial mass (prevents drift)
 
 
 def _apply_nh_edge_blend(
@@ -272,9 +274,11 @@ def compressible_euler_slow_tendencies(
     # Vertical theta advection is handled by the acoustic substeps.
     if config.discretization == "finite_volume":
         from legoesm.core.operators_3d import fv_scalar_advection_3d
+        from legoesm.core.conservation import zero_mean_tendency
         dtheta_p_dt = fv_scalar_advection_3d(
             theta_total, u, v, grid, limiter=config.fv_limiter,
         )
+        dtheta_p_dt = zero_mean_tendency(dtheta_p_dt, grid)
     else:
         # Advective form: -v·∇_h(θ) using centered gradients.
         dtheta_dx = gradient_x_3d(theta_total, grid)
@@ -285,9 +289,11 @@ def compressible_euler_slow_tendencies(
     # Vertical mass flux divergence is handled by the acoustic substeps.
     if config.discretization == "finite_volume":
         from legoesm.core.operators_3d import fv_flux_divergence_3d
+        from legoesm.core.conservation import zero_mean_tendency
         drho_p_dt = fv_flux_divergence_3d(
             rho_total, u, v, grid, g=0.0, limiter=config.fv_limiter,
         )
+        drho_p_dt = zero_mean_tendency(drho_p_dt, grid)
     else:
         rho_u = rho_total * u
         rho_v = rho_total * v
@@ -301,11 +307,13 @@ def compressible_euler_slow_tendencies(
 
         if config.discretization == "finite_volume":
             from legoesm.core.operators_3d import fv_scalar_advection_3d
+            from legoesm.core.conservation import zero_mean_tendency as _zmt
 
             def _single_tracer_tendency(q):
                 horiz_adv_q = fv_scalar_advection_3d(
                     q, u, v, grid, limiter=config.fv_limiter,
                 )
+                horiz_adv_q = _zmt(horiz_adv_q, grid)
                 vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
                 return horiz_adv_q + vert_adv_q
         else:
@@ -748,6 +756,7 @@ class CompressibleEulerModel:
         self.height_coord = height_coord
         self.terrain_metric = terrain_metric
         self.config = config or CompressibleEulerConfig()
+        self._target_mass = None  # Set on first step when fix_mass + anchor_mass_to_initial
         if self.config.small_earth_factor != 1.0:
             from legoesm.grids.cubed_sphere import apply_small_earth_scaling
             grid = apply_small_earth_scaling(grid, self.config.small_earth_factor)
@@ -844,6 +853,27 @@ class CompressibleEulerModel:
             or self.config.edge_blend_tracers > 0.0
         ):
             state_new = _apply_nh_edge_blend(state_new, self.grid, self.config)
+
+        if self.config.fix_mass:
+            from legoesm.core.conservation import (
+                fix_mass_nonhydrostatic, compute_nh_dry_mass,
+            )
+            if self.config.anchor_mass_to_initial and self._target_mass is None:
+                self._target_mass = compute_nh_dry_mass(
+                    state.rho_prime.data, self.height_coord,
+                    self.terrain_metric, self.grid,
+                )
+            target = self._target_mass if self.config.anchor_mass_to_initial else (
+                compute_nh_dry_mass(
+                    state.rho_prime.data, self.height_coord,
+                    self.terrain_metric, self.grid,
+                )
+            )
+            state_new = fix_mass_nonhydrostatic(
+                state_new, target, self.height_coord,
+                self.terrain_metric, self.grid,
+            )
+
         return state_new
 
     @partial(jax.jit, static_argnums=(0, 3))
@@ -909,6 +939,27 @@ class CompressibleEulerModel:
             or self.config.edge_blend_tracers > 0.0
         ):
             state_new = _apply_nh_edge_blend(state_new, self.grid, self.config)
+
+        if self.config.fix_mass:
+            from legoesm.core.conservation import (
+                fix_mass_nonhydrostatic, compute_nh_dry_mass,
+            )
+            if self.config.anchor_mass_to_initial and self._target_mass is None:
+                self._target_mass = compute_nh_dry_mass(
+                    state.rho_prime.data, self.height_coord,
+                    self.terrain_metric, self.grid,
+                )
+            target = self._target_mass if self.config.anchor_mass_to_initial else (
+                compute_nh_dry_mass(
+                    state.rho_prime.data, self.height_coord,
+                    self.terrain_metric, self.grid,
+                )
+            )
+            state_new = fix_mass_nonhydrostatic(
+                state_new, target, self.height_coord,
+                self.terrain_metric, self.grid,
+            )
+
         return state_new
 
     def integrate(

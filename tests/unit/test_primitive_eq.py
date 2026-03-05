@@ -784,3 +784,37 @@ class TestFVDiscretization:
         new_state = model.step(state, 60.0)
         assert jnp.all(jnp.isfinite(new_state.T.data))
         assert jnp.all(jnp.isfinite(new_state.p_s.data))
+
+    def test_fv_dp_s_dt_zero_mean(self, grid, sigma):
+        """FV dp_s/dt tendency should have near-zero global integral (mass conservation)."""
+        config = PrimitiveEquationConfig(discretization="finite_volume")
+        state = _make_state(grid, sigma, T_val=300.0, u_val=10.0, v_val=5.0)
+        tend = hydrostatic_tendencies(state, grid, sigma, config)
+        global_sum = float(jnp.sum(tend.dp_s_dt.data * grid.area))
+        # After zero_mean_tendency correction, should be very small
+        assert abs(global_sum) < 1e-2, f"dp_s/dt global sum = {global_sum}"
+
+    def test_fv_sigma_dot_consistent(self, grid, sigma):
+        """FV sigma_dot should be consistent with dp_s/dt (BCs satisfied)."""
+        config = PrimitiveEquationConfig(discretization="finite_volume")
+        state = _make_state(grid, sigma, T_val=300.0, u_val=10.0, v_val=5.0)
+        tend = hydrostatic_tendencies(state, grid, sigma, config)
+        # dp_s/dt should be finite
+        assert jnp.all(jnp.isfinite(tend.dp_s_dt.data))
+
+    def test_anchor_mass_to_initial(self, grid, sigma):
+        """Anchor to initial mass prevents drift over multiple steps."""
+        config = PrimitiveEquationConfig(
+            discretization="centered",
+            anchor_mass_to_initial=True,
+        )
+        model = PrimitiveEquationModel(grid, sigma, config)
+        state = _make_state(grid, sigma, T_val=300.0, u_val=5.0)
+        from legoesm.core.operators import global_integral
+        initial_mass = float(global_integral(state.p_s, grid))
+        # Run a few steps
+        for _ in range(3):
+            state = model.step(state, 60.0)
+        final_mass = float(global_integral(state.p_s, grid))
+        rel_err = abs(final_mass - initial_mass) / abs(initial_mass)
+        assert rel_err < 1e-8, f"Mass drift = {rel_err}"

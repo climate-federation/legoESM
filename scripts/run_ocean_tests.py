@@ -100,6 +100,95 @@ def _style_idealized_axes(ax):
     ax.set_global()
 
 
+def _compute_lat_depth_section(field_3d, grid, mask_2d, lat_bins_deg):
+    """Area-weighted latitude-depth section from cubed-sphere data."""
+    lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
+    area = np.asarray(grid.area)
+    mask = np.asarray(mask_2d)
+    field = np.asarray(field_3d)
+
+    n_levels = field.shape[-1]
+    flat_lat = lat_deg.ravel()
+    flat_w = (area * mask).ravel()
+    flat_field = field.reshape(-1, n_levels)
+
+    bin_idx = np.digitize(flat_lat, lat_bins_deg) - 1
+    n_bins = len(lat_bins_deg) - 1
+    section = np.full((n_bins, n_levels), np.nan, dtype=np.float64)
+
+    for i in range(n_bins):
+        sel = bin_idx == i
+        if not np.any(sel):
+            continue
+        w = flat_w[sel]
+        wsum = float(np.sum(w))
+        if wsum <= 0.0:
+            continue
+        section[i, :] = np.sum(flat_field[sel, :] * w[:, None], axis=0) / wsum
+
+    lat_centers = 0.5 * (lat_bins_deg[:-1] + lat_bins_deg[1:])
+    return lat_centers, section
+
+
+def _plot_lat_depth_sections(
+    output_path,
+    z_coord,
+    lat_centers,
+    panels,
+    suptitle,
+):
+    """Plot one or more latitude-depth section panels."""
+    depth = np.asarray(z_coord.z_full_ref)
+    if float(np.nanmean(depth)) < 0.0:
+        depth = -depth
+
+    n_panels = len(panels)
+    fig, axes = plt.subplots(1, n_panels, figsize=(7.0 * n_panels, 6.0), squeeze=False)
+    axes = axes.ravel()
+
+    for ax, (title, section, cmap, symmetric, cbar_label) in zip(axes, panels):
+        data = np.asarray(section).T  # (n_levels, n_lat)
+        finite = data[np.isfinite(data)]
+        if finite.size == 0:
+            ax.text(0.5, 0.5, "No ocean data", ha="center", va="center")
+            ax.set_title(title, fontsize=12, fontweight="bold")
+            ax.set_xlabel("Latitude [deg]")
+            ax.set_ylabel("Depth [m]")
+            continue
+
+        if symmetric:
+            vmax = float(np.max(np.abs(finite)))
+            vmax = max(vmax, 1.0e-12)
+            vmin = -vmax
+        else:
+            vmin = float(np.min(finite))
+            vmax = float(np.max(finite))
+            if abs(vmax - vmin) < 1.0e-12:
+                vmax = vmin + 1.0e-12
+
+        cs = ax.contourf(
+            lat_centers,
+            depth,
+            data,
+            levels=31,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            extend="both",
+        )
+        ax.set_xlabel("Latitude [deg]")
+        ax.set_ylabel("Depth [m]")
+        ax.set_title(title, fontsize=12, fontweight="bold")
+        ax.set_ylim(float(np.nanmax(depth)), float(np.nanmin(depth)))
+        ax.grid(True, alpha=0.25)
+        fig.colorbar(cs, ax=ax, orientation="vertical", pad=0.02, label=cbar_label)
+
+    fig.suptitle(suptitle, fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
 def _rest_state_all_ocean(grid, z_coord, **kwargs):
     """Rest state with no land mask for idealized ocean cases."""
     return rest_state_ocean(
@@ -429,6 +518,31 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
     plt.savefig(f"{output_dir}/rest_state/T_profile.png", dpi=150, bbox_inches="tight")
     plt.close()
 
+    # Latitude-depth sections (initial/final)
+    lat_bins = np.linspace(-90.0, 90.0, 73)
+    lat_centers, T_init_sec = _compute_lat_depth_section(
+        state_init.T.data,
+        grid,
+        state_init.land_mask.data,
+        lat_bins,
+    )
+    _, T_final_sec = _compute_lat_depth_section(
+        state.T.data,
+        grid,
+        state.land_mask.data,
+        lat_bins,
+    )
+    _plot_lat_depth_sections(
+        f"{output_dir}/rest_state/T_lat_depth_sections.png",
+        z_coord,
+        lat_centers,
+        [
+            ("Initial T", T_init_sec, "RdYlBu_r", False, "Temperature [degC]"),
+            ("Final T", T_final_sec, "RdYlBu_r", False, "Temperature [degC]"),
+        ],
+        "Rest-State Test — Latitude-Depth Temperature Sections",
+    )
+
     return state, diagnostics
 
 
@@ -588,6 +702,31 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
     plt.tight_layout()
     plt.savefig(f"{output_dir}/gravity_wave/diagnostics.png", dpi=150, bbox_inches="tight")
     plt.close()
+
+    # Latitude-depth sections at final time
+    lat_bins = np.linspace(-90.0, 90.0, 73)
+    lat_centers, speed_sec = _compute_lat_depth_section(
+        jnp.sqrt(state.u.data**2 + state.v.data**2),
+        grid,
+        state.land_mask.data,
+        lat_bins,
+    )
+    _, T_anom_sec = _compute_lat_depth_section(
+        state.T.data - state_init.T.data,
+        grid,
+        state.land_mask.data,
+        lat_bins,
+    )
+    _plot_lat_depth_sections(
+        f"{output_dir}/gravity_wave/lat_depth_sections.png",
+        z_coord,
+        lat_centers,
+        [
+            ("Final speed", speed_sec, "magma", False, "Speed [m/s]"),
+            ("Final T anomaly", T_anom_sec, "RdBu_r", True, "Delta T [degC]"),
+        ],
+        "Barotropic Gravity Wave — Latitude-Depth Sections",
+    )
 
     return state, diagnostics
 
@@ -808,6 +947,31 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
     plt.tight_layout()
     plt.savefig(f"{output_dir}/wind_gyre/T_profile.png", dpi=150, bbox_inches="tight")
     plt.close()
+
+    # Latitude-depth sections at final time
+    lat_bins = np.linspace(-90.0, 90.0, 73)
+    lat_centers, u_sec = _compute_lat_depth_section(
+        state.u.data,
+        grid,
+        state.land_mask.data,
+        lat_bins,
+    )
+    _, speed_sec = _compute_lat_depth_section(
+        jnp.sqrt(state.u.data**2 + state.v.data**2),
+        grid,
+        state.land_mask.data,
+        lat_bins,
+    )
+    _plot_lat_depth_sections(
+        f"{output_dir}/wind_gyre/lat_depth_sections.png",
+        z_coord,
+        lat_centers,
+        [
+            ("Final zonal velocity u", u_sec, "RdBu_r", True, "u [m/s]"),
+            ("Final speed", speed_sec, "magma", False, "Speed [m/s]"),
+        ],
+        "Wind-Driven Gyre — Latitude-Depth Sections",
+    )
 
     return state, diagnostics, gyre_config
 

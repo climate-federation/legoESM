@@ -419,9 +419,10 @@ def run_dcmip_transport(test_id, test_name, wind_fn, init_fn, tracer_names,
     save_transport_timeseries(out_dir, tag, ts_data, tracer_names,
                               has_error_norms=has_flow_reversal)
 
-    # Save raw snapshot data
+    # Save raw snapshot data (native face panels + metadata)
     for step_num, sdata in snap_data.items():
         np.savez(f"{out_dir}/snapshot_step{step_num:06d}.npz",
+                 remap_method="native_cubed_sphere",
                  tracers=sdata["tracers"])
 
     print(f"  Results saved to {out_dir}/")

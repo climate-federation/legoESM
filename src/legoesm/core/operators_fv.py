@@ -285,7 +285,10 @@ def _weno5_1d(q):
     e = q[..., 4:-1, :]    # q_{j+2}: indices 4..n+2
     f = q[..., 5:, :]      # q_{j+3}: indices 5..n+3
 
-    eps = 1e-6
+    # Use a small but safe epsilon to prevent division by zero in smoothness
+    # indicators.  1e-12 works well for float32 (avoids over-dissipation
+    # compared to the original 1e-6 while remaining safe from underflow).
+    eps = 1e-12
 
     # Left-biased (uses a, b, c, d, e) → q_L at interface c|d
     p0_L = (2.0 * a - 7.0 * b + 11.0 * c) / 6.0
@@ -485,6 +488,52 @@ def _symmetrize_boundary_fluxes(Phi_x, Phi_y):
             )
 
     return Phi_x, Phi_y
+
+
+def edge_flux_mismatch(Phi_x, Phi_y):
+    """Compute edge flux mismatch norm before symmetrization.
+
+    For each of the 12 shared cube edges, measures the L2 norm of the
+    difference between the two independently computed boundary fluxes.
+    Returns a dict with the maximum and mean mismatch norms across edges.
+
+    Parameters
+    ----------
+    Phi_x : jax.Array, shape (6, n+1, n)
+    Phi_y : jax.Array, shape (6, n, n+1)
+
+    Returns
+    -------
+    dict with keys 'max_mismatch', 'mean_mismatch', 'per_edge' (list of 12 floats).
+    """
+    mismatches = []
+    seen = set()
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+            key = tuple(sorted(((face, edge), (nbr_face, nbr_edge))))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            strip_a = _get_boundary_flux(Phi_x, Phi_y, face, edge)
+            strip_b = _get_boundary_flux(Phi_x, Phi_y, nbr_face, nbr_edge)
+            if is_reversed:
+                strip_b = strip_b[::-1]
+
+            same_outward = _OUTWARD_SIGN[edge] * _OUTWARD_SIGN[nbr_edge] > 0
+            if same_outward:
+                diff = strip_a + strip_b  # should be zero if consistent
+            else:
+                diff = strip_a - strip_b  # should be zero if consistent
+
+            mismatches.append(float(jnp.sqrt(jnp.mean(diff**2))))
+
+    return {
+        'max_mismatch': max(mismatches),
+        'mean_mismatch': sum(mismatches) / len(mismatches),
+        'per_edge': mismatches,
+    }
 
 
 def fv_flux_divergence(h, u, v, grid, g=9.80616, limiter="mc", h_s=None):

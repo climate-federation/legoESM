@@ -25,8 +25,12 @@ def _global_area_sum(array: jax.Array, grid: CubedSphereGrid) -> jax.Array:
     Like ``global_integral`` but works on raw arrays instead of
     ``Field`` objects.  Under MPI, local sums are combined via
     ``allreduce(SUM)`` to produce the true global total.
+
+    The accumulation is performed in float64 (if available) to avoid
+    precision loss in large-scale global integrals.
     """
-    local_sum = jnp.sum(array * grid.area)
+    prod = array.astype(jnp.float64) * grid.area.astype(jnp.float64)
+    local_sum = jnp.sum(prod)
     if _is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
@@ -212,13 +216,273 @@ def fix_mass_hydrostatic_latlon(
     -------
     HydrostaticState : Mass-conserving state.
     """
-    mass_old = jnp.sum(state_old.p_s.data * grid.area)
-    mass_new = jnp.sum(state_new.p_s.data * grid.area)
+    mass_old = jnp.sum(state_old.p_s.data.astype(jnp.float64) * grid.area.astype(jnp.float64))
+    mass_new = jnp.sum(state_new.p_s.data.astype(jnp.float64) * grid.area.astype(jnp.float64))
 
     correction = (mass_old - mass_new) / grid.total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
 
     return state_new._replace(p_s=p_s_fixed)
+
+
+def zero_mean_tendency(
+    tendency: jax.Array,
+    grid: CubedSphereGrid,
+) -> jax.Array:
+    """Remove the area-weighted global mean from a tendency field.
+
+    After this correction, ``sum(tendency * area) == 0`` to machine
+    precision, enforcing exact conservation for explicit FV mass equations.
+
+    Works for both 2D ``(6, n, n)`` and 3D ``(6, n, n, nlev)`` arrays.
+    For 3D arrays the correction is applied independently at each level.
+
+    Parameters
+    ----------
+    tendency : jax.Array
+        The mass/tracer tendency field.
+    grid : CubedSphereGrid
+        Grid with cell areas and total_area.
+
+    Returns
+    -------
+    jax.Array : Corrected tendency with zero global integral.
+    """
+    area = grid.area  # (6, n, n)
+    area_f64 = area.astype(jnp.float64)
+    total_area_f64 = jnp.sum(area_f64)
+    orig_dtype = tendency.dtype
+    if tendency.ndim == 3:
+        global_sum = _global_area_sum(tendency, grid)
+        correction = global_sum / total_area_f64
+        # Compute in float64 then cast back to original dtype
+        return (tendency.astype(jnp.float64) - correction).astype(orig_dtype)
+    elif tendency.ndim == 4:
+        # Per-level correction
+        tend_f64 = tendency.astype(jnp.float64)
+        prod = tend_f64 * area_f64[..., None]
+        level_sums = jnp.sum(prod, axis=(0, 1, 2))  # (nlev,)
+        if _is_distributed():
+            from legoesm.parallel.reductions import global_sum_mpi
+            level_sums = global_sum_mpi(level_sums)
+        corrections = level_sums / total_area_f64  # (nlev,)
+        return (tend_f64 - corrections[None, None, None, :]).astype(orig_dtype)
+    else:
+        return tendency
+
+
+def fix_mass_hydrostatic_target(
+    state_new: HydrostaticState,
+    target_mass: jax.Array,
+    grid: CubedSphereGrid,
+) -> HydrostaticState:
+    """Fix mass conservation anchored to a fixed target mass.
+
+    Unlike ``fix_mass_hydrostatic`` which anchors to the previous step,
+    this anchors to a fixed target (typically the initial global mass),
+    preventing slow drift accumulation over many steps.
+
+    Parameters
+    ----------
+    state_new : HydrostaticState
+        State after time integration.
+    target_mass : jax.Array
+        Target global mass integral (∫ p_s * dA at t=0).
+    grid : CubedSphereGrid
+
+    Returns
+    -------
+    HydrostaticState : Mass-conserving state.
+    """
+    mass_new = global_integral(state_new.p_s, grid)
+    correction = (target_mass - mass_new) / grid.total_area
+    p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
+    return state_new._replace(p_s=p_s_fixed)
+
+
+def compute_nh_dry_mass(
+    rho_prime: jax.Array,
+    height_coord,
+    terrain_metric,
+    grid: CubedSphereGrid,
+) -> jax.Array:
+    """Compute global dry-air mass for the non-hydrostatic model.
+
+    M = ∫ J · rho_total · dz · dA  summed over all levels.
+
+    Parameters
+    ----------
+    rho_prime : jax.Array, shape (6, n, n, nlev)
+    height_coord : HeightCoordinate
+    terrain_metric : TerrainMetric
+    grid : CubedSphereGrid
+
+    Returns
+    -------
+    jax.Array : Scalar global dry mass [kg].
+    """
+    rho_total = height_coord.rho_ref + rho_prime  # (6,n,n,nlev)
+    J = terrain_metric.jacobian  # (6, n, n)
+    dz = height_coord.dz  # (nlev,)
+    # Column mass: sum_k(J * rho_total_k * dz_k)
+    col_mass = jnp.sum(
+        J[..., None] * rho_total * dz[None, None, None, :],
+        axis=-1,
+    )  # (6, n, n)
+    return _global_area_sum(col_mass, grid)
+
+
+def fix_mass_nonhydrostatic(
+    state,
+    target_mass: jax.Array,
+    height_coord,
+    terrain_metric,
+    grid: CubedSphereGrid,
+):
+    """Fix dry-mass conservation for the non-hydrostatic model.
+
+    Applies a uniform additive correction to rho_prime so that the
+    global dry mass matches the target.
+
+    Parameters
+    ----------
+    state : NonHydrostaticState
+    target_mass : jax.Array
+        Target global mass.
+    height_coord : HeightCoordinate
+    terrain_metric : TerrainMetric
+    grid : CubedSphereGrid
+
+    Returns
+    -------
+    NonHydrostaticState : Mass-conserving state.
+    """
+    current_mass = compute_nh_dry_mass(
+        state.rho_prime.data, height_coord, terrain_metric, grid,
+    )
+    J = terrain_metric.jacobian
+    dz = height_coord.dz
+    # Total weighted volume: ∫ J * sum(dz) * dA
+    col_vol = J * jnp.sum(dz)  # (6, n, n)
+    total_vol = _global_area_sum(col_vol, grid)
+    # Uniform correction to rho_prime
+    correction = (target_mass - current_mass) / total_vol
+    rho_fixed = state.rho_prime.replace(
+        data=state.rho_prime.data + correction,
+    )
+    return state._replace(rho_prime=rho_fixed)
+
+
+def compute_hydrostatic_energy(
+    state: HydrostaticState,
+    grid: CubedSphereGrid,
+    sigma_coord,
+) -> dict[str, jax.Array]:
+    """Compute energy diagnostics for the hydrostatic PE model.
+
+    Returns
+    -------
+    dict with:
+        'kinetic_energy': ∫ 0.5·p_s·(u²+v²)·dσ·dA / g
+        'internal_energy': ∫ c_v·T·p_s·dσ·dA / g
+        'potential_energy': ∫ Φ·p_s·dσ·dA / g
+        'total_energy': sum of all three
+    """
+    from legoesm import constants
+    from legoesm.grids.vertical import compute_geopotential
+
+    u = state.u.data
+    v = state.v.data
+    T = state.T.data
+    p_s = state.p_s.data
+    phis = state.phis.data
+    g = constants.g
+    c_v = constants.c_vd
+    dsigma = sigma_coord.dsigma
+
+    # Kinetic energy
+    ke_3d = 0.5 * (u**2 + v**2) * p_s[..., None] * dsigma[None, None, None, :]
+    ke = _global_area_sum(jnp.sum(ke_3d, axis=-1), grid) / g
+
+    # Internal energy
+    ie_3d = c_v * T * p_s[..., None] * dsigma[None, None, None, :]
+    ie = _global_area_sum(jnp.sum(ie_3d, axis=-1), grid) / g
+
+    # Potential energy
+    Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+    pe_3d = Phi * p_s[..., None] * dsigma[None, None, None, :]
+    pe = _global_area_sum(jnp.sum(pe_3d, axis=-1), grid) / g
+
+    total = ke + ie + pe
+    return {
+        'kinetic_energy': ke,
+        'internal_energy': ie,
+        'potential_energy': pe,
+        'total_energy': total,
+    }
+
+
+def compute_nh_energy(
+    state,
+    grid: CubedSphereGrid,
+    height_coord,
+    terrain_metric,
+) -> dict[str, jax.Array]:
+    """Compute energy diagnostics for the non-hydrostatic CE model.
+
+    Returns
+    -------
+    dict with:
+        'kinetic_energy': ∫ 0.5·rho·(u²+v²+w²)·J·dz·dA
+        'internal_energy': ∫ c_v·T·rho·J·dz·dA
+        'potential_energy': ∫ g·z·rho·J·dz·dA
+        'total_energy': sum of all three
+    """
+    from legoesm import constants
+
+    u = state.u.data
+    v = state.v.data
+    w = state.w.data
+    theta_p = state.theta_prime.data
+    rho_p = state.rho_prime.data
+
+    g = constants.g
+    c_v = constants.c_vd
+    theta_0 = height_coord.theta_ref
+    rho_0 = height_coord.rho_ref
+    exner_0 = height_coord.exner_ref
+    dz = height_coord.dz
+    z_full = height_coord.z_full
+    J = terrain_metric.jacobian
+
+    rho_total = rho_0 + rho_p
+    theta_total = theta_0 + theta_p
+    T = theta_total * exner_0  # approximate T from theta * exner_ref
+
+    # w at full levels
+    w_full = 0.5 * (w[..., :-1] + w[..., 1:])
+
+    weight = J[..., None] * dz[None, None, None, :] * rho_total  # (6,n,n,nlev)
+
+    # Kinetic
+    ke_3d = 0.5 * (u**2 + v**2 + w_full**2) * weight
+    ke = _global_area_sum(jnp.sum(ke_3d, axis=-1), grid)
+
+    # Internal
+    ie_3d = c_v * T * weight
+    ie = _global_area_sum(jnp.sum(ie_3d, axis=-1), grid)
+
+    # Potential
+    pe_3d = g * z_full[None, None, None, :] * weight
+    pe = _global_area_sum(jnp.sum(pe_3d, axis=-1), grid)
+
+    total = ke + ie + pe
+    return {
+        'kinetic_energy': ke,
+        'internal_energy': ie,
+        'potential_energy': pe,
+        'total_energy': total,
+    }
 
 
 def compute_conservation_diagnostics(

@@ -2,6 +2,17 @@
 
 These helpers apply a configurable relaxation across connected cube-face
 edges to reduce edge-local numerical artifacts in collocated-grid fields.
+
+.. warning::
+
+   Edge blending is a **non-conservative** post-hoc smoothing operation.
+   It modifies field values near cube edges without accounting for the
+   change in global integrals, so it should **not** be used together
+   with strict conservation requirements. All edge-blend coefficients
+   default to ``0.0`` (disabled). Enable only as a diagnostic aid or
+   for visualization; for production runs with finite-volume transport,
+   rely on the conservative boundary flux symmetrization in
+   :mod:`legoesm.core.operators_fv` instead.
 """
 
 from __future__ import annotations

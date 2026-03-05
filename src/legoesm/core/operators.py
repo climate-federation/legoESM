@@ -240,6 +240,26 @@ def hyperdiffusion(field: Field, grid: CubedSphereGrid, coeff: float) -> Field:
     return field.replace(data=-coeff * lap2.data, name=f"hyperdiff_{field.name}")
 
 
+def max_hyperdiff_coeff(grid: CubedSphereGrid, dt: float) -> float:
+    """Maximum stable hyperdiffusion coefficient for a given grid and timestep.
+
+    The diffusion-CFL condition for ∇⁴ hyperdiffusion is:
+        ν₄ · dt / dx⁴ < 1/8
+
+    Parameters
+    ----------
+    grid : CubedSphereGrid
+    dt : float
+        Timestep [seconds].
+
+    Returns
+    -------
+    float : Maximum stable ν₄.
+    """
+    dx_min = float(jnp.min(grid.dx))
+    return dx_min**4 / (8.0 * dt)
+
+
 # ==============================================================================
 # Global integrals (for conservation)
 # ==============================================================================
@@ -263,7 +283,8 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     -------
     scalar : The global integral.
     """
-    local_sum = jnp.sum(field.data * grid.area)
+    prod = field.data.astype(jnp.float64) * grid.area.astype(jnp.float64)
+    local_sum = jnp.sum(prod)
     if _is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)

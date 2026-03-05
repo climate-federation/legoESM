@@ -345,9 +345,17 @@ def run_case(case_tag, case_cfg, grid, output_dir, fv_limiter="mc"):
     print(f"  {'-' * 68}")
     print(f"  Completed in {total_time:.1f}s ({steps_per_sec:.0f} steps/s)")
 
-    # --- Save snapshots ---
+    # --- Save snapshots (native face panels + lat-lon) ---
     for day, flds in snap_data.items():
-        np.savez(f"{case_dir}/snapshot_day{day:03d}.npz", **flds)
+        np.savez(
+            f"{case_dir}/snapshot_day{day:03d}.npz",
+            remap_method="idw_cKDTree",
+            **flds,
+        )
+        # Also save native cubed-sphere face panels (no interpolation artifacts)
+        for key in ("height", "wind_speed", "vorticity"):
+            if key in flds:
+                np.save(f"{case_dir}/native_{key}_day{day:03d}.npy", flds[key])
 
     # --- Visualization ---
     print("  Generating figures...")

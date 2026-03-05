@@ -484,3 +484,31 @@ class TestFVDiscretization:
         assert jnp.all(jnp.isfinite(tend.dv_dt.data))
         assert jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data))
         assert jnp.all(jnp.isfinite(tend.drho_prime_dt.data))
+
+    def test_fv_drho_dt_zero_mean(self, grid, height_coord, terrain_metric):
+        """FV drho/dt tendency should have near-zero per-level global integral."""
+        config = CompressibleEulerConfig(discretization="finite_volume")
+        state = _make_nh_state(grid, height_coord)
+        tend = compressible_euler_slow_tendencies(
+            state, grid, height_coord, terrain_metric, config,
+        )
+        drho = tend.drho_prime_dt.data  # (6, n, n, nlev)
+        for k in range(drho.shape[-1]):
+            gs = float(jnp.sum(drho[..., k] * grid.area))
+            assert abs(gs) < 1e-2, f"Level {k} drho global sum = {gs}"
+
+    def test_nh_mass_diagnostic(self, grid, height_coord, terrain_metric):
+        """NH dry mass diagnostic should be positive and finite."""
+        from legoesm.core.conservation import compute_nh_dry_mass
+        state = _make_nh_state(grid, height_coord)
+        mass = compute_nh_dry_mass(
+            state.rho_prime.data, height_coord, terrain_metric, grid,
+        )
+        assert jnp.isfinite(mass)
+        assert float(mass) > 0
+
+    def test_fix_mass_config(self):
+        """fix_mass and anchor_mass_to_initial config fields exist."""
+        config = CompressibleEulerConfig()
+        assert config.fix_mass == False
+        assert config.anchor_mass_to_initial == False
