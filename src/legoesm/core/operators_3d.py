@@ -25,6 +25,10 @@ from legoesm.core.operators import (
     curl_z,
     hyperdiffusion,
 )
+from legoesm.core.operators_fv import (
+    fv_flux_divergence,
+    fv_scalar_advection,
+)
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 
 
@@ -154,6 +158,74 @@ def hyperdiffusion_3d(
 
     f_t = jnp.moveaxis(field_3d, -1, 0)
     result = jax.vmap(single_level)(f_t)
+    return jnp.moveaxis(result, 0, -1)
+
+
+# ==============================================================================
+# FV horizontal operators (vmap of 2D FV operators over vertical levels)
+# ==============================================================================
+
+def fv_flux_divergence_3d(
+    h_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
+    grid: CubedSphereGrid, g: float = 9.80616, limiter: str = "mc",
+) -> jax.Array:
+    """Compute -div(h*v) at all levels using FV with Rusanov flux.
+
+    Parameters
+    ----------
+    h_3d : jax.Array, shape (6, n, n, nlev)
+        Scalar field (depth, pressure, density).
+    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
+        Velocity components.
+    grid : CubedSphereGrid
+    g : float
+        Gravity for wave speed (0 for pure transport).
+    limiter : str
+        Slope limiter name.
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n, nlev)
+        Mass tendency: -div(h*v) at each level.
+    """
+    def single_level(h_k, u_k, v_k):
+        return fv_flux_divergence(h_k, u_k, v_k, grid, g, limiter)
+
+    h_t = jnp.moveaxis(h_3d, -1, 0)
+    u_t = jnp.moveaxis(u_3d, -1, 0)
+    v_t = jnp.moveaxis(v_3d, -1, 0)
+    result = jax.vmap(single_level)(h_t, u_t, v_t)
+    return jnp.moveaxis(result, 0, -1)
+
+
+def fv_scalar_advection_3d(
+    q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
+    grid: CubedSphereGrid, limiter: str = "mc",
+) -> jax.Array:
+    """Compute upwind FV scalar advection at all levels.
+
+    Parameters
+    ----------
+    q_3d : jax.Array, shape (6, n, n, nlev)
+        Scalar field to advect.
+    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
+        Velocity components.
+    grid : CubedSphereGrid
+    limiter : str
+        Slope limiter name.
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n, nlev)
+        Advective tendency: -div(q*v) at each level.
+    """
+    def single_level(q_k, u_k, v_k):
+        return fv_scalar_advection(q_k, u_k, v_k, grid, limiter)
+
+    q_t = jnp.moveaxis(q_3d, -1, 0)
+    u_t = jnp.moveaxis(u_3d, -1, 0)
+    v_t = jnp.moveaxis(v_3d, -1, 0)
+    result = jax.vmap(single_level)(q_t, u_t, v_t)
     return jnp.moveaxis(result, 0, -1)
 
 

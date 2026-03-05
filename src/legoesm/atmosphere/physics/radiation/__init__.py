@@ -2,7 +2,7 @@
 
 Two backends are available:
 1. **Gray**: Two-stream gray radiation (Frierson et al. 2006) — self-contained
-2. **RRTMGP**: Full correlated-k radiation via jax-rrtmgp — optional dependency
+2. **RRTMGP**: Full correlated-k radiation (bundled jax-rrtmgp)
 
 Both produce the same `RadiationOutput` interface.
 
@@ -35,4 +35,4 @@ from legoesm.atmosphere.physics.radiation.solar import (
 from legoesm.atmosphere.physics.radiation.integration import (
     make_radiation_physics,
 )
-from legoesm.atmosphere.physics.radiation.rrtmgp_wrapper import rrtmgp_radiation
+from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import rrtmgp_radiation

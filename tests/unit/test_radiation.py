@@ -489,7 +489,7 @@ class TestRRTMGP:
 
     def test_rrtmgp_clear_sky(self):
         """RRTMGP clear-sky heating rates should be finite."""
-        from legoesm.atmosphere.physics.radiation.rrtmgp_wrapper import (
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
             rrtmgp_radiation,
         )
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
@@ -507,7 +507,7 @@ class TestRRTMGP:
 
     def test_rrtmgp_differentiable_temperature(self):
         """jax.grad w.r.t. temperature should work through rrtmgp_radiation."""
-        from legoesm.atmosphere.physics.radiation.rrtmgp_wrapper import (
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
             rrtmgp_radiation,
         )
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
@@ -528,7 +528,7 @@ class TestRRTMGP:
 
     def test_rrtmgp_differentiable_cos_zenith(self):
         """jax.grad w.r.t. cos_zenith should work through rrtmgp_radiation."""
-        from legoesm.atmosphere.physics.radiation.rrtmgp_wrapper import (
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
             rrtmgp_radiation,
         )
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig

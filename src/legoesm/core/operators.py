@@ -43,7 +43,7 @@ def gradient_x(field: Field, grid: CubedSphereGrid) -> Field:
     -------
     Field : d(field)/dx, shape (6, n, n).
     """
-    padded = pad_halo(field.data)
+    padded = pad_halo(field.data, interp_offsets=grid.halo_interp_offsets)
     # Centered difference: (f[i+1,j] - f[i-1,j]) / (2*dx)
     # In padded array: i+1 = padded[:, 2:, 1:-1], i-1 = padded[:, :-2, 1:-1]
     df_dx = (padded[:, 2:, 1:-1] - padded[:, :-2, 1:-1]) / grid.dx
@@ -55,7 +55,7 @@ def gradient_y(field: Field, grid: CubedSphereGrid) -> Field:
 
     Same as gradient_x but along axis=2 (y-direction).
     """
-    padded = pad_halo(field.data)
+    padded = pad_halo(field.data, interp_offsets=grid.halo_interp_offsets)
     # j+1 = padded[:, 1:-1, 2:], j-1 = padded[:, 1:-1, :-2]
     df_dy = (padded[:, 1:-1, 2:] - padded[:, 1:-1, :-2]) / grid.dy
     return field.replace(data=df_dy, name=f"d{field.name}_dy", units=f"{field.units}/m")
@@ -104,6 +104,7 @@ def divergence(u_field: Field, v_field: Field, grid: CubedSphereGrid) -> Field:
         u, v,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=grid.halo_interp_offsets,
     )
 
     flux_x_pad = u_pad * grid.hy_ext
@@ -148,6 +149,7 @@ def curl_z(u_field: Field, v_field: Field, grid: CubedSphereGrid) -> Field:
         u, v,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=grid.halo_interp_offsets,
     )
 
     # Orthogonal-curvilinear finite-volume form:
@@ -191,7 +193,7 @@ def advect_upwind(
 
     -u * dq/dx - v * dq/dy, using upwind differencing for stability.
     """
-    q_pad = pad_halo(q.data)
+    q_pad = pad_halo(q.data, interp_offsets=grid.halo_interp_offsets)
     u_data = u.data
     v_data = v.data
     q_data = q.data

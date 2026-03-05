@@ -49,7 +49,7 @@ def _get_radiation_fn(config: RadiationConfig):
     if config.scheme == "gray":
         return gray_radiation, config.gray
     elif config.scheme == "rrtmgp":
-        from legoesm.atmosphere.physics.radiation.rrtmgp_wrapper import (
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
             rrtmgp_radiation,
         )
         return rrtmgp_radiation, config.rrtmgp

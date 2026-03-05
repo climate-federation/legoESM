@@ -65,9 +65,9 @@ class GrayRadiationConfig(NamedTuple):
 
 
 class RRTMGPConfig(NamedTuple):
-    """Configuration for the jax-rrtmgp radiation wrapper.
+    """Configuration for RRTMGP correlated-k radiation.
 
-    Gas files default to empty strings, which tells the wrapper to use
+    Gas files default to empty strings, which tells the backend to use
     the jax-rrtmgp built-in defaults.
 
     Fields

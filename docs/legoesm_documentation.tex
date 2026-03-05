@@ -98,6 +98,8 @@ Wind rotation between geographic $(u_E,v_N)$ and grid-aligned $(u_g,v_g)$:
 \subsubsection{Halo exchange}
 Scalar fields are exchanged directly across the six-face connectivity table.  Vector fields are first rotated to geographic components, padded as scalars, then rotated back using the padded grid angle.
 
+Two halo widths are supported.  \textbf{Halo\,=\,1} (one ghost cell per side) suffices for second-order centred differences and MUSCL reconstruction.  \textbf{Halo\,=\,2} (two ghost cells per side) is required by higher-order reconstruction stencils (PPM, WENO5).  The halo exchange interpolates neighbour-face strips to the correct gnomonic position at each depth, removing the O($\Delta\alpha$) mismatch near cube corners.
+
 %-----------------------------------------------------------------------------
 \subsection{Gaussian Grid and Spectral Transforms}
 %-----------------------------------------------------------------------------
@@ -231,6 +233,108 @@ where $h_x=\Delta x/2$, $h_y=\Delta y/2$ are half-edge lengths and $A$ is the ce
 \end{equation}
 
 %=============================================================================
+\section{Finite-Volume Transport}
+%=============================================================================
+
+The finite-volume dynamical cores use upwind reconstruction at cell edges coupled with a Rusanov approximate Riemann solver.  Three reconstruction methods are available, selected via the \texttt{limiter} parameter.
+
+%-----------------------------------------------------------------------------
+\subsection{MUSCL Reconstruction (2nd order, halo\,=\,1)}
+%-----------------------------------------------------------------------------
+
+Piecewise-linear reconstruction with slope limiting (van Leer, 1979).  At the interface between cells $i$ and $i\!+\!1$:
+\begin{equation}
+  q_L = q_i + \half\,\phi_i, \qquad q_R = q_{i+1} - \half\,\phi_{i+1},
+\end{equation}
+where $\phi_i$ is the limited slope.  Two limiters are provided:
+\begin{itemize}[nosep]
+  \item \textbf{Minmod}: $\phi=\mathrm{minmod}(\Delta q_{+},\Delta q_{-})$,
+  \item \textbf{MC} (monotonised central): $\phi=\mathrm{minmod}\bigl(\mathrm{minmod}(2\Delta q_{+},2\Delta q_{-}),\;\half(\Delta q_{+}+\Delta q_{-})\bigr)$.
+\end{itemize}
+
+%-----------------------------------------------------------------------------
+\subsection{PPM Reconstruction (4th order, halo\,=\,2)}
+%-----------------------------------------------------------------------------
+
+The Piecewise Parabolic Method (Colella \& Woodward, 1984) constructs a monotone parabola in each cell from two edge values and the cell average.
+
+\subsubsection{Fourth-order edge values}
+At the interface $i\!+\!\half$:
+\begin{equation}
+  \hat q_{i+1/2} = \frac{7}{12}(q_i+q_{i+1}) - \frac{1}{12}(q_{i-1}+q_{i+2}).
+\end{equation}
+
+\subsubsection{Monotonicity constraint}
+The edge value is clamped to lie between its two adjacent cell averages:
+\begin{equation}
+  \hat q_{i+1/2} \leftarrow \mathrm{median}\!\bigl(\hat q_{i+1/2},\;q_i,\;q_{i+1}\bigr).
+\end{equation}
+
+\subsubsection{Colella--Woodward limiting}
+For each cell~$i$ with left edge value $a_L=\hat q_{i-1/2}$ and right edge value $a_R=\hat q_{i+1/2}$:
+\begin{enumerate}[nosep]
+  \item If $(a_R-q_i)(q_i-a_L)\le 0$ (local extremum): set $a_L=a_R=q_i$.
+  \item Define $\delta_m=a_R-a_L$ and $\delta_6=6\bigl(q_i-\half(a_L+a_R)\bigr)$.
+  \begin{itemize}[nosep]
+    \item If $\delta_m\,\delta_6>\delta_m^2$: set $a_L=3q_i-2a_R$.
+    \item If $\delta_m\,\delta_6<-\delta_m^2$: set $a_R=3q_i-2a_L$.
+  \end{itemize}
+\end{enumerate}
+The left and right states at each edge are then $q_L=a_R$ of the cell to the left and $q_R=a_L$ of the cell to the right.
+
+%-----------------------------------------------------------------------------
+\subsection{WENO5 Reconstruction (5th order, halo\,=\,2)}
+%-----------------------------------------------------------------------------
+
+The 5th-order Weighted Essentially Non-Oscillatory scheme (Jiang \& Shu, 1996) combines three 3rd-order sub-stencil polynomials with nonlinear weights that adapt to local smoothness.
+
+\subsubsection{Left-biased reconstruction at $i\!+\!\half$}
+Using cells $q_{i-2},\ldots,q_{i+2}$:
+\begin{alignat}{2}
+  q^{(0)} &= \tfrac{1}{6}(2q_{i-2}-7q_{i-1}+11q_i),
+  &\qquad d_0 &= \tfrac{1}{10},\\
+  q^{(1)} &= \tfrac{1}{6}(-q_{i-1}+5q_i+2q_{i+1}),
+  &\qquad d_1 &= \tfrac{6}{10},\\
+  q^{(2)} &= \tfrac{1}{6}(2q_i+5q_{i+1}-q_{i+2}),
+  &\qquad d_2 &= \tfrac{3}{10}.
+\end{alignat}
+
+\subsubsection{Smoothness indicators}
+\begin{align}
+  \beta_0 &= \tfrac{13}{12}(q_{i-2}-2q_{i-1}+q_i)^2 + \tfrac{1}{4}(q_{i-2}-4q_{i-1}+3q_i)^2,\\
+  \beta_1 &= \tfrac{13}{12}(q_{i-1}-2q_i+q_{i+1})^2 + \tfrac{1}{4}(q_{i-1}-q_{i+1})^2,\\
+  \beta_2 &= \tfrac{13}{12}(q_i-2q_{i+1}+q_{i+2})^2 + \tfrac{1}{4}(3q_i-4q_{i+1}+q_{i+2})^2.
+\end{align}
+
+\subsubsection{Nonlinear weights}
+\begin{equation}
+  \alpha_k = \frac{d_k}{(\varepsilon+\beta_k)^2}, \qquad
+  \omega_k = \frac{\alpha_k}{\sum_j\alpha_j}, \qquad
+  q_L = \sum_k \omega_k\,q^{(k)}, \qquad \varepsilon=10^{-6}.
+\end{equation}
+
+\subsubsection{Right-biased reconstruction}
+The right state $q_R$ at $i\!+\!\half$ is obtained by mirroring the stencil around the interface, using cells $q_{i-1},\ldots,q_{i+3}$ with ideal weights $d_0=\tfrac{1}{10}$, $d_1=\tfrac{6}{10}$, $d_2=\tfrac{3}{10}$ applied to the reversed sub-stencils.
+
+%-----------------------------------------------------------------------------
+\subsection{Rusanov Flux}
+%-----------------------------------------------------------------------------
+
+At each edge, the mass flux is
+\begin{equation}
+  F = \half(h_L u_L + h_R u_R) - \half\,\alpha\,(h_R-h_L),
+  \qquad \alpha=\max\!\bigl(|u_L|+c_L,\;|u_R|+c_R\bigr),
+\end{equation}
+where $c=\sqrt{g\,h}$ is the gravity-wave speed (set to zero for pure transport without wave-speed dissipation).  The net flux divergence for cell~$i$ is
+\begin{equation}
+  -(\nabla\!\cdot\!\bm F)_i = -\frac{1}{A_i}\Bigl[(F_x\,h_y)_{i+1/2}-(F_x\,h_y)_{i-1/2}+(G_y\,h_x)_{j+1/2}-(G_y\,h_x)_{j-1/2}\Bigr],
+\end{equation}
+where $h_x,h_y$ are the edge metric factors.
+
+\subsection{Well-balanced scheme}
+When topography $h_s$ is present, the scheme reconstructs the free surface $\eta=h+h_s$ instead of $h$.  The fluid depth at each edge is recovered as $h_L=\max(\eta_L-h_{s,\mathrm{edge}},0)$, ensuring zero spurious flux for a lake-at-rest state (Audusse et al., 2004).
+
+%=============================================================================
 \section{Atmospheric Dynamics}
 %=============================================================================
 
@@ -245,6 +349,8 @@ In \textbf{vector-invariant form} on the cubed sphere:
   \frac{\pp v}{\pp t} &= -(\zeta+f)\,u - \frac{\pp B}{\pp y} + D_v, \label{eq:sw-v}
 \end{align}
 where the Bernoulli function is $B=\half(u^2+v^2)+g(h+h_s)$ and $D_u,D_v$ represent hyperdiffusion.
+
+The mass equation~\eqref{eq:sw-mass} is discretised using the finite-volume Rusanov flux (Section~5) with a configurable reconstruction method: MUSCL (2nd order), PPM (4th order), or WENO5 (5th order), selected via \texttt{ShallowWaterConfig.fv\_limiter}.  Momentum uses centred differences with velocity-only biharmonic hyperdiffusion.
 
 %-----------------------------------------------------------------------------
 \subsection{Hydrostatic Primitive Equations ($\sigma$-coordinates)}
@@ -368,7 +474,7 @@ where $k+\half$ is the bottom interface and $k-\half$ the top (pressure increasi
 \subsection{RRTMGP Correlated-$k$ Radiation}
 %-----------------------------------------------------------------------------
 
-The RRTMGP wrapper calls JAX-RRTMGP with correlated-$k$ gaseous optics (128~LW and 112~SW $g$-points), a two-stream RTE solver, and optional cloud optics.  Default trace-gas concentrations: CO$_2$=415~ppmv, CH$_4$=1900~ppbv, N$_2$O=332~ppbv.
+The RRTMGP backend calls JAX-RRTMGP with correlated-$k$ gaseous optics (128~LW and 112~SW $g$-points), a two-stream RTE solver, and optional cloud optics.  Default trace-gas concentrations: CO$_2$=415~ppmv, CH$_4$=1900~ppbv, N$_2$O=332~ppbv.
 
 %-----------------------------------------------------------------------------
 \subsection{SBM Convection (Frierson 2007)}
@@ -716,9 +822,17 @@ $\rho_0$ & Ocean reference density & 1025 & kg\,m$^{-3}$ \\
 %=============================================================================
 
 \begin{description}[style=nextline,font=\normalfont]
+\item[Audusse, E., F.\ Bouchut, M.-O.\ Bristeau, R.\ Klein, and B.\ Perthame (2004)]
+A fast and stable well-balanced scheme with hydrostatic reconstruction for shallow water flows.
+\textit{SIAM J.\ Sci.\ Comput.}, \textbf{25}, 2050--2065.
+
 \item[Bourke, W.\ (1972)]
 An efficient, one-level, primitive-equation spectral model.
 \textit{Mon.\ Wea.\ Rev.}, \textbf{100}, 683--689.
+
+\item[Colella, P.\ and P.R.\ Woodward (1984)]
+The Piecewise Parabolic Method (PPM) for gas-dynamical simulations.
+\textit{J.\ Comput.\ Phys.}, \textbf{54}, 174--201.
 
 \item[Frierson, D.M.W., I.M.\ Held, and P.\ Zurita-Gotor (2006)]
 A gray-radiation aquaplanet moist GCM. Part~I: Static stability and eddy scale.
@@ -727,6 +841,10 @@ A gray-radiation aquaplanet moist GCM. Part~I: Static stability and eddy scale.
 \item[Frierson, D.M.W.\ (2007)]
 The dynamics of idealized convection schemes and their effect on the zonally averaged tropical circulation.
 \textit{J.\ Atmos.\ Sci.}, \textbf{64}, 1959--1976.
+
+\item[Jiang, G.-S.\ and C.-W.\ Shu (1996)]
+Efficient implementation of weighted ENO schemes.
+\textit{J.\ Comput.\ Phys.}, \textbf{126}, 202--228.
 
 \item[Held, I.M.\ and M.J.\ Suarez (1994)]
 A proposal for the intercomparison of the dynamical cores of atmospheric general circulation models.
@@ -747,6 +865,10 @@ An energy and angular-momentum conserving vertical finite-difference scheme and 
 \item[Skamarock, W.C.\ and J.B.\ Klemp (2008)]
 A time-split nonhydrostatic atmospheric model for weather research and forecasting applications.
 \textit{J.\ Comput.\ Phys.}, \textbf{227}, 3465--3485.
+
+\item[van Leer, B.\ (1979)]
+Towards the ultimate conservative difference scheme. V.\ A second-order sequel to Godunov's method.
+\textit{J.\ Comput.\ Phys.}, \textbf{32}, 101--136.
 
 \item[Wright, D.G.\ (1997)]
 An equation of state for use in ocean models: Eckart's formula revisited.

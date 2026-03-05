@@ -43,12 +43,10 @@ from legoesm.core.state import ShallowWaterState, ShallowWaterTendencies
 from legoesm.core.operators import (
     gradient_x,
     gradient_y,
-    divergence,
     curl_z,
-    advect_upwind,
-    advect_centered,
     hyperdiffusion,
 )
+from legoesm.core.operators_fv import fv_flux_divergence
 from legoesm.core.conservation import apply_conservation_fixer
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
@@ -157,9 +155,9 @@ class ShallowWaterConfig(NamedTuple):
     use_conservation_fixer: bool = True      # Apply mass/energy fixers
     fix_mass: bool = True
     fix_energy: bool = True
-    use_upwind_advection: bool = True       # Use upwind (True) or centered (False)
     time_integrator: str = "ssp_rk3"        # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
     edge_blend_strength: float = 0.0        # 0..1 cube-edge continuity relaxation
+    fv_limiter: str = "mc"                  # FV reconstruction: "mc", "minmod", "ppm", "weno5"
 
 
 def shallow_water_tendencies(
@@ -204,11 +202,15 @@ def shallow_water_tendencies(
     h_s = state.h_s
     g = config.g
 
-    # --- Mass continuity: dh/dt = -div(h*u, h*v) ---
-    hu = h * u
-    hv = h * v
+    # --- Mass continuity: dh/dt = -div(h*v) using well-balanced FV flux ---
+    # Use g=0 (pure transport) because gravity wave physics is handled by
+    # the pressure gradient in the momentum equation, not the mass flux.
+    # Including the gravity wave speed would cause excessive Rusanov dissipation.
     dh_dt = Field(
-        data=-divergence(hu, hv, grid).data,
+        data=fv_flux_divergence(
+            h.data, u.data, v.data, grid,
+            g=0.0, limiter=config.fv_limiter, h_s=h_s.data,
+        ),
         name="dh_dt", dims=h.dims, units="m/s",
     )
 
@@ -234,16 +236,13 @@ def shallow_water_tendencies(
     dv_dt_data = -abs_vor * u.data - dB_dy.data
 
     # --- Hyperdiffusion (scale-selective damping) ---
-    # Applied to all prognostic fields (u, v, h) to drain spurious energy
-    # from grid-scale oscillations, especially at face boundaries.
+    # Applied to velocity only — the FV mass equation already provides
+    # inherent numerical diffusion via upwind reconstruction.
     if config.hyperdiff_coeff > 0:
         diff_u = hyperdiffusion(u, grid, config.hyperdiff_coeff)
         diff_v = hyperdiffusion(v, grid, config.hyperdiff_coeff)
-        diff_h = hyperdiffusion(h, grid, config.hyperdiff_coeff)
         du_dt_data = du_dt_data + diff_u.data
         dv_dt_data = dv_dt_data + diff_v.data
-        dh_dt = Field(data=dh_dt.data + diff_h.data,
-                       name="dh_dt", dims=h.dims, units="m/s")
 
     du_dt = Field(data=du_dt_data, name="du_dt", dims=u.dims, units="m/s^2")
     dv_dt = Field(data=dv_dt_data, name="dv_dt", dims=v.dims, units="m/s^2")

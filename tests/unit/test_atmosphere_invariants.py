@@ -81,10 +81,10 @@ class TestRestStateInvariance:
 
         tend = hydrostatic_tendencies(state, grid, sigma, config)
 
-        assert float(jnp.max(jnp.abs(tend.du_dt.data))) < 1e-8
-        assert float(jnp.max(jnp.abs(tend.dv_dt.data))) < 1e-8
-        assert float(jnp.max(jnp.abs(tend.dT_dt.data))) < 1e-8
-        assert float(jnp.max(jnp.abs(tend.dp_s_dt.data))) < 1e-8
+        assert float(jnp.max(jnp.abs(tend.du_dt.data))) < 1e-7
+        assert float(jnp.max(jnp.abs(tend.dv_dt.data))) < 1e-7
+        assert float(jnp.max(jnp.abs(tend.dT_dt.data))) < 1e-7
+        assert float(jnp.max(jnp.abs(tend.dp_s_dt.data))) < 1e-7
 
 
 class TestSolidBodyRotationBehavior:

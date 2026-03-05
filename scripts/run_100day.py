@@ -68,7 +68,6 @@ config = ShallowWaterConfig(
     use_conservation_fixer=True,
     fix_mass=True,
     fix_energy=True,
-    use_upwind_advection=True,
 )
 model = ShallowWaterModel(grid, config)
 

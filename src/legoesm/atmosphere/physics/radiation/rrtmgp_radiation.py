@@ -1,11 +1,11 @@
-"""Wrapper around jax-rrtmgp for correlated-k radiation.
+"""RRTMGP correlated-k radiation backend.
 
 This module uses a bundled copy of jax-rrtmgp
 (https://github.com/climate-analytics-lab/jax-rrtmgp, Apache 2.0 license)
 by Jeff Parker (Google), Duncan Watson-Parris (UCSD), and
 Juan Nathaniel (Columbia University).
 
-The wrapper handles:
+This backend handles:
 1. Reshaping legoESM's (ncol, nlev) arrays to jax-rrtmgp's (ncol, 1, nlev+2)
 2. Adding 1-cell vertical halos (jax-rrtmgp convention)
 3. Building VMR dict from config concentrations

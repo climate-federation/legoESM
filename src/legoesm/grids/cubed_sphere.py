@@ -29,6 +29,8 @@ from legoesm.grids.halo import (
     extrapolate_to_halo,
     compute_padded_angle,
     compute_padded_half_metrics,
+    compute_halo_interp_offsets,
+    compute_halo_interp_offsets_h2,
 )
 
 
@@ -89,6 +91,16 @@ class CubedSphereGrid(NamedTuple):
     hy_ext : jax.Array
         Half dy extrapolated to halo, shape (6, n+2, n+2).
         Used in divergence computation.
+    cos_angle_padded_h2 : jax.Array
+        Cosine of padded grid angle for halo=2, shape (6, n+4, n+4).
+    sin_angle_padded_h2 : jax.Array
+        Sine of padded grid angle for halo=2, shape (6, n+4, n+4).
+    hx_ext_h2 : jax.Array
+        Half dx on halo=2 extended grid, shape (6, n+4, n+4).
+    hy_ext_h2 : jax.Array
+        Half dy on halo=2 extended grid, shape (6, n+4, n+4).
+    halo_interp_offsets_h2 : jax.Array
+        Interpolation offsets for halo=2 exchange, shape (6, 4, 2, n).
     """
     n: int
     radius: float
@@ -111,6 +123,12 @@ class CubedSphereGrid(NamedTuple):
     sin_angle_padded: jax.Array
     hx_ext: jax.Array
     hy_ext: jax.Array
+    halo_interp_offsets: jax.Array
+    cos_angle_padded_h2: jax.Array
+    sin_angle_padded_h2: jax.Array
+    hx_ext_h2: jax.Array
+    hy_ext_h2: jax.Array
+    halo_interp_offsets_h2: jax.Array
 
     @property
     def n_cells(self) -> int:
@@ -194,6 +212,16 @@ def create_cubed_sphere(
     cos_angle_padded_val = jnp.cos(angle_padded)
     sin_angle_padded_val = jnp.sin(angle_padded)
 
+    # Halo interpolation offsets for corrected cross-face exchange
+    halo_offsets = compute_halo_interp_offsets(n)
+
+    # halo=2 quantities for higher-order reconstruction (PPM, WENO5)
+    angle_padded_h2 = compute_padded_angle(n, halo=2)
+    hx_ext_h2, hy_ext_h2 = compute_padded_half_metrics(n, radius, halo=2)
+    cos_angle_padded_h2_val = jnp.cos(angle_padded_h2)
+    sin_angle_padded_h2_val = jnp.sin(angle_padded_h2)
+    halo_offsets_h2 = compute_halo_interp_offsets_h2(n)
+
     # Cast all arrays to float32. The cubed-sphere PE and tracer transport
     # models run in float32, so grid arrays must match to avoid scatter
     # cast warnings when jax_enable_x64 is True (e.g., spectral tests).
@@ -220,6 +248,12 @@ def create_cubed_sphere(
         sin_angle_padded=sin_angle_padded_val.astype(_f32),
         hx_ext=hx_ext.astype(_f32),
         hy_ext=hy_ext.astype(_f32),
+        halo_interp_offsets=halo_offsets.astype(_f32),
+        cos_angle_padded_h2=cos_angle_padded_h2_val.astype(_f32),
+        sin_angle_padded_h2=sin_angle_padded_h2_val.astype(_f32),
+        hx_ext_h2=hx_ext_h2.astype(_f32),
+        hy_ext_h2=hy_ext_h2.astype(_f32),
+        halo_interp_offsets_h2=halo_offsets_h2.astype(_f32),
     )
 
 

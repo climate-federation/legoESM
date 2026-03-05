@@ -207,33 +207,30 @@ def hydrostatic_tendencies(
     dv_dt_data = -abs_vor * u - dB_dy - pg_corr_y
 
     # --- 5. Surface pressure tendency and sigma-dot ---
-    # Flux-form surface pressure tendency for exact mass conservation.
+    # Local-form continuity for internal consistency between dp_s/dt
+    # and sigma-dot (both derived from the same div(v) field).
     #
     # The sigma-coordinate continuity equation is:
-    #   ∂p_s/∂t + ∫₀¹ div(p_s · v) dσ = 0
+    #   ∂(ln p_s)/∂t + ∫ div(v) dσ = 0
     #
-    # Flux form:  dp_s/dt = -Σ div(p_s · v_k) Δσ_k / σ_range
+    # Local form:  dp_s/dt = -p_s · D_total / σ_range
+    # where D_total = Σ div(v_k) · Δσ_k
     #
-    # This is exactly conservative because ∫ div(p_s·v) dA = 0 on a
-    # closed surface when the divergence operator is telescoping.
-    #
-    # Sigma-dot uses div(v) (advective form) for internal consistency
-    # with the vertical advection terms.
+    # This ensures exact discrete consistency: the per-layer residual
+    # dp_s/dt + p_s·div(v_k) + p_s·(σ̇_{k+1/2} - σ̇_{k-1/2})/Δσ_k = 0
+    # holds to machine precision. Global mass is maintained by the
+    # conservation fixer (fix_mass_hydrostatic).
     div_v = _divergence_3d(u, v, grid)  # (6,n,n,nlev)
 
     sigma_top = sigma_coord.sigma_half[0]
     sigma_range = 1.0 - sigma_top  # total sigma range
 
-    # Flux-form divergence: div(p_s * v) at each level
-    div_ps_v = _divergence_3d(
-        p_s[..., None] * u, p_s[..., None] * v, grid,
-    )  # (6,n,n,nlev)
+    D_total = jnp.sum(
+        div_v * dsigma[None, None, None, :], axis=-1,
+    )  # (6,n,n)
+    dp_s_dt_data = -p_s * D_total / sigma_range
 
-    dp_s_dt_data = -jnp.sum(
-        div_ps_v * dsigma[None, None, None, :], axis=-1,
-    ) / sigma_range  # (6,n,n)
-
-    # Sigma-dot (from div_v, consistent with vertical advection)
+    # Sigma-dot (from same div_v, internally consistent)
     sigma_dot = compute_sigma_dot(div_v, sigma_coord)  # (6,n,n,nlev+1)
 
     # --- 7. Vertical advection of T ---
@@ -247,7 +244,8 @@ def hydrostatic_tendencies(
     dv_dt_data = dv_dt_data + vert_adv_v
 
     # --- 8. Thermodynamic equation ---
-    # Horizontal advection of T: -v·∇T
+    # Horizontal advection of T in advective form: -v·∇T
+    # Uses centered gradients, consistent with primitive_eq_latlon.py
     dT_dx = _gradient_x_3d(T, grid)
     dT_dy = _gradient_y_3d(T, grid)
     horiz_adv_T = -(u * dT_dx + v * dT_dy)

@@ -54,7 +54,7 @@ from legoesm.atmosphere.dynamics.primitive_eq import (
 from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterConfig, ShallowWaterModel
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig, RRTMGPConfig
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
-from legoesm.atmosphere.physics.radiation.rrtmgp_wrapper import rrtmgp_radiation
+from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import rrtmgp_radiation
 from legoesm.core.conservation import compute_conservation_diagnostics
 from legoesm.core.field import Field
 from legoesm.core.operators import curl_z, global_integral

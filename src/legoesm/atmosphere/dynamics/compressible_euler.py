@@ -42,7 +42,6 @@ from legoesm.core.operators_3d import (
     hyperdiffusion_3d,
     vertical_gradient_half_to_full,
     vertical_advection_height,
-    vertical_divergence_height,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
@@ -68,7 +67,6 @@ class CompressibleEulerConfig(NamedTuple):
     sponge_coeff: float = 0.05      # Maximum Rayleigh damping rate [1/s]
     n_acoustic_substeps: int = 6
     small_earth_factor: float = 1.0
-    use_conservation_fixer: bool = True
     use_coriolis: bool = True       # Set False for f=0 tests (e.g. DCMIP TC3)
     semi_implicit_acoustic: bool = False  # Use tridiagonal solve for acoustic substeps
     outer_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
@@ -268,32 +266,22 @@ def compressible_euler_slow_tendencies(
     du_dt = du_dt + vertical_advection_height(u, w, dz, dz_half, J)
     dv_dt = dv_dt + vertical_advection_height(v, w, dz, dz_half, J)
 
-    # --- 6. Theta equation: horizontal + vertical advection ---
+    # --- 6. Theta equation: HORIZONTAL advection only ---
+    # Vertical theta advection is handled by the acoustic substeps.
+    # Advective form: -v·∇_h(θ) using centered gradients.
     dtheta_dx = gradient_x_3d(theta_total, grid)
     dtheta_dy = gradient_y_3d(theta_total, grid)
-    horiz_adv_theta = -(u * dtheta_dx + v * dtheta_dy)
+    dtheta_p_dt = -(u * dtheta_dx + v * dtheta_dy)
 
-    vert_adv_theta = vertical_advection_height(theta_total, w, dz, dz_half, J)
-
-    dtheta_p_dt = horiz_adv_theta + vert_adv_theta
-
-    # --- 7. Continuity: horizontal divergence contribution ---
-    # d(rho')/dt includes -(1/J) * div_h(J * rho * v_h) - vertical divergence
-    # Horizontal part: -div_h(rho * u, rho * v)
-    # For simplicity, use advective form: -u·grad(rho) - rho·div(v)
+    # --- 7. Continuity: HORIZONTAL divergence only ---
+    # Vertical mass flux divergence is handled by the acoustic substeps.
     rho_u = rho_total * u
     rho_v = rho_total * v
     div_rho_v = divergence_3d(rho_u, rho_v, grid)
 
-    # Vertical mass flux divergence
-    rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-    rho_w = jnp.zeros_like(w)
-    rho_w = rho_w.at[..., 1:-1].set(rho_half * w[..., 1:-1])
-    vert_div = vertical_divergence_height(rho_w, dz, J)
+    drho_p_dt = -div_rho_v
 
-    drho_p_dt = -div_rho_v - vert_div
-
-    # --- 8. Tracer advection ---
+    # --- 8. Tracer advection (advective form: -v·∇q) ---
     n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
     if n_tracers > 0:
         tracers_t = jnp.moveaxis(tracers, -1, 0)  # (n_tracers, 6, n, n, nlev)

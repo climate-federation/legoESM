@@ -26,6 +26,8 @@ from legoesm.core.operators_3d import (
     gradient_y_3d,
     divergence_3d,
     hyperdiffusion_3d,
+    fv_flux_divergence_3d,
+    fv_scalar_advection_3d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
@@ -115,8 +117,9 @@ def ocean_baroclinic_tendencies(
     # Vertical velocity must be diagnosed from div(v*h), NOT from div(v)*h,
     # because h_k varies horizontally and div(v*h) ≠ h*div(v).
     # This also makes w consistent with the free-surface tendency (step 13).
-    flux_div_k = divergence_3d(
-        u * h_k * mask_3d, v * h_k * mask_3d, grid,
+    # FV flux divergence returns -div(h*v), negate to get div(h*v).
+    flux_div_k = -fv_flux_divergence_3d(
+        h_k * mask_3d, u * mask_3d, v * mask_3d, grid, g=0.0,
     )  # (6, n, n, nlev)
     w = _diagnose_w_from_flux_div(flux_div_k)  # (6, n, n, nlev+1)
 
@@ -161,15 +164,9 @@ def ocean_baroclinic_tendencies(
     tracers = jnp.stack([T, S], axis=0)  # (2, 6, n, n, nlev)
 
     def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
-        # Skew-symmetric horizontal advection: average of advective and
-        # flux forms.  This conserves the tracer integral (from the flux
-        # part) and the tracer variance (from the advective part), and
-        # is exactly energy-neutral for tracer^2.
-        dtr_dx = gradient_x_3d(tr, grid)
-        dtr_dy = gradient_y_3d(tr, grid)
-        adv_form = -(u * dtr_dx + v * dtr_dy)
-        flux_form = -divergence_3d(u * tr * mask_3d, v * tr * mask_3d, grid)
-        dtr_dt = 0.5 * (adv_form + flux_form)
+        # Upwind FV horizontal advection: conservative and monotonic
+        # via MUSCL reconstruction with slope limiting.
+        dtr_dt = fv_scalar_advection_3d(tr, u * mask_3d, v * mask_3d, grid)
         dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
 
         if physics_fn is None:
