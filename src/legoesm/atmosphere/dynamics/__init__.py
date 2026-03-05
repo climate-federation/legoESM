@@ -69,6 +69,18 @@ from legoesm.atmosphere.dynamics.sfno_pe import (
     SFNOPrimitiveEquationModel,
     SFNOPrimitiveEquationConfig,
 )
+from legoesm.atmosphere.dynamics.shallow_water_fv import (
+    FVShallowWaterModel,
+    fv_shallow_water_tendencies,
+)
+from legoesm.atmosphere.dynamics.primitive_eq_fv import (
+    FVPrimitiveEquationModel,
+    fv_hydrostatic_tendencies,
+)
+from legoesm.atmosphere.dynamics.compressible_euler_fv import (
+    FVCompressibleEulerModel,
+    fv_compressible_euler_slow_tendencies,
+)
 # Available solver names for the factory (flat namespace)
 AVAILABLE_SOLVERS = [
     "shallow_water",
@@ -80,11 +92,14 @@ AVAILABLE_SOLVERS = [
     "spectral_compressible_euler",
     "sfno_shallow_water",
     "sfno_primitive_equations",
+    "fv_shallow_water",
+    "fv_primitive_equations",
+    "fv_compressible_euler",
 ]
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno"]
+DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume"]
 
 # (dynamics, discretization) -> flat solver name
 _AXIS_TO_SOLVER = {
@@ -96,6 +111,9 @@ _AXIS_TO_SOLVER = {
     ("hydrostatic", "sfno"): "sfno_primitive_equations",
     ("nonhydrostatic", "centered"): "compressible_euler",
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
+    ("shallow_water", "finite_volume"): "fv_shallow_water",
+    ("hydrostatic", "finite_volume"): "fv_primitive_equations",
+    ("nonhydrostatic", "finite_volume"): "fv_compressible_euler",
 }
 
 # flat solver name -> (dynamics, discretization)
@@ -289,6 +307,12 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return SFNOShallowWaterModel(**kwargs)
     elif name == "sfno_primitive_equations":
         return SFNOPrimitiveEquationModel(**kwargs)
+    elif name == "fv_shallow_water":
+        return FVShallowWaterModel(**kwargs)
+    elif name == "fv_primitive_equations":
+        return FVPrimitiveEquationModel(**kwargs)
+    elif name == "fv_compressible_euler":
+        return FVCompressibleEulerModel(**kwargs)
     else:
         raise ValueError(
             f"Unknown solver: {name!r}. "

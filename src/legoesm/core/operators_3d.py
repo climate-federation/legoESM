@@ -25,6 +25,10 @@ from legoesm.core.operators import (
     curl_z,
     hyperdiffusion,
 )
+from legoesm.core.operators_fv import (
+    fv_flux_divergence as _fv_flux_divergence_2d,
+    fv_scalar_advection as _fv_scalar_advection_2d,
+)
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 
 
@@ -154,6 +158,66 @@ def hyperdiffusion_3d(
 
     f_t = jnp.moveaxis(field_3d, -1, 0)
     result = jax.vmap(single_level)(f_t)
+    return jnp.moveaxis(result, 0, -1)
+
+
+def fv_flux_divergence_3d(
+    q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
+    grid: CubedSphereGrid, dt: float,
+    limiter: bool = True, x_first: bool = True,
+) -> jax.Array:
+    """Conservative FV flux divergence at all levels via vmap.
+
+    Parameters
+    ----------
+    q_3d : jax.Array, shape (6, n, n, nlev)
+    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
+    grid : CubedSphereGrid
+    dt : float
+    limiter : bool
+    x_first : bool
+
+    Returns
+    -------
+    jax.Array : shape (6, n, n, nlev)
+    """
+    def single_level(q_k, u_k, v_k):
+        return _fv_flux_divergence_2d(q_k, u_k, v_k, grid, dt, limiter, x_first)
+
+    q_t = jnp.moveaxis(q_3d, -1, 0)
+    u_t = jnp.moveaxis(u_3d, -1, 0)
+    v_t = jnp.moveaxis(v_3d, -1, 0)
+    result = jax.vmap(single_level)(q_t, u_t, v_t)
+    return jnp.moveaxis(result, 0, -1)
+
+
+def fv_scalar_advection_3d(
+    q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
+    grid: CubedSphereGrid, dt: float,
+    limiter: bool = True, x_first: bool = True,
+) -> jax.Array:
+    """PPM advection of scalar at all levels via vmap.
+
+    Parameters
+    ----------
+    q_3d : jax.Array, shape (6, n, n, nlev)
+    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
+    grid : CubedSphereGrid
+    dt : float
+    limiter : bool
+    x_first : bool
+
+    Returns
+    -------
+    jax.Array : shape (6, n, n, nlev)
+    """
+    def single_level(q_k, u_k, v_k):
+        return _fv_scalar_advection_2d(q_k, u_k, v_k, grid, dt, limiter, x_first)
+
+    q_t = jnp.moveaxis(q_3d, -1, 0)
+    u_t = jnp.moveaxis(u_3d, -1, 0)
+    v_t = jnp.moveaxis(v_3d, -1, 0)
+    result = jax.vmap(single_level)(q_t, u_t, v_t)
     return jnp.moveaxis(result, 0, -1)
 
 
