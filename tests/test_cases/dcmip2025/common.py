@@ -11,46 +11,11 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.grids.cubed_sphere import CubedSphereGrid, create_cubed_sphere
-
-
-# ==============================================================================
-# Small-Earth scaling
-# ==============================================================================
-
-def apply_small_earth_scaling(
-    grid: CubedSphereGrid,
-    factor: float,
-) -> CubedSphereGrid:
-    """Create a small-Earth grid by scaling radius and rotation rate.
-
-    On a small Earth of radius R/X:
-    - dx, dy scale as 1/X
-    - Cell areas scale as 1/X^2
-    - Omega scales as X (to keep Rossby number constant)
-    - Coriolis f scales as X
-
-    Parameters
-    ----------
-    grid : CubedSphereGrid
-        Original grid at Earth radius.
-    factor : float
-        Reduction factor X. Earth radius becomes R_earth/X.
-
-    Returns
-    -------
-    CubedSphereGrid
-        New grid with scaled metrics.
-    """
-    if factor == 1.0:
-        return grid
-
-    # Create a new grid at reduced radius
-    return create_cubed_sphere(
-        grid.n,
-        radius=constants.R_earth / factor,
-        omega=constants.Omega * factor,
-    )
+from legoesm.grids.cubed_sphere import (
+    CubedSphereGrid,
+    create_cubed_sphere,
+    apply_small_earth_scaling,
+)
 
 
 # ==============================================================================

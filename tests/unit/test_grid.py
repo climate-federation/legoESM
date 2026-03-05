@@ -38,8 +38,15 @@ class TestCubedSphereGrid:
         expected_area = 4.0 * jnp.pi * small_grid.radius**2
         actual_area = small_grid.total_area
         relative_error = jnp.abs(actual_area - expected_area) / expected_area
-        # Allow 5% error for low-res grid
-        assert relative_error < 0.05, f"Area error: {relative_error:.4f}"
+        assert relative_error < 1e-6, f"Area error: {relative_error:.2e}"
+
+    def test_total_area_multiple_resolutions(self):
+        """Exact cell areas should match 4*pi*R^2 at multiple resolutions."""
+        for n in (8, 16, 32):
+            g = create_cubed_sphere(n)
+            expected = 4.0 * jnp.pi * g.radius**2
+            rel_err = float(jnp.abs(g.total_area - expected) / expected)
+            assert rel_err < 5e-6, f"C{n}: area relative error = {rel_err:.2e}"
 
     def test_coriolis_parameter(self, small_grid):
         """Coriolis at equator ~ 0, at poles ~ +/- 2*Omega."""

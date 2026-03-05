@@ -753,3 +753,34 @@ class TestTemperatureStability:
             f"Temperature too hot: T_max = {T_max:.1f} K (expected < 400 K)"
         )
         assert jnp.all(jnp.isfinite(T)), "Non-finite temperatures detected"
+
+
+class TestFVDiscretization:
+    """Tests for FV discretization option in PE model."""
+
+    def test_centered_is_default(self):
+        """Default discretization should be 'centered'."""
+        config = PrimitiveEquationConfig()
+        assert config.discretization == "centered"
+
+    def test_fv_tendencies_finite(self, grid, sigma):
+        """FV path produces finite tendencies."""
+        config = PrimitiveEquationConfig(discretization="finite_volume")
+        state = _make_state(grid, sigma, T_val=300.0, u_val=10.0, v_val=5.0)
+        tend = hydrostatic_tendencies(state, grid, sigma, config)
+        assert jnp.all(jnp.isfinite(tend.du_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dv_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dT_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dp_s_dt.data))
+
+    def test_fv_step_finite(self, grid, sigma):
+        """FV path single step produces finite state."""
+        config = PrimitiveEquationConfig(
+            discretization="finite_volume",
+            use_conservation_fixer=False,
+        )
+        model = PrimitiveEquationModel(grid, sigma, config)
+        state = _make_state(grid, sigma, T_val=300.0, u_val=5.0)
+        new_state = model.step(state, 60.0)
+        assert jnp.all(jnp.isfinite(new_state.T.data))
+        assert jnp.all(jnp.isfinite(new_state.p_s.data))

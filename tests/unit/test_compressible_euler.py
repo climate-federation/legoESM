@@ -439,3 +439,48 @@ class TestDifferentiability:
 
         grad = jax.grad(loss_fn)(state.theta_prime.data)
         assert jnp.all(jnp.isfinite(grad))
+
+
+# ==============================================================================
+# Small-Earth scaling tests
+# ==============================================================================
+
+class TestSmallEarthFactor:
+    """Tests for small_earth_factor wiring."""
+
+    def test_small_earth_factor_scales_grid(self, grid, height_coord, terrain_metric):
+        """small_earth_factor=10 should scale grid radius and Coriolis."""
+        config = CompressibleEulerConfig(small_earth_factor=10.0)
+        model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
+        expected_radius = constants.R_earth / 10.0
+        assert abs(model.grid.radius - expected_radius) / expected_radius < 1e-6
+        # Coriolis should be scaled by factor
+        assert float(jnp.max(jnp.abs(model.grid.f))) > float(jnp.max(jnp.abs(grid.f))) * 9.0
+
+    def test_small_earth_factor_1_no_change(self, grid, height_coord, terrain_metric):
+        """Default small_earth_factor=1.0 should preserve original grid."""
+        config = CompressibleEulerConfig(small_earth_factor=1.0)
+        model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
+        assert model.grid.radius == grid.radius
+        assert jnp.allclose(model.grid.f, grid.f)
+
+
+class TestFVDiscretization:
+    """Tests for FV discretization option in CE model."""
+
+    def test_centered_is_default(self):
+        """Default discretization should be 'centered'."""
+        config = CompressibleEulerConfig()
+        assert config.discretization == "centered"
+
+    def test_fv_tendencies_finite(self, grid, height_coord, terrain_metric):
+        """FV path produces finite tendencies."""
+        config = CompressibleEulerConfig(discretization="finite_volume")
+        state = _make_nh_state(grid, height_coord)
+        tend = compressible_euler_slow_tendencies(
+            state, grid, height_coord, terrain_metric, config,
+        )
+        assert jnp.all(jnp.isfinite(tend.du_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dv_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data))
+        assert jnp.all(jnp.isfinite(tend.drho_prime_dt.data))

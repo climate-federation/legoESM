@@ -25,6 +25,7 @@ from legoesm.grids.halo import (
     pad_halo_vector,
     set_halo_backend,
     _pad_halo_local,
+    _pad_halo_local_h2,
 )
 from legoesm.ocean.conservation import ocean_conservation_fixer
 from legoesm.ocean.init import rest_state_ocean
@@ -125,6 +126,27 @@ class TestMPIHaloExchange:
         if topology.rank == 0:
             assert jnp.allclose(out_u, ref_u, atol=1e-6)
             assert jnp.allclose(out_v, ref_v, atol=1e-6)
+
+
+    def test_pad_halo_mpi_h2_matches_local(self, topology):
+        """MPI halo=2 exchange matches local reference."""
+        n = 8
+        key = jax.random.PRNGKey(99)
+        data = jax.random.normal(key, (6, n, n), dtype=jnp.float32)
+
+        reference = _pad_halo_local_h2(data)
+
+        partitioned = partition_state(data, topology)
+        set_halo_backend("mpi", topology)
+        result_local = pad_halo(partitioned, halo=2)
+        result = gather_state(result_local, topology)
+
+        if topology.rank == 0:
+            assert result.shape == (6, n + 4, n + 4)
+            assert jnp.allclose(result, reference, atol=1e-6), (
+                f"MPI halo=2 mismatch (max diff: "
+                f"{jnp.max(jnp.abs(result - reference))})"
+            )
 
 
 class TestMPIReductions:

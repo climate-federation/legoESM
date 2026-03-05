@@ -42,6 +42,7 @@ from legoesm.grids.halo import (
     SOUTH,
     NORTH,
     _extract_edge_strip,
+    _extract_edge_strip_at_depth,
 )
 from legoesm.parallel.comm import CommTopology
 from legoesm.parallel.reductions import _mpi4jax_array_result
@@ -63,9 +64,35 @@ def _place_strip(padded: jax.Array, face: int, edge: int, strip: jax.Array) -> j
     return padded
 
 
+def _place_strip_h2(
+    padded: jax.Array, face: int, edge: int,
+    strip_d0: jax.Array, strip_d1: jax.Array,
+) -> jax.Array:
+    """Place two received strips into halo=2 positions.
+
+    depth 0 = adjacent to interior, depth 1 = outer.
+    Interior is at [2:-2, 2:-2].
+    """
+    n = padded.shape[1] - 4
+    if edge == WEST:
+        padded = padded.at[face, 1, 2:-2].set(strip_d0)
+        padded = padded.at[face, 0, 2:-2].set(strip_d1)
+    elif edge == EAST:
+        padded = padded.at[face, n + 2, 2:-2].set(strip_d0)
+        padded = padded.at[face, n + 3, 2:-2].set(strip_d1)
+    elif edge == SOUTH:
+        padded = padded.at[face, 2:-2, 1].set(strip_d0)
+        padded = padded.at[face, 2:-2, 0].set(strip_d1)
+    elif edge == NORTH:
+        padded = padded.at[face, 2:-2, n + 2].set(strip_d0)
+        padded = padded.at[face, 2:-2, n + 3].set(strip_d1)
+    return padded
+
+
 def pad_halo_mpi(
     data: jax.Array,
     topology: CommTopology,
+    halo: int = 1,
 ) -> jax.Array:
     """Pad a scalar field with inter-face halo data using MPI.
 
@@ -82,10 +109,12 @@ def pad_halo_mpi(
         contain valid data for local exchanges or zeros.
     topology : CommTopology
         Pre-computed communication topology.
+    halo : int
+        Halo width (1 or 2).
 
     Returns
     -------
-    padded : jax.Array, shape (6, n+2, n+2)
+    padded : jax.Array, shape (6, n+2*halo, n+2*halo)
     """
     try:
         import mpi4jax
@@ -97,14 +126,15 @@ def pad_halo_mpi(
         ) from exc
 
     n = data.shape[1]
-    padded = jnp.zeros((6, n + 2, n + 2), dtype=data.dtype)
+    h2 = 2 * halo
+    padded = jnp.zeros((6, n + h2, n + h2), dtype=data.dtype)
 
     # Place interior data.
-    padded = padded.at[:, 1:-1, 1:-1].set(data)
+    padded = padded.at[:, halo:-halo, halo:-halo].set(data)
 
     # --- Phase 1: Classify edges as local vs remote, group remote by rank ---
-    local_edges = []   # (face, edge, nbr_face, nbr_edge, is_reversed)
-    remote_by_rank = defaultdict(list)  # nbr_rank -> [(face, edge, nbr_face, nbr_edge, is_reversed), ...]
+    local_edges = []
+    remote_by_rank = defaultdict(list)
 
     for face in topology.local_face_ids:
         for edge in _EDGES:
@@ -121,35 +151,41 @@ def pad_halo_mpi(
 
     # --- Phase 2: Handle local edges (no MPI) ---
     for face, edge, nbr_face, nbr_edge, is_reversed in local_edges:
-        strip = _extract_edge_strip(data, nbr_face, nbr_edge)
-        if is_reversed:
-            strip = strip[::-1]
-        padded = _place_strip(padded, face, edge, strip)
+        if halo == 1:
+            strip = _extract_edge_strip(data, nbr_face, nbr_edge)
+            if is_reversed:
+                strip = strip[::-1]
+            padded = _place_strip(padded, face, edge, strip)
+        else:
+            strip_d0 = _extract_edge_strip_at_depth(data, nbr_face, nbr_edge, 0)
+            strip_d1 = _extract_edge_strip_at_depth(data, nbr_face, nbr_edge, 1)
+            if is_reversed:
+                strip_d0 = strip_d0[::-1]
+                strip_d1 = strip_d1[::-1]
+            padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
 
     # --- Phase 3: Handle remote edges, packed per neighbor rank ---
+    strips_per_edge = halo  # 1 strip for halo=1, 2 strips for halo=2
     for nbr_rank in sorted(remote_by_rank):
         edges = remote_by_rank[nbr_rank]
         n_edges = len(edges)
-        # Canonical edge ordering for packed buffer correctness.
-        # Both sides must iterate shared edges in the SAME order so
-        # that strip i on the sender matches strip i on the receiver.
-        # Canonical key = sender's (face, edge):
-        #   - Sender sorts by (face, edge)           [its local key]
-        #   - Receiver sorts by (nbr_face, nbr_edge) [= sender's key]
-        # Without this, 2-rank and 3-rank decompositions corrupt halos.
         send_order = sorted(edges, key=lambda e: (e[0], e[1]))
         recv_order = sorted(edges, key=lambda e: (e[2], e[3]))
 
         # Pack all outgoing strips into one buffer.
         send_strips = []
         for face, edge, nbr_face, nbr_edge, is_reversed in send_order:
-            send_strips.append(_extract_edge_strip(data, face, edge))
-        send_buf = jnp.concatenate(send_strips, axis=0)  # (n_edges * n,)
+            if halo == 1:
+                send_strips.append(_extract_edge_strip(data, face, edge))
+            else:
+                for depth in range(halo):
+                    send_strips.append(
+                        _extract_edge_strip_at_depth(data, face, edge, depth)
+                    )
+        send_buf = jnp.concatenate(send_strips, axis=0)
 
-        recv_buf = jnp.zeros(n_edges * n, dtype=data.dtype)
+        recv_buf = jnp.zeros(n_edges * strips_per_edge * n, dtype=data.dtype)
 
-        # Single sendrecv per neighbor rank.
-        # Tag encodes (sender_rank, receiver_rank) for uniqueness.
         send_tag = topology.rank * 1000 + nbr_rank
         recv_tag = nbr_rank * 1000 + topology.rank
 
@@ -167,10 +203,19 @@ def pad_halo_mpi(
 
         # Unpack received buffer and place strips.
         for i, (face, edge, nbr_face, nbr_edge, is_reversed) in enumerate(recv_order):
-            strip = recv_buf[i * n : (i + 1) * n]
-            if is_reversed:
-                strip = strip[::-1]
-            padded = _place_strip(padded, face, edge, strip)
+            if halo == 1:
+                strip = recv_buf[i * n : (i + 1) * n]
+                if is_reversed:
+                    strip = strip[::-1]
+                padded = _place_strip(padded, face, edge, strip)
+            else:
+                base = i * halo * n
+                strip_d0 = recv_buf[base : base + n]
+                strip_d1 = recv_buf[base + n : base + 2 * n]
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
 
     return padded
 
@@ -183,6 +228,7 @@ def pad_halo_vector_mpi(
     cos_angle_padded: jax.Array,
     sin_angle_padded: jax.Array,
     topology: CommTopology,
+    halo: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
     """Pad vector components with MPI halo exchange.
 
@@ -195,22 +241,24 @@ def pad_halo_vector_mpi(
         Grid-aligned velocity components.
     cos_angle, sin_angle : jax.Array, shape (6, n, n)
         Precomputed trig of grid rotation angle.
-    cos_angle_padded, sin_angle_padded : jax.Array, shape (6, n+2, n+2)
+    cos_angle_padded, sin_angle_padded : jax.Array, shape (6, n+2*halo, n+2*halo)
         Precomputed trig of padded grid rotation angle.
     topology : CommTopology
         Pre-computed communication topology.
+    halo : int
+        Halo width (1 or 2).
 
     Returns
     -------
-    u_padded, v_padded : jax.Array, shape (6, n+2, n+2)
+    u_padded, v_padded : jax.Array, shape (6, n+2*halo, n+2*halo)
     """
     # Rotate to geographic (east, north).
     u_east = cos_angle * u_data - sin_angle * v_data
     v_north = sin_angle * u_data + cos_angle * v_data
 
     # Pad geographic components as scalars via MPI.
-    u_east_padded = pad_halo_mpi(u_east, topology)
-    v_north_padded = pad_halo_mpi(v_north, topology)
+    u_east_padded = pad_halo_mpi(u_east, topology, halo=halo)
+    v_north_padded = pad_halo_mpi(v_north, topology, halo=halo)
 
     # Rotate back to grid-aligned.
     u_padded = (

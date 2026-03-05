@@ -593,6 +593,13 @@ class SpectralCompressibleEulerModel:
         self.height_coord = height_coord
         self.terrain_metric = terrain_metric
         self.config = config or SpectralNHConfig()
+        if self.config.small_earth_factor != 1.0:
+            from legoesm import constants
+            factor = self.config.small_earth_factor
+            grid = grid._replace(
+                radius=constants.R_earth / factor,
+                f=grid.f * factor,
+            )
         self._use_cpu_for_spectral = False
         self._cpu_device = None
         self._default_device = None

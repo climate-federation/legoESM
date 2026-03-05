@@ -215,6 +215,69 @@ class TestDifferentiability:
         assert jnp.all(jnp.isfinite(grad))
 
 
+class TestFVTracerTransport:
+    """Tests for FV tracer transport path."""
+
+    def test_fv_limiter_none_is_centered(self, grid, sigma_coord):
+        """Default config (fv_limiter=None) uses centered advection."""
+        config = TracerTransportConfig()
+        assert config.fv_limiter is None
+        model = TracerTransportModel(grid, sigma_coord, _zero_wind, config=config)
+        state = _make_state(grid, sigma_coord, fill_value=1.0)
+        new_state = model.step(state, 600.0)
+        assert jnp.allclose(new_state.tracers.data, 1.0, atol=1e-8)
+
+    def test_fv_positivity(self, grid, sigma_coord):
+        """FV transport with clipping preserves positivity."""
+        def solid_rotation(t, grid, sigma_coord):
+            nlev = sigma_coord.n_levels
+            n = grid.lon.shape[1]
+            u = jnp.cos(grid.lat)[..., None] * jnp.ones(nlev) * 20.0
+            v = jnp.zeros((6, n, n, nlev))
+            sigma_dot = jnp.zeros((6, n, n, nlev + 1))
+            return u, v, sigma_dot
+
+        config = TracerTransportConfig(fv_limiter="mc")
+        model = TracerTransportModel(grid, sigma_coord, solid_rotation, config=config)
+
+        # Localized bump: mostly zero, positive bump on face 0
+        n = grid.lon.shape[1]
+        q = jnp.zeros((6, n, n, NLEV, 1))
+        q = q.at[0, n // 2, n // 2, :, 0].set(10.0)
+        state = TracerState(
+            tracers=Field(data=q, name="tracers",
+                          dims=("face", "x", "y", "level", "tracer"), units="kg/kg"),
+            time=Field(data=jnp.array(0.0), name="time", dims=(), units="s"),
+        )
+
+        for _ in range(5):
+            state = model.step(state, 300.0)
+
+        assert jnp.all(state.tracers.data >= 0.0), (
+            f"Negative values: min={float(jnp.min(state.tracers.data))}"
+        )
+        assert jnp.all(jnp.isfinite(state.tracers.data))
+
+    def test_fv_tendency_finite(self, grid, sigma_coord):
+        """FV tracer advection produces finite tendencies."""
+        def solid_rotation(t, grid, sigma_coord):
+            nlev = sigma_coord.n_levels
+            n = grid.lon.shape[1]
+            u = jnp.cos(grid.lat)[..., None] * jnp.ones(nlev) * 20.0
+            v = jnp.zeros((6, n, n, nlev))
+            sigma_dot = jnp.zeros((6, n, n, nlev + 1))
+            return u, v, sigma_dot
+
+        config = TracerTransportConfig(fv_limiter="mc")
+        state = _make_state(grid, sigma_coord)
+        q = state.tracers.data
+        q = q.at[..., 0].set(jnp.sin(grid.lon[..., None]) * jnp.ones(NLEV))
+        state = TracerState(tracers=state.tracers.replace(data=q), time=state.time)
+
+        tend = tracer_tendencies(state, grid, sigma_coord, solid_rotation, config)
+        assert jnp.all(jnp.isfinite(tend.tracers.data))
+
+
 class TestSolverFactory:
     """Test the create_model factory function."""
 

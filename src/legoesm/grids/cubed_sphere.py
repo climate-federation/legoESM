@@ -204,7 +204,7 @@ def create_cubed_sphere(
     angle = angle_padded[:, 1:-1, 1:-1]
     dx = 2.0 * hx_ext[:, 1:-1, 1:-1]
     dy = 2.0 * hy_ext[:, 1:-1, 1:-1]
-    area = hx_ext[:, 1:-1, 1:-1] * hy_ext[:, 1:-1, 1:-1]
+    area = _compute_exact_cell_areas(n, radius)
 
     # Precompute trig of grid angle for vector halo exchange
     cos_angle_val = jnp.cos(angle)
@@ -348,6 +348,71 @@ def _face_to_cartesian(
     return x, y, z
 
 
+def _compute_exact_cell_areas(n: int, radius: float) -> jax.Array:
+    """Compute exact spherical cell areas using l'Huilier's theorem.
+
+    Each cell is a spherical quadrilateral defined by its 4 corners on
+    the gnomonic grid.  We split each quad into 2 spherical triangles
+    and sum their spherical excess (= area on unit sphere).
+
+    Parameters
+    ----------
+    n : int
+        Number of cells per face edge.
+    radius : float
+        Sphere radius [m].
+
+    Returns
+    -------
+    area : jax.Array, shape (6, n, n)
+        Exact cell areas [m^2].
+    """
+    # Cell corners: n+1 points along each edge
+    alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
+    ax, ay = jnp.meshgrid(alpha_edges, alpha_edges, indexing='ij')
+
+    all_areas = []
+    for face in range(6):
+        # Corner Cartesian coordinates on unit sphere
+        x, y, z = _face_to_cartesian(face, ax, ay)
+        r = jnp.sqrt(x**2 + y**2 + z**2)
+        x, y, z = x / r, y / r, z / r  # (n+1, n+1)
+
+        # For each cell (i,j), corners at (i,j), (i+1,j), (i+1,j+1), (i,j+1)
+        # SW, SE, NE, NW
+        sw_x, sw_y, sw_z = x[:-1, :-1], y[:-1, :-1], z[:-1, :-1]
+        se_x, se_y, se_z = x[1:, :-1], y[1:, :-1], z[1:, :-1]
+        ne_x, ne_y, ne_z = x[1:, 1:], y[1:, 1:], z[1:, 1:]
+        nw_x, nw_y, nw_z = x[:-1, 1:], y[:-1, 1:], z[:-1, 1:]
+
+        def _triangle_excess(x1, y1, z1, x2, y2, z2, x3, y3, z3):
+            """Spherical excess of triangle on unit sphere via l'Huilier."""
+            # Arc lengths between vertices
+            dot12 = jnp.clip(x1*x2 + y1*y2 + z1*z2, -1.0, 1.0)
+            dot23 = jnp.clip(x2*x3 + y2*y3 + z2*z3, -1.0, 1.0)
+            dot31 = jnp.clip(x3*x1 + y3*y1 + z3*z1, -1.0, 1.0)
+            a = jnp.arccos(dot12)
+            b = jnp.arccos(dot23)
+            c = jnp.arccos(dot31)
+            s = 0.5 * (a + b + c)
+            # l'Huilier's theorem
+            tan_E4_sq = jnp.clip(
+                jnp.tan(s / 2) * jnp.tan((s - a) / 2)
+                * jnp.tan((s - b) / 2) * jnp.tan((s - c) / 2),
+                0.0, None,
+            )
+            return 4.0 * jnp.arctan(jnp.sqrt(tan_E4_sq))
+
+        # Split quad into 2 triangles: (SW,SE,NE) + (SW,NE,NW)
+        e1 = _triangle_excess(sw_x, sw_y, sw_z, se_x, se_y, se_z,
+                              ne_x, ne_y, ne_z)
+        e2 = _triangle_excess(sw_x, sw_y, sw_z, ne_x, ne_y, ne_z,
+                              nw_x, nw_y, nw_z)
+        all_areas.append(radius**2 * (e1 + e2))
+
+    return jnp.stack(all_areas, axis=0)
+
+
 def _compute_cell_areas(
     lon: jax.Array, lat: jax.Array, n: int, radius: float
 ) -> jax.Array:
@@ -485,6 +550,41 @@ def rotate_winds_geo_to_grid(
     u_grid = cos_a * u_east + sin_a * v_north
     v_grid = -sin_a * u_east + cos_a * v_north
     return u_grid, v_grid
+
+
+def apply_small_earth_scaling(
+    grid: CubedSphereGrid,
+    factor: float,
+) -> CubedSphereGrid:
+    """Create a small-Earth grid by scaling radius and rotation rate.
+
+    On a small Earth of radius R/X:
+    - dx, dy scale as 1/X
+    - Cell areas scale as 1/X^2
+    - Omega scales as X (to keep Rossby number constant)
+    - Coriolis f scales as X
+
+    Parameters
+    ----------
+    grid : CubedSphereGrid
+        Original grid at Earth radius.
+    factor : float
+        Reduction factor X. Earth radius becomes R_earth/X.
+
+    Returns
+    -------
+    CubedSphereGrid
+        New grid with scaled metrics.
+    """
+    if factor == 1.0:
+        return grid
+
+    from legoesm import constants
+    return create_cubed_sphere(
+        grid.n,
+        radius=constants.R_earth / factor,
+        omega=constants.Omega * factor,
+    )
 
 
 def rotate_winds_grid_to_geo(

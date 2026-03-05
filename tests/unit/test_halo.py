@@ -156,6 +156,38 @@ class TestPadHalo:
         assert not jnp.allclose(grads, 0.0)
 
 
+class TestPadHaloH2:
+    """Tests for halo=2 exchange."""
+
+    def test_output_shape_h2(self):
+        """Padded array should be (6, n+4, n+4) for halo=2."""
+        data = jnp.ones((6, 8, 8))
+        padded = pad_halo(data, halo=2)
+        assert padded.shape == (6, 12, 12)
+
+    def test_interior_preserved_h2(self):
+        """Interior data should be unchanged after halo=2 padding."""
+        key = jax.random.PRNGKey(42)
+        data = jax.random.normal(key, (6, 8, 8))
+        padded = pad_halo(data, halo=2)
+        assert jnp.allclose(padded[:, 2:-2, 2:-2], data)
+
+    def test_constant_field_h2(self):
+        """Padding a constant field with halo=2 should give constant halos."""
+        data = jnp.ones((6, 8, 8)) * 42.0
+        padded = pad_halo(data, halo=2)
+        for face in range(6):
+            # Depth 0 (adjacent to interior) and depth 1 (outer)
+            assert jnp.allclose(padded[face, 1, 2:-2], 42.0)
+            assert jnp.allclose(padded[face, 0, 2:-2], 42.0)
+            assert jnp.allclose(padded[face, -2, 2:-2], 42.0)
+            assert jnp.allclose(padded[face, -1, 2:-2], 42.0)
+            assert jnp.allclose(padded[face, 2:-2, 1], 42.0)
+            assert jnp.allclose(padded[face, 2:-2, 0], 42.0)
+            assert jnp.allclose(padded[face, 2:-2, -2], 42.0)
+            assert jnp.allclose(padded[face, 2:-2, -1], 42.0)
+
+
 class TestPadHaloVector:
     """Tests for vector halo exchange."""
 

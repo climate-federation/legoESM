@@ -21,7 +21,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import pad_halo, pad_halo_vector
+from legoesm.grids.halo import pad_halo, pad_halo_vector, CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
 
 # ==============================================================================
@@ -402,6 +402,91 @@ def _halo_fields(grid, halo):
                 grid.cos_angle_padded_h2, grid.sin_angle_padded_h2)
 
 
+def _get_boundary_flux(Phi_x, Phi_y, face, edge):
+    """Extract boundary flux strip from the flux arrays."""
+    if edge == WEST:
+        return Phi_x[face, 0, :]
+    elif edge == EAST:
+        return Phi_x[face, -1, :]
+    elif edge == SOUTH:
+        return Phi_y[face, :, 0]
+    elif edge == NORTH:
+        return Phi_y[face, :, -1]
+
+
+def _set_boundary_flux(Phi_x, Phi_y, face, edge, strip):
+    """Set boundary flux strip in the flux arrays."""
+    if edge == WEST:
+        Phi_x = Phi_x.at[face, 0, :].set(strip)
+    elif edge == EAST:
+        Phi_x = Phi_x.at[face, -1, :].set(strip)
+    elif edge == SOUTH:
+        Phi_y = Phi_y.at[face, :, 0].set(strip)
+    elif edge == NORTH:
+        Phi_y = Phi_y.at[face, :, -1].set(strip)
+    return Phi_x, Phi_y
+
+
+# Outward-normal sign for each boundary in the divergence formula:
+#   EAST/NORTH: +1 (positive flux = outward)
+#   WEST/SOUTH: -1 (negative flux = outward)
+_OUTWARD_SIGN = {WEST: -1, EAST: +1, SOUTH: -1, NORTH: +1}
+
+
+def _symmetrize_boundary_fluxes(Phi_x, Phi_y):
+    """Symmetrize boundary fluxes between neighboring faces.
+
+    Each physical edge shared by two faces should carry a single agreed-upon
+    flux.  For complementary edges (EAST/WEST, NORTH/SOUTH) the fluxes
+    represent the same physical flow with the SAME sign, so we average.
+    For same-sign edges (SOUTH/SOUTH, NORTH/EAST, etc.) the outward
+    normals point in the same direction so the fluxes should have
+    OPPOSITE signs; we anti-symmetrize.
+
+    Parameters
+    ----------
+    Phi_x : jax.Array, shape (6, n+1, n)
+        X-direction fluxes.
+    Phi_y : jax.Array, shape (6, n, n+1)
+        Y-direction fluxes.
+
+    Returns
+    -------
+    Phi_x, Phi_y : symmetrized flux arrays.
+    """
+    seen = set()
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+            key = tuple(sorted(((face, edge), (nbr_face, nbr_edge))))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            strip_a = _get_boundary_flux(Phi_x, Phi_y, face, edge)
+            strip_b = _get_boundary_flux(Phi_x, Phi_y, nbr_face, nbr_edge)
+            if is_reversed:
+                strip_b = strip_b[::-1]
+
+            same_outward = _OUTWARD_SIGN[edge] * _OUTWARD_SIGN[nbr_edge] > 0
+
+            if same_outward:
+                # Anti-symmetrize: physical flux has opposite signs
+                avg = 0.5 * (strip_a - strip_b)
+                nbr_val = -avg[::-1] if is_reversed else -avg
+            else:
+                # Average: physical flux has same sign
+                avg = 0.5 * (strip_a + strip_b)
+                nbr_val = avg[::-1] if is_reversed else avg
+
+            Phi_x, Phi_y = _set_boundary_flux(Phi_x, Phi_y, face, edge, avg)
+            Phi_x, Phi_y = _set_boundary_flux(
+                Phi_x, Phi_y, nbr_face, nbr_edge, nbr_val,
+            )
+
+    return Phi_x, Phi_y
+
+
 def fv_flux_divergence(h, u, v, grid, g=9.80616, limiter="mc", h_s=None):
     """Compute -div(h*v) using finite volume with Rusanov flux.
 
@@ -504,6 +589,9 @@ def fv_flux_divergence(h, u, v, grid, g=9.80616, limiter="mc", h_s=None):
     hx_edge = 0.5 * (grid.hx_ext[:, 1:-1, :-1] + grid.hx_ext[:, 1:-1, 1:])
     Phi_y = G_y * hx_edge
 
+    # ---- Symmetrize boundary fluxes ----
+    Phi_x, Phi_y = _symmetrize_boundary_fluxes(Phi_x, Phi_y)
+
     # ---- Net flux divergence ----
     net_x = Phi_x[:, 1:, :] - Phi_x[:, :-1, :]
     net_y = Phi_y[:, :, 1:] - Phi_y[:, :, :-1]
@@ -566,6 +654,9 @@ def fv_scalar_advection(q, u, v, grid, limiter="mc"):
 
     hx_edge = 0.5 * (grid.hx_ext[:, 1:-1, :-1] + grid.hx_ext[:, 1:-1, 1:])
     Phi_y = q_edge_y * v_edge * hx_edge
+
+    # ---- Symmetrize boundary fluxes ----
+    Phi_x, Phi_y = _symmetrize_boundary_fluxes(Phi_x, Phi_y)
 
     # ---- Net flux divergence ----
     net_x = Phi_x[:, 1:, :] - Phi_x[:, :-1, :]

@@ -29,7 +29,7 @@ from legoesm.core.field import Field
 from legoesm.core.state import TracerState
 from legoesm.core.operators import global_integral
 from legoesm.grids.cubed_sphere import CubedSphereGrid, rotate_winds_geo_to_grid
-from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
+from legoesm.grids.vertical import SigmaCoordinate
 from legoesm import constants
 
 # ============================================================================
@@ -47,18 +47,14 @@ _ptop = _p0 * jnp.exp(-_ztop / _H)
 
 
 def create_dcmip_sigma(n_levels: int) -> SigmaCoordinate:
-    """Create a sigma coordinate matching the DCMIP model domain.
+    """Create a pressure-based eta coordinate matching DCMIP v1.7 Appendix F.3.
 
-    The DCMIP transport tests assume z_top = 12000 m, which for an
-    isothermal atmosphere (T = 300 K) gives:
+    Appendix F.3 specifies pressure-based levels derived from uniformly spaced
+    geometric height:
 
-        sigma_top = exp(-z_top / H) ≈ 0.2553
+        eta_k = exp(-z_k / H),   z_k = z_top - (k + 0.5) * Delta_z
 
-    where H = R_d * T0 / g ≈ 8781.4 m.
-
-    Using the default sigma_top=0.01 places the model top at ~40 km,
-    far above the DCMIP domain, causing the prescribed wind fields to
-    blow up.
+    with Delta_z = z_top / n_levels and H = R_d*T0/g.
 
     Parameters
     ----------
@@ -69,8 +65,36 @@ def create_dcmip_sigma(n_levels: int) -> SigmaCoordinate:
     -------
     SigmaCoordinate
     """
-    sigma_top = float(jnp.exp(-_ztop / _H))  # ~0.2553
-    return create_sigma_coordinate(n_levels, sigma_top=sigma_top)
+    if n_levels <= 0:
+        raise ValueError(f"n_levels must be > 0, got {n_levels!r}")
+
+    # Interface heights from top->surface with uniform spacing in geometric z.
+    z_half = jnp.linspace(_ztop, 0.0, n_levels + 1, dtype=jnp.float32)
+    z_full = 0.5 * (z_half[:-1] + z_half[1:])
+
+    sigma_half = jnp.exp(-z_half / _H).astype(jnp.float32)
+    sigma_full = jnp.exp(-z_full / _H).astype(jnp.float32)
+    dsigma = sigma_half[1:] - sigma_half[:-1]
+
+    sigma_half_safe = jnp.clip(sigma_half, 1e-30, None)
+    ln_ratio = jnp.log(sigma_half_safe[1:] / sigma_half_safe[:-1])
+    alpha = jnp.log(sigma_half_safe[1:] / sigma_full)
+
+    sigma_top = sigma_half[0]
+    sigma_range = 1.0 - sigma_top
+    fractional_sigma = (sigma_half[1:] - sigma_top) / sigma_range
+    dsigma_full = jnp.diff(sigma_full)
+
+    return SigmaCoordinate(
+        n_levels=n_levels,
+        sigma_full=sigma_full,
+        sigma_half=sigma_half,
+        dsigma=dsigma,
+        ln_ratio=ln_ratio,
+        alpha=alpha,
+        fractional_sigma=fractional_sigma,
+        dsigma_full=dsigma_full,
+    )
 
 
 def _height_from_sigma(sigma, ps=_p0):
@@ -444,17 +468,60 @@ def _mountain_height(lon, lat):
     -------
     zs : jax.Array, shape (6, n, n)
     """
-    r = jnp.arccos(jnp.clip(
-        jnp.sin(_phim) * jnp.sin(lat)
-        + jnp.cos(_phim) * jnp.cos(lat) * jnp.cos(lon - _lambdam),
-        -1.0, 1.0
-    ))
-    zs = jnp.where(
-        r < _rm,
-        (_h0_mt / 2.0) * (1.0 + jnp.cos(jnp.pi * r / _rm)) * jnp.cos(jnp.pi * r / _zetam)**2,
-        0.0,
-    )
+    zs, _, _ = _mountain_height_with_gradients(lon, lat)
     return zs
+
+
+def _mountain_height_with_gradients(lon, lat):
+    """Mountain height and spherical lon/lat derivatives.
+
+    Returns
+    -------
+    zs, dzs_dlon, dzs_dlat : jax.Array
+        Mountain height and partial derivatives with respect to longitude and
+        latitude (both in radians), each shape (6, n, n).
+    """
+    dlon = lon - _lambdam
+    sin_phi_m = jnp.sin(_phim)
+    cos_phi_m = jnp.cos(_phim)
+    sin_lat = jnp.sin(lat)
+    cos_lat = jnp.cos(lat)
+    sin_dlon = jnp.sin(dlon)
+    cos_dlon = jnp.cos(dlon)
+
+    cos_r = jnp.clip(
+        sin_phi_m * sin_lat + cos_phi_m * cos_lat * cos_dlon,
+        -1.0,
+        1.0,
+    )
+    r = jnp.arccos(cos_r)
+    inside = r < _rm
+
+    psi_rm = jnp.pi * r / _rm
+    psi_zm = jnp.pi * r / _zetam
+    cos_rm = jnp.cos(psi_rm)
+    sin_rm = jnp.sin(psi_rm)
+    cos_zm = jnp.cos(psi_zm)
+    sin_zm = jnp.sin(psi_zm)
+
+    zs_profile = 0.5 * _h0_mt * (1.0 + cos_rm) * cos_zm**2
+    zs = jnp.where(inside, zs_profile, 0.0)
+
+    dzs_dr = 0.5 * _h0_mt * (
+        -(jnp.pi / _rm) * sin_rm * cos_zm**2
+        - (2.0 * jnp.pi / _zetam) * (1.0 + cos_rm) * cos_zm * sin_zm
+    )
+    dzs_dr = jnp.where(inside, dzs_dr, 0.0)
+
+    sin_r = jnp.sqrt(jnp.maximum(1.0 - cos_r**2, 0.0))
+    inv_sin_r = jnp.where(sin_r > 1e-12, 1.0 / sin_r, 0.0)
+
+    dr_dlon = cos_phi_m * cos_lat * sin_dlon * inv_sin_r
+    dr_dlat = (cos_phi_m * sin_lat * cos_dlon - sin_phi_m * cos_lat) * inv_sin_r
+
+    dzs_dlon = dzs_dr * dr_dlon
+    dzs_dlat = dzs_dr * dr_dlat
+    return zs, dzs_dlon, dzs_dlat
 
 
 def dcmip13_wind(
@@ -466,19 +533,15 @@ def dcmip13_wind(
 
     The horizontal wind is time-independent solid-body rotation with an
     inclination angle alpha. The physical vertical velocity w = 0, but the
-    terrain-following coordinate generates a non-zero sigma_dot as flow
-    crosses the mountain.
+    terrain-following pressure coordinate generates a non-zero sigma_dot as
+    flow crosses orography.
 
-    Note: Since we use pure sigma coordinates (not hybrid-eta), the
-    terrain-following sigma_dot is computed during advection via the
-    continuity equation. Here we set sigma_dot = 0 because w = 0
-    everywhere — the effective vertical advection in sigma coordinates
-    is implicitly handled through the sigma-coordinate metric terms.
+    This follows DCMIP-2012 v1.7 Appendix F.3 Eq. (220) for the
+    pressure-based form (a=0, b=eta):
 
-    For a simple sigma-coordinate model, sigma_dot from orographic flow
-    is diagnosed from the horizontal divergence via compute_sigma_dot,
-    which is already called by the transport model. The divergence-free
-    flow + orography produces the correct sigma_dot.
+        sigma_dot = (sigma / H) * [u/(a cos(phi)) * dzs/dlambda + v/a * dzs/dphi]
+
+    where H = R_d*T0/g and z_s is the mountain height.
 
     Parameters
     ----------
@@ -489,7 +552,7 @@ def dcmip13_wind(
     Returns
     -------
     u_grid, v_grid : (6, n, n, nlev)
-    sigma_dot : (6, n, n, nlev+1) — all zeros for w=0 in physical space
+    sigma_dot : (6, n, n, nlev+1)
     """
     lon = grid.lon
     lat = grid.lat
@@ -509,9 +572,16 @@ def dcmip13_wind(
         u_east_3d, v_north_3d, grid.angle[..., None]
     )
 
-    # sigma_dot = 0 (w = 0 in physical space; sigma_dot from orographic
-    # flow should be computed by the model's continuity equation)
-    sigma_dot = jnp.zeros((*lon.shape, nlev + 1))
+    # Terrain-following sigma velocity from Appendix F.3 (Eq. 220).
+    # Compute horizontal crossing of topography at constant geometric height.
+    _, dzs_dlon, dzs_dlat = _mountain_height_with_gradients(lon, lat)
+    cos_lat = jnp.clip(jnp.cos(lat), 1e-8, None)
+    terrain_crossing = (
+        u_east * dzs_dlon / (_a * cos_lat) + v_north * dzs_dlat / _a
+    )  # (6, n, n), units m/s
+
+    sigma_half = sigma_coord.sigma_half[None, None, None, :]  # (1,1,1,nlev+1)
+    sigma_dot = sigma_half * terrain_crossing[..., None] / _H  # (6,n,n,nlev+1)
 
     return u_grid, v_grid, sigma_dot
 
@@ -529,8 +599,8 @@ def dcmip13_init(
       q4: q1 + q2 + q3
 
     Note: This test uses orography, so height depends on horizontal
-    position. For sigma coordinates, z = z_s + sigma * (z_top - z_s)
-    where z_s is the surface elevation.
+    position. In the pressure-based isothermal form (Appendix F.3),
+    z = z_s - H * ln(sigma), where z_s is the surface elevation.
 
     Parameters
     ----------

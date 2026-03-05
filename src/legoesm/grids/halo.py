@@ -412,7 +412,7 @@ def pad_halo(
     # MPI dispatch.
     if _halo_backend == "mpi":
         from legoesm.parallel.halo_exchange import pad_halo_mpi
-        return pad_halo_mpi(data, _mpi_topology)
+        return pad_halo_mpi(data, _mpi_topology, halo=halo)
 
     if halo == 1:
         return _pad_halo_local(data, interp_offsets)

@@ -14,6 +14,7 @@ from tests.test_cases.dcmip_transport import (
     dcmip13_init,
     compute_tracer_error_norms,
     create_dcmip_sigma,
+    _height_from_sigma,
     _mountain_height,
 )
 from legoesm.atmosphere.dynamics.tracer_transport import (
@@ -35,6 +36,16 @@ def grid():
 @pytest.fixture
 def sigma_coord():
     return create_dcmip_sigma(NLEV)
+
+
+def test_dcmip_sigma_uniform_height_spacing():
+    """DCMIP sigma coordinate maps to uniformly spaced geometric height."""
+    sigma = create_dcmip_sigma(20)
+    z_half = _height_from_sigma(sigma.sigma_half)
+    dz = z_half[:-1] - z_half[1:]
+    assert jnp.allclose(dz, dz[0], rtol=5e-6, atol=1e-6)
+    assert float(z_half[0]) == pytest.approx(12000.0, abs=1e-3)
+    assert float(z_half[-1]) == pytest.approx(0.0, abs=1e-6)
 
 
 # ===========================================================================
@@ -208,10 +219,15 @@ class TestDCMIP13:
         assert jnp.allclose(u1, u2, atol=1e-10)
         assert jnp.allclose(v1, v2, atol=1e-10)
 
-    def test_sigma_dot_zero(self, grid, sigma_coord):
-        """sigma_dot = 0 for test 1-3 (w = 0 in physical space)."""
+    def test_sigma_dot_orographic(self, grid, sigma_coord):
+        """sigma_dot is terrain-induced (non-zero over mountain, ~0 elsewhere)."""
         _, _, sigma_dot = dcmip13_wind(0.0, grid, sigma_coord)
-        assert jnp.allclose(sigma_dot, 0.0)
+        zs = _mountain_height(grid.lon, grid.lat)
+        assert float(jnp.max(jnp.abs(sigma_dot))) > 0.0
+
+        off_mountain = zs < 1e-8
+        sigma_off_mountain = jnp.where(off_mountain[..., None], sigma_dot, 0.0)
+        assert jnp.max(jnp.abs(sigma_off_mountain)) < 1e-9
 
     def test_short_integration(self, grid, sigma_coord):
         """Short integration doesn't blow up."""

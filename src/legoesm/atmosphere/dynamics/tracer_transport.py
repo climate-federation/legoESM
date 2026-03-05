@@ -51,6 +51,7 @@ class TracerTransportConfig(NamedTuple):
     """Configuration for tracer transport model."""
     hyperdiff_coeff: float = 0.0
     time_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
+    fv_limiter: str | None = None  # None → centered, "mc"/"ppm"/"weno5" → FV advection
 
 
 def tracer_tendencies(
@@ -95,10 +96,16 @@ def tracer_tendencies(
     # Compute tendencies for each tracer via vmap over the tracer axis
     def single_tracer_tendency(q_i):
         """Compute dq_i/dt for a single tracer. q_i shape: (6, n, n, nlev)."""
-        # Horizontal advection: -(u dq/dx + v dq/dy)
-        dq_dx = gradient_x_3d(q_i, grid)
-        dq_dy = gradient_y_3d(q_i, grid)
-        horiz_adv = -(u * dq_dx + v * dq_dy)
+        if config.fv_limiter is not None:
+            from legoesm.core.operators_3d import fv_scalar_advection_3d
+            horiz_adv = fv_scalar_advection_3d(
+                q_i, u, v, grid, limiter=config.fv_limiter
+            )
+        else:
+            # Centered advection: -(u dq/dx + v dq/dy)
+            dq_dx = gradient_x_3d(q_i, grid)
+            dq_dy = gradient_y_3d(q_i, grid)
+            horiz_adv = -(u * dq_dx + v * dq_dy)
 
         # Vertical advection: -sigma_dot dq/dsigma
         vert_adv = vertical_advection(q_i, sigma_dot, sigma_coord)
@@ -186,12 +193,23 @@ class TracerTransportModel:
 
         integrator = self.config.time_integrator.lower()
         if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            return ssp_rk54_step(state, tendency_fn, dt)
-        if integrator in ("ssp_rk34", "ssp34", "rk34"):
-            return ssp_rk34_step(state, tendency_fn, dt)
-        if integrator in ("ssp_rk3", "ssp3", "rk3"):
-            return ssp_rk3_step(state, tendency_fn, dt)
-        raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")
+            new_state = ssp_rk54_step(state, tendency_fn, dt)
+        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
+            new_state = ssp_rk34_step(state, tendency_fn, dt)
+        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
+            new_state = ssp_rk3_step(state, tendency_fn, dt)
+        else:
+            raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")
+
+        # Clip negative tracers when using FV transport.
+        if self.config.fv_limiter is not None:
+            q = jnp.maximum(new_state.tracers.data, 0.0)
+            new_state = TracerState(
+                tracers=new_state.tracers.replace(data=q),
+                time=new_state.time,
+            )
+
+        return new_state
 
     def integrate(
         self,

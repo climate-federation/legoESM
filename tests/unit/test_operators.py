@@ -78,3 +78,40 @@ class TestOperators:
         v_data = jax.random.normal(jax.random.split(key)[0], (6, 8, 8))
         grads = jax.grad(loss, argnums=(0, 1))(u_data, v_data)
         assert all(jnp.all(jnp.isfinite(g)) for g in grads)
+
+
+class TestFVFluxConservation:
+    """Tests for FV flux operator conservation with symmetrized boundary fluxes."""
+
+    @pytest.mark.skipif(
+        not jax.config.jax_enable_x64,
+        reason="Requires float64 for tight conservation check",
+    )
+    def test_fv_divergence_global_sum_zero(self):
+        """Global sum of FV divergence * area should be near zero (float64)."""
+        from legoesm.core.operators_fv import fv_flux_divergence
+
+        grid = create_cubed_sphere(16)
+        key = jax.random.PRNGKey(0)
+        h = jax.random.uniform(key, (6, 16, 16), minval=0.5, maxval=1.5)
+        u = jax.random.normal(jax.random.PRNGKey(1), (6, 16, 16))
+        v = jax.random.normal(jax.random.PRNGKey(2), (6, 16, 16))
+        div = fv_flux_divergence(h, u, v, grid, g=0.0)
+        global_sum = float(jnp.sum(div * grid.area))
+        assert abs(global_sum) < 1e-6, f"Global sum = {global_sum}"
+
+    @pytest.mark.skipif(
+        not jax.config.jax_enable_x64,
+        reason="Requires float64 for tight conservation check",
+    )
+    def test_fv_scalar_advection_global_sum_zero(self):
+        """Global sum of FV scalar advection * area should be near zero."""
+        from legoesm.core.operators_fv import fv_scalar_advection
+
+        grid = create_cubed_sphere(16)
+        q = jax.random.uniform(jax.random.PRNGKey(0), (6, 16, 16), minval=0.5, maxval=1.5)
+        u = jax.random.normal(jax.random.PRNGKey(1), (6, 16, 16))
+        v = jax.random.normal(jax.random.PRNGKey(2), (6, 16, 16))
+        adv = fv_scalar_advection(q, u, v, grid)
+        global_sum = float(jnp.sum(adv * grid.area))
+        assert abs(global_sum) < 1e-6, f"Global sum = {global_sum}"
