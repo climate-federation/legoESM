@@ -264,31 +264,30 @@ def _reconstruct_edges_y_ppm(q_pad_h2):
 def _weno5_1d(q):
     """WENO5 reconstruction along the last-but-one axis.
 
+    Uses the full WENO5 stencil (6 points) for interior edges, and
+    falls back to MC-limited MUSCL at the two boundary edges where
+    the 6-point stencil extends beyond the halo=2 data.
+
     Parameters
     ----------
-    q : shape (..., M, K) where M = n+4
+    q : shape (..., M, K) where M = n+4 (halo=2 on each side)
 
     Returns
     -------
     q_left, q_right : each shape (..., n+1, K)
     """
-    # Pad by 1 on each side (edge replication) so the 5-point stencil
-    # is available at all n+1 interior edges
-    q_ext = jnp.pad(q, [(0, 0)] * (q.ndim - 2) + [(1, 1), (0, 0)],
-                     mode='edge')   # (..., n+6, K)
-
-    # Stencil values for n+1 edges: interface between q_ext[...,j,:] and
-    # q_ext[...,j+1,:] for j = 2..n+2
-    a = q_ext[..., :-5, :]     # q_{i-2}
-    b = q_ext[..., 1:-4, :]    # q_{i-1}
-    c = q_ext[..., 2:-3, :]    # q_i
-    d = q_ext[..., 3:-2, :]    # q_{i+1}
-    e = q_ext[..., 4:-1, :]    # q_{i+2}
-    f = q_ext[..., 5:, :]      # q_{i+3}
+    # --- Interior WENO5: n-1 edges (full 6-point stencil available) ---
+    # Edge k between cells (k+2) and (k+3) in q, for k = 0..n-2
+    a = q[..., :-5, :]     # q_{j-2}: indices 0..n-2
+    b = q[..., 1:-4, :]    # q_{j-1}: indices 1..n-1
+    c = q[..., 2:-3, :]    # q_j:     indices 2..n
+    d = q[..., 3:-2, :]    # q_{j+1}: indices 3..n+1
+    e = q[..., 4:-1, :]    # q_{j+2}: indices 4..n+2
+    f = q[..., 5:, :]      # q_{j+3}: indices 5..n+3
 
     eps = 1e-6
 
-    # ------ Left-biased (uses a, b, c, d, e) → q_L ------
+    # Left-biased (uses a, b, c, d, e) → q_L at interface c|d
     p0_L = (2.0 * a - 7.0 * b + 11.0 * c) / 6.0
     p1_L = (-b + 5.0 * c + 2.0 * d) / 6.0
     p2_L = (2.0 * c + 5.0 * d - e) / 6.0
@@ -297,15 +296,16 @@ def _weno5_1d(q):
     b1_L = (13.0 / 12.0) * (b - 2.0 * c + d) ** 2 + 0.25 * (b - d) ** 2
     b2_L = (13.0 / 12.0) * (c - 2.0 * d + e) ** 2 + 0.25 * (3.0 * c - 4.0 * d + e) ** 2
 
-    w0_L = 0.1 / (eps + b0_L) ** 2
-    w1_L = 0.6 / (eps + b1_L) ** 2
-    w2_L = 0.3 / (eps + b2_L) ** 2
+    # WENO-Z weights (Borges et al. 2008): better near smooth extrema
+    tau5_L = jnp.abs(b0_L - b2_L)
+    w0_L = 0.1 * (1.0 + (tau5_L / (b0_L + eps)) ** 2)
+    w1_L = 0.6 * (1.0 + (tau5_L / (b1_L + eps)) ** 2)
+    w2_L = 0.3 * (1.0 + (tau5_L / (b2_L + eps)) ** 2)
     ws_L = w0_L + w1_L + w2_L
 
-    q_left = (w0_L * p0_L + w1_L * p1_L + w2_L * p2_L) / ws_L
+    q_left_int = (w0_L * p0_L + w1_L * p1_L + w2_L * p2_L) / ws_L
 
-    # ------ Right-biased (uses b, c, d, e, f) → q_R ------
-    # Mirror of left-biased centered on cell d = q_{i+1}
+    # Right-biased (uses b, c, d, e, f) → q_R at interface c|d
     p0_R = (2.0 * f - 7.0 * e + 11.0 * d) / 6.0
     p1_R = (-e + 5.0 * d + 2.0 * c) / 6.0
     p2_R = (2.0 * d + 5.0 * c - b) / 6.0
@@ -314,12 +314,44 @@ def _weno5_1d(q):
     b1_R = (13.0 / 12.0) * (e - 2.0 * d + c) ** 2 + 0.25 * (e - c) ** 2
     b2_R = (13.0 / 12.0) * (d - 2.0 * c + b) ** 2 + 0.25 * (3.0 * d - 4.0 * c + b) ** 2
 
-    w0_R = 0.1 / (eps + b0_R) ** 2
-    w1_R = 0.6 / (eps + b1_R) ** 2
-    w2_R = 0.3 / (eps + b2_R) ** 2
+    tau5_R = jnp.abs(b0_R - b2_R)
+    w0_R = 0.1 * (1.0 + (tau5_R / (b0_R + eps)) ** 2)
+    w1_R = 0.6 * (1.0 + (tau5_R / (b1_R + eps)) ** 2)
+    w2_R = 0.3 * (1.0 + (tau5_R / (b2_R + eps)) ** 2)
     ws_R = w0_R + w1_R + w2_R
 
-    q_right = (w0_R * p0_R + w1_R * p1_R + w2_R * p2_R) / ws_R
+    q_right_int = (w0_R * p0_R + w1_R * p1_R + w2_R * p2_R) / ws_R
+
+    # Monotonicity clamp: prevent oscillations at cube edges
+    # Clip to range of the 3-cell neighborhood around each edge
+    q_min_L = jnp.minimum(jnp.minimum(b, c), d)
+    q_max_L = jnp.maximum(jnp.maximum(b, c), d)
+    q_left_int = jnp.clip(q_left_int, q_min_L, q_max_L)
+
+    q_min_R = jnp.minimum(jnp.minimum(c, d), e)
+    q_max_R = jnp.maximum(jnp.maximum(c, d), e)
+    q_right_int = jnp.clip(q_right_int, q_min_R, q_max_R)
+
+    # --- Boundary edges: MC-limited MUSCL fallback ---
+    # Left boundary: edge between cells 1 and 2 (halo|interior)
+    slope_L0 = mc_limiter(q[..., 2:3, :] - q[..., 1:2, :],
+                          q[..., 1:2, :] - q[..., 0:1, :])
+    slope_R0 = mc_limiter(q[..., 3:4, :] - q[..., 2:3, :],
+                          q[..., 2:3, :] - q[..., 1:2, :])
+    q_left_lo = q[..., 1:2, :] + 0.5 * slope_L0
+    q_right_lo = q[..., 2:3, :] - 0.5 * slope_R0
+
+    # Right boundary: edge between cells n+1 and n+2 (interior|halo)
+    slope_Ln = mc_limiter(q[..., -2:-1, :] - q[..., -3:-2, :],
+                          q[..., -3:-2, :] - q[..., -4:-3, :])
+    slope_Rn = mc_limiter(q[..., -1:, :] - q[..., -2:-1, :],
+                          q[..., -2:-1, :] - q[..., -3:-2, :])
+    q_left_hi = q[..., -3:-2, :] + 0.5 * slope_Ln
+    q_right_hi = q[..., -2:-1, :] - 0.5 * slope_Rn
+
+    # Concatenate: [left_boundary, interior, right_boundary]
+    q_left = jnp.concatenate([q_left_lo, q_left_int, q_left_hi], axis=-2)
+    q_right = jnp.concatenate([q_right_lo, q_right_int, q_right_hi], axis=-2)
 
     return q_left, q_right
 
