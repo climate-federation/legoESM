@@ -42,7 +42,6 @@ from __future__ import annotations
 from typing import Callable, TypeVar
 
 import jax
-import jax.numpy as jnp
 
 State = TypeVar("State")
 

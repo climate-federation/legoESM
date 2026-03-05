@@ -1,24 +1,24 @@
-"""FV3-style finite-volume transport operators on the cubed-sphere grid.
+"""Finite-volume transport operators on the cubed-sphere grid.
 
 Implements PPM (Piecewise Parabolic Method) reconstruction with
-Colella-Woodward monotonicity limiting and Lin-Rood directional
-operator splitting for conservative 2D transport.
+Colella-Woodward monotonicity limiting for conservative and advective
+2D transport.
 
 Key design:
 - PPM reconstruction is purely 1D along grid lines
 - At cube edges, pad_halo(halo=2) provides neighbor data
 - The 1D stencil never encounters coordinate discontinuities
-- Directional splitting processes x-sweeps and y-sweeps independently
+- Both x and y fluxes are computed on the SAME unmodified field
+  (no directional splitting) to preserve geostrophic balance
 
 Key functions
 -------------
-fv_flux_divergence : Conservative flux-form transport using PPM + Lin-Rood
+fv_flux_divergence : Conservative flux-form transport using PPM
 fv_scalar_advection : Advective (non-conservative) transport using PPM
 
 References
 ----------
 - Colella & Woodward (1984): The Piecewise Parabolic Method (PPM)
-- Lin & Rood (1996): Multidimensional Flux-Form Semi-Lagrangian Transport
 - Lin (2004): A "Vertically Lagrangian" Finite-Volume Dynamical Core (FV3)
 """
 
@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo, pad_halo_vector
 
 
@@ -171,190 +170,18 @@ def _ppm_reconstruct_y(q_pad_h2, limiter=True):
 
 
 # ==============================================================================
-# Single-direction flux computation
+# Unsplit 2D flux-form transport
 # ==============================================================================
 
-def _fv_flux_x(q, u, v, grid, dt, limiter=True):
-    """Compute x-direction flux divergence using PPM.
+def fv_flux_divergence(q, u, v, grid, limiter=True):
+    """Conservative flux-form 2D transport using PPM (unsplit).
 
-    Parameters
-    ----------
-    q : jax.Array, shape (6, n, n)
-        Scalar field (e.g. fluid depth, density).
-    u, v : jax.Array, shape (6, n, n)
-        Cell-center velocities.
-    grid : CubedSphereGrid
-    dt : float
-        Time step (for CFL-based limiting, currently unused).
-    limiter : bool
-        Apply Colella-Woodward monotonicity limiter.
+    Both x and y fluxes are computed on the SAME unmodified field q.
+    This is critical for maintaining discrete geostrophic balance when
+    the momentum equation uses centered differences.
 
-    Returns
-    -------
-    jax.Array, shape (6, n, n)
-        Flux divergence contribution from x-direction.
-    """
-    # Pad scalar with halo=2 for PPM reconstruction
-    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
-
-    # Pad velocity with halo=2 for interface velocity
-    u_pad, v_pad = pad_halo_vector(
-        u, v,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=grid.halo_interp_offsets_h2, halo=2,
-    )
-
-    # PPM reconstruction: q_L (right-edge of left cell), q_R (left-edge of right cell)
-    q_L, q_R = _ppm_reconstruct_x(q_pad, limiter)  # each (6, n+1, n)
-
-    # Interface velocity: average of adjacent cells in the padded array
-    # u_pad[:, :, 2:-2] strips y-halo → (6, n+4, n)
-    u_strip = u_pad[:, :, 2:-2]  # (6, n+4, n)
-    # Interior interface velocity: average at n+1 interfaces (padded indices 1..n+1)
-    u_iface = 0.5 * (u_strip[:, 1:-2, :] + u_strip[:, 2:-1, :])  # (6, n+1, n)
-
-    # Upwind selection
-    q_face = jnp.where(u_iface > 0, q_L, q_R)
-
-    # Edge metric: dy at interface
-    hy = grid.hy_ext_h2[:, :, 2:-2]  # (6, n+4, n) - strip y halo
-    hy_iface = 0.5 * (hy[:, 1:-2, :] + hy[:, 2:-1, :])  # (6, n+1, n)
-
-    # Flux
-    F = u_iface * hy_iface * q_face  # (6, n+1, n)
-
-    # Divergence: -(F[i+1/2] - F[i-1/2]) / area
-    return -(F[:, 1:, :] - F[:, :-1, :]) / grid.area
-
-
-def _fv_flux_y(q, u, v, grid, dt, limiter=True):
-    """Compute y-direction flux divergence using PPM.
-
-    Parameters
-    ----------
-    q : jax.Array, shape (6, n, n)
-        Scalar field.
-    u, v : jax.Array, shape (6, n, n)
-        Cell-center velocities.
-    grid : CubedSphereGrid
-    dt : float
-    limiter : bool
-
-    Returns
-    -------
-    jax.Array, shape (6, n, n)
-        Flux divergence contribution from y-direction.
-    """
-    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
-
-    u_pad, v_pad = pad_halo_vector(
-        u, v,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=grid.halo_interp_offsets_h2, halo=2,
-    )
-
-    q_L, q_R = _ppm_reconstruct_y(q_pad, limiter)  # each (6, n, n+1)
-
-    # Interface velocity in y
-    v_strip = v_pad[:, 2:-2, :]  # (6, n, n+4)
-    v_iface = 0.5 * (v_strip[:, :, 1:-2] + v_strip[:, :, 2:-1])  # (6, n, n+1)
-
-    q_face = jnp.where(v_iface > 0, q_L, q_R)
-
-    # Edge metric: dx at interface
-    hx = grid.hx_ext_h2[:, 2:-2, :]  # (6, n, n+4) - strip x halo
-    hx_iface = 0.5 * (hx[:, :, 1:-2] + hx[:, :, 2:-1])  # (6, n, n+1)
-
-    G = v_iface * hx_iface * q_face  # (6, n, n+1)
-
-    return -(G[:, :, 1:] - G[:, :, :-1]) / grid.area
-
-
-# ==============================================================================
-# Advective (non-conservative) single-direction sweeps
-# ==============================================================================
-
-def _fv_advect_x(q, u, v, grid, dt, limiter=True):
-    """Compute x-direction advective tendency -u * dq/dx using PPM.
-
-    Uses PPM reconstruction to compute upwind interface values, then
-    computes the advective flux as u * q_face (without multiplying by q
-    in the flux — this gives -v·∇q rather than -∇·(qv)).
-
-    Parameters
-    ----------
-    q, u, v : jax.Array, shape (6, n, n)
-    grid : CubedSphereGrid
-    dt : float
-    limiter : bool
-
-    Returns
-    -------
-    jax.Array, shape (6, n, n)
-    """
-    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
-
-    u_pad, v_pad = pad_halo_vector(
-        u, v,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=grid.halo_interp_offsets_h2, halo=2,
-    )
-
-    q_L, q_R = _ppm_reconstruct_x(q_pad, limiter)  # each (6, n+1, n)
-
-    u_strip = u_pad[:, :, 2:-2]
-    u_iface = 0.5 * (u_strip[:, 1:-2, :] + u_strip[:, 2:-1, :])  # (6, n+1, n)
-
-    q_face = jnp.where(u_iface > 0, q_L, q_R)
-
-    # Advective flux: just u * q_face (no density)
-    hy = grid.hy_ext_h2[:, :, 2:-2]
-    hy_iface = 0.5 * (hy[:, 1:-2, :] + hy[:, 2:-1, :])
-
-    F = u_iface * hy_iface * q_face
-
-    return -(F[:, 1:, :] - F[:, :-1, :]) / grid.area
-
-
-def _fv_advect_y(q, u, v, grid, dt, limiter=True):
-    """Compute y-direction advective tendency -v * dq/dy using PPM."""
-    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
-
-    u_pad, v_pad = pad_halo_vector(
-        u, v,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=grid.halo_interp_offsets_h2, halo=2,
-    )
-
-    q_L, q_R = _ppm_reconstruct_y(q_pad, limiter)
-
-    v_strip = v_pad[:, 2:-2, :]
-    v_iface = 0.5 * (v_strip[:, :, 1:-2] + v_strip[:, :, 2:-1])
-
-    q_face = jnp.where(v_iface > 0, q_L, q_R)
-
-    hx = grid.hx_ext_h2[:, 2:-2, :]
-    hx_iface = 0.5 * (hx[:, :, 1:-2] + hx[:, :, 2:-1])
-
-    G = v_iface * hx_iface * q_face
-
-    return -(G[:, :, 1:] - G[:, :, :-1]) / grid.area
-
-
-# ==============================================================================
-# Lin-Rood 2D operator-split transport
-# ==============================================================================
-
-def fv_flux_divergence(q, u, v, grid, dt, limiter=True, x_first=True):
-    """Conservative flux-form 2D transport using PPM + directional splitting.
-
-    Implements the Lin-Rood (1996) algorithm: split into 1D x-sweep and
-    y-sweep using PPM reconstruction. Each directional flux is a telescoping
-    sum (F[i+1/2] - F[i-1/2]), so the global sum is zero by construction.
+    Each directional flux is a telescoping sum, so the global sum
+    of the total divergence is zero by construction.
 
     Parameters
     ----------
@@ -363,36 +190,62 @@ def fv_flux_divergence(q, u, v, grid, dt, limiter=True, x_first=True):
     u, v : jax.Array, shape (6, n, n)
         Velocity components (grid-aligned).
     grid : CubedSphereGrid
-    dt : float
-        Time step [s].
     limiter : bool
         Apply Colella-Woodward monotonicity limiter.
-    x_first : bool
-        If True, x-sweep first then y-sweep; if False, reversed.
 
     Returns
     -------
     jax.Array, shape (6, n, n)
-        Flux divergence tendency: dq/dt.
+        Flux divergence tendency: dq/dt = -div(q * v).
     """
-    if x_first:
-        dq_1 = _fv_flux_x(q, u, v, grid, dt, limiter)
-        q_star = q + dt * dq_1
-        dq_2 = _fv_flux_y(q_star, u, v, grid, dt, limiter)
-    else:
-        dq_1 = _fv_flux_y(q, u, v, grid, dt, limiter)
-        q_star = q + dt * dq_1
-        dq_2 = _fv_flux_x(q_star, u, v, grid, dt, limiter)
+    # Single halo exchange for both directions
+    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
+    u_pad, v_pad = pad_halo_vector(
+        u, v,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+        interp_offsets=grid.halo_interp_offsets_h2, halo=2,
+    )
 
-    return dq_1 + dq_2
+    # --- X-direction flux ---
+    q_L_x, q_R_x = _ppm_reconstruct_x(q_pad, limiter)  # each (6, n+1, n)
+
+    u_strip = u_pad[:, :, 2:-2]  # (6, n+4, n)
+    u_iface = 0.5 * (u_strip[:, 1:-2, :] + u_strip[:, 2:-1, :])  # (6, n+1, n)
+
+    q_face_x = jnp.where(u_iface > 0, q_L_x, q_R_x)
+
+    hy = grid.hy_ext_h2[:, :, 2:-2]  # (6, n+4, n)
+    hy_iface = 0.5 * (hy[:, 1:-2, :] + hy[:, 2:-1, :])  # (6, n+1, n)
+
+    Phi_x = u_iface * hy_iface * q_face_x  # (6, n+1, n)
+
+    # --- Y-direction flux ---
+    q_L_y, q_R_y = _ppm_reconstruct_y(q_pad, limiter)  # each (6, n, n+1)
+
+    v_strip = v_pad[:, 2:-2, :]  # (6, n, n+4)
+    v_iface = 0.5 * (v_strip[:, :, 1:-2] + v_strip[:, :, 2:-1])  # (6, n, n+1)
+
+    q_face_y = jnp.where(v_iface > 0, q_L_y, q_R_y)
+
+    hx = grid.hx_ext_h2[:, 2:-2, :]  # (6, n, n+4)
+    hx_iface = 0.5 * (hx[:, :, 1:-2] + hx[:, :, 2:-1])  # (6, n, n+1)
+
+    Phi_y = v_iface * hx_iface * q_face_y  # (6, n, n+1)
+
+    # --- Net flux divergence (both directions, same field) ---
+    net_x = Phi_x[:, 1:, :] - Phi_x[:, :-1, :]
+    net_y = Phi_y[:, :, 1:] - Phi_y[:, :, :-1]
+
+    return -(net_x + net_y) / grid.area
 
 
-def fv_scalar_advection(q, u, v, grid, dt, limiter=True, x_first=True):
+def fv_scalar_advection(q, u, v, grid, limiter=True):
     """PPM advection of scalar q by (u,v) — advective (non-conservative) form.
 
     For tracers/temperature where we want -v·grad(q), not -div(q*v).
-    Uses the same PPM reconstruction and directional splitting as the
-    flux-form operator, but without flux form.
+    Uses the same PPM reconstruction but without flux form.
+    Both directions computed on the SAME unmodified field (unsplit).
 
     Parameters
     ----------
@@ -401,25 +254,113 @@ def fv_scalar_advection(q, u, v, grid, dt, limiter=True, x_first=True):
     u, v : jax.Array, shape (6, n, n)
         Velocity components.
     grid : CubedSphereGrid
-    dt : float
-        Time step [s].
     limiter : bool
         Apply Colella-Woodward monotonicity limiter.
-    x_first : bool
-        Sweep direction ordering.
 
     Returns
     -------
     jax.Array, shape (6, n, n)
-        Advective tendency: -v·grad(q).
+        Advective tendency: approximately -v·grad(q).
     """
-    if x_first:
-        dq_1 = _fv_advect_x(q, u, v, grid, dt, limiter)
-        q_star = q + dt * dq_1
-        dq_2 = _fv_advect_y(q_star, u, v, grid, dt, limiter)
-    else:
-        dq_1 = _fv_advect_y(q, u, v, grid, dt, limiter)
-        q_star = q + dt * dq_1
-        dq_2 = _fv_advect_x(q_star, u, v, grid, dt, limiter)
+    # Single halo exchange for both directions
+    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
+    u_pad, v_pad = pad_halo_vector(
+        u, v,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+        interp_offsets=grid.halo_interp_offsets_h2, halo=2,
+    )
 
-    return dq_1 + dq_2
+    # --- X-direction ---
+    q_L_x, q_R_x = _ppm_reconstruct_x(q_pad, limiter)
+
+    u_strip = u_pad[:, :, 2:-2]
+    u_iface = 0.5 * (u_strip[:, 1:-2, :] + u_strip[:, 2:-1, :])
+
+    q_face_x = jnp.where(u_iface > 0, q_L_x, q_R_x)
+
+    hy = grid.hy_ext_h2[:, :, 2:-2]
+    hy_iface = 0.5 * (hy[:, 1:-2, :] + hy[:, 2:-1, :])
+
+    Phi_x = u_iface * hy_iface * q_face_x
+
+    # --- Y-direction ---
+    q_L_y, q_R_y = _ppm_reconstruct_y(q_pad, limiter)
+
+    v_strip = v_pad[:, 2:-2, :]
+    v_iface = 0.5 * (v_strip[:, :, 1:-2] + v_strip[:, :, 2:-1])
+
+    q_face_y = jnp.where(v_iface > 0, q_L_y, q_R_y)
+
+    hx = grid.hx_ext_h2[:, 2:-2, :]
+    hx_iface = 0.5 * (hx[:, :, 1:-2] + hx[:, :, 2:-1])
+
+    Phi_y = v_iface * hx_iface * q_face_y
+
+    # --- Net flux divergence ---
+    net_x = Phi_x[:, 1:, :] - Phi_x[:, :-1, :]
+    net_y = Phi_y[:, :, 1:] - Phi_y[:, :, :-1]
+
+    return -(net_x + net_y) / grid.area
+
+
+# ==============================================================================
+# PPM-compatible gradients
+# ==============================================================================
+
+def fv_gradient_x(q, grid):
+    """PPM-compatible x-gradient using 4th-order edge values.
+
+    Computes dq/dx at cell centers by differencing PPM edge values
+    at the left and right cell boundaries.  This makes the gradient
+    operator compatible with the FV mass flux, preserving discrete
+    geostrophic balance.
+
+    Parameters
+    ----------
+    q : jax.Array, shape (6, n, n)
+    grid : CubedSphereGrid
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n)
+    """
+    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
+    q_strip = q_pad[:, :, 2:-2]   # (6, n+4, n) — strip transverse halo
+
+    # 4th-order edge values along x: (6, n+3, n)
+    q_hat = _ppm_edge_values(q_strip)
+
+    # Interior edges for n cells: need n+1 edges (indices 1..n+1)
+    q_edges = q_hat[:, 1:-1, :]   # (6, n+1, n)
+
+    # Gradient: (right edge - left edge) / cell width
+    # grid.dx spans 2 cells, so single-cell width = dx/2
+    return (q_edges[:, 1:, :] - q_edges[:, :-1, :]) / (grid.dx / 2.0)
+
+
+def fv_gradient_y(q, grid):
+    """PPM-compatible y-gradient using 4th-order edge values.
+
+    Parameters
+    ----------
+    q : jax.Array, shape (6, n, n)
+    grid : CubedSphereGrid
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n)
+    """
+    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
+    q_strip = q_pad[:, 2:-2, :]   # (6, n, n+4) — strip transverse halo
+
+    # Transpose to reuse x-direction PPM edge values
+    q_t = jnp.swapaxes(q_strip, -2, -1)  # (6, n+4, n)
+    q_hat_t = _ppm_edge_values(q_t)       # (6, n+3, n)
+    q_edges_t = q_hat_t[:, 1:-1, :]       # (6, n+1, n)
+
+    dq_t = q_edges_t[:, 1:, :] - q_edges_t[:, :-1, :]  # (6, n, n)
+
+    # Swap back to standard (face, x, y) layout and divide by cell width
+    # grid.dy spans 2 cells, so single-cell width = dy/2
+    return jnp.swapaxes(dq_t, -2, -1) / (grid.dy / 2.0)

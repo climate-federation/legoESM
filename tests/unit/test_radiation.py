@@ -170,6 +170,19 @@ class TestGrayRadiation:
         actual = out.lw_flux_up[:, -1]
         assert jnp.allclose(actual, expected, rtol=1e-5)
 
+    def test_lw_surface_reflection_for_nonblack_surface(self):
+        """Non-black surface should reflect part of downwelling LW."""
+        ncol, nlev = 1, 12
+        T, p_full, p_half, T_sfc, lat, _ = _make_column_data(ncol, nlev)
+        insol = jnp.zeros(ncol)
+        eps = 0.8
+        config = GrayRadiationConfig(sfc_emissivity=eps)
+        out = gray_radiation(T, p_full, p_half, T_sfc, lat, None, insol, config)
+
+        expected = eps * constants.sigma_sb * T_sfc ** 4 + (1.0 - eps) * out.lw_flux_down[:, -1]
+        actual = out.lw_flux_up[:, -1]
+        assert jnp.allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
     def test_lw_flux_down_at_toa_zero(self):
         """LW downward flux at TOA should be zero."""
         T, p_full, p_half, T_sfc, lat, insol = _make_column_data()

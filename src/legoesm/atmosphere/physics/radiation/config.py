@@ -41,7 +41,9 @@ class GrayRadiationConfig(NamedTuple):
     sfc_emissivity : float
         Surface emissivity for LW (default 1.0).
     sw_tau_0 : float
-        SW optical depth scale (default 0.22).
+        SW optical depth scale (default 0.22). Set to 0.0 for the
+        strict surface-absorbing SW limit often used in Frierson-style
+        gray setups.
     S_0 : float
         Total solar irradiance [W/m^2] (default 1360.0).
     sfc_albedo : float

@@ -17,16 +17,13 @@ References
 
 from __future__ import annotations
 
-from functools import partial
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from legoesm.grids.halo import (
     pad_halo,
-    extrapolate_to_halo,
     compute_padded_angle,
     compute_padded_half_metrics,
     compute_halo_interp_offsets,

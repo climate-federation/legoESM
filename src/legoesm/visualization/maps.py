@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.field import Field
@@ -274,11 +273,6 @@ def plot_wind_field(
 
     lon_np = np.asarray(grid.lon) * 180.0 / np.pi
     lat_np = np.asarray(grid.lat) * 180.0 / np.pi
-
-    # Rotate grid winds to geographic (east, north)
-    cos_a = np.asarray(grid.angle)
-    sin_a = np.sin(cos_a)
-    cos_a = np.cos(cos_a)
 
     u_np = np.asarray(u_field.data)
     v_np = np.asarray(v_field.data)

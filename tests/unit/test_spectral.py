@@ -9,7 +9,6 @@ from legoesm.grids.gaussian import (
     create_gaussian_grid,
     sh_analysis,
     sh_synthesis,
-    sh_analysis_H,
     sh_analysis_oc2,
     sh_analysis_dmu,
     uv_from_vordiv,
@@ -17,7 +16,6 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion,
 )
 from legoesm.atmosphere.dynamics.spectral_sw import (
-    SpectralSWState,
     SpectralSWConfig,
     SpectralShallowWaterModel,
     spectral_sw_tendencies,
@@ -26,7 +24,6 @@ from legoesm.atmosphere.dynamics.spectral_sw import (
     spectral_to_grid,
     compute_spectral_diagnostics,
 )
-from legoesm.core.field import Field
 from legoesm import constants
 
 

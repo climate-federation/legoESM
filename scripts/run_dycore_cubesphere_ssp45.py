@@ -182,6 +182,7 @@ def _save_case_snapshots(
     cube_lon_deg: np.ndarray,
     cube_lat_deg: np.ndarray,
     central_longitude: float = 0.0,
+    cube_plot_mode: str = "latlon",
 ):
     if not snapshots:
         return
@@ -190,7 +191,11 @@ def _save_case_snapshots(
     n_rows = len(field_specs)
     n_cols = len(snap_steps)
 
-    use_projected_cube = HAS_CARTOPY and cube_lon_deg is not None and cube_lat_deg is not None
+    cube_mode = (cube_plot_mode or "latlon").lower()
+    use_cube_latlon = cube_lon_deg is not None and cube_lat_deg is not None and cube_mode == "latlon"
+    use_projected_cube = (
+        HAS_CARTOPY and cube_lon_deg is not None and cube_lat_deg is not None and cube_mode == "scatter"
+    )
 
     fig = plt.figure(figsize=((5.0 if use_projected_cube else 4.4) * n_cols + 0.9, 3.4 * n_rows))
     width_ratios = [1.0] * n_cols + [0.06]
@@ -214,14 +219,31 @@ def _save_case_snapshots(
 
     for row, (key, row_label, cmap) in enumerate(field_specs):
         row_panels = []
+        lon_plot = None
+        lat_plot = None
         for step in snap_steps:
             field_dict = snapshots.get(step, {})
             if key not in field_dict:
                 row_panels.append(None)
                 continue
             arr = np.asarray(field_dict[key])
-            if use_projected_cube and arr.ndim == 3 and arr.shape[0] == 6:
-                row_panels.append(arr)
+            if arr.ndim == 3 and arr.shape[0] == 6 and (use_projected_cube or use_cube_latlon):
+                if use_cube_latlon:
+                    lon_ll, lat_ll, field_ll = _regrid_faces_to_latlon(
+                        arr,
+                        cube_lon_deg,
+                        cube_lat_deg,
+                    )
+                    lon_ll = (lon_ll + 360.0) % 360.0
+                    order = np.argsort(lon_ll[0, :])
+                    lon_ll = lon_ll[:, order]
+                    field_ll = field_ll[:, order]
+                    row_panels.append(field_ll)
+                    if lon_plot is None:
+                        lon_plot = lon_ll
+                        lat_plot = lat_ll
+                else:
+                    row_panels.append(arr)
             else:
                 row_panels.append(_field_to_panel(arr))
 
@@ -265,6 +287,21 @@ def _save_case_snapshots(
                     ax.set_global()
                     ax.coastlines(linewidth=0.35, color="0.35")
                     ax.gridlines(draw_labels=False, linewidth=0.2, color="0.6", alpha=0.35)
+                elif use_cube_latlon and panel.ndim == 2 and lon_plot is not None and lat_plot is not None:
+                    im = ax.pcolormesh(
+                        lon_plot,
+                        lat_plot,
+                        panel,
+                        cmap=cmap,
+                        vmin=vmin,
+                        vmax=vmax,
+                        shading="auto",
+                    )
+                    ax.set_xlim(0.0, 360.0)
+                    ax.set_ylim(-90.0, 90.0)
+                    ax.set_xticks([0, 60, 120, 180, 240, 300, 360])
+                    ax.set_yticks([-60, -30, 0, 30, 60])
+                    ax.grid(True, alpha=0.15)
                 else:
                     im = ax.imshow(
                         panel,
@@ -365,9 +402,65 @@ def _save_mean_timeseries(
     plt.close(fig)
 
 
+def _save_conservation_timeseries(
+    test_dir: Path,
+    case_name: str,
+    series: dict[str, list[float]],
+    dt: float,
+):
+    steps = np.asarray(series.get("step", []), dtype=float)
+    if steps.size == 0:
+        return
+
+    t_sec = steps * dt
+    t_days = t_sec / 86400.0
+    mass = np.asarray(series.get("mass", []), dtype=float)
+    energy = np.asarray(series.get("energy", []), dtype=float)
+
+    mass_rel = (mass - mass[0]) / max(abs(mass[0]), 1.0e-30)
+    energy_rel = (energy - energy[0]) / max(abs(energy[0]), 1.0e-30)
+
+    csv_path = test_dir / "conservation_timeseries.csv"
+    with open(csv_path, "w") as f:
+        f.write("step,time_seconds,time_days,mass,energy,mass_rel,energy_rel\n")
+        for i in range(len(steps)):
+            f.write(
+                f"{steps[i]:.0f},{t_sec[i]:.6f},{t_days[i]:.8f},"
+                f"{mass[i]:.12e},{energy[i]:.12e},{mass_rel[i]:.12e},{energy_rel[i]:.12e}\n",
+            )
+
+    fig, axes = plt.subplots(2, 1, figsize=(8.5, 6.5), sharex=True)
+    axes[0].plot(t_days, mass_rel, color="tab:blue", lw=1.8)
+    axes[0].axhline(0.0, color="0.2", lw=0.8, ls="--")
+    axes[0].set_ylabel("Relative drift")
+    axes[0].set_title("Mass balance")
+    axes[0].grid(True, alpha=0.25)
+
+    axes[1].plot(t_days, energy_rel, color="tab:red", lw=1.8)
+    axes[1].axhline(0.0, color="0.2", lw=0.8, ls="--")
+    axes[1].set_ylabel("Relative drift")
+    axes[1].set_xlabel("Time (days)")
+    axes[1].set_title("Energy balance")
+    axes[1].grid(True, alpha=0.25)
+
+    fig.suptitle(f"{case_name} - Conservation Time Series", fontsize=12)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.savefig(test_dir / "conservation_timeseries.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    with open(test_dir / "mass_energy_balance.txt", "w") as f:
+        f.write(f"initial_mass: {mass[0]:.12e}\n")
+        f.write(f"final_mass: {mass[-1]:.12e}\n")
+        f.write(f"mass_drift_rel: {mass_rel[-1]:.12e}\n")
+        f.write(f"initial_energy: {energy[0]:.12e}\n")
+        f.write(f"final_energy: {energy[-1]:.12e}\n")
+        f.write(f"energy_drift_rel: {energy_rel[-1]:.12e}\n")
+
+
 def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
+    from legoesm.core.conservation import compute_conservation_diagnostics
     from tests.test_cases.williamson import williamson_test2
 
     case_dir = out_dir / "01_sw_fv_williamson2"
@@ -393,6 +486,7 @@ def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
     snapshots = {}
     snap_targets = _snapshot_steps(n_steps)
     series = {"step": [], "mean_wind_speed": [], "mean_height": []}
+    cons_series = {"step": [], "mass": [], "energy": []}
 
     def _extract(s):
         u = np.asarray(s.u.data)
@@ -405,6 +499,10 @@ def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
     _capture_snapshot(snapshots, snap_targets, 0, _extract, state)
     f0 = _extract(state)
     _record_means(series, 0, {"mean_wind_speed": f0["wind_speed"], "mean_height": f0["height"]}, area)
+    d0 = compute_conservation_diagnostics(state, grid)
+    cons_series["step"].append(0.0)
+    cons_series["mass"].append(float(d0["total_mass"]))
+    cons_series["energy"].append(float(d0["total_energy"]))
 
     t0 = time.time()
     stable = True
@@ -417,6 +515,10 @@ def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
         if step % mean_every == 0 or step == n_steps:
             fs = _extract(state)
             _record_means(series, step, {"mean_wind_speed": fs["wind_speed"], "mean_height": fs["height"]}, area)
+            d = compute_conservation_diagnostics(state, grid)
+            cons_series["step"].append(float(step))
+            cons_series["mass"].append(float(d["total_mass"]))
+            cons_series["energy"].append(float(d["total_energy"]))
 
         if step % progress_every == 0:
             print(f"      SW W2 progress: {step}/{n_steps}")
@@ -448,6 +550,12 @@ def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
         dt,
         {"mean_wind_speed": "m/s", "mean_height": "m"},
     )
+    _save_conservation_timeseries(
+        case_dir,
+        f"SW FV Williamson 2 C{n} {solver}",
+        cons_series,
+        dt,
+    )
 
     h_err = float(jnp.sqrt(jnp.mean((state.h.data - state0.h.data) ** 2)))
     status = "PASS" if stable else "FAIL"
@@ -455,10 +563,13 @@ def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
     with open(case_dir / "results.txt", "w") as f:
         f.write(f"solver: {solver}\n")
         f.write(f"resolution: C{n}\n")
+        f.write("land_mask_applied: false\n")
         f.write(f"edge_blend_strength: {edge_blend:.2f}\n")
         f.write(f"dt: {dt}\n")
         f.write(f"n_steps: {n_steps}\n")
         f.write(f"l2_error_h: {h_err:.8e}\n")
+        f.write(f"mass_drift_rel: {float((cons_series['mass'][-1] - cons_series['mass'][0]) / max(abs(cons_series['mass'][0]), 1.0e-30)):.8e}\n")
+        f.write(f"energy_drift_rel: {float((cons_series['energy'][-1] - cons_series['energy'][0]) / max(abs(cons_series['energy'][0]), 1.0e-30)):.8e}\n")
         f.write(f"stable: {stable}\n")
         f.write(f"wall_time_s: {wall:.2f}\n")
 
@@ -474,6 +585,7 @@ def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
 def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
+    from legoesm.core.conservation import compute_conservation_diagnostics
     from tests.test_cases.williamson import williamson_test5
 
     case_dir = out_dir / "02_sw_fv_williamson5"
@@ -499,6 +611,7 @@ def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
     snapshots = {}
     snap_targets = _snapshot_steps(n_steps)
     series = {"step": [], "mean_wind_speed": [], "mean_height": []}
+    cons_series = {"step": [], "mass": [], "energy": []}
 
     def _extract(s):
         u = np.asarray(s.u.data)
@@ -511,6 +624,10 @@ def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
     _capture_snapshot(snapshots, snap_targets, 0, _extract, state)
     f0 = _extract(state)
     _record_means(series, 0, {"mean_wind_speed": f0["wind_speed"], "mean_height": f0["height"]}, area)
+    d0 = compute_conservation_diagnostics(state, grid)
+    cons_series["step"].append(0.0)
+    cons_series["mass"].append(float(d0["total_mass"]))
+    cons_series["energy"].append(float(d0["total_energy"]))
 
     t0 = time.time()
     stable = True
@@ -523,6 +640,10 @@ def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
         if step % mean_every == 0 or step == n_steps:
             fs = _extract(state)
             _record_means(series, step, {"mean_wind_speed": fs["wind_speed"], "mean_height": fs["height"]}, area)
+            d = compute_conservation_diagnostics(state, grid)
+            cons_series["step"].append(float(step))
+            cons_series["mass"].append(float(d["total_mass"]))
+            cons_series["energy"].append(float(d["total_energy"]))
 
         if step % progress_every == 0:
             print(f"      SW W5 progress: {step}/{n_steps}")
@@ -554,6 +675,12 @@ def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
         dt,
         {"mean_wind_speed": "m/s", "mean_height": "m"},
     )
+    _save_conservation_timeseries(
+        case_dir,
+        f"SW FV Williamson 5 C{n} {solver}",
+        cons_series,
+        dt,
+    )
 
     h0 = np.asarray(state0.h.data)
     h1 = np.asarray(state.h.data)
@@ -563,10 +690,13 @@ def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
     with open(case_dir / "results.txt", "w") as f:
         f.write(f"solver: {solver}\n")
         f.write(f"resolution: C{n}\n")
+        f.write("land_mask_applied: false\n")
         f.write(f"edge_blend_strength: {edge_blend:.2f}\n")
         f.write(f"dt: {dt}\n")
         f.write(f"n_steps: {n_steps}\n")
         f.write(f"mass_drift: {mass_drift:.8e}\n")
+        f.write(f"mass_drift_rel: {float((cons_series['mass'][-1] - cons_series['mass'][0]) / max(abs(cons_series['mass'][0]), 1.0e-30)):.8e}\n")
+        f.write(f"energy_drift_rel: {float((cons_series['energy'][-1] - cons_series['energy'][0]) / max(abs(cons_series['energy'][0]), 1.0e-30)):.8e}\n")
         f.write(f"stable: {stable}\n")
         f.write(f"wall_time_s: {wall:.2f}\n")
 

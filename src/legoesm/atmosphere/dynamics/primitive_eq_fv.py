@@ -1,6 +1,6 @@
 """FV3-Style Hydrostatic Primitive Equations on the cubed-sphere.
 
-Uses PPM + Lin-Rood directional splitting for:
+Uses unsplit PPM for:
 - Surface pressure tendency (replaces centered divergence)
 - Temperature horizontal advection (replaces centered gradient)
 
@@ -10,7 +10,7 @@ Vertical advection and thermodynamics are unchanged.
 References
 ----------
 - Lin (2004): A "Vertically Lagrangian" FV Dynamical Core (FV3)
-- Lin & Rood (1996): Multidimensional Flux-Form Semi-Lagrangian Transport
+- Colella & Woodward (1984): The Piecewise Parabolic Method (PPM)
 """
 
 from __future__ import annotations
@@ -112,8 +112,6 @@ def fv_hydrostatic_tendencies(
     sigma_coord: SigmaCoordinate,
     config: FVPrimitiveEquationConfig = FVPrimitiveEquationConfig(),
     physics_tendency: HydrostaticTendencies | None = None,
-    dt: float = 600.0,
-    x_first: bool = True,
 ) -> HydrostaticTendencies:
     """Compute tendencies for the FV hydrostatic primitive equations.
 
@@ -129,8 +127,6 @@ def fv_hydrostatic_tendencies(
     sigma_coord : SigmaCoordinate
     config : FVPrimitiveEquationConfig
     physics_tendency : HydrostaticTendencies, optional
-    dt : float
-    x_first : bool
 
     Returns
     -------
@@ -142,7 +138,6 @@ def fv_hydrostatic_tendencies(
     p_s = state.p_s.data   # (6, n, n)
     phis = state.phis.data
 
-    g = config.g
     R_d = constants.R_d
     kappa = constants.kappa
     dsigma = sigma_coord.dsigma
@@ -189,8 +184,8 @@ def fv_hydrostatic_tendencies(
 
     # FV transport of p_s using vertically-integrated velocity
     dp_s_dt_data = fv_flux_divergence(
-        p_s, u_int / sigma_range, v_int / sigma_range, grid, dt,
-        limiter=config.use_limiter, x_first=x_first,
+        p_s, u_int / sigma_range, v_int / sigma_range, grid,
+        limiter=config.use_limiter,
     )
     dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
@@ -209,8 +204,8 @@ def fv_hydrostatic_tendencies(
 
     # --- 8. Thermodynamic equation with FV horizontal advection ---
     horiz_adv_T = _fv_scalar_advection_3d(
-        T, u, v, grid, dt,
-        limiter=config.use_limiter, x_first=x_first,
+        T, u, v, grid,
+        limiter=config.use_limiter,
     )
 
     # Adiabatic heating: κ·T·ω/p
@@ -282,7 +277,6 @@ class FVPrimitiveEquationModel:
         self.sigma_coord = sigma_coord
         self.config = config or FVPrimitiveEquationConfig()
         self._target_mass = None
-        self._step_count = 0
 
         for name in ("edge_blend_uv", "edge_blend_T", "edge_blend_p_s"):
             value = float(getattr(self.config, name))
@@ -297,25 +291,19 @@ class FVPrimitiveEquationModel:
         self,
         state: HydrostaticState,
         physics_tendency: HydrostaticTendencies | None = None,
-        dt: float = 600.0,
-        x_first: bool = True,
     ) -> HydrostaticTendencies:
         """Compute tendencies (pure function wrapper)."""
         return fv_hydrostatic_tendencies(
             state, self.grid, self.sigma_coord, self.config,
-            physics_tendency, dt, x_first,
+            physics_tendency,
         )
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: HydrostaticState, dt: float) -> HydrostaticState:
         """Advance one time step."""
-        x_first = (self._step_count % 2 == 0)
-        self._step_count += 1
-
         def tendency_fn(s):
             tend = fv_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, self.config,
-                dt=dt, x_first=x_first,
             )
             return HydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),
@@ -368,16 +356,13 @@ class FVPrimitiveEquationModel:
         physics_fn=None,
     ) -> HydrostaticState:
         """Advance one time step with physics forcing."""
-        x_first = (self._step_count % 2 == 0)
-        self._step_count += 1
-
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
                 phys = physics_fn(s, self.grid, self.sigma_coord)
             tend = fv_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, self.config,
-                phys, dt=dt, x_first=x_first,
+                phys,
             )
             return HydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),

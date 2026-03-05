@@ -35,7 +35,6 @@ from legoesm.core.field import Field
 from legoesm.core.operators_3d import (
     vertical_advection_height,
     vertical_divergence_height,
-    vertical_gradient_half_to_full,
 )
 from legoesm.grids.gaussian import (
     GaussianGrid,
@@ -162,9 +161,7 @@ def spectral_nh_slow_tendencies(
     structure as state.
     """
     a = grid.radius
-    g = config.g
     c_p = constants.c_pd
-    R_d = constants.R_d
 
     dz = height_coord.dz
     dz_half = height_coord.dz_half
@@ -180,7 +177,6 @@ def spectral_nh_slow_tendencies(
     theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
     rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data)
 
-    nlev = theta_p.shape[-1]
     n_tracers = state.tracers_hat.data.shape[-1] if state.tracers_hat.data.ndim >= 3 else 0
 
     # --- 2. Velocities ---
@@ -374,12 +370,6 @@ def spectral_nh_slow_tendencies(
         dtheta_p_hat = dtheta_p_hat + physics_tendency.theta_prime_hat.data
         drho_p_hat = drho_p_hat + physics_tendency.rho_prime_hat.data
         dtracers_hat = dtracers_hat + physics_tendency.tracers_hat.data
-
-    # Return as same pytree structure
-    dims_3d = state.vor_hat.dims
-    dims_w = state.w_hat.dims
-    dims_2d = state.phis_hat.dims
-    dims_tr = state.tracers_hat.dims
 
     return SpectralNHState(
         vor_hat=state.vor_hat.replace(data=dvor_hat),

@@ -136,41 +136,11 @@ def _lw_two_stream(
     # Planck emission at each layer center
     B = constants.sigma_sb * T ** 4  # (ncol, nlev)
 
-    # --- Upward sweep (bottom to top) using scan ---
-    # BC: F_up(surface) = eps_sfc * sigma_sb * T_sfc^4
-    F_up_sfc = eps_sfc * constants.sigma_sb * sfc_temperature ** 4  # (ncol,)
-
-    # Scan from bottom (level nlev-1) to top (level 0)
-    # At each level k: F_up(k) = t_k * F_up(k+1) + eps_k * B_k
-    # lax.scan iterates over the FIRST axis, so transpose to (nlev, ncol)
-    t_T = jnp.moveaxis(transmittance, 1, 0)    # (nlev, ncol)
-    eB_T = jnp.moveaxis(emissivity * B, 1, 0)  # (nlev, ncol)
-
-    # Reverse level order: process from bottom (nlev-1) to top (0)
-    t_rev = t_T[::-1]    # (nlev, ncol)
-    eB_rev = eB_T[::-1]  # (nlev, ncol)
-
-    def upward_step(F_below, layer_data):
-        t_k, eB_k = layer_data  # each (ncol,)
-        F_above = t_k * F_below + eB_k
-        return F_above, F_above
-
-    F_up_toa, F_up_interfaces_rev = jax.lax.scan(
-        upward_step,
-        F_up_sfc,
-        (t_rev, eB_rev),
-    )
-    # F_up_interfaces_rev: (nlev, ncol) — from bottom+1 upward to TOA
-    # Reverse back to top-to-bottom order and transpose to (ncol, nlev)
-    F_up_inner = jnp.moveaxis(F_up_interfaces_rev[::-1], 0, 1)  # (ncol, nlev)
-    lw_up = jnp.concatenate([
-        F_up_inner,
-        F_up_sfc[:, None],
-    ], axis=1)  # (ncol, nlev+1): interfaces 0..nlev
-
     # --- Downward sweep (top to bottom) using scan ---
     # BC: F_down(TOA) = 0
     F_down_toa = jnp.zeros(ncol)
+    t_T = jnp.moveaxis(transmittance, 1, 0)    # (nlev, ncol)
+    eB_T = jnp.moveaxis(emissivity * B, 1, 0)  # (nlev, ncol)
 
     def downward_step(F_above, layer_data):
         t_k, eB_k = layer_data  # each (ncol,)
@@ -188,6 +158,38 @@ def _lw_two_stream(
         F_down_toa[:, None],
         F_down_interfaces,
     ], axis=1)  # (ncol, nlev+1)
+
+    # --- Upward sweep (bottom to top) using scan ---
+    # Surface LW boundary: emitted + reflected downward LW for non-black surface.
+    F_down_sfc = lw_down[:, -1]
+    F_up_sfc = (
+        eps_sfc * constants.sigma_sb * sfc_temperature ** 4
+        + (1.0 - eps_sfc) * F_down_sfc
+    )  # (ncol,)
+
+    # Scan from bottom (level nlev-1) to top (level 0)
+    # At each level k: F_up(k) = t_k * F_up(k+1) + eps_k * B_k
+    # lax.scan iterates over the FIRST axis, so transpose to (nlev, ncol)
+    t_rev = t_T[::-1]    # (nlev, ncol)
+    eB_rev = eB_T[::-1]  # (nlev, ncol)
+
+    def upward_step(F_below, layer_data):
+        t_k, eB_k = layer_data  # each (ncol,)
+        F_above = t_k * F_below + eB_k
+        return F_above, F_above
+
+    _, F_up_interfaces_rev = jax.lax.scan(
+        upward_step,
+        F_up_sfc,
+        (t_rev, eB_rev),
+    )
+    # F_up_interfaces_rev: (nlev, ncol) — from bottom+1 upward to TOA
+    # Reverse back to top-to-bottom order and transpose to (ncol, nlev)
+    F_up_inner = jnp.moveaxis(F_up_interfaces_rev[::-1], 0, 1)  # (ncol, nlev)
+    lw_up = jnp.concatenate([
+        F_up_inner,
+        F_up_sfc[:, None],
+    ], axis=1)  # (ncol, nlev+1): interfaces 0..nlev
 
     return lw_up, lw_down
 

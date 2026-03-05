@@ -40,7 +40,6 @@ from legoesm.core.operators_3d import (
     gradient_y_3d,
     divergence_3d,
     hyperdiffusion_3d,
-    vertical_gradient_half_to_full,
     vertical_advection_height,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -231,9 +230,7 @@ def compressible_euler_slow_tendencies(
     rho_p = state.rho_prime.data
     tracers = state.tracers.data  # (6, n, n, nlev, n_tracers)
 
-    g = config.g
     c_p = constants.c_pd
-    R_d = constants.R_d
     rho_0 = height_coord.rho_ref        # (nlev,)
     theta_0 = height_coord.theta_ref    # (nlev,)
     dz = height_coord.dz                # (nlev,)
@@ -423,7 +420,6 @@ def acoustic_substeps(
     """
     g = euler_config.g
     c_p = constants.c_pd
-    R_d = constants.R_d
     dz = height_coord.dz
     theta_0 = height_coord.theta_ref
     rho_0 = height_coord.rho_ref
@@ -592,7 +588,6 @@ def acoustic_substeps_semi_implicit(
     rho_p = state.rho_prime.data      # (..., nlev)
 
     nlev = theta_p.shape[-1]
-    n_inner = nlev - 1  # Number of interior half-levels
 
     # Precompute tridiagonal matrix coefficients for the implicit w solve.
     # The implicit equation at interior half-level k (k=1..nlev-1) is:

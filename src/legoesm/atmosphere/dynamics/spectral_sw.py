@@ -36,7 +36,6 @@ from legoesm.grids.gaussian import (
     sh_synthesis,
     sh_analysis_oc2,
     sh_analysis_dmu,
-    sh_analysis_H,
     uv_from_vordiv,
     spectral_hyperdiffusion,
 )
@@ -90,7 +89,6 @@ def spectral_sw_tendencies(
 
     # --- 1. Transform to grid space ---
     vor = sh_synthesis(grid, state.vor_hat.data)     # (n_lat, n_lon)
-    div = sh_synthesis(grid, state.div_hat.data)
     phi = sh_synthesis(grid, state.phi_hat.data)
     phis = sh_synthesis(grid, state.phis_hat.data)
 
@@ -305,12 +303,7 @@ def williamson_test2_spectral(grid: GaussianGrid) -> SpectralSWState:
     gh_0 = 2.94e4
 
     lat2d = grid.lat2d
-    cos_lat_2d = jnp.cos(lat2d)
     sin_lat_2d = jnp.sin(lat2d)
-
-    # Velocity field
-    u = u_0 * cos_lat_2d
-    v = jnp.zeros_like(u)
 
     # Height field (geostrophic balance)
     h = (gh_0 - (R * Omega * u_0 + u_0**2 / 2.0) * sin_lat_2d**2) / g
@@ -356,10 +349,6 @@ def williamson_test5_spectral(grid: GaussianGrid) -> SpectralSWState:
     lon2d = grid.lon2d
     cos_lat_2d = jnp.cos(lat2d)
     sin_lat_2d = jnp.sin(lat2d)
-
-    # Velocity field
-    u = u_0 * cos_lat_2d
-    v = jnp.zeros_like(u)
 
     # Vorticity and divergence
     vor = 2.0 * u_0 / R * sin_lat_2d

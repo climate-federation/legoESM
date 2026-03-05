@@ -1,16 +1,12 @@
-"""FV3-Style Shallow Water Equations on the cubed-sphere.
+"""FV3-Style Shallow Water Equations on the lat-lon grid.
 
 Uses PPM reconstruction for mass transport (unsplit), and vector-invariant
-form for momentum (same as centered).
+form for momentum (same as centered). Includes a Fourier polar filter
+for CFL stability near the poles.
 
-    dh/dt = fv_flux_divergence(h, u, v)    [FV mass continuity]
-    du/dt =  (zeta + f) * v - dB/dx + D_u  [vector-invariant momentum]
+    dh/dt = fv_flux_divergence_latlon(h, u, v)  [FV mass continuity]
+    du/dt =  (zeta + f) * v - dB/dx + D_u       [vector-invariant momentum]
     dv/dt = -(zeta + f) * u - dB/dy + D_v
-
-The FV mass equation uses PPM with both x and y fluxes computed on the
-SAME unmodified field (no directional splitting) to preserve geostrophic
-balance. Momentum uses the same vector-invariant form as the centered
-scheme (only scalar gradients cross face boundaries).
 
 References
 ----------
@@ -28,52 +24,53 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import ShallowWaterState, ShallowWaterTendencies
-from legoesm.core.operators import (
-    curl_z,
-    hyperdiffusion,
-)
-from legoesm.core.operators_fv import (
-    fv_flux_divergence,
-    fv_gradient_x,
-    fv_gradient_y,
+from legoesm.core.operators_latlon import curl_z, hyperdiffusion
+from legoesm.core.operators_fv_latlon import (
+    fv_flux_divergence_latlon,
+    fv_gradient_lon,
+    fv_gradient_lat,
 )
 from legoesm.core.conservation import (
-    apply_conservation_fixer,
-    zero_mean_tendency,
+    apply_conservation_fixer_latlon,
+    zero_mean_tendency_latlon,
 )
-from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.polar_filter import compute_polar_filter_mask, fourier_filter
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 from legoesm import constants
 
 
-class FVShallowWaterConfig(NamedTuple):
-    """Configuration for the FV shallow-water model."""
+class FVShallowWaterLatLonConfig(NamedTuple):
+    """Configuration for the FV shallow-water model on a lat-lon grid."""
     g: float = constants.g
-    hyperdiff_coeff: float = 0.0     # Only on u,v (PPM handles h dissipation)
+    hyperdiff_coeff: float = 0.0
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     fix_energy: bool = True
     time_integrator: str = "ssp_rk3"
     use_limiter: bool = True
+    use_polar_filter: bool = True
+    polar_filter_cutoff_deg: float = 60.0
+    polar_filter_max_wave_speed: float = 300.0
 
 
-def fv_shallow_water_tendencies(
+def fv_shallow_water_tendencies_latlon(
     state: ShallowWaterState,
-    grid: CubedSphereGrid,
-    config: FVShallowWaterConfig = FVShallowWaterConfig(),
+    grid: LatLonGrid,
+    config: FVShallowWaterLatLonConfig = FVShallowWaterLatLonConfig(),
+    polar_filter_mask: jnp.ndarray | None = None,
 ) -> ShallowWaterTendencies:
-    """Compute tendencies for the FV shallow water equations.
-
-    Mass uses unsplit PPM (both x and y fluxes on same field).
-    Momentum uses vector-invariant form (same as centered).
+    """Compute tendencies for the FV shallow water equations on a lat-lon grid.
 
     Parameters
     ----------
     state : ShallowWaterState
-    grid : CubedSphereGrid
-    config : FVShallowWaterConfig
+    grid : LatLonGrid
+    config : FVShallowWaterLatLonConfig
+    polar_filter_mask : jax.Array, optional
+        Precomputed polar filter mask. If None, no polar filtering.
 
     Returns
     -------
@@ -86,31 +83,25 @@ def fv_shallow_water_tendencies(
     g = config.g
 
     # --- Mass continuity: dh/dt via FV PPM transport ---
-    dh_dt_data = fv_flux_divergence(
+    dh_dt_data = fv_flux_divergence_latlon(
         h.data, u.data, v.data, grid,
         limiter=config.use_limiter,
     )
-    # Conservation cleanup
-    dh_dt_data = zero_mean_tendency(dh_dt_data, grid)
+    dh_dt_data = zero_mean_tendency_latlon(dh_dt_data, grid)
 
-    dh_dt = Field(
-        data=dh_dt_data,
-        name="dh_dt", dims=h.dims, units="m/s",
-    )
-
-    # --- Relative vorticity: zeta = dv/dx - du/dy ---
+    # --- Relative vorticity ---
     zeta = curl_z(u, v, grid).data
 
-    # --- Absolute vorticity: zeta + f ---
+    # --- Absolute vorticity ---
     abs_vor = zeta + grid.f
 
     # --- Bernoulli function: B = K + g*(h + h_s) ---
     kinetic_energy = 0.5 * (u.data**2 + v.data**2)
     bernoulli_data = kinetic_energy + g * (h.data + h_s.data)
 
-    # PPM-compatible gradients (same reconstruction as mass flux)
-    dB_dx_data = fv_gradient_x(bernoulli_data, grid)
-    dB_dy_data = fv_gradient_y(bernoulli_data, grid)
+    # PPM-compatible gradients
+    dB_dx_data = fv_gradient_lon(bernoulli_data, grid)
+    dB_dy_data = fv_gradient_lat(bernoulli_data, grid)
 
     # --- Vector-invariant momentum equations ---
     du_dt_data = abs_vor * v.data - dB_dx_data
@@ -123,39 +114,59 @@ def fv_shallow_water_tendencies(
         du_dt_data = du_dt_data + diff_u.data
         dv_dt_data = dv_dt_data + diff_v.data
 
-    du_dt = Field(data=du_dt_data, name="du_dt", dims=u.dims, units="m/s^2")
-    dv_dt = Field(data=dv_dt_data, name="dv_dt", dims=v.dims, units="m/s^2")
+    # --- Polar filter all tendencies ---
+    if config.use_polar_filter and polar_filter_mask is not None:
+        dh_dt_data = fourier_filter(dh_dt_data, grid, polar_filter_mask)
+        du_dt_data = fourier_filter(du_dt_data, grid, polar_filter_mask)
+        dv_dt_data = fourier_filter(dv_dt_data, grid, polar_filter_mask)
+
+    dims = h.dims
+
+    dh_dt = Field(data=dh_dt_data, name="dh_dt", dims=dims, units="m/s")
+    du_dt = Field(data=du_dt_data, name="du_dt", dims=dims, units="m/s^2")
+    dv_dt = Field(data=dv_dt_data, name="dv_dt", dims=dims, units="m/s^2")
 
     return ShallowWaterTendencies(dh_dt=dh_dt, du_dt=du_dt, dv_dt=dv_dt)
 
 
-class FVShallowWaterModel:
-    """FV3-style shallow water model on the cubed-sphere.
-
-    Same interface as ShallowWaterModel but uses PPM + Lin-Rood
-    for mass transport instead of centered differences.
+class FVShallowWaterLatLonModel:
+    """FV3-style shallow water model on the lat-lon grid.
 
     Parameters
     ----------
-    grid : CubedSphereGrid
-    config : FVShallowWaterConfig, optional
+    grid : LatLonGrid
+    config : FVShallowWaterLatLonConfig, optional
+    dt : float, optional
+        Time step for polar filter mask precomputation.
     """
 
     def __init__(
         self,
-        grid: CubedSphereGrid,
-        config: FVShallowWaterConfig | None = None,
+        grid: LatLonGrid,
+        config: FVShallowWaterLatLonConfig | None = None,
+        dt: float = 600.0,
     ):
         self.grid = grid
-        self.config = config or FVShallowWaterConfig()
+        self.config = config or FVShallowWaterLatLonConfig()
+
+        # Precompute polar filter mask
+        if self.config.use_polar_filter:
+            self.polar_filter_mask = compute_polar_filter_mask(
+                grid,
+                dt=dt,
+                max_wave_speed=self.config.polar_filter_max_wave_speed,
+                cutoff_lat_deg=self.config.polar_filter_cutoff_deg,
+            )
+        else:
+            self.polar_filter_mask = None
 
     def tendencies(
         self,
         state: ShallowWaterState,
     ) -> ShallowWaterTendencies:
         """Compute tendencies (pure function wrapper)."""
-        return fv_shallow_water_tendencies(
-            state, self.grid, self.config,
+        return fv_shallow_water_tendencies_latlon(
+            state, self.grid, self.config, self.polar_filter_mask,
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -173,8 +184,8 @@ class FVShallowWaterModel:
         ShallowWaterState
         """
         def tendency_fn(s):
-            tend = fv_shallow_water_tendencies(
-                s, self.grid, self.config,
+            tend = fv_shallow_water_tendencies_latlon(
+                s, self.grid, self.config, self.polar_filter_mask,
             )
             return ShallowWaterState(
                 h=s.h.replace(data=tend.dh_dt.data),
@@ -197,7 +208,7 @@ class FVShallowWaterModel:
 
         # Apply conservation fixers
         if self.config.use_conservation_fixer:
-            state_new = apply_conservation_fixer(
+            state_new = apply_conservation_fixer_latlon(
                 state_new, state, self.grid,
                 fix_mass=self.config.fix_mass,
                 fix_energy=self.config.fix_energy,
@@ -258,7 +269,7 @@ class FVShallowWaterModel:
         -------
         final_state : ShallowWaterState
         trajectory : ShallowWaterState
-            All intermediate states (each leaf: (n_steps, 6, n, n)).
+            All intermediate states (each leaf: (n_steps, n_lat, n_lon)).
         """
         def scan_fn(state, _):
             new_state = self.step(state, dt)

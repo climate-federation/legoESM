@@ -32,7 +32,6 @@ from legoesm.core.operators_latlon import (
     gradient_x as _gradient_x_2d,
     gradient_y as _gradient_y_2d,
     hyperdiffusion as _hyperdiffusion_2d,
-    global_integral as _global_integral_latlon,
 )
 from legoesm.core.operators_latlon_3d import (
     vorticity_3d as _vorticity_3d,

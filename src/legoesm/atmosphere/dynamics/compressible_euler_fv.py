@@ -1,6 +1,6 @@
 """FV3-Style Non-Hydrostatic Compressible Euler Equations on the cubed-sphere.
 
-Uses PPM + Lin-Rood directional splitting for:
+Uses unsplit PPM for:
 - Theta horizontal advection (replaces centered gradient)
 - Continuity horizontal divergence (replaces centered divergence)
 - Tracer advection (replaces centered gradient)
@@ -11,7 +11,7 @@ Acoustic substeps (vertical) are unchanged.
 References
 ----------
 - Lin (2004): A "Vertically Lagrangian" FV Dynamical Core (FV3)
-- Skamarock & Klemp (2008): A Time-Split Nonhydrostatic Atmospheric Model
+- Colella & Woodward (1984): The Piecewise Parabolic Method (PPM)
 """
 
 from __future__ import annotations
@@ -129,8 +129,6 @@ def fv_compressible_euler_slow_tendencies(
     terrain_metric: TerrainMetric,
     config: FVCompressibleEulerConfig,
     physics_tendency: NonHydrostaticTendencies | None = None,
-    dt: float = 10.0,
-    x_first: bool = True,
 ) -> NonHydrostaticTendencies:
     """Compute slow (advective) tendencies using FV transport.
 
@@ -148,7 +146,6 @@ def fv_compressible_euler_slow_tendencies(
     rho_p = state.rho_prime.data
     tracers = state.tracers.data
 
-    g = config.g
     c_p = constants.c_pd
     rho_0 = height_coord.rho_ref
     theta_0 = height_coord.theta_ref
@@ -185,14 +182,14 @@ def fv_compressible_euler_slow_tendencies(
 
     # --- 6. Theta equation: FV horizontal advection ---
     dtheta_p_dt = fv_scalar_advection_3d(
-        theta_total, u, v, grid, dt,
-        limiter=config.use_limiter, x_first=x_first,
+        theta_total, u, v, grid,
+        limiter=config.use_limiter,
     )
 
     # --- 7. Continuity: FV flux divergence ---
     drho_p_dt = fv_flux_divergence_3d(
-        rho_total, u, v, grid, dt,
-        limiter=config.use_limiter, x_first=x_first,
+        rho_total, u, v, grid,
+        limiter=config.use_limiter,
     )
 
     # --- 8. Tracer advection via FV ---
@@ -202,8 +199,8 @@ def fv_compressible_euler_slow_tendencies(
 
         def _single_tracer_tendency(q):
             horiz_adv_q = fv_scalar_advection_3d(
-                q, u, v, grid, dt,
-                limiter=config.use_limiter, x_first=x_first,
+                q, u, v, grid,
+                limiter=config.use_limiter,
             )
             vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
             return horiz_adv_q + vert_adv_q
@@ -315,7 +312,6 @@ class FVCompressibleEulerModel:
         self.terrain_metric = terrain_metric
         self.config = config or FVCompressibleEulerConfig()
         self._target_mass = None
-        self._step_count = 0
 
         if self.config.small_earth_factor != 1.0:
             from legoesm.grids.cubed_sphere import apply_small_earth_scaling
@@ -352,9 +348,6 @@ class FVCompressibleEulerModel:
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: NonHydrostaticState, dt: float) -> NonHydrostaticState:
         """Advance one time step using split-explicit RK3 with FV transport."""
-        x_first = (self._step_count % 2 == 0)
-        self._step_count += 1
-
         # Build a centered-style config for the acoustic substeps
         # (they reuse the existing acoustic_substeps function)
         from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
@@ -372,7 +365,7 @@ class FVCompressibleEulerModel:
         def slow_tendency_fn(s):
             tend = fv_compressible_euler_slow_tendencies(
                 s, self.grid, self.height_coord, self.terrain_metric,
-                self.config, dt=dt, x_first=x_first,
+                self.config,
             )
             return NonHydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),
@@ -438,9 +431,6 @@ class FVCompressibleEulerModel:
         physics_fn=None,
     ) -> NonHydrostaticState:
         """Advance one time step with physics forcing."""
-        x_first = (self._step_count % 2 == 0)
-        self._step_count += 1
-
         from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
         acoustic_cfg = CompressibleEulerConfig(
             g=self.config.g,
@@ -461,7 +451,7 @@ class FVCompressibleEulerModel:
                 )
             tend = fv_compressible_euler_slow_tendencies(
                 s, self.grid, self.height_coord, self.terrain_metric,
-                self.config, phys, dt=dt, x_first=x_first,
+                self.config, phys,
             )
             return NonHydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),

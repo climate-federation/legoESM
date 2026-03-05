@@ -163,8 +163,7 @@ def hyperdiffusion_3d(
 
 def fv_flux_divergence_3d(
     q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
-    grid: CubedSphereGrid, dt: float,
-    limiter: bool = True, x_first: bool = True,
+    grid: CubedSphereGrid, limiter: bool = True,
 ) -> jax.Array:
     """Conservative FV flux divergence at all levels via vmap.
 
@@ -173,16 +172,14 @@ def fv_flux_divergence_3d(
     q_3d : jax.Array, shape (6, n, n, nlev)
     u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
-    dt : float
     limiter : bool
-    x_first : bool
 
     Returns
     -------
     jax.Array : shape (6, n, n, nlev)
     """
     def single_level(q_k, u_k, v_k):
-        return _fv_flux_divergence_2d(q_k, u_k, v_k, grid, dt, limiter, x_first)
+        return _fv_flux_divergence_2d(q_k, u_k, v_k, grid, limiter)
 
     q_t = jnp.moveaxis(q_3d, -1, 0)
     u_t = jnp.moveaxis(u_3d, -1, 0)
@@ -193,8 +190,7 @@ def fv_flux_divergence_3d(
 
 def fv_scalar_advection_3d(
     q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
-    grid: CubedSphereGrid, dt: float,
-    limiter: bool = True, x_first: bool = True,
+    grid: CubedSphereGrid, limiter: bool = True,
 ) -> jax.Array:
     """PPM advection of scalar at all levels via vmap.
 
@@ -203,16 +199,14 @@ def fv_scalar_advection_3d(
     q_3d : jax.Array, shape (6, n, n, nlev)
     u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
-    dt : float
     limiter : bool
-    x_first : bool
 
     Returns
     -------
     jax.Array : shape (6, n, n, nlev)
     """
     def single_level(q_k, u_k, v_k):
-        return _fv_scalar_advection_2d(q_k, u_k, v_k, grid, dt, limiter, x_first)
+        return _fv_scalar_advection_2d(q_k, u_k, v_k, grid, limiter)
 
     q_t = jnp.moveaxis(q_3d, -1, 0)
     u_t = jnp.moveaxis(u_3d, -1, 0)

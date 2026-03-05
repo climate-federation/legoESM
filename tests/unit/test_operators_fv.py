@@ -85,7 +85,7 @@ class TestFVFluxDivergence:
         u = jnp.zeros((6, n, n))
         v = jnp.zeros((6, n, n))
 
-        dq = fv_flux_divergence(q, u, v, grid, dt=600.0)
+        dq = fv_flux_divergence(q, u, v, grid)
         assert jnp.allclose(dq, 0.0, atol=1e-10)
 
     def test_conservation(self, grid):
@@ -96,7 +96,7 @@ class TestFVFluxDivergence:
         u = jax.random.normal(jax.random.split(key)[0], (6, n, n)) * 5.0
         v = jax.random.normal(jax.random.split(key)[1], (6, n, n)) * 5.0
 
-        dq = fv_flux_divergence(q, u, v, grid, dt=600.0)
+        dq = fv_flux_divergence(q, u, v, grid)
         global_sum = jnp.sum(dq * grid.area)
         relative = float(jnp.abs(global_sum) / jnp.sum(jnp.abs(dq) * grid.area))
         assert relative < 0.01, f"Conservation error: {relative:.6f}"
@@ -107,7 +107,7 @@ class TestFVFluxDivergence:
         q = jnp.ones((6, n, n))
         u = jnp.ones((6, n, n))
         v = jnp.zeros((6, n, n))
-        dq = fv_flux_divergence(q, u, v, grid, dt=600.0)
+        dq = fv_flux_divergence(q, u, v, grid)
         assert dq.shape == (6, n, n)
 
     def test_all_finite(self, grid):
@@ -117,7 +117,7 @@ class TestFVFluxDivergence:
         q = jax.random.uniform(key, (6, n, n), minval=500.0, maxval=1500.0)
         u = jax.random.normal(jax.random.split(key)[0], (6, n, n)) * 20.0
         v = jax.random.normal(jax.random.split(key)[1], (6, n, n)) * 20.0
-        dq = fv_flux_divergence(q, u, v, grid, dt=300.0)
+        dq = fv_flux_divergence(q, u, v, grid)
         assert jnp.all(jnp.isfinite(dq))
 
     def test_differentiable(self, grid):
@@ -127,27 +127,25 @@ class TestFVFluxDivergence:
         def loss(q):
             u = jnp.ones((6, n, n)) * 10.0
             v = jnp.zeros((6, n, n))
-            dq = fv_flux_divergence(q, u, v, grid, dt=600.0)
+            dq = fv_flux_divergence(q, u, v, grid)
             return jnp.mean(dq ** 2)
 
         q = jnp.ones((6, n, n)) * 1000.0
         grads = jax.grad(loss)(q)
         assert jnp.all(jnp.isfinite(grads))
 
-    def test_x_first_vs_y_first(self, grid):
-        """Both orderings should give similar results."""
+    def test_unsplit_symmetric(self, grid):
+        """Unsplit operator: x and y fluxes computed on same field."""
         n = grid.n
         key = jax.random.PRNGKey(7)
         q = jax.random.uniform(key, (6, n, n), minval=900.0, maxval=1100.0)
         u = jax.random.normal(jax.random.split(key)[0], (6, n, n)) * 5.0
         v = jax.random.normal(jax.random.split(key)[1], (6, n, n)) * 5.0
 
-        dq_xf = fv_flux_divergence(q, u, v, grid, dt=600.0, x_first=True)
-        dq_yf = fv_flux_divergence(q, u, v, grid, dt=600.0, x_first=False)
-
-        # Should be similar but not identical (splitting order matters)
-        rel_diff = jnp.max(jnp.abs(dq_xf - dq_yf)) / (jnp.max(jnp.abs(dq_xf)) + 1e-30)
-        assert rel_diff < 0.5  # Within 50% — splitting order differences
+        # Calling twice should give identical results (deterministic, no splitting)
+        dq1 = fv_flux_divergence(q, u, v, grid)
+        dq2 = fv_flux_divergence(q, u, v, grid)
+        assert jnp.allclose(dq1, dq2, atol=1e-12)
 
 
 class TestFVScalarAdvection:
@@ -160,7 +158,7 @@ class TestFVScalarAdvection:
         u = jnp.ones((6, n, n)) * 10.0
         v = jnp.ones((6, n, n)) * 5.0
 
-        dq = fv_scalar_advection(q, u, v, grid, dt=600.0)
+        dq = fv_scalar_advection(q, u, v, grid)
         assert jnp.allclose(dq, 0.0, atol=1e-2)
 
     def test_output_shape_and_finite(self, grid):
@@ -171,7 +169,7 @@ class TestFVScalarAdvection:
         u = jax.random.normal(jax.random.split(key)[0], (6, n, n)) * 10.0
         v = jax.random.normal(jax.random.split(key)[1], (6, n, n)) * 10.0
 
-        dq = fv_scalar_advection(q, u, v, grid, dt=300.0)
+        dq = fv_scalar_advection(q, u, v, grid)
         assert dq.shape == (6, n, n)
         assert jnp.all(jnp.isfinite(dq))
 
@@ -182,7 +180,7 @@ class TestFVScalarAdvection:
         def loss(q):
             u = jnp.ones((6, n, n)) * 10.0
             v = jnp.zeros((6, n, n))
-            dq = fv_scalar_advection(q, u, v, grid, dt=600.0)
+            dq = fv_scalar_advection(q, u, v, grid)
             return jnp.mean(dq ** 2)
 
         q = jnp.ones((6, n, n)) * 300.0
@@ -204,7 +202,7 @@ class TestNoEdgeArtifacts:
         # Run 20 steps
         dt = 300.0
         for _ in range(20):
-            dq = fv_flux_divergence(q, u, v, grid, dt=dt)
+            dq = fv_flux_divergence(q, u, v, grid)
             q = q + dt * dq
 
         assert jnp.all(jnp.isfinite(q))

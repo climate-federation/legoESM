@@ -17,7 +17,6 @@ import re
 import warnings
 
 import jax
-import jax.numpy as jnp
 
 
 _TESTED_JAX_MIN = (0, 8, 0)

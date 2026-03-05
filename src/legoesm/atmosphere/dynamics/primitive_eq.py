@@ -154,7 +154,6 @@ def hydrostatic_tendencies(
     p_s = state.p_s.data   # (6, n, n)
     phis = state.phis.data  # (6, n, n)
 
-    g = config.g
     R_d = constants.R_d
     kappa = constants.kappa
     dsigma = sigma_coord.dsigma  # (nlev,)

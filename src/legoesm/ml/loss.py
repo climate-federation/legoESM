@@ -7,9 +7,6 @@ per-variable monitoring and autoregressive rollout losses.
 
 from __future__ import annotations
 
-from typing import Callable
-
-import jax
 import jax.numpy as jnp
 import equinox as eqx
 
@@ -60,7 +57,7 @@ def per_variable_mse(
     pred: jnp.ndarray,
     target: jnp.ndarray,
     weights: jnp.ndarray,
-    channel_weights: jnp.ndarray | None = None,
+    _channel_weights: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Per-channel area-weighted MSE for monitoring.
 

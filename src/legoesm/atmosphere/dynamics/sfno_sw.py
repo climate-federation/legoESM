@@ -17,17 +17,14 @@ References
 
 from __future__ import annotations
 
-from functools import partial
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
-from legoesm.grids.gaussian import GaussianGrid, sh_analysis, sh_synthesis
+from legoesm.grids.gaussian import GaussianGrid
 from legoesm.atmosphere.dynamics.spectral_sw import (
     SpectralSWState,
-    SpectralSWConfig,
 )
 from legoesm.ml.sfno import SFNO, SFNOConfig
 from legoesm.ml.normalization import (

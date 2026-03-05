@@ -46,7 +46,6 @@ _ensure_mpl_config_dir()
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 try:
     import cartopy.crs as ccrs
@@ -61,15 +60,12 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean import (
     OceanModel,
     OceanConfig,
-    OceanState,
     create_ocean_z_star,
     rest_state_ocean,
-    idealized_bathymetry,
 )
-from legoesm.ocean.eos import wright_eos, rho_0
-from legoesm.ocean.vertical import compute_layer_thickness, compute_ocean_jacobian
+from legoesm.ocean.eos import rho_0
+from legoesm.ocean.vertical import compute_layer_thickness
 from legoesm.ocean.conservation import _ocean_area_sum, _ocean_volume_sum
-from legoesm.core.field import Field
 
 
 # =====================================================================
@@ -565,7 +561,6 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
     lat_rad = grid.lat
     lon0 = jnp.pi  # 180 degrees
     lat0 = 0.0     # equator
-    R_earth = 6.371e6
     sigma = 10.0 * jnp.pi / 180.0  # 10 degrees
 
     # Great-circle distance

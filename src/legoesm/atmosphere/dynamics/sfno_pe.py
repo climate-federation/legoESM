@@ -24,12 +24,10 @@ from typing import NamedTuple, Callable
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
     sh_synthesis,
-    sh_synthesis_3d,
 )
 from legoesm.grids.vertical import SigmaCoordinate
 from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
@@ -42,8 +40,6 @@ from legoesm.ml.normalization import (
 from legoesm.ml.channel_packing import pack_pe_state, unpack_pe_output
 from legoesm.ml.conservation import (
     correct_dry_air_mass,
-    correct_moisture,
-    clip_humidity,
 )
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 

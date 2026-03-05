@@ -530,3 +530,133 @@ def compute_conservation_diagnostics(
         'total_mass': total_mass,
         'total_energy': total_energy,
     }
+
+
+# ==============================================================================
+# Lat-lon conservation fixers
+# ==============================================================================
+
+def _global_area_sum_latlon(array: jax.Array, grid) -> jax.Array:
+    """Area-weighted global sum for lat-lon grid."""
+    acc = _accumulation_dtype()
+    return jnp.sum(array.astype(acc) * grid.area.astype(acc))
+
+
+def zero_mean_tendency_latlon(
+    tendency: jax.Array,
+    grid,
+) -> jax.Array:
+    """Remove the area-weighted global mean from a tendency on a lat-lon grid.
+
+    After this correction, ``sum(tendency * area) == 0`` to machine
+    precision, enforcing exact conservation for explicit FV mass equations.
+
+    Works for 2D ``(n_lat, n_lon)`` and 3D ``(n_lat, n_lon, nlev)`` arrays.
+
+    Parameters
+    ----------
+    tendency : jax.Array
+    grid : LatLonGrid
+    """
+    acc = _accumulation_dtype()
+    area_acc = grid.area.astype(acc)
+    total_area_acc = jnp.sum(area_acc)
+    orig_dtype = tendency.dtype
+
+    if tendency.ndim == 2:
+        global_sum = _global_area_sum_latlon(tendency, grid)
+        correction = global_sum / total_area_acc
+        return (tendency.astype(acc) - correction).astype(orig_dtype)
+    elif tendency.ndim == 3:
+        # Per-level correction
+        tend_acc = tendency.astype(acc)
+        prod = tend_acc * area_acc[..., None]
+        level_sums = jnp.sum(prod, axis=(0, 1))  # (nlev,)
+        corrections = level_sums / total_area_acc
+        return (tend_acc - corrections[None, None, :]).astype(orig_dtype)
+    else:
+        return tendency
+
+
+def fix_mass_shallow_water_latlon(
+    state_new: ShallowWaterState,
+    state_old: ShallowWaterState,
+    grid,
+) -> ShallowWaterState:
+    """Fix mass conservation for shallow water on a lat-lon grid."""
+    acc = _accumulation_dtype()
+    mass_old = jnp.sum(state_old.h.data.astype(acc) * grid.area.astype(acc))
+    mass_new = jnp.sum(state_new.h.data.astype(acc) * grid.area.astype(acc))
+    correction = (mass_old - mass_new) / grid.total_area
+    h_fixed = state_new.h.replace(data=state_new.h.data + correction)
+    return state_new._replace(h=h_fixed)
+
+
+def fix_energy_shallow_water_latlon(
+    state_new: ShallowWaterState,
+    state_old: ShallowWaterState,
+    grid,
+    g: float = 9.80616,
+) -> ShallowWaterState:
+    """Fix total energy conservation for shallow water on a lat-lon grid."""
+    def total_energy(state):
+        h = state.h.data
+        u = state.u.data
+        v = state.v.data
+        h_s = state.h_s.data
+        ke = 0.5 * h * (u**2 + v**2)
+        pe = 0.5 * g * (h + h_s)**2
+        return _global_area_sum_latlon(ke + pe, grid)
+
+    E_old = total_energy(state_old)
+
+    h_new = state_new.h.data
+    u_new = state_new.u.data
+    v_new = state_new.v.data
+    KE_new = _global_area_sum_latlon(0.5 * h_new * (u_new**2 + v_new**2), grid)
+    PE_new = _global_area_sum_latlon(0.5 * g * (h_new + state_new.h_s.data)**2, grid)
+
+    KE_target = jnp.maximum(E_old - PE_new, 0.0)
+    scale = jnp.where(KE_new > 1e-30, jnp.sqrt(KE_target / KE_new), 1.0)
+
+    u_fixed = state_new.u.replace(data=u_new * scale)
+    v_fixed = state_new.v.replace(data=v_new * scale)
+    return state_new._replace(u=u_fixed, v=v_fixed)
+
+
+def apply_conservation_fixer_latlon(
+    state_new: ShallowWaterState,
+    state_old: ShallowWaterState,
+    grid,
+    fix_mass: bool = True,
+    fix_energy: bool = True,
+    g: float = 9.80616,
+) -> ShallowWaterState:
+    """Apply all conservation fixers for shallow water on a lat-lon grid."""
+    if fix_mass:
+        state_new = fix_mass_shallow_water_latlon(state_new, state_old, grid)
+    if fix_energy:
+        state_new = fix_energy_shallow_water_latlon(state_new, state_old, grid, g)
+    return state_new
+
+
+def compute_conservation_diagnostics_latlon(
+    state: ShallowWaterState,
+    grid,
+    g: float = 9.80616,
+) -> dict[str, jax.Array]:
+    """Compute conservation diagnostics for SW on a lat-lon grid."""
+    h = state.h.data
+    u = state.u.data
+    v = state.v.data
+    h_s = state.h_s.data
+
+    total_mass = _global_area_sum_latlon(h, grid)
+    ke = 0.5 * h * (u**2 + v**2)
+    pe = 0.5 * g * (h + h_s)**2
+    total_energy = _global_area_sum_latlon(ke + pe, grid)
+
+    return {
+        'total_mass': total_mass,
+        'total_energy': total_energy,
+    }

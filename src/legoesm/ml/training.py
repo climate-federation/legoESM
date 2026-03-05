@@ -22,7 +22,7 @@ import equinox as eqx
 import optax
 
 from legoesm.grids.gaussian import GaussianGrid
-from legoesm.ml.loss import area_weighted_mse, autoregressive_loss, weighted_mae
+from legoesm.ml.loss import area_weighted_mse, weighted_mae
 
 
 class TrainingConfig(NamedTuple):

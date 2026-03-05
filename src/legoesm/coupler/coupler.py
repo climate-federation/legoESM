@@ -31,7 +31,6 @@ from legoesm.coupler.coupling_fields import (
 )
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
 from legoesm.coupler.tile_fractions import (
-    TileFractions,
     blend_tiles,
     compute_tile_fractions,
 )
