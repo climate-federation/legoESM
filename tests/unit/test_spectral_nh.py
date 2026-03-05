@@ -474,11 +474,11 @@ class TestSpectralNHSolverAxis:
         """All 6 dynamics x discretization combinations should now resolve."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         expected = {
-            ("shallow_water", "finite_volume"): "shallow_water",
+            ("shallow_water", "centered"): "shallow_water",
             ("shallow_water", "spectral"): "spectral_shallow_water",
-            ("hydrostatic", "finite_volume"): "primitive_equations",
+            ("hydrostatic", "centered"): "primitive_equations",
             ("hydrostatic", "spectral"): "spectral_primitive_equations",
-            ("nonhydrostatic", "finite_volume"): "compressible_euler",
+            ("nonhydrostatic", "centered"): "compressible_euler",
             ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
         }
         for (dyn, disc), expected_name in expected.items():

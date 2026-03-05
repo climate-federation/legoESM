@@ -7,21 +7,18 @@ There are two ways to choose a dynamical core:
 1. **Two-axis selection** (recommended)::
 
        dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
-       discretization: "finite_volume" | "spectral"
+       discretization: "centered" | "spectral"
 
    These combine as:
 
    ========================  ==============  ===============================
    dynamics                  discretization  solver
    ========================  ==============  ===============================
-   ``shallow_water``         finite_volume   ShallowWaterModel
    ``shallow_water``         centered        ShallowWaterModel
    ``shallow_water``         spectral        SpectralShallowWaterModel
-   ``hydrostatic``           centered        PrimitiveEquationModel (centered ops)
-   ``hydrostatic``           finite_volume   PrimitiveEquationModel (FV ops)
+   ``hydrostatic``           centered        PrimitiveEquationModel
    ``hydrostatic``           spectral        SpectralPrimitiveEquationModel
-   ``nonhydrostatic``        centered        CompressibleEulerModel (centered ops)
-   ``nonhydrostatic``        finite_volume   CompressibleEulerModel (FV ops)
+   ``nonhydrostatic``        centered        CompressibleEulerModel
    ``nonhydrostatic``        spectral        SpectralCompressibleEulerModel
    ========================  ==============  ===============================
 
@@ -72,7 +69,6 @@ from legoesm.atmosphere.dynamics.sfno_pe import (
     SFNOPrimitiveEquationModel,
     SFNOPrimitiveEquationConfig,
 )
-
 # Available solver names for the factory (flat namespace)
 AVAILABLE_SOLVERS = [
     "shallow_water",
@@ -88,22 +84,17 @@ AVAILABLE_SOLVERS = [
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["finite_volume", "centered", "spectral", "sfno"]
+DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno"]
 
 # (dynamics, discretization) -> flat solver name
 _AXIS_TO_SOLVER = {
-    # "centered" entries come first so "finite_volume" wins in the
-    # reverse mapping _SOLVER_TO_AXIS (last write wins).
     ("shallow_water", "centered"): "shallow_water",
-    ("shallow_water", "finite_volume"): "shallow_water",
     ("shallow_water", "spectral"): "spectral_shallow_water",
     ("shallow_water", "sfno"): "sfno_shallow_water",
     ("hydrostatic", "centered"): "primitive_equations",
-    ("hydrostatic", "finite_volume"): "primitive_equations",
     ("hydrostatic", "spectral"): "spectral_primitive_equations",
     ("hydrostatic", "sfno"): "sfno_primitive_equations",
     ("nonhydrostatic", "centered"): "compressible_euler",
-    ("nonhydrostatic", "finite_volume"): "compressible_euler",
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
 }
 
@@ -158,14 +149,14 @@ def resolve_solver_name(
         # (the legacy key is kept for backward compatibility only).
         defaults_match = (
             (dynamics is None or dynamics == "shallow_water")
-            and (discretization is None or discretization == "finite_volume")
+            and (discretization is None or discretization == "centered")
         )
         if defaults_match:
             return equations
 
     # --- Axis-based resolution ---
     dyn = dynamics or "shallow_water"
-    disc = discretization or "finite_volume"
+    disc = discretization or "centered"
 
     if dyn not in DYNAMICS_OPTIONS:
         raise ValueError(
@@ -281,28 +272,10 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
             kwargs.setdefault("legoesm_config", legoesm_config)
         return SpectralShallowWaterModel(**kwargs)
     elif name == "primitive_equations":
-        # Auto-set FV discretization when global config requests it.
-        if (
-            legoesm_config is not None
-            and legoesm_config.get("atmosphere.discretization") == "finite_volume"
-        ):
-            from legoesm.atmosphere.dynamics.primitive_eq import PrimitiveEquationConfig
-            cfg = kwargs.get("config") or PrimitiveEquationConfig()
-            if cfg.discretization == "centered":
-                kwargs["config"] = cfg._replace(discretization="finite_volume")
         return PrimitiveEquationModel(**kwargs)
     elif name == "tracer_transport":
         return TracerTransportModel(**kwargs)
     elif name == "compressible_euler":
-        # Auto-set FV discretization when global config requests it.
-        if (
-            legoesm_config is not None
-            and legoesm_config.get("atmosphere.discretization") == "finite_volume"
-        ):
-            from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
-            cfg = kwargs.get("config") or CompressibleEulerConfig()
-            if cfg.discretization == "centered":
-                kwargs["config"] = cfg._replace(discretization="finite_volume")
         return CompressibleEulerModel(**kwargs)
     elif name == "spectral_primitive_equations":
         if legoesm_config is not None:

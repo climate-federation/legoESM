@@ -76,8 +76,6 @@ class CompressibleEulerConfig(NamedTuple):
     edge_blend_rho: float = 0.0
     edge_blend_tracers: float = 0.0
     edge_blend_width: int = 1
-    discretization: str = "centered"  # "centered" | "finite_volume"
-    fv_limiter: str = "mc"
     fix_mass: bool = False            # Apply NH mass conservation fixer
     anchor_mass_to_initial: bool = False  # Anchor to initial mass (prevents drift)
 
@@ -272,57 +270,29 @@ def compressible_euler_slow_tendencies(
 
     # --- 6. Theta equation: HORIZONTAL advection only ---
     # Vertical theta advection is handled by the acoustic substeps.
-    if config.discretization == "finite_volume":
-        from legoesm.core.operators_3d import fv_scalar_advection_3d
-        from legoesm.core.conservation import zero_mean_tendency
-        dtheta_p_dt = fv_scalar_advection_3d(
-            theta_total, u, v, grid, limiter=config.fv_limiter,
-        )
-        dtheta_p_dt = zero_mean_tendency(dtheta_p_dt, grid)
-    else:
-        # Advective form: -v·∇_h(θ) using centered gradients.
-        dtheta_dx = gradient_x_3d(theta_total, grid)
-        dtheta_dy = gradient_y_3d(theta_total, grid)
-        dtheta_p_dt = -(u * dtheta_dx + v * dtheta_dy)
+    # Advective form: -v·∇_h(θ) using centered gradients.
+    dtheta_dx = gradient_x_3d(theta_total, grid)
+    dtheta_dy = gradient_y_3d(theta_total, grid)
+    dtheta_p_dt = -(u * dtheta_dx + v * dtheta_dy)
 
     # --- 7. Continuity: HORIZONTAL divergence only ---
     # Vertical mass flux divergence is handled by the acoustic substeps.
-    if config.discretization == "finite_volume":
-        from legoesm.core.operators_3d import fv_flux_divergence_3d
-        from legoesm.core.conservation import zero_mean_tendency
-        drho_p_dt = fv_flux_divergence_3d(
-            rho_total, u, v, grid, g=0.0, limiter=config.fv_limiter,
-        )
-        drho_p_dt = zero_mean_tendency(drho_p_dt, grid)
-    else:
-        rho_u = rho_total * u
-        rho_v = rho_total * v
-        div_rho_v = divergence_3d(rho_u, rho_v, grid)
-        drho_p_dt = -div_rho_v
+    rho_u = rho_total * u
+    rho_v = rho_total * v
+    div_rho_v = divergence_3d(rho_u, rho_v, grid)
+    drho_p_dt = -div_rho_v
 
     # --- 8. Tracer advection ---
     n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
     if n_tracers > 0:
         tracers_t = jnp.moveaxis(tracers, -1, 0)  # (n_tracers, 6, n, n, nlev)
 
-        if config.discretization == "finite_volume":
-            from legoesm.core.operators_3d import fv_scalar_advection_3d
-            from legoesm.core.conservation import zero_mean_tendency as _zmt
-
-            def _single_tracer_tendency(q):
-                horiz_adv_q = fv_scalar_advection_3d(
-                    q, u, v, grid, limiter=config.fv_limiter,
-                )
-                horiz_adv_q = _zmt(horiz_adv_q, grid)
-                vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
-                return horiz_adv_q + vert_adv_q
-        else:
-            def _single_tracer_tendency(q):
-                dq_dx = gradient_x_3d(q, grid)
-                dq_dy = gradient_y_3d(q, grid)
-                horiz_adv_q = -(u * dq_dx + v * dq_dy)
-                vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
-                return horiz_adv_q + vert_adv_q
+        def _single_tracer_tendency(q):
+            dq_dx = gradient_x_3d(q, grid)
+            dq_dy = gradient_y_3d(q, grid)
+            horiz_adv_q = -(u * dq_dx + v * dq_dy)
+            vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
+            return horiz_adv_q + vert_adv_q
 
         dtracers_dt_t = jax.vmap(_single_tracer_tendency)(tracers_t)
         dtracers_dt = jnp.moveaxis(dtracers_dt_t, 0, -1)

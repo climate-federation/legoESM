@@ -755,57 +755,12 @@ class TestTemperatureStability:
         assert jnp.all(jnp.isfinite(T)), "Non-finite temperatures detected"
 
 
-class TestFVDiscretization:
-    """Tests for FV discretization option in PE model."""
-
-    def test_centered_is_default(self):
-        """Default discretization should be 'centered'."""
-        config = PrimitiveEquationConfig()
-        assert config.discretization == "centered"
-
-    def test_fv_tendencies_finite(self, grid, sigma):
-        """FV path produces finite tendencies."""
-        config = PrimitiveEquationConfig(discretization="finite_volume")
-        state = _make_state(grid, sigma, T_val=300.0, u_val=10.0, v_val=5.0)
-        tend = hydrostatic_tendencies(state, grid, sigma, config)
-        assert jnp.all(jnp.isfinite(tend.du_dt.data))
-        assert jnp.all(jnp.isfinite(tend.dv_dt.data))
-        assert jnp.all(jnp.isfinite(tend.dT_dt.data))
-        assert jnp.all(jnp.isfinite(tend.dp_s_dt.data))
-
-    def test_fv_step_finite(self, grid, sigma):
-        """FV path single step produces finite state."""
-        config = PrimitiveEquationConfig(
-            discretization="finite_volume",
-            use_conservation_fixer=False,
-        )
-        model = PrimitiveEquationModel(grid, sigma, config)
-        state = _make_state(grid, sigma, T_val=300.0, u_val=5.0)
-        new_state = model.step(state, 60.0)
-        assert jnp.all(jnp.isfinite(new_state.T.data))
-        assert jnp.all(jnp.isfinite(new_state.p_s.data))
-
-    def test_fv_dp_s_dt_zero_mean(self, grid, sigma):
-        """FV dp_s/dt tendency should have near-zero global integral (mass conservation)."""
-        config = PrimitiveEquationConfig(discretization="finite_volume")
-        state = _make_state(grid, sigma, T_val=300.0, u_val=10.0, v_val=5.0)
-        tend = hydrostatic_tendencies(state, grid, sigma, config)
-        global_sum = float(jnp.sum(tend.dp_s_dt.data * grid.area))
-        # After zero_mean_tendency correction, should be very small
-        assert abs(global_sum) < 1e-2, f"dp_s/dt global sum = {global_sum}"
-
-    def test_fv_sigma_dot_consistent(self, grid, sigma):
-        """FV sigma_dot should be consistent with dp_s/dt (BCs satisfied)."""
-        config = PrimitiveEquationConfig(discretization="finite_volume")
-        state = _make_state(grid, sigma, T_val=300.0, u_val=10.0, v_val=5.0)
-        tend = hydrostatic_tendencies(state, grid, sigma, config)
-        # dp_s/dt should be finite
-        assert jnp.all(jnp.isfinite(tend.dp_s_dt.data))
+class TestMassConservation:
+    """Tests for mass conservation options in PE model."""
 
     def test_anchor_mass_to_initial(self, grid, sigma):
         """Anchor to initial mass prevents drift over multiple steps."""
         config = PrimitiveEquationConfig(
-            discretization="centered",
             anchor_mass_to_initial=True,
         )
         model = PrimitiveEquationModel(grid, sigma, config)

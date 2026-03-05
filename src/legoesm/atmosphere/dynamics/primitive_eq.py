@@ -83,8 +83,6 @@ class PrimitiveEquationConfig(NamedTuple):
     edge_blend_T: float = 0.0
     edge_blend_p_s: float = 0.0
     edge_blend_width: int = 1
-    discretization: str = "centered"  # "centered" | "finite_volume"
-    fv_limiter: str = "mc"
 
 
 def _apply_hydro_edge_blend(
@@ -213,32 +211,12 @@ def hydrostatic_tendencies(
     sigma_top = sigma_coord.sigma_half[0]
     sigma_range = 1.0 - sigma_top  # total sigma range
 
-    if config.discretization == "finite_volume":
-        from legoesm.core.operators_3d import fv_flux_divergence_3d
-        from legoesm.core.conservation import zero_mean_tendency
-        # FV continuity: divergence of mass flux per layer
-        ps_layer = p_s[..., None] * dsigma[None, None, None, :]  # (6,n,n,nlev)
-        mass_div = fv_flux_divergence_3d(
-            ps_layer, u, v, grid, g=0.0, limiter=config.fv_limiter,
-        )
-        # Zero-mean correction: enforce exact global mass conservation
-        mass_div = zero_mean_tendency(mass_div, grid)
-        dp_s_dt_data = jnp.sum(mass_div, axis=-1) / sigma_range
-
-        # Derive effective velocity divergence consistent with FV mass flux
-        # so that sigma_dot is consistent with dp_s/dt.
-        # mass_div_k = -div(p_s * dsigma_k * v_k), so
-        # div_eff_k = -mass_div_k / (p_s * dsigma_k)
-        div_v = -mass_div / (jnp.clip(p_s[..., None], 100.0) * dsigma[None, None, None, :])
-        sigma_dot = compute_sigma_dot(div_v, sigma_coord)
-    else:
-        # Centered continuity (default).
-        div_v = _divergence_3d(u, v, grid)  # (6,n,n,nlev)
-        D_total = jnp.sum(
-            div_v * dsigma[None, None, None, :], axis=-1,
-        )  # (6,n,n)
-        dp_s_dt_data = -p_s * D_total / sigma_range
-        sigma_dot = compute_sigma_dot(div_v, sigma_coord)  # (6,n,n,nlev+1)
+    div_v = _divergence_3d(u, v, grid)  # (6,n,n,nlev)
+    D_total = jnp.sum(
+        div_v * dsigma[None, None, None, :], axis=-1,
+    )  # (6,n,n)
+    dp_s_dt_data = -p_s * D_total / sigma_range
+    sigma_dot = compute_sigma_dot(div_v, sigma_coord)  # (6,n,n,nlev+1)
 
     # --- 7. Vertical advection of T ---
     vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)  # (6,n,n,nlev)
@@ -251,16 +229,10 @@ def hydrostatic_tendencies(
     dv_dt_data = dv_dt_data + vert_adv_v
 
     # --- 8. Thermodynamic equation ---
-    if config.discretization == "finite_volume":
-        from legoesm.core.operators_3d import fv_scalar_advection_3d
-        horiz_adv_T = fv_scalar_advection_3d(
-            T, u, v, grid, limiter=config.fv_limiter,
-        )
-    else:
-        # Centered advection: -v·∇T
-        dT_dx = _gradient_x_3d(T, grid)
-        dT_dy = _gradient_y_3d(T, grid)
-        horiz_adv_T = -(u * dT_dx + v * dT_dy)
+    # Centered advection: -v·∇T
+    dT_dx = _gradient_x_3d(T, grid)
+    dT_dy = _gradient_y_3d(T, grid)
+    horiz_adv_T = -(u * dT_dx + v * dT_dy)
 
     # Adiabatic heating: κ·T·ω/p
     # The full pressure velocity is ω = σ·Dp_s/Dt + p_s·σ̇

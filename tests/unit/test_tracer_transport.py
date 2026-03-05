@@ -215,69 +215,6 @@ class TestDifferentiability:
         assert jnp.all(jnp.isfinite(grad))
 
 
-class TestFVTracerTransport:
-    """Tests for FV tracer transport path."""
-
-    def test_fv_limiter_none_is_centered(self, grid, sigma_coord):
-        """Default config (fv_limiter=None) uses centered advection."""
-        config = TracerTransportConfig()
-        assert config.fv_limiter is None
-        model = TracerTransportModel(grid, sigma_coord, _zero_wind, config=config)
-        state = _make_state(grid, sigma_coord, fill_value=1.0)
-        new_state = model.step(state, 600.0)
-        assert jnp.allclose(new_state.tracers.data, 1.0, atol=1e-8)
-
-    def test_fv_positivity(self, grid, sigma_coord):
-        """FV transport with clipping preserves positivity."""
-        def solid_rotation(t, grid, sigma_coord):
-            nlev = sigma_coord.n_levels
-            n = grid.lon.shape[1]
-            u = jnp.cos(grid.lat)[..., None] * jnp.ones(nlev) * 20.0
-            v = jnp.zeros((6, n, n, nlev))
-            sigma_dot = jnp.zeros((6, n, n, nlev + 1))
-            return u, v, sigma_dot
-
-        config = TracerTransportConfig(fv_limiter="mc")
-        model = TracerTransportModel(grid, sigma_coord, solid_rotation, config=config)
-
-        # Localized bump: mostly zero, positive bump on face 0
-        n = grid.lon.shape[1]
-        q = jnp.zeros((6, n, n, NLEV, 1))
-        q = q.at[0, n // 2, n // 2, :, 0].set(10.0)
-        state = TracerState(
-            tracers=Field(data=q, name="tracers",
-                          dims=("face", "x", "y", "level", "tracer"), units="kg/kg"),
-            time=Field(data=jnp.array(0.0), name="time", dims=(), units="s"),
-        )
-
-        for _ in range(5):
-            state = model.step(state, 300.0)
-
-        assert jnp.all(state.tracers.data >= 0.0), (
-            f"Negative values: min={float(jnp.min(state.tracers.data))}"
-        )
-        assert jnp.all(jnp.isfinite(state.tracers.data))
-
-    def test_fv_tendency_finite(self, grid, sigma_coord):
-        """FV tracer advection produces finite tendencies."""
-        def solid_rotation(t, grid, sigma_coord):
-            nlev = sigma_coord.n_levels
-            n = grid.lon.shape[1]
-            u = jnp.cos(grid.lat)[..., None] * jnp.ones(nlev) * 20.0
-            v = jnp.zeros((6, n, n, nlev))
-            sigma_dot = jnp.zeros((6, n, n, nlev + 1))
-            return u, v, sigma_dot
-
-        config = TracerTransportConfig(fv_limiter="mc")
-        state = _make_state(grid, sigma_coord)
-        q = state.tracers.data
-        q = q.at[..., 0].set(jnp.sin(grid.lon[..., None]) * jnp.ones(NLEV))
-        state = TracerState(tracers=state.tracers.replace(data=q), time=state.time)
-
-        tend = tracer_tendencies(state, grid, sigma_coord, solid_rotation, config)
-        assert jnp.all(jnp.isfinite(tend.tracers.data))
-
-
 class TestSolverFactory:
     """Test the create_model factory function."""
 
@@ -323,22 +260,22 @@ class TestSolverFactory:
 class TestSolverAxes:
     """Test the two-axis (dynamics x discretization) solver selection."""
 
-    def test_resolve_hydrostatic_fv(self):
-        """dynamics=hydrostatic + discretization=finite_volume -> primitive_equations."""
+    def test_resolve_hydrostatic_centered(self):
+        """dynamics=hydrostatic + discretization=centered -> primitive_equations."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name(dynamics="hydrostatic", discretization="finite_volume")
+        name = resolve_solver_name(dynamics="hydrostatic", discretization="centered")
         assert name == "primitive_equations"
 
-    def test_resolve_nonhydrostatic_fv(self):
-        """dynamics=nonhydrostatic + discretization=finite_volume -> compressible_euler."""
+    def test_resolve_nonhydrostatic_centered(self):
+        """dynamics=nonhydrostatic + discretization=centered -> compressible_euler."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name(dynamics="nonhydrostatic", discretization="finite_volume")
+        name = resolve_solver_name(dynamics="nonhydrostatic", discretization="centered")
         assert name == "compressible_euler"
 
-    def test_resolve_shallow_water_fv(self):
-        """dynamics=shallow_water + discretization=finite_volume -> shallow_water."""
+    def test_resolve_shallow_water_centered(self):
+        """dynamics=shallow_water + discretization=centered -> shallow_water."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
-        name = resolve_solver_name(dynamics="shallow_water", discretization="finite_volume")
+        name = resolve_solver_name(dynamics="shallow_water", discretization="centered")
         assert name == "shallow_water"
 
     def test_resolve_shallow_water_spectral(self):
@@ -347,14 +284,14 @@ class TestSolverAxes:
         name = resolve_solver_name(dynamics="shallow_water", discretization="spectral")
         assert name == "spectral_shallow_water"
 
-    def test_resolve_defaults_to_shallow_water_fv(self):
-        """No arguments default to shallow_water + finite_volume."""
+    def test_resolve_defaults_to_shallow_water_centered(self):
+        """No arguments default to shallow_water + centered."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name()
         assert name == "shallow_water"
 
     def test_resolve_nonhydrostatic_default_discretization(self):
-        """dynamics=nonhydrostatic alone defaults to finite_volume."""
+        """dynamics=nonhydrostatic alone defaults to centered."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name(dynamics="nonhydrostatic")
         assert name == "compressible_euler"
@@ -408,7 +345,7 @@ class TestSolverAxes:
         """solver_axes() is the inverse of resolve_solver_name()."""
         from legoesm.atmosphere.dynamics import resolve_solver_name, solver_axes
         for dyn in ["shallow_water", "hydrostatic", "nonhydrostatic"]:
-            for disc in ["finite_volume", "spectral"]:
+            for disc in ["centered", "spectral"]:
                 try:
                     name = resolve_solver_name(dynamics=dyn, discretization=disc)
                 except ValueError:
@@ -417,20 +354,20 @@ class TestSolverAxes:
                 assert axes == (dyn, disc), f"Roundtrip failed for {name}"
 
     def test_create_model_from_config_hydrostatic(self, grid, sigma_coord):
-        """create_model with Config resolves hydrostatic FV correctly."""
+        """create_model with Config resolves hydrostatic centered correctly."""
         from legoesm.atmosphere.dynamics import create_model, PrimitiveEquationModel
         from legoesm.config import Config
         cfg = Config.from_dict({
             "atmosphere": {
                 "dynamics": "hydrostatic",
-                "discretization": "finite_volume",
+                "discretization": "centered",
             }
         })
         model = create_model(legoesm_config=cfg, grid=grid, sigma_coord=sigma_coord)
         assert isinstance(model, PrimitiveEquationModel)
 
     def test_create_model_from_config_nonhydrostatic(self, grid):
-        """create_model with Config resolves nonhydrostatic FV correctly."""
+        """create_model with Config resolves nonhydrostatic centered correctly."""
         from legoesm.atmosphere.dynamics import create_model, CompressibleEulerModel
         from legoesm.config import Config
         from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
@@ -440,7 +377,7 @@ class TestSolverAxes:
         cfg = Config.from_dict({
             "atmosphere": {
                 "dynamics": "nonhydrostatic",
-                "discretization": "finite_volume",
+                "discretization": "centered",
             }
         })
         model = create_model(
@@ -450,13 +387,13 @@ class TestSolverAxes:
         assert isinstance(model, CompressibleEulerModel)
 
     def test_create_model_from_config_shallow_water(self, grid):
-        """create_model with Config resolves shallow_water FV correctly."""
+        """create_model with Config resolves shallow_water centered correctly."""
         from legoesm.atmosphere.dynamics import create_model, ShallowWaterModel
         from legoesm.config import Config
         cfg = Config.from_dict({
             "atmosphere": {
                 "dynamics": "shallow_water",
-                "discretization": "finite_volume",
+                "discretization": "centered",
             }
         })
         model = create_model(legoesm_config=cfg, grid=grid)
@@ -474,5 +411,5 @@ class TestSolverAxes:
         assert "hydrostatic" in DYNAMICS_OPTIONS
         assert "nonhydrostatic" in DYNAMICS_OPTIONS
         assert "shallow_water" in DYNAMICS_OPTIONS
-        assert "finite_volume" in DISCRETIZATION_OPTIONS
+        assert "centered" in DISCRETIZATION_OPTIONS
         assert "spectral" in DISCRETIZATION_OPTIONS

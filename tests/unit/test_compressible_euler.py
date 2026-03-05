@@ -465,37 +465,8 @@ class TestSmallEarthFactor:
         assert jnp.allclose(model.grid.f, grid.f)
 
 
-class TestFVDiscretization:
-    """Tests for FV discretization option in CE model."""
-
-    def test_centered_is_default(self):
-        """Default discretization should be 'centered'."""
-        config = CompressibleEulerConfig()
-        assert config.discretization == "centered"
-
-    def test_fv_tendencies_finite(self, grid, height_coord, terrain_metric):
-        """FV path produces finite tendencies."""
-        config = CompressibleEulerConfig(discretization="finite_volume")
-        state = _make_nh_state(grid, height_coord)
-        tend = compressible_euler_slow_tendencies(
-            state, grid, height_coord, terrain_metric, config,
-        )
-        assert jnp.all(jnp.isfinite(tend.du_dt.data))
-        assert jnp.all(jnp.isfinite(tend.dv_dt.data))
-        assert jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data))
-        assert jnp.all(jnp.isfinite(tend.drho_prime_dt.data))
-
-    def test_fv_drho_dt_zero_mean(self, grid, height_coord, terrain_metric):
-        """FV drho/dt tendency should have near-zero per-level global integral."""
-        config = CompressibleEulerConfig(discretization="finite_volume")
-        state = _make_nh_state(grid, height_coord)
-        tend = compressible_euler_slow_tendencies(
-            state, grid, height_coord, terrain_metric, config,
-        )
-        drho = tend.drho_prime_dt.data  # (6, n, n, nlev)
-        for k in range(drho.shape[-1]):
-            gs = float(jnp.sum(drho[..., k] * grid.area))
-            assert abs(gs) < 1e-2, f"Level {k} drho global sum = {gs}"
+class TestMassConservation:
+    """Tests for mass conservation options in CE model."""
 
     def test_nh_mass_diagnostic(self, grid, height_coord, terrain_metric):
         """NH dry mass diagnostic should be positive and finite."""

@@ -80,88 +80,6 @@ class TestOperators:
         assert all(jnp.all(jnp.isfinite(g)) for g in grads)
 
 
-class TestFVFluxConservation:
-    """Tests for FV flux operator conservation with symmetrized boundary fluxes."""
-
-    @pytest.mark.skipif(
-        not jax.config.jax_enable_x64,
-        reason="Requires float64 for tight conservation check",
-    )
-    def test_fv_divergence_global_sum_zero(self):
-        """Global sum of FV divergence * area should be near zero (float64)."""
-        from legoesm.core.operators_fv import fv_flux_divergence
-
-        grid = create_cubed_sphere(16)
-        key = jax.random.PRNGKey(0)
-        h = jax.random.uniform(key, (6, 16, 16), minval=0.5, maxval=1.5)
-        u = jax.random.normal(jax.random.PRNGKey(1), (6, 16, 16))
-        v = jax.random.normal(jax.random.PRNGKey(2), (6, 16, 16))
-        div = fv_flux_divergence(h, u, v, grid, g=0.0)
-        global_sum = float(jnp.sum(div * grid.area))
-        assert abs(global_sum) < 1e-6, f"Global sum = {global_sum}"
-
-    @pytest.mark.skipif(
-        not jax.config.jax_enable_x64,
-        reason="Requires float64 for tight conservation check",
-    )
-    def test_fv_scalar_advection_global_sum_zero(self):
-        """Global sum of FV scalar advection * area should be near zero."""
-        from legoesm.core.operators_fv import fv_scalar_advection
-
-        grid = create_cubed_sphere(16)
-        q = jax.random.uniform(jax.random.PRNGKey(0), (6, 16, 16), minval=0.5, maxval=1.5)
-        u = jax.random.normal(jax.random.PRNGKey(1), (6, 16, 16))
-        v = jax.random.normal(jax.random.PRNGKey(2), (6, 16, 16))
-        adv = fv_scalar_advection(q, u, v, grid)
-        global_sum = float(jnp.sum(adv * grid.area))
-        assert abs(global_sum) < 1e-6, f"Global sum = {global_sum}"
-
-    @pytest.mark.skipif(
-        not jax.config.jax_enable_x64,
-        reason="Requires float64 for tight conservation check",
-    )
-    def test_edge_flux_mismatch_diagnostic(self):
-        """Edge flux mismatch diagnostic should be finite and non-negative."""
-        from legoesm.core.operators_fv import (
-            fv_flux_divergence, edge_flux_mismatch,
-            pad_halo, pad_halo_vector, _reconstruct_x, _reconstruct_y,
-            _get_halo_width, _halo_fields,
-        )
-
-        grid = create_cubed_sphere(16)
-        h = jax.random.uniform(jax.random.PRNGKey(0), (6, 16, 16), minval=0.5, maxval=1.5)
-        u = jax.random.normal(jax.random.PRNGKey(1), (6, 16, 16)) * 10.0
-        v = jax.random.normal(jax.random.PRNGKey(2), (6, 16, 16)) * 10.0
-
-        # Build fluxes the same way as fv_flux_divergence, BEFORE symmetrization
-        halo = _get_halo_width("mc")
-        interp_off, cos_ap, sin_ap = _halo_fields(grid, halo)
-        u_pad, v_pad = pad_halo_vector(
-            u, v, grid.cos_angle, grid.sin_angle,
-            cos_ap, sin_ap, interp_offsets=interp_off, halo=halo,
-        )
-        h_pad = pad_halo(h, halo=halo, interp_offsets=interp_off)
-
-        h_L_x, h_R_x = _reconstruct_x(h_pad, "mc")
-        u_L_x, u_R_x = _reconstruct_x(u_pad, "mc")
-        alpha_x = jnp.maximum(jnp.abs(u_L_x), jnp.abs(u_R_x))
-        F_x = 0.5 * (h_L_x * u_L_x + h_R_x * u_R_x) - 0.5 * alpha_x * (h_R_x - h_L_x)
-        hy_edge = 0.5 * (grid.hy_ext[:, :-1, 1:-1] + grid.hy_ext[:, 1:, 1:-1])
-        Phi_x = F_x * hy_edge
-
-        h_L_y, h_R_y = _reconstruct_y(h_pad, "mc")
-        v_L_y, v_R_y = _reconstruct_y(v_pad, "mc")
-        alpha_y = jnp.maximum(jnp.abs(v_L_y), jnp.abs(v_R_y))
-        G_y = 0.5 * (h_L_y * v_L_y + h_R_y * v_R_y) - 0.5 * alpha_y * (h_R_y - h_L_y)
-        hx_edge = 0.5 * (grid.hx_ext[:, 1:-1, :-1] + grid.hx_ext[:, 1:-1, 1:])
-        Phi_y = G_y * hx_edge
-
-        diag = edge_flux_mismatch(Phi_x, Phi_y)
-        assert diag['max_mismatch'] >= 0.0
-        assert diag['mean_mismatch'] >= 0.0
-        assert len(diag['per_edge']) == 12
-
-
 class TestZeroMeanTendency:
     """Tests for the zero_mean_tendency correction."""
 
@@ -199,30 +117,6 @@ class TestZeroMeanTendency:
         assert jnp.std(diff) < 1e-6
 
 
-class TestFVMassTendency:
-    """Tests for FV mass tendency global integral closure."""
-
-    @pytest.mark.skipif(
-        not jax.config.jax_enable_x64,
-        reason="Requires float64 for tight conservation check",
-    )
-    def test_fv_divergence_with_zero_mean(self):
-        """FV divergence with zero_mean_tendency has exact zero global sum."""
-        from legoesm.core.operators_fv import fv_flux_divergence
-        from legoesm.core.conservation import zero_mean_tendency
-
-        grid = create_cubed_sphere(16)
-        h = jax.random.uniform(jax.random.PRNGKey(0), (6, 16, 16), minval=0.5, maxval=1.5)
-        u = jax.random.normal(jax.random.PRNGKey(1), (6, 16, 16)) * 10.0
-        v = jax.random.normal(jax.random.PRNGKey(2), (6, 16, 16)) * 10.0
-        div = fv_flux_divergence(h, u, v, grid, g=0.0)
-        corrected = zero_mean_tendency(div, grid)
-        global_sum = float(jnp.sum(corrected * grid.area))
-        # After zero-mean correction, residual is limited by float64 precision
-        # at Earth area scales (~5e14 m²)
-        assert abs(global_sum) < 1e-4, f"Global sum = {global_sum}"
-
-
 class TestConservationFixers:
     """Tests for conservation fixer enhancements."""
 
@@ -257,3 +151,60 @@ class TestConservationFixers:
         mass_fixed = global_integral(fixed.p_s, small_grid)
         rel_err = float(jnp.abs(mass_fixed - target_mass) / target_mass)
         assert rel_err < 1e-10, f"Relative error = {rel_err}"
+
+
+class TestDifferentiability:
+    """Tests that conservation code is differentiable with jax.grad."""
+
+    def test_zero_mean_tendency_differentiable(self, small_grid):
+        """zero_mean_tendency should be differentiable."""
+        from legoesm.core.conservation import zero_mean_tendency
+
+        def loss(data):
+            corrected = zero_mean_tendency(data, small_grid)
+            return jnp.sum(corrected ** 2)
+
+        data = jax.random.normal(jax.random.PRNGKey(0), (6, 8, 8))
+        grads = jax.grad(loss)(data)
+        assert jnp.all(jnp.isfinite(grads))
+
+    def test_zero_mean_tendency_3d_differentiable(self, small_grid):
+        """3D zero_mean_tendency should be differentiable."""
+        from legoesm.core.conservation import zero_mean_tendency
+
+        def loss(data):
+            corrected = zero_mean_tendency(data, small_grid)
+            return jnp.sum(corrected ** 2)
+
+        data = jax.random.normal(jax.random.PRNGKey(0), (6, 8, 8, 5))
+        grads = jax.grad(loss)(data)
+        assert jnp.all(jnp.isfinite(grads))
+
+    def test_fix_mass_hydrostatic_target_differentiable(self, small_grid):
+        """fix_mass_hydrostatic_target should be differentiable w.r.t. p_s."""
+        from legoesm.core.conservation import fix_mass_hydrostatic_target
+        from legoesm.core.field import Field
+        from legoesm.core.state import HydrostaticState
+
+        n = small_grid.n
+        shape_2d = (6, n, n)
+        shape_3d = (6, n, n, 5)
+        mk = lambda d, name, dims, u="1": Field(data=d, name=name, dims=dims, units=u)
+        target_mass = jnp.float32(1e5 * small_grid.total_area)
+
+        def loss(p_s_data):
+            state = HydrostaticState(
+                u=mk(jnp.zeros(shape_3d), "u", ("face", "x", "y", "level"), "m/s"),
+                v=mk(jnp.zeros(shape_3d), "v", ("face", "x", "y", "level"), "m/s"),
+                T=mk(jnp.ones(shape_3d) * 300.0, "T", ("face", "x", "y", "level"), "K"),
+                p_s=mk(p_s_data, "p_s", ("face", "x", "y"), "Pa"),
+                phis=mk(jnp.zeros(shape_2d), "phis", ("face", "x", "y"), "m^2/s^2"),
+            )
+            fixed = fix_mass_hydrostatic_target(state, target_mass, small_grid)
+            return jnp.sum(fixed.p_s.data ** 2)
+
+        p_s_data = jnp.ones(shape_2d) * 1e5 + jax.random.normal(
+            jax.random.PRNGKey(0), shape_2d,
+        ) * 100.0
+        grads = jax.grad(loss)(p_s_data)
+        assert jnp.all(jnp.isfinite(grads))

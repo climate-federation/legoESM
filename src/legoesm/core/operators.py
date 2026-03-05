@@ -283,7 +283,9 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     -------
     scalar : The global integral.
     """
-    prod = field.data.astype(jnp.float64) * grid.area.astype(jnp.float64)
+    from legoesm.core.conservation import _accumulation_dtype
+    acc = _accumulation_dtype()
+    prod = field.data.astype(acc) * grid.area.astype(acc)
     local_sum = jnp.sum(prod)
     if _is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi

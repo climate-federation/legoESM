@@ -19,6 +19,20 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.core.state import ShallowWaterState, HydrostaticState
 
 
+def _accumulation_dtype():
+    """Return the best dtype for accumulation: float64 if available, else float32.
+
+    On backends that lack float64 (e.g. Apple Metal), JAX silently
+    truncates .astype(float64) to float32, which is harmless but wastes
+    a cast.  This helper lets callers use the widest available type
+    explicitly, and makes the intent clear.
+    """
+    from legoesm.core.hardware import _UNSUPPORTED_F64_BACKENDS, get_backend
+    if get_backend() in _UNSUPPORTED_F64_BACKENDS or not jax.config.jax_enable_x64:
+        return jnp.float32
+    return jnp.float64
+
+
 def _global_area_sum(array: jax.Array, grid: CubedSphereGrid) -> jax.Array:
     """Area-weighted global sum of a raw array, MPI-aware.
 
@@ -29,7 +43,8 @@ def _global_area_sum(array: jax.Array, grid: CubedSphereGrid) -> jax.Array:
     The accumulation is performed in float64 (if available) to avoid
     precision loss in large-scale global integrals.
     """
-    prod = array.astype(jnp.float64) * grid.area.astype(jnp.float64)
+    acc = _accumulation_dtype()
+    prod = array.astype(acc) * grid.area.astype(acc)
     local_sum = jnp.sum(prod)
     if _is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
@@ -216,8 +231,9 @@ def fix_mass_hydrostatic_latlon(
     -------
     HydrostaticState : Mass-conserving state.
     """
-    mass_old = jnp.sum(state_old.p_s.data.astype(jnp.float64) * grid.area.astype(jnp.float64))
-    mass_new = jnp.sum(state_new.p_s.data.astype(jnp.float64) * grid.area.astype(jnp.float64))
+    acc = _accumulation_dtype()
+    mass_old = jnp.sum(state_old.p_s.data.astype(acc) * grid.area.astype(acc))
+    mass_new = jnp.sum(state_new.p_s.data.astype(acc) * grid.area.astype(acc))
 
     correction = (mass_old - mass_new) / grid.total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
@@ -248,25 +264,26 @@ def zero_mean_tendency(
     -------
     jax.Array : Corrected tendency with zero global integral.
     """
+    acc = _accumulation_dtype()
     area = grid.area  # (6, n, n)
-    area_f64 = area.astype(jnp.float64)
-    total_area_f64 = jnp.sum(area_f64)
+    area_acc = area.astype(acc)
+    total_area_acc = jnp.sum(area_acc)
     orig_dtype = tendency.dtype
     if tendency.ndim == 3:
         global_sum = _global_area_sum(tendency, grid)
-        correction = global_sum / total_area_f64
-        # Compute in float64 then cast back to original dtype
-        return (tendency.astype(jnp.float64) - correction).astype(orig_dtype)
+        correction = global_sum / total_area_acc
+        # Compute in accumulation dtype then cast back to original dtype
+        return (tendency.astype(acc) - correction).astype(orig_dtype)
     elif tendency.ndim == 4:
         # Per-level correction
-        tend_f64 = tendency.astype(jnp.float64)
-        prod = tend_f64 * area_f64[..., None]
+        tend_acc = tendency.astype(acc)
+        prod = tend_acc * area_acc[..., None]
         level_sums = jnp.sum(prod, axis=(0, 1, 2))  # (nlev,)
         if _is_distributed():
             from legoesm.parallel.reductions import global_sum_mpi
             level_sums = global_sum_mpi(level_sums)
-        corrections = level_sums / total_area_f64  # (nlev,)
-        return (tend_f64 - corrections[None, None, None, :]).astype(orig_dtype)
+        corrections = level_sums / total_area_acc  # (nlev,)
+        return (tend_acc - corrections[None, None, None, :]).astype(orig_dtype)
     else:
         return tendency
 

@@ -27,20 +27,20 @@ DEFAULT_CONFIG = {
     "atmosphere": {
         # --- Two-axis solver selection ---
         # dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
-        # discretization: "finite_volume" | "spectral"
+        # discretization: "centered" | "spectral"
         #
         # Mapping to solver implementations:
-        #   shallow_water  + finite_volume → ShallowWaterModel
-        #   shallow_water  + spectral      → SpectralShallowWaterModel
-        #   hydrostatic    + finite_volume → PrimitiveEquationModel
-        #   hydrostatic    + spectral      → SpectralPrimitiveEquationModel
-        #   nonhydrostatic + finite_volume → CompressibleEulerModel
-        #   nonhydrostatic + spectral      → SpectralCompressibleEulerModel
+        #   shallow_water  + centered → ShallowWaterModel
+        #   shallow_water  + spectral → SpectralShallowWaterModel
+        #   hydrostatic    + centered → PrimitiveEquationModel
+        #   hydrostatic    + spectral → SpectralPrimitiveEquationModel
+        #   nonhydrostatic + centered → CompressibleEulerModel
+        #   nonhydrostatic + spectral → SpectralCompressibleEulerModel
         #
         # The legacy "equations" key is still supported for backward
         # compatibility and takes precedence when set explicitly.
         "dynamics": "shallow_water",
-        "discretization": "finite_volume",
+        "discretization": "centered",
         "equations": "shallow_water",   # legacy; use dynamics+discretization
         "advection": "centered",
         "time_integrator": "ssp_rk3",   # "ssp_rk3" | "ssp_rk54"
