@@ -20,6 +20,8 @@ There are two ways to choose a dynamical core:
    ``hydrostatic``           spectral        SpectralPrimitiveEquationModel
    ``nonhydrostatic``        centered        CompressibleEulerModel
    ``nonhydrostatic``        spectral        SpectralCompressibleEulerModel
+   ``shallow_water``         cgrid           CGShallowWaterCubedModel (cubed-sphere)
+   ``shallow_water``         cgrid           CGShallowWaterLatLonModel (lat-lon, flat name)
    ========================  ==============  ===============================
 
 2. **Legacy flat name** (still supported)::
@@ -85,6 +87,18 @@ from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
     FVShallowWaterLatLonModel,
     fv_shallow_water_tendencies_latlon,
 )
+from legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon import (
+    CGShallowWaterLatLonModel,
+    CGShallowWaterConfig,
+    cgrid_shallow_water_tendencies,
+    a_to_cgrid,
+    cgrid_to_a,
+)
+from legoesm.atmosphere.dynamics.shallow_water_cgrid import (
+    CGShallowWaterCubedModel,
+    CGShallowWaterCubedConfig,
+    cgrid_shallow_water_tendencies_cubed,
+)
 from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
     FVLatLonPrimitiveEquationModel,
     fv_latlon_hydrostatic_tendencies,
@@ -110,11 +124,13 @@ AVAILABLE_SOLVERS = [
     "fv_shallow_water_latlon",
     "fv_primitive_equations_latlon",
     "fv_compressible_euler_latlon",
+    "cgrid_shallow_water_latlon",
+    "cgrid_shallow_water",
 ]
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume"]
+DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid"]
 
 # (dynamics, discretization) -> flat solver name
 _AXIS_TO_SOLVER = {
@@ -129,6 +145,7 @@ _AXIS_TO_SOLVER = {
     ("shallow_water", "finite_volume"): "fv_shallow_water",
     ("hydrostatic", "finite_volume"): "fv_primitive_equations",
     ("nonhydrostatic", "finite_volume"): "fv_compressible_euler",
+    ("shallow_water", "cgrid"): "cgrid_shallow_water",
 }
 
 # flat solver name -> (dynamics, discretization)
@@ -334,6 +351,10 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return FVLatLonPrimitiveEquationModel(**kwargs)
     elif name == "fv_compressible_euler_latlon":
         return FVCompressibleEulerLatLonModel(**kwargs)
+    elif name == "cgrid_shallow_water_latlon":
+        return CGShallowWaterLatLonModel(**kwargs)
+    elif name == "cgrid_shallow_water":
+        return CGShallowWaterCubedModel(**kwargs)
     else:
         raise ValueError(
             f"Unknown solver: {name!r}. "
