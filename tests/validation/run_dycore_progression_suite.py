@@ -68,6 +68,8 @@ ORDERED_CASES: list[SuiteCase] = [
 def _copy_if_exists(src: Path, dst: Path) -> bool:
     if not src.exists():
         return False
+    if src.resolve() == dst.resolve():
+        return True
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     return True

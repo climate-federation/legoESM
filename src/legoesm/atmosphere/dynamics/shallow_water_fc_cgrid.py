@@ -197,3 +197,17 @@ class FCCGShallowWaterModel:
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
         return state, trajectory
+
+    def integrate_scan(
+        self,
+        state: ShallowWaterState,
+        n_steps: int,
+        dt: float,
+    ) -> tuple[ShallowWaterState, ShallowWaterState]:
+        def scan_fn(state, _):
+            new_state = self.step(state, dt)
+            return new_state, new_state
+        final_state, trajectory = jax.lax.scan(
+            scan_fn, state, jnp.arange(n_steps)
+        )
+        return final_state, trajectory

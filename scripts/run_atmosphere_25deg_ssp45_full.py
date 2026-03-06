@@ -207,10 +207,13 @@ def _save_snapshots(
                     lat_pts = np.asarray(lat_deg).reshape(-1)
                     val_pts = panel.reshape(-1)
                     valid = np.isfinite(lon_pts) & np.isfinite(lat_pts) & np.isfinite(val_pts)
+                    lon_plot = lon_pts[valid]
+                    if MAP_PROJECTION == "platecarree":
+                        lon_plot = ((lon_plot + 180.0) % 360.0) - 180.0
                     n_face = panel.shape[1]
                     marker_size = max(0.8, 2200.0 / float(n_face * n_face))
                     im = ax.scatter(
-                        lon_pts[valid],
+                        lon_plot,
                         lat_pts[valid],
                         c=val_pts[valid],
                         cmap=cmap,
@@ -222,7 +225,7 @@ def _save_snapshots(
                         rasterized=True,
                     )
                     if MAP_PROJECTION == "platecarree":
-                        ax.set_extent([0.0, 360.0, -90.0, 90.0], ccrs.PlateCarree())
+                        ax.set_extent([-180.0, 180.0, -90.0, 90.0], ccrs.PlateCarree())
                     else:
                         ax.set_global()
                     if DRAW_COASTLINES:
@@ -231,8 +234,11 @@ def _save_snapshots(
                 elif use_latlon_map and panel.ndim == 2:
                     vals = panel.reshape(-1)
                     valid = np.isfinite(lon_pts) & np.isfinite(lat_pts) & np.isfinite(vals)
+                    lon_plot = lon_pts[valid]
+                    if MAP_PROJECTION == "platecarree":
+                        lon_plot = ((lon_plot + 180.0) % 360.0) - 180.0
                     im = ax.scatter(
-                        lon_pts[valid],
+                        lon_plot,
                         lat_pts[valid],
                         c=vals[valid],
                         cmap=cmap,
@@ -244,7 +250,7 @@ def _save_snapshots(
                         rasterized=True,
                     )
                     if MAP_PROJECTION == "platecarree":
-                        ax.set_extent([0.0, 360.0, -90.0, 90.0], ccrs.PlateCarree())
+                        ax.set_extent([-180.0, 180.0, -90.0, 90.0], ccrs.PlateCarree())
                     else:
                         ax.set_global()
                     if DRAW_COASTLINES:

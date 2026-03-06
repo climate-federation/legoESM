@@ -446,9 +446,12 @@ def _save_snapshots_latlon(
                 lon_pts = lon2d_deg.reshape(-1)
                 lat_pts = lat2d_deg.reshape(-1)
                 valid = np.isfinite(vals) & np.isfinite(lon_pts) & np.isfinite(lat_pts)
+                lon_plot = lon_pts[valid]
+                if projection == "platecarree":
+                    lon_plot = ((lon_plot + 180.0) % 360.0) - 180.0
                 marker_size = max(0.5, 2200.0 / max(1, vals.size))
                 im = ax.scatter(
-                    lon_pts[valid],
+                    lon_plot,
                     lat_pts[valid],
                     c=vals[valid],
                     s=marker_size,
@@ -460,7 +463,7 @@ def _save_snapshots_latlon(
                     rasterized=True,
                 )
                 if projection == "platecarree":
-                    ax.set_extent([0.0, 360.0, -90.0, 90.0], ccrs.PlateCarree())
+                    ax.set_extent([-180.0, 180.0, -90.0, 90.0], ccrs.PlateCarree())
                 else:
                     ax.set_global()
                 if draw_coastlines:
@@ -551,8 +554,11 @@ def _save_snapshots_cube(
                 ax.set_yticks([-60, -30, 0, 30, 60])
                 ax.grid(True, alpha=0.15)
             else:
+                lon_plot = lon_pts[valid]
+                if projection == "platecarree":
+                    lon_plot = ((lon_plot + 180.0) % 360.0) - 180.0
                 im = ax.scatter(
-                    lon_pts[valid],
+                    lon_plot,
                     lat_pts[valid],
                     c=fld[valid],
                     s=max(0.8, 2200.0 / max(1, fld.size)),
@@ -564,7 +570,7 @@ def _save_snapshots_cube(
                     rasterized=True,
                 )
                 if projection == "platecarree":
-                    ax.set_extent([0.0, 360.0, -90.0, 90.0], ccrs.PlateCarree())
+                    ax.set_extent([-180.0, 180.0, -90.0, 90.0], ccrs.PlateCarree())
                 else:
                     ax.set_global()
                 if draw_coastlines:
