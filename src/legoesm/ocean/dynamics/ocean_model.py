@@ -12,6 +12,14 @@ updates the SAME variables (eta, u, v) as the slow tendency. Wrapping
 it in RK3 creates inconsistencies from the convex blending of
 barotropic-updated states with un-updated states.
 
+Discretization options:
+- "centered" (default): centered finite differences (ocean_pe.py)
+- "fc_gram": FC-Gram spectral operators (ocean_pe_fc.py)
+- "fc_gram_cgrid": FC-Gram + divergence damping (ocean_pe_fc_cgrid.py)
+
+The finite-volume PPM option for tracer transport is controlled by
+OceanConfig.use_fv_tracer_transport within the centered discretization.
+
 Public API: state_new = model.step(state, dt)
 """
 
@@ -27,6 +35,8 @@ from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.ocean.dynamics.ocean_pe import ocean_baroclinic_tendencies
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
+
+OCEAN_DISCRETIZATIONS = ["centered", "fc_gram", "fc_gram_cgrid"]
 
 
 class OceanModel:
@@ -44,6 +54,11 @@ class OceanModel:
         Vertical coordinate.
     config : OceanConfig, optional
         Model configuration. Defaults to OceanConfig().
+    discretization : str, optional
+        Horizontal discretization: "centered" (default), "fc_gram",
+        or "fc_gram_cgrid".
+    fc_config : FCOperatorConfig, optional
+        FC-Gram operator config (required for fc_gram/fc_gram_cgrid).
 
     Example
     -------
@@ -59,11 +74,29 @@ class OceanModel:
         grid: CubedSphereGrid,
         z_coord: OceanZStarCoordinate,
         config: OceanConfig | None = None,
+        discretization: str = "centered",
+        fc_config=None,
     ):
+        if discretization not in OCEAN_DISCRETIZATIONS:
+            raise ValueError(
+                f"Unknown ocean discretization {discretization!r}. "
+                f"Options: {OCEAN_DISCRETIZATIONS}",
+            )
+
         self.grid = grid
         self.z_coord = z_coord
         self.config = config or OceanConfig()
+        self.discretization = discretization
         self._validate_config(self.config)
+
+        # Build FC config if needed
+        if discretization in ("fc_gram", "fc_gram_cgrid"):
+            if fc_config is None:
+                from legoesm.core.operators_fc import build_fc_config
+                fc_config = build_fc_config(d=2, C=4, degree=5)
+            self._fc_config = fc_config
+        else:
+            self._fc_config = None
 
         # Build physics function if configured
         if self.config.physics is not None:
@@ -189,10 +222,33 @@ class OceanModel:
 
     def tendencies(self, state: OceanState):
         """Compute baroclinic tendencies (pure function wrapper)."""
-        return ocean_baroclinic_tendencies(
-            state, self.grid, self.z_coord, self.config,
-            physics_fn=self._physics_fn,
-        )
+        return self._compute_tendencies(state)
+
+    def _compute_tendencies(self, state: OceanState):
+        """Dispatch to the appropriate tendency function."""
+        if self.discretization == "centered":
+            return ocean_baroclinic_tendencies(
+                state, self.grid, self.z_coord, self.config,
+                physics_fn=self._physics_fn,
+            )
+        elif self.discretization == "fc_gram":
+            from legoesm.ocean.dynamics.ocean_pe_fc import (
+                ocean_baroclinic_tendencies_fc,
+            )
+            return ocean_baroclinic_tendencies_fc(
+                state, self.grid, self.z_coord,
+                self._fc_config, self.config,
+                physics_fn=self._physics_fn,
+            )
+        elif self.discretization == "fc_gram_cgrid":
+            from legoesm.ocean.dynamics.ocean_pe_fc_cgrid import (
+                ocean_baroclinic_tendencies_fc_cgrid,
+            )
+            return ocean_baroclinic_tendencies_fc_cgrid(
+                state, self.grid, self.z_coord,
+                self._fc_config, self.config,
+                physics_fn=self._physics_fn,
+            )
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: OceanState, dt: float) -> OceanState:
@@ -216,10 +272,7 @@ class OceanModel:
         OceanState : State after one time step.
         """
         # --- 1. Baroclinic tendencies ---
-        tend = ocean_baroclinic_tendencies(
-            state, self.grid, self.z_coord, self.config,
-            physics_fn=self._physics_fn,
-        )
+        tend = self._compute_tendencies(state)
 
         # --- 2. Update tracers (forward Euler) ---
         T_new = state.T.data + dt * tend.dT_dt.data

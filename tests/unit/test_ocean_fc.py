@@ -99,3 +99,72 @@ def test_ocean_fc_eos_unchanged():
     rho = wright_eos(T, S, p)
     assert jnp.all(jnp.isfinite(rho))
     assert float(rho[0]) > 1000.0
+
+
+# ==============================================================================
+# OceanModel discretization integration tests
+# ==============================================================================
+
+def test_ocean_model_fc_gram_step(ocean_grid, ocean_z_coord, ocean_state):
+    """OceanModel with fc_gram discretization runs a step."""
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    config = OceanConfig(
+        use_conservation_fixer=False,
+        A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0, hyperdiff_coeff=0.0,
+    )
+    model = OceanModel(
+        ocean_grid, ocean_z_coord, config=config,
+        discretization="fc_gram",
+    )
+    state_new = model.step(ocean_state, 60.0)
+    assert jnp.all(jnp.isfinite(state_new.eta.data))
+    assert jnp.all(jnp.isfinite(state_new.T.data))
+
+
+def test_ocean_model_fc_gram_cgrid_step(ocean_grid, ocean_z_coord, ocean_state):
+    """OceanModel with fc_gram_cgrid discretization runs a step."""
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    from legoesm.core.operators_fc import build_fc_config
+    fc_config = build_fc_config(d=2, C=4, degree=5, div_damp_2=1e5)
+    config = OceanConfig(
+        use_conservation_fixer=False,
+        A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0, hyperdiff_coeff=0.0,
+    )
+    model = OceanModel(
+        ocean_grid, ocean_z_coord, config=config,
+        discretization="fc_gram_cgrid", fc_config=fc_config,
+    )
+    state_new = model.step(ocean_state, 60.0)
+    assert jnp.all(jnp.isfinite(state_new.eta.data))
+    assert jnp.all(jnp.isfinite(state_new.T.data))
+
+
+def test_ocean_model_fv_tracer_transport(ocean_grid, ocean_z_coord, ocean_state):
+    """OceanModel with FV tracer transport runs a step."""
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    config = OceanConfig(
+        use_fv_tracer_transport=True,
+        use_conservation_fixer=False,
+    )
+    model = OceanModel(ocean_grid, ocean_z_coord, config=config)
+    state_new = model.step(ocean_state, 60.0)
+    assert jnp.all(jnp.isfinite(state_new.T.data))
+    assert jnp.all(jnp.isfinite(state_new.S.data))
+
+
+def test_ocean_model_centered_step(ocean_grid, ocean_z_coord, ocean_state):
+    """OceanModel with default centered discretization runs a step."""
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    config = OceanConfig(use_conservation_fixer=False)
+    model = OceanModel(ocean_grid, ocean_z_coord, config=config)
+    state_new = model.step(ocean_state, 60.0)
+    assert jnp.all(jnp.isfinite(state_new.eta.data))
+    assert jnp.all(jnp.isfinite(state_new.T.data))
+
+
+def test_ocean_model_invalid_discretization(ocean_grid, ocean_z_coord):
+    """OceanModel rejects invalid discretization."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="Unknown ocean discretization"):
+        from legoesm.ocean.dynamics.ocean_model import OceanModel
+        OceanModel(ocean_grid, ocean_z_coord, discretization="invalid")

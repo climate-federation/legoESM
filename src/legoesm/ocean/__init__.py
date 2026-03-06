@@ -4,12 +4,14 @@ Boussinesq hydrostatic primitive equations with free surface,
 Wright (1997) EOS, z-star vertical coordinate, and split-explicit
 barotropic/baroclinic time stepping.
 
-Two discretizations:
-- Finite-volume on cubed-sphere: OceanModel
+Discretizations:
+- Centered finite differences on cubed-sphere: OceanModel(discretization="centered")
+- FC-Gram spectral on cubed-sphere: OceanModel(discretization="fc_gram")
+- FC-Gram + div damping on cubed-sphere: OceanModel(discretization="fc_gram_cgrid")
 - Spectral on Gaussian grid: SpectralOceanModel
 """
 
-from legoesm.ocean.dynamics.ocean_model import OceanModel
+from legoesm.ocean.dynamics.ocean_model import OceanModel, OCEAN_DISCRETIZATIONS
 from legoesm.ocean.dynamics.spectral_ocean_pe import (
     SpectralOceanModel,
     rest_state_spectral_ocean,
@@ -46,6 +48,7 @@ from legoesm.ocean.simple_ocean import (
 
 __all__ = [
     "OceanModel",
+    "OCEAN_DISCRETIZATIONS",
     "SpectralOceanModel",
     "SFNOOceanModel",
     "SFNOOceanConfig",
