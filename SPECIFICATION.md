@@ -356,9 +356,9 @@ Same operator set adapted for lat-lon geometry on `(n_lat, n_lon)` arrays:
 - Metric terms include `cos(lat)` factors for spherical geometry
 - 3D versions via vmap
 
-#### 3.3.3 Finite-Volume Operators — Cubed-Sphere (`core/operators_fv.py`, `operators_fv_3d.py`)
+#### 3.3.3 Finite-Volume Operators — Cubed-Sphere (`core/operators_fv.py`, `operators_3d.py`)
 
-FV3-style PPM (Piecewise Parabolic Method) transport on cubed-sphere:
+PPM (Piecewise Parabolic Method) transport on A-grid cubed-sphere, inspired by FV3:
 
 ```python
 fv_flux_divergence(q, u, v, grid)   # Conservative flux-form transport
@@ -367,21 +367,43 @@ fv_gradient_x(q, grid)              # PPM-compatible x-gradient
 fv_gradient_y(q, grid)              # PPM-compatible y-gradient
 ```
 
+**Relationship to FV3 (Lin 2004, Harris et al. 2022):**
+
+Our implementation uses FV3's PPM reconstruction and Colella-Woodward limiter
+but differs from the full FV3 C-D grid scheme in several important ways:
+
+| Feature | FV3 (GFDL) | legoESM |
+|---------|-----------|---------|
+| Grid staggering | C-D grid (winds at vertices + edge midpoints) | A-grid (all variables colocated at cell centers) |
+| Transport | Flux-form semi-Lagrangian (FFSL, CFL > 1 allowed) | Standard Eulerian PPM (CFL < 1 required) |
+| Momentum | Vorticity-divergence form, transported as scalars | Vector-invariant (ζ+f)v − ∇B with centered operators |
+| Vertical | Vertically Lagrangian with remapping | Eulerian σ or z* with explicit vertical advection |
+| Splitting | Directional split (alternating x-y sweeps) | Unsplit (both directions on same field) |
+| Damping | Divergence damping (2nd + 4th order on D-grid) | Hyperdiffusion (∇⁴) on velocity |
+
+**Design rationale:** The A-grid unsplit approach is simpler, avoids the complexity
+of staggered grid interpolation (important for differentiability), and the unsplit
+formulation preserves discrete geostrophic balance better than directional splitting
+on A-grid. The trade-off is stricter CFL requirements (no semi-Lagrangian) and
+potentially more diffusive momentum treatment.
+
 Key design decisions:
-- **Unsplit**: both x and y fluxes computed on the SAME unmodified field (no directional splitting). Splitting breaks geostrophic balance.
+- **Unsplit**: both x and y fluxes computed on the SAME unmodified field. Splitting breaks geostrophic balance on A-grid.
 - **PPM reconstruction** with Colella-Woodward limiter for monotonicity
 - **No dt parameter**: operators are pure spatial tendencies
 - **Grid metric**: `grid.dx`/`grid.dy` span 2 cells; single-cell width = `dx/2`
 - PPM provides inherent scalar dissipation; hyperdiffusion applied only to velocity
+- **Reusable across atmosphere and ocean**: same operators used for atmospheric scalar transport and ocean tracer (T/S) advection
 
-3D versions (`operators_fv_3d.py`): `fv_flux_divergence_3d`, `fv_scalar_advection_3d` via `jax.vmap`.
+3D versions (`operators_3d.py`): `fv_flux_divergence_3d`, `fv_scalar_advection_3d` via `jax.vmap`.
 
 #### 3.3.4 Finite-Volume Operators — Lat-Lon (`core/operators_fv_latlon.py`, `operators_fv_latlon_3d.py`)
 
-PPM operators adapted for lat-lon grid:
+PPM operators adapted for lat-lon grid (same A-grid PPM approach as cubed-sphere):
 - Periodic boundary conditions in longitude
 - Zero-gradient extrapolation at latitude poles
 - Same unsplit design as cubed-sphere variant
+- Reuses `_ppm_edge_values` and `_ppm_limit` from `operators_fv.py`
 
 **Critical A-grid lesson**: On A-grid lat-lon, PPM mass flux is energy-inconsistent with centered momentum operators. For shallow water, use centered divergence for mass (consistent with momentum). For PE/CE, use PPM for scalar transport (T, p_s, theta, rho, tracers) where feedback to momentum is indirect.
 
@@ -779,12 +801,17 @@ Ocean constants: ρ₀ = 1025.0 kg/m³, c_sw = 3994.0 J/(kg·K).
 **Baroclinic (slow) step** (`ocean/dynamics/ocean_pe.py`):
 1. Compute layer thickness h_k and Jacobian J from η, H_bathy
 2. Density from Wright EOS and hydrostatic pressure (top-down cumsum)
-3. Diagnose w from continuity (bottom-up integral of div(v))
+3. Diagnose w from continuity (bottom-up integral of div(v·h))
 4. Coriolis split: planetary f on baroclinic shear, relative ζ on full velocity
-5. Pressure gradient, vertical advection (upwind), tracer advection
-6. Horizontal/vertical mixing, optional hyperdiffusion
-7. Land masking of all tendencies
-8. Free-surface tendency from depth-integrated flux divergence
+5. Pressure gradient, vertical advection (upwind)
+6. Tracer advection: centered (default) or PPM (`use_fv_tracer_transport=True`)
+7. Horizontal/vertical mixing, optional hyperdiffusion
+8. Land masking of all tendencies
+9. Free-surface tendency from depth-integrated flux divergence
+
+**Tracer transport options:**
+- **Centered** (default): `-(u·∂T/∂x + v·∂T/∂y)` — simple, consistent with momentum operators
+- **PPM** (`use_fv_tracer_transport=True`): Reuses the same `fv_scalar_advection_3d` operators as the atmospheric FV dynamics. Reduces spurious numerical mixing, important for maintaining sharp thermocline gradients. Momentum remains centered (vector-invariant form).
 
 **Barotropic (fast) substeps** (`ocean/dynamics/barotropic.py`):
 

@@ -26,6 +26,7 @@ from legoesm.core.operators_3d import (
     gradient_y_3d,
     divergence_3d,
     hyperdiffusion_3d,
+    fv_scalar_advection_3d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
@@ -159,12 +160,18 @@ def ocean_baroclinic_tendencies(
     # --- 9. Tracer tendencies (vectorized over T,S) ---
     # Avoid duplicated operator launches by treating tracers as a batch axis.
     tracers = jnp.stack([T, S], axis=0)  # (2, 6, n, n, nlev)
+    use_fv = config.use_fv_tracer_transport
 
     def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
-        # Centered horizontal advection: -(u dq/dx + v dq/dy)
-        dtr_dx = gradient_x_3d(tr, grid)
-        dtr_dy = gradient_y_3d(tr, grid)
-        dtr_dt = -(u * mask_3d * dtr_dx + v * mask_3d * dtr_dy)
+        if use_fv:
+            # PPM advection: reduces spurious numerical mixing vs centered
+            # Uses the same operators as atmosphere FV dynamics (operators_fv.py)
+            dtr_dt = fv_scalar_advection_3d(tr, u * mask_3d, v * mask_3d, grid)
+        else:
+            # Centered horizontal advection: -(u dq/dx + v dq/dy)
+            dtr_dx = gradient_x_3d(tr, grid)
+            dtr_dy = gradient_y_3d(tr, grid)
+            dtr_dt = -(u * mask_3d * dtr_dx + v * mask_3d * dtr_dy)
         dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
 
         if physics_fn is None:
