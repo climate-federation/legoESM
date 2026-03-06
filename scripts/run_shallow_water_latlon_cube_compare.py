@@ -392,6 +392,9 @@ def _save_snapshots_latlon(
     field_specs: list[tuple[str, str, str]],
     lon2d_deg: np.ndarray,
     lat2d_deg: np.ndarray,
+    *,
+    projection: str = "platecarree",
+    draw_coastlines: bool = False,
 ) -> None:
     if not snapshots:
         return
@@ -407,7 +410,12 @@ def _save_snapshots_latlon(
         hspace=0.28,
         wspace=0.18,
     )
-    proj = ccrs.Robinson(central_longitude=0.0) if HAS_CARTOPY else None
+    proj = None
+    if HAS_CARTOPY:
+        if projection == "robinson":
+            proj = ccrs.Robinson(central_longitude=0.0)
+        else:
+            proj = ccrs.PlateCarree()
     axes = []
     for r in range(n_rows):
         row_axes = []
@@ -451,8 +459,12 @@ def _save_snapshots_latlon(
                     transform=ccrs.PlateCarree(),
                     rasterized=True,
                 )
-                ax.set_global()
-                ax.coastlines(linewidth=0.35, color="0.35")
+                if projection == "platecarree":
+                    ax.set_extent([0.0, 360.0, -90.0, 90.0], ccrs.PlateCarree())
+                else:
+                    ax.set_global()
+                if draw_coastlines:
+                    ax.coastlines(linewidth=0.35, color="0.35")
                 ax.gridlines(draw_labels=False, linewidth=0.2, color="0.6", alpha=0.35)
             ax.set_title(f"step {st}\nt={_format_sim_time(st, dt)}", fontsize=9)
             if c == 0:
@@ -475,6 +487,9 @@ def _save_snapshots_cube(
     cube_lon_deg: np.ndarray,
     cube_lat_deg: np.ndarray,
     filename: str = "field_snapshots_cube_native.png",
+    *,
+    projection: str = "platecarree",
+    draw_coastlines: bool = False,
 ) -> None:
     if not snapshots:
         return
@@ -490,7 +505,12 @@ def _save_snapshots_cube(
         hspace=0.28,
         wspace=0.18,
     )
-    proj = ccrs.Robinson(central_longitude=0.0) if HAS_CARTOPY else None
+    proj = None
+    if HAS_CARTOPY:
+        if projection == "robinson":
+            proj = ccrs.Robinson(central_longitude=0.0)
+        else:
+            proj = ccrs.PlateCarree()
     axes = []
     for r in range(n_rows):
         row_axes = []
@@ -543,8 +563,12 @@ def _save_snapshots_cube(
                     transform=ccrs.PlateCarree(),
                     rasterized=True,
                 )
-                ax.set_global()
-                ax.coastlines(linewidth=0.35, color="0.35")
+                if projection == "platecarree":
+                    ax.set_extent([0.0, 360.0, -90.0, 90.0], ccrs.PlateCarree())
+                else:
+                    ax.set_global()
+                if draw_coastlines:
+                    ax.coastlines(linewidth=0.35, color="0.35")
                 ax.gridlines(draw_labels=False, linewidth=0.2, color="0.6", alpha=0.35)
             ax.set_title(f"step {st}\nt={_format_sim_time(st, dt)}", fontsize=9)
             if c == 0:
@@ -563,6 +587,8 @@ def _run_spectral_latlon(
     days: float,
     dt: float,
     mean_every: int,
+    projection: str,
+    draw_coastlines: bool,
 ) -> dict:
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.atmosphere.dynamics.spectral_sw import (
@@ -671,6 +697,8 @@ def _run_spectral_latlon(
         ],
         lon2d,
         lat2d,
+        projection=projection,
+        draw_coastlines=draw_coastlines,
     )
     _save_mean_timeseries(
         out_dir,
@@ -722,6 +750,8 @@ def _run_fv_cubesphere(
     days: float,
     dt: float,
     mean_every: int,
+    projection: str,
+    draw_coastlines: bool,
 ) -> dict:
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water_fv import FVShallowWaterConfig, FVShallowWaterModel
@@ -860,6 +890,8 @@ def _run_fv_cubesphere(
         field_specs,
         lon2d_ref,
         lat2d_ref,
+        projection=projection,
+        draw_coastlines=draw_coastlines,
     )
     _save_snapshots_latlon(
         out_dir_cube,
@@ -869,6 +901,8 @@ def _run_fv_cubesphere(
         field_specs,
         lon2d_ref,
         lat2d_ref,
+        projection=projection,
+        draw_coastlines=draw_coastlines,
     )
     _save_snapshots_cube(
         out_dir_cube,
@@ -879,6 +913,8 @@ def _run_fv_cubesphere(
         lon_faces,
         lat_faces,
         filename="field_snapshots_cube_native.png",
+        projection=projection,
+        draw_coastlines=draw_coastlines,
     )
     _save_snapshot_times(out_dir_cube, sorted(snapshots_latlon.keys()), dt)
     for tgt_dir, tgt_name in ((out_dir_latlon, case_name_latlon), (out_dir_cube, case_name_cube)):
@@ -934,6 +970,18 @@ def main():
     parser.add_argument("--dt-spec", type=float, default=120.0)
     parser.add_argument("--mean-every-fv", type=int, default=24, help="Record FV means/diagnostics every N steps.")
     parser.add_argument("--mean-every-spec", type=int, default=60, help="Record spectral means/diagnostics every N steps.")
+    parser.add_argument(
+        "--projection",
+        type=str,
+        default="platecarree",
+        choices=("platecarree", "robinson"),
+        help="Map projection for snapshot figures.",
+    )
+    parser.add_argument(
+        "--coastlines",
+        action="store_true",
+        help="Draw coastlines on projected map snapshots.",
+    )
     args = parser.parse_args()
 
     out_root = args.output
@@ -955,6 +1003,8 @@ def main():
         days=args.days,
         dt=args.dt_spec,
         mean_every=args.mean_every_spec,
+        projection=args.projection,
+        draw_coastlines=args.coastlines,
     )
 
     print("\n[2/2] Finite-volume cubed-sphere run (+lat-lon remap outputs) ...")
@@ -965,6 +1015,8 @@ def main():
         days=args.days,
         dt=args.dt_fv,
         mean_every=args.mean_every_fv,
+        projection=args.projection,
+        draw_coastlines=args.coastlines,
     )
 
     wall = time.time() - t0
@@ -977,6 +1029,8 @@ def main():
         "dt_spec": args.dt_spec,
         "mean_every_fv": args.mean_every_fv,
         "mean_every_spec": args.mean_every_spec,
+        "projection": args.projection,
+        "coastlines": bool(args.coastlines),
     }
 
     with open(out_root / "summary.json", "w") as f:

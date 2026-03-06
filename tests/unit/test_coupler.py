@@ -689,3 +689,168 @@ def test_make_ocean_factory():
     # Invalid mode raises
     with pytest.raises(ValueError, match="Unknown ocean mode"):
         make_ocean(SimpleOceanConfig(mode="invalid"))
+
+
+# ==============================================================================
+# Test differentiability
+# ==============================================================================
+
+def test_coupler_differentiable():
+    """Full coupler step is differentiable w.r.t. ocean SST."""
+    coupler_cfg = CouplerConfig()
+    step_fn = make_coupler(coupler_cfg, LandConfig(), SeaIceConfig(), LakeConfig())
+
+    sfc_state = init_surface_state(SHAPE)
+    forcing = _make_forcing()
+    tile_cfg = TileConfig(
+        f_land=jnp.full(SHAPE, 0.3),
+        f_lake=jnp.full(SHAPE, 0.05),
+    )
+    zu = jnp.zeros(SHAPE)
+
+    def loss(ocean_sst):
+        _, blended = step_fn(
+            sfc_state, forcing, tile_cfg, ocean_sst, zu, zu, DT)
+        return jnp.sum(blended.shflx)
+
+    ocean_sst = jnp.full(SHAPE, 300.0)
+    grad_sst = jax.grad(loss)(ocean_sst)
+    assert grad_sst.shape == SHAPE
+    assert jnp.all(jnp.isfinite(grad_sst))
+    # Non-zero gradient (shflx depends on SST via bulk formula)
+    assert float(jnp.max(jnp.abs(grad_sst))) > 0.0
+
+
+def test_coupler_differentiable_through_surface_state():
+    """Coupler step is differentiable w.r.t. land soil temperature."""
+    coupler_cfg = CouplerConfig()
+    step_fn = make_coupler(coupler_cfg, LandConfig(), SeaIceConfig(), LakeConfig())
+
+    forcing = _make_forcing()
+    tile_cfg = TileConfig(
+        f_land=jnp.full(SHAPE, 0.5),
+        f_lake=jnp.full(SHAPE, 0.0),
+    )
+    ocean_sst = jnp.full(SHAPE, 300.0)
+    zu = jnp.zeros(SHAPE)
+
+    def loss(T_soil):
+        land = LandState(
+            T_soil=Field(T_soil, name="T_soil", dims=DIMS_2D, units="K"),
+            W_bucket=Field(jnp.full(SHAPE, 75.0), name="W_bucket",
+                           dims=DIMS_2D, units="kg/m2"),
+        )
+        sfc_state = SurfaceState(
+            land=land,
+            ice=_make_ice_state(),
+            lake=_make_lake_state(),
+            accumulator=reset_accumulator(SHAPE),
+        )
+        _, blended = step_fn(
+            sfc_state, forcing, tile_cfg, ocean_sst, zu, zu, DT)
+        return jnp.sum(blended.T_surface)
+
+    T_soil = jnp.full(SHAPE, 280.0)
+    grad_T = jax.grad(loss)(T_soil)
+    assert grad_T.shape == SHAPE
+    assert jnp.all(jnp.isfinite(grad_T))
+
+
+def test_coupler_with_3d_ocean_fc_gram():
+    """Coupler receives SST from FC-Gram ocean model (integration test)."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init import rest_state_ocean
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    from legoesm.ocean.state import OceanConfig
+
+    grid = create_cubed_sphere(8)
+    z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
+    ocean_state = rest_state_ocean(
+        grid, z_coord, T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0,
+    )
+
+    # Step ocean with FC-Gram
+    ocean_config = OceanConfig(
+        use_conservation_fixer=False,
+        A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0, hyperdiff_coeff=0.0,
+    )
+    ocean_model = OceanModel(
+        grid, z_coord, config=ocean_config, discretization="fc_gram",
+    )
+    ocean_state_new = ocean_model.step(ocean_state, 60.0)
+
+    # Extract SST (top-level T) for coupler
+    sst = ocean_state_new.T.data[:, :, :, 0]  # (6, n, n)
+    assert jnp.all(jnp.isfinite(sst))
+
+    # Feed to coupler
+    shape = (6, 8, 8)
+    coupler_cfg = CouplerConfig()
+    step_fn = make_coupler(coupler_cfg, LandConfig(), SeaIceConfig(), LakeConfig())
+
+    sfc_state = init_surface_state(shape)
+    forcing = _make_forcing(shape=shape)
+    tile_cfg = TileConfig(
+        f_land=jnp.full(shape, 0.3),
+        f_lake=jnp.full(shape, 0.0),
+    )
+    ocean_u = jnp.zeros(shape)
+    ocean_v = jnp.zeros(shape)
+
+    new_sfc, blended = step_fn(
+        sfc_state, forcing, tile_cfg,
+        sst + 273.15,  # degC → K
+        ocean_u, ocean_v, DT,
+    )
+    assert jnp.all(jnp.isfinite(blended.T_surface))
+    assert jnp.all(jnp.isfinite(blended.shflx))
+
+
+def test_coupler_with_fv_ocean_tracer_transport():
+    """Coupler receives SST from FV-tracer ocean model (integration test)."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init import rest_state_ocean
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    from legoesm.ocean.state import OceanConfig
+
+    grid = create_cubed_sphere(8)
+    z_coord = create_ocean_z_star(n_levels=5, H_max=4000.0)
+    ocean_state = rest_state_ocean(
+        grid, z_coord, T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=4000.0,
+    )
+
+    # Step ocean with FV tracer transport
+    ocean_config = OceanConfig(
+        use_fv_tracer_transport=True,
+        use_conservation_fixer=False,
+    )
+    ocean_model = OceanModel(grid, z_coord, config=ocean_config)
+    ocean_state_new = ocean_model.step(ocean_state, 60.0)
+
+    # Extract SST for coupler
+    sst = ocean_state_new.T.data[:, :, :, 0]
+    assert jnp.all(jnp.isfinite(sst))
+
+    # Feed to coupler
+    shape = (6, 8, 8)
+    coupler_cfg = CouplerConfig()
+    step_fn = make_coupler(coupler_cfg, LandConfig(), SeaIceConfig(), LakeConfig())
+
+    sfc_state = init_surface_state(shape)
+    forcing = _make_forcing(shape=shape)
+    tile_cfg = TileConfig(
+        f_land=jnp.full(shape, 0.3),
+        f_lake=jnp.full(shape, 0.0),
+    )
+
+    new_sfc, blended = step_fn(
+        sfc_state, forcing, tile_cfg,
+        sst + 273.15,
+        jnp.zeros(shape), jnp.zeros(shape), DT,
+    )
+    assert jnp.all(jnp.isfinite(blended.T_surface))
+    assert jnp.all(jnp.isfinite(blended.shflx))

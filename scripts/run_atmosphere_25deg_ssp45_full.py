@@ -40,6 +40,9 @@ except ImportError:
     ccrs = None
     HAS_CARTOPY = False
 
+MAP_PROJECTION = "platecarree"
+DRAW_COASTLINES = False
+
 
 def _snapshot_steps(n_steps: int) -> list[int]:
     if n_steps <= 0:
@@ -150,7 +153,10 @@ def _save_snapshots(
     )
 
     if use_cube_proj or use_latlon_map:
-        proj = ccrs.Robinson(central_longitude=0.0)
+        if MAP_PROJECTION == "robinson":
+            proj = ccrs.Robinson(central_longitude=0.0)
+        else:
+            proj = ccrs.PlateCarree()
         axes = [[fig.add_subplot(gs[r, c], projection=proj) for c in range(n_cols)] for r in range(n_rows)]
     else:
         axes = [[fig.add_subplot(gs[r, c]) for c in range(n_cols)] for r in range(n_rows)]
@@ -215,8 +221,12 @@ def _save_snapshots(
                         transform=ccrs.PlateCarree(),
                         rasterized=True,
                     )
-                    ax.set_global()
-                    ax.coastlines(linewidth=0.35, color="0.35")
+                    if MAP_PROJECTION == "platecarree":
+                        ax.set_extent([0.0, 360.0, -90.0, 90.0], ccrs.PlateCarree())
+                    else:
+                        ax.set_global()
+                    if DRAW_COASTLINES:
+                        ax.coastlines(linewidth=0.35, color="0.35")
                     ax.gridlines(draw_labels=False, linewidth=0.2, color="0.6", alpha=0.35)
                 elif use_latlon_map and panel.ndim == 2:
                     vals = panel.reshape(-1)
@@ -233,8 +243,12 @@ def _save_snapshots(
                         transform=ccrs.PlateCarree(),
                         rasterized=True,
                     )
-                    ax.set_global()
-                    ax.coastlines(linewidth=0.35, color="0.35")
+                    if MAP_PROJECTION == "platecarree":
+                        ax.set_extent([0.0, 360.0, -90.0, 90.0], ccrs.PlateCarree())
+                    else:
+                        ax.set_global()
+                    if DRAW_COASTLINES:
+                        ax.coastlines(linewidth=0.35, color="0.35")
                     ax.gridlines(draw_labels=False, linewidth=0.2, color="0.6", alpha=0.35)
                 else:
                     im = ax.imshow(panel, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
@@ -411,7 +425,6 @@ def _run_sw_fv_w2(out_dir: Path, n: int, solver: str, mean_every: int):
     lon_deg = np.asarray(grid.lon) * 180.0 / np.pi
     lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
     state0 = williamson_test2(grid)
-    n_steps = int(5 * 86400 / 450.0)
 
     def _runner(dt):
         local_steps = int(5 * 86400 / dt)
@@ -2975,6 +2988,8 @@ def _write_summary(out_dir: Path, cfg: dict, results: list[dict]):
 
 
 def main():
+    global MAP_PROJECTION, DRAW_COASTLINES
+
     parser = argparse.ArgumentParser(description="Atmosphere dycore full suite (~2.5 degree, SSP45)")
     parser.add_argument("--cube-resolution", type=int, default=36, help="Cubed-sphere resolution Cn")
     parser.add_argument("--latlon-nlat", type=int, default=72, help="Lat-lon n_lat")
@@ -2984,6 +2999,18 @@ def main():
     parser.add_argument("--nh-levels", type=int, default=20, help="NH vertical levels")
     parser.add_argument("--solver", type=str, default="ssp45", help="FV solver label for configurable models")
     parser.add_argument("--mean-every", type=int, default=20, help="Record integrated means every N steps")
+    parser.add_argument(
+        "--projection",
+        type=str,
+        default="platecarree",
+        choices=("platecarree", "robinson"),
+        help="Map projection for horizontal snapshot plots.",
+    )
+    parser.add_argument(
+        "--coastlines",
+        action="store_true",
+        help="Draw coastlines on projected map snapshots.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -3013,6 +3040,8 @@ def main():
         help="Run only one case",
     )
     args = parser.parse_args()
+    MAP_PROJECTION = args.projection
+    DRAW_COASTLINES = bool(args.coastlines)
 
     out_dir = args.output or Path("results/atmosphere_dycore_25deg_ssp45_full")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -3025,6 +3054,7 @@ def main():
     print(f"Devices: {jax.devices()}")
     print(f"Output: {out_dir}")
     print(f"Cartopy: {HAS_CARTOPY}")
+    print(f"Projection: {MAP_PROJECTION} | Coastlines: {DRAW_COASTLINES}")
 
     runners = [
         ("sw_fv_w2", lambda: _run_sw_fv_w2(out_dir, args.cube_resolution, args.solver, args.mean_every)),
@@ -3112,6 +3142,8 @@ def main():
         "nh_levels": args.nh_levels,
         "solver": args.solver,
         "mean_every": args.mean_every,
+        "projection": args.projection,
+        "coastlines": bool(args.coastlines),
     }
     _write_summary(out_dir, cfg, results)
 
