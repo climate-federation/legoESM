@@ -107,6 +107,36 @@ from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
     FVCompressibleEulerLatLonModel,
     fv_compressible_euler_latlon_slow_tendencies,
 )
+from legoesm.atmosphere.dynamics.shallow_water_fc import (
+    FCShallowWaterModel,
+    FCShallowWaterConfig,
+    fc_shallow_water_tendencies,
+)
+from legoesm.atmosphere.dynamics.shallow_water_fc_cgrid import (
+    FCCGShallowWaterModel,
+    FCCGShallowWaterConfig,
+    fc_cgrid_shallow_water_tendencies,
+)
+from legoesm.atmosphere.dynamics.primitive_eq_fc import (
+    FCPrimitiveEquationModel,
+    FCPrimitiveEquationConfig,
+    fc_hydrostatic_tendencies,
+)
+from legoesm.atmosphere.dynamics.primitive_eq_fc_cgrid import (
+    FCCGPrimitiveEquationModel,
+    FCCGPrimitiveEquationConfig,
+    fc_cgrid_hydrostatic_tendencies,
+)
+from legoesm.atmosphere.dynamics.compressible_euler_fc import (
+    FCCompressibleEulerModel,
+    FCCompressibleEulerConfig,
+    fc_compressible_euler_slow_tendencies,
+)
+from legoesm.atmosphere.dynamics.compressible_euler_fc_cgrid import (
+    FCCGCompressibleEulerModel,
+    FCCGCompressibleEulerConfig,
+    fc_cgrid_compressible_euler_slow_tendencies,
+)
 # Available solver names for the factory (flat namespace)
 AVAILABLE_SOLVERS = [
     "shallow_water",
@@ -126,11 +156,17 @@ AVAILABLE_SOLVERS = [
     "fv_compressible_euler_latlon",
     "cgrid_shallow_water_latlon",
     "cgrid_shallow_water",
+    "fc_shallow_water",
+    "fc_cgrid_shallow_water",
+    "fc_primitive_equations",
+    "fc_cgrid_primitive_equations",
+    "fc_compressible_euler",
+    "fc_cgrid_compressible_euler",
 ]
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid"]
+DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid", "fc_gram", "fc_gram_cgrid"]
 
 # (dynamics, discretization) -> flat solver name
 _AXIS_TO_SOLVER = {
@@ -146,6 +182,12 @@ _AXIS_TO_SOLVER = {
     ("hydrostatic", "finite_volume"): "fv_primitive_equations",
     ("nonhydrostatic", "finite_volume"): "fv_compressible_euler",
     ("shallow_water", "cgrid"): "cgrid_shallow_water",
+    ("shallow_water", "fc_gram"): "fc_shallow_water",
+    ("shallow_water", "fc_gram_cgrid"): "fc_cgrid_shallow_water",
+    ("hydrostatic", "fc_gram"): "fc_primitive_equations",
+    ("hydrostatic", "fc_gram_cgrid"): "fc_cgrid_primitive_equations",
+    ("nonhydrostatic", "fc_gram"): "fc_compressible_euler",
+    ("nonhydrostatic", "fc_gram_cgrid"): "fc_cgrid_compressible_euler",
 }
 
 # flat solver name -> (dynamics, discretization)
@@ -355,6 +397,18 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return CGShallowWaterLatLonModel(**kwargs)
     elif name == "cgrid_shallow_water":
         return CGShallowWaterCubedModel(**kwargs)
+    elif name == "fc_shallow_water":
+        return FCShallowWaterModel(**kwargs)
+    elif name == "fc_cgrid_shallow_water":
+        return FCCGShallowWaterModel(**kwargs)
+    elif name == "fc_primitive_equations":
+        return FCPrimitiveEquationModel(**kwargs)
+    elif name == "fc_cgrid_primitive_equations":
+        return FCCGPrimitiveEquationModel(**kwargs)
+    elif name == "fc_compressible_euler":
+        return FCCompressibleEulerModel(**kwargs)
+    elif name == "fc_cgrid_compressible_euler":
+        return FCCGCompressibleEulerModel(**kwargs)
     else:
         raise ValueError(
             f"Unknown solver: {name!r}. "
