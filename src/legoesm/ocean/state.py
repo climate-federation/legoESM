@@ -92,6 +92,8 @@ class OceanConfig(NamedTuple):
     salinity_max_psu: float = 50.0
     differentiable_barotropic: bool = False  # Use lax.scan (grad-compatible) vs fori_loop (faster)
     use_fv_tracer_transport: bool = False  # Use PPM for T/S horizontal advection (reduces spurious mixing)
+    div_damp_2: float = 0.0   # 2nd-order divergence damping [m²/s] (FV discretization)
+    div_damp_4: float = 0.0   # 4th-order divergence damping [m⁴/s] (FV discretization)
     physics: object = None  # OceanPhysicsConfig or None (legacy mode)
 
 

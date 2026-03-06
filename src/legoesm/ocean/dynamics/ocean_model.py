@@ -14,6 +14,8 @@ barotropic-updated states with un-updated states.
 
 Discretization options:
 - "centered" (default): centered finite differences (ocean_pe.py)
+- "finite_volume": FV PPM transport + FV-consistent w-diagnosis +
+  divergence damping (ocean_pe_fv.py)
 - "fc_gram": FC-Gram spectral operators (ocean_pe_fc.py)
 - "fc_gram_cgrid": FC-Gram + divergence damping (ocean_pe_fc_cgrid.py)
 
@@ -36,7 +38,7 @@ from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.ocean.dynamics.ocean_pe import ocean_baroclinic_tendencies
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 
-OCEAN_DISCRETIZATIONS = ["centered", "fc_gram", "fc_gram_cgrid"]
+OCEAN_DISCRETIZATIONS = ["centered", "finite_volume", "fc_gram", "fc_gram_cgrid"]
 
 
 class OceanModel:
@@ -228,6 +230,14 @@ class OceanModel:
         """Dispatch to the appropriate tendency function."""
         if self.discretization == "centered":
             return ocean_baroclinic_tendencies(
+                state, self.grid, self.z_coord, self.config,
+                physics_fn=self._physics_fn,
+            )
+        elif self.discretization == "finite_volume":
+            from legoesm.ocean.dynamics.ocean_pe_fv import (
+                ocean_baroclinic_tendencies_fv,
+            )
+            return ocean_baroclinic_tendencies_fv(
                 state, self.grid, self.z_coord, self.config,
                 physics_fn=self._physics_fn,
             )
