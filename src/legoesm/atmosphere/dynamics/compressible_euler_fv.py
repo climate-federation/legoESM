@@ -1,16 +1,23 @@
-"""FV3-Style Non-Hydrostatic Compressible Euler Equations on the cubed-sphere.
+"""Consistent FV Non-Hydrostatic Compressible Euler on the cubed-sphere.
 
-Uses unsplit PPM for:
-- Theta horizontal advection (replaces centered gradient)
-- Continuity horizontal divergence (replaces centered divergence)
-- Tracer advection (replaces centered gradient)
+Uses a compatible face-based discretization where rho, theta, tracers,
+and horizontal momentum all share the same FV interface flux layer:
 
-Momentum remains in vector-invariant form (same as centered).
-Acoustic substeps (vertical) are unchanged.
+- Theta advection: FV scalar advection (PPM)
+- Continuity (rho): FV flux divergence (PPM)
+- Tracer advection: FV scalar advection (PPM)
+- Momentum: vector-invariant form with centered PGF
+- Divergence damping: selective damping using FV-consistent divergence
+- Acoustic substeps: unchanged (vertical only)
+
+The divergence damping uses the SAME FV divergence operator as the
+mass/scalar transport, ensuring discrete compatibility and preventing
+cube-imprinted computational modes.
 
 References
 ----------
 - Lin (2004): A "Vertically Lagrangian" FV Dynamical Core (FV3)
+- Harris & Lin (2013): A Two-Way Nested Global-Regional Dynamical Core
 - Colella & Woodward (1984): The Piecewise Parabolic Method (PPM)
 """
 
@@ -33,15 +40,14 @@ from legoesm.core.operators_3d import (
     fv_flux_divergence_3d,
     fv_scalar_advection_3d,
 )
+from legoesm.core.operators_fv_cubed import (
+    fv_divergence_damping_3d as _fv_divergence_damping_3d,
+)
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
 from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
-)
-from legoesm.atmosphere.dynamics.edge_blending import (
-    blend_scalar_cube_edges,
-    blend_vector_cube_edges,
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
     compute_exner_perturbation,
@@ -54,8 +60,14 @@ from legoesm import constants
 
 
 class FVCompressibleEulerConfig(NamedTuple):
-    """Configuration for the FV non-hydrostatic compressible Euler model."""
+    """Configuration for the consistent FV non-hydrostatic CE model.
+
+    Divergence damping is the primary mechanism for controlling
+    cube-imprinted computational modes. Edge blending is NOT used.
+    """
     g: float = constants.g
+    div_damp_2: float = 0.0       # 2nd-order divergence damping [m²/s]
+    div_damp_4: float = 0.0       # 4th-order divergence damping [m⁴/s]
     hyperdiff_coeff: float = 0.0
     hyperdiff_rho_coeff: float = 0.0
     hyperdiff_w_coeff: float = 0.0
@@ -67,59 +79,8 @@ class FVCompressibleEulerConfig(NamedTuple):
     semi_implicit_acoustic: bool = False
     outer_integrator: str = "ssp_rk3"
     use_limiter: bool = True
-    edge_blend_uv: float = 0.0
-    edge_blend_w: float = 0.0
-    edge_blend_theta: float = 0.0
-    edge_blend_rho: float = 0.0
-    edge_blend_tracers: float = 0.0
-    edge_blend_width: int = 1
     fix_mass: bool = False
     anchor_mass_to_initial: bool = False
-
-
-def _apply_fv_nh_edge_blend(
-    state: NonHydrostaticState,
-    grid: CubedSphereGrid,
-    config: FVCompressibleEulerConfig,
-) -> NonHydrostaticState:
-    """Apply variable-specific cubed-sphere edge blending."""
-    u_data = state.u.data
-    v_data = state.v.data
-    w_data = state.w.data
-    theta_data = state.theta_prime.data
-    rho_data = state.rho_prime.data
-    tracers_data = state.tracers.data
-
-    if config.edge_blend_uv > 0.0:
-        u_data, v_data = blend_vector_cube_edges(
-            u_data, v_data, grid.cos_angle, grid.sin_angle,
-            config.edge_blend_uv, width=config.edge_blend_width,
-        )
-    if config.edge_blend_w > 0.0:
-        w_data = blend_scalar_cube_edges(
-            w_data, config.edge_blend_w, width=config.edge_blend_width
-        )
-    if config.edge_blend_theta > 0.0:
-        theta_data = blend_scalar_cube_edges(
-            theta_data, config.edge_blend_theta, width=config.edge_blend_width
-        )
-    if config.edge_blend_rho > 0.0:
-        rho_data = blend_scalar_cube_edges(
-            rho_data, config.edge_blend_rho, width=config.edge_blend_width
-        )
-    if config.edge_blend_tracers > 0.0 and tracers_data.ndim == 5 and tracers_data.shape[-1] > 0:
-        tracers_data = blend_scalar_cube_edges(
-            tracers_data, config.edge_blend_tracers, width=config.edge_blend_width
-        )
-
-    return state._replace(
-        u=state.u.replace(data=u_data),
-        v=state.v.replace(data=v_data),
-        w=state.w.replace(data=w_data),
-        theta_prime=state.theta_prime.replace(data=theta_data),
-        rho_prime=state.rho_prime.replace(data=rho_data),
-        tracers=state.tracers.replace(data=tracers_data),
-    )
 
 
 def fv_compressible_euler_slow_tendencies(
@@ -130,14 +91,23 @@ def fv_compressible_euler_slow_tendencies(
     config: FVCompressibleEulerConfig,
     physics_tendency: NonHydrostaticTendencies | None = None,
 ) -> NonHydrostaticTendencies:
-    """Compute slow (advective) tendencies using FV transport.
+    """Compute slow (advective) tendencies using consistent FV transport.
 
-    Differences from centered:
-    - Theta horizontal advection: FV scalar advection (PPM)
-    - Continuity: FV flux divergence (PPM)
-    - Tracer advection: FV scalar advection (PPM)
-    - Momentum: unchanged (vector-invariant)
-    - Acoustic substeps: unchanged (vertical only)
+    Key consistency: all scalar transport AND divergence damping use the
+    same FV interface flux layer.
+
+    Parameters
+    ----------
+    state : NonHydrostaticState
+    grid : CubedSphereGrid
+    height_coord : HeightCoordinate
+    terrain_metric : TerrainMetric
+    config : FVCompressibleEulerConfig
+    physics_tendency : NonHydrostaticTendencies, optional
+
+    Returns
+    -------
+    NonHydrostaticTendencies
     """
     u = state.u.data
     v = state.v.data
@@ -210,7 +180,15 @@ def fv_compressible_euler_slow_tendencies(
     else:
         dtracers_dt = jnp.zeros_like(tracers)
 
-    # --- 9. Hyperdiffusion ---
+    # --- 9. Divergence damping (primary stabilization) ---
+    if config.div_damp_2 > 0 or config.div_damp_4 > 0:
+        du_damp, dv_damp = _fv_divergence_damping_3d(
+            u, v, grid, config.div_damp_2, config.div_damp_4,
+        )
+        du_dt = du_dt + du_damp
+        dv_dt = dv_dt + dv_damp
+
+    # --- 10. Hyperdiffusion (secondary) ---
     if config.hyperdiff_coeff > 0:
         du_dt = du_dt + hyperdiffusion_3d(u, grid, config.hyperdiff_coeff)
         dv_dt = dv_dt + hyperdiffusion_3d(v, grid, config.hyperdiff_coeff)
@@ -222,7 +200,7 @@ def fv_compressible_euler_slow_tendencies(
             rho_p, grid, config.hyperdiff_rho_coeff
         )
 
-    # --- 10. Sponge layer ---
+    # --- 11. Sponge layer ---
     sponge = _sponge_profile(
         height_coord.z_full, height_coord.H,
         config.sponge_width, config.sponge_coeff,
@@ -236,7 +214,7 @@ def fv_compressible_euler_slow_tendencies(
         config.sponge_width, config.sponge_coeff,
     )
 
-    # --- 11. w tendency (slow: horizontal advection) ---
+    # --- 12. w tendency (slow: horizontal advection) ---
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
     dw_dx = gradient_x_3d(w_full, grid)
     dw_dy = gradient_y_3d(w_full, grid)
@@ -253,7 +231,7 @@ def fv_compressible_euler_slow_tendencies(
             w, grid, config.hyperdiff_w_coeff
         )
 
-    # --- 12. Physics ---
+    # --- 13. Physics ---
     if physics_tendency is not None:
         du_dt = du_dt + physics_tendency.du_dt.data
         dv_dt = dv_dt + physics_tendency.dv_dt.data
@@ -288,10 +266,10 @@ def fv_compressible_euler_slow_tendencies(
 
 
 class FVCompressibleEulerModel:
-    """FV3-style non-hydrostatic compressible Euler model.
+    """Consistent FV non-hydrostatic compressible Euler model.
 
-    Same interface as CompressibleEulerModel but uses PPM + Lin-Rood
-    for theta advection, continuity, and tracer transport.
+    Uses PPM transport for theta/rho/tracers, and FV-consistent
+    divergence damping. Does NOT rely on edge blending.
 
     Parameters
     ----------
@@ -318,22 +296,6 @@ class FVCompressibleEulerModel:
             grid = apply_small_earth_scaling(grid, self.config.small_earth_factor)
         self.grid = grid
 
-        for name in ("hyperdiff_coeff", "hyperdiff_rho_coeff", "hyperdiff_w_coeff"):
-            value = float(getattr(self.config, name))
-            if value < 0.0:
-                raise ValueError(f"{name} must be >= 0, got {value!r}")
-        for name in (
-            "edge_blend_uv", "edge_blend_w", "edge_blend_theta",
-            "edge_blend_rho", "edge_blend_tracers",
-        ):
-            value = float(getattr(self.config, name))
-            if not (0.0 <= value <= 1.0):
-                raise ValueError(f"{name} must be in [0, 1], got {value!r}")
-        if int(self.config.edge_blend_width) < 1:
-            raise ValueError(
-                f"edge_blend_width must be >= 1, got {self.config.edge_blend_width!r}"
-            )
-
     def tendencies(
         self,
         state: NonHydrostaticState,
@@ -348,8 +310,6 @@ class FVCompressibleEulerModel:
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: NonHydrostaticState, dt: float) -> NonHydrostaticState:
         """Advance one time step using split-explicit RK3 with FV transport."""
-        # Build a centered-style config for the acoustic substeps
-        # (they reuse the existing acoustic_substeps function)
         from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
         acoustic_cfg = CompressibleEulerConfig(
             g=self.config.g,
@@ -391,15 +351,6 @@ class FVCompressibleEulerModel:
         state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
-
-        if (
-            self.config.edge_blend_uv > 0.0
-            or self.config.edge_blend_w > 0.0
-            or self.config.edge_blend_theta > 0.0
-            or self.config.edge_blend_rho > 0.0
-            or self.config.edge_blend_tracers > 0.0
-        ):
-            state_new = _apply_fv_nh_edge_blend(state_new, self.grid, self.config)
 
         if self.config.fix_mass:
             from legoesm.core.conservation import (
@@ -477,15 +428,6 @@ class FVCompressibleEulerModel:
         state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
-
-        if (
-            self.config.edge_blend_uv > 0.0
-            or self.config.edge_blend_w > 0.0
-            or self.config.edge_blend_theta > 0.0
-            or self.config.edge_blend_rho > 0.0
-            or self.config.edge_blend_tracers > 0.0
-        ):
-            state_new = _apply_fv_nh_edge_blend(state_new, self.grid, self.config)
 
         if self.config.fix_mass:
             from legoesm.core.conservation import (

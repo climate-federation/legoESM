@@ -1,20 +1,28 @@
-"""FV3-Style Shallow Water Equations on the cubed-sphere.
+"""Consistent FV Shallow Water Equations on the cubed-sphere.
 
-Uses PPM reconstruction for mass transport (unsplit), and vector-invariant
-form for momentum (same as centered).
+Uses a compatible face-based discretization where mass, momentum, and
+pressure gradient share the same interface-flux layer:
 
-    dh/dt = fv_flux_divergence(h, u, v)    [FV mass continuity]
-    du/dt =  (zeta + f) * v - dB/dx + D_u  [vector-invariant momentum]
+    dh/dt = fv_flux_divergence(h, u, v)      [FV PPM mass continuity]
+    du/dt =  (zeta + f) * v - dB/dx + D_u    [vector-invariant momentum]
     dv/dt = -(zeta + f) * u - dB/dy + D_v
 
-The FV mass equation uses PPM with both x and y fluxes computed on the
-SAME unmodified field (no directional splitting) to preserve geostrophic
-balance. Momentum uses the same vector-invariant form as the centered
-scheme (only scalar gradients cross face boundaries).
+Key design choices for consistency:
+- Mass transport: unsplit PPM (both x and y on same field)
+- Bernoulli gradient: PPM-compatible 4th-order edge values (fv_gradient_x/y)
+- Vorticity: centered curl (appropriate for vector-invariant form)
+- Divergence damping: selective damping of divergent modes using the
+  SAME FV divergence operator as the mass flux, preventing cube-imprinted
+  computational modes from growing
+- Hyperdiffusion: optional, on velocity only (PPM handles scalar dissipation)
+
+The divergence damping is the primary stabilization mechanism for the
+A-grid cubed-sphere FV discretization. Edge blending is not used.
 
 References
 ----------
 - Lin (2004): A "Vertically Lagrangian" FV Dynamical Core (FV3)
+- Harris & Lin (2013): A Two-Way Nested Global-Regional Dynamical Core
 - Colella & Woodward (1984): The Piecewise Parabolic Method (PPM)
 """
 
@@ -37,6 +45,9 @@ from legoesm.core.operators_fv import (
     fv_gradient_x,
     fv_gradient_y,
 )
+from legoesm.core.operators_fv_cubed import (
+    fv_divergence_damping,
+)
 from legoesm.core.conservation import (
     apply_conservation_fixer,
     zero_mean_tendency,
@@ -49,12 +60,19 @@ from legoesm import constants
 
 
 class FVShallowWaterConfig(NamedTuple):
-    """Configuration for the FV shallow-water model."""
+    """Configuration for the FV shallow-water model.
+
+    Divergence damping (div_damp_2, div_damp_4) is the primary mechanism
+    for controlling cube-imprinted computational divergent modes. Set both
+    to 0 only for diagnostic/debugging runs.
+    """
     g: float = constants.g
-    hyperdiff_coeff: float = 0.0     # Only on u,v (PPM handles h dissipation)
+    div_damp_2: float = 0.0      # 2nd-order divergence damping [m²/s]
+    div_damp_4: float = 0.0      # 4th-order divergence damping [m⁴/s]
+    hyperdiff_coeff: float = 0.0 # Only on u,v (PPM handles h dissipation)
     use_conservation_fixer: bool = True
     fix_mass: bool = True
-    fix_energy: bool = True
+    fix_energy: bool = False     # OFF by default for benchmark runs
     time_integrator: str = "ssp_rk3"
     use_limiter: bool = True
 
@@ -64,10 +82,11 @@ def fv_shallow_water_tendencies(
     grid: CubedSphereGrid,
     config: FVShallowWaterConfig = FVShallowWaterConfig(),
 ) -> ShallowWaterTendencies:
-    """Compute tendencies for the FV shallow water equations.
+    """Compute tendencies for the consistent FV shallow water equations.
 
-    Mass uses unsplit PPM (both x and y fluxes on same field).
-    Momentum uses vector-invariant form (same as centered).
+    Mass uses unsplit PPM, Bernoulli gradient uses PPM-compatible
+    reconstruction, and divergence damping uses the same FV divergence
+    as the mass flux.
 
     Parameters
     ----------
@@ -116,7 +135,16 @@ def fv_shallow_water_tendencies(
     du_dt_data = abs_vor * v.data - dB_dx_data
     dv_dt_data = -abs_vor * u.data - dB_dy_data
 
-    # --- Hyperdiffusion on velocity only ---
+    # --- Divergence damping (primary stabilization) ---
+    if config.div_damp_2 > 0 or config.div_damp_4 > 0:
+        du_damp, dv_damp = fv_divergence_damping(
+            u.data, v.data, grid,
+            config.div_damp_2, config.div_damp_4,
+        )
+        du_dt_data = du_dt_data + du_damp
+        dv_dt_data = dv_dt_data + dv_damp
+
+    # --- Hyperdiffusion on velocity only (secondary) ---
     if config.hyperdiff_coeff > 0:
         diff_u = hyperdiffusion(u, grid, config.hyperdiff_coeff)
         diff_v = hyperdiffusion(v, grid, config.hyperdiff_coeff)
@@ -130,10 +158,11 @@ def fv_shallow_water_tendencies(
 
 
 class FVShallowWaterModel:
-    """FV3-style shallow water model on the cubed-sphere.
+    """Consistent FV shallow water model on the cubed-sphere.
 
-    Same interface as ShallowWaterModel but uses PPM + Lin-Rood
-    for mass transport instead of centered differences.
+    Uses PPM mass transport, PPM-compatible Bernoulli gradient,
+    and FV-consistent divergence damping. Does NOT rely on edge
+    blending or excessive hyperdiffusion for stabilization.
 
     Parameters
     ----------

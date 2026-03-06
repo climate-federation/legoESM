@@ -857,13 +857,17 @@ def _run_fv_cubesphere(
     snapshots_latlon: dict[int, dict[str, np.ndarray]] = {}
     snapshots_cube: dict[int, dict[str, np.ndarray]] = {}
 
+    from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
+    nu2, nu4 = default_div_damp_coeffs(grid, dt=dt)
     cfg = FVShallowWaterConfig(
         hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
+        div_damp_2=nu2,
+        div_damp_4=nu4,
         time_integrator="ssp45",
         use_limiter=True,
         use_conservation_fixer=True,
         fix_mass=True,
-        fix_energy=True,
+        fix_energy=False,
     )
     model = FVShallowWaterModel(grid, cfg)
 

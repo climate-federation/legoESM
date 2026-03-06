@@ -1,15 +1,23 @@
-"""FV3-Style Hydrostatic Primitive Equations on the cubed-sphere.
+"""Consistent FV Hydrostatic Primitive Equations on the cubed-sphere.
 
-Uses unsplit PPM for:
-- Surface pressure tendency (replaces centered divergence)
-- Temperature horizontal advection (replaces centered gradient)
+Uses a compatible face-based discretization where surface pressure,
+temperature, sigma_dot, and momentum all share the same FV interface
+flux layer:
 
-Momentum remains in vector-invariant form (same as centered).
-Vertical advection and thermodynamics are unchanged.
+- Surface pressure: FV flux divergence (PPM)
+- Temperature: FV scalar advection (PPM)
+- Sigma-dot: computed from FV divergence (same interface velocities as p_s)
+- Momentum: vector-invariant form with centered Bernoulli gradient
+- Divergence damping: selective damping using FV-consistent divergence
+
+The FV divergence used for sigma_dot is discretely compatible with the
+FV transport of p_s, ensuring that vertical velocity is consistent with
+horizontal mass transport.
 
 References
 ----------
 - Lin (2004): A "Vertically Lagrangian" FV Dynamical Core (FV3)
+- Harris & Lin (2013): A Two-Way Nested Global-Regional Dynamical Core
 - Colella & Woodward (1984): The Piecewise Parabolic Method (PPM)
 """
 
@@ -37,6 +45,10 @@ from legoesm.core.operators_3d import (
     fv_scalar_advection_3d as _fv_scalar_advection_3d,
 )
 from legoesm.core.operators_fv import fv_flux_divergence
+from legoesm.core.operators_fv_cubed import (
+    fv_divergence_3d as _fv_divergence_3d,
+    fv_divergence_damping_3d as _fv_divergence_damping_3d,
+)
 from legoesm.core.conservation import zero_mean_tendency
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
@@ -50,16 +62,18 @@ from legoesm.grids.vertical import (
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
-from legoesm.atmosphere.dynamics.edge_blending import (
-    blend_scalar_cube_edges,
-    blend_vector_cube_edges,
-)
 from legoesm import constants
 
 
 class FVPrimitiveEquationConfig(NamedTuple):
-    """Configuration for the FV hydrostatic primitive equation model."""
+    """Configuration for the consistent FV hydrostatic PE model.
+
+    Divergence damping is the primary mechanism for controlling
+    cube-imprinted computational modes. Edge blending is NOT used.
+    """
     g: float = constants.g
+    div_damp_2: float = 0.0       # 2nd-order divergence damping [m²/s]
+    div_damp_4: float = 0.0       # 4th-order divergence damping [m⁴/s]
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
     use_conservation_fixer: bool = True
@@ -67,43 +81,6 @@ class FVPrimitiveEquationConfig(NamedTuple):
     anchor_mass_to_initial: bool = False
     time_integrator: str = "ssp_rk3"
     use_limiter: bool = True
-    edge_blend_uv: float = 0.0
-    edge_blend_T: float = 0.0
-    edge_blend_p_s: float = 0.0
-    edge_blend_width: int = 1
-
-
-def _apply_fv_hydro_edge_blend(
-    state: HydrostaticState,
-    grid: CubedSphereGrid,
-    config: FVPrimitiveEquationConfig,
-) -> HydrostaticState:
-    """Apply variable-specific cubed-sphere edge blending."""
-    u_data = state.u.data
-    v_data = state.v.data
-    T_data = state.T.data
-    p_s_data = state.p_s.data
-
-    if config.edge_blend_uv > 0.0:
-        u_data, v_data = blend_vector_cube_edges(
-            u_data, v_data, grid.cos_angle, grid.sin_angle,
-            config.edge_blend_uv, width=config.edge_blend_width,
-        )
-    if config.edge_blend_T > 0.0:
-        T_data = blend_scalar_cube_edges(
-            T_data, config.edge_blend_T, width=config.edge_blend_width
-        )
-    if config.edge_blend_p_s > 0.0:
-        p_s_data = blend_scalar_cube_edges(
-            p_s_data, config.edge_blend_p_s, width=config.edge_blend_width
-        )
-
-    return state._replace(
-        u=state.u.replace(data=u_data),
-        v=state.v.replace(data=v_data),
-        T=state.T.replace(data=T_data),
-        p_s=state.p_s.replace(data=p_s_data),
-    )
 
 
 def fv_hydrostatic_tendencies(
@@ -113,12 +90,11 @@ def fv_hydrostatic_tendencies(
     config: FVPrimitiveEquationConfig = FVPrimitiveEquationConfig(),
     physics_tendency: HydrostaticTendencies | None = None,
 ) -> HydrostaticTendencies:
-    """Compute tendencies for the FV hydrostatic primitive equations.
+    """Compute tendencies for the consistent FV hydrostatic primitive equations.
 
-    Differences from centered:
-    - Surface pressure: FV flux divergence instead of centered divergence
-    - Temperature: FV scalar advection instead of centered gradient
-    - Momentum: unchanged (vector-invariant)
+    Key consistency: sigma_dot uses the SAME FV divergence operator as
+    the p_s transport, so vertical velocity is compatible with horizontal
+    mass flux.
 
     Parameters
     ----------
@@ -189,9 +165,10 @@ def fv_hydrostatic_tendencies(
     )
     dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
-    # sigma-dot from divergence (still use centered for vertical consistency)
-    from legoesm.core.operators_3d import divergence_3d as _divergence_3d
-    div_v = _divergence_3d(u, v, grid)
+    # --- 6. Sigma-dot from FV-consistent divergence ---
+    # Uses the SAME FV divergence operator as the mass flux,
+    # ensuring discrete compatibility.
+    div_v = _fv_divergence_3d(u, v, grid)
     sigma_dot = compute_sigma_dot(div_v, sigma_coord)
 
     # --- 7. Vertical advection of T, u, v ---
@@ -218,7 +195,15 @@ def fv_hydrostatic_tendencies(
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
 
-    # --- 9. Hyperdiffusion ---
+    # --- 9. Divergence damping (primary stabilization) ---
+    if config.div_damp_2 > 0 or config.div_damp_4 > 0:
+        du_damp, dv_damp = _fv_divergence_damping_3d(
+            u, v, grid, config.div_damp_2, config.div_damp_4,
+        )
+        du_dt_data = du_dt_data + du_damp
+        dv_dt_data = dv_dt_data + dv_damp
+
+    # --- 10. Hyperdiffusion (secondary) ---
     if config.hyperdiff_coeff > 0:
         diff_u = _hyperdiffusion_3d(u, grid, config.hyperdiff_coeff)
         diff_v = _hyperdiffusion_3d(v, grid, config.hyperdiff_coeff)
@@ -233,7 +218,7 @@ def fv_hydrostatic_tendencies(
         diff_ps = hyperdiffusion(ps_field, grid, config.hyperdiff_ps_coeff)
         dp_s_dt_data = dp_s_dt_data + diff_ps.data
 
-    # --- 10. Physics ---
+    # --- 11. Physics ---
     if physics_tendency is not None:
         du_dt_data = du_dt_data + physics_tendency.du_dt.data
         dv_dt_data = dv_dt_data + physics_tendency.dv_dt.data
@@ -255,10 +240,10 @@ def fv_hydrostatic_tendencies(
 
 
 class FVPrimitiveEquationModel:
-    """FV3-style hydrostatic PE model on the cubed-sphere.
+    """Consistent FV hydrostatic PE model on the cubed-sphere.
 
-    Same interface as PrimitiveEquationModel but uses PPM + Lin-Rood
-    for surface pressure and temperature horizontal transport.
+    Uses PPM transport for p_s and T, FV-consistent sigma_dot,
+    and selective divergence damping. Does NOT rely on edge blending.
 
     Parameters
     ----------
@@ -277,15 +262,6 @@ class FVPrimitiveEquationModel:
         self.sigma_coord = sigma_coord
         self.config = config or FVPrimitiveEquationConfig()
         self._target_mass = None
-
-        for name in ("edge_blend_uv", "edge_blend_T", "edge_blend_p_s"):
-            value = float(getattr(self.config, name))
-            if not (0.0 <= value <= 1.0):
-                raise ValueError(f"{name} must be in [0, 1], got {value!r}")
-        if int(self.config.edge_blend_width) < 1:
-            raise ValueError(
-                f"edge_blend_width must be >= 1, got {self.config.edge_blend_width!r}"
-            )
 
     def tendencies(
         self,
@@ -323,15 +299,6 @@ class FVPrimitiveEquationModel:
         else:
             raise ValueError(
                 f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
-
-        if (
-            self.config.edge_blend_uv > 0.0
-            or self.config.edge_blend_T > 0.0
-            or self.config.edge_blend_p_s > 0.0
-        ):
-            state_new = _apply_fv_hydro_edge_blend(
-                state_new, self.grid, self.config
             )
 
         if self.config.use_conservation_fixer and self.config.fix_mass:
@@ -382,15 +349,6 @@ class FVPrimitiveEquationModel:
         else:
             raise ValueError(
                 f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
-
-        if (
-            self.config.edge_blend_uv > 0.0
-            or self.config.edge_blend_T > 0.0
-            or self.config.edge_blend_p_s > 0.0
-        ):
-            state_new = _apply_fv_hydro_edge_blend(
-                state_new, self.grid, self.config
             )
 
         if self.config.use_conservation_fixer and self.config.fix_mass:
