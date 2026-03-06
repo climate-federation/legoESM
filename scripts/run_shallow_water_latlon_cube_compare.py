@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Run shallow-water Williamson tests with harmonized diagnostics.
 
-This script runs:
+This script runs (for Williamson 2 and/or 5):
 1) Spectral shallow water on Gaussian (lat-lon) grid
 2) Finite-volume shallow water on cubed-sphere, remapped to lat-lon outputs
 3) Finite-volume shallow water on cubed-sphere native map outputs
@@ -427,39 +427,51 @@ def _save_snapshots_latlon(
         axes.append(row_axes)
     caxes = [fig.add_subplot(gs[r, n_cols]) for r in range(n_rows)]
 
+    lon_base = np.asarray(lon2d_deg, dtype=np.float64)
+    lat_base = np.asarray(lat2d_deg, dtype=np.float64)
+    if HAS_CARTOPY and projection == "platecarree":
+        lon_base = ((lon_base + 180.0) % 360.0) - 180.0
+    order = np.argsort(lon_base[0, :])
+    lon_base = lon_base[:, order]
+    lat_base = lat_base[:, order]
+
+    lon_plot = np.concatenate([lon_base, lon_base[:, :1] + 360.0], axis=1)
+    lat_plot = np.concatenate([lat_base, lat_base[:, :1]], axis=1)
+
     for r, (key, label, cmap) in enumerate(field_specs):
         panels = [np.asarray(snapshots[s][key], dtype=np.float64) for s in steps]
         vmin, vmax = _color_limits(panels, symmetric=("vorticity" in key))
         im = None
         for c, st in enumerate(steps):
             ax = axes[r][c]
-            fld = panels[c]
+            fld = panels[c][:, order]
             if proj is None:
-                im = ax.pcolormesh(lon2d_deg, lat2d_deg, fld, cmap=cmap, vmin=vmin, vmax=vmax, shading="auto")
+                im = ax.pcolormesh(
+                    lon_plot,
+                    lat_plot,
+                    np.concatenate([fld, fld[:, :1]], axis=1),
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                    shading="auto",
+                    rasterized=True,
+                )
                 ax.set_xlim(0.0, 360.0)
                 ax.set_ylim(-90.0, 90.0)
                 ax.set_xticks([0, 60, 120, 180, 240, 300, 360])
                 ax.set_yticks([-60, -30, 0, 30, 60])
                 ax.grid(True, alpha=0.15)
             else:
-                vals = fld.reshape(-1)
-                lon_pts = lon2d_deg.reshape(-1)
-                lat_pts = lat2d_deg.reshape(-1)
-                valid = np.isfinite(vals) & np.isfinite(lon_pts) & np.isfinite(lat_pts)
-                lon_plot = lon_pts[valid]
-                if projection == "platecarree":
-                    lon_plot = ((lon_plot + 180.0) % 360.0) - 180.0
-                marker_size = max(0.5, 2200.0 / max(1, vals.size))
-                im = ax.scatter(
+                fld_plot = np.concatenate([fld, fld[:, :1]], axis=1)
+                im = ax.pcolormesh(
                     lon_plot,
-                    lat_pts[valid],
-                    c=vals[valid],
-                    s=marker_size,
+                    lat_plot,
+                    fld_plot,
                     cmap=cmap,
                     vmin=vmin,
                     vmax=vmax,
-                    linewidths=0.0,
                     transform=ccrs.PlateCarree(),
+                    shading="auto",
                     rasterized=True,
                 )
                 if projection == "platecarree":
@@ -525,8 +537,13 @@ def _save_snapshots_cube(
         axes.append(row_axes)
     caxes = [fig.add_subplot(gs[r, n_cols]) for r in range(n_rows)]
 
-    lon_pts = np.asarray(cube_lon_deg, dtype=np.float64).reshape(-1)
-    lat_pts = np.asarray(cube_lat_deg, dtype=np.float64).reshape(-1)
+    lon_faces = np.asarray(cube_lon_deg, dtype=np.float64)
+    lat_faces = np.asarray(cube_lat_deg, dtype=np.float64)
+    use_face_tiles = lon_faces.ndim == 3 and lat_faces.ndim == 3 and lon_faces.shape == lat_faces.shape
+    if use_face_tiles and projection == "platecarree":
+        lon_faces = ((lon_faces + 180.0) % 360.0) - 180.0
+    lon_pts = lon_faces.reshape(-1)
+    lat_pts = lat_faces.reshape(-1)
 
     for r, (key, label, cmap) in enumerate(field_specs):
         panels = [np.asarray(snapshots[s][key], dtype=np.float64) for s in steps]
@@ -534,41 +551,81 @@ def _save_snapshots_cube(
         im = None
         for c, st in enumerate(steps):
             ax = axes[r][c]
-            fld = panels[c].reshape(-1)
-            valid = np.isfinite(lon_pts) & np.isfinite(lat_pts) & np.isfinite(fld)
+            fld_panel = panels[c]
             if proj is None:
-                im = ax.scatter(
-                    ((lon_pts[valid] + 360.0) % 360.0),
-                    lat_pts[valid],
-                    c=fld[valid],
-                    s=max(0.8, 2200.0 / max(1, fld.size)),
-                    cmap=cmap,
-                    vmin=vmin,
-                    vmax=vmax,
-                    linewidths=0.0,
-                    rasterized=True,
-                )
+                if use_face_tiles and fld_panel.ndim == 3 and fld_panel.shape == lon_faces.shape:
+                    for fidx in range(fld_panel.shape[0]):
+                        lon_f = (lon_faces[fidx] + 360.0) % 360.0
+                        lat_f = lat_faces[fidx]
+                        fld_f = fld_panel[fidx]
+                        mask_f = ~(np.isfinite(lon_f) & np.isfinite(lat_f) & np.isfinite(fld_f))
+                        fld_m = np.ma.array(fld_f, mask=mask_f)
+                        im = ax.pcolormesh(
+                            lon_f,
+                            lat_f,
+                            fld_m,
+                            cmap=cmap,
+                            vmin=vmin,
+                            vmax=vmax,
+                            shading="nearest",
+                            rasterized=True,
+                        )
+                else:
+                    fld = fld_panel.reshape(-1)
+                    valid = np.isfinite(lon_pts) & np.isfinite(lat_pts) & np.isfinite(fld)
+                    im = ax.scatter(
+                        ((lon_pts[valid] + 360.0) % 360.0),
+                        lat_pts[valid],
+                        c=fld[valid],
+                        s=max(0.8, 2200.0 / max(1, fld.size)),
+                        cmap=cmap,
+                        vmin=vmin,
+                        vmax=vmax,
+                        linewidths=0.0,
+                        rasterized=True,
+                    )
                 ax.set_xlim(0.0, 360.0)
                 ax.set_ylim(-90.0, 90.0)
                 ax.set_xticks([0, 60, 120, 180, 240, 300, 360])
                 ax.set_yticks([-60, -30, 0, 30, 60])
                 ax.grid(True, alpha=0.15)
             else:
-                lon_plot = lon_pts[valid]
-                if projection == "platecarree":
-                    lon_plot = ((lon_plot + 180.0) % 360.0) - 180.0
-                im = ax.scatter(
-                    lon_plot,
-                    lat_pts[valid],
-                    c=fld[valid],
-                    s=max(0.8, 2200.0 / max(1, fld.size)),
-                    cmap=cmap,
-                    vmin=vmin,
-                    vmax=vmax,
-                    linewidths=0.0,
-                    transform=ccrs.PlateCarree(),
-                    rasterized=True,
-                )
+                if use_face_tiles and fld_panel.ndim == 3 and fld_panel.shape == lon_faces.shape:
+                    for fidx in range(fld_panel.shape[0]):
+                        lon_f = lon_faces[fidx]
+                        lat_f = lat_faces[fidx]
+                        fld_f = fld_panel[fidx]
+                        mask_f = ~(np.isfinite(lon_f) & np.isfinite(lat_f) & np.isfinite(fld_f))
+                        fld_m = np.ma.array(fld_f, mask=mask_f)
+                        im = ax.pcolormesh(
+                            lon_f,
+                            lat_f,
+                            fld_m,
+                            cmap=cmap,
+                            vmin=vmin,
+                            vmax=vmax,
+                            transform=ccrs.PlateCarree(),
+                            shading="nearest",
+                            rasterized=True,
+                        )
+                else:
+                    fld = fld_panel.reshape(-1)
+                    valid = np.isfinite(lon_pts) & np.isfinite(lat_pts) & np.isfinite(fld)
+                    lon_plot = lon_pts[valid]
+                    if projection == "platecarree":
+                        lon_plot = ((lon_plot + 180.0) % 360.0) - 180.0
+                    im = ax.scatter(
+                        lon_plot,
+                        lat_pts[valid],
+                        c=fld[valid],
+                        s=max(0.8, 2200.0 / max(1, fld.size)),
+                        cmap=cmap,
+                        vmin=vmin,
+                        vmax=vmax,
+                        linewidths=0.0,
+                        transform=ccrs.PlateCarree(),
+                        rasterized=True,
+                    )
                 if projection == "platecarree":
                     ax.set_extent([-180.0, 180.0, -90.0, 90.0], ccrs.PlateCarree())
                 else:
@@ -593,6 +650,7 @@ def _run_spectral_latlon(
     days: float,
     dt: float,
     mean_every: int,
+    case: str,
     projection: str,
     draw_coastlines: bool,
 ) -> dict:
@@ -603,11 +661,20 @@ def _run_spectral_latlon(
         spectral_to_grid,
         compute_spectral_diagnostics,
         williamson_test2_spectral,
+        williamson_test5_spectral,
     )
     from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    case_name = f"SW Spectral LatLon Williamson2 T{trunc} SSP45"
+    if case == "williamson2":
+        init_fn = williamson_test2_spectral
+        case_tag = "Williamson2"
+    elif case == "williamson5":
+        init_fn = williamson_test5_spectral
+        case_tag = "Williamson5"
+    else:
+        raise ValueError(f"Unsupported case '{case}'")
+    case_name = f"SW Spectral LatLon {case_tag} T{trunc} SSP45"
 
     grid = create_gaussian_grid(trunc)
     area = _gaussian_area_weights(grid)
@@ -615,7 +682,7 @@ def _run_spectral_latlon(
     lat1d = np.degrees(np.asarray(grid.lat))
     lon2d, lat2d = np.meshgrid(lon1d, lat1d)
 
-    state = williamson_test2_spectral(grid)
+    state = init_fn(grid)
     n_steps = int(days * 86400.0 / dt)
     snap_targets = _snapshot_steps(n_steps)
     snapshots: dict[int, dict[str, np.ndarray]] = {}
@@ -717,7 +784,7 @@ def _run_spectral_latlon(
     _save_slab_timeseries(out_dir, case_name, slab_values)
 
     with open(out_dir / "results.txt", "w") as f:
-        f.write(f"case: spectral_latlon\n")
+        f.write(f"case: spectral_latlon_{case}\n")
         f.write(f"truncation: T{trunc}\n")
         f.write(f"duration_days: {days}\n")
         f.write(f"dt: {dt}\n")
@@ -741,7 +808,7 @@ def _run_spectral_latlon(
         f.write(f"final_vort_rms: {slab_values[-1]['vor_rms']:.8e}\n")
 
     return {
-        "case": "spectral_latlon",
+        "case": f"spectral_latlon_{case}",
         "stable": stable,
         "wall_time_s": wall,
         "n_steps": n_steps,
@@ -756,6 +823,7 @@ def _run_fv_cubesphere(
     days: float,
     dt: float,
     mean_every: int,
+    case: str,
     projection: str,
     draw_coastlines: bool,
 ) -> dict:
@@ -763,19 +831,27 @@ def _run_fv_cubesphere(
     from legoesm.atmosphere.dynamics.shallow_water_fv import FVShallowWaterConfig, FVShallowWaterModel
     from legoesm.core.conservation import compute_conservation_diagnostics
     from legoesm.core.operators import curl_z
-    from tests.test_cases.williamson import williamson_test2
+    from tests.test_cases.williamson import williamson_test2, williamson_test5
 
     out_dir_latlon.mkdir(parents=True, exist_ok=True)
     out_dir_cube.mkdir(parents=True, exist_ok=True)
-    case_name_latlon = f"SW Finite-Volume LatLon(remapped) Williamson2 C{n} SSP45"
-    case_name_cube = f"SW Finite-Volume CubeSphere Williamson2 C{n} SSP45"
+    if case == "williamson2":
+        init_fn = williamson_test2
+        case_tag = "Williamson2"
+    elif case == "williamson5":
+        init_fn = williamson_test5
+        case_tag = "Williamson5"
+    else:
+        raise ValueError(f"Unsupported case '{case}'")
+    case_name_latlon = f"SW Finite-Volume LatLon(remapped) {case_tag} C{n} SSP45"
+    case_name_cube = f"SW Finite-Volume CubeSphere {case_tag} C{n} SSP45"
 
     grid = create_cubed_sphere(n)
     area = np.asarray(grid.area, dtype=np.float64)
     lon_faces = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
     lat_faces = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
 
-    state = williamson_test2(grid)
+    state = init_fn(grid)
     n_steps = int(days * 86400.0 / dt)
     snap_targets = _snapshot_steps(n_steps)
     snapshots_latlon: dict[int, dict[str, np.ndarray]] = {}
@@ -934,7 +1010,7 @@ def _run_fv_cubesphere(
         _save_conservation_timeseries(tgt_dir, tgt_name, cons_series, dt)
         _save_slab_timeseries(tgt_dir, tgt_name, slab_values)
         with open(tgt_dir / "results.txt", "w") as f:
-            f.write(f"case: fv_cubesphere\n")
+            f.write(f"case: fv_cubesphere_{case}\n")
             f.write(f"resolution: C{n}\n")
             f.write(f"duration_days: {days}\n")
             f.write(f"dt: {dt}\n")
@@ -958,7 +1034,7 @@ def _run_fv_cubesphere(
             f.write(f"final_vort_rms: {slab_values[-1]['vor_rms']:.8e}\n")
 
     return {
-        "case": "fv_cubesphere",
+        "case": f"fv_cubesphere_{case}",
         "stable": stable,
         "wall_time_s": wall,
         "n_steps": n_steps,
@@ -969,6 +1045,13 @@ def _run_fv_cubesphere(
 def main():
     parser = argparse.ArgumentParser(description="Run SW spectral/FV lat-lon and cubed-sphere diagnostics.")
     parser.add_argument("--output", type=Path, default=Path("results/sw_latlon_cube_compare"))
+    parser.add_argument(
+        "--case",
+        type=str,
+        default="all",
+        choices=("all", "williamson2", "williamson5"),
+        help="Williamson test case to run.",
+    )
     parser.add_argument("--days", type=float, default=5.0)
     parser.add_argument("--cube-resolution", type=int, default=36)
     parser.add_argument("--spectral-truncation", type=int, default=42)
@@ -995,6 +1078,7 @@ def main():
 
     print("Running shallow-water comparison suite:")
     print(f"  output={out_root}")
+    print(f"  case={args.case}")
     print(f"  days={args.days}")
     print(f"  cube_resolution=C{args.cube_resolution}, dt_fv={args.dt_fv}s")
     print(f"  spectral_truncation=T{args.spectral_truncation}, dt_spec={args.dt_spec}s")
@@ -1002,33 +1086,51 @@ def main():
     t0 = time.time()
     summary = {}
 
-    print("\n[1/2] Spectral lat-lon run ...")
-    summary["spectral_latlon"] = _run_spectral_latlon(
-        out_root / "01_latlon_spectral_williamson2",
-        trunc=args.spectral_truncation,
-        days=args.days,
-        dt=args.dt_spec,
-        mean_every=args.mean_every_spec,
-        projection=args.projection,
-        draw_coastlines=args.coastlines,
-    )
+    case_list = ["williamson2", "williamson5"] if args.case == "all" else [args.case]
+    dir_map = {
+        "williamson2": (
+            "01_latlon_spectral_williamson2",
+            "02_latlon_fv_williamson2",
+            "03_cubesphere_fv_williamson2",
+        ),
+        "williamson5": (
+            "04_latlon_spectral_williamson5",
+            "05_latlon_fv_williamson5",
+            "06_cubesphere_fv_williamson5",
+        ),
+    }
 
-    print("\n[2/2] Finite-volume cubed-sphere run (+lat-lon remap outputs) ...")
-    summary["finite_volume"] = _run_fv_cubesphere(
-        out_root / "02_latlon_fv_williamson2",
-        out_root / "03_cubesphere_fv_williamson2",
-        n=args.cube_resolution,
-        days=args.days,
-        dt=args.dt_fv,
-        mean_every=args.mean_every_fv,
-        projection=args.projection,
-        draw_coastlines=args.coastlines,
-    )
+    for idx, case in enumerate(case_list, start=1):
+        print(f"\n[{idx}/{len(case_list)}] Running {case} ...")
+        spec_dir, fv_ll_dir, fv_cube_dir = dir_map[case]
+        summary[f"spectral_latlon_{case}"] = _run_spectral_latlon(
+            out_root / spec_dir,
+            trunc=args.spectral_truncation,
+            days=args.days,
+            dt=args.dt_spec,
+            mean_every=args.mean_every_spec,
+            case=case,
+            projection=args.projection,
+            draw_coastlines=args.coastlines,
+        )
+
+        summary[f"finite_volume_{case}"] = _run_fv_cubesphere(
+            out_root / fv_ll_dir,
+            out_root / fv_cube_dir,
+            n=args.cube_resolution,
+            days=args.days,
+            dt=args.dt_fv,
+            mean_every=args.mean_every_fv,
+            case=case,
+            projection=args.projection,
+            draw_coastlines=args.coastlines,
+        )
 
     wall = time.time() - t0
     summary["wall_time_s_total"] = wall
     summary["args"] = {
         "days": args.days,
+        "case": args.case,
         "cube_resolution": args.cube_resolution,
         "spectral_truncation": args.spectral_truncation,
         "dt_fv": args.dt_fv,
