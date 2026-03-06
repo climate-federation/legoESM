@@ -1,17 +1,19 @@
-"""FV3-Style Shallow Water Equations on the lat-lon grid.
+"""Shallow Water Equations on the lat-lon grid (FV framework).
 
-Uses PPM reconstruction for mass transport (unsplit), and vector-invariant
-form for momentum (same as centered). Includes a Fourier polar filter
+Uses centered divergence for mass transport (consistent with the centered
+gradient and vorticity operators in the momentum equation) and
+vector-invariant form for momentum. Includes a Fourier polar filter
 for CFL stability near the poles.
 
-    dh/dt = fv_flux_divergence_latlon(h, u, v)  [FV mass continuity]
-    du/dt =  (zeta + f) * v - dB/dx + D_u       [vector-invariant momentum]
+    dh/dt = -div(h*u, h*v)                       [centered mass continuity]
+    du/dt =  (zeta + f) * v - dB/dx + D_u        [vector-invariant momentum]
     dv/dt = -(zeta + f) * u - dB/dy + D_v
 
-References
-----------
-- Lin (2004): A "Vertically Lagrangian" FV Dynamical Core (FV3)
-- Colella & Woodward (1984): The Piecewise Parabolic Method (PPM)
+Note: PPM transport is used in the PE and CE lat-lon models for scalar
+fields (T, p_s, theta, rho, tracers) where it does not directly feed
+back into the momentum equation. For the SW mass equation on an A-grid,
+centered divergence avoids energy-inconsistent feedback between mass and
+momentum operators that would otherwise cause exponential v-velocity growth.
 """
 
 from __future__ import annotations
@@ -24,11 +26,8 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import ShallowWaterState, ShallowWaterTendencies
-from legoesm.core.operators_latlon import curl_z, hyperdiffusion
-from legoesm.core.operators_fv_latlon import (
-    fv_flux_divergence_latlon,
-    fv_gradient_lon,
-    fv_gradient_lat,
+from legoesm.core.operators_latlon import (
+    curl_z, divergence, gradient_x, gradient_y, hyperdiffusion,
 )
 from legoesm.core.conservation import (
     apply_conservation_fixer_latlon,
@@ -82,11 +81,10 @@ def fv_shallow_water_tendencies_latlon(
     h_s = state.h_s
     g = config.g
 
-    # --- Mass continuity: dh/dt via FV PPM transport ---
-    dh_dt_data = fv_flux_divergence_latlon(
-        h.data, u.data, v.data, grid,
-        limiter=config.use_limiter,
-    )
+    # --- Mass continuity: centered divergence (consistent with momentum) ---
+    hu = h.replace(data=h.data * u.data)
+    hv = h.replace(data=h.data * v.data)
+    dh_dt_data = -divergence(hu, hv, grid).data
     dh_dt_data = zero_mean_tendency_latlon(dh_dt_data, grid)
 
     # --- Relative vorticity ---
@@ -99,9 +97,11 @@ def fv_shallow_water_tendencies_latlon(
     kinetic_energy = 0.5 * (u.data**2 + v.data**2)
     bernoulli_data = kinetic_energy + g * (h.data + h_s.data)
 
-    # PPM-compatible gradients
-    dB_dx_data = fv_gradient_lon(bernoulli_data, grid)
-    dB_dy_data = fv_gradient_lat(bernoulli_data, grid)
+    # Centered gradients (consistent with 2nd-order vorticity operator)
+    dims = h.dims
+    B_field = Field(data=bernoulli_data, name="B", dims=dims, units="m^2/s^2")
+    dB_dx_data = gradient_x(B_field, grid).data
+    dB_dy_data = gradient_y(B_field, grid).data
 
     # --- Vector-invariant momentum equations ---
     du_dt_data = abs_vor * v.data - dB_dx_data
@@ -119,8 +119,6 @@ def fv_shallow_water_tendencies_latlon(
         dh_dt_data = fourier_filter(dh_dt_data, grid, polar_filter_mask)
         du_dt_data = fourier_filter(du_dt_data, grid, polar_filter_mask)
         dv_dt_data = fourier_filter(dv_dt_data, grid, polar_filter_mask)
-
-    dims = h.dims
 
     dh_dt = Field(data=dh_dt_data, name="dh_dt", dims=dims, units="m/s")
     du_dt = Field(data=du_dt_data, name="du_dt", dims=dims, units="m/s^2")

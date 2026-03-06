@@ -85,6 +85,14 @@ from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
     FVShallowWaterLatLonModel,
     fv_shallow_water_tendencies_latlon,
 )
+from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
+    FVLatLonPrimitiveEquationModel,
+    fv_latlon_hydrostatic_tendencies,
+)
+from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
+    FVCompressibleEulerLatLonModel,
+    fv_compressible_euler_latlon_slow_tendencies,
+)
 # Available solver names for the factory (flat namespace)
 AVAILABLE_SOLVERS = [
     "shallow_water",
@@ -100,6 +108,8 @@ AVAILABLE_SOLVERS = [
     "fv_primitive_equations",
     "fv_compressible_euler",
     "fv_shallow_water_latlon",
+    "fv_primitive_equations_latlon",
+    "fv_compressible_euler_latlon",
 ]
 
 # Valid values for the two-axis config keys
@@ -320,6 +330,10 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return FVCompressibleEulerModel(**kwargs)
     elif name == "fv_shallow_water_latlon":
         return FVShallowWaterLatLonModel(**kwargs)
+    elif name == "fv_primitive_equations_latlon":
+        return FVLatLonPrimitiveEquationModel(**kwargs)
+    elif name == "fv_compressible_euler_latlon":
+        return FVCompressibleEulerLatLonModel(**kwargs)
     else:
         raise ValueError(
             f"Unknown solver: {name!r}. "
