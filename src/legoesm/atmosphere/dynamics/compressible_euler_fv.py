@@ -42,6 +42,9 @@ from legoesm.core.operators_3d import (
 )
 from legoesm.core.operators_fv_cubed import (
     fv_divergence_damping_3d as _fv_divergence_damping_3d,
+    face_boundary_weight,
+    edge_blend_scalar_3d,
+    edge_blend_vector_3d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
@@ -63,7 +66,8 @@ class FVCompressibleEulerConfig(NamedTuple):
     """Configuration for the consistent FV non-hydrostatic CE model.
 
     Divergence damping is the primary mechanism for controlling
-    cube-imprinted computational modes. Edge blending is NOT used.
+    cube-imprinted computational modes. Edge blending provides
+    localized Laplacian smoothing near face boundaries.
     """
     g: float = constants.g
     div_damp_2: float = 0.0       # 2nd-order divergence damping [m²/s]
@@ -71,6 +75,8 @@ class FVCompressibleEulerConfig(NamedTuple):
     hyperdiff_coeff: float = 0.0
     hyperdiff_rho_coeff: float = 0.0
     hyperdiff_w_coeff: float = 0.0
+    edge_blend_strength: float = 0.25  # Face-boundary blend (0=off)
+    edge_blend_depth: int = 2          # Rows to blend near each edge
     sponge_width: float = 10000.0
     sponge_coeff: float = 0.05
     n_acoustic_substeps: int = 6
@@ -268,8 +274,8 @@ def fv_compressible_euler_slow_tendencies(
 class FVCompressibleEulerModel:
     """Consistent FV non-hydrostatic compressible Euler model.
 
-    Uses PPM transport for theta/rho/tracers, and FV-consistent
-    divergence damping. Does NOT rely on edge blending.
+    Uses PPM transport for theta/rho/tracers, FV-consistent
+    divergence damping, and edge blending near face boundaries.
 
     Parameters
     ----------
@@ -295,6 +301,14 @@ class FVCompressibleEulerModel:
             from legoesm.grids.cubed_sphere import apply_small_earth_scaling
             grid = apply_small_earth_scaling(grid, self.config.small_earth_factor)
         self.grid = grid
+
+        cfg = self.config
+        if cfg.edge_blend_strength > 0 and cfg.edge_blend_depth > 0:
+            self._eb_weight = face_boundary_weight(
+                grid.n, cfg.edge_blend_depth, cfg.edge_blend_strength,
+            )
+        else:
+            self._eb_weight = None
 
     def tendencies(
         self,
@@ -351,6 +365,31 @@ class FVCompressibleEulerModel:
         state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
+
+        # Edge blending: localized smoothing near face boundaries
+        if self._eb_weight is not None:
+            u_new, v_new = edge_blend_vector_3d(
+                state_new.u.data, state_new.v.data,
+                self.grid, self._eb_weight,
+            )
+            w_new = edge_blend_scalar_3d(
+                state_new.w.data, self.grid, self._eb_weight,
+            )
+            theta_new = edge_blend_scalar_3d(
+                state_new.theta_prime.data, self.grid, self._eb_weight,
+            )
+            rho_new = edge_blend_scalar_3d(
+                state_new.rho_prime.data, self.grid, self._eb_weight,
+            )
+            state_new = NonHydrostaticState(
+                u=state_new.u.replace(data=u_new),
+                v=state_new.v.replace(data=v_new),
+                w=state_new.w.replace(data=w_new),
+                theta_prime=state_new.theta_prime.replace(data=theta_new),
+                rho_prime=state_new.rho_prime.replace(data=rho_new),
+                phis=state_new.phis,
+                tracers=state_new.tracers,
+            )
 
         if self.config.fix_mass:
             from legoesm.core.conservation import (
@@ -428,6 +467,31 @@ class FVCompressibleEulerModel:
         state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
         )
+
+        # Edge blending: localized smoothing near face boundaries
+        if self._eb_weight is not None:
+            u_new, v_new = edge_blend_vector_3d(
+                state_new.u.data, state_new.v.data,
+                self.grid, self._eb_weight,
+            )
+            w_new = edge_blend_scalar_3d(
+                state_new.w.data, self.grid, self._eb_weight,
+            )
+            theta_new = edge_blend_scalar_3d(
+                state_new.theta_prime.data, self.grid, self._eb_weight,
+            )
+            rho_new = edge_blend_scalar_3d(
+                state_new.rho_prime.data, self.grid, self._eb_weight,
+            )
+            state_new = NonHydrostaticState(
+                u=state_new.u.replace(data=u_new),
+                v=state_new.v.replace(data=v_new),
+                w=state_new.w.replace(data=w_new),
+                theta_prime=state_new.theta_prime.replace(data=theta_new),
+                rho_prime=state_new.rho_prime.replace(data=rho_new),
+                phis=state_new.phis,
+                tracers=state_new.tracers,
+            )
 
         if self.config.fix_mass:
             from legoesm.core.conservation import (

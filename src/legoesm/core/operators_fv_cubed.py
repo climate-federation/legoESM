@@ -228,3 +228,154 @@ def default_div_damp_coeffs(grid, dt=None):
     nu4 = 0.005 * dx_min ** 4 / dt_ref
 
     return nu2, nu4
+
+
+def default_hyperdiff_coeff(grid, dt=None, factor=0.05):
+    """Compute resolution-aware velocity hyperdiffusion coefficient.
+
+    Returns ``factor * dx_min⁴ / dt_ref``.
+
+    Parameters
+    ----------
+    grid : CubedSphereGrid
+    dt : float or None
+    factor : float
+        Non-dimensional strength (default 0.05).
+
+    Returns
+    -------
+    float
+    """
+    dx_min = float(jnp.min(grid.dx / 2.0))
+    c_ref = 340.0
+
+    if dt is None:
+        dt_ref = dx_min / (2.0 * c_ref)
+    else:
+        dt_ref = float(dt)
+
+    return factor * dx_min ** 4 / dt_ref
+
+
+# ==============================================================================
+# Edge blending — localized smoothing near face boundaries
+# ==============================================================================
+
+def face_boundary_weight(n: int, depth: int = 2, strength: float = 0.25):
+    """Smooth weight mask: *strength* at face edges, 0 in the interior.
+
+    Parameters
+    ----------
+    n : int
+        Grid cells per face edge.
+    depth : int
+        Number of cell rows to blend.
+    strength : float
+        Maximum weight at the boundary (0 = no blend, 1 = full replacement).
+
+    Returns
+    -------
+    jax.Array, shape (1, n, n)
+        Broadcastable to (6, n, n).
+    """
+    w = jnp.zeros((n, n), dtype=jnp.float32)
+    for d in range(depth):
+        alpha = strength * (1.0 - d / depth)
+        row = jnp.full(n, alpha, dtype=jnp.float32)
+        w = w.at[d, :].set(jnp.maximum(w[d, :], row))
+        w = w.at[-(d + 1), :].set(jnp.maximum(w[-(d + 1), :], row))
+        w = w.at[:, d].set(jnp.maximum(w[:, d], row))
+        w = w.at[:, -(d + 1)].set(jnp.maximum(w[:, -(d + 1)], row))
+    return w[None]  # (1, n, n)
+
+
+def edge_blend_scalar(q, grid, weight):
+    """Localized Laplacian smoothing of a scalar field near face boundaries.
+
+    Replaces each boundary cell with a weighted average of itself and its
+    4-connected neighbours.  Interior cells (where *weight* == 0) are
+    untouched.
+
+    Parameters
+    ----------
+    q : jax.Array, shape (6, n, n)
+    grid : CubedSphereGrid
+    weight : jax.Array, shape (1, n, n) or (6, n, n)
+        Face-boundary blend weights from :func:`face_boundary_weight`.
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n)
+    """
+    q_pad = pad_halo(q, interp_offsets=grid.halo_interp_offsets)
+    avg = (q_pad[:, 2:, 1:-1] + q_pad[:, :-2, 1:-1]
+           + q_pad[:, 1:-1, 2:] + q_pad[:, 1:-1, :-2]) / 4.0
+    return q + weight * (avg - q)
+
+
+def edge_blend_vector(u, v, grid, weight):
+    """Localized Laplacian smoothing of a vector field near face boundaries.
+
+    Uses :func:`pad_halo_vector` so that halo velocities are properly
+    rotated into the local face's coordinate frame before averaging.
+
+    Parameters
+    ----------
+    u, v : jax.Array, shape (6, n, n)
+    grid : CubedSphereGrid
+    weight : jax.Array, shape (1, n, n) or (6, n, n)
+
+    Returns
+    -------
+    u_blended, v_blended : jax.Array, shape (6, n, n)
+    """
+    u_pad, v_pad = pad_halo_vector(
+        u, v,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=grid.halo_interp_offsets,
+    )
+    avg_u = (u_pad[:, 2:, 1:-1] + u_pad[:, :-2, 1:-1]
+             + u_pad[:, 1:-1, 2:] + u_pad[:, 1:-1, :-2]) / 4.0
+    avg_v = (v_pad[:, 2:, 1:-1] + v_pad[:, :-2, 1:-1]
+             + v_pad[:, 1:-1, 2:] + v_pad[:, 1:-1, :-2]) / 4.0
+    return u + weight * (avg_u - u), v + weight * (avg_v - v)
+
+
+def edge_blend_scalar_3d(q_3d, grid, weight):
+    """Edge blend at all vertical levels via vmap.
+
+    Parameters
+    ----------
+    q_3d : jax.Array, shape (6, n, n, nlev)
+    grid : CubedSphereGrid
+    weight : jax.Array, shape (1, n, n) or (6, n, n)
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n, nlev)
+    """
+    q_t = jnp.moveaxis(q_3d, -1, 0)
+    result = jax.vmap(lambda q_k: edge_blend_scalar(q_k, grid, weight))(q_t)
+    return jnp.moveaxis(result, 0, -1)
+
+
+def edge_blend_vector_3d(u_3d, v_3d, grid, weight):
+    """Edge blend for 3D vector field via vmap.
+
+    Parameters
+    ----------
+    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
+    grid : CubedSphereGrid
+    weight : jax.Array, shape (1, n, n) or (6, n, n)
+
+    Returns
+    -------
+    u_blended, v_blended : jax.Array, shape (6, n, n, nlev)
+    """
+    u_t = jnp.moveaxis(u_3d, -1, 0)
+    v_t = jnp.moveaxis(v_3d, -1, 0)
+    def _single(u_k, v_k):
+        return edge_blend_vector(u_k, v_k, grid, weight)
+    u_out, v_out = jax.vmap(_single)(u_t, v_t)
+    return jnp.moveaxis(u_out, 0, -1), jnp.moveaxis(v_out, 0, -1)

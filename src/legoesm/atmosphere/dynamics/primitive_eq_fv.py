@@ -52,6 +52,10 @@ from legoesm.core.operators_fv import fv_flux_divergence
 from legoesm.core.operators_fv_cubed import (
     fv_divergence_3d as _fv_divergence_3d,
     fv_divergence_damping_3d as _fv_divergence_damping_3d,
+    face_boundary_weight,
+    edge_blend_scalar,
+    edge_blend_scalar_3d,
+    edge_blend_vector_3d,
 )
 from legoesm.core.conservation import zero_mean_tendency
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -73,13 +77,16 @@ class FVPrimitiveEquationConfig(NamedTuple):
     """Configuration for the consistent FV hydrostatic PE model.
 
     Divergence damping is the primary mechanism for controlling
-    cube-imprinted computational modes. Edge blending is NOT used.
+    cube-imprinted computational modes. Edge blending provides
+    localized Laplacian smoothing near face boundaries.
     """
     g: float = constants.g
     div_damp_2: float = 0.0       # 2nd-order divergence damping [m²/s]
     div_damp_4: float = 0.0       # 4th-order divergence damping [m⁴/s]
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
+    edge_blend_strength: float = 0.25  # Face-boundary blend (0=off)
+    edge_blend_depth: int = 2          # Rows to blend near each edge
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
@@ -250,7 +257,7 @@ class FVPrimitiveEquationModel:
     """Consistent FV hydrostatic PE model on the cubed-sphere.
 
     Uses PPM transport for p_s and T, FV-consistent sigma_dot,
-    and selective divergence damping. Does NOT rely on edge blending.
+    selective divergence damping, and edge blending near face boundaries.
 
     Parameters
     ----------
@@ -269,6 +276,14 @@ class FVPrimitiveEquationModel:
         self.sigma_coord = sigma_coord
         self.config = config or FVPrimitiveEquationConfig()
         self._target_mass = None
+
+        cfg = self.config
+        if cfg.edge_blend_strength > 0 and cfg.edge_blend_depth > 0:
+            self._eb_weight = face_boundary_weight(
+                grid.n, cfg.edge_blend_depth, cfg.edge_blend_strength,
+            )
+        else:
+            self._eb_weight = None
 
     def tendencies(
         self,
@@ -306,6 +321,26 @@ class FVPrimitiveEquationModel:
         else:
             raise ValueError(
                 f"Unsupported time_integrator={self.config.time_integrator!r}"
+            )
+
+        # Edge blending: localized smoothing near face boundaries
+        if self._eb_weight is not None:
+            u_new, v_new = edge_blend_vector_3d(
+                state_new.u.data, state_new.v.data,
+                self.grid, self._eb_weight,
+            )
+            T_new = edge_blend_scalar_3d(
+                state_new.T.data, self.grid, self._eb_weight,
+            )
+            ps_new = edge_blend_scalar(
+                state_new.p_s.data, self.grid, self._eb_weight,
+            )
+            state_new = HydrostaticState(
+                u=state_new.u.replace(data=u_new),
+                v=state_new.v.replace(data=v_new),
+                T=state_new.T.replace(data=T_new),
+                p_s=state_new.p_s.replace(data=ps_new),
+                phis=state_new.phis,
             )
 
         if self.config.use_conservation_fixer and self.config.fix_mass:
@@ -356,6 +391,26 @@ class FVPrimitiveEquationModel:
         else:
             raise ValueError(
                 f"Unsupported time_integrator={self.config.time_integrator!r}"
+            )
+
+        # Edge blending: localized smoothing near face boundaries
+        if self._eb_weight is not None:
+            u_new, v_new = edge_blend_vector_3d(
+                state_new.u.data, state_new.v.data,
+                self.grid, self._eb_weight,
+            )
+            T_new = edge_blend_scalar_3d(
+                state_new.T.data, self.grid, self._eb_weight,
+            )
+            ps_new = edge_blend_scalar(
+                state_new.p_s.data, self.grid, self._eb_weight,
+            )
+            state_new = HydrostaticState(
+                u=state_new.u.replace(data=u_new),
+                v=state_new.v.replace(data=v_new),
+                T=state_new.T.replace(data=T_new),
+                p_s=state_new.p_s.replace(data=ps_new),
+                phis=state_new.phis,
             )
 
         if self.config.use_conservation_fixer and self.config.fix_mass:

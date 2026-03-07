@@ -14,10 +14,10 @@ Key design choices for consistency:
 - Divergence damping: selective damping of divergent modes using the
   SAME FV divergence operator as the mass flux, preventing cube-imprinted
   computational modes from growing
-- Hyperdiffusion: optional, on velocity only (PPM handles scalar dissipation)
-
-The divergence damping is the primary stabilization mechanism for the
-A-grid cubed-sphere FV discretization. Edge blending is not used.
+- Hyperdiffusion: on velocity only (PPM handles scalar dissipation)
+- Edge blending: localized Laplacian smoothing near face boundaries,
+  applied as a post-step filter to damp accumulated halo-interpolation
+  errors that are spatially coherent at face edges
 
 References
 ----------
@@ -47,6 +47,9 @@ from legoesm.core.operators_fv import (
 )
 from legoesm.core.operators_fv_cubed import (
     fv_divergence_damping,
+    face_boundary_weight,
+    edge_blend_scalar,
+    edge_blend_vector,
 )
 from legoesm.core.conservation import (
     apply_conservation_fixer,
@@ -65,11 +68,18 @@ class FVShallowWaterConfig(NamedTuple):
     Divergence damping (div_damp_2, div_damp_4) is the primary mechanism
     for controlling cube-imprinted computational divergent modes. Set both
     to 0 only for diagnostic/debugging runs.
+
+    Edge blending (edge_blend_strength > 0) applies localized Laplacian
+    smoothing near face boundaries after each time step.  This damps the
+    spatially-coherent errors from halo interpolation that accumulate at
+    face edges over many steps.
     """
     g: float = constants.g
     div_damp_2: float = 0.0      # 2nd-order divergence damping [m²/s]
     div_damp_4: float = 0.0      # 4th-order divergence damping [m⁴/s]
     hyperdiff_coeff: float = 0.0 # Only on u,v (PPM handles h dissipation)
+    edge_blend_strength: float = 0.25  # Face-boundary blend (0=off, 0.25=default)
+    edge_blend_depth: int = 2          # Rows to blend near each edge
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     fix_energy: bool = False     # OFF by default for benchmark runs
@@ -178,6 +188,15 @@ class FVShallowWaterModel:
         self.grid = grid
         self.config = config or FVShallowWaterConfig()
 
+        # Precompute edge-blend weight (static, not JIT-traced)
+        cfg = self.config
+        if cfg.edge_blend_strength > 0 and cfg.edge_blend_depth > 0:
+            self._eb_weight = face_boundary_weight(
+                grid.n, cfg.edge_blend_depth, cfg.edge_blend_strength,
+            )
+        else:
+            self._eb_weight = None
+
     def tendencies(
         self,
         state: ShallowWaterState,
@@ -222,6 +241,22 @@ class FVShallowWaterModel:
         else:
             raise ValueError(
                 f"Unsupported time_integrator={self.config.time_integrator!r}"
+            )
+
+        # Edge blending: localized smoothing near face boundaries
+        if self._eb_weight is not None:
+            h_new = edge_blend_scalar(
+                state_new.h.data, self.grid, self._eb_weight,
+            )
+            u_new, v_new = edge_blend_vector(
+                state_new.u.data, state_new.v.data,
+                self.grid, self._eb_weight,
+            )
+            state_new = ShallowWaterState(
+                h=state_new.h.replace(data=h_new),
+                u=state_new.u.replace(data=u_new),
+                v=state_new.v.replace(data=v_new),
+                h_s=state_new.h_s,
             )
 
         # Apply conservation fixers
