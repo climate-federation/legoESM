@@ -67,7 +67,7 @@ Presets:
 """,
 )
 parser.add_argument("--dataset", type=str, default="cobe",
-                    choices=["cobe", "hadisst", "custom"],
+                    choices=["cobe", "hadisst", "custom", "analytical"],
                     help="Forcing dataset preset (default: cobe)")
 parser.add_argument("--forcing-path", type=str, default=None,
                     help="Path to NetCDF forcing file")
@@ -111,11 +111,14 @@ parser.add_argument("--ch4-ppbv", type=float, default=1900.0,
                     help="CH4 concentration [ppbv] for RRTMG (default: 1900)")
 parser.add_argument("--n2o-ppbv", type=float, default=332.0,
                     help="N2O concentration [ppbv] for RRTMG (default: 332)")
+parser.add_argument("--discretization", type=str, default="centered",
+                    choices=["centered", "finite_volume"],
+                    help="Dynamical core discretization (default: centered)")
 args = parser.parse_args()
 
-# Enforce that forcing-path is required unless restarting (config has it)
-if args.forcing_path is None and args.restart_from is None:
-    parser.error("--forcing-path is required (unless using --restart-from)")
+# Enforce that forcing-path is required unless restarting or analytical
+if args.forcing_path is None and args.restart_from is None and args.dataset != "analytical":
+    parser.error("--forcing-path is required (unless using --restart-from or --dataset analytical)")
 
 # ---------------------------------------------------------------------------
 # Build AMIPExperimentConfig
@@ -167,11 +170,14 @@ else:
     OUTPUT_DIR = Path(f"results/amip/C{N}_L{NLEV}_{N_DAYS}d_{RUN_ID}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+DISCRETIZATION = args.discretization
 _rad_label = "gray (Frierson 2006)" if RADIATION == "gray" else "RRTMG (correlated-k)"
+_disc_label = "Finite Volume (PPM)" if DISCRETIZATION == "finite_volume" else "Centered FD"
 print("=" * 70)
 print(f"  AMIP: Prescribed SST/SIC + {_rad_label} + SBM Convection")
 print("=" * 70)
 print(f"  Grid:       C{N} / L{NLEV}")
+print(f"  Dycore:     {_disc_label}")
 print(f"  dt:         {DT:.0f} s")
 print(f"  Duration:   {N_DAYS} days (start day {START_DAY})")
 print(f"  Radiation:  {_rad_label}")
@@ -206,69 +212,130 @@ print(f"  Grid created: {6*N*N} columns, {NLEV} levels")
 # ---------------------------------------------------------------------------
 # 2. Load AMIP forcing
 # ---------------------------------------------------------------------------
-from legoesm.forcing.amip import (
-    AMIPForcingConfig,
-    get_amip_preset,
-    load_amip_forcing,
-    get_forcing_at_time,
-)
+# Sea-ice parameters (defaults for analytical; overridden by forcing_config below)
+_T_ice = 271.35
+_albedo_ice = 0.65
+_albedo_ocean = 0.06
 
-forcing_path = args.forcing_path or exp_config.forcing_path
-if args.dataset == "custom":
-    forcing_config = AMIPForcingConfig(
-        dataset="custom",
-        path=forcing_path,
-        sst_var=args.sst_var or "sst",
-        sic_var=args.sic_var or "sic",
-        sst_offset=args.sst_offset if args.sst_offset is not None else 0.0,
-        sic_scale=args.sic_scale if args.sic_scale is not None else 1.0,
-    )
+if args.dataset == "analytical":
+    # Analytical zonally-symmetric SST + SIC with seasonal cycle
+    print("  Using analytical SST/SIC forcing (zonally symmetric, seasonal)")
+
+    lat_deg_cube = np.degrees(np.asarray(grid.lat))  # (6, N, N)
+
+    def _analytical_forcing(day):
+        """Compute SST and SIC for a given day (seasonal cycle)."""
+        day_of_year = day % 365.0 + 1.0
+        # Seasonal shift of SST peak: +/-5 degrees latitude
+        lat_shift = -5.0 * np.cos(2.0 * np.pi * day_of_year / 365.0)
+        lat_eff = lat_deg_cube - lat_shift
+
+        # Qobs-like SST profile (K): warm equator, cold poles
+        sst = 27.0 * (1.0 - np.sin(np.radians(lat_eff))**2) + 273.15
+        # Seasonal amplitude (+/-3 K at midlatitudes)
+        seasonal_amp = 3.0 * np.cos(np.radians(lat_eff)) * np.cos(2.0 * np.pi * day_of_year / 365.0)
+        sst = sst + seasonal_amp
+        sst = np.maximum(sst, _T_ice - 1.8)  # freezing floor
+
+        # SIC: ramp from 0 to 1 as SST drops below T_ice
+        sic = np.clip(((_T_ice + 0.5) - sst) / 3.0, 0.0, 1.0)
+
+        return jnp.array(sst), jnp.array(sic)
+
+    def get_sst_sic(day):
+        return _analytical_forcing(day)
+
+    sst_init, sic_init = get_sst_sic(START_DAY)
+    print(f"  Initial SST: min={float(jnp.min(sst_init)):.1f} K, "
+          f"max={float(jnp.max(sst_init)):.1f} K, "
+          f"mean={float(jnp.mean(sst_init)):.1f} K")
+    print(f"  Initial SIC: mean={float(jnp.mean(sic_init)):.3f}")
+
 else:
-    forcing_config = get_amip_preset(args.dataset)._replace(path=forcing_path)
+    from legoesm.forcing.amip import (
+        AMIPForcingConfig,
+        get_amip_preset,
+        load_amip_forcing,
+        get_forcing_at_time,
+    )
 
-print("  Loading forcing data...")
-t_load = time.time()
-forcing = load_amip_forcing(forcing_config, grid)
-t_load = time.time() - t_load
-print(f"  Forcing loaded in {t_load:.1f}s: {forcing.times.shape[0]} time records")
-print(f"  Time range: day {float(forcing.times[0]):.0f} to {float(forcing.times[-1]):.0f}")
+    forcing_path = args.forcing_path or exp_config.forcing_path
+    if args.dataset == "custom":
+        forcing_config = AMIPForcingConfig(
+            dataset="custom",
+            path=forcing_path,
+            sst_var=args.sst_var or "sst",
+            sic_var=args.sic_var or "sic",
+            sst_offset=args.sst_offset if args.sst_offset is not None else 0.0,
+            sic_scale=args.sic_scale if args.sic_scale is not None else 1.0,
+        )
+    else:
+        forcing_config = get_amip_preset(args.dataset)._replace(path=forcing_path)
 
-# Check start_day is within range
-if START_DAY < float(forcing.times[0]) or START_DAY > float(forcing.times[-1]):
-    print(f"  WARNING: start_day={START_DAY} outside forcing range "
-          f"[{float(forcing.times[0]):.0f}, {float(forcing.times[-1]):.0f}]")
-    print(f"  Forcing will be clamped to the nearest available record.")
+    print("  Loading forcing data...")
+    t_load = time.time()
+    forcing = load_amip_forcing(forcing_config, grid)
+    t_load = time.time() - t_load
+    print(f"  Forcing loaded in {t_load:.1f}s: {forcing.times.shape[0]} time records")
+    print(f"  Time range: day {float(forcing.times[0]):.0f} to {float(forcing.times[-1]):.0f}")
 
-# Show initial SST/SIC
-sst_init, sic_init = get_forcing_at_time(forcing, START_DAY)
-print(f"  Initial SST: min={float(jnp.min(sst_init)):.1f} K, "
-      f"max={float(jnp.max(sst_init)):.1f} K, "
-      f"mean={float(jnp.mean(sst_init)):.1f} K")
-print(f"  Initial SIC: mean={float(jnp.mean(sic_init)):.3f}, "
-      f"max={float(jnp.max(sic_init)):.3f}")
+    if START_DAY < float(forcing.times[0]) or START_DAY > float(forcing.times[-1]):
+        print(f"  WARNING: start_day={START_DAY} outside forcing range "
+              f"[{float(forcing.times[0]):.0f}, {float(forcing.times[-1]):.0f}]")
+        print(f"  Forcing will be clamped to the nearest available record.")
 
-# Sea-ice parameters
-_T_ice = forcing_config.T_ice
-_albedo_ice = forcing_config.albedo_ice
-_albedo_ocean = forcing_config.albedo_ocean
+    sst_init, sic_init = get_forcing_at_time(forcing, START_DAY)
+    print(f"  Initial SST: min={float(jnp.min(sst_init)):.1f} K, "
+          f"max={float(jnp.max(sst_init)):.1f} K, "
+          f"mean={float(jnp.mean(sst_init)):.1f} K")
+    print(f"  Initial SIC: mean={float(jnp.mean(sic_init)):.3f}, "
+          f"max={float(jnp.max(sic_init)):.3f}")
+
+    _T_ice = forcing_config.T_ice
+    _albedo_ice = forcing_config.albedo_ice
+    _albedo_ocean = forcing_config.albedo_ocean
+
+    def get_sst_sic(day):
+        return get_sst_sic(day)
 
 # ---------------------------------------------------------------------------
 # 3. Atmospheric model (hydrostatic primitive equations)
 # ---------------------------------------------------------------------------
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationModel,
-    PrimitiveEquationConfig,
-)
 from legoesm.atmosphere.physics.held_suarez import held_suarez_init
 
 HYPERDIFF = exp_config.hyperdiff_scale * (48 / N) ** 4
-dycore_config = PrimitiveEquationConfig(
-    hyperdiff_coeff=HYPERDIFF,
-    hyperdiff_ps_coeff=HYPERDIFF,
-    use_conservation_fixer=True,
-    fix_mass=True,
-)
-model = PrimitiveEquationModel(grid, sigma, dycore_config)
+
+if DISCRETIZATION == "finite_volume":
+    from legoesm.atmosphere.dynamics.primitive_eq_fv import (
+        FVPrimitiveEquationModel,
+        FVPrimitiveEquationConfig,
+    )
+    # FV uses divergence damping + velocity-only hyperdiffusion
+    dx_min = float(grid.dx.min()) / 2.0  # single-cell width (grid.dx spans 2 cells)
+    div_damp_2 = 0.05 * dx_min ** 2 / DT   # mild 2nd-order divergence damping
+    dycore_config = FVPrimitiveEquationConfig(
+        div_damp_2=div_damp_2,
+        div_damp_4=0.0,
+        hyperdiff_coeff=HYPERDIFF,
+        hyperdiff_ps_coeff=0.0,
+        use_conservation_fixer=True,
+        fix_mass=True,
+        use_limiter=True,
+    )
+    model = FVPrimitiveEquationModel(grid, sigma, dycore_config)
+    print(f"  FV dycore: div_damp_2={div_damp_2:.2e}, hyperdiff={HYPERDIFF:.2e}")
+else:
+    from legoesm.atmosphere.dynamics.primitive_eq import (
+        PrimitiveEquationModel,
+        PrimitiveEquationConfig,
+    )
+    dycore_config = PrimitiveEquationConfig(
+        hyperdiff_coeff=HYPERDIFF,
+        hyperdiff_ps_coeff=HYPERDIFF,
+        use_conservation_fixer=True,
+        fix_mass=True,
+    )
+    model = PrimitiveEquationModel(grid, sigma, dycore_config)
 
 # ---------------------------------------------------------------------------
 # 4. Initial state or restart
@@ -616,7 +683,7 @@ t_wall_start = time.time()
 day = current_day
 day_of_year = day % 365.0 + 1.0
 
-sst, sic = get_forcing_at_time(forcing, day)
+sst, sic = get_sst_sic(day)
 
 state = model.step_with_physics(state, DT)
 
@@ -654,7 +721,7 @@ for step in range(start_step + 1, n_steps_total):
     day = START_DAY + (step + 1) * DT / 86400.0
     day_of_year = day % 365.0 + 1.0
 
-    sst, sic = get_forcing_at_time(forcing, day)
+    sst, sic = get_sst_sic(day)
 
     # (a) Dynamics
     state = model.step_with_physics(state, DT)
@@ -817,7 +884,11 @@ with open(OUTPUT_DIR / "results.txt", "w") as f:
     if RAD_UPDATE_STEPS > 1:
         f.write(f"  Radiation update every {RAD_UPDATE_STEPS} steps\n")
     f.write(f"Dataset: {args.dataset}, file: {args.forcing_path}\n")
-    f.write(f"Forcing time range: day {float(forcing.times[0]):.0f} to {float(forcing.times[-1]):.0f}\n")
+    f.write(f"Dycore: {_disc_label}\n")
+    if args.dataset != "analytical":
+        f.write(f"Forcing time range: day {float(forcing.times[0]):.0f} to {float(forcing.times[-1]):.0f}\n")
+    else:
+        f.write(f"Forcing: analytical (Qobs-like SST + seasonal cycle)\n")
     f.write(f"Physics: {_rad_label} + SBM convection (operator-split)\n")
     f.write(f"BL: bulk aero C_H=C_E={_C_H}\n")
     f.write(f"Friction: k_free={_k_free*86400:.1f}/day, k_BL_max={_k_f_max*86400:.1f}/day\n")

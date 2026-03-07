@@ -4,8 +4,8 @@ Uses a compatible face-based discretization where surface pressure,
 temperature, sigma_dot, and momentum all share the same FV interface
 flux layer:
 
-- Surface pressure: FV flux divergence (PPM)
-- Temperature: FV scalar advection (PPM)
+- Surface pressure: FV flux divergence (PPM) — conservative mass transport
+- Temperature: centered advection — energy-consistent with momentum operators
 - Sigma-dot: computed from FV divergence (same interface velocities as p_s)
 - Momentum: vector-invariant form with centered Bernoulli gradient
 - Divergence damping: selective damping using FV-consistent divergence
@@ -13,6 +13,10 @@ flux layer:
 The FV divergence used for sigma_dot is discretely compatible with the
 FV transport of p_s, ensuring that vertical velocity is consistent with
 horizontal mass transport.
+
+Note: PPM scalar advection of T was found to be energy-inconsistent with
+the centered momentum operators on the cubed-sphere, causing exponential
+temperature growth at face boundaries. Centered T advection resolves this.
 
 References
 ----------
@@ -179,11 +183,14 @@ def fv_hydrostatic_tendencies(
     du_dt_data = du_dt_data + vert_adv_u
     dv_dt_data = dv_dt_data + vert_adv_v
 
-    # --- 8. Thermodynamic equation with FV horizontal advection ---
-    horiz_adv_T = _fv_scalar_advection_3d(
-        T, u, v, grid,
-        limiter=config.use_limiter,
-    )
+    # --- 8. Thermodynamic equation ---
+    # Use centered advection for T (not PPM) to maintain energy consistency
+    # with the centered momentum operators. PPM is energy-inconsistent with
+    # centered Bernoulli gradient, causing exponential T growth at face edges.
+    # PPM is still used for p_s (mass transport) where conservation matters.
+    dT_dx = _gradient_x_3d(T, grid)
+    dT_dy = _gradient_y_3d(T, grid)
+    horiz_adv_T = -(u * dT_dx + v * dT_dy)
 
     # Adiabatic heating: κ·T·ω/p
     omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
