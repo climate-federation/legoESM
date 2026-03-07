@@ -16,6 +16,9 @@ class LakeConfig(NamedTuple):
     albedo_lake: float = 0.08
     emissivity_lake: float = 0.97
     z0_lake: float = 1e-4           # Roughness length [m]
-    Cd_lake: float = 1.5e-3         # Drag coefficient
-    Ch_lake: float = 1.5e-3         # Heat transfer coefficient
+    Cd_lake: float = 1.5e-3         # Drag coefficient (constant scheme)
+    Ch_lake: float = 1.5e-3         # Heat transfer coefficient (constant)
     T_freeze: float = 273.15        # Freezing point [K]
+    bulk_scheme: str = "constant"   # "constant" or "most"
+    z_ref: float = 10.0             # Reference height for MOST [m]
+    bulk_n_iter: int = 5            # MOST iterations

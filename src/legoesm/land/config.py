@@ -13,6 +13,9 @@ class LandConfig(NamedTuple):
     albedo_land: float = 0.2
     emissivity_land: float = 0.96
     z0_land: float = 0.05       # Roughness length [m]
-    Cd_land: float = 3.0e-3     # Land drag coefficient
-    Ch_land: float = 3.0e-3     # Land heat transfer coefficient
+    Cd_land: float = 3.0e-3     # Land drag coefficient (constant scheme)
+    Ch_land: float = 3.0e-3     # Land heat transfer coefficient (constant)
     beta_min: float = 0.1       # Minimum moisture availability (dry soil)
+    bulk_scheme: str = "constant"  # "constant" or "most"
+    z_ref: float = 10.0           # Reference height for MOST [m]
+    bulk_n_iter: int = 5          # MOST iterations

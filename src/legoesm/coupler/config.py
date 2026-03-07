@@ -29,3 +29,6 @@ class CouplerConfig(NamedTuple):
     blend_sharpness: float = 20.0     # Sigmoid sharpness for tile blending
     Cd_ocean: float = 1.5e-3          # Ocean drag coefficient
     Ch_ocean: float = 1.5e-3          # Ocean heat transfer coefficient
+    bulk_scheme: str = "constant"     # "constant", "coare3", "large_yeager"
+    z_ref: float = 10.0               # Reference height for bulk formulas [m]
+    bulk_n_iter: int = 5              # MOST iterations (coare3/large_yeager)

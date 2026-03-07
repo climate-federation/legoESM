@@ -15,8 +15,8 @@ class SeaIceConfig(NamedTuple):
     albedo_ice: float = 0.65
     emissivity_ice: float = 0.97
     z0_ice: float = 5e-4            # Ice roughness length [m]
-    Cd_ice: float = 1.5e-3          # Ice-atmosphere drag coefficient
-    Ch_ice: float = 1.5e-3          # Ice-atmosphere heat transfer coefficient
+    Cd_ice: float = 1.5e-3          # Ice-atmosphere drag coefficient (constant)
+    Ch_ice: float = 1.5e-3          # Ice-atmosphere heat transfer coeff (constant)
     # Transport
     drag_ocean: float = 5.5e-3      # Ocean-ice drag coefficient
     drag_atm: float = 1.3e-3        # Air-ice drag coefficient
@@ -26,3 +26,7 @@ class SeaIceConfig(NamedTuple):
     T_ice_min: float = 180.0        # Lower bound for numerical stability [K]
     # Concentration dynamics
     h_new_ice: float = 0.05         # Thickness for new ice formation [m]
+    # Bulk flux algorithm
+    bulk_scheme: str = "constant"   # "constant" or "most"
+    z_ref: float = 10.0             # Reference height for MOST [m]
+    bulk_n_iter: int = 5            # MOST iterations

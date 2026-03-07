@@ -44,10 +44,20 @@ class SurfaceLayerConfig(NamedTuple):
         Neutral drag coefficient (default 1.5e-3).
     Ch_neutral : float
         Neutral heat transfer coefficient (default 1.5e-3).
+    bulk_scheme : str
+        Bulk flux algorithm: "constant", "coare3", "large_yeager"
+        (default "constant").
+    z_ref : float
+        Reference height for MOST bulk formulas [m] (default 10.0).
+    bulk_n_iter : int
+        Number of MOST iterations (default 5).
     """
     z0: float = 1e-4
     Cd_neutral: float = 1.5e-3
     Ch_neutral: float = 1.5e-3
+    bulk_scheme: str = "constant"
+    z_ref: float = 10.0
+    bulk_n_iter: int = 5
 
 
 class SmagorinskyConfig(NamedTuple):

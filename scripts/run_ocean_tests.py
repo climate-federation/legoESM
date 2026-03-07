@@ -115,9 +115,27 @@ def _default_lat_bins(grid, mask_2d, *, min_bins=24, max_bins=72):
     lat_lo = max(-90.0, lat_lo - pad)
     lat_hi = min(90.0, lat_hi + pad)
 
+    n_lat, _ = _default_pixel_dims(
+        grid,
+        mask_2d,
+        min_lat=min_bins,
+        max_lat=max_bins,
+        oversample=1.0,
+    )
+    return np.linspace(lat_lo, lat_hi, n_lat + 1)
+
+
+def _default_pixel_dims(grid, mask_2d, *, min_lat=24, max_lat=180, oversample=1.35):
+    """Choose a regular lat-lon pixel grid compatible with wet-cell density."""
+    mask = np.asarray(mask_2d, dtype=np.float64)
     n_wet = int(np.sum(mask > 0.5))
-    n_bins = int(np.clip(round(1.2 * np.sqrt(max(n_wet, 1))), min_bins, max_bins))
-    return np.linspace(lat_lo, lat_hi, n_bins + 1)
+    if n_wet < 4:
+        n_lat = int(min_lat)
+    else:
+        # n_lon ~ 2*n_lat on a lat-lon grid; pick target cells ~ O(n_wet).
+        n_lat = int(np.clip(round(oversample * np.sqrt(n_wet / 2.0)), min_lat, max_lat))
+    n_lon = int(np.clip(2 * n_lat, 2 * min_lat, 360))
+    return n_lat, n_lon
 
 
 def _fill_missing_lat_bands(section):
@@ -152,40 +170,44 @@ def _edges_from_centers(centers):
 
 
 def _compute_lat_depth_section(field_3d, grid, mask_2d, lat_bins_deg):
-    """Area-weighted latitude-depth section from cubed-sphere data."""
-    lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
-    area = np.asarray(grid.area)
-    mask = np.asarray(mask_2d)
-    field = np.asarray(field_3d)
+    """Latitude-depth section from area-weighted zonal means in latitude bins."""
+    field = np.asarray(field_3d, dtype=np.float64)
+    if field.ndim != 4:
+        raise ValueError(f"Expected field_3d with shape (face, x, y, level), got {field.shape}")
 
     n_levels = field.shape[-1]
-    flat_lat = lat_deg.ravel()
-    flat_w = (area * mask).ravel()
-    flat_field = field.reshape(-1, n_levels)
-
-    bin_idx = np.digitize(flat_lat, lat_bins_deg) - 1
-    n_bins = len(lat_bins_deg) - 1
+    n_bins = int(len(lat_bins_deg) - 1)
     section = np.full((n_bins, n_levels), np.nan, dtype=np.float64)
+    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
+    area = np.asarray(grid.area, dtype=np.float64)
+    if mask_2d is None:
+        mask = np.ones_like(area, dtype=np.float64)
+    else:
+        mask = np.asarray(mask_2d, dtype=np.float64)
 
-    valid_bin = (bin_idx >= 0) & (bin_idx < n_bins) & np.isfinite(flat_w) & (flat_w > 0.0)
-    for i in range(n_bins):
-        sel = valid_bin & (bin_idx == i)
-        if not np.any(sel):
+    lat_flat = lat_deg.ravel()
+    weight_flat = (area * mask).ravel()
+    lat_idx = np.digitize(lat_flat, lat_bins_deg, right=False) - 1
+    lat_idx = np.clip(lat_idx, 0, n_bins - 1)
+    valid_geom = np.isfinite(lat_flat) & np.isfinite(weight_flat) & (weight_flat > 0.0)
+
+    for k in range(n_levels):
+        data_flat = np.asarray(field[..., k], dtype=np.float64).ravel()
+        valid = valid_geom & np.isfinite(data_flat)
+        if not np.any(valid):
             continue
-        w = flat_w[sel]
-        wsum = float(np.sum(w))
-        if wsum <= 0.0:
-            continue
-        vals = flat_field[sel, :]
-        vals = np.where(np.isfinite(vals), vals, np.nan)
-        num = np.nansum(vals * w[:, None], axis=0)
-        den = np.nansum(np.where(np.isfinite(vals), w[:, None], 0.0), axis=0)
-        with np.errstate(invalid="ignore", divide="ignore"):
-            section[i, :] = num / np.maximum(den, 1.0e-20)
+
+        idx = lat_idx[valid]
+        w = weight_flat[valid]
+        v = data_flat[valid]
+        sum_w = np.bincount(idx, weights=w, minlength=n_bins)
+        sum_v = np.bincount(idx, weights=w * v, minlength=n_bins)
+
+        wet = sum_w > 0.0
+        section[wet, k] = sum_v[wet] / sum_w[wet]
 
     section = _fill_missing_lat_bands(section)
-
-    lat_centers = 0.5 * (lat_bins_deg[:-1] + lat_bins_deg[1:])
+    lat_centers = 0.5 * (np.asarray(lat_bins_deg[:-1]) + np.asarray(lat_bins_deg[1:]))
     return lat_centers, section
 
 
@@ -250,7 +272,15 @@ def _plot_lat_depth_sections(
     plt.close()
 
 
-def _remap_to_latlon_pixels(data_2d, grid, mask_2d=None, n_lat=181, n_lon=360):
+def _remap_to_latlon_pixels(
+    data_2d,
+    grid,
+    mask_2d=None,
+    n_lat=None,
+    n_lon=None,
+    *,
+    fill_empty=True,
+):
     """Conservative-ish remap from cubed-sphere points to regular lat-lon pixels.
 
     Uses area-weighted binning into pixel cells for clear visual continuity.
@@ -263,6 +293,15 @@ def _remap_to_latlon_pixels(data_2d, grid, mask_2d=None, n_lat=181, n_lon=360):
         mask = np.ones_like(area, dtype=np.float64)
     else:
         mask = np.asarray(mask_2d, dtype=np.float64)
+
+    if n_lat is None:
+        n_lat, n_lon_auto = _default_pixel_dims(grid, mask)
+        if n_lon is None:
+            n_lon = n_lon_auto
+    if n_lon is None:
+        n_lon = int(np.clip(2 * int(n_lat), 48, 360))
+    n_lat = int(n_lat)
+    n_lon = int(n_lon)
 
     lon_i = np.floor(lon_deg / 360.0 * n_lon).astype(np.int64)
     lat_i = np.floor((lat_deg + 90.0) / 180.0 * n_lat).astype(np.int64)
@@ -284,14 +323,15 @@ def _remap_to_latlon_pixels(data_2d, grid, mask_2d=None, n_lat=181, n_lon=360):
     wet = sum_w > 0.0
     out[wet] = sum_v[wet] / sum_w[wet]
     out = out.reshape(n_lat, n_lon)
-    out = _fill_nan_pixel_gaps(out)
+    if fill_empty:
+        out = _fill_nan_pixel_gaps(out)
 
     lon_edges = np.linspace(0.0, 360.0, n_lon + 1)
     lat_edges = np.linspace(-90.0, 90.0, n_lat + 1)
     return lon_edges, lat_edges, out
 
 
-def _fill_nan_pixel_gaps(pix, max_iter=512):
+def _fill_nan_pixel_gaps(pix, max_iter=8):
     """Fill empty remap bins using local-neighborhood inpainting.
 
     Coarse cubed-sphere grids projected to fine regular lat-lon pixels leave
@@ -356,13 +396,22 @@ def _plot_latlon_pixel_snapshots(
     cmap,
     cbar_label,
     symmetric=False,
-    n_lat=181,
-    n_lon=360,
+    n_lat=None,
+    n_lon=None,
 ):
     """Plot up to 4 snapshots as lat-lon pixel maps."""
     items = sorted(snapshots.items())[:4]
     remapped = []
     all_finite = []
+    if items and (n_lat is None or n_lon is None):
+        n_lat_auto, n_lon_auto = _default_pixel_dims(
+            grid,
+            np.asarray(items[0][1].land_mask.data),
+        )
+        if n_lat is None:
+            n_lat = n_lat_auto
+        if n_lon is None:
+            n_lon = n_lon_auto
     for step_num, snap in items:
         fld = np.asarray(field_getter(snap), dtype=np.float64)
         lon_e, lat_e, pix = _remap_to_latlon_pixels(
@@ -417,9 +466,12 @@ def _plot_latlon_pixel_snapshots(
         ax.grid(True, alpha=0.25)
         ax.set_title(f"step {step_num}\nt={day:.2f} d", fontsize=11, fontweight="bold")
     if pcm is not None:
-        fig.colorbar(pcm, ax=axes.tolist(), orientation="vertical", pad=0.02, label=cbar_label)
+        fig.subplots_adjust(left=0.06, right=0.90, bottom=0.08, top=0.90, wspace=0.13, hspace=0.32)
+        cax = fig.add_axes([0.92, 0.13, 0.02, 0.72])
+        fig.colorbar(pcm, cax=cax, orientation="vertical", label=cbar_label)
     fig.suptitle(title, fontsize=15, fontweight="bold")
-    plt.tight_layout()
+    if pcm is None:
+        fig.subplots_adjust(left=0.06, right=0.98, bottom=0.08, top=0.90, wspace=0.13, hspace=0.32)
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
 
@@ -437,12 +489,18 @@ def _plot_latlon_pixel_two_panel(
     cbar_label,
     field_getter_b=None,
     symmetric=False,
-    n_lat=181,
-    n_lon=360,
+    n_lat=None,
+    n_lon=None,
 ):
     """Plot two states as side-by-side lat-lon pixel maps."""
     if field_getter_b is None:
         field_getter_b = field_getter
+    if n_lat is None or n_lon is None:
+        n_lat_auto, n_lon_auto = _default_pixel_dims(grid, np.asarray(state_a.land_mask.data))
+        if n_lat is None:
+            n_lat = n_lat_auto
+        if n_lon is None:
+            n_lon = n_lon_auto
     lon_e, lat_e, pix_a = _remap_to_latlon_pixels(
         np.asarray(field_getter(state_a), dtype=np.float64),
         grid,
@@ -492,9 +550,12 @@ def _plot_latlon_pixel_two_panel(
         ax.grid(True, alpha=0.25)
         ax.set_title(label, fontsize=12, fontweight="bold")
     if pcm is not None:
-        fig.colorbar(pcm, ax=axes.tolist(), orientation="vertical", pad=0.02, label=cbar_label)
+        fig.subplots_adjust(left=0.06, right=0.90, bottom=0.10, top=0.88, wspace=0.16)
+        cax = fig.add_axes([0.92, 0.16, 0.02, 0.66])
+        fig.colorbar(pcm, cax=cax, orientation="vertical", label=cbar_label)
     fig.suptitle(title, fontsize=15, fontweight="bold")
-    plt.tight_layout()
+    if pcm is None:
+        fig.subplots_adjust(left=0.06, right=0.98, bottom=0.10, top=0.88, wspace=0.16)
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
 

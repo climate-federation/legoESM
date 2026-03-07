@@ -68,10 +68,22 @@ def step_sea_ice(
     # Surface humidity: ice-phase saturation
     q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
 
-    tau_x = -rho * config.Cd_ice * wind_speed * forcing.u_lowest
-    tau_y = -rho * config.Cd_ice * wind_speed * forcing.v_lowest
-    shflx = rho * constants.c_pd * config.Ch_ice * wind_speed * (T_ice - forcing.T_lowest)
-    lhflx = rho * constants.L_v * config.Ch_ice * wind_speed * (q_sfc - forcing.q_lowest)
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_ice, q_sfc, rho,
+            z_ref=config.z_ref,
+            z0_init=config.z0_ice,
+            scheme=config.bulk_scheme,
+            n_iter=config.bulk_n_iter,
+        )
+    else:
+        tau_x = -rho * config.Cd_ice * wind_speed * forcing.u_lowest
+        tau_y = -rho * config.Cd_ice * wind_speed * forcing.v_lowest
+        shflx = rho * constants.c_pd * config.Ch_ice * wind_speed * (T_ice - forcing.T_lowest)
+        lhflx = rho * constants.L_v * config.Ch_ice * wind_speed * (q_sfc - forcing.q_lowest)
 
     # ---------- Radiation ----------
     sw_net = (1.0 - config.albedo_ice) * forcing.sw_down

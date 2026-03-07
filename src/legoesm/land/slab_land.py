@@ -63,13 +63,25 @@ def step_land(
 
     # Bulk fluxes
     rho = forcing.rho_lowest
-    Cd = config.Cd_land
-    Ch = config.Ch_land
 
-    tau_x = -rho * Cd * wind_speed * forcing.u_lowest
-    tau_y = -rho * Cd * wind_speed * forcing.v_lowest
-    shflx = rho * constants.c_pd * Ch * wind_speed * (T_soil - forcing.T_lowest)
-    lhflx = rho * constants.L_v * Ch * wind_speed * (q_sfc - forcing.q_lowest)
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_soil, q_sfc, rho,
+            z_ref=config.z_ref,
+            z0_init=config.z0_land,
+            scheme=config.bulk_scheme,
+            n_iter=config.bulk_n_iter,
+        )
+    else:
+        Cd = config.Cd_land
+        Ch = config.Ch_land
+        tau_x = -rho * Cd * wind_speed * forcing.u_lowest
+        tau_y = -rho * Cd * wind_speed * forcing.v_lowest
+        shflx = rho * constants.c_pd * Ch * wind_speed * (T_soil - forcing.T_lowest)
+        lhflx = rho * constants.L_v * Ch * wind_speed * (q_sfc - forcing.q_lowest)
 
     # Radiation
     sw_net = (1.0 - config.albedo_land) * forcing.sw_down

@@ -37,7 +37,10 @@ def bulk_formula_surface_forcing(
     jacobian: jnp.ndarray,
     cfg: BulkFormulaConfig,
 ) -> SurfaceForcingOutput:
-    """Apply COARE-like bulk formulas for air-sea fluxes.
+    """Apply bulk formulas for air-sea fluxes.
+
+    Supports constant coefficients or stability-dependent MOST algorithms
+    (COARE 3.0 or Large & Yeager 2004) selected via ``cfg.bulk_scheme``.
 
     Parameters
     ----------
@@ -55,26 +58,42 @@ def bulk_formula_surface_forcing(
 
     # SST in Kelvin
     T_s = T[..., 0] + 273.15  # (6, n, n)
-
-    # Sensible heat flux: Q_sh = rho_a * c_pa * C_H * U_a * (T_s - T_a)
-    Q_sh = cfg.rho_a * cfg.c_pa * cfg.C_H * cfg.U_a * (T_s - cfg.T_a)
-
-    # Latent heat flux: Q_lh = rho_a * L_v * C_E * U_a * (q_sat - q_a)
     q_sat = _saturation_specific_humidity(T_s)
-    Q_lh = cfg.rho_a * cfg.L_v * cfg.C_E * cfg.U_a * (q_sat - cfg.q_a)
 
     # Upward longwave: Q_lw_up = epsilon * sigma * T_s^4
-    sigma_sb = 5.67e-8  # Stefan-Boltzmann constant
+    sigma_sb = 5.67e-8
     emissivity = 0.97
-    Q_lw_up = emissivity * sigma_sb * T_s**4
+    Q_lw_up = emissivity * sigma_sb * T_s ** 4
+
+    if cfg.bulk_scheme in ("coare3", "large_yeager"):
+        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        # Wind is zonal only (prescribed), zero meridional
+        u_a = jnp.full_like(T_s, cfg.U_a, dtype=dtype)
+        v_a = jnp.zeros_like(T_s)
+        T_a = jnp.full_like(T_s, cfg.T_a, dtype=dtype)
+        q_a = jnp.full_like(T_s, cfg.q_a, dtype=dtype)
+        rho_a = jnp.full_like(T_s, cfg.rho_a, dtype=dtype)
+
+        tau_x, tau_y, Q_sh, Q_lh, _ = compute_most_fluxes(
+            u_a, v_a, T_a, q_a, T_s, q_sat, rho_a,
+            z_ref=cfg.z_ref,
+            z0_init=cfg.z0,
+            scheme=cfg.bulk_scheme,
+            n_iter=cfg.bulk_n_iter,
+        )
+        # Fluxes are positive upward; stress opposes wind
+        tau_x = -tau_x  # flip to positive eastward
+    else:
+        # Constant coefficients (original behavior)
+        Q_sh = cfg.rho_a * cfg.c_pa * cfg.C_H * cfg.U_a * (T_s - cfg.T_a)
+        Q_lh = cfg.rho_a * cfg.L_v * cfg.C_E * cfg.U_a * (q_sat - cfg.q_a)
+
+        tau = cfg.rho_a * cfg.C_D * cfg.U_a ** 2
+        tau_x = jnp.full_like(T_s, tau, dtype=dtype)
+        tau_y = jnp.zeros_like(T_s)
 
     # Net heat flux (positive into ocean)
     Q_net = cfg.SW_down - Q_lw_up + cfg.LW_down - Q_sh - Q_lh
-
-    # Wind stress: tau = rho_a * C_D * U_a^2
-    tau = cfg.rho_a * cfg.C_D * cfg.U_a**2
-    tau_x = jnp.full_like(T[..., 0], tau, dtype=dtype)
-    tau_y = jnp.zeros_like(T[..., 0])
 
     # Convert to top-layer tendencies
     dz_0 = z_coord.dz_ref[0] * jacobian

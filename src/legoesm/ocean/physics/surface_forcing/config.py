@@ -27,9 +27,9 @@ class RestoringConfig(NamedTuple):
 
 class BulkFormulaConfig(NamedTuple):
     """COARE-like air-sea flux formulation."""
-    C_D: float = 1.2e-3     # Drag coefficient
-    C_H: float = 1.2e-3     # Sensible heat transfer coefficient
-    C_E: float = 1.5e-3     # Latent heat transfer coefficient
+    C_D: float = 1.2e-3     # Drag coefficient (constant scheme)
+    C_H: float = 1.2e-3     # Sensible heat transfer coefficient (constant)
+    C_E: float = 1.5e-3     # Latent heat transfer coefficient (constant)
     rho_a: float = 1.225    # Air density [kg/m^3]
     c_pa: float = 1004.0    # Specific heat of air [J/(kg·K)]
     L_v: float = 2.5e6      # Latent heat of vaporization [J/kg]
@@ -38,6 +38,10 @@ class BulkFormulaConfig(NamedTuple):
     q_a: float = 0.005      # Air specific humidity [kg/kg]
     SW_down: float = 200.0  # Downward shortwave [W/m^2]
     LW_down: float = 300.0  # Downward longwave [W/m^2]
+    bulk_scheme: str = "constant"  # "constant", "coare3", "large_yeager"
+    z_ref: float = 10.0     # Reference height for MOST [m]
+    z0: float = 1e-4        # Roughness length for MOST [m]
+    bulk_n_iter: int = 5    # MOST iterations
 
 
 class SurfaceForcingConfig(NamedTuple):

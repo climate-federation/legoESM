@@ -32,6 +32,10 @@ def compute_surface_fluxes(
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Compute bulk aerodynamic surface fluxes.
 
+    Supports constant neutral coefficients or stability-dependent
+    MOST algorithms (COARE 3.0, Large & Yeager 2004) selected via
+    ``config.bulk_scheme``.
+
     Parameters
     ----------
     u : jax.Array
@@ -64,6 +68,18 @@ def compute_surface_fluxes(
     ustar : jax.Array
         Friction velocity [m/s], shape (ncol,).
     """
+    if config.bulk_scheme in ("coare3", "large_yeager"):
+        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
+            u, v, T, q_v, T_sfc, q_sfc, rho,
+            z_ref=config.z_ref,
+            z0_init=config.z0,
+            scheme=config.bulk_scheme,
+            n_iter=config.bulk_n_iter,
+        )
+        return tau_x, tau_y, shflx, lhflx, ustar
+
+    # Constant neutral coefficients (default)
     Cd = config.Cd_neutral
     Ch = config.Ch_neutral
 

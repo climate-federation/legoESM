@@ -135,21 +135,38 @@ def ocean_tile_response(
     """Compute surface response for the ocean tile.
 
     Ocean provides SST with fixed albedo/emissivity. Bulk fluxes
-    are computed here using the coupler's ocean exchange coefficients.
+    are computed using either constant coefficients or stability-dependent
+    MOST algorithms (COARE 3.0 or Large & Yeager 2004).
     """
     shape = ocean_sst.shape
-    wind_speed = jnp.sqrt(
-        forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + config.U_min ** 2
-    )
-
     q_sfc = saturation_mixing_ratio(ocean_sst, forcing.p_surface)
     rho = forcing.rho_lowest
-
-    tau_x = -rho * config.Cd_ocean * wind_speed * forcing.u_lowest
-    tau_y = -rho * config.Cd_ocean * wind_speed * forcing.v_lowest
-    shflx = rho * constants.c_pd * config.Ch_ocean * wind_speed * (ocean_sst - forcing.T_lowest)
-    lhflx = rho * constants.L_v * config.Ch_ocean * wind_speed * (q_sfc - forcing.q_lowest)
     lw_up = config.ocean_emissivity * constants.sigma_sb * ocean_sst ** 4
+
+    if config.bulk_scheme in ("coare3", "large_yeager"):
+        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        # Use wind relative to ocean surface current
+        u_rel = forcing.u_lowest - ocean_u
+        v_rel = forcing.v_lowest - ocean_v
+        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
+            u_rel, v_rel,
+            forcing.T_lowest, forcing.q_lowest,
+            ocean_sst, q_sfc,
+            rho,
+            z_ref=config.z_ref,
+            z0_init=config.ocean_z0,
+            scheme=config.bulk_scheme,
+            n_iter=config.bulk_n_iter,
+        )
+    else:
+        # Constant neutral coefficients (original behavior)
+        wind_speed = jnp.sqrt(
+            forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + config.U_min ** 2
+        )
+        tau_x = -rho * config.Cd_ocean * wind_speed * forcing.u_lowest
+        tau_y = -rho * config.Cd_ocean * wind_speed * forcing.v_lowest
+        shflx = rho * constants.c_pd * config.Ch_ocean * wind_speed * (ocean_sst - forcing.T_lowest)
+        lhflx = rho * constants.L_v * config.Ch_ocean * wind_speed * (q_sfc - forcing.q_lowest)
 
     return TileResponse(
         T_surface=ocean_sst,
