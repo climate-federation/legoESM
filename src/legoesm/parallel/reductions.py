@@ -164,3 +164,73 @@ def global_max_mpi(local_value: jax.Array) -> jax.Array:
         mpi4jax.allreduce(local_value, op=MPI.MAX, comm=MPI.COMM_WORLD),
     )
     return global_val
+
+
+def global_min_mpi(local_value: jax.Array) -> jax.Array:
+    """Compute a global minimum across all MPI ranks.
+
+    Parameters
+    ----------
+    local_value : jax.Array
+        Scalar (or array) local partial minimum.
+
+    Returns
+    -------
+    jax.Array
+        The global minimum across all processes.
+    """
+    mpi4jax, MPI = _require_mpi_stack()
+
+    global_val = _mpi4jax_array_result(
+        mpi4jax.allreduce(local_value, op=MPI.MIN, comm=MPI.COMM_WORLD),
+    )
+    return global_val
+
+
+def allgather_mpi(local_value: jax.Array) -> jax.Array:
+    """Gather arrays from all MPI ranks.
+
+    Parameters
+    ----------
+    local_value : jax.Array
+        Local array to gather.
+
+    Returns
+    -------
+    jax.Array
+        Concatenated array from all processes along a new leading axis.
+        Shape: ``(n_processes,) + local_value.shape``.
+    """
+    mpi4jax, MPI = _require_mpi_stack()
+
+    n_procs = MPI.COMM_WORLD.Get_size()
+    recv_shape = (n_procs,) + local_value.shape
+    recv_buf = jax.numpy.zeros(recv_shape, dtype=local_value.dtype)
+
+    recv_buf = _mpi4jax_array_result(
+        mpi4jax.allgather(local_value, comm=MPI.COMM_WORLD),
+    )
+    return recv_buf
+
+
+def broadcast_mpi(value: jax.Array, root: int = 0) -> jax.Array:
+    """Broadcast an array from one rank to all others.
+
+    Parameters
+    ----------
+    value : jax.Array
+        Array to broadcast (only meaningful on ``root``).
+    root : int
+        Rank that broadcasts.
+
+    Returns
+    -------
+    jax.Array
+        The broadcast value on all ranks.
+    """
+    mpi4jax, MPI = _require_mpi_stack()
+
+    result = _mpi4jax_array_result(
+        mpi4jax.bcast(value, root=root, comm=MPI.COMM_WORLD),
+    )
+    return result

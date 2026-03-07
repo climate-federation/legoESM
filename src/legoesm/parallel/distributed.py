@@ -1,7 +1,10 @@
 """Multi-node MPI initialization and state management.
 
-Provides utilities for initializing the JAX distributed runtime,
-partitioning state across MPI processes, and gathering results.
+Supports two decomposition modes:
+
+1. **Face-only** (1–6 MPI ranks): each rank owns full faces.
+2. **Sub-face tiling** (N ranks where N is a multiple of 6, N > 6):
+   each face is split into tiles, each rank owns one tile.
 
 Usage
 -----
@@ -11,15 +14,12 @@ Usage
 
     config = initialize_distributed()
     # All operators now automatically use MPI halo exchange.
-    # State arrays keep shape (6, n, n) with zeros for non-local faces.
 
 Design
 ------
-We keep all arrays at their full ``(6, n, n)`` shape, with zeros for
-faces not owned by the current rank.  This is simpler than sub-setting
-and lets ``jnp.sum(field * area)`` naturally produce the local
-contribution without shape changes.  A final ``allreduce(SUM)`` gives
-the global result.
+Face-only mode keeps all arrays at ``(6, n, n)`` shape, with zeros
+for non-local faces.  Sub-face tiling mode keeps arrays at
+``(6, n_tile, n_tile)`` shape with only the local face populated.
 """
 
 from __future__ import annotations
@@ -44,8 +44,11 @@ def initialize_distributed(
 ) -> DeviceConfig | tuple[DeviceConfig, CommTopology]:
     """Initialize JAX distributed runtime and set up MPI halo exchange.
 
-    Must be called before any JAX computation.  Uses MPI for inter-process
-    communication and halo exchange.
+    Automatically detects the number of MPI ranks and selects face-only
+    or sub-face tiling decomposition:
+
+    - 1, 2, 3, or 6 ranks → face-only.
+    - Multiple of 6 and >6 → sub-face tiling.
 
     Parameters
     ----------
@@ -55,8 +58,6 @@ def initialize_distributed(
     Returns
     -------
     DeviceConfig or (DeviceConfig, CommTopology)
-        Device configuration with ``is_distributed=True``. If
-        ``return_topology=True``, returns ``(config, topology)``.
     """
     global _active_topology
 
@@ -80,8 +81,7 @@ def initialize_distributed(
     # Initialize JAX distributed runtime.
     jax.distributed.initialize()
 
-    # Use MPI as the authoritative source for rank/size,
-    # since halo_exchange.py uses MPI.COMM_WORLD for all communication.
+    # Use MPI as the authoritative source for rank/size.
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     n_processes = comm.Get_size()
@@ -111,13 +111,21 @@ def initialize_distributed(
     local_device_count = len(local_devices)
     if local_device_count < 1:
         raise RuntimeError("No local JAX devices found for this MPI rank.")
-    # Face-only sharding requires a divisor of 6. When local device count
-    # is not a divisor (e.g., 4), pick the largest supported local subset.
-    mesh_devices = next(
-        (d for d in (6, 3, 2, 1) if d <= local_device_count),
-        1,
-    )
-    if mesh_devices != local_device_count:
+
+    # Each MPI rank uses its local devices.
+    # For face-only: pick largest divisor of 6 ≤ local_device_count.
+    # For sub-face: each rank owns one tile, so use 1 device per rank
+    # (multiple local GPUs within a rank can be used for intra-rank parallelism).
+    if n_processes <= 6:
+        mesh_devices = next(
+            (d for d in (6, 3, 2, 1) if d <= local_device_count),
+            1,
+        )
+    else:
+        # Sub-face tiling: each rank owns one tile, use all local devices
+        mesh_devices = local_device_count
+
+    if mesh_devices != local_device_count and n_processes <= 6:
         import warnings
         warnings.warn(
             "Local device count does not evenly divide 6 cubed-sphere faces. "
@@ -131,6 +139,7 @@ def initialize_distributed(
     )
 
     # Return a new config marking distributed mode.
+    tiling = topology.tiling
     config = DeviceConfig(
         mesh=local_config.mesh,
         face_sharding=local_config.face_sharding,
@@ -138,6 +147,8 @@ def initialize_distributed(
         n_devices=local_config.n_devices,
         backend=local_config.backend,
         is_distributed=True,
+        tiling=tiling,
+        grid_type="cubed_sphere",
     )
     set_active_config(config)
     if return_topology:
@@ -162,8 +173,7 @@ def partition_state(state, topology: CommTopology | None = None):
     state
         Any JAX pytree (e.g., ``ShallowWaterState``).
     topology : CommTopology, optional
-        Communication topology for this rank. If omitted, uses the
-        active topology set by :func:`initialize_distributed`.
+        Communication topology for this rank.
 
     Returns
     -------
@@ -183,12 +193,10 @@ def partition_state(state, topology: CommTopology | None = None):
             return leaf
         if leaf.ndim < 1 or leaf.shape[0] != 6:
             return leaf
-        # Create a mask that is 1 for local faces, 0 for remote.
         mask_1d = jnp.array(
             [1.0 if f in local_faces else 0.0 for f in range(6)],
             dtype=leaf.dtype,
         )
-        # Broadcast mask to match array shape.
         shape = (6,) + (1,) * (leaf.ndim - 1)
         mask = mask_1d.reshape(shape)
         return leaf * mask
@@ -207,8 +215,7 @@ def gather_state(local_state, topology: CommTopology | None = None):
     local_state
         Partitioned JAX pytree (non-local faces are zero).
     topology : CommTopology, optional
-        Communication topology. If omitted, uses the active topology
-        set by :func:`initialize_distributed`.
+        Communication topology.
 
     Returns
     -------
@@ -227,7 +234,6 @@ def gather_state(local_state, topology: CommTopology | None = None):
         if not isinstance(leaf, (jax.Array, jnp.ndarray)):
             return leaf
         if leaf.ndim < 1 or leaf.shape[0] != 6:
-            # Non-face-leading leaves are replicated metadata/constants.
             return leaf
         result = _mpi4jax_array_result(
             mpi4jax.allreduce(leaf, op=MPI.SUM, comm=MPI.COMM_WORLD),

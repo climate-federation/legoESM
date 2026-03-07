@@ -17,12 +17,15 @@ from legoesm.parallel.mesh import (
     shard_pytree,
     replicate_pytree,
     _N_FACES,
+    _best_tile_factorization,
 )
 from legoesm.parallel.comm import (
     CommTopology,
     build_comm_topology,
     _face_to_rank,
     _rank_to_faces,
+    _tile_rank,
+    _rank_to_tile,
 )
 from legoesm.parallel.reductions import (
     _require_mpi_stack,
@@ -76,15 +79,16 @@ class TestDeviceMesh:
             create_device_mesh(n_devices=1, devices=[])
 
     def test_invalid_n_devices(self):
-        """n_devices that doesn't divide 6 raises ValueError."""
+        """n_devices=0 raises ValueError; 4 and 5 auto-adjust."""
         with pytest.raises(ValueError, match="must be >= 1"):
             create_device_mesh(n_devices=0)
 
-        with pytest.raises(ValueError, match="does not evenly divide"):
-            create_device_mesh(n_devices=4)
+        # 4 and 5 auto-adjust to usable counts (no longer raise)
+        config4 = create_device_mesh(n_devices=4)
+        assert config4.n_devices in (1, 2, 3)  # rounded down to valid count
 
-        with pytest.raises(ValueError, match="does not evenly divide"):
-            create_device_mesh(n_devices=5)
+        config5 = create_device_mesh(n_devices=5)
+        assert config5.n_devices in (1, 2, 3)  # rounded down to valid count
 
     def test_active_config_set(self):
         """create_device_mesh sets the active config singleton."""
@@ -96,7 +100,7 @@ class TestDeviceMesh:
         fake_devices = [object(), object(), object(), object()]
         with patch("legoesm.parallel.mesh.jax.devices", return_value=fake_devices):
             with patch("legoesm.parallel.mesh.jax.default_backend", return_value="gpu"):
-                with pytest.warns(RuntimeWarning, match="Falling back to 3 device"):
+                with pytest.warns(RuntimeWarning, match="using 3"):
                     config = create_device_mesh(n_devices="auto")
         assert config.n_devices == 3
 
@@ -280,6 +284,89 @@ class TestCommTopology:
                     sent_pairs = [(face, edge) for face, edge, *_ in send_order_a]
                     expected_pairs = [(nbr_face, nbr_edge) for _, _, nbr_face, nbr_edge, _ in recv_order_b]
                     assert sent_pairs == expected_pairs
+
+
+class TestSubFaceTiling:
+    """Tests for sub-face tiling decomposition."""
+
+    def test_square_tile_factorization(self):
+        """_best_tile_factorization always produces square tiles for >6 devices."""
+        # Perfect squares → square tiles
+        assert _best_tile_factorization(24) == (6, 2, 2)   # 6 * 2²
+        assert _best_tile_factorization(54) == (6, 3, 3)   # 6 * 3²
+        assert _best_tile_factorization(96) == (6, 4, 4)   # 6 * 4²
+        assert _best_tile_factorization(150) == (6, 5, 5)  # 6 * 5²
+        assert _best_tile_factorization(384) == (6, 8, 8)  # 6 * 8²
+        assert _best_tile_factorization(600) == (6, 10, 10)  # 6 * 10²
+
+    def test_non_square_rounds_down(self):
+        """Non-perfect-square tiles_per_face rounds down to largest k²."""
+        # 12 processes: tiles_per_face=2, isqrt(2)=1 → 6*1*1=6
+        n_groups, tx, ty = _best_tile_factorization(12)
+        assert tx == ty  # always square
+        assert n_groups * tx * ty <= 12
+
+        # 48 processes: tiles_per_face=8, isqrt(8)=2 → 6*2*2=24
+        n_groups, tx, ty = _best_tile_factorization(48)
+        assert tx == ty == 2
+        assert n_groups * tx * ty == 24
+
+    def test_tile_rank_mapping(self):
+        """_tile_rank and _rank_to_tile are inverses."""
+        tx, ty = 3, 3
+        for face in range(6):
+            for ti in range(tx):
+                for tj in range(ty):
+                    rank = _tile_rank(face, ti, tj, tx, ty)
+                    f, i, j = _rank_to_tile(rank, tx, ty)
+                    assert f == face
+                    assert i == ti
+                    assert j == tj
+
+    def test_tiled_topology_24_ranks(self):
+        """24-rank topology: 6 faces × 2×2 tiles, each rank owns one tile."""
+        for rank in range(24):
+            topo = build_comm_topology(rank, 24)
+            assert len(topo.local_face_ids) == 1
+            assert topo.tiling == (2, 2)
+            # 4 tile neighbors: some same-face, some None (face boundary)
+            assert set(topo.tile_neighbors.keys()) == {"west", "east", "south", "north"}
+
+    def test_tiled_topology_tile_neighbors(self):
+        """Interior tiles have all 4 same-face neighbors; corner tiles have 2."""
+        # 54 ranks: 6 faces × 3×3 tiles
+        # Center tile (1,1) on face 0: rank = 0*9 + 1*3 + 1 = 4
+        topo = build_comm_topology(rank=4, n_processes=54)
+        assert topo.tile_index == (1, 1)
+        # Interior tile has all 4 intra-face neighbors
+        for d in ("west", "east", "south", "north"):
+            assert topo.tile_neighbors[d] is not None
+
+        # Corner tile (0,0) on face 0: rank = 0
+        topo = build_comm_topology(rank=0, n_processes=54)
+        assert topo.tile_index == (0, 0)
+        # Corner tile has 2 face-boundary edges (west, south)
+        assert topo.tile_neighbors["west"] is None
+        assert topo.tile_neighbors["south"] is None
+        # And 2 intra-face neighbors (east, north)
+        assert topo.tile_neighbors["east"] is not None
+        assert topo.tile_neighbors["north"] is not None
+
+    def test_non_square_tiles_rejected(self):
+        """Process counts that yield non-square tiles_per_face raise ValueError."""
+        with pytest.raises(ValueError, match="not a perfect square"):
+            build_comm_topology(rank=0, n_processes=12)
+
+    def test_tiled_topology_inter_face_neighbors(self):
+        """Boundary tiles have inter-face neighbor info."""
+        # 24 ranks: 2×2 tiles. Tile (0,0) on face 0 has west and south on face boundary
+        topo = build_comm_topology(rank=0, n_processes=24)
+        face = topo.local_face_ids[0]
+        assert face == 0
+        # West boundary → inter-face neighbor (face 3)
+        from legoesm.grids.halo import WEST, SOUTH
+        assert (face, WEST) in topo.neighbor_info
+        assert (face, SOUTH) in topo.neighbor_info
 
 
 class TestMPIDependencyGuards:

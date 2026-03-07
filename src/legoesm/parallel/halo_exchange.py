@@ -7,6 +7,15 @@ The single-node version (using JAX's automatic SPMD) is in
 This module is only imported when MPI is active.  ``mpi4jax`` is
 an optional dependency.
 
+Supports two modes:
+
+1. **Face-only** (≤6 MPI ranks): each rank owns one or more full faces.
+   Halo exchange happens between faces on different ranks.
+
+2. **Sub-face tiling** (6 × k² ranks): each rank owns one tile of one
+   face.  Halo exchange happens both between tiles on the same face
+   (intra-face) and between tiles on adjacent faces (inter-face).
+
 Usage
 -----
 The halo exchange is set up once at initialization via
@@ -22,10 +31,11 @@ After that, all operators automatically use MPI halo exchange.
 
 Optimization
 ------------
-Edges to the same neighbor rank are packed into a single send buffer,
-reducing the number of MPI messages from ~4 per face (one per edge)
-to ~2-3 per rank (one per unique neighbor rank).  This cuts MPI
-latency overhead significantly on high-latency interconnects.
+Face-only mode: edges to the same neighbor rank are packed into a
+single send buffer, reducing MPI messages from ~4 per face to ~2-3
+per rank.
+
+Sub-face tiling mode: one sendrecv per edge direction (4 total).
 """
 
 from __future__ import annotations
@@ -49,6 +59,8 @@ from legoesm.parallel.reductions import _mpi4jax_array_result
 
 
 _EDGES = (WEST, EAST, SOUTH, NORTH)
+_DIR_TO_EDGE = {"west": WEST, "east": EAST, "south": SOUTH, "north": NORTH}
+_OPPOSITE_EDGE = {WEST: EAST, EAST: WEST, SOUTH: NORTH, NORTH: SOUTH}
 
 
 def _place_strip(padded: jax.Array, face: int, edge: int, strip: jax.Array) -> jax.Array:
@@ -89,50 +101,24 @@ def _place_strip_h2(
     return padded
 
 
-def pad_halo_mpi(
+# ======================================================================
+# Face-only MPI halo exchange (≤6 ranks)
+# ======================================================================
+
+def _pad_halo_mpi_face_only(
     data: jax.Array,
     topology: CommTopology,
-    halo: int = 1,
+    halo: int,
+    mpi4jax,
+    MPI,
 ) -> jax.Array:
-    """Pad a scalar field with inter-face halo data using MPI.
-
-    This mirrors :func:`legoesm.grids.halo.pad_halo` but uses
-    ``mpi4jax.sendrecv`` for edges that cross MPI rank boundaries.
-
-    Edges to the same neighbor rank are packed into a single buffer
-    to reduce the number of MPI messages (latency optimization).
-
-    Parameters
-    ----------
-    data : jax.Array, shape (6, n, n)
-        Scalar field on the cubed-sphere.  Non-local faces should
-        contain valid data for local exchanges or zeros.
-    topology : CommTopology
-        Pre-computed communication topology.
-    halo : int
-        Halo width (1 or 2).
-
-    Returns
-    -------
-    padded : jax.Array, shape (6, n+2*halo, n+2*halo)
-    """
-    try:
-        import mpi4jax
-        from mpi4py import MPI
-    except ImportError as exc:
-        raise ImportError(
-            "MPI halo exchange requires mpi4jax and mpi4py. "
-            "Install with: pip install mpi4jax mpi4py"
-        ) from exc
-
+    """Face-only halo exchange (original behavior)."""
     n = data.shape[1]
     h2 = 2 * halo
     padded = jnp.zeros((6, n + h2, n + h2), dtype=data.dtype)
-
-    # Place interior data.
     padded = padded.at[:, halo:-halo, halo:-halo].set(data)
 
-    # --- Phase 1: Classify edges as local vs remote, group remote by rank ---
+    # --- Classify edges as local vs remote, group remote by rank ---
     local_edges = []
     remote_by_rank = defaultdict(list)
 
@@ -149,7 +135,7 @@ def pad_halo_mpi(
             else:
                 remote_by_rank[nbr_rank].append(entry)
 
-    # --- Phase 2: Handle local edges (no MPI) ---
+    # --- Handle local edges (no MPI) ---
     for face, edge, nbr_face, nbr_edge, is_reversed in local_edges:
         if halo == 1:
             strip = _extract_edge_strip(data, nbr_face, nbr_edge)
@@ -164,7 +150,7 @@ def pad_halo_mpi(
                 strip_d1 = strip_d1[::-1]
             padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
 
-    # --- Phase 3: Handle remote edges, packed per neighbor rank ---
+    # --- Handle remote edges, packed per neighbor rank ---
     strips_per_edge = halo  # 1 strip for halo=1, 2 strips for halo=2
     for nbr_rank in sorted(remote_by_rank):
         edges = remote_by_rank[nbr_rank]
@@ -218,6 +204,167 @@ def pad_halo_mpi(
                 padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
 
     return padded
+
+
+# ======================================================================
+# Sub-face tiling MPI halo exchange (>6 ranks)
+# ======================================================================
+
+def _pad_halo_mpi_tiled(
+    data: jax.Array,
+    topology: CommTopology,
+    halo: int,
+    mpi4jax,
+    MPI,
+) -> jax.Array:
+    """Sub-face tiling halo exchange.
+
+    Each rank owns one tile of one face.  For each edge direction:
+    - If the neighbor is on the same face (intra-face): simple exchange,
+      no index reversal needed.
+    - If the neighbor is on a different face (inter-face boundary):
+      exchange with possible reversal from CONNECTIVITY.
+
+    Tags use ``rank * 4 + edge`` to uniquely identify each message.
+    """
+    face = topology.local_face_ids[0]
+    n = data.shape[1]  # tile dimension (same for i and j since tx == ty)
+    h2 = 2 * halo
+    padded = jnp.zeros((6, n + h2, n + h2), dtype=data.dtype)
+    padded = padded.at[:, halo:-halo, halo:-halo].set(data)
+
+    for direction, edge in _DIR_TO_EDGE.items():
+        tile_nbr_rank = topology.tile_neighbors.get(direction)
+
+        if tile_nbr_rank is not None:
+            # ----- Intra-face tile exchange (no reversal) -----
+            opp = _OPPOSITE_EDGE[edge]
+            # Tags: I send with tag = my_rank*4+edge, receive with tag = nbr*4+opp
+            sendtag = topology.rank * 4 + edge
+            recvtag = tile_nbr_rank * 4 + opp
+
+            if halo == 1:
+                my_strip = _extract_edge_strip(data, face, edge)
+                recv_buf = jnp.zeros(n, dtype=data.dtype)
+                recv_strip = _mpi4jax_array_result(
+                    mpi4jax.sendrecv(
+                        my_strip, recv_buf,
+                        source=tile_nbr_rank, dest=tile_nbr_rank,
+                        sendtag=sendtag, recvtag=recvtag,
+                        comm=MPI.COMM_WORLD,
+                    ),
+                )
+                padded = _place_strip(padded, face, edge, recv_strip)
+            else:
+                strips = []
+                for depth in range(halo):
+                    strips.append(
+                        _extract_edge_strip_at_depth(data, face, edge, depth)
+                    )
+                send_buf = jnp.concatenate(strips, axis=0)
+                recv_buf = jnp.zeros(halo * n, dtype=data.dtype)
+                recv_data = _mpi4jax_array_result(
+                    mpi4jax.sendrecv(
+                        send_buf, recv_buf,
+                        source=tile_nbr_rank, dest=tile_nbr_rank,
+                        sendtag=sendtag, recvtag=recvtag,
+                        comm=MPI.COMM_WORLD,
+                    ),
+                )
+                strip_d0 = recv_data[:n]
+                strip_d1 = recv_data[n : 2 * n]
+                padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+
+        elif (face, edge) in topology.neighbor_info:
+            # ----- Inter-face boundary exchange (with possible reversal) -----
+            nbr_face, nbr_edge, is_reversed = topology.neighbor_info[(face, edge)]
+            nbr_rank = topology.neighbor_ranks[(face, edge)]
+
+            sendtag = topology.rank * 4 + edge
+            recvtag = nbr_rank * 4 + nbr_edge
+
+            if halo == 1:
+                my_strip = _extract_edge_strip(data, face, edge)
+                recv_buf = jnp.zeros(n, dtype=data.dtype)
+                recv_strip = _mpi4jax_array_result(
+                    mpi4jax.sendrecv(
+                        my_strip, recv_buf,
+                        source=nbr_rank, dest=nbr_rank,
+                        sendtag=sendtag, recvtag=recvtag,
+                        comm=MPI.COMM_WORLD,
+                    ),
+                )
+                if is_reversed:
+                    recv_strip = recv_strip[::-1]
+                padded = _place_strip(padded, face, edge, recv_strip)
+            else:
+                strips = []
+                for depth in range(halo):
+                    strips.append(
+                        _extract_edge_strip_at_depth(data, face, edge, depth)
+                    )
+                send_buf = jnp.concatenate(strips, axis=0)
+                recv_buf = jnp.zeros(halo * n, dtype=data.dtype)
+                recv_data = _mpi4jax_array_result(
+                    mpi4jax.sendrecv(
+                        send_buf, recv_buf,
+                        source=nbr_rank, dest=nbr_rank,
+                        sendtag=sendtag, recvtag=recvtag,
+                        comm=MPI.COMM_WORLD,
+                    ),
+                )
+                strip_d0 = recv_data[:n]
+                strip_d1 = recv_data[n : 2 * n]
+                if is_reversed:
+                    strip_d0 = strip_d0[::-1]
+                    strip_d1 = strip_d1[::-1]
+                padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+
+        # else: no neighbor in this direction (shouldn't happen on a cube)
+
+    return padded
+
+
+# ======================================================================
+# Main entry point
+# ======================================================================
+
+def pad_halo_mpi(
+    data: jax.Array,
+    topology: CommTopology,
+    halo: int = 1,
+) -> jax.Array:
+    """Pad a scalar field with halo data using MPI.
+
+    Dispatches to face-only or sub-face tiling mode based on the
+    topology's tiling configuration.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (6, n, n)
+        Scalar field on the cubed-sphere.  Non-local faces should
+        contain valid data for local exchanges or zeros.
+    topology : CommTopology
+        Pre-computed communication topology.
+    halo : int
+        Halo width (1 or 2).
+
+    Returns
+    -------
+    padded : jax.Array, shape (6, n+2*halo, n+2*halo)
+    """
+    try:
+        import mpi4jax
+        from mpi4py import MPI
+    except ImportError as exc:
+        raise ImportError(
+            "MPI halo exchange requires mpi4jax and mpi4py. "
+            "Install with: pip install mpi4jax mpi4py"
+        ) from exc
+
+    if topology.tiling != (1, 1):
+        return _pad_halo_mpi_tiled(data, topology, halo, mpi4jax, MPI)
+    return _pad_halo_mpi_face_only(data, topology, halo, mpi4jax, MPI)
 
 
 def pad_halo_vector_mpi(
