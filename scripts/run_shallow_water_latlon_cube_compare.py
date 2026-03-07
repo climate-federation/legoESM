@@ -106,6 +106,10 @@ def _color_limits(arrays: list[np.ndarray], symmetric: bool = False) -> tuple[fl
     return vmin, vmax
 
 
+def _is_symmetric_snapshot_field(key: str) -> bool:
+    return key in ("u", "v") or ("vorticity" in key)
+
+
 def _save_snapshot_times(out_dir: Path, steps: list[int], dt: float) -> None:
     with open(out_dir / "snapshot_times.txt", "w") as f:
         f.write("step,time_seconds,time_days\n")
@@ -440,7 +444,7 @@ def _save_snapshots_latlon(
 
     for r, (key, label, cmap) in enumerate(field_specs):
         panels = [np.asarray(snapshots[s][key], dtype=np.float64) for s in steps]
-        vmin, vmax = _color_limits(panels, symmetric=("vorticity" in key))
+        vmin, vmax = _color_limits(panels, symmetric=_is_symmetric_snapshot_field(key))
         im = None
         for c, st in enumerate(steps):
             ax = axes[r][c]
@@ -547,7 +551,10 @@ def _save_snapshots_cube(
 
     for r, (key, label, cmap) in enumerate(field_specs):
         panels = [np.asarray(snapshots[s][key], dtype=np.float64) for s in steps]
-        vmin, vmax = _color_limits([p.reshape(-1) for p in panels], symmetric=("vorticity" in key))
+        vmin, vmax = _color_limits(
+            [p.reshape(-1) for p in panels],
+            symmetric=_is_symmetric_snapshot_field(key),
+        )
         im = None
         for c, st in enumerate(steps):
             ax = axes[r][c]
@@ -708,6 +715,8 @@ def _run_spectral_latlon(
         h = np.asarray(f["h"], dtype=np.float64)
         vor = np.asarray(f["vor"], dtype=np.float64)
         return {
+            "u": u,
+            "v": v,
             "wind_speed": np.sqrt(u * u + v * v),
             "height": h,
             "vorticity": vor,
@@ -764,6 +773,8 @@ def _run_spectral_latlon(
         snapshots,
         dt,
         [
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
             ("wind_speed", "Wind speed (m/s)", "magma"),
             ("height", "Fluid depth h (m)", "viridis"),
             ("vorticity", "Relative vorticity (1/s)", "RdBu_r"),
@@ -881,7 +892,7 @@ def _run_fv_cubesphere(
         h = np.asarray(s.h.data, dtype=np.float64)
         wind = np.sqrt(u * u + v * v)
         vor = np.asarray(curl_z(s.u, s.v, grid).data, dtype=np.float64)
-        return {"wind_speed": wind, "height": h, "vorticity": vor}
+        return {"u": u, "v": v, "wind_speed": wind, "height": h, "vorticity": vor}
 
     def _extract_latlon(face_fields: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         out = {}
@@ -930,7 +941,7 @@ def _run_fv_cubesphere(
     f0 = _extract_faces(state)
     ll0 = _extract_latlon(f0)
     snapshots_cube[0] = {k: v for k, v in f0.items()}
-    snapshots_latlon[0] = {k: ll0[k] for k in ("wind_speed", "height", "vorticity")}
+    snapshots_latlon[0] = {k: ll0[k] for k in ("u", "v", "wind_speed", "height", "vorticity")}
     lon2d_ref = ll0["_lon2d"]
     lat2d_ref = ll0["_lat2d"]
     lat_weights = _lat_weights_from_lat2d(lat2d_ref)
@@ -947,7 +958,7 @@ def _run_fv_cubesphere(
         if need_snap or need_record:
             f = _extract_faces(state)
             ll = _extract_latlon(f)
-            ll_fields = {k: ll[k] for k in ("wind_speed", "height", "vorticity")}
+            ll_fields = {k: ll[k] for k in ("u", "v", "wind_speed", "height", "vorticity")}
             if need_snap:
                 snapshots_cube[st] = {k: v for k, v in f.items()}
                 snapshots_latlon[st] = ll_fields
@@ -963,6 +974,8 @@ def _run_fv_cubesphere(
     wall = time.time() - t0
 
     field_specs = [
+        ("u", "Zonal wind u (m/s)", "RdBu_r"),
+        ("v", "Meridional wind v (m/s)", "RdBu_r"),
         ("wind_speed", "Wind speed (m/s)", "magma"),
         ("height", "Fluid depth h (m)", "viridis"),
         ("vorticity", "Relative vorticity (1/s)", "RdBu_r"),

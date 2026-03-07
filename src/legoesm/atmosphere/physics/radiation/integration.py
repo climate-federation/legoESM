@@ -76,6 +76,8 @@ def _call_radiation_backend(
     lat: jnp.ndarray,
     q_v: jnp.ndarray | None,
     insolation: jnp.ndarray,
+    sfc_albedo_override: jnp.ndarray | float | None = None,
+    sfc_emissivity_override: jnp.ndarray | float | None = None,
 ):
     """Call configured radiation backend with a unified integration interface."""
     radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
@@ -92,9 +94,10 @@ def _call_radiation_backend(
             config=scheme_config,
         )
 
-    # RRTMGP currently receives an effective daily-mean cosine zenith.
+    # RRTMGP: derive effective cosine zenith from daily-mean insolation.
+    S_0 = radiation_config.rrtmgp.S_0
     cos_zenith = jnp.clip(
-        insolation / jnp.clip(radiation_config.gray.S_0, 1.0e-6, None),
+        insolation / jnp.clip(S_0, 1.0e-6, None),
         0.0,
         1.0,
     )
@@ -107,6 +110,8 @@ def _call_radiation_backend(
         q_v=q_v_safe,
         cos_zenith=cos_zenith,
         config=scheme_config,
+        sfc_albedo_override=sfc_albedo_override,
+        sfc_emissivity_override=sfc_emissivity_override,
     )
 
 

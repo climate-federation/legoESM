@@ -163,6 +163,8 @@ def compute_Gamma_matrix(
     lnps_coupling = dsigma[None, :] / sigma_range  # (1, nlev) -> broadcast
 
     # --- Combined Gamma ---
+    # NOTE: No E-variable diagonal (lnps_ref * I) — the correct PGF form
+    # does not include the R_d*lnps_0*∇²(T') same-level coupling.
     Gamma = R_d * T_ref * (S + lnps_coupling)
 
     return Gamma

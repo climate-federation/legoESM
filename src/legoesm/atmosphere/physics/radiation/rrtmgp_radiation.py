@@ -131,6 +131,8 @@ def rrtmgp_radiation(
     q_v: jnp.ndarray,
     cos_zenith: jnp.ndarray,
     config: RRTMGPConfig,
+    sfc_albedo_override: jnp.ndarray | float | None = None,
+    sfc_emissivity_override: jnp.ndarray | float | None = None,
 ) -> RadiationOutput:
     """Compute radiation using jax-rrtmgp.
 
@@ -149,6 +151,14 @@ def rrtmgp_radiation(
     cos_zenith : jnp.ndarray
         Cosine of solar zenith angle (ncol,).
     config : RRTMGPConfig
+    sfc_albedo_override : jnp.ndarray | float | None
+        If provided, overrides config.sfc_albedo.  For AMIP, this is the
+        ice/ocean blended column-mean albedo.  The jax-rrtmgp solver uses a
+        scalar (column-averaged) albedo; if an array is passed, the column
+        mean is taken.  This is standard practice for column radiation at
+        coarse resolution (see limitations in docs/amip.md).
+    sfc_emissivity_override : jnp.ndarray | float | None
+        Same as sfc_albedo_override but for surface emissivity.
 
     Returns
     -------
@@ -187,9 +197,24 @@ def rrtmgp_radiation(
     # Compute a mean zenith angle (scalar) — bundled API uses a scalar zenith
     zenith = jnp.arccos(jnp.clip(jnp.mean(cos_zenith), 0.0, 1.0))
 
+    # Surface properties: use overrides if provided (e.g. ice/ocean blend),
+    # otherwise fall back to config defaults.
+    if sfc_albedo_override is not None:
+        # jax-rrtmgp's AtmosphericState uses a scalar sfc_alb that gets
+        # broadcast to all columns.  Take column mean for the best single-
+        # value approximation.
+        eff_albedo = float(jnp.mean(jnp.asarray(sfc_albedo_override)))
+    else:
+        eff_albedo = config.sfc_albedo
+
+    if sfc_emissivity_override is not None:
+        eff_emis = float(jnp.mean(jnp.asarray(sfc_emissivity_override)))
+    else:
+        eff_emis = config.sfc_emissivity
+
     atmos_state = AtmosphericState(
-        sfc_emis=config.sfc_emissivity,
-        sfc_alb=config.sfc_albedo,
+        sfc_emis=eff_emis,
+        sfc_alb=eff_albedo,
         zenith=zenith,
         irrad=config.S_0,
         vmr=vmr_lib,

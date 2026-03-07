@@ -77,9 +77,10 @@ class AMIPForcing(NamedTuple):
     times : jax.Array
         Time coordinate as days since first record, shape (ntime,).
     sst : jax.Array
-        Sea surface temperature [K], shape (ntime, 6, n, n).
+        Sea surface temperature [K], shape (ntime, ...) where ``...``
+        is ``(6, n, n)`` for cubed-sphere or ``(n_lat, n_lon)`` for Gaussian.
     sic : jax.Array
-        Sea-ice concentration [0-1], shape (ntime, 6, n, n).
+        Sea-ice concentration [0-1], same shape as sst.
     config : AMIPForcingConfig
         Configuration used to load the data.
     """
@@ -126,24 +127,49 @@ def get_amip_preset(dataset_name: str) -> AMIPForcingConfig:
 
 
 def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
-    """Load AMIP forcing from NetCDF and regrid to cubed-sphere.
+    """Load AMIP forcing from NetCDF and regrid to the target grid.
 
     Parameters
     ----------
     config : AMIPForcingConfig
         Forcing configuration with file path and variable names.
-    grid : CubedSphereGrid
-        Target cubed-sphere grid.
+    grid : CubedSphereGrid or GaussianGrid
+        Target grid.  Detected via ``hasattr(grid, 'n_lat')``.
 
     Returns
     -------
     AMIPForcing
         Regridded forcing data as JAX arrays.
+        Shape is (ntime, 6, n, n) for cubed-sphere or
+        (ntime, n_lat, n_lon) for Gaussian.
     """
     import xarray as xr
     from scipy.interpolate import RegularGridInterpolator
 
-    ds = xr.open_dataset(config.path)
+    path = config.path
+    if not path:
+        raise ValueError("AMIPForcingConfig.path is empty — provide a NetCDF file path")
+
+    ds = xr.open_dataset(path)
+
+    # --- Validate required variables ---
+    missing = []
+    for vname, label in [
+        (config.sst_var, "SST"),
+        (config.sic_var, "SIC"),
+        (config.lat_var, "latitude"),
+        (config.lon_var, "longitude"),
+        (config.time_var, "time"),
+    ]:
+        if vname not in ds:
+            missing.append(f"  {label}: expected variable '{vname}'")
+    if missing:
+        available = ", ".join(sorted(ds.data_vars.keys() | ds.coords.keys()))
+        raise KeyError(
+            f"Missing variables in {path}:\n"
+            + "\n".join(missing)
+            + f"\nAvailable: {available}"
+        )
 
     # Extract source grid
     lat_src = ds[config.lat_var].values.astype(np.float64)
@@ -191,18 +217,28 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
     sst_wrapped = np.concatenate([sst_data[:, :, -1:], sst_data, sst_data[:, :, :1]], axis=2)
     sic_wrapped = np.concatenate([sic_data[:, :, -1:], sic_data, sic_data[:, :, :1]], axis=2)
 
-    # Target coordinates: cubed-sphere lat/lon in degrees
-    target_lat = np.asarray(grid.lat) * 180.0 / np.pi  # (6, n, n) -> degrees
-    target_lon = np.asarray(grid.lon) * 180.0 / np.pi   # (6, n, n) -> degrees
-    target_lon = target_lon % 360.0  # [0, 360)
+    # Detect grid type: Gaussian grids have 'n_lat'; cubed-sphere has 'n'.
+    is_gaussian = hasattr(grid, 'n_lat') and not hasattr(grid, 'n')
+
+    if is_gaussian:
+        # Gaussian grid: lat is (n_lat,) in radians, lon is (n_lon,) in radians
+        target_lat_1d = np.asarray(grid.lat) * 180.0 / np.pi   # (n_lat,) degrees
+        target_lon_1d = np.asarray(grid.lon) * 180.0 / np.pi   # (n_lon,) degrees
+        target_lon_1d = target_lon_1d % 360.0
+        target_lon_2d, target_lat_2d = np.meshgrid(target_lon_1d, target_lat_1d)
+        target_shape = (grid.n_lat, grid.n_lon)
+    else:
+        # Cubed-sphere
+        target_lat_2d = np.asarray(grid.lat) * 180.0 / np.pi
+        target_lon_2d = np.asarray(grid.lon) * 180.0 / np.pi
+        target_lon_2d = target_lon_2d % 360.0
+        target_shape = (6, grid.n, grid.n)
 
     ntime = sst_data.shape[0]
-    n = grid.n
-    sst_regridded = np.zeros((ntime, 6, n, n), dtype=np.float64)
-    sic_regridded = np.zeros((ntime, 6, n, n), dtype=np.float64)
+    sst_regridded = np.zeros((ntime, *target_shape), dtype=np.float64)
+    sic_regridded = np.zeros((ntime, *target_shape), dtype=np.float64)
 
-    # Flatten target points for interpolation
-    target_points = np.stack([target_lat.ravel(), target_lon.ravel()], axis=-1)
+    target_points = np.stack([target_lat_2d.ravel(), target_lon_2d.ravel()], axis=-1)
 
     for t in range(ntime):
         interp_sst = RegularGridInterpolator(
@@ -213,8 +249,8 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
             (lat_src, lon_wrapped), sic_wrapped[t],
             method="linear", bounds_error=False, fill_value=None,
         )
-        sst_regridded[t] = interp_sst(target_points).reshape(6, n, n)
-        sic_regridded[t] = interp_sic(target_points).reshape(6, n, n)
+        sst_regridded[t] = interp_sst(target_points).reshape(target_shape)
+        sic_regridded[t] = interp_sic(target_points).reshape(target_shape)
 
     # Time axis: days since first record
     time_coord = ds[config.time_var].values
@@ -256,9 +292,9 @@ def get_forcing_at_time(
     Returns
     -------
     sst : jax.Array
-        Interpolated SST [K], shape (6, n, n).
+        Interpolated SST [K], same spatial shape as forcing.sst[0].
     sic : jax.Array
-        Interpolated SIC [0-1], shape (6, n, n).
+        Interpolated SIC [0-1], same spatial shape as forcing.sic[0].
     """
     times = forcing.times
     ntime = times.shape[0]

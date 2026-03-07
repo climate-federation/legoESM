@@ -79,24 +79,29 @@ def sbm_convection(
     # 2. Compute moist adiabatic temperature profile
     T_moist = compute_moist_adiabat(T_base, p_full)  # (ncol, nlev)
 
-    # 3. Reference moisture profile (before enthalpy correction)
-    q_ref_raw = config.RH_ref * saturation_mixing_ratio(T_moist, p_full)
+    # 3. Identify the convective layer: only levels where the moist adiabat
+    #    is warmer than the environment (conditional instability).
+    #    This prevents adjusting the stable stratosphere (Frierson 2007).
+    cloud_mask = (T_moist >= T).astype(T.dtype)  # (ncol, nlev)
 
-    # 4. Enthalpy-conserving correction (Newton iteration)
-    # We need delta_T such that:
-    #   sum(c_pd * (T_moist + dT - T) + L_v * (RH * q_sat(T_moist + dT, p) - q_v)) * dp = 0
-    # Use two Newton iterations for accuracy.
+    # 4. Compute CAPE from the RAW moist adiabat (before enthalpy correction)
+    #    to avoid artificial CAPE from the Newton correction.
+    cape = compute_cape(T, T_moist, p_full, p_half)  # (ncol,)
+
+    # 5. Enthalpy-conserving correction (Newton iteration)
+    #    Only over the cloud layer (masked levels).
     def _newton_step(T_trial):
         q_trial = config.RH_ref * saturation_mixing_ratio(T_trial, p_full)
         residual = jnp.sum(
-            (constants.c_pd * (T_trial - T) + constants.L_v * (q_trial - q_v)) * dp,
+            cloud_mask * (constants.c_pd * (T_trial - T)
+                          + constants.L_v * (q_trial - q_v)) * dp,
             axis=1,
         )  # (ncol,)
-        # Clausius-Clapeyron: dq_sat/dT ≈ L_v * q_sat / (R_v * T^2)
         q_sat_trial = saturation_mixing_ratio(T_trial, p_full)
         dqsat_dT = constants.L_v * q_sat_trial / (constants.R_v * T_trial ** 2)
         jacobian = jnp.sum(
-            (constants.c_pd + constants.L_v * config.RH_ref * dqsat_dT) * dp,
+            cloud_mask * (constants.c_pd
+                          + constants.L_v * config.RH_ref * dqsat_dT) * dp,
             axis=1,
         )  # (ncol,)
         dT = -residual / jnp.clip(jacobian, 1.0, None)
@@ -108,18 +113,15 @@ def sbm_convection(
     # Reference moisture at converged temperature
     q_ref = config.RH_ref * saturation_mixing_ratio(T_ref, p_full)
 
-    # 5. Compute CAPE for trigger
-    cape = compute_cape(T, T_ref, p_full, p_half)  # (ncol,)
-
-    # Smooth trigger: sigmoid(sharpness * (CAPE - threshold))
+    # 6. Smooth trigger: sigmoid(sharpness * (CAPE - threshold))
     trigger = jax.nn.sigmoid(
         config.smooth_trigger_sharpness * (cape - config.CAPE_threshold)
     )  # (ncol,)
 
-    # 6. Relaxation tendencies
+    # 7. Relaxation tendencies — only within the convective (cloud) layer
     tau_c = config.tau_c
-    dT_dt = trigger[:, None] * (T_ref - T) / tau_c  # (ncol, nlev)
-    dq_v_dt = trigger[:, None] * (q_ref - q_v) / tau_c  # (ncol, nlev)
+    dT_dt = trigger[:, None] * cloud_mask * (T_ref - T) / tau_c
+    dq_v_dt = trigger[:, None] * cloud_mask * (q_ref - q_v) / tau_c
 
     # 7. Precipitation: column-integrated moisture sink
     # precip = -sum(dq_v_dt * dp) / g, clipped >= 0

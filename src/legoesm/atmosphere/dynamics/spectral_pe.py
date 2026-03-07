@@ -49,6 +49,7 @@ from legoesm.grids.gaussian import (
 )
 from legoesm.grids.vertical import SigmaCoordinate
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 from legoesm import constants
 
 _LNPS_MIN = float(jnp.log(100.0))
@@ -78,6 +79,7 @@ class SpectralPEConfig(NamedTuple):
     g: float = constants.g
     hyperdiff_coeff: float = 0.0
     hyperdiff_order: int = 2
+    time_integrator: str = "ssp_rk3"  # "ssp_rk3" or "ssp_rk54"
     semi_implicit: bool = False      # Use Hoskins-Simmons semi-implicit
     si_T_ref: float = 300.0         # Reference temperature for linearization [K]
     si_alpha: float = 0.5           # Implicitness (0.5 = Crank-Nicolson)
@@ -250,29 +252,68 @@ def spectral_pe_tendencies(
         + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
     )
 
-    # --- 11. Energy variable: E = K + Phi + R_d * T * lnps ---
-    # This is the Bourke (1972) formulation for sigma-coordinate PGF.
-    E = K + Phi + R_d * T * lnps[..., None]
-    E_hat = sh_analysis_3d(grid, E)
+    # --- 11. Pressure gradient force (correct form, NOT Bourke E-variable) ---
+    # The PGF divergence is: -∇²(K + Φ) - ∇·(R_d·T·∇lnps)
+    # Split using T = T_ref + T':
+    #   = -∇²(K + Φ) - R_d·T_ref·∇²(lnps) - ∇·(R_d·T'·∇(lnps))
+    # The first two terms use spectral Laplacian (exact).
+    # The third term is computed as a grid-point product + spectral divergence.
+    #
+    # NOTE: The Bourke (1972) E-variable form E = K + Φ + R_d·T·lnps
+    # is NOT used because -∇²(R_d·T·lnps) ≠ -∇·(R_d·T·∇lnps).
+    # The E-variable adds a spurious same-level T→D coupling
+    # (-R_d·lnps_0·∇²T') that is unstable when combined with
+    # adiabatic heating.
+    T_ref = 300.0
+    KPhi = K + Phi
+    KPhi_hat = sh_analysis_3d(grid, KPhi)
+
+    # Compute ∇(lnps) on grid (needed for PGF correction and adiabatic)
+    dfdlon = sh_synthesis(grid, 1j * grid.ms * state.lnps_hat.data)
+    cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
+    dlnps_dx = dfdlon / (a * cos_lat_2d)
+    dfdtheta_cos = _sh_synthesis_H(grid, state.lnps_hat.data)
+    dlnps_dy = -dfdtheta_cos / (a * cos_lat_2d)
+
+    # PGF correction: -∇·(R_d·T'·∇lnps) computed as spectral div of grid product
+    T_prime_pgf = T - T_ref
+    pgf_Fx_cos = R_d * T_prime_pgf * dlnps_dx[..., None] * cos_lat_3d
+    pgf_Fy_cos = R_d * T_prime_pgf * dlnps_dy[..., None] * cos_lat_3d
+    pgf_correction_hat = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_Fx_cos)
+        - one_over_a * sh_analysis_dmu_3d(grid, pgf_Fy_cos)
+    )
 
     # --- 12. Horizontal tendencies ---
     dvor_hat = -flux_vor_div
-    ddiv_hat = flux_vor_curl - grid.lap[:, None] * E_hat
-
-    # --- 13. Temperature equation ---
-    # Horizontal: dT/dt = -div(T*v) + T*div(v) (advective form from flux form)
-    T_u_cos = T * u_cos
-    T_v_cos = T * v_cos
-
-    flux_T_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, T_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, T_v_cos)
+    ddiv_hat = (
+        flux_vor_curl
+        - grid.lap[:, None] * KPhi_hat
+        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
+        - pgf_correction_hat
     )
 
-    T_div = T * div
-    T_div_hat = sh_analysis_3d(grid, T_div)
+    # --- 13. Temperature equation ---
+    # Horizontal: dT/dt = -v·∇T = -div(T*v) + T*div(v)
+    # Reference-temperature subtraction (Simmons & Burridge 1981):
+    # For uniform T_ref, -div(T*v) + T*div = -div(T'*v) + T'*div
+    # where T' = T - T_ref.  This eliminates the O(T_ref * ε) cancellation
+    # error that otherwise destabilises the isothermal rest state.
+    T_ref = 300.0
+    T_prime = T - T_ref
 
-    dT_hat = -flux_T_div + T_div_hat
+    T_prime_u_cos = T_prime * u_cos
+    T_prime_v_cos = T_prime * v_cos
+
+    flux_T_div = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, T_prime_u_cos)
+        - one_over_a * sh_analysis_dmu_3d(grid, T_prime_v_cos)
+    )
+
+    T_prime_div = T_prime * div
+    T_prime_div_hat = sh_analysis_3d(grid, T_prime_div)
+
+    dT_hat = -flux_T_div + T_prime_div_hat
 
     # Vertical advection of T
     vert_adv_T = _vertical_advection_sigma_gaussian(T, sigma_dot, sigma_coord)
@@ -283,13 +324,8 @@ def spectral_pe_tendencies(
     adiabatic = kappa * T * omega / p_full
 
     # Material derivative correction: kappa * T * v . grad(lnps)
-    # Compute grad(lnps) on grid from spectral
-    dfdlon = sh_synthesis(grid, 1j * grid.ms * state.lnps_hat.data)
-    cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
-    dfdx = dfdlon / (a * cos_lat_2d)
-    dfdtheta_cos = _sh_synthesis_H(grid, state.lnps_hat.data)
-    dfdy = -dfdtheta_cos / (a * cos_lat_2d)
-    v_dot_grad_lnps = u * dfdx[..., None] + v * dfdy[..., None]
+    # (grad(lnps) already computed above for PGF correction)
+    v_dot_grad_lnps = u * dlnps_dx[..., None] + v * dlnps_dy[..., None]
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_hat = dT_hat + sh_analysis_3d(grid, adiabatic)
@@ -430,7 +466,7 @@ class SpectralPrimitiveEquationModel:
             self._si_dt = dt_si
 
     def _do_step(self, state, dt, tendency_fn):
-        """Core step: explicit RK3 or semi-implicit RK3."""
+        """Core step: explicit RK3/RK54 or semi-implicit RK3."""
         if self.config.semi_implicit:
             from legoesm.timestepping.semi_implicit import ssp_rk3_step_si
             n_substeps = int(self.config.si_substeps)
@@ -447,6 +483,10 @@ class SpectralPrimitiveEquationModel:
                 )
 
             return jax.lax.fori_loop(0, n_substeps, si_substep, state)
+
+        integrator = self.config.time_integrator.lower()
+        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
+            return ssp_rk54_step(state, tendency_fn, dt)
         return ssp_rk3_step(state, tendency_fn, dt)
 
     def step(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:

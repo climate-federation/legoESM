@@ -1,6 +1,7 @@
 """Prescribed forcing for legoESM.
 
-Provides AMIP-style prescribed SST and sea-ice boundary conditions.
+Provides AMIP-style prescribed SST and sea-ice boundary conditions,
+experiment configuration, checkpoint/restart, and external forcing scaffolds.
 """
 
 from legoesm.forcing.amip import (
@@ -10,6 +11,22 @@ from legoesm.forcing.amip import (
     load_amip_forcing,
     get_forcing_at_time,
 )
+from legoesm.forcing.amip_config import (
+    AMIPExperimentConfig,
+    config_to_dict,
+    config_from_dict,
+    save_config,
+    load_config,
+    save_checkpoint,
+    load_checkpoint,
+)
+from legoesm.forcing.external import (
+    ExternalForcingConfig,
+    GHGConfig,
+    OzoneConfig,
+    AerosolConfig,
+    SolarConfig,
+)
 
 __all__ = [
     "AMIPForcingConfig",
@@ -17,4 +34,16 @@ __all__ = [
     "get_amip_preset",
     "load_amip_forcing",
     "get_forcing_at_time",
+    "AMIPExperimentConfig",
+    "config_to_dict",
+    "config_from_dict",
+    "save_config",
+    "load_config",
+    "save_checkpoint",
+    "load_checkpoint",
+    "ExternalForcingConfig",
+    "GHGConfig",
+    "OzoneConfig",
+    "AerosolConfig",
+    "SolarConfig",
 ]
