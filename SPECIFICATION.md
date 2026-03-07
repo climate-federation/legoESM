@@ -1,10 +1,24 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.0
+## Technical Specification v3.1
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-06 (updated from v2.0, 2026-03-02)
+**Date**: 2026-03-07 (updated from v3.0, 2026-03-06)
+
+---
+
+### Changelog (v3.1, 2026-03-07)
+
+**Critical bug fixes:**
+
+1. **Spectral PE pressure gradient force** (`spectral_pe.py`, `semi_implicit.py`): Replaced the Bourke (1972) E-variable formulation `E = K + Φ + R_d·T·lnp_s` with the mathematically correct PGF `−∇²(K+Φ) − ∇·(R_d·T·∇lnp_s)`. The E-variable form introduces a spurious `−R_d·lnp_s₀·∇²(T')` coupling that causes exponential instability with growth rate ~10⁻³/s. Eigenvalue analysis confirms the corrected form is neutrally stable (purely imaginary eigenvalues). The semi-implicit Gamma matrix was updated to remove the corresponding `lnp_s₀·I` diagonal. See §4.1.5.
+
+2. **SBM convection cloud-layer masking** (`convection/sbm.py`): Added `cloud_mask = (T_moist ≥ T_env)` to restrict convective adjustment to conditionally unstable levels. Without masking, the scheme adjusted the entire column including the stable stratosphere, causing catastrophic cooling (~40 K/hr at model top). CAPE is now computed from the raw moist adiabat before the enthalpy-conserving Newton correction to avoid artificial triggering. See §4.1.9 (Convection).
+
+**New capability:**
+
+3. **365-day AMIP spectral simulation** (`scripts/run_amip_spectral.py`): T21/L20 with gray radiation, SBM convection, BL exchange, condensation, Rayleigh friction, and analytical SST forcing. Completed with physically realistic diagnostics: LW_TOA ≈ 255 W/m², precip ≈ 4.6 mm/day, clear seasonal cycle. See §4.6.2.
 
 ---
 
@@ -440,7 +454,7 @@ class TimeIntegrator(Protocol):
 | **SSP-RK3(4)** | `ssp_rk34.py` | Higher-order SSP with embedded error estimate |
 | **SSP-RK5(4)** | `ssp_rk54.py` | 5th-order SSP with 4th-order embedding |
 | **Split-explicit RK3** | `split_explicit.py` | Non-hydrostatic (acoustic substeps), ocean (barotropic substeps) |
-| **Semi-implicit** | `semi_implicit.py` | Hoskins-Simmons method for spectral PE |
+| **Semi-implicit** | `semi_implicit.py` | Hoskins-Simmons (1975) for spectral PE (Gamma corrected v3.1) |
 | **Tridiagonal solver** | `tridiagonal.py` | Semi-implicit acoustic substeps (vertical), vertical diffusion |
 
 #### 3.4.3 SSP-RK3
@@ -601,16 +615,24 @@ Exner perturbation: π' = π₀·[((1+ρ'/ρ₀)(1+θ'/θ₀))^(R_d/c_v) − 1] 
 
 #### 4.1.5 Spectral Variants
 
-Pseudospectral vorticity-divergence formulation on the Gaussian grid:
+Pseudospectral vorticity-divergence formulation on the Gaussian grid (Bourke 1972):
 
 ```
-∂ζ/∂t = −div((ζ+f)·v) + curl(...)
-∂D/∂t = curl((ζ+f)·v) − ∇²(E+Φ+...) + div(...)
+∂ζ/∂t = −div((ζ+f)·v) + curl(F_friction)
+∂D/∂t = curl((ζ+f)·v) − ∇²(K+Φ) − R_d·T_ref·∇²(lnp_s) − ∇·(R_d·T'·∇lnp_s) + div(F_friction)
+∂T/∂t = −v·∇T + κ·T·(σ̇/σ − v·∇lnp_s − D) − σ̇·∂T/∂σ
+∂lnp_s/∂t = −Σ(D_k·Δσ_k) / (1−σ_top)
 ```
 
 Workflow: SH synthesis → grid-space nonlinear products → SH analysis → spectral tendencies.
 Spectral hyperdiffusion: −ν·[n(n+1)/a²]^order per coefficient.
 Metal backend: automatic CPU fallback for complex128 SH transforms.
+
+**Pressure gradient force**: Uses the mathematically correct form `−∇²(K+Φ) − ∇·(R_d·T·∇lnp_s)` split as `−∇²(K+Φ) − R_d·T_ref·∇²(lnp_s) − ∇·(R_d·T'·∇lnp_s)` where `T' = T − T_ref`. The T_ref subtraction (Simmons & Burridge 1981) eliminates spectral transform cancellation errors. The correction term `∇·(R_d·T'·∇lnp_s)` is computed in grid space (product of grid fields) and transformed to spectral via the divergence operator.
+
+> **Bug fix (v3.1)**: The original code used the Bourke (1972) E-variable form `E = K + Φ + R_d·T·lnp_s`, which adds a spurious same-level coupling `−R_d·lnp_s₀·∇²(T')` to the divergence equation. Since `−∇²(R_d·T·lnp_s) ≠ −∇·(R_d·T·∇lnp_s)`, the E-variable form is only valid when `∇lnp_s ≈ 0`. With the reference surface pressure `lnp_s₀ ≈ 11.51`, this creates exponential instability via the coupling chain `D → T (adiabatic) → D (spurious PGF)`, with stability criterion `κ·(α_SB + lnp_s₀) = 3.49 > 1`. The correct PGF form eliminates this instability entirely — eigenvalue analysis confirms purely imaginary eigenvalues (gravity waves, no growth). The semi-implicit Gamma matrix (`semi_implicit.py`) was also corrected to remove the corresponding `lnp_s₀·I` diagonal.
+
+**Semi-implicit scheme**: Hoskins & Simmons (1975) treats fast gravity-wave terms implicitly in the divergence equation. Precomputed LU factorizations per wavenumber `n`, applied after each RK stage.
 
 #### 4.1.6 Learned (SFNO) Variants
 
@@ -658,11 +680,13 @@ Supporting: `solar.py` — solar geometry (zenith angle, insolation).
 
 | Scheme | File | Description |
 |--------|------|-------------|
-| **SBM** | `sbm.py` | Simplified Betts-Miller (Frierson 2007) |
+| **SBM** | `sbm.py` | Simplified Betts-Miller (Frierson 2007) — cloud-layer masked |
 | **DCA** | `dca.py` | Deep Convective Adjustment |
 | **Kuo** | `kuo.py` | Kuo (1965/1974) moisture convergence |
 | **Mass-flux** | `mass_flux.py` | Prognostic mass-flux (Arakawa-Wu) |
 | **EDMF** | `edmf.py` | Eddy-diffusivity mass-flux |
+
+> **Bug fix (v3.1)**: SBM convection originally adjusted the entire column toward a moist-adiabatic reference profile, including the convectively stable stratosphere. Combined with a Newton enthalpy correction that added a uniform temperature offset to all levels, this created artificial CAPE and triggered convective cooling of ~40 K/hr at the model top (σ=0.035), causing blowup within hours. The fix adds a `cloud_mask = (T_moist ≥ T_env)` that restricts the adjustment to levels where the moist adiabat indicates conditional instability (the convective layer). CAPE is now computed from the raw moist adiabat before the Newton correction, and the enthalpy constraint is applied only over the masked cloud layer.
 
 ##### Microphysics (`atmosphere/physics/microphysics/`)
 
@@ -991,6 +1015,39 @@ The coupler enforces that fluxes are conservative:
 Prescribed SST and sea-ice boundary conditions for atmosphere-only experiments:
 - `AMIPForcing` — loads and interpolates monthly SST/sea-ice data
 - `AMIPForcingConfig` — paths, interpolation method, climatology settings
+
+#### 4.6.2 AMIP Spectral Experiment (`scripts/run_amip_spectral.py`)
+
+Full AMIP simulation on the spectral PE dycore with operator-split physics:
+
+| Parameter | Value |
+|-----------|-------|
+| **Dycore** | Spectral PE (Gaussian grid, vorticity-divergence) |
+| **Resolution** | T21/L20 (~5.6°, 20 sigma levels) or T42/L20 (~2.8°) |
+| **Time step** | 600 s (T21), 300 s (T42) |
+| **Radiation** | Gray (Frierson 2006), moisture-dependent LW OD |
+| **Convection** | SBM (Frierson 2007, τ_c = 2 hr) |
+| **BL exchange** | Bulk aerodynamic (C_H = C_E = 0.0044) |
+| **Condensation** | Saturation adjustment |
+| **Friction** | Rayleigh (BL drag + free-atmosphere) |
+| **Hyperdiffusion** | ∇⁴, 0.5 hr e-folding at n_max |
+| **Forcing** | Analytical (Qobs-like SST + seasonal cycle) or NetCDF |
+
+**Physics coupling**: Gray radiation and Rayleigh friction are coupled inside the RK stages (spectral tendencies). BL exchange, SBM convection, and condensation are operator-split after each dynamics step; the updated grid-space temperature is transformed back to spectral coefficients.
+
+**Completed run (v3.1)**: 365-day T21/L20 simulation with analytical forcing, gray radiation, and fixed CO₂ (415 ppmv). Key diagnostics at equilibrium:
+
+| Diagnostic | Day 365 |
+|------------|---------|
+| `<T_atm>` | 266.1 K |
+| `<T_low>` | 288.4 K |
+| `<Precip>` | 4.6 mm/day |
+| `<CWV>` | 43.1 kg/m² |
+| `max\|v\|` | 49.6 m/s |
+| `LW_TOA` | 254.8 W/m² |
+| Wall time | 42 min (CPU, Apple M-series) |
+
+Clear seasonal cycle in all diagnostics; zonal-mean structure with ITCZ precipitation, midlatitude jets, and realistic radiative balance.
 
 ### 4.7 Machine Learning Module (`ml/`)
 
@@ -1495,8 +1552,14 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 
 ### Milestone 9: Climate-Scale Simulations — IN PROGRESS
 
-**Goals:**
+**Delivered:**
+- 365-day AMIP spectral simulation (T21/L20, gray radiation, SBM convection, analytical SST forcing)
+- Seasonal cycle reproduced with physically realistic diagnostics (LW_TOA ≈ 255 W/m², precip ≈ 4.6 mm/day)
+- Critical bug fixes enabling year-long stability: E-variable PGF correction, SBM cloud-layer masking
+
+**Remaining goals:**
 - Multi-century stability testing
+- Higher resolution (T42+) year-long simulations
 - Carbon cycle coupling (land carbon pools)
 - Ice sheet dynamics
 - Multi-node scaling validation (mpi4jax at scale)
