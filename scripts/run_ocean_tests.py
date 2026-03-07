@@ -96,6 +96,61 @@ def _style_idealized_axes(ax):
     ax.set_global()
 
 
+def _default_lat_bins(grid, mask_2d, *, min_bins=24, max_bins=72):
+    """Choose adaptive latitude bins from wet-cell coverage.
+
+    Fixed high bin counts at coarse resolution can create empty latitude bins,
+    which then appear as spurious horizontal/latitudinal bands in sections.
+    """
+    lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
+    mask = np.asarray(mask_2d, dtype=np.float64)
+    wet_lat = lat_deg[mask > 0.5]
+    if wet_lat.size < 2:
+        return np.linspace(-90.0, 90.0, min_bins + 1)
+
+    lat_lo = float(np.nanmin(wet_lat))
+    lat_hi = float(np.nanmax(wet_lat))
+    span = max(lat_hi - lat_lo, 1.0)
+    pad = max(0.5, 0.02 * span)
+    lat_lo = max(-90.0, lat_lo - pad)
+    lat_hi = min(90.0, lat_hi + pad)
+
+    n_wet = int(np.sum(mask > 0.5))
+    n_bins = int(np.clip(round(1.2 * np.sqrt(max(n_wet, 1))), min_bins, max_bins))
+    return np.linspace(lat_lo, lat_hi, n_bins + 1)
+
+
+def _fill_missing_lat_bands(section):
+    """Fill NaN latitude bins by 1D interpolation (per depth level)."""
+    out = np.asarray(section, dtype=np.float64).copy()
+    if out.ndim != 2:
+        return out
+    idx = np.arange(out.shape[0], dtype=np.float64)
+    for k in range(out.shape[1]):
+        col = out[:, k]
+        finite = np.isfinite(col)
+        if np.sum(finite) == 0:
+            continue
+        if np.sum(finite) == 1:
+            col[~finite] = col[finite][0]
+        else:
+            col[~finite] = np.interp(idx[~finite], idx[finite], col[finite])
+        out[:, k] = col
+    return out
+
+
+def _edges_from_centers(centers):
+    """Build monotonic cell edges from cell centers."""
+    c = np.asarray(centers, dtype=np.float64)
+    if c.size == 1:
+        return np.array([c[0] - 0.5, c[0] + 0.5], dtype=np.float64)
+    e = np.empty(c.size + 1, dtype=np.float64)
+    e[1:-1] = 0.5 * (c[:-1] + c[1:])
+    e[0] = c[0] - (e[1] - c[0])
+    e[-1] = c[-1] + (c[-1] - e[-2])
+    return e
+
+
 def _compute_lat_depth_section(field_3d, grid, mask_2d, lat_bins_deg):
     """Area-weighted latitude-depth section from cubed-sphere data."""
     lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
@@ -112,15 +167,23 @@ def _compute_lat_depth_section(field_3d, grid, mask_2d, lat_bins_deg):
     n_bins = len(lat_bins_deg) - 1
     section = np.full((n_bins, n_levels), np.nan, dtype=np.float64)
 
+    valid_bin = (bin_idx >= 0) & (bin_idx < n_bins) & np.isfinite(flat_w) & (flat_w > 0.0)
     for i in range(n_bins):
-        sel = bin_idx == i
+        sel = valid_bin & (bin_idx == i)
         if not np.any(sel):
             continue
         w = flat_w[sel]
         wsum = float(np.sum(w))
         if wsum <= 0.0:
             continue
-        section[i, :] = np.sum(flat_field[sel, :] * w[:, None], axis=0) / wsum
+        vals = flat_field[sel, :]
+        vals = np.where(np.isfinite(vals), vals, np.nan)
+        num = np.nansum(vals * w[:, None], axis=0)
+        den = np.nansum(np.where(np.isfinite(vals), w[:, None], 0.0), axis=0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            section[i, :] = num / np.maximum(den, 1.0e-20)
+
+    section = _fill_missing_lat_bands(section)
 
     lat_centers = 0.5 * (lat_bins_deg[:-1] + lat_bins_deg[1:])
     return lat_centers, section
@@ -162,15 +225,17 @@ def _plot_lat_depth_sections(
             if abs(vmax - vmin) < 1.0e-12:
                 vmax = vmin + 1.0e-12
 
-        cs = ax.contourf(
-            lat_centers,
-            depth,
-            data,
-            levels=31,
+        lat_edges = _edges_from_centers(lat_centers)
+        depth_edges = _edges_from_centers(depth)
+        data_m = np.ma.masked_invalid(data)
+        cs = ax.pcolormesh(
+            lat_edges,
+            depth_edges,
+            data_m,
             cmap=cmap,
             vmin=vmin,
             vmax=vmax,
-            extend="both",
+            shading="auto",
         )
         ax.set_xlabel("Latitude [deg]")
         ax.set_ylabel("Depth [m]")
@@ -180,6 +245,255 @@ def _plot_lat_depth_sections(
         fig.colorbar(cs, ax=ax, orientation="vertical", pad=0.02, label=cbar_label)
 
     fig.suptitle(suptitle, fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _remap_to_latlon_pixels(data_2d, grid, mask_2d=None, n_lat=181, n_lon=360):
+    """Conservative-ish remap from cubed-sphere points to regular lat-lon pixels.
+
+    Uses area-weighted binning into pixel cells for clear visual continuity.
+    """
+    lon_deg = (np.asarray(grid.lon) * 180.0 / np.pi + 360.0) % 360.0
+    lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
+    area = np.asarray(grid.area, dtype=np.float64)
+    data = np.asarray(data_2d, dtype=np.float64)
+    if mask_2d is None:
+        mask = np.ones_like(area, dtype=np.float64)
+    else:
+        mask = np.asarray(mask_2d, dtype=np.float64)
+
+    lon_i = np.floor(lon_deg / 360.0 * n_lon).astype(np.int64)
+    lat_i = np.floor((lat_deg + 90.0) / 180.0 * n_lat).astype(np.int64)
+    lon_i = np.clip(lon_i, 0, n_lon - 1)
+    lat_i = np.clip(lat_i, 0, n_lat - 1)
+
+    weights = area * mask
+    valid = np.isfinite(data) & np.isfinite(weights) & (weights > 0.0)
+    idx_flat = (lat_i * n_lon + lon_i).ravel()
+    idx_valid = idx_flat[valid.ravel()]
+    w_valid = weights.ravel()[valid.ravel()]
+    v_valid = data.ravel()[valid.ravel()]
+
+    n_cells = n_lat * n_lon
+    sum_w = np.bincount(idx_valid, weights=w_valid, minlength=n_cells)
+    sum_v = np.bincount(idx_valid, weights=w_valid * v_valid, minlength=n_cells)
+
+    out = np.full(n_cells, np.nan, dtype=np.float64)
+    wet = sum_w > 0.0
+    out[wet] = sum_v[wet] / sum_w[wet]
+    out = out.reshape(n_lat, n_lon)
+    out = _fill_nan_pixel_gaps(out)
+
+    lon_edges = np.linspace(0.0, 360.0, n_lon + 1)
+    lat_edges = np.linspace(-90.0, 90.0, n_lat + 1)
+    return lon_edges, lat_edges, out
+
+
+def _fill_nan_pixel_gaps(pix, max_iter=512):
+    """Fill empty remap bins using local-neighborhood inpainting.
+
+    Coarse cubed-sphere grids projected to fine regular lat-lon pixels leave
+    many empty bins. This pass fills those bins from adjacent finite neighbors
+    so the visualization is spatially continuous.
+    """
+    arr = np.asarray(pix, dtype=np.float64).copy()
+    if arr.ndim != 2:
+        return arr
+    finite = np.isfinite(arr)
+    if np.all(finite):
+        return arr
+
+    for _ in range(max_iter):
+        if np.all(finite):
+            break
+
+        vals = np.where(finite, arr, 0.0)
+        sum_n = np.zeros_like(arr)
+        cnt_n = np.zeros_like(arr, dtype=np.int32)
+
+        # Longitude neighbors (periodic).
+        for shift in (-1, 1):
+            v = np.roll(vals, shift=shift, axis=1)
+            m = np.roll(finite, shift=shift, axis=1)
+            sum_n += v * m
+            cnt_n += m.astype(np.int32)
+
+        # Latitude neighbors (non-periodic).
+        for shift in (-1, 1):
+            v = np.empty_like(vals)
+            m = np.empty_like(finite)
+            if shift == -1:
+                v[:-1, :] = vals[1:, :]
+                v[-1, :] = 0.0
+                m[:-1, :] = finite[1:, :]
+                m[-1, :] = False
+            else:
+                v[1:, :] = vals[:-1, :]
+                v[0, :] = 0.0
+                m[1:, :] = finite[:-1, :]
+                m[0, :] = False
+            sum_n += v * m
+            cnt_n += m.astype(np.int32)
+
+        to_fill = (~finite) & (cnt_n > 0)
+        if not np.any(to_fill):
+            break
+        arr[to_fill] = sum_n[to_fill] / cnt_n[to_fill]
+        finite[to_fill] = True
+
+    return arr
+
+
+def _plot_latlon_pixel_snapshots(
+    output_path,
+    snapshots,
+    dt,
+    grid,
+    field_getter,
+    title,
+    cmap,
+    cbar_label,
+    symmetric=False,
+    n_lat=181,
+    n_lon=360,
+):
+    """Plot up to 4 snapshots as lat-lon pixel maps."""
+    items = sorted(snapshots.items())[:4]
+    remapped = []
+    all_finite = []
+    for step_num, snap in items:
+        fld = np.asarray(field_getter(snap), dtype=np.float64)
+        lon_e, lat_e, pix = _remap_to_latlon_pixels(
+            fld,
+            grid,
+            mask_2d=np.asarray(snap.land_mask.data),
+            n_lat=n_lat,
+            n_lon=n_lon,
+        )
+        remapped.append((step_num, lon_e, lat_e, pix))
+        finite = pix[np.isfinite(pix)]
+        if finite.size:
+            all_finite.append(finite)
+    if not remapped:
+        return
+
+    if all_finite:
+        concat = np.concatenate(all_finite)
+        if symmetric:
+            vmax = max(float(np.nanmax(np.abs(concat))), 1.0e-12)
+            vmin = -vmax
+        else:
+            vmin = float(np.nanmin(concat))
+            vmax = float(np.nanmax(concat))
+            if abs(vmax - vmin) < 1.0e-12:
+                vmax = vmin + 1.0e-12
+    else:
+        vmin, vmax = 0.0, 1.0
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 9))
+    axes = axes.ravel()
+    pcm = None
+    for idx, ax in enumerate(axes):
+        if idx >= len(remapped):
+            ax.axis("off")
+            continue
+        step_num, lon_e, lat_e, pix = remapped[idx]
+        day = step_num * dt / 86400.0
+        pcm = ax.pcolormesh(
+            lon_e,
+            lat_e,
+            np.ma.masked_invalid(pix),
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            shading="auto",
+        )
+        ax.set_xlim(0.0, 360.0)
+        ax.set_ylim(-90.0, 90.0)
+        ax.set_xlabel("Longitude [deg]")
+        ax.set_ylabel("Latitude [deg]")
+        ax.grid(True, alpha=0.25)
+        ax.set_title(f"step {step_num}\nt={day:.2f} d", fontsize=11, fontweight="bold")
+    if pcm is not None:
+        fig.colorbar(pcm, ax=axes.tolist(), orientation="vertical", pad=0.02, label=cbar_label)
+    fig.suptitle(title, fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_latlon_pixel_two_panel(
+    output_path,
+    state_a,
+    state_b,
+    label_a,
+    label_b,
+    grid,
+    field_getter,
+    title,
+    cmap,
+    cbar_label,
+    field_getter_b=None,
+    symmetric=False,
+    n_lat=181,
+    n_lon=360,
+):
+    """Plot two states as side-by-side lat-lon pixel maps."""
+    if field_getter_b is None:
+        field_getter_b = field_getter
+    lon_e, lat_e, pix_a = _remap_to_latlon_pixels(
+        np.asarray(field_getter(state_a), dtype=np.float64),
+        grid,
+        mask_2d=np.asarray(state_a.land_mask.data),
+        n_lat=n_lat,
+        n_lon=n_lon,
+    )
+    _, _, pix_b = _remap_to_latlon_pixels(
+        np.asarray(field_getter_b(state_b), dtype=np.float64),
+        grid,
+        mask_2d=np.asarray(state_b.land_mask.data),
+        n_lat=n_lat,
+        n_lon=n_lon,
+    )
+    finite = np.concatenate(
+        [pix_a[np.isfinite(pix_a)], pix_b[np.isfinite(pix_b)]],
+        axis=0,
+    )
+    if finite.size == 0:
+        return
+    if symmetric:
+        vmax = max(float(np.nanmax(np.abs(finite))), 1.0e-12)
+        vmin = -vmax
+    else:
+        vmin = float(np.nanmin(finite))
+        vmax = float(np.nanmax(finite))
+        if abs(vmax - vmin) < 1.0e-12:
+            vmax = vmin + 1.0e-12
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5), squeeze=False)
+    axes = axes.ravel()
+    pcm = None
+    for ax, (label, pix) in zip(axes, [(label_a, pix_a), (label_b, pix_b)]):
+        pcm = ax.pcolormesh(
+            lon_e,
+            lat_e,
+            np.ma.masked_invalid(pix),
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            shading="auto",
+        )
+        ax.set_xlim(0.0, 360.0)
+        ax.set_ylim(-90.0, 90.0)
+        ax.set_xlabel("Longitude [deg]")
+        ax.set_ylabel("Latitude [deg]")
+        ax.grid(True, alpha=0.25)
+        ax.set_title(label, fontsize=12, fontweight="bold")
+    if pcm is not None:
+        fig.colorbar(pcm, ax=axes.tolist(), orientation="vertical", pad=0.02, label=cbar_label)
+    fig.suptitle(title, fontsize=15, fontweight="bold")
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -241,6 +555,120 @@ def compute_ocean_diagnostics(state, grid, z_coord):
         "u_max": float(jnp.max(jnp.abs(state.u.data))),
         "v_max": float(jnp.max(jnp.abs(state.v.data))),
     }
+
+
+def _save_case_timeseries(case_dir, diagnostics, dt, n_steps, state, grid, case_title):
+    """Save standardized conservation + mean-state time series for one case."""
+    os.makedirs(case_dir, exist_ok=True)
+
+    n_diag = len(diagnostics)
+    times_days = np.linspace(0, n_steps * dt / 86400.0, n_diag)
+
+    vol = np.array([d["volume"] for d in diagnostics], dtype=np.float64)
+    heat = np.array([d["heat"] for d in diagnostics], dtype=np.float64)
+    salt = np.array([d["salt"] for d in diagnostics], dtype=np.float64)
+    ke = np.array([d["kinetic_energy"] for d in diagnostics], dtype=np.float64)
+    sst_mean = np.array([d["SST_mean"] for d in diagnostics], dtype=np.float64)
+    ssh_min = np.array([d["SSH_min"] for d in diagnostics], dtype=np.float64)
+    ssh_max = np.array([d["SSH_max"] for d in diagnostics], dtype=np.float64)
+    u_max = np.array([d["u_max"] for d in diagnostics], dtype=np.float64)
+    v_max = np.array([d["v_max"] for d in diagnostics], dtype=np.float64)
+    speed_max = np.sqrt(u_max * u_max + v_max * v_max)
+
+    mask = np.asarray(state.land_mask.data, dtype=np.float64)
+    ocean_area = float(np.sum(mask * np.asarray(grid.area, dtype=np.float64)))
+    eta_mean = vol / max(ocean_area, 1.0)
+
+    vol_rel = (vol - vol[0]) / max(abs(vol[0]), 1.0e-30)
+    heat_rel = (heat - heat[0]) / max(abs(heat[0]), 1.0e-30)
+    salt_rel = (salt - salt[0]) / max(abs(salt[0]), 1.0e-30)
+
+    with open(os.path.join(case_dir, "timeseries.csv"), "w") as f:
+        f.write(
+            "time_days,eta_mean_m,SSH_min_m,SSH_max_m,SST_mean_degC,"
+            "u_max_ms,v_max_ms,speed_max_ms,kinetic_energy,volume,heat,salt,"
+            "volume_rel,heat_rel,salt_rel\n",
+        )
+        for i in range(n_diag):
+            f.write(
+                f"{times_days[i]:.8f},{eta_mean[i]:.12e},{ssh_min[i]:.12e},{ssh_max[i]:.12e},"
+                f"{sst_mean[i]:.12e},{u_max[i]:.12e},{v_max[i]:.12e},{speed_max[i]:.12e},"
+                f"{ke[i]:.12e},{vol[i]:.12e},{heat[i]:.12e},{salt[i]:.12e},"
+                f"{vol_rel[i]:.12e},{heat_rel[i]:.12e},{salt_rel[i]:.12e}\n",
+            )
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes[0, 0].plot(times_days, eta_mean, "b-", linewidth=1.5)
+    axes[0, 0].set_ylabel("Mean SSH eta [m]")
+    axes[0, 0].set_title("Mean Sea Surface Height eta")
+    axes[0, 0].grid(True, alpha=0.3)
+
+    axes[0, 1].plot(times_days, sst_mean, "g-", linewidth=1.5)
+    axes[0, 1].set_ylabel("Mean SST [degC]")
+    axes[0, 1].set_title("Mean Sea Surface Temperature")
+    axes[0, 1].grid(True, alpha=0.3)
+
+    axes[1, 0].plot(times_days, speed_max, "r-", linewidth=1.5)
+    axes[1, 0].set_xlabel("Time [days]")
+    axes[1, 0].set_ylabel("Max speed [m/s]")
+    axes[1, 0].set_title("Maximum Horizontal Speed")
+    axes[1, 0].grid(True, alpha=0.3)
+
+    axes[1, 1].plot(times_days, ke, "m-", linewidth=1.5)
+    axes[1, 1].set_xlabel("Time [days]")
+    axes[1, 1].set_ylabel("Kinetic energy")
+    axes[1, 1].set_title("Kinetic Energy")
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].ticklabel_format(axis="y", style="scientific", scilimits=(-3, 3))
+
+    fig.suptitle(f"{case_title} — Mean-State Time Series", fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(os.path.join(case_dir, "mean_state_timeseries.png"), dpi=150, bbox_inches="tight")
+    plt.close()
+
+    fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
+    axes[0].plot(times_days, vol_rel, "b-", linewidth=1.5)
+    axes[0].set_ylabel("Relative drift")
+    axes[0].set_title("Volume Conservation")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].ticklabel_format(axis="y", style="scientific", scilimits=(-3, 3))
+
+    axes[1].plot(times_days, heat_rel, "r-", linewidth=1.5)
+    axes[1].set_ylabel("Relative drift")
+    axes[1].set_title("Heat Conservation")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].ticklabel_format(axis="y", style="scientific", scilimits=(-3, 3))
+
+    axes[2].plot(times_days, salt_rel, "g-", linewidth=1.5)
+    axes[2].set_ylabel("Relative drift")
+    axes[2].set_xlabel("Time [days]")
+    axes[2].set_title("Salt Conservation")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].ticklabel_format(axis="y", style="scientific", scilimits=(-3, 3))
+
+    fig.suptitle(f"{case_title} — Conservation Time Series", fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(os.path.join(case_dir, "conservation_timeseries.png"), dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_point_profile_evolution(output_path, z_coord, snapshots, dt, extractor, x_label, title):
+    """Plot vertical profile evolution at one representative ocean point."""
+    z_ref = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    fig, ax = plt.subplots(1, 1, figsize=(8, 10))
+    for step_num, snap in sorted(snapshots.items()):
+        day = step_num * dt / 86400.0
+        profile = np.asarray(extractor(snap), dtype=np.float64)
+        ax.plot(profile, z_ref, linewidth=1.5, label=f"Day {day:.2f}")
+    ax.set_xlabel(x_label, fontsize=12)
+    ax.set_ylabel("Depth [m]", fontsize=12)
+    ax.set_title(title, fontsize=13, fontweight="bold")
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=9)
+    ax.invert_yaxis()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
 
 
 def summarize_case_metrics(state, diagnostics, grid):
@@ -382,6 +810,9 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
 
     # Diagnostics storage
     diagnostics = [compute_ocean_diagnostics(state, grid, z_coord)]
+    snapshot_fracs = [0.0, 0.25, 0.5, 1.0]
+    snapshot_steps = {int(f * n_steps): f for f in snapshot_fracs}
+    snapshots = {0: state}
     diag_interval = max(1, n_steps // 50)
 
     # Integration
@@ -401,6 +832,8 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
             print(f"{step:6d}  {day:6.1f}  {diag['SSH_max']:10.2e}  "
                   f"{diag['u_max']:10.2e}  {diag['SST_mean']:10.4f}  "
                   f"{diag['kinetic_energy']:12.2e}")
+        if step in snapshot_steps:
+            snapshots[step] = state
 
     total_time = time.time() - t_start
     steps_per_s = n_steps / max(total_time, 1.0e-12)
@@ -412,15 +845,20 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
     lat_deg = np.asarray(grid.lat) * 180 / np.pi
 
     if HAS_CARTOPY:
-        # SST initial and final
-        fig, axes = plt.subplots(1, 2, figsize=(16, 5),
+        # SST snapshots at multiple times
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10),
                                   subplot_kw={"projection": _idealized_projection()})
-        for ax, (label, snap) in zip(axes, [("Initial", state_init), ("Final", state)]):
+        axes = axes.ravel()
+        for idx, (step_num, snap) in enumerate(sorted(snapshots.items())):
+            if idx >= 4:
+                break
+            day = step_num * dt / 86400.0
+            ax = axes[idx]
             sst = np.asarray(snap.T.data[..., 0])
             sc = scatter_field(ax, lon_deg, lat_deg, sst, "RdYlBu_r",
                                vmin=0, vmax=22, point_size=point_size)
             _style_idealized_axes(ax)
-            ax.set_title(f"SST — {label}", fontsize=13, fontweight="bold")
+            ax.set_title(f"SST [degC] — Day {day:.2f}", fontsize=13, fontweight="bold")
         fig.colorbar(sc, ax=axes.tolist(), shrink=0.78, orientation="vertical",
                      label="Temperature [degC]", pad=0.02)
         fig.suptitle("Rest-State Test — Sea Surface Temperature", fontsize=15, fontweight="bold")
@@ -440,6 +878,29 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
                      label="SSH [m]", pad=0.02)
         plt.savefig(f"{output_dir}/rest_state/ssh.png", dpi=150, bbox_inches="tight")
         plt.close()
+
+    _plot_latlon_pixel_snapshots(
+        f"{output_dir}/rest_state/sst_latlon_pixels.png",
+        snapshots,
+        dt,
+        grid,
+        field_getter=lambda s: s.T.data[..., 0],
+        title="Rest-State Test — SST Snapshots (lat-lon pixels)",
+        cmap="RdYlBu_r",
+        cbar_label="Sea-surface temperature [degC]",
+        symmetric=False,
+    )
+    _plot_latlon_pixel_snapshots(
+        f"{output_dir}/rest_state/ssh_snapshots_latlon_pixels.png",
+        snapshots,
+        dt,
+        grid,
+        field_getter=lambda s: s.eta.data,
+        title="Rest-State Test — SSH Snapshots (lat-lon pixels)",
+        cmap="RdBu_r",
+        cbar_label="Sea surface height eta [m]",
+        symmetric=True,
+    )
 
     # Conservation time series
     n_diag = len(diagnostics)
@@ -514,8 +975,20 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
     plt.savefig(f"{output_dir}/rest_state/T_profile.png", dpi=150, bbox_inches="tight")
     plt.close()
 
+    # Vertical profile evolution across snapshots
+    mid = grid.n // 2
+    _plot_point_profile_evolution(
+        f"{output_dir}/rest_state/T_profile_over_time.png",
+        z_coord,
+        snapshots,
+        dt,
+        lambda snap: np.asarray(snap.T.data[0, mid, mid, :]),
+        "Temperature [degC]",
+        "Vertical Temperature Profile Evolution (mid-latitude point)",
+    )
+
     # Latitude-depth sections (initial/final)
-    lat_bins = np.linspace(-90.0, 90.0, 73)
+    lat_bins = _default_lat_bins(grid, state.land_mask.data)
     lat_centers, T_init_sec = _compute_lat_depth_section(
         state_init.T.data,
         grid,
@@ -537,6 +1010,16 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
             ("Final T", T_final_sec, "RdYlBu_r", False, "Temperature [degC]"),
         ],
         "Rest-State Test — Latitude-Depth Temperature Sections",
+    )
+
+    _save_case_timeseries(
+        f"{output_dir}/rest_state",
+        diagnostics,
+        dt,
+        n_steps,
+        state,
+        grid,
+        "Rest-State Test",
     )
 
     return state, diagnostics
@@ -668,11 +1151,37 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
                                point_size=point_size)
             _style_idealized_axes(ax)
             ax.set_title(title, fontsize=13, fontweight="bold")
-            fig.colorbar(sc, ax=ax, shrink=0.78, orientation="vertical", pad=0.02)
+            fig.colorbar(sc, ax=ax, shrink=0.78, orientation="vertical", pad=0.02, label=title)
         fig.suptitle("Barotropic Gravity Wave — Surface Velocity (Final)",
                      fontsize=15, fontweight="bold")
         plt.savefig(f"{output_dir}/gravity_wave/velocity_final.png", dpi=150, bbox_inches="tight")
         plt.close()
+
+    _plot_latlon_pixel_snapshots(
+        f"{output_dir}/gravity_wave/ssh_snapshots_latlon_pixels.png",
+        snapshots,
+        dt,
+        grid,
+        field_getter=lambda s: s.eta.data,
+        title="Barotropic Gravity Wave — SSH Snapshots (lat-lon pixels)",
+        cmap="RdBu_r",
+        cbar_label="Sea surface height eta [m]",
+        symmetric=True,
+    )
+    _plot_latlon_pixel_two_panel(
+        f"{output_dir}/gravity_wave/velocity_final_latlon_pixels.png",
+        state,
+        state,
+        "Surface u [m/s]",
+        "Surface v [m/s]",
+        grid,
+        field_getter=lambda s: s.u.data[..., 0],
+        field_getter_b=lambda s: s.v.data[..., 0],
+        title="Barotropic Gravity Wave — Surface Velocity (lat-lon pixels)",
+        cmap="RdBu_r",
+        cbar_label="Velocity [m/s]",
+        symmetric=True,
+    )
 
     # SSH time series
     fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
@@ -699,7 +1208,7 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
     plt.close()
 
     # Latitude-depth sections at final time
-    lat_bins = np.linspace(-90.0, 90.0, 73)
+    lat_bins = _default_lat_bins(grid, state.land_mask.data)
     lat_centers, speed_sec = _compute_lat_depth_section(
         jnp.sqrt(state.u.data**2 + state.v.data**2),
         grid,
@@ -721,6 +1230,30 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
             ("Final T anomaly", T_anom_sec, "RdBu_r", True, "Delta T [degC]"),
         ],
         "Barotropic Gravity Wave — Latitude-Depth Sections",
+    )
+
+    mid = grid.n // 2
+    _plot_point_profile_evolution(
+        f"{output_dir}/gravity_wave/speed_profile_over_time.png",
+        z_coord,
+        snapshots,
+        dt,
+        lambda snap: np.sqrt(
+            np.asarray(snap.u.data[0, mid, mid, :], dtype=np.float64) ** 2
+            + np.asarray(snap.v.data[0, mid, mid, :], dtype=np.float64) ** 2
+        ),
+        "Speed [m/s]",
+        "Vertical Speed Profile Evolution (mid-ocean point)",
+    )
+
+    _save_case_timeseries(
+        f"{output_dir}/gravity_wave",
+        diagnostics,
+        dt,
+        n_steps,
+        state,
+        grid,
+        "Barotropic Gravity Wave",
     )
 
     return state, diagnostics
@@ -867,7 +1400,7 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
                                point_size=point_size)
             _style_idealized_axes(ax)
             ax.set_title(title, fontsize=12, fontweight="bold")
-            fig.colorbar(sc, ax=ax, shrink=0.78, orientation="vertical", pad=0.02)
+            fig.colorbar(sc, ax=ax, shrink=0.78, orientation="vertical", pad=0.02, label=title)
 
         fig.suptitle("Wind-Driven Gyre — Surface Velocity (Final)",
                      fontsize=15, fontweight="bold")
@@ -889,6 +1422,45 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
                      fontsize=15, fontweight="bold")
         plt.savefig(f"{output_dir}/wind_gyre/sst.png", dpi=150, bbox_inches="tight")
         plt.close()
+
+    _plot_latlon_pixel_snapshots(
+        f"{output_dir}/wind_gyre/ssh_snapshots_latlon_pixels.png",
+        snapshots,
+        dt,
+        grid,
+        field_getter=lambda s: s.eta.data,
+        title="Wind-Driven Gyre — SSH Snapshots (lat-lon pixels)",
+        cmap="RdBu_r",
+        cbar_label="Sea surface height eta [m]",
+        symmetric=True,
+    )
+    _plot_latlon_pixel_two_panel(
+        f"{output_dir}/wind_gyre/velocity_final_latlon_pixels.png",
+        state,
+        state,
+        "Surface u [m/s]",
+        "Surface v [m/s]",
+        grid,
+        field_getter=lambda s: s.u.data[..., 0],
+        field_getter_b=lambda s: s.v.data[..., 0],
+        title="Wind-Driven Gyre — Surface Velocity (lat-lon pixels)",
+        cmap="RdBu_r",
+        cbar_label="Velocity [m/s]",
+        symmetric=True,
+    )
+    _plot_latlon_pixel_two_panel(
+        f"{output_dir}/wind_gyre/sst_initial_final_latlon_pixels.png",
+        state_init,
+        state,
+        "Initial SST [degC]",
+        "Final SST [degC]",
+        grid,
+        field_getter=lambda s: s.T.data[..., 0],
+        title="Wind-Driven Gyre — SST (lat-lon pixels)",
+        cmap="RdYlBu_r",
+        cbar_label="Sea-surface temperature [degC]",
+        symmetric=False,
+    )
 
     # Diagnostics time series
     n_diag = len(diagnostics)
@@ -944,7 +1516,7 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
     plt.close()
 
     # Latitude-depth sections at final time
-    lat_bins = np.linspace(-90.0, 90.0, 73)
+    lat_bins = _default_lat_bins(grid, state.land_mask.data)
     lat_centers, u_sec = _compute_lat_depth_section(
         state.u.data,
         grid,
@@ -968,7 +1540,921 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
         "Wind-Driven Gyre — Latitude-Depth Sections",
     )
 
+    mid = grid.n // 2
+    _plot_point_profile_evolution(
+        f"{output_dir}/wind_gyre/T_profile_over_time.png",
+        z_coord,
+        snapshots,
+        dt,
+        lambda snap: np.asarray(snap.T.data[0, mid, mid, :]),
+        "Temperature [degC]",
+        "Vertical Temperature Profile Evolution (mid-latitude point)",
+    )
+    _plot_point_profile_evolution(
+        f"{output_dir}/wind_gyre/speed_profile_over_time.png",
+        z_coord,
+        snapshots,
+        dt,
+        lambda snap: np.sqrt(
+            np.asarray(snap.u.data[0, mid, mid, :], dtype=np.float64) ** 2
+            + np.asarray(snap.v.data[0, mid, mid, :], dtype=np.float64) ** 2
+        ),
+        "Speed [m/s]",
+        "Vertical Speed Profile Evolution (mid-latitude point)",
+    )
+
+    _save_case_timeseries(
+        f"{output_dir}/wind_gyre",
+        diagnostics,
+        dt,
+        n_steps,
+        state,
+        grid,
+        "Wind-Driven Gyre",
+    )
+
     return state, diagnostics, gyre_config
+
+
+# =====================================================================
+# Additional idealized tests requested by oceanography guidance
+# =====================================================================
+
+def _great_circle_distance_rad(lon_rad, lat_rad, lon0_rad, lat0_rad):
+    """Great-circle angular distance [rad]."""
+    dlon = lon_rad - lon0_rad
+    return jnp.arccos(
+        jnp.clip(
+            jnp.sin(lat_rad) * jnp.sin(lat0_rad)
+            + jnp.cos(lat_rad) * jnp.cos(lat0_rad) * jnp.cos(dlon),
+            -1.0,
+            1.0,
+        ),
+    )
+
+
+def _replace_static_ocean_fields(state, H_bathy=None, land_mask=None):
+    """Replace static ocean fields and keep masked prognostic fields consistent."""
+    H_new = state.H_bathy.data if H_bathy is None else H_bathy
+    mask_new = state.land_mask.data if land_mask is None else land_mask
+    H_new = H_new.astype(state.H_bathy.data.dtype)
+    mask_new = mask_new.astype(state.land_mask.data.dtype)
+    mask_3d = mask_new[..., jnp.newaxis]
+    return state._replace(
+        H_bathy=state.H_bathy.replace(data=H_new),
+        land_mask=state.land_mask.replace(data=mask_new),
+        eta=state.eta.replace(data=state.eta.data * mask_new),
+        u=state.u.replace(data=state.u.data * mask_3d),
+        v=state.v.replace(data=state.v.data * mask_3d),
+    )
+
+
+def _pick_representative_ocean_point(mask_2d):
+    """Pick a representative ocean column near domain center for profile diagnostics."""
+    mask = np.asarray(mask_2d)
+    wet = np.argwhere(mask > 0.5)
+    if wet.size == 0:
+        return (0, 0, 0)
+    center = np.array([2.5, mask.shape[1] / 2.0, mask.shape[2] / 2.0], dtype=np.float64)
+    d2 = np.sum((wet.astype(np.float64) - center[None, :]) ** 2, axis=1)
+    sel = wet[int(np.argmin(d2))]
+    return int(sel[0]), int(sel[1]), int(sel[2])
+
+
+def _plot_scalar_map(
+    output_path,
+    title,
+    data,
+    grid,
+    point_size,
+    cmap="viridis",
+    vmin=None,
+    vmax=None,
+    symmetric=False,
+    cbar_label="",
+    central_longitude=0.0,
+):
+    """Plot a single scalar map on cubed-sphere points."""
+    if not HAS_CARTOPY:
+        return
+    arr = np.asarray(data, dtype=np.float64)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return
+    if symmetric:
+        vabs = float(np.max(np.abs(finite)))
+        vabs = max(vabs, 1.0e-12)
+        vmin_auto, vmax_auto = -vabs, vabs
+    else:
+        vmin_auto = float(np.min(finite))
+        vmax_auto = float(np.max(finite))
+        if abs(vmax_auto - vmin_auto) < 1.0e-12:
+            vmax_auto = vmin_auto + 1.0e-12
+
+    if vmin is None:
+        vmin = vmin_auto
+    if vmax is None:
+        vmax = vmax_auto
+
+    lon_deg = np.asarray(grid.lon) * 180.0 / np.pi
+    lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
+    fig, ax = plt.subplots(
+        1,
+        1,
+        figsize=(14, 7),
+        subplot_kw={"projection": _idealized_projection(central_longitude=central_longitude)},
+    )
+    sc = scatter_field(ax, lon_deg, lat_deg, arr, cmap, vmin, vmax, point_size=point_size)
+    _style_idealized_axes(ax)
+    ax.set_title(title, fontsize=14, fontweight="bold")
+    fig.colorbar(sc, ax=ax, shrink=0.78, orientation="vertical", label=cbar_label, pad=0.02)
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_standard_case_outputs(
+    case_dir,
+    case_title,
+    state_init,
+    state_final,
+    snapshots,
+    diagnostics,
+    grid,
+    z_coord,
+    dt,
+    n_steps,
+    point_size,
+    central_longitude=0.0,
+):
+    """Standardized snapshots + diagnostics for idealized ocean cases."""
+    lon_deg = np.asarray(grid.lon) * 180.0 / np.pi
+    lat_deg = np.asarray(grid.lat) * 180.0 / np.pi
+
+    if HAS_CARTOPY:
+        # SSH snapshots
+        fig, axes = plt.subplots(
+            2,
+            2,
+            figsize=(16, 10),
+            subplot_kw={"projection": _idealized_projection(central_longitude=central_longitude)},
+        )
+        axes = axes.ravel()
+        all_ssh = [np.asarray(s.eta.data) for s in snapshots.values()]
+        ssh_abs = max(float(np.nanmax(np.abs(a))) for a in all_ssh)
+        ssh_abs = max(ssh_abs, 1.0e-3)
+        sc = None
+        for idx, (step_num, snap) in enumerate(sorted(snapshots.items())):
+            if idx >= 4:
+                break
+            day = step_num * dt / 86400.0
+            ax = axes[idx]
+            sc = scatter_field(
+                ax,
+                lon_deg,
+                lat_deg,
+                np.asarray(snap.eta.data),
+                "RdBu_r",
+                -ssh_abs,
+                ssh_abs,
+                point_size=point_size,
+            )
+            _style_idealized_axes(ax)
+            ax.set_title(f"step {step_num}\nt={day:.2f} d", fontsize=12, fontweight="bold")
+        if sc is not None:
+            fig.colorbar(sc, ax=axes.tolist(), shrink=0.78, orientation="vertical",
+                         label="Sea surface height eta [m]", pad=0.02)
+        fig.suptitle(f"{case_title} — SSH Snapshots", fontsize=15, fontweight="bold")
+        plt.savefig(os.path.join(case_dir, "ssh_snapshots.png"), dpi=150, bbox_inches="tight")
+        plt.close()
+        _plot_latlon_pixel_snapshots(
+            os.path.join(case_dir, "ssh_snapshots_latlon_pixels.png"),
+            snapshots,
+            dt,
+            grid,
+            field_getter=lambda s: s.eta.data,
+            title=f"{case_title} — SSH Snapshots (lat-lon pixels)",
+            cmap="RdBu_r",
+            cbar_label="Sea surface height eta [m]",
+            symmetric=True,
+        )
+
+        # Final velocity maps
+        u_surf = np.asarray(state_final.u.data[..., 0])
+        v_surf = np.asarray(state_final.v.data[..., 0])
+        speed = np.sqrt(u_surf**2 + v_surf**2)
+        fig, axes = plt.subplots(
+            1,
+            3,
+            figsize=(22, 5),
+            subplot_kw={"projection": _idealized_projection(central_longitude=central_longitude)},
+        )
+        for ax, (data, title, cmap, symmetric) in zip(axes, [
+            (u_surf, "Surface zonal velocity u [m/s]", "RdBu_r", True),
+            (v_surf, "Surface meridional velocity v [m/s]", "RdBu_r", True),
+            (speed, "Surface speed [m/s]", "magma", False),
+        ]):
+            if symmetric:
+                vmax = max(float(np.nanmax(np.abs(data))), 1.0e-10)
+                vmin = -vmax
+            else:
+                vmin = 0.0
+                vmax = max(float(np.nanmax(data)), 1.0e-10)
+            sc = scatter_field(ax, lon_deg, lat_deg, data, cmap, vmin, vmax, point_size=point_size)
+            _style_idealized_axes(ax)
+            ax.set_title(title, fontsize=12, fontweight="bold")
+            fig.colorbar(sc, ax=ax, shrink=0.78, orientation="vertical", label=title, pad=0.02)
+        fig.suptitle(f"{case_title} — Surface Velocity (Final)", fontsize=15, fontweight="bold")
+        plt.savefig(os.path.join(case_dir, "velocity_final.png"), dpi=150, bbox_inches="tight")
+        plt.close()
+        _plot_latlon_pixel_two_panel(
+            os.path.join(case_dir, "velocity_final_latlon_pixels.png"),
+            state_final,
+            state_final,
+            "Surface u [m/s]",
+            "Surface v [m/s]",
+            grid,
+            field_getter=lambda s: s.u.data[..., 0],
+            field_getter_b=lambda s: s.v.data[..., 0],
+            title=f"{case_title} — Surface Velocity (lat-lon pixels)",
+            cmap="RdBu_r",
+            cbar_label="Velocity [m/s]",
+            symmetric=True,
+        )
+
+        # SST initial/final
+        fig, axes = plt.subplots(
+            1,
+            2,
+            figsize=(16, 5),
+            subplot_kw={"projection": _idealized_projection(central_longitude=central_longitude)},
+        )
+        sc = None
+        for ax, (label, snap) in zip(axes, [("Initial", state_init), ("Final", state_final)]):
+            sst = np.asarray(snap.T.data[..., 0])
+            vmin = float(np.nanmin(sst))
+            vmax = float(np.nanmax(sst))
+            if abs(vmax - vmin) < 1.0e-12:
+                vmax = vmin + 1.0e-12
+            sc = scatter_field(ax, lon_deg, lat_deg, sst, "RdYlBu_r", vmin, vmax, point_size=point_size)
+            _style_idealized_axes(ax)
+            ax.set_title(f"SST [degC] — {label}", fontsize=13, fontweight="bold")
+        if sc is not None:
+            fig.colorbar(sc, ax=axes.tolist(), shrink=0.78, orientation="vertical",
+                         label="Sea-surface temperature [degC]", pad=0.02)
+        fig.suptitle(f"{case_title} — Sea Surface Temperature", fontsize=15, fontweight="bold")
+        plt.savefig(os.path.join(case_dir, "sst_initial_final.png"), dpi=150, bbox_inches="tight")
+        plt.close()
+        _plot_latlon_pixel_two_panel(
+            os.path.join(case_dir, "sst_initial_final_latlon_pixels.png"),
+            state_init,
+            state_final,
+            "Initial SST [degC]",
+            "Final SST [degC]",
+            grid,
+            field_getter=lambda s: s.T.data[..., 0],
+            title=f"{case_title} — SST (lat-lon pixels)",
+            cmap="RdYlBu_r",
+            cbar_label="SST [degC]",
+            symmetric=False,
+        )
+
+    # Diagnostics time series
+    n_diag = len(diagnostics)
+    times_days = np.linspace(0, n_steps * dt / 86400.0, n_diag)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes[0, 0].plot(times_days, [d["SSH_max"] for d in diagnostics], "b-", linewidth=1.5, label="SSH max")
+    axes[0, 0].plot(times_days, [d["SSH_min"] for d in diagnostics], "c-", linewidth=1.5, label="SSH min")
+    axes[0, 0].set_ylabel("SSH [m]")
+    axes[0, 0].set_title("Sea Surface Height Extremes")
+    axes[0, 0].legend(fontsize=9)
+    axes[0, 0].grid(True, alpha=0.3)
+
+    ke = np.array([d["kinetic_energy"] for d in diagnostics], dtype=np.float64)
+    axes[0, 1].plot(times_days, ke, "m-", linewidth=1.5)
+    axes[0, 1].set_ylabel("Kinetic energy")
+    axes[0, 1].set_title("Kinetic Energy")
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].ticklabel_format(axis="y", style="scientific", scilimits=(-3, 3))
+
+    axes[1, 0].plot(times_days, [d["u_max"] for d in diagnostics], "r-", linewidth=1.5, label="|u| max")
+    axes[1, 0].plot(times_days, [d["v_max"] for d in diagnostics], "orange", linewidth=1.5, label="|v| max")
+    axes[1, 0].set_ylabel("Velocity [m/s]")
+    axes[1, 0].set_xlabel("Time [days]")
+    axes[1, 0].set_title("Maximum Velocity Components")
+    axes[1, 0].legend(fontsize=9)
+    axes[1, 0].grid(True, alpha=0.3)
+
+    axes[1, 1].plot(times_days, [d["SST_mean"] for d in diagnostics], "g-", linewidth=1.5)
+    axes[1, 1].set_ylabel("Mean SST [degC]")
+    axes[1, 1].set_xlabel("Time [days]")
+    axes[1, 1].set_title("Mean Sea-Surface Temperature")
+    axes[1, 1].grid(True, alpha=0.3)
+
+    fig.suptitle(f"{case_title} — Diagnostics", fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(os.path.join(case_dir, "diagnostics.png"), dpi=150, bbox_inches="tight")
+    plt.close()
+
+    # Latitude-depth sections
+    lat_bins = _default_lat_bins(grid, state_final.land_mask.data)
+    lat_centers, T_sec = _compute_lat_depth_section(state_final.T.data, grid, state_final.land_mask.data, lat_bins)
+    _, speed_sec = _compute_lat_depth_section(
+        jnp.sqrt(state_final.u.data**2 + state_final.v.data**2),
+        grid,
+        state_final.land_mask.data,
+        lat_bins,
+    )
+    _plot_lat_depth_sections(
+        os.path.join(case_dir, "lat_depth_sections.png"),
+        z_coord,
+        lat_centers,
+        [
+            ("Final temperature T", T_sec, "RdYlBu_r", False, "T [degC]"),
+            ("Final speed", speed_sec, "magma", False, "Speed [m/s]"),
+        ],
+        f"{case_title} — Latitude-Depth Sections",
+    )
+
+    # Profile evolution at representative wet column
+    face, i, j = _pick_representative_ocean_point(state_final.land_mask.data)
+    _plot_point_profile_evolution(
+        os.path.join(case_dir, "T_profile_over_time.png"),
+        z_coord,
+        snapshots,
+        dt,
+        lambda snap: np.asarray(snap.T.data[face, i, j, :], dtype=np.float64),
+        "Temperature [degC]",
+        f"Temperature Profile Evolution (face={face}, i={i}, j={j})",
+    )
+    _plot_point_profile_evolution(
+        os.path.join(case_dir, "speed_profile_over_time.png"),
+        z_coord,
+        snapshots,
+        dt,
+        lambda snap: np.sqrt(
+            np.asarray(snap.u.data[face, i, j, :], dtype=np.float64) ** 2
+            + np.asarray(snap.v.data[face, i, j, :], dtype=np.float64) ** 2
+        ),
+        "Speed [m/s]",
+        f"Speed Profile Evolution (face={face}, i={i}, j={j})",
+    )
+
+
+def _run_forced_ocean_case(
+    test_label,
+    case_subdir,
+    case_title,
+    state_init,
+    grid,
+    z_coord,
+    case_config,
+    dt,
+    n_steps,
+    output_dir,
+    point_size,
+    forcing_step_fn=None,
+    central_longitude=0.0,
+    extra_plot_fn=None,
+):
+    """Run a generic forced idealized ocean case with standard diagnostics."""
+    print("\n" + "=" * 70)
+    print(test_label)
+    print("=" * 70)
+    print(
+        "  Config: "
+        f"A_h={case_config.A_h:.1e}, K_h={case_config.K_h:.1e}, "
+        f"A_v={case_config.A_v:.1e}, K_v={case_config.K_v:.1e}, "
+        f"n_baro={case_config.n_barotropic_substeps}",
+    )
+
+    model = OceanModel(grid, z_coord, case_config)
+    step_fn = model.step_checked if case_config.enable_runtime_checks else model.step
+    state = state_init
+
+    print("  Warming up JIT...", end=" ", flush=True)
+    t0 = time.time()
+    warm = step_fn(state, dt)
+    jax.block_until_ready(warm.eta.data)
+    print(f"done ({time.time()-t0:.1f}s)")
+
+    diagnostics = [compute_ocean_diagnostics(state, grid, z_coord)]
+    snapshot_fracs = [0.0, 0.25, 0.5, 1.0]
+    snapshot_steps = {int(f * n_steps): f for f in snapshot_fracs}
+    snapshots = {0: state}
+    diag_interval = max(1, n_steps // 50)
+
+    print(f"\n{'Step':>6s}  {'Day':>7s}  {'SSH_max':>10s}  {'|u|_max':>10s}  "
+          f"{'SST_mean':>10s}  {'KE':>12s}")
+    print("-" * 74)
+    t_start = time.time()
+    for step in range(1, n_steps + 1):
+        if forcing_step_fn is not None:
+            state = forcing_step_fn(state, step, dt)
+        state = step_fn(state, dt)
+
+        if step % diag_interval == 0 or step == n_steps:
+            jax.block_until_ready(state.eta.data)
+            diag = compute_ocean_diagnostics(state, grid, z_coord)
+            diagnostics.append(diag)
+            day = step * dt / 86400.0
+            print(f"{step:6d}  {day:7.2f}  {diag['SSH_max']:10.4e}  "
+                  f"{diag['u_max']:10.4e}  {diag['SST_mean']:10.4f}  "
+                  f"{diag['kinetic_energy']:12.4e}")
+
+        if step in snapshot_steps:
+            snapshots[step] = state
+
+    total_time = time.time() - t_start
+    steps_per_s = n_steps / max(total_time, 1.0e-12)
+    print(f"\nCompleted in {total_time:.1f}s ({steps_per_s:.0f} steps/s)")
+
+    case_dir = f"{output_dir}/{case_subdir}"
+    os.makedirs(case_dir, exist_ok=True)
+    _plot_standard_case_outputs(
+        case_dir,
+        case_title,
+        state_init,
+        state,
+        snapshots,
+        diagnostics,
+        grid,
+        z_coord,
+        dt,
+        n_steps,
+        point_size,
+        central_longitude=central_longitude,
+    )
+    _save_case_timeseries(case_dir, diagnostics, dt, n_steps, state, grid, case_title)
+
+    if extra_plot_fn is not None:
+        extra_plot_fn(case_dir, state_init, state, snapshots, diagnostics)
+
+    return state, diagnostics, case_config
+
+
+def run_adiabatic_topography_adjustment_test(
+    grid, z_coord, config, dt, n_steps, output_dir, point_size,
+):
+    """Adiabatic adjustment over topography."""
+    state = _rest_state_all_ocean(
+        grid,
+        z_coord,
+        T_surface=6.0,
+        T_deep=6.0,
+        S_uniform=35.0,
+        H_max=4200.0,
+    )
+    _assert_all_ocean(state, "adiabatic_topography_test")
+
+    bump = 1500.0 * jnp.exp(
+        -0.5
+        * (
+            _great_circle_distance_rad(grid.lon, grid.lat, jnp.pi, 0.0)
+            / (12.0 * jnp.pi / 180.0)
+        ) ** 2,
+    )
+    H_bathy = jnp.clip(4200.0 - bump, 800.0, 4200.0)
+    state = _replace_static_ocean_fields(state, H_bathy=H_bathy)
+
+    eta0 = 0.30 * jnp.exp(
+        -0.5
+        * (
+            _great_circle_distance_rad(grid.lon, grid.lat, jnp.pi, 0.0)
+            / (16.0 * jnp.pi / 180.0)
+        ) ** 2,
+    )
+    eta0 = eta0 * state.land_mask.data
+    area_w = state.land_mask.data * grid.area
+    eta0 = eta0 - jnp.sum(eta0 * area_w) / jnp.maximum(jnp.sum(area_w), 1.0)
+    state = state._replace(eta=state.eta.replace(data=eta0.astype(state.eta.data.dtype)))
+
+    case_config = config._replace(
+        A_h=max(config.A_h, 5.0e4),
+        K_h=max(config.K_h, 5.0e3),
+        n_barotropic_substeps=max(config.n_barotropic_substeps, 40),
+        barotropic_diffusion_alpha=max(config.barotropic_diffusion_alpha, 0.05),
+    )
+
+    def extra(case_dir, state_init, *_):
+        _plot_scalar_map(
+            os.path.join(case_dir, "bathymetry.png"),
+            "Bathymetry depth H_bathy [m]",
+            state_init.H_bathy.data,
+            grid,
+            point_size,
+            cmap="terrain",
+            cbar_label="Depth [m]",
+        )
+        _plot_scalar_map(
+            os.path.join(case_dir, "eta_initial.png"),
+            "Initial sea-surface height eta [m]",
+            state_init.eta.data,
+            grid,
+            point_size,
+            cmap="RdBu_r",
+            symmetric=True,
+            cbar_label="eta [m]",
+        )
+
+    return _run_forced_ocean_case(
+        "TEST 4: Adiabatic Topographic Adjustment",
+        "adiabatic_topography",
+        "Adiabatic Topographic Adjustment",
+        state,
+        grid,
+        z_coord,
+        case_config,
+        dt,
+        n_steps,
+        output_dir,
+        point_size,
+        forcing_step_fn=None,
+        extra_plot_fn=extra,
+    )
+
+
+def run_holland_lin_double_gyre_test(
+    grid, z_coord, config, dt, n_steps, output_dir, point_size,
+):
+    """Wind-forced double gyre in a closed rectangular basin (Holland-Lin style)."""
+    state = _rest_state_all_ocean(
+        grid,
+        z_coord,
+        T_surface=15.0,
+        T_deep=15.0,
+        S_uniform=35.0,
+        H_max=4000.0,
+    )
+    lat_deg = grid.lat * (180.0 / jnp.pi)
+    lon_deg = (grid.lon * (180.0 / jnp.pi) + 180.0) % 360.0 - 180.0
+    basin_mask = jnp.where(
+        (lat_deg >= 10.0) & (lat_deg <= 70.0) & (lon_deg >= -70.0) & (lon_deg <= 20.0),
+        1.0,
+        0.0,
+    ).astype(jnp.float32)
+    if float(jnp.mean(basin_mask)) <= 0.01:
+        raise ValueError("holland_lin_double_gyre_test: basin mask is empty")
+
+    H_bathy = jnp.full_like(basin_mask, 4000.0, dtype=jnp.float32)
+    state = _replace_static_ocean_fields(state, H_bathy=H_bathy, land_mask=basin_mask)
+
+    y_norm = (lat_deg - 10.0) / 60.0
+    tau_max = 0.05  # N/m^2
+    tau_x = -tau_max * jnp.cos(2.0 * jnp.pi * y_norm)
+    tau_x = jnp.where((y_norm >= 0.0) & (y_norm <= 1.0) & (basin_mask > 0.5), tau_x, 0.0)
+    drag_factor = float(jnp.exp(-dt / (20.0 * 86400.0)))
+
+    case_config = config._replace(
+        A_h=max(config.A_h, 1.0e7),
+        K_h=max(config.K_h, 1.0e6),
+        A_v=max(config.A_v, 1.0e-2),
+        K_v=max(config.K_v, 1.0e-3),
+        n_barotropic_substeps=max(config.n_barotropic_substeps, 50),
+        barotropic_diffusion_alpha=max(config.barotropic_diffusion_alpha, 0.08),
+    )
+
+    def forcing_step_fn(state_now, step, dt_now):
+        del step
+        h_k = compute_layer_thickness(state_now.eta.data, state_now.H_bathy.data, z_coord)
+        h_surface = jnp.maximum(h_k[..., 0], 1.0)
+        du_surface = tau_x / (rho_0 * h_surface)
+        du_3d = jnp.zeros_like(state_now.u.data).at[..., 0].set(du_surface)
+        mask_3d = state_now.land_mask.data[..., jnp.newaxis]
+        u_new = (state_now.u.data + dt_now * du_3d) * drag_factor * mask_3d
+        v_new = state_now.v.data * drag_factor * mask_3d
+        return state_now._replace(
+            u=state_now.u.replace(data=u_new),
+            v=state_now.v.replace(data=v_new),
+        )
+
+    def extra(case_dir, state_init, *_):
+        _plot_scalar_map(
+            os.path.join(case_dir, "basin_mask.png"),
+            "Closed-basin ocean mask [1=ocean]",
+            state_init.land_mask.data,
+            grid,
+            point_size,
+            cmap="Blues",
+            vmin=0.0,
+            vmax=1.0,
+            cbar_label="Mask",
+        )
+        _plot_scalar_map(
+            os.path.join(case_dir, "wind_stress_tau_x.png"),
+            "Imposed zonal wind stress tau_x [N/m^2]",
+            tau_x,
+            grid,
+            point_size,
+            cmap="RdBu_r",
+            symmetric=True,
+            cbar_label="tau_x [N/m^2]",
+        )
+
+    return _run_forced_ocean_case(
+        "TEST 5: Holland-Lin Wind-Forced Double Gyre",
+        "holland_lin_gyre",
+        "Holland-Lin Double Gyre",
+        state,
+        grid,
+        z_coord,
+        case_config,
+        dt,
+        n_steps,
+        output_dir,
+        point_size,
+        forcing_step_fn=forcing_step_fn,
+        extra_plot_fn=extra,
+    )
+
+
+def run_diabatic_thermohaline_test(
+    grid, z_coord, config, dt, n_steps, output_dir, point_size,
+):
+    """Diabatic idealized thermohaline circulation with SST/SSS restoring."""
+    state = _rest_state_all_ocean(
+        grid,
+        z_coord,
+        T_surface=24.0,
+        T_deep=1.5,
+        S_uniform=34.8,
+        H_max=4500.0,
+    )
+    _assert_all_ocean(state, "diabatic_thermohaline_test")
+
+    lat = grid.lat
+    mask = state.land_mask.data
+    T_star = 24.0 - 20.0 * jnp.sin(lat) ** 2
+    S_star = 34.7 + 0.6 * jnp.cos(2.0 * lat)
+    tau_T = 20.0 * 86400.0
+    tau_S = 45.0 * 86400.0
+
+    case_config = config._replace(
+        A_h=max(config.A_h, 5.0e4),
+        K_h=max(config.K_h, 2.0e4),
+        A_v=max(config.A_v, 5.0e-3),
+        K_v=max(config.K_v, 5.0e-4),
+        n_barotropic_substeps=max(config.n_barotropic_substeps, 35),
+    )
+
+    def forcing_step_fn(state_now, step, dt_now):
+        del step
+        T_data = state_now.T.data
+        S_data = state_now.S.data
+        dT_sfc = (-(T_data[..., 0] - T_star) / tau_T) * mask
+        dS_sfc = (-(S_data[..., 0] - S_star) / tau_S) * mask
+        T_new = T_data.at[..., 0].set(T_data[..., 0] + dt_now * dT_sfc)
+        S_new = S_data.at[..., 0].set(S_data[..., 0] + dt_now * dS_sfc)
+        return state_now._replace(
+            T=state_now.T.replace(data=T_new),
+            S=state_now.S.replace(data=S_new),
+        )
+
+    def extra(case_dir, *_):
+        _plot_scalar_map(
+            os.path.join(case_dir, "target_sst.png"),
+            "Target SST restoring profile T* [degC]",
+            T_star,
+            grid,
+            point_size,
+            cmap="RdYlBu_r",
+            cbar_label="T* [degC]",
+        )
+        _plot_scalar_map(
+            os.path.join(case_dir, "target_sss.png"),
+            "Target SSS restoring profile S* [PSU]",
+            S_star,
+            grid,
+            point_size,
+            cmap="viridis",
+            cbar_label="S* [PSU]",
+        )
+
+    return _run_forced_ocean_case(
+        "TEST 6: Diabatic Thermohaline Circulation",
+        "thermohaline",
+        "Diabatic Thermohaline Circulation",
+        state,
+        grid,
+        z_coord,
+        case_config,
+        dt,
+        n_steps,
+        output_dir,
+        point_size,
+        forcing_step_fn=forcing_step_fn,
+        extra_plot_fn=extra,
+    )
+
+
+def run_two_layer_phillips_test(
+    grid, base_z_coord, config, dt, n_steps, output_dir, point_size,
+):
+    """Two-layer Phillips-style baroclinic test with zonal-mean relaxation."""
+    del base_z_coord
+    z_coord_2 = create_ocean_z_star(n_levels=2)
+    sim_seconds = n_steps * dt
+    dt_case = min(dt, 900.0)
+    n_steps_case = max(1, int(sim_seconds / dt_case))
+
+    state = _rest_state_all_ocean(
+        grid,
+        z_coord_2,
+        T_surface=17.0,
+        T_deep=7.0,
+        S_uniform=35.0,
+        H_max=3500.0,
+    )
+    _assert_all_ocean(state, "two_layer_phillips_test")
+
+    lat_deg = grid.lat * (180.0 / jnp.pi)
+    u_jet = 0.30 * jnp.exp(-((lat_deg - 45.0) / 14.0) ** 2) * state.land_mask.data
+    u_data = state.u.data.at[..., 0].set(u_jet).at[..., 1].set(-0.20 * u_jet)
+    eta_seed = 0.05 * jnp.sin(3.0 * grid.lon) * jnp.cos(2.0 * grid.lat) * state.land_mask.data
+    area_w = state.land_mask.data * grid.area
+    eta_seed = eta_seed - jnp.sum(eta_seed * area_w) / jnp.maximum(jnp.sum(area_w), 1.0)
+    state = state._replace(
+        u=state.u.replace(data=u_data.astype(state.u.data.dtype)),
+        eta=state.eta.replace(data=eta_seed.astype(state.eta.data.dtype)),
+    )
+
+    case_config = config._replace(
+        A_h=max(config.A_h, 2.0e5),
+        K_h=max(config.K_h, 2.0e4),
+        A_v=max(config.A_v, 1.0e-2),
+        K_v=max(config.K_v, 1.0e-3),
+        n_barotropic_substeps=max(config.n_barotropic_substeps, 45),
+        barotropic_diffusion_alpha=max(config.barotropic_diffusion_alpha, 0.06),
+    )
+
+    n_bins = max(24, 2 * grid.n)
+    lat_edges = jnp.linspace(-90.0, 90.0, n_bins + 1)
+    lat_deg_flat = (grid.lat * (180.0 / jnp.pi)).reshape(-1)
+    bin_idx = jnp.clip(
+        jnp.searchsorted(lat_edges, lat_deg_flat, side="right") - 1,
+        0,
+        n_bins - 1,
+    ).astype(jnp.int32)
+    weights = (grid.area * state.land_mask.data).reshape(-1)
+
+    def lat_bin_mean(field_2d):
+        flat = field_2d.reshape(-1)
+        wsum = jnp.bincount(bin_idx, weights=weights, length=n_bins)
+        ssum = jnp.bincount(bin_idx, weights=flat * weights, length=n_bins)
+        mean_bin = ssum / jnp.maximum(wsum, 1.0e-12)
+        return mean_bin[bin_idx].reshape(field_2d.shape)
+
+    T_star_upper = 16.0 - 10.0 * jnp.sin(grid.lat) ** 2
+    T_star_lower = 8.0 - 4.0 * jnp.sin(grid.lat) ** 2
+    tau_relax = 15.0 * 86400.0
+    drag_factor = float(jnp.exp(-dt_case / (25.0 * 86400.0)))
+
+    def forcing_step_fn(state_now, step, dt_now):
+        del step
+        T_data = state_now.T.data
+        mask = state_now.land_mask.data
+        T0_zm = lat_bin_mean(T_data[..., 0])
+        T1_zm = lat_bin_mean(T_data[..., 1])
+        dT0 = (-(T0_zm - T_star_upper) / tau_relax) * mask
+        dT1 = (-(T1_zm - T_star_lower) / tau_relax) * mask
+        T_new = T_data.at[..., 0].set(T_data[..., 0] + dt_now * dT0)
+        T_new = T_new.at[..., 1].set(T_data[..., 1] + dt_now * dT1)
+        mask_3d = mask[..., jnp.newaxis]
+        u_new = state_now.u.data * drag_factor * mask_3d
+        v_new = state_now.v.data * drag_factor * mask_3d
+        return state_now._replace(
+            T=state_now.T.replace(data=T_new),
+            u=state_now.u.replace(data=u_new),
+            v=state_now.v.replace(data=v_new),
+        )
+
+    def extra(case_dir, *_):
+        _plot_scalar_map(
+            os.path.join(case_dir, "target_T_upper.png"),
+            "Phillips target upper-layer T* [degC]",
+            T_star_upper,
+            grid,
+            point_size,
+            cmap="RdYlBu_r",
+            cbar_label="T* upper [degC]",
+        )
+        _plot_scalar_map(
+            os.path.join(case_dir, "target_T_lower.png"),
+            "Phillips target lower-layer T* [degC]",
+            T_star_lower,
+            grid,
+            point_size,
+            cmap="RdYlBu_r",
+            cbar_label="T* lower [degC]",
+        )
+
+    return _run_forced_ocean_case(
+        "TEST 7: Two-Layer Phillips Baroclinic Problem",
+        "phillips_two_layer",
+        "Two-Layer Phillips Test",
+        state,
+        grid,
+        z_coord_2,
+        case_config,
+        dt_case,
+        n_steps_case,
+        output_dir,
+        point_size,
+        forcing_step_fn=forcing_step_fn,
+        extra_plot_fn=extra,
+    )
+
+
+def run_taylor_column_test(
+    grid, z_coord, config, dt, n_steps, output_dir, point_size,
+):
+    """Taylor-column style flow over a seamount in rotating stratified ocean."""
+    sim_seconds = n_steps * dt
+    dt_case = min(dt, 1800.0)
+    n_steps_case = max(1, int(sim_seconds / dt_case))
+
+    state = _rest_state_all_ocean(
+        grid,
+        z_coord,
+        T_surface=8.0,
+        T_deep=4.0,
+        S_uniform=35.0,
+        H_max=4500.0,
+    )
+    _assert_all_ocean(state, "taylor_column_test")
+
+    dist = _great_circle_distance_rad(
+        grid.lon,
+        grid.lat,
+        jnp.pi,
+        30.0 * jnp.pi / 180.0,
+    )
+    bump = 1200.0 * jnp.exp(-0.5 * (dist / (10.0 * jnp.pi / 180.0)) ** 2)
+    H_bathy = jnp.clip(4500.0 - bump, 1200.0, 4500.0)
+    state = _replace_static_ocean_fields(state, H_bathy=H_bathy)
+
+    U0 = 0.02
+    u_target_2d = U0 * jnp.cos(grid.lat) * state.land_mask.data
+    u_target_3d = jnp.broadcast_to(u_target_2d[..., jnp.newaxis], state.u.data.shape)
+    state = state._replace(u=state.u.replace(data=u_target_3d.astype(state.u.data.dtype)))
+
+    case_config = config._replace(
+        A_h=max(config.A_h, 5.0e5),
+        K_h=max(config.K_h, 5.0e4),
+        A_v=max(config.A_v, 1.0e-2),
+        K_v=max(config.K_v, 1.0e-3),
+        n_barotropic_substeps=max(config.n_barotropic_substeps, 60),
+        barotropic_diffusion_alpha=max(config.barotropic_diffusion_alpha, 0.10),
+    )
+    tau_restore = 30.0 * 86400.0
+
+    def forcing_step_fn(state_now, step, dt_now):
+        del step
+        mask = state_now.land_mask.data
+        mask_3d = mask[..., jnp.newaxis]
+        u_target = jnp.broadcast_to(u_target_2d[..., jnp.newaxis], state_now.u.data.shape)
+        u_new = (state_now.u.data + dt_now * (u_target - state_now.u.data) / tau_restore) * mask_3d
+        v_new = state_now.v.data * jnp.exp(-dt_now / tau_restore) * mask_3d
+        return state_now._replace(
+            u=state_now.u.replace(data=u_new),
+            v=state_now.v.replace(data=v_new),
+        )
+
+    def extra(case_dir, *_):
+        _plot_scalar_map(
+            os.path.join(case_dir, "bathymetry.png"),
+            "Taylor-column bathymetry H_bathy [m]",
+            H_bathy,
+            grid,
+            point_size,
+            cmap="terrain",
+            cbar_label="Depth [m]",
+        )
+        _plot_scalar_map(
+            os.path.join(case_dir, "u_target.png"),
+            "Background zonal flow target u_target [m/s]",
+            u_target_2d,
+            grid,
+            point_size,
+            cmap="RdBu_r",
+            symmetric=True,
+            cbar_label="u_target [m/s]",
+        )
+
+    return _run_forced_ocean_case(
+        "TEST 8: Taylor Column over Seamount",
+        "taylor_column",
+        "Taylor Column Test",
+        state,
+        grid,
+        z_coord,
+        case_config,
+        dt_case,
+        n_steps_case,
+        output_dir,
+        point_size,
+        forcing_step_fn=forcing_step_fn,
+        extra_plot_fn=extra,
+    )
 
 
 # =====================================================================
@@ -990,7 +2476,17 @@ def main():
     parser.add_argument("--output", "-o", type=str, default=None,
                         help="Output directory (default: results/ocean_tests_C{n}_L{l})")
     parser.add_argument("--test", "-t", type=str, default="all",
-                        choices=["all", "rest", "wave", "gyre"],
+                        choices=[
+                            "all",
+                            "rest",
+                            "wave",
+                            "gyre",
+                            "adiabatic_topography",
+                            "holland_lin",
+                            "thermohaline",
+                            "phillips",
+                            "taylor",
+                        ],
                         help="Which test to run (default: all)")
     parser.add_argument("--runtime-checks", action="store_true",
                         help="Enable host-side runtime invariant checks")
@@ -1116,6 +2612,46 @@ def main():
             ),
         )
 
+    if args.test in ("all", "adiabatic_topography"):
+        _run_case(
+            "adiabatic_topography",
+            lambda: run_adiabatic_topography_adjustment_test(
+                grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+            ),
+        )
+
+    if args.test in ("all", "holland_lin"):
+        _run_case(
+            "holland_lin_gyre",
+            lambda: run_holland_lin_double_gyre_test(
+                grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+            ),
+        )
+
+    if args.test in ("all", "thermohaline"):
+        _run_case(
+            "thermohaline",
+            lambda: run_diabatic_thermohaline_test(
+                grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+            ),
+        )
+
+    if args.test in ("all", "phillips"):
+        _run_case(
+            "phillips_two_layer",
+            lambda: run_two_layer_phillips_test(
+                grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+            ),
+        )
+
+    if args.test in ("all", "taylor"):
+        _run_case(
+            "taylor_column",
+            lambda: run_taylor_column_test(
+                grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+            ),
+        )
+
     # =====================================================================
     # Summary
     # =====================================================================
@@ -1213,8 +2749,16 @@ def main():
 
     print(f"\n  Output directory: {output_dir}/")
     for name in results:
-        subdir = {"rest_state": "rest_state", "gravity_wave": "gravity_wave",
-                  "wind_gyre": "wind_gyre"}[name]
+        subdir = {
+            "rest_state": "rest_state",
+            "gravity_wave": "gravity_wave",
+            "wind_gyre": "wind_gyre",
+            "adiabatic_topography": "adiabatic_topography",
+            "holland_lin_gyre": "holland_lin_gyre",
+            "thermohaline": "thermohaline",
+            "phillips_two_layer": "phillips_two_layer",
+            "taylor_column": "taylor_column",
+        }[name]
         print(f"    {subdir}/")
     print("=" * 70)
     return 1 if case_errors else 0
