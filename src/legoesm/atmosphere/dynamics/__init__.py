@@ -99,6 +99,16 @@ from legoesm.atmosphere.dynamics.shallow_water_cgrid import (
     CGShallowWaterCubedConfig,
     cgrid_shallow_water_tendencies_cubed,
 )
+from legoesm.atmosphere.dynamics.primitive_eq_cgrid import (
+    CGPrimitiveEquationModel,
+    CGPrimitiveEquationConfig,
+    cgrid_hydrostatic_tendencies,
+)
+from legoesm.atmosphere.dynamics.compressible_euler_cgrid import (
+    CGCompressibleEulerModel,
+    CGCompressibleEulerConfig,
+    cgrid_compressible_euler_slow_tendencies,
+)
 from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
     FVLatLonPrimitiveEquationModel,
     fv_latlon_hydrostatic_tendencies,
@@ -162,6 +172,8 @@ AVAILABLE_SOLVERS = [
     "fc_cgrid_primitive_equations",
     "fc_compressible_euler",
     "fc_cgrid_compressible_euler",
+    "cgrid_primitive_equations",
+    "cgrid_compressible_euler",
 ]
 
 # Valid values for the two-axis config keys
@@ -182,6 +194,8 @@ _AXIS_TO_SOLVER = {
     ("hydrostatic", "finite_volume"): "fv_primitive_equations",
     ("nonhydrostatic", "finite_volume"): "fv_compressible_euler",
     ("shallow_water", "cgrid"): "cgrid_shallow_water",
+    ("hydrostatic", "cgrid"): "cgrid_primitive_equations",
+    ("nonhydrostatic", "cgrid"): "cgrid_compressible_euler",
     ("shallow_water", "fc_gram"): "fc_shallow_water",
     ("shallow_water", "fc_gram_cgrid"): "fc_cgrid_shallow_water",
     ("hydrostatic", "fc_gram"): "fc_primitive_equations",
@@ -397,6 +411,10 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return CGShallowWaterLatLonModel(**kwargs)
     elif name == "cgrid_shallow_water":
         return CGShallowWaterCubedModel(**kwargs)
+    elif name == "cgrid_primitive_equations":
+        return CGPrimitiveEquationModel(**kwargs)
+    elif name == "cgrid_compressible_euler":
+        return CGCompressibleEulerModel(**kwargs)
     elif name == "fc_shallow_water":
         return FCShallowWaterModel(**kwargs)
     elif name == "fc_cgrid_shallow_water":

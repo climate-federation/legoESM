@@ -50,6 +50,8 @@ from legoesm.core.operators_3d import (
     gradient_y_3d as _gradient_y_3d,
     divergence_3d as _divergence_3d,
     hyperdiffusion_3d as _hyperdiffusion_3d,
+    fv_flux_divergence_3d as _fv_flux_divergence_3d,
+    fv_scalar_advection_3d as _fv_scalar_advection_3d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
@@ -75,6 +77,7 @@ class PrimitiveEquationConfig(NamedTuple):
     g: float = constants.g
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0  # Separate coefficient for p_s ∇⁴ diffusion
+    div_damp_coeff: float = 0.0  # 2nd-order divergence damping [m²/s]
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False  # Anchor mass fixer to initial mass (prevents drift)
@@ -207,14 +210,24 @@ def hydrostatic_tendencies(
     dv_dt_data = -abs_vor * u - dB_dy - pg_corr_y
 
     # --- 5. Surface pressure tendency and sigma-dot ---
+    # Use PPM flux divergence for the continuity equation.
+    # PPM reconstruction with Colella-Woodward limiter inherently
+    # resolves the 2Δx checkerboard mode that centered divergence
+    # cannot see (its (i+1)-(i-1) stencil has a null-space for (-1)^i).
     sigma_top = sigma_coord.sigma_half[0]
     sigma_range = 1.0 - sigma_top  # total sigma range
 
+    # Column-integrated mass flux divergence via PPM
+    div_ps_v = _fv_flux_divergence_3d(
+        jnp.broadcast_to(p_s[..., None], T.shape),
+        u, v, grid,
+    )  # (6,n,n,nlev)
+    dp_s_dt_data = jnp.sum(
+        div_ps_v * dsigma[None, None, None, :], axis=-1,
+    ) / sigma_range
+
+    # Centered divergence for sigma-dot (vertical velocity diagnostic)
     div_v = _divergence_3d(u, v, grid)  # (6,n,n,nlev)
-    D_total = jnp.sum(
-        div_v * dsigma[None, None, None, :], axis=-1,
-    )  # (6,n,n)
-    dp_s_dt_data = -p_s * D_total / sigma_range
     sigma_dot = compute_sigma_dot(div_v, sigma_coord)  # (6,n,n,nlev+1)
 
     # --- 7. Vertical advection of T ---
@@ -228,7 +241,11 @@ def hydrostatic_tendencies(
     dv_dt_data = dv_dt_data + vert_adv_v
 
     # --- 8. Thermodynamic equation ---
-    # Centered advection: -v·∇T
+    # Centered advection: -v·∇T (energy-consistent with vector-invariant momentum).
+    # PPM T advection is energy-inconsistent with centered momentum on the
+    # cubed sphere, causing exponential T growth at face boundaries.
+    # The 2Δx checkerboard in T is handled by hyperdiffusion with the
+    # compact inner Laplacian (see operators.py:laplacian_compact).
     dT_dx = _gradient_x_3d(T, grid)
     dT_dy = _gradient_y_3d(T, grid)
     horiz_adv_T = -(u * dT_dx + v * dT_dy)
@@ -248,7 +265,16 @@ def hydrostatic_tendencies(
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
 
-    # --- 9. Hyperdiffusion ---
+    # --- 9. Divergence damping: ν₂ · ∇(∇·v) ---
+    # Damps grid-scale divergent modes while leaving rotational flow
+    # untouched.
+    if config.div_damp_coeff > 0:
+        ddiv_dx = _gradient_x_3d(div_v, grid)
+        ddiv_dy = _gradient_y_3d(div_v, grid)
+        du_dt_data = du_dt_data + config.div_damp_coeff * ddiv_dx
+        dv_dt_data = dv_dt_data + config.div_damp_coeff * ddiv_dy
+
+    # --- 10. Hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
         diff_u = _hyperdiffusion_3d(u, grid, config.hyperdiff_coeff)
         diff_v = _hyperdiffusion_3d(v, grid, config.hyperdiff_coeff)

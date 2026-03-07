@@ -112,7 +112,7 @@ parser.add_argument("--ch4-ppbv", type=float, default=1900.0,
 parser.add_argument("--n2o-ppbv", type=float, default=332.0,
                     help="N2O concentration [ppbv] for RRTMG (default: 332)")
 parser.add_argument("--discretization", type=str, default="centered",
-                    choices=["centered", "finite_volume"],
+                    choices=["centered", "finite_volume", "cgrid"],
                     help="Dynamical core discretization (default: centered)")
 args = parser.parse_args()
 
@@ -172,7 +172,8 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 DISCRETIZATION = args.discretization
 _rad_label = "gray (Frierson 2006)" if RADIATION == "gray" else "RRTMG (correlated-k)"
-_disc_label = "Finite Volume (PPM)" if DISCRETIZATION == "finite_volume" else "Centered FD"
+_disc_labels = {"finite_volume": "Finite Volume (PPM)", "cgrid": "C-grid (PPM + div damp)", "centered": "Centered FD"}
+_disc_label = _disc_labels.get(DISCRETIZATION, DISCRETIZATION)
 print("=" * 70)
 print(f"  AMIP: Prescribed SST/SIC + {_rad_label} + SBM Convection")
 print("=" * 70)
@@ -305,14 +306,14 @@ from legoesm.atmosphere.physics.held_suarez import held_suarez_init
 
 HYPERDIFF = exp_config.hyperdiff_scale * (48 / N) ** 4
 
+_dx_min = float(grid.dx.min()) / 2.0  # single-cell width
+
 if DISCRETIZATION == "finite_volume":
     from legoesm.atmosphere.dynamics.primitive_eq_fv import (
         FVPrimitiveEquationModel,
         FVPrimitiveEquationConfig,
     )
-    # FV uses divergence damping + velocity-only hyperdiffusion
-    dx_min = float(grid.dx.min()) / 2.0  # single-cell width (grid.dx spans 2 cells)
-    div_damp_2 = 0.05 * dx_min ** 2 / DT   # mild 2nd-order divergence damping
+    div_damp_2 = 0.05 * _dx_min ** 2 / DT
     dycore_config = FVPrimitiveEquationConfig(
         div_damp_2=div_damp_2,
         div_damp_4=0.0,
@@ -324,18 +325,38 @@ if DISCRETIZATION == "finite_volume":
     )
     model = FVPrimitiveEquationModel(grid, sigma, dycore_config)
     print(f"  FV dycore: div_damp_2={div_damp_2:.2e}, hyperdiff={HYPERDIFF:.2e}")
+elif DISCRETIZATION == "cgrid":
+    from legoesm.atmosphere.dynamics.primitive_eq_cgrid import (
+        CGPrimitiveEquationModel,
+        CGPrimitiveEquationConfig,
+    )
+    _div_damp_2 = 0.05 * _dx_min ** 2 / DT
+    _div_damp_4 = 0.01 * _dx_min ** 4 / DT
+    dycore_config = CGPrimitiveEquationConfig(
+        hyperdiff_coeff=HYPERDIFF,
+        hyperdiff_ps_coeff=0.0,
+        div_damp_2=_div_damp_2,
+        div_damp_4=_div_damp_4,
+        use_conservation_fixer=True,
+        fix_mass=True,
+    )
+    model = CGPrimitiveEquationModel(grid, sigma, dycore_config)
+    print(f"  C-grid dycore: div_damp_2={_div_damp_2:.2e}, div_damp_4={_div_damp_4:.2e}, hyperdiff={HYPERDIFF:.2e}")
 else:
     from legoesm.atmosphere.dynamics.primitive_eq import (
         PrimitiveEquationModel,
         PrimitiveEquationConfig,
     )
+    _div_damp = 0.12 * _dx_min ** 2 / DT
     dycore_config = PrimitiveEquationConfig(
         hyperdiff_coeff=HYPERDIFF,
         hyperdiff_ps_coeff=HYPERDIFF,
+        div_damp_coeff=_div_damp,
         use_conservation_fixer=True,
         fix_mass=True,
     )
     model = PrimitiveEquationModel(grid, sigma, dycore_config)
+    print(f"  Centered dycore (PPM scalar transport): div_damp={_div_damp:.2e}, hyperdiff={HYPERDIFF:.2e}")
 
 # ---------------------------------------------------------------------------
 # 4. Initial state or restart
@@ -433,6 +454,11 @@ _k_f_max = exp_config.k_BL_max_per_day / 86400.0
 _k_free = exp_config.k_free_per_day / 86400.0
 _k_f = _k_free + _k_f_max * jnp.maximum(0.0, (_sigma_full - _sigma_b) / (1.0 - _sigma_b))
 _fric_decay = jnp.exp(-_k_f * DT)
+
+# Mild moisture smoothing (∇⁴) for grid-scale q_v noise from convection.
+# The primary 2Δx checkerboard fix is now the compact ∇² in the dycore.
+from legoesm.core.operators_3d import hyperdiffusion_3d as _hyperdiff_3d
+_qv_smooth_coeff = HYPERDIFF * 0.5
 
 
 if RADIATION == "gray":
@@ -600,14 +626,17 @@ def regrid_faces_to_latlon(field_faces, n_lon=None, n_lat=None):
         [cos_lat_t * np.cos(lon_t), cos_lat_t * np.sin(lon_t), np.sin(lat_t)],
     )
 
-    k = min(8, src_xyz.shape[0])
+    k = min(16, src_xyz.shape[0])
     tree = cKDTree(src_xyz)
     dist, idx = tree.query(tgt_xyz, k=k)
     if k == 1:
         field_ll = val[idx].reshape(lon2d.shape)
     else:
+        # Gaussian (RBF) weighting: smoother than IDW across face boundaries
         dist = np.maximum(dist, 1.0e-12)
-        w = 1.0 / dist
+        # Scale length = median distance to nearest neighbor
+        sigma = np.median(dist[:, 0]) * 2.0
+        w = np.exp(-0.5 * (dist / sigma) ** 2)
         w /= np.sum(w, axis=1, keepdims=True)
         field_ll = np.sum(val[idx] * w, axis=1).reshape(lon2d.shape)
 
@@ -706,6 +735,9 @@ new_T = new_T + constants.L_v * _excess / constants.c_pd
 state = state._replace(T=state.T.replace(data=new_T))
 _precip_ls = jnp.sum(_excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
 
+# Mild moisture smoothing
+q_v = jnp.maximum(q_v + DT * _hyperdiff_3d(q_v, grid, _qv_smooth_coeff), 0.0)
+
 state = state._replace(
     u=state.u.replace(data=state.u.data * _fric_decay),
     v=state.v.replace(data=state.v.data * _fric_decay),
@@ -723,7 +755,7 @@ for step in range(start_step + 1, n_steps_total):
 
     sst, sic = get_sst_sic(day)
 
-    # (a) Dynamics
+    # (a) Dynamics (includes compact ∇² damping of 2Δx mode)
     state = model.step_with_physics(state, DT)
 
     # (b) Physics: recompute radiation on cadence, hold tendencies otherwise
@@ -757,7 +789,10 @@ for step in range(start_step + 1, n_steps_total):
     state = state._replace(T=state.T.replace(data=new_T))
     _precip_ls = jnp.sum(_excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
 
-    # (c) Rayleigh friction
+    # (c) Moisture smoothing
+    q_v = jnp.maximum(q_v + DT * _hyperdiff_3d(q_v, grid, _qv_smooth_coeff), 0.0)
+
+    # (d) Rayleigh friction
     state = state._replace(
         u=state.u.replace(data=state.u.data * _fric_decay),
         v=state.v.replace(data=state.v.data * _fric_decay),

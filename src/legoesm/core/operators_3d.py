@@ -24,6 +24,7 @@ from legoesm.core.operators import (
     divergence,
     curl_z,
     hyperdiffusion,
+    laplacian_compact,
 )
 from legoesm.core.operators_fv import (
     fv_flux_divergence as _fv_flux_divergence_2d,
@@ -155,6 +156,31 @@ def hyperdiffusion_3d(
     def single_level(f_k):
         f_field = Field(data=f_k, name="f", dims=("face", "x", "y"), units="")
         return hyperdiffusion(f_field, grid, coeff).data
+
+    f_t = jnp.moveaxis(field_3d, -1, 0)
+    result = jax.vmap(single_level)(f_t)
+    return jnp.moveaxis(result, 0, -1)
+
+
+def laplacian_compact_3d(
+    field_3d: jax.Array, grid: CubedSphereGrid,
+) -> jax.Array:
+    """Compact-stencil Laplacian at all levels via vmap.
+
+    Unlike the standard Laplacian (div(grad)), this uses adjacent-cell
+    second differences and resolves the 2Δx checkerboard mode.
+
+    Parameters
+    ----------
+    field_3d : jax.Array, shape (6, n, n, nlev)
+    grid : CubedSphereGrid
+
+    Returns
+    -------
+    jax.Array : ∇²f, shape (6, n, n, nlev)
+    """
+    def single_level(f_k):
+        return laplacian_compact(f_k, grid)
 
     f_t = jnp.moveaxis(field_3d, -1, 0)
     result = jax.vmap(single_level)(f_t)

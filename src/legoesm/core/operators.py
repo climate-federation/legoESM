@@ -175,11 +175,54 @@ def laplacian(field: Field, grid: CubedSphereGrid) -> Field:
     metric factors (h_y/h_x, h_x/h_y) and the adjoint compatibility
     of the constituent operators, giving a self-adjoint, negative-
     semi-definite diffusion operator on the cubed sphere.
+
+    **Warning**: This operator is blind to the 2Δx checkerboard mode
+    because both gradient and divergence use centered ``(i+1) - (i-1)``
+    differences.  Use :func:`laplacian_compact` to damp that mode.
     """
     gx = gradient_x(field, grid)
     gy = gradient_y(field, grid)
     lap = divergence(gx, gy, grid)
     return field.replace(data=lap.data, name=f"laplacian_{field.name}")
+
+
+def laplacian_compact(data: jax.Array, grid: CubedSphereGrid) -> jax.Array:
+    """Compact-stencil Laplacian that resolves the 2Δx checkerboard mode.
+
+    Uses ``(f[i+1] - 2f[i] + f[i-1]) / (dx/2)²`` — the standard
+    second-difference that sees ALL modes, including the odd-even
+    checkerboard that the centered-gradient-based
+    :func:`laplacian` misses.
+
+    The centered operators gradient_x/gradient_y use ``(f[i+1] - f[i-1])``
+    which is exactly zero for a ``(-1)^i`` pattern. The hyperdiffusion
+    ``div(grad(div(grad())))`` inherits this null-space. This compact
+    Laplacian has no such blind spot.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (6, n, n)
+        Scalar field on the cubed-sphere.
+    grid : CubedSphereGrid
+        The grid with metric terms.
+
+    Returns
+    -------
+    jax.Array : ∇²f, shape (6, n, n)
+    """
+    padded = pad_halo(data, interp_offsets=grid.halo_interp_offsets)
+
+    # Compact second differences using ADJACENT cells:
+    # d²f/dx² ≈ (f[i+1] - 2*f[i] + f[i-1]) / (dx/2)²
+    # In the padded array: i+1 → [:,2:,1:-1], i → [:,1:-1,1:-1], i-1 → [:,:-2,1:-1]
+    interior = padded[:, 1:-1, 1:-1]  # = data (the original field)
+    hx_sq = (grid.dx / 2.0) ** 2  # single-cell width squared
+    hy_sq = (grid.dy / 2.0) ** 2
+
+    d2f_dx2 = (padded[:, 2:, 1:-1] - 2.0 * interior + padded[:, :-2, 1:-1]) / hx_sq
+    d2f_dy2 = (padded[:, 1:-1, 2:] - 2.0 * interior + padded[:, 1:-1, :-2]) / hy_sq
+
+    return d2f_dx2 + d2f_dy2
 
 
 # ==============================================================================
@@ -234,8 +277,17 @@ def hyperdiffusion(field: Field, grid: CubedSphereGrid, coeff: float) -> Field:
     Provides scale-selective damping of grid-scale noise while
     preserving large-scale features. Essential for stability of
     centered advection schemes.
+
+    The inner Laplacian uses the compact stencil (adjacent cells)
+    so that the 2Δx checkerboard mode — which is in the null-space
+    of the composed div(grad()) Laplacian — is properly resolved.
+    The outer Laplacian uses the standard composed form, which can
+    act on the smooth output of the inner compact Laplacian.
     """
-    lap1 = laplacian(field, grid)
+    # Inner ∇²: compact stencil sees the 2Δx mode
+    lap1_data = laplacian_compact(field.data, grid)
+    lap1 = field.replace(data=lap1_data, name=f"lap_{field.name}")
+    # Outer ∇²: standard composed form (operates on smooth field)
     lap2 = laplacian(lap1, grid)
     return field.replace(data=-coeff * lap2.data, name=f"hyperdiff_{field.name}")
 
