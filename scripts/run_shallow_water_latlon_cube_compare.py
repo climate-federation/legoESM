@@ -837,11 +837,12 @@ def _run_fv_cubesphere(
     case: str,
     projection: str,
     draw_coastlines: bool,
+    fv_variant: str,
 ) -> dict:
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv import FVShallowWaterConfig, FVShallowWaterModel
     from legoesm.core.conservation import compute_conservation_diagnostics
     from legoesm.core.operators import curl_z
+    from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
     from tests.test_cases.williamson import williamson_test2, williamson_test5
 
     out_dir_latlon.mkdir(parents=True, exist_ok=True)
@@ -854,8 +855,30 @@ def _run_fv_cubesphere(
         case_tag = "Williamson5"
     else:
         raise ValueError(f"Unsupported case '{case}'")
-    case_name_latlon = f"SW Finite-Volume LatLon(remapped) {case_tag} C{n} SSP45"
-    case_name_cube = f"SW Finite-Volume CubeSphere {case_tag} C{n} SSP45"
+    fv_variant = fv_variant.lower().strip()
+    if fv_variant in ("agrid", "a-grid", "a_grid"):
+        from legoesm.atmosphere.dynamics.shallow_water_fv import (
+            FVShallowWaterConfig as _SWConfig,
+            FVShallowWaterModel as _SWModel,
+        )
+
+        variant_tag = "fv_agrid"
+        variant_label = "Finite-Volume A-grid"
+    elif fv_variant in ("cdgrid", "cgrid", "c-d-grid", "c_d_grid"):
+        from legoesm.atmosphere.dynamics.shallow_water_cgrid import (
+            CGShallowWaterCubedConfig as _SWConfig,
+            CGShallowWaterCubedModel as _SWModel,
+        )
+
+        variant_tag = "fv_cdgrid"
+        variant_label = "Finite-Volume C-D-grid"
+    else:
+        raise ValueError(
+            f"Unsupported fv_variant={fv_variant!r}; choose from 'agrid', 'cdgrid'."
+        )
+
+    case_name_latlon = f"SW {variant_label} LatLon(remapped) {case_tag} C{n} SSP45"
+    case_name_cube = f"SW {variant_label} CubeSphere {case_tag} C{n} SSP45"
 
     grid = create_cubed_sphere(n)
     area = np.asarray(grid.area, dtype=np.float64)
@@ -868,19 +891,29 @@ def _run_fv_cubesphere(
     snapshots_latlon: dict[int, dict[str, np.ndarray]] = {}
     snapshots_cube: dict[int, dict[str, np.ndarray]] = {}
 
-    from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
     nu2, nu4 = default_div_damp_coeffs(grid, dt=dt)
-    cfg = FVShallowWaterConfig(
-        hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
-        div_damp_2=nu2,
-        div_damp_4=nu4,
-        time_integrator="ssp45",
-        use_limiter=True,
-        use_conservation_fixer=True,
-        fix_mass=True,
-        fix_energy=False,
-    )
-    model = FVShallowWaterModel(grid, cfg)
+    if variant_tag == "fv_agrid":
+        cfg = _SWConfig(
+            hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
+            div_damp_2=nu2,
+            div_damp_4=nu4,
+            time_integrator="ssp45",
+            use_limiter=True,
+            use_conservation_fixer=True,
+            fix_mass=True,
+            fix_energy=False,
+        )
+    else:
+        cfg = _SWConfig(
+            hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
+            div_damp_2=nu2,
+            div_damp_4=nu4,
+            time_integrator="ssp45",
+            use_conservation_fixer=True,
+            fix_mass=True,
+            fix_energy=False,
+        )
+    model = _SWModel(grid, cfg)
 
     mean_series = _series_init(["mean_wind_speed", "mean_height", "mean_vorticity"])
     cons_series = _series_init(["mass", "energy", "enstrophy"])
@@ -1027,7 +1060,8 @@ def _run_fv_cubesphere(
         _save_conservation_timeseries(tgt_dir, tgt_name, cons_series, dt)
         _save_slab_timeseries(tgt_dir, tgt_name, slab_values)
         with open(tgt_dir / "results.txt", "w") as f:
-            f.write(f"case: fv_cubesphere_{case}\n")
+            f.write(f"case: {variant_tag}_{case}\n")
+            f.write(f"fv_variant: {variant_tag}\n")
             f.write(f"resolution: C{n}\n")
             f.write(f"duration_days: {days}\n")
             f.write(f"dt: {dt}\n")
@@ -1051,7 +1085,7 @@ def _run_fv_cubesphere(
             f.write(f"final_vort_rms: {slab_values[-1]['vor_rms']:.8e}\n")
 
     return {
-        "case": f"fv_cubesphere_{case}",
+        "case": f"{variant_tag}_{case}",
         "stable": stable,
         "wall_time_s": wall,
         "n_steps": n_steps,
@@ -1076,6 +1110,13 @@ def main():
     parser.add_argument("--dt-spec", type=float, default=120.0)
     parser.add_argument("--mean-every-fv", type=int, default=24, help="Record FV means/diagnostics every N steps.")
     parser.add_argument("--mean-every-spec", type=int, default=60, help="Record spectral means/diagnostics every N steps.")
+    parser.add_argument(
+        "--fv-variant",
+        type=str,
+        default="both",
+        choices=("agrid", "cdgrid", "both"),
+        help="Finite-volume cubed-sphere branch to run.",
+    )
     parser.add_argument(
         "--projection",
         type=str,
@@ -1116,6 +1157,16 @@ def main():
             "06_cubesphere_fv_williamson5",
         ),
     }
+    dir_map_cd = {
+        "williamson2": (
+            "07_latlon_fv_cdgrid_williamson2",
+            "08_cubesphere_fv_cdgrid_williamson2",
+        ),
+        "williamson5": (
+            "09_latlon_fv_cdgrid_williamson5",
+            "10_cubesphere_fv_cdgrid_williamson5",
+        ),
+    }
 
     for idx, case in enumerate(case_list, start=1):
         print(f"\n[{idx}/{len(case_list)}] Running {case} ...")
@@ -1131,17 +1182,25 @@ def main():
             draw_coastlines=args.coastlines,
         )
 
-        summary[f"finite_volume_{case}"] = _run_fv_cubesphere(
-            out_root / fv_ll_dir,
-            out_root / fv_cube_dir,
-            n=args.cube_resolution,
-            days=args.days,
-            dt=args.dt_fv,
-            mean_every=args.mean_every_fv,
-            case=case,
-            projection=args.projection,
-            draw_coastlines=args.coastlines,
-        )
+        fv_variants = ["agrid", "cdgrid"] if args.fv_variant == "both" else [args.fv_variant]
+        for fv_variant in fv_variants:
+            if fv_variant == "agrid":
+                ll_dir = fv_ll_dir
+                cube_dir = fv_cube_dir
+            else:
+                ll_dir, cube_dir = dir_map_cd[case]
+            summary[f"finite_volume_{fv_variant}_{case}"] = _run_fv_cubesphere(
+                out_root / ll_dir,
+                out_root / cube_dir,
+                n=args.cube_resolution,
+                days=args.days,
+                dt=args.dt_fv,
+                mean_every=args.mean_every_fv,
+                case=case,
+                projection=args.projection,
+                draw_coastlines=args.coastlines,
+                fv_variant=fv_variant,
+            )
 
     wall = time.time() - t0
     summary["wall_time_s_total"] = wall
@@ -1154,6 +1213,7 @@ def main():
         "dt_spec": args.dt_spec,
         "mean_every_fv": args.mean_every_fv,
         "mean_every_spec": args.mean_every_spec,
+        "fv_variant": args.fv_variant,
         "projection": args.projection,
         "coastlines": bool(args.coastlines),
     }

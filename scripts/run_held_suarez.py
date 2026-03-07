@@ -35,10 +35,7 @@ import matplotlib.pyplot as plt
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate, pressure_from_sigma
 from legoesm.core.operators import global_integral
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationModel,
-    PrimitiveEquationConfig,
-)
+from legoesm.core.conservation import compute_hydrostatic_energy
 from legoesm.atmosphere.physics.held_suarez import (
     held_suarez_forcing,
     held_suarez_init,
@@ -79,6 +76,13 @@ def main():
                         help="Hyperdiffusion coefficient (default: auto-scaled)")
     parser.add_argument("--output", "-o", type=str, default=None,
                         help="Output directory")
+    parser.add_argument(
+        "--fv-grid",
+        type=str,
+        default="a_grid",
+        choices=("a_grid", "cd_grid"),
+        help="Finite-volume branch: a_grid or cd_grid.",
+    )
     args = parser.parse_args()
 
     N_GRID = args.resolution
@@ -92,17 +96,18 @@ def main():
     HYPERDIFF_COEFF = args.hyperdiff or compute_hyperdiff_coeff(N_GRID)
 
     # Output directory
-    OUTPUT_DIR = Path(args.output or f"results/held_suarez_C{N_GRID}_L{N_LEVELS}")
+    OUTPUT_DIR = Path(args.output or f"results/held_suarez_C{N_GRID}_L{N_LEVELS}_{args.fv_grid}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
-    print("Held-Suarez Benchmark: Hydrostatic PE on Cubed-Sphere")
+    print("Held-Suarez Benchmark: Hydrostatic PE on Cubed-Sphere (FV)")
     print("=" * 70)
     print(f"Resolution: C{N_GRID} ({N_GRID}x{N_GRID} per face)")
     print(f"Levels: {N_LEVELS}")
     print(f"Time step: {DT:.0f} s")
     print(f"Duration: {N_DAYS} days")
     print(f"Hyperdiffusion: {HYPERDIFF_COEFF:.2e}")
+    print(f"FV branch: {args.fv_grid}")
     print()
 
     # --- Setup ---
@@ -113,13 +118,51 @@ def main():
     print(f"  Sigma levels: {N_LEVELS} (uniform)")
     print(f"  Sigma range: [{float(sigma.sigma_half[0]):.3f}, {float(sigma.sigma_half[-1]):.3f}]")
 
-    config = PrimitiveEquationConfig(
-        hyperdiff_coeff=HYPERDIFF_COEFF,
-        hyperdiff_ps_coeff=HYPERDIFF_COEFF,
-        use_conservation_fixer=True,
-        fix_mass=True,
-    )
-    model = PrimitiveEquationModel(grid, sigma, config)
+    from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
+    nu2, nu4 = default_div_damp_coeffs(grid, dt=DT)
+
+    if args.fv_grid == "a_grid":
+        from legoesm.atmosphere.dynamics.primitive_eq_fv import (
+            FVPrimitiveEquationModel,
+            FVPrimitiveEquationConfig,
+        )
+        config = FVPrimitiveEquationConfig(
+            hyperdiff_coeff=HYPERDIFF_COEFF,
+            hyperdiff_ps_coeff=HYPERDIFF_COEFF,
+            div_damp_2=nu2,
+            div_damp_4=nu4,
+            use_conservation_fixer=True,
+            fix_mass=True,
+            time_integrator="ssp45",
+            use_limiter=True,
+        )
+        model = FVPrimitiveEquationModel(grid, sigma, config)
+        branch_label = "FV A-grid"
+    else:
+        from legoesm.atmosphere.dynamics.primitive_eq_cgrid import (
+            CGPrimitiveEquationModel,
+            CGPrimitiveEquationConfig,
+        )
+        edge_uv = 0.10 if N_GRID >= 24 else 0.0
+        edge_T = 0.08 if N_GRID >= 24 else 0.0
+        edge_ps = 0.15 if N_GRID >= 24 else 0.0
+        edge_wd = 2 if N_GRID >= 24 else 1
+        config = CGPrimitiveEquationConfig(
+            hyperdiff_coeff=HYPERDIFF_COEFF,
+            hyperdiff_ps_coeff=HYPERDIFF_COEFF,
+            div_damp_2=nu2,
+            div_damp_4=nu4,
+            use_conservation_fixer=True,
+            fix_mass=True,
+            time_integrator="ssp45",
+            edge_blend_uv=edge_uv,
+            edge_blend_T=edge_T,
+            edge_blend_p_s=edge_ps,
+            edge_blend_width=edge_wd,
+        )
+        model = CGPrimitiveEquationModel(grid, sigma, config)
+        branch_label = "FV C-D-grid"
+    print(f"  Branch: {branch_label}")
     state = held_suarez_init(grid, sigma)
     print(f"  Initial T: {float(jnp.mean(state.T.data)):.1f} K")
     print(f"  Initial p_s: {float(jnp.mean(state.p_s.data)):.0f} Pa")
@@ -136,8 +179,10 @@ def main():
     # Storage for diagnostics
     diag_times = []
     diag_mass = []
+    diag_energy = []
     diag_max_wind = []
     diag_mean_T = []
+    diag_mean_ps = []
 
     # Storage for snapshots
     snap_days_target = sorted(set([0] + list(range(SNAP_INTERVAL, N_DAYS + 1, SNAP_INTERVAL)) + [N_DAYS]))
@@ -148,6 +193,7 @@ def main():
     snapshots[0] = jax.tree.map(lambda x: np.array(x), state)
 
     mass_initial = float(global_integral(state.p_s, grid))
+    energy_initial = float(compute_hydrostatic_energy(state, grid, sigma)["total_energy"])
     t_start = time.time()
     last_print = t_start
 
@@ -173,13 +219,17 @@ def main():
         if (step + 1) % diag_every == 0:
             day = (step + 1) * DT / 86400.0
             mass = float(global_integral(state.p_s, grid))
+            energy = float(compute_hydrostatic_energy(state, grid, sigma)["total_energy"])
             max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
             mean_T = float(jnp.mean(state.T.data))
+            mean_ps = float(jnp.mean(state.p_s.data))
 
             diag_times.append(day)
             diag_mass.append(mass)
+            diag_energy.append(energy)
             diag_max_wind.append(max_wind)
             diag_mean_T.append(mean_T)
+            diag_mean_ps.append(mean_ps)
 
             now = time.time()
             if now - last_print > 30:  # Print progress every 30 seconds
@@ -187,11 +237,13 @@ def main():
                 steps_per_sec = (step + 1) / elapsed
                 eta = (n_steps_total - step - 1) / steps_per_sec
                 mass_drift = (mass - mass_initial) / mass_initial
+                energy_drift = (energy - energy_initial) / max(abs(energy_initial), 1.0e-30)
                 print(
                     f"  Day {day:7.1f}/{N_DAYS} | "
                     f"max |v|={max_wind:6.1f} m/s | "
                     f"<T>={mean_T:6.1f} K | "
                     f"mass drift={mass_drift:+.2e} | "
+                    f"energy drift={energy_drift:+.2e} | "
                     f"{steps_per_sec:.0f} steps/s | "
                     f"ETA {eta/60:.0f} min"
                 )
@@ -208,8 +260,11 @@ def main():
 
     # Final diagnostics
     mass_final = float(global_integral(state.p_s, grid))
+    energy_final = float(compute_hydrostatic_energy(state, grid, sigma)["total_energy"])
     mass_drift = (mass_final - mass_initial) / mass_initial
+    energy_drift = (energy_final - energy_initial) / max(abs(energy_initial), 1.0e-30)
     print(f"  Mass drift: {mass_drift:+.2e} (relative)")
+    print(f"  Energy drift: {energy_drift:+.2e} (relative)")
     print(f"  Max wind: {float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2))):.1f} m/s")
     print(f"  Mean T: {float(jnp.mean(state.T.data)):.1f} K")
 
@@ -220,11 +275,13 @@ def main():
 
     diag_times = np.array(diag_times)
     diag_mass = np.array(diag_mass)
+    diag_energy = np.array(diag_energy)
     diag_max_wind = np.array(diag_max_wind)
     diag_mean_T = np.array(diag_mean_T)
+    diag_mean_ps = np.array(diag_mean_ps)
 
     # --- 1. Conservation time series ---
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+    fig, axes = plt.subplots(4, 1, figsize=(12, 13), sharex=True)
 
     mass_drift_ts = (diag_mass - mass_initial) / mass_initial
     axes[0].plot(diag_times, mass_drift_ts)
@@ -232,21 +289,67 @@ def main():
     axes[0].set_title("Global mass conservation")
     axes[0].grid(True)
 
-    axes[1].plot(diag_times, diag_max_wind)
-    axes[1].set_ylabel("Max |v| [m/s]")
-    axes[1].set_title("Maximum wind speed")
+    energy_drift_ts = (diag_energy - energy_initial) / max(abs(energy_initial), 1.0e-30)
+    axes[1].plot(diag_times, energy_drift_ts)
+    axes[1].set_ylabel("Energy drift (relative)")
+    axes[1].set_title("Total energy conservation")
     axes[1].grid(True)
 
-    axes[2].plot(diag_times, diag_mean_T)
-    axes[2].set_xlabel("Time [days]")
-    axes[2].set_ylabel("Mean T [K]")
-    axes[2].set_title("Global mean temperature")
+    axes[2].plot(diag_times, diag_max_wind)
+    axes[2].set_ylabel("Max |v| [m/s]")
+    axes[2].set_title("Maximum wind speed")
     axes[2].grid(True)
+
+    axes[3].plot(diag_times, diag_mean_T)
+    axes[3].set_xlabel("Time [days]")
+    axes[3].set_ylabel("Mean T [K]")
+    axes[3].set_title("Global mean temperature")
+    axes[3].grid(True)
+
+    with open(OUTPUT_DIR / "conservation_timeseries.csv", "w") as f:
+        f.write("time_days,mass,energy,max_wind,mean_T,mean_p_s,mass_drift_rel,energy_drift_rel\n")
+        for i in range(diag_times.size):
+            f.write(
+                f"{diag_times[i]:.8f},{diag_mass[i]:.12e},{diag_energy[i]:.12e},"
+                f"{diag_max_wind[i]:.12e},{diag_mean_T[i]:.12e},{diag_mean_ps[i]:.12e},"
+                f"{mass_drift_ts[i]:.12e},{energy_drift_ts[i]:.12e}\n"
+            )
 
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "conservation_timeseries.png", dpi=150)
     plt.close()
     print("  Saved conservation_timeseries.png")
+
+    # --- 1b. Slab/global mean time series ---
+    fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
+    axes[0].plot(diag_times, diag_mean_ps, lw=1.8)
+    axes[0].set_ylabel("Mean p_s [Pa]")
+    axes[0].set_title("Global mean surface pressure")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(diag_times, diag_mean_T, lw=1.8, color="tab:red")
+    axes[1].set_ylabel("Mean T [K]")
+    axes[1].set_title("Global mean temperature")
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(diag_times, diag_max_wind, lw=1.8, color="tab:blue")
+    axes[2].set_ylabel("Max |v| [m/s]")
+    axes[2].set_xlabel("Time [days]")
+    axes[2].set_title("Max wind speed")
+    axes[2].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "slab_timeseries.png", dpi=150)
+    plt.close()
+    print("  Saved slab_timeseries.png")
+
+    with open(OUTPUT_DIR / "slab_timeseries.csv", "w") as f:
+        f.write("time_days,mean_p_s,mean_T,max_wind\n")
+        for i in range(diag_times.size):
+            f.write(
+                f"{diag_times[i]:.8f},{diag_mean_ps[i]:.12e},"
+                f"{diag_mean_T[i]:.12e},{diag_max_wind[i]:.12e}\n"
+            )
 
     # --- 2. Zonal mean diagnostics ---
     final_state = jax.tree.map(lambda x: np.array(x), state)
@@ -351,6 +454,19 @@ def main():
     plt.savefig(OUTPUT_DIR / "equatorial_T_profile.png", dpi=150)
     plt.close()
     print("  Saved equatorial_T_profile.png")
+
+    with open(OUTPUT_DIR / "results.txt", "w") as f:
+        f.write(f"fv_grid: {args.fv_grid}\n")
+        f.write(f"branch: {branch_label}\n")
+        f.write(f"resolution: C{N_GRID}\n")
+        f.write(f"levels: {N_LEVELS}\n")
+        f.write(f"dt_s: {DT:.6f}\n")
+        f.write(f"days: {N_DAYS}\n")
+        f.write(f"mass_drift_rel: {mass_drift:.12e}\n")
+        f.write(f"energy_drift_rel: {energy_drift:.12e}\n")
+        f.write(f"final_max_wind_ms: {float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2))):.12e}\n")
+        f.write(f"final_mean_T_K: {float(jnp.mean(state.T.data)):.12e}\n")
+        f.write(f"wall_time_s: {elapsed:.2f}\n")
 
     print(f"\nAll outputs saved to {OUTPUT_DIR}/")
     print("Done!")
