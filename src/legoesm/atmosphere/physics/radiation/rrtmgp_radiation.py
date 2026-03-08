@@ -187,7 +187,7 @@ def rrtmgp_radiation(
 
     # Compute molecules per area (centered difference preserves shape via roll)
     dp = kernel_ops.centered_difference(p_3d, dim=2)
-    mol_m_air = (rrtmgp_constants.DRY_AIR_MOL_MASS
+    mol_m_air = (rrtmgp_constants.DRY_AIR_MOL_MASS * (1.0 - h2o_vmr)
                  + rrtmgp_constants.WATER_MOL_MASS * h2o_vmr)
     molecules = -(dp / rrtmgp_constants.G) * rrtmgp_constants.AVOGADRO / mol_m_air
 
