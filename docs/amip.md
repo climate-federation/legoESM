@@ -12,7 +12,7 @@ The AMIP driver (`scripts/run_amip.py`) couples:
   - **Gray**: Two-stream (Frierson 2006) with moisture-dependent LW optical depth
   - **RRTMG**: RRTMGP correlated-k (Pincus et al. 2019) via bundled jax-rrtmgp
 - **Convection**: Simplified Betts-Miller (SBM)
-- **Boundary layer**: Bulk aerodynamic heat and moisture exchange
+- **Boundary layer**: Bulk aerodynamic heat and moisture exchange (constant coefficients default; MOST/COARE3/LY04 available via coupler `bulk_scheme`)
 - **Large-scale condensation**: Saturation adjustment with latent heating
 - **Friction**: Rayleigh drag (strong in BL, weak free-atmosphere)
 - **Surface**: Prescribed SST + SIC from NetCDF, blending surface temperature,
@@ -211,7 +211,7 @@ path given by `--output`) containing:
 | Gray radiation | **Active** | Frierson 2006, moist LW OD, seasonal solar |
 | RRTMG radiation | **Active** | Correlated-k, H2O+CO2+CH4+N2O+O3, clear-sky |
 | SBM convection | **Active** | Frierson 2007 |
-| BL exchange | **Active** | Bulk aerodynamic (heat + moisture) |
+| BL exchange | **Active** | Bulk aerodynamic (constant default); MOST/COARE3/LY04 available |
 | Large-scale condensation | **Active** | Saturation adjustment |
 | Rayleigh friction | **Active** | BL + free-atmosphere drag |
 | Checkpoint/restart | **Active** | NPZ-based, reproducible |
@@ -234,7 +234,9 @@ For a first run:
 - **Radiation cadence**: every step for gray; `--rad-update-steps 6` for RRTMG at C16
 
 The hydrostatic centered discretization is the most stable and well-tested
-path. Do not use the FV cubed-sphere path for AMIP unless explicitly validated.
+path. The FV cubed-sphere path has been validated for 365-day integrations at
+C16/L20 (LW_TOA ≈ 236 W/m², precip ≈ 4 mm/day). FC-Gram and C-grid variants
+are available but not yet validated for AMIP-length runs.
 
 ## CLI reference
 

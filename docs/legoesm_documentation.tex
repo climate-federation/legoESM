@@ -41,7 +41,7 @@
 \section{Introduction}
 %=============================================================================
 
-legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, and sea-ice components on the sphere, with nine dynamical cores and over thirty physics parameterisations.
+legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, and sea-ice components on the sphere, with 25 dynamical cores spanning five discretisation families (centred, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and over thirty physics parameterisations.
 
 \paragraph{Design principles.}
 \begin{itemize}[nosep]
@@ -335,6 +335,33 @@ where $h_x,h_y$ are the edge metric factors.
 When topography $h_s$ is present, the scheme reconstructs the free surface $\eta=h+h_s$ instead of $h$.  The fluid depth at each edge is recovered as $h_L=\max(\eta_L-h_{s,\mathrm{edge}},0)$, ensuring zero spurious flux for a lake-at-rest state (Audusse et al., 2004).
 
 %=============================================================================
+\section{FC-Gram Spectral Operators}
+%=============================================================================
+
+The Fourier Continuation (FC-Gram) method extends periodic Fourier spectral methods to non-periodic domains by appending a smooth continuation interval.  On each cubed-sphere face, the 1D function $f(x)$ on $[0,1]$ is extended to a periodic function on $[0,1+d]$ via a Gram polynomial basis in the continuation region.
+
+\subsection{Extension operator}
+Given $f$ sampled at $n$ equispaced points, the extension $f_{\mathrm{ext}}$ is constructed as
+\begin{equation}
+  f_{\mathrm{ext}}(x) = \sum_{k=0}^{K-1}\alpha_k\,G_k(x), \qquad x\in[1,\,1+d],
+\end{equation}
+where $G_k$ are orthogonal Gram polynomials and the coefficients $\alpha_k$ are chosen so that $f_{\mathrm{ext}}$ smoothly matches $f$ at both endpoints, yielding a globally smooth periodic extension.
+
+\subsection{Spectral differentiation}
+On the extended periodic domain of length $L_{\mathrm{ext}}=1+d$, differentiation is performed via FFT:
+\begin{equation}
+  f'_j = \mathrm{IFFT}\bigl[i\,k\,\mathrm{FFT}[f_{\mathrm{ext}}]\bigr]\bigg|_{x_j\in[0,1]},
+\end{equation}
+where $k$ are the Fourier wavenumbers on the extended domain.  This achieves spectral accuracy in the interior with controlled Gibbs artifacts at face boundaries.
+
+\subsection{C-grid-style divergence damping}
+The FC-Gram variants with divergence damping add 2nd and 4th order selective dissipation of divergent modes:
+\begin{equation}
+  D_{\mathrm{div}} = -\nu_2\,\nabla(\nabla\!\cdot\!\bm v) - \nu_4\,\nabla(\nabla^2(\nabla\!\cdot\!\bm v)),
+\end{equation}
+applied to the momentum equations.  This selectively damps gravity-wave modes while preserving rotational (balanced) flow, mirroring the divergence damping strategy used in FV3 on its C-D grid.
+
+%=============================================================================
 \section{Atmospheric Dynamics}
 %=============================================================================
 
@@ -589,15 +616,70 @@ The backward-Euler system $-a_k\,\varphi_{k-1}+b_k\,\varphi_k-c_k\,\varphi_{k+1}
 \end{equation}
 
 %-----------------------------------------------------------------------------
-\subsection{Surface Fluxes (Bulk Aerodynamic)}
+\subsection{Surface Fluxes}
 %-----------------------------------------------------------------------------
 
+Three bulk flux schemes are available, selected per tile.
+
+\subsubsection{Constant coefficients (default)}
 \begin{align}
   \tau_x &= -\rho\,C_D\,|\bm V|\,u, \qquad \tau_y = -\rho\,C_D\,|\bm V|\,v, \\
   \mathrm{SH} &= \rho\,\cpd\,C_H\,|\bm V|\,(T_s-T_a), \\
-  \mathrm{LH} &= \rho\,\Lv\,C_H\,|\bm V|\,(q_s-q_a),
+  \mathrm{LH} &= \rho\,\Lv\,C_E\,|\bm V|\,(q_s-q_a),
 \end{align}
-with $C_D=C_H=1.5\times10^{-3}$ and $|\bm V|=\sqrt{u^2+v^2+10^{-4}}$.
+with $C_D=C_H=C_E=1.5\times10^{-3}$ and $|\bm V|=\sqrt{u^2+v^2+10^{-4}}$.
+
+\subsubsection{Monin--Obukhov Similarity Theory (MOST)}
+
+Stability-dependent transfer coefficients via iterative Obukhov length computation (Businger--Dyer profiles).
+
+\paragraph{Obukhov length.}
+\begin{equation}
+  L = -\frac{u_*^3\,T_v}{\kappa_{\mathrm{vK}}\,g\,(\theta_*+0.61\,T_a\,q_*)},
+\end{equation}
+where $u_*$, $\theta_*$, $q_*$ are friction velocity, temperature scale, and moisture scale.
+
+\paragraph{Stability parameter.}  $\zeta=z_{\mathrm{ref}}/L$.
+
+\paragraph{Businger--Dyer stability functions.}
+\begin{equation}
+  \psi_m(\zeta) = \begin{cases}
+    2\ln\!\bigl(\frac{1+x}{2}\bigr)+\ln\!\bigl(\frac{1+x^2}{2}\bigr)-2\arctan x+\frac{\pi}{2}, & \zeta<0, \quad x=(1-16\zeta)^{1/4}, \\[4pt]
+    -5\zeta, & \zeta\ge 0,
+  \end{cases}
+\end{equation}
+\begin{equation}
+  \psi_h(\zeta) = \begin{cases}
+    2\ln\!\bigl(\frac{1+y}{2}\bigr), & \zeta<0, \quad y=(1-16\zeta)^{1/2}, \\[4pt]
+    -5\zeta, & \zeta\ge 0.
+  \end{cases}
+\end{equation}
+
+\paragraph{Transfer coefficients.}
+\begin{equation}
+  C_D = \Bigl[\frac{\kappa_{\mathrm{vK}}}{\ln(z/z_0)-\psi_m(\zeta)}\Bigr]^2, \qquad
+  C_H = \frac{\kappa_{\mathrm{vK}}^2}{[\ln(z/z_0)-\psi_m(\zeta)][\ln(z/z_{0t})-\psi_h(\zeta)]}.
+\end{equation}
+
+\paragraph{Iterative solver.}
+The system $u_*,\theta_*,q_*,z_0,z_{0t},z_{0q},L$ is solved iteratively (default 5 iterations) using \texttt{jax.lax.fori\_loop} for full JAX differentiability.
+
+\subsubsection{COARE~3.0 roughness (Fairall et al.\ 2003)}
+
+Over ocean, roughness lengths are updated each iteration:
+\begin{equation}
+  z_0 = \alpha_c\,\frac{u_*^2}{g}+0.11\,\frac{\nu}{u_*}, \qquad
+  z_{0t} = \min\!\bigl(1.15\times10^{-4},\;5.5\times10^{-5}\,\mathrm{Re}_*^{-0.6}\bigr),
+\end{equation}
+where $\alpha_c=0.011$ is the Charnock parameter and $\mathrm{Re}_*=u_*\,z_0/\nu$.
+
+\subsubsection{Large \& Yeager (2004) roughness}
+
+Empirical neutral drag coefficient as a function of neutral 10-m wind speed $U_{10N}$:
+\begin{equation}
+  C_{DN}\times10^3 = \frac{2.7}{U_{10N}}+0.142+0.0764\,U_{10N},
+\end{equation}
+with roughness recovered as $z_0=10/\exp(\kappa_{\mathrm{vK}}/\sqrt{C_{DN}})$.  Stanton and Dalton numbers follow the stability-corrected LY04 parameterisation.
 
 %=============================================================================
 \section{Ocean Dynamics}
@@ -830,9 +912,17 @@ A fast and stable well-balanced scheme with hydrostatic reconstruction for shall
 An efficient, one-level, primitive-equation spectral model.
 \textit{Mon.\ Wea.\ Rev.}, \textbf{100}, 683--689.
 
+\item[Businger, J.A., J.C.\ Wyngaard, Y.\ Izumi, and E.F.\ Bradley (1971)]
+Flux-profile relationships in the atmospheric surface layer.
+\textit{J.\ Atmos.\ Sci.}, \textbf{28}, 181--189.
+
 \item[Colella, P.\ and P.R.\ Woodward (1984)]
 The Piecewise Parabolic Method (PPM) for gas-dynamical simulations.
 \textit{J.\ Comput.\ Phys.}, \textbf{54}, 174--201.
+
+\item[Fairall, C.W., E.F.\ Bradley, J.E.\ Hare, A.A.\ Grachev, and J.B.\ Edson (2003)]
+Bulk parameterization of air--sea fluxes: Updates and verification for the COARE algorithm.
+\textit{J.\ Climate}, \textbf{16}, 571--591.
 
 \item[Frierson, D.M.W., I.M.\ Held, and P.\ Zurita-Gotor (2006)]
 A gray-radiation aquaplanet moist GCM. Part~I: Static stability and eddy scale.
@@ -849,6 +939,10 @@ Efficient implementation of weighted ENO schemes.
 \item[Held, I.M.\ and M.J.\ Suarez (1994)]
 A proposal for the intercomparison of the dynamical cores of atmospheric general circulation models.
 \textit{Bull.\ Amer.\ Meteor.\ Soc.}, \textbf{75}, 1825--1830.
+
+\item[Large, W.G.\ and S.G.\ Yeager (2004)]
+Diurnal to decadal global forcing for ocean and sea-ice models: The data sets and flux climatologies.
+\textit{NCAR Technical Note}, NCAR/TN-460+STR.
 
 \item[Louis, J.-F.\ (1979)]
 A parametric model of vertical eddy fluxes in the atmosphere.

@@ -9,6 +9,14 @@ output/
 .ruff_cache/
 .mypy_cache/
 .DS_Store
+Icon?
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
 
 # Data and results artifacts
 *.zarr

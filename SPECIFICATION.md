@@ -1,10 +1,28 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.1
+## Technical Specification v3.2
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-07 (updated from v3.0, 2026-03-06)
+**Date**: 2026-03-08 (updated from v3.1, 2026-03-07)
+
+---
+
+### Changelog (v3.2, 2026-03-08)
+
+**New capabilities:**
+
+1. **Monin-Obukhov bulk flux module** (`coupler/bulk_flux.py`): Unified stability-dependent surface flux computation shared by all surface tiles (ocean, land, sea ice, lake). Three schemes: fixed-roughness MOST, COARE 3.0 (Fairall et al. 2003) with Charnock + smooth-flow roughness, and Large & Yeager 2004 (CORE) with empirical neutral drag. Iterative Obukhov length solver via `jax.lax.fori_loop` is fully JAX-differentiable. Businger-Dyer stability functions ψ_m, ψ_h for both unstable and stable regimes. See §4.5.3.
+
+2. **FC-Gram dynamical cores** (6 models): High-order spectral-like operators on cubed-sphere via Fourier Continuation (FC-Gram) method. Three equation sets (SW, PE, CE) with optional C-grid-style divergence damping variants. Includes ocean PE variant. See §4.1.7.
+
+3. **C-grid dynamical cores** (4 models): True C-grid staggering on lat-lon (exact PGF, PPM mass transport at interfaces) and A-grid cubed-sphere with divergence damping (2nd + 4th order) for SW, PE, and CE. See §4.1.8.
+
+4. **External forcing framework** (`forcing/external.py`): Modular configuration for greenhouse gases (CO₂, CH₄, N₂O), ozone, aerosols, and solar irradiance with constant or file-based sources. See §4.6.3.
+
+5. **365-day AMIP FV cubed-sphere simulation**: C16/L20 with gray radiation, SBM convection, PPM mass transport. LW_TOA ≈ 236 W/m², precip ≈ 4 mm/day. Checkpoint/restart support via NPZ format. See §4.6.5.
+
+6. **Repository cleanup**: Moved 12 test/validation scripts from `scripts/` to `tests/validation/`; removed 10 dead debug/diagnostic scripts; cleaned git-tracked build artifacts (.DS_Store, LaTeX aux files).
 
 ---
 
@@ -14,11 +32,11 @@
 
 1. **Spectral PE pressure gradient force** (`spectral_pe.py`, `semi_implicit.py`): Replaced the Bourke (1972) E-variable formulation `E = K + Φ + R_d·T·lnp_s` with the mathematically correct PGF `−∇²(K+Φ) − ∇·(R_d·T·∇lnp_s)`. The E-variable form introduces a spurious `−R_d·lnp_s₀·∇²(T')` coupling that causes exponential instability with growth rate ~10⁻³/s. Eigenvalue analysis confirms the corrected form is neutrally stable (purely imaginary eigenvalues). The semi-implicit Gamma matrix was updated to remove the corresponding `lnp_s₀·I` diagonal. See §4.1.5.
 
-2. **SBM convection cloud-layer masking** (`convection/sbm.py`): Added `cloud_mask = (T_moist ≥ T_env)` to restrict convective adjustment to conditionally unstable levels. Without masking, the scheme adjusted the entire column including the stable stratosphere, causing catastrophic cooling (~40 K/hr at model top). CAPE is now computed from the raw moist adiabat before the enthalpy-conserving Newton correction to avoid artificial triggering. See §4.1.9 (Convection).
+2. **SBM convection cloud-layer masking** (`convection/sbm.py`): Added `cloud_mask = (T_moist ≥ T_env)` to restrict convective adjustment to conditionally unstable levels. Without masking, the scheme adjusted the entire column including the stable stratosphere, causing catastrophic cooling (~40 K/hr at model top). CAPE is now computed from the raw moist adiabat before the enthalpy-conserving Newton correction to avoid artificial triggering. See §4.1.11 (Convection).
 
 **New capability:**
 
-3. **365-day AMIP spectral simulation** (`scripts/run_amip_spectral.py`): T21/L20 with gray radiation, SBM convection, BL exchange, condensation, Rayleigh friction, and analytical SST forcing. Completed with physically realistic diagnostics: LW_TOA ≈ 255 W/m², precip ≈ 4.6 mm/day, clear seasonal cycle. See §4.6.2.
+3. **365-day AMIP spectral simulation** (`scripts/run_amip_spectral.py`): T21/L20 with gray radiation, SBM convection, BL exchange, condensation, Rayleigh friction, and analytical SST forcing. Completed with physically realistic diagnostics: LW_TOA ≈ 255 W/m², precip ≈ 4.6 mm/day, clear seasonal cycle. See §4.6.4.
 
 ---
 
@@ -421,7 +439,21 @@ PPM operators adapted for lat-lon grid (same A-grid PPM approach as cubed-sphere
 
 **Critical A-grid lesson**: On A-grid lat-lon, PPM mass flux is energy-inconsistent with centered momentum operators. For shallow water, use centered divergence for mass (consistent with momentum). For PE/CE, use PPM for scalar transport (T, p_s, theta, rho, tracers) where feedback to momentum is indirect.
 
-#### 3.3.5 Halo Exchange
+#### 3.3.5 FC-Gram Operators (`core/operators_fc.py`, `operators_fc_3d.py`, `fc_gram.py`)
+
+Fourier Continuation (FC-Gram) spectral operators for high-order derivatives on the cubed-sphere A-grid. FC-Gram extends periodic Fourier methods to non-periodic domains by appending a smooth continuation, enabling spectral accuracy at face interiors with controlled Gibbs artifacts at boundaries.
+
+```python
+fc_gradient_x(field, grid, fc_basis)   # FC spectral d/dx
+fc_gradient_y(field, grid, fc_basis)   # FC spectral d/dy
+fc_divergence(u, v, grid, fc_basis)    # FC spectral divergence
+fc_curl_z(u, v, grid, fc_basis)        # FC spectral vorticity
+fc_laplacian(field, grid, fc_basis)    # FC spectral ∇²
+```
+
+The `fc_gram.py` module constructs the FC continuation basis (Gram polynomial extension) and precomputes differentiation matrices. 3D versions vmapped over vertical levels.
+
+#### 3.3.6 Halo Exchange
 
 **Cubed-Sphere** (`grids/halo.py`, `parallel/halo_exchange.py`):
 - `pad_halo(data)` → `(6, n+2, n+2)` — scalar halo padding
@@ -539,7 +571,9 @@ def smooth_clamp(x, lo, hi, sharpness=100.0):
 
 #### 4.1.1 Dynamical Cores Overview
 
-The atmosphere has **15+ implemented dynamical cores** spanning three discretization families (centered finite-difference, finite-volume PPM, pseudospectral), three grid types (cubed-sphere, lat-lon, Gaussian), three equation sets (shallow water, hydrostatic PE, non-hydrostatic compressible Euler), and learned (SFNO) variants.
+The atmosphere has **24+ implemented dynamical cores** spanning five discretization families (centered finite-difference, finite-volume PPM, pseudospectral, FC-Gram spectral, C-grid), three grid types (cubed-sphere, lat-lon, Gaussian), three equation sets (shallow water, hydrostatic PE, non-hydrostatic compressible Euler), and learned (SFNO) variants.
+
+**Centered + FV + Spectral + Learned (15 models):**
 
 | Model | Grid | Equations | Discretization | Time Integration |
 |-------|------|-----------|----------------|-----------------|
@@ -559,7 +593,27 @@ The atmosphere has **15+ implemented dynamical cores** spanning three discretiza
 | `FVCompressibleEulerLatLonModel` | Lat-lon | Non-hydrostatic (z*) | FV (PPM) | Split-explicit RK3 |
 | `SpectralCompressibleEulerModel` | Gaussian | Non-hydrostatic (vor-div-z*) | Spectral | Split-explicit RK3 |
 
-All models follow the same API: `state = model.step(state, dt)`, with `integrate()` and `integrate_scan()` (differentiable via `lax.scan`) methods.
+**FC-Gram spectral (6 models):**
+
+| Model | Grid | Equations | Discretization | Time Integration |
+|-------|------|-----------|----------------|-----------------|
+| `FCShallowWaterModel` | Cubed-sphere | Shallow water | FC-Gram | SSP-RK3 |
+| `FCCGShallowWaterModel` | Cubed-sphere | Shallow water | FC-Gram + div damping | SSP-RK3 |
+| `FCPrimitiveEquationModel` | Cubed-sphere | Hydrostatic PE (σ) | FC-Gram | SSP-RK3 |
+| `FCCGPrimitiveEquationModel` | Cubed-sphere | Hydrostatic PE (σ) | FC-Gram + div damping | SSP-RK3 |
+| `FCCompressibleEulerModel` | Cubed-sphere | Non-hydrostatic (z*) | FC-Gram | Split-explicit RK3 |
+| `FCCGCompressibleEulerModel` | Cubed-sphere | Non-hydrostatic (z*) | FC-Gram + div damping | Split-explicit RK3 |
+
+**C-grid / divergence-damped (4 models):**
+
+| Model | Grid | Equations | Discretization | Time Integration |
+|-------|------|-----------|----------------|-----------------|
+| `CGShallowWaterLatLonModel` | Lat-lon | Shallow water | True C-grid | SSP-RK3 |
+| `CGShallowWaterCubedModel` | Cubed-sphere | Shallow water | A-grid + div damping | SSP-RK3 |
+| `CGPrimitiveEquationModel` | Cubed-sphere | Hydrostatic PE (σ) | A-grid + div damping | SSP-RK3 |
+| `CGCompressibleEulerModel` | Cubed-sphere | Non-hydrostatic (z*) | A-grid + div damping | Split-explicit RK3 |
+
+All models follow the same API: `state = model.step(state, dt)`, with `integrate()` and `integrate_scan()` (differentiable via `lax.scan`) methods. The factory function `create_model(equations, discretization)` selects from 24 model variants via a two-axis key system.
 
 #### 4.1.2 Shallow Water Equations
 
@@ -641,15 +695,73 @@ Spherical Fourier Neural Operator models for SW and PE:
 - Trained via differentiable rollout loss
 - Drop-in replacement for physics-based dynamics via standard model API
 
-#### 4.1.7 Tracer Transport (`atmosphere/dynamics/tracer_transport.py`)
+#### 4.1.7 FC-Gram Variants
+
+Fourier Continuation (FC-Gram) spectral operators on the cubed-sphere grid, providing spectral-like accuracy for horizontal derivatives without requiring a Gaussian grid.
+
+**Core operators** (`core/operators_fc.py`, `operators_fc_3d.py`, `fc_gram.py`):
+- FC-Gram basis construction and extension matrices
+- High-order gradient, divergence, curl, and Laplacian via FC spectral differentiation
+- 3D versions vmapped over vertical levels
+
+**Models** (3 equation sets × 2 damping variants = 6 models):
+
+| Model | File | Description |
+|-------|------|-------------|
+| `FCShallowWaterModel` | `shallow_water_fc.py` | FC-Gram SWE on cubed-sphere |
+| `FCCGShallowWaterModel` | `shallow_water_fc_cgrid.py` | FC-Gram SWE + divergence damping |
+| `FCPrimitiveEquationModel` | `primitive_eq_fc.py` | FC-Gram hydrostatic PE |
+| `FCCGPrimitiveEquationModel` | `primitive_eq_fc_cgrid.py` | FC-Gram PE + divergence damping |
+| `FCCompressibleEulerModel` | `compressible_euler_fc.py` | FC-Gram non-hydrostatic CE |
+| `FCCGCompressibleEulerModel` | `compressible_euler_fc_cgrid.py` | FC-Gram CE + divergence damping |
+
+The FC-Gram + divergence damping variants combine FC spectral operators with C-grid-style 2nd + 4th order divergence damping to selectively dissipate divergent modes (barotropic gravity waves) while preserving rotational flow. Divergence damping is particularly valuable at cubed-sphere face boundaries where acoustic modes can alias.
+
+**Ocean variant**: `ocean_pe_fc_cgrid.py` — FC-Gram ocean PE with divergence damping.
+
+**Factory selection**: `discretization="fc_gram"` (pure FC) or `discretization="fc_gram_cgrid"` (FC + divergence damping).
+
+#### 4.1.8 C-Grid Variants
+
+Two C-grid strategies are implemented for different grid types:
+
+**True C-grid on lat-lon** (`shallow_water_cgrid_latlon.py`):
+- Full C-grid staggering: scalars (h) at cell centers, u at longitude interfaces, v at latitude interfaces
+- State: `CGShallowWaterState(h, uc, vc, h_s)` — uc shape `(n_lat, n_lon)`, vc shape `(n_lat+1, n_lon)`
+- Exact pressure gradient force (adjacent-cell differencing, no 2Δx blind spot)
+- PPM mass transport at staggered interfaces
+- 4-point Coriolis averaging (interpolation from centers to edges)
+- 2nd + 4th order divergence damping
+- Conversion utilities: `a_to_cgrid()`, `cgrid_to_a()` for interop with A-grid diagnostics
+- Helper `_ppm_face_values_1d(q_pad, n_out)`: reusable 1D PPM returning (a_L, a_R)
+
+**A-grid + divergence damping on cubed-sphere** (`shallow_water_cgrid.py`, `primitive_eq_cgrid.py`, `compressible_euler_cgrid.py`):
+- Uses A-grid storage (avoids staggered halo exchange complexity at face boundaries)
+- Adds FV3-style divergence damping (2nd + 4th order) to selectively dissipate divergent modes
+- PPM mass/scalar transport for conservation
+- Momentum remains vector-invariant (centered operators)
+- Compact inner ∇² for hyperdiffusion (resolves 2Δx checkerboard)
+
+| Model | File | Grid | Staggering |
+|-------|------|------|------------|
+| `CGShallowWaterLatLonModel` | `shallow_water_cgrid_latlon.py` | Lat-lon | True C-grid |
+| `CGShallowWaterCubedModel` | `shallow_water_cgrid.py` | Cubed-sphere | A-grid + div damp |
+| `CGPrimitiveEquationModel` | `primitive_eq_cgrid.py` | Cubed-sphere | A-grid + div damp |
+| `CGCompressibleEulerModel` | `compressible_euler_cgrid.py` | Cubed-sphere | A-grid + div damp |
+
+**Williamson TC2 results (48×96 lat-lon, 5 days)**: A-grid L2=3.8e-4, C-grid L2=3.2e-3. A-grid wins on balance preservation (centered div = exact discrete geostrophic balance). C-grid slightly better on TC5 KE conservation (17% vs 18%).
+
+**Factory selection**: `discretization="cgrid"` (cubed-sphere div-damped) or `grid="latlon"` with `discretization="cgrid"` (true C-grid lat-lon).
+
+#### 4.1.9 Tracer Transport (`atmosphere/dynamics/tracer_transport.py`)
 
 Passive tracer advection framework supporting arbitrary number of tracers.
 
-#### 4.1.8 Edge Blending (`atmosphere/dynamics/edge_blending.py`)
+#### 4.1.10 Edge Blending (`atmosphere/dynamics/edge_blending.py`)
 
 Utilities for smooth blending at cubed-sphere face boundaries.
 
-#### 4.1.9 Physics Parameterizations
+#### 4.1.11 Physics Parameterizations
 
 All physics parameterizations follow a **standard factory pattern**:
 
@@ -712,7 +824,7 @@ Supporting: `solar.py` — solar geometry (zenith angle, insolation).
 | **EDMF** | `edmf.py` | EDMF unified boundary layer framework |
 | **ML emulator** | `ml_emulator.py` | Neural network surrogate |
 
-Supporting: `surface_layer.py` (Monin-Obukhov surface layer), `vertical_diffusion.py` (vertical diffusion driver).
+Supporting: `surface_layer.py` (Monin-Obukhov surface layer with MOST/COARE3/LY04 dispatch), `vertical_diffusion.py` (vertical diffusion driver).
 
 ##### Gravity Wave Drag (`atmosphere/physics/gravity_wave_drag/`)
 
@@ -868,7 +980,7 @@ All ocean physics modules follow the same factory pattern as atmospheric physics
 |--------|------|-------------|
 | **Prescribed** | `prescribed.py` | Prescribed heat/freshwater fluxes |
 | **Restoring** | `restoring.py` | Relaxation to target T/S profiles |
-| **Bulk formulas** | `bulk_formulas.py` | Bulk aerodynamic flux computation |
+| **Bulk formulas** | `bulk_formulas.py` | Bulk aerodynamic flux computation (constant/MOST/COARE3/LY04) |
 
 ##### Bottom Drag (`ocean/physics/bottom_drag/`)
 
@@ -960,7 +1072,7 @@ Simple thermodynamic sea ice model:
 - Ice growth/melt based on surface energy balance
 - `step_sea_ice(state, forcing, config, dt) → SeaIceState`
 - State: `SeaIceState(ice_thickness, ice_concentration, ice_temperature, snow_on_ice)`
-- Config: `SeaIceConfig` with albedo, conductivity, salinity parameters
+- Config: `SeaIceConfig` with albedo, conductivity, salinity, `bulk_scheme` parameters
 
 #### 4.4.2 Future Phases
 
@@ -997,11 +1109,46 @@ make_coupler(config) → coupler_fn(atm_state, surface_states, dt) → coupled_t
 
 #### 4.5.2 Lake Model (`coupler/lake/`)
 
-Two-layer lake model for inland water bodies:
-- `LakeState(T_surface, T_deep, ice_fraction, ice_thickness)`
-- `step_lake(state, forcing, config, dt) → LakeState`
+Two-layer lake model (epilimnion + hypolimnion) for inland water bodies:
+- `LakeState(T_epi, T_hypo)` — epilimnion and hypolimnion temperatures
+- `LakeConfig` — layer depths, mixing coefficients, albedo, emissivity, bulk scheme selection
+- Epilimnion energy balance: `ρ·c·h_epi · dT_epi/dt = SW_net + LW_net - SH - LH - F_mix`
+- Wind-enhanced vertical mixing: `k_eff = k_mix · (1 + α · |V|)`
+- Supports constant or MOST bulk flux schemes
+- `step_lake(state, forcing, config, U_min, dt) → (LakeState, TileResponse)`
 
-#### 4.5.3 Conservation in Coupling
+#### 4.5.3 Bulk Flux Module (`coupler/bulk_flux.py`)
+
+Unified Monin-Obukhov Similarity Theory (MOST) surface flux computation shared by all surface tiles:
+
+```python
+compute_most_fluxes(
+    u_rel, v_rel, T_atm, q_atm, T_sfc, q_sfc, rho,
+    z_ref=10.0, z0_init=1e-4, scheme="coare3", n_iter=5, charnock=0.011,
+) → (tau_x, tau_y, shflx, lhflx, u_star)
+```
+
+**Three schemes:**
+
+| Scheme | Roughness | Use Case |
+|--------|-----------|----------|
+| `"most"` | Fixed z0 (from caller) | Land, sea ice, lake |
+| `"coare3"` | Charnock + smooth-flow: `z0 = α_c·u*²/g + 0.11·ν/u*` | Ocean (Fairall et al. 2003) |
+| `"large_yeager"` | Empirical C_DN(U_10N) | Ocean (Large & Yeager 2004 / CORE) |
+
+**Key features:**
+- Businger-Dyer stability functions ψ_m(ζ), ψ_h(ζ) for unstable (ζ<0) and stable (ζ>0) conditions
+- Iterative Obukhov length L solver via `jax.lax.fori_loop` (fully JAX-differentiable)
+- NaN-safe branching: `jnp.minimum(zeta, -1e-10)` / `jnp.maximum(zeta, 1e-10)` pattern for gradient safety
+- Python `if` on string `scheme` parameter resolved at JAX trace time (each scheme traces to a separate computational graph)
+
+**Integration across tiles:**
+- `CouplerConfig`, `SurfaceLayerConfig`, `BulkFormulaConfig`, `LandConfig`, `SeaIceConfig`, `LakeConfig` all have `bulk_scheme`, `z_ref`, `bulk_n_iter` fields
+- Ocean: wind relative to ocean surface current (`u_rel = u_atm - u_ocean`)
+- Land: moisture-adjusted surface humidity via soil moisture availability factor
+- Sea ice / Lake: saturated surface humidity at surface temperature
+
+#### 4.5.4 Conservation in Coupling
 
 The coupler enforces that fluxes are conservative:
 - Heat flux leaving atmosphere = heat flux entering ocean + land + lake + ice
@@ -1015,8 +1162,33 @@ The coupler enforces that fluxes are conservative:
 Prescribed SST and sea-ice boundary conditions for atmosphere-only experiments:
 - `AMIPForcing` — loads and interpolates monthly SST/sea-ice data
 - `AMIPForcingConfig` — paths, interpolation method, climatology settings
+- Supported presets: COBE-SST2, HadISST, custom NetCDF, analytical (Qobs-like)
 
-#### 4.6.2 AMIP Spectral Experiment (`scripts/run_amip_spectral.py`)
+#### 4.6.2 AMIP Experiment Configuration (`forcing/amip_config.py`)
+
+`AMIPExperimentConfig(NamedTuple)` — complete experiment parameter set:
+- Grid/integration: resolution, nlev, dt, start_day, days, diag_days, checkpoint_days
+- Forcing: dataset preset, forcing path, SST/SIC variable names and offsets
+- Physics: radiation scheme, hyperdiffusion, bulk aerodynamic coefficients, Rayleigh friction
+- RRTMG: CO₂, CH₄, N₂O concentrations
+- Surface: emissivity, albedo (ocean/ice), sea ice temperature
+
+Utilities: `config_to_dict()`, `config_from_dict()`, `save_config()`, `load_config()`, `save_checkpoint()`, `load_checkpoint()`.
+
+#### 4.6.3 External Forcing (`forcing/external.py`)
+
+Modular external forcing framework for prescribed boundary conditions:
+
+| Config | Parameters | Status |
+|--------|-----------|--------|
+| `GHGConfig` | CO₂ (348 ppmv), CH₄ (1650 ppbv), N₂O (306 ppbv) | Active (constant mode) |
+| `OzoneConfig` | Path, variable name | Placeholder (not yet implemented) |
+| `AerosolConfig` | Path, variable name | Placeholder (not yet implemented) |
+| `SolarConfig` | TSI (1360 W/m²) | Active (constant mode) |
+
+Each supports `source="constant"` (default) or `source="file"` (planned). Combined via `ExternalForcingConfig`.
+
+#### 4.6.4 AMIP Spectral Experiment (`scripts/run_amip_spectral.py`)
 
 Full AMIP simulation on the spectral PE dycore with operator-split physics:
 
@@ -1048,6 +1220,37 @@ Full AMIP simulation on the spectral PE dycore with operator-split physics:
 | Wall time | 42 min (CPU, Apple M-series) |
 
 Clear seasonal cycle in all diagnostics; zonal-mean structure with ITCZ precipitation, midlatitude jets, and realistic radiative balance.
+
+#### 4.6.5 AMIP FV Cubed-Sphere Experiment (`scripts/run_amip.py`)
+
+Full AMIP simulation on the FV cubed-sphere dycore with operator-split physics:
+
+| Parameter | Value |
+|-----------|-------|
+| **Dycore** | Hydrostatic PE on cubed-sphere (centered or FV) |
+| **Resolution** | C16/L20 (~500 km, 20 sigma levels) |
+| **Time step** | 600 s |
+| **Radiation** | Selectable: gray (Frierson 2006) or RRTMGP (correlated-k) |
+| **Convection** | SBM (Frierson 2007, τ_c = 2 hr) |
+| **BL exchange** | Bulk aerodynamic (C_H = C_E = 1.5e-3) |
+| **Condensation** | Saturation adjustment |
+| **Friction** | Rayleigh (BL drag + free-atmosphere) |
+| **Forcing** | COBE-SST2, HadISST, or analytical SST |
+
+**Key features:**
+- Checkpoint/restart via NPZ format with embedded JSON config
+- Radiation cadence: `--rad-update-steps N` (hold tendencies between calls)
+- RRTMGP with interactive H₂O and prescribed CO₂/CH₄/N₂O/O₃
+- `AMIPExperimentConfig` for full experiment reproducibility
+
+**Completed run (v3.2)**: 365-day C16/L20 simulation with gray radiation:
+
+| Diagnostic | Day 365 |
+|------------|---------|
+| `LW_TOA` | 236 W/m² |
+| `<Precip>` | 4 mm/day |
+
+See `docs/amip.md` for full CLI reference, radiation modes, and diagnostics.
 
 ### 4.7 Machine Learning Module (`ml/`)
 
@@ -1415,26 +1618,35 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
      /________________________\
 ```
 
-### 10.2 Test Suite (55+ test files)
+### 10.2 Test Suite (65+ test files, 1140+ tests)
 
 **Unit tests** (`tests/unit/`):
 
 | Category | Tests | Description |
 |----------|-------|-------------|
-| **Core** | `test_grid.py`, `test_latlon_grid.py`, `test_halo.py`, `test_operators.py`, `test_operators_fv.py`, `test_operators_latlon.py`, `test_field.py`, `test_conservation.py`, `test_smooth.py` | Grid creation, operator correctness, conservation fixers |
-| **Dynamics** | `test_shallow_water_fv.py`, `test_shallow_water_fv_latlon.py`, `test_primitive_eq.py`, `test_primitive_eq_fv_latlon.py`, `test_compressible_euler.py`, `test_spectral.py`, `test_spectral_pe.py`, `test_spectral_nh.py` | Model stepping, conservation, differentiability |
+| **Core** | `test_grid.py`, `test_latlon_grid.py`, `test_halo.py`, `test_operators.py`, `test_operators_fv.py`, `test_operators_latlon.py`, `test_operators_fc.py`, `test_operators_cgrid.py`, `test_cgrid_metrics.py`, `test_field.py`, `test_conservation.py`, `test_smooth.py` | Grid creation, operator correctness, conservation fixers |
+| **Dynamics** | `test_shallow_water_fv.py`, `test_shallow_water_fv_latlon.py`, `test_shallow_water_fc.py`, `test_shallow_water_cgrid.py`, `test_primitive_eq.py`, `test_primitive_eq_fv_latlon.py`, `test_primitive_eq_fc.py`, `test_compressible_euler.py`, `test_compressible_euler_fc.py`, `test_spectral.py`, `test_spectral_pe.py`, `test_spectral_nh.py`, `test_fc_gram.py` | Model stepping, conservation, differentiability |
 | **Physics** | `test_radiation.py`, `test_convection.py`, `test_turbulence.py`, `test_microphysics.py`, `test_gravity_wave_drag.py`, `test_combined_physics.py`, `test_all_physics_schemes.py` | Individual scheme correctness, factory pattern |
-| **Ocean** | `test_ocean.py`, `test_ocean_compatibility.py` | EOS, z-star, stepping, conservation |
+| **Ocean** | `test_ocean.py`, `test_ocean_compatibility.py`, `test_ocean_fc.py` | EOS, z-star, stepping, conservation |
 | **ML** | `test_sfno.py`, `test_sfno_sw.py`, `test_sfno_ocean.py` | SFNO architecture, channel packing |
-| **Coupled** | `test_coupler.py`, `test_atmosphere_invariants.py` | Tile blending, flux conservation |
+| **Coupled** | `test_coupler.py`, `test_atmosphere_invariants.py` | Tile blending, flux conservation, MOST bulk fluxes |
 | **Infrastructure** | `test_timestepping.py`, `test_thermodynamics.py`, `test_tracer_transport.py`, `test_backend_guard.py`, `test_backend_precision.py`, `test_parallel.py` | Time integrators, thermodynamics, parallelism |
-| **Validation** | `test_weatherbench.py`, `test_dcmip_transport.py`, `test_issue_fixes.py` | WeatherBench metrics, DCMIP transport |
+| **Validation** | `test_weatherbench.py`, `test_dcmip_transport.py`, `test_issue_fixes.py`, `test_amip_config.py` | WeatherBench metrics, DCMIP transport, AMIP config |
 
 **Integration tests** (`tests/integration/`):
 - `test_shallow_water.py` — Full SW integration
+- `test_amip_smoke.py` — AMIP simulation smoke test
+- `test_amip_rrtmg.py` — AMIP with RRTMGP radiation (8 tests)
+- `test_fv_cubesphere.py` — FV cubed-sphere integration
 
 **Distributed tests** (`tests/distributed/`):
 - `test_halo_mpi.py`, `test_coupler_mpi.py`, `test_ocean_mpi_conservation.py`
+
+**Validation tests** (`tests/validation/`):
+- Bulk flux differentiability and all-tile tests
+- Spectral PE stability analysis (E-variable, eigenvalues)
+- Held-Suarez fix verification
+- Dycore progression suite
 
 **Test cases** (`tests/test_cases/`):
 - Williamson TC2/TC5 on cubed-sphere and lat-lon
@@ -1554,8 +1766,14 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 
 **Delivered:**
 - 365-day AMIP spectral simulation (T21/L20, gray radiation, SBM convection, analytical SST forcing)
-- Seasonal cycle reproduced with physically realistic diagnostics (LW_TOA ≈ 255 W/m², precip ≈ 4.6 mm/day)
+- 365-day AMIP FV cubed-sphere simulation (C16/L20, gray radiation, SBM convection)
+- Seasonal cycle reproduced with physically realistic diagnostics
 - Critical bug fixes enabling year-long stability: E-variable PGF correction, SBM cloud-layer masking
+- Unified MOST bulk flux module across all surface tiles (ocean, land, sea ice, lake)
+- FC-Gram high-order dynamical cores (6 models) with optional divergence damping
+- C-grid variants: true C-grid on lat-lon, divergence-damped on cubed-sphere (4 models)
+- External forcing framework (GHG, ozone, aerosol, solar)
+- Checkpoint/restart for AMIP experiments
 
 **Remaining goals:**
 - Multi-century stability testing
@@ -1595,6 +1813,9 @@ legoESM/
 │   │   ├── operators_fv_3d.py              # 3D FV/PPM operators (cubed-sphere)
 │   │   ├── operators_fv_latlon.py          # 2D FV/PPM operators (lat-lon)
 │   │   ├── operators_fv_latlon_3d.py       # 3D FV/PPM operators (lat-lon)
+│   │   ├── operators_fc.py                 # 2D FC-Gram operators (cubed-sphere)
+│   │   ├── operators_fc_3d.py              # 3D FC-Gram operators (cubed-sphere)
+│   │   ├── fc_gram.py                      # FC-Gram basis and differentiation
 │   │   ├── conservation.py                 # Conservation fixers
 │   │   ├── smooth.py                       # Smooth approximations
 │   │   └── hardware.py                     # Device detection, backend info
@@ -1636,6 +1857,16 @@ legoESM/
 │   │   │   ├── spectral_nh.py             # Spectral NH (Gaussian)
 │   │   │   ├── sfno_sw.py                 # Learned SW (SFNO)
 │   │   │   ├── sfno_pe.py                 # Learned PE (SFNO)
+│   │   │   ├── shallow_water_fc.py        # FC-Gram SW (cubed-sphere)
+│   │   │   ├── shallow_water_fc_cgrid.py  # FC-Gram SW + div damping
+│   │   │   ├── primitive_eq_fc.py         # FC-Gram PE (cubed-sphere)
+│   │   │   ├── primitive_eq_fc_cgrid.py   # FC-Gram PE + div damping
+│   │   │   ├── compressible_euler_fc.py   # FC-Gram CE (cubed-sphere)
+│   │   │   ├── compressible_euler_fc_cgrid.py  # FC-Gram CE + div damping
+│   │   │   ├── shallow_water_cgrid_latlon.py   # True C-grid SW (lat-lon)
+│   │   │   ├── shallow_water_cgrid.py     # A-grid SW + div damping (cubed-sphere)
+│   │   │   ├── primitive_eq_cgrid.py      # A-grid PE + div damping (cubed-sphere)
+│   │   │   ├── compressible_euler_cgrid.py # A-grid CE + div damping (cubed-sphere)
 │   │   │   ├── tracer_transport.py        # Passive tracer advection
 │   │   │   └── edge_blending.py           # Face boundary blending
 │   │   │
@@ -1693,7 +1924,8 @@ legoESM/
 │   │   │   ├── ocean_pe.py                 # Baroclinic tendencies
 │   │   │   ├── barotropic.py               # Barotropic substeps
 │   │   │   ├── spectral_ocean_pe.py        # SpectralOceanModel
-│   │   │   └── sfno_ocean.py               # SFNOOceanModel
+│   │   │   ├── sfno_ocean.py               # SFNOOceanModel
+│   │   │   └── ocean_pe_fc_cgrid.py        # FC-Gram ocean PE + div damping
 │   │   └── physics/
 │   │       ├── combined.py                 # Ocean physics combiner
 │   │       ├── mixing.py                   # Mixing utilities
@@ -1718,6 +1950,7 @@ legoESM/
 │   │   ├── coupler.py                      # Main coupler engine
 │   │   ├── coupling_fields.py              # AtmToSurface, SurfaceToAtm, TileResponse
 │   │   ├── config.py                       # CouplerConfig, TileConfig
+│   │   ├── bulk_flux.py                    # MOST bulk flux (COARE3, LY04, fixed-z0)
 │   │   ├── tile_fractions.py               # TileFractions, blend_tiles
 │   │   ├── surface_exchange.py             # Atmosphere-surface fluxes
 │   │   ├── accumulator.py                  # Flux accumulation
@@ -1725,7 +1958,9 @@ legoESM/
 │   │       ├── state.py, config.py, two_layer_lake.py
 │   │
 │   ├── forcing/                            # External forcing
-│   │   └── amip.py                         # AMIP SST/sea-ice forcing
+│   │   ├── amip.py                         # AMIP SST/sea-ice forcing
+│   │   ├── amip_config.py                  # AMIPExperimentConfig, checkpoint I/O
+│   │   └── external.py                     # GHG, ozone, aerosol, solar configs
 │   │
 │   ├── ml/                                 # Machine learning
 │   │   ├── sfno.py                         # SFNO main class
@@ -1762,32 +1997,40 @@ legoESM/
 │
 ├── tests/
 │   ├── conftest.py                         # Shared fixtures
-│   ├── unit/                               # 40+ unit test files
-│   ├── integration/                        # Integration tests
+│   ├── unit/                               # 45+ unit test files
+│   ├── integration/                        # Integration tests (AMIP smoke, RRTMG, FV)
 │   ├── distributed/                        # MPI distributed tests
-│   ├── validation/                         # Validation suite
+│   ├── validation/                         # Validation suite (bulk flux, stability, dycores)
 │   └── test_cases/                         # Williamson, DCMIP, DCMIP-2025
 │
-├── scripts/                                # Research & validation scripts
-│   ├── run_dycore_tests.py                 # Comprehensive dycore suite
+├── scripts/                                # Research & experiment scripts
+│   ├── run_amip.py                         # AMIP simulation (gray/RRTMG, checkpoint)
+│   ├── run_amip_spectral.py                # AMIP spectral PE simulation
+│   ├── run_100day.py                       # 100-day atmospheric simulation
+│   ├── run_100day_spectral.py              # 100-day spectral simulation
 │   ├── run_held_suarez.py                  # Held-Suarez experiment
 │   ├── run_held_suarez_latlon.py           # Held-Suarez on lat-lon
+│   ├── run_held_suarez_spectral.py         # Held-Suarez spectral
+│   ├── run_dycore_tests.py                 # Comprehensive dycore suite
 │   ├── run_williamson_spectral.py          # Spectral Williamson tests
 │   ├── run_dcmip2025.py                    # DCMIP-2025 intercomparison
 │   ├── run_ocean_tests.py                  # Ocean validation
 │   ├── run_ocean_realistic.py              # Realistic ocean simulations
 │   ├── run_rce_25deg.py                    # Radiative-convective equilibrium
 │   ├── run_rce_slab_ocean.py               # RCE with slab ocean
-│   ├── run_100day.py                       # 100-day atmospheric simulation
-│   ├── run_amip.py                         # AMIP-style simulation
-│   └── ...                                 # 30+ total scripts
+│   ├── run_rce_slab_land.py                # RCE with slab land
+│   ├── run_parallel_validation.py          # Multi-device scaling validation
+│   ├── run_baroclinic_wave.py              # Baroclinic wave experiment
+│   └── ...                                 # 26 total run scripts
 │
 ├── config/                                 # Configuration templates
 │   ├── williamson_test2.yaml
 │   └── williamson_test5.yaml
 │
 ├── docs/                                   # Documentation
-│   └── REAL_HARDWARE_SCALING.md            # Multi-GPU/MPI scaling guide
+│   ├── REAL_HARDWARE_SCALING.md            # Multi-GPU/MPI scaling guide
+│   ├── amip.md                             # AMIP experiment guide (CLI, radiation, diagnostics)
+│   └── legoesm_documentation.tex           # LaTeX technical documentation (equations)
 │
 └── notebooks/                              # Jupyter notebooks
 ```
@@ -1869,14 +2112,17 @@ Run for 15 days. Validate:
 
 | Category | Count |
 |----------|-------|
-| Python modules | 200+ |
-| Dynamical cores | 15+ (3 grids × 3 equations × 2 discretizations + spectral + learned) |
+| Python modules | 230+ |
+| Dynamical cores | 25 (3 grids × 3 equations × 5 discretizations + spectral + learned) |
 | Physics schemes | 25+ across 5 categories |
 | Ocean physics | 12 schemes across 5 categories |
-| Test files | 55+ (unit + integration + distributed) |
-| Research scripts | 30+ |
+| Bulk flux schemes | 3 (MOST fixed-z0, COARE 3.0, Large & Yeager 2004) |
+| Test files | 65+ (unit + integration + distributed + validation) |
+| Test count | 1140+ (all passing) |
+| Research scripts | 26 |
 | Grids | 3 (cubed-sphere, lat-lon, Gaussian) |
 | Time integrators | 6 |
+| Discretization families | 5 (centered, FV/PPM, spectral, FC-Gram, C-grid) |
 
 ---
 
