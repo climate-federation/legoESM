@@ -1,7 +1,12 @@
 """Land surface component for legoESM."""
 
-from legoesm.land.config import LandConfig
-from legoesm.land.state import LandState
+from legoesm.land.config import LandConfig, MultiLayerLandConfig
+from legoesm.land.state import LandState, MultiLayerLandState
 from legoesm.land.slab_land import step_land
+from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
 
-__all__ = ["LandConfig", "LandState", "step_land"]
+__all__ = [
+    "LandConfig", "LandState", "step_land",
+    "MultiLayerLandConfig", "MultiLayerLandState",
+    "step_multilayer_land", "init_multilayer_land_state",
+]
