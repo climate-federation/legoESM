@@ -196,16 +196,52 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 - `src/legoesm/coupler/tile_fractions.py` — initialize from real land-sea mask
 - `scripts/run_amip.py` — add topography configuration
 
+**Files to create**:
+- `scripts/prepare_topography.py` — offline preprocessing script that converts raw DEM to Zarr
+- `data/topography/` — directory for preprocessed Zarr stores
+
+**Data format**: All static boundary condition data (topography, land-sea mask, soil type, bathymetry) are stored as **Zarr stores**, consistent with legoESM's primary I/O format. No NetCDF dependency for runtime data loading.
+
 **Implementation**:
-1. Download ETOPO1 (or GMTED2010) at 1-arc-minute resolution. Store as a NetCDF in a `data/` directory or load via URL.
-2. Implement `load_real_topography(grid, source="etopo1") → phis` that:
-   - Loads the raw DEM
-   - Area-averages to model grid cells (conservative regridding from high-res to model grid)
-   - Applies spectral truncation or Gaussian smoothing to remove scales the model can't resolve (2Δx filter)
-   - Returns `phis = g · z_surface` on the model grid
-3. Similarly, derive land-sea mask at model resolution: grid cell is "land" if >50% of sub-grid area is above sea level.
-4. Initialize `TileFractions` from the land-sea mask: `f_land` from mask, `f_ocean = 1 - f_land` (ice fraction from forcing data).
-5. For the cubed-sphere, topography needs to be smooth enough to not trigger instabilities at face boundaries. Apply the existing `edge_blending.py` to smooth topography at face edges.
+
+1. **Offline preprocessing** (`scripts/prepare_topography.py`): A one-time script that:
+   - Downloads ETOPO 2022 (preferred, 15 arc-second) or GMTED2010 from source
+   - For each target grid resolution (C16, C48, C96, etc.), computes:
+     - Area-averaged elevation per grid cell (conservative regridding from high-res to model grid)
+     - Land fraction per grid cell: fraction of sub-grid DEM pixels above sea level (continuous 0–1, not binary)
+     - Raw and filtered orographic surface geopotential `phis = g · z_surface`
+   - Applies spectral truncation or Gaussian smoothing to remove scales the model can't resolve (2Δx filter). For the spectral grid, truncate at T_max. For cubed-sphere, use iterative Laplacian smoothing (3–5 passes).
+   - Saves to Zarr store: `data/topography/etopo2022_C48.zarr` with variables:
+     ```
+     phis: (6, n, n) or (n_lat, n_lon)     — surface geopotential [m²/s²]
+     z_surface: (6, n, n) or (n_lat, n_lon) — surface elevation [m]
+     land_fraction: (6, n, n)               — fractional land cover [0–1]
+     land_mask: (6, n, n)                   — binary land mask (land_fraction > 0.5)
+     ```
+   - Script is idempotent: if the Zarr store already exists at the target resolution, skip.
+
+2. **Runtime loading** in `topography.py`: Add `load_real_topography(grid, zarr_path) → phis, land_fraction` that:
+   - Opens the Zarr store with `xarray.open_zarr(zarr_path)` (lazy loading)
+   - Extracts arrays as JAX arrays: `jnp.array(ds["phis"].values)`
+   - Validates shape matches the grid
+   - Returns `phis` as a `Field` with proper metadata
+
+3. **Tile fraction initialization** from `land_fraction`:
+   - `f_land = land_fraction` (continuous, from Zarr)
+   - `f_ocean = 1 - f_land` (adjusted later by ice forcing)
+   - `f_ice` initialized from AMIP sea-ice forcing data
+   - `f_lake` = 0 initially (can add lake mask later from HydroLAKES or similar)
+   - Store `TileFractions` initialization as part of the experiment config, not hardcoded.
+
+4. **Cubed-sphere face-boundary smoothing**: Apply `edge_blending.py` to smooth topography at face edges. This prevents sharp gradients at cube corners from triggering numerical instabilities, especially with the PGF.
+
+5. **Spectral grid variant**: For Gaussian grid runs, topography should be spectrally truncated at T_max (set spectral coefficients with n > n_max to zero after SH analysis of the raw field). This is the standard approach for spectral models and avoids Gibbs ringing.
+
+6. **Config integration**: Add to `AMIPExperimentConfig`:
+   ```python
+   topography_source: str = "idealized"  # "idealized", "zarr"
+   topography_zarr_path: str = ""        # path to Zarr store
+   ```
 
 **Depends on**: Task 4 (hybrid coordinate, for PGF accuracy over topography).
 
@@ -251,31 +287,271 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 
 ---
 
-## Task 8: Multi-Layer Soil in Land Model
+## Task 8: Multi-Layer Soil with Richards Equation, Runoff, and Retention Curves
 
-**Priority**: Medium-high — the slab land model has no memory beyond the current timestep.
+**Priority**: Medium-high — the slab land model has no memory beyond the current timestep, no vertical water transport, and no runoff generation.
+
+**Files to create**:
+- `src/legoesm/land/soil_grid.py` — flexible vertical soil grid
+- `src/legoesm/land/soil_hydraulics.py` — retention curves and hydraulic conductivity
+- `src/legoesm/land/richards.py` — Richards equation solver (mixed-form, Celia et al. 1990)
+- `src/legoesm/land/soil_thermal.py` — multi-layer soil heat diffusion
+- `src/legoesm/land/runoff.py` — surface and subsurface runoff generation
+- `src/legoesm/land/infiltration.py` — infiltration with ponding
 
 **Files to modify**:
-- `src/legoesm/land/slab_land.py` — upgrade to multi-layer
-- `src/legoesm/land/state.py` — extend `LandState` with soil layer arrays
-- `src/legoesm/land/config.py` — add soil layer configuration
+- `src/legoesm/land/slab_land.py` → rename to `land_model.py`, upgrade to multi-layer
+- `src/legoesm/land/state.py` — extend `LandState` with per-layer arrays
+- `src/legoesm/land/config.py` — add `SoilGridConfig`, `SoilHydraulicsConfig`, `RunoffConfig`
+- `src/legoesm/coupler/coupler.py` — pass runoff to ocean coastal cells
+- `src/legoesm/ocean/dynamics/ocean_pe.py` — receive freshwater runoff forcing
+- `src/legoesm/coupler/coupling_fields.py` — add `runoff` field to `SurfaceToAtm` / `SurfaceToOcean`
 
-**Implementation**:
-1. Replace the single-layer `T_surface` with a 4–6 layer soil temperature profile.
-2. Soil heat equation: `C(z) ∂T/∂t = ∂/∂z(k(z) ∂T/∂z)` discretized with the Thomas algorithm (already in `tridiagonal.py`).
-3. Layer depths: [0.05, 0.1, 0.2, 0.5, 1.0, 2.0] meters (total 3.85 m).
-4. Thermal conductivity: `k = k_dry + (k_sat - k_dry) · θ/θ_sat` where θ is soil moisture.
-5. Heat capacity: `C = (1-θ_sat)·C_soil + θ·C_water + (θ_sat-θ)·C_air`.
-6. Boundary conditions: top = surface energy balance flux, bottom = zero flux (geothermal negligible).
-7. For soil moisture: extend the bucket to per-layer storage. Simple downward percolation: excess water in layer k drains to layer k+1.
-8. Surface temperature is now the top soil layer temperature (or a skin temperature diagnosed from the energy balance).
+### 8A. Flexible Vertical Soil Grid (`soil_grid.py`)
+
+The soil grid must be configurable, with a sensible default that increases layer thickness with depth (power-of-2 geometric progression).
+
+**Default grid** — each layer is 2× the thickness of the one above:
+
+| Layer | Thickness (m) | Depth to bottom (m) | Purpose |
+|-------|--------------|---------------------|---------|
+| 1 | 0.025 | 0.025 | Skin / diurnal cycle |
+| 2 | 0.05 | 0.075 | Upper root zone |
+| 3 | 0.10 | 0.175 | Root zone |
+| 4 | 0.20 | 0.375 | Root zone |
+| 5 | 0.40 | 0.775 | Deep root zone |
+| 6 | 0.80 | 1.575 | Subsoil |
+| 7 | 1.60 | 3.175 | Deep subsoil |
+| 8 | 3.20 | 6.375 | Bedrock interface |
+
+The grid is defined by a `SoilGridConfig` NamedTuple:
+
+```python
+@dataclass(frozen=True)
+class SoilGridConfig:
+    """Flexible soil vertical grid. Default: geometric (power-of-2) spacing."""
+    n_layers: int = 8
+    dz_top: float = 0.025          # thickness of first layer [m]
+    growth_factor: float = 2.0     # each layer is growth_factor × previous
+    custom_dz: tuple | None = None # if set, overrides geometric grid
+    total_depth: float | None = None  # if set with n_layers, auto-compute dz_top
+```
+
+Usage:
+- Default: `SoilGridConfig()` → 8 layers, 0.025 m top, factor 2, total depth ~6.4 m
+- Custom: `SoilGridConfig(custom_dz=(0.05, 0.1, 0.2, 0.5, 1.0, 2.0))` → 6 layers, user-specified
+- Auto: `SoilGridConfig(n_layers=10, total_depth=8.0, growth_factor=1.8)` → solver computes `dz_top` to fill target depth
+- CLM-like: `SoilGridConfig(custom_dz=(0.018, 0.028, 0.046, 0.075, 0.124, 0.204, 0.336, 0.554, 0.913, 1.506))` — 10 layers matching CLM5 node spacing
+
+Build function: `make_soil_grid(config) → SoilGrid` returning a NamedTuple with:
+```python
+SoilGrid(
+    dz: jax.Array,           # (n_layers,) layer thicknesses [m]
+    z_node: jax.Array,       # (n_layers,) depth of layer midpoints [m]
+    z_interface: jax.Array,  # (n_layers+1,) depth of layer interfaces [m]
+    dz_interface: jax.Array, # (n_layers-1,) distance between adjacent midpoints [m]
+    n_layers: int,
+)
+```
+
+### 8B. Soil Water Retention Curves (`soil_hydraulics.py`)
+
+Implement a **pluggable retention curve system** with four options. All functions must be JAX-traceable (no Python branching on runtime values).
+
+**Option 1: Clapp-Hornberger (1978)** — power-law, used by many GCMs (GFDL, early CLM):
+```
+ψ(θ) = ψ_sat · (θ/θ_sat)^(-b)
+K(θ) = K_sat · (θ/θ_sat)^(2b+3)
+C(θ) = dθ/dψ = -θ_sat / (b · ψ_sat) · (θ/θ_sat)^(b+1)
+```
+Parameters per soil type: `θ_sat, ψ_sat, b, K_sat` from Cosby et al. (1984) 11-class lookup table.
+
+**Option 2: van Genuchten-Mualem (1980)** — smooth sigmoid, state of the art, used by CLM5/ELM/HYDRUS:
+```
+Se(ψ) = [1 + |α·ψ|^n]^(-m)     where m = 1 - 1/n
+θ(ψ) = θ_r + (θ_sat - θ_r) · Se
+K(Se) = K_sat · Se^(1/2) · [1 - (1 - Se^(1/m))^m]^2
+C(ψ) = α·m·n·|α·ψ|^(n-1) · (θ_sat - θ_r) · [1 + |α·ψ|^n]^(-m-1)
+```
+Parameters: `θ_r, θ_sat, α, n, K_sat`. Pedotransfer from Schaap et al. (2001) Rosetta, or per-texture-class defaults.
+
+**Option 3: Brooks-Corey (1964)** — piecewise power-law with explicit air entry:
+```
+Se(ψ) = |ψ_b/ψ|^λ    for ψ < ψ_b (unsaturated)
+Se(ψ) = 1             for ψ ≥ ψ_b (saturated)
+K(Se) = K_sat · Se^(3 + 2/λ)
+```
+Parameters: `θ_r, θ_sat, ψ_b, λ, K_sat`. Sharp air-entry makes this simpler but less smooth — use `sigmoid_switch` from `core/smooth.py` at the air-entry transition for differentiability.
+
+**Option 4: Campbell (1974)** — simplified power-law (Clapp-Hornberger is the discretized version):
+```
+ψ(Se) = ψ_e · Se^(-b)
+K(Se) = K_sat · Se^(2b+3)
+```
+Parameters: `ψ_e, b, θ_sat, K_sat`.
+
+**Config**:
+```python
+@dataclass(frozen=True)
+class SoilHydraulicsConfig:
+    retention_curve: str = "van_genuchten"  # "clapp_hornberger", "van_genuchten", "brooks_corey", "campbell"
+    # Van Genuchten defaults (loam):
+    theta_r: float = 0.078
+    theta_sat: float = 0.43
+    alpha: float = 3.6      # [1/m]
+    n_vg: float = 1.56
+    K_sat: float = 2.89e-6  # [m/s] (~0.25 m/day)
+    # Clapp-Hornberger defaults (loam):
+    psi_sat: float = -0.478  # [m]
+    b_ch: float = 5.39
+    # Allow per-grid-cell parameters (for heterogeneous soil maps):
+    spatially_varying: bool = False
+    soil_type_map: str = ""  # path to Zarr with per-cell soil type index
+```
+
+**Interblock hydraulic conductivity**: Use geometric mean between adjacent layers `K_{k+1/2} = sqrt(K_k · K_{k+1})` for unsaturated flow, arithmetic mean for saturated. This avoids smearing of wetting fronts (Haverkamp & Vauclin 1979).
+
+### 8C. Richards Equation Solver (`richards.py`)
+
+Use the **Celia et al. (1990) mixed-form modified Picard iteration** — this is the gold standard for mass-conservative unsaturated flow and handles both dry and wet extremes robustly.
+
+**Governing equation** (1D vertical, mixed form):
+```
+∂θ/∂t = ∂/∂z [K(ψ) · (∂ψ/∂z + 1)] - S(z)
+```
+where the `+1` is the gravitational term (z positive downward), and S is the sink term (root water uptake, evaporation).
+
+**Why mixed form**: The head-based form `C(ψ)·∂ψ/∂t = ...` has poor mass conservation because `C(ψ)` is evaluated at the old iterate. The θ-based form `∂θ/∂t = ∇·[D(θ)∇θ]` fails near saturation (D → ∞) and at layer interfaces with different soil types (θ is discontinuous but ψ is continuous). The mixed form time-steps in θ (guaranteeing mass conservation) but parameterizes fluxes in ψ (handling saturation and heterogeneity).
+
+**Discretization** — modified Picard iteration (Celia et al. 1990):
+
+For each Picard iteration `m` within timestep `n → n+1`:
+
+1. Compute the residual δψ from the linearized system:
+   ```
+   [C^m/Δt + A(K^m)] · δψ = -(θ^m - θ^n)/Δt + A(K^m)·ψ^m + g_flux
+   ```
+   where `A` is the tridiagonal diffusion operator built from interblock `K` values, and `g_flux` includes gravitational drainage and boundary fluxes.
+
+2. Update: `ψ^{m+1} = ψ^m + δψ`, then `θ^{m+1} = θ(ψ^{m+1})` from the retention curve.
+
+3. Convergence check: `max|θ^{m+1} - θ^m| < ε_θ` where `ε_θ = 1e-6 m³/m³`. Checking convergence in θ (not ψ) ensures mass conservation.
+
+4. The tridiagonal system is solved with the Thomas algorithm from `tridiagonal.py`.
+
+**JAX implementation**: Use `jax.lax.while_loop` for the Picard iteration (variable number of iterations, max 10). The convergence criterion uses `jnp.max(jnp.abs(theta_new - theta_old)) < eps`. For JIT compatibility, always run to `max_iter` but mask updates after convergence using `jnp.where`.
+
+**Boundary conditions**:
+
+- **Top**: Flux boundary (Neumann) = `precip - evap - runoff_surface`. When infiltration demand exceeds `K_sat` of the top layer, excess becomes surface runoff (ponding/infiltration-excess). Implement as:
+  ```
+  flux_demand = precip - evap
+  flux_max = K_sat_top · (1 + |ψ_top|/dz_top)  # infiltration capacity
+  flux_infiltration = smooth_min(flux_demand, flux_max)  # differentiable
+  runoff_surface = flux_demand - flux_infiltration
+  ```
+  When `ψ_top ≥ 0` (saturated), the surface is ponded: switch to Dirichlet `ψ_top = max(0, ponding_depth)`. Use `sigmoid_switch` for the smooth transition between flux and ponded BCs.
+
+- **Bottom**: Free drainage (gravitational flux only): `q_bottom = -K(ψ_N)` (Neumann). This produces subsurface runoff. Alternative: zero-flux (no drainage), or prescribed water table depth — selectable via config.
+
+**Elastic storage term for saturation**: Near and at saturation (ψ ≥ 0), add a small specific storage `S_s ≈ 1e-4 m⁻¹` to the capacity: `C_total = C(ψ) + S_s · θ_sat`. This regularizes the system when `C → 0` at saturation and naturally handles the saturated→unsaturated transition without branching. This is the standard approach from Miller et al. (1998).
+
+### 8D. Soil Thermal Diffusion (`soil_thermal.py`)
+
+Multi-layer heat equation, coupled to moisture through thermal properties:
+
+```
+C_eff(z) · ∂T/∂t = ∂/∂z [k_eff(z) · ∂T/∂z]
+```
+
+**Thermal conductivity** — Johansen (1975) method:
+```
+k_eff = k_dry + (k_sat - k_dry) · K_e(Sr)
+```
+where `Sr = (θ - θ_r)/(θ_sat - θ_r)` is the saturation ratio, `K_e` is the Kersten number:
+- Unfrozen coarse soil: `K_e = 0.7 · log10(Sr) + 1.0` for `Sr > 0.05`
+- Unfrozen fine soil: `K_e = log10(Sr) + 1.0` for `Sr > 0.1`
+- `k_dry` from de Vries (1963): `k_dry = (0.135·ρ_b + 64.7) / (2700 - 0.947·ρ_b)` [W/m/K]
+- `k_sat = k_solid^(1-θ_sat) · k_water^θ_sat` (geometric mean)
+
+**Heat capacity**:
+```
+C_eff = (1 - θ_sat)·C_soil + θ·C_water + (θ_sat - θ)·C_air
+```
+where `C_soil ≈ 2.0e6 J/m³/K` (mineral), `C_water = 4.18e6`, `C_air = 1.25e3`.
+
+Discretized with backward Euler + Thomas algorithm (already in `tridiagonal.py`). Top BC: surface energy balance flux `G = R_net - H - LE`. Bottom BC: zero flux.
+
+### 8E. Runoff Generation (`runoff.py`)
+
+Runoff has two components generated at every land grid cell, every timestep:
+
+1. **Surface (Hortonian/infiltration-excess) runoff**: `R_surface = max(0, P - E - f_infiltration)` where `f_infiltration` is the infiltration capacity from the Richards solver top BC (see 8C above). When the top soil layer is saturated (ponding), all additional precipitation becomes surface runoff.
+
+2. **Subsurface (baseflow/drainage) runoff**: `R_subsurface = K(ψ_bottom)` — the gravitational drainage flux at the bottom of the soil column. This represents slow groundwater-fed baseflow.
+
+3. **Saturation-excess (Dunne) runoff**: When the water table rises to the surface (all layers saturated), additional precipitation becomes runoff regardless of `K_sat`. This emerges naturally from the Richards solver with elastic storage — no special treatment needed.
+
+**Total runoff per grid cell**: `R_total = R_surface + R_subsurface` [kg/m²/s].
+
+**Runoff routing to ocean** — implement in the coupler:
+- Each land grid cell accumulates `R_total · A_cell · dt` over the coupling interval.
+- Simple nearest-coast routing: for each land cell, find the nearest ocean cell. Route the accumulated runoff to that ocean cell as a freshwater flux.
+- Add `runoff_freshwater` to `SurfaceToOcean` coupling fields [kg/s per ocean cell].
+- The ocean model receives this as a surface freshwater flux that dilutes surface salinity:
+  ```
+  dS/dt|_runoff = -S · (R_runoff / (ρ_0 · h_surface))
+  ```
+  where `h_surface` is the thickness of the top ocean layer.
+- This must work for **all ocean model variants** (FV cubed-sphere, spectral, FC-Gram, SFNO). The coupler is grid-agnostic — it passes freshwater flux through `coupling_fields.py`, so each ocean model just needs to apply it in its tendency computation.
+
+**Config**:
+```python
+@dataclass(frozen=True)
+class RunoffConfig:
+    bottom_bc: str = "free_drainage"   # "free_drainage", "zero_flux", "water_table"
+    water_table_depth: float = 10.0    # [m], only if bottom_bc="water_table"
+    route_to_ocean: bool = True
+    routing_method: str = "nearest_coast"  # "nearest_coast" (future: "river_network")
+```
+
+### 8F. Updated State and Integration
+
+**Extended `LandState`**:
+```python
+@dataclass(frozen=True)
+class LandState:
+    T_soil: Field           # (ncol, n_layers) soil temperature [K]
+    psi_soil: Field         # (ncol, n_layers) soil matric potential [m]
+    theta_soil: Field       # (ncol, n_layers) volumetric water content [m³/m³]
+    snow_depth: Field       # (ncol,) snow water equivalent [kg/m²]
+    snow_cover: Field       # (ncol,) fractional snow cover [-]
+    ponding_depth: Field    # (ncol,) surface water depth [m]
+    runoff_surface: Field   # (ncol,) accumulated surface runoff [kg/m²/s]
+    runoff_subsurface: Field # (ncol,) accumulated subsurface runoff [kg/m²/s]
+```
+
+Surface temperature is `T_soil[:, 0]` (top layer). A thin skin layer (layer 0 at 2.5 cm) resolves the diurnal cycle.
+
+**Physics step ordering** in the land model:
+1. Receive atmospheric forcing: precipitation, radiation, wind, temperature, humidity
+2. Surface energy balance → top BC for soil heat (G) and soil moisture (infiltration)
+3. Richards equation solve → updated θ, ψ, runoff
+4. Soil thermal diffusion → updated T_soil
+5. Snow accumulation/melt
+6. Return: surface temperature, sensible/latent heat flux, albedo, runoff
 
 **Validation**: Run 1-year AMIP. The multi-layer land should show:
 - Realistic diurnal temperature range (~10–15 K over continents)
-- Soil moisture memory of weeks to months
+- Soil moisture memory of weeks to months (e-folding time increases with depth)
+- Infiltration-excess runoff during intense precipitation events
+- Baseflow runoff proportional to soil moisture
 - No surface temperature blowup during polar night
+- Mass conservation: total water in soil column + cumulative runoff + cumulative ET = initial water + cumulative precip (residual < 1e-8 kg/m²)
+- Richards solver converges in ≤ 5 Picard iterations for typical Δt = 600 s
+- Validate against CLM5 single-column results for a standard soil type
 
-**Estimated effort**: 1–2 weeks.
+**Estimated effort**: 3–4 weeks.
 
 ---
 
@@ -396,7 +672,7 @@ output: monthly means + daily snapshots
 | 5 | Vertical resolution L40 | 3–5 days | Task 4 |
 | 6 | Real topography + land-sea mask | 1–2 weeks | Task 4 |
 | 7 | Activate microphysics | 1 week | — |
-| 8 | Multi-layer soil | 1–2 weeks | — |
+| 8 | Multi-layer soil + Richards + runoff | 3–4 weeks | — |
 | 9 | PBL height diagnosis | 3–5 days | — |
 | 10 | Surface albedo | 3–5 days | — |
 | 11 | Energy budget validation | 1 week | Tasks 1–3 |
@@ -408,7 +684,7 @@ Tasks 1, 2, 3, 4, 7, 8, 9, 10 can proceed in parallel across two implementation 
 - Task 7 (microphysics) fits in either thread
 - Task 12 is the integration milestone
 
-**Total estimated wall time**: 8–10 weeks of focused implementation (assumes single developer with Claude Code).
+**Total estimated wall time**: 10–13 weeks of focused implementation (assumes single developer with Claude Code).
 
 ---
 

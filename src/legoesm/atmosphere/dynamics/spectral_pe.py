@@ -659,12 +659,30 @@ def isothermal_rest_state_spectral(
     sigma_coord: SigmaCoordinate,
     T_init: float = 300.0,
     p_s_init: float = 1e5,
+    phis: jnp.ndarray | None = None,
 ) -> SpectralHydrostaticState:
     """Create an isothermal rest-state initial condition in spectral space.
 
     All fields are at rest (zero winds) with uniform temperature and
     uniform surface pressure.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+        Spectral/Gaussian grid.
+    sigma_coord : SigmaCoordinate
+        Vertical coordinate.
+    T_init : float
+        Initial temperature [K].
+    p_s_init : float
+        Initial surface pressure [Pa].
+    phis : jnp.ndarray or None
+        Surface geopotential [m^2/s^2], shape (n_lat, n_lon). If None,
+        flat terrain is used. When provided, surface pressure is reduced
+        hydrostatically: p_s = p_s_init * exp(-phis / (R_d * T_init)).
     """
+    from legoesm import constants
+
     nlev = sigma_coord.n_levels
     n_sh = grid.n_sh
 
@@ -680,21 +698,28 @@ def isothermal_rest_state_spectral(
     T_hat_2d = sh_analysis(grid, T_grid)  # (n_sh,)
     T_hat = jnp.broadcast_to(T_hat_2d[:, None], (n_sh, nlev)).copy()
 
-    # Uniform lnps
-    lnps_grid = jnp.full(
-        (grid.n_lat, grid.n_lon), jnp.log(p_s_init), dtype=jnp.float64,
-    )
+    # Surface pressure (hydrostatic adjustment for topography)
+    if phis is not None:
+        phis_grid = jnp.asarray(phis, dtype=jnp.float64)
+        p_s_grid = p_s_init * jnp.exp(-phis_grid / (constants.R_d * T_init))
+        lnps_grid = jnp.log(p_s_grid)
+    else:
+        lnps_grid = jnp.full(
+            (grid.n_lat, grid.n_lon), jnp.log(p_s_init), dtype=jnp.float64,
+        )
+        phis_grid = jnp.zeros((grid.n_lat, grid.n_lon), dtype=jnp.float64)
+
     lnps_hat = sh_analysis(grid, lnps_grid)
 
-    # No topography
-    phis_hat = jnp.zeros(n_sh, dtype=jnp.complex128)
+    # Topography in spectral space
+    phis_hat_data = sh_analysis(grid, phis_grid)
 
     return SpectralHydrostaticState(
         vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
         div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
         T_hat=Field(data=T_hat, name="T_hat", dims=dims_3d, units="K"),
         lnps_hat=Field(data=lnps_hat, name="lnps_hat", dims=dims_2d, units=""),
-        phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
+        phis_hat=Field(data=phis_hat_data, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
     )
 
 

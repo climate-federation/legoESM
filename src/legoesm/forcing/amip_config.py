@@ -80,6 +80,11 @@ class AMIPExperimentConfig(NamedTuple):
     sfc_emissivity: float = 0.98
     emissivity_ice: float = 0.99
 
+    # Topography
+    topography: str = "flat"  # "flat", "gaussian", or path to NetCDF file
+    topo_smoothing: int = 4  # Laplacian smoothing passes
+    topo_edge_blend: float = 0.3  # edge blending strength for cubed-sphere
+
     # Sea ice
     T_ice: float = 271.35
     albedo_ice: float = 0.65

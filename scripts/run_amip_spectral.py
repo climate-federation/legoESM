@@ -78,6 +78,11 @@ parser.add_argument("--output", type=str, default=None)
 parser.add_argument("--checkpoint-days", type=int, default=0)
 parser.add_argument("--co2-ppmv", type=float, default=415.0,
                     help="CO2 concentration [ppmv] (stored in config; gray rad ignores it)")
+# Topography
+parser.add_argument("--topography", type=str, default="flat",
+                    help="Topography: flat or path to NetCDF file (default: flat)")
+parser.add_argument("--topo-smoothing", type=int, default=4,
+                    help="Laplacian smoothing passes for topography (default: 4)")
 args = parser.parse_args()
 
 if args.dataset != "analytical" and args.forcing_path is None:
@@ -144,6 +149,34 @@ print(f"  Grid: {n_lat} x {n_lon} ({ncol} columns), {NLEV} levels")
 area_weights = np.asarray(grid.weights)  # (n_lat,)
 area_2d = area_weights[:, None] * np.ones(n_lon)[None, :]  # (n_lat, n_lon)
 area_2d = area_2d / area_2d.sum()  # normalized
+
+# ---------------------------------------------------------------------------
+# 1b. Topography
+# ---------------------------------------------------------------------------
+from legoesm.grids.topography import (
+    TopographyConfig, load_real_topography,
+)
+from legoesm import constants
+
+TOPOGRAPHY = args.topography
+if TOPOGRAPHY == "flat":
+    _phis_data = jnp.zeros(shape_2d)
+    _f_land = jnp.zeros(shape_2d)
+    _topo_label = "flat"
+else:
+    # Treat as path to NetCDF file
+    _topo_config = TopographyConfig(
+        source="file",
+        path=TOPOGRAPHY,
+        smoothing_passes=args.topo_smoothing,
+        edge_blend_strength=0.0,  # no edge blending for Gaussian grid
+    )
+    _phis_data, _f_land = load_real_topography(grid, config=_topo_config)
+    _z_max = float(jnp.max(_phis_data)) / constants.g
+    _land_pct = float(jnp.mean(_f_land)) * 100
+    _topo_label = f"real ({TOPOGRAPHY}), z_max={_z_max:.0f} m, land={_land_pct:.1f}%"
+
+print(f"  Topography: {_topo_label}")
 
 # ---------------------------------------------------------------------------
 # 2. Load or create AMIP forcing
@@ -271,8 +304,11 @@ if DT > 0.8 * dt_max_est:
 from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
 
 T_INIT = 270.0
-state = isothermal_rest_state_spectral(grid, sigma, T_init=T_INIT)
-print(f"  Atmosphere initialized: T={T_INIT} K isothermal")
+_phis_arg = _phis_data if float(jnp.max(jnp.abs(_phis_data))) > 0 else None
+state = isothermal_rest_state_spectral(grid, sigma, T_init=T_INIT, phis=_phis_arg)
+_z_max_init = float(jnp.max(_phis_data)) / constants.g
+_topo_msg = f", topo z_max={_z_max_init:.0f} m" if _z_max_init > 0 else ""
+print(f"  Atmosphere initialized: T={T_INIT} K isothermal{_topo_msg}")
 
 # Moisture initialization (grid space)
 p_s_init = 1.0e5

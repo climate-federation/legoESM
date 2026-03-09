@@ -131,6 +131,13 @@ parser.add_argument("--clouds", type=str, default="none",
 parser.add_argument("--discretization", type=str, default="centered",
                     choices=["centered", "finite_volume", "cgrid"],
                     help="Dynamical core discretization (default: centered)")
+# Topography
+parser.add_argument("--topography", type=str, default="flat",
+                    help="Topography: flat, gaussian, or path to NetCDF file (default: flat)")
+parser.add_argument("--topo-smoothing", type=int, default=4,
+                    help="Laplacian smoothing passes for topography (default: 4)")
+parser.add_argument("--topo-edge-blend", type=float, default=0.3,
+                    help="Edge blending strength at cube-face boundaries [0-1] (default: 0.3)")
 args = parser.parse_args()
 
 # Enforce that forcing-path is required unless restarting or analytical
@@ -175,6 +182,9 @@ exp_config = AMIPExperimentConfig(
     n2o_ppbv=args.n2o_ppbv,
     ozone_source=args.ozone_source,
     cloud_scheme=args.clouds,
+    topography=args.topography,
+    topo_smoothing=args.topo_smoothing,
+    topo_edge_blend=args.topo_edge_blend,
 )
 
 N = exp_config.resolution
@@ -244,6 +254,41 @@ shape_2d = (6, N, N)
 shape_3d = (6, N, N, NLEV)
 
 print(f"  Grid created: {6*N*N} columns, {NLEV} levels ({_vcoord_label})")
+
+# ---------------------------------------------------------------------------
+# 1b. Topography
+# ---------------------------------------------------------------------------
+from legoesm.grids.topography import (
+    TopographyConfig, load_real_topography, gaussian_mountain,
+    phis_from_topography, land_mask_from_topography,
+)
+from legoesm.coupler.config import TileConfig
+
+TOPOGRAPHY = exp_config.topography
+if TOPOGRAPHY == "flat":
+    _phis_data = jnp.zeros(shape_2d)
+    _f_land = jnp.zeros(shape_2d)
+    _topo_label = "flat"
+elif TOPOGRAPHY == "gaussian":
+    _z_s = gaussian_mountain(grid)
+    _phis_data = phis_from_topography(_z_s)
+    _f_land = land_mask_from_topography(_z_s)
+    _topo_label = "Gaussian mountain (h=2500 m)"
+else:
+    # Treat as path to NetCDF file
+    _topo_config = TopographyConfig(
+        source="file",
+        path=TOPOGRAPHY,
+        smoothing_passes=exp_config.topo_smoothing,
+        edge_blend_strength=exp_config.topo_edge_blend,
+    )
+    _phis_data, _f_land = load_real_topography(grid, config=_topo_config)
+    _z_max = float(jnp.max(_phis_data)) / constants.g
+    _land_pct = float(jnp.mean(_f_land)) * 100
+    _topo_label = f"real ({TOPOGRAPHY}), z_max={_z_max:.0f} m, land={_land_pct:.1f}%"
+
+_tile_config = TileConfig(f_land=_f_land, f_lake=jnp.zeros(shape_2d))
+print(f"  Topography: {_topo_label}")
 
 # ---------------------------------------------------------------------------
 # 2. Load AMIP forcing
@@ -418,8 +463,10 @@ if args.restart_from:
     if not args.forcing_path:
         exp_config = exp_config._replace(forcing_path=restored_config.forcing_path)
 else:
-    state = held_suarez_init(grid, sigma, T_init=exp_config.T_init)
-    print(f"  Atmosphere initialized: T={exp_config.T_init} K isothermal")
+    state = held_suarez_init(grid, sigma, T_init=exp_config.T_init, phis=_phis_data)
+    _z_max_init = float(jnp.max(_phis_data)) / constants.g
+    _topo_msg = f", topo z_max={_z_max_init:.0f} m" if _z_max_init > 0 else ""
+    print(f"  Atmosphere initialized: T={exp_config.T_init} K isothermal{_topo_msg}")
 
     # Moisture initialization
     _RH_init = exp_config.RH_init

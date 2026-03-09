@@ -19,4 +19,6 @@ from legoesm.grids.topography import (
     schaer_mountain,
     land_mask_from_topography,
     phis_from_topography,
+    TopographyConfig,
+    load_real_topography,
 )
