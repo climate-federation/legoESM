@@ -78,6 +78,10 @@ parser.add_argument("--output", type=str, default=None)
 parser.add_argument("--checkpoint-days", type=int, default=0)
 parser.add_argument("--co2-ppmv", type=float, default=415.0,
                     help="CO2 concentration [ppmv] (stored in config; gray rad ignores it)")
+parser.add_argument("--microphysics", type=str, default="none",
+                    choices=["none", "kessler", "sundqvist", "seifert_beheng",
+                             "morrison", "thompson"],
+                    help="Microphysics scheme (default: none = saturation adjustment only)")
 # Topography
 parser.add_argument("--topography", type=str, default="flat",
                     help="Topography: flat or path to NetCDF file (default: flat)")
@@ -95,6 +99,7 @@ N_DAYS = args.days
 DIAG_DAYS = args.diag_days
 START_DAY = args.start_day
 CHECKPOINT_DAYS = args.checkpoint_days
+MICROPHYSICS = args.microphysics
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 if args.output is not None:
@@ -111,6 +116,8 @@ print(f"  dt:         {DT:.0f} s")
 print(f"  Duration:   {N_DAYS} days (start day {START_DAY})")
 print(f"  Forcing:    {args.dataset}")
 print(f"  CO2:        {args.co2_ppmv} ppmv (config only)")
+if MICROPHYSICS != "none":
+    print(f"  Microphysics: {MICROPHYSICS}")
 print(f"  Diagnostics every {DIAG_DAYS} days")
 print(f"  Output:     {OUTPUT_DIR}")
 print()
@@ -325,6 +332,35 @@ cwv_init = float(jnp.mean(
 ))
 print(f"  Moisture: RH_init={RH_INIT}, mean q_v={mean_qv:.2f} g/kg, CWV={cwv_init:.1f} kg/m2")
 
+# Initialize cloud water and rain (zero initially)
+q_c = jnp.zeros(shape_3d)
+q_r = jnp.zeros(shape_3d)
+
+# ---------------------------------------------------------------------------
+# 4b. Microphysics configuration
+# ---------------------------------------------------------------------------
+from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig, KesslerConfig
+from legoesm.atmosphere.physics.microphysics.output import HydrometeorState, make_zero_hydrometeors
+
+_micro_config = MicrophysicsConfig(scheme=MICROPHYSICS)
+_micro_fn = None
+_micro_backend_config = None
+if MICROPHYSICS != "none":
+    from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
+    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
+    from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
+    from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
+    from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
+
+    _micro_backends = {
+        "kessler": (kessler_microphysics, _micro_config.kessler),
+        "sundqvist": (sundqvist_microphysics, _micro_config.sundqvist),
+        "seifert_beheng": (seifert_beheng_microphysics, _micro_config.seifert_beheng),
+        "morrison": (morrison_microphysics, _micro_config.morrison),
+        "thompson": (thompson_microphysics, _micro_config.thompson),
+    }
+    _micro_fn, _micro_backend_config = _micro_backends[MICROPHYSICS]
+
 # ---------------------------------------------------------------------------
 # 5. Physics configuration
 # ---------------------------------------------------------------------------
@@ -467,16 +503,17 @@ physics_fn = _make_physics_fn()
 
 
 @jax.jit
-def operator_split_moist_physics(T_g, p_s_g, q_v, u_g, v_g, sst, sic, dt):
-    """Operator-split moisture physics: convection + BL + condensation.
+def operator_split_moist_physics(T_g, p_s_g, q_v, q_c, q_r, u_g, v_g, sst, sic, dt):
+    """Operator-split moisture physics: convection + microphysics + BL + condensation.
 
     Applied AFTER the coupled dynamics+radiation step.
-    Returns: dT_conv (spectral T correction), new_q_v, precip, rad diagnostics.
+    Returns: T_new, q_v_new, dq_c_dt, dq_r_dt, precip, precip_ls.
     """
     T_sfc = sic * _T_ice + (1.0 - sic) * sst
     p_full = p_s_g[..., None] * _sigma_full
     p_half = p_s_g[..., None] * _sigma_half
 
+    ncol = shape_2d[0] * shape_2d[1]
     T_col = T_g.reshape(-1, NLEV)
     p_full_col = p_full.reshape(-1, NLEV)
     p_half_col = p_half.reshape(-1, NLEV + 1)
@@ -491,6 +528,36 @@ def operator_split_moist_physics(T_g, p_s_g, q_v, u_g, v_g, sst, sic, dt):
     dq_v_dt_conv = conv_out.dq_v_dt.reshape(shape_3d)
     precip = conv_out.precipitation.reshape(shape_2d)
 
+    # Microphysics (after convection)
+    dT_dt_micro = jnp.zeros(shape_3d)
+    dq_v_dt_micro = jnp.zeros(shape_3d)
+    dq_c_dt = jnp.zeros(shape_3d)
+    dq_r_dt = jnp.zeros(shape_3d)
+    precip_micro = jnp.zeros(shape_2d)
+    if _micro_fn is not None:
+        q_c_col = q_c.reshape(ncol, NLEV)
+        q_r_col = q_r.reshape(ncol, NLEV)
+        rho_col = p_full_col / (constants.R_d * T_col)
+        dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
+        dz_col = dp_col / (rho_col * constants.g)
+        hydrometeors = HydrometeorState(
+            q_c=q_c_col, q_r=q_r_col,
+            q_i=jnp.zeros_like(q_c_col), q_s=jnp.zeros_like(q_c_col),
+            q_g=jnp.zeros_like(q_c_col), N_c=jnp.zeros_like(q_c_col),
+            N_r=jnp.zeros_like(q_c_col), N_i=jnp.zeros_like(q_c_col),
+        )
+        micro_out = _micro_fn(
+            T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
+            p_full=p_full_col, p_half=p_half_col,
+            rho=rho_col, dz=dz_col, dt=dt,
+            config=_micro_backend_config,
+        )
+        dT_dt_micro = micro_out.dT_dt.reshape(shape_3d)
+        dq_v_dt_micro = micro_out.dq_v_dt.reshape(shape_3d)
+        dq_c_dt = micro_out.dq_c_dt.reshape(shape_3d)
+        dq_r_dt = micro_out.dq_r_dt.reshape(shape_3d)
+        precip_micro = micro_out.precipitation.reshape(shape_2d)
+
     # BL exchange
     rho_low = (p_s_g * _sigma_full[-1]) / (constants.R_d * T_g[..., -1])
     wind_speed = jnp.sqrt(u_g[..., -1]**2 + v_g[..., -1]**2 + 1.0)
@@ -504,26 +571,29 @@ def operator_split_moist_physics(T_g, p_s_g, q_v, u_g, v_g, sst, sic, dt):
     dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
     dq_BL = constants.g * evap_rate / dp_low
 
-    # Temperature tendency from convection + BL
-    dT_dt_moist = dT_dt_conv
+    # Temperature tendency from convection + microphysics + BL
+    dT_dt_moist = dT_dt_conv + dT_dt_micro
     dT_dt_moist = dT_dt_moist.at[..., -1].add(dT_BL)
 
     # Moisture tendency
-    dq_v_dt = dq_v_dt_conv
+    dq_v_dt = dq_v_dt_conv + dq_v_dt_micro
     dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
 
     # Apply tendencies
     T_new = T_g + dt * dT_dt_moist
     q_v_new = jnp.maximum(q_v + dt * dq_v_dt, 0.0)
 
-    # Large-scale condensation
-    q_sat = saturation_mixing_ratio(T_new, p_s_g[..., None] * _sigma_full)
-    excess = jnp.maximum(q_v_new - q_sat, 0.0)
-    q_v_new = q_v_new - excess
-    T_new = T_new + constants.L_v * excess / constants.c_pd
-    precip_ls = jnp.sum(excess * p_s_g[..., None] * _dsigma, axis=-1) / (constants.g * dt)
+    # Large-scale condensation (only if no microphysics)
+    if _micro_fn is None:
+        q_sat = saturation_mixing_ratio(T_new, p_s_g[..., None] * _sigma_full)
+        excess = jnp.maximum(q_v_new - q_sat, 0.0)
+        q_v_new = q_v_new - excess
+        T_new = T_new + constants.L_v * excess / constants.c_pd
+        precip_ls = jnp.sum(excess * p_s_g[..., None] * _dsigma, axis=-1) / (constants.g * dt)
+    else:
+        precip_ls = jnp.zeros(shape_2d)
 
-    return T_new, q_v_new, precip, precip_ls
+    return T_new, q_v_new, dq_c_dt, dq_r_dt, precip + precip_micro, precip_ls
 
 
 @jax.jit
@@ -648,10 +718,12 @@ u_grid = fields['u']
 v_grid = fields['v']
 p_s_grid = fields['p_s']
 
-# Operator-split: convection + BL + condensation (modifies T and q_v)
-T_new, q_v, _precip, _precip_ls = operator_split_moist_physics(
-    T_grid, p_s_grid, q_v, u_grid, v_grid, sst, sic, DT,
+# Operator-split: convection + microphysics + BL + condensation
+T_new, q_v, _dq_c_dt, _dq_r_dt, _precip, _precip_ls = operator_split_moist_physics(
+    T_grid, p_s_grid, q_v, q_c, q_r, u_grid, v_grid, sst, sic, DT,
 )
+q_c = jnp.maximum(q_c + DT * _dq_c_dt, 0.0)
+q_r = jnp.maximum(q_r + DT * _dq_r_dt, 0.0)
 
 # Transform updated T back to spectral
 T_hat_new = sh_analysis_3d(grid, T_new)
@@ -695,9 +767,11 @@ for step in range(1, n_steps_total):
     p_s_grid = fields['p_s']
 
     # (c) Operator-split moisture physics
-    T_new, q_v, _precip, _precip_ls = operator_split_moist_physics(
-        T_grid, p_s_grid, q_v, u_grid, v_grid, sst, sic, DT,
+    T_new, q_v, _dq_c_dt, _dq_r_dt, _precip, _precip_ls = operator_split_moist_physics(
+        T_grid, p_s_grid, q_v, q_c, q_r, u_grid, v_grid, sst, sic, DT,
     )
+    q_c = jnp.maximum(q_c + DT * _dq_c_dt, 0.0)
+    q_r = jnp.maximum(q_r + DT * _dq_r_dt, 0.0)
 
     # (d) Transform updated T back to spectral
     T_hat_new = sh_analysis_3d(grid, T_new)

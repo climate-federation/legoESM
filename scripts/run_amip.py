@@ -128,6 +128,10 @@ parser.add_argument("--clouds", type=str, default="none",
                     choices=["none", "sundqvist", "xu_randall"],
                     help="Cloud fraction scheme for RRTMG: none (clear-sky), "
                          "sundqvist (RH-based), xu_randall (RH+condensate) (default: none)")
+parser.add_argument("--microphysics", type=str, default="none",
+                    choices=["none", "kessler", "sundqvist", "seifert_beheng",
+                             "morrison", "thompson"],
+                    help="Microphysics scheme (default: none = saturation adjustment only)")
 parser.add_argument("--discretization", type=str, default="centered",
                     choices=["centered", "finite_volume", "cgrid"],
                     help="Dynamical core discretization (default: centered)")
@@ -182,6 +186,7 @@ exp_config = AMIPExperimentConfig(
     n2o_ppbv=args.n2o_ppbv,
     ozone_source=args.ozone_source,
     cloud_scheme=args.clouds,
+    microphysics=args.microphysics,
     topography=args.topography,
     topo_smoothing=args.topo_smoothing,
     topo_edge_blend=args.topo_edge_blend,
@@ -199,6 +204,7 @@ RAD_UPDATE_STEPS = exp_config.rad_update_steps
 DIURNAL_CYCLE = exp_config.diurnal_cycle
 OZONE_SOURCE = exp_config.ozone_source
 CLOUD_SCHEME = exp_config.cloud_scheme
+MICROPHYSICS = exp_config.microphysics
 
 # Build output directory with run identifier
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -224,6 +230,8 @@ if RADIATION == "rrtmg":
     print(f"  CO2: {exp_config.co2_ppmv} ppmv, CH4: {exp_config.ch4_ppbv} ppbv, N2O: {exp_config.n2o_ppbv} ppbv")
 if RAD_UPDATE_STEPS > 1:
     print(f"  Radiation update every {RAD_UPDATE_STEPS} steps ({RAD_UPDATE_STEPS * DT:.0f} s)")
+if MICROPHYSICS != "none":
+    print(f"  Microphysics: {MICROPHYSICS}")
 print(f"  Diagnostics every {DIAG_DAYS} days")
 if CHECKPOINT_DAYS > 0:
     print(f"  Checkpointing every {CHECKPOINT_DAYS} days")
@@ -455,13 +463,17 @@ restart_day = START_DAY
 
 if args.restart_from:
     print(f"  Loading checkpoint: {args.restart_from}")
-    state, q_v, restart_step, restart_day, restored_config, diag_accum = load_checkpoint(
+    state, q_v, restart_step, restart_day, restored_config, diag_accum, \
+        _ckpt_q_c, _ckpt_q_r = load_checkpoint(
         Path(args.restart_from), grid, sigma,
     )
     print(f"  Restart from step {restart_step}, day {restart_day:.1f}")
     # Use restored config's forcing_path if not overridden
     if not args.forcing_path:
         exp_config = exp_config._replace(forcing_path=restored_config.forcing_path)
+    # Restore hydrometeors (default to zero if not in checkpoint)
+    q_c = _ckpt_q_c if _ckpt_q_c is not None else jnp.zeros(shape_3d)
+    q_r = _ckpt_q_r if _ckpt_q_r is not None else jnp.zeros(shape_3d)
 else:
     state = held_suarez_init(grid, sigma, T_init=exp_config.T_init, phis=_phis_data)
     _z_max_init = float(jnp.max(_phis_data)) / constants.g
@@ -479,6 +491,10 @@ else:
         jnp.sum(q_v * state.p_s.data[..., None] * sigma.dsigma, axis=-1) / constants.g
     ))
     print(f"  Moisture: RH_init={_RH_init}, mean q_v={mean_qv:.2f} g/kg, CWV={cwv_init:.1f} kg/m2")
+
+    # Initialize cloud water and rain (zero initially)
+    q_c = jnp.zeros(shape_3d)
+    q_r = jnp.zeros(shape_3d)
 
 # ---------------------------------------------------------------------------
 # 5. Physics configuration
@@ -514,6 +530,28 @@ sbm_config = SBMConfig(tau_c=exp_config.sbm_tau_c, RH_ref=exp_config.sbm_RH_ref)
 
 ozone_config = OzoneProfileConfig(source=OZONE_SOURCE)
 cloud_config = CloudConfig(scheme=CLOUD_SCHEME)
+
+# Microphysics
+from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig, KesslerConfig
+from legoesm.atmosphere.physics.microphysics.output import HydrometeorState, make_zero_hydrometeors
+
+_micro_config = MicrophysicsConfig(scheme=MICROPHYSICS)
+_micro_fn = None
+if MICROPHYSICS != "none":
+    from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
+    from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphysics
+    from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
+    from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
+    from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
+
+    _micro_backends = {
+        "kessler": (kessler_microphysics, _micro_config.kessler),
+        "sundqvist": (sundqvist_microphysics, _micro_config.sundqvist),
+        "seifert_beheng": (seifert_beheng_microphysics, _micro_config.seifert_beheng),
+        "morrison": (morrison_microphysics, _micro_config.morrison),
+        "thompson": (thompson_microphysics, _micro_config.thompson),
+    }
+    _micro_fn, _micro_backend_config = _micro_backends[MICROPHYSICS]
 
 _rad_scheme_label = _rad_label
 print(f"  Physics: {_rad_scheme_label} + SBM convection (operator-split)")
@@ -621,10 +659,10 @@ else:
 
 
 @jax.jit
-def physics_step_no_rad(T, p_s, q_v, u, v, sst, sic, lat, dt,
+def physics_step_no_rad(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
                         dT_dt_rad_held, sw_net_sfc_held, lw_net_sfc_held,
                         sw_up_toa_held, lw_up_toa_held):
-    """Convection + BL exchange with held (pre-computed) radiation tendencies."""
+    """Convection + microphysics + BL exchange with held radiation tendencies."""
     nlev = _sigma_full.shape[0]
     shape_3d = T.shape
     shape_2d = p_s.shape
@@ -648,6 +686,36 @@ def physics_step_no_rad(T, p_s, q_v, u, v, sst, sic, lat, dt,
     dq_v_dt_conv = conv_out.dq_v_dt.reshape(shape_3d)
     precip = conv_out.precipitation.reshape(shape_2d)
 
+    # Microphysics (after convection)
+    dT_dt_micro = jnp.zeros(shape_3d)
+    dq_v_dt_micro = jnp.zeros(shape_3d)
+    dq_c_dt = jnp.zeros(shape_3d)
+    dq_r_dt = jnp.zeros(shape_3d)
+    precip_micro = jnp.zeros(shape_2d)
+    if _micro_fn is not None:
+        q_c_col = q_c.reshape(ncol, nlev)
+        q_r_col = q_r.reshape(ncol, nlev)
+        rho_col = p_full_col / (constants.R_d * T_col)
+        dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
+        dz_col = dp_col / (rho_col * constants.g)
+        hydrometeors = HydrometeorState(
+            q_c=q_c_col, q_r=q_r_col,
+            q_i=jnp.zeros_like(q_c_col), q_s=jnp.zeros_like(q_c_col),
+            q_g=jnp.zeros_like(q_c_col), N_c=jnp.zeros_like(q_c_col),
+            N_r=jnp.zeros_like(q_c_col), N_i=jnp.zeros_like(q_c_col),
+        )
+        micro_out = _micro_fn(
+            T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
+            p_full=p_full_col, p_half=p_half_col,
+            rho=rho_col, dz=dz_col, dt=dt,
+            config=_micro_backend_config,
+        )
+        dT_dt_micro = micro_out.dT_dt.reshape(shape_3d)
+        dq_v_dt_micro = micro_out.dq_v_dt.reshape(shape_3d)
+        dq_c_dt = micro_out.dq_c_dt.reshape(shape_3d)
+        dq_r_dt = micro_out.dq_r_dt.reshape(shape_3d)
+        precip_micro = micro_out.precipitation.reshape(shape_2d)
+
     rho_low = (p_s * _sigma_full[-1]) / (constants.R_d * T[..., -1])
     wind_speed = jnp.sqrt(u[..., -1]**2 + v[..., -1]**2 + 1.0)
     dp_low = p_s * (_sigma_half[-1] - _sigma_half[-2])
@@ -660,19 +728,19 @@ def physics_step_no_rad(T, p_s, q_v, u, v, sst, sic, lat, dt,
     dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
     dq_BL = constants.g * evap_rate / dp_low
 
-    dT_dt = dT_dt_rad_held + dT_dt_conv
+    dT_dt = dT_dt_rad_held + dT_dt_conv + dT_dt_micro
     dT_dt = dT_dt.at[..., -1].add(dT_BL)
 
-    dq_v_dt = dq_v_dt_conv
+    dq_v_dt = dq_v_dt_conv + dq_v_dt_micro
     dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
 
-    return (dT_dt, dq_v_dt, precip, sw_net_sfc_held, lw_net_sfc_held,
-            sw_up_toa_held, lw_up_toa_held)
+    return (dT_dt, dq_v_dt, dq_c_dt, dq_r_dt, precip + precip_micro,
+            sw_net_sfc_held, lw_net_sfc_held, sw_up_toa_held, lw_up_toa_held)
 
 
-def compute_radiation_and_physics(T, p_s, q_v, u, v, sst, sic, lat, lon,
+def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
                                   day_of_year, seconds_of_day, dt):
-    """Full physics step: recompute radiation + convection + BL."""
+    """Full physics step: recompute radiation + convection + microphysics + BL."""
     nlev = _sigma_full.shape[0]
     shape_3d = T.shape
     shape_2d = p_s.shape
@@ -708,7 +776,7 @@ def compute_radiation_and_physics(T, p_s, q_v, u, v, sst, sic, lat, lon,
     lw_up_toa = rad_out.lw_flux_up[:, 0].reshape(shape_2d)
 
     return physics_step_no_rad(
-        T, p_s, q_v, u, v, sst, sic, lat, dt,
+        T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
         dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
     ), dT_dt_rad
 
@@ -850,9 +918,9 @@ sst, sic = get_sst_sic(day)
 
 state = model.step_with_physics(state, DT)
 
-(dT_dt, dq_v_dt, _precip, _sw, _lw, _sw_toa, _lw_toa), _held_dT_rad = \
+(dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, _sw, _lw, _sw_toa, _lw_toa), _held_dT_rad = \
     compute_radiation_and_physics(
-        state.T.data, state.p_s.data, q_v, state.u.data, state.v.data,
+        state.T.data, state.p_s.data, q_v, q_c, q_r, state.u.data, state.v.data,
         sst, sic, grid.lat, grid.lon, day_of_year, seconds_of_day, DT,
     )
 _held_sw_net_sfc = _sw
@@ -862,12 +930,19 @@ _held_lw_up_toa = _lw_toa
 
 new_T = state.T.data + DT * dT_dt
 q_v = jnp.maximum(q_v + DT * dq_v_dt, 0.0)
-q_sat = saturation_mixing_ratio(new_T, state.p_s.data[..., None] * _sigma_full)
-_excess = jnp.maximum(q_v - q_sat, 0.0)
-q_v = q_v - _excess
-new_T = new_T + constants.L_v * _excess / constants.c_pd
+q_c = jnp.maximum(q_c + DT * _dq_c_dt, 0.0)
+q_r = jnp.maximum(q_r + DT * _dq_r_dt, 0.0)
+
+# Saturation adjustment (only if no microphysics — microphysics does its own)
+if MICROPHYSICS == "none":
+    q_sat = saturation_mixing_ratio(new_T, state.p_s.data[..., None] * _sigma_full)
+    _excess = jnp.maximum(q_v - q_sat, 0.0)
+    q_v = q_v - _excess
+    new_T = new_T + constants.L_v * _excess / constants.c_pd
+    _precip_ls = jnp.sum(_excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
+else:
+    _precip_ls = jnp.zeros(shape_2d)
 state = state._replace(T=state.T.replace(data=new_T))
-_precip_ls = jnp.sum(_excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
 
 # Mild moisture smoothing
 q_v = jnp.maximum(q_v + DT * _hyperdiff_3d(q_v, grid, _qv_smooth_coeff), 0.0)
@@ -897,9 +972,11 @@ for step in range(start_step + 1, n_steps_total):
     need_rad = (RAD_UPDATE_STEPS <= 1) or ((step + 1) % RAD_UPDATE_STEPS == 0)
 
     if need_rad:
-        (dT_dt, dq_v_dt, _precip, _sw, _lw, _sw_toa, _lw_toa), _held_dT_rad = \
+        (dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip,
+         _sw, _lw, _sw_toa, _lw_toa), _held_dT_rad = \
             compute_radiation_and_physics(
-                state.T.data, state.p_s.data, q_v, state.u.data, state.v.data,
+                state.T.data, state.p_s.data, q_v, q_c, q_r,
+                state.u.data, state.v.data,
                 sst, sic, grid.lat, grid.lon, day_of_year, seconds_of_day, DT,
             )
         _held_sw_net_sfc = _sw
@@ -907,9 +984,11 @@ for step in range(start_step + 1, n_steps_total):
         _held_sw_up_toa = _sw_toa
         _held_lw_up_toa = _lw_toa
     else:
-        dT_dt, dq_v_dt, _precip, _sw, _lw, _sw_toa, _lw_toa = \
+        dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, \
+            _sw, _lw, _sw_toa, _lw_toa = \
             physics_step_no_rad(
-                state.T.data, state.p_s.data, q_v, state.u.data, state.v.data,
+                state.T.data, state.p_s.data, q_v, q_c, q_r,
+                state.u.data, state.v.data,
                 sst, sic, grid.lat, DT,
                 _held_dT_rad, _held_sw_net_sfc, _held_lw_net_sfc,
                 _held_sw_up_toa, _held_lw_up_toa,
@@ -917,12 +996,19 @@ for step in range(start_step + 1, n_steps_total):
 
     new_T = state.T.data + DT * dT_dt
     q_v = jnp.maximum(q_v + DT * dq_v_dt, 0.0)
-    q_sat = saturation_mixing_ratio(new_T, state.p_s.data[..., None] * _sigma_full)
-    _excess = jnp.maximum(q_v - q_sat, 0.0)
-    q_v = q_v - _excess
-    new_T = new_T + constants.L_v * _excess / constants.c_pd
+    q_c = jnp.maximum(q_c + DT * _dq_c_dt, 0.0)
+    q_r = jnp.maximum(q_r + DT * _dq_r_dt, 0.0)
+
+    # Saturation adjustment (only if no microphysics)
+    if MICROPHYSICS == "none":
+        q_sat = saturation_mixing_ratio(new_T, state.p_s.data[..., None] * _sigma_full)
+        _excess = jnp.maximum(q_v - q_sat, 0.0)
+        q_v = q_v - _excess
+        new_T = new_T + constants.L_v * _excess / constants.c_pd
+        _precip_ls = jnp.sum(_excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
+    else:
+        _precip_ls = jnp.zeros(shape_2d)
     state = state._replace(T=state.T.replace(data=new_T))
-    _precip_ls = jnp.sum(_excess * state.p_s.data[..., None] * _dsigma, axis=-1) / (constants.g * DT)
 
     # (c) Moisture smoothing
     q_v = jnp.maximum(q_v + DT * _hyperdiff_3d(q_v, grid, _qv_smooth_coeff), 0.0)
@@ -997,9 +1083,14 @@ for step in range(start_step + 1, n_steps_total):
         diag_sw_net_sfc.append(mean_sw_sfc)
         diag_lw_net_sfc.append(mean_lw_sfc)
 
-        print(f"  {elapsed_day:6.0f}  {mean_sst:8.2f}  {mean_sic:6.3f}  {mean_T:8.2f}"
+        _diag_line = (f"  {elapsed_day:6.0f}  {mean_sst:8.2f}  {mean_sic:6.3f}  {mean_T:8.2f}"
               f"  {mean_T_low:8.2f}  {mean_precip:8.2f}  {mean_cwv:6.1f}  {max_v:8.2f}"
               f"  {mean_sw_toa:7.1f}  {mean_lw_toa:7.1f}  {mean_sw_sfc:6.1f}  {mean_lw_sfc:6.1f}")
+        if MICROPHYSICS != "none":
+            _mean_qc = float(jnp.mean(q_c)) * 1e6
+            _mean_qr = float(jnp.mean(q_r)) * 1e6
+            _diag_line += f"  qc={_mean_qc:.1f} qr={_mean_qr:.1f} mg/kg"
+        print(_diag_line)
 
         # --- Sanity checks ---
         if not jnp.all(jnp.isfinite(state.u.data)):
@@ -1032,6 +1123,8 @@ for step in range(start_step + 1, n_steps_total):
             step=step + 1,
             day=day,
             config=exp_config,
+            q_c=q_c,
+            q_r=q_r,
         )
         print(f"  Checkpoint saved: {ckpt_path.name}")
 
@@ -1119,6 +1212,8 @@ if CHECKPOINT_DAYS > 0:
         step=n_steps_total,
         day=START_DAY + N_DAYS,
         config=exp_config,
+        q_c=q_c,
+        q_r=q_r,
     )
     print(f"  Final checkpoint saved: {final_ckpt.name}")
 

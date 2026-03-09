@@ -80,6 +80,9 @@ class AMIPExperimentConfig(NamedTuple):
     sfc_emissivity: float = 0.98
     emissivity_ice: float = 0.99
 
+    # Microphysics
+    microphysics: str = "none"  # "none", "kessler", "sundqvist"
+
     # Topography
     topography: str = "flat"  # "flat", "gaussian", or path to NetCDF file
     topo_smoothing: int = 4  # Laplacian smoothing passes
@@ -131,6 +134,8 @@ def save_checkpoint(
     day: float,
     config: AMIPExperimentConfig,
     diag_accumulators: dict | None = None,
+    q_c: jnp.ndarray | None = None,
+    q_r: jnp.ndarray | None = None,
 ) -> None:
     """Save a checkpoint for restart.
 
@@ -150,6 +155,10 @@ def save_checkpoint(
         Experiment configuration (saved alongside for reproducibility).
     diag_accumulators : dict, optional
         Any accumulated diagnostic arrays to preserve across restart.
+    q_c : jax.Array, optional
+        Cloud water field, shape (6, n, n, nlev).
+    q_r : jax.Array, optional
+        Rain water field, shape (6, n, n, nlev).
     """
     # Extract state arrays
     arrays = {
@@ -162,6 +171,12 @@ def save_checkpoint(
         "step": np.array(step),
         "day": np.array(day),
     }
+
+    # Save hydrometeor fields if provided
+    if q_c is not None:
+        arrays["q_c"] = np.asarray(q_c)
+    if q_r is not None:
+        arrays["q_r"] = np.asarray(q_r)
 
     # Save config as JSON string inside npz
     arrays["config_json"] = np.array(json.dumps(config_to_dict(config)))
@@ -198,6 +213,8 @@ def load_checkpoint(
     day : float
     config : AMIPExperimentConfig
     diag_accumulators : dict
+    q_c : jax.Array or None
+    q_r : jax.Array or None
     """
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
@@ -235,4 +252,8 @@ def load_checkpoint(
         if key.startswith("diag_"):
             diag_accumulators[key[5:]] = data[key]
 
-    return state, q_v, step, day, config, diag_accumulators
+    # Restore hydrometeor fields if present
+    q_c = jnp.array(data["q_c"]) if "q_c" in data.files else None
+    q_r = jnp.array(data["q_r"]) if "q_r" in data.files else None
+
+    return state, q_v, step, day, config, diag_accumulators, q_c, q_r

@@ -706,3 +706,134 @@ class TestBackwardCompatKessler:
         p = jnp.array(1e5)
         q = saturation_mixing_ratio(T, p)
         assert float(q) > 0
+
+
+# ======================================================================
+# AMIP integration tests (checkpoint save/load with q_c/q_r)
+# ======================================================================
+
+class TestCheckpointWithHydrometeors:
+    """Test checkpoint save/load roundtrip with q_c and q_r fields."""
+
+    @pytest.fixture
+    def setup(self, tmp_path):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from legoesm.forcing.amip_config import (
+            AMIPExperimentConfig, save_checkpoint, load_checkpoint,
+        )
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+        n = grid.n
+        nlev = 10
+        q_v = jnp.full((6, n, n, nlev), 0.005)
+        q_c = jnp.full((6, n, n, nlev), 1e-4)
+        q_r = jnp.full((6, n, n, nlev), 5e-5)
+        config = AMIPExperimentConfig(
+            resolution=n, nlev=nlev, microphysics="kessler",
+        )
+        return state, q_v, q_c, q_r, config, grid, sigma, tmp_path
+
+    def test_roundtrip_with_hydrometeors(self, setup):
+        state, q_v, q_c, q_r, config, grid, sigma, tmp_path = setup
+        from legoesm.forcing.amip_config import save_checkpoint, load_checkpoint
+        path = tmp_path / "ckpt.npz"
+        save_checkpoint(path, state, q_v, step=100, day=10.0, config=config,
+                        q_c=q_c, q_r=q_r)
+
+        loaded = load_checkpoint(path, grid, sigma)
+        assert len(loaded) == 8  # state, q_v, step, day, config, diag, q_c, q_r
+        _, _, step, day, _, _, q_c_loaded, q_r_loaded = loaded
+        assert step == 100
+        assert day == 10.0
+        assert q_c_loaded is not None
+        assert q_r_loaded is not None
+        assert float(jnp.max(jnp.abs(q_c_loaded - q_c))) < 1e-10
+        assert float(jnp.max(jnp.abs(q_r_loaded - q_r))) < 1e-10
+
+    def test_roundtrip_without_hydrometeors(self, setup):
+        """Old checkpoints without q_c/q_r should load with None."""
+        state, q_v, q_c, q_r, config, grid, sigma, tmp_path = setup
+        from legoesm.forcing.amip_config import save_checkpoint, load_checkpoint
+        path = tmp_path / "ckpt_old.npz"
+        # Save without q_c/q_r (old-style)
+        save_checkpoint(path, state, q_v, step=50, day=5.0, config=config)
+
+        loaded = load_checkpoint(path, grid, sigma)
+        _, _, _, _, _, _, q_c_loaded, q_r_loaded = loaded
+        assert q_c_loaded is None
+        assert q_r_loaded is None
+
+    def test_config_microphysics_field_roundtrip(self, setup):
+        state, q_v, q_c, q_r, config, grid, sigma, tmp_path = setup
+        from legoesm.forcing.amip_config import save_checkpoint, load_checkpoint
+        path = tmp_path / "ckpt_cfg.npz"
+        save_checkpoint(path, state, q_v, step=10, day=1.0, config=config,
+                        q_c=q_c, q_r=q_r)
+        _, _, _, _, restored_config, _, _, _ = load_checkpoint(path, grid, sigma)
+        assert restored_config.microphysics == "kessler"
+
+
+class TestAMIPMicrophysicsConfig:
+    """Test AMIPExperimentConfig microphysics field."""
+
+    def test_default_microphysics_none(self):
+        from legoesm.forcing.amip_config import AMIPExperimentConfig
+        config = AMIPExperimentConfig()
+        assert config.microphysics == "none"
+
+    def test_kessler_microphysics(self):
+        from legoesm.forcing.amip_config import AMIPExperimentConfig
+        config = AMIPExperimentConfig(microphysics="kessler")
+        assert config.microphysics == "kessler"
+
+    def test_config_json_roundtrip(self):
+        from legoesm.forcing.amip_config import (
+            AMIPExperimentConfig, config_to_dict, config_from_dict,
+        )
+        config = AMIPExperimentConfig(microphysics="sundqvist")
+        d = config_to_dict(config)
+        assert d["microphysics"] == "sundqvist"
+        restored = config_from_dict(d)
+        assert restored.microphysics == "sundqvist"
+
+
+class TestMicrophysicsInPhysicsStep:
+    """Test microphysics backend dispatch for AMIP-like operator-split setup."""
+
+    def test_kessler_in_column_physics(self):
+        """Kessler produces non-trivial tendencies on moist columns."""
+        T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
+        config = KesslerConfig()
+        out = kessler_microphysics(T, q_v, h, p_full, p_half, rho, dz,
+                                   dt=600.0, config=config)
+        # Should have nonzero cloud water and rain tendencies
+        assert float(jnp.max(jnp.abs(out.dq_c_dt))) > 0
+        assert float(jnp.max(jnp.abs(out.dq_r_dt))) > 0
+        # Latent heating should be nonzero
+        assert float(jnp.max(jnp.abs(out.dT_dt))) > 0
+
+    def test_multi_step_stability(self):
+        """Multiple Kessler steps shouldn't produce NaN."""
+        T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
+        config = KesslerConfig()
+        dt = 600.0
+        q_c = h.q_c
+        q_r = h.q_r
+
+        for _ in range(10):
+            h_step = h._replace(q_c=q_c, q_r=q_r)
+            out = kessler_microphysics(T, q_v, h_step, p_full, p_half, rho, dz,
+                                       dt=dt, config=config)
+            q_v = jnp.maximum(q_v + dt * out.dq_v_dt, 0.0)
+            q_c = jnp.maximum(q_c + dt * out.dq_c_dt, 0.0)
+            q_r = jnp.maximum(q_r + dt * out.dq_r_dt, 0.0)
+            T = T + dt * out.dT_dt
+
+        assert jnp.all(jnp.isfinite(T))
+        assert jnp.all(jnp.isfinite(q_v))
+        assert jnp.all(jnp.isfinite(q_c))
+        assert jnp.all(jnp.isfinite(q_r))
