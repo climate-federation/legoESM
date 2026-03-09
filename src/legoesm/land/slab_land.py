@@ -5,6 +5,10 @@ Energy balance:
 
 Bucket hydrology:
     dW/dt = precip - E,   W in [0, W_max]
+
+Snow:
+    d(snow)/dt = precip_snow - melt
+    Snow cover fraction and albedo feedback (Task 10).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.land.config import LandConfig
 from legoesm.land.state import LandState
+from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
 def step_land(
@@ -24,6 +29,7 @@ def step_land(
     config: LandConfig,
     U_min: float,
     dt: float,
+    lat: jnp.ndarray | None = None,
 ) -> tuple[LandState, TileResponse]:
     """Step the slab land model forward by dt seconds.
 
@@ -39,6 +45,9 @@ def step_land(
         Minimum wind speed floor [m/s].
     dt : float
         Time step [s].
+    lat : jnp.ndarray or None
+        Latitude in radians, same shape as T_soil. Required when
+        snow_albedo_feedback is True.
 
     Returns
     -------
@@ -47,6 +56,34 @@ def step_land(
     """
     T_soil = state.T_soil.data
     W = state.W_bucket.data
+    snow = state.snow_depth.data
+    snow_age = state.snow_age.data
+
+    # --- Snow budget ---
+    # Accumulation from snowfall
+    snow_accum = forcing.precip_snow * dt  # kg/m2
+
+    # Melt: proportional to T above freezing
+    melt_rate = config.snow_melt_rate * jnp.maximum(
+        T_soil - config.T_snow_melt, 0.0
+    )  # kg/m2/s
+    snow_melt = jnp.minimum(melt_rate * dt, snow + snow_accum)
+
+    snow_new = jnp.maximum(snow + snow_accum - snow_melt, 0.0)
+
+    # Snow age: reset when fresh snowfall, otherwise age
+    is_snowing = forcing.precip_snow > 1e-10
+    snow_age_new = jnp.where(is_snowing, 0.0, snow_age + dt)
+    # If all snow has melted, reset age to zero
+    snow_age_new = jnp.where(snow_new > 0.0, snow_age_new, 0.0)
+
+    # --- Surface albedo ---
+    if config.snow_albedo_feedback and lat is not None:
+        alpha = compute_land_albedo(
+            lat, snow_new, snow_age_new, config.land_albedo,
+        )
+    else:
+        alpha = jnp.broadcast_to(jnp.array(config.albedo_land), T_soil.shape)
 
     # Smooth wind speed floor
     wind_speed = jnp.sqrt(
@@ -84,7 +121,7 @@ def step_land(
         lhflx = rho * constants.L_v * Ch * wind_speed * (q_sfc - forcing.q_lowest)
 
     # Radiation
-    sw_net = (1.0 - config.albedo_land) * forcing.sw_down
+    sw_net = (1.0 - alpha) * forcing.sw_down
     lw_down_abs = config.emissivity_land * forcing.lw_down
     lw_up = config.emissivity_land * constants.sigma_sb * T_soil ** 4
     lw_net = lw_down_abs - lw_up
@@ -103,6 +140,8 @@ def step_land(
     new_state = LandState(
         T_soil=state.T_soil.replace(data=T_soil_new),
         W_bucket=state.W_bucket.replace(data=W_new),
+        snow_depth=state.snow_depth.replace(data=snow_new),
+        snow_age=state.snow_age.replace(data=snow_age_new),
     )
 
     # Recompute upward LW with updated temperature for consistency
@@ -110,7 +149,7 @@ def step_land(
 
     response = TileResponse(
         T_surface=T_soil_new,
-        albedo=jnp.broadcast_to(jnp.array(config.albedo_land), T_soil.shape),
+        albedo=alpha,
         emissivity=jnp.broadcast_to(jnp.array(config.emissivity_land), T_soil.shape),
         z0=jnp.broadcast_to(jnp.array(config.z0_land), T_soil.shape),
         q_surface=q_sfc,

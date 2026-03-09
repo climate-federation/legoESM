@@ -20,6 +20,7 @@ from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio_ic
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import SeaIceState
+from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
 
 
 def step_sea_ice(
@@ -85,8 +86,14 @@ def step_sea_ice(
         shflx = rho * constants.c_pd * config.Ch_ice * wind_speed * (T_ice - forcing.T_lowest)
         lhflx = rho * constants.L_v * config.Ch_ice * wind_speed * (q_sfc - forcing.q_lowest)
 
+    # ---------- Ice albedo ----------
+    if config.temp_dependent_albedo:
+        alpha_ice = compute_ice_albedo(T_ice, config.ice_albedo)
+    else:
+        alpha_ice = jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape)
+
     # ---------- Radiation ----------
-    sw_net = (1.0 - config.albedo_ice) * forcing.sw_down
+    sw_net = (1.0 - alpha_ice) * forcing.sw_down
     lw_down_abs = config.emissivity_ice * forcing.lw_down
     lw_up = config.emissivity_ice * constants.sigma_sb * T_ice ** 4
     lw_net = lw_down_abs - lw_up
@@ -149,7 +156,7 @@ def step_sea_ice(
 
     response = TileResponse(
         T_surface=T_ice_new,
-        albedo=jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape),
+        albedo=alpha_ice,
         emissivity=jnp.broadcast_to(jnp.array(config.emissivity_ice), h.shape),
         z0=jnp.broadcast_to(jnp.array(config.z0_ice), h.shape),
         q_surface=q_sfc,

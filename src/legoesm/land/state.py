@@ -16,6 +16,8 @@ class LandState(NamedTuple):
     """
     T_soil: Field          # Soil slab temperature [K]
     W_bucket: Field        # Bucket soil moisture [kg/m2]
+    snow_depth: Field      # Snow water equivalent [kg/m2]
+    snow_age: Field        # Time since last snowfall [s]
 
 
 class MultiLayerLandState(NamedTuple):
@@ -29,3 +31,5 @@ class MultiLayerLandState(NamedTuple):
     theta_soil: jax.Array      # Volumetric water content [m3/m3], (ncol, n_layers)
     runoff_surface: jax.Array  # Surface runoff [kg/m2/s], (ncol,)
     runoff_subsurface: jax.Array  # Subsurface runoff [kg/m2/s], (ncol,)
+    snow_depth: jax.Array      # Snow water equivalent [kg/m2], (ncol,)
+    snow_age: jax.Array        # Time since last snowfall [s], (ncol,)

@@ -8,6 +8,7 @@ from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.richards import RichardsConfig
+from legoesm.surface_albedo import LandAlbedoConfig
 
 
 class LandConfig(NamedTuple):
@@ -15,7 +16,7 @@ class LandConfig(NamedTuple):
     C_soil: float = 2.0e6       # Soil heat capacity [J/m3/K]
     d_soil: float = 1.0         # Slab soil depth [m]
     W_max: float = 150.0        # Bucket capacity [kg/m2]
-    albedo_land: float = 0.2
+    albedo_land: float = 0.2    # Fallback constant albedo
     emissivity_land: float = 0.96
     z0_land: float = 0.05       # Roughness length [m]
     Cd_land: float = 3.0e-3     # Land drag coefficient (constant scheme)
@@ -24,12 +25,17 @@ class LandConfig(NamedTuple):
     bulk_scheme: str = "constant"  # "constant" or "most"
     z_ref: float = 10.0           # Reference height for MOST [m]
     bulk_n_iter: int = 5          # MOST iterations
+    # Snow/albedo
+    snow_albedo_feedback: bool = False  # Enable snow albedo feedback
+    land_albedo: LandAlbedoConfig = LandAlbedoConfig()
+    T_snow_melt: float = 273.15  # Temperature above which snow melts [K]
+    snow_melt_rate: float = 5.0e-6  # Snowmelt rate [kg/m2/s/K above T_melt]
 
 
 class MultiLayerLandConfig(NamedTuple):
     """Multi-layer soil model configuration (Task 8)."""
     # Surface properties
-    albedo_land: float = 0.2
+    albedo_land: float = 0.2    # Fallback constant albedo
     emissivity_land: float = 0.96
     z0_land: float = 0.05
     # Bulk flux
@@ -39,6 +45,11 @@ class MultiLayerLandConfig(NamedTuple):
     bulk_scheme: str = "constant"
     z_ref: float = 10.0
     bulk_n_iter: int = 5
+    # Snow/albedo
+    snow_albedo_feedback: bool = False  # Enable snow albedo feedback
+    land_albedo: LandAlbedoConfig = LandAlbedoConfig()
+    T_snow_melt: float = 273.15
+    snow_melt_rate: float = 5.0e-6
     # Sub-configs
     soil_grid: SoilGridConfig = SoilGridConfig()
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()

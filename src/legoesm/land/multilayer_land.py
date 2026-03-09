@@ -26,6 +26,7 @@ from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
+from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
 def step_multilayer_land(
@@ -34,6 +35,7 @@ def step_multilayer_land(
     config: MultiLayerLandConfig,
     U_min: float,
     dt: float,
+    lat: jnp.ndarray | None = None,
 ) -> tuple[MultiLayerLandState, TileResponse]:
     """Step the multi-layer land model forward by dt seconds.
 
@@ -49,6 +51,9 @@ def step_multilayer_land(
         Minimum wind speed floor [m/s].
     dt : float
         Time step [s].
+    lat : jnp.ndarray or None
+        Latitude in radians, shape (ncol,). Required when
+        snow_albedo_feedback is True.
 
     Returns
     -------
@@ -58,6 +63,8 @@ def step_multilayer_land(
     T_soil = state.T_soil       # (ncol, n_layers)
     psi = state.psi_soil        # (ncol, n_layers)
     theta = state.theta_soil    # (ncol, n_layers)
+    snow = state.snow_depth     # (ncol,)
+    snow_age = state.snow_age   # (ncol,)
 
     # Build soil grid from config
     grid = make_soil_grid(config.soil_grid)
@@ -110,8 +117,28 @@ def step_multilayer_land(
             q_sfc - forcing.q_lowest
         )
 
+    # --- Snow budget ---
+    snow_accum = forcing.precip_snow * dt
+    melt_rate = config.snow_melt_rate * jnp.maximum(
+        T_surface - config.T_snow_melt, 0.0
+    )
+    snow_melt = jnp.minimum(melt_rate * dt, snow + snow_accum)
+    snow_new = jnp.maximum(snow + snow_accum - snow_melt, 0.0)
+
+    is_snowing = forcing.precip_snow > 1e-10
+    snow_age_new = jnp.where(is_snowing, 0.0, snow_age + dt)
+    snow_age_new = jnp.where(snow_new > 0.0, snow_age_new, 0.0)
+
+    # --- Surface albedo ---
+    if config.snow_albedo_feedback and lat is not None:
+        alpha = compute_land_albedo(
+            lat, snow_new, snow_age_new, config.land_albedo,
+        )
+    else:
+        alpha = jnp.broadcast_to(jnp.array(config.albedo_land), T_surface.shape)
+
     # --- Radiation ---
-    sw_net = (1.0 - config.albedo_land) * forcing.sw_down
+    sw_net = (1.0 - alpha) * forcing.sw_down
     lw_down_abs = config.emissivity_land * forcing.lw_down
     lw_up = config.emissivity_land * constants.sigma_sb * T_surface ** 4
     lw_net = lw_down_abs - lw_up
@@ -150,6 +177,8 @@ def step_multilayer_land(
         theta_soil=richards_out.theta_new,
         runoff_surface=richards_out.runoff_surface,
         runoff_subsurface=richards_out.runoff_subsurface,
+        snow_depth=snow_new,
+        snow_age=snow_age_new,
     )
 
     # --- Build TileResponse ---
@@ -166,7 +195,7 @@ def step_multilayer_land(
 
     response = TileResponse(
         T_surface=T_surface_new,
-        albedo=jnp.broadcast_to(jnp.array(config.albedo_land), T_surface.shape),
+        albedo=alpha,
         emissivity=jnp.broadcast_to(
             jnp.array(config.emissivity_land), T_surface.shape
         ),
@@ -227,4 +256,6 @@ def init_multilayer_land_state(
         theta_soil=theta_soil,
         runoff_surface=jnp.zeros(ncol),
         runoff_subsurface=jnp.zeros(ncol),
+        snow_depth=jnp.zeros(ncol),
+        snow_age=jnp.zeros(ncol),
     )

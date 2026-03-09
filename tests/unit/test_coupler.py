@@ -71,6 +71,8 @@ def _make_land_state(shape=SHAPE, T=280.0, W=75.0):
     return LandState(
         T_soil=Field(jnp.full(shape, T), name="T_soil", dims=DIMS_2D, units="K"),
         W_bucket=Field(jnp.full(shape, W), name="W_bucket", dims=DIMS_2D, units="kg/m2"),
+        snow_depth=Field(jnp.zeros(shape), name="snow_depth", dims=DIMS_2D, units="kg/m2"),
+        snow_age=Field(jnp.zeros(shape), name="snow_age", dims=DIMS_2D, units="s"),
     )
 
 
@@ -739,6 +741,10 @@ def test_coupler_differentiable_through_surface_state():
             T_soil=Field(T_soil, name="T_soil", dims=DIMS_2D, units="K"),
             W_bucket=Field(jnp.full(SHAPE, 75.0), name="W_bucket",
                            dims=DIMS_2D, units="kg/m2"),
+            snow_depth=Field(jnp.zeros(SHAPE), name="snow_depth",
+                             dims=DIMS_2D, units="kg/m2"),
+            snow_age=Field(jnp.zeros(SHAPE), name="snow_age",
+                           dims=DIMS_2D, units="s"),
         )
         sfc_state = SurfaceState(
             land=land,

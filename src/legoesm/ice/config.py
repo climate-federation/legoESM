@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm.surface_albedo import IceAlbedoConfig
+
 
 class SeaIceConfig(NamedTuple):
     """Thermodynamic slab + simple transport sea ice configuration."""
@@ -12,7 +14,7 @@ class SeaIceConfig(NamedTuple):
     k_ice: float = 2.04             # Ice thermal conductivity [W/m/K]
     L_f: float = 3.337e5            # Latent heat of fusion [J/kg]
     h_ice_min: float = 0.01         # Min ice thickness for smooth ops [m]
-    albedo_ice: float = 0.65
+    albedo_ice: float = 0.65        # Fallback constant albedo
     emissivity_ice: float = 0.97
     z0_ice: float = 5e-4            # Ice roughness length [m]
     Cd_ice: float = 1.5e-3          # Ice-atmosphere drag coefficient (constant)
@@ -30,3 +32,6 @@ class SeaIceConfig(NamedTuple):
     bulk_scheme: str = "constant"   # "constant" or "most"
     z_ref: float = 10.0             # Reference height for MOST [m]
     bulk_n_iter: int = 5            # MOST iterations
+    # Temperature-dependent albedo (Task 10)
+    temp_dependent_albedo: bool = False
+    ice_albedo: IceAlbedoConfig = IceAlbedoConfig()

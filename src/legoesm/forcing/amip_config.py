@@ -93,6 +93,9 @@ class AMIPExperimentConfig(NamedTuple):
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
 
+    # Surface albedo improvements (Task 10)
+    dynamic_albedo: bool = False  # Enable temperature/zenith-dependent albedo
+
     # Output
     output_dir: str = ""
 

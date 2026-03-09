@@ -142,6 +142,9 @@ parser.add_argument("--topo-smoothing", type=int, default=4,
                     help="Laplacian smoothing passes for topography (default: 4)")
 parser.add_argument("--topo-edge-blend", type=float, default=0.3,
                     help="Edge blending strength at cube-face boundaries [0-1] (default: 0.3)")
+# Albedo
+parser.add_argument("--dynamic-albedo", action="store_true", default=False,
+                    help="Enable temperature/zenith-dependent surface albedo (Task 10)")
 args = parser.parse_args()
 
 # Enforce that forcing-path is required unless restarting or analytical
@@ -190,6 +193,7 @@ exp_config = AMIPExperimentConfig(
     topography=args.topography,
     topo_smoothing=args.topo_smoothing,
     topo_edge_blend=args.topo_edge_blend,
+    dynamic_albedo=args.dynamic_albedo,
 )
 
 N = exp_config.resolution
@@ -452,6 +456,7 @@ else:
 from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
+from legoesm.surface_albedo import ice_albedo as compute_ice_albedo, ocean_albedo as compute_ocean_albedo, IceAlbedoConfig, OceanAlbedoConfig
 from legoesm.atmosphere.physics.radiation.solar import (
     cos_zenith_angle,
     daily_mean_insolation,
@@ -747,7 +752,17 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
     ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
 
     T_sfc = sic * _T_ice + (1.0 - sic) * sst
-    albedo = sic * _albedo_ice + (1.0 - sic) * _albedo_ocean
+
+    if exp_config.dynamic_albedo:
+        # Temperature-dependent ice albedo + constant ocean (cos_zenith not
+        # available per-column here; using constant ocean for now)
+        _dyn_alpha_ice = compute_ice_albedo(
+            jnp.broadcast_to(jnp.array(_T_ice), sst.shape), IceAlbedoConfig()
+        )
+        _dyn_alpha_ocean = _albedo_ocean
+        albedo = sic * _dyn_alpha_ice + (1.0 - sic) * _dyn_alpha_ocean
+    else:
+        albedo = sic * _albedo_ice + (1.0 - sic) * _albedo_ocean
     emissivity = sic * _emissivity_ice + (1.0 - sic) * _emissivity_ocean
 
     p_full = p_s[..., None] * _sigma_full

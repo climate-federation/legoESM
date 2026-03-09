@@ -81,12 +81,16 @@ for scheme in ["constant", "most"]:
     land_state = LandState(
         T_soil=Field(data=T_init, name="T_soil", dims=dims, units="K"),
         W_bucket=Field(data=jnp.full(shape, 75.0), name="W_bucket", dims=dims, units="kg/m2"),
+        snow_depth=Field(data=jnp.zeros(shape), name="snow_depth", dims=dims, units="kg/m2"),
+        snow_age=Field(data=jnp.zeros(shape), name="snow_age", dims=dims, units="s"),
     )
 
     def land_loss(T_in):
         s = LandState(
             T_soil=land_state.T_soil.replace(data=T_in),
             W_bucket=land_state.W_bucket,
+            snow_depth=land_state.snow_depth,
+            snow_age=land_state.snow_age,
         )
         new_s, resp = step_land(s, forcing, land_config, 1.0, 3600.0)
         return jnp.mean(resp.shflx ** 2 + resp.tau_x ** 2)
@@ -170,12 +174,16 @@ T_init = jnp.full(shape, 290.0) + 5.0 * jnp.sin(jnp.linspace(0, 3, 4))[None, :, 
 land_state = LandState(
     T_soil=Field(data=T_init, name="T_soil", dims=dims, units="K"),
     W_bucket=Field(data=jnp.full(shape, 75.0), name="W_bucket", dims=dims, units="kg/m2"),
+    snow_depth=Field(data=jnp.zeros(shape), name="snow_depth", dims=dims, units="kg/m2"),
+    snow_age=Field(data=jnp.zeros(shape), name="snow_age", dims=dims, units="s"),
 )
 
 def land_multistep_loss(T_in):
     s = LandState(
         T_soil=land_state.T_soil.replace(data=T_in),
         W_bucket=land_state.W_bucket,
+        snow_depth=land_state.snow_depth,
+        snow_age=land_state.snow_age,
     )
     for _ in range(5):
         s, _ = step_land(s, forcing, land_config, 1.0, 1800.0)

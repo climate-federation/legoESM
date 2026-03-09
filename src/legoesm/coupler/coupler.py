@@ -15,6 +15,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
 from legoesm.core.field import Field
 from legoesm.coupler.accumulator import (
     FluxAccumulator,
@@ -102,6 +103,10 @@ def init_surface_state(
                      name="T_soil", dims=dims_2d, units="K"),
         W_bucket=Field(data=jnp.full(shape, W_bucket_init),
                        name="W_bucket", dims=dims_2d, units="kg/m2"),
+        snow_depth=Field(data=jnp.zeros(shape),
+                         name="snow_depth", dims=dims_2d, units="kg/m2"),
+        snow_age=Field(data=jnp.zeros(shape),
+                       name="snow_age", dims=dims_2d, units="s"),
     )
 
     ice = SeaIceState(
@@ -168,9 +173,17 @@ def ocean_tile_response(
         shflx = rho * constants.c_pd * config.Ch_ocean * wind_speed * (ocean_sst - forcing.T_lowest)
         lhflx = rho * constants.L_v * config.Ch_ocean * wind_speed * (q_sfc - forcing.q_lowest)
 
+    # Ocean albedo: constant or zenith-dependent
+    alpha_ocean = compute_ocean_albedo(
+        forcing.cos_zenith, config.ocean_albedo_config,
+    )
+    # Ensure correct shape
+    if not hasattr(alpha_ocean, 'shape') or alpha_ocean.shape != shape:
+        alpha_ocean = jnp.broadcast_to(jnp.asarray(alpha_ocean), shape)
+
     return TileResponse(
         T_surface=ocean_sst,
-        albedo=jnp.broadcast_to(jnp.array(config.ocean_albedo), shape),
+        albedo=alpha_ocean,
         emissivity=jnp.broadcast_to(jnp.array(config.ocean_emissivity), shape),
         z0=jnp.broadcast_to(jnp.array(config.ocean_z0), shape),
         q_surface=q_sfc,
