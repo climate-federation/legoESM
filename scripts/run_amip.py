@@ -145,6 +145,9 @@ parser.add_argument("--topo-edge-blend", type=float, default=0.3,
 # Albedo
 parser.add_argument("--dynamic-albedo", action="store_true", default=False,
                     help="Enable temperature/zenith-dependent surface albedo (Task 10)")
+# Monthly means (Task 12)
+parser.add_argument("--monthly-means", action="store_true", default=False,
+                    help="Accumulate monthly-mean zonal diagnostics for long runs")
 args = parser.parse_args()
 
 # Enforce that forcing-path is required unless restarting or analytical
@@ -162,6 +165,7 @@ from legoesm.forcing.amip_config import (
     load_checkpoint,
 )
 from legoesm.diagnostics.energy_budget import EnergyBudgetTracker
+from legoesm.diagnostics.monthly_means import MonthlyAccumulator
 
 _p_top = args.p_top if args.p_top is not None else (200.0 if args.vertical_coord == "hybrid" else 1000.0)
 _stretching = args.stretching if args.stretching is not None else (2.0 if args.vertical_coord == "hybrid" else 0.0)
@@ -195,6 +199,7 @@ exp_config = AMIPExperimentConfig(
     topo_smoothing=args.topo_smoothing,
     topo_edge_blend=args.topo_edge_blend,
     dynamic_albedo=args.dynamic_albedo,
+    monthly_means=args.monthly_means,
 )
 
 N = exp_config.resolution
@@ -899,6 +904,13 @@ diag_sigma = np.asarray(sigma.sigma_full)
 # Energy budget tracker (Task 11)
 energy_tracker = EnergyBudgetTracker()
 
+# Monthly-mean accumulator (Task 12)
+MONTHLY_MEANS = exp_config.monthly_means
+if MONTHLY_MEANS:
+    monthly_accum = MonthlyAccumulator(nlev=NLEV, n_lat_bins=90)
+    _lat_deg_grid = np.degrees(np.asarray(grid.lat))  # (6, N, N)
+    print(f"  Monthly-mean diagnostics enabled")
+
 # 2D snapshots at selected days (store all faces for lat-lon remapping)
 snapshot_days_set = set()
 for d in [5, 10, 15, 20, 25, 30, 60, 100, 200, 300]:
@@ -1121,6 +1133,34 @@ for step in range(start_step + 1, n_steps_total):
             elapsed_seconds=_elapsed_s,
         )
 
+        # Monthly-mean accumulation (Task 12)
+        if MONTHLY_MEANS:
+            _doy = day % 365.0 + 1.0
+            _year = int(day // 365.0)
+            monthly_accum.add_2d(_doy, _year, {
+                'T_low': np.asarray(state.T.data[..., -1]),
+                'precip': np.asarray(_precip + _precip_ls) * 86400.0,
+                'sw_up_toa': np.asarray(_sw_toa),
+                'lw_up_toa': np.asarray(_lw_toa),
+                'sw_net_sfc': np.asarray(_sw),
+                'lw_net_sfc': np.asarray(_lw),
+            }, _lat_deg_grid)
+            monthly_accum.add_3d(_doy, _year, {
+                'T': np.asarray(state.T.data),
+                'u': np.asarray(state.u.data),
+                'q_v': np.asarray(q_v) * 1000.0,
+            }, _lat_deg_grid)
+            monthly_accum.add_scalar(_doy, _year, {
+                'T_atm': mean_T,
+                'T_low': mean_T_low,
+                'precip': mean_precip,
+                'sw_up_toa': mean_sw_toa,
+                'lw_up_toa': mean_lw_toa,
+                'toa_net': _ebudget.toa_net,
+                'column_energy': _ebudget.column_energy,
+                'residual': _ebudget.residual,
+            })
+
         _diag_line = (f"  {elapsed_day:6.0f}  {mean_sst:8.2f}  {mean_sic:6.3f}  {mean_T:8.2f}"
               f"  {mean_T_low:8.2f}  {mean_precip:8.2f}  {mean_cwv:6.1f}  {max_v:8.2f}"
               f"  {mean_sw_toa:7.1f}  {mean_lw_toa:7.1f}  {mean_sw_sfc:6.1f}  {mean_lw_sfc:6.1f}")
@@ -1248,6 +1288,14 @@ np.savez(
     energy_dE_dt=np.array(energy_tracker.dE_dt),
     energy_residual=np.array(energy_tracker.residual),
 )
+
+# Save monthly means (Task 12)
+if MONTHLY_MEANS:
+    monthly_accum.save(
+        OUTPUT_DIR / "monthly_means.npz",
+        sigma=diag_sigma,
+    )
+    print(f"  Monthly means saved to {OUTPUT_DIR / 'monthly_means.npz'}")
 
 # Save final checkpoint
 if CHECKPOINT_DAYS > 0:

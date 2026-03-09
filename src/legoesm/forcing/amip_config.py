@@ -96,6 +96,9 @@ class AMIPExperimentConfig(NamedTuple):
     # Surface albedo improvements (Task 10)
     dynamic_albedo: bool = False  # Enable temperature/zenith-dependent albedo
 
+    # Monthly-mean diagnostics (Task 12)
+    monthly_means: bool = False  # Accumulate zonal/global monthly means
+
     # Output
     output_dir: str = ""
 

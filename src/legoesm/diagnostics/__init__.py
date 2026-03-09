@@ -10,3 +10,4 @@ from legoesm.diagnostics.energy_budget import (
     toa_net_radiation,
     toa_net_radiation_from_output,
 )
+from legoesm.diagnostics.monthly_means import MonthlyAccumulator
