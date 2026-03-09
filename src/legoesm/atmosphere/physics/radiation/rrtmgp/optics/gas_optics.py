@@ -370,12 +370,11 @@ def _compute_minor_optical_depth(
   # mask inactive iterations so that reverse-mode AD works (while_loop with
   # dynamic stopping is not reverse-mode differentiable).
   minor_start_idx = minor_bnd_start[ibnd]
+  _sentinel = jnp.array(minor_absorber_intervals, dtype=minor_start_idx.dtype)
   i0 = jax.lax.cond(
       minor_start_idx >= 0,
       true_fun=lambda: minor_start_idx,
-      false_fun=lambda: jnp.array(
-          minor_absorber_intervals, dtype=jnp.int_
-      ),
+      false_fun=lambda: _sentinel,
   )
   bnd_end = minor_bnd_end[ibnd]
 

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="legoESM.png" alt="legoESM" width="400">
+</p>
+
 # legoESM
 
 **A Differentiable Earth System Model in JAX**

@@ -11,12 +11,17 @@ The AMIP driver (`scripts/run_amip.py`) couples:
 - **Radiation**: Selectable via `--radiation {gray,rrtmg}`
   - **Gray**: Two-stream (Frierson 2006) with moisture-dependent LW optical depth
   - **RRTMG**: RRTMGP correlated-k (Pincus et al. 2019) via bundled jax-rrtmgp
+  - Optional diurnal cycle (`--diurnal-cycle`) with instantaneous solar zenith angle
 - **Convection**: Simplified Betts-Miller (SBM)
 - **Boundary layer**: Bulk aerodynamic heat and moisture exchange (constant coefficients default; MOST/COARE3/LY04 available via coupler `bulk_scheme`)
 - **Large-scale condensation**: Saturation adjustment with latent heating
+- **Clouds**: Diagnostic cloud fraction (`--clouds {none,sundqvist,xu_randall}`) coupled to RRTMG radiation
+- **Microphysics**: Selectable via `--microphysics {none,kessler,sundqvist}`
+- **Ozone**: Selectable via `--ozone-source {standard,analytical,none}`
 - **Friction**: Rayleigh drag (strong in BL, weak free-atmosphere)
 - **Surface**: Prescribed SST + SIC from NetCDF, blending surface temperature,
-  albedo, and emissivity
+  albedo, and emissivity. Optional dynamic albedo (`--dynamic-albedo`)
+- **Diagnostics**: Energy budget tracking, optional monthly-mean accumulation (`--monthly-means`)
 
 ## Radiation modes
 
@@ -25,7 +30,7 @@ The AMIP driver (`scripts/run_amip.py`) couples:
 The Frierson (2006) gray two-stream scheme:
 - LW optical depth depends on latitude and moisture (tau_moist_coeff * q_v)
 - SW uses Beer-Lambert absorption (no scattering)
-- Seasonal solar cycle via daily-mean insolation
+- Seasonal solar cycle; daily-mean insolation (default) or diurnal cycle
 - Fast, stable, well-tested; suitable for idealized experiments
 
 ```bash
@@ -40,8 +45,10 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
 RRTMGP correlated-k radiation (Pincus et al. 2019):
 - 128 LW g-points, 112 SW g-points
 - Full gas absorption: H2O (interactive), CO2, CH4, N2O, O3
-- Seasonal solar geometry (daily-mean cos zenith)
+- Seasonal solar geometry; daily-mean (default) or diurnal cycle cos zenith
 - Sea-ice/ocean blended surface albedo and emissivity
+- Optional cloud-radiation coupling (Sundqvist or Xu-Randall cloud fraction)
+- Analytical ozone profile with latitude dependence
 
 ```bash
 JAX_ENABLE_X64=1 python scripts/run_amip.py \
@@ -59,33 +66,27 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
 | CO2 | **Active, prescribed** | CLI `--co2-ppmv` | Default 415 ppmv; uniform in space and time |
 | CH4 | **Active, prescribed** | CLI `--ch4-ppbv` | Default 1900 ppbv; uniform |
 | N2O | **Active, prescribed** | CLI `--n2o-ppbv` | Default 332 ppbv; uniform |
-| O3 | **Active, prescribed** | US Std Atm 1976 fit | Gaussian profile peaking near 10 hPa; not interactive |
+| O3 | **Active, prescribed** | `--ozone-source` | `standard` (US Std Atm), `analytical` (lat-dependent Gaussian), or `none` |
 | CFCs | Not included | — | Not in current gas optics files |
-| Clouds | **Clear-sky only** | — | Cloud-radiation interaction not yet wired |
+| Clouds | **Active (optional)** | `--clouds` | `none` (clear-sky), `sundqvist`, or `xu_randall`; coupled to RRTMG cloud optics |
 | Aerosols | **Not included** | — | Clear-sky; no aerosol optical depth |
 
 #### RRTMG scientific limitations
 
-1. **Clear-sky radiation**: No cloud-radiation interaction. The infrastructure
-   exists (cloud optics lookup tables are bundled, `include_clouds` config flag
-   exists, microphysics schemes produce q_c/q_i) but the coupling is not yet
-   wired. This means the model overestimates surface SW and underestimates
-   planetary albedo relative to observations.
-
-2. **Scalar surface albedo**: The bundled jax-rrtmgp uses a single scalar
+1. **Scalar surface albedo**: The bundled jax-rrtmgp uses a single scalar
    `sfc_alb` for all columns. The AMIP driver passes the column-mean of the
    ice/ocean blended albedo. At coarse resolution (C16-C48) this is a good
    approximation; at fine resolution with large ice fraction gradients it may
    introduce small errors.
 
-3. **Prescribed ozone**: The O3 profile is a fixed analytical fit to the US
-   Standard Atmosphere 1976. It does not vary with latitude, season, or
+2. **Prescribed ozone**: The O3 profile is analytical (Gaussian in
+   log-pressure with latitude dependence). It does not vary with season or
    chemistry. A proper ozone climatology (e.g., from CMIP6 forcing files)
-   would improve stratospheric heating.
+   would improve stratospheric heating further.
 
-4. **No aerosols**: Aerosol direct and indirect effects are absent.
+3. **No aerosols**: Aerosol direct and indirect effects are absent.
 
-5. **Uniform well-mixed gases**: CO2, CH4, N2O are spatially and temporally
+4. **Uniform well-mixed gases**: CO2, CH4, N2O are spatially and temporally
    uniform. Time-varying concentrations from CMIP forcing files are scaffolded
    (`ExternalForcingConfig`) but not yet implemented.
 
@@ -158,6 +159,37 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
     --days 200
 ```
 
+### Full-physics RRTMG with clouds and diurnal cycle
+
+```bash
+JAX_ENABLE_X64=1 python scripts/run_amip.py \
+    --radiation rrtmg \
+    --dataset cobe \
+    --forcing-path /path/to/COBE-SST2.nc \
+    --days 365 --resolution 48 --nlev 40 --dt 450 \
+    --diurnal-cycle \
+    --ozone-source analytical \
+    --clouds xu_randall \
+    --microphysics kessler \
+    --dynamic-albedo \
+    --monthly-means \
+    --rad-update-steps 3 \
+    --checkpoint-days 30 \
+    --output results/amip_full_physics
+```
+
+### Production 10-year AMIP
+
+Use the production launcher script:
+
+```bash
+bash scripts/run_amip_production.sh /path/to/COBE-SST2.nc
+```
+
+This runs C48/L40 with RRTMG, diurnal cycle, analytical ozone, Xu-Randall
+clouds, Kessler microphysics, dynamic albedo, and monthly-mean diagnostics.
+Validation is run automatically on completion.
+
 ### Restart from checkpoint
 
 ```bash
@@ -183,6 +215,7 @@ path given by `--output`) containing:
 | `amip_profiles.png` | Vertical profile evolution (T, q_v) |
 | `checkpoint_day_NNNN.npz` | Checkpoint files (if `--checkpoint-days` > 0) |
 | `checkpoint_final.npz` | Final checkpoint (if checkpointing enabled) |
+| `monthly_means.npz` | Zonal/global monthly means (if `--monthly-means` enabled) |
 
 ## Diagnostics
 
@@ -202,6 +235,12 @@ path given by `--output`) containing:
 | Mean surface pressure | Dry-mass conservation proxy [Pa] | Both |
 | Vertical profiles | T(sigma) and q_v(sigma) | Both |
 | 2D snapshots | Maps at selected days | Both |
+| TOA net radiation | R_TOA = SW↓ - SW↑ - LW↑ [W/m²] | Both |
+| Column energy | Moist static energy [J/m²] | Both |
+| Energy tendency dE/dt | Column energy change rate [W/m²] | Both |
+| Energy residual | R_TOA − dE/dt [W/m²] | Both |
+| Monthly zonal means | Latitude-binned monthly averages | `--monthly-means` |
+| Monthly profiles | Zonal-mean T, u, q_v profiles | `--monthly-means` |
 
 ### Component status
 
@@ -216,9 +255,14 @@ path given by `--output`) containing:
 | Rayleigh friction | **Active** | BL + free-atmosphere drag |
 | Checkpoint/restart | **Active** | NPZ-based, reproducible |
 | Experiment config | **Active** | JSON-serializable `AMIPExperimentConfig` |
-| Cloud-radiation coupling | **Scaffolded** | Cloud optics exist but not wired to RRTMG |
+| Diurnal cycle | **Active** | Instantaneous cos(SZA) per column; `--diurnal-cycle` |
+| Cloud-radiation coupling | **Active** | Sundqvist or Xu-Randall cloud fraction → RRTMG optics |
+| Microphysics | **Active** | Kessler warm-rain or Sundqvist; `--microphysics` |
+| Ozone | **Active** | Standard (US Std Atm) or analytical (lat-dependent); `--ozone-source` |
+| Dynamic albedo | **Active** | Temperature/zenith-dependent ice+snow albedo; `--dynamic-albedo` |
+| Energy budget | **Active** | Online column energy, TOA balance, residual tracking |
+| Monthly means | **Active** | Zonal-mean and global-mean monthly accumulation; `--monthly-means` |
 | GHG time-varying | **Scaffolded** | `ExternalForcingConfig` interface ready |
-| Ozone climatology | **Placeholder** | Fixed US Std Atm profile; no lat/season dependence |
 | Aerosol forcing | **Placeholder** | Config exists; not connected to radiation |
 | Solar TSI variation | **Scaffolded** | Constant TSI active; time-varying from file not yet |
 
@@ -241,24 +285,62 @@ are available but not yet validated for AMIP-length runs.
 ## CLI reference
 
 ```
+# Grid and integration
+--resolution INT                  Cubed-sphere N (default: 16)
+--nlev INT                        Number of vertical levels (default: 40)
+--dt FLOAT                        Time step [seconds] (default: 600)
+--days INT                        Integration length [days] (default: 200)
+--start-day FLOAT                 Start day within forcing record
+--diag-days INT                   Diagnostic output interval [days] (default: 5)
+
+# Forcing
 --dataset {cobe,hadisst,custom}   Forcing dataset preset
 --forcing-path PATH               Path to NetCDF forcing file (required unless restarting)
 --sst-var NAME                    SST variable name (custom only)
 --sic-var NAME                    SIC variable name (custom only)
 --sst-offset FLOAT                Additive offset for SST (e.g., 273.15)
 --sic-scale FLOAT                 Multiplicative scale for SIC (e.g., 0.01)
---start-day FLOAT                 Start day within forcing record
---days INT                        Integration length [days]
---resolution INT                  Cubed-sphere N
---nlev INT                        Number of vertical levels
---dt FLOAT                        Time step [seconds]
---diag-days INT                   Diagnostic output interval [days]
---output PATH                     Output directory
---checkpoint-days INT             Checkpoint interval [days]; 0 = off (default)
---restart-from PATH               Restart from checkpoint .npz file
+
+# Radiation
 --radiation {gray,rrtmg}          Radiation scheme (default: gray)
 --rad-update-steps INT            Radiation call frequency [steps] (default: 1)
+--diurnal-cycle                   Use instantaneous solar zenith angle (default: off)
 --co2-ppmv FLOAT                  CO2 concentration [ppmv] for RRTMG (default: 415)
 --ch4-ppbv FLOAT                  CH4 concentration [ppbv] for RRTMG (default: 1900)
 --n2o-ppbv FLOAT                  N2O concentration [ppbv] for RRTMG (default: 332)
+--ozone-source {standard,analytical,none}  Ozone profile (default: standard)
+--clouds {none,sundqvist,xu_randall}       Cloud fraction scheme (default: none)
+
+# Physics
+--microphysics {none,kessler,sundqvist}    Microphysics scheme (default: none)
+--dynamic-albedo                  Temperature/zenith-dependent surface albedo (default: off)
+
+# Diagnostics
+--monthly-means                   Accumulate zonal/global monthly means (default: off)
+
+# I/O
+--output PATH                     Output directory
+--checkpoint-days INT             Checkpoint interval [days]; 0 = off (default)
+--restart-from PATH               Restart from checkpoint .npz file
 ```
+
+## Post-run validation
+
+The `scripts/validate_amip.py` script checks run output against observational
+targets:
+
+```bash
+python scripts/validate_amip.py results/amip_run/ --spinup 365
+```
+
+### Validation targets
+
+| Metric | Target range | Observed | Unit |
+|--------|-------------|----------|------|
+| Global mean T_2m | 287–289 | ~288 | K |
+| Global mean precipitation | 2.5–3.0 | ~2.7 | mm/day |
+| Net TOA imbalance | < 1 | ~0.5 | W/m² |
+| OLR | 235–245 | ~240 | W/m² |
+
+The script also checks for a subtropical jet at ~30° lat, reasonable
+equatorial/polar temperatures, and ITCZ position.

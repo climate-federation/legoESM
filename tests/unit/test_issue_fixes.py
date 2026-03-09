@@ -79,13 +79,15 @@ class TestC1RestStateInvariance:
         tend = hydrostatic_tendencies(state, grid, sigma, config)
 
         # Wind tendencies should be ~0 (Coriolis with u=v=0 gives zero)
-        assert jnp.allclose(tend.du_dt.data, 0.0, atol=1e-8), (
+        # Use 1e-6 tolerance to accommodate float32 precision
+        atol_wind = 1e-6
+        assert jnp.allclose(tend.du_dt.data, 0.0, atol=atol_wind), (
             f"max |du/dt| = {float(jnp.max(jnp.abs(tend.du_dt.data))):.2e}")
-        assert jnp.allclose(tend.dv_dt.data, 0.0, atol=1e-8), (
+        assert jnp.allclose(tend.dv_dt.data, 0.0, atol=atol_wind), (
             f"max |dv/dt| = {float(jnp.max(jnp.abs(tend.dv_dt.data))):.2e}")
 
         # Temperature tendency: isothermal + hydrostatic ⟹ ~0 advective heating
-        assert jnp.allclose(tend.dT_dt.data, 0.0, atol=1e-8), (
+        assert jnp.allclose(tend.dT_dt.data, 0.0, atol=atol_wind), (
             f"max |dT/dt| = {float(jnp.max(jnp.abs(tend.dT_dt.data))):.2e}")
 
         # Surface pressure tendency: no divergence ⟹ ~0

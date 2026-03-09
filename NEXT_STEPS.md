@@ -10,7 +10,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 
 ---
 
-## Task 1: Diurnal Cycle in Radiation
+## Task 1: Diurnal Cycle in Radiation ✅ COMPLETE
 
 **Priority**: Highest — without this, surface energy partitioning is fundamentally wrong.
 
@@ -40,7 +40,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 
 ---
 
-## Task 2: Prescribed Ozone for RRTMGP
+## Task 2: Prescribed Ozone for RRTMGP ✅ COMPLETE
 
 **Priority**: Highest — stratospheric temperature structure is completely wrong without ozone absorption.
 
@@ -72,7 +72,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 
 ---
 
-## Task 3: Cloud Fraction and Cloud–Radiation Coupling
+## Task 3: Cloud Fraction and Cloud–Radiation Coupling ✅ COMPLETE
 
 **Priority**: Highest — the dominant source of uncertainty in climate models, and currently completely absent.
 
@@ -121,7 +121,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 
 ---
 
-## Task 4: Hybrid Sigma-Pressure Vertical Coordinate
+## Task 4: Hybrid Sigma-Pressure Vertical Coordinate ✅ COMPLETE
 
 **Priority**: High — required for real topography without catastrophic PGF errors.
 
@@ -164,7 +164,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 
 ---
 
-## Task 5: Increase Vertical Resolution to L40–L60
+## Task 5: Increase Vertical Resolution to L40–L60 ✅ COMPLETE
 
 **Priority**: High — 20 levels is insufficient for resolving the tropopause, boundary layer, and stratosphere.
 
@@ -187,7 +187,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 
 ---
 
-## Task 6: Real Topography and Land-Sea Mask
+## Task 6: Real Topography and Land-Sea Mask ✅ COMPLETE
 
 **Priority**: High — idealized topography means the model cannot represent orographic precipitation, monsoons, or realistic stationary waves.
 
@@ -254,7 +254,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 
 ---
 
-## Task 7: Activate Microphysics in AMIP Runs
+## Task 7: Activate Microphysics in AMIP Runs ✅ COMPLETE
 
 **Priority**: High — saturation adjustment is not sufficient for a climate model.
 
@@ -287,7 +287,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 
 ---
 
-## Task 8: Multi-Layer Soil with Richards Equation, Runoff, and Retention Curves
+## Task 8: Multi-Layer Soil with Richards Equation, Runoff, and Retention Curves ✅ COMPLETE
 
 **Priority**: Medium-high — the slab land model has no memory beyond the current timestep, no vertical water transport, and no runoff generation.
 
@@ -555,7 +555,7 @@ Surface temperature is `T_soil[:, 0]` (top layer). A thin skin layer (layer 0 at
 
 ---
 
-## Task 9: PBL Height Diagnosis
+## Task 9: PBL Height Diagnosis ✅ COMPLETE
 
 **Priority**: Medium — needed for proper convection triggering and BL-free troposphere decoupling.
 
@@ -579,7 +579,7 @@ Surface temperature is `T_soil[:, 0]` (top layer). A thin skin layer (layer 0 at
 
 ---
 
-## Task 10: Surface Albedo Improvements
+## Task 10: Surface Albedo Improvements ✅ COMPLETE
 
 **Priority**: Medium — constant albedo gives wrong energy balance at high latitudes.
 
@@ -601,7 +601,7 @@ Surface temperature is `T_soil[:, 0]` (top layer). A thin skin layer (layer 0 at
 
 ---
 
-## Task 11: Energy Budget Closure Validation
+## Task 11: Energy Budget Closure Validation ✅ COMPLETE
 
 **Priority**: Medium — must validate before claiming climate model status.
 
@@ -622,7 +622,7 @@ Surface temperature is `T_soil[:, 0]` (top layer). A thin skin layer (layer 0 at
 
 ---
 
-## Task 12: 10-Year AMIP Run at C48/L40
+## Task 12: 10-Year AMIP Run at C48/L40 ✅ COMPLETE
 
 **Priority**: The capstone validation of Phase 1.
 
@@ -663,20 +663,20 @@ output: monthly means + daily snapshots
 
 ## Implementation Order Summary
 
-| Order | Task | Effort | Depends On |
-|-------|------|--------|------------|
-| 1 | Diurnal cycle | 3–5 days | — |
-| 2 | Prescribed ozone | 3–5 days | — |
-| 3 | Cloud fraction + cloud-radiation coupling | 2 weeks | — |
-| 4 | Hybrid σ-p coordinate | 2 weeks | — |
-| 5 | Vertical resolution L40 | 3–5 days | Task 4 |
-| 6 | Real topography + land-sea mask | 1–2 weeks | Task 4 |
-| 7 | Activate microphysics | 1 week | — |
-| 8 | Multi-layer soil + Richards + runoff | 3–4 weeks | — |
-| 9 | PBL height diagnosis | 3–5 days | — |
-| 10 | Surface albedo | 3–5 days | — |
-| 11 | Energy budget validation | 1 week | Tasks 1–3 |
-| 12 | 10-year C48/L40 AMIP run | 2 weeks | Tasks 1–11 |
+| Order | Task | Effort | Depends On | Status |
+|-------|------|--------|------------|--------|
+| 1 | Diurnal cycle | 3–5 days | — | ✅ Complete |
+| 2 | Prescribed ozone | 3–5 days | — | ✅ Complete |
+| 3 | Cloud fraction + cloud-radiation coupling | 2 weeks | — | ✅ Complete |
+| 4 | Hybrid σ-p coordinate | 2 weeks | — | ✅ Complete |
+| 5 | Vertical resolution L40 | 3–5 days | Task 4 | ✅ Complete |
+| 6 | Real topography + land-sea mask | 1–2 weeks | Task 4 | ✅ Complete |
+| 7 | Activate microphysics | 1 week | — | ✅ Complete |
+| 8 | Multi-layer soil + Richards + runoff | 3–4 weeks | — | ✅ Complete |
+| 9 | PBL height diagnosis | 3–5 days | — | ✅ Complete |
+| 10 | Surface albedo | 3–5 days | — | ✅ Complete |
+| 11 | Energy budget validation | 1 week | Tasks 1–3 | ✅ Complete |
+| 12 | 10-year C48/L40 AMIP run | 2 weeks | Tasks 1–11 | ✅ Complete |
 
 Tasks 1, 2, 3, 4, 7, 8, 9, 10 can proceed in parallel across two implementation threads:
 - **Thread A** (radiation/clouds): Tasks 1 → 2 → 3 → 11

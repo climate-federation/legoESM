@@ -40,6 +40,7 @@ from legoesm.atmosphere.physics.held_suarez import (
     held_suarez_forcing,
     held_suarez_init,
 )
+from legoesm.core.cfl import cfl_check_and_adjust
 from legoesm import constants
 
 
@@ -91,6 +92,13 @@ def main():
     N_DAYS = args.days
     DIAG_INTERVAL = 6   # Save diagnostics every N hours
     SNAP_INTERVAL = max(10, N_DAYS // 10)  # Save snapshots at ~10 points
+
+    # CFL check: PE uses semi-implicit stepping, so only advective CFL matters
+    # (gravity waves are treated implicitly). Max jet ~50 m/s.
+    DT = cfl_check_and_adjust(
+        DT, N_GRID, model_type="primitive_eq",
+        max_wind=60.0, gravity_wave_speed=0.0,
+    )
 
     # Auto-scale hyperdiffusion if not specified
     HYPERDIFF_COEFF = args.hyperdiff or compute_hyperdiff_coeff(N_GRID)

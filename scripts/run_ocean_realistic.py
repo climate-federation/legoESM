@@ -566,10 +566,18 @@ def stommel_gyre(args, grid, z_coord, config, output_dir, point_size):
     h_surface = jnp.maximum(h_k[..., 0], 1.0)
     du_surf_per_s = tau_x / (rho_0 * h_surface)
 
+    # Rayleigh (linear) friction to stabilize unresolved boundary currents
+    # at coarse resolution. 5-day e-folding time.
+    rayleigh_r = 1.0 / (5.0 * 86400.0)
+
     def wind_forcing(st, dt_val):
         du_3d = jnp.zeros_like(st.u.data)
         du_3d = du_3d.at[..., 0].set(du_surf_per_s * dt_val)
-        return st._replace(u=st.u.replace(data=st.u.data + du_3d))
+        decay = jnp.exp(-rayleigh_r * dt_val)
+        return st._replace(
+            u=st.u.replace(data=st.u.data * decay + du_3d),
+            v=st.v.replace(data=st.v.data * decay),
+        )
 
     model = OceanModel(grid, z_coord, config)
     dt = args.dt
@@ -955,8 +963,8 @@ def main():
                         help="Cubed-sphere resolution (default: 16)")
     parser.add_argument("--levels", "-l", type=int, default=20,
                         help="Number of vertical levels (default: 20)")
-    parser.add_argument("--dt", type=float, default=1800.0,
-                        help="Time step in seconds (default: 1800)")
+    parser.add_argument("--dt", type=float, default=900.0,
+                        help="Time step in seconds (default: 900)")
     parser.add_argument("--days", "-d", type=float, default=30.0,
                         help="Integration time in days (default: 30)")
     parser.add_argument("--output", "-o", type=str, default=None,
@@ -1018,15 +1026,16 @@ def main():
     hyperdiff_coeff = 1e-6 * mean_dx**4 / args.dt
 
     # Viscosity/diffusivity scaled with resolution
-    # At coarse resolution, large A_h needed to control pressure gradient errors
-    # from discrete representation of stratified flow on cubed sphere.
-    # Reference: A_h ~ 1e5 at 1-degree (~100km). Scale as dx^1.5 (sub-gridscale).
+    # At coarse resolution (C16 ~ 1200 km), large A_h needed to prevent
+    # computational instabilities from unresolved western boundary currents
+    # and pressure gradient errors on cubed sphere.
+    # Use dx^2 scaling: A_h ~ 1e5 * (dx / 100km)^2 with floor of 1e7.
     dx_ref = 100e3   # 100 km reference
     A_h_ref = 1e5    # m^2/s at 100km
-    A_h = A_h_ref * (mean_dx / dx_ref)**1.5
+    A_h = A_h_ref * (mean_dx / dx_ref)**2
     K_h = A_h / 10.0
-    A_h = max(A_h, 1e4)
-    K_h = max(K_h, 1e3)
+    A_h = max(A_h, 1e7)
+    K_h = max(K_h, 1e6)
 
     # Barotropic substeps: CFL for c = sqrt(gH) ~ 230 m/s
     # Use generous safety factor (4x) for stability of split-explicit coupling

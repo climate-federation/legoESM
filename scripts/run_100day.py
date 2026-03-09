@@ -12,8 +12,15 @@ Produces:
   - Error norms vs. day 0
 """
 
+import sys
 import time
 import os
+from pathlib import Path
+
+# Ensure project root is on the path so tests.test_cases is importable
+_project_root = str(Path(__file__).resolve().parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 import jax
 import jax.numpy as jnp
@@ -27,6 +34,7 @@ from tests.test_cases.williamson import (
     williamson_test5, compute_error_norms,
 )
 from legoesm.core.conservation import compute_conservation_diagnostics
+from legoesm.core.cfl import cfl_check_and_adjust
 from legoesm.core.field import Field
 from legoesm.core.operators import curl_z
 
@@ -34,9 +42,9 @@ from legoesm.core.operators import curl_z
 # Configuration
 # =====================================================================
 RESOLUTION = 48         # C48 ~ 200 km
-DT = 600.0              # 10 min timestep [s]
+DT = 120.0              # 2 min timestep [s] (auto-reduced by CFL check)
 DURATION_DAYS = 100
-SAVE_DIAG_EVERY = 144   # Save conservation diagnostics every N steps (~1 day)
+SAVE_DIAG_EVERY = 144   # Save conservation diagnostics every N steps (updated by CFL check)
 SNAPSHOT_DAYS = [0, 15, 50, 100]  # Days at which to save full state
 
 OUTPUT_DIR = "results/100day_williamson5"
@@ -57,11 +65,22 @@ print(f"  Grid created in {time.time()-t0:.1f}s")
 print(f"  Resolution: ~{grid.resolution_km:.0f} km")
 print(f"  Total cells: {grid.n_cells:,}")
 
-# Hyperdiffusion coefficient: scale with grid spacing
+# CFL check: adjust dt if needed for shallow water stability
+# Williamson 5: H ~ 5960m, c = sqrt(gH) ~ 242 m/s, max wind ~ 20 m/s
+DT = cfl_check_and_adjust(
+    DT, RESOLUTION, model_type="shallow_water",
+    max_wind=40.0, gravity_wave_speed=242.0,
+)
+SAVE_DIAG_EVERY = max(1, int(86400.0 / DT))  # ~1 day
+
+# Hyperdiffusion coefficient: fixed 6-hour e-folding at grid scale
+# nu4 = dx^4 / tau_efold, independent of dt
 mean_dx = float(jnp.mean(grid.dx))
-hyperdiff_coeff = 1e-4 * mean_dx**4 / DT
+tau_efold = 6.0 * 3600.0  # 6 hours
+hyperdiff_coeff = mean_dx**4 / tau_efold
 print(f"  Mean dx: {mean_dx/1000:.0f} km")
 print(f"  Hyperdiffusion coeff: {hyperdiff_coeff:.2e}")
+print(f"  Damping fraction per step: {hyperdiff_coeff * DT / mean_dx**4:.4f}")
 
 config = ShallowWaterConfig(
     hyperdiff_coeff=hyperdiff_coeff,

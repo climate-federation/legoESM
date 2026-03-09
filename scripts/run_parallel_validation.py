@@ -29,6 +29,11 @@ import time
 import traceback
 from typing import Any
 
+# Ensure project root is on the path so tests.test_cases is importable
+_project_root = str(Path(__file__).resolve().parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 
 def _parse_int_list(csv_text: str, *, label: str) -> list[int]:
     values = []

@@ -50,6 +50,7 @@ from legoesm.atmosphere.physics.baroclinic_wave import (
     baroclinic_wave_init,
     P0,
 )
+from legoesm.core.cfl import cfl_check_and_adjust
 from legoesm import constants
 
 
@@ -109,6 +110,13 @@ def main():
     SNAP_INTERVAL = max(1, N_DAYS // 10)  # Save snapshots
 
     HYPERDIFF_COEFF = args.hyperdiff or compute_hyperdiff_coeff(N_GRID)
+
+    # CFL check: PE uses semi-implicit stepping (gravity waves implicit).
+    # Only advective CFL matters. Baroclinic wave jet can reach ~50 m/s.
+    DT = cfl_check_and_adjust(
+        DT, N_GRID, model_type="primitive_eq",
+        max_wind=60.0, gravity_wave_speed=0.0,
+    )
 
     test_type = "perturbed" if PERTURBED else "steady_state"
     OUTPUT_DIR = Path(args.output or f"results/baroclinic_wave_{test_type}_C{N_GRID}_L{N_LEVELS}")

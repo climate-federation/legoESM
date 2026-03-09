@@ -1,10 +1,30 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.2
+## Technical Specification v3.3
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-08 (updated from v3.1, 2026-03-07)
+**Date**: 2026-03-09 (updated from v3.2, 2026-03-08)
+
+---
+
+### Changelog (v3.3, 2026-03-09)
+
+**New capabilities (Tasks 9–12 from NEXT_STEPS.md):**
+
+1. **PBL height diagnosis** (`atmosphere/physics/turbulence/pbl_height.py`): Bulk Richardson number method with two algorithms — sigmoid-weighted (smooth, fully differentiable) and linear interpolation (sharper). `PBLHeightConfig` with Ri_crit, h_min, h_max, sharpness. All 8 turbulence backends now return `h_pbl` in `TurbulenceOutput`. See §4.1 (Turbulence).
+
+2. **Surface albedo improvements** (`surface_albedo.py`): Comprehensive surface albedo parameterizations — latitude-dependent vegetation albedo, snow aging/cover fraction with Tanh decay, temperature-dependent sea ice albedo (sigmoid transition), ocean zenith-angle-dependent albedo (Briegleb 1992). Snow budget added to both slab and multi-layer land models. All disabled by default for backward compatibility. See §4.3, §4.4.
+
+3. **Energy budget closure validation** (`diagnostics/energy_budget.py`): Column-integrated moist static energy ∫(c_p·T + L_v·q + Φ + ½v²) dp/g with hydrostatic geopotential via `jax.lax.scan`. `EnergyBudgetTracker` computes residual R_TOA − dE/dt at each diagnostic interval. TOA net radiation now tracked through the full physics return chain. See §7.3.
+
+4. **Monthly-mean diagnostics** (`diagnostics/monthly_means.py`): `MonthlyAccumulator` bins cubed-sphere fields into zonal-mean latitude bands, accumulates 3D vertical profiles, and tracks global-mean scalars per calendar month. Saves to NPZ for post-processing. See §7.3.
+
+5. **AMIP validation framework** (`scripts/validate_amip.py`): Post-processing script that checks AMIP output against observational targets (T_2m, precipitation, TOA imbalance, OLR, energy residual, subtropical jet, ITCZ position). Generates formatted PASS/FAIL report.
+
+6. **Production 10-year AMIP configuration** (`scripts/run_amip_production.sh`): Launcher for C48/L40 10-year AMIP with full physics: RRTMGP + diurnal cycle, analytical ozone, Xu-Randall clouds, Kessler microphysics, dynamic surface albedo, monthly checkpointing, monthly-mean diagnostics, and auto-validation. See §4.6.5.
+
+7. **New CLI flags**: `--diurnal-cycle`, `--ozone-source`, `--clouds`, `--microphysics`, `--dynamic-albedo`, `--monthly-means` in `run_amip.py`.
 
 ---
 
@@ -89,7 +109,7 @@ computation for data assimilation, parameter estimation, and hybrid AI-physics m
 | M6 | Lat-lon grid + finite-volume transport | **Complete** |
 | M7 | Full physics suite (microphysics, GWD, turbulence) | **Complete** |
 | M8 | Adjoint data assimilation (4D-Var) | Planned |
-| M9 | Climate-scale simulations + validation | In progress |
+| M9 | Climate-scale simulations + validation | **Complete** |
 
 ### 1.4 Key Reference Models
 
@@ -824,7 +844,7 @@ Supporting: `solar.py` — solar geometry (zenith angle, insolation).
 | **EDMF** | `edmf.py` | EDMF unified boundary layer framework |
 | **ML emulator** | `ml_emulator.py` | Neural network surrogate |
 
-Supporting: `surface_layer.py` (Monin-Obukhov surface layer with MOST/COARE3/LY04 dispatch), `vertical_diffusion.py` (vertical diffusion driver).
+Supporting: `surface_layer.py` (Monin-Obukhov surface layer with MOST/COARE3/LY04 dispatch), `vertical_diffusion.py` (vertical diffusion driver), `pbl_height.py` (bulk Richardson PBL height diagnosis — all backends return `h_pbl` in `TurbulenceOutput`).
 
 ##### Gravity Wave Drag (`atmosphere/physics/gravity_wave_drag/`)
 
@@ -1028,38 +1048,64 @@ MPI-aware global sums via `global_sum_mpi()` in distributed mode.
 
 #### 4.3.1 Overview
 
-Simple slab land model (`land/slab_land.py`) for coupled experiments, with hooks for future DifferLand-inspired carbon-water coupling.
+Two land models: slab (`land/slab_land.py`) for simple experiments and multi-layer (`land/multilayer_land.py`) with Richards equation soil hydrology, soil thermal diffusion, and full surface energy balance. Both include snow budget and optional dynamic albedo via `surface_albedo.py`.
 
-#### 4.3.2 Current Implementation (Slab Model)
+#### 4.3.2 Slab Land Model
 
 - Surface energy balance: `R_net = H + LE + G`
 - Single-layer soil moisture bucket
-- Simple snow accumulation/melt
-- Prescribed vegetation (LAI)
-- `step_land(state, forcing, config, dt) → LandState`
+- Snow budget: accumulation from precipitation, melt proportional to T above T_melt
+- Optional snow-albedo feedback via `LandAlbedoConfig`
+- `step_land(state, forcing, config, dt) → (LandState, TileResponse)`
 
-#### 4.3.3 State (`land/state.py`)
+#### 4.3.3 Multi-Layer Land Model (`land/multilayer_land.py`)
+
+- Multi-layer soil temperature (backward Euler thermal diffusion, Johansen 1975 conductivity)
+- Multi-layer soil moisture (Richards equation, Celia et al. 1990 mixed-form Picard iteration)
+- 6 retention curves: van Genuchten, Clapp-Hornberger, Brooks-Corey, Campbell, PDI, Lu
+- Surface and subsurface runoff generation
+- Snow budget with aging and dynamic albedo
+- `step_multilayer_land(state, forcing, config, dt) → (MultiLayerLandState, TileResponse)`
+
+#### 4.3.4 Surface Albedo (`surface_albedo.py`)
+
+Top-level module with all surface albedo parameterizations:
+
+| Function | Description |
+|----------|-------------|
+| `land_vegetation_albedo(lat)` | Latitude-dependent (tropics 0.15, midlat 0.20, highlat 0.25) |
+| `snow_albedo(age)` | Exponential aging decay (max 0.80 → min 0.50, τ = 5 days) |
+| `snow_cover_fraction(depth)` | Linear ramp to critical depth (50 kg/m²) |
+| `land_albedo(lat, snow, age)` | Vegetation + snow blending |
+| `ice_albedo(T)` | Temperature-dependent sigmoid (cold 0.65 ↔ warm 0.45, ΔT = 5 K) |
+| `ocean_albedo(cos_zenith)` | Constant (0.06) or Briegleb 1992 zenith-dependent |
+
+Configs: `LandAlbedoConfig`, `IceAlbedoConfig`, `OceanAlbedoConfig`.
+
+#### 4.3.5 State (`land/state.py`)
 
 ```python
-@dataclass(frozen=True)
-class LandState:
-    T_surface: Field          # Surface temperature [K]
-    T_soil: Field             # Soil temperature profile [K]
-    snow_depth: Field         # Snow water equivalent [kg/m^2]
-    soil_moisture: Field      # Volumetric soil moisture [m^3/m^3]
-    snow_cover: Field         # Fractional snow cover [-]
+class LandState(NamedTuple):
+    T_soil: Field             # Soil temperature [K]
+    W_bucket: Field           # Soil moisture [kg/m²]
+    snow_depth: Field         # Snow water equivalent [kg/m²]
+    snow_age: Field           # Time since last snowfall [s]
+
+class MultiLayerLandState(NamedTuple):
+    T_soil: jax.Array         # (ncol, n_layers)
+    psi_soil: jax.Array       # Matric potential [m]
+    theta_soil: jax.Array     # Volumetric water content
+    runoff_surface: jax.Array
+    runoff_subsurface: jax.Array
+    snow_depth: jax.Array
+    snow_age: jax.Array
 ```
 
-#### 4.3.4 Future Phases
-
-**Phase 2 (DifferLand-inspired):**
-- Multi-layer soil temperature (diffusion equation)
-- Multi-layer soil moisture (Richards equation)
-- Carbon cycling: 6 pools (labile, foliar, root, wood, litter, SOM)
-- FvCB-Medlyn photosynthesis
-- Dynamic LAI from foliar carbon
+#### 4.3.6 Future Phases
 
 **Phase 3 (Full LSM):**
+- Carbon cycling: 6 pools (labile, foliar, root, wood, litter, SOM)
+- FvCB-Medlyn photosynthesis, dynamic LAI
 - Vegetation dynamics and competition
 - Carbon-nitrogen coupling
 - Groundwater and runoff routing
@@ -1070,9 +1116,10 @@ class LandState:
 
 Simple thermodynamic sea ice model:
 - Ice growth/melt based on surface energy balance
-- `step_sea_ice(state, forcing, config, dt) → SeaIceState`
-- State: `SeaIceState(ice_thickness, ice_concentration, ice_temperature, snow_on_ice)`
-- Config: `SeaIceConfig` with albedo, conductivity, salinity, `bulk_scheme` parameters
+- Optional temperature-dependent albedo via `IceAlbedoConfig` (sigmoid transition from cold=0.65 to warm=0.45)
+- `step_sea_ice(state, forcing, config, dt) → (SeaIceState, TileResponse)`
+- State: `SeaIceState(h_ice, T_ice, concentration)`
+- Config: `SeaIceConfig` with albedo, conductivity, salinity, `bulk_scheme`, `temp_dependent_albedo` parameters
 
 #### 4.4.2 Future Phases
 
@@ -1228,19 +1275,28 @@ Full AMIP simulation on the FV cubed-sphere dycore with operator-split physics:
 | Parameter | Value |
 |-----------|-------|
 | **Dycore** | Hydrostatic PE on cubed-sphere (centered or FV) |
-| **Resolution** | C16/L20 (~500 km, 20 sigma levels) |
-| **Time step** | 600 s |
+| **Resolution** | C16/L20 to C48/L40 |
+| **Vertical coordinate** | Sigma or hybrid sigma-pressure (selectable) |
+| **Time step** | 450–600 s |
 | **Radiation** | Selectable: gray (Frierson 2006) or RRTMGP (correlated-k) |
+| **Diurnal cycle** | Optional instantaneous solar zenith angle |
+| **Ozone** | Standard (US Std Atm 1976), analytical (lat-dependent), or none |
+| **Clouds** | None (clear-sky), Sundqvist (RH-based), or Xu-Randall (RH+condensate) |
 | **Convection** | SBM (Frierson 2007, τ_c = 2 hr) |
-| **BL exchange** | Bulk aerodynamic (C_H = C_E = 1.5e-3) |
-| **Condensation** | Saturation adjustment |
+| **Microphysics** | None, Kessler, Sundqvist, Seifert-Beheng, Morrison, Thompson |
+| **BL exchange** | Bulk aerodynamic (constant, COARE3, or Large-Yeager) |
+| **Surface albedo** | Constant or dynamic (snow feedback + ice T-dependent + ocean zenith) |
+| **Condensation** | Saturation adjustment (disabled when microphysics active) |
 | **Friction** | Rayleigh (BL drag + free-atmosphere) |
-| **Forcing** | COBE-SST2, HadISST, or analytical SST |
+| **Topography** | Flat, Gaussian mountain, or real (ETOPO1 NetCDF) |
+| **Forcing** | COBE-SST2, HadISST, analytical, or custom SST |
 
 **Key features:**
 - Checkpoint/restart via NPZ format with embedded JSON config
 - Radiation cadence: `--rad-update-steps N` (hold tendencies between calls)
 - RRTMGP with interactive H₂O and prescribed CO₂/CH₄/N₂O/O₃
+- Energy budget tracking (R_TOA, column energy, dE/dt, residual)
+- Monthly-mean zonal diagnostics via `--monthly-means`
 - `AMIPExperimentConfig` for full experiment reproducibility
 
 **Completed run (v3.2)**: 365-day C16/L20 simulation with gray radiation:
@@ -1249,6 +1305,10 @@ Full AMIP simulation on the FV cubed-sphere dycore with operator-split physics:
 |------------|---------|
 | `LW_TOA` | 236 W/m² |
 | `<Precip>` | 4 mm/day |
+
+**Production configuration (v3.3)**: 10-year C48/L40 AMIP (`scripts/run_amip_production.sh`) with RRTMGP, diurnal cycle, analytical ozone, Xu-Randall clouds, Kessler microphysics, dynamic surface albedo, monthly checkpointing, and auto-validation via `scripts/validate_amip.py`.
+
+**Validation targets (v3.3)**: T_2m: 287–289 K, precipitation: 2.5–3.0 mm/day, TOA imbalance: < 1 W/m², OLR: 235–245 W/m², subtropical jet: 30–40 m/s at ~30° lat.
 
 See `docs/amip.md` for full CLI reference, radiation modes, and diagnostics.
 
@@ -1440,7 +1500,7 @@ def load_state(path, time_index=-1):
 
 ERA5 reanalysis data loading for model initialization and ML training.
 
-### 7.3 Online Diagnostics
+### 7.3 Online Diagnostics (`diagnostics/`)
 
 Computed during runtime at configurable intervals:
 
@@ -1451,6 +1511,19 @@ Computed during runtime at configurable intervals:
 | Global means | Total energy, total mass, total moisture | Scalar |
 | Conservation budget | Energy/mass/moisture residuals per timestep | Scalar |
 | Spectra | Kinetic energy spectrum vs. wavenumber | Global |
+
+#### Energy Budget Closure (`diagnostics/energy_budget.py`)
+
+Column-integrated moist static energy: E = ∫(c_p·T + L_v·q + Φ + ½v²) dp/g, computed via hydrostatic geopotential integration with `jax.lax.scan`. `EnergyBudgetTracker` accumulates timeseries of R_TOA, column energy, dE/dt, and residual (R_TOA − dE/dt). Also provides `toa_net_radiation()`, `surface_net_radiation()`, `surface_energy_flux()` utility functions.
+
+#### Monthly Means (`diagnostics/monthly_means.py`)
+
+`MonthlyAccumulator` for long climate runs (10-year AMIP):
+- Bins 2D cubed-sphere fields into zonal-mean latitude bands (configurable n_lat_bins)
+- Accumulates 3D fields as zonal-mean vertical profiles (n_lat × nlev)
+- Tracks global-mean scalars per calendar month (365-day calendar)
+- `finalize()` computes monthly averages, `save()` writes to NPZ
+- Activated via `--monthly-means` CLI flag in `run_amip.py`
 
 ### 7.4 Visualization (`visualization/maps.py`)
 
@@ -1618,7 +1691,7 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
      /________________________\
 ```
 
-### 10.2 Test Suite (65+ test files, 1140+ tests)
+### 10.2 Test Suite (79 test files, 1350+ tests)
 
 **Unit tests** (`tests/unit/`):
 
@@ -1997,7 +2070,7 @@ legoESM/
 │
 ├── tests/
 │   ├── conftest.py                         # Shared fixtures
-│   ├── unit/                               # 45+ unit test files
+│   ├── unit/                               # 55+ unit test files
 │   ├── integration/                        # Integration tests (AMIP smoke, RRTMG, FV)
 │   ├── distributed/                        # MPI distributed tests
 │   ├── validation/                         # Validation suite (bulk flux, stability, dycores)
@@ -2117,8 +2190,8 @@ Run for 15 days. Validate:
 | Physics schemes | 25+ across 5 categories |
 | Ocean physics | 12 schemes across 5 categories |
 | Bulk flux schemes | 3 (MOST fixed-z0, COARE 3.0, Large & Yeager 2004) |
-| Test files | 65+ (unit + integration + distributed + validation) |
-| Test count | 1140+ (all passing) |
+| Test files | 79 (unit + integration + distributed + validation) |
+| Test count | 1350+ (all passing) |
 | Research scripts | 26 |
 | Grids | 3 (cubed-sphere, lat-lon, Gaussian) |
 | Time integrators | 6 |
