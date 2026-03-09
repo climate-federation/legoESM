@@ -535,17 +535,19 @@ def make_hybrid_levels(
     p_top_Pa: float = 200.0,
     p_ref: float = 1e5,
     transition_exponent: int = 3,
+    stretching: float = 0.0,
 ) -> HybridSigmaPressureCoordinate:
     """Generate hybrid coordinate with smooth sigma-to-pressure transition.
 
     Uses the parameterization:
-        eta = linspace(0, 1, nlev+1)
+        eta = stretched(linspace(0, 1, nlev+1))
         B = eta^exponent
         A = eta - B + (p_top/p_ref) * (1 - eta)
 
-    At reference p_s = p_ref the levels are uniformly spaced in pressure.
-    The exponent controls the transition height: higher values push the
-    transition closer to the surface.
+    At reference p_s = p_ref and zero stretching, levels are uniformly
+    spaced in pressure. The exponent controls the sigma-to-pressure
+    transition height. The stretching parameter concentrates levels near
+    the surface for boundary layer resolution.
 
     Parameters
     ----------
@@ -557,6 +559,11 @@ def make_hybrid_levels(
         Reference surface pressure [Pa].
     transition_exponent : int
         Power for B(eta) = eta^exponent. 1 = pure sigma, 3 = typical.
+    stretching : float
+        Sinh-based stretching parameter (>= 0). 0 = uniform spacing,
+        2-3 = enhanced boundary layer resolution. The stretching maps
+        eta -> sinh(s*eta)/sinh(s), concentrating levels near eta=1
+        (the surface).
 
     Returns
     -------
@@ -565,10 +572,62 @@ def make_hybrid_levels(
     import numpy as np
 
     eta = np.linspace(0.0, 1.0, n_levels + 1)
+    if stretching > 0:
+        # Concentrate levels near eta=1 (surface) for BL resolution
+        eta = 1.0 - np.sinh(stretching * (1.0 - eta)) / np.sinh(stretching)
     B_half = eta ** transition_exponent
     A_half = eta - B_half + (p_top_Pa / p_ref) * (1.0 - eta)
 
     return create_hybrid_coordinate(n_levels, A_half, B_half, p_ref)
+
+
+def standard_hybrid_levels(
+    n_levels: int = 40,
+    p_ref: float = 1e5,
+) -> HybridSigmaPressureCoordinate:
+    """Create standard hybrid levels with good defaults for any resolution.
+
+    Provides well-tested level designs for common configurations:
+
+    - **L20**: p_top=1000 Pa (10 hPa), moderate stretching.
+      5 BL levels, 10 troposphere, 5 stratosphere.
+    - **L40** (default): p_top=200 Pa (2 hPa), enhanced BL resolution.
+      ~8 BL levels, ~16 troposphere, ~8 UTLS, ~8 stratosphere.
+    - **L60**: p_top=10 Pa (0.1 hPa), high BL + stratospheric resolution.
+      ~10 BL levels, ~20 troposphere, ~15 UTLS, ~15 stratosphere.
+    - **Other**: automatically selects p_top and stretching based on nlev.
+
+    Parameters
+    ----------
+    n_levels : int
+        Number of full levels. Default 40.
+    p_ref : float
+        Reference surface pressure [Pa].
+
+    Returns
+    -------
+    HybridSigmaPressureCoordinate
+    """
+    if n_levels <= 25:
+        # Moderate resolution: 10 hPa top, mild stretching
+        p_top = 1000.0
+        stretching = 1.5
+        transition_exponent = 2
+    elif n_levels <= 45:
+        # Standard resolution: 2 hPa top, good BL resolution
+        p_top = 200.0
+        stretching = 2.5
+        transition_exponent = 3
+    else:
+        # High resolution: 0.1 hPa top, strong BL + strat resolution
+        p_top = 10.0
+        stretching = 2.5
+        transition_exponent = 3
+
+    return make_hybrid_levels(
+        n_levels, p_top_Pa=p_top, p_ref=p_ref,
+        transition_exponent=transition_exponent, stretching=stretching,
+    )
 
 
 def hybrid_from_sigma(

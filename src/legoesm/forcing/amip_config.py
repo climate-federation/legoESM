@@ -27,8 +27,13 @@ class AMIPExperimentConfig(NamedTuple):
     """
     # Grid
     resolution: int = 16
-    nlev: int = 20
+    nlev: int = 40
     dt: float = 600.0
+
+    # Vertical coordinate
+    vertical_coord: str = "hybrid"  # "sigma" or "hybrid"
+    p_top_Pa: float = 200.0  # model top pressure [Pa] (hybrid only)
+    stretching: float = 2.0  # sinh stretching for BL resolution (hybrid only)
 
     # Integration
     start_day: float = 0.0

@@ -24,6 +24,7 @@ from legoesm.grids.vertical import (
     create_sigma_coordinate,
     create_hybrid_coordinate,
     make_hybrid_levels,
+    standard_hybrid_levels,
     hybrid_from_sigma,
     pressure_from_sigma,
     pressure_from_hybrid,
@@ -395,3 +396,131 @@ class TestHybridDifferentiability:
         grad = jax.grad(f)(p_s)
         assert grad.shape == p_s.shape
         assert jnp.all(jnp.isfinite(grad))
+
+
+# ==============================================================================
+# Task 5: Enhanced vertical resolution and level design
+# ==============================================================================
+
+class TestStretching:
+    """Test sinh-based stretching for boundary layer resolution."""
+
+    def test_stretching_concentrates_near_surface(self):
+        """With stretching > 0, layers should be thinner near the surface."""
+        coord_uniform = make_hybrid_levels(40, stretching=0.0)
+        coord_stretched = make_hybrid_levels(40, stretching=2.0)
+
+        # Compute dp at reference for the bottom 5 levels
+        dp_uniform = jnp.array(coord_uniform.dA + coord_uniform.dB) * P_REF
+        dp_stretched = jnp.array(coord_stretched.dA + coord_stretched.dB) * P_REF
+
+        # Bottom levels should be thinner with stretching
+        bottom_mean_uniform = float(jnp.mean(dp_uniform[-5:]))
+        bottom_mean_stretched = float(jnp.mean(dp_stretched[-5:]))
+        assert bottom_mean_stretched < bottom_mean_uniform
+
+    def test_stretching_preserves_pressure_range(self):
+        """Total pressure range should be the same regardless of stretching."""
+        for s in [0.0, 1.0, 2.0, 3.0]:
+            coord = make_hybrid_levels(40, p_top_Pa=200.0, stretching=s)
+            p_half_ref = (coord.A_half + coord.B_half) * P_REF
+            assert float(p_half_ref[0]) == pytest.approx(200.0, rel=1e-3)
+            assert float(p_half_ref[-1]) == pytest.approx(P_REF, rel=1e-5)
+
+    def test_stretching_zero_is_uniform(self):
+        """stretching=0 should give uniform pressure spacing at reference."""
+        coord = make_hybrid_levels(40, p_top_Pa=200.0, stretching=0.0)
+        p_half_ref = (coord.A_half + coord.B_half) * P_REF
+        dp_ref = jnp.diff(p_half_ref)
+        np.testing.assert_allclose(dp_ref, dp_ref[0], rtol=1e-4)
+
+    def test_stretching_positive_dp(self):
+        """All layers should have positive pressure thickness with stretching."""
+        for s in [1.0, 2.0, 3.0, 4.0]:
+            coord = make_hybrid_levels(40, stretching=s)
+            p_s = jnp.full((2, 2, 2), P_REF)
+            dp = dp_from_hybrid(coord, p_s)
+            assert jnp.all(dp > 0), f"stretching={s} gave non-positive dp"
+
+    def test_stretching_monotonic_pressure(self):
+        """Pressure should increase monotonically from top to surface."""
+        coord = make_hybrid_levels(60, p_top_Pa=10.0, stretching=2.5)
+        p_s = jnp.full((2, 2, 2), P_REF)
+        p_half = pressure_from_hybrid(coord, p_s, full=False)
+        dp = jnp.diff(p_half, axis=-1)
+        assert jnp.all(dp > 0), "Pressure not monotonically increasing"
+
+
+class TestStandardLevels:
+    """Test standard_hybrid_levels presets."""
+
+    @pytest.mark.parametrize("nlev", [20, 40, 60])
+    def test_standard_creates_valid_coordinate(self, nlev):
+        """standard_hybrid_levels should create valid coordinates."""
+        coord = standard_hybrid_levels(nlev)
+        assert coord.n_levels == nlev
+        assert coord.A_half.shape == (nlev + 1,)
+        assert float(coord.B_half[0]) == pytest.approx(0.0, abs=1e-7)
+        assert float(coord.B_half[-1]) == pytest.approx(1.0, abs=1e-7)
+
+    @pytest.mark.parametrize("nlev", [20, 40, 60])
+    def test_standard_positive_dp(self, nlev):
+        """All standard level sets should have positive dp."""
+        coord = standard_hybrid_levels(nlev)
+        p_s = jnp.full((2, 2), P_REF)
+        dp = dp_from_hybrid(coord, p_s)
+        assert jnp.all(dp > 0)
+
+    @pytest.mark.parametrize("nlev", [20, 40, 60])
+    def test_standard_monotonic_pressure(self, nlev):
+        """All standard level sets should have monotonic pressure."""
+        coord = standard_hybrid_levels(nlev)
+        p_half_ref = (coord.A_half + coord.B_half) * P_REF
+        dp = jnp.diff(p_half_ref)
+        assert jnp.all(dp > 0)
+
+    def test_l40_has_bl_resolution(self):
+        """L40 should have enhanced BL resolution (thinner bottom layers)."""
+        coord = standard_hybrid_levels(40)
+        p_half_ref = (coord.A_half + coord.B_half) * P_REF
+        dp_ref = jnp.diff(p_half_ref)
+
+        # Bottom layer should be thinner than mean
+        mean_dp = float(jnp.mean(dp_ref))
+        bottom_dp = float(dp_ref[-1])
+        assert bottom_dp < mean_dp * 0.5, (
+            f"Bottom layer {bottom_dp:.0f} Pa not much thinner than mean {mean_dp:.0f} Pa"
+        )
+
+    def test_l40_ptop(self):
+        """L40 should have p_top around 200 Pa."""
+        coord = standard_hybrid_levels(40)
+        p_half_ref = (coord.A_half + coord.B_half) * P_REF
+        p_top = float(p_half_ref[0])
+        assert 100 < p_top < 500, f"L40 p_top={p_top:.0f} Pa outside expected range"
+
+    def test_l60_ptop(self):
+        """L60 should have p_top around 10 Pa (0.1 hPa)."""
+        coord = standard_hybrid_levels(60)
+        p_half_ref = (coord.A_half + coord.B_half) * P_REF
+        p_top = float(p_half_ref[0])
+        assert 1 < p_top < 50, f"L60 p_top={p_top:.0f} Pa outside expected range"
+
+    def test_l40_geopotential_finite(self):
+        """L40 geopotential should be finite and well-behaved."""
+        coord = standard_hybrid_levels(40)
+        T = jnp.full((2, 2, 2, 40), 250.0)
+        p_s = jnp.full((2, 2, 2), P_REF)
+        phis = jnp.zeros((2, 2, 2))
+        Phi = compute_geopotential_hybrid(T, p_s, coord, phis)
+        assert jnp.all(jnp.isfinite(Phi))
+        assert float(Phi[0, 0, 0, 0]) > float(Phi[0, 0, 0, -1])
+
+    @pytest.mark.parametrize("nlev", [15, 25, 35, 50, 80])
+    def test_arbitrary_nlev(self, nlev):
+        """standard_hybrid_levels should work for arbitrary nlev values."""
+        coord = standard_hybrid_levels(nlev)
+        assert coord.n_levels == nlev
+        p_s = jnp.full((2, 2), P_REF)
+        dp = dp_from_hybrid(coord, p_s)
+        assert jnp.all(dp > 0)

@@ -61,8 +61,15 @@ parser.add_argument("--days", type=int, default=365,
                     help="Integration length [days] (default: 365)")
 parser.add_argument("--truncation", type=int, default=21,
                     help="Spectral truncation T (default: 21, ~5.6 deg; T42=~2.8 deg needs dt<=300)")
-parser.add_argument("--nlev", type=int, default=20,
-                    help="Number of vertical levels (default: 20)")
+parser.add_argument("--nlev", type=int, default=40,
+                    help="Number of vertical levels (default: 40)")
+parser.add_argument("--vertical-coord", type=str, default="hybrid",
+                    choices=["sigma", "hybrid"],
+                    help="Vertical coordinate type (default: hybrid)")
+parser.add_argument("--p-top", type=float, default=None,
+                    help="Model top pressure [Pa] for hybrid coord (default: auto)")
+parser.add_argument("--stretching", type=float, default=None,
+                    help="Sinh stretching for BL resolution (default: auto)")
 parser.add_argument("--dt", type=float, default=600.0,
                     help="Time step [s] (default: 600 for T21; use 300 for T42)")
 parser.add_argument("--diag-days", type=int, default=5,
@@ -115,10 +122,15 @@ from legoesm.grids.gaussian import (
     sh_synthesis,
     sh_synthesis_3d,
 )
-from legoesm.grids.vertical import create_sigma_coordinate
+from legoesm.grids.vertical import create_sigma_coordinate, make_hybrid_levels
 
 grid = create_gaussian_grid(TRUNC)
-sigma = create_sigma_coordinate(NLEV)
+if args.vertical_coord == "hybrid":
+    _p_top = args.p_top if args.p_top is not None else 200.0
+    _stretch = args.stretching if args.stretching is not None else 2.0
+    sigma = make_hybrid_levels(NLEV, p_top_Pa=_p_top, stretching=_stretch)
+else:
+    sigma = create_sigma_coordinate(NLEV)
 
 n_lat = grid.n_lat
 n_lon = grid.n_lon
@@ -354,8 +366,15 @@ def _make_physics_fn():
 
         T_sfc = sic * _T_ice + (1.0 - sic) * sst
 
-        p_full = p_s_g[..., None] * sigma_coord.sigma_full
-        p_half = p_s_g[..., None] * sigma_coord.sigma_half
+        from legoesm.grids.vertical import (
+            HybridSigmaPressureCoordinate, pressure_from_hybrid,
+        )
+        if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+            p_full = pressure_from_hybrid(sigma_coord, p_s_g, full=True)
+            p_half = pressure_from_hybrid(sigma_coord, p_s_g, full=False)
+        else:
+            p_full = p_s_g[..., None] * sigma_coord.sigma_full
+            p_half = p_s_g[..., None] * sigma_coord.sigma_half
 
         T_col = T_g.reshape(-1, NLEV)
         p_full_col = p_full.reshape(-1, NLEV)

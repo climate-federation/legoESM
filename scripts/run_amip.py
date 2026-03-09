@@ -85,8 +85,15 @@ parser.add_argument("--days", type=int, default=200,
                     help="Integration length [days] (default: 200)")
 parser.add_argument("--resolution", type=int, default=16,
                     help="Cubed-sphere N (default: 16)")
-parser.add_argument("--nlev", type=int, default=20,
-                    help="Number of vertical levels (default: 20)")
+parser.add_argument("--nlev", type=int, default=40,
+                    help="Number of vertical levels (default: 40)")
+parser.add_argument("--vertical-coord", type=str, default="hybrid",
+                    choices=["sigma", "hybrid"],
+                    help="Vertical coordinate type (default: hybrid)")
+parser.add_argument("--p-top", type=float, default=None,
+                    help="Model top pressure [Pa] for hybrid coord (default: auto)")
+parser.add_argument("--stretching", type=float, default=None,
+                    help="Sinh stretching for BL resolution (default: auto)")
 parser.add_argument("--dt", type=float, default=600.0,
                     help="Time step [s] (default: 600)")
 parser.add_argument("--diag-days", type=int, default=5,
@@ -141,10 +148,15 @@ from legoesm.forcing.amip_config import (
     load_checkpoint,
 )
 
+_p_top = args.p_top if args.p_top is not None else (200.0 if args.vertical_coord == "hybrid" else 1000.0)
+_stretching = args.stretching if args.stretching is not None else (2.0 if args.vertical_coord == "hybrid" else 0.0)
 exp_config = AMIPExperimentConfig(
     resolution=args.resolution,
     nlev=args.nlev,
     dt=args.dt,
+    vertical_coord=args.vertical_coord,
+    p_top_Pa=_p_top,
+    stretching=_stretching,
     start_day=args.start_day,
     days=args.days,
     diag_days=args.diag_days,
@@ -216,15 +228,22 @@ print()
 # 1. Grid and vertical coordinate
 # ---------------------------------------------------------------------------
 from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.grids.vertical import create_sigma_coordinate
+from legoesm.grids.vertical import create_sigma_coordinate, make_hybrid_levels
 
 grid = create_cubed_sphere(N)
-sigma = create_sigma_coordinate(NLEV)
+if exp_config.vertical_coord == "hybrid":
+    sigma = make_hybrid_levels(
+        NLEV, p_top_Pa=exp_config.p_top_Pa, stretching=exp_config.stretching,
+    )
+    _vcoord_label = f"hybrid σ-p (p_top={exp_config.p_top_Pa:.0f} Pa, stretch={exp_config.stretching:.1f})"
+else:
+    sigma = create_sigma_coordinate(NLEV)
+    _vcoord_label = "sigma"
 
 shape_2d = (6, N, N)
 shape_3d = (6, N, N, NLEV)
 
-print(f"  Grid created: {6*N*N} columns, {NLEV} levels")
+print(f"  Grid created: {6*N*N} columns, {NLEV} levels ({_vcoord_label})")
 
 # ---------------------------------------------------------------------------
 # 2. Load AMIP forcing
