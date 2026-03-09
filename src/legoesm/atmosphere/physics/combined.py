@@ -185,7 +185,15 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             if callable(reset_fn):
                 reset_fn()
 
+    def set_time(day_of_year: float, seconds_of_day: float):
+        """Propagate time to all sub-physics modules (e.g. radiation)."""
+        for fn in fns:
+            st = getattr(fn, "set_time", None)
+            if callable(st):
+                st(day_of_year, seconds_of_day)
+
     physics_fn.reset_state = reset_state
+    physics_fn.set_time = set_time
     return physics_fn
 
 
@@ -260,7 +268,14 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             if callable(reset_fn):
                 reset_fn()
 
+    def set_time(day_of_year: float, seconds_of_day: float):
+        for fn in fns:
+            st = getattr(fn, "set_time", None)
+            if callable(st):
+                st(day_of_year, seconds_of_day)
+
     physics_fn.reset_state = reset_state
+    physics_fn.set_time = set_time
     return physics_fn
 
 
@@ -330,5 +345,12 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             if callable(reset_fn):
                 reset_fn()
 
+    def set_time(day_of_year: float, seconds_of_day: float):
+        for fn in fns:
+            st = getattr(fn, "set_time", None)
+            if callable(st):
+                st(day_of_year, seconds_of_day)
+
     physics_fn.reset_state = reset_state
+    physics_fn.set_time = set_time
     return physics_fn

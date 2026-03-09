@@ -31,9 +31,13 @@ from legoesm.grids.vertical import (
 )
 from legoesm import constants
 
-from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+from legoesm.atmosphere.physics.radiation.config import (
+    OzoneProfileConfig,
+    RadiationConfig,
+)
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.solar import (
+    cos_zenith_angle,
     daily_mean_insolation,
     perpetual_equinox_insolation,
 )
@@ -57,14 +61,79 @@ def _get_radiation_fn(config: RadiationConfig):
         raise ValueError(f"Unknown radiation scheme: {config.scheme!r}")
 
 
-def _compute_insolation(lat: jnp.ndarray, config: RadiationConfig) -> jnp.ndarray:
-    """Compute TOA insolation using shared geometry settings."""
+def _compute_insolation(
+    lat: jnp.ndarray,
+    config: RadiationConfig,
+    lon: jnp.ndarray | None = None,
+    day_of_year: float = 80.0,
+    seconds_of_day: float = 43200.0,
+) -> tuple[jnp.ndarray, jnp.ndarray | None]:
+    """Compute TOA insolation and (optionally) cosine zenith angle.
+
+    Returns
+    -------
+    insolation : jnp.ndarray
+        TOA downward SW flux per column [W/m^2].
+    cos_sza : jnp.ndarray or None
+        Cosine of solar zenith angle (clipped >=0) per column.
+        Only returned when ``config.diurnal_cycle`` is True.
+    """
+    S_0 = config.rrtmgp.S_0 if config.scheme == "rrtmgp" else config.gray.S_0
+    obliquity = config.gray.obliquity
+
+    if config.diurnal_cycle and lon is not None:
+        hour = seconds_of_day / 3600.0
+        cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, obliquity)
+        cos_sza_pos = jnp.maximum(cos_sza, 0.0)
+        return S_0 * cos_sza_pos, cos_sza_pos
+
+    # No diurnal cycle — daily-mean or perpetual-equinox insolation.
     gray_config = config.gray
     if gray_config.perpetual_equinox:
-        return perpetual_equinox_insolation(lat, gray_config.S_0)
-    return daily_mean_insolation(
-        lat, 80.0, gray_config.S_0, gray_config.obliquity,
+        return perpetual_equinox_insolation(lat, S_0), None
+    return daily_mean_insolation(lat, day_of_year, S_0, obliquity), None
+
+
+def _compute_ozone_vmr(
+    p_full: jnp.ndarray,
+    lat: jnp.ndarray,
+    ozone_config: OzoneProfileConfig,
+) -> jnp.ndarray | None:
+    """Compute ozone VMR for RRTMGP.
+
+    Parameters
+    ----------
+    p_full : jnp.ndarray
+        Pressure at full levels (ncol, nlev) [Pa].
+    lat : jnp.ndarray
+        Latitude (ncol,) [rad].
+    ozone_config : OzoneProfileConfig
+
+    Returns
+    -------
+    jnp.ndarray or None
+        Ozone VMR (ncol, nlev), or None to use the built-in profile.
+    """
+    if ozone_config.source == "standard":
+        return None  # rrtmgp_radiation uses its built-in _standard_o3_profile
+
+    if ozone_config.source == "none":
+        return jnp.full_like(p_full, 1.0e-10)
+
+    # source == "analytical": latitude-dependent Gaussian profile.
+    p_hPa = p_full / 100.0
+    p_peak = ozone_config.p_peak_hPa
+    sigma = ozone_config.sigma_logp
+    o3 = ozone_config.o3_max_vmr * jnp.exp(
+        -0.5 * ((jnp.log(p_hPa) - jnp.log(p_peak)) / sigma) ** 2
     )
+
+    if ozone_config.lat_dependence:
+        # Ozone is ~2x higher at poles than equator in the lower stratosphere.
+        lat_factor = 1.0 + 0.5 * jnp.sin(lat) ** 2  # (ncol,)
+        o3 = o3 * lat_factor[:, None]  # broadcast to (ncol, nlev)
+
+    return jnp.clip(o3, 1.0e-10, None)
 
 
 def _call_radiation_backend(
@@ -76,10 +145,18 @@ def _call_radiation_backend(
     lat: jnp.ndarray,
     q_v: jnp.ndarray | None,
     insolation: jnp.ndarray,
+    cos_sza: jnp.ndarray | None = None,
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
 ):
-    """Call configured radiation backend with a unified integration interface."""
+    """Call configured radiation backend with a unified integration interface.
+
+    Parameters
+    ----------
+    cos_sza : jnp.ndarray or None
+        If provided (diurnal cycle), used directly as RRTMGP cos(zenith).
+        Otherwise derived from ``insolation / S_0``.
+    """
     radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
 
     if radiation_config.scheme == "gray":
@@ -94,24 +171,31 @@ def _call_radiation_backend(
             config=scheme_config,
         )
 
-    # RRTMGP: derive effective cosine zenith from daily-mean insolation.
-    S_0 = radiation_config.rrtmgp.S_0
-    cos_zenith = jnp.clip(
-        insolation / jnp.clip(S_0, 1.0e-6, None),
-        0.0,
-        1.0,
-    )
+    # RRTMGP: use actual cos_sza if available (diurnal cycle), else derive
+    # from daily-mean insolation.
+    if cos_sza is None:
+        S_0 = radiation_config.rrtmgp.S_0
+        cos_sza = jnp.clip(
+            insolation / jnp.clip(S_0, 1.0e-6, None),
+            0.0,
+            1.0,
+        )
     q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
+
+    # Compute ozone VMR based on config.
+    o3_vmr = _compute_ozone_vmr(p_full, lat, radiation_config.ozone)
+
     return radiation_fn(
         T=T,
         p_full=p_full,
         p_half=p_half,
         sfc_temperature=sfc_temperature,
         q_v=q_v_safe,
-        cos_zenith=cos_zenith,
+        cos_zenith=cos_sza,
         config=scheme_config,
         sfc_albedo_override=sfc_albedo_override,
         sfc_emissivity_override=sfc_emissivity_override,
+        o3_vmr=o3_vmr,
     )
 
 
@@ -156,7 +240,15 @@ def _make_hydrostatic_radiation(
     """Create radiation physics_fn for PrimitiveEquationModel.
 
     Signature: (state, grid, sigma_coord) -> HydrostaticTendencies
+
+    The returned function has a ``set_time(day_of_year, seconds_of_day)``
+    method that must be called before each radiation step when
+    ``radiation_config.diurnal_cycle`` is True (or when the seasonal
+    cycle should vary with day of year).
     """
+    # Mutable time state — updated via physics_fn.set_time().
+    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}
+
     def physics_fn(
         state: HydrostaticState,
         grid: CubedSphereGrid,
@@ -165,6 +257,7 @@ def _make_hydrostatic_radiation(
         T = state.T.data          # (6, n, n, nlev)
         p_s = state.p_s.data      # (6, n, n)
         lat = grid.lat             # (6, n, n)
+        lon = grid.lon             # (6, n, n)
 
         nlev = sigma_coord.n_levels
         shape_3d = T.shape
@@ -177,8 +270,13 @@ def _make_hydrostatic_radiation(
         # Surface temperature = lowest-level temperature
         T_sfc = T[..., -1]  # (6, n, n)
 
-        # Insolation for both gray and RRTMGP backends.
-        insol = _compute_insolation(lat, radiation_config)
+        # Insolation (and optionally cos_sza for diurnal cycle).
+        insol, cos_sza = _compute_insolation(
+            lat, radiation_config,
+            lon=lon,
+            day_of_year=_time["day_of_year"],
+            seconds_of_day=_time["seconds_of_day"],
+        )
 
         # Reshape cubed sphere to columns: (6,n,n,...) -> (ncol, ...)
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]  # 6*n*n
@@ -188,6 +286,7 @@ def _make_hydrostatic_radiation(
         T_sfc_col = T_sfc.reshape(ncol)
         lat_col = lat.reshape(ncol)
         insol_col = insol.reshape(ncol)
+        cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
         # Hydrostatic state is dry-only; pass zero vapor to moist-aware backends.
         q_v_col = jnp.zeros_like(T_col)
@@ -201,6 +300,7 @@ def _make_hydrostatic_radiation(
             lat=lat_col,
             q_v=q_v_col,
             insolation=insol_col,
+            cos_sza=cos_sza_col,
         )
 
         # Reshape heating rate back to (6, n, n, nlev)
@@ -232,6 +332,12 @@ def _make_hydrostatic_radiation(
             ),
         )
 
+    def set_time(day_of_year: float, seconds_of_day: float):
+        """Update time state for the next radiation call."""
+        _time["day_of_year"] = day_of_year
+        _time["seconds_of_day"] = seconds_of_day
+
+    physics_fn.set_time = set_time
     return physics_fn
 
 
@@ -246,6 +352,8 @@ def _make_nonhydrostatic_radiation(
 
     Signature: (state, grid, height_coord, terrain_metric) -> NonHydrostaticTendencies
     """
+    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}
+
     def physics_fn(
         state: NonHydrostaticState,
         grid: CubedSphereGrid,
@@ -255,6 +363,7 @@ def _make_nonhydrostatic_radiation(
         theta_p = state.theta_prime.data   # (6, n, n, nlev)
         rho_p = state.rho_prime.data       # (6, n, n, nlev)
         lat = grid.lat                     # (6, n, n)
+        lon = grid.lon                     # (6, n, n)
 
         # Reference profiles (1D -> broadcast)
         theta_0 = height_coord.theta_ref   # (nlev,)
@@ -286,8 +395,13 @@ def _make_nonhydrostatic_radiation(
         # Surface temperature = lowest-level temperature
         T_sfc = T[..., -1]
 
-        # Insolation for both gray and RRTMGP backends.
-        insol = _compute_insolation(lat, radiation_config)
+        # Insolation (and optionally cos_sza for diurnal cycle).
+        insol, cos_sza = _compute_insolation(
+            lat, radiation_config,
+            lon=lon,
+            day_of_year=_time["day_of_year"],
+            seconds_of_day=_time["seconds_of_day"],
+        )
 
         # Reshape to columns
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
@@ -297,6 +411,7 @@ def _make_nonhydrostatic_radiation(
         T_sfc_col = T_sfc.reshape(ncol)
         lat_col = lat.reshape(ncol)
         insol_col = insol.reshape(ncol)
+        cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
         # NH state stores water vapor in tracer slot 0 when moist tracers exist.
         if state.tracers.data.shape[-1] > 0:
@@ -314,6 +429,7 @@ def _make_nonhydrostatic_radiation(
             lat=lat_col,
             q_v=q_v_col,
             insolation=insol_col,
+            cos_sza=cos_sza_col,
         )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -357,6 +473,11 @@ def _make_nonhydrostatic_radiation(
             ),
         )
 
+    def set_time(day_of_year: float, seconds_of_day: float):
+        _time["day_of_year"] = day_of_year
+        _time["seconds_of_day"] = seconds_of_day
+
+    physics_fn.set_time = set_time
     return physics_fn
 
 
@@ -374,6 +495,8 @@ def _make_spectral_pe_radiation(
     Transforms spectral state to Gaussian grid, computes radiation,
     then transforms temperature tendency back to spectral space.
     """
+    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}
+
     def physics_fn(state, grid, sigma_coord, grid_fields=None):
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
@@ -401,9 +524,26 @@ def _make_spectral_pe_radiation(
         # Surface temperature = lowest level
         T_sfc = T[..., -1]  # (n_lat, n_lon)
 
-        # Insolation: broadcast lat to (n_lat, n_lon).
-        insol_1d = _compute_insolation(lat, radiation_config)
-        insol = jnp.broadcast_to(insol_1d[:, None], (n_lat, n_lon))
+        # Insolation (with diurnal cycle support).
+        # For diurnal cycle we need 2-D lat/lon; otherwise lat is 1-D and
+        # the result is broadcast to (n_lat, n_lon).
+        if radiation_config.diurnal_cycle:
+            lat_2d = jnp.broadcast_to(lat[:, None], (n_lat, n_lon))
+            lon_2d = jnp.broadcast_to(grid.lon[None, :], (n_lat, n_lon))
+            insol, cos_sza = _compute_insolation(
+                lat_2d, radiation_config,
+                lon=lon_2d,
+                day_of_year=_time["day_of_year"],
+                seconds_of_day=_time["seconds_of_day"],
+            )
+        else:
+            insol_1d, _ = _compute_insolation(
+                lat, radiation_config,
+                day_of_year=_time["day_of_year"],
+                seconds_of_day=_time["seconds_of_day"],
+            )
+            insol = jnp.broadcast_to(insol_1d[:, None], (n_lat, n_lon))
+            cos_sza = None
 
         # Reshape to columns: (n_lat, n_lon, ...) -> (ncol, ...)
         ncol = n_lat * n_lon
@@ -413,6 +553,7 @@ def _make_spectral_pe_radiation(
         T_sfc_col = T_sfc.reshape(ncol)
         lat_col = jnp.broadcast_to(lat[:, None], (n_lat, n_lon)).reshape(ncol)
         insol_col = insol.reshape(ncol)
+        cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
         # Spectral PE state is dry-only in current formulation.
         q_v_col = jnp.zeros_like(T_col)
@@ -426,6 +567,7 @@ def _make_spectral_pe_radiation(
             lat=lat_col,
             q_v=q_v_col,
             insolation=insol_col,
+            cos_sza=cos_sza_col,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)
@@ -446,4 +588,9 @@ def _make_spectral_pe_radiation(
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
 
+    def set_time(day_of_year: float, seconds_of_day: float):
+        _time["day_of_year"] = day_of_year
+        _time["seconds_of_day"] = seconds_of_day
+
+    physics_fn.set_time = set_time
     return physics_fn

@@ -133,6 +133,7 @@ def rrtmgp_radiation(
     config: RRTMGPConfig,
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
+    o3_vmr: jnp.ndarray | None = None,
 ) -> RadiationOutput:
     """Compute radiation using jax-rrtmgp.
 
@@ -159,6 +160,10 @@ def rrtmgp_radiation(
         coarse resolution (see limitations in docs/amip.md).
     sfc_emissivity_override : jnp.ndarray | float | None
         Same as sfc_albedo_override but for surface emissivity.
+    o3_vmr : jnp.ndarray | None
+        External ozone volume mixing ratio (ncol, nlev) in legoESM
+        convention (index 0 = TOA).  If None, the built-in US Standard
+        Atmosphere 1976 profile is used.
 
     Returns
     -------
@@ -180,9 +185,17 @@ def rrtmgp_radiation(
     # Water vapor: convert mass mixing ratio to volume mixing ratio
     mol_ratio = rrtmgp_constants.R_V / rrtmgp_constants.R_D
     h2o_vmr = mol_ratio * q_v_3d / (1.0 - q_v_3d)
+
+    # Ozone: use external profile if provided, otherwise built-in.
+    if o3_vmr is not None:
+        # External ozone in legoESM convention (TOA-first) → flip + add halos.
+        o3_3d = _add_halos(jnp.clip(o3_vmr, 1.0e-10, None)[:, None, ::-1])
+    else:
+        o3_3d = _standard_o3_profile(p_3d)
+
     vmr_fields = {
         "h2o": h2o_vmr,
-        "o3": _standard_o3_profile(p_3d),
+        "o3": o3_3d,
     }
 
     # Compute molecules per area (centered difference preserves shape via roll)

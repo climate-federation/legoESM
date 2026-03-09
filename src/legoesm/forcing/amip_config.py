@@ -52,6 +52,7 @@ class AMIPExperimentConfig(NamedTuple):
     # Radiation
     radiation: str = "gray"  # "gray" or "rrtmg"
     rad_update_steps: int = 1  # recompute radiation every N steps (1 = every step)
+    diurnal_cycle: bool = False  # use instantaneous solar zenith angle
 
     # Physics — gray radiation
     tau_equator: float = 7.2

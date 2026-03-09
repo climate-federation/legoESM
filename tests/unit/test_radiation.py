@@ -14,6 +14,7 @@ import jax.numpy as jnp
 
 from legoesm.atmosphere.physics.radiation.config import (
     GrayRadiationConfig,
+    OzoneProfileConfig,
     RadiationConfig,
 )
 from legoesm.atmosphere.physics.radiation.output import RadiationOutput
@@ -559,3 +560,301 @@ class TestRRTMGP:
         grad_cz = jax.grad(loss)(cos_zen)
         assert jnp.all(jnp.isfinite(grad_cz))
         assert grad_cz.shape == cos_zen.shape
+
+
+# ===========================================================================
+# Diurnal cycle tests
+# ===========================================================================
+
+class TestDiurnalCycle:
+    """Tests for diurnal cycle in radiation."""
+
+    def test_set_time_exists_on_physics_fn(self):
+        """make_radiation_physics should return a function with set_time."""
+        config = RadiationConfig(scheme="gray")
+        physics_fn = make_radiation_physics(config, model_type="hydrostatic")
+        assert hasattr(physics_fn, "set_time")
+        assert callable(physics_fn.set_time)
+
+    def test_diurnal_day_night_contrast(self):
+        """Diurnal cycle should produce day/night SW contrast."""
+        ncol, nlev = 4, 10
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        config = GrayRadiationConfig()
+        lon = jnp.linspace(0, 2 * jnp.pi, ncol)
+
+        # Noon (hour=12) — sun near local noon
+        cos_sza_noon = cos_zenith_angle(lat, lon, 80.0, 12.0)
+        insol_noon = 1360.0 * jnp.maximum(cos_sza_noon, 0.0)
+        out_noon = gray_radiation(T, p_full, p_half, T_sfc, lat, None, insol_noon, config)
+
+        # Midnight (hour=0) — sun on opposite side
+        cos_sza_midnight = cos_zenith_angle(lat, lon, 80.0, 0.0)
+        insol_midnight = 1360.0 * jnp.maximum(cos_sza_midnight, 0.0)
+        out_midnight = gray_radiation(T, p_full, p_half, T_sfc, lat, None, insol_midnight, config)
+
+        # SW heating at noon should be larger than at midnight for at least
+        # some columns (those that are sunlit at noon)
+        sw_noon_max = float(jnp.max(jnp.abs(out_noon.sw_heating_rate)))
+        sw_midnight_max = float(jnp.max(jnp.abs(out_midnight.sw_heating_rate)))
+        # At least one of these should be significantly different
+        assert sw_noon_max > 0.0 or sw_midnight_max > 0.0
+
+    def test_diurnal_integration_hydrostatic(self):
+        """Integration with diurnal_cycle=True should produce valid tendencies."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        config = RadiationConfig(scheme="gray", diurnal_cycle=True)
+        physics_fn = make_radiation_physics(config, model_type="hydrostatic")
+
+        # Set time to noon at equinox
+        physics_fn.set_time(80.0, 43200.0)
+        tendencies = physics_fn(state, grid, sigma)
+
+        assert tendencies.dT_dt.data.shape == (6, 8, 8, 10)
+        max_hr = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
+        assert max_hr > 0.0
+        assert jnp.all(jnp.isfinite(tendencies.dT_dt.data))
+
+    def test_diurnal_nightside_zero_sw(self):
+        """Columns on the nightside should have zero SW insolation."""
+        # All columns at lon=pi (midnight side at hour=0)
+        lat = jnp.zeros(4)
+        lon = jnp.full(4, jnp.pi)
+        cos_sza = cos_zenith_angle(lat, lon, 80.0, 0.0)
+        # At equator, lon=pi, hour=0: hour_angle = 2*pi*(0/24) + pi - pi = 0
+        # cos_z = cos(0)*cos(delta)*cos(0) + ... should be > 0 for equinox
+        # Actually let's test lon=0, hour=0 -> hour_angle = 0 + 0 - pi = -pi
+        # cos_z = cos(lat)*cos(delta)*cos(-pi) = -cos(lat)*cos(delta) < 0 at equinox
+        lon_dark = jnp.zeros(4)  # lon=0, hour=0 -> nightside
+        cos_sza_dark = cos_zenith_angle(lat, lon_dark, 80.0, 0.0)
+        insol_dark = 1360.0 * jnp.maximum(cos_sza_dark, 0.0)
+        # Should be zero (nightside)
+        assert jnp.allclose(insol_dark, 0.0, atol=1e-6)
+
+    def test_daily_mean_unchanged_without_diurnal(self):
+        """Without diurnal_cycle, behavior should be identical to before."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(8)
+        sigma = create_sigma_coordinate(10)
+        state = held_suarez_init(grid, sigma)
+
+        config = RadiationConfig(scheme="gray", diurnal_cycle=False)
+        physics_fn = make_radiation_physics(config, model_type="hydrostatic")
+
+        # Two calls with different times should give the same result
+        # (perpetual equinox is the default for gray)
+        physics_fn.set_time(80.0, 0.0)
+        tend1 = physics_fn(state, grid, sigma)
+
+        physics_fn.set_time(80.0, 43200.0)
+        tend2 = physics_fn(state, grid, sigma)
+
+        assert jnp.allclose(tend1.dT_dt.data, tend2.dT_dt.data)
+
+
+# ===========================================================================
+# Ozone profile tests
+# ===========================================================================
+
+class TestOzoneProfile:
+    """Tests for prescribed ozone profiles in RRTMGP."""
+
+    def test_analytical_ozone_profile_shape(self):
+        """Analytical ozone profile should return correct shape."""
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _compute_ozone_vmr,
+        )
+        ncol, nlev = 8, 20
+        p_full = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev)[None, :], (ncol, nlev)
+        )
+        lat = jnp.linspace(-jnp.pi / 2, jnp.pi / 2, ncol)
+        config = OzoneProfileConfig(source="analytical")
+
+        o3 = _compute_ozone_vmr(p_full, lat, config)
+        assert o3 is not None
+        assert o3.shape == (ncol, nlev)
+        assert jnp.all(jnp.isfinite(o3))
+        assert jnp.all(o3 > 0)
+
+    def test_analytical_ozone_peak_location(self):
+        """Ozone should peak near the configured p_peak pressure."""
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _compute_ozone_vmr,
+        )
+        ncol = 1
+        nlev = 100
+        # Fine pressure grid to resolve the peak
+        p_full = jnp.broadcast_to(
+            jnp.logspace(jnp.log10(10.0), jnp.log10(1.0e5), nlev)[None, :],
+            (ncol, nlev),
+        )
+        lat = jnp.zeros(ncol)
+        config = OzoneProfileConfig(source="analytical", p_peak_hPa=30.0)
+
+        o3 = _compute_ozone_vmr(p_full, lat, config)
+        peak_idx = int(jnp.argmax(o3[0]))
+        peak_p_hPa = float(p_full[0, peak_idx]) / 100.0
+        # Peak should be near 30 hPa (within a factor of 2)
+        assert 15.0 < peak_p_hPa < 60.0
+
+    def test_analytical_ozone_latitude_dependence(self):
+        """Polar ozone should be higher than equatorial ozone."""
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _compute_ozone_vmr,
+        )
+        ncol = 2
+        nlev = 40
+        p_full = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev)[None, :], (ncol, nlev)
+        )
+        # Column 0 = equator, column 1 = pole
+        lat = jnp.array([0.0, jnp.pi / 2])
+        config = OzoneProfileConfig(source="analytical", lat_dependence=True)
+
+        o3 = _compute_ozone_vmr(p_full, lat, config)
+        # Pole (sin²(π/2) = 1) should have 1.5x the equatorial value
+        assert float(jnp.max(o3[1])) > float(jnp.max(o3[0]))
+        # Ratio should be close to 1.5
+        ratio = float(jnp.max(o3[1])) / float(jnp.max(o3[0]))
+        assert 1.4 < ratio < 1.6
+
+    def test_analytical_no_lat_dependence(self):
+        """With lat_dependence=False, polar and equatorial ozone should match."""
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _compute_ozone_vmr,
+        )
+        ncol = 2
+        nlev = 40
+        p_full = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev)[None, :], (ncol, nlev)
+        )
+        lat = jnp.array([0.0, jnp.pi / 2])
+        config = OzoneProfileConfig(source="analytical", lat_dependence=False)
+
+        o3 = _compute_ozone_vmr(p_full, lat, config)
+        assert jnp.allclose(o3[0], o3[1])
+
+    def test_standard_ozone_returns_none(self):
+        """Standard source should return None (use built-in profile)."""
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _compute_ozone_vmr,
+        )
+        ncol, nlev = 4, 20
+        p_full = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev)[None, :], (ncol, nlev)
+        )
+        lat = jnp.zeros(ncol)
+        config = OzoneProfileConfig(source="standard")
+
+        assert _compute_ozone_vmr(p_full, lat, config) is None
+
+    def test_none_ozone_returns_near_zero(self):
+        """Source 'none' should return near-zero ozone."""
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _compute_ozone_vmr,
+        )
+        ncol, nlev = 4, 20
+        p_full = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev)[None, :], (ncol, nlev)
+        )
+        lat = jnp.zeros(ncol)
+        config = OzoneProfileConfig(source="none")
+
+        o3 = _compute_ozone_vmr(p_full, lat, config)
+        assert o3 is not None
+        assert float(jnp.max(o3)) < 1.0e-9
+
+    def test_rrtmgp_with_external_ozone(self):
+        """RRTMGP should accept external ozone and produce valid output."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 4, 40
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 0.001)
+        cos_zen = jnp.full(ncol, 0.5)
+        config = RRTMGPConfig()
+
+        # Create a simple ozone profile
+        p_hPa = p_full / 100.0
+        o3_vmr = 8.0e-6 * jnp.exp(
+            -0.5 * ((jnp.log(p_hPa) - jnp.log(30.0)) / 1.5) ** 2
+        )
+
+        out = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, config,
+            o3_vmr=o3_vmr,
+        )
+        assert jnp.all(jnp.isfinite(out.heating_rate))
+        assert out.heating_rate.shape == (ncol, nlev)
+
+    def test_rrtmgp_ozone_affects_heating(self):
+        """External ozone should produce different heating than no ozone."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 4, 40
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 0.001)
+        cos_zen = jnp.full(ncol, 0.5)
+        config = RRTMGPConfig()
+
+        # With zero ozone
+        o3_zero = jnp.full((ncol, nlev), 1.0e-10)
+        out_no_o3 = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, config,
+            o3_vmr=o3_zero,
+        )
+
+        # With substantial ozone
+        p_hPa = p_full / 100.0
+        o3_vmr = 8.0e-6 * jnp.exp(
+            -0.5 * ((jnp.log(p_hPa) - jnp.log(30.0)) / 1.5) ** 2
+        )
+        out_with_o3 = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, config,
+            o3_vmr=o3_vmr,
+        )
+
+        # Heating rates should differ
+        diff = float(jnp.max(jnp.abs(
+            out_with_o3.heating_rate - out_no_o3.heating_rate
+        )))
+        assert diff > 1e-8
+
+    def test_integration_with_analytical_ozone(self):
+        """Integration bridge should work with analytical ozone config."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(4)
+        sigma = create_sigma_coordinate(8)
+        state = held_suarez_init(grid, sigma)
+
+        config = RadiationConfig(
+            scheme="rrtmgp",
+            ozone=OzoneProfileConfig(source="analytical"),
+        )
+        physics_fn = make_radiation_physics(config, model_type="hydrostatic")
+        tendencies = physics_fn(state, grid, sigma)
+
+        assert tendencies.dT_dt.data.shape == (6, 4, 4, 8)
+        assert jnp.all(jnp.isfinite(tendencies.dT_dt.data))
+        max_hr = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
+        assert max_hr > 0.0

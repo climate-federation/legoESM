@@ -283,7 +283,10 @@ print(f"  Moisture: RH_init={RH_INIT}, mean q_v={mean_qv:.2f} g/kg, CWV={cwv_ini
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
-from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
+from legoesm.atmosphere.physics.radiation.solar import (
+    cos_zenith_angle,
+    daily_mean_insolation,
+)
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 
 S_0 = 1360.0
@@ -326,6 +329,7 @@ _forcing_state = {
     'sst': jnp.full(shape_2d, 290.0),
     'sic': jnp.zeros(shape_2d),
     'day_of_year': 1.0,
+    'seconds_of_day': 43200.0,
     'q_v': q_v,  # will be updated each step
 }
 
@@ -345,6 +349,7 @@ def _make_physics_fn():
         sst = _forcing_state['sst']
         sic = _forcing_state['sic']
         day_of_year = _forcing_state['day_of_year']
+        seconds_of_day = _forcing_state['seconds_of_day']
         q_v_now = _forcing_state['q_v']
 
         T_sfc = sic * _T_ice + (1.0 - sic) * sst
@@ -358,6 +363,7 @@ def _make_physics_fn():
         q_v_col = q_v_now.reshape(-1, NLEV)
         T_sfc_col = T_sfc.reshape(-1)
         lat_col = lat_2d_grid.reshape(-1)
+        lon_col = lon_2d_grid.reshape(-1)
 
         # --- Radiation ---
         insol = daily_mean_insolation(lat_col, day_of_year, S_0)
@@ -522,6 +528,7 @@ checkpoint_interval = int(CHECKPOINT_DAYS * 86400 / DT) if CHECKPOINT_DAYS > 0 e
 
 # Latitude array for radiation (broadcast to 2d) — used by physics_fn
 lat_2d_grid = jnp.broadcast_to(grid.lat[:, None], shape_2d)
+lon_2d_grid = jnp.broadcast_to(grid.lon[None, :], shape_2d)
 
 # Diagnostics storage
 diag_times = []
@@ -566,12 +573,14 @@ t_wall_start = time.time()
 
 day = current_day
 day_of_year = day % 365.0 + 1.0
+seconds_of_day = (day * 86400.0) % 86400.0
 sst, sic = get_sst_sic(day)
 
 # Set forcing state for physics_fn
 _forcing_state['sst'] = sst
 _forcing_state['sic'] = sic
 _forcing_state['day_of_year'] = day_of_year
+_forcing_state['seconds_of_day'] = seconds_of_day
 _forcing_state['q_v'] = q_v
 
 # Coupled dynamics + radiation + friction step
@@ -609,6 +618,7 @@ t_wall_start = time.time()
 for step in range(1, n_steps_total):
     day = START_DAY + (step + 1) * DT / 86400.0
     day_of_year = day % 365.0 + 1.0
+    seconds_of_day = (day * 86400.0) % 86400.0
 
     sst, sic = get_sst_sic(day)
 
@@ -616,6 +626,7 @@ for step in range(1, n_steps_total):
     _forcing_state['sst'] = sst
     _forcing_state['sic'] = sic
     _forcing_state['day_of_year'] = day_of_year
+    _forcing_state['seconds_of_day'] = seconds_of_day
     _forcing_state['q_v'] = q_v
 
     # (a) Coupled dynamics + radiation + friction

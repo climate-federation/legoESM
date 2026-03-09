@@ -104,6 +104,8 @@ parser.add_argument("--radiation", type=str, default="gray",
                     help="Radiation scheme: gray (Frierson 2006) or rrtmg (RRTMGP correlated-k) (default: gray)")
 parser.add_argument("--rad-update-steps", type=int, default=1,
                     help="Recompute radiation every N steps (1 = every step; default: 1)")
+parser.add_argument("--diurnal-cycle", action="store_true", default=False,
+                    help="Use instantaneous solar zenith angle instead of daily-mean insolation")
 # RRTMG gas concentrations
 parser.add_argument("--co2-ppmv", type=float, default=415.0,
                     help="CO2 concentration [ppmv] for RRTMG (default: 415)")
@@ -147,6 +149,7 @@ exp_config = AMIPExperimentConfig(
     sic_scale=args.sic_scale if args.sic_scale is not None else 1.0,
     radiation=args.radiation,
     rad_update_steps=args.rad_update_steps,
+    diurnal_cycle=args.diurnal_cycle,
     co2_ppmv=args.co2_ppmv,
     ch4_ppbv=args.ch4_ppbv,
     n2o_ppbv=args.n2o_ppbv,
@@ -161,6 +164,7 @@ START_DAY = exp_config.start_day
 CHECKPOINT_DAYS = exp_config.checkpoint_days
 RADIATION = exp_config.radiation
 RAD_UPDATE_STEPS = exp_config.rad_update_steps
+DIURNAL_CYCLE = exp_config.diurnal_cycle
 
 # Build output directory with run identifier
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -364,7 +368,10 @@ else:
 from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
-from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
+from legoesm.atmosphere.physics.radiation.solar import (
+    cos_zenith_angle,
+    daily_mean_insolation,
+)
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 
 restart_step = 0
@@ -464,9 +471,15 @@ _qv_smooth_coeff = HYPERDIFF * 0.5
 if RADIATION == "gray":
     @jax.jit
     def radiation_step(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
-                       lat_col, day_of_year, albedo_col, emis_col):
-        """Gray radiation call."""
-        insol = daily_mean_insolation(lat_col, day_of_year, _S_0)
+                       lat_col, lon_col, day_of_year, seconds_of_day,
+                       albedo_col, emis_col):
+        """Gray radiation call (daily-mean or diurnal-cycle insolation)."""
+        if DIURNAL_CYCLE:
+            hour = seconds_of_day / 3600.0
+            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
+            insol = _S_0 * jnp.maximum(cos_sza, 0.0)
+        else:
+            insol = daily_mean_insolation(lat_col, day_of_year, _S_0)
         return gray_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col,
@@ -477,10 +490,16 @@ else:
 
     @jax.jit
     def radiation_step(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
-                       lat_col, day_of_year, albedo_col, emis_col):
+                       lat_col, lon_col, day_of_year, seconds_of_day,
+                       albedo_col, emis_col):
         """RRTMG radiation call with per-column albedo/emissivity."""
-        insol = daily_mean_insolation(lat_col, day_of_year, _S_0)
-        cos_zenith = jnp.clip(insol / jnp.clip(_S_0, 1.0e-6, None), 0.0, 1.0)
+        if DIURNAL_CYCLE:
+            hour = seconds_of_day / 3600.0
+            cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
+            cos_zenith = jnp.maximum(cos_sza, 0.0)
+        else:
+            insol = daily_mean_insolation(lat_col, day_of_year, _S_0)
+            cos_zenith = jnp.clip(insol / jnp.clip(_S_0, 1.0e-6, None), 0.0, 1.0)
         return rrtmgp_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_col,
@@ -540,7 +559,8 @@ def physics_step_no_rad(T, p_s, q_v, u, v, sst, sic, lat, dt,
             sw_up_toa_held, lw_up_toa_held)
 
 
-def compute_radiation_and_physics(T, p_s, q_v, u, v, sst, sic, lat, day_of_year, dt):
+def compute_radiation_and_physics(T, p_s, q_v, u, v, sst, sic, lat, lon,
+                                  day_of_year, seconds_of_day, dt):
     """Full physics step: recompute radiation + convection + BL."""
     nlev = _sigma_full.shape[0]
     shape_3d = T.shape
@@ -560,11 +580,13 @@ def compute_radiation_and_physics(T, p_s, q_v, u, v, sst, sic, lat, day_of_year,
     q_v_col = q_v.reshape(ncol, nlev)
     T_sfc_col = T_sfc.reshape(ncol)
     lat_col = lat.reshape(ncol)
+    lon_col = lon.reshape(ncol)
     albedo_col = albedo.reshape(ncol)
     emis_col = emissivity.reshape(ncol)
 
     rad_out = radiation_step(T_col, p_full_col, p_half_col, q_v_col,
-                             T_sfc_col, lat_col, day_of_year,
+                             T_sfc_col, lat_col, lon_col,
+                             day_of_year, seconds_of_day,
                              albedo_col, emis_col)
     dT_dt_rad = rad_out.heating_rate.reshape(shape_3d)
 
@@ -711,6 +733,7 @@ t_wall_start = time.time()
 # JIT warmup: run one full step (with radiation)
 day = current_day
 day_of_year = day % 365.0 + 1.0
+seconds_of_day = (day * 86400.0) % 86400.0
 
 sst, sic = get_sst_sic(day)
 
@@ -719,7 +742,7 @@ state = model.step_with_physics(state, DT)
 (dT_dt, dq_v_dt, _precip, _sw, _lw, _sw_toa, _lw_toa), _held_dT_rad = \
     compute_radiation_and_physics(
         state.T.data, state.p_s.data, q_v, state.u.data, state.v.data,
-        sst, sic, grid.lat, day_of_year, DT,
+        sst, sic, grid.lat, grid.lon, day_of_year, seconds_of_day, DT,
     )
 _held_sw_net_sfc = _sw
 _held_lw_net_sfc = _lw
@@ -752,6 +775,7 @@ t_wall_start = time.time()
 for step in range(start_step + 1, n_steps_total):
     day = START_DAY + (step + 1) * DT / 86400.0
     day_of_year = day % 365.0 + 1.0
+    seconds_of_day = (day * 86400.0) % 86400.0
 
     sst, sic = get_sst_sic(day)
 
@@ -765,7 +789,7 @@ for step in range(start_step + 1, n_steps_total):
         (dT_dt, dq_v_dt, _precip, _sw, _lw, _sw_toa, _lw_toa), _held_dT_rad = \
             compute_radiation_and_physics(
                 state.T.data, state.p_s.data, q_v, state.u.data, state.v.data,
-                sst, sic, grid.lat, day_of_year, DT,
+                sst, sic, grid.lat, grid.lon, day_of_year, seconds_of_day, DT,
             )
         _held_sw_net_sfc = _sw
         _held_lw_net_sfc = _lw

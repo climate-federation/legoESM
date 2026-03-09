@@ -21,6 +21,7 @@ Example
 
 from legoesm.atmosphere.physics.radiation.config import (
     GrayRadiationConfig,
+    OzoneProfileConfig,
     RadiationConfig,
     RRTMGPConfig,
 )

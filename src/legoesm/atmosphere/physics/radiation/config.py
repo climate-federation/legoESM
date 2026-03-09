@@ -113,6 +113,41 @@ class RRTMGPConfig(NamedTuple):
     include_clouds: bool = False
 
 
+class OzoneProfileConfig(NamedTuple):
+    """Configuration for the ozone profile used in RRTMGP radiation.
+
+    Controls how ozone volume mixing ratio is computed per column per level.
+    Only affects the RRTMGP backend; gray radiation does not use ozone.
+
+    Fields
+    ------
+    source : str
+        Ozone profile source:
+
+        - ``"standard"``: built-in US Standard Atmosphere 1976 profile.
+          Gaussian in log-pressure, peak at 10 hPa, 8 ppmv, no latitude
+          dependence.  This is the original default.
+        - ``"analytical"``: latitude-dependent Gaussian profile with
+          configurable parameters.  Peak scaled by
+          ``1 + 0.5 * sin²(lat)`` when ``lat_dependence`` is True.
+        - ``"none"``: zero ozone (disables ozone absorption entirely).
+    p_peak_hPa : float
+        Peak pressure [hPa] for the analytical profile (default 30.0).
+    o3_max_vmr : float
+        Maximum ozone VMR at the profile peak (default 8.0e-6 = 8 ppmv).
+    sigma_logp : float
+        Width of the Gaussian in log-pressure space (default 1.5).
+    lat_dependence : bool
+        If True, scale analytical ozone by ``1 + 0.5 * sin²(lat)``
+        (default True).  Only used when ``source="analytical"``.
+    """
+    source: str = "standard"
+    p_peak_hPa: float = 30.0
+    o3_max_vmr: float = 8.0e-6
+    sigma_logp: float = 1.5
+    lat_dependence: bool = True
+
+
 class RadiationConfig(NamedTuple):
     """Top-level radiation configuration.
 
@@ -128,8 +163,18 @@ class RadiationConfig(NamedTuple):
         Configuration for RRTMGP radiation.
     update_interval_steps : int
         Recompute radiation every N time steps (1 = every step).
+    diurnal_cycle : bool
+        If True, compute instantaneous insolation from the solar zenith
+        angle (per column, per time step) instead of daily-mean insolation.
+        Requires ``set_time(day_of_year, seconds_of_day)`` to be called on
+        the physics function before each radiation step.  Default False
+        for backward compatibility with idealized experiments.
+    ozone : OzoneProfileConfig
+        Ozone profile configuration for RRTMGP.  Ignored by gray radiation.
     """
     scheme: str = "gray"
     gray: GrayRadiationConfig = GrayRadiationConfig()
     rrtmgp: RRTMGPConfig = RRTMGPConfig()
     update_interval_steps: int = 1
+    diurnal_cycle: bool = False
+    ozone: OzoneProfileConfig = OzoneProfileConfig()
