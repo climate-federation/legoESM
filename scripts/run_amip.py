@@ -161,6 +161,7 @@ from legoesm.forcing.amip_config import (
     save_checkpoint,
     load_checkpoint,
 )
+from legoesm.diagnostics.energy_budget import EnergyBudgetTracker
 
 _p_top = args.p_top if args.p_top is not None else (200.0 if args.vertical_coord == "hybrid" else 1000.0)
 _stretching = args.stretching if args.stretching is not None else (2.0 if args.vertical_coord == "hybrid" else 0.0)
@@ -666,7 +667,8 @@ else:
 @jax.jit
 def physics_step_no_rad(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
                         dT_dt_rad_held, sw_net_sfc_held, lw_net_sfc_held,
-                        sw_up_toa_held, lw_up_toa_held):
+                        sw_up_toa_held, lw_up_toa_held,
+                        sw_down_toa_held=None):
     """Convection + microphysics + BL exchange with held radiation tendencies."""
     nlev = _sigma_full.shape[0]
     shape_3d = T.shape
@@ -739,8 +741,10 @@ def physics_step_no_rad(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
     dq_v_dt = dq_v_dt_conv + dq_v_dt_micro
     dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
 
+    _sw_down_toa = sw_down_toa_held if sw_down_toa_held is not None else jnp.zeros_like(sw_up_toa_held)
     return (dT_dt, dq_v_dt, dq_c_dt, dq_r_dt, precip + precip_micro,
-            sw_net_sfc_held, lw_net_sfc_held, sw_up_toa_held, lw_up_toa_held)
+            sw_net_sfc_held, lw_net_sfc_held, sw_up_toa_held, lw_up_toa_held,
+            _sw_down_toa)
 
 
 def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
@@ -789,10 +793,12 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
     lw_net_sfc = (rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]).reshape(shape_2d)
     sw_up_toa = rad_out.sw_flux_up[:, 0].reshape(shape_2d)
     lw_up_toa = rad_out.lw_flux_up[:, 0].reshape(shape_2d)
+    sw_down_toa = rad_out.sw_flux_down[:, 0].reshape(shape_2d)
 
     return physics_step_no_rad(
         T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
         dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
+        sw_down_toa,
     ), dT_dt_rad
 
 
@@ -890,6 +896,9 @@ diag_profiles_T = []
 diag_profiles_qv = []
 diag_sigma = np.asarray(sigma.sigma_full)
 
+# Energy budget tracker (Task 11)
+energy_tracker = EnergyBudgetTracker()
+
 # 2D snapshots at selected days (store all faces for lat-lon remapping)
 snapshot_days_set = set()
 for d in [5, 10, 15, 20, 25, 30, 60, 100, 200, 300]:
@@ -921,6 +930,7 @@ _held_sw_net_sfc = jnp.zeros(shape_2d)
 _held_lw_net_sfc = jnp.zeros(shape_2d)
 _held_sw_up_toa = jnp.zeros(shape_2d)
 _held_lw_up_toa = jnp.zeros(shape_2d)
+_held_sw_down_toa = jnp.zeros(shape_2d)
 
 t_wall_start = time.time()
 
@@ -933,7 +943,7 @@ sst, sic = get_sst_sic(day)
 
 state = model.step_with_physics(state, DT)
 
-(dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, _sw, _lw, _sw_toa, _lw_toa), _held_dT_rad = \
+(dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad = \
     compute_radiation_and_physics(
         state.T.data, state.p_s.data, q_v, q_c, q_r, state.u.data, state.v.data,
         sst, sic, grid.lat, grid.lon, day_of_year, seconds_of_day, DT,
@@ -942,6 +952,7 @@ _held_sw_net_sfc = _sw
 _held_lw_net_sfc = _lw
 _held_sw_up_toa = _sw_toa
 _held_lw_up_toa = _lw_toa
+_held_sw_down_toa = _sw_down_toa
 
 new_T = state.T.data + DT * dT_dt
 q_v = jnp.maximum(q_v + DT * dq_v_dt, 0.0)
@@ -988,7 +999,7 @@ for step in range(start_step + 1, n_steps_total):
 
     if need_rad:
         (dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip,
-         _sw, _lw, _sw_toa, _lw_toa), _held_dT_rad = \
+         _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad = \
             compute_radiation_and_physics(
                 state.T.data, state.p_s.data, q_v, q_c, q_r,
                 state.u.data, state.v.data,
@@ -998,15 +1009,17 @@ for step in range(start_step + 1, n_steps_total):
         _held_lw_net_sfc = _lw
         _held_sw_up_toa = _sw_toa
         _held_lw_up_toa = _lw_toa
+        _held_sw_down_toa = _sw_down_toa
     else:
         dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, \
-            _sw, _lw, _sw_toa, _lw_toa = \
+            _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa = \
             physics_step_no_rad(
                 state.T.data, state.p_s.data, q_v, q_c, q_r,
                 state.u.data, state.v.data,
                 sst, sic, grid.lat, DT,
                 _held_dT_rad, _held_sw_net_sfc, _held_lw_net_sfc,
                 _held_sw_up_toa, _held_lw_up_toa,
+                _held_sw_down_toa,
             )
 
     new_T = state.T.data + DT * dT_dt
@@ -1098,6 +1111,16 @@ for step in range(start_step + 1, n_steps_total):
         diag_sw_net_sfc.append(mean_sw_sfc)
         diag_lw_net_sfc.append(mean_lw_sfc)
 
+        # Energy budget (Task 11)
+        _elapsed_s = elapsed_day * 86400.0
+        _ebudget = energy_tracker.update(
+            state.T.data, q_v, state.u.data, state.v.data,
+            state.phis.data, state.p_s.data,
+            _dsigma, _sigma_full,
+            _sw_down_toa, _sw_toa, _lw_toa, _sw, _lw,
+            elapsed_seconds=_elapsed_s,
+        )
+
         _diag_line = (f"  {elapsed_day:6.0f}  {mean_sst:8.2f}  {mean_sic:6.3f}  {mean_T:8.2f}"
               f"  {mean_T_low:8.2f}  {mean_precip:8.2f}  {mean_cwv:6.1f}  {max_v:8.2f}"
               f"  {mean_sw_toa:7.1f}  {mean_lw_toa:7.1f}  {mean_sw_sfc:6.1f}  {mean_lw_sfc:6.1f}")
@@ -1148,6 +1171,9 @@ total_wall = time.time() - t_wall_start
 print(f"\n  Integration complete: {total_wall:.1f}s wall time")
 print(f"  Status: {run_status}")
 
+# Energy budget summary (Task 11)
+print(f"\n  {energy_tracker.summary()}")
+
 # ---------------------------------------------------------------------------
 # 10. Save results
 # ---------------------------------------------------------------------------
@@ -1195,6 +1221,7 @@ with open(OUTPUT_DIR / "results.txt", "w") as f:
         f.write(f"Final <Precip>: {diag_precip[-1]:.2f} mm/day\n")
         f.write(f"Final <CWV>: {diag_CWV[-1]:.1f} kg/m2\n")
         f.write(f"Final <p_s>: {diag_dry_mass[-1]:.1f} Pa\n")
+    f.write(f"\n{energy_tracker.summary()}\n")
 
 # Save timeseries as npz for post-processing
 np.savez(
@@ -1215,6 +1242,11 @@ np.savez(
     sigma=diag_sigma,
     profiles_T=np.array(diag_profiles_T) if diag_profiles_T else np.array([]),
     profiles_qv=np.array(diag_profiles_qv) if diag_profiles_qv else np.array([]),
+    # Energy budget (Task 11)
+    energy_toa_net=np.array(energy_tracker.toa_net),
+    energy_column=np.array(energy_tracker.column_energy),
+    energy_dE_dt=np.array(energy_tracker.dE_dt),
+    energy_residual=np.array(energy_tracker.residual),
 )
 
 # Save final checkpoint
