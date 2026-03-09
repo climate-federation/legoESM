@@ -113,6 +113,10 @@ parser.add_argument("--ch4-ppbv", type=float, default=1900.0,
                     help="CH4 concentration [ppbv] for RRTMG (default: 1900)")
 parser.add_argument("--n2o-ppbv", type=float, default=332.0,
                     help="N2O concentration [ppbv] for RRTMG (default: 332)")
+parser.add_argument("--ozone-source", type=str, default="standard",
+                    choices=["standard", "analytical", "none"],
+                    help="Ozone profile for RRTMG: standard (US Std Atm 1976), "
+                         "analytical (lat-dependent Gaussian), none (default: standard)")
 parser.add_argument("--discretization", type=str, default="centered",
                     choices=["centered", "finite_volume", "cgrid"],
                     help="Dynamical core discretization (default: centered)")
@@ -153,6 +157,7 @@ exp_config = AMIPExperimentConfig(
     co2_ppmv=args.co2_ppmv,
     ch4_ppbv=args.ch4_ppbv,
     n2o_ppbv=args.n2o_ppbv,
+    ozone_source=args.ozone_source,
 )
 
 N = exp_config.resolution
@@ -165,6 +170,7 @@ CHECKPOINT_DAYS = exp_config.checkpoint_days
 RADIATION = exp_config.radiation
 RAD_UPDATE_STEPS = exp_config.rad_update_steps
 DIURNAL_CYCLE = exp_config.diurnal_cycle
+OZONE_SOURCE = exp_config.ozone_source
 
 # Build output directory with run identifier
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -406,8 +412,9 @@ else:
 # 5. Physics configuration
 # ---------------------------------------------------------------------------
 from legoesm.atmosphere.physics.radiation.config import (
-    GrayRadiationConfig, RRTMGPConfig,
+    GrayRadiationConfig, OzoneProfileConfig, RRTMGPConfig,
 )
+from legoesm.atmosphere.physics.radiation.integration import _compute_ozone_vmr
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 
 gray_config = GrayRadiationConfig(
@@ -431,14 +438,21 @@ rrtmg_config = RRTMGPConfig(
 
 sbm_config = SBMConfig(tau_c=exp_config.sbm_tau_c, RH_ref=exp_config.sbm_RH_ref)
 
+ozone_config = OzoneProfileConfig(source=OZONE_SOURCE)
+
 _rad_scheme_label = _rad_label
 print(f"  Physics: {_rad_scheme_label} + SBM convection (operator-split)")
 if RADIATION == "rrtmg":
+    _o3_labels = {
+        "standard": "US Std Atm 1976 climatology",
+        "analytical": "analytical lat-dependent Gaussian",
+        "none": "disabled (no ozone absorption)",
+    }
     print(f"  RRTMG atmospheric composition:")
     print(f"    CO2 = {exp_config.co2_ppmv} ppmv  (ACTIVE — affects LW/SW absorption)")
     print(f"    CH4 = {exp_config.ch4_ppbv} ppbv  (ACTIVE — affects LW absorption)")
     print(f"    N2O = {exp_config.n2o_ppbv} ppbv  (ACTIVE — affects LW absorption)")
-    print(f"    O3  = US Std Atm 1976 climatology (ACTIVE — prescribed, not interactive)")
+    print(f"    O3  = {_o3_labels.get(OZONE_SOURCE, OZONE_SOURCE)} (ACTIVE — prescribed, not interactive)")
     print(f"    H2O = from prognostic q_v  (ACTIVE — radiatively interactive)")
     print(f"    Clouds: clear-sky only (no cloud-radiation interaction)")
     print(f"    Aerosols: none (clear-sky)")
@@ -500,12 +514,14 @@ else:
         else:
             insol = daily_mean_insolation(lat_col, day_of_year, _S_0)
             cos_zenith = jnp.clip(insol / jnp.clip(_S_0, 1.0e-6, None), 0.0, 1.0)
+        o3_vmr = _compute_ozone_vmr(p_full_col, lat_col, ozone_config)
         return rrtmgp_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_col,
             cos_zenith=cos_zenith, config=rrtmg_config,
             sfc_albedo_override=albedo_col,
             sfc_emissivity_override=emis_col,
+            o3_vmr=o3_vmr,
         )
 
 

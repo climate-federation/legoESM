@@ -70,6 +70,7 @@ class AMIPExperimentConfig(NamedTuple):
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
+    ozone_source: str = "standard"  # "standard", "analytical", or "none"
     sfc_emissivity: float = 0.98
     emissivity_ice: float = 0.99
 
