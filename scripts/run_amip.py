@@ -117,6 +117,10 @@ parser.add_argument("--ozone-source", type=str, default="standard",
                     choices=["standard", "analytical", "none"],
                     help="Ozone profile for RRTMG: standard (US Std Atm 1976), "
                          "analytical (lat-dependent Gaussian), none (default: standard)")
+parser.add_argument("--clouds", type=str, default="none",
+                    choices=["none", "sundqvist", "xu_randall"],
+                    help="Cloud fraction scheme for RRTMG: none (clear-sky), "
+                         "sundqvist (RH-based), xu_randall (RH+condensate) (default: none)")
 parser.add_argument("--discretization", type=str, default="centered",
                     choices=["centered", "finite_volume", "cgrid"],
                     help="Dynamical core discretization (default: centered)")
@@ -158,6 +162,7 @@ exp_config = AMIPExperimentConfig(
     ch4_ppbv=args.ch4_ppbv,
     n2o_ppbv=args.n2o_ppbv,
     ozone_source=args.ozone_source,
+    cloud_scheme=args.clouds,
 )
 
 N = exp_config.resolution
@@ -171,6 +176,7 @@ RADIATION = exp_config.radiation
 RAD_UPDATE_STEPS = exp_config.rad_update_steps
 DIURNAL_CYCLE = exp_config.diurnal_cycle
 OZONE_SOURCE = exp_config.ozone_source
+CLOUD_SCHEME = exp_config.cloud_scheme
 
 # Build output directory with run identifier
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -415,6 +421,8 @@ from legoesm.atmosphere.physics.radiation.config import (
     GrayRadiationConfig, OzoneProfileConfig, RRTMGPConfig,
 )
 from legoesm.atmosphere.physics.radiation.integration import _compute_ozone_vmr
+from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 
 gray_config = GrayRadiationConfig(
@@ -439,6 +447,7 @@ rrtmg_config = RRTMGPConfig(
 sbm_config = SBMConfig(tau_c=exp_config.sbm_tau_c, RH_ref=exp_config.sbm_RH_ref)
 
 ozone_config = OzoneProfileConfig(source=OZONE_SOURCE)
+cloud_config = CloudConfig(scheme=CLOUD_SCHEME)
 
 _rad_scheme_label = _rad_label
 print(f"  Physics: {_rad_scheme_label} + SBM convection (operator-split)")
@@ -448,13 +457,18 @@ if RADIATION == "rrtmg":
         "analytical": "analytical lat-dependent Gaussian",
         "none": "disabled (no ozone absorption)",
     }
+    _cloud_labels = {
+        "none": "clear-sky only (no cloud-radiation interaction)",
+        "sundqvist": "Sundqvist (1988) RH-based cloud fraction",
+        "xu_randall": "Xu-Randall (1996) RH+condensate cloud fraction",
+    }
     print(f"  RRTMG atmospheric composition:")
     print(f"    CO2 = {exp_config.co2_ppmv} ppmv  (ACTIVE — affects LW/SW absorption)")
     print(f"    CH4 = {exp_config.ch4_ppbv} ppbv  (ACTIVE — affects LW absorption)")
     print(f"    N2O = {exp_config.n2o_ppbv} ppbv  (ACTIVE — affects LW absorption)")
     print(f"    O3  = {_o3_labels.get(OZONE_SOURCE, OZONE_SOURCE)} (ACTIVE — prescribed, not interactive)")
     print(f"    H2O = from prognostic q_v  (ACTIVE — radiatively interactive)")
-    print(f"    Clouds: clear-sky only (no cloud-radiation interaction)")
+    print(f"    Clouds: {_cloud_labels.get(CLOUD_SCHEME, CLOUD_SCHEME)}")
     print(f"    Aerosols: none (clear-sky)")
 
 # ---------------------------------------------------------------------------
@@ -515,6 +529,20 @@ else:
             insol = daily_mean_insolation(lat_col, day_of_year, _S_0)
             cos_zenith = jnp.clip(insol / jnp.clip(_S_0, 1.0e-6, None), 0.0, 1.0)
         o3_vmr = _compute_ozone_vmr(p_full_col, lat_col, ozone_config)
+        # Compute cloud properties if cloud scheme is active.
+        cloud_kwargs = {}
+        if CLOUD_SCHEME != "none":
+            dp = p_half_col[:, 1:] - p_half_col[:, :-1]
+            cloud_props = compute_cloud_properties(
+                T=T_col, p_full=p_full_col, q_v=q_v_col,
+                dp=dp, config=cloud_config,
+            )
+            cloud_kwargs = {
+                "cloud_path_liq": cloud_props.lwp,
+                "cloud_path_ice": cloud_props.iwp,
+                "cloud_r_eff_liq": cloud_props.r_eff_liq,
+                "cloud_r_eff_ice": cloud_props.r_eff_ice,
+            }
         return rrtmgp_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_col,
@@ -522,6 +550,7 @@ else:
             sfc_albedo_override=albedo_col,
             sfc_emissivity_override=emis_col,
             o3_vmr=o3_vmr,
+            **cloud_kwargs,
         )
 
 

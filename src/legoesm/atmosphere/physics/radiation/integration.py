@@ -31,6 +31,8 @@ from legoesm.grids.vertical import (
 )
 from legoesm import constants
 
+from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
 from legoesm.atmosphere.physics.radiation.config import (
     OzoneProfileConfig,
     RadiationConfig,
@@ -148,6 +150,8 @@ def _call_radiation_backend(
     cos_sza: jnp.ndarray | None = None,
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
+    q_cloud: jnp.ndarray | None = None,
+    q_ice: jnp.ndarray | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -156,6 +160,10 @@ def _call_radiation_backend(
     cos_sza : jnp.ndarray or None
         If provided (diurnal cycle), used directly as RRTMGP cos(zenith).
         Otherwise derived from ``insolation / S_0``.
+    q_cloud : jnp.ndarray or None
+        Cloud liquid water mixing ratio (ncol, nlev) [kg/kg].
+    q_ice : jnp.ndarray or None
+        Cloud ice mixing ratio (ncol, nlev) [kg/kg].
     """
     radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
 
@@ -185,6 +193,27 @@ def _call_radiation_backend(
     # Compute ozone VMR based on config.
     o3_vmr = _compute_ozone_vmr(p_full, lat, radiation_config.ozone)
 
+    # Compute cloud properties if cloud scheme is active.
+    cloud_kwargs = {}
+    if radiation_config.cloud_scheme != "none":
+        cloud_config = CloudConfig(scheme=radiation_config.cloud_scheme)
+        dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
+        cloud_props = compute_cloud_properties(
+            T=T,
+            p_full=p_full,
+            q_v=q_v_safe,
+            dp=dp,
+            config=cloud_config,
+            q_cloud=q_cloud,
+            q_ice=q_ice,
+        )
+        cloud_kwargs = {
+            "cloud_path_liq": cloud_props.lwp,
+            "cloud_path_ice": cloud_props.iwp,
+            "cloud_r_eff_liq": cloud_props.r_eff_liq,
+            "cloud_r_eff_ice": cloud_props.r_eff_ice,
+        }
+
     return radiation_fn(
         T=T,
         p_full=p_full,
@@ -196,6 +225,7 @@ def _call_radiation_backend(
         sfc_albedo_override=sfc_albedo_override,
         sfc_emissivity_override=sfc_emissivity_override,
         o3_vmr=o3_vmr,
+        **cloud_kwargs,
     )
 
 
@@ -414,11 +444,24 @@ def _make_nonhydrostatic_radiation(
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
         # NH state stores water vapor in tracer slot 0 when moist tracers exist.
-        if state.tracers.data.shape[-1] > 0:
+        n_tracers = state.tracers.data.shape[-1]
+        if n_tracers > 0:
             q_v = jnp.clip(state.tracers.data[..., 0], 0.0, None)
         else:
             q_v = jnp.zeros_like(T)
         q_v_col = q_v.reshape(ncol, nlev)
+
+        # Cloud condensate from tracer slots 1 (q_c) and 3 (q_i).
+        q_cloud_col = None
+        q_ice_col = None
+        if n_tracers > 1:
+            q_cloud_col = jnp.clip(
+                state.tracers.data[..., 1], 0.0, None
+            ).reshape(ncol, nlev)
+        if n_tracers > 3:
+            q_ice_col = jnp.clip(
+                state.tracers.data[..., 3], 0.0, None
+            ).reshape(ncol, nlev)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -430,6 +473,8 @@ def _make_nonhydrostatic_radiation(
             q_v=q_v_col,
             insolation=insol_col,
             cos_sza=cos_sza_col,
+            q_cloud=q_cloud_col,
+            q_ice=q_ice_col,
         )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).

@@ -171,6 +171,10 @@ class RadiationConfig(NamedTuple):
         for backward compatibility with idealized experiments.
     ozone : OzoneProfileConfig
         Ozone profile configuration for RRTMGP.  Ignored by gray radiation.
+    cloud_scheme : str
+        Cloud fraction scheme for cloud-radiation coupling:
+        ``"none"`` (clear-sky, default), ``"sundqvist"``, or ``"xu_randall"``.
+        Only affects RRTMGP; gray radiation ignores clouds.
     """
     scheme: str = "gray"
     gray: GrayRadiationConfig = GrayRadiationConfig()
@@ -178,3 +182,4 @@ class RadiationConfig(NamedTuple):
     update_interval_steps: int = 1
     diurnal_cycle: bool = False
     ozone: OzoneProfileConfig = OzoneProfileConfig()
+    cloud_scheme: str = "none"

@@ -28,6 +28,12 @@ from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.integration import (
     make_radiation_physics,
 )
+from legoesm.atmosphere.physics.clouds.config import CloudConfig
+from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+    compute_cloud_properties,
+    sundqvist_cloud_fraction,
+    xu_randall_cloud_fraction,
+)
 from legoesm import constants
 
 
@@ -858,3 +864,221 @@ class TestOzoneProfile:
         assert jnp.all(jnp.isfinite(tendencies.dT_dt.data))
         max_hr = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
         assert max_hr > 0.0
+
+
+# ===========================================================================
+# Cloud fraction and cloud-radiation coupling tests
+# ===========================================================================
+
+class TestCloudFraction:
+    """Tests for diagnostic cloud fraction and cloud-radiation coupling."""
+
+    def test_sundqvist_zero_below_rh_crit(self):
+        """Sundqvist cloud fraction should be 0 when RH < RH_crit."""
+        config = CloudConfig(scheme="sundqvist", rh_crit=0.7)
+        RH = jnp.array([[0.0, 0.3, 0.5, 0.69]])
+        cf = sundqvist_cloud_fraction(RH, config)
+        assert jnp.allclose(cf, 0.0, atol=1e-10)
+
+    def test_sundqvist_one_at_saturation(self):
+        """Sundqvist cloud fraction should be 1 when RH = 1."""
+        config = CloudConfig(scheme="sundqvist", rh_crit=0.7)
+        RH = jnp.array([[1.0]])
+        cf = sundqvist_cloud_fraction(RH, config)
+        assert jnp.allclose(cf, 1.0, atol=1e-10)
+
+    def test_sundqvist_linear_ramp(self):
+        """Sundqvist should give 0.5 at RH = (1 + RH_crit) / 2."""
+        config = CloudConfig(scheme="sundqvist", rh_crit=0.7)
+        RH_mid = jnp.array([[(1.0 + 0.7) / 2]])
+        cf = sundqvist_cloud_fraction(RH_mid, config)
+        assert jnp.allclose(cf, 0.5, atol=1e-6)
+
+    def test_xu_randall_zero_without_condensate(self):
+        """Xu-Randall should give 0 when condensate is zero."""
+        config = CloudConfig(scheme="xu_randall")
+        ncol, nlev = 4, 10
+        RH = jnp.full((ncol, nlev), 0.8)
+        q_c = jnp.zeros((ncol, nlev))
+        q_sat = jnp.full((ncol, nlev), 0.01)
+        cf = xu_randall_cloud_fraction(RH, q_c, q_sat, config)
+        assert jnp.allclose(cf, 0.0, atol=1e-8)
+
+    def test_xu_randall_increases_with_condensate(self):
+        """Xu-Randall cloud fraction should increase with condensate."""
+        config = CloudConfig(scheme="xu_randall")
+        RH = jnp.array([[0.9]])
+        q_sat = jnp.array([[0.01]])
+        cf_low = xu_randall_cloud_fraction(
+            RH, jnp.array([[1e-5]]), q_sat, config
+        )
+        cf_high = xu_randall_cloud_fraction(
+            RH, jnp.array([[1e-3]]), q_sat, config
+        )
+        assert float(cf_high[0, 0]) > float(cf_low[0, 0])
+
+    def test_cloud_properties_shape(self):
+        """compute_cloud_properties should return correct shapes."""
+        config = CloudConfig(scheme="sundqvist")
+        ncol, nlev = 8, 20
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 0.005)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+
+        props = compute_cloud_properties(T, p_full, q_v, dp, config)
+        assert props.cloud_fraction.shape == (ncol, nlev)
+        assert props.lwp.shape == (ncol, nlev)
+        assert props.iwp.shape == (ncol, nlev)
+        assert props.r_eff_liq.shape == (ncol, nlev)
+        assert props.r_eff_ice.shape == (ncol, nlev)
+        assert jnp.all(jnp.isfinite(props.cloud_fraction))
+        assert jnp.all(props.cloud_fraction >= 0.0)
+        assert jnp.all(props.cloud_fraction <= 1.0)
+
+    def test_cloud_properties_diagnostic_condensate(self):
+        """Without explicit condensate, diagnostic q_c should scale with cf."""
+        config = CloudConfig(scheme="sundqvist", rh_crit=0.7)
+        ncol, nlev = 4, 20
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        dp = p_half[:, 1:] - p_half[:, :-1]
+
+        # Moist atmosphere: high RH -> clouds
+        from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v_moist = 0.9 * q_sat  # RH = 0.9 > rh_crit
+
+        props = compute_cloud_properties(T, p_full, q_v_moist, dp, config)
+        # Should have nonzero cloud fraction and water paths
+        assert float(jnp.max(props.cloud_fraction)) > 0.5
+        assert float(jnp.sum(props.lwp + props.iwp)) > 0.0
+
+    def test_cloud_properties_ice_at_cold_temperatures(self):
+        """At cold temperatures, condensate should be mostly ice."""
+        config = CloudConfig(scheme="sundqvist", rh_crit=0.5)
+        ncol, nlev = 4, 20
+        # Cold atmosphere
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(
+            ncol, nlev, T_surface=220.0, T_top=180.0,
+        )
+        dp = p_half[:, 1:] - p_half[:, :-1]
+
+        from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+        q_sat = saturation_mixing_ratio(T, p_full)
+        q_v = 0.9 * q_sat
+
+        props = compute_cloud_properties(T, p_full, q_v, dp, config)
+        # Ice should dominate at these cold temps
+        total_ice = float(jnp.sum(props.iwp))
+        total_liq = float(jnp.sum(props.lwp))
+        assert total_ice > total_liq
+
+    def test_rrtmgp_with_clouds(self):
+        """RRTMGP should accept cloud properties and produce valid output."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 4, 40
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 0.001)
+        cos_zen = jnp.full(ncol, 0.5)
+        config = RRTMGPConfig()
+
+        # Create simple cloud properties
+        lwp = jnp.full((ncol, nlev), 0.01)  # 10 g/m^2 per layer
+        iwp = jnp.full((ncol, nlev), 0.005)
+        r_eff_liq = jnp.full((ncol, nlev), 10.0e-6)
+        r_eff_ice = jnp.full((ncol, nlev), 30.0e-6)
+
+        out = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, config,
+            cloud_path_liq=lwp,
+            cloud_path_ice=iwp,
+            cloud_r_eff_liq=r_eff_liq,
+            cloud_r_eff_ice=r_eff_ice,
+        )
+        assert jnp.all(jnp.isfinite(out.heating_rate))
+        assert out.heating_rate.shape == (ncol, nlev)
+
+    def test_clouds_affect_radiation(self):
+        """Clouds should change radiation fluxes compared to clear-sky."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 4, 40
+        T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 0.001)
+        cos_zen = jnp.full(ncol, 0.5)
+        config = RRTMGPConfig()
+
+        # Clear sky
+        out_clear = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, config,
+        )
+
+        # Cloudy sky
+        lwp = jnp.full((ncol, nlev), 0.05)
+        iwp = jnp.zeros((ncol, nlev))
+        r_eff_liq = jnp.full((ncol, nlev), 10.0e-6)
+        r_eff_ice = jnp.full((ncol, nlev), 30.0e-6)
+        out_cloudy = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, config,
+            cloud_path_liq=lwp, cloud_path_ice=iwp,
+            cloud_r_eff_liq=r_eff_liq, cloud_r_eff_ice=r_eff_ice,
+        )
+
+        # Heating rates should differ
+        diff = float(jnp.max(jnp.abs(
+            out_cloudy.heating_rate - out_clear.heating_rate
+        )))
+        assert diff > 1e-8
+
+        # Clouds should increase LW flux down at surface (greenhouse)
+        lw_down_sfc_clear = float(jnp.mean(out_clear.lw_flux_down[:, -1]))
+        lw_down_sfc_cloudy = float(jnp.mean(out_cloudy.lw_flux_down[:, -1]))
+        assert lw_down_sfc_cloudy > lw_down_sfc_clear
+
+    def test_integration_with_sundqvist_clouds(self):
+        """Integration bridge should work with Sundqvist cloud scheme."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(4)
+        sigma = create_sigma_coordinate(8)
+        state = held_suarez_init(grid, sigma)
+
+        config = RadiationConfig(
+            scheme="rrtmgp",
+            cloud_scheme="sundqvist",
+        )
+        physics_fn = make_radiation_physics(config, model_type="hydrostatic")
+        tendencies = physics_fn(state, grid, sigma)
+
+        assert tendencies.dT_dt.data.shape == (6, 4, 4, 8)
+        assert jnp.all(jnp.isfinite(tendencies.dT_dt.data))
+
+    def test_cloud_none_matches_clear_sky(self):
+        """cloud_scheme='none' should give identical results to no cloud config."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+
+        grid = create_cubed_sphere(4)
+        sigma = create_sigma_coordinate(8)
+        state = held_suarez_init(grid, sigma)
+
+        config_clear = RadiationConfig(scheme="rrtmgp")
+        config_none = RadiationConfig(scheme="rrtmgp", cloud_scheme="none")
+
+        tend_clear = make_radiation_physics(
+            config_clear, model_type="hydrostatic"
+        )(state, grid, sigma)
+        tend_none = make_radiation_physics(
+            config_none, model_type="hydrostatic"
+        )(state, grid, sigma)
+
+        assert jnp.allclose(tend_clear.dT_dt.data, tend_none.dT_dt.data)

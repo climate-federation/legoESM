@@ -134,6 +134,10 @@ def rrtmgp_radiation(
     sfc_albedo_override: jnp.ndarray | float | None = None,
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     o3_vmr: jnp.ndarray | None = None,
+    cloud_path_liq: jnp.ndarray | None = None,
+    cloud_path_ice: jnp.ndarray | None = None,
+    cloud_r_eff_liq: jnp.ndarray | None = None,
+    cloud_r_eff_ice: jnp.ndarray | None = None,
 ) -> RadiationOutput:
     """Compute radiation using jax-rrtmgp.
 
@@ -164,6 +168,15 @@ def rrtmgp_radiation(
         External ozone volume mixing ratio (ncol, nlev) in legoESM
         convention (index 0 = TOA).  If None, the built-in US Standard
         Atmosphere 1976 profile is used.
+    cloud_path_liq : jnp.ndarray | None
+        Grid-mean liquid water path per layer (ncol, nlev) [kg/m^2].
+        In legoESM convention (index 0 = TOA).
+    cloud_path_ice : jnp.ndarray | None
+        Grid-mean ice water path per layer (ncol, nlev) [kg/m^2].
+    cloud_r_eff_liq : jnp.ndarray | None
+        Liquid cloud effective radius per layer (ncol, nlev) [m].
+    cloud_r_eff_ice : jnp.ndarray | None
+        Ice cloud effective radius per layer (ncol, nlev) [m].
 
     Returns
     -------
@@ -236,6 +249,16 @@ def rrtmgp_radiation(
 
     sfc_T_2d = sfc_temperature[:, None]  # (ncol, 1)
 
+    # --- Cloud properties: reshape to jax-rrtmgp convention ---
+    has_clouds = cloud_path_liq is not None
+    if has_clouds:
+        cpl_3d = _add_halos(jnp.clip(cloud_path_liq, 0.0, None)[:, None, ::-1])
+        cpi_3d = _add_halos(jnp.clip(cloud_path_ice, 0.0, None)[:, None, ::-1])
+        crl_3d = _add_halos(jnp.clip(cloud_r_eff_liq, 1.0e-6, None)[:, None, ::-1])
+        cri_3d = _add_halos(jnp.clip(cloud_r_eff_ice, 1.0e-6, None)[:, None, ::-1])
+    else:
+        cpl_3d = cpi_3d = crl_3d = cri_3d = None
+
     # --- 4. Solve LW (vmr_fields keyed by chemical formula; solve_lw reindexes) ---
     lw_fluxes = two_stream.solve_lw(
         p_3d,
@@ -245,6 +268,10 @@ def rrtmgp_radiation(
         atmos_state,
         vmr_fields,
         sfc_T_2d,
+        cloud_r_eff_liq=crl_3d,
+        cloud_path_liq=cpl_3d,
+        cloud_r_eff_ice=cri_3d,
+        cloud_path_ice=cpi_3d,
         use_scan=config.use_scan,
     )
 
@@ -256,6 +283,10 @@ def rrtmgp_radiation(
         optics_lib,
         atmos_state,
         vmr_fields,
+        cloud_r_eff_liq=crl_3d,
+        cloud_path_liq=cpl_3d,
+        cloud_r_eff_ice=cri_3d,
+        cloud_path_ice=cpi_3d,
         use_scan=config.use_scan,
     )
 
