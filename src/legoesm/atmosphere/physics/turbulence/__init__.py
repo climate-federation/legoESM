@@ -51,6 +51,12 @@ from legoesm.atmosphere.physics.turbulence.ml_emulator import (
     ml_turbulence,
     TurbulenceEmulator,
 )
+from legoesm.atmosphere.physics.turbulence.pbl_height import (
+    PBLHeightConfig,
+    compute_bulk_richardson,
+    diagnose_pbl_height,
+    diagnose_pbl_height_interp,
+)
 from legoesm.atmosphere.physics.turbulence.integration import (
     make_turbulence_physics,
 )

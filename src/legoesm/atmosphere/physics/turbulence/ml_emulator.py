@@ -18,6 +18,7 @@ import equinox as eqx
 from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import MLTurbulenceEmulatorConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
+from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
 )
@@ -165,6 +166,8 @@ def ml_turbulence(
         T_sfc, q_sfc, rho[:, -1], config.surface,
     )
 
+    h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+
     return TurbulenceOutput(
         du_dt=du_dt,
         dv_dt=dv_dt,
@@ -175,4 +178,5 @@ def ml_turbulence(
         shflx=shflx,
         lhflx=lhflx,
         ustar=ustar,
+        h_pbl=h_pbl,
     )

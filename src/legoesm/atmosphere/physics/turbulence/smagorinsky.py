@@ -17,6 +17,7 @@ from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
+from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
 )
@@ -123,6 +124,8 @@ def smagorinsky_turbulence(
     dT_dt = (T_new - T) / dt
     dq_v_dt = (q_new - q_v) / dt
 
+    h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+
     return TurbulenceOutput(
         du_dt=du_dt,
         dv_dt=dv_dt,
@@ -133,4 +136,5 @@ def smagorinsky_turbulence(
         shflx=shflx,
         lhflx=lhflx,
         ustar=ustar,
+        h_pbl=h_pbl,
     )

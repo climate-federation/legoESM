@@ -20,6 +20,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import EDMFConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
+from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
 )
@@ -275,6 +276,8 @@ def edmf_turbulence(
     ) / (1.0 + dt * diss_coeff)
     tke_new = jnp.maximum(tke_new, config.tke_min)
 
+    h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+
     output = TurbulenceOutput(
         du_dt=du_dt,
         dv_dt=dv_dt,
@@ -285,6 +288,7 @@ def edmf_turbulence(
         shflx=shflx,
         lhflx=lhflx,
         ustar=ustar,
+        h_pbl=h_pbl,
     )
 
     return output, tke_new

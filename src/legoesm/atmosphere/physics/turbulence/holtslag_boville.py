@@ -204,4 +204,5 @@ def holtslag_boville_turbulence(
         shflx=shflx,
         lhflx=lhflx,
         ustar=ustar,
+        h_pbl=h_pbl,
     )

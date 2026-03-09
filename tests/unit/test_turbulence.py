@@ -29,6 +29,12 @@ from legoesm.atmosphere.physics.turbulence.config import (
     TurbulenceConfig,
 )
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
+from legoesm.atmosphere.physics.turbulence.pbl_height import (
+    PBLHeightConfig,
+    compute_bulk_richardson,
+    diagnose_pbl_height,
+    diagnose_pbl_height_interp,
+)
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
 )
@@ -1145,3 +1151,164 @@ class TestMLTurbulenceEmulator:
         # Tendencies should be small (residual scaling ×0.01)
         assert float(jnp.max(jnp.abs(out.dT_dt))) < 1.0
         assert float(jnp.max(jnp.abs(out.du_dt))) < 1.0
+
+
+# ===========================================================================
+# PBL Height Diagnosis tests (Task 9)
+# ===========================================================================
+
+class TestPBLHeight:
+    """Tests for PBL height diagnosis via bulk Richardson method."""
+
+    def test_bulk_richardson_shape(self):
+        """Bulk Ri should have shape (ncol, nlev)."""
+        ncol, nlev = 4, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+
+        Ri_bulk, theta_v = compute_bulk_richardson(T, q_v, u, v, p_full, z_full)
+        assert Ri_bulk.shape == (ncol, nlev)
+        assert theta_v.shape == (ncol, nlev)
+
+    def test_bulk_richardson_surface_zero(self):
+        """Ri at the surface level should be near zero (no buoyancy difference)."""
+        ncol, nlev = 4, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+
+        Ri_bulk, _ = compute_bulk_richardson(T, q_v, u, v, p_full, z_full)
+        # Bottom level (surface): theta_v(sfc) - theta_v(sfc) = 0 so Ri ~ 0
+        assert float(jnp.max(jnp.abs(Ri_bulk[:, -1]))) < 0.1
+
+    def test_bulk_richardson_finite(self):
+        """Ri should be finite everywhere."""
+        ncol, nlev = 4, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+
+        Ri_bulk, theta_v = compute_bulk_richardson(T, q_v, u, v, p_full, z_full)
+        assert jnp.all(jnp.isfinite(Ri_bulk))
+        assert jnp.all(jnp.isfinite(theta_v))
+
+    def test_diagnose_pbl_height_shape(self):
+        """h_pbl should have shape (ncol,)."""
+        ncol, nlev = 4, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+
+        h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+        assert h_pbl.shape == (ncol,)
+
+    def test_diagnose_pbl_height_bounds(self):
+        """h_pbl should be within [h_min, h_max]."""
+        ncol, nlev = 4, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        config = PBLHeightConfig(h_min=100.0, h_max=5000.0)
+
+        h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full, config)
+        assert jnp.all(h_pbl >= config.h_min)
+        assert jnp.all(h_pbl <= config.h_max)
+
+    def test_diagnose_pbl_height_finite(self):
+        """h_pbl should be finite."""
+        ncol, nlev = 4, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+
+        h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+        assert jnp.all(jnp.isfinite(h_pbl))
+
+    def test_interp_method_shape_and_bounds(self):
+        """Interp method should return correct shape within bounds."""
+        ncol, nlev = 4, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        config = PBLHeightConfig(h_min=100.0, h_max=5000.0)
+
+        h_pbl = diagnose_pbl_height_interp(T, q_v, u, v, p_full, z_full, config)
+        assert h_pbl.shape == (ncol,)
+        assert jnp.all(h_pbl >= config.h_min)
+        assert jnp.all(h_pbl <= config.h_max)
+        assert jnp.all(jnp.isfinite(h_pbl))
+
+    def test_strong_shear_deeper_pbl(self):
+        """Stronger wind shear should produce a deeper PBL (more Ri < Ri_crit)."""
+        ncol, nlev = 4, 20
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+
+        # Weak wind -> shallow PBL
+        u_weak = u * 0.2
+        v_weak = v * 0.2
+        h_weak = diagnose_pbl_height(T, q_v, u_weak, v_weak, p_full, z_full)
+
+        # Strong wind -> deeper PBL
+        u_strong = u * 3.0
+        v_strong = v * 3.0
+        h_strong = diagnose_pbl_height(T, q_v, u_strong, v_strong, p_full, z_full)
+
+        # Stronger shear means larger V^2, so Ri is smaller -> more levels
+        # where Ri < Ri_crit -> deeper PBL
+        assert float(jnp.mean(h_strong)) > float(jnp.mean(h_weak))
+
+    def test_differentiable(self):
+        """jax.grad should work through PBL height diagnosis."""
+        ncol, nlev = 2, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+
+        def loss(T_in):
+            h = diagnose_pbl_height(T_in, q_v, u, v, p_full, z_full)
+            return jnp.sum(h ** 2)
+
+        grad_T = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(grad_T))
+        assert grad_T.shape == T.shape
+
+    def test_backends_return_h_pbl(self):
+        """All turbulence backends should return h_pbl in TurbulenceOutput."""
+        ncol, nlev = 4, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        T_sfc = T[:, -1] + 5.0
+        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+        tke = jnp.full((ncol, nlev), 0.1)
+
+        # Smagorinsky
+        out = smagorinsky_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=SmagorinskyConfig(),
+        )
+        assert out.h_pbl.shape == (ncol,)
+        assert jnp.all(jnp.isfinite(out.h_pbl))
+
+        # Louis
+        out = louis_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=LouisConfig(),
+        )
+        assert out.h_pbl.shape == (ncol,)
+        assert jnp.all(jnp.isfinite(out.h_pbl))
+
+        # YSU
+        out = ysu_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=YSUConfig(),
+        )
+        assert out.h_pbl.shape == (ncol,)
+        assert jnp.all(jnp.isfinite(out.h_pbl))
+
+        # Holtslag-Boville
+        out = holtslag_boville_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=HoltslagBovilleConfig(),
+        )
+        assert out.h_pbl.shape == (ncol,)
+        assert jnp.all(jnp.isfinite(out.h_pbl))
+
+        # TKE
+        out, _ = tke_turbulence(
+            u, v, T, q_v, tke, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=TKEConfig(),
+        )
+        assert out.h_pbl.shape == (ncol,)
+        assert jnp.all(jnp.isfinite(out.h_pbl))
+
+        # EDMF
+        out, _ = edmf_turbulence(
+            u, v, T, q_v, tke, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=EDMFConfig(),
+        )
+        assert out.h_pbl.shape == (ncol,)
+        assert jnp.all(jnp.isfinite(out.h_pbl))

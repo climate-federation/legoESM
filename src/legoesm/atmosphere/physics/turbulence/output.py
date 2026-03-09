@@ -39,6 +39,8 @@ class TurbulenceOutput(NamedTuple):
         Surface latent heat flux [W/m^2], shape (ncol,).
     ustar : jax.Array
         Friction velocity [m/s], shape (ncol,).
+    h_pbl : jax.Array
+        Diagnosed PBL height [m], shape (ncol,).
     """
     du_dt: jax.Array
     dv_dt: jax.Array
@@ -49,3 +51,4 @@ class TurbulenceOutput(NamedTuple):
     shflx: jax.Array
     lhflx: jax.Array
     ustar: jax.Array
+    h_pbl: jax.Array

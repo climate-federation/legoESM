@@ -19,6 +19,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
+from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
 )
@@ -170,6 +171,8 @@ def louis_turbulence(
     T_new = implicit_vertical_diffusion(T, Kh_half, rho, dz_layer, dz_half, dt, sflx_T)
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
+    h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+
     return TurbulenceOutput(
         du_dt=(u_new - u) / dt,
         dv_dt=(v_new - v) / dt,
@@ -180,4 +183,5 @@ def louis_turbulence(
         shflx=shflx,
         lhflx=lhflx,
         ustar=ustar,
+        h_pbl=h_pbl,
     )
