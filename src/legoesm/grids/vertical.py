@@ -1,16 +1,21 @@
 """Vertical coordinates for legoESM.
 
-Two vertical coordinate systems are provided:
+Three vertical coordinate systems are provided:
 
 1. **SigmaCoordinate** (pressure-based, for hydrostatic primitive equations):
    σ = p / p_s, terrain-following in pressure space.
 
-2. **HeightCoordinate** (height-based, for non-hydrostatic compressible Euler):
+2. **HybridSigmaPressureCoordinate** (hybrid σ-p, for hydrostatic PE):
+   p(k) = A(k)·p_ref + B(k)·p_s.  Near the top, levels are pure
+   pressure surfaces (B→0); near the surface, pure sigma (A→0, B→1).
+   Eliminates pressure-gradient force errors over steep topography.
+
+3. **HeightCoordinate** (height-based, for non-hydrostatic compressible Euler):
    z* = H·(z - z_s)/(H - z_s), terrain-following in physical height space.
    Includes 1D reference state profiles (rho_0, theta_0, pi_0) for
    reference-state subtraction.
 
-3. **TerrainMetric**: 3D coordinate metric terms that depend on surface
+4. **TerrainMetric**: 3D coordinate metric terms that depend on surface
    elevation z_s(x, y). Used with HeightCoordinate for terrain-following
    transformations.
 
@@ -403,6 +408,447 @@ def compute_pressure_velocity(
         sigma_full * dp_s_dt[..., None]
         + p_s[..., None] * sigma_dot_full
     )
+
+    return omega
+
+
+# ==============================================================================
+# Hybrid sigma-pressure vertical coordinate
+# ==============================================================================
+
+
+class HybridSigmaPressureCoordinate(NamedTuple):
+    """Hybrid sigma-pressure vertical coordinate.
+
+    Pressure at level k: p(k) = A(k) * p_ref + B(k) * p_s
+
+    Near the model top B → 0 (pure pressure levels, no terrain influence).
+    Near the surface A → 0, B → 1 (terrain-following sigma coordinate).
+    This eliminates the large pressure-gradient force errors that pure
+    sigma coordinates produce over steep topography.
+
+    Levels are indexed top-to-bottom: k=0 is the model top, k=nlev-1
+    is the lowest level.
+
+    Fields
+    ------
+    n_levels : int
+        Number of full levels.
+    A_half : jax.Array
+        Interface A coefficients, shape (nlev+1,). A_half[0] = p_top/p_ref.
+    B_half : jax.Array
+        Interface B coefficients, shape (nlev+1,). B_half[0] = 0 (top).
+    A_full : jax.Array
+        Mid-level A coefficients, shape (nlev,).
+    B_full : jax.Array
+        Mid-level B coefficients, shape (nlev,).
+    p_ref : float
+        Reference surface pressure [Pa], typically 1e5.
+    dA : jax.Array
+        A_half[k+1] - A_half[k], shape (nlev,).
+    dB : jax.Array
+        B_half[k+1] - B_half[k], shape (nlev,).
+    B_range : float
+        B_half[-1] - B_half[0], typically 1.0.
+    ln_ratio_ref : jax.Array
+        Precomputed log(p_half[k+1]/p_half[k]) at p_s = p_ref, shape (nlev,).
+    alpha_ref : jax.Array
+        Simmons-Burridge alpha at p_s = p_ref, shape (nlev,).
+    dsigma_eff : jax.Array
+        Effective layer thickness dA + dB for semi-implicit, shape (nlev,).
+    """
+    n_levels: int
+    A_half: jax.Array
+    B_half: jax.Array
+    A_full: jax.Array
+    B_full: jax.Array
+    p_ref: float
+    dA: jax.Array
+    dB: jax.Array
+    B_range: float
+    ln_ratio_ref: jax.Array
+    alpha_ref: jax.Array
+    dsigma_eff: jax.Array
+
+
+def create_hybrid_coordinate(
+    n_levels: int,
+    A_half: jax.Array,
+    B_half: jax.Array,
+    p_ref: float = 1e5,
+) -> HybridSigmaPressureCoordinate:
+    """Create a hybrid sigma-pressure coordinate from A/B coefficients.
+
+    Parameters
+    ----------
+    n_levels : int
+        Number of full levels.
+    A_half : array-like
+        Interface A coefficients, shape (nlev+1,).
+    B_half : array-like
+        Interface B coefficients, shape (nlev+1,).
+    p_ref : float
+        Reference surface pressure [Pa].
+
+    Returns
+    -------
+    HybridSigmaPressureCoordinate
+    """
+    A_half = jnp.asarray(A_half, dtype=jnp.float32)
+    B_half = jnp.asarray(B_half, dtype=jnp.float32)
+
+    A_full = 0.5 * (A_half[:-1] + A_half[1:])
+    B_full = 0.5 * (B_half[:-1] + B_half[1:])
+    dA = A_half[1:] - A_half[:-1]
+    dB = B_half[1:] - B_half[:-1]
+    B_range = float(B_half[-1] - B_half[0])
+
+    # Reference pressures at p_s = p_ref
+    p_half_ref = (A_half + B_half) * p_ref
+    p_full_ref = (A_full + B_full) * p_ref
+    p_half_ref_safe = jnp.clip(p_half_ref, 1e-10, None)
+    p_full_ref_safe = jnp.clip(p_full_ref, 1e-10, None)
+
+    ln_ratio_ref = jnp.log(p_half_ref_safe[1:] / p_half_ref_safe[:-1])
+    alpha_ref = jnp.log(p_half_ref_safe[1:] / p_full_ref_safe)
+
+    dsigma_eff = dA + dB
+
+    return HybridSigmaPressureCoordinate(
+        n_levels=n_levels,
+        A_half=A_half,
+        B_half=B_half,
+        A_full=A_full,
+        B_full=B_full,
+        p_ref=p_ref,
+        dA=dA,
+        dB=dB,
+        B_range=B_range,
+        ln_ratio_ref=ln_ratio_ref,
+        alpha_ref=alpha_ref,
+        dsigma_eff=dsigma_eff,
+    )
+
+
+def make_hybrid_levels(
+    n_levels: int,
+    p_top_Pa: float = 200.0,
+    p_ref: float = 1e5,
+    transition_exponent: int = 3,
+) -> HybridSigmaPressureCoordinate:
+    """Generate hybrid coordinate with smooth sigma-to-pressure transition.
+
+    Uses the parameterization:
+        eta = linspace(0, 1, nlev+1)
+        B = eta^exponent
+        A = eta - B + (p_top/p_ref) * (1 - eta)
+
+    At reference p_s = p_ref the levels are uniformly spaced in pressure.
+    The exponent controls the transition height: higher values push the
+    transition closer to the surface.
+
+    Parameters
+    ----------
+    n_levels : int
+        Number of full levels.
+    p_top_Pa : float
+        Model top pressure [Pa]. Default 200 Pa (2 hPa).
+    p_ref : float
+        Reference surface pressure [Pa].
+    transition_exponent : int
+        Power for B(eta) = eta^exponent. 1 = pure sigma, 3 = typical.
+
+    Returns
+    -------
+    HybridSigmaPressureCoordinate
+    """
+    import numpy as np
+
+    eta = np.linspace(0.0, 1.0, n_levels + 1)
+    B_half = eta ** transition_exponent
+    A_half = eta - B_half + (p_top_Pa / p_ref) * (1.0 - eta)
+
+    return create_hybrid_coordinate(n_levels, A_half, B_half, p_ref)
+
+
+def hybrid_from_sigma(
+    sigma_coord: SigmaCoordinate,
+    p_ref: float = 1e5,
+) -> HybridSigmaPressureCoordinate:
+    """Convert a SigmaCoordinate to hybrid form (A=0, B=sigma).
+
+    Useful for validation: a pure-sigma hybrid should give identical
+    results to the original SigmaCoordinate.
+
+    Parameters
+    ----------
+    sigma_coord : SigmaCoordinate
+        Existing sigma coordinate.
+    p_ref : float
+        Reference surface pressure [Pa].
+
+    Returns
+    -------
+    HybridSigmaPressureCoordinate
+    """
+    import numpy as np
+
+    A_half = np.zeros(sigma_coord.n_levels + 1)
+    B_half = np.array(sigma_coord.sigma_half)
+
+    return create_hybrid_coordinate(sigma_coord.n_levels, A_half, B_half, p_ref)
+
+
+def pressure_from_hybrid(
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+    full: bool = True,
+) -> jax.Array:
+    """Compute pressure at full or half levels from hybrid coordinate.
+
+    p = A * p_ref + B * p_s
+
+    Parameters
+    ----------
+    coord : HybridSigmaPressureCoordinate
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+    full : bool
+        If True, return full-level pressures; if False, half-level.
+
+    Returns
+    -------
+    jax.Array
+        Pressure, shape (..., nlev) or (..., nlev+1).
+    """
+    A = coord.A_full if full else coord.A_half
+    B = coord.B_full if full else coord.B_half
+    return A * coord.p_ref + B * p_s[..., None]
+
+
+def dp_from_hybrid(
+    coord: HybridSigmaPressureCoordinate,
+    p_s: jax.Array,
+) -> jax.Array:
+    """Compute layer pressure thickness from hybrid coordinate.
+
+    dp_k = dA_k * p_ref + dB_k * p_s
+
+    Parameters
+    ----------
+    coord : HybridSigmaPressureCoordinate
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+
+    Returns
+    -------
+    jax.Array
+        Layer pressure thickness, shape (..., nlev).
+    """
+    return coord.dA * coord.p_ref + coord.dB * p_s[..., None]
+
+
+def compute_geopotential_hybrid(
+    T: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+    phis: jax.Array,
+) -> jax.Array:
+    """Compute geopotential using Simmons-Burridge for hybrid coordinates.
+
+    Same algorithm as compute_geopotential but with pressure-dependent
+    log ratios and alpha coefficients computed from the hybrid pressure.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature, shape (..., nlev).
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+    coord : HybridSigmaPressureCoordinate
+    phis : jax.Array
+        Surface geopotential, shape (...,).
+
+    Returns
+    -------
+    jax.Array
+        Geopotential at full levels, shape (..., nlev).
+    """
+    R_d = constants.R_d
+
+    # Compute hybrid pressures at interfaces and full levels
+    p_half = pressure_from_hybrid(coord, p_s, full=False)  # (..., nlev+1)
+    p_full = pressure_from_hybrid(coord, p_s, full=True)   # (..., nlev)
+
+    p_half_safe = jnp.clip(p_half, 1e-10, None)
+    p_full_safe = jnp.clip(p_full, 1e-10, None)
+
+    # Log ratios and alpha — now spatially dependent
+    ln_ratio = jnp.log(p_half_safe[..., 1:] / p_half_safe[..., :-1])  # (..., nlev)
+    alpha = jnp.log(p_half_safe[..., 1:] / p_full_safe)  # (..., nlev)
+
+    # Geopotential thickness of each full layer
+    dPhi = R_d * T * ln_ratio  # (..., nlev)
+
+    # Cumulative sum from bottom: Phi_above[k] = sum from k to nlev-1
+    dPhi_reversed = dPhi[..., ::-1]
+    cumsum_reversed = jnp.cumsum(dPhi_reversed, axis=-1)
+    cumsum = cumsum_reversed[..., ::-1]
+
+    Phi_above = phis[..., None] + cumsum
+
+    # Bottom interface of each layer
+    Phi_below = jnp.concatenate(
+        [Phi_above[..., 1:], phis[..., None]], axis=-1
+    )
+
+    Phi_full = Phi_below + alpha * R_d * T
+
+    return Phi_full
+
+
+def compute_mass_flux_hybrid(
+    div_3d: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Compute vertical mass flux at half-levels for hybrid coordinates.
+
+    Returns the pressure mass flux F at interfaces (analogous to
+    p_s * sigma_dot in sigma coordinates):
+
+        F_{k+1/2} = B_{k+1/2} * D_total_p - cumsum(D_k * dp_k)[k]
+
+    where D_total_p = sum(div_k * dp_k) and dp_k is the layer pressure
+    thickness.
+
+    Boundary conditions: F = 0 at top and surface.
+
+    Parameters
+    ----------
+    div_3d : jax.Array
+        Horizontal divergence at each level, shape (..., nlev).
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+    coord : HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    jax.Array
+        Mass flux at half-levels, shape (..., nlev+1). Units: Pa/s.
+    """
+    dp = dp_from_hybrid(coord, p_s)  # (..., nlev)
+
+    # Mass-weighted divergence
+    div_dp = div_3d * dp  # (..., nlev)
+
+    # Column-integrated divergence
+    D_total_p = jnp.sum(div_dp, axis=-1, keepdims=True)  # (..., 1)
+
+    # Cumulative sum from top
+    cumsum_div = jnp.cumsum(div_dp, axis=-1)  # (..., nlev)
+
+    # Mass flux at interfaces 1..nlev
+    # F_{k+1/2} = (B_{k+1/2} - B_top) / B_range * D_total_p - cumsum_k
+    B_top = coord.B_half[0]
+    frac_B = (coord.B_half[1:] - B_top) / coord.B_range  # (nlev,)
+    mass_flux_inner = frac_B * D_total_p - cumsum_div  # (..., nlev)
+
+    # Prepend top (F=0)
+    shape_horiz = div_3d.shape[:-1]
+    zero_top = jnp.zeros((*shape_horiz, 1))
+    mass_flux = jnp.concatenate([zero_top, mass_flux_inner], axis=-1)
+
+    # Force bottom boundary
+    mass_flux = mass_flux.at[..., -1].set(0.0)
+
+    return mass_flux
+
+
+def vertical_advection_hybrid(
+    field: jax.Array,
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Compute vertical advection in hybrid coordinates.
+
+    Computes: -F_full * df/dp
+
+    where F is the mass flux interpolated from half-levels to full levels
+    and df/dp uses upwind differencing in pressure space.
+
+    Parameters
+    ----------
+    field : jax.Array
+        Field to advect, shape (..., nlev).
+    mass_flux : jax.Array
+        Mass flux at half-levels from compute_mass_flux_hybrid,
+        shape (..., nlev+1).
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+    coord : HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    jax.Array
+        Vertical advection tendency, shape (..., nlev).
+    """
+    # Interpolate mass flux to full levels
+    F_full = 0.5 * (mass_flux[..., :-1] + mass_flux[..., 1:])  # (..., nlev)
+
+    # Pressure at full levels
+    p_full = pressure_from_hybrid(coord, p_s, full=True)  # (..., nlev)
+    dp_full = jnp.diff(p_full, axis=-1)  # (..., nlev-1)
+    dp_full_safe = jnp.clip(jnp.abs(dp_full), 1e-10, None)
+
+    # Vertical gradient df/dp with upwind differencing
+    df = jnp.diff(field, axis=-1)  # (..., nlev-1)
+
+    shape_horiz = field.shape[:-1]
+    grad_bwd = jnp.concatenate(
+        [jnp.zeros((*shape_horiz, 1)), df / dp_full_safe], axis=-1
+    )
+    grad_fwd = jnp.concatenate(
+        [df / dp_full_safe, jnp.zeros((*shape_horiz, 1))], axis=-1
+    )
+
+    # Upwind: F > 0 (downward mass flux) → backward difference
+    grad = jnp.where(F_full > 0, grad_bwd, grad_fwd)
+
+    return -F_full * grad
+
+
+def compute_omega_hybrid(
+    mass_flux: jax.Array,
+    p_s: jax.Array,
+    dp_s_dt: jax.Array,
+    coord: HybridSigmaPressureCoordinate,
+) -> jax.Array:
+    """Compute pressure velocity omega for hybrid coordinates.
+
+    omega_k = B_full_k * dp_s/dt + F_k_full
+
+    where F_k_full is the mass flux interpolated to full levels.
+
+    Parameters
+    ----------
+    mass_flux : jax.Array
+        Mass flux at half-levels, shape (..., nlev+1).
+    p_s : jax.Array
+        Surface pressure, shape (...,).
+    dp_s_dt : jax.Array
+        Surface pressure tendency, shape (...,).
+    coord : HybridSigmaPressureCoordinate
+
+    Returns
+    -------
+    jax.Array
+        Pressure velocity at full levels, shape (..., nlev).
+    """
+    F_full = 0.5 * (mass_flux[..., :-1] + mass_flux[..., 1:])  # (..., nlev)
+
+    omega = coord.B_full * dp_s_dt[..., None] + F_full
 
     return omega
 

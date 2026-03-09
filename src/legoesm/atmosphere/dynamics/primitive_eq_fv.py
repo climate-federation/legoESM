@@ -61,11 +61,18 @@ from legoesm.core.conservation import zero_mean_tendency
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
     SigmaCoordinate,
+    HybridSigmaPressureCoordinate,
     pressure_from_sigma,
+    pressure_from_hybrid,
+    dp_from_hybrid,
     compute_geopotential,
+    compute_geopotential_hybrid,
     compute_sigma_dot,
+    compute_mass_flux_hybrid,
     vertical_advection,
+    vertical_advection_hybrid,
     compute_pressure_velocity,
+    compute_omega_hybrid,
 )
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
@@ -97,7 +104,7 @@ class FVPrimitiveEquationConfig(NamedTuple):
 def fv_hydrostatic_tendencies(
     state: HydrostaticState,
     grid: CubedSphereGrid,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     config: FVPrimitiveEquationConfig = FVPrimitiveEquationConfig(),
     physics_tendency: HydrostaticTendencies | None = None,
 ) -> HydrostaticTendencies:
@@ -111,7 +118,7 @@ def fv_hydrostatic_tendencies(
     ----------
     state : HydrostaticState
     grid : CubedSphereGrid
-    sigma_coord : SigmaCoordinate
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
     config : FVPrimitiveEquationConfig
     physics_tendency : HydrostaticTendencies, optional
 
@@ -119,6 +126,8 @@ def fv_hydrostatic_tendencies(
     -------
     HydrostaticTendencies
     """
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
     u = state.u.data       # (6, n, n, nlev)
     v = state.v.data
     T = state.T.data
@@ -127,15 +136,21 @@ def fv_hydrostatic_tendencies(
 
     R_d = constants.R_d
     kappa = constants.kappa
-    dsigma = sigma_coord.dsigma
 
     p_s = jnp.clip(p_s, 100.0, 2.0e6)
 
     # --- 1. Pressure at full levels ---
-    p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
+    if _hybrid:
+        p_full = pressure_from_hybrid(sigma_coord, p_s)
+        dp = dp_from_hybrid(sigma_coord, p_s)
+    else:
+        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
 
     # --- 2. Geopotential via hydrostatic integration ---
-    Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+    if _hybrid:
+        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+    else:
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
 
     # --- 3. Kinetic energy and Bernoulli function ---
     K = 0.5 * (u**2 + v**2)
@@ -162,45 +177,58 @@ def fv_hydrostatic_tendencies(
     dv_dt_data = -abs_vor * u - dB_dy - pg_corr_y
 
     # --- 5. Surface pressure tendency via FV transport ---
-    # Vertically integrated velocity: u_int = sum(u_k * dsigma_k)
-    sigma_top = sigma_coord.sigma_half[0]
-    sigma_range = 1.0 - sigma_top
+    if _hybrid:
+        # Weight velocity by layer pressure thickness
+        u_int = jnp.sum(u * dp / p_s[..., None], axis=-1)
+        v_int = jnp.sum(v * dp / p_s[..., None], axis=-1)
 
-    u_int = jnp.sum(u * dsigma[None, None, None, :], axis=-1)  # (6, n, n)
-    v_int = jnp.sum(v * dsigma[None, None, None, :], axis=-1)
+        dp_s_dt_data = fv_flux_divergence(
+            p_s, u_int / sigma_coord.B_range,
+            v_int / sigma_coord.B_range, grid,
+            limiter=config.use_limiter,
+        )
+        dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
-    # FV transport of p_s using vertically-integrated velocity
-    dp_s_dt_data = fv_flux_divergence(
-        p_s, u_int / sigma_range, v_int / sigma_range, grid,
-        limiter=config.use_limiter,
-    )
-    dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
+        div_v = _fv_divergence_3d(u, v, grid)
+        mass_flux = compute_mass_flux_hybrid(div_v, p_s, sigma_coord)
 
-    # --- 6. Sigma-dot from FV-consistent divergence ---
-    # Uses the SAME FV divergence operator as the mass flux,
-    # ensuring discrete compatibility.
-    div_v = _fv_divergence_3d(u, v, grid)
-    sigma_dot = compute_sigma_dot(div_v, sigma_coord)
+        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
+        vert_adv_u = vertical_advection_hybrid(u, mass_flux, p_s, sigma_coord)
+        vert_adv_v = vertical_advection_hybrid(v, mass_flux, p_s, sigma_coord)
+    else:
+        dsigma = sigma_coord.dsigma
+        sigma_top = sigma_coord.sigma_half[0]
+        sigma_range = 1.0 - sigma_top
 
-    # --- 7. Vertical advection of T, u, v ---
-    vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
-    vert_adv_u = vertical_advection(u, sigma_dot, sigma_coord)
-    vert_adv_v = vertical_advection(v, sigma_dot, sigma_coord)
+        u_int = jnp.sum(u * dsigma[None, None, None, :], axis=-1)
+        v_int = jnp.sum(v * dsigma[None, None, None, :], axis=-1)
+
+        dp_s_dt_data = fv_flux_divergence(
+            p_s, u_int / sigma_range, v_int / sigma_range, grid,
+            limiter=config.use_limiter,
+        )
+        dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
+
+        div_v = _fv_divergence_3d(u, v, grid)
+        sigma_dot = compute_sigma_dot(div_v, sigma_coord)
+
+        vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
+        vert_adv_u = vertical_advection(u, sigma_dot, sigma_coord)
+        vert_adv_v = vertical_advection(v, sigma_dot, sigma_coord)
 
     du_dt_data = du_dt_data + vert_adv_u
     dv_dt_data = dv_dt_data + vert_adv_v
 
     # --- 8. Thermodynamic equation ---
-    # Use centered advection for T (not PPM) to maintain energy consistency
-    # with the centered momentum operators. PPM is energy-inconsistent with
-    # centered Bernoulli gradient, causing exponential T growth at face edges.
-    # PPM is still used for p_s (mass transport) where conservation matters.
     dT_dx = _gradient_x_3d(T, grid)
     dT_dy = _gradient_y_3d(T, grid)
     horiz_adv_T = -(u * dT_dx + v * dT_dy)
 
     # Adiabatic heating: κ·T·ω/p
-    omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
+    if _hybrid:
+        omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
+    else:
+        omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
     adiabatic = kappa * T * omega / p_full
 
     # Missing term from full material derivative of p_s

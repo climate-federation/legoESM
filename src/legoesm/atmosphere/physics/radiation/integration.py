@@ -26,8 +26,10 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
+    HybridSigmaPressureCoordinate,
     TerrainMetric,
     pressure_from_sigma,
+    pressure_from_hybrid,
 )
 from legoesm import constants
 
@@ -294,8 +296,12 @@ def _make_hydrostatic_radiation(
         shape_2d = p_s.shape
 
         # Pressure at full and half levels
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (6,n,n,nlev)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)  # (6,n,n,nlev+1)
+        if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+            p_full = pressure_from_hybrid(sigma_coord, p_s, full=True)
+            p_half = pressure_from_hybrid(sigma_coord, p_s, full=False)
+        else:
+            p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
+            p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
 
         # Surface temperature = lowest-level temperature
         T_sfc = T[..., -1]  # (6, n, n)
@@ -561,10 +567,14 @@ def _make_spectral_pe_radiation(
         n_lat, n_lon = p_s.shape
 
         # Pressure at full and half levels
-        sigma_full = sigma_coord.sigma_full
-        sigma_half = sigma_coord.sigma_half
-        p_full = p_s[..., None] * sigma_full  # (n_lat, n_lon, nlev)
-        p_half = p_s[..., None] * sigma_half  # (n_lat, n_lon, nlev+1)
+        if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+            p_full = pressure_from_hybrid(sigma_coord, p_s, full=True)
+            p_half = pressure_from_hybrid(sigma_coord, p_s, full=False)
+        else:
+            sigma_full = sigma_coord.sigma_full
+            sigma_half = sigma_coord.sigma_half
+            p_full = p_s[..., None] * sigma_full
+            p_half = p_s[..., None] * sigma_half
 
         # Surface temperature = lowest level
         T_sfc = T[..., -1]  # (n_lat, n_lon)

@@ -47,7 +47,16 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
     _sh_synthesis_H,
 )
-from legoesm.grids.vertical import SigmaCoordinate
+from legoesm.grids.vertical import (
+    SigmaCoordinate,
+    HybridSigmaPressureCoordinate,
+    pressure_from_hybrid,
+    dp_from_hybrid,
+    compute_geopotential_hybrid,
+    compute_mass_flux_hybrid,
+    vertical_advection_hybrid,
+    compute_omega_hybrid,
+)
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 from legoesm import constants
@@ -171,7 +180,7 @@ def _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt, sigma_coord):
 def spectral_pe_tendencies(
     state: SpectralHydrostaticState,
     grid: GaussianGrid,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     config: SpectralPEConfig,
     physics_tendency: SpectralHydrostaticState | None = None,
 ) -> SpectralHydrostaticState:
@@ -185,12 +194,11 @@ def spectral_pe_tendencies(
 
     Returns tendencies in the same pytree structure as state (for SSP-RK3).
     """
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
     a = grid.radius
     R_d = constants.R_d
     kappa = constants.kappa
-    dsigma = sigma_coord.dsigma
-    sigma_top = sigma_coord.sigma_half[0]
-    sigma_range = 1.0 - sigma_top
 
     # --- 1. Transform to grid space ---
     vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
@@ -213,10 +221,17 @@ def spectral_pe_tendencies(
 
     # --- 3. Pressure ---
     p_s = jnp.exp(lnps)
-    p_full = p_s[..., None] * sigma_coord.sigma_full  # (n_lat, n_lon, nlev)
+    if _hybrid:
+        p_full = pressure_from_hybrid(sigma_coord, p_s)
+        dp = dp_from_hybrid(sigma_coord, p_s)
+    else:
+        p_full = p_s[..., None] * sigma_coord.sigma_full  # (n_lat, n_lon, nlev)
 
     # --- 4. Geopotential ---
-    Phi = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis)
+    if _hybrid:
+        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+    else:
+        Phi = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis)
 
     # --- 5. Kinetic energy ---
     K = 0.5 * (u * u + v * v)
@@ -224,13 +239,24 @@ def spectral_pe_tendencies(
     # --- 6. Absolute vorticity ---
     abs_vor = vor + grid.f[..., None]
 
-    # --- 7. Sigma-dot ---
-    sigma_dot = _compute_sigma_dot_gaussian(div, sigma_coord)
+    # --- 7. Vertical velocity ---
+    if _hybrid:
+        mass_flux = compute_mass_flux_hybrid(div, p_s, sigma_coord)
+    else:
+        sigma_dot = _compute_sigma_dot_gaussian(div, sigma_coord)
 
     # --- 8. Surface pressure tendency ---
-    D_total = jnp.sum(div * dsigma, axis=-1)
-    dlnps_dt_grid = -D_total / sigma_range
-    dp_s_dt_grid = p_s * dlnps_dt_grid
+    if _hybrid:
+        D_total_p = jnp.sum(div * dp, axis=-1)
+        dlnps_dt_grid = -D_total_p / (p_s * sigma_coord.B_range)
+        dp_s_dt_grid = p_s * dlnps_dt_grid
+    else:
+        dsigma = sigma_coord.dsigma
+        sigma_top = sigma_coord.sigma_half[0]
+        sigma_range = 1.0 - sigma_top
+        D_total = jnp.sum(div * dsigma, axis=-1)
+        dlnps_dt_grid = -D_total / sigma_range
+        dp_s_dt_grid = p_s * dlnps_dt_grid
 
     # --- 9. Spectral operators ---
     im_over_a = 1j * grid.ms.astype(jnp.float64) / a  # (n_sh,)
@@ -316,23 +342,32 @@ def spectral_pe_tendencies(
     dT_hat = -flux_T_div + T_prime_div_hat
 
     # Vertical advection of T
-    vert_adv_T = _vertical_advection_sigma_gaussian(T, sigma_dot, sigma_coord)
+    if _hybrid:
+        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
+    else:
+        vert_adv_T = _vertical_advection_sigma_gaussian(T, sigma_dot, sigma_coord)
     dT_hat = dT_hat + sh_analysis_3d(grid, vert_adv_T)
 
     # Adiabatic heating: kappa * T * omega / p
-    omega = _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt_grid, sigma_coord)
+    if _hybrid:
+        omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_grid, sigma_coord)
+    else:
+        omega = _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt_grid, sigma_coord)
     adiabatic = kappa * T * omega / p_full
 
     # Material derivative correction: kappa * T * v . grad(lnps)
-    # (grad(lnps) already computed above for PGF correction)
     v_dot_grad_lnps = u * dlnps_dx[..., None] + v * dlnps_dy[..., None]
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_hat = dT_hat + sh_analysis_3d(grid, adiabatic)
 
     # --- 14. Vertical advection of momentum ---
-    vert_adv_u = _vertical_advection_sigma_gaussian(u, sigma_dot, sigma_coord)
-    vert_adv_v = _vertical_advection_sigma_gaussian(v, sigma_dot, sigma_coord)
+    if _hybrid:
+        vert_adv_u = vertical_advection_hybrid(u, mass_flux, p_s, sigma_coord)
+        vert_adv_v = vertical_advection_hybrid(v, mass_flux, p_s, sigma_coord)
+    else:
+        vert_adv_u = _vertical_advection_sigma_gaussian(u, sigma_dot, sigma_coord)
+        vert_adv_v = _vertical_advection_sigma_gaussian(v, sigma_dot, sigma_coord)
 
     # Convert to spectral vor/div contributions
     vert_u_cos = vert_adv_u * grid.cos_lat[:, None, None]

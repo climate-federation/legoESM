@@ -56,11 +56,18 @@ from legoesm.core.operators_3d import (
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
     SigmaCoordinate,
+    HybridSigmaPressureCoordinate,
     pressure_from_sigma,
+    pressure_from_hybrid,
+    dp_from_hybrid,
     compute_geopotential,
+    compute_geopotential_hybrid,
     compute_sigma_dot,
+    compute_mass_flux_hybrid,
     vertical_advection,
+    vertical_advection_hybrid,
     compute_pressure_velocity,
+    compute_omega_hybrid,
 )
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
@@ -128,7 +135,7 @@ def _apply_hydro_edge_blend(
 def hydrostatic_tendencies(
     state: HydrostaticState,
     grid: CubedSphereGrid,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     config: PrimitiveEquationConfig = PrimitiveEquationConfig(),
     physics_tendency: HydrostaticTendencies | None = None,
 ) -> HydrostaticTendencies:
@@ -140,7 +147,7 @@ def hydrostatic_tendencies(
         Current model state.
     grid : CubedSphereGrid
         Horizontal grid.
-    sigma_coord : SigmaCoordinate
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate.
     config : PrimitiveEquationConfig
         Model configuration.
@@ -151,6 +158,8 @@ def hydrostatic_tendencies(
     -------
     HydrostaticTendencies : Time derivatives.
     """
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
     u = state.u.data       # (6, n, n, nlev)
     v = state.v.data       # (6, n, n, nlev)
     T = state.T.data       # (6, n, n, nlev)
@@ -159,15 +168,20 @@ def hydrostatic_tendencies(
 
     R_d = constants.R_d
     kappa = constants.kappa
-    dsigma = sigma_coord.dsigma  # (nlev,)
     p_s = jnp.clip(p_s, 100.0, 2.0e6)
 
     # --- 1. Pressure at full and half levels ---
-    p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (6,n,n,nlev)
-    # p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+    if _hybrid:
+        p_full = pressure_from_hybrid(sigma_coord, p_s)  # (6,n,n,nlev)
+        dp = dp_from_hybrid(sigma_coord, p_s)  # (6,n,n,nlev)
+    else:
+        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (6,n,n,nlev)
 
     # --- 2. Geopotential via hydrostatic integration ---
-    Phi = compute_geopotential(T, p_s, sigma_coord, phis)  # (6,n,n,nlev)
+    if _hybrid:
+        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+    else:
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis)  # (6,n,n,nlev)
 
     # --- 3. Kinetic energy and Bernoulli function ---
     K = 0.5 * (u**2 + v**2)  # (6,n,n,nlev)
@@ -210,32 +224,47 @@ def hydrostatic_tendencies(
     dv_dt_data = -abs_vor * u - dB_dy - pg_corr_y
 
     # --- 5. Surface pressure tendency and sigma-dot ---
-    # Use PPM flux divergence for the continuity equation.
-    # PPM reconstruction with Colella-Woodward limiter inherently
-    # resolves the 2Δx checkerboard mode that centered divergence
-    # cannot see (its (i+1)-(i-1) stencil has a null-space for (-1)^i).
-    sigma_top = sigma_coord.sigma_half[0]
-    sigma_range = 1.0 - sigma_top  # total sigma range
+    if _hybrid:
+        # Hybrid: dp_s/dt = -sum(div_k * dp_k) / B_range
+        div_ps_v = _fv_flux_divergence_3d(
+            jnp.broadcast_to(p_s[..., None], T.shape),
+            u, v, grid,
+        )
+        dp_s_dt_data = jnp.sum(
+            div_ps_v * dp / p_s[..., None], axis=-1,
+        ) / sigma_coord.B_range
 
-    # Column-integrated mass flux divergence via PPM
-    div_ps_v = _fv_flux_divergence_3d(
-        jnp.broadcast_to(p_s[..., None], T.shape),
-        u, v, grid,
-    )  # (6,n,n,nlev)
-    dp_s_dt_data = jnp.sum(
-        div_ps_v * dsigma[None, None, None, :], axis=-1,
-    ) / sigma_range
+        # Mass flux for vertical dynamics
+        div_v = _divergence_3d(u, v, grid)
+        mass_flux = compute_mass_flux_hybrid(div_v, p_s, sigma_coord)
 
-    # Centered divergence for sigma-dot (vertical velocity diagnostic)
-    div_v = _divergence_3d(u, v, grid)  # (6,n,n,nlev)
-    sigma_dot = compute_sigma_dot(div_v, sigma_coord)  # (6,n,n,nlev+1)
+        # Vertical advection
+        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
+        vert_adv_u = vertical_advection_hybrid(u, mass_flux, p_s, sigma_coord)
+        vert_adv_v = vertical_advection_hybrid(v, mass_flux, p_s, sigma_coord)
+    else:
+        # Pure sigma
+        dsigma = sigma_coord.dsigma
+        sigma_top = sigma_coord.sigma_half[0]
+        sigma_range = 1.0 - sigma_top
 
-    # --- 7. Vertical advection of T ---
-    vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)  # (6,n,n,nlev)
+        # Column-integrated mass flux divergence via PPM
+        div_ps_v = _fv_flux_divergence_3d(
+            jnp.broadcast_to(p_s[..., None], T.shape),
+            u, v, grid,
+        )
+        dp_s_dt_data = jnp.sum(
+            div_ps_v * dsigma[None, None, None, :], axis=-1,
+        ) / sigma_range
 
-    # Also add vertical advection of u, v for consistency
-    vert_adv_u = vertical_advection(u, sigma_dot, sigma_coord)
-    vert_adv_v = vertical_advection(v, sigma_dot, sigma_coord)
+        # Centered divergence for sigma-dot
+        div_v = _divergence_3d(u, v, grid)
+        sigma_dot = compute_sigma_dot(div_v, sigma_coord)
+
+        # Vertical advection
+        vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
+        vert_adv_u = vertical_advection(u, sigma_dot, sigma_coord)
+        vert_adv_v = vertical_advection(v, sigma_dot, sigma_coord)
 
     du_dt_data = du_dt_data + vert_adv_u
     dv_dt_data = dv_dt_data + vert_adv_v
@@ -255,7 +284,10 @@ def hydrostatic_tendencies(
     # where Dp_s/Dt = ∂p_s/∂t + v·∇p_s (material derivative).
     # compute_pressure_velocity uses the Eulerian ∂p_s/∂t, so we must
     # add the missing advective contribution: κ·T·v·∇ln(p_s).
-    omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
+    if _hybrid:
+        omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
+    else:
+        omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
     adiabatic = kappa * T * omega / p_full
 
     # Missing term from full material derivative of p_s:

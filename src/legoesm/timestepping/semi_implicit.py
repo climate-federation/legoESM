@@ -46,7 +46,7 @@ import jax.numpy as jnp
 from jax.numpy.linalg import solve
 
 from legoesm.grids.gaussian import GaussianGrid
-from legoesm.grids.vertical import SigmaCoordinate
+from legoesm.grids.vertical import SigmaCoordinate, HybridSigmaPressureCoordinate
 from legoesm import constants
 
 
@@ -86,7 +86,7 @@ class SemiImplicitData(NamedTuple):
 
 
 def compute_Gamma_matrix(
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_ref: float,
 ) -> jax.Array:
     """Compute the Hoskins-Simmons vertical coupling matrix Gamma.
@@ -118,10 +118,14 @@ def compute_Gamma_matrix(
 
     where S is an upper-triangular geopotential coupling matrix.
 
+    For hybrid coordinates, the reference ln_ratio and alpha are
+    precomputed at p_s = p_ref (standard linearization). The effective
+    dsigma = dA + dB and B_range replace dsigma and sigma_range.
+
     Parameters
     ----------
-    sigma_coord : SigmaCoordinate
-        Vertical sigma coordinate.
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+        Vertical coordinate.
     T_ref : float
         Reference temperature [K].
 
@@ -132,12 +136,19 @@ def compute_Gamma_matrix(
     R_d = constants.R_d
     nlev = sigma_coord.n_levels
 
-    # Cast to float64 for numerical precision (keep as JAX arrays for JIT compat)
-    dsigma = jnp.asarray(sigma_coord.dsigma, dtype=jnp.float64)
-    ln_ratio = jnp.asarray(sigma_coord.ln_ratio, dtype=jnp.float64)
-    alpha_sb = jnp.asarray(sigma_coord.alpha, dtype=jnp.float64)
-    sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=jnp.float64)
-    sigma_range = 1.0 - sigma_top
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    if _hybrid:
+        dsigma = jnp.asarray(sigma_coord.dsigma_eff, dtype=jnp.float64)
+        ln_ratio = jnp.asarray(sigma_coord.ln_ratio_ref, dtype=jnp.float64)
+        alpha_sb = jnp.asarray(sigma_coord.alpha_ref, dtype=jnp.float64)
+        sigma_range = jnp.asarray(sigma_coord.B_range, dtype=jnp.float64)
+    else:
+        dsigma = jnp.asarray(sigma_coord.dsigma, dtype=jnp.float64)
+        ln_ratio = jnp.asarray(sigma_coord.ln_ratio, dtype=jnp.float64)
+        alpha_sb = jnp.asarray(sigma_coord.alpha, dtype=jnp.float64)
+        sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=jnp.float64)
+        sigma_range = 1.0 - sigma_top
 
     # --- Geopotential coupling matrix S[k, k'] ---
     # S[k, k'] = ln_ratio[k']  if k' > k  (k' is below level k in the
@@ -172,7 +183,7 @@ def compute_Gamma_matrix(
 
 def precompute_si_matrices(
     grid: GaussianGrid,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_ref: float = 300.0,
     alpha: float = 0.5,
     dt: float = 1200.0,
@@ -183,7 +194,7 @@ def precompute_si_matrices(
     ----------
     grid : GaussianGrid
         Gaussian grid (for radius and max wavenumber).
-    sigma_coord : SigmaCoordinate
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate.
     T_ref : float
         Reference temperature for linearization [K].
@@ -197,6 +208,8 @@ def precompute_si_matrices(
     SemiImplicitData
         Precomputed matrices for use in si_correction.
     """
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
     a = grid.radius
     n_max = grid.n_max
     nlev = sigma_coord.n_levels
@@ -216,9 +229,13 @@ def precompute_si_matrices(
     si_matrices = I[None, :, :] + coeff * eigenvalues[:, None, None] * Gamma[None, :, :]
 
     # Store dsigma and sigma_range for lnps correction
-    dsigma = jnp.asarray(sigma_coord.dsigma, dtype=jnp.float64)
-    sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=jnp.float64)
-    sigma_range = 1.0 - sigma_top
+    if _hybrid:
+        dsigma = jnp.asarray(sigma_coord.dsigma_eff, dtype=jnp.float64)
+        sigma_range = jnp.asarray(sigma_coord.B_range, dtype=jnp.float64)
+    else:
+        dsigma = jnp.asarray(sigma_coord.dsigma, dtype=jnp.float64)
+        sigma_top = jnp.asarray(sigma_coord.sigma_half[0], dtype=jnp.float64)
+        sigma_range = 1.0 - sigma_top
 
     return SemiImplicitData(
         Gamma=Gamma,
