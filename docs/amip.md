@@ -87,8 +87,10 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
 3. **No aerosols**: Aerosol direct and indirect effects are absent.
 
 4. **Uniform well-mixed gases**: CO2, CH4, N2O are spatially and temporally
-   uniform. Time-varying concentrations from CMIP forcing files are scaffolded
-   (`ExternalForcingConfig`) but not yet implemented.
+   uniform by default. Time-varying concentrations from CMIP forcing files are
+   supported via `GHGConfig(source="file", path="...")` with NetCDF time
+   interpolation (`ExternalForcingConfig`), but the AMIP driver currently uses
+   constant values from CLI flags.
 
 #### Radiation update interval
 
@@ -262,9 +264,10 @@ path given by `--output`) containing:
 | Dynamic albedo | **Active** | Temperature/zenith-dependent ice+snow albedo; `--dynamic-albedo` |
 | Energy budget | **Active** | Online column energy, TOA balance, residual tracking |
 | Monthly means | **Active** | Zonal-mean and global-mean monthly accumulation; `--monthly-means` |
-| GHG time-varying | **Scaffolded** | `ExternalForcingConfig` interface ready |
-| Aerosol forcing | **Placeholder** | Config exists; not connected to radiation |
-| Solar TSI variation | **Scaffolded** | Constant TSI active; time-varying from file not yet |
+| GHG time-varying | **Active** | `GHGConfig(source="file")` with NetCDF time interpolation |
+| Ozone from file | **Active** | `OzoneConfig(enabled=True)` monthly zonal-mean from NetCDF; not yet connected to radiation |
+| Aerosol from file | **Active** | `AerosolConfig(enabled=True)` monthly zonal-mean from NetCDF; not yet connected to radiation |
+| Solar TSI variation | **Active** | `SolarConfig(source="file")` with NetCDF time interpolation |
 
 ## Recommended stable settings
 

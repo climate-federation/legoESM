@@ -1,10 +1,28 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.3
+## Technical Specification v3.4
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-09 (updated from v3.2, 2026-03-08)
+**Date**: 2026-03-10 (updated from v3.3, 2026-03-09)
+
+---
+
+### Changelog (v3.4, 2026-03-10)
+
+**Bug fixes and CMIP readiness:**
+
+1. **Coupler ocean albedo fix** (`coupler/coupler.py`): `CouplerConfig.ocean_albedo` was validated but ignored in `ocean_tile_response()`, which only used `ocean_albedo_config`. Fixed: when `ocean_albedo_config.method == "constant"`, the config's `ocean_albedo` value now overrides `OceanAlbedoConfig.alpha_ocean_const`. No API ambiguity — `CouplerConfig.ocean_albedo` controls the constant value, `ocean_albedo_config.method` selects constant vs. zenith-dependent. See §4.5.
+
+2. **Stale q_surface fix** (`land/slab_land.py`, `ice/sea_ice.py`, `coupler/lake/two_layer_lake.py`): All three slab surface tiles computed `q_surface` from the pre-step surface temperature but returned the post-step `T_surface` in `TileResponse`. Fixed: q_surface is now recomputed from the updated temperature (and updated soil moisture for land) before constructing `TileResponse`, consistent with `multilayer_land.py`. See §4.3, §4.4, §4.5.
+
+3. **Pytest validation test fix** (`tests/validation/test_differentiability_ocean.py`): Test function took `disc_name` as a bare parameter, which pytest interpreted as a missing fixture. Converted to `@pytest.mark.parametrize` with a `scope="module"` fixture for shared setup. Script remains directly runnable via `__main__`. See §10.2.
+
+4. **External forcing file modes** (`forcing/external.py`): Implemented NetCDF-based time interpolation for all four forcing types. `get_ghg_at_time(source="file")` reads time-varying CO₂/CH₄/N₂O. `get_ozone_at_time(enabled=True)` and `get_aerosol_at_time(enabled=True)` read monthly zonal-mean climatologies with cyclic interpolation. `get_tsi_at_time(source="file")` reads TSI time series. All use LRU-cached `netCDF4` loading. See §4.6.3.
+
+5. **CMIP readiness documentation** (`docs/cmip_readiness.md`): New document with component-by-component implementation status tables and explicit list of 9 remaining gaps for CMIP production.
+
+6. **New tests**: `test_ocean_albedo_constant_honoured`, `test_land_q_surface_uses_updated_temperature`, `test_ice_q_surface_uses_updated_temperature`, `test_lake_q_surface_uses_updated_temperature` in `test_coupler.py`; 15 tests in new `test_external_forcing.py` covering file interpolation and error paths. See §10.2.
 
 ---
 
@@ -1139,10 +1157,14 @@ The coupler is fully implemented with tile-based surface exchange:
 make_coupler(config) → coupler_fn(atm_state, surface_states, dt) → coupled_tendencies
 ```
 
+**Ocean albedo plumbing**: `CouplerConfig.ocean_albedo` (float, default 0.06) controls the constant ocean albedo. When `ocean_albedo_config.method == "constant"`, the coupler overrides `OceanAlbedoConfig.alpha_ocean_const` with this value. When `method == "zenith"`, the Briegleb (1992) zenith-angle formula is used instead and `ocean_albedo` is ignored.
+
+**q_surface consistency**: All slab surface tiles (land, sea ice, lake) recompute `q_surface` from the updated post-step surface temperature before constructing `TileResponse`. For slab land, the moisture availability factor β is also recomputed from updated bucket moisture. This ensures `q_surface` and `T_surface` in `TileResponse` are always thermodynamically consistent.
+
 **Coupling fields** (`coupler/coupling_fields.py`):
 - `AtmToSurface` — downward radiation, precipitation, wind, temperature, humidity
 - `SurfaceToAtm` — sensible heat, latent heat, albedo, roughness, SST
-- `TileResponse` — per-tile surface response
+- `TileResponse` — per-tile surface response (13 fields including `T_surface`, `q_surface`, `albedo`)
 
 **Tile fractions** (`coupler/tile_fractions.py`):
 - `TileFractions(ocean, land, lake, ice)` — fractional coverage per grid cell
@@ -1228,12 +1250,21 @@ Modular external forcing framework for prescribed boundary conditions:
 
 | Config | Parameters | Status |
 |--------|-----------|--------|
-| `GHGConfig` | CO₂ (348 ppmv), CH₄ (1650 ppbv), N₂O (306 ppbv) | Active (constant mode) |
-| `OzoneConfig` | Path, variable name | Placeholder (not yet implemented) |
-| `AerosolConfig` | Path, variable name | Placeholder (not yet implemented) |
-| `SolarConfig` | TSI (1360 W/m²) | Active (constant mode) |
+| `GHGConfig` | CO₂ (348 ppmv), CH₄ (1650 ppbv), N₂O (306 ppbv) | Active (constant + file) |
+| `OzoneConfig` | Path, variable name, enabled flag | Active (monthly zonal-mean from file) |
+| `AerosolConfig` | Path, variable name, enabled flag | Active (monthly zonal-mean from file) |
+| `SolarConfig` | TSI (1360 W/m²) | Active (constant + file) |
 
-Each supports `source="constant"` (default) or `source="file"` (planned). Combined via `ExternalForcingConfig`.
+Each supports `source="constant"` (default) or `source="file"` (time-varying from NetCDF). Combined via `ExternalForcingConfig`.
+
+**File-based interpolation** (v3.4):
+- `_load_nc_timeseries(path, varnames)`: LRU-cached NetCDF loading for 1-D time series (GHG, TSI). Linear interpolation with edge clamping.
+- `_load_nc_monthly_zonal(path, varname)`: LRU-cached loading for monthly zonal-mean fields (ozone, aerosol). Cyclic interpolation with period 365.25 days.
+- GHG file format: `time` dimension + `co2_ppmv`, `ch4_ppbv`, `n2o_ppbv` variables.
+- TSI file format: `time` dimension + `tsi` variable.
+- Ozone/aerosol file format: `time` (12 months) × `lat` dimensions + `ozone`/`aod` variable.
+
+**Note**: Ozone and aerosol data are loaded and interpolated but not yet connected to the radiation solver. This is the primary remaining gap for CMIP forcing readiness. See `docs/cmip_readiness.md`.
 
 #### 4.6.4 AMIP Spectral Experiment (`scripts/run_amip_spectral.py`)
 
@@ -1702,7 +1733,7 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 | **Physics** | `test_radiation.py`, `test_convection.py`, `test_turbulence.py`, `test_microphysics.py`, `test_gravity_wave_drag.py`, `test_combined_physics.py`, `test_all_physics_schemes.py` | Individual scheme correctness, factory pattern |
 | **Ocean** | `test_ocean.py`, `test_ocean_compatibility.py`, `test_ocean_fc.py` | EOS, z-star, stepping, conservation |
 | **ML** | `test_sfno.py`, `test_sfno_sw.py`, `test_sfno_ocean.py` | SFNO architecture, channel packing |
-| **Coupled** | `test_coupler.py`, `test_atmosphere_invariants.py` | Tile blending, flux conservation, MOST bulk fluxes |
+| **Coupled** | `test_coupler.py`, `test_atmosphere_invariants.py`, `test_external_forcing.py` | Tile blending, flux conservation, MOST bulk fluxes, ocean albedo plumbing, q_surface consistency, external forcing file interpolation |
 | **Infrastructure** | `test_timestepping.py`, `test_thermodynamics.py`, `test_tracer_transport.py`, `test_backend_guard.py`, `test_backend_precision.py`, `test_parallel.py` | Time integrators, thermodynamics, parallelism |
 | **Validation** | `test_weatherbench.py`, `test_dcmip_transport.py`, `test_issue_fixes.py`, `test_amip_config.py` | WeatherBench metrics, DCMIP transport, AMIP config |
 
@@ -1717,6 +1748,7 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 
 **Validation tests** (`tests/validation/`):
 - Bulk flux differentiability and all-tile tests
+- Ocean model differentiability across all 4 discretizations (`test_differentiability_ocean.py`, pytest-parametrized)
 - Spectral PE stability analysis (E-variable, eigenvalues)
 - Held-Suarez fix verification
 - Dycore progression suite

@@ -801,6 +801,9 @@ Each outer RK stage computes slow tendencies once, updates $u,v$ and tracers, th
 \end{equation}
 Moisture availability $\beta=\beta_{\min}+(1-\beta_{\min})\,W/W_{\max}$ modulates evaporation via $q_{\mathrm{sfc}}=\beta\,q_s(T_s)$.
 
+\paragraph{Surface humidity consistency.}
+All slab surface tiles (land, sea ice, lake) recompute $q_{\mathrm{sfc}}$ from the \emph{updated} surface temperature $T_s^{n+1}$ (and updated $W^{n+1}$ for land) before constructing the \texttt{TileResponse}.  This ensures that the returned $q_{\mathrm{sfc}}$ and $T_{\mathrm{surface}}$ are thermodynamically consistent at the end of the timestep.
+
 %-----------------------------------------------------------------------------
 \subsection{Sea-Ice Model}
 %-----------------------------------------------------------------------------
@@ -833,6 +836,16 @@ Surface fluxes are area-weighted blends over ocean, land, sea-ice, and lake tile
   X_{\mathrm{blend}} = f_{\mathrm{ocn}}\,X_{\mathrm{ocn}} + f_{\mathrm{land}}\,X_{\mathrm{land}} + f_{\mathrm{ice}}\,X_{\mathrm{ice}} + f_{\mathrm{lake}}\,X_{\mathrm{lake}}.
 \end{equation}
 Fluxes are time-averaged over each coupling window before being passed to the atmosphere.
+
+\paragraph{Ocean albedo.}
+The constant ocean albedo $\alpha_{\mathrm{ocn}}$ is controlled by \texttt{CouplerConfig.ocean\_albedo} (default 0.06).  When \texttt{ocean\_albedo\_config.method="zenith"}, the Briegleb~(1992) zenith-angle formula is used:
+\begin{equation}
+  \alpha_{\mathrm{ocn}} = \frac{0.026}{1.1\,\mu_0^{1.7}+0.065} + 0.15\,(\mu_0-0.1)(\mu_0-0.5)(\mu_0-1.0),
+\end{equation}
+where $\mu_0=\cos\theta_z$ is the cosine of the solar zenith angle.
+
+\paragraph{External forcing.}
+Time-varying greenhouse gases (CO$_2$, CH$_4$, N$_2$O), total solar irradiance, and monthly zonal-mean ozone and aerosol climatologies can be read from NetCDF files and linearly interpolated in time via the \texttt{ExternalForcingConfig} interface.  Ozone and aerosol data are loaded but not yet connected to the radiation solver.
 
 %=============================================================================
 \section{Machine Learning: Spherical Fourier Neural Operator}
