@@ -762,6 +762,89 @@ def test_coupler_differentiable_through_surface_state():
     assert jnp.all(jnp.isfinite(grad_T))
 
 
+# ==============================================================================
+# Test ocean albedo plumbing (P0-1)
+# ==============================================================================
+
+def test_ocean_albedo_constant_honoured():
+    """CouplerConfig.ocean_albedo should control ocean tile albedo when method='constant'."""
+    forcing = _make_forcing()
+    ocean_sst = jnp.full(SHAPE, 300.0)
+    zu = jnp.zeros(SHAPE)
+
+    # Default albedo = 0.06
+    cfg_default = CouplerConfig()
+    resp_default = ocean_tile_response(forcing, ocean_sst, zu, zu, cfg_default)
+
+    # Custom albedo = 0.15
+    cfg_custom = CouplerConfig(ocean_albedo=0.15)
+    resp_custom = ocean_tile_response(forcing, ocean_sst, zu, zu, cfg_custom)
+
+    assert jnp.allclose(resp_default.albedo, 0.06, atol=1e-6)
+    assert jnp.allclose(resp_custom.albedo, 0.15, atol=1e-6)
+    assert not jnp.allclose(resp_default.albedo, resp_custom.albedo)
+
+
+# ==============================================================================
+# Test q_surface consistency with T_surface (P0-2)
+# ==============================================================================
+
+def test_land_q_surface_uses_updated_temperature():
+    """Slab land q_surface should be consistent with updated T_surface."""
+    from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+
+    state = _make_land_state(T=280.0, W=75.0)
+    forcing = _make_forcing(T_lowest=300.0, sw=400.0)  # strong warming
+    config = LandConfig()
+
+    new_state, resp = step_land(state, forcing, config, U_min=1.0, dt=DT)
+
+    # q_surface should correspond to updated T_surface, not initial
+    T_new = resp.T_surface
+    assert not jnp.allclose(T_new, 280.0, atol=0.01), "T should have changed"
+
+    q_sat_new = saturation_mixing_ratio(T_new, forcing.p_surface)
+    w_frac = jnp.clip(new_state.W_bucket.data / config.W_max, 0.0, 1.0)
+    beta = config.beta_min + (1.0 - config.beta_min) * w_frac
+    q_expected = beta * q_sat_new
+    assert jnp.allclose(resp.q_surface, q_expected, rtol=1e-5)
+
+
+def test_ice_q_surface_uses_updated_temperature():
+    """Sea ice q_surface should be consistent with updated T_surface."""
+    from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio_ice
+
+    state = _make_ice_state(h=1.0, T=260.0, conc=0.8)
+    forcing = _make_forcing(T_lowest=250.0, sw=100.0)
+    config = SeaIceConfig()
+    ocean_sst = jnp.full(SHAPE, 271.0)
+
+    new_state, resp = step_sea_ice(
+        state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=DT)
+
+    T_new = resp.T_surface
+    q_expected = saturation_mixing_ratio_ice(T_new, forcing.p_surface)
+    assert jnp.allclose(resp.q_surface, q_expected, rtol=1e-5)
+
+
+def test_lake_q_surface_uses_updated_temperature():
+    """Lake q_surface should be consistent with updated T_surface."""
+    from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+
+    state = _make_lake_state(T_epi=285.0, T_hypo=278.0)
+    forcing = _make_forcing(T_lowest=300.0, sw=400.0)  # strong warming
+    config = LakeConfig()
+
+    new_state, resp = step_lake(state, forcing, config, U_min=1.0, dt=DT)
+
+    T_new = resp.T_surface
+    assert not jnp.allclose(T_new, 285.0, atol=0.01), "T should have changed"
+
+    q_expected = saturation_mixing_ratio(T_new, forcing.p_surface)
+    assert jnp.allclose(resp.q_surface, q_expected, rtol=1e-5)
+
+
 def test_coupler_with_3d_ocean_fc_gram():
     """Coupler receives SST from FC-Gram ocean model (integration test)."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere

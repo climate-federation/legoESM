@@ -147,12 +147,17 @@ def step_land(
     # Recompute upward LW with updated temperature for consistency
     lw_up_new = config.emissivity_land * constants.sigma_sb * T_soil_new ** 4
 
+    # Recompute q_surface from updated T and moisture for consistency
+    w_frac_new = jnp.clip(W_new / config.W_max, 0.0, 1.0)
+    beta_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
+    q_sfc_new = beta_new * saturation_mixing_ratio(T_soil_new, forcing.p_surface)
+
     response = TileResponse(
         T_surface=T_soil_new,
         albedo=alpha,
         emissivity=jnp.broadcast_to(jnp.array(config.emissivity_land), T_soil.shape),
         z0=jnp.broadcast_to(jnp.array(config.z0_land), T_soil.shape),
-        q_surface=q_sfc,
+        q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx,
         tau_x=tau_x,

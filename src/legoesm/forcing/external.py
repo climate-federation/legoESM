@@ -22,10 +22,112 @@ a file, or computed interactively.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+
+
+# ==============================================================================
+# NetCDF time-interpolation helper
+# ==============================================================================
+
+@lru_cache(maxsize=16)
+def _load_nc_timeseries(path: str, varnames: tuple[str, ...]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Load 1-D time series variables from a NetCDF file.
+
+    Parameters
+    ----------
+    path : str
+        Path to a NetCDF file with a ``time`` dimension (in fractional days).
+    varnames : tuple of str
+        Variable names to load (must be 1-D along time).
+
+    Returns
+    -------
+    (times, data) where times is shape (N,) in days and data maps
+    each varname to a 1-D numpy array of length N.
+    """
+    import netCDF4  # deferred to avoid hard dep at import time
+
+    with netCDF4.Dataset(path, "r") as ds:
+        if "time" not in ds.dimensions:
+            raise ValueError(f"NetCDF file {path!r} has no 'time' dimension")
+        times = np.asarray(ds.variables["time"][:], dtype=np.float64)
+        data = {}
+        for v in varnames:
+            if v not in ds.variables:
+                raise ValueError(f"Variable {v!r} not found in {path!r}")
+            arr = np.asarray(ds.variables[v][:], dtype=np.float64)
+            if arr.ndim != 1 or arr.shape[0] != times.shape[0]:
+                raise ValueError(
+                    f"Variable {v!r} must be 1-D with length matching 'time' "
+                    f"(got shape {arr.shape}, expected ({times.shape[0]},))"
+                )
+            data[v] = arr
+    return times, data
+
+
+def _interp_1d(times: np.ndarray, values: np.ndarray, day: float) -> float:
+    """Linearly interpolate a 1-D time series at *day*, clamping at edges."""
+    return float(np.interp(day, times, values))
+
+
+@lru_cache(maxsize=16)
+def _load_nc_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load a monthly zonal-mean field from NetCDF.
+
+    Expected dimensions: ``(time=12, lat, [level])``.
+
+    Returns
+    -------
+    (mid_days, lat, data) where mid_days is shape (12,) giving
+    mid-month days, lat is shape (nlat,), and data is shape
+    (12, nlat) or (12, nlat, nlev).
+    """
+    import netCDF4
+
+    with netCDF4.Dataset(path, "r") as ds:
+        if varname not in ds.variables:
+            raise ValueError(f"Variable {varname!r} not found in {path!r}")
+        data = np.asarray(ds.variables[varname][:], dtype=np.float64)
+        if "lat" in ds.variables:
+            lat = np.asarray(ds.variables["lat"][:], dtype=np.float64)
+        elif "latitude" in ds.variables:
+            lat = np.asarray(ds.variables["latitude"][:], dtype=np.float64)
+        else:
+            raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
+        if "time" in ds.variables:
+            mid_days = np.asarray(ds.variables["time"][:], dtype=np.float64)
+        else:
+            # Assume 12 months, mid-month day of year
+            mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+    return mid_days, lat, data
+
+
+def _interp_monthly_cyclic(mid_days: np.ndarray, data: np.ndarray, day: float) -> np.ndarray:
+    """Interpolate a monthly-cyclic field (12, ...) to a day of year.
+
+    Uses cyclic linear interpolation with period 365.25 days.
+    """
+    period = 365.25
+    day_mod = day % period
+    # Wrap mid_days to ensure cyclic interpolation
+    n = len(mid_days)
+    # Find bracketing months
+    idx_right = np.searchsorted(mid_days % period, day_mod)
+    if idx_right >= n:
+        idx_right = 0
+    idx_left = (idx_right - 1) % n
+    d_left = mid_days[idx_left] % period
+    d_right = mid_days[idx_right] % period
+    # Handle wrap-around
+    span = (d_right - d_left) % period
+    if span == 0:
+        return data[idx_left]
+    w = ((day_mod - d_left) % period) / span
+    return (1 - w) * data[idx_left] + w * data[idx_right]
 
 
 # ==============================================================================
@@ -80,11 +182,11 @@ def get_ghg_at_time(config: GHGConfig, day: float) -> dict:
             "n2o_ppbv": config.n2o_ppbv,
         }
     elif config.source == "file":
-        raise NotImplementedError(
-            "Time-varying GHG from file is not yet implemented. "
-            "Provide a GHG NetCDF file and implement interpolation in "
-            "legoesm/forcing/external.py:get_ghg_at_time()."
-        )
+        if not config.path:
+            raise ValueError("GHGConfig.path must be set when source='file'")
+        varnames = ("co2_ppmv", "ch4_ppbv", "n2o_ppbv")
+        times, data = _load_nc_timeseries(config.path, varnames)
+        return {v: _interp_1d(times, data[v], day) for v in varnames}
     else:
         raise ValueError(f"Unknown GHG source: {config.source!r}")
 
@@ -119,17 +221,30 @@ class OzoneConfig(NamedTuple):
 def get_ozone_at_time(config: OzoneConfig, day: float, grid=None, sigma=None):
     """Return ozone field at a given simulation day.
 
+    Parameters
+    ----------
+    config : OzoneConfig
+    day : float
+        Day of year (fractional).
+    grid : optional
+        Grid object (unused for zonal-mean climatology).
+    sigma : optional
+        Sigma levels (unused for zonal-mean climatology).
+
     Returns
     -------
-    None if ozone is disabled, otherwise raises NotImplementedError.
+    None if ozone is disabled.
+    dict with keys ``"lat"``, ``"ozone"`` if enabled.
+    ``"ozone"`` has shape ``(nlat,)`` or ``(nlat, nlev)`` interpolated
+    to the given day from a monthly climatology.
     """
     if not config.enabled:
         return None
-    raise NotImplementedError(
-        "Ozone forcing is scaffolded but not yet implemented. "
-        "Provide an ozone climatology NetCDF and implement interpolation in "
-        "legoesm/forcing/external.py:get_ozone_at_time()."
-    )
+    if not config.path:
+        raise ValueError("OzoneConfig.path must be set when enabled=True")
+    mid_days, lat, data = _load_nc_monthly_zonal(config.path, "ozone")
+    ozone_interp = _interp_monthly_cyclic(mid_days, data, day)
+    return {"lat": lat, "ozone": ozone_interp}
 
 
 # ==============================================================================
@@ -161,17 +276,28 @@ class AerosolConfig(NamedTuple):
 def get_aerosol_at_time(config: AerosolConfig, day: float, grid=None):
     """Return aerosol optical depth at a given simulation day.
 
+    Parameters
+    ----------
+    config : AerosolConfig
+    day : float
+        Day of year (fractional).
+    grid : optional
+        Grid object (unused for zonal-mean climatology).
+
     Returns
     -------
-    None if aerosol is disabled, otherwise raises NotImplementedError.
+    None if aerosol is disabled.
+    dict with keys ``"lat"``, ``"aod"`` if enabled.
+    ``"aod"`` has shape ``(nlat,)`` interpolated to the given day from
+    a monthly climatology.
     """
     if not config.enabled:
         return None
-    raise NotImplementedError(
-        "Aerosol forcing is scaffolded but not yet implemented. "
-        "Provide an aerosol climatology NetCDF and implement interpolation in "
-        "legoesm/forcing/external.py:get_aerosol_at_time()."
-    )
+    if not config.path:
+        raise ValueError("AerosolConfig.path must be set when enabled=True")
+    mid_days, lat, data = _load_nc_monthly_zonal(config.path, "aod")
+    aod_interp = _interp_monthly_cyclic(mid_days, data, day)
+    return {"lat": lat, "aod": aod_interp}
 
 
 # ==============================================================================
@@ -216,9 +342,10 @@ def get_tsi_at_time(config: SolarConfig, day: float) -> float:
     if config.source == "constant":
         return config.S_0
     elif config.source == "file":
-        raise NotImplementedError(
-            "Time-varying TSI from file is not yet implemented."
-        )
+        if not config.path:
+            raise ValueError("SolarConfig.path must be set when source='file'")
+        times, data = _load_nc_timeseries(config.path, ("tsi",))
+        return _interp_1d(times, data["tsi"], day)
     else:
         raise ValueError(f"Unknown solar source: {config.source!r}")
 

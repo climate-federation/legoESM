@@ -154,12 +154,15 @@ def step_sea_ice(
 
     lw_up_new = config.emissivity_ice * constants.sigma_sb * T_ice_new ** 4
 
+    # Recompute q_surface from updated ice temperature for consistency
+    q_sfc_new = saturation_mixing_ratio_ice(T_ice_new, forcing.p_surface)
+
     response = TileResponse(
         T_surface=T_ice_new,
         albedo=alpha_ice,
         emissivity=jnp.broadcast_to(jnp.array(config.emissivity_ice), h.shape),
         z0=jnp.broadcast_to(jnp.array(config.z0_ice), h.shape),
-        q_surface=q_sfc,
+        q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx,
         tau_x=tau_x,

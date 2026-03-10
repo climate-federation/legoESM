@@ -153,9 +153,9 @@ class TestExternalForcingConfig:
         assert result["co2_ppmv"] == 400.0
         assert result["ch4_ppbv"] == 1650.0  # default
 
-    def test_ghg_file_mode_raises(self):
-        ghg = GHGConfig(source="file", path="/nonexistent")
-        with pytest.raises(NotImplementedError):
+    def test_ghg_file_mode_missing_path_raises(self):
+        ghg = GHGConfig(source="file", path="")
+        with pytest.raises(ValueError, match="path must be set"):
             get_ghg_at_time(ghg, day=0.0)
 
     def test_ghg_unknown_source_raises(self):
@@ -167,25 +167,25 @@ class TestExternalForcingConfig:
         ozone = OzoneConfig(enabled=False)
         assert get_ozone_at_time(ozone, day=0.0) is None
 
-    def test_ozone_enabled_raises(self):
-        ozone = OzoneConfig(enabled=True)
-        with pytest.raises(NotImplementedError):
+    def test_ozone_enabled_missing_path_raises(self):
+        ozone = OzoneConfig(enabled=True, path="")
+        with pytest.raises(ValueError, match="path must be set"):
             get_ozone_at_time(ozone, day=0.0)
 
     def test_aerosol_disabled_returns_none(self):
         aerosol = AerosolConfig(enabled=False)
         assert get_aerosol_at_time(aerosol, day=0.0) is None
 
-    def test_aerosol_enabled_raises(self):
-        aerosol = AerosolConfig(enabled=True)
-        with pytest.raises(NotImplementedError):
+    def test_aerosol_enabled_missing_path_raises(self):
+        aerosol = AerosolConfig(enabled=True, path="")
+        with pytest.raises(ValueError, match="path must be set"):
             get_aerosol_at_time(aerosol, day=0.0)
 
     def test_tsi_constant(self):
         solar = SolarConfig(S_0=1365.0)
         assert get_tsi_at_time(solar, day=42.0) == 1365.0
 
-    def test_tsi_file_mode_raises(self):
-        solar = SolarConfig(source="file")
-        with pytest.raises(NotImplementedError):
+    def test_tsi_file_mode_missing_path_raises(self):
+        solar = SolarConfig(source="file", path="")
+        with pytest.raises(ValueError, match="path must be set"):
             get_tsi_at_time(solar, day=0.0)

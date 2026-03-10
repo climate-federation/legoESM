@@ -89,12 +89,15 @@ def step_lake(
 
     lw_up_new = config.emissivity_lake * constants.sigma_sb * T_epi_new ** 4
 
+    # Recompute q_surface from updated epilimnion temperature for consistency
+    q_sfc_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)
+
     response = TileResponse(
         T_surface=T_epi_new,
         albedo=jnp.broadcast_to(jnp.array(config.albedo_lake), T_epi.shape),
         emissivity=jnp.broadcast_to(jnp.array(config.emissivity_lake), T_epi.shape),
         z0=jnp.broadcast_to(jnp.array(config.z0_lake), T_epi.shape),
-        q_surface=q_sfc,
+        q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx,
         tau_x=tau_x,

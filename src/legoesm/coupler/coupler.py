@@ -174,8 +174,13 @@ def ocean_tile_response(
         lhflx = rho * constants.L_v * config.Ch_ocean * wind_speed * (q_sfc - forcing.q_lowest)
 
     # Ocean albedo: constant or zenith-dependent
+    # Honour CouplerConfig.ocean_albedo for the constant-albedo path by
+    # overriding alpha_ocean_const in the OceanAlbedoConfig.
+    oac = config.ocean_albedo_config
+    if oac.method == "constant":
+        oac = oac._replace(alpha_ocean_const=config.ocean_albedo)
     alpha_ocean = compute_ocean_albedo(
-        forcing.cos_zenith, config.ocean_albedo_config,
+        forcing.cos_zenith, oac,
     )
     # Ensure correct shape
     if not hasattr(alpha_ocean, 'shape') or alpha_ocean.shape != shape:
