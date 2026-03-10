@@ -82,8 +82,8 @@ def rayleigh_gwd(
     # Frictional heating: dT/dt = -(u*du/dt + v*dv/dt) / c_pd
     dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd
 
-    # Column dissipation
+    # Column dissipation (positive-definite: KE lost by the mean flow)
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
-    eps_gwd = jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
+    eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 
     return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, eps_gwd=eps_gwd)

@@ -1,12 +1,15 @@
-"""CLUBB-lite higher-order closure skeleton.
+"""CLUBB-lite — simplified surrogate, NOT a faithful CLUBB implementation.
 
-CLUBB (Cloud Layers Unified By Binormals) is a higher-order turbulence
-closure with ~13 prognostic moments and double-Gaussian PDF diagnostics.
-Full implementation is a major undertaking.
+This module provides the CLUBB-lite interface but internally delegates
+entirely to the TKE scheme. It does NOT implement the CLUBB higher-order
+closure (prognostic moments, double-Gaussian PDF, etc.).
 
-This skeleton establishes the CLUBB interface and internally delegates
-to the TKE scheme. Future development will add CLUBB-specific higher-order
-moment equations and PDF diagnostics.
+The purpose is to reserve the CLUBB interface for future development.
+Until actual CLUBB equations are added, this is functionally identical
+to the TKE scheme.
+
+The reference CLUBB (Golaz et al. 2002) includes ~13 prognostic moment
+equations and binormal PDF diagnostics that are not present here.
 
 References
 ----------
@@ -40,10 +43,11 @@ def clubb_lite_turbulence(
     dt: float,
     config: CLUBBLiteConfig,
 ) -> tuple[TurbulenceOutput, jax.Array]:
-    """Compute turbulence tendencies using CLUBB-lite skeleton.
+    """Compute turbulence tendencies using CLUBB-lite surrogate.
 
-    Currently delegates to the TKE scheme internally. The CLUBB interface
-    is established for future development of higher-order closure.
+    WARNING: This is NOT a CLUBB implementation. It delegates entirely
+    to the TKE scheme. The CLUBB interface is reserved for future
+    development of a proper higher-order closure.
 
     Parameters
     ----------

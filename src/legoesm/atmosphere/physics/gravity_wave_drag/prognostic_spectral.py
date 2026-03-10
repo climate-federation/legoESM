@@ -161,8 +161,8 @@ def prognostic_spectral_gwd(
     # Frictional heating
     dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd
 
-    # Column dissipation
-    eps_gwd = jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
+    # Column dissipation (positive-definite: KE lost by the mean flow)
+    eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 
     # Prognostic spectrum update: relax toward launch source
     launch_source = jnp.full((ncol, n_az, n_wn), config.launch_flux)

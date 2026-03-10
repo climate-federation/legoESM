@@ -1,7 +1,7 @@
 """External forcing interfaces for AMIP/CMIP-style experiments.
 
-Provides scaffolded configuration and interpolation for time-varying
-external forcings beyond SST/SIC:
+Provides configuration and interpolation for time-varying external
+forcings beyond SST/SIC:
 
 - Greenhouse gas concentrations (CO2, CH4, N2O, CFCs)
 - Ozone climatology / forcing
@@ -10,14 +10,10 @@ external forcings beyond SST/SIC:
 
 Status
 ------
-- GHG: config + constant-value mode active; time-varying from file is scaffolded
-- Ozone: fully scaffolded (placeholder)
-- Aerosol: fully scaffolded (placeholder)
-- Solar: seasonal cycle already active in gray radiation; TSI variation scaffolded
-
-These interfaces are designed so that physics parameterizations can query
-them without knowing whether the forcing is constant, prescribed from
-a file, or computed interactively.
+- GHG: config + constant-value active; time-varying from file supported
+- Ozone: zonal-mean climatology with lat/vertical interpolation to model grid
+- Aerosol: zonal-mean AOD climatology with lat interpolation to model grid
+- Solar: constant TSI active; time-varying TSI from file supported
 """
 
 from __future__ import annotations
@@ -79,6 +75,7 @@ def _load_nc_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndar
     """Load a monthly zonal-mean field from NetCDF.
 
     Expected dimensions: ``(time=12, lat, [level])``.
+    An optional ``level`` or ``plev`` variable provides pressure levels [Pa].
 
     Returns
     -------
@@ -106,6 +103,40 @@ def _load_nc_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndar
     return mid_days, lat, data
 
 
+@lru_cache(maxsize=16)
+def _load_nc_monthly_zonal_with_levels(path: str, varname: str):
+    """Like _load_nc_monthly_zonal but also returns pressure levels if present.
+
+    Returns
+    -------
+    (mid_days, lat, plev, data) where plev is shape (nlev,) in [Pa]
+    or None if no vertical dimension.
+    """
+    import netCDF4
+
+    with netCDF4.Dataset(path, "r") as ds:
+        if varname not in ds.variables:
+            raise ValueError(f"Variable {varname!r} not found in {path!r}")
+        data = np.asarray(ds.variables[varname][:], dtype=np.float64)
+        if "lat" in ds.variables:
+            lat = np.asarray(ds.variables["lat"][:], dtype=np.float64)
+        elif "latitude" in ds.variables:
+            lat = np.asarray(ds.variables["latitude"][:], dtype=np.float64)
+        else:
+            raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
+        if "time" in ds.variables:
+            mid_days = np.asarray(ds.variables["time"][:], dtype=np.float64)
+        else:
+            mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+
+        plev = None
+        for vname in ("plev", "level", "lev"):
+            if vname in ds.variables:
+                plev = np.asarray(ds.variables[vname][:], dtype=np.float64)
+                break
+    return mid_days, lat, plev, data
+
+
 def _interp_monthly_cyclic(mid_days: np.ndarray, data: np.ndarray, day: float) -> np.ndarray:
     """Interpolate a monthly-cyclic field (12, ...) to a day of year.
 
@@ -113,21 +144,83 @@ def _interp_monthly_cyclic(mid_days: np.ndarray, data: np.ndarray, day: float) -
     """
     period = 365.25
     day_mod = day % period
-    # Wrap mid_days to ensure cyclic interpolation
     n = len(mid_days)
-    # Find bracketing months
     idx_right = np.searchsorted(mid_days % period, day_mod)
     if idx_right >= n:
         idx_right = 0
     idx_left = (idx_right - 1) % n
     d_left = mid_days[idx_left] % period
     d_right = mid_days[idx_right] % period
-    # Handle wrap-around
     span = (d_right - d_left) % period
     if span == 0:
         return data[idx_left]
     w = ((day_mod - d_left) % period) / span
     return (1 - w) * data[idx_left] + w * data[idx_right]
+
+
+def _interp_zonal_to_grid(lat_src: np.ndarray, field: np.ndarray,
+                           lat_grid: jnp.ndarray) -> jnp.ndarray:
+    """Interpolate a zonal-mean field to model grid latitudes.
+
+    Parameters
+    ----------
+    lat_src : (nlat_src,)
+        Source latitudes [degrees].
+    field : (nlat_src,) or (nlat_src, nlev)
+        Zonal-mean field at source latitudes.
+    lat_grid : jax array, any shape
+        Model grid latitudes [radians]. Will be converted to degrees.
+
+    Returns
+    -------
+    jax array with shape (*lat_grid.shape,) or (*lat_grid.shape, nlev)
+    """
+    lat_deg = np.asarray(jnp.degrees(lat_grid)).ravel()
+
+    if field.ndim == 1:
+        result = np.interp(lat_deg, lat_src, field)
+        return jnp.array(result).reshape(lat_grid.shape)
+    elif field.ndim == 2:
+        nlev = field.shape[1]
+        result = np.zeros((len(lat_deg), nlev))
+        for k in range(nlev):
+            result[:, k] = np.interp(lat_deg, lat_src, field[:, k])
+        return jnp.array(result).reshape((*lat_grid.shape, nlev))
+    else:
+        raise ValueError(f"Expected 1D or 2D field, got {field.ndim}D")
+
+
+def _interp_vertical(field_plev: jnp.ndarray, plev_src: np.ndarray,
+                      p_target: jnp.ndarray) -> jnp.ndarray:
+    """Interpolate vertically in log-pressure space.
+
+    Parameters
+    ----------
+    field_plev : (..., nlev_src)
+        Field on source pressure levels.
+    plev_src : (nlev_src,)
+        Source pressure levels [Pa].
+    p_target : (..., nlev_target)
+        Target pressure levels [Pa].
+
+    Returns
+    -------
+    (..., nlev_target) interpolated field.
+    """
+    log_p_src = np.log(np.maximum(plev_src, 1e-10))
+    log_p_tgt = jnp.log(jnp.maximum(p_target, 1e-10))
+
+    # Use numpy interp on flattened arrays
+    shape_prefix = field_plev.shape[:-1]
+    nlev_tgt = p_target.shape[-1]
+    field_flat = np.asarray(field_plev).reshape(-1, len(plev_src))
+    log_p_tgt_flat = np.asarray(log_p_tgt).reshape(-1, nlev_tgt)
+
+    result = np.zeros((field_flat.shape[0], nlev_tgt))
+    for i in range(field_flat.shape[0]):
+        result[i] = np.interp(log_p_tgt_flat[i], log_p_src, field_flat[i])
+
+    return jnp.array(result).reshape((*shape_prefix, nlev_tgt))
 
 
 # ==============================================================================
@@ -137,10 +230,11 @@ def _interp_monthly_cyclic(mid_days: np.ndarray, data: np.ndarray, day: float) -
 class GHGConfig(NamedTuple):
     """Greenhouse gas configuration.
 
-    Currently used to inform radiation (e.g., scaling LW optical depth).
-    The gray radiation does not use GHG concentrations directly, but this
-    config provides the interface for future multi-band or correlated-k
-    radiation schemes.
+    When source="constant", the specified concentrations are used at
+    all times. When source="file", values are linearly interpolated
+    from a NetCDF time series containing co2_ppmv, ch4_ppbv, n2o_ppbv.
+
+    The concentrations are consumed by RRTMGP radiation (not gray).
 
     Fields
     ------
@@ -198,11 +292,15 @@ def get_ghg_at_time(config: GHGConfig, day: float) -> dict:
 class OzoneConfig(NamedTuple):
     """Ozone forcing configuration.
 
-    Placeholder for prescribed ozone climatology or forcing.
-    When active, provides column ozone or 3D ozone mixing ratio
-    for radiation calculations.
+    When enabled, provides column ozone or 3D ozone mixing ratio
+    for radiation. Supports zonal-mean monthly climatology from
+    NetCDF with latitude and optional vertical interpolation to the
+    model grid.
 
-    Status: fully scaffolded. Not yet connected to radiation.
+    Expected NetCDF schema for climatology:
+    - Variable: 'ozone' with dims (time=12, lat[, plev])
+    - Units: volume mixing ratio [mol/mol]
+    - 'lat' in degrees, 'plev' in Pa (if 3D)
 
     Fields
     ------
@@ -218,7 +316,9 @@ class OzoneConfig(NamedTuple):
     path: str = ""
 
 
-def get_ozone_at_time(config: OzoneConfig, day: float, grid=None, sigma=None):
+def get_ozone_at_time(config: OzoneConfig, day: float,
+                       lat_grid: jnp.ndarray | None = None,
+                       p_grid: jnp.ndarray | None = None):
     """Return ozone field at a given simulation day.
 
     Parameters
@@ -226,25 +326,39 @@ def get_ozone_at_time(config: OzoneConfig, day: float, grid=None, sigma=None):
     config : OzoneConfig
     day : float
         Day of year (fractional).
-    grid : optional
-        Grid object (unused for zonal-mean climatology).
-    sigma : optional
-        Sigma levels (unused for zonal-mean climatology).
+    lat_grid : jax array or None
+        Model grid latitudes [radians]. If provided, interpolates
+        the zonal-mean climatology to these latitudes.
+    p_grid : jax array or None
+        Model pressure levels [Pa]. If provided and the ozone file
+        contains a vertical dimension, interpolates vertically.
 
     Returns
     -------
     None if ozone is disabled.
-    dict with keys ``"lat"``, ``"ozone"`` if enabled.
-    ``"ozone"`` has shape ``(nlat,)`` or ``(nlat, nlev)`` interpolated
-    to the given day from a monthly climatology.
+    jax array interpolated to (lat_grid.shape,) or
+    (lat_grid.shape, nlev) if 3D, or dict with "lat"/"ozone" keys
+    if lat_grid is not provided.
     """
     if not config.enabled:
         return None
     if not config.path:
         raise ValueError("OzoneConfig.path must be set when enabled=True")
-    mid_days, lat, data = _load_nc_monthly_zonal(config.path, "ozone")
+
+    mid_days, lat, plev, data = _load_nc_monthly_zonal_with_levels(
+        config.path, "ozone"
+    )
     ozone_interp = _interp_monthly_cyclic(mid_days, data, day)
-    return {"lat": lat, "ozone": ozone_interp}
+
+    if lat_grid is not None:
+        # Interpolate to model grid latitudes
+        ozone_on_grid = _interp_zonal_to_grid(lat, ozone_interp, lat_grid)
+        # Vertical interpolation if 3D data and pressure grid provided
+        if plev is not None and p_grid is not None and ozone_on_grid.ndim > len(lat_grid.shape):
+            ozone_on_grid = _interp_vertical(ozone_on_grid, plev, p_grid)
+        return ozone_on_grid
+    else:
+        return {"lat": lat, "ozone": ozone_interp}
 
 
 # ==============================================================================
@@ -254,10 +368,13 @@ def get_ozone_at_time(config: OzoneConfig, day: float, grid=None, sigma=None):
 class AerosolConfig(NamedTuple):
     """Aerosol forcing configuration.
 
-    Placeholder for prescribed aerosol optical depth climatology.
-    When active, modifies SW radiation via column AOD.
+    When enabled, provides prescribed aerosol optical depth from a
+    zonal-mean monthly climatology. The AOD modifies SW radiation.
 
-    Status: fully scaffolded. Not yet connected to radiation.
+    Expected NetCDF schema for climatology:
+    - Variable: 'aod' with dims (time=12, lat)
+    - Units: dimensionless optical depth at 550 nm
+    - 'lat' in degrees
 
     Fields
     ------
@@ -273,7 +390,8 @@ class AerosolConfig(NamedTuple):
     path: str = ""
 
 
-def get_aerosol_at_time(config: AerosolConfig, day: float, grid=None):
+def get_aerosol_at_time(config: AerosolConfig, day: float,
+                         lat_grid: jnp.ndarray | None = None):
     """Return aerosol optical depth at a given simulation day.
 
     Parameters
@@ -281,15 +399,13 @@ def get_aerosol_at_time(config: AerosolConfig, day: float, grid=None):
     config : AerosolConfig
     day : float
         Day of year (fractional).
-    grid : optional
-        Grid object (unused for zonal-mean climatology).
+    lat_grid : jax array or None
+        If provided, interpolates AOD to model grid latitudes.
 
     Returns
     -------
     None if aerosol is disabled.
-    dict with keys ``"lat"``, ``"aod"`` if enabled.
-    ``"aod"`` has shape ``(nlat,)`` interpolated to the given day from
-    a monthly climatology.
+    jax array if lat_grid provided, else dict with "lat"/"aod".
     """
     if not config.enabled:
         return None
@@ -297,7 +413,11 @@ def get_aerosol_at_time(config: AerosolConfig, day: float, grid=None):
         raise ValueError("AerosolConfig.path must be set when enabled=True")
     mid_days, lat, data = _load_nc_monthly_zonal(config.path, "aod")
     aod_interp = _interp_monthly_cyclic(mid_days, data, day)
-    return {"lat": lat, "aod": aod_interp}
+
+    if lat_grid is not None:
+        return _interp_zonal_to_grid(lat, aod_interp, lat_grid)
+    else:
+        return {"lat": lat, "aod": aod_interp}
 
 
 # ==============================================================================
@@ -307,11 +427,12 @@ def get_aerosol_at_time(config: AerosolConfig, day: float, grid=None):
 class SolarConfig(NamedTuple):
     """Solar irradiance configuration.
 
-    The seasonal cycle is already handled by the gray radiation's
-    daily_mean_insolation(). This config adds support for TSI variations
-    (e.g., solar cycle, volcanic dimming).
+    The seasonal cycle is handled by the radiation scheme's insolation
+    calculation. This config adds support for TSI variations (e.g.,
+    solar cycle, volcanic dimming).
 
-    Status: constant TSI active; time-varying TSI scaffolded.
+    Constant TSI is active by default. Time-varying TSI from file is
+    supported via source="file".
 
     Fields
     ------

@@ -18,11 +18,18 @@ class BiharmonicConfig(NamedTuple):
 
 
 class GMRediConfig(NamedTuple):
-    """Gent-McWilliams (1990) / Redi isopycnal diffusion."""
+    """Gent-McWilliams / Redi isopycnal mixing (small-slope formulation).
+
+    Implements the Griffies (1998) skew-flux form for GM and the full
+    Redi isopycnal diffusion tensor with DM95 slope tapering.
+
+    When kappa_GM == kappa_Redi (default), the horizontal off-diagonal
+    terms cancel and the scheme reduces to horizontal diffusion plus
+    an enhanced vertical mixing term proportional to S^2.
+    """
     kappa_GM: float = 1e3       # GM bolus transport coefficient [m^2/s]
     kappa_Redi: float = 1e3     # Redi isopycnal diffusivity [m^2/s]
-    S_max: float = 0.01         # Maximum isopycnal slope
-    taper_scheme: str = "dm95"  # Tapering scheme
+    S_max: float = 0.01         # Maximum isopycnal slope for tapering
 
 
 class LateralMixingConfig(NamedTuple):

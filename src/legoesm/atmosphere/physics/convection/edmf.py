@@ -1,8 +1,17 @@
-"""Simplified EDMF (Eddy-Diffusivity Mass-Flux) convection scheme.
+"""Simplified EDMF convection — NOT a full Siebesma et al. (2007) EDMF.
 
-A mass-flux-based convection parameterization with a prognostic updraft
-area fraction a_u. The scheme diagnoses updraft properties from entraining
-plume equations and computes MF tendencies from detrainment.
+A simplified single-updraft mass-flux convection scheme inspired by the
+EDMF framework. Includes a prognostic updraft area fraction, entraining
+plume equations, and mass-flux tendencies.
+
+This is a reduced-complexity surrogate, not a production-grade EDMF
+implementation. Key simplifications vs. a full EDMF:
+- Single updraft plume (no multi-plume or downdraft components)
+- Simplified entrainment/detrainment (exponential dilution)
+- No stochastic or turbulence-based triggering
+- No interaction with a sub-grid PDF closure
+
+Suitable for idealized experiments and as a development baseline.
 
 Algorithm:
 1. Compute CAPE and moist adiabat for activation

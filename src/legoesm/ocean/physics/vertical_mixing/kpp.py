@@ -1,7 +1,25 @@
-"""K-Profile Parameterization (KPP).
+"""LMD94-style K-Profile Parameterization (KPP).
 
-Large, McWilliams & Doney (1994): Oceanic vertical mixing —
-A review and a model with a nonlocal boundary layer parameterization.
+Boundary-layer parameterization following Large, McWilliams & Doney (1994)
+with:
+
+- Bulk Richardson number BL-depth diagnosis with linear interpolation
+  of the crossing depth between model levels.
+- Turbulent velocity scales w_s(sigma) from surface forcing (u_star, B_f).
+- Cubic shape function G(sigma) = sigma * (1 - sigma)^2.
+- Non-local tracer transport for unstable (convective) conditions only.
+- Interior mixing: Richardson-number dependent + convective instability
+  enhancement for statically unstable layers below the BL.
+
+The caller should provide surface wind stress and buoyancy flux when
+available.  If tau_x/tau_y are None, a simplified u_star proxy from
+surface speed is used.
+
+References
+----------
+- Large, W. G., McWilliams, J. C., & Doney, S. C. (1994). Oceanic
+  vertical mixing: A review and a model with a nonlocal boundary layer
+  parameterization. Rev. Geophys., 32, 363-403.
 """
 
 from __future__ import annotations
@@ -27,17 +45,20 @@ def _boundary_layer_depth(
     v: jnp.ndarray,
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
+    u_star: jnp.ndarray,
+    B_f: jnp.ndarray,
     cfg: KPPConfig,
     g: float = 9.80616,
 ) -> jnp.ndarray:
     """Estimate boundary layer depth h via bulk Richardson number.
 
-    Ri_b(k) = g * delta_rho * |z(k)| / (rho_0 * (delta_V^2 + V_t^2))
-    BL depth is where Ri_b first exceeds Ri_crit.
+    Uses linear interpolation to find the depth where Ri_b crosses
+    Ri_crit, rather than snapping to the nearest model level.
 
-    Returns shape (...) boundary layer depth [m, positive].
+    Returns shape (...) boundary layer depth [m, positive downward].
     """
     eps = 1e-12
+    nlev = rho.shape[-1]
 
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     # Depth of cell centers below surface (positive downward)
@@ -51,7 +72,6 @@ def _boundary_layer_depth(
 
     # Unresolved shear: V_t^2 = Cv * sqrt(|N2|) * h (approx with z_depth)
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
-    # Extend N2 to full levels by padding surface with first interface value
     N2_full = jnp.concatenate([N2[..., :1], N2], axis=-1)
     V_t2 = cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 0.0)) * z_depth
 
@@ -60,23 +80,45 @@ def _boundary_layer_depth(
         rho_0_ref * jnp.maximum(delta_V2 + V_t2, eps)
     )
 
-    # Find first level where Ri_b > Ri_crit
+    # --- Linear interpolation of crossing depth ---
+    # Find where Ri_b first exceeds Ri_crit and interpolate
     exceeds = Ri_b > cfg.Ri_crit
+
     # Use argmax to find first True; if none found, use bottom
-    nlev = rho.shape[-1]
     idx = jnp.argmax(exceeds, axis=-1)
-    # If no level exceeds, set to bottom
     any_exceeds = jnp.any(exceeds, axis=-1)
     idx = jnp.where(any_exceeds, idx, nlev - 1)
 
-    # Boundary layer depth: z_depth at that index
-    # Gather using advanced indexing
+    # Gather Ri_b and z_depth at idx and idx-1 for interpolation
     shape = rho.shape[:-1]
     flat_idx = idx.ravel()
     z_depth_flat = z_depth.reshape(-1, nlev)
-    h = z_depth_flat[jnp.arange(z_depth_flat.shape[0]), flat_idx]
-    h = h.reshape(shape)
-    h = jnp.maximum(h, dz_actual[..., 0])  # At least one layer
+    Ri_b_flat = Ri_b.reshape(-1, nlev)
+
+    ncols = z_depth_flat.shape[0]
+    arange = jnp.arange(ncols)
+
+    z_at = z_depth_flat[arange, flat_idx]
+    Ri_at = Ri_b_flat[arange, flat_idx]
+
+    # Previous level (clipped to 0)
+    idx_prev = jnp.maximum(flat_idx - 1, 0)
+    z_prev = z_depth_flat[arange, idx_prev]
+    Ri_prev = Ri_b_flat[arange, idx_prev]
+
+    # Linear interpolation: find z where Ri_b = Ri_crit
+    dRi = Ri_at - Ri_prev
+    frac = jnp.where(
+        jnp.abs(dRi) > eps,
+        (cfg.Ri_crit - Ri_prev) / dRi,
+        1.0,
+    )
+    frac = jnp.clip(frac, 0.0, 1.0)
+    h_interp = z_prev + frac * (z_at - z_prev)
+    h = h_interp.reshape(shape)
+
+    # At least one layer thick
+    h = jnp.maximum(h, dz_actual[..., 0])
 
     return h
 
@@ -92,8 +134,11 @@ def kpp_vertical_mixing(
     jacobian: jnp.ndarray,
     cfg: KPPConfig,
     g: float = 9.80616,
+    tau_x: jnp.ndarray | None = None,
+    tau_y: jnp.ndarray | None = None,
+    B_f: jnp.ndarray | None = None,
 ) -> VerticalMixingOutput:
-    """Apply KPP vertical mixing.
+    """Apply LMD94-style KPP vertical mixing.
 
     Parameters
     ----------
@@ -105,6 +150,11 @@ def kpp_vertical_mixing(
     jacobian : array (6, n, n)
     cfg : KPPConfig
     g : float
+    tau_x, tau_y : array (6, n, n) or None
+        Surface wind stress [Pa]. If None, a proxy from surface speed is used.
+    B_f : array (6, n, n) or None
+        Surface buoyancy flux [m^2/s^3], positive = destabilizing (convective).
+        If None, estimated from surface density gradient.
 
     Returns
     -------
@@ -113,37 +163,71 @@ def kpp_vertical_mixing(
     eps = 1e-12
     nlev = u.shape[-1]
 
+    # --- Friction velocity ---
+    if tau_x is not None and tau_y is not None:
+        # Proper u_star from wind stress: u_star = sqrt(|tau| / rho_0)
+        tau_mag = jnp.sqrt(tau_x**2 + tau_y**2 + eps)
+        u_star = jnp.sqrt(tau_mag / rho_0_ref)
+    else:
+        # Simplified proxy: u_star ~ 0.01 * |U_surface|
+        speed_sfc = jnp.sqrt(u[..., 0]**2 + v[..., 0]**2 + eps)
+        u_star = jnp.maximum(speed_sfc * 0.01, 1e-4)
+
+    # --- Surface buoyancy flux ---
+    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
+    dz_half0 = 0.5 * (dz_actual[..., 0] + dz_actual[..., 1])
+    if B_f is None:
+        # Estimate from near-surface density gradient
+        drho_dz_sfc = (rho[..., 0] - rho[..., 1]) / jnp.maximum(dz_half0, eps)
+        B_f = -g / rho_0_ref * cfg.K_bg * drho_dz_sfc  # simplified proxy
+
     # --- Boundary layer depth ---
-    h_bl = _boundary_layer_depth(rho, u, v, z_coord, jacobian, cfg, g)
+    h_bl = _boundary_layer_depth(rho, u, v, z_coord, jacobian, u_star, B_f, cfg, g)
 
     # --- Depth coordinate ---
-    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     z_depth = jnp.cumsum(dz_actual, axis=-1) - 0.5 * dz_actual
-    # sigma = z_depth / h_bl: normalized depth within BL
     sigma = z_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
 
     # --- Shape function G(sigma) = sigma * (1 - sigma)^2 ---
     sigma_clip = jnp.clip(sigma, 0.0, 1.0)
     G = sigma_clip * (1.0 - sigma_clip) ** 2
 
-    # --- Friction velocity (simple estimate from surface wind stress) ---
-    # Use surface shear as proxy: u* = sqrt(A_bg * |du/dz|_surface)
-    # Simplified: u_star ~ max(|u_surface|, 0.01) * 0.01
-    speed_sfc = jnp.sqrt(u[..., 0]**2 + v[..., 0]**2 + eps)
-    u_star = jnp.maximum(speed_sfc * 0.01, 1e-4)
+    # --- Turbulent velocity scale w_s(sigma) (LMD94 Appendix B) ---
+    # w_s depends on stability (B_f) and depth d = sigma * h_bl
+    d = sigma_clip * h_bl[..., jnp.newaxis]
+    # Monin-Obukhov length: L_MO = u_star^3 / (kappa * B_f)
+    L_MO = u_star[..., jnp.newaxis]**3 / (
+        cfg.kappa_vk * jnp.where(jnp.abs(B_f[..., jnp.newaxis]) > eps,
+                                  B_f[..., jnp.newaxis], eps)
+    )
+    zeta_kpp = d / L_MO
+
+    # Unstable (B_f > 0 or zeta < 0): w_s = kappa * u_star * (1 - c_s * zeta)^p
+    # Stable (B_f <= 0): w_s = kappa * u_star / (1 + 5*zeta)
+    is_unstable = B_f[..., jnp.newaxis] > 0.0
+    w_s_unstable = (cfg.kappa_vk * u_star[..., jnp.newaxis]
+                    * jnp.power(jnp.maximum(1.0 + 16.0 * jnp.abs(zeta_kpp), 1.0), 0.25))
+    w_s_stable = (cfg.kappa_vk * u_star[..., jnp.newaxis]
+                  / jnp.maximum(1.0 + 5.0 * jnp.maximum(zeta_kpp, 0.0), 1.0))
+    w_s = jnp.where(is_unstable, w_s_unstable, w_s_stable)
+    w_s = jnp.maximum(w_s, 1e-10)
 
     # --- BL diffusivity at full levels ---
-    K_bl_full = h_bl[..., jnp.newaxis] * cfg.kappa_vk * u_star[..., jnp.newaxis] * G
+    K_bl_full = h_bl[..., jnp.newaxis] * w_s * G
     K_bl_full = jnp.minimum(K_bl_full, cfg.K_max)
 
-    # --- Interior: Richardson-number mixing below BL ---
+    # --- Interior mixing: Richardson-number dependent ---
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
     du = u[..., :-1] - u[..., 1:]
     dv = v[..., :-1] - v[..., 1:]
     S2 = (du**2 + dv**2) / jnp.maximum(dz_half**2, eps)
-    Ri = jnp.maximum(N2 / jnp.maximum(S2, eps), 0.0)
-    K_interior = cfg.K_bg / (1.0 + 5.0 * Ri) ** 2 + cfg.K_bg
+    Ri_int = N2 / jnp.maximum(S2, eps)
+    K_interior = cfg.K_bg / (1.0 + 5.0 * jnp.maximum(Ri_int, 0.0)) ** 2 + cfg.K_bg
+
+    # Interior static instability: enhanced mixing where N2 < 0
+    K_conv = jnp.where(N2 < cfg.Ri_conv, cfg.K_conv, 0.0)
+    K_interior = K_interior + K_conv
 
     # --- K at interfaces (average of full level K_bl) ---
     K_bl_half = 0.5 * (K_bl_full[..., :-1] + K_bl_full[..., 1:])
@@ -172,24 +256,31 @@ def kpp_vertical_mixing(
         in_axes=0, out_axes=0,
     )(tracers)
 
-    # --- Non-local flux for T, S within boundary layer ---
-    # gamma * Q_s / (h * c_sw * rho_0), approximated by surface buoyancy flux
-    # Use surface T gradient as proxy for heat flux
+    # --- Non-local flux for T, S: ONLY for unstable (convective) forcing ---
+    # gamma * w_s * G / h  (LMD94 Eq. 19)
+    # Surface forcing proxy for heat: Q_T ≈ B_f * rho_0 / (g * alpha_T)
+    # Simplified: use surface T gradient scaled by K
     dT_dz_sfc = (T[..., 0] - T[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    Q_proxy = cfg.K_bg * dT_dz_sfc  # [K·m/s]
-    nonlocal_T = cfg.gamma_T * Q_proxy[..., jnp.newaxis] / jnp.maximum(
+    Q_T = cfg.K_bg * dT_dz_sfc  # [K·m/s]
+
+    # Only apply nonlocal for unstable forcing (B_f > 0)
+    is_unstable_col = B_f > 0.0
+    nonlocal_T = cfg.gamma_T * Q_T[..., jnp.newaxis] / jnp.maximum(
         h_bl[..., jnp.newaxis], eps
     )
-    # Apply only within BL
     in_bl_full = sigma < 1.0
-    dT_nonlocal = jnp.where(in_bl_full, nonlocal_T, 0.0)
+    dT_nonlocal = jnp.where(
+        in_bl_full & is_unstable_col[..., jnp.newaxis], nonlocal_T, 0.0
+    )
 
     dS_dz_sfc = (S[..., 0] - S[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    S_proxy = cfg.K_bg * dS_dz_sfc
-    nonlocal_S = cfg.gamma_S * S_proxy[..., jnp.newaxis] / jnp.maximum(
+    Q_S = cfg.K_bg * dS_dz_sfc
+    nonlocal_S = cfg.gamma_S * Q_S[..., jnp.newaxis] / jnp.maximum(
         h_bl[..., jnp.newaxis], eps
     )
-    dS_nonlocal = jnp.where(in_bl_full, nonlocal_S, 0.0)
+    dS_nonlocal = jnp.where(
+        in_bl_full & is_unstable_col[..., jnp.newaxis], nonlocal_S, 0.0
+    )
 
     return VerticalMixingOutput(
         du_dt=vel_tend[0],

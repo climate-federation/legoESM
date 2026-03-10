@@ -590,6 +590,10 @@ if RADIATION == "rrtmg":
 # 6. Operator-split physics step
 # ---------------------------------------------------------------------------
 _S_0 = exp_config.S_0
+
+# External forcing: time-varying TSI via get_tsi_at_time()
+from legoesm.forcing.external import get_tsi_at_time, SolarConfig
+_solar_config = SolarConfig(S_0=exp_config.S_0)
 _sigma_full = sigma.sigma_full
 _sigma_half = sigma.sigma_half
 _dsigma = sigma.dsigma
@@ -615,14 +619,14 @@ if RADIATION == "gray":
     @jax.jit
     def radiation_step(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
                        lat_col, lon_col, day_of_year, seconds_of_day,
-                       albedo_col, emis_col):
+                       albedo_col, emis_col, s_0=_S_0):
         """Gray radiation call (daily-mean or diurnal-cycle insolation)."""
         if DIURNAL_CYCLE:
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
-            insol = _S_0 * jnp.maximum(cos_sza, 0.0)
+            insol = s_0 * jnp.maximum(cos_sza, 0.0)
         else:
-            insol = daily_mean_insolation(lat_col, day_of_year, _S_0)
+            insol = daily_mean_insolation(lat_col, day_of_year, s_0)
         return gray_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col,
@@ -634,15 +638,15 @@ else:
     @jax.jit
     def radiation_step(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
                        lat_col, lon_col, day_of_year, seconds_of_day,
-                       albedo_col, emis_col):
+                       albedo_col, emis_col, s_0=_S_0):
         """RRTMG radiation call with per-column albedo/emissivity."""
         if DIURNAL_CYCLE:
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
             cos_zenith = jnp.maximum(cos_sza, 0.0)
         else:
-            insol = daily_mean_insolation(lat_col, day_of_year, _S_0)
-            cos_zenith = jnp.clip(insol / jnp.clip(_S_0, 1.0e-6, None), 0.0, 1.0)
+            insol = daily_mean_insolation(lat_col, day_of_year, s_0)
+            cos_zenith = jnp.clip(insol / jnp.clip(s_0, 1.0e-6, None), 0.0, 1.0)
         o3_vmr = _compute_ozone_vmr(p_full_col, lat_col, ozone_config)
         # Compute cloud properties if cloud scheme is active.
         cloud_kwargs = {}
@@ -753,7 +757,7 @@ def physics_step_no_rad(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
 
 
 def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
-                                  day_of_year, seconds_of_day, dt):
+                                  day_of_year, seconds_of_day, dt, s_0=_S_0):
     """Full physics step: recompute radiation + convection + microphysics + BL."""
     nlev = _sigma_full.shape[0]
     shape_3d = T.shape
@@ -790,7 +794,7 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
     rad_out = radiation_step(T_col, p_full_col, p_half_col, q_v_col,
                              T_sfc_col, lat_col, lon_col,
                              day_of_year, seconds_of_day,
-                             albedo_col, emis_col)
+                             albedo_col, emis_col, s_0)
     dT_dt_rad = rad_out.heating_rate.reshape(shape_3d)
 
     sw_down_sfc = rad_out.sw_flux_down[:, -1].reshape(shape_2d)
@@ -955,10 +959,12 @@ sst, sic = get_sst_sic(day)
 
 state = model.step_with_physics(state, DT)
 
+_current_s_0 = get_tsi_at_time(_solar_config, day)
 (dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad = \
     compute_radiation_and_physics(
         state.T.data, state.p_s.data, q_v, q_c, q_r, state.u.data, state.v.data,
         sst, sic, grid.lat, grid.lon, day_of_year, seconds_of_day, DT,
+        _current_s_0,
     )
 _held_sw_net_sfc = _sw
 _held_lw_net_sfc = _lw
@@ -1009,6 +1015,9 @@ for step in range(start_step + 1, n_steps_total):
     # (b) Physics: recompute radiation on cadence, hold tendencies otherwise
     need_rad = (RAD_UPDATE_STEPS <= 1) or ((step + 1) % RAD_UPDATE_STEPS == 0)
 
+    # Time-varying TSI from external forcing
+    _current_s_0 = get_tsi_at_time(_solar_config, day)
+
     if need_rad:
         (dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip,
          _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad = \
@@ -1016,6 +1025,7 @@ for step in range(start_step + 1, n_steps_total):
                 state.T.data, state.p_s.data, q_v, q_c, q_r,
                 state.u.data, state.v.data,
                 sst, sic, grid.lat, grid.lon, day_of_year, seconds_of_day, DT,
+                _current_s_0,
             )
         _held_sw_net_sfc = _sw
         _held_lw_net_sfc = _lw

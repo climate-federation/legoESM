@@ -1,12 +1,16 @@
-"""Soil water retention curves and hydraulic conductivity (Task 8B).
+"""Soil water retention curves and hydraulic conductivity.
 
 Six pluggable retention curve models, all JAX-differentiable:
-1. Clapp-Hornberger (1978)
-2. Van Genuchten-Mualem (1980)
-3. Brooks-Corey (1964)
-4. Campbell (1974)
-5. Peters-Durner-Iden (2015) — capillary + adsorptive film flow
-6. Lu (2016) — three-regime SWRC (capillary + adsorbed film + tightly adsorbed)
+1. Clapp-Hornberger (1978) — faithful implementation
+2. Van Genuchten-Mualem (1980) — faithful implementation
+3. Brooks-Corey (1964) — faithful implementation
+4. Campbell (1974) — faithful implementation
+5. Peters-Durner-Iden (2015) — approximate variant: faithful SWRC and
+   capillary conductivity, but uses VG inverse for psi(theta) and
+   simplified film-flow conductivity (see pdi_psi, pdi_K docstrings)
+6. Lu (2016) — approximate variant: faithful three-regime SWRC, but
+   uses VG inverse for psi(theta) and simplified conductivity
+   (see lu_psi, lu_K docstrings)
 
 References
 ----------
@@ -257,13 +261,15 @@ def pdi_theta(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
 
 
 def pdi_psi(theta: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
-    """PDI matric potential from water content (VG inverse, approximate).
+    """PDI matric potential from water content (approximate VG inverse).
 
-    Uses the capillary component (dominant in the normal moisture range)
-    to invert: Sc ≈ (theta - theta_r*Snc) / (theta_s - theta_r).
-    Falls back to the standard VG inverse for robustness.
+    NOTE: This uses the standard Van Genuchten inverse as an approximation.
+    The capillary component dominates in the normal moisture range
+    (theta_r < theta < theta_sat), so the VG inverse is a reasonable
+    proxy. A faithful PDI inverse would require numerical root-finding
+    (e.g., Newton iteration on the full pdi_theta function), which is
+    not implemented here.
     """
-    # Use standard VG inverse as the capillary component dominates
     return van_genuchten_psi(theta, config)
 
 
@@ -377,19 +383,26 @@ def lu_theta(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
 
 
 def lu_psi(theta: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
-    """Lu (2016) inverse: matric potential from water content.
+    """Lu (2016) inverse: matric potential from water content (approximate).
 
-    Uses VG inverse as approximation (capillary regime dominates in
-    the normal moisture range relevant for Richards equation).
+    NOTE: Uses the standard Van Genuchten inverse as an approximation.
+    The capillary regime dominates in the normal moisture range relevant
+    for the Richards equation. A faithful Lu inverse would require
+    numerical root-finding on the full lu_theta function (capillary +
+    adsorptive + cavitation), which is not implemented here.
     """
     return van_genuchten_psi(theta, config)
 
 
 def lu_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
-    """Lu (2016) hydraulic conductivity.
+    """Lu (2016) hydraulic conductivity (approximate).
 
-    Uses VG-Mualem for the capillary component. In the adsorptive regime
-    (theta < theta_r), a film-flow floor ensures K remains positive.
+    NOTE: Uses VG-Mualem for the capillary component with a film-flow
+    floor in the adsorptive regime. The original Lu (2016) formulation
+    includes a more elaborate conductivity model coupling the capillary,
+    adsorptive, and cavitation regimes. This is a simplified variant
+    adequate for Richards equation integration in the normal moisture
+    range.
     """
     theta = lu_theta(psi, config)
     Se = jnp.clip(

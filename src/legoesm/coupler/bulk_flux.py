@@ -198,29 +198,67 @@ def compute_most_fluxes(
             z0_q_new = z0_t_new
 
         elif scheme == "large_yeager":
-            # Large & Yeager 2004: empirical C_DN(U_10N)
+            # Large & Yeager 2004 (CORE): iterate in coefficient space.
+            # 1) Neutral 10-m wind from current u_star and z0
             U_10N = u_star_safe / KAPPA * jnp.log(
                 10.0 / jnp.maximum(z0, 1e-12)
             )
             U_10N = jnp.clip(U_10N, 0.5, 50.0)
 
+            # 2) Empirical neutral 10-m drag coefficient C_DN(U_10N)
             C_DN = (2.7 / U_10N + 0.142 + 0.0764 * U_10N) * 1e-3
             C_DN = jnp.clip(C_DN, 0.5e-3, 3.0e-3)
 
-            z0_new = 10.0 / jnp.exp(KAPPA / jnp.sqrt(C_DN))
+            # 3) Neutral exchange coefficients at 10 m
+            rdn = jnp.sqrt(C_DN)
+            # Stability-dependent 10-m Stanton/Dalton number
+            CHN10 = jnp.where(zeta < 0.0, 32.7e-3, 18.0e-3) * rdn
+            CEN10 = 34.6e-3 * rdn
+            rhn = CHN10 / rdn  # = ch_coeff
+            ren = CEN10 / rdn  # = ce_coeff
 
-            # Stability-dependent Stanton / Dalton coefficient
-            ch_coeff = jnp.where(zeta < 0.0, 32.7e-3, 18.0e-3)
-            ce_coeff = jnp.where(zeta < 0.0, 34.6e-3, 34.6e-3)
-            z0_t_new = 10.0 / jnp.exp(KAPPA / ch_coeff)
-            z0_q_new = 10.0 / jnp.exp(KAPPA / ce_coeff)
+            # 4) Shift coefficients from 10 m to measurement height z_ref
+            #    with stability corrections (LY04 Eq. 9-11):
+            #    rd = rdn / (1 + rdn/kappa * (ln(z_ref/10) - psi_m))
+            #    rh = rhn / (1 + rhn/kappa * (ln(z_ref/10) - psi_h))
+            ln_z_ratio = jnp.log(z_ref / 10.0)
+            zeta_10 = jnp.clip(10.0 / L, -10.0, 10.0)
+            psi_m_10 = psi_m(zeta_10)
+            psi_h_10 = psi_h(zeta_10)
+            # Stability correction difference between z_ref and 10 m
+            dpsi_m = psi_m_val - psi_m_10
+            dpsi_h = psi_h_val - psi_h_10
+
+            rd = rdn / jnp.maximum(
+                1.0 + rdn / KAPPA * (ln_z_ratio - dpsi_m), 0.2
+            )
+            rh = rhn / jnp.maximum(
+                1.0 + rhn / KAPPA * (ln_z_ratio - dpsi_h), 0.2
+            )
+            re = ren / jnp.maximum(
+                1.0 + ren / KAPPA * (ln_z_ratio - dpsi_h), 0.2
+            )
+
+            # 5) Update scaling parameters directly from coefficients
+            u_star_new = rd * wind_speed
+            theta_star_new = rh * dT
+            q_star_new = re * dq
+
+            # Still need z0 for the next iteration's U_10N estimate
+            z0_new = z_ref / jnp.exp(KAPPA / rd + psi_m_val)
+            z0_new = jnp.clip(z0_new, 1e-12, 1.0)
+            z0_t_new = z0_t  # not used in coefficient path
+            z0_q_new = z0_q  # not used in coefficient path
+
+            return (u_star_new, z0_new, z0_t_new, z0_q_new,
+                    theta_star_new, q_star_new)
 
         else:
             z0_new = z0
             z0_t_new = z0_t
             z0_q_new = z0_q
 
-        # Transfer coefficients with stability correction
+        # For COARE and constant: transfer coefficients via log-law + stability
         ln_z_z0 = jnp.log(z_ref / jnp.maximum(z0_new, 1e-12))
         ln_z_z0t = jnp.log(z_ref / jnp.maximum(z0_t_new, 1e-12))
         ln_z_z0q = jnp.log(z_ref / jnp.maximum(z0_q_new, 1e-12))

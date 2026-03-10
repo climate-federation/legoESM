@@ -119,7 +119,7 @@ def mcfarlane_gwd(
     # Frictional heating
     dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd
 
-    # Column dissipation
-    eps_gwd = jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
+    # Column dissipation (positive-definite: KE lost by the mean flow)
+    eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 
     return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, eps_gwd=eps_gwd)

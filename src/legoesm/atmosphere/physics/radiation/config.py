@@ -43,7 +43,13 @@ class GrayRadiationConfig(NamedTuple):
     sw_tau_0 : float
         SW optical depth scale (default 0.22). Set to 0.0 for the
         strict surface-absorbing SW limit often used in Frierson-style
-        gray setups.
+        gray setups. The SW optical depth profile is:
+        tau_sw(sigma) = sw_tau_0 * sigma^sw_exponent.
+    sw_exponent : float
+        Exponent for the SW optical-depth profile (default 2.0).
+        Controls how SW absorption is distributed vertically.
+        Only the downward SW beam is absorbed; reflected upward
+        SW escapes directly to TOA (Frierson/Isca convention).
     S_0 : float
         Total solar irradiance [W/m^2] (default 1360.0).
     sfc_albedo : float
@@ -60,6 +66,7 @@ class GrayRadiationConfig(NamedTuple):
     lw_diff_factor: float = 1.66
     sfc_emissivity: float = 1.0
     sw_tau_0: float = 0.22
+    sw_exponent: float = 2.0
     S_0: float = 1360.0
     sfc_albedo: float = 0.31
     perpetual_equinox: bool = True

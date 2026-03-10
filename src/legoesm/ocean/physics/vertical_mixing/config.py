@@ -22,7 +22,18 @@ class RichardsonVerticalMixingConfig(NamedTuple):
 
 
 class KPPConfig(NamedTuple):
-    """Large, McWilliams & Doney (1994) K-Profile Parameterization."""
+    """LMD94-style K-Profile Parameterization.
+
+    Extends the Large, McWilliams & Doney (1994) KPP boundary-layer
+    parameterization with linear interpolation for h_bl, proper
+    turbulent velocity scales, and interior convective instability
+    handling.
+
+    The caller should supply surface wind stress (tau_x, tau_y) and
+    surface buoyancy flux (B_f) so that friction velocity and turbulent
+    velocity scales can be computed correctly.  If these are not
+    provided, simplified proxies from the ocean state are used.
+    """
     Ri_crit: float = 0.3    # Critical bulk Richardson number
     Cv: float = 1.6          # Unresolved shear coefficient
     kappa_vk: float = 0.4    # von Karman constant
@@ -31,6 +42,8 @@ class KPPConfig(NamedTuple):
     A_bg: float = 1e-4       # Background viscosity [m^2/s]
     gamma_T: float = 6.33    # Non-local transport coefficient for T
     gamma_S: float = 6.33    # Non-local transport coefficient for S
+    K_conv: float = 1.0      # Convective mixing diffusivity [m^2/s]
+    Ri_conv: float = 0.0     # Ri threshold for convective instability
 
 
 class VerticalMixingConfig(NamedTuple):

@@ -106,9 +106,10 @@ def solve_richards(
 
     # --- Picard iteration ---
     psi_m = psi  # iterate
+    n_iter_count = jnp.zeros(ncol)  # per-column iteration counter
 
     def picard_body(m, carry):
-        psi_m, theta_m, converged = carry
+        psi_m, theta_m, converged, n_iter_count = carry
 
         # Recompute hydraulic properties at current iterate
         K_m = hydraulic_conductivity(psi_m, theta_m, hydro_config)  # (ncol, nlayers)
@@ -187,18 +188,20 @@ def solve_richards(
         update_mask = ~converged
         psi_out = jnp.where(update_mask[:, None], psi_new, psi_m)
         theta_out = jnp.where(update_mask[:, None], theta_new, theta_m)
+        # Increment iteration count for columns that were still active
+        n_iter_out = n_iter_count + jnp.where(update_mask, 1.0, 0.0)
         converged_out = converged | newly_converged
 
-        return psi_out, theta_out, converged_out
+        return psi_out, theta_out, converged_out, n_iter_out
 
     converged_init = jnp.zeros(ncol, dtype=bool)
     theta_m_init = theta_from_psi(psi_m, hydro_config)
     theta_m_init = jnp.clip(theta_m_init, hydro_config.theta_r, hydro_config.theta_sat)
 
-    psi_final, theta_final, converged_final = jax.lax.fori_loop(
+    psi_final, theta_final, converged_final, n_iter_final = jax.lax.fori_loop(
         0, richards_config.max_iter,
         picard_body,
-        (psi_m, theta_m_init, converged_init),
+        (psi_m, theta_m_init, converged_init, n_iter_count),
     )
 
     # Subsurface runoff: gravitational drainage at bottom
@@ -218,7 +221,7 @@ def solve_richards(
         theta_new=theta_final,
         runoff_surface=runoff_surface_kgm2s,
         runoff_subsurface=runoff_subsurface_kgm2s,
-        n_iter=jnp.sum(~converged_final).astype(jnp.float64) * jnp.ones(ncol),
+        n_iter=n_iter_final,
     )
 
 

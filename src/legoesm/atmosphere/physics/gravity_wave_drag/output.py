@@ -29,6 +29,7 @@ class GWDOutput(NamedTuple):
         Temperature tendency from wave breaking [K/s], shape (ncol, nlev).
     eps_gwd : jax.Array
         Column-integrated wave energy dissipation [W/m^2], shape (ncol,).
+        Positive-definite: eps_gwd = -sum(rho * (u*du_dt + v*dv_dt) * dz).
     """
     du_dt: jax.Array
     dv_dt: jax.Array

@@ -8,7 +8,10 @@ Implements a simplified but physically consistent radiation scheme:
   `jax.lax.scan` for JIT-friendliness and differentiability.
 
 **Shortwave (SW):**
-  Beer-Lambert absorption with surface reflection (no scattering).
+  Frierson/Isca-style Beer-Lambert absorption of the downward stream
+  only. Reflected upward SW escapes directly to TOA (no atmospheric
+  absorption of the upward beam). The SW optical depth profile is
+  tau_sw(sigma) = sw_tau_0 * sigma^sw_exponent.
 
 **Heating rate:**
   dT/dt = (g / c_p) * dF_net / dp  at each layer.
@@ -200,10 +203,13 @@ def _sw_beer_lambert(
     insolation: jnp.ndarray,
     config: GrayRadiationConfig,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Compute SW fluxes using Beer-Lambert absorption.
+    """Compute SW fluxes using Beer-Lambert absorption (Frierson/Isca style).
 
-    No scattering — downward flux attenuated exponentially,
-    surface-reflected upward flux also attenuated.
+    Only the downward SW beam is absorbed by the atmosphere. Reflected
+    upward SW escapes directly to TOA without further atmospheric
+    absorption. The SW optical depth profile is:
+
+        tau_sw(sigma) = sw_tau_0 * sigma^sw_exponent
 
     Parameters
     ----------
@@ -222,25 +228,24 @@ def _sw_beer_lambert(
     sw_down : jnp.ndarray
         Downward SW flux at interfaces (ncol, nlev+1) [W/m^2].
     """
-    D = config.lw_diff_factor
     tau_sw_0 = config.sw_tau_0
     alpha = config.sfc_albedo
 
     # sigma at interfaces
     sigma_half = p_half / p_s[:, None]  # (ncol, nlev+1)
 
-    # Cumulative SW optical depth from TOA: tau_sw(sigma) = tau_sw_0 * sigma
-    tau_sw = tau_sw_0 * sigma_half  # (ncol, nlev+1)
+    # Cumulative SW optical depth from TOA: tau_sw(sigma) = tau_sw_0 * sigma^exponent
+    tau_sw = tau_sw_0 * sigma_half ** config.sw_exponent  # (ncol, nlev+1)
 
-    # Downward SW flux: F_down(k) = insolation * exp(-D * tau_sw(k))
-    sw_down = insolation[:, None] * jnp.exp(-D * tau_sw)  # (ncol, nlev+1)
+    # Downward SW flux attenuated by Beer-Lambert
+    sw_down = insolation[:, None] * jnp.exp(-tau_sw)  # (ncol, nlev+1)
 
     # Surface reflection: F_up(sfc) = alpha * F_down(sfc)
     F_up_sfc = alpha * sw_down[:, -1]  # (ncol,)
 
-    # Upward SW flux attenuated from surface: F_up(k) = F_up(sfc) * exp(-D * (tau_sw(sfc) - tau_sw(k)))
-    tau_sw_sfc = tau_sw[:, -1:]  # (ncol, 1)
-    sw_up = F_up_sfc[:, None] * jnp.exp(-D * (tau_sw_sfc - tau_sw))  # (ncol, nlev+1)
+    # Frierson/Isca convention: reflected upward SW escapes directly to TOA
+    # without further atmospheric absorption. F_up is constant at all levels.
+    sw_up = jnp.broadcast_to(F_up_sfc[:, None], p_half.shape)  # (ncol, nlev+1)
 
     return sw_up, sw_down
 
