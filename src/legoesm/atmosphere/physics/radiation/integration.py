@@ -11,6 +11,7 @@ Supported model types:
 
 from __future__ import annotations
 
+import math
 from typing import Callable
 
 import jax.numpy as jnp
@@ -249,6 +250,13 @@ def make_radiation_physics(
     Callable
         Physics function with the correct signature for the model.
     """
+    # Load heavy/static RRTMGP optics once outside model JIT traces.
+    if radiation_config.scheme == "rrtmgp":
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            preload_rrtmgp_optics,
+        )
+        preload_rrtmgp_optics(radiation_config.rrtmgp)
+
     if model_type == "hydrostatic":
         return _make_hydrostatic_radiation(radiation_config)
     elif model_type == "nonhydrostatic":
@@ -286,14 +294,26 @@ def _make_hydrostatic_radiation(
         grid: CubedSphereGrid,
         sigma_coord: SigmaCoordinate,
     ) -> HydrostaticTendencies:
-        T = state.T.data          # (6, n, n, nlev)
-        p_s = state.p_s.data      # (6, n, n)
-        lat = grid.lat             # (6, n, n)
-        lon = grid.lon             # (6, n, n)
+        T = state.T.data
+        p_s = state.p_s.data
 
         nlev = sigma_coord.n_levels
         shape_3d = T.shape
         shape_2d = p_s.shape
+        ncol = int(math.prod(int(s) for s in shape_2d))
+
+        # Hydrostatic grids can be cubed-sphere (face,x,y) or lat-lon (lat,lon).
+        lat_src = getattr(grid, "lat2d", getattr(grid, "lat"))
+        lon_src = getattr(grid, "lon2d", getattr(grid, "lon"))
+        lat = jnp.asarray(lat_src)
+        lon = jnp.asarray(lon_src)
+        if lat.ndim < len(shape_2d):
+            lat = jnp.broadcast_to(lat.reshape((*lat.shape, *([1] * (len(shape_2d) - lat.ndim))),), shape_2d)
+        if lon.ndim < len(shape_2d):
+            if lon.ndim == 1 and len(shape_2d) == 2:
+                lon = jnp.broadcast_to(lon[None, :], shape_2d)
+            else:
+                lon = jnp.broadcast_to(lon.reshape((*([1] * (len(shape_2d) - lon.ndim)), *lon.shape)), shape_2d)
 
         # Pressure at full and half levels
         if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
@@ -314,8 +334,7 @@ def _make_hydrostatic_radiation(
             seconds_of_day=_time["seconds_of_day"],
         )
 
-        # Reshape cubed sphere to columns: (6,n,n,...) -> (ncol, ...)
-        ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]  # 6*n*n
+        # Flatten horizontal dimensions to column-major shape (ncol, nlev).
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
@@ -342,8 +361,8 @@ def _make_hydrostatic_radiation(
         # Reshape heating rate back to (6, n, n, nlev)
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
 
-        dims_3d = ("face", "x", "y", "level")
-        dims_2d = ("face", "x", "y")
+        dims_3d = state.T.dims
+        dims_2d = state.p_s.dims
 
         return HydrostaticTendencies(
             du_dt=Field(

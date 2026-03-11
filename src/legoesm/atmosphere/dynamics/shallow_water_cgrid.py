@@ -33,8 +33,13 @@ from legoesm.core.state import ShallowWaterState, ShallowWaterTendencies
 from legoesm.core.conservation import apply_conservation_fixer, zero_mean_tendency
 from legoesm.core.operators import curl_z
 from legoesm.core.operators_fv import fv_flux_divergence, fv_gradient_x, fv_gradient_y
+from legoesm.core.operators_fv_cubed import (
+    fv_divergence_damping,
+    face_boundary_weight,
+    edge_blend_scalar,
+    edge_blend_vector,
+)
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
@@ -44,90 +49,15 @@ from legoesm import constants
 class CGShallowWaterCubedConfig(NamedTuple):
     """Configuration for the C-grid shallow water model on cubed-sphere."""
     g: float = constants.g
-    div_damp_2: float = 0.0       # 2nd-order divergence damping
-    div_damp_4: float = 0.0       # 4th-order divergence damping
+    div_damp_2: float = 0.0       # 2nd-order divergence damping [m²/s]
+    div_damp_4: float = 0.0       # 4th-order divergence damping [m⁴/s]
     hyperdiff_coeff: float = 0.0  # Velocity hyperdiffusion (backup)
+    edge_blend_strength: float = 0.15  # Face-boundary blend (0=off)
+    edge_blend_depth: int = 2          # Rows to blend near each edge
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     fix_energy: bool = True
     time_integrator: str = "ssp_rk3"
-
-
-# ==============================================================================
-# C-grid operators on cubed-sphere
-# ==============================================================================
-
-def _cgrid_divergence(u_pad, v_pad, grid):
-    """Compute divergence at cell centers using C-grid finite differences.
-
-    Uses the padded velocity field with half-cell metrics.
-    """
-    hx = grid.hx_ext  # (6, n+2, n+2)
-    hy = grid.hy_ext
-
-    # Flux at x-edges: u * hy
-    flux_x = u_pad * hy
-    # Flux at y-edges: v * hx
-    flux_y = v_pad * hx
-
-    # Net flux: right edge - left edge for x, top - bottom for y
-    # For cell at padded index (i, j) → interior index (1..n, 1..n)
-    # Right x-edge is between (i, j) and (i+1, j): flux_x at (i+0.5, j)
-    # We approximate as average: 0.5*(flux_x[i,j] + flux_x[i+1,j])
-    # Left x-edge: 0.5*(flux_x[i-1,j] + flux_x[i,j])
-    # Net = right - left = 0.5*(flux_x[i+1,j] - flux_x[i-1,j])
-    d_flux_x = flux_x[:, 2:, 1:-1] - flux_x[:, :-2, 1:-1]
-    d_flux_y = flux_y[:, 1:-1, 2:] - flux_y[:, 1:-1, :-2]
-
-    return (d_flux_x + d_flux_y) / (2.0 * grid.area)
-
-
-def _cgrid_divergence_damping(u_data, v_data, grid, config):
-    """Apply divergence damping to momentum tendencies.
-
-    2nd order: +nu2 * grad(div)
-    4th order: -nu4 * grad(lap(div))
-    """
-    du_damp = jnp.zeros_like(u_data)
-    dv_damp = jnp.zeros_like(v_data)
-
-    if config.div_damp_2 <= 0 and config.div_damp_4 <= 0:
-        return du_damp, dv_damp
-
-    # Compute divergence
-    u_pad, v_pad = pad_halo_vector(
-        u_data, v_data,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
-    )
-    div = _cgrid_divergence(u_pad, v_pad, grid)  # (6, n, n)
-
-    if config.div_damp_2 > 0:
-        # grad(div) using centered differences
-        div_pad = pad_halo(div, interp_offsets=grid.halo_interp_offsets)
-        grad_div_x = (div_pad[:, 2:, 1:-1] - div_pad[:, :-2, 1:-1]) / grid.dx
-        grad_div_y = (div_pad[:, 1:-1, 2:] - div_pad[:, 1:-1, :-2]) / grid.dy
-        du_damp = du_damp + config.div_damp_2 * grad_div_x
-        dv_damp = dv_damp + config.div_damp_2 * grad_div_y
-
-    if config.div_damp_4 > 0:
-        # Laplacian of divergence
-        div_pad = pad_halo(div, interp_offsets=grid.halo_interp_offsets)
-        lap_div = (
-            (div_pad[:, 2:, 1:-1] - 2*div_pad[:, 1:-1, 1:-1] + div_pad[:, :-2, 1:-1])
-            / (grid.dx / 2)**2
-            + (div_pad[:, 1:-1, 2:] - 2*div_pad[:, 1:-1, 1:-1] + div_pad[:, 1:-1, :-2])
-            / (grid.dy / 2)**2
-        )
-        # grad(lap(div))
-        lap_div_pad = pad_halo(lap_div, interp_offsets=grid.halo_interp_offsets)
-        grad_lap_x = (lap_div_pad[:, 2:, 1:-1] - lap_div_pad[:, :-2, 1:-1]) / grid.dx
-        grad_lap_y = (lap_div_pad[:, 1:-1, 2:] - lap_div_pad[:, 1:-1, :-2]) / grid.dy
-        du_damp = du_damp - config.div_damp_4 * grad_lap_x
-        dv_damp = dv_damp - config.div_damp_4 * grad_lap_y
-
-    return du_damp, dv_damp
 
 
 # ==============================================================================
@@ -175,10 +105,14 @@ def cgrid_shallow_water_tendencies_cubed(
     du_dt_data = abs_vor * v.data - dBdx
     dv_dt_data = -abs_vor * u.data - dBdy
 
-    # --- 5. Divergence damping ---
-    du_damp, dv_damp = _cgrid_divergence_damping(u.data, v.data, grid, config)
-    du_dt_data = du_dt_data + du_damp
-    dv_dt_data = dv_dt_data + dv_damp
+    # --- 5. Divergence damping (FV-consistent operator) ---
+    if config.div_damp_2 > 0 or config.div_damp_4 > 0:
+        du_damp, dv_damp = fv_divergence_damping(
+            u.data, v.data, grid,
+            config.div_damp_2, config.div_damp_4,
+        )
+        du_dt_data = du_dt_data + du_damp
+        dv_dt_data = dv_dt_data + dv_damp
 
     # --- 6. Hyperdiffusion (optional) ---
     if config.hyperdiff_coeff > 0:
@@ -221,6 +155,15 @@ class CGShallowWaterCubedModel:
         self.grid = grid
         self.config = config or CGShallowWaterCubedConfig()
 
+        # Precompute edge-blend weight (static, not JIT-traced)
+        cfg = self.config
+        if cfg.edge_blend_strength > 0 and cfg.edge_blend_depth > 0:
+            self._eb_weight = face_boundary_weight(
+                grid.n, cfg.edge_blend_depth, cfg.edge_blend_strength,
+            )
+        else:
+            self._eb_weight = None
+
     def tendencies(self, state: ShallowWaterState) -> ShallowWaterTendencies:
         """Compute tendencies (pure function wrapper)."""
         return cgrid_shallow_water_tendencies_cubed(
@@ -251,6 +194,22 @@ class CGShallowWaterCubedModel:
         else:
             raise ValueError(
                 f"Unsupported time_integrator={self.config.time_integrator!r}"
+            )
+
+        # Edge blending: localized smoothing near face boundaries
+        if self._eb_weight is not None:
+            h_new = edge_blend_scalar(
+                state_new.h.data, self.grid, self._eb_weight,
+            )
+            u_new, v_new = edge_blend_vector(
+                state_new.u.data, state_new.v.data,
+                self.grid, self._eb_weight,
+            )
+            state_new = ShallowWaterState(
+                h=state_new.h.replace(data=h_new),
+                u=state_new.u.replace(data=u_new),
+                v=state_new.v.replace(data=v_new),
+                h_s=state_new.h_s,
             )
 
         if self.config.use_conservation_fixer:

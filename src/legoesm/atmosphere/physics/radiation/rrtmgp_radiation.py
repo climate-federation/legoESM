@@ -58,7 +58,11 @@ _optics_cache: dict = {}
 
 
 def _get_optics(config: RRTMGPConfig):
-    """Get or create cached optics scheme and VMR library."""
+    """Get or create cached optics scheme and VMR library.
+
+    This function should be called outside model-step JIT traces so the
+    cached objects are created from concrete arrays rather than tracers.
+    """
     key = (config.lw_gas_file, config.sw_gas_file,
            config.lw_cloud_file, config.sw_cloud_file,
            config.include_clouds,
@@ -89,6 +93,11 @@ def _get_optics(config: RRTMGPConfig):
         optics_lib = optics_factory(optics_params, vmr_lib)
         _optics_cache[key] = (optics_lib, vmr_lib)
     return _optics_cache[key]
+
+
+def preload_rrtmgp_optics(config: RRTMGPConfig) -> None:
+    """Preload optics tables/cache outside JIT for stable runtime reuse."""
+    _get_optics(config)
 
 
 def _standard_o3_profile(p_full: jnp.ndarray) -> jnp.ndarray:
