@@ -7,7 +7,7 @@ Runs:
      Expected: wave breaks around day 7-9 with ~30 m/s surface winds,
      surface pressure anomaly ~40 hPa, ~10 K T anomaly at 850 hPa.
 
-Outputs (in results/spectral_pe/):
+Outputs (in results/atmosphere/hydrostatic/spectral_pe/):
   - conservation.png      — mass (dry), energy time series
   - timeseries.png        — global-mean T, max wind, min p_s
   - profiles_T.png        — zonal-mean T at days 0, 4, 7, 10
@@ -56,7 +56,7 @@ from legoesm import constants
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
-OUT_DIR = os.path.join(PROJECT_DIR, "results", "spectral_pe")
+OUT_DIR = os.path.join(PROJECT_DIR, "results", "atmosphere", "hydrostatic", "spectral_pe")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 

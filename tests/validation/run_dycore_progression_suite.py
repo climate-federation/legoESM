@@ -6,7 +6,7 @@ This orchestrator prepares and runs a consistent dycore validation ladder:
 2) Hydrostatic core (FV cube, FV lat-lon, spectral)
 3) Non-hydrostatic core (FV cube, spectral, harder FV cube cases)
 
-Outputs are written in one location under tests/validation/results with a
+Outputs are written in one location under results/atmosphere with a
 standardized per-case artifact schema:
 - field_snapshots.png
 - snapshot_times.txt
@@ -245,8 +245,8 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("tests/validation/results/dycore_progression_suite"),
-        help="Unified output root under tests/",
+        default=Path("results/atmosphere/dycore_progression_suite"),
+        help="Unified output root under results/",
     )
     parser.add_argument("--cube-resolution", type=int, default=36)
     parser.add_argument("--latlon-nlat", type=int, default=72)

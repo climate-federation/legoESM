@@ -47,7 +47,7 @@ DURATION_DAYS = 100
 SAVE_DIAG_EVERY = 144   # Save conservation diagnostics every N steps (updated by CFL check)
 SNAPSHOT_DAYS = [0, 15, 50, 100]  # Days at which to save full state
 
-OUTPUT_DIR = "results/100day_williamson5"
+OUTPUT_DIR = "results/atmosphere/shallow_water/100day_williamson5"
 
 # =====================================================================
 # Setup

@@ -237,7 +237,7 @@ def main():
     parser.add_argument("--dt", type=float, default=180.0)
     parser.add_argument("--days", type=float, default=5.0)
     parser.add_argument("--mean-every", type=int, default=20)
-    parser.add_argument("--output", type=Path, default=Path("results/held_suarez_matrix/03_spectral"))
+    parser.add_argument("--output", type=Path, default=Path("results/atmosphere/hydrostatic/held_suarez_spectral"))
     args = parser.parse_args()
 
     out = args.output

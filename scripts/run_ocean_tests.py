@@ -56,6 +56,16 @@ except ImportError:
 
 IDEALIZED_LAND_LAT_THRESHOLD = 90.0  # Fully oceanic mask for idealized cases
 
+# Cases with explicit forcing — conservation drift includes forced tendency
+# and should NOT be interpreted as numerical conservation error.
+_FORCED_CASES = {
+    "wind_gyre": "Wind stress + Rayleigh drag",
+    "holland_lin_gyre": "Wind stress + Rayleigh drag",
+    "thermohaline": "SST/SSS restoring (non-conservative by design)",
+    "phillips_two_layer": "Zonal-mean T relaxation + Rayleigh drag",
+    "taylor_column": "Background flow restoring",
+}
+
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean import (
     OceanModel,
@@ -1224,7 +1234,7 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
         lat_bins,
     )
     _plot_lat_depth_sections(
-        f"{output_dir}/rest_state/T_lat_depth_sections.png",
+        f"{output_dir}/rest_state/lat_depth_sections.png",
         z_coord,
         lat_centers,
         [
@@ -1247,7 +1257,7 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
         lon_bins,
     )
     _plot_lon_depth_sections(
-        f"{output_dir}/rest_state/T_lon_depth_sections.png",
+        f"{output_dir}/rest_state/lon_depth_sections.png",
         z_coord,
         lon_centers,
         [
@@ -2788,7 +2798,7 @@ def main():
     parser.add_argument("--days", "-d", type=float, default=5.0,
                         help="Integration time in days (default: 5)")
     parser.add_argument("--output", "-o", type=str, default=None,
-                        help="Output directory (default: results/ocean_tests_C{n}_L{l})")
+                        help="Output directory (default: results/ocean/ocean_tests_C{n}_L{l})")
     parser.add_argument("--test", "-t", type=str, default="all",
                         choices=[
                             "all",
@@ -2817,7 +2827,7 @@ def main():
 
     jax.config.update("jax_enable_x64", bool(args.x64))
 
-    output_dir = args.output or f"results/ocean_tests_C{args.resolution}_L{args.levels}"
+    output_dir = args.output or f"results/ocean/ocean_tests_C{args.resolution}_L{args.levels}"
     os.makedirs(output_dir, exist_ok=True)
 
     n_steps = int(args.days * 86400 / args.dt)
@@ -2979,15 +2989,27 @@ def main():
     summary_cases = {}
     for name, res in results.items():
         m = res["metrics"]
+        is_forced = name in _FORCED_CASES
+        if is_forced:
+            m["forced"] = True
+            m["conservation_note"] = _FORCED_CASES[name]
+        else:
+            m["forced"] = False
         print(f"\n  --- {name} ---")
+        if is_forced:
+            print(f"    [FORCED: {_FORCED_CASES[name]}]")
         print(f"    Final SSH range:  [{m['SSH_min']:.4e}, {m['SSH_max']:.4e}] m")
         print(f"    Final |u| max:    {m['u_max']:.4e} m/s")
         print(f"    Final |v| max:    {m['v_max']:.4e} m/s")
         print(f"    Final speed max:  {m['speed_max']:.4e} m/s")
         print(f"    Final SST mean:   {m['SST_mean']:.4f} degC")
         print(f"    Final KE:         {m['kinetic_energy']:.4e}")
-        print(f"    Heat drift rel:   {m['heat_drift_rel']:.2e}")
-        print(f"    Salt drift rel:   {m['salt_drift_rel']:.2e}")
+        if is_forced:
+            print(f"    Heat drift rel:   {m['heat_drift_rel']:.2e}  (includes forced tendency)")
+            print(f"    Salt drift rel:   {m['salt_drift_rel']:.2e}  (includes forced tendency)")
+        else:
+            print(f"    Heat drift rel:   {m['heat_drift_rel']:.2e}")
+            print(f"    Salt drift rel:   {m['salt_drift_rel']:.2e}")
         print(f"    Mean eta drift:   {m['volume_mean_eta_drift']:.2e} m")
         print(f"    All fields finite: {m['all_finite']}")
         print(f"    Land cells zero:   {m['land_zero']}")
@@ -3042,16 +3064,25 @@ def main():
             f.write("\n")
         for name, m in summary_cases.items():
             f.write(f"{name}\n")
+            if m.get("forced"):
+                f.write(f"  [FORCED: {m.get('conservation_note', '')}]\n")
             f.write(
                 f"  SSH=[{m['SSH_min']:.4e}, {m['SSH_max']:.4e}] "
                 f"u_max={m['u_max']:.4e} v_max={m['v_max']:.4e} "
                 f"speed_max={m['speed_max']:.4e}\n",
             )
-            f.write(
-                f"  heat_drift_rel={m['heat_drift_rel']:.3e} "
-                f"salt_drift_rel={m['salt_drift_rel']:.3e} "
-                f"eta_mean_drift={m['volume_mean_eta_drift']:.3e}\n",
-            )
+            if m.get("forced"):
+                f.write(
+                    f"  heat_drift_rel={m['heat_drift_rel']:.3e} (forced) "
+                    f"salt_drift_rel={m['salt_drift_rel']:.3e} (forced) "
+                    f"eta_mean_drift={m['volume_mean_eta_drift']:.3e}\n",
+                )
+            else:
+                f.write(
+                    f"  heat_drift_rel={m['heat_drift_rel']:.3e} "
+                    f"salt_drift_rel={m['salt_drift_rel']:.3e} "
+                    f"eta_mean_drift={m['volume_mean_eta_drift']:.3e}\n",
+                )
             f.write(
                 f"  all_finite={m['all_finite']} land_zero={m['land_zero']}\n\n",
             )

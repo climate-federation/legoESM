@@ -1617,7 +1617,7 @@ def main():
         "--output",
         type=Path,
         default=None,
-        help="Output directory (default: results/dycore_cube_C{resolution}_{solver})",
+        help="Output directory (default: results/atmosphere/dycore_cube_C{resolution}_{solver})",
     )
     parser.add_argument("--skip-nh", action="store_true", help="Skip NH DCMIP cases")
     parser.add_argument("--skip-transport", action="store_true", help="Skip transport case")
@@ -1630,7 +1630,7 @@ def main():
     )
     args = parser.parse_args()
 
-    out_dir = args.output or Path(f"results/dycore_cube_C{args.resolution}_{args.solver}")
+    out_dir = args.output or Path(f"results/atmosphere/dycore_cube_C{args.resolution}_{args.solver}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 72)

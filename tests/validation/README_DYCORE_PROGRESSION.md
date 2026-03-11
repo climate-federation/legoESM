@@ -4,7 +4,7 @@ Runner:
 - `tests/validation/run_dycore_progression_suite.py`
 
 Default output location:
-- `tests/validation/results/dycore_progression_suite`
+- `results/atmosphere/dycore_progression_suite`
 
 ## Purpose
 

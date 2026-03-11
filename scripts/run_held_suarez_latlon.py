@@ -81,7 +81,7 @@ def main():
 
     HYPERDIFF_COEFF = args.hyperdiff or compute_hyperdiff_coeff(N_LAT)
 
-    OUTPUT_DIR = Path(args.output or f"results/held_suarez_latlon_{N_LAT}x{N_LON}_L{N_LEVELS}")
+    OUTPUT_DIR = Path(args.output or f"results/atmosphere/hydrostatic/held_suarez_latlon_{N_LAT}x{N_LON}_L{N_LEVELS}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)

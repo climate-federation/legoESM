@@ -78,7 +78,7 @@ CASES = {
     },
 }
 
-DEFAULT_OUTPUT_BASE = "results/williamson_spectral"
+DEFAULT_OUTPUT_BASE = "results/atmosphere/shallow_water/williamson_spectral"
 
 
 # =========================================================================

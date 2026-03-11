@@ -1,7 +1,16 @@
 """Long-run MPI ocean conservation regression.
 
-Run with:
-    mpirun -np 3 python -m pytest tests/distributed/test_ocean_mpi_conservation.py -v
+Run with a valid rank count that divides the 6 cubed-sphere faces:
+
+    mpirun -np 6 python -m pytest tests/ocean/distributed/test_ocean_mpi_conservation.py -v
+
+Valid rank counts:
+  - 1, 2, 3, 6  (each rank gets one or more whole faces)
+  - >6: must divide evenly into face tilings, e.g. 24 (4 per face)
+  - 4, 5 are NOT valid (cannot tile 6 faces evenly) and will fail.
+
+A helper script ``scripts/run_ocean_mpi_tests.sh`` automates rank
+selection and provides clear error messages before launch.
 """
 
 from __future__ import annotations
@@ -13,6 +22,28 @@ import pytest
 # Guard: skip all tests if mpi4jax/mpi4py are not installed.
 mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
+
+# Valid MPI rank counts for a 6-face cubed-sphere topology.
+_VALID_SMALL_RANKS = {1, 2, 3, 6}
+
+
+def _is_valid_rank_count(n: int) -> bool:
+    """Return True if *n* MPI ranks can tile 6 cubed-sphere faces."""
+    if n in _VALID_SMALL_RANKS:
+        return True
+    if n > 6 and n % 6 == 0:
+        return True
+    return False
+
+
+_n_procs = MPI.COMM_WORLD.Get_size()
+if not _is_valid_rank_count(_n_procs):
+    pytest.skip(
+        f"MPI size {_n_procs} cannot tile 6 cubed-sphere faces. "
+        f"Use one of {{1,2,3,6}} or a multiple of 6 (e.g. 12, 24). "
+        f"See docstring for details.",
+        allow_module_level=True,
+    )
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.halo import set_halo_backend

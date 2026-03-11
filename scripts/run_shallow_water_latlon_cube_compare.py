@@ -1095,7 +1095,7 @@ def _run_fv_cubesphere(
 
 def main():
     parser = argparse.ArgumentParser(description="Run SW spectral/FV lat-lon and cubed-sphere diagnostics.")
-    parser.add_argument("--output", type=Path, default=Path("results/sw_latlon_cube_compare"))
+    parser.add_argument("--output", type=Path, default=Path("results/atmosphere/shallow_water/sw_latlon_cube_compare"))
     parser.add_argument(
         "--case",
         type=str,

@@ -719,20 +719,132 @@ def _make_gravity_wave_case(grid, z_coord):
 
 
 def _make_baroclinic_front_case(grid, z_coord):
+    """Baroclinic front with geostrophic balance and vertical decay.
+
+    Initialises a surface-intensified meridional temperature front in
+    approximate geostrophic balance (steric-height SSH).  Parameters are
+    deliberately mild to keep the subsequent adjustment well controlled.
+    """
     state = _make_rest_case(grid, z_coord)
     mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
     lat_deg = np.asarray(grid.lat2d, dtype=np.float64) * 180.0 / np.pi
-    front_lat = 25.0
-    front_width = 15.0
+
+    # Front parameters — deliberately mild for a regression baseline
+    front_lat = 30.0        # centre latitude [deg]  (was 25)
+    front_width = 30.0      # characteristic width [deg] (was 15)
+    T_south = 17.0          # warm side [degC]  (was 22)
+    T_north = 13.0          # cold side [degC]  (was 8)
+    T_ref = 0.5 * (T_south + T_north)  # 15 degC mean
+    H_e = 500.0             # vertical e-folding depth [m]
+    alpha_T = 2.0e-4        # thermal expansion coeff [1/K]
+
+    # Meridional front factor: 0 far south -> 1 far north
     front = 0.5 * (1.0 + np.tanh((lat_deg - front_lat) / (0.5 * front_width)))
-    T_south = 22.0
-    T_north = 8.0
-    T_2d = T_south + (T_north - T_south) * front
-    T_3d = np.broadcast_to(T_2d[..., None], (grid.n_lat, grid.n_lon, z_coord.n_levels))
+    T_2d = T_south + (T_north - T_south) * front  # 17 -> 13
+
+    # Vertical decay — surface-intensified front
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)  # negative
+    depth_factor = np.exp(z_full / H_e)  # 1 at surface, decays
+
+    # 3D temperature: background T_ref + surface-intensified anomaly
+    T_anom_2d = T_2d - T_ref  # +2 south, -2 north
+    T_3d = T_ref + T_anom_2d[..., None] * depth_factor[None, None, :]
     T_3d = T_3d * mask[..., None]
+
+    # Geostrophic SSH from steric height: eta ~ alpha_T * T_anom * H_eff
+    H_total = float(-z_full[-1])
+    H_eff = H_e * (1.0 - np.exp(-H_total / H_e))
+    eta_geo = alpha_T * T_anom_2d * H_eff * mask
+    # Remove global mean for volume conservation
+    area = _cell_area(grid)
+    weighted_area = area * mask
+    total_area = max(float(np.sum(weighted_area)), 1.0)
+    eta_geo = eta_geo - float(np.sum(eta_geo * weighted_area)) / total_area
+
     return state._replace(
         T_hat=state.T_hat.replace(data=sh_analysis_3d(grid, jnp.asarray(T_3d))),
+        eta_hat=state.eta_hat.replace(data=sh_analysis(grid, jnp.asarray(eta_geo))),
     )
+
+
+# Per-case acceptance thresholds: warn/fail bounds for key metrics.
+_CASE_THRESHOLDS = {
+    "rest_state": {
+        "max_abs_ssh": {"warn": 0.005, "fail": 0.05},
+        "max_speed": {"warn": 0.005, "fail": 0.05},
+        "heat_drift_rel": {"warn": 1e-9, "fail": 1e-6},
+        "salt_drift_rel": {"warn": 1e-9, "fail": 1e-6},
+    },
+    "gravity_wave": {
+        "max_abs_ssh": {"warn": 2.0, "fail": 10.0},
+        "max_speed": {"warn": 0.5, "fail": 5.0},
+        "heat_drift_rel": {"warn": 1e-7, "fail": 1e-4},
+        "salt_drift_rel": {"warn": 1e-7, "fail": 1e-4},
+    },
+    "baroclinic_adjustment": {
+        "max_abs_ssh": {"warn": 1.0, "fail": 5.0},
+        "max_speed": {"warn": 0.5, "fail": 2.0},
+        "heat_drift_rel": {"warn": 1e-5, "fail": 1e-2},
+        "salt_drift_rel": {"warn": 1e-5, "fail": 1e-2},
+    },
+}
+
+
+def _evaluate_thresholds(case_name, metrics):
+    """Evaluate metrics against per-case thresholds -> status dict."""
+    thresholds = _CASE_THRESHOLDS.get(case_name, {})
+    if not thresholds:
+        return {"overall": "PASS"}
+
+    status = {}
+    checks = []
+
+    # Finiteness is always a hard requirement
+    if not metrics.get("all_finite", True):
+        status["all_finite"] = "FAIL"
+        checks.append("FAIL")
+    else:
+        status["all_finite"] = "PASS"
+        checks.append("PASS")
+
+    # max_abs_ssh — take the larger of |SSH_min|, |SSH_max|
+    if "max_abs_ssh" in thresholds:
+        val = max(abs(metrics.get("SSH_min", 0)), abs(metrics.get("SSH_max", 0)))
+        t = thresholds["max_abs_ssh"]
+        if val > t["fail"]:
+            s = "FAIL"
+        elif val > t["warn"]:
+            s = "WARN"
+        else:
+            s = "PASS"
+        status["max_abs_ssh"] = {"value": float(val), "status": s}
+        checks.append(s)
+
+    for key, metric_key in [
+        ("max_speed", "speed_max"),
+        ("heat_drift_rel", "heat_drift_rel"),
+        ("salt_drift_rel", "salt_drift_rel"),
+    ]:
+        if key in thresholds:
+            val = abs(metrics.get(metric_key, 0))
+            t = thresholds[key]
+            if val > t["fail"]:
+                s = "FAIL"
+            elif val > t["warn"]:
+                s = "WARN"
+            else:
+                s = "PASS"
+            status[key] = {"value": float(val), "status": s}
+            checks.append(s)
+
+    if "FAIL" in checks:
+        status["overall"] = "FAIL"
+    elif "WARN" in checks:
+        status["overall"] = "WARN"
+    else:
+        status["overall"] = "PASS"
+
+    return status
 
 
 def main():
@@ -755,7 +867,7 @@ def main():
         "-o",
         type=str,
         default=None,
-        help="Output directory (default: results/ocean_spectral_tests_T{n}_L{l}).",
+        help="Output directory (default: results/ocean/ocean_spectral_tests_T{n}_L{l}).",
     )
     args = parser.parse_args()
 
@@ -781,7 +893,7 @@ def main():
             f"(got days={args.days}, dt={args.dt}).",
         )
 
-    output_dir = Path(args.output or f"results/ocean_spectral_tests_T{args.truncation}_L{args.levels}")
+    output_dir = Path(args.output or f"results/ocean/ocean_spectral_tests_T{args.truncation}_L{args.levels}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)
@@ -813,36 +925,57 @@ def main():
         use_conservation_fixer=True,
         min_water_column_m=0.5,
     )
-    model = SpectralOceanModel(grid, z_coord, config, allow_unsupported_backend=True)
+
+    # Baroclinic case uses higher diffusion for stability
+    baroclinic_config = SpectralOceanConfig(
+        A_h=5.0e4,
+        K_h=5.0e3,
+        A_v=1.0e-3,
+        K_v=1.0e-4,
+        hyperdiff_coeff=5.0e15,
+        hyperdiff_order=2,
+        use_conservation_fixer=True,
+        min_water_column_m=0.5,
+    )
 
     cases = []
     if args.test in ("all", "rest"):
-        cases.append(("rest_state", "TEST 1: Spectral Rest State", _make_rest_case))
+        cases.append(("rest_state", "TEST 1: Spectral Rest State", _make_rest_case, config))
     if args.test in ("all", "wave"):
-        cases.append(("gravity_wave", "TEST 2: Spectral Barotropic Gravity Wave", _make_gravity_wave_case))
+        cases.append(("gravity_wave", "TEST 2: Spectral Barotropic Gravity Wave", _make_gravity_wave_case, config))
     if args.test in ("all", "baroclinic"):
-        cases.append(("baroclinic_adjustment", "TEST 3: Spectral Baroclinic Adjustment", _make_baroclinic_front_case))
+        cases.append(("baroclinic_adjustment", "TEST 3: Spectral Baroclinic Adjustment", _make_baroclinic_front_case, baroclinic_config))
 
     summary_cases = {}
+    case_statuses = {}
+    case_configs = {}
     case_errors = {}
-    for case_name, case_title, init_fn in cases:
+    for case_name, case_title, init_fn, case_config in cases:
         try:
             state0 = init_fn(grid, z_coord)
+            case_model = SpectralOceanModel(grid, z_coord, case_config, allow_unsupported_backend=True)
             metrics, _ = _run_case(
                 case_title=case_title,
                 case_name=case_name,
                 state0=state0,
-                model=model,
+                model=case_model,
                 grid=grid,
                 z_coord=z_coord,
-                config=config,
+                config=case_config,
                 dt=args.dt,
                 n_steps=n_steps,
                 output_dir=output_dir,
             )
             summary_cases[case_name] = metrics
+            case_statuses[case_name] = _evaluate_thresholds(case_name, metrics)
+            case_configs[case_name] = {
+                "A_h": float(case_config.A_h),
+                "K_h": float(case_config.K_h),
+                "hyperdiff_coeff": float(case_config.hyperdiff_coeff),
+            }
         except Exception as exc:  # pragma: no cover
             case_errors[case_name] = f"{type(exc).__name__}: {exc}"
+            case_statuses[case_name] = {"overall": "FAIL"}
             print(f"\n  !!! CASE FAILED: {case_name} -> {case_errors[case_name]}")
             traceback.print_exc()
 
@@ -872,6 +1005,9 @@ def main():
             "min_water_column_m": float(config.min_water_column_m),
         },
         "cases": summary_cases,
+        "case_configs": case_configs,
+        "case_statuses": case_statuses,
+        "thresholds": _CASE_THRESHOLDS,
         "case_errors": case_errors,
     }
 
@@ -884,7 +1020,8 @@ def main():
         f.write(f"T{args.truncation}, levels={args.levels}, dt={args.dt:.0f}s, days={args.days:.2f}, steps={n_steps}\n")
         f.write(f"n_lat={grid.n_lat}, n_lon={grid.n_lon}, n_sh={grid.n_sh}\n\n")
         for name, m in summary_cases.items():
-            f.write(f"{name}\n")
+            st = case_statuses.get(name, {}).get("overall", "?")
+            f.write(f"{name} [{st}]\n")
             f.write(
                 f"  SSH=[{m['SSH_min']:.4e}, {m['SSH_max']:.4e}] "
                 f"u_max={m['u_max']:.4e} v_max={m['v_max']:.4e} "
@@ -906,7 +1043,8 @@ def main():
     print("SUMMARY")
     print("=" * 70)
     for name, m in summary_cases.items():
-        print(f"  {name}: speed_max={m['speed_max']:.3e}, heat_drift_rel={m['heat_drift_rel']:.3e}, all_finite={m['all_finite']}")
+        st = case_statuses.get(name, {}).get("overall", "?")
+        print(f"  {name} [{st}]: speed_max={m['speed_max']:.3e}, heat_drift_rel={m['heat_drift_rel']:.3e}, all_finite={m['all_finite']}")
     if case_errors:
         print("  failed_cases:")
         for name, msg in case_errors.items():

@@ -94,6 +94,8 @@ class OceanConfig(NamedTuple):
     use_fv_tracer_transport: bool = False  # Use PPM for T/S horizontal advection (reduces spurious mixing)
     div_damp_2: float = 0.0   # 2nd-order divergence damping [m²/s] (FV discretization)
     div_damp_4: float = 0.0   # 4th-order divergence damping [m⁴/s] (FV discretization)
+    edge_blend_strength: float = 0.0  # FV cube-edge continuity relaxation (0=off)
+    edge_blend_depth: int = 2         # Rows near each face edge to relax
     physics: object = None  # OceanPhysicsConfig or None (legacy mode)
 
 

@@ -6,7 +6,7 @@ Runs two experiments sequentially:
   2. RCE with slab land + bucket hydrology
 
 Both use gray radiation (Frierson 2006) + SBM convection, operator-split.
-Results saved to results/rce_ocean_25deg/ and results/rce_land_25deg/.
+Results saved to results/ocean/rce_25deg/ and results/land/rce_25deg/.
 
 Usage:
     JAX_ENABLE_X64=1 python scripts/run_rce_25deg.py
@@ -264,7 +264,7 @@ def save_results_txt(diag, output_dir, header, sfc_label, sfc_data, extra_cols=N
 # RCE with slab ocean
 # ============================================================================
 
-OUTPUT_OCEAN = Path("results/rce_ocean_25deg")
+OUTPUT_OCEAN = Path("results/ocean/rce_25deg")
 OUTPUT_OCEAN.mkdir(parents=True, exist_ok=True)
 
 print("=" * 70)
@@ -484,7 +484,7 @@ save_snapshots(snapshots_ocean, OUTPUT_OCEAN, "SST", "SST [K]")
 # RCE with slab land + bucket hydrology
 # ============================================================================
 
-OUTPUT_LAND = Path("results/rce_land_25deg")
+OUTPUT_LAND = Path("results/land/rce_25deg")
 OUTPUT_LAND.mkdir(parents=True, exist_ok=True)
 
 print("\n" + "=" * 70)

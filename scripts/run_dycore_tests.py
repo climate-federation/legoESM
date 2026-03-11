@@ -44,7 +44,7 @@ except ImportError:
     ccrs = None
 
 # Global output directory
-OUTPUT_BASE = Path("results/dycore_tests")
+OUTPUT_BASE = Path("results/atmosphere/dycore_tests")
 
 # Collect results for summary
 ALL_RESULTS = []

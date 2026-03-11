@@ -1,5 +1,7 @@
 """Shared test fixtures for legoESM."""
 
+from pathlib import Path
+
 import pytest
 import jax
 import jax.numpy as jnp
@@ -7,6 +9,25 @@ import jax.numpy as jnp
 from legoesm.grids.cubed_sphere import create_cubed_sphere, CubedSphereGrid
 from legoesm.core.field import Field
 from legoesm.core.state import ShallowWaterState
+
+
+RESULTS_SUBDIRS = (
+    "atmosphere/shallow_water",
+    "atmosphere/hydrostatic",
+    "atmosphere/nonhydrostatic",
+    "ocean",
+    "land",
+    "sea_ice",
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _ensure_results_tree() -> Path:
+    """Ensure structured component result directories exist."""
+    root = Path("results")
+    for rel in RESULTS_SUBDIRS:
+        (root / rel).mkdir(parents=True, exist_ok=True)
+    return root
 
 
 @pytest.fixture(scope="session")

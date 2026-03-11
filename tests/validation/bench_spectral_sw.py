@@ -7,7 +7,7 @@ Runs:
   - Test Case 5 (mountain flow):  15-day integration at T42.
     Expected: stable, recognizable mountain-wave pattern.
 
-Outputs (in results/spectral_sw/):
+Outputs (in results/atmosphere/shallow_water/spectral_sw/):
   - conservation_tc2.png   — mass, energy, enstrophy time series (TC2)
   - conservation_tc5.png   — mass, energy, enstrophy time series (TC5)
   - snapshots_tc2.png      — height field at days 0, 1, 3, 5
@@ -49,7 +49,7 @@ from legoesm import constants
 # ── Output directory ────────────────────────────────────────────────────
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
-OUT_DIR = os.path.join(PROJECT_DIR, "results", "spectral_sw")
+OUT_DIR = os.path.join(PROJECT_DIR, "results", "atmosphere", "shallow_water", "spectral_sw")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 

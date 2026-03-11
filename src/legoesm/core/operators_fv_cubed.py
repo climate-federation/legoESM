@@ -30,6 +30,8 @@ import jax.numpy as jnp
 from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 
+_EDGE_BLEND_CROSS_WEIGHT = 0.25
+
 
 # ==============================================================================
 # FV divergence — consistent with PPM mass flux
@@ -290,11 +292,14 @@ def face_boundary_weight(n: int, depth: int = 2, strength: float = 0.25):
 
 
 def edge_blend_scalar(q, grid, weight):
-    """Localized Laplacian smoothing of a scalar field near face boundaries.
+    """Cross-face continuity relaxation for scalars near face boundaries.
 
-    Replaces each boundary cell with a weighted average of itself and its
-    4-connected neighbours.  Interior cells (where *weight* == 0) are
-    untouched.
+    This filter combines:
+    1) direct cross-face edge matching (using interpolated halo values),
+    2) local 4-point Laplacian smoothing.
+
+    The post-filter field is corrected to preserve the exact
+    area-weighted global integral of *q*.
 
     Parameters
     ----------
@@ -307,17 +312,68 @@ def edge_blend_scalar(q, grid, weight):
     -------
     jax.Array, shape (6, n, n)
     """
+    n = q.shape[1]
+
+    # Local in-face 4-point average (secondary smoothing).
     q_pad = pad_halo(q, interp_offsets=grid.halo_interp_offsets)
-    avg = (q_pad[:, 2:, 1:-1] + q_pad[:, :-2, 1:-1]
-           + q_pad[:, 1:-1, 2:] + q_pad[:, 1:-1, :-2]) / 4.0
-    return q + weight * (avg - q)
+    local_avg = (
+        q_pad[:, 2:, 1:-1]
+        + q_pad[:, :-2, 1:-1]
+        + q_pad[:, 1:-1, 2:]
+        + q_pad[:, 1:-1, :-2]
+    ) / 4.0
+
+    # Cross-face target from directly adjacent neighbour-face cells.
+    accum = jnp.zeros_like(q)
+    counts = jnp.zeros_like(q)
+
+    accum = accum.at[:, 0, :].add(0.5 * (q[:, 0, :] + q_pad[:, 0, 1:-1]))
+    counts = counts.at[:, 0, :].add(1.0)
+    accum = accum.at[:, -1, :].add(0.5 * (q[:, -1, :] + q_pad[:, -1, 1:-1]))
+    counts = counts.at[:, -1, :].add(1.0)
+    accum = accum.at[:, :, 0].add(0.5 * (q[:, :, 0] + q_pad[:, 1:-1, 0]))
+    counts = counts.at[:, :, 0].add(1.0)
+    accum = accum.at[:, :, -1].add(0.5 * (q[:, :, -1] + q_pad[:, 1:-1, -1]))
+    counts = counts.at[:, :, -1].add(1.0)
+
+    # Add one more row/column near boundaries (depth=1) when available.
+    if n >= 3:
+        q_pad_h2 = pad_halo(
+            q, halo=2, interp_offsets=grid.halo_interp_offsets_h2,
+        )
+        accum = accum.at[:, 1, :].add(0.5 * (q[:, 1, :] + q_pad_h2[:, 0, 2:-2]))
+        counts = counts.at[:, 1, :].add(1.0)
+        accum = accum.at[:, -2, :].add(
+            0.5 * (q[:, -2, :] + q_pad_h2[:, n + 3, 2:-2])
+        )
+        counts = counts.at[:, -2, :].add(1.0)
+        accum = accum.at[:, :, 1].add(0.5 * (q[:, :, 1] + q_pad_h2[:, 2:-2, 0]))
+        counts = counts.at[:, :, 1].add(1.0)
+        accum = accum.at[:, :, -2].add(
+            0.5 * (q[:, :, -2] + q_pad_h2[:, 2:-2, n + 3])
+        )
+        counts = counts.at[:, :, -2].add(1.0)
+
+    cross_target = jnp.where(counts > 0.0, accum / counts, q)
+    target = (
+        _EDGE_BLEND_CROSS_WEIGHT * cross_target
+        + (1.0 - _EDGE_BLEND_CROSS_WEIGHT) * local_avg
+    )
+    q_blended = q + weight * (target - q)
+
+    # Preserve the area-weighted global integral exactly.
+    area = grid.area.astype(q_blended.dtype)
+    mass_old = jnp.sum(q * area)
+    mass_new = jnp.sum(q_blended * area)
+    area_sum = jnp.sum(area)
+    return q_blended + (mass_old - mass_new) / jnp.maximum(area_sum, 1.0e-30)
 
 
 def edge_blend_vector(u, v, grid, weight):
-    """Localized Laplacian smoothing of a vector field near face boundaries.
+    """Cross-face continuity relaxation for vectors near face boundaries.
 
-    Uses :func:`pad_halo_vector` so that halo velocities are properly
-    rotated into the local face's coordinate frame before averaging.
+    Uses :func:`pad_halo_vector` so halo values are rotated into each
+    local face coordinate frame before applying the blend.
 
     Parameters
     ----------
@@ -329,17 +385,94 @@ def edge_blend_vector(u, v, grid, weight):
     -------
     u_blended, v_blended : jax.Array, shape (6, n, n)
     """
+    n = u.shape[1]
+
+    # Local in-face 4-point average (secondary smoothing).
     u_pad, v_pad = pad_halo_vector(
         u, v,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
         interp_offsets=grid.halo_interp_offsets,
     )
-    avg_u = (u_pad[:, 2:, 1:-1] + u_pad[:, :-2, 1:-1]
-             + u_pad[:, 1:-1, 2:] + u_pad[:, 1:-1, :-2]) / 4.0
-    avg_v = (v_pad[:, 2:, 1:-1] + v_pad[:, :-2, 1:-1]
-             + v_pad[:, 1:-1, 2:] + v_pad[:, 1:-1, :-2]) / 4.0
-    return u + weight * (avg_u - u), v + weight * (avg_v - v)
+    local_avg_u = (
+        u_pad[:, 2:, 1:-1]
+        + u_pad[:, :-2, 1:-1]
+        + u_pad[:, 1:-1, 2:]
+        + u_pad[:, 1:-1, :-2]
+    ) / 4.0
+    local_avg_v = (
+        v_pad[:, 2:, 1:-1]
+        + v_pad[:, :-2, 1:-1]
+        + v_pad[:, 1:-1, 2:]
+        + v_pad[:, 1:-1, :-2]
+    ) / 4.0
+
+    # Cross-face target from adjacent neighbour-face cells.
+    accum_u = jnp.zeros_like(u)
+    accum_v = jnp.zeros_like(v)
+    counts = jnp.zeros_like(u)
+
+    accum_u = accum_u.at[:, 0, :].add(0.5 * (u[:, 0, :] + u_pad[:, 0, 1:-1]))
+    accum_v = accum_v.at[:, 0, :].add(0.5 * (v[:, 0, :] + v_pad[:, 0, 1:-1]))
+    counts = counts.at[:, 0, :].add(1.0)
+    accum_u = accum_u.at[:, -1, :].add(0.5 * (u[:, -1, :] + u_pad[:, -1, 1:-1]))
+    accum_v = accum_v.at[:, -1, :].add(0.5 * (v[:, -1, :] + v_pad[:, -1, 1:-1]))
+    counts = counts.at[:, -1, :].add(1.0)
+    accum_u = accum_u.at[:, :, 0].add(0.5 * (u[:, :, 0] + u_pad[:, 1:-1, 0]))
+    accum_v = accum_v.at[:, :, 0].add(0.5 * (v[:, :, 0] + v_pad[:, 1:-1, 0]))
+    counts = counts.at[:, :, 0].add(1.0)
+    accum_u = accum_u.at[:, :, -1].add(0.5 * (u[:, :, -1] + u_pad[:, 1:-1, -1]))
+    accum_v = accum_v.at[:, :, -1].add(0.5 * (v[:, :, -1] + v_pad[:, 1:-1, -1]))
+    counts = counts.at[:, :, -1].add(1.0)
+
+    if n >= 3:
+        u_pad_h2, v_pad_h2 = pad_halo_vector(
+            u, v,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+            interp_offsets=grid.halo_interp_offsets_h2, halo=2,
+        )
+        accum_u = accum_u.at[:, 1, :].add(
+            0.5 * (u[:, 1, :] + u_pad_h2[:, 0, 2:-2])
+        )
+        accum_v = accum_v.at[:, 1, :].add(
+            0.5 * (v[:, 1, :] + v_pad_h2[:, 0, 2:-2])
+        )
+        counts = counts.at[:, 1, :].add(1.0)
+        accum_u = accum_u.at[:, -2, :].add(
+            0.5 * (u[:, -2, :] + u_pad_h2[:, n + 3, 2:-2])
+        )
+        accum_v = accum_v.at[:, -2, :].add(
+            0.5 * (v[:, -2, :] + v_pad_h2[:, n + 3, 2:-2])
+        )
+        counts = counts.at[:, -2, :].add(1.0)
+        accum_u = accum_u.at[:, :, 1].add(
+            0.5 * (u[:, :, 1] + u_pad_h2[:, 2:-2, 0])
+        )
+        accum_v = accum_v.at[:, :, 1].add(
+            0.5 * (v[:, :, 1] + v_pad_h2[:, 2:-2, 0])
+        )
+        counts = counts.at[:, :, 1].add(1.0)
+        accum_u = accum_u.at[:, :, -2].add(
+            0.5 * (u[:, :, -2] + u_pad_h2[:, 2:-2, n + 3])
+        )
+        accum_v = accum_v.at[:, :, -2].add(
+            0.5 * (v[:, :, -2] + v_pad_h2[:, 2:-2, n + 3])
+        )
+        counts = counts.at[:, :, -2].add(1.0)
+
+    cross_u = jnp.where(counts > 0.0, accum_u / counts, u)
+    cross_v = jnp.where(counts > 0.0, accum_v / counts, v)
+    target_u = (
+        _EDGE_BLEND_CROSS_WEIGHT * cross_u
+        + (1.0 - _EDGE_BLEND_CROSS_WEIGHT) * local_avg_u
+    )
+    target_v = (
+        _EDGE_BLEND_CROSS_WEIGHT * cross_v
+        + (1.0 - _EDGE_BLEND_CROSS_WEIGHT) * local_avg_v
+    )
+
+    return u + weight * (target_u - u), v + weight * (target_v - v)
 
 
 def edge_blend_scalar_3d(q_3d, grid, weight):

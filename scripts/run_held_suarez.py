@@ -104,7 +104,7 @@ def main():
     HYPERDIFF_COEFF = args.hyperdiff or compute_hyperdiff_coeff(N_GRID)
 
     # Output directory
-    OUTPUT_DIR = Path(args.output or f"results/held_suarez_C{N_GRID}_L{N_LEVELS}_{args.fv_grid}")
+    OUTPUT_DIR = Path(args.output or f"results/atmosphere/hydrostatic/held_suarez_C{N_GRID}_L{N_LEVELS}_{args.fv_grid}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=" * 70)

@@ -45,7 +45,7 @@ def main():
     DURATION_DAYS = 100
     SNAPSHOT_DAYS = [0, 25, 50, 75, 100]
 
-    OUTPUT_DIR = "results/100day_spectral"
+    OUTPUT_DIR = "results/atmosphere/shallow_water/100day_spectral"
 
     # =====================================================================
     # Setup

@@ -56,7 +56,7 @@ DT = args.dt if args.dt is not None else (300.0 if N > 24 else 600.0)
 N_DAYS = args.days
 DIAG_DAYS = args.diag_days
 
-OUTPUT_DIR = Path("results/rce_slab_land")
+OUTPUT_DIR = Path("results/land/rce_slab_land")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 print("=" * 70)

@@ -33,6 +33,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.core.operators_fv_cubed import (
+    face_boundary_weight,
+    edge_blend_scalar,
+    edge_blend_scalar_3d,
+    edge_blend_vector_3d,
+)
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.ocean.dynamics.ocean_pe import ocean_baroclinic_tendencies
@@ -90,6 +96,7 @@ class OceanModel:
         self.config = config or OceanConfig()
         self.discretization = discretization
         self._validate_config(self.config)
+        self._eb_weight = None
 
         # Build FC config if needed
         if discretization in ("fc_gram", "fc_gram_cgrid"):
@@ -106,6 +113,18 @@ class OceanModel:
             self._physics_fn = make_ocean_physics(self.config.physics)
         else:
             self._physics_fn = None
+
+        # Optional FV face-edge continuity relaxation.
+        if (
+            self.discretization == "finite_volume"
+            and self.config.edge_blend_strength > 0.0
+            and self.config.edge_blend_depth > 0
+        ):
+            self._eb_weight = face_boundary_weight(
+                self.grid.n,
+                self.config.edge_blend_depth,
+                self.config.edge_blend_strength,
+            )
 
     @staticmethod
     def _validate_config(config: OceanConfig) -> None:
@@ -148,6 +167,16 @@ class OceanModel:
             raise ValueError(
                 "salinity_min_psu must be <= salinity_max_psu, got "
                 f"{config.salinity_min_psu!r} > {config.salinity_max_psu!r}",
+            )
+        if not (0.0 <= config.edge_blend_strength <= 1.0):
+            raise ValueError(
+                "edge_blend_strength must be in [0, 1], got "
+                f"{config.edge_blend_strength!r}",
+            )
+        if config.edge_blend_depth < 0:
+            raise ValueError(
+                "edge_blend_depth must be >= 0, got "
+                f"{config.edge_blend_depth!r}",
             )
 
     def _assert_runtime_invariants(self, state: OceanState) -> None:
@@ -308,6 +337,32 @@ class OceanModel:
             dt_s, self.config.n_barotropic_substeps,
             self.grid, self.z_coord, self.config,
         )
+
+        # FV cube-edge continuity relaxation (optional).
+        if self._eb_weight is not None:
+            mask = state_new.land_mask.data
+            mask_3d = mask[..., jnp.newaxis]
+
+            u_new, v_new = edge_blend_vector_3d(
+                state_new.u.data, state_new.v.data, self.grid, self._eb_weight,
+            )
+            T_new = edge_blend_scalar_3d(
+                state_new.T.data, self.grid, self._eb_weight,
+            )
+            S_new = edge_blend_scalar_3d(
+                state_new.S.data, self.grid, self._eb_weight,
+            )
+            eta_new = edge_blend_scalar(
+                state_new.eta.data, self.grid, self._eb_weight,
+            )
+
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=u_new * mask_3d),
+                v=state_new.v.replace(data=v_new * mask_3d),
+                T=state_new.T.replace(data=T_new * mask_3d),
+                S=state_new.S.replace(data=S_new * mask_3d),
+                eta=state_new.eta.replace(data=eta_new * mask),
+            )
 
         # --- 5. Conservation fixers ---
         if self.config.use_conservation_fixer:

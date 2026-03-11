@@ -105,7 +105,7 @@ RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 if args.output is not None:
     OUTPUT_DIR = Path(args.output)
 else:
-    OUTPUT_DIR = Path(f"results/amip_spectral/T{TRUNC}_L{NLEV}_{N_DAYS}d_{RUN_ID}")
+    OUTPUT_DIR = Path(f"results/atmosphere/hydrostatic/amip_spectral/T{TRUNC}_L{NLEV}_{N_DAYS}d_{RUN_ID}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 print("=" * 70)

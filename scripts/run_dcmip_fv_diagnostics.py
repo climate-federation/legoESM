@@ -36,7 +36,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.spatial import cKDTree
 
-OUTPUT_BASE = "results/dcmip_fv"
+OUTPUT_BASE = "results/atmosphere/nonhydrostatic/dcmip_fv"
 
 
 # =========================================================================

@@ -7,7 +7,7 @@ Runs:
      Expected: acoustic/gravity wave propagation from mountain forcing,
      w perturbations ~ 0.1-1 m/s, stable integration.
 
-Outputs (in results/spectral_nh/):
+Outputs (in results/atmosphere/nonhydrostatic/spectral_nh/):
   - rest_stability.png     — perturbation growth time series
   - timeseries.png         — max |w|, max |theta'| time series
   - profiles_w.png         — zonal-mean w at times 0, 20min, 40min, 60min
@@ -57,7 +57,7 @@ from legoesm import constants
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
-OUT_DIR = os.path.join(PROJECT_DIR, "results", "spectral_nh")
+OUT_DIR = os.path.join(PROJECT_DIR, "results", "atmosphere", "nonhydrostatic", "spectral_nh")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 

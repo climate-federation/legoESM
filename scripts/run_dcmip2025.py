@@ -275,7 +275,7 @@ def main():
 
     defaults = {"tc1": 3.0, "tc2a": 6.0, "tc3": 2.0}
     hours = args.hours or defaults[args.test]
-    out = Path(args.output or f"results/dcmip2025_{args.test}_C{args.resolution}")
+    out = Path(args.output or f"results/atmosphere/nonhydrostatic/dcmip2025_{args.test}_C{args.resolution}")
 
     print(f"DCMIP-2025 {args.test.upper()} | C{args.resolution} L{args.levels}")
 
