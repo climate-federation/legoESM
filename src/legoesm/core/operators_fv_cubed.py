@@ -27,10 +27,12 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.operators import laplacian_compact
+from legoesm.core.operators_fv import fv_gradient_x, fv_gradient_y
 from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 
-_EDGE_BLEND_CROSS_WEIGHT = 0.25
+_EDGE_BLEND_CROSS_WEIGHT = 0.0
 
 
 # ==============================================================================
@@ -149,25 +151,16 @@ def fv_divergence_damping(u, v, grid, nu2, nu4=0.0):
     div = fv_divergence(u, v, grid)  # (6, n, n)
 
     if nu2 > 0.0:
-        div_pad = pad_halo(div, interp_offsets=grid.halo_interp_offsets)
-        grad_div_x = (div_pad[:, 2:, 1:-1] - div_pad[:, :-2, 1:-1]) / grid.dx
-        grad_div_y = (div_pad[:, 1:-1, 2:] - div_pad[:, 1:-1, :-2]) / grid.dy
+        # Use PPM/FV-consistent gradients to avoid seam-biased damping.
+        grad_div_x = fv_gradient_x(div, grid)
+        grad_div_y = fv_gradient_y(div, grid)
         du_damp = du_damp + nu2 * grad_div_x
         dv_damp = dv_damp + nu2 * grad_div_y
 
     if nu4 > 0.0:
-        div_pad = pad_halo(div, interp_offsets=grid.halo_interp_offsets)
-        # Laplacian of divergence
-        lap_div = (
-            (div_pad[:, 2:, 1:-1] - 2 * div_pad[:, 1:-1, 1:-1] + div_pad[:, :-2, 1:-1])
-            / (grid.dx / 2.0) ** 2
-            + (div_pad[:, 1:-1, 2:] - 2 * div_pad[:, 1:-1, 1:-1] + div_pad[:, 1:-1, :-2])
-            / (grid.dy / 2.0) ** 2
-        )
-        # Gradient of laplacian
-        lap_div_pad = pad_halo(lap_div, interp_offsets=grid.halo_interp_offsets)
-        grad_lap_x = (lap_div_pad[:, 2:, 1:-1] - lap_div_pad[:, :-2, 1:-1]) / grid.dx
-        grad_lap_y = (lap_div_pad[:, 1:-1, 2:] - lap_div_pad[:, 1:-1, :-2]) / grid.dy
+        lap_div = laplacian_compact(div, grid)
+        grad_lap_x = fv_gradient_x(lap_div, grid)
+        grad_lap_y = fv_gradient_y(lap_div, grid)
         du_damp = du_damp - nu4 * grad_lap_x
         dv_damp = dv_damp - nu4 * grad_lap_y
 
@@ -323,6 +316,14 @@ def edge_blend_scalar(q, grid, weight):
         + q_pad[:, 1:-1, :-2]
     ) / 4.0
 
+    if _EDGE_BLEND_CROSS_WEIGHT <= 0.0:
+        q_blended = q + weight * (local_avg - q)
+        area = grid.area.astype(q_blended.dtype)
+        mass_old = jnp.sum(q * area)
+        mass_new = jnp.sum(q_blended * area)
+        area_sum = jnp.sum(area)
+        return q_blended + (mass_old - mass_new) / jnp.maximum(area_sum, 1.0e-30)
+
     # Cross-face target from directly adjacent neighbour-face cells.
     accum = jnp.zeros_like(q)
     counts = jnp.zeros_like(q)
@@ -406,6 +407,9 @@ def edge_blend_vector(u, v, grid, weight):
         + v_pad[:, 1:-1, 2:]
         + v_pad[:, 1:-1, :-2]
     ) / 4.0
+
+    if _EDGE_BLEND_CROSS_WEIGHT <= 0.0:
+        return u + weight * (local_avg_u - u), v + weight * (local_avg_v - v)
 
     # Cross-face target from adjacent neighbour-face cells.
     accum_u = jnp.zeros_like(u)

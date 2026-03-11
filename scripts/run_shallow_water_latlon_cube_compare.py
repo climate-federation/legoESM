@@ -884,6 +884,8 @@ def _run_fv_cubesphere(
     area = np.asarray(grid.area, dtype=np.float64)
     lon_faces = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
     lat_faces = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
+    cos_ang = np.asarray(grid.cos_angle, dtype=np.float64)
+    sin_ang = np.asarray(grid.sin_angle, dtype=np.float64)
 
     state = init_fn(grid)
     n_steps = int(days * 86400.0 / dt)
@@ -920,8 +922,13 @@ def _run_fv_cubesphere(
     slab_values: list[dict[str, float]] = []
 
     def _extract_faces(s):
-        u = np.asarray(s.u.data, dtype=np.float64)
-        v = np.asarray(s.v.data, dtype=np.float64)
+        # Convert grid-aligned velocity to true east/north before remap.
+        # Plotting raw grid-aligned components on a global lat-lon map
+        # introduces cube-face orientation artifacts in diagnostics.
+        u_grid = np.asarray(s.u.data, dtype=np.float64)
+        v_grid = np.asarray(s.v.data, dtype=np.float64)
+        u = cos_ang * u_grid - sin_ang * v_grid
+        v = sin_ang * u_grid + cos_ang * v_grid
         h = np.asarray(s.h.data, dtype=np.float64)
         wind = np.sqrt(u * u + v * v)
         vor = np.asarray(curl_z(s.u, s.v, grid).data, dtype=np.float64)
