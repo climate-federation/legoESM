@@ -29,12 +29,13 @@ from legoesm.core.operators_3d import (
     vorticity_3d,
     gradient_x_3d,
     gradient_y_3d,
-    divergence_3d,
     hyperdiffusion_3d,
-    laplacian_compact_3d,
     vertical_advection_height,
     fv_flux_divergence_3d,
     fv_scalar_advection_3d,
+)
+from legoesm.core.operators_fv_cubed import (
+    fv_divergence_damping_3d as _fv_divergence_damping_3d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
@@ -123,21 +124,15 @@ def cgrid_compressible_euler_slow_tendencies(
     du_dt = abs_vor * v - dK_dx - c_p * theta_total * dpi_dx
     dv_dt = -abs_vor * u - dK_dy - c_p * theta_total * dpi_dy
 
-    # --- 5. Divergence damping (2nd + 4th order) ---
-    div_v = divergence_3d(u, v, grid)
-
-    if config.div_damp_2 > 0:
-        ddiv_dx = gradient_x_3d(div_v, grid)
-        ddiv_dy = gradient_y_3d(div_v, grid)
-        du_dt = du_dt + config.div_damp_2 * ddiv_dx
-        dv_dt = dv_dt + config.div_damp_2 * ddiv_dy
-
-    if config.div_damp_4 > 0:
-        lap_div = laplacian_compact_3d(div_v, grid)
-        grad_lap_x = gradient_x_3d(lap_div, grid)
-        grad_lap_y = gradient_y_3d(lap_div, grid)
-        du_dt = du_dt - config.div_damp_4 * grad_lap_x
-        dv_dt = dv_dt - config.div_damp_4 * grad_lap_y
+    # --- 5. Divergence damping (FV-consistent operator) ---
+    # Use the same FV divergence as the mass equation (PPM interface fluxes)
+    # to avoid energy injection from operator inconsistency.
+    if config.div_damp_2 > 0 or config.div_damp_4 > 0:
+        du_damp, dv_damp = _fv_divergence_damping_3d(
+            u, v, grid, config.div_damp_2, config.div_damp_4,
+        )
+        du_dt = du_dt + du_damp
+        dv_dt = dv_dt + dv_damp
 
     # --- 6. Vertical advection of u, v ---
     du_dt = du_dt + vertical_advection_height(u, w, dz, dz_half, J)

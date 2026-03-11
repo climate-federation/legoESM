@@ -41,6 +41,10 @@ from legoesm.core.operators_3d import (
     fv_flux_divergence_3d as _fv_flux_divergence_3d,
     fv_scalar_advection_3d as _fv_scalar_advection_3d,
 )
+from legoesm.core.operators_fv_cubed import (
+    fv_divergence_3d as _fv_divergence_3d,
+    fv_divergence_damping_3d as _fv_divergence_damping_3d,
+)
 from legoesm.core.conservation import zero_mean_tendency
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
@@ -122,21 +126,18 @@ def cgrid_hydrostatic_tendencies(
     du_dt_data = abs_vor * v - dB_dx - pg_corr_x
     dv_dt_data = -abs_vor * u - dB_dy - pg_corr_y
 
-    # --- Divergence damping (2nd + 4th order) ---
+    # --- Divergence damping (FV-consistent operator) ---
+    # Use the same FV divergence as the mass equation (PPM interface fluxes)
+    # to avoid energy injection from operator inconsistency.
+    if config.div_damp_2 > 0 or config.div_damp_4 > 0:
+        du_damp, dv_damp = _fv_divergence_damping_3d(
+            u, v, grid, config.div_damp_2, config.div_damp_4,
+        )
+        du_dt_data = du_dt_data + du_damp
+        dv_dt_data = dv_dt_data + dv_damp
+
+    # Centered divergence still needed for sigma_dot diagnostic
     div_v = _divergence_3d(u, v, grid)
-
-    if config.div_damp_2 > 0:
-        ddiv_dx = _gradient_x_3d(div_v, grid)
-        ddiv_dy = _gradient_y_3d(div_v, grid)
-        du_dt_data = du_dt_data + config.div_damp_2 * ddiv_dx
-        dv_dt_data = dv_dt_data + config.div_damp_2 * ddiv_dy
-
-    if config.div_damp_4 > 0:
-        lap_div = _laplacian_compact_3d(div_v, grid)
-        grad_lap_x = _gradient_x_3d(lap_div, grid)
-        grad_lap_y = _gradient_y_3d(lap_div, grid)
-        du_dt_data = du_dt_data - config.div_damp_4 * grad_lap_x
-        dv_dt_data = dv_dt_data - config.div_damp_4 * grad_lap_y
 
     # --- Surface pressure tendency via PPM ---
     sigma_top = sigma_coord.sigma_half[0]
