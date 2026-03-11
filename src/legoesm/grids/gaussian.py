@@ -66,6 +66,7 @@ def create_gaussian_grid(
     n_max: int,
     radius: float = constants.R_earth,
     *,
+    dealiasing: str = "quadratic",
     allow_unsupported_backend: bool = False,
     legoesm_config=None,
 ) -> GaussianGrid:
@@ -74,11 +75,16 @@ def create_gaussian_grid(
     Parameters
     ----------
     n_max : int
-        Spectral truncation. Grid has n_lat = 3*(n_max+1)//2 latitudes
-        (sufficient for dealiasing quadratic nonlinearities) and
-        n_lon = 2 * n_lat longitudes.
+        Spectral truncation.
     radius : float
         Sphere radius [m].
+    dealiasing : str
+        Dealiasing rule for the transform grid size:
+        - ``"quadratic"`` (default): n_lat = 3*(n_max+1)//2.
+          Exact for products of 2 spectral fields (shallow water).
+        - ``"cubic"``: n_lat = 2*(n_max+1).
+          Exact for products of 3 spectral fields (primitive equations).
+        - ``"linear"``: n_lat = n_max + 1. No dealiasing.
     allow_unsupported_backend : bool
         If True, bypass the backend compatibility check (expert only).
         Default False.
@@ -116,8 +122,18 @@ def create_gaussian_grid(
     # Guard: spectral code requires float64/complex128
     check_spectral_backend(allow_unsupported=allow_unsupported_backend)
 
-    # Grid dimensions (standard dealiasing: n_lat >= 3*(n_max+1)/2)
-    n_lat = 3 * (n_max + 1) // 2
+    # Grid dimensions based on dealiasing rule
+    if dealiasing == "cubic":
+        n_lat = 2 * (n_max + 1)
+    elif dealiasing == "quadratic":
+        n_lat = 3 * (n_max + 1) // 2
+    elif dealiasing == "linear":
+        n_lat = n_max + 1
+    else:
+        raise ValueError(
+            f"Unknown dealiasing={dealiasing!r}. "
+            "Use 'quadratic', 'cubic', or 'linear'."
+        )
     # Make n_lat even for FFT efficiency
     if n_lat % 2 != 0:
         n_lat += 1

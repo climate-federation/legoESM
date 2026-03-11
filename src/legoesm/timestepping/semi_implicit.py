@@ -283,12 +283,16 @@ def si_correction(
     alpha = si_data.alpha
     T_ref = si_data.T_ref
 
-    # Explicit divergence (what RK produced)
+    # Explicit divergence (what RK produced) and old divergence (start of stage)
     div_hat_explicit = state_explicit.div_hat.data  # (n_sh, nlev)
+    div_hat_old = state_old.div_hat.data            # (n_sh, nlev)
 
-    # The implicit correction solves:
-    # (I + alpha^2*dt^2*eigenvalue[n]*Gamma) * div_hat_new = div_hat_explicit
-    # for each (n, m) mode.
+    # The Hoskins-Simmons SI correction solves:
+    # (I + alpha^2*dt^2*eigenvalue[n]*Gamma) * D_new = D_explicit + alpha^2*dt^2*eigenvalue[n]*Gamma * D_old
+    #
+    # This ensures only the TENDENCY is implicitly modified, not the full state:
+    # D_new = D_old + (I + M)^{-1} * dt * F(X_old)
+    # where M = alpha^2 * dt^2 * eigenvalue * Gamma.
 
     # Map each SH coefficient to its total wavenumber n
     ns = grid.ls  # (n_sh,) -- total wavenumber for each coefficient
@@ -297,9 +301,14 @@ def si_correction(
     # si_matrices: (n_max+1, nlev, nlev), ns: (n_sh,)
     matrices = si_data.si_matrices[ns]  # (n_sh, nlev, nlev)
 
-    # Solve: matrices @ div_corrected = div_explicit (per coefficient)
-    # JAX v0.5+ requires explicit batched 1D solve form
-    div_hat_corrected = solve(matrices, div_hat_explicit[..., None]).squeeze(-1)
+    # Build RHS: D_explicit + M * D_old
+    # M * D_old = (matrices - I) * D_old
+    I_nlev = jnp.eye(matrices.shape[-1], dtype=matrices.dtype)
+    M_times_D_old = jnp.einsum('...ij,...j->...i', matrices - I_nlev, div_hat_old)
+    rhs = div_hat_explicit + M_times_D_old
+
+    # Solve: matrices @ div_corrected = rhs (per coefficient)
+    div_hat_corrected = solve(matrices, rhs[..., None]).squeeze(-1)
 
     # Divergence correction
     delta_div = div_hat_corrected - div_hat_explicit  # (n_sh, nlev)
@@ -373,6 +382,130 @@ def ssp_rk3_step_si(
     k3 = _pytree_linear_combination(state, k2_step, 1.0 / 3.0, 2.0 / 3.0)
 
     return k3
+
+
+def euler_si_step(
+    state,
+    tendency_fn,
+    dt: float,
+    si_data: SemiImplicitData,
+    grid: GaussianGrid,
+):
+    """Forward Euler step with semi-implicit correction.
+
+    Used for the first time step of leapfrog integration (startup).
+    SI data should be precomputed with the same dt.
+
+    Parameters
+    ----------
+    state : SpectralHydrostaticState
+        Current state.
+    tendency_fn : callable
+        Explicit tendency function.
+    dt : float
+        Time step.
+    si_data : SemiImplicitData
+        Precomputed matrices (for dt).
+    grid : GaussianGrid
+        Gaussian grid.
+
+    Returns
+    -------
+    SpectralHydrostaticState
+        State after one forward Euler + SI step.
+    """
+    tend = tendency_fn(state)
+    state_explicit = _pytree_axpy(state, tend, dt)
+    return si_correction(state_explicit, state, si_data, grid, dt)
+
+
+def leapfrog_si_step(
+    state_n,
+    state_nm1,
+    tendency_fn,
+    dt: float,
+    si_data: SemiImplicitData,
+    grid: GaussianGrid,
+):
+    """Leapfrog step with semi-implicit gravity wave correction.
+
+    Computes X^{n+1} from X^n and X^{n-1} using:
+    1. Explicit leapfrog: X* = X^{n-1} + 2*dt * F(X^n)
+    2. SI correction: solves the implicit gravity-wave system
+
+    The SI data should be precomputed with dt_eff = 2*dt (the full
+    leapfrog step size), using the same alpha.
+
+    Leapfrog is neutral for oscillatory modes (|amplification factor| = 1),
+    so unlike SSP-RK3, the SI correction only needs to handle the implicit
+    gravity-wave coupling without fighting Euler amplification.
+
+    Parameters
+    ----------
+    state_n : SpectralHydrostaticState
+        State at time level n.
+    state_nm1 : SpectralHydrostaticState
+        State at time level n-1.
+    tendency_fn : callable
+        Explicit tendency function.
+    dt : float
+        Base time step. The leapfrog step is 2*dt.
+    si_data : SemiImplicitData
+        Precomputed matrices (for dt_eff = 2*dt).
+    grid : GaussianGrid
+        Gaussian grid.
+
+    Returns
+    -------
+    SpectralHydrostaticState
+        State at time level n+1.
+
+    References
+    ----------
+    - Hoskins, B. J. & Simmons, A. J. (1975). A multi-layer spectral model
+      and the semi-implicit method. Q. J. R. Met. Soc., 101, 637-655.
+    """
+    tend = tendency_fn(state_n)
+    dt2 = 2.0 * dt
+    state_explicit = _pytree_axpy(state_nm1, tend, dt2)
+    return si_correction(state_explicit, state_nm1, si_data, grid, dt2)
+
+
+def robert_asselin_filter(state_nm1, state_n, state_np1, gamma):
+    """Robert-Asselin time filter for leapfrog.
+
+    Damps the computational mode (2*dt oscillation) that leapfrog permits:
+
+        X^n_filtered = X^n + (gamma/2) * (X^{n-1} - 2*X^n + X^{n+1})
+
+    Parameters
+    ----------
+    state_nm1 : pytree
+        State at time n-1 (filtered from previous step).
+    state_n : pytree
+        State at time n (unfiltered).
+    state_np1 : pytree
+        State at time n+1 (just computed).
+    gamma : float
+        Filter coefficient (typically 0.05-0.1).
+
+    Returns
+    -------
+    state_n_filtered : pytree
+        Filtered state at time n.
+
+    References
+    ----------
+    - Robert, A. J. (1966). The integration of a low order spectral form of
+      the primitive meteorological equations. J. Met. Soc. Japan, 44, 237-245.
+    - Asselin, R. (1972). Frequency filter for time integrations.
+      Mon. Wea. Rev., 100, 487-490.
+    """
+    coeff = gamma / 2.0
+    return jax.tree.map(
+        lambda xm, xn, xp: xn + coeff * (xm - 2.0 * xn + xp),
+        state_nm1, state_n, state_np1,
+    )
 
 
 def _pytree_axpy(x, y, alpha):

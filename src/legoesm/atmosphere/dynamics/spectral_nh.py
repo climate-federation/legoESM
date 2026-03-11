@@ -34,7 +34,6 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.operators_3d import (
     vertical_advection_height,
-    vertical_divergence_height,
 )
 from legoesm.grids.gaussian import (
     GaussianGrid,
@@ -280,14 +279,12 @@ def spectral_nh_slow_tendencies(
 
     dtheta_p_hat = -flux_theta_div + theta_div_hat
 
-    # Vertical advection of theta
-    vert_adv_theta = vertical_advection_height(
-        theta_total, w, dz, dz_half, J,
-    )
-    dtheta_p_hat = dtheta_p_hat + sh_analysis_3d(grid, vert_adv_theta)
+    # NOTE: Vertical advection of theta by w is handled ONLY by the
+    # acoustic substeps (forward-backward scheme) to avoid double counting
+    # in the split-explicit time integration (Skamarock & Klemp 2008).
 
     # --- 13. Continuity equation (rho') ---
-    # Horizontal: -div_h(rho*v) · J / J (the J factors from z* cancel)
+    # Horizontal only: vertical mass flux divergence handled by acoustic step.
     rho_u_cos = rho_total * u_cos * J[..., None]
     rho_v_cos = rho_total * v_cos * J[..., None]
 
@@ -296,17 +293,8 @@ def spectral_nh_slow_tendencies(
         - one_over_a * sh_analysis_dmu_3d(grid, rho_v_cos)
     )
     # d(rho')/dt_horiz = -(1/J)*div_h(J*rho*v)
-    # flux_rho_div is spectral div_h(J*rho*v); divide by J in grid space:
     rho_horiz_tend_grid = -sh_synthesis_3d(grid, flux_rho_div) / J[..., None]
-
-    # Vertical divergence in grid space
-    rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-    rho_w = jnp.zeros_like(w)
-    rho_w = rho_w.at[..., 1:-1].set(rho_half * w[..., 1:-1])
-    vert_div_rho = vertical_divergence_height(rho_w, dz, J)
-
-    drho_p_grid = rho_horiz_tend_grid - vert_div_rho
-    drho_p_hat = sh_analysis_3d(grid, drho_p_grid)
+    drho_p_hat = sh_analysis_3d(grid, rho_horiz_tend_grid)
 
     # --- 14. w tendency (slow part) ---
     # Slow w tendency is zero: vertical PGF, buoyancy, and w-divergence are
@@ -419,7 +407,7 @@ def _acoustic_substeps_grid(
         theta_half_inner = 0.5 * (theta_total[..., :-1] + theta_total[..., 1:])
         theta_p_half = 0.5 * (theta_p_c[..., :-1] + theta_p_c[..., 1:])
         theta_0_half = 0.5 * (theta_0[:-1] + theta_0[1:])
-        buoyancy = -g * theta_p_half / theta_0_half
+        buoyancy = g * theta_p_half / theta_0_half
 
         dw_dt_inner = (
             -c_p * theta_half_inner * dpi_dz_inner / J[..., None]
@@ -502,7 +490,7 @@ def _acoustic_substeps_grid_semi_implicit(
         theta_half_inner = 0.5 * (theta_total[..., :-1] + theta_total[..., 1:])
         theta_p_half = 0.5 * (theta_p_c[..., :-1] + theta_p_c[..., 1:])
         theta_0_half = 0.5 * (theta_0[:-1] + theta_0[1:])
-        buoyancy = -g * theta_p_half / theta_0_half
+        buoyancy = g * theta_p_half / theta_0_half
 
         dw_dt_inner = (
             -c_p * theta_half_inner * dpi_dz_inner / J[..., None]

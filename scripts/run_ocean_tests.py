@@ -125,6 +125,26 @@ def _default_lat_bins(grid, mask_2d, *, min_bins=24, max_bins=72):
     return np.linspace(lat_lo, lat_hi, n_lat + 1)
 
 
+def _default_lon_bins(grid, mask_2d, *, min_bins=36, max_bins=180):
+    """Choose adaptive longitude bins from wet-cell density."""
+    mask = np.asarray(mask_2d, dtype=np.float64)
+    wet_count = int(np.sum(mask > 0.5))
+    if wet_count < 4:
+        return np.linspace(0.0, 360.0, min_bins + 1)
+
+    min_lat = max(12, min_bins // 2)
+    max_lat = max(24, max_bins // 2)
+    _, n_lon = _default_pixel_dims(
+        grid,
+        mask_2d,
+        min_lat=min_lat,
+        max_lat=max_lat,
+        oversample=1.0,
+    )
+    n_lon = int(np.clip(n_lon, min_bins, max_bins))
+    return np.linspace(0.0, 360.0, n_lon + 1)
+
+
 def _default_pixel_dims(grid, mask_2d, *, min_lat=24, max_lat=180, oversample=1.35):
     """Choose a regular lat-lon pixel grid compatible with wet-cell density."""
     mask = np.asarray(mask_2d, dtype=np.float64)
@@ -138,12 +158,13 @@ def _default_pixel_dims(grid, mask_2d, *, min_lat=24, max_lat=180, oversample=1.
     return n_lat, n_lon
 
 
-def _fill_missing_lat_bands(section):
-    """Fill NaN latitude bins by 1D interpolation (per depth level)."""
+def _fill_missing_bands(section, *, periodic=False):
+    """Fill NaN bins by 1D interpolation (per depth level)."""
     out = np.asarray(section, dtype=np.float64).copy()
     if out.ndim != 2:
         return out
-    idx = np.arange(out.shape[0], dtype=np.float64)
+    n_bins = out.shape[0]
+    idx = np.arange(n_bins, dtype=np.float64)
     for k in range(out.shape[1]):
         col = out[:, k]
         finite = np.isfinite(col)
@@ -152,9 +173,45 @@ def _fill_missing_lat_bands(section):
         if np.sum(finite) == 1:
             col[~finite] = col[finite][0]
         else:
-            col[~finite] = np.interp(idx[~finite], idx[finite], col[finite])
+            if periodic:
+                x = idx[finite]
+                y = col[finite]
+                x_ext = np.concatenate([x - float(n_bins), x, x + float(n_bins)])
+                y_ext = np.concatenate([y, y, y])
+                col[~finite] = np.interp(idx[~finite], x_ext, y_ext)
+            else:
+                col[~finite] = np.interp(idx[~finite], idx[finite], col[finite])
         out[:, k] = col
+
+    # Fill depth levels with no finite bins from nearest valid level.
+    finite_level = np.any(np.isfinite(out), axis=0)
+    if np.any(finite_level):
+        level_idx = np.arange(out.shape[1], dtype=np.int64)
+        for k in level_idx[~finite_level]:
+            nearest = level_idx[finite_level][
+                np.argmin(np.abs(level_idx[finite_level] - k))
+            ]
+            out[:, k] = out[:, nearest]
+
+    # Last resort: prevent NaNs in output diagnostics.
+    finite_all = np.isfinite(out)
+    if np.any(finite_all):
+        fill = float(np.nanmean(out[finite_all]))
+        out[~finite_all] = fill
+    else:
+        out[...] = 0.0
+
     return out
+
+
+def _fill_missing_lat_bands(section):
+    """Fill NaN latitude bins by interpolation (non-periodic)."""
+    return _fill_missing_bands(section, periodic=False)
+
+
+def _fill_missing_lon_bands(section):
+    """Fill NaN longitude bins by interpolation (periodic)."""
+    return _fill_missing_bands(section, periodic=True)
 
 
 def _edges_from_centers(centers):
@@ -211,6 +268,48 @@ def _compute_lat_depth_section(field_3d, grid, mask_2d, lat_bins_deg):
     return lat_centers, section
 
 
+def _compute_lon_depth_section(field_3d, grid, mask_2d, lon_bins_deg):
+    """Longitude-depth section from area-weighted means in longitude bins."""
+    field = np.asarray(field_3d, dtype=np.float64)
+    if field.ndim != 4:
+        raise ValueError(f"Expected field_3d with shape (face, x, y, level), got {field.shape}")
+
+    n_levels = field.shape[-1]
+    n_bins = int(len(lon_bins_deg) - 1)
+    section = np.full((n_bins, n_levels), np.nan, dtype=np.float64)
+    lon_deg = (np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi + 360.0) % 360.0
+    area = np.asarray(grid.area, dtype=np.float64)
+    if mask_2d is None:
+        mask = np.ones_like(area, dtype=np.float64)
+    else:
+        mask = np.asarray(mask_2d, dtype=np.float64)
+
+    lon_flat = lon_deg.ravel()
+    weight_flat = (area * mask).ravel()
+    lon_idx = np.digitize(lon_flat, lon_bins_deg, right=False) - 1
+    lon_idx = np.clip(lon_idx, 0, n_bins - 1)
+    valid_geom = np.isfinite(lon_flat) & np.isfinite(weight_flat) & (weight_flat > 0.0)
+
+    for k in range(n_levels):
+        data_flat = np.asarray(field[..., k], dtype=np.float64).ravel()
+        valid = valid_geom & np.isfinite(data_flat)
+        if not np.any(valid):
+            continue
+
+        idx = lon_idx[valid]
+        w = weight_flat[valid]
+        v = data_flat[valid]
+        sum_w = np.bincount(idx, weights=w, minlength=n_bins)
+        sum_v = np.bincount(idx, weights=w * v, minlength=n_bins)
+
+        wet = sum_w > 0.0
+        section[wet, k] = sum_v[wet] / sum_w[wet]
+
+    section = _fill_missing_lon_bands(section)
+    lon_centers = 0.5 * (np.asarray(lon_bins_deg[:-1]) + np.asarray(lon_bins_deg[1:]))
+    return lon_centers, section
+
+
 def _plot_lat_depth_sections(
     output_path,
     z_coord,
@@ -262,6 +361,68 @@ def _plot_lat_depth_sections(
         ax.set_xlabel("Latitude [deg]")
         ax.set_ylabel("Depth [m]")
         ax.set_title(title, fontsize=12, fontweight="bold")
+        ax.set_ylim(float(np.nanmax(depth)), float(np.nanmin(depth)))
+        ax.grid(True, alpha=0.25)
+        fig.colorbar(cs, ax=ax, orientation="vertical", pad=0.02, label=cbar_label)
+
+    fig.suptitle(suptitle, fontsize=15, fontweight="bold")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+def _plot_lon_depth_sections(
+    output_path,
+    z_coord,
+    lon_centers,
+    panels,
+    suptitle,
+):
+    """Plot one or more longitude-depth section panels."""
+    depth = np.asarray(z_coord.z_full_ref)
+    if float(np.nanmean(depth)) < 0.0:
+        depth = -depth
+
+    n_panels = len(panels)
+    fig, axes = plt.subplots(1, n_panels, figsize=(7.0 * n_panels, 6.0), squeeze=False)
+    axes = axes.ravel()
+
+    for ax, (title, section, cmap, symmetric, cbar_label) in zip(axes, panels):
+        data = np.asarray(section).T  # (n_levels, n_lon)
+        finite = data[np.isfinite(data)]
+        if finite.size == 0:
+            ax.text(0.5, 0.5, "No ocean data", ha="center", va="center")
+            ax.set_title(title, fontsize=12, fontweight="bold")
+            ax.set_xlabel("Longitude [deg]")
+            ax.set_ylabel("Depth [m]")
+            continue
+
+        if symmetric:
+            vmax = float(np.max(np.abs(finite)))
+            vmax = max(vmax, 1.0e-12)
+            vmin = -vmax
+        else:
+            vmin = float(np.min(finite))
+            vmax = float(np.max(finite))
+            if abs(vmax - vmin) < 1.0e-12:
+                vmax = vmin + 1.0e-12
+
+        lon_edges = _edges_from_centers(lon_centers)
+        depth_edges = _edges_from_centers(depth)
+        data_m = np.ma.masked_invalid(data)
+        cs = ax.pcolormesh(
+            lon_edges,
+            depth_edges,
+            data_m,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            shading="auto",
+        )
+        ax.set_xlabel("Longitude [deg]")
+        ax.set_ylabel("Depth [m]")
+        ax.set_title(title, fontsize=12, fontweight="bold")
+        ax.set_xlim(float(np.nanmin(lon_edges)), float(np.nanmax(lon_edges)))
         ax.set_ylim(float(np.nanmax(depth)), float(np.nanmin(depth)))
         ax.grid(True, alpha=0.25)
         fig.colorbar(cs, ax=ax, orientation="vertical", pad=0.02, label=cbar_label)
@@ -1072,6 +1233,29 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
         ],
         "Rest-State Test — Latitude-Depth Temperature Sections",
     )
+    lon_bins = _default_lon_bins(grid, state.land_mask.data)
+    lon_centers, T_init_lon_sec = _compute_lon_depth_section(
+        state_init.T.data,
+        grid,
+        state_init.land_mask.data,
+        lon_bins,
+    )
+    _, T_final_lon_sec = _compute_lon_depth_section(
+        state.T.data,
+        grid,
+        state.land_mask.data,
+        lon_bins,
+    )
+    _plot_lon_depth_sections(
+        f"{output_dir}/rest_state/T_lon_depth_sections.png",
+        z_coord,
+        lon_centers,
+        [
+            ("Initial T", T_init_lon_sec, "RdYlBu_r", False, "Temperature [degC]"),
+            ("Final T", T_final_lon_sec, "RdYlBu_r", False, "Temperature [degC]"),
+        ],
+        "Rest-State Test — Longitude-Depth Temperature Sections",
+    )
 
     _save_case_timeseries(
         f"{output_dir}/rest_state",
@@ -1291,6 +1475,29 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
             ("Final T anomaly", T_anom_sec, "RdBu_r", True, "Delta T [degC]"),
         ],
         "Barotropic Gravity Wave — Latitude-Depth Sections",
+    )
+    lon_bins = _default_lon_bins(grid, state.land_mask.data)
+    lon_centers, speed_lon_sec = _compute_lon_depth_section(
+        jnp.sqrt(state.u.data**2 + state.v.data**2),
+        grid,
+        state.land_mask.data,
+        lon_bins,
+    )
+    _, T_anom_lon_sec = _compute_lon_depth_section(
+        state.T.data - state_init.T.data,
+        grid,
+        state.land_mask.data,
+        lon_bins,
+    )
+    _plot_lon_depth_sections(
+        f"{output_dir}/gravity_wave/lon_depth_sections.png",
+        z_coord,
+        lon_centers,
+        [
+            ("Final speed", speed_lon_sec, "magma", False, "Speed [m/s]"),
+            ("Final T anomaly", T_anom_lon_sec, "RdBu_r", True, "Delta T [degC]"),
+        ],
+        "Barotropic Gravity Wave — Longitude-Depth Sections",
     )
 
     mid = grid.n // 2
@@ -1599,6 +1806,29 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
             ("Final speed", speed_sec, "magma", False, "Speed [m/s]"),
         ],
         "Wind-Driven Gyre — Latitude-Depth Sections",
+    )
+    lon_bins = _default_lon_bins(grid, state.land_mask.data)
+    lon_centers, u_lon_sec = _compute_lon_depth_section(
+        state.u.data,
+        grid,
+        state.land_mask.data,
+        lon_bins,
+    )
+    _, speed_lon_sec = _compute_lon_depth_section(
+        jnp.sqrt(state.u.data**2 + state.v.data**2),
+        grid,
+        state.land_mask.data,
+        lon_bins,
+    )
+    _plot_lon_depth_sections(
+        f"{output_dir}/wind_gyre/lon_depth_sections.png",
+        z_coord,
+        lon_centers,
+        [
+            ("Final zonal velocity u", u_lon_sec, "RdBu_r", True, "u [m/s]"),
+            ("Final speed", speed_lon_sec, "magma", False, "Speed [m/s]"),
+        ],
+        "Wind-Driven Gyre — Longitude-Depth Sections",
     )
 
     mid = grid.n // 2
@@ -1934,6 +2164,29 @@ def _plot_standard_case_outputs(
             ("Final speed", speed_sec, "magma", False, "Speed [m/s]"),
         ],
         f"{case_title} — Latitude-Depth Sections",
+    )
+    lon_bins = _default_lon_bins(grid, state_final.land_mask.data)
+    lon_centers, T_lon_sec = _compute_lon_depth_section(
+        state_final.T.data,
+        grid,
+        state_final.land_mask.data,
+        lon_bins,
+    )
+    _, speed_lon_sec = _compute_lon_depth_section(
+        jnp.sqrt(state_final.u.data**2 + state_final.v.data**2),
+        grid,
+        state_final.land_mask.data,
+        lon_bins,
+    )
+    _plot_lon_depth_sections(
+        os.path.join(case_dir, "lon_depth_sections.png"),
+        z_coord,
+        lon_centers,
+        [
+            ("Final temperature T", T_lon_sec, "RdYlBu_r", False, "T [degC]"),
+            ("Final speed", speed_lon_sec, "magma", False, "Speed [m/s]"),
+        ],
+        f"{case_title} — Longitude-Depth Sections",
     )
 
     # Profile evolution at representative wet column

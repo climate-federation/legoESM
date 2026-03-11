@@ -58,6 +58,7 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 from legoesm import constants
 
@@ -88,12 +89,26 @@ class SpectralPEConfig(NamedTuple):
     g: float = constants.g
     hyperdiff_coeff: float = 0.0
     hyperdiff_order: int = 2
-    time_integrator: str = "ssp_rk3"  # "ssp_rk3" or "ssp_rk54"
+    time_integrator: str = "ssp_rk3"  # "ssp_rk3", "ssp_rk34", or "ssp_rk54"
     semi_implicit: bool = False      # Use Hoskins-Simmons semi-implicit
     si_T_ref: float = 300.0         # Reference temperature for linearization [K]
     si_alpha: float = 0.5           # Implicitness (0.5 = Crank-Nicolson)
     si_substeps: int = 1            # Internal SI substeps per external model step
     si_hyperdiff_boost: float = 1.0  # Multiply hyperdiffusion in SI mode
+    # Sponge layer (implicit multiplicative filter at model top)
+    sponge_sigma: float = 0.1       # Sigma below which sponge is active (damps above)
+    sponge_tau: float = 0.0         # E-folding time at model top [s] (0 = off)
+    # Level-dependent hyperdiffusion scaling (stronger at low pressures)
+    hyperdiff_pscale: float = 0.0   # Power-law exponent: nu_k = nu * (p_ref/p_k)^exp (0 = off)
+    # Temperature floor (positivity protection)
+    T_min: float = 50.0             # Minimum temperature [K]
+    # Post-step spectral filter (damps highest wavenumbers)
+    spectral_filter_order: int = 8   # Sharpness of spectral filter
+    spectral_filter_strength: float = 0.0  # Retention at n=n_max (0=off, 0.01=aggressive)
+    # Pressure floor for adiabatic heating (limits 1/p at model top)
+    p_floor: float = 0.0            # Pa; adiabatic uses max(p, p_floor) (0 = off)
+    # Robert-Asselin filter for leapfrog (controls computational mode)
+    robert_asselin_coeff: float = 0.05  # Filter coefficient (0 = off, 0.05-0.1 typical)
 
 
 # =============================================================================
@@ -204,6 +219,7 @@ def spectral_pe_tendencies(
     vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
     div = sh_synthesis_3d(grid, state.div_hat.data)
     T = sh_synthesis_3d(grid, state.T_hat.data)
+    T = jnp.maximum(T, config.T_min)  # Positivity protection
     lnps = jnp.clip(
         sh_synthesis(grid, state.lnps_hat.data),
         _LNPS_MIN,
@@ -353,7 +369,8 @@ def spectral_pe_tendencies(
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_grid, sigma_coord)
     else:
         omega = _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt_grid, sigma_coord)
-    adiabatic = kappa * T * omega / p_full
+    p_adiab = jnp.maximum(p_full, config.p_floor) if config.p_floor > 0 else p_full
+    adiabatic = kappa * T * omega / p_adiab
 
     # Material derivative correction: kappa * T * v . grad(lnps)
     v_dot_grad_lnps = u * dlnps_dx[..., None] + v * dlnps_dy[..., None]
@@ -396,15 +413,33 @@ def spectral_pe_tendencies(
         hyperdiff_coeff = hyperdiff_coeff * config.si_hyperdiff_boost
 
     if hyperdiff_coeff > 0:
-        dvor_hat = dvor_hat + spectral_hyperdiffusion_3d(
+        base_diff_vor = spectral_hyperdiffusion_3d(
             grid, state.vor_hat.data, hyperdiff_coeff, config.hyperdiff_order,
         )
-        ddiv_hat = ddiv_hat + spectral_hyperdiffusion_3d(
+        base_diff_div = spectral_hyperdiffusion_3d(
             grid, state.div_hat.data, hyperdiff_coeff, config.hyperdiff_order,
         )
-        dT_hat = dT_hat + spectral_hyperdiffusion_3d(
+        base_diff_T = spectral_hyperdiffusion_3d(
             grid, state.T_hat.data, hyperdiff_coeff, config.hyperdiff_order,
         )
+
+        if config.hyperdiff_pscale > 0:
+            # Level-dependent scaling: (p_ref/p_k)^exponent
+            # Stronger diffusion at low pressures (upper atmosphere)
+            if _hybrid:
+                sigma_full = sigma_coord.A_full + sigma_coord.B_full
+            else:
+                sigma_full = sigma_coord.sigma_full
+            p_ref_sigma = sigma_full[-1]  # near-surface reference
+            scale = (p_ref_sigma / jnp.clip(sigma_full, 1e-6, None)) ** config.hyperdiff_pscale
+            scale = scale[None, :]  # (1, nlev)
+            base_diff_vor = base_diff_vor * scale
+            base_diff_div = base_diff_div * scale
+            base_diff_T = base_diff_T * scale
+
+        dvor_hat = dvor_hat + base_diff_vor
+        ddiv_hat = ddiv_hat + base_diff_div
+        dT_hat = dT_hat + base_diff_T
 
     # --- 17. Add physics tendencies if provided ---
     if physics_tendency is not None:
@@ -420,6 +455,103 @@ def spectral_pe_tendencies(
         T_hat=state.T_hat.replace(data=dT_hat),
         lnps_hat=state.lnps_hat.replace(data=dlnps_hat),
         phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+    )
+
+
+def _compute_spectral_filter(ls, n_max, order=8, cutoff_fraction=0.65):
+    """Compute an exponential spectral filter.
+
+    Applies exp(-alpha * (n/n_max)^order) where alpha is chosen so that
+    the filter value at n_max equals cutoff_fraction.
+
+    Parameters
+    ----------
+    ls : jax.Array, shape (n_sh,)
+        Total wavenumber for each spectral coefficient.
+    n_max : int
+        Maximum wavenumber.
+    order : int
+        Filter order (higher = sharper cutoff).
+    cutoff_fraction : float
+        Filter value at n=n_max.
+
+    Returns
+    -------
+    filter : jax.Array, shape (n_sh,)
+        Multiplicative filter in [cutoff_fraction, 1].
+    """
+    alpha = -jnp.log(cutoff_fraction)
+    ratio = ls / n_max
+    return jnp.exp(-alpha * ratio**order)
+
+
+def _compute_sponge_factor(sigma_full, sponge_sigma, sponge_tau, dt):
+    """Compute multiplicative sponge damping factor per level.
+
+    Returns exp(-damping_rate * dt) where damping_rate uses a sin² profile
+    ramping from zero at sponge_sigma to 1/sponge_tau at sigma=0.
+    This is an implicit (unconditionally stable) sponge filter applied
+    after each time step.
+
+    Returns shape (nlev,) array of damping factors in [0, 1].
+    """
+    sponge_arg = jnp.clip(
+        (sponge_sigma - sigma_full) / sponge_sigma, 0.0, 1.0,
+    )
+    damping_rate = jnp.sin(0.5 * jnp.pi * sponge_arg) ** 2 / sponge_tau
+    return jnp.exp(-damping_rate * dt)
+
+
+def _apply_sponge_filter(state, sponge_factor, ms):
+    """Apply multiplicative sponge damping to vor, div, and T' at top levels.
+
+    Damps vor and div toward zero.  Damps T perturbations (m != 0 modes)
+    toward the zonal mean so that the mean thermal structure is preserved
+    but eddy T anomalies are suppressed.
+
+    Parameters
+    ----------
+    state : SpectralHydrostaticState
+    sponge_factor : jax.Array, shape (nlev,)
+        Per-level damping factors in [0, 1].
+    ms : jax.Array, shape (n_sh,)
+        Zonal wavenumber for each spectral coefficient.
+    """
+    sf = sponge_factor[None, :]  # (1, nlev)
+
+    vor_hat_damped = state.vor_hat.data * sf
+    div_hat_damped = state.div_hat.data * sf
+
+    # For temperature, only damp non-zonal modes (m != 0) to preserve
+    # the mean thermal stratification
+    is_zonal = (ms == 0)[:, None]  # (n_sh, 1) bool
+    T_sf = jnp.where(is_zonal, 1.0, sf)  # no damping for m=0
+    T_hat_damped = state.T_hat.data * T_sf
+
+    return state._replace(
+        vor_hat=state.vor_hat.replace(data=vor_hat_damped),
+        div_hat=state.div_hat.replace(data=div_hat_damped),
+        T_hat=state.T_hat.replace(data=T_hat_damped),
+    )
+
+
+def _apply_spectral_filter_to_state(state, spectral_filter):
+    """Apply exponential spectral filter to all prognostic fields.
+
+    Parameters
+    ----------
+    state : SpectralHydrostaticState
+    spectral_filter : jax.Array, shape (n_sh,)
+        Multiplicative filter per spectral coefficient.
+    """
+    sf_3d = spectral_filter[:, None]  # (n_sh, 1) for 3D fields
+    sf_2d = spectral_filter           # (n_sh,) for 2D fields
+
+    return state._replace(
+        vor_hat=state.vor_hat.replace(data=state.vor_hat.data * sf_3d),
+        div_hat=state.div_hat.replace(data=state.div_hat.data * sf_3d),
+        T_hat=state.T_hat.replace(data=state.T_hat.data * sf_3d),
+        lnps_hat=state.lnps_hat.replace(data=state.lnps_hat.data * sf_2d),
     )
 
 
@@ -456,6 +588,21 @@ class SpectralPrimitiveEquationModel:
         self._default_device = None
         self._si_data = None
         self._si_dt = None
+        self._si_data_lf = None  # SI data for leapfrog (dt_eff = 2*dt)
+        self._si_dt_lf = None
+        self._sponge_factor = None
+        self._sponge_dt = None
+        # Leapfrog state management
+        self._state_prev = None  # Previous time level for leapfrog
+        # Precompute spectral filter (time-independent)
+        self._spectral_filter = None
+        if self.config.spectral_filter_strength > 0:
+            self._spectral_filter = _compute_spectral_filter(
+                grid.ls if not self._use_cpu_for_spectral else self.grid.ls,
+                grid.n_max if not self._use_cpu_for_spectral else self.grid.n_max,
+                order=self.config.spectral_filter_order,
+                cutoff_fraction=self.config.spectral_filter_strength,
+            )
 
         if self.config.si_substeps < 1:
             raise ValueError(
@@ -500,34 +647,154 @@ class SpectralPrimitiveEquationModel:
             )
             self._si_dt = dt_si
 
+    def _ensure_sponge_factor(self, dt: float):
+        """Lazily precompute sponge damping factors and refresh when dt changes."""
+        if self.config.sponge_tau <= 0:
+            return
+        if self._sponge_factor is not None and self._sponge_dt == dt:
+            return
+
+        _hybrid = isinstance(self.sigma_coord, HybridSigmaPressureCoordinate)
+        if _hybrid:
+            sigma_full = self.sigma_coord.A_full + self.sigma_coord.B_full
+        else:
+            sigma_full = self.sigma_coord.sigma_full
+
+        self._sponge_factor = _compute_sponge_factor(
+            sigma_full, self.config.sponge_sigma, self.config.sponge_tau, dt,
+        )
+        self._sponge_dt = dt
+
+    def _ensure_si_data_leapfrog(self, dt: float):
+        """Precompute SI matrices for leapfrog (dt_eff = 2*dt)."""
+        from legoesm.timestepping.semi_implicit import precompute_si_matrices
+
+        dt_eff = 2.0 * float(dt)
+        if self._si_data_lf is None or self._si_dt_lf != dt_eff:
+            self._si_data_lf = precompute_si_matrices(
+                self.grid, self.sigma_coord,
+                T_ref=self.config.si_T_ref,
+                alpha=self.config.si_alpha,
+                dt=dt_eff,
+            )
+            self._si_dt_lf = dt_eff
+
+    def reset_leapfrog(self):
+        """Reset leapfrog state (next step will use Euler startup)."""
+        self._state_prev = None
+
     def _do_step(self, state, dt, tendency_fn):
-        """Core step: explicit RK3/RK54 or semi-implicit RK3."""
+        """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge."""
         if self.config.semi_implicit:
             from legoesm.timestepping.semi_implicit import ssp_rk3_step_si
             n_substeps = int(self.config.si_substeps)
             dt_si = dt / float(n_substeps)
 
             if n_substeps == 1:
-                return ssp_rk3_step_si(
+                result = ssp_rk3_step_si(
                     state, tendency_fn, dt_si, self._si_data, self.grid,
                 )
+            else:
+                def si_substep(_, s):
+                    return ssp_rk3_step_si(
+                        s, tendency_fn, dt_si, self._si_data, self.grid,
+                    )
+                result = jax.lax.fori_loop(0, n_substeps, si_substep, state)
+        else:
+            integrator = self.config.time_integrator.lower()
+            if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
+                result = ssp_rk54_step(state, tendency_fn, dt)
+            elif integrator in ("ssp_rk34", "ssp34", "rk34"):
+                result = ssp_rk34_step(state, tendency_fn, dt)
+            else:
+                result = ssp_rk3_step(state, tendency_fn, dt)
 
-            def si_substep(_, s):
-                return ssp_rk3_step_si(
-                    s, tendency_fn, dt_si, self._si_data, self.grid,
-                )
+        # Apply implicit sponge filter (unconditionally stable)
+        if self._sponge_factor is not None:
+            result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
 
-            return jax.lax.fori_loop(0, n_substeps, si_substep, state)
+        # Apply spectral filter (damps highest wavenumbers)
+        if self._spectral_filter is not None:
+            result = _apply_spectral_filter_to_state(result, self._spectral_filter)
 
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            return ssp_rk54_step(state, tendency_fn, dt)
-        return ssp_rk3_step(state, tendency_fn, dt)
+        return result
 
     def step(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
-        """Advance one time step using SSP-RK3 (explicit or semi-implicit)."""
+        """Advance one time step.
+
+        Dispatches to leapfrog+SI or SSP-RK3 based on config.time_integrator.
+        """
+        integrator = self.config.time_integrator.lower()
+        if integrator in ("leapfrog", "leapfrog_si"):
+            return self._leapfrog_step(state, dt)
+
         self._ensure_si_data(dt)
+        self._ensure_sponge_factor(dt)
         return self._step_jit(state, dt)
+
+    def _leapfrog_step(self, state, dt):
+        """Leapfrog + SI step with Robert-Asselin filter.
+
+        First call: forward Euler + SI (startup).
+        Subsequent calls: leapfrog + SI + RA filter.
+        """
+        self._ensure_sponge_factor(dt)
+
+        if self._state_prev is None:
+            # --- First step: forward Euler + SI ---
+            self._ensure_si_data(dt)  # SI matrices for dt
+            # Also precompute leapfrog SI for next step (avoids stale jit)
+            self._ensure_si_data_leapfrog(dt)
+            result = self._euler_si_jit(state, dt)
+            # Apply sponge and spectral filter
+            if self._sponge_factor is not None:
+                result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
+            if self._spectral_filter is not None:
+                result = _apply_spectral_filter_to_state(result, self._spectral_filter)
+            self._state_prev = state
+            return result
+        else:
+            # --- Leapfrog + SI ---
+            self._ensure_si_data_leapfrog(dt)
+            state_np1 = self._leapfrog_si_jit(state, self._state_prev, dt)
+            # Apply sponge and spectral filter
+            if self._sponge_factor is not None:
+                state_np1 = _apply_sponge_filter(
+                    state_np1, self._sponge_factor, self.grid.ms,
+                )
+            if self._spectral_filter is not None:
+                state_np1 = _apply_spectral_filter_to_state(
+                    state_np1, self._spectral_filter,
+                )
+            # Robert-Asselin filter on time-n state
+            gamma = self.config.robert_asselin_coeff
+            if gamma > 0:
+                from legoesm.timestepping.semi_implicit import robert_asselin_filter
+                state_n_filtered = robert_asselin_filter(
+                    self._state_prev, state, state_np1, gamma,
+                )
+            else:
+                state_n_filtered = state
+            self._state_prev = state_n_filtered
+            return state_np1
+
+    @partial(jax.jit, static_argnums=(0, 2))
+    def _euler_si_jit(self, state, dt):
+        """JIT-compiled Euler + SI step (leapfrog startup)."""
+        def tendency_fn(s):
+            return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
+        from legoesm.timestepping.semi_implicit import euler_si_step
+        return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
+
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _leapfrog_si_jit(self, state_n, state_nm1, dt):
+        """JIT-compiled leapfrog + SI step."""
+        def tendency_fn(s):
+            return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
+        from legoesm.timestepping.semi_implicit import leapfrog_si_step
+        return leapfrog_si_step(
+            state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
+        )
 
     @partial(jax.jit, static_argnums=(0, 2))
     def _step_jit(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
@@ -549,8 +816,79 @@ class SpectralPrimitiveEquationModel:
         physics_fn=None,
     ) -> SpectralHydrostaticState:
         """Advance one time step with physics forcing."""
+        integrator = self.config.time_integrator.lower()
+        if integrator in ("leapfrog", "leapfrog_si"):
+            return self._leapfrog_step_with_physics(state, dt, physics_fn)
+
         self._ensure_si_data(dt)
+        self._ensure_sponge_factor(dt)
         return self._step_with_physics_jit(state, dt, physics_fn)
+
+    def _leapfrog_step_with_physics(self, state, dt, physics_fn):
+        """Leapfrog + SI step with physics and RA filter."""
+        self._ensure_sponge_factor(dt)
+
+        if self._state_prev is None:
+            self._ensure_si_data(dt)
+            self._ensure_si_data_leapfrog(dt)
+            result = self._euler_si_physics_jit(state, dt, physics_fn)
+            if self._sponge_factor is not None:
+                result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
+            if self._spectral_filter is not None:
+                result = _apply_spectral_filter_to_state(result, self._spectral_filter)
+            self._state_prev = state
+            return result
+        else:
+            self._ensure_si_data_leapfrog(dt)
+            state_np1 = self._leapfrog_si_physics_jit(
+                state, self._state_prev, dt, physics_fn,
+            )
+            if self._sponge_factor is not None:
+                state_np1 = _apply_sponge_filter(
+                    state_np1, self._sponge_factor, self.grid.ms,
+                )
+            if self._spectral_filter is not None:
+                state_np1 = _apply_spectral_filter_to_state(
+                    state_np1, self._spectral_filter,
+                )
+            gamma = self.config.robert_asselin_coeff
+            if gamma > 0:
+                from legoesm.timestepping.semi_implicit import robert_asselin_filter
+                state_n_filtered = robert_asselin_filter(
+                    self._state_prev, state, state_np1, gamma,
+                )
+            else:
+                state_n_filtered = state
+            self._state_prev = state_n_filtered
+            return state_np1
+
+    @partial(jax.jit, static_argnums=(0, 2, 3))
+    def _euler_si_physics_jit(self, state, dt, physics_fn):
+        """JIT-compiled Euler + SI step with physics (leapfrog startup)."""
+        def tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                phys = physics_fn(s, self.grid, self.sigma_coord)
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+        from legoesm.timestepping.semi_implicit import euler_si_step
+        return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
+
+    @partial(jax.jit, static_argnums=(0, 3, 4))
+    def _leapfrog_si_physics_jit(self, state_n, state_nm1, dt, physics_fn):
+        """JIT-compiled leapfrog + SI step with physics."""
+        def tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                phys = physics_fn(s, self.grid, self.sigma_coord)
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+        from legoesm.timestepping.semi_implicit import leapfrog_si_step
+        return leapfrog_si_step(
+            state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
+        )
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
     def _step_with_physics_jit(
@@ -615,6 +953,7 @@ class SpectralPrimitiveEquationModel:
         """
         n_steps = int(duration / dt)
         self._ensure_si_data(dt)
+        self._ensure_sponge_factor(dt)
 
         if self._use_cpu_for_spectral:
             return self._integrate_on_cpu(state, n_steps, dt, save_every, physics_fn)

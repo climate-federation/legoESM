@@ -451,10 +451,12 @@ def acoustic_substeps(
         # Theta at half levels (interpolated)
         theta_half_inner = 0.5 * (theta_total[..., :-1] + theta_total[..., 1:])
 
-        # Buoyancy: -g * theta'/theta_0 at half levels
+        # Buoyancy: +g * theta'/theta_0 at half levels
+        # Derived from: buoyancy = -c_p * theta' * d(pi_0)/dz
+        # Using hydrostatic balance d(pi_0)/dz = -g/(c_p*theta_0)
         theta_p_half = 0.5 * (theta_p_c[..., :-1] + theta_p_c[..., 1:])
         theta_0_half = 0.5 * (theta_0[:-1] + theta_0[1:])
-        buoyancy = -g * theta_p_half / theta_0_half
+        buoyancy = g * theta_p_half / theta_0_half
 
         # w tendency at interior half levels
         dw_dt_inner = (
@@ -613,7 +615,7 @@ def acoustic_substeps_semi_implicit(
         theta_half_inner = 0.5 * (theta_total[..., :-1] + theta_total[..., 1:])
         theta_p_half = 0.5 * (theta_p_c[..., :-1] + theta_p_c[..., 1:])
         theta_0_half = 0.5 * (theta_0[:-1] + theta_0[1:])
-        buoyancy = -g * theta_p_half / theta_0_half
+        buoyancy = g * theta_p_half / theta_0_half
 
         dw_dt_inner = (
             -c_p * theta_half_inner * dpi_dz_inner / J[..., None]
