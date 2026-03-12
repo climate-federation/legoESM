@@ -224,3 +224,47 @@ class MPASShallowWaterTendencies(NamedTuple):
     """
     dh_dt: Field
     du_dt: Field
+
+
+# ==============================================================================
+# MPAS Voronoi Mesh Ocean States
+# ==============================================================================
+
+class MPASOceanState(NamedTuple):
+    """State for ocean primitive equations on an MPAS Voronoi mesh.
+
+    Uses TRiSK C-grid staggering: tracers/SSH on cells, normal
+    velocity on edges.
+
+    Fields
+    ------
+    u : Field
+        Normal velocity [m/s]. Shape (nEdges, nlev). Prognostic.
+    T : Field
+        Potential temperature [degC]. Shape (nCells, nlev). Prognostic.
+    S : Field
+        Salinity [PSU]. Shape (nCells, nlev). Prognostic.
+    eta : Field
+        Sea surface height [m]. Shape (nCells,). Prognostic.
+    H_bathy : Field
+        Bathymetry depth [m]. Shape (nCells,). Positive downward. Static.
+    land_mask : Field
+        Ocean mask. Shape (nCells,). 1=ocean, 0=land. Static.
+    """
+    u: Field
+    T: Field
+    S: Field
+    eta: Field
+    H_bathy: Field
+    land_mask: Field
+
+
+class MPASOceanTendencies(NamedTuple):
+    """Tendencies for MPAS ocean primitive equations.
+
+    Only prognostic fields have tendencies.
+    """
+    du_dt: Field
+    dT_dt: Field
+    dS_dt: Field
+    deta_dt: Field

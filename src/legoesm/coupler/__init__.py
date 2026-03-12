@@ -32,6 +32,12 @@ def __getattr__(name):
     raise AttributeError(f"module 'legoesm.coupler' has no attribute {name!r}")
 
 
+from legoesm.coupler.mpas_adapter import (
+    make_mpas_tile_config,
+    init_mpas_surface_state,
+    make_mpas_coupler,
+)
+
 __all__ = [
     "CouplerConfig", "TileConfig",
     "AtmToSurface", "SurfaceToAtm", "TileResponse",
@@ -42,4 +48,6 @@ __all__ = [
     "compute_most_fluxes", "psi_m", "psi_h",
     "SurfaceState", "init_surface_state", "make_coupler", "ocean_tile_response",
     "LakeConfig", "LakeState", "step_lake",
+    # MPAS Voronoi adapter
+    "make_mpas_tile_config", "init_mpas_surface_state", "make_mpas_coupler",
 ]

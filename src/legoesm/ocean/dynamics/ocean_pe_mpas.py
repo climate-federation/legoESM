@@ -1,0 +1,269 @@
+"""MPAS ocean baroclinic tendencies using TRiSK operators.
+
+Boussinesq hydrostatic primitive equations in vector-invariant form
+on MPAS Voronoi (C-grid) meshes. Uses the TRiSK discretization from
+Ringler et al. (2010).
+
+Equations (per layer k):
+    du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) + A_h·del2(u) + A_v·d²u/dz²
+    d(h·T)/dt = -div(h·u·T) + K_h·h·lap(T) + K_v·d²T/dz²
+    d(h·S)/dt = -div(h·u·S) + K_h·h·lap(S) + K_v·d²S/dz²
+    dη/dt = -Σ_k div(h_k · u_k)
+
+References
+----------
+- Ringler, T. D., et al. (2010). J. Comput. Phys., 229(9), 3065-3090.
+- Ringler, T. D., et al. (2013). Ocean Modelling, 69, 211-232.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+
+from legoesm.core.field import Field
+from legoesm.core.state import MPASOceanState, MPASOceanTendencies
+from legoesm.core.operators_voronoi import (
+    divergence_cell,
+    gradient_edge,
+    curl_vertex,
+    kinetic_energy_cell,
+    potential_vorticity_vertex,
+    pv_flux_energy_conserving,
+    pv_flux_enstrophy_conserving,
+    edge_thickness,
+    vector_laplacian_del2,
+)
+from legoesm.ocean.mpas_config import MPASOceanConfig
+from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    compute_layer_thickness,
+    compute_ocean_jacobian,
+)
+
+
+def mpas_ocean_baroclinic_tendencies(
+    state: MPASOceanState,
+    mesh,
+    z_coord: OceanZStarCoordinate,
+    config: MPASOceanConfig = MPASOceanConfig(),
+) -> MPASOceanTendencies:
+    """Compute baroclinic (slow) tendencies for MPAS ocean.
+
+    Parameters
+    ----------
+    state : MPASOceanState
+    mesh : VoronoiMesh
+    z_coord : OceanZStarCoordinate
+    config : MPASOceanConfig
+
+    Returns
+    -------
+    MPASOceanTendencies
+    """
+    g = config.g
+    rho_0 = config.rho_0
+    nlev = z_coord.n_levels
+
+    u_3d = state.u.data          # (nEdges, nlev)
+    T_3d = state.T.data          # (nCells, nlev)
+    S_3d = state.S.data          # (nCells, nlev)
+    eta = state.eta.data         # (nCells,)
+    H_bathy = state.H_bathy.data  # (nCells,)
+    mask = state.land_mask.data  # (nCells,)
+
+    # ---- Layer thickness and Jacobian ----
+    jacobian = compute_ocean_jacobian(
+        eta, H_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    )
+    h_k = compute_layer_thickness(
+        eta, H_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    )  # (nCells, nlev)
+
+    # ---- Density and hydrostatic pressure ----
+    p_hydro = compute_hydrostatic_pressure(
+        wright_eos(T_3d, S_3d, jnp.zeros_like(T_3d)),
+        eta, z_coord.dz_ref, jacobian, rho_0, g,
+    )  # (nCells, nlev)
+
+    # ---- Edge mask for land boundaries ----
+    c1 = mesh.cellsOnEdge[0]  # (nEdges,)
+    c2 = mesh.cellsOnEdge[1]  # (nEdges,)
+    edge_mask = mask[c1] * mask[c2]  # 1 only if both cells are ocean
+
+    # ---- Per-level momentum and tracer tendencies ----
+    # Use vmap over vertical levels
+    def _level_tendencies(k):
+        """Compute tendencies for a single level."""
+        u_k = u_3d[:, k]       # (nEdges,)
+        T_k = T_3d[:, k]       # (nCells,)
+        S_k = S_3d[:, k]       # (nCells,)
+        h_k_level = h_k[:, k]  # (nCells,)
+        p_k = p_hydro[:, k]    # (nCells,)
+
+        # Edge layer thickness
+        h_e = edge_thickness(h_k_level, mesh)  # (nEdges,)
+
+        # ---- Momentum tendency ----
+        # Kinetic energy
+        ke = kinetic_energy_cell(u_k, mesh)  # (nCells,)
+
+        # Bernoulli function: KE + p'/rho_0 + g*eta
+        bernoulli = ke + p_k / rho_0 + g * eta  # (nCells,)
+
+        # Pressure gradient + Bernoulli
+        grad_B = gradient_edge(bernoulli, mesh)  # (nEdges,)
+
+        # PV flux (Coriolis + vorticity)
+        q_v = potential_vorticity_vertex(u_k, h_k_level, mesh.fVertex, mesh)
+        if config.pv_scheme == "energy":
+            pv_flux = pv_flux_energy_conserving(u_k, h_k_level, q_v, mesh)
+        else:
+            pv_flux = pv_flux_enstrophy_conserving(u_k, h_k_level, q_v, mesh)
+
+        # Horizontal viscosity
+        visc = config.A_h * vector_laplacian_del2(u_k, mesh)  # (nEdges,)
+
+        du_dt_k = -grad_B + pv_flux + visc
+        du_dt_k = du_dt_k * edge_mask  # zero on land edges
+
+        # ---- Thickness flux for continuity ----
+        thickness_flux_k = u_k * h_e  # (nEdges,)
+
+        # Continuity: dh_k/dt = -div(u * h_e)
+        div_flux = divergence_cell(thickness_flux_k, mesh)  # (nCells,)
+
+        # ---- Tracer tendencies (flux form) ----
+        # Edge tracer values (centered)
+        T_e = 0.5 * (T_k[c1] + T_k[c2])  # (nEdges,)
+        S_e = 0.5 * (S_k[c1] + S_k[c2])
+
+        # Tracer flux: u * h_e * T_e
+        T_flux = thickness_flux_k * T_e
+        S_flux = thickness_flux_k * S_e
+
+        # Divergence of tracer flux
+        div_T_flux = divergence_cell(T_flux, mesh)  # (nCells,)
+        div_S_flux = divergence_cell(S_flux, mesh)
+
+        # Flux-form tracer tendency: h * dT/dt = -div(h*u*T) + T*div(h*u)
+        h_safe = jnp.maximum(h_k_level, 1e-10)
+        dT_dt_k = (-div_T_flux + T_k * div_flux) / h_safe
+        dS_dt_k = (-div_S_flux + S_k * div_flux) / h_safe
+
+        # Horizontal tracer diffusion: K_h * lap(T)
+        # Approximate Laplacian as div(grad(T))
+        grad_T = gradient_edge(T_k, mesh)
+        dT_dt_k = dT_dt_k + config.K_h * divergence_cell(grad_T, mesh) / h_safe * h_k_level
+        grad_S = gradient_edge(S_k, mesh)
+        dS_dt_k = dS_dt_k + config.K_h * divergence_cell(grad_S, mesh) / h_safe * h_k_level
+
+        # Mask land cells
+        dT_dt_k = dT_dt_k * mask
+        dS_dt_k = dS_dt_k * mask
+
+        return du_dt_k, dT_dt_k, dS_dt_k, div_flux
+
+    # Vectorize over levels using scan for efficiency
+    def _scan_fn(carry, k):
+        du, dT, dS, div_f = _level_tendencies(k)
+        return carry, (du, dT, dS, div_f)
+
+    _, (du_dt_all, dT_dt_all, dS_dt_all, div_flux_all) = jax.lax.scan(
+        _scan_fn, None, jnp.arange(nlev),
+    )
+    # scan outputs: (nlev, nEdges), (nlev, nCells), etc.
+    du_dt_3d = du_dt_all.T  # (nEdges, nlev)
+    dT_dt_3d = dT_dt_all.T  # (nCells, nlev)
+    dS_dt_3d = dS_dt_all.T  # (nCells, nlev)
+
+    # ---- Vertical mixing ----
+    dz_half = z_coord.dz_half_ref  # (nlev-1,)
+    dz = z_coord.dz_ref  # (nlev,)
+
+    # Vertical viscosity: d/dz(A_v * du/dz) at each edge
+    du_dt_3d = du_dt_3d + _vertical_diffusion(
+        u_3d, dz_half, dz, jacobian=None, coeff=config.A_v, is_edge=True,
+        mesh=mesh,
+    )
+
+    # Vertical tracer diffusion
+    dT_dt_3d = dT_dt_3d + _vertical_diffusion(
+        T_3d, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
+        mesh=mesh,
+    ) * mask[:, jnp.newaxis]
+    dS_dt_3d = dS_dt_3d + _vertical_diffusion(
+        S_3d, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
+        mesh=mesh,
+    ) * mask[:, jnp.newaxis]
+
+    # ---- Free surface tendency ----
+    # deta/dt = -sum_k div(u_k * h_e_k)
+    deta_dt = -jnp.sum(div_flux_all.T, axis=1) * mask  # (nCells,)
+
+    return MPASOceanTendencies(
+        du_dt=Field(data=du_dt_3d, name="du_dt",
+                    dims=("nEdges", "nlev"), units="m/s²"),
+        dT_dt=Field(data=dT_dt_3d, name="dT_dt",
+                    dims=("nCells", "nlev"), units="degC/s"),
+        dS_dt=Field(data=dS_dt_3d, name="dS_dt",
+                    dims=("nCells", "nlev"), units="PSU/s"),
+        deta_dt=Field(data=deta_dt, name="deta_dt",
+                      dims=("nCells",), units="m/s"),
+    )
+
+
+def _vertical_diffusion(field_3d, dz_half, dz, jacobian, coeff, is_edge, mesh):
+    """Compute vertical diffusion d/dz(coeff * df/dz).
+
+    Parameters
+    ----------
+    field_3d : jax.Array, shape (n, nlev)
+    dz_half : jax.Array, shape (nlev-1,)
+    dz : jax.Array, shape (nlev,)
+    jacobian : jax.Array or None, shape (nCells,) or None
+    coeff : float
+    is_edge : bool
+        If True, field lives on edges (use edge-averaged jacobian).
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (n, nlev)
+    """
+    nlev = field_3d.shape[1]
+    if nlev < 2:
+        return jnp.zeros_like(field_3d)
+
+    # Scale dz by jacobian if available
+    if jacobian is not None and not is_edge:
+        J = jacobian[:, jnp.newaxis]  # (nCells, 1)
+    elif jacobian is not None and is_edge:
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        J = 0.5 * (jacobian[c1] + jacobian[c2])  # (nEdges,)
+        J = J[:, jnp.newaxis]
+    else:
+        J = 1.0
+
+    dz_half_actual = dz_half * J if jacobian is not None else jnp.broadcast_to(
+        dz_half[jnp.newaxis, :], (field_3d.shape[0], nlev - 1),
+    )
+    dz_actual = dz * J if jacobian is not None else jnp.broadcast_to(
+        dz[jnp.newaxis, :], field_3d.shape,
+    )
+
+    # Flux at interfaces: coeff * (f[k] - f[k+1]) / dz_half
+    dz_half_safe = jnp.maximum(dz_half_actual, 1e-10)
+    flux_interface = coeff * (field_3d[:, :-1] - field_3d[:, 1:]) / dz_half_safe
+
+    # Tendency: (flux[k-1/2] - flux[k+1/2]) / dz[k]
+    zeros = jnp.zeros((field_3d.shape[0], 1), dtype=field_3d.dtype)
+    flux_above = jnp.concatenate([zeros, flux_interface], axis=1)  # (n, nlev)
+    flux_below = jnp.concatenate([flux_interface, zeros], axis=1)  # (n, nlev)
+
+    dz_safe = jnp.maximum(dz_actual, 1e-10)
+    return (flux_above - flux_below) / dz_safe

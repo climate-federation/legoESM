@@ -45,6 +45,19 @@ from legoesm.ocean.simple_ocean import (
     make_ocean,
     init_slab_state,
 )
+from legoesm.ocean.mpas_config import MPASOceanConfig, MPASSimpleOceanConfig
+from legoesm.ocean.simple_ocean_mpas import (
+    MPASSlabOceanState,
+    init_mpas_slab_state,
+    make_mpas_ocean,
+)
+from legoesm.ocean.init_mpas import (
+    rest_state_mpas_ocean,
+    idealized_bathymetry_mpas,
+    reconstruct_cell_velocity,
+)
+from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
+from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
 
 __all__ = [
     "OceanModel",
@@ -71,4 +84,15 @@ __all__ = [
     "SlabOceanState",
     "make_ocean",
     "init_slab_state",
+    # MPAS Voronoi ocean
+    "MPASOceanModel",
+    "MPASOceanConfig",
+    "MPASSimpleOceanConfig",
+    "MPASSlabOceanState",
+    "init_mpas_slab_state",
+    "make_mpas_ocean",
+    "rest_state_mpas_ocean",
+    "idealized_bathymetry_mpas",
+    "reconstruct_cell_velocity",
+    "mpas_ocean_conservation_fixer",
 ]
