@@ -36,13 +36,9 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d
+from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d, divergence_3d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.ocean.eos import compute_buoyancy_frequency
-from legoesm.ocean.physics.mixing import (
-    laplacian_viscosity_3d,
-    vertical_diffusion_variable_K,
-)
+from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -139,11 +135,18 @@ def _tracer_tendency_gm_redi(
     dq_dy_half = 0.5 * (dq_dy[..., :-1] + dq_dy[..., 1:])
 
     # === Horizontal Redi + GM off-diagonal contribution ===
-    # The off-diagonal horizontal flux is:
-    #   (kappa_Redi - kappa_GM) * S * dq/dz at interfaces
-    # Average S*dq/dz to full levels for horizontal divergence
+    # Full horizontal flux (Griffies 1998, small-slope):
+    #   F_x = kappa_Redi * dq/dx + (kappa_Redi - kappa_GM) * Sx * dq/dz
+    #   F_y = kappa_Redi * dq/dy + (kappa_Redi - kappa_GM) * Sy * dq/dz
+    #
+    # The diagonal part (kappa_Redi * nabla^2 q) is computed via laplacian.
+    # The off-diagonal part needs: div[(kR-kG) * S * dq/dz].
+    # When kappa_GM == kappa_Redi the off-diagonal vanishes identically.
+
+    # Off-diagonal flux at interfaces: (kR - kG) * S * dq/dz
     off_diag_x = (kappa_Redi - kappa_GM) * S_x * dq_dz_half
     off_diag_y = (kappa_Redi - kappa_GM) * S_y * dq_dz_half
+
     # Average interface values to full levels (pad boundaries with zero)
     z_pad = jnp.zeros((*off_diag_x.shape[:-1], 1), dtype=off_diag_x.dtype)
     off_diag_x_full = 0.5 * (
@@ -155,24 +158,11 @@ def _tracer_tendency_gm_redi(
         + jnp.concatenate([off_diag_y, z_pad], axis=-1)
     )
 
-    # Horizontal part: kappa_Redi * nabla^2(q) + div(off_diag)
-    # The main Redi horizontal diffusion
+    # Diagonal: kappa_Redi * nabla^2(q)
     dq_h = laplacian_viscosity_3d(q, grid, kappa_Redi)
-    # Off-diagonal contribution: approximate div by treating as additional source
-    # For the off-diagonal flux divergence, we add it to horizontal diffusion.
-    # This is a first-order approximation; the off-diagonal x-flux enters the
-    # x-divergence and similarly for y.
-    dq_h = dq_h + laplacian_viscosity_3d(
-        jnp.zeros_like(q), grid, 0.0
-    )  # placeholder: the off-diagonal term needs proper divergence
-    # Actually, the off-diagonal term is already part of the horizontal flux.
-    # The proper way: when kappa_GM == kappa_Redi, the horizontal off-diagonal
-    # cancels and we just get kappa * nabla^2(q). When they differ, we need
-    # d/dx[(kR-kG)*Sx*dq/dz] + d/dy[(kR-kG)*Sy*dq/dz].
-    # For simplicity and common usage (kappa_GM == kappa_Redi), we omit the
-    # horizontal divergence of the off-diagonal term. This is exact for the
-    # common case and a small-slope approximation otherwise.
-    dq_h = laplacian_viscosity_3d(q, grid, kappa_Redi)
+
+    # Off-diagonal: div[(kR-kG) * S * dq/dz]
+    dq_h = dq_h + divergence_3d(off_diag_x_full, off_diag_y_full, grid)
 
     # === Vertical flux ===
     # F_z at interfaces = (kR + kG) * (Sx*dq/dx + Sy*dq/dy) + kR * S^2 * dq/dz

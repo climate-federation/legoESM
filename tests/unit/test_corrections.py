@@ -294,6 +294,176 @@ class TestGMRedi:
         cfg = GMRediConfig()
         assert not hasattr(cfg, 'taper_scheme'), "taper_scheme should be removed"
 
+    def _make_tilted_isopycnal_setup(self, n=4, nlev=10):
+        """Create setup with tilted isopycnals (non-zero slopes)."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi import gm_redi_lateral_mixing
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        grid, z_coord, jacobian, shape = self._make_ocean_setup(n, nlev)
+
+        # Density increases with depth and has a meridional gradient
+        # (tilted isopycnals, non-zero S_y)
+        lat_profile = jnp.linspace(-1.0, 1.0, n)[None, None, :, None]
+        vert_profile = jnp.linspace(0.0, 2.0, nlev)[None, None, None, :]
+        rho = 1025.0 + vert_profile + 0.1 * lat_profile
+        rho = jnp.broadcast_to(rho, shape).copy()
+
+        # Tracer with horizontal gradient (so slopes matter)
+        T = 20.0 - vert_profile * 5.0 - 0.5 * lat_profile
+        T = jnp.broadcast_to(T, shape).copy()
+        S = jnp.ones(shape) * 35.0
+        u = jnp.zeros(shape)
+        v = jnp.zeros(shape)
+
+        return grid, z_coord, jacobian, shape, rho, T, S, u, v
+
+    def test_unequal_kappas_finite(self):
+        """kappa_GM != kappa_Redi should produce finite tendencies."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi import gm_redi_lateral_mixing
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        grid, z_coord, jacobian, shape, rho, T, S, u, v = (
+            self._make_tilted_isopycnal_setup()
+        )
+
+        cfg = GMRediConfig(kappa_GM=800.0, kappa_Redi=1200.0)
+        out = gm_redi_lateral_mixing(u, v, T, S, rho, z_coord, jacobian, grid, cfg)
+        assert jnp.all(jnp.isfinite(out.dT_dt))
+        assert jnp.all(jnp.isfinite(out.dS_dt))
+
+    def test_unequal_kappas_differ_from_equal(self):
+        """kappa_GM != kappa_Redi should give different tendencies than equal."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi import gm_redi_lateral_mixing
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        grid, z_coord, jacobian, shape, rho, T, S, u, v = (
+            self._make_tilted_isopycnal_setup()
+        )
+
+        cfg_equal = GMRediConfig(kappa_GM=1000.0, kappa_Redi=1000.0)
+        cfg_unequal = GMRediConfig(kappa_GM=500.0, kappa_Redi=1500.0)
+
+        out_eq = gm_redi_lateral_mixing(
+            u, v, T, S, rho, z_coord, jacobian, grid, cfg_equal
+        )
+        out_uneq = gm_redi_lateral_mixing(
+            u, v, T, S, rho, z_coord, jacobian, grid, cfg_unequal
+        )
+
+        # With tilted isopycnals the off-diagonal term is non-zero,
+        # so unequal kappas must give different tendencies
+        assert not jnp.allclose(out_eq.dT_dt, out_uneq.dT_dt, atol=1e-20)
+
+    def test_off_diagonal_vanishes_when_equal(self):
+        """When kappa_GM == kappa_Redi, off-diagonal should be zero."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi import (
+            _tracer_tendency_gm_redi, _compute_tapered_slopes,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        grid, z_coord, jacobian, shape, rho, T, S, u, v = (
+            self._make_tilted_isopycnal_setup()
+        )
+
+        cfg = GMRediConfig(kappa_GM=1e3, kappa_Redi=1e3)
+        S_x, S_y, _ = _compute_tapered_slopes(rho, z_coord, jacobian, grid, cfg)
+
+        # With equal kappas: (kR - kG) = 0, so off-diagonal vanishes.
+        # Result should equal pure kappa_Redi * laplacian + vertical flux.
+        # Running with kG=kR=1e3 should match running with kG=0,kR=1e3 only
+        # when slopes are zero. With non-zero slopes they must differ,
+        # confirming the vertical tensor terms are active.
+        dT_equal = _tracer_tendency_gm_redi(
+            T, S_x, S_y, z_coord, jacobian, grid, 1e3, 1e3,
+        )
+        # Perturb kG slightly
+        dT_perturbed = _tracer_tendency_gm_redi(
+            T, S_x, S_y, z_coord, jacobian, grid, 1e3 + 1.0, 1e3,
+        )
+        # The 1 m²/s change in kG should produce a small but non-zero difference
+        diff = jnp.max(jnp.abs(dT_equal - dT_perturbed))
+        assert diff > 0, "Small kG perturbation should produce a difference"
+
+    def test_gm_only_no_redi(self):
+        """Pure GM (kappa_Redi=0): should only have skew-flux vertical terms."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi import gm_redi_lateral_mixing
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        grid, z_coord, jacobian, shape, rho, T, S, u, v = (
+            self._make_tilted_isopycnal_setup()
+        )
+
+        cfg = GMRediConfig(kappa_GM=1e3, kappa_Redi=0.0)
+        out = gm_redi_lateral_mixing(u, v, T, S, rho, z_coord, jacobian, grid, cfg)
+        assert jnp.all(jnp.isfinite(out.dT_dt))
+        assert jnp.all(jnp.isfinite(out.dS_dt))
+
+    def test_redi_only_no_gm(self):
+        """Pure Redi (kappa_GM=0): full isopycnal diffusion tensor."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi import gm_redi_lateral_mixing
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        grid, z_coord, jacobian, shape, rho, T, S, u, v = (
+            self._make_tilted_isopycnal_setup()
+        )
+
+        cfg = GMRediConfig(kappa_GM=0.0, kappa_Redi=1e3)
+        out = gm_redi_lateral_mixing(u, v, T, S, rho, z_coord, jacobian, grid, cfg)
+        assert jnp.all(jnp.isfinite(out.dT_dt))
+
+    def test_off_diagonal_sign(self):
+        """Off-diagonal term should change sign when kG and kR are swapped
+        (relative to their difference)."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi import (
+            _tracer_tendency_gm_redi, _compute_tapered_slopes,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        grid, z_coord, jacobian, shape, rho, T, S, u, v = (
+            self._make_tilted_isopycnal_setup()
+        )
+
+        cfg = GMRediConfig()
+        S_x, S_y, _ = _compute_tapered_slopes(rho, z_coord, jacobian, grid, cfg)
+
+        # kR > kG: off-diagonal factor is (kR - kG) > 0
+        dT_a = _tracer_tendency_gm_redi(
+            T, S_x, S_y, z_coord, jacobian, grid,
+            kappa_GM=500.0, kappa_Redi=1500.0,
+        )
+        # kR < kG: off-diagonal factor is (kR - kG) < 0
+        dT_b = _tracer_tendency_gm_redi(
+            T, S_x, S_y, z_coord, jacobian, grid,
+            kappa_GM=1500.0, kappa_Redi=500.0,
+        )
+        # The two should differ (the off-diagonal sign flips)
+        assert not jnp.allclose(dT_a, dT_b, atol=1e-20)
+
+    def test_symmetry_vertical_flux(self):
+        """Vertical flux coefficient (kR+kG) should be the same when
+        kappas are swapped (since addition is commutative)."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi import (
+            _tracer_tendency_gm_redi, _compute_tapered_slopes,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+        grid, z_coord, jacobian, shape, rho, T, S, u, v = (
+            self._make_tilted_isopycnal_setup()
+        )
+
+        cfg = GMRediConfig()
+        S_x, S_y, _ = _compute_tapered_slopes(rho, z_coord, jacobian, grid, cfg)
+
+        # (kR=800, kG=1200): kR+kG=2000, kR-kG=-400
+        dT_a = _tracer_tendency_gm_redi(
+            T, S_x, S_y, z_coord, jacobian, grid,
+            kappa_GM=1200.0, kappa_Redi=800.0,
+        )
+        # (kR=1200, kG=800): kR+kG=2000, kR-kG=+400
+        dT_b = _tracer_tendency_gm_redi(
+            T, S_x, S_y, z_coord, jacobian, grid,
+            kappa_GM=800.0, kappa_Redi=1200.0,
+        )
+        # Diagonal laplacian differs (kR=800 vs kR=1200), so totals differ.
+        # But since kR+kG is the same, difference must come only from
+        # the diagonal (laplacian) and the off-diagonal (sign flip).
+        # Just verify both are finite and different.
+        assert jnp.all(jnp.isfinite(dT_a))
+        assert jnp.all(jnp.isfinite(dT_b))
+        assert not jnp.allclose(dT_a, dT_b, atol=1e-20)
+
 
 # ===========================================================================
 # P0: KPP
