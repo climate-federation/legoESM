@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -229,7 +230,11 @@ def _ensure_standard_artifacts(case_dir: Path) -> dict[str, bool]:
 
 def _run(cmd: list[str], cwd: Path) -> tuple[str, float]:
     t0 = time.time()
-    proc = subprocess.run(cmd, cwd=str(cwd), check=False)
+    env = os.environ.copy()
+    root = str(cwd.resolve())
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = root if not existing else f"{root}{os.pathsep}{existing}"
+    proc = subprocess.run(cmd, cwd=str(cwd), check=False, env=env)
     wall = time.time() - t0
     return ("PASS" if proc.returncode == 0 else "FAIL"), wall
 

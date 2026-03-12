@@ -8,7 +8,17 @@ from legoesm.surface_albedo import IceAlbedoConfig
 
 
 class SeaIceConfig(NamedTuple):
-    """Thermodynamic slab + simple transport sea ice configuration."""
+    """Thermodynamic slab + optional dynamics sea ice configuration.
+
+    Dynamics modes:
+    - ``"none"``: Slab thermodynamics only (diagnostic free-drift).
+    - ``"free_drift"``: Free-drift velocity with tracer advection.
+    - ``"evp"``: Elastic-Viscous-Plastic rheology (Hunke & Dukowicz 1997).
+
+    Multi-category ice:
+    - ``n_categories=1``: Single-category slab (default, backward compatible).
+    - ``n_categories=5``: 5-category CICE-standard ITD.
+    """
     rho_ice: float = 917.0          # Ice density [kg/m3]
     c_ice: float = 2106.0           # Ice specific heat [J/kg/K]
     k_ice: float = 2.04             # Ice thermal conductivity [W/m/K]
@@ -35,3 +45,17 @@ class SeaIceConfig(NamedTuple):
     # Temperature-dependent albedo (Task 10)
     temp_dependent_albedo: bool = False
     ice_albedo: IceAlbedoConfig = IceAlbedoConfig()
+    # --- Dynamics ---
+    dynamics: str = "none"          # "none", "free_drift", or "evp"
+    differentiable_dynamics: bool = False  # scan vs fori_loop for EVP
+    # --- EVP rheology parameters ---
+    N_evp: int = 120                # EVP subcycle count
+    e_yield: float = 2.0            # Yield curve eccentricity
+    P_star: float = 2.75e4          # Ice strength parameter [N/m^2]
+    C_strength: float = 20.0        # Strength exponential decay constant
+    Delta_min: float = 2.0e-9       # Minimum deformation rate [1/s]
+    T_evp: float = 0.36             # EVP damping timescale ratio
+    # --- Multi-category ice ---
+    n_categories: int = 1           # 1=single-category (backward compat), 5=CICE ITD
+    # --- Tracer transport ---
+    transport: str = "none"         # "none" or "advect"

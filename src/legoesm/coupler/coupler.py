@@ -222,6 +222,7 @@ def make_coupler(
     ice_config: SeaIceConfig,
     lake_config: LakeConfig,
     lat: jnp.ndarray | None = None,
+    grid=None,
 ):
     """Factory that returns step_surface function.
 
@@ -230,6 +231,9 @@ def make_coupler(
     lat : jnp.ndarray, optional
         Latitude [radians], same spatial shape as forcing fields.
         Required when the land carbon cycle is enabled.
+    grid : CubedSphereGrid, optional
+        Required when ``ice_config.dynamics != "none"`` or
+        ``ice_config.transport != "none"``.
 
     Returns
     -------
@@ -241,6 +245,7 @@ def make_coupler(
     U_min = coupler_config.U_min
     coupling_dt = float(coupler_config.coupling_dt)
     _lat = lat
+    _grid = grid
 
     def step_surface(
         sfc_state: SurfaceState,
@@ -275,7 +280,7 @@ def make_coupler(
         # 2. Step sea ice
         ice_new, ice_resp = step_sea_ice(
             sfc_state.ice, atm_forcing, ocean_sst, ocean_u_sfc,
-            ocean_v_sfc, ice_config, U_min, dt)
+            ocean_v_sfc, ice_config, U_min, dt, grid=_grid)
 
         # 3. Step lake
         lake_new, lake_resp = step_lake(
@@ -287,7 +292,11 @@ def make_coupler(
             coupler_config)
 
         # 5. Tile fractions (ice concentration from updated ice state)
-        fracs = compute_tile_fractions(tile_config, ice_new.concentration.data)
+        ice_conc = ice_new.concentration.data
+        # Multi-category: sum across categories for total concentration
+        if ice_conc.ndim > len(atm_forcing.sw_down.shape):
+            ice_conc = jnp.sum(ice_conc, axis=-1)
+        fracs = compute_tile_fractions(tile_config, ice_conc)
 
         # 6. Blend
         blended = blend_tiles(ocean_resp, ice_resp, land_resp, lake_resp, fracs)
