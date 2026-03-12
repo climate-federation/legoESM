@@ -66,6 +66,16 @@ from legoesm.ocean.freshwater import (
     virtual_salt_flux,
     freshwater_from_coupler,
 )
+from legoesm.ocean.bathymetry import (
+    BathymetryConfig,
+    CRITICAL_STRAITS,
+    init_ocean_bathymetry,
+    load_bathymetry_cubed_sphere,
+    load_bathymetry_mpas,
+    load_bathymetry_gaussian,
+    rest_state_ocean_realistic,
+    enforce_straits,
+)
 
 __all__ = [
     "OceanModel",
@@ -103,6 +113,15 @@ __all__ = [
     "idealized_bathymetry_mpas",
     "reconstruct_cell_velocity",
     "mpas_ocean_conservation_fixer",
+    # Bathymetry
+    "BathymetryConfig",
+    "CRITICAL_STRAITS",
+    "init_ocean_bathymetry",
+    "load_bathymetry_cubed_sphere",
+    "load_bathymetry_mpas",
+    "load_bathymetry_gaussian",
+    "rest_state_ocean_realistic",
+    "enforce_straits",
     # Freshwater
     "FreshwaterForcing",
     "zero_freshwater",

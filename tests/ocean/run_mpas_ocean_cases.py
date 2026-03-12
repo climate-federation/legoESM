@@ -294,6 +294,208 @@ def _vertical_slab_means(
     return out
 
 
+def _edges_from_centers(centers: np.ndarray) -> np.ndarray:
+    c = np.asarray(centers, dtype=np.float64)
+    if c.size == 1:
+        return np.array([c[0] - 0.5, c[0] + 0.5], dtype=np.float64)
+    e = np.empty(c.size + 1, dtype=np.float64)
+    e[1:-1] = 0.5 * (c[:-1] + c[1:])
+    e[0] = c[0] - (e[1] - c[0])
+    e[-1] = c[-1] + (c[-1] - e[-2])
+    return e
+
+
+def _default_lat_bins_mpas(
+    mesh: VoronoiMesh,
+    mask_1d: np.ndarray,
+    *,
+    min_bins: int = 24,
+    max_bins: int = 96,
+) -> np.ndarray:
+    lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi
+    area = np.asarray(mesh.areaCell, dtype=np.float64)
+    mask = np.asarray(mask_1d, dtype=np.float64)
+    wet = (mask > 0.5) & np.isfinite(area) & (area > 0.0) & np.isfinite(lat_deg)
+    wet_lat = lat_deg[wet]
+    if wet_lat.size < 2:
+        return np.linspace(-90.0, 90.0, min_bins + 1)
+    lat_lo = max(-90.0, float(np.nanmin(wet_lat)) - 1.0)
+    lat_hi = min(90.0, float(np.nanmax(wet_lat)) + 1.0)
+    n_wet = int(np.sum(wet))
+    n_bins = int(np.clip(round(np.sqrt(max(n_wet, 4))), min_bins, max_bins))
+    return np.linspace(lat_lo, lat_hi, n_bins + 1)
+
+
+def _default_lon_bins_mpas(
+    mesh: VoronoiMesh,
+    mask_1d: np.ndarray,
+    *,
+    min_bins: int = 36,
+    max_bins: int = 180,
+) -> np.ndarray:
+    area = np.asarray(mesh.areaCell, dtype=np.float64)
+    mask = np.asarray(mask_1d, dtype=np.float64)
+    wet = (mask > 0.5) & np.isfinite(area) & (area > 0.0)
+    n_wet = int(np.sum(wet))
+    if n_wet < 4:
+        return np.linspace(0.0, 360.0, min_bins + 1)
+    n_bins = int(np.clip(round(1.7 * np.sqrt(n_wet)), min_bins, max_bins))
+    return np.linspace(0.0, 360.0, n_bins + 1)
+
+
+def _fill_missing_bands(section: np.ndarray, *, periodic: bool) -> np.ndarray:
+    out = np.asarray(section, dtype=np.float64).copy()
+    if out.ndim != 2:
+        return out
+    n_bins = out.shape[0]
+    idx = np.arange(n_bins, dtype=np.float64)
+    for k in range(out.shape[1]):
+        col = out[:, k]
+        finite = np.isfinite(col)
+        if np.sum(finite) == 0:
+            continue
+        if np.sum(finite) == 1:
+            col[~finite] = col[finite][0]
+        else:
+            if periodic:
+                x = idx[finite]
+                y = col[finite]
+                x_ext = np.concatenate([x - float(n_bins), x, x + float(n_bins)])
+                y_ext = np.concatenate([y, y, y])
+                col[~finite] = np.interp(idx[~finite], x_ext, y_ext)
+            else:
+                col[~finite] = np.interp(idx[~finite], idx[finite], col[finite])
+        out[:, k] = col
+
+    finite_level = np.any(np.isfinite(out), axis=0)
+    if np.any(finite_level):
+        level_idx = np.arange(out.shape[1], dtype=np.int64)
+        for k in level_idx[~finite_level]:
+            nearest = level_idx[finite_level][
+                np.argmin(np.abs(level_idx[finite_level] - k))
+            ]
+            out[:, k] = out[:, nearest]
+
+    finite_all = np.isfinite(out)
+    if np.any(finite_all):
+        fill = float(np.nanmean(out[finite_all]))
+        out[~finite_all] = fill
+    else:
+        out[...] = 0.0
+    return out
+
+
+def _compute_binned_depth_section_mpas(
+    field_2d: np.ndarray,
+    coord_deg_1d: np.ndarray,
+    area_1d: np.ndarray,
+    mask_1d: np.ndarray,
+    bins_deg: np.ndarray,
+    *,
+    periodic: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    field = np.asarray(field_2d, dtype=np.float64)
+    if field.ndim != 2:
+        raise ValueError(f"Expected field_2d (nCells, nLevels), got {field.shape}")
+
+    coord = np.asarray(coord_deg_1d, dtype=np.float64).ravel()
+    area = np.asarray(area_1d, dtype=np.float64).ravel()
+    mask = np.asarray(mask_1d, dtype=np.float64).ravel()
+    n_lev = field.shape[1]
+    n_bins = int(len(bins_deg) - 1)
+    section = np.full((n_bins, n_lev), np.nan, dtype=np.float64)
+
+    if periodic:
+        coord = np.mod(coord, 360.0)
+    idx = np.digitize(coord, bins_deg, right=False) - 1
+    idx = np.clip(idx, 0, n_bins - 1)
+    w = area * mask
+    valid_geom = np.isfinite(coord) & np.isfinite(w) & (w > 0.0)
+
+    for k in range(n_lev):
+        v = field[:, k]
+        valid = valid_geom & np.isfinite(v)
+        if not np.any(valid):
+            continue
+        bins_k = idx[valid]
+        w_k = w[valid]
+        v_k = v[valid]
+        sum_w = np.bincount(bins_k, weights=w_k, minlength=n_bins)
+        sum_v = np.bincount(bins_k, weights=w_k * v_k, minlength=n_bins)
+        wet = sum_w > 0.0
+        section[wet, k] = sum_v[wet] / sum_w[wet]
+
+    section = _fill_missing_bands(section, periodic=periodic)
+    centers = 0.5 * (np.asarray(bins_deg[:-1]) + np.asarray(bins_deg[1:]))
+    return centers, section
+
+
+def _plot_depth_section_snapshots(
+    output_path: Path,
+    z_coord: OceanZStarCoordinate,
+    coord_centers: np.ndarray,
+    coord_label: str,
+    section_snaps: dict[str, np.ndarray],
+    field_label: str,
+    cmap: str,
+    *,
+    symmetric: bool = False,
+) -> None:
+    labels = [k for k in ("initial", "q1", "mid", "q3", "final") if k in section_snaps]
+    if not labels:
+        return
+
+    depth = -np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth_edges = _edges_from_centers(depth)
+    coord_edges = _edges_from_centers(coord_centers)
+
+    finite_values = []
+    for lbl in labels:
+        arr = np.asarray(section_snaps[lbl], dtype=np.float64)
+        fin = arr[np.isfinite(arr)]
+        if fin.size:
+            finite_values.append(fin)
+    if finite_values:
+        data_all = np.concatenate(finite_values)
+        if symmetric:
+            vmax = max(float(np.nanmax(np.abs(data_all))), 1.0e-12)
+            vmin = -vmax
+        else:
+            vmin = float(np.nanmin(data_all))
+            vmax = float(np.nanmax(data_all))
+            if abs(vmax - vmin) < 1.0e-12:
+                vmax = vmin + 1.0e-12
+    else:
+        vmin, vmax = 0.0, 1.0
+
+    fig, axes = plt.subplots(1, len(labels), figsize=(5.2 * len(labels), 5.5), squeeze=False)
+    axes = axes.ravel()
+    for i, lbl in enumerate(labels):
+        ax = axes[i]
+        sec = np.asarray(section_snaps[lbl], dtype=np.float64).T
+        mesh = ax.pcolormesh(
+            coord_edges,
+            depth_edges,
+            np.ma.masked_invalid(sec),
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            shading="auto",
+        )
+        ax.set_title(f"{field_label}\n{lbl}")
+        ax.set_xlabel(coord_label)
+        if i == 0:
+            ax.set_ylabel("Depth (m)")
+        ax.set_ylim(float(np.nanmax(depth_edges)), float(np.nanmin(depth_edges)))
+        ax.grid(True, alpha=0.25)
+        fig.colorbar(mesh, ax=ax, shrink=0.9)
+
+    fig.suptitle(f"{field_label} | {coord_label}-Depth Snapshots")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _build_latlon_pixel_mapper(
     mesh: VoronoiMesh, nlon: int, nlat: int
 ) -> tuple[np.ndarray, np.ndarray, callable]:
@@ -642,8 +844,17 @@ def _run_case(
     slab_rows: list[dict[str, float]] = []
     profile_snaps: dict[str, dict[str, np.ndarray]] = {}
     surface_snaps: dict[str, dict[str, np.ndarray]] = {}
+    lat_depth_t_snaps: dict[str, np.ndarray] = {}
+    lon_depth_t_snaps: dict[str, np.ndarray] = {}
+    lat_depth_speed_snaps: dict[str, np.ndarray] = {}
+    lon_depth_speed_snaps: dict[str, np.ndarray] = {}
     stable = True
     blowup_step = -1
+
+    lat_bins = _default_lat_bins_mpas(mesh, np.asarray(state0.land_mask.data))
+    lon_bins = _default_lon_bins_mpas(mesh, np.asarray(state0.land_mask.data))
+    lat_centers = 0.5 * (lat_bins[:-1] + lat_bins[1:])
+    lon_centers = 0.5 * (lon_bins[:-1] + lon_bins[1:])
 
     def record_step(step: int, state) -> None:
         diag = _ocean_diagnostics(state, mesh, z_coord, config)
@@ -670,6 +881,7 @@ def _run_case(
             profiles = _horizontal_profiles(state, mesh)
             profile_snaps[label] = profiles
             u_east, v_north = reconstruct_cell_velocity(state.u.data, mesh)
+            speed_3d = np.asarray(jnp.sqrt(u_east ** 2 + v_north ** 2), dtype=np.float64)
             speed = jnp.sqrt(u_east[:, 0] ** 2 + v_north[:, 0] ** 2)
             surface_snaps[label] = {
                 "eta": pixel_mapper(np.asarray(state.eta.data, dtype=np.float64)),
@@ -677,6 +889,42 @@ def _run_case(
                 "S_surface": pixel_mapper(np.asarray(state.S.data[:, 0], dtype=np.float64)),
                 "speed_surface": pixel_mapper(np.asarray(speed, dtype=np.float64)),
             }
+            _, lat_t = _compute_binned_depth_section_mpas(
+                np.asarray(state.T.data, dtype=np.float64),
+                np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi,
+                np.asarray(mesh.areaCell, dtype=np.float64),
+                np.asarray(state.land_mask.data, dtype=np.float64),
+                lat_bins,
+                periodic=False,
+            )
+            _, lon_t = _compute_binned_depth_section_mpas(
+                np.asarray(state.T.data, dtype=np.float64),
+                (np.asarray(mesh.lonCell, dtype=np.float64) * 180.0 / np.pi + 360.0) % 360.0,
+                np.asarray(mesh.areaCell, dtype=np.float64),
+                np.asarray(state.land_mask.data, dtype=np.float64),
+                lon_bins,
+                periodic=True,
+            )
+            _, lat_speed = _compute_binned_depth_section_mpas(
+                speed_3d,
+                np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi,
+                np.asarray(mesh.areaCell, dtype=np.float64),
+                np.asarray(state.land_mask.data, dtype=np.float64),
+                lat_bins,
+                periodic=False,
+            )
+            _, lon_speed = _compute_binned_depth_section_mpas(
+                speed_3d,
+                (np.asarray(mesh.lonCell, dtype=np.float64) * 180.0 / np.pi + 360.0) % 360.0,
+                np.asarray(mesh.areaCell, dtype=np.float64),
+                np.asarray(state.land_mask.data, dtype=np.float64),
+                lon_bins,
+                periodic=True,
+            )
+            lat_depth_t_snaps[label] = lat_t
+            lon_depth_t_snaps[label] = lon_t
+            lat_depth_speed_snaps[label] = lat_speed
+            lon_depth_speed_snaps[label] = lon_speed
             _write_profile_csv(profiles, depth_m, case_dir / f"horizontal_profile_{label}.csv")
 
     state = state0
@@ -734,6 +982,42 @@ def _run_case(
         case_dir / "surface_snapshots_latlon.png",
         title=f"{case.label} | surface maps (lat-lon pixels)",
     )
+    _plot_depth_section_snapshots(
+        case_dir / "lat_depth_sections_temperature.png",
+        z_coord,
+        lat_centers,
+        "Latitude (deg)",
+        lat_depth_t_snaps,
+        "Temperature (degC)",
+        "RdYlBu_r",
+    )
+    _plot_depth_section_snapshots(
+        case_dir / "lon_depth_sections_temperature.png",
+        z_coord,
+        lon_centers,
+        "Longitude (deg)",
+        lon_depth_t_snaps,
+        "Temperature (degC)",
+        "RdYlBu_r",
+    )
+    _plot_depth_section_snapshots(
+        case_dir / "lat_depth_sections_speed.png",
+        z_coord,
+        lat_centers,
+        "Latitude (deg)",
+        lat_depth_speed_snaps,
+        "Speed (m/s)",
+        "magma",
+    )
+    _plot_depth_section_snapshots(
+        case_dir / "lon_depth_sections_speed.png",
+        z_coord,
+        lon_centers,
+        "Longitude (deg)",
+        lon_depth_speed_snaps,
+        "Speed (m/s)",
+        "magma",
+    )
 
     np.savez(
         case_dir / "surface_snapshots_latlon.npz",
@@ -743,6 +1027,12 @@ def _run_case(
         **{f"{k}_T_surface": v["T_surface"] for k, v in surface_snaps.items()},
         **{f"{k}_S_surface": v["S_surface"] for k, v in surface_snaps.items()},
         **{f"{k}_speed_surface": v["speed_surface"] for k, v in surface_snaps.items()},
+        lat_centers=lat_centers,
+        lon_centers=lon_centers,
+        **{f"{k}_lat_depth_temperature": v for k, v in lat_depth_t_snaps.items()},
+        **{f"{k}_lon_depth_temperature": v for k, v in lon_depth_t_snaps.items()},
+        **{f"{k}_lat_depth_speed": v for k, v in lat_depth_speed_snaps.items()},
+        **{f"{k}_lon_depth_speed": v for k, v in lon_depth_speed_snaps.items()},
     )
 
     d0 = scalar_rows[0]
