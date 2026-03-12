@@ -135,9 +135,36 @@ def edmf_convection(
     # 8. Mass flux: M_u = rho * a_u * w_u
     M_u = rho * a_u_new[:, None] * w_u  # (ncol, nlev)
 
-    # 9. MF tendencies (detrainment form)
-    dT_dt = -M_u * config.delta_0 * (T_u - T) / jnp.clip(rho, 0.01, None)
-    dq_v_dt = -M_u * config.delta_0 * (q_u - q_v) / jnp.clip(rho, 0.01, None)
+    # 9. MF tendencies: compensating subsidence + detrainment
+    # Standard mass-flux decomposition (e.g. Siebesma et al. 2007):
+    #   (a) Compensating subsidence: (M/rho)*(dT/dz + g/cp) for T,
+    #                                (M/rho)*dq/dz for moisture
+    #   (b) Detrainment mixing:      +delta * M_u * (T_u - T_env) / rho
+
+    # Environmental vertical gradients (centered, zero at boundaries)
+    dT_dz = jnp.zeros_like(T)
+    dT_dz = dT_dz.at[:, 1:-1].set(
+        (T[:, :-2] - T[:, 2:]) / jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
+    )
+    dq_dz = jnp.zeros_like(q_v)
+    dq_dz = dq_dz.at[:, 1:-1].set(
+        (q_v[:, :-2] - q_v[:, 2:]) / jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
+    )
+
+    rho_safe = jnp.clip(rho, 0.01, None)
+
+    # (a) Compensating subsidence (Tiedtke 1989; Siebesma et al. 2007):
+    #     For T: (M/rho)*(dT/dz + g/cp) — includes adiabatic compression
+    #     For q: (M/rho)*dq/dz — conserved variable, no adiabatic correction
+    dT_subsidence = (M_u / rho_safe) * (dT_dz + constants.g / constants.c_pd)
+    dq_subsidence = (M_u / rho_safe) * dq_dz
+
+    # (b) Detrainment: warm/moist updraft air mixes into environment
+    dT_detrain = config.delta_0 * M_u * (T_u - T) / rho_safe
+    dq_detrain = config.delta_0 * M_u * (q_u - q_v) / rho_safe
+
+    dT_dt = dT_subsidence + dT_detrain
+    dq_v_dt = dq_subsidence + dq_detrain
 
     # 10. Precipitation from condensate detrainment
     condensate = jnp.clip(q_u - saturation_mixing_ratio(T_u, p_full), 0.0, None)

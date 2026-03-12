@@ -119,8 +119,13 @@ def mass_flux_convection(
     q_sat_u = saturation_mixing_ratio(T_u, p_full)
     q_u = dilution * q_sat_u + (1.0 - dilution) * q_v
 
-    # 7. Compensating subsidence tendencies
-    # Environmental temperature gradient (centered differences, zero at boundaries)
+    # 7. Environmental tendencies from mass flux
+    # Two contributions (standard mass-flux decomposition):
+    #   (a) Compensating subsidence: (M/rho) * (dT/dz + g/cp) for T,
+    #                                (M/rho) * dq/dz for moisture
+    #   (b) Detrainment mixing:      +delta * M * (T_u - T_env) / rho
+
+    # Environmental gradient (centered differences, zero at boundaries)
     dT_dz = jnp.zeros_like(T)
     dT_dz = dT_dz.at[:, 1:-1].set(
         (T[:, :-2] - T[:, 2:]) / jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
@@ -131,17 +136,21 @@ def mass_flux_convection(
         (q_v[:, :-2] - q_v[:, 2:]) / jnp.clip(z[:, :-2] - z[:, 2:], 1.0, None)
     )
 
-    # Subsidence warming: M_c * m(z) * dT/dz_env / rho
-    dT_dt = (
-        M_c_new[:, None] * m_profile * dT_dz
-        / jnp.clip(rho, 0.01, None)
-    )  # (ncol, nlev)
+    rho_safe = jnp.clip(rho, 0.01, None)
+    M_profile = M_c_new[:, None] * m_profile  # (ncol, nlev)
 
-    # Subsidence drying
-    dq_v_dt = (
-        M_c_new[:, None] * m_profile * dq_dz
-        / jnp.clip(rho, 0.01, None)
-    )  # (ncol, nlev)
+    # (a) Compensating subsidence (Tiedtke 1989; Siebesma et al. 2007):
+    #     For T: (M/rho)*(dT/dz + g/cp) — includes adiabatic compression
+    #     For q: (M/rho)*dq/dz — conserved variable, no adiabatic correction
+    dT_subsidence = (M_profile / rho_safe) * (dT_dz + constants.g / constants.c_pd)
+    dq_subsidence = (M_profile / rho_safe) * dq_dz
+
+    # (b) Detrainment: updraft air mixes into environment
+    dT_detrain = config.delta_0 * M_profile * (T_u - T) / rho_safe
+    dq_detrain = config.delta_0 * M_profile * (q_u - q_v) / rho_safe
+
+    dT_dt = dT_subsidence + dT_detrain  # (ncol, nlev)
+    dq_v_dt = dq_subsidence + dq_detrain  # (ncol, nlev)
 
     # 8. Precipitation from detrainment of condensate
     condensate = jnp.clip(q_u - saturation_mixing_ratio(T_u, p_full), 0.0, None)
