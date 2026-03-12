@@ -32,7 +32,13 @@ from legoesm.core.operators_fv import fv_gradient_x, fv_gradient_y
 from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 
-_EDGE_BLEND_CROSS_WEIGHT = 0.0
+# Blend target mix near cube edges:
+# 0.0 -> purely local in-face smoothing;
+# 1.0 -> purely cross-face continuity target.
+#
+# A non-zero value suppresses residual cube-edge imprint in wind/vorticity
+# while retaining conservative scalar blending.
+_EDGE_BLEND_CROSS_WEIGHT = 0.55
 
 
 # ==============================================================================
