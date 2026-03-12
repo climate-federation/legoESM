@@ -73,11 +73,13 @@ def fix_volume_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None
     correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1e-30)
     eta_fixed = eta_new + correction * mask
 
-    # Ensure minimum water column
+    # Ensure minimum water column (ocean cells only)
     if min_water_column_m is not None:
         H_bathy = state_new.H_bathy.data
         eta_floor = min_water_column_m - H_bathy
-        eta_fixed = jnp.maximum(eta_fixed, eta_floor)
+        eta_fixed = jnp.where(
+            mask > 0.5, jnp.maximum(eta_fixed, eta_floor), eta_fixed,
+        )
 
     return state_new._replace(
         eta=state_new.eta.replace(data=eta_fixed),
