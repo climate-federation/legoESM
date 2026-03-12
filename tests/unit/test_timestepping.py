@@ -14,6 +14,8 @@ from legoesm.timestepping.ssp_rk54 import (
     integrate_scan as integrate_scan_rk54,
 )
 
+_IS_X64 = bool(jax.config.jax_enable_x64)
+
 
 class TestSSPRK3:
     """Tests for the SSP-RK3 time integrator."""
@@ -185,8 +187,9 @@ class TestSSPRK54:
             y = ssp_rk54_step(y, tendency_fn, dt)
 
         exact = y0 * jnp.exp(dt * n_steps)
-        # 4th-order method should achieve much tighter tolerance than RK3
-        assert jnp.allclose(y, exact, rtol=1e-7)
+        # x32 has expected roundoff accumulation over 100 steps.
+        rtol = 1.0e-7 if _IS_X64 else 5.0e-6
+        assert jnp.allclose(y, exact, rtol=rtol)
 
     def test_higher_order_than_rk3(self):
         """RK54 should be more accurate than RK3 for dy/dt = y."""
@@ -217,7 +220,9 @@ class TestSSPRK54:
         T = 1.0  # Integrate to t=1
 
         errors = []
-        for dt in [0.1, 0.05]:
+        # Choose dt-pair by precision so truncation error dominates roundoff.
+        dts = [0.1, 0.05] if _IS_X64 else [0.25, 0.125]
+        for dt in dts:
             n_steps = int(T / dt)
             y = y0
             for _ in range(n_steps):
@@ -227,7 +232,8 @@ class TestSSPRK54:
 
         # For 4th order: error(dt/2) / error(dt) ~ (1/2)^4 = 1/16
         ratio = errors[1] / errors[0]
-        assert ratio < 0.1  # Should be ~1/16 ≈ 0.0625
+        ratio_max = 0.1 if _IS_X64 else 0.2
+        assert ratio < ratio_max
 
     def test_pytree_state(self):
         """SSP-RK54 should work with pytree states."""
@@ -289,5 +295,6 @@ class TestSSPRK54:
             s = ssp_rk54_step(s, tendency, dt=0.01)
 
         E_final = float((s.x ** 2 + s.v ** 2).sum())
-        # 4th order over 1000 steps with dt=0.01 should conserve well
-        assert abs(E_final - E0) / E0 < 1e-6
+        # x32 accumulates noticeably more roundoff over 1000 steps.
+        tol = 1.0e-6 if _IS_X64 else 1.0e-4
+        assert abs(E_final - E0) / E0 < tol

@@ -651,6 +651,20 @@ def _save_snapshots_cube(
     plt.close(fig)
 
 
+def _normalize_integrator(name: str) -> tuple[str, str]:
+    key = name.lower().strip()
+    if key in ("ssp_rk3", "ssp3", "rk3"):
+        return "ssp_rk3", "SSPRK3"
+    if key in ("ssp_rk34", "ssp34", "rk34"):
+        return "ssp_rk34", "SSPRK34"
+    if key in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
+        return "ssp45", "SSP45"
+    raise ValueError(
+        f"Unsupported time integrator {name!r}; choose from "
+        "'ssp_rk3', 'ssp_rk34', or 'ssp45'.",
+    )
+
+
 def _run_spectral_latlon(
     out_dir: Path,
     trunc: int,
@@ -660,6 +674,7 @@ def _run_spectral_latlon(
     case: str,
     projection: str,
     draw_coastlines: bool,
+    time_integrator: str,
 ) -> dict:
     from legoesm.grids.gaussian import create_gaussian_grid
     from legoesm.atmosphere.dynamics.spectral_sw import (
@@ -670,6 +685,8 @@ def _run_spectral_latlon(
         williamson_test2_spectral,
         williamson_test5_spectral,
     )
+    from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+    from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
     from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -681,7 +698,8 @@ def _run_spectral_latlon(
         case_tag = "Williamson5"
     else:
         raise ValueError(f"Unsupported case '{case}'")
-    case_name = f"SW Spectral LatLon {case_tag} T{trunc} SSP45"
+    integrator_key, integrator_label = _normalize_integrator(time_integrator)
+    case_name = f"SW Spectral LatLon {case_tag} T{trunc} {integrator_label}"
 
     grid = create_gaussian_grid(trunc)
     area = _gaussian_area_weights(grid)
@@ -701,7 +719,15 @@ def _run_spectral_latlon(
     def _tendency(s):
         return spectral_sw_tendencies(s, grid, cfg)
 
-    stepper = jax.jit(lambda s: ssp_rk54_step(s, _tendency, dt))
+    if integrator_key == "ssp_rk3":
+        _step = ssp_rk3_step
+    elif integrator_key == "ssp_rk34":
+        _step = ssp_rk34_step
+    elif integrator_key == "ssp45":
+        _step = ssp_rk54_step
+    else:  # pragma: no cover
+        raise RuntimeError(f"Unexpected integrator key: {integrator_key}")
+    stepper = jax.jit(lambda s: _step(s, _tendency, dt))
 
     mean_series = _series_init(["mean_wind_speed", "mean_height", "mean_vorticity"])
     cons_series = _series_init(["mass", "energy", "enstrophy"])
@@ -796,6 +822,7 @@ def _run_spectral_latlon(
 
     with open(out_dir / "results.txt", "w") as f:
         f.write(f"case: spectral_latlon_{case}\n")
+        f.write(f"time_integrator: {integrator_key}\n")
         f.write(f"truncation: T{trunc}\n")
         f.write(f"duration_days: {days}\n")
         f.write(f"dt: {dt}\n")
@@ -820,6 +847,7 @@ def _run_spectral_latlon(
 
     return {
         "case": f"spectral_latlon_{case}",
+        "time_integrator": integrator_key,
         "stable": stable,
         "wall_time_s": wall,
         "n_steps": n_steps,
@@ -838,6 +866,7 @@ def _run_fv_cubesphere(
     projection: str,
     draw_coastlines: bool,
     fv_variant: str,
+    time_integrator: str,
 ) -> dict:
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.core.conservation import compute_conservation_diagnostics
@@ -877,8 +906,9 @@ def _run_fv_cubesphere(
             f"Unsupported fv_variant={fv_variant!r}; choose from 'agrid', 'cdgrid'."
         )
 
-    case_name_latlon = f"SW {variant_label} LatLon(remapped) {case_tag} C{n} SSP45"
-    case_name_cube = f"SW {variant_label} CubeSphere {case_tag} C{n} SSP45"
+    integrator_key, integrator_label = _normalize_integrator(time_integrator)
+    case_name_latlon = f"SW {variant_label} LatLon(remapped) {case_tag} C{n} {integrator_label}"
+    case_name_cube = f"SW {variant_label} CubeSphere {case_tag} C{n} {integrator_label}"
 
     grid = create_cubed_sphere(n)
     area = np.asarray(grid.area, dtype=np.float64)
@@ -899,7 +929,7 @@ def _run_fv_cubesphere(
             hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
             div_damp_2=nu2,
             div_damp_4=nu4,
-            time_integrator="ssp45",
+            time_integrator=integrator_key,
             use_limiter=True,
             use_conservation_fixer=True,
             fix_mass=True,
@@ -910,7 +940,7 @@ def _run_fv_cubesphere(
             hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
             div_damp_2=nu2,
             div_damp_4=nu4,
-            time_integrator="ssp45",
+            time_integrator=integrator_key,
             use_conservation_fixer=True,
             fix_mass=True,
             fix_energy=False,
@@ -1069,6 +1099,7 @@ def _run_fv_cubesphere(
         with open(tgt_dir / "results.txt", "w") as f:
             f.write(f"case: {variant_tag}_{case}\n")
             f.write(f"fv_variant: {variant_tag}\n")
+            f.write(f"time_integrator: {integrator_key}\n")
             f.write(f"resolution: C{n}\n")
             f.write(f"duration_days: {days}\n")
             f.write(f"dt: {dt}\n")
@@ -1093,6 +1124,7 @@ def _run_fv_cubesphere(
 
     return {
         "case": f"{variant_tag}_{case}",
+        "time_integrator": integrator_key,
         "stable": stable,
         "wall_time_s": wall,
         "n_steps": n_steps,
@@ -1117,6 +1149,20 @@ def main():
     parser.add_argument("--dt-spec", type=float, default=120.0)
     parser.add_argument("--mean-every-fv", type=int, default=24, help="Record FV means/diagnostics every N steps.")
     parser.add_argument("--mean-every-spec", type=int, default=60, help="Record spectral means/diagnostics every N steps.")
+    parser.add_argument(
+        "--fv-integrator",
+        type=str,
+        default="ssp45",
+        choices=("ssp_rk3", "ssp_rk34", "ssp45", "all"),
+        help="FV time integrator to run.",
+    )
+    parser.add_argument(
+        "--spec-integrator",
+        type=str,
+        default="ssp45",
+        choices=("ssp_rk3", "ssp_rk34", "ssp45", "all"),
+        help="Spectral time integrator to run.",
+    )
     parser.add_argument(
         "--fv-variant",
         type=str,
@@ -1147,6 +1193,8 @@ def main():
     print(f"  days={args.days}")
     print(f"  cube_resolution=C{args.cube_resolution}, dt_fv={args.dt_fv}s")
     print(f"  spectral_truncation=T{args.spectral_truncation}, dt_spec={args.dt_spec}s")
+    print(f"  fv_integrator={args.fv_integrator}")
+    print(f"  spec_integrator={args.spec_integrator}")
 
     t0 = time.time()
     summary = {}
@@ -1174,40 +1222,62 @@ def main():
             "10_cubesphere_fv_cdgrid_williamson5",
         ),
     }
+    spec_integrators = (
+        ["ssp_rk3", "ssp_rk34", "ssp45"]
+        if args.spec_integrator == "all"
+        else [args.spec_integrator]
+    )
+    fv_integrators = (
+        ["ssp_rk3", "ssp_rk34", "ssp45"]
+        if args.fv_integrator == "all"
+        else [args.fv_integrator]
+    )
 
     for idx, case in enumerate(case_list, start=1):
         print(f"\n[{idx}/{len(case_list)}] Running {case} ...")
         spec_dir, fv_ll_dir, fv_cube_dir = dir_map[case]
-        summary[f"spectral_latlon_{case}"] = _run_spectral_latlon(
-            out_root / spec_dir,
-            trunc=args.spectral_truncation,
-            days=args.days,
-            dt=args.dt_spec,
-            mean_every=args.mean_every_spec,
-            case=case,
-            projection=args.projection,
-            draw_coastlines=args.coastlines,
-        )
+        for spec_int in spec_integrators:
+            spec_int_key, _ = _normalize_integrator(spec_int)
+            spec_dir_name = spec_dir if (len(spec_integrators) == 1 and spec_int_key == "ssp45") else f"{spec_dir}_{spec_int_key}"
+            print(f"    Spectral integrator: {spec_int_key}")
+            summary[f"spectral_latlon_{case}_{spec_int_key}"] = _run_spectral_latlon(
+                out_root / spec_dir_name,
+                trunc=args.spectral_truncation,
+                days=args.days,
+                dt=args.dt_spec,
+                mean_every=args.mean_every_spec,
+                case=case,
+                projection=args.projection,
+                draw_coastlines=args.coastlines,
+                time_integrator=spec_int_key,
+            )
 
         fv_variants = ["agrid", "cdgrid"] if args.fv_variant == "both" else [args.fv_variant]
         for fv_variant in fv_variants:
             if fv_variant == "agrid":
-                ll_dir = fv_ll_dir
-                cube_dir = fv_cube_dir
+                ll_base = fv_ll_dir
+                cube_base = fv_cube_dir
             else:
-                ll_dir, cube_dir = dir_map_cd[case]
-            summary[f"finite_volume_{fv_variant}_{case}"] = _run_fv_cubesphere(
-                out_root / ll_dir,
-                out_root / cube_dir,
-                n=args.cube_resolution,
-                days=args.days,
-                dt=args.dt_fv,
-                mean_every=args.mean_every_fv,
-                case=case,
-                projection=args.projection,
-                draw_coastlines=args.coastlines,
-                fv_variant=fv_variant,
-            )
+                ll_base, cube_base = dir_map_cd[case]
+            for fv_int in fv_integrators:
+                fv_int_key, _ = _normalize_integrator(fv_int)
+                keep_legacy = len(fv_integrators) == 1 and fv_int_key == "ssp45"
+                ll_dir = ll_base if keep_legacy else f"{ll_base}_{fv_int_key}"
+                cube_dir = cube_base if keep_legacy else f"{cube_base}_{fv_int_key}"
+                print(f"    FV {fv_variant} integrator: {fv_int_key}")
+                summary[f"finite_volume_{fv_variant}_{case}_{fv_int_key}"] = _run_fv_cubesphere(
+                    out_root / ll_dir,
+                    out_root / cube_dir,
+                    n=args.cube_resolution,
+                    days=args.days,
+                    dt=args.dt_fv,
+                    mean_every=args.mean_every_fv,
+                    case=case,
+                    projection=args.projection,
+                    draw_coastlines=args.coastlines,
+                    fv_variant=fv_variant,
+                    time_integrator=fv_int_key,
+                )
 
     wall = time.time() - t0
     summary["wall_time_s_total"] = wall
@@ -1221,6 +1291,8 @@ def main():
         "mean_every_fv": args.mean_every_fv,
         "mean_every_spec": args.mean_every_spec,
         "fv_variant": args.fv_variant,
+        "fv_integrator": args.fv_integrator,
+        "spec_integrator": args.spec_integrator,
         "projection": args.projection,
         "coastlines": bool(args.coastlines),
     }

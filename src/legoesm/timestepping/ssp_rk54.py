@@ -42,6 +42,7 @@ from __future__ import annotations
 from typing import Callable, TypeVar
 
 import jax
+import jax.numpy as jnp
 
 State = TypeVar("State")
 
@@ -77,6 +78,22 @@ _b53 = 0.063692468666290
 _b54 = 0.226007483236906
 
 
+def _state_inexact_dtype(state: State):
+    """Return first inexact (float/complex) dtype found in a pytree state."""
+    for leaf in jax.tree.leaves(state):
+        dtype = getattr(leaf, "dtype", None)
+        if dtype is not None and jnp.issubdtype(dtype, jnp.inexact):
+            return dtype
+    return None
+
+
+def _cast_scalar(value, dtype):
+    """Cast scalar constants to the model state's inexact dtype when available."""
+    if dtype is None:
+        return value
+    return jnp.asarray(value, dtype=dtype)
+
+
 def ssp_rk54_step(
     state: State,
     tendency_fn: Callable[[State], State],
@@ -99,32 +116,53 @@ def ssp_rk54_step(
     state : pytree
         The state advanced by one time step.
     """
+    # Keep scalar coefficients in the same floating precision as the state.
+    # This makes x32 behavior explicit and avoids backend-dependent weak-scalar
+    # promotion subtleties in long integrations.
+    dtype = _state_inexact_dtype(state)
+    dt_t = _cast_scalar(dt, dtype)
+    a20 = _cast_scalar(_a20, dtype)
+    a21 = _cast_scalar(_a21, dtype)
+    a30 = _cast_scalar(_a30, dtype)
+    a32 = _cast_scalar(_a32, dtype)
+    a40 = _cast_scalar(_a40, dtype)
+    a43 = _cast_scalar(_a43, dtype)
+    a52 = _cast_scalar(_a52, dtype)
+    a53 = _cast_scalar(_a53, dtype)
+    a54 = _cast_scalar(_a54, dtype)
+    b10 = _cast_scalar(_b10, dtype)
+    b21 = _cast_scalar(_b21, dtype)
+    b32 = _cast_scalar(_b32, dtype)
+    b43 = _cast_scalar(_b43, dtype)
+    b53 = _cast_scalar(_b53, dtype)
+    b54 = _cast_scalar(_b54, dtype)
+
     # Stage 1: u1 = u0 + b10 * dt * F(u0)
     F0 = tendency_fn(state)
-    u1 = _pytree_axpy(state, F0, _b10 * dt)
+    u1 = _pytree_axpy(state, F0, b10 * dt_t)
 
     # Stage 2: u2 = a20*u0 + a21*u1 + b21*dt*F(u1)
     F1 = tendency_fn(u1)
-    u2 = _pytree_linear_combination(state, u1, _a20, _a21)
-    u2 = _pytree_axpy(u2, F1, _b21 * dt)
+    u2 = _pytree_linear_combination(state, u1, a20, a21)
+    u2 = _pytree_axpy(u2, F1, b21 * dt_t)
 
     # Stage 3: u3 = a30*u0 + a32*u2 + b32*dt*F(u2)
     F2 = tendency_fn(u2)
-    u3 = _pytree_linear_combination(state, u2, _a30, _a32)
-    u3 = _pytree_axpy(u3, F2, _b32 * dt)
+    u3 = _pytree_linear_combination(state, u2, a30, a32)
+    u3 = _pytree_axpy(u3, F2, b32 * dt_t)
 
     # Stage 4: u4 = a40*u0 + a43*u3 + b43*dt*F(u3)
     F3 = tendency_fn(u3)
-    u4 = _pytree_linear_combination(state, u3, _a40, _a43)
-    u4 = _pytree_axpy(u4, F3, _b43 * dt)
+    u4 = _pytree_linear_combination(state, u3, a40, a43)
+    u4 = _pytree_axpy(u4, F3, b43 * dt_t)
 
     # Stage 5: u5 = a52*u2 + a53*u3 + b53*dt*F(u3) + a54*u4 + b54*dt*F(u4)
     F4 = tendency_fn(u4)
     u5 = jax.tree.map(
         lambda s2, s3, s4, f3, f4: (
-            _a52 * s2
-            + _a53 * s3 + _b53 * dt * f3
-            + _a54 * s4 + _b54 * dt * f4
+            a52 * s2
+            + a53 * s3 + b53 * dt_t * f3
+            + a54 * s4 + b54 * dt_t * f4
         ),
         u2, u3, u4, F3, F4,
     )
