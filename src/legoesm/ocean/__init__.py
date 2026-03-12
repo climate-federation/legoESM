@@ -66,6 +66,17 @@ from legoesm.ocean.freshwater import (
     virtual_salt_flux,
     freshwater_from_coupler,
 )
+from legoesm.ocean.biogeochemistry import (
+    BiogeoConfig,
+    OceanBiogeoState,
+    BiogeoTendencies,
+    AirSeaCO2Diagnostics,
+    init_biogeo_state,
+    step_ocean_biogeochemistry,
+    compute_biogeo_tendencies,
+    air_sea_co2_flux,
+    solve_carbonate_system,
+)
 from legoesm.ocean.bathymetry import (
     BathymetryConfig,
     CRITICAL_STRAITS,
@@ -113,6 +124,16 @@ __all__ = [
     "idealized_bathymetry_mpas",
     "reconstruct_cell_velocity",
     "mpas_ocean_conservation_fixer",
+    # Biogeochemistry
+    "BiogeoConfig",
+    "OceanBiogeoState",
+    "BiogeoTendencies",
+    "AirSeaCO2Diagnostics",
+    "init_biogeo_state",
+    "step_ocean_biogeochemistry",
+    "compute_biogeo_tendencies",
+    "air_sea_co2_flux",
+    "solve_carbonate_system",
     # Bathymetry
     "BathymetryConfig",
     "CRITICAL_STRAITS",
