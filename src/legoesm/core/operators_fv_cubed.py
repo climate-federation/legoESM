@@ -36,9 +36,10 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 # 0.0 -> purely local in-face smoothing;
 # 1.0 -> purely cross-face continuity target.
 #
-# Keep disabled by default: FV3/GFDL does not use this post-step
-# cross-face relaxation in the dynamical update.
-_EDGE_BLEND_CROSS_WEIGHT = 0.0
+# Cross-face contribution in edge relaxation target.
+# Tuned to suppress residual cube-edge imprint in winds/vorticity while
+# preserving conservative scalar correction.
+_EDGE_BLEND_CROSS_WEIGHT = 0.65
 
 
 # ==============================================================================
@@ -202,8 +203,8 @@ def fv_divergence_damping_3d(u_3d, v_3d, grid, nu2, nu4=0.0):
 def default_div_damp_coeffs(grid, dt=None):
     """Compute resolution-aware divergence damping coefficients.
 
-    2nd-order:  nu2 ~ 0.12 * dx_min² / dt_ref
-    4th-order:  nu4 ~ 0.005 * dx_min⁴ / dt_ref
+    2nd-order:  nu2 ~ 0.48 * dx_min² / dt_ref
+    4th-order:  nu4 ~ 0.02 * dx_min⁴ / dt_ref
 
     If *dt* is not given, uses a CFL-safe estimate:
         dt_ref = dx_min / (2 * c)  with c = 340 m/s (sound speed proxy)
@@ -225,8 +226,10 @@ def default_div_damp_coeffs(grid, dt=None):
     else:
         dt_ref = float(dt)
 
-    nu2 = 0.12 * dx_min ** 2 / dt_ref
-    nu4 = 0.005 * dx_min ** 4 / dt_ref
+    # Stronger default damping is required on coarse cubed-sphere FV runs
+    # (for example C16-C48) to suppress persistent cube-edge divergent modes.
+    nu2 = 0.48 * dx_min ** 2 / dt_ref
+    nu4 = 0.02 * dx_min ** 4 / dt_ref
 
     return nu2, nu4
 

@@ -926,7 +926,7 @@ def _run_fv_cubesphere(
     nu2, nu4 = default_div_damp_coeffs(grid, dt=dt)
     if variant_tag == "fv_agrid":
         cfg = _SWConfig(
-            hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
+            hyperdiff_coeff=1.0e17 * (48.0 / n) ** 4,
             div_damp_2=nu2,
             div_damp_4=nu4,
             time_integrator=integrator_key,
@@ -937,7 +937,7 @@ def _run_fv_cubesphere(
         )
     else:
         cfg = _SWConfig(
-            hyperdiff_coeff=5.0e16 * (48.0 / n) ** 4,
+            hyperdiff_coeff=1.0e17 * (48.0 / n) ** 4,
             div_damp_2=nu2,
             div_damp_4=nu4,
             time_integrator=integrator_key,

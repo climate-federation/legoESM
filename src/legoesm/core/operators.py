@@ -144,38 +144,24 @@ def curl_z(u_field: Field, v_field: Field, grid: CubedSphereGrid) -> Field:
     u = u_field.data
     v = v_field.data
 
-    # Flux-form circulation stencil on cell interfaces.
-    #
-    # This mirrors the FV3/GFDL cubed-sphere strategy used in SW/D-grid:
-    # compute metric-weighted edge circulation and take the cell-integrated
-    # line-integral curl (Stokes form). Compared to pure centered
-    # (i+1)-(i-1) differencing, this is less prone to cube-edge imprint.
+    # Pad vector components with proper rotation (using precomputed trig)
     u_pad, v_pad = pad_halo_vector(
         u, v,
         grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=grid.halo_interp_offsets_h2,
-        halo=2,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=grid.halo_interp_offsets,
     )
 
-    # v*h_y on x-interfaces (n+1, n)
-    v_strip = v_pad[:, :, 2:-2]
-    hy_strip = grid.hy_ext_h2[:, :, 2:-2]
-    v_iface = 0.5 * (v_strip[:, 1:-2, :] + v_strip[:, 2:-1, :])
-    hy_iface = 0.5 * (hy_strip[:, 1:-2, :] + hy_strip[:, 2:-1, :])
-    circ_x = v_iface * hy_iface
+    # Orthogonal-curvilinear finite-volume form:
+    # zeta = (1/area) * [d(v*h_y)/di - d(u*h_x)/dj] / 2
+    # with h_x = dx/2, h_y = dy/2 on the local (padded) stencil.
+    vort_x = v_pad * grid.hy_ext
+    vort_y = u_pad * grid.hx_ext
 
-    # u*h_x on y-interfaces (n, n+1)
-    u_strip = u_pad[:, 2:-2, :]
-    hx_strip = grid.hx_ext_h2[:, 2:-2, :]
-    u_iface = 0.5 * (u_strip[:, :, 1:-2] + u_strip[:, :, 2:-1])
-    hx_iface = 0.5 * (hx_strip[:, :, 1:-2] + hx_strip[:, :, 2:-1])
-    circ_y = u_iface * hx_iface
+    d_vort_x = vort_x[:, 2:, 1:-1] - vort_x[:, :-2, 1:-1]
+    d_vort_y = vort_y[:, 1:-1, 2:] - vort_y[:, 1:-1, :-2]
 
-    # Cell-integrated curl: d(v*h_y)/dx - d(u*h_x)/dy
-    d_circ_x = circ_x[:, 1:, :] - circ_x[:, :-1, :]
-    d_circ_y = circ_y[:, :, 1:] - circ_y[:, :, :-1]
-    vort_data = (d_circ_x - d_circ_y) / grid.area
+    vort_data = (d_vort_x - d_vort_y) / (2.0 * grid.area)
 
     return Field(data=vort_data, name="vorticity", dims=u_field.dims,
                  units="1/s", staggering="cell")

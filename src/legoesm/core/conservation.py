@@ -660,3 +660,77 @@ def compute_conservation_diagnostics_latlon(
         'total_mass': total_mass,
         'total_energy': total_energy,
     }
+
+
+# ==============================================================================
+# Voronoi mesh conservation
+# ==============================================================================
+
+def global_integral_voronoi(field, mesh) -> jax.Array:
+    """Area-weighted global integral on a Voronoi mesh.
+
+    Parameters
+    ----------
+    field : jax.Array, shape (nCells,)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array : scalar
+    """
+    acc = _accumulation_dtype()
+    return jnp.sum(field.astype(acc) * mesh.areaCell.astype(acc))
+
+
+def fix_mass_mpas(state, target_mass, mesh):
+    """Fix mass conservation on Voronoi mesh via uniform h correction.
+
+    Parameters
+    ----------
+    state : MPASShallowWaterState
+    target_mass : jax.Array
+        Target global mass (∫ h * dA).
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    MPASShallowWaterState
+    """
+    from legoesm.core.state import MPASShallowWaterState
+    current_mass = global_integral_voronoi(state.h.data, mesh)
+    total_area = jnp.sum(mesh.areaCell)
+    correction = (target_mass - current_mass) / total_area
+    h_fixed = state.h.replace(data=state.h.data + correction)
+    return state._replace(h=h_fixed)
+
+
+def fix_energy_mpas(state, target_energy, mesh, g=9.80616):
+    """Fix energy conservation on Voronoi mesh via velocity scaling.
+
+    Parameters
+    ----------
+    state : MPASShallowWaterState
+    target_energy : jax.Array
+        Target total energy.
+    mesh : VoronoiMesh
+    g : float
+
+    Returns
+    -------
+    MPASShallowWaterState
+    """
+    from legoesm.core.operators_voronoi import kinetic_energy_cell
+
+    h = state.h.data
+    u = state.u.data
+    h_s = state.h_s.data
+    area = mesh.areaCell
+
+    KE_cells = kinetic_energy_cell(u, mesh)
+    KE = jnp.sum(KE_cells * h * area)
+    PE = jnp.sum(0.5 * g * (h + h_s) ** 2 * area)
+
+    KE_target = jnp.maximum(target_energy - PE, 0.0)
+    scale = jnp.where(KE > 1e-30, jnp.sqrt(KE_target / KE), 1.0)
+    u_fixed = state.u.replace(data=u * scale)
+    return state._replace(u=u_fixed)

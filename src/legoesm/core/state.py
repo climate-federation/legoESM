@@ -190,3 +190,37 @@ class NonHydrostaticTendencies(NamedTuple):
     drho_prime_dt: Field
     dphis_dt: Field
     dtracers_dt: Field
+
+
+# ==============================================================================
+# MPAS Voronoi Mesh States
+# ==============================================================================
+
+class MPASShallowWaterState(NamedTuple):
+    """State for shallow water equations on an MPAS Voronoi mesh.
+
+    Uses the TRiSK C-grid staggering: thickness on cells, normal
+    velocity on edges, topography on cells.
+
+    Fields
+    ------
+    h : Field
+        Fluid depth [m]. Shape (nCells,). Prognostic.
+    u : Field
+        Normal velocity [m/s]. Shape (nEdges,). Prognostic.
+        Positive in the direction from cellsOnEdge[0] to cellsOnEdge[1].
+    h_s : Field
+        Surface topography height [m]. Shape (nCells,). Static.
+    """
+    h: Field
+    u: Field
+    h_s: Field
+
+
+class MPASShallowWaterTendencies(NamedTuple):
+    """Tendencies for the MPAS shallow water equations.
+
+    Same pytree structure as MPASShallowWaterState prognostic fields.
+    """
+    dh_dt: Field
+    du_dt: Field
