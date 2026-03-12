@@ -635,7 +635,11 @@ def _plot_latlon_pixel_snapshots(
         ax.set_xlabel("Longitude [deg]")
         ax.set_ylabel("Latitude [deg]")
         ax.grid(True, alpha=0.25)
-        ax.set_title(f"step {step_num}\nt={day:.2f} d", fontsize=11, fontweight="bold")
+        ax.set_title(
+            f"{cbar_label}\nstep {step_num}, t={day:.2f} d",
+            fontsize=11,
+            fontweight="bold",
+        )
     if pcm is not None:
         fig.subplots_adjust(left=0.06, right=0.90, bottom=0.08, top=0.90, wspace=0.13, hspace=0.32)
         cax = fig.add_axes([0.92, 0.13, 0.02, 0.72])
@@ -1385,7 +1389,7 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
             sc = scatter_field(ax, lon_deg, lat_deg, ssh_data, "RdBu_r",
                                -ssh_max, ssh_max, point_size=point_size)
             _style_idealized_axes(ax)
-            ax.set_title(f"Day {day:.2f}", fontsize=13, fontweight="bold")
+            ax.set_title(f"SSH [m] — Day {day:.2f}", fontsize=13, fontweight="bold")
 
         fig.suptitle("Barotropic Gravity Wave — Sea Surface Height [m]",
                      fontsize=15, fontweight="bold")
@@ -1647,7 +1651,7 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
             sc = scatter_field(ax, lon_deg, lat_deg, ssh_data, "RdBu_r",
                                -ssh_abs, ssh_abs, point_size=point_size)
             _style_idealized_axes(ax)
-            ax.set_title(f"Day {day:.0f}", fontsize=13, fontweight="bold")
+            ax.set_title(f"SSH [m] — Day {day:.0f}", fontsize=13, fontweight="bold")
 
         fig.suptitle("Wind-Driven Gyre — Sea Surface Height [m]",
                      fontsize=15, fontweight="bold")
@@ -2020,7 +2024,11 @@ def _plot_standard_case_outputs(
                 point_size=point_size,
             )
             _style_idealized_axes(ax)
-            ax.set_title(f"step {step_num}\nt={day:.2f} d", fontsize=12, fontweight="bold")
+            ax.set_title(
+                f"Sea surface height eta [m]\nstep {step_num}, t={day:.2f} d",
+                fontsize=12,
+                fontweight="bold",
+            )
         if sc is not None:
             fig.colorbar(sc, ax=axes.tolist(), shrink=0.78, orientation="vertical",
                          label="Sea surface height eta [m]", pad=0.02)

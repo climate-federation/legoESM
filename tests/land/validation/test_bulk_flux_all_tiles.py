@@ -92,7 +92,7 @@ for scheme in ["constant", "most"]:
             snow_depth=land_state.snow_depth,
             snow_age=land_state.snow_age,
         )
-        new_s, resp = step_land(s, forcing, land_config, 1.0, 3600.0)
+        new_s, resp, _ = step_land(s, forcing, land_config, 1.0, 3600.0)
         return jnp.mean(resp.shflx ** 2 + resp.tau_x ** 2)
 
     grads = jax.grad(land_loss)(T_init)
@@ -186,7 +186,7 @@ def land_multistep_loss(T_in):
         snow_age=land_state.snow_age,
     )
     for _ in range(5):
-        s, _ = step_land(s, forcing, land_config, 1.0, 1800.0)
+        s, _, _ = step_land(s, forcing, land_config, 1.0, 1800.0)
     return jnp.mean(s.T_soil.data ** 2)
 
 grads = jax.grad(land_multistep_loss)(T_init)

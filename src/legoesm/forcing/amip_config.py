@@ -99,6 +99,9 @@ class AMIPExperimentConfig(NamedTuple):
     # Monthly-mean diagnostics (Task 12)
     monthly_means: bool = False  # Accumulate zonal/global monthly means
 
+    # Carbon cycle
+    carbon_cycle: str = "none"  # "none", "differland", or "seasonal"
+
     # Output
     output_dir: str = ""
 

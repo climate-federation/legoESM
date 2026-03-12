@@ -119,7 +119,7 @@ def test_land_step_finite():
     forcing = _make_forcing()
     config = LandConfig()
 
-    new_state, resp = step_land(state, forcing, config, U_min=1.0, dt=DT)
+    new_state, resp, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
 
     assert jnp.all(jnp.isfinite(new_state.T_soil.data))
     assert jnp.all(jnp.isfinite(new_state.W_bucket.data))
@@ -134,7 +134,7 @@ def test_land_energy_balance_sign():
     forcing = _make_forcing(T_lowest=270.0)  # Cold air
     config = LandConfig()
 
-    _, resp = step_land(state, forcing, config, U_min=1.0, dt=DT)
+    _, resp, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
     assert jnp.all(resp.shflx > 0)
 
 
@@ -145,12 +145,12 @@ def test_land_bucket_limits():
     # Saturated bucket with zero precip
     state = _make_land_state(W=config.W_max)
     forcing = _make_forcing(precip=0.0)
-    new_state, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
+    new_state, _, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
     assert jnp.all(new_state.W_bucket.data <= config.W_max + 1e-6)
 
     # Empty bucket
     state = _make_land_state(W=0.0)
-    new_state, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
+    new_state, _, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
     assert jnp.all(new_state.W_bucket.data >= -1e-6)
 
 
@@ -797,7 +797,7 @@ def test_land_q_surface_uses_updated_temperature():
     forcing = _make_forcing(T_lowest=300.0, sw=400.0)  # strong warming
     config = LandConfig()
 
-    new_state, resp = step_land(state, forcing, config, U_min=1.0, dt=DT)
+    new_state, resp, _ = step_land(state, forcing, config, U_min=1.0, dt=DT)
 
     # q_surface should correspond to updated T_surface, not initial
     T_new = resp.T_surface

@@ -228,8 +228,7 @@ def save_snapshots(snapshots, output_dir, sfc_key, sfc_label):
             ax = axes[i, j]
             im = ax.imshow(snap[key], origin="lower", cmap=cmap)
             fig.colorbar(im, ax=ax, shrink=0.8)
-            if i == 0:
-                ax.set_title(f"Day {day}", fontsize=11, fontweight="bold")
+            ax.set_title(f"{label}\nDay {day}", fontsize=11, fontweight="bold")
             if j == 0:
                 ax.set_ylabel(label, fontsize=10)
             ax.tick_params(labelsize=7)

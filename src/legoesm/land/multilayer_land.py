@@ -21,6 +21,8 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.land.carbon.config import CarbonState
+from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
@@ -36,7 +38,9 @@ def step_multilayer_land(
     U_min: float,
     dt: float,
     lat: jnp.ndarray | None = None,
-) -> tuple[MultiLayerLandState, TileResponse]:
+    carbon_state: CarbonState | None = None,
+    doy: float = 0.0,
+) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
     """Step the multi-layer land model forward by dt seconds.
 
     Parameters
@@ -57,8 +61,8 @@ def step_multilayer_land(
 
     Returns
     -------
-    (MultiLayerLandState, TileResponse)
-        Updated state and surface response for tile blending.
+    (MultiLayerLandState, TileResponse, CarbonState | None)
+        Updated state, surface response, and updated carbon state.
     """
     T_soil = state.T_soil       # (ncol, n_layers)
     psi = state.psi_soil        # (ncol, n_layers)
@@ -193,6 +197,17 @@ def step_multilayer_land(
     beta_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
     q_sfc_new = beta_new * saturation_mixing_ratio(T_surface_new, forcing.p_surface)
 
+    # --- Carbon cycle ---
+    if config.carbon.scheme != "none":
+        lat_arr = lat if lat is not None else jnp.zeros(ncol)
+        carbon_state_new, co2_flux = step_carbon(
+            carbon_state, forcing.sw_down, T_surface_new, forcing.co2_ppmv,
+            beta, lat_arr, doy, forcing.precip_total, config.carbon, dt,
+        )
+    else:
+        carbon_state_new = carbon_state
+        co2_flux = jnp.zeros(ncol)
+
     response = TileResponse(
         T_surface=T_surface_new,
         albedo=alpha,
@@ -208,10 +223,10 @@ def step_multilayer_land(
         lw_up=lw_up_new,
         u_ocean_sfc=jnp.zeros(ncol),
         v_ocean_sfc=jnp.zeros(ncol),
-        co2_flux=jnp.zeros(ncol),
+        co2_flux=co2_flux,
     )
 
-    return new_state, response
+    return new_state, response, carbon_state_new
 
 
 def init_multilayer_land_state(

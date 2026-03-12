@@ -173,7 +173,7 @@ def _plot_cube_snapshots(
                 ax.set_xticks([])
                 ax.set_yticks([])
 
-            ax.set_title(f"step {step}\nt={_format_sim_time(step, dt)}", fontsize=9)
+            ax.set_title(f"{label}\nstep {step}, t={_format_sim_time(step, dt)}", fontsize=9)
             if col == 0:
                 ax.set_ylabel(label, fontsize=10)
 
@@ -541,16 +541,20 @@ def _plot_column_snapshots(
         p_hpa = snap["p_full_pa"] / 100.0
         p_int_hpa = snap["p_half_pa"] / 100.0
 
+        time_label = _format_sim_time(step, dt)
+
         axes[0, col].plot(snap["temperature_k"], p_hpa, color="tab:red", lw=2)
-        axes[0, col].set_title(f"step {step}\nt={_format_sim_time(step, dt)}", fontsize=10)
+        axes[0, col].set_title(f"Temperature profile\nstep {step}, t={time_label}", fontsize=10)
         axes[0, col].set_xlabel("T (K)")
 
         axes[1, col].plot(snap["heating_kday"], p_hpa, color="tab:blue", lw=2)
         axes[1, col].axvline(0.0, color="0.4", lw=0.8)
+        axes[1, col].set_title(f"Heating profile\nstep {step}, t={time_label}", fontsize=10)
         axes[1, col].set_xlabel("dT/dt (K/day)")
 
         axes[2, col].plot(snap["net_down_flux"], p_int_hpa, color="tab:green", lw=2)
         axes[2, col].axvline(0.0, color="0.4", lw=0.8)
+        axes[2, col].set_title(f"Net flux profile\nstep {step}, t={time_label}", fontsize=10)
         axes[2, col].set_xlabel("Net down flux (W/m^2)")
 
         for r in range(3):

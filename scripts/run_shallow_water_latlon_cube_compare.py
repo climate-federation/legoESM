@@ -485,7 +485,7 @@ def _save_snapshots_latlon(
                 if draw_coastlines:
                     ax.coastlines(linewidth=0.35, color="0.35")
                 ax.gridlines(draw_labels=False, linewidth=0.2, color="0.6", alpha=0.35)
-            ax.set_title(f"step {st}\nt={_format_sim_time(st, dt)}", fontsize=9)
+            ax.set_title(f"{label}\nstep {st}, t={_format_sim_time(st, dt)}", fontsize=9)
             if c == 0:
                 ax.set_ylabel(label, fontsize=10)
         fig.colorbar(im, cax=caxes[r], orientation="vertical")
@@ -640,7 +640,7 @@ def _save_snapshots_cube(
                 if draw_coastlines:
                     ax.coastlines(linewidth=0.35, color="0.35")
                 ax.gridlines(draw_labels=False, linewidth=0.2, color="0.6", alpha=0.35)
-            ax.set_title(f"step {st}\nt={_format_sim_time(st, dt)}", fontsize=9)
+            ax.set_title(f"{label}\nstep {st}, t={_format_sim_time(st, dt)}", fontsize=9)
             if c == 0:
                 ax.set_ylabel(label, fontsize=10)
         fig.colorbar(im, cax=caxes[r], orientation="vertical")

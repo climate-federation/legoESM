@@ -261,7 +261,7 @@ def _save_snapshots(
                     ax.set_xticks([])
                     ax.set_yticks([])
 
-            ax.set_title(f"step {st}\nt={tlabel}", fontsize=9)
+            ax.set_title(f"{label}\nstep {st}, t={tlabel}", fontsize=9)
             if c == 0:
                 ax.set_ylabel(label, fontsize=10)
 

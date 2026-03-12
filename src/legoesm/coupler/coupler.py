@@ -38,6 +38,8 @@ from legoesm.coupler.tile_fractions import (
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.ice.state import SeaIceState
+from legoesm.land.carbon.config import CarbonState
+from legoesm.land.carbon.carbon_cycle import init_carbon_state
 from legoesm.land.config import LandConfig
 from legoesm.land.slab_land import step_land
 from legoesm.land.state import LandState
@@ -49,6 +51,7 @@ class SurfaceState(NamedTuple):
     ice: SeaIceState
     lake: LakeState
     accumulator: FluxAccumulator
+    carbon: CarbonState | None = None
 
 
 def _validate_coupler_config(config: CouplerConfig) -> None:
@@ -88,6 +91,7 @@ def init_surface_state(
     T_epi_init: float = 285.0,
     T_hypo_init: float = 278.0,
     T_ice_init: float = 260.0,
+    land_config: LandConfig | None = None,
 ) -> SurfaceState:
     """Initialize all surface tile states.
 
@@ -95,6 +99,9 @@ def init_surface_state(
     ----------
     shape : tuple
         Spatial shape, typically (6, n, n).
+    land_config : LandConfig, optional
+        If provided and ``land_config.carbon.scheme == "differland"``,
+        initialises prognostic carbon pools.
     """
     dims_2d = ("face", "x", "y")
 
@@ -127,7 +134,13 @@ def init_surface_state(
 
     acc = reset_accumulator(shape)
 
-    return SurfaceState(land=land, ice=ice, lake=lake, accumulator=acc)
+    # Carbon pools (only for differland scheme)
+    carbon = None
+    if land_config is not None and land_config.carbon.scheme == "differland":
+        carbon = init_carbon_state(shape, land_config.carbon)
+
+    return SurfaceState(land=land, ice=ice, lake=lake, accumulator=acc,
+                        carbon=carbon)
 
 
 def ocean_tile_response(
@@ -208,18 +221,26 @@ def make_coupler(
     land_config: LandConfig,
     ice_config: SeaIceConfig,
     lake_config: LakeConfig,
+    lat: jnp.ndarray | None = None,
 ):
     """Factory that returns step_surface function.
+
+    Parameters
+    ----------
+    lat : jnp.ndarray, optional
+        Latitude [radians], same spatial shape as forcing fields.
+        Required when the land carbon cycle is enabled.
 
     Returns
     -------
     step_surface : callable
         (SurfaceState, AtmToSurface, TileConfig, ocean_sst, ocean_u,
-         ocean_v, dt) -> (SurfaceState, SurfaceToAtm)
+         ocean_v, dt, doy) -> (SurfaceState, SurfaceToAtm)
     """
     _validate_coupler_config(coupler_config)
     U_min = coupler_config.U_min
     coupling_dt = float(coupler_config.coupling_dt)
+    _lat = lat
 
     def step_surface(
         sfc_state: SurfaceState,
@@ -229,6 +250,7 @@ def make_coupler(
         ocean_u_sfc: jnp.ndarray,
         ocean_v_sfc: jnp.ndarray,
         dt: float,
+        doy: float = 0.0,
     ) -> tuple[SurfaceState, SurfaceToAtm]:
         """Step all surface tiles and return blended response."""
         if dt <= 0.0:
@@ -244,9 +266,11 @@ def make_coupler(
                 f"{tile_config.f_lake.shape!r} vs {atm_forcing.sw_down.shape!r}",
             )
 
-        # 1. Step land
-        land_new, land_resp = step_land(
-            sfc_state.land, atm_forcing, land_config, U_min, dt)
+        # 1. Step land (with optional carbon cycle)
+        land_new, land_resp, carbon_new = step_land(
+            sfc_state.land, atm_forcing, land_config, U_min, dt,
+            lat=_lat, carbon_state=sfc_state.carbon, doy=doy,
+        )
 
         # 2. Step sea ice
         ice_new, ice_resp = step_sea_ice(
@@ -300,7 +324,8 @@ def make_coupler(
         )
 
         new_state = SurfaceState(
-            land=land_new, ice=ice_new, lake=lake_new, accumulator=acc_next)
+            land=land_new, ice=ice_new, lake=lake_new, accumulator=acc_next,
+            carbon=carbon_new)
 
         return new_state, blended_out
 

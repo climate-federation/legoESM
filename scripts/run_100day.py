@@ -218,7 +218,7 @@ for idx, (step_num, snap) in enumerate(snapshots.items()):
     ax.coastlines(linewidth=0.5, color="gray")
     ax.gridlines(linewidth=0.3, alpha=0.4)
     ax.set_global()
-    ax.set_title(f"Day {day:.0f}", fontsize=13, fontweight="bold")
+    ax.set_title(f"Fluid depth h [m] — Day {day:.0f}", fontsize=13, fontweight="bold")
 
 fig.suptitle("Williamson Test 5 — Fluid Depth h [m]  (C48, 100 days)",
              fontsize=15, fontweight="bold")

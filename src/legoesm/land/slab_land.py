@@ -18,6 +18,8 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.land.carbon.config import CarbonState
+from legoesm.land.carbon.carbon_cycle import step_carbon
 from legoesm.land.config import LandConfig
 from legoesm.land.state import LandState
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
@@ -30,7 +32,9 @@ def step_land(
     U_min: float,
     dt: float,
     lat: jnp.ndarray | None = None,
-) -> tuple[LandState, TileResponse]:
+    carbon_state: CarbonState | None = None,
+    doy: float = 0.0,
+) -> tuple[LandState, TileResponse, CarbonState | None]:
     """Step the slab land model forward by dt seconds.
 
     Parameters
@@ -51,8 +55,8 @@ def step_land(
 
     Returns
     -------
-    (LandState, TileResponse)
-        Updated state and surface response for tile blending.
+    (LandState, TileResponse, CarbonState | None)
+        Updated state, surface response, and updated carbon state.
     """
     T_soil = state.T_soil.data
     W = state.W_bucket.data
@@ -152,6 +156,17 @@ def step_land(
     beta_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
     q_sfc_new = beta_new * saturation_mixing_ratio(T_soil_new, forcing.p_surface)
 
+    # --- Carbon cycle ---
+    if config.carbon.scheme != "none":
+        lat_arr = lat if lat is not None else jnp.zeros_like(T_soil)
+        carbon_state_new, co2_flux = step_carbon(
+            carbon_state, forcing.sw_down, T_soil_new, forcing.co2_ppmv,
+            beta, lat_arr, doy, forcing.precip_total, config.carbon, dt,
+        )
+    else:
+        carbon_state_new = carbon_state
+        co2_flux = jnp.zeros_like(T_soil)
+
     response = TileResponse(
         T_surface=T_soil_new,
         albedo=alpha,
@@ -165,7 +180,7 @@ def step_land(
         lw_up=lw_up_new,
         u_ocean_sfc=jnp.zeros_like(T_soil),
         v_ocean_sfc=jnp.zeros_like(T_soil),
-        co2_flux=jnp.zeros_like(T_soil),
+        co2_flux=co2_flux,
     )
 
-    return new_state, response
+    return new_state, response, carbon_state_new

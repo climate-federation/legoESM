@@ -347,7 +347,7 @@ def _save_case_snapshots(
                     ax.set_xticks([])
                     ax.set_yticks([])
 
-            title = f"step {step}\nt={time_label}"
+            title = f"{row_label}\nstep {step}, t={time_label}"
             ax.set_title(title, fontsize=9)
 
             if col == 0:

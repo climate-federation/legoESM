@@ -619,7 +619,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         state = init_multilayer_land_state(ncol, config, T_init=280.0)
         forcing = self._make_forcing(ncol)
 
-        new_state, response = step_multilayer_land(
+        new_state, response, _ = step_multilayer_land(
             state, forcing, config, U_min=1.0, dt=600.0,
         )
 
@@ -643,7 +643,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         state = init_multilayer_land_state(ncol, config, T_init=270.0)
         forcing = self._make_forcing(ncol)
 
-        new_state, _ = step_multilayer_land(
+        new_state, _, _ = step_multilayer_land(
             state, forcing, config, U_min=1.0, dt=600.0,
         )
 
@@ -662,7 +662,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         forcing = self._make_forcing(ncol)
 
         for _ in range(10):
-            state, response = step_multilayer_land(
+            state, response, _ = step_multilayer_land(
                 state, forcing, config, U_min=1.0, dt=600.0,
             )
 
@@ -697,7 +697,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         state = init_multilayer_land_state(ncol, config)
         forcing = self._make_forcing(ncol)
 
-        _, response = step_multilayer_land(
+        _, response, _ = step_multilayer_land(
             state, forcing, config, U_min=1.0, dt=600.0,
         )
 
@@ -736,7 +736,7 @@ class TestMultilayerLandStep(unittest.TestCase):
             has_radiation=jnp.ones(ncol),
             has_precipitation=jnp.ones(ncol),
         )
-        new_state, _ = step_multilayer_land(
+        new_state, _, _ = step_multilayer_land(
             state, forcing, config, U_min=1.0, dt=600.0,
         )
         # Surface runoff should be zero (no precip and evap may be negative flux_top,

@@ -329,7 +329,7 @@ def plot_ssh_snapshots(snapshots, grid, dt, output_path, title, point_size,
         sc = scatter_field(ax, lon_deg, lat_deg, ssh, "RdBu_r",
                            -ssh_abs, ssh_abs, point_size=point_size)
         _style_idealized_axes(ax)
-        ax.set_title(f"Day {day:.0f}", fontsize=13, fontweight="bold")
+        ax.set_title(f"SSH [m] — Day {day:.0f}", fontsize=13, fontweight="bold")
 
     fig.suptitle(title, fontsize=15, fontweight="bold")
     fig.colorbar(sc, ax=axes.tolist(), shrink=0.78, pad=0.02, orientation="vertical",
@@ -917,7 +917,7 @@ def equatorial_kelvin_wave(args, grid, z_coord, config, output_dir, point_size):
             sc = scatter_field(ax, lon_deg_np, lat_deg_np, ssh, "RdBu_r",
                                -ssh_abs, ssh_abs, point_size=point_size)
             _style_idealized_axes(ax)
-            ax.set_title(f"Day {day:.1f}", fontsize=11, fontweight="bold")
+            ax.set_title(f"SSH [m] — Day {day:.1f}", fontsize=11, fontweight="bold")
 
         for idx in range(n_panel, len(axes)):
             axes[idx].set_visible(False)

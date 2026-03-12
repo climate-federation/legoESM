@@ -1491,8 +1491,7 @@ try:
                 except Exception:
                     ax.text(0.5, 0.5, "N/A", ha="center", va="center",
                             transform=ax.transAxes)
-                if i == 0:
-                    ax.set_title(f"Day {day_snap}", fontsize=11, fontweight="bold")
+                ax.set_title(f"{label}\nDay {day_snap}", fontsize=11, fontweight="bold")
                 if j == 0:
                     ax.set_ylabel(label, fontsize=9)
                 ax.tick_params(labelsize=6)

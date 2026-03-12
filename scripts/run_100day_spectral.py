@@ -210,7 +210,7 @@ def main():
         ax = axes[idx]
         fields = spectral_to_grid(snap, grid)
         pc = pcolor_field(ax, fields['h'], "RdYlBu_r", 5000, 6100)
-        ax.set_title(f"Day {day:.0f}", fontsize=12, fontweight="bold")
+        ax.set_title(f"Fluid depth h [m] — Day {day:.0f}", fontsize=12, fontweight="bold")
 
     fig.suptitle(f"Spectral T{N_MAX} — Fluid Depth h [m]  (100 days)",
                  fontsize=14, fontweight="bold", y=1.02)

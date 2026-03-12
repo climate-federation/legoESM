@@ -127,7 +127,7 @@ def _save_snapshots(
             ax.set_xticks([0, 60, 120, 180, 240, 300, 360])
             ax.set_yticks([-60, -30, 0, 30, 60])
             ax.grid(True, alpha=0.15)
-            ax.set_title(f"step {st}\nt={_fmt_time(st, dt)}", fontsize=9)
+            ax.set_title(f"{label}\nstep {st}, t={_fmt_time(st, dt)}", fontsize=9)
             if c == 0:
                 ax.set_ylabel(label)
             fig.colorbar(im, ax=ax, orientation="vertical", fraction=0.046, pad=0.03)

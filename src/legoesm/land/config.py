@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm.land.carbon.config import CarbonConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -30,6 +31,8 @@ class LandConfig(NamedTuple):
     land_albedo: LandAlbedoConfig = LandAlbedoConfig()
     T_snow_melt: float = 273.15  # Temperature above which snow melts [K]
     snow_melt_rate: float = 5.0e-6  # Snowmelt rate [kg/m2/s/K above T_melt]
+    # Carbon cycle
+    carbon: CarbonConfig = CarbonConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -55,3 +58,5 @@ class MultiLayerLandConfig(NamedTuple):
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()
     thermal: SoilThermalConfig = SoilThermalConfig()
     richards: RichardsConfig = RichardsConfig()
+    # Carbon cycle
+    carbon: CarbonConfig = CarbonConfig()

@@ -264,7 +264,11 @@ def _plot_latlon_snapshots(output_path, snapshots, dt, grid, field_getter, title
         ax.set_ylim(float(np.min(lat_edges)), float(np.max(lat_edges)))
         ax.set_xlabel("Longitude [deg]")
         ax.set_ylabel("Latitude [deg]")
-        ax.set_title(f"step {step_num}, t={day:.2f} d", fontsize=11, fontweight="bold")
+        ax.set_title(
+            f"{cbar_label}\nstep {step_num}, t={day:.2f} d",
+            fontsize=11,
+            fontweight="bold",
+        )
         ax.grid(True, alpha=0.25)
 
     if pcm is not None:

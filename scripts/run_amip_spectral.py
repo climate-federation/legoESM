@@ -1016,8 +1016,7 @@ try:
                 if data is not None:
                     im = ax.pcolormesh(lon_deg, lat_deg, data,
                                        cmap=cmap, vmin=vmin, vmax=vmax, shading='auto')
-                if row == 0:
-                    ax.set_title(f"Day {d}")
+                ax.set_title(f"{label}\nDay {d}")
                 if col == 0:
                     ax.set_ylabel(label)
                 if col == n_snap - 1:
