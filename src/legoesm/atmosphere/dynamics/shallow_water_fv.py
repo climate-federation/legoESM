@@ -78,8 +78,8 @@ class FVShallowWaterConfig(NamedTuple):
     div_damp_2: float = 0.0      # 2nd-order divergence damping [m²/s]
     div_damp_4: float = 0.0      # 4th-order divergence damping [m⁴/s]
     hyperdiff_coeff: float = 0.0 # Only on u,v (PPM handles h dissipation)
-    edge_blend_strength: float = 0.25  # Face-boundary blend (0=off)
-    edge_blend_depth: int = 3          # Rows to blend near each edge
+    edge_blend_strength: float = 0.0   # GFDL/FV3 path: no post-step edge blend
+    edge_blend_depth: int = 3          # Rows to blend near each edge (if enabled)
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     fix_energy: bool = False     # OFF by default for benchmark runs

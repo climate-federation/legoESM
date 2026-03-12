@@ -36,9 +36,9 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 # 0.0 -> purely local in-face smoothing;
 # 1.0 -> purely cross-face continuity target.
 #
-# A non-zero value suppresses residual cube-edge imprint in wind/vorticity
-# while retaining conservative scalar blending.
-_EDGE_BLEND_CROSS_WEIGHT = 0.55
+# Keep disabled by default: FV3/GFDL does not use this post-step
+# cross-face relaxation in the dynamical update.
+_EDGE_BLEND_CROSS_WEIGHT = 0.0
 
 
 # ==============================================================================
