@@ -58,6 +58,14 @@ from legoesm.ocean.init_mpas import (
 )
 from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
 from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+from legoesm.ocean.freshwater import (
+    FreshwaterForcing,
+    zero_freshwater,
+    net_freshwater_flux,
+    freshwater_eta_tendency,
+    virtual_salt_flux,
+    freshwater_from_coupler,
+)
 
 __all__ = [
     "OceanModel",
@@ -95,4 +103,11 @@ __all__ = [
     "idealized_bathymetry_mpas",
     "reconstruct_cell_velocity",
     "mpas_ocean_conservation_fixer",
+    # Freshwater
+    "FreshwaterForcing",
+    "zero_freshwater",
+    "net_freshwater_flux",
+    "freshwater_eta_tendency",
+    "virtual_salt_flux",
+    "freshwater_from_coupler",
 ]

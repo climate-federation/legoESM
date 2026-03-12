@@ -23,6 +23,7 @@ from legoesm.ocean.dynamics.barotropic_mpas import (
     reconcile_3d_velocity,
 )
 from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
+from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_eta_tendency
 
 
 class MPASOceanModel:
@@ -45,14 +46,24 @@ class MPASOceanModel:
         self.z_coord = z_coord
         self.config = config or MPASOceanConfig()
 
-    def tendencies(self, state: MPASOceanState) -> MPASOceanTendencies:
+    def tendencies(
+        self,
+        state: MPASOceanState,
+        freshwater: FreshwaterForcing | None = None,
+    ) -> MPASOceanTendencies:
         """Compute baroclinic tendencies."""
         return mpas_ocean_baroclinic_tendencies(
             state, self.mesh, self.z_coord, self.config,
+            freshwater=freshwater,
         )
 
     @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: MPASOceanState, dt: float) -> MPASOceanState:
+    def step(
+        self,
+        state: MPASOceanState,
+        dt: float,
+        freshwater: FreshwaterForcing | None = None,
+    ) -> MPASOceanState:
         """Advance one full timestep (baroclinic + barotropic).
 
         Parameters
@@ -60,6 +71,8 @@ class MPASOceanModel:
         state : MPASOceanState
         dt : float
             Baroclinic timestep [s].
+        freshwater : FreshwaterForcing or None
+            Freshwater forcing (P, E, runoff, ice). If None, no freshwater.
 
         Returns
         -------
@@ -71,7 +84,7 @@ class MPASOceanModel:
         mask = state.land_mask.data
 
         # 1. Compute baroclinic tendencies
-        tend = self.tendencies(state)
+        tend = self.tendencies(state, freshwater=freshwater)
 
         # 2. Update tracers (forward Euler)
         T_new = state.T.data + dt * tend.dT_dt.data
@@ -105,8 +118,14 @@ class MPASOceanModel:
             u=state.u.replace(data=u_baro),
         )
 
+        # Freshwater mass flux for barotropic continuity equation
+        F_slow_eta = None
+        if freshwater is not None and config.freshwater_closure != "none":
+            F_slow_eta = freshwater_eta_tendency(freshwater, config.rho_0) * mask
+
         eta_new, u_bar_new = barotropic_substeps_mpas(
             state_for_baro, mesh, z_coord, config, dt_baro, n_sub, F_slow,
+            F_slow_eta=F_slow_eta,
         )
 
         # 5. Reconcile 3D velocity

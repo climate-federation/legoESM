@@ -27,7 +27,23 @@ def _accumulation_dtype():
     a cast.  This helper lets callers use the widest available type
     explicitly, and makes the intent clear.
     """
-    from legoesm.core.hardware import _UNSUPPORTED_F64_BACKENDS, get_backend
+    from legoesm.core.hardware import (
+        _UNSUPPORTED_F64_BACKENDS,
+        get_backend,
+        get_runtime_precision_dtype,
+    )
+
+    configured = get_runtime_precision_dtype("conservation")
+    if configured is not None:
+        if configured == jnp.float64:
+            if (
+                get_backend() in _UNSUPPORTED_F64_BACKENDS
+                or not jax.config.jax_enable_x64
+            ):
+                return jnp.float32
+            return jnp.float64
+        return jnp.float32
+
     if get_backend() in _UNSUPPORTED_F64_BACKENDS or not jax.config.jax_enable_x64:
         return jnp.float32
     return jnp.float64

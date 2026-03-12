@@ -41,6 +41,11 @@ from legoesm.ocean.vertical import (
     compute_layer_thickness,
     compute_ocean_jacobian,
 )
+from legoesm.ocean.freshwater import (
+    FreshwaterForcing,
+    freshwater_eta_tendency,
+    virtual_salt_flux,
+)
 
 
 def mpas_ocean_baroclinic_tendencies(
@@ -48,6 +53,7 @@ def mpas_ocean_baroclinic_tendencies(
     mesh,
     z_coord: OceanZStarCoordinate,
     config: MPASOceanConfig = MPASOceanConfig(),
+    freshwater: FreshwaterForcing | None = None,
 ) -> MPASOceanTendencies:
     """Compute baroclinic (slow) tendencies for MPAS ocean.
 
@@ -57,6 +63,8 @@ def mpas_ocean_baroclinic_tendencies(
     mesh : VoronoiMesh
     z_coord : OceanZStarCoordinate
     config : MPASOceanConfig
+    freshwater : FreshwaterForcing or None
+        Freshwater forcing. If None, no freshwater terms are applied.
 
     Returns
     -------
@@ -203,6 +211,16 @@ def mpas_ocean_baroclinic_tendencies(
     # ---- Free surface tendency ----
     # deta/dt = -sum_k div(u_k * h_e_k)
     deta_dt = -jnp.sum(div_flux_all.T, axis=1) * mask  # (nCells,)
+
+    # ---- Freshwater forcing ----
+    if freshwater is not None and config.freshwater_closure != "none":
+        # Free-surface mass flux: deta/dt += F_fw / rho_0
+        deta_dt = deta_dt + freshwater_eta_tendency(freshwater, config.rho_0) * mask
+
+        # Virtual salt flux: dS/dt = -S_ref * F_fw / (rho_0 * dz_0)
+        dz_0 = h_k[:, 0]  # top layer thickness (nCells,)
+        dS_fw = virtual_salt_flux(freshwater, config.S_ref, dz_0, config.rho_0)
+        dS_dt_3d = dS_dt_3d.at[:, 0].add(dS_fw * mask)
 
     return MPASOceanTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",

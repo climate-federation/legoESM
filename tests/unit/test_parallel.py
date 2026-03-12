@@ -7,8 +7,10 @@ requiring multiple devices or MPI.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 from unittest.mock import patch
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.mesh import (
     DeviceConfig,
@@ -117,6 +119,17 @@ class TestDeviceMesh:
         assert isinstance(config, DeviceConfig)
         assert config.n_devices == 1
 
+    def test_subface_mesh_uses_tile_i_tile_j_axes(self):
+        """Sub-face decomposition must shard both horizontal tile directions."""
+        dev = jax.devices()[0]
+        fake_devices = [dev] * 24  # 6 faces × 2×2 tiles
+        with patch("legoesm.parallel.mesh.jax.devices", return_value=fake_devices):
+            config = create_device_mesh(n_devices=24)
+        assert config.tiling == (2, 2)
+        assert config.mesh is not None
+        assert config.mesh.axis_names == ("face", "tile_i", "tile_j")
+        assert config.face_sharding.spec == P("face", "tile_i", "tile_j")
+
 
 class TestShardPytree:
     """Tests for shard_pytree and replicate_pytree."""
@@ -161,6 +174,42 @@ class TestShardPytree:
         data = jnp.ones((6, 4, 4))
         result = replicate_pytree(data, config)
         assert jnp.array_equal(result, data)
+
+    def test_shard_tiled_uses_both_horizontal_axes(self):
+        """Tiled cubed-sphere mode shards (face, x, y) over (face, tile_i, tile_j)."""
+        dev = jax.devices()[0]
+        mesh = Mesh(np.array([[[dev]]]), axis_names=("face", "tile_i", "tile_j"))
+        config = DeviceConfig(
+            mesh=mesh,
+            face_sharding=NamedSharding(mesh, P("face", "tile_i", "tile_j")),
+            replicated_sharding=NamedSharding(mesh, P()),
+            n_devices=1,
+            backend="CPU",
+            is_distributed=False,
+            tiling=(2, 2),
+            grid_type="cubed_sphere",
+        )
+        data = jnp.ones((6, 8, 8), dtype=jnp.float32)
+        sharded = shard_pytree(data, config)
+        assert sharded.sharding.spec == P("face", "tile_i", "tile_j")
+
+    def test_shard_tiled_face_vector_uses_face_only(self):
+        """Lower-rank face-leading arrays should avoid tile-axis mis-sharding."""
+        dev = jax.devices()[0]
+        mesh = Mesh(np.array([[[dev]]]), axis_names=("face", "tile_i", "tile_j"))
+        config = DeviceConfig(
+            mesh=mesh,
+            face_sharding=NamedSharding(mesh, P("face", "tile_i", "tile_j")),
+            replicated_sharding=NamedSharding(mesh, P()),
+            n_devices=1,
+            backend="CPU",
+            is_distributed=False,
+            tiling=(2, 2),
+            grid_type="cubed_sphere",
+        )
+        data = jnp.ones((6, 10), dtype=jnp.float32)
+        sharded = shard_pytree(data, config)
+        assert sharded.sharding.spec == P("face")
 
 
 # ==============================================================================

@@ -4,7 +4,7 @@
 This script performs three checks:
 1. Parallel unit tests (no MPI required)
 2. MPI distributed test cases (if launcher + mpi4py + mpi4jax are available)
-3. Scaling benchmark suite (strong + weak scaling on CPU/GPU backends),
+3. Scaling benchmark suite (strong + weak scaling on CPU/GPU/TPU backends),
    with optional MPI atmosphere scaling.
 
 Outputs:
@@ -19,6 +19,7 @@ import argparse
 from datetime import datetime, timezone
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -137,6 +138,41 @@ def _extract_json_line(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def _is_supported_cubedsphere_parallel_count(n: int) -> tuple[bool, str]:
+    """Validate exact cubed-sphere parallel counts.
+
+    Supported exact counts:
+    - Face-only: ``1, 2, 3, 6``
+    - Sub-face tiling: ``6 * k^2`` for integer ``k >= 1`` (e.g., 24, 54, 96)
+    """
+    if n < 1:
+        return False, f"parallel count must be >=1, got {n!r}"
+
+    if n <= 6:
+        if 6 % n == 0:
+            return True, "face-only decomposition"
+        return False, (
+            f"n={n} invalid for face-only decomposition; "
+            "supported values are 1,2,3,6"
+        )
+
+    if n % 6 != 0:
+        return False, (
+            f"n={n} invalid for sub-face decomposition; "
+            "n>6 must be a multiple of 6"
+        )
+
+    tiles_per_face = n // 6
+    t = int(math.isqrt(tiles_per_face))
+    if t * t != tiles_per_face:
+        return False, (
+            f"n={n} invalid for sub-face decomposition; "
+            "requires n = 6 * k^2 (e.g., 24,54,96,150)"
+        )
+
+    return True, "sub-face tiled decomposition"
+
+
 def _run_cmd(
     cmd: list[str],
     *,
@@ -250,10 +286,11 @@ def _run_scaling_worker(
                 ),
             }
 
-        if 6 % n_devices != 0:
+        valid_count, reason = _is_supported_cubedsphere_parallel_count(n_devices)
+        if not valid_count:
             return {
                 "status": "skipped",
-                "reason": f"n_devices={n_devices} does not evenly divide 6 faces.",
+                "reason": f"n_devices={n_devices} unsupported: {reason}.",
             }
 
         set_halo_backend("local")
@@ -554,6 +591,7 @@ def _run_scaling_suite(args: argparse.Namespace, output_dir: Path, host_info: di
     backends = _parse_str_list(args.scaling_backends)
     cpu_devices = _parse_int_list(args.scaling_cpu_devices, label="--scaling-cpu-devices")
     gpu_devices = _parse_int_list(args.scaling_gpu_devices, label="--scaling-gpu-devices")
+    tpu_devices = _parse_int_list(args.scaling_tpu_devices, label="--scaling-tpu-devices")
     workload = args.scaling_workload.strip().lower()
 
     thresholds = {
@@ -571,7 +609,7 @@ def _run_scaling_suite(args: argparse.Namespace, output_dir: Path, host_info: di
 
     for backend in backends:
         backend = backend.lower()
-        if backend not in {"cpu", "gpu"}:
+        if backend not in {"cpu", "gpu", "tpu"}:
             backend_results.append(
                 {
                     "backend": backend,
@@ -583,18 +621,23 @@ def _run_scaling_suite(args: argparse.Namespace, output_dir: Path, host_info: di
             continue
 
         available = int(host_info.get("device_counts", {}).get(backend, 0))
-        if backend == "gpu" and available < 1:
+        if backend in {"gpu", "tpu"} and available < 1:
             backend_results.append(
                 {
                     "backend": backend,
                     "status": "skipped",
-                    "reason": "No local GPU devices detected.",
+                    "reason": f"No local {backend.upper()} devices detected.",
                     "cases": [],
                 },
             )
             continue
 
-        requested_devices = cpu_devices if backend == "cpu" else gpu_devices
+        if backend == "cpu":
+            requested_devices = cpu_devices
+        elif backend == "gpu":
+            requested_devices = gpu_devices
+        else:
+            requested_devices = tpu_devices
         if not requested_devices:
             backend_results.append(
                 {
@@ -707,11 +750,13 @@ def _run_mpi_scaling_worker(
                 "reason": f"MPI scaling workload {workload!r} is not supported.",
             }
 
-        if 6 % max(1, int(comm.Get_size())) != 0:
+        n_ranks = max(1, int(comm.Get_size()))
+        valid_count, reason = _is_supported_cubedsphere_parallel_count(n_ranks)
+        if not valid_count:
             return {
                 "status": "skipped",
                 "rank": rank_for_error,
-                "reason": "MPI ranks must evenly divide 6 cubed-sphere faces.",
+                "reason": f"MPI ranks unsupported: {reason}.",
             }
 
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -1567,8 +1612,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scaling-backends",
         type=str,
-        default="cpu,gpu",
-        help="Comma-separated scaling benchmark backends (cpu,gpu).",
+        default="cpu,gpu,tpu",
+        help="Comma-separated scaling benchmark backends (cpu,gpu,tpu).",
     )
     parser.add_argument(
         "--scaling-workload",
@@ -1586,14 +1631,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--scaling-cpu-devices",
         type=str,
-        default="1,2,3,6",
+        default="1,2,3,6,24",
         help="Comma-separated CPU device counts for scaling benchmarks.",
     )
     parser.add_argument(
         "--scaling-gpu-devices",
         type=str,
-        default="1,2,3,6",
+        default="1,2,3,6,24",
         help="Comma-separated GPU device counts for scaling benchmarks.",
+    )
+    parser.add_argument(
+        "--scaling-tpu-devices",
+        type=str,
+        default="1,2,3,6,24",
+        help="Comma-separated TPU device counts for scaling benchmarks.",
     )
     parser.add_argument(
         "--scaling-strong-grid",

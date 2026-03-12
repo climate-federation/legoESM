@@ -231,8 +231,10 @@ def fc_compressible_euler_slow_tendencies(
     horiz_adv_w = -(u * dw_dx + v * dw_dy)
 
     horiz_adv_w_half = jnp.zeros_like(w)
+    horiz_adv_w_mid = 0.5 * (horiz_adv_w[..., :-1] + horiz_adv_w[..., 1:])
+    horiz_adv_w_mid = horiz_adv_w_mid.astype(horiz_adv_w_half.dtype)
     horiz_adv_w_half = horiz_adv_w_half.at[..., 1:-1].set(
-        0.5 * (horiz_adv_w[..., :-1] + horiz_adv_w[..., 1:])
+        horiz_adv_w_mid
     )
 
     dw_dt = horiz_adv_w_half - sponge_half * w

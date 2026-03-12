@@ -247,11 +247,13 @@ def create_device_mesh(
             n_dev, backend_name, _N_FACES // n_dev,
         )
     else:
-        # Sub-face tiling: reshape devices into (6, tx*ty) mesh.
+        # Sub-face tiling: reshape devices into a 3D mesh
+        # (face, tile_i, tile_j) so arrays (6, n, n, ...) are sharded
+        # over both horizontal directions.
         import numpy as np
-        dev_array = np.array(selected).reshape(6, tx * ty)
-        mesh = Mesh(dev_array, axis_names=("face", "tile"))
-        face_sharding = NamedSharding(mesh, P("face", "tile"))
+        dev_array = np.array(selected).reshape(6, tx, ty)
+        mesh = Mesh(dev_array, axis_names=("face", "tile_i", "tile_j"))
+        face_sharding = NamedSharding(mesh, P("face", "tile_i", "tile_j"))
         replicated_sharding = NamedSharding(mesh, P())
         tiling = (tx, ty)
         logger.info(
@@ -452,8 +454,8 @@ def shard_pytree(pytree, config: DeviceConfig):
     """Shard a pytree across devices according to the grid type.
 
     - **cubed_sphere**: face-first arrays ``(6, n, n, ...)`` sharded on face.
-      With sub-face tiling, arrays are reshaped to ``(6, tx*ty, ...)`` and
-      sharded on both face and tile axes.
+      With sub-face tiling, a 3D mesh ``(face, tile_i, tile_j)`` is used so
+      both horizontal dimensions are sharded directly.
     - **latlon**: arrays ``(n_lat, n_lon, ...)`` sharded on lat dimension.
     - **spectral**: arrays ``(nlev, ...)`` sharded on level dimension.
 
@@ -471,12 +473,26 @@ def shard_pytree(pytree, config: DeviceConfig):
     if config.face_sharding is None:
         return pytree  # single-device: nothing to do
 
+    tiled_face_only = None
+    if (
+        config.grid_type == "cubed_sphere"
+        and config.mesh is not None
+        and config.tiling != (1, 1)
+    ):
+        tiled_face_only = NamedSharding(config.mesh, P("face"))
+
     def _shard_leaf(leaf):
         if not isinstance(leaf, (jax.Array, jnp.ndarray)):
             return leaf
 
         if config.grid_type == "cubed_sphere":
             if leaf.ndim >= 1 and leaf.shape[0] == _N_FACES:
+                # In tiled cubed-sphere mode, use both tile axes only for
+                # true face-plane arrays; lower-rank face-leading fields keep
+                # face-only sharding.
+                if config.tiling != (1, 1) and leaf.ndim < 3:
+                    sharding = tiled_face_only or config.face_sharding
+                    return jax.device_put(leaf, sharding)
                 return jax.device_put(leaf, config.face_sharding)
             return jax.device_put(leaf, config.replicated_sharding)
 

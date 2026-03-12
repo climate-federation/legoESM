@@ -1,5 +1,8 @@
 """Tests for FC-Gram compressible Euler models."""
 
+import warnings
+
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -15,6 +18,7 @@ from legoesm.atmosphere.dynamics.compressible_euler_fc import (
 from legoesm.atmosphere.dynamics.compressible_euler_fc_cgrid import (
     FCCGCompressibleEulerModel,
     FCCGCompressibleEulerConfig,
+    fc_cgrid_compressible_euler_slow_tendencies,
 )
 from legoesm.core.operators_fc import build_fc_config
 
@@ -46,6 +50,11 @@ def _rest_state_ce(grid, height_coord):
         tracers=Field(data=jnp.zeros((6, n, n, nlev, n_tracers), dtype=jnp.float32),
                       name="tracers", dims=dims_tr, units="kg/kg"),
     )
+
+
+def _require_x64():
+    if not jax.config.jax_enable_x64:
+        pytest.skip("requires JAX_ENABLE_X64=True")
 
 
 @pytest.fixture
@@ -101,3 +110,33 @@ def test_fc_ce_acoustic_substeps_unchanged(grid, height_coord, terrain_metric):
     )
     assert callable(acoustic_substeps)
     assert callable(acoustic_substeps_semi_implicit)
+
+
+def test_fc_ce_w_tendency_no_futurewarning_x64(grid, height_coord, terrain_metric):
+    """FC CE w tendency should not trigger dtype-scatter FutureWarnings in x64 mode."""
+    _require_x64()
+    fc_config = build_fc_config(d=2, C=4, degree=5)
+    config = FCCompressibleEulerConfig()
+    state = _rest_state_ce(grid, height_coord)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        tend = fc_compressible_euler_slow_tendencies(
+            state, grid, height_coord, terrain_metric, fc_config, config,
+        )
+    assert tend.dw_dt.data.dtype == state.w.data.dtype
+
+
+def test_fc_cgrid_ce_w_tendency_no_futurewarning_x64(grid, height_coord, terrain_metric):
+    """FC C-grid CE w tendency should not trigger dtype-scatter FutureWarnings in x64 mode."""
+    _require_x64()
+    fc_config = build_fc_config(d=2, C=4, degree=5)
+    config = FCCGCompressibleEulerConfig()
+    state = _rest_state_ce(grid, height_coord)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        tend = fc_cgrid_compressible_euler_slow_tendencies(
+            state, grid, height_coord, terrain_metric, fc_config, config,
+        )
+    assert tend.dw_dt.data.dtype == state.w.data.dtype

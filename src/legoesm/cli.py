@@ -70,14 +70,18 @@ def main():
 def cmd_run(args):
     """Run a simulation from a config file."""
     from legoesm.config import Config
+    from legoesm.core.hardware import apply_hardware_config
 
     config = Config.from_yaml(args.config)
+    hw_runtime = apply_hardware_config(config)
     print(f"legoESM v0.1.0 | Loaded config from {args.config}")
     print(f"  Model: {config.get('model.name')}")
     print(f"  Grid: {config.get('grid.type')} C{config.get('grid.resolution')}")
     print(f"  Duration: {config.get('time.duration_hours')} hours")
-    print(f"  Backend: {jax.default_backend()}")
-    print(f"  Devices: {jax.devices()}")
+    print(f"  Backend: {hw_runtime['device_config'].backend}")
+    print(f"  Devices: {hw_runtime['device_config'].n_devices}")
+    print(f"  Distributed: {hw_runtime['distributed']}")
+    print(f"  Precision policy: {hw_runtime['precision']}")
 
     # TODO: Build and run model from config
     print("\nFull run from config not yet implemented. Use 'legoesm test' for now.")

@@ -10,10 +10,32 @@ from __future__ import annotations
 import warnings
 
 import jax
+import jax.numpy as jnp
 
 
 # Backends known to lack float64 / complex128 support.
 _UNSUPPORTED_F64_BACKENDS = frozenset({"METAL"})
+
+_PRECISION_NAME_TO_DTYPE = {
+    "float16": jnp.float16,
+    "fp16": jnp.float16,
+    "half": jnp.float16,
+    "bfloat16": jnp.bfloat16,
+    "bf16": jnp.bfloat16,
+    "float32": jnp.float32,
+    "fp32": jnp.float32,
+    "single": jnp.float32,
+    "float64": jnp.float64,
+    "fp64": jnp.float64,
+    "double": jnp.float64,
+}
+
+_RUNTIME_PRECISION_POLICY = {
+    "dynamics": jnp.float32,
+    "ml": jnp.bfloat16,
+    "conservation": None,  # None => auto-select widest supported accumulator.
+}
+_UNSET = object()
 
 
 def get_backend() -> str:
@@ -119,4 +141,136 @@ def detect_devices() -> dict:
         "devices": devices,
         "supports_f64": backend not in _UNSUPPORTED_F64_BACKENDS,
         "distributed": jax.process_count() > 1,
+    }
+
+
+def _parse_precision_dtype(value, *, field_name: str, allow_none: bool = False):
+    """Parse a precision config value into a JAX dtype."""
+    if value is None:
+        if allow_none:
+            return None
+        raise ValueError(f"{field_name} precision cannot be None")
+
+    if value in (jnp.float16, jnp.bfloat16, jnp.float32, jnp.float64):
+        return value
+
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in _PRECISION_NAME_TO_DTYPE:
+            return _PRECISION_NAME_TO_DTYPE[key]
+
+    allowed = sorted(_PRECISION_NAME_TO_DTYPE.keys())
+    raise ValueError(
+        f"Unknown {field_name} precision {value!r}. "
+        f"Use one of {allowed}."
+    )
+
+
+def set_runtime_precision_policy(
+    *,
+    dynamics=_UNSET,
+    ml=_UNSET,
+    conservation=_UNSET,
+) -> dict:
+    """Set runtime precision policy from config-like values.
+
+    Returns the resolved dtype policy as a dict.
+    """
+    if dynamics is not _UNSET:
+        _RUNTIME_PRECISION_POLICY["dynamics"] = _parse_precision_dtype(
+            dynamics, field_name="dynamics",
+        )
+    if ml is not _UNSET:
+        _RUNTIME_PRECISION_POLICY["ml"] = _parse_precision_dtype(
+            ml, field_name="ml",
+        )
+    if conservation is not _UNSET:
+        cons = _parse_precision_dtype(
+            conservation, field_name="conservation", allow_none=True,
+        )
+        if cons not in (None, jnp.float32, jnp.float64):
+            raise ValueError(
+                "conservation precision must be float32, float64, or None."
+            )
+        _RUNTIME_PRECISION_POLICY["conservation"] = cons
+
+    return get_runtime_precision_policy()
+
+
+def get_runtime_precision_policy() -> dict:
+    """Return the active runtime precision policy."""
+    return dict(_RUNTIME_PRECISION_POLICY)
+
+
+def get_runtime_precision_dtype(component: str):
+    """Return configured dtype for one precision component."""
+    if component not in _RUNTIME_PRECISION_POLICY:
+        raise KeyError(
+            f"Unknown precision component {component!r}. "
+            f"Use one of {tuple(_RUNTIME_PRECISION_POLICY.keys())}."
+        )
+    return _RUNTIME_PRECISION_POLICY[component]
+
+
+def apply_hardware_config(config) -> dict:
+    """Apply ``hardware.*`` runtime options from a legoESM Config object.
+
+    This consumes:
+    - ``hardware.precision.*``
+    - ``hardware.devices`` (legacy alias)
+    - ``hardware.parallelism.*``
+    """
+    dynamics_precision = config.get("hardware.precision.dynamics")
+    ml_precision = config.get("hardware.precision.ml")
+    conservation_precision = config.get("hardware.precision.conservation")
+
+    policy = set_runtime_precision_policy(
+        dynamics=dynamics_precision,
+        ml=ml_precision,
+        conservation=conservation_precision,
+    )
+
+    # Enable x64 when dynamics precision requires it. We intentionally avoid
+    # forcing x64 off for lower-precision settings, since spectral workflows
+    # may rely on x64 being enabled elsewhere.
+    if policy["dynamics"] == jnp.float64 and not jax.config.jax_enable_x64:
+        jax.config.update("jax_enable_x64", True)
+
+    n_devices = config.get("hardware.parallelism.n_devices", "auto")
+    backend = config.get("hardware.parallelism.backend", None)
+    distributed = bool(config.get("hardware.parallelism.distributed", False))
+
+    # Legacy compatibility: hardware.devices acts as n_devices when
+    # parallelism.n_devices is not set explicitly.
+    legacy_devices = config.get("hardware.devices", "auto")
+    if n_devices in (None, "auto") and legacy_devices not in (None, "auto"):
+        n_devices = legacy_devices
+    if n_devices is None:
+        n_devices = "auto"
+
+    if distributed:
+        if backend is not None or n_devices not in (None, "auto"):
+            warnings.warn(
+                "hardware.parallelism.distributed=true ignores "
+                "hardware.parallelism.backend and n_devices; using "
+                "MPI rank-local device topology.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        from legoesm.parallel.distributed import initialize_distributed
+        device_config, topology = initialize_distributed(return_topology=True)
+        return {
+            "precision": policy,
+            "distributed": True,
+            "device_config": device_config,
+            "topology": topology,
+        }
+
+    from legoesm.parallel.mesh import create_device_mesh
+    device_config = create_device_mesh(n_devices=n_devices, backend=backend)
+    return {
+        "precision": policy,
+        "distributed": False,
+        "device_config": device_config,
+        "topology": None,
     }

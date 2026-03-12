@@ -42,6 +42,13 @@ class MPASOceanConfig(NamedTuple):
         Minimum allowed water column depth [m].
     barotropic_damping : float
         Rayleigh damping coefficient for barotropic mode [1/s].
+    freshwater_closure : str
+        Freshwater closure: "none", "virtual_salt_flux", or "real_freshwater".
+        "virtual_salt_flux": apply virtual salt flux to S, real mass flux to eta.
+        "real_freshwater": apply real freshwater mass to eta and dilution to S.
+        "none": ignore freshwater forcing.
+    S_ref : float
+        Reference salinity [PSU] for virtual salt flux.
     """
     g: float = 9.80616
     rho_0: float = 1025.0
@@ -57,6 +64,8 @@ class MPASOceanConfig(NamedTuple):
     fix_salt: bool = True
     min_water_column_m: float = 0.5
     barotropic_damping: float = 0.0
+    freshwater_closure: str = "virtual_salt_flux"
+    S_ref: float = 35.0
 
 
 class MPASSimpleOceanConfig(NamedTuple):

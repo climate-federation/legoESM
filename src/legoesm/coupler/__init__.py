@@ -36,6 +36,7 @@ from legoesm.coupler.mpas_adapter import (
     make_mpas_tile_config,
     init_mpas_surface_state,
     make_mpas_coupler,
+    compute_mpas_freshwater,
 )
 
 __all__ = [
@@ -50,4 +51,5 @@ __all__ = [
     "LakeConfig", "LakeState", "step_lake",
     # MPAS Voronoi adapter
     "make_mpas_tile_config", "init_mpas_surface_state", "make_mpas_coupler",
+    "compute_mpas_freshwater",
 ]

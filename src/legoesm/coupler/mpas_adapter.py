@@ -18,6 +18,7 @@ import jax.numpy as jnp
 
 from legoesm.coupler.config import CouplerConfig, TileConfig
 from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm
+from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_from_coupler
 
 
 def make_mpas_tile_config(
@@ -129,4 +130,65 @@ def make_mpas_coupler(
         ice_config=ice_config,
         lake_config=lake_config,
         lat=lat,
+    )
+
+
+def compute_mpas_freshwater(
+    atm_forcing: AtmToSurface,
+    sfc_response: SurfaceToAtm,
+    ocean_mask: jnp.ndarray,
+    L_v: float = 2.5e6,
+    land_state=None,
+    ice_state_old=None,
+    ice_state_new=None,
+    ice_config=None,
+    dt: float = 1.0,
+) -> FreshwaterForcing:
+    """Compute freshwater forcing for MPAS ocean from coupler fields.
+
+    Extracts precipitation, evaporation (from latent heat), land runoff,
+    and ice melt/freeze freshwater, then applies ocean mask.
+
+    Parameters
+    ----------
+    atm_forcing : AtmToSurface
+        Atmospheric forcing with precip_total.
+    sfc_response : SurfaceToAtm
+        Surface response with lhflx.
+    ocean_mask : jax.Array, shape (nCells,)
+        Ocean mask (1=ocean, 0=land).
+    L_v : float
+        Latent heat of vaporization [J/kg].
+    land_state : MultiLayerLandState or None
+        Land state with runoff fields.
+    ice_state_old, ice_state_new : SeaIceState or None
+        Ice states before/after step for ice freshwater.
+    ice_config : SeaIceConfig or None
+    dt : float
+        Timestep [s].
+
+    Returns
+    -------
+    FreshwaterForcing
+    """
+    # Land runoff
+    runoff_sfc = None
+    runoff_sub = None
+    if land_state is not None:
+        if hasattr(land_state, 'runoff_surface'):
+            runoff_sfc = land_state.runoff_surface
+        if hasattr(land_state, 'runoff_subsurface'):
+            runoff_sub = land_state.runoff_subsurface
+
+    return freshwater_from_coupler(
+        precip_total=atm_forcing.precip_total,
+        lhflx=sfc_response.lhflx,
+        L_v=L_v,
+        runoff_surface=runoff_sfc,
+        runoff_subsurface=runoff_sub,
+        ice_state_old=ice_state_old,
+        ice_state_new=ice_state_new,
+        ice_config=ice_config,
+        ocean_mask=ocean_mask,
+        dt=dt,
     )

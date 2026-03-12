@@ -358,6 +358,11 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
             grid=grid, sigma_coord=sc,
         )
     """
+    # --- Apply runtime hardware config when available ---
+    if legoesm_config is not None:
+        from legoesm.core.hardware import apply_hardware_config
+        apply_hardware_config(legoesm_config)
+
     # --- Resolve name from config if not given directly ---
     if name is None:
         if legoesm_config is None:

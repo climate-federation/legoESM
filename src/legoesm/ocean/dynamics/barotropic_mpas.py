@@ -32,11 +32,12 @@ def barotropic_substeps_mpas(
     dt_baro,
     n_substeps,
     F_slow_u=None,
+    F_slow_eta=None,
 ):
     """Run barotropic substeps on MPAS Voronoi mesh.
 
     Forward-backward scheme:
-        1. Forward:  eta^{n+1} = eta^n - dt * div(H_e * u_bar^n)
+        1. Forward:  eta^{n+1} = eta^n - dt * div(H_e * u_bar^n) + dt * F_slow_eta
         2. Backward: u_bar^{n+1} = u_bar^n + dt * (-g*grad(eta^{n+1}) + f*v_t + F_slow)
 
     Parameters
@@ -51,6 +52,8 @@ def barotropic_substeps_mpas(
         Number of barotropic substeps.
     F_slow_u : jax.Array or None, shape (nEdges,)
         Slow (baroclinic) forcing for u_bar.
+    F_slow_eta : jax.Array or None, shape (nCells,)
+        Slow forcing for eta (e.g., freshwater mass flux) [m/s].
 
     Returns
     -------
@@ -90,6 +93,8 @@ def barotropic_substeps_mpas(
     # Slow forcing (default zero)
     if F_slow_u is None:
         F_slow_u = jnp.zeros_like(u_bar)
+    if F_slow_eta is None:
+        F_slow_eta = jnp.zeros_like(eta)
 
     # Forward-backward substeps via scan
     def _substep(carry, _):
@@ -99,9 +104,9 @@ def barotropic_substeps_mpas(
         H_c = jnp.maximum(eta_c + H_bathy, config.min_water_column_m)
         H_e_c = _edge_avg(H_c, mesh)
 
-        # Forward: update eta
+        # Forward: update eta (continuity + freshwater mass source)
         transport = H_e_c * u_bar_c * edge_mask
-        eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask
+        eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask + dt_baro * F_slow_eta * mask
 
         # Backward: update u_bar using new eta
         grad_eta = gradient_edge(eta_next, mesh)
