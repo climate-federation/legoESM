@@ -40,7 +40,6 @@ import matplotlib.pyplot as plt
 
 from legoesm.grids.voronoi import VoronoiMesh, create_voronoi_mesh
 from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
-from legoesm.ocean.freshwater import FreshwaterForcing
 from legoesm.ocean.init_mpas import reconstruct_cell_velocity, rest_state_mpas_ocean
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness, create_ocean_z_star
@@ -51,8 +50,7 @@ class CaseSpec:
     tag: str
     label: str
     init_kind: str
-    freshwater_kind: str
-    freshwater_closure: str
+    forcing_kind: str
     use_fixers: bool
     fix_volume: bool
     fix_heat: bool
@@ -61,84 +59,88 @@ class CaseSpec:
 
 
 CASE_SPECS: dict[str, CaseSpec] = {
-    "rest_no_fixers": CaseSpec(
-        tag="rest_no_fixers",
-        label="Rest State (No Fixers)",
-        init_kind="rest",
-        freshwater_kind="none",
-        freshwater_closure="virtual_salt_flux",
-        use_fixers=False,
-        fix_volume=False,
-        fix_heat=False,
-        fix_salt=False,
-        default_hours=12.0,
-    ),
-    "rest_all_fixers": CaseSpec(
-        tag="rest_all_fixers",
-        label="Rest State (All Fixers)",
-        init_kind="rest",
-        freshwater_kind="none",
-        freshwater_closure="virtual_salt_flux",
+    "rest_state": CaseSpec(
+        tag="rest_state",
+        label="Rest State",
+        init_kind="rest_state",
+        forcing_kind="none",
         use_fixers=True,
         fix_volume=True,
         fix_heat=True,
         fix_salt=True,
-        default_hours=12.0,
+        default_hours=24.0,
     ),
-    "perturbed_no_fixers": CaseSpec(
-        tag="perturbed_no_fixers",
-        label="Perturbed IC (No Fixers)",
-        init_kind="perturbed",
-        freshwater_kind="none",
-        freshwater_closure="virtual_salt_flux",
-        use_fixers=False,
-        fix_volume=False,
-        fix_heat=False,
-        fix_salt=False,
-        default_hours=12.0,
-    ),
-    "perturbed_all_fixers": CaseSpec(
-        tag="perturbed_all_fixers",
-        label="Perturbed IC (All Fixers)",
-        init_kind="perturbed",
-        freshwater_kind="none",
-        freshwater_closure="virtual_salt_flux",
+    "gravity_wave": CaseSpec(
+        tag="gravity_wave",
+        label="Barotropic Gravity Wave",
+        init_kind="gravity_wave",
+        forcing_kind="none",
         use_fixers=True,
         fix_volume=True,
         fix_heat=True,
         fix_salt=True,
-        default_hours=12.0,
+        default_hours=24.0,
     ),
-    "freshwater_precip": CaseSpec(
-        tag="freshwater_precip",
-        label="Freshwater Precipitation Forcing",
-        init_kind="rest",
-        freshwater_kind="precip_uniform",
-        freshwater_closure="virtual_salt_flux",
-        use_fixers=False,
-        fix_volume=False,
-        fix_heat=False,
-        fix_salt=False,
-        default_hours=6.0,
+    "wind_gyre": CaseSpec(
+        tag="wind_gyre",
+        label="Wind-Driven Gyre",
+        init_kind="wind_gyre",
+        forcing_kind="wind_gyre",
+        use_fixers=True,
+        fix_volume=True,
+        fix_heat=True,
+        fix_salt=True,
+        default_hours=24.0,
     ),
-    "freshwater_evap": CaseSpec(
-        tag="freshwater_evap",
-        label="Freshwater Evaporation Forcing",
-        init_kind="rest",
-        freshwater_kind="evap_uniform",
-        freshwater_closure="virtual_salt_flux",
-        use_fixers=False,
-        fix_volume=False,
-        fix_heat=False,
-        fix_salt=False,
-        default_hours=6.0,
+    "adiabatic_topography": CaseSpec(
+        tag="adiabatic_topography",
+        label="Adiabatic Topographic Adjustment",
+        init_kind="adiabatic_topography",
+        forcing_kind="none",
+        use_fixers=True,
+        fix_volume=True,
+        fix_heat=True,
+        fix_salt=True,
+        default_hours=24.0,
     ),
-    "freshwater_balanced": CaseSpec(
-        tag="freshwater_balanced",
-        label="Balanced Freshwater + Fixers",
-        init_kind="rest",
-        freshwater_kind="balanced",
-        freshwater_closure="virtual_salt_flux",
+    "holland_lin_gyre": CaseSpec(
+        tag="holland_lin_gyre",
+        label="Holland-Lin Double Gyre",
+        init_kind="holland_lin_gyre",
+        forcing_kind="holland_lin_gyre",
+        use_fixers=True,
+        fix_volume=True,
+        fix_heat=True,
+        fix_salt=True,
+        default_hours=24.0,
+    ),
+    "thermohaline": CaseSpec(
+        tag="thermohaline",
+        label="Diabatic Thermohaline Circulation",
+        init_kind="thermohaline",
+        forcing_kind="thermohaline",
+        use_fixers=True,
+        fix_volume=True,
+        fix_heat=True,
+        fix_salt=True,
+        default_hours=24.0,
+    ),
+    "phillips_two_layer": CaseSpec(
+        tag="phillips_two_layer",
+        label="Phillips Two-Layer Test",
+        init_kind="phillips_two_layer",
+        forcing_kind="phillips_two_layer",
+        use_fixers=True,
+        fix_volume=True,
+        fix_heat=True,
+        fix_salt=True,
+        default_hours=24.0,
+    ),
+    "taylor_column": CaseSpec(
+        tag="taylor_column",
+        label="Taylor Column",
+        init_kind="taylor_column",
+        forcing_kind="taylor_column",
         use_fixers=True,
         fix_volume=True,
         fix_heat=True,
@@ -161,6 +163,36 @@ def _parse_csv_ints(text: str) -> list[int]:
 
 def _weighted_mean(x: jax.Array, w: jax.Array) -> float:
     return float(jnp.sum(x * w) / jnp.maximum(jnp.sum(w), 1.0e-30))
+
+
+def _wrap_lon_deg(lon_deg: jax.Array) -> jax.Array:
+    return (lon_deg + 180.0) % 360.0 - 180.0
+
+
+def _great_circle_distance_rad(
+    lon: jax.Array,
+    lat: jax.Array,
+    lon0: float,
+    lat0: float,
+) -> jax.Array:
+    dlon = ((lon - lon0 + jnp.pi) % (2.0 * jnp.pi)) - jnp.pi
+    cos_d = (
+        jnp.sin(lat) * jnp.sin(lat0)
+        + jnp.cos(lat) * jnp.cos(lat0) * jnp.cos(dlon)
+    )
+    return jnp.arccos(jnp.clip(cos_d, -1.0, 1.0))
+
+
+def _edge_ocean_mask(mesh: VoronoiMesh, land_mask: jax.Array) -> jax.Array:
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    return land_mask[c1] * land_mask[c2]
+
+
+def _cell_to_edge_mean(mesh: VoronoiMesh, field_cell: jax.Array) -> jax.Array:
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    return 0.5 * (field_cell[c1] + field_cell[c2])
 
 
 def _ocean_diagnostics(
@@ -715,58 +747,386 @@ def _plot_surface_snapshots(
     plt.close(fig)
 
 
+def _plot_surface_snapshots_native(
+    surface_snaps: dict[str, dict[str, np.ndarray]],
+    lon_cell_deg: np.ndarray,
+    lat_cell_deg: np.ndarray,
+    out_path: Path,
+    title: str,
+) -> None:
+    labels = [k for k in ("initial", "q1", "mid", "q3", "final") if k in surface_snaps]
+    if not labels:
+        return
+
+    fields = [
+        ("eta", "Sea-surface height eta (m)", "RdBu_r"),
+        ("T_surface", "Surface temperature (degC)", "turbo"),
+        ("S_surface", "Surface salinity (PSU)", "viridis"),
+        ("speed_surface", "Surface speed (m/s)", "magma"),
+    ]
+
+    nrows = len(fields)
+    ncols = len(labels)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.2 * nrows), squeeze=False)
+    marker_size = 8.0
+
+    for i, (key, label, cmap) in enumerate(fields):
+        vals = [surface_snaps[t][key] for t in labels]
+        vmin = float(np.nanmin([np.nanmin(v) for v in vals]))
+        vmax = float(np.nanmax([np.nanmax(v) for v in vals]))
+        if vmin == vmax:
+            vmin, vmax = vmin - 1.0, vmax + 1.0
+
+        for j, tlabel in enumerate(labels):
+            ax = axes[i, j]
+            arr = surface_snaps[tlabel][key]
+            sc = ax.scatter(
+                lon_cell_deg,
+                lat_cell_deg,
+                c=arr,
+                s=marker_size,
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                linewidths=0.0,
+            )
+            ax.set_title(f"{label}\n{tlabel}")
+            ax.set_xlim(-180.0, 180.0)
+            ax.set_ylim(-90.0, 90.0)
+            ax.set_xlabel("Longitude (deg)")
+            if j == 0:
+                ax.set_ylabel("Latitude (deg)")
+            ax.grid(True, alpha=0.15)
+            fig.colorbar(sc, ax=ax, shrink=0.9)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _prepare_initial_state(
     mesh: VoronoiMesh,
     z_coord: OceanZStarCoordinate,
-    init_kind: str,
+    case: CaseSpec,
 ):
+    if case.init_kind == "adiabatic_topography":
+        state = rest_state_mpas_ocean(
+            mesh,
+            z_coord,
+            T_surface=6.0,
+            T_deep=6.0,
+            S_uniform=35.0,
+            H_max=4200.0,
+            land_lat_threshold=90.0,
+        )
+        dist = _great_circle_distance_rad(mesh.lonCell, mesh.latCell, float(jnp.pi), 0.0)
+        bump = 1500.0 * jnp.exp(-0.5 * (dist / (12.0 * jnp.pi / 180.0)) ** 2)
+        H_bathy = jnp.clip(4200.0 - bump, 800.0, 4200.0) * state.land_mask.data
+        eta0 = 0.30 * jnp.exp(-0.5 * (dist / (16.0 * jnp.pi / 180.0)) ** 2) * state.land_mask.data
+        area_w = state.land_mask.data * mesh.areaCell
+        eta0 = eta0 - jnp.sum(eta0 * area_w) / jnp.maximum(jnp.sum(area_w), 1.0)
+        return state._replace(
+            H_bathy=state.H_bathy.replace(data=H_bathy),
+            eta=state.eta.replace(data=eta0.astype(state.eta.data.dtype)),
+        )
+
+    if case.init_kind == "thermohaline":
+        return rest_state_mpas_ocean(
+            mesh,
+            z_coord,
+            T_surface=24.0,
+            T_deep=1.5,
+            S_uniform=34.8,
+            H_max=4500.0,
+            land_lat_threshold=90.0,
+        )
+
+    if case.init_kind == "phillips_two_layer":
+        state = rest_state_mpas_ocean(
+            mesh,
+            z_coord,
+            T_surface=17.0,
+            T_deep=7.0,
+            S_uniform=35.0,
+            H_max=3500.0,
+            land_lat_threshold=90.0,
+        )
+        lat_deg = mesh.latCell * (180.0 / jnp.pi)
+        u_jet_cell = 0.30 * jnp.exp(-((lat_deg - 45.0) / 14.0) ** 2) * state.land_mask.data
+        u_jet_edge = _cell_to_edge_mean(mesh, u_jet_cell) * jnp.cos(mesh.angleEdge)
+        u_data = jnp.zeros_like(state.u.data)
+        u_data = u_data.at[:, 0].set(u_jet_edge)
+        if z_coord.n_levels > 1:
+            u_data = u_data.at[:, 1].set(-0.20 * u_jet_edge)
+        eta_seed = 0.05 * jnp.sin(3.0 * mesh.lonCell) * jnp.cos(2.0 * mesh.latCell) * state.land_mask.data
+        area_w = state.land_mask.data * mesh.areaCell
+        eta_seed = eta_seed - jnp.sum(eta_seed * area_w) / jnp.maximum(jnp.sum(area_w), 1.0)
+        return state._replace(
+            u=state.u.replace(data=u_data.astype(state.u.data.dtype)),
+            eta=state.eta.replace(data=eta_seed.astype(state.eta.data.dtype)),
+        )
+
+    if case.init_kind == "taylor_column":
+        state = rest_state_mpas_ocean(
+            mesh,
+            z_coord,
+            T_surface=8.0,
+            T_deep=4.0,
+            S_uniform=35.0,
+            H_max=4500.0,
+            land_lat_threshold=90.0,
+        )
+        dist = _great_circle_distance_rad(
+            mesh.lonCell,
+            mesh.latCell,
+            float(jnp.pi),
+            float(30.0 * jnp.pi / 180.0),
+        )
+        bump = 1200.0 * jnp.exp(-0.5 * (dist / (10.0 * jnp.pi / 180.0)) ** 2)
+        H_bathy = jnp.clip(4500.0 - bump, 1200.0, 4500.0) * state.land_mask.data
+        u_target_cell = 0.02 * jnp.cos(mesh.latCell) * state.land_mask.data
+        u_target_edge = _cell_to_edge_mean(mesh, u_target_cell) * jnp.cos(mesh.angleEdge)
+        u_data = jnp.broadcast_to(
+            u_target_edge[:, None],
+            state.u.data.shape,
+        ).astype(state.u.data.dtype)
+        return state._replace(
+            H_bathy=state.H_bathy.replace(data=H_bathy),
+            u=state.u.replace(data=u_data),
+        )
+
     state = rest_state_mpas_ocean(
         mesh,
         z_coord,
         T_surface=20.0,
         T_deep=2.0,
         S_uniform=35.0,
-        H_max=500.0,
-        land_lat_threshold=85.0,
+        H_max=4000.0,
+        land_lat_threshold=90.0,
     )
-    if init_kind == "perturbed":
-        mask = state.land_mask.data
-        T_new = state.T.data + 0.5 * jnp.sin(4.0 * mesh.latCell)[:, None] * mask[:, None]
-        eta_new = state.eta.data + 0.01 * jnp.sin(3.0 * mesh.lonCell) * mask
+
+    if case.init_kind == "gravity_wave":
+        dist = _great_circle_distance_rad(mesh.lonCell, mesh.latCell, float(jnp.pi), 0.0)
+        eta0 = 1.0 * jnp.exp(-0.5 * (dist / 0.18) ** 2) * state.land_mask.data
+        area_w = state.land_mask.data * mesh.areaCell
+        eta0 = eta0 - jnp.sum(eta0 * area_w) / jnp.maximum(jnp.sum(area_w), 1.0)
+        state = state._replace(eta=state.eta.replace(data=eta0.astype(state.eta.data.dtype)))
+
+    if case.init_kind in ("wind_gyre", "holland_lin_gyre"):
+        lat_deg = mesh.latCell * (180.0 / jnp.pi)
+        lon_deg = _wrap_lon_deg(mesh.lonCell * (180.0 / jnp.pi))
+        if case.init_kind == "wind_gyre":
+            basin = (
+                (lat_deg >= 10.0) & (lat_deg <= 70.0)
+                & (lon_deg >= -80.0) & (lon_deg <= 20.0)
+            )
+        else:
+            basin = (
+                (lat_deg >= 10.0) & (lat_deg <= 70.0)
+                & (lon_deg >= -70.0) & (lon_deg <= 20.0)
+            )
+        basin_mask = basin.astype(state.land_mask.data.dtype)
+        H_bathy = 4000.0 * basin_mask
+        edge_mask = _edge_ocean_mask(mesh, basin_mask)
         state = state._replace(
-            T=state.T.replace(data=T_new),
-            eta=state.eta.replace(data=eta_new),
+            land_mask=state.land_mask.replace(data=basin_mask),
+            H_bathy=state.H_bathy.replace(data=H_bathy.astype(state.H_bathy.data.dtype)),
+            eta=state.eta.replace(data=(state.eta.data * basin_mask).astype(state.eta.data.dtype)),
+            T=state.T.replace(data=(state.T.data * basin_mask[:, None]).astype(state.T.data.dtype)),
+            S=state.S.replace(data=(state.S.data * basin_mask[:, None]).astype(state.S.data.dtype)),
+            u=state.u.replace(data=(state.u.data * edge_mask[:, None]).astype(state.u.data.dtype)),
         )
+
     return state
 
 
-def _freshwater_for_case(case: CaseSpec, state0, n_cells: int):
-    mask = state0.land_mask.data
-    zeros = jnp.zeros(n_cells, dtype=state0.eta.data.dtype)
-    if case.freshwater_kind == "none":
+def _config_for_case(case: CaseSpec) -> MPASOceanConfig:
+    cfg = MPASOceanConfig(
+        A_h=1.0e4,
+        K_h=1.0e3,
+        A_v=1.0e-3,
+        K_v=1.0e-4,
+        n_barotropic_substeps=30,
+        use_conservation_fixer=case.use_fixers,
+        fix_volume=case.fix_volume,
+        fix_heat=case.fix_heat,
+        fix_salt=case.fix_salt,
+        freshwater_closure="none",
+    )
+    if case.tag in ("wind_gyre", "holland_lin_gyre"):
+        return cfg._replace(
+            A_h=1.0e7,
+            K_h=1.0e6,
+            A_v=1.0e-2,
+            K_v=1.0e-3,
+            n_barotropic_substeps=50,
+            barotropic_damping=1.0e-5,
+        )
+    if case.tag == "adiabatic_topography":
+        return cfg._replace(
+            A_h=5.0e4,
+            K_h=5.0e3,
+            n_barotropic_substeps=40,
+            barotropic_damping=5.0e-6,
+        )
+    if case.tag == "thermohaline":
+        return cfg._replace(
+            A_h=5.0e4,
+            K_h=2.0e4,
+            A_v=5.0e-3,
+            K_v=5.0e-4,
+            n_barotropic_substeps=35,
+        )
+    if case.tag == "phillips_two_layer":
+        return cfg._replace(
+            A_h=2.0e5,
+            K_h=2.0e4,
+            A_v=1.0e-2,
+            K_v=1.0e-3,
+            n_barotropic_substeps=45,
+            barotropic_damping=5.0e-6,
+        )
+    if case.tag == "taylor_column":
+        return cfg._replace(
+            A_h=5.0e5,
+            K_h=5.0e4,
+            A_v=1.0e-2,
+            K_v=1.0e-3,
+            n_barotropic_substeps=60,
+            barotropic_damping=1.0e-5,
+        )
+    return cfg
+
+
+def _forcing_step_for_case(
+    case: CaseSpec,
+    mesh: VoronoiMesh,
+    z_coord: OceanZStarCoordinate,
+    config: MPASOceanConfig,
+):
+    if case.forcing_kind == "none":
         return None
-    if case.freshwater_kind == "precip_uniform":
-        return FreshwaterForcing(
-            precip=1.0e-3 * mask,
-            evap=zeros,
-            runoff=zeros,
-            ice_fw=zeros,
-        )
-    if case.freshwater_kind == "evap_uniform":
-        return FreshwaterForcing(
-            precip=zeros,
-            evap=1.0e-3 * mask,
-            runoff=zeros,
-            ice_fw=zeros,
-        )
-    if case.freshwater_kind == "balanced":
-        return FreshwaterForcing(
-            precip=3.5e-8 * mask,
-            evap=2.0e-8 * mask,
-            runoff=0.5e-8 * mask,
-            ice_fw=zeros,
-        )
-    raise ValueError(f"Unsupported freshwater kind: {case.freshwater_kind!r}")
+
+    if case.forcing_kind in ("wind_gyre", "holland_lin_gyre"):
+        lat_edge_deg = mesh.latEdge * (180.0 / jnp.pi)
+        y_norm = (lat_edge_deg - 10.0) / 60.0
+        active = ((y_norm >= 0.0) & (y_norm <= 1.0)).astype(jnp.float64)
+        tau_max = 0.05
+        if case.forcing_kind == "wind_gyre":
+            tau_x = -tau_max * jnp.sin(jnp.pi * y_norm) * active
+        else:
+            tau_x = -tau_max * jnp.cos(2.0 * jnp.pi * y_norm) * active
+        edge_cos = jnp.cos(mesh.angleEdge)
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        drag_tau = 20.0 * 86400.0
+
+        def _step(state, _step_num: int, dt_now: float):
+            del _step_num
+            mask_c = state.land_mask.data
+            edge_mask = _edge_ocean_mask(mesh, mask_c)
+            h_k = compute_layer_thickness(
+                state.eta.data,
+                state.H_bathy.data,
+                z_coord,
+                min_water_column_m=config.min_water_column_m,
+            )
+            h0 = jnp.maximum(h_k[:, 0], 1.0)
+            h0_edge = jnp.maximum(0.5 * (h0[c1] + h0[c2]), 1.0)
+            du0 = (tau_x * edge_cos) / (config.rho_0 * h0_edge)
+            du0 = du0 * edge_mask
+            drag_factor = jnp.exp(-dt_now / drag_tau)
+            u_new = state.u.data * drag_factor
+            u_new = u_new.at[:, 0].add(dt_now * du0)
+            u_new = u_new * edge_mask[:, None]
+            return state._replace(u=state.u.replace(data=u_new.astype(state.u.data.dtype)))
+
+        return _step
+
+    if case.forcing_kind == "thermohaline":
+        lat = mesh.latCell
+        T_star = 24.0 - 20.0 * jnp.sin(lat) ** 2
+        S_star = 34.7 + 0.6 * jnp.cos(2.0 * lat)
+        tau_T = 20.0 * 86400.0
+        tau_S = 45.0 * 86400.0
+
+        def _step(state, _step_num: int, dt_now: float):
+            del _step_num
+            mask = state.land_mask.data
+            T = state.T.data
+            S = state.S.data
+            dT0 = (-(T[:, 0] - T_star) / tau_T) * mask
+            dS0 = (-(S[:, 0] - S_star) / tau_S) * mask
+            T_new = T.at[:, 0].set(T[:, 0] + dt_now * dT0)
+            S_new = S.at[:, 0].set(S[:, 0] + dt_now * dS0)
+            return state._replace(
+                T=state.T.replace(data=T_new.astype(state.T.data.dtype)),
+                S=state.S.replace(data=S_new.astype(state.S.data.dtype)),
+            )
+
+        return _step
+
+    if case.forcing_kind == "phillips_two_layer":
+        lat_deg = mesh.latCell * (180.0 / jnp.pi)
+        n_bins = 72
+        lat_edges = jnp.linspace(-90.0, 90.0, n_bins + 1)
+        bin_idx = jnp.clip(
+            jnp.searchsorted(lat_edges, lat_deg, side="right") - 1,
+            0,
+            n_bins - 1,
+        ).astype(jnp.int32)
+        base_weights = mesh.areaCell
+        T_star_upper = 16.0 - 10.0 * jnp.sin(mesh.latCell) ** 2
+        T_star_lower = 8.0 - 4.0 * jnp.sin(mesh.latCell) ** 2
+        tau_relax = 15.0 * 86400.0
+        tau_drag = 25.0 * 86400.0
+
+        def _lat_bin_mean(field_1d: jax.Array, mask_1d: jax.Array) -> jax.Array:
+            weights = base_weights * mask_1d
+            wsum = jnp.bincount(bin_idx, weights=weights, length=n_bins)
+            ssum = jnp.bincount(bin_idx, weights=field_1d * weights, length=n_bins)
+            mean_bin = ssum / jnp.maximum(wsum, 1.0e-12)
+            return mean_bin[bin_idx]
+
+        def _step(state, _step_num: int, dt_now: float):
+            del _step_num
+            mask = state.land_mask.data
+            T = state.T.data
+            T_new = T
+            if T.shape[1] >= 1:
+                T0_zm = _lat_bin_mean(T[:, 0], mask)
+                dT0 = (-(T0_zm - T_star_upper) / tau_relax) * mask
+                T_new = T_new.at[:, 0].set(T[:, 0] + dt_now * dT0)
+            if T.shape[1] >= 2:
+                T1_zm = _lat_bin_mean(T[:, 1], mask)
+                dT1 = (-(T1_zm - T_star_lower) / tau_relax) * mask
+                T_new = T_new.at[:, 1].set(T[:, 1] + dt_now * dT1)
+            edge_mask = _edge_ocean_mask(mesh, mask)
+            drag_factor = jnp.exp(-dt_now / tau_drag)
+            u_new = state.u.data * drag_factor * edge_mask[:, None]
+            return state._replace(
+                T=state.T.replace(data=T_new.astype(state.T.data.dtype)),
+                u=state.u.replace(data=u_new.astype(state.u.data.dtype)),
+            )
+
+        return _step
+
+    if case.forcing_kind == "taylor_column":
+        u_target_edge = 0.02 * jnp.cos(mesh.latEdge) * jnp.cos(mesh.angleEdge)
+        tau_restore = 30.0 * 86400.0
+
+        def _step(state, _step_num: int, dt_now: float):
+            del _step_num
+            edge_mask = _edge_ocean_mask(mesh, state.land_mask.data)
+            u_target = jnp.broadcast_to(u_target_edge[:, None], state.u.data.shape)
+            u_new = state.u.data + dt_now * (u_target - state.u.data) / tau_restore
+            u_new = u_new * edge_mask[:, None]
+            return state._replace(u=state.u.replace(data=u_new.astype(state.u.data.dtype)))
+
+        return _step
+
+    raise ValueError(f"Unsupported forcing kind: {case.forcing_kind!r}")
 
 
 def _write_profile_csv(
@@ -795,41 +1155,43 @@ def _run_case(
     lloyd_iterations: int,
     case: CaseSpec,
     dt: float,
+    run_hours: float | None,
     save_every: int,
     latlon_nlon: int,
     latlon_nlat: int,
 ) -> dict:
     mesh = create_voronoi_mesh(subdivision_level=mesh_level, lloyd_iterations=lloyd_iterations)
-    z_coord = create_ocean_z_star(
-        n_levels=n_levels,
-        H_max=500.0,
-        dz_surface=20.0,
-        dz_deep=200.0,
-    )
+    if case.tag == "phillips_two_layer":
+        z_coord = create_ocean_z_star(
+            n_levels=2,
+            H_max=3500.0,
+            dz_surface=120.0,
+            dz_deep=2200.0,
+        )
+    else:
+        z_coord = create_ocean_z_star(
+            n_levels=n_levels,
+            H_max=5000.0,
+            dz_surface=20.0,
+            dz_deep=300.0,
+        )
 
-    config = MPASOceanConfig(
-        A_h=1.0e3,
-        K_h=1.0e2,
-        A_v=1.0e-3,
-        K_v=1.0e-4,
-        n_barotropic_substeps=5,
-        use_conservation_fixer=case.use_fixers,
-        fix_volume=case.fix_volume,
-        fix_heat=case.fix_heat,
-        fix_salt=case.fix_salt,
-        freshwater_closure=case.freshwater_closure,
-    )
+    config = _config_for_case(case)
     model = MPASOceanModel(mesh, z_coord, config)
 
-    state0 = _prepare_initial_state(mesh, z_coord, case.init_kind)
-    freshwater = _freshwater_for_case(case, state0, mesh.nCells)
+    state0 = _prepare_initial_state(mesh, z_coord, case)
+    forcing_step_fn = _forcing_step_for_case(case, mesh, z_coord, config)
 
-    n_steps = max(1, int(case.default_hours * 3600.0 / dt))
+    hours = float(run_hours) if run_hours is not None else float(case.default_hours)
+    n_steps = max(1, int(hours * 3600.0 / dt))
     save_every = max(1, int(save_every))
-    case_dir = out_root / f"L{mesh_level}_K{n_levels}" / case.tag
+    n_levels_case = int(z_coord.n_levels)
+    case_dir = out_root / f"L{mesh_level}_K{n_levels_case}" / case.tag
     case_dir.mkdir(parents=True, exist_ok=True)
 
     lon2d, lat2d, pixel_mapper = _build_latlon_pixel_mapper(mesh, latlon_nlon, latlon_nlat)
+    lon_cell_deg = _wrap_lon_deg(np.asarray(mesh.lonCell, dtype=np.float64) * 180.0 / np.pi)
+    lat_cell_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi
     depth_m = -np.asarray(z_coord.z_full_ref, dtype=np.float64)
 
     snapshot_steps = {
@@ -844,6 +1206,7 @@ def _run_case(
     slab_rows: list[dict[str, float]] = []
     profile_snaps: dict[str, dict[str, np.ndarray]] = {}
     surface_snaps: dict[str, dict[str, np.ndarray]] = {}
+    surface_native_snaps: dict[str, dict[str, np.ndarray]] = {}
     lat_depth_t_snaps: dict[str, np.ndarray] = {}
     lon_depth_t_snaps: dict[str, np.ndarray] = {}
     lat_depth_speed_snaps: dict[str, np.ndarray] = {}
@@ -889,6 +1252,12 @@ def _run_case(
                 "S_surface": pixel_mapper(np.asarray(state.S.data[:, 0], dtype=np.float64)),
                 "speed_surface": pixel_mapper(np.asarray(speed, dtype=np.float64)),
             }
+            surface_native_snaps[label] = {
+                "eta": np.asarray(state.eta.data, dtype=np.float64),
+                "T_surface": np.asarray(state.T.data[:, 0], dtype=np.float64),
+                "S_surface": np.asarray(state.S.data[:, 0], dtype=np.float64),
+                "speed_surface": np.asarray(speed, dtype=np.float64),
+            }
             _, lat_t = _compute_binned_depth_section_mpas(
                 np.asarray(state.T.data, dtype=np.float64),
                 np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi,
@@ -932,7 +1301,9 @@ def _run_case(
     record_step(0, state)
 
     for step in range(1, n_steps + 1):
-        state = model.step(state, dt, freshwater=freshwater)
+        if forcing_step_fn is not None:
+            state = forcing_step_fn(state, step, dt)
+        state = model.step(state, dt)
         if (step % save_every == 0) or (step == n_steps) or (step in snapshot_steps):
             jax.block_until_ready(state.eta.data)
             record_step(step, state)
@@ -953,6 +1324,12 @@ def _run_case(
             "S_surface": pixel_mapper(np.asarray(state.S.data[:, 0], dtype=np.float64)),
             "speed_surface": pixel_mapper(np.asarray(speed, dtype=np.float64)),
         }
+        surface_native_snaps["final"] = {
+            "eta": np.asarray(state.eta.data, dtype=np.float64),
+            "T_surface": np.asarray(state.T.data[:, 0], dtype=np.float64),
+            "S_surface": np.asarray(state.S.data[:, 0], dtype=np.float64),
+            "speed_surface": np.asarray(speed, dtype=np.float64),
+        }
         _write_profile_csv(
             profile_snaps["final"], depth_m, case_dir / "horizontal_profile_final.csv"
         )
@@ -962,7 +1339,7 @@ def _run_case(
     _plot_scalar_timeseries(
         scalar_rows,
         case_dir / "scalar_diagnostics.png",
-        title=f"{case.label} | MPAS ocean L{mesh_level} K{n_levels}",
+        title=f"{case.label} | MPAS ocean L{mesh_level} K{n_levels_case}",
     )
     _plot_vertical_slab_timeseries(
         slab_rows,
@@ -981,6 +1358,13 @@ def _run_case(
         lat2d,
         case_dir / "surface_snapshots_latlon.png",
         title=f"{case.label} | surface maps (lat-lon pixels)",
+    )
+    _plot_surface_snapshots_native(
+        surface_native_snaps,
+        lon_cell_deg,
+        lat_cell_deg,
+        case_dir / "surface_snapshots_native.png",
+        title=f"{case.label} | native MPAS surface maps",
     )
     _plot_depth_section_snapshots(
         case_dir / "lat_depth_sections_temperature.png",
@@ -1023,10 +1407,16 @@ def _run_case(
         case_dir / "surface_snapshots_latlon.npz",
         lon2d=lon2d,
         lat2d=lat2d,
+        lon_cell_deg=lon_cell_deg,
+        lat_cell_deg=lat_cell_deg,
         **{f"{k}_eta": v["eta"] for k, v in surface_snaps.items()},
         **{f"{k}_T_surface": v["T_surface"] for k, v in surface_snaps.items()},
         **{f"{k}_S_surface": v["S_surface"] for k, v in surface_snaps.items()},
         **{f"{k}_speed_surface": v["speed_surface"] for k, v in surface_snaps.items()},
+        **{f"{k}_native_eta": v["eta"] for k, v in surface_native_snaps.items()},
+        **{f"{k}_native_T_surface": v["T_surface"] for k, v in surface_native_snaps.items()},
+        **{f"{k}_native_S_surface": v["S_surface"] for k, v in surface_native_snaps.items()},
+        **{f"{k}_native_speed_surface": v["speed_surface"] for k, v in surface_native_snaps.items()},
         lat_centers=lat_centers,
         lon_centers=lon_centers,
         **{f"{k}_lat_depth_temperature": v for k, v in lat_depth_t_snaps.items()},
@@ -1041,7 +1431,7 @@ def _run_case(
         "case": case.tag,
         "label": case.label,
         "mesh_level": mesh_level,
-        "n_levels": n_levels,
+        "n_levels": n_levels_case,
         "n_cells": int(mesh.nCells),
         "n_edges": int(mesh.nEdges),
         "n_steps": int(df["step"]),
@@ -1097,6 +1487,12 @@ def main() -> None:
         help="Comma-separated vertical levels (e.g., 5,10).",
     )
     parser.add_argument("--dt", type=float, default=60.0, help="Timestep in seconds.")
+    parser.add_argument(
+        "--hours",
+        type=float,
+        default=None,
+        help="If set, override per-case default integration length with this value [hours].",
+    )
     parser.add_argument("--save-every", type=int, default=10, help="Save diagnostics every N steps.")
     parser.add_argument("--lloyd-iterations", type=int, default=30)
     parser.add_argument("--latlon-nlon", type=int, default=360)
@@ -1133,7 +1529,7 @@ def main() -> None:
     print(f"  output={out_root}")
     print(f"  cases={case_tags}")
     print(f"  mesh_levels={mesh_levels}, n_levels={n_levels_list}")
-    print(f"  dt={args.dt}, save_every={args.save_every}, x64={args.x64}")
+    print(f"  dt={args.dt}, hours={args.hours}, save_every={args.save_every}, x64={args.x64}")
 
     all_results = []
     t0 = time.time()
@@ -1149,6 +1545,7 @@ def main() -> None:
                     lloyd_iterations=int(args.lloyd_iterations),
                     case=case,
                     dt=float(args.dt),
+                    run_hours=(None if args.hours is None else float(args.hours)),
                     save_every=int(args.save_every),
                     latlon_nlon=int(args.latlon_nlon),
                     latlon_nlat=int(args.latlon_nlat),

@@ -85,6 +85,10 @@ def _mpas_summary_ok(summary: dict) -> tuple[bool, str]:
     runs = summary.get("runs", []) or []
     if not runs:
         return False, "no_runs"
+    cases_seen = {str(run.get("case", "")) for run in runs}
+    missing = [c for c in REQUESTED_CASES if c not in cases_seen]
+    if missing:
+        return False, f"missing_cases={missing}"
     unstable = []
     for run in runs:
         stable = bool(run.get("stable", False))
@@ -457,6 +461,8 @@ def main() -> int:
                 str(args.levels),
                 "--dt",
                 f"{dt_now:.12g}",
+                "--hours",
+                f"{(24.0 * args.days):.12g}",
                 "--save-every",
                 str(args.save_every),
                 "--lloyd-iterations",
