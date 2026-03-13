@@ -1,0 +1,391 @@
+"""CMIP-style experiment templates for legoESM.
+
+Provides predefined experiment configurations following CMIP6 protocol
+conventions.  Each template encodes the forcing type (fixed vs transient),
+time span, parent experiment, and baseline greenhouse-gas concentrations.
+
+Built-in GHG concentration time series for historical, SSP2-4.5 and
+SSP5-8.5 scenarios allow the model to run without external data files.
+
+Public API
+----------
+- ``ExperimentTemplate`` : experiment metadata NamedTuple
+- ``EXPERIMENT_TEMPLATES`` : dict of built-in templates
+- ``ghg_at_year(experiment_name, year)`` : interpolated (co2, ch4, n2o)
+- ``get_ghg_for_experiment(name, year)`` : same, returned as a dict
+- ``create_experiment_config(name, **overrides)`` : build an
+  ``AMIPExperimentConfig`` from a template
+"""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+import numpy as np
+
+from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+
+# ======================================================================
+# ExperimentTemplate
+# ======================================================================
+
+class ExperimentTemplate(NamedTuple):
+    """Metadata for a CMIP-style experiment.
+
+    Parameters
+    ----------
+    name : str
+        Short experiment identifier (e.g. ``"piControl"``).
+    description : str
+        One-line human-readable description.
+    start_year : int
+        First simulation year.
+    end_year : int
+        Last simulation year (inclusive).
+    parent_experiment : str
+        Name of the parent experiment (empty string if none).
+    forcing_type : str
+        ``"fixed"`` for time-invariant forcing, ``"transient"`` for
+        time-varying GHG concentrations.
+    variant_label : str
+        CMIP6 variant label (e.g. ``"r1i1p1f1"``).
+    base_co2_ppmv : float
+        CO2 concentration [ppmv].  For fixed experiments this is the
+        constant value; for transient experiments the starting value.
+    base_ch4_ppbv : float
+        CH4 concentration [ppbv] (same convention as CO2).
+    base_n2o_ppbv : float
+        N2O concentration [ppbv] (same convention as CO2).
+    """
+
+    name: str
+    description: str
+    start_year: int
+    end_year: int
+    parent_experiment: str
+    forcing_type: str
+    variant_label: str
+    base_co2_ppmv: float
+    base_ch4_ppbv: float
+    base_n2o_ppbv: float
+
+
+# ======================================================================
+# Built-in GHG concentration time series (CMIP6 key years)
+# ======================================================================
+
+# Each dict maps year -> (co2_ppmv, ch4_ppbv, n2o_ppbv).
+
+_GHG_HISTORICAL: dict[int, tuple[float, float, float]] = {
+    1850: (284.3, 808.2, 273.0),
+    1900: (295.7, 911.0, 275.7),
+    1950: (310.7, 1147.0, 289.0),
+    1980: (338.7, 1547.0, 301.0),
+    2000: (369.5, 1773.0, 316.0),
+    2014: (397.5, 1834.0, 327.0),
+}
+
+_GHG_SSP245: dict[int, tuple[float, float, float]] = {
+    2015: (401.0, 1877.0, 328.9),
+    2030: (437.0, 1803.0, 338.0),
+    2050: (502.0, 1555.0, 348.0),
+    2070: (554.0, 1350.0, 355.0),
+    2100: (603.0, 1122.0, 360.0),
+}
+
+_GHG_SSP585: dict[int, tuple[float, float, float]] = {
+    2015: (401.0, 1877.0, 328.9),
+    2030: (472.0, 2030.0, 345.0),
+    2050: (601.0, 2200.0, 373.0),
+    2070: (798.0, 2200.0, 405.0),
+    2100: (1135.0, 2000.0, 435.0),
+}
+
+# Mapping from experiment name to its GHG table (only for experiments
+# that have transient or explicitly tabulated concentrations).
+_GHG_TABLES: dict[str, dict[int, tuple[float, float, float]]] = {
+    "historical": _GHG_HISTORICAL,
+    "ssp245": _GHG_SSP245,
+    "ssp585": _GHG_SSP585,
+}
+
+
+# ======================================================================
+# GHG interpolation
+# ======================================================================
+
+def _interp_ghg_table(
+    table: dict[int, tuple[float, float, float]],
+    year: float,
+) -> tuple[float, float, float]:
+    """Linearly interpolate a GHG table, clamped at endpoints.
+
+    Parameters
+    ----------
+    table : dict[int, (co2, ch4, n2o)]
+        Sparse year-to-concentration mapping.
+    year : float
+        Target year (may be fractional).
+
+    Returns
+    -------
+    (co2_ppmv, ch4_ppbv, n2o_ppbv) : tuple of float
+    """
+    years = sorted(table.keys())
+    co2_vals = np.array([table[y][0] for y in years])
+    ch4_vals = np.array([table[y][1] for y in years])
+    n2o_vals = np.array([table[y][2] for y in years])
+    years_arr = np.array(years, dtype=np.float64)
+
+    co2 = float(np.interp(year, years_arr, co2_vals))
+    ch4 = float(np.interp(year, years_arr, ch4_vals))
+    n2o = float(np.interp(year, years_arr, n2o_vals))
+    return co2, ch4, n2o
+
+
+def ghg_at_year(
+    experiment_name: str,
+    year: float,
+) -> tuple[float, float, float]:
+    """Return GHG concentrations for *experiment_name* at *year*.
+
+    Linear interpolation between benchmark years; clamped at the edges
+    of each scenario's time series.
+
+    For ``"piControl"`` and ``"amip"`` the concentrations are constant
+    (the template's base values).  For ``"1pctCO2"`` the CO2 grows at
+    1 % per year from 284.3 ppmv while CH4 and N2O stay at
+    pre-industrial levels.
+
+    Parameters
+    ----------
+    experiment_name : str
+        One of the keys in ``EXPERIMENT_TEMPLATES``.
+    year : float
+        Calendar year (may be fractional, e.g. 1990.5).
+
+    Returns
+    -------
+    (co2_ppmv, ch4_ppbv, n2o_ppbv) : tuple of float
+
+    Raises
+    ------
+    ValueError
+        If *experiment_name* is not recognised.
+    """
+    if experiment_name not in EXPERIMENT_TEMPLATES:
+        raise ValueError(
+            f"Unknown experiment {experiment_name!r}. "
+            f"Available: {sorted(EXPERIMENT_TEMPLATES)}"
+        )
+
+    tmpl = EXPERIMENT_TEMPLATES[experiment_name]
+
+    # Experiments with a dedicated GHG table.
+    if experiment_name in _GHG_TABLES:
+        return _interp_ghg_table(_GHG_TABLES[experiment_name], year)
+
+    # 1pctCO2: 1 % per year compound increase from pre-industrial CO2.
+    if experiment_name == "1pctCO2":
+        years_elapsed = max(year - tmpl.start_year, 0.0)
+        co2 = tmpl.base_co2_ppmv * (1.01 ** years_elapsed)
+        return co2, tmpl.base_ch4_ppbv, tmpl.base_n2o_ppbv
+
+    # Fixed-forcing experiments (piControl, amip, ...).
+    return tmpl.base_co2_ppmv, tmpl.base_ch4_ppbv, tmpl.base_n2o_ppbv
+
+
+def get_ghg_for_experiment(
+    name: str,
+    year: float,
+) -> dict[str, float]:
+    """Return GHG concentrations as a dict.
+
+    Convenience wrapper around :func:`ghg_at_year`.
+
+    Parameters
+    ----------
+    name : str
+        Experiment name (key in ``EXPERIMENT_TEMPLATES``).
+    year : float
+        Calendar year.
+
+    Returns
+    -------
+    dict
+        ``{"co2_ppmv": ..., "ch4_ppbv": ..., "n2o_ppbv": ...}``
+    """
+    co2, ch4, n2o = ghg_at_year(name, year)
+    return {"co2_ppmv": co2, "ch4_ppbv": ch4, "n2o_ppbv": n2o}
+
+
+# ======================================================================
+# Experiment templates
+# ======================================================================
+
+EXPERIMENT_TEMPLATES: dict[str, ExperimentTemplate] = {
+    "piControl": ExperimentTemplate(
+        name="piControl",
+        description="Pre-industrial control with fixed 1850 forcing",
+        start_year=1850,
+        end_year=2350,
+        parent_experiment="",
+        forcing_type="fixed",
+        variant_label="r1i1p1f1",
+        base_co2_ppmv=284.3,
+        base_ch4_ppbv=808.2,
+        base_n2o_ppbv=273.0,
+    ),
+    "historical": ExperimentTemplate(
+        name="historical",
+        description="Historical simulation with observed transient forcing (1850-2014)",
+        start_year=1850,
+        end_year=2014,
+        parent_experiment="piControl",
+        forcing_type="transient",
+        variant_label="r1i1p1f1",
+        base_co2_ppmv=284.3,
+        base_ch4_ppbv=808.2,
+        base_n2o_ppbv=273.0,
+    ),
+    "ssp245": ExperimentTemplate(
+        name="ssp245",
+        description="SSP2-4.5 future scenario (medium forcing pathway)",
+        start_year=2015,
+        end_year=2100,
+        parent_experiment="historical",
+        forcing_type="transient",
+        variant_label="r1i1p1f1",
+        base_co2_ppmv=401.0,
+        base_ch4_ppbv=1877.0,
+        base_n2o_ppbv=328.9,
+    ),
+    "ssp585": ExperimentTemplate(
+        name="ssp585",
+        description="SSP5-8.5 future scenario (high forcing pathway)",
+        start_year=2015,
+        end_year=2100,
+        parent_experiment="historical",
+        forcing_type="transient",
+        variant_label="r1i1p1f1",
+        base_co2_ppmv=401.0,
+        base_ch4_ppbv=1877.0,
+        base_n2o_ppbv=328.9,
+    ),
+    "amip": ExperimentTemplate(
+        name="amip",
+        description="AMIP simulation with prescribed SST and sea-ice (1979-2014)",
+        start_year=1979,
+        end_year=2014,
+        parent_experiment="",
+        forcing_type="fixed",
+        variant_label="r1i1p1f1",
+        base_co2_ppmv=348.0,
+        base_ch4_ppbv=1650.0,
+        base_n2o_ppbv=306.0,
+    ),
+    "1pctCO2": ExperimentTemplate(
+        name="1pctCO2",
+        description="1% per year CO2 increase from pre-industrial (idealized)",
+        start_year=1850,
+        end_year=2000,
+        parent_experiment="piControl",
+        forcing_type="transient",
+        variant_label="r1i1p1f1",
+        base_co2_ppmv=284.3,
+        base_ch4_ppbv=808.2,
+        base_n2o_ppbv=273.0,
+    ),
+}
+
+
+# ======================================================================
+# Factory: template -> AMIPExperimentConfig
+# ======================================================================
+
+_DAYS_PER_YEAR = 365
+
+
+def _year_to_day(year: int, ref_year: int) -> float:
+    """Convert a calendar year to a model day relative to *ref_year*."""
+    return float((year - ref_year) * _DAYS_PER_YEAR)
+
+
+def create_experiment_config(
+    name: str,
+    **overrides,
+) -> AMIPExperimentConfig:
+    """Create an :class:`AMIPExperimentConfig` from a template.
+
+    The factory translates year-based experiment metadata into
+    model-day-based configuration fields, sets GHG concentrations
+    from the template's base values, and applies any caller-supplied
+    overrides on top.
+
+    Parameters
+    ----------
+    name : str
+        Experiment name (must be a key in ``EXPERIMENT_TEMPLATES``).
+    **overrides
+        Any ``AMIPExperimentConfig`` field name with the desired value.
+        These are applied last and take precedence over template
+        defaults.
+
+    Returns
+    -------
+    AMIPExperimentConfig
+
+    Raises
+    ------
+    ValueError
+        If *name* is not a recognised experiment.
+    TypeError
+        If an override key is not a valid ``AMIPExperimentConfig`` field.
+
+    Examples
+    --------
+    >>> cfg = create_experiment_config("piControl", resolution=48)
+    >>> cfg.days
+    182500
+    >>> cfg.co2_ppmv
+    284.3
+    """
+    if name not in EXPERIMENT_TEMPLATES:
+        raise ValueError(
+            f"Unknown experiment {name!r}. "
+            f"Available: {sorted(EXPERIMENT_TEMPLATES)}"
+        )
+
+    # Validate override keys.
+    valid_fields = set(AMIPExperimentConfig._fields)
+    bad = set(overrides) - valid_fields
+    if bad:
+        raise TypeError(
+            f"Invalid AMIPExperimentConfig field(s): {sorted(bad)}"
+        )
+
+    tmpl = EXPERIMENT_TEMPLATES[name]
+
+    # Total integration length in model days.
+    total_days = (tmpl.end_year - tmpl.start_year) * _DAYS_PER_YEAR
+
+    # GHG concentrations at the start of the experiment.
+    co2, ch4, n2o = ghg_at_year(name, tmpl.start_year)
+
+    # Build the config dict, starting from defaults.
+    cfg_dict: dict = {
+        "days": total_days,
+        "start_day": 0.0,
+        "co2_ppmv": co2,
+        "ch4_ppbv": ch4,
+        "n2o_ppbv": n2o,
+    }
+
+    # Apply caller overrides.
+    cfg_dict.update(overrides)
+
+    return AMIPExperimentConfig(**{
+        **AMIPExperimentConfig()._asdict(),
+        **cfg_dict,
+    })

@@ -444,6 +444,97 @@ def _plot_lon_depth_sections(
     plt.close()
 
 
+def _select_snapshot_items(snapshots, max_items=5):
+    """Pick up to max_items snapshots spanning the integration."""
+    items = sorted(snapshots.items(), key=lambda kv: kv[0])
+    if len(items) <= max_items:
+        return items
+    idx = np.linspace(0, len(items) - 1, max_items, dtype=int)
+    chosen = []
+    seen = set()
+    for i in idx:
+        i = int(i)
+        if i in seen:
+            continue
+        seen.add(i)
+        chosen.append(items[i])
+    return chosen
+
+
+def _plot_depth_section_snapshots(
+    output_path,
+    z_coord,
+    coord_centers,
+    coord_label,
+    section_snapshots,
+    field_label,
+    cmap,
+    *,
+    symmetric=False,
+    suptitle=None,
+):
+    """Plot a field's latitude/longitude-depth sections at multiple times."""
+    if not section_snapshots:
+        return
+
+    depth = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    if float(np.nanmean(depth)) < 0.0:
+        depth = -depth
+    depth_edges = _edges_from_centers(depth)
+    coord_edges = _edges_from_centers(coord_centers)
+
+    finite_values = []
+    for _, section in section_snapshots:
+        sec = np.asarray(section, dtype=np.float64)
+        fin = sec[np.isfinite(sec)]
+        if fin.size:
+            finite_values.append(fin)
+    if finite_values:
+        data_all = np.concatenate(finite_values)
+        if symmetric:
+            vmax = max(float(np.nanmax(np.abs(data_all))), 1.0e-12)
+            vmin = -vmax
+        else:
+            vmin = float(np.nanmin(data_all))
+            vmax = float(np.nanmax(data_all))
+            if abs(vmax - vmin) < 1.0e-12:
+                vmax = vmin + 1.0e-12
+    else:
+        vmin, vmax = 0.0, 1.0
+
+    n_panels = len(section_snapshots)
+    fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 5.5), squeeze=False)
+    axes = axes.ravel()
+    for i, (label, section) in enumerate(section_snapshots):
+        ax = axes[i]
+        sec = np.asarray(section, dtype=np.float64).T
+        mesh = ax.pcolormesh(
+            coord_edges,
+            depth_edges,
+            np.ma.masked_invalid(sec),
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            shading="auto",
+        )
+        ax.set_title(f"{field_label}\n{label}", fontsize=11, fontweight="bold")
+        ax.set_xlabel(coord_label)
+        if i == 0:
+            ax.set_ylabel("Depth [m]")
+        ax.set_ylim(float(np.nanmax(depth_edges)), float(np.nanmin(depth_edges)))
+        ax.grid(True, alpha=0.25)
+        fig.colorbar(mesh, ax=ax, orientation="vertical", pad=0.02)
+
+    fig.suptitle(
+        suptitle or f"{field_label} - {coord_label}-Depth Snapshots",
+        fontsize=14,
+        fontweight="bold",
+    )
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+
 def _remap_to_latlon_pixels(
     data_2d,
     grid,
@@ -1281,6 +1372,50 @@ def run_rest_state_test(
         "Rest-State Test — Longitude-Depth Temperature Sections",
     )
 
+    snap_items = _select_snapshot_items(snapshots, max_items=5)
+    lat_t_snaps = []
+    lon_t_snaps = []
+    for step_num, snap in snap_items:
+        day = step_num * dt / 86400.0
+        label = f"step {step_num}, t={day:.2f} d"
+        _, lat_t = _compute_lat_depth_section(
+            snap.T.data,
+            grid,
+            snap.land_mask.data,
+            lat_bins,
+        )
+        _, lon_t = _compute_lon_depth_section(
+            snap.T.data,
+            grid,
+            snap.land_mask.data,
+            lon_bins,
+        )
+        lat_t_snaps.append((label, lat_t))
+        lon_t_snaps.append((label, lon_t))
+
+    _plot_depth_section_snapshots(
+        f"{output_dir}/rest_state/lat_depth_temperature_snapshots.png",
+        z_coord,
+        lat_centers,
+        "Latitude [deg]",
+        lat_t_snaps,
+        "Temperature [degC]",
+        "RdYlBu_r",
+        symmetric=False,
+        suptitle="Rest-State Test — Latitude-Depth Temperature Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        f"{output_dir}/rest_state/lon_depth_temperature_snapshots.png",
+        z_coord,
+        lon_centers,
+        "Longitude [deg]",
+        lon_t_snaps,
+        "Temperature [degC]",
+        "RdYlBu_r",
+        symmetric=False,
+        suptitle="Rest-State Test — Longitude-Depth Temperature Snapshots",
+    )
+
     _save_case_timeseries(
         f"{output_dir}/rest_state",
         diagnostics,
@@ -1531,6 +1666,79 @@ def run_gravity_wave_test(
             ("Final T anomaly", T_anom_lon_sec, "RdBu_r", True, "Delta T [degC]"),
         ],
         "Barotropic Gravity Wave — Longitude-Depth Sections",
+    )
+
+    snap_items = _select_snapshot_items(snapshots, max_items=5)
+    lat_speed_snaps = []
+    lat_tanom_snaps = []
+    lon_speed_snaps = []
+    lon_tanom_snaps = []
+    for step_num, snap in snap_items:
+        day = step_num * dt / 86400.0
+        label = f"step {step_num}, t={day:.2f} d"
+        speed_3d = jnp.sqrt(snap.u.data**2 + snap.v.data**2)
+        _, lat_speed = _compute_lat_depth_section(speed_3d, grid, snap.land_mask.data, lat_bins)
+        _, lat_tanom = _compute_lat_depth_section(
+            snap.T.data - state_init.T.data,
+            grid,
+            snap.land_mask.data,
+            lat_bins,
+        )
+        _, lon_speed = _compute_lon_depth_section(speed_3d, grid, snap.land_mask.data, lon_bins)
+        _, lon_tanom = _compute_lon_depth_section(
+            snap.T.data - state_init.T.data,
+            grid,
+            snap.land_mask.data,
+            lon_bins,
+        )
+        lat_speed_snaps.append((label, lat_speed))
+        lat_tanom_snaps.append((label, lat_tanom))
+        lon_speed_snaps.append((label, lon_speed))
+        lon_tanom_snaps.append((label, lon_tanom))
+
+    _plot_depth_section_snapshots(
+        f"{output_dir}/gravity_wave/lat_depth_speed_snapshots.png",
+        z_coord,
+        lat_centers,
+        "Latitude [deg]",
+        lat_speed_snaps,
+        "Speed [m/s]",
+        "magma",
+        symmetric=False,
+        suptitle="Barotropic Gravity Wave — Latitude-Depth Speed Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        f"{output_dir}/gravity_wave/lat_depth_tanom_snapshots.png",
+        z_coord,
+        lat_centers,
+        "Latitude [deg]",
+        lat_tanom_snaps,
+        "Temperature anomaly [degC]",
+        "RdBu_r",
+        symmetric=True,
+        suptitle="Barotropic Gravity Wave — Latitude-Depth Temperature-Anomaly Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        f"{output_dir}/gravity_wave/lon_depth_speed_snapshots.png",
+        z_coord,
+        lon_centers,
+        "Longitude [deg]",
+        lon_speed_snaps,
+        "Speed [m/s]",
+        "magma",
+        symmetric=False,
+        suptitle="Barotropic Gravity Wave — Longitude-Depth Speed Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        f"{output_dir}/gravity_wave/lon_depth_tanom_snapshots.png",
+        z_coord,
+        lon_centers,
+        "Longitude [deg]",
+        lon_tanom_snaps,
+        "Temperature anomaly [degC]",
+        "RdBu_r",
+        symmetric=True,
+        suptitle="Barotropic Gravity Wave — Longitude-Depth Temperature-Anomaly Snapshots",
     )
 
     mid = grid.n // 2
@@ -1871,6 +2079,69 @@ def run_wind_driven_gyre_test(
             ("Final speed", speed_lon_sec, "magma", False, "Speed [m/s]"),
         ],
         "Wind-Driven Gyre — Longitude-Depth Sections",
+    )
+
+    snap_items = _select_snapshot_items(snapshots, max_items=5)
+    lat_u_snaps = []
+    lat_speed_snaps = []
+    lon_u_snaps = []
+    lon_speed_snaps = []
+    for step_num, snap in snap_items:
+        day = step_num * dt / 86400.0
+        label = f"step {step_num}, t={day:.2f} d"
+        speed_3d = jnp.sqrt(snap.u.data**2 + snap.v.data**2)
+        _, lat_u = _compute_lat_depth_section(snap.u.data, grid, snap.land_mask.data, lat_bins)
+        _, lat_speed = _compute_lat_depth_section(speed_3d, grid, snap.land_mask.data, lat_bins)
+        _, lon_u = _compute_lon_depth_section(snap.u.data, grid, snap.land_mask.data, lon_bins)
+        _, lon_speed = _compute_lon_depth_section(speed_3d, grid, snap.land_mask.data, lon_bins)
+        lat_u_snaps.append((label, lat_u))
+        lat_speed_snaps.append((label, lat_speed))
+        lon_u_snaps.append((label, lon_u))
+        lon_speed_snaps.append((label, lon_speed))
+
+    _plot_depth_section_snapshots(
+        f"{output_dir}/wind_gyre/lat_depth_u_snapshots.png",
+        z_coord,
+        lat_centers,
+        "Latitude [deg]",
+        lat_u_snaps,
+        "Zonal velocity u [m/s]",
+        "RdBu_r",
+        symmetric=True,
+        suptitle="Wind-Driven Gyre — Latitude-Depth Zonal-Velocity Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        f"{output_dir}/wind_gyre/lat_depth_speed_snapshots.png",
+        z_coord,
+        lat_centers,
+        "Latitude [deg]",
+        lat_speed_snaps,
+        "Speed [m/s]",
+        "magma",
+        symmetric=False,
+        suptitle="Wind-Driven Gyre — Latitude-Depth Speed Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        f"{output_dir}/wind_gyre/lon_depth_u_snapshots.png",
+        z_coord,
+        lon_centers,
+        "Longitude [deg]",
+        lon_u_snaps,
+        "Zonal velocity u [m/s]",
+        "RdBu_r",
+        symmetric=True,
+        suptitle="Wind-Driven Gyre — Longitude-Depth Zonal-Velocity Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        f"{output_dir}/wind_gyre/lon_depth_speed_snapshots.png",
+        z_coord,
+        lon_centers,
+        "Longitude [deg]",
+        lon_speed_snaps,
+        "Speed [m/s]",
+        "magma",
+        symmetric=False,
+        suptitle="Wind-Driven Gyre — Longitude-Depth Speed Snapshots",
     )
 
     mid = grid.n // 2
@@ -2233,6 +2504,88 @@ def _plot_standard_case_outputs(
             ("Final speed", speed_lon_sec, "magma", False, "Speed [m/s]"),
         ],
         f"{case_title} — Longitude-Depth Sections",
+    )
+
+    snap_items = _select_snapshot_items(snapshots, max_items=5)
+    lat_t_snaps = []
+    lat_speed_snaps = []
+    lon_t_snaps = []
+    lon_speed_snaps = []
+    for step_num, snap in snap_items:
+        day = step_num * dt / 86400.0
+        label = f"step {step_num}, t={day:.2f} d"
+        _, lat_t = _compute_lat_depth_section(
+            snap.T.data,
+            grid,
+            snap.land_mask.data,
+            lat_bins,
+        )
+        _, lat_speed = _compute_lat_depth_section(
+            jnp.sqrt(snap.u.data**2 + snap.v.data**2),
+            grid,
+            snap.land_mask.data,
+            lat_bins,
+        )
+        _, lon_t = _compute_lon_depth_section(
+            snap.T.data,
+            grid,
+            snap.land_mask.data,
+            lon_bins,
+        )
+        _, lon_speed = _compute_lon_depth_section(
+            jnp.sqrt(snap.u.data**2 + snap.v.data**2),
+            grid,
+            snap.land_mask.data,
+            lon_bins,
+        )
+        lat_t_snaps.append((label, lat_t))
+        lat_speed_snaps.append((label, lat_speed))
+        lon_t_snaps.append((label, lon_t))
+        lon_speed_snaps.append((label, lon_speed))
+
+    _plot_depth_section_snapshots(
+        os.path.join(case_dir, "lat_depth_sections_temperature_snapshots.png"),
+        z_coord,
+        lat_centers,
+        "Latitude [deg]",
+        lat_t_snaps,
+        "Temperature [degC]",
+        "RdYlBu_r",
+        symmetric=False,
+        suptitle=f"{case_title} — Latitude-Depth Temperature Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        os.path.join(case_dir, "lat_depth_sections_speed_snapshots.png"),
+        z_coord,
+        lat_centers,
+        "Latitude [deg]",
+        lat_speed_snaps,
+        "Speed [m/s]",
+        "magma",
+        symmetric=False,
+        suptitle=f"{case_title} — Latitude-Depth Speed Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        os.path.join(case_dir, "lon_depth_sections_temperature_snapshots.png"),
+        z_coord,
+        lon_centers,
+        "Longitude [deg]",
+        lon_t_snaps,
+        "Temperature [degC]",
+        "RdYlBu_r",
+        symmetric=False,
+        suptitle=f"{case_title} — Longitude-Depth Temperature Snapshots",
+    )
+    _plot_depth_section_snapshots(
+        os.path.join(case_dir, "lon_depth_sections_speed_snapshots.png"),
+        z_coord,
+        lon_centers,
+        "Longitude [deg]",
+        lon_speed_snaps,
+        "Speed [m/s]",
+        "magma",
+        symmetric=False,
+        suptitle=f"{case_title} — Longitude-Depth Speed Snapshots",
     )
 
     # Profile evolution at representative wet column

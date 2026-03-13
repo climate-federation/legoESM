@@ -6,9 +6,11 @@ barotropic/baroclinic time stepping.
 
 Discretizations:
 - Centered finite differences on cubed-sphere: OceanModel(discretization="centered")
+- FV PPM on cubed-sphere: OceanModel(discretization="finite_volume")
 - FC-Gram spectral on cubed-sphere: OceanModel(discretization="fc_gram")
 - FC-Gram + div damping on cubed-sphere: OceanModel(discretization="fc_gram_cgrid")
 - Spectral on Gaussian grid: SpectralOceanModel
+- FV PPM on lat-lon grid: LatLonOceanModel
 """
 
 from legoesm.ocean.dynamics.ocean_model import OceanModel, OCEAN_DISCRETIZATIONS
@@ -77,6 +79,18 @@ from legoesm.ocean.biogeochemistry import (
     air_sea_co2_flux,
     solve_carbonate_system,
 )
+from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
+from legoesm.ocean.state import (
+    LatLonOceanState,
+    LatLonOceanTendencies,
+    LatLonOceanConfig,
+)
+from legoesm.ocean.init_latlon import (
+    rest_state_latlon_ocean,
+    idealized_bathymetry_latlon,
+    wind_driven_gyre_latlon,
+)
+from legoesm.ocean.conservation_latlon import latlon_ocean_conservation_fixer
 from legoesm.ocean.bathymetry import (
     BathymetryConfig,
     CRITICAL_STRAITS,
@@ -143,6 +157,15 @@ __all__ = [
     "load_bathymetry_gaussian",
     "rest_state_ocean_realistic",
     "enforce_straits",
+    # Lat-lon FV ocean
+    "LatLonOceanModel",
+    "LatLonOceanState",
+    "LatLonOceanTendencies",
+    "LatLonOceanConfig",
+    "rest_state_latlon_ocean",
+    "idealized_bathymetry_latlon",
+    "wind_driven_gyre_latlon",
+    "latlon_ocean_conservation_fixer",
     # Freshwater
     "FreshwaterForcing",
     "zero_freshwater",

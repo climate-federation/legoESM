@@ -28,6 +28,13 @@ from legoesm.forcing.external import (
     SolarConfig,
     get_solar_forcing_at_time,
 )
+from legoesm.forcing.experiments import (
+    ExperimentTemplate,
+    EXPERIMENT_TEMPLATES,
+    ghg_at_year,
+    get_ghg_for_experiment,
+    create_experiment_config,
+)
 
 __all__ = [
     "AMIPForcingConfig",
@@ -48,4 +55,10 @@ __all__ = [
     "AerosolConfig",
     "SolarConfig",
     "get_solar_forcing_at_time",
+    # Experiment templates
+    "ExperimentTemplate",
+    "EXPERIMENT_TEMPLATES",
+    "ghg_at_year",
+    "get_ghg_for_experiment",
+    "create_experiment_config",
 ]
