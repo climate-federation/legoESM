@@ -58,6 +58,9 @@ class AMIPExperimentConfig(NamedTuple):
     radiation: str = "gray"  # "gray" or "rrtmg"
     rad_update_steps: int = 1  # recompute radiation every N steps (1 = every step)
     diurnal_cycle: bool = False  # use instantaneous solar zenith angle
+    solar_source: str = "constant"  # "constant", "file", or "spectral_file"
+    solar_file: str = ""
+    solar_spectral_var: str = "solar_fraction_by_gpt"
 
     # Physics — gray radiation
     tau_equator: float = 7.2
@@ -76,6 +79,13 @@ class AMIPExperimentConfig(NamedTuple):
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
     ozone_source: str = "standard"  # "standard", "analytical", or "none"
+    ozone_forcing: str = "inline"  # "inline", "external", or "off"
+    ozone_file: str = ""
+    aerosol_forcing: str = "off"  # "off" or "external"
+    aerosol_file: str = ""
+    aerosol_reference_aod: float = 0.03
+    volcanic_aerosol_file: str = ""
+    volcanic_aerosol_scale: float = 1.0
     cloud_scheme: str = "none"  # "none", "sundqvist", or "xu_randall"
     sfc_emissivity: float = 0.98
     emissivity_ice: float = 0.99

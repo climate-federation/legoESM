@@ -11,9 +11,9 @@ forcings beyond SST/SIC:
 Status
 ------
 - GHG: config + constant-value active; time-varying from file supported
-- Ozone: zonal-mean climatology with lat/vertical interpolation to model grid
-- Aerosol: zonal-mean AOD climatology with lat interpolation to model grid
-- Solar: constant TSI active; time-varying TSI from file supported
+- Ozone: zonal-mean climatology with lat/vertical interpolation + reference fallback
+- Aerosol: zonal-mean AOD climatology with optional volcanic contribution
+- Solar: constant/file TSI and full spectral (per g-point) forcing from NetCDF
 """
 
 from __future__ import annotations
@@ -68,6 +68,19 @@ def _load_nc_timeseries(path: str, varnames: tuple[str, ...]) -> tuple[np.ndarra
 def _interp_1d(times: np.ndarray, values: np.ndarray, day: float) -> float:
     """Linearly interpolate a 1-D time series at *day*, clamping at edges."""
     return float(np.interp(day, times, values))
+
+
+def _interp_2d_time(times: np.ndarray, values: np.ndarray, day: float) -> np.ndarray:
+    """Linearly interpolate a 2-D time series (time, nfeat) at *day*."""
+    if values.ndim != 2 or values.shape[0] != times.shape[0]:
+        raise ValueError(
+            "Expected values with shape (ntime, nfeat) matching times length; "
+            f"got {values.shape} with times {times.shape}",
+        )
+    out = np.zeros((values.shape[1],), dtype=np.float64)
+    for j in range(values.shape[1]):
+        out[j] = np.interp(day, times, values[:, j])
+    return out
 
 
 @lru_cache(maxsize=16)
@@ -135,6 +148,46 @@ def _load_nc_monthly_zonal_with_levels(path: str, varname: str):
                 plev = np.asarray(ds.variables[vname][:], dtype=np.float64)
                 break
     return mid_days, lat, plev, data
+
+
+@lru_cache(maxsize=16)
+def _load_nc_time_gpt(
+    path: str,
+    tsi_var: str,
+    spectral_var: str,
+) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+    """Load time-varying solar spectral forcing.
+
+    Expected variables
+    ------------------
+    - ``time`` (days)
+    - optional ``tsi`` [W/m^2]
+    - spectral weights ``spectral_var`` with shape (time, ngpt)
+    """
+    import netCDF4
+
+    with netCDF4.Dataset(path, "r") as ds:
+        if "time" not in ds.variables:
+            raise ValueError(f"No 'time' variable in spectral solar file {path!r}")
+        times = np.asarray(ds.variables["time"][:], dtype=np.float64)
+        if spectral_var not in ds.variables:
+            raise ValueError(
+                f"Spectral variable {spectral_var!r} not found in {path!r}",
+            )
+        spec = np.asarray(ds.variables[spectral_var][:], dtype=np.float64)
+        if spec.ndim != 2 or spec.shape[0] != times.shape[0]:
+            raise ValueError(
+                f"Spectral variable {spectral_var!r} must have shape (time, ngpt); "
+                f"got {spec.shape}",
+            )
+        tsi = None
+        if tsi_var in ds.variables:
+            tsi = np.asarray(ds.variables[tsi_var][:], dtype=np.float64)
+            if tsi.ndim != 1 or tsi.shape[0] != times.shape[0]:
+                raise ValueError(
+                    f"TSI variable {tsi_var!r} must have shape (time,); got {tsi.shape}",
+                )
+    return times, tsi, spec
 
 
 def _interp_monthly_cyclic(mid_days: np.ndarray, data: np.ndarray, day: float) -> np.ndarray:
@@ -310,10 +363,48 @@ class OzoneConfig(NamedTuple):
         "climatology" (monthly zonal-mean) or "file" (full 3D).
     path : str
         Path to ozone NetCDF file.
+    use_reference_if_missing : bool
+        If True and path is empty, use a built-in reference ozone profile.
+    reference_p_peak_hPa : float
+        Peak pressure for the reference profile [hPa].
+    reference_o3_max_vmr : float
+        Peak ozone VMR [mol/mol] for the reference profile.
+    reference_sigma_logp : float
+        Width of reference ozone in log-pressure space.
+    reference_lat_dependence : bool
+        If True, reference ozone increases toward poles.
     """
     enabled: bool = False
     source: str = "climatology"
     path: str = ""
+    use_reference_if_missing: bool = False
+    reference_p_peak_hPa: float = 30.0
+    reference_o3_max_vmr: float = 8.0e-6
+    reference_sigma_logp: float = 1.5
+    reference_lat_dependence: bool = True
+
+
+def _reference_ozone_profile(
+    lat_grid: jnp.ndarray,
+    p_grid: jnp.ndarray | None,
+    config: OzoneConfig,
+) -> jnp.ndarray:
+    """Reference ozone profile used when external ozone is active without a file."""
+    if p_grid is None:
+        base = jnp.full(lat_grid.shape, config.reference_o3_max_vmr)
+        if config.reference_lat_dependence:
+            base = base * (1.0 + 0.5 * jnp.sin(lat_grid) ** 2)
+        return jnp.clip(base, 1.0e-10, None)
+
+    p_hPa = p_grid / 100.0
+    sigma = config.reference_sigma_logp
+    p_peak = config.reference_p_peak_hPa
+    o3 = config.reference_o3_max_vmr * jnp.exp(
+        -0.5 * ((jnp.log(jnp.maximum(p_hPa, 1.0e-12)) - jnp.log(p_peak)) / sigma) ** 2,
+    )
+    if config.reference_lat_dependence:
+        o3 = o3 * (1.0 + 0.5 * jnp.sin(lat_grid)[..., None] ** 2)
+    return jnp.clip(o3, 1.0e-10, None)
 
 
 def get_ozone_at_time(config: OzoneConfig, day: float,
@@ -342,8 +433,17 @@ def get_ozone_at_time(config: OzoneConfig, day: float,
     """
     if not config.enabled:
         return None
+    if (not config.path) and config.use_reference_if_missing:
+        if lat_grid is None:
+            lat_ref = np.linspace(-90.0, 90.0, 181)
+            lat_ref_rad = jnp.radians(jnp.array(lat_ref))
+            return {"lat": lat_ref, "ozone": np.asarray(_reference_ozone_profile(lat_ref_rad, None, config))}
+        return _reference_ozone_profile(lat_grid, p_grid, config)
     if not config.path:
-        raise ValueError("OzoneConfig.path must be set when enabled=True")
+        raise ValueError(
+            "OzoneConfig.path must be set when enabled=True unless "
+            "use_reference_if_missing=True",
+        )
 
     mid_days, lat, plev, data = _load_nc_monthly_zonal_with_levels(
         config.path, "ozone"
@@ -384,10 +484,36 @@ class AerosolConfig(NamedTuple):
         "climatology" or "file".
     path : str
         Path to aerosol NetCDF file.
+    use_reference_if_missing : bool
+        If True and path is empty, use a built-in reference aerosol field.
+    reference_aod_550 : float
+        Reference background AOD at 550 nm.
+    reference_lat_factor : float
+        Strength of low-latitude enhancement in the reference AOD profile.
+    volcanic_enabled : bool
+        If True, add volcanic aerosol forcing on top of baseline aerosol.
+    volcanic_path : str
+        NetCDF path for volcanic AOD climatology/time-series (same schema as aerosol).
+    volcanic_scale : float
+        Multiplicative scaling applied to volcanic AOD.
     """
     enabled: bool = False
     source: str = "climatology"
     path: str = ""
+    use_reference_if_missing: bool = False
+    reference_aod_550: float = 0.03
+    reference_lat_factor: float = 0.35
+    volcanic_enabled: bool = False
+    volcanic_path: str = ""
+    volcanic_scale: float = 1.0
+
+
+def _reference_aerosol_profile(lat_grid: jnp.ndarray, config: AerosolConfig) -> jnp.ndarray:
+    """Reference zonal aerosol optical depth profile."""
+    aod = config.reference_aod_550 * (
+        1.0 + config.reference_lat_factor * jnp.cos(lat_grid) ** 2
+    )
+    return jnp.clip(aod, 0.0, None)
 
 
 def get_aerosol_at_time(config: AerosolConfig, day: float,
@@ -409,15 +535,55 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     """
     if not config.enabled:
         return None
-    if not config.path:
-        raise ValueError("AerosolConfig.path must be set when enabled=True")
-    mid_days, lat, data = _load_nc_monthly_zonal(config.path, "aod")
-    aod_interp = _interp_monthly_cyclic(mid_days, data, day)
-
-    if lat_grid is not None:
-        return _interp_zonal_to_grid(lat, aod_interp, lat_grid)
+    if config.path:
+        mid_days, lat, data = _load_nc_monthly_zonal(config.path, "aod")
+        aod_interp = _interp_monthly_cyclic(mid_days, data, day)
+        if lat_grid is not None:
+            base_aod = _interp_zonal_to_grid(lat, aod_interp, lat_grid)
+        else:
+            base_aod = {"lat": lat, "aod": aod_interp}
+    elif config.use_reference_if_missing:
+        if lat_grid is None:
+            lat = np.linspace(-90.0, 90.0, 181)
+            lat_rad = jnp.radians(jnp.array(lat))
+            base_aod = {"lat": lat, "aod": np.asarray(_reference_aerosol_profile(lat_rad, config))}
+        else:
+            base_aod = _reference_aerosol_profile(lat_grid, config)
     else:
-        return {"lat": lat, "aod": aod_interp}
+        raise ValueError(
+            "AerosolConfig.path must be set when enabled=True unless "
+            "use_reference_if_missing=True",
+        )
+
+    # Optional volcanic contribution.
+    if config.volcanic_enabled:
+        if config.volcanic_path:
+            mid_days_v, lat_v, data_v = _load_nc_monthly_zonal(config.volcanic_path, "aod")
+            aod_v = _interp_monthly_cyclic(mid_days_v, data_v, day) * config.volcanic_scale
+            if lat_grid is not None:
+                volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
+            else:
+                volc = {"lat": lat_v, "aod": aod_v}
+        elif config.use_reference_if_missing:
+            volc = (
+                jnp.zeros_like(base_aod)
+                if lat_grid is not None
+                else {"lat": base_aod["lat"], "aod": np.zeros_like(base_aod["aod"])}
+            )
+        else:
+            raise ValueError(
+                "AerosolConfig.volcanic_path must be set when volcanic_enabled=True "
+                "unless use_reference_if_missing=True",
+            )
+
+        if lat_grid is not None:
+            return jnp.clip(base_aod + volc, 0.0, None)
+        volc_aod = volc["aod"]
+        if not np.array_equal(base_aod["lat"], volc["lat"]):
+            volc_aod = np.interp(base_aod["lat"], volc["lat"], volc_aod)
+        return {"lat": base_aod["lat"], "aod": np.clip(base_aod["aod"] + volc_aod, 0.0, None)}
+
+    return base_aod
 
 
 # ==============================================================================
@@ -439,13 +605,64 @@ class SolarConfig(NamedTuple):
     S_0 : float
         Total solar irradiance [W/m2]. Default: 1360.
     source : str
-        "constant" or "file" (time-varying TSI from NetCDF).
+        "constant", "file", or "spectral_file".
     path : str
-        Path to TSI time series file.
+        Path to forcing NetCDF file.
+    tsi_var : str
+        Variable name for TSI time series.
+    spectral_var : str
+        Variable name for per-g-point solar fractions when source="spectral_file".
+    normalize_spectral : bool
+        If True, normalize interpolated spectral fractions to sum to one.
     """
     S_0: float = 1360.0
     source: str = "constant"
     path: str = ""
+    tsi_var: str = "tsi"
+    spectral_var: str = "solar_fraction_by_gpt"
+    normalize_spectral: bool = True
+
+
+def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
+    """Return solar forcing dict with broadband TSI and optional spectral weights.
+
+    Returns
+    -------
+    dict
+        Keys:
+        - ``"tsi"``: float [W/m^2]
+        - ``"solar_fraction_by_gpt"``: jax array (ngpt,) or None
+    """
+    if config.source == "constant":
+        return {"tsi": float(config.S_0), "solar_fraction_by_gpt": None}
+
+    if config.source == "file":
+        if not config.path:
+            raise ValueError("SolarConfig.path must be set when source='file'")
+        times, data = _load_nc_timeseries(config.path, (config.tsi_var,))
+        return {"tsi": _interp_1d(times, data[config.tsi_var], day), "solar_fraction_by_gpt": None}
+
+    if config.source == "spectral_file":
+        if not config.path:
+            raise ValueError("SolarConfig.path must be set when source='spectral_file'")
+        times, tsi_series, spec_series = _load_nc_time_gpt(
+            config.path,
+            config.tsi_var,
+            config.spectral_var,
+        )
+        tsi_val = _interp_1d(times, tsi_series, day) if tsi_series is not None else float(config.S_0)
+        spec = _interp_2d_time(times, spec_series, day)
+        spec = np.clip(spec, 0.0, None)
+        if config.normalize_spectral:
+            denom = float(np.sum(spec))
+            if denom <= 0.0:
+                raise ValueError(
+                    f"Interpolated spectral forcing has non-positive sum at day={day}",
+                )
+            spec = spec / denom
+        return {"tsi": tsi_val, "solar_fraction_by_gpt": jnp.array(spec)}
+
+    raise ValueError(f"Unknown solar source: {config.source!r}")
 
 
 def get_tsi_at_time(config: SolarConfig, day: float) -> float:
@@ -460,15 +677,7 @@ def get_tsi_at_time(config: SolarConfig, day: float) -> float:
     -------
     float : TSI [W/m2]
     """
-    if config.source == "constant":
-        return config.S_0
-    elif config.source == "file":
-        if not config.path:
-            raise ValueError("SolarConfig.path must be set when source='file'")
-        times, data = _load_nc_timeseries(config.path, ("tsi",))
-        return _interp_1d(times, data["tsi"], day)
-    else:
-        raise ValueError(f"Unknown solar source: {config.source!r}")
+    return float(get_solar_forcing_at_time(config, day)["tsi"])
 
 
 # ==============================================================================

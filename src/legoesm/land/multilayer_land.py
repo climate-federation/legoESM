@@ -23,6 +23,11 @@ from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon
+from legoesm.land.carbon.stomata import (
+    coupled_farquhar_stomata,
+    compute_stomatal_beta,
+    jarvis_gs,
+)
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.state import MultiLayerLandState
 from legoesm.land.soil_grid import make_soil_grid
@@ -89,7 +94,27 @@ def step_multilayer_land(
     w_frac = jnp.clip(
         (theta_top - theta_r) / (theta_sat - theta_r + 1e-10), 0.0, 1.0
     )
-    beta = config.beta_min + (1.0 - config.beta_min) * w_frac
+    beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac
+
+    # --- Stomatal conductance (if enabled) ---
+    gpp_farq = None
+    if config.stomata.enabled:
+        if config.carbon.scheme == "differland" and carbon_state is not None:
+            LAI = carbon_state.C_fol / config.carbon.LCMA
+            gs, gpp_farq = coupled_farquhar_stomata(
+                T_surface, forcing.sw_down, forcing.co2_ppmv,
+                forcing.q_lowest, forcing.p_surface, LAI, beta_soil,
+                config.stomata)
+            beta = compute_stomatal_beta(
+                gs, LAI, beta_soil, config.stomata)
+        else:
+            gs = jarvis_gs(
+                T_surface, forcing.sw_down, forcing.q_lowest,
+                forcing.p_surface, beta_soil, config.stomata)
+            beta = compute_stomatal_beta(
+                gs, None, beta_soil, config.stomata)
+    else:
+        beta = beta_soil
 
     # --- Surface saturation humidity ---
     q_sat_sfc = saturation_mixing_ratio(T_surface, forcing.p_surface)
@@ -202,7 +227,8 @@ def step_multilayer_land(
         lat_arr = lat if lat is not None else jnp.zeros(ncol)
         carbon_state_new, co2_flux = step_carbon(
             carbon_state, forcing.sw_down, T_surface_new, forcing.co2_ppmv,
-            beta, lat_arr, doy, forcing.precip_total, config.carbon, dt,
+            beta_soil, lat_arr, doy, forcing.precip_total, config.carbon, dt,
+            gpp_override=gpp_farq,
         )
     else:
         carbon_state_new = carbon_state

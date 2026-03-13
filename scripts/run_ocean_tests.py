@@ -69,6 +69,7 @@ _FORCED_CASES = {
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean import (
     OceanModel,
+    OCEAN_DISCRETIZATIONS,
     OceanConfig,
     create_ocean_z_star,
     rest_state_ocean,
@@ -1019,13 +1020,22 @@ def add_wind_stress_tendency(state, grid, z_coord, config, tau_max=0.1):
 # Test Case 1: Rest-state adjustment
 # =====================================================================
 
-def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_size):
+def run_rest_state_test(
+    grid,
+    z_coord,
+    config,
+    dt,
+    n_steps,
+    output_dir,
+    point_size,
+    discretization="centered",
+):
     """Rest-state adjustment: start from rest, verify small tendencies."""
     print("\n" + "=" * 70)
     print("TEST 1: Rest-State Adjustment")
     print("=" * 70)
 
-    model = OceanModel(grid, z_coord, config)
+    model = OceanModel(grid, z_coord, config, discretization=discretization)
     step_fn = model.step_checked if config.enable_runtime_checks else model.step
     state = _rest_state_all_ocean(grid, z_coord)
     _assert_all_ocean(state, "rest_state_test")
@@ -1288,7 +1298,16 @@ def run_rest_state_test(grid, z_coord, config, dt, n_steps, output_dir, point_si
 # Test Case 2: Barotropic gravity wave
 # =====================================================================
 
-def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_size):
+def run_gravity_wave_test(
+    grid,
+    z_coord,
+    config,
+    dt,
+    n_steps,
+    output_dir,
+    point_size,
+    discretization="centered",
+):
     """Barotropic gravity wave: Gaussian SSH perturbation."""
     print("\n" + "=" * 70)
     print("TEST 2: Barotropic Gravity Wave")
@@ -1323,7 +1342,7 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
     c_wave = float(jnp.sqrt(9.81 * 5500.0))
     print(f"  Expected wave speed: {c_wave:.0f} m/s")
 
-    model = OceanModel(grid, z_coord, config)
+    model = OceanModel(grid, z_coord, config, discretization=discretization)
     step_fn = model.step_checked if config.enable_runtime_checks else model.step
 
     # JIT warmup
@@ -1545,7 +1564,16 @@ def run_gravity_wave_test(grid, z_coord, config, dt, n_steps, output_dir, point_
 # Test Case 3: Wind-driven gyre
 # =====================================================================
 
-def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, point_size):
+def run_wind_driven_gyre_test(
+    grid,
+    z_coord,
+    config,
+    dt,
+    n_steps,
+    output_dir,
+    point_size,
+    discretization="centered",
+):
     """Wind-driven double gyre with idealized zonal wind stress."""
     print("\n" + "=" * 70)
     print("TEST 3: Wind-Driven Gyre")
@@ -1578,7 +1606,7 @@ def run_wind_driven_gyre_test(grid, z_coord, config, dt, n_steps, output_dir, po
         f"A_v={gyre_config.A_v:.1e}, K_v={gyre_config.K_v:.1e}",
     )
 
-    model = OceanModel(grid, z_coord, gyre_config)
+    model = OceanModel(grid, z_coord, gyre_config, discretization=discretization)
     step_fn = model.step_checked if gyre_config.enable_runtime_checks else model.step
 
     # JIT warmup
@@ -2247,6 +2275,7 @@ def _run_forced_ocean_case(
     forcing_step_fn=None,
     central_longitude=0.0,
     extra_plot_fn=None,
+    discretization="centered",
 ):
     """Run a generic forced idealized ocean case with standard diagnostics."""
     print("\n" + "=" * 70)
@@ -2259,7 +2288,7 @@ def _run_forced_ocean_case(
         f"n_baro={case_config.n_barotropic_substeps}",
     )
 
-    model = OceanModel(grid, z_coord, case_config)
+    model = OceanModel(grid, z_coord, case_config, discretization=discretization)
     step_fn = model.step_checked if case_config.enable_runtime_checks else model.step
     state = state_init
 
@@ -2325,7 +2354,7 @@ def _run_forced_ocean_case(
 
 
 def run_adiabatic_topography_adjustment_test(
-    grid, z_coord, config, dt, n_steps, output_dir, point_size,
+    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
 ):
     """Adiabatic adjustment over topography."""
     state = _rest_state_all_ocean(
@@ -2402,11 +2431,12 @@ def run_adiabatic_topography_adjustment_test(
         point_size,
         forcing_step_fn=None,
         extra_plot_fn=extra,
+        discretization=discretization,
     )
 
 
 def run_holland_lin_double_gyre_test(
-    grid, z_coord, config, dt, n_steps, output_dir, point_size,
+    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
 ):
     """Wind-forced double gyre in a closed rectangular basin (Holland-Lin style)."""
     state = _rest_state_all_ocean(
@@ -2496,11 +2526,12 @@ def run_holland_lin_double_gyre_test(
         point_size,
         forcing_step_fn=forcing_step_fn,
         extra_plot_fn=extra,
+        discretization=discretization,
     )
 
 
 def run_diabatic_thermohaline_test(
-    grid, z_coord, config, dt, n_steps, output_dir, point_size,
+    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
 ):
     """Diabatic idealized thermohaline circulation with SST/SSS restoring."""
     state = _rest_state_all_ocean(
@@ -2575,11 +2606,12 @@ def run_diabatic_thermohaline_test(
         point_size,
         forcing_step_fn=forcing_step_fn,
         extra_plot_fn=extra,
+        discretization=discretization,
     )
 
 
 def run_two_layer_phillips_test(
-    grid, base_z_coord, config, dt, n_steps, output_dir, point_size,
+    grid, base_z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
 ):
     """Two-layer Phillips-style baroclinic test with zonal-mean relaxation."""
     del base_z_coord
@@ -2693,11 +2725,12 @@ def run_two_layer_phillips_test(
         point_size,
         forcing_step_fn=forcing_step_fn,
         extra_plot_fn=extra,
+        discretization=discretization,
     )
 
 
 def run_taylor_column_test(
-    grid, z_coord, config, dt, n_steps, output_dir, point_size,
+    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
 ):
     """Taylor-column style flow over a seamount in rotating stratified ocean."""
     sim_seconds = n_steps * dt
@@ -2786,6 +2819,7 @@ def run_taylor_column_test(
         point_size,
         forcing_step_fn=forcing_step_fn,
         extra_plot_fn=extra,
+        discretization=discretization,
     )
 
 
@@ -2822,6 +2856,13 @@ def main():
                         help="Which test to run (default: all)")
     parser.add_argument("--runtime-checks", action="store_true",
                         help="Enable host-side runtime invariant checks")
+    parser.add_argument(
+        "--discretization",
+        type=str,
+        default="centered",
+        choices=OCEAN_DISCRETIZATIONS,
+        help="Ocean horizontal discretization (default: centered).",
+    )
     args = parser.parse_args()
 
     if args.resolution < 1:
@@ -2853,6 +2894,7 @@ def main():
     print(f"  Backend:      {jax.default_backend()}")
     print(f"  Devices:      {jax.device_count()}")
     print(f"  Float dtype:  {jnp.zeros(1).dtype}")
+    print(f"  Discretization: {args.discretization}")
 
     # Grid setup
     print(f"\nCreating C{args.resolution} cubed-sphere grid...")
@@ -2925,6 +2967,7 @@ def main():
             "rest_state",
             lambda: run_rest_state_test(
                 grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+                args.discretization,
             ),
         )
 
@@ -2933,6 +2976,7 @@ def main():
             "gravity_wave",
             lambda: run_gravity_wave_test(
                 grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+                args.discretization,
             ),
         )
 
@@ -2941,6 +2985,7 @@ def main():
             "wind_gyre",
             lambda: run_wind_driven_gyre_test(
                 grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+                args.discretization,
             ),
         )
 
@@ -2949,6 +2994,7 @@ def main():
             "adiabatic_topography",
             lambda: run_adiabatic_topography_adjustment_test(
                 grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+                args.discretization,
             ),
         )
 
@@ -2957,6 +3003,7 @@ def main():
             "holland_lin_gyre",
             lambda: run_holland_lin_double_gyre_test(
                 grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+                args.discretization,
             ),
         )
 
@@ -2965,6 +3012,7 @@ def main():
             "thermohaline",
             lambda: run_diabatic_thermohaline_test(
                 grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+                args.discretization,
             ),
         )
 
@@ -2973,6 +3021,7 @@ def main():
             "phillips_two_layer",
             lambda: run_two_layer_phillips_test(
                 grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+                args.discretization,
             ),
         )
 
@@ -2981,6 +3030,7 @@ def main():
             "taylor_column",
             lambda: run_taylor_column_test(
                 grid, z_coord, config, args.dt, n_steps, output_dir, point_size,
+                args.discretization,
             ),
         )
 
@@ -3040,6 +3090,7 @@ def main():
             "days": float(args.days),
             "n_steps": int(n_steps),
             "runtime_checks": bool(args.runtime_checks),
+            "discretization": str(args.discretization),
         },
         "config": _config_to_dict(config),
         "case_configs": case_configs,
@@ -3053,6 +3104,7 @@ def main():
         f.write("=" * 48 + "\n")
         f.write(f"Resolution: C{args.resolution}, Levels: {args.levels}\n")
         f.write(f"dt={args.dt:.0f}s, days={args.days:.2f}, steps={n_steps}\n")
+        f.write(f"discretization={args.discretization}\n")
         f.write(f"Runtime checks: {args.runtime_checks}\n")
         f.write(
             "Config: "

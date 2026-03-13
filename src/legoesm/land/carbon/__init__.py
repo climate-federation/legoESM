@@ -22,6 +22,17 @@ from legoesm.land.carbon.carbon_cycle import (
     step_carbon,
     step_carbon_differland,
 )
+from legoesm.land.carbon.stomata import (
+    StomataConfig,
+    arrhenius,
+    peaked_arrhenius,
+    farquhar_photosynthesis,
+    ball_berry_gs,
+    medlyn_gs,
+    jarvis_gs,
+    coupled_farquhar_stomata,
+    compute_stomatal_beta,
+)
 
 __all__ = [
     "CarbonConfig",
@@ -32,4 +43,14 @@ __all__ = [
     "seasonal_co2_flux",
     "step_carbon",
     "step_carbon_differland",
+    # Stomata / plant physiology
+    "StomataConfig",
+    "arrhenius",
+    "peaked_arrhenius",
+    "farquhar_photosynthesis",
+    "ball_berry_gs",
+    "medlyn_gs",
+    "jarvis_gs",
+    "coupled_farquhar_stomata",
+    "compute_stomatal_beta",
 ]

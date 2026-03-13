@@ -26,6 +26,7 @@ from legoesm.forcing.external import (
     OzoneConfig,
     AerosolConfig,
     SolarConfig,
+    get_solar_forcing_at_time,
 )
 
 __all__ = [
@@ -46,4 +47,5 @@ __all__ = [
     "OzoneConfig",
     "AerosolConfig",
     "SolarConfig",
+    "get_solar_forcing_at_time",
 ]

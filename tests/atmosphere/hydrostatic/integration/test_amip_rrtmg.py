@@ -203,6 +203,74 @@ class TestRRTMGRadiationDirect:
             f"Higher albedo should reflect more SW: low={sw_up_low:.1f}, high={sw_up_high:.1f}"
         )
 
+    def test_rrtmg_aerosol_coupling_reduces_sw_surface_flux(self, rrtmg_setup):
+        """Adding aerosol optical depth should reduce downwelling SW at surface."""
+        grid = rrtmg_setup["grid"]
+        sigma = rrtmg_setup["sigma"]
+        state = rrtmg_setup["state"]
+        q_v = rrtmg_setup["q_v"]
+
+        nlev = sigma.n_levels
+        ncol = 6 * grid.n * grid.n
+        p_full = (state.p_s.data[..., None] * sigma.sigma_full).reshape(ncol, nlev)
+        p_half = (state.p_s.data[..., None] * sigma.sigma_half).reshape(ncol, nlev + 1)
+        T_col = state.T.data.reshape(ncol, nlev)
+        q_v_col = q_v.reshape(ncol, nlev)
+        T_sfc = state.T.data[..., -1].reshape(ncol)
+        cos_zenith = 0.5 * jnp.ones(ncol)
+        cfg = RRTMGPConfig(sfc_albedo=0.06, S_0=1360.0)
+
+        out_clear = rrtmgp_radiation(
+            T=T_col, p_full=p_full, p_half=p_half,
+            sfc_temperature=T_sfc, q_v=q_v_col,
+            cos_zenith=cos_zenith, config=cfg,
+        )
+        aerosol_od = 0.25 * jnp.ones((ncol, nlev))
+        out_hazy = rrtmgp_radiation(
+            T=T_col, p_full=p_full, p_half=p_half,
+            sfc_temperature=T_sfc, q_v=q_v_col,
+            cos_zenith=cos_zenith, config=cfg,
+            aerosol_optical_depth=aerosol_od,
+        )
+        sw_down_clear = float(jnp.mean(out_clear.sw_flux_down[:, -1]))
+        sw_down_hazy = float(jnp.mean(out_hazy.sw_flux_down[:, -1]))
+        assert sw_down_hazy < sw_down_clear
+
+    def test_rrtmg_spectral_solar_weights_are_consumed(self, rrtmg_setup):
+        """Custom solar spectral weights should alter SW fluxes."""
+        grid = rrtmg_setup["grid"]
+        sigma = rrtmg_setup["sigma"]
+        state = rrtmg_setup["state"]
+        q_v = rrtmg_setup["q_v"]
+
+        nlev = sigma.n_levels
+        ncol = 6 * grid.n * grid.n
+        p_full = (state.p_s.data[..., None] * sigma.sigma_full).reshape(ncol, nlev)
+        p_half = (state.p_s.data[..., None] * sigma.sigma_half).reshape(ncol, nlev + 1)
+        T_col = state.T.data.reshape(ncol, nlev)
+        q_v_col = q_v.reshape(ncol, nlev)
+        T_sfc = state.T.data[..., -1].reshape(ncol)
+        cos_zenith = 0.5 * jnp.ones(ncol)
+        cfg = RRTMGPConfig(sfc_albedo=0.06, S_0=1360.0)
+
+        out_default = rrtmgp_radiation(
+            T=T_col, p_full=p_full, p_half=p_half,
+            sfc_temperature=T_sfc, q_v=q_v_col,
+            cos_zenith=cos_zenith, config=cfg,
+        )
+        # Strongly front-load energy to low g-points to force a measurable change.
+        ngpt = 112
+        weights = jnp.linspace(2.0, 0.2, ngpt)
+        weights = weights / jnp.sum(weights)
+        out_custom = rrtmgp_radiation(
+            T=T_col, p_full=p_full, p_half=p_half,
+            sfc_temperature=T_sfc, q_v=q_v_col,
+            cos_zenith=cos_zenith, config=cfg,
+            solar_spectral_fraction=weights,
+        )
+        diff = float(jnp.mean(jnp.abs(out_default.sw_flux_down - out_custom.sw_flux_down)))
+        assert diff > 1.0e-8
+
 
 class TestAMIPWithRRTMG:
     """Integration test: AMIP pipeline with RRTMG radiation."""

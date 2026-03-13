@@ -147,6 +147,8 @@ def rrtmgp_radiation(
     cloud_path_ice: jnp.ndarray | None = None,
     cloud_r_eff_liq: jnp.ndarray | None = None,
     cloud_r_eff_ice: jnp.ndarray | None = None,
+    aerosol_optical_depth: jnp.ndarray | None = None,
+    solar_spectral_fraction: jnp.ndarray | None = None,
 ) -> RadiationOutput:
     """Compute radiation using jax-rrtmgp.
 
@@ -186,6 +188,13 @@ def rrtmgp_radiation(
         Liquid cloud effective radius per layer (ncol, nlev) [m].
     cloud_r_eff_ice : jnp.ndarray | None
         Ice cloud effective radius per layer (ncol, nlev) [m].
+    aerosol_optical_depth : jnp.ndarray | None
+        Prescribed aerosol optical depth per layer (ncol, nlev), legoESM
+        ordering (index 0 = TOA). If provided, SW extinction/scattering
+        is augmented in the radiative transfer solve.
+    solar_spectral_fraction : jnp.ndarray | None
+        Optional per-g-point solar source weights (ngpt_sw,). If provided,
+        this overrides the default RRTMGP solar partitioning.
 
     Returns
     -------
@@ -268,6 +277,25 @@ def rrtmgp_radiation(
     else:
         cpl_3d = cpi_3d = crl_3d = cri_3d = None
 
+    # Optional externally prescribed aerosol optical depth.
+    if aerosol_optical_depth is not None:
+        aerosol_od_3d = _add_halos(jnp.clip(aerosol_optical_depth, 0.0, None)[:, None, ::-1])
+    else:
+        aerosol_od_3d = None
+
+    # Optional full spectral solar forcing (weights by SW g-point).
+    if solar_spectral_fraction is not None:
+        solar_weights = jnp.clip(jnp.asarray(solar_spectral_fraction), 0.0, None)
+        denom = jnp.maximum(jnp.sum(solar_weights), 1.0e-30)
+        solar_weights = solar_weights / denom
+        if solar_weights.shape[0] != optics_lib.n_gpt_sw:
+            raise ValueError(
+                "solar_spectral_fraction has wrong length: "
+                f"{solar_weights.shape[0]} (expected {optics_lib.n_gpt_sw})",
+            )
+    else:
+        solar_weights = None
+
     # --- 4. Solve LW (vmr_fields keyed by chemical formula; solve_lw reindexes) ---
     lw_fluxes = two_stream.solve_lw(
         p_3d,
@@ -296,6 +324,10 @@ def rrtmgp_radiation(
         cloud_path_liq=cpl_3d,
         cloud_r_eff_ice=cri_3d,
         cloud_path_ice=cpi_3d,
+        aerosol_optical_depth=aerosol_od_3d,
+        aerosol_single_scattering_albedo=config.aerosol_ssa,
+        aerosol_asymmetry_factor=config.aerosol_g,
+        solar_fraction_by_gpt=solar_weights,
         use_scan=config.use_scan,
     )
 

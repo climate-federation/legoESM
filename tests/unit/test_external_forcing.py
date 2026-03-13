@@ -6,6 +6,7 @@ Creates temporary NetCDF files for file-based interpolation tests.
 import tempfile
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -18,6 +19,7 @@ from legoesm.forcing.external import (
     get_ghg_at_time,
     get_ozone_at_time,
     get_aerosol_at_time,
+    get_solar_forcing_at_time,
     get_tsi_at_time,
 )
 
@@ -48,6 +50,20 @@ def _make_tsi_nc(path, times, tsi):
         t[:] = times
         v = ds.createVariable("tsi", "f8", ("time",))
         v[:] = tsi
+
+
+def _make_solar_spectral_nc(path, times, tsi, spectral):
+    """Write a solar forcing file with broadband + per-g-point spectra."""
+    import netCDF4
+    with netCDF4.Dataset(path, "w") as ds:
+        ds.createDimension("time", len(times))
+        ds.createDimension("gpt", spectral.shape[1])
+        t = ds.createVariable("time", "f8", ("time",))
+        t[:] = times
+        tsi_v = ds.createVariable("tsi", "f8", ("time",))
+        tsi_v[:] = tsi
+        spec_v = ds.createVariable("solar_fraction_by_gpt", "f8", ("time", "gpt"))
+        spec_v[:] = spectral
 
 
 def _make_monthly_zonal_nc(path, varname, lat, data_12):
@@ -138,6 +154,20 @@ class TestSolar:
         with pytest.raises(ValueError, match="Unknown solar source"):
             get_tsi_at_time(cfg, day=0.0)
 
+    def test_spectral_file_interpolation(self, tmp_path):
+        nc_path = str(tmp_path / "solar_spectral.nc")
+        times = np.array([0.0, 365.0], dtype=np.float64)
+        tsi = np.array([1360.0, 1362.0], dtype=np.float64)
+        spectral = np.array([[0.7, 0.3], [0.2, 0.8]], dtype=np.float64)
+        _make_solar_spectral_nc(nc_path, times, tsi, spectral)
+
+        cfg = SolarConfig(source="spectral_file", path=nc_path)
+        forcing = get_solar_forcing_at_time(cfg, day=182.5)
+        assert abs(forcing["tsi"] - 1361.0) < 1.0e-6
+        weights = np.asarray(forcing["solar_fraction_by_gpt"])
+        np.testing.assert_allclose(np.sum(weights), 1.0, atol=1.0e-12)
+        np.testing.assert_allclose(weights, np.array([0.45, 0.55]), atol=1.0e-6)
+
 
 # ==============================================================================
 # Ozone tests
@@ -168,6 +198,15 @@ class TestOzone:
         with pytest.raises(ValueError, match="path must be set"):
             get_ozone_at_time(cfg, day=0.0)
 
+    def test_reference_fallback(self):
+        lat_grid = jnp.array([0.0, np.deg2rad(45.0)])
+        p_grid = jnp.array([[90000.0, 30000.0], [90000.0, 30000.0]])
+        cfg = OzoneConfig(enabled=True, use_reference_if_missing=True)
+        out = get_ozone_at_time(cfg, day=100.0, lat_grid=lat_grid, p_grid=p_grid)
+        assert out.shape == p_grid.shape
+        assert np.all(np.isfinite(np.asarray(out)))
+        assert float(np.max(out)) > float(np.min(out))
+
 
 # ==============================================================================
 # Aerosol tests
@@ -195,6 +234,32 @@ class TestAerosol:
         cfg = AerosolConfig(enabled=True, path="")
         with pytest.raises(ValueError, match="path must be set"):
             get_aerosol_at_time(cfg, day=0.0)
+
+    def test_reference_fallback(self):
+        lat_grid = jnp.linspace(-np.pi / 2, np.pi / 2, 7)
+        cfg = AerosolConfig(enabled=True, use_reference_if_missing=True, reference_aod_550=0.04)
+        out = get_aerosol_at_time(cfg, day=12.0, lat_grid=lat_grid)
+        assert out.shape == lat_grid.shape
+        assert np.all(np.asarray(out) >= 0.0)
+
+    def test_volcanic_addition(self, tmp_path):
+        nc_base = str(tmp_path / "aod_base.nc")
+        nc_volc = str(tmp_path / "aod_volc.nc")
+        lat = np.linspace(-90, 90, 19)
+        base = np.full((12, 19), 0.02)
+        volc = np.full((12, 19), 0.04)
+        _make_monthly_zonal_nc(nc_base, "aod", lat, base)
+        _make_monthly_zonal_nc(nc_volc, "aod", lat, volc)
+
+        cfg = AerosolConfig(
+            enabled=True,
+            path=nc_base,
+            volcanic_enabled=True,
+            volcanic_path=nc_volc,
+            volcanic_scale=0.5,
+        )
+        out = get_aerosol_at_time(cfg, day=40.0)
+        np.testing.assert_allclose(out["aod"], 0.02 + 0.5 * 0.04, atol=1.0e-6)
 
 
 # ==============================================================================

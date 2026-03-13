@@ -235,6 +235,10 @@ def solve_sw(
     cloud_path_liq: Array | None = None,
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
+    aerosol_optical_depth: Array | None = None,
+    aerosol_single_scattering_albedo: float = 0.93,
+    aerosol_asymmetry_factor: float = 0.70,
+    solar_fraction_by_gpt: Array | None = None,
     use_scan: bool = False,
 ) -> dict[str, Array]:
   """Solves the two-stream radiative transfer equation for shortwave.
@@ -263,6 +267,11 @@ def solve_sw(
     cloud_r_eff_ice: The effective radius of cloud ice particles [m].
     cloud_path_ice: The cloud ice water path in each atmospheric grid cell
       [kg/m²].
+    aerosol_optical_depth: Optional aerosol optical depth per layer (same
+      shape as `temperature`), added to SW extinction.
+    aerosol_single_scattering_albedo: Bulk aerosol single-scattering albedo.
+    aerosol_asymmetry_factor: Bulk aerosol asymmetry factor.
+    solar_fraction_by_gpt: Optional external spectral solar weights by g-point.
     use_scan: Whether to use scan or for loops for the recurrent operation.
 
   Returns:
@@ -290,6 +299,28 @@ def solve_sw(
         cloud_r_eff_ice,
         cloud_path_ice,
     )
+    if aerosol_optical_depth is not None:
+      tau_bg = jnp.maximum(sw_optical_props['optical_depth'], 1.0e-12)
+      tau_aer = jnp.maximum(aerosol_optical_depth, 0.0)
+      tau_tot = tau_bg + tau_aer
+      w_bg = sw_optical_props['ssa']
+      g_bg = sw_optical_props['asymmetry_factor']
+      w_num = tau_bg * w_bg + tau_aer * aerosol_single_scattering_albedo
+      w_tot = jnp.clip(w_num / jnp.maximum(tau_tot, 1.0e-12), 0.0, 1.0)
+      g_num = (
+          tau_bg * w_bg * g_bg
+          + tau_aer * aerosol_single_scattering_albedo * aerosol_asymmetry_factor
+      )
+      g_tot = jnp.clip(
+          g_num / jnp.maximum(tau_tot * jnp.maximum(w_tot, 1.0e-12), 1.0e-12),
+          -1.0,
+          1.0,
+      )
+      sw_optical_props = {
+          'optical_depth': tau_tot,
+          'ssa': w_tot,
+          'asymmetry_factor': g_tot,
+      }
     optical_props_2stream = monochromatic_two_stream.sw_cell_properties(
         zenith,
         sw_optical_props['optical_depth'],
@@ -302,7 +333,11 @@ def solve_sw(
     sfc_albedo = atmos_state.sfc_alb * jnp.ones_like(temperature)[:, :, 0]
 
     # Monochromatic top of atmosphere flux.
-    solar_flux = atmos_state.irrad * optics_lib.solar_fraction_by_gpt[igpt]
+    if solar_fraction_by_gpt is None:
+      spectral_weight = optics_lib.solar_fraction_by_gpt[igpt]
+    else:
+      spectral_weight = solar_fraction_by_gpt[igpt]
+    solar_flux = atmos_state.irrad * spectral_weight
     toa_flux = solar_flux * jnp.ones_like(temperature)[:, :, 0]
 
     sources_2stream = monochromatic_two_stream.sw_cell_source(

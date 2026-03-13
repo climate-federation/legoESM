@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm.land.carbon.config import CarbonConfig
+from legoesm.land.carbon.stomata import StomataConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
@@ -33,6 +34,8 @@ class LandConfig(NamedTuple):
     snow_melt_rate: float = 5.0e-6  # Snowmelt rate [kg/m2/s/K above T_melt]
     # Carbon cycle
     carbon: CarbonConfig = CarbonConfig()
+    # Stomatal conductance / plant physiology
+    stomata: StomataConfig = StomataConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -60,3 +63,5 @@ class MultiLayerLandConfig(NamedTuple):
     richards: RichardsConfig = RichardsConfig()
     # Carbon cycle
     carbon: CarbonConfig = CarbonConfig()
+    # Stomatal conductance / plant physiology
+    stomata: StomataConfig = StomataConfig()

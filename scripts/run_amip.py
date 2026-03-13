@@ -124,6 +124,29 @@ parser.add_argument("--ozone-source", type=str, default="standard",
                     choices=["standard", "analytical", "none"],
                     help="Ozone profile for RRTMG: standard (US Std Atm 1976), "
                          "analytical (lat-dependent Gaussian), none (default: standard)")
+parser.add_argument("--ozone-forcing", type=str, default="inline",
+                    choices=["inline", "external", "off"],
+                    help="Ozone forcing mode: inline profile (default), external file/reference, or off")
+parser.add_argument("--ozone-file", type=str, default="",
+                    help="Optional NetCDF ozone forcing file (used when --ozone-forcing external)")
+parser.add_argument("--aerosol-forcing", type=str, default="off",
+                    choices=["off", "external"],
+                    help="Aerosol forcing mode: off (default) or external (file/reference)")
+parser.add_argument("--aerosol-file", type=str, default="",
+                    help="Optional NetCDF aerosol forcing file (AOD climatology/time-series)")
+parser.add_argument("--aerosol-reference-aod", type=float, default=0.03,
+                    help="Reference background AOD550 if aerosol forcing is active without a file")
+parser.add_argument("--volcanic-aerosol-file", type=str, default="",
+                    help="Optional NetCDF volcanic AOD forcing file")
+parser.add_argument("--volcanic-aerosol-scale", type=float, default=1.0,
+                    help="Scale factor applied to volcanic aerosol forcing")
+parser.add_argument("--solar-source", type=str, default="constant",
+                    choices=["constant", "file", "spectral_file"],
+                    help="Solar forcing source: constant TSI, TSI file, or full spectral file")
+parser.add_argument("--solar-file", type=str, default="",
+                    help="Path to solar forcing NetCDF file (for --solar-source file/spectral_file)")
+parser.add_argument("--solar-spectral-var", type=str, default="solar_fraction_by_gpt",
+                    help="Variable name for spectral solar fractions (time, ngpt) in spectral forcing file")
 parser.add_argument("--clouds", type=str, default="none",
                     choices=["none", "sundqvist", "xu_randall"],
                     help="Cloud fraction scheme for RRTMG: none (clear-sky), "
@@ -153,6 +176,8 @@ args = parser.parse_args()
 # Enforce that forcing-path is required unless restarting or analytical
 if args.forcing_path is None and args.restart_from is None and args.dataset != "analytical":
     parser.error("--forcing-path is required (unless using --restart-from or --dataset analytical)")
+if args.solar_source in ("file", "spectral_file") and not args.solar_file:
+    parser.error("--solar-file is required when --solar-source is file or spectral_file")
 
 # ---------------------------------------------------------------------------
 # Build AMIPExperimentConfig
@@ -189,10 +214,20 @@ exp_config = AMIPExperimentConfig(
     radiation=args.radiation,
     rad_update_steps=args.rad_update_steps,
     diurnal_cycle=args.diurnal_cycle,
+    solar_source=args.solar_source,
+    solar_file=args.solar_file,
+    solar_spectral_var=args.solar_spectral_var,
     co2_ppmv=args.co2_ppmv,
     ch4_ppbv=args.ch4_ppbv,
     n2o_ppbv=args.n2o_ppbv,
     ozone_source=args.ozone_source,
+    ozone_forcing=args.ozone_forcing,
+    ozone_file=args.ozone_file,
+    aerosol_forcing=args.aerosol_forcing,
+    aerosol_file=args.aerosol_file,
+    aerosol_reference_aod=args.aerosol_reference_aod,
+    volcanic_aerosol_file=args.volcanic_aerosol_file,
+    volcanic_aerosol_scale=args.volcanic_aerosol_scale,
     cloud_scheme=args.clouds,
     microphysics=args.microphysics,
     topography=args.topography,
@@ -213,8 +248,11 @@ RADIATION = exp_config.radiation
 RAD_UPDATE_STEPS = exp_config.rad_update_steps
 DIURNAL_CYCLE = exp_config.diurnal_cycle
 OZONE_SOURCE = exp_config.ozone_source
+OZONE_FORCING = exp_config.ozone_forcing
+AEROSOL_FORCING = exp_config.aerosol_forcing
 CLOUD_SCHEME = exp_config.cloud_scheme
 MICROPHYSICS = exp_config.microphysics
+SOLAR_SOURCE = exp_config.solar_source
 
 # Build output directory with run identifier
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -581,19 +619,87 @@ if RADIATION == "rrtmg":
     print(f"    CO2 = {exp_config.co2_ppmv} ppmv  (ACTIVE — affects LW/SW absorption)")
     print(f"    CH4 = {exp_config.ch4_ppbv} ppbv  (ACTIVE — affects LW absorption)")
     print(f"    N2O = {exp_config.n2o_ppbv} ppbv  (ACTIVE — affects LW absorption)")
-    print(f"    O3  = {_o3_labels.get(OZONE_SOURCE, OZONE_SOURCE)} (ACTIVE — prescribed, not interactive)")
+    if OZONE_FORCING == "external":
+        _oz_file = exp_config.ozone_file if exp_config.ozone_file else "reference profile fallback"
+        print(f"    O3  = external forcing ({_oz_file})")
+    elif OZONE_FORCING == "off":
+        print("    O3  = disabled")
+    else:
+        print(f"    O3  = {_o3_labels.get(OZONE_SOURCE, OZONE_SOURCE)} (ACTIVE — prescribed, not interactive)")
     print(f"    H2O = from prognostic q_v  (ACTIVE — radiatively interactive)")
     print(f"    Clouds: {_cloud_labels.get(CLOUD_SCHEME, CLOUD_SCHEME)}")
-    print(f"    Aerosols: none (clear-sky)")
+    if AEROSOL_FORCING == "external":
+        _aer_file = exp_config.aerosol_file if exp_config.aerosol_file else f"reference AOD={exp_config.aerosol_reference_aod:.3f}"
+        _volc = (
+            f", volcanic={exp_config.volcanic_aerosol_file} x{exp_config.volcanic_aerosol_scale:g}"
+            if exp_config.volcanic_aerosol_file else ""
+        )
+        print(f"    Aerosols: external ({_aer_file}{_volc})")
+    else:
+        print("    Aerosols: none (clear-sky)")
+    if SOLAR_SOURCE == "spectral_file":
+        print(f"    Solar forcing: full spectral ({exp_config.solar_file})")
+    elif SOLAR_SOURCE == "file":
+        print(f"    Solar forcing: time-varying TSI file ({exp_config.solar_file})")
+    else:
+        print("    Solar forcing: constant broadband TSI")
 
 # ---------------------------------------------------------------------------
 # 6. Operator-split physics step
 # ---------------------------------------------------------------------------
 _S_0 = exp_config.S_0
 
-# External forcing: time-varying TSI via get_tsi_at_time()
-from legoesm.forcing.external import get_tsi_at_time, SolarConfig
-_solar_config = SolarConfig(S_0=exp_config.S_0)
+# External forcing: solar / ozone / aerosol
+from legoesm.forcing.external import (
+    AerosolConfig,
+    OzoneConfig,
+    SolarConfig,
+    get_aerosol_at_time,
+    get_ozone_at_time,
+    get_solar_forcing_at_time,
+)
+
+_solar_config = SolarConfig(
+    S_0=exp_config.S_0,
+    source=SOLAR_SOURCE,
+    path=exp_config.solar_file,
+    spectral_var=exp_config.solar_spectral_var,
+)
+_use_solar_spectral = (SOLAR_SOURCE == "spectral_file")
+
+_ozone_external_active = (RADIATION == "rrtmg") and (OZONE_FORCING == "external")
+_ozone_external_config = OzoneConfig(
+    enabled=_ozone_external_active,
+    source="climatology",
+    path=exp_config.ozone_file,
+    use_reference_if_missing=True,
+)
+
+_aerosol_active = (RADIATION == "rrtmg") and (AEROSOL_FORCING == "external")
+_aerosol_config = AerosolConfig(
+    enabled=_aerosol_active,
+    source="climatology",
+    path=exp_config.aerosol_file,
+    use_reference_if_missing=True,
+    reference_aod_550=exp_config.aerosol_reference_aod,
+    volcanic_enabled=bool(exp_config.volcanic_aerosol_file),
+    volcanic_path=exp_config.volcanic_aerosol_file,
+    volcanic_scale=exp_config.volcanic_aerosol_scale,
+)
+
+_solar_init = get_solar_forcing_at_time(_solar_config, START_DAY)
+if _use_solar_spectral:
+    _solar_weights_template = jnp.asarray(_solar_init["solar_fraction_by_gpt"])
+else:
+    _solar_weights_template = jnp.array([], dtype=jnp.float64)
+
+
+def _distribute_column_aod_to_layers(aod_col, p_half_col):
+    """Distribute column AOD to layers using pressure-thickness weights."""
+    dp = jnp.clip(p_half_col[:, 1:] - p_half_col[:, :-1], 1.0e-12, None)
+    w = dp / jnp.sum(dp, axis=1, keepdims=True)
+    return jnp.clip(aod_col, 0.0, None)[:, None] * w
+
 _sigma_full = sigma.sigma_full
 _sigma_half = sigma.sigma_half
 _dsigma = sigma.dsigma
@@ -619,7 +725,8 @@ if RADIATION == "gray":
     @jax.jit
     def radiation_step(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
                        lat_col, lon_col, day_of_year, seconds_of_day,
-                       albedo_col, emis_col, s_0=_S_0):
+                       albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
+                       solar_weights, s_0=_S_0):
         """Gray radiation call (daily-mean or diurnal-cycle insolation)."""
         if DIURNAL_CYCLE:
             hour = seconds_of_day / 3600.0
@@ -638,7 +745,8 @@ else:
     @jax.jit
     def radiation_step(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
                        lat_col, lon_col, day_of_year, seconds_of_day,
-                       albedo_col, emis_col, s_0=_S_0):
+                       albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
+                       solar_weights, s_0=_S_0):
         """RRTMG radiation call with per-column albedo/emissivity."""
         if DIURNAL_CYCLE:
             hour = seconds_of_day / 3600.0
@@ -647,7 +755,6 @@ else:
         else:
             insol = daily_mean_insolation(lat_col, day_of_year, s_0)
             cos_zenith = jnp.clip(insol / jnp.clip(s_0, 1.0e-6, None), 0.0, 1.0)
-        o3_vmr = _compute_ozone_vmr(p_full_col, lat_col, ozone_config)
         # Compute cloud properties if cloud scheme is active.
         cloud_kwargs = {}
         if CLOUD_SCHEME != "none":
@@ -668,7 +775,9 @@ else:
             cos_zenith=cos_zenith, config=rrtmg_config,
             sfc_albedo_override=albedo_col,
             sfc_emissivity_override=emis_col,
-            o3_vmr=o3_vmr,
+            o3_vmr=o3_vmr_col,
+            aerosol_optical_depth=aerosol_od_col,
+            solar_spectral_fraction=solar_weights if _use_solar_spectral else None,
             **cloud_kwargs,
         )
 
@@ -757,7 +866,8 @@ def physics_step_no_rad(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
 
 
 def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
-                                  day_of_year, seconds_of_day, dt, s_0=_S_0):
+                                  day_absolute, day_of_year, seconds_of_day, dt,
+                                  solar_weights, s_0=_S_0):
     """Full physics step: recompute radiation + convection + microphysics + BL."""
     nlev = _sigma_full.shape[0]
     shape_3d = T.shape
@@ -791,10 +901,41 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
     albedo_col = albedo.reshape(ncol)
     emis_col = emissivity.reshape(ncol)
 
+    # External composition forcing fields (RRTMG only).
+    if RADIATION == "rrtmg":
+        if _ozone_external_active:
+            o3_vmr_col = get_ozone_at_time(
+                _ozone_external_config,
+                day_absolute,
+                lat_grid=lat_col,
+                p_grid=p_full_col,
+            )
+        elif OZONE_FORCING == "off":
+            o3_vmr_col = jnp.full_like(p_full_col, 1.0e-10)
+        else:
+            o3_vmr_col = _compute_ozone_vmr(p_full_col, lat_col, ozone_config)
+
+        if _aerosol_active:
+            aerosol_col = get_aerosol_at_time(
+                _aerosol_config,
+                day_absolute,
+                lat_grid=lat_col,
+            )
+            aerosol_od_col = _distribute_column_aod_to_layers(
+                jnp.asarray(aerosol_col),
+                p_half_col,
+            )
+        else:
+            aerosol_od_col = None
+    else:
+        o3_vmr_col = None
+        aerosol_od_col = None
+
     rad_out = radiation_step(T_col, p_full_col, p_half_col, q_v_col,
                              T_sfc_col, lat_col, lon_col,
                              day_of_year, seconds_of_day,
-                             albedo_col, emis_col, s_0)
+                             albedo_col, emis_col,
+                             o3_vmr_col, aerosol_od_col, solar_weights, s_0)
     dT_dt_rad = rad_out.heating_rate.reshape(shape_3d)
 
     sw_down_sfc = rad_out.sw_flux_down[:, -1].reshape(shape_2d)
@@ -959,11 +1100,17 @@ sst, sic = get_sst_sic(day)
 
 state = model.step_with_physics(state, DT)
 
-_current_s_0 = get_tsi_at_time(_solar_config, day)
+_solar_forcing_now = get_solar_forcing_at_time(_solar_config, day)
+_current_s_0 = float(_solar_forcing_now["tsi"])
+if _use_solar_spectral:
+    _current_solar_weights = jnp.asarray(_solar_forcing_now["solar_fraction_by_gpt"])
+else:
+    _current_solar_weights = _solar_weights_template
 (dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad = \
     compute_radiation_and_physics(
         state.T.data, state.p_s.data, q_v, q_c, q_r, state.u.data, state.v.data,
-        sst, sic, grid.lat, grid.lon, day_of_year, seconds_of_day, DT,
+        sst, sic, grid.lat, grid.lon, day, day_of_year, seconds_of_day, DT,
+        _current_solar_weights,
         _current_s_0,
     )
 _held_sw_net_sfc = _sw
@@ -1015,8 +1162,13 @@ for step in range(start_step + 1, n_steps_total):
     # (b) Physics: recompute radiation on cadence, hold tendencies otherwise
     need_rad = (RAD_UPDATE_STEPS <= 1) or ((step + 1) % RAD_UPDATE_STEPS == 0)
 
-    # Time-varying TSI from external forcing
-    _current_s_0 = get_tsi_at_time(_solar_config, day)
+    # Time-varying solar forcing (broadband + optional full spectral weights)
+    _solar_forcing_now = get_solar_forcing_at_time(_solar_config, day)
+    _current_s_0 = float(_solar_forcing_now["tsi"])
+    if _use_solar_spectral:
+        _current_solar_weights = jnp.asarray(_solar_forcing_now["solar_fraction_by_gpt"])
+    else:
+        _current_solar_weights = _solar_weights_template
 
     if need_rad:
         (dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip,
@@ -1024,7 +1176,8 @@ for step in range(start_step + 1, n_steps_total):
             compute_radiation_and_physics(
                 state.T.data, state.p_s.data, q_v, q_c, q_r,
                 state.u.data, state.v.data,
-                sst, sic, grid.lat, grid.lon, day_of_year, seconds_of_day, DT,
+                sst, sic, grid.lat, grid.lon, day, day_of_year, seconds_of_day, DT,
+                _current_solar_weights,
                 _current_s_0,
             )
         _held_sw_net_sfc = _sw

@@ -199,6 +199,7 @@ def step_carbon_differland(
     precip: jnp.ndarray,
     config: CarbonConfig,
     dt: float,
+    gpp_override: jnp.ndarray | None = None,
 ) -> tuple[CarbonState, jnp.ndarray]:
     """Advance all six carbon pools by *dt* seconds.
 
@@ -226,7 +227,10 @@ def step_carbon_differland(
     LAI = state.C_fol / config.LCMA
 
     # --- GPP ---------------------------------------------------------------
-    gpp = compute_gpp(sw_down, T, LAI, co2_ppmv, beta, config)  # gC/m2/s
+    if gpp_override is not None:
+        gpp = gpp_override
+    else:
+        gpp = compute_gpp(sw_down, T, LAI, co2_ppmv, beta, config)  # gC/m2/s
     gpp_day = gpp * _SPD  # gC/m2/day rate
 
     # --- Autotrophic respiration & NPP -------------------------------------
@@ -338,8 +342,15 @@ def step_carbon(
     precip: jnp.ndarray,
     config: CarbonConfig,
     dt: float,
+    gpp_override: jnp.ndarray | None = None,
 ) -> tuple[CarbonState | None, jnp.ndarray]:
     """Dispatch carbon step based on *config.scheme*.
+
+    Parameters
+    ----------
+    gpp_override : jnp.ndarray, optional
+        When provided (e.g. from Farquhar photosynthesis), replaces the
+        internal LUE-based GPP computation.
 
     Returns
     -------
@@ -351,7 +362,7 @@ def step_carbon(
             raise ValueError("differland scheme requires a CarbonState")
         return step_carbon_differland(
             carbon_state, sw_down, T, co2_ppmv, beta, lat, doy,
-            precip, config, dt,
+            precip, config, dt, gpp_override=gpp_override,
         )
     elif config.scheme == "seasonal":
         return carbon_state, seasonal_co2_flux(doy, lat, config)

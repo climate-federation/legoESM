@@ -101,6 +101,12 @@ class RRTMGPConfig(NamedTuple):
         Surface albedo for SW (default 0.06).
     S_0 : float
         Total solar irradiance [W/m^2] (default 1360.86).
+    aerosol_ssa : float
+        Bulk aerosol single-scattering albedo used when aerosol optical depth
+        is externally prescribed (default 0.93).
+    aerosol_g : float
+        Bulk aerosol asymmetry factor used when aerosol optical depth is
+        externally prescribed (default 0.70).
     use_scan : bool
         If True, use lax.scan (differentiable); else fori_loop (default False).
     include_clouds : bool
@@ -116,6 +122,8 @@ class RRTMGPConfig(NamedTuple):
     sfc_emissivity: float = 0.98
     sfc_albedo: float = 0.06
     S_0: float = 1360.86
+    aerosol_ssa: float = 0.93
+    aerosol_g: float = 0.70
     use_scan: bool = False
     include_clouds: bool = False
 
