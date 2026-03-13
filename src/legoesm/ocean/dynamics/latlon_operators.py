@@ -97,8 +97,8 @@ def _ppm_edge_values_bounded(q: jnp.ndarray) -> jnp.ndarray:
         e2 = 0.5 * (q[1:2] + q[2:3])
         edges.append(e2)
 
-    # i=N-1: 2nd order
-    if N > 1:
+    # i=N-1: 2nd order (only when not already covered by interior/elif)
+    if N > 3:
         eN = 0.5 * (q[N - 2:N - 1] + q[N - 1:N])
         edges.append(eN)
 
@@ -157,9 +157,9 @@ def fv_divergence_latlon(
 
     Computes div(F) = (1/A) * [flux_east - flux_west + flux_north - flux_south]
 
-    using PPM reconstruction for interface fluxes:
-    - Zonal (longitude): periodic BC, PPM along axis 1
-    - Meridional (latitude): wall BC at poles (v=0), PPM along axis 0
+    using centered interface averaging:
+    - Zonal (longitude): periodic BC
+    - Meridional (latitude): wall BC at poles (v=0)
 
     Parameters
     ----------
@@ -391,10 +391,7 @@ def gradient_y_latlon(
     dy = grid.dy  # scalar, spans 2 cells
 
     # Pad with boundary values (zero-gradient)
-    if f.ndim == 2:
-        f_pad = jnp.concatenate([f[0:1], f, f[-1:]], axis=0)
-    else:
-        f_pad = jnp.concatenate([f[0:1], f, f[-1:]], axis=0)
+    f_pad = jnp.concatenate([f[0:1], f, f[-1:]], axis=0)
 
     df = f_pad[2:] - f_pad[:-2]  # same shape as f
     return df / dy
@@ -480,10 +477,7 @@ def laplacian_latlon(
 
     # d/dφ(cos φ df/dφ): finite difference with cos(lat) metric
     # Pad in lat with boundary values
-    if f.ndim == 2:
-        f_pad = jnp.concatenate([f[0:1], f, f[-1:]], axis=0)
-    else:
-        f_pad = jnp.concatenate([f[0:1], f, f[-1:]], axis=0)
+    f_pad = jnp.concatenate([f[0:1], f, f[-1:]], axis=0)
 
     # df/dφ at half-levels
     df_north = (f_pad[2:] - f_pad[1:-1]) / dlat  # north face of cell i

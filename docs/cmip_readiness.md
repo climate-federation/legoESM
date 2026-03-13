@@ -58,7 +58,8 @@ Status of legoESM components for CMIP-class production experiments.
 | Slab ocean (mixed layer) | Done | Freezing clamp |
 | Two-layer ocean | Done | Deep restoring option |
 | 3D ocean dynamics (multiple discretizations) | Done | Centered, FV, FC-Gram, FC-Gram C-grid |
-| Ocean biogeochemistry | Missing | No carbon cycle / DIC |
+| Ocean biogeochemistry (abiotic) | Done | DIC + ALK, carbonate equilibria, air-sea CO₂ (Wanninkhof 2014) |
+| Ocean biogeochemistry (NPZD) | Done | N-P-Z-D ecosystem + Redfield coupling to DIC/ALK |
 | Ocean tracer transport | Done | FV tracer option |
 
 ## Sea Ice
@@ -68,8 +69,8 @@ Status of legoESM components for CMIP-class production experiments.
 | Thermodynamic slab ice | Done | Growth/melt, conductive flux |
 | Ice concentration (prognostic) | Done | |
 | Ice velocity (free drift) | Done | Diagnostic |
-| Rheology / dynamics | Missing | No VP or EVP solver |
-| Multi-category ice | Missing | Single thickness category |
+| EVP rheology / dynamics | Done | Hunke & Dukowicz 1997, subcycled momentum, `dynamics="evp"` |
+| Multi-category ice | Done | CICE framework, Lipscomb 2001 linear remapping, `n_categories > 1` |
 
 ## Land Surface
 
@@ -78,8 +79,8 @@ Status of legoESM components for CMIP-class production experiments.
 | Slab land (thermal + bucket hydrology) | Done | |
 | Multilayer land | Done | Multi-layer soil temperature |
 | Snow budget (accumulation/melt) | Done | |
-| Vegetation / canopy model | Missing | No stomatal conductance or LAI |
-| Land carbon cycle | Missing | |
+| Vegetation / stomatal conductance | Done | Farquhar + Ball-Berry/Medlyn (coupled), Jarvis (uncoupled) |
+| Land carbon cycle | Done | DALEC-990 6-pool + seasonal scheme; GPP via Farquhar or LUE |
 
 ## Lake
 
@@ -87,14 +88,22 @@ Status of legoESM components for CMIP-class production experiments.
 |---|---|---|
 | Two-layer lake (epilimnion + hypolimnion) | Done | Wind-enhanced mixing |
 
+## CMIP Infrastructure
+
+| Feature | Status | Notes |
+|---|---|---|
+| CMOR/CF-compliant output | Done | `CFWriter` with CF-1.8, CMIP6 DRS naming, 27 variables (Amon + Lmon) |
+| Experiment templates | Done | piControl, historical, SSP2-4.5, SSP5-8.5, AMIP, 1pctCO₂ |
+| Built-in GHG time series | Done | Linear interpolation for historical + SSP scenarios |
+| Restart/reproducibility | Done | SHA-256 state digests, config hashes, platform metadata |
+| Tuning guide | Done | 16 parameters, validation, resolution-appropriate defaults |
+
 ## Remaining Gaps for CMIP Production
 
 1. **Aerosol-radiation coupling**: AOD is loaded but not applied to SW radiation.
 2. **Ozone-radiation coupling**: Ozone is loaded but not passed to radiation.
 3. **Volcanic forcing**: No stratospheric aerosol injection events.
 4. **Land-use change**: Static land mask, no transient land cover.
-5. **Ocean biogeochemistry**: No carbon cycle or ocean CO2 flux feedback.
-6. **Dynamic vegetation**: No interactive LAI or stomatal conductance.
-7. **Sea-ice dynamics**: Thermodynamics only, no rheological solver.
-8. **Multi-category sea ice**: Single thickness category.
-9. **Spectral solar distribution**: Only broadband TSI, no spectral bands.
+5. **Dynamic vegetation**: No interactive LAI (currently prescribed).
+6. **Spectral solar distribution**: Only broadband TSI, no spectral bands.
+7. **Ice sheet dynamics**: No shallow-ice/shallow-shelf approximation.

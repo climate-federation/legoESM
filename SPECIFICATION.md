@@ -1,10 +1,34 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.4
+## Technical Specification v3.5
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-10 (updated from v3.3, 2026-03-09)
+**Date**: 2026-03-13 (updated from v3.4, 2026-03-10)
+
+---
+
+### Changelog (v3.5, 2026-03-13)
+
+**New capabilities (biogeochemistry, sea-ice dynamics, plant physiology, CMIP infrastructure):**
+
+1. **Ocean biogeochemistry** (`ocean/biogeochemistry/`): Full ocean carbon cycle with two schemes — abiotic (DIC + ALK with carbonate equilibria and air-sea CO₂ gas exchange via Wanninkhof 2014) and NPZD ecosystem model (Fasham et al. 1990; nutrients, phytoplankton, zooplankton, detritus coupled to carbon via Redfield stoichiometry). Includes Beer-Lambert light attenuation with chlorophyll self-shading, Peters-Durner-Iden carbonate solver, and Schmidt number parameterization. See §4.2.
+
+2. **Sea-ice dynamics with EVP rheology** (`ice/sea_ice.py`): Three dynamics modes — slab (thermodynamic-only, backward compatible), free-drift (diagnostic velocity + optional tracer advection), and EVP (Elastic-Viscous-Plastic, Hunke & Dukowicz 1997) with subcycled momentum solver. Multi-category ice (CICE framework, Lipscomb 2001 linear remapping). State types: `SeaIceState` (slab) and `DynamicSeaIceState` (with u_ice, v_ice, sigma fields, per-category arrays). See §4.4.
+
+3. **Plant physiology / stomatal conductance** (`land/carbon/stomata.py`): Farquhar (1980) C3 photosynthesis with Arrhenius/peaked-Arrhenius temperature responses (Bernacchi 2001), Ball-Berry (1987) and Medlyn (2011) stomatal conductance models. Jarvis (1976) multiplicative model as CO₂-independent fallback when carbon cycle is inactive. Coupled A-gs-Ci solver via 5-iteration fixed-point loop (unrolled for JIT). Soil moisture stress on Vc_max (CLM approach). Beer-law canopy fraction blending. See §4.3.
+
+4. **CMOR/CF-compliant output pipeline** (`io/cmor_output.py`): `CFWriter` class producing CF-1.8 / CMOR 3.x compliant NetCDF4 output with CMIP6 DRS naming convention. 27 CMOR variables across 2 tables (Amon: 21 vars, Lmon: 6 vars). Standard 19-level pressure grid (CMIP6_PLEV19). See §7.
+
+5. **Experiment templates** (`forcing/experiments.py`): CMIP6-style experiment configurations with built-in GHG time series. 6 templates: piControl (fixed 1850), historical (1850–2014), SSP2-4.5, SSP5-8.5, AMIP, 1pctCO₂. `ghg_at_year()` provides linearly interpolated CO₂/CH₄/N₂O for any experiment and year. `create_experiment_config()` builds `AMIPExperimentConfig` from template with overrides. See §4.6.
+
+6. **Restart/reproducibility** (`io/restart.py`): Enhanced restart files with SHA-256 state digests and config hashes. `RestartMetadata` captures platform, JAX version, x64 mode, git hash. `verify_reproducibility()` compares two restart files and reports differences. Strict validation mode checks resolution, nlev, config hash, and state digest on load. See §7.
+
+7. **Documented tuning guide** (`tuning.py`): Registry of 16 tunable parameters across 5 categories (dynamics, radiation, convection, diffusion, surface) with valid ranges, sensitivities, and physical notes. `validate_tuning()` checks an `AMIPExperimentConfig` for potentially problematic settings. `recommended_params()` suggests resolution-appropriate defaults. `print_tuning_guide()` outputs formatted table. See §7.
+
+8. **Land carbon cycle** (`land/carbon/`): DALEC-990 six-pool carbon model (labile, foliage, root, wood, litter, SOM) with LUE-based GPP and Q10 decomposition. Seasonal simplified scheme as alternative. Both slab and multi-layer land models return carbon state. 43 tests.
+
+9. **New tests**: 47 stomata tests, 43 CMOR/experiments/restart/tuning tests, 43 carbon cycle tests. Total test count: 80+ test files, 1500+ tests.
 
 ---
 
@@ -1062,6 +1086,29 @@ MPI-aware global sums via `global_sum_mpi()` in distributed mode.
 | Rest state | C8 | 50 steps | Tendencies < 1e-6, T/S bounded |
 | Differentiability | C8 | 1 step | `jax.grad` through model.step produces finite gradients |
 
+#### 4.2.10 Ocean Biogeochemistry (`ocean/biogeochemistry/`)
+
+Two schemes controlled by `BiogeoConfig.scheme`:
+
+**Abiotic** (`scheme="abiotic"`):
+- Prognostic DIC and ALK (dissolved inorganic carbon, total alkalinity)
+- Carbonate equilibria solver (CO₂ solubility, HCO₃⁻/CO₃²⁻ speciation)
+- Air-sea CO₂ gas exchange: Wanninkhof (2014) parameterization with Schmidt number and gas transfer velocity
+- `air_sea_co2_flux(pCO2_ocean, pCO2_atm, T, S, U10)` [mol/m²/s]
+
+**NPZD ecosystem** (`scheme="npzd"`):
+- Four biological tracers: NO₃, phytoplankton, zooplankton, detritus (Fasham et al. 1990)
+- Phytoplankton growth: Michaelis-Menten nutrient limitation × light limitation × temperature-dependent maximum rate
+- Light model: Beer-Lambert PAR attenuation with water absorption + chlorophyll self-shading
+- Grazing: Holling-III functional response with assimilation efficiency
+- Detrital sinking with depth-dependent remineralization
+- Redfield stoichiometry coupling: R_C:N = 6.625, R_O:N = 10.625, CaCO₃ rain ratio = 0.07
+- Full coupling to DIC/ALK via biological production and respiration
+
+**State**: `OceanBiogeoState(DIC, ALK, NO3, Phyto, Zoo, Det)` — all tracers shape `(6, n, n, nlev)`.
+
+**Key parameters**: μ_max = 1.5/day (max growth), k_N = 0.7 mmol/m³ (half-saturation), w_sink = 10 m/day (detrital sinking), remin_rate = 0.05/day.
+
 ### 4.3 Land
 
 #### 4.3.1 Overview
@@ -1119,30 +1166,78 @@ class MultiLayerLandState(NamedTuple):
     snow_age: jax.Array
 ```
 
-#### 4.3.6 Future Phases
+#### 4.3.6 Land Carbon Cycle (`land/carbon/`)
 
-**Phase 3 (Full LSM):**
-- Carbon cycling: 6 pools (labile, foliar, root, wood, litter, SOM)
-- FvCB-Medlyn photosynthesis, dynamic LAI
+Two carbon cycle schemes integrated into both slab and multi-layer land:
+
+- **DifferLand** (`carbon_cycle.py`): DALEC-990 six-pool model (labile, foliage, root, wood, litter, SOM). Light-use-efficiency GPP with DALEC phenology. Q10 decomposition with moisture limitation. Full carbon-water coupling.
+- **Seasonal** (`carbon_cycle.py`): Sinusoidal NEE with latitude-dependent amplitude/phase (quick-look carbon diagnostics).
+
+`step_land()` and `step_multilayer_land()` return 3-tuples: `(state, response, carbon_state)`.
+
+#### 4.3.7 Plant Physiology (`land/carbon/stomata.py`)
+
+Stomatal conductance and photosynthesis module, activated when `StomataConfig.enabled = True`:
+
+**Farquhar (1980) C3 photosynthesis:**
+- Rubisco-limited (Wc) and RuBP-regeneration-limited (Wj) rates with smooth minimum
+- Arrhenius and peaked-Arrhenius temperature responses (Bernacchi et al. 2001 parameters)
+- Soil moisture stress on Vc_max (CLM approach: Vc_max × β_soil)
+
+**Stomatal conductance models:**
+
+| Model | Formula | Activation |
+|-------|---------|------------|
+| Ball-Berry (1987) | gs = g0 + g1·A·RH/Cs | Carbon cycle active |
+| Medlyn (2011) | gs = g0 + 1.6·(1 + g1/√VPD)·A/Cs | Carbon cycle active |
+| Jarvis (1976) | gs = gs_max·f(PAR)·f(T)·f(VPD)·f(soil) | Carbon cycle inactive |
+
+**Coupled solver:** Fixed-point A-gs-Ci iteration (5 steps, unrolled for JIT). Farquhar GPP passed as `gpp_override` to carbon cycle (avoids double-counting).
+
+**ET coupling:** Beer-law canopy fraction blends bare-soil evaporation with canopy transpiration. `compute_stomatal_beta()` returns effective β for surface flux computation.
+
+#### 4.3.8 Future Phases
+
+**Remaining:**
+- Dynamic LAI (currently prescribed)
 - Vegetation dynamics and competition
 - Carbon-nitrogen coupling
 - Groundwater and runoff routing
 
 ### 4.4 Cryosphere
 
-#### 4.4.1 Sea Ice — Current Implementation (`ice/sea_ice.py`)
+#### 4.4.1 Sea Ice — Three Dynamics Modes (`ice/sea_ice.py`)
 
-Simple thermodynamic sea ice model:
-- Ice growth/melt based on surface energy balance
-- Optional temperature-dependent albedo via `IceAlbedoConfig` (sigmoid transition from cold=0.65 to warm=0.45)
-- `step_sea_ice(state, forcing, config, dt) → (SeaIceState, TileResponse)`
-- State: `SeaIceState(h_ice, T_ice, concentration)`
-- Config: `SeaIceConfig` with albedo, conductivity, salinity, `bulk_scheme`, `temp_dependent_albedo` parameters
+The sea ice model supports three dynamics modes, controlled by `SeaIceConfig.dynamics`:
 
-#### 4.4.2 Future Phases
+**Slab (default, `dynamics="none"`):**
+- Thermodynamic-only: growth/melt from surface energy balance
+- Free-drift diagnostic velocity (wind-driven)
+- `SeaIceState(h_ice, T_ice, concentration)` — backward compatible
+- Optional temperature-dependent albedo via `IceAlbedoConfig`
 
-- Dynamic sea ice: Elastic-viscous-plastic (EVP) rheology
-- Ice transport: Advection of ice area and volume
+**Free Drift (`dynamics="free_drift"`):**
+- Diagnostic velocity from wind + ocean current
+- Optional tracer advection (ice area, volume)
+
+**EVP (`dynamics="evp"`):**
+- Elastic-Viscous-Plastic rheology (Hunke & Dukowicz 1997)
+- Subcycled momentum solver: `N_evp` substeps per timestep (default 120)
+- Internal ice stress tensor from elliptic yield curve (e = 2.0)
+- Ice strength: P = P* · h · exp(−C · (1 − c)) with P* = 27.5 kPa, C = 20
+- `DynamicSeaIceState` with u_ice, v_ice, sigma_11/22/12 stress tensor fields
+- Coriolis, ocean tilt, air/ocean drag, internal stress divergence
+
+#### 4.4.2 Multi-Category Ice
+
+When `SeaIceConfig.n_categories > 1` (CICE framework):
+- Per-category state: `h_cat`, `T_cat`, `c_cat` arrays (shape `[ncol, n_cat]`)
+- Linear remapping (Lipscomb 2001) redistributes ice across thickness categories after thermodynamic growth/melt
+- Category boundaries follow equal-area partitioning
+- Bulk properties (mean h, T, c) derived from category-weighted averages
+
+#### 4.4.3 Future Phases
+
 - Ice sheets: Shallow-ice/shallow-shelf approximation
 - Permafrost: Deep soil extension with phase change
 
@@ -1265,6 +1360,24 @@ Each supports `source="constant"` (default) or `source="file"` (time-varying fro
 - Ozone/aerosol file format: `time` (12 months) × `lat` dimensions + `ozone`/`aod` variable.
 
 **Note**: Ozone and aerosol data are loaded and interpolated but not yet connected to the radiation solver. This is the primary remaining gap for CMIP forcing readiness. See `docs/cmip_readiness.md`.
+
+#### 4.6.4 Experiment Templates (`forcing/experiments.py`)
+
+CMIP6-style experiment configurations with built-in GHG time series:
+
+| Template | Period | Forcing | Parent |
+|----------|--------|---------|--------|
+| `piControl` | 1850–∞ | Fixed 1850 (CO₂=284.3, CH₄=808, N₂O=273) | — |
+| `historical` | 1850–2014 | Transient (interpolated from key benchmark years) | piControl |
+| `ssp245` | 2015–2100 | SSP2-4.5 pathway (CO₂ reaches ~600 ppmv by 2100) | historical |
+| `ssp585` | 2015–2100 | SSP5-8.5 pathway (CO₂ reaches ~1135 ppmv by 2100) | historical |
+| `amip` | 1979–2014 | Prescribed SST/SIC + transient GHG | — |
+| `1pctCO2` | Year 1–150 | 1% per year CO₂ increase from 284.3 ppmv | piControl |
+
+**Key functions:**
+- `ghg_at_year(experiment_name, year)` → `(co2_ppmv, ch4_ppbv, n2o_ppbv)` with linear interpolation
+- `get_ghg_for_experiment(name, year)` → dict version
+- `create_experiment_config(name, **overrides)` → `AMIPExperimentConfig` from template
 
 #### 4.6.4 AMIP Spectral Experiment (`scripts/run_amip_spectral.py`)
 
@@ -1556,7 +1669,46 @@ Column-integrated moist static energy: E = ∫(c_p·T + L_v·q + Φ + ½v²) dp/
 - `finalize()` computes monthly averages, `save()` writes to NPZ
 - Activated via `--monthly-means` CLI flag in `run_amip.py`
 
-### 7.4 Visualization (`visualization/maps.py`)
+### 7.4 CF/CMOR-Compliant Output (`io/cmor_output.py`)
+
+`CFWriter` class for CMIP6-class NetCDF output:
+
+- **CF-1.8 conventions**: standard_name, long_name, units, cell_methods, time bounds
+- **CMIP6 DRS naming**: `<var>_<table>_<model>_<expt>_<variant>_<grid>[_<trange>].nc`
+- **Two CMOR tables**: Amon (21 atmospheric monthly variables) and Lmon (6 land monthly variables)
+- **Standard pressure grid**: `CMIP6_PLEV19` — 19 standard pressure levels
+- **Variable lookup**: `lookup_cmor_entry(var_name)` → (table_id, metadata_dict)
+- **Context manager** and explicit `close()` support
+- **Lazy imports**: xarray and netCDF4 imported only when writing (not at module load)
+
+```python
+writer = CFWriter(output_dir="output/", experiment_id="historical", model_id="legoESM-1-0", freq="mon")
+writer.write_field("tas", data, time=15.0, time_bounds=(0.0, 30.0), lat=lat, lon=lon)
+writer.write_monthly(monthly_data, lat, lon, plev=CMIP6_PLEV19)  # from MonthlyAccumulator
+writer.close()
+```
+
+### 7.5 Restart and Reproducibility (`io/restart.py`)
+
+Enhanced restart I/O with cryptographic integrity verification:
+
+- **`RestartMetadata`** (NamedTuple, 13 fields): model_version, creation_time, platform, jax_version, jax_x64_enabled, numpy_version, config_hash, state_digest, resolution, nlev, step, day, git_hash
+- **`save_restart()`**: Writes `.npz` checkpoint + `.meta.json` sidecar with SHA-256 state digest and config hash
+- **`load_restart()`**: Loads checkpoint with optional strict validation (resolution, nlev, config hash, state digest match)
+- **`verify_reproducibility(path_a, path_b)`** → `ReproducibilityReport(identical, differences, state_digest_match, config_match)`
+- **`compute_state_digest()`**: SHA-256 of sorted, concatenated array bytes (deterministic across runs)
+- **`compute_config_hash()`**: SHA-256 of JSON-serialized config
+
+### 7.6 Tuning Guide (`tuning.py`)
+
+Executable tuning documentation with parameter registry and validation:
+
+- **`TUNING_PARAMETERS`**: Registry of 16 parameters across 5 categories (dynamics, radiation, convection, diffusion, surface) with valid ranges, default values, sensitivity ratings (high/medium/low), and physical notes
+- **`validate_tuning(config)`**: Checks an `AMIPExperimentConfig` for problematic settings (CFL violations, range exceedances, conflicting options)
+- **`recommended_params(resolution, nlev)`**: Returns resolution-appropriate defaults (dt, hyperdiff_scale, rad_update_steps) with CFL-based scaling
+- **`print_tuning_guide()`**: Formatted table of all parameters by category
+
+### 7.7 Visualization (`visualization/maps.py`)
 
 Global field plotting with Cartopy (Mollweide projection) and conservation timeseries.
 
@@ -1722,7 +1874,7 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
      /________________________\
 ```
 
-### 10.2 Test Suite (79 test files, 1350+ tests)
+### 10.2 Test Suite (80+ test files, 1500+ tests)
 
 **Unit tests** (`tests/unit/`):
 
@@ -1735,6 +1887,8 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 | **ML** | `test_sfno.py`, `test_sfno_sw.py`, `test_sfno_ocean.py` | SFNO architecture, channel packing |
 | **Coupled** | `test_coupler.py`, `test_atmosphere_invariants.py`, `test_external_forcing.py` | Tile blending, flux conservation, MOST bulk fluxes, ocean albedo plumbing, q_surface consistency, external forcing file interpolation |
 | **Infrastructure** | `test_timestepping.py`, `test_thermodynamics.py`, `test_tracer_transport.py`, `test_backend_guard.py`, `test_backend_precision.py`, `test_parallel.py` | Time integrators, thermodynamics, parallelism |
+| **Land** | `test_multilayer_land.py`, `test_carbon_cycle.py`, `test_stomata.py`, `test_surface_albedo.py`, `test_topography.py` | Carbon pools, stomatal conductance, soil hydraulics, albedo |
+| **CMIP infra** | `test_cmor_experiments_restart.py` | CMOR tables, CFWriter, experiment templates, GHG interpolation, restart digests, tuning validation |
 | **Validation** | `test_weatherbench.py`, `test_dcmip_transport.py`, `test_issue_fixes.py`, `test_amip_config.py` | WeatherBench metrics, DCMIP transport, AMIP config |
 
 **Integration tests** (`tests/integration/`):
@@ -1831,8 +1985,8 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 
 **Delivered:**
 - **Ocean**: Full 3D PE with z-star coordinates, Wright EOS, split-explicit barotropic, spectral variant, SFNO variant, comprehensive physics (vertical mixing: constant/Richardson/KPP; lateral mixing: harmonic/biharmonic/GM-Redi; surface forcing: prescribed/restoring/bulk; bottom drag: linear/quadratic; convection: enhanced diffusion/plume)
-- **Land**: Slab land model with energy balance
-- **Sea ice**: Simple thermodynamic model
+- **Land**: Slab + multi-layer land, Richards equation, 6 retention curves, carbon cycle (DALEC-990 6-pool + seasonal), Farquhar photosynthesis + Ball-Berry/Medlyn/Jarvis stomata
+- **Sea ice**: Thermodynamic slab + EVP rheology (Hunke & Dukowicz 1997) + multi-category (Lipscomb 2001)
 - **Lake**: Two-layer lake model
 - **Coupler**: Tile-based surface exchange with flux accumulation, conservation enforcement
 - **AMIP forcing**: Prescribed SST/sea-ice boundary conditions
@@ -1879,16 +2033,24 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 - C-grid variants: true C-grid on lat-lon, divergence-damped on cubed-sphere (4 models)
 - External forcing framework (GHG, ozone, aerosol, solar)
 - Checkpoint/restart for AMIP experiments
+- Land carbon cycle (DALEC-990 6-pool + seasonal scheme)
+- Plant physiology (Farquhar + Ball-Berry/Medlyn + Jarvis stomata)
+- Ocean biogeochemistry (abiotic DIC/ALK + NPZD ecosystem)
+- Sea-ice dynamics (EVP rheology + multi-category ice)
+- CMOR/CF-compliant output pipeline (27 variables, CMIP6 DRS naming)
+- Experiment templates (piControl, historical, SSP2-4.5, SSP5-8.5, AMIP, 1pctCO₂)
+- Restart/reproducibility with SHA-256 state digests
+- Documented tuning guide (16 parameters, validation, recommended defaults)
 
 **Remaining goals:**
 - Multi-century stability testing
 - Higher resolution (T42+) year-long simulations
-- Carbon cycle coupling (land carbon pools)
 - Ice sheet dynamics
 - Multi-node scaling validation (mpi4jax at scale)
-- Full ESM configuration (atmosphere + ocean + land + ice + carbon)
-- Climate scenario simulations (SSP2-4.5, SSP5-8.5)
+- Full ESM configuration (atmosphere + ocean + land + ice + carbon all coupled)
+- Climate scenario simulations (SSP2-4.5, SSP5-8.5) with experiment templates
 - Validation against CMIP6 models and observations
+- Aerosol-radiation and ozone-radiation coupling
 
 ---
 
@@ -2039,17 +2201,31 @@ legoESM/
 │   │       ├── surface_forcing/            # prescribed, restoring, bulk_formulas
 │   │       ├── bottom_drag/                # linear, quadratic
 │   │       └── convection/                 # enhanced_diffusion, plume
+│   │   └── biogeochemistry/               # Ocean carbon cycle
+│   │       ├── config.py                  # BiogeoConfig, OceanBiogeoState
+│   │       ├── carbon_cycle.py            # Abiotic + NPZD integration
+│   │       ├── carbonate.py               # CO₂ solubility, carbonate equilibria
+│   │       ├── gas_exchange.py            # Air-sea CO₂ flux (Wanninkhof 2014)
+│   │       └── npzd.py                    # NPZD ecosystem model
 │   │
 │   ├── land/                               # Land component
 │   │   ├── state.py                        # LandState
-│   │   ├── config.py                       # LandConfig
-│   │   ├── slab_land.py                    # Simple slab land model
-│   │   └── carbon/                         # Carbon cycle (skeleton)
+│   │   ├── config.py                       # LandConfig, MultiLayerLandConfig
+│   │   ├── slab_land.py                    # Slab land model + stomata coupling
+│   │   ├── multilayer_land.py              # Multi-layer Richards + thermal diffusion
+│   │   ├── soil_grid.py                    # SoilGrid geometry
+│   │   ├── soil_hydraulics.py              # 6 retention curves (VG, CH, BC, Campbell, PDI, Lu)
+│   │   ├── richards.py                     # Mixed-form Richards equation solver
+│   │   ├── soil_thermal.py                 # Soil thermal diffusion (Johansen 1975)
+│   │   └── carbon/                         # Carbon cycle + plant physiology
+│   │       ├── config.py                   # CarbonConfig, CarbonState
+│   │       ├── carbon_cycle.py             # DALEC-990 6-pool + seasonal schemes
+│   │       └── stomata.py                  # Farquhar, Ball-Berry, Medlyn, Jarvis
 │   │
 │   ├── ice/                                # Cryosphere
-│   │   ├── state.py                        # SeaIceState
-│   │   ├── config.py                       # SeaIceConfig
-│   │   └── sea_ice.py                      # Simple sea ice model
+│   │   ├── state.py                        # SeaIceState, DynamicSeaIceState
+│   │   ├── config.py                       # SeaIceConfig (dynamics, n_categories, EVP params)
+│   │   └── sea_ice.py                      # Slab + free-drift + EVP + multi-category
 │   │
 │   ├── coupler/                            # Component coupling
 │   │   ├── coupler.py                      # Main coupler engine
@@ -2065,7 +2241,15 @@ legoESM/
 │   ├── forcing/                            # External forcing
 │   │   ├── amip.py                         # AMIP SST/sea-ice forcing
 │   │   ├── amip_config.py                  # AMIPExperimentConfig, checkpoint I/O
-│   │   └── external.py                     # GHG, ozone, aerosol, solar configs
+│   │   ├── external.py                     # GHG, ozone, aerosol, solar configs
+│   │   └── experiments.py                  # CMIP6 experiment templates + GHG time series
+│   │
+│   ├── io/                                 # I/O and data pipeline
+│   │   ├── cmor_output.py                  # CFWriter, CMOR tables, CMIP6 DRS output
+│   │   └── restart.py                      # RestartMetadata, reproducibility checks
+│   │
+│   ├── tuning.py                           # Tuning parameter registry + validation
+│   ├── surface_albedo.py                   # Surface albedo parameterizations
 │   │
 │   ├── ml/                                 # Machine learning
 │   │   ├── sfno.py                         # SFNO main class

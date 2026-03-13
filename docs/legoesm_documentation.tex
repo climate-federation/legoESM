@@ -47,7 +47,7 @@
 \section{Introduction}
 %=============================================================================
 
-legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, and sea-ice components on the sphere, with 25 dynamical cores spanning five discretisation families (centred, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and over thirty physics parameterisations.
+legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, sea-ice, and biogeochemical components on the sphere, with 25 dynamical cores spanning five discretisation families (centred, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and over thirty physics parameterisations.  The model includes a land carbon cycle with Farquhar photosynthesis and stomatal conductance, ocean biogeochemistry (abiotic carbon + NPZD ecosystem), sea-ice dynamics with EVP rheology and multi-category ice, and CMIP6-class infrastructure (CF/CMOR output, experiment templates, restart reproducibility, documented tuning).
 
 \paragraph{Design principles.}
 \begin{itemize}[nosep]
@@ -827,6 +827,51 @@ All slab surface tiles (land, sea ice, lake) recompute $q_{\mathrm{sfc}}$ from t
   \end{cases}
 \end{equation}
 
+\subsubsection{EVP Rheology (Hunke \& Dukowicz 1997)}
+
+When \texttt{dynamics="evp"}, the ice momentum equation is
+\begin{equation}
+  m\,\frac{\pp \bm{u}_i}{\pp t} = \bm{\tau}_a + \bm{\tau}_w - mf\hat{\bm{k}}\times\bm{u}_i - mg\nabla\eta + \nabla\cdot\bm{\sigma},
+\end{equation}
+where $\bm{\tau}_a,\bm{\tau}_w$ are air and ocean drag, and $\bm{\sigma}$ is the internal stress tensor from an elliptic yield curve with eccentricity $e=2$.  Ice strength:
+\begin{equation}
+  P = P^*\,h\,\exp\!\big(-C(1-c)\big), \qquad P^*=27.5\;\text{kPa},\; C=20.
+\end{equation}
+The elastic term provides subcycling stability ($N_{\mathrm{evp}}=120$ substeps).
+
+\subsubsection{Multi-category ice}
+
+For $N_{\mathrm{cat}}>1$, per-category state $(h_k,T_k,c_k)$ evolves independently under thermodynamics, then Lipscomb~(2001) linear remapping redistributes ice across thickness categories.
+
+%-----------------------------------------------------------------------------
+\subsection{Land Carbon Cycle and Stomatal Conductance}
+%-----------------------------------------------------------------------------
+
+\subsubsection{DALEC-990 Carbon Pools}
+Six prognostic pools: labile $C_{\mathrm{lab}}$, foliage $C_f$, root $C_r$, wood $C_w$, litter $C_{\mathrm{lit}}$, soil organic matter $C_{\mathrm{SOM}}$.  GPP via light-use efficiency; decomposition via $Q_{10}$ temperature sensitivity with moisture limitation.
+
+\subsubsection{Farquhar (1980) Photosynthesis}
+Assimilation rate:
+\begin{equation}
+  A = \min(W_c,\, W_j) - R_d, \qquad
+  W_c = V_{c,\max}\frac{C_i - \Gamma^*}{C_i + K_c(1+O/K_o)}, \qquad
+  W_j = \frac{J\,(C_i - \Gamma^*)}{4(C_i + 2\Gamma^*)},
+\end{equation}
+where the minimum is a smooth (differentiable) function.  $V_{c,\max}$ and $J_{\max}$ follow peaked Arrhenius temperature responses (Bernacchi et al.\ 2001).  Soil moisture stress: $V_{c,\max}\leftarrow V_{c,\max}\,\beta_{\mathrm{soil}}$.
+
+\subsubsection{Stomatal conductance}
+
+\paragraph{Ball--Berry (1987):}
+$g_s = g_0 + g_1\,A\,\mathrm{RH}/C_s.$
+
+\paragraph{Medlyn (2011):}
+$g_s = g_0 + 1.6\bigl(1+g_1/\!\sqrt{\mathrm{VPD}}\bigr)\,A/C_s.$
+
+\paragraph{Jarvis (1976):}
+$g_s = g_{s,\max}\,f(\mathrm{PAR})\,f(T)\,f(\mathrm{VPD})\,f(\theta)$ \quad (CO$_2$-independent; used when carbon cycle is inactive).
+
+The coupled $A$--$g_s$--$C_i$ system is solved by 5 fixed-point iterations (unrolled for JAX JIT).
+
 %-----------------------------------------------------------------------------
 \subsection{Tile Coupler}
 %-----------------------------------------------------------------------------
@@ -919,6 +964,70 @@ $\rho_0$ & Ocean reference density & 1025 & kg\,m$^{-3}$ \\
 \end{center}
 
 %=============================================================================
+\section{Ocean Biogeochemistry}
+%=============================================================================
+
+Two schemes: abiotic (DIC + ALK only) and NPZD ecosystem.
+
+\subsection{Carbonate Chemistry and Air-Sea CO$_2$ Exchange}
+
+The ocean surface $p$CO$_2$ is computed from DIC, ALK, $T$, $S$ via carbonate equilibria.
+Air-sea flux (Wanninkhof 2014):
+\begin{equation}
+  F_{\mathrm{CO}_2} = k_w\,K_0\,(p\mathrm{CO}_{2,\mathrm{ocean}} - p\mathrm{CO}_{2,\mathrm{atm}}),
+\end{equation}
+where $k_w = 0.251\,U_{10}^2\,(\mathrm{Sc}/660)^{-1/2}$ is the gas transfer velocity [cm/hr] and $K_0$ is Henry's law solubility.
+
+\subsection{NPZD Ecosystem Model}
+
+Four biological tracers: NO$_3$, phytoplankton $P$, zooplankton $Z$, detritus $D$ (Fasham et al.\ 1990).
+\begin{align}
+  \frac{\pp P}{\pp t} &= \mu_P\,P - G - m_P\,P, \\
+  \frac{\pp Z}{\pp t} &= \gamma_Z\,G - m_Z\,Z^2, \\
+  \frac{\pp D}{\pp t} &= (1-\gamma_Z)G + m_P P + m_Z Z^2 - r_D D + w_s\frac{\pp D}{\pp z}, \\
+  \frac{\pp \mathrm{NO}_3}{\pp t} &= -\mu_P\,P + r_D\,D,
+\end{align}
+where $\mu_P = \mu_{\max}\,f(T)\,\min(L_N,L_I)$ with Michaelis-Menten nutrient limitation $L_N=\mathrm{NO}_3/(k_N+\mathrm{NO}_3)$ and Beer-Lambert light limitation with chlorophyll self-shading.  Grazing $G$ follows Holling-III.  Redfield stoichiometry ($R_{C:N}=6.625$) couples biology to DIC/ALK.
+
+%=============================================================================
+\section{CMIP Infrastructure}
+%=============================================================================
+
+\subsection{CF/CMOR-Compliant Output}
+
+The \texttt{CFWriter} class produces CF-1.8 NetCDF4 files with CMIP6 Data Reference Syntax (DRS) filenames: \texttt{<var>\_<table>\_<model>\_<expt>\_<variant>\_<grid>.nc}.  Two CMOR tables are provided: \texttt{Amon} (21 atmospheric variables) and \texttt{Lmon} (6 land variables).
+
+\subsection{Experiment Templates}
+
+Six CMIP6-style experiments with built-in GHG time series:
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+Template & Period & Forcing & CO$_2$ range \\
+\midrule
+\texttt{piControl} & 1850--$\infty$ & Fixed 1850 & 284.3 ppmv \\
+\texttt{historical} & 1850--2014 & Transient & 284$\to$397 ppmv \\
+\texttt{ssp245} & 2015--2100 & SSP2-4.5 & 397$\to$600 ppmv \\
+\texttt{ssp585} & 2015--2100 & SSP5-8.5 & 397$\to$1135 ppmv \\
+\texttt{amip} & 1979--2014 & Prescribed SST & Transient \\
+\texttt{1pctCO2} & 1--150 & 1\%/yr increase & 284$\to$1277 ppmv \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Restart and Reproducibility}
+
+Each restart file is accompanied by a \texttt{.meta.json} sidecar containing:
+SHA-256 state digest (sorted, concatenated array bytes), SHA-256 config hash,
+platform identifier, JAX version, x64 mode, and git hash.
+The function \texttt{verify\_reproducibility()} compares two restart files and reports any discrepancies.
+
+\subsection{Tuning Guide}
+
+A registry of 16 tunable parameters across five categories (dynamics, radiation, convection, diffusion, surface) with valid ranges, default values, sensitivity ratings, and physical notes.  \texttt{validate\_tuning(config)} checks CFL consistency, range violations, and conflicting options.  \texttt{recommended\_params(resolution, nlev)} provides resolution-appropriate defaults.
+
+%=============================================================================
 \section{References}
 %=============================================================================
 
@@ -926,6 +1035,14 @@ $\rho_0$ & Ocean reference density & 1025 & kg\,m$^{-3}$ \\
 \item[Audusse, E., F.\ Bouchut, M.-O.\ Bristeau, R.\ Klein, and B.\ Perthame (2004)]
 A fast and stable well-balanced scheme with hydrostatic reconstruction for shallow water flows.
 \textit{SIAM J.\ Sci.\ Comput.}, \textbf{25}, 2050--2065.
+
+\item[Ball, J.T., I.E.\ Woodrow, and J.A.\ Berry (1987)]
+A model predicting stomatal conductance and its contribution to the control of photosynthesis under different environmental conditions.
+\textit{Prog.\ in Photosynthesis Res.}, \textbf{4}, 221--224.
+
+\item[Bernacchi, C.J., E.L.\ Singsaas, C.\ Pimentel, A.R.\ Portis, and S.P.\ Long (2001)]
+Improved temperature response functions for models of Rubisco-limited photosynthesis.
+\textit{Plant Cell Environ.}, \textbf{24}, 253--259.
 
 \item[Bourke, W.\ (1972)]
 An efficient, one-level, primitive-equation spectral model.
@@ -938,6 +1055,14 @@ Flux-profile relationships in the atmospheric surface layer.
 \item[Colella, P.\ and P.R.\ Woodward (1984)]
 The Piecewise Parabolic Method (PPM) for gas-dynamical simulations.
 \textit{J.\ Comput.\ Phys.}, \textbf{54}, 174--201.
+
+\item[Farquhar, G.D., S.\ von Caemmerer, and J.A.\ Berry (1980)]
+A biochemical model of photosynthetic CO$_2$ assimilation in leaves of C3 species.
+\textit{Planta}, \textbf{149}, 78--90.
+
+\item[Fasham, M.J.R., H.W.\ Ducklow, and S.M.\ McKelvie (1990)]
+A nitrogen-based model of plankton dynamics in the oceanic mixed layer.
+\textit{J.\ Mar.\ Res.}, \textbf{48}, 591--639.
 
 \item[Fairall, C.W., E.F.\ Bradley, J.E.\ Hare, A.A.\ Grachev, and J.B.\ Edson (2003)]
 Bulk parameterization of air--sea fluxes: Updates and verification for the COARE algorithm.
@@ -955,6 +1080,10 @@ The dynamics of idealized convection schemes and their effect on the zonally ave
 Efficient implementation of weighted ENO schemes.
 \textit{J.\ Comput.\ Phys.}, \textbf{126}, 202--228.
 
+\item[Hunke, E.C.\ and J.K.\ Dukowicz (1997)]
+An elastic-viscous-plastic model for sea ice dynamics.
+\textit{J.\ Phys.\ Oceanogr.}, \textbf{27}, 1849--1867.
+
 \item[Held, I.M.\ and M.J.\ Suarez (1994)]
 A proposal for the intercomparison of the dynamical cores of atmospheric general circulation models.
 \textit{Bull.\ Amer.\ Meteor.\ Soc.}, \textbf{75}, 1825--1830.
@@ -963,9 +1092,17 @@ A proposal for the intercomparison of the dynamical cores of atmospheric general
 Diurnal to decadal global forcing for ocean and sea-ice models: The data sets and flux climatologies.
 \textit{NCAR Technical Note}, NCAR/TN-460+STR.
 
+\item[Lipscomb, W.H.\ (2001)]
+Remapping the thickness distribution in sea ice models.
+\textit{J.\ Geophys.\ Res.}, \textbf{106}(C7), 13989--14000.
+
 \item[Louis, J.-F.\ (1979)]
 A parametric model of vertical eddy fluxes in the atmosphere.
 \textit{Bound.-Layer Meteor.}, \textbf{17}, 187--202.
+
+\item[Medlyn, B.E.\ et al.\ (2011)]
+Reconciling the optimal and empirical approaches to modelling stomatal conductance.
+\textit{Global Change Biol.}, \textbf{17}, 2134--2144.
 
 \item[Shu, C.-W.\ and S.\ Osher (1988)]
 Efficient implementation of essentially non-oscillatory shock-capturing schemes.
@@ -982,6 +1119,10 @@ A time-split nonhydrostatic atmospheric model for weather research and forecasti
 \item[van Leer, B.\ (1979)]
 Towards the ultimate conservative difference scheme. V.\ A second-order sequel to Godunov's method.
 \textit{J.\ Comput.\ Phys.}, \textbf{32}, 101--136.
+
+\item[Wanninkhof, R.\ (2014)]
+Relationship between wind speed and gas exchange over the ocean revisited.
+\textit{Limnol.\ Oceanogr.\ Methods}, \textbf{12}, 351--362.
 
 \item[Wright, D.G.\ (1997)]
 An equation of state for use in ocean models: Eckart's formula revisited.

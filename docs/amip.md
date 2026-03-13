@@ -265,6 +265,10 @@ path given by `--output`) containing:
 | Energy budget | **Active** | Online column energy, TOA balance, residual tracking |
 | Monthly means | **Active** | Zonal-mean and global-mean monthly accumulation; `--monthly-means` |
 | GHG time-varying | **Active** | `GHGConfig(source="file")` with NetCDF time interpolation |
+| Experiment templates | **Active** | piControl, historical, SSP2-4.5, SSP5-8.5, AMIP, 1pctCO₂; `create_experiment_config()` |
+| CMOR output | **Active** | CF-1.8/CMIP6 DRS NetCDF via `CFWriter`; 27 CMOR variables |
+| Restart/reproducibility | **Active** | SHA-256 state digests, config hashes; `verify_reproducibility()` |
+| Tuning validation | **Active** | `validate_tuning()` checks CFL, ranges, conflicts |
 | Ozone from file | **Active** | `OzoneConfig(enabled=True)` monthly zonal-mean from NetCDF; not yet connected to radiation |
 | Aerosol from file | **Active** | `AerosolConfig(enabled=True)` monthly zonal-mean from NetCDF; not yet connected to radiation |
 | Solar TSI variation | **Active** | `SolarConfig(source="file")` with NetCDF time interpolation |

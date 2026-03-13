@@ -13,11 +13,6 @@ from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonOceanState, LatLonOceanConfig
 
 
-def _area_sum(field_2d, mask, grid):
-    """Area-weighted sum over ocean cells."""
-    return jnp.sum(field_2d * mask * grid.area)
-
-
 def fix_volume_latlon(
     state_new: LatLonOceanState,
     state_old: LatLonOceanState,

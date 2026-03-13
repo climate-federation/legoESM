@@ -241,10 +241,10 @@ def latlon_ocean_baroclinic_tendencies(
                     dv_dt = dv_dt + vdiff
 
         if config.hyperdiff_coeff > 0:
-            du_dt = du_dt + config.hyperdiff_coeff * laplacian_latlon(
+            du_dt = du_dt - config.hyperdiff_coeff * laplacian_latlon(
                 laplacian_latlon(u * mask_3d, grid), grid,
             )
-            dv_dt = dv_dt + config.hyperdiff_coeff * laplacian_latlon(
+            dv_dt = dv_dt - config.hyperdiff_coeff * laplacian_latlon(
                 laplacian_latlon(v * mask_3d, grid), grid,
             )
     else:
