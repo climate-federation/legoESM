@@ -973,3 +973,163 @@ class TestSpectralOcean:
         for leaf in jax.tree.leaves(tend):
             if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.inexact):
                 assert jnp.all(jnp.isfinite(leaf))
+
+
+# ==============================================================================
+# Long-Run Conservation Tests
+# ==============================================================================
+
+class TestLongRunConservation:
+    """Tests for mass, heat, and salt conservation over many timesteps.
+
+    These verify that the z-star transport velocity correctly reduces
+    spurious drift, and that the conservation fixer restores invariants.
+    """
+
+    @staticmethod
+    def _ocean_invariants(state, grid, z_coord, config):
+        """Compute volume, heat, and salt global integrals."""
+        mask = state.land_mask.data
+        area = grid.area
+        h_k = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, z_coord,
+            min_water_column_m=config.min_water_column_m,
+        )
+        weighted_area = mask * area
+        ocean_area = float(jnp.sum(weighted_area))
+        # Use mean eta (not total eta*area) for volume to avoid
+        # zero-reference issues when eta starts at 0.
+        mean_eta = float(jnp.sum(state.eta.data * weighted_area)) / max(ocean_area, 1.0)
+        heat = float(jnp.sum(jnp.sum(state.T.data * h_k, axis=-1) * weighted_area))
+        salt = float(jnp.sum(jnp.sum(state.S.data * h_k, axis=-1) * weighted_area))
+        return mean_eta, heat, salt, ocean_area
+
+    def test_longrun_conservation_with_fixer(self):
+        """50-step integration with conservation fixer: drift should be small."""
+        grid = create_cubed_sphere(8)
+        z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
+        state = rest_state_ocean(
+            grid, z_coord, T_surface=20.0, T_deep=2.0,
+            S_uniform=35.0, H_max=4000.0,
+        )
+        config = OceanConfig(
+            A_h=1e4, K_h=1e3, A_v=1e-3, K_v=1e-4,
+            n_barotropic_substeps=10,
+            use_conservation_fixer=True,
+        )
+        model = OceanModel(grid, z_coord, config)
+
+        eta0, heat0, salt0, _ = self._ocean_invariants(state, grid, z_coord, config)
+
+        for _ in range(50):
+            state = model.step(state, 3600.0)
+
+        eta1, heat1, salt1, _ = self._ocean_invariants(state, grid, z_coord, config)
+
+        # With the conservation fixer, mean eta drift should be very small.
+        assert abs(eta1 - eta0) < 1e-8, \
+            f"Mean eta drift: {abs(eta1 - eta0):.2e}"
+        # Heat and salt: relative errors should be small.
+        assert abs(heat1 - heat0) / max(abs(heat0), 1.0) < 1e-8, \
+            f"Heat drift: {abs(heat1 - heat0) / max(abs(heat0), 1.0):.2e}"
+        assert abs(salt1 - salt0) / max(abs(salt0), 1.0) < 1e-8, \
+            f"Salt drift: {abs(salt1 - salt0) / max(abs(salt0), 1.0):.2e}"
+
+        # Check fields remain finite and bounded.
+        mask_3d = state.land_mask.data[..., jnp.newaxis]
+        assert jnp.all(jnp.isfinite(state.T.data))
+        assert jnp.all(jnp.isfinite(state.S.data))
+        assert jnp.all(jnp.isfinite(state.u.data))
+        assert jnp.all(jnp.isfinite(state.v.data))
+        assert jnp.all(jnp.isfinite(state.eta.data))
+        T_ocean = jnp.where(mask_3d > 0.5, state.T.data, jnp.nan)
+        assert float(jnp.nanmin(T_ocean)) > -5.0
+        assert float(jnp.nanmax(T_ocean)) < 40.0
+
+    def test_longrun_stability_without_fixer(self):
+        """50-step integration WITHOUT fixer: state should remain finite and bounded."""
+        grid = create_cubed_sphere(8)
+        z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
+        state = rest_state_ocean(
+            grid, z_coord, T_surface=20.0, T_deep=2.0,
+            S_uniform=35.0, H_max=4000.0,
+        )
+        config = OceanConfig(
+            A_h=1e4, K_h=1e3, A_v=1e-3, K_v=1e-4,
+            n_barotropic_substeps=10,
+            use_conservation_fixer=False,
+        )
+        model = OceanModel(grid, z_coord, config)
+
+        for _ in range(50):
+            state = model.step(state, 3600.0)
+
+        # Without fixer, check stability (finite and bounded).
+        assert jnp.all(jnp.isfinite(state.T.data))
+        assert jnp.all(jnp.isfinite(state.S.data))
+        assert jnp.all(jnp.isfinite(state.eta.data))
+        mask_3d = state.land_mask.data[..., jnp.newaxis]
+        T_ocean = jnp.where(mask_3d > 0.5, state.T.data, jnp.nan)
+        assert float(jnp.nanmin(T_ocean)) > -5.0
+        assert float(jnp.nanmax(T_ocean)) < 40.0
+
+    def test_zstar_transport_velocity_boundary_conditions(self):
+        """Z-star transport velocity should be zero at surface and bottom."""
+        from legoesm.ocean.dynamics.ocean_pe import _diagnose_w_from_flux_div
+
+        z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
+        # Arbitrary flux divergence (not identically zero).
+        flux_div = jnp.linspace(-0.01, 0.01, 10).reshape(1, 1, 1, 10)
+
+        w = _diagnose_w_from_flux_div(flux_div, z_coord)
+
+        # Surface (k=0) and bottom (k=nlev) should be zero.
+        assert float(jnp.max(jnp.abs(w[..., 0]))) < 1e-15, \
+            f"Surface w = {float(w[0, 0, 0, 0]):.2e}"
+        assert float(jnp.max(jnp.abs(w[..., -1]))) < 1e-15, \
+            f"Bottom w = {float(w[0, 0, 0, -1]):.2e}"
+
+        # Interior should be non-zero for non-trivial divergence.
+        assert float(jnp.max(jnp.abs(w[..., 1:-1]))) > 0.0
+
+    def test_advective_form_zero_for_uniform_tracer(self):
+        """Advective form -ẇ·∂T/∂z should give zero for uniform T."""
+        from legoesm.ocean.dynamics.ocean_pe import (
+            _diagnose_w_from_flux_div,
+            _vertical_advection_ocean,
+        )
+
+        z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
+        J = jnp.ones((1, 1, 1))
+        T_uniform = jnp.full((1, 1, 1, 10), 15.0)
+
+        # Non-trivial flux divergence → non-trivial ẇ.
+        flux_div = jnp.linspace(-0.01, 0.01, 10).reshape(1, 1, 1, 10)
+        w = _diagnose_w_from_flux_div(flux_div, z_coord)
+
+        tendency = _vertical_advection_ocean(T_uniform, w, z_coord, J)
+        assert float(jnp.max(jnp.abs(tendency))) < 1e-14, \
+            f"Uniform tracer tendency: {float(jnp.max(jnp.abs(tendency))):.2e}"
+
+    def test_zstar_eulerian_comparison(self):
+        """Z-star velocity should differ from Eulerian when deta/dt != 0."""
+        from legoesm.ocean.dynamics.ocean_pe import _diagnose_w_from_flux_div
+
+        z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
+        # Asymmetric flux divergence so sum != 0 → Eulerian w[0] != 0.
+        flux_div = jnp.linspace(0.0, 0.02, 10).reshape(1, 1, 1, 10)
+
+        w_euler = _diagnose_w_from_flux_div(flux_div, None)
+        w_zstar = _diagnose_w_from_flux_div(flux_div, z_coord)
+
+        # Eulerian: w[0] = -sum(flux_div) != 0, w[nlev] = 0
+        assert float(jnp.abs(w_euler[0, 0, 0, 0])) > 1e-5
+        assert float(jnp.abs(w_euler[0, 0, 0, -1])) < 1e-15
+
+        # Z-star: w[0] = 0, w[nlev] = 0
+        assert float(jnp.abs(w_zstar[0, 0, 0, 0])) < 1e-15
+        assert float(jnp.abs(w_zstar[0, 0, 0, -1])) < 1e-15
+
+        # Interior values should differ.
+        diff = float(jnp.max(jnp.abs(w_zstar - w_euler)))
+        assert diff > 0.0

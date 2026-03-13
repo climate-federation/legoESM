@@ -103,7 +103,7 @@ def ocean_baroclinic_tendencies_fc_cgrid(
     flux_div_k = fc_divergence_3d(
         h_k * u * mask_3d, h_k * v * mask_3d, grid, fc_config,
     )
-    w = _diagnose_w_from_flux_div(flux_div_k)
+    w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
 
     div_v = fc_divergence_3d(u * mask_3d, v * mask_3d, grid, fc_config)
 

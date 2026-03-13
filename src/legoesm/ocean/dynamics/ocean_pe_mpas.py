@@ -119,8 +119,10 @@ def mpas_ocean_baroclinic_tendencies(
         # Kinetic energy
         ke = kinetic_energy_cell(u_k, mesh)  # (nCells,)
 
-        # Bernoulli function: KE + p'/rho_0 + g*eta
-        bernoulli = ke + p_k / rho_0 + g * eta  # (nCells,)
+        # Bernoulli function: KE + p'/rho_0  (baroclinic only;
+        # the barotropic pressure gradient -g*grad(eta) is handled
+        # by the barotropic substeps to avoid double-counting)
+        bernoulli = ke + p_k / rho_0  # (nCells,)
 
         # Pressure gradient + Bernoulli
         grad_B = gradient_edge(bernoulli, mesh)  # (nEdges,)
@@ -194,7 +196,7 @@ def mpas_ocean_baroclinic_tendencies(
 
     # Vertical viscosity: d/dz(A_v * du/dz) at each edge
     du_dt_3d = du_dt_3d + _vertical_diffusion(
-        u_3d, dz_half, dz, jacobian=None, coeff=config.A_v, is_edge=True,
+        u_3d, dz_half, dz, jacobian=jacobian, coeff=config.A_v, is_edge=True,
         mesh=mesh,
     )
 

@@ -119,7 +119,7 @@ def ocean_baroclinic_tendencies(
     flux_div_k = divergence_3d(
         h_k * u * mask_3d, h_k * v * mask_3d, grid,
     )  # (6, n, n, nlev)
-    w = _diagnose_w_from_flux_div(flux_div_k)  # (6, n, n, nlev+1)
+    w = _diagnose_w_from_flux_div(flux_div_k, z_coord)  # z-star transport ẇ
 
     # Velocity divergence (needed for skew-symmetric momentum, step 7).
     div_v = divergence_3d(u * mask_3d, v * mask_3d, grid)  # (6, n, n, nlev)
@@ -172,6 +172,8 @@ def ocean_baroclinic_tendencies(
             dtr_dx = gradient_x_3d(tr, grid)
             dtr_dy = gradient_y_3d(tr, grid)
             dtr_dt = -(u * mask_3d * dtr_dx + v * mask_3d * dtr_dy)
+        # Vertical advection with z-star transport velocity ẇ
+        # (ẇ[0]=0 at surface, ẇ[nlev]=0 at bottom eliminates spurious BCs).
         dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
 
         if physics_fn is None:
@@ -259,30 +261,40 @@ def ocean_baroclinic_tendencies(
 
 def _diagnose_w_from_flux_div(
     flux_div_k: jnp.ndarray,
+    z_coord: OceanZStarCoordinate | None = None,
 ) -> jnp.ndarray:
-    """Diagnose vertical velocity from the flux divergence div(v*h_k).
+    """Diagnose z-star transport velocity from the flux divergence div(v*h_k).
 
-    From the layer continuity equation:
-        dh_k/dt + div(v_k * h_k) + w_{k-1/2} - w_{k+1/2} = 0
+    In z-star coordinates, the layer continuity equation is:
 
-    Assuming w = 0 at the ocean floor and integrating bottom-up:
-        w_{k-1/2} = -sum_{k'=k}^{nlev-1} div(v_k' * h_k')
+        d(J·Δz_ref)/dt + div(J·Δz_ref·v) + ẇ_{k-1/2} - ẇ_{k+1/2} = 0
 
-    Using div(v*h) directly (rather than div(v)*h) ensures exact
-    consistency with the free-surface tendency  dη/dt = -Σ div(v*h_k)
-    and avoids the spurious source from the product rule on variable h.
+    where ẇ is the velocity relative to the moving z-star surfaces.
+    The grid velocity at each interface is proportional to dη/dt:
+
+        ẇ[k] = w_euler[k] - σ_k · (dη/dt)
+
+    where σ_k = (z_half_ref[k] + H_max) / H_max is the fraction of
+    the reference water column below interface k.  This ensures
+    ẇ[0] = 0 at the surface and ẇ[nlev] = 0 at the bottom, giving
+    no-flux boundary conditions that are essential for tracer
+    conservation in flux-form vertical advection.
 
     Parameters
     ----------
     flux_div_k : array
         Horizontal flux divergence div(v_k * h_k), shape (..., nlev).
+    z_coord : OceanZStarCoordinate or None
+        Vertical coordinate.  When provided, the returned velocity is
+        the z-star transport velocity ẇ (recommended).  When ``None``,
+        the raw Eulerian w is returned for backward compatibility.
 
     Returns
     -------
     array : Vertical velocity at interfaces [m/s], shape (..., nlev+1).
         w[..., 0] is at the surface, w[..., -1] = 0 at the bottom.
     """
-    # Cumulative sum from bottom up: w at each interface
+    # Cumulative sum from bottom up: Eulerian w at each interface
     fd_rev = flux_div_k[..., ::-1]
     cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]  # (..., nlev)
@@ -291,8 +303,16 @@ def _diagnose_w_from_flux_div(
     zeros_bottom = jnp.zeros(
         (*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype,
     )
-    w = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
-    return w
+    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
+
+    if z_coord is None:
+        return w_euler
+
+    # z-star correction: subtract the grid velocity component.
+    # σ_k = (z_half_ref[k] + H_max) / H_max  (1 at surface, 0 at bottom)
+    sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max  # (nlev+1,)
+    deta_dt = w_euler[..., 0:1]  # surface w = dη/dt, shape (..., 1)
+    return w_euler - sigma * deta_dt
 
 
 def _vertical_advection_ocean(
@@ -302,6 +322,10 @@ def _vertical_advection_ocean(
     jacobian: jnp.ndarray,
 ) -> jnp.ndarray:
     """Compute vertical advection -w * d(field)/dz with upwind scheme.
+
+    Advective form — suitable for momentum (u, v) in the vector-invariant
+    formulation.  For tracer conservation, use
+    ``_flux_form_vertical_advection_tracer`` instead.
 
     Parameters
     ----------
@@ -327,3 +351,56 @@ def _vertical_advection_ocean(
     dz_half = z_coord.dz_half_ref * jac_safe  # (..., nlev-1)
     grad = upwind_vertical_gradient(field, dz_half, w_full)
     return -w_full * grad
+
+
+def _flux_form_vertical_advection_tracer(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    jacobian: jnp.ndarray,
+) -> jnp.ndarray:
+    """Conservative flux-form vertical advection for tracers.
+
+    Computes  dT/dt = (1/h_k) · (F[k+1] - F[k])
+
+    where F[k] = ẇ[k] · T_upwind at each interface.  The z-star
+    transport velocity ẇ satisfies ẇ[0] = 0 (surface) and
+    ẇ[nlev] = 0 (bottom), so boundary fluxes vanish and the
+    depth-integrated tracer ∫h·T is exactly conserved.
+
+    Parameters
+    ----------
+    field : array
+        Tracer at full levels, shape (..., nlev).
+    w_half : array
+        Z-star transport velocity at interfaces [m/s], shape (..., nlev+1).
+        Must satisfy w_half[..., 0] ≈ 0 and w_half[..., -1] = 0.
+    z_coord : OceanZStarCoordinate
+        Vertical coordinate.
+    jacobian : array
+        Dynamic Jacobian, shape (...).
+
+    Returns
+    -------
+    array : Vertical advection tendency, shape (..., nlev).
+    """
+    # Upwind tracer at interior interfaces k = 1 .. nlev-1.
+    # Interface k sits between layers k-1 (above) and k (below).
+    T_above = field[..., :-1]   # T[k-1] for k=1..nlev-1
+    T_below = field[..., 1:]    # T[k]   for k=1..nlev-1
+    w_interior = w_half[..., 1:-1]  # ẇ at k=1..nlev-1
+
+    T_at_interface = jnp.where(w_interior > 0, T_below, T_above)
+    F_interior = w_interior * T_at_interface  # (..., nlev-1)
+
+    # Boundary fluxes: ẇ[0] = 0, ẇ[nlev] = 0  →  F = 0.
+    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
+    flux = jnp.concatenate([zeros, F_interior, zeros], axis=-1)  # (..., nlev+1)
+
+    # Tendency:  (F[k+1] − F[k]) / h_k
+    # F[k+1] > 0 means upward flux entering layer k from below (positive).
+    # F[k]   > 0 means upward flux leaving layer k through the top (negative).
+    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
+    h_k = z_coord.dz_ref * jac_safe  # (..., nlev)
+
+    return (flux[..., 1:] - flux[..., :-1]) / h_k

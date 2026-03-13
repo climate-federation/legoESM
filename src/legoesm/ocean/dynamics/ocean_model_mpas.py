@@ -98,22 +98,16 @@ class MPASOceanModel:
         u_baro = state.u.data + dt * tend.du_dt.data
 
         # 4. Barotropic substeps
+        # The baroclinic tendency is already applied to u_baro, so the
+        # barotropic solver computes u_bar from the updated velocity.
+        # No F_slow_u is needed (same pattern as cubed-sphere barotropic.py).
         n_sub = config.n_barotropic_substeps
         dt_baro = dt / n_sub
 
-        # Compute slow forcing for barotropic from baroclinic tendency
-        # Depth-averaged tendency from 3D momentum
-        h_k = compute_layer_thickness(
-            state.eta.data, state.H_bathy.data, z_coord,
-            min_water_column_m=config.min_water_column_m,
-        )
         c1 = mesh.cellsOnEdge[0]
         c2 = mesh.cellsOnEdge[1]
-        h_e_k = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
-        H_e = jnp.sum(h_e_k, axis=1)  # (nEdges,)
-        F_slow = jnp.sum(tend.du_dt.data * h_e_k, axis=1) / jnp.maximum(H_e, 1e-10)
 
-        # Create intermediate state with updated tracers for barotropic
+        # Create intermediate state with updated velocity for barotropic
         state_for_baro = state._replace(
             u=state.u.replace(data=u_baro),
         )
@@ -124,23 +118,26 @@ class MPASOceanModel:
             F_slow_eta = freshwater_eta_tendency(freshwater, config.rho_0) * mask
 
         eta_new, u_bar_new = barotropic_substeps_mpas(
-            state_for_baro, mesh, z_coord, config, dt_baro, n_sub, F_slow,
+            state_for_baro, mesh, z_coord, config, dt_baro, n_sub,
             F_slow_eta=F_slow_eta,
         )
 
         # 5. Reconcile 3D velocity
+        # Compute u_bar_old from the UPDATED state (state_for_baro),
+        # not the original. This ensures depth_avg(u_3d_new) = u_bar_new.
+        h_k = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, z_coord,
+            min_water_column_m=config.min_water_column_m,
+        )
+        h_e_k = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
         H_total = jnp.maximum(state.eta.data + state.H_bathy.data,
                               config.min_water_column_m)
-        H_e_old = 0.5 * (H_total[c1] + H_total[c2])
-        u_bar_old = jnp.sum(state.u.data * h_e_k, axis=1) / jnp.maximum(H_e_old, 1e-10)
+        H_e = 0.5 * (H_total[c1] + H_total[c2])
+        u_bar_old = jnp.sum(u_baro * h_e_k, axis=1) / jnp.maximum(H_e, 1e-10)
 
         u_3d_new = reconcile_3d_velocity(
-            u_baro, u_bar_old, u_bar_new, h_k, mesh, mask,
+            u_baro, u_bar_old, u_bar_new, mesh, mask,
         )
-
-        # Mask land edges
-        edge_mask = mask[c1] * mask[c2]
-        u_3d_new = u_3d_new * edge_mask[:, jnp.newaxis]
 
         state_new = MPASOceanState(
             u=state.u.replace(data=u_3d_new),

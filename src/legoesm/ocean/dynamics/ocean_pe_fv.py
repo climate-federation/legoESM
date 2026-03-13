@@ -123,7 +123,7 @@ def ocean_baroclinic_tendencies_fv(
     flux_div_k = _fv_divergence_3d(
         h_k * u * mask_3d, h_k * v * mask_3d, grid,
     )
-    w = _diagnose_w_from_flux_div(flux_div_k)
+    w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
 
     # Velocity divergence for skew-symmetric momentum
     div_v = _fv_divergence_3d(u * mask_3d, v * mask_3d, grid)

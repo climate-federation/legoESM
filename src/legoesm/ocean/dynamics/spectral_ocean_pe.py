@@ -216,13 +216,17 @@ def spectral_ocean_tendencies(
     # --- 6. Absolute vorticity ---
     abs_vor = vor + grid.f[..., jnp.newaxis]
 
-    # --- 7. Diagnose w ---
+    # --- 7. Diagnose z-star transport velocity ---
     div_h = div.real * h_k.real
     div_h_rev = div_h[..., ::-1]
     cumsum_rev = jnp.cumsum(div_h_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]
     zeros_bottom = jnp.zeros((*div.shape[:-1], 1), dtype=div_h.dtype)
-    w = jnp.concatenate([w_inner, zeros_bottom], axis=-1)  # (n_lat, n_lon, nlev+1)
+    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
+    # z-star correction: subtract grid velocity so ẇ[0]=0, ẇ[nlev]=0.
+    sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
+    deta_dt_local = w_euler[..., 0:1]
+    w = w_euler - sigma * deta_dt_local
 
     # --- 8. Spectral operators ---
     im_over_a = 1j * grid.ms.astype(jnp.float64) / a
@@ -384,13 +388,36 @@ def _vertical_advection_spectral(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Vertical advection -w * d(field)/dz with upwind scheme (grid-space)."""
+    """Vertical advection -w * d(field)/dz with upwind scheme (momentum)."""
     w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
     jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
 
     dz_half = z_coord.dz_half_ref * jac_safe
     grad = upwind_vertical_gradient(field, dz_half, w_full)
     return -w_full * grad
+
+
+def _flux_form_vertical_advection_spectral(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    jacobian: jnp.ndarray,
+) -> jnp.ndarray:
+    """Conservative flux-form vertical advection for tracers (spectral)."""
+    T_above = field[..., :-1]
+    T_below = field[..., 1:]
+    w_interior = w_half[..., 1:-1]
+
+    T_at_interface = jnp.where(w_interior > 0, T_below, T_above)
+    F_interior = w_interior * T_at_interface
+
+    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
+    flux = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+
+    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
+    h_k = z_coord.dz_ref * jac_safe
+
+    return (flux[..., 1:] - flux[..., :-1]) / h_k
 
 
 # ==============================================================================

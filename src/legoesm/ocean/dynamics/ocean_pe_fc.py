@@ -30,7 +30,6 @@ from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
-    upwind_vertical_gradient,
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 from legoesm.ocean.physics.mixing import vertical_diffusion
@@ -106,7 +105,7 @@ def ocean_baroclinic_tendencies_fc(
     flux_div_k = fc_divergence_3d(
         h_k * u * mask_3d, h_k * v * mask_3d, grid, fc_config,
     )
-    w = _diagnose_w_from_flux_div(flux_div_k)
+    w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
 
     div_v = fc_divergence_3d(u * mask_3d, v * mask_3d, grid, fc_config)
 

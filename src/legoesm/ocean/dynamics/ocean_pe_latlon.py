@@ -45,12 +45,18 @@ from legoesm.ocean.dynamics.latlon_operators import (
 )
 
 
-def _diagnose_w_from_flux_div(flux_div_k: jnp.ndarray) -> jnp.ndarray:
-    """Diagnose vertical velocity from flux divergence (bottom-up cumsum).
+def _diagnose_w_from_flux_div(
+    flux_div_k: jnp.ndarray,
+    z_coord: OceanZStarCoordinate | None = None,
+) -> jnp.ndarray:
+    """Diagnose z-star transport velocity from flux divergence (bottom-up cumsum).
 
     Parameters
     ----------
     flux_div_k : array, shape (..., nlev)
+    z_coord : OceanZStarCoordinate or None
+        When provided, applies the z-star correction so that ẇ[0] = 0
+        at the surface and ẇ[nlev] = 0 at the bottom.
 
     Returns
     -------
@@ -61,7 +67,14 @@ def _diagnose_w_from_flux_div(flux_div_k: jnp.ndarray) -> jnp.ndarray:
     cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]
     zeros_bottom = jnp.zeros((*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype)
-    return jnp.concatenate([w_inner, zeros_bottom], axis=-1)
+    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
+
+    if z_coord is None:
+        return w_euler
+
+    sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
+    deta_dt = w_euler[..., 0:1]
+    return w_euler - sigma * deta_dt
 
 
 def _vertical_advection_ocean(
@@ -70,7 +83,7 @@ def _vertical_advection_ocean(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Vertical advection -w * d(field)/dz with upwind scheme.
+    """Vertical advection -w * d(field)/dz with upwind scheme (momentum).
 
     Parameters
     ----------
@@ -88,6 +101,32 @@ def _vertical_advection_ocean(
     dz_half = z_coord.dz_half_ref * jac_safe
     grad = upwind_vertical_gradient(field, dz_half, w_full)
     return -w_full * grad
+
+
+def _flux_form_vertical_advection_tracer(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    jacobian: jnp.ndarray,
+) -> jnp.ndarray:
+    """Conservative flux-form vertical advection for tracers (lat-lon).
+
+    See ocean_pe._flux_form_vertical_advection_tracer for full docstring.
+    """
+    T_above = field[..., :-1]
+    T_below = field[..., 1:]
+    w_interior = w_half[..., 1:-1]
+
+    T_at_interface = jnp.where(w_interior > 0, T_below, T_above)
+    F_interior = w_interior * T_at_interface
+
+    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
+    flux = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+
+    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
+    h_k = z_coord.dz_ref * jac_safe
+
+    return (flux[..., 1:] - flux[..., :-1]) / h_k
 
 
 def latlon_ocean_baroclinic_tendencies(
@@ -154,7 +193,7 @@ def latlon_ocean_baroclinic_tendencies(
     flux_div_k = fv_divergence_latlon_3d(
         h_k * u * mask_3d, h_k * v * mask_3d, grid,
     )
-    w = _diagnose_w_from_flux_div(flux_div_k)
+    w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
 
     # Velocity divergence for skew-symmetric momentum
     div_v = fv_divergence_latlon_3d(u * mask_3d, v * mask_3d, grid)

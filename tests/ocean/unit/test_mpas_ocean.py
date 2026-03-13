@@ -303,7 +303,7 @@ class TestBarotropicSubsteps:
         mask = state.land_mask.data
 
         u_3d_new = reconcile_3d_velocity(
-            state.u.data, u_bar_old, u_bar_new, h_k, mesh, mask,
+            state.u.data, u_bar_old, u_bar_new, mesh, mask,
         )
         assert u_3d_new.shape == state.u.data.shape
 

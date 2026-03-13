@@ -96,6 +96,20 @@ def _mpas_summary_ok(summary: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _latlon_native_fv_summary_ok(summary: dict) -> tuple[bool, str]:
+    if not bool(summary.get("ok", False)):
+        return False, f"ok={summary.get('ok', False)}"
+    counts = summary.get("counts", {}) or {}
+    passed = int(counts.get("passed", 0))
+    failed = int(counts.get("failed", 0))
+    errors = int(counts.get("errors", 0))
+    if passed <= 0:
+        return False, "no_passed_tests"
+    if failed > 0 or errors > 0:
+        return False, f"failed={failed},errors={errors}"
+    return True, "ok"
+
+
 @dataclass
 class Attempt:
     attempt: int
@@ -226,6 +240,7 @@ def main() -> int:
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--skip-cube", action="store_true")
     parser.add_argument("--skip-latlon-projection", action="store_true")
+    parser.add_argument("--skip-latlon-native-fv", action="store_true")
     parser.add_argument("--skip-latlon-spectral", action="store_true")
     parser.add_argument("--skip-icosahedral", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -351,6 +366,37 @@ def main() -> int:
             )
 
     # ------------------------------------------------------------------
+    # Native lat-lon finite-volume branch (dedicated FV test suite).
+    # ------------------------------------------------------------------
+    if not args.skip_latlon_native_fv:
+        out_dir = out_root / "lat_lon" / "native_finite_volume" / "pytest"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def build_latlon_native_fv_cmd(_: float) -> list[str]:
+            return [
+                args.python,
+                "tests/ocean/run_latlon_ocean_fv_suite.py",
+                "--python",
+                args.python,
+                "--output",
+                str(out_dir),
+            ]
+
+        runs.append(
+            _run_with_backoff(
+                label="lat_lon/native_finite_volume",
+                output_dir=out_dir,
+                dt0=1.0,
+                max_retries=int(args.max_retries),
+                build_cmd=build_latlon_native_fv_cmd,
+                summary_check=_latlon_native_fv_summary_ok,
+                cwd=cwd,
+                logs_root=logs_root,
+                dry_run=bool(args.dry_run),
+            ),
+        )
+
+    # ------------------------------------------------------------------
     # Lat-lon spectral run (native Gaussian-grid spectral ocean suite).
     # ------------------------------------------------------------------
     if not args.skip_latlon_spectral:
@@ -444,6 +490,10 @@ def main() -> int:
             "lat_lon_projection": (
                 "projection_from_cube runs use cubed-sphere ocean dynamics and output "
                 "native + remapped lat-lon diagnostics under lat_lon/projection_from_cube."
+            ),
+            "lat_lon_native_fv": (
+                "native finite-volume lat-lon branch runs tests/ocean/test_latlon_ocean.py "
+                "via tests/ocean/run_latlon_ocean_fv_suite.py."
             ),
             "lat_lon_spectral_cases": (
                 "Native spectral lat-lon suite currently covers rest/wave/baroclinic cases."
