@@ -11,3 +11,10 @@ from legoesm.diagnostics.energy_budget import (
     toa_net_radiation_from_output,
 )
 from legoesm.diagnostics.monthly_means import MonthlyAccumulator
+from legoesm.diagnostics.precision_drift import (
+    DriftSnapshot,
+    PrecisionDriftChecker,
+    compare_states,
+    precision_health_report,
+    check_tracer_negativity,
+)

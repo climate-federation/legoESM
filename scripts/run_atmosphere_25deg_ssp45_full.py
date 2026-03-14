@@ -404,6 +404,12 @@ def _run_with_dt_fallback(case_name: str, dt_candidates: list[float], runner):
     }
 
 
+def _hyperdiff_floor_hs_latlon(n_lat: int) -> float:
+    """Resolution scaling with stability floor for Held-Suarez lat-lon."""
+    scaled = 2.0e16 * (64.0 / float(n_lat)) ** 4
+    return max(scaled, 1.0e16)
+
+
 def _series_init(keys: list[str]) -> dict[str, list[float]]:
     out = {"step": []}
     for k in keys:
@@ -1114,7 +1120,7 @@ def _run_nh_fv_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: i
     def _runner(dt):
         local_steps = int(0.05 * 3600.0 / dt)
         config = CompressibleEulerConfig(
-            n_acoustic_substeps=6,
+            n_acoustic_substeps=8,
             sponge_width=15000.0,
             sponge_coeff=1.0 / (0.1 * 86400.0),
             small_earth_factor=20.0,
@@ -1254,7 +1260,7 @@ def _run_nh_fv_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: i
             "notes": "",
         }
 
-    return _run_with_dt_fallback(case_name, [1.0, 0.5, 0.2], _runner)
+    return _run_with_dt_fallback(case_name, [1.0, 0.5, 0.25, 0.2], _runner)
 
 
 def _run_nh_fv_tc3(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
@@ -1277,12 +1283,18 @@ def _run_nh_fv_tc3(out_dir: Path, n: int, nlev: int, solver: str, mean_every: in
     def _runner(dt):
         local_steps = int(0.05 * 3600.0 / dt)
         config = CompressibleEulerConfig(
-            n_acoustic_substeps=6,
+            n_acoustic_substeps=10,
             sponge_width=5000.0,
-            sponge_coeff=0.05,
+            sponge_coeff=0.08,
             small_earth_factor=60.0,
             use_coriolis=False,
             outer_integrator=solver,
+            edge_blend_uv=0.10,
+            edge_blend_w=0.10,
+            edge_blend_theta=0.08,
+            edge_blend_rho=0.10,
+            edge_blend_tracers=0.10,
+            edge_blend_width=3,
         )
         model = CompressibleEulerModel(small_grid, height_coord, terrain_metric, config)
         state = state0
@@ -1421,7 +1433,7 @@ def _run_nh_fv_tc3(out_dir: Path, n: int, nlev: int, solver: str, mean_every: in
             "notes": "",
         }
 
-    return _run_with_dt_fallback(case_name, [1.0, 0.5, 0.2], _runner)
+    return _run_with_dt_fallback(case_name, [0.5, 0.25, 0.2, 0.1], _runner)
 
 
 def _run_transport_fv(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
@@ -1586,7 +1598,7 @@ def _run_hydro_latlon_hs(out_dir: Path, n_lat: int, n_lon: int, nlev: int, mean_
 
     def _runner(dt):
         local_steps = int(10 * 86400 / dt)
-        hyper = 2.0e16 * (64.0 / n_lat) ** 4
+        hyper = _hyperdiff_floor_hs_latlon(n_lat)
         config = LatLonPrimitiveEquationConfig(
             hyperdiff_coeff=hyper,
             hyperdiff_ps_coeff=hyper,
@@ -1752,7 +1764,7 @@ def _run_hydro_latlon_hs(out_dir: Path, n_lat: int, n_lon: int, nlev: int, mean_
 
     def _runner_rk3(dt):
         local_steps = int(10 * 86400 / dt)
-        hyper = 2.0e16 * (64.0 / n_lat) ** 4
+        hyper = _hyperdiff_floor_hs_latlon(n_lat)
         config = LatLonPrimitiveEquationConfig(
             hyperdiff_coeff=hyper,
             hyperdiff_ps_coeff=hyper,
@@ -2773,10 +2785,10 @@ def _run_nh_spec_tc1(out_dir: Path, trunc: int, nlev: int, mean_every: int):
         a = grid.radius
         eig_max = trunc * (trunc + 1) / (a * a)
         config = SpectralNHConfig(
-            n_acoustic_substeps=6,
+            n_acoustic_substeps=10,
             sponge_width=10000.0,
-            sponge_coeff=0.05,
-            hyperdiff_coeff=1.0 / (0.5 * 3600.0 * eig_max ** 2),
+            sponge_coeff=0.08,
+            hyperdiff_coeff=1.0 / (0.2 * 3600.0 * eig_max ** 2),
         )
         model = SpectralCompressibleEulerModel(grid, height_coord, terrain_metric, config)
         slow_fn, acoustic_fn = model._build_se_functions()
@@ -2917,7 +2929,7 @@ def _run_nh_spec_tc1(out_dir: Path, trunc: int, nlev: int, mean_every: int):
             "notes": "",
         }
 
-    return _run_with_dt_fallback(case_name, [5.0, 3.0, 2.0, 1.0], _runner)
+    return _run_with_dt_fallback(case_name, [2.0, 1.0, 0.5], _runner)
 
 
 def _write_summary(out_dir: Path, cfg: dict, results: list[dict]):

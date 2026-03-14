@@ -15,10 +15,36 @@ Usage:
 import argparse
 import time
 from pathlib import Path
+import sys
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# Allow direct script execution without requiring PYTHONPATH=.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _recommended_dt(test: str, resolution: int) -> float:
+    """Heuristic stable dt [s] by test and cubed-sphere resolution."""
+    res = max(int(resolution), 1)
+    base = {"tc1": 6.0, "tc2a": 4.0, "tc3": 2.0}[test]
+    dt = base * (16.0 / float(res))
+    dt_min = 0.2 if test in ("tc1", "tc2a") else 0.1
+    return float(max(dt_min, min(base, dt)))
+
+
+def _dt_fallback_candidates(dt0: float, dt_min: float) -> list[float]:
+    vals = [dt0, 0.75 * dt0, 0.5 * dt0, 0.25 * dt0]
+    out: list[float] = []
+    for v in vals:
+        vv = max(float(dt_min), float(v))
+        # Keep list unique while preserving order.
+        if not any(abs(vv - x) < 1.0e-12 for x in out):
+            out.append(vv)
+    return out
 
 
 def run_tc1(resolution, n_levels, dt, duration_hours, output_dir):
@@ -260,9 +286,19 @@ def main():
                         help="Test case (tc1, tc2a, tc3)")
     parser.add_argument("--resolution", "-n", type=int, default=16)
     parser.add_argument("--levels", "-l", type=int, default=20)
-    parser.add_argument("--dt", type=float, default=10.0)
+    parser.add_argument(
+        "--dt",
+        type=float,
+        default=None,
+        help="Timestep in seconds (default: auto by case/resolution).",
+    )
     parser.add_argument("--hours", type=float, default=None)
     parser.add_argument("--output", "-o", type=str, default=None)
+    parser.add_argument(
+        "--no-dt-fallback",
+        action="store_true",
+        help="Disable automatic retries with smaller dt when unstable.",
+    )
     parser.add_argument(
         "--x64",
         action="store_true",
@@ -280,11 +316,31 @@ def main():
     print(f"DCMIP-2025 {args.test.upper()} | C{args.resolution} L{args.levels}")
 
     if args.test == "tc1":
-        run_tc1(args.resolution, args.levels, args.dt, hours, out)
+        runner = run_tc1
     elif args.test == "tc2a":
-        run_tc2a(args.resolution, args.levels, args.dt, hours, out)
-    elif args.test == "tc3":
-        run_tc3(args.resolution, args.levels, args.dt, hours, out)
+        runner = run_tc2a
+    else:
+        runner = run_tc3
+
+    dt0 = float(args.dt) if args.dt is not None else _recommended_dt(args.test, args.resolution)
+    dt_min = 0.2 if args.test in ("tc1", "tc2a") else 0.1
+    dt_candidates = [dt0] if args.no_dt_fallback else _dt_fallback_candidates(dt0, dt_min)
+
+    print(f"  Initial dt: {dt0:.3f}s")
+    if not args.no_dt_fallback and len(dt_candidates) > 1:
+        print(f"  dt fallback candidates: {dt_candidates}")
+
+    result = None
+    for dt in dt_candidates:
+        print(f"  Attempt with dt={dt:.3f}s")
+        result = runner(args.resolution, args.levels, dt, hours, out)
+        if bool(result.get("stable", False)):
+            print(f"  Stable at dt={dt:.3f}s")
+            break
+        print(f"  Unstable at dt={dt:.3f}s")
+
+    if result is None:
+        raise RuntimeError("No DCMIP run attempt was executed.")
 
 
 if __name__ == "__main__":

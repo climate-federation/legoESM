@@ -105,14 +105,14 @@ def kuo_convection(
         / config.tau_relax
     )  # (ncol, nlev)
 
-    # 7. Precipitation: column-integrated moisture sink
+    # 7. Precipitation from implied condensation (latent heat budget closure)
+    # P = ∫ (dT/dt * c_pd / L_v) dp/g — ensures energy-moisture consistency
+    implied_condensation = dT_dt * constants.c_pd / constants.L_v  # (ncol, nlev)
     precipitation = jnp.clip(
-        -jnp.sum(dq_v_dt * dp, axis=1) / constants.g,
+        jnp.sum(implied_condensation * dp, axis=1) / constants.g,
         0.0,
         None,
     )  # (ncol,)
-    # Add direct condensation from moisture convergence
-    precipitation = precipitation + jnp.clip(trigger * MC / dt, 0.0, None)
 
     # 8. CAPE diagnostic
     cape = compute_cape(T, T_moist, p_full, p_half)  # (ncol,)

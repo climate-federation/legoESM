@@ -45,13 +45,19 @@ from legoesm.atmosphere.physics.held_suarez_latlon import (
 )
 
 
-def compute_hyperdiff_coeff(n_lat: int, reference_n: int = 64,
-                            reference_coeff: float = 2e16) -> float:
+def compute_hyperdiff_coeff(
+    n_lat: int,
+    reference_n: int = 64,
+    reference_coeff: float = 2e16,
+    min_coeff: float = 1e16,
+) -> float:
     """Scale hyperdiffusion coefficient with resolution.
 
     For nabla^4 diffusion, nu scales as (dx)^4.
+    A minimum floor keeps high-resolution lat-lon runs stable in SSP45 mode.
     """
-    return reference_coeff * (reference_n / n_lat) ** 4
+    scaled = reference_coeff * (reference_n / n_lat) ** 4
+    return max(scaled, min_coeff)
 
 
 def main():
@@ -79,7 +85,10 @@ def main():
     N_DAYS = args.days
     DIAG_INTERVAL = 6  # hours
 
-    HYPERDIFF_COEFF = args.hyperdiff or compute_hyperdiff_coeff(N_LAT)
+    if args.hyperdiff is None:
+        HYPERDIFF_COEFF = compute_hyperdiff_coeff(N_LAT)
+    else:
+        HYPERDIFF_COEFF = float(args.hyperdiff)
 
     OUTPUT_DIR = Path(args.output or f"results/atmosphere/hydrostatic/held_suarez_latlon_{N_LAT}x{N_LON}_L{N_LEVELS}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)

@@ -124,19 +124,52 @@ class TKEConfig(NamedTuple):
 
 
 class CLUBBLiteConfig(NamedTuple):
-    """Configuration for CLUBB-lite higher-order closure skeleton.
+    """Configuration for CLUBB-lite higher-order closure.
+
+    Simplified implementation of the Cloud Layers Unified By Binormals
+    (CLUBB) model. Carries five prognostic second moments (w'², θ_l'²,
+    r_t'², w'θ_l', w'r_t') and diagnoses cloud fraction from a Gaussian
+    PDF of the saturation deficit.
+
+    References
+    ----------
+    - Golaz, J.-C., Larson, V. E., & Cotton, W. R. (2002). A PDF-based
+      model for boundary layer clouds. Part I. J. Atmos. Sci., 59, 3540.
+    - Larson, V. E., & Golaz, J.-C. (2005). Using Assumed PDF shapes.
+      J. Atmos. Sci., 62, 3620-3649.
 
     Fields
     ------
     C1 : float
-        Placeholder tuning parameter (default 1.0).
+        Pressure scrambling / return-to-isotropy coeff for w'² (default 4.0).
+    C4 : float
+        Pressure scrambling for flux moments w'θ_l', w'r_t' (default 3.0).
+    C5 : float
+        Scalar variance dissipation rate (default 3.0).
+    C_eps : float
+        TKE dissipation coefficient (default 0.19).
+    C_K : float
+        Diffusivity coefficient: Km = C_K * l * sqrt(w'²) (default 0.4).
+    Pr_t : float
+        Turbulent Prandtl number (default 0.33).
+    l_mix_max : float
+        Maximum mixing length [m] (default 100.0).
     tke_min : float
-        Minimum TKE [m^2/s^2] (default 1e-6).
+        Minimum TKE (w'²) [m²/s²] (default 1e-6).
+    var_min : float
+        Minimum scalar variance [K² or (kg/kg)²] (default 1e-12).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
-    C1: float = 1.0
+    C1: float = 4.0
+    C4: float = 3.0
+    C5: float = 3.0
+    C_eps: float = 0.19
+    C_K: float = 0.4
+    Pr_t: float = 0.33
+    l_mix_max: float = 100.0
     tke_min: float = 1e-6
+    var_min: float = 1e-12
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
