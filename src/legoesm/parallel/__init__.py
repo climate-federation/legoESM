@@ -29,6 +29,12 @@ Parallelism strategies
    ``partition_voronoi_mesh()`` partitions unstructured MPAS/Voronoi
    meshes via geometric bisection or METIS, with halo exchange via
    ``VoronoiHaloExchange``.
+
+8. **Ensemble parallelism**:
+   ``make_ensemble_step()`` vmaps the model step over an ensemble
+   dimension; ``ensemble_integrate()`` combines scan + vmap for
+   efficient time-integration of many members.  Multi-device
+   sharding via ``shard_ensemble()``.
 """
 
 from legoesm.parallel.mesh import (
@@ -57,6 +63,24 @@ from legoesm.parallel.halo_exchange_voronoi import (
     exchange_local_simulated,
 )
 
+from legoesm.parallel.ensemble import (
+    stack_states,
+    unstack_states,
+    perturb_initial_conditions,
+    perturb_parameters,
+    make_ensemble_step,
+    make_ensemble_step_jit,
+    ensemble_integrate,
+    ensemble_integrate_with_forcing,
+    ensemble_mean,
+    ensemble_std,
+    ensemble_percentile,
+    ensemble_spread,
+    create_ensemble_mesh,
+    shard_ensemble,
+    gather_ensemble,
+)
+
 __all__ = [
     "DeviceConfig",
     "create_device_mesh",
@@ -76,4 +100,20 @@ __all__ = [
     "scatter_to_local",
     "VoronoiHaloExchange",
     "exchange_local_simulated",
+    # Ensemble parallelism
+    "stack_states",
+    "unstack_states",
+    "perturb_initial_conditions",
+    "perturb_parameters",
+    "make_ensemble_step",
+    "make_ensemble_step_jit",
+    "ensemble_integrate",
+    "ensemble_integrate_with_forcing",
+    "ensemble_mean",
+    "ensemble_std",
+    "ensemble_percentile",
+    "ensemble_spread",
+    "create_ensemble_mesh",
+    "shard_ensemble",
+    "gather_ensemble",
 ]
