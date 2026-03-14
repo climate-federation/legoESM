@@ -1,0 +1,357 @@
+"""Boussinesq Hydrostatic Primitive Equations on the C-D grid cubed-sphere.
+
+FV3-style C-D grid discretisation for the ocean:
+
+* D-grid winds ``u_d, v_d`` at cell corners (shape ``(6, n+1, n+1, nlev)``)
+  are the prognostic velocity variables.
+* C-grid velocities at cell edges are diagnosed for mass and tracer transport.
+* Vorticity is computed from the integral circulation, exact on the D-grid.
+* Bernoulli gradient uses the Arakawa-Lamb 4-point formula.
+* Scalars (T, S, h, eta) live at cell centres on the A-grid.
+
+The ocean state containers (``OceanState``, ``OceanTendencies``) use A-grid
+velocity storage ``(6, n, n, nlev)`` for compatibility with the rest of the
+ocean infrastructure (barotropic solver, conservation fixers, etc.).
+Conversion between A-grid and D-grid is done at the tendency interface.
+
+References
+----------
+- Lin (2004): A "Vertically Lagrangian" FV Dynamical Core
+- Griffies (2004): Fundamentals of Ocean Climate Models
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+
+from legoesm.core.field import Field
+from legoesm.core.operators_cdgrid import (
+    dgrid_to_cgrid,
+    cgrid_to_dgrid,
+    dgrid_vorticity_3d,
+    cgrid_divergence_3d,
+    cgrid_mass_flux_divergence_3d,
+    _arakawa_lamb_gradient_3d,
+    _interp_center_to_corner_3d,
+    _laplacian_dgrid,
+)
+from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.cubed_sphere_cdgrid import (
+    CubedSphereCDGrid,
+    create_cubed_sphere_cdgrid,
+)
+from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    compute_layer_thickness,
+    compute_ocean_jacobian,
+    upwind_vertical_gradient,
+)
+from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
+
+
+# ==============================================================================
+# A-grid <-> D-grid conversion
+# ==============================================================================
+
+def _agrid_to_dgrid_3d(u_a, v_a, cdgrid):
+    """Convert A-grid cell-centre velocities to D-grid corner velocities.
+
+    Simple 4-point average from surrounding cell centres to corners,
+    using halo exchange for cross-face data.
+
+    Parameters
+    ----------
+    u_a, v_a : jax.Array, shape (6, n, n, nlev)
+
+    Returns
+    -------
+    u_d, v_d : jax.Array, shape (6, n+1, n+1, nlev)
+    """
+    u_d = _interp_center_to_corner_3d(u_a, cdgrid)
+    v_d = _interp_center_to_corner_3d(v_a, cdgrid)
+    return u_d, v_d
+
+
+def _dgrid_to_agrid_3d(u_d, v_d, cdgrid):
+    """Convert D-grid corner velocities to A-grid cell-centre velocities.
+
+    Simple 4-point average from surrounding corners to cell centres.
+
+    Parameters
+    ----------
+    u_d, v_d : jax.Array, shape (6, n+1, n+1, nlev)
+
+    Returns
+    -------
+    u_a, v_a : jax.Array, shape (6, n, n, nlev)
+    """
+    u_a = 0.25 * (u_d[:, :-1, :-1, :] + u_d[:, 1:, :-1, :]
+                   + u_d[:, :-1, 1:, :] + u_d[:, 1:, 1:, :])
+    v_a = 0.25 * (v_d[:, :-1, :-1, :] + v_d[:, 1:, :-1, :]
+                   + v_d[:, :-1, 1:, :] + v_d[:, 1:, 1:, :])
+    return u_a, v_a
+
+
+# ==============================================================================
+# Vertical velocity diagnosis
+# ==============================================================================
+
+def _diagnose_w_from_flux_div(flux_div_k, z_coord=None):
+    """Diagnose z-star transport velocity from flux divergence.
+
+    Parameters
+    ----------
+    flux_div_k : array, shape (..., nlev)
+    z_coord : OceanZStarCoordinate or None
+
+    Returns
+    -------
+    w : array, shape (..., nlev+1)
+    """
+    fd_rev = flux_div_k[..., ::-1]
+    cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
+    w_inner = -cumsum_rev[..., ::-1]
+    zeros_bottom = jnp.zeros((*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype)
+    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
+
+    if z_coord is None:
+        return w_euler
+
+    sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
+    deta_dt = w_euler[..., 0:1]
+    return w_euler - sigma * deta_dt
+
+
+def _vertical_advection_ocean(field, w_half, z_coord, jacobian):
+    """Vertical advection -w * d(field)/dz with upwind scheme.
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+    w_half : array, shape (..., nlev+1)
+    z_coord : OceanZStarCoordinate
+    jacobian : array, shape (...)
+
+    Returns
+    -------
+    tendency : array, shape (..., nlev)
+    """
+    w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
+    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
+    dz_half = z_coord.dz_half_ref * jac_safe
+    grad = upwind_vertical_gradient(field, dz_half, w_full)
+    return -w_full * grad
+
+
+# ==============================================================================
+# Main tendency function
+# ==============================================================================
+
+def ocean_baroclinic_tendencies_cdgrid(
+    state: OceanState,
+    grid: CubedSphereGrid,
+    z_coord: OceanZStarCoordinate,
+    cdgrid: CubedSphereCDGrid,
+    config: OceanConfig = OceanConfig(),
+    physics_fn=None,
+) -> OceanTendencies:
+    """Compute 3D baroclinic tendencies using C-D grid operators.
+
+    The state uses A-grid storage. Velocities are converted to D-grid
+    for the momentum computation, then converted back.
+
+    Parameters
+    ----------
+    state : OceanState
+    grid : CubedSphereGrid
+    z_coord : OceanZStarCoordinate
+    cdgrid : CubedSphereCDGrid
+    config : OceanConfig
+    physics_fn : callable, optional
+
+    Returns
+    -------
+    OceanTendencies
+    """
+    u_a = state.u.data       # (6, n, n, nlev)
+    v_a = state.v.data
+    T = state.T.data
+    S = state.S.data
+    eta = state.eta.data      # (6, n, n)
+    H_bathy = state.H_bathy.data
+    mask = state.land_mask.data
+    mask_3d = mask[..., jnp.newaxis]
+
+    g = config.g
+    rho_0 = config.rho_0
+    min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
+    eta_floor = min_water_col - H_bathy
+    eta_safe = jnp.maximum(eta, eta_floor) * mask
+
+    # --- 1. Layer thickness and Jacobian ---
+    J = compute_ocean_jacobian(
+        eta_safe, H_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    )
+    h_k = compute_layer_thickness(
+        eta_safe, H_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    )
+
+    # --- 2. Density from EOS ---
+    p_hydro = compute_hydrostatic_pressure(
+        jnp.full_like(T, rho_0), eta_safe, z_coord.dz_ref, J, rho_0, g,
+    )
+    rho = wright_eos(T, S, p_hydro)
+    rho_prime = rho - rho_0
+
+    # --- 3. Baroclinic pressure gradient ---
+    dz_actual = z_coord.dz_ref * J[..., jnp.newaxis]
+    dp_layer = rho_prime * g * dz_actual
+    p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
+    p_prime = p_prime + 0.5 * dp_layer
+
+    # --- 4. Convert to D-grid ---
+    u_d, v_d = _agrid_to_dgrid_3d(u_a * mask_3d, v_a * mask_3d, cdgrid)
+
+    # --- 5. C-grid velocities for mass transport ---
+    u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
+
+    # --- 6. Flux divergence for vertical velocity ---
+    # Use A-grid for flux divergence (cell-centre h_k and velocities)
+    flux_div_k = cgrid_mass_flux_divergence_3d(
+        h_k, u_c, v_c, cdgrid,
+    )
+    w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
+
+    # --- 7. Velocity divergence for skew-symmetric correction ---
+    div_v = cgrid_divergence_3d(u_c, v_c, cdgrid)
+
+    # --- 8. Vorticity ---
+    zeta = dgrid_vorticity_3d(u_d, v_d, cdgrid)
+
+    # --- 9. KE at cell centres ---
+    u_center = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])
+    v_center = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])
+    KE = 0.5 * (u_center ** 2 + v_center ** 2)
+
+    # --- 10. Bernoulli and pressure gradients at D-grid corners ---
+    dKE_dx, dKE_dy = _arakawa_lamb_gradient_3d(KE, cdgrid)
+    dp_dx, dp_dy = _arakawa_lamb_gradient_3d(p_prime, cdgrid)
+
+    # --- 11. Vorticity at corners (relative only) ---
+    zeta_corner = _interp_center_to_corner_3d(zeta, cdgrid)
+    f_corner_3d = cdgrid.f_corner[:, :, :, None]   # (6, n+1, n+1, 1)
+
+    # --- 12. Baroclinic Coriolis split ---
+    # Planetary Coriolis: barotropic part (f*v_bar) handled by barotropic
+    # substeps; here only the baroclinic deviation is included.
+    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), min_water_col)
+    U_bar_a = jnp.sum(u_a * h_k, axis=-1) / H_total * mask
+    V_bar_a = jnp.sum(v_a * h_k, axis=-1) / H_total * mask
+    u_prime_a = (u_a - U_bar_a[..., jnp.newaxis]) * mask_3d
+    v_prime_a = (v_a - V_bar_a[..., jnp.newaxis]) * mask_3d
+    u_prime_d, v_prime_d = _agrid_to_dgrid_3d(u_prime_a, v_prime_a, cdgrid)
+
+    # --- 13. D-grid momentum tendencies ---
+    # ζ*v + f*v' (relative vorticity × full velocity, Coriolis × deviation)
+    du_d_dt = (zeta_corner * v_d + f_corner_3d * v_prime_d
+               - dKE_dx - dp_dx / rho_0)
+    dv_d_dt = (-zeta_corner * u_d - f_corner_3d * u_prime_d
+               - dKE_dy - dp_dy / rho_0)
+
+    # Skew-symmetric correction
+    div_corner = _interp_center_to_corner_3d(div_v, cdgrid)
+    du_d_dt = du_d_dt - 0.5 * u_d * div_corner
+    dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
+
+    # --- 14. Convert D-grid tendencies back to A-grid ---
+    du_dt, dv_dt = _dgrid_to_agrid_3d(du_d_dt, dv_d_dt, cdgrid)
+
+    # --- 15. Vertical advection of u, v (A-grid) ---
+    du_dt = du_dt + _vertical_advection_ocean(u_a, w, z_coord, J)
+    dv_dt = dv_dt + _vertical_advection_ocean(v_a, w, z_coord, J)
+
+    # --- 16. Tracer tendencies ---
+    # Use C-grid velocities for upwind advection of tracers at cell centres
+    tracers = jnp.stack([T, S], axis=0)
+
+    def tracer_tendency(tr):
+        # Horizontal: upwind advection with C-grid velocities
+        dtr_dt = cgrid_mass_flux_divergence_3d(tr, u_c, v_c, cdgrid)
+        # Vertical advection
+        dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
+
+        if physics_fn is None:
+            if config.K_h > 0:
+                from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
+                dtr_dt = dtr_dt + laplacian_viscosity_3d(tr, grid, config.K_h)
+            if config.K_v > 0:
+                from legoesm.ocean.physics.mixing import vertical_diffusion
+                dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
+        return dtr_dt
+
+    tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
+    dT_dt = tracer_tend[0]
+    dS_dt = tracer_tend[1]
+
+    # --- 17. Mixing ---
+    if physics_fn is None:
+        if config.A_h > 0:
+            from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
+            vel_masked = jnp.stack([u_a * mask_3d, v_a * mask_3d], axis=0)
+            vel_lap = jax.vmap(
+                lambda q: laplacian_viscosity_3d(q, grid, config.A_h),
+                in_axes=0, out_axes=0,
+            )(vel_masked)
+            du_dt = du_dt + vel_lap[0]
+            dv_dt = dv_dt + vel_lap[1]
+        if config.A_v > 0:
+            from legoesm.ocean.physics.mixing import vertical_diffusion
+            vel = jnp.stack([u_a, v_a], axis=0)
+            vel_vdiff = jax.vmap(
+                lambda q: vertical_diffusion(q, z_coord, J, config.A_v),
+                in_axes=0, out_axes=0,
+            )(vel)
+            du_dt = du_dt + vel_vdiff[0]
+            dv_dt = dv_dt + vel_vdiff[1]
+        if config.hyperdiff_coeff > 0:
+            from legoesm.core.operators_3d import hyperdiffusion_3d
+            du_dt = du_dt + hyperdiffusion_3d(u_a * mask_3d, grid, config.hyperdiff_coeff)
+            dv_dt = dv_dt + hyperdiffusion_3d(v_a * mask_3d, grid, config.hyperdiff_coeff)
+    else:
+        phys = physics_fn(state, grid, z_coord)
+        du_dt = du_dt + phys.du_dt.data
+        dv_dt = dv_dt + phys.dv_dt.data
+        dT_dt = dT_dt + phys.dT_dt.data
+        dS_dt = dS_dt + phys.dS_dt.data
+
+    # --- 18. Land masking ---
+    du_dt = du_dt * mask_3d
+    dv_dt = dv_dt * mask_3d
+    dT_dt = dT_dt * mask_3d
+    dS_dt = dS_dt * mask_3d
+
+    # --- 19. Free-surface tendency ---
+    deta_dt = -jnp.sum(flux_div_k, axis=-1) * mask
+
+    dims_3d = ("face", "x", "y", "level")
+    dims_2d = ("face", "x", "y")
+
+    return OceanTendencies(
+        du_dt=Field(data=du_dt, name="du_dt", dims=dims_3d, units="m/s^2"),
+        dv_dt=Field(data=dv_dt, name="dv_dt", dims=dims_3d, units="m/s^2"),
+        dT_dt=Field(data=dT_dt, name="dT_dt", dims=dims_3d, units="degC/s"),
+        dS_dt=Field(data=dS_dt, name="dS_dt", dims=dims_3d, units="PSU/s"),
+        deta_dt=Field(data=deta_dt, name="deta_dt", dims=dims_2d, units="m/s"),
+        dH_bathy_dt=Field(
+            data=jnp.zeros_like(H_bathy), name="dH_bathy_dt",
+            dims=dims_2d, units="m/s",
+        ),
+        dland_mask_dt=Field(
+            data=jnp.zeros_like(mask), name="dland_mask_dt",
+            dims=dims_2d, units="1/s",
+        ),
+    )

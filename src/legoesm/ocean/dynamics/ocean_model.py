@@ -44,7 +44,7 @@ from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.ocean.dynamics.ocean_pe import ocean_baroclinic_tendencies
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 
-OCEAN_DISCRETIZATIONS = ["centered", "finite_volume", "fc_gram", "fc_gram_cgrid"]
+OCEAN_DISCRETIZATIONS = ["centered", "finite_volume", "fc_gram", "fc_gram_cgrid", "cdgrid"]
 
 
 class OceanModel:
@@ -106,6 +106,13 @@ class OceanModel:
             self._fc_config = fc_config
         else:
             self._fc_config = None
+
+        # Build C-D grid if needed
+        if discretization == "cdgrid":
+            from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+            self._cdgrid = create_cubed_sphere_cdgrid(grid)
+        else:
+            self._cdgrid = None
 
         # Build physics function if configured
         if self.config.physics is not None:
@@ -286,6 +293,15 @@ class OceanModel:
             return ocean_baroclinic_tendencies_fc_cgrid(
                 state, self.grid, self.z_coord,
                 self._fc_config, self.config,
+                physics_fn=self._physics_fn,
+            )
+        elif self.discretization == "cdgrid":
+            from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
+                ocean_baroclinic_tendencies_cdgrid,
+            )
+            return ocean_baroclinic_tendencies_cdgrid(
+                state, self.grid, self.z_coord,
+                self._cdgrid, self.config,
                 physics_fn=self._physics_fn,
             )
 

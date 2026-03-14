@@ -147,6 +147,12 @@ from legoesm.atmosphere.dynamics.compressible_euler_fc_cgrid import (
     FCCGCompressibleEulerConfig,
     fc_cgrid_compressible_euler_slow_tendencies,
 )
+from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    CDGridShallowWaterModel,
+    CDGridShallowWaterConfig,
+    CDGridShallowWaterState,
+    cdgrid_shallow_water_tendencies,
+)
 # Available solver names for the factory (flat namespace)
 AVAILABLE_SOLVERS = [
     "shallow_water",
@@ -174,11 +180,12 @@ AVAILABLE_SOLVERS = [
     "fc_cgrid_compressible_euler",
     "cgrid_primitive_equations",
     "cgrid_compressible_euler",
+    "cdgrid_shallow_water",
 ]
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid", "fc_gram", "fc_gram_cgrid"]
+DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid", "cdgrid", "fc_gram", "fc_gram_cgrid"]
 
 # (dynamics, discretization) -> flat solver name
 _AXIS_TO_SOLVER = {
@@ -202,6 +209,7 @@ _AXIS_TO_SOLVER = {
     ("hydrostatic", "fc_gram_cgrid"): "fc_cgrid_primitive_equations",
     ("nonhydrostatic", "fc_gram"): "fc_compressible_euler",
     ("nonhydrostatic", "fc_gram_cgrid"): "fc_cgrid_compressible_euler",
+    ("shallow_water", "cdgrid"): "cdgrid_shallow_water",
 }
 
 # flat solver name -> (dynamics, discretization)
@@ -432,6 +440,8 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return FCCompressibleEulerModel(**kwargs)
     elif name == "fc_cgrid_compressible_euler":
         return FCCGCompressibleEulerModel(**kwargs)
+    elif name == "cdgrid_shallow_water":
+        return CDGridShallowWaterModel(**kwargs)
     else:
         raise ValueError(
             f"Unknown solver: {name!r}. "

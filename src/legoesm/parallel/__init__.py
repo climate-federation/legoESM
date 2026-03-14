@@ -24,6 +24,11 @@ Parallelism strategies
 
 6. **Metal (Apple Silicon)**:
    ``get_metal_config()`` for hybrid Metal/CPU routing.
+
+7. **Voronoi mesh decomposition**:
+   ``partition_voronoi_mesh()`` partitions unstructured MPAS/Voronoi
+   meshes via geometric bisection or METIS, with halo exchange via
+   ``VoronoiHaloExchange``.
 """
 
 from legoesm.parallel.mesh import (
@@ -38,6 +43,20 @@ from legoesm.parallel.mesh import (
     shard_levels,
 )
 
+from legoesm.parallel.voronoi_partition import (
+    HaloCommSchedule,
+    VoronoiPartition,
+    partition_cells_geometric,
+    partition_voronoi_mesh,
+    build_local_mesh,
+    scatter_to_local,
+)
+
+from legoesm.parallel.halo_exchange_voronoi import (
+    VoronoiHaloExchange,
+    exchange_local_simulated,
+)
+
 __all__ = [
     "DeviceConfig",
     "create_device_mesh",
@@ -48,4 +67,13 @@ __all__ = [
     "shard_pytree",
     "shard_latlon",
     "shard_levels",
+    # Voronoi mesh decomposition
+    "HaloCommSchedule",
+    "VoronoiPartition",
+    "partition_cells_geometric",
+    "partition_voronoi_mesh",
+    "build_local_mesh",
+    "scatter_to_local",
+    "VoronoiHaloExchange",
+    "exchange_local_simulated",
 ]

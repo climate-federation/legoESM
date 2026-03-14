@@ -20,6 +20,7 @@ Diagnostics per case:
 - conservation_timeseries.csv / conservation_timeseries.png
 - vertical_profiles.csv / vertical_profiles.png
 - zonal_cross_sections.png (latitude vs sigma/height, averaged across longitudes)
+- meridional_cross_sections.png (longitude vs sigma/height, averaged across latitudes)
 - results.txt
 """
 
@@ -105,6 +106,15 @@ PRESETS = {
         spectral_truncation=15,
         hydro_levels=15,
         nh_levels=15,
+    ),
+    "high": ResolutionPreset(
+        name="high",
+        cube_resolution=24,
+        latlon_nlat=120,
+        latlon_nlon=240,
+        spectral_truncation=85,
+        hydro_levels=20,
+        nh_levels=20,
     ),
 }
 
@@ -209,6 +219,53 @@ def _latbin_mean_3d(
     return centers, prof
 
 
+def _lonbin_mean_3d(
+    field_3d: np.ndarray,
+    lon_deg_2d: np.ndarray,
+    area_2d: np.ndarray,
+    n_lon_bins: int = 240,
+) -> tuple[np.ndarray, np.ndarray]:
+    lon_flat = np.asarray(lon_deg_2d, dtype=np.float64).reshape(-1)
+    lon_flat = np.mod(lon_flat, 360.0)
+    area_flat = np.asarray(area_2d, dtype=np.float64).reshape(-1)
+    fld = np.asarray(field_3d, dtype=np.float64).reshape(lon_flat.size, -1)
+
+    edges = np.linspace(0.0, 360.0, n_lon_bins + 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    prof = np.full((n_lon_bins, fld.shape[1]), np.nan, dtype=np.float64)
+
+    for i in range(n_lon_bins):
+        if i == n_lon_bins - 1:
+            mask = (lon_flat >= edges[i]) & (lon_flat <= edges[i + 1])
+        else:
+            mask = (lon_flat >= edges[i]) & (lon_flat < edges[i + 1])
+        if not np.any(mask):
+            continue
+        w = area_flat[mask]
+        wsum = np.sum(w)
+        if wsum <= 0.0:
+            continue
+        prof[i, :] = np.sum(fld[mask, :] * w[:, None], axis=0) / wsum
+
+    x = centers
+    for k in range(prof.shape[1]):
+        y = prof[:, k]
+        valid = np.isfinite(y)
+        if not np.any(valid):
+            prof[:, k] = 0.0
+            continue
+        if np.sum(valid) == 1:
+            prof[:, k] = y[valid][0]
+            continue
+        x_valid = x[valid]
+        y_valid = y[valid]
+        x_ext = np.concatenate([x_valid - 360.0, x_valid, x_valid + 360.0])
+        y_ext = np.concatenate([y_valid, y_valid, y_valid])
+        prof[:, k] = np.interp(x, x_ext, y_ext)
+
+    return centers, prof
+
+
 def _save_conservation(out_dir: Path, case_name: str, rows: list[dict[str, float]]) -> tuple[float, float]:
     if not rows:
         return float("nan"), float("nan")
@@ -301,6 +358,64 @@ def _save_zonal_cross_sections(
     fig.suptitle(f"{case_name} - Zonal Mean Cross Sections", fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(out_dir / "zonal_cross_sections.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_meridional_cross_sections(
+    out_dir: Path,
+    case_name: str,
+    cross_sections: dict[int, dict[str, np.ndarray]],
+    dt: float,
+    level_values: np.ndarray,
+    level_label: str,
+    invert_y: bool,
+) -> None:
+    if not cross_sections:
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    steps = sorted(cross_sections.keys())
+    keys = [k for k in cross_sections[steps[0]].keys() if k != "lon_deg"]
+    n_rows = len(keys)
+    n_cols = len(steps)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.8 * n_cols, 3.8 * n_rows), sharey=True)
+    if n_rows == 1:
+        axes = np.array([axes])
+    if n_cols == 1:
+        axes = np.array([[axes[r]] for r in range(n_rows)])
+
+    for r, key in enumerate(keys):
+        values = [np.asarray(cross_sections[s][key], dtype=np.float64) for s in steps]
+        vmin = float(min(np.nanmin(v) for v in values))
+        vmax = float(max(np.nanmax(v) for v in values))
+        if vmin < 0.0 < vmax:
+            m = max(abs(vmin), abs(vmax), 1.0e-12)
+            vmin, vmax = -m, m
+        if np.isclose(vmin, vmax):
+            pad = max(abs(vmin), 1.0) * 1.0e-6
+            vmin -= pad
+            vmax += pad
+
+        for c, st in enumerate(steps):
+            ax = axes[r, c]
+            lon = np.asarray(cross_sections[st]["lon_deg"], dtype=np.float64)
+            fld = np.asarray(cross_sections[st][key], dtype=np.float64)
+            im = ax.pcolormesh(lon, level_values, fld.T, cmap="RdBu_r" if vmin < 0 < vmax else "viridis",
+                               vmin=vmin, vmax=vmax, shading="auto")
+            if invert_y:
+                ax.invert_yaxis()
+            if r == n_rows - 1:
+                ax.set_xlabel("Longitude [deg]")
+            if c == 0:
+                ax.set_ylabel(level_label)
+            ax.set_title(f"{key}\n{atm25._format_sim_time(st, dt)}", fontsize=9)
+            ax.grid(True, alpha=0.2)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+
+    fig.suptitle(f"{case_name} - Meridional Mean Cross Sections", fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.savefig(out_dir / "meridional_cross_sections.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -400,8 +515,17 @@ def run_hs_fv_cube(case_dir: Path, preset: ResolutionPreset, scheme: str, days: 
         u = np.asarray(s.u.data)
         T = np.asarray(s.T.data)
         lat_cent, u_z = _latbin_mean_3d(u, lat_deg, area)
+        lon_cent, u_m = _lonbin_mean_3d(u, lon_deg, area)
         _, T_z = _latbin_mean_3d(T, lat_deg, area)
-        return {"lat_deg": lat_cent, "u_zonal": u_z, "T_zonal": T_z}
+        _, T_m = _lonbin_mean_3d(T, lon_deg, area)
+        return {
+            "lat_deg": lat_cent,
+            "u_zonal": u_z,
+            "T_zonal": T_z,
+            "lon_deg": lon_cent,
+            "u_meridional": u_m,
+            "T_meridional": T_m,
+        }
 
     def _record(step_i: int, s):
         u = np.asarray(s.u.data)
@@ -490,7 +614,24 @@ def run_hs_fv_cube(case_dir: Path, preset: ResolutionPreset, scheme: str, days: 
         units={"wind_profile": "m/s", "T_profile": "K"},
     )
     mass_end, energy_end = _save_conservation(case_dir, case_name, cons_rows)
-    _save_zonal_cross_sections(case_dir, case_name, cross_sections, dt, sigma_full, "Sigma", invert_y=True)
+    _save_zonal_cross_sections(
+        case_dir,
+        case_name,
+        {k: {"lat_deg": v["lat_deg"], "u_zonal": v["u_zonal"], "T_zonal": v["T_zonal"]} for k, v in cross_sections.items()},
+        dt,
+        sigma_full,
+        "Sigma",
+        invert_y=True,
+    )
+    _save_meridional_cross_sections(
+        case_dir,
+        case_name,
+        {k: {"lon_deg": v["lon_deg"], "u_meridional": v["u_meridional"], "T_meridional": v["T_meridional"]} for k, v in cross_sections.items()},
+        dt,
+        sigma_full,
+        "Sigma",
+        invert_y=True,
+    )
 
     _write_results_txt(
         case_dir / "results.txt",
@@ -591,10 +732,16 @@ def run_hs_fv_latlon(case_dir: Path, preset: ResolutionPreset, scheme: str, days
     def _extract_cross(s):
         u = np.asarray(s.u.data)
         T = np.asarray(s.T.data)
+        lon2d = np.broadcast_to(lon_deg[None, :], (u.shape[0], u.shape[1]))
+        lon_cent, u_m = _lonbin_mean_3d(u, lon2d, area, n_lon_bins=u.shape[1])
+        _, T_m = _lonbin_mean_3d(T, lon2d, area, n_lon_bins=u.shape[1])
         return {
             "lat_deg": lat_deg,
             "u_zonal": np.mean(u, axis=1),
             "T_zonal": np.mean(T, axis=1),
+            "lon_deg": lon_cent,
+            "u_meridional": u_m,
+            "T_meridional": T_m,
         }
 
     def _record(step_i: int, s):
@@ -684,7 +831,24 @@ def run_hs_fv_latlon(case_dir: Path, preset: ResolutionPreset, scheme: str, days
         units={"wind_profile": "m/s", "T_profile": "K"},
     )
     mass_end, energy_end = _save_conservation(case_dir, case_name, cons_rows)
-    _save_zonal_cross_sections(case_dir, case_name, cross_sections, dt, sigma_full, "Sigma", invert_y=True)
+    _save_zonal_cross_sections(
+        case_dir,
+        case_name,
+        {k: {"lat_deg": v["lat_deg"], "u_zonal": v["u_zonal"], "T_zonal": v["T_zonal"]} for k, v in cross_sections.items()},
+        dt,
+        sigma_full,
+        "Sigma",
+        invert_y=True,
+    )
+    _save_meridional_cross_sections(
+        case_dir,
+        case_name,
+        {k: {"lon_deg": v["lon_deg"], "u_meridional": v["u_meridional"], "T_meridional": v["T_meridional"]} for k, v in cross_sections.items()},
+        dt,
+        sigma_full,
+        "Sigma",
+        invert_y=True,
+    )
 
     _write_results_txt(
         case_dir / "results.txt",
@@ -799,10 +963,16 @@ def run_hs_spectral(case_dir: Path, preset: ResolutionPreset, scheme: str, days:
     def _extract_cross(fields):
         u = np.asarray(fields["u"])
         T = np.asarray(fields["T"])
+        lon2d = np.broadcast_to(lon_deg[None, :], (u.shape[0], u.shape[1]))
+        lon_cent, u_m = _lonbin_mean_3d(u, lon2d, area, n_lon_bins=u.shape[1])
+        _, T_m = _lonbin_mean_3d(T, lon2d, area, n_lon_bins=u.shape[1])
         return {
             "lat_deg": lat_deg,
             "u_zonal": np.mean(u, axis=1),
             "T_zonal": np.mean(T, axis=1),
+            "lon_deg": lon_cent,
+            "u_meridional": u_m,
+            "T_meridional": T_m,
         }
 
     def _record(step_i: int, fields):
@@ -895,7 +1065,24 @@ def run_hs_spectral(case_dir: Path, preset: ResolutionPreset, scheme: str, days:
         units={"wind_profile": "m/s", "T_profile": "K"},
     )
     mass_end, energy_end = _save_conservation(case_dir, case_name, cons_rows)
-    _save_zonal_cross_sections(case_dir, case_name, cross_sections, dt, sigma_full, "Sigma", invert_y=True)
+    _save_zonal_cross_sections(
+        case_dir,
+        case_name,
+        {k: {"lat_deg": v["lat_deg"], "u_zonal": v["u_zonal"], "T_zonal": v["T_zonal"]} for k, v in cross_sections.items()},
+        dt,
+        sigma_full,
+        "Sigma",
+        invert_y=True,
+    )
+    _save_meridional_cross_sections(
+        case_dir,
+        case_name,
+        {k: {"lon_deg": v["lon_deg"], "u_meridional": v["u_meridional"], "T_meridional": v["T_meridional"]} for k, v in cross_sections.items()},
+        dt,
+        sigma_full,
+        "Sigma",
+        invert_y=True,
+    )
 
     _write_results_txt(
         case_dir / "results.txt",
@@ -996,8 +1183,17 @@ def _run_nh_fv_case(
         u = np.asarray(s.u.data)
         theta_p = np.asarray(s.theta_prime.data)
         lat_cent, uz = _latbin_mean_3d(u, lat_deg, area)
+        lon_cent, um = _lonbin_mean_3d(u, lon_deg, area)
         _, thz = _latbin_mean_3d(theta_p, lat_deg, area)
-        return {"lat_deg": lat_cent, "u_zonal": uz, "theta_prime_zonal": thz}
+        _, thm = _lonbin_mean_3d(theta_p, lon_deg, area)
+        return {
+            "lat_deg": lat_cent,
+            "u_zonal": uz,
+            "theta_prime_zonal": thz,
+            "lon_deg": lon_cent,
+            "u_meridional": um,
+            "theta_prime_meridional": thm,
+        }
 
     def _record(step_i: int, s):
         u = np.asarray(s.u.data)
@@ -1095,7 +1291,38 @@ def _run_nh_fv_case(
         },
     )
     mass_end, energy_end = _save_conservation(case_dir, pretty_case, cons_rows)
-    _save_zonal_cross_sections(case_dir, pretty_case, cross_sections, dt, z_full, "Height z (m)", invert_y=False)
+    _save_zonal_cross_sections(
+        case_dir,
+        pretty_case,
+        {
+            k: {
+                "lat_deg": v["lat_deg"],
+                "u_zonal": v["u_zonal"],
+                "theta_prime_zonal": v["theta_prime_zonal"],
+            }
+            for k, v in cross_sections.items()
+        },
+        dt,
+        z_full,
+        "Height z (m)",
+        invert_y=False,
+    )
+    _save_meridional_cross_sections(
+        case_dir,
+        pretty_case,
+        {
+            k: {
+                "lon_deg": v["lon_deg"],
+                "u_meridional": v["u_meridional"],
+                "theta_prime_meridional": v["theta_prime_meridional"],
+            }
+            for k, v in cross_sections.items()
+        },
+        dt,
+        z_full,
+        "Height z (m)",
+        invert_y=False,
+    )
 
     _write_results_txt(
         case_dir / "results.txt",
@@ -1221,7 +1448,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Held-Suarez/DCMIP radiation matrix")
     parser.add_argument("--output", type=Path, default=Path("results/atmosphere/hydrostatic/hs_dcmip_radiation_matrix"))
     parser.add_argument("--schemes", type=str, default="gray,rrtmgp", help="Comma-separated: gray,rrtmgp")
-    parser.add_argument("--presets", type=str, default="low,medium", help="Comma-separated: low,medium")
+    parser.add_argument("--presets", type=str, default="low,medium", help="Comma-separated: low,medium,high")
     parser.add_argument("--hs-days", type=float, default=2.0)
     parser.add_argument("--tc1-hours", type=float, default=1.0)
     parser.add_argument("--tc23-minutes", type=float, default=3.0)

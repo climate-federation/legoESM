@@ -463,6 +463,11 @@ def _pad_halo_local(
             elif edge == NORTH:
                 padded = padded.at[face, 1:-1, -1].set(strip)
 
+    # Fill corner cells by averaging the two adjacent edge-halo values.
+    # This avoids zeros at the 4 corner cells per face that can pollute
+    # operators with larger stencils.
+    padded = _fill_corners_h1(padded)
+
     return padded
 
 
@@ -522,6 +527,124 @@ def _pad_halo_local_h2(
                     padded = padded.at[face, 2:-2, 1 - depth].set(strip)
                 elif edge == NORTH:
                     padded = padded.at[face, 2:-2, n + 2 + depth].set(strip)
+
+    # Fill L-shaped corner regions (4 cells per corner × 4 corners × 6 faces)
+    padded = _fill_corners_h2(padded)
+
+    return padded
+
+
+def _fill_corners_h1(padded: jax.Array) -> jax.Array:
+    """Fill corner cells of halo=1 padded array by averaging adjacent edge halos.
+
+    Each face has 4 corner cells in the padded array that are not filled
+    by the edge-strip exchange.  We fill each corner as the average of
+    the two neighbouring edge-halo cells that share a side with it.
+
+    Parameters
+    ----------
+    padded : jax.Array, shape (6, n+2, n+2)
+
+    Returns
+    -------
+    jax.Array, shape (6, n+2, n+2)
+    """
+    for f in range(6):
+        # SW corner (0, 0): average of WEST halo at j=1 and SOUTH halo at i=1
+        padded = padded.at[f, 0, 0].set(
+            0.5 * (padded[f, 0, 1] + padded[f, 1, 0])
+        )
+        # SE corner (-1, 0): average of EAST halo at j=1 and SOUTH halo at i=-2
+        padded = padded.at[f, -1, 0].set(
+            0.5 * (padded[f, -1, 1] + padded[f, -2, 0])
+        )
+        # NW corner (0, -1): average of WEST halo at j=-2 and NORTH halo at i=1
+        padded = padded.at[f, 0, -1].set(
+            0.5 * (padded[f, 0, -2] + padded[f, 1, -1])
+        )
+        # NE corner (-1, -1): average of EAST halo at j=-2 and NORTH halo at i=-2
+        padded = padded.at[f, -1, -1].set(
+            0.5 * (padded[f, -1, -2] + padded[f, -2, -1])
+        )
+    return padded
+
+
+def _fill_corners_h2(padded: jax.Array) -> jax.Array:
+    """Fill L-shaped corner regions of halo=2 padded array.
+
+    Each face has 4 corner regions of 2×2 = 4 cells that are not
+    filled by the edge-strip exchange.  We fill inside-out: the cell
+    closest to the interior first (average of its two filled neighbours),
+    then propagate outward.
+
+    Parameters
+    ----------
+    padded : jax.Array, shape (6, n+4, n+4)
+
+    Returns
+    -------
+    jax.Array, shape (6, n+4, n+4)
+    """
+    for f in range(6):
+        # --- SW corner (rows 0-1, cols 0-1) ---
+        # Inner corner (1,1): adjacent cells (1,2) and (2,1) are filled
+        padded = padded.at[f, 1, 1].set(
+            0.5 * (padded[f, 1, 2] + padded[f, 2, 1])
+        )
+        # (0,1): adjacent to (0,2) [WEST halo, filled] and (1,1) [just filled]
+        padded = padded.at[f, 0, 1].set(
+            0.5 * (padded[f, 0, 2] + padded[f, 1, 1])
+        )
+        # (1,0): adjacent to (2,0) [SOUTH halo, filled] and (1,1) [just filled]
+        padded = padded.at[f, 1, 0].set(
+            0.5 * (padded[f, 2, 0] + padded[f, 1, 1])
+        )
+        # Outer corner (0,0)
+        padded = padded.at[f, 0, 0].set(
+            0.5 * (padded[f, 0, 1] + padded[f, 1, 0])
+        )
+
+        # --- SE corner (rows n+2..n+3, cols 0-1) ---
+        padded = padded.at[f, -2, 1].set(
+            0.5 * (padded[f, -2, 2] + padded[f, -3, 1])
+        )
+        padded = padded.at[f, -1, 1].set(
+            0.5 * (padded[f, -1, 2] + padded[f, -2, 1])
+        )
+        padded = padded.at[f, -2, 0].set(
+            0.5 * (padded[f, -3, 0] + padded[f, -2, 1])
+        )
+        padded = padded.at[f, -1, 0].set(
+            0.5 * (padded[f, -1, 1] + padded[f, -2, 0])
+        )
+
+        # --- NW corner (rows 0-1, cols n+2..n+3) ---
+        padded = padded.at[f, 1, -2].set(
+            0.5 * (padded[f, 1, -3] + padded[f, 2, -2])
+        )
+        padded = padded.at[f, 0, -2].set(
+            0.5 * (padded[f, 0, -3] + padded[f, 1, -2])
+        )
+        padded = padded.at[f, 1, -1].set(
+            0.5 * (padded[f, 2, -1] + padded[f, 1, -2])
+        )
+        padded = padded.at[f, 0, -1].set(
+            0.5 * (padded[f, 0, -2] + padded[f, 1, -1])
+        )
+
+        # --- NE corner (rows n+2..n+3, cols n+2..n+3) ---
+        padded = padded.at[f, -2, -2].set(
+            0.5 * (padded[f, -2, -3] + padded[f, -3, -2])
+        )
+        padded = padded.at[f, -1, -2].set(
+            0.5 * (padded[f, -1, -3] + padded[f, -2, -2])
+        )
+        padded = padded.at[f, -2, -1].set(
+            0.5 * (padded[f, -3, -1] + padded[f, -2, -2])
+        )
+        padded = padded.at[f, -1, -1].set(
+            0.5 * (padded[f, -1, -2] + padded[f, -2, -1])
+        )
 
     return padded
 
