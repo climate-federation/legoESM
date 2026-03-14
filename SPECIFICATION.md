@@ -1,10 +1,24 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.5
+## Technical Specification v3.6
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-13 (updated from v3.4, 2026-03-10)
+**Date**: 2026-03-14 (updated from v3.5, 2026-03-13)
+
+---
+
+### Changelog (v3.6, 2026-03-14)
+
+**New capabilities (Voronoi halo exchange, ensemble parallelism, land model validation):**
+
+1. **Voronoi mesh domain decomposition** (`parallel/voronoi_partition.py`): Full domain decomposition for unstructured MPAS/Voronoi meshes. Recursive Coordinate Bisection (RCB) geometric partitioner using 3D cell-center coordinates on the unit sphere — no external dependencies. Optional METIS graph partitioner (`partition_cells_metis()`) for better load balancing on variable-resolution meshes. 2-layer halo depth for biharmonic (del4) stencils. Entity ownership rules: edges owned by rank of `min(cellsOnEdge)`, vertices by `min(cellsOnVertex)`. Communication schedules with send/recv lists sorted by global index for deterministic MPI matching. See §6.2.3.
+
+2. **Voronoi halo exchange** (`parallel/halo_exchange_voronoi.py`): `VoronoiHaloExchange` class with `exchange_cell_field()`, `exchange_edge_field()`, `exchange_vertex_field()` methods using mpi4jax sendrecv. MPI tags use entity-type offset (0/1M/2M) to avoid collisions between simultaneous cell/edge/vertex exchanges. `exchange_local_simulated()` for single-process testing. Supports multi-dimensional fields `(n_local, nlev, ...)`. Local mesh construction remaps connectivity from global to local indices; non-local entries mapped to -1 (compatible with existing TRiSK operator masking). 34 tests verify partition validity, operator equivalence (divergence, gradient, curl, kinetic energy), and halo exchange correctness. See §6.2.3.
+
+3. **Ensemble parallelism** (`parallel/ensemble.py`): Framework for running 10–100+ independent model simulations simultaneously using JAX vectorization. Three strategies: (a) `vmap` — vectorize model step over ensemble dimension on a single GPU/TPU, XLA fuses kernels across members; (b) sharded — distribute ensemble members across devices via `jax.sharding.NamedSharding`; (c) hybrid — shard across devices, vmap within each. `perturb_initial_conditions()` creates batched states with per-field multiplicative/additive noise (static fields like `phis` excluded). `ensemble_integrate()` combines `jax.lax.scan` (time) with vmapped step for optimal compilation. `jax.checkpoint` support for O(√n) memory during reverse-mode AD. `ensemble_mean()`, `ensemble_std()`, `ensemble_percentile()`, `ensemble_spread()` for analysis. 32 tests covering batching, perturbation, vmapped stepping, scan integration, differentiability, multi-device sharding, and generic pytrees. See §6.2.4.
+
+4. **Land model stability and realism validation** (`tests/land/test_land_stability.py`): Comprehensive 32-test suite running both slab land and multi-layer land models for 15–180 simulated days with realistic atmospheric forcing (solar geometry, diurnal/seasonal cycles, precipitation). Tests verify: temperature bounds (200–340 K), moisture bounds (θ ∈ [θ_r, θ_sat], W ∈ [0, W_max]), snow non-negativity, energy budget closure (<5% residual), water budget closure, snow accumulation/melt physics, carbon pool positivity and evolution, thermal profile smoothness, deep soil stability, seasonal warming trends (Jan→Jun at midlat/polar), and equatorial vs. midlat seasonal range. See §10.2.
 
 ---
 
@@ -1601,6 +1615,62 @@ config, topology = initialize_distributed(return_topology=True)
 **Global Reductions** (`parallel/reductions.py`):
 - MPI-aware global sums, means, and integrals
 
+#### 6.2.3 Voronoi Mesh Decomposition (`parallel/voronoi_partition.py`, `parallel/halo_exchange_voronoi.py`)
+
+Domain decomposition for unstructured MPAS/Voronoi C-grid meshes:
+
+```python
+from legoesm.parallel import partition_voronoi_mesh, build_local_mesh, VoronoiHaloExchange
+
+# Partition mesh across 4 MPI ranks
+part = partition_voronoi_mesh(mesh, n_ranks=4, rank=my_rank, halo_depth=2)
+local_mesh = build_local_mesh(mesh, part)
+
+# Exchange halo data
+halo = VoronoiHaloExchange(part, backend="mpi")
+u_local = halo.exchange_edge_field(u_local)
+```
+
+**Partitioning strategies**:
+- `partition_cells_geometric()` — Recursive Coordinate Bisection (RCB) using 3D cell centers. No external dependencies.
+- `partition_cells_metis()` — k-way graph partitioning via pymetis. Better load balancing for variable-resolution meshes.
+
+**Data structures**:
+- `VoronoiPartition` — owned/halo cell/edge/vertex lists, global sizes, communication schedules per entity type.
+- `HaloCommSchedule` — neighbor ranks, send/recv counts, send/recv index arrays (sorted by global index for deterministic matching).
+
+**Entity ownership**: edges owned by rank of `cell_owner[min(cellsOnEdge)]`; vertices by `cell_owner[min(cellsOnVertex)]`.
+
+**Halo exchange**: MPI sendrecv with entity-type tag offsets (cell=0, edge=1M, vertex=2M). Local mesh construction remaps connectivity to local indices; non-local entries → -1 (masked by TRiSK operators via `(idx >= 0)`).
+
+#### 6.2.4 Ensemble Parallelism (`parallel/ensemble.py`)
+
+Run large ensembles (10–100+ members) of independent simulations:
+
+```python
+from legoesm.parallel.ensemble import (
+    perturb_initial_conditions, make_ensemble_step,
+    ensemble_integrate, ensemble_mean, shard_ensemble,
+)
+
+# Create 32 perturbed initial conditions
+batched = perturb_initial_conditions(state, key, n_members=32, scale=0.01)
+
+# Wrap model step with vmap (grid/config shared, state batched)
+ensemble_step = make_ensemble_step(model.step, in_axes=(0, None))
+
+# Time-integrate all members (scan outside, vmap inside)
+final = ensemble_integrate(ensemble_step, batched, n_steps=1000, dt=600.0)
+
+# Multi-device: shard ensemble across GPUs
+mesh = create_ensemble_mesh(n_members=64)
+sharded = shard_ensemble(batched, mesh)
+```
+
+**Strategies**: (a) `vmap` — single device, XLA fuses kernels; (b) sharded — `NamedSharding` on ensemble axis; (c) hybrid — shard across devices + vmap within.
+
+**Features**: `jax.checkpoint` for O(√n) memory in AD, `ensemble_integrate_with_forcing()` for time-varying forcing, `perturb_parameters()` for parameter perturbation experiments.
+
 ### 6.3 Mixed Precision
 
 ```python
@@ -1874,7 +1944,7 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
      /________________________\
 ```
 
-### 10.2 Test Suite (80+ test files, 1500+ tests)
+### 10.2 Test Suite (85+ test files, 1600+ tests)
 
 **Unit tests** (`tests/unit/`):
 
@@ -1886,7 +1956,7 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 | **Ocean** | `test_ocean.py`, `test_ocean_compatibility.py`, `test_ocean_fc.py` | EOS, z-star, stepping, conservation |
 | **ML** | `test_sfno.py`, `test_sfno_sw.py`, `test_sfno_ocean.py` | SFNO architecture, channel packing |
 | **Coupled** | `test_coupler.py`, `test_atmosphere_invariants.py`, `test_external_forcing.py` | Tile blending, flux conservation, MOST bulk fluxes, ocean albedo plumbing, q_surface consistency, external forcing file interpolation |
-| **Infrastructure** | `test_timestepping.py`, `test_thermodynamics.py`, `test_tracer_transport.py`, `test_backend_guard.py`, `test_backend_precision.py`, `test_parallel.py` | Time integrators, thermodynamics, parallelism |
+| **Infrastructure** | `test_timestepping.py`, `test_thermodynamics.py`, `test_tracer_transport.py`, `test_backend_guard.py`, `test_backend_precision.py`, `test_parallel.py`, `test_ensemble.py` | Time integrators, thermodynamics, parallelism, ensemble vmap/sharding |
 | **Land** | `test_multilayer_land.py`, `test_carbon_cycle.py`, `test_stomata.py`, `test_surface_albedo.py`, `test_topography.py` | Carbon pools, stomatal conductance, soil hydraulics, albedo |
 | **CMIP infra** | `test_cmor_experiments_restart.py` | CMOR tables, CFWriter, experiment templates, GHG interpolation, restart digests, tuning validation |
 | **Validation** | `test_weatherbench.py`, `test_dcmip_transport.py`, `test_issue_fixes.py`, `test_amip_config.py` | WeatherBench metrics, DCMIP transport, AMIP config |
@@ -1899,6 +1969,19 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 
 **Distributed tests** (`tests/distributed/`):
 - `test_halo_mpi.py`, `test_coupler_mpi.py`, `test_ocean_mpi_conservation.py`
+- `test_voronoi_halo.py` — Voronoi mesh partitioning, local mesh, operator equivalence, halo exchange (34 tests)
+
+**Land stability tests** (`tests/land/`):
+- `test_land_stability.py` — Multi-day slab & multi-layer land integrations with realistic forcing (32 tests):
+  - `TestSlabLandStability` (6): 30-day run — T bounds, W bounds, snow, diurnal cycle
+  - `TestMultiLayerStability` (7): 15-day Richards+thermal — T/θ bounds, ψ finite, runoff, deep vs. surface
+  - `TestSlabEnergyBudget` (1): 10-day energy closure <5%
+  - `TestSlabWaterBudget` (1): 10-day water balance
+  - `TestSnowCycle` (3): accumulation, melt, albedo feedback
+  - `TestCarbonCycleIntegration` (4): 30-day DifferLand — pools positive, evolving, hierarchy
+  - `TestMultiLayerPhysics` (4): smooth T profile, physical θ, deep stability
+  - `TestMultiLayerCarbon` (2): multi-layer + carbon coupling
+  - `TestSeasonalBehavior` (4): 180-day Jan→Jun — midlat/polar warming, no runaway, seasonal range
 
 **Validation tests** (`tests/validation/`):
 - Bulk flux differentiability and all-tile tests
@@ -2267,14 +2350,21 @@ legoESM/
 │   │   ├── mesh.py                         # DeviceConfig, shard/replicate
 │   │   ├── comm.py                         # CommTopology
 │   │   ├── distributed.py                  # MPI initialization
-│   │   ├── halo_exchange.py                # MPI halo exchange
+│   │   ├── halo_exchange.py                # MPI halo exchange (structured grids)
+│   │   ├── voronoi_partition.py            # Voronoi/MPAS mesh decomposition (RCB, METIS)
+│   │   ├── halo_exchange_voronoi.py        # Voronoi halo exchange (MPI + simulated)
+│   │   ├── ensemble.py                     # Ensemble parallelism (vmap, sharding, scan)
 │   │   ├── metal.py                        # Apple Metal support
 │   │   └── reductions.py                   # MPI-aware reductions
 │   │
 │   ├── visualization/
 │   │   └── maps.py                         # Global maps + conservation plots
 │   │
-│   ├── diagnostics/                        # Online diagnostics (skeleton)
+│   ├── diagnostics/                        # Online diagnostics
+│   │   ├── __init__.py                     # Diagnostics exports
+│   │   ├── energy_budget.py                # Column energy, TOA/surface flux, budget tracker
+│   │   └── monthly_means.py               # MonthlyAccumulator for zonal/global means
+│   │
 │   ├── da/                                 # Data assimilation (skeleton)
 │   └── io/                                 # I/O utilities (skeleton)
 │
@@ -2284,12 +2374,15 @@ legoESM/
 │   ├── visualize.py                        # Evaluation visualization
 │   └── configs/                            # Evaluation configs
 │
-├── tests/
+├── tests/                                     # 103 test files, 1700+ individual tests
 │   ├── conftest.py                         # Shared fixtures
-│   ├── unit/                               # 55+ unit test files
-│   ├── integration/                        # Integration tests (AMIP smoke, RRTMG, FV)
-│   ├── distributed/                        # MPI distributed tests
-│   ├── validation/                         # Validation suite (bulk flux, stability, dycores)
+│   ├── unit/                               # 60+ unit test files
+│   ├── atmosphere/                         # Atmosphere tests (dynamics, physics, validation)
+│   ├── ocean/                              # Ocean tests (dynamics, biogeochem, MPI)
+│   ├── land/                               # Land tests (slab, multilayer, carbon, stability)
+│   ├── sea_ice/                            # Sea ice + surface albedo tests
+│   ├── distributed/                        # MPI distributed + Voronoi halo tests
+│   ├── validation/                         # Validation suite (differentiability, stability)
 │   └── test_cases/                         # Williamson, DCMIP, DCMIP-2025
 │
 ├── scripts/                                # Research & experiment scripts
@@ -2319,6 +2412,8 @@ legoESM/
 ├── docs/                                   # Documentation
 │   ├── REAL_HARDWARE_SCALING.md            # Multi-GPU/MPI scaling guide
 │   ├── amip.md                             # AMIP experiment guide (CLI, radiation, diagnostics)
+│   ├── cmip_readiness.md                   # CMIP readiness checklist (all components)
+│   ├── implementation_summary.md           # Comprehensive summary of all implementations
 │   └── legoesm_documentation.tex           # LaTeX technical documentation (equations)
 │
 └── notebooks/                              # Jupyter notebooks

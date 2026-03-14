@@ -25,9 +25,9 @@ Status of legoESM components for CMIP-class production experiments.
 | Aerosol optical depth climatology | Done | NetCDF loading + cyclic interpolation |
 | Total solar irradiance (constant) | Done | Via `SolarConfig.S_0` |
 | Total solar irradiance (time-varying from file) | Done | NetCDF interpolation in `get_tsi_at_time()` |
-| Ozone connected to radiation | Missing | Ozone data loaded but not yet passed to radiation schemes |
-| Aerosol connected to radiation | Missing | AOD data loaded but not yet modifying SW fluxes |
-| Volcanic forcing | Missing | No eruption-driven AOD or stratospheric heating |
+| Ozone connected to radiation | Done | Analytical + standard profiles, passed to RRTMGP via `o3_vmr` |
+| Aerosol connected to radiation | Done | AOD climatology loaded and applied |
+| Volcanic forcing | Done | Stratospheric AOD perturbation support |
 | Land-use change forcing | Missing | Static land fraction only |
 
 ## Radiation
@@ -77,16 +77,38 @@ Status of legoESM components for CMIP-class production experiments.
 | Feature | Status | Notes |
 |---|---|---|
 | Slab land (thermal + bucket hydrology) | Done | |
-| Multilayer land | Done | Multi-layer soil temperature |
-| Snow budget (accumulation/melt) | Done | |
+| Multilayer land | Done | Richards equation (6 retention curves) + Johansen thermal diffusion |
+| Snow budget (accumulation/melt) | Done | Age-dependent albedo, latitude-varying vegetation |
 | Vegetation / stomatal conductance | Done | Farquhar + Ball-Berry/Medlyn (coupled), Jarvis (uncoupled) |
 | Land carbon cycle | Done | DALEC-990 6-pool + seasonal scheme; GPP via Farquhar or LUE |
+| Land stability validation | Done | 32 tests: energy/water budget closure, seasonal behavior, 180-day runs |
 
 ## Lake
 
 | Feature | Status | Notes |
 |---|---|---|
 | Two-layer lake (epilimnion + hypolimnion) | Done | Wind-enhanced mixing |
+
+## Diagnostics
+
+| Feature | Status | Notes |
+|---|---|---|
+| Energy budget tracking | Done | Column MSE, TOA/surface fluxes, dE/dt residual |
+| Monthly-mean accumulation | Done | Zonal means, 3D profiles, global scalars |
+| AMIP validation targets | Done | T_2m, precip, OLR, TOA imbalance, jet position, ITCZ |
+
+## Parallelism
+
+| Feature | Status | Notes |
+|---|---|---|
+| Cubed-sphere face sharding | Done | 1-6 devices |
+| Sub-face tiling | Done | Multiples of 6 devices |
+| Lat-lon / level sharding | Done | Domain decomposition |
+| MPI halo exchange (structured) | Done | mpi4jax, validated with `mpirun -np 2/3/6` |
+| Voronoi mesh decomposition | Done | RCB + METIS, 2-layer halo, entity ownership |
+| Voronoi halo exchange (MPI) | Done | mpi4jax sendrecv, entity-type tagging |
+| Ensemble parallelism | Done | vmap + NamedSharding + scan, gradient checkpointing |
+| Apple Silicon Metal | Done | Metal/CPU hybrid routing |
 
 ## CMIP Infrastructure
 

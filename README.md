@@ -14,7 +14,56 @@ legoESM is a next-generation, fully differentiable Earth System Model spanning w
 - **Conservation as hard constraint**: Mass, energy, and momentum conserved via projection
 - **Modular & swappable**: Standard tensor-in/tendency-out interface for AI or physics modules
 - **Hardware-portable**: CPU, GPU (multi-GPU), TPU, and Apple Silicon
-- **Multi-grid**: Cubed-sphere (primary), with support for icosahedral, lat-lon, spectral element
+- **Multi-grid**: Cubed-sphere, lat-lon, Gaussian/spectral, Voronoi/MPAS, icosahedral
+
+## Model Components
+
+### Atmosphere
+- **24 dynamical cores**: Shallow water, hydrostatic PE, non-hydrostatic CE across 8 discretizations (centered, FV/PPM, FC-Gram, C-grid) on cubed-sphere, lat-lon, and Gaussian grids, plus 2 SFNO learned cores
+- **25+ physics schemes**: Radiation (gray + RRTMGP with diurnal cycle, ozone, cloud-radiation coupling), 5 convection backends, 6 microphysics backends, 8 turbulence backends (with PBL height diagnosis), 6 gravity wave drag backends, cloud fraction (Sundqvist, Xu-Randall)
+- **Vertical coordinates**: Sigma and hybrid sigma-pressure (L20-L60, sinh stretching)
+
+### Ocean
+- **3D ocean dynamics**: Split-explicit baroclinic/barotropic, spectral ocean, SFNO ocean, FC-Gram ocean
+- **Ocean physics**: KPP/Richardson/constant vertical mixing, harmonic/biharmonic/GM-Redi lateral mixing, surface forcing, bottom drag, convective adjustment
+- **Biogeochemistry**: Abiotic carbon cycle (DIC+ALK, carbonate equilibria, air-sea CO2 flux) + NPZD ecosystem model
+- **Simple ocean**: Slab mixed-layer and two-layer models
+
+### Land Surface
+- **Slab land**: Energy balance + bucket hydrology with stomatal conductance (Farquhar + Ball-Berry/Medlyn/Jarvis)
+- **Multi-layer land**: Richards equation (mixed-form Picard, 6 retention curves: VG, CH, BC, Campbell, PDI, Lu) + Johansen thermal diffusion
+- **Carbon cycle**: DALEC-990 6-pool (labile/foliage/root/wood/litter/SOM) with LUE GPP + seasonal scheme
+- **Snow**: Accumulation/melt budget, age-dependent albedo, latitude-varying vegetation albedo
+
+### Cryosphere
+- **Sea ice**: Thermodynamic slab + free-drift + EVP rheology (Hunke & Dukowicz 1997), multi-category (Lipscomb 2001), temperature-dependent albedo
+
+### Coupler
+- **Tile-based coupling**: Ocean/ice/land/lake with area-weighted blending
+- **Bulk flux**: COARE 3.0, Large & Yeager 2004, fixed-z0
+- **Surface albedo**: Zenith-dependent ocean (Briegleb 1992), snow age decay, ice temperature feedback
+
+### Diagnostics
+- **Energy budget**: Column moist/dry static energy, TOA/surface flux tracking, dE/dt residual monitoring
+- **Monthly means**: Zonal-mean profiles, global-mean scalars, multi-year accumulation
+
+### External Forcing
+- **GHG**: Constant or time-varying (NetCDF), CMIP6 experiment templates (piControl, historical, SSP2-4.5, SSP5-8.5, AMIP, 1pctCO2)
+- **Ozone/Aerosol/Solar**: Climatological or time-varying from files
+- **Real topography**: NetCDF loading with bilinear regridding, Laplacian smoothing, land fraction derivation
+
+### Parallelism
+- **Cubed-sphere sharding**: Face-level (1-6 devices) and sub-face tiling (multiples of 6)
+- **Lat-lon / level sharding**: Domain decomposition by latitude or vertical levels
+- **Voronoi mesh decomposition**: Recursive coordinate bisection + METIS partitioning with halo exchange
+- **Ensemble parallelism**: `vmap`-based vectorization + `NamedSharding` for multi-device, scan-based time integration with gradient checkpointing
+- **MPI**: mpi4jax-based halo exchange and reductions for multi-node execution
+- **Apple Silicon**: Metal/CPU hybrid routing
+
+### CMIP Infrastructure
+- **CF-compliant output**: `CFWriter` with CF-1.8, CMIP6 DRS naming, 27 variables (Amon + Lmon)
+- **Restart/reproducibility**: SHA-256 state digests, config hashes, platform metadata
+- **Tuning**: 16-parameter registry with resolution-appropriate defaults
 
 ## Quick Start
 
@@ -69,6 +118,14 @@ To check your current JAX backend:
 ```bash
 python -c "import jax; print(jax.default_backend())"
 ```
+
+## Documentation
+
+- [SPECIFICATION.md](SPECIFICATION.md) — Full technical specification (v3.6)
+- [docs/implementation_summary.md](docs/implementation_summary.md) — Comprehensive summary of all implementations and tests
+- [docs/cmip_readiness.md](docs/cmip_readiness.md) — CMIP production readiness checklist
+- [docs/amip.md](docs/amip.md) — AMIP experiment guide
+- [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md) — Multi-GPU/MPI scaling guide
 
 ## Acknowledgments
 
