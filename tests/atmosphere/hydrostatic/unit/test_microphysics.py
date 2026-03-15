@@ -39,7 +39,7 @@ from legoesm.atmosphere.physics.microphysics.ml_emulator import (
 from legoesm.atmosphere.physics.microphysics.integration import (
     make_microphysics_physics,
 )
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm import constants
 
 
@@ -701,7 +701,7 @@ class TestBackwardCompatKessler:
 
     def test_saturation_mixing_ratio_import(self):
         """saturation_mixing_ratio can still be imported from kessler module."""
-        from legoesm.atmosphere.physics.kessler import saturation_mixing_ratio
+        from legoesm.thermo import saturation_mixing_ratio
         T = jnp.array(280.0)
         p = jnp.array(1e5)
         q = saturation_mixing_ratio(T, p)

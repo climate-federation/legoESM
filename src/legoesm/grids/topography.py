@@ -17,6 +17,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.edge_blending import blend_scalar_cube_edges_2d
 
 
 def gaussian_mountain(
@@ -570,9 +571,6 @@ def load_real_topography(
 
     # Edge blending for cubed-sphere
     if not is_gaussian and config.edge_blend_strength > 0:
-        from legoesm.atmosphere.dynamics.edge_blending import (
-            blend_scalar_cube_edges_2d,
-        )
         z_s_jax = jnp.array(z_s)
         z_s_jax = blend_scalar_cube_edges_2d(
             z_s_jax,

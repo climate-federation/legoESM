@@ -53,6 +53,21 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 
+def _make_time_state():
+    """Create a mutable time-state dict and its ``set_time`` mutator.
+
+    Returns ``(_time, set_time)`` where *_time* is the mutable dict and
+    *set_time* is a function that updates it in-place.
+    """
+    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}
+
+    def set_time(day_of_year: float, seconds_of_day: float):
+        _time["day_of_year"] = day_of_year
+        _time["seconds_of_day"] = seconds_of_day
+
+    return _time, set_time
+
+
 def _get_radiation_fn(config: RadiationConfig):
     """Select the radiation backend based on config.scheme."""
     if config.scheme == "gray":
@@ -291,7 +306,7 @@ def _make_hydrostatic_radiation(
     cycle should vary with day of year).
     """
     # Mutable time state — updated via physics_fn.set_time().
-    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}
+    _time, set_time = _make_time_state()
 
     def physics_fn(
         state: HydrostaticState,
@@ -391,11 +406,6 @@ def _make_hydrostatic_radiation(
             ),
         )
 
-    def set_time(day_of_year: float, seconds_of_day: float):
-        """Update time state for the next radiation call."""
-        _time["day_of_year"] = day_of_year
-        _time["seconds_of_day"] = seconds_of_day
-
     physics_fn.set_time = set_time
     return physics_fn
 
@@ -411,7 +421,7 @@ def _make_nonhydrostatic_radiation(
 
     Signature: (state, grid, height_coord, terrain_metric) -> NonHydrostaticTendencies
     """
-    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}
+    _time, set_time = _make_time_state()
 
     def physics_fn(
         state: NonHydrostaticState,
@@ -547,10 +557,6 @@ def _make_nonhydrostatic_radiation(
             ),
         )
 
-    def set_time(day_of_year: float, seconds_of_day: float):
-        _time["day_of_year"] = day_of_year
-        _time["seconds_of_day"] = seconds_of_day
-
     physics_fn.set_time = set_time
     return physics_fn
 
@@ -569,7 +575,7 @@ def _make_spectral_pe_radiation(
     Transforms spectral state to Gaussian grid, computes radiation,
     then transforms temperature tendency back to spectral space.
     """
-    _time = {"day_of_year": 80.0, "seconds_of_day": 43200.0}
+    _time, set_time = _make_time_state()
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None):
         from legoesm.atmosphere.dynamics.spectral_pe import (
@@ -665,10 +671,6 @@ def _make_spectral_pe_radiation(
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
-
-    def set_time(day_of_year: float, seconds_of_day: float):
-        _time["day_of_year"] = day_of_year
-        _time["seconds_of_day"] = seconds_of_day
 
     physics_fn.set_time = set_time
     return physics_fn

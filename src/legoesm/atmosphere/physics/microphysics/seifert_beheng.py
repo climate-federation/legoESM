@@ -19,7 +19,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.microphysics.config import SeifertBehengConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,

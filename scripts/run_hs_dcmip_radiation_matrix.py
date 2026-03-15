@@ -8,6 +8,8 @@ Coverage:
   - Spectral (gaussian lat-lon)
 - DCMIP-2025 non-hydrostatic (FV cubed-sphere):
   - TC1, TC2a, TC3
+- Non-hydrostatic FV lat-lon:
+  - Dry-rest dynamical stability (diagnostic coverage case)
 
 Radiation schemes:
 - gray
@@ -70,6 +72,8 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragC
 from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
 from legoesm.atmosphere.physics.radiation.config import RadiationConfig
 from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+from legoesm.core.field import Field
+from legoesm.core.state import NonHydrostaticState
 from legoesm.core.conservation import (
     compute_hydrostatic_energy,
     compute_nh_dry_mass,
@@ -1360,6 +1364,303 @@ def _run_nh_fv_case(
     }
 
 
+def _make_nh_latlon_rest_state(grid, height_coord, n_tracers: int = 4) -> NonHydrostaticState:
+    nlev = int(height_coord.n_levels)
+    shape_3d = (int(grid.n_lat), int(grid.n_lon), nlev)
+    shape_w = (int(grid.n_lat), int(grid.n_lon), nlev + 1)
+    shape_2d = (int(grid.n_lat), int(grid.n_lon))
+    shape_tr = (*shape_3d, int(max(0, n_tracers)))
+
+    dims_3d = ("lat", "lon", "level")
+    dims_w = ("lat", "lon", "level_half")
+    dims_2d = ("lat", "lon")
+    dims_tr = ("lat", "lon", "level", "tracer")
+
+    # Keep a tiny balanced perturbation so advection/prognostics are exercised
+    # while remaining in a robustly stable regime.
+    lat = jnp.asarray(grid.lat, dtype=jnp.float64)[:, None, None]
+    lev = jnp.asarray(height_coord.z_full, dtype=jnp.float64)[None, None, :]
+    lev_scale = lev / jnp.maximum(float(height_coord.H), 1.0)
+    u0 = 2.0 * jnp.cos(lat) * jnp.exp(-lev_scale)
+    theta_p0 = 0.05 * jnp.sin(lat) * jnp.exp(-((lev_scale - 0.5) / 0.25) ** 2)
+
+    return NonHydrostaticState(
+        u=Field(data=jnp.broadcast_to(u0, shape_3d), name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=jnp.zeros(shape_3d), name="v", dims=dims_3d, units="m/s"),
+        w=Field(data=jnp.zeros(shape_w), name="w", dims=dims_w, units="m/s"),
+        theta_prime=Field(data=jnp.broadcast_to(theta_p0, shape_3d), name="theta_prime", dims=dims_3d, units="K"),
+        rho_prime=Field(data=jnp.zeros(shape_3d), name="rho_prime", dims=dims_3d, units="kg/m^3"),
+        phis=Field(data=jnp.zeros(shape_2d), name="phis", dims=dims_2d, units="m^2/s^2"),
+        tracers=Field(data=jnp.zeros(shape_tr), name="tracers", dims=dims_tr, units="kg/kg"),
+    )
+
+
+def run_nh_fv_latlon_rest(case_dir: Path, preset: ResolutionPreset, scheme: str, tc1_hours: float, mean_every: int, solver: str):
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
+    from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
+        FVCompressibleEulerLatLonConfig,
+        FVCompressibleEulerLatLonModel,
+    )
+
+    dt = 2.0
+    duration_s = max(tc1_hours * 3600.0, dt)
+    n_steps = int(duration_s / dt)
+    case_dir.mkdir(parents=True, exist_ok=True)
+
+    grid = create_latlon_grid(preset.latlon_nlat, preset.latlon_nlon)
+    height_coord = create_height_coordinate(preset.nh_levels, 30000.0)
+    z_s = jnp.zeros((grid.n_lat, grid.n_lon), dtype=jnp.float64)
+    terrain_metric = compute_terrain_metric(z_s, height_coord)
+
+    state0 = _make_nh_latlon_rest_state(grid, height_coord, n_tracers=4)
+    state = state0
+
+    area = np.asarray(grid.area, dtype=np.float64)
+    lon_deg_1d = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
+    lat_deg_1d = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
+    lon_deg_2d, lat_deg_2d = np.meshgrid(lon_deg_1d, lat_deg_1d)
+    z_full = np.asarray(height_coord.z_full, dtype=np.float64)
+    dz = np.asarray(height_coord.dz, dtype=np.float64)
+
+    scale = (90.0 / float(max(grid.n_lat, 1))) ** 4
+    config = FVCompressibleEulerLatLonConfig(
+        hyperdiff_coeff=2.0e15 * scale,
+        hyperdiff_rho_coeff=5.0e14 * scale,
+        hyperdiff_w_coeff=1.0e14 * scale,
+        sponge_width=12000.0,
+        sponge_coeff=0.03,
+        n_acoustic_substeps=6,
+        outer_integrator=solver,
+        use_polar_filter=True,
+        fix_mass=True,
+        anchor_mass_to_initial=True,
+    )
+    model = FVCompressibleEulerLatLonModel(grid, height_coord, terrain_metric, config, dt=dt)
+    # Nonhydro radiation integration is currently cube-oriented in this workspace.
+    # Keep this standard case as dry dynamics until a lat-lon NH radiation bridge is added.
+    physics_fn = None
+
+    snap_targets = atm25._snapshot_steps(n_steps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+    profiles: dict[int, dict[str, np.ndarray]] = {}
+    cross_sections: dict[int, dict[str, np.ndarray]] = {}
+    series = atm25._series_init(["mean_wind_3d", "mean_abs_w_3d", "mean_theta_prime_3d", "mean_rho_prime_3d"])
+    cons_rows: list[dict[str, float]] = []
+
+    mass0 = float(compute_nh_dry_mass(state.rho_prime.data, height_coord, terrain_metric, grid))
+    energy0 = float(compute_nh_energy(state, grid, height_coord, terrain_metric)["total_energy"])
+
+    def _extract_snapshot(s):
+        u_low = np.asarray(s.u.data)[..., -1]
+        v_low = np.asarray(s.v.data)[..., -1]
+        w_half = np.asarray(s.w.data)
+        out = {
+            "wind_low": np.sqrt(u_low * u_low + v_low * v_low),
+            "rho_prime_low": np.asarray(s.rho_prime.data)[..., -1],
+            "w_mid": w_half[..., w_half.shape[-1] // 2],
+        }
+        tr = np.asarray(s.tracers.data)
+        if tr.ndim == 4 and tr.shape[-1] >= 1:
+            out["qv_low"] = np.clip(tr[..., -1, 0], 0.0, None)
+        return out
+
+    def _extract_profile(s):
+        u = np.asarray(s.u.data)
+        v = np.asarray(s.v.data)
+        w_half = np.asarray(s.w.data)
+        w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
+        wind = np.sqrt(u * u + v * v)
+        return {
+            "wind_profile": atm25._horizontal_profile_3d(wind, area),
+            "abs_w_profile": atm25._horizontal_profile_3d(np.abs(w_full), area),
+            "theta_prime_profile": atm25._horizontal_profile_3d(np.asarray(s.theta_prime.data), area),
+            "rho_prime_profile": atm25._horizontal_profile_3d(np.asarray(s.rho_prime.data), area),
+        }
+
+    def _extract_cross(s):
+        u = np.asarray(s.u.data)
+        theta_p = np.asarray(s.theta_prime.data)
+        lat_cent, uz = _latbin_mean_3d(u, lat_deg_2d, area)
+        lon_cent, um = _lonbin_mean_3d(u, lon_deg_2d, area)
+        _, thz = _latbin_mean_3d(theta_p, lat_deg_2d, area)
+        _, thm = _lonbin_mean_3d(theta_p, lon_deg_2d, area)
+        return {
+            "lat_deg": lat_cent,
+            "u_zonal": uz,
+            "theta_prime_zonal": thz,
+            "lon_deg": lon_cent,
+            "u_meridional": um,
+            "theta_prime_meridional": thm,
+        }
+
+    def _record(step_i: int, s):
+        u = np.asarray(s.u.data)
+        v = np.asarray(s.v.data)
+        w_half = np.asarray(s.w.data)
+        w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
+        wind_prof = atm25._horizontal_profile_3d(np.sqrt(u * u + v * v), area)
+        abs_w_prof = atm25._horizontal_profile_3d(np.abs(w_full), area)
+        th_prof = atm25._horizontal_profile_3d(np.asarray(s.theta_prime.data), area)
+        rho_prof = atm25._horizontal_profile_3d(np.asarray(s.rho_prime.data), area)
+        atm25._series_push(
+            series,
+            step_i,
+            {
+                "mean_wind_3d": atm25._vertical_integral_from_profile(wind_prof, dz),
+                "mean_abs_w_3d": atm25._vertical_integral_from_profile(abs_w_prof, dz),
+                "mean_theta_prime_3d": atm25._vertical_integral_from_profile(th_prof, dz),
+                "mean_rho_prime_3d": atm25._vertical_integral_from_profile(rho_prof, dz),
+            },
+        )
+        mass = float(compute_nh_dry_mass(s.rho_prime.data, height_coord, terrain_metric, grid))
+        energy = float(compute_nh_energy(s, grid, height_coord, terrain_metric)["total_energy"])
+        cons_rows.append(
+            {
+                "step": float(step_i),
+                "time_days": float(step_i * dt / 86400.0),
+                "mass": mass,
+                "energy": energy,
+                "mass_rel": (mass - mass0) / max(abs(mass0), 1.0e-30),
+                "energy_rel": (energy - energy0) / max(abs(energy0), 1.0e-30),
+            },
+        )
+
+    snapshots[0] = _extract_snapshot(state)
+    profiles[0] = _extract_profile(state)
+    cross_sections[0] = _extract_cross(state)
+    _record(0, state)
+
+    stable = True
+    t0 = time.time()
+    progress_every = max(1, n_steps // 10)
+    for i in range(n_steps):
+        state = model.step_with_physics(state, dt, physics_fn)
+        st = i + 1
+        if st in snap_targets:
+            snapshots[st] = _extract_snapshot(state)
+            profiles[st] = _extract_profile(state)
+            cross_sections[st] = _extract_cross(state)
+        if st % max(1, mean_every) == 0 or st == n_steps:
+            _record(st, state)
+        if st % progress_every == 0:
+            print(f"      nh_fv_latlon_rest progress: {st}/{n_steps}")
+        u_max = float(jnp.max(jnp.abs(state.u.data)))
+        if (not bool(jnp.all(jnp.isfinite(state.u.data)))) or (u_max > 1500.0):
+            stable = False
+            break
+    jax.block_until_ready(state.u.data)
+    wall = time.time() - t0
+
+    case_name = f"nh_fv_latlon_rest_{preset.name}"
+    pretty_case = f"NH FV LatLon Rest ({scheme}, {preset.name})"
+    field_specs = [
+        ("wind_low", "Low-level wind speed (m/s)", "magma"),
+        ("rho_prime_low", "Low-level rho' (kg/m3)", "RdBu_r"),
+        ("w_mid", "Mid-level w (m/s)", "RdBu_r"),
+        ("qv_low", "Low-level qv (kg/kg)", "Blues"),
+    ]
+    atm25._save_snapshots(
+        case_dir,
+        pretty_case,
+        snapshots,
+        dt,
+        field_specs,
+        coord_kind="latlon",
+        lon_deg=lon_deg_1d,
+        lat_deg=lat_deg_1d,
+    )
+    atm25._save_timeseries(
+        case_dir,
+        pretty_case,
+        series,
+        dt,
+        {
+            "mean_wind_3d": "m/s",
+            "mean_abs_w_3d": "m/s",
+            "mean_theta_prime_3d": "K",
+            "mean_rho_prime_3d": "kg/m3",
+        },
+    )
+    atm25._save_profiles(
+        case_dir,
+        pretty_case,
+        profiles,
+        dt,
+        z_full,
+        "Height z (m)",
+        invert_y=False,
+        units={
+            "wind_profile": "m/s",
+            "abs_w_profile": "m/s",
+            "theta_prime_profile": "K",
+            "rho_prime_profile": "kg/m3",
+        },
+    )
+    mass_end, energy_end = _save_conservation(case_dir, pretty_case, cons_rows)
+    _save_zonal_cross_sections(
+        case_dir,
+        pretty_case,
+        {
+            k: {
+                "lat_deg": v["lat_deg"],
+                "u_zonal": v["u_zonal"],
+                "theta_prime_zonal": v["theta_prime_zonal"],
+            }
+            for k, v in cross_sections.items()
+        },
+        dt,
+        z_full,
+        "Height z (m)",
+        invert_y=False,
+    )
+    _save_meridional_cross_sections(
+        case_dir,
+        pretty_case,
+        {
+            k: {
+                "lon_deg": v["lon_deg"],
+                "u_meridional": v["u_meridional"],
+                "theta_prime_meridional": v["theta_prime_meridional"],
+            }
+            for k, v in cross_sections.items()
+        },
+        dt,
+        z_full,
+        "Height z (m)",
+        invert_y=False,
+    )
+    _write_results_txt(
+        case_dir / "results.txt",
+        {
+            "case": case_name,
+            "scheme": scheme,
+            "preset": preset.name,
+            "dt": dt,
+            "duration_s": duration_s,
+            "n_steps": n_steps,
+            "stable": stable,
+            "mass_drift_rel": f"{mass_end:.12e}",
+            "energy_drift_rel": f"{energy_end:.12e}",
+            "notes": "dry_dynamics_only; nh_latlon_radiation_bridge_pending",
+            "wall_time_s": f"{wall:.2f}",
+        },
+    )
+
+    return {
+        "case": "nh_fv_latlon_rest",
+        "scheme": scheme,
+        "preset": preset.name,
+        "status": "PASS" if stable else "FAIL",
+        "stable": stable,
+        "mass_drift_rel": mass_end,
+        "energy_drift_rel": energy_end,
+        "notes": "dry_dynamics_only; nh_latlon_radiation_bridge_pending",
+        "wall_time_s": wall,
+        "output": str(case_dir),
+    }
+
+
 def run_dcmip_fv_tc1(case_dir: Path, preset: ResolutionPreset, scheme: str, tc1_hours: float, mean_every: int, solver: str):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from tests.test_cases.dcmip2025 import dcmip25_tc1_init
@@ -1499,6 +1800,7 @@ def main() -> None:
                 ("dcmip_tc1_fv_cube", lambda: run_dcmip_fv_tc1(block_root / "04_dcmip_tc1_fv_cube", preset, scheme, args.tc1_hours, args.mean_every, args.solver)),
                 ("dcmip_tc2a_fv_cube", lambda: run_dcmip_fv_tc2a(block_root / "05_dcmip_tc2a_fv_cube", preset, scheme, args.tc23_minutes, args.mean_every, args.solver)),
                 ("dcmip_tc3_fv_cube", lambda: run_dcmip_fv_tc3(block_root / "06_dcmip_tc3_fv_cube", preset, scheme, args.tc23_minutes, args.mean_every, args.solver)),
+                ("nh_fv_latlon_rest", lambda: run_nh_fv_latlon_rest(block_root / "07_nh_fv_latlon_rest", preset, scheme, args.tc1_hours, args.mean_every, args.solver)),
             ]
 
             for name, fn in runs:

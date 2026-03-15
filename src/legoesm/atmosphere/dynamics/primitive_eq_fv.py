@@ -74,9 +74,8 @@ from legoesm.grids.vertical import (
     compute_pressure_velocity,
     compute_omega_hybrid,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
-from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
+from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm import constants
 
 
@@ -281,7 +280,7 @@ def fv_hydrostatic_tendencies(
     )
 
 
-class FVPrimitiveEquationModel:
+class FVPrimitiveEquationModel(IntegrationMixin):
     """Consistent FV hydrostatic PE model on the cubed-sphere.
 
     Uses PPM transport for p_s and T, FV-consistent sigma_dot,
@@ -324,75 +323,9 @@ class FVPrimitiveEquationModel:
             physics_tendency,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: HydrostaticState, dt: float) -> HydrostaticState:
-        """Advance one time step."""
-        def tendency_fn(s):
-            tend = fv_hydrostatic_tendencies(
-                s, self.grid, self.sigma_coord, self.config,
-            )
-            return HydrostaticState(
-                u=s.u.replace(data=tend.du_dt.data),
-                v=s.v.replace(data=tend.dv_dt.data),
-                T=s.T.replace(data=tend.dT_dt.data),
-                p_s=s.p_s.replace(data=tend.dp_s_dt.data),
-                phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
-            )
-
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            state_new = ssp_rk54_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-            state_new = ssp_rk34_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            state_new = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(
-                f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
-
-        # Edge blending: localized smoothing near face boundaries
-        if self._eb_weight is not None:
-            u_new, v_new = edge_blend_vector_3d(
-                state_new.u.data, state_new.v.data,
-                self.grid, self._eb_weight,
-            )
-            T_new = edge_blend_scalar_3d(
-                state_new.T.data, self.grid, self._eb_weight,
-            )
-            ps_new = edge_blend_scalar(
-                state_new.p_s.data, self.grid, self._eb_weight,
-            )
-            state_new = HydrostaticState(
-                u=state_new.u.replace(data=u_new),
-                v=state_new.v.replace(data=v_new),
-                T=state_new.T.replace(data=T_new),
-                p_s=state_new.p_s.replace(data=ps_new),
-                phis=state_new.phis,
-            )
-
-        if self.config.use_conservation_fixer and self.config.fix_mass:
-            if self.config.anchor_mass_to_initial:
-                from legoesm.core.conservation import fix_mass_hydrostatic_target
-                if self._target_mass is None:
-                    self._target_mass = global_integral(state.p_s, self.grid)
-                state_new = fix_mass_hydrostatic_target(
-                    state_new, self._target_mass, self.grid,
-                )
-            else:
-                from legoesm.core.conservation import fix_mass_hydrostatic
-                state_new = fix_mass_hydrostatic(state_new, state, self.grid)
-
-        return state_new
-
     @partial(jax.jit, static_argnums=(0, 3))
-    def step_with_physics(
-        self,
-        state: HydrostaticState,
-        dt: float,
-        physics_fn=None,
-    ) -> HydrostaticState:
-        """Advance one time step with physics forcing."""
+    def step(self, state: HydrostaticState, dt: float, physics_fn=None) -> HydrostaticState:
+        """Advance one time step, optionally with physics forcing."""
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -409,17 +342,9 @@ class FVPrimitiveEquationModel:
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
             )
 
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            state_new = ssp_rk54_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-            state_new = ssp_rk34_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            state_new = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(
-                f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
+        state_new = dispatch_integrator(
+            state, tendency_fn, dt, self.config.time_integrator,
+        )
 
         # Edge blending: localized smoothing near face boundaries
         if self._eb_weight is not None:
@@ -455,40 +380,13 @@ class FVPrimitiveEquationModel:
 
         return state_new
 
-    def integrate(
+    def step_with_physics(
         self,
         state: HydrostaticState,
-        duration: float,
         dt: float,
-        save_every: int = 1,
         physics_fn=None,
-    ) -> tuple[HydrostaticState, list[HydrostaticState]]:
-        """Integrate forward for a given duration."""
-        n_steps = int(duration / dt)
-        trajectory = [state]
+    ) -> HydrostaticState:
+        """Backward-compatible wrapper for step() with physics."""
+        return self.step(state, dt, physics_fn=physics_fn)
 
-        for i in range(n_steps):
-            if physics_fn is not None:
-                state = self.step_with_physics(state, dt, physics_fn)
-            else:
-                state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-
-        return state, trajectory
-
-    def integrate_scan(
-        self,
-        state: HydrostaticState,
-        n_steps: int,
-        dt: float,
-    ) -> tuple[HydrostaticState, HydrostaticState]:
-        """Integrate using jax.lax.scan."""
-        def scan_fn(state, _):
-            new_state = self.step(state, dt)
-            return new_state, new_state
-
-        final_state, trajectory = jax.lax.scan(
-            scan_fn, state, xs=None, length=n_steps
-        )
-        return final_state, trajectory
+    # integrate() and integrate_scan() inherited from IntegrationMixin

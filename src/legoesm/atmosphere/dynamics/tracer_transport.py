@@ -32,9 +32,8 @@ from legoesm.core.operators_3d import (
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import SigmaCoordinate, vertical_advection
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
-from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
+from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
 
 
 # Type alias for prescribed wind functions.
@@ -123,7 +122,7 @@ def tracer_tendencies(
     )
 
 
-class TracerTransportModel:
+class TracerTransportModel(IntegrationMixin):
     """Prescribed-wind tracer transport model on the cubed-sphere.
 
     Parameters
@@ -166,7 +165,7 @@ class TracerTransportModel:
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: TracerState, dt: float) -> TracerState:
-        """Advance one time step using SSP-RK3.
+        """Advance one time step.
 
         Parameters
         ----------
@@ -184,86 +183,8 @@ class TracerTransportModel:
                 s, self.grid, self.sigma_coord, self.wind_fn, self.config
             )
 
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            new_state = ssp_rk54_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-            new_state = ssp_rk34_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            new_state = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(f"Unsupported time_integrator={self.config.time_integrator!r}")
-
-        return new_state
-
-    def integrate(
-        self,
-        state: TracerState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-        callback=None,
-    ) -> tuple[TracerState, list[TracerState]]:
-        """Integrate forward for a given duration.
-
-        Parameters
-        ----------
-        state : TracerState
-            Initial state.
-        duration : float
-            Total integration time [seconds].
-        dt : float
-            Time step [seconds].
-        save_every : int
-            Save state every N steps.
-        callback : callable, optional
-            Called as callback(step_number, state) every save_every steps.
-
-        Returns
-        -------
-        final_state : TracerState
-        trajectory : list of TracerState
-        """
-        n_steps = int(duration / dt)
-        trajectory = [state]
-
-        for i in range(n_steps):
-            state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-                if callback is not None:
-                    callback(i + 1, state)
-
-        return state, trajectory
-
-    def integrate_scan(
-        self,
-        state: TracerState,
-        n_steps: int,
-        dt: float,
-    ) -> tuple[TracerState, TracerState]:
-        """Integrate using jax.lax.scan (differentiable, JIT-friendly).
-
-        Parameters
-        ----------
-        state : TracerState
-            Initial state.
-        n_steps : int
-            Number of time steps.
-        dt : float
-            Time step [seconds].
-
-        Returns
-        -------
-        final_state : TracerState
-        trajectory : TracerState
-            All states, each leaf shape: (n_steps, ...).
-        """
-        def scan_fn(state, _):
-            new_state = self.step(state, dt)
-            return new_state, new_state
-
-        final_state, trajectory = jax.lax.scan(
-            scan_fn, state, xs=None, length=n_steps
+        return dispatch_integrator(
+            state, tendency_fn, dt, self.config.time_integrator,
         )
-        return final_state, trajectory
+
+    # integrate() and integrate_scan() inherited from IntegrationMixin

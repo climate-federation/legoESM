@@ -47,10 +47,9 @@ from legoesm.grids.vertical import (
     vertical_advection,
     compute_pressure_velocity,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
-from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
-from legoesm.atmosphere.dynamics.edge_blending import (
+from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.grids.edge_blending import (
     blend_scalar_cube_edges,
     blend_vector_cube_edges,
 )
@@ -237,7 +236,7 @@ def fc_hydrostatic_tendencies(
     )
 
 
-class FCPrimitiveEquationModel:
+class FCPrimitiveEquationModel(IntegrationMixin):
     """FC-Gram hydrostatic PE model on the cubed-sphere.
 
     Parameters
@@ -279,63 +278,9 @@ class FCPrimitiveEquationModel:
             self.fc_config, self.config, physics_tendency,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: HydrostaticState, dt: float) -> HydrostaticState:
-        def tendency_fn(s):
-            tend = fc_hydrostatic_tendencies(
-                s, self.grid, self.sigma_coord,
-                self.fc_config, self.config,
-            )
-            return HydrostaticState(
-                u=s.u.replace(data=tend.du_dt.data),
-                v=s.v.replace(data=tend.dv_dt.data),
-                T=s.T.replace(data=tend.dT_dt.data),
-                p_s=s.p_s.replace(data=tend.dp_s_dt.data),
-                phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
-            )
-
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            state_new = ssp_rk54_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-            state_new = ssp_rk34_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            state_new = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(
-                f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
-
-        if (
-            self.config.edge_blend_uv > 0.0
-            or self.config.edge_blend_T > 0.0
-            or self.config.edge_blend_p_s > 0.0
-        ):
-            state_new = _apply_fc_hydro_edge_blend(
-                state_new, self.grid, self.config
-            )
-
-        if self.config.use_conservation_fixer and self.config.fix_mass:
-            if self.config.anchor_mass_to_initial:
-                from legoesm.core.conservation import fix_mass_hydrostatic_target
-                if self._target_mass is None:
-                    self._target_mass = global_integral(state.p_s, self.grid)
-                state_new = fix_mass_hydrostatic_target(
-                    state_new, self._target_mass, self.grid,
-                )
-            else:
-                from legoesm.core.conservation import fix_mass_hydrostatic
-                state_new = fix_mass_hydrostatic(state_new, state, self.grid)
-
-        return state_new
-
     @partial(jax.jit, static_argnums=(0, 3))
-    def step_with_physics(
-        self,
-        state: HydrostaticState,
-        dt: float,
-        physics_fn=None,
-    ) -> HydrostaticState:
+    def step(self, state: HydrostaticState, dt: float, physics_fn=None) -> HydrostaticState:
+        """Advance one time step, optionally with physics forcing."""
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -352,17 +297,9 @@ class FCPrimitiveEquationModel:
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
             )
 
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            state_new = ssp_rk54_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-            state_new = ssp_rk34_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            state_new = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(
-                f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
+        state_new = dispatch_integrator(
+            state, tendency_fn, dt, self.config.time_integrator,
+        )
 
         if (
             self.config.edge_blend_uv > 0.0
@@ -387,35 +324,8 @@ class FCPrimitiveEquationModel:
 
         return state_new
 
-    def integrate(
-        self,
-        state: HydrostaticState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-        physics_fn=None,
-    ) -> tuple[HydrostaticState, list[HydrostaticState]]:
-        n_steps = int(duration / dt)
-        trajectory = [state]
-        for i in range(n_steps):
-            if physics_fn is not None:
-                state = self.step_with_physics(state, dt, physics_fn)
-            else:
-                state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-        return state, trajectory
+    def step_with_physics(self, state, dt, physics_fn=None):
+        """Backward-compatible wrapper for step() with physics."""
+        return self.step(state, dt, physics_fn=physics_fn)
 
-    def integrate_scan(
-        self,
-        state: HydrostaticState,
-        n_steps: int,
-        dt: float,
-    ) -> tuple[HydrostaticState, HydrostaticState]:
-        def scan_fn(state, _):
-            new_state = self.step(state, dt)
-            return new_state, new_state
-        final_state, trajectory = jax.lax.scan(
-            scan_fn, state, xs=None, length=n_steps
-        )
-        return final_state, trajectory
+    # integrate() and integrate_scan() inherited from IntegrationMixin

@@ -14,7 +14,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height

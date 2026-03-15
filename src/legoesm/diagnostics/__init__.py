@@ -1,5 +1,6 @@
 """Online diagnostics for legoESM."""
 
+from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import (
     EnergyBudget,
     EnergyBudgetTracker,

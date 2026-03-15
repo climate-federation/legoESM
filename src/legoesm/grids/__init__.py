@@ -17,6 +17,11 @@ from legoesm.grids.vertical import (
     standard_hybrid_levels,
     hybrid_from_sigma,
 )
+from legoesm.grids.edge_blending import (
+    blend_scalar_cube_edges,
+    blend_scalar_cube_edges_2d,
+    blend_vector_cube_edges,
+)
 from legoesm.grids.topography import (
     gaussian_mountain,
     zonal_ridge,

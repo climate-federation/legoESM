@@ -164,7 +164,8 @@ print(f"  Slab ocean: h_mix={ocean_config.h_mix} m, C_mix={_C_mix:.0e} J/m2/K, T
 # 5. Moisture initialization (60% RH)
 # ---------------------------------------------------------------------------
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.diagnostics.column_integrals import column_water_vapor
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.solar import perpetual_equinox_insolation
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
@@ -181,7 +182,7 @@ q_v = _RH_init * q_sat_init * sigma.sigma_full ** 2
 q_v = jnp.minimum(q_v, q_sat_init)  # ensure sub-saturation
 mean_qv = float(jnp.mean(q_v)) * 1000.0
 cwv_init = float(jnp.mean(
-    jnp.sum(q_v * state.p_s.data[..., None] * sigma.dsigma, axis=-1) / constants.g
+    column_water_vapor(q_v, state.p_s.data, sigma.dsigma)
 ))
 print(f"  Moisture: RH_init={_RH_init}, mean q_v={mean_qv:.2f} g/kg, CWV={cwv_init:.1f} kg/m2")
 
@@ -407,7 +408,7 @@ for step in range(1, n_steps):
         mean_precip = float(jnp.mean(_precip + _precip_ls)) * 86400.0
 
         # Column water vapor [kg/m2]
-        cwv = jnp.sum(q_v * state.p_s.data[..., None] * _dsigma, axis=-1) / constants.g
+        cwv = column_water_vapor(q_v, state.p_s.data, _dsigma)
         mean_cwv = float(jnp.mean(cwv))
 
         diag_times.append(day)

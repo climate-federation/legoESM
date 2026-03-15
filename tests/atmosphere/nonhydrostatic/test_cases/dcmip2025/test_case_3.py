@@ -36,7 +36,7 @@ from legoesm.grids.vertical import (
 from .common import (
     apply_small_earth_scaling,
 )
-from legoesm.atmosphere.physics.kessler import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm import constants
 
 

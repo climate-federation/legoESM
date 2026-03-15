@@ -22,12 +22,13 @@ from legoesm.atmosphere.dynamics.primitive_eq import (
     PrimitiveEquationModel, PrimitiveEquationConfig,
 )
 from legoesm.atmosphere.physics.held_suarez import held_suarez_init
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
+from legoesm.forcing.time_utils import day_to_calendar
 from legoesm import constants
 
 
@@ -113,7 +114,7 @@ def test_amip_5_steps(amip_setup):
 
     for step in range(5):
         day = step * DT / 86400.0
-        day_of_year = day % 365.0 + 1.0
+        day_of_year, _ = day_to_calendar(day)
         sst, sic = get_forcing_at_time(forcing, day)
 
         # Dynamics

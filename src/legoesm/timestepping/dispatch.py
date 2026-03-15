@@ -1,19 +1,53 @@
 """Time integrator dispatch for LegoESM."""
 
+import jax
+
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
 from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
+
+
+def _rk4_step(state, tendency_fn, dt):
+    """Classical 4th-order Runge-Kutta step.
+
+    Parameters
+    ----------
+    state : pytree
+    tendency_fn : callable
+    dt : float
+
+    Returns
+    -------
+    pytree : state advanced by dt
+    """
+    k1 = tendency_fn(state)
+    s1 = jax.tree.map(lambda s, k: s + 0.5 * dt * k, state, k1)
+
+    k2 = tendency_fn(s1)
+    s2 = jax.tree.map(lambda s, k: s + 0.5 * dt * k, state, k2)
+
+    k3 = tendency_fn(s2)
+    s3 = jax.tree.map(lambda s, k: s + dt * k, state, k3)
+
+    k4 = tendency_fn(s3)
+    state_new = jax.tree.map(
+        lambda s, a, b, c, d: s + (dt / 6.0) * (a + 2.0 * b + 2.0 * c + d),
+        state, k1, k2, k3, k4,
+    )
+    return state_new
+
 
 _INTEGRATORS = {
     "ssp_rk3": ssp_rk3_step, "ssp3": ssp_rk3_step, "rk3": ssp_rk3_step,
     "ssp_rk34": ssp_rk34_step, "ssp34": ssp_rk34_step, "rk34": ssp_rk34_step,
     "ssp_rk54": ssp_rk54_step, "ssp54": ssp_rk54_step,
     "ssp45": ssp_rk54_step, "rk54": ssp_rk54_step,
+    "rk4": _rk4_step, "runge_kutta_4": _rk4_step,
 }
 
 
 def dispatch_integrator(state, tendency_fn, dt, integrator_name):
-    """Dispatch to the appropriate SSP-RK integrator.
+    """Dispatch to the appropriate time integrator.
 
     Parameters
     ----------

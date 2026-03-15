@@ -17,7 +17,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.core.field import Field
 from legoesm.coupler.coupling_fields import AtmToSurface
 

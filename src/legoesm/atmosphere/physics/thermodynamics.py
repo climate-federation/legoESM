@@ -30,32 +30,11 @@ _P_MAX = 2.0e7          # [Pa]
 # Basic thermodynamic relations (extracted from kessler.py)
 # ==============================================================================
 
-def saturation_mixing_ratio(
-    T: jax.Array,
-    p: jax.Array,
-) -> jax.Array:
-    """Compute saturation mixing ratio using Tetens formula.
-
-    e_sat = 611.2 * exp(17.67 * (T - 273.15) / (T - 29.65))
-    q_sat = epsilon * e_sat / (p - e_sat)
-
-    Parameters
-    ----------
-    T : jax.Array
-        Temperature [K].
-    p : jax.Array
-        Pressure [Pa].
-
-    Returns
-    -------
-    jax.Array
-        Saturation mixing ratio [kg/kg].
-    """
-    T_c = T - constants.T_freeze  # Celsius
-    e_sat = 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
-    # Clip to avoid division by zero
-    denom = jnp.clip(p - e_sat, 1.0, None)
-    return constants.epsilon * e_sat / denom
+# Canonical implementations now live in legoesm.thermo so that non-atmosphere
+# packages (land, ice, ocean, coupler) can import them without pulling in the
+# full atmosphere.physics package.  Re-exported here for backward compatibility.
+from legoesm.thermo import saturation_mixing_ratio as saturation_mixing_ratio  # noqa: F401
+from legoesm.thermo import saturation_mixing_ratio_ice as saturation_mixing_ratio_ice  # noqa: F401
 
 
 def temperature_from_theta(
@@ -279,34 +258,6 @@ def compute_moist_adiabat(
 
     # Reverse back to top-to-bottom ordering
     return T_moist_rev[:, ::-1]
-
-
-def saturation_mixing_ratio_ice(
-    T: jax.Array,
-    p: jax.Array,
-) -> jax.Array:
-    """Compute saturation mixing ratio over ice (Clausius-Clapeyron).
-
-    e_sat_i = 611.2 * exp(L_s/R_v * (1/T_freeze - 1/T))
-    q_sat_i = epsilon * e_sat_i / (p - e_sat_i)
-
-    Parameters
-    ----------
-    T : jax.Array
-        Temperature [K].
-    p : jax.Array
-        Pressure [Pa].
-
-    Returns
-    -------
-    jax.Array
-        Ice saturation mixing ratio [kg/kg].
-    """
-    e_sat_i = 611.2 * jnp.exp(
-        constants.L_s / constants.R_v * (1.0 / constants.T_freeze - 1.0 / T)
-    )
-    denom = jnp.clip(p - e_sat_i, 1.0, None)
-    return constants.epsilon * e_sat_i / denom
 
 
 def compute_cape(

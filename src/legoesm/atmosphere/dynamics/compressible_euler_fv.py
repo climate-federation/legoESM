@@ -321,106 +321,9 @@ class FVCompressibleEulerModel:
             self.config, physics_tendency,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: NonHydrostaticState, dt: float) -> NonHydrostaticState:
-        """Advance one time step using split-explicit RK3 with FV transport."""
-        from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
-        acoustic_cfg = CompressibleEulerConfig(
-            g=self.config.g,
-            n_acoustic_substeps=self.config.n_acoustic_substeps,
-            semi_implicit_acoustic=self.config.semi_implicit_acoustic,
-        )
-
-        se_config = SplitExplicitConfig(
-            n_substeps=self.config.n_acoustic_substeps,
-            outer_integrator=self.config.outer_integrator,
-        )
-
-        def slow_tendency_fn(s):
-            tend = fv_compressible_euler_slow_tendencies(
-                s, self.grid, self.height_coord, self.terrain_metric,
-                self.config,
-            )
-            return NonHydrostaticState(
-                u=s.u.replace(data=tend.du_dt.data),
-                v=s.v.replace(data=tend.dv_dt.data),
-                w=s.w.replace(data=tend.dw_dt.data),
-                theta_prime=s.theta_prime.replace(data=tend.dtheta_prime_dt.data),
-                rho_prime=s.rho_prime.replace(data=tend.drho_prime_dt.data),
-                phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
-                tracers=s.tracers.replace(data=tend.dtracers_dt.data),
-            )
-
-        def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
-            if self.config.semi_implicit_acoustic:
-                return acoustic_substeps_semi_implicit(
-                    s, slow_tend, dt_s, n_sub, cfg,
-                    self.height_coord, self.terrain_metric, acoustic_cfg,
-                )
-            return acoustic_substeps(
-                s, slow_tend, dt_s, n_sub, cfg,
-                self.height_coord, self.terrain_metric, acoustic_cfg,
-            )
-
-        state_new = split_explicit_step(
-            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-        )
-
-        # Edge blending: localized smoothing near face boundaries
-        if self._eb_weight is not None:
-            u_new, v_new = edge_blend_vector_3d(
-                state_new.u.data, state_new.v.data,
-                self.grid, self._eb_weight,
-            )
-            w_new = edge_blend_scalar_3d(
-                state_new.w.data, self.grid, self._eb_weight,
-            )
-            theta_new = edge_blend_scalar_3d(
-                state_new.theta_prime.data, self.grid, self._eb_weight,
-            )
-            rho_new = edge_blend_scalar_3d(
-                state_new.rho_prime.data, self.grid, self._eb_weight,
-            )
-            state_new = NonHydrostaticState(
-                u=state_new.u.replace(data=u_new),
-                v=state_new.v.replace(data=v_new),
-                w=state_new.w.replace(data=w_new),
-                theta_prime=state_new.theta_prime.replace(data=theta_new),
-                rho_prime=state_new.rho_prime.replace(data=rho_new),
-                phis=state_new.phis,
-                tracers=state_new.tracers,
-            )
-
-        if self.config.fix_mass:
-            from legoesm.core.conservation import (
-                fix_mass_nonhydrostatic, compute_nh_dry_mass,
-            )
-            if self.config.anchor_mass_to_initial and self._target_mass is None:
-                self._target_mass = compute_nh_dry_mass(
-                    state.rho_prime.data, self.height_coord,
-                    self.terrain_metric, self.grid,
-                )
-            target = self._target_mass if self.config.anchor_mass_to_initial else (
-                compute_nh_dry_mass(
-                    state.rho_prime.data, self.height_coord,
-                    self.terrain_metric, self.grid,
-                )
-            )
-            state_new = fix_mass_nonhydrostatic(
-                state_new, target, self.height_coord,
-                self.terrain_metric, self.grid,
-            )
-
-        return state_new
-
     @partial(jax.jit, static_argnums=(0, 3))
-    def step_with_physics(
-        self,
-        state: NonHydrostaticState,
-        dt: float,
-        physics_fn=None,
-    ) -> NonHydrostaticState:
-        """Advance one time step with physics forcing."""
+    def step(self, state: NonHydrostaticState, dt: float, physics_fn=None) -> NonHydrostaticState:
+        """Advance one time step using split-explicit RK3 with FV transport."""
         from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
         acoustic_cfg = CompressibleEulerConfig(
             g=self.config.g,
@@ -515,6 +418,10 @@ class FVCompressibleEulerModel:
 
         return state_new
 
+    def step_with_physics(self, state, dt, physics_fn=None):
+        """Backward-compatible wrapper for step() with physics."""
+        return self.step(state, dt, physics_fn=physics_fn)
+
     def integrate(
         self,
         state: NonHydrostaticState,
@@ -528,10 +435,7 @@ class FVCompressibleEulerModel:
         trajectory = [state]
 
         for i in range(n_steps):
-            if physics_fn is not None:
-                state = self.step_with_physics(state, dt, physics_fn)
-            else:
-                state = self.step(state, dt)
+            state = self.step(state, dt, physics_fn=physics_fn)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
 

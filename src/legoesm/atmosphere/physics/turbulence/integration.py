@@ -50,9 +50,9 @@ from legoesm.atmosphere.physics.turbulence.ml_emulator import (
     ml_turbulence,
     TurbulenceEmulator,
 )
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
-    saturation_mixing_ratio,
     reconstruct_half_level_pressure_hydrostatic,
     sanitize_theta_rho,
 )

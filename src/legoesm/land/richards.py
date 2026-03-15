@@ -238,19 +238,6 @@ def _thomas_solve_batch(a, b, c, d):
     """
     ncol, n = b.shape
 
-    # Forward sweep
-    def forward_step(carry, k):
-        c_prev, d_prev = carry
-        w = a[:, k] / jnp.clip(b[:, k] - a[:, k] * c_prev, 1e-30, None)
-        # Actually this is wrong for the standard algorithm. Let me fix.
-        # Standard Thomas:
-        # c'[0] = c[0]/b[0], d'[0] = d[0]/b[0]
-        # w = a[k] / (b[k] - a[k]*c'[k-1])
-        # ... this is simpler with fori_loop
-
-        return (c_prev, d_prev), None
-
-    # Use the simpler fori_loop approach
     def solve_single(a_col, b_col, c_col, d_col):
         """Solve single column tridiagonal system."""
         # Forward elimination

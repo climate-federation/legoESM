@@ -598,7 +598,7 @@ test_name = "RCE Slab Ocean (C36/L20, 10 days)"
 print(f"\n  [{15}] {test_name}")
 try:
     from legoesm import constants
-    from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+    from legoesm.thermo import saturation_mixing_ratio
     from legoesm.atmosphere.physics.radiation.gray import gray_radiation
     from legoesm.atmosphere.physics.radiation.solar import perpetual_equinox_insolation
     from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig

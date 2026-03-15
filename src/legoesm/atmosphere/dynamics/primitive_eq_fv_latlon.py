@@ -56,9 +56,8 @@ from legoesm.grids.vertical import (
     vertical_advection,
     compute_pressure_velocity,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
-from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
+from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm import constants
 
 
@@ -245,7 +244,7 @@ def _filter_state(
     )
 
 
-class FVLatLonPrimitiveEquationModel:
+class FVLatLonPrimitiveEquationModel(IntegrationMixin):
     """FV3-style hydrostatic PE model on the lat-lon grid.
 
     Same interface as LatLonPrimitiveEquationModel but uses PPM + Lin-Rood
@@ -291,50 +290,9 @@ class FVLatLonPrimitiveEquationModel:
             physics_tendency, self.polar_mask,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: HydrostaticState, dt: float) -> HydrostaticState:
-        """Advance one time step."""
-        if self.polar_mask is not None:
-            state = _filter_state(state, self.grid, self.polar_mask)
-
-        def tendency_fn(s):
-            tend = fv_latlon_hydrostatic_tendencies(
-                s, self.grid, self.sigma_coord, self.config,
-                polar_mask=self.polar_mask,
-            )
-            return HydrostaticState(
-                u=s.u.replace(data=tend.du_dt.data),
-                v=s.v.replace(data=tend.dv_dt.data),
-                T=s.T.replace(data=tend.dT_dt.data),
-                p_s=s.p_s.replace(data=tend.dp_s_dt.data),
-                phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
-            )
-
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            state_new = ssp_rk54_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-            state_new = ssp_rk34_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            state_new = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(
-                f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
-
-        if self.config.use_conservation_fixer and self.config.fix_mass:
-            state_new = fix_mass_hydrostatic_latlon(state_new, state, self.grid)
-
-        return state_new
-
     @partial(jax.jit, static_argnums=(0, 3))
-    def step_with_physics(
-        self,
-        state: HydrostaticState,
-        dt: float,
-        physics_fn=None,
-    ) -> HydrostaticState:
-        """Advance one time step with physics forcing."""
+    def step(self, state: HydrostaticState, dt: float, physics_fn=None) -> HydrostaticState:
+        """Advance one time step, optionally with physics forcing."""
         if self.polar_mask is not None:
             state = _filter_state(state, self.grid, self.polar_mask)
 
@@ -354,57 +312,17 @@ class FVLatLonPrimitiveEquationModel:
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
             )
 
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            state_new = ssp_rk54_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-            state_new = ssp_rk34_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            state_new = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(
-                f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
+        state_new = dispatch_integrator(
+            state, tendency_fn, dt, self.config.time_integrator,
+        )
 
         if self.config.use_conservation_fixer and self.config.fix_mass:
             state_new = fix_mass_hydrostatic_latlon(state_new, state, self.grid)
 
         return state_new
 
-    def integrate(
-        self,
-        state: HydrostaticState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-        physics_fn=None,
-    ) -> tuple[HydrostaticState, list[HydrostaticState]]:
-        """Integrate forward for a given duration."""
-        n_steps = int(duration / dt)
-        trajectory = [state]
+    def step_with_physics(self, state, dt, physics_fn=None):
+        """Backward-compatible wrapper for step() with physics."""
+        return self.step(state, dt, physics_fn=physics_fn)
 
-        for i in range(n_steps):
-            if physics_fn is not None:
-                state = self.step_with_physics(state, dt, physics_fn)
-            else:
-                state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-
-        return state, trajectory
-
-    def integrate_scan(
-        self,
-        state: HydrostaticState,
-        n_steps: int,
-        dt: float,
-    ) -> tuple[HydrostaticState, HydrostaticState]:
-        """Integrate using jax.lax.scan."""
-        def scan_fn(state, _):
-            new_state = self.step(state, dt)
-            return new_state, new_state
-
-        final_state, trajectory = jax.lax.scan(
-            scan_fn, state, xs=None, length=n_steps
-        )
-        return final_state, trajectory
+    # integrate() and integrate_scan() inherited from IntegrationMixin

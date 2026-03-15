@@ -284,3 +284,54 @@ def compute_most_fluxes(
     lhflx = rho * constants.L_v * u_star * q_star_val
 
     return tau_x, tau_y, shflx, lhflx, u_star
+
+
+def simple_bulk_fluxes(
+    u_lowest: jnp.ndarray,
+    v_lowest: jnp.ndarray,
+    T_lowest: jnp.ndarray,
+    q_lowest: jnp.ndarray,
+    T_sfc: jnp.ndarray,
+    q_sfc: jnp.ndarray,
+    rho: jnp.ndarray,
+    wind_speed: jnp.ndarray,
+    Cd: float,
+    Ch: float,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Simple bulk-aerodynamic surface fluxes with constant coefficients.
+
+    Parameters
+    ----------
+    u_lowest, v_lowest : array
+        Lowest-level wind components [m/s].
+    T_lowest : array
+        Lowest-level air temperature [K].
+    q_lowest : array
+        Lowest-level specific humidity [kg/kg].
+    T_sfc : array
+        Surface temperature [K].
+    q_sfc : array
+        Surface specific humidity [kg/kg].
+    rho : array
+        Air density at lowest level [kg/m3].
+    wind_speed : array
+        Wind speed (with minimum floor applied) [m/s].
+    Cd : float
+        Drag coefficient for momentum.
+    Ch : float
+        Transfer coefficient for heat and moisture.
+
+    Returns
+    -------
+    tau_x, tau_y : array
+        Surface stress [Pa] (opposes wind).
+    shflx : array
+        Sensible heat flux [W/m2] (positive upward = surface warmer).
+    lhflx : array
+        Latent heat flux [W/m2] (positive upward = surface moister).
+    """
+    tau_x = -rho * Cd * wind_speed * u_lowest
+    tau_y = -rho * Cd * wind_speed * v_lowest
+    shflx = rho * constants.c_pd * Ch * wind_speed * (T_sfc - T_lowest)
+    lhflx = rho * constants.L_v * Ch * wind_speed * (q_sfc - q_lowest)
+    return tau_x, tau_y, shflx, lhflx

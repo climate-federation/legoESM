@@ -36,6 +36,7 @@ from legoesm.forcing.experiments import (
     create_experiment_config,
 )
 from legoesm.forcing.analytical import analytical_sst_sic
+from legoesm.forcing.time_utils import day_to_calendar
 from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blend_surface_property,
@@ -69,6 +70,8 @@ __all__ = [
     "create_experiment_config",
     # Analytical forcing
     "analytical_sst_sic",
+    # Time utilities
+    "day_to_calendar",
     # Surface utilities
     "blend_surface_temperature",
     "blend_surface_property",

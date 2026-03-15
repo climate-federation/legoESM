@@ -281,8 +281,9 @@ class CGCompressibleEulerModel:
             self.config, physics_tendency,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: NonHydrostaticState, dt: float) -> NonHydrostaticState:
+    @partial(jax.jit, static_argnums=(0, 3))
+    def step(self, state: NonHydrostaticState, dt: float, physics_fn=None) -> NonHydrostaticState:
+        """Advance one time step, optionally with physics forcing."""
         from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
         acoustic_cfg = CompressibleEulerConfig(
             g=self.config.g,
@@ -296,9 +297,14 @@ class CGCompressibleEulerModel:
         )
 
         def slow_tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                phys = physics_fn(
+                    s, self.grid, self.height_coord, self.terrain_metric,
+                )
             tend = cgrid_compressible_euler_slow_tendencies(
                 s, self.grid, self.height_coord, self.terrain_metric,
-                self.config,
+                self.config, phys,
             )
             return NonHydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),
@@ -356,6 +362,10 @@ class CGCompressibleEulerModel:
 
         return state_new
 
+    def step_with_physics(self, state, dt, physics_fn=None):
+        """Backward-compatible wrapper for step() with physics."""
+        return self.step(state, dt, physics_fn=physics_fn)
+
     def integrate(
         self,
         state: NonHydrostaticState,
@@ -367,7 +377,7 @@ class CGCompressibleEulerModel:
         n_steps = int(duration / dt)
         trajectory = [state]
         for i in range(n_steps):
-            state = self.step(state, dt)
+            state = self.step(state, dt, physics_fn=physics_fn)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
         return state, trajectory

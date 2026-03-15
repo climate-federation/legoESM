@@ -943,7 +943,7 @@ class TestCloudFraction:
         dp = p_half[:, 1:] - p_half[:, :-1]
 
         # Moist atmosphere: high RH -> clouds
-        from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+        from legoesm.thermo import saturation_mixing_ratio
         q_sat = saturation_mixing_ratio(T, p_full)
         q_v_moist = 0.9 * q_sat  # RH = 0.9 > rh_crit
 
@@ -962,7 +962,7 @@ class TestCloudFraction:
         )
         dp = p_half[:, 1:] - p_half[:, :-1]
 
-        from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+        from legoesm.thermo import saturation_mixing_ratio
         q_sat = saturation_mixing_ratio(T, p_full)
         q_v = 0.9 * q_sat
 

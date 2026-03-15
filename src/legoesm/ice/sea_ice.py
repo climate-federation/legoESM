@@ -24,8 +24,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio_ice
+from legoesm.thermo import saturation_mixing_ratio_ice
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import (
     SeaIceState,
@@ -108,10 +110,7 @@ def _step_slab(
     T_ice = state.T_ice.data
     conc = state.concentration.data
 
-    ice_mask = h > 0.0
-    h_eff = jnp.maximum(h, config.h_ice_min)
-
-    # ---------- Surface fluxes ----------
+    # ---------- Surface fluxes (MOST dispatch stays in slab path) ----------
     wind_speed = jnp.sqrt(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
     )
@@ -130,54 +129,18 @@ def _step_slab(
             n_iter=config.bulk_n_iter,
         )
     else:
-        tau_x = -rho * config.Cd_ice * wind_speed * forcing.u_lowest
-        tau_y = -rho * config.Cd_ice * wind_speed * forcing.v_lowest
-        shflx = rho * constants.c_pd * config.Ch_ice * wind_speed * (T_ice - forcing.T_lowest)
-        lhflx = rho * constants.L_v * config.Ch_ice * wind_speed * (q_sfc - forcing.q_lowest)
+        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_ice, q_sfc, rho, wind_speed,
+            config.Cd_ice, config.Ch_ice,
+        )
 
-    # ---------- Ice albedo ----------
-    if config.temp_dependent_albedo:
-        alpha_ice = compute_ice_albedo(T_ice, config.ice_albedo)
-    else:
-        alpha_ice = jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape)
-
-    # ---------- Radiation ----------
-    sw_net = (1.0 - alpha_ice) * forcing.sw_down
-    lw_down_abs = config.emissivity_ice * forcing.lw_down
-    lw_up = config.emissivity_ice * constants.sigma_sb * T_ice ** 4
-    lw_net = lw_down_abs - lw_up
-    Q_sfc = sw_net + lw_net - shflx - lhflx
-
-    # ---------- Conductive flux ----------
-    F_cond = jnp.where(
-        ice_mask,
-        config.k_ice * (config.T_freeze_ocean - T_ice) / h_eff,
-        0.0,
+    # ---------- Thermodynamics (delegate to shared routine) ----------
+    h_new, T_ice_new, conc_new = _thermo_single(
+        h, T_ice, conc, forcing, ocean_sst, config, U_min, dt,
+        shflx=shflx, lhflx=lhflx,
     )
-
-    # ---------- Surface temperature evolution ----------
-    skin_cap = config.rho_ice * config.c_ice * h_eff * 0.5
-    dT_dt = (Q_sfc - F_cond) / skin_cap
-    T_ice_trial = T_ice + dt * dT_dt
-    T_ice_new = jnp.where(
-        ice_mask,
-        jnp.clip(T_ice_trial, config.T_ice_min, config.T_freeze_ocean),
-        jnp.broadcast_to(jnp.array(config.T_freeze_ocean), T_ice.shape),
-    )
-
-    # ---------- Growth / melt ----------
-    F_ocean = config.k_ice * jnp.maximum(ocean_sst - config.T_freeze_ocean, 0.0) / h_eff
-    dh_dt_ice = (F_cond - F_ocean) / (config.rho_ice * config.L_f)
-    freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
-    dh_dt_open = freeze_flux_open / (config.rho_ice * config.L_f)
-    dh_dt = jnp.where(ice_mask, dh_dt_ice, dh_dt_open)
-    h_new = jnp.maximum(h + dt * dh_dt, 0.0)
-
-    # ---------- Concentration ----------
-    dconc_growth = jnp.maximum(dh_dt, 0.0) * (1.0 - conc) / config.h_new_ice
-    dconc_melt = jnp.minimum(dh_dt, 0.0) * conc / (h_eff)
-    conc_new = conc + dt * (dconc_growth + dconc_melt)
-    conc_new = jnp.clip(conc_new, 0.0, 1.0)
 
     # ---------- Ice velocity (free drift, diagnostic) ----------
     u_ice = (config.drag_ocean * ocean_u
@@ -191,7 +154,16 @@ def _step_slab(
         concentration=state.concentration.replace(data=conc_new),
     )
 
-    lw_up_new = config.emissivity_ice * constants.sigma_sb * T_ice_new ** 4
+    # ---------- Build response ----------
+    if config.temp_dependent_albedo:
+        alpha_ice = compute_ice_albedo(T_ice_new, config.ice_albedo)
+    else:
+        alpha_ice = jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape)
+
+    _, _, lw_up_new = surface_radiation_fluxes(
+        forcing.sw_down, forcing.lw_down, T_ice_new, alpha_ice,
+        config.emissivity_ice,
+    )
     q_sfc_new = saturation_mixing_ratio_ice(T_ice_new, forcing.p_surface)
 
     response = TileResponse(
@@ -372,22 +344,35 @@ def _thermo_single(
     config: SeaIceConfig,
     U_min: float,
     dt: float,
+    shflx: jnp.ndarray | None = None,
+    lhflx: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Thermodynamic update for a single thickness class."""
+    """Thermodynamic update for a single thickness class.
+
+    Parameters
+    ----------
+    shflx, lhflx : jnp.ndarray or None
+        Pre-computed sensible and latent heat fluxes.  When *None*
+        (the default), ``simple_bulk_fluxes`` is called internally.
+        Pass pre-computed values when the caller uses a different
+        bulk-flux scheme (e.g. MOST).
+    """
     ice_mask = h > 0.0
     h_eff = jnp.maximum(h, config.h_ice_min)
 
-    wind_speed = jnp.sqrt(
-        forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
-    )
-    rho = forcing.rho_lowest
-    q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
-
-    # Bulk fluxes
-    tau_x = -rho * config.Cd_ice * wind_speed * forcing.u_lowest
-    tau_y = -rho * config.Cd_ice * wind_speed * forcing.v_lowest
-    shflx = rho * constants.c_pd * config.Ch_ice * wind_speed * (T_ice - forcing.T_lowest)
-    lhflx = rho * constants.L_v * config.Ch_ice * wind_speed * (q_sfc - forcing.q_lowest)
+    # Bulk fluxes — use caller-supplied values when available.
+    if shflx is None or lhflx is None:
+        wind_speed = jnp.sqrt(
+            forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
+        )
+        rho = forcing.rho_lowest
+        q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
+        _, _, shflx, lhflx = simple_bulk_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_ice, q_sfc, rho, wind_speed,
+            config.Cd_ice, config.Ch_ice,
+        )
 
     # Albedo
     if config.temp_dependent_albedo:
@@ -396,10 +381,11 @@ def _thermo_single(
         alpha_ice = jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape)
 
     # Radiation
-    sw_net = (1.0 - alpha_ice) * forcing.sw_down
-    lw_down_abs = config.emissivity_ice * forcing.lw_down
-    lw_up = config.emissivity_ice * constants.sigma_sb * T_ice ** 4
-    Q_sfc = sw_net + lw_down_abs - lw_up - shflx - lhflx
+    sw_net, lw_net, lw_up = surface_radiation_fluxes(
+        forcing.sw_down, forcing.lw_down, T_ice, alpha_ice,
+        config.emissivity_ice,
+    )
+    Q_sfc = sw_net + lw_net - shflx - lhflx
 
     # Conductive flux
     F_cond = jnp.where(
@@ -456,17 +442,22 @@ def _build_response(
     else:
         alpha_ice = jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape)
 
-    lw_up = config.emissivity_ice * constants.sigma_sb * T_ice ** 4
+    _, _, lw_up = surface_radiation_fluxes(
+        forcing.sw_down, forcing.lw_down, T_ice, alpha_ice,
+        config.emissivity_ice,
+    )
 
     # Recompute surface fluxes from aggregated state
     wind_speed = jnp.sqrt(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
     )
     rho = forcing.rho_lowest
-    shflx = rho * constants.c_pd * config.Ch_ice * wind_speed * (T_ice - forcing.T_lowest)
-    lhflx = rho * constants.L_v * config.Ch_ice * wind_speed * (q_sfc - forcing.q_lowest)
-    tau_x = -rho * config.Cd_ice * wind_speed * forcing.u_lowest
-    tau_y = -rho * config.Cd_ice * wind_speed * forcing.v_lowest
+    tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+        forcing.u_lowest, forcing.v_lowest,
+        forcing.T_lowest, forcing.q_lowest,
+        T_ice, q_sfc, rho, wind_speed,
+        config.Cd_ice, config.Ch_ice,
+    )
 
     return TileResponse(
         T_surface=T_ice,

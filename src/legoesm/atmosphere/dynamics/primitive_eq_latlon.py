@@ -55,6 +55,7 @@ from legoesm.grids.vertical import (
     compute_pressure_velocity,
 )
 from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm import constants
 
 
@@ -246,7 +247,7 @@ def _filter_state(
     )
 
 
-class LatLonPrimitiveEquationModel:
+class LatLonPrimitiveEquationModel(IntegrationMixin):
     """Hydrostatic primitive equation model on a lat-lon grid.
 
     Parameters
@@ -372,24 +373,4 @@ class LatLonPrimitiveEquationModel:
 
         return state_new
 
-    def integrate(
-        self,
-        state: HydrostaticState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-        physics_fn=None,
-    ) -> tuple[HydrostaticState, list[HydrostaticState]]:
-        """Integrate forward for a given duration."""
-        n_steps = int(duration / dt)
-        trajectory = [state]
-
-        for i in range(n_steps):
-            if physics_fn is not None:
-                state = self.step_with_physics(state, dt, physics_fn)
-            else:
-                state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-
-        return state, trajectory
+    # integrate() and integrate_scan() inherited from IntegrationMixin

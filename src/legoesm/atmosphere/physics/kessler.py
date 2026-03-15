@@ -18,7 +18,7 @@ from legoesm.atmosphere.physics.microphysics.integration import (
 )
 
 # Re-export saturation_mixing_ratio (used by dcmip2025/test_case_3.py)
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio  # noqa: F401
+from legoesm.thermo import saturation_mixing_ratio  # noqa: F401
 
 
 def kessler_tendencies(state, grid, height_coord, terrain_metric,

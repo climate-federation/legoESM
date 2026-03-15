@@ -29,7 +29,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm import constants
 
 

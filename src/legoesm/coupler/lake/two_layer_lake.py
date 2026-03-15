@@ -16,8 +16,10 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.coupler.lake.config import LakeConfig
 from legoesm.coupler.lake.state import LakeState
 
@@ -56,16 +58,18 @@ def step_lake(
             n_iter=config.bulk_n_iter,
         )
     else:
-        tau_x = -rho * config.Cd_lake * wind_speed * forcing.u_lowest
-        tau_y = -rho * config.Cd_lake * wind_speed * forcing.v_lowest
-        shflx = rho * constants.c_pd * config.Ch_lake * wind_speed * (T_epi - forcing.T_lowest)
-        lhflx = rho * constants.L_v * config.Ch_lake * wind_speed * (q_sfc - forcing.q_lowest)
+        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_epi, q_sfc, rho, wind_speed,
+            config.Cd_lake, config.Ch_lake,
+        )
 
     # Radiation
-    sw_net = (1.0 - config.albedo_lake) * forcing.sw_down
-    lw_down_abs = config.emissivity_lake * forcing.lw_down
-    lw_up = config.emissivity_lake * constants.sigma_sb * T_epi ** 4
-    lw_net = lw_down_abs - lw_up
+    sw_net, lw_net, lw_up = surface_radiation_fluxes(
+        forcing.sw_down, forcing.lw_down, T_epi, config.albedo_lake,
+        config.emissivity_lake,
+    )
 
     # Vertical mixing: wind-enhanced
     k_eff = config.k_mix * (1.0 + config.wind_mix_alpha * wind_speed)
@@ -87,7 +91,10 @@ def step_lake(
         T_hypo=state.T_hypo.replace(data=T_hypo_new),
     )
 
-    lw_up_new = config.emissivity_lake * constants.sigma_sb * T_epi_new ** 4
+    _, _, lw_up_new = surface_radiation_fluxes(
+        forcing.sw_down, forcing.lw_down, T_epi_new, config.albedo_lake,
+        config.emissivity_lake,
+    )
 
     # Recompute q_surface from updated epilimnion temperature for consistency
     q_sfc_new = saturation_mixing_ratio(T_epi_new, forcing.p_surface)

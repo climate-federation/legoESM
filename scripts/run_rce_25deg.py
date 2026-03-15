@@ -77,7 +77,8 @@ model = PrimitiveEquationModel(grid, sigma, dycore_config)
 # 3. Physics configuration (shared)
 # ---------------------------------------------------------------------------
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.diagnostics.column_integrals import column_water_vapor
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.solar import perpetual_equinox_insolation
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
@@ -424,7 +425,7 @@ for step in range(1, n_steps):
         m_Tl = float(jnp.mean(state.T.data[..., -1]))
         mx_v = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
         m_pr = float(jnp.mean(_pr + _precip_ls)) * 86400.0
-        cwv = jnp.sum(q_v * state.p_s.data[..., None] * _dsigma, axis=-1) / constants.g
+        cwv = column_water_vapor(q_v, state.p_s.data, _dsigma)
         m_cwv = float(jnp.mean(cwv))
 
         diag_ocean["times"].append(day)
@@ -660,7 +661,7 @@ for step in range(1, n_steps):
         mx_v = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
         m_pr = float(jnp.mean(_pr + _precip_ls)) * 86400.0
         m_W = float(jnp.mean(W_bucket))
-        cwv = jnp.sum(q_v * state.p_s.data[..., None] * _dsigma, axis=-1) / constants.g
+        cwv = column_water_vapor(q_v, state.p_s.data, _dsigma)
         m_cwv = float(jnp.mean(cwv))
 
         diag_land["times"].append(day)

@@ -16,9 +16,11 @@ Coverage (available in current workspace):
   - RCE slab land (gray)
 - Non-hydrostatic:
   - DCMIP TC1/TC2a/TC3 FV cube (gray, rrtmgp)
+  - FV lat-lon dry-rest radiation-stability case (gray, rrtmgp)
   - DCMIP TC1 spectral (no radiation-coupled benchmark path)
 - Icosahedral:
   - Shallow-water Williamson TC2/TC5/TC6 (native + lat-lon pixel snapshots)
+  - Hydrostatic/non-hydrostatic primitive-equation/CE paths: not implemented yet
 
 Artifacts per case (standardized when available):
 - field_snapshots.png
@@ -98,6 +100,7 @@ CASE_MAP = {
     "04_dcmip_tc1_fv_cube": ("nonhydrostatic", "cube_sphere", "dcmip_tc1_finite_volume"),
     "05_dcmip_tc2a_fv_cube": ("nonhydrostatic", "cube_sphere", "dcmip_tc2a_finite_volume"),
     "06_dcmip_tc3_fv_cube": ("nonhydrostatic", "cube_sphere", "dcmip_tc3_finite_volume"),
+    "07_nh_fv_latlon_rest": ("nonhydrostatic", "latlon", "nh_rest_finite_volume"),
 }
 
 
@@ -751,6 +754,26 @@ def main() -> None:
                 dst = output_root / "shallow_water" / "icosahedral" / f"williamson_{case_tag}" / f"default_{preset.name}"
                 _copy_tree(case_dir, dst)
                 _standardize_case_artifacts(dst)
+
+    # 6) Explicitly report currently unavailable icosahedral hydro/NH dycore paths.
+    records.append(
+        {
+            "component": "hydrostatic_icosahedral_fv",
+            "status": "SKIPPED",
+            "wall_time_s": 0.0,
+            "output": "",
+            "notes": "Not implemented in workspace: no hydrostatic primitive-equation Voronoi/icosahedral dycore.",
+        },
+    )
+    records.append(
+        {
+            "component": "nonhydrostatic_icosahedral_fv",
+            "status": "SKIPPED",
+            "wall_time_s": 0.0,
+            "output": "",
+            "notes": "Not implemented in workspace: no nonhydrostatic compressible-Euler Voronoi/icosahedral dycore.",
+        },
+    )
 
     summary = {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),

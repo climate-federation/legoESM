@@ -57,9 +57,7 @@ from legoesm.grids.vertical import (
     vertical_advection_hybrid,
     compute_omega_hybrid,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
-from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
+from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm import constants
 
 _LNPS_MIN = float(jnp.log(100.0))
@@ -701,13 +699,9 @@ class SpectralPrimitiveEquationModel:
                     )
                 result = jax.lax.fori_loop(0, n_substeps, si_substep, state)
         else:
-            integrator = self.config.time_integrator.lower()
-            if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-                result = ssp_rk54_step(state, tendency_fn, dt)
-            elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-                result = ssp_rk34_step(state, tendency_fn, dt)
-            else:
-                result = ssp_rk3_step(state, tendency_fn, dt)
+            result = dispatch_integrator(
+                state, tendency_fn, dt, self.config.time_integrator,
+            )
 
         # Apply implicit sponge filter (unconditionally stable)
         if self._sponge_factor is not None:
@@ -719,20 +713,20 @@ class SpectralPrimitiveEquationModel:
 
         return result
 
-    def step(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
-        """Advance one time step.
+    def step(self, state: SpectralHydrostaticState, dt: float, physics_fn=None) -> SpectralHydrostaticState:
+        """Advance one time step, optionally with physics forcing.
 
         Dispatches to leapfrog+SI or SSP-RK3 based on config.time_integrator.
         """
         integrator = self.config.time_integrator.lower()
         if integrator in ("leapfrog", "leapfrog_si"):
-            return self._leapfrog_step(state, dt)
+            return self._leapfrog_step(state, dt, physics_fn)
 
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
-        return self._step_jit(state, dt)
+        return self._step_jit(state, dt, physics_fn)
 
-    def _leapfrog_step(self, state, dt):
+    def _leapfrog_step(self, state, dt, physics_fn=None):
         """Leapfrog + SI step with Robert-Asselin filter.
 
         First call: forward Euler + SI (startup).
@@ -745,7 +739,7 @@ class SpectralPrimitiveEquationModel:
             self._ensure_si_data(dt)  # SI matrices for dt
             # Also precompute leapfrog SI for next step (avoids stale jit)
             self._ensure_si_data_leapfrog(dt)
-            result = self._euler_si_jit(state, dt)
+            result = self._euler_si_jit(state, dt, physics_fn)
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
@@ -756,7 +750,9 @@ class SpectralPrimitiveEquationModel:
         else:
             # --- Leapfrog + SI ---
             self._ensure_si_data_leapfrog(dt)
-            state_np1 = self._leapfrog_si_jit(state, self._state_prev, dt)
+            state_np1 = self._leapfrog_si_jit(
+                state, self._state_prev, dt, physics_fn,
+            )
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 state_np1 = _apply_sponge_filter(
@@ -778,93 +774,22 @@ class SpectralPrimitiveEquationModel:
             self._state_prev = state_n_filtered
             return state_np1
 
-    @partial(jax.jit, static_argnums=(0, 2))
-    def _euler_si_jit(self, state, dt):
-        """JIT-compiled Euler + SI step (leapfrog startup)."""
-        def tendency_fn(s):
-            return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
-        from legoesm.timestepping.semi_implicit import euler_si_step
-        return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
-
-    @partial(jax.jit, static_argnums=(0, 3))
-    def _leapfrog_si_jit(self, state_n, state_nm1, dt):
-        """JIT-compiled leapfrog + SI step."""
-        def tendency_fn(s):
-            return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
-        from legoesm.timestepping.semi_implicit import leapfrog_si_step
-        return leapfrog_si_step(
-            state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
-        )
-
-    @partial(jax.jit, static_argnums=(0, 2))
-    def _step_jit(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
-        """JIT-compiled inner step (SI matrices already precomputed)."""
-        def tendency_fn(s):
-            return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
-
-        if self._use_cpu_for_spectral:
-            state_cpu = jax.device_put(state, self._cpu_device)
-            result_cpu = self._do_step(state_cpu, dt, tendency_fn)
-            return jax.device_put(result_cpu, self._default_device)
-
-        return self._do_step(state, dt, tendency_fn)
-
     def step_with_physics(
         self,
         state: SpectralHydrostaticState,
         dt: float,
         physics_fn=None,
     ) -> SpectralHydrostaticState:
-        """Advance one time step with physics forcing."""
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("leapfrog", "leapfrog_si"):
-            return self._leapfrog_step_with_physics(state, dt, physics_fn)
-
-        self._ensure_si_data(dt)
-        self._ensure_sponge_factor(dt)
-        return self._step_with_physics_jit(state, dt, physics_fn)
+        """Backward-compatible wrapper for step() with physics."""
+        return self.step(state, dt, physics_fn=physics_fn)
 
     def _leapfrog_step_with_physics(self, state, dt, physics_fn):
-        """Leapfrog + SI step with physics and RA filter."""
-        self._ensure_sponge_factor(dt)
-
-        if self._state_prev is None:
-            self._ensure_si_data(dt)
-            self._ensure_si_data_leapfrog(dt)
-            result = self._euler_si_physics_jit(state, dt, physics_fn)
-            if self._sponge_factor is not None:
-                result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
-            if self._spectral_filter is not None:
-                result = _apply_spectral_filter_to_state(result, self._spectral_filter)
-            self._state_prev = state
-            return result
-        else:
-            self._ensure_si_data_leapfrog(dt)
-            state_np1 = self._leapfrog_si_physics_jit(
-                state, self._state_prev, dt, physics_fn,
-            )
-            if self._sponge_factor is not None:
-                state_np1 = _apply_sponge_filter(
-                    state_np1, self._sponge_factor, self.grid.ms,
-                )
-            if self._spectral_filter is not None:
-                state_np1 = _apply_spectral_filter_to_state(
-                    state_np1, self._spectral_filter,
-                )
-            gamma = self.config.robert_asselin_coeff
-            if gamma > 0:
-                from legoesm.timestepping.semi_implicit import robert_asselin_filter
-                state_n_filtered = robert_asselin_filter(
-                    self._state_prev, state, state_np1, gamma,
-                )
-            else:
-                state_n_filtered = state
-            self._state_prev = state_n_filtered
-            return state_np1
+        """Backward-compatible wrapper for _leapfrog_step() with physics."""
+        return self._leapfrog_step(state, dt, physics_fn=physics_fn)
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
-    def _euler_si_physics_jit(self, state, dt, physics_fn):
-        """JIT-compiled Euler + SI step with physics (leapfrog startup)."""
+    def _euler_si_jit(self, state, dt, physics_fn=None):
+        """JIT-compiled Euler + SI step (leapfrog startup), optionally with physics."""
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -876,8 +801,8 @@ class SpectralPrimitiveEquationModel:
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
     @partial(jax.jit, static_argnums=(0, 3, 4))
-    def _leapfrog_si_physics_jit(self, state_n, state_nm1, dt, physics_fn):
-        """JIT-compiled leapfrog + SI step with physics."""
+    def _leapfrog_si_jit(self, state_n, state_nm1, dt, physics_fn=None):
+        """JIT-compiled leapfrog + SI step, optionally with physics."""
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -891,13 +816,13 @@ class SpectralPrimitiveEquationModel:
         )
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
-    def _step_with_physics_jit(
+    def _step_jit(
         self,
         state: SpectralHydrostaticState,
         dt: float,
         physics_fn=None,
     ) -> SpectralHydrostaticState:
-        """JIT-compiled inner step with physics (SI matrices already precomputed)."""
+        """JIT-compiled inner step (SI matrices already precomputed), optionally with physics."""
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -913,21 +838,19 @@ class SpectralPrimitiveEquationModel:
 
         return self._do_step(state, dt, tendency_fn)
 
-    @partial(jax.jit, static_argnums=(0, 2))
-    def _step_on_cpu(self, state: SpectralHydrostaticState, dt: float) -> SpectralHydrostaticState:
-        """Step without device transfers (for batched CPU integration on Metal)."""
-        def tendency_fn(s):
-            return spectral_pe_tendencies(s, self.grid, self.sigma_coord, self.config)
-        return self._do_step(state, dt, tendency_fn)
+    # Keep old names as aliases for backward compatibility
+    _euler_si_physics_jit = _euler_si_jit
+    _leapfrog_si_physics_jit = _leapfrog_si_jit
+    _step_with_physics_jit = _step_jit
 
     @partial(jax.jit, static_argnums=(0, 2, 3))
-    def _step_on_cpu_with_physics(
+    def _step_on_cpu(
         self,
         state: SpectralHydrostaticState,
         dt: float,
         physics_fn=None,
     ) -> SpectralHydrostaticState:
-        """Step with physics, no device transfers (for batched CPU integration)."""
+        """Step on CPU without device transfers, optionally with physics."""
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -936,6 +859,9 @@ class SpectralPrimitiveEquationModel:
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
         return self._do_step(state, dt, tendency_fn)
+
+    # Keep old name as alias for backward compatibility
+    _step_on_cpu_with_physics = _step_on_cpu
 
     def integrate(
         self,
@@ -960,10 +886,7 @@ class SpectralPrimitiveEquationModel:
 
         trajectory = [state]
         for i in range(n_steps):
-            if physics_fn is not None:
-                state = self.step_with_physics(state, dt, physics_fn)
-            else:
-                state = self.step(state, dt)
+            state = self.step(state, dt, physics_fn=physics_fn)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
         return state, trajectory
@@ -974,10 +897,7 @@ class SpectralPrimitiveEquationModel:
         trajectory_cpu = [state_cpu]
 
         for i in range(n_steps):
-            if physics_fn is not None:
-                state_cpu = self._step_on_cpu_with_physics(state_cpu, dt, physics_fn)
-            else:
-                state_cpu = self._step_on_cpu(state_cpu, dt)
+            state_cpu = self._step_on_cpu(state_cpu, dt, physics_fn)
             if (i + 1) % save_every == 0:
                 trajectory_cpu.append(state_cpu)
 

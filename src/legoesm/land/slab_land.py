@@ -16,17 +16,16 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon
-from legoesm.land.carbon.stomata import (
-    coupled_farquhar_stomata,
-    compute_stomatal_beta,
-    jarvis_gs,
-)
 from legoesm.land.config import LandConfig
+from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import LandState
+from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
@@ -69,22 +68,10 @@ def step_land(
     snow_age = state.snow_age.data
 
     # --- Snow budget ---
-    # Accumulation from snowfall
-    snow_accum = forcing.precip_snow * dt  # kg/m2
-
-    # Melt: proportional to T above freezing
-    melt_rate = config.snow_melt_rate * jnp.maximum(
-        T_soil - config.T_snow_melt, 0.0
-    )  # kg/m2/s
-    snow_melt = jnp.minimum(melt_rate * dt, snow + snow_accum)
-
-    snow_new = jnp.maximum(snow + snow_accum - snow_melt, 0.0)
-
-    # Snow age: reset when fresh snowfall, otherwise age
-    is_snowing = forcing.precip_snow > 1e-10
-    snow_age_new = jnp.where(is_snowing, 0.0, snow_age + dt)
-    # If all snow has melted, reset age to zero
-    snow_age_new = jnp.where(snow_new > 0.0, snow_age_new, 0.0)
+    snow_new, snow_age_new = update_snow(
+        snow, snow_age, T_soil, forcing.precip_snow,
+        config.snow_melt_rate, config.T_snow_melt, dt,
+    )
 
     # --- Surface albedo ---
     if config.snow_albedo_feedback and lat is not None:
@@ -104,24 +91,9 @@ def step_land(
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac
 
     # --- Stomatal conductance (if enabled) ---
-    gpp_farq = None
-    if config.stomata.enabled:
-        if config.carbon.scheme == "differland" and carbon_state is not None:
-            LAI = carbon_state.C_fol / config.carbon.LCMA
-            gs, gpp_farq = coupled_farquhar_stomata(
-                T_soil, forcing.sw_down, forcing.co2_ppmv,
-                forcing.q_lowest, forcing.p_surface, LAI, beta_soil,
-                config.stomata)
-            beta = compute_stomatal_beta(
-                gs, LAI, beta_soil, config.stomata)
-        else:
-            gs = jarvis_gs(
-                T_soil, forcing.sw_down, forcing.q_lowest,
-                forcing.p_surface, beta_soil, config.stomata)
-            beta = compute_stomatal_beta(
-                gs, None, beta_soil, config.stomata)
-    else:
-        beta = beta_soil
+    beta, gpp_farq = compute_effective_beta(
+        T_soil, forcing, beta_soil, config, carbon_state, dt,
+    )
 
     # Surface saturation humidity
     q_sat_sfc = saturation_mixing_ratio(T_soil, forcing.p_surface)
@@ -142,18 +114,18 @@ def step_land(
             n_iter=config.bulk_n_iter,
         )
     else:
-        Cd = config.Cd_land
-        Ch = config.Ch_land
-        tau_x = -rho * Cd * wind_speed * forcing.u_lowest
-        tau_y = -rho * Cd * wind_speed * forcing.v_lowest
-        shflx = rho * constants.c_pd * Ch * wind_speed * (T_soil - forcing.T_lowest)
-        lhflx = rho * constants.L_v * Ch * wind_speed * (q_sfc - forcing.q_lowest)
+        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_soil, q_sfc, rho, wind_speed,
+            config.Cd_land, config.Ch_land,
+        )
 
     # Radiation
-    sw_net = (1.0 - alpha) * forcing.sw_down
-    lw_down_abs = config.emissivity_land * forcing.lw_down
-    lw_up = config.emissivity_land * constants.sigma_sb * T_soil ** 4
-    lw_net = lw_down_abs - lw_up
+    sw_net, lw_net, lw_up = surface_radiation_fluxes(
+        forcing.sw_down, forcing.lw_down, T_soil, alpha,
+        config.emissivity_land,
+    )
 
     # Energy balance: dT/dt
     heat_cap = config.C_soil * config.d_soil
@@ -174,7 +146,10 @@ def step_land(
     )
 
     # Recompute upward LW with updated temperature for consistency
-    lw_up_new = config.emissivity_land * constants.sigma_sb * T_soil_new ** 4
+    _, _, lw_up_new = surface_radiation_fluxes(
+        forcing.sw_down, forcing.lw_down, T_soil_new, alpha,
+        config.emissivity_land,
+    )
 
     # Recompute q_surface from updated T and moisture for consistency
     w_frac_new = jnp.clip(W_new / config.W_max, 0.0, 1.0)

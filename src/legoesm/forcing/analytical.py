@@ -9,6 +9,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.forcing.time_utils import day_to_calendar
+
 
 def analytical_sst_sic(
     lat_deg: np.ndarray,
@@ -33,7 +35,7 @@ def analytical_sst_sic(
     sic : jax.Array
         Sea-ice concentration [0, 1], same shape as *lat_deg*.
     """
-    day_of_year = day % 365.0 + 1.0
+    day_of_year, _ = day_to_calendar(day)
     lat_shift = -5.0 * np.cos(2.0 * np.pi * day_of_year / 365.0)
     lat_eff = np.asarray(lat_deg) - lat_shift
 

@@ -679,7 +679,7 @@ def load_bathymetry_cubed_sphere(
     # Edge blending for cubed-sphere face boundaries
     if cfg.edge_blend_strength > 0:
         try:
-            from legoesm.atmosphere.dynamics.edge_blending import (
+            from legoesm.grids.edge_blending import (
                 blend_scalar_cube_edges_2d,
             )
             depth_jax = jnp.array(depth)

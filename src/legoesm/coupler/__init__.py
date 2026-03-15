@@ -11,7 +11,8 @@ from legoesm.coupler.accumulator import (
 from legoesm.coupler.surface_exchange import (
     extract_atm_to_surface, extract_atm_to_surface_nh,
 )
-from legoesm.coupler.bulk_flux import compute_most_fluxes, psi_m, psi_h
+from legoesm.coupler.bulk_flux import compute_most_fluxes, simple_bulk_fluxes, psi_m, psi_h
+from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
 
 
@@ -46,7 +47,8 @@ __all__ = [
     "FluxAccumulator", "accumulate", "mean_accumulator", "reset_accumulator",
     "accumulator_from_flux",
     "extract_atm_to_surface", "extract_atm_to_surface_nh",
-    "compute_most_fluxes", "psi_m", "psi_h",
+    "compute_most_fluxes", "simple_bulk_fluxes", "psi_m", "psi_h",
+    "surface_radiation_fluxes",
     "SurfaceState", "init_surface_state", "make_coupler", "ocean_tile_response",
     "LakeConfig", "LakeState", "step_lake",
     # MPAS Voronoi adapter

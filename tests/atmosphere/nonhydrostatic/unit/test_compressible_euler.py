@@ -394,7 +394,7 @@ class TestKesslerMicrophysics:
 
     def test_saturation_mixing_ratio(self):
         """Saturation mixing ratio increases with temperature."""
-        from legoesm.atmosphere.physics.kessler import saturation_mixing_ratio
+        from legoesm.thermo import saturation_mixing_ratio
         T_cold = jnp.array(260.0)
         T_warm = jnp.array(300.0)
         p = jnp.array(1e5)

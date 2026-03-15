@@ -26,7 +26,7 @@ from legoesm.atmosphere.dynamics.primitive_eq import (
     PrimitiveEquationModel, PrimitiveEquationConfig,
 )
 from legoesm.atmosphere.physics.held_suarez import held_suarez_init
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.config import (
     GrayRadiationConfig, RRTMGPConfig, RadiationConfig,
 )
@@ -36,6 +36,7 @@ from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm import constants
+from legoesm.forcing.time_utils import day_to_calendar
 
 
 def _make_synthetic_forcing(path, n_lat=18, n_lon=36):
@@ -300,7 +301,7 @@ class TestAMIPWithRRTMG:
 
         for step in range(3):
             day = step * DT / 86400.0
-            day_of_year = day % 365.0 + 1.0
+            day_of_year, _ = day_to_calendar(day)
             sst, sic = get_forcing_at_time(forcing, day)
 
             # Dynamics

@@ -1,0 +1,29 @@
+# SlopBuster configuration for legoESM
+# Differentiable Earth System Model in JAX
+# Docs: https://www.connectory.ai/docs/
+
+language: auto
+
+reviews:
+  style: thorough
+  max_findings: 15
+
+ignore:
+  - ".venv/**"
+  - "**/__pycache__/**"
+  - "*.egg-info/**"
+  - "results/**"
+  - "notebooks/**"
+  - "docs/**"
+  - "evaluations/**"
+  - "*.png"
+  - "*.npz"
+  - "*.nc"
+
+rules:
+  framework_reinvention:
+    severity: warning
+  error_handling:
+    severity: warning
+  ai_slop:
+    severity: error

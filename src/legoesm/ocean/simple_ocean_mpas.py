@@ -14,7 +14,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.ocean.mpas_config import MPASSimpleOceanConfig
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 
 
 class MPASSlabOceanState(NamedTuple):

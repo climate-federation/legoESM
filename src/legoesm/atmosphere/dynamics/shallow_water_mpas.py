@@ -41,7 +41,8 @@ from legoesm.core.operators_voronoi import (
     apvm_correction,
 )
 from legoesm.grids.voronoi import VoronoiMesh
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm import constants
 
 
@@ -128,44 +129,10 @@ def mpas_shallow_water_tendencies(
 
 
 # ============================================================================
-# RK4 time integrator (MPAS default)
-# ============================================================================
-
-def _rk4_step(state, tendency_fn, dt):
-    """Classical 4th-order Runge-Kutta step.
-
-    Parameters
-    ----------
-    state : pytree
-    tendency_fn : callable
-    dt : float
-
-    Returns
-    -------
-    pytree : state advanced by dt
-    """
-    k1 = tendency_fn(state)
-    s1 = jax.tree.map(lambda s, k: s + 0.5 * dt * k, state, k1)
-
-    k2 = tendency_fn(s1)
-    s2 = jax.tree.map(lambda s, k: s + 0.5 * dt * k, state, k2)
-
-    k3 = tendency_fn(s2)
-    s3 = jax.tree.map(lambda s, k: s + dt * k, state, k3)
-
-    k4 = tendency_fn(s3)
-    state_new = jax.tree.map(
-        lambda s, a, b, c, d: s + (dt / 6.0) * (a + 2.0 * b + 2.0 * c + d),
-        state, k1, k2, k3, k4,
-    )
-    return state_new
-
-
-# ============================================================================
 # Model class
 # ============================================================================
 
-class MPASShallowWaterModel:
+class MPASShallowWaterModel(IntegrationMixin):
     """MPAS shallow water model using TRiSK discretization.
 
     Parameters
@@ -213,14 +180,9 @@ class MPASShallowWaterModel:
                 h_s=s.h_s.replace(data=jnp.zeros_like(s.h_s.data)),
             )
 
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("rk4", "runge_kutta_4"):
-            state_new = _rk4_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            state_new = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(
-                f"Unsupported time_integrator={self.config.time_integrator!r}")
+        state_new = dispatch_integrator(
+            state, tendency_fn, dt, self.config.time_integrator,
+        )
 
         # Conservation fixers
         if self.config.fix_mass:
@@ -231,64 +193,7 @@ class MPASShallowWaterModel:
 
         return state_new
 
-    def integrate(
-        self,
-        state: MPASShallowWaterState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-    ) -> tuple[MPASShallowWaterState, list[MPASShallowWaterState]]:
-        """Integrate forward for a given duration.
-
-        Parameters
-        ----------
-        state : MPASShallowWaterState
-        duration : float
-            Total integration time [seconds].
-        dt : float
-            Time step [seconds].
-        save_every : int
-            Save state every N steps.
-
-        Returns
-        -------
-        final_state, trajectory
-        """
-        n_steps = int(duration / dt)
-        trajectory = [state]
-
-        for i in range(n_steps):
-            state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-
-        return state, trajectory
-
-    def integrate_scan(
-        self,
-        state: MPASShallowWaterState,
-        n_steps: int,
-        dt: float,
-    ) -> tuple[MPASShallowWaterState, MPASShallowWaterState]:
-        """Integrate using jax.lax.scan (differentiable).
-
-        Parameters
-        ----------
-        state : MPASShallowWaterState
-        n_steps : int
-        dt : float
-
-        Returns
-        -------
-        final_state, trajectory
-        """
-        def scan_fn(state, _):
-            new_state = self.step(state, dt)
-            return new_state, new_state
-
-        final_state, trajectory = jax.lax.scan(
-            scan_fn, state, jnp.arange(n_steps))
-        return final_state, trajectory
+    # integrate() and integrate_scan() inherited from IntegrationMixin
 
 
 # ============================================================================

@@ -791,7 +791,7 @@ def test_ocean_albedo_constant_honoured():
 
 def test_land_q_surface_uses_updated_temperature():
     """Slab land q_surface should be consistent with updated T_surface."""
-    from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+    from legoesm.thermo import saturation_mixing_ratio
 
     state = _make_land_state(T=280.0, W=75.0)
     forcing = _make_forcing(T_lowest=300.0, sw=400.0)  # strong warming
@@ -812,7 +812,7 @@ def test_land_q_surface_uses_updated_temperature():
 
 def test_ice_q_surface_uses_updated_temperature():
     """Sea ice q_surface should be consistent with updated T_surface."""
-    from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio_ice
+    from legoesm.thermo import saturation_mixing_ratio_ice
 
     state = _make_ice_state(h=1.0, T=260.0, conc=0.8)
     forcing = _make_forcing(T_lowest=250.0, sw=100.0)
@@ -830,7 +830,7 @@ def test_ice_q_surface_uses_updated_temperature():
 
 def test_lake_q_surface_uses_updated_temperature():
     """Lake q_surface should be consistent with updated T_surface."""
-    from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+    from legoesm.thermo import saturation_mixing_ratio
 
     state = _make_lake_state(T_epi=285.0, T_hypo=278.0)
     forcing = _make_forcing(T_lowest=300.0, sw=400.0)  # strong warming

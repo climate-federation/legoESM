@@ -168,6 +168,7 @@ from legoesm.grids.topography import (
     TopographyConfig, load_real_topography,
 )
 from legoesm import constants
+from legoesm.diagnostics.column_integrals import column_water_vapor
 
 TOPOGRAPHY = args.topography
 if TOPOGRAPHY == "flat":
@@ -295,7 +296,7 @@ if DT > 0.8 * dt_max_est:
 # ---------------------------------------------------------------------------
 # 4. Initial state
 # ---------------------------------------------------------------------------
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 
 T_INIT = 270.0
 _phis_arg = _phis_data if float(jnp.max(jnp.abs(_phis_data))) > 0 else None
@@ -315,7 +316,7 @@ q_v = RH_INIT * q_sat_init * sigma.sigma_full ** 2
 q_v = jnp.minimum(q_v, q_sat_init)
 mean_qv = float(jnp.mean(q_v)) * 1000.0
 cwv_init = float(jnp.mean(
-    jnp.sum(q_v * p_s_init * sigma.dsigma, axis=-1) / constants.g
+    column_water_vapor(q_v, p_s_init, sigma.dsigma)
 ))
 print(f"  Moisture: RH_init={RH_INIT}, mean q_v={mean_qv:.2f} g/kg, CWV={cwv_init:.1f} kg/m2")
 
@@ -365,6 +366,7 @@ from legoesm.atmosphere.physics.radiation.solar import (
 )
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.forcing.analytical import analytical_sst_sic
+from legoesm.forcing.time_utils import day_to_calendar
 from legoesm.forcing.surface_utils import blend_surface_temperature, blend_surface_property
 
 S_0 = 1360.0
@@ -725,8 +727,7 @@ print(f"  {'-'*6}  {'-'*8}  {'-'*6}  {'-'*8}"
 t_wall_start = time.time()
 
 day = current_day
-day_of_year = day % 365.0 + 1.0
-seconds_of_day = (day * 86400.0) % 86400.0
+day_of_year, seconds_of_day = day_to_calendar(day)
 sst, sic = get_sst_sic(day)
 
 # Set forcing state for physics_fn
@@ -772,8 +773,7 @@ t_wall_start = time.time()
 
 for step in range(1, n_steps_total):
     day = START_DAY + (step + 1) * DT / 86400.0
-    day_of_year = day % 365.0 + 1.0
-    seconds_of_day = (day * 86400.0) % 86400.0
+    day_of_year, seconds_of_day = day_to_calendar(day)
 
     sst, sic = get_sst_sic(day)
 
@@ -828,7 +828,7 @@ for step in range(1, n_steps_total):
 
         mean_precip = float(jnp.mean(_precip + _precip_ls)) * 86400.0
 
-        cwv = jnp.sum(q_v * p_s_grid[..., None] * _dsigma, axis=-1) / constants.g
+        cwv = column_water_vapor(q_v, p_s_grid, _dsigma)
         mean_cwv = float(jnp.mean(cwv))
 
         mean_sw_toa = float(jnp.mean(_sw_toa))

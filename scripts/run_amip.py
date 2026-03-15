@@ -202,6 +202,7 @@ from legoesm.forcing.amip_config import (
     save_checkpoint,
     load_checkpoint,
 )
+from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import EnergyBudgetTracker
 from legoesm.diagnostics.monthly_means import MonthlyAccumulator
 
@@ -513,7 +514,7 @@ else:
 # 4. Initial state or restart
 # ---------------------------------------------------------------------------
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo, ocean_albedo as compute_ocean_albedo, IceAlbedoConfig, OceanAlbedoConfig
 from legoesm.atmosphere.physics.radiation.solar import (
@@ -522,6 +523,7 @@ from legoesm.atmosphere.physics.radiation.solar import (
 )
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.forcing.analytical import analytical_sst_sic
+from legoesm.forcing.time_utils import day_to_calendar
 from legoesm.forcing.surface_utils import (
     blend_surface_temperature,
     blend_surface_property,
@@ -559,7 +561,7 @@ else:
     q_v = jnp.minimum(q_v, q_sat_init)
     mean_qv = float(jnp.mean(q_v)) * 1000.0
     cwv_init = float(jnp.mean(
-        jnp.sum(q_v * state.p_s.data[..., None] * sigma.dsigma, axis=-1) / constants.g
+        column_water_vapor(q_v, state.p_s.data, sigma.dsigma)
     ))
     print(f"  Moisture: RH_init={_RH_init}, mean q_v={mean_qv:.2f} g/kg, CWV={cwv_init:.1f} kg/m2")
 
@@ -1153,8 +1155,7 @@ t_wall_start = time.time()
 
 # JIT warmup: run one full step (with radiation)
 day = current_day
-day_of_year = day % 365.0 + 1.0
-seconds_of_day = (day * 86400.0) % 86400.0
+day_of_year, seconds_of_day = day_to_calendar(day)
 
 sst, sic = get_sst_sic(day)
 
@@ -1221,8 +1222,7 @@ t_wall_start = time.time()
 
 for step in range(start_step + 1, n_steps_total):
     day = START_DAY + (step + 1) * DT / 86400.0
-    day_of_year = day % 365.0 + 1.0
-    seconds_of_day = (day * 86400.0) % 86400.0
+    day_of_year, seconds_of_day = day_to_calendar(day)
 
     sst, sic = get_sst_sic(day)
 
@@ -1312,7 +1312,7 @@ for step in range(start_step + 1, n_steps_total):
 
         mean_precip = float(jnp.mean(_precip + _precip_ls)) * 86400.0
 
-        cwv = jnp.sum(q_v * state.p_s.data[..., None] * _dsigma, axis=-1) / constants.g
+        cwv = column_water_vapor(q_v, state.p_s.data, _dsigma)
         mean_cwv = float(jnp.mean(cwv))
 
         # TOA radiative fluxes
@@ -1377,7 +1377,7 @@ for step in range(start_step + 1, n_steps_total):
 
         # Monthly-mean accumulation (Task 12)
         if MONTHLY_MEANS:
-            _doy = day % 365.0 + 1.0
+            _doy, _ = day_to_calendar(day)
             _year = int(day // 365.0)
             _2d_fields = {
                 'T_low': np.asarray(state.T.data[..., -1]),

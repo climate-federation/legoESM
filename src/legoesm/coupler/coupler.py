@@ -14,7 +14,9 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics.thermodynamics import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
 from legoesm.core.field import Field
 from legoesm.coupler.accumulator import (
@@ -159,7 +161,6 @@ def ocean_tile_response(
     shape = ocean_sst.shape
     q_sfc = saturation_mixing_ratio(ocean_sst, forcing.p_surface)
     rho = forcing.rho_lowest
-    lw_up = config.ocean_emissivity * constants.sigma_sb * ocean_sst ** 4
 
     if config.bulk_scheme in ("coare3", "large_yeager"):
         from legoesm.coupler.bulk_flux import compute_most_fluxes
@@ -181,10 +182,12 @@ def ocean_tile_response(
         wind_speed = jnp.sqrt(
             forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + config.U_min ** 2
         )
-        tau_x = -rho * config.Cd_ocean * wind_speed * forcing.u_lowest
-        tau_y = -rho * config.Cd_ocean * wind_speed * forcing.v_lowest
-        shflx = rho * constants.c_pd * config.Ch_ocean * wind_speed * (ocean_sst - forcing.T_lowest)
-        lhflx = rho * constants.L_v * config.Ch_ocean * wind_speed * (q_sfc - forcing.q_lowest)
+        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            ocean_sst, q_sfc, rho, wind_speed,
+            config.Cd_ocean, config.Ch_ocean,
+        )
 
     # Ocean albedo: constant or zenith-dependent
     # Honour CouplerConfig.ocean_albedo for the constant-albedo path by
@@ -198,6 +201,12 @@ def ocean_tile_response(
     # Ensure correct shape
     if not hasattr(alpha_ocean, 'shape') or alpha_ocean.shape != shape:
         alpha_ocean = jnp.broadcast_to(jnp.asarray(alpha_ocean), shape)
+
+    # Surface radiation (only lw_up needed for ocean tile response)
+    _, _, lw_up = surface_radiation_fluxes(
+        forcing.sw_down, forcing.lw_down, ocean_sst, alpha_ocean,
+        config.ocean_emissivity,
+    )
 
     return TileResponse(
         T_surface=ocean_sst,
