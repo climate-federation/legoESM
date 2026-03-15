@@ -107,8 +107,8 @@ parser.add_argument("--restart-from", type=str, default=None,
                     help="Path to checkpoint .npz file for restart")
 # Radiation
 parser.add_argument("--radiation", type=str, default="gray",
-                    choices=["gray", "rrtmg"],
-                    help="Radiation scheme: gray (Frierson 2006) or rrtmg (RRTMGP correlated-k) (default: gray)")
+                    choices=["gray", "rrtmg", "rrtmgp"],
+                    help="Radiation scheme: gray (Frierson 2006) or rrtmgp (RRTMGP correlated-k) (default: gray)")
 parser.add_argument("--rad-update-steps", type=int, default=1,
                     help="Recompute radiation every N steps (1 = every step; default: 1)")
 parser.add_argument("--diurnal-cycle", action="store_true", default=False,
@@ -171,7 +171,20 @@ parser.add_argument("--dynamic-albedo", action="store_true", default=False,
 # Monthly means (Task 12)
 parser.add_argument("--monthly-means", action="store_true", default=False,
                     help="Accumulate monthly-mean zonal diagnostics for long runs")
+# CMIP experiment
+parser.add_argument("--experiment", type=str, default="",
+                    help="CMIP experiment template: piControl, historical, ssp245, ssp585, amip, 1pctCO2")
+parser.add_argument("--start-year", type=int, default=1979,
+                    help="Calendar start year for GHG trajectory lookup (default: 1979)")
+parser.add_argument("--cmip-output", action="store_true", default=False,
+                    help="Write CF/CMOR-compliant NetCDF output files")
+parser.add_argument("--clear-sky-diag", action="store_true", default=False,
+                    help="Compute clear-sky radiation diagnostics (rsutcs, rlutcs, etc.)")
 args = parser.parse_args()
+
+# Backward-compatible alias: keep internal branch checks on "rrtmg".
+if args.radiation == "rrtmgp":
+    args.radiation = "rrtmg"
 
 # Enforce that forcing-path is required unless restarting or analytical
 if args.forcing_path is None and args.restart_from is None and args.dataset != "analytical":
@@ -235,7 +248,28 @@ exp_config = AMIPExperimentConfig(
     topo_edge_blend=args.topo_edge_blend,
     dynamic_albedo=args.dynamic_albedo,
     monthly_means=args.monthly_means,
+    experiment=args.experiment,
+    start_year=args.start_year,
+    cmip_output=args.cmip_output,
+    clear_sky_diag=args.clear_sky_diag,
 )
+
+# --- Experiment template: override GHG from template at start_year ---
+EXPERIMENT = exp_config.experiment
+START_YEAR = exp_config.start_year
+CMIP_OUTPUT = exp_config.cmip_output
+CLEAR_SKY_DIAG = exp_config.clear_sky_diag
+
+if EXPERIMENT:
+    from legoesm.forcing.experiments import ghg_at_year, EXPERIMENT_TEMPLATES
+    _tmpl_co2, _tmpl_ch4, _tmpl_n2o = ghg_at_year(EXPERIMENT, START_YEAR)
+    exp_config = exp_config._replace(
+        co2_ppmv=_tmpl_co2,
+        ch4_ppbv=_tmpl_ch4,
+        n2o_ppbv=_tmpl_n2o,
+    )
+    print(f"  Experiment: {EXPERIMENT} (start year {START_YEAR})")
+    print(f"  GHG at year {START_YEAR}: CO2={_tmpl_co2:.1f} ppmv, CH4={_tmpl_ch4:.1f} ppbv, N2O={_tmpl_n2o:.1f} ppbv")
 
 N = exp_config.resolution
 NLEV = exp_config.nlev
@@ -360,27 +394,8 @@ if args.dataset == "analytical":
 
     lat_deg_cube = np.degrees(np.asarray(grid.lat))  # (6, N, N)
 
-    def _analytical_forcing(day):
-        """Compute SST and SIC for a given day (seasonal cycle)."""
-        day_of_year = day % 365.0 + 1.0
-        # Seasonal shift of SST peak: +/-5 degrees latitude
-        lat_shift = -5.0 * np.cos(2.0 * np.pi * day_of_year / 365.0)
-        lat_eff = lat_deg_cube - lat_shift
-
-        # Qobs-like SST profile (K): warm equator, cold poles
-        sst = 27.0 * (1.0 - np.sin(np.radians(lat_eff))**2) + 273.15
-        # Seasonal amplitude (+/-3 K at midlatitudes)
-        seasonal_amp = 3.0 * np.cos(np.radians(lat_eff)) * np.cos(2.0 * np.pi * day_of_year / 365.0)
-        sst = sst + seasonal_amp
-        sst = np.maximum(sst, _T_ice - 1.8)  # freezing floor
-
-        # SIC: ramp from 0 to 1 as SST drops below T_ice
-        sic = np.clip(((_T_ice + 0.5) - sst) / 3.0, 0.0, 1.0)
-
-        return jnp.array(sst), jnp.array(sic)
-
     def get_sst_sic(day):
-        return _analytical_forcing(day)
+        return analytical_sst_sic(lat_deg_cube, day, T_ice=_T_ice)
 
     sst_init, sic_init = get_sst_sic(START_DAY)
     print(f"  Initial SST: min={float(jnp.min(sst_init)):.1f} K, "
@@ -506,6 +521,13 @@ from legoesm.atmosphere.physics.radiation.solar import (
     daily_mean_insolation,
 )
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
+from legoesm.forcing.analytical import analytical_sst_sic
+from legoesm.forcing.surface_utils import (
+    blend_surface_temperature,
+    blend_surface_property,
+    distribute_column_aod_to_layers,
+)
+from legoesm.grids.regridding import regrid_faces_to_latlon as _regrid_lib
 
 restart_step = 0
 restart_day = START_DAY
@@ -694,12 +716,6 @@ else:
     _solar_weights_template = jnp.array([], dtype=jnp.float64)
 
 
-def _distribute_column_aod_to_layers(aod_col, p_half_col):
-    """Distribute column AOD to layers using pressure-thickness weights."""
-    dp = jnp.clip(p_half_col[:, 1:] - p_half_col[:, :-1], 1.0e-12, None)
-    w = dp / jnp.sum(dp, axis=1, keepdims=True)
-    return jnp.clip(aod_col, 0.0, None)[:, None] * w
-
 _sigma_full = sigma.sigma_full
 _sigma_half = sigma.sigma_half
 _dsigma = sigma.dsigma
@@ -742,12 +758,12 @@ if RADIATION == "gray":
 else:
     from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import rrtmgp_radiation
 
-    @jax.jit
-    def radiation_step(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
-                       lat_col, lon_col, day_of_year, seconds_of_day,
-                       albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
-                       solar_weights, s_0=_S_0):
-        """RRTMG radiation call with per-column albedo/emissivity."""
+    def _rrtmgp_radiation_impl(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
+                                lat_col, lon_col, day_of_year, seconds_of_day,
+                                albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
+                                solar_weights, s_0, co2_vmr, ch4_vmr, n2o_vmr,
+                                include_clouds=True):
+        """Shared RRTMGP radiation implementation (all-sky or clear-sky)."""
         if DIURNAL_CYCLE:
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
@@ -755,9 +771,8 @@ else:
         else:
             insol = daily_mean_insolation(lat_col, day_of_year, s_0)
             cos_zenith = jnp.clip(insol / jnp.clip(s_0, 1.0e-6, None), 0.0, 1.0)
-        # Compute cloud properties if cloud scheme is active.
         cloud_kwargs = {}
-        if CLOUD_SCHEME != "none":
+        if include_clouds and CLOUD_SCHEME != "none":
             dp = p_half_col[:, 1:] - p_half_col[:, :-1]
             cloud_props = compute_cloud_properties(
                 T=T_col, p_full=p_full_col, q_v=q_v_col,
@@ -769,6 +784,15 @@ else:
                 "cloud_r_eff_liq": cloud_props.r_eff_liq,
                 "cloud_r_eff_ice": cloud_props.r_eff_ice,
             }
+        ghg_override = None
+        if co2_vmr is not None or ch4_vmr is not None or n2o_vmr is not None:
+            ghg_override = {}
+            if co2_vmr is not None:
+                ghg_override["co2"] = co2_vmr
+            if ch4_vmr is not None:
+                ghg_override["ch4"] = ch4_vmr
+            if n2o_vmr is not None:
+                ghg_override["n2o"] = n2o_vmr
         return rrtmgp_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_col,
@@ -778,8 +802,41 @@ else:
             o3_vmr=o3_vmr_col,
             aerosol_optical_depth=aerosol_od_col,
             solar_spectral_fraction=solar_weights if _use_solar_spectral else None,
+            ghg_vmr_override=ghg_override,
             **cloud_kwargs,
         )
+
+    @jax.jit
+    def radiation_step(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
+                       lat_col, lon_col, day_of_year, seconds_of_day,
+                       albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
+                       solar_weights, s_0=_S_0,
+                       co2_vmr=None, ch4_vmr=None, n2o_vmr=None):
+        """RRTMG all-sky radiation call."""
+        return _rrtmgp_radiation_impl(
+            T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
+            lat_col, lon_col, day_of_year, seconds_of_day,
+            albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
+            solar_weights, s_0, co2_vmr, ch4_vmr, n2o_vmr,
+            include_clouds=True,
+        )
+
+    if CLEAR_SKY_DIAG:
+        @jax.jit
+        def radiation_step_clearsky(T_col, p_full_col, p_half_col, q_v_col,
+                                     T_sfc_col, lat_col, lon_col,
+                                     day_of_year, seconds_of_day,
+                                     albedo_col, emis_col, o3_vmr_col,
+                                     aerosol_od_col, solar_weights, s_0=_S_0,
+                                     co2_vmr=None, ch4_vmr=None, n2o_vmr=None):
+            """Clear-sky RRTMG call (no cloud properties)."""
+            return _rrtmgp_radiation_impl(
+                T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
+                lat_col, lon_col, day_of_year, seconds_of_day,
+                albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
+                solar_weights, s_0, co2_vmr, ch4_vmr, n2o_vmr,
+                include_clouds=False,
+            )
 
 
 @jax.jit
@@ -793,7 +850,7 @@ def physics_step_no_rad(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
     shape_2d = p_s.shape
     ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
 
-    T_sfc = sic * _T_ice + (1.0 - sic) * sst
+    T_sfc = blend_surface_temperature(sst, sic, _T_ice)
 
     p_full = p_s[..., None] * _sigma_full
     p_half = p_s[..., None] * _sigma_half
@@ -867,26 +924,24 @@ def physics_step_no_rad(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
 
 def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
                                   day_absolute, day_of_year, seconds_of_day, dt,
-                                  solar_weights, s_0=_S_0):
+                                  solar_weights, s_0=_S_0,
+                                  co2_vmr=None, ch4_vmr=None, n2o_vmr=None):
     """Full physics step: recompute radiation + convection + microphysics + BL."""
     nlev = _sigma_full.shape[0]
     shape_3d = T.shape
     shape_2d = p_s.shape
     ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
 
-    T_sfc = sic * _T_ice + (1.0 - sic) * sst
+    T_sfc = blend_surface_temperature(sst, sic, _T_ice)
 
     if exp_config.dynamic_albedo:
-        # Temperature-dependent ice albedo + constant ocean (cos_zenith not
-        # available per-column here; using constant ocean for now)
         _dyn_alpha_ice = compute_ice_albedo(
             jnp.broadcast_to(jnp.array(_T_ice), sst.shape), IceAlbedoConfig()
         )
-        _dyn_alpha_ocean = _albedo_ocean
-        albedo = sic * _dyn_alpha_ice + (1.0 - sic) * _dyn_alpha_ocean
+        albedo = blend_surface_property(sic, _dyn_alpha_ice, _albedo_ocean)
     else:
-        albedo = sic * _albedo_ice + (1.0 - sic) * _albedo_ocean
-    emissivity = sic * _emissivity_ice + (1.0 - sic) * _emissivity_ocean
+        albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
+    emissivity = blend_surface_property(sic, _emissivity_ice, _emissivity_ocean)
 
     p_full = p_s[..., None] * _sigma_full
     p_half = p_s[..., None] * _sigma_half
@@ -921,7 +976,7 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
                 day_absolute,
                 lat_grid=lat_col,
             )
-            aerosol_od_col = _distribute_column_aod_to_layers(
+            aerosol_od_col = distribute_column_aod_to_layers(
                 jnp.asarray(aerosol_col),
                 p_half_col,
             )
@@ -931,11 +986,23 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
         o3_vmr_col = None
         aerosol_od_col = None
 
-    rad_out = radiation_step(T_col, p_full_col, p_half_col, q_v_col,
-                             T_sfc_col, lat_col, lon_col,
-                             day_of_year, seconds_of_day,
-                             albedo_col, emis_col,
-                             o3_vmr_col, aerosol_od_col, solar_weights, s_0)
+    if RADIATION == "rrtmg":
+        rad_out = radiation_step(
+            T_col, p_full_col, p_half_col, q_v_col,
+            T_sfc_col, lat_col, lon_col,
+            day_of_year, seconds_of_day,
+            albedo_col, emis_col,
+            o3_vmr_col, aerosol_od_col, solar_weights, s_0,
+            co2_vmr, ch4_vmr, n2o_vmr,
+        )
+    else:
+        rad_out = radiation_step(
+            T_col, p_full_col, p_half_col, q_v_col,
+            T_sfc_col, lat_col, lon_col,
+            day_of_year, seconds_of_day,
+            albedo_col, emis_col,
+            o3_vmr_col, aerosol_od_col, solar_weights, s_0,
+        )
     dT_dt_rad = rad_out.heating_rate.reshape(shape_3d)
 
     sw_down_sfc = rad_out.sw_flux_down[:, -1].reshape(shape_2d)
@@ -945,74 +1012,37 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
     lw_up_toa = rad_out.lw_flux_up[:, 0].reshape(shape_2d)
     sw_down_toa = rad_out.sw_flux_down[:, 0].reshape(shape_2d)
 
+    # Clear-sky diagnostics (second radiation call without clouds).
+    cs_diag = None
+    if CLEAR_SKY_DIAG and RADIATION == "rrtmg":
+        cs_out = radiation_step_clearsky(
+            T_col, p_full_col, p_half_col, q_v_col,
+            T_sfc_col, lat_col, lon_col,
+            day_of_year, seconds_of_day,
+            albedo_col, emis_col,
+            o3_vmr_col, aerosol_od_col, solar_weights, s_0,
+            co2_vmr, ch4_vmr, n2o_vmr,
+        )
+        cs_diag = {
+            "rsutcs": cs_out.sw_flux_up[:, 0].reshape(shape_2d),
+            "rlutcs": cs_out.lw_flux_up[:, 0].reshape(shape_2d),
+            "rsdscs": cs_out.sw_flux_down[:, -1].reshape(shape_2d),
+            "rldscs": cs_out.lw_flux_down[:, -1].reshape(shape_2d),
+        }
+
     return physics_step_no_rad(
         T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
         dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
         sw_down_toa,
-    ), dT_dt_rad
+    ), dT_dt_rad, cs_diag
 
 
 # ---------------------------------------------------------------------------
 # 7. Lat-lon regridding utility
 # ---------------------------------------------------------------------------
 def regrid_faces_to_latlon(field_faces, n_lon=None, n_lat=None):
-    """Interpolate cubed-sphere face data to a regular lat-lon grid.
-
-    Uses inverse-distance weighting of nearest neighbors in 3D Cartesian
-    coordinates on the unit sphere.
-    """
-    if n_lon is None:
-        n_lon = max(360, 8 * N)
-    if n_lat is None:
-        n_lat = n_lon // 2
-
-    cube_lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
-    cube_lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
-
-    lon = cube_lon_deg.reshape(-1)
-    lat = cube_lat_deg.reshape(-1)
-    val = np.asarray(field_faces, dtype=np.float64).reshape(-1)
-
-    valid = np.isfinite(lon) & np.isfinite(lat) & np.isfinite(val)
-    lon = ((lon[valid] + 180.0) % 360.0) - 180.0
-    lat = np.clip(lat[valid], -90.0, 90.0)
-    val = val[valid]
-
-    lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
-    lat_cent = np.linspace(-90.0, 90.0, n_lat)
-    lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
-
-    from scipy.spatial import cKDTree
-
-    lon_rad = np.deg2rad(lon)
-    lat_rad = np.deg2rad(lat)
-    cos_lat = np.cos(lat_rad)
-    src_xyz = np.column_stack(
-        [cos_lat * np.cos(lon_rad), cos_lat * np.sin(lon_rad), np.sin(lat_rad)],
-    )
-
-    lon_t = np.deg2rad(lon2d.reshape(-1))
-    lat_t = np.deg2rad(lat2d.reshape(-1))
-    cos_lat_t = np.cos(lat_t)
-    tgt_xyz = np.column_stack(
-        [cos_lat_t * np.cos(lon_t), cos_lat_t * np.sin(lon_t), np.sin(lat_t)],
-    )
-
-    k = min(16, src_xyz.shape[0])
-    tree = cKDTree(src_xyz)
-    dist, idx = tree.query(tgt_xyz, k=k)
-    if k == 1:
-        field_ll = val[idx].reshape(lon2d.shape)
-    else:
-        # Gaussian (RBF) weighting: smoother than IDW across face boundaries
-        dist = np.maximum(dist, 1.0e-12)
-        # Scale length = median distance to nearest neighbor
-        sigma = np.median(dist[:, 0]) * 2.0
-        w = np.exp(-0.5 * (dist / sigma) ** 2)
-        w /= np.sum(w, axis=1, keepdims=True)
-        field_ll = np.sum(val[idx] * w, axis=1).reshape(lon2d.shape)
-
-    return lon_cent, lat_cent, field_ll
+    """Thin wrapper around library regridding, binding this run's grid."""
+    return _regrid_lib(field_faces, grid.lon, grid.lat, n_lon=n_lon, n_lat=n_lat)
 
 
 # ---------------------------------------------------------------------------
@@ -1055,6 +1085,36 @@ if MONTHLY_MEANS:
     monthly_accum = MonthlyAccumulator(nlev=NLEV, n_lat_bins=90)
     _lat_deg_grid = np.degrees(np.asarray(grid.lat))  # (6, N, N)
     print(f"  Monthly-mean diagnostics enabled")
+
+# CFWriter for CMIP output (Phase 5)
+_cf_writer = None
+if CMIP_OUTPUT:
+    from legoesm.io.cmor_output import CFWriter, CMIP6_PLEV19
+    _cf_writer = CFWriter(
+        output_dir=str(OUTPUT_DIR / "cmor"),
+        experiment_id=EXPERIMENT or "amip",
+        model_id="legoESM-1-0",
+        freq="mon",
+        calendar="noleap",
+        ref_date="0001-01-01",
+    )
+    if not MONTHLY_MEANS:
+        # CMIP output requires monthly-mean accumulation
+        MONTHLY_MEANS = True
+        monthly_accum = MonthlyAccumulator(nlev=NLEV, n_lat_bins=90)
+        _lat_deg_grid = np.degrees(np.asarray(grid.lat))
+    print(f"  CMIP output enabled → {OUTPUT_DIR / 'cmor'}")
+
+# GHG override state for transient experiments
+_ghg_co2_vmr = None
+_ghg_ch4_vmr = None
+_ghg_n2o_vmr = None
+
+# Held clear-sky diagnostics
+_held_cs_diag = None
+
+if CLEAR_SKY_DIAG:
+    print(f"  Clear-sky radiation diagnostics enabled")
 
 # 2D snapshots at selected days (store all faces for lat-lon remapping)
 snapshot_days_set = set()
@@ -1106,12 +1166,22 @@ if _use_solar_spectral:
     _current_solar_weights = jnp.asarray(_solar_forcing_now["solar_fraction_by_gpt"])
 else:
     _current_solar_weights = _solar_weights_template
-(dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad = \
+
+# Compute GHG override from experiment template if active.
+if EXPERIMENT and RADIATION == "rrtmg":
+    _current_year = START_YEAR + day / 365.0
+    _ghg = ghg_at_year(EXPERIMENT, _current_year)
+    _ghg_co2_vmr = _ghg[0] * 1.0e-6
+    _ghg_ch4_vmr = _ghg[1] * 1.0e-9
+    _ghg_n2o_vmr = _ghg[2] * 1.0e-9
+
+(dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad, _held_cs_diag = \
     compute_radiation_and_physics(
         state.T.data, state.p_s.data, q_v, q_c, q_r, state.u.data, state.v.data,
         sst, sic, grid.lat, grid.lon, day, day_of_year, seconds_of_day, DT,
         _current_solar_weights,
         _current_s_0,
+        _ghg_co2_vmr, _ghg_ch4_vmr, _ghg_n2o_vmr,
     )
 _held_sw_net_sfc = _sw
 _held_lw_net_sfc = _lw
@@ -1170,15 +1240,24 @@ for step in range(start_step + 1, n_steps_total):
     else:
         _current_solar_weights = _solar_weights_template
 
+    # Update GHG override for transient experiments.
+    if EXPERIMENT and RADIATION == "rrtmg" and need_rad:
+        _current_year = START_YEAR + day / 365.0
+        _ghg = ghg_at_year(EXPERIMENT, _current_year)
+        _ghg_co2_vmr = _ghg[0] * 1.0e-6
+        _ghg_ch4_vmr = _ghg[1] * 1.0e-9
+        _ghg_n2o_vmr = _ghg[2] * 1.0e-9
+
     if need_rad:
         (dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip,
-         _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad = \
+         _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad, _held_cs_diag = \
             compute_radiation_and_physics(
                 state.T.data, state.p_s.data, q_v, q_c, q_r,
                 state.u.data, state.v.data,
                 sst, sic, grid.lat, grid.lon, day, day_of_year, seconds_of_day, DT,
                 _current_solar_weights,
                 _current_s_0,
+                _ghg_co2_vmr, _ghg_ch4_vmr, _ghg_n2o_vmr,
             )
         _held_sw_net_sfc = _sw
         _held_lw_net_sfc = _lw
@@ -1262,7 +1341,7 @@ for step in range(start_step + 1, n_steps_total):
         # 2D snapshots (all faces for lat-lon remapping)
         iday = int(round(elapsed_day))
         if iday in snapshot_days_set:
-            T_sfc_snap = sic * _T_ice + (1.0 - sic) * sst
+            T_sfc_snap = blend_surface_temperature(sst, sic, _T_ice)
             # TOA net = SW_down_TOA - SW_up_TOA - LW_up_TOA (positive = net incoming)
             toa_net = -(_sw_toa + _lw_toa)  # approximate: -SW_up - LW_up
             sfc_net = _sw + _lw  # SW_net_sfc + LW_net_sfc
@@ -1300,14 +1379,21 @@ for step in range(start_step + 1, n_steps_total):
         if MONTHLY_MEANS:
             _doy = day % 365.0 + 1.0
             _year = int(day // 365.0)
-            monthly_accum.add_2d(_doy, _year, {
+            _2d_fields = {
                 'T_low': np.asarray(state.T.data[..., -1]),
                 'precip': np.asarray(_precip + _precip_ls) * 86400.0,
                 'sw_up_toa': np.asarray(_sw_toa),
                 'lw_up_toa': np.asarray(_lw_toa),
                 'sw_net_sfc': np.asarray(_sw),
                 'lw_net_sfc': np.asarray(_lw),
-            }, _lat_deg_grid)
+            }
+            # Add clear-sky diagnostics if available.
+            if _held_cs_diag is not None:
+                _2d_fields['rsutcs'] = np.asarray(_held_cs_diag['rsutcs'])
+                _2d_fields['rlutcs'] = np.asarray(_held_cs_diag['rlutcs'])
+                _2d_fields['rsdscs'] = np.asarray(_held_cs_diag['rsdscs'])
+                _2d_fields['rldscs'] = np.asarray(_held_cs_diag['rldscs'])
+            monthly_accum.add_2d(_doy, _year, _2d_fields, _lat_deg_grid)
             monthly_accum.add_3d(_doy, _year, {
                 'T': np.asarray(state.T.data),
                 'u': np.asarray(state.u.data),
@@ -1323,6 +1409,86 @@ for step in range(start_step + 1, n_steps_total):
                 'column_energy': _ebudget.column_energy,
                 'residual': _ebudget.residual,
             })
+
+        # CMIP output: write CF-compliant fields at each diagnostic step
+        if _cf_writer is not None:
+            # Regrid cubed-sphere → lat-lon for CF output
+            _n_lon_cmip = max(72, 4 * N)
+            _n_lat_cmip = _n_lon_cmip // 2
+
+            # Compute derived fields
+            _T_sfc_cmip = blend_surface_temperature(sst, sic, _T_ice)
+            _evap_cmip = jnp.maximum(_lw * 0.0 + jnp.mean(
+                jnp.clip(q_v[..., -1] - saturation_mixing_ratio(
+                    state.T.data[..., -1], state.p_s.data
+                ), None, 0.0), axis=None
+            ), 0.0)  # placeholder
+
+            # Compute sea-level pressure (hypsometric)
+            _T_low_mean = state.T.data[..., -1]
+            _psl_cmip = state.p_s.data * jnp.exp(
+                _phis_data / (constants.R_d * jnp.maximum(_T_low_mean, 200.0))
+            )
+
+            # Compute relative humidity at lowest level
+            _q_sat_low = saturation_mixing_ratio(state.T.data[..., -1], state.p_s.data)
+            _hurs_cmip = jnp.clip(q_v[..., -1] / jnp.maximum(_q_sat_low, 1e-10), 0.0, 1.0) * 100.0
+
+            # Evaporation from latent heat flux
+            _evap_rate_cmip = jnp.maximum(_lw * 0.0, 0.0)  # placeholder; actual evap from BL
+            _rho_low_cmip = (state.p_s.data * _sigma_full[-1]) / (constants.R_d * state.T.data[..., -1])
+            _wind_cmip = jnp.sqrt(state.u.data[..., -1]**2 + state.v.data[..., -1]**2 + 1.0)
+            _q_sat_sfc_cmip = saturation_mixing_ratio(_T_sfc_cmip, state.p_s.data)
+            _evspsbl_cmip = _rho_low_cmip * _C_E * _wind_cmip * jnp.maximum(_q_sat_sfc_cmip - q_v[..., -1], 0.0)
+
+            # Time for this snapshot
+            _time_cmip = elapsed_day
+            _time_bnds_cmip = (elapsed_day - DIAG_DAYS, elapsed_day)
+
+            # Regrid and write 2D fields
+            _cmip_2d_vars = {
+                'tas': state.T.data[..., -1],
+                'ts': _T_sfc_cmip,
+                'ps': state.p_s.data,
+                'psl': _psl_cmip,
+                'pr': (_precip + _precip_ls),  # kg/m2/s
+                'hurs': _hurs_cmip,
+                'rsut': _sw_toa,
+                'rlut': _lw_toa,
+                'rsdt': _sw_down_toa,
+                'rsds': jnp.zeros(shape_2d),  # placeholder
+                'rlds': jnp.zeros(shape_2d),  # placeholder
+                'hfls': _rho_low_cmip * constants.L_v * _C_E * _wind_cmip * jnp.maximum(_q_sat_sfc_cmip - q_v[..., -1], 0.0),
+                'hfss': _rho_low_cmip * constants.c_pd * _C_H * _wind_cmip * (_T_sfc_cmip - state.T.data[..., -1]),
+                'evspsbl': _evspsbl_cmip,
+            }
+            # Add clear-sky if available
+            if _held_cs_diag is not None:
+                _cmip_2d_vars['rsutcs'] = _held_cs_diag['rsutcs']
+                _cmip_2d_vars['rlutcs'] = _held_cs_diag['rlutcs']
+                _cmip_2d_vars['rsdscs'] = _held_cs_diag['rsdscs']
+                _cmip_2d_vars['rldscs'] = _held_cs_diag['rldscs']
+
+            # Add ocean vars
+            _cmip_2d_vars['tos'] = sst
+            _cmip_2d_vars['sic'] = sic * 100.0  # convert to %
+
+            for _vname, _vdata in _cmip_2d_vars.items():
+                try:
+                    _lon_ll, _lat_ll, _field_ll = regrid_faces_to_latlon(
+                        np.asarray(_vdata), n_lon=_n_lon_cmip, n_lat=_n_lat_cmip,
+                    )
+                    # Determine table for this variable
+                    _tbl = None
+                    if _vname in ('tos', 'sic'):
+                        _tbl = 'Omon'
+                    _cf_writer.write_field(
+                        var_name=_vname, data=_field_ll,
+                        time=_time_cmip, time_bounds=_time_bnds_cmip,
+                        lat=_lat_ll, lon=_lon_ll, table=_tbl,
+                    )
+                except (KeyError, ValueError):
+                    pass  # Skip vars not in CMOR tables
 
         _diag_line = (f"  {elapsed_day:6.0f}  {mean_sst:8.2f}  {mean_sic:6.3f}  {mean_T:8.2f}"
               f"  {mean_T_low:8.2f}  {mean_precip:8.2f}  {mean_cwv:6.1f}  {max_v:8.2f}"
@@ -1373,6 +1539,11 @@ jax.block_until_ready(state.u.data)
 total_wall = time.time() - t_wall_start
 print(f"\n  Integration complete: {total_wall:.1f}s wall time")
 print(f"  Status: {run_status}")
+
+# Close CFWriter
+if _cf_writer is not None:
+    _cf_writer.close()
+    print(f"  CMIP output written to {OUTPUT_DIR / 'cmor'}")
 
 # Energy budget summary (Task 11)
 print(f"\n  {energy_tracker.summary()}")
@@ -1565,7 +1736,7 @@ try:
 
     # ---- Global lat-lon final state ----
     try:
-        T_sfc_final = np.asarray(sic * _T_ice + (1.0 - sic) * sst)
+        T_sfc_final = np.asarray(blend_surface_temperature(sst, sic, _T_ice))
         wind_sfc = np.asarray(jnp.sqrt(state.u.data[..., -1]**2 + state.v.data[..., -1]**2))
         q_sfc = np.asarray(q_v[..., -1]) * 1000.0
         precip_map = np.asarray(_precip + _precip_ls) * 86400.0

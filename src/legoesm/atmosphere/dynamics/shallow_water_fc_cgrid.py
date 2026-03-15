@@ -34,9 +34,8 @@ from legoesm.core.conservation import (
     zero_mean_tendency,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
-from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
+from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm import constants
 
 
@@ -119,7 +118,7 @@ def fc_cgrid_shallow_water_tendencies(
     )
 
 
-class FCCGShallowWaterModel:
+class FCCGShallowWaterModel(IntegrationMixin):
     """FC + divergence-damping shallow water model on the cubed-sphere.
 
     Parameters
@@ -161,17 +160,9 @@ class FCCGShallowWaterModel:
                 h_s=s.h_s.replace(data=jnp.zeros_like(s.h_s.data)),
             )
 
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            state_new = ssp_rk54_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-            state_new = ssp_rk34_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            state_new = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(
-                f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
+        state_new = dispatch_integrator(
+            state, tendency_fn, dt, self.config.time_integrator,
+        )
 
         if self.config.use_conservation_fixer:
             state_new = apply_conservation_fixer(
@@ -183,31 +174,3 @@ class FCCGShallowWaterModel:
 
         return state_new
 
-    def integrate(
-        self,
-        state: ShallowWaterState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-    ) -> tuple[ShallowWaterState, list[ShallowWaterState]]:
-        n_steps = int(duration / dt)
-        trajectory = [state]
-        for i in range(n_steps):
-            state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-        return state, trajectory
-
-    def integrate_scan(
-        self,
-        state: ShallowWaterState,
-        n_steps: int,
-        dt: float,
-    ) -> tuple[ShallowWaterState, ShallowWaterState]:
-        def scan_fn(state, _):
-            new_state = self.step(state, dt)
-            return new_state, new_state
-        final_state, trajectory = jax.lax.scan(
-            scan_fn, state, jnp.arange(n_steps)
-        )
-        return final_state, trajectory

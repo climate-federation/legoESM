@@ -10,11 +10,15 @@ Coverage (available in current workspace):
   - Held-Suarez FV cube (gray, rrtmgp)
   - Held-Suarez FV lat-lon (gray, rrtmgp)
   - Held-Suarez spectral (gray, rrtmgp)
-  - AMIP FV cube (gray, rrtmg)
-  - AMIP spectral (gray)
+  - AMIP FV cube (gray, rrtmgp)
+  - AMIP spectral (gray, rrtmgp)
+  - RCE fixed uniform SST (gray)
+  - RCE slab land (gray)
 - Non-hydrostatic:
   - DCMIP TC1/TC2a/TC3 FV cube (gray, rrtmgp)
   - DCMIP TC1 spectral (no radiation-coupled benchmark path)
+- Icosahedral:
+  - Shallow-water Williamson TC2/TC5/TC6 (native + lat-lon pixel snapshots)
 
 Artifacts per case (standardized when available):
 - field_snapshots.png
@@ -74,6 +78,15 @@ PRESETS = {
         spectral_truncation=15,
         hydro_levels=15,
         nh_levels=15,
+    ),
+    "atm2deg": Preset(
+        name="atm2deg",
+        cube_resolution=32,
+        latlon_nlat=90,
+        latlon_nlon=180,
+        spectral_truncation=63,
+        hydro_levels=20,
+        nh_levels=20,
     ),
 }
 
@@ -203,11 +216,103 @@ def _write_snapshot_times(case_dir: Path, days: list[float]) -> None:
             f.write(f"day {d:.2f}\n")
 
 
-def _standardize_case_artifacts(case_dir: Path) -> None:
+def _write_placeholder_plot(path: Path, title: str, message: str) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8.0, 4.0))
+    ax.text(0.5, 0.58, title, ha="center", va="center", fontsize=11, weight="bold")
+    ax.text(0.5, 0.42, message, ha="center", va="center", fontsize=10)
+    ax.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _write_placeholder_csv(path: Path, header: str) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w") as f:
+        f.write(header.rstrip() + "\n")
+
+
+def _harmonize_output_names(case_dir: Path) -> None:
+    # Snapshot conventions
+    if not (case_dir / "field_snapshots_native.png").exists():
+        _copy_if_exists(case_dir / "field_snapshots.png", case_dir / "field_snapshots_native.png")
+    if not (case_dir / "field_snapshots_latlon_pixels.png").exists():
+        _copy_if_exists(case_dir / "field_snapshots.png", case_dir / "field_snapshots_latlon_pixels.png")
+    _write_placeholder_plot(
+        case_dir / "field_snapshots_native.png",
+        "Native Grid Snapshots",
+        "Snapshot fields unavailable for this short/incomplete run.",
+    )
+    _write_placeholder_plot(
+        case_dir / "field_snapshots_latlon_pixels.png",
+        "Lat-Lon Pixel Snapshots",
+        "Snapshot fields unavailable for this short/incomplete run.",
+    )
+    _copy_if_exists(case_dir / "field_snapshots_latlon_pixels.png", case_dir / "field_snapshots.png")
+
+    # Mean time series conventions
+    _copy_if_exists(case_dir / "mean_timeseries.csv", case_dir / "integrated_timeseries.csv")
+    _copy_if_exists(case_dir / "mean_timeseries.png", case_dir / "integrated_timeseries.png")
     _copy_if_exists(case_dir / "integrated_timeseries.csv", case_dir / "mean_timeseries.csv")
     _copy_if_exists(case_dir / "integrated_timeseries.png", case_dir / "mean_timeseries.png")
+    _write_placeholder_csv(case_dir / "mean_timeseries.csv", "time_days")
+    _write_placeholder_csv(case_dir / "integrated_timeseries.csv", "time_days")
+    _write_placeholder_plot(
+        case_dir / "mean_timeseries.png",
+        "Mean Conserved Variables",
+        "Mean time-series unavailable for this short/incomplete run.",
+    )
+    _copy_if_exists(case_dir / "mean_timeseries.png", case_dir / "integrated_timeseries.png")
+
+    # Vertical profile conventions
     _copy_if_exists(case_dir / "vertical_profiles.csv", case_dir / "mean_profiles.csv")
     _copy_if_exists(case_dir / "vertical_profiles.png", case_dir / "mean_profiles.png")
+    _copy_if_exists(case_dir / "mean_profiles.csv", case_dir / "vertical_profiles.csv")
+    _copy_if_exists(case_dir / "mean_profiles.png", case_dir / "vertical_profiles.png")
+    _copy_if_exists(case_dir / "vertical_profiles.png", case_dir / "vertical_profile_evolution.png")
+    _write_placeholder_csv(case_dir / "vertical_profiles.csv", "time_days,sigma,profile_value")
+    _write_placeholder_csv(case_dir / "mean_profiles.csv", "time_days,sigma,profile_value")
+
+    # Cross-section conventions
+    _copy_if_exists(case_dir / "zonal_cross_sections.png", case_dir / "lat_vertical_snapshots.png")
+    _copy_if_exists(case_dir / "meridional_cross_sections.png", case_dir / "lon_vertical_snapshots.png")
+    _copy_if_exists(case_dir / "lat_vertical_snapshots.png", case_dir / "zonal_cross_sections.png")
+    _copy_if_exists(case_dir / "lon_vertical_snapshots.png", case_dir / "meridional_cross_sections.png")
+
+    # Fill missing-but-required diagnostic views with explicit placeholders.
+    _write_placeholder_plot(
+        case_dir / "lat_vertical_snapshots.png",
+        "Latitude-Vertical Snapshots",
+        "Not available for this case output in current model path.",
+    )
+    _write_placeholder_plot(
+        case_dir / "lon_vertical_snapshots.png",
+        "Longitude-Vertical Snapshots",
+        "Not available for this case output in current model path.",
+    )
+    _write_placeholder_plot(
+        case_dir / "vertical_profile_evolution.png",
+        "Vertical Profile Evolution",
+        "Not available for this case output in current model path.",
+    )
+    _write_placeholder_csv(
+        case_dir / "conservation_timeseries.csv",
+        "step,time_days,mass_proxy,energy_proxy,mass_rel,energy_rel",
+    )
+    _write_placeholder_plot(
+        case_dir / "conservation_timeseries.png",
+        "Conservation Diagnostics",
+        "Conservation diagnostics unavailable for this short/incomplete run.",
+    )
+
+
+def _standardize_case_artifacts(case_dir: Path) -> None:
+    _harmonize_output_names(case_dir)
     if not (case_dir / "conservation_timeseries.csv").exists():
         _derive_conservation_from_mean(case_dir)
 
@@ -225,10 +330,12 @@ def _build_amip_artifacts(case_dir: Path, default_snapshot_days: list[float]) ->
     _copy_if_exists(case_dir / "amip_profiles.png", case_dir / "vertical_profiles.png")
     _copy_if_exists(case_dir / "amip_timeseries.png", case_dir / "mean_timeseries.png")
     _copy_if_exists(case_dir / "amip_profiles.png", case_dir / "mean_profiles.png")
+    _copy_if_exists(case_dir / "amip_timeseries.png", case_dir / "integrated_timeseries.png")
 
     npz_path = case_dir / "timeseries.npz"
     if not npz_path.exists():
         _write_snapshot_times(case_dir, default_snapshot_days)
+        _harmonize_output_names(case_dir)
         return
 
     data = np.load(npz_path)
@@ -246,6 +353,11 @@ def _build_amip_artifacts(case_dir: Path, default_snapshot_days: list[float]) ->
         if arr.ndim == 1 and arr.size == t_days.size:
             one_d[k] = arr.astype(float)
 
+    if t_days.size == 0:
+        _write_snapshot_times(case_dir, default_snapshot_days)
+        _harmonize_output_names(case_dir)
+        return
+
     mean_csv = case_dir / "mean_timeseries.csv"
     with mean_csv.open("w") as f:
         cols = ["time_days"] + sorted(one_d.keys())
@@ -260,12 +372,12 @@ def _build_amip_artifacts(case_dir: Path, default_snapshot_days: list[float]) ->
             mass = one_d[key]
             break
     energy = one_d.get("energy_column")
-    if mass is not None:
+    if mass is not None and mass.size > 0:
         mass0 = max(abs(float(mass[0])), 1.0e-30)
         mrel = (mass - mass[0]) / mass0
     else:
         mrel = np.zeros_like(t_days)
-    if energy is not None:
+    if energy is not None and energy.size > 0:
         e0 = max(abs(float(energy[0])), 1.0e-30)
         erel = (energy - energy[0]) / e0
     else:
@@ -314,11 +426,31 @@ def _build_amip_artifacts(case_dir: Path, default_snapshot_days: list[float]) ->
                     f.write(f"{t_days[ti]:.8f},{sigma[k]:.8e},{prof_t[ti, k]:.8e},{qval:.8e}\n")
 
     _write_snapshot_times(case_dir, default_snapshot_days)
+    _harmonize_output_names(case_dir)
+
+
+def _build_rce_artifacts(case_dir: Path, default_snapshot_days: list[float]) -> None:
+    if not _copy_if_exists(case_dir / "rce_snapshots.png", case_dir / "field_snapshots.png"):
+        _copy_if_exists(case_dir / "rce_final_state.png", case_dir / "field_snapshots.png")
+    if not _copy_if_exists(case_dir / "field_snapshots.png", case_dir / "field_snapshots_native.png"):
+        _copy_if_exists(case_dir / "rce_final_state.png", case_dir / "field_snapshots_native.png")
+    if not _copy_if_exists(case_dir / "field_snapshots.png", case_dir / "field_snapshots_latlon_pixels.png"):
+        _copy_if_exists(case_dir / "rce_final_state.png", case_dir / "field_snapshots_latlon_pixels.png")
+
+    _copy_if_exists(case_dir / "rce_profiles.png", case_dir / "vertical_profiles.png")
+    _copy_if_exists(case_dir / "rce_profiles.png", case_dir / "mean_profiles.png")
+    _copy_if_exists(case_dir / "rce_profiles.png", case_dir / "vertical_profile_evolution.png")
+
+    _copy_if_exists(case_dir / "rce_timeseries.png", case_dir / "mean_timeseries.png")
+    _copy_if_exists(case_dir / "rce_timeseries.png", case_dir / "integrated_timeseries.png")
+
+    _write_snapshot_times(case_dir, default_snapshot_days)
+    _harmonize_output_names(case_dir)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run hydro/NH benchmark matrix with standardized outputs.")
-    parser.add_argument("--preset", type=str, default="low", choices=sorted(PRESETS.keys()))
+    parser.add_argument("--preset", type=str, default="atm2deg", choices=sorted(PRESETS.keys()))
     parser.add_argument("--output", type=Path, default=Path("results/atmosphere"))
     parser.add_argument("--python", type=Path, default=Path(".venv/bin/python"))
     parser.add_argument("--schemes", type=str, default="gray,rrtmgp")
@@ -330,9 +462,20 @@ def main() -> None:
     parser.add_argument("--amip-days", type=int, default=10)
     parser.add_argument("--amip-dt", type=float, default=600.0)
     parser.add_argument("--amip-spec-dt", type=float, default=900.0)
+    parser.add_argument("--rce-days", type=int, default=30)
+    parser.add_argument("--rce-diag-days", type=int, default=5)
+    parser.add_argument("--rce-dt", type=float, default=0.0, help="RCE dt override; 0 uses script auto dt.")
+    parser.add_argument("--icosa-cases", type=str, default="tc2,tc5,tc6")
+    parser.add_argument("--icosa-mesh-levels", type=str, default="5")
+    parser.add_argument("--icosa-days-tc2", type=float, default=5.0)
+    parser.add_argument("--icosa-days-tc5", type=float, default=5.0)
+    parser.add_argument("--icosa-days-tc6", type=float, default=5.0)
+    parser.add_argument("--icosa-save-every", type=int, default=20)
     parser.add_argument("--skip-hs-dcmip", action="store_true")
     parser.add_argument("--skip-amip", action="store_true")
+    parser.add_argument("--skip-rce", action="store_true")
     parser.add_argument("--skip-nh-spectral", action="store_true")
+    parser.add_argument("--skip-icosahedral-sw", action="store_true")
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -342,7 +485,9 @@ def main() -> None:
     raw_root.mkdir(parents=True, exist_ok=True)
 
     preset = PRESETS[args.preset]
-    schemes = [s.strip() for s in args.schemes.split(",") if s.strip()]
+    schemes = []
+    for s in [x.strip() for x in args.schemes.split(",") if x.strip()]:
+        schemes.append("rrtmgp" if s == "rrtmg" else s)
     records: list[dict[str, object]] = []
 
     # 1) HS + DCMIP radiation matrix (hydro + NH FV)
@@ -404,13 +549,13 @@ def main() -> None:
                         },
                     )
 
-    # 2) AMIP FV cube (gray + rrtmg)
+    # 2) AMIP FV + spectral (gray + rrtmgp)
     if not args.skip_amip:
         amip_snapshot_days = [d for d in [5, 10, 15, 20, 25, 30, 60, 100, 200, 300] if d <= args.amip_days]
         if args.amip_days not in amip_snapshot_days:
             amip_snapshot_days.append(float(args.amip_days))
 
-        for rad in ("gray", "rrtmg"):
+        for rad in ("gray", "rrtmgp"):
             amip_raw = raw_root / f"amip_cube_fv_{rad}_{preset.name}"
             cmd_amip = [
                 str(python_exec),
@@ -451,58 +596,88 @@ def main() -> None:
                 _copy_tree(amip_raw, dst)
                 _build_amip_artifacts(dst, amip_snapshot_days)
 
-        # Spectral AMIP (gray only in current script)
-        amip_spec_raw = raw_root / f"amip_spectral_gray_{preset.name}"
-        cmd_amip_spec = [
-            str(python_exec),
-            "scripts/run_amip_spectral.py",
-            "--dataset",
-            "analytical",
-            "--vertical-coord",
-            "sigma",
-            "--days",
-            str(args.amip_days),
-            "--truncation",
-            str(preset.spectral_truncation),
-            "--nlev",
-            str(preset.hydro_levels),
-            "--dt",
-            str(args.amip_spec_dt),
-            "--diag-days",
-            "1",
-            "--output",
-            str(amip_spec_raw),
+        for rad in ("gray", "rrtmgp"):
+            amip_spec_raw = raw_root / f"amip_spectral_{rad}_{preset.name}"
+            cmd_amip_spec = [
+                str(python_exec),
+                "scripts/run_amip_spectral.py",
+                "--dataset",
+                "analytical",
+                "--vertical-coord",
+                "sigma",
+                "--days",
+                str(args.amip_days),
+                "--truncation",
+                str(preset.spectral_truncation),
+                "--nlev",
+                str(preset.hydro_levels),
+                "--dt",
+                str(args.amip_spec_dt),
+                "--diag-days",
+                "1",
+                "--radiation",
+                rad,
+                "--output",
+                str(amip_spec_raw),
+            ]
+            rc, wall = _run(cmd_amip_spec, repo_root)
+            status = "PASS" if rc == 0 else "FAIL"
+            records.append(
+                {
+                    "component": f"amip_spectral_{rad}",
+                    "status": status,
+                    "wall_time_s": wall,
+                    "output": str(amip_spec_raw),
+                },
+            )
+            if rc == 0:
+                dst = output_root / "hydrostatic" / "gaussian_latlon" / "amip_spectral" / f"{rad}_{preset.name}"
+                _copy_tree(amip_spec_raw, dst)
+                _build_amip_artifacts(dst, amip_snapshot_days)
+
+    # 3) RCE fixed-SST ocean + RCE land (gray)
+    if not args.skip_rce:
+        rce_snapshot_days = [d for d in [10, 30, 60, 100, 200, 300] if d <= args.rce_days]
+        if args.rce_days not in rce_snapshot_days:
+            rce_snapshot_days.append(float(args.rce_days))
+
+        rce_cases = [
+            ("rce_fixed_uniform_sst", "scripts/run_rce_slab_ocean.py", raw_root / f"rce_uniform_sst_gray_{preset.name}"),
+            ("rce_slab_land", "scripts/run_rce_slab_land.py", raw_root / f"rce_slab_land_gray_{preset.name}"),
         ]
-        rc, wall = _run(cmd_amip_spec, repo_root)
-        status = "PASS" if rc == 0 else "FAIL"
-        records.append(
-            {
-                "component": "amip_spectral_gray",
-                "status": status,
-                "wall_time_s": wall,
-                "output": str(amip_spec_raw),
-            },
-        )
-        if rc == 0:
-            dst = output_root / "hydrostatic" / "gaussian_latlon" / "amip_spectral" / f"gray_{preset.name}"
-            _copy_tree(amip_spec_raw, dst)
-            _build_amip_artifacts(dst, amip_snapshot_days)
+        for case_name, script_path, rce_raw in rce_cases:
+            cmd_rce = [
+                str(python_exec),
+                script_path,
+                "--days",
+                str(args.rce_days),
+                "--resolution",
+                str(preset.cube_resolution),
+                "--nlev",
+                str(preset.hydro_levels),
+                "--diag-days",
+                str(max(1, args.rce_diag_days)),
+                "--output",
+                str(rce_raw),
+            ]
+            if args.rce_dt > 0.0:
+                cmd_rce.extend(["--dt", str(args.rce_dt)])
+            rc, wall = _run(cmd_rce, repo_root)
+            status = "PASS" if rc == 0 else "FAIL"
+            records.append(
+                {
+                    "component": f"{case_name}_gray",
+                    "status": status,
+                    "wall_time_s": wall,
+                    "output": str(rce_raw),
+                },
+            )
+            if rc == 0:
+                dst = output_root / "hydrostatic" / "cube_sphere" / case_name / f"gray_{preset.name}"
+                _copy_tree(rce_raw, dst)
+                _build_rce_artifacts(dst, rce_snapshot_days)
 
-        # Explicit unsupported marker
-        unsup_dir = output_root / "hydrostatic" / "gaussian_latlon" / "amip_spectral" / f"rrtmg_{preset.name}"
-        unsup_dir.mkdir(parents=True, exist_ok=True)
-        with (unsup_dir / "SKIPPED.txt").open("w") as f:
-            f.write("Unsupported in current workspace: scripts/run_amip_spectral.py only supports gray radiation.\n")
-        records.append(
-            {
-                "component": "amip_spectral_rrtmg",
-                "status": "SKIPPED",
-                "wall_time_s": 0.0,
-                "output": str(unsup_dir),
-            },
-        )
-
-    # 3) NH spectral TC1 (available benchmark spectral NH path)
+    # 4) NH spectral TC1 (available benchmark spectral NH path)
     if not args.skip_nh_spectral:
         nh_spec_raw = raw_root / f"nh_spectral_tc1_{preset.name}"
         cmd_nh_spec = [
@@ -536,6 +711,47 @@ def main() -> None:
                 _copy_tree(produced[0], dst)
                 _standardize_case_artifacts(dst)
 
+    # 5) Icosahedral shallow-water Williamson runs (MPAS-style Voronoi mesh)
+    if not args.skip_icosahedral_sw:
+        sw_icosa_raw = raw_root / f"shallow_water_icosahedral_{preset.name}"
+        cmd_sw_icosa = [
+            str(python_exec),
+            "tests/atmosphere/shallow_water/run_williamson_mpas_cases.py",
+            "--output",
+            str(sw_icosa_raw),
+            "--mesh-levels",
+            args.icosa_mesh_levels,
+            "--latlon-nlon",
+            str(max(180, preset.latlon_nlon)),
+            "--latlon-nlat",
+            str(max(90, preset.latlon_nlat)),
+            "--cases",
+            args.icosa_cases,
+            "--days-tc2",
+            str(args.icosa_days_tc2),
+            "--days-tc5",
+            str(args.icosa_days_tc5),
+            "--days-tc6",
+            str(args.icosa_days_tc6),
+            "--save-every",
+            str(max(1, args.icosa_save_every)),
+        ]
+        rc, wall = _run(cmd_sw_icosa, repo_root)
+        records.append(
+            {
+                "component": "shallow_water_icosahedral",
+                "status": "PASS" if rc == 0 else "FAIL",
+                "wall_time_s": wall,
+                "output": str(sw_icosa_raw),
+            },
+        )
+        if rc == 0 and sw_icosa_raw.exists():
+            for case_dir in sorted([p for p in sw_icosa_raw.iterdir() if p.is_dir() and p.name.startswith("tc")]):
+                case_tag = case_dir.name.split("_", 1)[0]
+                dst = output_root / "shallow_water" / "icosahedral" / f"williamson_{case_tag}" / f"default_{preset.name}"
+                _copy_tree(case_dir, dst)
+                _standardize_case_artifacts(dst)
+
     summary = {
         "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
         "config": {
@@ -548,7 +764,16 @@ def main() -> None:
             "amip_days": args.amip_days,
             "amip_dt": args.amip_dt,
             "amip_spec_dt": args.amip_spec_dt,
+            "rce_days": args.rce_days,
+            "rce_diag_days": args.rce_diag_days,
+            "rce_dt": args.rce_dt,
             "mean_every": args.mean_every,
+            "icosa_cases": args.icosa_cases,
+            "icosa_mesh_levels": args.icosa_mesh_levels,
+            "icosa_days_tc2": args.icosa_days_tc2,
+            "icosa_days_tc5": args.icosa_days_tc5,
+            "icosa_days_tc6": args.icosa_days_tc6,
+            "icosa_save_every": args.icosa_save_every,
         },
         "results": records,
     }

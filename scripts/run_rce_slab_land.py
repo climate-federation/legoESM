@@ -48,6 +48,7 @@ parser.add_argument("--resolution", type=int, default=16, help="Cubed-sphere N")
 parser.add_argument("--nlev", type=int, default=20, help="Number of vertical levels")
 parser.add_argument("--dt", type=float, default=None, help="Time step [s] (auto: 600 for C≤24, 300 for C>24)")
 parser.add_argument("--diag-days", type=int, default=5, help="Diagnostic interval [days]")
+parser.add_argument("--output", type=str, default="results/land/rce_slab_land", help="Output directory")
 args = parser.parse_args()
 
 N = args.resolution
@@ -56,7 +57,7 @@ DT = args.dt if args.dt is not None else (300.0 if N > 24 else 600.0)
 N_DAYS = args.days
 DIAG_DAYS = args.diag_days
 
-OUTPUT_DIR = Path("results/land/rce_slab_land")
+OUTPUT_DIR = Path(args.output)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 print("=" * 70)
@@ -340,7 +341,7 @@ diag_profiles_qv = []   # global-mean q_v profiles (nlev,) in g/kg
 diag_sigma = np.asarray(sigma.sigma_full)  # vertical coordinate for profile plots
 
 # 2D snapshots at selected days (face 0 only, for evolution plots)
-snapshot_days = {10, 30, 60, 100, 200, 300}
+snapshot_days = {10, 30, 60, 100, 200, 300, int(N_DAYS)}
 snapshots = {}  # day -> dict of 2D arrays
 
 print(f"\n  Starting integration: {n_steps} steps ({N_DAYS} days)")

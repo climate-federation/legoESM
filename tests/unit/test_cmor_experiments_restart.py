@@ -54,6 +54,57 @@ class TestCMORTables(unittest.TestCase):
         table, entry = lookup_cmor_entry("gpp")
         self.assertEqual(table, "Lmon")
 
+    def test_omon_variables(self):
+        """Omon table contains ocean variables."""
+        from legoesm.io.cmor_output import CMOR_TABLES
+
+        omon = CMOR_TABLES["Omon"]
+        expected = {"tos", "sic"}
+        self.assertTrue(expected.issubset(set(omon.keys())))
+
+    def test_aday_variables(self):
+        """Aday table contains daily atmosphere variables."""
+        from legoesm.io.cmor_output import CMOR_TABLES
+
+        aday = CMOR_TABLES["Aday"]
+        expected = {"tas", "pr", "psl", "rsut", "rlut"}
+        self.assertTrue(expected.issubset(set(aday.keys())))
+
+    def test_clearsky_variables_in_amon(self):
+        """Amon table contains clear-sky radiation variables."""
+        from legoesm.io.cmor_output import CMOR_TABLES
+
+        amon = CMOR_TABLES["Amon"]
+        cs_vars = {"rsutcs", "rlutcs", "rsdscs", "rldscs"}
+        self.assertTrue(cs_vars.issubset(set(amon.keys())))
+
+    def test_new_amon_variables(self):
+        """Amon table contains all new Phase 4 variables."""
+        from legoesm.io.cmor_output import CMOR_TABLES
+
+        amon = CMOR_TABLES["Amon"]
+        new_vars = {"ts", "zg", "wap", "hur", "hurs", "clw", "cli", "evspsbl"}
+        self.assertTrue(new_vars.issubset(set(amon.keys())))
+
+    def test_lookup_omon_variable(self):
+        """lookup_cmor_entry finds ocean variables in Omon table."""
+        from legoesm.io.cmor_output import lookup_cmor_entry
+
+        table, entry = lookup_cmor_entry("tos")
+        self.assertEqual(table, "Omon")
+        self.assertEqual(entry["units"], "K")
+
+        table, entry = lookup_cmor_entry("tos", table="Omon")
+        self.assertEqual(table, "Omon")
+
+    def test_lookup_aday_variable(self):
+        """lookup_cmor_entry finds daily variables in Aday table."""
+        from legoesm.io.cmor_output import lookup_cmor_entry
+
+        # tas is in both Amon and Aday; explicit table lookup works
+        table, entry = lookup_cmor_entry("tas", table="Aday")
+        self.assertEqual(table, "Aday")
+
     def test_lookup_unknown_raises(self):
         """lookup_cmor_entry raises KeyError for unknown variables."""
         from legoesm.io.cmor_output import lookup_cmor_entry
@@ -304,6 +355,89 @@ class TestGHGInterpolation(unittest.TestCase):
         self.assertIn("ch4_ppbv", ghg)
         self.assertIn("n2o_ppbv", ghg)
         self.assertAlmostEqual(ghg["co2_ppmv"], 369.5, places=1)
+
+
+class TestAMIPExperimentConfigNewFields(unittest.TestCase):
+    """New CMIP experiment fields in AMIPExperimentConfig."""
+
+    def test_experiment_field_default(self):
+        """Default experiment field is empty string."""
+        from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+        cfg = AMIPExperimentConfig()
+        self.assertEqual(cfg.experiment, "")
+
+    def test_start_year_default(self):
+        """Default start_year is 1979."""
+        from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+        cfg = AMIPExperimentConfig()
+        self.assertEqual(cfg.start_year, 1979)
+
+    def test_cmip_output_default(self):
+        """cmip_output defaults to False."""
+        from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+        cfg = AMIPExperimentConfig()
+        self.assertFalse(cfg.cmip_output)
+
+    def test_clear_sky_diag_default(self):
+        """clear_sky_diag defaults to False."""
+        from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+        cfg = AMIPExperimentConfig()
+        self.assertFalse(cfg.clear_sky_diag)
+
+    def test_experiment_field_set(self):
+        """Experiment field can be set."""
+        from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+        cfg = AMIPExperimentConfig(experiment="historical", start_year=1990)
+        self.assertEqual(cfg.experiment, "historical")
+        self.assertEqual(cfg.start_year, 1990)
+
+    def test_serialization_roundtrip(self):
+        """New fields survive config serialization roundtrip."""
+        from legoesm.forcing.amip_config import (
+            AMIPExperimentConfig, config_to_dict, config_from_dict,
+        )
+
+        cfg = AMIPExperimentConfig(
+            experiment="ssp245",
+            start_year=2015,
+            cmip_output=True,
+            clear_sky_diag=True,
+        )
+        d = config_to_dict(cfg)
+        cfg2 = config_from_dict(d)
+        self.assertEqual(cfg2.experiment, "ssp245")
+        self.assertEqual(cfg2.start_year, 2015)
+        self.assertTrue(cfg2.cmip_output)
+        self.assertTrue(cfg2.clear_sky_diag)
+
+
+class TestGHGVMROverride(unittest.TestCase):
+    """GHG VMR override in RRTMGP radiation."""
+
+    def test_rrtmgp_accepts_ghg_override(self):
+        """rrtmgp_radiation accepts ghg_vmr_override parameter."""
+        import inspect
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+        )
+
+        sig = inspect.signature(rrtmgp_radiation)
+        self.assertIn("ghg_vmr_override", sig.parameters)
+
+    def test_integration_accepts_ghg_override(self):
+        """_call_radiation_backend accepts ghg_vmr_override parameter."""
+        import inspect
+        from legoesm.atmosphere.physics.radiation.integration import (
+            _call_radiation_backend,
+        )
+
+        sig = inspect.signature(_call_radiation_backend)
+        self.assertIn("ghg_vmr_override", sig.parameters)
 
 
 class TestCreateExperimentConfig(unittest.TestCase):

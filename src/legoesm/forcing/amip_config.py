@@ -112,6 +112,12 @@ class AMIPExperimentConfig(NamedTuple):
     # Carbon cycle
     carbon_cycle: str = "none"  # "none", "differland", or "seasonal"
 
+    # CMIP experiment
+    experiment: str = ""  # "piControl", "historical", "ssp245", "ssp585", "amip", "1pctCO2"
+    start_year: int = 1979  # calendar start year (for GHG trajectory lookup)
+    cmip_output: bool = False  # write CF/CMOR NetCDF files during the run
+    clear_sky_diag: bool = False  # run clear-sky radiation pass for rsutcs/rlutcs
+
     # Output
     output_dir: str = ""
 

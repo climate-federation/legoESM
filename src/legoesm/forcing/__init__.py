@@ -35,6 +35,12 @@ from legoesm.forcing.experiments import (
     get_ghg_for_experiment,
     create_experiment_config,
 )
+from legoesm.forcing.analytical import analytical_sst_sic
+from legoesm.forcing.surface_utils import (
+    blend_surface_temperature,
+    blend_surface_property,
+    distribute_column_aod_to_layers,
+)
 
 __all__ = [
     "AMIPForcingConfig",
@@ -61,4 +67,10 @@ __all__ = [
     "ghg_at_year",
     "get_ghg_for_experiment",
     "create_experiment_config",
+    # Analytical forcing
+    "analytical_sst_sic",
+    # Surface utilities
+    "blend_surface_temperature",
+    "blend_surface_property",
+    "distribute_column_aod_to_layers",
 ]

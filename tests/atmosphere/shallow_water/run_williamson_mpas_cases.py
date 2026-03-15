@@ -5,8 +5,8 @@ Outputs are written under ``results/atmosphere/shallow_water`` by default.
 
 This script complements the pytest suite by producing runnable case artifacts:
 - per-case `results.txt`
-- time-varying diagnostics CSV + plots
-- field snapshots (`h`) at initial/mid/final times
+- time-varying diagnostics CSV + plots (mean + conservation views)
+- field snapshots (`h`) at initial/mid/final times on native and lat-lon grids
 - root `summary.json`
 """
 
@@ -16,6 +16,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -240,6 +241,57 @@ def _plot_h_snapshots(
     plt.close(fig)
 
 
+def _plot_h_snapshots_native(
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    snapshots: dict[str, np.ndarray],
+    out_path: Path,
+    title: str,
+) -> None:
+    labels = [k for k in ("initial", "mid", "final") if k in snapshots]
+    if not labels:
+        return
+
+    vmin = min(float(np.nanmin(snapshots[k])) for k in labels)
+    vmax = max(float(np.nanmax(snapshots[k])) for k in labels)
+
+    fig, axes = plt.subplots(1, len(labels), figsize=(5 * len(labels), 4), squeeze=False)
+    for i, lbl in enumerate(labels):
+        ax = axes[0, i]
+        sc = ax.scatter(
+            lon_deg,
+            lat_deg,
+            c=snapshots[lbl],
+            s=5.0,
+            cmap="viridis",
+            vmin=vmin,
+            vmax=vmax,
+            linewidths=0.0,
+            rasterized=True,
+        )
+        ax.set_title(f"{lbl} h (m, native mesh)")
+        ax.set_xlabel("Longitude (deg)")
+        if i == 0:
+            ax.set_ylabel("Latitude (deg)")
+        ax.grid(True, alpha=0.2)
+        fig.colorbar(sc, ax=ax, shrink=0.9)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _write_placeholder_plot(path: Path, title: str, message: str) -> None:
+    fig, ax = plt.subplots(figsize=(8.0, 4.0))
+    ax.text(0.5, 0.58, title, ha="center", va="center", fontsize=11, weight="bold")
+    ax.text(0.5, 0.42, message, ha="center", va="center", fontsize=10)
+    ax.set_axis_off()
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _build_latlon_pixel_mapper(
     mesh: VoronoiMesh, nlon: int, nlat: int
 ) -> tuple[np.ndarray, np.ndarray, callable]:
@@ -344,19 +396,31 @@ def _run_case(
         snapshots["final"] = np.asarray(state.h.data, dtype=np.float64)
 
     _write_csv(rows, case_dir / "diagnostics_timeseries.csv")
+    _write_csv(rows, case_dir / "mean_timeseries.csv")
+    _write_csv(rows, case_dir / "integrated_timeseries.csv")
     _plot_timeseries(
         rows,
         case_dir / "diagnostics_timeseries.png",
         title=f"{case_spec.label} | icosahedral level {mesh_level}",
     )
+    shutil.copy2(case_dir / "diagnostics_timeseries.png", case_dir / "mean_timeseries.png")
+    shutil.copy2(case_dir / "diagnostics_timeseries.png", case_dir / "integrated_timeseries.png")
     _plot_h_snapshots(
         lon2d,
         lat2d,
         pixel_mapper,
         snapshots,
-        case_dir / "h_snapshots.png",
+        case_dir / "field_snapshots_latlon_pixels.png",
         title=f"{case_spec.label} | icosahedral level {mesh_level}",
     )
+    _plot_h_snapshots_native(
+        lon_deg,
+        lat_deg,
+        snapshots,
+        case_dir / "field_snapshots_native.png",
+        title=f"{case_spec.label} | icosahedral level {mesh_level}",
+    )
+    shutil.copy2(case_dir / "field_snapshots_latlon_pixels.png", case_dir / "field_snapshots.png")
     latlon_snapshots = {f"{k}_latlon": pixel_mapper(v) for k, v in snapshots.items()}
     np.savez(
         case_dir / "h_snapshots.npz",
@@ -367,6 +431,73 @@ def _run_case(
         **snapshots,
         **latlon_snapshots,
     )
+
+    # Conservation diagnostics from global invariants.
+    if rows:
+        t_days = np.array([float(r["time_days"]) for r in rows], dtype=np.float64)
+        mass = np.array([float(r["mass"]) for r in rows], dtype=np.float64)
+        energy = np.array([float(r["energy"]) for r in rows], dtype=np.float64)
+        mass0 = max(abs(float(mass[0])), 1.0e-30)
+        energy0 = max(abs(float(energy[0])), 1.0e-30)
+        mrel = (mass - mass[0]) / mass0
+        erel = (energy - energy[0]) / energy0
+
+        with (case_dir / "conservation_timeseries.csv").open("w") as f:
+            f.write("step,time_days,mass_proxy,energy_proxy,mass_rel,energy_rel\n")
+            for i, r in enumerate(rows):
+                f.write(
+                    f"{int(r['step'])},{r['time_days']:.8f},{mass[i]:.12e},{energy[i]:.12e},"
+                    f"{mrel[i]:.12e},{erel[i]:.12e}\n",
+                )
+
+        fig, axes = plt.subplots(2, 1, figsize=(9.0, 6.2), sharex=True)
+        axes[0].plot(t_days, mrel, lw=1.8, color="tab:blue")
+        axes[0].axhline(0.0, color="0.3", lw=0.8, ls="--")
+        axes[0].set_ylabel("Mass drift (rel.)")
+        axes[0].set_title("Mass conservation")
+        axes[0].grid(True, alpha=0.3)
+        axes[1].plot(t_days, erel, lw=1.8, color="tab:red")
+        axes[1].axhline(0.0, color="0.3", lw=0.8, ls="--")
+        axes[1].set_ylabel("Energy drift (rel.)")
+        axes[1].set_xlabel("Time (days)")
+        axes[1].set_title("Energy conservation")
+        axes[1].grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(case_dir / "conservation_timeseries.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    # Shallow-water has no vertical dimension; emit explicit placeholders for
+    # standardized atmosphere post-processing interfaces.
+    _write_placeholder_plot(
+        case_dir / "vertical_profiles.png",
+        "Vertical Profile Evolution",
+        "N/A for shallow-water (single-layer) dynamics.",
+    )
+    _write_placeholder_plot(
+        case_dir / "zonal_cross_sections.png",
+        "Latitude-Vertical Snapshots",
+        "N/A for shallow-water (single-layer) dynamics.",
+    )
+    _write_placeholder_plot(
+        case_dir / "meridional_cross_sections.png",
+        "Longitude-Vertical Snapshots",
+        "N/A for shallow-water (single-layer) dynamics.",
+    )
+    shutil.copy2(case_dir / "vertical_profiles.png", case_dir / "mean_profiles.png")
+    shutil.copy2(case_dir / "zonal_cross_sections.png", case_dir / "lat_vertical_snapshots.png")
+    shutil.copy2(case_dir / "meridional_cross_sections.png", case_dir / "lon_vertical_snapshots.png")
+    with (case_dir / "vertical_profiles.csv").open("w") as f:
+        f.write("time_days,sigma,profile_value\n")
+        f.write("0.0,1.0,nan\n")
+    shutil.copy2(case_dir / "vertical_profiles.csv", case_dir / "mean_profiles.csv")
+
+    snap_days = [0.0]
+    if "mid" in snapshots:
+        snap_days.append(0.5 * days)
+    snap_days.append(float(days))
+    with (case_dir / "snapshot_times.txt").open("w") as f:
+        for d in sorted(set(snap_days)):
+            f.write(f"day {d:.2f}\n")
 
     d0 = _diagnostics(state0, mesh, config.g)
     df = _diagnostics(state, mesh, config.g)
@@ -421,7 +552,7 @@ def main() -> None:
         default=None,
         help=(
             "Output directory. Default: "
-            "results/atmosphere/shallow_water/icosahedral_williamson_cases_<timestamp>"
+            "results/atmosphere/shallow_water/icosahedral/williamson_cases_<timestamp>"
         ),
     )
     parser.add_argument(
@@ -433,19 +564,19 @@ def main() -> None:
     parser.add_argument(
         "--mesh-levels",
         type=str,
-        default="3,4",
-        help="Comma-separated icosahedral refinement levels (e.g., 3,4).",
+        default="5",
+        help="Comma-separated icosahedral refinement levels (default: 5, ~2-degree).",
     )
     parser.add_argument(
         "--latlon-nlon",
         type=int,
-        default=360,
+        default=180,
         help="Longitude pixel count for lat-lon snapshot projection.",
     )
     parser.add_argument(
         "--latlon-nlat",
         type=int,
-        default=181,
+        default=91,
         help="Latitude pixel count for lat-lon snapshot projection.",
     )
     parser.add_argument("--days-tc2", type=float, default=CASE_SPECS["tc2"].default_days)
@@ -463,7 +594,7 @@ def main() -> None:
     if args.output is None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_root = Path(
-            f"results/atmosphere/shallow_water/icosahedral_williamson_cases_{stamp}"
+            f"results/atmosphere/shallow_water/icosahedral/williamson_cases_{stamp}"
         )
     else:
         out_root = args.output

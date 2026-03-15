@@ -116,6 +116,15 @@ PRESETS = {
         hydro_levels=20,
         nh_levels=20,
     ),
+    "atm2deg": ResolutionPreset(
+        name="atm2deg",
+        cube_resolution=32,
+        latlon_nlat=90,
+        latlon_nlon=180,
+        spectral_truncation=63,
+        hydro_levels=20,
+        nh_levels=20,
+    ),
 }
 
 
@@ -1448,7 +1457,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Held-Suarez/DCMIP radiation matrix")
     parser.add_argument("--output", type=Path, default=Path("results/atmosphere/hydrostatic/hs_dcmip_radiation_matrix"))
     parser.add_argument("--schemes", type=str, default="gray,rrtmgp", help="Comma-separated: gray,rrtmgp")
-    parser.add_argument("--presets", type=str, default="low,medium", help="Comma-separated: low,medium,high")
+    parser.add_argument("--presets", type=str, default="atm2deg", help="Comma-separated: low,medium,high,atm2deg")
     parser.add_argument("--hs-days", type=float, default=2.0)
     parser.add_argument("--tc1-hours", type=float, default=1.0)
     parser.add_argument("--tc23-minutes", type=float, default=3.0)

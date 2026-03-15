@@ -3,13 +3,13 @@
 
 Atmosphere-only integration with prescribed SST and sea-ice concentration.
 Uses the spectral PE dycore (Bourke 1972, vorticity-divergence formulation)
-with gray radiation (Frierson 2006), SBM convection, bulk aerodynamic BL
+with configurable radiation (gray or RRTMGP), SBM convection, bulk aerodynamic BL
 exchange, large-scale condensation, and Rayleigh friction.
 
 Physics is operator-split:
   1. Dynamics: spectral PE step (SSP-RK54 explicit or semi-implicit)
   2. Physics (on Gaussian grid):
-     - Gray radiation (moisture-dependent LW OD, seasonal solar)
+     - Radiation (gray moisture-dependent LW OD, or RRTMGP correlated-k)
      - SBM convection
      - Bulk aerodynamic BL exchange (heat + moisture)
      - Large-scale condensation (saturation adjustment)
@@ -78,6 +78,9 @@ parser.add_argument("--output", type=str, default=None)
 parser.add_argument("--checkpoint-days", type=int, default=0)
 parser.add_argument("--co2-ppmv", type=float, default=415.0,
                     help="CO2 concentration [ppmv] (stored in config; gray rad ignores it)")
+parser.add_argument("--radiation", type=str, default="gray",
+                    choices=["gray", "rrtmg", "rrtmgp"],
+                    help="Radiation scheme: gray or rrtmgp (default: gray)")
 parser.add_argument("--microphysics", type=str, default="none",
                     choices=["none", "kessler", "sundqvist", "seifert_beheng",
                              "morrison", "thompson"],
@@ -100,6 +103,7 @@ DIAG_DAYS = args.diag_days
 START_DAY = args.start_day
 CHECKPOINT_DAYS = args.checkpoint_days
 MICROPHYSICS = args.microphysics
+RADIATION = "rrtmgp" if args.radiation in ("rrtmg", "rrtmgp") else "gray"
 
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
 if args.output is not None:
@@ -109,7 +113,7 @@ else:
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 print("=" * 70)
-print(f"  AMIP Spectral: T{TRUNC}/L{NLEV} — Gray Radiation + SBM Convection")
+print(f"  AMIP Spectral: T{TRUNC}/L{NLEV} — {RADIATION.upper()} + SBM Convection")
 print("=" * 70)
 print(f"  Truncation: T{TRUNC}")
 print(f"  dt:         {DT:.0f} s")
@@ -203,37 +207,20 @@ if args.dataset == "analytical":
 
     lat_deg = np.degrees(np.asarray(grid.lat))  # (n_lat,)
 
-    def _analytical_forcing(day):
-        """Compute SST and SIC for a given day (seasonal cycle)."""
-        day_of_year = day % 365.0 + 1.0
-        # Seasonal shift of SST peak: ±5 degrees latitude
-        lat_shift = -5.0 * np.cos(2.0 * np.pi * day_of_year / 365.0)  # NH summer -> north
-        lat_eff = lat_deg - lat_shift  # (n_lat,)
-
-        # Qobs-like SST profile (K): warm equator, cold poles
-        sst_1d = 27.0 * (1.0 - np.sin(np.radians(lat_eff))**2) + 273.15
-        # Add seasonal amplitude (±3 K at midlatitudes)
-        seasonal_amp = 3.0 * np.cos(np.radians(lat_eff)) * np.cos(2.0 * np.pi * day_of_year / 365.0)
-        sst_1d = sst_1d + seasonal_amp
-        sst_1d = np.maximum(sst_1d, _T_ice - 1.8)  # freezing floor
-
-        # SIC: ramp from 0 to 1 as SST drops below T_ice
-        sic_1d = np.clip(((_T_ice + 0.5) - sst_1d) / 3.0, 0.0, 1.0)
-
-        # Broadcast to (n_lat, n_lon)
-        sst = jnp.broadcast_to(jnp.array(sst_1d)[:, None], shape_2d)
-        sic = jnp.broadcast_to(jnp.array(sic_1d)[:, None], shape_2d)
-        return sst, sic
+    def get_sst_sic(day):
+        sst_1d, sic_1d = analytical_sst_sic(lat_deg, day, T_ice=_T_ice)
+        # Broadcast (n_lat,) → (n_lat, n_lon)
+        return (
+            jnp.broadcast_to(sst_1d[:, None], shape_2d),
+            jnp.broadcast_to(sic_1d[:, None], shape_2d),
+        )
 
     # Initial check
-    sst_init, sic_init = _analytical_forcing(START_DAY)
+    sst_init, sic_init = get_sst_sic(START_DAY)
     print(f"  Initial SST: min={float(jnp.min(sst_init)):.1f} K, "
           f"max={float(jnp.max(sst_init)):.1f} K, "
           f"mean={float(jnp.mean(sst_init)):.1f} K")
     print(f"  Initial SIC: mean={float(jnp.mean(sic_init)):.3f}")
-
-    def get_sst_sic(day):
-        return _analytical_forcing(day)
 
 else:
     from legoesm.forcing.amip import (
@@ -365,13 +352,20 @@ if MICROPHYSICS != "none":
 # 5. Physics configuration
 # ---------------------------------------------------------------------------
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
+from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
+from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+    preload_rrtmgp_optics,
+    rrtmgp_radiation,
+)
 from legoesm.atmosphere.physics.radiation.solar import (
     cos_zenith_angle,
     daily_mean_insolation,
 )
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
+from legoesm.forcing.analytical import analytical_sst_sic
+from legoesm.forcing.surface_utils import blend_surface_temperature, blend_surface_property
 
 S_0 = 1360.0
 gray_config = GrayRadiationConfig(
@@ -381,6 +375,14 @@ gray_config = GrayRadiationConfig(
     sfc_albedo=_albedo_ocean,
     perpetual_equinox=False,
 )
+rrtmg_config = RRTMGPConfig(
+    co2_ppmv=args.co2_ppmv,
+    sfc_albedo=_albedo_ocean,
+    sfc_emissivity=0.98,
+    S_0=S_0,
+)
+if RADIATION == "rrtmgp":
+    preload_rrtmgp_optics(rrtmg_config)
 sbm_config = SBMConfig(tau_c=7200.0, RH_ref=0.7)
 
 _sigma_full = sigma.sigma_full
@@ -397,7 +399,7 @@ _k_f_max = 1.0 / 86400.0
 _k_free = 0.1 / 86400.0
 _k_f = _k_free + _k_f_max * jnp.maximum(0.0, (_sigma_full - _sigma_b) / (1.0 - _sigma_b))
 
-print(f"  Physics: Gray radiation + friction (coupled into dynamics) + SBM + BL (operator-split)")
+print(f"  Physics: {RADIATION} radiation + friction (coupled into dynamics) + SBM + BL (operator-split)")
 
 # ---------------------------------------------------------------------------
 # 6. Physics functions
@@ -436,7 +438,7 @@ def _make_physics_fn():
         seconds_of_day = _forcing_state['seconds_of_day']
         q_v_now = _forcing_state['q_v']
 
-        T_sfc = sic * _T_ice + (1.0 - sic) * sst
+        T_sfc = blend_surface_temperature(sst, sic, _T_ice)
 
         from legoesm.grids.vertical import (
             HybridSigmaPressureCoordinate, pressure_from_hybrid,
@@ -457,12 +459,25 @@ def _make_physics_fn():
         lon_col = lon_2d_grid.reshape(-1)
 
         # --- Radiation ---
-        insol = daily_mean_insolation(lat_col, day_of_year, S_0)
-        rad_out = gray_radiation(
-            T=T_col, p_full=p_full_col, p_half=p_half_col,
-            sfc_temperature=T_sfc_col, lat=lat_col,
-            q_v=q_v_col, insolation=insol, config=gray_config,
-        )
+        if RADIATION == "gray":
+            insol = daily_mean_insolation(lat_col, day_of_year, S_0)
+            rad_out = gray_radiation(
+                T=T_col, p_full=p_full_col, p_half=p_half_col,
+                sfc_temperature=T_sfc_col, lat=lat_col,
+                q_v=q_v_col, insolation=insol, config=gray_config,
+            )
+        else:
+            hour = seconds_of_day / 3600.0
+            cosz = jnp.maximum(cos_zenith_angle(lat_col, lon_col, day_of_year, hour), 0.0)
+            rad_out = rrtmgp_radiation(
+                T=T_col,
+                p_full=p_full_col,
+                p_half=p_half_col,
+                sfc_temperature=T_sfc_col,
+                q_v=q_v_col,
+                cos_zenith=cosz,
+                config=rrtmg_config,
+            )
         dT_dt_rad = rad_out.heating_rate.reshape(shape_3d)
 
         # --- Rayleigh friction ---
@@ -509,7 +524,7 @@ def operator_split_moist_physics(T_g, p_s_g, q_v, q_c, q_r, u_g, v_g, sst, sic, 
     Applied AFTER the coupled dynamics+radiation step.
     Returns: T_new, q_v_new, dq_c_dt, dq_r_dt, precip, precip_ls.
     """
-    T_sfc = sic * _T_ice + (1.0 - sic) * sst
+    T_sfc = blend_surface_temperature(sst, sic, _T_ice)
     p_full = p_s_g[..., None] * _sigma_full
     p_half = p_s_g[..., None] * _sigma_half
 
@@ -597,10 +612,10 @@ def operator_split_moist_physics(T_g, p_s_g, q_v, q_c, q_r, u_g, v_g, sst, sic, 
 
 
 @jax.jit
-def compute_rad_diagnostics(T_g, p_s_g, q_v, sst, sic, day_of_year):
+def compute_rad_diagnostics(T_g, p_s_g, q_v, sst, sic, day_of_year, seconds_of_day):
     """Compute radiation diagnostics (fluxes) for output only."""
-    T_sfc = sic * _T_ice + (1.0 - sic) * sst
-    albedo = sic * _albedo_ice + (1.0 - sic) * _albedo_ocean
+    T_sfc = blend_surface_temperature(sst, sic, _T_ice)
+    albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
     p_full = p_s_g[..., None] * _sigma_full
     p_half = p_s_g[..., None] * _sigma_half
 
@@ -610,13 +625,26 @@ def compute_rad_diagnostics(T_g, p_s_g, q_v, sst, sic, day_of_year):
     q_v_col = q_v.reshape(-1, NLEV)
     T_sfc_col = T_sfc.reshape(-1)
     lat_col = lat_2d_grid.reshape(-1)
-
-    insol = daily_mean_insolation(lat_col, day_of_year, S_0)
-    rad_out = gray_radiation(
-        T=T_col, p_full=p_full_col, p_half=p_half_col,
-        sfc_temperature=T_sfc_col, lat=lat_col,
-        q_v=q_v_col, insolation=insol, config=gray_config,
-    )
+    lon_col = lon_2d_grid.reshape(-1)
+    if RADIATION == "gray":
+        insol = daily_mean_insolation(lat_col, day_of_year, S_0)
+        rad_out = gray_radiation(
+            T=T_col, p_full=p_full_col, p_half=p_half_col,
+            sfc_temperature=T_sfc_col, lat=lat_col,
+            q_v=q_v_col, insolation=insol, config=gray_config,
+        )
+    else:
+        hour = seconds_of_day / 3600.0
+        cosz = jnp.maximum(cos_zenith_angle(lat_col, lon_col, day_of_year, hour), 0.0)
+        rad_out = rrtmgp_radiation(
+            T=T_col,
+            p_full=p_full_col,
+            p_half=p_half_col,
+            sfc_temperature=T_sfc_col,
+            q_v=q_v_col,
+            cos_zenith=cosz,
+            config=rrtmg_config,
+        )
 
     sw_down_sfc = rad_out.sw_flux_down[:, -1].reshape(shape_2d)
     sw_net_sfc = sw_down_sfc * (1.0 - albedo)
@@ -633,7 +661,7 @@ def compute_rad_diagnostics(T_g, p_s_g, q_v, sst, sic, day_of_year):
 config_dict = {
     "truncation": TRUNC, "nlev": NLEV, "dt": DT,
     "days": N_DAYS, "start_day": START_DAY,
-    "forcing": args.dataset, "radiation": "gray",
+    "forcing": args.dataset, "radiation": RADIATION,
     "co2_ppmv": args.co2_ppmv, "S_0": S_0,
     "T_init": T_INIT, "RH_init": RH_INIT,
     "hyperdiff_coeff": float(HYPERDIFF),
@@ -789,7 +817,7 @@ for step in range(1, n_steps_total):
 
         # Compute radiation diagnostics
         _sw, _lw, _sw_toa, _lw_toa = compute_rad_diagnostics(
-            T_new, p_s_grid, q_v, sst, sic, day_of_year,
+            T_new, p_s_grid, q_v, sst, sic, day_of_year, seconds_of_day,
         )
 
         mean_sst = float(jnp.mean(sst))
@@ -836,7 +864,7 @@ for step in range(1, n_steps_total):
         # 2D snapshots (already on lat-lon — no regridding needed!)
         iday = int(round(elapsed_day))
         if iday in snapshot_days_set:
-            T_sfc_snap = sic * _T_ice + (1.0 - sic) * sst
+            T_sfc_snap = blend_surface_temperature(sst, sic, _T_ice)
             toa_net = -(_sw_toa + _lw_toa)
             sfc_net = _sw + _lw
             snapshots[iday] = {
@@ -908,7 +936,7 @@ print(f"  Saved timeseries to {OUTPUT_DIR / 'timeseries.npz'}")
 # Save summary text
 with open(OUTPUT_DIR / "results.txt", "w") as f:
     f.write(f"AMIP Spectral PE — T{TRUNC}/L{NLEV}\n")
-    f.write(f"Radiation: gray (Frierson 2006)\n")
+    f.write(f"Radiation: {RADIATION}\n")
     f.write(f"Forcing: {args.dataset}\n")
     f.write(f"CO2: {args.co2_ppmv} ppmv\n")
     f.write(f"Duration: {N_DAYS} days, dt={DT}s\n")
@@ -949,7 +977,7 @@ try:
         ax = axes[3, 0]; ax.plot(t, diag_sw_up_toa, label="SW up"); ax.plot(t, diag_lw_up_toa, label="LW up"); ax.set_ylabel("W/m2"); ax.legend(); ax.set_title("TOA fluxes"); ax.set_xlabel("Day")
         ax = axes[3, 1]; ax.plot(t, diag_dry_mass); ax.set_ylabel("Pa"); ax.set_title("Mean surface pressure"); ax.set_xlabel("Day")
 
-        plt.suptitle(f"AMIP Spectral T{TRUNC}/L{NLEV} — Gray radiation, {N_DAYS} days", fontsize=13)
+        plt.suptitle(f"AMIP Spectral T{TRUNC}/L{NLEV} — {RADIATION} radiation, {N_DAYS} days", fontsize=13)
         plt.tight_layout()
         plt.savefig(OUTPUT_DIR / "amip_timeseries.png", dpi=150, bbox_inches="tight")
         plt.close()

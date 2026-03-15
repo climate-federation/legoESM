@@ -260,3 +260,95 @@ def regrid_vector(
         return u_out, v_out
 
     return u_tgt, v_tgt
+
+
+# ==============================================================================
+# Cubed-sphere to regular lat-lon regridding (for output / plotting)
+# ==============================================================================
+
+
+def regrid_faces_to_latlon(
+    field_faces: np.ndarray,
+    src_lon_rad: np.ndarray,
+    src_lat_rad: np.ndarray,
+    n_lon: int | None = None,
+    n_lat: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Interpolate cubed-sphere face data to a regular lat-lon grid.
+
+    Uses Gaussian (RBF) weighting of K nearest neighbors in 3-D Cartesian
+    coordinates on the unit sphere.
+
+    Parameters
+    ----------
+    field_faces : array
+        Data on cubed-sphere faces (e.g. shape ``(6, n, n)``).
+    src_lon_rad, src_lat_rad : array
+        Source grid longitude/latitude in **radians**, same shape as the
+        spatial dimensions of *field_faces*.
+    n_lon, n_lat : int, optional
+        Output grid size.  Defaults to ``max(360, 8*N)`` and ``n_lon // 2``
+        where *N* is inferred from the face tile dimension.
+
+    Returns
+    -------
+    lon_cent : 1-D array, shape (n_lon,)
+        Longitude centres [degrees].
+    lat_cent : 1-D array, shape (n_lat,)
+        Latitude centres [degrees].
+    field_ll : 2-D array, shape (n_lat, n_lon)
+        Regridded field.
+    """
+    from scipy.spatial import cKDTree
+
+    # Infer default output resolution from face tile size
+    face_shape = np.asarray(field_faces).shape
+    N_tile = face_shape[1] if len(face_shape) >= 3 else int(np.sqrt(face_shape[0] / 6))
+    if n_lon is None:
+        n_lon = max(360, 8 * N_tile)
+    if n_lat is None:
+        n_lat = n_lon // 2
+
+    cube_lon_deg = np.asarray(src_lon_rad, dtype=np.float64) * 180.0 / np.pi
+    cube_lat_deg = np.asarray(src_lat_rad, dtype=np.float64) * 180.0 / np.pi
+
+    lon = cube_lon_deg.reshape(-1)
+    lat = cube_lat_deg.reshape(-1)
+    val = np.asarray(field_faces, dtype=np.float64).reshape(-1)
+
+    valid = np.isfinite(lon) & np.isfinite(lat) & np.isfinite(val)
+    lon = ((lon[valid] + 180.0) % 360.0) - 180.0
+    lat = np.clip(lat[valid], -90.0, 90.0)
+    val = val[valid]
+
+    lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
+    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
+
+    lon_rad = np.deg2rad(lon)
+    lat_rad = np.deg2rad(lat)
+    cos_lat = np.cos(lat_rad)
+    src_xyz = np.column_stack(
+        [cos_lat * np.cos(lon_rad), cos_lat * np.sin(lon_rad), np.sin(lat_rad)],
+    )
+
+    lon_t = np.deg2rad(lon2d.reshape(-1))
+    lat_t = np.deg2rad(lat2d.reshape(-1))
+    cos_lat_t = np.cos(lat_t)
+    tgt_xyz = np.column_stack(
+        [cos_lat_t * np.cos(lon_t), cos_lat_t * np.sin(lon_t), np.sin(lat_t)],
+    )
+
+    k = min(16, src_xyz.shape[0])
+    tree = cKDTree(src_xyz)
+    dist, idx = tree.query(tgt_xyz, k=k)
+    if k == 1:
+        field_ll = val[idx].reshape(lon2d.shape)
+    else:
+        dist = np.maximum(dist, 1.0e-12)
+        sigma = np.median(dist[:, 0]) * 2.0
+        w = np.exp(-0.5 * (dist / sigma) ** 2)
+        w /= np.sum(w, axis=1, keepdims=True)
+        field_ll = np.sum(val[idx] * w, axis=1).reshape(lon2d.shape)
+
+    return lon_cent, lat_cent, field_ll

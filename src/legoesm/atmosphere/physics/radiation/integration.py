@@ -155,6 +155,7 @@ def _call_radiation_backend(
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     q_cloud: jnp.ndarray | None = None,
     q_ice: jnp.ndarray | None = None,
+    ghg_vmr_override: dict | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -167,6 +168,8 @@ def _call_radiation_backend(
         Cloud liquid water mixing ratio (ncol, nlev) [kg/kg].
     q_ice : jnp.ndarray or None
         Cloud ice mixing ratio (ncol, nlev) [kg/kg].
+    ghg_vmr_override : dict or None
+        Runtime GHG VMR overrides passed to RRTMGP (e.g. transient CO2).
     """
     radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
 
@@ -228,6 +231,7 @@ def _call_radiation_backend(
         sfc_albedo_override=sfc_albedo_override,
         sfc_emissivity_override=sfc_emissivity_override,
         o3_vmr=o3_vmr,
+        ghg_vmr_override=ghg_vmr_override,
         **cloud_kwargs,
     )
 

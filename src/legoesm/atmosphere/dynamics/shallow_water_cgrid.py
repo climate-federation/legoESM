@@ -40,9 +40,8 @@ from legoesm.core.operators_fv_cubed import (
     edge_blend_vector,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
-from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
-from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
+from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm import constants
 
 
@@ -52,8 +51,8 @@ class CGShallowWaterCubedConfig(NamedTuple):
     div_damp_2: float = 0.0       # 2nd-order divergence damping [m²/s]
     div_damp_4: float = 0.0       # 4th-order divergence damping [m⁴/s]
     hyperdiff_coeff: float = 0.0  # Velocity hyperdiffusion (backup)
-    edge_blend_strength: float = 0.50  # Face-boundary blend (0=off)
-    edge_blend_depth: int = 4          # Rows to blend near each edge
+    edge_blend_strength: float = 0.0   # Face-boundary blend (0=off)
+    edge_blend_depth: int = 0          # Rows to blend near each edge
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     fix_energy: bool = True
@@ -134,7 +133,7 @@ def cgrid_shallow_water_tendencies_cubed(
 # Model class
 # ==============================================================================
 
-class CGShallowWaterCubedModel:
+class CGShallowWaterCubedModel(IntegrationMixin):
     """C-grid shallow water model on the cubed-sphere.
 
     Uses C-grid-style operators (exact pressure gradient, divergence
@@ -184,17 +183,9 @@ class CGShallowWaterCubedModel:
                 h_s=s.h_s.replace(data=jnp.zeros_like(s.h_s.data)),
             )
 
-        integrator = self.config.time_integrator.lower()
-        if integrator in ("ssp_rk54", "ssp54", "ssp45", "rk54"):
-            state_new = ssp_rk54_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk34", "ssp34", "rk34"):
-            state_new = ssp_rk34_step(state, tendency_fn, dt)
-        elif integrator in ("ssp_rk3", "ssp3", "rk3"):
-            state_new = ssp_rk3_step(state, tendency_fn, dt)
-        else:
-            raise ValueError(
-                f"Unsupported time_integrator={self.config.time_integrator!r}"
-            )
+        state_new = dispatch_integrator(
+            state, tendency_fn, dt, self.config.time_integrator,
+        )
 
         # Edge blending: localized smoothing near face boundaries
         if self._eb_weight is not None:
@@ -222,18 +213,3 @@ class CGShallowWaterCubedModel:
 
         return state_new
 
-    def integrate(
-        self,
-        state: ShallowWaterState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-    ) -> tuple[ShallowWaterState, list[ShallowWaterState]]:
-        """Integrate forward for a given duration."""
-        n_steps = int(duration / dt)
-        trajectory = [state]
-        for i in range(n_steps):
-            state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-        return state, trajectory

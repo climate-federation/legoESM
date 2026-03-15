@@ -49,11 +49,11 @@ def _accumulation_dtype():
     return jnp.float64
 
 
-def _global_area_sum(array: jax.Array, grid: CubedSphereGrid) -> jax.Array:
+def _global_area_sum(array: jax.Array, grid) -> jax.Array:
     """Area-weighted global sum of a raw array, MPI-aware.
 
-    Like ``global_integral`` but works on raw arrays instead of
-    ``Field`` objects.  Under MPI, local sums are combined via
+    Works on any grid with a ``.area`` attribute (CubedSphereGrid,
+    LatLonGrid, etc.).  Under MPI, local sums are combined via
     ``allreduce(SUM)`` to produce the true global total.
 
     The accumulation is performed in float64 (if available) to avoid
@@ -68,12 +68,20 @@ def _global_area_sum(array: jax.Array, grid: CubedSphereGrid) -> jax.Array:
     return local_sum
 
 
+def _total_area(grid) -> jax.Array:
+    """Total area for any grid with .total_area or .area."""
+    if hasattr(grid, 'total_area'):
+        return grid.total_area
+    acc = _accumulation_dtype()
+    return jnp.sum(grid.area.astype(acc))
+
+
 def fix_mass_shallow_water(
     state_new: ShallowWaterState,
     state_old: ShallowWaterState,
-    grid: CubedSphereGrid,
+    grid,
 ) -> ShallowWaterState:
-    """Fix mass conservation for shallow water equations.
+    """Fix mass conservation for shallow water equations (any grid).
 
     Applies a uniform additive correction to the fluid depth h
     so that the global integral of h is preserved exactly.
@@ -87,18 +95,17 @@ def fix_mass_shallow_water(
         State after time integration (may not conserve mass exactly).
     state_old : ShallowWaterState
         State before time integration (reference mass).
-    grid : CubedSphereGrid
-        The grid.
+    grid : CubedSphereGrid or LatLonGrid
+        The grid (any grid with .area and .total_area).
 
     Returns
     -------
     ShallowWaterState : Mass-conserving state.
     """
-    mass_old = global_integral(state_old.h, grid)
-    mass_new = global_integral(state_new.h, grid)
+    mass_old = _global_area_sum(state_old.h.data, grid)
+    mass_new = _global_area_sum(state_new.h.data, grid)
 
-    # Uniform correction
-    correction = (mass_old - mass_new) / grid.total_area
+    correction = (mass_old - mass_new) / _total_area(grid)
     h_fixed = state_new.h.replace(data=state_new.h.data + correction)
 
     return state_new._replace(h=h_fixed)
@@ -107,10 +114,10 @@ def fix_mass_shallow_water(
 def fix_energy_shallow_water(
     state_new: ShallowWaterState,
     state_old: ShallowWaterState,
-    grid: CubedSphereGrid,
+    grid,
     g: float = 9.80616,
 ) -> ShallowWaterState:
-    """Fix total energy conservation for shallow water equations.
+    """Fix total energy conservation for shallow water equations (any grid).
 
     Total energy = kinetic + potential:
         E = 0.5 * h * (u^2 + v^2) + 0.5 * g * (h + h_s)^2
@@ -123,8 +130,8 @@ def fix_energy_shallow_water(
         State after time integration.
     state_old : ShallowWaterState
         State before time integration.
-    grid : CubedSphereGrid
-        The grid.
+    grid : CubedSphereGrid or LatLonGrid
+        The grid (any grid with .area).
     g : float
         Gravitational acceleration.
 
@@ -143,20 +150,15 @@ def fix_energy_shallow_water(
 
     E_old = total_energy(state_old)
 
-    # Compute current kinetic energy
     h_new = state_new.h.data
     u_new = state_new.u.data
     v_new = state_new.v.data
     KE_new = _global_area_sum(0.5 * h_new * (u_new**2 + v_new**2), grid)
 
-    # PE is already set by h (which was fixed by mass fixer)
     PE_new = _global_area_sum(0.5 * g * (h_new + state_new.h_s.data)**2, grid)
 
-    # Scale KE to match target: KE_target = E_old - PE_new
     KE_target = E_old - PE_new
-    # Guard against negative KE_target (PE_new > E_old after mass fixer)
     KE_target = jnp.maximum(KE_target, 0.0)
-    # Avoid division by zero when KE_new is negligible
     scale = jnp.where(KE_new > 1e-30, jnp.sqrt(KE_target / KE_new), 1.0)
 
     u_fixed = state_new.u.replace(data=u_new * scale)
@@ -168,12 +170,12 @@ def fix_energy_shallow_water(
 def apply_conservation_fixer(
     state_new: ShallowWaterState,
     state_old: ShallowWaterState,
-    grid: CubedSphereGrid,
+    grid,
     fix_mass: bool = True,
     fix_energy: bool = True,
     g: float = 9.80616,
 ) -> ShallowWaterState:
-    """Apply all conservation fixers in sequence.
+    """Apply all conservation fixers in sequence (any grid).
 
     Order: mass first, then energy (energy fix adjusts velocities
     without changing mass).
@@ -259,47 +261,59 @@ def fix_mass_hydrostatic_latlon(
 
 def zero_mean_tendency(
     tendency: jax.Array,
-    grid: CubedSphereGrid,
+    grid,
 ) -> jax.Array:
-    """Remove the area-weighted global mean from a tendency field.
+    """Remove the area-weighted global mean from a tendency field (any grid).
 
     After this correction, ``sum(tendency * area) == 0`` to machine
     precision, enforcing exact conservation for explicit FV mass equations.
 
-    Works for both 2D ``(6, n, n)`` and 3D ``(6, n, n, nlev)`` arrays.
-    For 3D arrays the correction is applied independently at each level.
+    Works for 2D, 3D, and 4D arrays. The area dimensions are inferred
+    from ``grid.area.ndim``:
+    - Cubed-sphere: area is (6,n,n), tendency is (6,n,n) or (6,n,n,nlev).
+    - Lat-lon: area is (n_lat,n_lon), tendency is (n_lat,n_lon) or (n_lat,n_lon,nlev).
+
+    For arrays with a trailing level axis, the correction is applied
+    independently at each level.
 
     Parameters
     ----------
     tendency : jax.Array
         The mass/tracer tendency field.
-    grid : CubedSphereGrid
-        Grid with cell areas and total_area.
+    grid : CubedSphereGrid or LatLonGrid
+        Grid with cell areas.
 
     Returns
     -------
     jax.Array : Corrected tendency with zero global integral.
     """
     acc = _accumulation_dtype()
-    area = grid.area  # (6, n, n)
+    area = grid.area
     area_acc = area.astype(acc)
     total_area_acc = jnp.sum(area_acc)
     orig_dtype = tendency.dtype
-    if tendency.ndim == 3:
+    area_ndim = area.ndim  # 3 for cubed-sphere, 2 for lat-lon
+
+    if tendency.ndim == area_ndim:
+        # 2D tendency (lat-lon) or 3D tendency (cubed-sphere) — no level axis
         global_sum = _global_area_sum(tendency, grid)
         correction = global_sum / total_area_acc
-        # Compute in accumulation dtype then cast back to original dtype
         return (tendency.astype(acc) - correction).astype(orig_dtype)
-    elif tendency.ndim == 4:
-        # Per-level correction
+    elif tendency.ndim == area_ndim + 1:
+        # Has a trailing level axis — per-level correction
         tend_acc = tendency.astype(acc)
         prod = tend_acc * area_acc[..., None]
-        level_sums = jnp.sum(prod, axis=(0, 1, 2))  # (nlev,)
+        # Sum over all spatial axes (all except the last)
+        spatial_axes = tuple(range(area_ndim))
+        level_sums = jnp.sum(prod, axis=spatial_axes)  # (nlev,)
         if _is_distributed():
             from legoesm.parallel.reductions import global_sum_mpi
             level_sums = global_sum_mpi(level_sums)
         corrections = level_sums / total_area_acc  # (nlev,)
-        return (tend_acc - corrections[None, None, None, :]).astype(orig_dtype)
+        # Broadcast corrections to match tendency shape
+        for _ in range(area_ndim):
+            corrections = jnp.expand_dims(corrections, 0)
+        return (tend_acc - corrections).astype(orig_dtype)
     else:
         return tendency
 
@@ -520,17 +534,16 @@ def compute_nh_energy(
 
 def compute_conservation_diagnostics(
     state: ShallowWaterState,
-    grid: CubedSphereGrid,
+    grid,
     g: float = 9.80616,
 ) -> dict[str, jax.Array]:
-    """Compute conservation diagnostic quantities.
+    """Compute conservation diagnostic quantities (any grid).
 
     Returns
     -------
     dict with:
         'total_mass': Global integral of h*area
         'total_energy': Global integral of (KE + PE)*area
-        'total_enstrophy': Global integral of 0.5*q^2*h*area (q = abs vorticity / h)
     """
     h = state.h.data
     u = state.u.data
@@ -552,130 +565,13 @@ def compute_conservation_diagnostics(
 # Lat-lon conservation fixers
 # ==============================================================================
 
-def _global_area_sum_latlon(array: jax.Array, grid) -> jax.Array:
-    """Area-weighted global sum for lat-lon grid."""
-    acc = _accumulation_dtype()
-    return jnp.sum(array.astype(acc) * grid.area.astype(acc))
-
-
-def zero_mean_tendency_latlon(
-    tendency: jax.Array,
-    grid,
-) -> jax.Array:
-    """Remove the area-weighted global mean from a tendency on a lat-lon grid.
-
-    After this correction, ``sum(tendency * area) == 0`` to machine
-    precision, enforcing exact conservation for explicit FV mass equations.
-
-    Works for 2D ``(n_lat, n_lon)`` and 3D ``(n_lat, n_lon, nlev)`` arrays.
-
-    Parameters
-    ----------
-    tendency : jax.Array
-    grid : LatLonGrid
-    """
-    acc = _accumulation_dtype()
-    area_acc = grid.area.astype(acc)
-    total_area_acc = jnp.sum(area_acc)
-    orig_dtype = tendency.dtype
-
-    if tendency.ndim == 2:
-        global_sum = _global_area_sum_latlon(tendency, grid)
-        correction = global_sum / total_area_acc
-        return (tendency.astype(acc) - correction).astype(orig_dtype)
-    elif tendency.ndim == 3:
-        # Per-level correction
-        tend_acc = tendency.astype(acc)
-        prod = tend_acc * area_acc[..., None]
-        level_sums = jnp.sum(prod, axis=(0, 1))  # (nlev,)
-        corrections = level_sums / total_area_acc
-        return (tend_acc - corrections[None, None, :]).astype(orig_dtype)
-    else:
-        return tendency
-
-
-def fix_mass_shallow_water_latlon(
-    state_new: ShallowWaterState,
-    state_old: ShallowWaterState,
-    grid,
-) -> ShallowWaterState:
-    """Fix mass conservation for shallow water on a lat-lon grid."""
-    acc = _accumulation_dtype()
-    mass_old = jnp.sum(state_old.h.data.astype(acc) * grid.area.astype(acc))
-    mass_new = jnp.sum(state_new.h.data.astype(acc) * grid.area.astype(acc))
-    correction = (mass_old - mass_new) / grid.total_area
-    h_fixed = state_new.h.replace(data=state_new.h.data + correction)
-    return state_new._replace(h=h_fixed)
-
-
-def fix_energy_shallow_water_latlon(
-    state_new: ShallowWaterState,
-    state_old: ShallowWaterState,
-    grid,
-    g: float = 9.80616,
-) -> ShallowWaterState:
-    """Fix total energy conservation for shallow water on a lat-lon grid."""
-    def total_energy(state):
-        h = state.h.data
-        u = state.u.data
-        v = state.v.data
-        h_s = state.h_s.data
-        ke = 0.5 * h * (u**2 + v**2)
-        pe = 0.5 * g * (h + h_s)**2
-        return _global_area_sum_latlon(ke + pe, grid)
-
-    E_old = total_energy(state_old)
-
-    h_new = state_new.h.data
-    u_new = state_new.u.data
-    v_new = state_new.v.data
-    KE_new = _global_area_sum_latlon(0.5 * h_new * (u_new**2 + v_new**2), grid)
-    PE_new = _global_area_sum_latlon(0.5 * g * (h_new + state_new.h_s.data)**2, grid)
-
-    KE_target = jnp.maximum(E_old - PE_new, 0.0)
-    scale = jnp.where(KE_new > 1e-30, jnp.sqrt(KE_target / KE_new), 1.0)
-
-    u_fixed = state_new.u.replace(data=u_new * scale)
-    v_fixed = state_new.v.replace(data=v_new * scale)
-    return state_new._replace(u=u_fixed, v=v_fixed)
-
-
-def apply_conservation_fixer_latlon(
-    state_new: ShallowWaterState,
-    state_old: ShallowWaterState,
-    grid,
-    fix_mass: bool = True,
-    fix_energy: bool = True,
-    g: float = 9.80616,
-) -> ShallowWaterState:
-    """Apply all conservation fixers for shallow water on a lat-lon grid."""
-    if fix_mass:
-        state_new = fix_mass_shallow_water_latlon(state_new, state_old, grid)
-    if fix_energy:
-        state_new = fix_energy_shallow_water_latlon(state_new, state_old, grid, g)
-    return state_new
-
-
-def compute_conservation_diagnostics_latlon(
-    state: ShallowWaterState,
-    grid,
-    g: float = 9.80616,
-) -> dict[str, jax.Array]:
-    """Compute conservation diagnostics for SW on a lat-lon grid."""
-    h = state.h.data
-    u = state.u.data
-    v = state.v.data
-    h_s = state.h_s.data
-
-    total_mass = _global_area_sum_latlon(h, grid)
-    ke = 0.5 * h * (u**2 + v**2)
-    pe = 0.5 * g * (h + h_s)**2
-    total_energy = _global_area_sum_latlon(ke + pe, grid)
-
-    return {
-        'total_mass': total_mass,
-        'total_energy': total_energy,
-    }
+# Backward-compatible aliases — the unified functions now work for any grid.
+_global_area_sum_latlon = _global_area_sum
+zero_mean_tendency_latlon = zero_mean_tendency
+fix_mass_shallow_water_latlon = fix_mass_shallow_water
+fix_energy_shallow_water_latlon = fix_energy_shallow_water
+apply_conservation_fixer_latlon = apply_conservation_fixer
+compute_conservation_diagnostics_latlon = compute_conservation_diagnostics
 
 
 # ==============================================================================

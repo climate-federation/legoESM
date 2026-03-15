@@ -149,6 +149,7 @@ def rrtmgp_radiation(
     cloud_r_eff_ice: jnp.ndarray | None = None,
     aerosol_optical_depth: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
+    ghg_vmr_override: dict | None = None,
 ) -> RadiationOutput:
     """Compute radiation using jax-rrtmgp.
 
@@ -195,6 +196,11 @@ def rrtmgp_radiation(
     solar_spectral_fraction : jnp.ndarray | None
         Optional per-g-point solar source weights (ngpt_sw,). If provided,
         this overrides the default RRTMGP solar partitioning.
+    ghg_vmr_override : dict or None
+        Runtime GHG overrides.  Keys are gas names (``"co2"``, ``"ch4"``,
+        ``"n2o"``); values are volume mixing ratios (dimensionless).
+        These are injected as 3D ``vmr_fields`` entries, overriding
+        the cached global means in the VMR library.
 
     Returns
     -------
@@ -228,6 +234,11 @@ def rrtmgp_radiation(
         "h2o": h2o_vmr,
         "o3": o3_3d,
     }
+
+    # Inject runtime GHG overrides as 3D vmr_fields (bypasses cached optics).
+    if ghg_vmr_override is not None:
+        for gas_name, vmr_value in ghg_vmr_override.items():
+            vmr_fields[gas_name] = jnp.full_like(p_3d, vmr_value)
 
     # Compute molecules per area (centered difference preserves shape via roll)
     dp = kernel_ops.centered_difference(p_3d, dim=2)

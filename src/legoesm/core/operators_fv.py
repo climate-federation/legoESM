@@ -33,19 +33,22 @@ from legoesm.grids.halo import pad_halo, pad_halo_vector
 # PPM edge reconstruction
 # ==============================================================================
 
-def _ppm_edge_values(q_1d):
+def _ppm_edge_values(q_1d, blend_edges=False):
     """4th-order edge values from cell averages along last-but-one axis.
 
-    At the two cube-face boundary edges (inner-most halo to first interior
-    cell), the 4th-order stencil is blended with a one-sided 3rd-order
-    extrapolation from the interior to reduce sensitivity to halo
-    interpolation errors.  This follows the FV3 approach of Putman &
-    Lin (2007).
+    When ``blend_edges=True``, the boundary edges (inner-most halo to
+    first interior cell) are blended with one-sided 3rd-order
+    extrapolation from the interior — the FV3 approach of Putman &
+    Lin (2007).  With Duo-Grid halo interpolation, this blending is
+    unnecessary and disabled by default.
 
     Parameters
     ----------
     q_1d : jax.Array, shape (..., M, K) where M = n+4
         Cell averages with halo=2, transverse halo stripped.
+    blend_edges : bool
+        If True, blend boundary edges with one-sided extrapolation.
+        Default False (full 4th-order everywhere with Duo-Grid halo).
 
     Returns
     -------
@@ -58,12 +61,8 @@ def _ppm_edge_values(q_1d):
     q_hat_inner = ((7.0 / 12.0) * (q_1d[..., 1:-2, :] + q_1d[..., 2:-1, :])
                    - (1.0 / 12.0) * (q_1d[..., :-3, :] + q_1d[..., 3:, :]))
 
-    # One-sided 3rd-order extrapolation from interior at cube-face boundaries.
-    # Edge 1 (between cells 1 and 2, position 1.5): extrapolate from cells 2,3,4.
-    # Edge M-3 (between cells M-3 and M-2): extrapolate from cells M-3,M-4,M-5.
-    # Formula: Lagrange interpolation at x+0.5 from 3 interior cell centres.
-    #   q_hat = (15*q_near - 10*q_mid + 3*q_far) / 8
-    if M >= 7:  # n >= 3 — enough interior cells for 3-point extrapolation
+    if blend_edges and M >= 7:
+        # One-sided 3rd-order extrapolation from interior at cube-face boundaries.
         q_os_lo = (
             15.0 * q_1d[..., 2:3, :]
             - 10.0 * q_1d[..., 3:4, :]

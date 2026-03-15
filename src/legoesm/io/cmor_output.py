@@ -252,6 +252,91 @@ _AMON_VARIABLES: Dict[str, Dict[str, str]] = {
         "cell_methods": "time: mean",
         "dimensions": ("time", "plev", "lat", "lon"),
     },
+    # --- Additional Amon variables for CMIP submission ---
+    "ts": {
+        "standard_name": "surface_temperature",
+        "long_name": "Surface Temperature",
+        "units": "K",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "zg": {
+        "standard_name": "geopotential_height",
+        "long_name": "Geopotential Height",
+        "units": "m",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "plev", "lat", "lon"),
+    },
+    "wap": {
+        "standard_name": "lagrangian_tendency_of_air_pressure",
+        "long_name": "Omega (=dp/dt)",
+        "units": "Pa s-1",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "plev", "lat", "lon"),
+    },
+    "hur": {
+        "standard_name": "relative_humidity",
+        "long_name": "Relative Humidity",
+        "units": "%",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "plev", "lat", "lon"),
+    },
+    "hurs": {
+        "standard_name": "relative_humidity",
+        "long_name": "Near-Surface Relative Humidity",
+        "units": "%",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "clw": {
+        "standard_name": "mass_fraction_of_cloud_liquid_water_in_air",
+        "long_name": "Mass Fraction of Cloud Liquid Water",
+        "units": "1",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "plev", "lat", "lon"),
+    },
+    "cli": {
+        "standard_name": "mass_fraction_of_cloud_ice_in_air",
+        "long_name": "Mass Fraction of Cloud Ice",
+        "units": "1",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "plev", "lat", "lon"),
+    },
+    "rsutcs": {
+        "standard_name": "toa_outgoing_shortwave_flux_assuming_clear_sky",
+        "long_name": "TOA Outgoing Clear-Sky Shortwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "rlutcs": {
+        "standard_name": "toa_outgoing_longwave_flux_assuming_clear_sky",
+        "long_name": "TOA Outgoing Clear-Sky Longwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "rsdscs": {
+        "standard_name": "surface_downwelling_shortwave_flux_in_air_assuming_clear_sky",
+        "long_name": "Surface Downwelling Clear-Sky Shortwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "rldscs": {
+        "standard_name": "surface_downwelling_longwave_flux_in_air_assuming_clear_sky",
+        "long_name": "Surface Downwelling Clear-Sky Longwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "evspsbl": {
+        "standard_name": "water_evapotranspiration_flux",
+        "long_name": "Evaporation Including Sublimation and Transpiration",
+        "units": "kg m-2 s-1",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
 }
 
 _LMON_VARIABLES: Dict[str, Dict[str, str]] = {
@@ -304,10 +389,67 @@ _LMON_VARIABLES: Dict[str, Dict[str, str]] = {
     },
 }
 
+_OMON_VARIABLES: Dict[str, Dict[str, str]] = {
+    "tos": {
+        "standard_name": "sea_surface_temperature",
+        "long_name": "Sea Surface Temperature",
+        "units": "K",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "sic": {
+        "standard_name": "sea_ice_area_fraction",
+        "long_name": "Sea-Ice Area Percentage (Ocean Grid)",
+        "units": "%",
+        "cell_methods": "time: mean area: mean where sea",
+        "dimensions": ("time", "lat", "lon"),
+    },
+}
+
+_ADAY_VARIABLES: Dict[str, Dict[str, str]] = {
+    "tas": {
+        "standard_name": "air_temperature",
+        "long_name": "Near-Surface Air Temperature",
+        "units": "K",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "pr": {
+        "standard_name": "precipitation_flux",
+        "long_name": "Precipitation",
+        "units": "kg m-2 s-1",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "psl": {
+        "standard_name": "air_pressure_at_mean_sea_level",
+        "long_name": "Sea Level Pressure",
+        "units": "Pa",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "rsut": {
+        "standard_name": "toa_outgoing_shortwave_flux",
+        "long_name": "TOA Outgoing Shortwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+    "rlut": {
+        "standard_name": "toa_outgoing_longwave_flux",
+        "long_name": "TOA Outgoing Longwave Radiation",
+        "units": "W m-2",
+        "cell_methods": "time: mean",
+        "dimensions": ("time", "lat", "lon"),
+    },
+}
+
 # Combined lookup for convenience
 CMOR_TABLES: Dict[str, Dict[str, Dict[str, str]]] = {
     "Amon": _AMON_VARIABLES,
     "Lmon": _LMON_VARIABLES,
+    "Omon": _OMON_VARIABLES,
+    "Aday": _ADAY_VARIABLES,
 }
 
 # Standard CMIP6 pressure levels [Pa] (19 levels, top-to-bottom)

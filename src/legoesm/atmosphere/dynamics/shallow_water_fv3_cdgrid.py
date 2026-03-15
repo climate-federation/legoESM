@@ -35,7 +35,8 @@ from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
     create_cubed_sphere_cdgrid,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm import constants
 
 
@@ -64,6 +65,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     hyperdiff_coeff: float = 0.0  # Biharmonic hyperdiffusion
     use_conservation_fixer: bool = True
     fix_mass: bool = True
+    time_integrator: str = "ssp_rk3"
 
 
 # ==============================================================================
@@ -111,7 +113,7 @@ def cdgrid_shallow_water_tendencies(
 # Model class
 # ==============================================================================
 
-class CDGridShallowWaterModel:
+class CDGridShallowWaterModel(IntegrationMixin):
     """FV3-style C-D grid shallow water model on the cubed-sphere.
 
     Parameters
@@ -150,7 +152,9 @@ class CDGridShallowWaterModel:
                 h_s=jnp.zeros_like(s.h_s),
             )
 
-        state_new = ssp_rk3_step(state, tendency_fn, dt)
+        state_new = dispatch_integrator(
+            state, tendency_fn, dt, self.config.time_integrator,
+        )
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
@@ -162,18 +166,3 @@ class CDGridShallowWaterModel:
 
         return state_new
 
-    def integrate(
-        self,
-        state: CDGridShallowWaterState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-    ) -> tuple[CDGridShallowWaterState, list[CDGridShallowWaterState]]:
-        """Integrate forward for a given duration."""
-        n_steps = int(duration / dt)
-        trajectory = [state]
-        for i in range(n_steps):
-            state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-        return state, trajectory
