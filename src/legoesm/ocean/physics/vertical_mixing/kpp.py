@@ -80,42 +80,26 @@ def _boundary_layer_depth(
         rho_0_ref * jnp.maximum(delta_V2 + V_t2, eps)
     )
 
-    # --- Linear interpolation of crossing depth ---
-    # Find where Ri_b first exceeds Ri_crit and interpolate
-    exceeds = Ri_b > cfg.Ri_crit
+    # --- Differentiable soft interpolation of crossing depth ---
+    # Instead of argmax (non-differentiable), use a sigmoid-weighted
+    # average over all levels.  Each level contributes a weight
+    # proportional to how much Ri_b crosses Ri_crit there.
+    #
+    # Weight at level k = sigmoid(sharpness * (Ri_b[k] - Ri_crit))
+    #                    - sigmoid(sharpness * (Ri_b[k-1] - Ri_crit))
+    # This is ~1 at the crossing level and ~0 elsewhere.
+    sharpness = 20.0
+    sig = jax.nn.sigmoid(sharpness * (Ri_b - cfg.Ri_crit))  # (..., nlev)
 
-    # Use argmax to find first True; if none found, use bottom
-    idx = jnp.argmax(exceeds, axis=-1)
-    any_exceeds = jnp.any(exceeds, axis=-1)
-    idx = jnp.where(any_exceeds, idx, nlev - 1)
+    # Crossing weight: difference of adjacent sigmoid values
+    sig_prev = jnp.concatenate([jnp.zeros_like(sig[..., :1]), sig[..., :-1]], axis=-1)
+    w_cross = sig - sig_prev  # (..., nlev), peaks at crossing level
+    w_cross = jnp.maximum(w_cross, 0.0)
+    w_sum = jnp.sum(w_cross, axis=-1, keepdims=True)
+    w_norm = w_cross / jnp.maximum(w_sum, eps)
 
-    # Gather Ri_b and z_depth at idx and idx-1 for interpolation
-    shape = rho.shape[:-1]
-    flat_idx = idx.ravel()
-    z_depth_flat = z_depth.reshape(-1, nlev)
-    Ri_b_flat = Ri_b.reshape(-1, nlev)
-
-    ncols = z_depth_flat.shape[0]
-    arange = jnp.arange(ncols)
-
-    z_at = z_depth_flat[arange, flat_idx]
-    Ri_at = Ri_b_flat[arange, flat_idx]
-
-    # Previous level (clipped to 0)
-    idx_prev = jnp.maximum(flat_idx - 1, 0)
-    z_prev = z_depth_flat[arange, idx_prev]
-    Ri_prev = Ri_b_flat[arange, idx_prev]
-
-    # Linear interpolation: find z where Ri_b = Ri_crit
-    dRi = Ri_at - Ri_prev
-    frac = jnp.where(
-        jnp.abs(dRi) > eps,
-        (cfg.Ri_crit - Ri_prev) / dRi,
-        1.0,
-    )
-    frac = jnp.clip(frac, 0.0, 1.0)
-    h_interp = z_prev + frac * (z_at - z_prev)
-    h = h_interp.reshape(shape)
+    # Weighted average depth gives the BL depth estimate
+    h = jnp.sum(w_norm * z_depth, axis=-1)  # (...)
 
     # At least one layer thick
     h = jnp.maximum(h, dz_actual[..., 0])

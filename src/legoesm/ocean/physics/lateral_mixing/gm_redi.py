@@ -78,8 +78,9 @@ def _compute_tapered_slopes(
     drho_dz_safe = jnp.minimum(drho_dz, -eps)
 
     # Slopes: S_x = -(drho/dx) / (drho/dz)
-    S_x = -drho_dx_half / drho_dz_safe
-    S_y = -drho_dy_half / drho_dz_safe
+    # Guard denominator to prevent huge slopes and NaN gradients
+    S_x = jnp.clip(-drho_dx_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
+    S_y = jnp.clip(-drho_dy_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
 
     # DM95 tapering: smooth taper near S_max
     S_mag = jnp.sqrt(S_x**2 + S_y**2 + eps)

@@ -244,17 +244,16 @@ def rrtmgp_radiation(
     # Surface properties: use overrides if provided (e.g. ice/ocean blend),
     # otherwise fall back to config defaults.
     if sfc_albedo_override is not None:
-        # jax-rrtmgp's AtmosphericState uses a scalar sfc_alb that gets
-        # broadcast to all columns.  Take column mean for the best single-
-        # value approximation.
-        eff_albedo = float(jnp.mean(jnp.asarray(sfc_albedo_override)))
+        # Keep this as a JAX scalar (not Python float) so rrtmgp_radiation
+        # remains JIT-safe when called from traced AMIP operator-split paths.
+        eff_albedo = jnp.asarray(jnp.mean(jnp.asarray(sfc_albedo_override)), dtype=p_3d.dtype)
     else:
-        eff_albedo = config.sfc_albedo
+        eff_albedo = jnp.asarray(config.sfc_albedo, dtype=p_3d.dtype)
 
     if sfc_emissivity_override is not None:
-        eff_emis = float(jnp.mean(jnp.asarray(sfc_emissivity_override)))
+        eff_emis = jnp.asarray(jnp.mean(jnp.asarray(sfc_emissivity_override)), dtype=p_3d.dtype)
     else:
-        eff_emis = config.sfc_emissivity
+        eff_emis = jnp.asarray(config.sfc_emissivity, dtype=p_3d.dtype)
 
     atmos_state = AtmosphericState(
         sfc_emis=eff_emis,

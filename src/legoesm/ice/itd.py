@@ -207,42 +207,38 @@ def linear_remap(
     # Volume = h * a for each category
     vol_new = h_new * a_new
 
-    # Transfer ice that exceeds upper bound to next category
-    # Transfer ice that falls below lower bound to previous category
-    vol_remap = vol_new.copy()
-    a_remap = a_new.copy()
+    # Vectorized transfer: compute excess/deficit fractions for all categories
+    # excess_frac[..., k]: fraction of category k's ice above its upper bound
+    excess_frac = jnp.where(
+        h_new > hi,
+        jnp.clip((h_new - hi) / jnp.maximum(h_new, 1e-10), 0.0, 1.0),
+        0.0,
+    )
+    # deficit_frac[..., k]: fraction below lower bound
+    deficit_frac = jnp.where(
+        (h_new < lo) & (h_new > 0.0),
+        jnp.clip((lo - h_new) / jnp.maximum(lo, 1e-10), 0.0, 1.0),
+        0.0,
+    )
 
-    for k in range(n_cat):
-        # Fraction of this category's ice that exceeds its upper bound
-        excess_frac = jnp.where(
-            h_new[..., k] > hi[k],
-            jnp.clip((h_new[..., k] - hi[k]) / jnp.maximum(h_new[..., k], 1e-10), 0.0, 1.0),
-            0.0,
-        )
-        # Fraction below lower bound
-        deficit_frac = jnp.where(
-            (h_new[..., k] < lo[k]) & (h_new[..., k] > 0.0),
-            jnp.clip((lo[k] - h_new[..., k]) / jnp.maximum(lo[k], 1e-10), 0.0, 1.0),
-            0.0,
-        )
+    # Volume and area transfers
+    vol_excess = vol_new * excess_frac
+    a_excess = a_new * excess_frac
+    vol_deficit = vol_new * deficit_frac
+    a_deficit = a_new * deficit_frac
 
-        # Move excess volume to next category (if exists)
-        vol_excess = vol_remap[..., k] * excess_frac
-        a_excess = a_remap[..., k] * excess_frac
-        vol_remap = vol_remap.at[..., k].add(-vol_excess)
-        a_remap = a_remap.at[..., k].add(-a_excess)
-        if k < n_cat - 1:
-            vol_remap = vol_remap.at[..., k + 1].add(vol_excess)
-            a_remap = a_remap.at[..., k + 1].add(a_excess)
+    # Remove excess and deficit from each category
+    vol_remap = vol_new - vol_excess - vol_deficit
+    a_remap = a_new - a_excess - a_deficit
 
-        # Move deficit volume to previous category (if exists)
-        vol_deficit = vol_remap[..., k] * deficit_frac
-        a_deficit = a_remap[..., k] * deficit_frac
-        vol_remap = vol_remap.at[..., k].add(-vol_deficit)
-        a_remap = a_remap.at[..., k].add(-a_deficit)
-        if k > 0:
-            vol_remap = vol_remap.at[..., k - 1].add(vol_deficit)
-            a_remap = a_remap.at[..., k - 1].add(a_deficit)
+    # Add excess to next category (shift left, pad last with zero)
+    z_pad = jnp.zeros_like(vol_excess[..., :1])
+    vol_remap = vol_remap + jnp.concatenate([z_pad, vol_excess[..., :-1]], axis=-1)
+    a_remap = a_remap + jnp.concatenate([z_pad, a_excess[..., :-1]], axis=-1)
+
+    # Add deficit to previous category (shift right, pad first with zero)
+    vol_remap = vol_remap + jnp.concatenate([vol_deficit[..., 1:], z_pad], axis=-1)
+    a_remap = a_remap + jnp.concatenate([a_deficit[..., 1:], z_pad], axis=-1)
 
     # Recover thickness from volume
     a_remap = jnp.clip(a_remap, 0.0, 1.0)

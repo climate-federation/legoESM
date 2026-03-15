@@ -20,6 +20,7 @@ Thermodynamics:
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -286,20 +287,19 @@ def _step_dynamic(
     # ---- 2. Transport ----
     if config.transport == "advect" and grid is not None:
         if h.ndim > 3:
-            # Multi-category: advect each category
-            n_cat = h.shape[-1]
-            h_list, conc_list, T_list = [], [], []
-            for k in range(n_cat):
-                h_k, c_k, T_k = advect_ice_tracers(
-                    h[..., k], conc[..., k], T_ice[..., k],
-                    u_ice, v_ice, grid, dt,
+            # Multi-category: advect each category via vmap over last axis
+            def _advect_cat(h_k, conc_k, T_k):
+                return advect_ice_tracers(
+                    h_k, conc_k, T_k, u_ice, v_ice, grid, dt,
                 )
-                h_list.append(h_k)
-                conc_list.append(c_k)
-                T_list.append(T_k)
-            h = jnp.stack(h_list, axis=-1)
-            conc = jnp.stack(conc_list, axis=-1)
-            T_ice = jnp.stack(T_list, axis=-1)
+            # Move category axis to front for vmap, then back
+            h_t = jnp.moveaxis(h, -1, 0)
+            conc_t = jnp.moveaxis(conc, -1, 0)
+            T_t = jnp.moveaxis(T_ice, -1, 0)
+            h_t, conc_t, T_t = jax.vmap(_advect_cat)(h_t, conc_t, T_t)
+            h = jnp.moveaxis(h_t, 0, -1)
+            conc = jnp.moveaxis(conc_t, 0, -1)
+            T_ice = jnp.moveaxis(T_t, 0, -1)
         else:
             h, conc, T_ice = advect_ice_tracers(
                 h, conc, T_ice, u_ice, v_ice, grid, dt,
@@ -307,22 +307,24 @@ def _step_dynamic(
 
     # ---- 3. Thermodynamics (per category or single) ----
     if h.ndim > 3:
-        # Multi-category: apply thermodynamics per category
-        h_old = h.copy()
-        conc_old = conc.copy()
+        # Multi-category: apply thermodynamics per category via vmap
         n_cat = h.shape[-1]
-        h_list, T_list, conc_list = [], [], []
-        for k in range(n_cat):
-            h_k, T_k, conc_k = _thermo_single(
-                h[..., k], T_ice[..., k], conc[..., k],
+        h_old = h
+        conc_old = conc
+
+        def _thermo_cat(h_k, T_k, conc_k):
+            return _thermo_single(
+                h_k, T_k, conc_k,
                 forcing, ocean_sst, config, U_min, dt,
             )
-            h_list.append(h_k)
-            T_list.append(T_k)
-            conc_list.append(conc_k)
-        h = jnp.stack(h_list, axis=-1)
-        T_ice = jnp.stack(T_list, axis=-1)
-        conc = jnp.stack(conc_list, axis=-1)
+
+        h_t = jnp.moveaxis(h, -1, 0)
+        T_t = jnp.moveaxis(T_ice, -1, 0)
+        conc_t = jnp.moveaxis(conc, -1, 0)
+        h_t, T_t, conc_t = jax.vmap(_thermo_cat)(h_t, T_t, conc_t)
+        h = jnp.moveaxis(h_t, 0, -1)
+        T_ice = jnp.moveaxis(T_t, 0, -1)
+        conc = jnp.moveaxis(conc_t, 0, -1)
 
         # ---- 4. ITD remap ----
         h, conc = linear_remap(h_old, conc_old, h, conc, n_cat)

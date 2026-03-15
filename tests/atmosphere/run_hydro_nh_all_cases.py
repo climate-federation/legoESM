@@ -93,6 +93,7 @@ def _run(cmd: list[str], cwd: Path) -> tuple[int, float]:
     root = str(cwd.resolve())
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = root if not existing else f"{root}{os.pathsep}{existing}"
+    env.setdefault("JAX_ENABLE_X64", "True")
     t0 = time.time()
     proc = subprocess.run(cmd, cwd=str(cwd), env=env, check=False)
     return proc.returncode, time.time() - t0
@@ -212,7 +213,15 @@ def _standardize_case_artifacts(case_dir: Path) -> None:
 
 
 def _build_amip_artifacts(case_dir: Path, default_snapshot_days: list[float]) -> None:
-    _copy_if_exists(case_dir / "amip_snapshots.png", case_dir / "field_snapshots.png")
+    if not _copy_if_exists(case_dir / "amip_snapshots.png", case_dir / "field_snapshots.png"):
+        _copy_if_exists(case_dir / "amip_final_state.png", case_dir / "field_snapshots.png")
+    if not _copy_if_exists(case_dir / "amip_snapshots_native.png", case_dir / "field_snapshots_native.png"):
+        _copy_if_exists(case_dir / "field_snapshots.png", case_dir / "field_snapshots_native.png")
+    if not _copy_if_exists(
+        case_dir / "amip_snapshots_latlon_pixels.png",
+        case_dir / "field_snapshots_latlon_pixels.png",
+    ):
+        _copy_if_exists(case_dir / "field_snapshots.png", case_dir / "field_snapshots_latlon_pixels.png")
     _copy_if_exists(case_dir / "amip_profiles.png", case_dir / "vertical_profiles.png")
     _copy_if_exists(case_dir / "amip_timeseries.png", case_dir / "mean_timeseries.png")
     _copy_if_exists(case_dir / "amip_profiles.png", case_dir / "mean_profiles.png")
@@ -321,6 +330,7 @@ def main() -> None:
     parser.add_argument("--amip-days", type=int, default=10)
     parser.add_argument("--amip-dt", type=float, default=600.0)
     parser.add_argument("--amip-spec-dt", type=float, default=900.0)
+    parser.add_argument("--skip-hs-dcmip", action="store_true")
     parser.add_argument("--skip-amip", action="store_true")
     parser.add_argument("--skip-nh-spectral", action="store_true")
     args = parser.parse_args()
@@ -336,62 +346,63 @@ def main() -> None:
     records: list[dict[str, object]] = []
 
     # 1) HS + DCMIP radiation matrix (hydro + NH FV)
-    matrix_out = raw_root / "hs_dcmip_matrix"
-    cmd_matrix = [
-        str(python_exec),
-        "scripts/run_hs_dcmip_radiation_matrix.py",
-        "--output",
-        str(matrix_out),
-        "--schemes",
-        ",".join(schemes),
-        "--presets",
-        preset.name,
-        "--hs-days",
-        str(args.hs_days),
-        "--tc1-hours",
-        str(args.tc1_hours),
-        "--tc23-minutes",
-        str(args.tc23_minutes),
-        "--mean-every",
-        str(args.mean_every),
-        "--solver",
-        args.solver,
-    ]
-    rc, wall = _run(cmd_matrix, repo_root)
-    records.append(
-        {
-            "component": "hs_dcmip_matrix",
-            "status": "PASS" if rc == 0 else "FAIL",
-            "wall_time_s": wall,
-            "output": str(matrix_out),
-        },
-    )
+    if not args.skip_hs_dcmip:
+        matrix_out = raw_root / "hs_dcmip_matrix"
+        cmd_matrix = [
+            str(python_exec),
+            "scripts/run_hs_dcmip_radiation_matrix.py",
+            "--output",
+            str(matrix_out),
+            "--schemes",
+            ",".join(schemes),
+            "--presets",
+            preset.name,
+            "--hs-days",
+            str(args.hs_days),
+            "--tc1-hours",
+            str(args.tc1_hours),
+            "--tc23-minutes",
+            str(args.tc23_minutes),
+            "--mean-every",
+            str(args.mean_every),
+            "--solver",
+            args.solver,
+        ]
+        rc, wall = _run(cmd_matrix, repo_root)
+        records.append(
+            {
+                "component": "hs_dcmip_matrix",
+                "status": "PASS" if rc == 0 else "FAIL",
+                "wall_time_s": wall,
+                "output": str(matrix_out),
+            },
+        )
 
-    if rc == 0:
-        for scheme in schemes:
-            for src_name, (dycore, grid, case) in CASE_MAP.items():
-                src = matrix_out / scheme / preset.name / src_name
-                if not src.exists():
+        if rc == 0:
+            for scheme in schemes:
+                for src_name, (dycore, grid, case) in CASE_MAP.items():
+                    src = matrix_out / scheme / preset.name / src_name
+                    if not src.exists():
+                        records.append(
+                            {
+                                "component": f"{scheme}/{src_name}",
+                                "status": "MISSING",
+                                "wall_time_s": 0.0,
+                                "output": "",
+                            },
+                        )
+                        continue
+                    dst = output_root / dycore / grid / case / f"{scheme}_{preset.name}"
+                    _copy_tree(src, dst)
+                    _standardize_case_artifacts(dst)
                     records.append(
                         {
                             "component": f"{scheme}/{src_name}",
-                            "status": "MISSING",
+                            "status": "PASS",
                             "wall_time_s": 0.0,
-                            "output": "",
+                            "output": str(dst),
                         },
                     )
-                    continue
-                dst = output_root / dycore / grid / case / f"{scheme}_{preset.name}"
-                _copy_tree(src, dst)
-                _standardize_case_artifacts(dst)
-                records.append(
-                    {
-                        "component": f"{scheme}/{src_name}",
-                        "status": "PASS",
-                        "wall_time_s": 0.0,
-                        "output": str(dst),
-                    },
-                )
 
     # 2) AMIP FV cube (gray + rrtmg)
     if not args.skip_amip:
@@ -406,6 +417,8 @@ def main() -> None:
                 "scripts/run_amip.py",
                 "--dataset",
                 "analytical",
+                "--vertical-coord",
+                "sigma",
                 "--days",
                 str(args.amip_days),
                 "--resolution",
@@ -445,6 +458,8 @@ def main() -> None:
             "scripts/run_amip_spectral.py",
             "--dataset",
             "analytical",
+            "--vertical-coord",
+            "sigma",
             "--days",
             str(args.amip_days),
             "--truncation",

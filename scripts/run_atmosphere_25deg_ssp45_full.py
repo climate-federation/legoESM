@@ -281,6 +281,219 @@ def _save_snapshots(
             t_sec = st * dt
             f.write(f"{st},{t_sec:.6f},{t_sec/86400.0:.8f}\n")
 
+    # Additional standardized products:
+    # - native grid rendering
+    # - pixelwise lat-lon regridding rendering
+    _save_snapshots_native(
+        out_dir,
+        case_name,
+        snapshots,
+        dt,
+        field_specs,
+        coord_kind=coord_kind,
+    )
+    if lon_deg is not None and lat_deg is not None:
+        _save_snapshots_latlon_pixels(
+            out_dir,
+            case_name,
+            snapshots,
+            dt,
+            field_specs,
+            coord_kind=coord_kind,
+            lon_deg=np.asarray(lon_deg),
+            lat_deg=np.asarray(lat_deg),
+        )
+
+
+def _panel_native_grid(panel: np.ndarray, coord_kind: str) -> np.ndarray:
+    arr = np.asarray(panel)
+    if coord_kind == "cube" and arr.ndim == 3 and arr.shape[0] == 6:
+        # Face-index strip (0..5) in native cube-face order.
+        return np.concatenate([arr[i] for i in range(6)], axis=1)
+    if arr.ndim == 2:
+        return arr
+    return np.squeeze(arr)
+
+
+def _regrid_panel_to_latlon_pixels(
+    panel: np.ndarray,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    coord_kind: str,
+    n_lon_out: int = 360,
+    n_lat_out: int = 181,
+) -> np.ndarray:
+    arr = np.asarray(panel, dtype=np.float64)
+
+    if coord_kind == "cube" and arr.ndim == 3 and arr.shape[0] == 6:
+        vals = arr.reshape(-1)
+        lon = np.asarray(lon_deg, dtype=np.float64).reshape(-1)
+        lat = np.asarray(lat_deg, dtype=np.float64).reshape(-1)
+    else:
+        if arr.ndim != 2:
+            arr = np.squeeze(arr)
+        lon_a = np.asarray(lon_deg, dtype=np.float64)
+        lat_a = np.asarray(lat_deg, dtype=np.float64)
+        if lon_a.ndim == 1 and lat_a.ndim == 1:
+            lon2d, lat2d = np.meshgrid(lon_a, lat_a)
+        else:
+            lon2d = lon_a
+            lat2d = lat_a
+        vals = arr.reshape(-1)
+        lon = lon2d.reshape(-1)
+        lat = lat2d.reshape(-1)
+
+    lon = ((lon + 180.0) % 360.0) - 180.0
+    lat = np.clip(lat, -90.0, 90.0)
+
+    valid = np.isfinite(vals) & np.isfinite(lon) & np.isfinite(lat)
+    if not np.any(valid):
+        return np.full((n_lat_out, n_lon_out), np.nan, dtype=np.float64)
+
+    vals_v = vals[valid]
+    lon_v = lon[valid]
+    lat_v = lat[valid]
+
+    lat_edges = np.linspace(-90.0, 90.0, n_lat_out + 1)
+    lon_edges = np.linspace(-180.0, 180.0, n_lon_out + 1)
+    sum_grid, _, _ = np.histogram2d(lat_v, lon_v, bins=(lat_edges, lon_edges), weights=vals_v)
+    cnt_grid, _, _ = np.histogram2d(lat_v, lon_v, bins=(lat_edges, lon_edges))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(cnt_grid > 0.0, sum_grid / cnt_grid, np.nan)
+    return out
+
+
+def _save_snapshots_native(
+    out_dir: Path,
+    case_name: str,
+    snapshots: dict[int, dict[str, np.ndarray]],
+    dt: float,
+    field_specs: list[tuple[str, str, str]],
+    *,
+    coord_kind: str,
+) -> None:
+    steps = sorted(snapshots.keys())
+    if not steps:
+        return
+
+    n_rows = len(field_specs)
+    n_cols = len(steps)
+    fig = plt.figure(figsize=(4.3 * n_cols + 0.9, 3.2 * n_rows))
+    gs = fig.add_gridspec(
+        n_rows,
+        n_cols + 1,
+        width_ratios=[1.0] * n_cols + [0.06],
+        hspace=0.28,
+        wspace=0.18,
+    )
+    axes = [[fig.add_subplot(gs[r, c]) for c in range(n_cols)] for r in range(n_rows)]
+    caxes = [fig.add_subplot(gs[r, n_cols]) for r in range(n_rows)]
+
+    for r, (key, label, cmap) in enumerate(field_specs):
+        row = []
+        for st in steps:
+            fld = snapshots[st].get(key)
+            row.append(None if fld is None else _panel_native_grid(np.asarray(fld), coord_kind))
+        vmin, vmax = _color_limits([p for p in row if p is not None])
+        im = None
+        for c, st in enumerate(steps):
+            ax = axes[r][c]
+            panel = row[c]
+            if panel is None:
+                ax.text(0.5, 0.5, "N/A", ha="center", va="center", fontsize=10)
+                ax.set_xticks([])
+                ax.set_yticks([])
+            else:
+                im = ax.imshow(panel, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+                if coord_kind == "cube" and np.asarray(panel).ndim == 2:
+                    n_face = panel.shape[1] // 6
+                    for k in range(1, 6):
+                        ax.axvline(k * n_face - 0.5, color="w", lw=0.4, alpha=0.6)
+                ax.set_xticks([])
+                ax.set_yticks([])
+            ax.set_title(f"{label}\nstep {st}, t={_format_sim_time(st, dt)}", fontsize=9)
+            if c == 0:
+                ax.set_ylabel(label, fontsize=10)
+        if im is not None:
+            fig.colorbar(im, cax=caxes[r], orientation="vertical")
+        else:
+            caxes[r].axis("off")
+
+    fig.suptitle(f"{case_name} - Field Snapshots (Native Grid)", fontsize=13)
+    fig.subplots_adjust(top=0.92)
+    fig.savefig(out_dir / "field_snapshots_native.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_snapshots_latlon_pixels(
+    out_dir: Path,
+    case_name: str,
+    snapshots: dict[int, dict[str, np.ndarray]],
+    dt: float,
+    field_specs: list[tuple[str, str, str]],
+    *,
+    coord_kind: str,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+) -> None:
+    steps = sorted(snapshots.keys())
+    if not steps:
+        return
+
+    n_rows = len(field_specs)
+    n_cols = len(steps)
+    fig = plt.figure(figsize=(4.9 * n_cols + 0.9, 3.3 * n_rows))
+    gs = fig.add_gridspec(
+        n_rows,
+        n_cols + 1,
+        width_ratios=[1.0] * n_cols + [0.06],
+        hspace=0.28,
+        wspace=0.18,
+    )
+    axes = [[fig.add_subplot(gs[r, c]) for c in range(n_cols)] for r in range(n_rows)]
+    caxes = [fig.add_subplot(gs[r, n_cols]) for r in range(n_rows)]
+
+    for r, (key, label, cmap) in enumerate(field_specs):
+        row = []
+        for st in steps:
+            fld = snapshots[st].get(key)
+            if fld is None:
+                row.append(None)
+            else:
+                row.append(_regrid_panel_to_latlon_pixels(np.asarray(fld), lon_deg, lat_deg, coord_kind))
+        vmin, vmax = _color_limits([p for p in row if p is not None])
+        im = None
+        for c, st in enumerate(steps):
+            ax = axes[r][c]
+            panel = row[c]
+            if panel is None:
+                ax.text(0.5, 0.5, "N/A", ha="center", va="center", fontsize=10)
+                ax.set_xticks([])
+                ax.set_yticks([])
+            else:
+                masked = np.ma.masked_invalid(panel)
+                im = ax.imshow(
+                    masked,
+                    origin="lower",
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                    extent=[-180.0, 180.0, -90.0, 90.0],
+                    aspect="auto",
+                )
+                ax.set_xlabel("Longitude (deg)")
+                ax.set_ylabel("Latitude (deg)")
+            ax.set_title(f"{label}\nstep {st}, t={_format_sim_time(st, dt)}", fontsize=9)
+        if im is not None:
+            fig.colorbar(im, cax=caxes[r], orientation="vertical")
+        else:
+            caxes[r].axis("off")
+
+    fig.suptitle(f"{case_name} - Field Snapshots (Pixelwise Lat-Lon)", fontsize=13)
+    fig.subplots_adjust(top=0.92)
+    fig.savefig(out_dir / "field_snapshots_latlon_pixels.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
 
 def _save_timeseries(
     out_dir: Path,

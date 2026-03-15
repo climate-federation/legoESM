@@ -1652,8 +1652,50 @@ try:
         plt.suptitle(f"AMIP snapshots (lat-lon), C{N}/L{NLEV}", fontsize=13, y=1.01)
         plt.tight_layout()
         plt.savefig(OUTPUT_DIR / "amip_snapshots.png", dpi=150, bbox_inches="tight")
+        plt.savefig(OUTPUT_DIR / "amip_snapshots_latlon_pixels.png", dpi=150, bbox_inches="tight")
         plt.close()
         print(f"  Saved lat-lon snapshot evolution")
+
+        # Native cube-face snapshots (face-index strip, 0..5).
+        fig, axes = plt.subplots(n_fields, n_snap, figsize=(4.5 * n_snap, 2.8 * n_fields))
+        if n_snap == 1:
+            axes = axes[:, None]
+        if n_fields == 1:
+            axes = axes[None, :]
+
+        for j, day_snap in enumerate(snap_days_sorted):
+            snap = snapshots[day_snap]
+            for i, (key, label, cmap, vlim) in enumerate(fields):
+                ax = axes[i, j]
+                try:
+                    data_faces = np.asarray(snap[key], dtype=float)
+                    if data_faces.ndim == 3 and data_faces.shape[0] == 6:
+                        data_native = np.concatenate([data_faces[k] for k in range(6)], axis=1)
+                        n_face = data_faces.shape[1]
+                    else:
+                        data_native = np.squeeze(data_faces)
+                        n_face = None
+                    kw = dict(cmap=cmap, origin="lower", aspect="auto")
+                    if vlim is not None:
+                        kw["vmin"], kw["vmax"] = vlim
+                    im = ax.imshow(data_native, **kw)
+                    if n_face is not None:
+                        for k in range(1, 6):
+                            ax.axvline(k * n_face - 0.5, color="w", lw=0.4, alpha=0.6)
+                    fig.colorbar(im, ax=ax, shrink=0.8, pad=0.02)
+                except Exception:
+                    ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                            transform=ax.transAxes)
+                ax.set_title(f"{label}\nDay {day_snap}", fontsize=11, fontweight="bold")
+                if j == 0:
+                    ax.set_ylabel(label, fontsize=9)
+                ax.tick_params(labelsize=6)
+
+        plt.suptitle(f"AMIP snapshots (native cube faces), C{N}/L{NLEV}", fontsize=13, y=1.01)
+        plt.tight_layout()
+        plt.savefig(OUTPUT_DIR / "amip_snapshots_native.png", dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"  Saved native-grid snapshot evolution")
 
 except ImportError:
     print("  matplotlib not available, skipping plots")

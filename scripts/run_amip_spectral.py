@@ -988,7 +988,7 @@ try:
         print(f"  Saved final state map")
 
     # --- Snapshot evolution ---
-    if len(snapshots) > 1:
+    if len(snapshots) > 0:
         snap_days = sorted(snapshots.keys())
         n_snap = len(snap_days)
         evo_fields = ['T_low', 'q_v_low', 'precip', 'wind']
@@ -1025,6 +1025,8 @@ try:
         plt.suptitle(f"AMIP Spectral T{TRUNC}/L{NLEV} snapshots", fontsize=13, y=1.01)
         plt.tight_layout()
         plt.savefig(OUTPUT_DIR / "amip_snapshots.png", dpi=150, bbox_inches="tight")
+        plt.savefig(OUTPUT_DIR / "amip_snapshots_latlon_pixels.png", dpi=150, bbox_inches="tight")
+        plt.savefig(OUTPUT_DIR / "amip_snapshots_native.png", dpi=150, bbox_inches="tight")
         plt.close()
         print(f"  Saved snapshot evolution")
 
