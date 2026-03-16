@@ -218,7 +218,7 @@ class SpectralShallowWaterModel:
                 allow_unsupported=allow_unsupported_backend
             )
 
-    @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
+    @partial(jax.jit, static_argnums=(0,))
     def step(self, state: SpectralSWState, dt: float) -> SpectralSWState:
         """Advance one time step using SSP-RK3.
 
@@ -235,7 +235,7 @@ class SpectralShallowWaterModel:
 
         return ssp_rk3_step(state, tendency_fn, dt)
 
-    @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
+    @partial(jax.jit, static_argnums=(0,))
     def _step_on_cpu(self, state: SpectralSWState, dt: float) -> SpectralSWState:
         """Step without device transfers (for batched CPU integration on Metal)."""
         def tendency_fn(s):

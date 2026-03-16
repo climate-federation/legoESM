@@ -1,0 +1,300 @@
+"""Held-Suarez forcing for the MPAS Voronoi mesh dynamical core.
+
+Mirrors the cubed-sphere Held-Suarez (held_suarez.py) but uses MPAS
+state/tendency types with edge-normal velocity on a C-grid.
+
+References
+----------
+- Held, I. M., & Suarez, M. J. (1994). A Proposal for the
+  Intercomparison of the Dynamical Cores of Atmospheric General
+  Circulation Models. Bull. Amer. Meteor. Soc., 75(10), 1825-1830.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+
+from legoesm.core.field import Field
+from legoesm.core.state import MPASHydrostaticState, MPASHydrostaticTendencies
+from legoesm.grids.voronoi import VoronoiMesh
+from legoesm.grids.vertical import (
+    SigmaCoordinate,
+    HybridSigmaPressureCoordinate,
+    pressure_from_sigma,
+    pressure_from_hybrid,
+)
+from legoesm import constants
+
+# Held-Suarez parameters (Table 1)
+K_A = 1.0 / (40.0 * 86400.0)     # free atmosphere relaxation [1/s]
+K_S = 1.0 / (4.0 * 86400.0)      # surface relaxation [1/s]
+K_F = 1.0 / (1.0 * 86400.0)      # Rayleigh friction [1/s]
+SIGMA_B = 0.7
+DELTA_T_Y = 60.0                  # meridional gradient [K]
+DELTA_THETA_Z = 10.0              # vertical gradient [K]
+T_MIN = 200.0                     # minimum T_eq [K]
+P_0 = 1.0e5                      # reference pressure [Pa]
+
+
+def held_suarez_equilibrium_temperature(lat, p):
+    """Compute Held-Suarez T_eq. Works with any array shapes."""
+    kappa = constants.kappa
+    sin_lat = jnp.sin(lat)
+    cos_lat = jnp.cos(lat)
+    p_ratio = p / P_0
+    T_eq = (
+        (315.0 - DELTA_T_Y * sin_lat**2
+         - DELTA_THETA_Z * jnp.log(p_ratio) * cos_lat**2)
+        * p_ratio**kappa
+    )
+    return jnp.maximum(T_eq, T_MIN)
+
+
+def held_suarez_forcing_mpas(
+    state: MPASHydrostaticState,
+    mesh: VoronoiMesh,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+) -> MPASHydrostaticTendencies:
+    """Compute Held-Suarez physics tendencies on an MPAS mesh.
+
+    Parameters
+    ----------
+    state : MPASHydrostaticState
+        u (nEdges, nlev), T (nCells, nlev), p_s (nCells,).
+    mesh : VoronoiMesh
+        Provides latCell, latEdge.
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+        Vertical coordinate.
+
+    Returns
+    -------
+    MPASHydrostaticTendencies
+    """
+    u = state.u.data       # (nEdges, nlev)
+    T = state.T.data       # (nCells, nlev)
+    p_s = state.p_s.data   # (nCells,)
+
+    nlev = T.shape[-1]
+    lat_cell = mesh.latCell  # (nCells,)
+    lat_edge = mesh.latEdge  # (nEdges,)
+
+    # Pressure at cell centers
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+    if _hybrid:
+        p_full = pressure_from_hybrid(sigma_coord, p_s)  # (nCells, nlev)
+        # Effective sigma for BL parameterization
+        sigma_eff = p_full / p_s[:, None]
+    else:
+        sigma_full = sigma_coord.sigma_full  # (nlev,)
+        p_full = pressure_from_sigma(sigma_full, p_s)    # (nCells, nlev)
+        sigma_eff = jnp.broadcast_to(sigma_full[None, :], T.shape)
+
+    # Equilibrium temperature (nCells, nlev)
+    T_eq = held_suarez_equilibrium_temperature(lat_cell[:, None], p_full)
+
+    # Temperature relaxation coefficient k_T(σ, φ) at cell centers
+    sigma_factor = jnp.maximum(0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B))
+    cos_lat_4 = jnp.cos(lat_cell) ** 4  # (nCells,)
+    k_T = K_A + (K_S - K_A) * sigma_factor * cos_lat_4[:, None]
+
+    # Newtonian relaxation
+    dT_dt = -k_T * (T - T_eq)  # (nCells, nlev)
+
+    # Rayleigh friction coefficient k_v(σ) at edge locations
+    # Use edge-adjacent cell pressures averaged
+    c0 = mesh.cellsOnEdge[0]  # (nEdges,)
+    c1 = mesh.cellsOnEdge[1]  # (nEdges,)
+    if _hybrid:
+        p_edge = 0.5 * (p_full[c0] + p_full[c1])        # (nEdges, nlev)
+        ps_edge = 0.5 * (p_s[c0] + p_s[c1])             # (nEdges,)
+        sigma_edge = p_edge / ps_edge[:, None]
+    else:
+        sigma_edge = jnp.broadcast_to(sigma_full[None, :], u.shape)
+
+    sigma_factor_edge = jnp.maximum(
+        0.0, (sigma_edge - SIGMA_B) / (1.0 - SIGMA_B)
+    )
+    k_v = K_F * sigma_factor_edge  # (nEdges, nlev)
+
+    # Rayleigh friction on normal velocity
+    du_dt = -k_v * u  # (nEdges, nlev)
+
+    # Construct tendencies
+    dims_edge = ("nEdges", "level")
+    dims_cell = ("nCells", "level")
+    dims_cell_2d = ("nCells",)
+
+    return MPASHydrostaticTendencies(
+        du_dt=Field(data=du_dt, name="du_dt_phys", dims=dims_edge, units="m/s^2"),
+        dT_dt=Field(data=dT_dt, name="dT_dt_phys", dims=dims_cell, units="K/s"),
+        dp_s_dt=Field(
+            data=jnp.zeros_like(p_s), name="dp_s_dt_phys",
+            dims=dims_cell_2d, units="Pa/s",
+        ),
+        dphis_dt=Field(
+            data=jnp.zeros_like(p_s), name="dphis_dt_phys",
+            dims=dims_cell_2d, units="m^2/s^3",
+        ),
+    )
+
+
+def held_suarez_init_mpas(
+    mesh: VoronoiMesh,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    T_init: float = 300.0,
+    p_s_init: float = 1.0e5,
+    perturbation_amplitude: float = 1.0,
+    seed: int = 42,
+) -> MPASHydrostaticState:
+    """Create isothermal rest-state initial conditions for Held-Suarez on MPAS.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+        MPAS Voronoi mesh.
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+        Vertical coordinate.
+    T_init : float
+        Initial temperature [K].
+    p_s_init : float
+        Initial surface pressure [Pa].
+    perturbation_amplitude : float
+        Amplitude of random T perturbation at lowest level [K].
+    seed : int
+        Random seed.
+
+    Returns
+    -------
+    MPASHydrostaticState
+    """
+    nCells = mesh.nCells
+    nEdges = mesh.nEdges
+    nlev = sigma_coord.n_levels
+
+    # Surface pressure: uniform
+    p_s_data = jnp.full((nCells,), p_s_init)
+
+    # Temperature: uniform with small perturbation at lowest level
+    T_data = jnp.full((nCells, nlev), T_init)
+    key = jax.random.PRNGKey(seed)
+    perturbation = jax.random.normal(key, (nCells,)) * perturbation_amplitude
+    T_data = T_data.at[:, -1].add(perturbation)
+
+    # Velocity: at rest
+    u_data = jnp.zeros((nEdges, nlev))
+
+    # Surface geopotential: flat
+    phis_data = jnp.zeros((nCells,))
+
+    return MPASHydrostaticState(
+        u=Field(data=u_data, name="u", dims=("nEdges", "level"), units="m/s"),
+        T=Field(data=T_data, name="T", dims=("nCells", "level"), units="K"),
+        p_s=Field(data=p_s_data, name="p_s", dims=("nCells",), units="Pa"),
+        phis=Field(data=phis_data, name="phis", dims=("nCells",), units="m^2/s^2"),
+    )
+
+
+def baroclinic_wave_init_mpas(
+    mesh: VoronoiMesh,
+    sigma_coord: SigmaCoordinate,
+    perturbed: bool = True,
+) -> MPASHydrostaticState:
+    """Initialize Jablonowski-Williamson baroclinic wave on MPAS mesh.
+
+    Follows Jablonowski & Williamson (2006) with:
+    - Balanced zonal jet at 45° latitude
+    - Optional Gaussian perturbation to trigger instability
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+    sigma_coord : SigmaCoordinate
+    perturbed : bool
+        If True, add perturbation to trigger instability.
+
+    Returns
+    -------
+    MPASHydrostaticState
+    """
+    nCells = mesh.nCells
+    nEdges = mesh.nEdges
+    nlev = sigma_coord.n_levels
+    sigma_full = sigma_coord.sigma_full  # (nlev,)
+
+    R_d = constants.R_d
+    g = constants.g
+    Omega = constants.Omega
+    a = constants.R_earth
+
+    # Jablonowski-Williamson parameters
+    u0 = 35.0        # max jet speed [m/s]
+    T0 = 288.0       # equatorial surface temperature [K]
+    T_strato = 200.0  # stratospheric temperature [K]
+    lapse = 0.005     # lapse rate [K/m]
+    eta_t = 0.2       # tropopause sigma level
+
+    # Compute eta-based temperature profile and surface pressure
+    # T(eta, lat) and p_s(lat) from balanced wind profile
+
+    lat_c = mesh.latCell   # (nCells,)
+    lon_c = mesh.lonCell   # (nCells,)
+    lat_e = mesh.latEdge   # (nEdges,)
+    lon_e = mesh.lonEdge   # (nEdges,)
+
+    # Reference pressure
+    p0 = 1.0e5
+
+    # Surface pressure: hydrostatically balanced
+    # Using simplified Jablonowski approach
+    cos_lat = jnp.cos(lat_c)
+    sin_lat = jnp.sin(lat_c)
+
+    # Zonal wind profile u(eta, lat)
+    eta = sigma_full[None, :]  # (1, nlev)
+    eta_v = (eta - 0.252) * jnp.pi / 2.0
+    u_wind_cell = u0 * jnp.cos(eta_v) ** 1.5 * jnp.sin(2.0 * lat_c[:, None]) ** 2
+
+    # Temperature from thermal wind balance
+    T_mean = T0 * eta ** (R_d * lapse / g)
+    T_mean = jnp.where(eta < eta_t, T_strato, T_mean)
+    # Latitude-dependent perturbation from thermal wind
+    T_pert = (3.0 / 4.0) * (eta * jnp.pi * u0 / R_d) * jnp.sin(eta_v) * jnp.sqrt(jnp.cos(eta_v))
+    T_pert = T_pert * (
+        (-2.0 * sin_lat[:, None] ** 6 * (cos_lat[:, None] ** 2 + 1.0 / 3.0) + 10.0 / 63.0)
+        * 2.0 * u0 * jnp.cos(eta_v) ** 1.5
+    )
+    T_data = jnp.broadcast_to(T_mean, (nCells, nlev)) + T_pert
+    T_data = jnp.maximum(T_data, T_strato)
+
+    # Surface pressure (approximate balance)
+    p_s_data = jnp.full((nCells,), p0)
+
+    # Edge-normal velocity from zonal wind
+    cos_angle = jnp.cos(mesh.angleEdge)  # (nEdges,)
+    sin_angle = jnp.sin(mesh.angleEdge)
+    eta_e = sigma_full[None, :]
+    eta_v_e = (eta_e - 0.252) * jnp.pi / 2.0
+    u_zonal_edge = u0 * jnp.cos(eta_v_e) ** 1.5 * jnp.sin(2.0 * lat_e[:, None]) ** 2
+    # Project zonal wind to edge normal: u_n = u_east * cos(angle) + v_north * sin(angle)
+    # For zonal-only: v_north = 0
+    u_data = u_zonal_edge * cos_angle[:, None]
+
+    # Optional perturbation (Gaussian bump)
+    if perturbed:
+        lon_c_pert = 2.0 * jnp.pi / 9.0   # 40°E
+        lat_c_pert = 2.0 * jnp.pi / 9.0   # 40°N
+        up = 1.0  # m/s perturbation amplitude
+        r2 = ((lon_e - lon_c_pert) ** 2 + (lat_e - lat_c_pert) ** 2) / (0.1 ** 2)
+        u_pert_edge = up * jnp.exp(-r2)
+        u_data = u_data + u_pert_edge[:, None] * cos_angle[:, None]
+
+    # Surface geopotential: flat
+    phis_data = jnp.zeros((nCells,))
+
+    return MPASHydrostaticState(
+        u=Field(data=u_data, name="u", dims=("nEdges", "level"), units="m/s"),
+        T=Field(data=T_data, name="T", dims=("nCells", "level"), units="K"),
+        p_s=Field(data=p_s_data, name="p_s", dims=("nCells",), units="Pa"),
+        phis=Field(data=phis_data, name="phis", dims=("nCells",), units="m^2/s^2"),
+    )

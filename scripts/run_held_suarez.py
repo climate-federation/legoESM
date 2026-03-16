@@ -60,8 +60,8 @@ def run_spectral(n_max, nlev, coord_type, dt, n_days, diag_every_days=10):
     config = SpectralPEConfig(
         hyperdiff_coeff=1.0 / (0.5 * 3600.0 * eig_max**2),
         hyperdiff_order=2,
-        semi_implicit=False,
-        time_integrator="ssp_rk54",
+        semi_implicit=True,
+        time_integrator="leapfrog_si",
     )
     model = SpectralPrimitiveEquationModel(grid, sigma, config)
 
@@ -604,14 +604,14 @@ Examples:
 
     if args.grid == "all":
         configs = [
-            ("spectral", 42, "sigma", 180.0),
-            ("spectral", 42, "hybrid", 180.0),
+            ("spectral", 42, "sigma", 900.0),
+            ("spectral", 42, "hybrid", 900.0),
             ("cubed_sphere", 48, "sigma", 600.0),
             ("latlon", 72, "sigma", 600.0),
         ]
     else:
         default_res = {"spectral": 42, "cubed_sphere": 48, "latlon": 72}
-        default_dt = {"spectral": 180.0, "cubed_sphere": 600.0, "latlon": 600.0}
+        default_dt = {"spectral": 900.0, "cubed_sphere": 600.0, "latlon": 600.0}
         res = args.resolution or default_res[args.grid]
         dt = args.dt or default_dt[args.grid]
         configs = [(args.grid, res, args.coord, dt)]

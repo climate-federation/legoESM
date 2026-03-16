@@ -151,6 +151,24 @@ TEST_MATRIX: list[TestCase] = [
     # ===== NON-HYDROSTATIC — SPECTRAL =====
     TestCase("spectral", "nonhydrostatic", "T42", "height", "dcmip2025_tc1",
              3 / 24, 0.5 / 24, "run_nh_dcmip2025_spectral", {"test_case": "tc1"}),
+
+    # ===== SHALLOW WATER — ICOSAHEDRAL (MPAS) =====
+    TestCase("icosahedral", "shallow_water", "ico5", "none", "williamson2",
+             5, 1, "run_sw_icosahedral", {"test_num": 2}),
+    TestCase("icosahedral", "shallow_water", "ico5", "none", "williamson5",
+             15, 1, "run_sw_icosahedral", {"test_num": 5}),
+    TestCase("icosahedral", "shallow_water", "ico5", "none", "williamson6",
+             15, 1, "run_sw_icosahedral", {"test_num": 6}),
+
+    # ===== HYDROSTATIC — ICOSAHEDRAL SIGMA =====
+    TestCase("icosahedral", "hydrostatic", "ico5", "sigma", "held_suarez_gray",
+             200, 30, "run_hydro_held_suarez_icosahedral", {}),
+    TestCase("icosahedral", "hydrostatic", "ico5", "sigma", "baroclinic_wave",
+             10, 2, "run_hydro_baroclinic_icosahedral", {}),
+
+    # ===== NON-HYDROSTATIC — ICOSAHEDRAL =====
+    TestCase("icosahedral", "nonhydrostatic", "ico5", "height", "dcmip2025_tc1",
+             3 / 24, 0.5 / 24, "run_nh_dcmip2025_icosahedral", {"test_case": "tc1"}),
 ]
 
 
@@ -830,6 +848,9 @@ def run_hydro_baroclinic_cube(tc: TestCase, output_dir: Path, days: float, **kwa
     dt = 200.0
 
     grid = create_cubed_sphere(n_grid)
+    # baroclinic_wave_init requires SigmaCoordinate for sigma_full;
+    # create sigma for init, use hybrid for the model if requested.
+    sigma_for_init = create_sigma_coordinate(nlev)
     if vert == "hybrid":
         sigma = standard_hybrid_levels(nlev)
     else:
@@ -847,7 +868,7 @@ def run_hydro_baroclinic_cube(tc: TestCase, output_dir: Path, days: float, **kwa
         edge_blend_width=2,
     )
     model = PrimitiveEquationModel(grid, sigma, config)
-    state = baroclinic_wave_init(grid, sigma, perturbed=True)
+    state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
     mass_init = float(global_integral(state.p_s, grid))
 
     n_steps = int(days * 86400 / dt)
@@ -1552,6 +1573,317 @@ def run_nh_dcmip2025_spectral(tc: TestCase, output_dir: Path, days: float, **kwa
     return "PASS" if ok else "FAIL", wall, notes
 
 
+# ---------------------------------------------------------------------------
+# Shallow water — icosahedral (MPAS)
+# ---------------------------------------------------------------------------
+def _parse_ico_level(resolution: str) -> int:
+    """Parse 'ico5' → 5."""
+    return int(resolution.replace("ico", ""))
+
+
+def run_sw_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
+    test_num = kwargs["test_num"]
+
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+        MPASShallowWaterModel, MPASShallowWaterConfig,
+    )
+    from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
+        williamson_test2_mpas, williamson_test5_mpas, williamson_test6_mpas,
+        compute_error_norms_mpas,
+    )
+
+    level = _parse_ico_level(tc.resolution)
+    mesh = create_voronoi_mesh(level)
+    dt = 300.0
+
+    # Hyperdiffusion: scale del4 with mesh spacing
+    dx_mean = jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells)
+    nu_del4 = float(dx_mean ** 4 / (48.0 * 3600.0))
+
+    init_fns = {2: williamson_test2_mpas, 5: williamson_test5_mpas, 6: williamson_test6_mpas}
+    state_init = init_fns[test_num](mesh)
+
+    config = MPASShallowWaterConfig(nu_del4=nu_del4)
+    model = MPASShallowWaterModel(mesh, config)
+    state = state_init
+
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+    diag_times, diag_mass, diag_max_wind = [], [], []
+    mass_init = float(jnp.mean(state_init.h.data))
+
+    t0 = time.time()
+    for i in range(n_steps):
+        state = model.step(state, dt)
+        if (i + 1) % diag_every == 0:
+            day = (i + 1) * dt / 86400.0
+            diag_times.append(day)
+            diag_mass.append(float(jnp.mean(state.h.data)))
+            diag_max_wind.append(float(jnp.max(jnp.abs(state.u.data))))
+    jax.block_until_ready(state.h.data)
+    wall = time.time() - t0
+
+    ok = check_finite({"h": state.h.data, "u": state.u.data})
+
+    notes = ""
+    if test_num == 2:
+        norms = compute_error_norms_mpas(state.h.data, state_init.h.data, mesh)
+        notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
+    else:
+        mass_drift = abs(diag_mass[-1] - mass_init) / abs(mass_init) if diag_mass else 0
+        notes = f"mass drift={mass_drift:.2e}"
+
+    results = {
+        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "n_steps": n_steps, "nCells": mesh.nCells,
+        "wall_time": f"{wall:.1f}s", "status": "PASS" if ok else "FAIL", "notes": notes,
+    }
+    write_results_txt(output_dir, results)
+
+    if diag_times:
+        save_timeseries_plot(output_dir, "timeseries.png",
+                             f"SW Williamson {test_num} — ico{level} ({mesh.nCells} cells)",
+                             [("Mean h (m)", diag_times, diag_mass, "h"),
+                              ("Max |u_n| (m/s)", diag_times, diag_max_wind, "|u|")])
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ---------------------------------------------------------------------------
+# Hydrostatic Held-Suarez — icosahedral (MPAS)
+# ---------------------------------------------------------------------------
+def run_hydro_held_suarez_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.physics.held_suarez_mpas import (
+        held_suarez_forcing_mpas, held_suarez_init_mpas,
+    )
+
+    level = _parse_ico_level(tc.resolution)
+    nlev = 40
+    dt = 200.0
+    mesh = create_voronoi_mesh(level)
+    sigma = create_sigma_coordinate(nlev)
+
+    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
+    nu_del4 = dx_mean ** 4 / (48.0 * 3600.0)
+
+    config = MPASPrimitiveEquationConfig(nu_del4=nu_del4, fix_mass=True)
+    model = MPASPrimitiveEquationModel(mesh, sigma, config)
+    state = held_suarez_init_mpas(mesh, sigma)
+
+    mass_init = float(jnp.sum(state.p_s.data * mesh.areaCell))
+
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, int(6 * 3600 / dt))
+    diag_times, diag_mass, diag_max_wind, diag_mean_T = [], [], [], []
+
+    t0 = time.time()
+    last_print = t0
+    for step in range(n_steps):
+        state = model.step(state, dt, held_suarez_forcing_mpas)
+
+        if (step + 1) % 100 == 0:
+            u_max = float(jnp.max(jnp.abs(state.u.data)))
+            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
+                print(f"  BLOWUP at step {step + 1}, u_max={u_max:.1f}")
+                break
+
+        if (step + 1) % diag_every == 0:
+            day = (step + 1) * dt / 86400.0
+            mass = float(jnp.sum(state.p_s.data * mesh.areaCell))
+            max_wind = float(jnp.max(jnp.abs(state.u.data)))
+            mean_T = float(jnp.mean(state.T.data))
+            diag_times.append(day)
+            diag_mass.append(mass)
+            diag_max_wind.append(max_wind)
+            diag_mean_T.append(mean_T)
+
+            now = time.time()
+            if now - last_print > 30:
+                mass_drift = abs(mass - mass_init) / abs(mass_init)
+                print(f"    Day {day:7.1f}/{days} | max|u|={max_wind:6.1f} m/s | "
+                      f"<T>={mean_T:.1f} K | mass drift={mass_drift:.2e}")
+                last_print = now
+
+    jax.block_until_ready(state.T.data)
+    wall = time.time() - t0
+
+    ok = check_finite({"T": state.T.data, "u": state.u.data, "p_s": state.p_s.data})
+    mass_final = float(jnp.sum(state.p_s.data * mesh.areaCell))
+    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
+    notes = f"mass drift={mass_drift:.2e}"
+
+    results = {
+        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
+        "levels": nlev, "nCells": mesh.nCells,
+        "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+    }
+    write_results_txt(output_dir, results)
+
+    if diag_times:
+        mass_drift_ts = [abs(m - mass_init) / abs(mass_init) for m in diag_mass]
+        save_timeseries_plot(output_dir, "timeseries.png",
+                             f"Held-Suarez — ico{level}/L{nlev} ({mesh.nCells} cells)",
+                             [("Mass drift (rel)", diag_times, mass_drift_ts, "mass"),
+                              ("Max |u_n| (m/s)", diag_times, diag_max_wind, "|u|"),
+                              ("Mean T (K)", diag_times, diag_mean_T, "T")])
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ---------------------------------------------------------------------------
+# Hydrostatic baroclinic wave — icosahedral (MPAS)
+# ---------------------------------------------------------------------------
+def run_hydro_baroclinic_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
+
+    level = _parse_ico_level(tc.resolution)
+    nlev = 40
+    dt = 200.0
+    mesh = create_voronoi_mesh(level)
+    sigma = create_sigma_coordinate(nlev)
+
+    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
+    nu_del4 = dx_mean ** 4 / (48.0 * 3600.0)
+
+    config = MPASPrimitiveEquationConfig(nu_del4=nu_del4, fix_mass=True)
+    model = MPASPrimitiveEquationModel(mesh, sigma, config)
+    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+
+    mass_init = float(jnp.sum(state.p_s.data * mesh.areaCell))
+
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, int(6 * 3600 / dt))
+    diag_times, diag_max_wind = [], []
+
+    t0 = time.time()
+    last_print = t0
+    for step in range(n_steps):
+        state = model.step(state, dt)
+
+        if (step + 1) % 100 == 0:
+            u_max = float(jnp.max(jnp.abs(state.u.data)))
+            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
+                print(f"  BLOWUP at step {step + 1}")
+                break
+
+        if (step + 1) % diag_every == 0:
+            day = (step + 1) * dt / 86400.0
+            max_wind = float(jnp.max(jnp.abs(state.u.data)))
+            diag_times.append(day)
+            diag_max_wind.append(max_wind)
+
+            now = time.time()
+            if now - last_print > 30:
+                print(f"    Day {day:7.1f}/{days} | max|u|={max_wind:6.1f} m/s")
+                last_print = now
+
+    jax.block_until_ready(state.T.data)
+    wall = time.time() - t0
+
+    ok = check_finite({"T": state.T.data, "u": state.u.data, "p_s": state.p_s.data})
+    mass_final = float(jnp.sum(state.p_s.data * mesh.areaCell))
+    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
+    notes = f"mass drift={mass_drift:.2e}, max|u|={diag_max_wind[-1]:.1f}" if diag_max_wind else ""
+
+    results = {
+        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
+        "levels": nlev, "nCells": mesh.nCells,
+        "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+    }
+    write_results_txt(output_dir, results)
+
+    if diag_times:
+        save_timeseries_plot(output_dir, "timeseries.png",
+                             f"Baroclinic Wave — ico{level}/L{nlev}",
+                             [("Max |u_n| (m/s)", diag_times, diag_max_wind, "|u|")])
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ---------------------------------------------------------------------------
+# Non-hydrostatic DCMIP-2025 — icosahedral (MPAS)
+# ---------------------------------------------------------------------------
+def run_nh_dcmip2025_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
+    test_case = kwargs["test_case"]
+
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+        MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
+    )
+
+    level = _parse_ico_level(tc.resolution)
+    nlev = 40
+    duration_hours = days * 24.0
+    mesh = create_voronoi_mesh(level)
+
+    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
+
+    if test_case == "tc1":
+        from tests.test_cases.dcmip2025.test_case_1_mpas import dcmip25_tc1_init_mpas
+        state, height_coord, terrain_metric = dcmip25_tc1_init_mpas(mesh, n_levels=nlev)
+        dt = max(0.2, 6.0 * (200.0 / (dx_mean / 1000.0)))  # scale with grid spacing
+        dt = min(dt, 6.0)  # cap
+        nh_config = MPASCompressibleEulerConfig(
+            n_acoustic_substeps=10,
+            sponge_width=10000.0,
+            sponge_coeff=0.05,
+            nu_del4=dx_mean ** 4 / (48.0 * 3600.0),
+        )
+    else:
+        raise ValueError(f"MPAS NH only supports tc1, got {test_case}")
+
+    model = MPASCompressibleEulerModel(mesh, height_coord, terrain_metric, nh_config)
+
+    n_steps = int(duration_hours * 3600.0 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    t0 = time.time()
+    stable = True
+    for i in range(n_steps):
+        state = model.step(state, dt)
+        if (i + 1) % diag_every == 0:
+            w_max = float(jnp.max(jnp.abs(state.w.data)))
+            if not jnp.all(jnp.isfinite(state.u.data)):
+                print(f"    BLOWUP at step {i + 1}")
+                stable = False
+                break
+            t_hours = (i + 1) * dt / 3600.0
+            print(f"    Step {i + 1:6d}/{n_steps} | t={t_hours:.2f}h | |w|_max={w_max:.4f} m/s")
+
+    jax.block_until_ready(state.u.data)
+    wall = time.time() - t0
+
+    ok = stable and check_finite({
+        "u": state.u.data, "w": state.w.data,
+        "theta_prime": state.theta_prime.data, "rho_prime": state.rho_prime.data,
+    })
+    w_max_final = float(jnp.max(jnp.abs(state.w.data))) if ok else float("nan")
+    notes = f"|w|_max={w_max_final:.4f} m/s, dt={dt:.2f}s"
+
+    results = {
+        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
+        "levels": nlev, "nCells": mesh.nCells, "duration_hours": duration_hours,
+        "dt": dt, "wall_time": f"{wall:.1f}s",
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+    }
+    write_results_txt(output_dir, results)
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
 # ===========================================================================
 # Runner dispatch
 # ===========================================================================
@@ -1560,17 +1892,21 @@ RUNNERS: dict[str, Callable] = {
     "run_sw_cubed_sphere": run_sw_cubed_sphere,
     "run_sw_latlon": run_sw_latlon,
     "run_sw_spectral": run_sw_spectral,
+    "run_sw_icosahedral": run_sw_icosahedral,
     "run_hydro_held_suarez_cube": run_hydro_held_suarez_cube,
     "run_hydro_held_suarez_latlon": run_hydro_held_suarez_latlon,
     "run_hydro_held_suarez_spectral": run_hydro_held_suarez_spectral,
+    "run_hydro_held_suarez_icosahedral": run_hydro_held_suarez_icosahedral,
     "run_hydro_baroclinic_cube": run_hydro_baroclinic_cube,
     "run_hydro_baroclinic_spectral": run_hydro_baroclinic_spectral,
+    "run_hydro_baroclinic_icosahedral": run_hydro_baroclinic_icosahedral,
     "run_hydro_dcmip_transport": run_hydro_dcmip_transport,
     "run_hydro_amip_cube": run_hydro_amip_cube,
     "run_hydro_amip_spectral": run_hydro_amip_spectral,
     "run_hydro_rce_cube": run_hydro_rce_cube,
     "run_nh_dcmip2025_cube": run_nh_dcmip2025_cube,
     "run_nh_dcmip2025_spectral": run_nh_dcmip2025_spectral,
+    "run_nh_dcmip2025_icosahedral": run_nh_dcmip2025_icosahedral,
 }
 
 
@@ -1587,7 +1923,7 @@ def build_parser() -> argparse.ArgumentParser:
                    choices=["sw", "hydro", "nh", "all"],
                    help="Run only a specific equation set (default: all)")
     p.add_argument("--grid", type=str, default="all",
-                   choices=["cubed_sphere", "latlon", "spectral", "all"],
+                   choices=["cubed_sphere", "latlon", "spectral", "icosahedral", "all"],
                    help="Run only a specific grid type (default: all)")
     p.add_argument("--test", type=str, default=None,
                    help="Run only a specific test name (e.g. held_suarez_gray)")
