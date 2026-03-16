@@ -17,7 +17,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
+import shutil
 import sys
 import time
 import traceback
@@ -263,6 +265,341 @@ def compute_hyperdiff_latlon(n_lat: int, reference_n: int = 64,
     return reference_coeff * (reference_n / n_lat) ** 4
 
 
+_RICH_DIAG_HELPERS = None
+
+
+def _get_rich_diag_helpers():
+    """Lazily load plotting helpers from the full atmosphere suite script."""
+    global _RICH_DIAG_HELPERS
+    if _RICH_DIAG_HELPERS is not None:
+        return _RICH_DIAG_HELPERS
+
+    helper_path = Path(__file__).with_name("run_atmosphere_25deg_ssp45_full.py")
+    spec = importlib.util.spec_from_file_location("atm25_helpers", helper_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load diagnostics helper module: {helper_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    _RICH_DIAG_HELPERS = module
+    return _RICH_DIAG_HELPERS
+
+
+def _copy_if_exists(src: Path, dst: Path) -> bool:
+    if not src.exists():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.resolve() != dst.resolve():
+        shutil.copy2(src, dst)
+    return True
+
+
+def _write_placeholder_plot(path: Path, title: str, text: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.axis("off")
+    ax.text(0.5, 0.6, title, ha="center", va="center", fontsize=11, fontweight="bold")
+    ax.text(0.5, 0.35, text, ha="center", va="center", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_mean_and_conservation(
+    output_dir: Path,
+    case_name: str,
+    step_series: list[int],
+    dt: float,
+    series_values: dict[str, list[float]],
+    *,
+    units: dict[str, str] | None = None,
+    mass_key: str | None = None,
+    energy_key: str | None = None,
+):
+    """Write standardized mean + conservation diagnostics from scalar series."""
+    if not step_series:
+        return
+
+    helpers = _get_rich_diag_helpers()
+    series = {"step": [float(s) for s in step_series]}
+    for k, v in series_values.items():
+        if len(v) == len(step_series):
+            series[k] = [float(x) for x in v]
+
+    helpers._save_timeseries(output_dir, case_name, series, dt, units or {})
+
+    _copy_if_exists(output_dir / "integrated_timeseries.csv", output_dir / "mean_timeseries.csv")
+    _copy_if_exists(output_dir / "integrated_timeseries.png", output_dir / "mean_timeseries.png")
+
+    keys = [k for k in series if k != "step"]
+    if not keys:
+        return
+    if mass_key is None or mass_key not in series:
+        mass_key = keys[0]
+    if energy_key is None or energy_key not in series:
+        energy_key = keys[min(1, len(keys) - 1)]
+
+    mass = np.asarray(series[mass_key], dtype=np.float64)
+    energy = np.asarray(series[energy_key], dtype=np.float64)
+    steps = np.asarray(series["step"], dtype=np.float64)
+    t_days = steps * dt / 86400.0
+    mass_rel = (mass - mass[0]) / max(abs(mass[0]), 1.0e-30)
+    energy_rel = (energy - energy[0]) / max(abs(energy[0]), 1.0e-30)
+
+    with open(output_dir / "conservation_timeseries.csv", "w") as f:
+        f.write("step,time_days,mass_proxy,energy_proxy,mass_rel,energy_rel\n")
+        for i in range(steps.size):
+            f.write(
+                f"{steps[i]:.0f},{t_days[i]:.8f},{mass[i]:.12e},{energy[i]:.12e},"
+                f"{mass_rel[i]:.12e},{energy_rel[i]:.12e}\n",
+            )
+
+    fig, axes = plt.subplots(2, 1, figsize=(8.8, 6.2), sharex=True)
+    axes[0].plot(t_days, mass_rel, lw=1.8)
+    axes[0].axhline(0.0, color="0.3", ls="--", lw=0.8)
+    axes[0].set_ylabel("Mass proxy drift")
+    axes[0].set_title(f"{mass_key} conservation proxy")
+    axes[0].grid(True, alpha=0.25)
+    axes[1].plot(t_days, energy_rel, lw=1.8, color="tab:red")
+    axes[1].axhline(0.0, color="0.3", ls="--", lw=0.8)
+    axes[1].set_ylabel("Energy proxy drift")
+    axes[1].set_xlabel("Time (days)")
+    axes[1].set_title(f"{energy_key} conservation proxy")
+    axes[1].grid(True, alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(output_dir / "conservation_timeseries.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_snapshots_bundle(
+    output_dir: Path,
+    case_name: str,
+    snapshots: dict[int, dict[str, np.ndarray]],
+    dt: float,
+    field_specs: list[tuple[str, str, str]],
+    *,
+    coord_kind: str,
+    lon_deg: np.ndarray | None = None,
+    lat_deg: np.ndarray | None = None,
+):
+    if not snapshots:
+        return
+    helpers = _get_rich_diag_helpers()
+    helpers._save_snapshots(
+        output_dir,
+        case_name,
+        snapshots,
+        dt,
+        field_specs,
+        coord_kind=coord_kind,
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+    )
+
+
+def _bin_points_to_latlon(
+    values: np.ndarray,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    *,
+    n_lat_out: int = 181,
+    n_lon_out: int = 360,
+) -> np.ndarray:
+    vals = np.asarray(values, dtype=np.float64).reshape(-1)
+    lon = np.asarray(lon_deg, dtype=np.float64).reshape(-1)
+    lat = np.asarray(lat_deg, dtype=np.float64).reshape(-1)
+    lon = ((lon + 180.0) % 360.0) - 180.0
+    lat = np.clip(lat, -90.0, 90.0)
+    valid = np.isfinite(vals) & np.isfinite(lon) & np.isfinite(lat)
+    if not np.any(valid):
+        return np.full((n_lat_out, n_lon_out), np.nan, dtype=np.float64)
+    lat_edges = np.linspace(-90.0, 90.0, n_lat_out + 1)
+    lon_edges = np.linspace(-180.0, 180.0, n_lon_out + 1)
+    sum_grid, _, _ = np.histogram2d(
+        lat[valid], lon[valid], bins=(lat_edges, lon_edges), weights=vals[valid]
+    )
+    cnt_grid, _, _ = np.histogram2d(lat[valid], lon[valid], bins=(lat_edges, lon_edges))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.where(cnt_grid > 0.0, sum_grid / cnt_grid, np.nan)
+    return out
+
+
+def _regrid_3d_to_latlon(
+    field_3d: np.ndarray,
+    *,
+    coord_kind: str,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    n_lat_out: int = 181,
+    n_lon_out: int = 360,
+) -> np.ndarray:
+    arr = np.asarray(field_3d, dtype=np.float64)
+    helpers = _get_rich_diag_helpers()
+
+    if coord_kind == "cube":
+        # (6, n, n, nlev)
+        nlev = arr.shape[-1]
+        out = np.full((n_lat_out, n_lon_out, nlev), np.nan, dtype=np.float64)
+        for k in range(nlev):
+            out[..., k] = helpers._regrid_panel_to_latlon_pixels(
+                arr[..., k],
+                lon_deg,
+                lat_deg,
+                "cube",
+                n_lon_out=n_lon_out,
+                n_lat_out=n_lat_out,
+            )
+        return out
+
+    if coord_kind in ("latlon", "gaussian"):
+        # already (lat, lon, nlev)
+        if arr.ndim == 2:
+            arr = arr[..., None]
+        return arr
+
+    if coord_kind == "icosa":
+        # (nCells, nlev)
+        if arr.ndim == 1:
+            arr = arr[:, None]
+        nlev = arr.shape[-1]
+        out = np.full((n_lat_out, n_lon_out, nlev), np.nan, dtype=np.float64)
+        for k in range(nlev):
+            out[..., k] = _bin_points_to_latlon(
+                arr[:, k], lon_deg, lat_deg, n_lat_out=n_lat_out, n_lon_out=n_lon_out
+            )
+        return out
+
+    raise ValueError(f"Unsupported coord_kind: {coord_kind}")
+
+
+def _save_vertical_cross_sections(
+    output_dir: Path,
+    case_name: str,
+    snapshots: dict[int, dict[str, np.ndarray]],
+    dt: float,
+    *,
+    field_key_3d: str,
+    coord_kind: str,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    level_values: np.ndarray | None = None,
+    level_label: str = "Level",
+):
+    steps = sorted(snapshots.keys())
+    if not steps:
+        return
+
+    # Find steps that carry the requested 3D field
+    valid_steps = [s for s in steps if field_key_3d in snapshots[s]]
+    if not valid_steps:
+        _write_placeholder_plot(
+            output_dir / "latitude_vertical_cross_sections.png",
+            f"{case_name} latitude-vertical",
+            f"No 3D field '{field_key_3d}' was saved for this case.",
+        )
+        _write_placeholder_plot(
+            output_dir / "longitude_vertical_cross_sections.png",
+            f"{case_name} longitude-vertical",
+            f"No 3D field '{field_key_3d}' was saved for this case.",
+        )
+        return
+
+    sample = np.asarray(snapshots[valid_steps[0]][field_key_3d])
+    nlev = sample.shape[-1]
+    if level_values is None:
+        level_values = np.arange(nlev, dtype=np.float64)
+    lev = np.asarray(level_values, dtype=np.float64)
+
+    lat_sections = {}
+    lon_sections = {}
+    for st in valid_steps:
+        field_3d = np.asarray(snapshots[st][field_key_3d], dtype=np.float64)
+        ll = _regrid_3d_to_latlon(
+            field_3d,
+            coord_kind=coord_kind,
+            lon_deg=lon_deg,
+            lat_deg=lat_deg,
+            n_lat_out=181,
+            n_lon_out=360,
+        )  # (lat, lon, lev)
+        lat_sections[st] = np.nanmean(ll, axis=1)  # (lat, lev)
+        lon_sections[st] = np.nanmean(ll, axis=0)  # (lon, lev)
+
+    lat_axis = np.linspace(-90.0, 90.0, lat_sections[valid_steps[0]].shape[0])
+    lon_axis = np.linspace(-180.0, 180.0, lon_sections[valid_steps[0]].shape[0])
+
+    for fname, axis_vals, data_map, xlabel in [
+        ("latitude_vertical_cross_sections.png", lat_axis, lat_sections, "Latitude (deg)"),
+        ("longitude_vertical_cross_sections.png", lon_axis, lon_sections, "Longitude (deg)"),
+    ]:
+        n_cols = len(valid_steps)
+        fig, axes = plt.subplots(1, n_cols, figsize=(4.5 * n_cols, 4.8), sharey=True)
+        if n_cols == 1:
+            axes = [axes]
+        images = []
+        for ax, st in zip(axes, valid_steps):
+            sec = data_map[st]  # (axis, lev)
+            im = ax.imshow(
+                sec.T,
+                origin="lower",
+                aspect="auto",
+                extent=[axis_vals[0], axis_vals[-1], float(lev[0]), float(lev[-1])],
+                cmap="RdBu_r",
+            )
+            images.append(im)
+            ax.set_title(f"step {st}, t={st * dt / 86400.0:.2f} d", fontsize=9)
+            ax.set_xlabel(xlabel)
+        axes[0].set_ylabel(level_label)
+        cbar = fig.colorbar(images[-1], ax=axes, orientation="vertical", fraction=0.028, pad=0.02)
+        cbar.set_label(field_key_3d)
+        fig.suptitle(f"{case_name} - {field_key_3d} cross-sections", fontsize=12)
+        fig.tight_layout(rect=[0, 0, 0.98, 0.95])
+        fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+
+def _ensure_required_artifacts(output_dir: Path):
+    """Guarantee standardized artifact files exist in each case folder."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    _copy_if_exists(output_dir / "integrated_timeseries.csv", output_dir / "mean_timeseries.csv")
+    _copy_if_exists(output_dir / "integrated_timeseries.png", output_dir / "mean_timeseries.png")
+    _copy_if_exists(output_dir / "timeseries.png", output_dir / "mean_timeseries.png")
+
+    if not (output_dir / "field_snapshots.png").exists():
+        _copy_if_exists(output_dir / "field_snapshots_latlon_pixels.png", output_dir / "field_snapshots.png")
+    if not (output_dir / "field_snapshots.png").exists():
+        _copy_if_exists(output_dir / "field_snapshots_native.png", output_dir / "field_snapshots.png")
+
+    if not (output_dir / "snapshot_times.txt").exists():
+        with open(output_dir / "snapshot_times.txt", "w") as f:
+            f.write("step,time_seconds,time_days\n")
+
+    for png_name in [
+        "field_snapshots.png",
+        "field_snapshots_native.png",
+        "field_snapshots_latlon_pixels.png",
+        "mean_timeseries.png",
+        "conservation_timeseries.png",
+        "latitude_vertical_cross_sections.png",
+        "longitude_vertical_cross_sections.png",
+    ]:
+        p = output_dir / png_name
+        if not p.exists():
+            _write_placeholder_plot(
+                p,
+                f"{png_name}",
+                "This artifact was not produced by this specific test runner.",
+            )
+
+    if not (output_dir / "mean_timeseries.csv").exists():
+        with open(output_dir / "mean_timeseries.csv", "w") as f:
+            f.write("step,time_seconds,time_days\n")
+    if not (output_dir / "conservation_timeseries.csv").exists():
+        with open(output_dir / "conservation_timeseries.csv", "w") as f:
+            f.write("step,time_days,mass_proxy,energy_proxy,mass_rel,energy_rel\n")
+
+
 # ===========================================================================
 # Runner functions
 # ===========================================================================
@@ -301,16 +638,33 @@ def run_sw_cubed_sphere(tc: TestCase, output_dir: Path, days: float, **kwargs):
 
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 20)
-    diag_times, diag_mass, diag_max_wind = [], [], []
+    diag_times, diag_steps, diag_mass, diag_max_wind = [], [], [], []
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def _extract_sw_fields(s):
+        u = np.asarray(s.u.data, dtype=np.float64)
+        v = np.asarray(s.v.data, dtype=np.float64)
+        return {
+            "u": u,
+            "v": v,
+            "wind_speed": np.sqrt(u * u + v * v),
+            "height": np.asarray(s.h.data, dtype=np.float64),
+        }
 
     mass_init = float(jnp.mean(state_init.h.data))
+    snapshots[0] = _extract_sw_fields(state)
 
     t0 = time.time()
     for i in range(n_steps):
         state = model.step(state, dt)
+        step = i + 1
+        if step in snap_targets:
+            snapshots[step] = _extract_sw_fields(state)
         if (i + 1) % diag_every == 0:
             day = (i + 1) * dt / 86400.0
             diag_times.append(day)
+            diag_steps.append(i + 1)
             diag_mass.append(float(jnp.mean(state.h.data)))
             diag_max_wind.append(float(jnp.max(jnp.sqrt(
                 state.u.data ** 2 + state.v.data ** 2))))
@@ -341,6 +695,32 @@ def run_sw_cubed_sphere(tc: TestCase, output_dir: Path, days: float, **kwargs):
                              f"SW Williamson {test_num} — C{n_grid}",
                              [("Mean h (m)", diag_times, diag_mass, "h"),
                               ("Max |v| (m/s)", diag_times, diag_max_wind, "|v|")])
+        _save_mean_and_conservation(
+            output_dir,
+            f"SW Williamson {test_num} C{n_grid}",
+            diag_steps,
+            dt,
+            {"mean_height": diag_mass, "max_wind": diag_max_wind},
+            units={"mean_height": "m", "max_wind": "m/s"},
+            mass_key="mean_height",
+            energy_key="max_wind",
+        )
+
+    _save_snapshots_bundle(
+        output_dir,
+        f"SW Williamson {test_num} C{n_grid}",
+        snapshots,
+        dt,
+        [
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
+            ("wind_speed", "Wind speed (m/s)", "magma"),
+            ("height", "Fluid depth h (m)", "viridis"),
+        ],
+        coord_kind="cube",
+        lon_deg=np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi,
+        lat_deg=np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi,
+    )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -377,15 +757,33 @@ def run_sw_latlon(tc: TestCase, output_dir: Path, days: float, **kwargs):
 
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 20)
-    diag_times, diag_mass, diag_max_wind = [], [], []
+    diag_times, diag_steps, diag_mass, diag_max_wind = [], [], [], []
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def _extract_sw_fields(s):
+        u = np.asarray(s.u.data, dtype=np.float64)
+        v = np.asarray(s.v.data, dtype=np.float64)
+        return {
+            "u": u,
+            "v": v,
+            "wind_speed": np.sqrt(u * u + v * v),
+            "height": np.asarray(s.h.data, dtype=np.float64),
+        }
+
     mass_init = float(jnp.mean(state_init.h.data))
+    snapshots[0] = _extract_sw_fields(state)
 
     t0 = time.time()
     for i in range(n_steps):
         state = model.step(state, dt)
+        step = i + 1
+        if step in snap_targets:
+            snapshots[step] = _extract_sw_fields(state)
         if (i + 1) % diag_every == 0:
             day = (i + 1) * dt / 86400.0
             diag_times.append(day)
+            diag_steps.append(i + 1)
             diag_mass.append(float(jnp.mean(state.h.data)))
             diag_max_wind.append(float(jnp.max(jnp.sqrt(
                 state.u.data ** 2 + state.v.data ** 2))))
@@ -415,6 +813,34 @@ def run_sw_latlon(tc: TestCase, output_dir: Path, days: float, **kwargs):
                              f"SW Williamson {test_num} — {n_lat}x{n_lon}",
                              [("Mean h (m)", diag_times, diag_mass, "h"),
                               ("Max |v| (m/s)", diag_times, diag_max_wind, "|v|")])
+        _save_mean_and_conservation(
+            output_dir,
+            f"SW Williamson {test_num} {n_lat}x{n_lon}",
+            diag_steps,
+            dt,
+            {"mean_height": diag_mass, "max_wind": diag_max_wind},
+            units={"mean_height": "m", "max_wind": "m/s"},
+            mass_key="mean_height",
+            energy_key="max_wind",
+        )
+
+    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
+    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
+    _save_snapshots_bundle(
+        output_dir,
+        f"SW Williamson {test_num} {n_lat}x{n_lon}",
+        snapshots,
+        dt,
+        [
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
+            ("wind_speed", "Wind speed (m/s)", "magma"),
+            ("height", "Fluid depth h (m)", "viridis"),
+        ],
+        coord_kind="latlon",
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+    )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -455,15 +881,36 @@ def run_sw_spectral(tc: TestCase, output_dir: Path, days: float, **kwargs):
 
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 20)
-    diag_times, diag_max_wind = [], []
+    diag_times, diag_steps, diag_mean_h, diag_max_wind = [], [], [], []
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def _extract_spec_sw(s):
+        fld = spectral_to_grid(s, grid)
+        u = np.asarray(fld["u"], dtype=np.float64)
+        v = np.asarray(fld["v"], dtype=np.float64)
+        h = np.asarray(fld["h"], dtype=np.float64)
+        return {
+            "u": u,
+            "v": v,
+            "wind_speed": np.sqrt(u * u + v * v),
+            "height": h,
+        }
+
+    snapshots[0] = _extract_spec_sw(state)
 
     t0 = time.time()
     for i in range(n_steps):
         state = step_jit(state, dt)
-        if (i + 1) % diag_every == 0:
+        step = i + 1
+        if step in snap_targets:
+            snapshots[step] = _extract_spec_sw(state)
+        if step % diag_every == 0:
             fields = spectral_to_grid(state, grid)
             day = (i + 1) * dt / 86400.0
             diag_times.append(day)
+            diag_steps.append(step)
+            diag_mean_h.append(float(jnp.mean(fields["h"])))
             diag_max_wind.append(float(jnp.max(jnp.sqrt(
                 fields["u"] ** 2 + fields["v"] ** 2))))
     jax.block_until_ready(state.vor_hat.data)
@@ -484,6 +931,32 @@ def run_sw_spectral(tc: TestCase, output_dir: Path, days: float, **kwargs):
         save_timeseries_plot(output_dir, "timeseries.png",
                              f"SW Spectral Williamson {test_num} — T{truncation}",
                              [("Max |v| (m/s)", diag_times, diag_max_wind, "|v|")])
+        _save_mean_and_conservation(
+            output_dir,
+            f"SW Spectral Williamson {test_num} T{truncation}",
+            diag_steps,
+            dt,
+            {"mean_height": diag_mean_h, "max_wind": diag_max_wind},
+            units={"mean_height": "m", "max_wind": "m/s"},
+            mass_key="mean_height",
+            energy_key="max_wind",
+        )
+
+    _save_snapshots_bundle(
+        output_dir,
+        f"SW Spectral Williamson {test_num} T{truncation}",
+        snapshots,
+        dt,
+        [
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
+            ("wind_speed", "Wind speed (m/s)", "magma"),
+            ("height", "Fluid depth h (m)", "viridis"),
+        ],
+        coord_kind="gaussian",
+        lon_deg=np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi,
+        lat_deg=np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi,
+    )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -550,25 +1023,44 @@ def run_hydro_held_suarez_cube(tc: TestCase, output_dir: Path, days: float, **kw
 
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, int(6 * 3600 / dt))  # every 6 hours
-    diag_times, diag_mass, diag_max_wind, diag_mean_T = [], [], [], []
+    diag_times, diag_steps, diag_mass, diag_max_wind, diag_mean_T = [], [], [], [], []
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def _extract_hs_cube(s):
+        u_sfc = np.asarray(s.u.data[..., -1], dtype=np.float64)
+        v_sfc = np.asarray(s.v.data[..., -1], dtype=np.float64)
+        return {
+            "u": u_sfc,
+            "v": v_sfc,
+            "wind_speed": np.sqrt(u_sfc * u_sfc + v_sfc * v_sfc),
+            "p_s": np.asarray(s.p_s.data, dtype=np.float64),
+            "T_3d": np.asarray(s.T.data, dtype=np.float64),
+        }
+
+    snapshots[0] = _extract_hs_cube(state)
 
     t0 = time.time()
     last_print = t0
     for step in range(n_steps):
         state = model.step_with_physics(state, dt, physics_fn)
+        step_num = step + 1
+        if step_num in snap_targets:
+            snapshots[step_num] = _extract_hs_cube(state)
 
-        if (step + 1) % 100 == 0:
+        if step_num % 100 == 0:
             u_max = float(jnp.max(jnp.abs(state.u.data)))
             if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step + 1}, u_max={u_max:.1f}")
+                print(f"  BLOWUP at step {step_num}, u_max={u_max:.1f}")
                 break
 
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
+        if step_num % diag_every == 0:
+            day = step_num * dt / 86400.0
             mass = float(global_integral(state.p_s, grid))
             max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
             mean_T = float(jnp.mean(state.T.data))
             diag_times.append(day)
+            diag_steps.append(step_num)
             diag_mass.append(mass)
             diag_max_wind.append(max_wind)
             diag_mean_T.append(mean_T)
@@ -604,6 +1096,63 @@ def run_hydro_held_suarez_cube(tc: TestCase, output_dir: Path, days: float, **kw
                              [("Mass drift (rel)", diag_times, mass_drift_ts, "mass"),
                               ("Max |v| (m/s)", diag_times, diag_max_wind, "|v|"),
                               ("Mean T (K)", diag_times, diag_mean_T, "T")])
+        _save_mean_and_conservation(
+            output_dir,
+            f"Held-Suarez {radiation} C{n_grid} {vert}",
+            diag_steps,
+            dt,
+            {"mean_p_s": diag_mass, "max_wind": diag_max_wind, "mean_T": diag_mean_T},
+            units={"mean_p_s": "Pa", "max_wind": "m/s", "mean_T": "K"},
+            mass_key="mean_p_s",
+            energy_key="mean_T",
+        )
+
+    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
+    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
+    _save_snapshots_bundle(
+        output_dir,
+        f"Held-Suarez {radiation} C{n_grid} {vert}",
+        snapshots,
+        dt,
+        [
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
+            ("wind_speed", "Wind speed (m/s)", "magma"),
+            ("p_s", "Surface pressure (Pa)", "viridis"),
+        ],
+        coord_kind="cube",
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+    )
+    _save_vertical_cross_sections(
+        output_dir,
+        f"Held-Suarez {radiation} C{n_grid} {vert}",
+        snapshots,
+        dt,
+        field_key_3d="T_3d",
+        coord_kind="cube",
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+        level_values=np.asarray(getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64),
+        level_label="Sigma level",
+    )
+    if hasattr(sigma, "sigma_full"):
+        _get_rich_diag_helpers()._save_profiles(
+            output_dir,
+            f"Held-Suarez {radiation} C{n_grid} {vert}",
+            {
+                st: {
+                    "T_mean": np.nanmean(np.asarray(snapshots[st]["T_3d"]), axis=(0, 1, 2))
+                }
+                for st in sorted(snapshots.keys())
+                if "T_3d" in snapshots[st]
+            },
+            dt,
+            np.asarray(sigma.sigma_full, dtype=np.float64),
+            "Sigma",
+            True,
+            units={"T_mean": "K"},
+        )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -664,25 +1213,44 @@ def run_hydro_held_suarez_latlon(tc: TestCase, output_dir: Path, days: float, **
 
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, int(6 * 3600 / dt))
-    diag_times, diag_mass, diag_max_wind, diag_mean_T = [], [], [], []
+    diag_times, diag_steps, diag_mass, diag_max_wind, diag_mean_T = [], [], [], [], []
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def _extract_hs_latlon(s):
+        u = np.asarray(s.u.data[..., -1], dtype=np.float64)
+        v = np.asarray(s.v.data[..., -1], dtype=np.float64)
+        return {
+            "u": u,
+            "v": v,
+            "wind_speed": np.sqrt(u * u + v * v),
+            "p_s": np.asarray(s.p_s.data, dtype=np.float64),
+            "T_3d": np.asarray(s.T.data, dtype=np.float64),
+        }
+
+    snapshots[0] = _extract_hs_latlon(state)
 
     t0 = time.time()
     last_print = t0
     for step in range(n_steps):
         state = model.step_with_physics(state, dt, physics_fn)
+        step_num = step + 1
+        if step_num in snap_targets:
+            snapshots[step_num] = _extract_hs_latlon(state)
 
-        if (step + 1) % 100 == 0:
+        if step_num % 100 == 0:
             u_max = float(jnp.max(jnp.abs(state.u.data)))
             if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step + 1}")
+                print(f"  BLOWUP at step {step_num}")
                 break
 
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
+        if step_num % diag_every == 0:
+            day = step_num * dt / 86400.0
             mass = float(global_integral_ll(state.p_s, grid))
             max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
             mean_T = float(jnp.mean(state.T.data))
             diag_times.append(day)
+            diag_steps.append(step_num)
             diag_mass.append(mass)
             diag_max_wind.append(max_wind)
             diag_mean_T.append(mean_T)
@@ -716,6 +1284,62 @@ def run_hydro_held_suarez_latlon(tc: TestCase, output_dir: Path, days: float, **
                              [("Mass drift (rel)", diag_times, mass_drift_ts, "mass"),
                               ("Max |v| (m/s)", diag_times, diag_max_wind, "|v|"),
                               ("Mean T (K)", diag_times, diag_mean_T, "T")])
+        _save_mean_and_conservation(
+            output_dir,
+            f"Held-Suarez {radiation} {n_lat}x{n_lon}",
+            diag_steps,
+            dt,
+            {"mean_p_s": diag_mass, "max_wind": diag_max_wind, "mean_T": diag_mean_T},
+            units={"mean_p_s": "Pa", "max_wind": "m/s", "mean_T": "K"},
+            mass_key="mean_p_s",
+            energy_key="mean_T",
+        )
+
+    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
+    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
+    _save_snapshots_bundle(
+        output_dir,
+        f"Held-Suarez {radiation} {n_lat}x{n_lon}",
+        snapshots,
+        dt,
+        [
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
+            ("wind_speed", "Wind speed (m/s)", "magma"),
+            ("p_s", "Surface pressure (Pa)", "viridis"),
+        ],
+        coord_kind="latlon",
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+    )
+    _save_vertical_cross_sections(
+        output_dir,
+        f"Held-Suarez {radiation} {n_lat}x{n_lon}",
+        snapshots,
+        dt,
+        field_key_3d="T_3d",
+        coord_kind="latlon",
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+        level_values=np.asarray(sigma.sigma_full, dtype=np.float64),
+        level_label="Sigma",
+    )
+    _get_rich_diag_helpers()._save_profiles(
+        output_dir,
+        f"Held-Suarez {radiation} {n_lat}x{n_lon}",
+        {
+            st: {
+                "T_mean": np.nanmean(np.asarray(snapshots[st]["T_3d"]), axis=(0, 1))
+            }
+            for st in sorted(snapshots.keys())
+            if "T_3d" in snapshots[st]
+        },
+        dt,
+        np.asarray(sigma.sigma_full, dtype=np.float64),
+        "Sigma",
+        True,
+        units={"T_mean": "K"},
+    )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -777,24 +1401,46 @@ def run_hydro_held_suarez_spectral(tc: TestCase, output_dir: Path, days: float, 
 
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, int(6 * 3600 / dt))
-    diag_times, diag_max_wind, diag_mean_T = [], [], []
+    diag_times, diag_steps, diag_mean_ps, diag_max_wind, diag_mean_T = [], [], [], [], []
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def _extract_hs_spec(s):
+        fld = spectral_pe_to_grid(s, grid, sigma)
+        u = np.asarray(fld["u"][..., -1], dtype=np.float64)
+        v = np.asarray(fld["v"][..., -1], dtype=np.float64)
+        return {
+            "u": u,
+            "v": v,
+            "wind_speed": np.sqrt(u * u + v * v),
+            "p_s": np.asarray(fld["p_s"], dtype=np.float64),
+            "T_3d": np.asarray(fld["T"], dtype=np.float64),
+        }
+
+    snapshots[0] = _extract_hs_spec(state)
 
     t0 = time.time()
     last_print = t0
     for step in range(n_steps):
         state = model.step_with_physics(state, dt, physics_fn)
+        step_num = step + 1
+        if step_num in snap_targets:
+            snapshots[step_num] = _extract_hs_spec(state)
 
-        if (step + 1) % 100 == 0:
+        if step_num % 100 == 0:
             if not jnp.all(jnp.isfinite(state.vor_hat.data)):
-                print(f"  BLOWUP at step {step + 1}")
+                print(f"  BLOWUP at step {step_num}")
                 break
 
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
+        if step_num % diag_every == 0:
+            day = step_num * dt / 86400.0
             fields = spectral_pe_to_grid(state, grid, sigma)
             max_wind = float(jnp.max(jnp.sqrt(fields["u"]**2 + fields["v"]**2)))
             mean_T = float(jnp.mean(fields["T"]))
+            mean_ps = float(jnp.mean(fields["p_s"]))
             diag_times.append(day)
+            diag_steps.append(step_num)
+            diag_mean_ps.append(mean_ps)
             diag_max_wind.append(max_wind)
             diag_mean_T.append(mean_T)
 
@@ -825,6 +1471,63 @@ def run_hydro_held_suarez_spectral(tc: TestCase, output_dir: Path, days: float, 
                              f"Held-Suarez ({radiation}) — T{truncation}/L{nlev} ({vert})",
                              [("Max |v| (m/s)", diag_times, diag_max_wind, "|v|"),
                               ("Mean T (K)", diag_times, diag_mean_T, "T")])
+        _save_mean_and_conservation(
+            output_dir,
+            f"Held-Suarez spectral {radiation} T{truncation} {vert}",
+            diag_steps,
+            dt,
+            {"mean_p_s": diag_mean_ps, "max_wind": diag_max_wind, "mean_T": diag_mean_T},
+            units={"mean_p_s": "Pa", "max_wind": "m/s", "mean_T": "K"},
+            mass_key="mean_p_s",
+            energy_key="mean_T",
+        )
+
+    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
+    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
+    _save_snapshots_bundle(
+        output_dir,
+        f"Held-Suarez spectral {radiation} T{truncation} {vert}",
+        snapshots,
+        dt,
+        [
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
+            ("wind_speed", "Wind speed (m/s)", "magma"),
+            ("p_s", "Surface pressure (Pa)", "viridis"),
+        ],
+        coord_kind="gaussian",
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+    )
+    _save_vertical_cross_sections(
+        output_dir,
+        f"Held-Suarez spectral {radiation} T{truncation} {vert}",
+        snapshots,
+        dt,
+        field_key_3d="T_3d",
+        coord_kind="gaussian",
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+        level_values=np.asarray(getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64),
+        level_label="Sigma",
+    )
+    if hasattr(sigma, "sigma_full"):
+        _get_rich_diag_helpers()._save_profiles(
+            output_dir,
+            f"Held-Suarez spectral {radiation} T{truncation} {vert}",
+            {
+                st: {
+                    "T_mean": np.nanmean(np.asarray(snapshots[st]["T_3d"]), axis=(0, 1))
+                }
+                for st in sorted(snapshots.keys())
+                if "T_3d" in snapshots[st]
+            },
+            dt,
+            np.asarray(sigma.sigma_full, dtype=np.float64),
+            "Sigma",
+            True,
+            units={"T_mean": "K"},
+        )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -1472,19 +2175,44 @@ def run_nh_dcmip2025_cube(tc: TestCase, output_dir: Path, days: float, **kwargs)
 
     n_steps = int(duration_hours * 3600.0 / dt)
     diag_every = max(1, n_steps // 20)
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    diag_steps, diag_max_w, diag_mean_theta, diag_mean_rho = [], [], [], []
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def _extract_nh_cube(s):
+        u = np.asarray(s.u.data[..., 0], dtype=np.float64)
+        v = np.asarray(s.v.data[..., 0], dtype=np.float64)
+        w_mid = np.asarray(s.w.data[..., min(s.w.data.shape[-1] // 2, s.w.data.shape[-1] - 1)], dtype=np.float64)
+        return {
+            "u": u,
+            "v": v,
+            "w_mid": w_mid,
+            "wind_speed": np.sqrt(u * u + v * v),
+            "theta_prime_3d": np.asarray(s.theta_prime.data, dtype=np.float64),
+            "rho_prime_3d": np.asarray(s.rho_prime.data, dtype=np.float64),
+        }
+
+    snapshots[0] = _extract_nh_cube(state)
 
     t0 = time.time()
     stable = True
     for i in range(n_steps):
         state = model.step(state, dt)
-        if (i + 1) % diag_every == 0:
+        step = i + 1
+        if step in snap_targets:
+            snapshots[step] = _extract_nh_cube(state)
+        if step % diag_every == 0:
             w_max = float(jnp.max(jnp.abs(state.w.data)))
             if not jnp.all(jnp.isfinite(state.u.data)):
-                print(f"    BLOWUP at step {i + 1}")
+                print(f"    BLOWUP at step {step}")
                 stable = False
                 break
-            t_hours = (i + 1) * dt / 3600.0
-            print(f"    Step {i + 1:6d}/{n_steps} | t={t_hours:.2f}h | |w|_max={w_max:.4f} m/s")
+            t_hours = step * dt / 3600.0
+            print(f"    Step {step:6d}/{n_steps} | t={t_hours:.2f}h | |w|_max={w_max:.4f} m/s")
+            diag_steps.append(step)
+            diag_max_w.append(w_max)
+            diag_mean_theta.append(float(jnp.mean(state.theta_prime.data)))
+            diag_mean_rho.append(float(jnp.mean(state.rho_prime.data)))
 
     jax.block_until_ready(state.u.data)
     wall = time.time() - t0
@@ -1502,6 +2230,70 @@ def run_nh_dcmip2025_cube(tc: TestCase, output_dir: Path, days: float, **kwargs)
         "wall_time": f"{wall:.1f}s", "status": "PASS" if ok else "FAIL", "notes": notes,
     }
     write_results_txt(output_dir, results)
+
+    if diag_steps:
+        _save_mean_and_conservation(
+            output_dir,
+            f"NH DCMIP {test_case} C{n_grid}",
+            diag_steps,
+            dt,
+            {
+                "max_abs_w": diag_max_w,
+                "mean_theta_prime": diag_mean_theta,
+                "mean_rho_prime": diag_mean_rho,
+            },
+            units={"max_abs_w": "m/s", "mean_theta_prime": "K", "mean_rho_prime": "kg/m^3"},
+            mass_key="mean_rho_prime",
+            energy_key="mean_theta_prime",
+        )
+
+    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
+    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
+    _save_snapshots_bundle(
+        output_dir,
+        f"NH DCMIP {test_case} C{n_grid}",
+        snapshots,
+        dt,
+        [
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
+            ("w_mid", "Vertical velocity w mid (m/s)", "RdBu_r"),
+            ("wind_speed", "Wind speed (m/s)", "magma"),
+        ],
+        coord_kind="cube",
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+    )
+    z_full = np.asarray(getattr(height_coord, "z_full", np.arange(nlev)), dtype=np.float64)
+    _save_vertical_cross_sections(
+        output_dir,
+        f"NH DCMIP {test_case} C{n_grid}",
+        snapshots,
+        dt,
+        field_key_3d="theta_prime_3d",
+        coord_kind="cube",
+        lon_deg=lon_deg,
+        lat_deg=lat_deg,
+        level_values=z_full,
+        level_label="Height (m)",
+    )
+    _get_rich_diag_helpers()._save_profiles(
+        output_dir,
+        f"NH DCMIP {test_case} C{n_grid}",
+        {
+            st: {
+                "theta_prime_mean": np.nanmean(np.asarray(snapshots[st]["theta_prime_3d"]), axis=(0, 1, 2)),
+                "rho_prime_mean": np.nanmean(np.asarray(snapshots[st]["rho_prime_3d"]), axis=(0, 1, 2)),
+            }
+            for st in sorted(snapshots.keys())
+            if "theta_prime_3d" in snapshots[st]
+        },
+        dt,
+        z_full,
+        "Height (m)",
+        False,
+        units={"theta_prime_mean": "K", "rho_prime_mean": "kg/m^3"},
+    )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -1541,6 +2333,7 @@ def run_nh_dcmip2025_spectral(tc: TestCase, output_dir: Path, days: float, **kwa
 
     n_steps = int(duration_hours * 3600.0 / dt)
     diag_every = max(1, n_steps // 20)
+    diag_steps, diag_theta_norm, diag_rho_norm = [], [], []
 
     t0 = time.time()
     stable = True
@@ -1553,6 +2346,9 @@ def run_nh_dcmip2025_spectral(tc: TestCase, output_dir: Path, days: float, **kwa
                 break
             t_hours = (i + 1) * dt / 3600.0
             print(f"    Step {i + 1:6d}/{n_steps} | t={t_hours:.2f}h")
+            diag_steps.append(i + 1)
+            diag_theta_norm.append(float(jnp.linalg.norm(state.theta_prime_hat.data)))
+            diag_rho_norm.append(float(jnp.linalg.norm(state.rho_prime_hat.data)))
 
     jax.block_until_ready(state.theta_prime_hat.data)
     wall = time.time() - t0
@@ -1569,6 +2365,18 @@ def run_nh_dcmip2025_spectral(tc: TestCase, output_dir: Path, days: float, **kwa
         "wall_time": f"{wall:.1f}s", "status": "PASS" if ok else "FAIL", "notes": notes,
     }
     write_results_txt(output_dir, results)
+
+    if diag_steps:
+        _save_mean_and_conservation(
+            output_dir,
+            f"NH Spectral DCMIP {test_case} T{truncation}",
+            diag_steps,
+            dt,
+            {"theta_hat_norm": diag_theta_norm, "rho_hat_norm": diag_rho_norm},
+            units={"theta_hat_norm": "arb", "rho_hat_norm": "arb"},
+            mass_key="rho_hat_norm",
+            energy_key="theta_hat_norm",
+        )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -1610,15 +2418,31 @@ def run_sw_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
 
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 20)
-    diag_times, diag_mass, diag_max_wind = [], [], []
+    diag_times, diag_steps, diag_mass, diag_max_wind = [], [], [], []
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+    lon_cell_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180.0 / np.pi
+    lat_cell_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi
+
+    def _extract_sw_ico(s):
+        h_ll = _bin_points_to_latlon(np.asarray(s.h.data, dtype=np.float64), lon_cell_deg, lat_cell_deg)
+        return {
+            "height": h_ll,
+        }
+
     mass_init = float(jnp.mean(state_init.h.data))
+    snapshots[0] = _extract_sw_ico(state)
 
     t0 = time.time()
     for i in range(n_steps):
         state = model.step(state, dt)
+        step = i + 1
+        if step in snap_targets:
+            snapshots[step] = _extract_sw_ico(state)
         if (i + 1) % diag_every == 0:
             day = (i + 1) * dt / 86400.0
             diag_times.append(day)
+            diag_steps.append(i + 1)
             diag_mass.append(float(jnp.mean(state.h.data)))
             diag_max_wind.append(float(jnp.max(jnp.abs(state.u.data))))
     jax.block_until_ready(state.h.data)
@@ -1646,6 +2470,27 @@ def run_sw_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
                              f"SW Williamson {test_num} — ico{level} ({mesh.nCells} cells)",
                              [("Mean h (m)", diag_times, diag_mass, "h"),
                               ("Max |u_n| (m/s)", diag_times, diag_max_wind, "|u|")])
+        _save_mean_and_conservation(
+            output_dir,
+            f"SW Williamson {test_num} ico{level}",
+            diag_steps,
+            dt,
+            {"mean_height": diag_mass, "max_edge_wind": diag_max_wind},
+            units={"mean_height": "m", "max_edge_wind": "m/s"},
+            mass_key="mean_height",
+            energy_key="max_edge_wind",
+        )
+
+    _save_snapshots_bundle(
+        output_dir,
+        f"SW Williamson {test_num} ico{level}",
+        snapshots,
+        dt,
+        [("height", "Fluid depth h (m)", "viridis")],
+        coord_kind="latlon",
+        lon_deg=np.linspace(-180.0, 180.0, 360, endpoint=False),
+        lat_deg=np.linspace(-90.0, 90.0, 181),
+    )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -1680,25 +2525,49 @@ def run_hydro_held_suarez_icosahedral(tc: TestCase, output_dir: Path, days: floa
 
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, int(6 * 3600 / dt))
-    diag_times, diag_mass, diag_max_wind, diag_mean_T = [], [], [], []
+    diag_times, diag_steps, diag_mass, diag_max_wind, diag_mean_T = [], [], [], [], []
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+    lon_cell_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180.0 / np.pi
+    lat_cell_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi
+
+    def _extract_hs_ico(s):
+        u_raw = np.asarray(s.u.data, dtype=np.float64).reshape(-1)
+        if u_raw.size == lon_cell_deg.size:
+            u_ll = _bin_points_to_latlon(u_raw, lon_cell_deg, lat_cell_deg)
+        else:
+            # Some MPAS variants store momentum on edges; keep snapshot schema stable.
+            u_ll = np.full((181, 360), np.nan, dtype=np.float64)
+        ps_ll = _bin_points_to_latlon(np.asarray(s.p_s.data, dtype=np.float64), lon_cell_deg, lat_cell_deg)
+        return {
+            "u": u_ll,
+            "p_s": ps_ll,
+            "T_3d": np.asarray(s.T.data, dtype=np.float64),
+        }
+
+    snapshots[0] = _extract_hs_ico(state)
 
     t0 = time.time()
     last_print = t0
     for step in range(n_steps):
         state = model.step(state, dt, held_suarez_forcing_mpas)
+        step_num = step + 1
+        if step_num in snap_targets:
+            snapshots[step_num] = _extract_hs_ico(state)
 
-        if (step + 1) % 100 == 0:
+        if step_num % 100 == 0:
             u_max = float(jnp.max(jnp.abs(state.u.data)))
             if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step + 1}, u_max={u_max:.1f}")
+                print(f"  BLOWUP at step {step_num}, u_max={u_max:.1f}")
                 break
 
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
+        if step_num % diag_every == 0:
+            day = step_num * dt / 86400.0
             mass = float(jnp.sum(state.p_s.data * mesh.areaCell))
             max_wind = float(jnp.max(jnp.abs(state.u.data)))
             mean_T = float(jnp.mean(state.T.data))
             diag_times.append(day)
+            diag_steps.append(step_num)
             diag_mass.append(mass)
             diag_max_wind.append(max_wind)
             diag_mean_T.append(mean_T)
@@ -1733,6 +2602,58 @@ def run_hydro_held_suarez_icosahedral(tc: TestCase, output_dir: Path, days: floa
                              [("Mass drift (rel)", diag_times, mass_drift_ts, "mass"),
                               ("Max |u_n| (m/s)", diag_times, diag_max_wind, "|u|"),
                               ("Mean T (K)", diag_times, diag_mean_T, "T")])
+        _save_mean_and_conservation(
+            output_dir,
+            f"Held-Suarez ico{level}",
+            diag_steps,
+            dt,
+            {"mean_p_s": diag_mass, "max_edge_wind": diag_max_wind, "mean_T": diag_mean_T},
+            units={"mean_p_s": "Pa", "max_edge_wind": "m/s", "mean_T": "K"},
+            mass_key="mean_p_s",
+            energy_key="mean_T",
+        )
+
+    _save_snapshots_bundle(
+        output_dir,
+        f"Held-Suarez ico{level}",
+        snapshots,
+        dt,
+        [
+            ("u", "Edge-normal wind (m/s)", "RdBu_r"),
+            ("p_s", "Surface pressure (Pa)", "viridis"),
+        ],
+        coord_kind="latlon",
+        lon_deg=np.linspace(-180.0, 180.0, 360, endpoint=False),
+        lat_deg=np.linspace(-90.0, 90.0, 181),
+    )
+    _save_vertical_cross_sections(
+        output_dir,
+        f"Held-Suarez ico{level}",
+        snapshots,
+        dt,
+        field_key_3d="T_3d",
+        coord_kind="icosa",
+        lon_deg=lon_cell_deg,
+        lat_deg=lat_cell_deg,
+        level_values=np.asarray(sigma.sigma_full, dtype=np.float64),
+        level_label="Sigma",
+    )
+    _get_rich_diag_helpers()._save_profiles(
+        output_dir,
+        f"Held-Suarez ico{level}",
+        {
+            st: {
+                "T_mean": np.nanmean(np.asarray(snapshots[st]["T_3d"]), axis=0)
+            }
+            for st in sorted(snapshots.keys())
+            if "T_3d" in snapshots[st]
+        },
+        dt,
+        np.asarray(sigma.sigma_full, dtype=np.float64),
+        "Sigma",
+        True,
+        units={"T_mean": "K"},
+    )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -1849,19 +2770,52 @@ def run_nh_dcmip2025_icosahedral(tc: TestCase, output_dir: Path, days: float, **
 
     n_steps = int(duration_hours * 3600.0 / dt)
     diag_every = max(1, n_steps // 20)
+    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
+    diag_steps, diag_max_w, diag_mean_theta, diag_mean_rho = [], [], [], []
+    snapshots: dict[int, dict[str, np.ndarray]] = {}
+    lon_cell_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180.0 / np.pi
+    lat_cell_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi
+
+    def _extract_nh_ico(s):
+        u_raw = np.asarray(s.u.data, dtype=np.float64).reshape(-1)
+        if u_raw.size == lon_cell_deg.size:
+            u_ll = _bin_points_to_latlon(u_raw, lon_cell_deg, lat_cell_deg)
+        else:
+            u_ll = np.full((181, 360), np.nan, dtype=np.float64)
+        w_arr = np.asarray(s.w.data, dtype=np.float64)
+        if w_arr.ndim >= 2 and w_arr.shape[0] == lon_cell_deg.size:
+            w_mid = w_arr[:, min(w_arr.shape[-1] // 2, w_arr.shape[-1] - 1)]
+            w_ll = _bin_points_to_latlon(w_mid, lon_cell_deg, lat_cell_deg)
+        else:
+            w_ll = np.full((181, 360), np.nan, dtype=np.float64)
+        return {
+            "u": u_ll,
+            "w_mid": w_ll,
+            "theta_prime_3d": np.asarray(s.theta_prime.data, dtype=np.float64),
+            "rho_prime_3d": np.asarray(s.rho_prime.data, dtype=np.float64),
+        }
+
+    snapshots[0] = _extract_nh_ico(state)
 
     t0 = time.time()
     stable = True
     for i in range(n_steps):
         state = model.step(state, dt)
-        if (i + 1) % diag_every == 0:
+        step = i + 1
+        if step in snap_targets:
+            snapshots[step] = _extract_nh_ico(state)
+        if step % diag_every == 0:
             w_max = float(jnp.max(jnp.abs(state.w.data)))
             if not jnp.all(jnp.isfinite(state.u.data)):
-                print(f"    BLOWUP at step {i + 1}")
+                print(f"    BLOWUP at step {step}")
                 stable = False
                 break
-            t_hours = (i + 1) * dt / 3600.0
-            print(f"    Step {i + 1:6d}/{n_steps} | t={t_hours:.2f}h | |w|_max={w_max:.4f} m/s")
+            t_hours = step * dt / 3600.0
+            print(f"    Step {step:6d}/{n_steps} | t={t_hours:.2f}h | |w|_max={w_max:.4f} m/s")
+            diag_steps.append(step)
+            diag_max_w.append(w_max)
+            diag_mean_theta.append(float(jnp.mean(state.theta_prime.data)))
+            diag_mean_rho.append(float(jnp.mean(state.rho_prime.data)))
 
     jax.block_until_ready(state.u.data)
     wall = time.time() - t0
@@ -1880,6 +2834,66 @@ def run_nh_dcmip2025_icosahedral(tc: TestCase, output_dir: Path, days: float, **
         "status": "PASS" if ok else "FAIL", "notes": notes,
     }
     write_results_txt(output_dir, results)
+
+    if diag_steps:
+        _save_mean_and_conservation(
+            output_dir,
+            f"NH DCMIP {test_case} ico{level}",
+            diag_steps,
+            dt,
+            {
+                "max_abs_w": diag_max_w,
+                "mean_theta_prime": diag_mean_theta,
+                "mean_rho_prime": diag_mean_rho,
+            },
+            units={"max_abs_w": "m/s", "mean_theta_prime": "K", "mean_rho_prime": "kg/m^3"},
+            mass_key="mean_rho_prime",
+            energy_key="mean_theta_prime",
+        )
+
+    _save_snapshots_bundle(
+        output_dir,
+        f"NH DCMIP {test_case} ico{level}",
+        snapshots,
+        dt,
+        [
+            ("u", "Edge-normal wind (m/s)", "RdBu_r"),
+            ("w_mid", "Vertical velocity mid (m/s)", "RdBu_r"),
+        ],
+        coord_kind="latlon",
+        lon_deg=np.linspace(-180.0, 180.0, 360, endpoint=False),
+        lat_deg=np.linspace(-90.0, 90.0, 181),
+    )
+    z_full = np.asarray(getattr(height_coord, "z_full", np.arange(nlev)), dtype=np.float64)
+    _save_vertical_cross_sections(
+        output_dir,
+        f"NH DCMIP {test_case} ico{level}",
+        snapshots,
+        dt,
+        field_key_3d="theta_prime_3d",
+        coord_kind="icosa",
+        lon_deg=lon_cell_deg,
+        lat_deg=lat_cell_deg,
+        level_values=z_full,
+        level_label="Height (m)",
+    )
+    _get_rich_diag_helpers()._save_profiles(
+        output_dir,
+        f"NH DCMIP {test_case} ico{level}",
+        {
+            st: {
+                "theta_prime_mean": np.nanmean(np.asarray(snapshots[st]["theta_prime_3d"]), axis=0),
+                "rho_prime_mean": np.nanmean(np.asarray(snapshots[st]["rho_prime_3d"]), axis=0),
+            }
+            for st in sorted(snapshots.keys())
+            if "theta_prime_3d" in snapshots[st]
+        },
+        dt,
+        z_full,
+        "Height (m)",
+        False,
+        units={"theta_prime_mean": "K", "rho_prime_mean": "kg/m^3"},
+    )
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -2032,6 +3046,9 @@ def main():
         except Exception as e:
             record(tc, "ERROR", 0, str(e)[:120])
             traceback.print_exc()
+        finally:
+            # Keep per-case artifact schema consistent, even on failures.
+            _ensure_required_artifacts(out_dir)
 
     total_wall = time.time() - t_start_all
 
