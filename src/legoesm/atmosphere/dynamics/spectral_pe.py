@@ -800,7 +800,7 @@ class SpectralPrimitiveEquationModel:
         from legoesm.timestepping.semi_implicit import euler_si_step
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
-    @partial(jax.jit, static_argnums=(0, 3, 4))
+    @partial(jax.jit, static_argnums=(0, 3, 4), donate_argnums=(2,))
     def _leapfrog_si_jit(self, state_n, state_nm1, dt, physics_fn=None):
         """JIT-compiled leapfrog + SI step, optionally with physics."""
         def tendency_fn(s):
@@ -815,7 +815,7 @@ class SpectralPrimitiveEquationModel:
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
 
-    @partial(jax.jit, static_argnums=(0, 2, 3))
+    @partial(jax.jit, static_argnums=(0, 2, 3), donate_argnums=(1,))
     def _step_jit(
         self,
         state: SpectralHydrostaticState,
@@ -843,7 +843,7 @@ class SpectralPrimitiveEquationModel:
     _leapfrog_si_physics_jit = _leapfrog_si_jit
     _step_with_physics_jit = _step_jit
 
-    @partial(jax.jit, static_argnums=(0, 2, 3))
+    @partial(jax.jit, static_argnums=(0, 2, 3), donate_argnums=(1,))
     def _step_on_cpu(
         self,
         state: SpectralHydrostaticState,

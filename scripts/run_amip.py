@@ -180,6 +180,13 @@ parser.add_argument("--cmip-output", action="store_true", default=False,
                     help="Write CF/CMOR-compliant NetCDF output files")
 parser.add_argument("--clear-sky-diag", action="store_true", default=False,
                     help="Compute clear-sky radiation diagnostics (rsutcs, rlutcs, etc.)")
+# Distributed execution
+parser.add_argument("--distributed", action="store_true", default=False,
+                    help="Enable distributed (multi-rank MPI) execution")
+parser.add_argument("--ensemble-size", type=int, default=1,
+                    help="Number of ensemble members (default: 1 = single run)")
+parser.add_argument("--n-ranks", type=int, default=1,
+                    help="Expected MPI rank count (informational; actual count from MPI)")
 args = parser.parse_args()
 
 # Backward-compatible alias: keep internal branch checks on "rrtmg".
@@ -253,6 +260,8 @@ exp_config = AMIPExperimentConfig(
     start_year=args.start_year,
     cmip_output=args.cmip_output,
     clear_sky_diag=args.clear_sky_diag,
+    distributed=args.distributed,
+    ensemble_size=args.ensemble_size,
 )
 
 # --- Experiment template: override GHG from template at start_year ---
@@ -288,6 +297,28 @@ AEROSOL_FORCING = exp_config.aerosol_forcing
 CLOUD_SCHEME = exp_config.cloud_scheme
 MICROPHYSICS = exp_config.microphysics
 SOLAR_SOURCE = exp_config.solar_source
+DISTRIBUTED = exp_config.distributed
+ENSEMBLE_SIZE = exp_config.ensemble_size
+
+# ---------------------------------------------------------------------------
+# Distributed initialization (MPI)
+# ---------------------------------------------------------------------------
+_dist_rank = 0
+_dist_n_ranks = 1
+_dist_mesh = None
+_dist_topology = None
+
+if DISTRIBUTED:
+    from legoesm.parallel.distributed import initialize_distributed
+    _dist_config, _dist_topology = initialize_distributed(return_topology=True)
+    _dist_rank = _dist_topology.rank
+    _dist_n_ranks = _dist_topology.n_processes
+    _dist_mesh = _dist_config.mesh
+    # Halo backend is already set inside initialize_distributed()
+
+def _is_root():
+    """Return True if this is rank 0 (or non-distributed)."""
+    return _dist_rank == 0
 
 # Build output directory with run identifier
 RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -301,29 +332,34 @@ DISCRETIZATION = args.discretization
 _rad_label = "gray (Frierson 2006)" if RADIATION == "gray" else "RRTMG (correlated-k)"
 _disc_labels = {"finite_volume": "Finite Volume (PPM)", "cgrid": "C-grid (PPM + div damp)", "centered": "Centered FD"}
 _disc_label = _disc_labels.get(DISCRETIZATION, DISCRETIZATION)
-print("=" * 70)
-print(f"  AMIP: Prescribed SST/SIC + {_rad_label} + SBM Convection")
-print("=" * 70)
-print(f"  Grid:       C{N} / L{NLEV}")
-print(f"  Dycore:     {_disc_label}")
-print(f"  dt:         {DT:.0f} s")
-print(f"  Duration:   {N_DAYS} days (start day {START_DAY})")
-print(f"  Radiation:  {_rad_label}")
-if RADIATION == "rrtmg":
-    print(f"  CO2: {exp_config.co2_ppmv} ppmv, CH4: {exp_config.ch4_ppbv} ppbv, N2O: {exp_config.n2o_ppbv} ppbv")
-if RAD_UPDATE_STEPS > 1:
-    print(f"  Radiation update every {RAD_UPDATE_STEPS} steps ({RAD_UPDATE_STEPS * DT:.0f} s)")
-if MICROPHYSICS != "none":
-    print(f"  Microphysics: {MICROPHYSICS}")
-print(f"  Diagnostics every {DIAG_DAYS} days")
-if CHECKPOINT_DAYS > 0:
-    print(f"  Checkpointing every {CHECKPOINT_DAYS} days")
-if args.restart_from:
-    print(f"  Restarting from: {args.restart_from}")
-print(f"  Dataset:    {args.dataset}")
-print(f"  Forcing:    {args.forcing_path}")
-print(f"  Output:     {OUTPUT_DIR}")
-print()
+if _is_root():
+    print("=" * 70)
+    print(f"  AMIP: Prescribed SST/SIC + {_rad_label} + SBM Convection")
+    print("=" * 70)
+    print(f"  Grid:       C{N} / L{NLEV}")
+    print(f"  Dycore:     {_disc_label}")
+    print(f"  dt:         {DT:.0f} s")
+    print(f"  Duration:   {N_DAYS} days (start day {START_DAY})")
+    print(f"  Radiation:  {_rad_label}")
+    if RADIATION == "rrtmg":
+        print(f"  CO2: {exp_config.co2_ppmv} ppmv, CH4: {exp_config.ch4_ppbv} ppbv, N2O: {exp_config.n2o_ppbv} ppbv")
+    if RAD_UPDATE_STEPS > 1:
+        print(f"  Radiation update every {RAD_UPDATE_STEPS} steps ({RAD_UPDATE_STEPS * DT:.0f} s)")
+    if MICROPHYSICS != "none":
+        print(f"  Microphysics: {MICROPHYSICS}")
+    print(f"  Diagnostics every {DIAG_DAYS} days")
+    if CHECKPOINT_DAYS > 0:
+        print(f"  Checkpointing every {CHECKPOINT_DAYS} days")
+    if args.restart_from:
+        print(f"  Restarting from: {args.restart_from}")
+    if DISTRIBUTED:
+        print(f"  Distributed: {_dist_n_ranks} MPI ranks")
+    if ENSEMBLE_SIZE > 1:
+        print(f"  Ensemble:   {ENSEMBLE_SIZE} members")
+    print(f"  Dataset:    {args.dataset}")
+    print(f"  Forcing:    {args.forcing_path}")
+    print(f"  Output:     {OUTPUT_DIR}")
+    print()
 
 # ---------------------------------------------------------------------------
 # 1. Grid and vertical coordinate
@@ -568,6 +604,29 @@ else:
     # Initialize cloud water and rain (zero initially)
     q_c = jnp.zeros(shape_3d)
     q_r = jnp.zeros(shape_3d)
+
+# ---------------------------------------------------------------------------
+# 4b. Ensemble initialization
+# ---------------------------------------------------------------------------
+_ensemble_step_fn = None
+if ENSEMBLE_SIZE > 1:
+    from legoesm.parallel.ensemble import (
+        perturb_initial_conditions,
+        stack_states,
+        make_ensemble_step_jit,
+        create_ensemble_mesh,
+    )
+    # Create perturbed initial conditions
+    _ens_key = jax.random.PRNGKey(42)
+    state = perturb_initial_conditions(
+        state, _ens_key, n_members=ENSEMBLE_SIZE, scale=0.01,
+    )
+    # Replicate moisture / hydrometeors across ensemble members
+    q_v = jnp.broadcast_to(q_v[None], (ENSEMBLE_SIZE,) + q_v.shape)
+    q_c = jnp.broadcast_to(q_c[None], (ENSEMBLE_SIZE,) + q_c.shape)
+    q_r = jnp.broadcast_to(q_r[None], (ENSEMBLE_SIZE,) + q_r.shape)
+    if _is_root():
+        print(f"  Ensemble: {ENSEMBLE_SIZE} members initialized (scale=0.01)")
 
 # ---------------------------------------------------------------------------
 # 5. Physics configuration
@@ -841,12 +900,15 @@ else:
             )
 
 
-@jax.jit
-def physics_step_no_rad(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
-                        dT_dt_rad_held, sw_net_sfc_held, lw_net_sfc_held,
-                        sw_up_toa_held, lw_up_toa_held,
-                        sw_down_toa_held=None):
-    """Convection + microphysics + BL exchange with held radiation tendencies."""
+def _physics_step_no_rad_impl(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
+                              dT_dt_rad_held, sw_net_sfc_held, lw_net_sfc_held,
+                              sw_up_toa_held, lw_up_toa_held,
+                              sw_down_toa_held):
+    """Convection + microphysics + BL exchange with held radiation tendencies.
+
+    Pure-JAX implementation (no @jax.jit) so it can be called from within
+    jax.lax.cond branches or from an outer JIT-compiled function.
+    """
     nlev = _sigma_full.shape[0]
     shape_3d = T.shape
     shape_2d = p_s.shape
@@ -918,17 +980,29 @@ def physics_step_no_rad(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
     dq_v_dt = dq_v_dt_conv + dq_v_dt_micro
     dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
 
-    _sw_down_toa = sw_down_toa_held if sw_down_toa_held is not None else jnp.zeros_like(sw_up_toa_held)
     return (dT_dt, dq_v_dt, dq_c_dt, dq_r_dt, precip + precip_micro,
             sw_net_sfc_held, lw_net_sfc_held, sw_up_toa_held, lw_up_toa_held,
-            _sw_down_toa)
+            sw_down_toa_held)
 
 
-def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
-                                  day_absolute, day_of_year, seconds_of_day, dt,
-                                  solar_weights, s_0=_S_0,
-                                  co2_vmr=None, ch4_vmr=None, n2o_vmr=None):
-    """Full physics step: recompute radiation + convection + microphysics + BL."""
+def _compute_radiation_core(T, p_s, q_v, sst, sic, lat, lon,
+                            day_of_year, seconds_of_day,
+                            solar_weights, s_0,
+                            o3_vmr_precomputed, aerosol_od_precomputed,
+                            co2_vmr, ch4_vmr, n2o_vmr):
+    """Compute radiation tendencies and fluxes (pure JAX, no I/O).
+
+    External forcing fields (ozone, aerosol) must be pre-computed by the
+    caller and passed in. This function is safe to call from within
+    jax.lax.cond branches or from an outer JIT context.
+
+    Returns
+    -------
+    dT_dt_rad : array (shape_3d)
+    sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa, sw_down_toa : arrays (shape_2d)
+    cs_rsutcs, cs_rlutcs, cs_rsdscs, cs_rldscs : arrays (shape_2d)
+        Clear-sky diagnostics (zeros if CLEAR_SKY_DIAG is False).
+    """
     nlev = _sigma_full.shape[0]
     shape_3d = T.shape
     shape_2d = p_s.shape
@@ -958,35 +1032,29 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
     albedo_col = albedo.reshape(ncol)
     emis_col = emissivity.reshape(ncol)
 
-    # External composition forcing fields (RRTMG only).
+    # Use pre-computed external forcing fields.
     if RADIATION == "rrtmg":
         if _ozone_external_active:
-            o3_vmr_col = get_ozone_at_time(
-                _ozone_external_config,
-                day_absolute,
-                lat_grid=lat_col,
-                p_grid=p_full_col,
-            )
+            o3_vmr_col = o3_vmr_precomputed
         elif OZONE_FORCING == "off":
             o3_vmr_col = jnp.full_like(p_full_col, 1.0e-10)
         else:
             o3_vmr_col = _compute_ozone_vmr(p_full_col, lat_col, ozone_config)
 
         if _aerosol_active:
-            aerosol_col = get_aerosol_at_time(
-                _aerosol_config,
-                day_absolute,
-                lat_grid=lat_col,
-            )
-            aerosol_od_col = distribute_column_aod_to_layers(
-                jnp.asarray(aerosol_col),
-                p_half_col,
-            )
+            aerosol_od_col = aerosol_od_precomputed
         else:
             aerosol_od_col = None
     else:
         o3_vmr_col = None
         aerosol_od_col = None
+
+    # GHG override: only pass concrete VMR values when a transient CMIP
+    # experiment is active (compile-time constant).  Otherwise pass None
+    # so the radiation function uses its config defaults.
+    _ghg_co2 = co2_vmr if (EXPERIMENT and RADIATION == "rrtmg") else None
+    _ghg_ch4 = ch4_vmr if (EXPERIMENT and RADIATION == "rrtmg") else None
+    _ghg_n2o = n2o_vmr if (EXPERIMENT and RADIATION == "rrtmg") else None
 
     if RADIATION == "rrtmg":
         rad_out = radiation_step(
@@ -995,7 +1063,7 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
             day_of_year, seconds_of_day,
             albedo_col, emis_col,
             o3_vmr_col, aerosol_od_col, solar_weights, s_0,
-            co2_vmr, ch4_vmr, n2o_vmr,
+            _ghg_co2, _ghg_ch4, _ghg_n2o,
         )
     else:
         rad_out = radiation_step(
@@ -1015,7 +1083,10 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
     sw_down_toa = rad_out.sw_flux_down[:, 0].reshape(shape_2d)
 
     # Clear-sky diagnostics (second radiation call without clouds).
-    cs_diag = None
+    cs_rsutcs = jnp.zeros(shape_2d)
+    cs_rlutcs = jnp.zeros(shape_2d)
+    cs_rsdscs = jnp.zeros(shape_2d)
+    cs_rldscs = jnp.zeros(shape_2d)
     if CLEAR_SKY_DIAG and RADIATION == "rrtmg":
         cs_out = radiation_step_clearsky(
             T_col, p_full_col, p_half_col, q_v_col,
@@ -1023,20 +1094,157 @@ def compute_radiation_and_physics(T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lo
             day_of_year, seconds_of_day,
             albedo_col, emis_col,
             o3_vmr_col, aerosol_od_col, solar_weights, s_0,
+            _ghg_co2, _ghg_ch4, _ghg_n2o,
+        )
+        cs_rsutcs = cs_out.sw_flux_up[:, 0].reshape(shape_2d)
+        cs_rlutcs = cs_out.lw_flux_up[:, 0].reshape(shape_2d)
+        cs_rsdscs = cs_out.sw_flux_down[:, -1].reshape(shape_2d)
+        cs_rldscs = cs_out.lw_flux_down[:, -1].reshape(shape_2d)
+
+    return (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa, sw_down_toa,
+            cs_rsutcs, cs_rlutcs, cs_rsdscs, cs_rldscs)
+
+
+def _precompute_external_forcing(day_absolute, p_s, lat):
+    """Pre-compute external forcing fields that may involve I/O.
+
+    Must be called outside JIT boundary. Returns arrays suitable for
+    passing into the JIT-compiled physics_step_unified.
+    """
+    nlev = _sigma_full.shape[0]
+    shape_2d = p_s.shape
+    ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
+
+    p_full = p_s[..., None] * _sigma_full
+    p_half = p_s[..., None] * _sigma_half
+    p_full_col = p_full.reshape(ncol, nlev)
+    p_half_col = p_half.reshape(ncol, nlev + 1)
+    lat_col = lat.reshape(ncol)
+
+    # Ozone
+    o3_vmr_col = jnp.zeros((ncol, nlev))  # placeholder
+    if RADIATION == "rrtmg" and _ozone_external_active:
+        o3_vmr_col = jnp.asarray(get_ozone_at_time(
+            _ozone_external_config,
+            day_absolute,
+            lat_grid=lat_col,
+            p_grid=p_full_col,
+        ))
+
+    # Aerosol
+    aerosol_od_col = jnp.zeros((ncol, nlev))  # placeholder
+    if RADIATION == "rrtmg" and _aerosol_active:
+        aerosol_col = get_aerosol_at_time(
+            _aerosol_config,
+            day_absolute,
+            lat_grid=lat_col,
+        )
+        aerosol_od_col = distribute_column_aod_to_layers(
+            jnp.asarray(aerosol_col),
+            p_half_col,
+        )
+
+    return o3_vmr_col, aerosol_od_col
+
+
+@jax.jit
+def physics_step_unified(need_rad_jax, T, p_s, q_v, q_c, q_r, u, v,
+                         sst, sic, lat, lon,
+                         day_of_year, seconds_of_day, dt,
+                         solar_weights, s_0,
+                         o3_vmr_precomputed, aerosol_od_precomputed,
+                         co2_vmr, ch4_vmr, n2o_vmr,
+                         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                         held_cs_rsutcs, held_cs_rlutcs,
+                         held_cs_rsdscs, held_cs_rldscs):
+    """Unified physics step using jax.lax.cond for radiation branching.
+
+    When need_rad_jax is True, recomputes radiation and updates held
+    tendencies. When False, reuses held radiation tendencies. Both
+    branches execute convection + microphysics + BL exchange.
+
+    Returns
+    -------
+    physics_out : 10-tuple
+        (dT_dt, dq_v_dt, dq_c_dt, dq_r_dt, precip,
+         sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa, sw_down_toa)
+    new_held : 6-tuple
+        Updated held radiation values (dT_rad, sw_sfc, lw_sfc, sw_toa, lw_toa, sw_down_toa)
+    cs_diag : 4-tuple
+        Clear-sky diagnostic arrays (rsutcs, rlutcs, rsdscs, rldscs).
+        Zeros when CLEAR_SKY_DIAG is False.
+    """
+    def _rad_branch(args):
+        """Branch: recompute radiation, then convection + BL."""
+        (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+         day_of_year, seconds_of_day, dt,
+         solar_weights, s_0,
+         o3_vmr_precomputed, aerosol_od_precomputed,
+         co2_vmr, ch4_vmr, n2o_vmr,
+         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+         held_cs_rsutcs, held_cs_rlutcs,
+         held_cs_rsdscs, held_cs_rldscs) = args
+
+        # Compute fresh radiation
+        (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa, sw_down_toa,
+         cs_rsutcs, cs_rlutcs, cs_rsdscs, cs_rldscs) = _compute_radiation_core(
+            T, p_s, q_v, sst, sic, lat, lon,
+            day_of_year, seconds_of_day,
+            solar_weights, s_0,
+            o3_vmr_precomputed, aerosol_od_precomputed,
             co2_vmr, ch4_vmr, n2o_vmr,
         )
-        cs_diag = {
-            "rsutcs": cs_out.sw_flux_up[:, 0].reshape(shape_2d),
-            "rlutcs": cs_out.lw_flux_up[:, 0].reshape(shape_2d),
-            "rsdscs": cs_out.sw_flux_down[:, -1].reshape(shape_2d),
-            "rldscs": cs_out.lw_flux_down[:, -1].reshape(shape_2d),
-        }
 
-    return physics_step_no_rad(
-        T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
-        dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
-        sw_down_toa,
-    ), dT_dt_rad, cs_diag
+        # Run convection + microphysics + BL with fresh radiation
+        physics_out = _physics_step_no_rad_impl(
+            T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
+            dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
+            sw_down_toa,
+        )
+
+        new_held = (dT_dt_rad, sw_net_sfc, lw_net_sfc,
+                    sw_up_toa, lw_up_toa, sw_down_toa)
+        cs_diag = (cs_rsutcs, cs_rlutcs, cs_rsdscs, cs_rldscs)
+        return physics_out, new_held, cs_diag
+
+    def _no_rad_branch(args):
+        """Branch: reuse held radiation tendencies."""
+        (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+         day_of_year, seconds_of_day, dt,
+         solar_weights, s_0,
+         o3_vmr_precomputed, aerosol_od_precomputed,
+         co2_vmr, ch4_vmr, n2o_vmr,
+         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+         held_cs_rsutcs, held_cs_rlutcs,
+         held_cs_rsdscs, held_cs_rldscs) = args
+
+        physics_out = _physics_step_no_rad_impl(
+            T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
+            held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+            held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+        )
+
+        # Pass through held values unchanged
+        new_held = (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa)
+        cs_diag = (held_cs_rsutcs, held_cs_rlutcs,
+                   held_cs_rsdscs, held_cs_rldscs)
+        return physics_out, new_held, cs_diag
+
+    args = (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+            day_of_year, seconds_of_day, dt,
+            solar_weights, s_0,
+            o3_vmr_precomputed, aerosol_od_precomputed,
+            co2_vmr, ch4_vmr, n2o_vmr,
+            held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+            held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+            held_cs_rsutcs, held_cs_rlutcs,
+            held_cs_rsdscs, held_cs_rldscs)
+
+    return jax.lax.cond(need_rad_jax, _rad_branch, _no_rad_branch, args)
 
 
 # ---------------------------------------------------------------------------
@@ -1107,13 +1315,20 @@ if CMIP_OUTPUT:
         _lat_deg_grid = np.degrees(np.asarray(grid.lat))
     print(f"  CMIP output enabled → {OUTPUT_DIR / 'cmor'}")
 
-# GHG override state for transient experiments
-_ghg_co2_vmr = None
-_ghg_ch4_vmr = None
-_ghg_n2o_vmr = None
+# GHG override state for transient experiments.
+# Use concrete JAX scalars (not None) so they can pass through jax.lax.cond.
+# A value of 0.0 is never used — the radiation_step function only reads these
+# when EXPERIMENT is active, and in that case they are overwritten before use.
+_ghg_co2_vmr = jnp.array(0.0)
+_ghg_ch4_vmr = jnp.array(0.0)
+_ghg_n2o_vmr = jnp.array(0.0)
 
-# Held clear-sky diagnostics
-_held_cs_diag = None
+# Held clear-sky diagnostics (always concrete arrays for jax.lax.cond).
+# When CLEAR_SKY_DIAG is False these remain zeros and are never read.
+_held_cs_rsutcs = jnp.zeros(shape_2d)
+_held_cs_rlutcs = jnp.zeros(shape_2d)
+_held_cs_rsdscs = jnp.zeros(shape_2d)
+_held_cs_rldscs = jnp.zeros(shape_2d)
 
 if CLEAR_SKY_DIAG:
     print(f"  Clear-sky radiation diagnostics enabled")
@@ -1172,23 +1387,31 @@ else:
 if EXPERIMENT and RADIATION == "rrtmg":
     _current_year = START_YEAR + day / 365.0
     _ghg = ghg_at_year(EXPERIMENT, _current_year)
-    _ghg_co2_vmr = _ghg[0] * 1.0e-6
-    _ghg_ch4_vmr = _ghg[1] * 1.0e-9
-    _ghg_n2o_vmr = _ghg[2] * 1.0e-9
+    _ghg_co2_vmr = jnp.array(_ghg[0] * 1.0e-6)
+    _ghg_ch4_vmr = jnp.array(_ghg[1] * 1.0e-9)
+    _ghg_n2o_vmr = jnp.array(_ghg[2] * 1.0e-9)
 
-(dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad, _held_cs_diag = \
-    compute_radiation_and_physics(
-        state.T.data, state.p_s.data, q_v, q_c, q_r, state.u.data, state.v.data,
-        sst, sic, grid.lat, grid.lon, day, day_of_year, seconds_of_day, DT,
-        _current_solar_weights,
-        _current_s_0,
+# Pre-compute external forcing (ozone, aerosol) outside JIT boundary
+_ext_o3, _ext_aer = _precompute_external_forcing(day, state.p_s.data, grid.lat)
+
+# Warmup: always compute radiation (need_rad = True)
+(dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), \
+    (_held_dT_rad, _held_sw_net_sfc, _held_lw_net_sfc,
+     _held_sw_up_toa, _held_lw_up_toa, _held_sw_down_toa), \
+    (_held_cs_rsutcs, _held_cs_rlutcs, _held_cs_rsdscs, _held_cs_rldscs) = \
+    physics_step_unified(
+        jnp.bool_(True),
+        state.T.data, state.p_s.data, q_v, q_c, q_r,
+        state.u.data, state.v.data,
+        sst, sic, grid.lat, grid.lon,
+        day_of_year, seconds_of_day, DT,
+        _current_solar_weights, _current_s_0,
+        _ext_o3, _ext_aer,
         _ghg_co2_vmr, _ghg_ch4_vmr, _ghg_n2o_vmr,
+        _held_dT_rad, _held_sw_net_sfc, _held_lw_net_sfc,
+        _held_sw_up_toa, _held_lw_up_toa, _held_sw_down_toa,
+        _held_cs_rsutcs, _held_cs_rlutcs, _held_cs_rsdscs, _held_cs_rldscs,
     )
-_held_sw_net_sfc = _sw
-_held_lw_net_sfc = _lw
-_held_sw_up_toa = _sw_toa
-_held_lw_up_toa = _lw_toa
-_held_sw_down_toa = _sw_down_toa
 
 new_T = state.T.data + DT * dT_dt
 q_v = jnp.maximum(q_v + DT * dq_v_dt, 0.0)
@@ -1229,8 +1452,11 @@ for step in range(start_step + 1, n_steps_total):
     # (a) Dynamics (includes compact ∇² damping of 2Δx mode)
     state = model.step_with_physics(state, DT)
 
-    # (b) Physics: recompute radiation on cadence, hold tendencies otherwise
-    need_rad = (RAD_UPDATE_STEPS <= 1) or ((step + 1) % RAD_UPDATE_STEPS == 0)
+    # (b) Physics: recompute radiation on cadence, hold tendencies otherwise.
+    # need_rad is a JAX boolean so the branch is handled by jax.lax.cond
+    # inside the JIT-compiled physics_step_unified.
+    need_rad_py = (RAD_UPDATE_STEPS <= 1) or ((step + 1) % RAD_UPDATE_STEPS == 0)
+    need_rad_jax = jnp.bool_(need_rad_py)
 
     # Time-varying solar forcing (broadband + optional full spectral weights)
     _solar_forcing_now = get_solar_forcing_at_time(_solar_config, day)
@@ -1241,40 +1467,42 @@ for step in range(start_step + 1, n_steps_total):
         _current_solar_weights = _solar_weights_template
 
     # Update GHG override for transient experiments.
-    if EXPERIMENT and RADIATION == "rrtmg" and need_rad:
+    if EXPERIMENT and RADIATION == "rrtmg" and need_rad_py:
         _current_year = START_YEAR + day / 365.0
         _ghg = ghg_at_year(EXPERIMENT, _current_year)
-        _ghg_co2_vmr = _ghg[0] * 1.0e-6
-        _ghg_ch4_vmr = _ghg[1] * 1.0e-9
-        _ghg_n2o_vmr = _ghg[2] * 1.0e-9
+        _ghg_co2_vmr = jnp.array(_ghg[0] * 1.0e-6)
+        _ghg_ch4_vmr = jnp.array(_ghg[1] * 1.0e-9)
+        _ghg_n2o_vmr = jnp.array(_ghg[2] * 1.0e-9)
 
-    if need_rad:
-        (dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip,
-         _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), _held_dT_rad, _held_cs_diag = \
-            compute_radiation_and_physics(
-                state.T.data, state.p_s.data, q_v, q_c, q_r,
-                state.u.data, state.v.data,
-                sst, sic, grid.lat, grid.lon, day, day_of_year, seconds_of_day, DT,
-                _current_solar_weights,
-                _current_s_0,
-                _ghg_co2_vmr, _ghg_ch4_vmr, _ghg_n2o_vmr,
-            )
-        _held_sw_net_sfc = _sw
-        _held_lw_net_sfc = _lw
-        _held_sw_up_toa = _sw_toa
-        _held_lw_up_toa = _lw_toa
-        _held_sw_down_toa = _sw_down_toa
-    else:
-        dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip, \
-            _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa = \
-            physics_step_no_rad(
-                state.T.data, state.p_s.data, q_v, q_c, q_r,
-                state.u.data, state.v.data,
-                sst, sic, grid.lat, DT,
-                _held_dT_rad, _held_sw_net_sfc, _held_lw_net_sfc,
-                _held_sw_up_toa, _held_lw_up_toa,
-                _held_sw_down_toa,
-            )
+    # Pre-compute external forcing (ozone, aerosol) outside JIT boundary.
+    # Only needed on radiation steps, but the cost is negligible (pure JAX
+    # math or cached I/O), and passing concrete arrays avoids None issues.
+    if need_rad_py:
+        _ext_o3, _ext_aer = _precompute_external_forcing(
+            day, state.p_s.data, grid.lat)
+    # else: reuse previous _ext_o3, _ext_aer (they won't be read by the
+    #        no-rad branch, but must be valid arrays for jax.lax.cond tracing)
+
+    (dT_dt, dq_v_dt, _dq_c_dt, _dq_r_dt, _precip,
+     _sw, _lw, _sw_toa, _lw_toa, _sw_down_toa), \
+        (_held_dT_rad, _held_sw_net_sfc, _held_lw_net_sfc,
+         _held_sw_up_toa, _held_lw_up_toa, _held_sw_down_toa), \
+        (_held_cs_rsutcs, _held_cs_rlutcs,
+         _held_cs_rsdscs, _held_cs_rldscs) = \
+        physics_step_unified(
+            need_rad_jax,
+            state.T.data, state.p_s.data, q_v, q_c, q_r,
+            state.u.data, state.v.data,
+            sst, sic, grid.lat, grid.lon,
+            day_of_year, seconds_of_day, DT,
+            _current_solar_weights, _current_s_0,
+            _ext_o3, _ext_aer,
+            _ghg_co2_vmr, _ghg_ch4_vmr, _ghg_n2o_vmr,
+            _held_dT_rad, _held_sw_net_sfc, _held_lw_net_sfc,
+            _held_sw_up_toa, _held_lw_up_toa, _held_sw_down_toa,
+            _held_cs_rsutcs, _held_cs_rlutcs,
+            _held_cs_rsdscs, _held_cs_rldscs,
+        )
 
     new_T = state.T.data + DT * dT_dt
     q_v = jnp.maximum(q_v + DT * dq_v_dt, 0.0)
@@ -1388,11 +1616,11 @@ for step in range(start_step + 1, n_steps_total):
                 'lw_net_sfc': np.asarray(_lw),
             }
             # Add clear-sky diagnostics if available.
-            if _held_cs_diag is not None:
-                _2d_fields['rsutcs'] = np.asarray(_held_cs_diag['rsutcs'])
-                _2d_fields['rlutcs'] = np.asarray(_held_cs_diag['rlutcs'])
-                _2d_fields['rsdscs'] = np.asarray(_held_cs_diag['rsdscs'])
-                _2d_fields['rldscs'] = np.asarray(_held_cs_diag['rldscs'])
+            if CLEAR_SKY_DIAG:
+                _2d_fields['rsutcs'] = np.asarray(_held_cs_rsutcs)
+                _2d_fields['rlutcs'] = np.asarray(_held_cs_rlutcs)
+                _2d_fields['rsdscs'] = np.asarray(_held_cs_rsdscs)
+                _2d_fields['rldscs'] = np.asarray(_held_cs_rldscs)
             monthly_accum.add_2d(_doy, _year, _2d_fields, _lat_deg_grid)
             monthly_accum.add_3d(_doy, _year, {
                 'T': np.asarray(state.T.data),
@@ -1463,11 +1691,11 @@ for step in range(start_step + 1, n_steps_total):
                 'evspsbl': _evspsbl_cmip,
             }
             # Add clear-sky if available
-            if _held_cs_diag is not None:
-                _cmip_2d_vars['rsutcs'] = _held_cs_diag['rsutcs']
-                _cmip_2d_vars['rlutcs'] = _held_cs_diag['rlutcs']
-                _cmip_2d_vars['rsdscs'] = _held_cs_diag['rsdscs']
-                _cmip_2d_vars['rldscs'] = _held_cs_diag['rldscs']
+            if CLEAR_SKY_DIAG:
+                _cmip_2d_vars['rsutcs'] = _held_cs_rsutcs
+                _cmip_2d_vars['rlutcs'] = _held_cs_rlutcs
+                _cmip_2d_vars['rsdscs'] = _held_cs_rsdscs
+                _cmip_2d_vars['rldscs'] = _held_cs_rldscs
 
             # Add ocean vars
             _cmip_2d_vars['tos'] = sst
@@ -1490,6 +1718,16 @@ for step in range(start_step + 1, n_steps_total):
                 except (KeyError, ValueError):
                     pass  # Skip vars not in CMOR tables
 
+        # Distributed diagnostic gathering: use MPI global sum for
+        # conservation-critical quantities, only rank 0 prints.
+        if DISTRIBUTED:
+            from legoesm.parallel.reductions import global_sum_mpi
+            # mean_ps is proportional to dry air mass — use global sum
+            _local_ps_sum = jnp.sum(state.p_s.data)
+            _global_ps_sum = float(global_sum_mpi(_local_ps_sum))
+            _n_cols_total = 6 * N * N  # total columns across all ranks
+            mean_ps = _global_ps_sum / _n_cols_total
+
         _diag_line = (f"  {elapsed_day:6.0f}  {mean_sst:8.2f}  {mean_sic:6.3f}  {mean_T:8.2f}"
               f"  {mean_T_low:8.2f}  {mean_precip:8.2f}  {mean_cwv:6.1f}  {max_v:8.2f}"
               f"  {mean_sw_toa:7.1f}  {mean_lw_toa:7.1f}  {mean_sw_sfc:6.1f}  {mean_lw_sfc:6.1f}")
@@ -1497,7 +1735,8 @@ for step in range(start_step + 1, n_steps_total):
             _mean_qc = float(jnp.mean(q_c)) * 1e6
             _mean_qr = float(jnp.mean(q_r)) * 1e6
             _diag_line += f"  qc={_mean_qc:.1f} qr={_mean_qr:.1f} mg/kg"
-        print(_diag_line)
+        if _is_root():
+            print(_diag_line)
 
         # --- Sanity checks ---
         if not jnp.all(jnp.isfinite(state.u.data)):
@@ -1522,18 +1761,36 @@ for step in range(start_step + 1, n_steps_total):
     # --- Checkpoint ---
     if checkpoint_interval > 0 and (step + 1) % checkpoint_interval == 0:
         elapsed_day = day - START_DAY
-        ckpt_path = OUTPUT_DIR / f"checkpoint_day_{int(elapsed_day):04d}.npz"
-        save_checkpoint(
-            path=ckpt_path,
-            state=state,
-            q_v=q_v,
-            step=step + 1,
-            day=day,
-            config=exp_config,
-            q_c=q_c,
-            q_r=q_r,
-        )
-        print(f"  Checkpoint saved: {ckpt_path.name}")
+        if DISTRIBUTED:
+            from legoesm.io.distributed_checkpoint import save_checkpoint_distributed
+            ckpt_dir = OUTPUT_DIR / f"checkpoint_day_{int(elapsed_day):04d}"
+            save_checkpoint_distributed(
+                path=ckpt_dir,
+                state=state,
+                rank=_dist_rank,
+                n_ranks=_dist_n_ranks,
+                step=step + 1,
+                day=day,
+                config=exp_config,
+                q_v=q_v,
+                q_c=q_c,
+                q_r=q_r,
+            )
+            if _is_root():
+                print(f"  Distributed checkpoint saved: {ckpt_dir.name}/")
+        else:
+            ckpt_path = OUTPUT_DIR / f"checkpoint_day_{int(elapsed_day):04d}.npz"
+            save_checkpoint(
+                path=ckpt_path,
+                state=state,
+                q_v=q_v,
+                step=step + 1,
+                day=day,
+                config=exp_config,
+                q_c=q_c,
+                q_r=q_r,
+            )
+            print(f"  Checkpoint saved: {ckpt_path.name}")
 
 jax.block_until_ready(state.u.data)
 total_wall = time.time() - t_wall_start
@@ -1633,18 +1890,36 @@ if MONTHLY_MEANS:
 
 # Save final checkpoint
 if CHECKPOINT_DAYS > 0:
-    final_ckpt = OUTPUT_DIR / "checkpoint_final.npz"
-    save_checkpoint(
-        path=final_ckpt,
-        state=state,
-        q_v=q_v,
-        step=n_steps_total,
-        day=START_DAY + N_DAYS,
-        config=exp_config,
-        q_c=q_c,
-        q_r=q_r,
-    )
-    print(f"  Final checkpoint saved: {final_ckpt.name}")
+    if DISTRIBUTED:
+        from legoesm.io.distributed_checkpoint import save_checkpoint_distributed
+        final_ckpt_dir = OUTPUT_DIR / "checkpoint_final"
+        save_checkpoint_distributed(
+            path=final_ckpt_dir,
+            state=state,
+            rank=_dist_rank,
+            n_ranks=_dist_n_ranks,
+            step=n_steps_total,
+            day=START_DAY + N_DAYS,
+            config=exp_config,
+            q_v=q_v,
+            q_c=q_c,
+            q_r=q_r,
+        )
+        if _is_root():
+            print(f"  Final distributed checkpoint saved: {final_ckpt_dir.name}/")
+    else:
+        final_ckpt = OUTPUT_DIR / "checkpoint_final.npz"
+        save_checkpoint(
+            path=final_ckpt,
+            state=state,
+            q_v=q_v,
+            step=n_steps_total,
+            day=START_DAY + N_DAYS,
+            config=exp_config,
+            q_c=q_c,
+            q_r=q_r,
+        )
+        print(f"  Final checkpoint saved: {final_ckpt.name}")
 
 # ---------------------------------------------------------------------------
 # 11. Plots

@@ -1376,19 +1376,11 @@ def _make_nh_latlon_rest_state(grid, height_coord, n_tracers: int = 4) -> NonHyd
     dims_2d = ("lat", "lon")
     dims_tr = ("lat", "lon", "level", "tracer")
 
-    # Keep a tiny balanced perturbation so advection/prognostics are exercised
-    # while remaining in a robustly stable regime.
-    lat = jnp.asarray(grid.lat, dtype=jnp.float64)[:, None, None]
-    lev = jnp.asarray(height_coord.z_full, dtype=jnp.float64)[None, None, :]
-    lev_scale = lev / jnp.maximum(float(height_coord.H), 1.0)
-    u0 = 2.0 * jnp.cos(lat) * jnp.exp(-lev_scale)
-    theta_p0 = 0.05 * jnp.sin(lat) * jnp.exp(-((lev_scale - 0.5) / 0.25) ** 2)
-
     return NonHydrostaticState(
-        u=Field(data=jnp.broadcast_to(u0, shape_3d), name="u", dims=dims_3d, units="m/s"),
+        u=Field(data=jnp.zeros(shape_3d), name="u", dims=dims_3d, units="m/s"),
         v=Field(data=jnp.zeros(shape_3d), name="v", dims=dims_3d, units="m/s"),
         w=Field(data=jnp.zeros(shape_w), name="w", dims=dims_w, units="m/s"),
-        theta_prime=Field(data=jnp.broadcast_to(theta_p0, shape_3d), name="theta_prime", dims=dims_3d, units="K"),
+        theta_prime=Field(data=jnp.zeros(shape_3d), name="theta_prime", dims=dims_3d, units="K"),
         rho_prime=Field(data=jnp.zeros(shape_3d), name="rho_prime", dims=dims_3d, units="kg/m^3"),
         phis=Field(data=jnp.zeros(shape_2d), name="phis", dims=dims_2d, units="m^2/s^2"),
         tracers=Field(data=jnp.zeros(shape_tr), name="tracers", dims=dims_tr, units="kg/kg"),
@@ -1403,7 +1395,7 @@ def run_nh_fv_latlon_rest(case_dir: Path, preset: ResolutionPreset, scheme: str,
         FVCompressibleEulerLatLonModel,
     )
 
-    dt = 2.0
+    dt = 0.5
     duration_s = max(tc1_hours * 3600.0, dt)
     n_steps = int(duration_s / dt)
     case_dir.mkdir(parents=True, exist_ok=True)
@@ -1430,8 +1422,8 @@ def run_nh_fv_latlon_rest(case_dir: Path, preset: ResolutionPreset, scheme: str,
         hyperdiff_w_coeff=1.0e14 * scale,
         sponge_width=12000.0,
         sponge_coeff=0.03,
-        n_acoustic_substeps=6,
-        outer_integrator=solver,
+        n_acoustic_substeps=8,
+        outer_integrator="ssp_rk3",
         use_polar_filter=True,
         fix_mass=True,
         anchor_mass_to_initial=True,

@@ -281,7 +281,7 @@ class CGCompressibleEulerModel:
             self.config, physics_tendency,
         )
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, 3), donate_argnums=(1,))
     def step(self, state: NonHydrostaticState, dt: float, physics_fn=None) -> NonHydrostaticState:
         """Advance one time step, optionally with physics forcing."""
         from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig

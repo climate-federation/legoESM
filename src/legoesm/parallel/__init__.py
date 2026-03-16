@@ -35,6 +35,23 @@ Parallelism strategies
    dimension; ``ensemble_integrate()`` combines scan + vmap for
    efficient time-integration of many members.  Multi-device
    sharding via ``shard_ensemble()``.
+
+9. **Sharded dynamics** (shard_map-based):
+   ``make_sharded_step()`` wraps a dynamics model for SPMD execution
+   across devices with explicit sharding constraints and optional
+   halo exchange.  ``shard_state()`` / ``gather_state()`` move data
+   between single-device and multi-device layouts.
+
+10. **Async halo exchange (compute/communication overlap)**:
+   ``overlapped_halo_compute()`` splits stencil evaluation into
+   interior (halo-independent) and boundary (halo-dependent) parts,
+   enabling the XLA compiler to overlap interior computation with
+   halo communication scheduling.
+
+11. **Device configuration and hardware-aware optimization**:
+    ``detect_devices()`` auto-detects hardware (CPU/GPU/TPU/Metal),
+    ``configure_jax_for_device()`` applies backend-specific XLA flags,
+    and ``mixed_precision_policy()`` returns optimal dtype policies.
 """
 
 from legoesm.parallel.mesh import (
@@ -61,6 +78,53 @@ from legoesm.parallel.voronoi_partition import (
 from legoesm.parallel.halo_exchange_voronoi import (
     VoronoiHaloExchange,
     exchange_local_simulated,
+)
+
+from legoesm.parallel.async_halo import (
+    InteriorBoundaryMasks,
+    OverlapContext,
+    create_interior_boundary_masks,
+    split_interior_boundary,
+    merge_interior_boundary,
+    boundary_slices,
+    interior_slice,
+    extract_interior_padded,
+    overlapped_halo_compute,
+    overlapped_halo_compute_vector,
+    create_overlap_context,
+    overlapped_compute_with_context,
+    start_halo_exchange,
+    finish_halo_exchange,
+    async_halo_step,
+    async_halo_step_multi,
+    async_halo_step_vector,
+)
+
+from legoesm.parallel.device_config import (
+    HardwareConfig,
+    detect_devices as detect_hardware,
+    configure_jax_for_device,
+    get_optimal_dtype,
+    get_optimal_mesh,
+    MixedPrecisionPolicy,
+    mixed_precision_policy,
+    cast_for_device,
+)
+
+from legoesm.parallel.sharded_dynamics import (
+    make_sharded_step,
+    shard_state as shard_state_to_devices,
+    gather_state as gather_state_from_devices,
+    create_output_shardings,
+    sharded_step_with_halo,
+    make_face_halo_exchange,
+    sharded_integrate,
+    sharded_integrate_scan,
+    check_sharding,
+)
+
+from legoesm.parallel.reductions import (
+    batch_allreduce_mpi,
 )
 
 from legoesm.parallel.ensemble import (
@@ -116,4 +180,43 @@ __all__ = [
     "create_ensemble_mesh",
     "shard_ensemble",
     "gather_ensemble",
+    # Async halo exchange (compute/communication overlap)
+    "InteriorBoundaryMasks",
+    "OverlapContext",
+    "create_interior_boundary_masks",
+    "split_interior_boundary",
+    "merge_interior_boundary",
+    "boundary_slices",
+    "interior_slice",
+    "extract_interior_padded",
+    "overlapped_halo_compute",
+    "overlapped_halo_compute_vector",
+    "create_overlap_context",
+    "overlapped_compute_with_context",
+    "start_halo_exchange",
+    "finish_halo_exchange",
+    "async_halo_step",
+    "async_halo_step_multi",
+    "async_halo_step_vector",
+    # Sharded dynamics (shard_map-based SPMD)
+    "make_sharded_step",
+    "shard_state_to_devices",
+    "gather_state_from_devices",
+    "create_output_shardings",
+    "sharded_step_with_halo",
+    "make_face_halo_exchange",
+    "sharded_integrate",
+    "sharded_integrate_scan",
+    "check_sharding",
+    # Batch MPI reductions
+    "batch_allreduce_mpi",
+    # Device configuration and hardware-aware optimization
+    "HardwareConfig",
+    "detect_hardware",
+    "configure_jax_for_device",
+    "get_optimal_dtype",
+    "get_optimal_mesh",
+    "MixedPrecisionPolicy",
+    "mixed_precision_policy",
+    "cast_for_device",
 ]

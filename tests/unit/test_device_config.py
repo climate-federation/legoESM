@@ -1,0 +1,491 @@
+"""Unit tests for the device configuration and hardware-aware optimization module.
+
+Tests auto-detection, XLA flag configuration, mixed-precision policies,
+dtype selection, and optimal mesh construction.  All tests run on CPU
+without requiring GPU/TPU hardware.
+"""
+
+import os
+import jax
+import jax.numpy as jnp
+import pytest
+from unittest.mock import patch, MagicMock
+
+from legoesm.parallel.device_config import (
+    HardwareConfig,
+    MixedPrecisionPolicy,
+    detect_devices,
+    configure_jax_for_device,
+    get_optimal_dtype,
+    mixed_precision_policy,
+    cast_for_device,
+    get_optimal_mesh,
+    _estimate_device_memory,
+    _recommended_batch_size,
+    _set_xla_flags,
+    _TPU_XLA_FLAGS,
+    _GPU_XLA_FLAGS,
+)
+
+
+# ============================================================================
+# Hardware detection
+# ============================================================================
+
+class TestDetectDevices:
+    """Tests for detect_devices() auto-detection."""
+
+    def test_returns_hardware_config(self):
+        """detect_devices returns a HardwareConfig NamedTuple."""
+        config = detect_devices()
+        assert isinstance(config, HardwareConfig)
+
+    def test_backend_is_lowercase_string(self):
+        """Backend name is a lowercase string."""
+        config = detect_devices()
+        assert isinstance(config.backend, str)
+        assert config.backend == config.backend.lower()
+
+    def test_device_count_positive(self):
+        """At least one device is detected."""
+        config = detect_devices()
+        assert config.device_count >= 1
+
+    def test_devices_per_host_positive(self):
+        """At least one device per host."""
+        config = detect_devices()
+        assert config.devices_per_host >= 1
+        assert config.devices_per_host <= config.device_count
+
+    def test_num_hosts_positive(self):
+        """At least one host."""
+        config = detect_devices()
+        assert config.num_hosts >= 1
+
+    def test_cpu_supports_float64(self):
+        """CPU backend supports float64."""
+        config = detect_devices()
+        if config.backend == "cpu":
+            assert config.supports_float64 is True
+            assert config.supports_complex128 is True
+
+    def test_memory_positive(self):
+        """Memory estimate is positive."""
+        config = detect_devices()
+        assert config.memory_per_device_gb > 0
+
+    def test_recommended_batch_size_positive(self):
+        """Recommended batch size is at least 1."""
+        config = detect_devices()
+        assert config.recommended_batch_size >= 1
+
+    def test_tpu_detection_mock(self):
+        """Simulated TPU detection returns correct backend."""
+        with patch("legoesm.parallel.device_config.jax.default_backend",
+                   return_value="tpu"):
+            with patch("legoesm.parallel.device_config.jax.devices",
+                       return_value=[MagicMock(device_kind="TPU v4")]):
+                with patch("legoesm.parallel.device_config.jax.local_devices",
+                           return_value=[MagicMock(device_kind="TPU v4")]):
+                    with patch("legoesm.parallel.device_config.jax.process_count",
+                               return_value=1):
+                        config = detect_devices()
+        assert config.backend == "tpu"
+        assert config.supports_float64 is True
+
+    def test_metal_detection_mock(self):
+        """Simulated Metal detection reports no float64."""
+        with patch("legoesm.parallel.device_config.jax.default_backend",
+                   return_value="metal"):
+            with patch("legoesm.parallel.device_config.jax.devices",
+                       return_value=[MagicMock(device_kind="Apple M2")]):
+                with patch("legoesm.parallel.device_config.jax.local_devices",
+                           return_value=[MagicMock(device_kind="Apple M2")]):
+                    with patch("legoesm.parallel.device_config.jax.process_count",
+                               return_value=1):
+                        config = detect_devices()
+        assert config.backend == "metal"
+        assert config.supports_float64 is False
+        assert config.supports_complex128 is False
+
+
+# ============================================================================
+# Memory estimation
+# ============================================================================
+
+class TestMemoryEstimation:
+    """Tests for _estimate_device_memory heuristics."""
+
+    def test_tpu_v4_memory(self):
+        """TPU v4 devices should report 32 GB."""
+        devices = [MagicMock(device_kind="TPU v4")]
+        mem = _estimate_device_memory("tpu", devices)
+        assert mem == 32.0
+
+    def test_tpu_v3_memory(self):
+        """TPU v3 devices should report 16 GB."""
+        devices = [MagicMock(device_kind="TPU v3")]
+        mem = _estimate_device_memory("tpu", devices)
+        assert mem == 16.0
+
+    def test_tpu_v5p_memory(self):
+        """TPU v5p devices should report 95 GB."""
+        devices = [MagicMock(device_kind="TPU v5p")]
+        mem = _estimate_device_memory("tpu", devices)
+        assert mem == 95.0
+
+    def test_unknown_tpu_default(self):
+        """Unknown TPU generation defaults to 16 GB."""
+        devices = [MagicMock(device_kind="TPU v99")]
+        mem = _estimate_device_memory("tpu", devices)
+        assert mem == 16.0
+
+    def test_gpu_a100_memory(self):
+        """A100 should report 40 GB."""
+        devices = [MagicMock(device_kind="NVIDIA A100")]
+        mem = _estimate_device_memory("gpu", devices)
+        assert mem == 40.0
+
+    def test_gpu_h100_memory(self):
+        """H100 should report 80 GB."""
+        devices = [MagicMock(device_kind="NVIDIA H100")]
+        mem = _estimate_device_memory("gpu", devices)
+        assert mem == 80.0
+
+    def test_unknown_gpu_default(self):
+        """Unknown GPU defaults to 16 GB."""
+        devices = [MagicMock(device_kind="Unknown GPU")]
+        mem = _estimate_device_memory("gpu", devices)
+        assert mem == 16.0
+
+    def test_cpu_memory(self):
+        """CPU reports 64 GB."""
+        mem = _estimate_device_memory("cpu", [])
+        assert mem == 64.0
+
+    def test_metal_memory(self):
+        """Metal reports 8 GB."""
+        mem = _estimate_device_memory("metal", [])
+        assert mem == 8.0
+
+
+# ============================================================================
+# Batch size heuristics
+# ============================================================================
+
+class TestBatchSize:
+    """Tests for _recommended_batch_size."""
+
+    def test_high_memory(self):
+        """>=80 GB should recommend 6 faces."""
+        assert _recommended_batch_size(80.0) == 6
+        assert _recommended_batch_size(95.0) == 6
+
+    def test_medium_memory(self):
+        """32-79 GB should recommend 4 faces."""
+        assert _recommended_batch_size(32.0) == 4
+        assert _recommended_batch_size(64.0) == 4
+
+    def test_low_memory(self):
+        """16-31 GB should recommend 2 faces."""
+        assert _recommended_batch_size(16.0) == 2
+        assert _recommended_batch_size(24.0) == 2
+
+    def test_very_low_memory(self):
+        """<16 GB should recommend 1 face."""
+        assert _recommended_batch_size(8.0) == 1
+        assert _recommended_batch_size(4.0) == 1
+
+
+# ============================================================================
+# XLA flag configuration
+# ============================================================================
+
+class TestXLAFlags:
+    """Tests for _set_xla_flags and configure_jax_for_device."""
+
+    def test_set_xla_flags_adds_to_env(self):
+        """_set_xla_flags appends flags to XLA_FLAGS."""
+        old = os.environ.get("XLA_FLAGS", "")
+        try:
+            os.environ["XLA_FLAGS"] = ""
+            _set_xla_flags({"test_flag_abc": "true"})
+            assert "test_flag_abc=true" in os.environ["XLA_FLAGS"]
+        finally:
+            if old:
+                os.environ["XLA_FLAGS"] = old
+            else:
+                os.environ.pop("XLA_FLAGS", None)
+
+    def test_set_xla_flags_does_not_duplicate(self):
+        """_set_xla_flags does not duplicate existing flags."""
+        old = os.environ.get("XLA_FLAGS", "")
+        try:
+            os.environ["XLA_FLAGS"] = "--test_flag_xyz=false"
+            _set_xla_flags({"test_flag_xyz": "true"})
+            # Should not add because key already present
+            assert os.environ["XLA_FLAGS"].count("test_flag_xyz") == 1
+        finally:
+            if old:
+                os.environ["XLA_FLAGS"] = old
+            else:
+                os.environ.pop("XLA_FLAGS", None)
+
+    def test_set_xla_flags_merges_with_existing(self):
+        """_set_xla_flags preserves existing flags while adding new ones."""
+        old = os.environ.get("XLA_FLAGS", "")
+        try:
+            os.environ["XLA_FLAGS"] = "--existing_flag=1"
+            _set_xla_flags({"new_flag_qrs": "2"})
+            flags = os.environ["XLA_FLAGS"]
+            assert "existing_flag=1" in flags
+            assert "new_flag_qrs=2" in flags
+        finally:
+            if old:
+                os.environ["XLA_FLAGS"] = old
+            else:
+                os.environ.pop("XLA_FLAGS", None)
+
+    def test_configure_cpu_does_not_crash(self):
+        """configure_jax_for_device on CPU completes without error."""
+        config = detect_devices()
+        configure_jax_for_device(config)
+
+
+# ============================================================================
+# Optimal dtype selection
+# ============================================================================
+
+class TestGetOptimalDtype:
+    """Tests for get_optimal_dtype."""
+
+    def test_single_always_float32(self):
+        """Single precision returns float32 on any backend."""
+        for backend in ("cpu", "gpu", "tpu", "metal"):
+            config = HardwareConfig(
+                backend=backend,
+                device_count=1, devices_per_host=1, num_hosts=1,
+                supports_float64=backend not in ("metal",),
+                supports_complex128=backend not in ("metal",),
+                memory_per_device_gb=16.0,
+                recommended_batch_size=2,
+            )
+            assert get_optimal_dtype(config, "single") == jnp.float32
+
+    def test_half_on_tpu_is_bfloat16(self):
+        """Half precision on TPU returns bfloat16."""
+        config = HardwareConfig(
+            backend="tpu", device_count=4, devices_per_host=4, num_hosts=1,
+            supports_float64=True, supports_complex128=True,
+            memory_per_device_gb=32.0, recommended_batch_size=4,
+        )
+        assert get_optimal_dtype(config, "half") == jnp.bfloat16
+
+    def test_half_on_gpu_is_float16(self):
+        """Half precision on GPU returns float16."""
+        config = HardwareConfig(
+            backend="gpu", device_count=1, devices_per_host=1, num_hosts=1,
+            supports_float64=True, supports_complex128=True,
+            memory_per_device_gb=16.0, recommended_batch_size=2,
+        )
+        assert get_optimal_dtype(config, "half") == jnp.float16
+
+    def test_half_on_cpu_is_float32(self):
+        """Half precision on CPU falls back to float32."""
+        config = HardwareConfig(
+            backend="cpu", device_count=1, devices_per_host=1, num_hosts=1,
+            supports_float64=True, supports_complex128=True,
+            memory_per_device_gb=64.0, recommended_batch_size=4,
+        )
+        assert get_optimal_dtype(config, "half") == jnp.float32
+
+    def test_half_on_metal_is_float32(self):
+        """Half precision on Metal falls back to float32."""
+        config = HardwareConfig(
+            backend="metal", device_count=1, devices_per_host=1, num_hosts=1,
+            supports_float64=False, supports_complex128=False,
+            memory_per_device_gb=8.0, recommended_batch_size=1,
+        )
+        assert get_optimal_dtype(config, "half") == jnp.float32
+
+    def test_double_on_supported(self):
+        """Double precision returns float64 when supported."""
+        config = HardwareConfig(
+            backend="gpu", device_count=1, devices_per_host=1, num_hosts=1,
+            supports_float64=True, supports_complex128=True,
+            memory_per_device_gb=16.0, recommended_batch_size=2,
+        )
+        assert get_optimal_dtype(config, "double") == jnp.float64
+
+    def test_double_on_metal_falls_back(self):
+        """Double precision on Metal falls back to float32."""
+        config = HardwareConfig(
+            backend="metal", device_count=1, devices_per_host=1, num_hosts=1,
+            supports_float64=False, supports_complex128=False,
+            memory_per_device_gb=8.0, recommended_batch_size=1,
+        )
+        assert get_optimal_dtype(config, "double") == jnp.float32
+
+
+# ============================================================================
+# Mixed-precision policy
+# ============================================================================
+
+class TestMixedPrecisionPolicy:
+    """Tests for mixed_precision_policy and cast_for_device."""
+
+    def test_tpu_policy(self):
+        """TPU policy uses bfloat16 for compute."""
+        config = HardwareConfig(
+            backend="tpu", device_count=4, devices_per_host=4, num_hosts=1,
+            supports_float64=True, supports_complex128=True,
+            memory_per_device_gb=32.0, recommended_batch_size=4,
+        )
+        policy = mixed_precision_policy(config)
+        assert isinstance(policy, MixedPrecisionPolicy)
+        assert policy.compute_dtype == jnp.bfloat16
+        assert policy.param_dtype == jnp.float32
+        assert policy.output_dtype == jnp.float32
+
+    def test_gpu_policy(self):
+        """GPU policy uses float32 for everything."""
+        config = HardwareConfig(
+            backend="gpu", device_count=1, devices_per_host=1, num_hosts=1,
+            supports_float64=True, supports_complex128=True,
+            memory_per_device_gb=16.0, recommended_batch_size=2,
+        )
+        policy = mixed_precision_policy(config)
+        assert policy.compute_dtype == jnp.float32
+        assert policy.param_dtype == jnp.float32
+        assert policy.output_dtype == jnp.float32
+
+    def test_cpu_policy(self):
+        """CPU policy uses float32 for everything."""
+        config = detect_devices()
+        if config.backend == "cpu":
+            policy = mixed_precision_policy(config)
+            assert policy.compute_dtype == jnp.float32
+            assert policy.param_dtype == jnp.float32
+
+    def test_cast_for_device_compute(self):
+        """cast_for_device with role='compute' applies compute dtype."""
+        config = detect_devices()
+        x = jnp.ones(5, dtype=jnp.float32)
+        y = cast_for_device(x, config, role="compute")
+        assert y.shape == x.shape
+        assert jnp.allclose(y, x)
+
+    def test_cast_for_device_param(self):
+        """cast_for_device with role='param' keeps float32."""
+        config = detect_devices()
+        x = jnp.ones(5, dtype=jnp.float64)
+        y = cast_for_device(x, config, role="param")
+        assert y.dtype == jnp.float32
+
+    def test_cast_for_device_output(self):
+        """cast_for_device with role='output' returns float32."""
+        config = detect_devices()
+        x = jnp.ones(5, dtype=jnp.float64)
+        y = cast_for_device(x, config, role="output")
+        assert y.dtype == jnp.float32
+
+    def test_cast_noop_when_already_correct(self):
+        """cast_for_device is a no-op when dtype already matches."""
+        config = detect_devices()
+        x = jnp.ones(5, dtype=jnp.float32)
+        y = cast_for_device(x, config, role="param")
+        # Should be the exact same object (no copy).
+        assert y is x
+
+    def test_cast_invalid_role_raises(self):
+        """cast_for_device with unknown role raises ValueError."""
+        config = detect_devices()
+        x = jnp.ones(5)
+        with pytest.raises(ValueError, match="Unknown role"):
+            cast_for_device(x, config, role="unknown")
+
+    def test_tpu_cast_to_bfloat16(self):
+        """On TPU, compute cast should produce bfloat16."""
+        config = HardwareConfig(
+            backend="tpu", device_count=4, devices_per_host=4, num_hosts=1,
+            supports_float64=True, supports_complex128=True,
+            memory_per_device_gb=32.0, recommended_batch_size=4,
+        )
+        x = jnp.ones(5, dtype=jnp.float32)
+        y = cast_for_device(x, config, role="compute")
+        assert y.dtype == jnp.bfloat16
+
+
+# ============================================================================
+# Optimal mesh construction
+# ============================================================================
+
+class TestGetOptimalMesh:
+    """Tests for get_optimal_mesh."""
+
+    def test_cubed_sphere_single_device(self):
+        """Single-device cubed-sphere returns valid DeviceConfig."""
+        from legoesm.parallel.mesh import DeviceConfig as MeshDeviceConfig
+        config = detect_devices()
+        mesh_cfg = get_optimal_mesh(config, grid_type="cubed_sphere")
+        assert isinstance(mesh_cfg, MeshDeviceConfig)
+        assert mesh_cfg.grid_type == "cubed_sphere"
+
+    def test_spectral_single_device(self):
+        """Single-device spectral returns valid DeviceConfig."""
+        from legoesm.parallel.mesh import DeviceConfig as MeshDeviceConfig
+        config = detect_devices()
+        mesh_cfg = get_optimal_mesh(config, grid_type="spectral", nlev=40)
+        assert isinstance(mesh_cfg, MeshDeviceConfig)
+        assert mesh_cfg.grid_type == "spectral"
+
+    def test_latlon_single_device(self):
+        """Single-device lat-lon returns valid DeviceConfig."""
+        from legoesm.parallel.mesh import DeviceConfig as MeshDeviceConfig
+        config = detect_devices()
+        mesh_cfg = get_optimal_mesh(config, grid_type="latlon")
+        assert isinstance(mesh_cfg, MeshDeviceConfig)
+        assert mesh_cfg.grid_type == "latlon"
+
+    def test_unknown_grid_type_raises(self):
+        """Unknown grid type raises ValueError."""
+        config = detect_devices()
+        with pytest.raises(ValueError, match="Unknown grid_type"):
+            get_optimal_mesh(config, grid_type="hexagonal")
+
+
+# ============================================================================
+# Re-export from parallel package
+# ============================================================================
+
+class TestReExports:
+    """Verify that public API is accessible via legoesm.parallel."""
+
+    def test_hardware_config_importable(self):
+        from legoesm.parallel import HardwareConfig
+        assert HardwareConfig is not None
+
+    def test_detect_hardware_importable(self):
+        from legoesm.parallel import detect_hardware
+        config = detect_hardware()
+        assert isinstance(config, HardwareConfig)
+
+    def test_configure_jax_for_device_importable(self):
+        from legoesm.parallel import configure_jax_for_device
+        assert callable(configure_jax_for_device)
+
+    def test_get_optimal_dtype_importable(self):
+        from legoesm.parallel import get_optimal_dtype
+        assert callable(get_optimal_dtype)
+
+    def test_mixed_precision_policy_importable(self):
+        from legoesm.parallel import MixedPrecisionPolicy, mixed_precision_policy
+        assert callable(mixed_precision_policy)
+
+    def test_cast_for_device_importable(self):
+        from legoesm.parallel import cast_for_device
+        assert callable(cast_for_device)
+
+    def test_get_optimal_mesh_importable(self):
+        from legoesm.parallel import get_optimal_mesh
+        assert callable(get_optimal_mesh)

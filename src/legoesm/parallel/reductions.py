@@ -213,6 +213,81 @@ def allgather_mpi(local_value: jax.Array) -> jax.Array:
     return recv_buf
 
 
+def batch_allreduce_mpi(
+    values: list[jax.Array],
+    op: str = "sum",
+) -> list[jax.Array]:
+    """Batch multiple reductions into a single MPI allreduce call.
+
+    Instead of issuing N separate ``allreduce`` calls (each incurring
+    MPI latency), this function packs all values into a single flat
+    buffer, performs one ``allreduce``, and unpacks the results.
+
+    Parameters
+    ----------
+    values : list[jax.Array]
+        Local partial values to reduce.  Each element can be a scalar
+        or an array of any shape; they need not share the same shape.
+    op : str
+        Reduction operation: ``"sum"`` or ``"max"``.
+
+    Returns
+    -------
+    list[jax.Array]
+        Global reduced values, one per input, with original shapes and
+        dtypes restored.
+
+    Examples
+    --------
+    >>> E, Z, M = batch_allreduce_mpi([E_local, Z_local, M_local])
+    >>> v_max, T_max = batch_allreduce_mpi([v_local, T_local], op="max")
+    """
+    if not values:
+        return []
+
+    mpi4jax, MPI = _require_mpi_stack()
+
+    mpi_op_map = {"sum": MPI.SUM, "max": MPI.MAX, "min": MPI.MIN}
+    if op not in mpi_op_map:
+        raise ValueError(
+            f"Unsupported op={op!r}. Choose from {list(mpi_op_map)}."
+        )
+    mpi_op = mpi_op_map[op]
+
+    # Promote all values to a common dtype for packing.
+    import jax.numpy as jnp
+
+    dtypes = [v.dtype for v in values]
+    common_dtype = jnp.result_type(*dtypes)
+    promoted = [v.astype(common_dtype) for v in values]
+
+    # Record shapes and sizes for unpacking.
+    shapes = [v.shape for v in values]
+    sizes = [int(v.size) for v in promoted]
+
+    # Pack into a single flat buffer.
+    flat_parts = [v.reshape(-1) for v in promoted]
+    packed = jnp.concatenate(flat_parts, axis=0)
+
+    # Single MPI allreduce.
+    global_packed = _mpi4jax_array_result(
+        mpi4jax.allreduce(packed, op=mpi_op, comm=MPI.COMM_WORLD),
+    )
+
+    # Unpack and restore original shapes and dtypes.
+    results = []
+    offset = 0
+    for i, (shape, size) in enumerate(zip(shapes, sizes)):
+        chunk = global_packed[offset : offset + size].reshape(shape)
+        # Cast back to original dtype if it differs from the common one.
+        if dtypes[i] != common_dtype:
+            chunk = chunk.astype(dtypes[i])
+        results.append(chunk)
+        offset += size
+
+    return results
+
+
 def broadcast_mpi(value: jax.Array, root: int = 0) -> jax.Array:
     """Broadcast an array from one rank to all others.
 

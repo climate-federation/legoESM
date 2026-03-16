@@ -118,6 +118,10 @@ class AMIPExperimentConfig(NamedTuple):
     cmip_output: bool = False  # write CF/CMOR NetCDF files during the run
     clear_sky_diag: bool = False  # run clear-sky radiation pass for rsutcs/rlutcs
 
+    # Distributed execution
+    distributed: bool = False
+    ensemble_size: int = 1
+
     # Output
     output_dir: str = ""
 

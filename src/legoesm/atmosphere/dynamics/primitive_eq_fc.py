@@ -278,7 +278,7 @@ class FCPrimitiveEquationModel(IntegrationMixin):
             self.fc_config, self.config, physics_tendency,
         )
 
-    @partial(jax.jit, static_argnums=(0, 3))
+    @partial(jax.jit, static_argnums=(0, 3), donate_argnums=(1,))
     def step(self, state: HydrostaticState, dt: float, physics_fn=None) -> HydrostaticState:
         """Advance one time step, optionally with physics forcing."""
         def tendency_fn(s):
