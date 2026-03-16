@@ -230,6 +230,85 @@ class MPASShallowWaterTendencies(NamedTuple):
 # MPAS Voronoi Mesh Ocean States
 # ==============================================================================
 
+# ==============================================================================
+# MPAS Voronoi Mesh Atmosphere States
+# ==============================================================================
+
+class MPASHydrostaticState(NamedTuple):
+    """State for the hydrostatic primitive equations on an MPAS Voronoi mesh.
+
+    Uses TRiSK C-grid staggering: normal velocity on edges, scalars on cells.
+
+    Fields
+    ------
+    u : Field
+        Normal velocity [m/s]. Shape (nEdges, nlev). Prognostic.
+    T : Field
+        Temperature [K]. Shape (nCells, nlev). Prognostic.
+    p_s : Field
+        Surface pressure [Pa]. Shape (nCells,). Prognostic.
+    phis : Field
+        Surface geopotential [m^2/s^2]. Shape (nCells,). Static.
+    """
+    u: Field
+    T: Field
+    p_s: Field
+    phis: Field
+
+
+class MPASHydrostaticTendencies(NamedTuple):
+    """Tendencies for the MPAS hydrostatic primitive equations."""
+    du_dt: Field
+    dT_dt: Field
+    dp_s_dt: Field
+    dphis_dt: Field
+
+
+class MPASNonHydrostaticState(NamedTuple):
+    """State for the non-hydrostatic compressible Euler equations on MPAS.
+
+    Uses TRiSK C-grid staggering: normal velocity on edges, all other
+    prognostic variables on cells. Vertical velocity w uses Lorenz
+    staggering at interface levels.
+
+    Fields
+    ------
+    u : Field
+        Normal velocity [m/s]. Shape (nEdges, nlev). Prognostic.
+    w : Field
+        Vertical velocity [m/s] at interface levels.
+        Shape (nCells, nlev+1). Lorenz staggering.
+    theta_prime : Field
+        Potential temperature perturbation [K]. Shape (nCells, nlev).
+    rho_prime : Field
+        Dry density perturbation [kg/m^3]. Shape (nCells, nlev).
+    phis : Field
+        Surface geopotential [m^2/s^2]. Shape (nCells,). Static.
+    tracers : Field
+        Tracer mixing ratios [kg/kg]. Shape (nCells, nlev, n_tracers).
+    """
+    u: Field
+    w: Field
+    theta_prime: Field
+    rho_prime: Field
+    phis: Field
+    tracers: Field
+
+
+class MPASNonHydrostaticTendencies(NamedTuple):
+    """Tendencies for the MPAS non-hydrostatic equations."""
+    du_dt: Field
+    dw_dt: Field
+    dtheta_prime_dt: Field
+    drho_prime_dt: Field
+    dphis_dt: Field
+    dtracers_dt: Field
+
+
+# ==============================================================================
+# MPAS Voronoi Mesh Ocean States
+# ==============================================================================
+
 class MPASOceanState(NamedTuple):
     """State for ocean primitive equations on an MPAS Voronoi mesh.
 

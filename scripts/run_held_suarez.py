@@ -1,484 +1,693 @@
 #!/usr/bin/env python
-"""Run the Held-Suarez benchmark with the hydrostatic PE dynamical core.
+"""Held-Suarez realism analysis at 2.5° resolution.
 
-This script integrates the hydrostatic primitive equations with Held-Suarez
-forcing at specified resolution on the cubed-sphere.
+Runs both spectral (T42) and cubed-sphere (C48) configurations with
+sigma and hybrid-sigma-pressure coordinates, then compares zonal-mean
+profiles against Held & Suarez (1994) reference climatology.
 
-Expected results (C48, 1200 days):
-- Subtropical jets ~30 m/s at ~200 hPa and ~30° latitude
-- Hadley cell circulation
-- Mass conservation to float32 precision
-
-Usage:
-    cd /Users/pierregentine/legoESM
-    source .venv/bin/activate
-
-    # Quick test (C16, 30 days, ~10 min)
-    python scripts/run_held_suarez.py --resolution 16 --days 30
-
-    # Full benchmark (C48, 1200 days)
-    python scripts/run_held_suarez.py --resolution 48 --days 1200
+Expected climate (Held & Suarez 1994, Fig 1-3):
+- Subtropical jets: ~25-30 m/s at ~250 hPa, ~30° lat
+- Surface westerlies: ~5-8 m/s at ~45° lat
+- Surface easterlies: ~3-5 m/s in tropics
+- Equatorial T_surface: ~295 K, polar T_surface: ~230-240 K
+- Tropopause: ~200 K at ~200 hPa (tropics), ~220 K at ~300 hPa (poles)
+- Stratosphere: isothermal ~200 K
+- Temperature lapse rate: ~6.5 K/km in troposphere
 """
 
-import argparse
-import os
+from __future__ import annotations
+
 import time
+import sys
 from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
-from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.grids.vertical import create_sigma_coordinate, pressure_from_sigma
-from legoesm.core.operators import global_integral
-from legoesm.core.conservation import compute_hydrostatic_energy
-from legoesm.atmosphere.physics.held_suarez import (
-    held_suarez_forcing,
-    held_suarez_init,
-)
-from legoesm.core.cfl import cfl_check_and_adjust
+jax.config.update("jax_enable_x64", True)
+
 from legoesm import constants
+from legoesm.atmosphere.physics.held_suarez import (
+    held_suarez_equilibrium_temperature,
+    held_suarez_forcing,
+    held_suarez_forcing_spectral,
+    held_suarez_init,
+    K_A, K_S, K_F, SIGMA_B, DELTA_T_Y, DELTA_THETA_Z, T_MIN, P_0,
+)
 
 
-def compute_hyperdiff_coeff(n_grid: int, reference_n: int = 48,
-                            reference_coeff: float = 5e16) -> float:
-    """Scale hyperdiffusion coefficient with resolution.
-
-    For ∇⁴ diffusion, ν scales as (dx)⁴ / τ. Since dx ∝ 1/n_grid,
-    ν ∝ (1/n_grid)⁴. We use C48 as the reference.
-
-    Parameters
-    ----------
-    n_grid : int
-        Grid resolution.
-    reference_n : int
-        Reference resolution (C48).
-    reference_coeff : float
-        Hyperdiffusion coefficient at reference resolution.
-    """
-    return reference_coeff * (reference_n / n_grid) ** 4
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Held-Suarez benchmark")
-    parser.add_argument("--resolution", "-n", type=int, default=48,
-                        help="Cubed-sphere resolution (default: 48)")
-    parser.add_argument("--levels", "-l", type=int, default=20,
-                        help="Number of vertical levels (default: 20)")
-    parser.add_argument("--dt", type=float, default=600.0,
-                        help="Time step in seconds (default: 600)")
-    parser.add_argument("--days", "-d", type=int, default=1200,
-                        help="Integration time in days (default: 1200)")
-    parser.add_argument("--hyperdiff", type=float, default=None,
-                        help="Hyperdiffusion coefficient (default: auto-scaled)")
-    parser.add_argument("--output", "-o", type=str, default=None,
-                        help="Output directory")
-    parser.add_argument(
-        "--fv-grid",
-        type=str,
-        default="a_grid",
-        choices=("a_grid", "cd_grid"),
-        help="Finite-volume branch: a_grid or cd_grid.",
-    )
-    args = parser.parse_args()
-
-    N_GRID = args.resolution
-    N_LEVELS = args.levels
-    DT = args.dt
-    N_DAYS = args.days
-    DIAG_INTERVAL = 6   # Save diagnostics every N hours
-    SNAP_INTERVAL = max(10, N_DAYS // 10)  # Save snapshots at ~10 points
-
-    # CFL check: PE uses semi-implicit stepping, so only advective CFL matters
-    # (gravity waves are treated implicitly). Max jet ~50 m/s.
-    DT = cfl_check_and_adjust(
-        DT, N_GRID, model_type="primitive_eq",
-        max_wind=60.0, gravity_wave_speed=0.0,
+def run_spectral(n_max, nlev, coord_type, dt, n_days, diag_every_days=10):
+    """Run spectral PE Held-Suarez and return diagnostics."""
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    from legoesm.atmosphere.dynamics.spectral_pe import (
+        SpectralPEConfig, SpectralPrimitiveEquationModel,
+        isothermal_rest_state_spectral, spectral_pe_to_grid,
     )
 
-    # Auto-scale hyperdiffusion if not specified
-    HYPERDIFF_COEFF = args.hyperdiff or compute_hyperdiff_coeff(N_GRID)
+    grid = create_gaussian_grid(n_max)
 
-    # Output directory
-    OUTPUT_DIR = Path(args.output or f"results/atmosphere/hydrostatic/held_suarez_C{N_GRID}_L{N_LEVELS}_{args.fv_grid}")
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    print("=" * 70)
-    print("Held-Suarez Benchmark: Hydrostatic PE on Cubed-Sphere (FV)")
-    print("=" * 70)
-    print(f"Resolution: C{N_GRID} ({N_GRID}x{N_GRID} per face)")
-    print(f"Levels: {N_LEVELS}")
-    print(f"Time step: {DT:.0f} s")
-    print(f"Duration: {N_DAYS} days")
-    print(f"Hyperdiffusion: {HYPERDIFF_COEFF:.2e}")
-    print(f"FV branch: {args.fv_grid}")
-    print()
-
-    # --- Setup ---
-    print("Creating grid and initial conditions...")
-    grid = create_cubed_sphere(N_GRID)
-    sigma = create_sigma_coordinate(N_LEVELS)
-    print(f"  Grid resolution: ~{float(grid.resolution_km):.0f} km")
-    print(f"  Sigma levels: {N_LEVELS} (uniform)")
-    print(f"  Sigma range: [{float(sigma.sigma_half[0]):.3f}, {float(sigma.sigma_half[-1]):.3f}]")
-
-    from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
-    nu2, nu4 = default_div_damp_coeffs(grid, dt=DT)
-
-    if args.fv_grid == "a_grid":
-        from legoesm.atmosphere.dynamics.primitive_eq_fv import (
-            FVPrimitiveEquationModel,
-            FVPrimitiveEquationConfig,
-        )
-        config = FVPrimitiveEquationConfig(
-            hyperdiff_coeff=HYPERDIFF_COEFF,
-            hyperdiff_ps_coeff=HYPERDIFF_COEFF,
-            div_damp_2=nu2,
-            div_damp_4=nu4,
-            use_conservation_fixer=True,
-            fix_mass=True,
-            time_integrator="ssp45",
-            use_limiter=True,
-        )
-        model = FVPrimitiveEquationModel(grid, sigma, config)
-        branch_label = "FV A-grid"
+    if coord_type == "sigma":
+        sigma = create_sigma_coordinate(nlev)
     else:
-        from legoesm.atmosphere.dynamics.primitive_eq_cgrid import (
-            CGPrimitiveEquationModel,
-            CGPrimitiveEquationConfig,
-        )
-        edge_uv = 0.10 if N_GRID >= 24 else 0.0
-        edge_T = 0.08 if N_GRID >= 24 else 0.0
-        edge_ps = 0.15 if N_GRID >= 24 else 0.0
-        edge_wd = 2 if N_GRID >= 24 else 1
-        config = CGPrimitiveEquationConfig(
-            hyperdiff_coeff=HYPERDIFF_COEFF,
-            hyperdiff_ps_coeff=HYPERDIFF_COEFF,
-            div_damp_2=nu2,
-            div_damp_4=nu4,
-            use_conservation_fixer=True,
-            fix_mass=True,
-            time_integrator="ssp45",
-            edge_blend_uv=edge_uv,
-            edge_blend_T=edge_T,
-            edge_blend_p_s=edge_ps,
-            edge_blend_width=edge_wd,
-        )
-        model = CGPrimitiveEquationModel(grid, sigma, config)
-        branch_label = "FV C-D-grid"
-    print(f"  Branch: {branch_label}")
-    state = held_suarez_init(grid, sigma)
-    print(f"  Initial T: {float(jnp.mean(state.T.data)):.1f} K")
-    print(f"  Initial p_s: {float(jnp.mean(state.p_s.data)):.0f} Pa")
+        sigma = standard_hybrid_levels(nlev)
 
-    # --- Integration ---
-    n_steps_total = int(N_DAYS * 86400 / DT)
-    diag_every = int(DIAG_INTERVAL * 3600 / DT)
-    snap_every = int(SNAP_INTERVAL * 86400 / DT)
+    state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0, p_s_init=1e5)
 
-    print(f"\nIntegrating for {n_steps_total} steps...")
-    print(f"  Diagnostics every {diag_every} steps ({DIAG_INTERVAL}h)")
-    print(f"  Snapshots every {snap_every} steps ({SNAP_INTERVAL} days)")
+    a = float(grid.radius)
+    eig_max = n_max * (n_max + 1) / (a * a)
+    config = SpectralPEConfig(
+        hyperdiff_coeff=1.0 / (0.5 * 3600.0 * eig_max**2),
+        hyperdiff_order=2,
+        semi_implicit=False,
+        time_integrator="ssp_rk54",
+    )
+    model = SpectralPrimitiveEquationModel(grid, sigma, config)
 
-    # Storage for diagnostics
-    diag_times = []
-    diag_mass = []
-    diag_energy = []
-    diag_max_wind = []
-    diag_mean_T = []
-    diag_mean_ps = []
+    n_steps = int(n_days * 86400.0 / dt)
+    diag_interval = max(1, int(diag_every_days * 86400.0 / dt))
 
-    # Storage for snapshots
-    snap_days_target = sorted(set([0] + list(range(SNAP_INTERVAL, N_DAYS + 1, SNAP_INTERVAL)) + [N_DAYS]))
-    snap_steps = {int(d * 86400 / DT): d for d in snap_days_target}
-    snapshots = {}
+    print(f"  T{n_max}/L{nlev} ({coord_type}): {n_steps} steps, dt={dt}s")
 
-    # Save initial snapshot
-    snapshots[0] = jax.tree.map(lambda x: np.array(x), state)
+    # Warmup
+    state = model.step_with_physics(state, dt, held_suarez_forcing_spectral)
+    jax.block_until_ready(state.vor_hat.data)
 
-    mass_initial = float(global_integral(state.p_s, grid))
-    energy_initial = float(compute_hydrostatic_energy(state, grid, sigma)["total_energy"])
-    t_start = time.time()
-    last_print = t_start
+    t0 = time.time()
+    diag_records = []
+    for step in range(1, n_steps + 1):
+        if step > 1:
+            state = model.step_with_physics(state, dt, held_suarez_forcing_spectral)
 
-    # JIT warmup
-    print("  JIT compiling (first step)...", end=" ", flush=True)
-    t_jit = time.time()
-    state = model.step_with_physics(state, DT, held_suarez_forcing)
-    jax.block_until_ready(state.u.data)
-    print(f"done ({time.time() - t_jit:.1f}s)")
+        if step % diag_interval == 0 or step == n_steps:
+            fields = spectral_pe_to_grid(state, grid, sigma)
+            u = np.asarray(fields['u'])
+            v = np.asarray(fields['v'])
+            T = np.asarray(fields['T'])
+            p_s = np.asarray(fields['p_s'])
+            day = step * dt / 86400.0
+            wind = np.sqrt(u**2 + v**2)
+            diag_records.append({
+                'day': day,
+                'u': u, 'v': v, 'T': T, 'p_s': p_s,
+                'max_wind': float(np.max(wind)),
+                'mean_T': float(np.mean(T)),
+            })
+            print(f"    day {day:.0f}: max|v|={float(np.max(wind)):.1f} m/s, "
+                  f"<T>={float(np.mean(T)):.1f} K")
 
-    for step in range(1, n_steps_total):
-        state = model.step_with_physics(state, DT, held_suarez_forcing)
-
-        # Check for blowup
-        if step % 100 == 0:
-            u_max = float(jnp.max(jnp.abs(state.u.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                day = (step + 1) * DT / 86400.0
-                print(f"\n  *** BLOWUP at day {day:.1f}, step {step+1}, u_max={u_max:.1f} ***")
+        if step % max(1, n_steps // 10) == 0:
+            if not bool(jnp.all(jnp.isfinite(state.vor_hat.data))):
+                print(f"    *** BLOWUP at step {step} ***")
                 break
 
-        # Diagnostics
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * DT / 86400.0
-            mass = float(global_integral(state.p_s, grid))
-            energy = float(compute_hydrostatic_energy(state, grid, sigma)["total_energy"])
-            max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
-            mean_T = float(jnp.mean(state.T.data))
-            mean_ps = float(jnp.mean(state.p_s.data))
+    wall = time.time() - t0
+    print(f"    Done in {wall:.0f}s ({n_steps / wall:.0f} steps/s)")
 
-            diag_times.append(day)
-            diag_mass.append(mass)
-            diag_energy.append(energy)
-            diag_max_wind.append(max_wind)
-            diag_mean_T.append(mean_T)
-            diag_mean_ps.append(mean_ps)
+    # Extract final zonal means
+    lat_1d = np.asarray(grid.lat)  # (n_lat,)
+    weights = np.asarray(grid.weights)  # (n_lat,)
+    final = diag_records[-1]
+    u_zonal = np.mean(final['u'], axis=1)  # (n_lat, nlev)
+    T_zonal = np.mean(final['T'], axis=1)  # (n_lat, nlev)
 
-            now = time.time()
-            if now - last_print > 30:  # Print progress every 30 seconds
-                elapsed = now - t_start
-                steps_per_sec = (step + 1) / elapsed
-                eta = (n_steps_total - step - 1) / steps_per_sec
-                mass_drift = (mass - mass_initial) / mass_initial
-                energy_drift = (energy - energy_initial) / max(abs(energy_initial), 1.0e-30)
-                print(
-                    f"  Day {day:7.1f}/{N_DAYS} | "
-                    f"max |v|={max_wind:6.1f} m/s | "
-                    f"<T>={mean_T:6.1f} K | "
-                    f"mass drift={mass_drift:+.2e} | "
-                    f"energy drift={energy_drift:+.2e} | "
-                    f"{steps_per_sec:.0f} steps/s | "
-                    f"ETA {eta/60:.0f} min"
-                )
-                last_print = now
+    # Get sigma/pressure levels
+    if coord_type == "sigma":
+        sigma_full = np.asarray(sigma.sigma_full)
+    else:
+        sigma_full = np.asarray(sigma.B_full)  # approximate for hybrid
 
-        # Save snapshots
-        if (step + 1) in snap_steps:
-            day = snap_steps[step + 1]
-            snapshots[day] = jax.tree.map(lambda x: np.array(x), state)
-            print(f"  *** Snapshot saved at day {day} ***")
+    return {
+        'lat': lat_1d,
+        'sigma': sigma_full,
+        'u_zonal': u_zonal,
+        'T_zonal': T_zonal,
+        'p_s_mean': float(np.mean(final['p_s'])),
+        'diag_records': diag_records,
+        'wall_time': wall,
+        'coord_type': coord_type,
+        'grid_type': f'T{n_max}',
+    }
 
-    elapsed = time.time() - t_start
-    print(f"\nIntegration complete: {elapsed:.0f}s ({n_steps_total/elapsed:.0f} steps/s)")
 
-    # Final diagnostics
-    mass_final = float(global_integral(state.p_s, grid))
-    energy_final = float(compute_hydrostatic_energy(state, grid, sigma)["total_energy"])
-    mass_drift = (mass_final - mass_initial) / mass_initial
-    energy_drift = (energy_final - energy_initial) / max(abs(energy_initial), 1.0e-30)
-    print(f"  Mass drift: {mass_drift:+.2e} (relative)")
-    print(f"  Energy drift: {energy_drift:+.2e} (relative)")
-    print(f"  Max wind: {float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2))):.1f} m/s")
-    print(f"  Mean T: {float(jnp.mean(state.T.data)):.1f} K")
+def run_cubed_sphere(n_grid, nlev, coord_type, dt, n_days, diag_every_days=10):
+    """Run cubed-sphere FV Held-Suarez and return diagnostics."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    from legoesm.atmosphere.dynamics.primitive_eq_fv import (
+        FVPrimitiveEquationModel, FVPrimitiveEquationConfig,
+    )
+    from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
+    from legoesm.core.cfl import cfl_check_and_adjust
 
-    # ===========================================================================
-    # Generate plots
-    # ===========================================================================
-    print("\nGenerating plots...")
+    grid = create_cubed_sphere(n_grid)
 
-    diag_times = np.array(diag_times)
-    diag_mass = np.array(diag_mass)
-    diag_energy = np.array(diag_energy)
-    diag_max_wind = np.array(diag_max_wind)
-    diag_mean_T = np.array(diag_mean_T)
-    diag_mean_ps = np.array(diag_mean_ps)
+    if coord_type == "sigma":
+        sigma = create_sigma_coordinate(nlev)
+    else:
+        sigma = standard_hybrid_levels(nlev)
 
-    # --- 1. Conservation time series ---
-    fig, axes = plt.subplots(4, 1, figsize=(12, 13), sharex=True)
+    # CFL check
+    dt = cfl_check_and_adjust(dt, n_grid, model_type="primitive_eq",
+                               max_wind=60.0, gravity_wave_speed=0.0)
 
-    mass_drift_ts = (diag_mass - mass_initial) / mass_initial
-    axes[0].plot(diag_times, mass_drift_ts)
-    axes[0].set_ylabel("Mass drift (relative)")
-    axes[0].set_title("Global mass conservation")
-    axes[0].grid(True)
+    nu2, nu4 = default_div_damp_coeffs(grid, dt=dt)
+    ref_coeff = 5e16
+    hyperdiff = ref_coeff * (48 / n_grid) ** 4
 
-    energy_drift_ts = (diag_energy - energy_initial) / max(abs(energy_initial), 1.0e-30)
-    axes[1].plot(diag_times, energy_drift_ts)
-    axes[1].set_ylabel("Energy drift (relative)")
-    axes[1].set_title("Total energy conservation")
-    axes[1].grid(True)
+    config = FVPrimitiveEquationConfig(
+        hyperdiff_coeff=hyperdiff,
+        hyperdiff_ps_coeff=hyperdiff,
+        div_damp_2=nu2,
+        div_damp_4=nu4,
+        use_conservation_fixer=True,
+        fix_mass=True,
+        time_integrator="ssp45",
+        use_limiter=True,
+    )
+    model = FVPrimitiveEquationModel(grid, sigma, config)
+    state = held_suarez_init(grid, sigma)
 
-    axes[2].plot(diag_times, diag_max_wind)
-    axes[2].set_ylabel("Max |v| [m/s]")
-    axes[2].set_title("Maximum wind speed")
-    axes[2].grid(True)
+    n_steps = int(n_days * 86400.0 / dt)
+    diag_interval = max(1, int(diag_every_days * 86400.0 / dt))
 
-    axes[3].plot(diag_times, diag_mean_T)
-    axes[3].set_xlabel("Time [days]")
-    axes[3].set_ylabel("Mean T [K]")
-    axes[3].set_title("Global mean temperature")
-    axes[3].grid(True)
+    print(f"  C{n_grid}/L{nlev} ({coord_type}): {n_steps} steps, dt={dt}s")
 
-    with open(OUTPUT_DIR / "conservation_timeseries.csv", "w") as f:
-        f.write("time_days,mass,energy,max_wind,mean_T,mean_p_s,mass_drift_rel,energy_drift_rel\n")
-        for i in range(diag_times.size):
-            f.write(
-                f"{diag_times[i]:.8f},{diag_mass[i]:.12e},{diag_energy[i]:.12e},"
-                f"{diag_max_wind[i]:.12e},{diag_mean_T[i]:.12e},{diag_mean_ps[i]:.12e},"
-                f"{mass_drift_ts[i]:.12e},{energy_drift_ts[i]:.12e}\n"
-            )
+    # Warmup
+    state = model.step_with_physics(state, dt, held_suarez_forcing)
+    jax.block_until_ready(state.u.data)
 
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "conservation_timeseries.png", dpi=150)
-    plt.close()
-    print("  Saved conservation_timeseries.png")
+    t0 = time.time()
+    diag_records = []
+    for step in range(1, n_steps + 1):
+        if step > 1:
+            state = model.step_with_physics(state, dt, held_suarez_forcing)
 
-    # --- 1b. Slab/global mean time series ---
-    fig, axes = plt.subplots(3, 1, figsize=(11, 10), sharex=True)
-    axes[0].plot(diag_times, diag_mean_ps, lw=1.8)
-    axes[0].set_ylabel("Mean p_s [Pa]")
-    axes[0].set_title("Global mean surface pressure")
-    axes[0].grid(True, alpha=0.3)
+        if step % 100 == 0:
+            u_max = float(jnp.max(jnp.abs(state.u.data)))
+            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 500:
+                day = (step + 1) * dt / 86400.0
+                print(f"    *** BLOWUP at day {day:.1f}, u_max={u_max:.1f} ***")
+                break
 
-    axes[1].plot(diag_times, diag_mean_T, lw=1.8, color="tab:red")
-    axes[1].set_ylabel("Mean T [K]")
-    axes[1].set_title("Global mean temperature")
-    axes[1].grid(True, alpha=0.3)
+        if step % diag_interval == 0 or step == n_steps:
+            day = step * dt / 86400.0
+            u = np.asarray(state.u.data)
+            v = np.asarray(state.v.data)
+            T = np.asarray(state.T.data)
+            p_s = np.asarray(state.p_s.data)
+            wind = np.sqrt(u**2 + v**2)
+            diag_records.append({
+                'day': day,
+                'u': u, 'v': v, 'T': T, 'p_s': p_s,
+                'max_wind': float(np.max(wind)),
+                'mean_T': float(np.mean(T)),
+            })
+            print(f"    day {day:.0f}: max|v|={float(np.max(wind)):.1f} m/s, "
+                  f"<T>={float(np.mean(T)):.1f} K")
 
-    axes[2].plot(diag_times, diag_max_wind, lw=1.8, color="tab:blue")
-    axes[2].set_ylabel("Max |v| [m/s]")
-    axes[2].set_xlabel("Time [days]")
-    axes[2].set_title("Max wind speed")
-    axes[2].grid(True, alpha=0.3)
+    wall = time.time() - t0
+    print(f"    Done in {wall:.0f}s ({n_steps / wall:.0f} steps/s)")
 
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "slab_timeseries.png", dpi=150)
-    plt.close()
-    print("  Saved slab_timeseries.png")
+    # Compute zonal means on cubed-sphere
+    lat_np = np.asarray(grid.lat).flatten()
+    area_np = np.asarray(grid.area).flatten()
+    final = diag_records[-1]
 
-    with open(OUTPUT_DIR / "slab_timeseries.csv", "w") as f:
-        f.write("time_days,mean_p_s,mean_T,max_wind\n")
-        for i in range(diag_times.size):
-            f.write(
-                f"{diag_times[i]:.8f},{diag_mean_ps[i]:.12e},"
-                f"{diag_mean_T[i]:.12e},{diag_max_wind[i]:.12e}\n"
-            )
-
-    # --- 2. Zonal mean diagnostics ---
-    final_state = jax.tree.map(lambda x: np.array(x), state)
-
-    lat_np = np.array(grid.lat)  # (6, n, n)
-    lat_flat = lat_np.flatten()
-    area_flat = np.array(grid.area).flatten()
-
-    # Adaptive binning: fewer bins at coarse resolution to ensure coverage
-    n_lat_bins = min(91, max(30, 2 * N_GRID))
-    lat_bins = np.linspace(-np.pi/2, np.pi/2, n_lat_bins + 1)
+    n_bins = 64
+    lat_bins = np.linspace(-np.pi / 2, np.pi / 2, n_bins + 1)
     lat_centers = 0.5 * (lat_bins[:-1] + lat_bins[1:])
+    u_zonal = np.full((n_bins, nlev), np.nan)
+    T_zonal = np.full((n_bins, nlev), np.nan)
 
-    u_final = np.array(final_state.u.data)  # (6,n,n,nlev)
-    T_final = np.array(final_state.T.data)
-    nlev = sigma.n_levels
+    u_flat = final['u'].reshape(-1, nlev)
+    T_flat = final['T'].reshape(-1, nlev)
 
-    # Initialize with NaN so empty bins are detectable (not 0 K!)
-    u_zonal = np.full((len(lat_centers), nlev), np.nan)
-    T_zonal = np.full((len(lat_centers), nlev), np.nan)
-
-    for i in range(len(lat_centers)):
-        mask = (lat_flat >= lat_bins[i]) & (lat_flat < lat_bins[i+1])
+    for i in range(n_bins):
+        mask = (lat_np >= lat_bins[i]) & (lat_np < lat_bins[i + 1])
         if np.sum(mask) > 0:
-            w = area_flat[mask]
-            w = w / w.sum()  # area-weighted average
-            for k in range(nlev):
-                u_zonal[i, k] = np.sum(w * u_final[..., k].flatten()[mask])
-                T_zonal[i, k] = np.sum(w * T_final[..., k].flatten()[mask])
+            w = area_np[mask]
+            w = w / w.sum()
+            u_zonal[i] = np.sum(w[:, None] * u_flat[mask], axis=0)
+            T_zonal[i] = np.sum(w[:, None] * T_flat[mask], axis=0)
 
-    # Interpolate through any remaining empty bins
+    # Interpolate any empty bins
     for k in range(nlev):
         valid = ~np.isnan(T_zonal[:, k])
         if valid.any() and not valid.all():
             T_zonal[:, k] = np.interp(lat_centers, lat_centers[valid], T_zonal[valid, k])
             u_zonal[:, k] = np.interp(lat_centers, lat_centers[valid], u_zonal[valid, k])
 
-    sigma_full_np = np.array(sigma.sigma_full)
-    p_levels = sigma_full_np * 1000  # Approximate pressure in hPa
+    if coord_type == "sigma":
+        sigma_full = np.asarray(sigma.sigma_full)
+    else:
+        sigma_full = np.asarray(sigma.B_full)
 
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    return {
+        'lat': lat_centers,
+        'sigma': sigma_full,
+        'u_zonal': u_zonal,
+        'T_zonal': T_zonal,
+        'p_s_mean': float(np.mean(final['p_s'])),
+        'diag_records': diag_records,
+        'wall_time': wall,
+        'coord_type': coord_type,
+        'grid_type': f'C{n_grid}',
+    }
 
-    cs = axes[0].contourf(
-        np.degrees(lat_centers), p_levels, u_zonal.T,
-        levels=np.arange(-20, 45, 5), cmap="RdBu_r", extend="both"
+
+def check_realism(result, label):
+    """Check profiles against Held-Suarez reference climate."""
+    lat_deg = np.degrees(result['lat'])
+    u_z = result['u_zonal']
+    T_z = result['T_zonal']
+    sigma = result['sigma']
+    p_hPa = sigma * 1000  # approximate
+
+    issues = []
+
+    # --- Zonal wind checks ---
+    # Find jet maximum
+    jet_idx = np.unravel_index(np.nanargmax(u_z), u_z.shape)
+    jet_lat = lat_deg[jet_idx[0]]
+    jet_p = p_hPa[jet_idx[1]]
+    jet_speed = u_z[jet_idx]
+
+    print(f"\n  [{label}] Jet: {jet_speed:.1f} m/s at {jet_lat:.0f}°, {jet_p:.0f} hPa")
+
+    if jet_speed < 15:
+        issues.append(f"Jet too weak: {jet_speed:.1f} m/s (expected ~25-30 m/s)")
+    elif jet_speed > 45:
+        issues.append(f"Jet too strong: {jet_speed:.1f} m/s (expected ~25-30 m/s)")
+
+    if abs(jet_lat) < 15 or abs(jet_lat) > 50:
+        issues.append(f"Jet at wrong latitude: {jet_lat:.0f}° (expected ~30°)")
+
+    if jet_p > 500 or jet_p < 50:
+        issues.append(f"Jet at wrong level: {jet_p:.0f} hPa (expected ~200-300 hPa)")
+
+    # --- Surface wind structure ---
+    sfc_idx = -1  # lowest level
+    u_sfc = u_z[:, sfc_idx]
+
+    # Check for surface westerlies at midlatitudes
+    midlat_mask = (np.abs(lat_deg) > 30) & (np.abs(lat_deg) < 60)
+    if midlat_mask.any():
+        midlat_u = np.nanmean(np.abs(u_sfc[midlat_mask]))
+        if midlat_u < 1:
+            issues.append(f"Surface midlat winds too weak: {midlat_u:.1f} m/s (expected ~5-8 m/s)")
+
+    # --- Temperature checks ---
+    # Equatorial surface temperature
+    eq_mask = np.abs(lat_deg) < 10
+    if eq_mask.any():
+        T_eq_sfc = np.nanmean(T_z[eq_mask, sfc_idx])
+        print(f"  [{label}] T_eq_surface: {T_eq_sfc:.1f} K (expected ~290-300 K)")
+        if T_eq_sfc < 275 or T_eq_sfc > 310:
+            issues.append(f"Equatorial surface T: {T_eq_sfc:.1f} K (expected ~290-300 K)")
+
+    # Polar surface temperature
+    pole_mask = np.abs(lat_deg) > 70
+    if pole_mask.any():
+        T_pole_sfc = np.nanmean(T_z[pole_mask, sfc_idx])
+        print(f"  [{label}] T_pole_surface: {T_pole_sfc:.1f} K (expected ~230-250 K)")
+        if T_pole_sfc < 200 or T_pole_sfc > 265:
+            issues.append(f"Polar surface T: {T_pole_sfc:.1f} K (expected ~230-250 K)")
+
+    # Stratosphere temperature (should be ~200 K)
+    top_idx = 0
+    T_strat = np.nanmean(T_z[:, top_idx])
+    print(f"  [{label}] T_stratosphere: {T_strat:.1f} K (expected ~200 K)")
+    if T_strat < 180 or T_strat > 220:
+        issues.append(f"Stratosphere T: {T_strat:.1f} K (expected ~200 K)")
+
+    # Meridional temperature gradient at surface
+    if eq_mask.any() and pole_mask.any():
+        dT_merid = T_eq_sfc - T_pole_sfc
+        print(f"  [{label}] Meridional dT: {dT_merid:.1f} K (expected ~40-60 K)")
+        if dT_merid < 20:
+            issues.append(f"Meridional dT too small: {dT_merid:.1f} K (expected ~40-60 K)")
+        elif dT_merid > 80:
+            issues.append(f"Meridional dT too large: {dT_merid:.1f} K (expected ~40-60 K)")
+
+    # Global mean temperature
+    mean_T = np.nanmean(T_z)
+    print(f"  [{label}] Global mean T: {mean_T:.1f} K (expected ~250-270 K)")
+
+    # Hemispheric symmetry (NH ≈ SH)
+    nh_mask = lat_deg > 10
+    sh_mask = lat_deg < -10
+    if nh_mask.any() and sh_mask.any():
+        T_nh = np.nanmean(T_z[nh_mask])
+        T_sh = np.nanmean(T_z[sh_mask])
+        asym = abs(T_nh - T_sh)
+        if asym > 5:
+            issues.append(f"Hemispheric T asymmetry: {asym:.1f} K (should be <5 K)")
+
+    # Mean surface pressure
+    print(f"  [{label}] Mean p_s: {result['p_s_mean']:.0f} Pa (expected ~100000 Pa)")
+
+    if issues:
+        print(f"  [{label}] ISSUES FOUND:")
+        for issue in issues:
+            print(f"    - {issue}")
+    else:
+        print(f"  [{label}] All checks PASSED")
+
+    return issues
+
+
+def run_latlon(n_lat, nlev, coord_type, dt, n_days, diag_every_days=10):
+    """Run lat-lon PE Held-Suarez and return diagnostics."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
+        LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig,
     )
-    axes[0].set_ylim(1000, 0)
-    axes[0].set_xlabel("Latitude [°]")
-    axes[0].set_ylabel("Pressure [hPa]")
-    axes[0].set_title(f"Zonal-mean zonal wind [m/s] (day {N_DAYS})")
-    plt.colorbar(cs, ax=axes[0])
-
-    cs = axes[1].contourf(
-        np.degrees(lat_centers), p_levels, T_zonal.T,
-        levels=20, cmap="RdYlBu_r"
+    from legoesm.atmosphere.physics.held_suarez_latlon import (
+        held_suarez_forcing_latlon, held_suarez_init_latlon,
     )
-    axes[1].set_ylim(1000, 0)
-    axes[1].set_xlabel("Latitude [°]")
-    axes[1].set_ylabel("Pressure [hPa]")
-    axes[1].set_title(f"Zonal-mean temperature [K] (day {N_DAYS})")
-    plt.colorbar(cs, ax=axes[1])
 
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "zonal_mean.png", dpi=150)
-    plt.close()
-    print("  Saved zonal_mean.png")
+    n_lon = 2 * n_lat
+    grid = create_latlon_grid(n_lat, n_lon)
 
-    # --- 3. Surface pressure snapshots ---
-    n_snap_plot = min(len(snapshots), 4)
-    fig, axes = plt.subplots(1, n_snap_plot, figsize=(5 * n_snap_plot, 5))
-    if n_snap_plot == 1:
-        axes = [axes]
-    for idx, (day, snap) in enumerate(sorted(snapshots.items())[:n_snap_plot]):
-        ax = axes[idx]
-        ps = np.array(snap.p_s.data)
-        im = ax.pcolormesh(ps[0] / 100, cmap="viridis")
-        ax.set_title(f"p_s [hPa] face 0, day {day}")
-        ax.set_aspect("equal")
-        plt.colorbar(im, ax=ax)
+    if coord_type == "sigma":
+        sigma = create_sigma_coordinate(nlev)
+    else:
+        sigma = standard_hybrid_levels(nlev)
 
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "surface_pressure.png", dpi=150)
-    plt.close()
-    print("  Saved surface_pressure.png")
+    # Scale hyperdiffusion
+    ref_coeff = 2e16
+    hyperdiff = max(ref_coeff * (64 / n_lat) ** 4, 1e16)
 
-    # --- 4. Temperature profile at equator ---
-    eq_mask = np.abs(lat_flat) < np.radians(5.0)
-    eq_area = area_flat[eq_mask]
-    eq_w = eq_area / eq_area.sum()
-    T_eq_profile = np.zeros(nlev)
-    for k in range(nlev):
-        T_eq_profile[k] = np.sum(eq_w * T_final[..., k].flatten()[eq_mask])
+    config = LatLonPrimitiveEquationConfig(
+        hyperdiff_coeff=hyperdiff,
+        hyperdiff_ps_coeff=hyperdiff,
+        use_conservation_fixer=True,
+        fix_mass=True,
+    )
+    model = LatLonPrimitiveEquationModel(grid, sigma, config)
+    state = held_suarez_init_latlon(grid, sigma)
 
-    fig, ax = plt.subplots(figsize=(6, 8))
-    ax.plot(T_eq_profile, p_levels, "b-o", markersize=4)
-    ax.set_ylim(1000, 0)
-    ax.set_xlabel("Temperature [K]")
-    ax.set_ylabel("Pressure [hPa]")
-    ax.set_title(f"Equatorial temperature profile (day {N_DAYS})")
-    ax.grid(True)
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "equatorial_T_profile.png", dpi=150)
-    plt.close()
-    print("  Saved equatorial_T_profile.png")
+    n_steps = int(n_days * 86400.0 / dt)
+    diag_interval = max(1, int(diag_every_days * 86400.0 / dt))
 
-    with open(OUTPUT_DIR / "results.txt", "w") as f:
-        f.write(f"fv_grid: {args.fv_grid}\n")
-        f.write(f"branch: {branch_label}\n")
-        f.write(f"resolution: C{N_GRID}\n")
-        f.write(f"levels: {N_LEVELS}\n")
-        f.write(f"dt_s: {DT:.6f}\n")
-        f.write(f"days: {N_DAYS}\n")
-        f.write(f"mass_drift_rel: {mass_drift:.12e}\n")
-        f.write(f"energy_drift_rel: {energy_drift:.12e}\n")
-        f.write(f"final_max_wind_ms: {float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2))):.12e}\n")
-        f.write(f"final_mean_T_K: {float(jnp.mean(state.T.data)):.12e}\n")
-        f.write(f"wall_time_s: {elapsed:.2f}\n")
+    print(f"  {n_lat}x{n_lon}/L{nlev} ({coord_type}): {n_steps} steps, dt={dt}s")
 
-    print(f"\nAll outputs saved to {OUTPUT_DIR}/")
-    print("Done!")
+    # Warmup
+    state = model.step_with_physics(state, dt, held_suarez_forcing_latlon)
+    jax.block_until_ready(state.u.data)
+
+    t0 = time.time()
+    diag_records = []
+    for step in range(1, n_steps + 1):
+        if step > 1:
+            state = model.step_with_physics(state, dt, held_suarez_forcing_latlon)
+
+        if step % 100 == 0:
+            u_max = float(jnp.max(jnp.abs(state.u.data)))
+            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 500:
+                day = (step + 1) * dt / 86400.0
+                print(f"    *** BLOWUP at day {day:.1f}, u_max={u_max:.1f} ***")
+                break
+
+        if step % diag_interval == 0 or step == n_steps:
+            day = step * dt / 86400.0
+            u = np.asarray(state.u.data)
+            v = np.asarray(state.v.data)
+            T = np.asarray(state.T.data)
+            p_s = np.asarray(state.p_s.data)
+            wind = np.sqrt(u**2 + v**2)
+            diag_records.append({
+                'day': day,
+                'u': u, 'v': v, 'T': T, 'p_s': p_s,
+                'max_wind': float(np.max(wind)),
+                'mean_T': float(np.mean(T)),
+            })
+            print(f"    day {day:.0f}: max|v|={float(np.max(wind)):.1f} m/s, "
+                  f"<T>={float(np.mean(T)):.1f} K")
+
+    wall = time.time() - t0
+    print(f"    Done in {wall:.0f}s ({n_steps / wall:.0f} steps/s)")
+
+    # Zonal means on lat-lon grid (simple longitude average)
+    lat_1d = np.asarray(grid.lat)  # (n_lat,)
+    final = diag_records[-1]
+    u_zonal = np.mean(final['u'], axis=1)  # (n_lat, nlev)
+    T_zonal = np.mean(final['T'], axis=1)  # (n_lat, nlev)
+
+    if coord_type == "sigma":
+        sigma_full = np.asarray(sigma.sigma_full)
+    else:
+        sigma_full = np.asarray(sigma.B_full)
+
+    return {
+        'lat': lat_1d,
+        'sigma': sigma_full,
+        'u_zonal': u_zonal,
+        'T_zonal': T_zonal,
+        'p_s_mean': float(np.mean(final['p_s'])),
+        'diag_records': diag_records,
+        'wall_time': wall,
+        'coord_type': coord_type,
+        'grid_type': f'{n_lat}x{n_lon}',
+    }
+
+
+def check_equilibrium_temperature():
+    """Verify T_eq formula matches Held & Suarez (1994) Table 1."""
+    print("\n--- Equilibrium Temperature Verification ---")
+
+    lat = jnp.array([0.0, jnp.pi / 6, jnp.pi / 4, jnp.pi / 3, jnp.pi / 2])
+    lat_deg = np.degrees(np.asarray(lat))
+    p = jnp.array([100e2, 200e2, 500e2, 850e2, 1000e2])  # Pa
+
+    for i, la in enumerate(lat):
+        for j, pr in enumerate(p):
+            T_eq = float(held_suarez_equilibrium_temperature(la, pr))
+            sigma = float(pr / 1e5)
+            print(f"  lat={lat_deg[i]:5.1f}°, p={float(pr)/100:7.0f} hPa (σ={sigma:.3f}): "
+                  f"T_eq = {T_eq:.1f} K")
+
+    # Check specific reference values from HS94
+    # At equator, surface: T_eq ≈ 315 * (1000/1000)^0.286 = 315 K -> capped behavior
+    T_eq_eq_sfc = float(held_suarez_equilibrium_temperature(jnp.array(0.0), jnp.array(1e5)))
+    T_eq_pole_sfc = float(held_suarez_equilibrium_temperature(jnp.array(jnp.pi / 2), jnp.array(1e5)))
+    T_eq_eq_top = float(held_suarez_equilibrium_temperature(jnp.array(0.0), jnp.array(100e2)))
+
+    print(f"\n  Reference checks:")
+    print(f"    T_eq(eq, sfc)  = {T_eq_eq_sfc:.1f} K (should be 315.0 K)")
+    print(f"    T_eq(pole, sfc) = {T_eq_pole_sfc:.1f} K (should be 255.0 K)")
+    print(f"    T_eq(eq, 100hPa) = {T_eq_eq_top:.1f} K (should be 200.0 K, capped)")
+
+    issues = []
+    if abs(T_eq_eq_sfc - 315.0) > 0.1:
+        issues.append(f"T_eq(eq,sfc) = {T_eq_eq_sfc:.1f}, expected 315.0")
+    if abs(T_eq_pole_sfc - 255.0) > 0.1:
+        issues.append(f"T_eq(pole,sfc) = {T_eq_pole_sfc:.1f}, expected 255.0")
+    if T_eq_eq_top > 200.1:
+        issues.append(f"T_eq(eq,100hPa) = {T_eq_eq_top:.1f}, should be capped at 200.0")
+
+    return issues
+
+
+def check_forcing_coefficients():
+    """Verify k_T and k_v match HS94 Table 1."""
+    print("\n--- Forcing Coefficient Verification ---")
+
+    print(f"  k_a = {K_A:.6e} s⁻¹ (1/40 day = {1/(40*86400):.6e})")
+    print(f"  k_s = {K_S:.6e} s⁻¹ (1/4 day = {1/(4*86400):.6e})")
+    print(f"  k_f = {K_F:.6e} s⁻¹ (1/1 day = {1/(1*86400):.6e})")
+    print(f"  σ_b = {SIGMA_B}")
+    print(f"  ΔT_y = {DELTA_T_Y} K")
+    print(f"  Δθ_z = {DELTA_THETA_Z} K")
+    print(f"  T_min = {T_MIN} K")
+    print(f"  P_0 = {P_0:.0f} Pa")
+
+    issues = []
+    if abs(K_A - 1 / (40 * 86400)) > 1e-12:
+        issues.append(f"k_a wrong: {K_A}")
+    if abs(K_S - 1 / (4 * 86400)) > 1e-12:
+        issues.append(f"k_s wrong: {K_S}")
+    if abs(K_F - 1 / (1 * 86400)) > 1e-12:
+        issues.append(f"k_f wrong: {K_F}")
+    if SIGMA_B != 0.7:
+        issues.append(f"σ_b wrong: {SIGMA_B}")
+
+    # Check k_T at specific points
+    # At σ=1.0, equator: k_T = k_a + (k_s - k_a) * (1-0.7)/(1-0.7) * cos⁴(0) = k_s
+    # At σ=0.5 (above BL): k_T = k_a (no BL contribution)
+    # At σ=1.0, pole: k_T = k_a + (k_s - k_a) * 1 * cos⁴(90°) = k_a
+    sigma_1 = 1.0
+    sigma_05 = 0.5
+    sf_1 = max(0, (sigma_1 - SIGMA_B) / (1 - SIGMA_B))
+    sf_05 = max(0, (sigma_05 - SIGMA_B) / (1 - SIGMA_B))
+
+    k_T_eq_sfc = K_A + (K_S - K_A) * sf_1 * np.cos(0) ** 4
+    k_T_eq_mid = K_A + (K_S - K_A) * sf_05 * np.cos(0) ** 4
+    k_T_pole_sfc = K_A + (K_S - K_A) * sf_1 * np.cos(np.pi / 2) ** 4
+
+    print(f"\n  k_T(σ=1, eq) = {k_T_eq_sfc:.6e} (should = k_s = {K_S:.6e})")
+    print(f"  k_T(σ=0.5, eq) = {k_T_eq_mid:.6e} (should = k_a = {K_A:.6e})")
+    print(f"  k_T(σ=1, pole) = {k_T_pole_sfc:.6e} (should = k_a = {K_A:.6e})")
+
+    if abs(k_T_eq_sfc - K_S) > 1e-12:
+        issues.append("k_T(σ=1,eq) should equal k_s")
+    if abs(k_T_eq_mid - K_A) > 1e-12:
+        issues.append("k_T(σ=0.5,eq) should equal k_a")
+    if abs(k_T_pole_sfc - K_A) > 1e-12:
+        issues.append("k_T(σ=1,pole) should equal k_a")
+
+    return issues
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Unified Held-Suarez driver and profile analyzer.",
+        epilog="""
+Examples:
+  # Run all grid types (spectral, cubed-sphere, lat-lon) with defaults:
+  python analyze_held_suarez.py
+
+  # Run only spectral T42 with sigma:
+  python analyze_held_suarez.py --grid spectral --resolution 42 --coord sigma
+
+  # Run cubed-sphere C48 with hybrid sigma-pressure:
+  python analyze_held_suarez.py --grid cubed_sphere --resolution 48 --coord hybrid
+
+  # Run lat-lon 72x144:
+  python analyze_held_suarez.py --grid latlon --resolution 72 --coord sigma
+
+  # Quick test (30 days):
+  python analyze_held_suarez.py --days 30 --grid spectral --resolution 21
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--grid", type=str, default="all",
+                        choices=["all", "spectral", "cubed_sphere", "latlon"],
+                        help="Grid type (default: all)")
+    parser.add_argument("--resolution", type=int, default=None,
+                        help="Resolution (T-number for spectral, C-number for cubed-sphere, n_lat for latlon)")
+    parser.add_argument("--levels", type=int, default=20,
+                        help="Number of vertical levels (default: 20)")
+    parser.add_argument("--coord", type=str, default="sigma",
+                        choices=["sigma", "hybrid"],
+                        help="Vertical coordinate type (default: sigma)")
+    parser.add_argument("--dt", type=float, default=None,
+                        help="Time step in seconds (default: auto)")
+    parser.add_argument("--days", type=int, default=200,
+                        help="Integration duration in days (default: 200)")
+    parser.add_argument("--skip-verify", action="store_true",
+                        help="Skip forcing formula verification")
+    args = parser.parse_args()
+
+    print("=" * 70)
+    print("Held-Suarez Realism Analysis")
+    print("=" * 70)
+
+    all_issues = {}
+
+    # Phase 1: Verify forcing formulas
+    if not args.skip_verify:
+        teq_issues = check_equilibrium_temperature()
+        coeff_issues = check_forcing_coefficients()
+        if teq_issues:
+            all_issues['T_eq formula'] = teq_issues
+        if coeff_issues:
+            all_issues['Coefficients'] = coeff_issues
+
+    # Phase 2: Build configuration list
+    n_days = args.days
+    nlev = args.levels
+
+    if args.grid == "all":
+        configs = [
+            ("spectral", 42, "sigma", 180.0),
+            ("spectral", 42, "hybrid", 180.0),
+            ("cubed_sphere", 48, "sigma", 600.0),
+            ("latlon", 72, "sigma", 600.0),
+        ]
+    else:
+        default_res = {"spectral": 42, "cubed_sphere": 48, "latlon": 72}
+        default_dt = {"spectral": 180.0, "cubed_sphere": 600.0, "latlon": 600.0}
+        res = args.resolution or default_res[args.grid]
+        dt = args.dt or default_dt[args.grid]
+        configs = [(args.grid, res, args.coord, dt)]
+
+    results = {}
+    for grid_type, res, coord, dt in configs:
+        label = f"{grid_type}_{coord}"
+        print(f"\n{'='*70}")
+        print(f"Running: {label} (res={res}, L{nlev}, dt={dt}s, {n_days} days)")
+        print(f"{'='*70}")
+
+        try:
+            if grid_type == "spectral":
+                result = run_spectral(res, nlev, coord, dt, n_days)
+            elif grid_type == "latlon":
+                result = run_latlon(res, nlev, coord, dt, n_days)
+            else:
+                result = run_cubed_sphere(res, nlev, coord, dt, n_days)
+            results[label] = result
+            issues = check_realism(result, label)
+            if issues:
+                all_issues[label] = issues
+        except Exception as e:
+            print(f"  FAILED: {e}")
+            import traceback
+            traceback.print_exc()
+            all_issues[label] = [f"Runtime error: {e}"]
+
+    # Phase 3: Summary
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+
+    if not all_issues:
+        print("All checks passed! Profiles are realistic.")
+    else:
+        print(f"Found issues in {len(all_issues)} categories:")
+        for cat, issues in all_issues.items():
+            print(f"\n  {cat}:")
+            for issue in issues:
+                print(f"    - {issue}")
+
+    # Phase 4: Cross-compare spectral vs cubed-sphere
+    if 'spectral_sigma' in results and 'cubed_sphere_sigma' in results:
+        print("\n--- Cross-comparison: Spectral vs Cubed-Sphere (sigma) ---")
+        sp = results['spectral_sigma']
+        cs = results['cubed_sphere_sigma']
+
+        # Compare jet speeds
+        sp_jet = np.nanmax(sp['u_zonal'])
+        cs_jet = np.nanmax(cs['u_zonal'])
+        print(f"  Jet speed: spectral={sp_jet:.1f} m/s, cubed-sphere={cs_jet:.1f} m/s")
+        print(f"  Difference: {abs(sp_jet - cs_jet):.1f} m/s")
+
+        # Compare global mean T
+        sp_meanT = np.nanmean(sp['T_zonal'])
+        cs_meanT = np.nanmean(cs['T_zonal'])
+        print(f"  Mean T: spectral={sp_meanT:.1f} K, cubed-sphere={cs_meanT:.1f} K")
+
+    # Phase 5: Compare sigma vs hybrid
+    if 'spectral_sigma' in results and 'spectral_hybrid' in results:
+        print("\n--- Cross-comparison: Sigma vs Hybrid (spectral T42) ---")
+        sig = results['spectral_sigma']
+        hyb = results['spectral_hybrid']
+
+        sig_jet = np.nanmax(sig['u_zonal'])
+        hyb_jet = np.nanmax(hyb['u_zonal'])
+        print(f"  Jet speed: sigma={sig_jet:.1f} m/s, hybrid={hyb_jet:.1f} m/s")
+
+        sig_meanT = np.nanmean(sig['T_zonal'])
+        hyb_meanT = np.nanmean(hyb['T_zonal'])
+        print(f"  Mean T: sigma={sig_meanT:.1f} K, hybrid={hyb_meanT:.1f} K")
+
+    return all_issues
 
 
 if __name__ == "__main__":
-    main()
+    issues = main()
+    sys.exit(1 if issues else 0)

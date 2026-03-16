@@ -147,7 +147,7 @@ class LatLonOceanModel:
             physics_fn=self._physics_fn,
         )
 
-    @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
+    @partial(jax.jit, static_argnums=(0,))
     def step(self, state: LatLonOceanState, dt: float) -> LatLonOceanState:
         """Advance one time step using split-explicit stepping.
 

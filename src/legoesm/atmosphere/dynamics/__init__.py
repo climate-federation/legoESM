@@ -153,6 +153,16 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
     CDGridShallowWaterState,
     cdgrid_shallow_water_tendencies,
 )
+from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+    MPASPrimitiveEquationModel,
+    MPASPrimitiveEquationConfig,
+    mpas_hydrostatic_tendencies,
+)
+from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+    MPASCompressibleEulerModel,
+    MPASCompressibleEulerConfig,
+    mpas_compressible_euler_slow_tendencies,
+)
 # Available solver names for the factory (flat namespace)
 AVAILABLE_SOLVERS = [
     "shallow_water",
@@ -181,11 +191,13 @@ AVAILABLE_SOLVERS = [
     "cgrid_primitive_equations",
     "cgrid_compressible_euler",
     "cdgrid_shallow_water",
+    "mpas_primitive_equations",
+    "mpas_compressible_euler",
 ]
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid", "cdgrid", "fc_gram", "fc_gram_cgrid"]
+DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid", "cdgrid", "fc_gram", "fc_gram_cgrid", "mpas"]
 
 # (dynamics, discretization) -> flat solver name
 _AXIS_TO_SOLVER = {
@@ -210,6 +222,9 @@ _AXIS_TO_SOLVER = {
     ("nonhydrostatic", "fc_gram"): "fc_compressible_euler",
     ("nonhydrostatic", "fc_gram_cgrid"): "fc_cgrid_compressible_euler",
     ("shallow_water", "cdgrid"): "cdgrid_shallow_water",
+    ("shallow_water", "mpas"): "mpas_shallow_water",
+    ("hydrostatic", "mpas"): "mpas_primitive_equations",
+    ("nonhydrostatic", "mpas"): "mpas_compressible_euler",
 }
 
 # flat solver name -> (dynamics, discretization)
@@ -442,6 +457,10 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return FCCGCompressibleEulerModel(**kwargs)
     elif name == "cdgrid_shallow_water":
         return CDGridShallowWaterModel(**kwargs)
+    elif name == "mpas_primitive_equations":
+        return MPASPrimitiveEquationModel(**kwargs)
+    elif name == "mpas_compressible_euler":
+        return MPASCompressibleEulerModel(**kwargs)
     else:
         raise ValueError(
             f"Unknown solver: {name!r}. "
