@@ -45,6 +45,46 @@ class LatLonGrid(NamedTuple):
     dlon: float                 # longitude spacing [rad]
     dlat: float                 # latitude spacing [rad]
 
+    # ------------------------------------------------------------------
+    # GridProtocol properties
+    # ------------------------------------------------------------------
+
+    @property
+    def grid_lat(self) -> jax.Array:
+        return self.lat2d
+
+    @property
+    def grid_lon(self) -> jax.Array:
+        return self.lon2d
+
+    @property
+    def grid_area(self) -> jax.Array:
+        return self.area
+
+    @property
+    def grid_total_area(self):
+        return self.total_area
+
+    @property
+    def grid_coriolis(self) -> jax.Array:
+        return self.f
+
+    @property
+    def grid_radius(self) -> float:
+        return self.radius
+
+    @property
+    def grid_n_columns(self) -> int:
+        return self.n_lat * self.n_lon
+
+    def to_columns(self, field):
+        extra = field.shape[2:]
+        return field.reshape(self.n_lat * self.n_lon, *extra)
+
+    def from_columns(self, cols):
+        extra = cols.shape[1:]
+        return cols.reshape(self.n_lat, self.n_lon, *extra)
+
 
 def create_latlon_grid(
     n_lat: int,

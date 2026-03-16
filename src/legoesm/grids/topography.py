@@ -535,7 +535,9 @@ def load_real_topography(
 
     ds.close()
 
-    # Detect grid type
+    # Use protocol for grid detection
+    grid_lat = np.asarray(grid.grid_lat)
+    grid_lon = np.asarray(grid.grid_lon)
     is_gaussian = hasattr(grid, 'n_lat') and not hasattr(grid, 'n')
 
     if is_gaussian:
@@ -545,10 +547,10 @@ def load_real_topography(
         target_lon_2d, target_lat_2d = np.meshgrid(target_lon, target_lat)
         grid_spacing = 180.0 / grid.n_lat
     else:
-        target_lat_2d = np.asarray(grid.lat) * 180.0 / np.pi
-        target_lon_2d = np.asarray(grid.lon) * 180.0 / np.pi
+        target_lat_2d = grid_lat * 180.0 / np.pi
+        target_lon_2d = grid_lon * 180.0 / np.pi
         target_lon_2d = target_lon_2d % 360.0
-        grid_spacing = 90.0 / grid.n  # approximate
+        grid_spacing = 90.0 / grid.n
 
     # Regrid elevation
     z_s = _regrid_to_target(lat_src, lon_src, elev_data,

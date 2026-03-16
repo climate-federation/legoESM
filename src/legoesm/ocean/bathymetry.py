@@ -847,7 +847,7 @@ def _idealized_dispatch(grid, cfg: BathymetryConfig):
 
     # GaussianGrid: has attribute 'n_lat'
     if hasattr(grid, 'n_lat') and not hasattr(grid, 'n'):
-        lat_deg = jnp.abs(grid.lat2d) * (180.0 / jnp.pi)
+        lat_deg = jnp.abs(grid.grid_lat) * (180.0 / jnp.pi)
         ocean_mask = jnp.where(lat_deg < cfg.land_lat_threshold, 1.0, 0.0)
         H_bathy = jnp.where(ocean_mask > 0.5, cfg.H_max, 1.0)
         return H_bathy, ocean_mask

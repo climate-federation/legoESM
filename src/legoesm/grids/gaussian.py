@@ -61,6 +61,49 @@ class GaussianGrid(NamedTuple):
     lap: jax.Array          # Spectral Laplacian = -n(n+1)/a^2, (n_sh,)
     ilap: jax.Array         # Inverse Laplacian (0 for n=0), (n_sh,)
 
+    # ------------------------------------------------------------------
+    # GridProtocol properties
+    # ------------------------------------------------------------------
+
+    @property
+    def grid_lat(self) -> jax.Array:
+        return self.lat2d
+
+    @property
+    def grid_lon(self) -> jax.Array:
+        return self.lon2d
+
+    @property
+    def grid_area(self):
+        dlon = 2.0 * jnp.pi / self.n_lon
+        return self.radius ** 2 * dlon * jnp.broadcast_to(
+            self.weights[:, None], (self.n_lat, self.n_lon)
+        )
+
+    @property
+    def grid_total_area(self):
+        return jnp.sum(self.grid_area)
+
+    @property
+    def grid_coriolis(self) -> jax.Array:
+        return self.f
+
+    @property
+    def grid_radius(self) -> float:
+        return self.radius
+
+    @property
+    def grid_n_columns(self) -> int:
+        return self.n_lat * self.n_lon
+
+    def to_columns(self, field):
+        extra = field.shape[2:]
+        return field.reshape(self.n_lat * self.n_lon, *extra)
+
+    def from_columns(self, cols):
+        extra = cols.shape[1:]
+        return cols.reshape(self.n_lat, self.n_lon, *extra)
+
 
 def create_gaussian_grid(
     n_max: int,

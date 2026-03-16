@@ -81,6 +81,19 @@ class SigmaCoordinate(NamedTuple):
     fractional_sigma: jax.Array
     dsigma_full: jax.Array
 
+    # ------------------------------------------------------------------
+    # VerticalCoordProtocol methods
+    # ------------------------------------------------------------------
+
+    def pressure_at_full(self, p_s):
+        return pressure_from_sigma(self.sigma_full, p_s)
+
+    def pressure_at_half(self, p_s):
+        return pressure_from_sigma(self.sigma_half, p_s)
+
+    def layer_thickness_dp(self, p_s):
+        return self.dsigma * p_s[..., None]
+
 
 def create_sigma_coordinate(
     n_levels: int,
@@ -469,6 +482,19 @@ class HybridSigmaPressureCoordinate(NamedTuple):
     ln_ratio_ref: jax.Array
     alpha_ref: jax.Array
     dsigma_eff: jax.Array
+
+    # ------------------------------------------------------------------
+    # VerticalCoordProtocol methods
+    # ------------------------------------------------------------------
+
+    def pressure_at_full(self, p_s):
+        return pressure_from_hybrid(self, p_s, full=True)
+
+    def pressure_at_half(self, p_s):
+        return pressure_from_hybrid(self, p_s, full=False)
+
+    def layer_thickness_dp(self, p_s):
+        return dp_from_hybrid(self, p_s)
 
 
 def create_hybrid_coordinate(

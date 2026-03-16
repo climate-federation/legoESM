@@ -69,11 +69,8 @@ def _global_area_sum(array: jax.Array, grid) -> jax.Array:
 
 
 def _total_area(grid) -> jax.Array:
-    """Total area for any grid with .total_area or .area."""
-    if hasattr(grid, 'total_area'):
-        return grid.total_area
-    acc = _accumulation_dtype()
-    return jnp.sum(grid.area.astype(acc))
+    """Total area for any grid."""
+    return grid.grid_total_area
 
 
 def fix_mass_shallow_water(

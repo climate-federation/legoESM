@@ -322,10 +322,8 @@ def _make_hydrostatic_radiation(
         ncol = int(math.prod(int(s) for s in shape_2d))
 
         # Hydrostatic grids can be cubed-sphere (face,x,y) or lat-lon (lat,lon).
-        lat_src = getattr(grid, "lat2d", getattr(grid, "lat"))
-        lon_src = getattr(grid, "lon2d", getattr(grid, "lon"))
-        lat = jnp.asarray(lat_src)
-        lon = jnp.asarray(lon_src)
+        lat = jnp.asarray(grid.grid_lat)
+        lon = jnp.asarray(grid.grid_lon)
         if lat.ndim < len(shape_2d):
             lat = jnp.broadcast_to(lat.reshape((*lat.shape, *([1] * (len(shape_2d) - lat.ndim))),), shape_2d)
         if lon.ndim < len(shape_2d):
@@ -335,12 +333,8 @@ def _make_hydrostatic_radiation(
                 lon = jnp.broadcast_to(lon.reshape((*([1] * (len(shape_2d) - lon.ndim)), *lon.shape)), shape_2d)
 
         # Pressure at full and half levels
-        if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
-            p_full = pressure_from_hybrid(sigma_coord, p_s, full=True)
-            p_half = pressure_from_hybrid(sigma_coord, p_s, full=False)
-        else:
-            p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-            p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Surface temperature = lowest-level temperature
         T_sfc = T[..., -1]  # (6, n, n)
@@ -596,14 +590,8 @@ def _make_spectral_pe_radiation(
         n_lat, n_lon = p_s.shape
 
         # Pressure at full and half levels
-        if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
-            p_full = pressure_from_hybrid(sigma_coord, p_s, full=True)
-            p_half = pressure_from_hybrid(sigma_coord, p_s, full=False)
-        else:
-            sigma_full = sigma_coord.sigma_full
-            sigma_half = sigma_coord.sigma_half
-            p_full = p_s[..., None] * sigma_full
-            p_half = p_s[..., None] * sigma_half
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Surface temperature = lowest level
         T_sfc = T[..., -1]  # (n_lat, n_lon)

@@ -1,5 +1,6 @@
 """Grid implementations for legoESM."""
 
+from legoesm.grids.protocol import GridProtocol, VerticalCoordProtocol
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,

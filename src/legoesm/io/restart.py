@@ -158,26 +158,48 @@ def save_restart(
     q_c=None,
     q_r=None,
     model_version: str = "0.1.0",
+    backend: str = "npz",
 ) -> None:
     """Save a restart checkpoint together with reproducibility metadata.
 
-    Delegates array persistence to :func:`save_checkpoint` and writes a
-    companion ``.meta.json`` alongside the ``.npz`` file.
+    Delegates array persistence to :func:`save_checkpoint` (npz) or
+    :func:`save_checkpoint_zarr` (zarr) and writes a companion
+    ``.meta.json`` alongside the checkpoint.
+
+    Parameters
+    ----------
+    backend : str
+        ``"npz"`` (default) or ``"zarr"``.
     """
     path = Path(path)
 
-    # 1. Delegate to existing save_checkpoint
-    save_checkpoint(
-        path,
-        state,
-        q_v,
-        step,
-        day,
-        config,
-        diag_accumulators=diag_accumulators,
-        q_c=q_c,
-        q_r=q_r,
-    )
+    # 1. Delegate to appropriate backend
+    if backend == "zarr":
+        from legoesm.io.checkpoint import save_checkpoint_zarr
+
+        save_checkpoint_zarr(
+            path,
+            state,
+            q_v,
+            step,
+            day,
+            config,
+            q_c=q_c,
+            q_r=q_r,
+            diag_accumulators=diag_accumulators,
+        )
+    else:
+        save_checkpoint(
+            path,
+            state,
+            q_v,
+            step,
+            day,
+            config,
+            diag_accumulators=diag_accumulators,
+            q_c=q_c,
+            q_r=q_r,
+        )
 
     # 2. Compute integrity hashes
     state_arrays = _state_arrays_from_checkpoint_args(state, q_v, q_c, q_r)
@@ -247,9 +269,11 @@ def load_restart(
     """
     path = Path(path)
 
-    # 1. Delegate to existing load_checkpoint
+    # 1. Delegate to auto-detecting loader (handles both .npz and .zarr)
+    from legoesm.io.checkpoint import load_checkpoint_auto
+
     state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r = (
-        load_checkpoint(path, grid, sigma)
+        load_checkpoint_auto(path, grid, sigma)
     )
 
     # 2. Try to read companion metadata

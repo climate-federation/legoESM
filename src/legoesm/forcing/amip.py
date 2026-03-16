@@ -217,22 +217,22 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
     sst_wrapped = np.concatenate([sst_data[:, :, -1:], sst_data, sst_data[:, :, :1]], axis=2)
     sic_wrapped = np.concatenate([sic_data[:, :, -1:], sic_data, sic_data[:, :, :1]], axis=2)
 
-    # Detect grid type: Gaussian grids have 'n_lat'; cubed-sphere has 'n'.
-    is_gaussian = hasattr(grid, 'n_lat') and not hasattr(grid, 'n')
+    # Use protocol: grid_lat gives 2D (or 3D for CS) lat in radians
+    grid_lat = np.asarray(grid.grid_lat)
+    grid_lon = np.asarray(grid.grid_lon)
+    is_gaussian = grid_lat.ndim == 2 and not hasattr(grid, 'n')
 
     if is_gaussian:
-        # Gaussian grid: lat is (n_lat,) in radians, lon is (n_lon,) in radians
-        target_lat_1d = np.asarray(grid.lat) * 180.0 / np.pi   # (n_lat,) degrees
-        target_lon_1d = np.asarray(grid.lon) * 180.0 / np.pi   # (n_lon,) degrees
+        target_lat_1d = np.asarray(grid.lat) * 180.0 / np.pi
+        target_lon_1d = np.asarray(grid.lon) * 180.0 / np.pi
         target_lon_1d = target_lon_1d % 360.0
         target_lon_2d, target_lat_2d = np.meshgrid(target_lon_1d, target_lat_1d)
-        target_shape = (grid.n_lat, grid.n_lon)
+        target_shape = grid_lat.shape
     else:
-        # Cubed-sphere
-        target_lat_2d = np.asarray(grid.lat) * 180.0 / np.pi
-        target_lon_2d = np.asarray(grid.lon) * 180.0 / np.pi
+        target_lat_2d = grid_lat * 180.0 / np.pi
+        target_lon_2d = grid_lon * 180.0 / np.pi
         target_lon_2d = target_lon_2d % 360.0
-        target_shape = (6, grid.n, grid.n)
+        target_shape = grid_lat.shape
 
     ntime = sst_data.shape[0]
     sst_regridded = np.zeros((ntime, *target_shape), dtype=np.float64)

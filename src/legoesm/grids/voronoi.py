@@ -93,6 +93,44 @@ class VoronoiMesh(NamedTuple):
     edgeSignOnVertex: jnp.ndarray   # (vertexDegree, nVertices) ±1
     meshDensity: jnp.ndarray        # (nCells,)
 
+    # ------------------------------------------------------------------
+    # GridProtocol properties
+    # ------------------------------------------------------------------
+
+    @property
+    def grid_lat(self) -> jnp.ndarray:
+        return self.latCell
+
+    @property
+    def grid_lon(self) -> jnp.ndarray:
+        return self.lonCell
+
+    @property
+    def grid_area(self) -> jnp.ndarray:
+        return self.areaCell
+
+    @property
+    def grid_total_area(self):
+        return jnp.sum(self.areaCell)
+
+    @property
+    def grid_coriolis(self) -> jnp.ndarray:
+        return 2.0 * 7.292e-5 * jnp.sin(self.latCell)
+
+    @property
+    def grid_radius(self) -> float:
+        return self.radius
+
+    @property
+    def grid_n_columns(self) -> int:
+        return self.nCells
+
+    def to_columns(self, field):
+        return field
+
+    def from_columns(self, cols):
+        return cols
+
 
 # ============================================================================
 # Icosahedral mesh generation

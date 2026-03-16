@@ -286,3 +286,120 @@ def save_checkpoint_sharded(
             json.dump(meta, f, indent=2)
 
     multihost_utils.sync_global_devices("save_checkpoint_sharded_post")
+
+
+# ---------------------------------------------------------------------------
+# Distributed checkpoint (Zarr variant)
+# ---------------------------------------------------------------------------
+
+def save_checkpoint_distributed_zarr(
+    path,
+    state,
+    rank: int,
+    n_ranks: int,
+    step: int,
+    day: float,
+    config=None,
+    q_v=None,
+    q_c=None,
+    q_r=None,
+    diag_accumulators: dict | None = None,
+) -> None:
+    """Save distributed checkpoint to a single Zarr store.
+
+    Each rank writes to its own group within the store::
+
+        checkpoint.zarr/
+            .zattrs         — metadata (rank 0)
+            rank_000/       — rank 0 arrays
+            rank_001/       — rank 1 arrays
+            ...
+    """
+    import zarr
+    from zarr.codecs import ZstdCodec
+
+    path = Path(path)
+    compressor = ZstdCodec(level=3)
+
+    root = zarr.open_group(str(path), mode="a")
+
+    group_name = f"rank_{rank:03d}"
+    if group_name in root:
+        grp = root[group_name]
+    else:
+        grp = root.create_group(group_name)
+
+    arrays: dict[str, np.ndarray] = _state_to_arrays(state)
+    if q_v is not None:
+        arrays["q_v"] = np.asarray(q_v)
+    if q_c is not None:
+        arrays["q_c"] = np.asarray(q_c)
+    if q_r is not None:
+        arrays["q_r"] = np.asarray(q_r)
+    if diag_accumulators:
+        for k, v in diag_accumulators.items():
+            arrays[f"diag_{k}"] = np.asarray(v)
+
+    for name, arr in arrays.items():
+        if name in grp:
+            grp[name][:] = arr
+        else:
+            grp.create_array(
+                name, data=arr, compressors=compressor,
+            )
+
+    # Rank 0 writes metadata
+    if rank == 0:
+        root.attrs["step"] = int(step)
+        root.attrs["day"] = float(day)
+        root.attrs["n_ranks"] = n_ranks
+        if config is not None:
+            root.attrs["config_json"] = json.dumps(config_to_dict(config))
+
+        zarr.consolidate_metadata(root.store)
+
+
+def load_checkpoint_distributed_zarr(
+    path,
+    rank: int,
+    n_ranks: int,
+):
+    """Load distributed checkpoint from a single Zarr store.
+
+    Returns
+    -------
+    tuple
+        ``(arrays, step, day, config, diag_accumulators)``
+    """
+    import zarr
+
+    path = Path(path)
+    root = zarr.open_consolidated(str(path), mode="r")
+
+    saved_n_ranks = root.attrs["n_ranks"]
+    if saved_n_ranks != n_ranks:
+        raise ValueError(
+            f"Checkpoint was saved with {saved_n_ranks} ranks, but "
+            f"load called with n_ranks={n_ranks}."
+        )
+
+    step = int(root.attrs["step"])
+    day = float(root.attrs["day"])
+
+    config = None
+    config_str = root.attrs.get("config_json")
+    if config_str:
+        config = config_from_dict(json.loads(config_str))
+
+    group_name = f"rank_{rank:03d}"
+    grp = root[group_name]
+
+    arrays: dict[str, np.ndarray] = {}
+    diag_accumulators: dict[str, np.ndarray] = {}
+    for key in grp.array_keys():
+        if key.startswith("diag_"):
+            diag_accumulators[key[5:]] = grp[key][:]
+        else:
+            arrays[key] = grp[key][:]
+
+    return arrays, step, day, config, diag_accumulators

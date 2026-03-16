@@ -148,6 +148,46 @@ class CubedSphereGrid(NamedTuple):
         """
         return (jnp.pi / 2) * self.radius / (self.n * 1000.0)
 
+    # ------------------------------------------------------------------
+    # GridProtocol properties
+    # ------------------------------------------------------------------
+
+    @property
+    def grid_lat(self) -> jax.Array:
+        return self.lat
+
+    @property
+    def grid_lon(self) -> jax.Array:
+        return self.lon
+
+    @property
+    def grid_area(self) -> jax.Array:
+        return self.area
+
+    @property
+    def grid_total_area(self):
+        return jnp.sum(self.area)
+
+    @property
+    def grid_coriolis(self) -> jax.Array:
+        return self.f
+
+    @property
+    def grid_radius(self) -> float:
+        return self.radius
+
+    @property
+    def grid_n_columns(self) -> int:
+        return 6 * self.n * self.n
+
+    def to_columns(self, field):
+        extra = field.shape[3:]
+        return field.reshape(6 * self.n * self.n, *extra)
+
+    def from_columns(self, cols):
+        extra = cols.shape[1:]
+        return cols.reshape(6, self.n, self.n, *extra)
+
 
 def create_cubed_sphere(
     n: int,

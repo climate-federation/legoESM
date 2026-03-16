@@ -245,15 +245,7 @@ def _make_hydrostatic_gwd(
 
 def _get_lat_hydrostatic(grid, ncol):
     """Extract latitude array for hydrostatic columns."""
-    if hasattr(grid, "lat"):
-        lat_data = getattr(grid, "lat")
-        if lat_data is not None:
-            return jnp.asarray(lat_data).reshape(-1)[:ncol]
-    if hasattr(grid, "lat_face"):
-        lat_data = getattr(grid, "lat_face")
-        if lat_data is not None:
-            return jnp.asarray(lat_data).reshape(-1)[:ncol]
-    return jnp.zeros(ncol)
+    return jnp.asarray(grid.grid_lat).reshape(-1)[:ncol]
 
 
 # ===========================================================================

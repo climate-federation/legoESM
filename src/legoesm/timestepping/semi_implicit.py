@@ -468,7 +468,7 @@ def leapfrog_si_step(
     tend = tendency_fn(state_n)
     dt2 = 2.0 * dt
     state_explicit = _pytree_axpy(state_nm1, tend, dt2)
-    return si_correction(state_explicit, state_nm1, si_data, grid, dt2)
+    return si_correction(state_explicit, state_n, si_data, grid, dt2)
 
 
 def robert_asselin_filter(state_nm1, state_n, state_np1, gamma):
