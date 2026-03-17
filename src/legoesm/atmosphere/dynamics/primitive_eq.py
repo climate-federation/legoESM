@@ -396,7 +396,7 @@ class PrimitiveEquationModel(IntegrationMixin):
             state, self.grid, self.sigma_coord, self.config, physics_tendency
         )
 
-    @partial(jax.jit, static_argnums=(0, 3), donate_argnums=(1,))
+    @partial(jax.jit, static_argnums=(0, 3))
     def step(
         self,
         state: HydrostaticState,

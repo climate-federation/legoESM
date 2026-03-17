@@ -343,8 +343,11 @@ def _arakawa_lamb_gradient(B, cdgrid):
     dy_dual = 0.25 * (dy_pad[:, :-1, :-1] + dy_pad[:, 1:, :-1]
                        + dy_pad[:, :-1, 1:] + dy_pad[:, 1:, 1:])
 
-    dB_dx = 0.5 * ((B_se + B_ne) - (B_sw + B_nw)) / jnp.maximum(dx_dual, 1e-10)
-    dB_dy = 0.5 * ((B_nw + B_ne) - (B_sw + B_se)) / jnp.maximum(dy_dual, 1e-10)
+    # dx_dual is the 2-cell span (average of grid.dx which spans i-1 to i+1).
+    # The stencil (B_se - B_sw) spans 1 cell, so divide by dx_dual/2 = dx_dual * 0.5.
+    # Equivalently: drop the 0.5 factor and divide by dx_dual directly.
+    dB_dx = ((B_se + B_ne) - (B_sw + B_nw)) / jnp.maximum(dx_dual, 1e-10)
+    dB_dy = ((B_nw + B_ne) - (B_sw + B_se)) / jnp.maximum(dy_dual, 1e-10)
 
     return dB_dx, dB_dy
 
@@ -383,8 +386,8 @@ def _arakawa_lamb_gradient_3d(B, cdgrid):
     dy_dual = 0.25 * (dy_pad[:, :-1, :-1] + dy_pad[:, 1:, :-1]
                        + dy_pad[:, :-1, 1:] + dy_pad[:, 1:, 1:])
 
-    dB_dx = 0.5 * ((B_se + B_ne) - (B_sw + B_nw)) / jnp.maximum(dx_dual[..., None], 1e-10)
-    dB_dy = 0.5 * ((B_nw + B_ne) - (B_sw + B_se)) / jnp.maximum(dy_dual[..., None], 1e-10)
+    dB_dx = ((B_se + B_ne) - (B_sw + B_nw)) / jnp.maximum(dx_dual[..., None], 1e-10)
+    dB_dy = ((B_nw + B_ne) - (B_sw + B_se)) / jnp.maximum(dy_dual[..., None], 1e-10)
 
     return dB_dx, dB_dy
 
@@ -455,12 +458,17 @@ def _laplacian_dgrid(u_d, cdgrid):
                        + dx_pad[:, :-1, 1:] + dx_pad[:, 1:, 1:])
     dy_dual = dx_dual  # approximate isotropy
 
+    # dx_dual is the 2-cell span; the 5-point stencil spans 1 cell per direction,
+    # so the single-cell spacing is dx_dual/2.  Laplacian = d²u/dx² + d²u/dy²
+    # with spacing h = dx_dual/2 gives denominator h² = (dx_dual/2)².
+    hx = dx_dual * 0.5
+    hy = dy_dual * 0.5
+
     u_pad = jnp.pad(u_d, ((0, 0), (1, 1), (1, 1)), mode='edge')
     return (
-        u_pad[:, 2:, 1:-1] + u_pad[:, :-2, 1:-1]
-        + u_pad[:, 1:-1, 2:] + u_pad[:, 1:-1, :-2]
-        - 4.0 * u_d
-    ) / (dx_dual * dy_dual)
+        (u_pad[:, 2:, 1:-1] + u_pad[:, :-2, 1:-1] - 2.0 * u_d) / (hx * hx)
+        + (u_pad[:, 1:-1, 2:] + u_pad[:, 1:-1, :-2] - 2.0 * u_d) / (hy * hy)
+    )
 
 
 # ==============================================================================
