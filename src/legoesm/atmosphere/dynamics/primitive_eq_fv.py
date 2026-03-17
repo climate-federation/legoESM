@@ -177,15 +177,13 @@ def fv_hydrostatic_tendencies(
 
     # --- 5. Surface pressure tendency via FV transport ---
     if _hybrid:
-        # Weight velocity by layer pressure thickness
-        u_int = jnp.sum(u * dp / p_s[..., None], axis=-1)
-        v_int = jnp.sum(v * dp / p_s[..., None], axis=-1)
-
-        dp_s_dt_data = fv_flux_divergence(
-            p_s, u_int / sigma_coord.B_range,
-            v_int / sigma_coord.B_range, grid,
-            limiter=config.use_limiter,
+        # Hybrid closure:
+        #   B_range * dp_s/dt = -sum_k div(dp_k * v_k)
+        # Evaluate with the same FV transport operator used by the core.
+        div_dp_v = _fv_flux_divergence_3d(
+            dp, u, v, grid, limiter=config.use_limiter,
         )
+        dp_s_dt_data = jnp.sum(div_dp_v, axis=-1) / sigma_coord.B_range
         dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
         div_v = _fv_divergence_3d(u, v, grid)

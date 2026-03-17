@@ -174,10 +174,15 @@ def latlon_ocean_baroclinic_tendencies(
     )
 
     # --- 2. Density from EOS ---
+    rho = wright_eos(T, S, jnp.zeros_like(T))
+    for _ in range(2):
+        p_hydro = compute_hydrostatic_pressure(
+            rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
+        )
+        rho = wright_eos(T, S, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
-        jnp.full_like(T, rho_0), eta_safe, z_coord.dz_ref, J, rho_0, g,
+        rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
     )
-    rho = wright_eos(T, S, p_hydro)
     rho_prime = rho - rho_0
 
     # --- 3. Baroclinic pressure gradient ---

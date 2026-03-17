@@ -208,10 +208,20 @@ def mpas_hydrostatic_tendencies(
 
     # --- 4. Surface pressure tendency and vertical velocity ---
     if _hybrid:
-        div_ps_v = div_3d * p_s[:, None]  # approximate
-        dp_s_dt = -jnp.sum(
-            div_ps_v * dp / p_s[:, None], axis=-1,
-        ) / sigma_coord.B_range
+        # Hybrid closure on MPAS:
+        #   B_range * dp_s/dt = -sum_k div(dp_k * v_k)
+        # Compute layer-pressure flux on edges, then cell divergence.
+        dp_t = jnp.moveaxis(dp, -1, 0)      # (nlev, nCells)
+        u_t = jnp.moveaxis(u_3d, -1, 0)     # (nlev, nEdges)
+
+        def _div_dp_flux(dp_k, u_k):
+            dp_edge = edge_thickness(dp_k, mesh)
+            return divergence_cell(u_k * dp_edge, mesh)
+
+        div_dp_all = jax.vmap(_div_dp_flux, in_axes=(0, 0), out_axes=0)(
+            dp_t, u_t,
+        )  # (nlev, nCells)
+        dp_s_dt = -jnp.sum(div_dp_all, axis=0) / sigma_coord.B_range
 
         mass_flux = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T_3d, mass_flux, p_s, sigma_coord)

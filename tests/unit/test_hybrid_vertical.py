@@ -106,6 +106,14 @@ class TestHybridCoordinateConstruction:
         np.testing.assert_allclose(hybrid.A_half, 0.0, atol=1e-10)
         np.testing.assert_allclose(hybrid.B_half, sigma.sigma_half, atol=1e-6)
 
+    def test_sigma_compatibility_views(self):
+        """Hybrid coordinate exposes sigma-style compatibility properties."""
+        coord = make_hybrid_levels(NLEV, p_top_Pa=200.0)
+        np.testing.assert_allclose(coord.sigma_half, coord.A_half + coord.B_half, atol=1e-7)
+        np.testing.assert_allclose(coord.sigma_full, coord.A_full + coord.B_full, atol=1e-7)
+        np.testing.assert_allclose(coord.dsigma, coord.dA + coord.dB, atol=1e-7)
+        np.testing.assert_allclose(coord.dsigma_full, np.diff(coord.sigma_full), atol=1e-7)
+
 
 class TestHybridPressure:
     """Test pressure computation from hybrid coordinates."""

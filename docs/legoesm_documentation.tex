@@ -491,10 +491,13 @@ Downward sweep from TOA ($F^\downarrow_0=0$):
 
 \subsubsection{Shortwave (Beer--Lambert)}
 \begin{equation}
-  F^\downarrow_{\mathrm{SW}}(k) = \frac{S_0}{4}\,e^{-D\,\tau_{\mathrm{SW},0}\,\sigma_k}, \qquad
-  F^\uparrow_{\mathrm{SW}}(k) = \alpha_s\,F^\downarrow_{\mathrm{SW}}(\mathrm{sfc})\,e^{-D\,\tau_{\mathrm{SW},0}\,(1-\sigma_k)},
+  F^\downarrow_{\mathrm{SW}}(k) = \frac{S_0}{4}\,e^{-\tau_{\mathrm{SW},0}\,\sigma_k}, \qquad
+  F^\uparrow_{\mathrm{SW}}(k) = \alpha_s\,F^\downarrow_{\mathrm{SW}}(\mathrm{sfc}),
 \end{equation}
 with $\tau_{\mathrm{SW},0}=0.22$, $S_0=1360$~W\,m$^{-2}$, $\alpha_s=0.31$.
+This follows the Frierson/Isca convention used in the code: only the
+downward SW beam is absorbed by the atmosphere, while reflected upward
+SW escapes directly to space.
 
 \subsubsection{Heating rate}
 Defining $F_{\mathrm{net}}^\uparrow=F^\uparrow-F^\downarrow$ (upward positive) at each interface, the heating rate for layer~$k$ is

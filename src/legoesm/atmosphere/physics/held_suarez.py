@@ -29,7 +29,12 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.vertical import SigmaCoordinate, pressure_from_sigma
+from legoesm.grids.vertical import (
+    SigmaCoordinate,
+    HybridSigmaPressureCoordinate,
+    pressure_from_sigma,
+    pressure_from_hybrid,
+)
 from legoesm import constants
 
 
@@ -98,7 +103,7 @@ def held_suarez_equilibrium_temperature(
 def held_suarez_forcing(
     state: HydrostaticState,
     grid: CubedSphereGrid,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
 ) -> HydrostaticTendencies:
     """Compute Held-Suarez physics tendencies.
 
@@ -108,7 +113,7 @@ def held_suarez_forcing(
         Current model state.
     grid : CubedSphereGrid
         Horizontal grid (provides latitude).
-    sigma_coord : SigmaCoordinate
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate.
 
     Returns
@@ -120,11 +125,17 @@ def held_suarez_forcing(
     T = state.T.data
     p_s = state.p_s.data   # (6, n, n)
 
-    sigma_full = sigma_coord.sigma_full  # (nlev,)
     lat = grid.lat  # (6, n, n)
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
 
     # --- Pressure at full levels (for T_eq computation) ---
-    p_full = pressure_from_sigma(sigma_full, p_s)  # (6,n,n,nlev)
+    if _hybrid:
+        p_full = pressure_from_hybrid(sigma_coord, p_s)  # (6,n,n,nlev)
+        sigma_eff = p_full / jnp.maximum(p_s[..., None], 1.0)
+    else:
+        sigma_full = sigma_coord.sigma_full  # (nlev,)
+        p_full = pressure_from_sigma(sigma_full, p_s)  # (6,n,n,nlev)
+        sigma_eff = jnp.broadcast_to(sigma_full[None, None, None, :], T.shape)
 
     # --- Equilibrium temperature ---
     # lat shape (6,n,n) -> broadcast to (6,n,n,nlev)
@@ -135,8 +146,8 @@ def held_suarez_forcing(
     # --- Temperature relaxation coefficient k_T(σ, φ) ---
     # k_T = k_a + (k_s - k_a) · max(0, (σ-σ_b)/(1-σ_b)) · cos⁴(φ)
     sigma_factor = jnp.maximum(
-        0.0, (sigma_full[None, None, None, :] - SIGMA_B) / (1.0 - SIGMA_B)
-    )  # (1,1,1,nlev) -> broadcasts
+        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B)
+    )
     cos_lat_4 = jnp.cos(lat)**4  # (6,n,n)
 
     k_T = K_A + (K_S - K_A) * sigma_factor * cos_lat_4[..., None]
@@ -147,8 +158,8 @@ def held_suarez_forcing(
     # --- Rayleigh friction coefficient k_v(σ) ---
     # k_v = k_f · max(0, (σ-σ_b)/(1-σ_b))
     k_v = K_F * jnp.maximum(
-        0.0, (sigma_full[None, None, None, :] - SIGMA_B) / (1.0 - SIGMA_B)
-    )  # (1,1,1,nlev)
+        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B)
+    )
 
     # --- Rayleigh friction: Q_u = -k_v·u, Q_v = -k_v·v ---
     du_dt_phys = -k_v * u
@@ -215,11 +226,17 @@ def held_suarez_forcing_spectral(
     T = fields['T']
     p_s = fields['p_s']     # (n_lat, n_lon)
 
-    sigma_full = sigma_coord.sigma_full  # (nlev,)
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
     lat = grid.lat  # (n_lat,)
 
     # --- 2. Pressure at full levels ---
-    p_full = p_s[..., None] * sigma_full  # (n_lat, n_lon, nlev)
+    if _hybrid:
+        p_full = pressure_from_hybrid(sigma_coord, p_s)  # (n_lat, n_lon, nlev)
+        sigma_eff = p_full / jnp.maximum(p_s[..., None], 1.0)
+    else:
+        sigma_full = sigma_coord.sigma_full  # (nlev,)
+        p_full = p_s[..., None] * sigma_full  # (n_lat, n_lon, nlev)
+        sigma_eff = jnp.broadcast_to(sigma_full[None, None, :], T.shape)
 
     # --- 3. Equilibrium temperature ---
     T_eq = held_suarez_equilibrium_temperature(
@@ -228,22 +245,22 @@ def held_suarez_forcing_spectral(
 
     # --- 4. Temperature relaxation coefficient k_T(sigma, phi) ---
     sigma_factor = jnp.maximum(
-        0.0, (sigma_full - SIGMA_B) / (1.0 - SIGMA_B),
-    )  # (nlev,)
+        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B),
+    )
     cos_lat_4 = jnp.cos(lat) ** 4  # (n_lat,)
-    k_T = K_A + (K_S - K_A) * sigma_factor[None, None, :] * cos_lat_4[:, None, None]
+    k_T = K_A + (K_S - K_A) * sigma_factor * cos_lat_4[:, None, None]
 
     # --- 5. Newtonian relaxation ---
     dT_dt_phys = -k_T * (T - T_eq)
 
     # --- 6. Rayleigh friction coefficient k_v(sigma) ---
     k_v = K_F * jnp.maximum(
-        0.0, (sigma_full - SIGMA_B) / (1.0 - SIGMA_B),
-    )  # (nlev,)
+        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B),
+    )
 
     # --- 7. Rayleigh friction: du/dt = -k_v*u, dv/dt = -k_v*v ---
-    du_dt_phys = -k_v[None, None, :] * u
-    dv_dt_phys = -k_v[None, None, :] * v
+    du_dt_phys = -k_v * u
+    dv_dt_phys = -k_v * v
 
     # --- 8. Convert wind tendencies to spectral vor/div tendencies ---
     # The physics tendency in (u,v) must be projected onto (vor,div) in
@@ -287,7 +304,7 @@ def held_suarez_forcing_spectral(
 
 def held_suarez_init(
     grid: CubedSphereGrid,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
     p_s_init: float = 1.0e5,
     perturbation_amplitude: float = 1.0,
@@ -304,7 +321,7 @@ def held_suarez_init(
     ----------
     grid : CubedSphereGrid
         Horizontal grid.
-    sigma_coord : SigmaCoordinate
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate.
     T_init : float
         Initial temperature [K].

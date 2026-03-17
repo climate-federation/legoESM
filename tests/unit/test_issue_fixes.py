@@ -21,7 +21,8 @@ from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 from legoesm.core.operators import global_integral
 from legoesm.core.conservation import fix_mass_hydrostatic
 from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.grids.vertical import create_sigma_coordinate
+from legoesm.grids.latlon import create_latlon_grid
+from legoesm.grids.vertical import create_sigma_coordinate, hybrid_from_sigma
 from legoesm.grids.halo import pad_halo_vector
 from legoesm.atmosphere.dynamics.primitive_eq import (
     PrimitiveEquationConfig,
@@ -390,3 +391,56 @@ class TestC5MassConservation:
 
         grads = jax.grad(loss)(state_old.p_s.data)
         assert jnp.all(jnp.isfinite(grads)), "Gradients through mass fixer not finite"
+
+
+# =========================================================================
+# Hybrid Held-Suarez compatibility
+# =========================================================================
+
+class TestHybridHeldSuarezCompatibility:
+    """Hybrid coordinates should work with Held-Suarez forcing on all grids."""
+
+    def test_cubed_and_latlon_hybrid_forcing_finite(self):
+        from legoesm.atmosphere.physics.held_suarez import (
+            held_suarez_forcing,
+            held_suarez_init,
+        )
+        from legoesm.atmosphere.physics.held_suarez_latlon import (
+            held_suarez_forcing_latlon,
+            held_suarez_init_latlon,
+        )
+
+        sigma = create_sigma_coordinate(5)
+        hybrid = hybrid_from_sigma(sigma)
+
+        cube = create_cubed_sphere(6)
+        state_cube = held_suarez_init(cube, hybrid, T_init=280.0)
+        tend_cube = held_suarez_forcing(state_cube, cube, hybrid)
+        assert jnp.all(jnp.isfinite(tend_cube.du_dt.data))
+        assert jnp.all(jnp.isfinite(tend_cube.dT_dt.data))
+
+        latlon = create_latlon_grid(8, 16)
+        state_ll = held_suarez_init_latlon(latlon, hybrid, T_init=280.0)
+        tend_ll = held_suarez_forcing_latlon(state_ll, latlon, hybrid)
+        assert jnp.all(jnp.isfinite(tend_ll.du_dt.data))
+        assert jnp.all(jnp.isfinite(tend_ll.dT_dt.data))
+
+    def test_spectral_hybrid_forcing_finite(self):
+        if not jax.config.jax_enable_x64:
+            pytest.skip("Spectral hybrid Held-Suarez test requires jax_enable_x64")
+
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            isothermal_rest_state_spectral,
+        )
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing_spectral
+
+        sigma = create_sigma_coordinate(4)
+        hybrid = hybrid_from_sigma(sigma)
+        grid = create_gaussian_grid(n_max=7)
+        state = isothermal_rest_state_spectral(grid, hybrid, T_init=280.0)
+        tend = held_suarez_forcing_spectral(state, grid, hybrid)
+
+        assert jnp.all(jnp.isfinite(tend.vor_hat.data.real))
+        assert jnp.all(jnp.isfinite(tend.div_hat.data.real))
+        assert jnp.all(jnp.isfinite(tend.T_hat.data.real))

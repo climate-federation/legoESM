@@ -180,8 +180,12 @@ def fv_flux_divergence_latlon(q, u, v, grid, limiter=True):
 def fv_scalar_advection_latlon(q, u, v, grid, limiter=True):
     """PPM advection of scalar q by (u,v) on the lat-lon grid (advective form).
 
-    For tracers/temperature where we want -v·grad(q), not -div(q*v).
-    Same PPM reconstruction, both directions computed on SAME field (unsplit).
+    For tracers/temperature where we want -v·grad(q), not -div(q*v):
+
+        -v·∇q = -div(q v) + q div(v)
+
+    Uses the same FV transport operator for both terms, preserving
+    constant-field invariance under divergent flow.
 
     Parameters
     ----------
@@ -194,8 +198,9 @@ def fv_scalar_advection_latlon(q, u, v, grid, limiter=True):
     -------
     jax.Array, shape (n_lat, n_lon)
     """
-    # Identical to flux_divergence for now (same structure)
-    return fv_flux_divergence_latlon(q, u, v, grid, limiter)
+    flux_form = fv_flux_divergence_latlon(q, u, v, grid, limiter)
+    div_v = -fv_flux_divergence_latlon(jnp.ones_like(q), u, v, grid, limiter=False)
+    return flux_form + q * div_v
 
 
 # ==============================================================================

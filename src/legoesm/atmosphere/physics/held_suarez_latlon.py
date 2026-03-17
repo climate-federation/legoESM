@@ -12,7 +12,12 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.grids.vertical import SigmaCoordinate, pressure_from_sigma
+from legoesm.grids.vertical import (
+    SigmaCoordinate,
+    HybridSigmaPressureCoordinate,
+    pressure_from_sigma,
+    pressure_from_hybrid,
+)
 from legoesm.atmosphere.physics.held_suarez import (
     held_suarez_equilibrium_temperature,
     K_A, K_S, K_F, SIGMA_B,
@@ -22,7 +27,7 @@ from legoesm.atmosphere.physics.held_suarez import (
 def held_suarez_forcing_latlon(
     state: HydrostaticState,
     grid: LatLonGrid,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
 ) -> HydrostaticTendencies:
     """Compute Held-Suarez physics tendencies on a lat-lon grid.
 
@@ -32,7 +37,7 @@ def held_suarez_forcing_latlon(
         Current model state.
     grid : LatLonGrid
         Horizontal grid (provides latitude).
-    sigma_coord : SigmaCoordinate
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate.
 
     Returns
@@ -44,11 +49,17 @@ def held_suarez_forcing_latlon(
     T = state.T.data
     p_s = state.p_s.data   # (n_lat, n_lon)
 
-    sigma_full = sigma_coord.sigma_full  # (nlev,)
     lat = grid.lat  # (n_lat,)
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
 
     # Pressure at full levels
-    p_full = pressure_from_sigma(sigma_full, p_s)  # (n_lat, n_lon, nlev)
+    if _hybrid:
+        p_full = pressure_from_hybrid(sigma_coord, p_s)  # (n_lat, n_lon, nlev)
+        sigma_eff = p_full / jnp.maximum(p_s[..., None], 1.0)
+    else:
+        sigma_full = sigma_coord.sigma_full  # (nlev,)
+        p_full = pressure_from_sigma(sigma_full, p_s)  # (n_lat, n_lon, nlev)
+        sigma_eff = jnp.broadcast_to(sigma_full[None, None, :], T.shape)
 
     # Equilibrium temperature
     # lat (n_lat,) -> broadcast to (n_lat, 1, 1) for (n_lat, n_lon, nlev)
@@ -58,8 +69,8 @@ def held_suarez_forcing_latlon(
 
     # Temperature relaxation coefficient k_T(σ, φ)
     sigma_factor = jnp.maximum(
-        0.0, (sigma_full[None, None, :] - SIGMA_B) / (1.0 - SIGMA_B)
-    )  # (1, 1, nlev)
+        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B)
+    )
     cos_lat_4 = jnp.cos(lat)**4  # (n_lat,)
 
     k_T = K_A + (K_S - K_A) * sigma_factor * cos_lat_4[:, None, None]
@@ -69,7 +80,7 @@ def held_suarez_forcing_latlon(
 
     # Rayleigh friction coefficient k_v(σ)
     k_v = K_F * jnp.maximum(
-        0.0, (sigma_full[None, None, :] - SIGMA_B) / (1.0 - SIGMA_B)
+        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B)
     )
 
     du_dt_phys = -k_v * u
@@ -94,7 +105,7 @@ def held_suarez_forcing_latlon(
 
 def held_suarez_init_latlon(
     grid: LatLonGrid,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
     p_s_init: float = 1.0e5,
     perturbation_amplitude: float = 1.0,
@@ -109,7 +120,7 @@ def held_suarez_init_latlon(
     ----------
     grid : LatLonGrid
         Horizontal grid.
-    sigma_coord : SigmaCoordinate
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate.
     T_init : float
         Initial temperature [K].

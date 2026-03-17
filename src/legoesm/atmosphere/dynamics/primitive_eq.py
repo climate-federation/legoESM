@@ -224,14 +224,11 @@ def hydrostatic_tendencies(
 
     # --- 5. Surface pressure tendency and sigma-dot ---
     if _hybrid:
-        # Hybrid: dp_s/dt = -sum(div_k * dp_k) / B_range
-        div_ps_v = _fv_flux_divergence_3d(
-            jnp.broadcast_to(p_s[..., None], T.shape),
-            u, v, grid,
-        )
-        dp_s_dt_data = jnp.sum(
-            div_ps_v * dp / p_s[..., None], axis=-1,
-        ) / sigma_coord.B_range
+        # Hybrid: B_range * dp_s/dt = -sum_k div(dp_k * v_k)
+        # Use FV transport of layer pressure thickness directly so the
+        # closure is consistent with flux-form mass continuity.
+        div_dp_v = _fv_flux_divergence_3d(dp, u, v, grid)
+        dp_s_dt_data = jnp.sum(div_dp_v, axis=-1) / sigma_coord.B_range
 
         # Mass flux for vertical dynamics
         div_v = _divergence_3d(u, v, grid)

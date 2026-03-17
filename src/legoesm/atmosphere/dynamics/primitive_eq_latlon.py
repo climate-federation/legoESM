@@ -40,6 +40,7 @@ from legoesm.core.operators_latlon_3d import (
     divergence_3d as _divergence_3d,
     hyperdiffusion_3d as _hyperdiffusion_3d,
 )
+from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.polar_filter import (
     compute_polar_filter_mask,
@@ -155,10 +156,11 @@ def latlon_hydrostatic_tendencies(
     sigma_top = sigma_coord.sigma_half[0]
     sigma_range = 1.0 - sigma_top
 
-    D_vel_total = jnp.sum(
-        div_v * dsigma[None, None, :], axis=-1
+    u_int = jnp.sum(u * dsigma[None, None, :], axis=-1)
+    v_int = jnp.sum(v * dsigma[None, None, :], axis=-1)
+    dp_s_dt_data = fv_flux_divergence_latlon(
+        p_s, u_int / sigma_range, v_int / sigma_range, grid, limiter=True,
     )
-    dp_s_dt_data = -p_s * D_vel_total / sigma_range
 
     sigma_dot = compute_sigma_dot(div_v, sigma_coord)
 

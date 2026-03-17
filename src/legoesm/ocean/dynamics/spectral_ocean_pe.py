@@ -194,15 +194,27 @@ def spectral_ocean_tendencies(
     # --- 4. EOS and hydrostatic pressure ---
     T_real = T.real
     S_real = S.real
+    # Two-pass EOS-pressure coupling: improves consistency versus a
+    # single rho(p=0) seed evaluation in long integrations.
+    rho = wright_eos(T_real, S_real, jnp.zeros_like(T_real))
+    for _ in range(2):
+        p_hydro = compute_hydrostatic_pressure(
+            rho,
+            eta_safe,
+            z_coord.dz_ref,
+            J.real,
+            rho_0,
+            g,
+        )
+        rho = wright_eos(T_real, S_real, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
-        jnp.full_like(T_real, rho_0),
+        rho,
         eta_safe,
         z_coord.dz_ref,
         J.real,
         rho_0,
         g,
     )
-    rho = wright_eos(T_real, S_real, p_hydro)
     rho_prime = rho - rho_0
 
     # Baroclinic pressure perturbation (top-down cumsum)
@@ -344,7 +356,16 @@ def spectral_ocean_tendencies(
         )
 
     # --- 16. Free-surface tendency ---
-    deta_dt_grid = -jnp.sum(div.real * h_k.real, axis=-1) * mask
+    # Use flux-form continuity explicitly: dη/dt = -sum_k div(h_k * v_k).
+    # This avoids the div(v)*h approximation error on deforming z-star layers.
+    hu_cos = h_k.real * u_cos * mask_3d
+    hv_cos = h_k.real * v_cos * mask_3d
+    div_hv_hat = (
+        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, hu_cos)
+        - one_over_a * sh_analysis_dmu_3d(grid, hv_cos)
+    )
+    div_hv = sh_synthesis_3d(grid, div_hv_hat).real * mask_3d
+    deta_dt_grid = -jnp.sum(div_hv, axis=-1) * mask
     deta_hat = sh_analysis(grid, deta_dt_grid)
 
     # --- 17. Spectral hyperdiffusion ---

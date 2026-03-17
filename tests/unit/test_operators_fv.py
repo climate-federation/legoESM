@@ -187,6 +187,18 @@ class TestFVScalarAdvection:
         grads = jax.grad(loss)(q)
         assert jnp.all(jnp.isfinite(grads))
 
+    def test_uniform_field_divergent_flow_zero(self, grid):
+        """Advective-form transport keeps constant fields invariant."""
+        n = grid.n
+        key = jax.random.PRNGKey(123)
+        q = jnp.ones((6, n, n), dtype=jnp.float32) * 300.0
+        u = jax.random.normal(key, (6, n, n), dtype=jnp.float32) * 15.0
+        v = jax.random.normal(jax.random.PRNGKey(456), (6, n, n), dtype=jnp.float32) * 15.0
+
+        dq = fv_scalar_advection(q, u, v, grid)
+        max_abs = float(jnp.max(jnp.abs(dq)))
+        assert max_abs < 5e-6, f"constant-field drift too large: {max_abs:.3e}"
+
 
 class TestNoEdgeArtifacts:
     """Test that FV transport doesn't create cube-edge artifacts."""

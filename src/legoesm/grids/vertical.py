@@ -496,6 +496,34 @@ class HybridSigmaPressureCoordinate(NamedTuple):
     def layer_thickness_dp(self, p_s):
         return dp_from_hybrid(self, p_s)
 
+    # ------------------------------------------------------------------
+    # Sigma-compatibility views
+    # ------------------------------------------------------------------
+    @property
+    def sigma_half(self):
+        """Effective interface sigma coefficients A_half + B_half.
+
+        This preserves compatibility with utilities that only require a
+        monotonic sigma-like coordinate shape and do not assume pure-sigma
+        pressure dependence.
+        """
+        return self.A_half + self.B_half
+
+    @property
+    def sigma_full(self):
+        """Effective full-level sigma coefficients A_full + B_full."""
+        return self.A_full + self.B_full
+
+    @property
+    def dsigma(self):
+        """Effective layer thickness coefficients dA + dB."""
+        return self.dsigma_eff
+
+    @property
+    def dsigma_full(self):
+        """Difference between full-level sigma coefficients."""
+        return jnp.diff(self.sigma_full)
+
 
 def create_hybrid_coordinate(
     n_levels: int,

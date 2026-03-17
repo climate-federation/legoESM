@@ -92,9 +92,14 @@ def mpas_ocean_baroclinic_tendencies(
     )  # (nCells, nlev)
 
     # ---- Density and hydrostatic pressure ----
+    rho = wright_eos(T_3d, S_3d, jnp.zeros_like(T_3d))
+    for _ in range(2):
+        p_hydro = compute_hydrostatic_pressure(
+            rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
+        )
+        rho = wright_eos(T_3d, S_3d, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
-        wright_eos(T_3d, S_3d, jnp.zeros_like(T_3d)),
-        eta, z_coord.dz_ref, jacobian, rho_0, g,
+        rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
     )  # (nCells, nlev)
 
     # ---- Edge mask for land boundaries ----

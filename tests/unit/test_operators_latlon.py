@@ -22,6 +22,7 @@ from legoesm.core.operators_latlon_3d import (
     divergence_3d,
     hyperdiffusion_3d,
 )
+from legoesm.core.operators_fv_latlon import fv_scalar_advection_latlon
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.halo_latlon import pad_halo_latlon
 from legoesm.grids.polar_filter import (
@@ -284,6 +285,22 @@ class TestOperators3D:
         assert jnp.all(jnp.isfinite(divergence_3d(u, v, grid)))
         assert jnp.all(jnp.isfinite(gradient_x_3d(u, grid)))
         assert jnp.all(jnp.isfinite(gradient_y_3d(u, grid)))
+
+
+class TestFVScalarAdvectionLatLon:
+    """Tests for FV advective-form scalar transport on lat-lon."""
+
+    def test_uniform_field_divergent_flow_zero(self, grid):
+        """Constant field should remain invariant under divergent flow."""
+        key_u = jax.random.PRNGKey(11)
+        key_v = jax.random.PRNGKey(12)
+        q = jnp.ones((grid.n_lat, grid.n_lon), dtype=jnp.float32) * 300.0
+        u = jax.random.normal(key_u, q.shape, dtype=jnp.float32) * 10.0
+        v = jax.random.normal(key_v, q.shape, dtype=jnp.float32) * 10.0
+
+        dq = fv_scalar_advection_latlon(q, u, v, grid)
+        max_abs = float(jnp.max(jnp.abs(dq)))
+        assert max_abs < 5e-6, f"constant-field drift too large: {max_abs:.3e}"
 
 
 # ==============================================================================

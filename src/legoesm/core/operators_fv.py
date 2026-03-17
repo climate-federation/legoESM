@@ -274,11 +274,13 @@ def fv_flux_divergence(q, u, v, grid, limiter=True):
 
 
 def fv_scalar_advection(q, u, v, grid, limiter=True):
-    """PPM advection of scalar q by (u,v) — conservative flux-form divergence.
+    """PPM advection of scalar q by (u,v) in advective form.
 
-    Computes -div(q*v) using PPM reconstruction with upwind flux selection.
-    Same as fv_flux_divergence; use that function directly for clarity.
-    Both directions computed on the SAME unmodified field (unsplit).
+    Computes:
+        -v·∇q = -div(q v) + q div(v)
+
+    using the same unsplit FV transport operator for both terms, which
+    preserves constant-field invariance even for divergent flow.
 
     Parameters
     ----------
@@ -295,46 +297,9 @@ def fv_scalar_advection(q, u, v, grid, limiter=True):
     jax.Array, shape (6, n, n)
         Advective tendency: approximately -v·grad(q).
     """
-    # Single halo exchange for both directions
-    q_pad = pad_halo(q, halo=2, interp_offsets=grid.halo_interp_offsets_h2)
-    u_pad, v_pad = pad_halo_vector(
-        u, v,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=grid.halo_interp_offsets_h2, halo=2,
-    )
-
-    # --- X-direction ---
-    q_L_x, q_R_x = _ppm_reconstruct_x(q_pad, limiter)
-
-    u_strip = u_pad[:, :, 2:-2]
-    u_iface = 0.5 * (u_strip[:, 1:-2, :] + u_strip[:, 2:-1, :])
-
-    q_face_x = jnp.where(u_iface > 0, q_L_x, q_R_x)
-
-    hy = grid.hy_ext_h2[:, :, 2:-2]
-    hy_iface = 0.5 * (hy[:, 1:-2, :] + hy[:, 2:-1, :])
-
-    Phi_x = u_iface * hy_iface * q_face_x
-
-    # --- Y-direction ---
-    q_L_y, q_R_y = _ppm_reconstruct_y(q_pad, limiter)
-
-    v_strip = v_pad[:, 2:-2, :]
-    v_iface = 0.5 * (v_strip[:, :, 1:-2] + v_strip[:, :, 2:-1])
-
-    q_face_y = jnp.where(v_iface > 0, q_L_y, q_R_y)
-
-    hx = grid.hx_ext_h2[:, 2:-2, :]
-    hx_iface = 0.5 * (hx[:, :, 1:-2] + hx[:, :, 2:-1])
-
-    Phi_y = v_iface * hx_iface * q_face_y
-
-    # --- Net flux divergence ---
-    net_x = Phi_x[:, 1:, :] - Phi_x[:, :-1, :]
-    net_y = Phi_y[:, :, 1:] - Phi_y[:, :, :-1]
-
-    return -(net_x + net_y) / grid.area
+    flux_form = fv_flux_divergence(q, u, v, grid, limiter)
+    div_v = -fv_flux_divergence(jnp.ones_like(q), u, v, grid, limiter=False)
+    return flux_form + q * div_v
 
 
 # ==============================================================================
