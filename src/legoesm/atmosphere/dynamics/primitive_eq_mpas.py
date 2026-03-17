@@ -261,7 +261,8 @@ def mpas_hydrostatic_tendencies(
         # the simpler approach: v·∇(ln p_s) ≈ (1/A_c) Σ_e u_e * grad_ln_ps_e * l_e
         # but grad_ln_ps is already the normal gradient.  The dot product
         # v·∇φ at cell c ≈ div(u * φ) - φ * div(u) = divergence_cell(u*ln_ps) - ln_ps * div(u)
-        return divergence_cell(u_3d[:, k] * ln_ps[c1], mesh) - ln_ps * div_3d[:, k]
+        ln_ps_edge = 0.5 * (ln_ps[c1] + ln_ps[c2])
+        return divergence_cell(u_3d[:, k] * ln_ps_edge, mesh) - ln_ps * div_3d[:, k]
 
     # Vectorize over levels
     _, v_grad_lnps_all = jax.lax.scan(

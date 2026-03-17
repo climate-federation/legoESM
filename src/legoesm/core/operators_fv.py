@@ -274,10 +274,10 @@ def fv_flux_divergence(q, u, v, grid, limiter=True):
 
 
 def fv_scalar_advection(q, u, v, grid, limiter=True):
-    """PPM advection of scalar q by (u,v) — advective (non-conservative) form.
+    """PPM advection of scalar q by (u,v) — conservative flux-form divergence.
 
-    For tracers/temperature where we want -v·grad(q), not -div(q*v).
-    Uses the same PPM reconstruction but without flux form.
+    Computes -div(q*v) using PPM reconstruction with upwind flux selection.
+    Same as fv_flux_divergence; use that function directly for clarity.
     Both directions computed on the SAME unmodified field (unsplit).
 
     Parameters

@@ -304,7 +304,7 @@ def spectral_pe_tendencies(
     # The E-variable adds a spurious same-level T→D coupling
     # (-R_d·lnps_0·∇²T') that is unstable when combined with
     # adiabatic heating.
-    T_ref = 300.0
+    T_ref = config.si_T_ref
     KPhi = K + Phi
     KPhi_hat = sh_analysis_3d(grid, KPhi)
 
@@ -339,7 +339,7 @@ def spectral_pe_tendencies(
     # For uniform T_ref, -div(T*v) + T*div = -div(T'*v) + T'*div
     # where T' = T - T_ref.  This eliminates the O(T_ref * ε) cancellation
     # error that otherwise destabilises the isothermal rest state.
-    T_ref = 300.0
+    T_ref = config.si_T_ref
     T_prime = T - T_ref
 
     T_prime_u_cos = T_prime * u_cos
