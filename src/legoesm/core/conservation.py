@@ -315,6 +315,117 @@ def zero_mean_tendency(
         return tendency
 
 
+# ==============================================================================
+# Moisture conservation
+# ==============================================================================
+
+def compute_global_moisture(
+    q_v: jax.Array,
+    p_s: jax.Array,
+    dsigma: jax.Array,
+    grid,
+) -> jax.Array:
+    """Compute global column-integrated water vapor.
+
+    Integral: (1/g) * ∫∫ q_v · p_s · dσ · dA
+
+    Parameters
+    ----------
+    q_v : jax.Array, shape (..., nlev)
+        Specific humidity [kg/kg].
+    p_s : jax.Array, shape (...)
+        Surface pressure [Pa].
+    dsigma : jax.Array, shape (nlev,)
+        Sigma layer thicknesses.
+    grid : CubedSphereGrid or similar
+        Grid with ``.area`` attribute.
+
+    Returns
+    -------
+    jax.Array : Scalar global moisture integral [kg].
+    """
+    from legoesm import constants
+    # Column water vapor: ∫ q_v dp/g = q_v * p_s * dsigma / g
+    cwv = jnp.sum(q_v * p_s[..., None] * dsigma, axis=-1) / constants.g
+    return _global_area_sum(cwv, grid)
+
+
+def fix_moisture_hydrostatic(
+    q_v: jax.Array,
+    target_moisture: jax.Array,
+    p_s: jax.Array,
+    dsigma: jax.Array,
+    grid,
+) -> jax.Array:
+    """Fix global moisture conservation via multiplicative scaling.
+
+    Scales q_v uniformly so that the global column-integrated water vapor
+    matches *target_moisture*.  Uses multiplicative (not additive) correction
+    to preserve spatial gradients and guarantee non-negativity.
+
+    Parameters
+    ----------
+    q_v : jax.Array, shape (..., nlev)
+        Specific humidity after physics [kg/kg].
+    target_moisture : jax.Array
+        Target global moisture integral [kg] (from initial state).
+    p_s : jax.Array, shape (...)
+        Surface pressure [Pa].
+    dsigma : jax.Array, shape (nlev,)
+        Sigma layer thicknesses.
+    grid : CubedSphereGrid or similar
+
+    Returns
+    -------
+    jax.Array : Moisture-conserving q_v with same shape as input.
+    """
+    current = compute_global_moisture(q_v, p_s, dsigma, grid)
+    scale = jnp.where(current > 1e-30, target_moisture / current, 1.0)
+    return q_v * scale
+
+
+def fix_total_water(
+    tracers: dict[str, jax.Array],
+    target_total_water: jax.Array,
+    p_s: jax.Array,
+    dsigma: jax.Array,
+    grid,
+    water_names: tuple[str, ...] = ("q_v", "q_c", "q_r"),
+) -> dict[str, jax.Array]:
+    """Fix total water (vapor + condensate) conservation.
+
+    Scales all water tracers by a single uniform factor so that
+    ``∫(q_v + q_c + q_r + ...) dp/g dA = target_total_water``.
+
+    Parameters
+    ----------
+    tracers : dict[str, jax.Array]
+        Tracer dict; only entries whose keys are in *water_names* are scaled.
+    target_total_water : jax.Array
+        Target global total water integral [kg].
+    p_s : jax.Array
+        Surface pressure [Pa].
+    dsigma : jax.Array
+        Sigma layer thicknesses.
+    grid : CubedSphereGrid or similar
+    water_names : tuple[str, ...]
+        Names of water-species tracers to include.
+
+    Returns
+    -------
+    dict[str, jax.Array] : Tracers with water species scaled to conserve total water.
+    """
+    total_q = sum(tracers[n] for n in water_names if n in tracers)
+    current = compute_global_moisture(total_q, p_s, dsigma, grid)
+    scale = jnp.where(current > 1e-30, target_total_water / current, 1.0)
+
+    result = dict(tracers)
+    for name in water_names:
+        if name in result:
+            result[name] = result[name] * scale
+    return result
+
+
 def fix_mass_hydrostatic_target(
     state_new: HydrostaticState,
     target_mass: jax.Array,

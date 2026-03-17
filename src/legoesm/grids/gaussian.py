@@ -55,6 +55,10 @@ class GaussianGrid(NamedTuple):
     Hnm: jax.Array          # -(1-mu^2)*dP/dmu = cos(lat)*dP/dtheta, (n_lat, n_sh)
     Pnm_oc2: jax.Array      # P_n^m / cos^2(lat), (n_lat, n_sh)
     Dnm: jax.Array           # dP_n^m/dmu = -Hnm/cos^2(lat), (n_lat, n_sh)
+    wPnm: jax.Array         # weights * Pnm (precomputed for SH analysis), (n_lat, n_sh)
+    wHnm: jax.Array         # weights * Hnm (precomputed), (n_lat, n_sh)
+    wPnm_oc2: jax.Array     # weights * Pnm_oc2 (precomputed), (n_lat, n_sh)
+    wDnm: jax.Array         # weights * Dnm (precomputed), (n_lat, n_sh)
     n_sh: int               # Number of spectral coefficients
     ls: jax.Array           # Total wavenumber n for each SH index, (n_sh,)
     ms: jax.Array           # Zonal wavenumber m for each SH index, (n_sh,)
@@ -235,6 +239,13 @@ def create_gaussian_grid(
             return jnp.array(np_arr, dtype=dtype)
         return jax.device_put(np_arr, target_device)
 
+    # Precompute weighted Legendre matrices (avoid recomputing every SH analysis)
+    w_col = w_gauss[:, None]  # (n_lat, 1)
+    wPnm_np = Pnm_np * w_col
+    wHnm_np = Hnm_np * w_col
+    wPnm_oc2_np = Pnm_oc2_np * w_col
+    wDnm_np = Dnm_np * w_col
+
     return GaussianGrid(
         n_lat=n_lat,
         n_lon=n_lon,
@@ -252,6 +263,10 @@ def create_gaussian_grid(
         Hnm=_to_jax(Hnm_np, np.float64),
         Pnm_oc2=_to_jax(Pnm_oc2_np, np.float64),
         Dnm=_to_jax(Dnm_np, np.float64),
+        wPnm=_to_jax(wPnm_np, np.float64),
+        wHnm=_to_jax(wHnm_np, np.float64),
+        wPnm_oc2=_to_jax(wPnm_oc2_np, np.float64),
+        wDnm=_to_jax(wDnm_np, np.float64),
         n_sh=n_sh,
         ls=_to_jax(ls_np, np.int32),
         ms=_to_jax(ms_np, np.int32),
@@ -418,18 +433,12 @@ def sh_analysis(grid: GaussianGrid, field_grid: jax.Array) -> jax.Array:
     # coeffs[k] = 2*pi * sum_lat [ w[lat] * Pnm[lat, k] * f_m[lat, m_of_k] ]
     # We can do this as a matrix multiply if we construct the weighted Legendre matrix
 
-    # Weighted Legendre: (n_lat, n_sh) * weights[:, None]
-    wPnm = grid.Pnm * grid.weights[:, None]  # (n_lat, n_sh)
-
-    # For each spectral index k with zonal wavenumber m_k, pick f_m[:, m_k]
-    # and contract: coeffs[k] = 2*pi * sum_lat wPnm[lat, k] * f_m[lat, m_k]
-
     # Gather the right Fourier mode for each spectral index
     ms = grid.ms  # (n_sh,) int
     f_m_gathered = f_m[:, ms]  # (n_lat, n_sh)
 
-    # Contract over latitude
-    coeffs = 2.0 * jnp.pi * jnp.sum(wPnm * f_m_gathered, axis=0)  # (n_sh,)
+    # Contract over latitude using precomputed weighted Legendre matrix
+    coeffs = 2.0 * jnp.pi * jnp.sum(grid.wPnm * f_m_gathered, axis=0)  # (n_sh,)
 
     return coeffs
 
@@ -493,10 +502,9 @@ def sh_analysis_oc2(grid: GaussianGrid, field_grid: jax.Array) -> jax.Array:
     f_hat_lon = jnp.fft.rfft(field_grid, axis=1) / grid.n_lon
     f_m = f_hat_lon[:, :n_max + 1]
 
-    wPnm_oc2 = grid.Pnm_oc2 * grid.weights[:, None]
     f_m_gathered = f_m[:, grid.ms]
 
-    coeffs = 2.0 * jnp.pi * jnp.sum(wPnm_oc2 * f_m_gathered, axis=0)
+    coeffs = 2.0 * jnp.pi * jnp.sum(grid.wPnm_oc2 * f_m_gathered, axis=0)
     return coeffs
 
 
@@ -512,10 +520,9 @@ def sh_analysis_dmu(grid: GaussianGrid, field_grid: jax.Array) -> jax.Array:
     f_hat_lon = jnp.fft.rfft(field_grid, axis=1) / grid.n_lon
     f_m = f_hat_lon[:, :n_max + 1]
 
-    wDnm = grid.Dnm * grid.weights[:, None]
     f_m_gathered = f_m[:, grid.ms]
 
-    coeffs = 2.0 * jnp.pi * jnp.sum(wDnm * f_m_gathered, axis=0)
+    coeffs = 2.0 * jnp.pi * jnp.sum(grid.wDnm * f_m_gathered, axis=0)
     return coeffs
 
 
@@ -540,10 +547,9 @@ def sh_analysis_H(grid: GaussianGrid, field_grid: jax.Array) -> jax.Array:
     f_hat_lon = jnp.fft.rfft(field_grid, axis=1) / grid.n_lon
     f_m = f_hat_lon[:, :n_max + 1]
 
-    wHnm = grid.Hnm * grid.weights[:, None]
     f_m_gathered = f_m[:, grid.ms]
 
-    coeffs = 2.0 * jnp.pi * jnp.sum(wHnm * f_m_gathered, axis=0)
+    coeffs = 2.0 * jnp.pi * jnp.sum(grid.wHnm * f_m_gathered, axis=0)
 
     return coeffs
 

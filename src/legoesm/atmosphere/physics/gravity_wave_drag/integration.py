@@ -137,19 +137,26 @@ def _make_hydrostatic_gwd(
     gwd_config: GravityWaveDragConfig,
     dt: float,
 ) -> Callable:
-    """Create GWD physics_fn for PrimitiveEquationModel."""
+    """Create GWD physics_fn for PrimitiveEquationModel.
+
+    Signature: (state, grid, sigma_coord, phys_state=None)
+               -> HydrostaticTendencies
+
+    When *phys_state* is passed, the GWD wave action spectrum is read
+    from ``phys_state.gwd_spectrum`` and the updated spectrum is stored
+    on ``physics_fn._updated_gwd_spectrum``.
+    """
     scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
-    spectrum_state = None
-    ml_model = None
+    _ml_model_cache = [None]
 
     def physics_fn(
         state: HydrostaticState,
         grid: CubedSphereGrid,
         sigma_coord: SigmaCoordinate,
+        phys_state=None,
     ) -> HydrostaticTendencies:
-        nonlocal spectrum_state, ml_model
         T = state.T.data
         u = state.u.data
         v = state.v.data
@@ -189,12 +196,13 @@ def _make_hydrostatic_gwd(
 
         if is_prognostic:
             sc = scheme_config
-            if spectrum_state is None:
-                spectrum_state = jnp.full(
-                    (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
-                )
-            spec_in = spectrum_state
-            if spec_in.shape[0] != ncol:
+            if phys_state is not None:
+                spec_in = phys_state.gwd_spectrum
+                if spec_in.shape[0] != ncol:
+                    spec_in = jnp.full(
+                        (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
+                    )
+            else:
                 spec_in = jnp.full(
                     (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
                 )
@@ -202,11 +210,11 @@ def _make_hydrostatic_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, sc, spec_in,
             )
-            spectrum_state = spec_new
+            physics_fn._updated_gwd_spectrum = spec_new
         elif is_ml:
-            if ml_model is None:
+            if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
-                ml_model = GWDEmulator(
+                _ml_model_cache[0] = GWDEmulator(
                     scheme_config.n_input, scheme_config.n_hidden,
                     scheme_config.n_layers, scheme_config.n_output,
                     key=key,
@@ -214,7 +222,7 @@ def _make_hydrostatic_gwd(
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
-                ml_model,
+                _ml_model_cache[0],
             )
         else:
             gwd_out = gwd_fn(
@@ -234,10 +242,12 @@ def _make_hydrostatic_gwd(
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
         )
 
+    physics_fn._updated_gwd_spectrum = None
+    physics_fn._is_prognostic = is_prognostic
+
     def reset_state():
-        nonlocal spectrum_state, ml_model
-        spectrum_state = None
-        ml_model = None
+        _ml_model_cache[0] = None
+        physics_fn._updated_gwd_spectrum = None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -256,20 +266,23 @@ def _make_nonhydrostatic_gwd(
     gwd_config: GravityWaveDragConfig,
     dt: float,
 ) -> Callable:
-    """Create GWD physics_fn for CompressibleEulerModel."""
+    """Create GWD physics_fn for CompressibleEulerModel.
+
+    Signature: (state, grid, height_coord, terrain_metric, phys_state=None)
+               -> NonHydrostaticTendencies
+    """
     scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
-    spectrum_state = None
-    ml_model = None
+    _ml_model_cache = [None]
 
     def physics_fn(
         state: NonHydrostaticState,
         grid: CubedSphereGrid,
         height_coord: HeightCoordinate,
         terrain_metric: TerrainMetric,
+        phys_state=None,
     ) -> NonHydrostaticTendencies:
-        nonlocal spectrum_state, ml_model
         theta_p = state.theta_prime.data
         rho_p = state.rho_prime.data
         u_data = state.u.data
@@ -330,12 +343,13 @@ def _make_nonhydrostatic_gwd(
 
         if is_prognostic:
             sc = scheme_config
-            if spectrum_state is None:
-                spectrum_state = jnp.full(
-                    (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
-                )
-            spec_in = spectrum_state
-            if spec_in.shape[0] != ncol:
+            if phys_state is not None:
+                spec_in = phys_state.gwd_spectrum
+                if spec_in.shape[0] != ncol:
+                    spec_in = jnp.full(
+                        (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
+                    )
+            else:
                 spec_in = jnp.full(
                     (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
                 )
@@ -343,11 +357,11 @@ def _make_nonhydrostatic_gwd(
                 u_col, v_col, T_col, p_full_col, p_half,
                 z_full, z_half, rho_col, lat, dt, sc, spec_in,
             )
-            spectrum_state = spec_new
+            physics_fn._updated_gwd_spectrum = spec_new
         elif is_ml:
-            if ml_model is None:
+            if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
-                ml_model = GWDEmulator(
+                _ml_model_cache[0] = GWDEmulator(
                     scheme_config.n_input, scheme_config.n_hidden,
                     scheme_config.n_layers, scheme_config.n_output,
                     key=key,
@@ -355,7 +369,7 @@ def _make_nonhydrostatic_gwd(
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half,
                 z_full, z_half, rho_col, lat, dt, scheme_config,
-                ml_model,
+                _ml_model_cache[0],
             )
         else:
             gwd_out = gwd_fn(
@@ -378,10 +392,12 @@ def _make_nonhydrostatic_gwd(
             dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_gwd", dims=dims_tr, units="1/s"),
         )
 
+    physics_fn._updated_gwd_spectrum = None
+    physics_fn._is_prognostic = is_prognostic
+
     def reset_state():
-        nonlocal spectrum_state, ml_model
-        spectrum_state = None
-        ml_model = None
+        _ml_model_cache[0] = None
+        physics_fn._updated_gwd_spectrum = None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -395,15 +411,17 @@ def _make_spectral_pe_gwd(
     gwd_config: GravityWaveDragConfig,
     dt: float,
 ) -> Callable:
-    """Create GWD physics_fn for SpectralPEModel."""
+    """Create GWD physics_fn for SpectralPEModel.
+
+    Signature: (state, grid, sigma_coord, grid_fields=None, phys_state=None)
+               -> SpectralHydrostaticState
+    """
     scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
     is_ml = scheme_name == "ml_emulator"
-    spectrum_state = None
-    ml_model = None
+    _ml_model_cache = [None]
 
-    def physics_fn(state, grid, sigma_coord, grid_fields=None):
-        nonlocal spectrum_state, ml_model
+    def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
             spectral_pe_to_grid,
@@ -457,12 +475,13 @@ def _make_spectral_pe_gwd(
 
         if is_prognostic:
             sc = scheme_config
-            if spectrum_state is None:
-                spectrum_state = jnp.full(
-                    (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
-                )
-            spec_in = spectrum_state
-            if spec_in.shape[0] != ncol:
+            if phys_state is not None:
+                spec_in = phys_state.gwd_spectrum
+                if spec_in.shape[0] != ncol:
+                    spec_in = jnp.full(
+                        (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
+                    )
+            else:
                 spec_in = jnp.full(
                     (ncol, sc.n_azimuths, sc.n_wavenumbers), sc.launch_flux
                 )
@@ -470,11 +489,11 @@ def _make_spectral_pe_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, sc, spec_in,
             )
-            spectrum_state = spec_new
+            physics_fn._updated_gwd_spectrum = spec_new
         elif is_ml:
-            if ml_model is None:
+            if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
-                ml_model = GWDEmulator(
+                _ml_model_cache[0] = GWDEmulator(
                     scheme_config.n_input, scheme_config.n_hidden,
                     scheme_config.n_layers, scheme_config.n_output,
                     key=key,
@@ -482,7 +501,7 @@ def _make_spectral_pe_gwd(
             gwd_out = gwd_fn(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, scheme_config,
-                ml_model,
+                _ml_model_cache[0],
             )
         else:
             gwd_out = gwd_fn(
@@ -522,10 +541,12 @@ def _make_spectral_pe_gwd(
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
 
+    physics_fn._updated_gwd_spectrum = None
+    physics_fn._is_prognostic = is_prognostic
+
     def reset_state():
-        nonlocal spectrum_state, ml_model
-        spectrum_state = None
-        ml_model = None
+        _ml_model_cache[0] = None
+        physics_fn._updated_gwd_spectrum = None
 
     physics_fn.reset_state = reset_state
     return physics_fn

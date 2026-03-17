@@ -100,6 +100,42 @@ def preload_rrtmgp_optics(config: RRTMGPConfig) -> None:
     _get_optics(config)
 
 
+def preload_rrtmgp_optics_mpi(config: RRTMGPConfig) -> None:
+    """MPI-aware preload: rank 0 reads NetCDF files, broadcasts to others.
+
+    Avoids N parallel filesystem reads of ~90 JAX arrays (tens of MB)
+    by having only rank 0 read the NetCDF data, then using MPI broadcast
+    (pickle serialization) to distribute the optics objects.
+
+    Falls back to per-rank loading if mpi4py is not available.
+    """
+    try:
+        from mpi4py import MPI
+    except ImportError:
+        preload_rrtmgp_optics(config)
+        return
+
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+
+    # Rank 0 loads from NetCDF files.
+    if rank == 0:
+        preload_rrtmgp_optics(config)
+
+    # Build the cache key (must match _get_optics).
+    key = (config.lw_gas_file, config.sw_gas_file,
+           config.lw_cloud_file, config.sw_cloud_file,
+           config.include_clouds,
+           config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv)
+
+    # Broadcast the optics objects (pickle-serialized, includes JAX arrays).
+    data = _optics_cache.get(key) if rank == 0 else None
+    data = comm.bcast(data, root=0)
+
+    if rank != 0:
+        _optics_cache[key] = data
+
+
 def _standard_o3_profile(p_full: jnp.ndarray) -> jnp.ndarray:
     """Simple climatological ozone profile (VMR).
 

@@ -23,6 +23,6 @@ from legoesm.driver.config import (
     OutputConfig,
     ExperimentConfig,
 )
-from legoesm.driver.physics_pipeline import PhysicsPipeline, build_physics_pipeline
+from legoesm.driver.physics_pipeline import PhysicsPipeline, PhysicsOutput, HeldRadiation, build_physics_pipeline
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.model_driver import ModelDriver

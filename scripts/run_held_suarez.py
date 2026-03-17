@@ -261,6 +261,108 @@ def run_cubed_sphere(n_grid, nlev, coord_type, dt, n_days, diag_every_days=10):
     }
 
 
+def run_icosahedral(subdiv_level, nlev, coord_type, dt, n_days, diag_every_days=10):
+    """Run MPAS icosahedral PE Held-Suarez and return diagnostics."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
+    )
+    from legoesm.atmosphere.physics.held_suarez_mpas import (
+        held_suarez_forcing_mpas, held_suarez_init_mpas,
+    )
+
+    mesh = create_voronoi_mesh(subdiv_level)
+    nCells = mesh.nCells
+    dx_km = np.sqrt(4 * np.pi * mesh.radius**2 / nCells) / 1e3
+
+    if coord_type == "sigma":
+        sigma = create_sigma_coordinate(nlev)
+    else:
+        sigma = standard_hybrid_levels(nlev)
+
+    dx_mean = np.sqrt(4 * np.pi * mesh.radius**2 / nCells)
+    nu_del4 = dx_mean**4 / (48.0 * 3600.0)
+
+    config = MPASPrimitiveEquationConfig(nu_del4=nu_del4, fix_mass=True)
+    model = MPASPrimitiveEquationModel(mesh, sigma, config)
+    state = held_suarez_init_mpas(mesh, sigma)
+
+    n_steps = int(n_days * 86400.0 / dt)
+    diag_interval = max(1, int(diag_every_days * 86400.0 / dt))
+
+    print(f"  MPAS level {subdiv_level} ({nCells} cells, ~{dx_km:.0f} km)/L{nlev} ({coord_type}): "
+          f"{n_steps} steps, dt={dt}s")
+
+    state = model.step(state, dt, held_suarez_forcing_mpas)
+    jax.block_until_ready(state.T.data)
+
+    t0 = time.time()
+    diag_records = []
+    for step in range(1, n_steps + 1):
+        if step > 1:
+            state = model.step(state, dt, held_suarez_forcing_mpas)
+
+        if step % 100 == 0:
+            if not jnp.all(jnp.isfinite(state.T.data)):
+                day = (step + 1) * dt / 86400.0
+                print(f"    *** BLOWUP at day {day:.1f} ***")
+                break
+
+        if step % diag_interval == 0 or step == n_steps:
+            day = step * dt / 86400.0
+            T = np.asarray(state.T.data)
+            u = np.asarray(state.u.data)
+            p_s = np.asarray(state.p_s.data)
+            diag_records.append({
+                'day': day, 'T': T, 'u': u, 'p_s': p_s,
+                'max_wind': float(np.max(np.abs(u))),
+                'mean_T': float(np.mean(T)),
+            })
+            print(f"    day {day:.0f}: max|u|={float(np.max(np.abs(u))):.1f} m/s, "
+                  f"<T>={float(np.mean(T)):.1f} K")
+
+    wall = time.time() - t0
+    print(f"    Done in {wall:.0f}s ({n_steps / wall:.0f} steps/s)")
+
+    # Zonal means on unstructured grid
+    lat_cells = np.asarray(mesh.grid_lat)
+    area_cells = np.asarray(mesh.grid_area)
+    lat_deg_cells = np.degrees(lat_cells)
+    final = diag_records[-1]
+
+    n_bins = max(36, nCells // 100)
+    lat_bins = np.linspace(-90, 90, n_bins + 1)
+    lat_centers = 0.5 * (lat_bins[:-1] + lat_bins[1:])
+    T_zonal = np.full((n_bins, nlev), np.nan)
+
+    for i in range(n_bins):
+        mask = (lat_deg_cells >= lat_bins[i]) & (lat_deg_cells < lat_bins[i + 1])
+        if np.sum(mask) > 0:
+            w = area_cells[mask]
+            w = w / w.sum()
+            T_zonal[i] = np.sum(w[:, None] * final['T'][mask], axis=0)
+
+    if coord_type == "sigma":
+        sigma_full = np.asarray(sigma.sigma_full)
+    else:
+        sigma_full = np.asarray(sigma.B_full)
+
+    # No u_zonal for MPAS (edge-normal velocity, not u/v decomposition)
+    # Use T_zonal for temperature analysis
+    return {
+        'lat': np.radians(lat_centers),
+        'sigma': sigma_full,
+        'u_zonal': np.zeros_like(T_zonal),  # placeholder — MPAS has edge-normal u
+        'T_zonal': T_zonal,
+        'p_s_mean': float(np.mean(final['p_s'])),
+        'diag_records': diag_records,
+        'wall_time': wall,
+        'coord_type': coord_type,
+        'grid_type': f'MPAS-L{subdiv_level}({nCells})',
+    }
+
+
 def check_realism(result, label):
     """Check profiles against Held-Suarez reference climate."""
     lat_deg = np.degrees(result['lat'])
@@ -570,7 +672,7 @@ Examples:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--grid", type=str, default="all",
-                        choices=["all", "spectral", "cubed_sphere", "latlon"],
+                        choices=["all", "spectral", "cubed_sphere", "latlon", "icosahedral"],
                         help="Grid type (default: all)")
     parser.add_argument("--resolution", type=int, default=None,
                         help="Resolution (T-number for spectral, C-number for cubed-sphere, n_lat for latlon)")
@@ -612,10 +714,11 @@ Examples:
             ("spectral", 42, "hybrid", 300.0),
             ("cubed_sphere", 48, "sigma", 600.0),
             ("latlon", 72, "sigma", 600.0),
+            ("icosahedral", 4, "sigma", 300.0),  # level 4 = 2562 cells (~4°)
         ]
     else:
-        default_res = {"spectral": 42, "cubed_sphere": 48, "latlon": 72}
-        default_dt = {"spectral": 300.0, "cubed_sphere": 600.0, "latlon": 600.0}
+        default_res = {"spectral": 42, "cubed_sphere": 48, "latlon": 72, "icosahedral": 4}
+        default_dt = {"spectral": 300.0, "cubed_sphere": 600.0, "latlon": 600.0, "icosahedral": 300.0}
         res = args.resolution or default_res[args.grid]
         dt = args.dt or default_dt[args.grid]
         configs = [(args.grid, res, args.coord, dt)]
@@ -632,6 +735,8 @@ Examples:
                 result = run_spectral(res, nlev, coord, dt, n_days)
             elif grid_type == "latlon":
                 result = run_latlon(res, nlev, coord, dt, n_days)
+            elif grid_type == "icosahedral":
+                result = run_icosahedral(res, nlev, coord, dt, n_days)
             else:
                 result = run_cubed_sphere(res, nlev, coord, dt, n_days)
             results[label] = result

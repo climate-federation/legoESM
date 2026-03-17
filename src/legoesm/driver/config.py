@@ -71,10 +71,27 @@ class ExperimentConfig(NamedTuple):
     n2o_ppbv: float = 332.0
     S_0: float = 1361.0
     ozone_source: str = "standard"
+    ozone_forcing: str = "inline"       # inline, external, off
+    ozone_file: str = ""
+
+    # Solar
+    solar_source: str = "constant"      # constant, file, spectral_file
+    solar_file: str = ""
+    solar_spectral_var: str = "solar_fraction_by_gpt"
+
+    # Aerosol
+    aerosol_forcing: str = "off"        # off, external
+    aerosol_file: str = ""
+    aerosol_reference_aod: float = 0.03
+    volcanic_aerosol_file: str = ""
+    volcanic_aerosol_scale: float = 1.0
 
     # Clouds & Microphysics
     cloud_scheme: str = "none"
     microphysics: str = "none"
+
+    # Conservation
+    fix_moisture: bool = False
 
     # Topography
     topography: str = "flat"
@@ -153,6 +170,16 @@ class ExperimentConfig(NamedTuple):
             n2o_ppbv=amip_cfg.n2o_ppbv,
             S_0=amip_cfg.S_0,
             ozone_source=amip_cfg.ozone_source,
+            ozone_forcing=getattr(amip_cfg, 'ozone_forcing', 'inline'),
+            ozone_file=getattr(amip_cfg, 'ozone_file', ''),
+            solar_source=getattr(amip_cfg, 'solar_source', 'constant'),
+            solar_file=getattr(amip_cfg, 'solar_file', ''),
+            solar_spectral_var=getattr(amip_cfg, 'solar_spectral_var', 'solar_fraction_by_gpt'),
+            aerosol_forcing=getattr(amip_cfg, 'aerosol_forcing', 'off'),
+            aerosol_file=getattr(amip_cfg, 'aerosol_file', ''),
+            aerosol_reference_aod=getattr(amip_cfg, 'aerosol_reference_aod', 0.03),
+            volcanic_aerosol_file=getattr(amip_cfg, 'volcanic_aerosol_file', ''),
+            volcanic_aerosol_scale=getattr(amip_cfg, 'volcanic_aerosol_scale', 1.0),
             cloud_scheme=amip_cfg.cloud_scheme,
             microphysics=amip_cfg.microphysics,
             topography=amip_cfg.topography,
@@ -210,6 +237,16 @@ class ExperimentConfig(NamedTuple):
             n2o_ppbv=self.n2o_ppbv,
             S_0=self.S_0,
             ozone_source=self.ozone_source,
+            ozone_forcing=self.ozone_forcing,
+            ozone_file=self.ozone_file,
+            solar_source=self.solar_source,
+            solar_file=self.solar_file,
+            solar_spectral_var=self.solar_spectral_var,
+            aerosol_forcing=self.aerosol_forcing,
+            aerosol_file=self.aerosol_file,
+            aerosol_reference_aod=self.aerosol_reference_aod,
+            volcanic_aerosol_file=self.volcanic_aerosol_file,
+            volcanic_aerosol_scale=self.volcanic_aerosol_scale,
             cloud_scheme=self.cloud_scheme,
             microphysics=self.microphysics,
             topography=self.topography,

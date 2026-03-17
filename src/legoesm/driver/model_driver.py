@@ -18,6 +18,8 @@ from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import day_to_calendar
 
+from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
+from legoesm.core.tracers import TracerRegistry, make_moisture_registry, init_tracers, clip_positive_definite
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import PhysicsPipeline, build_physics_pipeline
 from legoesm.driver.diagnostics import DiagnosticCollector
@@ -45,9 +47,8 @@ class ModelDriver:
         self.model = None
         self.physics = None
         self.state = None
-        self.q_v = None
-        self.q_c = None
-        self.q_r = None
+        self.tracers: dict[str, jax.Array] = {}
+        self.tracer_registry: TracerRegistry = make_moisture_registry()
         self.get_sst_sic = None
         self.diagnostics = None
         self._phis_data = None
@@ -70,6 +71,31 @@ class ModelDriver:
     def output_dir(self) -> Path:
         return self._output_dir
 
+    # Backward-compatible accessors for individual tracers.
+    @property
+    def q_v(self) -> jax.Array:
+        return self.tracers.get("q_v")
+
+    @q_v.setter
+    def q_v(self, value):
+        self.tracers["q_v"] = value
+
+    @property
+    def q_c(self) -> jax.Array:
+        return self.tracers.get("q_c")
+
+    @q_c.setter
+    def q_c(self, value):
+        self.tracers["q_c"] = value
+
+    @property
+    def q_r(self) -> jax.Array:
+        return self.tracers.get("q_r")
+
+    @q_r.setter
+    def q_r(self, value):
+        self.tracers["q_r"] = value
+
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
         self._output_dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +105,7 @@ class ModelDriver:
         self._create_forcing()
         self._init_state()
         self._create_physics()
+        self._setup_external_forcing()
         self._create_diagnostics()
         self._create_friction()
         self._save_config()
@@ -249,18 +276,18 @@ class ModelDriver:
             self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
         )
 
+        # Initialize all tracers via registry
+        self.tracers = init_tracers(self.tracer_registry, shape_3d)
+
         # Moisture initialization
         p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
         q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
-        self.q_v = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
-        self.q_v = jnp.minimum(self.q_v, q_sat_init)
+        self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
+        self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
 
-        self.q_c = jnp.zeros(shape_3d)
-        self.q_r = jnp.zeros(shape_3d)
-
-        mean_qv = float(jnp.mean(self.q_v)) * 1000.0
+        mean_qv = float(jnp.mean(self.tracers["q_v"])) * 1000.0
         cwv = float(jnp.mean(
-            column_water_vapor(self.q_v, self.state.p_s.data, self.sigma.dsigma)
+            column_water_vapor(self.tracers["q_v"], self.state.p_s.data, self.sigma.dsigma)
         ))
         print(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
 
@@ -268,6 +295,94 @@ class ModelDriver:
         """Build the physics pipeline."""
         self.physics = build_physics_pipeline(self.grid, self.sigma, self.config)
         print(f"  Physics: {self.config.radiation} + SBM convection")
+
+    def _setup_external_forcing(self) -> None:
+        """Configure external forcing: solar, ozone, aerosol, CMIP GHG."""
+        from legoesm.forcing.external import (
+            SolarConfig, OzoneConfig, AerosolConfig,
+            get_solar_forcing_at_time, get_ozone_at_time, get_aerosol_at_time,
+        )
+
+        cfg = self.config
+        self._solar_config = SolarConfig(
+            S_0=cfg.S_0, source=cfg.solar_source,
+            path=cfg.solar_file, spectral_var=cfg.solar_spectral_var,
+        )
+        self._use_solar_spectral = (cfg.solar_source == "spectral_file")
+
+        # Ozone external forcing
+        self._ozone_ext_active = (cfg.radiation in ("rrtmg", "rrtmgp")
+                                  and cfg.ozone_forcing == "external")
+        self._ozone_ext_config = OzoneConfig(
+            enabled=self._ozone_ext_active,
+            source="climatology", path=cfg.ozone_file,
+            use_reference_if_missing=True,
+        )
+
+        # Aerosol external forcing
+        self._aerosol_active = (cfg.radiation in ("rrtmg", "rrtmgp")
+                                and cfg.aerosol_forcing == "external")
+        self._aerosol_config = AerosolConfig(
+            enabled=self._aerosol_active,
+            source="climatology", path=cfg.aerosol_file,
+            use_reference_if_missing=True,
+            reference_aod_550=cfg.aerosol_reference_aod,
+            volcanic_enabled=bool(cfg.volcanic_aerosol_file),
+            volcanic_path=cfg.volcanic_aerosol_file,
+            volcanic_scale=cfg.volcanic_aerosol_scale,
+        )
+
+        # Solar init
+        solar_init = get_solar_forcing_at_time(self._solar_config, cfg.start_day)
+        if self._use_solar_spectral:
+            self._solar_weights_template = jnp.asarray(
+                solar_init["solar_fraction_by_gpt"]
+            )
+        else:
+            self._solar_weights_template = jnp.array([], dtype=jnp.float64)
+
+        # CMIP experiment GHG override
+        self._experiment = cfg.experiment
+        self._start_year = cfg.start_year
+        if self._experiment:
+            from legoesm.forcing.experiments import ghg_at_year
+            co2, ch4, n2o = ghg_at_year(self._experiment, self._start_year)
+            self.config = cfg._replace(co2_ppmv=co2, ch4_ppbv=ch4, n2o_ppbv=n2o)
+            print(f"  CMIP: {self._experiment} (year {self._start_year}), "
+                  f"CO2={co2:.1f} ppmv")
+
+    def _precompute_external_forcing(self, day, p_s, lat):
+        """Pre-compute ozone/aerosol fields outside JIT boundary."""
+        from legoesm.forcing.external import get_ozone_at_time, get_aerosol_at_time
+        from legoesm.forcing.surface_utils import distribute_column_aod_to_layers
+
+        nlev = self.sigma.sigma_full.shape[0]
+        shape_2d = p_s.shape
+        ncol = int(np.prod(np.array(shape_2d)))
+
+        p_full = p_s[..., None] * self.sigma.sigma_full
+        p_half = p_s[..., None] * self.sigma.sigma_half
+        p_full_col = p_full.reshape(ncol, nlev)
+        p_half_col = p_half.reshape(ncol, nlev + 1)
+        lat_col = lat.reshape(ncol)
+
+        o3_vmr = jnp.zeros((ncol, nlev))
+        if self._ozone_ext_active:
+            o3_vmr = jnp.asarray(get_ozone_at_time(
+                self._ozone_ext_config, day,
+                lat_grid=lat_col, p_grid=p_full_col,
+            ))
+
+        aerosol_od = jnp.zeros((ncol, nlev))
+        if self._aerosol_active:
+            aerosol_col = get_aerosol_at_time(
+                self._aerosol_config, day, lat_grid=lat_col,
+            )
+            aerosol_od = distribute_column_aod_to_layers(
+                jnp.asarray(aerosol_col), p_half_col,
+            )
+
+        return o3_vmr, aerosol_od
 
     def _create_diagnostics(self) -> None:
         """Set up diagnostic collection."""
@@ -331,6 +446,10 @@ class ModelDriver:
     def run(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run the time integration.
 
+        Uses a JIT-compiled unified physics step with ``jax.lax.cond``
+        for radiation sub-cycling (held tendencies reused between
+        radiation update steps).
+
         Parameters
         ----------
         start_step : int
@@ -344,12 +463,14 @@ class ModelDriver:
             Run status ("COMPLETED" or "BLOWUP at day ...").
         """
         from legoesm.core.operators_3d import hyperdiffusion_3d
+        from legoesm.forcing.external import get_solar_forcing_at_time
 
         cfg = self.config
         DT = cfg.dycore.dt
         N_DAYS = cfg.days
         START_DAY = start_day if start_day is not None else cfg.start_day
         MICROPHYSICS = cfg.microphysics
+        RAD_UPDATE_STEPS = cfg.rad_update_steps
 
         n_steps_total = int(N_DAYS * 86400 / DT)
         diag_interval = int(cfg.output.diag_days * 86400 / DT)
@@ -359,7 +480,6 @@ class ModelDriver:
         )
 
         sigma_full = self.sigma.sigma_full
-        sigma_half = self.sigma.sigma_half
         dsigma = self.sigma.dsigma
 
         if cfg.grid.grid_type == "cubed_sphere":
@@ -370,11 +490,20 @@ class ModelDriver:
             shape_2d = (self.grid.n_lat, self.grid.n_lon)
             shape_3d = (*shape_2d, cfg.grid.nlev)
 
-        # Solar forcing
-        from legoesm.forcing.external import SolarConfig, get_solar_forcing_at_time
-        solar_config = SolarConfig(S_0=cfg.S_0, source="constant")
-        solar_init = get_solar_forcing_at_time(solar_config, START_DAY)
-        solar_weights = jnp.array([], dtype=jnp.float64)
+        ncol = int(np.prod(np.array(shape_2d)))
+        nlev = cfg.grid.nlev
+
+        # Solar forcing (initial)
+        solar_init = get_solar_forcing_at_time(self._solar_config, START_DAY)
+        current_s_0 = float(solar_init["tsi"])
+        solar_weights = (
+            jnp.asarray(solar_init["solar_fraction_by_gpt"])
+            if self._use_solar_spectral
+            else self._solar_weights_template
+        )
+
+        # Build JIT-compiled unified physics step
+        step_unified = self.physics.build_step_unified()
 
         # Held radiation tendencies
         held_dT_rad = jnp.zeros(shape_3d)
@@ -384,14 +513,76 @@ class ModelDriver:
         held_lw_up_toa = jnp.zeros(shape_2d)
         held_sw_down_toa = jnp.zeros(shape_2d)
 
+        # External forcing (pre-compute outside JIT)
+        o3_vmr, aerosol_od = self._precompute_external_forcing(
+            START_DAY, self.state.p_s.data, self.grid.lat,
+        )
+
+        # Moisture conservation fixer
+        FIX_MOISTURE = cfg.fix_moisture
+        if FIX_MOISTURE:
+            target_moisture = compute_global_moisture(
+                self.q_v, self.state.p_s.data, dsigma, self.grid,
+            )
+
         run_status = "COMPLETED"
         lat_deg_grid = np.degrees(np.asarray(self.grid.lat))
 
         print(f"\n  Starting: {n_steps_total - start_step} steps, {N_DAYS} days")
 
+        # --- JIT warmup ---
+        t_jit_start = time.time()
+        day = START_DAY + (start_step + 1) * DT / 86400.0
+        day_of_year, seconds_of_day = day_to_calendar(day)
+        sst, sic = self.get_sst_sic(day)
+
+        self.state = self.model.step_with_physics(self.state, DT)
+
+        phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+            step_unified(
+                jnp.bool_(True),
+                self.state.T.data, self.state.p_s.data,
+                self.q_v, self.q_c, self.q_r,
+                self.state.u.data, self.state.v.data,
+                sst, sic, self.grid.lat, self.grid.lon,
+                day_of_year, seconds_of_day, DT,
+                solar_weights, current_s_0,
+                o3_vmr, aerosol_od,
+                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+            )
+
+        # Apply warmup tendencies
+        new_T = self.state.T.data + DT * phys_out.dT_dt
+        self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
+        self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
+        self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
+
+        if MICROPHYSICS == "none":
+            p_full = self.state.p_s.data[..., None] * sigma_full
+            q_sat = saturation_mixing_ratio(new_T, p_full)
+            excess = jnp.maximum(self.q_v - q_sat, 0.0)
+            self.q_v = self.q_v - excess
+            new_T = new_T + constants.L_v * excess / constants.c_pd
+
+        self.state = self.state._replace(T=self.state.T.replace(data=new_T))
+        self.q_v = jnp.maximum(
+            self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff), 0.0
+        )
+        self.state = self.state._replace(
+            u=self.state.u.replace(data=self.state.u.data * self._fric_decay),
+            v=self.state.v.replace(data=self.state.v.data * self._fric_decay),
+        )
+
+        jax.block_until_ready(self.state.u.data)
+        t_jit = time.time() - t_jit_start
+        print(f"  JIT compiled in {t_jit:.1f}s")
+
+        # --- Main time loop ---
         t_start = time.time()
 
-        for step in range(start_step, n_steps_total):
+        for step in range(start_step + 1, n_steps_total):
             day = START_DAY + (step + 1) * DT / 86400.0
             day_of_year, seconds_of_day = day_to_calendar(day)
 
@@ -400,59 +591,47 @@ class ModelDriver:
             # (a) Dynamics
             self.state = self.model.step_with_physics(self.state, DT)
 
-            # (b) Radiation (always compute for now — sub-cycling TODO)
-            from legoesm.forcing.surface_utils import blend_surface_temperature, blend_surface_property
-            ncol = np.prod(np.array(shape_2d))
-            nlev = cfg.grid.nlev
+            # (b) Physics with radiation sub-cycling
+            need_rad_py = (RAD_UPDATE_STEPS <= 1) or ((step + 1) % RAD_UPDATE_STEPS == 0)
+            need_rad_jax = jnp.bool_(need_rad_py)
 
-            T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
-            albedo = blend_surface_property(sic, cfg.albedo_ice, cfg.albedo_ocean)
-            emissivity = blend_surface_property(sic, cfg.emissivity_ice, cfg.sfc_emissivity)
+            # Update external forcing on radiation steps
+            if need_rad_py:
+                # Solar
+                solar_now = get_solar_forcing_at_time(self._solar_config, day)
+                current_s_0 = float(solar_now["tsi"])
+                if self._use_solar_spectral:
+                    solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
 
-            p_full = self.state.p_s.data[..., None] * sigma_full
-            p_half = self.state.p_s.data[..., None] * sigma_half
+                # Ozone + aerosol
+                o3_vmr, aerosol_od = self._precompute_external_forcing(
+                    day, self.state.p_s.data, self.grid.lat,
+                )
 
-            T_col = self.state.T.data.reshape(ncol, nlev)
-            p_full_col = p_full.reshape(ncol, nlev)
-            p_half_col = p_half.reshape(ncol, nlev + 1)
-            q_v_col = self.q_v.reshape(ncol, nlev)
-            T_sfc_col = T_sfc.reshape(ncol)
-            lat_col = jnp.asarray(self.grid.lat).reshape(-1)[:ncol]
-            lon_col = jnp.asarray(self.grid.lon).reshape(-1)[:ncol]
-            albedo_col = albedo.reshape(ncol)
-            emis_col = emissivity.reshape(ncol)
+                # CMIP GHG trajectory
+                if self._experiment and cfg.radiation in ("rrtmg", "rrtmgp"):
+                    from legoesm.forcing.experiments import ghg_at_year
+                    current_year = self._start_year + day / 365.0
+                    ghg = ghg_at_year(self._experiment, current_year)
+                    # GHG override passed via config to radiation_fn at build time;
+                    # for transient experiments the pipeline already uses config defaults.
 
-            current_s_0 = float(solar_init["tsi"])
+            phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+                step_unified(
+                    need_rad_jax,
+                    self.state.T.data, self.state.p_s.data,
+                    self.q_v, self.q_c, self.q_r,
+                    self.state.u.data, self.state.v.data,
+                    sst, sic, self.grid.lat, self.grid.lon,
+                    day_of_year, seconds_of_day, DT,
+                    solar_weights, current_s_0,
+                    o3_vmr, aerosol_od,
+                    held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                )
 
-            rad_out = self.physics.radiation_fn(
-                T_col, p_full_col, p_half_col, q_v_col,
-                T_sfc_col, lat_col, lon_col,
-                day_of_year, seconds_of_day,
-                albedo_col, emis_col,
-                jnp.zeros((ncol, nlev)),  # o3
-                jnp.zeros((ncol, nlev)),  # aerosol
-                solar_weights, current_s_0,
-            )
-
-            dT_dt_rad = rad_out.heating_rate.reshape(shape_3d)
-            sw_net_sfc = (rad_out.sw_flux_down[:, -1].reshape(shape_2d)
-                          * (1.0 - albedo))
-            lw_net_sfc = (rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]).reshape(shape_2d)
-            sw_up_toa = rad_out.sw_flux_up[:, 0].reshape(shape_2d)
-            lw_up_toa = rad_out.lw_flux_up[:, 0].reshape(shape_2d)
-            sw_down_toa = rad_out.sw_flux_down[:, 0].reshape(shape_2d)
-
-            # (c) Physics (convection + microphysics + BL)
-            phys_out = self.physics.physics_step_no_rad(
-                self.state.T.data, self.state.p_s.data,
-                self.q_v, self.q_c, self.q_r,
-                self.state.u.data, self.state.v.data,
-                sst, sic, lat_col.reshape(shape_2d) if lat_col.size == np.prod(np.array(shape_2d)) else jnp.asarray(self.grid.lat),
-                DT, dT_dt_rad, sw_net_sfc, lw_net_sfc,
-                sw_up_toa, lw_up_toa, sw_down_toa,
-            )
-
-            # (d) Update state
+            # (c) Update state
             new_T = self.state.T.data + DT * phys_out.dT_dt
             self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
             self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
@@ -460,13 +639,13 @@ class ModelDriver:
 
             # Saturation adjustment
             if MICROPHYSICS == "none":
+                p_full = self.state.p_s.data[..., None] * sigma_full
                 q_sat = saturation_mixing_ratio(new_T, p_full)
                 excess = jnp.maximum(self.q_v - q_sat, 0.0)
                 self.q_v = self.q_v - excess
                 new_T = new_T + constants.L_v * excess / constants.c_pd
                 precip_ls = jnp.sum(
-                    excess * self.state.p_s.data[..., None] * dsigma,
-                    axis=-1
+                    excess * self.state.p_s.data[..., None] * dsigma, axis=-1
                 ) / (constants.g * DT)
             else:
                 precip_ls = jnp.zeros(shape_2d)
@@ -474,6 +653,13 @@ class ModelDriver:
             self.state = self.state._replace(
                 T=self.state.T.replace(data=new_T)
             )
+
+            # Moisture conservation fixer
+            if FIX_MOISTURE:
+                self.q_v = fix_moisture_hydrostatic(
+                    self.q_v, target_moisture,
+                    self.state.p_s.data, dsigma, self.grid,
+                )
 
             # Moisture smoothing
             self.q_v = jnp.maximum(
@@ -501,11 +687,11 @@ class ModelDriver:
                     sst=sst,
                     sic=sic,
                     precip_total=phys_out.precip + precip_ls,
-                    sw_up_toa=sw_up_toa,
-                    lw_up_toa=lw_up_toa,
-                    sw_net_sfc=sw_net_sfc,
-                    lw_net_sfc=lw_net_sfc,
-                    sw_down_toa=sw_down_toa,
+                    sw_up_toa=phys_out.sw_up_toa,
+                    lw_up_toa=phys_out.lw_up_toa,
+                    sw_net_sfc=phys_out.sw_net_sfc,
+                    lw_net_sfc=phys_out.lw_net_sfc,
+                    sw_down_toa=phys_out.sw_down_toa,
                     T_ice=cfg.T_ice,
                     lat_deg_grid=lat_deg_grid,
                 )
@@ -531,6 +717,30 @@ class ModelDriver:
         print(f"\n  Done: {total_wall:.1f}s wall time, status={run_status}")
 
         self.diagnostics.save(self._output_dir)
+        self.save_results(run_status, t_jit, total_wall)
         print(f"  {self.diagnostics.print_summary()}")
 
+        # Final checkpoint
+        if checkpoint_interval > 0:
+            self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
+
         return run_status
+
+    def save_results(self, run_status: str, jit_time: float, wall_time: float) -> None:
+        """Write results.txt summary file."""
+        cfg = self.config
+        d = self.diagnostics
+        with open(self._output_dir / "results.txt", "w") as f:
+            f.write(f"legoESM AMIP run\n")
+            f.write(f"Grid: {cfg.grid.grid_type} {cfg.grid.resolution} / "
+                    f"L{cfg.grid.nlev}, dt={cfg.dycore.dt}s, {cfg.days} days\n")
+            f.write(f"Radiation: {cfg.radiation}\n")
+            f.write(f"Status: {run_status}\n\n")
+            f.write(f"JIT compilation: {jit_time:.1f}s\n")
+            f.write(f"Wall time: {wall_time:.1f}s\n\n")
+            if d.times:
+                f.write(f"Final <T_atm>: {d.T_atm[-1]:.3f} K\n")
+                f.write(f"Final <Precip>: {d.precip[-1]:.2f} mm/day\n")
+                f.write(f"Final <CWV>: {d.CWV[-1]:.1f} kg/m2\n")
+            f.write(f"\n{d.energy_tracker.summary()}\n")
+        print(f"  Results saved to {self._output_dir}")

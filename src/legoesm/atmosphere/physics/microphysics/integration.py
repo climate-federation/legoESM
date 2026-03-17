@@ -143,14 +143,13 @@ def _make_hydrostatic_microphysics(
     """
     scheme_name, micro_fn, scheme_config = _get_microphysics_fn(microphysics_config)
     is_ml = scheme_name == "ml_emulator"
-    ml_model = None
+    _ml_model_cache = [None]
 
     def physics_fn(
         state: HydrostaticState,
         grid: CubedSphereGrid,
         sigma_coord: SigmaCoordinate,
     ) -> HydrostaticTendencies:
-        nonlocal ml_model
         T = state.T.data
         p_s = state.p_s.data
 
@@ -187,16 +186,16 @@ def _make_hydrostatic_microphysics(
         hydrometeors = make_zero_hydrometeors(ncol, nlev)
 
         if is_ml:
-            if ml_model is None:
+            if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
-                ml_model = MicrophysicsEmulator(
+                _ml_model_cache[0] = MicrophysicsEmulator(
                     scheme_config.n_input, scheme_config.n_hidden,
                     scheme_config.n_layers, scheme_config.n_output, key=key,
                 )
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt,
-                scheme_config, ml_model,
+                scheme_config, _ml_model_cache[0],
             )
         else:
             micro_out = micro_fn(
@@ -215,8 +214,7 @@ def _make_hydrostatic_microphysics(
         )
 
     def reset_state():
-        nonlocal ml_model
-        ml_model = None
+        _ml_model_cache[0] = None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -236,7 +234,7 @@ def _make_nonhydrostatic_microphysics(
     """
     scheme_name, micro_fn, scheme_config = _get_microphysics_fn(microphysics_config)
     is_ml = scheme_name == "ml_emulator"
-    ml_model = None
+    _ml_model_cache = [None]
 
     def physics_fn(
         state: NonHydrostaticState,
@@ -244,7 +242,6 @@ def _make_nonhydrostatic_microphysics(
         height_coord: HeightCoordinate,
         terrain_metric: TerrainMetric,
     ) -> NonHydrostaticTendencies:
-        nonlocal ml_model
         theta_p = state.theta_prime.data
         rho_p = state.rho_prime.data
         tracers = state.tracers.data
@@ -319,16 +316,16 @@ def _make_nonhydrostatic_microphysics(
         )
 
         if is_ml:
-            if ml_model is None:
+            if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
-                ml_model = MicrophysicsEmulator(
+                _ml_model_cache[0] = MicrophysicsEmulator(
                     scheme_config.n_input, scheme_config.n_hidden,
                     scheme_config.n_layers, scheme_config.n_output, key=key,
                 )
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half, rho_col, dz, dt,
-                scheme_config, ml_model,
+                scheme_config, _ml_model_cache[0],
             )
         else:
             micro_out = micro_fn(
@@ -363,8 +360,7 @@ def _make_nonhydrostatic_microphysics(
         )
 
     def reset_state():
-        nonlocal ml_model
-        ml_model = None
+        _ml_model_cache[0] = None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -384,10 +380,9 @@ def _make_spectral_pe_microphysics(
     """
     scheme_name, micro_fn, scheme_config = _get_microphysics_fn(microphysics_config)
     is_ml = scheme_name == "ml_emulator"
-    ml_model = None
+    _ml_model_cache = [None]
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None):
-        nonlocal ml_model
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
             spectral_pe_to_grid,
@@ -435,16 +430,16 @@ def _make_spectral_pe_microphysics(
         hydrometeors = make_zero_hydrometeors(ncol, nlev)
 
         if is_ml:
-            if ml_model is None:
+            if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
-                ml_model = MicrophysicsEmulator(
+                _ml_model_cache[0] = MicrophysicsEmulator(
                     scheme_config.n_input, scheme_config.n_hidden,
                     scheme_config.n_layers, scheme_config.n_output, key=key,
                 )
             micro_out = micro_fn(
                 T_col, q_v_col, hydrometeors,
                 p_full_col, p_half_col, rho, dz, dt,
-                scheme_config, ml_model,
+                scheme_config, _ml_model_cache[0],
             )
         else:
             micro_out = micro_fn(
@@ -466,8 +461,7 @@ def _make_spectral_pe_microphysics(
         )
 
     def reset_state():
-        nonlocal ml_model
-        ml_model = None
+        _ml_model_cache[0] = None
 
     physics_fn.reset_state = reset_state
     return physics_fn

@@ -5,6 +5,11 @@ physics function that combines radiation, convection, turbulence,
 and microphysics tendencies.  Each sub-module can be independently
 enabled/disabled via its ``scheme`` field (set to ``"none"`` to disable).
 
+The combined function accepts an optional ``phys_state`` (``PhysicsState``)
+argument.  When provided, prognostic physics variables (TKE, convective
+mass flux, GWD wave action) are read from and written to the state,
+enabling checkpoint/restart, ensemble ``vmap``, and clean JIT tracing.
+
 Example
 -------
 >>> from legoesm.atmosphere.physics import (
@@ -124,26 +129,61 @@ def make_physics(
         )
 
 
+def _collect_updated_phys_state(phys_state, tagged_fns):
+    """Build updated PhysicsState from sub-function attributes.
+
+    After calling sub-physics functions, each one may have stored updated
+    prognostic fields on its attributes (_updated_tke, _updated_conv_prog,
+    _updated_gwd_spectrum).  This function collects those into a new
+    PhysicsState, falling back to the input phys_state for unchanged fields.
+    """
+    if phys_state is None:
+        return None
+    from legoesm.atmosphere.physics.physics_state import PhysicsState
+
+    new_tke = phys_state.tke
+    new_conv_prog = phys_state.conv_prog
+    new_gwd_spectrum = phys_state.gwd_spectrum
+
+    for fn, _ in tagged_fns:
+        updated = getattr(fn, '_updated_tke', None)
+        if updated is not None:
+            new_tke = updated
+        updated = getattr(fn, '_updated_conv_prog', None)
+        if updated is not None:
+            new_conv_prog = updated
+        updated = getattr(fn, '_updated_gwd_spectrum', None)
+        if updated is not None:
+            new_gwd_spectrum = updated
+
+    return PhysicsState(
+        tke=new_tke,
+        conv_prog=new_conv_prog,
+        gwd_spectrum=new_gwd_spectrum,
+    )
+
+
 # ======================================================================
 # Hydrostatic
 # ======================================================================
 
 def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
-    fns = []
-    # Radiation has no dt parameter
+    # Tagged list: (fn, accepts_phys_state)
+    # Turbulence, convection, GWD accept phys_state; radiation, microphysics don't.
+    tagged_fns = []
     if config.radiation.scheme != "none":
-        fns.append(make_radiation_physics(config.radiation, "hydrostatic"))
+        tagged_fns.append((make_radiation_physics(config.radiation, "hydrostatic"), False))
     if config.convection.scheme != "none":
-        fns.append(make_convection_physics(config.convection, "hydrostatic", dt))
+        tagged_fns.append((make_convection_physics(config.convection, "hydrostatic", dt), True))
     if config.turbulence.scheme != "none":
-        fns.append(make_turbulence_physics(config.turbulence, "hydrostatic", dt))
+        tagged_fns.append((make_turbulence_physics(config.turbulence, "hydrostatic", dt), True))
     if config.microphysics.scheme != "none":
-        fns.append(make_microphysics_physics(config.microphysics, "hydrostatic", dt))
+        tagged_fns.append((make_microphysics_physics(config.microphysics, "hydrostatic", dt), False))
     if config.gravity_wave_drag.scheme != "none":
-        fns.append(make_gwd_physics(config.gravity_wave_drag, "hydrostatic", dt))
+        tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "hydrostatic", dt), True))
 
-    def physics_fn(state, grid, sigma_coord):
-        if not fns:
+    def physics_fn(state, grid, sigma_coord, phys_state=None):
+        if not tagged_fns:
             shape_3d = state.T.data.shape
             shape_2d = state.p_s.data.shape
             dims_3d = ("face", "x", "y", "level")
@@ -156,20 +196,32 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
                 dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_phys", dims=dims_2d, units="m^2/s^3"),
             )
 
-        first = fns[0](state, grid, sigma_coord)
+        fn0, accepts_ps = tagged_fns[0]
+        if accepts_ps:
+            first = fn0(state, grid, sigma_coord, phys_state=phys_state)
+        else:
+            first = fn0(state, grid, sigma_coord)
         du_dt = first.du_dt.data
         dv_dt = first.dv_dt.data
         dT_dt = first.dT_dt.data
         dp_s_dt = first.dp_s_dt.data
         dphis_dt = first.dphis_dt.data
 
-        for fn in fns[1:]:
-            t = fn(state, grid, sigma_coord)
+        for fn, accepts_ps in tagged_fns[1:]:
+            if accepts_ps:
+                t = fn(state, grid, sigma_coord, phys_state=phys_state)
+            else:
+                t = fn(state, grid, sigma_coord)
             du_dt = du_dt + t.du_dt.data
             dv_dt = dv_dt + t.dv_dt.data
             dT_dt = dT_dt + t.dT_dt.data
             dp_s_dt = dp_s_dt + t.dp_s_dt.data
             dphis_dt = dphis_dt + t.dphis_dt.data
+
+        # Collect updated PhysicsState from sub-function attributes.
+        physics_fn._updated_phys_state = _collect_updated_phys_state(
+            phys_state, tagged_fns,
+        )
 
         return HydrostaticTendencies(
             du_dt=first.du_dt.replace(data=du_dt),
@@ -179,15 +231,18 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             dphis_dt=first.dphis_dt.replace(data=dphis_dt),
         )
 
+    physics_fn._updated_phys_state = None
+
     def reset_state():
-        for fn in fns:
+        for fn, _ in tagged_fns:
             reset_fn = getattr(fn, "reset_state", None)
             if callable(reset_fn):
                 reset_fn()
+        physics_fn._updated_phys_state = None
 
     def set_time(day_of_year: float, seconds_of_day: float):
         """Propagate time to all sub-physics modules (e.g. radiation)."""
-        for fn in fns:
+        for fn, _ in tagged_fns:
             st = getattr(fn, "set_time", None)
             if callable(st):
                 st(day_of_year, seconds_of_day)
@@ -202,20 +257,20 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
 # ======================================================================
 
 def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
-    fns = []
+    tagged_fns = []
     if config.radiation.scheme != "none":
-        fns.append(make_radiation_physics(config.radiation, "nonhydrostatic"))
+        tagged_fns.append((make_radiation_physics(config.radiation, "nonhydrostatic"), False))
     if config.convection.scheme != "none":
-        fns.append(make_convection_physics(config.convection, "nonhydrostatic", dt))
+        tagged_fns.append((make_convection_physics(config.convection, "nonhydrostatic", dt), True))
     if config.turbulence.scheme != "none":
-        fns.append(make_turbulence_physics(config.turbulence, "nonhydrostatic", dt))
+        tagged_fns.append((make_turbulence_physics(config.turbulence, "nonhydrostatic", dt), True))
     if config.microphysics.scheme != "none":
-        fns.append(make_microphysics_physics(config.microphysics, "nonhydrostatic", dt))
+        tagged_fns.append((make_microphysics_physics(config.microphysics, "nonhydrostatic", dt), False))
     if config.gravity_wave_drag.scheme != "none":
-        fns.append(make_gwd_physics(config.gravity_wave_drag, "nonhydrostatic", dt))
+        tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "nonhydrostatic", dt), True))
 
-    def physics_fn(state, grid, height_coord, terrain_metric):
-        if not fns:
+    def physics_fn(state, grid, height_coord, terrain_metric, phys_state=None):
+        if not tagged_fns:
             shape_3d = state.theta_prime.data.shape
             shape_w = state.w.data.shape
             shape_2d = state.phis.data.shape
@@ -233,7 +288,11 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
                 dtracers_dt=Field(data=jnp.zeros_like(state.tracers.data), name="dtracers_dt_phys", dims=dims_tr, units="1/s"),
             )
 
-        first = fns[0](state, grid, height_coord, terrain_metric)
+        fn0, accepts_ps = tagged_fns[0]
+        if accepts_ps:
+            first = fn0(state, grid, height_coord, terrain_metric, phys_state=phys_state)
+        else:
+            first = fn0(state, grid, height_coord, terrain_metric)
         du_dt = first.du_dt.data
         dv_dt = first.dv_dt.data
         dw_dt = first.dw_dt.data
@@ -242,8 +301,11 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
         dphis_dt = first.dphis_dt.data
         dtracers_dt = first.dtracers_dt.data
 
-        for fn in fns[1:]:
-            t = fn(state, grid, height_coord, terrain_metric)
+        for fn, accepts_ps in tagged_fns[1:]:
+            if accepts_ps:
+                t = fn(state, grid, height_coord, terrain_metric, phys_state=phys_state)
+            else:
+                t = fn(state, grid, height_coord, terrain_metric)
             du_dt = du_dt + t.du_dt.data
             dv_dt = dv_dt + t.dv_dt.data
             dw_dt = dw_dt + t.dw_dt.data
@@ -251,6 +313,10 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             drho_prime_dt = drho_prime_dt + t.drho_prime_dt.data
             dphis_dt = dphis_dt + t.dphis_dt.data
             dtracers_dt = dtracers_dt + t.dtracers_dt.data
+
+        physics_fn._updated_phys_state = _collect_updated_phys_state(
+            phys_state, tagged_fns,
+        )
 
         return NonHydrostaticTendencies(
             du_dt=first.du_dt.replace(data=du_dt),
@@ -262,14 +328,17 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             dtracers_dt=first.dtracers_dt.replace(data=dtracers_dt),
         )
 
+    physics_fn._updated_phys_state = None
+
     def reset_state():
-        for fn in fns:
+        for fn, _ in tagged_fns:
             reset_fn = getattr(fn, "reset_state", None)
             if callable(reset_fn):
                 reset_fn()
+        physics_fn._updated_phys_state = None
 
     def set_time(day_of_year: float, seconds_of_day: float):
-        for fn in fns:
+        for fn, _ in tagged_fns:
             st = getattr(fn, "set_time", None)
             if callable(st):
                 st(day_of_year, seconds_of_day)
@@ -284,25 +353,25 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
 # ======================================================================
 
 def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
-    fns = []
+    tagged_fns = []
     if config.radiation.scheme != "none":
-        fns.append(make_radiation_physics(config.radiation, "spectral_pe"))
+        tagged_fns.append((make_radiation_physics(config.radiation, "spectral_pe"), False))
     if config.convection.scheme != "none":
-        fns.append(make_convection_physics(config.convection, "spectral_pe", dt))
+        tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True))
     if config.turbulence.scheme != "none":
-        fns.append(make_turbulence_physics(config.turbulence, "spectral_pe", dt))
+        tagged_fns.append((make_turbulence_physics(config.turbulence, "spectral_pe", dt), True))
     if config.microphysics.scheme != "none":
-        fns.append(make_microphysics_physics(config.microphysics, "spectral_pe", dt))
+        tagged_fns.append((make_microphysics_physics(config.microphysics, "spectral_pe", dt), False))
     if config.gravity_wave_drag.scheme != "none":
-        fns.append(make_gwd_physics(config.gravity_wave_drag, "spectral_pe", dt))
+        tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "spectral_pe", dt), True))
 
-    def physics_fn(state, grid, sigma_coord):
+    def physics_fn(state, grid, sigma_coord, phys_state=None):
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
             spectral_pe_to_grid,
         )
 
-        if not fns:
+        if not tagged_fns:
             zero_3d = jnp.zeros_like(state.vor_hat.data)
             zero_2d = jnp.zeros_like(state.lnps_hat.data)
             return SpectralHydrostaticState(
@@ -316,20 +385,31 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
         # Compute grid-space diagnostics once and reuse across all active modules.
         shared_fields = spectral_pe_to_grid(state, grid, sigma_coord)
 
-        first = fns[0](state, grid, sigma_coord, grid_fields=shared_fields)
+        fn0, accepts_ps = tagged_fns[0]
+        if accepts_ps:
+            first = fn0(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state)
+        else:
+            first = fn0(state, grid, sigma_coord, grid_fields=shared_fields)
         vor_hat = first.vor_hat.data
         div_hat = first.div_hat.data
         T_hat = first.T_hat.data
         lnps_hat = first.lnps_hat.data
         phis_hat = first.phis_hat.data
 
-        for fn in fns[1:]:
-            t = fn(state, grid, sigma_coord, grid_fields=shared_fields)
+        for fn, accepts_ps in tagged_fns[1:]:
+            if accepts_ps:
+                t = fn(state, grid, sigma_coord, grid_fields=shared_fields, phys_state=phys_state)
+            else:
+                t = fn(state, grid, sigma_coord, grid_fields=shared_fields)
             vor_hat = vor_hat + t.vor_hat.data
             div_hat = div_hat + t.div_hat.data
             T_hat = T_hat + t.T_hat.data
             lnps_hat = lnps_hat + t.lnps_hat.data
             phis_hat = phis_hat + t.phis_hat.data
+
+        physics_fn._updated_phys_state = _collect_updated_phys_state(
+            phys_state, tagged_fns,
+        )
 
         return SpectralHydrostaticState(
             vor_hat=first.vor_hat.replace(data=vor_hat),
@@ -339,14 +419,17 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             phis_hat=first.phis_hat.replace(data=phis_hat),
         )
 
+    physics_fn._updated_phys_state = None
+
     def reset_state():
-        for fn in fns:
+        for fn, _ in tagged_fns:
             reset_fn = getattr(fn, "reset_state", None)
             if callable(reset_fn):
                 reset_fn()
+        physics_fn._updated_phys_state = None
 
     def set_time(day_of_year: float, seconds_of_day: float):
-        for fn in fns:
+        for fn, _ in tagged_fns:
             st = getattr(fn, "set_time", None)
             if callable(st):
                 st(day_of_year, seconds_of_day)

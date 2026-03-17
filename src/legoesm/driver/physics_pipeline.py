@@ -31,6 +31,16 @@ class PhysicsOutput(NamedTuple):
     sw_down_toa: jax.Array
 
 
+class HeldRadiation(NamedTuple):
+    """Held radiation tendencies for sub-cycling."""
+    dT_dt_rad: jax.Array
+    sw_net_sfc: jax.Array
+    lw_net_sfc: jax.Array
+    sw_up_toa: jax.Array
+    lw_up_toa: jax.Array
+    sw_down_toa: jax.Array
+
+
 class PhysicsPipeline:
     """Encapsulates the full physics pipeline for operator-split stepping.
 
@@ -196,6 +206,130 @@ class PhysicsPipeline:
             lw_up_toa=lw_up_toa,
             sw_down_toa=sw_down_toa,
         )
+
+    def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
+                               day_of_year, seconds_of_day,
+                               solar_weights, s_0,
+                               o3_vmr_precomputed, aerosol_od_precomputed):
+        """Compute radiation tendencies and fluxes (pure JAX, no I/O).
+
+        Returns (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
+                 sw_down_toa) as a 6-tuple.
+        """
+        from legoesm.forcing.surface_utils import blend_surface_property
+
+        nlev = self.sigma_full.shape[0]
+        shape_3d = T.shape
+        shape_2d = p_s.shape
+        ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
+
+        T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
+        albedo = blend_surface_property(sic, self.albedo_ice, self.albedo_ocean)
+        emissivity = blend_surface_property(sic, self.emissivity_ice, self.emissivity_ocean)
+
+        p_full = p_s[..., None] * self.sigma_full
+        p_half = p_s[..., None] * self.sigma_half
+
+        T_col = T.reshape(ncol, nlev)
+        p_full_col = p_full.reshape(ncol, nlev)
+        p_half_col = p_half.reshape(ncol, nlev + 1)
+        q_v_col = q_v.reshape(ncol, nlev)
+        T_sfc_col = T_sfc.reshape(ncol)
+        lat_col = lat.reshape(ncol)
+        lon_col = lon.reshape(ncol)
+        albedo_col = albedo.reshape(ncol)
+        emis_col = emissivity.reshape(ncol)
+
+        rad_out = self.radiation_fn(
+            T_col, p_full_col, p_half_col, q_v_col,
+            T_sfc_col, lat_col, lon_col,
+            day_of_year, seconds_of_day,
+            albedo_col, emis_col,
+            o3_vmr_precomputed, aerosol_od_precomputed,
+            solar_weights, s_0,
+        )
+
+        dT_dt_rad = rad_out.heating_rate.reshape(shape_3d)
+        sw_down_sfc = rad_out.sw_flux_down[:, -1].reshape(shape_2d)
+        sw_net_sfc = sw_down_sfc * (1.0 - albedo)
+        lw_net_sfc = (rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]).reshape(shape_2d)
+        sw_up_toa = rad_out.sw_flux_up[:, 0].reshape(shape_2d)
+        lw_up_toa = rad_out.lw_flux_up[:, 0].reshape(shape_2d)
+        sw_down_toa = rad_out.sw_flux_down[:, 0].reshape(shape_2d)
+
+        return (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
+                sw_down_toa)
+
+    def build_step_unified(self):
+        """Build a JIT-compiled unified physics step with radiation sub-cycling.
+
+        Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
+        u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+        solar_weights, s_0, o3_vmr, aerosol_od, held) -> (PhysicsOutput,
+        HeldRadiation)``.
+        """
+        pipeline = self
+
+        @jax.jit
+        def step_unified(need_rad, T, p_s, q_v, q_c, q_r, u, v,
+                         sst, sic, lat, lon,
+                         day_of_year, seconds_of_day, dt,
+                         solar_weights, s_0,
+                         o3_vmr, aerosol_od,
+                         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa):
+
+            def _rad_branch(args):
+                (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+                 day_of_year, seconds_of_day, dt,
+                 solar_weights, s_0, o3_vmr, aerosol_od,
+                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = args
+
+                (dT_dt_rad, sw_net_sfc, lw_net_sfc,
+                 sw_up_toa, lw_up_toa, sw_down_toa) = \
+                    pipeline.compute_radiation_core(
+                        T, p_s, q_v, sst, sic, lat, lon,
+                        day_of_year, seconds_of_day,
+                        solar_weights, s_0, o3_vmr, aerosol_od,
+                    )
+
+                physics_out = pipeline.physics_step_no_rad(
+                    T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
+                    dT_dt_rad, sw_net_sfc, lw_net_sfc,
+                    sw_up_toa, lw_up_toa, sw_down_toa,
+                )
+
+                new_held = (dT_dt_rad, sw_net_sfc, lw_net_sfc,
+                            sw_up_toa, lw_up_toa, sw_down_toa)
+                return physics_out, new_held
+
+            def _no_rad_branch(args):
+                (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+                 day_of_year, seconds_of_day, dt,
+                 solar_weights, s_0, o3_vmr, aerosol_od,
+                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = args
+
+                physics_out = pipeline.physics_step_no_rad(
+                    T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
+                    held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                )
+
+                new_held = (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                            held_sw_up_toa, held_lw_up_toa, held_sw_down_toa)
+                return physics_out, new_held
+
+            args = (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+                    day_of_year, seconds_of_day, dt,
+                    solar_weights, s_0, o3_vmr, aerosol_od,
+                    held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa)
+
+            return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
+
+        return step_unified
 
 
 def build_physics_pipeline(grid, sigma, config):
