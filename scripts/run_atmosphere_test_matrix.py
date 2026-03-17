@@ -1,23 +1,33 @@
 #!/usr/bin/env python
-"""Atmosphere test matrix: organized, hierarchical test runner.
+"""Atmosphere test matrix: organized test runner for legoESM dynamical cores.
 
-Runs shallow-water, hydrostatic, non-hydrostatic, and RCE tests across
-cubed-sphere, lat-lon, and spectral grids at ~2.5° baseline resolution.
+Runs shallow-water, hydrostatic, and non-hydrostatic tests across
+cubed-sphere, lat-lon, and icosahedral grids at ~2.5 degree resolution.
 
 Output structure:
-    results/atmosphere/<grid>/<equation_set>/<resolution>/<vertical_coord>/<test>/
+    results/atmosphere/<equation_set>/<case>/<grid_type>/<resolution>/<vertical_coord>/
+
+Each case folder contains:
+    - mean_timeseries.csv / .png      (domain-averaged scalar time series)
+    - conservation_timeseries.csv/.png (mass & energy drift)
+    - field_snapshots.png              (2D field maps at selected times)
+    - snapshots_<field>.png            (per-field snapshot evolution)
+    - vertical_profiles.png            (vertical profile evolution)
+    - latitude_vertical_cross_sections.png
+    - longitude_vertical_cross_sections.png
+    - results.txt                      (run metadata)
 
 Usage:
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py --quick
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py --only sw
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py --test held_suarez_gray --grid cubed_sphere
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py --only hydro --grid cubed_sphere
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py --radiation rrtmgp
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import shutil
 import sys
@@ -29,7 +39,6 @@ from typing import Any, Callable
 
 sys.stdout.reconfigure(line_buffering=True)
 
-# Ensure project root is on sys.path so `tests.*` imports work.
 _PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
@@ -40,2860 +49,1710 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import numpy as np
 
-# ---------------------------------------------------------------------------
-# Matplotlib setup (Agg backend for headless)
-# ---------------------------------------------------------------------------
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
 # ===========================================================================
-# Test case registry
+# Configuration constants
+# ===========================================================================
+
+# ~2.5 degree resolutions per grid type
+GRID_RESOLUTIONS: dict[str, str] = {
+    "cubed_sphere": "C36",
+    "latlon": "72x144",
+    "icosahedral": "ico5",
+}
+
+GRID_TYPES = list(GRID_RESOLUTIONS.keys())
+
+DEFAULT_NLEV = 40
+
+
+# ===========================================================================
+# TestCase dataclass
 # ===========================================================================
 
 @dataclass
 class TestCase:
     """A single test case in the matrix."""
-    grid_type: str          # cubed_sphere, latlon, spectral
     equation_set: str       # shallow_water, hydrostatic, nonhydrostatic
-    resolution: str         # C36, 72x144, T42
+    case: str               # williamson2, held_suarez, dcmip_tc1, etc.
+    grid_type: str          # cubed_sphere, latlon, icosahedral
+    resolution: str         # C36, 72x144, ico5
     vertical_coord: str     # none, sigma, hybrid, height
-    test_name: str          # williamson2, held_suarez_gray, etc.
-    duration_days: float    # duration in days
-    quick_duration_days: float  # quick-mode duration in days
-    run_fn: str             # name of the runner function (string)
+    duration_days: float
+    quick_days: float
     run_kwargs: dict = field(default_factory=dict)
 
     @property
     def output_path(self) -> str:
-        return f"{self.grid_type}/{self.equation_set}/{self.resolution}/{self.vertical_coord}/{self.test_name}"
-
-
-# ---------------------------------------------------------------------------
-# Full test matrix
-# ---------------------------------------------------------------------------
-TEST_MATRIX: list[TestCase] = [
-    # ===== SHALLOW WATER — CUBED-SPHERE =====
-    TestCase("cubed_sphere", "shallow_water", "C36", "none", "williamson2",
-             5, 1, "run_sw_cubed_sphere", {"test_num": 2}),
-    TestCase("cubed_sphere", "shallow_water", "C36", "none", "williamson5",
-             15, 1, "run_sw_cubed_sphere", {"test_num": 5}),
-
-    # ===== SHALLOW WATER — LAT-LON =====
-    TestCase("latlon", "shallow_water", "72x144", "none", "williamson2",
-             5, 1, "run_sw_latlon", {"test_num": 2}),
-    TestCase("latlon", "shallow_water", "72x144", "none", "williamson5",
-             15, 1, "run_sw_latlon", {"test_num": 5}),
-
-    # ===== SHALLOW WATER — SPECTRAL =====
-    TestCase("spectral", "shallow_water", "T42", "none", "williamson2",
-             5, 1, "run_sw_spectral", {"test_num": 2}),
-    TestCase("spectral", "shallow_water", "T42", "none", "williamson5",
-             15, 1, "run_sw_spectral", {"test_num": 5}),
-
-    # ===== HYDROSTATIC — CUBED-SPHERE SIGMA =====
-    TestCase("cubed_sphere", "hydrostatic", "C36", "sigma", "held_suarez_gray",
-             200, 30, "run_hydro_held_suarez_cube", {"radiation": "gray"}),
-    TestCase("cubed_sphere", "hydrostatic", "C36", "sigma", "held_suarez_rrtmgp",
-             200, 30, "run_hydro_held_suarez_cube", {"radiation": "rrtmgp"}),
-    TestCase("cubed_sphere", "hydrostatic", "C36", "sigma", "baroclinic_wave",
-             10, 2, "run_hydro_baroclinic_cube", {}),
-    TestCase("cubed_sphere", "hydrostatic", "C36", "sigma", "dcmip_transport_11",
-             12, 1, "run_hydro_dcmip_transport", {"test_num": 11}),
-    TestCase("cubed_sphere", "hydrostatic", "C36", "sigma", "dcmip_transport_12",
-             12, 1, "run_hydro_dcmip_transport", {"test_num": 12}),
-    TestCase("cubed_sphere", "hydrostatic", "C36", "sigma", "dcmip_transport_13",
-             12, 1, "run_hydro_dcmip_transport", {"test_num": 13}),
-
-    # ===== HYDROSTATIC — CUBED-SPHERE HYBRID =====
-    TestCase("cubed_sphere", "hydrostatic", "C36", "hybrid", "held_suarez_gray",
-             200, 30, "run_hydro_held_suarez_cube", {"radiation": "gray", "vert": "hybrid"}),
-    TestCase("cubed_sphere", "hydrostatic", "C36", "hybrid", "held_suarez_rrtmgp",
-             200, 30, "run_hydro_held_suarez_cube", {"radiation": "rrtmgp", "vert": "hybrid"}),
-    TestCase("cubed_sphere", "hydrostatic", "C36", "hybrid", "baroclinic_wave",
-             10, 2, "run_hydro_baroclinic_cube", {"vert": "hybrid"}),
-    TestCase("cubed_sphere", "hydrostatic", "C36", "hybrid", "amip_gray",
-             365, 30, "run_hydro_amip_cube", {"radiation": "gray"}),
-    TestCase("cubed_sphere", "hydrostatic", "C36", "hybrid", "amip_rrtmgp",
-             365, 30, "run_hydro_amip_cube", {"radiation": "rrtmgp"}),
-
-    # ===== HYDROSTATIC — CUBED-SPHERE RCE =====
-    TestCase("cubed_sphere", "hydrostatic", "C36", "sigma", "rce_fixed_ocean",
-             200, 30, "run_hydro_rce_cube", {}),
-
-    # ===== HYDROSTATIC — LAT-LON =====
-    TestCase("latlon", "hydrostatic", "72x144", "sigma", "held_suarez_gray",
-             200, 30, "run_hydro_held_suarez_latlon", {"radiation": "gray"}),
-    TestCase("latlon", "hydrostatic", "72x144", "sigma", "held_suarez_rrtmgp",
-             200, 30, "run_hydro_held_suarez_latlon", {"radiation": "rrtmgp"}),
-
-    # ===== HYDROSTATIC — SPECTRAL SIGMA =====
-    TestCase("spectral", "hydrostatic", "T42", "sigma", "held_suarez_gray",
-             200, 30, "run_hydro_held_suarez_spectral", {"radiation": "gray"}),
-    TestCase("spectral", "hydrostatic", "T42", "sigma", "held_suarez_rrtmgp",
-             200, 30, "run_hydro_held_suarez_spectral", {"radiation": "rrtmgp"}),
-    TestCase("spectral", "hydrostatic", "T42", "sigma", "baroclinic_wave",
-             10, 2, "run_hydro_baroclinic_spectral", {}),
-
-    # ===== HYDROSTATIC — SPECTRAL HYBRID =====
-    TestCase("spectral", "hydrostatic", "T42", "hybrid", "held_suarez_gray",
-             200, 30, "run_hydro_held_suarez_spectral", {"radiation": "gray", "vert": "hybrid"}),
-    TestCase("spectral", "hydrostatic", "T42", "hybrid", "amip_gray",
-             365, 30, "run_hydro_amip_spectral", {"radiation": "gray"}),
-
-    # ===== NON-HYDROSTATIC — CUBED-SPHERE =====
-    TestCase("cubed_sphere", "nonhydrostatic", "C36", "height", "dcmip2025_tc1",
-             3 / 24, 0.5 / 24, "run_nh_dcmip2025_cube", {"test_case": "tc1"}),
-    TestCase("cubed_sphere", "nonhydrostatic", "C36", "height", "dcmip2025_tc2a",
-             6 / 24, 5 / (24 * 60), "run_nh_dcmip2025_cube", {"test_case": "tc2a"}),
-    TestCase("cubed_sphere", "nonhydrostatic", "C36", "height", "dcmip2025_tc3",
-             2 / 24, 5 / (24 * 60), "run_nh_dcmip2025_cube", {"test_case": "tc3"}),
-
-    # ===== NON-HYDROSTATIC — SPECTRAL =====
-    TestCase("spectral", "nonhydrostatic", "T42", "height", "dcmip2025_tc1",
-             3 / 24, 0.5 / 24, "run_nh_dcmip2025_spectral", {"test_case": "tc1"}),
-
-    # ===== SHALLOW WATER — ICOSAHEDRAL (MPAS) =====
-    TestCase("icosahedral", "shallow_water", "ico5", "none", "williamson2",
-             5, 1, "run_sw_icosahedral", {"test_num": 2}),
-    TestCase("icosahedral", "shallow_water", "ico5", "none", "williamson5",
-             15, 1, "run_sw_icosahedral", {"test_num": 5}),
-    TestCase("icosahedral", "shallow_water", "ico5", "none", "williamson6",
-             15, 1, "run_sw_icosahedral", {"test_num": 6}),
-
-    # ===== HYDROSTATIC — ICOSAHEDRAL SIGMA =====
-    TestCase("icosahedral", "hydrostatic", "ico5", "sigma", "held_suarez_gray",
-             200, 30, "run_hydro_held_suarez_icosahedral", {}),
-    TestCase("icosahedral", "hydrostatic", "ico5", "sigma", "baroclinic_wave",
-             10, 2, "run_hydro_baroclinic_icosahedral", {}),
-
-    # ===== NON-HYDROSTATIC — ICOSAHEDRAL =====
-    TestCase("icosahedral", "nonhydrostatic", "ico5", "height", "dcmip2025_tc1",
-             3 / 24, 0.5 / 24, "run_nh_dcmip2025_icosahedral", {"test_case": "tc1"}),
-]
+        parts = [self.equation_set, self.case, self.grid_type, self.resolution]
+        if self.vertical_coord != "none":
+            parts.append(self.vertical_coord)
+        return "/".join(parts)
 
 
 # ===========================================================================
-# Shared utilities
+# Test matrix generation
+# ===========================================================================
+
+def _build_test_matrix() -> list[TestCase]:
+    """Generate the full test matrix from grid × case × vertical coord."""
+    matrix: list[TestCase] = []
+    res = GRID_RESOLUTIONS
+
+    # --- Shallow water: all grids, no vertical coord ---
+    for g in GRID_TYPES:
+        for case, dur, quick, kw in [
+            ("williamson2", 5, 1, {"test_num": 2}),
+            ("williamson5", 15, 1, {"test_num": 5}),
+        ]:
+            matrix.append(TestCase(
+                "shallow_water", case, g, res[g], "none", dur, quick, dict(kw)))
+
+    # --- Hydrostatic: all grids, sigma + hybrid ---
+    for g in GRID_TYPES:
+        for vert in ["sigma", "hybrid"]:
+            matrix.append(TestCase(
+                "hydrostatic", "held_suarez", g, res[g], vert, 200, 30))
+            matrix.append(TestCase(
+                "hydrostatic", "baroclinic", g, res[g], vert, 10, 2))
+        # DCMIP transport: sigma only
+        for tn in [11, 12, 13]:
+            matrix.append(TestCase(
+                "hydrostatic", f"dcmip_transport_{tn}", g, res[g], "sigma",
+                12, 1, {"test_num": tn}))
+        # AMIP: hybrid only
+        matrix.append(TestCase(
+            "hydrostatic", "amip", g, res[g], "hybrid", 365, 30))
+
+    # --- Non-hydrostatic: all grids, height coord ---
+    for g in GRID_TYPES:
+        for case, dur, quick, kw in [
+            ("dcmip_tc1", 3 / 24, 0.5 / 24, {"test_case": "tc1"}),
+            ("dcmip_tc2", 6 / 24, 5 / (24 * 60), {"test_case": "tc2a"}),
+            ("dcmip_tc3", 2 / 24, 5 / (24 * 60), {"test_case": "tc3"}),
+        ]:
+            matrix.append(TestCase(
+                "nonhydrostatic", case, g, res[g], "height", dur, quick,
+                dict(kw)))
+
+    return matrix
+
+
+TEST_MATRIX = _build_test_matrix()
+
+
+# ===========================================================================
+# Results tracking
 # ===========================================================================
 
 ALL_RESULTS: list[dict[str, Any]] = []
 
 
 def record(tc: TestCase, status: str, wall_time: float, notes: str = ""):
-    """Record a test result."""
-    icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!"}[status]
+    icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!", "SKIP": "--"}[status]
     ALL_RESULTS.append({
-        "test": tc.test_name,
-        "grid": tc.grid_type,
-        "equation_set": tc.equation_set,
-        "resolution": tc.resolution,
-        "vertical_coord": tc.vertical_coord,
-        "status": status,
-        "wall_time": wall_time,
-        "notes": notes,
+        "test": tc.case, "grid": tc.grid_type,
+        "equation_set": tc.equation_set, "resolution": tc.resolution,
+        "vertical_coord": tc.vertical_coord, "status": status,
+        "wall_time": wall_time, "notes": notes,
     })
-    label = f"{tc.grid_type}/{tc.equation_set}/{tc.test_name}"
+    label = f"{tc.equation_set}/{tc.case}/{tc.grid_type}"
     print(f"  {icon} {status:5s} | {label:<55s} | {wall_time:7.1f}s | {notes}")
 
 
+# ===========================================================================
+# Shared utilities
+# ===========================================================================
+
 def check_finite(arrays: dict[str, Any]) -> bool:
-    for _name, arr in arrays.items():
+    for arr in arrays.values():
         if not bool(jnp.all(jnp.isfinite(arr))):
             return False
     return True
 
 
-def write_results_txt(output_dir: Path, rows: dict[str, Any]):
+def _snapshot_steps(n_steps: int, n_snaps: int = 10) -> set[int]:
+    """Return step numbers at which to save snapshots."""
+    if n_steps <= 0:
+        return set()
+    steps = {0, n_steps}
+    for i in range(1, n_snaps):
+        steps.add(max(1, int(i * n_steps / n_snaps)))
+    return steps
+
+
+def _compute_drift(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    return abs(values[-1] - values[0]) / max(abs(values[0]), 1e-30)
+
+
+# ---------------------------------------------------------------------------
+# Hyperdiffusion helpers
+# ---------------------------------------------------------------------------
+
+def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 5e16) -> float:
+    return ref_coeff * (ref_n / n) ** 4
+
+
+def _hyperdiff_latlon(n_lat: int, ref_n: int = 64, ref_coeff: float = 2e16) -> float:
+    return ref_coeff * (ref_n / n_lat) ** 4
+
+
+def _hyperdiff_ico(mesh) -> float:
+    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
+    return dx_mean ** 4 / (48.0 * 3600.0)
+
+
+# ---------------------------------------------------------------------------
+# Vertical coordinate creation
+# ---------------------------------------------------------------------------
+
+def _create_vertical(nlev: int, vertical_coord: str):
+    """Create vertical coordinate (sigma or hybrid)."""
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    if vertical_coord == "hybrid":
+        return standard_hybrid_levels(nlev)
+    return create_sigma_coordinate(nlev)
+
+
+# ---------------------------------------------------------------------------
+# RRTMGP physics factory
+# ---------------------------------------------------------------------------
+
+def _make_rrtmgp_physics(model_type: str, dt: float):
+    """Create RRTMGP-based physics function."""
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+
+    phys_cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="rrtmgp"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(scheme="none"),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    return make_physics(phys_cfg, model_type=model_type, dt=dt)
+
+
+# ===========================================================================
+# Generic time loop
+# ===========================================================================
+
+def _run_timeloop(
+    step_fn: Callable,
+    state: Any,
+    dt: float,
+    n_steps: int,
+    check_fn: Callable,
+    scalar_fn: Callable,
+    extract_fn: Callable,
+    diag_every: int,
+    key_array_fn: Callable,
+    *,
+    label: str = "",
+    total_days: float = 0,
+    blowup_threshold: float = 1000.0,
+    n_snaps: int = 10,
+) -> tuple[Any, dict, dict, float, bool]:
+    """Run time loop with diagnostics.
+
+    Returns (final_state, snapshots, diag, wall_time, ok).
+    """
+    snap_targets = _snapshot_steps(n_steps, n_snaps)
+    snapshots: dict[int, dict[str, np.ndarray]] = {0: extract_fn(state)}
+    diag: dict[str, list] = {"times": [], "steps": []}
+
+    t0 = time.time()
+    last_print = t0
+    blown_up = False
+
+    for i in range(n_steps):
+        state = step_fn(state, dt)
+        step = i + 1
+
+        if step in snap_targets:
+            snapshots[step] = extract_fn(state)
+
+        if step % 100 == 0:
+            is_finite, metric = check_fn(state)
+            if not is_finite or metric > blowup_threshold:
+                print(f"  BLOWUP at step {step}, metric={metric:.1f}")
+                blown_up = True
+                break
+
+        if step % diag_every == 0:
+            day = step * dt / 86400.0
+            scalars = scalar_fn(state)
+            diag["times"].append(day)
+            diag["steps"].append(step)
+            for k, v in scalars.items():
+                diag.setdefault(k, []).append(v)
+
+            now = time.time()
+            if now - last_print > 30:
+                summary = " | ".join(
+                    f"{k}={v:.4g}" for k, v in list(scalars.items())[:3])
+                print(f"    Day {day:7.1f}/{total_days} | {summary}")
+                last_print = now
+
+    jax.block_until_ready(key_array_fn(state))
+    wall = time.time() - t0
+
+    is_finite, _ = check_fn(state)
+    ok = is_finite and not blown_up
+
+    return state, snapshots, diag, wall, ok
+
+
+# ===========================================================================
+# Diagnostic saving
+# ===========================================================================
+
+def _bin_to_latlon(
+    values: np.ndarray,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    n_lat: int = 181,
+    n_lon: int = 360,
+) -> np.ndarray:
+    """Bin unstructured points onto a regular lat-lon grid."""
+    vals = np.asarray(values, dtype=np.float64).ravel()
+    lon = np.asarray(lon_deg, dtype=np.float64).ravel()
+    lat = np.asarray(lat_deg, dtype=np.float64).ravel()
+    lon = ((lon + 180.0) % 360.0) - 180.0
+    lat = np.clip(lat, -90.0, 90.0)
+    valid = np.isfinite(vals) & np.isfinite(lon) & np.isfinite(lat)
+    if not np.any(valid):
+        return np.full((n_lat, n_lon), np.nan, dtype=np.float64)
+    lat_edges = np.linspace(-90.0, 90.0, n_lat + 1)
+    lon_edges = np.linspace(-180.0, 180.0, n_lon + 1)
+    s, _, _ = np.histogram2d(
+        lat[valid], lon[valid], bins=(lat_edges, lon_edges),
+        weights=vals[valid])
+    c, _, _ = np.histogram2d(
+        lat[valid], lon[valid], bins=(lat_edges, lon_edges))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(c > 0, s / c, np.nan)
+
+
+def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
+               coord_kind: str) -> np.ndarray:
+    """Regrid a 2D field to (181, 360) lat-lon."""
+    if coord_kind in ("latlon", "gaussian"):
+        return np.asarray(field, dtype=np.float64)
+    return _bin_to_latlon(field.ravel(), lon_deg.ravel(), lat_deg.ravel())
+
+
+def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
+                     lat_deg: np.ndarray, coord_kind: str) -> np.ndarray:
+    """Regrid a 3D field (*, nlev) to (181, 360, nlev)."""
+    arr = np.asarray(field_3d, dtype=np.float64)
+    if coord_kind in ("latlon", "gaussian"):
+        if arr.ndim == 2:
+            arr = arr[..., None]
+        return arr
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    nlev = arr.shape[-1]
+    out = np.full((181, 360, nlev), np.nan, dtype=np.float64)
+    flat = arr.reshape(-1, nlev)
+    for k in range(nlev):
+        out[..., k] = _bin_to_latlon(
+            flat[:, k], lon_deg.ravel(), lat_deg.ravel())
+    return out
+
+
+# ---------------------------------------------------------------------------
+# File writers
+# ---------------------------------------------------------------------------
+
+def _write_results_txt(output_dir: Path, rows: dict[str, Any]):
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "results.txt", "w") as f:
         for k, v in rows.items():
             f.write(f"{k}: {v}\n")
 
 
-def save_timeseries_csv(output_dir: Path, filename: str, header: str,
-                        columns: dict[str, list]):
-    """Save timeseries data as CSV."""
+def _save_timeseries_csv(output_dir: Path, diag: dict, dt: float):
+    keys = [k for k in diag if k not in ("steps", "times")]
+    if not keys or not diag["steps"]:
+        return
     output_dir.mkdir(parents=True, exist_ok=True)
-    keys = list(columns.keys())
-    n = len(columns[keys[0]])
-    with open(output_dir / filename, "w") as f:
-        f.write(header + "\n")
-        for i in range(n):
-            vals = ",".join(f"{columns[k][i]:.8e}" for k in keys)
-            f.write(vals + "\n")
+    with open(output_dir / "mean_timeseries.csv", "w") as f:
+        f.write("step,time_days," + ",".join(keys) + "\n")
+        for i in range(len(diag["steps"])):
+            vals = ",".join(f"{diag[k][i]:.12e}" for k in keys)
+            f.write(f"{diag['steps'][i]},{diag['times'][i]:.8f},{vals}\n")
 
 
-def save_timeseries_plot(output_dir: Path, filename: str, title: str,
-                         panels: list[tuple[str, list, list, str]]):
-    """Save multi-panel timeseries plot.
-
-    panels: list of (ylabel, x_data, y_data, label)
-    """
+def _save_timeseries_plot(output_dir: Path, case_name: str, diag: dict,
+                          scalar_units: dict[str, str]):
+    keys = [k for k in diag if k not in ("steps", "times")]
+    times = diag.get("times", [])
+    if not keys or not times:
+        return
     output_dir.mkdir(parents=True, exist_ok=True)
-    n = len(panels)
+    n = len(keys)
     fig, axes = plt.subplots(n, 1, figsize=(10, 3 * n), sharex=True)
     if n == 1:
         axes = [axes]
-    for ax, (ylabel, xd, yd, label) in zip(axes, panels):
-        ax.plot(xd, yd, label=label)
-        ax.set_ylabel(ylabel)
-        ax.legend(loc="best", fontsize=8)
+    for ax, key in zip(axes, keys):
+        ax.plot(times, diag[key], lw=1.5)
+        unit = scalar_units.get(key, "")
+        ax.set_ylabel(f"{key}" + (f" ({unit})" if unit else ""))
         ax.grid(True, alpha=0.3)
     axes[-1].set_xlabel("Time (days)")
-    fig.suptitle(title, fontsize=13)
+    fig.suptitle(f"{case_name} — domain-averaged time series", fontsize=12)
     fig.tight_layout()
-    fig.savefig(output_dir / filename, dpi=120, bbox_inches="tight")
+    fig.savefig(output_dir / "mean_timeseries.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-def compute_hyperdiff_cube(n_grid: int, reference_n: int = 48,
-                           reference_coeff: float = 5e16) -> float:
-    return reference_coeff * (reference_n / n_grid) ** 4
-
-
-def compute_hyperdiff_spectral(truncation: int) -> float:
-    from legoesm import constants
-    a = constants.R_earth
-    eig_max = truncation * (truncation + 1) / (a * a)
-    return 1.0 / (0.5 * 3600.0 * eig_max ** 2)
-
-
-def compute_hyperdiff_latlon(n_lat: int, reference_n: int = 64,
-                              reference_coeff: float = 2e16) -> float:
-    return reference_coeff * (reference_n / n_lat) ** 4
-
-
-_RICH_DIAG_HELPERS = None
-
-
-def _get_rich_diag_helpers():
-    """Lazily load plotting helpers from the full atmosphere suite script."""
-    global _RICH_DIAG_HELPERS
-    if _RICH_DIAG_HELPERS is not None:
-        return _RICH_DIAG_HELPERS
-
-    helper_path = Path(__file__).with_name("run_atmosphere_25deg_ssp45_full.py")
-    spec = importlib.util.spec_from_file_location("atm25_helpers", helper_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load diagnostics helper module: {helper_path}")
-
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _RICH_DIAG_HELPERS = module
-    return _RICH_DIAG_HELPERS
-
-
-def _copy_if_exists(src: Path, dst: Path) -> bool:
-    if not src.exists():
-        return False
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if src.resolve() != dst.resolve():
-        shutil.copy2(src, dst)
-    return True
-
-
-def _write_placeholder_plot(path: Path, title: str, text: str):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(figsize=(8, 3))
-    ax.axis("off")
-    ax.text(0.5, 0.6, title, ha="center", va="center", fontsize=11, fontweight="bold")
-    ax.text(0.5, 0.35, text, ha="center", va="center", fontsize=9)
-    fig.tight_layout()
-    fig.savefig(path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-
-
-def _save_mean_and_conservation(
-    output_dir: Path,
-    case_name: str,
-    step_series: list[int],
-    dt: float,
-    series_values: dict[str, list[float]],
-    *,
-    units: dict[str, str] | None = None,
-    mass_key: str | None = None,
-    energy_key: str | None = None,
-):
-    """Write standardized mean + conservation diagnostics from scalar series."""
-    if not step_series:
+def _save_conservation(output_dir: Path, case_name: str, diag: dict,
+                       mass_key: str, energy_key: str):
+    mass_vals = diag.get(mass_key, [])
+    energy_vals = diag.get(energy_key, [])
+    times = diag.get("times", [])
+    if not mass_vals or not energy_vals or not times:
         return
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    helpers = _get_rich_diag_helpers()
-    series = {"step": [float(s) for s in step_series]}
-    for k, v in series_values.items():
-        if len(v) == len(step_series):
-            series[k] = [float(x) for x in v]
-
-    helpers._save_timeseries(output_dir, case_name, series, dt, units or {})
-
-    _copy_if_exists(output_dir / "integrated_timeseries.csv", output_dir / "mean_timeseries.csv")
-    _copy_if_exists(output_dir / "integrated_timeseries.png", output_dir / "mean_timeseries.png")
-
-    keys = [k for k in series if k != "step"]
-    if not keys:
-        return
-    if mass_key is None or mass_key not in series:
-        mass_key = keys[0]
-    if energy_key is None or energy_key not in series:
-        energy_key = keys[min(1, len(keys) - 1)]
-
-    mass = np.asarray(series[mass_key], dtype=np.float64)
-    energy = np.asarray(series[energy_key], dtype=np.float64)
-    steps = np.asarray(series["step"], dtype=np.float64)
-    t_days = steps * dt / 86400.0
-    mass_rel = (mass - mass[0]) / max(abs(mass[0]), 1.0e-30)
-    energy_rel = (energy - energy[0]) / max(abs(energy[0]), 1.0e-30)
+    mass = np.array(mass_vals, dtype=np.float64)
+    energy = np.array(energy_vals, dtype=np.float64)
+    t = np.array(times, dtype=np.float64)
+    mass_rel = (mass - mass[0]) / max(abs(mass[0]), 1e-30)
+    energy_rel = (energy - energy[0]) / max(abs(energy[0]), 1e-30)
 
     with open(output_dir / "conservation_timeseries.csv", "w") as f:
-        f.write("step,time_days,mass_proxy,energy_proxy,mass_rel,energy_rel\n")
-        for i in range(steps.size):
-            f.write(
-                f"{steps[i]:.0f},{t_days[i]:.8f},{mass[i]:.12e},{energy[i]:.12e},"
-                f"{mass_rel[i]:.12e},{energy_rel[i]:.12e}\n",
-            )
+        f.write("time_days,mass_proxy,energy_proxy,mass_rel,energy_rel\n")
+        for i in range(t.size):
+            f.write(f"{t[i]:.8f},{mass[i]:.12e},{energy[i]:.12e},"
+                    f"{mass_rel[i]:.12e},{energy_rel[i]:.12e}\n")
 
-    fig, axes = plt.subplots(2, 1, figsize=(8.8, 6.2), sharex=True)
-    axes[0].plot(t_days, mass_rel, lw=1.8)
-    axes[0].axhline(0.0, color="0.3", ls="--", lw=0.8)
-    axes[0].set_ylabel("Mass proxy drift")
-    axes[0].set_title(f"{mass_key} conservation proxy")
+    fig, axes = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
+    axes[0].plot(t, mass_rel, lw=1.5)
+    axes[0].axhline(0, color="0.3", ls="--", lw=0.8)
+    axes[0].set_ylabel(f"Relative {mass_key} drift")
+    axes[0].set_title(f"{mass_key} conservation")
     axes[0].grid(True, alpha=0.25)
-    axes[1].plot(t_days, energy_rel, lw=1.8, color="tab:red")
-    axes[1].axhline(0.0, color="0.3", ls="--", lw=0.8)
-    axes[1].set_ylabel("Energy proxy drift")
+    axes[1].plot(t, energy_rel, lw=1.5, color="tab:red")
+    axes[1].axhline(0, color="0.3", ls="--", lw=0.8)
+    axes[1].set_ylabel(f"Relative {energy_key} drift")
     axes[1].set_xlabel("Time (days)")
-    axes[1].set_title(f"{energy_key} conservation proxy")
+    axes[1].set_title(f"{energy_key} conservation")
     axes[1].grid(True, alpha=0.25)
+    fig.suptitle(f"{case_name} — conservation diagnostics", fontsize=12)
     fig.tight_layout()
-    fig.savefig(output_dir / "conservation_timeseries.png", dpi=150, bbox_inches="tight")
+    fig.savefig(
+        output_dir / "conservation_timeseries.png", dpi=150,
+        bbox_inches="tight")
     plt.close(fig)
 
 
-def _save_snapshots_bundle(
-    output_dir: Path,
-    case_name: str,
-    snapshots: dict[int, dict[str, np.ndarray]],
-    dt: float,
-    field_specs: list[tuple[str, str, str]],
-    *,
-    coord_kind: str,
-    lon_deg: np.ndarray | None = None,
-    lat_deg: np.ndarray | None = None,
-):
+def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
+                         dt: float, field_specs: list[tuple[str, str, str]],
+                         coord_kind: str, lon_deg: np.ndarray,
+                         lat_deg: np.ndarray):
+    """Save snapshot evolution plots for each 2D field."""
     if not snapshots:
         return
-    helpers = _get_rich_diag_helpers()
-    helpers._save_snapshots(
-        output_dir,
-        case_name,
-        snapshots,
-        dt,
-        field_specs,
-        coord_kind=coord_kind,
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    valid_steps = sorted(snapshots.keys())
+    first_saved = None
 
+    for field_key, field_label, cmap in field_specs:
+        steps = [s for s in valid_steps if field_key in snapshots[s]]
+        if not steps:
+            continue
+        if len(steps) > 8:
+            idx = np.linspace(0, len(steps) - 1, 8).astype(int)
+            steps = [steps[i] for i in idx]
 
-def _bin_points_to_latlon(
-    values: np.ndarray,
-    lon_deg: np.ndarray,
-    lat_deg: np.ndarray,
-    *,
-    n_lat_out: int = 181,
-    n_lon_out: int = 360,
-) -> np.ndarray:
-    vals = np.asarray(values, dtype=np.float64).reshape(-1)
-    lon = np.asarray(lon_deg, dtype=np.float64).reshape(-1)
-    lat = np.asarray(lat_deg, dtype=np.float64).reshape(-1)
-    lon = ((lon + 180.0) % 360.0) - 180.0
-    lat = np.clip(lat, -90.0, 90.0)
-    valid = np.isfinite(vals) & np.isfinite(lon) & np.isfinite(lat)
-    if not np.any(valid):
-        return np.full((n_lat_out, n_lon_out), np.nan, dtype=np.float64)
-    lat_edges = np.linspace(-90.0, 90.0, n_lat_out + 1)
-    lon_edges = np.linspace(-180.0, 180.0, n_lon_out + 1)
-    sum_grid, _, _ = np.histogram2d(
-        lat[valid], lon[valid], bins=(lat_edges, lon_edges), weights=vals[valid]
-    )
-    cnt_grid, _, _ = np.histogram2d(lat[valid], lon[valid], bins=(lat_edges, lon_edges))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        out = np.where(cnt_grid > 0.0, sum_grid / cnt_grid, np.nan)
-    return out
+        n_cols = min(4, len(steps))
+        n_rows = (len(steps) + n_cols - 1) // n_cols
+        fig, axes = plt.subplots(
+            n_rows, n_cols, figsize=(4.5 * n_cols, 3.5 * n_rows))
+        axes = np.atleast_2d(axes)
+        im = None
 
-
-def _regrid_3d_to_latlon(
-    field_3d: np.ndarray,
-    *,
-    coord_kind: str,
-    lon_deg: np.ndarray,
-    lat_deg: np.ndarray,
-    n_lat_out: int = 181,
-    n_lon_out: int = 360,
-) -> np.ndarray:
-    arr = np.asarray(field_3d, dtype=np.float64)
-    helpers = _get_rich_diag_helpers()
-
-    if coord_kind == "cube":
-        # (6, n, n, nlev)
-        nlev = arr.shape[-1]
-        out = np.full((n_lat_out, n_lon_out, nlev), np.nan, dtype=np.float64)
-        for k in range(nlev):
-            out[..., k] = helpers._regrid_panel_to_latlon_pixels(
-                arr[..., k],
-                lon_deg,
-                lat_deg,
-                "cube",
-                n_lon_out=n_lon_out,
-                n_lat_out=n_lat_out,
-            )
-        return out
-
-    if coord_kind in ("latlon", "gaussian"):
-        # already (lat, lon, nlev)
-        if arr.ndim == 2:
-            arr = arr[..., None]
-        return arr
-
-    if coord_kind == "icosa":
-        # (nCells, nlev)
-        if arr.ndim == 1:
-            arr = arr[:, None]
-        nlev = arr.shape[-1]
-        out = np.full((n_lat_out, n_lon_out, nlev), np.nan, dtype=np.float64)
-        for k in range(nlev):
-            out[..., k] = _bin_points_to_latlon(
-                arr[:, k], lon_deg, lat_deg, n_lat_out=n_lat_out, n_lon_out=n_lon_out
-            )
-        return out
-
-    raise ValueError(f"Unsupported coord_kind: {coord_kind}")
-
-
-def _save_vertical_cross_sections(
-    output_dir: Path,
-    case_name: str,
-    snapshots: dict[int, dict[str, np.ndarray]],
-    dt: float,
-    *,
-    field_key_3d: str,
-    coord_kind: str,
-    lon_deg: np.ndarray,
-    lat_deg: np.ndarray,
-    level_values: np.ndarray | None = None,
-    level_label: str = "Level",
-):
-    steps = sorted(snapshots.keys())
-    if not steps:
-        return
-
-    # Find steps that carry the requested 3D field
-    valid_steps = [s for s in steps if field_key_3d in snapshots[s]]
-    if not valid_steps:
-        _write_placeholder_plot(
-            output_dir / "latitude_vertical_cross_sections.png",
-            f"{case_name} latitude-vertical",
-            f"No 3D field '{field_key_3d}' was saved for this case.",
-        )
-        _write_placeholder_plot(
-            output_dir / "longitude_vertical_cross_sections.png",
-            f"{case_name} longitude-vertical",
-            f"No 3D field '{field_key_3d}' was saved for this case.",
-        )
-        return
-
-    sample = np.asarray(snapshots[valid_steps[0]][field_key_3d])
-    nlev = sample.shape[-1]
-    if level_values is None:
-        level_values = np.arange(nlev, dtype=np.float64)
-    lev = np.asarray(level_values, dtype=np.float64)
-
-    lat_sections = {}
-    lon_sections = {}
-    for st in valid_steps:
-        field_3d = np.asarray(snapshots[st][field_key_3d], dtype=np.float64)
-        ll = _regrid_3d_to_latlon(
-            field_3d,
-            coord_kind=coord_kind,
-            lon_deg=lon_deg,
-            lat_deg=lat_deg,
-            n_lat_out=181,
-            n_lon_out=360,
-        )  # (lat, lon, lev)
-        lat_sections[st] = np.nanmean(ll, axis=1)  # (lat, lev)
-        lon_sections[st] = np.nanmean(ll, axis=0)  # (lon, lev)
-
-    lat_axis = np.linspace(-90.0, 90.0, lat_sections[valid_steps[0]].shape[0])
-    lon_axis = np.linspace(-180.0, 180.0, lon_sections[valid_steps[0]].shape[0])
-
-    for fname, axis_vals, data_map, xlabel in [
-        ("latitude_vertical_cross_sections.png", lat_axis, lat_sections, "Latitude (deg)"),
-        ("longitude_vertical_cross_sections.png", lon_axis, lon_sections, "Longitude (deg)"),
-    ]:
-        n_cols = len(valid_steps)
-        fig, axes = plt.subplots(1, n_cols, figsize=(4.5 * n_cols, 4.8), sharey=True)
-        if n_cols == 1:
-            axes = [axes]
-        images = []
-        for ax, st in zip(axes, valid_steps):
-            sec = data_map[st]  # (axis, lev)
+        for idx, step in enumerate(steps):
+            r, c = divmod(idx, n_cols)
+            ax = axes[r, c]
+            raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
+            regridded = _regrid_2d(raw, lon_deg, lat_deg, coord_kind)
             im = ax.imshow(
-                sec.T,
-                origin="lower",
-                aspect="auto",
-                extent=[axis_vals[0], axis_vals[-1], float(lev[0]), float(lev[-1])],
-                cmap="RdBu_r",
-            )
-            images.append(im)
-            ax.set_title(f"step {st}, t={st * dt / 86400.0:.2f} d", fontsize=9)
+                regridded, origin="lower", aspect="auto", cmap=cmap,
+                extent=[-180, 180, -90, 90])
+            day = step * dt / 86400.0
+            ax.set_title(f"t={day:.2f} d", fontsize=9)
+            if c == 0:
+                ax.set_ylabel("Latitude")
+            if r == n_rows - 1:
+                ax.set_xlabel("Longitude")
+
+        for idx in range(len(steps), n_rows * n_cols):
+            r, c = divmod(idx, n_cols)
+            axes[r, c].set_visible(False)
+
+        if im is not None:
+            fig.colorbar(
+                im, ax=axes.ravel().tolist(), orientation="vertical",
+                fraction=0.02, pad=0.02, label=field_label)
+        fig.suptitle(f"{case_name} — {field_key}", fontsize=11)
+        fig.tight_layout(rect=[0, 0, 0.96, 0.95])
+        fname = f"snapshots_{field_key}.png"
+        fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        if first_saved is None:
+            first_saved = fname
+
+    # Alias first field as field_snapshots.png
+    if first_saved and (output_dir / first_saved).exists():
+        shutil.copy2(output_dir / first_saved,
+                     output_dir / "field_snapshots.png")
+
+
+def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
+                         dt: float, field_3d_key: str, coord_kind: str,
+                         lon_deg: np.ndarray, lat_deg: np.ndarray,
+                         levels: np.ndarray, level_label: str):
+    """Save latitude-vertical and longitude-vertical cross-sections."""
+    valid_steps = sorted(
+        s for s in snapshots if field_3d_key in snapshots[s])
+    if not valid_steps:
+        return
+    if len(valid_steps) > 6:
+        idx = np.linspace(0, len(valid_steps) - 1, 6).astype(int)
+        valid_steps = [valid_steps[i] for i in idx]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lat_axis = np.linspace(-90, 90, 181)
+    lon_axis = np.linspace(-180, 180, 360)
+
+    for fname, axis_vals, mean_axis, xlabel in [
+        ("latitude_vertical_cross_sections.png", lat_axis, 1, "Latitude"),
+        ("longitude_vertical_cross_sections.png", lon_axis, 0, "Longitude"),
+    ]:
+        nc = len(valid_steps)
+        fig, axes_arr = plt.subplots(
+            1, nc, figsize=(4.5 * nc, 5), sharey=True)
+        if nc == 1:
+            axes_arr = [axes_arr]
+        im = None
+
+        for ax, step in zip(axes_arr, valid_steps):
+            f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
+            ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
+            section = np.nanmean(ll, axis=mean_axis)  # (axis, lev)
+            im = ax.imshow(
+                section.T, origin="lower", aspect="auto", cmap="RdBu_r",
+                extent=[axis_vals[0], axis_vals[-1],
+                        float(levels[0]), float(levels[-1])])
+            day = step * dt / 86400.0
+            ax.set_title(f"t={day:.2f} d", fontsize=9)
             ax.set_xlabel(xlabel)
-        axes[0].set_ylabel(level_label)
-        cbar = fig.colorbar(images[-1], ax=axes, orientation="vertical", fraction=0.028, pad=0.02)
-        cbar.set_label(field_key_3d)
-        fig.suptitle(f"{case_name} - {field_key_3d} cross-sections", fontsize=12)
-        fig.tight_layout(rect=[0, 0, 0.98, 0.95])
+
+        axes_arr[0].set_ylabel(level_label)
+        if im is not None:
+            fig.colorbar(
+                im, ax=axes_arr, orientation="vertical", fraction=0.028,
+                pad=0.02, label=field_3d_key)
+        fig.suptitle(
+            f"{case_name} — {field_3d_key} cross-sections", fontsize=11)
+        fig.tight_layout(rect=[0, 0, 0.96, 0.95])
         fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
 
-def _ensure_required_artifacts(output_dir: Path):
-    """Guarantee standardized artifact files exist in each case folder."""
+def _save_profiles(output_dir: Path, case_name: str, snapshots: dict,
+                   dt: float, field_3d_key: str, levels: np.ndarray,
+                   level_label: str, invert_y: bool = True):
+    """Save vertical profile evolution plot."""
+    valid_steps = sorted(
+        s for s in snapshots if field_3d_key in snapshots[s])
+    if not valid_steps:
+        return
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    _copy_if_exists(output_dir / "integrated_timeseries.csv", output_dir / "mean_timeseries.csv")
-    _copy_if_exists(output_dir / "integrated_timeseries.png", output_dir / "mean_timeseries.png")
-    _copy_if_exists(output_dir / "timeseries.png", output_dir / "mean_timeseries.png")
+    fig, ax = plt.subplots(figsize=(7, 8))
+    colors = plt.cm.viridis(np.linspace(0, 1, len(valid_steps)))
+    for step, color in zip(valid_steps, colors):
+        f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
+        profile = np.nanmean(f3d, axis=tuple(range(f3d.ndim - 1)))
+        day = step * dt / 86400.0
+        ax.plot(profile, levels, color=color, lw=1.5, label=f"day {day:.1f}")
+    ax.set_xlabel(field_3d_key)
+    ax.set_ylabel(level_label)
+    if invert_y:
+        ax.invert_yaxis()
+    ax.legend(fontsize=7, ncol=2, loc="best")
+    ax.set_title(f"{case_name} — vertical profile evolution")
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(
+        output_dir / "vertical_profiles.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
-    if not (output_dir / "field_snapshots.png").exists():
-        _copy_if_exists(output_dir / "field_snapshots_latlon_pixels.png", output_dir / "field_snapshots.png")
-    if not (output_dir / "field_snapshots.png").exists():
-        _copy_if_exists(output_dir / "field_snapshots_native.png", output_dir / "field_snapshots.png")
 
+def _save_snapshot_times(output_dir: Path, snapshots: dict, dt: float):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / "snapshot_times.txt", "w") as f:
+        f.write("step,time_seconds,time_days\n")
+        for step in sorted(snapshots.keys()):
+            t_s = step * dt
+            f.write(f"{step},{t_s:.2f},{t_s / 86400:.6f}\n")
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+def _save_case_diagnostics(
+    output_dir: Path,
+    case_name: str,
+    dt: float,
+    diag: dict,
+    snapshots: dict,
+    coord_kind: str,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    field_specs_2d: list[tuple[str, str, str]],
+    *,
+    field_3d_key: str | None = None,
+    level_values: np.ndarray | None = None,
+    level_label: str = "Level",
+    mass_key: str | None = None,
+    energy_key: str | None = None,
+    scalar_units: dict[str, str] | None = None,
+    invert_levels: bool = True,
+):
+    """Save all standard diagnostic outputs for a test case."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    su = scalar_units or {}
+
+    _save_timeseries_csv(output_dir, diag, dt)
+    _save_timeseries_plot(output_dir, case_name, diag, su)
+
+    if mass_key and energy_key:
+        _save_conservation(output_dir, case_name, diag, mass_key, energy_key)
+
+    _save_snapshot_plots(
+        output_dir, case_name, snapshots, dt, field_specs_2d,
+        coord_kind, lon_deg, lat_deg)
+    _save_snapshot_times(output_dir, snapshots, dt)
+
+    if field_3d_key and level_values is not None:
+        _save_cross_sections(
+            output_dir, case_name, snapshots, dt, field_3d_key,
+            coord_kind, lon_deg, lat_deg, level_values, level_label)
+        _save_profiles(
+            output_dir, case_name, snapshots, dt, field_3d_key,
+            level_values, level_label, invert_levels)
+
+
+def _placeholder_plot(path: Path, title: str, text: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(6, 2))
+    ax.text(0.5, 0.6, title, ha="center", va="center",
+            fontsize=10, fontweight="bold")
+    ax.text(0.5, 0.3, text, ha="center", va="center", fontsize=8)
+    ax.axis("off")
+    fig.savefig(path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _ensure_required_artifacts(output_dir: Path):
+    """Guarantee standardized files exist in each case folder."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for csv_name in ["mean_timeseries.csv", "conservation_timeseries.csv"]:
+        p = output_dir / csv_name
+        if not p.exists():
+            with open(p, "w") as f:
+                f.write("# No data produced\n")
     if not (output_dir / "snapshot_times.txt").exists():
         with open(output_dir / "snapshot_times.txt", "w") as f:
             f.write("step,time_seconds,time_days\n")
-
     for png_name in [
-        "field_snapshots.png",
-        "field_snapshots_native.png",
-        "field_snapshots_latlon_pixels.png",
-        "mean_timeseries.png",
+        "field_snapshots.png", "mean_timeseries.png",
         "conservation_timeseries.png",
         "latitude_vertical_cross_sections.png",
         "longitude_vertical_cross_sections.png",
+        "vertical_profiles.png",
     ]:
         p = output_dir / png_name
         if not p.exists():
-            _write_placeholder_plot(
-                p,
-                f"{png_name}",
-                "This artifact was not produced by this specific test runner.",
-            )
-
-    if not (output_dir / "mean_timeseries.csv").exists():
-        with open(output_dir / "mean_timeseries.csv", "w") as f:
-            f.write("step,time_seconds,time_days\n")
-    if not (output_dir / "conservation_timeseries.csv").exists():
-        with open(output_dir / "conservation_timeseries.csv", "w") as f:
-            f.write("step,time_days,mass_proxy,energy_proxy,mass_rel,energy_rel\n")
+            _placeholder_plot(p, png_name, "Not produced for this case.")
 
 
 # ===========================================================================
-# Runner functions
+# Shared field extraction helpers
 # ===========================================================================
 
-# ---------------------------------------------------------------------------
-# Shallow water — cubed-sphere
-# ---------------------------------------------------------------------------
-def run_sw_cubed_sphere(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    test_num = kwargs["test_num"]
+def _extract_hydro_cube_latlon(s):
+    """Extract hydrostatic snapshot fields for cubed-sphere or lat-lon."""
+    u_sfc = np.asarray(s.u.data[..., -1], dtype=np.float64)
+    v_sfc = np.asarray(s.v.data[..., -1], dtype=np.float64)
+    return {
+        "u": u_sfc,
+        "v": v_sfc,
+        "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
+        "p_s": np.asarray(s.p_s.data, dtype=np.float64),
+        "T_3d": np.asarray(s.T.data, dtype=np.float64),
+    }
 
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water import (
-        ShallowWaterModel, ShallowWaterConfig,
-    )
-    from tests.test_cases.williamson import (
-        williamson_test2, williamson_test2_exact, williamson_test5,
-        compute_error_norms,
-    )
 
-    n_grid = int(tc.resolution[1:])  # C36 → 36
-    grid = create_cubed_sphere(n_grid)
-    dt = 300.0
-    hyperdiff = compute_hyperdiff_cube(n_grid)
-
-    if test_num == 2:
-        state_init = williamson_test2(grid)
+def _extract_hydro_mpas(s, lon_deg, lat_deg):
+    """Extract hydrostatic snapshot fields for icosahedral (MPAS)."""
+    u_raw = np.asarray(s.u.data, dtype=np.float64).ravel()
+    if u_raw.size == lon_deg.size:
+        u_ll = _bin_to_latlon(u_raw, lon_deg, lat_deg)
     else:
-        state_init = williamson_test5(grid)
+        u_ll = np.full((181, 360), np.nan, dtype=np.float64)
+    ps_ll = _bin_to_latlon(
+        np.asarray(s.p_s.data, dtype=np.float64), lon_deg, lat_deg)
+    return {
+        "u": u_ll,
+        "p_s": ps_ll,
+        "T_3d": np.asarray(s.T.data, dtype=np.float64),
+    }
 
-    config = ShallowWaterConfig(
-        hyperdiff_coeff=hyperdiff,
-        edge_blend_strength=0.25,
-    )
-    model = ShallowWaterModel(grid, config)
-    state = state_init
 
+# ===========================================================================
+# Runner: Shallow Water
+# ===========================================================================
+
+def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
+                      radiation: str = "gray") -> tuple[str, float, str]:
+    test_num = tc.run_kwargs["test_num"]
+
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.shallow_water import (
+            ShallowWaterModel, ShallowWaterConfig)
+        from tests.test_cases.williamson import (
+            williamson_test2, williamson_test5,
+            williamson_test2_exact, compute_error_norms)
+
+        n = int(tc.resolution[1:])
+        grid = create_cubed_sphere(n)
+        dt = 300.0
+        config = ShallowWaterConfig(
+            hyperdiff_coeff=_hyperdiff_cube(n), edge_blend_strength=0.25)
+        model = ShallowWaterModel(grid, config)
+        state = williamson_test2(grid) if test_num == 2 else williamson_test5(grid)
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        def check_fn(s):
+            return (check_finite({"h": s.h.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        def scalar_fn(s):
+            return {
+                "mean_height": float(jnp.mean(s.h.data)),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    s.u.data ** 2 + s.v.data ** 2))),
+            }
+
+        def extract_fn(s):
+            u = np.asarray(s.u.data, dtype=np.float64)
+            v = np.asarray(s.v.data, dtype=np.float64)
+            return {"u": u, "v": v,
+                    "wind_speed": np.sqrt(u ** 2 + v ** 2),
+                    "height": np.asarray(s.h.data, dtype=np.float64)}
+
+        key_array_fn = lambda s: s.h.data
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig)
+        from tests.test_cases.williamson_latlon import (
+            williamson_test2_latlon, williamson_test5_latlon,
+            williamson_test2_exact_latlon, compute_error_norms_latlon)
+
+        n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
+        grid = create_latlon_grid(n_lat, n_lon)
+        dt = 300.0
+        config = FVShallowWaterLatLonConfig(
+            hyperdiff_coeff=_hyperdiff_latlon(n_lat))
+        model = FVShallowWaterLatLonModel(grid, config)
+        state = (williamson_test2_latlon(grid) if test_num == 2
+                 else williamson_test5_latlon(grid))
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        def check_fn(s):
+            return (check_finite({"h": s.h.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        def scalar_fn(s):
+            return {
+                "mean_height": float(jnp.mean(s.h.data)),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    s.u.data ** 2 + s.v.data ** 2))),
+            }
+
+        def extract_fn(s):
+            u = np.asarray(s.u.data, dtype=np.float64)
+            v = np.asarray(s.v.data, dtype=np.float64)
+            return {"u": u, "v": v,
+                    "wind_speed": np.sqrt(u ** 2 + v ** 2),
+                    "height": np.asarray(s.h.data, dtype=np.float64)}
+
+        key_array_fn = lambda s: s.h.data
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "icosahedral":
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+            MPASShallowWaterModel, MPASShallowWaterConfig)
+        from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
+            williamson_test2_mpas, williamson_test5_mpas,
+            compute_error_norms_mpas)
+
+        level = int(tc.resolution.replace("ico", ""))
+        mesh = create_voronoi_mesh(level)
+        dt = 300.0
+        config = MPASShallowWaterConfig(nu_del4=_hyperdiff_ico(mesh))
+        model = MPASShallowWaterModel(mesh, config)
+        init_fns = {2: williamson_test2_mpas, 5: williamson_test5_mpas}
+        state = init_fns[test_num](mesh)
+        grid = mesh  # for consistent naming
+
+        lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        def check_fn(s):
+            return (check_finite({"h": s.h.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        def scalar_fn(s):
+            return {
+                "mean_height": float(jnp.mean(s.h.data)),
+                "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+            }
+
+        def extract_fn(s):
+            return {"height": _bin_to_latlon(
+                np.asarray(s.h.data, dtype=np.float64),
+                lon_cell, lat_cell)}
+
+        key_array_fn = lambda s: s.h.data
+        coord_kind = "latlon"  # already regridded
+        lon_deg = np.linspace(-180, 180, 360, endpoint=False)
+        lat_deg = np.linspace(-90, 90, 181)
+
+    else:
+        raise NotImplementedError(
+            f"Shallow water not implemented for grid '{tc.grid_type}'")
+
+    # --- Time loop ---
+    mass_init = float(jnp.mean(state.h.data))
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 20)
-    diag_times, diag_steps, diag_mass, diag_max_wind = [], [], [], []
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
 
-    def _extract_sw_fields(s):
-        u = np.asarray(s.u.data, dtype=np.float64)
-        v = np.asarray(s.v.data, dtype=np.float64)
-        return {
-            "u": u,
-            "v": v,
-            "wind_speed": np.sqrt(u * u + v * v),
-            "height": np.asarray(s.h.data, dtype=np.float64),
-        }
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, key_array_fn,
+        label=f"SW W{test_num} ({tc.grid_type})", total_days=days)
 
-    mass_init = float(jnp.mean(state_init.h.data))
-    snapshots[0] = _extract_sw_fields(state)
-
-    t0 = time.time()
-    for i in range(n_steps):
-        state = model.step(state, dt)
-        step = i + 1
-        if step in snap_targets:
-            snapshots[step] = _extract_sw_fields(state)
-        if (i + 1) % diag_every == 0:
-            day = (i + 1) * dt / 86400.0
-            diag_times.append(day)
-            diag_steps.append(i + 1)
-            diag_mass.append(float(jnp.mean(state.h.data)))
-            diag_max_wind.append(float(jnp.max(jnp.sqrt(
-                state.u.data ** 2 + state.v.data ** 2))))
-    jax.block_until_ready(state.h.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"h": state.h.data, "u": state.u.data, "v": state.v.data})
-
-    # Error norms for TC2
+    # --- Error norms for TC2 ---
     notes = ""
-    if test_num == 2:
+    if test_num == 2 and tc.grid_type == "cubed_sphere":
         exact = williamson_test2_exact(grid, days * 86400.0)
         norms = compute_error_norms(state, exact, grid)
         notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
-    else:
-        mass_drift = abs(diag_mass[-1] - mass_init) / abs(mass_init) if diag_mass else 0
-        notes = f"mass drift={mass_drift:.2e}"
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "days": days, "dt": dt, "n_steps": n_steps, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"SW Williamson {test_num} — C{n_grid}",
-                             [("Mean h (m)", diag_times, diag_mass, "h"),
-                              ("Max |v| (m/s)", diag_times, diag_max_wind, "|v|")])
-        _save_mean_and_conservation(
-            output_dir,
-            f"SW Williamson {test_num} C{n_grid}",
-            diag_steps,
-            dt,
-            {"mean_height": diag_mass, "max_wind": diag_max_wind},
-            units={"mean_height": "m", "max_wind": "m/s"},
-            mass_key="mean_height",
-            energy_key="max_wind",
-        )
-
-    _save_snapshots_bundle(
-        output_dir,
-        f"SW Williamson {test_num} C{n_grid}",
-        snapshots,
-        dt,
-        [
-            ("u", "Zonal wind u (m/s)", "RdBu_r"),
-            ("v", "Meridional wind v (m/s)", "RdBu_r"),
-            ("wind_speed", "Wind speed (m/s)", "magma"),
-            ("height", "Fluid depth h (m)", "viridis"),
-        ],
-        coord_kind="cube",
-        lon_deg=np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi,
-        lat_deg=np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi,
-    )
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Shallow water — lat-lon
-# ---------------------------------------------------------------------------
-def run_sw_latlon(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    test_num = kwargs["test_num"]
-
-    from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-        FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig,
-    )
-    from tests.test_cases.williamson_latlon import (
-        williamson_test2_latlon, williamson_test2_exact_latlon,
-        williamson_test5_latlon, compute_error_norms_latlon,
-    )
-
-    parts = tc.resolution.split("x")
-    n_lat, n_lon = int(parts[0]), int(parts[1])
-    grid = create_latlon_grid(n_lat, n_lon)
-    dt = 300.0
-    hyperdiff = compute_hyperdiff_latlon(n_lat)
-
-    if test_num == 2:
-        state_init = williamson_test2_latlon(grid)
-    else:
-        state_init = williamson_test5_latlon(grid)
-
-    config = FVShallowWaterLatLonConfig(hyperdiff_coeff=hyperdiff)
-    model = FVShallowWaterLatLonModel(grid, config)
-    state = state_init
-
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, n_steps // 20)
-    diag_times, diag_steps, diag_mass, diag_max_wind = [], [], [], []
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
-
-    def _extract_sw_fields(s):
-        u = np.asarray(s.u.data, dtype=np.float64)
-        v = np.asarray(s.v.data, dtype=np.float64)
-        return {
-            "u": u,
-            "v": v,
-            "wind_speed": np.sqrt(u * u + v * v),
-            "height": np.asarray(s.h.data, dtype=np.float64),
-        }
-
-    mass_init = float(jnp.mean(state_init.h.data))
-    snapshots[0] = _extract_sw_fields(state)
-
-    t0 = time.time()
-    for i in range(n_steps):
-        state = model.step(state, dt)
-        step = i + 1
-        if step in snap_targets:
-            snapshots[step] = _extract_sw_fields(state)
-        if (i + 1) % diag_every == 0:
-            day = (i + 1) * dt / 86400.0
-            diag_times.append(day)
-            diag_steps.append(i + 1)
-            diag_mass.append(float(jnp.mean(state.h.data)))
-            diag_max_wind.append(float(jnp.max(jnp.sqrt(
-                state.u.data ** 2 + state.v.data ** 2))))
-    jax.block_until_ready(state.h.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"h": state.h.data, "u": state.u.data, "v": state.v.data})
-
-    notes = ""
-    if test_num == 2:
+    elif test_num == 2 and tc.grid_type == "latlon":
         exact = williamson_test2_exact_latlon(grid, days * 86400.0)
         norms = compute_error_norms_latlon(state, exact, grid)
         notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
-    else:
-        mass_drift = abs(diag_mass[-1] - mass_init) / abs(mass_init) if diag_mass else 0
-        notes = f"mass drift={mass_drift:.2e}"
+    elif test_num == 2 and tc.grid_type == "icosahedral":
+        norms = compute_error_norms_mpas(state.h.data, init_fns[2](mesh).h.data, mesh)
+        notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
+    elif diag.get("mean_height"):
+        notes = f"mass drift={_compute_drift(diag['mean_height']):.2e}"
 
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "days": days, "dt": dt, "n_steps": n_steps, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"SW Williamson {test_num} — {n_lat}x{n_lon}",
-                             [("Mean h (m)", diag_times, diag_mass, "h"),
-                              ("Max |v| (m/s)", diag_times, diag_max_wind, "|v|")])
-        _save_mean_and_conservation(
-            output_dir,
-            f"SW Williamson {test_num} {n_lat}x{n_lon}",
-            diag_steps,
-            dt,
-            {"mean_height": diag_mass, "max_wind": diag_max_wind},
-            units={"mean_height": "m", "max_wind": "m/s"},
-            mass_key="mean_height",
-            energy_key="max_wind",
-        )
-
-    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
-    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
-    _save_snapshots_bundle(
-        output_dir,
-        f"SW Williamson {test_num} {n_lat}x{n_lon}",
-        snapshots,
-        dt,
-        [
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "status": "PASS" if ok else "FAIL",
+        "notes": notes})
+    _save_case_diagnostics(
+        output_dir, f"SW Williamson {test_num} {tc.resolution}", dt,
+        diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
             ("u", "Zonal wind u (m/s)", "RdBu_r"),
             ("v", "Meridional wind v (m/s)", "RdBu_r"),
             ("wind_speed", "Wind speed (m/s)", "magma"),
             ("height", "Fluid depth h (m)", "viridis"),
         ],
-        coord_kind="latlon",
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-    )
+        mass_key="mean_height", energy_key="max_wind",
+        scalar_units={"mean_height": "m", "max_wind": "m/s"})
 
     return "PASS" if ok else "FAIL", wall, notes
 
 
-# ---------------------------------------------------------------------------
-# Shallow water — spectral
-# ---------------------------------------------------------------------------
-def run_sw_spectral(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    test_num = kwargs["test_num"]
+# ===========================================================================
+# Runner: Held-Suarez
+# ===========================================================================
 
-    from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_sw import (
-        SpectralSWConfig, spectral_sw_tendencies,
-        williamson_test2_spectral, williamson_test5_spectral,
-        spectral_to_grid,
-    )
-    from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
+                    radiation: str = "gray") -> tuple[str, float, str]:
+    nlev = DEFAULT_NLEV
 
-    truncation = int(tc.resolution[1:])  # T42 → 42
-    grid = create_gaussian_grid(truncation)
-    dt = 60.0  # explicit spectral SW needs small dt
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.primitive_eq import (
+            PrimitiveEquationModel, PrimitiveEquationConfig)
+        from legoesm.atmosphere.physics.held_suarez import (
+            held_suarez_forcing, held_suarez_init)
+        from legoesm.core.operators import global_integral
 
-    a = grid.radius
-    eig_max = truncation * (truncation + 1) / (a * a)
-    hyperdiff = 1.0 / (1.0 * 3600.0 * eig_max ** 2)
-    config = SpectralSWConfig(hyperdiff_coeff=hyperdiff)
+        n = int(tc.resolution[1:])
+        grid = create_cubed_sphere(n)
+        sigma = _create_vertical(nlev, tc.vertical_coord)
+        hd = _hyperdiff_cube(n)
+        dt = 200.0
+        config = PrimitiveEquationConfig(
+            hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
+            use_conservation_fixer=True, fix_mass=True,
+            edge_blend_uv=0.15, edge_blend_T=0.10,
+            edge_blend_p_s=0.20, edge_blend_width=2)
+        model = PrimitiveEquationModel(grid, sigma, config)
+        state = held_suarez_init(grid, sigma)
 
-    if test_num == 2:
-        state_init = williamson_test2_spectral(grid)
-    else:
-        state_init = williamson_test5_spectral(grid)
+        physics_fn = (_make_rrtmgp_physics("hydrostatic", dt)
+                      if radiation == "rrtmgp" else held_suarez_forcing)
 
-    def tendency(s):
-        return spectral_sw_tendencies(s, grid, config)
+        def step_fn(s, dt_):
+            return model.step_with_physics(s, dt_, physics_fn)
 
-    step_jit = jax.jit(lambda s, dt_: ssp_rk3_step(s, tendency, dt_))
-    state = state_init
+        mass_fn = lambda s: float(global_integral(s.p_s, grid))
 
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, n_steps // 20)
-    diag_times, diag_steps, diag_mean_h, diag_max_wind = [], [], [], []
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
+        def check_fn(s):
+            return (check_finite({"T": s.T.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
 
-    def _extract_spec_sw(s):
-        fld = spectral_to_grid(s, grid)
-        u = np.asarray(fld["u"], dtype=np.float64)
-        v = np.asarray(fld["v"], dtype=np.float64)
-        h = np.asarray(fld["h"], dtype=np.float64)
-        return {
-            "u": u,
-            "v": v,
-            "wind_speed": np.sqrt(u * u + v * v),
-            "height": h,
-        }
-
-    snapshots[0] = _extract_spec_sw(state)
-
-    t0 = time.time()
-    for i in range(n_steps):
-        state = step_jit(state, dt)
-        step = i + 1
-        if step in snap_targets:
-            snapshots[step] = _extract_spec_sw(state)
-        if step % diag_every == 0:
-            fields = spectral_to_grid(state, grid)
-            day = (i + 1) * dt / 86400.0
-            diag_times.append(day)
-            diag_steps.append(step)
-            diag_mean_h.append(float(jnp.mean(fields["h"])))
-            diag_max_wind.append(float(jnp.max(jnp.sqrt(
-                fields["u"] ** 2 + fields["v"] ** 2))))
-    jax.block_until_ready(state.vor_hat.data)
-    wall = time.time() - t0
-
-    fields = spectral_to_grid(state, grid)
-    ok = check_finite({"h": fields["h"], "u": fields["u"], "v": fields["v"]})
-    notes = ""
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "days": days, "dt": dt, "n_steps": n_steps, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL",
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"SW Spectral Williamson {test_num} — T{truncation}",
-                             [("Max |v| (m/s)", diag_times, diag_max_wind, "|v|")])
-        _save_mean_and_conservation(
-            output_dir,
-            f"SW Spectral Williamson {test_num} T{truncation}",
-            diag_steps,
-            dt,
-            {"mean_height": diag_mean_h, "max_wind": diag_max_wind},
-            units={"mean_height": "m", "max_wind": "m/s"},
-            mass_key="mean_height",
-            energy_key="max_wind",
-        )
-
-    _save_snapshots_bundle(
-        output_dir,
-        f"SW Spectral Williamson {test_num} T{truncation}",
-        snapshots,
-        dt,
-        [
-            ("u", "Zonal wind u (m/s)", "RdBu_r"),
-            ("v", "Meridional wind v (m/s)", "RdBu_r"),
-            ("wind_speed", "Wind speed (m/s)", "magma"),
-            ("height", "Fluid depth h (m)", "viridis"),
-        ],
-        coord_kind="gaussian",
-        lon_deg=np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi,
-        lat_deg=np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi,
-    )
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Hydrostatic Held-Suarez — cubed-sphere
-# ---------------------------------------------------------------------------
-def run_hydro_held_suarez_cube(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    radiation = kwargs.get("radiation", "gray")
-    vert = kwargs.get("vert", "sigma")
-
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
-    from legoesm.atmosphere.dynamics.primitive_eq import (
-        PrimitiveEquationModel, PrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing, held_suarez_init
-    from legoesm.core.operators import global_integral
-
-    n_grid = int(tc.resolution[1:])
-    nlev = 40
-    dt = 200.0
-    grid = create_cubed_sphere(n_grid)
-
-    if vert == "hybrid":
-        sigma = standard_hybrid_levels(nlev)
-    else:
-        sigma = create_sigma_coordinate(nlev)
-
-    hyperdiff = compute_hyperdiff_cube(n_grid)
-    config = PrimitiveEquationConfig(
-        hyperdiff_coeff=hyperdiff,
-        hyperdiff_ps_coeff=hyperdiff,
-        use_conservation_fixer=True,
-        fix_mass=True,
-        edge_blend_uv=0.15,
-        edge_blend_T=0.10,
-        edge_blend_p_s=0.20,
-        edge_blend_width=2,
-    )
-    model = PrimitiveEquationModel(grid, sigma, config)
-    state = held_suarez_init(grid, sigma)
-    mass_init = float(global_integral(state.p_s, grid))
-
-    # Physics: gray or RRTMGP via make_physics
-    if radiation == "rrtmgp":
-        from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
-        from legoesm.atmosphere.physics.radiation.config import RadiationConfig
-        from legoesm.atmosphere.physics.convection.config import ConvectionConfig
-        from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
-        from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
-
-        phys_cfg = PhysicsConfig(
-            radiation=RadiationConfig(scheme="rrtmgp"),
-            convection=ConvectionConfig(scheme="none"),
-            turbulence=TurbulenceConfig(scheme="none"),
-            microphysics=MicrophysicsConfig(scheme="none"),
-            gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
-        )
-        physics_fn = make_physics(phys_cfg, model_type="hydrostatic", dt=dt)
-    else:
-        physics_fn = held_suarez_forcing
-
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(6 * 3600 / dt))  # every 6 hours
-    diag_times, diag_steps, diag_mass, diag_max_wind, diag_mean_T = [], [], [], [], []
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
-
-    def _extract_hs_cube(s):
-        u_sfc = np.asarray(s.u.data[..., -1], dtype=np.float64)
-        v_sfc = np.asarray(s.v.data[..., -1], dtype=np.float64)
-        return {
-            "u": u_sfc,
-            "v": v_sfc,
-            "wind_speed": np.sqrt(u_sfc * u_sfc + v_sfc * v_sfc),
-            "p_s": np.asarray(s.p_s.data, dtype=np.float64),
-            "T_3d": np.asarray(s.T.data, dtype=np.float64),
-        }
-
-    snapshots[0] = _extract_hs_cube(state)
-
-    t0 = time.time()
-    last_print = t0
-    for step in range(n_steps):
-        state = model.step_with_physics(state, dt, physics_fn)
-        step_num = step + 1
-        if step_num in snap_targets:
-            snapshots[step_num] = _extract_hs_cube(state)
-
-        if step_num % 100 == 0:
-            u_max = float(jnp.max(jnp.abs(state.u.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step_num}, u_max={u_max:.1f}")
-                break
-
-        if step_num % diag_every == 0:
-            day = step_num * dt / 86400.0
-            mass = float(global_integral(state.p_s, grid))
-            max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
-            mean_T = float(jnp.mean(state.T.data))
-            diag_times.append(day)
-            diag_steps.append(step_num)
-            diag_mass.append(mass)
-            diag_max_wind.append(max_wind)
-            diag_mean_T.append(mean_T)
-
-            now = time.time()
-            if now - last_print > 30:
-                mass_drift = abs(mass - mass_init) / abs(mass_init)
-                print(f"    Day {day:7.1f}/{days} | max|v|={max_wind:6.1f} m/s | "
-                      f"<T>={mean_T:.1f} K | mass drift={mass_drift:.2e}")
-                last_print = now
-
-    jax.block_until_ready(state.T.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"T": state.T.data, "u": state.u.data, "v": state.v.data,
-                        "p_s": state.p_s.data})
-    mass_final = float(global_integral(state.p_s, grid))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
-    notes = f"mass drift={mass_drift:.2e}, max|v|={diag_max_wind[-1]:.1f}" if diag_max_wind else ""
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "vertical_coord": vert, "levels": nlev, "radiation": radiation,
-        "days": days, "dt": dt, "n_steps": n_steps, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        mass_drift_ts = [abs(m - mass_init) / abs(mass_init) for m in diag_mass]
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"Held-Suarez ({radiation}) — C{n_grid}/L{nlev} ({vert})",
-                             [("Mass drift (rel)", diag_times, mass_drift_ts, "mass"),
-                              ("Max |v| (m/s)", diag_times, diag_max_wind, "|v|"),
-                              ("Mean T (K)", diag_times, diag_mean_T, "T")])
-        _save_mean_and_conservation(
-            output_dir,
-            f"Held-Suarez {radiation} C{n_grid} {vert}",
-            diag_steps,
-            dt,
-            {"mean_p_s": diag_mass, "max_wind": diag_max_wind, "mean_T": diag_mean_T},
-            units={"mean_p_s": "Pa", "max_wind": "m/s", "mean_T": "K"},
-            mass_key="mean_p_s",
-            energy_key="mean_T",
-        )
-
-    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
-    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
-    _save_snapshots_bundle(
-        output_dir,
-        f"Held-Suarez {radiation} C{n_grid} {vert}",
-        snapshots,
-        dt,
-        [
-            ("u", "Zonal wind u (m/s)", "RdBu_r"),
-            ("v", "Meridional wind v (m/s)", "RdBu_r"),
-            ("wind_speed", "Wind speed (m/s)", "magma"),
-            ("p_s", "Surface pressure (Pa)", "viridis"),
-        ],
-        coord_kind="cube",
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-    )
-    _save_vertical_cross_sections(
-        output_dir,
-        f"Held-Suarez {radiation} C{n_grid} {vert}",
-        snapshots,
-        dt,
-        field_key_3d="T_3d",
-        coord_kind="cube",
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-        level_values=np.asarray(getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64),
-        level_label="Sigma level",
-    )
-    if hasattr(sigma, "sigma_full"):
-        _get_rich_diag_helpers()._save_profiles(
-            output_dir,
-            f"Held-Suarez {radiation} C{n_grid} {vert}",
-            {
-                st: {
-                    "T_mean": np.nanmean(np.asarray(snapshots[st]["T_3d"]), axis=(0, 1, 2))
-                }
-                for st in sorted(snapshots.keys())
-                if "T_3d" in snapshots[st]
-            },
-            dt,
-            np.asarray(sigma.sigma_full, dtype=np.float64),
-            "Sigma",
-            True,
-            units={"T_mean": "K"},
-        )
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Hydrostatic Held-Suarez — lat-lon
-# ---------------------------------------------------------------------------
-def run_hydro_held_suarez_latlon(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    radiation = kwargs.get("radiation", "gray")
-
-    from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
-        LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.physics.held_suarez_latlon import (
-        held_suarez_forcing_latlon, held_suarez_init_latlon,
-    )
-    from legoesm.core.operators_latlon import global_integral as global_integral_ll
-
-    parts = tc.resolution.split("x")
-    n_lat, n_lon = int(parts[0]), int(parts[1])
-    nlev = 40
-    dt = 200.0
-
-    grid = create_latlon_grid(n_lat, n_lon)
-    sigma = create_sigma_coordinate(nlev)
-    hyperdiff = compute_hyperdiff_latlon(n_lat)
-
-    config = LatLonPrimitiveEquationConfig(
-        hyperdiff_coeff=hyperdiff,
-        hyperdiff_ps_coeff=hyperdiff,
-        use_conservation_fixer=True,
-        fix_mass=True,
-    )
-    model = LatLonPrimitiveEquationModel(grid, sigma, config)
-    state = held_suarez_init_latlon(grid, sigma)
-    mass_init = float(global_integral_ll(state.p_s, grid))
-
-    if radiation == "rrtmgp":
-        from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
-        from legoesm.atmosphere.physics.radiation.config import RadiationConfig
-        from legoesm.atmosphere.physics.convection.config import ConvectionConfig
-        from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
-        from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
-
-        phys_cfg = PhysicsConfig(
-            radiation=RadiationConfig(scheme="rrtmgp"),
-            convection=ConvectionConfig(scheme="none"),
-            turbulence=TurbulenceConfig(scheme="none"),
-            microphysics=MicrophysicsConfig(scheme="none"),
-            gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
-        )
-        physics_fn = make_physics(phys_cfg, model_type="hydrostatic", dt=dt)
-    else:
-        physics_fn = held_suarez_forcing_latlon
-
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(6 * 3600 / dt))
-    diag_times, diag_steps, diag_mass, diag_max_wind, diag_mean_T = [], [], [], [], []
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
-
-    def _extract_hs_latlon(s):
-        u = np.asarray(s.u.data[..., -1], dtype=np.float64)
-        v = np.asarray(s.v.data[..., -1], dtype=np.float64)
-        return {
-            "u": u,
-            "v": v,
-            "wind_speed": np.sqrt(u * u + v * v),
-            "p_s": np.asarray(s.p_s.data, dtype=np.float64),
-            "T_3d": np.asarray(s.T.data, dtype=np.float64),
-        }
-
-    snapshots[0] = _extract_hs_latlon(state)
-
-    t0 = time.time()
-    last_print = t0
-    for step in range(n_steps):
-        state = model.step_with_physics(state, dt, physics_fn)
-        step_num = step + 1
-        if step_num in snap_targets:
-            snapshots[step_num] = _extract_hs_latlon(state)
-
-        if step_num % 100 == 0:
-            u_max = float(jnp.max(jnp.abs(state.u.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step_num}")
-                break
-
-        if step_num % diag_every == 0:
-            day = step_num * dt / 86400.0
-            mass = float(global_integral_ll(state.p_s, grid))
-            max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
-            mean_T = float(jnp.mean(state.T.data))
-            diag_times.append(day)
-            diag_steps.append(step_num)
-            diag_mass.append(mass)
-            diag_max_wind.append(max_wind)
-            diag_mean_T.append(mean_T)
-
-            now = time.time()
-            if now - last_print > 30:
-                print(f"    Day {day:7.1f}/{days} | max|v|={max_wind:6.1f} m/s | <T>={mean_T:.1f} K")
-                last_print = now
-
-    jax.block_until_ready(state.T.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"T": state.T.data, "u": state.u.data, "v": state.v.data,
-                        "p_s": state.p_s.data})
-    mass_final = float(global_integral_ll(state.p_s, grid))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
-    notes = f"mass drift={mass_drift:.2e}"
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "radiation": radiation, "levels": nlev,
-        "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        mass_drift_ts = [abs(m - mass_init) / abs(mass_init) for m in diag_mass]
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"Held-Suarez ({radiation}) — {n_lat}x{n_lon}/L{nlev}",
-                             [("Mass drift (rel)", diag_times, mass_drift_ts, "mass"),
-                              ("Max |v| (m/s)", diag_times, diag_max_wind, "|v|"),
-                              ("Mean T (K)", diag_times, diag_mean_T, "T")])
-        _save_mean_and_conservation(
-            output_dir,
-            f"Held-Suarez {radiation} {n_lat}x{n_lon}",
-            diag_steps,
-            dt,
-            {"mean_p_s": diag_mass, "max_wind": diag_max_wind, "mean_T": diag_mean_T},
-            units={"mean_p_s": "Pa", "max_wind": "m/s", "mean_T": "K"},
-            mass_key="mean_p_s",
-            energy_key="mean_T",
-        )
-
-    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
-    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
-    _save_snapshots_bundle(
-        output_dir,
-        f"Held-Suarez {radiation} {n_lat}x{n_lon}",
-        snapshots,
-        dt,
-        [
-            ("u", "Zonal wind u (m/s)", "RdBu_r"),
-            ("v", "Meridional wind v (m/s)", "RdBu_r"),
-            ("wind_speed", "Wind speed (m/s)", "magma"),
-            ("p_s", "Surface pressure (Pa)", "viridis"),
-        ],
-        coord_kind="latlon",
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-    )
-    _save_vertical_cross_sections(
-        output_dir,
-        f"Held-Suarez {radiation} {n_lat}x{n_lon}",
-        snapshots,
-        dt,
-        field_key_3d="T_3d",
-        coord_kind="latlon",
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-        level_values=np.asarray(sigma.sigma_full, dtype=np.float64),
-        level_label="Sigma",
-    )
-    _get_rich_diag_helpers()._save_profiles(
-        output_dir,
-        f"Held-Suarez {radiation} {n_lat}x{n_lon}",
-        {
-            st: {
-                "T_mean": np.nanmean(np.asarray(snapshots[st]["T_3d"]), axis=(0, 1))
+        def scalar_fn(s):
+            return {
+                "mass": mass_fn(s),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    s.u.data ** 2 + s.v.data ** 2))),
+                "mean_T": float(jnp.mean(s.T.data)),
             }
-            for st in sorted(snapshots.keys())
-            if "T_3d" in snapshots[st]
-        },
-        dt,
-        np.asarray(sigma.sigma_full, dtype=np.float64),
-        "Sigma",
-        True,
-        units={"T_mean": "K"},
-    )
 
-    return "PASS" if ok else "FAIL", wall, notes
+        extract_fn = _extract_hydro_cube_latlon
+        key_array_fn = lambda s: s.T.data
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
 
+    elif tc.grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
+            LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
+        from legoesm.atmosphere.physics.held_suarez_latlon import (
+            held_suarez_forcing_latlon, held_suarez_init_latlon)
+        from legoesm.core.operators_latlon import (
+            global_integral as global_integral_ll)
 
-# ---------------------------------------------------------------------------
-# Hydrostatic Held-Suarez — spectral
-# ---------------------------------------------------------------------------
-def run_hydro_held_suarez_spectral(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    radiation = kwargs.get("radiation", "gray")
-    vert = kwargs.get("vert", "sigma")
+        n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
+        grid = create_latlon_grid(n_lat, n_lon)
+        sigma = _create_vertical(nlev, tc.vertical_coord)
+        hd = _hyperdiff_latlon(n_lat)
+        dt = 200.0
+        config = LatLonPrimitiveEquationConfig(
+            hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
+            use_conservation_fixer=True, fix_mass=True)
+        model = LatLonPrimitiveEquationModel(grid, sigma, config)
+        state = held_suarez_init_latlon(grid, sigma)
 
-    from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
-    from legoesm.atmosphere.dynamics.spectral_pe import (
-        SpectralPrimitiveEquationModel, SpectralPEConfig,
-        isothermal_rest_state_spectral, spectral_pe_to_grid,
-    )
-    from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing_spectral
+        physics_fn = (_make_rrtmgp_physics("hydrostatic", dt)
+                      if radiation == "rrtmgp" else held_suarez_forcing_latlon)
 
-    truncation = int(tc.resolution[1:])
-    nlev = 40
-    dt = 600.0
+        def step_fn(s, dt_):
+            return model.step_with_physics(s, dt_, physics_fn)
 
-    grid = create_gaussian_grid(truncation)
-    if vert == "hybrid":
-        sigma = standard_hybrid_levels(nlev)
-    else:
+        mass_fn = lambda s: float(global_integral_ll(s.p_s, grid))
+
+        def check_fn(s):
+            return (check_finite({"T": s.T.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        def scalar_fn(s):
+            return {
+                "mass": mass_fn(s),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    s.u.data ** 2 + s.v.data ** 2))),
+                "mean_T": float(jnp.mean(s.T.data)),
+            }
+
+        extract_fn = _extract_hydro_cube_latlon
+        key_array_fn = lambda s: s.T.data
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "icosahedral":
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
+        from legoesm.atmosphere.physics.held_suarez_mpas import (
+            held_suarez_forcing_mpas, held_suarez_init_mpas)
+
+        level = int(tc.resolution.replace("ico", ""))
+        mesh = create_voronoi_mesh(level)
+        # MPAS PE currently uses sigma only
         sigma = create_sigma_coordinate(nlev)
+        dt = 200.0
+        config = MPASPrimitiveEquationConfig(
+            nu_del4=_hyperdiff_ico(mesh), fix_mass=True)
+        model = MPASPrimitiveEquationModel(mesh, sigma, config)
+        state = held_suarez_init_mpas(mesh, sigma)
+        grid = mesh
 
-    hyperdiff = compute_hyperdiff_spectral(truncation)
-    config = SpectralPEConfig(
-        hyperdiff_coeff=hyperdiff,
-        hyperdiff_order=2,
-        semi_implicit=True,
-        si_T_ref=300.0,
-    )
-    model = SpectralPrimitiveEquationModel(grid, sigma, config)
-    state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
+        def step_fn(s, dt_):
+            return model.step(s, dt_, held_suarez_forcing_mpas)
 
-    # For RRTMGP, use make_physics; for gray, use spectral forcing
-    if radiation == "rrtmgp":
-        from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
-        from legoesm.atmosphere.physics.radiation.config import RadiationConfig
-        from legoesm.atmosphere.physics.convection.config import ConvectionConfig
-        from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
-        from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+        mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
 
-        phys_cfg = PhysicsConfig(
-            radiation=RadiationConfig(scheme="rrtmgp"),
-            convection=ConvectionConfig(scheme="none"),
-            turbulence=TurbulenceConfig(scheme="none"),
-            microphysics=MicrophysicsConfig(scheme="none"),
-            gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
-        )
-        physics_fn = make_physics(phys_cfg, model_type="spectral_pe", dt=dt)
+        def check_fn(s):
+            return (check_finite({"T": s.T.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        def scalar_fn(s):
+            return {
+                "mass": mass_fn(s),
+                "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+                "mean_T": float(jnp.mean(s.T.data)),
+            }
+
+        lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+
+        def extract_fn(s):
+            return _extract_hydro_mpas(s, lon_cell, lat_cell)
+
+        key_array_fn = lambda s: s.T.data
+        coord_kind = "icosa"
+        lon_deg = lon_cell
+        lat_deg = lat_cell
     else:
-        physics_fn = held_suarez_forcing_spectral
+        raise NotImplementedError(
+            f"Held-Suarez not implemented for grid '{tc.grid_type}'")
 
+    # --- Time loop ---
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, int(6 * 3600 / dt))
-    diag_times, diag_steps, diag_mean_ps, diag_max_wind, diag_mean_T = [], [], [], [], []
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
 
-    def _extract_hs_spec(s):
-        fld = spectral_pe_to_grid(s, grid, sigma)
-        u = np.asarray(fld["u"][..., -1], dtype=np.float64)
-        v = np.asarray(fld["v"][..., -1], dtype=np.float64)
-        return {
-            "u": u,
-            "v": v,
-            "wind_speed": np.sqrt(u * u + v * v),
-            "p_s": np.asarray(fld["p_s"], dtype=np.float64),
-            "T_3d": np.asarray(fld["T"], dtype=np.float64),
-        }
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, key_array_fn,
+        label=f"Held-Suarez ({tc.grid_type})", total_days=days)
 
-    snapshots[0] = _extract_hs_spec(state)
+    mass_drift = _compute_drift(diag.get("mass", []))
+    max_wind = diag["max_wind"][-1] if diag.get("max_wind") else 0
+    notes = f"mass drift={mass_drift:.2e}, max|v|={max_wind:.1f}"
 
-    t0 = time.time()
-    last_print = t0
-    for step in range(n_steps):
-        state = model.step_with_physics(state, dt, physics_fn)
-        step_num = step + 1
-        if step_num in snap_targets:
-            snapshots[step_num] = _extract_hs_spec(state)
+    level_values = np.asarray(
+        getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
 
-        if step_num % 100 == 0:
-            if not jnp.all(jnp.isfinite(state.vor_hat.data)):
-                print(f"  BLOWUP at step {step_num}")
-                break
-
-        if step_num % diag_every == 0:
-            day = step_num * dt / 86400.0
-            fields = spectral_pe_to_grid(state, grid, sigma)
-            max_wind = float(jnp.max(jnp.sqrt(fields["u"]**2 + fields["v"]**2)))
-            mean_T = float(jnp.mean(fields["T"]))
-            mean_ps = float(jnp.mean(fields["p_s"]))
-            diag_times.append(day)
-            diag_steps.append(step_num)
-            diag_mean_ps.append(mean_ps)
-            diag_max_wind.append(max_wind)
-            diag_mean_T.append(mean_T)
-
-            now = time.time()
-            if now - last_print > 30:
-                print(f"    Day {day:7.1f}/{days} | max|v|={max_wind:6.1f} m/s | <T>={mean_T:.1f} K")
-                last_print = now
-
-    jax.block_until_ready(state.vor_hat.data)
-    wall = time.time() - t0
-
-    ok = check_finite({
-        "vor_hat": state.vor_hat.data, "div_hat": state.div_hat.data,
-        "T_hat": state.T_hat.data, "lnps_hat": state.lnps_hat.data,
-    })
-    notes = f"max|v|={diag_max_wind[-1]:.1f}" if diag_max_wind else ""
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "vertical_coord": vert, "radiation": radiation, "levels": nlev,
-        "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "vertical_coord": tc.vertical_coord, "radiation": radiation,
+        "days": days, "dt": dt, "levels": nlev,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"Held-Suarez ({radiation}) — T{truncation}/L{nlev} ({vert})",
-                             [("Max |v| (m/s)", diag_times, diag_max_wind, "|v|"),
-                              ("Mean T (K)", diag_times, diag_mean_T, "T")])
-        _save_mean_and_conservation(
-            output_dir,
-            f"Held-Suarez spectral {radiation} T{truncation} {vert}",
-            diag_steps,
-            dt,
-            {"mean_p_s": diag_mean_ps, "max_wind": diag_max_wind, "mean_T": diag_mean_T},
-            units={"mean_p_s": "Pa", "max_wind": "m/s", "mean_T": "K"},
-            mass_key="mean_p_s",
-            energy_key="mean_T",
-        )
-
-    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
-    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
-    _save_snapshots_bundle(
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
         output_dir,
-        f"Held-Suarez spectral {radiation} T{truncation} {vert}",
-        snapshots,
-        dt,
-        [
+        f"Held-Suarez {radiation} {tc.resolution} {tc.vertical_coord}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
             ("u", "Zonal wind u (m/s)", "RdBu_r"),
             ("v", "Meridional wind v (m/s)", "RdBu_r"),
             ("wind_speed", "Wind speed (m/s)", "magma"),
             ("p_s", "Surface pressure (Pa)", "viridis"),
         ],
-        coord_kind="gaussian",
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-    )
-    _save_vertical_cross_sections(
-        output_dir,
-        f"Held-Suarez spectral {radiation} T{truncation} {vert}",
-        snapshots,
-        dt,
-        field_key_3d="T_3d",
-        coord_kind="gaussian",
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-        level_values=np.asarray(getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64),
-        level_label="Sigma",
-    )
-    if hasattr(sigma, "sigma_full"):
-        _get_rich_diag_helpers()._save_profiles(
-            output_dir,
-            f"Held-Suarez spectral {radiation} T{truncation} {vert}",
-            {
-                st: {
-                    "T_mean": np.nanmean(np.asarray(snapshots[st]["T_3d"]), axis=(0, 1))
-                }
-                for st in sorted(snapshots.keys())
-                if "T_3d" in snapshots[st]
-            },
-            dt,
-            np.asarray(sigma.sigma_full, dtype=np.float64),
-            "Sigma",
-            True,
-            units={"T_mean": "K"},
-        )
+        field_3d_key="T_3d", level_values=level_values,
+        level_label="Sigma level",
+        mass_key="mass", energy_key="mean_T",
+        scalar_units={"mass": "Pa*sr", "max_wind": "m/s", "mean_T": "K"})
 
     return "PASS" if ok else "FAIL", wall, notes
 
 
-# ---------------------------------------------------------------------------
-# Hydrostatic baroclinic wave — cubed-sphere
-# ---------------------------------------------------------------------------
-def run_hydro_baroclinic_cube(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    vert = kwargs.get("vert", "sigma")
+# ===========================================================================
+# Runner: Baroclinic Wave
+# ===========================================================================
 
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
-    from legoesm.atmosphere.dynamics.primitive_eq import (
-        PrimitiveEquationModel, PrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
-    from legoesm.core.operators import global_integral
+def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
+                   radiation: str = "gray") -> tuple[str, float, str]:
+    nlev = DEFAULT_NLEV
 
-    n_grid = int(tc.resolution[1:])
-    nlev = 40
-    dt = 200.0
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq import (
+            PrimitiveEquationModel, PrimitiveEquationConfig)
+        from legoesm.atmosphere.physics.baroclinic_wave import (
+            baroclinic_wave_init)
+        from legoesm.core.operators import global_integral
 
-    grid = create_cubed_sphere(n_grid)
-    # baroclinic_wave_init requires SigmaCoordinate for sigma_full;
-    # create sigma for init, use hybrid for the model if requested.
-    sigma_for_init = create_sigma_coordinate(nlev)
-    if vert == "hybrid":
-        sigma = standard_hybrid_levels(nlev)
-    else:
+        n = int(tc.resolution[1:])
+        grid = create_cubed_sphere(n)
+        sigma_for_init = create_sigma_coordinate(nlev)
+        sigma = _create_vertical(nlev, tc.vertical_coord)
+        hd = _hyperdiff_cube(n)
+        dt = 200.0
+        config = PrimitiveEquationConfig(
+            hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
+            use_conservation_fixer=True, fix_mass=True,
+            edge_blend_uv=0.15, edge_blend_T=0.10,
+            edge_blend_p_s=0.20, edge_blend_width=2)
+        model = PrimitiveEquationModel(grid, sigma, config)
+        state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        mass_fn = lambda s: float(global_integral(s.p_s, grid))
+
+        def check_fn(s):
+            return (check_finite({"T": s.T.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        ps_init = np.array(state.p_s.data)
+
+        def scalar_fn(s):
+            return {
+                "mass": mass_fn(s),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    s.u.data ** 2 + s.v.data ** 2))),
+                "ps_perturbation": float(jnp.max(
+                    jnp.abs(s.p_s.data - ps_init))),
+            }
+
+        extract_fn = _extract_hydro_cube_latlon
+        key_array_fn = lambda s: s.T.data
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "latlon":
+        # baroclinic_wave_init is typed for CubedSphereGrid; try it anyway
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
+            LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
+        from legoesm.atmosphere.physics.baroclinic_wave import (
+            baroclinic_wave_init)
+        from legoesm.core.operators_latlon import (
+            global_integral as global_integral_ll)
+
+        n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
+        grid = create_latlon_grid(n_lat, n_lon)
+        sigma_for_init = create_sigma_coordinate(nlev)
+        sigma = _create_vertical(nlev, tc.vertical_coord)
+        hd = _hyperdiff_latlon(n_lat)
+        dt = 200.0
+        config = LatLonPrimitiveEquationConfig(
+            hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
+            use_conservation_fixer=True, fix_mass=True)
+        model = LatLonPrimitiveEquationModel(grid, sigma, config)
+        state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        mass_fn = lambda s: float(global_integral_ll(s.p_s, grid))
+
+        def check_fn(s):
+            return (check_finite({"T": s.T.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        ps_init = np.array(state.p_s.data)
+
+        def scalar_fn(s):
+            return {
+                "mass": mass_fn(s),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    s.u.data ** 2 + s.v.data ** 2))),
+                "ps_perturbation": float(jnp.max(
+                    jnp.abs(s.p_s.data - ps_init))),
+            }
+
+        extract_fn = _extract_hydro_cube_latlon
+        key_array_fn = lambda s: s.T.data
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "icosahedral":
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
+        from legoesm.atmosphere.physics.held_suarez_mpas import (
+            baroclinic_wave_init_mpas)
+
+        level = int(tc.resolution.replace("ico", ""))
+        mesh = create_voronoi_mesh(level)
         sigma = create_sigma_coordinate(nlev)
+        dt = 200.0
+        config = MPASPrimitiveEquationConfig(
+            nu_del4=_hyperdiff_ico(mesh), fix_mass=True)
+        model = MPASPrimitiveEquationModel(mesh, sigma, config)
+        state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+        grid = mesh
 
-    hyperdiff = compute_hyperdiff_cube(n_grid)
-    config = PrimitiveEquationConfig(
-        hyperdiff_coeff=hyperdiff,
-        hyperdiff_ps_coeff=hyperdiff,
-        use_conservation_fixer=True,
-        fix_mass=True,
-        edge_blend_uv=0.15,
-        edge_blend_T=0.10,
-        edge_blend_p_s=0.20,
-        edge_blend_width=2,
-    )
-    model = PrimitiveEquationModel(grid, sigma, config)
-    state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
-    mass_init = float(global_integral(state.p_s, grid))
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
 
+        mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
+
+        def check_fn(s):
+            return (check_finite({"T": s.T.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        def scalar_fn(s):
+            return {
+                "mass": mass_fn(s),
+                "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+            }
+
+        lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+
+        def extract_fn(s):
+            return _extract_hydro_mpas(s, lon_cell, lat_cell)
+
+        key_array_fn = lambda s: s.T.data
+        coord_kind = "icosa"
+        lon_deg = lon_cell
+        lat_deg = lat_cell
+    else:
+        raise NotImplementedError(
+            f"Baroclinic wave not implemented for grid '{tc.grid_type}'")
+
+    # --- Time loop ---
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, int(6 * 3600 / dt))
-    diag_times, diag_max_wind, diag_ps_pert = [], [], []
 
-    t0 = time.time()
-    ps_init_data = np.array(state.p_s.data)
-    last_print = t0
-    for step in range(n_steps):
-        state = model.step(state, dt)
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, key_array_fn,
+        label=f"Baroclinic ({tc.grid_type})", total_days=days)
 
-        if (step + 1) % 100 == 0:
-            u_max = float(jnp.max(jnp.abs(state.u.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step + 1}")
-                break
+    mass_drift = _compute_drift(diag.get("mass", []))
+    notes = f"mass drift={mass_drift:.2e}"
+    if diag.get("max_wind"):
+        notes += f", max|v|={diag['max_wind'][-1]:.1f}"
 
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
-            max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
-            ps_pert = float(jnp.max(jnp.abs(state.p_s.data - ps_init_data)))
-            diag_times.append(day)
-            diag_max_wind.append(max_wind)
-            diag_ps_pert.append(ps_pert)
+    level_values = np.asarray(
+        getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
 
-            now = time.time()
-            if now - last_print > 30:
-                print(f"    Day {day:7.1f}/{days} | max|v|={max_wind:6.1f} m/s | "
-                      f"p_s pert={ps_pert:.0f} Pa")
-                last_print = now
-
-    jax.block_until_ready(state.T.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"T": state.T.data, "u": state.u.data, "v": state.v.data,
-                        "p_s": state.p_s.data})
-    mass_final = float(global_integral(state.p_s, grid))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
-    u_max_final = float(jnp.max(jnp.abs(state.u.data)))
-    notes = f"mass drift={mass_drift:.2e}, |u|_max={u_max_final:.1f} m/s"
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "vertical_coord": vert, "levels": nlev,
-        "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "vertical_coord": tc.vertical_coord, "days": days, "dt": dt,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"Baroclinic Wave — C{n_grid}/L{nlev} ({vert})",
-                             [("Max |v| (m/s)", diag_times, diag_max_wind, "|v|"),
-                              ("p_s perturbation (Pa)", diag_times, diag_ps_pert, "p_s'")])
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir,
+        f"Baroclinic {tc.resolution} {tc.vertical_coord}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
+            ("wind_speed", "Wind speed (m/s)", "magma"),
+            ("p_s", "Surface pressure (Pa)", "viridis"),
+        ],
+        field_3d_key="T_3d", level_values=level_values,
+        level_label="Sigma level",
+        mass_key="mass", energy_key="max_wind",
+        scalar_units={
+            "mass": "Pa*sr", "max_wind": "m/s",
+            "ps_perturbation": "Pa"})
 
     return "PASS" if ok else "FAIL", wall, notes
 
 
-# ---------------------------------------------------------------------------
-# Hydrostatic baroclinic wave — spectral
-# ---------------------------------------------------------------------------
-def run_hydro_baroclinic_spectral(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.spectral_pe import (
-        SpectralPrimitiveEquationModel, SpectralPEConfig,
-        baroclinic_wave_init_spectral, spectral_pe_to_grid,
-    )
+# ===========================================================================
+# Runner: DCMIP Transport
+# ===========================================================================
 
-    truncation = int(tc.resolution[1:])
-    nlev = 40
-    dt = 600.0
+def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
+                        radiation: str = "gray") -> tuple[str, float, str]:
+    test_num = tc.run_kwargs["test_num"]
 
-    grid = create_gaussian_grid(truncation)
-    sigma = create_sigma_coordinate(nlev)
-    hyperdiff = compute_hyperdiff_spectral(truncation)
-
-    config = SpectralPEConfig(
-        hyperdiff_coeff=hyperdiff,
-        hyperdiff_order=2,
-        semi_implicit=True,
-        si_T_ref=300.0,
-    )
-    model = SpectralPrimitiveEquationModel(grid, sigma, config)
-    state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True)
-
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(6 * 3600 / dt))
-    diag_times, diag_max_wind = [], []
-
-    t0 = time.time()
-    last_print = t0
-    for step in range(n_steps):
-        state = model.step(state, dt)
-
-        if (step + 1) % 100 == 0:
-            if not jnp.all(jnp.isfinite(state.vor_hat.data)):
-                print(f"  BLOWUP at step {step + 1}")
-                break
-
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
-            fields = spectral_pe_to_grid(state, grid, sigma)
-            max_wind = float(jnp.max(jnp.sqrt(fields["u"]**2 + fields["v"]**2)))
-            diag_times.append(day)
-            diag_max_wind.append(max_wind)
-
-            now = time.time()
-            if now - last_print > 30:
-                print(f"    Day {day:7.1f}/{days} | max|v|={max_wind:6.1f} m/s")
-                last_print = now
-
-    jax.block_until_ready(state.vor_hat.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"vor_hat": state.vor_hat.data, "div_hat": state.div_hat.data,
-                        "T_hat": state.T_hat.data})
-    notes = f"max|v|={diag_max_wind[-1]:.1f}" if diag_max_wind else ""
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "levels": nlev, "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"Baroclinic Wave — T{truncation}/L{nlev}",
-                             [("Max |v| (m/s)", diag_times, diag_max_wind, "|v|")])
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Hydrostatic DCMIP transport — cubed-sphere
-# ---------------------------------------------------------------------------
-def run_hydro_dcmip_transport(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    test_num = kwargs["test_num"]
+    if tc.grid_type != "cubed_sphere":
+        raise NotImplementedError(
+            f"DCMIP transport not yet implemented for grid '{tc.grid_type}'")
 
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.tracer_transport import (
-        TracerTransportModel, TracerTransportConfig,
-    )
+        TracerTransportModel, TracerTransportConfig)
     from tests.test_cases.dcmip_transport import (
-        dcmip11_wind, dcmip11_init,
-        dcmip12_wind, dcmip12_init,
+        dcmip11_wind, dcmip11_init, dcmip12_wind, dcmip12_init,
         dcmip13_wind, dcmip13_init,
-        compute_tracer_error_norms,
-        create_dcmip_sigma,
-    )
+        compute_tracer_error_norms, create_dcmip_sigma)
 
-    TEST_CONFIGS = {
-        11: {"wind_fn": dcmip11_wind, "init_fn": dcmip11_init,
-             "period_days": 12.0, "default_dt": 1800.0, "n_tracers": 4},
-        12: {"wind_fn": dcmip12_wind, "init_fn": dcmip12_init,
-             "period_days": 1.0, "default_dt": 600.0, "n_tracers": 1},
-        13: {"wind_fn": dcmip13_wind, "init_fn": dcmip13_init,
-             "period_days": 12.0, "default_dt": 1800.0, "n_tracers": 4},
+    TC_CFGS = {
+        11: {"wind": dcmip11_wind, "init": dcmip11_init,
+             "period": 12.0, "dt": 1800.0, "n_tracers": 4},
+        12: {"wind": dcmip12_wind, "init": dcmip12_init,
+             "period": 1.0, "dt": 600.0, "n_tracers": 1},
+        13: {"wind": dcmip13_wind, "init": dcmip13_init,
+             "period": 12.0, "dt": 1800.0, "n_tracers": 4},
     }
-    tc_cfg = TEST_CONFIGS[test_num]
+    cfg = TC_CFGS[test_num]
 
-    n_grid = int(tc.resolution[1:])
+    n = int(tc.resolution[1:])
     nlev = 30
-    dt = tc_cfg["default_dt"]
-    grid = create_cubed_sphere(n_grid)
+    dt = cfg["dt"]
+    grid = create_cubed_sphere(n)
     sigma_coord = create_dcmip_sigma(nlev)
 
-    state_init = tc_cfg["init_fn"](grid, sigma_coord)
+    state_init = cfg["init"](grid, sigma_coord)
     config = TracerTransportConfig(hyperdiff_coeff=0.0)
-    model = TracerTransportModel(grid, sigma_coord, tc_cfg["wind_fn"], config)
+    model = TracerTransportModel(grid, sigma_coord, cfg["wind"], config)
 
-    # Use actual period or capped by days
-    period = min(days, tc_cfg["period_days"])
+    period = min(days, cfg["period"])
     n_steps = int(period * 86400.0 / dt)
     diag_every = max(1, n_steps // 20)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    def check_fn(s):
+        return (check_finite({"tracers": s.tracers.data}),
+                float(jnp.max(jnp.abs(s.tracers.data))))
+
+    def scalar_fn(s):
+        q = s.tracers.data
+        return {
+            "q1_min": float(jnp.min(q[..., 0])),
+            "q1_max": float(jnp.max(q[..., 0])),
+            "q1_mean": float(jnp.mean(q[..., 0])),
+        }
+
+    def extract_fn(s):
+        return {}  # tracer snapshots not plotted as 2D maps
 
     state = state_init
     t0 = time.time()
     for i in range(n_steps):
-        state = model.step(state, dt)
+        state = step_fn(state, dt)
         if (i + 1) % diag_every == 0:
             q = state.tracers.data
             progress = (i + 1) / n_steps * 100
-            q1_min = float(jnp.min(q[..., 0]))
-            q1_max = float(jnp.max(q[..., 0]))
             print(f"    Step {i + 1:6d}/{n_steps} ({progress:5.1f}%) | "
-                  f"q1: [{q1_min:.4f}, {q1_max:.4f}]")
+                  f"q1: [{float(jnp.min(q[..., 0])):.4f}, "
+                  f"{float(jnp.max(q[..., 0])):.4f}]")
     jax.block_until_ready(state.tracers.data)
     wall = time.time() - t0
 
     ok = check_finite({"tracers": state.tracers.data})
 
-    # Compute error norms for flow-reversal tests
     notes = ""
     if test_num in (11, 12):
         norms = compute_tracer_error_norms(state, state_init, grid)
-        n_tracers = tc_cfg["n_tracers"]
-        norm_strs = []
-        for i in range(n_tracers):
-            norm_strs.append(f"q{i + 1} L2={norms['l2'][i]:.4e}")
+        norm_strs = [f"q{i + 1} L2={norms['l2'][i]:.4e}"
+                     for i in range(cfg["n_tracers"])]
         notes = ", ".join(norm_strs)
 
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "levels": nlev, "period_days": period, "dt": dt, "wall_time": f"{wall:.1f}s",
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "levels": nlev, "period_days": period, "dt": dt,
         "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
+        "wall_time": f"{wall:.1f}s"})
 
     return "PASS" if ok else "FAIL", wall, notes
 
 
-# ---------------------------------------------------------------------------
-# Hydrostatic AMIP — cubed-sphere (gray radiation, no SST data needed)
-# ---------------------------------------------------------------------------
-def run_hydro_amip_cube(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    """Simplified AMIP: analytical SSTs, hybrid vertical coord, gray or RRTMGP."""
-    radiation = kwargs.get("radiation", "gray")
+# ===========================================================================
+# Runner: AMIP
+# ===========================================================================
 
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.vertical import standard_hybrid_levels
-    from legoesm.atmosphere.dynamics.primitive_eq import (
-        PrimitiveEquationModel, PrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.physics.held_suarez import held_suarez_init
-    from legoesm.atmosphere.physics.radiation.gray import gray_radiation
-    from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
-    from legoesm.core.operators import global_integral
-    from legoesm.thermo import saturation_mixing_ratio
-    from legoesm import constants
+def run_amip(tc: TestCase, output_dir: Path, days: float, *,
+             radiation: str = "gray") -> tuple[str, float, str]:
+    nlev = DEFAULT_NLEV
 
-    n_grid = int(tc.resolution[1:])
-    nlev = 40
-    dt = 300.0
-    grid = create_cubed_sphere(n_grid)
-    sigma = standard_hybrid_levels(nlev)
-    hyperdiff = compute_hyperdiff_cube(n_grid)
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import standard_hybrid_levels
+        from legoesm.atmosphere.dynamics.primitive_eq import (
+            PrimitiveEquationModel, PrimitiveEquationConfig)
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from legoesm.core.operators import global_integral
 
-    config = PrimitiveEquationConfig(
-        hyperdiff_coeff=hyperdiff,
-        hyperdiff_ps_coeff=hyperdiff,
-        use_conservation_fixer=True,
-        fix_mass=True,
-        edge_blend_uv=0.15,
-        edge_blend_T=0.10,
-        edge_blend_p_s=0.20,
-        edge_blend_width=2,
-    )
-    model = PrimitiveEquationModel(grid, sigma, config)
-    state = held_suarez_init(grid, sigma, T_init=280.0)
-    mass_init = float(global_integral(state.p_s, grid))
+        n = int(tc.resolution[1:])
+        grid = create_cubed_sphere(n)
+        sigma = standard_hybrid_levels(nlev)
+        hd = _hyperdiff_cube(n)
+        dt = 300.0
+        config = PrimitiveEquationConfig(
+            hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
+            use_conservation_fixer=True, fix_mass=True,
+            edge_blend_uv=0.15, edge_blend_T=0.10,
+            edge_blend_p_s=0.20, edge_blend_width=2)
+        model = PrimitiveEquationModel(grid, sigma, config)
+        state = held_suarez_init(grid, sigma, T_init=280.0)
 
-    # Analytical SST: zonally uniform, warm tropics, cold poles
-    lat_2d = grid.lat  # (6, n, n)
-    sst = 273.15 + 27.0 * jnp.maximum(0.0, 1.0 - 3.0 * lat_2d**2 / (jnp.pi / 2)**2)
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
 
-    # Moisture initialization (60% RH, sigma-weighted)
-    from legoesm.grids.vertical import pressure_from_hybrid
-    p_full = pressure_from_hybrid(sigma, state.p_s.data)
-    q_sat_init = saturation_mixing_ratio(state.T.data, p_full)
-    # sigma-like weighting via B_full
-    b_weights = jnp.array(sigma.B_full)
-    q_v = 0.6 * q_sat_init * b_weights ** 2
-    q_v = jnp.minimum(q_v, q_sat_init)
+        mass_fn = lambda s: float(global_integral(s.p_s, grid))
 
-    # Physics config
-    gray_config = GrayRadiationConfig(
-        tau_equator=7.2, tau_pole=1.8, S_0=1360.0,
-        sfc_albedo=0.31, perpetual_equinox=True,
-    )
+        def check_fn(s):
+            return (check_finite({"T": s.T.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
 
+        def scalar_fn(s):
+            return {
+                "mass": mass_fn(s),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    s.u.data ** 2 + s.v.data ** 2))),
+                "mean_T": float(jnp.mean(s.T.data)),
+                "mean_p_s": float(jnp.mean(s.p_s.data)),
+            }
+
+        extract_fn = _extract_hydro_cube_latlon
+        key_array_fn = lambda s: s.T.data
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import standard_hybrid_levels
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
+            LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
+        from legoesm.atmosphere.physics.held_suarez_latlon import (
+            held_suarez_init_latlon)
+        from legoesm.core.operators_latlon import (
+            global_integral as global_integral_ll)
+
+        n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
+        grid = create_latlon_grid(n_lat, n_lon)
+        sigma = standard_hybrid_levels(nlev)
+        hd = _hyperdiff_latlon(n_lat)
+        dt = 300.0
+        config = LatLonPrimitiveEquationConfig(
+            hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
+            use_conservation_fixer=True, fix_mass=True)
+        model = LatLonPrimitiveEquationModel(grid, sigma, config)
+        state = held_suarez_init_latlon(grid, sigma)
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        mass_fn = lambda s: float(global_integral_ll(s.p_s, grid))
+
+        def check_fn(s):
+            return (check_finite({"T": s.T.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        def scalar_fn(s):
+            return {
+                "mass": mass_fn(s),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    s.u.data ** 2 + s.v.data ** 2))),
+                "mean_T": float(jnp.mean(s.T.data)),
+                "mean_p_s": float(jnp.mean(s.p_s.data)),
+            }
+
+        extract_fn = _extract_hydro_cube_latlon
+        key_array_fn = lambda s: s.T.data
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "icosahedral":
+        raise NotImplementedError(
+            "AMIP not yet implemented for icosahedral grid")
+    else:
+        raise NotImplementedError(
+            f"AMIP not implemented for grid '{tc.grid_type}'")
+
+    # --- Time loop ---
     n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(24 * 3600 / dt))  # daily diagnostics
-    diag_times, diag_max_wind, diag_mean_T, diag_mean_ps = [], [], [], []
+    diag_every = max(1, int(24 * 3600 / dt))
 
-    t0 = time.time()
-    last_print = t0
-    for step in range(n_steps):
-        state = model.step(state, dt)
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, key_array_fn,
+        label=f"AMIP ({tc.grid_type})", total_days=days)
 
-        if (step + 1) % 100 == 0:
-            u_max = float(jnp.max(jnp.abs(state.u.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step + 1}")
-                break
-
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
-            max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
-            mean_T = float(jnp.mean(state.T.data))
-            mean_ps = float(jnp.mean(state.p_s.data))
-            diag_times.append(day)
-            diag_max_wind.append(max_wind)
-            diag_mean_T.append(mean_T)
-            diag_mean_ps.append(mean_ps)
-
-            now = time.time()
-            if now - last_print > 30:
-                print(f"    Day {day:7.1f}/{days} | max|v|={max_wind:6.1f} m/s | "
-                      f"<T>={mean_T:.1f} K | <p_s>={mean_ps:.0f} Pa")
-                last_print = now
-
-    jax.block_until_ready(state.T.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"T": state.T.data, "u": state.u.data, "v": state.v.data,
-                        "p_s": state.p_s.data})
-    mass_final = float(global_integral(state.p_s, grid))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
+    mass_drift = _compute_drift(diag.get("mass", []))
     notes = f"mass drift={mass_drift:.2e}"
 
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "radiation": radiation, "levels": nlev,
-        "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
+    level_values = np.asarray(
+        getattr(sigma, "sigma_full", np.arange(nlev)), dtype=np.float64)
 
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"AMIP ({radiation}) — C{n_grid}/L{nlev} hybrid",
-                             [("Max |v| (m/s)", diag_times, diag_max_wind, "|v|"),
-                              ("Mean T (K)", diag_times, diag_mean_T, "T"),
-                              ("Mean p_s (Pa)", diag_times, diag_mean_ps, "p_s")])
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "radiation": radiation, "days": days, "dt": dt,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir,
+        f"AMIP {radiation} {tc.resolution} hybrid",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("u", "Zonal wind u (m/s)", "RdBu_r"),
+            ("v", "Meridional wind v (m/s)", "RdBu_r"),
+            ("wind_speed", "Wind speed (m/s)", "magma"),
+            ("p_s", "Surface pressure (Pa)", "viridis"),
+        ],
+        field_3d_key="T_3d", level_values=level_values,
+        level_label="Sigma level",
+        mass_key="mass", energy_key="mean_T",
+        scalar_units={
+            "mass": "Pa*sr", "max_wind": "m/s", "mean_T": "K",
+            "mean_p_s": "Pa"})
 
     return "PASS" if ok else "FAIL", wall, notes
 
 
-# ---------------------------------------------------------------------------
-# Hydrostatic AMIP — spectral
-# ---------------------------------------------------------------------------
-def run_hydro_amip_spectral(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    """Simplified AMIP with spectral PE: Held-Suarez forcing + hybrid coord."""
-    radiation = kwargs.get("radiation", "gray")
+# ===========================================================================
+# Runner: Non-Hydrostatic (DCMIP-2025)
+# ===========================================================================
 
-    from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.grids.vertical import standard_hybrid_levels
-    from legoesm.atmosphere.dynamics.spectral_pe import (
-        SpectralPrimitiveEquationModel, SpectralPEConfig,
-        isothermal_rest_state_spectral, spectral_pe_to_grid,
-    )
-    from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing_spectral
+def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
+                       radiation: str = "gray") -> tuple[str, float, str]:
+    test_case = tc.run_kwargs["test_case"]
+    nlev = DEFAULT_NLEV
 
-    truncation = int(tc.resolution[1:])
-    nlev = 40
-    dt = 600.0
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.compressible_euler import (
+            CompressibleEulerModel, CompressibleEulerConfig)
 
-    grid = create_gaussian_grid(truncation)
-    sigma = standard_hybrid_levels(nlev)
-    hyperdiff = compute_hyperdiff_spectral(truncation)
+        n = int(tc.resolution[1:])
+        grid = create_cubed_sphere(n)
+        hd = _hyperdiff_cube(n)
 
-    config = SpectralPEConfig(
-        hyperdiff_coeff=hyperdiff,
-        hyperdiff_order=2,
-        semi_implicit=True,
-        si_T_ref=300.0,
-    )
-    model = SpectralPrimitiveEquationModel(grid, sigma, config)
-    state = isothermal_rest_state_spectral(grid, sigma, T_init=280.0)
+        if test_case == "tc1":
+            from tests.test_cases.dcmip2025 import dcmip25_tc1_init
+            state, hcoord, tmetric = dcmip25_tc1_init(grid, n_levels=nlev)
+            dt = max(0.2, 6.0 * (16.0 / n))
+            nh_config = CompressibleEulerConfig(
+                n_acoustic_substeps=10, semi_implicit_acoustic=True,
+                sponge_width=10000.0, sponge_coeff=0.05,
+                hyperdiff_coeff=hd, edge_blend_uv=0.15, edge_blend_w=0.15,
+                edge_blend_theta=0.15, edge_blend_rho=0.15)
+        elif test_case == "tc2a":
+            from tests.test_cases.dcmip2025 import dcmip25_tc2_init
+            state, hcoord, tmetric, _ = dcmip25_tc2_init(
+                grid, n_levels=nlev)
+            dt = max(0.2, 4.0 * (16.0 / n))
+            nh_config = CompressibleEulerConfig(
+                n_acoustic_substeps=10, semi_implicit_acoustic=True,
+                sponge_width=5000.0, sponge_coeff=0.1,
+                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
+                edge_blend_uv=0.15, edge_blend_w=0.15,
+                edge_blend_theta=0.15, edge_blend_rho=0.15)
+        elif test_case == "tc3":
+            from tests.test_cases.dcmip2025 import dcmip25_tc3_init
+            state, hcoord, tmetric, _ = dcmip25_tc3_init(
+                grid, n_levels=nlev)
+            dt = max(0.1, 2.0 * (16.0 / n))
+            nh_config = CompressibleEulerConfig(
+                n_acoustic_substeps=10, semi_implicit_acoustic=True,
+                sponge_width=5000.0, sponge_coeff=0.1,
+                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
+                edge_blend_uv=0.15, edge_blend_w=0.15,
+                edge_blend_theta=0.15, edge_blend_rho=0.15)
+        else:
+            raise ValueError(f"Unknown NH test case: {test_case}")
 
-    physics_fn = held_suarez_forcing_spectral
+        model = CompressibleEulerModel(grid, hcoord, tmetric, nh_config)
 
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(24 * 3600 / dt))
-    diag_times, diag_max_wind, diag_mean_T = [], [], []
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
 
-    t0 = time.time()
-    last_print = t0
-    for step in range(n_steps):
-        state = model.step_with_physics(state, dt, physics_fn)
+        def check_fn(s):
+            return (check_finite({
+                "u": s.u.data, "w": s.w.data,
+                "theta": s.theta_prime.data}),
+                float(jnp.max(jnp.abs(s.u.data))))
 
-        if (step + 1) % 100 == 0:
-            if not jnp.all(jnp.isfinite(state.vor_hat.data)):
-                print(f"  BLOWUP at step {step + 1}")
-                break
+        def scalar_fn(s):
+            return {
+                "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
+                "mean_theta_prime": float(jnp.mean(s.theta_prime.data)),
+                "mean_rho_prime": float(jnp.mean(s.rho_prime.data)),
+            }
 
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
-            fields = spectral_pe_to_grid(state, grid, sigma)
-            max_wind = float(jnp.max(jnp.sqrt(fields["u"]**2 + fields["v"]**2)))
-            mean_T = float(jnp.mean(fields["T"]))
-            diag_times.append(day)
-            diag_max_wind.append(max_wind)
-            diag_mean_T.append(mean_T)
+        def extract_fn(s):
+            u = np.asarray(s.u.data[..., 0], dtype=np.float64)
+            v = np.asarray(s.v.data[..., 0], dtype=np.float64)
+            w_idx = min(s.w.data.shape[-1] // 2, s.w.data.shape[-1] - 1)
+            return {
+                "u": u, "v": v,
+                "w_mid": np.asarray(s.w.data[..., w_idx], dtype=np.float64),
+                "wind_speed": np.sqrt(u ** 2 + v ** 2),
+                "theta_prime_3d": np.asarray(
+                    s.theta_prime.data, dtype=np.float64),
+                "rho_prime_3d": np.asarray(
+                    s.rho_prime.data, dtype=np.float64),
+            }
 
-            now = time.time()
-            if now - last_print > 30:
-                print(f"    Day {day:7.1f}/{days} | max|v|={max_wind:6.1f} m/s | <T>={mean_T:.1f} K")
-                last_print = now
+        key_array_fn = lambda s: s.u.data
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        z_full = np.asarray(
+            getattr(hcoord, "z_full", np.arange(nlev)), dtype=np.float64)
 
-    jax.block_until_ready(state.vor_hat.data)
-    wall = time.time() - t0
+    elif tc.grid_type == "icosahedral":
+        if test_case != "tc1":
+            raise NotImplementedError(
+                f"MPAS NH only supports tc1, got {test_case}")
 
-    ok = check_finite({"vor_hat": state.vor_hat.data, "T_hat": state.T_hat.data,
-                        "lnps_hat": state.lnps_hat.data})
-    notes = f"max|v|={diag_max_wind[-1]:.1f}" if diag_max_wind else ""
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
+            MPASCompressibleEulerModel, MPASCompressibleEulerConfig)
+        from tests.test_cases.dcmip2025.test_case_1_mpas import (
+            dcmip25_tc1_init_mpas)
 
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "radiation": radiation, "levels": nlev,
-        "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
+        level = int(tc.resolution.replace("ico", ""))
+        mesh = create_voronoi_mesh(level)
+        state, hcoord, tmetric = dcmip25_tc1_init_mpas(
+            mesh, n_levels=nlev)
+        grid = mesh
 
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"AMIP ({radiation}) — T{truncation}/L{nlev} hybrid",
-                             [("Max |v| (m/s)", diag_times, diag_max_wind, "|v|"),
-                              ("Mean T (K)", diag_times, diag_mean_T, "T")])
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Hydrostatic RCE — cubed-sphere with slab ocean
-# ---------------------------------------------------------------------------
-def run_hydro_rce_cube(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.vertical import create_sigma_coordinate, pressure_from_sigma
-    from legoesm.atmosphere.dynamics.primitive_eq import (
-        PrimitiveEquationModel, PrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.physics.held_suarez import held_suarez_init
-    from legoesm.atmosphere.physics.radiation.gray import gray_radiation
-    from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
-    from legoesm.atmosphere.physics.convection.sbm import sbm_convection
-    from legoesm.atmosphere.physics.convection.config import SBMConfig
-    from legoesm.thermo import saturation_mixing_ratio
-    from legoesm import constants
-
-    n_grid = int(tc.resolution[1:])
-    nlev = 40
-    dt = 300.0
-    grid = create_cubed_sphere(n_grid)
-    sigma = create_sigma_coordinate(nlev)
-    hyperdiff = compute_hyperdiff_cube(n_grid)
-
-    dycore_config = PrimitiveEquationConfig(
-        hyperdiff_coeff=hyperdiff,
-        hyperdiff_ps_coeff=hyperdiff,
-        use_conservation_fixer=True,
-        fix_mass=True,
-        edge_blend_uv=0.15 if n_grid > 16 else 0.0,
-        edge_blend_T=0.10 if n_grid > 16 else 0.0,
-        edge_blend_p_s=0.20 if n_grid > 16 else 0.0,
-        edge_blend_width=2 if n_grid > 16 else 1,
-    )
-    model = PrimitiveEquationModel(grid, sigma, dycore_config)
-    state = held_suarez_init(grid, sigma, T_init=280.0)
-
-    # Moisture init (60% RH)
-    p_full = state.p_s.data[..., None] * sigma.sigma_full
-    q_sat_init = saturation_mixing_ratio(state.T.data, p_full)
-    q_v = 0.6 * q_sat_init * jnp.array(sigma.sigma_full) ** 2
-    q_v = jnp.minimum(q_v, q_sat_init)
-
-    # Fixed SST (300 K everywhere)
-    ocean_sst = jnp.full(state.p_s.data.shape, 300.0)
-
-    gray_config = GrayRadiationConfig(
-        tau_equator=7.2, tau_pole=1.8, S_0=1360.0,
-        sfc_albedo=0.31, perpetual_equinox=True,
-    )
-    sbm_config = SBMConfig(tau_c=7200.0, RH_ref=0.7)
-
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(24 * 3600 / dt))
-    diag_times, diag_mean_T, diag_max_wind = [], [], []
-
-    g = constants.g
-    c_pd = constants.c_pd
-    L_v = constants.L_v
-    C_H = 1.5e-3
-
-    t0 = time.time()
-    last_print = t0
-    for step in range(n_steps):
-        # Dynamics step
-        state = model.step(state, dt)
-
-        if (step + 1) % 100 == 0:
-            u_max = float(jnp.max(jnp.abs(state.u.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step + 1}")
-                break
-
-        # Simple large-scale condensation
-        p_full_now = state.p_s.data[..., None] * sigma.sigma_full
-        q_sat = saturation_mixing_ratio(state.T.data, p_full_now)
-        excess = jnp.maximum(q_v - q_sat, 0.0)
-        q_v = q_v - excess
-        new_T = state.T.data + L_v * excess / c_pd
-        state = state._replace(T=state.T.replace(data=new_T))
-
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
-            max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
-            mean_T = float(jnp.mean(state.T.data))
-            diag_times.append(day)
-            diag_mean_T.append(mean_T)
-            diag_max_wind.append(max_wind)
-
-            now = time.time()
-            if now - last_print > 30:
-                print(f"    Day {day:7.1f}/{days} | max|v|={max_wind:6.1f} m/s | <T>={mean_T:.1f} K")
-                last_print = now
-
-    jax.block_until_ready(state.T.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"T": state.T.data, "u": state.u.data, "v": state.v.data})
-    notes = f"<T>={diag_mean_T[-1]:.1f} K" if diag_mean_T else ""
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "levels": nlev, "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"RCE Fixed Ocean — C{n_grid}/L{nlev}",
-                             [("Mean T (K)", diag_times, diag_mean_T, "T"),
-                              ("Max |v| (m/s)", diag_times, diag_max_wind, "|v|")])
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Non-hydrostatic DCMIP-2025 — cubed-sphere
-# ---------------------------------------------------------------------------
-def run_nh_dcmip2025_cube(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    test_case = kwargs["test_case"]
-
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler import (
-        CompressibleEulerModel, CompressibleEulerConfig,
-    )
-
-    n_grid = int(tc.resolution[1:])
-    nlev = 40
-    grid = create_cubed_sphere(n_grid)
-
-    # TC-specific init and config
-    duration_hours = days * 24.0
-
-    if test_case == "tc1":
-        from tests.test_cases.dcmip2025 import dcmip25_tc1_init
-        state, height_coord, terrain_metric = dcmip25_tc1_init(grid, n_levels=nlev)
-        dt = max(0.2, 6.0 * (16.0 / n_grid))
-        nh_config = CompressibleEulerConfig(
-            n_acoustic_substeps=10,
-            semi_implicit_acoustic=True,
-            sponge_width=10000.0,
+        dx_mean = float(jnp.sqrt(
+            4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
+        dt = min(max(0.2, 6.0 * (200.0 / (dx_mean / 1000.0))), 6.0)
+        nh_config = MPASCompressibleEulerConfig(
+            n_acoustic_substeps=10, sponge_width=10000.0,
             sponge_coeff=0.05,
-            hyperdiff_coeff=compute_hyperdiff_cube(n_grid),
-            edge_blend_uv=0.15,
-            edge_blend_w=0.15,
-            edge_blend_theta=0.15,
-            edge_blend_rho=0.15,
-        )
-    elif test_case == "tc2a":
-        from tests.test_cases.dcmip2025 import dcmip25_tc2_init
-        state, height_coord, terrain_metric, _ = dcmip25_tc2_init(grid, n_levels=nlev)
-        dt = max(0.2, 4.0 * (16.0 / n_grid))
-        nh_config = CompressibleEulerConfig(
-            n_acoustic_substeps=10,
-            semi_implicit_acoustic=True,
-            sponge_width=5000.0,
-            sponge_coeff=0.1,
-            small_earth_factor=1.0 / 120.0,
-            hyperdiff_coeff=compute_hyperdiff_cube(n_grid),
-            edge_blend_uv=0.15,
-            edge_blend_w=0.15,
-            edge_blend_theta=0.15,
-            edge_blend_rho=0.15,
-        )
-    else:  # tc3
-        from tests.test_cases.dcmip2025 import dcmip25_tc3_init
-        state, height_coord, terrain_metric, _ = dcmip25_tc3_init(grid, n_levels=nlev)
-        dt = max(0.1, 2.0 * (16.0 / n_grid))
-        nh_config = CompressibleEulerConfig(
-            n_acoustic_substeps=10,
-            semi_implicit_acoustic=True,
-            sponge_width=5000.0,
-            sponge_coeff=0.1,
-            small_earth_factor=1.0 / 120.0,
-            hyperdiff_coeff=compute_hyperdiff_cube(n_grid),
-            edge_blend_uv=0.15,
-            edge_blend_w=0.15,
-            edge_blend_theta=0.15,
-            edge_blend_rho=0.15,
-        )
+            nu_del4=dx_mean ** 4 / (48.0 * 3600.0))
+        model = MPASCompressibleEulerModel(
+            mesh, hcoord, tmetric, nh_config)
 
-    model = CompressibleEulerModel(grid, height_coord, terrain_metric, nh_config)
+        lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
 
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        def check_fn(s):
+            return (check_finite({
+                "u": s.u.data, "w": s.w.data,
+                "theta": s.theta_prime.data}),
+                float(jnp.max(jnp.abs(s.u.data))))
+
+        def scalar_fn(s):
+            return {
+                "max_abs_w": float(jnp.max(jnp.abs(s.w.data))),
+                "mean_theta_prime": float(jnp.mean(s.theta_prime.data)),
+                "mean_rho_prime": float(jnp.mean(s.rho_prime.data)),
+            }
+
+        def extract_fn(s):
+            u_raw = np.asarray(s.u.data, dtype=np.float64).ravel()
+            u_ll = (_bin_to_latlon(u_raw, lon_cell, lat_cell)
+                    if u_raw.size == lon_cell.size
+                    else np.full((181, 360), np.nan))
+            w_arr = np.asarray(s.w.data, dtype=np.float64)
+            if w_arr.ndim >= 2 and w_arr.shape[0] == lon_cell.size:
+                w_mid = w_arr[:, min(
+                    w_arr.shape[-1] // 2, w_arr.shape[-1] - 1)]
+                w_ll = _bin_to_latlon(w_mid, lon_cell, lat_cell)
+            else:
+                w_ll = np.full((181, 360), np.nan)
+            return {
+                "u": u_ll, "w_mid": w_ll,
+                "theta_prime_3d": np.asarray(
+                    s.theta_prime.data, dtype=np.float64),
+                "rho_prime_3d": np.asarray(
+                    s.rho_prime.data, dtype=np.float64),
+            }
+
+        key_array_fn = lambda s: s.u.data
+        coord_kind = "icosa"
+        lon_deg = lon_cell
+        lat_deg = lat_cell
+        z_full = np.asarray(
+            getattr(hcoord, "z_full", np.arange(nlev)), dtype=np.float64)
+
+    elif tc.grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
+            FVCompressibleEulerLatLonModel, FVCompressibleEulerLatLonConfig)
+
+        if test_case != "tc1":
+            raise NotImplementedError(
+                f"Lat-lon NH only supports tc1, got {test_case}")
+
+        from tests.test_cases.dcmip2025 import dcmip25_tc1_init
+
+        n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
+        # dcmip25_tc1_init expects CubedSphereGrid; fall back to cube grid
+        # for initialization then reshape — or raise if incompatible
+        raise NotImplementedError(
+            "DCMIP NH init requires CubedSphereGrid; "
+            "lat-lon NH not yet available")
+    else:
+        raise NotImplementedError(
+            f"NH not implemented for grid '{tc.grid_type}'")
+
+    # --- Time loop ---
+    duration_hours = days * 24.0
     n_steps = int(duration_hours * 3600.0 / dt)
     diag_every = max(1, n_steps // 20)
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    diag_steps, diag_max_w, diag_mean_theta, diag_mean_rho = [], [], [], []
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
 
-    def _extract_nh_cube(s):
-        u = np.asarray(s.u.data[..., 0], dtype=np.float64)
-        v = np.asarray(s.v.data[..., 0], dtype=np.float64)
-        w_mid = np.asarray(s.w.data[..., min(s.w.data.shape[-1] // 2, s.w.data.shape[-1] - 1)], dtype=np.float64)
-        return {
-            "u": u,
-            "v": v,
-            "w_mid": w_mid,
-            "wind_speed": np.sqrt(u * u + v * v),
-            "theta_prime_3d": np.asarray(s.theta_prime.data, dtype=np.float64),
-            "rho_prime_3d": np.asarray(s.rho_prime.data, dtype=np.float64),
-        }
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, key_array_fn,
+        label=f"NH {test_case} ({tc.grid_type})", total_days=days)
 
-    snapshots[0] = _extract_nh_cube(state)
+    w_max = (float(jnp.max(jnp.abs(state.w.data))) if ok
+             else float("nan"))
+    notes = f"|w|_max={w_max:.4f} m/s, dt={dt:.2f}s"
 
-    t0 = time.time()
-    stable = True
-    for i in range(n_steps):
-        state = model.step(state, dt)
-        step = i + 1
-        if step in snap_targets:
-            snapshots[step] = _extract_nh_cube(state)
-        if step % diag_every == 0:
-            w_max = float(jnp.max(jnp.abs(state.w.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)):
-                print(f"    BLOWUP at step {step}")
-                stable = False
-                break
-            t_hours = step * dt / 3600.0
-            print(f"    Step {step:6d}/{n_steps} | t={t_hours:.2f}h | |w|_max={w_max:.4f} m/s")
-            diag_steps.append(step)
-            diag_max_w.append(w_max)
-            diag_mean_theta.append(float(jnp.mean(state.theta_prime.data)))
-            diag_mean_rho.append(float(jnp.mean(state.rho_prime.data)))
-
-    jax.block_until_ready(state.u.data)
-    wall = time.time() - t0
-
-    ok = stable and check_finite({
-        "u": state.u.data, "v": state.v.data, "w": state.w.data,
-        "theta_prime": state.theta_prime.data, "rho_prime": state.rho_prime.data,
-    })
-    w_max_final = float(jnp.max(jnp.abs(state.w.data))) if ok else float("nan")
-    notes = f"|w|_max={w_max_final:.4f} m/s, dt={dt:.2f}s"
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "levels": nlev, "duration_hours": duration_hours, "dt": dt,
-        "wall_time": f"{wall:.1f}s", "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_steps:
-        _save_mean_and_conservation(
-            output_dir,
-            f"NH DCMIP {test_case} C{n_grid}",
-            diag_steps,
-            dt,
-            {
-                "max_abs_w": diag_max_w,
-                "mean_theta_prime": diag_mean_theta,
-                "mean_rho_prime": diag_mean_rho,
-            },
-            units={"max_abs_w": "m/s", "mean_theta_prime": "K", "mean_rho_prime": "kg/m^3"},
-            mass_key="mean_rho_prime",
-            energy_key="mean_theta_prime",
-        )
-
-    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180.0 / np.pi
-    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180.0 / np.pi
-    _save_snapshots_bundle(
-        output_dir,
-        f"NH DCMIP {test_case} C{n_grid}",
-        snapshots,
-        dt,
-        [
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"NH DCMIP {test_case} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
             ("u", "Zonal wind u (m/s)", "RdBu_r"),
             ("v", "Meridional wind v (m/s)", "RdBu_r"),
             ("w_mid", "Vertical velocity w mid (m/s)", "RdBu_r"),
             ("wind_speed", "Wind speed (m/s)", "magma"),
         ],
-        coord_kind="cube",
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-    )
-    z_full = np.asarray(getattr(height_coord, "z_full", np.arange(nlev)), dtype=np.float64)
-    _save_vertical_cross_sections(
-        output_dir,
-        f"NH DCMIP {test_case} C{n_grid}",
-        snapshots,
-        dt,
-        field_key_3d="theta_prime_3d",
-        coord_kind="cube",
-        lon_deg=lon_deg,
-        lat_deg=lat_deg,
-        level_values=z_full,
-        level_label="Height (m)",
-    )
-    _get_rich_diag_helpers()._save_profiles(
-        output_dir,
-        f"NH DCMIP {test_case} C{n_grid}",
-        {
-            st: {
-                "theta_prime_mean": np.nanmean(np.asarray(snapshots[st]["theta_prime_3d"]), axis=(0, 1, 2)),
-                "rho_prime_mean": np.nanmean(np.asarray(snapshots[st]["rho_prime_3d"]), axis=(0, 1, 2)),
-            }
-            for st in sorted(snapshots.keys())
-            if "theta_prime_3d" in snapshots[st]
-        },
-        dt,
-        z_full,
-        "Height (m)",
-        False,
-        units={"theta_prime_mean": "K", "rho_prime_mean": "kg/m^3"},
-    )
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Non-hydrostatic DCMIP-2025 — spectral
-# ---------------------------------------------------------------------------
-def run_nh_dcmip2025_spectral(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    test_case = kwargs["test_case"]
-
-    from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.atmosphere.dynamics.spectral_nh import (
-        SpectralCompressibleEulerModel, SpectralNHConfig,
-        dcmip25_tc1_init_spectral,
-    )
-
-    truncation = int(tc.resolution[1:])
-    nlev = 40
-    dt = 2.0
-    duration_hours = days * 24.0
-
-    grid = create_gaussian_grid(truncation)
-    hyperdiff = compute_hyperdiff_spectral(truncation)
-
-    if test_case == "tc1":
-        state, height_coord, terrain_metric = dcmip25_tc1_init_spectral(grid, n_levels=nlev)
-    else:
-        raise ValueError(f"Spectral NH only supports tc1, got {test_case}")
-
-    config = SpectralNHConfig(
-        n_acoustic_substeps=6,
-        sponge_width=10000.0,
-        sponge_coeff=0.05,
-        hyperdiff_coeff=hyperdiff,
-    )
-    model = SpectralCompressibleEulerModel(grid, height_coord, terrain_metric, config)
-
-    n_steps = int(duration_hours * 3600.0 / dt)
-    diag_every = max(1, n_steps // 20)
-    diag_steps, diag_theta_norm, diag_rho_norm = [], [], []
-
-    t0 = time.time()
-    stable = True
-    for i in range(n_steps):
-        state = model.step(state, dt)
-        if (i + 1) % diag_every == 0:
-            if not jnp.all(jnp.isfinite(state.theta_prime_hat.data)):
-                print(f"    BLOWUP at step {i + 1}")
-                stable = False
-                break
-            t_hours = (i + 1) * dt / 3600.0
-            print(f"    Step {i + 1:6d}/{n_steps} | t={t_hours:.2f}h")
-            diag_steps.append(i + 1)
-            diag_theta_norm.append(float(jnp.linalg.norm(state.theta_prime_hat.data)))
-            diag_rho_norm.append(float(jnp.linalg.norm(state.rho_prime_hat.data)))
-
-    jax.block_until_ready(state.theta_prime_hat.data)
-    wall = time.time() - t0
-
-    ok = stable and check_finite({
-        "theta_prime_hat": state.theta_prime_hat.data,
-        "rho_prime_hat": state.rho_prime_hat.data,
-    })
-    notes = f"dt={dt:.2f}s"
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "levels": nlev, "duration_hours": duration_hours, "dt": dt,
-        "wall_time": f"{wall:.1f}s", "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_steps:
-        _save_mean_and_conservation(
-            output_dir,
-            f"NH Spectral DCMIP {test_case} T{truncation}",
-            diag_steps,
-            dt,
-            {"theta_hat_norm": diag_theta_norm, "rho_hat_norm": diag_rho_norm},
-            units={"theta_hat_norm": "arb", "rho_hat_norm": "arb"},
-            mass_key="rho_hat_norm",
-            energy_key="theta_hat_norm",
-        )
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Shallow water — icosahedral (MPAS)
-# ---------------------------------------------------------------------------
-def _parse_ico_level(resolution: str) -> int:
-    """Parse 'ico5' → 5."""
-    return int(resolution.replace("ico", ""))
-
-
-def run_sw_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    test_num = kwargs["test_num"]
-
-    from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.shallow_water_mpas import (
-        MPASShallowWaterModel, MPASShallowWaterConfig,
-    )
-    from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
-        williamson_test2_mpas, williamson_test5_mpas, williamson_test6_mpas,
-        compute_error_norms_mpas,
-    )
-
-    level = _parse_ico_level(tc.resolution)
-    mesh = create_voronoi_mesh(level)
-    dt = 300.0
-
-    # Hyperdiffusion: scale del4 with mesh spacing
-    dx_mean = jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells)
-    nu_del4 = float(dx_mean ** 4 / (48.0 * 3600.0))
-
-    init_fns = {2: williamson_test2_mpas, 5: williamson_test5_mpas, 6: williamson_test6_mpas}
-    state_init = init_fns[test_num](mesh)
-
-    config = MPASShallowWaterConfig(nu_del4=nu_del4)
-    model = MPASShallowWaterModel(mesh, config)
-    state = state_init
-
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, n_steps // 20)
-    diag_times, diag_steps, diag_mass, diag_max_wind = [], [], [], []
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
-    lon_cell_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180.0 / np.pi
-    lat_cell_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi
-
-    def _extract_sw_ico(s):
-        h_ll = _bin_points_to_latlon(np.asarray(s.h.data, dtype=np.float64), lon_cell_deg, lat_cell_deg)
-        return {
-            "height": h_ll,
-        }
-
-    mass_init = float(jnp.mean(state_init.h.data))
-    snapshots[0] = _extract_sw_ico(state)
-
-    t0 = time.time()
-    for i in range(n_steps):
-        state = model.step(state, dt)
-        step = i + 1
-        if step in snap_targets:
-            snapshots[step] = _extract_sw_ico(state)
-        if (i + 1) % diag_every == 0:
-            day = (i + 1) * dt / 86400.0
-            diag_times.append(day)
-            diag_steps.append(i + 1)
-            diag_mass.append(float(jnp.mean(state.h.data)))
-            diag_max_wind.append(float(jnp.max(jnp.abs(state.u.data))))
-    jax.block_until_ready(state.h.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"h": state.h.data, "u": state.u.data})
-
-    notes = ""
-    if test_num == 2:
-        norms = compute_error_norms_mpas(state.h.data, state_init.h.data, mesh)
-        notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
-    else:
-        mass_drift = abs(diag_mass[-1] - mass_init) / abs(mass_init) if diag_mass else 0
-        notes = f"mass drift={mass_drift:.2e}"
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "days": days, "dt": dt, "n_steps": n_steps, "nCells": mesh.nCells,
-        "wall_time": f"{wall:.1f}s", "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"SW Williamson {test_num} — ico{level} ({mesh.nCells} cells)",
-                             [("Mean h (m)", diag_times, diag_mass, "h"),
-                              ("Max |u_n| (m/s)", diag_times, diag_max_wind, "|u|")])
-        _save_mean_and_conservation(
-            output_dir,
-            f"SW Williamson {test_num} ico{level}",
-            diag_steps,
-            dt,
-            {"mean_height": diag_mass, "max_edge_wind": diag_max_wind},
-            units={"mean_height": "m", "max_edge_wind": "m/s"},
-            mass_key="mean_height",
-            energy_key="max_edge_wind",
-        )
-
-    _save_snapshots_bundle(
-        output_dir,
-        f"SW Williamson {test_num} ico{level}",
-        snapshots,
-        dt,
-        [("height", "Fluid depth h (m)", "viridis")],
-        coord_kind="latlon",
-        lon_deg=np.linspace(-180.0, 180.0, 360, endpoint=False),
-        lat_deg=np.linspace(-90.0, 90.0, 181),
-    )
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Hydrostatic Held-Suarez — icosahedral (MPAS)
-# ---------------------------------------------------------------------------
-def run_hydro_held_suarez_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
-        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.physics.held_suarez_mpas import (
-        held_suarez_forcing_mpas, held_suarez_init_mpas,
-    )
-
-    level = _parse_ico_level(tc.resolution)
-    nlev = 40
-    dt = 200.0
-    mesh = create_voronoi_mesh(level)
-    sigma = create_sigma_coordinate(nlev)
-
-    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
-    nu_del4 = dx_mean ** 4 / (48.0 * 3600.0)
-
-    config = MPASPrimitiveEquationConfig(nu_del4=nu_del4, fix_mass=True)
-    model = MPASPrimitiveEquationModel(mesh, sigma, config)
-    state = held_suarez_init_mpas(mesh, sigma)
-
-    mass_init = float(jnp.sum(state.p_s.data * mesh.areaCell))
-
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(6 * 3600 / dt))
-    diag_times, diag_steps, diag_mass, diag_max_wind, diag_mean_T = [], [], [], [], []
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
-    lon_cell_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180.0 / np.pi
-    lat_cell_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi
-
-    def _extract_hs_ico(s):
-        u_raw = np.asarray(s.u.data, dtype=np.float64).reshape(-1)
-        if u_raw.size == lon_cell_deg.size:
-            u_ll = _bin_points_to_latlon(u_raw, lon_cell_deg, lat_cell_deg)
-        else:
-            # Some MPAS variants store momentum on edges; keep snapshot schema stable.
-            u_ll = np.full((181, 360), np.nan, dtype=np.float64)
-        ps_ll = _bin_points_to_latlon(np.asarray(s.p_s.data, dtype=np.float64), lon_cell_deg, lat_cell_deg)
-        return {
-            "u": u_ll,
-            "p_s": ps_ll,
-            "T_3d": np.asarray(s.T.data, dtype=np.float64),
-        }
-
-    snapshots[0] = _extract_hs_ico(state)
-
-    t0 = time.time()
-    last_print = t0
-    for step in range(n_steps):
-        state = model.step(state, dt, held_suarez_forcing_mpas)
-        step_num = step + 1
-        if step_num in snap_targets:
-            snapshots[step_num] = _extract_hs_ico(state)
-
-        if step_num % 100 == 0:
-            u_max = float(jnp.max(jnp.abs(state.u.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step_num}, u_max={u_max:.1f}")
-                break
-
-        if step_num % diag_every == 0:
-            day = step_num * dt / 86400.0
-            mass = float(jnp.sum(state.p_s.data * mesh.areaCell))
-            max_wind = float(jnp.max(jnp.abs(state.u.data)))
-            mean_T = float(jnp.mean(state.T.data))
-            diag_times.append(day)
-            diag_steps.append(step_num)
-            diag_mass.append(mass)
-            diag_max_wind.append(max_wind)
-            diag_mean_T.append(mean_T)
-
-            now = time.time()
-            if now - last_print > 30:
-                mass_drift = abs(mass - mass_init) / abs(mass_init)
-                print(f"    Day {day:7.1f}/{days} | max|u|={max_wind:6.1f} m/s | "
-                      f"<T>={mean_T:.1f} K | mass drift={mass_drift:.2e}")
-                last_print = now
-
-    jax.block_until_ready(state.T.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"T": state.T.data, "u": state.u.data, "p_s": state.p_s.data})
-    mass_final = float(jnp.sum(state.p_s.data * mesh.areaCell))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
-    notes = f"mass drift={mass_drift:.2e}"
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "levels": nlev, "nCells": mesh.nCells,
-        "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        mass_drift_ts = [abs(m - mass_init) / abs(mass_init) for m in diag_mass]
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"Held-Suarez — ico{level}/L{nlev} ({mesh.nCells} cells)",
-                             [("Mass drift (rel)", diag_times, mass_drift_ts, "mass"),
-                              ("Max |u_n| (m/s)", diag_times, diag_max_wind, "|u|"),
-                              ("Mean T (K)", diag_times, diag_mean_T, "T")])
-        _save_mean_and_conservation(
-            output_dir,
-            f"Held-Suarez ico{level}",
-            diag_steps,
-            dt,
-            {"mean_p_s": diag_mass, "max_edge_wind": diag_max_wind, "mean_T": diag_mean_T},
-            units={"mean_p_s": "Pa", "max_edge_wind": "m/s", "mean_T": "K"},
-            mass_key="mean_p_s",
-            energy_key="mean_T",
-        )
-
-    _save_snapshots_bundle(
-        output_dir,
-        f"Held-Suarez ico{level}",
-        snapshots,
-        dt,
-        [
-            ("u", "Edge-normal wind (m/s)", "RdBu_r"),
-            ("p_s", "Surface pressure (Pa)", "viridis"),
-        ],
-        coord_kind="latlon",
-        lon_deg=np.linspace(-180.0, 180.0, 360, endpoint=False),
-        lat_deg=np.linspace(-90.0, 90.0, 181),
-    )
-    _save_vertical_cross_sections(
-        output_dir,
-        f"Held-Suarez ico{level}",
-        snapshots,
-        dt,
-        field_key_3d="T_3d",
-        coord_kind="icosa",
-        lon_deg=lon_cell_deg,
-        lat_deg=lat_cell_deg,
-        level_values=np.asarray(sigma.sigma_full, dtype=np.float64),
-        level_label="Sigma",
-    )
-    _get_rich_diag_helpers()._save_profiles(
-        output_dir,
-        f"Held-Suarez ico{level}",
-        {
-            st: {
-                "T_mean": np.nanmean(np.asarray(snapshots[st]["T_3d"]), axis=0)
-            }
-            for st in sorted(snapshots.keys())
-            if "T_3d" in snapshots[st]
-        },
-        dt,
-        np.asarray(sigma.sigma_full, dtype=np.float64),
-        "Sigma",
-        True,
-        units={"T_mean": "K"},
-    )
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Hydrostatic baroclinic wave — icosahedral (MPAS)
-# ---------------------------------------------------------------------------
-def run_hydro_baroclinic_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
-        MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
-
-    level = _parse_ico_level(tc.resolution)
-    nlev = 40
-    dt = 200.0
-    mesh = create_voronoi_mesh(level)
-    sigma = create_sigma_coordinate(nlev)
-
-    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
-    nu_del4 = dx_mean ** 4 / (48.0 * 3600.0)
-
-    config = MPASPrimitiveEquationConfig(nu_del4=nu_del4, fix_mass=True)
-    model = MPASPrimitiveEquationModel(mesh, sigma, config)
-    state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
-
-    mass_init = float(jnp.sum(state.p_s.data * mesh.areaCell))
-
-    n_steps = int(days * 86400 / dt)
-    diag_every = max(1, int(6 * 3600 / dt))
-    diag_times, diag_max_wind = [], []
-
-    t0 = time.time()
-    last_print = t0
-    for step in range(n_steps):
-        state = model.step(state, dt)
-
-        if (step + 1) % 100 == 0:
-            u_max = float(jnp.max(jnp.abs(state.u.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)) or u_max > 1000:
-                print(f"  BLOWUP at step {step + 1}")
-                break
-
-        if (step + 1) % diag_every == 0:
-            day = (step + 1) * dt / 86400.0
-            max_wind = float(jnp.max(jnp.abs(state.u.data)))
-            diag_times.append(day)
-            diag_max_wind.append(max_wind)
-
-            now = time.time()
-            if now - last_print > 30:
-                print(f"    Day {day:7.1f}/{days} | max|u|={max_wind:6.1f} m/s")
-                last_print = now
-
-    jax.block_until_ready(state.T.data)
-    wall = time.time() - t0
-
-    ok = check_finite({"T": state.T.data, "u": state.u.data, "p_s": state.p_s.data})
-    mass_final = float(jnp.sum(state.p_s.data * mesh.areaCell))
-    mass_drift = abs(mass_final - mass_init) / abs(mass_init)
-    notes = f"mass drift={mass_drift:.2e}, max|u|={diag_max_wind[-1]:.1f}" if diag_max_wind else ""
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "levels": nlev, "nCells": mesh.nCells,
-        "days": days, "dt": dt, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_times:
-        save_timeseries_plot(output_dir, "timeseries.png",
-                             f"Baroclinic Wave — ico{level}/L{nlev}",
-                             [("Max |u_n| (m/s)", diag_times, diag_max_wind, "|u|")])
-
-    return "PASS" if ok else "FAIL", wall, notes
-
-
-# ---------------------------------------------------------------------------
-# Non-hydrostatic DCMIP-2025 — icosahedral (MPAS)
-# ---------------------------------------------------------------------------
-def run_nh_dcmip2025_icosahedral(tc: TestCase, output_dir: Path, days: float, **kwargs):
-    test_case = kwargs["test_case"]
-
-    from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
-        MPASCompressibleEulerModel, MPASCompressibleEulerConfig,
-    )
-
-    level = _parse_ico_level(tc.resolution)
-    nlev = 40
-    duration_hours = days * 24.0
-    mesh = create_voronoi_mesh(level)
-
-    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
-
-    if test_case == "tc1":
-        from tests.test_cases.dcmip2025.test_case_1_mpas import dcmip25_tc1_init_mpas
-        state, height_coord, terrain_metric = dcmip25_tc1_init_mpas(mesh, n_levels=nlev)
-        dt = max(0.2, 6.0 * (200.0 / (dx_mean / 1000.0)))  # scale with grid spacing
-        dt = min(dt, 6.0)  # cap
-        nh_config = MPASCompressibleEulerConfig(
-            n_acoustic_substeps=10,
-            sponge_width=10000.0,
-            sponge_coeff=0.05,
-            nu_del4=dx_mean ** 4 / (48.0 * 3600.0),
-        )
-    else:
-        raise ValueError(f"MPAS NH only supports tc1, got {test_case}")
-
-    model = MPASCompressibleEulerModel(mesh, height_coord, terrain_metric, nh_config)
-
-    n_steps = int(duration_hours * 3600.0 / dt)
-    diag_every = max(1, n_steps // 20)
-    snap_targets = _get_rich_diag_helpers()._snapshot_steps(n_steps)
-    diag_steps, diag_max_w, diag_mean_theta, diag_mean_rho = [], [], [], []
-    snapshots: dict[int, dict[str, np.ndarray]] = {}
-    lon_cell_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180.0 / np.pi
-    lat_cell_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180.0 / np.pi
-
-    def _extract_nh_ico(s):
-        u_raw = np.asarray(s.u.data, dtype=np.float64).reshape(-1)
-        if u_raw.size == lon_cell_deg.size:
-            u_ll = _bin_points_to_latlon(u_raw, lon_cell_deg, lat_cell_deg)
-        else:
-            u_ll = np.full((181, 360), np.nan, dtype=np.float64)
-        w_arr = np.asarray(s.w.data, dtype=np.float64)
-        if w_arr.ndim >= 2 and w_arr.shape[0] == lon_cell_deg.size:
-            w_mid = w_arr[:, min(w_arr.shape[-1] // 2, w_arr.shape[-1] - 1)]
-            w_ll = _bin_points_to_latlon(w_mid, lon_cell_deg, lat_cell_deg)
-        else:
-            w_ll = np.full((181, 360), np.nan, dtype=np.float64)
-        return {
-            "u": u_ll,
-            "w_mid": w_ll,
-            "theta_prime_3d": np.asarray(s.theta_prime.data, dtype=np.float64),
-            "rho_prime_3d": np.asarray(s.rho_prime.data, dtype=np.float64),
-        }
-
-    snapshots[0] = _extract_nh_ico(state)
-
-    t0 = time.time()
-    stable = True
-    for i in range(n_steps):
-        state = model.step(state, dt)
-        step = i + 1
-        if step in snap_targets:
-            snapshots[step] = _extract_nh_ico(state)
-        if step % diag_every == 0:
-            w_max = float(jnp.max(jnp.abs(state.w.data)))
-            if not jnp.all(jnp.isfinite(state.u.data)):
-                print(f"    BLOWUP at step {step}")
-                stable = False
-                break
-            t_hours = step * dt / 3600.0
-            print(f"    Step {step:6d}/{n_steps} | t={t_hours:.2f}h | |w|_max={w_max:.4f} m/s")
-            diag_steps.append(step)
-            diag_max_w.append(w_max)
-            diag_mean_theta.append(float(jnp.mean(state.theta_prime.data)))
-            diag_mean_rho.append(float(jnp.mean(state.rho_prime.data)))
-
-    jax.block_until_ready(state.u.data)
-    wall = time.time() - t0
-
-    ok = stable and check_finite({
-        "u": state.u.data, "w": state.w.data,
-        "theta_prime": state.theta_prime.data, "rho_prime": state.rho_prime.data,
-    })
-    w_max_final = float(jnp.max(jnp.abs(state.w.data))) if ok else float("nan")
-    notes = f"|w|_max={w_max_final:.4f} m/s, dt={dt:.2f}s"
-
-    results = {
-        "test": tc.test_name, "grid": tc.grid_type, "resolution": tc.resolution,
-        "levels": nlev, "nCells": mesh.nCells, "duration_hours": duration_hours,
-        "dt": dt, "wall_time": f"{wall:.1f}s",
-        "status": "PASS" if ok else "FAIL", "notes": notes,
-    }
-    write_results_txt(output_dir, results)
-
-    if diag_steps:
-        _save_mean_and_conservation(
-            output_dir,
-            f"NH DCMIP {test_case} ico{level}",
-            diag_steps,
-            dt,
-            {
-                "max_abs_w": diag_max_w,
-                "mean_theta_prime": diag_mean_theta,
-                "mean_rho_prime": diag_mean_rho,
-            },
-            units={"max_abs_w": "m/s", "mean_theta_prime": "K", "mean_rho_prime": "kg/m^3"},
-            mass_key="mean_rho_prime",
-            energy_key="mean_theta_prime",
-        )
-
-    _save_snapshots_bundle(
-        output_dir,
-        f"NH DCMIP {test_case} ico{level}",
-        snapshots,
-        dt,
-        [
-            ("u", "Edge-normal wind (m/s)", "RdBu_r"),
-            ("w_mid", "Vertical velocity mid (m/s)", "RdBu_r"),
-        ],
-        coord_kind="latlon",
-        lon_deg=np.linspace(-180.0, 180.0, 360, endpoint=False),
-        lat_deg=np.linspace(-90.0, 90.0, 181),
-    )
-    z_full = np.asarray(getattr(height_coord, "z_full", np.arange(nlev)), dtype=np.float64)
-    _save_vertical_cross_sections(
-        output_dir,
-        f"NH DCMIP {test_case} ico{level}",
-        snapshots,
-        dt,
-        field_key_3d="theta_prime_3d",
-        coord_kind="icosa",
-        lon_deg=lon_cell_deg,
-        lat_deg=lat_cell_deg,
-        level_values=z_full,
-        level_label="Height (m)",
-    )
-    _get_rich_diag_helpers()._save_profiles(
-        output_dir,
-        f"NH DCMIP {test_case} ico{level}",
-        {
-            st: {
-                "theta_prime_mean": np.nanmean(np.asarray(snapshots[st]["theta_prime_3d"]), axis=0),
-                "rho_prime_mean": np.nanmean(np.asarray(snapshots[st]["rho_prime_3d"]), axis=0),
-            }
-            for st in sorted(snapshots.keys())
-            if "theta_prime_3d" in snapshots[st]
-        },
-        dt,
-        z_full,
-        "Height (m)",
-        False,
-        units={"theta_prime_mean": "K", "rho_prime_mean": "kg/m^3"},
-    )
+        field_3d_key="theta_prime_3d", level_values=z_full,
+        level_label="Height (m)", invert_levels=False,
+        mass_key="mean_rho_prime", energy_key="mean_theta_prime",
+        scalar_units={
+            "max_abs_w": "m/s", "mean_theta_prime": "K",
+            "mean_rho_prime": "kg/m^3"})
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -2903,73 +1762,69 @@ def run_nh_dcmip2025_icosahedral(tc: TestCase, output_dir: Path, days: float, **
 # ===========================================================================
 
 RUNNERS: dict[str, Callable] = {
-    "run_sw_cubed_sphere": run_sw_cubed_sphere,
-    "run_sw_latlon": run_sw_latlon,
-    "run_sw_spectral": run_sw_spectral,
-    "run_sw_icosahedral": run_sw_icosahedral,
-    "run_hydro_held_suarez_cube": run_hydro_held_suarez_cube,
-    "run_hydro_held_suarez_latlon": run_hydro_held_suarez_latlon,
-    "run_hydro_held_suarez_spectral": run_hydro_held_suarez_spectral,
-    "run_hydro_held_suarez_icosahedral": run_hydro_held_suarez_icosahedral,
-    "run_hydro_baroclinic_cube": run_hydro_baroclinic_cube,
-    "run_hydro_baroclinic_spectral": run_hydro_baroclinic_spectral,
-    "run_hydro_baroclinic_icosahedral": run_hydro_baroclinic_icosahedral,
-    "run_hydro_dcmip_transport": run_hydro_dcmip_transport,
-    "run_hydro_amip_cube": run_hydro_amip_cube,
-    "run_hydro_amip_spectral": run_hydro_amip_spectral,
-    "run_hydro_rce_cube": run_hydro_rce_cube,
-    "run_nh_dcmip2025_cube": run_nh_dcmip2025_cube,
-    "run_nh_dcmip2025_spectral": run_nh_dcmip2025_spectral,
-    "run_nh_dcmip2025_icosahedral": run_nh_dcmip2025_icosahedral,
+    "williamson2": run_shallow_water,
+    "williamson5": run_shallow_water,
+    "held_suarez": run_held_suarez,
+    "baroclinic": run_baroclinic,
+    "dcmip_transport_11": run_dcmip_transport,
+    "dcmip_transport_12": run_dcmip_transport,
+    "dcmip_transport_13": run_dcmip_transport,
+    "amip": run_amip,
+    "dcmip_tc1": run_nonhydrostatic,
+    "dcmip_tc2": run_nonhydrostatic,
+    "dcmip_tc3": run_nonhydrostatic,
 }
 
 
 # ===========================================================================
-# CLI + Main
+# CLI
 # ===========================================================================
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Atmosphere test matrix: organized, hierarchical test runner.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p.add_argument("--only", type=str, default="all",
-                   choices=["sw", "hydro", "nh", "all"],
-                   help="Run only a specific equation set (default: all)")
-    p.add_argument("--grid", type=str, default="all",
-                   choices=["cubed_sphere", "latlon", "spectral", "icosahedral", "all"],
-                   help="Run only a specific grid type (default: all)")
-    p.add_argument("--test", type=str, default=None,
-                   help="Run only a specific test name (e.g. held_suarez_gray)")
-    p.add_argument("--resolution", type=str, default=None,
-                   help="Override baseline resolution (e.g. C48, T85, 90x180)")
-    p.add_argument("--output", "-o", type=str, default="results/atmosphere",
-                   help="Base output directory (default: results/atmosphere)")
-    p.add_argument("--quick", action="store_true",
-                   help="Use shorter durations for quick verification")
-    p.add_argument("--list", action="store_true",
-                   help="List all test cases and exit")
+        description="Atmosphere test matrix for legoESM dynamical cores.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument(
+        "--only", type=str, default="all",
+        choices=["sw", "hydro", "nh", "all"],
+        help="Run only a specific equation set (default: all)")
+    p.add_argument(
+        "--grid", type=str, default="all",
+        choices=["cubed_sphere", "latlon", "icosahedral", "all"],
+        help="Run only a specific grid type (default: all)")
+    p.add_argument(
+        "--test", type=str, default=None,
+        help="Run only cases matching this name (e.g. held_suarez)")
+    p.add_argument(
+        "--radiation", type=str, default="gray",
+        choices=["gray", "rrtmgp"],
+        help="Radiation scheme for applicable tests (default: gray)")
+    p.add_argument(
+        "--resolution", type=str, default=None,
+        help="Override baseline resolution (e.g. C48, 90x180, ico6)")
+    p.add_argument(
+        "--output", "-o", type=str, default="results/atmosphere",
+        help="Base output directory (default: results/atmosphere)")
+    p.add_argument(
+        "--quick", action="store_true",
+        help="Use shorter durations for quick verification")
+    p.add_argument(
+        "--list", action="store_true",
+        help="List all test cases and exit")
     return p
 
 
 def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
-    """Filter test matrix based on CLI arguments."""
     filtered = tests
-
-    # Filter by equation set
-    eq_map = {"sw": "shallow_water", "hydro": "hydrostatic", "nh": "nonhydrostatic"}
+    eq_map = {"sw": "shallow_water", "hydro": "hydrostatic",
+              "nh": "nonhydrostatic"}
     if args.only != "all":
         eq_set = eq_map[args.only]
         filtered = [t for t in filtered if t.equation_set == eq_set]
-
-    # Filter by grid type
     if args.grid != "all":
         filtered = [t for t in filtered if t.grid_type == args.grid]
-
-    # Filter by test name
     if args.test:
-        filtered = [t for t in filtered if args.test in t.test_name]
-
+        filtered = [t for t in filtered if args.test in t.case]
     return filtered
 
 
@@ -2977,41 +1832,33 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    # List mode
-    if args.list:
-        print(f"{'#':>3s}  {'Grid':<14s}  {'Equation Set':<16s}  {'Resolution':<10s}  "
-              f"{'Vert':<7s}  {'Test':<25s}  {'Days':>8s}  {'Quick':>8s}")
-        print("-" * 100)
-        for i, tc in enumerate(TEST_MATRIX, 1):
-            print(f"{i:3d}  {tc.grid_type:<14s}  {tc.equation_set:<16s}  "
-                  f"{tc.resolution:<10s}  {tc.vertical_coord:<7s}  "
-                  f"{tc.test_name:<25s}  {tc.duration_days:8.2f}  "
-                  f"{tc.quick_duration_days:8.4f}")
-        print(f"\nTotal: {len(TEST_MATRIX)} test cases")
-        return
-
-    # Filter tests
     tests = filter_tests(TEST_MATRIX, args)
+
+    if args.list:
+        print(f"{'#':>3}  {'Equation Set':<16}  {'Case':<22}  "
+              f"{'Grid':<14}  {'Resolution':<10}  {'Vert':<7}  "
+              f"{'Days':>8}  {'Quick':>8}")
+        print("-" * 105)
+        for i, tc in enumerate(tests, 1):
+            print(f"{i:3d}  {tc.equation_set:<16}  {tc.case:<22}  "
+                  f"{tc.grid_type:<14}  {tc.resolution:<10}  "
+                  f"{tc.vertical_coord:<7}  {tc.duration_days:8.4f}  "
+                  f"{tc.quick_days:8.4f}")
+        print(f"\nTotal: {len(tests)} test cases "
+              f"(of {len(TEST_MATRIX)} in full matrix)")
+        return
     if not tests:
         print("No tests match the given filters.")
         return
 
-    # Apply resolution override
     if args.resolution:
-        new_tests = []
-        for t in tests:
-            new_tests.append(TestCase(
-                grid_type=t.grid_type, equation_set=t.equation_set,
-                resolution=args.resolution, vertical_coord=t.vertical_coord,
-                test_name=t.test_name, duration_days=t.duration_days,
-                quick_duration_days=t.quick_duration_days,
-                run_fn=t.run_fn, run_kwargs=t.run_kwargs,
-            ))
-        tests = new_tests
+        tests = [TestCase(
+            t.equation_set, t.case, t.grid_type, args.resolution,
+            t.vertical_coord, t.duration_days, t.quick_days, t.run_kwargs)
+            for t in tests]
 
     output_base = Path(args.output)
 
-    # Print header
     print("=" * 78)
     print("  legoESM Atmosphere Test Matrix")
     print("=" * 78)
@@ -3019,93 +1866,98 @@ def main():
     print(f"  X64:        {jax.config.jax_enable_x64}")
     print(f"  Devices:    {jax.devices()}")
     print(f"  Output:     {output_base}")
+    print(f"  Radiation:  {args.radiation}")
     print(f"  Quick mode: {args.quick}")
     print(f"  Tests:      {len(tests)} / {len(TEST_MATRIX)}")
     print("=" * 78)
     print()
 
-    # Run tests
     t_start_all = time.time()
+
     for i, tc in enumerate(tests, 1):
-        days = tc.quick_duration_days if args.quick else tc.duration_days
+        days = tc.quick_days if args.quick else tc.duration_days
         out_dir = output_base / tc.output_path
 
-        label = f"{tc.grid_type}/{tc.equation_set}/{tc.test_name}"
-        print(f"\n[{i}/{len(tests)}] {label} ({tc.resolution}, {tc.vertical_coord}, "
-              f"{days:.4g} days)")
+        label = f"{tc.equation_set}/{tc.case}/{tc.grid_type}"
+        print(f"\n[{i}/{len(tests)}] {label} ({tc.resolution}, "
+              f"{tc.vertical_coord}, {days:.4g} days)")
         print("-" * 60)
 
-        runner = RUNNERS.get(tc.run_fn)
+        runner = RUNNERS.get(tc.case)
         if runner is None:
-            record(tc, "ERROR", 0, f"Unknown runner: {tc.run_fn}")
+            record(tc, "ERROR", 0, f"Unknown runner for case: {tc.case}")
             continue
 
         try:
-            status, wall, notes = runner(tc, out_dir, days, **tc.run_kwargs)
+            status, wall, notes = runner(
+                tc, out_dir, days, radiation=args.radiation)
             record(tc, status, wall, notes)
+        except NotImplementedError as e:
+            record(tc, "SKIP", 0, str(e)[:120])
         except Exception as e:
             record(tc, "ERROR", 0, str(e)[:120])
             traceback.print_exc()
         finally:
-            # Keep per-case artifact schema consistent, even on failures.
             _ensure_required_artifacts(out_dir)
 
     total_wall = time.time() - t_start_all
 
-    # Print summary
+    # --- Summary ---
     print("\n" + "=" * 78)
     print("  SUMMARY")
     print("=" * 78)
-    print(f"  {'Status':6s}  {'Grid':<14s}  {'Equation Set':<16s}  "
-          f"{'Test':<25s}  {'Time':>8s}  Notes")
-    print("-" * 100)
+    print(f"  {'Status':6}  {'Grid':<14}  {'Equation Set':<16}  "
+          f"{'Case':<22}  {'Time':>8}  Notes")
+    print("-" * 105)
 
-    n_pass = n_fail = n_error = 0
+    n_pass = n_fail = n_error = n_skip = 0
     for r in ALL_RESULTS:
-        icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!"}[r["status"]]
-        print(f"  {icon}{r['status']:5s}  {r['grid']:<14s}  {r['equation_set']:<16s}  "
-              f"{r['test']:<25s}  {r['wall_time']:7.1f}s  {r['notes']}")
+        icon = {"PASS": "  ", "FAIL": "**", "ERROR": "!!",
+                "SKIP": "--"}[r["status"]]
+        print(f"  {icon}{r['status']:5}  {r['grid']:<14}  "
+              f"{r['equation_set']:<16}  {r['test']:<22}  "
+              f"{r['wall_time']:7.1f}s  {r['notes']}")
         if r["status"] == "PASS":
             n_pass += 1
         elif r["status"] == "FAIL":
             n_fail += 1
+        elif r["status"] == "SKIP":
+            n_skip += 1
         else:
             n_error += 1
 
-    print("-" * 100)
+    print("-" * 105)
     print(f"  Total: {len(ALL_RESULTS)} tests | "
-          f"PASS: {n_pass} | FAIL: {n_fail} | ERROR: {n_error} | "
-          f"Wall time: {total_wall:.1f}s ({total_wall / 60:.1f} min)")
+          f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
+          f"ERROR: {n_error} | Wall: {total_wall:.1f}s "
+          f"({total_wall / 60:.1f} min)")
     print("=" * 78)
 
     # Save summary
     output_base.mkdir(parents=True, exist_ok=True)
-    summary_path = output_base / "summary.json"
-    with open(summary_path, "w") as f:
+    with open(output_base / "summary.json", "w") as f:
         json.dump({
-            "results": ALL_RESULTS,
-            "total_wall_time": total_wall,
-            "n_pass": n_pass,
-            "n_fail": n_fail,
-            "n_error": n_error,
-            "quick_mode": args.quick,
+            "results": ALL_RESULTS, "total_wall_time": total_wall,
+            "n_pass": n_pass, "n_fail": n_fail, "n_skip": n_skip,
+            "n_error": n_error, "quick_mode": args.quick,
+            "radiation": args.radiation,
         }, f, indent=2)
-    print(f"\n  Summary saved to: {summary_path}")
-
-    summary_txt = output_base / "summary.txt"
-    with open(summary_txt, "w") as f:
+    with open(output_base / "summary.txt", "w") as f:
         f.write("legoESM Atmosphere Test Matrix Summary\n")
         f.write("=" * 60 + "\n")
         f.write(f"Total: {len(ALL_RESULTS)} tests | "
-                f"PASS: {n_pass} | FAIL: {n_fail} | ERROR: {n_error}\n")
+                f"PASS: {n_pass} | FAIL: {n_fail} | SKIP: {n_skip} | "
+                f"ERROR: {n_error}\n")
         f.write(f"Wall time: {total_wall:.1f}s ({total_wall / 60:.1f} min)\n")
+        f.write(f"Radiation: {args.radiation}\n")
         f.write(f"Quick mode: {args.quick}\n\n")
         for r in ALL_RESULTS:
-            f.write(f"{r['status']:5s}  {r['grid']:<14s}  {r['equation_set']:<16s}  "
-                    f"{r['test']:<25s}  {r['wall_time']:7.1f}s  {r['notes']}\n")
-    print(f"  Summary saved to: {summary_txt}")
+            f.write(f"{r['status']:5}  {r['grid']:<14}  "
+                    f"{r['equation_set']:<16}  {r['test']:<22}  "
+                    f"{r['wall_time']:7.1f}s  {r['notes']}\n")
 
-    # Exit with non-zero if any failures
+    print(f"\n  Summary: {output_base / 'summary.json'}")
+
     if n_fail > 0 or n_error > 0:
         sys.exit(1)
 
