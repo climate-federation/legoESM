@@ -12,6 +12,8 @@ Each case folder contains:
     - conservation_timeseries.csv/.png (mass & energy drift)
     - field_snapshots.png              (2D field maps at selected times)
     - snapshots_<field>.png            (per-field snapshot evolution)
+    - snapshots_native.npz             (snapshot arrays in native grid coords)
+    - snapshots_latlon.npz             (snapshot arrays regridded to 181x360 lat-lon)
     - vertical_profiles.png            (vertical profile evolution)
     - latitude_vertical_cross_sections.png
     - longitude_vertical_cross_sections.png
@@ -612,6 +614,59 @@ def _save_snapshot_times(output_dir: Path, snapshots: dict, dt: float):
             f.write(f"{step},{t_s:.2f},{t_s / 86400:.6f}\n")
 
 
+def _save_snapshot_data(
+    output_dir: Path,
+    snapshots: dict,
+    dt: float,
+    coord_kind: str,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+):
+    """Save snapshot field arrays as NPZ files in both native grid and lat-lon.
+
+    Produces:
+        snapshots_native.npz   – raw arrays keyed as ``{field}_step{step}``
+        snapshots_latlon.npz   – regridded to (181, 360) regular lat-lon,
+                                 same key convention.  For 3-D fields the
+                                 shape is (181, 360, nlev).
+    Both files also contain ``times_days`` and ``steps`` metadata arrays.
+    """
+    if not snapshots:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    sorted_steps = sorted(snapshots.keys())
+    times_days = np.array([s * dt / 86400.0 for s in sorted_steps],
+                          dtype=np.float64)
+
+    native_arrays: dict[str, np.ndarray] = {
+        "steps": np.array(sorted_steps, dtype=np.int64),
+        "times_days": times_days,
+    }
+    latlon_arrays: dict[str, np.ndarray] = {
+        "steps": np.array(sorted_steps, dtype=np.int64),
+        "times_days": times_days,
+        "lat": np.linspace(-90.0, 90.0, 181),
+        "lon": np.linspace(-180.0, 180.0, 360),
+    }
+
+    for step in sorted_steps:
+        for field_key, field_val in snapshots[step].items():
+            arr = np.asarray(field_val, dtype=np.float64)
+            key = f"{field_key}_step{step}"
+            native_arrays[key] = arr
+            # Fields with "_3d" suffix are (*, nlev) – regrid per level
+            if field_key.endswith("_3d"):
+                latlon_arrays[key] = _regrid_3d_level(
+                    arr, lon_deg, lat_deg, coord_kind)
+            else:
+                latlon_arrays[key] = _regrid_2d(
+                    arr, lon_deg, lat_deg, coord_kind)
+
+    np.savez_compressed(output_dir / "snapshots_native.npz", **native_arrays)
+    np.savez_compressed(output_dir / "snapshots_latlon.npz", **latlon_arrays)
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -649,6 +704,8 @@ def _save_case_diagnostics(
         output_dir, case_name, snapshots, dt, field_specs_2d,
         coord_kind, lon_deg, lat_deg)
     _save_snapshot_times(output_dir, snapshots, dt)
+    _save_snapshot_data(
+        output_dir, snapshots, dt, coord_kind, lon_deg, lat_deg)
 
     if field_3d_key and level_values is not None:
         _save_cross_sections(
