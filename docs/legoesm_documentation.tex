@@ -47,7 +47,7 @@
 \section{Introduction}
 %=============================================================================
 
-legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, sea-ice, and biogeochemical components on the sphere, with 25 dynamical cores spanning five discretisation families (centred, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and over thirty physics parameterisations.  The model includes a land carbon cycle with Farquhar photosynthesis and stomatal conductance, ocean biogeochemistry (abiotic carbon + NPZD ecosystem), sea-ice dynamics with EVP rheology and multi-category ice, and CMIP6-class infrastructure (CF/CMOR output, experiment templates, restart reproducibility, documented tuning).
+legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, sea-ice, and biogeochemical components on the sphere, with 25+ dynamical cores spanning five discretisation families (C-D grid FV3, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and over thirty physics parameterisations.  The cubed-sphere implementation is unified around a single FV3-style C-D grid discretisation (Lin 2004, Putman \& Lin 2007) shared by atmosphere (shallow water, hydrostatic PE, non-hydrostatic CE) and ocean, eliminating the Hollingsworth--Kallberg instability.  The model includes a land carbon cycle with Farquhar photosynthesis and stomatal conductance, ocean biogeochemistry (abiotic carbon + NPZD ecosystem), sea-ice dynamics with EVP rheology and multi-category ice, and CMIP6-class infrastructure (CF/CMOR output, experiment templates, restart reproducibility, documented tuning).
 
 \paragraph{Design principles.}
 \begin{itemize}[nosep]
@@ -231,6 +231,33 @@ where $h_x=\Delta x/2$, $h_y=\Delta y/2$ are half-edge lengths and $A$ is the ce
   \zeta = \frac{1}{2\,A_{i,j}}
   \Bigl[\delta_i\bigl(v\,h_y\bigr)-\delta_j\bigl(u\,h_x\bigr)\Bigr].
 \end{equation}
+
+\subsection{C-D Grid Operators (FV3-style, \texttt{operators\_cdgrid.py})}
+
+The canonical cubed-sphere operator module uses FV3-style C-D grid staggering (Lin 2004, Putman \& Lin 2007), shared by all atmosphere (SW, PE, CE) and ocean dynamical cores.  D-grid winds at cell corners~$(6,n\!+\!1,n\!+\!1)$ are prognostic; C-grid velocities at cell edges are diagnosed for mass/scalar transport.
+
+\paragraph{D-grid vorticity.}
+Vorticity at each cell corner is the discrete circulation integral divided by the corner dual-cell area~$A_c$:
+\begin{equation}
+  \zeta_{\mathrm{corner}} = \frac{1}{A_c}\oint \bm{u}\cdot\dd\bm{l}
+  \approx \frac{1}{A_c}\bigl[u^D_{i,j}\Delta x - u^D_{i+1,j}\Delta x + v^D_{i,j+1}\Delta y - v^D_{i,j}\Delta y\bigr].
+\end{equation}
+This circulation-based discretisation is exact on the D-grid and eliminates the Hollingsworth--Kallberg instability that plagues A-grid vorticity operators.
+
+\paragraph{Arakawa--Lamb gradient.}
+The Bernoulli (or Exner) gradient at D-grid corners is a 4-point Arakawa--Lamb average:
+\begin{equation}
+  \left.\frac{\pp B}{\pp x}\right|_{i+\half,j+\half}
+  = \frac{B_{i+1,j}+B_{i+1,j+1}-B_{i,j}-B_{i,j+1}}{2\Delta x},
+\end{equation}
+and analogously for~$\pp B/\pp y$.
+
+\paragraph{C-grid mass-flux divergence.}
+Scalar transport uses upwind C-grid mass fluxes:
+\begin{equation}
+  \frac{\dd h}{\dd t} = -\frac{1}{A}\bigl[(h u_c)_{i+\half,j}-(h u_c)_{i-\half,j}+(h v_c)_{i,j+\half}-(h v_c)_{i,j-\half}\bigr],
+\end{equation}
+where $u_c,v_c$ are diagnosed from $u_d,v_d$ by face-edge averaging.
 
 \subsection{Laplacian and Hyperdiffusion}
 \begin{equation}
@@ -454,6 +481,13 @@ The equations are integrated with an outer SSP-RK3 scheme for the slow tendencie
 \end{equation}
 
 An optional \textbf{semi-implicit acoustic} solve replaces the forward Euler for $w$ with a tridiagonal system to remove the vertical acoustic CFL constraint.
+
+\paragraph{Acoustic off-centering (v3.7).}
+To damp vertically propagating acoustic/gravity wave noise in long integrations, the density update can be off-centred (Skamarock \& Klemp 2008):
+\begin{equation}
+  \rho'^{n+1}_{\beta} = (1+\beta)\,\rho'^{n+1} - \beta\,\rho'^{n},
+\end{equation}
+where $\beta\ge 0$ is the off-centering parameter (\texttt{acoustic\_off\_centering} in the config).  For $\beta=0$ the scheme is centred (neutral); $\beta=0.1$ is recommended for AMIP/CMIP runs.  This adds a small amount of temporal diffusion to the fast modes without tightening the horizontal CFL constraint.
 
 \subsubsection{Sponge layer}
 \begin{equation}
@@ -780,6 +814,30 @@ The three-stage strong-stability-preserving Runge--Kutta method:
 SSP-RK(4,3) and SSP-RK(5,4) variants are also available.
 
 %-----------------------------------------------------------------------------
+\subsection{Robert-Asselin-Williams (RAW) Time Filter (v3.7)}
+%-----------------------------------------------------------------------------
+
+The leapfrog scheme used by the semi-implicit spectral PE solver requires a time filter to damp the computational mode.  The Williams (2009) modification of the Robert--Asselin filter splits the correction between the current and next time levels, restoring second-order accuracy:
+\begin{align}
+  d^n &= \frac{\gamma}{2}\bigl(X^{n-1}-2X^n+X^{n+1}\bigr), \\
+  X^n_{\mathrm{filt}} &= X^n + (1-\alpha)\,d^n, \\
+  X^{n+1}_{\mathrm{filt}} &= X^{n+1} + \alpha\,d^n.
+\end{align}
+With $\alpha=0.5$ (default), this is the RAW filter; $\alpha=0$ recovers the original Robert--Asselin filter.  The original RA filter introduces a first-order phase error that causes slow energy drift over climate-length integrations; the RAW modification eliminates this while preserving the same damping rate for the computational mode.
+
+%-----------------------------------------------------------------------------
+\subsection{Adaptive Hyperdiffusion (v3.7)}
+%-----------------------------------------------------------------------------
+
+The maximum stable coefficient for $n$-th order hyperdiffusion under forward Euler is
+\begin{equation}
+  \nu_n = S\cdot\frac{C(n)\,\Delta x^n}{\Delta t},
+  \qquad
+  C(2)=\tfrac{1}{2},\;C(4)=\tfrac{1}{8},\;C(6)=\tfrac{1}{48},
+\end{equation}
+where $S\in(0,1]$ is a safety factor (default 0.5).  The function \texttt{adaptive\_hyperdiff\_coeff(dx\_min, dt, order, safety)} eliminates manual tuning of the hyperdiffusion coefficient for each resolution and timestep.
+
+%-----------------------------------------------------------------------------
 \subsection{Split-Explicit Methods}
 %-----------------------------------------------------------------------------
 
@@ -936,6 +994,13 @@ Dry-air mass is corrected by a uniform adjustment to $p_s$ that restores the are
 \end{equation}
 so that $\sum_i A_i\,p_{s,i}^{\mathrm{corr}}=\sum_i A_i\,p_{s,i}^{\mathrm{old}}$ (global dry mass conserved exactly).
 Column moisture is rescaled: $q^{\mathrm{corr}}=q^{\mathrm{new}}\cdot Q_{\mathrm{old}}/Q_{\mathrm{new}}$.
+
+\paragraph{Initial-mass anchoring (v3.7).}
+For long AMIP/CMIP integrations, the fixer can anchor to the \emph{initial} mass $M_0=\sum_i A_i\,p_{s,i}^{\mathrm{init}}$ rather than the previous step's mass, preventing cumulative $O(\varepsilon)$ drift over millions of timesteps.  The correction becomes
+\begin{equation}
+  \Delta\bar p = \frac{\sum_i A_i\,p_{s,i}^{\mathrm{new}} - M_0}{\sum_i A_i}.
+\end{equation}
+Set via \texttt{model.set\_initial\_mass(state)} or \texttt{anchor\_mass\_to\_initial=True} in the config.  All accumulations use float64 regardless of the state precision.
 
 \subsection{Ocean}
 Volume conservation: $\eta^{\mathrm{corr}}=\eta^{\mathrm{new}}+(\sum\eta_{\mathrm{old}}\,A-\sum\eta_{\mathrm{new}}\,A)/\sum A$.\\
