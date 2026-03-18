@@ -124,11 +124,17 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
 )
 
 
+# --- Backward-compatible FV wrappers (accept ShallowWaterState with Fields) ---
+from legoesm.atmosphere.dynamics.shallow_water_fv import (
+    FVShallowWaterModel as _FVShallowWaterModelWrapped,
+    FVShallowWaterConfig as _FVShallowWaterConfigWrapped,
+)
+
 # Backward compatibility aliases
 ShallowWaterModel = CDGridShallowWaterModel
 PrimitiveEquationModel = CDGridPrimitiveEquationModel
 CompressibleEulerModel = CDGridCompressibleEulerModel
-FVShallowWaterModel = CDGridShallowWaterModel
+FVShallowWaterModel = _FVShallowWaterModelWrapped
 FVPrimitiveEquationModel = CDGridPrimitiveEquationModel
 FVCompressibleEulerModel = CDGridCompressibleEulerModel
 CGShallowWaterCubedModel = CDGridShallowWaterModel
@@ -186,9 +192,9 @@ _AXIS_TO_SOLVER = {
     ("hydrostatic", "sfno"): "sfno_primitive_equations",
     ("nonhydrostatic", "centered"): "cdgrid_compressible_euler",
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
-    ("shallow_water", "finite_volume"): "cdgrid_shallow_water",
-    ("hydrostatic", "finite_volume"): "cdgrid_primitive_equations",
-    ("nonhydrostatic", "finite_volume"): "cdgrid_compressible_euler",
+    ("shallow_water", "finite_volume"): "fv_shallow_water",
+    ("hydrostatic", "finite_volume"): "fv_primitive_equations",
+    ("nonhydrostatic", "finite_volume"): "fv_compressible_euler",
     ("shallow_water", "cgrid"): "cdgrid_shallow_water",
     ("hydrostatic", "cgrid"): "cdgrid_primitive_equations",
     ("nonhydrostatic", "cgrid"): "cdgrid_compressible_euler",
@@ -280,14 +286,11 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
             equations=legoesm_config.get("atmosphere.equations"),
         )
 
-    # Map legacy names to cdgrid
+    # Map legacy names to cdgrid (fv_ names handled separately below)
     _legacy_map = {
         "shallow_water": "cdgrid_shallow_water",
         "primitive_equations": "cdgrid_primitive_equations",
         "compressible_euler": "cdgrid_compressible_euler",
-        "fv_shallow_water": "cdgrid_shallow_water",
-        "fv_primitive_equations": "cdgrid_primitive_equations",
-        "fv_compressible_euler": "cdgrid_compressible_euler",
         "cgrid_shallow_water": "cdgrid_shallow_water",
         "cgrid_primitive_equations": "cdgrid_primitive_equations",
         "cgrid_compressible_euler": "cdgrid_compressible_euler",
@@ -295,7 +298,13 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
     name = _legacy_map.get(name, name)
 
     # --- Instantiate ---
-    if name == "cdgrid_shallow_water":
+    if name == "fv_shallow_water":
+        return _FVShallowWaterModelWrapped(**kwargs)
+    elif name == "fv_primitive_equations":
+        return CDGridPrimitiveEquationModel(**kwargs)
+    elif name == "fv_compressible_euler":
+        return CDGridCompressibleEulerModel(**kwargs)
+    elif name == "cdgrid_shallow_water":
         return CDGridShallowWaterModel(**kwargs)
     elif name == "cdgrid_primitive_equations":
         return CDGridPrimitiveEquationModel(**kwargs)
