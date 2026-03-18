@@ -78,6 +78,48 @@ def cfl_max_dt(
     return cfl_number * dx_min / (wave_speed * np.sqrt(ndim))
 
 
+def adaptive_hyperdiff_coeff(
+    dx_min: float,
+    dt: float,
+    order: int = 4,
+    safety: float = 0.5,
+) -> float:
+    """Compute a stable hyperdiffusion coefficient for a given grid and timestep.
+
+    For an n-th order hyperdiffusion ν_n · (-1)^{n/2+1} ∇^n, the maximum
+    stable coefficient under forward Euler is:
+
+        ν_n · dt / dx^n < C(n)
+
+    where C(n) is an order-dependent stability constant:
+        - order 2: C = 0.5
+        - order 4: C = 1/8
+        - order 6: C = 1/48
+
+    This function returns ν_n = safety * C(n) * dx^n / dt.
+
+    Parameters
+    ----------
+    dx_min : float
+        Minimum grid spacing [m].
+    dt : float
+        Time step [s].
+    order : int
+        Diffusion order (2 = Laplacian, 4 = biharmonic, 6 = triharmonic).
+    safety : float
+        Safety factor (0 < safety <= 1). Default 0.5 gives half the
+        theoretical maximum, providing a margin for multi-stage RK schemes.
+
+    Returns
+    -------
+    float
+        Hyperdiffusion coefficient ν_n [m^n/s].
+    """
+    stability_constants = {2: 0.5, 4: 0.125, 6: 1.0 / 48.0}
+    C_n = stability_constants.get(order, 1.0 / (2.0 ** order))
+    return safety * C_n * dx_min ** order / dt
+
+
 def cfl_check_and_adjust(
     dt: float,
     n: int,

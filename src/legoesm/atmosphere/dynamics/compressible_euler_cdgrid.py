@@ -63,7 +63,13 @@ from legoesm import constants
 
 
 class CDGridCompressibleEulerConfig(NamedTuple):
-    """Configuration for the C-D grid non-hydrostatic CE model."""
+    """Configuration for the C-D grid non-hydrostatic CE model.
+
+    This is the recommended cubed-sphere non-hydrostatic solver for
+    production AMIP/CMIP simulations.  Uses FV3-style C-D grid staggering
+    (Lin 2004, Putman & Lin 2007) which eliminates the Hollingsworth-Kallberg
+    instability that affects A-grid solvers.
+    """
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
     hyperdiff_coeff: float = 0.0
@@ -78,6 +84,8 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     outer_integrator: str = "ssp_rk3"
     fix_mass: bool = False
     anchor_mass_to_initial: bool = False
+    acoustic_off_centering: float = 0.0   # Off-centering beta for acoustic damping
+                                          # 0.0 = centered, 0.1 = recommended for long runs
 
 
 def cdgrid_compressible_euler_slow_tendencies(
@@ -312,6 +320,7 @@ class CDGridCompressibleEulerModel:
             g=self.config.g,
             n_acoustic_substeps=self.config.n_acoustic_substeps,
             semi_implicit_acoustic=self.config.semi_implicit_acoustic,
+            acoustic_off_centering=self.config.acoustic_off_centering,
         )
 
         se_config = SplitExplicitConfig(

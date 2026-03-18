@@ -555,18 +555,23 @@ def compute_hydrostatic_energy(
     c_v = constants.c_vd
     dsigma = sigma_coord.dsigma
 
+    # Mass weight per layer: p_s * dsigma / g
+    # Use [..., None] broadcasting so this works for both cubed-sphere
+    # (6, n, n, nlev) and lat-lon (n_lat, n_lon, nlev) state shapes.
+    mass_weight = p_s[..., None] * dsigma / g
+
     # Kinetic energy
-    ke_3d = 0.5 * (u**2 + v**2) * p_s[..., None] * dsigma[None, None, None, :]
-    ke = _global_area_sum(jnp.sum(ke_3d, axis=-1), grid) / g
+    ke_3d = 0.5 * (u**2 + v**2) * mass_weight
+    ke = _global_area_sum(jnp.sum(ke_3d, axis=-1), grid)
 
     # Internal energy
-    ie_3d = c_v * T * p_s[..., None] * dsigma[None, None, None, :]
-    ie = _global_area_sum(jnp.sum(ie_3d, axis=-1), grid) / g
+    ie_3d = c_v * T * mass_weight
+    ie = _global_area_sum(jnp.sum(ie_3d, axis=-1), grid)
 
     # Potential energy
     Phi = compute_geopotential(T, p_s, sigma_coord, phis)
-    pe_3d = Phi * p_s[..., None] * dsigma[None, None, None, :]
-    pe = _global_area_sum(jnp.sum(pe_3d, axis=-1), grid) / g
+    pe_3d = Phi * mass_weight
+    pe = _global_area_sum(jnp.sum(pe_3d, axis=-1), grid)
 
     total = ke + ie + pe
     return {

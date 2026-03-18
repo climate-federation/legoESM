@@ -1,5 +1,25 @@
 """Dynamical cores for the legoESM atmosphere.
 
+Architecture
+------------
+The cubed-sphere implementation is unified around a single FV3-style C-D grid
+discretisation (Lin 2004, Putman & Lin 2007):
+
+- **D-grid** winds (cell corners) are prognostic for momentum.
+- **C-grid** velocities (cell edges) are diagnosed for mass/scalar transport.
+- **Vorticity** from circulation (exact on D-grid, avoids the
+  Hollingsworth-Kallberg instability that plagues A-grid solvers).
+- The same ``operators_cdgrid`` module is shared by the atmosphere
+  (shallow water, hydrostatic PE, non-hydrostatic CE) and the ocean.
+
+All cubed-sphere solvers default to the C-D grid variant.  The legacy name
+``CompressibleEulerModel`` resolves to ``CDGridCompressibleEulerModel``,
+``ShallowWaterModel`` to ``CDGridShallowWaterModel``, etc.
+
+Spectral (Gaussian-grid) and FC-Gram (Fourier Continuation) alternatives are
+available as genuinely different discretisations — these are NOT redundant
+copies of the C-D grid solver.
+
 Solver selection
 ----------------
 There are two ways to choose a dynamical core:

@@ -1902,6 +1902,15 @@ RUNNERS: dict[str, Callable] = {
     "dcmip_tc3": run_nonhydrostatic,
 }
 
+CATEGORY_RUNNER_HINTS: dict[str, str] = {
+    "shallow_water": "scripts/atmosphere/run_shallow_water_tests.py",
+    "hydrostatic": "scripts/atmosphere/run_hydrostatic_tests.py",
+    "nonhydrostatic": "scripts/atmosphere/run_nonhydrostatic_tests.py",
+    "rce": "scripts/atmosphere/run_rce_tests.py",
+    "aquaplanet": "scripts/atmosphere/run_aquaplanet_tests.py",
+    "ocean": "scripts/ocean/run_ocean_category_tests.py",
+}
+
 
 # ===========================================================================
 # CLI
@@ -1938,6 +1947,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--list", action="store_true",
         help="List all test cases and exit")
+    p.add_argument(
+        "--list-category-scripts", action="store_true",
+        help="List canonical per-category runner scripts and exit")
     return p
 
 
@@ -1960,6 +1972,12 @@ def main():
     args = parser.parse_args()
 
     tests = filter_tests(TEST_MATRIX, args)
+
+    if args.list_category_scripts:
+        print("Canonical category runner scripts:")
+        for cat, path in CATEGORY_RUNNER_HINTS.items():
+            print(f"  - {cat:<14} {path}")
+        return
 
     if args.list:
         print(f"{'#':>3}  {'Equation Set':<16}  {'Case':<22}  "

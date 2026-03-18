@@ -40,8 +40,11 @@ class FVShallowWaterConfig(NamedTuple):
     g: float = constants.g
     A_h: float = 0.0
     hyperdiff_coeff: float = 0.0
+    div_damp_2: float = 0.0       # 2nd-order divergence damping coefficient
+    div_damp_4: float = 0.0       # 4th-order divergence damping coefficient
     use_conservation_fixer: bool = True
     fix_mass: bool = True
+    fix_energy: bool = False      # Apply energy conservation fixer
     time_integrator: str = "ssp_rk3"
 
 

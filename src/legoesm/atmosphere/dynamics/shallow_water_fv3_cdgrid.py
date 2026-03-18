@@ -131,6 +131,16 @@ class CDGridShallowWaterModel(IntegrationMixin):
         self.grid = grid
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self.config = config or CDGridShallowWaterConfig()
+        self._target_mass = None  # Set on first step for drift-free conservation
+
+    def set_initial_mass(self, state: CDGridShallowWaterState):
+        """Anchor conservation fixer to initial state mass.
+
+        Call once before time integration to prevent cumulative mass drift
+        in long runs (AMIP/CMIP). Without this, the fixer anchors to the
+        previous step, and O(eps) errors accumulate over millions of steps.
+        """
+        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
 
     def tendencies(self, state: CDGridShallowWaterState):
         """Compute tendencies (pure function wrapper)."""
@@ -156,12 +166,22 @@ class CDGridShallowWaterModel(IntegrationMixin):
             state, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Conservation fixer
+        # Conservation fixer — anchored to initial mass when available,
+        # otherwise to previous step's mass.
         if self.config.use_conservation_fixer and self.config.fix_mass:
-            mass_old = jnp.sum(state.h * self.cdgrid.base.area)
-            mass_new = jnp.sum(state_new.h * self.cdgrid.base.area)
-            total_area = jnp.sum(self.cdgrid.base.area)
-            h_fixed = state_new.h + (mass_old - mass_new) / total_area
+            from legoesm.core.conservation import _accumulation_dtype
+            acc = _accumulation_dtype()
+            area = self.cdgrid.base.area.astype(acc)
+            total_area = jnp.sum(area)
+            # Use initial target mass if set (drift-free for long runs);
+            # otherwise anchor to previous step.
+            if self._target_mass is not None:
+                mass_target = self._target_mass
+            else:
+                mass_target = jnp.sum(state.h.astype(acc) * area)
+            mass_new = jnp.sum(state_new.h.astype(acc) * area)
+            correction = (mass_target - mass_new) / total_area
+            h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
 
         return state_new

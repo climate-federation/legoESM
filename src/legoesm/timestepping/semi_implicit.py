@@ -471,28 +471,40 @@ def leapfrog_si_step(
     return si_correction(state_explicit, state_n, si_data, grid, dt2)
 
 
-def robert_asselin_filter(state_nm1, state_n, state_np1, gamma):
-    """Robert-Asselin time filter for leapfrog.
+def robert_asselin_filter(state_nm1, state_n, state_np1, gamma, alpha=0.5):
+    """Robert-Asselin-Williams (RAW) time filter for leapfrog.
 
-    Damps the computational mode (2*dt oscillation) that leapfrog permits:
+    The standard Robert-Asselin filter damps the computational mode
+    (2*dt oscillation) that leapfrog permits, but introduces a first-order
+    phase error.  The Williams (2009) modification splits the correction
+    between the current and next time levels, restoring second-order
+    accuracy while preserving the damping:
 
-        X^n_filtered = X^n + (gamma/2) * (X^{n-1} - 2*X^n + X^{n+1})
+        d_n = (gamma/2) * (X^{n-1} - 2*X^n + X^{n+1})
+        X^n_filtered   = X^n   + (1 - alpha) * d_n
+        X^{n+1}_filtered = X^{n+1} + alpha * d_n
+
+    With alpha=0.5 this is the RAW filter; alpha=0 recovers the original
+    Robert-Asselin filter.
 
     Parameters
     ----------
     state_nm1 : pytree
-        State at time n-1 (filtered from previous step).
+        State at time n-1 (already filtered from previous step).
     state_n : pytree
         State at time n (unfiltered).
     state_np1 : pytree
-        State at time n+1 (just computed).
+        State at time n+1 (just computed, unfiltered).
     gamma : float
         Filter coefficient (typically 0.05-0.1).
+    alpha : float
+        Williams parameter. 0.5 = RAW (default, recommended for long
+        climate runs). 0.0 = original Robert-Asselin.
 
     Returns
     -------
-    state_n_filtered : pytree
-        Filtered state at time n.
+    state_n_filtered, state_np1_filtered : tuple of pytrees
+        Filtered states at time n and n+1.
 
     References
     ----------
@@ -500,12 +512,23 @@ def robert_asselin_filter(state_nm1, state_n, state_np1, gamma):
       the primitive meteorological equations. J. Met. Soc. Japan, 44, 237-245.
     - Asselin, R. (1972). Frequency filter for time integrations.
       Mon. Wea. Rev., 100, 487-490.
+    - Williams, P. D. (2009). A proposed modification to the Robert-Asselin
+      time filter. Mon. Wea. Rev., 137, 2538-2546.
     """
     coeff = gamma / 2.0
-    return jax.tree.map(
-        lambda xm, xn, xp: xn + coeff * (xm - 2.0 * xn + xp),
+    d_n = jax.tree.map(
+        lambda xm, xn, xp: coeff * (xm - 2.0 * xn + xp),
         state_nm1, state_n, state_np1,
     )
+    state_n_filtered = jax.tree.map(
+        lambda xn, dn: xn + (1.0 - alpha) * dn,
+        state_n, d_n,
+    )
+    state_np1_filtered = jax.tree.map(
+        lambda xp, dn: xp + alpha * dn,
+        state_np1, d_n,
+    )
+    return state_n_filtered, state_np1_filtered
 
 
 def _pytree_axpy(x, y, alpha):

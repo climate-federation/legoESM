@@ -77,6 +77,10 @@ class CompressibleEulerConfig(NamedTuple):
     edge_blend_width: int = 1
     fix_mass: bool = False            # Apply NH mass conservation fixer
     anchor_mass_to_initial: bool = False  # Anchor to initial mass (prevents drift)
+    acoustic_off_centering: float = 0.0   # Off-centering parameter beta for acoustic steps
+                                          # 0.0 = centered (neutral), 0.1 = slightly damped
+                                          # Damps vertically-propagating acoustic modes
+                                          # without horizontal CFL constraint (Skamarock 2008)
 
 
 def _apply_nh_edge_blend(
@@ -430,6 +434,12 @@ def acoustic_substeps(
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
 
+    # Off-centering parameter for acoustic damping (Skamarock & Klemp 2008).
+    # beta > 0 introduces a small amount of temporal diffusion that damps
+    # vertically-propagating acoustic/gravity wave noise without affecting
+    # the horizontal CFL constraint.  Typical value: 0.1 for long runs.
+    beta = euler_config.acoustic_off_centering
+
     def substep_body(i, carry):
         w_c, theta_p_c, rho_p_c = carry
 
@@ -479,6 +489,11 @@ def acoustic_substeps(
         vert_div = vert_div / J[..., None]
 
         rho_p_new = rho_p_c - dt_s * vert_div
+
+        # --- Off-centering: damp acoustic mode via time-averaging ---
+        # rho_p_damped = (1+beta)*rho_p_new - beta*rho_p_old
+        # For beta=0: no damping (centered). For beta>0: dissipative.
+        rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
         # --- Backward: update theta' using vertical w advection ---
         # d(theta')/dt from acoustic vertical advection only
@@ -691,7 +706,18 @@ def acoustic_substeps_semi_implicit(
 # ==============================================================================
 
 class CompressibleEulerModel:
-    """Non-hydrostatic compressible Euler model on the cubed-sphere.
+    """Non-hydrostatic compressible Euler model on the cubed-sphere (A-grid).
+
+    .. note::
+
+       For production AMIP/CMIP simulations, prefer
+       :class:`CDGridCompressibleEulerModel` from
+       ``compressible_euler_cdgrid.py``, which uses FV3-style C-D grid
+       staggering that eliminates the Hollingsworth-Kallberg instability.
+       This A-grid model is retained for backward compatibility, rapid
+       prototyping, and as the container for shared utilities
+       (``compute_exner_perturbation``, ``acoustic_substeps``, etc.)
+       that all non-hydrostatic solvers import.
 
     Parameters
     ----------
