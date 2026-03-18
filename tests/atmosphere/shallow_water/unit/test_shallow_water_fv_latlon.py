@@ -100,7 +100,7 @@ class TestWilliamsonTC2:
 
     def test_tc2_one_day_error(self):
         """TC2 L2 error after 1 day should be small."""
-        from tests.test_cases.williamson_latlon import (
+        from tests.atmosphere.shallow_water.test_cases.williamson_latlon import (
             williamson_test2_latlon,
             compute_error_norms_latlon,
         )
@@ -126,7 +126,7 @@ class TestWilliamsonTC2:
 
     def test_tc2_five_day_stable(self):
         """TC2 should remain stable for 5 days."""
-        from tests.test_cases.williamson_latlon import williamson_test2_latlon
+        from tests.atmosphere.shallow_water.test_cases.williamson_latlon import williamson_test2_latlon
 
         grid = create_latlon_grid(32)
         config = FVShallowWaterLatLonConfig(
@@ -152,7 +152,7 @@ class TestWilliamsonTC5:
 
     def test_tc5_stable_15_days(self):
         """TC5 should remain stable for 15 days."""
-        from tests.test_cases.williamson_latlon import williamson_test5_latlon
+        from tests.atmosphere.shallow_water.test_cases.williamson_latlon import williamson_test5_latlon
 
         grid = create_latlon_grid(32)
         config = FVShallowWaterLatLonConfig(
@@ -173,7 +173,7 @@ class TestWilliamsonTC5:
 
     def test_tc5_topography_preserved(self):
         """Topography h_s should be unchanged after integration."""
-        from tests.test_cases.williamson_latlon import williamson_test5_latlon
+        from tests.atmosphere.shallow_water.test_cases.williamson_latlon import williamson_test5_latlon
 
         grid = create_latlon_grid(32)
         dt = 900.0
@@ -198,7 +198,7 @@ class TestConservation:
 
     def test_mass_conservation(self):
         """Mass should be conserved to high precision with the fixer."""
-        from tests.test_cases.williamson_latlon import williamson_test2_latlon
+        from tests.atmosphere.shallow_water.test_cases.williamson_latlon import williamson_test2_latlon
 
         grid = create_latlon_grid(32)
         config = FVShallowWaterLatLonConfig(
@@ -232,7 +232,7 @@ class TestDifferentiability:
 
     def test_grad_single_step(self):
         """Single step should be differentiable via jax.grad."""
-        from tests.test_cases.williamson_latlon import williamson_test2_latlon
+        from tests.atmosphere.shallow_water.test_cases.williamson_latlon import williamson_test2_latlon
 
         grid = create_latlon_grid(16)
         config = FVShallowWaterLatLonConfig(
@@ -256,7 +256,7 @@ class TestDifferentiability:
 
     def test_grad_scan(self):
         """Multi-step scan integration should be differentiable."""
-        from tests.test_cases.williamson_latlon import williamson_test2_latlon
+        from tests.atmosphere.shallow_water.test_cases.williamson_latlon import williamson_test2_latlon
 
         grid = create_latlon_grid(16)
         config = FVShallowWaterLatLonConfig(

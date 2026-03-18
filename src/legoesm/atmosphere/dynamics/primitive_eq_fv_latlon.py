@@ -290,7 +290,7 @@ class FVLatLonPrimitiveEquationModel(IntegrationMixin):
             physics_tendency, self.polar_mask,
         )
 
-    @partial(jax.jit, static_argnums=(0, 3), donate_argnums=(1,))
+    @partial(jax.jit, static_argnums=(0, 3))
     def step(self, state: HydrostaticState, dt: float, physics_fn=None) -> HydrostaticState:
         """Advance one time step, optionally with physics forcing."""
         if self.polar_mask is not None:
