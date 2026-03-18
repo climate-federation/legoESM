@@ -373,6 +373,70 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     return out
 
 
+def _fill_nan_profile(profile: np.ndarray) -> np.ndarray:
+    """Fill NaNs in a 1D profile by linear interpolation along index."""
+    prof = np.asarray(profile, dtype=np.float64).copy()
+    valid = np.isfinite(prof)
+    if not np.any(valid):
+        return prof
+    if np.count_nonzero(valid) == 1:
+        prof[:] = prof[valid][0]
+        return prof
+    x = np.arange(prof.size, dtype=np.float64)
+    prof[:] = np.interp(x, x[valid], prof[valid])
+    return prof
+
+
+def _fill_nan_section(section: np.ndarray) -> np.ndarray:
+    """Fill NaNs along the horizontal axis for each vertical level."""
+    sec = np.asarray(section, dtype=np.float64).copy()
+    if sec.ndim != 2:
+        return sec
+    for k in range(sec.shape[1]):
+        sec[:, k] = _fill_nan_profile(sec[:, k])
+    return sec
+
+
+def _axis_cross_section_unstructured(
+    field_3d: np.ndarray,
+    axis_coord: np.ndarray,
+    axis_vals: np.ndarray,
+    *,
+    periodic_lon: bool = False,
+) -> np.ndarray:
+    """Bin unstructured 3D field to a 2D (axis, level) cross-section."""
+    arr = np.asarray(field_3d, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    flat = arr.reshape(-1, arr.shape[-1])
+
+    axis = np.asarray(axis_coord, dtype=np.float64).ravel()
+    if periodic_lon:
+        axis = ((axis + 180.0) % 360.0) - 180.0
+
+    if axis.size != flat.shape[0]:
+        n = min(axis.size, flat.shape[0])
+        axis = axis[:n]
+        flat = flat[:n, :]
+
+    edges = np.linspace(
+        float(axis_vals[0]), float(axis_vals[-1]), axis_vals.size + 1)
+    out = np.full((axis_vals.size, flat.shape[1]), np.nan, dtype=np.float64)
+    valid_axis = np.isfinite(axis)
+
+    for k in range(flat.shape[1]):
+        vals = flat[:, k]
+        valid = valid_axis & np.isfinite(vals)
+        if not np.any(valid):
+            continue
+        sums, _ = np.histogram(axis[valid], bins=edges, weights=vals[valid])
+        counts, _ = np.histogram(axis[valid], bins=edges)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out[:, k] = np.where(counts > 0, sums / counts, np.nan)
+
+    return _fill_nan_section(out)
+
+
 # ---------------------------------------------------------------------------
 # File writers
 # ---------------------------------------------------------------------------
@@ -540,9 +604,9 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
     lat_axis = np.linspace(-90, 90, 181)
     lon_axis = np.linspace(-180, 180, 360)
 
-    for fname, axis_vals, mean_axis, xlabel in [
-        ("latitude_vertical_cross_sections.png", lat_axis, 1, "Latitude"),
-        ("longitude_vertical_cross_sections.png", lon_axis, 0, "Longitude"),
+    for fname, axis_vals, axis_key, mean_axis, xlabel in [
+        ("latitude_vertical_cross_sections.png", lat_axis, "lat", 1, "Latitude"),
+        ("longitude_vertical_cross_sections.png", lon_axis, "lon", 0, "Longitude"),
     ]:
         nc = len(valid_steps)
         fig, axes_arr = plt.subplots(
@@ -553,8 +617,14 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
 
         for ax, step in zip(axes_arr, valid_steps):
             f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
-            ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
-            section = np.nanmean(ll, axis=mean_axis)  # (axis, lev)
+            if coord_kind in ("latlon", "gaussian"):
+                ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
+                section = np.nanmean(ll, axis=mean_axis)  # (axis, lev)
+                section = _fill_nan_section(section)
+            else:
+                axis_coord = lat_deg if axis_key == "lat" else lon_deg
+                section = _axis_cross_section_unstructured(
+                    f3d, axis_coord, axis_vals, periodic_lon=(axis_key == "lon"))
             im = ax.imshow(
                 section.T, origin="lower", aspect="auto", cmap="RdBu_r",
                 extent=[axis_vals[0], axis_vals[-1],

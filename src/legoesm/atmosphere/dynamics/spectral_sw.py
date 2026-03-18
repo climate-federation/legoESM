@@ -147,14 +147,16 @@ def spectral_sw_tendencies(
     # d(phi_hat)/dt = -div(phi*v)
     dphi_hat = -flux_mass_div
 
-    # --- 6. Spectral hyperdiffusion ---
+    # --- 6. Spectral hyperdiffusion (vorticity & divergence only) ---
+    # Hyperdiffusion is NOT applied to phi (geopotential / mass) because:
+    #   - It would violate mass distribution conservation
+    #   - It causes spurious energy drift
+    #   - Standard practice (Hack & Jakob 1992) diffuses only vor and div
     if config.hyperdiff_coeff > 0:
         dvor_hat = dvor_hat + spectral_hyperdiffusion(
             grid, state.vor_hat.data, config.hyperdiff_coeff, config.hyperdiff_order)
         ddiv_hat = ddiv_hat + spectral_hyperdiffusion(
             grid, state.div_hat.data, config.hyperdiff_coeff, config.hyperdiff_order)
-        dphi_hat = dphi_hat + spectral_hyperdiffusion(
-            grid, state.phi_hat.data, config.hyperdiff_coeff, config.hyperdiff_order)
 
     # Return as same pytree structure (for SSP-RK3 tree_map)
     return SpectralSWState(

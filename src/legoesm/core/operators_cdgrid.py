@@ -1,16 +1,19 @@
 """C-D grid operators on the cubed-sphere.
 
-Provides the core operators for the FV3-style C-D grid discretisation:
+Provides the core operators for the FV3-style C-D grid discretisation,
+unified for both 2D (shallow water) and 3D (atmosphere PE / ocean PE):
 
 * D-grid vorticity (at cell centres from corner winds via circulation)
 * D-grid to C-grid wind interpolation
 * C-grid divergence and mass flux
 * Vector-invariant momentum tendencies with Arakawa-Lamb gradient
-* 3D extensions for the primitive equation / ocean solvers
+* Laplacian and biharmonic diffusion on the D-grid
 
-D-grid winds are prognostic (at cell corners, shape ``(6, n+1, n+1)``).
-C-grid winds are diagnostic (at cell edges, ``(6, n+1, n)`` for ``u_c``
-and ``(6, n, n+1)`` for ``v_c``).
+All operators automatically handle both 2D (shape ``(6, n+1, n+1)``)
+and 3D (shape ``(6, n+1, n+1, nlev)``) inputs.
+
+D-grid winds are prognostic (at cell corners).
+C-grid winds are diagnostic (at cell edges).
 
 References
 ----------
@@ -20,10 +23,45 @@ References
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import pad_halo
+
+
+# ==============================================================================
+# Internal: halo padding that works for both 2D and 3D
+# ==============================================================================
+
+def _pad_halo_auto(field, cdgrid):
+    """Pad halo for a 2D or 3D cell-centre field.
+
+    Parameters
+    ----------
+    field : jax.Array, shape (6, n, n) or (6, n, n, nlev)
+
+    Returns
+    -------
+    jax.Array, shape (6, n+2, n+2) or (6, n+2, n+2, nlev)
+    """
+    if field.ndim == 3:
+        return pad_halo(field, interp_offsets=cdgrid.base.halo_interp_offsets)
+    # 3D: vmap over levels
+    f_t = jnp.moveaxis(field, -1, 0)
+
+    def pad_one(fk):
+        return pad_halo(fk, interp_offsets=cdgrid.base.halo_interp_offsets)
+
+    f_pad_t = jax.vmap(pad_one)(f_t)
+    return jnp.moveaxis(f_pad_t, 0, -1)
+
+
+def _broadcast_metric(metric, field):
+    """Broadcast a 2D metric (6, ...) to match field's trailing nlev dim."""
+    if field.ndim > metric.ndim:
+        return metric[..., None]
+    return metric
 
 
 # ==============================================================================
@@ -33,26 +71,18 @@ from legoesm.grids.halo import pad_halo
 def dgrid_to_cgrid(u_d, v_d, cdgrid):
     """Interpolate D-grid corner winds to C-grid edge-normal velocities.
 
-    u_c at the x-interface between cells (i,j) and (i+1,j) is the average
-    of u_d at the two corners of that edge: (i+1,j) and (i+1,j+1) →
-    effectively an average along the y-direction (axis 2).
-
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
 
     Parameters
     ----------
-    u_d : jax.Array, shape (6, n+1, n+1) or (6, n+1, n+1, nlev)
-    v_d : jax.Array, shape (6, n+1, n+1) or (6, n+1, n+1, nlev)
-    cdgrid : CubedSphereCDGrid
+    u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
 
     Returns
     -------
-    u_c : jax.Array, shape (6, n+1, n) or (6, n+1, n, nlev)
-    v_c : jax.Array, shape (6, n, n+1) or (6, n, n+1, nlev)
+    u_c : jax.Array, shape (6, n+1, n[, nlev])
+    v_c : jax.Array, shape (6, n, n+1[, nlev])
     """
-    # Average along axis 2 (y-direction) for u_c
     u_c = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
-    # Average along axis 1 (x-direction) for v_c
     v_c = 0.5 * (v_d[:, :-1] + v_d[:, 1:])
     return u_c, v_c
 
@@ -60,21 +90,21 @@ def dgrid_to_cgrid(u_d, v_d, cdgrid):
 def cgrid_to_dgrid(u_c, v_c, cdgrid):
     """Interpolate C-grid edge velocities to D-grid corners.
 
+    Works for both 2D and 3D inputs.
+
     Parameters
     ----------
-    u_c : jax.Array, shape (6, n+1, n) or (6, n+1, n, nlev)
-    v_c : jax.Array, shape (6, n, n+1) or (6, n, n+1, nlev)
+    u_c : jax.Array, shape (6, n+1, n[, nlev])
+    v_c : jax.Array, shape (6, n, n+1[, nlev])
 
     Returns
     -------
-    u_d, v_d : jax.Array, shape (6, n+1, n+1) or (6, n+1, n+1, nlev)
+    u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    # Pad axis 2 (y) for u_c
     pad_u = [(0, 0), (0, 0), (1, 1)] + [(0, 0)] * (u_c.ndim - 3)
     u_c_pad = jnp.pad(u_c, pad_u, mode='edge')
     u_d = 0.5 * (u_c_pad[:, :, :-1] + u_c_pad[:, :, 1:])
 
-    # Pad axis 1 (x) for v_c
     pad_v = [(0, 0), (1, 1), (0, 0)] + [(0, 0)] * (v_c.ndim - 3)
     v_c_pad = jnp.pad(v_c, pad_v, mode='edge')
     v_d = 0.5 * (v_c_pad[:, :-1] + v_c_pad[:, 1:])
@@ -88,74 +118,34 @@ def cgrid_to_dgrid(u_c, v_c, cdgrid):
 def dgrid_vorticity(u_d, v_d, cdgrid):
     """Relative vorticity at cell centres from D-grid corner winds.
 
-    Uses the integral circulation form: ζ = (1/A) ∮ v · dl, which is
+    Uses the integral circulation form: zeta = (1/A) oint v . dl, which is
     exact for the D-grid and avoids the Hollingsworth-Kallberg instability.
 
-    For cell (i,j) with corners (i,j), (i+1,j), (i+1,j+1), (i,j+1),
-    the counterclockwise circulation is:
-
-        Γ = u_south * dx_south + v_east * dy_east
-          - u_north * dx_north - v_west * dy_west
-
-    where each edge velocity is the average of the D-grid winds at the
-    two corners of that edge.
+    Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
 
     Parameters
     ----------
-    u_d : jax.Array, shape (6, n+1, n+1)
-    v_d : jax.Array, shape (6, n+1, n+1)
-    cdgrid : CubedSphereCDGrid
+    u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
 
     Returns
     -------
-    zeta : jax.Array, shape (6, n, n)
+    zeta : jax.Array, shape (6, n, n[, nlev])
     """
-    # Average D-grid winds along each cell edge
-    u_south = 0.5 * (u_d[:, :-1, :-1] + u_d[:, 1:, :-1])   # (6, n, n)
-    u_north = 0.5 * (u_d[:, :-1, 1:] + u_d[:, 1:, 1:])     # (6, n, n)
-    v_east = 0.5 * (v_d[:, 1:, :-1] + v_d[:, 1:, 1:])       # (6, n, n)
-    v_west = 0.5 * (v_d[:, :-1, :-1] + v_d[:, :-1, 1:])     # (6, n, n)
+    u_south = 0.5 * (u_d[:, :-1, :-1] + u_d[:, 1:, :-1])
+    u_north = 0.5 * (u_d[:, :-1, 1:] + u_d[:, 1:, 1:])
+    v_east = 0.5 * (v_d[:, 1:, :-1] + v_d[:, 1:, 1:])
+    v_west = 0.5 * (v_d[:, :-1, :-1] + v_d[:, :-1, 1:])
 
-    # Edge lengths
-    # dx_edge_y: shape (6, n, n+1) — distance corner (i,j) to (i+1,j)
-    # dy_edge_x: shape (6, n+1, n) — distance corner (i,j) to (i,j+1)
-    dx_south = cdgrid.dx_edge_y[:, :, :-1]   # (6, n, n)
-    dx_north = cdgrid.dx_edge_y[:, :, 1:]    # (6, n, n)
-    dy_west = cdgrid.dy_edge_x[:, :-1, :]    # (6, n, n)
-    dy_east = cdgrid.dy_edge_x[:, 1:, :]     # (6, n, n)
+    dx_south = _broadcast_metric(cdgrid.dx_edge_y[:, :, :-1], u_d)
+    dx_north = _broadcast_metric(cdgrid.dx_edge_y[:, :, 1:], u_d)
+    dy_west = _broadcast_metric(cdgrid.dy_edge_x[:, :-1, :], u_d)
+    dy_east = _broadcast_metric(cdgrid.dy_edge_x[:, 1:, :], u_d)
 
     circ = (u_south * dx_south + v_east * dy_east
             - u_north * dx_north - v_west * dy_west)
 
-    return circ / cdgrid.base.area
-
-
-def dgrid_vorticity_3d(u_d, v_d, cdgrid):
-    """Vorticity at cell centres for 3D fields.
-
-    Parameters
-    ----------
-    u_d : jax.Array, shape (6, n+1, n+1, nlev)
-    v_d : jax.Array, shape (6, n+1, n+1, nlev)
-
-    Returns
-    -------
-    zeta : jax.Array, shape (6, n, n, nlev)
-    """
-    u_south = 0.5 * (u_d[:, :-1, :-1, :] + u_d[:, 1:, :-1, :])
-    u_north = 0.5 * (u_d[:, :-1, 1:, :] + u_d[:, 1:, 1:, :])
-    v_east = 0.5 * (v_d[:, 1:, :-1, :] + v_d[:, 1:, 1:, :])
-    v_west = 0.5 * (v_d[:, :-1, :-1, :] + v_d[:, :-1, 1:, :])
-
-    dx_south = cdgrid.dx_edge_y[:, :, :-1, None]
-    dx_north = cdgrid.dx_edge_y[:, :, 1:, None]
-    dy_west = cdgrid.dy_edge_x[:, :-1, :, None]
-    dy_east = cdgrid.dy_edge_x[:, 1:, :, None]
-
-    circ = (u_south * dx_south + v_east * dy_east
-            - u_north * dx_north - v_west * dy_west)
-
-    return circ / cdgrid.base.area[..., None]
+    area = _broadcast_metric(cdgrid.base.area, u_d)
+    return circ / area
 
 
 # ==============================================================================
@@ -165,41 +155,25 @@ def dgrid_vorticity_3d(u_d, v_d, cdgrid):
 def cgrid_divergence(u_c, v_c, cdgrid):
     """Exact flux-form divergence at cell centres.
 
-    Parameters
-    ----------
-    u_c : jax.Array, shape (6, n+1, n)
-    v_c : jax.Array, shape (6, n, n+1)
-
-    Returns
-    -------
-    div : jax.Array, shape (6, n, n)
-    """
-    flux_x = u_c * cdgrid.dy_edge_x   # (6, n+1, n)
-    flux_y = v_c * cdgrid.dx_edge_y   # (6, n, n+1)
-    net_x = flux_x[:, 1:, :] - flux_x[:, :-1, :]
-    net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
-    return (net_x + net_y) / cdgrid.base.area
-
-
-def cgrid_divergence_3d(u_c, v_c, cdgrid):
-    """Exact flux-form divergence for 3D fields.
+    Works for both 2D and 3D inputs.
 
     Parameters
     ----------
-    u_c : jax.Array, shape (6, n+1, n, nlev)
-    v_c : jax.Array, shape (6, n, n+1, nlev)
+    u_c : jax.Array, shape (6, n+1, n[, nlev])
+    v_c : jax.Array, shape (6, n, n+1[, nlev])
 
     Returns
     -------
-    div : jax.Array, shape (6, n, n, nlev)
+    div : jax.Array, shape (6, n, n[, nlev])
     """
-    dy = cdgrid.dy_edge_x[:, :, :, None]   # (6, n+1, n, 1)
-    dx = cdgrid.dx_edge_y[:, :, :, None]   # (6, n, n+1, 1)
+    dy = _broadcast_metric(cdgrid.dy_edge_x, u_c)
+    dx = _broadcast_metric(cdgrid.dx_edge_y, v_c)
     flux_x = u_c * dy
     flux_y = v_c * dx
     net_x = flux_x[:, 1:] - flux_x[:, :-1]
     net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
-    return (net_x + net_y) / cdgrid.base.area[:, :, :, None]
+    area = _broadcast_metric(cdgrid.base.area, net_x)
+    return (net_x + net_y) / area
 
 
 # ==============================================================================
@@ -209,72 +183,36 @@ def cgrid_divergence_3d(u_c, v_c, cdgrid):
 def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     """Conservative mass flux divergence with upwind face values.
 
-    Parameters
-    ----------
-    h : jax.Array, shape (6, n, n)
-    u_c : jax.Array, shape (6, n+1, n)
-    v_c : jax.Array, shape (6, n, n+1)
-
-    Returns
-    -------
-    dh_dt : jax.Array, shape (6, n, n)
-    """
-    h_pad = pad_halo(h, interp_offsets=cdgrid.base.halo_interp_offsets)
-
-    h_left_x = h_pad[:, :-1, 1:-1]
-    h_right_x = h_pad[:, 1:, 1:-1]
-    h_face_x = jnp.where(u_c > 0, h_left_x, h_right_x)
-
-    h_left_y = h_pad[:, 1:-1, :-1]
-    h_right_y = h_pad[:, 1:-1, 1:]
-    h_face_y = jnp.where(v_c > 0, h_left_y, h_right_y)
-
-    flux_x = h_face_x * u_c * cdgrid.dy_edge_x
-    flux_y = h_face_y * v_c * cdgrid.dx_edge_y
-
-    net_x = flux_x[:, 1:, :] - flux_x[:, :-1, :]
-    net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
-
-    return -(net_x + net_y) / cdgrid.base.area
-
-
-def cgrid_mass_flux_divergence_3d(h, u_c, v_c, cdgrid):
-    """Conservative mass flux divergence for 3D fields (upwind).
+    Works for both 2D and 3D inputs.
 
     Parameters
     ----------
-    h : jax.Array, shape (6, n, n, nlev)
-    u_c : jax.Array, shape (6, n+1, n, nlev)
-    v_c : jax.Array, shape (6, n, n+1, nlev)
+    h : jax.Array, shape (6, n, n[, nlev])
+    u_c : jax.Array, shape (6, n+1, n[, nlev])
+    v_c : jax.Array, shape (6, n, n+1[, nlev])
 
     Returns
     -------
-    dh_dt : jax.Array, shape (6, n, n, nlev)
+    dh_dt : jax.Array, shape (6, n, n[, nlev])
     """
-    import jax
+    h_pad = _pad_halo_auto(h, cdgrid)
 
-    # Pad each level individually via vmap
-    def pad_one(h_k):
-        return pad_halo(h_k, interp_offsets=cdgrid.base.halo_interp_offsets)
+    if h.ndim == 3:
+        h_left_x = h_pad[:, :-1, 1:-1]
+        h_right_x = h_pad[:, 1:, 1:-1]
+        h_left_y = h_pad[:, 1:-1, :-1]
+        h_right_y = h_pad[:, 1:-1, 1:]
+    else:
+        h_left_x = h_pad[:, :-1, 1:-1, :]
+        h_right_x = h_pad[:, 1:, 1:-1, :]
+        h_left_y = h_pad[:, 1:-1, :-1, :]
+        h_right_y = h_pad[:, 1:-1, 1:, :]
 
-    h_transposed = jnp.moveaxis(h, -1, 0)      # (nlev, 6, n, n)
-    h_pad_t = jax.vmap(pad_one)(h_transposed)   # (nlev, 6, n+2, n+2)
-    h_pad = jnp.moveaxis(h_pad_t, 0, -1)        # (6, n+2, n+2, nlev)
-
-    # h at x-interfaces: upwind from u_c sign
-    # u_c has shape (6, n+1, n, nlev)
-    h_left_x = h_pad[:, :-1, 1:-1, :]    # (6, n+1, n, nlev)
-    h_right_x = h_pad[:, 1:, 1:-1, :]    # (6, n+1, n, nlev)
     h_face_x = jnp.where(u_c > 0, h_left_x, h_right_x)
-
-    # h at y-interfaces: upwind from v_c sign
-    # v_c has shape (6, n, n+1, nlev)
-    h_left_y = h_pad[:, 1:-1, :-1, :]    # (6, n, n+1, nlev)
-    h_right_y = h_pad[:, 1:-1, 1:, :]    # (6, n, n+1, nlev)
     h_face_y = jnp.where(v_c > 0, h_left_y, h_right_y)
 
-    dy = cdgrid.dy_edge_x[:, :, :, None]   # (6, n+1, n, 1)
-    dx = cdgrid.dx_edge_y[:, :, :, None]   # (6, n, n+1, 1)
+    dy = _broadcast_metric(cdgrid.dy_edge_x, u_c)
+    dx = _broadcast_metric(cdgrid.dx_edge_y, v_c)
 
     flux_x = h_face_x * u_c * dy
     flux_y = h_face_y * v_c * dx
@@ -282,7 +220,8 @@ def cgrid_mass_flux_divergence_3d(h, u_c, v_c, cdgrid):
     net_x = flux_x[:, 1:] - flux_x[:, :-1]
     net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
 
-    return -(net_x + net_y) / cdgrid.base.area[:, :, :, None]
+    area = _broadcast_metric(cdgrid.base.area, net_x)
+    return -(net_x + net_y) / area
 
 
 # ==============================================================================
@@ -292,14 +231,7 @@ def cgrid_mass_flux_divergence_3d(h, u_c, v_c, cdgrid):
 def cgrid_scalar_advection(q, u_c, v_c, cdgrid):
     """Advective transport of scalar q by C-grid velocities (upwind).
 
-    Parameters
-    ----------
-    q : jax.Array, shape (6, n, n)
-    u_c, v_c : C-grid velocities
-
-    Returns
-    -------
-    dq_dt : jax.Array, shape (6, n, n)
+    Works for both 2D and 3D inputs.
     """
     return cgrid_mass_flux_divergence(q, u_c, v_c, cdgrid)
 
@@ -311,73 +243,28 @@ def cgrid_scalar_advection(q, u_c, v_c, cdgrid):
 def _arakawa_lamb_gradient(B, cdgrid):
     """4-point Arakawa-Lamb gradient of cell-centre field at D-grid corners.
 
-    At corner (i,j), the gradient uses the 4 surrounding cell values:
-    (i-1,j-1), (i,j-1), (i-1,j), (i,j). The x-gradient is the average
-    of the east pair minus the west pair, divided by the cell width.
+    Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
 
     Parameters
     ----------
-    B : jax.Array, shape (6, n, n)
-        Cell-centre field.
-    cdgrid : CubedSphereCDGrid
+    B : jax.Array, shape (6, n, n[, nlev])
 
     Returns
     -------
-    dB_dx, dB_dy : jax.Array, shape (6, n+1, n+1)
-        Gradients at D-grid corners.
+    dB_dx, dB_dy : jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    B_pad = pad_halo(B, interp_offsets=cdgrid.base.halo_interp_offsets)
-    # (6, n+2, n+2), interior at [1:-1, 1:-1]
+    B_pad = _pad_halo_auto(B, cdgrid)
 
-    # 4 cells surrounding each corner
-    B_sw = B_pad[:, :-1, :-1]   # (6, n+1, n+1)
-    B_se = B_pad[:, 1:, :-1]
-    B_nw = B_pad[:, :-1, 1:]
-    B_ne = B_pad[:, 1:, 1:]
-
-    # Dual-cell spacing: average of 4 surrounding cell metrics
-    dx_pad = jnp.pad(cdgrid.base.dx, ((0, 0), (1, 1), (1, 1)), mode='edge')
-    dy_pad = jnp.pad(cdgrid.base.dy, ((0, 0), (1, 1), (1, 1)), mode='edge')
-    dx_dual = 0.25 * (dx_pad[:, :-1, :-1] + dx_pad[:, 1:, :-1]
-                       + dx_pad[:, :-1, 1:] + dx_pad[:, 1:, 1:])
-    dy_dual = 0.25 * (dy_pad[:, :-1, :-1] + dy_pad[:, 1:, :-1]
-                       + dy_pad[:, :-1, 1:] + dy_pad[:, 1:, 1:])
-
-    # dx_dual is the 2-cell span (average of grid.dx which spans i-1 to i+1).
-    # The stencil (B_se - B_sw) spans 1 cell, so divide by dx_dual/2 = dx_dual * 0.5.
-    # Equivalently: drop the 0.5 factor and divide by dx_dual directly.
-    dB_dx = ((B_se + B_ne) - (B_sw + B_nw)) / jnp.maximum(dx_dual, 1e-10)
-    dB_dy = ((B_nw + B_ne) - (B_sw + B_se)) / jnp.maximum(dy_dual, 1e-10)
-
-    return dB_dx, dB_dy
-
-
-def _arakawa_lamb_gradient_3d(B, cdgrid):
-    """4-point Arakawa-Lamb gradient for 3D fields.
-
-    Parameters
-    ----------
-    B : jax.Array, shape (6, n, n, nlev)
-
-    Returns
-    -------
-    dB_dx, dB_dy : jax.Array, shape (6, n+1, n+1, nlev)
-    """
-    import jax
-
-    nlev = B.shape[-1]
-    B_t = jnp.moveaxis(B, -1, 0)   # (nlev, 6, n, n)
-
-    def pad_one(b):
-        return pad_halo(b, interp_offsets=cdgrid.base.halo_interp_offsets)
-
-    B_pad_t = jax.vmap(pad_one)(B_t)   # (nlev, 6, n+2, n+2)
-    B_pad = jnp.moveaxis(B_pad_t, 0, -1)  # (6, n+2, n+2, nlev)
-
-    B_sw = B_pad[:, :-1, :-1, :]
-    B_se = B_pad[:, 1:, :-1, :]
-    B_nw = B_pad[:, :-1, 1:, :]
-    B_ne = B_pad[:, 1:, 1:, :]
+    if B.ndim == 3:
+        B_sw = B_pad[:, :-1, :-1]
+        B_se = B_pad[:, 1:, :-1]
+        B_nw = B_pad[:, :-1, 1:]
+        B_ne = B_pad[:, 1:, 1:]
+    else:
+        B_sw = B_pad[:, :-1, :-1, :]
+        B_se = B_pad[:, 1:, :-1, :]
+        B_nw = B_pad[:, :-1, 1:, :]
+        B_ne = B_pad[:, 1:, 1:, :]
 
     dx_pad = jnp.pad(cdgrid.base.dx, ((0, 0), (1, 1), (1, 1)), mode='edge')
     dy_pad = jnp.pad(cdgrid.base.dy, ((0, 0), (1, 1), (1, 1)), mode='edge')
@@ -386,8 +273,11 @@ def _arakawa_lamb_gradient_3d(B, cdgrid):
     dy_dual = 0.25 * (dy_pad[:, :-1, :-1] + dy_pad[:, 1:, :-1]
                        + dy_pad[:, :-1, 1:] + dy_pad[:, 1:, 1:])
 
-    dB_dx = ((B_se + B_ne) - (B_sw + B_nw)) / jnp.maximum(dx_dual[..., None], 1e-10)
-    dB_dy = ((B_nw + B_ne) - (B_sw + B_se)) / jnp.maximum(dy_dual[..., None], 1e-10)
+    dx_dual_b = _broadcast_metric(dx_dual, B_sw)
+    dy_dual_b = _broadcast_metric(dy_dual, B_sw)
+
+    dB_dx = ((B_se + B_ne) - (B_sw + B_nw)) / jnp.maximum(dx_dual_b, 1e-10)
+    dB_dy = ((B_nw + B_ne) - (B_sw + B_se)) / jnp.maximum(dy_dual_b, 1e-10)
 
     return dB_dx, dB_dy
 
@@ -399,43 +289,41 @@ def _arakawa_lamb_gradient_3d(B, cdgrid):
 def _interp_center_to_corner(field, cdgrid):
     """Interpolate cell-centre field to D-grid corners (4-point average).
 
-    Parameters
-    ----------
-    field : jax.Array, shape (6, n, n)
-
-    Returns
-    -------
-    jax.Array, shape (6, n+1, n+1)
-    """
-    f_pad = pad_halo(field, interp_offsets=cdgrid.base.halo_interp_offsets)
-    return 0.25 * (f_pad[:, :-1, :-1] + f_pad[:, 1:, :-1]
-                    + f_pad[:, :-1, 1:] + f_pad[:, 1:, 1:])
-
-
-def _interp_center_to_corner_3d(field, cdgrid):
-    """Interpolate cell-centre 3D field to D-grid corners.
+    Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
 
     Parameters
     ----------
-    field : jax.Array, shape (6, n, n, nlev)
+    field : jax.Array, shape (6, n, n[, nlev])
 
     Returns
     -------
-    jax.Array, shape (6, n+1, n+1, nlev)
+    jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    import jax
+    f_pad = _pad_halo_auto(field, cdgrid)
 
-    nlev = field.shape[-1]
-    f_t = jnp.moveaxis(field, -1, 0)
-
-    def pad_one(fk):
-        return pad_halo(fk, interp_offsets=cdgrid.base.halo_interp_offsets)
-
-    f_pad_t = jax.vmap(pad_one)(f_t)
-    f_pad = jnp.moveaxis(f_pad_t, 0, -1)
-
+    if field.ndim == 3:
+        return 0.25 * (f_pad[:, :-1, :-1] + f_pad[:, 1:, :-1]
+                        + f_pad[:, :-1, 1:] + f_pad[:, 1:, 1:])
     return 0.25 * (f_pad[:, :-1, :-1, :] + f_pad[:, 1:, :-1, :]
                     + f_pad[:, :-1, 1:, :] + f_pad[:, 1:, 1:, :])
+
+
+def _interp_corner_to_center(field_d):
+    """Interpolate D-grid corners to cell centres (4-point average).
+
+    Parameters
+    ----------
+    field_d : jax.Array, shape (6, n+1, n+1[, nlev])
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n[, nlev])
+    """
+    if field_d.ndim == 3:
+        return 0.25 * (field_d[:, :-1, :-1] + field_d[:, 1:, :-1]
+                        + field_d[:, :-1, 1:] + field_d[:, 1:, 1:])
+    return 0.25 * (field_d[:, :-1, :-1, :] + field_d[:, 1:, :-1, :]
+                    + field_d[:, :-1, 1:, :] + field_d[:, 1:, 1:, :])
 
 
 # ==============================================================================
@@ -445,24 +333,32 @@ def _interp_center_to_corner_3d(field, cdgrid):
 def _laplacian_dgrid(u_d, cdgrid):
     """5-point Laplacian of a D-grid field.
 
+    Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev).
+    For 3D, applies the Laplacian level-by-level.
+
     Parameters
     ----------
-    u_d : jax.Array, shape (6, n+1, n+1)
+    u_d : jax.Array, shape (6, n+1, n+1[, nlev])
 
     Returns
     -------
-    jax.Array, shape (6, n+1, n+1)
+    jax.Array, shape (6, n+1, n+1[, nlev])
     """
+    if u_d.ndim == 4:
+        # Apply per-level via vmap
+        u_t = jnp.moveaxis(u_d, -1, 0)
+
+        def lap_one(uk):
+            return _laplacian_dgrid(uk, cdgrid)
+
+        result = jax.vmap(lap_one)(u_t)
+        return jnp.moveaxis(result, 0, -1)
+
     dx_pad = jnp.pad(cdgrid.base.dx, ((0, 0), (1, 1), (1, 1)), mode='edge')
     dx_dual = 0.25 * (dx_pad[:, :-1, :-1] + dx_pad[:, 1:, :-1]
                        + dx_pad[:, :-1, 1:] + dx_pad[:, 1:, 1:])
-    dy_dual = dx_dual  # approximate isotropy
-
-    # dx_dual is the 2-cell span; the 5-point stencil spans 1 cell per direction,
-    # so the single-cell spacing is dx_dual/2.  Laplacian = d²u/dx² + d²u/dy²
-    # with spacing h = dx_dual/2 gives denominator h² = (dx_dual/2)².
     hx = dx_dual * 0.5
-    hy = dy_dual * 0.5
+    hy = hx  # approximate isotropy
 
     u_pad = jnp.pad(u_d, ((0, 0), (1, 1), (1, 1)), mode='edge')
     return (
@@ -472,63 +368,118 @@ def _laplacian_dgrid(u_d, cdgrid):
 
 
 # ==============================================================================
-# Vector-invariant momentum (2D shallow water)
+# Vector-invariant momentum tendencies (unified 2D/3D)
 # ==============================================================================
 
 def cdgrid_momentum_tendencies(
-    h, u_d, v_d, h_s, cdgrid, g=9.80616,
-    A_h=0.0, hyperdiff_coeff=0.0,
+    h_or_p, u_d, v_d, h_s_or_p_prime, cdgrid,
+    g=9.80616, A_h=0.0, hyperdiff_coeff=0.0,
+    rho_0=None, div_v=None, f_3d=None,
+    u_prime=None, v_prime=None,
 ):
-    """D-grid momentum tendencies (vector-invariant form, shallow water).
+    """D-grid momentum tendencies (vector-invariant form).
 
-    du_d/dt = +ζ_abs * v_d - ∂B/∂x + viscosity
-    dv_d/dt = -ζ_abs * u_d - ∂B/∂y + viscosity
+    Unified for both shallow water (2D) and 3D primitive equations.
 
-    where B = KE + g*(h + h_s) and ζ_abs = ζ + f.
+    For 2D (shallow water):
+        du_d/dt = +zeta_abs * v_d - dB/dx + viscosity
+        dv_d/dt = -zeta_abs * u_d - dB/dy + viscosity
+        where B = KE + g*(h + h_s)
+
+    For 3D (primitive equations / ocean):
+        du_d/dt = zeta*v_d + f*v' - dKE/dx - (1/rho_0)*dp'/dx + viscosity
+        dv_d/dt = -zeta*u_d - f*u' - dKE/dy - (1/rho_0)*dp'/dy + viscosity
 
     Parameters
     ----------
-    h : jax.Array, shape (6, n, n)
-    u_d, v_d : jax.Array, shape (6, n+1, n+1)
-    h_s : jax.Array, shape (6, n, n)
+    h_or_p : jax.Array, shape (6, n, n[, nlev])
+        Height (2D shallow water) or baroclinic pressure perturbation (3D).
+    u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
+    h_s_or_p_prime : jax.Array, shape (6, n, n)
+        Surface topography (2D) — unused in 3D (pass zeros).
     cdgrid : CubedSphereCDGrid
     g : float
+        Gravity (used for 2D Bernoulli function).
     A_h : float
+        Laplacian viscosity [m^2/s].
     hyperdiff_coeff : float
+        Biharmonic hyperdiffusion coefficient.
+    rho_0 : float or None
+        Reference density (3D ocean only).
+    div_v : jax.Array or None
+        Velocity divergence for skew-symmetric correction (3D).
+    f_3d : jax.Array or None
+        Coriolis parameter broadcast to 3D.
+    u_prime, v_prime : jax.Array or None
+        Baroclinic velocity deviation (3D ocean).
 
     Returns
     -------
-    du_d_dt, dv_d_dt : jax.Array, shape (6, n+1, n+1)
+    du_d_dt, dv_d_dt : jax.Array, shape (6, n+1, n+1[, nlev])
     """
+    is_3d = u_d.ndim == 4
+
     # 1. Vorticity at cell centres
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)
-    zeta_abs = zeta + cdgrid.base.f
+    if is_3d:
+        zeta_abs = zeta  # Coriolis handled separately via f_3d + u_prime/v_prime
+    else:
+        zeta_abs = zeta + cdgrid.base.f
 
     # 2. KE at cell centres from C-grid velocities
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
-    u_center = 0.5 * (u_c[:, :-1, :] + u_c[:, 1:, :])
-    v_center = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
+    if is_3d:
+        u_center = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])
+        v_center = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])
+    else:
+        u_center = 0.5 * (u_c[:, :-1, :] + u_c[:, 1:, :])
+        v_center = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
     KE = 0.5 * (u_center ** 2 + v_center ** 2)
 
-    # 3. Bernoulli function
-    B = KE + g * (h + h_s)
+    # 3. Gradients at corners (Arakawa-Lamb)
+    if is_3d:
+        # 3D: separate KE and pressure gradients
+        dKE_dx, dKE_dy = _arakawa_lamb_gradient(KE, cdgrid)
+        dp_dx, dp_dy = _arakawa_lamb_gradient(h_or_p, cdgrid)
+    else:
+        # 2D: Bernoulli function B = KE + g*(h + h_s)
+        B = KE + g * (h_or_p + h_s_or_p_prime)
+        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
 
-    # 4. Gradient at corners (Arakawa-Lamb)
-    dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
-
-    # 5. Vorticity at corners (interpolated from centres)
+    # 4. Vorticity at corners
     zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
 
-    # 6. Tendencies
-    du_d_dt = zeta_corner * v_d - dB_dx
-    dv_d_dt = -zeta_corner * u_d - dB_dy
+    # 5. Tendencies
+    if is_3d:
+        du_d_dt = zeta_corner * v_d - dKE_dx
+        dv_d_dt = -zeta_corner * u_d - dKE_dy
 
-    # 7. Laplacian viscosity
+        # Pressure gradient
+        if rho_0 is not None:
+            du_d_dt = du_d_dt - dp_dx / rho_0
+            dv_d_dt = dv_d_dt - dp_dy / rho_0
+
+        # Coriolis on baroclinic deviation
+        if f_3d is not None and u_prime is not None and v_prime is not None:
+            f_corner = cdgrid.f_corner[..., None]
+            du_d_dt = du_d_dt + f_corner * v_prime
+            dv_d_dt = dv_d_dt - f_corner * u_prime
+
+        # Skew-symmetric correction
+        if div_v is not None:
+            div_corner = _interp_center_to_corner(div_v, cdgrid)
+            du_d_dt = du_d_dt - 0.5 * u_d * div_corner
+            dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
+    else:
+        du_d_dt = zeta_corner * v_d - dB_dx
+        dv_d_dt = -zeta_corner * u_d - dB_dy
+
+    # 6. Laplacian viscosity
     if A_h > 0:
         du_d_dt = du_d_dt + A_h * _laplacian_dgrid(u_d, cdgrid)
         dv_d_dt = dv_d_dt + A_h * _laplacian_dgrid(v_d, cdgrid)
 
-    # 8. Biharmonic hyperdiffusion
+    # 7. Biharmonic hyperdiffusion
     if hyperdiff_coeff > 0:
         du_d_dt = du_d_dt - hyperdiff_coeff * _laplacian_dgrid(
             _laplacian_dgrid(u_d, cdgrid), cdgrid)
@@ -539,76 +490,42 @@ def cdgrid_momentum_tendencies(
 
 
 # ==============================================================================
-# 3D momentum tendencies (for PE / ocean solvers)
+# Legacy aliases for backward compatibility
 # ==============================================================================
+
+def dgrid_vorticity_3d(u_d, v_d, cdgrid):
+    """Alias: dgrid_vorticity handles both 2D and 3D."""
+    return dgrid_vorticity(u_d, v_d, cdgrid)
+
+
+def cgrid_divergence_3d(u_c, v_c, cdgrid):
+    """Alias: cgrid_divergence handles both 2D and 3D."""
+    return cgrid_divergence(u_c, v_c, cdgrid)
+
+
+def cgrid_mass_flux_divergence_3d(h, u_c, v_c, cdgrid):
+    """Alias: cgrid_mass_flux_divergence handles both 2D and 3D."""
+    return cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
+
+
+def _arakawa_lamb_gradient_3d(B, cdgrid):
+    """Alias: _arakawa_lamb_gradient handles both 2D and 3D."""
+    return _arakawa_lamb_gradient(B, cdgrid)
+
+
+def _interp_center_to_corner_3d(field, cdgrid):
+    """Alias: _interp_center_to_corner handles both 2D and 3D."""
+    return _interp_center_to_corner(field, cdgrid)
+
 
 def cdgrid_momentum_tendencies_3d(
     u_d, v_d, p_prime, cdgrid, rho_0,
     A_h=0.0, div_v=None, f_3d=None,
     u_prime=None, v_prime=None,
 ):
-    """D-grid momentum tendencies for 3D primitive equations.
-
-    du_d/dt = ζ·v_d + f·v_prime - ∂(KE)/∂x - (1/ρ₀)·∂p'/∂x - ½u·div(v)
-    dv_d/dt = -ζ·u_d - f·u_prime - ∂(KE)/∂y - (1/ρ₀)·∂p'/∂y - ½v·div(v)
-
-    Parameters
-    ----------
-    u_d, v_d : jax.Array, shape (6, n+1, n+1, nlev)
-    p_prime : jax.Array, shape (6, n, n, nlev)
-        Baroclinic pressure perturbation at cell centres.
-    cdgrid : CubedSphereCDGrid
-    rho_0 : float
-    A_h : float
-    div_v : jax.Array, shape (6, n, n, nlev) or None
-        Velocity divergence for skew-symmetric correction.
-    f_3d : jax.Array, shape (6, n, n, 1) or None
-        Coriolis parameter broadcast to 3D.
-    u_prime, v_prime : jax.Array, shape (6, n+1, n+1, nlev) or None
-        Baroclinic velocity deviation.
-
-    Returns
-    -------
-    du_d_dt, dv_d_dt : jax.Array, shape (6, n+1, n+1, nlev)
-    """
-    # 1. Vorticity at cell centres
-    zeta = dgrid_vorticity_3d(u_d, v_d, cdgrid)
-
-    # 2. KE at cell centres
-    u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
-    u_center = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])
-    v_center = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])
-    KE = 0.5 * (u_center ** 2 + v_center ** 2)
-
-    # 3. Gradients at corners
-    dKE_dx, dKE_dy = _arakawa_lamb_gradient_3d(KE, cdgrid)
-    dp_dx, dp_dy = _arakawa_lamb_gradient_3d(p_prime, cdgrid)
-
-    # 4. Vorticity at corners
-    zeta_corner = _interp_center_to_corner_3d(zeta, cdgrid)
-
-    # 5. Tendencies
-    du_d_dt = zeta_corner * v_d - dKE_dx - dp_dx / rho_0
-    dv_d_dt = -zeta_corner * u_d - dKE_dy - dp_dy / rho_0
-
-    # 6. Coriolis on baroclinic deviation (avoid double-counting barotropic)
-    if f_3d is not None and u_prime is not None and v_prime is not None:
-        f_corner = cdgrid.f_corner[..., None]  # (6, n+1, n+1, 1)
-        du_d_dt = du_d_dt + f_corner * v_prime
-        dv_d_dt = dv_d_dt - f_corner * u_prime
-
-    # 7. Skew-symmetric correction for divergent flow
-    if div_v is not None:
-        div_corner = _interp_center_to_corner_3d(div_v, cdgrid)
-        du_d_dt = du_d_dt - 0.5 * u_d * div_corner
-        dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
-
-    # 8. Laplacian viscosity
-    if A_h > 0:
-        for k in range(u_d.shape[-1]):
-            lap_u_k = _laplacian_dgrid(u_d[..., k], cdgrid)
-            lap_v_k = _laplacian_dgrid(v_d[..., k], cdgrid)
-            du_d_dt = du_d_dt.at[..., k].add(A_h * lap_u_k)
-            dv_d_dt = dv_d_dt.at[..., k].add(A_h * lap_v_k)
-
-    return du_d_dt, dv_d_dt
+    """Alias: cdgrid_momentum_tendencies handles both 2D and 3D."""
+    return cdgrid_momentum_tendencies(
+        p_prime, u_d, v_d, jnp.zeros(cdgrid.base.area.shape), cdgrid,
+        rho_0=rho_0, A_h=A_h, div_v=div_v, f_3d=f_3d,
+        u_prime=u_prime, v_prime=v_prime,
+    )
