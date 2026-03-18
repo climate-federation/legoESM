@@ -1,6 +1,6 @@
 """Atmosphere component for legoESM."""
 
-from legoesm.atmosphere.dynamics.shallow_water import (
-    ShallowWaterModel,
-    shallow_water_tendencies,
+from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    CDGridShallowWaterModel as ShallowWaterModel,
+    cdgrid_shallow_water_tendencies as shallow_water_tendencies,
 )

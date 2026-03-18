@@ -7,53 +7,54 @@ There are two ways to choose a dynamical core:
 1. **Two-axis selection** (recommended)::
 
        dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
-       discretization: "centered" | "spectral"
+       discretization: "cdgrid" | "spectral" | ...
 
    These combine as:
 
    ========================  ==============  ===============================
    dynamics                  discretization  solver
    ========================  ==============  ===============================
-   ``shallow_water``         centered        ShallowWaterModel
+   ``shallow_water``         cdgrid          CDGridShallowWaterModel
    ``shallow_water``         spectral        SpectralShallowWaterModel
-   ``hydrostatic``           centered        PrimitiveEquationModel
+   ``hydrostatic``           cdgrid          CDGridPrimitiveEquationModel
    ``hydrostatic``           spectral        SpectralPrimitiveEquationModel
-   ``nonhydrostatic``        centered        CompressibleEulerModel
+   ``nonhydrostatic``        cdgrid          CDGridCompressibleEulerModel
    ``nonhydrostatic``        spectral        SpectralCompressibleEulerModel
-   ``shallow_water``         cgrid           CGShallowWaterCubedModel (cubed-sphere)
-   ``shallow_water``         cgrid           CGShallowWaterLatLonModel (lat-lon, flat name)
    ========================  ==============  ===============================
 
 2. **Legacy flat name** (still supported)::
 
-       "shallow_water", "spectral_shallow_water",
-       "primitive_equations", "spectral_primitive_equations",
-       "compressible_euler", "spectral_compressible_euler",
+       "cdgrid_shallow_water", "spectral_shallow_water",
+       "cdgrid_primitive_equations", "spectral_primitive_equations",
+       "cdgrid_compressible_euler", "spectral_compressible_euler",
        "tracer_transport"
 
 Use :func:`resolve_solver_name` to convert between the two, and
 :func:`create_model` to instantiate.
 """
 
-from legoesm.atmosphere.dynamics.shallow_water import (
-    ShallowWaterModel,
-    shallow_water_tendencies,
+# --- C-D grid cubed-sphere cores (FV3-style) ---
+from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    CDGridShallowWaterModel,
+    CDGridShallowWaterConfig,
+    CDGridShallowWaterState,
+    cdgrid_shallow_water_tendencies,
 )
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationModel,
+    CDGridPrimitiveEquationConfig,
+    cdgrid_hydrostatic_tendencies,
+)
+from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    CDGridCompressibleEulerModel,
+    CDGridCompressibleEulerConfig,
+    cdgrid_compressible_euler_slow_tendencies,
+)
+
+# --- Spectral cores ---
 from legoesm.atmosphere.dynamics.spectral_sw import (
     SpectralShallowWaterModel,
     spectral_sw_tendencies,
-)
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationModel,
-    hydrostatic_tendencies,
-)
-from legoesm.atmosphere.dynamics.tracer_transport import (
-    TracerTransportModel,
-    tracer_tendencies,
-)
-from legoesm.atmosphere.dynamics.compressible_euler import (
-    CompressibleEulerModel,
-    compressible_euler_slow_tendencies,
 )
 from legoesm.atmosphere.dynamics.spectral_pe import (
     SpectralPrimitiveEquationModel,
@@ -63,6 +64,8 @@ from legoesm.atmosphere.dynamics.spectral_nh import (
     SpectralCompressibleEulerModel,
     spectral_nh_slow_tendencies,
 )
+
+# --- SFNO (data-driven) ---
 from legoesm.atmosphere.dynamics.sfno_sw import (
     SFNOShallowWaterModel,
     SFNOShallowWaterConfig,
@@ -71,18 +74,8 @@ from legoesm.atmosphere.dynamics.sfno_pe import (
     SFNOPrimitiveEquationModel,
     SFNOPrimitiveEquationConfig,
 )
-from legoesm.atmosphere.dynamics.shallow_water_fv import (
-    FVShallowWaterModel,
-    fv_shallow_water_tendencies,
-)
-from legoesm.atmosphere.dynamics.primitive_eq_fv import (
-    FVPrimitiveEquationModel,
-    fv_hydrostatic_tendencies,
-)
-from legoesm.atmosphere.dynamics.compressible_euler_fv import (
-    FVCompressibleEulerModel,
-    fv_compressible_euler_slow_tendencies,
-)
+
+# --- Lat-lon cores ---
 from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
     FVShallowWaterLatLonModel,
     fv_shallow_water_tendencies_latlon,
@@ -90,24 +83,9 @@ from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
 from legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon import (
     CGShallowWaterLatLonModel,
     CGShallowWaterConfig,
-    cgrid_shallow_water_tendencies,
+    cgrid_shallow_water_tendencies as cgrid_shallow_water_tendencies_latlon,
     a_to_cgrid,
     cgrid_to_a,
-)
-from legoesm.atmosphere.dynamics.shallow_water_cgrid import (
-    CGShallowWaterCubedModel,
-    CGShallowWaterCubedConfig,
-    cgrid_shallow_water_tendencies_cubed,
-)
-from legoesm.atmosphere.dynamics.primitive_eq_cgrid import (
-    CGPrimitiveEquationModel,
-    CGPrimitiveEquationConfig,
-    cgrid_hydrostatic_tendencies,
-)
-from legoesm.atmosphere.dynamics.compressible_euler_cgrid import (
-    CGCompressibleEulerModel,
-    CGCompressibleEulerConfig,
-    cgrid_compressible_euler_slow_tendencies,
 )
 from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
     FVLatLonPrimitiveEquationModel,
@@ -117,42 +95,8 @@ from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
     FVCompressibleEulerLatLonModel,
     fv_compressible_euler_latlon_slow_tendencies,
 )
-from legoesm.atmosphere.dynamics.shallow_water_fc import (
-    FCShallowWaterModel,
-    FCShallowWaterConfig,
-    fc_shallow_water_tendencies,
-)
-from legoesm.atmosphere.dynamics.shallow_water_fc_cgrid import (
-    FCCGShallowWaterModel,
-    FCCGShallowWaterConfig,
-    fc_cgrid_shallow_water_tendencies,
-)
-from legoesm.atmosphere.dynamics.primitive_eq_fc import (
-    FCPrimitiveEquationModel,
-    FCPrimitiveEquationConfig,
-    fc_hydrostatic_tendencies,
-)
-from legoesm.atmosphere.dynamics.primitive_eq_fc_cgrid import (
-    FCCGPrimitiveEquationModel,
-    FCCGPrimitiveEquationConfig,
-    fc_cgrid_hydrostatic_tendencies,
-)
-from legoesm.atmosphere.dynamics.compressible_euler_fc import (
-    FCCompressibleEulerModel,
-    FCCompressibleEulerConfig,
-    fc_compressible_euler_slow_tendencies,
-)
-from legoesm.atmosphere.dynamics.compressible_euler_fc_cgrid import (
-    FCCGCompressibleEulerModel,
-    FCCGCompressibleEulerConfig,
-    fc_cgrid_compressible_euler_slow_tendencies,
-)
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-    CDGridShallowWaterModel,
-    CDGridShallowWaterConfig,
-    CDGridShallowWaterState,
-    cdgrid_shallow_water_tendencies,
-)
+
+# --- MPAS icosahedral ---
 from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
     MPASPrimitiveEquationModel,
     MPASPrimitiveEquationConfig,
@@ -163,14 +107,54 @@ from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
     MPASCompressibleEulerConfig,
     mpas_compressible_euler_slow_tendencies,
 )
+
+# --- Tracer transport ---
+from legoesm.atmosphere.dynamics.tracer_transport import (
+    TracerTransportModel,
+    tracer_tendencies,
+)
+
+# --- Shared utilities (acoustic substeps, sponge, Exner) ---
+from legoesm.atmosphere.dynamics.compressible_euler import (
+    CompressibleEulerConfig,
+    compute_exner_perturbation,
+    _sponge_profile,
+    acoustic_substeps,
+    acoustic_substeps_semi_implicit,
+)
+
+
+# Backward compatibility aliases
+ShallowWaterModel = CDGridShallowWaterModel
+PrimitiveEquationModel = CDGridPrimitiveEquationModel
+CompressibleEulerModel = CDGridCompressibleEulerModel
+FVShallowWaterModel = CDGridShallowWaterModel
+FVPrimitiveEquationModel = CDGridPrimitiveEquationModel
+FVCompressibleEulerModel = CDGridCompressibleEulerModel
+CGShallowWaterCubedModel = CDGridShallowWaterModel
+CGPrimitiveEquationModel = CDGridPrimitiveEquationModel
+CGCompressibleEulerModel = CDGridCompressibleEulerModel
+FVPrimitiveEquationConfig = CDGridPrimitiveEquationConfig
+FVCompressibleEulerConfig = CDGridCompressibleEulerConfig
+shallow_water_tendencies = cdgrid_shallow_water_tendencies
+hydrostatic_tendencies = cdgrid_hydrostatic_tendencies
+compressible_euler_slow_tendencies = cdgrid_compressible_euler_slow_tendencies
+fv_shallow_water_tendencies = cdgrid_shallow_water_tendencies
+fv_hydrostatic_tendencies = cdgrid_hydrostatic_tendencies
+fv_compressible_euler_slow_tendencies = cdgrid_compressible_euler_slow_tendencies
+
+
 # Available solver names for the factory (flat namespace)
 AVAILABLE_SOLVERS = [
     "shallow_water",
+    "cdgrid_shallow_water",
     "spectral_shallow_water",
     "primitive_equations",
+    "cdgrid_primitive_equations",
     "spectral_primitive_equations",
     "tracer_transport",
     "compressible_euler",
+    "cdgrid_compressible_euler",
     "spectral_compressible_euler",
     "sfno_shallow_water",
     "sfno_primitive_equations",
@@ -182,47 +166,35 @@ AVAILABLE_SOLVERS = [
     "fv_compressible_euler_latlon",
     "cgrid_shallow_water_latlon",
     "cgrid_shallow_water",
-    "fc_shallow_water",
-    "fc_cgrid_shallow_water",
-    "fc_primitive_equations",
-    "fc_cgrid_primitive_equations",
-    "fc_compressible_euler",
-    "fc_cgrid_compressible_euler",
     "cgrid_primitive_equations",
     "cgrid_compressible_euler",
-    "cdgrid_shallow_water",
     "mpas_primitive_equations",
     "mpas_compressible_euler",
 ]
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid", "cdgrid", "fc_gram", "fc_gram_cgrid", "mpas"]
+DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid", "cdgrid", "mpas"]
 
 # (dynamics, discretization) -> flat solver name
 _AXIS_TO_SOLVER = {
-    ("shallow_water", "centered"): "shallow_water",
+    ("shallow_water", "centered"): "cdgrid_shallow_water",
     ("shallow_water", "spectral"): "spectral_shallow_water",
     ("shallow_water", "sfno"): "sfno_shallow_water",
-    ("hydrostatic", "centered"): "primitive_equations",
+    ("hydrostatic", "centered"): "cdgrid_primitive_equations",
     ("hydrostatic", "spectral"): "spectral_primitive_equations",
     ("hydrostatic", "sfno"): "sfno_primitive_equations",
-    ("nonhydrostatic", "centered"): "compressible_euler",
+    ("nonhydrostatic", "centered"): "cdgrid_compressible_euler",
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
-    ("shallow_water", "finite_volume"): "fv_shallow_water",
-    ("hydrostatic", "finite_volume"): "fv_primitive_equations",
-    ("nonhydrostatic", "finite_volume"): "fv_compressible_euler",
-    ("shallow_water", "cgrid"): "cgrid_shallow_water",
-    ("hydrostatic", "cgrid"): "cgrid_primitive_equations",
-    ("nonhydrostatic", "cgrid"): "cgrid_compressible_euler",
-    ("shallow_water", "fc_gram"): "fc_shallow_water",
-    ("shallow_water", "fc_gram_cgrid"): "fc_cgrid_shallow_water",
-    ("hydrostatic", "fc_gram"): "fc_primitive_equations",
-    ("hydrostatic", "fc_gram_cgrid"): "fc_cgrid_primitive_equations",
-    ("nonhydrostatic", "fc_gram"): "fc_compressible_euler",
-    ("nonhydrostatic", "fc_gram_cgrid"): "fc_cgrid_compressible_euler",
+    ("shallow_water", "finite_volume"): "cdgrid_shallow_water",
+    ("hydrostatic", "finite_volume"): "cdgrid_primitive_equations",
+    ("nonhydrostatic", "finite_volume"): "cdgrid_compressible_euler",
+    ("shallow_water", "cgrid"): "cdgrid_shallow_water",
+    ("hydrostatic", "cgrid"): "cdgrid_primitive_equations",
+    ("nonhydrostatic", "cgrid"): "cdgrid_compressible_euler",
     ("shallow_water", "cdgrid"): "cdgrid_shallow_water",
-    ("shallow_water", "mpas"): "mpas_shallow_water",
+    ("hydrostatic", "cdgrid"): "cdgrid_primitive_equations",
+    ("nonhydrostatic", "cdgrid"): "cdgrid_compressible_euler",
     ("hydrostatic", "mpas"): "mpas_primitive_equations",
     ("nonhydrostatic", "mpas"): "mpas_compressible_euler",
 }
@@ -242,40 +214,16 @@ def resolve_solver_name(
     Parameters
     ----------
     dynamics : str, optional
-        Vertical physics: ``"shallow_water"``, ``"hydrostatic"``, or
-        ``"nonhydrostatic"``.
     discretization : str, optional
-        Horizontal method: ``"finite_volume"`` or ``"spectral"``.
     equations : str, optional
-        Legacy flat solver name (e.g. ``"primitive_equations"``).
-        If this matches a known solver and *dynamics* / *discretization*
-        are at their defaults, it takes precedence for backward
-        compatibility.
+        Legacy flat solver name.
 
     Returns
     -------
     str
-        Flat solver name suitable for :func:`create_model`.
-
-    Raises
-    ------
-    ValueError
-        If the combination is invalid or not yet implemented.
-
-    Examples
-    --------
-    >>> resolve_solver_name(dynamics="hydrostatic", discretization="finite_volume")
-    'primitive_equations'
-    >>> resolve_solver_name(dynamics="nonhydrostatic")
-    'compressible_euler'
-    >>> resolve_solver_name(equations="spectral_shallow_water")
-    'spectral_shallow_water'
     """
-    # --- Legacy path: explicit equations name ---
+    # --- Legacy path ---
     if equations is not None and equations in AVAILABLE_SOLVERS:
-        # If the user also set dynamics/discretization to something
-        # other than the defaults, prefer the axis-based resolution
-        # (the legacy key is kept for backward compatibility only).
         defaults_match = (
             (dynamics is None or dynamics == "shallow_water")
             and (discretization is None or discretization == "centered")
@@ -309,78 +257,12 @@ def resolve_solver_name(
 
 
 def solver_axes(name: str) -> tuple[str, str]:
-    """Return the (dynamics, discretization) pair for a flat solver name.
-
-    Parameters
-    ----------
-    name : str
-        Flat solver name (e.g. ``"primitive_equations"``).
-
-    Returns
-    -------
-    (dynamics, discretization) : tuple[str, str]
-
-    Raises
-    ------
-    KeyError
-        If the name has no axis mapping (e.g. ``"tracer_transport"``).
-    """
+    """Return the (dynamics, discretization) pair for a flat solver name."""
     return _SOLVER_TO_AXIS[name]
 
 
 def create_model(name: str = None, legoesm_config=None, **kwargs):
-    """Create a dynamical core model by name or from config.
-
-    Parameters
-    ----------
-    name : str, optional
-        Flat solver name (e.g. ``"shallow_water"``).  If *None*,
-        the solver is resolved from *legoesm_config* using the
-        ``atmosphere.dynamics`` and ``atmosphere.discretization``
-        keys (falling back to ``atmosphere.equations``).
-    legoesm_config : Config, optional
-        legoESM global configuration.  Used to resolve the solver
-        name when *name* is None, and forwarded to spectral models
-        for the ``atmosphere.spectral.allow_unsupported`` guard.
-    **kwargs
-        Keyword arguments passed to the model constructor.
-
-    Returns
-    -------
-    Model instance.
-
-    Raises
-    ------
-    ValueError
-        If the solver name is not recognized or the axis combination
-        is invalid.
-
-    Examples
-    --------
-    Create by flat name (legacy)::
-
-        model = create_model("shallow_water", grid=grid)
-
-    Create by config (recommended)::
-
-        cfg = Config.from_dict({
-            "atmosphere": {
-                "dynamics": "nonhydrostatic",
-                "discretization": "finite_volume",
-            }
-        })
-        model = create_model(legoesm_config=cfg, grid=grid,
-                             height_coord=hc, terrain_metric=tm)
-
-    Create by axis keywords passed through name=None::
-
-        model = create_model(
-            legoesm_config=Config.from_dict({
-                "atmosphere": {"dynamics": "hydrostatic"}
-            }),
-            grid=grid, sigma_coord=sc,
-        )
-    """
+    """Create a dynamical core model by name or from config."""
     # --- Apply runtime hardware config when available ---
     if legoesm_config is not None:
         from legoesm.core.hardware import apply_hardware_config
@@ -398,19 +280,31 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
             equations=legoesm_config.get("atmosphere.equations"),
         )
 
+    # Map legacy names to cdgrid
+    _legacy_map = {
+        "shallow_water": "cdgrid_shallow_water",
+        "primitive_equations": "cdgrid_primitive_equations",
+        "compressible_euler": "cdgrid_compressible_euler",
+        "fv_shallow_water": "cdgrid_shallow_water",
+        "fv_primitive_equations": "cdgrid_primitive_equations",
+        "fv_compressible_euler": "cdgrid_compressible_euler",
+        "cgrid_shallow_water": "cdgrid_shallow_water",
+        "cgrid_primitive_equations": "cdgrid_primitive_equations",
+        "cgrid_compressible_euler": "cdgrid_compressible_euler",
+    }
+    name = _legacy_map.get(name, name)
+
     # --- Instantiate ---
-    if name == "shallow_water":
-        return ShallowWaterModel(**kwargs)
+    if name == "cdgrid_shallow_water":
+        return CDGridShallowWaterModel(**kwargs)
+    elif name == "cdgrid_primitive_equations":
+        return CDGridPrimitiveEquationModel(**kwargs)
+    elif name == "cdgrid_compressible_euler":
+        return CDGridCompressibleEulerModel(**kwargs)
     elif name == "spectral_shallow_water":
         if legoesm_config is not None:
             kwargs.setdefault("legoesm_config", legoesm_config)
         return SpectralShallowWaterModel(**kwargs)
-    elif name == "primitive_equations":
-        return PrimitiveEquationModel(**kwargs)
-    elif name == "tracer_transport":
-        return TracerTransportModel(**kwargs)
-    elif name == "compressible_euler":
-        return CompressibleEulerModel(**kwargs)
     elif name == "spectral_primitive_equations":
         if legoesm_config is not None:
             kwargs.setdefault("legoesm_config", legoesm_config)
@@ -423,12 +317,6 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return SFNOShallowWaterModel(**kwargs)
     elif name == "sfno_primitive_equations":
         return SFNOPrimitiveEquationModel(**kwargs)
-    elif name == "fv_shallow_water":
-        return FVShallowWaterModel(**kwargs)
-    elif name == "fv_primitive_equations":
-        return FVPrimitiveEquationModel(**kwargs)
-    elif name == "fv_compressible_euler":
-        return FVCompressibleEulerModel(**kwargs)
     elif name == "fv_shallow_water_latlon":
         return FVShallowWaterLatLonModel(**kwargs)
     elif name == "fv_primitive_equations_latlon":
@@ -437,26 +325,8 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         return FVCompressibleEulerLatLonModel(**kwargs)
     elif name == "cgrid_shallow_water_latlon":
         return CGShallowWaterLatLonModel(**kwargs)
-    elif name == "cgrid_shallow_water":
-        return CGShallowWaterCubedModel(**kwargs)
-    elif name == "cgrid_primitive_equations":
-        return CGPrimitiveEquationModel(**kwargs)
-    elif name == "cgrid_compressible_euler":
-        return CGCompressibleEulerModel(**kwargs)
-    elif name == "fc_shallow_water":
-        return FCShallowWaterModel(**kwargs)
-    elif name == "fc_cgrid_shallow_water":
-        return FCCGShallowWaterModel(**kwargs)
-    elif name == "fc_primitive_equations":
-        return FCPrimitiveEquationModel(**kwargs)
-    elif name == "fc_cgrid_primitive_equations":
-        return FCCGPrimitiveEquationModel(**kwargs)
-    elif name == "fc_compressible_euler":
-        return FCCompressibleEulerModel(**kwargs)
-    elif name == "fc_cgrid_compressible_euler":
-        return FCCGCompressibleEulerModel(**kwargs)
-    elif name == "cdgrid_shallow_water":
-        return CDGridShallowWaterModel(**kwargs)
+    elif name == "tracer_transport":
+        return TracerTransportModel(**kwargs)
     elif name == "mpas_primitive_equations":
         return MPASPrimitiveEquationModel(**kwargs)
     elif name == "mpas_compressible_euler":

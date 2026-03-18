@@ -179,43 +179,16 @@ class ModelDriver:
         DT = dc.dt
         HYPERDIFF = dc.hyperdiff_scale * (48 / N) ** 4
 
-        if dc.discretization == "finite_volume":
-            from legoesm.atmosphere.dynamics.primitive_eq_fv import (
-                FVPrimitiveEquationModel, FVPrimitiveEquationConfig,
-            )
-            div_damp_2 = 0.05 * dx_min ** 2 / DT
-            dycore_config = FVPrimitiveEquationConfig(
-                div_damp_2=div_damp_2, div_damp_4=0.0,
-                hyperdiff_coeff=HYPERDIFF, hyperdiff_ps_coeff=0.0,
-                use_conservation_fixer=dc.conservation_fixer,
-                fix_mass=dc.fix_mass, use_limiter=True,
-            )
-            self.model = FVPrimitiveEquationModel(self.grid, self.sigma, dycore_config)
-        elif dc.discretization == "cgrid":
-            from legoesm.atmosphere.dynamics.primitive_eq_cgrid import (
-                CGPrimitiveEquationModel, CGPrimitiveEquationConfig,
-            )
-            div_damp_2 = 0.05 * dx_min ** 2 / DT
-            div_damp_4 = 0.01 * dx_min ** 4 / DT
-            dycore_config = CGPrimitiveEquationConfig(
-                hyperdiff_coeff=HYPERDIFF, hyperdiff_ps_coeff=0.0,
-                div_damp_2=div_damp_2, div_damp_4=div_damp_4,
-                use_conservation_fixer=dc.conservation_fixer,
-                fix_mass=dc.fix_mass,
-            )
-            self.model = CGPrimitiveEquationModel(self.grid, self.sigma, dycore_config)
-        else:
-            from legoesm.atmosphere.dynamics.primitive_eq import (
-                PrimitiveEquationModel, PrimitiveEquationConfig,
-            )
-            div_damp = 0.12 * dx_min ** 2 / DT
-            dycore_config = PrimitiveEquationConfig(
-                hyperdiff_coeff=HYPERDIFF, hyperdiff_ps_coeff=HYPERDIFF,
-                div_damp_coeff=div_damp,
-                use_conservation_fixer=dc.conservation_fixer,
-                fix_mass=dc.fix_mass,
-            )
-            self.model = PrimitiveEquationModel(self.grid, self.sigma, dycore_config)
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
+        )
+        dycore_config = CDGridPrimitiveEquationConfig(
+            A_h=0.05 * dx_min ** 2 / DT,
+            hyperdiff_coeff=HYPERDIFF, hyperdiff_ps_coeff=0.0,
+            use_conservation_fixer=dc.conservation_fixer,
+            fix_mass=dc.fix_mass,
+        )
+        self.model = CDGridPrimitiveEquationModel(self.grid, self.sigma, dycore_config)
 
         self._hyperdiff = HYPERDIFF
         print(f"  Dycore: {dc.discretization}, dt={DT}s")
