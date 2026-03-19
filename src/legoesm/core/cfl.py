@@ -5,7 +5,10 @@ on cubed-sphere and Gaussian grids.
 """
 from __future__ import annotations
 
+import logging
 import numpy as np
+
+logger = logging.getLogger("legoesm.cfl")
 
 
 def estimate_min_dx_cubed_sphere(n: int, radius: float = 6.371229e6) -> float:
@@ -176,7 +179,7 @@ def cfl_check_and_adjust(
 
     if verbose:
         cfl_actual = c_total * dt / dx_min * np.sqrt(2)
-        print(f"  CFL check: dx_min={dx_min/1000:.0f} km, "
+        logger.info(f"  CFL check: dx_min={dx_min/1000:.0f} km, "
               f"c_max={c_total:.0f} m/s, "
               f"CFL(dt={dt:.0f}s)={cfl_actual:.2f}, "
               f"dt_max={dt_max:.0f}s")
@@ -190,10 +193,10 @@ def cfl_check_and_adjust(
                 dt_safe = float(nv)
                 break
         if verbose:
-            print(f"  WARNING: dt={dt:.0f}s exceeds CFL limit. "
+            logger.warning(f"  WARNING: dt={dt:.0f}s exceeds CFL limit. "
                   f"Reducing to dt={dt_safe:.0f}s")
         return dt_safe
     else:
         if verbose:
-            print(f"  CFL OK: dt={dt:.0f}s is within stability limit")
+            logger.info(f"  CFL OK: dt={dt:.0f}s is within stability limit")
         return dt

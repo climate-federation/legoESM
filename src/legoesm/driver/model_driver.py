@@ -6,6 +6,7 @@ checkpointing into a single reusable class.
 """
 from __future__ import annotations
 
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,9 @@ from legoesm.core.tracers import TracerRegistry, make_moisture_registry, init_tr
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import PhysicsPipeline, build_physics_pipeline
 from legoesm.driver.diagnostics import DiagnosticCollector
+from legoesm.io.restart import save_restart, load_restart
+
+logger = logging.getLogger("legoesm.driver")
 
 
 class ModelDriver:
@@ -135,7 +139,7 @@ class ModelDriver:
             from legoesm.grids.vertical import create_sigma_coordinate
             self.sigma = create_sigma_coordinate(gc.nlev)
 
-        print(f"  Grid: {gc.grid_type} {gc.resolution}, "
+        logger.info(f"  Grid: {gc.grid_type} {gc.resolution}, "
               f"{gc.nlev} levels ({gc.vertical_coord})")
 
     def _create_topography(self) -> None:
@@ -191,7 +195,7 @@ class ModelDriver:
         self.model = CDGridPrimitiveEquationModel(self.grid, self.sigma, dycore_config)
 
         self._hyperdiff = HYPERDIFF
-        print(f"  Dycore: {dc.discretization}, dt={DT}s")
+        logger.info(f"  Dycore: {dc.discretization}, dt={DT}s")
 
     def _create_forcing(self) -> None:
         """Load SST/SIC forcing data."""
@@ -262,12 +266,12 @@ class ModelDriver:
         cwv = float(jnp.mean(
             column_water_vapor(self.tracers["q_v"], self.state.p_s.data, self.sigma.dsigma)
         ))
-        print(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
+        logger.info(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
 
     def _create_physics(self) -> None:
         """Build the physics pipeline."""
         self.physics = build_physics_pipeline(self.grid, self.sigma, self.config)
-        print(f"  Physics: {self.config.radiation} + SBM convection")
+        logger.info(f"  Physics: {self.config.radiation} + SBM convection")
 
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, CMIP GHG."""
@@ -321,7 +325,7 @@ class ModelDriver:
             from legoesm.forcing.experiments import ghg_at_year
             co2, ch4, n2o = ghg_at_year(self._experiment, self._start_year)
             self.config = cfg._replace(co2_ppmv=co2, ch4_ppbv=ch4, n2o_ppbv=n2o)
-            print(f"  CMIP: {self._experiment} (year {self._start_year}), "
+            logger.info(f"  CMIP: {self._experiment} (year {self._start_year}), "
                   f"CO2={co2:.1f} ppmv")
 
     def _precompute_external_forcing(self, day, p_s, lat):
@@ -390,7 +394,10 @@ class ModelDriver:
         save_config(amip_cfg, self._output_dir / "experiment_config.json")
 
     def save_checkpoint(self, step: int, day: float) -> None:
-        """Save checkpoint to output directory."""
+        """Save checkpoint to output directory.
+
+        TODO: Migrate to io/restart.py for unified restart API
+        """
         from legoesm.forcing.amip_config import save_checkpoint
         elapsed_day = day - self.config.start_day
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
@@ -400,10 +407,13 @@ class ModelDriver:
             step=step, day=day, config=amip_cfg,
             q_c=self.q_c, q_r=self.q_r,
         )
-        print(f"  Checkpoint: {ckpt_path.name}")
+        logger.info(f"  Checkpoint: {ckpt_path.name}")
 
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
-        """Load state from a checkpoint. Returns (step, day)."""
+        """Load state from a checkpoint. Returns (step, day).
+
+        TODO: Migrate to io/restart.py for unified restart API
+        """
         from legoesm.forcing.amip_config import load_checkpoint
         state, q_v, step, day, _, _, q_c, q_r = load_checkpoint(
             Path(path), self.grid, self.sigma,
@@ -501,7 +511,7 @@ class ModelDriver:
         run_status = "COMPLETED"
         lat_deg_grid = np.degrees(np.asarray(self.grid.lat))
 
-        print(f"\n  Starting: {n_steps_total - start_step} steps, {N_DAYS} days")
+        logger.info(f"Starting: {n_steps_total - start_step} steps, {N_DAYS} days")
 
         # --- JIT warmup ---
         t_jit_start = time.time()
@@ -550,7 +560,7 @@ class ModelDriver:
 
         jax.block_until_ready(self.state.u.data)
         t_jit = time.time() - t_jit_start
-        print(f"  JIT compiled in {t_jit:.1f}s")
+        logger.info(f"  JIT compiled in {t_jit:.1f}s")
 
         # --- Main time loop ---
         t_start = time.time()
@@ -669,14 +679,14 @@ class ModelDriver:
                     lat_deg_grid=lat_deg_grid,
                 )
 
-                print(f"  Day {elapsed_day:6.0f}: T={diag_info['mean_T']:.1f}K, "
+                logger.info(f"  Day {elapsed_day:6.0f}: T={diag_info['mean_T']:.1f}K, "
                       f"precip={diag_info['mean_precip']:.1f}mm/d, "
                       f"max_v={diag_info['max_v']:.1f}m/s")
 
                 # Stability check
                 error = self.diagnostics.check_stability(self.state, elapsed_day)
                 if error:
-                    print(f"  {error}")
+                    logger.warning(f"  {error}")
                     run_status = error
                     break
 
@@ -687,11 +697,11 @@ class ModelDriver:
         # Finalize
         jax.block_until_ready(self.state.u.data)
         total_wall = time.time() - t_start
-        print(f"\n  Done: {total_wall:.1f}s wall time, status={run_status}")
+        logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
 
         self.diagnostics.save(self._output_dir)
         self.save_results(run_status, t_jit, total_wall)
-        print(f"  {self.diagnostics.print_summary()}")
+        logger.info(self.diagnostics.print_summary())
 
         # Final checkpoint
         if checkpoint_interval > 0:
@@ -716,4 +726,4 @@ class ModelDriver:
                 f.write(f"Final <Precip>: {d.precip[-1]:.2f} mm/day\n")
                 f.write(f"Final <CWV>: {d.CWV[-1]:.1f} kg/m2\n")
             f.write(f"\n{d.energy_tracker.summary()}\n")
-        print(f"  Results saved to {self._output_dir}")
+        logger.info(f"  Results saved to {self._output_dir}")

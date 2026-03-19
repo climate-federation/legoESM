@@ -40,9 +40,12 @@ def saturation_mixing_ratio(
     """
     T_c = T - constants.T_freeze  # Celsius
     e_sat = 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
-    # Clip to avoid division by zero
-    denom = jnp.clip(p - e_sat, 1.0, None)
-    return constants.epsilon * e_sat / denom
+    # Clip denominator to avoid division by zero when e_sat >= p
+    denom = jnp.maximum(p - e_sat, 1.0)
+    q_sat = constants.epsilon * e_sat / denom
+    # Cap at 1.0 kg/kg: prevents singularity at low-pressure levels
+    # where e_sat > p (e.g. isothermal 300K init above ~3500 Pa)
+    return jnp.minimum(q_sat, 1.0)
 
 
 def saturation_mixing_ratio_ice(
@@ -69,5 +72,6 @@ def saturation_mixing_ratio_ice(
     e_sat_i = 611.2 * jnp.exp(
         constants.L_s / constants.R_v * (1.0 / constants.T_freeze - 1.0 / T)
     )
-    denom = jnp.clip(p - e_sat_i, 1.0, None)
-    return constants.epsilon * e_sat_i / denom
+    denom = jnp.maximum(p - e_sat_i, 1.0)
+    q_sat_i = constants.epsilon * e_sat_i / denom
+    return jnp.minimum(q_sat_i, 1.0)

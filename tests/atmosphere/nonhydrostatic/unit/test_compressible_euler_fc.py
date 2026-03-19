@@ -10,17 +10,22 @@ from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
-from legoesm.atmosphere.dynamics.compressible_euler_fc import (
-    FCCompressibleEulerModel,
-    FCCompressibleEulerConfig,
-    fc_compressible_euler_slow_tendencies,
-)
-from legoesm.atmosphere.dynamics.compressible_euler_fc_cgrid import (
-    FCCGCompressibleEulerModel,
-    FCCGCompressibleEulerConfig,
-    fc_cgrid_compressible_euler_slow_tendencies,
-)
-from legoesm.core.operators_fc import build_fc_config
+
+# Skip this module if FC-Gram compressible Euler is not available
+try:
+    from legoesm.atmosphere.dynamics.compressible_euler_fc import (
+        FCCompressibleEulerModel,
+        FCCompressibleEulerConfig,
+        fc_compressible_euler_slow_tendencies,
+    )
+    from legoesm.atmosphere.dynamics.compressible_euler_fc_cgrid import (
+        FCCGCompressibleEulerModel,
+        FCCGCompressibleEulerConfig,
+        fc_cgrid_compressible_euler_slow_tendencies,
+    )
+    from legoesm.core.operators_fc import build_fc_config
+except ImportError:
+    pytest.skip("FC-Gram compressible euler models not available", allow_module_level=True)
 
 
 def _rest_state_ce(grid, height_coord):

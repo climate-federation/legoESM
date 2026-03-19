@@ -30,15 +30,20 @@ def __getattr__(name):
             "ocean_tile_response": ocean_tile_response,
         }
         return _map[name]
+    elif name in ("make_mpas_tile_config", "init_mpas_surface_state",
+                  "make_mpas_coupler", "compute_mpas_freshwater"):
+        from legoesm.coupler.mpas_adapter import (
+            make_mpas_tile_config, init_mpas_surface_state,
+            make_mpas_coupler, compute_mpas_freshwater,
+        )
+        _map = {
+            "make_mpas_tile_config": make_mpas_tile_config,
+            "init_mpas_surface_state": init_mpas_surface_state,
+            "make_mpas_coupler": make_mpas_coupler,
+            "compute_mpas_freshwater": compute_mpas_freshwater,
+        }
+        return _map[name]
     raise AttributeError(f"module 'legoesm.coupler' has no attribute {name!r}")
-
-
-from legoesm.coupler.mpas_adapter import (
-    make_mpas_tile_config,
-    init_mpas_surface_state,
-    make_mpas_coupler,
-    compute_mpas_freshwater,
-)
 
 __all__ = [
     "CouplerConfig", "TileConfig",

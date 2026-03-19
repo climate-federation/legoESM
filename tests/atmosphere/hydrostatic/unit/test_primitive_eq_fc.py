@@ -7,16 +7,21 @@ from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
-from legoesm.atmosphere.dynamics.primitive_eq_fc import (
-    FCPrimitiveEquationModel,
-    FCPrimitiveEquationConfig,
-    fc_hydrostatic_tendencies,
-)
-from legoesm.atmosphere.dynamics.primitive_eq_fc_cgrid import (
-    FCCGPrimitiveEquationModel,
-    FCCGPrimitiveEquationConfig,
-)
-from legoesm.core.operators_fc import build_fc_config
+
+# Skip this module if FC-Gram primitive equations are not available
+try:
+    from legoesm.atmosphere.dynamics.primitive_eq_fc import (
+        FCPrimitiveEquationModel,
+        FCPrimitiveEquationConfig,
+        fc_hydrostatic_tendencies,
+    )
+    from legoesm.atmosphere.dynamics.primitive_eq_fc_cgrid import (
+        FCCGPrimitiveEquationModel,
+        FCCGPrimitiveEquationConfig,
+    )
+    from legoesm.core.operators_fc import build_fc_config
+except ImportError:
+    pytest.skip("FC-Gram primitive equation models not available", allow_module_level=True)
 
 
 def _rest_state_pe(grid, sigma_coord, T0=300.0, p_s0=1e5):

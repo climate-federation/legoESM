@@ -9,11 +9,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 
 import jax
 import jax.numpy as jnp
+
+logger = logging.getLogger("legoesm.cli")
 
 
 def main():
@@ -71,20 +74,29 @@ def cmd_run(args):
     """Run a simulation from a config file."""
     from legoesm.config import Config
     from legoesm.core.hardware import apply_hardware_config
+    from legoesm.driver.model_driver import ModelDriver
 
-    config = Config.from_yaml(args.config)
-    hw_runtime = apply_hardware_config(config)
-    print(f"legoESM v0.1.0 | Loaded config from {args.config}")
-    print(f"  Model: {config.get('model.name')}")
-    print(f"  Grid: {config.get('grid.type')} C{config.get('grid.resolution')}")
-    print(f"  Duration: {config.get('time.duration_hours')} hours")
-    print(f"  Backend: {hw_runtime['device_config'].backend}")
-    print(f"  Devices: {hw_runtime['device_config'].n_devices}")
-    print(f"  Distributed: {hw_runtime['distributed']}")
-    print(f"  Precision policy: {hw_runtime['precision']}")
+    try:
+        config = Config.from_yaml(args.config)
+        hw_runtime = apply_hardware_config(config)
+        logger.info(f"legoESM v0.1.0 | Loaded config from {args.config}")
+        logger.info(f"  Model: {config.get('model.name')}")
+        logger.info(f"  Grid: {config.get('grid.type')} C{config.get('grid.resolution')}")
+        logger.info(f"  Duration: {config.get('time.duration_hours')} hours")
+        logger.info(f"  Backend: {hw_runtime['device_config'].backend}")
+        logger.info(f"  Devices: {hw_runtime['device_config'].n_devices}")
+        logger.info(f"  Distributed: {hw_runtime['distributed']}")
+        logger.info(f"  Precision policy: {hw_runtime['precision']}")
 
-    # TODO: Build and run model from config
-    print("\nFull run from config not yet implemented. Use 'legoesm test' for now.")
+        logger.info("Initializing model driver...")
+        driver = ModelDriver(config)
+        driver.setup()
+        logger.info("Running simulation...")
+        driver.run()
+        logger.info("Simulation completed successfully.")
+    except Exception as e:
+        logger.error(f"Error running simulation: {e}")
+        sys.exit(1)
 
 
 def cmd_test(args):
@@ -97,18 +109,17 @@ def cmd_test(args):
     )
     from legoesm.core.conservation import compute_conservation_diagnostics
 
-    print(f"legoESM v0.1.0 | Williamson Test Case {args.case}")
-    print(f"  Resolution: C{args.resolution} (~{6.371229e3 / args.resolution:.0f} km)")
-    print(f"  Duration: {args.days} days")
-    print(f"  Time step: {args.dt} s")
-    print(f"  Backend: {jax.default_backend()}")
-    print(f"  Devices: {jax.devices()}")
-    print()
+    logger.info(f"legoESM v0.1.0 | Williamson Test Case {args.case}")
+    logger.info(f"  Resolution: C{args.resolution} (~{6.371229e3 / args.resolution:.0f} km)")
+    logger.info(f"  Duration: {args.days} days")
+    logger.info(f"  Time step: {args.dt} s")
+    logger.info(f"  Backend: {jax.default_backend()}")
+    logger.info(f"  Devices: {jax.devices()}")
 
     # Create grid
-    print("Creating cubed-sphere grid...", end=" ", flush=True)
+    logger.info("Creating cubed-sphere grid...")
     grid = create_cubed_sphere(args.resolution)
-    print(f"done. ({grid.n_cells} cells)")
+    logger.info(f"done. ({grid.n_cells} cells)")
 
     # Create initial condition
     if args.case == 2:
@@ -116,7 +127,7 @@ def cmd_test(args):
     elif args.case == 5:
         state = williamson_test5(grid)
     else:
-        print(f"Unknown test case: {args.case}")
+        logger.error(f"Unknown test case: {args.case}")
         sys.exit(1)
 
     # Create model with hyperdiffusion for stability
@@ -133,7 +144,7 @@ def cmd_test(args):
     n_steps = int(args.days * 86400 / args.dt)
     diag_interval = max(1, n_steps // 20)  # ~20 diagnostic outputs
 
-    print(f"Integrating {n_steps} steps...")
+    logger.info(f"Integrating {n_steps} steps...")
     diagnostics = [compute_conservation_diagnostics(state, grid)]
 
     t_start = time.time()
@@ -146,30 +157,30 @@ def cmd_test(args):
             progress = (i + 1) / n_steps * 100
             mass_err = abs(float(diag['total_mass'] - diagnostics[0]['total_mass']))
             energy_err = abs(float(diag['total_energy'] - diagnostics[0]['total_energy']))
-            print(f"  Step {i+1:6d}/{n_steps} ({progress:5.1f}%) | "
+            logger.info(f"  Step {i+1:6d}/{n_steps} ({progress:5.1f}%) | "
                   f"Mass err: {mass_err:.2e} | Energy err: {energy_err:.2e}")
 
     wall_time = time.time() - t_start
-    print(f"\nCompleted in {wall_time:.1f}s ({n_steps/wall_time:.0f} steps/s)")
+    logger.info(f"Completed in {wall_time:.1f}s ({n_steps/wall_time:.0f} steps/s)")
 
     # Error norms (Test 2 only)
     if args.case == 2:
         exact = williamson_test2_exact(grid, args.days * 86400)
         norms = compute_error_norms(state, exact, grid)
-        print(f"\nError norms (height field):")
-        print(f"  L1:   {norms['l1']:.6e}")
-        print(f"  L2:   {norms['l2']:.6e}")
-        print(f"  Linf: {norms['linf']:.6e}")
+        logger.info("Error norms (height field):")
+        logger.info(f"  L1:   {norms['l1']:.6e}")
+        logger.info(f"  L2:   {norms['l2']:.6e}")
+        logger.info(f"  Linf: {norms['linf']:.6e}")
 
     # Conservation summary
     mass_0 = float(diagnostics[0]['total_mass'])
     mass_f = float(diagnostics[-1]['total_mass'])
     energy_0 = float(diagnostics[0]['total_energy'])
     energy_f = float(diagnostics[-1]['total_energy'])
-    print(f"\nConservation:")
-    print(f"  Mass:   initial={mass_0:.6e}, final={mass_f:.6e}, "
+    logger.info("Conservation:")
+    logger.info(f"  Mass:   initial={mass_0:.6e}, final={mass_f:.6e}, "
           f"relative change={(mass_f-mass_0)/mass_0:.2e}")
-    print(f"  Energy: initial={energy_0:.6e}, final={energy_f:.6e}, "
+    logger.info(f"  Energy: initial={energy_0:.6e}, final={energy_f:.6e}, "
           f"relative change={(energy_f-energy_0)/energy_0:.2e}")
 
     # Visualization
@@ -193,9 +204,9 @@ def cmd_test(args):
                 title=f"Williamson Test {args.case}: Conservation",
                 save_path=os.path.join(args.output, f"williamson{args.case}_conservation.png"),
             )
-            print(f"\nPlots saved to {args.output}/")
+            logger.info(f"Plots saved to {args.output}/")
         except ImportError:
-            print("\nSkipping plots (matplotlib/cartopy not available)")
+            logger.info("Skipping plots (matplotlib/cartopy not available)")
 
 
 def cmd_benchmark(args):
@@ -204,12 +215,11 @@ def cmd_benchmark(args):
     from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel
     from tests.test_cases.williamson import williamson_test2
 
-    print(f"legoESM v0.1.0 | Benchmark")
-    print(f"  Resolution: C{args.resolution}")
-    print(f"  Steps: {args.n_steps}")
-    print(f"  Backend: {jax.default_backend()}")
-    print(f"  Devices: {jax.devices()}")
-    print()
+    logger.info(f"legoESM v0.1.0 | Benchmark")
+    logger.info(f"  Resolution: C{args.resolution}")
+    logger.info(f"  Steps: {args.n_steps}")
+    logger.info(f"  Backend: {jax.default_backend()}")
+    logger.info(f"  Devices: {jax.devices()}")
 
     grid = create_cubed_sphere(args.resolution)
     model = ShallowWaterModel(grid)
@@ -219,20 +229,20 @@ def cmd_benchmark(args):
     if args.multi_gpu:
         from legoesm.parallel.mesh import create_device_mesh, shard_pytree, replicate_pytree
         dev_config = create_device_mesh()
-        print(f"  Sharding: {dev_config.n_devices} devices, "
+        logger.info(f"  Sharding: {dev_config.n_devices} devices, "
               f"face-parallel on {dev_config.backend}")
         state = shard_pytree(state, dev_config)
         grid = replicate_pytree(grid, dev_config)
 
     # Warmup (JIT compilation)
-    print("Warmup (JIT compilation)...", end=" ", flush=True)
+    logger.info("Warmup (JIT compilation)...")
     state_warm = model.step(state, args.dt)
     # Force evaluation
     jax.block_until_ready(state_warm.h.data)
-    print("done.")
+    logger.info("done.")
 
     # Timed run
-    print(f"Running {args.n_steps} steps...", end=" ", flush=True)
+    logger.info(f"Running {args.n_steps} steps...")
     t_start = time.time()
     for i in range(args.n_steps):
         state = model.step(state, args.dt)
@@ -242,12 +252,12 @@ def cmd_benchmark(args):
     throughput = args.n_steps / wall_time
     sim_days_per_hour = throughput * args.dt / 86400 * 3600
 
-    print(f"done.")
-    print(f"\nResults:")
-    print(f"  Wall time: {wall_time:.2f}s")
-    print(f"  Throughput: {throughput:.1f} steps/s")
-    print(f"  Simulated days per wall-clock hour: {sim_days_per_hour:.1f}")
-    print(f"  Time per step: {wall_time/args.n_steps*1000:.2f} ms")
+    logger.info("done.")
+    logger.info("Results:")
+    logger.info(f"  Wall time: {wall_time:.2f}s")
+    logger.info(f"  Throughput: {throughput:.1f} steps/s")
+    logger.info(f"  Simulated days per wall-clock hour: {sim_days_per_hour:.1f}")
+    logger.info(f"  Time per step: {wall_time/args.n_steps*1000:.2f} ms")
 
 
 if __name__ == "__main__":

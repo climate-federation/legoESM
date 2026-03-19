@@ -34,9 +34,13 @@ dependencies = [
     "numpy>=1.26",
     "netCDF4>=1.6",
     "dataclasses-json>=0.6",
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]
+ml = ["imageio>=2.30", "equinox>=0.11", "optax>=0.2"]
+mesh = ["pymetis>=1.2"]
+viz = ["matplotlib>=3.9", "cartopy>=0.23"]
 data = [
     "gcsfs>=2024.2",
     "fsspec>=2024.2",

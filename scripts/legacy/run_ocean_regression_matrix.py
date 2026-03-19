@@ -79,6 +79,7 @@ def _build_matrix(args, output_root: Path) -> list[dict]:
             "--dt", str(args.std_dt),
             "--days", str(args.std_days),
             "--test", "all",
+            "--discretization", "cdgrid",
             "--output", str(outdir),
         ]
         if args.runtime_checks:
