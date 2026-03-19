@@ -18,6 +18,7 @@ DEFAULT_CONFIG = {
         "name": "legoESM",
         "type": "atmosphere_only",
     },
+    "mode": "atmosphere",  # "atmosphere", "coupled_climate", "research_test"
     "grid": {
         "type": "cubed_sphere",
         "resolution": 48,          # N cells per face edge (C48 ~ 200km)
@@ -139,6 +140,73 @@ class Config:
         """Save configuration to a YAML file."""
         with open(path, "w") as f:
             yaml.dump(self._data, f, default_flow_style=False, sort_keys=False)
+
+    def to_experiment_config(self):
+        """Convert this YAML-based Config to an ExperimentConfig for ModelDriver.
+
+        This is the canonical bridge between the user-facing YAML config
+        and the structured NamedTuple consumed by the driver.
+        """
+        from legoesm.driver.config import (
+            ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
+        )
+
+        d = self._data
+
+        grid = GridConfig(
+            grid_type=d.get("grid", {}).get("type", "cubed_sphere"),
+            resolution=d.get("grid", {}).get("resolution", 48),
+            nlev=d.get("grid", {}).get("n_levels", 40),
+            vertical_coord=d.get("grid", {}).get("vertical_coord", "hybrid"),
+            p_top_Pa=d.get("grid", {}).get("p_top_Pa", 200.0),
+            stretching=d.get("grid", {}).get("stretching", 2.0),
+        )
+
+        atm = d.get("atmosphere", {})
+        dycore = DycoreConfig(
+            model_type=atm.get("dynamics", "hydrostatic"),
+            discretization=atm.get("discretization", "centered"),
+            dt=float(atm.get("dt_seconds", 600)),
+            hyperdiff_scale=float(atm.get("hyperdiffusion_coeff", 1.0)),
+            conservation_fixer=d.get("conservation", {}).get("fix_mass", True),
+            fix_mass=d.get("conservation", {}).get("fix_mass", True),
+        )
+
+        time_cfg = d.get("time", {})
+        output_cfg = d.get("output", {})
+        output = OutputConfig(
+            output_dir=output_cfg.get("path", ""),
+            diag_days=max(1, int(time_cfg.get("output_interval_hours", 6) / 24)),
+            checkpoint_days=int(output_cfg.get("checkpoint_days", 0)),
+            monthly_means=bool(output_cfg.get("monthly_means", False)),
+            cmip_output=bool(output_cfg.get("cmip_output", False)),
+            clear_sky_diag=bool(output_cfg.get("clear_sky_diag", False)),
+            checkpoint_format=output_cfg.get("checkpoint_format", "npz"),
+        )
+
+        # Integration time
+        duration_hours = time_cfg.get("duration_hours", 120)
+        days = int(duration_hours / 24)
+
+        # Build ExperimentConfig with available overrides
+        forcing = d.get("forcing", {})
+        radiation = d.get("radiation", {})
+
+        kwargs = dict(
+            grid=grid,
+            dycore=dycore,
+            output=output,
+            days=days,
+            start_day=float(time_cfg.get("start_day", 0.0)),
+            dataset=forcing.get("dataset", "analytical"),
+            forcing_path=forcing.get("path", ""),
+            radiation=radiation.get("scheme", atm.get("radiation", "gray")),
+            T_init=float(d.get("surface", {}).get("T_init", 300.0)),
+            RH_init=float(d.get("surface", {}).get("RH_init", 0.7)),
+            distributed=bool(d.get("hardware", {}).get("parallelism", {}).get("distributed", False)),
+        )
+
+        return ExperimentConfig(**kwargs)
 
     def __repr__(self) -> str:
         return f"Config({self._data})"

@@ -76,6 +76,12 @@ def cmd_run(args):
     from legoesm.core.hardware import apply_hardware_config
     from legoesm.driver.model_driver import ModelDriver
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
     try:
         config = Config.from_yaml(args.config)
         hw_runtime = apply_hardware_config(config)
@@ -88,14 +94,17 @@ def cmd_run(args):
         logger.info(f"  Distributed: {hw_runtime['distributed']}")
         logger.info(f"  Precision policy: {hw_runtime['precision']}")
 
+        # Bridge from YAML Config to structured ExperimentConfig
+        experiment_config = config.to_experiment_config()
+
         logger.info("Initializing model driver...")
-        driver = ModelDriver(config)
+        driver = ModelDriver(experiment_config)
         driver.setup()
         logger.info("Running simulation...")
-        driver.run()
-        logger.info("Simulation completed successfully.")
+        status = driver.run()
+        logger.info(f"Simulation completed: {status}")
     except Exception as e:
-        logger.error(f"Error running simulation: {e}")
+        logger.error(f"Error running simulation: {e}", exc_info=True)
         sys.exit(1)
 
 
@@ -108,6 +117,12 @@ def cmd_test(args):
         compute_error_norms,
     )
     from legoesm.core.conservation import compute_conservation_diagnostics
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
     logger.info(f"legoESM v0.1.0 | Williamson Test Case {args.case}")
     logger.info(f"  Resolution: C{args.resolution} (~{6.371229e3 / args.resolution:.0f} km)")
@@ -214,6 +229,12 @@ def cmd_benchmark(args):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel
     from tests.test_cases.williamson import williamson_test2
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
     logger.info(f"legoESM v0.1.0 | Benchmark")
     logger.info(f"  Resolution: C{args.resolution}")

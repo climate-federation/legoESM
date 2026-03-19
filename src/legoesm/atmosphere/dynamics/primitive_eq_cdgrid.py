@@ -93,6 +93,8 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Typical value: 0.5 * c_grav^2 * dt / dx^2 where c_grav ~ 300 m/s.
         # This is a simplified semi-implicit treatment that selectively
         # damps divergent modes without a full barotropic solve.
+    T_min: float = 50.0            # Temperature floor [K] (positivity protection)
+    p_floor: float = 100.0         # Pressure floor [Pa] for adiabatic heating (limits 1/p)
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
@@ -133,6 +135,8 @@ def cdgrid_hydrostatic_tendencies(
     R_d = constants.R_d
     kappa = constants.kappa
 
+    # Positivity protections
+    T = jnp.maximum(T, config.T_min)
     p_s = jnp.clip(p_s, 100.0, 2.0e6)
 
     # --- 1. Pressure at full levels ---
@@ -264,7 +268,8 @@ def cdgrid_hydrostatic_tendencies(
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
     else:
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
-    adiabatic = kappa * T * omega / p_full
+    p_adiab = jnp.maximum(p_full, config.p_floor)
+    adiabatic = kappa * T * omega / p_adiab
 
     # Material derivative of ln(p_s)
     v_dot_grad_lnps = u * dln_ps_dx[..., None] + v * dln_ps_dy[..., None]

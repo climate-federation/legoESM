@@ -4,7 +4,7 @@ Provides save/load of atmospheric state to/from Zarr stores with Zstd
 compression. Backward-compatible with existing .npz checkpoints
 via auto-detection in ``load_checkpoint_auto``.
 
-Uses zarr v3 API (zarr >= 3.0).
+Compatible with zarr v2 (>= 2.18) and v3 (>= 3.0).
 """
 from __future__ import annotations
 
@@ -73,11 +73,23 @@ def save_checkpoint_zarr(
         Zarr v3 codec. Default: Zstd(level=3).
     """
     import zarr
-    from zarr.codecs import ZstdCodec
 
     path = Path(path)
+
+    # Zarr v2/v3 compatible compressor
     if compressor is None:
-        compressor = ZstdCodec(level=3)
+        try:
+            # zarr v3 API
+            from zarr.codecs import ZstdCodec
+            compressor = ZstdCodec(level=3)
+            _use_v3 = True
+        except ImportError:
+            # zarr v2 API
+            from numcodecs import Zstd
+            compressor = Zstd(level=3)
+            _use_v3 = False
+    else:
+        _use_v3 = hasattr(compressor, '__class__') and 'Codec' in type(compressor).__name__
 
     root = zarr.open_group(str(path), mode="w")
 
@@ -100,12 +112,16 @@ def save_checkpoint_zarr(
             arrays[f"diag_{k}"] = np.asarray(v)
 
     for name, arr in arrays.items():
-        root.create_array(
-            name,
+        kwargs = dict(
+            name=name,
             data=arr,
             chunks=_auto_chunks(arr.shape),
-            compressors=compressor,
         )
+        if _use_v3:
+            kwargs["compressors"] = compressor
+        else:
+            kwargs["compressor"] = compressor
+        root.create_dataset(**kwargs) if not _use_v3 else root.create_array(**kwargs)
 
     # Metadata as root attributes
     root.attrs["step"] = int(step)
@@ -145,15 +161,28 @@ def load_checkpoint_zarr(
     from legoesm.core.state import HydrostaticState
 
     path = Path(path)
-    root = zarr.open_consolidated(str(path), mode="r")
+
+    # Try consolidated metadata first, fall back to regular open
+    try:
+        root = zarr.open_consolidated(str(path), mode="r")
+    except Exception:
+        root = zarr.open_group(str(path), mode="r")
+
+    # v2/v3 compatible key iteration
+    def _array_keys(group):
+        if hasattr(group, 'array_keys'):
+            return list(group.array_keys())
+        return [k for k in group.keys() if hasattr(group[k], 'shape')]
+
+    array_names = _array_keys(root)
 
     if lazy:
-        arrays = {k: root[k] for k in root.array_keys()}
+        arrays = {k: root[k] for k in array_names}
         step = int(root.attrs["step"])
         day = float(root.attrs["day"])
         config_str = root.attrs.get("config_json", "{}")
         config = config_from_dict(json.loads(config_str))
-        diag = {k[5:]: root[k] for k in root.array_keys() if k.startswith("diag_")}
+        diag = {k[5:]: root[k] for k in array_names if k.startswith("diag_")}
         q_c = root["q_c"] if "q_c" in root else None
         q_r = root["q_r"] if "q_r" in root else None
         return arrays, step, day, config, diag, q_c, q_r
@@ -183,7 +212,7 @@ def load_checkpoint_zarr(
     config = config_from_dict(json.loads(config_str))
 
     diag_accumulators = {}
-    for k in root.array_keys():
+    for k in array_names:
         if k.startswith("diag_"):
             arr = root[k]
             diag_accumulators[k[5:]] = arr[()] if arr.ndim == 0 else arr[:]

@@ -39,6 +39,8 @@ class DiagnosticCollector:
         Track clear-sky radiation diagnostics.
     n_days : int
         Total simulation days (for snapshot selection).
+    output_dir : str or Path
+        Output directory for diagnostics and CMOR files.
     """
 
     def __init__(
@@ -50,6 +52,7 @@ class DiagnosticCollector:
         cmip_output: bool = False,
         clear_sky_diag: bool = False,
         n_days: int = 200,
+        output_dir: str | Path = "",
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
@@ -87,8 +90,9 @@ class DiagnosticCollector:
         self.cf_writer = None
         if cmip_output:
             from legoesm.io.cmor_output import CFWriter
+            cmor_dir = str(Path(output_dir) / "cmor") if output_dir else "cmor"
             self.cf_writer = CFWriter(
-                output_dir="cmor",
+                output_dir=cmor_dir,
                 experiment_id="amip",
                 model_id="legoESM-1-0",
                 freq="mon",

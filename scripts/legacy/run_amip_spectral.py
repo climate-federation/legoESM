@@ -282,6 +282,7 @@ pe_config = SpectralPEConfig(
     hyperdiff_order=2,
     time_integrator="ssp_rk54",
     semi_implicit=False,
+    p_floor=200.0,  # Prevent adiabatic heating 1/p singularity at model top
 )
 model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
 

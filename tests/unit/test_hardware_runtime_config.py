@@ -154,7 +154,7 @@ class TestApplyHardwareConfig:
             }
         )
         with patch("legoesm.core.hardware.apply_hardware_config") as apply_hw, patch(
-            "legoesm.atmosphere.dynamics.ShallowWaterModel",
+            "legoesm.atmosphere.dynamics.CDGridShallowWaterModel",
             return_value=object(),
         ):
             create_model("shallow_water", legoesm_config=cfg, grid=object())

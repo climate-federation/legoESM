@@ -61,6 +61,8 @@ class FCPrimitiveEquationConfig(NamedTuple):
     g: float = constants.g
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
+    T_min: float = 50.0            # Temperature floor [K]
+    p_floor: float = 100.0         # Pressure floor [Pa] for adiabatic heating
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
@@ -136,6 +138,9 @@ def fc_hydrostatic_tendencies(
     p_s = state.p_s.data   # (6, n, n)
     phis = state.phis.data
 
+    # Positivity protections
+    T = jnp.maximum(T, config.T_min)
+
     R_d = constants.R_d
     kappa = constants.kappa
     dsigma = sigma_coord.dsigma
@@ -198,7 +203,8 @@ def fc_hydrostatic_tendencies(
     horiz_adv_T = fc_scalar_advection_3d(T, u, v, grid, fc_config)
 
     omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
-    adiabatic = kappa * T * omega / p_full
+    p_adiab = jnp.maximum(p_full, config.p_floor)
+    adiabatic = kappa * T * omega / p_adiab
     v_dot_grad_lnps = u * dln_ps_dx[..., None] + v * dln_ps_dy[..., None]
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 

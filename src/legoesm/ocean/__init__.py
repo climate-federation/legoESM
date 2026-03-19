@@ -18,10 +18,6 @@ from legoesm.ocean.dynamics.spectral_ocean_pe import (
     SpectralOceanModel,
     rest_state_spectral_ocean,
 )
-from legoesm.ocean.dynamics.sfno_ocean import (
-    SFNOOceanModel,
-    SFNOOceanConfig,
-)
 from legoesm.ocean.state import (
     OceanState,
     OceanTendencies,
@@ -174,3 +170,13 @@ __all__ = [
     "virtual_salt_flux",
     "freshwater_from_coupler",
 ]
+
+
+def __getattr__(name):
+    """Lazy imports for ML-dependent ocean components."""
+    _sfno_names = {"SFNOOceanModel", "SFNOOceanConfig"}
+    if name in _sfno_names:
+        from legoesm.ocean.dynamics.sfno_ocean import SFNOOceanModel, SFNOOceanConfig
+        _map = {"SFNOOceanModel": SFNOOceanModel, "SFNOOceanConfig": SFNOOceanConfig}
+        return _map[name]
+    raise AttributeError(f"module 'legoesm.ocean' has no attribute {name!r}")

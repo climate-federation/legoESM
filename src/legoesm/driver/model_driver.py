@@ -181,7 +181,16 @@ class ModelDriver:
         N = self.config.grid.resolution
         dx_min = float(self.grid.dx.min()) / 2.0 if hasattr(self.grid, 'dx') else 1e5
         DT = dc.dt
-        HYPERDIFF = dc.hyperdiff_scale * (48 / N) ** 4
+
+        # Physical hyperdiffusion: e-folding time for grid-scale noise
+        # nu_4 = dx^4 / tau_efold, with 24-hour e-folding (conservative)
+        tau_efold = 24.0 * 3600.0
+        HYPERDIFF = dc.hyperdiff_scale * dx_min ** 4 / tau_efold
+
+        # Divergence damping: damps external gravity wave mode
+        # nu_div = scale * c_grav * dx / (2*pi)
+        c_grav = 300.0
+        div_damp = dc.div_damp_scale * c_grav * dx_min / (2.0 * 3.14159)
 
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
@@ -189,6 +198,7 @@ class ModelDriver:
         dycore_config = CDGridPrimitiveEquationConfig(
             A_h=0.05 * dx_min ** 2 / DT,
             hyperdiff_coeff=HYPERDIFF, hyperdiff_ps_coeff=0.0,
+            div_damp_coeff=div_damp,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
         )
@@ -371,6 +381,7 @@ class ModelDriver:
             cmip_output=self.config.output.cmip_output,
             clear_sky_diag=self.config.output.clear_sky_diag,
             n_days=self.config.days,
+            output_dir=self._output_dir,
         )
 
     def _create_friction(self) -> None:
@@ -389,41 +400,61 @@ class ModelDriver:
 
     def _save_config(self) -> None:
         """Save experiment config to output directory."""
+        import json
+        # Save structured config as JSON
+        config_dict = self.config._asdict()
+        # Convert nested NamedTuples to dicts
+        for key, val in config_dict.items():
+            if hasattr(val, '_asdict'):
+                config_dict[key] = val._asdict()
+        with open(self._output_dir / "experiment_config.json", "w") as f:
+            json.dump(config_dict, f, indent=2, default=str)
+
+        # Also save AMIP-format for backward compatibility
         amip_cfg = self.config.to_amip_config()
         from legoesm.forcing.amip_config import save_config
-        save_config(amip_cfg, self._output_dir / "experiment_config.json")
+        save_config(amip_cfg, self._output_dir / "amip_config.json")
 
     def save_checkpoint(self, step: int, day: float) -> None:
-        """Save checkpoint to output directory.
-
-        TODO: Migrate to io/restart.py for unified restart API
-        """
-        from legoesm.forcing.amip_config import save_checkpoint
+        """Save checkpoint to output directory using unified restart API."""
         elapsed_day = day - self.config.start_day
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
+
+        backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
+
+        # Use the AMIP config for serialization (backward compatible)
         amip_cfg = self.config.to_amip_config()
-        save_checkpoint(
-            path=ckpt_path, state=self.state, q_v=self.q_v,
-            step=step, day=day, config=amip_cfg,
-            q_c=self.q_c, q_r=self.q_r,
+        save_restart(
+            path=ckpt_path,
+            state=self.state,
+            q_v=self.q_v,
+            step=step,
+            day=day,
+            config=amip_cfg,
+            q_c=self.q_c,
+            q_r=self.q_r,
+            backend=backend,
         )
         logger.info(f"  Checkpoint: {ckpt_path.name}")
 
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
-        """Load state from a checkpoint. Returns (step, day).
+        """Load state from a checkpoint using unified restart API.
 
-        TODO: Migrate to io/restart.py for unified restart API
+        Returns (step, day).
         """
-        from legoesm.forcing.amip_config import load_checkpoint
-        state, q_v, step, day, _, _, q_c, q_r = load_checkpoint(
-            Path(path), self.grid, self.sigma,
+        result = load_restart(
+            Path(path), self.grid, self.sigma, strict=False,
         )
+        state, q_v, step, day, _, _, q_c, q_r, metadata = result
         self.state = state
         self.q_v = q_v
         if q_c is not None:
             self.q_c = q_c
         if q_r is not None:
             self.q_r = q_r
+        if metadata:
+            logger.info(f"  Loaded restart: step={step}, day={day}, "
+                       f"digest={metadata.state_digest[:16]}...")
         return step, day
 
     def run(self, start_step: int = 0, start_day: float | None = None) -> str:

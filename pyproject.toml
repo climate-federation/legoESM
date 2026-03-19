@@ -39,7 +39,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ml = ["imageio>=2.30", "equinox>=0.11", "optax>=0.2"]
-mesh = ["pymetis>=1.2"]
+mesh = ["pymetis>=1.2", "scipy>=1.10"]
 viz = ["matplotlib>=3.9", "cartopy>=0.23"]
 data = [
     "gcsfs>=2024.2",
@@ -53,11 +53,15 @@ mpi = [
 dev = [
     "pytest>=8.0",
     "pytest-xdist",
+    "pytest-timeout",
     "ruff",
     "mypy",
     "pre-commit",
 ]
 docs = ["sphinx", "myst-parser"]
+all = [
+    "legoesm[ml,mesh,viz,data,dev,docs]",
+]
 
 [project.scripts]
 legoesm = "legoesm.cli:main"
