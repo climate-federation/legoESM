@@ -162,6 +162,83 @@ def weighted_mae(
     return jnp.mean(abs_err * w)
 
 
+def empirical_crps(
+    ensemble: jnp.ndarray,
+    target: jnp.ndarray,
+) -> jnp.ndarray:
+    """Empirical CRPS field for a finite ensemble.
+
+    Parameters
+    ----------
+    ensemble : array, shape (n_members, ..., n_lat, n_lon, n_channels)
+        Ensemble predictions.
+    target : array, shape (..., n_lat, n_lon, n_channels)
+        Deterministic target field.
+
+    Returns
+    -------
+    array
+        CRPS evaluated pointwise, retaining all non-ensemble dimensions.
+    """
+    obs_term = jnp.mean(jnp.abs(ensemble - target[None, ...]), axis=0)
+    pairwise = jnp.abs(ensemble[:, None, ...] - ensemble[None, :, ...])
+    return obs_term - 0.5 * jnp.mean(pairwise, axis=(0, 1))
+
+
+def almost_fair_crps(
+    ensemble: jnp.ndarray,
+    target: jnp.ndarray,
+    *,
+    alpha: float = 0.95,
+) -> jnp.ndarray:
+    """Almost-fair CRPS field for a finite ensemble.
+
+    This follows the finite-ensemble adjustment used in the referenced
+    stochastic S2S literature: it reduces the small-ensemble bias in the
+    pairwise spread term while remaining simple to evaluate from samples.
+
+    Parameters
+    ----------
+    ensemble : array, shape (n_members, ..., n_lat, n_lon, n_channels)
+        Ensemble predictions.
+    target : array, shape (..., n_lat, n_lon, n_channels)
+        Deterministic target field.
+    alpha : float, default=0.95
+        Finite-ensemble adjustment factor. Values near 1.0 recover a
+        near-fair ensemble score while remaining numerically stable for
+        small ensemble sizes.
+
+    Returns
+    -------
+    array
+        Pointwise almost-fair CRPS.
+    """
+    n_members = ensemble.shape[0]
+    if n_members <= 1:
+        return jnp.abs(ensemble[0] - target)
+
+    obs_term = jnp.mean(jnp.abs(ensemble - target[None, ...]), axis=0)
+    pairwise_sum = jnp.sum(
+        jnp.abs(ensemble[:, None, ...] - ensemble[None, :, ...]),
+        axis=(0, 1),
+    )
+    coeff = (n_members - 1 + alpha) / (2.0 * n_members * n_members * (n_members - 1))
+    return obs_term - coeff * pairwise_sum
+
+
+def area_weighted_afcrps(
+    ensemble: jnp.ndarray,
+    target: jnp.ndarray,
+    weights: jnp.ndarray,
+    *,
+    alpha: float = 0.95,
+) -> jnp.ndarray:
+    """Area-weighted almost-fair CRPS averaged over all non-ensemble dimensions."""
+    crps = almost_fair_crps(ensemble, target, alpha=alpha)
+    w = weights[:, None, None]
+    return jnp.mean(crps * w)
+
+
 def spectral_loss(
     pred_hat: jnp.ndarray,
     target_hat: jnp.ndarray,
