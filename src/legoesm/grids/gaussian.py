@@ -38,6 +38,29 @@ class GaussianGrid(NamedTuple):
     """Gaussian grid with precomputed spectral transform matrices.
 
     All arrays are JAX arrays (float64 or complex128).
+
+    Memory Scaling
+    ~~~~~~~~~~~~~~
+    The grid stores full Legendre polynomial matrices in memory. For a spectral
+    truncation with n_sh spectral coefficients and n_lat latitude points:
+
+    - Each Legendre matrix (Pnm, Hnm, Pnm_oc2, Dnm) takes ~8 * n_lat * n_sh bytes
+      (float64). Plus their weighted versions (wPnm, wHnm, wPnm_oc2, wDnm), which
+      are also ~8 * n_lat * n_sh bytes each.
+
+    - Total: ~8 * n_lat * n_sh * 8 = ~64 * n_lat * n_sh bytes per grid.
+
+    For standard truncations:
+
+    - **T170** (n_max=170): n_sh ≈ 14,706, typical n_lat ≈ 512 (quadratic dealiasing)
+      → ~480 MB per grid instance.
+
+    - **T340** (n_max=340): n_sh ≈ 58,366, typical n_lat ≈ 1024
+      → ~4.8 GB per grid instance.
+
+    On multi-process runs (e.g., 8-GPU system with MPI), each process loads its own
+    grid copy, so total memory usage scales roughly as (# processes) × (# grids) ×
+    memory-per-grid. Use grid caching / singleton patterns in large distributed runs.
     """
     n_lat: int              # Number of latitude points
     n_lon: int              # Number of longitude points
@@ -139,6 +162,14 @@ def create_gaussian_grid(
         legoESM global configuration. If provided, the
         ``atmosphere.spectral.allow_unsupported`` value is used
         (overrides *allow_unsupported_backend*).
+
+    Warnings
+    --------
+    Memory usage scales quadratically with truncation level. At high truncations
+    (n_max ≥ 340), expect ~4+ GB of memory per grid instance (see GaussianGrid
+    "Memory Scaling" section for details). In distributed MPI runs with many
+    processes, consider caching grid instances or implementing lazy loading
+    strategies if memory becomes a bottleneck.
     """
     # Extract allow_unsupported from global config if provided
     if legoesm_config is not None:

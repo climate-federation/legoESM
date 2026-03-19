@@ -36,6 +36,21 @@ single send buffer, reducing MPI messages from ~4 per face to ~2-3
 per rank.
 
 Sub-face tiling mode: one sendrecv per edge direction (4 total).
+
+TODO: Non-blocking MPI Support
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Currently all halo exchanges use blocking ``sendrecv`` via ``mpi4jax``.
+To enable true asynchronous communication overlap, consider:
+
+1. **mpi4jax non-blocking support**: Replace blocking ``sendrecv`` with
+   ``Isend``/``Irecv`` once ``mpi4jax`` exposes these primitives.
+
+2. **JAX-native collective permute**: Use ``jax.lax.ppermute`` for
+   device-to-device communication on multi-GPU/TPU systems. This avoids
+   MPI entirely and integrates natively with XLA's compiler stack.
+
+See :func:`jax_native_halo_exchange` in :mod:`legoesm.parallel.async_halo`
+for a placeholder implementation demonstrating the API and fallback strategy.
 """
 
 from __future__ import annotations

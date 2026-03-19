@@ -6,7 +6,9 @@ jit, grad, vmap, scan, and checkpoint.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import NamedTuple, Protocol, runtime_checkable
+
+import jax
 
 from legoesm.core.field import Field
 
@@ -72,12 +74,17 @@ class HydrostaticState(NamedTuple):
     phis : Field
         Surface geopotential [m^2/s^2]. Static (not time-stepped).
         Shape (6, n, n).
+    tracers : dict[str, Field] | None
+        Tracer mixing ratios as a dictionary. Keys are tracer names
+        (e.g., "q_v", "q_c", "q_r"). Values are Fields with shape
+        (6, n, n, nlev). None when tracers are not in use.
     """
     u: Field
     v: Field
     T: Field
     p_s: Field
     phis: Field
+    tracers: dict[str, Field] | None = None
 
 
 class HydrostaticTendencies(NamedTuple):
@@ -91,6 +98,44 @@ class HydrostaticTendencies(NamedTuple):
     dT_dt: Field
     dp_s_dt: Field
     dphis_dt: Field
+
+
+class PhysicsState(NamedTuple):
+    """Prognostic physics state carried across timesteps.
+
+    All fields are optional (None when the corresponding scheme is inactive).
+    Registered as a JAX pytree so it can be checkpointed, vmapped, and
+    passed through jax.lax.scan.
+    """
+    tke: jax.Array | None = None              # Turbulent kinetic energy (ncol, nlev)
+    conv_mass_flux: jax.Array | None = None   # Convective mass flux (ncol,)
+    conv_prog: jax.Array | None = None        # Convective prognostic state
+    gwd_wave_action: jax.Array | None = None  # Gravity wave drag spectrum (ncol, nlev, n_wave)
+    clubb_moments: jax.Array | None = None    # CLUBB higher-order moments (ncol, nlev, 5)
+    radiation_tend: jax.Array | None = None   # Held radiation tendencies for sub-cycling
+
+
+# ==============================================================================
+# Physics Module Protocol
+# ==============================================================================
+
+@runtime_checkable
+class PhysicsModuleProtocol(Protocol):
+    """Interface contract for all physics parameterization modules.
+
+    Every physics factory (make_radiation_physics, make_turbulence_physics, etc.)
+    must return a callable matching this protocol.
+    """
+    def __call__(
+        self,
+        state: HydrostaticState,
+        grid,
+        coord,
+        phys_state: PhysicsState | None = None,
+    ) -> HydrostaticTendencies: ...
+
+    def set_time(self, day_of_year: float, seconds_of_day: float) -> None: ...
+    def reset_state(self) -> None: ...
 
 
 # ==============================================================================
