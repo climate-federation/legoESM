@@ -86,6 +86,16 @@ def _write_minimal_s2s_store(tmp_path: Path) -> ChaosBenchS2SConfig:
                     coords={"latitude": source_lat, "longitude": source_lon},
                     dims=("latitude", "longitude"),
                 ),
+                "ileadfra": xr.DataArray(
+                    np.zeros((source_lat.size, source_lon.size), dtype=np.float32),
+                    coords={"latitude": source_lat, "longitude": source_lon},
+                    dims=("latitude", "longitude"),
+                ),
+                "iicethic": xr.DataArray(
+                    np.zeros((source_lat.size, source_lon.size), dtype=np.float32),
+                    coords={"latitude": source_lat, "longitude": source_lon},
+                    dims=("latitude", "longitude"),
+                ),
             }
         )
         oras5.to_zarr(tmp_path / "oras5" / f"oras5_full_1.5deg_{date}.zarr")
