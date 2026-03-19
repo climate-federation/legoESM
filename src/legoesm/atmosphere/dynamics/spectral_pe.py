@@ -103,6 +103,14 @@ class SpectralPEConfig(NamedTuple):
     # Post-step spectral filter (damps highest wavenumbers)
     spectral_filter_order: int = 8   # Sharpness of spectral filter
     spectral_filter_strength: float = 0.0  # Retention at n=n_max (0=off, 0.01=aggressive)
+    # Tendency truncation to prevent aliasing from cubic nonlinearities.
+    dealiasing_fraction: float = 0.0  # 0.667 recommended for long runs
+    # Implicit (multiplicative) hyperdiffusion.  Applied as a post-step
+    # filter: coeff_new = coeff_old * exp(-nu * [n(n+1)/a^2]^p * dt).
+    # This is UNCONDITIONALLY STABLE, unlike explicit (tendency-based)
+    # hyperdiffusion which is unstable with leapfrog time integration.
+    # Set implicit_hyperdiff=True to use this instead of explicit.
+    implicit_hyperdiff: bool = False
     # Pressure floor for adiabatic heating (limits 1/p at model top)
     p_floor: float = 0.0            # Pa; adiabatic uses max(p, p_floor) (0 = off)
     # Robert-Asselin filter for leapfrog (controls computational mode)
@@ -212,6 +220,16 @@ def spectral_pe_tendencies(
     a = grid.radius
     R_d = constants.R_d
     kappa = constants.kappa
+
+    # Dealiasing mask: zero wavenumbers above dealiasing_fraction * n_max
+    # to prevent spectral aliasing from cubic nonlinearities.
+    if config.dealiasing_fraction > 0:
+        n_cut = int(config.dealiasing_fraction * grid.n_max)
+        _dealias = jnp.where(grid.ls <= n_cut, 1.0, 0.0)
+        _dealias_3d = _dealias[:, None]  # (n_sh, 1) for 3D fields
+    else:
+        _dealias = None
+        _dealias_3d = None
 
     # --- 1. Transform to grid space ---
     vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
@@ -410,7 +428,7 @@ def spectral_pe_tendencies(
     if config.semi_implicit and config.si_hyperdiff_boost != 1.0:
         hyperdiff_coeff = hyperdiff_coeff * config.si_hyperdiff_boost
 
-    if hyperdiff_coeff > 0:
+    if hyperdiff_coeff > 0 and not config.implicit_hyperdiff:
         base_diff_vor = spectral_hyperdiffusion_3d(
             grid, state.vor_hat.data, hyperdiff_coeff, config.hyperdiff_order,
         )
@@ -445,6 +463,13 @@ def spectral_pe_tendencies(
         ddiv_hat = ddiv_hat + physics_tendency.div_hat.data
         dT_hat = dT_hat + physics_tendency.T_hat.data
         dlnps_hat = dlnps_hat + physics_tendency.lnps_hat.data
+
+    # Apply dealiasing truncation to prevent aliasing instability
+    if _dealias_3d is not None:
+        dvor_hat = dvor_hat * _dealias_3d
+        ddiv_hat = ddiv_hat * _dealias_3d
+        dT_hat = dT_hat * _dealias_3d
+        dlnps_hat = dlnps_hat * _dealias
 
     # Return as same pytree structure (for SSP-RK3)
     return SpectralHydrostaticState(
@@ -607,6 +632,10 @@ class SpectralPrimitiveEquationModel:
                 f"si_substeps must be >= 1, got {self.config.si_substeps!r}",
             )
 
+        # Precompute implicit hyperdiffusion filter (unconditionally stable)
+        self._hyperdiff_filter = None
+        self._hyperdiff_filter_dt = None
+
         if legoesm_config is not None:
             allow_unsupported_backend = bool(
                 legoesm_config.get(
@@ -662,6 +691,43 @@ class SpectralPrimitiveEquationModel:
             sigma_full, self.config.sponge_sigma, self.config.sponge_tau, dt,
         )
         self._sponge_dt = dt
+
+    def _ensure_hyperdiff_filter(self, dt: float):
+        """Lazily precompute implicit hyperdiffusion filter."""
+        if not self.config.implicit_hyperdiff or self.config.hyperdiff_coeff <= 0:
+            return
+        if self._hyperdiff_filter is not None and self._hyperdiff_filter_dt == dt:
+            return
+        nu = self.config.hyperdiff_coeff
+        order = self.config.hyperdiff_order
+        # Eigenvalue: -[n(n+1)/a^2]^order
+        eig = (self.grid.ls * (self.grid.ls + 1) / self.grid.radius ** 2) ** order
+        # For leapfrog, effective dt is 2*dt
+        integrator = self.config.time_integrator.lower()
+        dt_eff = 2.0 * dt if 'leapfrog' in integrator else dt
+        # Multiplicative filter: exp(-nu * eig * dt_eff)
+        self._hyperdiff_filter = jnp.exp(-nu * eig * dt_eff)
+        self._hyperdiff_filter_dt = dt
+
+    def _apply_implicit_hyperdiff(self, state):
+        """Apply implicit (multiplicative) hyperdiffusion filter.
+
+        Divergence gets 2x stronger damping than vorticity and temperature
+        to preferentially suppress gravity wave noise from nonlinear
+        baroclinic eddy breakdown (standard practice in operational GCMs).
+        """
+        if self._hyperdiff_filter is None:
+            return state
+        hf = self._hyperdiff_filter
+        hf_3d = hf[:, None]  # (n_sh, 1) for 3D fields
+        hf_div = hf ** 2  # stronger damping for divergence
+        hf_div_3d = hf_div[:, None]
+        return state._replace(
+            vor_hat=state.vor_hat.replace(data=state.vor_hat.data * hf_3d),
+            div_hat=state.div_hat.replace(data=state.div_hat.data * hf_div_3d),
+            T_hat=state.T_hat.replace(data=state.T_hat.data * hf_3d),
+            # lnps and phis are NOT diffused (mass conservation)
+        )
 
     def _ensure_si_data_leapfrog(self, dt: float):
         """Precompute SI matrices for leapfrog (dt_eff = 2*dt)."""
@@ -727,12 +793,13 @@ class SpectralPrimitiveEquationModel:
         return self._step_jit(state, dt, physics_fn)
 
     def _leapfrog_step(self, state, dt, physics_fn=None):
-        """Leapfrog + SI step with Robert-Asselin filter.
+        """Leapfrog + SI step with Robert-Asselin filter + implicit diffusion.
 
         First call: forward Euler + SI (startup).
-        Subsequent calls: leapfrog + SI + RA filter.
+        Subsequent calls: leapfrog + SI + RA filter + implicit hyperdiffusion.
         """
         self._ensure_sponge_factor(dt)
+        self._ensure_hyperdiff_filter(dt)
 
         if self._state_prev is None:
             # --- First step: forward Euler + SI ---
@@ -745,6 +812,8 @@ class SpectralPrimitiveEquationModel:
                 result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
             if self._spectral_filter is not None:
                 result = _apply_spectral_filter_to_state(result, self._spectral_filter)
+            # Implicit hyperdiffusion (unconditionally stable)
+            result = self._apply_implicit_hyperdiff(result)
             self._state_prev = state
             return result
         else:
@@ -762,17 +831,20 @@ class SpectralPrimitiveEquationModel:
                 state_np1 = _apply_spectral_filter_to_state(
                     state_np1, self._spectral_filter,
                 )
+            # Implicit hyperdiffusion (unconditionally stable with leapfrog)
+            state_np1 = self._apply_implicit_hyperdiff(state_np1)
             # Robert-Asselin filter on time-n state
             gamma = self.config.robert_asselin_coeff
             if gamma > 0:
                 from legoesm.timestepping.semi_implicit import robert_asselin_filter
-                state_n_filtered = robert_asselin_filter(
+                state_n_filtered, state_np1_filtered = robert_asselin_filter(
                     self._state_prev, state, state_np1, gamma,
                 )
             else:
                 state_n_filtered = state
+                state_np1_filtered = state_np1
             self._state_prev = state_n_filtered
-            return state_np1
+            return state_np1_filtered
 
     def step_with_physics(
         self,
