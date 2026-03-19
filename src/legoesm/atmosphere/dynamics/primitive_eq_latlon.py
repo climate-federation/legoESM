@@ -49,8 +49,10 @@ from legoesm.grids.polar_filter import (
 )
 from legoesm.grids.vertical import (
     SigmaCoordinate,
+    HybridSigmaPressureCoordinate,
     pressure_from_sigma,
     compute_geopotential,
+    compute_geopotential_hybrid,
     compute_sigma_dot,
     vertical_advection,
     compute_pressure_velocity,
@@ -120,7 +122,10 @@ def latlon_hydrostatic_tendencies(
     p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
 
     # --- 2. Geopotential via hydrostatic integration ---
-    Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+    else:
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
 
     # --- 3. Kinetic energy and Bernoulli function ---
     K = 0.5 * (u**2 + v**2)

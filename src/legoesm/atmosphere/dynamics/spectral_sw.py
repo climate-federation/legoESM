@@ -64,6 +64,9 @@ class SpectralSWConfig(NamedTuple):
     mean_depth: float = 5960.0        # H_0 for linearized mass equation [m]
     hyperdiff_coeff: float = 2.338e15 # Spectral diffusion coefficient
     hyperdiff_order: int = 2          # Diffusion order (2 = nabla^4)
+    spectral_filter_order: int = 0    # Exponential filter order (0 = off)
+                                      # Recommended: 8 for runs with topography
+    spectral_filter_cutoff: float = 0.65  # Filter value at n_max
 
 
 # =============================================================================
@@ -195,6 +198,19 @@ class SpectralShallowWaterModel:
         self._cpu_device = None
         self._default_device = None
 
+        # Precompute exponential spectral filter if enabled.
+        # The filter damps high-wavenumber spectral coefficients to
+        # suppress Gibbs ringing from non-smooth fields (e.g. conical
+        # topography in Williamson TC5).  Applied after each time step.
+        if self.config.spectral_filter_order > 0:
+            alpha = -jnp.log(jnp.float64(self.config.spectral_filter_cutoff))
+            ratio = grid.ls.astype(jnp.float64) / grid.n_max
+            self._spectral_filter = jnp.exp(
+                -alpha * ratio ** self.config.spectral_filter_order
+            )
+        else:
+            self._spectral_filter = None
+
         # Extract allow_unsupported from global config if provided
         if legoesm_config is not None:
             allow_unsupported_backend = bool(
@@ -225,17 +241,52 @@ class SpectralShallowWaterModel:
         """Advance one time step using SSP-RK3.
 
         On Metal, transfers state to CPU for computation, then back.
+        If a spectral filter is enabled, it is applied after each step
+        to suppress Gibbs ringing from topography or other discontinuities.
         """
         def tendency_fn(s):
             return spectral_sw_tendencies(s, self.grid, self.config)
 
         if self._use_cpu_for_spectral:
-            # Transfer state to CPU, compute, transfer back to Metal.
             state_cpu = jax.device_put(state, self._cpu_device)
             result_cpu = ssp_rk3_step(state_cpu, tendency_fn, dt)
+            result_cpu = self._apply_filter(result_cpu)
             return jax.device_put(result_cpu, self._default_device)
 
-        return ssp_rk3_step(state, tendency_fn, dt)
+        result = ssp_rk3_step(state, tendency_fn, dt)
+        return self._apply_filter(result)
+
+    def _apply_filter(self, state: SpectralSWState) -> SpectralSWState:
+        """Apply exponential spectral filter to all prognostic fields."""
+        if self._spectral_filter is None:
+            return state
+        sf = self._spectral_filter
+        return SpectralSWState(
+            vor_hat=state.vor_hat.replace(data=state.vor_hat.data * sf),
+            div_hat=state.div_hat.replace(data=state.div_hat.data * sf),
+            phi_hat=state.phi_hat.replace(data=state.phi_hat.data * sf),
+            phis_hat=state.phis_hat,  # topography is static — never filter
+        )
+
+    def filter_initial_state(self, state: SpectralSWState) -> SpectralSWState:
+        """Filter all initial spectral fields including topography.
+
+        Call this once before time integration when the initial conditions
+        contain non-smooth fields (e.g. conical/step topography in TC5).
+        The spectral filter removes Gibbs oscillations that would otherwise
+        cause nonlinear instability.
+
+        If no spectral filter is configured, returns the state unchanged.
+        """
+        if self._spectral_filter is None:
+            return state
+        sf = self._spectral_filter
+        return SpectralSWState(
+            vor_hat=state.vor_hat.replace(data=state.vor_hat.data * sf),
+            div_hat=state.div_hat.replace(data=state.div_hat.data * sf),
+            phi_hat=state.phi_hat.replace(data=state.phi_hat.data * sf),
+            phis_hat=state.phis_hat.replace(data=state.phis_hat.data * sf),
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_on_cpu(self, state: SpectralSWState, dt: float) -> SpectralSWState:

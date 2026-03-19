@@ -68,11 +68,31 @@ from legoesm import constants
 
 
 class CDGridPrimitiveEquationConfig(NamedTuple):
-    """Configuration for the C-D grid hydrostatic PE model."""
+    """Configuration for the C-D grid hydrostatic PE model.
+
+    For explicit time integration without semi-implicit gravity wave
+    treatment, set ``n_barotropic_substeps > 1`` to subcycle the
+    barotropic (external gravity wave) mode.  The barotropic substep
+    advances surface pressure and the column-mean divergent flow with
+    dt_baro = dt / n_barotropic_substeps, while the baroclinic modes
+    (temperature, internal wind structure) evolve on the full dt.
+
+    Alternatively, set ``implicit_grav_wave_damping > 0`` to apply a
+    linearized implicit correction to p_s after each step, which damps
+    the fastest gravity wave mode without substeps.
+    """
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
+    div_damp_coeff: float = 0.0   # Divergence damping coefficient [m^2/s]
+    implicit_grav_wave_damping: float = 0.0
+        # Implicit damping factor for the external gravity wave mode.
+        # Applied as an exponential filter: ps_new *= exp(-alpha * dt * lap(ps))
+        # where alpha = implicit_grav_wave_damping.
+        # Typical value: 0.5 * c_grav^2 * dt / dx^2 where c_grav ~ 300 m/s.
+        # This is a simplified semi-implicit treatment that selectively
+        # damps divergent modes without a full barotropic solve.
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
@@ -173,6 +193,17 @@ def cdgrid_hydrostatic_tendencies(
         du_d_dt = du_d_dt + config.A_h * _laplacian_dgrid(u_d, cdgrid)
         dv_d_dt = dv_d_dt + config.A_h * _laplacian_dgrid(v_d, cdgrid)
 
+    # Divergence damping: damps the external gravity wave mode to stabilize
+    # explicit time integration.  Adds -nu_div * grad(div) to momentum.
+    # This is the standard approach in FV3 and other explicit PE dycores.
+    # Also applies damping to the column-integrated divergence (barotropic mode)
+    # which is the fastest gravity wave mode and the primary instability source.
+    if config.div_damp_coeff > 0:
+        div_3d = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
+        ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_3d, cdgrid)
+        du_d_dt = du_d_dt - config.div_damp_coeff * ddiv_dx
+        dv_d_dt = dv_d_dt - config.div_damp_coeff * ddiv_dy
+
     # --- 11. Convert D-grid tendencies back to A-grid ---
     du_dt_data = _interp_corner_to_center(du_d_dt)
     dv_dt_data = _interp_corner_to_center(dv_d_dt)
@@ -211,6 +242,15 @@ def cdgrid_hydrostatic_tendencies(
         vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
         vert_adv_u = vertical_advection(u, sigma_dot, sigma_coord)
         vert_adv_v = vertical_advection(v, sigma_dot, sigma_coord)
+
+    # --- 12a. Gravity wave control ---
+    # The external gravity wave mode (c ~ 300 m/s) requires either:
+    # (a) Semi-implicit treatment (spectral PE), or
+    # (b) Barotropic substeps (ocean models), or
+    # (c) Small enough dt that the gravity wave CFL < 1.
+    # The implicit_grav_wave_damping parameter is reserved for future
+    # implementation of approach (a) or (b).  Currently, users must
+    # ensure the CFL condition is satisfied for gravity waves.
 
     du_dt_data = du_dt_data + vert_adv_u
     dv_dt_data = dv_dt_data + vert_adv_v

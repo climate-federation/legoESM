@@ -23,6 +23,10 @@ It now advertises category entry points via:
 
 Notes:
 
-- Existing legacy scripts in `scripts/` are kept for backward compatibility.
+- Legacy one-off drivers were moved to `scripts/legacy/`.
+- Lightweight compatibility wrappers remain at original paths in `scripts/`
+  so existing invocations continue to work.
+- For the Slurm submission script, the original path is a symlink to preserve
+  `#SBATCH` directive behavior:
+  `scripts/submit_ginsburg_atmos_scaling.sbatch -> scripts/legacy/...`.
 - New category runners are the preferred entry points for routine test execution.
-

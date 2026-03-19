@@ -42,6 +42,7 @@ class FVShallowWaterConfig(NamedTuple):
     hyperdiff_coeff: float = 0.0
     div_damp_2: float = 0.0       # 2nd-order divergence damping coefficient
     div_damp_4: float = 0.0       # 4th-order divergence damping coefficient
+    edge_blend_strength: float = 0.0  # Cubed-sphere edge blending strength [0-1]
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     fix_energy: bool = False      # Apply energy conservation fixer
