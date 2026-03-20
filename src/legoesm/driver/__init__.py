@@ -28,5 +28,10 @@ from legoesm.driver.config import (
     load_experiment_config,
 )
 from legoesm.driver.physics_pipeline import PhysicsPipeline, PhysicsOutput, HeldRadiation, build_physics_pipeline
+from legoesm.driver.grid_adapters import ColumnAdapter, SingleColumnGrid, make_adapter
+from legoesm.driver.kernel_registry import (
+    RADIATION_REGISTRY, CONVECTION_REGISTRY, MICROPHYSICS_REGISTRY,
+    resolve_kernel, available_schemes,
+)
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.model_driver import ModelDriver

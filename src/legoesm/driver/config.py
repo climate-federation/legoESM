@@ -136,6 +136,9 @@ class ExperimentConfig(NamedTuple):
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
 
+    # Performance
+    gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
+
     # Distributed
     distributed: bool = False
     ensemble_size: int = 1

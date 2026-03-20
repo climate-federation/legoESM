@@ -12,15 +12,12 @@ updates the SAME variables (eta, u, v) as the slow tendency. Wrapping
 it in RK3 creates inconsistencies from the convex blending of
 barotropic-updated states with un-updated states.
 
-Discretization options:
-- "centered" (default): centered finite differences (ocean_pe.py)
-- "finite_volume": FV PPM transport + FV-consistent w-diagnosis +
-  divergence damping (ocean_pe_fv.py)
-- "fc_gram": FC-Gram spectral operators (ocean_pe_fc.py)
-- "fc_gram_cgrid": FC-Gram + divergence damping (ocean_pe_fc_cgrid.py)
+Supported discretization: ``"cdgrid"`` (C-D grid finite volume, the only
+cubed-sphere implementation).
 
-The finite-volume PPM option for tracer transport is controlled by
-OceanConfig.use_fv_tracer_transport within the centered discretization.
+Deprecated aliases that silently map to ``"cdgrid"``:
+``"centered"``, ``"finite_volume"``, ``"fv"``.
+These emit ``DeprecationWarning`` and will be removed in a future release.
 
 Public API: state_new = model.step(state, dt)
 """
@@ -85,8 +82,18 @@ class OceanModel:
         discretization: str = "cdgrid",
         fc_config=None,
     ):
-        # Map legacy discretization names to current names
-        discretization = _LEGACY_DISCRETIZATION_MAP.get(discretization, discretization)
+        # Map legacy discretization names with deprecation warning
+        if discretization in _LEGACY_DISCRETIZATION_MAP:
+            import warnings
+            canonical = _LEGACY_DISCRETIZATION_MAP[discretization]
+            warnings.warn(
+                f"Ocean discretization {discretization!r} is deprecated; "
+                f"use {canonical!r} instead. All cubed-sphere ocean "
+                f"discretizations map to the C-D grid implementation.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            discretization = canonical
 
         if discretization not in OCEAN_DISCRETIZATIONS:
             raise ValueError(

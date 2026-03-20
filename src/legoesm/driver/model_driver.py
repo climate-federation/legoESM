@@ -857,6 +857,7 @@ class ModelDriver:
                 o3_vmr=o3_vmr,
                 aerosol_od=aerosol_od,
                 start_day=START_DAY,
+                gradient_checkpoint=cfg.gradient_checkpoint,
             )
 
             # Pack state into carry

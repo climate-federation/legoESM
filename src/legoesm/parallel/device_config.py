@@ -258,11 +258,21 @@ def _configure_gpu(config: HardwareConfig) -> None:
 
 
 def _configure_metal(config: HardwareConfig) -> None:
-    """Apply Metal-specific JAX configuration."""
-    # Metal does not support float64; ensure we do not accidentally
-    # enable x64 mode which would cause silent truncation.
-    # No special XLA flags needed — Metal backend is relatively simple.
-    pass
+    """Apply Metal-specific JAX configuration.
+
+    Metal does not support float64; spectral solvers are routed to CPU
+    automatically.  We enable multi-threading for CPU fallback operations
+    to ensure the spectral transforms (which run on CPU) use all cores.
+    """
+    if "XLA_FLAGS" not in os.environ:
+        try:
+            n_cores = os.cpu_count() or 4
+            _set_xla_flags({
+                "xla_cpu_multi_thread_eigen": "true",
+                "intra_op_parallelism_threads": str(n_cores),
+            })
+        except Exception:
+            pass  # Non-critical; XLA will use defaults.
 
 
 def _configure_cpu(config: HardwareConfig) -> None:

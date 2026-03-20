@@ -228,13 +228,14 @@ def _pad_halo_mpi_tiled(
     mpi4jax,
     MPI,
 ) -> jax.Array:
-    """Sub-face tiling halo exchange using allgather.
+    """Sub-face tiling halo exchange using point-to-point sendrecv.
 
-    Replaces 4 sequential blocking sendrecv calls (one per direction)
-    with a single allgather collective.  Each rank packs its 4 edge
-    strips into a canonical buffer (4 slots indexed by edge direction),
-    allgathers to collect all ranks' strips, then locally extracts
-    neighbor data.
+    Each tile communicates only with its 2-4 actual neighbors via
+    individual sendrecv calls.  This avoids the O(N) bandwidth of
+    allgather when most of the received data is unused.
+
+    For N=24 ranks with 4 neighbors each, this reduces communication
+    volume by ~6x compared to allgather.
     """
     face = topology.local_face_ids[0]
     n = data.shape[1]  # tile dimension
@@ -242,59 +243,76 @@ def _pad_halo_mpi_tiled(
     padded = jnp.zeros((6, n + h2, n + h2), dtype=data.dtype)
     padded = padded.at[:, halo:-halo, halo:-halo].set(data)
 
-    # --- Pack edge strips into canonical buffer ---
-    # 4 slots (WEST=0, EAST=1, SOUTH=2, NORTH=3), each halo*n elements.
     strip_size = halo * n
-    buf_size = 4 * strip_size
+    comm = MPI.COMM_WORLD
+    rank = topology.rank
 
-    send_buf = jnp.zeros(buf_size, dtype=data.dtype)
-    for edge in _EDGES:
-        slot_offset = edge * strip_size
-        if halo == 1:
-            strip = _extract_edge_strip(data, face, edge)
-            send_buf = send_buf.at[slot_offset : slot_offset + n].set(strip)
-        else:
-            for depth in range(halo):
-                strip = _extract_edge_strip_at_depth(data, face, edge, depth)
-                d_offset = slot_offset + depth * n
-                send_buf = send_buf.at[d_offset : d_offset + n].set(strip)
-
-    # One collective call replaces 4 sequential sendrecv calls.
-    all_bufs = _mpi4jax_array_result(
-        mpi4jax.allgather(send_buf, comm=MPI.COMM_WORLD),
-    )  # shape: (n_ranks, buf_size)
-
-    # --- Unpack neighbor strips ---
     for direction, edge in _DIR_TO_EDGE.items():
         tile_nbr_rank = topology.tile_neighbors.get(direction)
 
         if tile_nbr_rank is not None:
             # Intra-face tile: neighbor's opposite edge, no reversal.
             opp = _OPPOSITE_EDGE[edge]
-            src_offset = opp * strip_size
+
+            # Pack our edge strip to send.
+            if halo == 1:
+                send_strip = _extract_edge_strip(data, face, edge)
+            else:
+                parts = []
+                for depth in range(halo):
+                    parts.append(_extract_edge_strip_at_depth(data, face, edge, depth))
+                send_strip = jnp.concatenate(parts)
+
+            # Point-to-point exchange with this neighbor.
+            tag = edge * 1000 + rank
+            recv_strip = _mpi4jax_array_result(
+                mpi4jax.sendrecv(
+                    send_strip, jnp.zeros_like(send_strip),
+                    source=tile_nbr_rank, dest=tile_nbr_rank,
+                    sendtag=tag, recvtag=opp * 1000 + tile_nbr_rank,
+                    comm=comm,
+                ),
+            )
 
             if halo == 1:
-                strip = all_bufs[tile_nbr_rank, src_offset : src_offset + n]
-                padded = _place_strip(padded, face, edge, strip)
+                padded = _place_strip(padded, face, edge, recv_strip)
             else:
-                strip_d0 = all_bufs[tile_nbr_rank, src_offset : src_offset + n]
-                strip_d1 = all_bufs[tile_nbr_rank, src_offset + n : src_offset + 2 * n]
-                padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+                padded = _place_strip_h2(
+                    padded, face, edge,
+                    recv_strip[:n], recv_strip[n:2 * n],
+                )
 
         elif (face, edge) in topology.neighbor_info:
             # Inter-face boundary: possible reversal from CONNECTIVITY.
             nbr_face, nbr_edge, is_reversed = topology.neighbor_info[(face, edge)]
             nbr_rank = topology.neighbor_ranks[(face, edge)]
-            src_offset = nbr_edge * strip_size
 
             if halo == 1:
-                strip = all_bufs[nbr_rank, src_offset : src_offset + n]
+                send_strip = _extract_edge_strip(data, face, edge)
+            else:
+                parts = []
+                for depth in range(halo):
+                    parts.append(_extract_edge_strip_at_depth(data, face, edge, depth))
+                send_strip = jnp.concatenate(parts)
+
+            tag = edge * 1000 + rank
+            recv_strip = _mpi4jax_array_result(
+                mpi4jax.sendrecv(
+                    send_strip, jnp.zeros_like(send_strip),
+                    source=nbr_rank, dest=nbr_rank,
+                    sendtag=tag, recvtag=nbr_edge * 1000 + nbr_rank,
+                    comm=comm,
+                ),
+            )
+
+            if halo == 1:
+                strip = recv_strip
                 if is_reversed:
                     strip = strip[::-1]
                 padded = _place_strip(padded, face, edge, strip)
             else:
-                strip_d0 = all_bufs[nbr_rank, src_offset : src_offset + n]
-                strip_d1 = all_bufs[nbr_rank, src_offset + n : src_offset + 2 * n]
+                strip_d0 = recv_strip[:n]
+                strip_d1 = recv_strip[n:2 * n]
                 if is_reversed:
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]

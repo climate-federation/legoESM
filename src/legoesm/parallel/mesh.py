@@ -502,9 +502,16 @@ def shard_pytree(pytree, config: DeviceConfig):
             return jax.device_put(leaf, config.replicated_sharding)
 
         elif config.grid_type == "spectral":
-            # Shard arrays with a level-like leading dimension
-            if leaf.ndim >= 1:
-                return jax.device_put(leaf, config.face_sharding)
+            # Spectral state arrays have shape (n_sh, nlev).
+            # Shard on the level axis (axis 1) for independent SH transforms.
+            if leaf.ndim == 2:
+                level_axis_sharding = NamedSharding(
+                    config.mesh, P(None, "level"),
+                )
+                return jax.device_put(leaf, level_axis_sharding)
+            if leaf.ndim == 1:
+                # 1D arrays (e.g., lnps_hat): replicate across devices.
+                return jax.device_put(leaf, config.replicated_sharding)
             return jax.device_put(leaf, config.replicated_sharding)
 
         # Default: replicate

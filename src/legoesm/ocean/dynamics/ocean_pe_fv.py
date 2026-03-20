@@ -1,16 +1,27 @@
-"""Backward-compatible alias for FV (C-D grid) ocean primitive equation model.
+"""Deprecated alias for FV (C-D grid) ocean primitive equation model.
 
-This module re-exports functions from ocean_pe_cdgrid for backward
-compatibility with code that imports from the old FV module name.
-
-The C-D grid discretization (ocean_pe_cdgrid) is the FV implementation
-for the cubed-sphere ocean model.
+.. deprecated::
+    Import from ``legoesm.ocean.dynamics.ocean_pe_cdgrid`` instead.
+    The "FV" ocean module is the same C-D grid implementation.
 """
 
+import warnings as _warnings
+
 from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
-    ocean_baroclinic_tendencies_cdgrid as ocean_baroclinic_tendencies_fv,
+    ocean_baroclinic_tendencies_cdgrid as _real_fn,
 )
 
-__all__ = [
-    "ocean_baroclinic_tendencies_fv",
-]
+
+def ocean_baroclinic_tendencies_fv(*args, **kwargs):
+    """Deprecated wrapper — delegates to ocean_baroclinic_tendencies_cdgrid."""
+    _warnings.warn(
+        "ocean_baroclinic_tendencies_fv is deprecated; "
+        "use ocean_baroclinic_tendencies_cdgrid from "
+        "legoesm.ocean.dynamics.ocean_pe_cdgrid instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _real_fn(*args, **kwargs)
+
+
+__all__ = ["ocean_baroclinic_tendencies_fv"]

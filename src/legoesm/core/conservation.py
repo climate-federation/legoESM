@@ -678,13 +678,41 @@ def compute_conservation_diagnostics(
 # Lat-lon conservation fixers
 # ==============================================================================
 
-# Backward-compatible aliases — the unified functions now work for any grid.
-_global_area_sum_latlon = _global_area_sum
-zero_mean_tendency_latlon = zero_mean_tendency
-fix_mass_shallow_water_latlon = fix_mass_shallow_water
-fix_energy_shallow_water_latlon = fix_energy_shallow_water
-apply_conservation_fixer_latlon = apply_conservation_fixer
-compute_conservation_diagnostics_latlon = compute_conservation_diagnostics
+# Deprecated aliases — the unified functions now work for any grid.
+# These emit DeprecationWarning on first call and will be removed.
+import warnings as _warnings
+import functools as _functools
+
+
+def _deprecated_alias(old_name, new_name, fn):
+    """Create a deprecated wrapper that warns once and delegates."""
+    @_functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        _warnings.warn(
+            f"{old_name} is deprecated; use {new_name} instead. "
+            f"The unified function works for any grid.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return fn(*args, **kwargs)
+    wrapper.__name__ = old_name
+    wrapper.__qualname__ = old_name
+    return wrapper
+
+
+_global_area_sum_latlon = _deprecated_alias(
+    "_global_area_sum_latlon", "_global_area_sum", _global_area_sum)
+zero_mean_tendency_latlon = _deprecated_alias(
+    "zero_mean_tendency_latlon", "zero_mean_tendency", zero_mean_tendency)
+fix_mass_shallow_water_latlon = _deprecated_alias(
+    "fix_mass_shallow_water_latlon", "fix_mass_shallow_water", fix_mass_shallow_water)
+fix_energy_shallow_water_latlon = _deprecated_alias(
+    "fix_energy_shallow_water_latlon", "fix_energy_shallow_water", fix_energy_shallow_water)
+apply_conservation_fixer_latlon = _deprecated_alias(
+    "apply_conservation_fixer_latlon", "apply_conservation_fixer", apply_conservation_fixer)
+compute_conservation_diagnostics_latlon = _deprecated_alias(
+    "compute_conservation_diagnostics_latlon", "compute_conservation_diagnostics",
+    compute_conservation_diagnostics)
 
 
 # ==============================================================================

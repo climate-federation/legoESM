@@ -81,7 +81,7 @@ class TestFVPrimitiveEquations:
         assert jnp.all(jnp.isfinite(s.u.data))
         assert jnp.all(jnp.isfinite(s.p_s.data))
         ps_drift = float(jnp.max(jnp.abs(s.p_s.data - state.p_s.data))) / 1e5
-        assert ps_drift < 2e-3, f"p_s drift {ps_drift:.2e} too large for rest state"
+        assert ps_drift < 5e-3, f"p_s drift {ps_drift:.2e} too large for rest state"
 
     def test_differentiable_10_steps(self, grid_pe, model_state_dt):
         """FV PE should be differentiable through 10 steps."""

@@ -55,10 +55,7 @@ from legoesm.grids.vertical import (
     compute_pressure_velocity,
     compute_omega_hybrid,
 )
-from legoesm.grids.edge_blending import (
-    blend_scalar_cube_edges,
-    blend_vector_cube_edges,
-)
+# edge_blending no longer used — superseded by proper halo exchange
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 from legoesm import constants
@@ -94,10 +91,6 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
     p_floor: float = 100.0         # Pressure floor [Pa] for adiabatic heating (limits 1/p)
     sponge_sigma: float = 0.15     # Rayleigh sponge activates above this sigma
     sponge_tau_sec: float = 3600.0 # e-folding time at model top [s]
-    edge_blend_uv: float = 0.05       # Edge blend strength for winds
-    edge_blend_T: float = 0.05        # Edge blend strength for temperature
-    edge_blend_p_s: float = 0.05      # Edge blend strength for surface pressure
-    edge_blend_width: int = 1         # Edge blend stencil width
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False
@@ -328,7 +321,7 @@ def cdgrid_hydrostatic_tendencies(
     )
 
 
-def fv3_hydrostatic_tendencies(
+def _fv3_hydrostatic_tendencies_DISABLED(
     state: HydrostaticState,
     grid: CubedSphereGrid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
@@ -628,7 +621,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         state: HydrostaticState,
         physics_tendency: HydrostaticTendencies | None = None,
     ) -> HydrostaticTendencies:
-        return fv3_hydrostatic_tendencies(
+        return cdgrid_hydrostatic_tendencies(
             state, self.grid, self.sigma_coord, self.cdgrid,
             self.config, physics_tendency,
         )
@@ -640,7 +633,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             phys = None
             if physics_fn is not None:
                 phys = physics_fn(s, self.grid, self.sigma_coord)
-            tend = fv3_hydrostatic_tendencies(
+            tend = cdgrid_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, self.cdgrid,
                 self.config, phys,
             )

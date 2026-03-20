@@ -12,44 +12,49 @@ discretisation (Lin 2004, Putman & Lin 2007):
 - The same ``operators_cdgrid`` module is shared by the atmosphere
   (shallow water, hydrostatic PE, non-hydrostatic CE) and the ocean.
 
-All cubed-sphere solvers default to the C-D grid variant.  The legacy name
-``CompressibleEulerModel`` resolves to ``CDGridCompressibleEulerModel``,
-``ShallowWaterModel`` to ``CDGridShallowWaterModel``, etc.
-
-Spectral (Gaussian-grid) alternatives are available as a genuinely different
-discretisation — these are NOT redundant copies of the C-D grid solver.
-
 Solver selection
 ----------------
-There are two ways to choose a dynamical core:
+Use two-axis selection (recommended)::
 
-1. **Two-axis selection** (recommended)::
+    dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
+    discretization: "cdgrid" | "spectral" | "sfno" | "latlon_fv" | "mpas"
 
-       dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
-       discretization: "cdgrid" | "spectral" | ...
+Supported implementation matrix
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+===========================  ==============  =================================
+dynamics                     discretization  solver
+===========================  ==============  =================================
+``shallow_water``            cdgrid          CDGridShallowWaterModel
+``shallow_water``            spectral        SpectralShallowWaterModel
+``shallow_water``            sfno            SFNOShallowWaterModel
+``shallow_water``            latlon_fv       FVShallowWaterLatLonModel
+``shallow_water``            latlon_cgrid    CGShallowWaterLatLonModel
+``hydrostatic``              cdgrid          CDGridPrimitiveEquationModel
+``hydrostatic``              spectral        SpectralPrimitiveEquationModel
+``hydrostatic``              sfno            SFNOPrimitiveEquationModel
+``hydrostatic``              latlon_fv       FVLatLonPrimitiveEquationModel
+``hydrostatic``              mpas            MPASPrimitiveEquationModel
+``nonhydrostatic``           cdgrid          CDGridCompressibleEulerModel
+``nonhydrostatic``           spectral        SpectralCompressibleEulerModel
+``nonhydrostatic``           latlon_fv       FVCompressibleEulerLatLonModel
+``nonhydrostatic``           mpas            MPASCompressibleEulerModel
+===========================  ==============  =================================
 
-   These combine as:
+Deprecated aliases
+~~~~~~~~~~~~~~~~~~
+The following names silently resolve to the C-D grid implementation and
+emit ``DeprecationWarning``.  They will be removed in a future release:
 
-   ========================  ==============  ===============================
-   dynamics                  discretization  solver
-   ========================  ==============  ===============================
-   ``shallow_water``         cdgrid          CDGridShallowWaterModel
-   ``shallow_water``         spectral        SpectralShallowWaterModel
-   ``hydrostatic``           cdgrid          CDGridPrimitiveEquationModel
-   ``hydrostatic``           spectral        SpectralPrimitiveEquationModel
-   ``nonhydrostatic``        cdgrid          CDGridCompressibleEulerModel
-   ``nonhydrostatic``        spectral        SpectralCompressibleEulerModel
-   ========================  ==============  ===============================
+- ``ShallowWaterModel``, ``FVShallowWaterModel``, ``CGShallowWaterCubedModel``
+  → use ``CDGridShallowWaterModel``
+- ``PrimitiveEquationModel``, ``FVPrimitiveEquationModel``,
+  ``CGPrimitiveEquationModel`` → use ``CDGridPrimitiveEquationModel``
+- ``CompressibleEulerModel``, ``FVCompressibleEulerModel``,
+  ``CGCompressibleEulerModel`` → use ``CDGridCompressibleEulerModel``
+- discretization names ``"centered"``, ``"finite_volume"``, ``"cgrid"``
+  → use ``"cdgrid"``
 
-2. **Legacy flat name** (still supported)::
-
-       "cdgrid_shallow_water", "spectral_shallow_water",
-       "cdgrid_primitive_equations", "spectral_primitive_equations",
-       "cdgrid_compressible_euler", "spectral_compressible_euler",
-       "tracer_transport"
-
-Use :func:`resolve_solver_name` to convert between the two, and
-:func:`create_model` to instantiate.
+See :mod:`legoesm.supported_matrix` for the full implementation matrix.
 """
 
 # --- C-D grid cubed-sphere cores (FV3-style) ---
@@ -143,79 +148,110 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
 )
 
 
-# Backward compatibility aliases
-ShallowWaterModel = CDGridShallowWaterModel
-PrimitiveEquationModel = CDGridPrimitiveEquationModel
-PrimitiveEquationConfig = CDGridPrimitiveEquationConfig
-CompressibleEulerModel = CDGridCompressibleEulerModel
-FVShallowWaterModel = CDGridShallowWaterModel
-FVPrimitiveEquationModel = CDGridPrimitiveEquationModel
-FVCompressibleEulerModel = CDGridCompressibleEulerModel
-FVPrimitiveEquationConfig = CDGridPrimitiveEquationConfig
-FVCompressibleEulerConfig = CDGridCompressibleEulerConfig
-CGShallowWaterCubedModel = CDGridShallowWaterModel
-CGPrimitiveEquationModel = CDGridPrimitiveEquationModel
-CGCompressibleEulerModel = CDGridCompressibleEulerModel
-shallow_water_tendencies = cdgrid_shallow_water_tendencies
-hydrostatic_tendencies = cdgrid_hydrostatic_tendencies
-compressible_euler_slow_tendencies = cdgrid_compressible_euler_slow_tendencies
-fv_shallow_water_tendencies = cdgrid_shallow_water_tendencies
-fv_hydrostatic_tendencies = cdgrid_hydrostatic_tendencies
-fv_compressible_euler_slow_tendencies = cdgrid_compressible_euler_slow_tendencies
+# -----------------------------------------------------------------------
+# Deprecated aliases — emit DeprecationWarning on access
+# -----------------------------------------------------------------------
+
+import warnings as _warnings
+
+_DEPRECATED_ALIASES = {
+    "ShallowWaterModel": ("CDGridShallowWaterModel", CDGridShallowWaterModel),
+    "PrimitiveEquationModel": ("CDGridPrimitiveEquationModel", CDGridPrimitiveEquationModel),
+    "PrimitiveEquationConfig": ("CDGridPrimitiveEquationConfig", CDGridPrimitiveEquationConfig),
+    "CompressibleEulerModel": ("CDGridCompressibleEulerModel", CDGridCompressibleEulerModel),
+    "FVShallowWaterModel": ("CDGridShallowWaterModel", CDGridShallowWaterModel),
+    "FVPrimitiveEquationModel": ("CDGridPrimitiveEquationModel", CDGridPrimitiveEquationModel),
+    "FVCompressibleEulerModel": ("CDGridCompressibleEulerModel", CDGridCompressibleEulerModel),
+    "FVPrimitiveEquationConfig": ("CDGridPrimitiveEquationConfig", CDGridPrimitiveEquationConfig),
+    "FVCompressibleEulerConfig": ("CDGridCompressibleEulerConfig", CDGridCompressibleEulerConfig),
+    "CGShallowWaterCubedModel": ("CDGridShallowWaterModel", CDGridShallowWaterModel),
+    "CGPrimitiveEquationModel": ("CDGridPrimitiveEquationModel", CDGridPrimitiveEquationModel),
+    "CGCompressibleEulerModel": ("CDGridCompressibleEulerModel", CDGridCompressibleEulerModel),
+    "shallow_water_tendencies": ("cdgrid_shallow_water_tendencies", cdgrid_shallow_water_tendencies),
+    "hydrostatic_tendencies": ("cdgrid_hydrostatic_tendencies", cdgrid_hydrostatic_tendencies),
+    "compressible_euler_slow_tendencies": ("cdgrid_compressible_euler_slow_tendencies", cdgrid_compressible_euler_slow_tendencies),
+    "fv_shallow_water_tendencies": ("cdgrid_shallow_water_tendencies", cdgrid_shallow_water_tendencies),
+    "fv_hydrostatic_tendencies": ("cdgrid_hydrostatic_tendencies", cdgrid_hydrostatic_tendencies),
+    "fv_compressible_euler_slow_tendencies": ("cdgrid_compressible_euler_slow_tendencies", cdgrid_compressible_euler_slow_tendencies),
+}
 
 
-# Available solver names for the factory (flat namespace)
+def __getattr__(name):
+    if name in _DEPRECATED_ALIASES:
+        canonical, obj = _DEPRECATED_ALIASES[name]
+        _warnings.warn(
+            f"legoesm.atmosphere.dynamics.{name} is deprecated; "
+            f"use {canonical} instead. "
+            f"This alias will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return obj
+    raise AttributeError(f"module 'legoesm.atmosphere.dynamics' has no attribute {name!r}")
+
+
+# Canonical solver names (genuinely distinct implementations only)
 AVAILABLE_SOLVERS = [
-    "shallow_water",
     "cdgrid_shallow_water",
-    "spectral_shallow_water",
-    "primitive_equations",
     "cdgrid_primitive_equations",
-    "spectral_primitive_equations",
-    "tracer_transport",
-    "compressible_euler",
     "cdgrid_compressible_euler",
+    "spectral_shallow_water",
+    "spectral_primitive_equations",
     "spectral_compressible_euler",
     "sfno_shallow_water",
     "sfno_primitive_equations",
-    "fv_shallow_water",
-    "fv_primitive_equations",
-    "fv_compressible_euler",
     "fv_shallow_water_latlon",
     "fv_primitive_equations_latlon",
     "fv_compressible_euler_latlon",
     "cgrid_shallow_water_latlon",
-    "cgrid_shallow_water",
-    "cgrid_primitive_equations",
-    "cgrid_compressible_euler",
     "mpas_primitive_equations",
     "mpas_compressible_euler",
+    "tracer_transport",
 ]
+
+# Deprecated flat names that alias a canonical solver
+_DEPRECATED_SOLVER_NAMES = {
+    "shallow_water": "cdgrid_shallow_water",
+    "primitive_equations": "cdgrid_primitive_equations",
+    "compressible_euler": "cdgrid_compressible_euler",
+    "fv_shallow_water": "cdgrid_shallow_water",
+    "fv_primitive_equations": "cdgrid_primitive_equations",
+    "fv_compressible_euler": "cdgrid_compressible_euler",
+    "cgrid_shallow_water": "cdgrid_shallow_water",
+    "cgrid_primitive_equations": "cdgrid_primitive_equations",
+    "cgrid_compressible_euler": "cdgrid_compressible_euler",
+}
+
+# Legacy names still accepted by create_model for backward compatibility
+_ALL_SOLVER_NAMES = AVAILABLE_SOLVERS + list(_DEPRECATED_SOLVER_NAMES)
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["centered", "spectral", "sfno", "finite_volume", "cgrid", "cdgrid", "mpas"]
+DISCRETIZATION_OPTIONS = ["cdgrid", "spectral", "sfno", "latlon_fv", "latlon_cgrid", "mpas"]
 
-# (dynamics, discretization) -> flat solver name
+# Deprecated discretization names
+_DEPRECATED_DISCRETIZATIONS = {
+    "centered": "cdgrid",
+    "finite_volume": "cdgrid",
+    "cgrid": "cdgrid",
+    "fv": "cdgrid",
+}
+
+# (dynamics, discretization) -> canonical flat solver name
 _AXIS_TO_SOLVER = {
-    ("shallow_water", "centered"): "cdgrid_shallow_water",
+    ("shallow_water", "cdgrid"): "cdgrid_shallow_water",
     ("shallow_water", "spectral"): "spectral_shallow_water",
     ("shallow_water", "sfno"): "sfno_shallow_water",
-    ("hydrostatic", "centered"): "cdgrid_primitive_equations",
+    ("shallow_water", "latlon_fv"): "fv_shallow_water_latlon",
+    ("shallow_water", "latlon_cgrid"): "cgrid_shallow_water_latlon",
+    ("hydrostatic", "cdgrid"): "cdgrid_primitive_equations",
     ("hydrostatic", "spectral"): "spectral_primitive_equations",
     ("hydrostatic", "sfno"): "sfno_primitive_equations",
-    ("nonhydrostatic", "centered"): "cdgrid_compressible_euler",
-    ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
-    ("shallow_water", "finite_volume"): "fv_shallow_water",
-    ("hydrostatic", "finite_volume"): "fv_primitive_equations",
-    ("nonhydrostatic", "finite_volume"): "fv_compressible_euler",
-    ("shallow_water", "cgrid"): "cdgrid_shallow_water",
-    ("hydrostatic", "cgrid"): "cdgrid_primitive_equations",
-    ("nonhydrostatic", "cgrid"): "cdgrid_compressible_euler",
-    ("shallow_water", "cdgrid"): "cdgrid_shallow_water",
-    ("hydrostatic", "cdgrid"): "cdgrid_primitive_equations",
-    ("nonhydrostatic", "cdgrid"): "cdgrid_compressible_euler",
+    ("hydrostatic", "latlon_fv"): "fv_primitive_equations_latlon",
     ("hydrostatic", "mpas"): "mpas_primitive_equations",
+    ("nonhydrostatic", "cdgrid"): "cdgrid_compressible_euler",
+    ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
+    ("nonhydrostatic", "latlon_fv"): "fv_compressible_euler_latlon",
     ("nonhydrostatic", "mpas"): "mpas_compressible_euler",
 }
 
@@ -241,24 +277,42 @@ def resolve_solver_name(
     Returns
     -------
     str
+        A canonical solver name from ``AVAILABLE_SOLVERS``.
     """
-    # --- Legacy path ---
-    if equations is not None and equations in AVAILABLE_SOLVERS:
-        defaults_match = (
-            (dynamics is None or dynamics == "shallow_water")
-            and (discretization is None or discretization == "centered")
-        )
-        if defaults_match:
+    # --- Legacy flat name path ---
+    if equations is not None:
+        if equations in _DEPRECATED_SOLVER_NAMES:
+            canonical = _DEPRECATED_SOLVER_NAMES[equations]
+            _warnings.warn(
+                f"Solver name {equations!r} is deprecated; "
+                f"use {canonical!r} instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return canonical
+        if equations in AVAILABLE_SOLVERS:
             return equations
 
     # --- Axis-based resolution ---
     dyn = dynamics or "shallow_water"
-    disc = discretization or "centered"
+    disc = discretization or "cdgrid"
 
     if dyn not in DYNAMICS_OPTIONS:
         raise ValueError(
             f"Unknown dynamics={dyn!r}. Choose from {DYNAMICS_OPTIONS}"
         )
+
+    # Resolve deprecated discretization names
+    if disc in _DEPRECATED_DISCRETIZATIONS:
+        canonical_disc = _DEPRECATED_DISCRETIZATIONS[disc]
+        _warnings.warn(
+            f"Discretization {disc!r} is deprecated; "
+            f"use {canonical_disc!r} instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        disc = canonical_disc
+
     if disc not in DISCRETIZATION_OPTIONS:
         raise ValueError(
             f"Unknown discretization={disc!r}. "
@@ -300,25 +354,19 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
             equations=legoesm_config.get("atmosphere.equations"),
         )
 
-    # Map legacy names to cdgrid (fv_ names handled separately below)
-    _legacy_map = {
-        "shallow_water": "cdgrid_shallow_water",
-        "primitive_equations": "cdgrid_primitive_equations",
-        "compressible_euler": "cdgrid_compressible_euler",
-        "cgrid_shallow_water": "cdgrid_shallow_water",
-        "cgrid_primitive_equations": "cdgrid_primitive_equations",
-        "cgrid_compressible_euler": "cdgrid_compressible_euler",
-    }
-    name = _legacy_map.get(name, name)
+    # Map deprecated solver names with warning
+    if name in _DEPRECATED_SOLVER_NAMES:
+        canonical = _DEPRECATED_SOLVER_NAMES[name]
+        _warnings.warn(
+            f"Solver name {name!r} is deprecated; "
+            f"use {canonical!r} instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        name = canonical
 
     # --- Instantiate ---
-    if name == "fv_shallow_water":
-        return CDGridShallowWaterModel(**kwargs)
-    elif name == "fv_primitive_equations":
-        return CDGridPrimitiveEquationModel(**kwargs)
-    elif name == "fv_compressible_euler":
-        return CDGridCompressibleEulerModel(**kwargs)
-    elif name == "cdgrid_shallow_water":
+    if name == "cdgrid_shallow_water":
         return CDGridShallowWaterModel(**kwargs)
     elif name == "cdgrid_primitive_equations":
         return CDGridPrimitiveEquationModel(**kwargs)

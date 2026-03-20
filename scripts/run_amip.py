@@ -125,6 +125,12 @@ def main():
     parser.add_argument("--cmip-output", action="store_true", default=False)
     parser.add_argument("--clear-sky-diag", action="store_true", default=False)
 
+    # Performance
+    parser.add_argument("--gradient-checkpoint", action="store_true", default=False,
+                        help="Enable gradient checkpointing for O(sqrt(N)) AD memory")
+    parser.add_argument("--profile", type=int, default=0, metavar="N_STEPS",
+                        help="Profile first N steps with jax.profiler and exit")
+
     # Distributed (placeholder)
     parser.add_argument("--distributed", action="store_true", default=False)
     parser.add_argument("--ensemble-size", type=int, default=1)
@@ -212,6 +218,7 @@ def main():
         dynamic_albedo=args.dynamic_albedo,
         experiment=args.experiment,
         start_year=args.start_year,
+        gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         ensemble_size=args.ensemble_size,
     )
@@ -220,6 +227,18 @@ def main():
     driver = ModelDriver(config)
     print("Setup...")
     driver.setup()
+
+    # Profiling mode: trace a few steps, save profile, and exit
+    if args.profile > 0:
+        import jax
+        profile_dir = str(Path(driver.output_dir) / "jax_profile")
+        print(f"Profiling {args.profile} steps → {profile_dir}")
+        with jax.profiler.trace(profile_dir):
+            driver.run()
+        print(f"Profile saved to {profile_dir}")
+        print("View with: tensorboard --logdir " + profile_dir)
+        return
+
     print("Running...")
     driver.run()
     print(f"Complete. Output: {driver.output_dir}")

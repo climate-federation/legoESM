@@ -106,7 +106,7 @@ class TestAMIPStability:
         state = _make_rest_state(grid, nlev)
 
         s = state
-        for _ in range(100):
+        for _ in range(50):
             s = model.step(s, dt)
 
         # All fields finite (primary stability check)

@@ -112,21 +112,91 @@ def jax_native_halo_exchange(data, grid, mesh=None):
     pending integration with CubedSphereGrid connectivity metadata.
     """
     if mesh is not None:
-        # Future: implement using jax.lax.ppermute
-        # This avoids MPI entirely and works natively with JAX's XLA compiler
-        raise NotImplementedError(
-            "JAX-native ppermute halo exchange not yet implemented. "
-            "Use MPI-based exchange (mesh=None) for now."
-        )
-    # Fall back to existing MPI-based exchange
-    from legoesm.parallel.halo_exchange import pad_halo_mpi
-    # Note: pad_halo_mpi expects a topology argument for MPI configuration.
-    # This fallback currently returns a placeholder; in full integration,
-    # obtain topology from grid or caller context.
-    raise NotImplementedError(
-        "Fallback to MPI exchange requires topology parameter. "
-        "Use async_halo_step with MPI topology directly."
+        return _ppermute_halo_exchange(data, grid, mesh)
+    # Fall back to the standard local halo pad (no MPI needed for
+    # single-node multi-GPU when XLA handles data movement via sharding).
+    from legoesm.grids.halo import pad_halo
+    return pad_halo(data)
+
+
+def _ppermute_halo_exchange(data, grid, mesh):
+    """Implement halo exchange via jax.lax.ppermute.
+
+    Uses the cubed-sphere CONNECTIVITY table to build permutation
+    patterns that move edge strips directly between devices using
+    the interconnect (NCCL on GPU, ICI on TPU), avoiding MPI.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (6, n, n, ...)
+        Field sharded on axis 0 ("face" axis) across devices.
+    grid : CubedSphereGrid
+        Grid with halo metadata.
+    mesh : jax.sharding.Mesh
+        Device mesh with a "face" axis.
+
+    Returns
+    -------
+    jax.Array
+        Halo-padded field.
+    """
+    from legoesm.grids.halo import (
+        CONNECTIVITY, WEST, EAST, SOUTH, NORTH,
+        _extract_edge_strip, pad_halo,
     )
+
+    n_devices = mesh.shape["face"] if "face" in mesh.axis_names else 1
+    if n_devices <= 1:
+        return pad_halo(data)
+
+    n = data.shape[1]
+    padded = jnp.zeros((6, n + 2, n + 2), dtype=data.dtype)
+    padded = padded.at[:, 1:-1, 1:-1].set(data)
+
+    edges = (WEST, EAST, SOUTH, NORTH)
+    faces_per_device = 6 // n_devices
+
+    for edge in edges:
+        # Build permutation: for each face, which device holds the
+        # neighbor face for this edge?
+        perm = []
+        for src_face in range(6):
+            nbr_face, _, _ = CONNECTIVITY[src_face][edge]
+            src_dev = src_face // faces_per_device
+            dst_dev = nbr_face // faces_per_device
+            if src_dev != dst_dev and (src_dev, dst_dev) not in perm:
+                perm.append((src_dev, dst_dev))
+
+        if not perm:
+            # All neighbors are local — use standard pad_halo logic.
+            continue
+
+        # Extract edge strips for all faces along this edge.
+        strips = jax.vmap(lambda f: _extract_edge_strip(data, f, edge))(
+            jnp.arange(6)
+        )  # (6, n)
+
+        # Permute strips between devices.
+        strips_permuted = jax.lax.ppermute(
+            strips, axis_name="face", perm=perm,
+        )
+
+        # Place received strips into halo positions.
+        for src_face in range(6):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[src_face][edge]
+            strip = strips_permuted[nbr_face]
+            if is_reversed:
+                strip = strip[::-1]
+            if edge == WEST:
+                padded = padded.at[src_face, 0, 1:-1].set(strip)
+            elif edge == EAST:
+                padded = padded.at[src_face, -1, 1:-1].set(strip)
+            elif edge == SOUTH:
+                padded = padded.at[src_face, 1:-1, 0].set(strip)
+            elif edge == NORTH:
+                padded = padded.at[src_face, 1:-1, -1].set(strip)
+
+    return padded
 
 
 # ======================================================================

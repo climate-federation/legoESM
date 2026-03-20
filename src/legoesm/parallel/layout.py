@@ -257,11 +257,11 @@ def scatter_pytree(pytree, layout):
 # Gather: rank-local → global
 # =========================================================================
 
-def gather(local_array: jax.Array, layout) -> jax.Array:
+def gather(local_array: jax.Array, layout, root_only: bool = False) -> jax.Array:
     """Reconstruct a global ``(6, n, n, ...)`` array from rank-local data.
 
     For single-rank, this is identity.
-    For multi-rank, uses MPI allgather + reassembly.
+    For multi-rank, uses MPI gather (or allgather) + reassembly.
 
     Parameters
     ----------
@@ -269,11 +269,16 @@ def gather(local_array: jax.Array, layout) -> jax.Array:
         Rank-local array.
     layout : DistributedLayout or SingleRankLayout
         Layout descriptor.
+    root_only : bool, optional
+        If True, use ``MPI.Gather`` to rank 0 only (saves bandwidth).
+        Non-root ranks receive an empty array.  Default False
+        (allgather to all ranks for backward compatibility).
 
     Returns
     -------
     jax.Array
         Global array with shape ``(6, n, n, ...)``.
+        If *root_only* is True, non-root ranks get zeros.
     """
     if isinstance(layout, SingleRankLayout):
         return local_array
@@ -286,22 +291,35 @@ def gather(local_array: jax.Array, layout) -> jax.Array:
     n = layout.global_n
     trailing = local_array.shape[3:] if local_array.ndim > 3 else ()
 
+    # Use MPI.Gather to root only when caller only needs data on rank 0
+    # (e.g., I/O).  This saves (N-1)/N bandwidth vs allgather.
+    _gather_fn = mpi4jax.allgather
+    if root_only:
+        rank = comm.Get_rank()
+        try:
+            _gather_fn = lambda x, comm: mpi4jax.gather(x, root=0, comm=comm)
+        except AttributeError:
+            # mpi4jax version doesn't have gather; fall back to allgather.
+            _gather_fn = mpi4jax.allgather
+
     if not layout.is_tiled:
         # Face-only: each rank contributes its faces into the global array.
-        # Use allgather to collect from all ranks, then reassemble.
         all_data = _mpi4jax_array_result(
-            mpi4jax.allgather(local_array, comm=comm),
+            _gather_fn(local_array, comm=comm),
         )
+        if root_only and comm.Get_rank() != 0:
+            return jnp.zeros((6,) + (n,) * 2 + trailing, dtype=local_array.dtype)
         # all_data shape: (n_ranks, n_local_faces, n, n, ...)
         # Flatten to (6, n, n, ...) since total faces = 6.
         n_local = local_array.shape[0]
         return all_data.reshape((6,) + (n,) * 2 + trailing)
     else:
         # Tiled: each rank has (1, n_tile, n_tile, ...).
-        # Allgather gives (n_ranks, 1, n_tile, n_tile, ...).
         all_tiles = _mpi4jax_array_result(
-            mpi4jax.allgather(local_array, comm=comm),
+            _gather_fn(local_array, comm=comm),
         )
+        if root_only and comm.Get_rank() != 0:
+            return jnp.zeros((6, n, n) + trailing, dtype=local_array.dtype)
         # Reassemble into (6, n, n, ...).
         k = own.tiling[0]
         nt = own.tile_size

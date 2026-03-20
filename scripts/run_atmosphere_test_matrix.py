@@ -903,42 +903,63 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water import (
-            ShallowWaterModel, ShallowWaterConfig)
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterModel, CDGridShallowWaterConfig)
+        from legoesm.grids.halo import pad_halo_vector
         from tests.test_cases.williamson import (
             williamson_test2, williamson_test5,
             williamson_test2_exact, compute_error_norms)
 
         n = int(tc.resolution[1:])
         grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
-        config = ShallowWaterConfig(
-            hyperdiff_coeff=_hyperdiff_cube(n), edge_blend_strength=0.25)
-        model = ShallowWaterModel(grid, config)
-        state = williamson_test2(grid) if test_num == 2 else williamson_test5(grid)
+        config = CDGridShallowWaterConfig(
+            hyperdiff_coeff=_hyperdiff_cube(n))
+        model = CDGridShallowWaterModel(grid, config)
+
+        # Convert A-grid Williamson state to CDGrid D-grid state
+        sw = williamson_test2(grid) if test_num == 2 else williamson_test5(grid)
+        u_pad, v_pad = pad_halo_vector(
+            sw.u.data, sw.v.data,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=grid.halo_interp_offsets,
+        )
+        u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1] +
+                       u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
+        v_d = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1] +
+                       v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterState
+        state = CDGridShallowWaterState(h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
         def check_fn(s):
-            return (check_finite({"h": s.h.data, "u": s.u.data}),
-                    float(jnp.max(jnp.abs(s.u.data))))
+            return (check_finite({"h": s.h, "u_d": s.u_d}),
+                    float(jnp.max(jnp.abs(s.u_d))))
 
         def scalar_fn(s):
             return {
-                "mean_height": float(jnp.mean(s.h.data)),
-                "max_wind": float(jnp.max(jnp.sqrt(
-                    s.u.data ** 2 + s.v.data ** 2))),
+                "mean_height": float(jnp.mean(s.h)),
+                "max_wind": float(jnp.max(jnp.abs(s.u_d))),
             }
 
         def extract_fn(s):
-            u = np.asarray(s.u.data, dtype=np.float64)
-            v = np.asarray(s.v.data, dtype=np.float64)
+            # Convert D-grid back to A-grid for diagnostics
+            from legoesm.core.operators_cdgrid import dgrid_to_cgrid
+            u_c, v_c = dgrid_to_cgrid(s.u_d, s.v_d, cdgrid)
+            u_a = 0.5 * (u_c[:, :-1] + u_c[:, 1:])
+            v_a = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
+            u = np.asarray(u_a, dtype=np.float64)
+            v = np.asarray(v_a, dtype=np.float64)
             return {"u": u, "v": v,
                     "wind_speed": np.sqrt(u ** 2 + v ** 2),
-                    "height": np.asarray(s.h.data, dtype=np.float64)}
+                    "height": np.asarray(s.h, dtype=np.float64)}
 
-        key_array_fn = lambda s: s.h.data
+        key_array_fn = lambda s: s.h
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -1034,7 +1055,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             f"Shallow water not implemented for grid '{tc.grid_type}'")
 
     # --- Time loop ---
-    mass_init = float(jnp.mean(state.h.data))
+    h_data = state.h if isinstance(state.h, jnp.ndarray) else state.h.data
+    mass_init = float(jnp.mean(h_data))
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 20)
 
@@ -1047,7 +1069,14 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
     notes = ""
     if test_num == 2 and tc.grid_type == "cubed_sphere":
         exact = williamson_test2_exact(grid, days * 86400.0)
-        norms = compute_error_norms(state, exact, grid)
+        h_final = state.h if isinstance(state.h, jnp.ndarray) else state.h.data
+        h_exact = exact.h.data
+        # Manual L2 / Linf norms for CDGrid state
+        err = h_final - h_exact
+        area = grid.area
+        l2 = float(jnp.sqrt(jnp.sum(err**2 * area) / jnp.sum(h_exact**2 * area)))
+        linf = float(jnp.max(jnp.abs(err)) / jnp.max(jnp.abs(h_exact)))
+        norms = {"l2": l2, "linf": linf}
         notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
     elif test_num == 2 and tc.grid_type == "latlon":
         exact = williamson_test2_exact_latlon(grid, days * 86400.0)

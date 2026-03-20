@@ -206,6 +206,7 @@ def build_segment_fn(
     o3_vmr,
     aerosol_od,
     start_day: float,
+    gradient_checkpoint: bool = False,
 ):
     """Build a compiled segment function.
 
@@ -245,6 +246,10 @@ def build_segment_fn(
         External forcing (fixed within segment).
     start_day : float
         Start day for the entire run (used to compute step→day).
+    gradient_checkpoint : bool, optional
+        If True, wrap the scan body with ``jax.checkpoint`` to trade
+        recomputation for O(sqrt(N)) memory during reverse-mode AD.
+        Default False (full trajectory stored).
 
     Returns
     -------
@@ -357,14 +362,21 @@ def build_segment_fn(
         )
         return new_carry, None
 
-    @partial(jax.jit, static_argnums=(1,))
+    # Optionally wrap scan body with gradient checkpointing so that
+    # reverse-mode AD uses O(sqrt(N)) memory instead of O(N).
+    _step_fn = _single_step
+    if gradient_checkpoint:
+        _step_fn = jax.checkpoint(_single_step, prevent_cse=False)
+
+    @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
     def run_segment(carry: SegmentCarry, n_steps: int) -> SegmentCarry:
         """Run n_steps of the atmosphere integration as a compiled kernel.
 
         Parameters
         ----------
         carry : SegmentCarry
-            Input state.
+            Input state.  The input buffers are **donated** — XLA may
+            recycle them in-place for the output, reducing peak memory.
         n_steps : int
             Number of steps to execute.  This is a **static** argument:
             ``jax.lax.scan`` requires a concrete ``length``, so changing
@@ -377,7 +389,7 @@ def build_segment_fn(
         SegmentCarry
             Updated state after n_steps.
         """
-        final_carry, _ = jax.lax.scan(_single_step, carry, None, length=n_steps)
+        final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
         return final_carry
 
     return run_segment

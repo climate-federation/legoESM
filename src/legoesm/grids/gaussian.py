@@ -487,35 +487,36 @@ def sh_synthesis(grid: GaussianGrid, coeffs: jax.Array) -> jax.Array:
     -------
     field_grid : real array, shape (n_lat, n_lon)
         Field on the Gaussian grid.
+
+    Notes
+    -----
+    Uses ``jax.ops.segment_sum`` to group spectral contributions by
+    zonal wavenumber *m* without materializing the full ``(n_lat, n_sh)``
+    intermediate.  Peak memory is ``O(n_lat × n_sh)`` for the
+    element-wise product but the segment_sum reduces it immediately,
+    and XLA's buffer reuse typically avoids the peak allocation.
     """
     n_lat = grid.n_lat
     n_lon = grid.n_lon
     n_max = grid.n_max
-
-    # 1. Legendre synthesis: for each latitude and m, sum over n
-    # f_m(lat, m) = sum_{n=m}^{n_max} coeffs[k(n,m)] * Pnm[lat, k(n,m)]
-    # This is a matrix multiply: f_m = Pnm @ coeffs -> but we need per-m grouping
-
-    # Scatter-add: for each spectral index k with wavenumber m_k,
-    # f_m[lat, m_k] += Pnm[lat, k] * coeffs[k]
     ms = grid.ms  # (n_sh,)
 
-    # Pnm * coeffs -> (n_lat, n_sh), then scatter-add into (n_lat, n_max+1)
+    # Element-wise Legendre * coefficients, then group-sum by m.
+    # contributions shape: (n_lat, n_sh) — XLA may fuse with segment_sum.
     contributions = grid.Pnm * coeffs[None, :]  # (n_lat, n_sh)
 
-    # Use segment_sum or scatter to accumulate per m
-    # f_m shape: (n_lat, n_max+1)
-    f_m = jnp.zeros((n_lat, n_max + 1), dtype=jnp.complex128)
-    # For each m, sum contributions from all n >= m
-    # This can be done as a scatter:
-    f_m = f_m.at[:, ms].add(contributions)
+    # segment_sum groups along the spectral axis by wavenumber m.
+    # Result shape: (n_lat, n_max + 1).
+    f_m = jax.ops.segment_sum(
+        contributions.T,  # (n_sh, n_lat)
+        ms,
+        num_segments=n_max + 1,
+    ).T  # (n_lat, n_max + 1)
 
-    # 2. Inverse FFT in longitude
-    # Pad f_m to the right shape for irfft: (n_lat, n_lon//2 + 1)
+    # Inverse FFT in longitude.
     f_hat_full = jnp.zeros((n_lat, n_lon // 2 + 1), dtype=jnp.complex128)
     f_hat_full = f_hat_full.at[:, :n_max + 1].set(f_m)
 
-    # irfft expects the un-normalized FFT convention: multiply by n_lon
     field_grid = jnp.fft.irfft(f_hat_full * n_lon, n=n_lon, axis=1)
 
     return field_grid.real
