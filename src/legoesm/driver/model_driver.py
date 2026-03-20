@@ -176,36 +176,27 @@ class ModelDriver:
             )
 
     def _create_dycore(self) -> None:
-        """Create the dynamical core model."""
+        """Create the dynamical core model via the component factory.
+
+        The factory resolves ``(model_type, discretization, grid_type)``
+        from :attr:`config` and instantiates the correct solver with
+        physically derived diffusion coefficients.
+        """
+        from legoesm.driver.component_factory import (
+            create_atmosphere_dycore, compute_diffusion,
+        )
+
+        self.model = create_atmosphere_dycore(self.config, self.grid, self.sigma)
+
+        # Keep hyperdiffusion coefficient for moisture smoothing later.
+        diff = compute_diffusion(self.grid, self.config.dycore)
+        self._hyperdiff = diff.hyperdiff
+
         dc = self.config.dycore
-        N = self.config.grid.resolution
-        dx_min = float(self.grid.dx.min()) / 2.0 if hasattr(self.grid, 'dx') else 1e5
-        DT = dc.dt
-
-        # Physical hyperdiffusion: e-folding time for grid-scale noise
-        # nu_4 = dx^4 / tau_efold, with 24-hour e-folding (conservative)
-        tau_efold = 24.0 * 3600.0
-        HYPERDIFF = dc.hyperdiff_scale * dx_min ** 4 / tau_efold
-
-        # Divergence damping: damps external gravity wave mode
-        # nu_div = scale * c_grav * dx / (2*pi)
-        c_grav = 300.0
-        div_damp = dc.div_damp_scale * c_grav * dx_min / (2.0 * 3.14159)
-
-        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
-            CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
+        logger.info(
+            f"  Dycore: {dc.model_type}/{dc.discretization} on "
+            f"{self.config.grid.grid_type}, dt={dc.dt}s"
         )
-        dycore_config = CDGridPrimitiveEquationConfig(
-            A_h=0.05 * dx_min ** 2 / DT,
-            hyperdiff_coeff=HYPERDIFF, hyperdiff_ps_coeff=0.0,
-            div_damp_coeff=div_damp,
-            use_conservation_fixer=dc.conservation_fixer,
-            fix_mass=dc.fix_mass,
-        )
-        self.model = CDGridPrimitiveEquationModel(self.grid, self.sigma, dycore_config)
-
-        self._hyperdiff = HYPERDIFF
-        logger.info(f"  Dycore: {dc.discretization}, dt={DT}s")
 
     def _create_forcing(self) -> None:
         """Load SST/SIC forcing data."""
