@@ -68,7 +68,8 @@ def _validate_mpi_runtime_versions(
             "legoESM distributed runtime requires mpi4jax "
             f"{_format_range(_TESTED_MPI4JAX_MIN, _TESTED_MPI4JAX_MAX_EXCL)} "
             f"because older versions use incompatible token semantics. "
-            f"Detected mpi4jax=={mpi4jax_version}.",
+            f"Detected mpi4jax=={mpi4jax_version}. "
+            f"Fix: pip install 'mpi4jax>=0.8,<0.9'",
         )
 
     in_tested_jax = _TESTED_JAX_MIN <= jax_triplet < _TESTED_JAX_MAX_EXCL
@@ -76,12 +77,23 @@ def _validate_mpi_runtime_versions(
     if in_tested_jax and in_tested_mpi4jax:
         return
 
+    parts = []
+    if not in_tested_jax:
+        parts.append(
+            f"jax=={jax_version} (tested "
+            f"{_format_range(_TESTED_JAX_MIN, _TESTED_JAX_MAX_EXCL)})"
+        )
+    if not in_tested_mpi4jax:
+        parts.append(
+            f"mpi4jax=={mpi4jax_version} (tested "
+            f"{_format_range(_TESTED_MPI4JAX_MIN, _TESTED_MPI4JAX_MAX_EXCL)})"
+        )
     msg = (
-        "Detected JAX/mpi4jax versions outside legoESM's tested MPI range: "
-        f"jax=={jax_version} (tested {_format_range(_TESTED_JAX_MIN, _TESTED_JAX_MAX_EXCL)}), "
-        f"mpi4jax=={mpi4jax_version} (tested "
-        f"{_format_range(_TESTED_MPI4JAX_MIN, _TESTED_MPI4JAX_MAX_EXCL)}). "
-        "MPI execution may fail or produce incorrect results."
+        "Detected versions outside legoESM's tested MPI range: "
+        + ", ".join(parts)
+        + ". MPI execution may fail or produce incorrect results. "
+        "Set LEGOESM_MPI_STRICT_COMPAT=1 to turn this into a hard error, "
+        "or install tested versions: pip install 'mpi4jax>=0.8,<0.9'"
     )
     if strict:
         raise RuntimeError(msg)

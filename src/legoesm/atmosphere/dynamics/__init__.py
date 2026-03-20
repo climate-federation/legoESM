@@ -68,6 +68,9 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel,
     CDGridPrimitiveEquationConfig,
     cdgrid_hydrostatic_tendencies,
+    fv3_hydrostatic_tendencies,
+    hydrostatic_to_fv3,
+    fv3_to_hydrostatic,
 )
 from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
     CDGridCompressibleEulerModel,

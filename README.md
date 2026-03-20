@@ -81,20 +81,25 @@ pytest tests/
 
 ## Platform Notes
 
-### Tested Compatibility Matrix
+### Compatibility Matrix
+
+**Install minimum** (from `pyproject.toml`): Python ≥3.11, JAX ≥0.4.35, mpi4jax ≥0.8,<0.9 (optional), mpi4py ≥4.1,<5 (optional).
+
+**Tested range** — the versions CI and benchmarks run against:
 
 | Path | Hardware / Backend | MPI Runtime | Tested JAX | Tested mpi4jax | Status / Notes |
 |---|---|---|---|---|---|
 | Finite-volume dycores + ocean (single-process) | CPU (`jax` CPU backend) | N/A | `>=0.8,<0.10` | N/A | Regular unit/regression path |
-| Finite-volume dycores + ocean (single-process) | Apple Silicon Metal (`jax-metal`) | N/A | `>=0.8,<0.10` | N/A | Supported for FV solvers (`float32`) |
-| Spectral solvers (atmosphere/ocean) | CPU (`JAX_PLATFORMS=cpu`) | N/A | `>=0.8,<0.10` | N/A | Requires `float64`/`complex128` |
-| Distributed MPI halo/reductions | CPU + OpenMPI (`mpirun`) | OpenMPI (4.x/5.x) | `>=0.8,<0.10` | `>=0.8,<0.9` | Validated with `mpirun -np 2/3/6` on `tests/distributed/test_halo_mpi.py` |
-| Nightly long-run MPI ocean conservation | CPU + OpenMPI (`mpirun`) | OpenMPI (4.x/5.x) | `>=0.8,<0.10` | `>=0.8,<0.9` | Validated on `tests/distributed/test_ocean_mpi_conservation.py` |
-| Multi-device scaling suite | CPU/GPU (if available) | Optional (for distributed checks) | `>=0.8,<0.10` | `>=0.8,<0.9` (MPI mode) | Use `scripts/run_parallel_validation.py` for strong/weak scaling and thresholds |
+| Finite-volume dycores + ocean (single-process) | Apple Silicon Metal (`jax-metal`) | N/A | `>=0.8,<0.10` | N/A | FV solvers only (`float32`); no `float64` |
+| Spectral solvers (atmosphere/ocean) | CPU (`JAX_PLATFORMS=cpu`) | N/A | `>=0.8,<0.10` | N/A | Requires `float64`/`complex128`; not Metal-compatible |
+| Distributed MPI halo/reductions | CPU + OpenMPI (`mpirun`) | OpenMPI 4.x/5.x | `>=0.8,<0.10` | `>=0.8,<0.9` | Validated with `mpirun -np 2/3/6` |
+| Multi-device scaling suite | CPU/GPU (if available) | Optional | `>=0.8,<0.10` | `>=0.8,<0.9` (MPI mode) | `scripts/run_parallel_validation.py` |
 
-`legoesm.parallel.reductions` enforces MPI compatibility guardrails:
-- Hard fail for legacy `mpi4jax<0.8` (incompatible token semantics).
-- Warning for versions outside tested range; set `LEGOESM_MPI_STRICT_COMPAT=1` to make this a hard fail.
+JAX versions outside the tested range may work but are not guaranteed. Versions below the install minimum will fail at `pip install`.
+
+`legoesm.parallel.reductions` enforces MPI compatibility guardrails at runtime:
+- **Hard error** for `mpi4jax<0.8` (incompatible token semantics).
+- **Warning** for JAX or mpi4jax outside the tested range. Set `LEGOESM_MPI_STRICT_COMPAT=1` to promote the warning to a hard error.
 
 Detailed runbook for real hardware MPI/multi-GPU scaling:
 - [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md)

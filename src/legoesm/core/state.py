@@ -100,6 +100,29 @@ class HydrostaticTendencies(NamedTuple):
     dphis_dt: Field
 
 
+class FV3HydrostaticState(NamedTuple):
+    """State for FV3 hydrostatic PE with D-grid prognostic winds.
+
+    Winds are stored at D-grid cell corners (6, n+1, n+1, nlev).
+    Scalars at cell centres (6, n, n[, nlev]).
+    """
+    u_d: Field    # D-grid x-velocity (6, n+1, n+1, nlev)
+    v_d: Field    # D-grid y-velocity (6, n+1, n+1, nlev)
+    T: Field      # Temperature (6, n, n, nlev)
+    p_s: Field    # Surface pressure (6, n, n)
+    phis: Field   # Surface geopotential (6, n, n)
+    tracers: dict[str, Field] | None = None
+
+
+class FV3HydrostaticTendencies(NamedTuple):
+    """Tendencies for FV3 hydrostatic PE (D-grid winds)."""
+    du_d_dt: Field   # (6, n+1, n+1, nlev)
+    dv_d_dt: Field   # (6, n+1, n+1, nlev)
+    dT_dt: Field     # (6, n, n, nlev)
+    dp_s_dt: Field   # (6, n, n)
+    dphis_dt: Field  # (6, n, n) — always zero
+
+
 class PhysicsState(NamedTuple):
     """Prognostic physics state carried across timesteps.
 

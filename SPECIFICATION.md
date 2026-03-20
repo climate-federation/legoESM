@@ -1839,16 +1839,17 @@ Global field plotting with Cartopy (Mollweide projection) and conservation times
 | Dependency | Version | Purpose |
 |------------|---------|---------|
 | **Python** | >= 3.11 | Runtime |
-| **JAX** | >= 0.4.35 | Core compute framework |
+| **JAX** | >= 0.4.35 (tested 0.8–0.9) | Core compute framework |
 | **jaxlib** | matching JAX | XLA backends |
-| **jax-metal** | latest | Apple Silicon GPU support |
+| **jax-metal** | latest | Apple Silicon GPU support (FV solvers only, no float64) |
 | **Equinox** | >= 0.11 | Neural network modules (pytree-based) |
 | **Optax** | >= 0.2 | Optimizers for training/DA |
 | **xarray** | >= 2024.0 | Data structures for I/O |
 | **zarr** | >= 2.18 | Storage format |
 | **matplotlib** | >= 3.9 | Visualization |
 | **cartopy** | >= 0.23 | Map projections |
-| **mpi4jax** | >= 0.4 | Multi-node parallelism |
+| **mpi4py** | >= 4.1, < 5 | MPI bindings (optional) |
+| **mpi4jax** | >= 0.8, < 0.9 | Multi-node parallelism (optional) |
 | **pytest** | >= 8.0 | Testing |
 | **pyyaml** | >= 6.0 | Configuration |
 | **netCDF4** | >= 1.6 | NetCDF file support |
@@ -1870,7 +1871,7 @@ requires-python = ">=3.11"
 [project.optional-dependencies]
 data = ["gcsfs", "fsspec"]
 metal = ["jax-metal"]
-mpi = ["mpi4py", "mpi4jax>=0.4"]
+mpi = ["mpi4py>=4.1,<5", "mpi4jax>=0.8,<0.9"]
 dev = ["pytest>=8.0", "ruff", "mypy"]
 
 [project.scripts]
