@@ -12,22 +12,36 @@ Usage
 
     from legoesm.parallel.distributed import initialize_distributed
 
-    config = initialize_distributed()
-    # All operators now automatically use MPI halo exchange.
+    config, layout = initialize_distributed(return_layout=True)
+    # Ranks now hold only local data — no zero-masked global arrays.
 
 Design
 ------
-Face-only mode keeps all arrays at ``(6, n, n)`` shape, with zeros
-for non-local faces.  Sub-face tiling mode keeps arrays at
-``(6, n_tile, n_tile)`` shape with only the local face populated.
+Ranks store **only their local data**.  ``layout.scatter()`` extracts
+the local portion from a global array; ``layout.gather()`` reconstructs
+the global array via MPI allgather (for I/O, plotting, restart only).
+
+The legacy ``partition_state`` / ``gather_state`` API is retained as
+thin backward-compatible shims that delegate to the layout system.
 """
 
 from __future__ import annotations
+
+import warnings
 
 import jax
 import jax.numpy as jnp
 
 from legoesm.parallel.comm import CommTopology, build_comm_topology
+from legoesm.parallel.layout import (
+    DistributedLayout,
+    SingleRankLayout,
+    make_layout,
+    scatter as layout_scatter,
+    scatter_pytree as layout_scatter_pytree,
+    gather as layout_gather,
+    gather_pytree as layout_gather_pytree,
+)
 from legoesm.parallel.mesh import (
     DeviceConfig,
     create_device_mesh,
@@ -36,12 +50,15 @@ from legoesm.parallel.mesh import (
 from legoesm.parallel.reductions import _require_mpi_stack, _mpi4jax_array_result
 
 _active_topology: CommTopology | None = None
+_active_layout: DistributedLayout | SingleRankLayout | None = None
 
 
 def initialize_distributed(
     *,
     return_topology: bool = False,
-) -> DeviceConfig | tuple[DeviceConfig, CommTopology]:
+    return_layout: bool = False,
+    global_n: int | None = None,
+) -> DeviceConfig | tuple:
     """Initialize JAX distributed runtime and set up MPI halo exchange.
 
     Automatically detects the number of MPI ranks and selects face-only
@@ -53,16 +70,22 @@ def initialize_distributed(
     Parameters
     ----------
     return_topology : bool
-        If ``True``, also return the resolved :class:`CommTopology`.
+        If ``True``, include the :class:`CommTopology` in the return.
+    return_layout : bool
+        If ``True``, include the :class:`DistributedLayout` in the return.
+    global_n : int, optional
+        Per-face grid resolution.  Required for ``return_layout=True``
+        to construct the layout.  If ``None`` and ``return_layout`` is
+        requested, the layout is not created (caller must call
+        ``make_layout`` later).
 
     Returns
     -------
-    DeviceConfig or (DeviceConfig, CommTopology)
+    DeviceConfig, or tuple including topology and/or layout as requested.
     """
-    global _active_topology
+    global _active_topology, _active_layout
 
     if _active_topology is not None:
-        import warnings
         warnings.warn(
             "initialize_distributed() called more than once. "
             "Returning existing configuration.",
@@ -71,9 +94,12 @@ def initialize_distributed(
         )
         from legoesm.parallel.mesh import get_active_config
         config = get_active_config()
+        result = [config]
         if return_topology:
-            return config, _active_topology
-        return config
+            result.append(_active_topology)
+        if return_layout:
+            result.append(_active_layout)
+        return tuple(result) if len(result) > 1 else result[0]
 
     # Validate MPI dependencies before touching JAX distributed runtime.
     _mpi4jax, MPI = _require_mpi_stack()
@@ -151,9 +177,19 @@ def initialize_distributed(
         grid_type="cubed_sphere",
     )
     set_active_config(config)
+
+    # Build the rank-local layout if grid resolution is known.
+    layout = None
+    if global_n is not None:
+        layout = make_layout(rank, n_processes, global_n)
+        _active_layout = layout
+
+    result = [config]
     if return_topology:
-        return config, topology
-    return config
+        result.append(topology)
+    if return_layout:
+        result.append(layout)
+    return tuple(result) if len(result) > 1 else result[0]
 
 
 def get_active_topology() -> CommTopology | None:
@@ -161,23 +197,89 @@ def get_active_topology() -> CommTopology | None:
     return _active_topology
 
 
-def partition_state(state, topology: CommTopology | None = None):
-    """Zero out non-local faces in a state pytree.
+def get_active_layout():
+    """Return the active distributed layout, if initialized."""
+    return _active_layout
 
-    Keeps the full ``(6, n, n)`` shape but sets non-local face data to
-    zero.  This ensures that ``jnp.sum(field * area)`` gives the local
-    contribution, and ``allreduce(SUM)`` gives the global total.
+
+def set_active_layout(layout) -> None:
+    """Set the active distributed layout (for deferred construction)."""
+    global _active_layout
+    _active_layout = layout
+
+
+# =========================================================================
+# Rank-local API (new — no zero-masked global arrays)
+# =========================================================================
+
+def scatter_to_local(global_state, layout=None):
+    """Extract rank-local data from a global ``(6, n, n, ...)`` pytree.
+
+    Unlike the legacy ``partition_state``, this returns arrays with shape
+    ``(n_local_faces, n, n, ...)`` — **not** a zero-masked ``(6, n, n)``
+    global array.  This saves memory proportional to ``6 / n_local_faces``.
 
     Parameters
     ----------
-    state
-        Any JAX pytree (e.g., ``ShallowWaterState``).
-    topology : CommTopology, optional
-        Communication topology for this rank.
+    global_state
+        Any JAX pytree with face-indexed arrays.
+    layout : DistributedLayout or SingleRankLayout, optional
+        Layout for this rank.  Uses active layout if ``None``.
 
     Returns
     -------
-    Masked pytree with same structure.
+    Rank-local pytree.
+    """
+    layout = layout or _active_layout
+    if layout is None:
+        raise ValueError(
+            "No layout provided and no active layout is set. "
+            "Call initialize_distributed(global_n=...) first."
+        )
+    return layout_scatter_pytree(global_state, layout)
+
+
+def gather_to_global(local_state, layout=None):
+    """Reconstruct a global ``(6, n, n, ...)`` pytree from rank-local data.
+
+    This is the inverse of :func:`scatter_to_local`.  Uses MPI allgather
+    under the hood.
+
+    Use this **only** for I/O, plotting, restart writing, or debug.
+
+    Parameters
+    ----------
+    local_state
+        Rank-local pytree from :func:`scatter_to_local`.
+    layout : DistributedLayout or SingleRankLayout, optional
+        Layout for this rank.
+
+    Returns
+    -------
+    Global pytree.
+    """
+    layout = layout or _active_layout
+    if layout is None:
+        raise ValueError(
+            "No layout provided and no active layout is set. "
+            "Call initialize_distributed(global_n=...) first."
+        )
+    return layout_gather_pytree(local_state, layout)
+
+
+# =========================================================================
+# Legacy API — backward-compatible shims
+# =========================================================================
+
+def partition_state(state, topology: CommTopology | None = None):
+    """Zero out non-local faces in a state pytree.
+
+    .. deprecated::
+        Use :func:`scatter_to_local` instead, which returns truly
+        rank-local arrays (smaller shape, less memory).
+
+    This legacy function keeps the full ``(6, n, n)`` shape but sets
+    non-local face data to zero.
     """
     topology = topology or _active_topology
     if topology is None:
@@ -205,21 +307,14 @@ def partition_state(state, topology: CommTopology | None = None):
 
 
 def gather_state(local_state, topology: CommTopology | None = None):
-    """Gather a partitioned state from all MPI ranks.
+    """Gather a zero-masked partitioned state from all MPI ranks.
 
-    Since non-local faces are zero, ``allreduce(SUM)`` produces the
-    complete global state.
+    .. deprecated::
+        Use :func:`gather_to_global` instead with rank-local data
+        from :func:`scatter_to_local`.
 
-    Parameters
-    ----------
-    local_state
-        Partitioned JAX pytree (non-local faces are zero).
-    topology : CommTopology, optional
-        Communication topology.
-
-    Returns
-    -------
-    Global state pytree with all faces populated.
+    This legacy function uses ``allreduce(SUM)`` on the zero-masked
+    global arrays (each rank contributes its local faces, zeros elsewhere).
     """
     topology = topology or _active_topology
     if topology is None:

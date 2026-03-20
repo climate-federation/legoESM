@@ -112,6 +112,8 @@ from legoesm.parallel.device_config import (
 )
 
 from legoesm.parallel.sharded_dynamics import (
+    StepCacheKey,
+    CompiledShardedStep,
     make_sharded_step,
     shard_state as shard_state_to_devices,
     gather_state as gather_state_from_devices,
@@ -125,6 +127,21 @@ from legoesm.parallel.sharded_dynamics import (
 
 from legoesm.parallel.reductions import (
     batch_allreduce_mpi,
+)
+
+from legoesm.parallel.layout import (
+    DistributedLayout,
+    SingleRankLayout,
+    FaceOwnership,
+    make_layout,
+    scatter as layout_scatter,
+    scatter_pytree as layout_scatter_pytree,
+    gather as layout_gather,
+    gather_pytree as layout_gather_pytree,
+    local_sum as layout_local_sum,
+    local_max as layout_local_max,
+    local_min as layout_local_min,
+    global_reduce as layout_global_reduce,
 )
 
 from legoesm.parallel.ensemble import (
@@ -199,6 +216,8 @@ __all__ = [
     "async_halo_step_multi",
     "async_halo_step_vector",
     # Sharded dynamics (shard_map-based SPMD)
+    "StepCacheKey",
+    "CompiledShardedStep",
     "make_sharded_step",
     "shard_state_to_devices",
     "gather_state_from_devices",

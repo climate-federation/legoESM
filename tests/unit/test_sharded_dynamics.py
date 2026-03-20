@@ -223,12 +223,12 @@ class TestMakeShardedStep:
             atol=1e-12,
         )
 
-    def test_sharded_step_with_physics_fn_single_device_raises(self):
-        """On single device the JIT'd step cannot accept a function arg.
+    def test_sharded_step_with_physics_fn_single_device(self):
+        """On single device, physics_fn is captured in the jitted closure.
 
-        The single-device path wraps the step in @jax.jit without marking
-        physics_fn as static, so passing a callable raises TypeError.
-        Use sharded_step_with_halo for physics on single device.
+        The single-device path wraps the step in @jax.jit with the
+        physics_fn captured in the closure (not passed as a traced
+        argument), so passing a callable works correctly.
         """
         config = _single_device_config()
         model = _MockModel()
@@ -239,8 +239,15 @@ class TestMakeShardedStep:
             return s._replace(T=s.T.replace(data=s.T.data + 1.0))
 
         step_fn = make_sharded_step(model, config)
-        with pytest.raises(TypeError):
-            step_fn(state, dt, physics_fn=physics)
+        result = step_fn(state, dt, physics_fn=physics)
+
+        # Verify physics was applied: T should be stepped + 1.0
+        expected = model.step_with_physics(state, dt, physics)
+        np.testing.assert_allclose(
+            np.asarray(result.T.data),
+            np.asarray(expected.T.data),
+            atol=1e-6,
+        )
 
     def test_sharded_step_preserves_state_type(self):
         """The returned state has the same type as the input."""
