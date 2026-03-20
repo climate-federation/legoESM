@@ -1119,7 +1119,7 @@ def run_rest_state_test(
     n_steps,
     output_dir,
     point_size,
-    discretization="centered",
+    discretization="cdgrid",
 ):
     """Rest-state adjustment: start from rest, verify small tendencies."""
     print("\n" + "=" * 70)
@@ -1441,7 +1441,7 @@ def run_gravity_wave_test(
     n_steps,
     output_dir,
     point_size,
-    discretization="centered",
+    discretization="cdgrid",
 ):
     """Barotropic gravity wave: Gaussian SSH perturbation."""
     print("\n" + "=" * 70)
@@ -1780,7 +1780,7 @@ def run_wind_driven_gyre_test(
     n_steps,
     output_dir,
     point_size,
-    discretization="centered",
+    discretization="cdgrid",
 ):
     """Wind-driven double gyre with idealized zonal wind stress."""
     print("\n" + "=" * 70)
@@ -2628,7 +2628,7 @@ def _run_forced_ocean_case(
     forcing_step_fn=None,
     central_longitude=0.0,
     extra_plot_fn=None,
-    discretization="centered",
+    discretization="cdgrid",
 ):
     """Run a generic forced idealized ocean case with standard diagnostics."""
     print("\n" + "=" * 70)
@@ -2707,7 +2707,7 @@ def _run_forced_ocean_case(
 
 
 def run_adiabatic_topography_adjustment_test(
-    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
+    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="cdgrid",
 ):
     """Adiabatic adjustment over topography."""
     state = _rest_state_all_ocean(
@@ -2789,7 +2789,7 @@ def run_adiabatic_topography_adjustment_test(
 
 
 def run_holland_lin_double_gyre_test(
-    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
+    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="cdgrid",
 ):
     """Wind-forced double gyre in a closed rectangular basin (Holland-Lin style)."""
     state = _rest_state_all_ocean(
@@ -2884,7 +2884,7 @@ def run_holland_lin_double_gyre_test(
 
 
 def run_diabatic_thermohaline_test(
-    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
+    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="cdgrid",
 ):
     """Diabatic idealized thermohaline circulation with SST/SSS restoring."""
     state = _rest_state_all_ocean(
@@ -2964,7 +2964,7 @@ def run_diabatic_thermohaline_test(
 
 
 def run_two_layer_phillips_test(
-    grid, base_z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
+    grid, base_z_coord, config, dt, n_steps, output_dir, point_size, discretization="cdgrid",
 ):
     """Two-layer Phillips-style baroclinic test with zonal-mean relaxation."""
     del base_z_coord
@@ -3083,7 +3083,7 @@ def run_two_layer_phillips_test(
 
 
 def run_taylor_column_test(
-    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="centered",
+    grid, z_coord, config, dt, n_steps, output_dir, point_size, discretization="cdgrid",
 ):
     """Taylor-column style flow over a seamount in rotating stratified ocean."""
     sim_seconds = n_steps * dt
@@ -3212,9 +3212,9 @@ def main():
     parser.add_argument(
         "--discretization",
         type=str,
-        default="centered",
+        default="cdgrid",
         choices=OCEAN_DISCRETIZATIONS,
-        help="Ocean horizontal discretization (default: centered).",
+        help="Ocean horizontal discretization (default: cdgrid).",
     )
     args = parser.parse_args()
 

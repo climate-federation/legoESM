@@ -34,6 +34,7 @@ from legoesm.core.operators_fc_3d import (
     fc_gradient_x_3d,
     fc_gradient_y_3d,
     fc_divergence_3d,
+    fc_laplacian_3d,
     fc_hyperdiffusion_3d,
     fc_scalar_advection_3d,
 )
@@ -59,6 +60,7 @@ from legoesm import constants
 class FCPrimitiveEquationConfig(NamedTuple):
     """Configuration for the FC hydrostatic PE model."""
     g: float = constants.g
+    A_h: float = 0.0               # Laplacian viscosity [m^2/s]
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
     T_min: float = 50.0            # Temperature floor [K]
@@ -175,20 +177,18 @@ def fc_hydrostatic_tendencies(
     du_dt_data = abs_vor * v - dB_dx - pg_corr_x
     dv_dt_data = -abs_vor * u - dB_dy - pg_corr_y
 
-    # --- 5. Surface pressure tendency via FC transport ---
+    # --- 5. Surface pressure tendency and sigma-dot ---
+    # CRITICAL: dp_s/dt and σ̇ MUST use the SAME divergence operator.
+    div_v = fc_divergence_3d(u, v, grid, fc_config)
+
     sigma_top = sigma_coord.sigma_half[0]
     sigma_range = 1.0 - sigma_top
 
-    u_int = jnp.sum(u * dsigma[None, None, None, :], axis=-1)
-    v_int = jnp.sum(v * dsigma[None, None, None, :], axis=-1)
-
-    dp_s_dt_data = fc_flux_divergence(
-        p_s, u_int / sigma_range, v_int / sigma_range, grid, fc_config,
-    )
+    # dp_s/dt from FC divergence (same operator as σ̇)
+    D_total = jnp.sum(div_v * dsigma[None, None, None, :], axis=-1)
+    dp_s_dt_data = -p_s * D_total / sigma_range
     dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
-    # Sigma-dot from FC divergence for consistency
-    div_v = fc_divergence_3d(u, v, grid, fc_config)
     sigma_dot = compute_sigma_dot(div_v, sigma_coord)
 
     # --- 7. Vertical advection ---
@@ -209,6 +209,16 @@ def fc_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
+
+    # --- 8b. Laplacian viscosity (∇²) ---
+    # Damps intermediate-scale modes that ∇⁴ hyperdiffusion misses.
+    if config.A_h > 0:
+        lap_u = fc_laplacian_3d(u, grid, fc_config)
+        lap_v = fc_laplacian_3d(v, grid, fc_config)
+        lap_T = fc_laplacian_3d(T, grid, fc_config)
+        du_dt_data = du_dt_data + config.A_h * lap_u
+        dv_dt_data = dv_dt_data + config.A_h * lap_v
+        dT_dt_data = dT_dt_data + config.A_h * lap_T
 
     # --- 9. Hyperdiffusion ---
     if config.hyperdiff_coeff > 0:

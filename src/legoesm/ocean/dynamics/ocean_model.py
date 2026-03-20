@@ -39,6 +39,13 @@ from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 
 OCEAN_DISCRETIZATIONS = ["cdgrid"]
 
+# Legacy discretization name mapping
+_LEGACY_DISCRETIZATION_MAP = {
+    "centered": "cdgrid",
+    "finite_volume": "cdgrid",
+    "fv": "cdgrid",
+}
+
 
 class OceanModel:
     """Boussinesq hydrostatic ocean model on the cubed-sphere.
@@ -78,6 +85,9 @@ class OceanModel:
         discretization: str = "cdgrid",
         fc_config=None,
     ):
+        # Map legacy discretization names to current names
+        discretization = _LEGACY_DISCRETIZATION_MAP.get(discretization, discretization)
+
         if discretization not in OCEAN_DISCRETIZATIONS:
             raise ValueError(
                 f"Unknown ocean discretization {discretization!r}. "

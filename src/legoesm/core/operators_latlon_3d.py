@@ -16,6 +16,7 @@ from legoesm.core.operators_latlon import (
     gradient_y,
     divergence,
     curl_z,
+    laplacian,
     hyperdiffusion,
 )
 from legoesm.grids.latlon import LatLonGrid
@@ -47,6 +48,12 @@ def _divergence_raw(u_k, v_k, *, grid):
     u_f = Field(data=u_k, name="u", dims=("lat", "lon"), units="m/s")
     v_f = Field(data=v_k, name="v", dims=("lat", "lon"), units="m/s")
     return divergence(u_f, v_f, grid).data
+
+
+def _laplacian_raw(f_k, *, grid):
+    """laplacian wrapper: raw array -> raw array."""
+    f_field = Field(data=f_k, name="f", dims=("lat", "lon"), units="")
+    return laplacian(f_field, grid).data
 
 
 def _hyperdiffusion_raw(f_k, *, grid, coeff):
@@ -129,3 +136,18 @@ def hyperdiffusion_3d(field_3d: jax.Array, grid: LatLonGrid, coeff: float) -> ja
     jax.Array : Hyperdiffusion tendency, shape (n_lat, n_lon, nlev).
     """
     return vmap_over_levels(_hyperdiffusion_raw)(field_3d, grid=grid, coeff=coeff)
+
+
+def laplacian_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
+    """Compute Laplacian at all levels via vmap.
+
+    Parameters
+    ----------
+    field_3d : jax.Array, shape (n_lat, n_lon, nlev)
+    grid : LatLonGrid
+
+    Returns
+    -------
+    jax.Array : Laplacian, shape (n_lat, n_lon, nlev).
+    """
+    return vmap_over_levels(_laplacian_raw)(field_3d, grid=grid)

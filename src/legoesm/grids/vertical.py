@@ -383,6 +383,57 @@ def vertical_advection(
     return -sigma_dot_full * grad
 
 
+def vertical_advection_theta(
+    T: jax.Array,
+    sigma_dot: jax.Array,
+    p_s: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> jax.Array:
+    """Combined vertical advection + adiabatic σ̇ term for temperature.
+
+    Instead of computing  -σ̇·∂T/∂σ  and  κ·T·σ̇/σ  separately (which
+    involves catastrophic cancellation at upper levels where 1/σ → ∞),
+    this function advects potential temperature θ and converts back:
+
+        -σ̇·∂T/∂σ + κ·T·σ̇/σ  =  -(p/p₀)^κ · σ̇·∂θ/∂σ
+
+    This eliminates the 1/σ amplification and is numerically stable at
+    all levels.
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature, shape (..., nlev).
+    sigma_dot : jax.Array
+        Sigma-dot at interfaces, shape (..., nlev+1).
+    p_s : jax.Array
+        Surface pressure, shape (...).
+    sigma_coord : SigmaCoordinate
+        Vertical coordinate.
+
+    Returns
+    -------
+    jax.Array
+        Combined tendency: -σ̇·∂T/∂σ + κ·T·σ̇/σ, shape (..., nlev).
+    """
+    kappa = constants.kappa
+    sigma_full = sigma_coord.sigma_full  # (nlev,)
+    P_0 = 1.0e5
+
+    # Pressure at full levels
+    p_full = sigma_full * p_s[..., None]  # (..., nlev)
+
+    # Potential temperature: θ = T · (p₀/p)^κ
+    theta = T * (P_0 / jnp.maximum(p_full, 1.0)) ** kappa
+
+    # Advect θ: -σ̇ · ∂θ/∂σ  (using same upwind scheme)
+    adv_theta = vertical_advection(theta, sigma_dot, sigma_coord)
+
+    # Convert back: tendency_T = (p/p₀)^κ · adv_θ
+    exner = (p_full / P_0) ** kappa  # (p/p₀)^κ
+    return exner * adv_theta
+
+
 def compute_pressure_velocity(
     sigma_dot: jax.Array,
     p_s: jax.Array,
@@ -523,6 +574,21 @@ class HybridSigmaPressureCoordinate(NamedTuple):
     def dsigma_full(self):
         """Difference between full-level sigma coefficients."""
         return jnp.diff(self.sigma_full)
+
+    @property
+    def fractional_sigma(self):
+        """Fractional sigma for sigma-dot computation.
+
+        fractional_sigma[k] = (sigma_half[k+1] - sigma_top) / (1 - sigma_top)
+
+        This is the same quantity precomputed in SigmaCoordinate and
+        required by ``compute_sigma_dot``.
+        """
+        s_half = self.sigma_half  # A_half + B_half
+        sigma_top = s_half[0]
+        sigma_range = s_half[-1] - sigma_top
+        sigma_range = jnp.where(sigma_range > 0, sigma_range, 1.0)
+        return (s_half[1:] - sigma_top) / sigma_range
 
 
 def create_hybrid_coordinate(

@@ -38,9 +38,10 @@ from legoesm.core.operators_latlon_3d import (
     gradient_x_3d as _gradient_x_3d,
     gradient_y_3d as _gradient_y_3d,
     divergence_3d as _divergence_3d,
+    laplacian_3d as _laplacian_3d,
     hyperdiffusion_3d as _hyperdiffusion_3d,
 )
-from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
+from legoesm.core.operators_fv_latlon_3d import fv_scalar_advection_latlon_3d
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.polar_filter import (
     compute_polar_filter_mask,
@@ -65,13 +66,19 @@ from legoesm import constants
 class LatLonPrimitiveEquationConfig(NamedTuple):
     """Configuration for the lat-lon hydrostatic primitive equation model."""
     g: float = constants.g
+    A_h: float = 0.0                   # Laplacian viscosity [m^2/s]
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
+    div_damp_coeff: float = 0.0       # divergence damping coefficient
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     use_polar_filter: bool = True
     polar_filter_cutoff_deg: float = 60.0
     polar_filter_max_wave_speed: float = 300.0  # external gravity wave [m/s]
+    T_min: float = 150.0               # temperature floor [K]
+    p_floor: float = 50.0              # surface pressure floor [Pa]
+    sponge_sigma: float = 0.15         # Rayleigh sponge activates above this sigma
+    sponge_tau_sec: float = 3600.0     # e-folding time at model top [s]
 
 
 # ==============================================================================
@@ -116,7 +123,7 @@ def latlon_hydrostatic_tendencies(
     R_d = constants.R_d
     kappa = constants.kappa
     dsigma = sigma_coord.dsigma  # (nlev,)
-    p_s = jnp.clip(p_s, 100.0, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
 
     # --- 1. Pressure at full levels ---
     p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
@@ -156,16 +163,18 @@ def latlon_hydrostatic_tendencies(
     dv_dt_data = -abs_vor * u - dB_dy - pg_corr_y
 
     # --- 5. Surface pressure tendency and sigma-dot ---
+    # CRITICAL: dp_s/dt and σ̇ MUST use the SAME divergence operator.
+    # Using FV flux divergence for dp_s/dt but centered divergence for
+    # σ̇ breaks the discrete continuity closure, creating spurious
+    # vertical motion at the model top and exponential instability.
     div_v = _divergence_3d(u, v, grid)
 
     sigma_top = sigma_coord.sigma_half[0]
     sigma_range = 1.0 - sigma_top
 
-    u_int = jnp.sum(u * dsigma[None, None, :], axis=-1)
-    v_int = jnp.sum(v * dsigma[None, None, :], axis=-1)
-    dp_s_dt_data = fv_flux_divergence_latlon(
-        p_s, u_int / sigma_range, v_int / sigma_range, grid, limiter=True,
-    )
+    # dp_s/dt from centered divergence (same operator as σ̇)
+    D_total = jnp.sum(div_v * dsigma[None, None, :], axis=-1)  # (n_lat, n_lon)
+    dp_s_dt_data = -p_s * D_total / sigma_range
 
     sigma_dot = compute_sigma_dot(div_v, sigma_coord)
 
@@ -178,9 +187,8 @@ def latlon_hydrostatic_tendencies(
     dv_dt_data = dv_dt_data + vert_adv_v
 
     # --- 8. Thermodynamic equation ---
-    dT_dx = _gradient_x_3d(T, grid)
-    dT_dy = _gradient_y_3d(T, grid)
-    horiz_adv_T = -(u * dT_dx + v * dT_dy)
+    # PPM FV advection (monotone, prevents grid-scale noise from centered scheme)
+    horiz_adv_T = fv_scalar_advection_latlon_3d(T, u, v, grid, limiter=True)
 
     omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
     adiabatic = kappa * T * omega / p_full
@@ -189,6 +197,16 @@ def latlon_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
+
+    # --- 8b. Laplacian viscosity (∇²) ---
+    # Damps intermediate-scale modes that ∇⁴ hyperdiffusion misses.
+    if config.A_h > 0:
+        lap_u = _laplacian_3d(u, grid)
+        lap_v = _laplacian_3d(v, grid)
+        lap_T = _laplacian_3d(T, grid)
+        du_dt_data = du_dt_data + config.A_h * lap_u
+        dv_dt_data = dv_dt_data + config.A_h * lap_v
+        dT_dt_data = dT_dt_data + config.A_h * lap_T
 
     # --- 9. Hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
@@ -206,12 +224,37 @@ def latlon_hydrostatic_tendencies(
         diff_ps = _hyperdiffusion_2d(ps_field, grid, config.hyperdiff_ps_coeff)
         dp_s_dt_data = dp_s_dt_data + diff_ps.data
 
-    # --- 9b. Polar filter on tendencies ---
+    # --- 9a. Divergence damping ---
+    # Damp divergent (gravity wave) modes: du/dt -= ν_div * ∂δ/∂x
+    # This is the standard explicit approach used in FV3 and similar
+    # PE dycores.  It selectively damps the irrotational component
+    # without affecting the vorticity-carrying rotational modes.
+    if config.div_damp_coeff > 0:
+        # div_v already computed above: (..., nlev)
+        div_dx = _gradient_x_3d(div_v, grid)
+        div_dy = _gradient_y_3d(div_v, grid)
+        du_dt_data = du_dt_data - config.div_damp_coeff * div_dx
+        dv_dt_data = dv_dt_data - config.div_damp_coeff * div_dy
+
+    # --- 9b. Temperature floor ---
+    # (Applied later via state clipping in the model step)
+
+    # --- 9c. Polar filter on tendencies ---
     if config.use_polar_filter and polar_mask is not None:
         du_dt_data = fourier_filter_3d(du_dt_data, grid, polar_mask)
         dv_dt_data = fourier_filter_3d(dv_dt_data, grid, polar_mask)
         dT_dt_data = fourier_filter_3d(dT_dt_data, grid, polar_mask)
         dp_s_dt_data = fourier_filter(dp_s_dt_data, grid, polar_mask)
+
+    # --- 9d. Upper-atmosphere Rayleigh sponge ---
+    if config.sponge_tau_sec > 0 and config.sponge_sigma > 0:
+        sigma_full = sigma_coord.sigma_full  # (nlev,)
+        sponge_frac = jnp.clip(
+            (config.sponge_sigma - sigma_full) / config.sponge_sigma, 0.0, 1.0
+        )
+        sponge_rate = sponge_frac**2 / config.sponge_tau_sec  # (nlev,)
+        du_dt_data = du_dt_data - sponge_rate * u
+        dv_dt_data = dv_dt_data - sponge_rate * v
 
     # --- 10. Add physics tendencies ---
     if physics_tendency is not None:
@@ -328,6 +371,14 @@ class LatLonPrimitiveEquationModel(IntegrationMixin):
 
         state_new = ssp_rk3_step(state, tendency_fn, dt)
 
+        # Temperature and pressure floors
+        T_new = jnp.clip(state_new.T.data, self.config.T_min, None)
+        p_s_new = jnp.clip(state_new.p_s.data, self.config.p_floor, None)
+        state_new = state_new._replace(
+            T=state_new.T.replace(data=T_new),
+            p_s=state_new.p_s.replace(data=p_s_new),
+        )
+
         if self.config.use_conservation_fixer and self.config.fix_mass:
             from legoesm.core.conservation import fix_mass_hydrostatic_latlon
             state_new = fix_mass_hydrostatic_latlon(state_new, state, self.grid)
@@ -373,6 +424,14 @@ class LatLonPrimitiveEquationModel(IntegrationMixin):
             )
 
         state_new = ssp_rk3_step(state, tendency_fn, dt)
+
+        # Temperature and pressure floors
+        T_new = jnp.clip(state_new.T.data, self.config.T_min, None)
+        p_s_new = jnp.clip(state_new.p_s.data, self.config.p_floor, None)
+        state_new = state_new._replace(
+            T=state_new.T.replace(data=T_new),
+            p_s=state_new.p_s.replace(data=p_s_new),
+        )
 
         if self.config.use_conservation_fixer and self.config.fix_mass:
             from legoesm.core.conservation import fix_mass_hydrostatic_latlon

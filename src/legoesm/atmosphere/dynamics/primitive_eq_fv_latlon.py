@@ -34,6 +34,7 @@ from legoesm.core.operators_latlon_3d import (
     gradient_x_3d as _gradient_x_3d,
     gradient_y_3d as _gradient_y_3d,
     divergence_3d as _divergence_3d,
+    laplacian_3d as _laplacian_3d,
     hyperdiffusion_3d as _hyperdiffusion_3d,
 )
 from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
@@ -64,6 +65,7 @@ from legoesm import constants
 class FVLatLonPrimitiveEquationConfig(NamedTuple):
     """Configuration for the FV hydrostatic PE model on a lat-lon grid."""
     g: float = constants.g
+    A_h: float = 0.0               # Laplacian viscosity [m^2/s]
     hyperdiff_coeff: float = 0.0
     hyperdiff_ps_coeff: float = 0.0
     use_conservation_fixer: bool = True
@@ -145,21 +147,20 @@ def fv_latlon_hydrostatic_tendencies(
     du_dt_data = abs_vor * v - dB_dx - pg_corr_x
     dv_dt_data = -abs_vor * u - dB_dy - pg_corr_y
 
-    # --- 5. Surface pressure tendency via FV transport ---
+    # --- 5. Surface pressure tendency and sigma-dot ---
+    # CRITICAL: dp_s/dt and σ̇ MUST use the SAME divergence operator.
+    # Using FV flux divergence for dp_s/dt but centered divergence for
+    # σ̇ breaks the discrete continuity closure.
+    div_v = _divergence_3d(u, v, grid)
+
     sigma_top = sigma_coord.sigma_half[0]
     sigma_range = 1.0 - sigma_top
 
-    u_int = jnp.sum(u * dsigma[None, None, :], axis=-1)  # (n_lat, n_lon)
-    v_int = jnp.sum(v * dsigma[None, None, :], axis=-1)
-
-    dp_s_dt_data = fv_flux_divergence_latlon(
-        p_s, u_int / sigma_range, v_int / sigma_range, grid,
-        limiter=config.use_limiter,
-    )
+    # dp_s/dt from centered divergence (same operator as σ̇)
+    D_total = jnp.sum(div_v * dsigma[None, None, :], axis=-1)
+    dp_s_dt_data = -p_s * D_total / sigma_range
     dp_s_dt_data = zero_mean_tendency_latlon(dp_s_dt_data, grid)
 
-    # sigma-dot from divergence (centered for vertical consistency)
-    div_v = _divergence_3d(u, v, grid)
     sigma_dot = compute_sigma_dot(div_v, sigma_coord)
 
     # --- 7. Vertical advection of T, u, v ---
@@ -185,6 +186,16 @@ def fv_latlon_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
+
+    # --- 8b. Laplacian viscosity (∇²) ---
+    # Damps intermediate-scale modes that ∇⁴ hyperdiffusion misses.
+    if config.A_h > 0:
+        lap_u = _laplacian_3d(u, grid)
+        lap_v = _laplacian_3d(v, grid)
+        lap_T = _laplacian_3d(T, grid)
+        du_dt_data = du_dt_data + config.A_h * lap_u
+        dv_dt_data = dv_dt_data + config.A_h * lap_v
+        dT_dt_data = dT_dt_data + config.A_h * lap_T
 
     # --- 9. Hyperdiffusion ---
     if config.hyperdiff_coeff > 0:

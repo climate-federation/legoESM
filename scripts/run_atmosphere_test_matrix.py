@@ -201,13 +201,53 @@ def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 5e16) -> float:
     return ref_coeff * (ref_n / n) ** 4
 
 
+def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 5e6) -> float:
+    """Scale second-order divergence damping for cubed-sphere."""
+    return ref_coeff * (ref_n / n) ** 2
+
+
 def _hyperdiff_latlon(n_lat: int, ref_n: int = 64, ref_coeff: float = 2e16) -> float:
     return ref_coeff * (ref_n / n_lat) ** 4
+
+
+def _div_damp_latlon(n_lat: int, ref_n: int = 64, ref_coeff: float = 5e6) -> float:
+    """Scale second-order divergence damping coefficient with grid spacing."""
+    return ref_coeff * (ref_n / n_lat) ** 2
 
 
 def _hyperdiff_ico(mesh) -> float:
     dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
     return dx_mean ** 4 / (48.0 * 3600.0)
+
+
+def _laplacian_visc_cube(n: int, frac: float = 0.1) -> float:
+    """Laplacian viscosity A_h = frac * c_gw * dx for cubed-sphere.
+
+    Damps intermediate-scale modes that ∇⁴ hyperdiffusion misses.
+    """
+    import math
+    from legoesm import constants
+    dx = math.pi * constants.R_earth / (2.0 * n)
+    c_gw = math.sqrt(constants.R_d * 300.0)
+    return frac * c_gw * dx
+
+
+def _laplacian_visc_latlon(n_lat: int, frac: float = 0.1) -> float:
+    """Laplacian viscosity A_h = frac * c_gw * dy for lat-lon grid."""
+    import math
+    from legoesm import constants
+    dy = math.pi * constants.R_earth / n_lat
+    c_gw = math.sqrt(constants.R_d * 300.0)
+    return frac * c_gw * dy
+
+
+def _laplacian_visc_ico(mesh, frac: float = 0.1) -> float:
+    """Laplacian viscosity A_h = frac * c_gw * dx for icosahedral grid."""
+    import math
+    from legoesm import constants
+    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
+    c_gw = math.sqrt(constants.R_d * 300.0)
+    return frac * c_gw * dx_mean
 
 
 # ---------------------------------------------------------------------------
@@ -1058,12 +1098,13 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         hd = _hyperdiff_cube(n)
+        dd = _div_damp_cube(n)
+        ah = _laplacian_visc_cube(n)
         dt = 200.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
-            use_conservation_fixer=True, fix_mass=True,
-            edge_blend_uv=0.15, edge_blend_T=0.10,
-            edge_blend_p_s=0.20, edge_blend_width=2)
+            div_damp_coeff=dd, A_h=ah,
+            use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init(grid, sigma)
 
@@ -1106,9 +1147,12 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_latlon_grid(n_lat, n_lon)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         hd = _hyperdiff_latlon(n_lat)
+        dd = _div_damp_latlon(n_lat)
+        ah = _laplacian_visc_latlon(n_lat)
         dt = 200.0
         config = LatLonPrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
+            div_damp_coeff=dd, A_h=ah,
             use_conservation_fixer=True, fix_mass=True)
         model = LatLonPrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init_latlon(grid, sigma)
@@ -1152,8 +1196,9 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         # MPAS PE currently uses sigma only
         sigma = create_sigma_coordinate(nlev)
         dt = 200.0
+        ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma)
         grid = mesh
@@ -1250,12 +1295,13 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         hd = _hyperdiff_cube(n)
+        dd = _div_damp_cube(n)
+        ah = _laplacian_visc_cube(n)
         dt = 200.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
-            use_conservation_fixer=True, fix_mass=True,
-            edge_blend_uv=0.15, edge_blend_T=0.10,
-            edge_blend_p_s=0.20, edge_blend_width=2)
+            div_damp_coeff=dd, A_h=ah,
+            use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
 
@@ -1301,9 +1347,12 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
         hd = _hyperdiff_latlon(n_lat)
+        dd = _div_damp_latlon(n_lat)
+        ah = _laplacian_visc_latlon(n_lat)
         dt = 200.0
         config = LatLonPrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
+            div_damp_coeff=dd, A_h=ah,
             use_conservation_fixer=True, fix_mass=True)
         model = LatLonPrimitiveEquationModel(grid, sigma, config)
         state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
@@ -1346,8 +1395,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         mesh = create_voronoi_mesh(level)
         sigma = create_sigma_coordinate(nlev)
         dt = 200.0
+        ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
         grid = mesh
@@ -1536,12 +1586,13 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_cubed_sphere(n)
         sigma = standard_hybrid_levels(nlev)
         hd = _hyperdiff_cube(n)
+        dd = _div_damp_cube(n)
+        ah = _laplacian_visc_cube(n)
         dt = 300.0
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
-            use_conservation_fixer=True, fix_mass=True,
-            edge_blend_uv=0.15, edge_blend_T=0.10,
-            edge_blend_p_s=0.20, edge_blend_width=2)
+            div_damp_coeff=dd, A_h=ah,
+            use_conservation_fixer=True, fix_mass=True)
         model = PrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init(grid, sigma, T_init=280.0)
 
@@ -1583,9 +1634,12 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         grid = create_latlon_grid(n_lat, n_lon)
         sigma = standard_hybrid_levels(nlev)
         hd = _hyperdiff_latlon(n_lat)
+        dd = _div_damp_latlon(n_lat)
+        ah = _laplacian_visc_latlon(n_lat)
         dt = 300.0
         config = LatLonPrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
+            div_damp_coeff=dd, A_h=ah,
             use_conservation_fixer=True, fix_mass=True)
         model = LatLonPrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init_latlon(grid, sigma)

@@ -74,6 +74,16 @@ class LatLonGrid(NamedTuple):
         return self.radius
 
     @property
+    def n(self) -> int:
+        """Grid resolution parameter, analogous to cubed-sphere ``n``.
+
+        For lat-lon grids this returns ``n_lat`` so that code expecting
+        ``grid.n`` (e.g. baroclinic wave initialisation) works
+        transparently.
+        """
+        return self.n_lat
+
+    @property
     def grid_n_columns(self) -> int:
         return self.n_lat * self.n_lon
 
