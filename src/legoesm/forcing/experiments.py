@@ -14,7 +14,9 @@ Public API
 - ``ghg_at_year(experiment_name, year)`` : interpolated (co2, ch4, n2o)
 - ``get_ghg_for_experiment(name, year)`` : same, returned as a dict
 - ``create_experiment_config(name, **overrides)`` : build an
-  ``AMIPExperimentConfig`` from a template
+  ``ExperimentConfig`` from a template (canonical runtime config)
+- ``create_amip_experiment_config(name, **overrides)`` : legacy wrapper
+  returning ``AMIPExperimentConfig`` for backward compatibility
 """
 
 from __future__ import annotations
@@ -315,33 +317,36 @@ def _year_to_day(year: int, ref_year: int) -> float:
 def create_experiment_config(
     name: str,
     **overrides,
-) -> AMIPExperimentConfig:
-    """Create an :class:`AMIPExperimentConfig` from a template.
+):
+    """Create an :class:`ExperimentConfig` from a template.
 
     The factory translates year-based experiment metadata into
     model-day-based configuration fields, sets GHG concentrations
     from the template's base values, and applies any caller-supplied
     overrides on top.
 
+    Returns the **canonical** ``ExperimentConfig``.  For the legacy
+    ``AMIPExperimentConfig`` use ``create_amip_experiment_config``.
+
     Parameters
     ----------
     name : str
         Experiment name (must be a key in ``EXPERIMENT_TEMPLATES``).
     **overrides
-        Any ``AMIPExperimentConfig`` field name with the desired value.
-        These are applied last and take precedence over template
-        defaults.
+        Any ``ExperimentConfig`` or ``AMIPExperimentConfig`` field name
+        with the desired value.  AMIPExperimentConfig field names are
+        accepted for backward compatibility and mapped transparently.
 
     Returns
     -------
-    AMIPExperimentConfig
+    ExperimentConfig
 
     Raises
     ------
     ValueError
         If *name* is not a recognised experiment.
     TypeError
-        If an override key is not a valid ``AMIPExperimentConfig`` field.
+        If an override key is not a valid field.
 
     Examples
     --------
@@ -350,6 +355,24 @@ def create_experiment_config(
     182500
     >>> cfg.co2_ppmv
     284.3
+    """
+    # Build via the legacy AMIP path and upconvert — this keeps
+    # the field mapping logic in one place and avoids duplication.
+    # Lazy import to avoid circular dependency chain.
+    from legoesm.driver.config import ExperimentConfig
+
+    amip_cfg = create_amip_experiment_config(name, **overrides)
+    return ExperimentConfig.from_amip_config(amip_cfg)
+
+
+def create_amip_experiment_config(
+    name: str,
+    **overrides,
+) -> AMIPExperimentConfig:
+    """Create an :class:`AMIPExperimentConfig` from a template.
+
+    Legacy factory — prefer ``create_experiment_config`` which returns
+    the canonical ``ExperimentConfig``.
     """
     if name not in EXPERIMENT_TEMPLATES:
         raise ValueError(

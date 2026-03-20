@@ -886,9 +886,9 @@ def _run_fv_cubesphere(
         raise ValueError(f"Unsupported case '{case}'")
     fv_variant = fv_variant.lower().strip()
     if fv_variant in ("agrid", "a-grid", "a_grid"):
-        from legoesm.atmosphere.dynamics.shallow_water_fv import (
-            FVShallowWaterConfig as _SWConfig,
-            FVShallowWaterModel as _SWModel,
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig as _SWConfig,
+            CDGridShallowWaterModel as _SWModel,
         )
 
         variant_tag = "fv_agrid"
@@ -927,13 +927,9 @@ def _run_fv_cubesphere(
     if variant_tag == "fv_agrid":
         cfg = _SWConfig(
             hyperdiff_coeff=1.0e17 * (48.0 / n) ** 4,
-            div_damp_2=nu2,
-            div_damp_4=nu4,
             time_integrator=integrator_key,
-            use_limiter=True,
             use_conservation_fixer=True,
             fix_mass=True,
-            fix_energy=False,
         )
     else:
         cfg = _SWConfig(

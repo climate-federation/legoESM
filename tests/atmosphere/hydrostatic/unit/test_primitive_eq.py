@@ -9,6 +9,7 @@ from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 from legoesm.core.operators import global_integral
 from legoesm.core.conservation import fix_mass_hydrostatic
 from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.vertical import (
     SigmaCoordinate,
     create_sigma_coordinate,
@@ -18,13 +19,15 @@ from legoesm.grids.vertical import (
     vertical_advection,
     compute_pressure_velocity,
 )
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationConfig,
-    PrimitiveEquationModel,
-    hydrostatic_tendencies,
-    _vorticity_3d,
-    _divergence_3d,
-    _gradient_x_3d,
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
+    CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+    cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
+)
+from legoesm.core.operators_3d import (
+    vorticity_3d as _vorticity_3d,
+    divergence_3d as _divergence_3d,
+    gradient_x_3d as _gradient_x_3d,
 )
 from legoesm import constants
 
@@ -37,6 +40,12 @@ from legoesm import constants
 def grid():
     """Small cubed-sphere grid for testing."""
     return create_cubed_sphere(8)
+
+
+@pytest.fixture
+def cdgrid(grid):
+    """CDGrid for testing."""
+    return create_cubed_sphere_cdgrid(grid)
 
 
 @pytest.fixture
@@ -368,7 +377,7 @@ class TestOperators3D:
 class TestHydrostaticTendencies:
     """Tests for the hydrostatic primitive equation tendency computation."""
 
-    def test_isothermal_rest_state_small_tendencies(self, grid, sigma):
+    def test_isothermal_rest_state_small_tendencies(self, grid, cdgrid, sigma):
         """Isothermal atmosphere at rest should have near-zero tendencies.
 
         For uniform T, u=v=0, uniform p_s, phis=0:
@@ -381,7 +390,7 @@ class TestHydrostaticTendencies:
         state = _make_state(grid, sigma, T_val=250.0, u_val=0.0, v_val=0.0)
         config = PrimitiveEquationConfig(hyperdiff_coeff=0.0)
 
-        tend = hydrostatic_tendencies(state, grid, sigma, config)
+        tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
 
         # All tendencies should be near zero
         assert jnp.allclose(tend.du_dt.data, 0.0, atol=1e-8), \
@@ -394,35 +403,35 @@ class TestHydrostaticTendencies:
             f"dp_s_dt max: {float(jnp.max(jnp.abs(tend.dp_s_dt.data)))}"
         assert jnp.allclose(tend.dphis_dt.data, 0.0, atol=1e-15)
 
-    def test_tendencies_finite(self, grid, sigma):
+    def test_tendencies_finite(self, grid, cdgrid, sigma):
         """Tendencies should be finite for any reasonable state."""
         state = _make_state(grid, sigma, T_val=280.0, u_val=10.0, v_val=5.0)
         config = PrimitiveEquationConfig(hyperdiff_coeff=0.0)
 
-        tend = hydrostatic_tendencies(state, grid, sigma, config)
+        tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
 
         assert jnp.all(jnp.isfinite(tend.du_dt.data)), "du_dt not finite"
         assert jnp.all(jnp.isfinite(tend.dv_dt.data)), "dv_dt not finite"
         assert jnp.all(jnp.isfinite(tend.dT_dt.data)), "dT_dt not finite"
         assert jnp.all(jnp.isfinite(tend.dp_s_dt.data)), "dp_s_dt not finite"
 
-    def test_tendencies_with_hyperdiffusion(self, grid, sigma):
+    def test_tendencies_with_hyperdiffusion(self, grid, cdgrid, sigma):
         """Tendencies with hyperdiffusion should be finite."""
         state = _make_state(grid, sigma, T_val=280.0, u_val=10.0, v_val=5.0)
         config = PrimitiveEquationConfig(hyperdiff_coeff=1e15)
 
-        tend = hydrostatic_tendencies(state, grid, sigma, config)
+        tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
 
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
         assert jnp.all(jnp.isfinite(tend.dv_dt.data))
         assert jnp.all(jnp.isfinite(tend.dT_dt.data))
 
-    def test_tendency_pytree_structure(self, grid, sigma):
+    def test_tendency_pytree_structure(self, grid, cdgrid, sigma):
         """Tendency should have same structure as state."""
         state = _make_state(grid, sigma)
         config = PrimitiveEquationConfig(hyperdiff_coeff=0.0)
 
-        tend = hydrostatic_tendencies(state, grid, sigma, config)
+        tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
 
         assert isinstance(tend, HydrostaticTendencies)
         assert tend.du_dt.data.shape == state.u.data.shape
@@ -540,14 +549,14 @@ class TestMassFixerHydrostatic:
 class TestDifferentiability:
     """Tests that the PE model is differentiable."""
 
-    def test_grad_through_tendencies(self, grid, sigma):
+    def test_grad_through_tendencies(self, grid, cdgrid, sigma):
         """jax.grad should work through tendency computation."""
         state = _make_state(grid, sigma, T_val=280.0, u_val=5.0, v_val=2.0)
         config = PrimitiveEquationConfig(hyperdiff_coeff=0.0)
 
         def loss(u_data):
             state_new = state._replace(u=state.u.replace(data=u_data))
-            tend = hydrostatic_tendencies(state_new, grid, sigma, config)
+            tend = hydrostatic_tendencies(state_new, grid, sigma, cdgrid, config)
             return jnp.sum(tend.du_dt.data ** 2)
 
         grads = jax.grad(loss)(state.u.data)

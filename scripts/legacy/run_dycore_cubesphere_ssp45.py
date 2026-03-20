@@ -712,7 +712,7 @@ def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
 def _run_hydro_held_suarez(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq import PrimitiveEquationModel, PrimitiveEquationConfig
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import CDGridPrimitiveEquationModel as PrimitiveEquationModel, CDGridPrimitiveEquationConfig as PrimitiveEquationConfig
     from legoesm.atmosphere.physics.held_suarez import held_suarez_init, held_suarez_forcing
     from legoesm.core.operators import global_integral
 
@@ -859,7 +859,7 @@ def _run_hydro_held_suarez(out_dir: Path, n: int, nlev: int, solver: str, mean_e
 def _run_hydro_baroclinic(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq import PrimitiveEquationModel, PrimitiveEquationConfig
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import CDGridPrimitiveEquationModel as PrimitiveEquationModel, CDGridPrimitiveEquationConfig as PrimitiveEquationConfig
     from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
     from legoesm.core.operators import global_integral
 

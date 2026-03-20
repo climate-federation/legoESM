@@ -1088,8 +1088,9 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.primitive_eq import (
-            PrimitiveEquationModel, PrimitiveEquationConfig)
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+            CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
         from legoesm.atmosphere.physics.held_suarez import (
             held_suarez_forcing, held_suarez_init)
         from legoesm.core.operators import global_integral
@@ -1284,8 +1285,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq import (
-            PrimitiveEquationModel, PrimitiveEquationConfig)
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+            CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
         from legoesm.atmosphere.physics.baroclinic_wave import (
             baroclinic_wave_init)
         from legoesm.core.operators import global_integral
@@ -1577,8 +1579,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.primitive_eq import (
-            PrimitiveEquationModel, PrimitiveEquationConfig)
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+            CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
         from legoesm.atmosphere.physics.held_suarez import held_suarez_init
         from legoesm.core.operators import global_integral
 
@@ -1814,7 +1817,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
             MPASCompressibleEulerModel, MPASCompressibleEulerConfig)
-        from tests.test_cases.dcmip2025.test_case_1_mpas import (
+        from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
             dcmip25_tc1_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))

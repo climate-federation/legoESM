@@ -158,7 +158,10 @@ class DiagnosticCollector:
         mean_sic = float(jnp.mean(sic))
         mean_T = float(jnp.mean(state.T.data))
         mean_T_low = float(jnp.mean(state.T.data[..., -1]))
-        max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+        if hasattr(state, 'v'):
+            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+        else:
+            max_v = float(jnp.max(jnp.abs(state.u.data)))
         mean_precip = float(jnp.mean(precip_total)) * 86400.0
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
         mean_cwv = float(jnp.mean(cwv))
@@ -310,7 +313,10 @@ class DiagnosticCollector:
         """
         if not jnp.all(jnp.isfinite(state.u.data)):
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
-        max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+        if hasattr(state, 'v'):
+            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+        else:
+            max_v = float(jnp.max(jnp.abs(state.u.data)))
         if max_v > 500:
             return f"BLOWUP at day {elapsed_day:.0f}: max wind {max_v:.1f} m/s"
         if not jnp.all(jnp.isfinite(state.T.data)):

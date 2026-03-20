@@ -22,6 +22,10 @@ from legoesm.driver.config import (
     DycoreConfig,
     OutputConfig,
     ExperimentConfig,
+    experiment_config_to_dict,
+    experiment_config_from_dict,
+    save_experiment_config,
+    load_experiment_config,
 )
 from legoesm.driver.physics_pipeline import PhysicsPipeline, PhysicsOutput, HeldRadiation, build_physics_pipeline
 from legoesm.driver.diagnostics import DiagnosticCollector

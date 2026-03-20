@@ -1,10 +1,19 @@
 """Driver configuration dataclasses.
 
-Provides structured configuration for the composable model driver,
-with conversion to/from AMIPExperimentConfig for backward compatibility.
+Provides the **canonical runtime configuration** for legoESM:
+
+- ``ExperimentConfig`` is the single authoritative in-memory schema.
+- ``GridConfig``, ``DycoreConfig``, ``OutputConfig`` are composed sub-configs.
+- Native JSON serialization via ``experiment_config_to_dict`` /
+  ``experiment_config_from_dict`` — no intermediate format needed.
+- Backward-compatible conversion to/from the legacy
+  ``AMIPExperimentConfig`` for checkpoint I/O is preserved but restricted
+  to serialization boundaries (see ``to_amip_config`` / ``from_amip_config``).
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import NamedTuple
 
 
@@ -42,6 +51,9 @@ class OutputConfig(NamedTuple):
 
 class ExperimentConfig(NamedTuple):
     """Top-level experiment configuration.
+
+    This is the **canonical runtime schema** for legoESM.  All driver,
+    physics, forcing, and diagnostic code should consume this type.
 
     Composes GridConfig, DycoreConfig, OutputConfig with physics
     and forcing parameters.
@@ -128,9 +140,17 @@ class ExperimentConfig(NamedTuple):
     distributed: bool = False
     ensemble_size: int = 1
 
+    # ------------------------------------------------------------------
+    # Legacy AMIP adapter (serialization boundary only)
+    # ------------------------------------------------------------------
+
     @staticmethod
     def from_amip_config(amip_cfg) -> ExperimentConfig:
-        """Convert AMIPExperimentConfig to ExperimentConfig."""
+        """Convert AMIPExperimentConfig to ExperimentConfig.
+
+        Used at deserialization boundaries (checkpoint load, legacy
+        experiment factory) — not in core runtime paths.
+        """
         grid = GridConfig(
             resolution=amip_cfg.resolution,
             nlev=amip_cfg.nlev,
@@ -143,12 +163,12 @@ class ExperimentConfig(NamedTuple):
             hyperdiff_scale=getattr(amip_cfg, 'hyperdiff_scale', 1.0),
         )
         output = OutputConfig(
-            output_dir=amip_cfg.output_dir,
+            output_dir=getattr(amip_cfg, 'output_dir', ''),
             diag_days=amip_cfg.diag_days,
             checkpoint_days=amip_cfg.checkpoint_days,
-            monthly_means=amip_cfg.monthly_means,
-            cmip_output=amip_cfg.cmip_output,
-            clear_sky_diag=amip_cfg.clear_sky_diag,
+            monthly_means=getattr(amip_cfg, 'monthly_means', False),
+            cmip_output=getattr(amip_cfg, 'cmip_output', False),
+            clear_sky_diag=getattr(amip_cfg, 'clear_sky_diag', False),
         )
         return ExperimentConfig(
             grid=grid,
@@ -210,7 +230,11 @@ class ExperimentConfig(NamedTuple):
         )
 
     def to_amip_config(self):
-        """Convert to AMIPExperimentConfig for backward compatibility."""
+        """Convert to AMIPExperimentConfig for backward-compatible serialization.
+
+        Used at serialization boundaries (checkpoint save, legacy config
+        export) — not in core runtime paths.
+        """
         from legoesm.forcing.amip_config import AMIPExperimentConfig
         return AMIPExperimentConfig(
             resolution=self.grid.resolution,
@@ -279,3 +303,62 @@ class ExperimentConfig(NamedTuple):
             ensemble_size=self.ensemble_size,
             output_dir=self.output.output_dir,
         )
+
+
+# ======================================================================
+# Native JSON serialization for ExperimentConfig
+# ======================================================================
+
+_SUB_CONFIGS = {
+    "grid": GridConfig,
+    "dycore": DycoreConfig,
+    "output": OutputConfig,
+}
+
+
+def experiment_config_to_dict(config: ExperimentConfig) -> dict:
+    """Serialize ExperimentConfig to a JSON-safe dict.
+
+    Sub-configs (grid, dycore, output) are inlined as nested dicts.
+    This is the canonical serialization format.
+    """
+    d = config._asdict()
+    for key in _SUB_CONFIGS:
+        sub = d[key]
+        if hasattr(sub, '_asdict'):
+            d[key] = sub._asdict()
+    return d
+
+
+def experiment_config_from_dict(d: dict) -> ExperimentConfig:
+    """Reconstruct ExperimentConfig from a dict (e.g. loaded from JSON).
+
+    Unknown fields are silently dropped for forward-compatibility
+    (so older checkpoints with removed fields still load).
+    """
+    # Reconstruct sub-configs
+    sub_values = {}
+    for key, cls in _SUB_CONFIGS.items():
+        if key in d and isinstance(d[key], dict):
+            known_sub = set(cls._fields)
+            filtered = {k: v for k, v in d[key].items() if k in known_sub}
+            sub_values[key] = cls(**filtered)
+
+    # Filter top-level fields
+    known = set(ExperimentConfig._fields)
+    filtered = {k: v for k, v in d.items() if k in known}
+    filtered.update(sub_values)
+
+    return ExperimentConfig(**filtered)
+
+
+def save_experiment_config(config: ExperimentConfig, path: Path | str) -> None:
+    """Save ExperimentConfig to JSON file."""
+    with open(path, "w") as f:
+        json.dump(experiment_config_to_dict(config), f, indent=2, default=str)
+
+
+def load_experiment_config(path: Path | str) -> ExperimentConfig:
+    """Load ExperimentConfig from JSON file."""
+    with open(path) as f:
+        return experiment_config_from_dict(json.load(f))

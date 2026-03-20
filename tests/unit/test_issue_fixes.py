@@ -21,12 +21,13 @@ from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 from legoesm.core.operators import global_integral
 from legoesm.core.conservation import fix_mass_hydrostatic
 from legoesm.grids.cubed_sphere import create_cubed_sphere
+from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.grids.vertical import create_sigma_coordinate, hybrid_from_sigma
 from legoesm.grids.halo import pad_halo_vector
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationConfig,
-    hydrostatic_tendencies,
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
+    cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
 )
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
@@ -72,12 +73,13 @@ class TestC1RestStateInvariance:
 
     def test_rest_state_tendencies_near_zero(self):
         grid = create_cubed_sphere(8)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
         sigma = create_sigma_coordinate(5)
         state = _make_hydrostatic_state(grid, sigma, T_val=300.0,
                                         u_val=0.0, v_val=0.0)
         config = PrimitiveEquationConfig(hyperdiff_coeff=0.0)
 
-        tend = hydrostatic_tendencies(state, grid, sigma, config)
+        tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
 
         # Wind tendencies should be ~0 (Coriolis with u=v=0 gives zero)
         # Use 1e-6 tolerance to accommodate float32 precision
@@ -98,13 +100,14 @@ class TestC1RestStateInvariance:
     def test_rest_state_jit_compatible(self):
         """Tendency computation should work under jax.jit."""
         grid = create_cubed_sphere(8)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
         sigma = create_sigma_coordinate(5)
         state = _make_hydrostatic_state(grid, sigma)
         config = PrimitiveEquationConfig(hyperdiff_coeff=0.0)
 
         @jax.jit
         def compute(state):
-            return hydrostatic_tendencies(state, grid, sigma, config)
+            return hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
 
         tend = compute(state)
         assert jnp.all(jnp.isfinite(tend.du_dt.data))

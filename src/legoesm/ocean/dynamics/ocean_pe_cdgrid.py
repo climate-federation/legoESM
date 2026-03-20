@@ -27,6 +27,8 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.operators_cdgrid import (
+    agrid_to_dgrid_vector,
+    dgrid_to_agrid_vector,
     dgrid_to_cgrid,
     cgrid_to_dgrid,
     dgrid_vorticity_3d,
@@ -58,8 +60,8 @@ from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 def _agrid_to_dgrid_3d(u_a, v_a, cdgrid):
     """Convert A-grid cell-centre velocities to D-grid corner velocities.
 
-    Simple 4-point average from surrounding cell centres to corners,
-    using halo exchange for cross-face data.
+    Delegates to the shared ``agrid_to_dgrid_vector`` which uses
+    ``pad_halo_vector`` for proper rotation across face boundaries.
 
     Parameters
     ----------
@@ -69,15 +71,13 @@ def _agrid_to_dgrid_3d(u_a, v_a, cdgrid):
     -------
     u_d, v_d : jax.Array, shape (6, n+1, n+1, nlev)
     """
-    u_d = _interp_center_to_corner_3d(u_a, cdgrid)
-    v_d = _interp_center_to_corner_3d(v_a, cdgrid)
-    return u_d, v_d
+    return agrid_to_dgrid_vector(u_a, v_a, cdgrid)
 
 
 def _dgrid_to_agrid_3d(u_d, v_d, cdgrid):
     """Convert D-grid corner velocities to A-grid cell-centre velocities.
 
-    Simple 4-point average from surrounding corners to cell centres.
+    Delegates to the shared ``dgrid_to_agrid_vector``.
 
     Parameters
     ----------
@@ -87,11 +87,7 @@ def _dgrid_to_agrid_3d(u_d, v_d, cdgrid):
     -------
     u_a, v_a : jax.Array, shape (6, n, n, nlev)
     """
-    u_a = 0.25 * (u_d[:, :-1, :-1, :] + u_d[:, 1:, :-1, :]
-                   + u_d[:, :-1, 1:, :] + u_d[:, 1:, 1:, :])
-    v_a = 0.25 * (v_d[:, :-1, :-1, :] + v_d[:, 1:, :-1, :]
-                   + v_d[:, :-1, 1:, :] + v_d[:, 1:, 1:, :])
-    return u_a, v_a
+    return dgrid_to_agrid_vector(u_d, v_d)
 
 
 # ==============================================================================

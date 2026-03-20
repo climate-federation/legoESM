@@ -124,8 +124,9 @@ test_name = "Hydro FV Held-Suarez (C36/L20, 10 days)"
 print(f"\n  [{3}] {test_name}")
 try:
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq import (
-        PrimitiveEquationModel, PrimitiveEquationConfig,
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
     )
     from legoesm.atmosphere.physics.held_suarez import (
         held_suarez_forcing, held_suarez_init,

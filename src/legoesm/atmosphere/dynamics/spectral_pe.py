@@ -605,7 +605,29 @@ class SpectralPrimitiveEquationModel:
         legoesm_config=None,
     ):
         self.sigma_coord = sigma_coord
-        self.config = config or SpectralPEConfig()
+        cfg = config or SpectralPEConfig()
+
+        # Force implicit hyperdiffusion for leapfrog integrators
+        if cfg.time_integrator in ("leapfrog", "leapfrog_si") and not cfg.implicit_hyperdiff:
+            import warnings
+            warnings.warn(
+                f"Explicit hyperdiffusion is unstable with {cfg.time_integrator} "
+                f"time integration. Forcing implicit_hyperdiff=True.",
+                stacklevel=2,
+            )
+            cfg = cfg._replace(implicit_hyperdiff=True)
+
+        # Warn if dealiasing is off
+        if cfg.dealiasing_fraction == 0.0:
+            import warnings
+            warnings.warn(
+                "dealiasing_fraction=0.0: spectral aliasing from cubic "
+                "nonlinearities is not suppressed. Set dealiasing_fraction=0.667 "
+                "for production runs.",
+                stacklevel=2,
+            )
+
+        self.config = cfg
         self._use_cpu_for_spectral = False
         self._cpu_device = None
         self._default_device = None

@@ -123,7 +123,7 @@ class PhysicsPipeline:
         nlev = self.sigma_full.shape[0]
         shape_3d = T.shape
         shape_2d = p_s.shape
-        ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
+        ncol = int(jnp.prod(jnp.array(shape_2d)))
 
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
 
@@ -221,7 +221,7 @@ class PhysicsPipeline:
         nlev = self.sigma_full.shape[0]
         shape_3d = T.shape
         shape_2d = p_s.shape
-        ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
+        ncol = int(jnp.prod(jnp.array(shape_2d)))
 
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
         albedo = blend_surface_property(sic, self.albedo_ice, self.albedo_ocean)

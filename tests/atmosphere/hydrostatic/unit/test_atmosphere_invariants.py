@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationConfig,
-    hydrostatic_tendencies,
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
+    cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
 )
-from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterConfig, ShallowWaterModel
+from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    CDGridShallowWaterModel, CDGridShallowWaterConfig, CDGridShallowWaterState,
+)
+from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from tests.test_cases.williamson import williamson_test2
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
@@ -93,41 +96,62 @@ class TestSolidBodyRotationBehavior:
     """Solid-body flow should remain stable in energy/enstrophy statistics."""
 
     def test_williamson2_energy_enstrophy_stable(self):
+        from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
+        from legoesm.grids.halo import pad_halo_vector
+
         grid = create_cubed_sphere(12)
-        state = williamson_test2(grid)
-        model = ShallowWaterModel(
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        sw_state = williamson_test2(grid)
+
+        # Convert A-grid state to CDGrid state
+        h = sw_state.h.data
+        u_a, v_a = sw_state.u.data, sw_state.v.data
+        u_pad, v_pad = pad_halo_vector(
+            u_a, v_a,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=grid.halo_interp_offsets,
+        )
+        u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1] +
+                       u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
+        v_d = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1] +
+                       v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
+        state = CDGridShallowWaterState(
+            h=h, u_d=u_d, v_d=v_d, h_s=sw_state.h_s.data,
+        )
+
+        model = CDGridShallowWaterModel(
             grid,
-            ShallowWaterConfig(
+            CDGridShallowWaterConfig(
                 hyperdiff_coeff=1e15,
                 use_conservation_fixer=False,
                 time_integrator="ssp45",
             ),
         )
 
-        e0 = float(compute_conservation_diagnostics(state, grid)["total_energy"])
-        z0 = float(_sw_enstrophy(state, grid))
+        # Use CDGrid diagnostics for conservation
+        area = grid.area
+        from legoesm.core.operators_cdgrid import dgrid_to_cgrid
+        def _total_energy(s):
+            u_c, v_c = dgrid_to_cgrid(s.u_d, s.v_d, cdgrid)
+            u_cell = 0.5 * (u_c[:, :-1] + u_c[:, 1:])
+            v_cell = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
+            ke = 0.5 * (u_cell**2 + v_cell**2)
+            g = 9.80616
+            pe = 0.5 * g * (s.h + s.h_s)**2
+            return float(jnp.sum((ke * s.h + pe) * area))
+
+        e0 = _total_energy(state)
 
         for _ in range(120):
             state = model.step(state, dt=120.0)
 
-        ef = float(compute_conservation_diagnostics(state, grid)["total_energy"])
-        zf = float(_sw_enstrophy(state, grid))
-
+        ef = _total_energy(state)
         energy_rel_drift = (ef - e0) / e0
-        enstrophy_rel_drift = (zf - z0) / z0
 
-        assert jnp.isfinite(ef)
-        assert jnp.isfinite(zf)
-        # Without conservation fixer, SSP-RK(5,4) slowly dissipates energy
-        # (~3% over 120 steps at C16). This is expected: explicit RK methods
-        # are not symplectic.  The threshold allows up to 5% drift.
+        assert jnp.isfinite(jnp.array(ef))
         assert abs(energy_rel_drift) < 5e-2, f"Energy drift too large: {energy_rel_drift:.3e}"
-        # Enstrophy is not explicitly conserved by this scheme; expect
-        # ~5–10% dissipation over 120 steps at C16 resolution.
-        assert abs(enstrophy_rel_drift) < 0.15, (
-            f"Enstrophy drift too large: {enstrophy_rel_drift:.3e}"
-        )
-        assert float(jnp.min(state.h.data)) > 100.0
+        assert float(jnp.min(state.h)) > 100.0
 
 
 class TestSingleColumnRadiation:

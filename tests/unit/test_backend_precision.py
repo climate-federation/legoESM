@@ -39,6 +39,27 @@ from legoesm.core.hardware import get_backend
 # Helpers
 # =====================================================================
 
+def _sw_to_cdgrid(state, cdgrid):
+    """Convert generic ShallowWaterState to CDGridShallowWaterState."""
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterState
+    from legoesm.grids.halo import pad_halo_vector
+    h = state.h.data
+    u_center = state.u.data
+    v_center = state.v.data
+    h_s = state.h_s.data
+    u_pad, v_pad = pad_halo_vector(
+        u_center, v_center,
+        cdgrid.base.cos_angle, cdgrid.base.sin_angle,
+        cdgrid.base.cos_angle_padded, cdgrid.base.sin_angle_padded,
+        interp_offsets=cdgrid.base.halo_interp_offsets,
+    )
+    u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1] +
+                   u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
+    v_d = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1] +
+                   v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
+    return CDGridShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)
+
+
 def _make_fields(grid, dtype):
     """Create test scalar and velocity fields at the given dtype."""
     n = grid.n
@@ -113,24 +134,28 @@ class TestFVFloat32:
 
     def test_full_sw_step(self, grid):
         """Full FV shallow water step in float32."""
-        from legoesm.atmosphere.dynamics.shallow_water_fv import (
-            FVShallowWaterModel, FVShallowWaterConfig,
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterModel,
+            CDGridShallowWaterConfig,
         )
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from tests.test_cases.williamson import williamson_test2
 
-        state = williamson_test2(grid)
+        sw_state = williamson_test2(grid)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        state = _sw_to_cdgrid(sw_state, cdgrid)
         # Cast all state fields to float32
         state = jax.tree.map(
             lambda x: x.astype(jnp.float32) if hasattr(x, 'dtype') else x,
             state,
         )
-        config = FVShallowWaterConfig(
+        config = CDGridShallowWaterConfig(
             hyperdiff_coeff=0.0, use_conservation_fixer=False,
         )
-        model = FVShallowWaterModel(grid, config)
+        model = CDGridShallowWaterModel(grid, config)
         state_new = model.step(state, dt=300.0)
-        assert jnp.all(jnp.isfinite(state_new.h.data))
-        assert jnp.all(jnp.isfinite(state_new.u.data))
+        assert jnp.all(jnp.isfinite(state_new.h))
+        assert jnp.all(jnp.isfinite(state_new.u_d))
 
     def test_differentiable_float32(self, grid):
         """jax.grad works through FV operators in float32."""
@@ -205,18 +230,22 @@ class TestFVFloat64:
     def test_full_sw_step_float64(self, grid):
         """Full FV shallow water step in float64."""
         _requires_x64()
-        from legoesm.atmosphere.dynamics.shallow_water_fv import (
-            FVShallowWaterModel, FVShallowWaterConfig,
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterModel,
+            CDGridShallowWaterConfig,
         )
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from tests.test_cases.williamson import williamson_test2
 
-        state = williamson_test2(grid)
-        config = FVShallowWaterConfig(
+        sw_state = williamson_test2(grid)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        state = _sw_to_cdgrid(sw_state, cdgrid)
+        config = CDGridShallowWaterConfig(
             hyperdiff_coeff=0.0, use_conservation_fixer=False,
         )
-        model = FVShallowWaterModel(grid, config)
+        model = CDGridShallowWaterModel(grid, config)
         state_new = model.step(state, dt=300.0)
-        assert jnp.all(jnp.isfinite(state_new.h.data))
+        assert jnp.all(jnp.isfinite(state_new.h))
 
 
 # =====================================================================

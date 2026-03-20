@@ -54,9 +54,9 @@ shape_3d = (6, N, N, NLEV)
 # ---------------------------------------------------------------------------
 # 2. Atmospheric dycore (shared, with edge blending for C36)
 # ---------------------------------------------------------------------------
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationModel,
-    PrimitiveEquationConfig,
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
 )
 from legoesm.atmosphere.physics.held_suarez import held_suarez_init
 

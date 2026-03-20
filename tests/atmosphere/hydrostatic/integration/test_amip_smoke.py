@@ -18,8 +18,9 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
 from legoesm.forcing.amip import AMIPForcingConfig, load_amip_forcing, get_forcing_at_time
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationModel, PrimitiveEquationConfig,
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
 )
 from legoesm.atmosphere.physics.held_suarez import held_suarez_init
 from legoesm.thermo import saturation_mixing_ratio

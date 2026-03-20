@@ -16,9 +16,8 @@ All cubed-sphere solvers default to the C-D grid variant.  The legacy name
 ``CompressibleEulerModel`` resolves to ``CDGridCompressibleEulerModel``,
 ``ShallowWaterModel`` to ``CDGridShallowWaterModel``, etc.
 
-Spectral (Gaussian-grid) and FC-Gram (Fourier Continuation) alternatives are
-available as genuinely different discretisations — these are NOT redundant
-copies of the C-D grid solver.
+Spectral (Gaussian-grid) alternatives are available as a genuinely different
+discretisation — these are NOT redundant copies of the C-D grid solver.
 
 Solver selection
 ----------------
@@ -144,24 +143,19 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
 )
 
 
-# --- Backward-compatible FV wrappers (accept ShallowWaterState with Fields) ---
-from legoesm.atmosphere.dynamics.shallow_water_fv import (
-    FVShallowWaterModel as _FVShallowWaterModelWrapped,
-    FVShallowWaterConfig as _FVShallowWaterConfigWrapped,
-)
-
 # Backward compatibility aliases
 ShallowWaterModel = CDGridShallowWaterModel
 PrimitiveEquationModel = CDGridPrimitiveEquationModel
+PrimitiveEquationConfig = CDGridPrimitiveEquationConfig
 CompressibleEulerModel = CDGridCompressibleEulerModel
-FVShallowWaterModel = _FVShallowWaterModelWrapped
+FVShallowWaterModel = CDGridShallowWaterModel
 FVPrimitiveEquationModel = CDGridPrimitiveEquationModel
 FVCompressibleEulerModel = CDGridCompressibleEulerModel
+FVPrimitiveEquationConfig = CDGridPrimitiveEquationConfig
+FVCompressibleEulerConfig = CDGridCompressibleEulerConfig
 CGShallowWaterCubedModel = CDGridShallowWaterModel
 CGPrimitiveEquationModel = CDGridPrimitiveEquationModel
 CGCompressibleEulerModel = CDGridCompressibleEulerModel
-FVPrimitiveEquationConfig = CDGridPrimitiveEquationConfig
-FVCompressibleEulerConfig = CDGridCompressibleEulerConfig
 shallow_water_tendencies = cdgrid_shallow_water_tendencies
 hydrostatic_tendencies = cdgrid_hydrostatic_tendencies
 compressible_euler_slow_tendencies = cdgrid_compressible_euler_slow_tendencies
@@ -319,7 +313,7 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
 
     # --- Instantiate ---
     if name == "fv_shallow_water":
-        return _FVShallowWaterModelWrapped(**kwargs)
+        return CDGridShallowWaterModel(**kwargs)
     elif name == "fv_primitive_equations":
         return CDGridPrimitiveEquationModel(**kwargs)
     elif name == "fv_compressible_euler":

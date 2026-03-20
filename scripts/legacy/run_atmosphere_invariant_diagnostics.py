@@ -46,10 +46,10 @@ else:
         HAS_CARTOPY = False
 
 from legoesm import constants
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationConfig,
-    PrimitiveEquationModel,
-    hydrostatic_tendencies,
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
+    CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+    cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
 )
 from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterConfig, ShallowWaterModel
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig, RRTMGPConfig
@@ -281,6 +281,8 @@ def _hydro_ke_proxy(state: HydrostaticState, grid, sigma) -> jnp.ndarray:
 def _run_rest_state_case(case_dir: Path) -> dict[str, float]:
     print("\n[1/4] Rest-state invariance with diagnostics")
     grid = create_cubed_sphere(8)
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+    cdgrid = create_cubed_sphere_cdgrid(grid)
     sigma = create_sigma_coordinate(12)
     state0 = _make_stratified_rest_state(grid, sigma)
     state = state0
@@ -306,7 +308,7 @@ def _run_rest_state_case(case_dir: Path) -> dict[str, float]:
     t0 = time.time()
     for step in range(n_steps + 1):
         # Diagnose tendencies directly for strict rest-state invariance.
-        tend = hydrostatic_tendencies(state, grid, sigma, cfg)
+        tend = hydrostatic_tendencies(state, grid, sigma, cdgrid, cfg)
         wind_speed = jnp.sqrt(state.u.data * state.u.data + state.v.data * state.v.data)
         mass = float(global_integral(state.p_s, grid))
         ke = float(_hydro_ke_proxy(state, grid, sigma))

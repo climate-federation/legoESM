@@ -318,9 +318,9 @@ def _benchmark_mpi_cubedsphere(
     from legoesm.grids.halo import set_halo_backend
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_fv import (
-        FVPrimitiveEquationModel,
-        FVPrimitiveEquationConfig,
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel as FVPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig as FVPrimitiveEquationConfig,
     )
     from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
     from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing, held_suarez_init

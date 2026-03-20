@@ -450,45 +450,6 @@ def _compute_exact_cell_areas(n: int, radius: float) -> jax.Array:
     return jnp.stack(all_areas, axis=0)
 
 
-def _compute_cell_areas(
-    lon: jax.Array, lat: jax.Array, n: int, radius: float
-) -> jax.Array:
-    """Compute cell areas on the cubed-sphere.
-
-    Uses the fact that for a gnomonic equidistant grid, the area of each
-    cell can be computed from the solid angle subtended.
-
-    For uniform gnomonic grid, the area element is:
-        dA = R^2 * cos(alpha_y) / (1 + tan^2(alpha_x) + tan^2(alpha_y))^(3/2) * dalpha_x * dalpha_y
-
-    We use a simpler approach: compute areas from the 4 corner coordinates
-    via the spherical excess formula.
-    """
-    # Approximate: use the Jacobian of the gnomonic projection
-    dalpha = jnp.pi / (2 * n)  # Grid spacing in gnomonic coordinates
-
-    # For each cell center, compute the area element
-    alpha = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n, endpoint=False)
-    alpha = alpha + (jnp.pi / 4) / n
-    ax, ay = jnp.meshgrid(alpha, alpha, indexing='ij')
-
-    # Area element for gnomonic projection
-    # dA = R^2 / (1 + tan^2(ax) + tan^2(ay))^2 * sec^2(ax) * sec^2(ay) * dalpha^2
-    # Simplified: dA = R^2 * dalpha^2 / cos^3(ax) / cos^3(ay) / (1/cos^2(ax)/cos^2(ay) * D^3)
-    # where D = sqrt(1 + tan^2(ax) + tan^2(ay))
-
-    tan_ax = jnp.tan(ax)
-    tan_ay = jnp.tan(ay)
-    D = jnp.sqrt(1.0 + tan_ax**2 + tan_ay**2)
-
-    # Exact area element for gnomonic equidistant projection
-    area_face = radius**2 * dalpha**2 / (jnp.cos(ax)**2 * jnp.cos(ay)**2 * D**3)
-
-    # Broadcast to all 6 faces (same local coordinates, same areas)
-    area = jnp.broadcast_to(area_face[None, :, :], (6, n, n))
-
-    return area
-
 
 def _compute_grid_spacing(
     lon: jax.Array, lat: jax.Array, n: int, radius: float

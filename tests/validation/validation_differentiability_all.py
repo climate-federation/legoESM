@@ -157,39 +157,11 @@ if __name__ == "__main__":
         ))
         test_differentiability("centered", model, sw_state, DT_SW, grad_field="h")
 
-        # Finite Volume
-        from legoesm.atmosphere.dynamics.shallow_water_fv import FVShallowWaterModel, FVShallowWaterConfig
-        model = FVShallowWaterModel(grid, FVShallowWaterConfig(
-            use_conservation_fixer=False, edge_blend_strength=0.25,
+        # C-D grid (FV3-style)
+        model = ShallowWaterModel(grid, ShallowWaterConfig(
+            use_conservation_fixer=False,
         ))
-        test_differentiability("finite_volume", model, sw_state, DT_SW, grad_field="h")
-
-        # FV with edge_blend=0 (no blending)
-        model = FVShallowWaterModel(grid, FVShallowWaterConfig(
-            use_conservation_fixer=False, edge_blend_strength=0.0,
-        ))
-        test_differentiability("finite_volume (no blend)", model, sw_state, DT_SW, grad_field="h")
-
-        # C-grid
-        from legoesm.atmosphere.dynamics.shallow_water_cgrid import (
-            CGShallowWaterCubedModel, CGShallowWaterCubedConfig,
-        )
-        model = CGShallowWaterCubedModel(grid, CGShallowWaterCubedConfig())
-        test_differentiability("cgrid", model, sw_state, DT_SW, grad_field="h")
-
-        # FC-gram
-        from legoesm.atmosphere.dynamics.shallow_water_fc import (
-            FCShallowWaterModel, FCShallowWaterConfig,
-        )
-        model = FCShallowWaterModel(grid, FCShallowWaterConfig())
-        test_differentiability("fc_gram", model, sw_state, DT_SW, grad_field="h")
-
-        # FC-gram C-grid
-        from legoesm.atmosphere.dynamics.shallow_water_fc_cgrid import (
-            FCCGShallowWaterModel, FCCGShallowWaterConfig,
-        )
-        model = FCCGShallowWaterModel(grid, FCCGShallowWaterConfig())
-        test_differentiability("fc_gram_cgrid", model, sw_state, DT_SW, grad_field="h")
+        test_differentiability("cdgrid", model, sw_state, DT_SW, grad_field="h")
 
         # Spectral
         from legoesm.atmosphere.dynamics.spectral_sw import SpectralShallowWaterModel
@@ -209,50 +181,14 @@ if __name__ == "__main__":
 
         pe_state = make_pe_state()
 
-        # Centered
-        from legoesm.atmosphere.dynamics.primitive_eq import (
-            PrimitiveEquationModel, PrimitiveEquationConfig,
+        # C-D grid (FV3-style)
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
         )
-        model = PrimitiveEquationModel(grid, sigma, PrimitiveEquationConfig(
+        model = CDGridPrimitiveEquationModel(grid, sigma, CDGridPrimitiveEquationConfig(
             hyperdiff_coeff=0.0, use_conservation_fixer=False,
         ))
-        test_differentiability("centered", model, pe_state, DT_PE)
-
-        # Finite Volume
-        from legoesm.atmosphere.dynamics.primitive_eq_fv import (
-            FVPrimitiveEquationModel, FVPrimitiveEquationConfig,
-        )
-        model = FVPrimitiveEquationModel(grid, sigma, FVPrimitiveEquationConfig(
-            use_conservation_fixer=False, edge_blend_strength=0.25,
-        ))
-        test_differentiability("finite_volume", model, pe_state, DT_PE)
-
-        # FV no blend
-        model = FVPrimitiveEquationModel(grid, sigma, FVPrimitiveEquationConfig(
-            use_conservation_fixer=False, edge_blend_strength=0.0,
-        ))
-        test_differentiability("finite_volume (no blend)", model, pe_state, DT_PE)
-
-        # C-grid
-        from legoesm.atmosphere.dynamics.primitive_eq_cgrid import (
-            CGPrimitiveEquationModel, CGPrimitiveEquationConfig,
-        )
-        model = CGPrimitiveEquationModel(grid, sigma, CGPrimitiveEquationConfig())
-        test_differentiability("cgrid", model, pe_state, DT_PE)
-
-        # FC-gram
-        from legoesm.atmosphere.dynamics.primitive_eq_fc import (
-            FCPrimitiveEquationModel, FCPrimitiveEquationConfig,
-        )
-        model = FCPrimitiveEquationModel(grid, sigma, FCPrimitiveEquationConfig())
-        test_differentiability("fc_gram", model, pe_state, DT_PE)
-
-        # FC-gram C-grid
-        from legoesm.atmosphere.dynamics.primitive_eq_fc_cgrid import (
-            FCCGPrimitiveEquationModel, FCCGPrimitiveEquationConfig,
-        )
-        model = FCCGPrimitiveEquationModel(grid, sigma, FCCGPrimitiveEquationConfig())
-        test_differentiability("fc_gram_cgrid", model, pe_state, DT_PE)
+        test_differentiability("cdgrid", model, pe_state, DT_PE)
 
         # Spectral
         from legoesm.atmosphere.dynamics.spectral_pe import SpectralPrimitiveEquationModel
@@ -304,24 +240,6 @@ if __name__ == "__main__":
             sponge_coeff=0.0,
         ))
         test_differentiability("cgrid", model, ce_state, DT_CE, grad_field="theta_prime")
-
-        # FC-gram
-        from legoesm.atmosphere.dynamics.compressible_euler_fc import (
-            FCCompressibleEulerModel, FCCompressibleEulerConfig,
-        )
-        model = FCCompressibleEulerModel(grid, height_coord, terrain_metric, FCCompressibleEulerConfig(
-            sponge_coeff=0.0,
-        ))
-        test_differentiability("fc_gram", model, ce_state, DT_CE, grad_field="theta_prime")
-
-        # FC-gram C-grid
-        from legoesm.atmosphere.dynamics.compressible_euler_fc_cgrid import (
-            FCCGCompressibleEulerModel, FCCGCompressibleEulerConfig,
-        )
-        model = FCCGCompressibleEulerModel(grid, height_coord, terrain_metric, FCCGCompressibleEulerConfig(
-            sponge_coeff=0.0,
-        ))
-        test_differentiability("fc_gram_cgrid", model, ce_state, DT_CE, grad_field="theta_prime")
 
         # Spectral
         from legoesm.atmosphere.dynamics.spectral_nh import SpectralCompressibleEulerModel

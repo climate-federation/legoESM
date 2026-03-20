@@ -139,8 +139,9 @@ def run_cubed_sphere(n_grid, nlev, coord_type, dt, n_days, diag_every_days=10):
     """Run cubed-sphere FV Held-Suarez and return diagnostics."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
-    from legoesm.atmosphere.dynamics.primitive_eq_fv import (
-        FVPrimitiveEquationModel, FVPrimitiveEquationConfig,
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel as FVPrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig as FVPrimitiveEquationConfig,
     )
     from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
     from legoesm.core.cfl import cfl_check_and_adjust

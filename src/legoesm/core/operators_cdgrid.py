@@ -90,6 +90,83 @@ def _broadcast_metric(metric, field):
 
 
 # ==============================================================================
+# A-grid to D-grid vector conversion (with proper face-boundary rotation)
+# ==============================================================================
+
+def agrid_to_dgrid_vector(u_a, v_a, cdgrid):
+    """Convert A-grid cell-centre wind vectors to D-grid corner positions.
+
+    Uses ``pad_halo_vector`` for proper rotation of vector components
+    across cubed-sphere face boundaries, then 4-point averages to corners.
+
+    Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
+
+    Parameters
+    ----------
+    u_a, v_a : jax.Array, shape (6, n, n[, nlev])
+
+    Returns
+    -------
+    u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
+    """
+    from legoesm.grids.halo import pad_halo_vector
+
+    grid = cdgrid.base
+    if u_a.ndim == 3:
+        u_pad, v_pad = pad_halo_vector(
+            u_a, v_a,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=grid.halo_interp_offsets,
+        )
+        u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
+                       + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
+        v_d = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1]
+                       + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
+        return u_d, v_d
+
+    # 3D: vmap over levels
+    u_t = jnp.moveaxis(u_a, -1, 0)
+    v_t = jnp.moveaxis(v_a, -1, 0)
+
+    def convert_one(args):
+        uk, vk = args
+        return agrid_to_dgrid_vector(uk, vk, cdgrid)
+
+    u_d_t, v_d_t = jax.vmap(convert_one)((u_t, v_t))
+    return jnp.moveaxis(u_d_t, 0, -1), jnp.moveaxis(v_d_t, 0, -1)
+
+
+def dgrid_to_agrid_vector(u_d, v_d):
+    """Convert D-grid corner velocities to A-grid cell centres.
+
+    Simple 4-point average — no cross-face rotation needed since
+    corners within a face share the same local coordinate system.
+
+    Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev).
+
+    Parameters
+    ----------
+    u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
+
+    Returns
+    -------
+    u_a, v_a : jax.Array, shape (6, n, n[, nlev])
+    """
+    if u_d.ndim == 3:
+        u_a = 0.25 * (u_d[:, :-1, :-1] + u_d[:, 1:, :-1]
+                       + u_d[:, :-1, 1:] + u_d[:, 1:, 1:])
+        v_a = 0.25 * (v_d[:, :-1, :-1] + v_d[:, 1:, :-1]
+                       + v_d[:, :-1, 1:] + v_d[:, 1:, 1:])
+    else:
+        u_a = 0.25 * (u_d[:, :-1, :-1, :] + u_d[:, 1:, :-1, :]
+                       + u_d[:, :-1, 1:, :] + u_d[:, 1:, 1:, :])
+        v_a = 0.25 * (v_d[:, :-1, :-1, :] + v_d[:, 1:, :-1, :]
+                       + v_d[:, :-1, 1:, :] + v_d[:, 1:, 1:, :])
+    return u_a, v_a
+
+
+# ==============================================================================
 # D-grid to C-grid interpolation
 # ==============================================================================
 

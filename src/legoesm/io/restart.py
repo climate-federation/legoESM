@@ -19,10 +19,28 @@ from typing import NamedTuple
 import numpy as np
 
 from legoesm.forcing.amip_config import (
-    config_to_dict,
+    config_to_dict as _amip_config_to_dict,
     load_checkpoint,
     save_checkpoint,
 )
+
+# Lazy imports to avoid circular dependency:
+#   io.restart → driver.config → driver.__init__ → model_driver → io.restart
+# We import ExperimentConfig and its serializer at function level instead.
+_ExperimentConfig = None
+_experiment_config_to_dict = None
+
+
+def _get_experiment_config_type():
+    global _ExperimentConfig, _experiment_config_to_dict
+    if _ExperimentConfig is None:
+        from legoesm.driver.config import (
+            ExperimentConfig as _EC,
+            experiment_config_to_dict as _ectd,
+        )
+        _ExperimentConfig = _EC
+        _experiment_config_to_dict = _ectd
+    return _ExperimentConfig, _experiment_config_to_dict
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +90,31 @@ def compute_state_digest(state_arrays: dict[str, np.ndarray]) -> str:
     return h.hexdigest()
 
 
+def _config_to_dict_any(config) -> dict:
+    """Convert any config type to a dict for serialization.
+
+    Accepts ``ExperimentConfig`` (canonical) or ``AMIPExperimentConfig``
+    (legacy).  Returns a flat dict in both cases.
+    """
+    EC, ectd = _get_experiment_config_type()
+    if isinstance(config, EC):
+        return ectd(config)
+    # Legacy AMIPExperimentConfig or anything with _asdict
+    return _amip_config_to_dict(config)
+
+
+def config_to_dict(config) -> dict:
+    """Public alias — serialize any config type to a dict.
+
+    Kept for backward compatibility with code that imports
+    ``config_to_dict`` from this module.
+    """
+    return _config_to_dict_any(config)
+
+
 def compute_config_hash(config) -> str:
     """SHA-256 of the JSON-serialized *config*."""
-    text = json.dumps(config_to_dict(config), sort_keys=True)
+    text = json.dumps(_config_to_dict_any(config), sort_keys=True)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -146,6 +186,19 @@ def _meta_path(checkpoint_path: Path) -> Path:
 # Save / Load
 # ---------------------------------------------------------------------------
 
+def _ensure_amip_config(config):
+    """Convert ExperimentConfig to AMIPExperimentConfig if needed.
+
+    The npz/zarr checkpoint formats still use the AMIP wire format
+    for backward compatibility.  This helper keeps the conversion
+    at the serialization boundary.
+    """
+    EC, _ = _get_experiment_config_type()
+    if isinstance(config, EC):
+        return config.to_amip_config()
+    return config
+
+
 def save_restart(
     path,
     state,
@@ -162,6 +215,10 @@ def save_restart(
 ) -> None:
     """Save a restart checkpoint together with reproducibility metadata.
 
+    Accepts either ``ExperimentConfig`` (canonical) or
+    ``AMIPExperimentConfig`` (legacy).  Conversion to the AMIP wire
+    format happens at this serialization boundary.
+
     Delegates array persistence to :func:`save_checkpoint` (npz) or
     :func:`save_checkpoint_zarr` (zarr) and writes a companion
     ``.meta.json`` alongside the checkpoint.
@@ -173,6 +230,9 @@ def save_restart(
     """
     path = Path(path)
 
+    # Convert ExperimentConfig → AMIP wire format at the boundary
+    wire_config = _ensure_amip_config(config)
+
     # 1. Delegate to appropriate backend
     if backend == "zarr":
         from legoesm.io.checkpoint import save_checkpoint_zarr
@@ -183,7 +243,7 @@ def save_restart(
             q_v,
             step,
             day,
-            config,
+            wire_config,
             q_c=q_c,
             q_r=q_r,
             diag_accumulators=diag_accumulators,
@@ -195,7 +255,7 @@ def save_restart(
             q_v,
             step,
             day,
-            config,
+            wire_config,
             diag_accumulators=diag_accumulators,
             q_c=q_c,
             q_r=q_r,
@@ -253,9 +313,9 @@ def load_restart(
         Grid object (must match checkpoint resolution).
     sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate (must match checkpoint nlev).
-    config : AMIPExperimentConfig, optional
+    config : ExperimentConfig or AMIPExperimentConfig, optional
         If provided and *strict* is True the saved config hash is compared
-        against this config.
+        against this config.  Accepts either type.
     strict : bool
         When True (default) several validation checks are applied; failures
         raise :class:`ValueError` (for hard mismatches) or emit warnings.
@@ -272,9 +332,13 @@ def load_restart(
     # 1. Delegate to auto-detecting loader (handles both .npz and .zarr)
     from legoesm.io.checkpoint import load_checkpoint_auto
 
-    state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r = (
+    state, q_v, step, day, loaded_amip_config, diag_accumulators, q_c, q_r = (
         load_checkpoint_auto(path, grid, sigma)
     )
+
+    # Upconvert AMIP wire format → canonical ExperimentConfig
+    EC, _ = _get_experiment_config_type()
+    loaded_config = EC.from_amip_config(loaded_amip_config)
 
     # 2. Try to read companion metadata
     meta_file = _meta_path(path)

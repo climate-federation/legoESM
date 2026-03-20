@@ -41,10 +41,10 @@ import matplotlib.pyplot as plt
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate, pressure_from_sigma
 from legoesm.core.operators import global_integral
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationModel,
-    PrimitiveEquationConfig,
-    hydrostatic_tendencies,
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
+    cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
 )
 from legoesm.atmosphere.physics.baroclinic_wave import (
     baroclinic_wave_init,
@@ -69,7 +69,7 @@ def compute_hyperdiff_coeff(n_grid: int, reference_n: int = 48,
 
 def compute_850hPa_vorticity(state, grid, sigma_coord):
     """Compute relative vorticity at the level closest to 850 hPa."""
-    from legoesm.atmosphere.dynamics.primitive_eq import _vorticity_3d
+    from legoesm.core.operators_3d import vorticity_3d as _vorticity_3d
 
     sigma_full = np.array(sigma_coord.sigma_full)
     # 850 hPa corresponds to sigma = 0.85 (since p_s ≈ 1000 hPa)
@@ -135,6 +135,8 @@ def main():
     # --- Setup ---
     print("Creating grid and initial conditions...")
     grid = create_cubed_sphere(N_GRID)
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+    cdgrid = create_cubed_sphere_cdgrid(grid)
     sigma = create_sigma_coordinate(N_LEVELS)
     print(f"  Grid resolution: ~{float(grid.resolution_km):.0f} km")
     print(f"  Sigma levels: {N_LEVELS}")
@@ -151,7 +153,7 @@ def main():
         use_conservation_fixer=True,
         fix_mass=True,
     )
-    tend_init = hydrostatic_tendencies(state, grid, sigma, config)
+    tend_init = hydrostatic_tendencies(state, grid, sigma, cdgrid, config)
     print(f"\n  Initial tendency magnitudes (no diffusion):")
     print(f"    max |du/dt|:   {float(jnp.max(jnp.abs(tend_init.du_dt.data))):.4e} m/s^2")
     print(f"    max |dv/dt|:   {float(jnp.max(jnp.abs(tend_init.dv_dt.data))):.4e} m/s^2")

@@ -464,8 +464,10 @@ class TestCreateExperimentConfig(unittest.TestCase):
         from legoesm.forcing.experiments import create_experiment_config
 
         cfg = create_experiment_config("piControl", resolution=48, dt=300.0)
-        self.assertEqual(cfg.resolution, 48)
-        self.assertEqual(cfg.dt, 300.0)
+        # create_experiment_config now returns ExperimentConfig (canonical)
+        # where resolution lives under grid and dt under dycore.
+        self.assertEqual(cfg.grid.resolution, 48)
+        self.assertEqual(cfg.dycore.dt, 300.0)
 
     def test_unknown_experiment_raises(self):
         """Unknown experiment name raises ValueError."""

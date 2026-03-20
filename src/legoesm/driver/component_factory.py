@@ -238,8 +238,23 @@ def create_atmosphere_dycore(
         return SpectralShallowWaterModel(grid=grid)
 
     if solver_name == "spectral_primitive_equations":
-        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPrimitiveEquationModel
-        return SpectralPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPrimitiveEquationModel, SpectralPEConfig,
+        )
+        # Compute hyperdiffusion from truncation: 0.5-hour e-folding at max wavenumber
+        n_max = grid.n_max
+        a = grid.radius
+        eig_max = n_max * (n_max + 1) / (a * a)
+        hyperdiff = 1.0 / (0.5 * 3600.0 * eig_max ** 2)
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=hyperdiff,
+            hyperdiff_order=2,
+            time_integrator="ssp_rk54",
+            p_floor=200.0,
+        )
+        return SpectralPrimitiveEquationModel(
+            grid=grid, sigma_coord=sigma, config=pe_config,
+        )
 
     if solver_name == "spectral_compressible_euler":
         from legoesm.atmosphere.dynamics.spectral_nh import SpectralCompressibleEulerModel
@@ -261,11 +276,11 @@ def create_atmosphere_dycore(
     # ----- MPAS icosahedral -----
     if solver_name == "mpas_primitive_equations":
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import MPASPrimitiveEquationModel
-        return MPASPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
+        return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma)
 
     if solver_name == "mpas_compressible_euler":
         from legoesm.atmosphere.dynamics.compressible_euler_mpas import MPASCompressibleEulerModel
-        return MPASCompressibleEulerModel(grid=grid, sigma_coord=sigma)
+        return MPASCompressibleEulerModel(mesh=grid, sigma_coord=sigma)
 
     # ----- SFNO data-driven -----
     if solver_name == "sfno_shallow_water":

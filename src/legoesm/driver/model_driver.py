@@ -127,6 +127,9 @@ class ModelDriver:
         elif gc.grid_type == "latlon":
             from legoesm.grids.latlon import create_latlon_grid
             self.grid = create_latlon_grid(gc.resolution)
+        elif gc.grid_type == "voronoi":
+            from legoesm.grids.voronoi import create_voronoi_mesh
+            self.grid = create_voronoi_mesh(gc.resolution, lloyd_iterations=50)
         else:
             raise ValueError(f"Unknown grid type: {gc.grid_type}")
 
@@ -142,6 +145,14 @@ class ModelDriver:
         logger.info(f"  Grid: {gc.grid_type} {gc.resolution}, "
               f"{gc.nlev} levels ({gc.vertical_coord})")
 
+        # Cache lat/lon accessors for grid-agnostic use
+        if gc.grid_type == "voronoi":
+            self._grid_lat = self.grid.latCell
+            self._grid_lon = self.grid.lonCell
+        else:
+            self._grid_lat = self.grid.lat
+            self._grid_lon = self.grid.lon
+
     def _create_topography(self) -> None:
         """Load or generate topography and land-sea mask."""
         from legoesm.grids.topography import (
@@ -155,6 +166,8 @@ class ModelDriver:
 
         if self.config.grid.grid_type == "cubed_sphere":
             shape_2d = (6, N, N)
+        elif self.config.grid.grid_type == "voronoi":
+            shape_2d = (self.grid.nCells,)
         else:
             shape_2d = (self.grid.n_lat, self.grid.n_lon)
 
@@ -204,7 +217,7 @@ class ModelDriver:
 
         if cfg.dataset == "analytical":
             from legoesm.forcing.analytical import analytical_sst_sic
-            lat_deg = np.degrees(np.asarray(self.grid.lat))
+            lat_deg = np.degrees(np.asarray(self._grid_lat))
             T_ice = cfg.T_ice
 
             def get_sst_sic(day):
@@ -238,36 +251,56 @@ class ModelDriver:
 
     def _init_state(self) -> None:
         """Initialize atmospheric state and moisture."""
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
         from legoesm.diagnostics.column_integrals import column_water_vapor
 
         cfg = self.config
         N = cfg.grid.resolution
         NLEV = cfg.grid.nlev
 
-        if cfg.grid.grid_type == "cubed_sphere":
-            shape_3d = (6, N, N, NLEV)
-        else:
+        if cfg.grid.grid_type == "voronoi":
+            from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_init_mpas
+            shape_3d = (self.grid.nCells, NLEV)
+            self.state = held_suarez_init_mpas(
+                self.grid, self.sigma, T_init=cfg.T_init,
+            )
+            if jnp.any(self._phis_data != 0):
+                self.state = self.state._replace(
+                    phis=self.state.phis.replace(data=self._phis_data),
+                )
+        elif cfg.dycore.discretization == "spectral":
+            from legoesm.atmosphere.dynamics.spectral_pe import isothermal_rest_state_spectral
             shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
-
-        self.state = held_suarez_init(
-            self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
-        )
+            phis_arg = self._phis_data if jnp.any(self._phis_data != 0) else None
+            self.state = isothermal_rest_state_spectral(
+                self.grid, self.sigma, T_init=cfg.T_init, phis=phis_arg,
+            )
+        else:
+            from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+            if cfg.grid.grid_type == "cubed_sphere":
+                shape_3d = (6, N, N, NLEV)
+            else:
+                shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
+            self.state = held_suarez_init(
+                self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
+            )
 
         # Initialize all tracers via registry
         self.tracers = init_tracers(self.tracer_registry, shape_3d)
 
-        # Moisture initialization
-        p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
-        q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
-        self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
-        self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
+        # Moisture initialization (spectral and MPAS use dry physics)
+        if hasattr(self.state, 'p_s') and hasattr(self.state.p_s, 'data'):
+            p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
+            q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
+            self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
+            self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
 
-        mean_qv = float(jnp.mean(self.tracers["q_v"])) * 1000.0
-        cwv = float(jnp.mean(
-            column_water_vapor(self.tracers["q_v"], self.state.p_s.data, self.sigma.dsigma)
-        ))
-        logger.info(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
+            mean_qv = float(jnp.mean(self.tracers["q_v"])) * 1000.0
+            cwv = float(jnp.mean(
+                column_water_vapor(self.tracers["q_v"], self.state.p_s.data, self.sigma.dsigma)
+            ))
+            logger.info(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
+        else:
+            logger.info(f"  State init: T={cfg.T_init}K (dry spectral)")
 
     def _create_physics(self) -> None:
         """Build the physics pipeline."""
@@ -390,38 +423,36 @@ class ModelDriver:
         self._qv_smooth_coeff = self._hyperdiff * 0.5
 
     def _save_config(self) -> None:
-        """Save experiment config to output directory."""
-        import json
-        # Save structured config as JSON
-        config_dict = self.config._asdict()
-        # Convert nested NamedTuples to dicts
-        for key, val in config_dict.items():
-            if hasattr(val, '_asdict'):
-                config_dict[key] = val._asdict()
-        with open(self._output_dir / "experiment_config.json", "w") as f:
-            json.dump(config_dict, f, indent=2, default=str)
+        """Save experiment config to output directory.
 
-        # Also save AMIP-format for backward compatibility
-        amip_cfg = self.config.to_amip_config()
-        from legoesm.forcing.amip_config import save_config
-        save_config(amip_cfg, self._output_dir / "amip_config.json")
+        Writes the canonical ExperimentConfig JSON.  Also writes a
+        legacy ``amip_config.json`` for backward-compatible tooling.
+        """
+        from legoesm.driver.config import save_experiment_config
+        save_experiment_config(self.config, self._output_dir / "experiment_config.json")
+
+        # Legacy AMIP-format sidecar (serialization boundary adapter)
+        from legoesm.forcing.amip_config import save_config as _save_amip
+        _save_amip(self.config.to_amip_config(), self._output_dir / "amip_config.json")
 
     def save_checkpoint(self, step: int, day: float) -> None:
-        """Save checkpoint to output directory using unified restart API."""
+        """Save checkpoint to output directory using unified restart API.
+
+        Accepts ``ExperimentConfig`` directly — the restart layer handles
+        the AMIP wire-format conversion internally.
+        """
         elapsed_day = day - self.config.start_day
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
 
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
 
-        # Use the AMIP config for serialization (backward compatible)
-        amip_cfg = self.config.to_amip_config()
         save_restart(
             path=ckpt_path,
             state=self.state,
             q_v=self.q_v,
             step=step,
             day=day,
-            config=amip_cfg,
+            config=self.config,
             q_c=self.q_c,
             q_r=self.q_r,
             backend=backend,
@@ -469,9 +500,231 @@ class ModelDriver:
         str
             Run status ("COMPLETED" or "BLOWUP at day ...").
         """
+        # MPAS and spectral states use different pytree layouts;
+        # use dedicated simple run loops.
+        if self.config.grid.grid_type == "voronoi":
+            return self._run_mpas(start_step, start_day)
+        if self.config.dycore.discretization == "spectral":
+            return self._run_spectral(start_step, start_day)
         if compiled:
             return self._run_compiled(start_step, start_day)
         return self._run_per_step(start_step, start_day)
+
+    # ==================================================================
+    # MPAS execution path (Held-Suarez forcing, no separate physics pipeline)
+    # ==================================================================
+
+    def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
+        """Run MPAS model with Held-Suarez forcing.
+
+        Uses the MPAS PE model's built-in physics_fn interface instead
+        of the general physics pipeline (which assumes A-grid u/v).
+        """
+        import time
+        from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_forcing_mpas
+
+        cfg = self.config
+        DT = cfg.dycore.dt
+        N_DAYS = cfg.days
+        n_steps_total = int(N_DAYS * 86400.0 / DT)
+        DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        START_DAY = start_day if start_day is not None else cfg.start_day
+
+        physics_fn = held_suarez_forcing_mpas
+
+        run_status = "COMPLETED"
+        logger.info(f"Starting MPAS: {n_steps_total - start_step} steps, {N_DAYS} days")
+
+        t_start = time.time()
+
+        for step in range(start_step, n_steps_total):
+            self.state = self.model.step(self.state, DT, physics_fn=physics_fn)
+
+            # Diagnostics at intervals
+            if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
+                elapsed_day = (step + 1) * DT / 86400.0
+                day = START_DAY + elapsed_day
+                T_data = self.state.T.data
+                p_s_data = self.state.p_s.data
+                u_data = self.state.u.data
+
+                mean_T = float(jnp.mean(T_data))
+                mean_ps = float(jnp.mean(p_s_data))
+                max_u = float(jnp.max(jnp.abs(u_data)))
+                T_min = float(jnp.min(T_data))
+                T_max = float(jnp.max(T_data))
+
+                elapsed = time.time() - t_start
+                rate = elapsed_day / (elapsed + 1e-10)
+                logger.info(
+                    f"  Day {elapsed_day:6.1f}: T=[{T_min:.1f},{T_max:.1f}]K "
+                    f"mean={mean_T:.1f}K  p_s={mean_ps/100:.1f}hPa  "
+                    f"|u|_max={max_u:.1f}m/s  ({rate:.1f} sim-days/s)"
+                )
+
+                # Blowup detection
+                if not jnp.all(jnp.isfinite(T_data)):
+                    run_status = f"BLOWUP at day {elapsed_day:.1f}"
+                    logger.error(run_status)
+                    break
+
+        elapsed = time.time() - t_start
+        logger.info(f"MPAS run {run_status} in {elapsed:.1f}s")
+        return run_status
+
+    # ==================================================================
+    # Spectral execution path (Held-Suarez + radiation on Gaussian grid)
+    # ==================================================================
+
+    def _run_spectral(self, start_step: int = 0, start_day: float | None = None) -> str:
+        """Run spectral PE model with physics coupling.
+
+        Physics tendencies are computed on the Gaussian grid and converted
+        back to spectral space via SH analysis.
+        """
+        import time
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            spectral_pe_to_grid,
+            SpectralHydrostaticState,
+        )
+        from legoesm.grids.gaussian import (
+            sh_analysis_3d,
+            sh_analysis_oc2_3d,
+            sh_analysis_dmu_3d,
+        )
+        from legoesm.atmosphere.physics.radiation.gray import gray_radiation
+        from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
+        from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
+        from legoesm.forcing.surface_utils import blend_surface_temperature
+
+        cfg = self.config
+        DT = cfg.dycore.dt
+        N_DAYS = cfg.days
+        n_steps_total = int(N_DAYS * 86400.0 / DT)
+        DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        START_DAY = start_day if start_day is not None else cfg.start_day
+        a = self.grid.radius
+
+        # Rayleigh friction profile
+        sigma_full = self.sigma.sigma_full
+        K_F = 1.0 / 86400.0
+        SIGMA_B = 0.7
+        k_f = K_F * jnp.maximum(0.0, (sigma_full - SIGMA_B) / (1.0 - SIGMA_B))
+
+        gray_config = GrayRadiationConfig()
+        shape_2d = (self.grid.n_lat, self.grid.n_lon)
+        shape_3d = (*shape_2d, cfg.grid.nlev)
+        S_0 = 1361.0
+        T_ice = cfg.T_ice
+
+        # Precompute spectral transform constants
+        _im_over_a = 1j * self.grid.ms.astype(jnp.float64) / a
+        _one_over_a = 1.0 / a
+        cos_lat_3d = self.grid.cos_lat[:, None, None]
+
+        def _spectral_physics_fn(state, grid, sigma_coord):
+            """Compute physics tendencies and return spectral tendencies."""
+            fields = spectral_pe_to_grid(state, grid, sigma_coord)
+            T_g = fields['T']
+            u_g = fields['u']
+            v_g = fields['v']
+            p_s_g = fields['p_s']
+
+            sst, sic = self.get_sst_sic(self._current_day)
+            # Broadcast from (n_lat,) to (n_lat, n_lon) if needed
+            if sst.ndim == 1 and len(shape_2d) == 2:
+                sst = jnp.broadcast_to(sst[:, None], shape_2d)
+                sic = jnp.broadcast_to(sic[:, None], shape_2d)
+            T_sfc = blend_surface_temperature(sst, sic, T_ice)
+
+            p_full = p_s_g[..., None] * sigma_full
+            p_half = p_s_g[..., None] * self.sigma.sigma_half
+            T_col = T_g.reshape(-1, cfg.grid.nlev)
+            p_full_col = p_full.reshape(-1, cfg.grid.nlev)
+            p_half_col = p_half.reshape(-1, cfg.grid.nlev + 1)
+            q_v_col = jnp.zeros_like(T_col)  # dry physics
+            T_sfc_col = T_sfc.reshape(-1)
+            # Broadcast lat from (n_lat,) to (n_lat, n_lon) then flatten
+            lat_2d = jnp.broadcast_to(
+                self._grid_lat[:, None], shape_2d
+            )
+            lat_col = lat_2d.reshape(-1)
+
+            insol = daily_mean_insolation(lat_col, self._current_day, S_0)
+            rad_out = gray_radiation(
+                T=T_col, p_full=p_full_col, p_half=p_half_col,
+                sfc_temperature=T_sfc_col, lat=lat_col,
+                q_v=q_v_col, insolation=insol, config=gray_config,
+            )
+            dT_dt_rad = rad_out.heating_rate.reshape(shape_3d)
+
+            # Rayleigh friction
+            du_dt = -k_f * u_g
+            dv_dt = -k_f * v_g
+
+            # Convert (du, dv) to spectral (dvor, ddiv)
+            du_cos = du_dt * cos_lat_3d
+            dv_cos = dv_dt * cos_lat_3d
+            dvor_hat = (
+                _im_over_a[:, None] * sh_analysis_oc2_3d(grid, dv_cos)
+                + _one_over_a * sh_analysis_dmu_3d(grid, du_cos)
+            )
+            ddiv_hat = (
+                _im_over_a[:, None] * sh_analysis_oc2_3d(grid, du_cos)
+                - _one_over_a * sh_analysis_dmu_3d(grid, dv_cos)
+            )
+            dT_hat = sh_analysis_3d(grid, dT_dt_rad)
+            dlnps_hat = jnp.zeros_like(state.lnps_hat.data)
+
+            return SpectralHydrostaticState(
+                vor_hat=state.vor_hat.replace(data=dvor_hat),
+                div_hat=state.div_hat.replace(data=ddiv_hat),
+                T_hat=state.T_hat.replace(data=dT_hat),
+                lnps_hat=state.lnps_hat.replace(data=dlnps_hat),
+                phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+            )
+
+        self._current_day = START_DAY
+        run_status = "COMPLETED"
+        logger.info(f"Starting spectral: {n_steps_total - start_step} steps, {N_DAYS} days")
+
+        t_start = time.time()
+        for step in range(start_step, n_steps_total):
+            self._current_day = START_DAY + (step + 1) * DT / 86400.0
+
+            self.state = self.model.step(
+                self.state, DT, physics_fn=_spectral_physics_fn,
+            )
+
+            if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
+                elapsed_day = (step + 1) * DT / 86400.0
+                fields = spectral_pe_to_grid(self.state, self.grid, self.sigma)
+                T_g = fields['T']
+                p_s_g = fields['p_s']
+                u_g, v_g = fields['u'], fields['v']
+
+                mean_T = float(jnp.mean(T_g))
+                T_min = float(jnp.min(T_g))
+                T_max = float(jnp.max(T_g))
+                mean_ps = float(jnp.mean(p_s_g))
+                max_wind = float(jnp.max(jnp.sqrt(u_g**2 + v_g**2)))
+
+                elapsed = time.time() - t_start
+                rate = elapsed_day / (elapsed + 1e-10)
+                logger.info(
+                    f"  Day {elapsed_day:6.1f}: T=[{T_min:.1f},{T_max:.1f}]K "
+                    f"mean={mean_T:.1f}K  p_s={mean_ps/100:.1f}hPa  "
+                    f"|v|_max={max_wind:.1f}m/s  ({rate:.1f} sim-days/s)"
+                )
+
+                if not jnp.all(jnp.isfinite(T_g)):
+                    run_status = f"BLOWUP at day {elapsed_day:.1f}"
+                    logger.error(run_status)
+                    break
+
+        elapsed = time.time() - t_start
+        logger.info(f"Spectral run {run_status} in {elapsed:.1f}s")
+        return run_status
 
     # ==================================================================
     # Compiled segment execution path
@@ -517,6 +770,9 @@ class ModelDriver:
             N = cfg.grid.resolution
             shape_2d = (6, N, N)
             shape_3d = (6, N, N, cfg.grid.nlev)
+        elif cfg.grid.grid_type == "voronoi":
+            shape_2d = (self.grid.nCells,)
+            shape_3d = (self.grid.nCells, cfg.grid.nlev)
         else:
             shape_2d = (self.grid.n_lat, self.grid.n_lon)
             shape_3d = (*shape_2d, cfg.grid.nlev)
@@ -543,11 +799,11 @@ class ModelDriver:
 
         # External forcing
         o3_vmr, aerosol_od = self._precompute_external_forcing(
-            START_DAY, self.state.p_s.data, self.grid.lat,
+            START_DAY, self.state.p_s.data, self._grid_lat,
         )
 
         run_status = "COMPLETED"
-        lat_deg_grid = np.degrees(np.asarray(self.grid.lat))
+        lat_deg_grid = np.degrees(np.asarray(self._grid_lat))
 
         logger.info(
             f"Starting compiled run: {n_steps_remaining} steps, "
@@ -572,7 +828,7 @@ class ModelDriver:
                 if self._use_solar_spectral:
                     solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
                 o3_vmr, aerosol_od = self._precompute_external_forcing(
-                    day, self.state.p_s.data, self.grid.lat,
+                    day, self.state.p_s.data, self._grid_lat,
                 )
 
             # Build the compiled segment function.
@@ -592,8 +848,8 @@ class ModelDriver:
                 qv_smooth_coeff=self._qv_smooth_coeff,
                 sst=sst,
                 sic=sic,
-                lat=self.grid.lat,
-                lon=self.grid.lon,
+                lat=self._grid_lat,
+                lon=self._grid_lon,
                 day_of_year=day_of_year,
                 seconds_of_day=seconds_of_day,
                 solar_weights=solar_weights,
@@ -728,6 +984,9 @@ class ModelDriver:
             N = cfg.grid.resolution
             shape_2d = (6, N, N)
             shape_3d = (6, N, N, cfg.grid.nlev)
+        elif cfg.grid.grid_type == "voronoi":
+            shape_2d = (self.grid.nCells,)
+            shape_3d = (self.grid.nCells, cfg.grid.nlev)
         else:
             shape_2d = (self.grid.n_lat, self.grid.n_lon)
             shape_3d = (*shape_2d, cfg.grid.nlev)
@@ -757,7 +1016,7 @@ class ModelDriver:
 
         # External forcing (pre-compute outside JIT)
         o3_vmr, aerosol_od = self._precompute_external_forcing(
-            START_DAY, self.state.p_s.data, self.grid.lat,
+            START_DAY, self.state.p_s.data, self._grid_lat,
         )
 
         # Moisture conservation fixer
@@ -768,7 +1027,7 @@ class ModelDriver:
             )
 
         run_status = "COMPLETED"
-        lat_deg_grid = np.degrees(np.asarray(self.grid.lat))
+        lat_deg_grid = np.degrees(np.asarray(self._grid_lat))
 
         logger.info(f"Starting: {n_steps_total - start_step} steps, {N_DAYS} days")
 
@@ -787,7 +1046,7 @@ class ModelDriver:
                 self.state.T.data, self.state.p_s.data,
                 self.q_v, self.q_c, self.q_r,
                 self.state.u.data, self.state.v.data,
-                sst, sic, self.grid.lat, self.grid.lon,
+                sst, sic, self._grid_lat, self._grid_lon,
                 day_of_year, seconds_of_day, DT,
                 solar_weights, current_s_0,
                 o3_vmr, aerosol_od,
@@ -847,7 +1106,7 @@ class ModelDriver:
 
                 # Ozone + aerosol
                 o3_vmr, aerosol_od = self._precompute_external_forcing(
-                    day, self.state.p_s.data, self.grid.lat,
+                    day, self.state.p_s.data, self._grid_lat,
                 )
 
                 # CMIP GHG trajectory
@@ -865,7 +1124,7 @@ class ModelDriver:
                     self.state.T.data, self.state.p_s.data,
                     self.q_v, self.q_c, self.q_r,
                     self.state.u.data, self.state.v.data,
-                    sst, sic, self.grid.lat, self.grid.lon,
+                    sst, sic, self._grid_lat, self._grid_lon,
                     day_of_year, seconds_of_day, DT,
                     solar_weights, current_s_0,
                     o3_vmr, aerosol_od,

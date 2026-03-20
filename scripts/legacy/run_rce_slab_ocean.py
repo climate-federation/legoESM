@@ -86,9 +86,9 @@ print(f"  Grid created: {6*N*N} columns, {NLEV} levels")
 # ---------------------------------------------------------------------------
 # 2. Atmospheric model (hydrostatic primitive equations)
 # ---------------------------------------------------------------------------
-from legoesm.atmosphere.dynamics.primitive_eq import (
-    PrimitiveEquationModel,
-    PrimitiveEquationConfig,
+from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+    CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+    CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
 )
 from legoesm.atmosphere.physics.held_suarez import held_suarez_init
 

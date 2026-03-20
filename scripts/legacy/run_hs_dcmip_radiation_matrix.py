@@ -460,7 +460,7 @@ def _safe_hydro_energy(state, grid, sigma) -> float:
 def run_hs_fv_cube(case_dir: Path, preset: ResolutionPreset, scheme: str, days: float, mean_every: int, solver: str) -> dict[str, object]:
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq import PrimitiveEquationModel, PrimitiveEquationConfig
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import CDGridPrimitiveEquationModel as PrimitiveEquationModel, CDGridPrimitiveEquationConfig as PrimitiveEquationConfig
     from legoesm.atmosphere.physics.held_suarez import held_suarez_init
 
     dt = 600.0

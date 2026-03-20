@@ -53,8 +53,12 @@ def main():
                         choices=["sigma", "hybrid"])
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
+    parser.add_argument("--grid-type", type=str, default="cubed_sphere",
+                        choices=["cubed_sphere", "gaussian", "latlon", "voronoi"])
     parser.add_argument("--discretization", type=str, default="centered",
-                        choices=["centered", "finite_volume", "cgrid"])
+                        choices=["centered", "finite_volume", "cgrid", "mpas", "spectral"])
+    parser.add_argument("--truncation", type=int, default=None,
+                        help="Spectral truncation (T21, T42, etc.). Sets grid_type=gaussian.")
 
     # Integration
     parser.add_argument("--start-day", type=float, default=0.0)
@@ -138,8 +142,16 @@ def main():
     if args.solar_source in ("file", "spectral_file") and not args.solar_file:
         parser.error("--solar-file required when --solar-source is file/spectral_file")
 
+    # Auto-configure for spectral discretization
+    if args.discretization == "spectral" or args.truncation is not None:
+        args.discretization = "spectral"
+        args.grid_type = "gaussian"
+        if args.truncation is not None:
+            args.resolution = args.truncation
+
     # Build configuration
     grid_config = GridConfig(
+        grid_type=args.grid_type,
         resolution=args.resolution,
         nlev=args.nlev,
         vertical_coord=args.vertical_coord,

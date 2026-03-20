@@ -19,9 +19,9 @@ class TestFVPrimitiveEquations:
 
     @pytest.fixture(scope="class")
     def model_state_dt(self, grid_pe):
-        from legoesm.atmosphere.dynamics.primitive_eq_fv import (
-            FVPrimitiveEquationConfig,
-            FVPrimitiveEquationModel,
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationConfig as FVPrimitiveEquationConfig,
+            CDGridPrimitiveEquationModel as FVPrimitiveEquationModel,
         )
         from legoesm.grids.vertical import create_sigma_coordinate
 

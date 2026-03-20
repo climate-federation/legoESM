@@ -363,6 +363,8 @@ def fv3_hydrostatic_tendencies(
     HydrostaticTendencies
     """
     from legoesm.core.operators_cdgrid import (
+        agrid_to_dgrid_vector,
+        dgrid_to_agrid_vector,
         dgrid_vorticity,
         dgrid_to_cgrid,
         cgrid_divergence,
@@ -370,9 +372,7 @@ def fv3_hydrostatic_tendencies(
         _interp_center_to_corner,
         _interp_corner_to_center,
         _laplacian_dgrid,
-        _pad_halo_auto,
     )
-    from legoesm.grids.halo import pad_halo, pad_halo_vector
 
     _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
 
@@ -381,8 +381,6 @@ def fv3_hydrostatic_tendencies(
     T = state.T.data
     p_s = state.p_s.data   # (6, n, n)
     phis = state.phis.data
-    n = grid.n
-    nlev = u.shape[-1]
 
     R_d = constants.R_d
     kappa = constants.kappa
@@ -391,28 +389,8 @@ def fv3_hydrostatic_tendencies(
     T = jnp.maximum(T, config.T_min)
     p_s = jnp.clip(p_s, 100.0, 2.0e6)
 
-    # --- 1. Convert A-grid winds to D-grid ---
-    # Interpolate cell-centre winds to cell corners via halo-aware averaging
-    def _a_to_d_level(u_k, v_k):
-        """Convert one level of A-grid winds to D-grid corners."""
-        u_pad, v_pad = pad_halo_vector(
-            u_k, v_k,
-            grid.cos_angle, grid.sin_angle,
-            grid.cos_angle_padded, grid.sin_angle_padded,
-            interp_offsets=grid.halo_interp_offsets,
-        )
-        u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
-                       + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
-        v_d = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1]
-                       + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
-        return u_d, v_d
-
-    # vmap over levels
-    u_t = jnp.moveaxis(u, -1, 0)  # (nlev, 6, n, n)
-    v_t = jnp.moveaxis(v, -1, 0)
-    u_d_t, v_d_t = jax.vmap(_a_to_d_level)(u_t, v_t)  # (nlev, 6, n+1, n+1) each
-    u_d = jnp.moveaxis(u_d_t, 0, -1)  # (6, n+1, n+1, nlev)
-    v_d = jnp.moveaxis(v_d_t, 0, -1)
+    # --- 1. Convert A-grid winds to D-grid (shared with ocean) ---
+    u_d, v_d = agrid_to_dgrid_vector(u, v, cdgrid)  # (6, n+1, n+1, nlev)
 
     # --- 2. D-grid → C-grid ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)  # (6, n+1, n, nlev), (6, n, n+1, nlev)
@@ -477,8 +455,7 @@ def fv3_hydrostatic_tendencies(
             _laplacian_dgrid(v_d, cdgrid), cdgrid)
 
     # --- 9. Convert D-grid tendencies back to A-grid ---
-    du_dt_data = _interp_corner_to_center(du_d_dt)  # (6, n, n, nlev)
-    dv_dt_data = _interp_corner_to_center(dv_d_dt)
+    du_dt_data, dv_dt_data = dgrid_to_agrid_vector(du_d_dt, dv_d_dt)
 
     # --- 10. Surface pressure tendency using C-grid divergence ---
     div_v_c = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)

@@ -719,9 +719,9 @@ def run_hydro_fv_tests(output_dir):
     """Run Held-Suarez and Baroclinic wave with FV PE."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq import (
-        PrimitiveEquationModel,
-        PrimitiveEquationConfig,
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel as PrimitiveEquationModel,
+        CDGridPrimitiveEquationConfig as PrimitiveEquationConfig,
     )
     from legoesm.atmosphere.physics.held_suarez import (
         held_suarez_forcing,
