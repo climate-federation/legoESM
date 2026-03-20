@@ -151,7 +151,7 @@ def set_module_override(module: str, **role_overrides: str) -> None:
     if module not in _MODULE_OVERRIDES:
         _MODULE_OVERRIDES[module] = {}
 
-    from legoesm.core.hardware import _parse_precision_dtype
+    from legoesm.core.hardware import _parse_precision_dtype  # legacy helper
     for role, value in role_overrides.items():
         if value is None:
             _MODULE_OVERRIDES[module].pop(role, None)

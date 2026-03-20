@@ -1,8 +1,11 @@
 """Hardware backend detection and compatibility guards for legoESM.
 
-Provides runtime checks to ensure that code requiring specific numerical
-capabilities (e.g., float64, complex128) is not accidentally run on
-backends that lack those capabilities (e.g., Apple Metal/MPS).
+.. deprecated::
+    This module is **legacy**.  New code should import from
+    :mod:`legoesm.runtime` instead.  Every public function here is now a
+    thin wrapper that delegates to the canonical runtime layer.  These
+    wrappers exist only for backward compatibility and will be removed in
+    a future release.
 """
 
 from __future__ import annotations
@@ -13,7 +16,10 @@ import jax
 import jax.numpy as jnp
 
 
-# Backends known to lack float64 / complex128 support.
+# ---------------------------------------------------------------------------
+# Legacy constants — kept so that ``from legoesm.core.hardware import
+# _UNSUPPORTED_F64_BACKENDS`` in conservation.py et al. keeps working.
+# ---------------------------------------------------------------------------
 _UNSUPPORTED_F64_BACKENDS = frozenset({"METAL"})
 
 _PRECISION_NAME_TO_DTYPE = {
@@ -30,6 +36,9 @@ _PRECISION_NAME_TO_DTYPE = {
     "double": jnp.float64,
 }
 
+# Legacy mutable precision dict — still the backing store for the 3-component
+# policy used by conservation.py.  Kept in sync by set_runtime_precision_policy
+# and by runtime.precision.apply_precision.
 _RUNTIME_PRECISION_POLICY = {
     "dynamics": jnp.float32,
     "ml": jnp.bfloat16,
@@ -38,100 +47,35 @@ _RUNTIME_PRECISION_POLICY = {
 _UNSET = object()
 
 
-def get_backend() -> str:
-    """Return the current JAX default backend name (uppercase).
+# ---------------------------------------------------------------------------
+# Delegating wrappers
+# ---------------------------------------------------------------------------
 
-    Common values: ``"CPU"``, ``"GPU"``, ``"TPU"``, ``"METAL"``.
+def get_backend() -> str:
+    """Return the current JAX default backend name (**uppercase**).
+
+    .. deprecated:: Use ``legoesm.runtime.get_backend()`` (lowercase) instead.
     """
-    return jax.default_backend().upper()
+    from legoesm.runtime.backend import get_backend as _get_backend
+    return _get_backend().upper()          # legacy callers expect uppercase
 
 
 def check_spectral_backend(
     *,
     allow_unsupported: bool = False,
 ) -> None:
-    """Verify the current JAX backend supports float64 and complex128.
+    """Verify the backend supports float64/complex128.
 
-    The spectral solver (Gaussian grid + spherical harmonic transforms)
-    requires float64 real arithmetic and complex128 FFTs.  Backends that
-    do not support these types (e.g., Apple Metal/MPS) will produce
-    incorrect results or crash with opaque errors.
-
-    Parameters
-    ----------
-    allow_unsupported : bool
-        If ``True``, emit a warning instead of raising.  Intended for
-        expert users who have forced a compatible backend via
-        ``JAX_PLATFORMS=cpu``.
-
-    Raises
-    ------
-    ValueError
-        If the backend is unsupported and *allow_unsupported* is False.
+    .. deprecated:: Use ``legoesm.runtime.check_spectral_backend()`` instead.
     """
-    backend = get_backend()
-
-    # Check that float64/complex128 is actually enabled in JAX config.
-    # Without jax_enable_x64, JAX silently truncates float64 to float32,
-    # which corrupts spectral transforms.
-    if not jax.config.jax_enable_x64:
-        x64_message = (
-            "The spectral solver requires float64 and complex128 arithmetic, "
-            "but JAX is running in 32-bit mode (jax_enable_x64 is not set).\n\n"
-            "Remediation: set the environment variable JAX_ENABLE_X64=True "
-            "or call jax.config.update('jax_enable_x64', True) before "
-            "importing any spectral modules."
-        )
-        if allow_unsupported:
-            warnings.warn(
-                x64_message,
-                RuntimeWarning,
-                stacklevel=3,
-            )
-        else:
-            raise ValueError(x64_message)
-
-    if backend not in _UNSUPPORTED_F64_BACKENDS:
-        return
-
-    message = (
-        f"The spectral solver requires float64 and complex128 arithmetic, "
-        f"but the current JAX backend is '{backend}', which does not support "
-        f"these types.\n\n"
-        f"Remediation options:\n"
-        f"  1. Force CPU backend:  JAX_PLATFORMS=cpu python your_script.py\n"
-        f"  2. Use the finite-volume solver (cubed-sphere) instead, which "
-        f"works in float32 on all backends including Metal.\n"
-        f"  3. Set atmosphere.spectral.allow_unsupported=true in your config "
-        f"to bypass this check (expert only, results may be incorrect)."
-    )
-
-    if allow_unsupported:
-        warnings.warn(
-            f"Spectral solver running on unsupported backend '{backend}'. "
-            f"Results may be incorrect.\n\n" + message,
-            RuntimeWarning,
-            stacklevel=3,
-        )
-        return
-
-    raise ValueError(message)
+    from legoesm.runtime.backend import check_spectral_backend as _check
+    _check(allow_unsupported=allow_unsupported)
 
 
 def detect_devices() -> dict:
-    """Detect available JAX devices and their capabilities.
+    """Detect available JAX devices and capabilities.
 
-    Returns
-    -------
-    dict
-        Keys:
-
-        - ``backend`` (*str*) — default backend name (uppercase).
-        - ``n_devices`` (*int*) — number of available devices.
-        - ``devices`` (*list*) — list of ``jax.Device`` objects.
-        - ``supports_f64`` (*bool*) — whether float64 is available.
-        - ``distributed`` (*bool*) — whether ``jax.distributed``
-          has been initialized.
+    .. deprecated:: Use ``legoesm.runtime.detect_hardware()`` instead.
     """
     backend = get_backend()
     devices = jax.devices()
@@ -143,6 +87,12 @@ def detect_devices() -> dict:
         "distributed": jax.process_count() > 1,
     }
 
+
+# ---------------------------------------------------------------------------
+# Precision helpers — still the canonical implementation for the 3-component
+# legacy dict because several modules import _parse_precision_dtype and
+# get_runtime_precision_dtype directly.
+# ---------------------------------------------------------------------------
 
 def _parse_precision_dtype(value, *, field_name: str, allow_none: bool = False):
     """Parse a precision config value into a JAX dtype."""
@@ -172,9 +122,9 @@ def set_runtime_precision_policy(
     ml=_UNSET,
     conservation=_UNSET,
 ) -> dict:
-    """Set runtime precision policy from config-like values.
+    """Set the legacy 3-component runtime precision policy.
 
-    Returns the resolved dtype policy as a dict.
+    .. deprecated:: Use ``legoesm.runtime.apply_precision()`` instead.
     """
     if dynamics is not _UNSET:
         _RUNTIME_PRECISION_POLICY["dynamics"] = _parse_precision_dtype(
@@ -198,12 +148,12 @@ def set_runtime_precision_policy(
 
 
 def get_runtime_precision_policy() -> dict:
-    """Return the active runtime precision policy."""
+    """Return the active legacy 3-component precision policy."""
     return dict(_RUNTIME_PRECISION_POLICY)
 
 
 def get_runtime_precision_dtype(component: str):
-    """Return configured dtype for one precision component."""
+    """Return configured dtype for one legacy precision component."""
     if component not in _RUNTIME_PRECISION_POLICY:
         raise KeyError(
             f"Unknown precision component {component!r}. "
@@ -215,62 +165,33 @@ def get_runtime_precision_dtype(component: str):
 def apply_hardware_config(config) -> dict:
     """Apply ``hardware.*`` runtime options from a legoESM Config object.
 
-    This consumes:
-    - ``hardware.precision.*``
-    - ``hardware.devices`` (legacy alias)
-    - ``hardware.parallelism.*``
+    .. deprecated::
+        Use ``legoesm.runtime.bootstrap_from_yaml_config(config)`` instead.
+        This wrapper delegates to the canonical runtime layer and syncs
+        the legacy 3-component precision dict for backward compatibility.
     """
-    dynamics_precision = config.get("hardware.precision.dynamics")
-    ml_precision = config.get("hardware.precision.ml")
-    conservation_precision = config.get("hardware.precision.conservation")
+    # First, consume the precision keys into the legacy dict so that
+    # callers reading get_runtime_precision_dtype() see the right values.
+    dynamics_precision = config.get("hardware.precision.dynamics", None)
+    ml_precision = config.get("hardware.precision.ml", None)
+    conservation_precision = config.get("hardware.precision.conservation", None)
+    kwargs = {}
+    if dynamics_precision is not None:
+        kwargs["dynamics"] = dynamics_precision
+    if ml_precision is not None:
+        kwargs["ml"] = ml_precision
+    if conservation_precision is not None:
+        kwargs["conservation"] = conservation_precision
+    if kwargs:
+        set_runtime_precision_policy(**kwargs)
 
-    policy = set_runtime_precision_policy(
-        dynamics=dynamics_precision,
-        ml=ml_precision,
-        conservation=conservation_precision,
-    )
+    # Delegate to canonical bootstrap.
+    from legoesm.runtime.config import bootstrap_from_yaml_config
+    rc = bootstrap_from_yaml_config(config)
 
-    # Enable x64 when dynamics precision requires it. We intentionally avoid
-    # forcing x64 off for lower-precision settings, since spectral workflows
-    # may rely on x64 being enabled elsewhere.
-    if policy["dynamics"] == jnp.float64 and not jax.config.jax_enable_x64:
-        jax.config.update("jax_enable_x64", True)
-
-    n_devices = config.get("hardware.parallelism.n_devices", "auto")
-    backend = config.get("hardware.parallelism.backend", None)
-    distributed = bool(config.get("hardware.parallelism.distributed", False))
-
-    # Legacy compatibility: hardware.devices acts as n_devices when
-    # parallelism.n_devices is not set explicitly.
-    legacy_devices = config.get("hardware.devices", "auto")
-    if n_devices in (None, "auto") and legacy_devices not in (None, "auto"):
-        n_devices = legacy_devices
-    if n_devices is None:
-        n_devices = "auto"
-
-    if distributed:
-        if backend is not None or n_devices not in (None, "auto"):
-            warnings.warn(
-                "hardware.parallelism.distributed=true ignores "
-                "hardware.parallelism.backend and n_devices; using "
-                "MPI rank-local device topology.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        from legoesm.parallel.distributed import initialize_distributed
-        device_config, topology = initialize_distributed(return_topology=True)
-        return {
-            "precision": policy,
-            "distributed": True,
-            "device_config": device_config,
-            "topology": topology,
-        }
-
-    from legoesm.parallel.mesh import create_device_mesh
-    device_config = create_device_mesh(n_devices=n_devices, backend=backend)
     return {
-        "precision": policy,
-        "distributed": False,
-        "device_config": device_config,
+        "precision": get_runtime_precision_policy(),
+        "distributed": rc.distributed,
+        "device_config": rc.device_config,
         "topology": None,
     }

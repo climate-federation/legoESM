@@ -4,6 +4,11 @@ Usage:
     legoesm run config.yaml
     legoesm test williamson --case 2 --resolution 48 --days 5
     legoesm benchmark --resolution 48 --n-steps 100
+
+Note: JAX is NOT imported at module scope.  The runtime bootstrap
+(``legoesm.runtime.bootstrap``) is called inside each sub-command
+*before* any JAX-heavy model code is imported, ensuring that X64,
+backend, and precision policies are fully resolved first.
 """
 
 from __future__ import annotations
@@ -12,9 +17,6 @@ import argparse
 import logging
 import sys
 import time
-
-import jax
-import jax.numpy as jnp
 
 logger = logging.getLogger("legoesm.cli")
 
@@ -73,8 +75,6 @@ def main():
 def cmd_run(args):
     """Run a simulation from a config file."""
     from legoesm.config import Config
-    from legoesm.core.hardware import apply_hardware_config
-    from legoesm.driver.model_driver import ModelDriver
 
     logging.basicConfig(
         level=logging.INFO,
@@ -84,17 +84,23 @@ def cmd_run(args):
 
     try:
         config = Config.from_yaml(args.config)
-        hw_runtime = apply_hardware_config(config)
+
+        # --- Runtime bootstrap (before any JAX-heavy imports) ---
+        from legoesm.runtime import bootstrap_from_yaml_config
+        rc = bootstrap_from_yaml_config(config)
+
         logger.info(f"legoESM v0.1.0 | Loaded config from {args.config}")
         logger.info(f"  Model: {config.get('model.name')}")
         logger.info(f"  Grid: {config.get('grid.type')} C{config.get('grid.resolution')}")
         logger.info(f"  Duration: {config.get('time.duration_hours')} hours")
-        logger.info(f"  Backend: {hw_runtime['device_config'].backend}")
-        logger.info(f"  Devices: {hw_runtime['device_config'].n_devices}")
-        logger.info(f"  Distributed: {hw_runtime['distributed']}")
-        logger.info(f"  Precision policy: {hw_runtime['precision']}")
+        logger.info(f"  Backend: {rc.backend}")
+        logger.info(f"  Devices: {rc.device_config.n_devices}")
+        logger.info(f"  Distributed: {rc.distributed}")
+        logger.info(f"  Precision: {rc.precision}")
 
-        # Bridge from YAML Config to structured ExperimentConfig
+        # Now safe to import JAX-heavy model code.
+        from legoesm.driver.model_driver import ModelDriver
+
         experiment_config = config.to_experiment_config()
 
         logger.info("Initializing model driver...")
@@ -110,6 +116,18 @@ def cmd_run(args):
 
 def cmd_test(args):
     """Run a Williamson test case."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Bootstrap runtime before JAX-heavy imports.
+    from legoesm.runtime import bootstrap
+    rc = bootstrap(precision="fp32")
+
+    import jax
+    import jax.numpy as jnp
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
     from tests.test_cases.williamson import (
@@ -118,17 +136,11 @@ def cmd_test(args):
     )
     from legoesm.core.conservation import compute_conservation_diagnostics
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
     logger.info(f"legoESM v0.1.0 | Williamson Test Case {args.case}")
     logger.info(f"  Resolution: C{args.resolution} (~{6.371229e3 / args.resolution:.0f} km)")
     logger.info(f"  Duration: {args.days} days")
     logger.info(f"  Time step: {args.dt} s")
-    logger.info(f"  Backend: {jax.default_backend()}")
+    logger.info(f"  Backend: {rc.backend}")
     logger.info(f"  Devices: {jax.devices()}")
 
     # Create grid
@@ -226,20 +238,26 @@ def cmd_test(args):
 
 def cmd_benchmark(args):
     """Run a performance benchmark."""
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel
-    from tests.test_cases.williamson import williamson_test2
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
+    # Bootstrap runtime before JAX-heavy imports.
+    from legoesm.runtime import bootstrap
+    rc = bootstrap(precision="fp32")
+
+    import jax
+    import jax.numpy as jnp
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel
+    from tests.test_cases.williamson import williamson_test2
+
     logger.info(f"legoESM v0.1.0 | Benchmark")
     logger.info(f"  Resolution: C{args.resolution}")
     logger.info(f"  Steps: {args.n_steps}")
-    logger.info(f"  Backend: {jax.default_backend()}")
+    logger.info(f"  Backend: {rc.backend}")
     logger.info(f"  Devices: {jax.devices()}")
 
     grid = create_cubed_sphere(args.resolution)

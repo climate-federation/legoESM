@@ -291,8 +291,8 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
     """Create a dynamical core model by name or from config."""
     # --- Apply runtime hardware config when available ---
     if legoesm_config is not None:
-        from legoesm.core.hardware import apply_hardware_config
-        apply_hardware_config(legoesm_config)
+        from legoesm.runtime.config import bootstrap_from_yaml_config
+        bootstrap_from_yaml_config(legoesm_config)
 
     # --- Resolve name from config if not given directly ---
     if name is None:

@@ -104,13 +104,12 @@ class TestApplyHardwareConfig:
         )
         with patch(
             "legoesm.parallel.distributed.initialize_distributed",
-            return_value=(_dummy_cfg(), {"rank": 0}),
+            return_value=_dummy_cfg(),
         ) as init_dist, patch(
             "legoesm.parallel.mesh.create_device_mesh",
         ) as create_mesh:
-            with pytest.warns(RuntimeWarning, match="distributed=true ignores"):
-                apply_hardware_config(cfg)
-        init_dist.assert_called_once_with(return_topology=True)
+            apply_hardware_config(cfg)
+        init_dist.assert_called_once()
         create_mesh.assert_not_called()
 
     def test_precision_policy_is_applied(self):
@@ -130,20 +129,16 @@ class TestApplyHardwareConfig:
                 }
             }
         )
-        should_enable_x64 = not jax.config.jax_enable_x64
         with patch(
             "legoesm.parallel.mesh.create_device_mesh",
             return_value=_dummy_cfg(),
-        ), patch("legoesm.core.hardware.jax.config.update") as update_cfg:
+        ):
             apply_hardware_config(cfg)
 
+        # Legacy 3-component dict should reflect the config values.
         assert get_runtime_precision_dtype("dynamics") == jnp.float64
         assert get_runtime_precision_dtype("ml") == jnp.float32
         assert get_runtime_precision_dtype("conservation") == jnp.float32
-        if should_enable_x64:
-            update_cfg.assert_called_with("jax_enable_x64", True)
-        else:
-            update_cfg.assert_not_called()
 
     def test_create_model_consumes_hardware_config(self):
         cfg = Config.from_dict(
@@ -153,12 +148,15 @@ class TestApplyHardwareConfig:
                 }
             }
         )
-        with patch("legoesm.core.hardware.apply_hardware_config") as apply_hw, patch(
+        with patch(
+            "legoesm.runtime.config.bootstrap_from_yaml_config"
+        ) as bootstrap_fn, patch(
             "legoesm.atmosphere.dynamics.CDGridShallowWaterModel",
             return_value=object(),
         ):
+            bootstrap_fn.return_value = None  # prevent actual bootstrap
             create_model("shallow_water", legoesm_config=cfg, grid=object())
-        apply_hw.assert_called_once_with(cfg)
+        bootstrap_fn.assert_called_once_with(cfg)
 
 
 class TestConservationPrecisionHook:
