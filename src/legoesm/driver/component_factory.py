@@ -251,6 +251,7 @@ def create_atmosphere_dycore(
             hyperdiff_order=2,
             time_integrator="ssp_rk54",
             p_floor=200.0,
+            dealiasing_fraction=0.667,
         )
         return SpectralPrimitiveEquationModel(
             grid=grid, sigma_coord=sigma, config=pe_config,
