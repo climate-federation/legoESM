@@ -328,6 +328,264 @@ def cdgrid_hydrostatic_tendencies(
     )
 
 
+def fv3_hydrostatic_tendencies(
+    state: HydrostaticState,
+    grid: CubedSphereGrid,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    cdgrid: CubedSphereCDGrid,
+    config: CDGridPrimitiveEquationConfig = CDGridPrimitiveEquationConfig(),
+    physics_tendency: HydrostaticTendencies | None = None,
+) -> HydrostaticTendencies:
+    """FV3-style tendencies using D-grid vorticity and Arakawa-Lamb gradient.
+
+    Momentum uses the vector-invariant form on the C-D grid:
+    - Vorticity from D-grid winds via exact circulation (avoids H-K instability)
+    - KE at cell centers from C-grid velocities
+    - Bernoulli gradient at D-grid corners via 4-point Arakawa-Lamb formula
+    - Momentum tendencies computed at D-grid corners, then averaged to A-grid
+
+    Continuity uses C-grid divergence for exact discrete mass conservation.
+
+    Temperature uses PPM flux-form transport per level.
+
+    Parameters
+    ----------
+    state : HydrostaticState
+        Winds stored at A-grid cell centres; internally converted to D-grid.
+    grid : CubedSphereGrid
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+    cdgrid : CubedSphereCDGrid
+    config : CDGridPrimitiveEquationConfig
+    physics_tendency : HydrostaticTendencies, optional
+
+    Returns
+    -------
+    HydrostaticTendencies
+    """
+    from legoesm.core.operators_cdgrid import (
+        dgrid_vorticity,
+        dgrid_to_cgrid,
+        cgrid_divergence,
+        _arakawa_lamb_gradient,
+        _interp_center_to_corner,
+        _interp_corner_to_center,
+        _laplacian_dgrid,
+        _pad_halo_auto,
+    )
+    from legoesm.grids.halo import pad_halo, pad_halo_vector
+
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    u = state.u.data       # (6, n, n, nlev) — A-grid
+    v = state.v.data
+    T = state.T.data
+    p_s = state.p_s.data   # (6, n, n)
+    phis = state.phis.data
+    n = grid.n
+    nlev = u.shape[-1]
+
+    R_d = constants.R_d
+    kappa = constants.kappa
+
+    # Positivity protections
+    T = jnp.maximum(T, config.T_min)
+    p_s = jnp.clip(p_s, 100.0, 2.0e6)
+
+    # --- 1. Convert A-grid winds to D-grid ---
+    # Interpolate cell-centre winds to cell corners via halo-aware averaging
+    def _a_to_d_level(u_k, v_k):
+        """Convert one level of A-grid winds to D-grid corners."""
+        u_pad, v_pad = pad_halo_vector(
+            u_k, v_k,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=grid.halo_interp_offsets,
+        )
+        u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
+                       + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
+        v_d = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1]
+                       + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
+        return u_d, v_d
+
+    # vmap over levels
+    u_t = jnp.moveaxis(u, -1, 0)  # (nlev, 6, n, n)
+    v_t = jnp.moveaxis(v, -1, 0)
+    u_d_t, v_d_t = jax.vmap(_a_to_d_level)(u_t, v_t)  # (nlev, 6, n+1, n+1) each
+    u_d = jnp.moveaxis(u_d_t, 0, -1)  # (6, n+1, n+1, nlev)
+    v_d = jnp.moveaxis(v_d_t, 0, -1)
+
+    # --- 2. D-grid → C-grid ---
+    u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)  # (6, n+1, n, nlev), (6, n, n+1, nlev)
+
+    # --- 3. Pressure and geopotential ---
+    if _hybrid:
+        p_full = pressure_from_hybrid(sigma_coord, p_s)
+        dp = dp_from_hybrid(sigma_coord, p_s)
+    else:
+        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
+
+    if _hybrid:
+        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+    else:
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+
+    # --- 4. KE at cell centers from C-grid velocities ---
+    u_center = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])  # (6, n, n, nlev)
+    v_center = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])
+    KE = 0.5 * (u_center ** 2 + v_center ** 2)
+
+    # --- 5. Bernoulli function B = KE + Φ (cell centers) ---
+    B = KE + Phi
+
+    # --- 6. D-grid vorticity via circulation ---
+    zeta = dgrid_vorticity(u_d, v_d, cdgrid)      # (6, n, n, nlev)
+    zeta_abs = zeta + grid.f[..., None]
+
+    # Vorticity at D-grid corners (interpolated)
+    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)  # (6, n+1, n+1, nlev)
+
+    # --- 7. Gradients at D-grid corners via Arakawa-Lamb ---
+    dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)  # (6, n+1, n+1, nlev)
+
+    # Pressure gradient correction at D-grid corners
+    ln_ps = jnp.log(p_s)
+    dln_dx, dln_dy = _arakawa_lamb_gradient(ln_ps, cdgrid)  # (6, n+1, n+1)
+    T_corner = _interp_center_to_corner(T, cdgrid)  # (6, n+1, n+1, nlev)
+    pg_corr_x = R_d * T_corner * dln_dx[..., None]  # (6, n+1, n+1, nlev)
+    pg_corr_y = R_d * T_corner * dln_dy[..., None]
+
+    # --- 8. D-grid momentum tendencies ---
+    du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x
+    dv_d_dt = -zeta_corner * u_d - dB_dy - pg_corr_y
+
+    # Divergence damping at D-grid
+    if config.div_damp_coeff > 0:
+        div_v = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
+        ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_v, cdgrid)
+        du_d_dt = du_d_dt - config.div_damp_coeff * ddiv_dx
+        dv_d_dt = dv_d_dt - config.div_damp_coeff * ddiv_dy
+
+    # Diffusion at D-grid corners
+    if config.A_h > 0:
+        du_d_dt = du_d_dt + config.A_h * _laplacian_dgrid(u_d, cdgrid)
+        dv_d_dt = dv_d_dt + config.A_h * _laplacian_dgrid(v_d, cdgrid)
+
+    if config.hyperdiff_coeff > 0:
+        du_d_dt = du_d_dt - config.hyperdiff_coeff * _laplacian_dgrid(
+            _laplacian_dgrid(u_d, cdgrid), cdgrid)
+        dv_d_dt = dv_d_dt - config.hyperdiff_coeff * _laplacian_dgrid(
+            _laplacian_dgrid(v_d, cdgrid), cdgrid)
+
+    # --- 9. Convert D-grid tendencies back to A-grid ---
+    du_dt_data = _interp_corner_to_center(du_d_dt)  # (6, n, n, nlev)
+    dv_dt_data = _interp_corner_to_center(dv_d_dt)
+
+    # --- 10. Surface pressure tendency using C-grid divergence ---
+    div_v_c = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
+
+    if _hybrid:
+        D_total_p = jnp.sum(div_v_c * dp, axis=-1)
+        dp_s_dt_data = -D_total_p / sigma_coord.B_range
+        dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
+
+        mass_flux = compute_mass_flux_hybrid(div_v_c, p_s, sigma_coord)
+        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
+        vert_adv_u = vertical_advection_hybrid(u, mass_flux, p_s, sigma_coord)
+        vert_adv_v = vertical_advection_hybrid(v, mass_flux, p_s, sigma_coord)
+
+        omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
+        p_adiab = jnp.maximum(p_full, config.p_floor)
+    else:
+        dsigma = sigma_coord.dsigma
+        sigma_top = sigma_coord.sigma_half[0]
+        sigma_range = 1.0 - sigma_top
+
+        D_total = jnp.sum(div_v_c * dsigma, axis=-1)
+        dp_s_dt_data = -p_s * D_total / sigma_range
+        dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
+
+        sigma_dot = compute_sigma_dot(div_v_c, sigma_coord)
+        vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
+        vert_adv_u = vertical_advection(u, sigma_dot, sigma_coord)
+        vert_adv_v = vertical_advection(v, sigma_dot, sigma_coord)
+
+        omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
+        p_adiab = jnp.maximum(p_full, config.p_floor)
+
+    du_dt_data = du_dt_data + vert_adv_u
+    dv_dt_data = dv_dt_data + vert_adv_v
+
+    # --- 11. Thermodynamic equation ---
+    # Horizontal advection: centered A-grid advection -v·∇T
+    dT_dx = _gradient_x_3d(T, grid)
+    dT_dy = _gradient_y_3d(T, grid)
+    horiz_adv_T = -(u * dT_dx + v * dT_dy)
+
+    # Adiabatic heating
+    ln_ps_field = Field(data=ln_ps, name="ln_ps", dims=("face", "x", "y"),
+                        units="", staggering="cell")
+    dln_ps_dx = gradient_x(ln_ps_field, grid).data
+    dln_ps_dy = gradient_y(ln_ps_field, grid).data
+    adiabatic = kappa * T * omega / p_adiab
+    v_dot_grad_lnps = u * dln_ps_dx[..., None] + v * dln_ps_dy[..., None]
+    adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
+
+    dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
+
+    # Temperature dissipation
+    if config.T_diss_coeff > 0:
+        wind_speed = jnp.sqrt(u**2 + v**2)
+        dx_local = grid.dx[..., None]
+        nu_T = config.T_diss_coeff * wind_speed * dx_local
+        lap_T = _laplacian_compact_3d(T, grid)
+        dT_dt_data = dT_dt_data + nu_T * lap_T
+
+    # Temperature diffusion
+    if config.A_h > 0:
+        lap_T = _laplacian_compact_3d(T, grid)
+        dT_dt_data = dT_dt_data + config.A_h * lap_T
+
+    if config.hyperdiff_coeff > 0:
+        dT_dt_data = dT_dt_data + _hyperdiffusion_3d(T, grid, config.hyperdiff_coeff)
+
+    if config.hyperdiff_ps_coeff > 0:
+        from legoesm.core.operators import hyperdiffusion
+        ps_field = Field(data=p_s, name="p_s", dims=("face", "x", "y"),
+                         units="Pa", staggering="cell")
+        diff_ps = hyperdiffusion(ps_field, grid, config.hyperdiff_ps_coeff)
+        dp_s_dt_data = dp_s_dt_data + diff_ps.data
+
+    # --- 12. Upper-atmosphere Rayleigh sponge ---
+    if config.sponge_tau_sec > 0 and config.sponge_sigma > 0:
+        sigma_full = sigma_coord.sigma_full
+        sponge_frac = jnp.clip(
+            (config.sponge_sigma - sigma_full) / config.sponge_sigma, 0.0, 1.0
+        )
+        sponge_rate = sponge_frac**2 / config.sponge_tau_sec
+        du_dt_data = du_dt_data - sponge_rate * u
+        dv_dt_data = dv_dt_data - sponge_rate * v
+
+    # --- 13. Physics ---
+    if physics_tendency is not None:
+        du_dt_data = du_dt_data + physics_tendency.du_dt.data
+        dv_dt_data = dv_dt_data + physics_tendency.dv_dt.data
+        dT_dt_data = dT_dt_data + physics_tendency.dT_dt.data
+        dp_s_dt_data = dp_s_dt_data + physics_tendency.dp_s_dt.data
+
+    dims_3d = ("face", "x", "y", "level")
+    dims_2d = ("face", "x", "y")
+
+    return HydrostaticTendencies(
+        du_dt=Field(data=du_dt_data, name="du_dt", dims=dims_3d, units="m/s^2"),
+        dv_dt=Field(data=dv_dt_data, name="dv_dt", dims=dims_3d, units="m/s^2"),
+        dT_dt=Field(data=dT_dt_data, name="dT_dt", dims=dims_3d, units="K/s"),
+        dp_s_dt=Field(data=dp_s_dt_data, name="dp_s_dt", dims=dims_2d, units="Pa/s"),
+        dphis_dt=Field(
+            data=jnp.zeros_like(phis), name="dphis_dt", dims=dims_2d, units="m^2/s^3"
+        ),
+    )
+
+
 def _apply_edge_blend(
     state: HydrostaticState,
     grid: CubedSphereGrid,
@@ -362,10 +620,12 @@ def _apply_edge_blend(
 
 
 class CDGridPrimitiveEquationModel(IntegrationMixin):
-    """Hydrostatic PE model on the cubed-sphere with A-grid dynamics.
+    """Hydrostatic PE model on the cubed-sphere with FV3 C-D grid dynamics.
 
-    Uses A-grid operators for momentum (energy-consistent) and C-grid
-    divergence for continuity (exact flux form).
+    Uses FV3-style vector-invariant form:
+    - D-grid vorticity via circulation (avoids Hollingsworth-Kallberg)
+    - Arakawa-Lamb gradient at D-grid corners
+    - C-grid divergence for exact mass conservation
 
     Parameters
     ----------
@@ -391,7 +651,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         state: HydrostaticState,
         physics_tendency: HydrostaticTendencies | None = None,
     ) -> HydrostaticTendencies:
-        return cdgrid_hydrostatic_tendencies(
+        return fv3_hydrostatic_tendencies(
             state, self.grid, self.sigma_coord, self.cdgrid,
             self.config, physics_tendency,
         )
@@ -403,7 +663,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             phys = None
             if physics_fn is not None:
                 phys = physics_fn(s, self.grid, self.sigma_coord)
-            tend = cdgrid_hydrostatic_tendencies(
+            tend = fv3_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, self.cdgrid,
                 self.config, phys,
             )
@@ -419,29 +679,12 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             state, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Edge blending — cubed-sphere panel-edge treatment
-        if (
-            self.config.edge_blend_uv > 0.0
-            or self.config.edge_blend_T > 0.0
-            or self.config.edge_blend_p_s > 0.0
-        ):
-            state_new = _apply_edge_blend(state_new, self.grid, self.config)
-
         # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
-        # This selectively damps the fast barotropic gravity wave mode that
-        # cannot be resolved by the explicit time integrator.  The damping
-        # coefficient α·dt has units [m²] and is proportional to c_gw²·dt²
-        # where c_gw = √(R_d·T̄) ≈ 300 m/s.
-        # Standard value: α = 0.5·c_gw²·dt ≈ 0.5·300²·dt
         if self.config.implicit_grav_wave_damping > 0:
             from legoesm.core.operators import laplacian_compact
             alpha = self.config.implicit_grav_wave_damping
             lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
-            # Apply as: p_s_new = p_s + α·dt·∇²(p_s)
-            # This is a forward-Euler diffusion step that damps oscillations.
-            # The compact Laplacian resolves ALL modes including 2Δx.
             p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
-            # Ensure p_s stays positive
             p_s_damped = jnp.maximum(p_s_damped, 100.0)
             state_new = state_new._replace(
                 p_s=state_new.p_s.replace(data=p_s_damped),

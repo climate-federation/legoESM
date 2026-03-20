@@ -448,12 +448,9 @@ class ModelDriver:
                        f"digest={metadata.state_digest[:16]}...")
         return step, day
 
-    def run(self, start_step: int = 0, start_day: float | None = None) -> str:
+    def run(self, start_step: int = 0, start_day: float | None = None,
+            compiled: bool = True) -> str:
         """Run the time integration.
-
-        Uses a JIT-compiled unified physics step with ``jax.lax.cond``
-        for radiation sub-cycling (held tendencies reused between
-        radiation update steps).
 
         Parameters
         ----------
@@ -461,11 +458,251 @@ class ModelDriver:
             Starting time step (for restart).
         start_day : float, optional
             Starting day (for restart). Defaults to config.start_day.
+        compiled : bool
+            If ``True`` (default), use compiled segment execution via
+            ``jax.lax.scan``.  If ``False``, use the legacy per-step
+            Python loop (useful for debugging or when the compiled path
+            is not applicable).
 
         Returns
         -------
         str
             Run status ("COMPLETED" or "BLOWUP at day ...").
+        """
+        if compiled:
+            return self._run_compiled(start_step, start_day)
+        return self._run_per_step(start_step, start_day)
+
+    # ==================================================================
+    # Compiled segment execution path
+    # ==================================================================
+
+    def _run_compiled(self, start_step: int = 0, start_day: float | None = None) -> str:
+        """Run using compiled segments (jax.lax.scan over N steps).
+
+        The hot integration loop is compiled into segments of
+        ``segment_length`` steps.  Host Python only runs between
+        segments for diagnostics, checkpoints, and forcing updates.
+        """
+        from legoesm.forcing.external import get_solar_forcing_at_time
+        from legoesm.driver.compiled_segments import (
+            SegmentCarry, pack_carry, unpack_carry,
+            compute_segment_length, build_segment_fn,
+        )
+
+        cfg = self.config
+        DT = cfg.dycore.dt
+        N_DAYS = cfg.days
+        START_DAY = start_day if start_day is not None else cfg.start_day
+        RAD_UPDATE_STEPS = cfg.rad_update_steps
+
+        n_steps_total = int(N_DAYS * 86400 / DT)
+        diag_interval = int(cfg.output.diag_days * 86400 / DT)
+        checkpoint_interval = (
+            int(cfg.output.checkpoint_days * 86400 / DT)
+            if cfg.output.checkpoint_days > 0 else 0
+        )
+
+        # Compute segment length = GCD of all cadence intervals
+        segment_length = compute_segment_length(
+            diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
+        )
+        n_steps_remaining = n_steps_total - start_step
+        n_segments = (n_steps_remaining + segment_length - 1) // segment_length
+
+        sigma_full = self.sigma.sigma_full
+        dsigma = self.sigma.dsigma
+
+        if cfg.grid.grid_type == "cubed_sphere":
+            N = cfg.grid.resolution
+            shape_2d = (6, N, N)
+            shape_3d = (6, N, N, cfg.grid.nlev)
+        else:
+            shape_2d = (self.grid.n_lat, self.grid.n_lon)
+            shape_3d = (*shape_2d, cfg.grid.nlev)
+
+        # Solar forcing (initial)
+        solar_init = get_solar_forcing_at_time(self._solar_config, START_DAY)
+        current_s_0 = float(solar_init["tsi"])
+        solar_weights = (
+            jnp.asarray(solar_init["solar_fraction_by_gpt"])
+            if self._use_solar_spectral
+            else self._solar_weights_template
+        )
+
+        # Build JIT-compiled unified physics step
+        step_unified = self.physics.build_step_unified()
+
+        # Initial held radiation tendencies
+        held_dT_rad = jnp.zeros(shape_3d)
+        held_sw_net_sfc = jnp.zeros(shape_2d)
+        held_lw_net_sfc = jnp.zeros(shape_2d)
+        held_sw_up_toa = jnp.zeros(shape_2d)
+        held_lw_up_toa = jnp.zeros(shape_2d)
+        held_sw_down_toa = jnp.zeros(shape_2d)
+
+        # External forcing
+        o3_vmr, aerosol_od = self._precompute_external_forcing(
+            START_DAY, self.state.p_s.data, self.grid.lat,
+        )
+
+        run_status = "COMPLETED"
+        lat_deg_grid = np.degrees(np.asarray(self.grid.lat))
+
+        logger.info(
+            f"Starting compiled run: {n_steps_remaining} steps, "
+            f"{n_segments} segments of {segment_length} steps"
+        )
+
+        current_step = start_step
+        t_jit = 0.0
+        t_start = time.time()
+
+        for seg_idx in range(n_segments):
+            seg_steps = min(segment_length, n_steps_total - current_step)
+            seg_end_step = current_step + seg_steps
+            day = START_DAY + seg_end_step * DT / 86400.0
+            day_of_year, seconds_of_day = day_to_calendar(day)
+            sst, sic = self.get_sst_sic(day)
+
+            # Update external forcing at segment boundary (if radiation-aligned)
+            if RAD_UPDATE_STEPS > 1 and seg_idx > 0:
+                solar_now = get_solar_forcing_at_time(self._solar_config, day)
+                current_s_0 = float(solar_now["tsi"])
+                if self._use_solar_spectral:
+                    solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
+                o3_vmr, aerosol_od = self._precompute_external_forcing(
+                    day, self.state.p_s.data, self.grid.lat,
+                )
+
+            # Build the compiled segment function.
+            # On the first call this triggers JIT compilation; subsequent
+            # calls with the same segment_length reuse the cached executable.
+            run_segment = build_segment_fn(
+                model=self.model,
+                step_unified=step_unified,
+                grid=self.grid,
+                sigma_full=sigma_full,
+                dsigma=dsigma,
+                dt=DT,
+                rad_update_steps=RAD_UPDATE_STEPS,
+                microphysics=cfg.microphysics,
+                fix_moisture=cfg.fix_moisture,
+                fric_decay=self._fric_decay,
+                qv_smooth_coeff=self._qv_smooth_coeff,
+                sst=sst,
+                sic=sic,
+                lat=self.grid.lat,
+                lon=self.grid.lon,
+                day_of_year=day_of_year,
+                seconds_of_day=seconds_of_day,
+                solar_weights=solar_weights,
+                s_0=current_s_0,
+                o3_vmr=o3_vmr,
+                aerosol_od=aerosol_od,
+                start_day=START_DAY,
+            )
+
+            # Pack state into carry
+            carry = pack_carry(
+                self.state, self.q_v, self.q_c, self.q_r,
+                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                current_step,
+            )
+
+            # Time first segment for JIT measurement
+            if seg_idx == 0:
+                t_jit_start = time.time()
+
+            # Execute compiled segment
+            carry = run_segment(carry, seg_steps)
+
+            if seg_idx == 0:
+                jax.block_until_ready(carry.u)
+                t_jit = time.time() - t_jit_start
+                logger.info(f"  Segment 0 (incl. JIT) in {t_jit:.1f}s")
+
+            # Unpack carry back to driver state
+            (self.state, self.q_v, self.q_c, self.q_r,
+             held_tuple, _) = unpack_carry(carry, self.state)
+            (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+             held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
+
+            current_step = seg_end_step
+
+            # --- Host-side actions at segment boundaries ---
+            elapsed_day = day - START_DAY
+
+            # Diagnostics
+            if diag_interval > 0 and current_step % diag_interval == 0:
+                jax.block_until_ready(self.state.u.data)
+                # Compute precip_ls as zero placeholder (exact precip
+                # is only available per-step; for diagnostics we use
+                # the physics output from the last step of the segment)
+                precip_placeholder = jnp.zeros(shape_2d)
+                diag_info = self.diagnostics.collect(
+                    elapsed_day=elapsed_day,
+                    day=day,
+                    state=self.state,
+                    q_v=self.q_v,
+                    q_c=self.q_c,
+                    q_r=self.q_r,
+                    sst=sst,
+                    sic=sic,
+                    precip_total=precip_placeholder,
+                    sw_up_toa=held_sw_up_toa,
+                    lw_up_toa=held_lw_up_toa,
+                    sw_net_sfc=held_sw_net_sfc,
+                    lw_net_sfc=held_lw_net_sfc,
+                    sw_down_toa=held_sw_down_toa,
+                    T_ice=cfg.T_ice,
+                    lat_deg_grid=lat_deg_grid,
+                )
+
+                logger.info(
+                    f"  Day {elapsed_day:6.0f}: T={diag_info['mean_T']:.1f}K, "
+                    f"max_v={diag_info['max_v']:.1f}m/s"
+                )
+
+                # Stability check
+                error = self.diagnostics.check_stability(self.state, elapsed_day)
+                if error:
+                    logger.warning(f"  {error}")
+                    run_status = error
+                    break
+
+            # Checkpoint
+            if checkpoint_interval > 0 and current_step % checkpoint_interval == 0:
+                self.save_checkpoint(current_step, day)
+
+        # Finalize
+        jax.block_until_ready(self.state.u.data)
+        total_wall = time.time() - t_start
+        logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
+
+        self.diagnostics.save(self._output_dir)
+        self.save_results(run_status, t_jit, total_wall)
+        logger.info(self.diagnostics.print_summary())
+
+        if checkpoint_interval > 0:
+            self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
+
+        return run_status
+
+    # ==================================================================
+    # Legacy per-step execution path
+    # ==================================================================
+
+    def _run_per_step(self, start_step: int = 0, start_day: float | None = None) -> str:
+        """Run using per-step Python orchestration (legacy path).
+
+        Uses a JIT-compiled unified physics step with ``jax.lax.cond``
+        for radiation sub-cycling (held tendencies reused between
+        radiation update steps).
+
+        This path is retained for debugging and as a reference
+        implementation.  For production use, prefer ``run(compiled=True)``.
         """
         from legoesm.core.operators_3d import hyperdiffusion_3d
         from legoesm.forcing.external import get_solar_forcing_at_time

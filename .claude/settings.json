@@ -8,9 +8,8 @@
       "Bash(wget *)",
       "WebFetch(*)",
       "WebSearch(*)",
-      "Read(/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/*)",
-      "Write(/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/*)"
+      "Read(/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/**)",
+      "Write(/Users/pierregentine/Library/CloudStorage/GoogleDrive-pg2328@columbia.edu/My Drive/Code/legoESM/**)"
     ]
   }
 }
-

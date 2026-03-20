@@ -27,3 +27,4 @@ results/
 checkpoints/
 data/
 wandb/
+.claude/worktrees/serene-perlman/

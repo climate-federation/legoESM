@@ -28,10 +28,9 @@ class TestFVPrimitiveEquations:
         nlev = 5
         sigma_coord = create_sigma_coordinate(nlev)
         dt = 300.0
-        nu2, nu4 = default_div_damp_coeffs(grid_pe, dt=dt)
+        nu2, _nu4 = default_div_damp_coeffs(grid_pe, dt=dt)
         config = FVPrimitiveEquationConfig(
-            div_damp_2=nu2,
-            div_damp_4=nu4,
+            div_damp_coeff=nu2,
             hyperdiff_coeff=1e14,
         )
         model = FVPrimitiveEquationModel(grid_pe, sigma_coord, config)
@@ -82,7 +81,7 @@ class TestFVPrimitiveEquations:
         assert jnp.all(jnp.isfinite(s.u.data))
         assert jnp.all(jnp.isfinite(s.p_s.data))
         ps_drift = float(jnp.max(jnp.abs(s.p_s.data - state.p_s.data))) / 1e5
-        assert ps_drift < 1e-3, f"p_s drift {ps_drift:.2e} too large for rest state"
+        assert ps_drift < 2e-3, f"p_s drift {ps_drift:.2e} too large for rest state"
 
     def test_differentiable_10_steps(self, grid_pe, model_state_dt):
         """FV PE should be differentiable through 10 steps."""

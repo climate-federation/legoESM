@@ -28,6 +28,7 @@ import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import pad_halo
+from legoesm.core.operators_fv import _ppm_reconstruct_x, _ppm_reconstruct_y
 
 
 # ==============================================================================
@@ -52,6 +53,30 @@ def _pad_halo_auto(field, cdgrid):
 
     def pad_one(fk):
         return pad_halo(fk, interp_offsets=cdgrid.base.halo_interp_offsets)
+
+    f_pad_t = jax.vmap(pad_one)(f_t)
+    return jnp.moveaxis(f_pad_t, 0, -1)
+
+
+def _pad_halo_auto_h2(field, cdgrid):
+    """Pad halo=2 for a 2D or 3D cell-centre field.
+
+    Parameters
+    ----------
+    field : jax.Array, shape (6, n, n) or (6, n, n, nlev)
+
+    Returns
+    -------
+    jax.Array, shape (6, n+4, n+4) or (6, n+4, n+4, nlev)
+    """
+    if field.ndim == 3:
+        return pad_halo(field, halo=2,
+                        interp_offsets=cdgrid.base.halo_interp_offsets_h2)
+    f_t = jnp.moveaxis(field, -1, 0)
+
+    def pad_one(fk):
+        return pad_halo(fk, halo=2,
+                        interp_offsets=cdgrid.base.halo_interp_offsets_h2)
 
     f_pad_t = jax.vmap(pad_one)(f_t)
     return jnp.moveaxis(f_pad_t, 0, -1)
@@ -181,7 +206,11 @@ def cgrid_divergence(u_c, v_c, cdgrid):
 # ==============================================================================
 
 def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
-    """Conservative mass flux divergence with upwind face values.
+    """Conservative mass flux divergence with PPM face values.
+
+    Uses PPM (Piecewise Parabolic Method) reconstruction with
+    Colella-Woodward monotonicity limiting for high-order face
+    states, then applies upwind selection based on C-grid velocity.
 
     Works for both 2D and 3D inputs.
 
@@ -195,24 +224,33 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     -------
     dh_dt : jax.Array, shape (6, n, n[, nlev])
     """
-    h_pad = _pad_halo_auto(h, cdgrid)
+    if h.ndim == 4:
+        # 3D: apply PPM per level via vmap
+        h_t = jnp.moveaxis(h, -1, 0)       # (nlev, 6, n, n)
+        u_c_t = jnp.moveaxis(u_c, -1, 0)   # (nlev, 6, n+1, n)
+        v_c_t = jnp.moveaxis(v_c, -1, 0)   # (nlev, 6, n, n+1)
 
-    if h.ndim == 3:
-        h_left_x = h_pad[:, :-1, 1:-1]
-        h_right_x = h_pad[:, 1:, 1:-1]
-        h_left_y = h_pad[:, 1:-1, :-1]
-        h_right_y = h_pad[:, 1:-1, 1:]
-    else:
-        h_left_x = h_pad[:, :-1, 1:-1, :]
-        h_right_x = h_pad[:, 1:, 1:-1, :]
-        h_left_y = h_pad[:, 1:-1, :-1, :]
-        h_right_y = h_pad[:, 1:-1, 1:, :]
+        def flux_div_one(args):
+            hk, uk, vk = args
+            return cgrid_mass_flux_divergence(hk, uk, vk, cdgrid)
 
-    h_face_x = jnp.where(u_c > 0, h_left_x, h_right_x)
-    h_face_y = jnp.where(v_c > 0, h_left_y, h_right_y)
+        result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t))
+        return jnp.moveaxis(result_t, 0, -1)
 
-    dy = _broadcast_metric(cdgrid.dy_edge_x, u_c)
-    dx = _broadcast_metric(cdgrid.dx_edge_y, v_c)
+    # 2D case: PPM reconstruction
+    h_pad_h2 = _pad_halo_auto_h2(h, cdgrid)  # (6, n+4, n+4)
+
+    # PPM left/right states at x-interfaces: (6, n+1, n)
+    h_L_x, h_R_x = _ppm_reconstruct_x(h_pad_h2)
+    # PPM left/right states at y-interfaces: (6, n, n+1)
+    h_L_y, h_R_y = _ppm_reconstruct_y(h_pad_h2)
+
+    # Upwind selection
+    h_face_x = jnp.where(u_c > 0, h_L_x, h_R_x)
+    h_face_y = jnp.where(v_c > 0, h_L_y, h_R_y)
+
+    dy = cdgrid.dy_edge_x   # (6, n+1, n)
+    dx = cdgrid.dx_edge_y   # (6, n, n+1)
 
     flux_x = h_face_x * u_c * dy
     flux_y = h_face_y * v_c * dx
@@ -220,8 +258,7 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     net_x = flux_x[:, 1:] - flux_x[:, :-1]
     net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
 
-    area = _broadcast_metric(cdgrid.base.area, net_x)
-    return -(net_x + net_y) / area
+    return -(net_x + net_y) / cdgrid.base.area
 
 
 # ==============================================================================
@@ -331,7 +368,11 @@ def _interp_corner_to_center(field_d):
 # ==============================================================================
 
 def _laplacian_dgrid(u_d, cdgrid):
-    """5-point Laplacian of a D-grid field.
+    """Laplacian of a D-grid field using A-grid round-trip.
+
+    Interpolates D-grid → A-grid centres, applies the compact
+    A-grid Laplacian (which uses proper inter-face halo exchange),
+    then interpolates back to D-grid corners.
 
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev).
     For 3D, applies the Laplacian level-by-level.
@@ -345,7 +386,6 @@ def _laplacian_dgrid(u_d, cdgrid):
     jax.Array, shape (6, n+1, n+1[, nlev])
     """
     if u_d.ndim == 4:
-        # Apply per-level via vmap
         u_t = jnp.moveaxis(u_d, -1, 0)
 
         def lap_one(uk):
@@ -354,17 +394,15 @@ def _laplacian_dgrid(u_d, cdgrid):
         result = jax.vmap(lap_one)(u_t)
         return jnp.moveaxis(result, 0, -1)
 
-    dx_pad = jnp.pad(cdgrid.base.dx, ((0, 0), (1, 1), (1, 1)), mode='edge')
-    dx_dual = 0.25 * (dx_pad[:, :-1, :-1] + dx_pad[:, 1:, :-1]
-                       + dx_pad[:, :-1, 1:] + dx_pad[:, 1:, 1:])
-    hx = dx_dual * 0.5
-    hy = hx  # approximate isotropy
+    # 1. D-grid → A-grid (corner_to_center): (6, n+1, n+1) → (6, n, n)
+    u_a = _interp_corner_to_center(u_d)
 
-    u_pad = jnp.pad(u_d, ((0, 0), (1, 1), (1, 1)), mode='edge')
-    return (
-        (u_pad[:, 2:, 1:-1] + u_pad[:, :-2, 1:-1] - 2.0 * u_d) / (hx * hx)
-        + (u_pad[:, 1:-1, 2:] + u_pad[:, 1:-1, :-2] - 2.0 * u_d) / (hy * hy)
-    )
+    # 2. A-grid Laplacian with proper halo exchange
+    from legoesm.core.operators import laplacian_compact
+    lap_a = laplacian_compact(u_a, cdgrid.base)  # (6, n, n)
+
+    # 3. A-grid → D-grid (center_to_corner): (6, n, n) → (6, n+1, n+1)
+    return _interp_center_to_corner(lap_a, cdgrid)
 
 
 # ==============================================================================

@@ -1,0 +1,410 @@
+"""Compiled segment execution for atmosphere time integration.
+
+Instead of orchestrating every time step from Python (which prevents XLA
+from fusing across steps), this module compiles *segments* of N steps
+into a single ``jax.lax.scan``-based kernel.  The host Python only runs
+between segments to perform side effects: diagnostics, checkpoints,
+external forcing updates, and stability checks.
+
+Architecture
+------------
+::
+
+    Host Python loop (segment boundaries)
+    ├── update external forcing (solar, ozone, aerosol)
+    ├── run_segment(carry, segment_steps)   ← compiled via jax.lax.scan
+    │     ├── dynamics step
+    │     ├── physics (with radiation sub-cycling via lax.cond)
+    │     ├── state update + saturation adjustment
+    │     ├── moisture fixer
+    │     ├── hyperdiffusion smoothing
+    │     └── Rayleigh friction
+    ├── diagnostics collection (host-side, after block_until_ready)
+    └── checkpoint save (host-side I/O)
+
+The segment carry (:class:`SegmentCarry`) packs every array the hot loop
+needs into a single flat NamedTuple so ``jax.lax.scan`` can type-check
+the carry across iterations.
+
+Segment length is chosen as the GCD of diagnostic and checkpoint
+intervals — this ensures every I/O boundary falls exactly on a segment
+boundary, without needing to interrupt the compiled kernel mid-segment.
+"""
+
+from __future__ import annotations
+
+import math
+import logging
+from functools import partial
+from typing import NamedTuple
+
+import jax
+import jax.numpy as jnp
+
+from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio
+
+logger = logging.getLogger(__name__)
+
+
+# ======================================================================
+# Segment carry — all mutable arrays for the hot loop
+# ======================================================================
+
+class SegmentCarry(NamedTuple):
+    """All mutable arrays threaded through the compiled segment.
+
+    Every field is a JAX array.  No Python objects, no file handles,
+    no host-side state — only data that can live inside ``lax.scan``.
+
+    Attributes
+    ----------
+    u, v, T, p_s, phis : jax.Array
+        Prognostic dynamics fields.
+    q_v, q_c, q_r : jax.Array
+        Moisture tracers.
+    held_dT_rad, held_sw_net_sfc, held_lw_net_sfc : jax.Array
+        Held radiation tendencies for sub-cycling.
+    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa : jax.Array
+        Held radiation fluxes for sub-cycling.
+    step_index : jax.Array
+        Scalar int32 — absolute step counter (for radiation cadence).
+    """
+    u: jax.Array
+    v: jax.Array
+    T: jax.Array
+    p_s: jax.Array
+    phis: jax.Array
+    q_v: jax.Array
+    q_c: jax.Array
+    q_r: jax.Array
+    held_dT_rad: jax.Array
+    held_sw_net_sfc: jax.Array
+    held_lw_net_sfc: jax.Array
+    held_sw_up_toa: jax.Array
+    held_lw_up_toa: jax.Array
+    held_sw_down_toa: jax.Array
+    step_index: jax.Array
+
+
+def pack_carry(state, q_v, q_c, q_r,
+               held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+               held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+               step_index):
+    """Pack driver state into a SegmentCarry for the compiled kernel."""
+    return SegmentCarry(
+        u=state.u.data,
+        v=state.v.data,
+        T=state.T.data,
+        p_s=state.p_s.data,
+        phis=state.phis.data,
+        q_v=q_v,
+        q_c=q_c,
+        q_r=q_r,
+        held_dT_rad=held_dT_rad,
+        held_sw_net_sfc=held_sw_net_sfc,
+        held_lw_net_sfc=held_lw_net_sfc,
+        held_sw_up_toa=held_sw_up_toa,
+        held_lw_up_toa=held_lw_up_toa,
+        held_sw_down_toa=held_sw_down_toa,
+        step_index=jnp.int32(step_index),
+    )
+
+
+def unpack_carry(carry, state_template):
+    """Unpack a SegmentCarry back into driver state objects.
+
+    Parameters
+    ----------
+    carry : SegmentCarry
+    state_template : HydrostaticState
+        Template for field metadata (names, units, dims).
+
+    Returns
+    -------
+    state, q_v, q_c, q_r, held_tuple, step_index
+    """
+    new_state = state_template._replace(
+        u=state_template.u.replace(data=carry.u),
+        v=state_template.v.replace(data=carry.v),
+        T=state_template.T.replace(data=carry.T),
+        p_s=state_template.p_s.replace(data=carry.p_s),
+        phis=state_template.phis.replace(data=carry.phis),
+    )
+    held_tuple = (
+        carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
+        carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
+    )
+    return (new_state, carry.q_v, carry.q_c, carry.q_r,
+            held_tuple, int(carry.step_index))
+
+
+# ======================================================================
+# Segment boundary computation
+# ======================================================================
+
+def compute_segment_length(
+    diag_interval: int,
+    checkpoint_interval: int,
+    rad_update_steps: int,
+) -> int:
+    """Compute the optimal segment length.
+
+    The segment length is the GCD of all cadence intervals that require
+    host-side actions (diagnostics, checkpoints, radiation forcing
+    updates).  This ensures every cadence boundary falls on a segment
+    boundary.
+
+    Parameters
+    ----------
+    diag_interval : int
+        Steps between diagnostic collections.
+    checkpoint_interval : int
+        Steps between checkpoints (0 = disabled).
+    rad_update_steps : int
+        Steps between radiation forcing refreshes.
+
+    Returns
+    -------
+    int
+        Segment length in time steps.  Always >= 1.
+    """
+    intervals = [i for i in [diag_interval, checkpoint_interval, rad_update_steps]
+                 if i > 0]
+    if not intervals:
+        return 1
+    seg = intervals[0]
+    for i in intervals[1:]:
+        seg = math.gcd(seg, i)
+    return max(seg, 1)
+
+
+# ======================================================================
+# Compiled segment builder
+# ======================================================================
+
+def build_segment_fn(
+    model,
+    step_unified,
+    grid,
+    sigma_full,
+    dsigma,
+    dt: float,
+    rad_update_steps: int,
+    microphysics: str,
+    fix_moisture: bool,
+    fric_decay,
+    qv_smooth_coeff,
+    sst,
+    sic,
+    lat,
+    lon,
+    day_of_year,
+    seconds_of_day,
+    solar_weights,
+    s_0,
+    o3_vmr,
+    aerosol_od,
+    start_day: float,
+):
+    """Build a compiled segment function.
+
+    The returned function runs ``n_steps`` of the full atmosphere
+    integration (dynamics + physics + fixers) inside ``jax.lax.scan``,
+    compiled as a single XLA program.
+
+    Parameters
+    ----------
+    model
+        Dynamics model with ``.step()`` and ``.step_with_physics()``.
+    step_unified : callable
+        JIT-compiled physics step from ``PhysicsPipeline.build_step_unified()``.
+    grid
+        Cubed-sphere or lat-lon grid.
+    sigma_full, dsigma : jax.Array
+        Vertical coordinate arrays.
+    dt : float
+        Time step in seconds.
+    rad_update_steps : int
+        Radiation update cadence.
+    microphysics : str
+        "none" or explicit scheme name.
+    fix_moisture : bool
+        Whether to apply moisture fixer.
+    fric_decay, qv_smooth_coeff
+        Rayleigh friction and smoothing parameters.
+    sst, sic : jax.Array
+        Sea surface temperature and ice concentration (fixed within segment).
+    lat, lon : jax.Array
+        Grid coordinates.
+    day_of_year, seconds_of_day : float
+        Time state (fixed within segment — updated at segment boundaries).
+    solar_weights, s_0 : jax.Array / float
+        Solar forcing (fixed within segment).
+    o3_vmr, aerosol_od : jax.Array
+        External forcing (fixed within segment).
+    start_day : float
+        Start day for the entire run (used to compute step→day).
+
+    Returns
+    -------
+    callable
+        ``run_segment(carry: SegmentCarry, n_steps: int) -> SegmentCarry``
+    """
+    from legoesm.core.operators_3d import hyperdiffusion_3d
+    from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
+
+    do_sat_adjust = (microphysics == "none")
+
+    # Convert scalars to JAX tracers once.
+    _dt = jnp.float32(dt)
+    _day_of_year = jnp.float32(day_of_year)
+    _seconds_of_day = jnp.float32(seconds_of_day)
+    _s_0 = jnp.float32(s_0)
+    _solar_weights = jnp.asarray(solar_weights)
+    _sst = jnp.asarray(sst)
+    _sic = jnp.asarray(sic)
+    _o3_vmr = jnp.asarray(o3_vmr)
+    _aerosol_od = jnp.asarray(aerosol_od)
+    _fric_decay = jnp.asarray(fric_decay)
+
+    def _single_step(carry: SegmentCarry, _unused) -> tuple:
+        """One atmosphere step: dynamics → physics → fixers."""
+        step_idx = carry.step_index
+
+        # --- Dynamics ---
+        # Reconstruct a minimal state for the model.step call.
+        # The model operates on Field-wrapped NamedTuples, but inside
+        # lax.scan we work with raw arrays.  We rely on the model's
+        # internal JIT handling array inputs.
+        dyn_state = model.step(
+            _rebuild_state(carry, model),
+            _dt,
+        )
+
+        T_new = dyn_state.T.data
+        u_new = dyn_state.u.data
+        v_new = dyn_state.v.data
+        p_s_new = dyn_state.p_s.data
+
+        # --- Physics with radiation sub-cycling ---
+        need_rad = jnp.where(
+            rad_update_steps <= 1,
+            jnp.bool_(True),
+            ((step_idx + 1) % rad_update_steps) == 0,
+        )
+
+        phys_out, held_new = step_unified(
+            need_rad,
+            T_new, p_s_new,
+            carry.q_v, carry.q_c, carry.q_r,
+            u_new, v_new,
+            _sst, _sic, lat, lon,
+            _day_of_year, _seconds_of_day, _dt,
+            _solar_weights, _s_0,
+            _o3_vmr, _aerosol_od,
+            carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
+            carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
+        )
+
+        # --- State update ---
+        T_upd = T_new + _dt * phys_out.dT_dt
+        q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
+        q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
+        q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
+
+        # --- Saturation adjustment ---
+        if do_sat_adjust:
+            p_full = p_s_new[..., None] * sigma_full
+            q_sat = saturation_mixing_ratio(T_upd, p_full)
+            excess = jnp.maximum(q_v_upd - q_sat, 0.0)
+            q_v_upd = q_v_upd - excess
+            T_upd = T_upd + constants.L_v * excess / constants.c_pd
+
+        # --- Moisture fixer ---
+        if fix_moisture:
+            q_v_upd = fix_moisture_hydrostatic(
+                q_v_upd, compute_global_moisture(carry.q_v, p_s_new, dsigma, grid),
+                p_s_new, dsigma, grid,
+            )
+
+        # --- Moisture smoothing ---
+        q_v_upd = jnp.maximum(
+            q_v_upd + _dt * hyperdiffusion_3d(q_v_upd, grid, qv_smooth_coeff),
+            0.0,
+        )
+
+        # --- Rayleigh friction ---
+        u_upd = u_new * _fric_decay
+        v_upd = v_new * _fric_decay
+
+        new_carry = SegmentCarry(
+            u=u_upd,
+            v=v_upd,
+            T=T_upd,
+            p_s=p_s_new,
+            phis=carry.phis,
+            q_v=q_v_upd,
+            q_c=q_c_upd,
+            q_r=q_r_upd,
+            held_dT_rad=held_new[0],
+            held_sw_net_sfc=held_new[1],
+            held_lw_net_sfc=held_new[2],
+            held_sw_up_toa=held_new[3],
+            held_lw_up_toa=held_new[4],
+            held_sw_down_toa=held_new[5],
+            step_index=step_idx + 1,
+        )
+        return new_carry, None
+
+    @partial(jax.jit, static_argnums=(1,))
+    def run_segment(carry: SegmentCarry, n_steps: int) -> SegmentCarry:
+        """Run n_steps of the atmosphere integration as a compiled kernel.
+
+        Parameters
+        ----------
+        carry : SegmentCarry
+            Input state.
+        n_steps : int
+            Number of steps to execute.  This is a **static** argument:
+            ``jax.lax.scan`` requires a concrete ``length``, so changing
+            ``n_steps`` triggers recompilation.  In practice the segment
+            length is constant (the GCD of cadence intervals), so this
+            causes at most one extra compile for the final short segment.
+
+        Returns
+        -------
+        SegmentCarry
+            Updated state after n_steps.
+        """
+        final_carry, _ = jax.lax.scan(_single_step, carry, None, length=n_steps)
+        return final_carry
+
+    return run_segment
+
+
+def _rebuild_state(carry: SegmentCarry, model):
+    """Rebuild the model's expected state type from raw carry arrays.
+
+    The dynamics model expects a NamedTuple with Field-wrapped arrays.
+    Inside lax.scan we store raw arrays, so we reconstruct the state
+    type here.  This is cheap — only Python object creation, no data copy.
+    """
+    from legoesm.core.field import Field
+
+    # Detect state type from model
+    if hasattr(model, '_state_type'):
+        StateType = model._state_type
+    else:
+        # Fallback: use HydrostaticState (the most common case)
+        from legoesm.core.state import HydrostaticState
+        StateType = HydrostaticState
+
+    # Build Fields with minimal metadata
+    u_f = Field(carry.u, name="u", dims=("face", "x", "y", "level"), units="m/s")
+    v_f = Field(carry.v, name="v", dims=("face", "x", "y", "level"), units="m/s")
+    T_f = Field(carry.T, name="T", dims=("face", "x", "y", "level"), units="K")
+    p_s_f = Field(carry.p_s, name="p_s", dims=("face", "x", "y"), units="Pa")
+    phis_f = Field(carry.phis, name="phis", dims=("face", "x", "y"), units="m2/s2")
+
+    return StateType(u=u_f, v=v_f, T=T_f, p_s=p_s_f, phis=phis_f)
