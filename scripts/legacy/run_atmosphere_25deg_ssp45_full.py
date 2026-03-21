@@ -1151,7 +1151,8 @@ def _run_hydro_fv_bw(out_dir: Path, n: int, nlev: int, solver: str, mean_every: 
 
 def _run_nh_fv_tc1(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerModel, CompressibleEulerConfig
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel as CompressibleEulerModel
+    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
     from tests.test_cases.dcmip2025 import dcmip25_tc1_init
 
     case_name = "NH FV DCMIP TC1"
@@ -1315,7 +1316,8 @@ def _run_nh_fv_tc1(out_dir: Path, n: int, nlev: int, solver: str, mean_every: in
 
 def _run_nh_fv_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerModel, CompressibleEulerConfig
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel as CompressibleEulerModel
+    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
     from tests.test_cases.dcmip2025 import dcmip25_tc2_init
 
     case_name = "NH FV DCMIP TC2a"
@@ -1478,7 +1480,8 @@ def _run_nh_fv_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: i
 
 def _run_nh_fv_tc3(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerModel, CompressibleEulerConfig
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel as CompressibleEulerModel
+    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
     from tests.test_cases.dcmip2025 import dcmip25_tc3_init
 
     case_name = "NH FV DCMIP TC3"

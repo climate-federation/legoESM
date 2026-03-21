@@ -1140,7 +1140,8 @@ def _run_nh_fv_case(
     config_kwargs: dict[str, object],
     mean_every: int,
 ) -> dict[str, object]:
-    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig, CompressibleEulerModel
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel as CompressibleEulerModel
+    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
 
     n_steps = int(duration_s / dt)
     case_dir.mkdir(parents=True, exist_ok=True)

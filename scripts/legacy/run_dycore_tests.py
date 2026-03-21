@@ -1159,10 +1159,10 @@ def run_hydro_spectral_tests(output_dir):
 # =============================================================================
 
 def run_nh_fv_tests(output_dir):
-    """Run DCMIP-2025 TC1, TC2a, TC3 with CompressibleEulerModel."""
+    """Run DCMIP-2025 TC1, TC2a, TC3 with CDGridCompressibleEulerModel."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel as CompressibleEulerModel
     from legoesm.atmosphere.dynamics.compressible_euler import (
-        CompressibleEulerModel,
         CompressibleEulerConfig,
     )
 
@@ -1882,8 +1882,8 @@ def run_semi_implicit_tests(output_dir):
 
     try:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel as CompressibleEulerModel
         from legoesm.atmosphere.dynamics.compressible_euler import (
-            CompressibleEulerModel,
             CompressibleEulerConfig,
         )
         from tests.test_cases.dcmip2025 import dcmip25_tc2_init

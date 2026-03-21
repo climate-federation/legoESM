@@ -27,10 +27,13 @@ from legoesm.grids.vertical import (
 from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
 from legoesm.atmosphere.dynamics.compressible_euler import (
-    CompressibleEulerModel,
     CompressibleEulerConfig,
     compressible_euler_slow_tendencies,
     compute_exner_perturbation,
+)
+from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+    CDGridCompressibleEulerModel as CompressibleEulerModel,
+    CDGridCompressibleEulerConfig,
 )
 from legoesm import constants
 
@@ -312,7 +315,7 @@ class TestCompressibleEulerModel:
 
     def test_single_step(self, grid, height_coord, terrain_metric):
         """Model can take a single time step."""
-        config = CompressibleEulerConfig(
+        config = CDGridCompressibleEulerConfig(
             hyperdiff_coeff=0.0,
             n_acoustic_substeps=2,
         )
@@ -324,7 +327,7 @@ class TestCompressibleEulerModel:
 
     def test_multi_step_stability(self, grid, height_coord, terrain_metric):
         """Model is stable for a few time steps from rest."""
-        config = CompressibleEulerConfig(
+        config = CDGridCompressibleEulerConfig(
             hyperdiff_coeff=0.0,
             n_acoustic_substeps=2,
             sponge_coeff=0.0,
@@ -450,7 +453,7 @@ class TestSmallEarthFactor:
 
     def test_small_earth_factor_scales_grid(self, grid, height_coord, terrain_metric):
         """small_earth_factor=10 should scale grid radius and Coriolis."""
-        config = CompressibleEulerConfig(small_earth_factor=10.0)
+        config = CDGridCompressibleEulerConfig(small_earth_factor=10.0)
         model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
         expected_radius = constants.R_earth / 10.0
         assert abs(model.grid.radius - expected_radius) / expected_radius < 1e-6
@@ -459,7 +462,7 @@ class TestSmallEarthFactor:
 
     def test_small_earth_factor_1_no_change(self, grid, height_coord, terrain_metric):
         """Default small_earth_factor=1.0 should preserve original grid."""
-        config = CompressibleEulerConfig(small_earth_factor=1.0)
+        config = CDGridCompressibleEulerConfig(small_earth_factor=1.0)
         model = CompressibleEulerModel(grid, height_coord, terrain_metric, config)
         assert model.grid.radius == grid.radius
         assert jnp.allclose(model.grid.f, grid.f)

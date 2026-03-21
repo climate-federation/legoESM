@@ -1004,7 +1004,8 @@ def _run_hydro_baroclinic(out_dir: Path, n: int, nlev: int, solver: str, mean_ev
 
 def _run_nh_tc1(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int, dt: float):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerModel, CompressibleEulerConfig
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel as CompressibleEulerModel
+    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
     from tests.test_cases.dcmip2025 import dcmip25_tc1_init
 
     case_dir = out_dir / "05_nh_fv_dcmip25_tc1"
@@ -1146,7 +1147,8 @@ def _run_nh_tc1(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int, 
 
 def _run_nh_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int, dt: float):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerModel, CompressibleEulerConfig
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel as CompressibleEulerModel
+    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
     from tests.test_cases.dcmip2025 import dcmip25_tc2_init
 
     case_dir = out_dir / "06_nh_fv_dcmip25_tc2a"
@@ -1290,7 +1292,8 @@ def _run_nh_tc2a(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int,
 
 def _run_nh_tc3(out_dir: Path, n: int, nlev: int, solver: str, mean_every: int, dt: float):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerModel, CompressibleEulerConfig
+    from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import CDGridCompressibleEulerModel as CompressibleEulerModel
+    from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
     from tests.test_cases.dcmip2025 import dcmip25_tc3_init
 
     case_dir = out_dir / "07_nh_fv_dcmip25_tc3"

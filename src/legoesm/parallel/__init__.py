@@ -54,6 +54,13 @@ Parallelism strategies
     and ``mixed_precision_policy()`` returns optimal dtype policies.
 """
 
+from legoesm.parallel.runtime import (
+    ParallelRuntime,
+    HaloBackend,
+    ReductionBackend,
+    validate_device_count,
+)
+
 from legoesm.parallel.mesh import (
     DeviceConfig,
     create_device_mesh,
@@ -163,6 +170,12 @@ from legoesm.parallel.ensemble import (
 )
 
 __all__ = [
+    # Canonical runtime (preferred entry point)
+    "ParallelRuntime",
+    "HaloBackend",
+    "ReductionBackend",
+    "validate_device_count",
+    # Device mesh
     "DeviceConfig",
     "create_device_mesh",
     "create_latlon_mesh",

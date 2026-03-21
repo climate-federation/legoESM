@@ -93,7 +93,7 @@ def set_active_config(config: DeviceConfig | None) -> None:
 # ==============================================================================
 
 def _best_tile_factorization(n_devices: int) -> tuple[int, int, int]:
-    """Find the best (n_face_groups, tx, ty) for n_devices.
+    """Find the exact (n_face_groups, tx, ty) for n_devices.
 
     We want 6 * tx * ty = n_devices.  Square tiles (tx == ty) are required
     because inter-face boundaries with axis swaps (e.g., face 1 SOUTH →
@@ -101,25 +101,39 @@ def _best_tile_factorization(n_devices: int) -> tuple[int, int, int]:
     tiles the i-edge and j-edge have different cell counts, causing mismatches
     at swapped boundaries.
 
-    If n_devices is not 6 * k² for some integer k, we round down to the
-    largest such value ≤ n_devices.
+    Raises ``ValueError`` if n_devices is not an exact supported count.
+    Use :func:`legoesm.parallel.runtime.validate_device_count` to check
+    before calling this function.
 
     Returns (n_face_groups, tx, ty) where total = 6 * tx * ty.
     """
     if n_devices <= 6:
-        # Simple face sharding
-        valid = [d for d in (6, 3, 2, 1) if d <= n_devices and 6 % d == 0]
-        return (valid[0], 1, 1)
+        if n_devices < 1 or 6 % n_devices != 0:
+            raise ValueError(
+                f"For ≤6 devices, count must divide 6. Got {n_devices}. "
+                f"Supported: 1, 2, 3, 6."
+            )
+        return (n_devices, 1, 1)
 
     # n_devices > 6: need sub-face tiling
     if n_devices % 6 != 0:
-        n_devices = (n_devices // 6) * 6
-        if n_devices < 6:
-            n_devices = 6
+        raise ValueError(
+            f"For >6 devices, count must be 6*k² (multiple of 6 with "
+            f"square tiles). Got {n_devices}. "
+            f"Next valid counts: "
+            + ", ".join(str(6 * k * k) for k in range(2, 12) if 6 * k * k >= n_devices)[:5]
+        )
 
     tiles_per_face = n_devices // 6
-    # Require square tiles: tx = ty = floor(sqrt(tiles_per_face))
     t = int(math.isqrt(tiles_per_face))
+    if t * t != tiles_per_face:
+        raise ValueError(
+            f"For >6 devices, tiles_per_face ({tiles_per_face}) must be "
+            f"a perfect square. Got {n_devices} = 6 × {tiles_per_face}. "
+            f"Nearest valid: {6 * t * t} ({t}×{t} tiles) "
+            f"or {6 * (t+1) * (t+1)} ({t+1}×{t+1} tiles)."
+        )
+
     return (6, t, t)
 
 
@@ -221,19 +235,8 @@ def create_device_mesh(
         logger.info("legoESM: single-device mode (%s)", backend_name)
         return config
 
-    # Determine face/tile decomposition.
+    # Determine face/tile decomposition (no silent round-down).
     n_face_devices, tx, ty = _best_tile_factorization(n_dev)
-    actual_devices = n_face_devices * tx * ty
-
-    if actual_devices != n_dev:
-        warnings.warn(
-            f"Requested {n_dev} devices; using {actual_devices} "
-            f"({n_face_devices} faces × {tx}×{ty} tiles).",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        n_dev = actual_devices
-
     selected = devices[:n_dev]
 
     if tx == 1 and ty == 1:

@@ -6,7 +6,6 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 
 
@@ -19,9 +18,9 @@ class TestFVCompressibleEuler:
 
     @pytest.fixture(scope="class")
     def model_state_dt(self, grid_ce):
-        from legoesm.atmosphere.dynamics.compressible_euler_fv import (
-            FVCompressibleEulerConfig,
-            FVCompressibleEulerModel,
+        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+            CDGridCompressibleEulerConfig as FVCompressibleEulerConfig,
+            CDGridCompressibleEulerModel as FVCompressibleEulerModel,
         )
         from legoesm.grids.vertical import create_height_coordinate, compute_terrain_metric
 
@@ -32,10 +31,7 @@ class TestFVCompressibleEuler:
         terrain_metric = compute_terrain_metric(terrain, height_coord)
 
         dt = 10.0
-        nu2, nu4 = default_div_damp_coeffs(grid_ce, dt=dt)
         config = FVCompressibleEulerConfig(
-            div_damp_2=nu2,
-            div_damp_4=nu4,
             hyperdiff_coeff=1e14,
             n_acoustic_substeps=4,
         )

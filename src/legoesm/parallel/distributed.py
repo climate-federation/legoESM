@@ -275,12 +275,19 @@ def partition_state(state, topology: CommTopology | None = None):
     """Zero out non-local faces in a state pytree.
 
     .. deprecated::
-        Use :func:`scatter_to_local` instead, which returns truly
-        rank-local arrays (smaller shape, less memory).
+        Use :func:`scatter_to_local` or :class:`ParallelRuntime.scatter`
+        instead, which return truly rank-local arrays.
 
     This legacy function keeps the full ``(6, n, n)`` shape but sets
-    non-local face data to zero.
+    non-local face data to zero.  It wastes memory and will be removed.
     """
+    import warnings
+    warnings.warn(
+        "partition_state is deprecated. Use ParallelRuntime.scatter() or "
+        "layout.scatter() for rank-local arrays.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     topology = topology or _active_topology
     if topology is None:
         raise ValueError(

@@ -208,38 +208,14 @@ if __name__ == "__main__":
 
         ce_state = make_ce_state()
 
-        # Centered
-        from legoesm.atmosphere.dynamics.compressible_euler import (
-            CompressibleEulerModel, CompressibleEulerConfig,
+        # C-D grid (FV3-style)
+        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+            CDGridCompressibleEulerModel, CDGridCompressibleEulerConfig,
         )
-        model = CompressibleEulerModel(grid, height_coord, terrain_metric, CompressibleEulerConfig(
+        model = CDGridCompressibleEulerModel(grid, height_coord, terrain_metric, CDGridCompressibleEulerConfig(
             hyperdiff_coeff=0.0, sponge_coeff=0.0,
         ))
-        test_differentiability("centered", model, ce_state, DT_CE, grad_field="theta_prime")
-
-        # Finite Volume
-        from legoesm.atmosphere.dynamics.compressible_euler_fv import (
-            FVCompressibleEulerModel, FVCompressibleEulerConfig,
-        )
-        model = FVCompressibleEulerModel(grid, height_coord, terrain_metric, FVCompressibleEulerConfig(
-            sponge_coeff=0.0, edge_blend_strength=0.25,
-        ))
-        test_differentiability("finite_volume", model, ce_state, DT_CE, grad_field="theta_prime")
-
-        # FV no blend
-        model = FVCompressibleEulerModel(grid, height_coord, terrain_metric, FVCompressibleEulerConfig(
-            sponge_coeff=0.0, edge_blend_strength=0.0,
-        ))
-        test_differentiability("finite_volume (no blend)", model, ce_state, DT_CE, grad_field="theta_prime")
-
-        # C-grid
-        from legoesm.atmosphere.dynamics.compressible_euler_cgrid import (
-            CGCompressibleEulerModel, CGCompressibleEulerConfig,
-        )
-        model = CGCompressibleEulerModel(grid, height_coord, terrain_metric, CGCompressibleEulerConfig(
-            sponge_coeff=0.0,
-        ))
-        test_differentiability("cgrid", model, ce_state, DT_CE, grad_field="theta_prime")
+        test_differentiability("cdgrid", model, ce_state, DT_CE, grad_field="theta_prime")
 
         # Spectral
         from legoesm.atmosphere.dynamics.spectral_nh import SpectralCompressibleEulerModel

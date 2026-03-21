@@ -53,7 +53,8 @@ legoESM is a next-generation, fully differentiable Earth System Model spanning w
 - **Real topography**: NetCDF loading with bilinear regridding, Laplacian smoothing, land fraction derivation
 
 ### Parallelism
-- **Cubed-sphere sharding**: Face-level (1-6 devices) and sub-face tiling (multiples of 6)
+- **Canonical parallel runtime** (`ParallelRuntime`): single entry point for serial, multi-GPU, MPI, and hybrid execution
+- **Cubed-sphere sharding**: Face-level (1/2/3/6 devices) and sub-face tiling (6k² devices: 24, 54, 96, ...)
 - **Lat-lon / level sharding**: Domain decomposition by latitude or vertical levels
 - **Voronoi mesh decomposition**: Recursive coordinate bisection + METIS partitioning with halo exchange
 - **Ensemble parallelism**: `vmap`-based vectorization + `NamedSharding` for multi-device, scan-based time integration with gradient checkpointing
@@ -103,6 +104,31 @@ JAX versions outside the tested range may work but are not guaranteed. Versions 
 
 Detailed runbook for real hardware MPI/multi-GPU scaling:
 - [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md)
+
+### Parallel Runtime & Supported Device Counts
+
+The canonical entry point for all parallelism is `ParallelRuntime.create()`:
+
+```python
+from legoesm.parallel import ParallelRuntime
+rt = ParallelRuntime.create(grid_type="cubed_sphere", grid_n=48)
+```
+
+**Supported cubed-sphere device/rank counts** (others are rejected with a precise error):
+- **Face-only**: 1, 2, 3, 6
+- **Sub-face tiling**: 6k² for k ≥ 2: 24, 54, 96, 150, 216, 294, 384, 600, ...
+
+Unsupported counts (4, 5, 7, 8, 12, 36, 48, ...) raise `ValueError` with the nearest valid counts. There is no silent round-down.
+
+**Execution modes**:
+| Mode | Ranks | Devices/rank | Halo backend | Reduction backend |
+|------|-------|-------------|-------------|-------------------|
+| `serial` | 1 | 1 | local | local |
+| `multi_device` | 1 | N | JAX SPMD | local |
+| `mpi` | N | 1 | MPI | MPI |
+| `hybrid` | N | M | MPI + JAX | MPI + JAX |
+
+**Deprecated APIs**: `partition_state()` (zero-masked global arrays) emits `DeprecationWarning`. Use `ParallelRuntime.scatter()` / `.gather()` instead.
 
 ### Apple Silicon (Metal/MPS backend)
 
