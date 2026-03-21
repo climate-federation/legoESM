@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Sequence
 from urllib.request import urlopen
 
-import imageio.v2 as imageio
+try:
+    import imageio.v2 as imageio
+except ImportError:
+    imageio = None  # deferred; functions that need it raise at call time
 import matplotlib
 
 matplotlib.use("Agg")
@@ -86,6 +89,11 @@ def _plot_map(ax: plt.Axes, field: xr.DataArray, title: str, *, vmin: float, vma
 
 
 def _frame_to_image(fig: plt.Figure) -> np.ndarray:
+    if imageio is None:
+        raise ImportError(
+            "imageio is required for GIF postprocessing. "
+            "Install it with: pip install 'legoesm[ml]'"
+        )
     buffer = BytesIO()
     fig.savefig(buffer, format="png", dpi=110)
     plt.close(fig)

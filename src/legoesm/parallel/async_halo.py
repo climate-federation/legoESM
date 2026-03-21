@@ -65,16 +65,18 @@ import jax.numpy as jnp
 # ======================================================================
 
 def jax_native_halo_exchange(data, grid, mesh=None):
-    """JAX-native halo exchange using collective operations.
+    """JAX-native halo exchange using collective operations (experimental).
+
+    .. warning::
+
+       The ``ppermute``-based path is **experimental** and has not been
+       validated at scale.  When ``mesh`` is provided, the function will
+       attempt the ppermute code path and emit a warning.  Set ``mesh=None``
+       (the default) to use the well-tested local/MPI-based exchange.
 
     When running on multi-GPU/TPU with JAX sharding, this uses
     ``jax.lax.ppermute`` for device-to-device communication instead of MPI.
-    Falls back to the MPI-based exchange when mesh is None.
-
-    This function demonstrates the intended API and fallback strategy for
-    non-blocking, JAX-native halo exchange without MPI. On multi-GPU systems,
-    ppermute enables zero-copy device-to-device data movement that integrates
-    with XLA's compiler stack, avoiding host-side MPI synchronization entirely.
+    Falls back to the local halo pad when mesh is None.
 
     Parameters
     ----------
@@ -84,34 +86,35 @@ def jax_native_halo_exchange(data, grid, mesh=None):
         Grid with halo metadata and connectivity information.
     mesh : jax.sharding.Mesh, optional
         JAX device mesh for multi-GPU/TPU environments. If provided, uses
-        ``ppermute`` for device-to-device halos; otherwise falls back to
-        MPI-based exchange. Default None (use MPI).
+        the experimental ``ppermute`` path for device-to-device halos;
+        otherwise falls back to the local halo pad. Default None.
 
     Returns
     -------
     jax.Array
         Halo-padded field with same shape as input but with halo regions filled.
 
-    Raises
-    ------
-    NotImplementedError
-        If ``mesh`` is not None, since ppermute halo exchange is not yet
-        implemented. Use ``mesh=None`` to fall back to MPI-based exchange.
-
     Notes
     -----
-    The ppermute implementation (when available) will:
+    The ppermute implementation is experimental and:
 
-    1. Use the grid's face connectivity to define permutation patterns.
-    2. Apply ``jax.lax.ppermute`` calls for each edge/halo strip.
-    3. Avoid MPI entirely, keeping computation on-device.
-    4. Integrate with JAX's collective operations for potential
+    1. Uses the grid's face connectivity to define permutation patterns.
+    2. Applies ``jax.lax.ppermute`` calls for each edge/halo strip.
+    3. Avoids MPI entirely, keeping computation on-device.
+    4. Integrates with JAX's collective operations for potential
        compiler-level optimizations.
 
-    This is currently a placeholder; the full ppermute implementation is
-    pending integration with CubedSphereGrid connectivity metadata.
+    This path has not been validated beyond single-node multi-device setups.
     """
     if mesh is not None:
+        import warnings
+        warnings.warn(
+            "jax_native_halo_exchange: the ppermute-based code path is "
+            "experimental and has not been validated at scale. "
+            "Use mesh=None for the well-tested local/MPI-based exchange.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return _ppermute_halo_exchange(data, grid, mesh)
     # Fall back to the standard local halo pad (no MPI needed for
     # single-node multi-GPU when XLA handles data movement via sharding).
@@ -120,7 +123,13 @@ def jax_native_halo_exchange(data, grid, mesh=None):
 
 
 def _ppermute_halo_exchange(data, grid, mesh):
-    """Implement halo exchange via jax.lax.ppermute.
+    """Implement halo exchange via jax.lax.ppermute (experimental).
+
+    .. warning::
+
+       This function is experimental and has not been validated beyond
+       basic single-node multi-device setups.  It may produce incorrect
+       halo data for complex connectivity patterns or multi-node runs.
 
     Uses the cubed-sphere CONNECTIVITY table to build permutation
     patterns that move edge strips directly between devices using

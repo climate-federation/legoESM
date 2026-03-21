@@ -1,9 +1,9 @@
 """Component factory for the legoESM driver.
 
-Resolves configured atmosphere (and future ocean/land/ice) solvers into
-concrete model instances.  The driver delegates all solver construction
-here, so that ``ModelDriver`` never hardcodes a particular dynamical
-core class.
+Resolves configured atmosphere, ocean, land, ice, and coupler
+components into concrete model instances.  The driver delegates all
+component construction here, so that ``ModelDriver`` never hardcodes
+a particular dynamical core or surface component class.
 
 Design
 ------
@@ -13,9 +13,10 @@ Design
   - Computes physical diffusion coefficients from grid properties.
   - Validates that the grid type is compatible with the chosen solver.
   - Returns the model instance ready for time-stepping.
-* The factory is designed to be extended: ``create_ocean_component``,
-  ``create_land_component``, ``create_ice_component``, and
-  ``create_coupler`` stubs are provided for future patches.
+* ``create_ocean_component``, ``create_land_component``,
+  ``create_ice_component``, and ``create_coupler`` delegate to the
+  canonical component constructors in ``legoesm.ocean``,
+  ``legoesm.land``, ``legoesm.ice``, and ``legoesm.coupler``.
 """
 
 from __future__ import annotations
@@ -333,46 +334,219 @@ def _fail_unsupported(model_type: str, discretization: str, grid_type: str):
 
 
 # =========================================================================
-# Future component stubs — ocean, land, ice, coupler
+# Ocean, land, ice, and coupler component factories
 # =========================================================================
 
-def create_ocean_component(_config: ExperimentConfig, _grid, _vertical_coord):
-    """Create the configured ocean dynamical core.
+def create_ocean_component(
+    config: ExperimentConfig,
+    grid,
+    vertical_coord=None,
+    *,
+    ocean_config=None,
+    sst_map=None,
+):
+    """Create the configured ocean component.
 
-    Placeholder for future implementation.  Parameters are prefixed
-    with ``_`` to signal that they are intentionally unused.
+    This factory supports two modes:
+
+    1. **Simple ocean** (default): returns a step-function created by
+       ``legoesm.ocean.simple_ocean.make_ocean``.  Pass an optional
+       ``SimpleOceanConfig`` via *ocean_config*; if omitted, the
+       default fixed-SST configuration is used.
+    2. **Full ocean model**: if *ocean_config* is an ``OceanConfig``,
+       instantiates a full ``OceanModel`` from ``legoesm.ocean``.
+
+    Parameters
+    ----------
+    config : ExperimentConfig
+        Experiment-level configuration (used for logging).
+    grid
+        Horizontal grid object.
+    vertical_coord
+        Vertical coordinate (needed for the full ocean model; ignored
+        for the simple ocean).
+    ocean_config
+        A ``SimpleOceanConfig`` or ``OceanConfig`` instance.  If *None*,
+        defaults to ``SimpleOceanConfig()`` (fixed SST at 300 K).
+    sst_map : array-like, optional
+        Spatial SST map for fixed/slab modes.
+
+    Returns
+    -------
+    step_fn or OceanModel
+        A callable step function (simple ocean) or an ``OceanModel``
+        instance (full ocean).
     """
-    raise NotImplementedError(
-        "Ocean component factory is not yet wired. "
-        "Configure the ocean solver directly for now."
+    from legoesm.ocean.simple_ocean import SimpleOceanConfig, make_ocean
+    from legoesm.ocean.state import OceanConfig
+
+    if ocean_config is None:
+        ocean_config = SimpleOceanConfig()
+
+    if isinstance(ocean_config, SimpleOceanConfig):
+        logger.info(
+            "Ocean: simple mode=%s (h_mix=%.0f m)",
+            ocean_config.mode, ocean_config.h_mix,
+        )
+        return make_ocean(ocean_config, sst_map=sst_map)
+
+    if isinstance(ocean_config, OceanConfig):
+        from legoesm.ocean import OceanModel
+        logger.info("Ocean: full OceanModel")
+        return OceanModel(grid=grid, vertical_coord=vertical_coord, config=ocean_config)
+
+    raise TypeError(
+        f"ocean_config must be SimpleOceanConfig or OceanConfig, "
+        f"got {type(ocean_config).__name__!r}"
     )
 
 
-def create_land_component(_config: ExperimentConfig, _grid):
+def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
     """Create the configured land surface model.
 
-    Placeholder for future implementation.
+    Returns a ``step_land`` callable (slab land) or a
+    ``step_multilayer_land`` callable, depending on the config type.
+
+    Parameters
+    ----------
+    config : ExperimentConfig
+        Experiment-level configuration (used for logging).
+    grid
+        Horizontal grid object (used for determining spatial shape).
+    land_config
+        A ``LandConfig`` or ``MultiLayerLandConfig``.  If *None*,
+        defaults to ``LandConfig()``.
+
+    Returns
+    -------
+    step_fn : callable
+        The land surface step function.
     """
-    raise NotImplementedError(
-        "Land component factory is not yet wired."
+    from legoesm.land import (
+        LandConfig, MultiLayerLandConfig,
+        step_land, step_multilayer_land,
+    )
+
+    if land_config is None:
+        land_config = LandConfig()
+
+    if isinstance(land_config, MultiLayerLandConfig):
+        logger.info("Land: multilayer model (n_soil=%d)", land_config.n_soil)
+        return step_multilayer_land
+
+    if isinstance(land_config, LandConfig):
+        logger.info("Land: slab model")
+        return step_land
+
+    raise TypeError(
+        f"land_config must be LandConfig or MultiLayerLandConfig, "
+        f"got {type(land_config).__name__!r}"
     )
 
 
-def create_ice_component(_config: ExperimentConfig, _grid):
+def create_ice_component(config: ExperimentConfig, grid, *, ice_config=None):
     """Create the configured sea-ice model.
 
-    Placeholder for future implementation.
+    Returns the ``step_sea_ice`` function from ``legoesm.ice``.
+    The caller should also construct a ``SeaIceState`` for initialization.
+
+    Parameters
+    ----------
+    config : ExperimentConfig
+        Experiment-level configuration (used for logging).
+    grid
+        Horizontal grid object (needed when ice dynamics are enabled).
+    ice_config
+        A ``SeaIceConfig`` instance.  If *None*, defaults to
+        ``SeaIceConfig()``.
+
+    Returns
+    -------
+    step_fn : callable
+        ``step_sea_ice(state, forcing, config, dt) -> SeaIceState``.
     """
-    raise NotImplementedError(
-        "Ice component factory is not yet wired."
+    from legoesm.ice import SeaIceConfig, step_sea_ice
+
+    if ice_config is None:
+        ice_config = SeaIceConfig()
+
+    logger.info(
+        "Ice: dynamics=%s, n_categories=%d",
+        ice_config.dynamics, ice_config.n_categories,
     )
+    return step_sea_ice
 
 
-def create_coupler(_config: ExperimentConfig, _components: dict):
-    """Create the component coupler.
+def create_coupler(
+    config: ExperimentConfig,
+    components: dict,
+    *,
+    coupler_config=None,
+    land_config=None,
+    ice_config=None,
+    lake_config=None,
+    lat=None,
+    grid=None,
+):
+    """Create the surface coupler.
 
-    Placeholder for future implementation.
+    Delegates to ``legoesm.coupler.coupler.make_coupler``, which
+    returns a ``step_surface`` callable.
+
+    Parameters
+    ----------
+    config : ExperimentConfig
+        Experiment-level configuration (used for logging).
+    components : dict
+        Not currently used; reserved for future multi-component
+        coupling patterns.
+    coupler_config
+        A ``CouplerConfig`` instance.  If *None*, defaults to
+        ``CouplerConfig()``.
+    land_config
+        A ``LandConfig`` for the land tile.  If *None*, defaults to
+        ``LandConfig()``.
+    ice_config
+        A ``SeaIceConfig`` for the ice tile.  If *None*, defaults to
+        ``SeaIceConfig()``.
+    lake_config
+        A ``LakeConfig`` for the lake tile.  If *None*, defaults to
+        ``LakeConfig()``.
+    lat : array-like, optional
+        Latitude array [radians] (needed for carbon cycle).
+    grid : optional
+        Grid object (needed when ice dynamics or transport are enabled).
+
+    Returns
+    -------
+    step_surface : callable
+        ``(SurfaceState, AtmToSurface, TileConfig, ocean_sst, ocean_u,
+        ocean_v, dt, doy) -> (SurfaceState, SurfaceToAtm)``.
     """
-    raise NotImplementedError(
-        "Coupler factory is not yet wired."
+    from legoesm.coupler.coupler import make_coupler
+    from legoesm.coupler.config import CouplerConfig
+    from legoesm.coupler.lake import LakeConfig
+    from legoesm.land import LandConfig
+    from legoesm.ice import SeaIceConfig
+
+    if coupler_config is None:
+        coupler_config = CouplerConfig()
+    if land_config is None:
+        land_config = LandConfig()
+    if ice_config is None:
+        ice_config = SeaIceConfig()
+    if lake_config is None:
+        lake_config = LakeConfig()
+
+    logger.info(
+        "Coupler: coupling_dt=%.0f s, bulk_scheme=%s",
+        coupler_config.coupling_dt, coupler_config.bulk_scheme,
+    )
+    return make_coupler(
+        coupler_config=coupler_config,
+        land_config=land_config,
+        ice_config=ice_config,
+        lake_config=lake_config,
+        lat=lat,
+        grid=grid,
     )

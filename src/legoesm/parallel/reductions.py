@@ -24,6 +24,16 @@ _TESTED_JAX_MAX_EXCL = (0, 10, 0)
 _TESTED_MPI4JAX_MIN = (0, 8, 0)
 _TESTED_MPI4JAX_MAX_EXCL = (0, 9, 0)
 
+# mpi4jax 0.8.x uses the deprecated API_VERSION_STATUS_RETURNING custom-call
+# convention removed in JAX 0.10.  Until mpi4jax ships an FFI-based release,
+# pin JAX < 0.10 for MPI workloads.  The warning from XLA is cosmetic for now
+# (the API still functions) but will become a hard error once JAX 0.10 ships.
+_MPI4JAX_FFI_MIGRATION_NOTE = (
+    "mpi4jax 0.8.x uses a custom-call API deprecated in JAX 0.9 and removed "
+    "in JAX 0.10.  Monitor https://github.com/mpi4jax/mpi4jax for an FFI-based "
+    "release.  Until then, pin JAX < 0.10 for MPI workloads."
+)
+
 
 def _parse_version_triplet(version: str) -> tuple[int, int, int]:
     """Parse a version string into (major, minor, patch) ints."""
@@ -49,6 +59,52 @@ def _env_flag_true(name: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _check_mpi4jax_api_version_deprecation() -> str | None:
+    """Detect the mpi4jax API_VERSION_STATUS_RETURNING deprecation.
+
+    mpi4jax >= 0.8 changed the custom-call API: operations return arrays
+    directly instead of ``(array, token)`` tuples.  When running an older
+    mpi4jax against a newer JAX that has dropped the legacy token-based
+    custom call path, mpi4jax emits ``API_VERSION_STATUS_RETURNING``
+    deprecation warnings and may fail at runtime.
+
+    Returns a diagnostic message if the deprecation is detected, or
+    ``None`` if everything looks compatible.
+    """
+    try:
+        import mpi4jax
+    except ImportError:
+        return None
+
+    # Check for the legacy API marker.  mpi4jax < 0.8 exposed
+    # ``API_VERSION_STATUS_RETURNING`` in its XLA bridge layer.
+    # If the attribute exists, the installed version uses the deprecated path.
+    api_version = getattr(
+        getattr(mpi4jax, "_src", None),
+        "API_VERSION_STATUS_RETURNING",
+        None,
+    )
+    if api_version is not None:
+        return (
+            "mpi4jax is using the deprecated API_VERSION_STATUS_RETURNING "
+            "custom-call interface, which is incompatible with modern JAX. "
+            "Upgrade mpi4jax: pip install 'mpi4jax>=0.8,<0.9'"
+        )
+
+    # Also check via XLA custom call registration if available.
+    xla_bridge = getattr(getattr(mpi4jax, "_src", None), "xla_bridge", None)
+    if xla_bridge is not None:
+        for attr_name in dir(xla_bridge):
+            if "STATUS_RETURNING" in attr_name.upper():
+                return (
+                    f"mpi4jax xla_bridge uses deprecated attribute "
+                    f"'{attr_name}', indicating an incompatible custom-call "
+                    "API. Upgrade mpi4jax: pip install 'mpi4jax>=0.8,<0.9'"
+                )
+
+    return None
+
+
 def _validate_mpi_runtime_versions(
     jax_version: str,
     mpi4jax_version: str,
@@ -59,6 +115,8 @@ def _validate_mpi_runtime_versions(
 
     We hard-fail on clearly unsupported mpi4jax versions and warn (or fail in
     strict mode) when versions fall outside the currently tested range.
+    Additionally detects the ``API_VERSION_STATUS_RETURNING`` deprecation
+    which indicates an incompatible custom-call API between mpi4jax and JAX.
     """
     jax_triplet = _parse_version_triplet(jax_version)
     mpi4jax_triplet = _parse_version_triplet(mpi4jax_version)
@@ -70,6 +128,15 @@ def _validate_mpi_runtime_versions(
             f"because older versions use incompatible token semantics. "
             f"Detected mpi4jax=={mpi4jax_version}. "
             f"Fix: pip install 'mpi4jax>=0.8,<0.9'",
+        )
+
+    # Detect API_VERSION_STATUS_RETURNING deprecation (fail-fast).
+    api_deprecation_msg = _check_mpi4jax_api_version_deprecation()
+    if api_deprecation_msg is not None:
+        raise RuntimeError(
+            f"Incompatible mpi4jax/JAX combination detected: "
+            f"{api_deprecation_msg} "
+            f"(jax=={jax_version}, mpi4jax=={mpi4jax_version})"
         )
 
     in_tested_jax = _TESTED_JAX_MIN <= jax_triplet < _TESTED_JAX_MAX_EXCL
@@ -92,6 +159,7 @@ def _validate_mpi_runtime_versions(
         "Detected versions outside legoESM's tested MPI range: "
         + ", ".join(parts)
         + ". MPI execution may fail or produce incorrect results. "
+        + _MPI4JAX_FFI_MIGRATION_NOTE + " "
         "Set LEGOESM_MPI_STRICT_COMPAT=1 to turn this into a hard error, "
         "or install tested versions: pip install 'mpi4jax>=0.8,<0.9'"
     )

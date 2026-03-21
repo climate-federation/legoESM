@@ -66,6 +66,8 @@ from legoesm.grids.halo import (
     NORTH,
     _extract_edge_strip,
     _extract_edge_strip_at_depth,
+    _fill_corners_h1,
+    _fill_corners_h2,
 )
 from legoesm.parallel.comm import CommTopology
 from legoesm.parallel.reductions import _mpi4jax_array_result
@@ -214,6 +216,13 @@ def _pad_halo_mpi_face_only(
                 strip_d1 = strip_d1[::-1]
             padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
 
+    # Fill corner cells by averaging adjacent edge-halo values
+    # (matching the local implementation).
+    if halo == 1:
+        padded = _fill_corners_h1(padded)
+    else:
+        padded = _fill_corners_h2(padded)
+
     return padded
 
 
@@ -317,6 +326,12 @@ def _pad_halo_mpi_tiled(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                 padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
+
+    # Fill corner cells by averaging adjacent edge-halo values.
+    if halo == 1:
+        padded = _fill_corners_h1(padded)
+    else:
+        padded = _fill_corners_h2(padded)
 
     return padded
 

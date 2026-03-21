@@ -239,6 +239,7 @@ def _probe_host() -> dict[str, Any]:
         "cpu": _device_count("cpu"),
         "gpu": _device_count("gpu"),
         "tpu": _device_count("tpu"),
+        "metal": _device_count("METAL"),  # experimental — Apple Silicon
     }
 
     return {
@@ -609,6 +610,20 @@ def _run_scaling_suite(args: argparse.Namespace, output_dir: Path, host_info: di
 
     for backend in backends:
         backend = backend.lower()
+        if backend == "metal":
+            backend_results.append(
+                {
+                    "backend": backend,
+                    "status": "skipped",
+                    "reason": (
+                        "Metal backend is experimental and not validated by "
+                        "this scaling suite. Metal support in JAX is still "
+                        "maturing; scaling results may not be reliable."
+                    ),
+                    "cases": [],
+                },
+            )
+            continue
         if backend not in {"cpu", "gpu", "tpu"}:
             backend_results.append(
                 {
@@ -1295,7 +1310,7 @@ def _write_report(path: Path, payload: dict[str, Any]) -> None:
         "",
         f"- Backend: {host['backend']}",
         f"- Local devices: {host['local_device_count']} ({', '.join(host['local_devices'])})",
-        f"- Device counts: cpu={host['device_counts']['cpu']}, gpu={host['device_counts']['gpu']}, tpu={host['device_counts']['tpu']}",
+        f"- Device counts: cpu={host['device_counts']['cpu']}, gpu={host['device_counts']['gpu']}, tpu={host['device_counts']['tpu']}, metal={host['device_counts'].get('metal', 0)} (experimental)",
         f"- JAX process count: {host['process_count']}",
         f"- mpirun: {host.get('mpirun_path') or 'not found'}",
         f"- mpiexec: {host.get('mpiexec_path') or 'not found'}",

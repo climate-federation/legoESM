@@ -1,10 +1,16 @@
-"""Unit tests for the local SFNO S2S package."""
+"""Unit tests for the local SFNO S2S package.
+
+Requires the ``[ml]`` extras (equinox, optax).
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import equinox as eqx
+import pytest
+
+eqx = pytest.importorskip("equinox", reason="requires legoesm[ml] extras")
+
 import jax.numpy as jnp
 import numpy as np
 import xarray as xr

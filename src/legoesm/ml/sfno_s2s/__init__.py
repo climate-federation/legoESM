@@ -41,11 +41,7 @@ from legoesm.ml.sfno_s2s.preparation import (
     prepare_arco_sst_cache,
     prepare_arco_surface_forcing,
 )
-from legoesm.ml.sfno_s2s.postprocess import (
-    open_rollout_members,
-    postprocess_campaign_center_crps,
-    postprocess_ensemble_rollouts,
-)
+# postprocess requires optional imageio; lazy-import via __getattr__ below.
 from legoesm.ml.sfno_s2s.evaluation import (
     aggregate_long_records,
     compute_ensemble_daily_metrics,
@@ -81,6 +77,20 @@ from legoesm.ml.sfno_s2s.training import (
     train_sfno_s2s,
     validate_s2s_step,
 )
+
+_POSTPROCESS_NAMES = {
+    "open_rollout_members",
+    "postprocess_campaign_center_crps",
+    "postprocess_ensemble_rollouts",
+}
+
+
+def __getattr__(name):
+    if name in _POSTPROCESS_NAMES:
+        from legoesm.ml.sfno_s2s import postprocess
+        return getattr(postprocess, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "CHAOSBENCH_ATMOS_VARS",

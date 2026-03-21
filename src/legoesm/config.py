@@ -1,15 +1,71 @@
-"""Configuration system for legoESM.
+"""YAML configuration adapter for legoESM.
 
-Supports YAML-based configuration with sensible defaults
-and programmatic override.
+This module is a **serialization boundary**: it reads user-facing YAML
+files and converts them into the canonical ``ExperimentConfig`` consumed
+by the driver.  It is *not* a second live schema — ``ExperimentConfig``
+(in ``legoesm.driver.config``) is the single source of truth for runtime
+configuration.
+
+Legacy YAML field names (e.g. ``discretization: "centered"``) are
+accepted for backward compatibility and normalized to canonical names
+at the boundary (see ``_LEGACY_DISCRETIZATION`` below).
 """
 
 from __future__ import annotations
 
 import copy
+import warnings
 
 import yaml
 from typing import Any
+
+
+# ======================================================================
+# Legacy-name normalization tables
+# ======================================================================
+# Canonical discretization names are defined in
+# ``legoesm.atmosphere.dynamics.DISCRETIZATION_OPTIONS``.
+# The YAML layer accepts deprecated aliases for backward compatibility
+# and maps them to the canonical names here, at the boundary.
+
+_LEGACY_DISCRETIZATION: dict[str, str] = {
+    "centered": "cdgrid",
+    "finite_volume": "cdgrid",
+    "cgrid": "cdgrid",
+    "fv": "cdgrid",
+}
+
+_LEGACY_DYNAMICS: dict[str, str] = {
+    # No legacy aliases at this time; table is here for future use.
+}
+
+
+def _normalize_discretization(raw: str) -> str:
+    """Map a legacy discretization name to its canonical form."""
+    canonical = _LEGACY_DISCRETIZATION.get(raw)
+    if canonical is not None:
+        warnings.warn(
+            f"YAML discretization {raw!r} is deprecated; "
+            f"use {canonical!r} instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return canonical
+    return raw
+
+
+def _normalize_dynamics(raw: str) -> str:
+    """Map a legacy dynamics name to its canonical form."""
+    canonical = _LEGACY_DYNAMICS.get(raw)
+    if canonical is not None:
+        warnings.warn(
+            f"YAML dynamics {raw!r} is deprecated; "
+            f"use {canonical!r} instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return canonical
+    return raw
 
 
 # Default configuration
@@ -28,22 +84,24 @@ DEFAULT_CONFIG = {
     "atmosphere": {
         # --- Two-axis solver selection ---
         # dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
-        # discretization: "centered" | "spectral"
+        # discretization: "cdgrid" | "spectral" | "sfno" | "latlon_fv" | "mpas"
         #
         # Mapping to solver implementations:
-        #   shallow_water  + centered → ShallowWaterModel
+        #   shallow_water  + cdgrid   → CDGridShallowWaterModel
         #   shallow_water  + spectral → SpectralShallowWaterModel
-        #   hydrostatic    + centered → PrimitiveEquationModel
+        #   hydrostatic    + cdgrid   → CDGridPrimitiveEquationModel
         #   hydrostatic    + spectral → SpectralPrimitiveEquationModel
-        #   nonhydrostatic + centered → CompressibleEulerModel
+        #   nonhydrostatic + cdgrid   → CDGridCompressibleEulerModel
         #   nonhydrostatic + spectral → SpectralCompressibleEulerModel
         #
+        # Legacy aliases "centered", "finite_volume", "cgrid" are accepted
+        # and normalized to "cdgrid" at the boundary.
         # The legacy "equations" key is still supported for backward
         # compatibility and takes precedence when set explicitly.
         "dynamics": "shallow_water",
-        "discretization": "centered",
+        "discretization": "cdgrid",
         "equations": "shallow_water",   # legacy; use dynamics+discretization
-        "advection": "centered",
+        "advection": "cdgrid",
         "time_integrator": "ssp_rk3",   # "ssp_rk3" | "ssp_rk54"
         "dt_seconds": 600,          # 10 minutes
         "hyperdiffusion_coeff": 0.0,
@@ -144,8 +202,10 @@ class Config:
     def to_experiment_config(self):
         """Convert this YAML-based Config to an ExperimentConfig for ModelDriver.
 
-        This is the canonical bridge between the user-facing YAML config
-        and the structured NamedTuple consumed by the driver.
+        This is the **serialization boundary** between user-facing YAML and
+        the canonical ``ExperimentConfig`` NamedTuple consumed by the driver.
+        Legacy solver / discretization names are normalized here so that
+        downstream code only ever sees canonical names.
         """
         from legoesm.driver.config import (
             ExperimentConfig, GridConfig, DycoreConfig, OutputConfig,
@@ -163,9 +223,16 @@ class Config:
         )
 
         atm = d.get("atmosphere", {})
+
+        # Normalize legacy names at the boundary
+        raw_dynamics = atm.get("dynamics", "hydrostatic")
+        raw_disc = atm.get("discretization", "cdgrid")
+        dynamics = _normalize_dynamics(raw_dynamics)
+        discretization = _normalize_discretization(raw_disc)
+
         dycore = DycoreConfig(
-            model_type=atm.get("dynamics", "hydrostatic"),
-            discretization=atm.get("discretization", "centered"),
+            model_type=dynamics,
+            discretization=discretization,
             dt=float(atm.get("dt_seconds", 600)),
             hyperdiff_scale=float(atm.get("hyperdiffusion_coeff", 1.0)),
             conservation_fixer=d.get("conservation", {}).get("fix_mass", True),

@@ -251,9 +251,9 @@ class TestSolverFactory:
     def test_available_solvers_list(self):
         """AVAILABLE_SOLVERS is populated."""
         from legoesm.atmosphere.dynamics import AVAILABLE_SOLVERS
-        assert "shallow_water" in AVAILABLE_SOLVERS
+        assert "cdgrid_shallow_water" in AVAILABLE_SOLVERS
         assert "tracer_transport" in AVAILABLE_SOLVERS
-        assert "primitive_equations" in AVAILABLE_SOLVERS
+        assert "cdgrid_primitive_equations" in AVAILABLE_SOLVERS
         assert "spectral_shallow_water" in AVAILABLE_SOLVERS
 
 
@@ -261,22 +261,22 @@ class TestSolverAxes:
     """Test the two-axis (dynamics x discretization) solver selection."""
 
     def test_resolve_hydrostatic_centered(self):
-        """dynamics=hydrostatic + discretization=centered -> primitive_equations."""
+        """dynamics=hydrostatic + discretization=centered -> cdgrid_primitive_equations."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name(dynamics="hydrostatic", discretization="centered")
-        assert name == "primitive_equations"
+        assert name == "cdgrid_primitive_equations"
 
     def test_resolve_nonhydrostatic_centered(self):
-        """dynamics=nonhydrostatic + discretization=centered -> compressible_euler."""
+        """dynamics=nonhydrostatic + discretization=centered -> cdgrid_compressible_euler."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name(dynamics="nonhydrostatic", discretization="centered")
-        assert name == "compressible_euler"
+        assert name == "cdgrid_compressible_euler"
 
     def test_resolve_shallow_water_centered(self):
-        """dynamics=shallow_water + discretization=centered -> shallow_water."""
+        """dynamics=shallow_water + discretization=centered -> cdgrid_shallow_water."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name(dynamics="shallow_water", discretization="centered")
-        assert name == "shallow_water"
+        assert name == "cdgrid_shallow_water"
 
     def test_resolve_shallow_water_spectral(self):
         """dynamics=shallow_water + discretization=spectral -> spectral_shallow_water."""
@@ -285,16 +285,16 @@ class TestSolverAxes:
         assert name == "spectral_shallow_water"
 
     def test_resolve_defaults_to_shallow_water_centered(self):
-        """No arguments default to shallow_water + centered."""
+        """No arguments default to cdgrid_shallow_water."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name()
-        assert name == "shallow_water"
+        assert name == "cdgrid_shallow_water"
 
     def test_resolve_nonhydrostatic_default_discretization(self):
         """dynamics=nonhydrostatic alone defaults to centered."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name(dynamics="nonhydrostatic")
-        assert name == "compressible_euler"
+        assert name == "cdgrid_compressible_euler"
 
     def test_resolve_spectral_default_dynamics(self):
         """discretization=spectral alone defaults to shallow_water dynamics."""
@@ -327,10 +327,11 @@ class TestSolverAxes:
         assert name == "spectral_compressible_euler"
 
     def test_resolve_legacy_equations_takes_precedence(self):
-        """Legacy equations key overrides default dynamics/discretization."""
+        """Legacy equations key works when no axis keys are given."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         name = resolve_solver_name(equations="primitive_equations")
-        assert name == "primitive_equations"
+        # Legacy "primitive_equations" is a deprecated alias → cdgrid_primitive_equations
+        assert name == "cdgrid_primitive_equations"
 
     def test_resolve_explicit_axes_override_legacy(self):
         """When dynamics is set explicitly, it overrides legacy equations."""
@@ -339,13 +340,13 @@ class TestSolverAxes:
             dynamics="nonhydrostatic",
             equations="shallow_water",  # legacy, should be ignored
         )
-        assert name == "compressible_euler"
+        assert name == "cdgrid_compressible_euler"
 
     def test_solver_axes_roundtrip(self):
         """solver_axes() is the inverse of resolve_solver_name()."""
         from legoesm.atmosphere.dynamics import resolve_solver_name, solver_axes
         for dyn in ["shallow_water", "hydrostatic", "nonhydrostatic"]:
-            for disc in ["centered", "spectral"]:
+            for disc in ["cdgrid", "spectral"]:
                 try:
                     name = resolve_solver_name(dynamics=dyn, discretization=disc)
                 except ValueError:
@@ -411,5 +412,5 @@ class TestSolverAxes:
         assert "hydrostatic" in DYNAMICS_OPTIONS
         assert "nonhydrostatic" in DYNAMICS_OPTIONS
         assert "shallow_water" in DYNAMICS_OPTIONS
-        assert "centered" in DISCRETIZATION_OPTIONS
+        assert "cdgrid" in DISCRETIZATION_OPTIONS
         assert "spectral" in DISCRETIZATION_OPTIONS
