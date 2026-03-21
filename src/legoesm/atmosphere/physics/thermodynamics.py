@@ -219,11 +219,16 @@ def compute_moist_adiabat(
     # Reverse to scan from surface (bottom) upward (top)
     p_rev = p_levels[:, ::-1]  # (ncol, nlev), surface first
 
+    # Promote to common dtype so scan carry types are consistent.
+    # Physical constants in moist_adiabat_lapse_rate are Python float64;
+    # computation internally uses the promoted dtype, but the carry must
+    # have matching input/output dtypes for jax.lax.scan.
+    _dtype = jnp.result_type(T_base, p_rev)
+    T_base = T_base.astype(_dtype)
+    p_rev = p_rev.astype(_dtype)
+
     def scan_step(T_prev, p_k):
         """Trapezoidal predictor-corrector step."""
-        # p_prev is the previous pressure (higher, closer to surface)
-        # p_k is current pressure (lower, closer to top)
-        # We carry (T, p_prev)
         T_prev_val, p_prev_val = T_prev
 
         dp = p_k - p_prev_val  # negative (going upward)
@@ -236,11 +241,10 @@ def compute_moist_adiabat(
         gamma_2 = moist_adiabat_lapse_rate(T_pred, p_k)
         T_new = T_prev_val + 0.5 * (gamma_1 + gamma_2) * dp
 
-        # Ensure temperature stays physical (cast bounds to input dtype
-        # to avoid float32→float64 promotion inside jax.lax.scan)
-        T_new = jnp.clip(T_new, jnp.asarray(150.0, T_new.dtype), jnp.asarray(500.0, T_new.dtype))
+        # Ensure temperature stays physical
+        T_new = jnp.clip(T_new, 150.0, 500.0).astype(_dtype)
 
-        return (T_new, p_k), T_new
+        return (T_new, p_k.astype(_dtype)), T_new
 
     # Initial state: temperature at surface level
     init = (T_base, p_rev[:, 0])
