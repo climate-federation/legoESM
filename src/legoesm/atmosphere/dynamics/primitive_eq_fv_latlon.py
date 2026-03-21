@@ -298,7 +298,8 @@ class FVLatLonPrimitiveEquationModel(IntegrationMixin):
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys, _ = physics_fn(s, self.grid, self.sigma_coord)
+                _phys_result = physics_fn(s, self.grid, self.sigma_coord)
+                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
             tend = fv_latlon_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
                 self.polar_mask,

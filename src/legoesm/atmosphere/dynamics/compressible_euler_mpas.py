@@ -480,9 +480,10 @@ class MPASCompressibleEulerModel:
         def slow_tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys, _ = physics_fn(
+                _phys_result = physics_fn(
                     s, self.mesh, self.height_coord, self.terrain_metric,
                 )
+                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
             tend = mpas_compressible_euler_slow_tendencies(
                 s, self.mesh, self.height_coord, self.terrain_metric,
                 self.config, phys,

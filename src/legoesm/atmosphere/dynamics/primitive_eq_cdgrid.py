@@ -562,7 +562,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             if physics_fn is not None:
                 # Convert D-grid state to A-grid for physics
                 s_agrid = fv3_to_hydrostatic(s, cdgrid)
-                phys_agrid, _ = physics_fn(s_agrid, self.grid, self.sigma_coord)
+                _phys_result = physics_fn(s_agrid, self.grid, self.sigma_coord)
+                phys_agrid = _phys_result[0] if type(_phys_result) is tuple else _phys_result
                 # Convert A-grid physics tendencies to D-grid
                 pu_d, pv_d = agrid_to_dgrid_vector(
                     phys_agrid.du_dt.data, phys_agrid.dv_dt.data, cdgrid,

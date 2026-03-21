@@ -1075,7 +1075,7 @@ class TestLongRunConservation:
 
     def test_zstar_transport_velocity_boundary_conditions(self):
         """Z-star transport velocity should be zero at surface and bottom."""
-        from legoesm.ocean.dynamics.ocean_pe import _diagnose_w_from_flux_div
+        from legoesm.ocean.dynamics.ocean_pe_cdgrid import _diagnose_w_from_flux_div
 
         z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
         # Arbitrary flux divergence (not identically zero).
@@ -1094,7 +1094,7 @@ class TestLongRunConservation:
 
     def test_advective_form_zero_for_uniform_tracer(self):
         """Advective form -ẇ·∂T/∂z should give zero for uniform T."""
-        from legoesm.ocean.dynamics.ocean_pe import (
+        from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
             _diagnose_w_from_flux_div,
             _vertical_advection_ocean,
         )
@@ -1113,7 +1113,7 @@ class TestLongRunConservation:
 
     def test_zstar_eulerian_comparison(self):
         """Z-star velocity should differ from Eulerian when deta/dt != 0."""
-        from legoesm.ocean.dynamics.ocean_pe import _diagnose_w_from_flux_div
+        from legoesm.ocean.dynamics.ocean_pe_cdgrid import _diagnose_w_from_flux_div
 
         z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
         # Asymmetric flux divergence so sum != 0 → Eulerian w[0] != 0.

@@ -228,15 +228,15 @@ class TestMPIAwareness:
         )
 
     def test_operators_use_halo_exchange(self):
-        """Baroclinic tendencies should use operators that call pad_halo."""
+        """Baroclinic tendencies should use C-D grid operators with halo exchange."""
         import inspect
-        from legoesm.ocean.dynamics.ocean_pe import ocean_baroclinic_tendencies
+        from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 
-        source = inspect.getsource(ocean_baroclinic_tendencies)
-        # Should use 3D operators that auto-dispatch halo exchange
-        assert "gradient_x_3d" in source
-        assert "gradient_y_3d" in source
-        assert "divergence_3d" in source
+        source = inspect.getsource(ocean_baroclinic_tendencies_cdgrid)
+        # C-D grid ocean uses C-D grid operators (not A-grid gradient_x_3d)
+        assert "cgrid_mass_flux_divergence_3d" in source
+        assert "cgrid_divergence_3d" in source
+        assert "dgrid_vorticity_3d" in source
 
     def test_barotropic_uses_halo_operators(self):
         """Barotropic substeps should call operators with halo exchange."""

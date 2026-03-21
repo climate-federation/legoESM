@@ -365,9 +365,10 @@ class CDGridCompressibleEulerModel:
         def slow_tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys, _ = physics_fn(
+                _phys_result = physics_fn(
                     s, self.grid, self.height_coord, self.terrain_metric,
                 )
+                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
             tend = cdgrid_compressible_euler_slow_tendencies(
                 s, self.grid, self.height_coord, self.terrain_metric,
                 self.cdgrid, self.config, phys,

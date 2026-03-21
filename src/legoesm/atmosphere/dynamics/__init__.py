@@ -57,131 +57,123 @@ emit ``DeprecationWarning``.  They will be removed in a future release:
 See :mod:`legoesm.supported_matrix` for the full implementation matrix.
 """
 
-# --- C-D grid cubed-sphere cores (FV3-style) ---
-from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-    CDGridShallowWaterModel,
-    CDGridShallowWaterConfig,
-    CDGridShallowWaterState,
-    cdgrid_shallow_water_tendencies,
-)
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
-    CDGridPrimitiveEquationModel,
-    CDGridPrimitiveEquationConfig,
-    cdgrid_hydrostatic_tendencies,
-    fv3_hydrostatic_tendencies,
-    hydrostatic_to_fv3,
-    fv3_to_hydrostatic,
-)
-from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
-    CDGridCompressibleEulerModel,
-    CDGridCompressibleEulerConfig,
-    cdgrid_compressible_euler_slow_tendencies,
-)
+# -----------------------------------------------------------------------
+# Lazy imports — the full solver zoo is loaded on first access to avoid
+# pulling every solver module (and its transitive dependencies such as
+# JAX/XLA compilation) at package-import time.
+# -----------------------------------------------------------------------
 
-# --- Spectral cores ---
-from legoesm.atmosphere.dynamics.spectral_sw import (
-    SpectralShallowWaterModel,
-    spectral_sw_tendencies,
-)
-from legoesm.atmosphere.dynamics.spectral_pe import (
-    SpectralPrimitiveEquationModel,
-    spectral_pe_tendencies,
-)
-from legoesm.atmosphere.dynamics.spectral_nh import (
-    SpectralCompressibleEulerModel,
-    spectral_nh_slow_tendencies,
-)
+import importlib as _importlib
+import warnings as _warnings
 
-# --- SFNO (data-driven) ---
-from legoesm.atmosphere.dynamics.sfno_sw import (
-    SFNOShallowWaterModel,
-    SFNOShallowWaterConfig,
-)
-from legoesm.atmosphere.dynamics.sfno_pe import (
-    SFNOPrimitiveEquationModel,
-    SFNOPrimitiveEquationConfig,
-)
+# Mapping from public name -> (module path, attribute name in that module).
+# When a name appears here it is resolved lazily via __getattr__ below.
+_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
+    # --- C-D grid cubed-sphere cores (FV3-style) ---
+    "CDGridShallowWaterModel": ("legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid", "CDGridShallowWaterModel"),
+    "CDGridShallowWaterConfig": ("legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid", "CDGridShallowWaterConfig"),
+    "CDGridShallowWaterState": ("legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid", "CDGridShallowWaterState"),
+    "cdgrid_shallow_water_tendencies": ("legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid", "cdgrid_shallow_water_tendencies"),
+    "CDGridPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.primitive_eq_cdgrid", "CDGridPrimitiveEquationModel"),
+    "CDGridPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.primitive_eq_cdgrid", "CDGridPrimitiveEquationConfig"),
+    "cdgrid_hydrostatic_tendencies": ("legoesm.atmosphere.dynamics.primitive_eq_cdgrid", "cdgrid_hydrostatic_tendencies"),
+    "fv3_hydrostatic_tendencies": ("legoesm.atmosphere.dynamics.primitive_eq_cdgrid", "fv3_hydrostatic_tendencies"),
+    "hydrostatic_to_fv3": ("legoesm.atmosphere.dynamics.primitive_eq_cdgrid", "hydrostatic_to_fv3"),
+    "fv3_to_hydrostatic": ("legoesm.atmosphere.dynamics.primitive_eq_cdgrid", "fv3_to_hydrostatic"),
+    "CDGridCompressibleEulerModel": ("legoesm.atmosphere.dynamics.compressible_euler_cdgrid", "CDGridCompressibleEulerModel"),
+    "CDGridCompressibleEulerConfig": ("legoesm.atmosphere.dynamics.compressible_euler_cdgrid", "CDGridCompressibleEulerConfig"),
+    "cdgrid_compressible_euler_slow_tendencies": ("legoesm.atmosphere.dynamics.compressible_euler_cdgrid", "cdgrid_compressible_euler_slow_tendencies"),
+    # --- Spectral cores ---
+    "SpectralShallowWaterModel": ("legoesm.atmosphere.dynamics.spectral_sw", "SpectralShallowWaterModel"),
+    "spectral_sw_tendencies": ("legoesm.atmosphere.dynamics.spectral_sw", "spectral_sw_tendencies"),
+    "SpectralPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.spectral_pe", "SpectralPrimitiveEquationModel"),
+    "spectral_pe_tendencies": ("legoesm.atmosphere.dynamics.spectral_pe", "spectral_pe_tendencies"),
+    "SpectralCompressibleEulerModel": ("legoesm.atmosphere.dynamics.spectral_nh", "SpectralCompressibleEulerModel"),
+    "spectral_nh_slow_tendencies": ("legoesm.atmosphere.dynamics.spectral_nh", "spectral_nh_slow_tendencies"),
+    # --- SFNO (data-driven) ---
+    "SFNOShallowWaterModel": ("legoesm.atmosphere.dynamics.sfno_sw", "SFNOShallowWaterModel"),
+    "SFNOShallowWaterConfig": ("legoesm.atmosphere.dynamics.sfno_sw", "SFNOShallowWaterConfig"),
+    "SFNOPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.sfno_pe", "SFNOPrimitiveEquationModel"),
+    "SFNOPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.sfno_pe", "SFNOPrimitiveEquationConfig"),
+    # --- Lat-lon cores ---
+    "FVShallowWaterLatLonModel": ("legoesm.atmosphere.dynamics.shallow_water_fv_latlon", "FVShallowWaterLatLonModel"),
+    "fv_shallow_water_tendencies_latlon": ("legoesm.atmosphere.dynamics.shallow_water_fv_latlon", "fv_shallow_water_tendencies_latlon"),
+    "CGShallowWaterLatLonModel": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "CGShallowWaterLatLonModel"),
+    "CGShallowWaterConfig": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "CGShallowWaterConfig"),
+    "cgrid_shallow_water_tendencies_latlon": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "cgrid_shallow_water_tendencies"),
+    "a_to_cgrid": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "a_to_cgrid"),
+    "cgrid_to_a": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "cgrid_to_a"),
+    "FVLatLonPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.primitive_eq_fv_latlon", "FVLatLonPrimitiveEquationModel"),
+    "fv_latlon_hydrostatic_tendencies": ("legoesm.atmosphere.dynamics.primitive_eq_fv_latlon", "fv_latlon_hydrostatic_tendencies"),
+    "FVCompressibleEulerLatLonModel": ("legoesm.atmosphere.dynamics.compressible_euler_fv_latlon", "FVCompressibleEulerLatLonModel"),
+    "fv_compressible_euler_latlon_slow_tendencies": ("legoesm.atmosphere.dynamics.compressible_euler_fv_latlon", "fv_compressible_euler_latlon_slow_tendencies"),
+    # --- MPAS icosahedral ---
+    "MPASPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.primitive_eq_mpas", "MPASPrimitiveEquationModel"),
+    "MPASPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.primitive_eq_mpas", "MPASPrimitiveEquationConfig"),
+    "mpas_hydrostatic_tendencies": ("legoesm.atmosphere.dynamics.primitive_eq_mpas", "mpas_hydrostatic_tendencies"),
+    "MPASCompressibleEulerModel": ("legoesm.atmosphere.dynamics.compressible_euler_mpas", "MPASCompressibleEulerModel"),
+    "MPASCompressibleEulerConfig": ("legoesm.atmosphere.dynamics.compressible_euler_mpas", "MPASCompressibleEulerConfig"),
+    "mpas_compressible_euler_slow_tendencies": ("legoesm.atmosphere.dynamics.compressible_euler_mpas", "mpas_compressible_euler_slow_tendencies"),
+    # --- Tracer transport ---
+    "TracerTransportModel": ("legoesm.atmosphere.dynamics.tracer_transport", "TracerTransportModel"),
+    "tracer_tendencies": ("legoesm.atmosphere.dynamics.tracer_transport", "tracer_tendencies"),
+    # --- Shared utilities (acoustic substeps, sponge, Exner) ---
+    "CompressibleEulerConfig": ("legoesm.atmosphere.dynamics.compressible_euler", "CompressibleEulerConfig"),
+    "compute_exner_perturbation": ("legoesm.atmosphere.dynamics.compressible_euler", "compute_exner_perturbation"),
+    "_sponge_profile": ("legoesm.atmosphere.dynamics.compressible_euler", "_sponge_profile"),
+    "acoustic_substeps": ("legoesm.atmosphere.dynamics.compressible_euler", "acoustic_substeps"),
+    "acoustic_substeps_semi_implicit": ("legoesm.atmosphere.dynamics.compressible_euler", "acoustic_substeps_semi_implicit"),
+}
 
-# --- Lat-lon cores ---
-from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-    FVShallowWaterLatLonModel,
-    fv_shallow_water_tendencies_latlon,
-)
-from legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon import (
-    CGShallowWaterLatLonModel,
-    CGShallowWaterConfig,
-    cgrid_shallow_water_tendencies as cgrid_shallow_water_tendencies_latlon,
-    a_to_cgrid,
-    cgrid_to_a,
-)
-from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
-    FVLatLonPrimitiveEquationModel,
-    fv_latlon_hydrostatic_tendencies,
-)
-from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
-    FVCompressibleEulerLatLonModel,
-    fv_compressible_euler_latlon_slow_tendencies,
-)
-
-# --- MPAS icosahedral ---
-from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
-    MPASPrimitiveEquationModel,
-    MPASPrimitiveEquationConfig,
-    mpas_hydrostatic_tendencies,
-)
-from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
-    MPASCompressibleEulerModel,
-    MPASCompressibleEulerConfig,
-    mpas_compressible_euler_slow_tendencies,
-)
-
-# --- Tracer transport ---
-from legoesm.atmosphere.dynamics.tracer_transport import (
-    TracerTransportModel,
-    tracer_tendencies,
-)
-
-# --- Shared utilities (acoustic substeps, sponge, Exner) ---
-from legoesm.atmosphere.dynamics.compressible_euler import (
-    CompressibleEulerConfig,
-    compute_exner_perturbation,
-    _sponge_profile,
-    acoustic_substeps,
-    acoustic_substeps_semi_implicit,
-)
+# Cache for already-resolved lazy imports (avoids repeated importlib calls).
+_LAZY_CACHE: dict[str, object] = {}
 
 
 # -----------------------------------------------------------------------
 # Deprecated aliases — emit DeprecationWarning on access
 # -----------------------------------------------------------------------
 
-import warnings as _warnings
+# NOTE: _DEPRECATED_ALIASES references the lazy names above; the values
+# are resolved through __getattr__ as well, so no eager import is needed.
 
-_DEPRECATED_ALIASES = {
-    "ShallowWaterModel": ("CDGridShallowWaterModel", CDGridShallowWaterModel),
-    "PrimitiveEquationModel": ("CDGridPrimitiveEquationModel", CDGridPrimitiveEquationModel),
-    "PrimitiveEquationConfig": ("CDGridPrimitiveEquationConfig", CDGridPrimitiveEquationConfig),
-    "CompressibleEulerModel": ("CDGridCompressibleEulerModel", CDGridCompressibleEulerModel),
-    "FVShallowWaterModel": ("CDGridShallowWaterModel", CDGridShallowWaterModel),
-    "FVPrimitiveEquationModel": ("CDGridPrimitiveEquationModel", CDGridPrimitiveEquationModel),
-    "FVCompressibleEulerModel": ("CDGridCompressibleEulerModel", CDGridCompressibleEulerModel),
-    "FVPrimitiveEquationConfig": ("CDGridPrimitiveEquationConfig", CDGridPrimitiveEquationConfig),
-    "FVCompressibleEulerConfig": ("CDGridCompressibleEulerConfig", CDGridCompressibleEulerConfig),
-    "CGShallowWaterCubedModel": ("CDGridShallowWaterModel", CDGridShallowWaterModel),
-    "CGPrimitiveEquationModel": ("CDGridPrimitiveEquationModel", CDGridPrimitiveEquationModel),
-    "CGCompressibleEulerModel": ("CDGridCompressibleEulerModel", CDGridCompressibleEulerModel),
-    "shallow_water_tendencies": ("cdgrid_shallow_water_tendencies", cdgrid_shallow_water_tendencies),
-    "hydrostatic_tendencies": ("cdgrid_hydrostatic_tendencies", cdgrid_hydrostatic_tendencies),
-    "compressible_euler_slow_tendencies": ("cdgrid_compressible_euler_slow_tendencies", cdgrid_compressible_euler_slow_tendencies),
-    "fv_shallow_water_tendencies": ("cdgrid_shallow_water_tendencies", cdgrid_shallow_water_tendencies),
-    "fv_hydrostatic_tendencies": ("cdgrid_hydrostatic_tendencies", cdgrid_hydrostatic_tendencies),
-    "fv_compressible_euler_slow_tendencies": ("cdgrid_compressible_euler_slow_tendencies", cdgrid_compressible_euler_slow_tendencies),
+# Deprecated alias name -> canonical lazy-import name it maps to.
+_DEPRECATED_ALIASES: dict[str, str] = {
+    "ShallowWaterModel": "CDGridShallowWaterModel",
+    "PrimitiveEquationModel": "CDGridPrimitiveEquationModel",
+    "PrimitiveEquationConfig": "CDGridPrimitiveEquationConfig",
+    "CompressibleEulerModel": "CDGridCompressibleEulerModel",
+    "FVShallowWaterModel": "CDGridShallowWaterModel",
+    "FVPrimitiveEquationModel": "CDGridPrimitiveEquationModel",
+    "FVCompressibleEulerModel": "CDGridCompressibleEulerModel",
+    "FVPrimitiveEquationConfig": "CDGridPrimitiveEquationConfig",
+    "FVCompressibleEulerConfig": "CDGridCompressibleEulerConfig",
+    "CGShallowWaterCubedModel": "CDGridShallowWaterModel",
+    "CGPrimitiveEquationModel": "CDGridPrimitiveEquationModel",
+    "CGCompressibleEulerModel": "CDGridCompressibleEulerModel",
+    "shallow_water_tendencies": "cdgrid_shallow_water_tendencies",
+    "hydrostatic_tendencies": "cdgrid_hydrostatic_tendencies",
+    "compressible_euler_slow_tendencies": "cdgrid_compressible_euler_slow_tendencies",
+    "fv_shallow_water_tendencies": "cdgrid_shallow_water_tendencies",
+    "fv_hydrostatic_tendencies": "cdgrid_hydrostatic_tendencies",
+    "fv_compressible_euler_slow_tendencies": "cdgrid_compressible_euler_slow_tendencies",
 }
 
 
+def _resolve_lazy(name: str) -> object:
+    """Resolve a lazy import by name, caching the result."""
+    if name in _LAZY_CACHE:
+        return _LAZY_CACHE[name]
+    mod_path, attr = _LAZY_IMPORTS[name]
+    mod = _importlib.import_module(mod_path)
+    obj = getattr(mod, attr)
+    _LAZY_CACHE[name] = obj
+    return obj
+
+
 def __getattr__(name):
+    # Deprecated aliases — warn and redirect to the canonical lazy name.
     if name in _DEPRECATED_ALIASES:
-        canonical, obj = _DEPRECATED_ALIASES[name]
+        canonical = _DEPRECATED_ALIASES[name]
         _warnings.warn(
             f"legoesm.atmosphere.dynamics.{name} is deprecated; "
             f"use {canonical} instead. "
@@ -189,7 +181,10 @@ def __getattr__(name):
             DeprecationWarning,
             stacklevel=2,
         )
-        return obj
+        return _resolve_lazy(canonical)
+    # Lazy imports for canonical names.
+    if name in _LAZY_IMPORTS:
+        return _resolve_lazy(name)
     raise AttributeError(f"module 'legoesm.atmosphere.dynamics' has no attribute {name!r}")
 
 
@@ -282,8 +277,11 @@ def resolve_solver_name(
     str
         A canonical solver name from ``AVAILABLE_SOLVERS``.
     """
-    # --- Legacy flat name path ---
-    if equations is not None:
+    # --- Axis-based keys take priority when explicitly provided ---
+    # The legacy "equations" key is only used as a fallback when neither
+    # dynamics nor discretization is set.  This prevents a stale default
+    # "equations" value from overriding an explicit axis-based selection.
+    if dynamics is None and discretization is None and equations is not None:
         if equations in _DEPRECATED_SOLVER_NAMES:
             canonical = _DEPRECATED_SOLVER_NAMES[equations]
             _warnings.warn(
@@ -368,45 +366,41 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         )
         name = canonical
 
-    # --- Instantiate ---
-    if name == "cdgrid_shallow_water":
-        return CDGridShallowWaterModel(**kwargs)
-    elif name == "cdgrid_primitive_equations":
-        return CDGridPrimitiveEquationModel(**kwargs)
-    elif name == "cdgrid_compressible_euler":
-        return CDGridCompressibleEulerModel(**kwargs)
-    elif name == "spectral_shallow_water":
-        if legoesm_config is not None:
-            kwargs.setdefault("legoesm_config", legoesm_config)
-        return SpectralShallowWaterModel(**kwargs)
-    elif name == "spectral_primitive_equations":
-        if legoesm_config is not None:
-            kwargs.setdefault("legoesm_config", legoesm_config)
-        return SpectralPrimitiveEquationModel(**kwargs)
-    elif name == "spectral_compressible_euler":
-        if legoesm_config is not None:
-            kwargs.setdefault("legoesm_config", legoesm_config)
-        return SpectralCompressibleEulerModel(**kwargs)
-    elif name == "sfno_shallow_water":
-        return SFNOShallowWaterModel(**kwargs)
-    elif name == "sfno_primitive_equations":
-        return SFNOPrimitiveEquationModel(**kwargs)
-    elif name == "fv_shallow_water_latlon":
-        return FVShallowWaterLatLonModel(**kwargs)
-    elif name == "fv_primitive_equations_latlon":
-        return FVLatLonPrimitiveEquationModel(**kwargs)
-    elif name == "fv_compressible_euler_latlon":
-        return FVCompressibleEulerLatLonModel(**kwargs)
-    elif name == "cgrid_shallow_water_latlon":
-        return CGShallowWaterLatLonModel(**kwargs)
-    elif name == "tracer_transport":
-        return TracerTransportModel(**kwargs)
-    elif name == "mpas_primitive_equations":
-        return MPASPrimitiveEquationModel(**kwargs)
-    elif name == "mpas_compressible_euler":
-        return MPASCompressibleEulerModel(**kwargs)
-    else:
+    # --- Instantiate (resolves lazy imports on demand) ---
+    _SOLVER_TO_CLASS = {
+        "cdgrid_shallow_water": "CDGridShallowWaterModel",
+        "cdgrid_primitive_equations": "CDGridPrimitiveEquationModel",
+        "cdgrid_compressible_euler": "CDGridCompressibleEulerModel",
+        "spectral_shallow_water": "SpectralShallowWaterModel",
+        "spectral_primitive_equations": "SpectralPrimitiveEquationModel",
+        "spectral_compressible_euler": "SpectralCompressibleEulerModel",
+        "sfno_shallow_water": "SFNOShallowWaterModel",
+        "sfno_primitive_equations": "SFNOPrimitiveEquationModel",
+        "fv_shallow_water_latlon": "FVShallowWaterLatLonModel",
+        "fv_primitive_equations_latlon": "FVLatLonPrimitiveEquationModel",
+        "fv_compressible_euler_latlon": "FVCompressibleEulerLatLonModel",
+        "cgrid_shallow_water_latlon": "CGShallowWaterLatLonModel",
+        "tracer_transport": "TracerTransportModel",
+        "mpas_primitive_equations": "MPASPrimitiveEquationModel",
+        "mpas_compressible_euler": "MPASCompressibleEulerModel",
+    }
+
+    # Spectral solvers accept legoesm_config as a kwarg.
+    _SPECTRAL_SOLVERS = {
+        "spectral_shallow_water",
+        "spectral_primitive_equations",
+        "spectral_compressible_euler",
+    }
+
+    class_name = _SOLVER_TO_CLASS.get(name)
+    if class_name is None:
         raise ValueError(
             f"Unknown solver: {name!r}. "
             f"Available: {AVAILABLE_SOLVERS}"
         )
+
+    if name in _SPECTRAL_SOLVERS and legoesm_config is not None:
+        kwargs.setdefault("legoesm_config", legoesm_config)
+
+    cls = _resolve_lazy(class_name)
+    return cls(**kwargs)
