@@ -129,7 +129,7 @@ def cmd_test(args):
     import jax
     import jax.numpy as jnp
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel, CDGridShallowWaterConfig as ShallowWaterConfig
     from tests.test_cases.williamson import (
         williamson_test2, williamson_test5, williamson_test2_exact,
         compute_error_norms,
@@ -251,7 +251,7 @@ def cmd_benchmark(args):
     import jax
     import jax.numpy as jnp
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel
     from tests.test_cases.williamson import williamson_test2
 
     logger.info(f"legoESM v0.1.0 | Benchmark")

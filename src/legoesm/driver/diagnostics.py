@@ -321,4 +321,26 @@ class DiagnosticCollector:
             return f"BLOWUP at day {elapsed_day:.0f}: max wind {max_v:.1f} m/s"
         if not jnp.all(jnp.isfinite(state.T.data)):
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite T"
+
+        # Temperature bounds (physical range for Earth atmosphere)
+        T_min_val = float(jnp.min(state.T.data))
+        T_max_val = float(jnp.max(state.T.data))
+        if T_min_val < 100.0 or T_max_val > 400.0:
+            return (
+                f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical bounds "
+                f"(min={T_min_val:.1f}K, max={T_max_val:.1f}K). "
+                f"Check dt, hyperdiffusion, and physics configuration."
+            )
+
+        # Surface pressure bounds
+        if hasattr(state, 'p_s'):
+            ps_min = float(jnp.min(state.p_s.data))
+            ps_max = float(jnp.max(state.p_s.data))
+            if ps_min < 40000.0 or ps_max > 115000.0:
+                return (
+                    f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of bounds "
+                    f"(min={ps_min:.0f}Pa, max={ps_max:.0f}Pa). "
+                    f"Check dt and dynamics configuration."
+                )
+
         return None

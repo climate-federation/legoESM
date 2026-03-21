@@ -459,7 +459,7 @@ def _save_conservation_timeseries(
 
 def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel, CDGridShallowWaterConfig as ShallowWaterConfig
     from legoesm.core.conservation import compute_conservation_diagnostics
     from tests.test_cases.williamson import williamson_test2
 
@@ -584,7 +584,7 @@ def _run_sw_williamson2(out_dir: Path, n: int, solver: str, mean_every: int):
 
 def _run_sw_williamson5(out_dir: Path, n: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel, CDGridShallowWaterConfig as ShallowWaterConfig
     from legoesm.core.conservation import compute_conservation_diagnostics
     from tests.test_cases.williamson import williamson_test5
 

@@ -498,36 +498,52 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
     def tendencies(
         self,
-        state: FV3HydrostaticState,
-        physics_tendency: FV3HydrostaticTendencies | None = None,
-    ) -> FV3HydrostaticTendencies:
-        return fv3_hydrostatic_tendencies(
+        state,
+        physics_tendency=None,
+    ):
+        """Compute tendencies. Accepts FV3HydrostaticState or HydrostaticState."""
+        if isinstance(state, FV3HydrostaticState):
+            return fv3_hydrostatic_tendencies(
+                state, self.grid, self.sigma_coord, self.cdgrid,
+                self.config, physics_tendency,
+            )
+        # Legacy A-grid path: convert → compute → convert back
+        return cdgrid_hydrostatic_tendencies(
             state, self.grid, self.sigma_coord, self.cdgrid,
             self.config, physics_tendency,
         )
 
+    def step(self, state, dt, physics_fn=None):
+        """Advance one time step.
+
+        Accepts both ``FV3HydrostaticState`` (D-grid) and
+        ``HydrostaticState`` (A-grid, legacy).  When given A-grid
+        state, converts to D-grid at the boundary, runs the D-grid
+        dycore, and converts back.
+
+        Parameters
+        ----------
+        state : FV3HydrostaticState or HydrostaticState
+        dt : float
+        physics_fn : callable, optional
+
+        Returns
+        -------
+        Same type as input state.
+        """
+        if isinstance(state, FV3HydrostaticState):
+            return self._step_fv3(state, dt, physics_fn=physics_fn)
+        # Legacy A-grid path
+        return self._step_agrid(state, dt, physics_fn=physics_fn)
+
     @partial(jax.jit, static_argnums=(0, 3))
-    def step(
+    def _step_fv3(
         self,
         state: FV3HydrostaticState,
         dt: float,
         physics_fn=None,
     ) -> FV3HydrostaticState:
-        """Advance one time step with D-grid prognostic winds.
-
-        Parameters
-        ----------
-        state : FV3HydrostaticState
-        dt : float
-        physics_fn : callable, optional
-            Physics forcing function.  Called with (HydrostaticState,
-            grid, sigma_coord) and returns HydrostaticTendencies (A-grid).
-            The model handles D<->A conversion at the interface.
-
-        Returns
-        -------
-        FV3HydrostaticState
-        """
+        """Advance one time step with D-grid prognostic winds."""
         from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
 
         cdgrid = self.cdgrid
@@ -605,7 +621,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         return state_new
 
     @partial(jax.jit, static_argnums=(0, 3))
-    def step_agrid(
+    def _step_agrid(
         self,
         state: HydrostaticState,
         dt: float,
@@ -619,12 +635,11 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         entirely on D-grid winds.
         """
         fv3_state = hydrostatic_to_fv3(state, self.cdgrid)
-        fv3_new = self.step(fv3_state, dt, physics_fn=physics_fn)
+        fv3_new = self._step_fv3(fv3_state, dt, physics_fn=physics_fn)
         return fv3_to_hydrostatic(fv3_new, self.cdgrid)
 
+    # Backward-compatible aliases
+    step_agrid = _step_agrid
+
     def step_with_physics(self, state, dt, physics_fn=None):
-        """Dispatch to step() or step_agrid() depending on state type."""
-        if isinstance(state, FV3HydrostaticState):
-            return self.step(state, dt, physics_fn=physics_fn)
-        # Legacy A-grid path
-        return self.step_agrid(state, dt, physics_fn=physics_fn)
+        return self.step(state, dt, physics_fn=physics_fn)

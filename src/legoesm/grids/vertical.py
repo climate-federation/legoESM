@@ -125,7 +125,9 @@ def create_sigma_coordinate(
     # Precompute constants for geopotential (avoids log calls in hot loop)
     sigma_half_safe = jnp.clip(sigma_half, 1e-30, None)
     ln_ratio = jnp.log(sigma_half_safe[1:] / sigma_half_safe[:-1])  # (n_levels,)
-    alpha = jnp.log(sigma_half_safe[1:] / sigma_full)  # (n_levels,)
+    # Exact Simmons-Burridge (1981) alpha coefficient:
+    #   α_k = 1 - (σ_{k-1/2} / Δσ_k) * ln(σ_{k+1/2} / σ_{k-1/2})
+    alpha = 1.0 - (sigma_half_safe[:-1] / dsigma) * ln_ratio  # (n_levels,)
 
     # Precompute fractional sigma for sigma-dot computation
     sigma_range = 1.0 - sigma_top
@@ -630,7 +632,9 @@ def create_hybrid_coordinate(
     p_full_ref_safe = jnp.clip(p_full_ref, 1e-10, None)
 
     ln_ratio_ref = jnp.log(p_half_ref_safe[1:] / p_half_ref_safe[:-1])
-    alpha_ref = jnp.log(p_half_ref_safe[1:] / p_full_ref_safe)
+    # Exact Simmons-Burridge (1981) alpha:
+    dP_ref = p_half_ref_safe[1:] - p_half_ref_safe[:-1]
+    alpha_ref = 1.0 - (p_half_ref_safe[:-1] / dP_ref) * ln_ratio_ref
 
     dsigma_eff = dA + dB
 
@@ -862,9 +866,10 @@ def compute_geopotential_hybrid(
     p_half_safe = jnp.clip(p_half, 1e-10, None)
     p_full_safe = jnp.clip(p_full, 1e-10, None)
 
-    # Log ratios and alpha — now spatially dependent
+    # Log ratios and exact Simmons-Burridge alpha — spatially dependent
     ln_ratio = jnp.log(p_half_safe[..., 1:] / p_half_safe[..., :-1])  # (..., nlev)
-    alpha = jnp.log(p_half_safe[..., 1:] / p_full_safe)  # (..., nlev)
+    dp = p_half_safe[..., 1:] - p_half_safe[..., :-1]
+    alpha = 1.0 - (p_half_safe[..., :-1] / dp) * ln_ratio  # (..., nlev)
 
     # Geopotential thickness of each full layer
     dPhi = R_d * T * ln_ratio  # (..., nlev)

@@ -102,6 +102,11 @@ class ModelDriver:
 
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
+        # Config cross-validation
+        config_warnings = self.config.validate()
+        for w in config_warnings:
+            logger.warning(f"  Config: {w}")
+
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._create_grid()
         self._create_topography()
@@ -131,7 +136,10 @@ class ModelDriver:
             from legoesm.grids.voronoi import create_voronoi_mesh
             self.grid = create_voronoi_mesh(gc.resolution, lloyd_iterations=50)
         else:
-            raise ValueError(f"Unknown grid type: {gc.grid_type}")
+            raise ValueError(
+                f"Unknown grid_type={gc.grid_type!r}. "
+                f"Supported: cubed_sphere, gaussian, latlon, voronoi"
+            )
 
         if gc.vertical_coord == "hybrid":
             from legoesm.grids.vertical import make_hybrid_levels
@@ -206,6 +214,30 @@ class ModelDriver:
         self._hyperdiff = diff.hyperdiff
 
         dc = self.config.dycore
+
+        # --- CFL validation (uses cfl module, warns and adjusts if unsafe) ---
+        from legoesm.core.cfl import cfl_check_and_adjust
+        gc = self.config.grid
+        model_type_map = {
+            "shallow_water": "shallow_water",
+            "hydrostatic": "primitive_eq",
+            "nonhydrostatic": "compressible",
+        }
+        cfl_model = model_type_map.get(dc.model_type, "primitive_eq")
+        dt_safe = cfl_check_and_adjust(
+            dc.dt, gc.resolution, model_type=cfl_model,
+            radius=getattr(self.grid, 'radius', 6.371229e6),
+        )
+        if dt_safe < dc.dt:
+            logger.warning(
+                f"  CFL: reducing dt from {dc.dt:.0f}s to {dt_safe:.0f}s "
+                f"for {gc.grid_type} C{gc.resolution}"
+            )
+            self.config = self.config._replace(
+                dycore=dc._replace(dt=dt_safe),
+            )
+            dc = self.config.dycore
+
         logger.info(
             f"  Dycore: {dc.model_type}/{dc.discretization} on "
             f"{self.config.grid.grid_type}, dt={dc.dt}s"
@@ -465,7 +497,7 @@ class ModelDriver:
         Returns (step, day).
         """
         result = load_restart(
-            Path(path), self.grid, self.sigma, strict=False,
+            Path(path), self.grid, self.sigma, strict=True,
         )
         state, q_v, step, day, _, _, q_c, q_r, metadata = result
         self.state = state
@@ -802,6 +834,15 @@ class ModelDriver:
             START_DAY, self.state.p_s.data, self._grid_lat,
         )
 
+        # Compute fixed moisture target for conservation fixer
+        from legoesm.core.conservation import compute_global_moisture
+        _target_moisture = jnp.float32(0.0)
+        if cfg.fix_moisture:
+            _target_moisture = compute_global_moisture(
+                self.q_v, self.state.p_s.data, dsigma, self.grid,
+            )
+            logger.info(f"  Moisture target: {float(_target_moisture):.6e} kg")
+
         run_status = "COMPLETED"
         lat_deg_grid = np.degrees(np.asarray(self._grid_lat))
 
@@ -866,6 +907,8 @@ class ModelDriver:
                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 current_step,
+                target_moisture=_target_moisture,
+                precip_accum=jnp.zeros(shape_2d),
             )
 
             # Time first segment for JIT measurement
@@ -882,7 +925,7 @@ class ModelDriver:
 
             # Unpack carry back to driver state
             (self.state, self.q_v, self.q_c, self.q_r,
-             held_tuple, _) = unpack_carry(carry, self.state)
+             held_tuple, _, seg_precip) = unpack_carry(carry, self.state)
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
 
@@ -894,10 +937,6 @@ class ModelDriver:
             # Diagnostics
             if diag_interval > 0 and current_step % diag_interval == 0:
                 jax.block_until_ready(self.state.u.data)
-                # Compute precip_ls as zero placeholder (exact precip
-                # is only available per-step; for diagnostics we use
-                # the physics output from the last step of the segment)
-                precip_placeholder = jnp.zeros(shape_2d)
                 diag_info = self.diagnostics.collect(
                     elapsed_day=elapsed_day,
                     day=day,
@@ -907,7 +946,7 @@ class ModelDriver:
                     q_r=self.q_r,
                     sst=sst,
                     sic=sic,
-                    precip_total=precip_placeholder,
+                    precip_total=seg_precip,
                     sw_up_toa=held_sw_up_toa,
                     lw_up_toa=held_lw_up_toa,
                     sw_net_sfc=held_sw_net_sfc,
@@ -917,9 +956,17 @@ class ModelDriver:
                     lat_deg_grid=lat_deg_grid,
                 )
 
+                elapsed_wall = time.time() - t_start
+                days_done = elapsed_day
+                eta_str = ""
+                if days_done > 0:
+                    rate = elapsed_wall / days_done
+                    remaining = (N_DAYS - days_done) * rate
+                    eta_str = f", ETA {remaining/3600:.1f}h"
                 logger.info(
                     f"  Day {elapsed_day:6.0f}: T={diag_info['mean_T']:.1f}K, "
                     f"max_v={diag_info['max_v']:.1f}m/s"
+                    f"{eta_str}"
                 )
 
                 # Stability check

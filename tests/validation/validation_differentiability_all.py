@@ -151,7 +151,7 @@ if __name__ == "__main__":
         sw_state = make_sw_state()
 
         # Centered
-        from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel, CDGridShallowWaterConfig as ShallowWaterConfig
         model = ShallowWaterModel(grid, ShallowWaterConfig(
             hyperdiff_coeff=0.0, use_conservation_fixer=False,
         ))

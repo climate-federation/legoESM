@@ -51,7 +51,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
     CDGridPrimitiveEquationModel as PrimitiveEquationModel,
     cdgrid_hydrostatic_tendencies as hydrostatic_tendencies,
 )
-from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterConfig, ShallowWaterModel
+from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterConfig as ShallowWaterConfig, CDGridShallowWaterModel as ShallowWaterModel
 from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig, RRTMGPConfig
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import rrtmgp_radiation

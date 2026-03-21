@@ -377,9 +377,9 @@ def _save_case_snapshots(
 def run_sw_fv_tests(output_dir):
     """Run Williamson Tests 2 and 5 with FV shallow water."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water import (
-        ShallowWaterModel,
-        ShallowWaterConfig,
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterModel as ShallowWaterModel,
+        CDGridShallowWaterConfig as ShallowWaterConfig,
     )
     from tests.test_cases.williamson import (
         williamson_test2,

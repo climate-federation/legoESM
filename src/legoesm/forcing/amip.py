@@ -299,8 +299,10 @@ def get_forcing_at_time(
     times = forcing.times
     ntime = times.shape[0]
 
-    # Clamp day to forcing time range
-    day = jnp.clip(day, times[0], times[-1])
+    # Wrap day cyclically so multi-year runs repeat the annual cycle
+    # instead of clamping at the last record.
+    period = times[-1] - times[0]
+    day = jnp.where(period > 0, times[0] + (day - times[0]) % period, day)
 
     # Find bracketing indices
     idx = jnp.searchsorted(times, day, side="right") - 1

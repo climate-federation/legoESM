@@ -302,6 +302,23 @@ class CDGridCompressibleEulerModel:
         self.grid = grid
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
 
+        # Acoustic CFL check at construction time (outside JIT)
+        from legoesm.core.cfl import estimate_min_dx_cubed_sphere
+        import logging as _logging
+        _ce_logger = _logging.getLogger("legoesm.compressible_euler")
+        dx_min = estimate_min_dx_cubed_sphere(
+            grid.n, getattr(grid, 'radius', 6.371229e6),
+        )
+        c_sound = float(jnp.sqrt(
+            constants.c_pd / constants.c_vd * constants.R_d * 300.0
+        ))
+        self._dx_min = dx_min
+        self._c_sound = c_sound
+        _ce_logger.info(
+            f"  Acoustic check: dx_min={dx_min/1000:.0f}km, c_s={c_sound:.0f}m/s, "
+            f"n_substeps={self.config.n_acoustic_substeps}"
+        )
+
     def tendencies(
         self,
         state: NonHydrostaticState,

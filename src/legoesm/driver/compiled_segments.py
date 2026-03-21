@@ -69,6 +69,11 @@ class SegmentCarry(NamedTuple):
         Held radiation fluxes for sub-cycling.
     step_index : jax.Array
         Scalar int32 — absolute step counter (for radiation cadence).
+    target_moisture : jax.Array
+        Scalar float — fixed global moisture target for the fixer,
+        computed once at initialization to prevent cross-step drift.
+    precip_accum : jax.Array
+        Accumulated precipitation over the segment [kg/m2].
     """
     u: jax.Array
     v: jax.Array
@@ -85,13 +90,20 @@ class SegmentCarry(NamedTuple):
     held_lw_up_toa: jax.Array
     held_sw_down_toa: jax.Array
     step_index: jax.Array
+    target_moisture: jax.Array
+    precip_accum: jax.Array
 
 
 def pack_carry(state, q_v, q_c, q_r,
                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-               step_index):
+               step_index,
+               target_moisture=None, precip_accum=None):
     """Pack driver state into a SegmentCarry for the compiled kernel."""
+    if target_moisture is None:
+        target_moisture = jnp.float32(0.0)
+    if precip_accum is None:
+        precip_accum = jnp.zeros_like(state.p_s.data)
     return SegmentCarry(
         u=state.u.data,
         v=state.v.data,
@@ -108,6 +120,8 @@ def pack_carry(state, q_v, q_c, q_r,
         held_lw_up_toa=held_lw_up_toa,
         held_sw_down_toa=held_sw_down_toa,
         step_index=jnp.int32(step_index),
+        target_moisture=jnp.asarray(target_moisture),
+        precip_accum=precip_accum,
     )
 
 
@@ -136,7 +150,8 @@ def unpack_carry(carry, state_template):
         carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
     )
     return (new_state, carry.q_v, carry.q_c, carry.q_r,
-            held_tuple, int(carry.step_index))
+            held_tuple, int(carry.step_index),
+            carry.precip_accum)
 
 
 # ======================================================================
@@ -326,10 +341,10 @@ def build_segment_fn(
             q_v_upd = q_v_upd - excess
             T_upd = T_upd + constants.L_v * excess / constants.c_pd
 
-        # --- Moisture fixer ---
+        # --- Moisture fixer (uses fixed target from initialization) ---
         if fix_moisture:
             q_v_upd = fix_moisture_hydrostatic(
-                q_v_upd, compute_global_moisture(carry.q_v, p_s_new, dsigma, grid),
+                q_v_upd, carry.target_moisture,
                 p_s_new, dsigma, grid,
             )
 
@@ -342,6 +357,10 @@ def build_segment_fn(
         # --- Rayleigh friction ---
         u_upd = u_new * _fric_decay
         v_upd = v_new * _fric_decay
+
+        # --- Accumulate precipitation ---
+        precip_step = phys_out.precipitation if hasattr(phys_out, 'precipitation') else jnp.zeros_like(p_s_new)
+        precip_accum = carry.precip_accum + precip_step * _dt
 
         new_carry = SegmentCarry(
             u=u_upd,
@@ -359,6 +378,8 @@ def build_segment_fn(
             held_lw_up_toa=held_new[4],
             held_sw_down_toa=held_new[5],
             step_index=step_idx + 1,
+            target_moisture=carry.target_moisture,
+            precip_accum=precip_accum,
         )
         return new_carry, None
 

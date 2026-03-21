@@ -346,9 +346,9 @@ def _run_scaling_worker(
             cells_per_step = 6.0 * float(grid_size) * float(grid_size)
         elif workload == "atmosphere_sw":
             from legoesm.grids.cubed_sphere import create_cubed_sphere
-            from legoesm.atmosphere.dynamics.shallow_water import (
-                ShallowWaterConfig,
-                ShallowWaterModel,
+            from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+                CDGridShallowWaterConfig as ShallowWaterConfig,
+                CDGridShallowWaterModel as ShallowWaterModel,
             )
             from tests.test_cases.williamson import williamson_test2
 
@@ -760,9 +760,9 @@ def _run_mpi_scaling_worker(
             }
 
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.shallow_water import (
-            ShallowWaterConfig,
-            ShallowWaterModel,
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig as ShallowWaterConfig,
+            CDGridShallowWaterModel as ShallowWaterModel,
         )
         from tests.test_cases.williamson import williamson_test2
 

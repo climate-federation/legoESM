@@ -638,7 +638,7 @@ def _series_push(series: dict[str, list[float]], step: int, vals: dict[str, floa
 
 def _run_sw_fv_w2(out_dir: Path, n: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel, CDGridShallowWaterConfig as ShallowWaterConfig
     from tests.test_cases.williamson import williamson_test2
 
     case_name = "SW FV Williamson 2"
@@ -744,7 +744,7 @@ def _run_sw_fv_w2(out_dir: Path, n: int, solver: str, mean_every: int):
 
 def _run_sw_fv_w5(out_dir: Path, n: int, solver: str, mean_every: int):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water import ShallowWaterModel, ShallowWaterConfig
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel, CDGridShallowWaterConfig as ShallowWaterConfig
     from tests.test_cases.williamson import williamson_test5
 
     case_name = "SW FV Williamson 5"

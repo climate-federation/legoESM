@@ -104,7 +104,7 @@ class SpectralPEConfig(NamedTuple):
     spectral_filter_order: int = 8   # Sharpness of spectral filter
     spectral_filter_strength: float = 0.0  # Retention at n=n_max (0=off, 0.01=aggressive)
     # Tendency truncation to prevent aliasing from cubic nonlinearities.
-    dealiasing_fraction: float = 0.0  # 0.667 recommended for long runs
+    dealiasing_fraction: float = 0.667  # 2/3 rule for cubic nonlinearities
     # Implicit (multiplicative) hyperdiffusion.  Applied as a post-step
     # filter: coeff_new = coeff_old * exp(-nu * [n(n+1)/a^2]^p * dt).
     # This is UNCONDITIONALLY STABLE, unlike explicit (tendency-based)

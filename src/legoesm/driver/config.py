@@ -143,6 +143,29 @@ class ExperimentConfig(NamedTuple):
     distributed: bool = False
     ensemble_size: int = 1
 
+    def validate(self) -> list[str]:
+        """Check for suspicious parameter combinations.
+
+        Returns a list of warning strings (empty if config is clean).
+        """
+        warns: list[str] = []
+        if self.radiation == "gray" and self.aerosol_forcing != "off":
+            warns.append("aerosol_forcing is ignored with gray radiation")
+        if self.microphysics != "none" and self.radiation == "gray":
+            warns.append(
+                "microphysics without RRTMGP radiation may give unrealistic results"
+            )
+        if self.dycore.dt > 900 and self.grid.resolution >= 32:
+            warns.append(
+                f"dt={self.dycore.dt}s may violate CFL at C{self.grid.resolution}"
+            )
+        if self.fix_moisture and self.microphysics != "none":
+            warns.append(
+                "fix_moisture with active microphysics may conflict "
+                "with microphysical moisture sources/sinks"
+            )
+        return warns
+
     # ------------------------------------------------------------------
     # Legacy AMIP adapter (serialization boundary only)
     # ------------------------------------------------------------------

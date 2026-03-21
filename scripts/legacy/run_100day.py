@@ -27,8 +27,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
-from legoesm.atmosphere.dynamics.shallow_water import (
-    ShallowWaterModel, ShallowWaterConfig,
+from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    CDGridShallowWaterModel as ShallowWaterModel, CDGridShallowWaterConfig as ShallowWaterConfig,
 )
 from tests.test_cases.williamson import (
     williamson_test5, compute_error_norms,
