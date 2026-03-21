@@ -41,6 +41,8 @@ _LEGACY_DISCRETIZATION_MAP = {
     "centered": "cdgrid",
     "finite_volume": "cdgrid",
     "fv": "cdgrid",
+    "fc_gram": "cdgrid",
+    "fc_gram_cgrid": "cdgrid",
 }
 
 
@@ -60,10 +62,9 @@ class OceanModel:
     config : OceanConfig, optional
         Model configuration. Defaults to OceanConfig().
     discretization : str, optional
-        Horizontal discretization: "centered" (default), "fc_gram",
-        or "fc_gram_cgrid".
-    fc_config : FCOperatorConfig, optional
-        FC-Gram operator config (required for fc_gram/fc_gram_cgrid).
+        Horizontal discretization. Only "cdgrid" is supported.
+        Legacy names ("centered", "finite_volume", "fc_gram",
+        "fc_gram_cgrid") are accepted with a deprecation warning.
 
     Example
     -------

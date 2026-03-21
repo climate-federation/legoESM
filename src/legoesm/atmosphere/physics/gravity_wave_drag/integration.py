@@ -143,8 +143,8 @@ def _make_hydrostatic_gwd(
                -> HydrostaticTendencies
 
     When *phys_state* is passed, the GWD wave action spectrum is read
-    from ``phys_state.gwd_spectrum`` and the updated spectrum is stored
-    on ``physics_fn._updated_gwd_spectrum``.
+    from ``phys_state.gwd_spectrum`` and the updated spectrum is
+    returned as the second element of the result tuple.
     """
     scheme_name, gwd_fn, scheme_config = _get_gwd_fn(gwd_config)
     is_prognostic = scheme_name == "prognostic_spectral"
@@ -156,7 +156,8 @@ def _make_hydrostatic_gwd(
         grid: CubedSphereGrid,
         sigma_coord: SigmaCoordinate,
         phys_state=None,
-    ) -> HydrostaticTendencies:
+    ):
+        gwd_spectrum_out = None
         T = state.T.data
         u = state.u.data
         v = state.v.data
@@ -180,13 +181,14 @@ def _make_hydrostatic_gwd(
         dims_2d = ("face", "x", "y")
 
         if gwd_fn is None:
-            return HydrostaticTendencies(
+            tendencies = HydrostaticTendencies(
                 du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
                 dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
                 dT_dt=Field(data=jnp.zeros(shape_3d), name="dT_dt_gwd", dims=dims_3d, units="K/s"),
                 dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_gwd", dims=dims_2d, units="Pa/s"),
                 dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
             )
+            return tendencies, gwd_spectrum_out
 
         z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
         rho = _compute_rho(T_col, p_full_col)
@@ -210,7 +212,7 @@ def _make_hydrostatic_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, sc, spec_in,
             )
-            physics_fn._updated_gwd_spectrum = spec_new
+            gwd_spectrum_out = spec_new
         elif is_ml:
             if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
@@ -234,20 +236,17 @@ def _make_hydrostatic_gwd(
         dv_dt = gwd_out.dv_dt.reshape(shape_3d)
         dT_dt = gwd_out.dT_dt.reshape(shape_3d)
 
-        return HydrostaticTendencies(
+        tendencies = HydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
             dT_dt=Field(data=dT_dt, name="dT_dt_gwd", dims=dims_3d, units="K/s"),
             dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_gwd", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
         )
-
-    physics_fn._updated_gwd_spectrum = None
-    physics_fn._is_prognostic = is_prognostic
+        return tendencies, gwd_spectrum_out
 
     def reset_state():
         _ml_model_cache[0] = None
-        physics_fn._updated_gwd_spectrum = None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -282,7 +281,8 @@ def _make_nonhydrostatic_gwd(
         height_coord: HeightCoordinate,
         terrain_metric: TerrainMetric,
         phys_state=None,
-    ) -> NonHydrostaticTendencies:
+    ):
+        gwd_spectrum_out = None
         theta_p = state.theta_prime.data
         rho_p = state.rho_prime.data
         u_data = state.u.data
@@ -314,7 +314,7 @@ def _make_nonhydrostatic_gwd(
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
 
         if gwd_fn is None:
-            return NonHydrostaticTendencies(
+            tendencies = NonHydrostaticTendencies(
                 du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
                 dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
                 dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_gwd", dims=dims_w, units="m/s^2"),
@@ -323,6 +323,7 @@ def _make_nonhydrostatic_gwd(
                 dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_gwd", dims=dims_tr, units="1/s"),
             )
+            return tendencies, gwd_spectrum_out
 
         # Terrain-aware heights and interface pressure.
         z_full = terrain_metric.z_full_3d.reshape(ncol, nlev)
@@ -357,7 +358,7 @@ def _make_nonhydrostatic_gwd(
                 u_col, v_col, T_col, p_full_col, p_half,
                 z_full, z_half, rho_col, lat, dt, sc, spec_in,
             )
-            physics_fn._updated_gwd_spectrum = spec_new
+            gwd_spectrum_out = spec_new
         elif is_ml:
             if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
@@ -382,7 +383,7 @@ def _make_nonhydrostatic_gwd(
         dT_dt = gwd_out.dT_dt.reshape(shape_3d)
         dtheta_prime_dt = dT_dt / jnp.clip(exner, 1e-6, None)
 
-        return NonHydrostaticTendencies(
+        tendencies = NonHydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_gwd", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_gwd", dims=dims_3d, units="m/s^2"),
             dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_gwd", dims=dims_w, units="m/s^2"),
@@ -391,13 +392,10 @@ def _make_nonhydrostatic_gwd(
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_gwd", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_gwd", dims=dims_tr, units="1/s"),
         )
-
-    physics_fn._updated_gwd_spectrum = None
-    physics_fn._is_prognostic = is_prognostic
+        return tendencies, gwd_spectrum_out
 
     def reset_state():
         _ml_model_cache[0] = None
-        physics_fn._updated_gwd_spectrum = None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -422,6 +420,7 @@ def _make_spectral_pe_gwd(
     _ml_model_cache = [None]
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
+        gwd_spectrum_out = None
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralHydrostaticState,
             spectral_pe_to_grid,
@@ -459,13 +458,14 @@ def _make_spectral_pe_gwd(
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
 
         if gwd_fn is None:
-            return SpectralHydrostaticState(
+            tendencies = SpectralHydrostaticState(
                 vor_hat=state.vor_hat.replace(data=zero_3d),
                 div_hat=state.div_hat.replace(data=zero_3d),
                 T_hat=state.T_hat.replace(data=jnp.zeros_like(state.T_hat.data)),
                 lnps_hat=state.lnps_hat.replace(data=zero_2d),
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             )
+            return tendencies, gwd_spectrum_out
 
         z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
         rho = _compute_rho(T_col, p_full_col)
@@ -489,7 +489,7 @@ def _make_spectral_pe_gwd(
                 u_col, v_col, T_col, p_full_col, p_half_col,
                 z_full, z_half, rho, lat, dt, sc, spec_in,
             )
-            physics_fn._updated_gwd_spectrum = spec_new
+            gwd_spectrum_out = spec_new
         elif is_ml:
             if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
@@ -533,20 +533,17 @@ def _make_spectral_pe_gwd(
 
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
-        return SpectralHydrostaticState(
+        tendencies = SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=dvor_hat),
             div_hat=state.div_hat.replace(data=ddiv_hat),
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
-
-    physics_fn._updated_gwd_spectrum = None
-    physics_fn._is_prognostic = is_prognostic
+        return tendencies, gwd_spectrum_out
 
     def reset_state():
         _ml_model_cache[0] = None
-        physics_fn._updated_gwd_spectrum = None
 
     physics_fn.reset_state = reset_state
     return physics_fn

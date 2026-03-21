@@ -518,7 +518,7 @@ class TestIntegration:
 
         config = TurbulenceConfig(scheme="smagorinsky")
         physics_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         n = grid.n
         nlev = sigma.n_levels
@@ -548,7 +548,7 @@ class TestIntegration:
 
         config = TurbulenceConfig(scheme="smagorinsky")
         physics_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         # Should have nonzero du_dt (from surface drag at minimum)
         max_du = float(jnp.max(jnp.abs(tendencies.du_dt.data)))
@@ -566,7 +566,7 @@ class TestIntegration:
 
         config = TurbulenceConfig(scheme="smagorinsky")
         physics_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         max_dT = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
         assert max_dT > 0.0
@@ -605,7 +605,7 @@ class TestIntegration:
 
         config = TurbulenceConfig(scheme="smagorinsky")
         physics_fn = make_turbulence_physics(config, model_type="nonhydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, height_coord, terrain_metric)
+        tendencies, _ = physics_fn(state, grid, height_coord, terrain_metric)
 
         assert tendencies.dtheta_prime_dt.data.shape == (6, n, n, nlev)
         assert tendencies.du_dt.data.shape == (6, n, n, nlev)
@@ -627,7 +627,7 @@ class TestIntegration:
 
         def loss(T_data):
             new_state = state._replace(T=state.T.replace(data=T_data))
-            tendencies = physics_fn(new_state, grid, sigma)
+            tendencies, _ = physics_fn(new_state, grid, sigma)
             return jnp.sum(tendencies.dT_dt.data ** 2)
 
         grad_T = jax.grad(loss)(state.T.data)
@@ -659,8 +659,8 @@ class TestIntegration:
             TurbulenceConfig(scheme="louis"), model_type="hydrostatic", dt=300.0,
         )
 
-        tend_smag = fn_smag(state, grid, sigma)
-        tend_louis = fn_louis(state, grid, sigma)
+        tend_smag, _ = fn_smag(state, grid, sigma)
+        tend_louis, _ = fn_louis(state, grid, sigma)
 
         # Both nonzero but different
         assert float(jnp.max(jnp.abs(tend_smag.du_dt.data))) > 0
@@ -690,7 +690,7 @@ class TestIntegration:
 
         config = TurbulenceConfig(scheme="none")
         physics_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         assert jnp.allclose(tendencies.dT_dt.data, 0.0)
         assert jnp.allclose(tendencies.du_dt.data, 0.0)

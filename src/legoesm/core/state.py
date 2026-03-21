@@ -123,19 +123,9 @@ class FV3HydrostaticTendencies(NamedTuple):
     dphis_dt: Field  # (6, n, n) — always zero
 
 
-class PhysicsState(NamedTuple):
-    """Prognostic physics state carried across timesteps.
-
-    All fields are optional (None when the corresponding scheme is inactive).
-    Registered as a JAX pytree so it can be checkpointed, vmapped, and
-    passed through jax.lax.scan.
-    """
-    tke: jax.Array | None = None              # Turbulent kinetic energy (ncol, nlev)
-    conv_mass_flux: jax.Array | None = None   # Convective mass flux (ncol,)
-    conv_prog: jax.Array | None = None        # Convective prognostic state
-    gwd_wave_action: jax.Array | None = None  # Gravity wave drag spectrum (ncol, nlev, n_wave)
-    clubb_moments: jax.Array | None = None    # CLUBB higher-order moments (ncol, nlev, 5)
-    radiation_tend: jax.Array | None = None   # Held radiation tendencies for sub-cycling
+# PhysicsState is defined in legoesm.atmosphere.physics.physics_state
+# (authoritative, concrete-array version).  Import from there directly:
+#   from legoesm.atmosphere.physics.physics_state import PhysicsState
 
 
 # ==============================================================================
@@ -147,15 +137,16 @@ class PhysicsModuleProtocol(Protocol):
     """Interface contract for all physics parameterization modules.
 
     Every physics factory (make_radiation_physics, make_turbulence_physics, etc.)
-    must return a callable matching this protocol.
+    must return a callable matching this protocol.  The return is a 2-tuple
+    of (tendencies, updated_phys_state).
     """
     def __call__(
         self,
         state: HydrostaticState,
         grid,
         coord,
-        phys_state: PhysicsState | None = None,
-    ) -> HydrostaticTendencies: ...
+        phys_state=None,
+    ) -> tuple: ...
 
     def set_time(self, day_of_year: float, seconds_of_day: float) -> None: ...
     def reset_state(self) -> None: ...

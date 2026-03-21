@@ -117,11 +117,12 @@ def _make_hydrostatic_convection(
 ) -> Callable:
     """Create convection physics_fn for PrimitiveEquationModel.
 
-    Signature: (state, grid, sigma_coord, phys_state=None) -> HydrostaticTendencies
+    Signature: (state, grid, sigma_coord, phys_state=None)
+               -> (HydrostaticTendencies, conv_prog_new | None)
 
-    When *phys_state* (a ``PhysicsState``) is passed, the convective
-    prognostic variable is read from ``phys_state.conv_prog`` and the
-    updated value is stored on ``physics_fn._updated_conv_prog``.
+    When *phys_state* is passed, the convective prognostic variable is
+    read from ``phys_state.conv_prog`` and the updated value is returned
+    as the second element of the result tuple.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
     is_prognostic = scheme_name in ("mass_flux", "edmf")
@@ -138,7 +139,7 @@ def _make_hydrostatic_convection(
         grid: CubedSphereGrid,
         sigma_coord: SigmaCoordinate,
         phys_state=None,
-    ) -> HydrostaticTendencies:
+    ):
         T = state.T.data          # (6, n, n, nlev)
         p_s = state.p_s.data      # (6, n, n)
 
@@ -159,6 +160,7 @@ def _make_hydrostatic_convection(
         # No tracers in HydrostaticState — use zero moisture
         q_v_col = jnp.zeros((ncol, nlev))
 
+        conv_prog_out = None
         if conv_fn is None:
             # "none" scheme: return zero tendencies
             dT_dt = jnp.zeros(shape_3d)
@@ -176,7 +178,7 @@ def _make_hydrostatic_convection(
                 **{prog_key: prog_in},
                 dt=dt, config=scheme_config,
             )
-            physics_fn._updated_conv_prog = prog_new
+            conv_prog_out = prog_new
             dT_dt = conv_out.dT_dt.reshape(shape_3d)
         else:
             conv_out = conv_fn(
@@ -189,7 +191,7 @@ def _make_hydrostatic_convection(
         dims_3d = ("face", "x", "y", "level")
         dims_2d = ("face", "x", "y")
 
-        return HydrostaticTendencies(
+        tendencies = HydrostaticTendencies(
             du_dt=Field(
                 data=jnp.zeros(shape_3d), name="du_dt_conv",
                 dims=dims_3d, units="m/s^2",
@@ -211,12 +213,10 @@ def _make_hydrostatic_convection(
                 dims=dims_2d, units="m^2/s^3",
             ),
         )
-
-    physics_fn._updated_conv_prog = None
-    physics_fn._is_prognostic = is_prognostic
+        return tendencies, conv_prog_out
 
     def reset_state():
-        physics_fn._updated_conv_prog = None
+        pass
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -233,11 +233,11 @@ def _make_nonhydrostatic_convection(
     """Create convection physics_fn for CompressibleEulerModel.
 
     Signature: (state, grid, height_coord, terrain_metric, phys_state=None)
-               -> NonHydrostaticTendencies
+               -> (NonHydrostaticTendencies, conv_prog_new | None)
 
     When *phys_state* is passed, the convective prognostic variable is
-    read from ``phys_state.conv_prog`` and the updated value is stored
-    on ``physics_fn._updated_conv_prog``.
+    read from ``phys_state.conv_prog`` and the updated value is returned
+    as the second element of the result tuple.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
     is_prognostic = scheme_name in ("mass_flux", "edmf")
@@ -316,6 +316,7 @@ def _make_nonhydrostatic_convection(
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_conv", dims=dims_tr, units="1/s"),
             )
 
+        conv_prog_out = None
         if is_prognostic:
             if phys_state is not None:
                 prog_in = phys_state.conv_prog
@@ -330,7 +331,7 @@ def _make_nonhydrostatic_convection(
                 **{prog_key: prog_in},
                 dt=dt, config=scheme_config,
             )
-            physics_fn._updated_conv_prog = prog_new
+            conv_prog_out = prog_new
         else:
             conv_out = conv_fn(
                 T=T_col, q_v=q_v_col,
@@ -348,7 +349,7 @@ def _make_nonhydrostatic_convection(
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dtracers = dtracers.at[..., 0].set(dq_v_dt)
 
-        return NonHydrostaticTendencies(
+        tendencies = NonHydrostaticTendencies(
             du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_conv", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_conv", dims=dims_3d, units="m/s^2"),
             dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_conv", dims=dims_w, units="m/s^2"),
@@ -357,12 +358,10 @@ def _make_nonhydrostatic_convection(
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_conv", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=dtracers, name="dtracers_dt_conv", dims=dims_tr, units="1/s"),
         )
-
-    physics_fn._updated_conv_prog = None
-    physics_fn._is_prognostic = is_prognostic
+        return tendencies, conv_prog_out
 
     def reset_state():
-        physics_fn._updated_conv_prog = None
+        pass
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -379,11 +378,11 @@ def _make_spectral_pe_convection(
     """Create convection physics_fn for SpectralPEModel.
 
     Signature: (state, grid, sigma_coord, grid_fields=None, phys_state=None)
-               -> SpectralHydrostaticState
+               -> (SpectralHydrostaticState, conv_prog_new | None)
 
     When *phys_state* is passed, the convective prognostic variable is
-    read from ``phys_state.conv_prog`` and the updated value is stored
-    on ``physics_fn._updated_conv_prog``.
+    read from ``phys_state.conv_prog`` and the updated value is returned
+    as the second element of the result tuple.
     """
     scheme_name, conv_fn, scheme_config = _get_convection_fn(convection_config)
     is_prognostic = scheme_name in ("mass_flux", "edmf")
@@ -425,6 +424,7 @@ def _make_spectral_pe_convection(
         p_half_col = p_half.reshape(ncol, nlev + 1)
         q_v_col = jnp.zeros((ncol, nlev))
 
+        conv_prog_out = None
         if conv_fn is None:
             dT_dt = jnp.zeros_like(T)
         elif is_prognostic:
@@ -441,7 +441,7 @@ def _make_spectral_pe_convection(
                 **{prog_key: prog_in},
                 dt=dt, config=scheme_config,
             )
-            physics_fn._updated_conv_prog = prog_new
+            conv_prog_out = prog_new
             dT_dt = conv_out.dT_dt.reshape(n_lat, n_lon, nlev)
         else:
             conv_out = conv_fn(
@@ -458,19 +458,17 @@ def _make_spectral_pe_convection(
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
 
-        return SpectralHydrostaticState(
+        tendencies = SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=zero_3d),
             div_hat=state.div_hat.replace(data=zero_3d),
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
-
-    physics_fn._updated_conv_prog = None
-    physics_fn._is_prognostic = is_prognostic
+        return tendencies, conv_prog_out
 
     def reset_state():
-        physics_fn._updated_conv_prog = None
+        pass
 
     physics_fn.reset_state = reset_state
     return physics_fn

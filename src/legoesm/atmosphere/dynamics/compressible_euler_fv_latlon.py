@@ -303,9 +303,26 @@ class FVCompressibleEulerLatLonModel:
             self.config, physics_tendency, self.polar_mask,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
     def step(self, state: NonHydrostaticState, dt: float) -> NonHydrostaticState:
-        """Advance one time step using split-explicit RK3 with FV transport."""
+        """Advance one time step using split-explicit RK3 with FV transport.
+
+        This non-jitted wrapper precomputes target mass outside the JIT
+        boundary, then delegates to the jitted ``_step_jitted``.
+        """
+        # Precompute target mass outside JIT boundary (host-side only).
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            from legoesm.core.conservation import compute_nh_dry_mass
+            self._target_mass = compute_nh_dry_mass(
+                state.rho_prime.data, self.height_coord,
+                self.terrain_metric, self.grid,
+            )
+        return self._step_jitted(state, dt)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_jitted(self, state: NonHydrostaticState, dt: float) -> NonHydrostaticState:
+        """JIT-compiled step core (no physics)."""
         from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
         acoustic_cfg = CompressibleEulerConfig(
             g=self.config.g,
@@ -352,11 +369,7 @@ class FVCompressibleEulerLatLonModel:
             from legoesm.core.conservation import (
                 fix_mass_nonhydrostatic, compute_nh_dry_mass,
             )
-            if self.config.anchor_mass_to_initial and self._target_mass is None:
-                self._target_mass = compute_nh_dry_mass(
-                    state.rho_prime.data, self.height_coord,
-                    self.terrain_metric, self.grid,
-                )
+            # _target_mass is precomputed in step() outside the JIT boundary.
             target = self._target_mass if self.config.anchor_mass_to_initial else (
                 compute_nh_dry_mass(
                     state.rho_prime.data, self.height_coord,
@@ -370,14 +383,36 @@ class FVCompressibleEulerLatLonModel:
 
         return state_new
 
-    @partial(jax.jit, static_argnums=(0, 3))
     def step_with_physics(
         self,
         state: NonHydrostaticState,
         dt: float,
         physics_fn=None,
     ) -> NonHydrostaticState:
-        """Advance one time step with physics forcing."""
+        """Advance one time step with physics forcing.
+
+        This non-jitted wrapper precomputes target mass outside the JIT
+        boundary, then delegates to the jitted ``_step_with_physics_jitted``.
+        """
+        # Precompute target mass outside JIT boundary (host-side only).
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            from legoesm.core.conservation import compute_nh_dry_mass
+            self._target_mass = compute_nh_dry_mass(
+                state.rho_prime.data, self.height_coord,
+                self.terrain_metric, self.grid,
+            )
+        return self._step_with_physics_jitted(state, dt, physics_fn=physics_fn)
+
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _step_with_physics_jitted(
+        self,
+        state: NonHydrostaticState,
+        dt: float,
+        physics_fn=None,
+    ) -> NonHydrostaticState:
+        """JIT-compiled step core with physics forcing."""
         from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
         acoustic_cfg = CompressibleEulerConfig(
             g=self.config.g,
@@ -393,7 +428,7 @@ class FVCompressibleEulerLatLonModel:
         def slow_tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys = physics_fn(
+                phys, _ = physics_fn(
                     s, self.grid, self.height_coord, self.terrain_metric,
                 )
             tend = fv_compressible_euler_latlon_slow_tendencies(
@@ -429,11 +464,7 @@ class FVCompressibleEulerLatLonModel:
             from legoesm.core.conservation import (
                 fix_mass_nonhydrostatic, compute_nh_dry_mass,
             )
-            if self.config.anchor_mass_to_initial and self._target_mass is None:
-                self._target_mass = compute_nh_dry_mass(
-                    state.rho_prime.data, self.height_coord,
-                    self.terrain_metric, self.grid,
-                )
+            # _target_mass is precomputed in step_with_physics() outside the JIT boundary.
             target = self._target_mass if self.config.anchor_mass_to_initial else (
                 compute_nh_dry_mass(
                     state.rho_prime.data, self.height_coord,

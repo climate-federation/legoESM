@@ -189,7 +189,7 @@ class SFNOPrimitiveEquationModel:
         if self.config.mode == "hybrid_tendencies":
             def combined_tendency(s):
                 sfno_tend = self._sfno_tendency(s)
-                phys_tend = physics_fn(s, self.grid, self.sigma_coord)
+                phys_tend, _ = physics_fn(s, self.grid, self.sigma_coord)
                 return jax.tree.map(
                     lambda a, b: a + b, sfno_tend, phys_tend
                 )
@@ -197,7 +197,7 @@ class SFNOPrimitiveEquationModel:
         else:
             # State update mode: SFNO prediction + physics tendencies
             new_state = self._step_state_update(state)
-            phys_tend = physics_fn(state, self.grid, self.sigma_coord)
+            phys_tend, _ = physics_fn(state, self.grid, self.sigma_coord)
             new_state = jax.tree.map(
                 lambda s, t: s + dt * t, new_state, phys_tend
             )

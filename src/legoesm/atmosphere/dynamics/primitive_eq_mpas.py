@@ -383,7 +383,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys = physics_fn(s, self.mesh, self.sigma_coord)
+                phys, _ = physics_fn(s, self.mesh, self.sigma_coord)
             tend = mpas_hydrostatic_tendencies(
                 s, self.mesh, self.sigma_coord, self.config,
                 physics_tendency=phys, dt=dt,

@@ -163,9 +163,8 @@ def _make_hydrostatic_turbulence(
     Signature: (state, grid, sigma_coord, phys_state=None) -> HydrostaticTendencies
 
     When *phys_state* (a ``PhysicsState``) is passed, TKE is read from
-    ``phys_state.tke`` and the updated TKE is stored on the function's
-    ``.phys_state`` attribute.  This replaces the old mutable ``nonlocal``
-    pattern, making physics state checkpointable and vmappable.
+    ``phys_state.tke`` and the updated TKE is returned as the second
+    element of the result tuple.
 
     Note: HydrostaticState has no tracers, so q_v is set to zero.
     Turbulence produces nonzero du_dt, dv_dt (unlike convection/radiation).
@@ -182,7 +181,8 @@ def _make_hydrostatic_turbulence(
         grid: CubedSphereGrid,
         sigma_coord: SigmaCoordinate,
         phys_state=None,
-    ) -> HydrostaticTendencies:
+    ):
+        tke_out = None
         T = state.T.data          # (6, n, n, nlev)
         u = state.u.data
         v = state.v.data
@@ -217,7 +217,7 @@ def _make_hydrostatic_turbulence(
                 dT_dt=Field(data=jnp.zeros(shape_3d), name="dT_dt_turb", dims=dims_3d, units="K/s"),
                 dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
                 dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
-            )
+            ), tke_out
 
         # Heights and density
         z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
@@ -242,8 +242,7 @@ def _make_hydrostatic_turbulence(
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
             )
-            # Store updated TKE on function attribute for the orchestrator.
-            physics_fn._updated_tke = tke_new
+            tke_out = tke_new
         elif is_ml:
             if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
@@ -269,20 +268,17 @@ def _make_hydrostatic_turbulence(
         dv_dt = turb_out.dv_dt.reshape(shape_3d)
         dT_dt = turb_out.dT_dt.reshape(shape_3d)
 
-        return HydrostaticTendencies(
+        tendencies = HydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
             dT_dt=Field(data=dT_dt, name="dT_dt_turb", dims=dims_3d, units="K/s"),
             dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
         )
-
-    physics_fn._updated_tke = None
-    physics_fn._needs_tke = needs_tke
+        return tendencies, tke_out
 
     def reset_state():
         _ml_model_cache[0] = None
-        physics_fn._updated_tke = None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -299,11 +295,11 @@ def _make_nonhydrostatic_turbulence(
     """Create turbulence physics_fn for CompressibleEulerModel.
 
     Signature: (state, grid, height_coord, terrain_metric, phys_state=None)
-               -> NonHydrostaticTendencies
+               -> (NonHydrostaticTendencies, tke_out)
 
     When *phys_state* (a ``PhysicsState``) is passed, TKE is read from
-    ``phys_state.tke`` and the updated TKE is stored on the function's
-    ``.phys_state`` attribute.
+    ``phys_state.tke`` and the updated TKE is returned as the second
+    element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
@@ -316,7 +312,8 @@ def _make_nonhydrostatic_turbulence(
         height_coord: HeightCoordinate,
         terrain_metric: TerrainMetric,
         phys_state=None,
-    ) -> NonHydrostaticTendencies:
+    ):
+        tke_out = None
         theta_p = state.theta_prime.data
         rho_p = state.rho_prime.data
         u_data = state.u.data
@@ -357,7 +354,7 @@ def _make_nonhydrostatic_turbulence(
                 drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_turb", dims=dims_3d, units="kg/m^3/s"),
                 dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_turb", dims=dims_tr, units="1/s"),
-            )
+            ), tke_out
 
         # Use terrain-aware heights for NH columns.
         z_full = terrain_metric.z_full_3d.reshape(ncol, nlev)
@@ -396,7 +393,7 @@ def _make_nonhydrostatic_turbulence(
                 p_full_col, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho_col, dt, scheme_config,
             )
-            physics_fn._updated_tke = tke_new
+            tke_out = tke_new
         elif is_ml:
             if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
@@ -428,7 +425,7 @@ def _make_nonhydrostatic_turbulence(
             dq_v_dt = turb_out.dq_v_dt.reshape(shape_3d)
             dtracers = dtracers.at[..., 0].set(dq_v_dt)
 
-        return NonHydrostaticTendencies(
+        tendencies = NonHydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
             dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_turb", dims=dims_w, units="m/s^2"),
@@ -437,13 +434,10 @@ def _make_nonhydrostatic_turbulence(
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=dtracers, name="dtracers_dt_turb", dims=dims_tr, units="1/s"),
         )
-
-    physics_fn._updated_tke = None
-    physics_fn._needs_tke = needs_tke
+        return tendencies, tke_out
 
     def reset_state():
         _ml_model_cache[0] = None
-        physics_fn._updated_tke = None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -460,11 +454,11 @@ def _make_spectral_pe_turbulence(
     """Create turbulence physics_fn for SpectralPEModel.
 
     Signature: (state, grid, sigma_coord, grid_fields=None, phys_state=None)
-               -> SpectralHydrostaticState
+               -> (SpectralHydrostaticState, tke_out)
 
     When *phys_state* (a ``PhysicsState``) is passed, TKE is read from
-    ``phys_state.tke`` and the updated TKE is stored on the function's
-    ``.phys_state`` attribute.
+    ``phys_state.tke`` and the updated TKE is returned as the second
+    element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
@@ -481,6 +475,8 @@ def _make_spectral_pe_turbulence(
             sh_analysis_oc2_3d,
             sh_analysis_dmu_3d,
         )
+
+        tke_out = None
 
         # Transform spectral state to grid space (or reuse precomputed fields).
         fields = grid_fields
@@ -519,7 +515,7 @@ def _make_spectral_pe_turbulence(
                 T_hat=state.T_hat.replace(data=jnp.zeros_like(state.T_hat.data)),
                 lnps_hat=state.lnps_hat.replace(data=zero_2d),
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
-            )
+            ), tke_out
 
         # Heights and density
         z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
@@ -540,7 +536,7 @@ def _make_spectral_pe_turbulence(
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
             )
-            physics_fn._updated_tke = tke_new
+            tke_out = tke_new
         elif is_ml:
             if _ml_model_cache[0] is None:
                 key = jax.random.PRNGKey(scheme_config.seed)
@@ -592,20 +588,17 @@ def _make_spectral_pe_turbulence(
         # Temperature tendency to spectral
         dT_hat = sh_analysis_3d(grid, dT_dt)
 
-        return SpectralHydrostaticState(
+        tendencies = SpectralHydrostaticState(
             vor_hat=state.vor_hat.replace(data=dvor_hat),
             div_hat=state.div_hat.replace(data=ddiv_hat),
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
-
-    physics_fn._updated_tke = None
-    physics_fn._needs_tke = needs_tke
+        return tendencies, tke_out
 
     def reset_state():
         _ml_model_cache[0] = None
-        physics_fn._updated_tke = None
 
     physics_fn.reset_state = reset_state
     return physics_fn

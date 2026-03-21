@@ -531,6 +531,15 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         -------
         Same type as input state.
         """
+        # Precompute target mass outside JIT boundary (host-side only).
+        # This avoids writing traced values into persistent object attributes
+        # inside a jit-compiled method.
+        if (self.config.use_conservation_fixer and self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            from legoesm.core.operators import global_integral
+            self._target_mass = global_integral(state.p_s, self.grid)
+
         if isinstance(state, FV3HydrostaticState):
             return self._step_fv3(state, dt, physics_fn=physics_fn)
         # Legacy A-grid path
@@ -553,7 +562,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             if physics_fn is not None:
                 # Convert D-grid state to A-grid for physics
                 s_agrid = fv3_to_hydrostatic(s, cdgrid)
-                phys_agrid = physics_fn(s_agrid, self.grid, self.sigma_coord)
+                phys_agrid, _ = physics_fn(s_agrid, self.grid, self.sigma_coord)
                 # Convert A-grid physics tendencies to D-grid
                 pu_d, pv_d = agrid_to_dgrid_vector(
                     phys_agrid.du_dt.data, phys_agrid.dv_dt.data, cdgrid,
@@ -599,11 +608,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         if self.config.use_conservation_fixer and self.config.fix_mass:
             if self.config.anchor_mass_to_initial:
                 from legoesm.core.conservation import fix_mass_hydrostatic_target
-                from legoesm.core.operators import global_integral
-                if self._target_mass is None:
-                    self._target_mass = global_integral(state.p_s, self.grid)
-                # fix_mass_hydrostatic_target expects HydrostaticState,
-                # but only uses .p_s — create a minimal adapter.
+                # _target_mass is precomputed in step() outside the JIT boundary.
                 state_h = fv3_to_hydrostatic(state_new, cdgrid)
                 state_h_fixed = fix_mass_hydrostatic_target(
                     state_h, self._target_mass, self.grid,

@@ -376,7 +376,7 @@ class TestIntegration:
 
         config = ConvectionConfig(scheme="sbm")
         physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         n = grid.n
         nlev = sigma.n_levels
@@ -396,7 +396,7 @@ class TestIntegration:
 
         config = ConvectionConfig(scheme="sbm")
         physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         max_hr = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
         assert max_hr > 0.0
@@ -413,7 +413,7 @@ class TestIntegration:
 
         config = ConvectionConfig(scheme="sbm")
         physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         assert jnp.allclose(tendencies.du_dt.data, 0.0)
         assert jnp.allclose(tendencies.dv_dt.data, 0.0)
@@ -453,7 +453,7 @@ class TestIntegration:
 
         config = ConvectionConfig(scheme="sbm")
         physics_fn = make_convection_physics(config, model_type="nonhydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, height_coord, terrain_metric)
+        tendencies, _ = physics_fn(state, grid, height_coord, terrain_metric)
 
         assert tendencies.dtheta_prime_dt.data.shape == (6, n, n, nlev)
         assert tendencies.du_dt.data.shape == (6, n, n, nlev)
@@ -494,7 +494,7 @@ class TestIntegration:
 
         config = ConvectionConfig(scheme="sbm")
         physics_fn = make_convection_physics(config, model_type="nonhydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, height_coord, terrain_metric)
+        tendencies, _ = physics_fn(state, grid, height_coord, terrain_metric)
 
         max_hr = float(jnp.max(jnp.abs(tendencies.dtheta_prime_dt.data)))
         assert max_hr > 0.0
@@ -514,7 +514,7 @@ class TestIntegration:
 
         def loss(T_data):
             new_state = state._replace(T=state.T.replace(data=T_data))
-            tendencies = physics_fn(new_state, grid, sigma)
+            tendencies, _ = physics_fn(new_state, grid, sigma)
             return jnp.sum(tendencies.dT_dt.data ** 2)
 
         grad_T = jax.grad(loss)(state.T.data)
@@ -539,8 +539,8 @@ class TestIntegration:
         fn_sbm = make_convection_physics(config_sbm, model_type="hydrostatic", dt=300.0)
         fn_dca = make_convection_physics(config_dca, model_type="hydrostatic", dt=300.0)
 
-        tend_sbm = fn_sbm(state, grid, sigma)
-        tend_dca = fn_dca(state, grid, sigma)
+        tend_sbm, _ = fn_sbm(state, grid, sigma)
+        tend_dca, _ = fn_dca(state, grid, sigma)
 
         # Both should produce nonzero but different tendencies
         assert not jnp.allclose(tend_sbm.dT_dt.data, tend_dca.dT_dt.data, atol=1e-10)
@@ -557,7 +557,7 @@ class TestIntegration:
 
         config = ConvectionConfig(scheme="none")
         physics_fn = make_convection_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         assert jnp.allclose(tendencies.dT_dt.data, 0.0)
 
@@ -577,8 +577,8 @@ class TestIntegration:
         fn_sbm = make_convection_physics(
             ConvectionConfig(scheme="sbm"), model_type="hydrostatic", dt=300.0,
         )
-        tend_kuo = fn_kuo(state, grid, sigma)
-        tend_sbm = fn_sbm(state, grid, sigma)
+        tend_kuo, _ = fn_kuo(state, grid, sigma)
+        tend_sbm, _ = fn_sbm(state, grid, sigma)
 
         assert not jnp.allclose(tend_kuo.dT_dt.data, tend_sbm.dT_dt.data, atol=1e-10)
 
@@ -595,7 +595,7 @@ class TestIntegration:
         fn = make_convection_physics(
             ConvectionConfig(scheme="mass_flux"), model_type="hydrostatic", dt=300.0,
         )
-        tendencies = fn(state, grid, sigma)
+        tendencies, _ = fn(state, grid, sigma)
         max_val = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
         assert max_val > 0.0
 
@@ -612,7 +612,7 @@ class TestIntegration:
         fn = make_convection_physics(
             ConvectionConfig(scheme="edmf"), model_type="hydrostatic", dt=300.0,
         )
-        tendencies = fn(state, grid, sigma)
+        tendencies, _ = fn(state, grid, sigma)
         max_val = float(jnp.max(jnp.abs(tendencies.dT_dt.data)))
         assert max_val > 0.0
 
@@ -631,7 +631,7 @@ class TestIntegration:
 
         def loss(T_data):
             new_state = state._replace(T=state.T.replace(data=T_data))
-            tendencies = physics_fn(new_state, grid, sigma)
+            tendencies, _ = physics_fn(new_state, grid, sigma)
             return jnp.sum(tendencies.dT_dt.data ** 2)
 
         grad_T = jax.grad(loss)(state.T.data)
@@ -652,7 +652,7 @@ class TestIntegration:
 
         def loss(T_data):
             new_state = state._replace(T=state.T.replace(data=T_data))
-            tendencies = physics_fn(new_state, grid, sigma)
+            tendencies, _ = physics_fn(new_state, grid, sigma)
             return jnp.sum(tendencies.dT_dt.data ** 2)
 
         grad_T = jax.grad(loss)(state.T.data)

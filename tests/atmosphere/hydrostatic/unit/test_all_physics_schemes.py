@@ -98,14 +98,14 @@ class TestRadiationSchemes:
     def test_gray(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(radiation=RadiationConfig(scheme="gray"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "radiation/gray")
         assert float(jnp.max(jnp.abs(tend.dT_dt.data))) > 0.0, "gray: zero heating"
 
     def test_rrtmgp(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(radiation=RadiationConfig(scheme="rrtmgp"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "radiation/rrtmgp")
         assert float(jnp.max(jnp.abs(tend.dT_dt.data))) > 0.0, "rrtmgp: zero heating"
 
@@ -120,31 +120,31 @@ class TestConvectionSchemes:
     def test_sbm(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(convection=ConvectionConfig(scheme="sbm"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "convection/sbm")
 
     def test_dca(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(convection=ConvectionConfig(scheme="dca"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "convection/dca")
 
     def test_kuo(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(convection=ConvectionConfig(scheme="kuo"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "convection/kuo")
 
     def test_mass_flux(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(convection=ConvectionConfig(scheme="mass_flux"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "convection/mass_flux")
 
     def test_edmf(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(convection=ConvectionConfig(scheme="edmf"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "convection/edmf")
 
 
@@ -158,51 +158,51 @@ class TestTurbulenceSchemes:
     def test_smagorinsky(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(turbulence=TurbulenceConfig(scheme="smagorinsky"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/smagorinsky")
         assert float(jnp.max(jnp.abs(tend.du_dt.data))) > 0.0, "smagorinsky: zero wind tendency"
 
     def test_louis(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(turbulence=TurbulenceConfig(scheme="louis"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/louis")
         assert float(jnp.max(jnp.abs(tend.du_dt.data))) > 0.0, "louis: zero wind tendency"
 
     def test_tke(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(turbulence=TurbulenceConfig(scheme="tke"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/tke")
 
     def test_clubb_lite(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(turbulence=TurbulenceConfig(scheme="clubb_lite"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/clubb_lite")
 
     def test_holtslag_boville(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(turbulence=TurbulenceConfig(scheme="holtslag_boville"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/holtslag_boville")
 
     def test_ysu(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(turbulence=TurbulenceConfig(scheme="ysu"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/ysu")
 
     def test_edmf(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(turbulence=TurbulenceConfig(scheme="edmf"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/edmf")
 
     def test_ml_emulator(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(turbulence=TurbulenceConfig(scheme="ml_emulator"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/ml_emulator")
 
 
@@ -216,37 +216,37 @@ class TestMicrophysicsSchemes:
     def test_kessler(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(microphysics=MicrophysicsConfig(scheme="kessler"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "microphysics/kessler")
 
     def test_sundqvist(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(microphysics=MicrophysicsConfig(scheme="sundqvist"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "microphysics/sundqvist")
 
     def test_seifert_beheng(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(microphysics=MicrophysicsConfig(scheme="seifert_beheng"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "microphysics/seifert_beheng")
 
     def test_morrison(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(microphysics=MicrophysicsConfig(scheme="morrison"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "microphysics/morrison")
 
     def test_thompson(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(microphysics=MicrophysicsConfig(scheme="thompson"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "microphysics/thompson")
 
     def test_ml_emulator(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(microphysics=MicrophysicsConfig(scheme="ml_emulator"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "microphysics/ml_emulator")
 
 
@@ -260,38 +260,38 @@ class TestGWDSchemes:
     def test_rayleigh(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(gravity_wave_drag=GravityWaveDragConfig(scheme="rayleigh"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "gwd/rayleigh")
         assert float(jnp.max(jnp.abs(tend.du_dt.data))) > 0.0, "rayleigh: zero wind tendency"
 
     def test_lindzen(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(gravity_wave_drag=GravityWaveDragConfig(scheme="lindzen"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "gwd/lindzen")
 
     def test_mcfarlane(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(gravity_wave_drag=GravityWaveDragConfig(scheme="mcfarlane"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "gwd/mcfarlane")
 
     def test_hines(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(gravity_wave_drag=GravityWaveDragConfig(scheme="hines"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "gwd/hines")
 
     def test_prognostic_spectral(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(gravity_wave_drag=GravityWaveDragConfig(scheme="prognostic_spectral"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "gwd/prognostic_spectral")
 
     def test_ml_emulator(self):
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = _none_config(gravity_wave_drag=GravityWaveDragConfig(scheme="ml_emulator"))
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "gwd/ml_emulator")
 
 
@@ -306,7 +306,7 @@ class TestFullPhysicsCombinations:
         """Default config (gray + sbm + smagorinsky + none + none)."""
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = PhysicsConfig()
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "defaults")
 
     def test_full_five_module_stack(self):
@@ -319,7 +319,7 @@ class TestFullPhysicsCombinations:
             microphysics=MicrophysicsConfig(scheme="kessler"),
             gravity_wave_drag=GravityWaveDragConfig(scheme="rayleigh"),
         )
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "full_stack")
         assert float(jnp.max(jnp.abs(tend.dT_dt.data))) > 0.0
         assert float(jnp.max(jnp.abs(tend.du_dt.data))) > 0.0
@@ -334,5 +334,5 @@ class TestFullPhysicsCombinations:
             microphysics=MicrophysicsConfig(scheme="sundqvist"),
             gravity_wave_drag=GravityWaveDragConfig(scheme="lindzen"),
         )
-        tend = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "advanced_stack")

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Test JAX differentiability of all ocean discretizations over 10 steps.
+"""Test JAX differentiability of maintained ocean discretizations over 10 steps.
 
-For each ocean discretization (centered, finite_volume, fc_gram, fc_gram_cgrid),
-compute jax.grad through 10 time steps and verify finite, non-zero gradients.
+For each supported ocean discretization (cdgrid), compute jax.grad through
+10 time steps and verify finite, non-zero gradients.
 """
 
 import sys
@@ -22,7 +22,7 @@ N = 8
 N_STEPS = 10
 DT = 600.0
 
-DISCRETIZATIONS = ["centered", "finite_volume", "fc_gram", "fc_gram_cgrid"]
+DISCRETIZATIONS = ["cdgrid"]
 
 
 @pytest.fixture(scope="module")

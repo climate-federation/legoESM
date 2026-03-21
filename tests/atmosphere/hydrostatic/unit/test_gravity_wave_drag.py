@@ -485,7 +485,7 @@ class TestIntegration:
 
         config = GravityWaveDragConfig(scheme="rayleigh")
         physics_fn = make_gwd_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         assert tendencies.dT_dt.data.shape == (6, n, n, nlev)
         assert tendencies.du_dt.data.shape == (6, n, n, nlev)
@@ -524,7 +524,7 @@ class TestIntegration:
 
         config = GravityWaveDragConfig(scheme="rayleigh")
         physics_fn = make_gwd_physics(config, model_type="nonhydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, height_coord, terrain_metric)
+        tendencies, _ = physics_fn(state, grid, height_coord, terrain_metric)
 
         assert tendencies.du_dt.data.shape == shape_3d
         assert tendencies.dv_dt.data.shape == shape_3d
@@ -548,7 +548,7 @@ class TestIntegration:
 
         config = GravityWaveDragConfig(scheme="rayleigh")
         physics_fn = make_gwd_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         max_du = float(jnp.max(jnp.abs(tendencies.du_dt.data)))
         assert max_du > 0.0
@@ -576,7 +576,7 @@ class TestIntegration:
             s = state._replace(
                 u=Field(data=u_data, name="u", dims=("face", "x", "y", "level"), units="m/s"),
             )
-            t = physics_fn(s, grid, sigma)
+            t, _ = physics_fn(s, grid, sigma)
             return jnp.sum(t.du_dt.data ** 2)
 
         g = jax.grad(loss)(state.u.data)
@@ -601,7 +601,7 @@ class TestIntegration:
 
         config = GravityWaveDragConfig(scheme="none")
         physics_fn = make_gwd_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         assert jnp.allclose(tendencies.du_dt.data, 0.0)
         assert jnp.allclose(tendencies.dv_dt.data, 0.0)
@@ -637,7 +637,7 @@ class TestIntegration:
             gravity_wave_drag=GravityWaveDragConfig(scheme="rayleigh"),
         )
         physics_fn = make_physics(config, model_type="hydrostatic", dt=300.0)
-        tendencies = physics_fn(state, grid, sigma)
+        tendencies, _ = physics_fn(state, grid, sigma)
 
         assert tendencies.du_dt.data.shape == (6, n, n, nlev)
         max_du = float(jnp.max(jnp.abs(tendencies.du_dt.data)))

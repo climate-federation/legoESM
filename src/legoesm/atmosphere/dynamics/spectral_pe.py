@@ -887,7 +887,7 @@ class SpectralPrimitiveEquationModel:
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys = physics_fn(s, self.grid, self.sigma_coord)
+                phys, _ = physics_fn(s, self.grid, self.sigma_coord)
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
@@ -900,7 +900,7 @@ class SpectralPrimitiveEquationModel:
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys = physics_fn(s, self.grid, self.sigma_coord)
+                phys, _ = physics_fn(s, self.grid, self.sigma_coord)
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
@@ -920,7 +920,7 @@ class SpectralPrimitiveEquationModel:
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys = physics_fn(s, self.grid, self.sigma_coord)
+                phys, _ = physics_fn(s, self.grid, self.sigma_coord)
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
@@ -948,7 +948,7 @@ class SpectralPrimitiveEquationModel:
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys = physics_fn(s, self.grid, self.sigma_coord)
+                phys, _ = physics_fn(s, self.grid, self.sigma_coord)
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )

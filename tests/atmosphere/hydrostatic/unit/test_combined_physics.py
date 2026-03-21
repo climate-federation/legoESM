@@ -86,7 +86,7 @@ class TestCombinedHydrostatic:
             turbulence=TurbulenceConfig(scheme="none"),
         )
         physics_fn = make_physics(cfg, "hydrostatic", dt=300.0)
-        tend = physics_fn(state, grid, sigma)
+        tend, _ = physics_fn(state, grid, sigma)
 
         assert jnp.allclose(tend.du_dt.data, 0.0)
         assert jnp.allclose(tend.dv_dt.data, 0.0)
@@ -101,7 +101,7 @@ class TestCombinedHydrostatic:
             turbulence=TurbulenceConfig(scheme="none"),
         )
         physics_fn = make_physics(cfg, "hydrostatic", dt=300.0)
-        tend = physics_fn(state, grid, sigma)
+        tend, _ = physics_fn(state, grid, sigma)
 
         assert float(jnp.max(jnp.abs(tend.dT_dt.data))) > 0.0
         # Radiation alone produces no wind tendency
@@ -116,7 +116,7 @@ class TestCombinedHydrostatic:
             turbulence=TurbulenceConfig(scheme="smagorinsky"),
         )
         physics_fn = make_physics(cfg, "hydrostatic", dt=300.0)
-        tend = physics_fn(state, grid, sigma)
+        tend, _ = physics_fn(state, grid, sigma)
 
         assert float(jnp.max(jnp.abs(tend.du_dt.data))) > 0.0
         assert float(jnp.max(jnp.abs(tend.dT_dt.data))) > 0.0
@@ -131,7 +131,7 @@ class TestCombinedHydrostatic:
             convection=ConvectionConfig(scheme="none"),
             turbulence=TurbulenceConfig(scheme="none"),
         )
-        tend_rad = make_physics(cfg_rad, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend_rad, _ = make_physics(cfg_rad, "hydrostatic", dt=300.0)(state, grid, sigma)
 
         # Turbulence alone
         cfg_turb = PhysicsConfig(
@@ -139,7 +139,7 @@ class TestCombinedHydrostatic:
             convection=ConvectionConfig(scheme="none"),
             turbulence=TurbulenceConfig(scheme="smagorinsky"),
         )
-        tend_turb = make_physics(cfg_turb, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend_turb, _ = make_physics(cfg_turb, "hydrostatic", dt=300.0)(state, grid, sigma)
 
         # Both
         cfg_both = PhysicsConfig(
@@ -147,7 +147,7 @@ class TestCombinedHydrostatic:
             convection=ConvectionConfig(scheme="none"),
             turbulence=TurbulenceConfig(scheme="smagorinsky"),
         )
-        tend_both = make_physics(cfg_both, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend_both, _ = make_physics(cfg_both, "hydrostatic", dt=300.0)(state, grid, sigma)
 
         # Combined dT_dt should equal sum of individuals
         expected_dT = tend_rad.dT_dt.data + tend_turb.dT_dt.data
@@ -165,7 +165,7 @@ class TestCombinedHydrostatic:
             turbulence=TurbulenceConfig(scheme="none"),
         )
         physics_fn = make_physics(cfg, "hydrostatic", dt=300.0)
-        tend = physics_fn(state, grid, sigma)
+        tend, _ = physics_fn(state, grid, sigma)
 
         # SBM should produce some T tendency (heating/cooling from adjustment)
         assert jnp.all(jnp.isfinite(tend.dT_dt.data))
@@ -182,7 +182,7 @@ class TestCombinedHydrostatic:
             turbulence=TurbulenceConfig(scheme="smagorinsky"),
         )
         physics_fn = make_physics(cfg, "hydrostatic", dt=300.0)
-        tend = physics_fn(state, grid, sigma)
+        tend, _ = physics_fn(state, grid, sigma)
 
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
         assert jnp.all(jnp.isfinite(tend.dv_dt.data))
@@ -206,8 +206,8 @@ class TestCombinedHydrostatic:
             convection=ConvectionConfig(scheme="dca"),
             turbulence=TurbulenceConfig(scheme="none"),
         )
-        tend_sbm = make_physics(cfg_sbm, "hydrostatic", dt=300.0)(state, grid, sigma)
-        tend_dca = make_physics(cfg_dca, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend_sbm, _ = make_physics(cfg_sbm, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend_dca, _ = make_physics(cfg_dca, "hydrostatic", dt=300.0)(state, grid, sigma)
 
         # Both should be finite
         assert jnp.all(jnp.isfinite(tend_sbm.dT_dt.data))
@@ -225,7 +225,7 @@ class TestCombinedHydrostatic:
             convection=ConvectionConfig(scheme="none"),
             turbulence=TurbulenceConfig(scheme="none"),
         )
-        tend_gray = make_physics(cfg_gray, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend_gray, _ = make_physics(cfg_gray, "hydrostatic", dt=300.0)(state, grid, sigma)
 
         # No radiation
         cfg_none = PhysicsConfig(
@@ -233,7 +233,7 @@ class TestCombinedHydrostatic:
             convection=ConvectionConfig(scheme="none"),
             turbulence=TurbulenceConfig(scheme="none"),
         )
-        tend_none = make_physics(cfg_none, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend_none, _ = make_physics(cfg_none, "hydrostatic", dt=300.0)(state, grid, sigma)
 
         # Should be different
         assert not jnp.allclose(tend_gray.dT_dt.data, tend_none.dT_dt.data)
@@ -252,8 +252,8 @@ class TestCombinedHydrostatic:
             convection=ConvectionConfig(scheme="none"),
             turbulence=TurbulenceConfig(scheme="louis"),
         )
-        tend_smag = make_physics(cfg_smag, "hydrostatic", dt=300.0)(state, grid, sigma)
-        tend_louis = make_physics(cfg_louis, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend_smag, _ = make_physics(cfg_smag, "hydrostatic", dt=300.0)(state, grid, sigma)
+        tend_louis, _ = make_physics(cfg_louis, "hydrostatic", dt=300.0)(state, grid, sigma)
 
         # Both nonzero
         assert float(jnp.max(jnp.abs(tend_smag.du_dt.data))) > 0
@@ -266,7 +266,7 @@ class TestCombinedHydrostatic:
         state, grid, sigma = _make_hydrostatic_setup()
         cfg = PhysicsConfig()
         physics_fn = make_physics(cfg, "hydrostatic", dt=300.0)
-        tend = physics_fn(state, grid, sigma)
+        tend, _ = physics_fn(state, grid, sigma)
 
         n, nlev = grid.n, sigma.n_levels
         assert tend.du_dt.data.shape == (6, n, n, nlev)
@@ -286,7 +286,7 @@ class TestCombinedHydrostatic:
 
         def loss(T_data):
             new_state = state._replace(T=state.T.replace(data=T_data))
-            tend = physics_fn(new_state, grid, sigma)
+            tend, _ = physics_fn(new_state, grid, sigma)
             return jnp.sum(tend.dT_dt.data ** 2)
 
         grad_T = jax.grad(loss)(state.T.data)
@@ -339,7 +339,7 @@ class TestCombinedNonHydrostatic:
             turbulence=TurbulenceConfig(scheme="smagorinsky"),
         )
         physics_fn = make_physics(cfg, "nonhydrostatic", dt=300.0)
-        tend = physics_fn(state, grid, hc, tm)
+        tend, _ = physics_fn(state, grid, hc, tm)
 
         assert tend.du_dt.data.shape == (6, n, n, nlev)
         assert tend.dv_dt.data.shape == (6, n, n, nlev)
@@ -357,7 +357,7 @@ class TestCombinedNonHydrostatic:
             turbulence=TurbulenceConfig(scheme="none"),
         )
         physics_fn = make_physics(cfg, "nonhydrostatic", dt=300.0)
-        tend = physics_fn(state, grid, hc, tm)
+        tend, _ = physics_fn(state, grid, hc, tm)
 
         assert jnp.allclose(tend.du_dt.data, 0.0)
         assert jnp.allclose(tend.dv_dt.data, 0.0)
@@ -373,7 +373,7 @@ class TestCombinedNonHydrostatic:
             turbulence=TurbulenceConfig(scheme="smagorinsky"),
         )
         physics_fn = make_physics(cfg, "nonhydrostatic", dt=300.0)
-        tend = physics_fn(state, grid, hc, tm)
+        tend, _ = physics_fn(state, grid, hc, tm)
 
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
         assert jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data))
@@ -394,7 +394,7 @@ class TestCombinedNonHydrostatic:
 
         def loss(u_data):
             new_state = state._replace(u=state.u.replace(data=u_data))
-            tend = physics_fn(new_state, grid, hc, tm)
+            tend, _ = physics_fn(new_state, grid, hc, tm)
             return jnp.sum(tend.du_dt.data ** 2)
 
         grad_u = jax.grad(loss)(state.u.data)
@@ -427,7 +427,7 @@ class TestCombinedSpectralPE:
             turbulence=TurbulenceConfig(scheme="none"),
         )
         physics_fn = make_physics(cfg, "spectral_pe", dt=300.0)
-        tend = physics_fn(state, grid, sigma)
+        tend, _ = physics_fn(state, grid, sigma)
 
         assert jnp.allclose(tend.vor_hat.data, 0.0)
         assert jnp.allclose(tend.div_hat.data, 0.0)
@@ -443,7 +443,7 @@ class TestCombinedSpectralPE:
             turbulence=TurbulenceConfig(scheme="none"),
         )
         physics_fn = make_physics(cfg, "spectral_pe", dt=300.0)
-        tend = physics_fn(state, grid, sigma)
+        tend, _ = physics_fn(state, grid, sigma)
 
         n_sh = grid.n_sh
         nlev = sigma.n_levels
@@ -461,7 +461,7 @@ class TestCombinedSpectralPE:
             turbulence=TurbulenceConfig(scheme="none"),
         )
         physics_fn = make_physics(cfg, "spectral_pe", dt=300.0)
-        tend = physics_fn(state, grid, sigma)
+        tend, _ = physics_fn(state, grid, sigma)
 
         assert jnp.all(jnp.isfinite(tend.T_hat.data))
         assert float(jnp.max(jnp.abs(tend.T_hat.data))) > 0.0

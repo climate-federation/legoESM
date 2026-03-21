@@ -480,7 +480,7 @@ class MPASCompressibleEulerModel:
         def slow_tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys = physics_fn(
+                phys, _ = physics_fn(
                     s, self.mesh, self.height_coord, self.terrain_metric,
                 )
             tend = mpas_compressible_euler_slow_tendencies(
