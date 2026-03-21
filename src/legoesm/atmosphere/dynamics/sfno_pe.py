@@ -41,7 +41,7 @@ from legoesm.ml.channel_packing import pack_pe_state, unpack_pe_output
 from legoesm.ml.conservation import (
     correct_dry_air_mass,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.dispatch import dispatch_integrator
 
 
 class SFNOPrimitiveEquationConfig(NamedTuple):
@@ -78,6 +78,7 @@ class SFNOPrimitiveEquationConfig(NamedTuple):
     pressure_levels: tuple = (
         1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50
     )
+    time_integrator: str = "ssp_rk3"
 
 
 class SFNOPrimitiveEquationModel:
@@ -192,7 +193,7 @@ class SFNOPrimitiveEquationModel:
                 return jax.tree.map(
                     lambda a, b: a + b, sfno_tend, phys_tend
                 )
-            new_state = ssp_rk3_step(state, combined_tendency, dt)
+            new_state = dispatch_integrator(state, combined_tendency, dt, self.config.time_integrator)
         else:
             # State update mode: SFNO prediction + physics tendencies
             new_state = self._step_state_update(state)
@@ -229,8 +230,8 @@ class SFNOPrimitiveEquationModel:
         state: SpectralHydrostaticState,
         dt: float,
     ) -> SpectralHydrostaticState:
-        """Hybrid mode: SFNO tendencies + SSP-RK3."""
-        return ssp_rk3_step(state, self._sfno_tendency, dt)
+        """Hybrid mode: SFNO tendencies + configurable RK integrator."""
+        return dispatch_integrator(state, self._sfno_tendency, dt, self.config.time_integrator)
 
     def _sfno_tendency(
         self,

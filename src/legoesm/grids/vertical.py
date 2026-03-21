@@ -1297,21 +1297,16 @@ def compute_terrain_metric(
     """
     H = height_coord.H
 
-    # Jacobian: J = (H - z_s) / H, shape (6, n, n)
+    # Jacobian: J = (H - z_s) / H, shape same as z_s
     jacobian = (H - z_s) / H
 
     # Physical z at full levels: z = z_s + z* * (H - z_s) / H
-    # z_full is (nlev,), z_s is (6,n,n) -> z_full_3d is (6,n,n,nlev)
-    z_full_3d = (
-        z_s[..., None]
-        + height_coord.z_full[None, None, None, :] * jacobian[..., None]
-    )
-
-    # Physical z at half levels: same formula with z_half
-    z_half_3d = (
-        z_s[..., None]
-        + height_coord.z_half[None, None, None, :] * jacobian[..., None]
-    )
+    # z_full is (nlev,).  z_s can be (6,n,n) or (nCells,) — broadcast generically.
+    n_spatial = z_s.ndim  # 3 for cubed-sphere, 1 for MPAS
+    z_full_bc = height_coord.z_full.reshape((1,) * n_spatial + (-1,))
+    z_half_bc = height_coord.z_half.reshape((1,) * n_spatial + (-1,))
+    z_full_3d = z_s[..., None] + z_full_bc * jacobian[..., None]
+    z_half_3d = z_s[..., None] + z_half_bc * jacobian[..., None]
 
     return TerrainMetric(
         z_s=z_s,

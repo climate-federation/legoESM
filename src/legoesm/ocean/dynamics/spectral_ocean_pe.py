@@ -42,7 +42,7 @@ from legoesm.grids.gaussian import (
     uv_from_vordiv_3d,
     spectral_hyperdiffusion_3d,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
@@ -557,14 +557,14 @@ class SpectralOceanModel:
 
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
-            result_cpu = ssp_rk3_step(state_cpu, tendency_fn, dt)
+            result_cpu = dispatch_integrator(state_cpu, tendency_fn, dt, self.config.time_integrator)
             if self.config.use_conservation_fixer:
                 result_cpu = _spectral_conservation_fixer(
                     result_cpu, state_cpu, self.grid, self.z_coord, self.config,
                 )
             return jax.device_put(result_cpu, self._default_device)
 
-        result = ssp_rk3_step(state, tendency_fn, dt)
+        result = dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
         if self.config.use_conservation_fixer:
             result = _spectral_conservation_fixer(
                 result, state, self.grid, self.z_coord, self.config,
@@ -580,7 +580,7 @@ class SpectralOceanModel:
             return spectral_ocean_tendencies(
                 s, self.grid, self.z_coord, self.config,
             )
-        result = ssp_rk3_step(state, tendency_fn, dt)
+        result = dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
         if self.config.use_conservation_fixer:
             result = _spectral_conservation_fixer(
                 result, state, self.grid, self.z_coord, self.config,

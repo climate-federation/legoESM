@@ -1758,8 +1758,9 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.atmosphere.dynamics.compressible_euler import (
-            CompressibleEulerModel, CompressibleEulerConfig)
+        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+            CDGridCompressibleEulerModel as CompressibleEulerModel,
+            CDGridCompressibleEulerConfig as CompressibleEulerConfig)
 
         n = int(tc.resolution[1:])
         grid = create_cubed_sphere(n)
@@ -1772,8 +1773,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=10000.0, sponge_coeff=0.05,
-                hyperdiff_coeff=hd, edge_blend_uv=0.15, edge_blend_w=0.15,
-                edge_blend_theta=0.15, edge_blend_rho=0.15)
+                hyperdiff_coeff=hd)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, _ = dcmip25_tc2_init(
@@ -1782,9 +1782,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=5000.0, sponge_coeff=0.1,
-                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
-                edge_blend_uv=0.15, edge_blend_w=0.15,
-                edge_blend_theta=0.15, edge_blend_rho=0.15)
+                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, _ = dcmip25_tc3_init(
@@ -1793,9 +1791,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=5000.0, sponge_coeff=0.1,
-                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
-                edge_blend_uv=0.15, edge_blend_w=0.15,
-                edge_blend_theta=0.15, edge_blend_rho=0.15)
+                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 

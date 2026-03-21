@@ -58,7 +58,7 @@ from legoesm.grids.vertical import (
     vertical_advection,
     compute_pressure_velocity,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 from legoesm import constants
 
@@ -79,6 +79,7 @@ class LatLonPrimitiveEquationConfig(NamedTuple):
     p_floor: float = 50.0              # surface pressure floor [Pa]
     sponge_sigma: float = 0.15         # Rayleigh sponge activates above this sigma
     sponge_tau_sec: float = 3600.0     # e-folding time at model top [s]
+    time_integrator: str = "ssp_rk3"  # Any integrator from dispatch
 
 
 # ==============================================================================
@@ -369,7 +370,7 @@ class LatLonPrimitiveEquationModel(IntegrationMixin):
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
             )
 
-        state_new = ssp_rk3_step(state, tendency_fn, dt)
+        state_new = dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
 
         # Temperature and pressure floors
         T_new = jnp.clip(state_new.T.data, self.config.T_min, None)
@@ -423,7 +424,7 @@ class LatLonPrimitiveEquationModel(IntegrationMixin):
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
             )
 
-        state_new = ssp_rk3_step(state, tendency_fn, dt)
+        state_new = dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
 
         # Temperature and pressure floors
         T_new = jnp.clip(state_new.T.data, self.config.T_min, None)

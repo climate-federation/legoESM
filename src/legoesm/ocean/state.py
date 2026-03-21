@@ -150,6 +150,7 @@ class SpectralOceanConfig(NamedTuple):
     hyperdiff_order: int = 2
     use_conservation_fixer: bool = True
     min_water_column_m: float = 0.5
+    time_integrator: str = "ssp_rk3"
 
 
 # ==============================================================================

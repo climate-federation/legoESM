@@ -52,7 +52,7 @@ from legoesm.ml.conservation import (
     correct_ocean_heat,
     correct_ocean_salt,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.dispatch import dispatch_integrator
 
 
 class SFNOOceanConfig(NamedTuple):
@@ -93,6 +93,7 @@ class SFNOOceanConfig(NamedTuple):
     correct_salt: bool = True
     use_normalization: bool = False
     min_water_column_m: float = 0.5
+    time_integrator: str = "ssp_rk3"
 
 
 class SFNOOceanModel:
@@ -198,8 +199,8 @@ class SFNOOceanModel:
         state: SpectralOceanState,
         dt: float,
     ) -> SpectralOceanState:
-        """Hybrid mode: SFNO tendencies + SSP-RK3."""
-        return ssp_rk3_step(state, self._sfno_tendency, dt)
+        """Hybrid mode: SFNO tendencies + configurable RK integrator."""
+        return dispatch_integrator(state, self._sfno_tendency, dt, self.config.time_integrator)
 
     def _sfno_tendency(
         self,

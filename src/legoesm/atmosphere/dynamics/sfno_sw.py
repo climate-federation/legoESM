@@ -33,7 +33,7 @@ from legoesm.ml.normalization import (
     denormalize,
 )
 from legoesm.ml.channel_packing import pack_sw_state, unpack_sw_output
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.dispatch import dispatch_integrator
 
 
 class SFNOShallowWaterConfig(NamedTuple):
@@ -61,6 +61,7 @@ class SFNOShallowWaterConfig(NamedTuple):
     dt_sfno: float = 3600.0
     g: float = 9.81
     use_normalization: bool = False
+    time_integrator: str = "ssp_rk3"
 
 
 class SFNOShallowWaterModel:
@@ -179,7 +180,7 @@ class SFNOShallowWaterModel:
                 y = denormalize(y, self.norm_stats)
             return unpack_sw_output(y, s, self.grid, mode="tendencies")
 
-        return ssp_rk3_step(state, tendency_fn, dt)
+        return dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
 
     def integrate(
         self,

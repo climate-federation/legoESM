@@ -201,8 +201,8 @@ class TestTimeInterpolation:
         expected = 0.5 * (forcing.sst[0] + forcing.sst[1])
         assert jnp.allclose(sst_mid, expected, atol=1e-4)
 
-    def test_clamp_outside_range(self, grid, forcing_path):
-        """Times outside forcing range should clamp to boundary."""
+    def test_cyclic_outside_range(self, grid, forcing_path):
+        """Times outside forcing range should wrap cyclically."""
         config = AMIPForcingConfig(
             path=forcing_path,
             sst_var="sst",
@@ -211,9 +211,11 @@ class TestTimeInterpolation:
             sic_scale=0.01,
         )
         forcing = load_amip_forcing(config, grid)
-        sst_before, _ = get_forcing_at_time(forcing, -100.0)
-        sst_first, _ = get_forcing_at_time(forcing, 0.0)
-        assert jnp.allclose(sst_before, sst_first, atol=1e-5)
+        period = float(forcing.times[-1] - forcing.times[0])
+        # A time one full period later should give the same SST as the start.
+        sst_wrap, _ = get_forcing_at_time(forcing, float(forcing.times[0]) + period)
+        sst_first, _ = get_forcing_at_time(forcing, float(forcing.times[0]))
+        assert jnp.allclose(sst_wrap, sst_first, atol=1e-5)
 
 
 class TestFillNanNearest:

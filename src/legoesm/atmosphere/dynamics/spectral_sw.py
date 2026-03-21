@@ -39,7 +39,7 @@ from legoesm.grids.gaussian import (
     uv_from_vordiv,
     spectral_hyperdiffusion,
 )
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm import constants
 
 
@@ -67,6 +67,7 @@ class SpectralSWConfig(NamedTuple):
     spectral_filter_order: int = 0    # Exponential filter order (0 = off)
                                       # Recommended: 8 for runs with topography
     spectral_filter_cutoff: float = 0.65  # Filter value at n_max
+    time_integrator: str = "ssp_rk3"  # Any integrator from dispatch
 
 
 # =============================================================================
@@ -247,13 +248,15 @@ class SpectralShallowWaterModel:
         def tendency_fn(s):
             return spectral_sw_tendencies(s, self.grid, self.config)
 
+        integrator = self.config.time_integrator
+
         if self._use_cpu_for_spectral:
             state_cpu = jax.device_put(state, self._cpu_device)
-            result_cpu = ssp_rk3_step(state_cpu, tendency_fn, dt)
+            result_cpu = dispatch_integrator(state_cpu, tendency_fn, dt, integrator)
             result_cpu = self._apply_filter(result_cpu)
             return jax.device_put(result_cpu, self._default_device)
 
-        result = ssp_rk3_step(state, tendency_fn, dt)
+        result = dispatch_integrator(state, tendency_fn, dt, integrator)
         return self._apply_filter(result)
 
     def _apply_filter(self, state: SpectralSWState) -> SpectralSWState:
@@ -293,7 +296,7 @@ class SpectralShallowWaterModel:
         """Step without device transfers (for batched CPU integration on Metal)."""
         def tendency_fn(s):
             return spectral_sw_tendencies(s, self.grid, self.config)
-        return ssp_rk3_step(state, tendency_fn, dt)
+        return dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
 
     def integrate(
         self,
