@@ -26,7 +26,10 @@ import numpy as np
 
 Array: TypeAlias = jax.Array
 
-_NETCDF_DATA_DIR = '/tmp/netcdf/data'
+_NETCDF_DATA_DIR = os.environ.get(
+    "LEGOESM_DATA_DIR",
+    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "data", "netcdf"),
+)
 
 
 def _bytes_to_str(split_str):
@@ -42,13 +45,19 @@ def _create_local_file(filepath: str) -> str:
   """Copies remote files locally so they can be ingested by netCDF reader."""
   # Create local directory.
   if os.path.exists(_NETCDF_DATA_DIR):
-    assert os.path.isdir(_NETCDF_DATA_DIR)
+    if not os.path.isdir(_NETCDF_DATA_DIR):
+      raise FileNotFoundError(
+          f"RRTMGP data directory path exists but is not a directory: {_NETCDF_DATA_DIR}"
+      )
   else:
     os.makedirs(_NETCDF_DATA_DIR)
   local_filename = os.path.join(_NETCDF_DATA_DIR, os.path.basename(filepath))
   # Copy the file from remote location if not already present.
   if os.path.exists(local_filename):
-    assert os.path.isfile(local_filename)
+    if not os.path.isfile(local_filename):
+      raise FileNotFoundError(
+          f"RRTMGP data path exists but is not a file: {local_filename}"
+      )
   else:
     path = Path(local_filename)
     path.write_bytes(Path(filepath).read_bytes())

@@ -150,120 +150,130 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
     if not path:
         raise ValueError("AMIPForcingConfig.path is empty — provide a NetCDF file path")
 
-    ds = xr.open_dataset(path)
-
-    # --- Validate required variables ---
-    missing = []
-    for vname, label in [
-        (config.sst_var, "SST"),
-        (config.sic_var, "SIC"),
-        (config.lat_var, "latitude"),
-        (config.lon_var, "longitude"),
-        (config.time_var, "time"),
-    ]:
-        if vname not in ds:
-            missing.append(f"  {label}: expected variable '{vname}'")
-    if missing:
-        available = ", ".join(sorted(ds.data_vars.keys() | ds.coords.keys()))
-        raise KeyError(
-            f"Missing variables in {path}:\n"
-            + "\n".join(missing)
-            + f"\nAvailable: {available}"
+    try:
+        ds = xr.open_dataset(path)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"AMIP forcing file not found: {path}"
         )
+    except Exception as exc:
+        raise OSError(
+            f"Failed to open AMIP forcing file: {path}\n  {exc}"
+        ) from exc
 
-    # Extract source grid
-    lat_src = ds[config.lat_var].values.astype(np.float64)
-    lon_src = ds[config.lon_var].values.astype(np.float64)
+    try:
+        # --- Validate required variables ---
+        missing = []
+        for vname, label in [
+            (config.sst_var, "SST"),
+            (config.sic_var, "SIC"),
+            (config.lat_var, "latitude"),
+            (config.lon_var, "longitude"),
+            (config.time_var, "time"),
+        ]:
+            if vname not in ds:
+                missing.append(f"  {label}: expected variable '{vname}'")
+        if missing:
+            available = ", ".join(sorted(ds.data_vars.keys() | ds.coords.keys()))
+            raise KeyError(
+                f"Missing variables in {path}:\n"
+                + "\n".join(missing)
+                + f"\nAvailable: {available}"
+            )
 
-    # Ensure longitude is in [0, 360) for wrapping
-    lon_src = lon_src % 360.0
+        # Extract source grid
+        lat_src = ds[config.lat_var].values.astype(np.float64)
+        lon_src = ds[config.lon_var].values.astype(np.float64)
 
-    # Sort by longitude if needed
-    lon_order = np.argsort(lon_src)
-    lon_src = lon_src[lon_order]
+        # Ensure longitude is in [0, 360) for wrapping
+        lon_src = lon_src % 360.0
 
-    # Extract SST and SIC
-    sst_data = ds[config.sst_var].values  # (ntime, nlat, nlon) or (ntime, nlon, nlat)
-    sic_data = ds[config.sic_var].values
+        # Sort by longitude if needed
+        lon_order = np.argsort(lon_src)
+        lon_src = lon_src[lon_order]
 
-    # Handle dimension ordering: ensure (ntime, nlat, nlon)
-    # Check if shapes match (lat, lon) order
-    if sst_data.ndim == 3:
-        # Reorder longitude
-        sst_data = sst_data[:, :, lon_order]
-        sic_data = sic_data[:, :, lon_order]
-    elif sst_data.ndim == 2:
-        # Single time step
-        sst_data = sst_data[None, :, lon_order]
-        sic_data = sic_data[None, :, lon_order]
+        # Extract SST and SIC
+        sst_data = ds[config.sst_var].values  # (ntime, nlat, nlon) or (ntime, nlon, nlat)
+        sic_data = ds[config.sic_var].values
 
-    # Apply unit conversions
-    sst_data = sst_data.astype(np.float64) + config.sst_offset
-    sic_data = sic_data.astype(np.float64) * config.sic_scale
+        # Handle dimension ordering: ensure (ntime, nlat, nlon)
+        # Check if shapes match (lat, lon) order
+        if sst_data.ndim == 3:
+            # Reorder longitude
+            sst_data = sst_data[:, :, lon_order]
+            sic_data = sic_data[:, :, lon_order]
+        elif sst_data.ndim == 2:
+            # Single time step
+            sst_data = sst_data[None, :, lon_order]
+            sic_data = sic_data[None, :, lon_order]
 
-    # Fill NaN (land points) with nearest neighbor
-    sst_data = _fill_nan_nearest(sst_data, lat_src, lon_src)
-    sic_data = _fill_nan_nearest(sic_data, lat_src, lon_src)
+        # Apply unit conversions
+        sst_data = sst_data.astype(np.float64) + config.sst_offset
+        sic_data = sic_data.astype(np.float64) * config.sic_scale
 
-    # Clamp SIC to [0, 1]
-    sic_data = np.clip(sic_data, 0.0, 1.0)
+        # Fill NaN (land points) with nearest neighbor
+        sst_data = _fill_nan_nearest(sst_data, lat_src, lon_src)
+        sic_data = _fill_nan_nearest(sic_data, lat_src, lon_src)
 
-    # Ensure SST is physically reasonable (at least freezing)
-    sst_data = np.maximum(sst_data, 200.0)
+        # Clamp SIC to [0, 1]
+        sic_data = np.clip(sic_data, 0.0, 1.0)
 
-    # Wrap longitude for interpolation continuity
-    # Pad one column at each end
-    lon_wrapped = np.concatenate([lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0])
-    sst_wrapped = np.concatenate([sst_data[:, :, -1:], sst_data, sst_data[:, :, :1]], axis=2)
-    sic_wrapped = np.concatenate([sic_data[:, :, -1:], sic_data, sic_data[:, :, :1]], axis=2)
+        # Ensure SST is physically reasonable (at least freezing)
+        sst_data = np.maximum(sst_data, 200.0)
 
-    # Use protocol: grid_lat gives 2D (or 3D for CS) lat in radians
-    grid_lat = np.asarray(grid.grid_lat)
-    grid_lon = np.asarray(grid.grid_lon)
-    is_gaussian = grid_lat.ndim == 2 and not hasattr(grid, 'n')
+        # Wrap longitude for interpolation continuity
+        # Pad one column at each end
+        lon_wrapped = np.concatenate([lon_src[-1:] - 360.0, lon_src, lon_src[:1] + 360.0])
+        sst_wrapped = np.concatenate([sst_data[:, :, -1:], sst_data, sst_data[:, :, :1]], axis=2)
+        sic_wrapped = np.concatenate([sic_data[:, :, -1:], sic_data, sic_data[:, :, :1]], axis=2)
 
-    if is_gaussian:
-        target_lat_1d = np.asarray(grid.lat) * 180.0 / np.pi
-        target_lon_1d = np.asarray(grid.lon) * 180.0 / np.pi
-        target_lon_1d = target_lon_1d % 360.0
-        target_lon_2d, target_lat_2d = np.meshgrid(target_lon_1d, target_lat_1d)
-        target_shape = grid_lat.shape
-    else:
-        target_lat_2d = grid_lat * 180.0 / np.pi
-        target_lon_2d = grid_lon * 180.0 / np.pi
-        target_lon_2d = target_lon_2d % 360.0
-        target_shape = grid_lat.shape
+        # Use protocol: grid_lat gives 2D (or 3D for CS) lat in radians
+        grid_lat = np.asarray(grid.grid_lat)
+        grid_lon = np.asarray(grid.grid_lon)
+        is_gaussian = grid_lat.ndim == 2 and not hasattr(grid, 'n')
 
-    ntime = sst_data.shape[0]
-    sst_regridded = np.zeros((ntime, *target_shape), dtype=np.float64)
-    sic_regridded = np.zeros((ntime, *target_shape), dtype=np.float64)
+        if is_gaussian:
+            target_lat_1d = np.asarray(grid.lat) * 180.0 / np.pi
+            target_lon_1d = np.asarray(grid.lon) * 180.0 / np.pi
+            target_lon_1d = target_lon_1d % 360.0
+            target_lon_2d, target_lat_2d = np.meshgrid(target_lon_1d, target_lat_1d)
+            target_shape = grid_lat.shape
+        else:
+            target_lat_2d = grid_lat * 180.0 / np.pi
+            target_lon_2d = grid_lon * 180.0 / np.pi
+            target_lon_2d = target_lon_2d % 360.0
+            target_shape = grid_lat.shape
 
-    target_points = np.stack([target_lat_2d.ravel(), target_lon_2d.ravel()], axis=-1)
+        ntime = sst_data.shape[0]
+        sst_regridded = np.zeros((ntime, *target_shape), dtype=np.float64)
+        sic_regridded = np.zeros((ntime, *target_shape), dtype=np.float64)
 
-    for t in range(ntime):
-        interp_sst = RegularGridInterpolator(
-            (lat_src, lon_wrapped), sst_wrapped[t],
-            method="linear", bounds_error=False, fill_value=None,
-        )
-        interp_sic = RegularGridInterpolator(
-            (lat_src, lon_wrapped), sic_wrapped[t],
-            method="linear", bounds_error=False, fill_value=None,
-        )
-        sst_regridded[t] = interp_sst(target_points).reshape(target_shape)
-        sic_regridded[t] = interp_sic(target_points).reshape(target_shape)
+        target_points = np.stack([target_lat_2d.ravel(), target_lon_2d.ravel()], axis=-1)
 
-    # Time axis: days since first record
-    time_coord = ds[config.time_var].values
-    if np.issubdtype(time_coord.dtype, np.datetime64):
-        t0 = time_coord[0]
-        times_days = (time_coord - t0) / np.timedelta64(1, "D")
-        times_days = times_days.astype(np.float64)
-    else:
-        # Assume already in days or similar numeric
-        times_days = time_coord.astype(np.float64)
-        times_days = times_days - times_days[0]
+        for t in range(ntime):
+            interp_sst = RegularGridInterpolator(
+                (lat_src, lon_wrapped), sst_wrapped[t],
+                method="linear", bounds_error=False, fill_value=None,
+            )
+            interp_sic = RegularGridInterpolator(
+                (lat_src, lon_wrapped), sic_wrapped[t],
+                method="linear", bounds_error=False, fill_value=None,
+            )
+            sst_regridded[t] = interp_sst(target_points).reshape(target_shape)
+            sic_regridded[t] = interp_sic(target_points).reshape(target_shape)
 
-    ds.close()
+        # Time axis: days since first record
+        time_coord = ds[config.time_var].values
+        if np.issubdtype(time_coord.dtype, np.datetime64):
+            t0 = time_coord[0]
+            times_days = (time_coord - t0) / np.timedelta64(1, "D")
+            times_days = times_days.astype(np.float64)
+        else:
+            # Assume already in days or similar numeric
+            times_days = time_coord.astype(np.float64)
+            times_days = times_days - times_days[0]
+    finally:
+        ds.close()
 
     # Clamp SIC again after interpolation
     sic_regridded = np.clip(sic_regridded, 0.0, 1.0)

@@ -180,6 +180,10 @@ class CubedSphereGrid(NamedTuple):
     def grid_n_columns(self) -> int:
         return 6 * self.n * self.n
 
+    @property
+    def grid_shape_2d(self) -> tuple[int, ...]:
+        return (6, self.n, self.n)
+
     def to_columns(self, field):
         extra = field.shape[3:]
         return field.reshape(6 * self.n * self.n, *extra)

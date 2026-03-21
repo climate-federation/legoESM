@@ -28,6 +28,9 @@ from typing import Callable, NamedTuple, TypeVar
 
 import jax
 
+from legoesm.timestepping.pytree_ops import pytree_axpy as _pytree_axpy
+from legoesm.timestepping.pytree_ops import pytree_linear_combination as _pytree_linear_combination
+
 State = TypeVar("State")
 
 
@@ -220,11 +223,3 @@ def _rk_stage_with_acoustics(
     return state_out
 
 
-def _pytree_axpy(x, y, alpha):
-    """Compute x + alpha * y for two pytrees."""
-    return jax.tree.map(lambda xi, yi: xi + alpha * yi, x, y)
-
-
-def _pytree_linear_combination(x, y, a, b):
-    """Compute a * x + b * y for two pytrees."""
-    return jax.tree.map(lambda xi, yi: a * xi + b * yi, x, y)

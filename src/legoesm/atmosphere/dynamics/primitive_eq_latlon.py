@@ -283,19 +283,7 @@ def latlon_hydrostatic_tendencies(
 # Model class
 # ==============================================================================
 
-def _filter_state(
-    state: HydrostaticState,
-    grid: LatLonGrid,
-    mask: jnp.ndarray,
-) -> HydrostaticState:
-    """Apply polar filter to prognostic state variables."""
-    return HydrostaticState(
-        u=state.u.replace(data=fourier_filter_3d(state.u.data, grid, mask)),
-        v=state.v.replace(data=fourier_filter_3d(state.v.data, grid, mask)),
-        T=state.T.replace(data=fourier_filter_3d(state.T.data, grid, mask)),
-        p_s=state.p_s.replace(data=fourier_filter(state.p_s.data, grid, mask)),
-        phis=state.phis,
-    )
+from legoesm.core.filters import filter_state as _filter_state
 
 
 class LatLonPrimitiveEquationModel(IntegrationMixin):
@@ -411,7 +399,7 @@ class LatLonPrimitiveEquationModel(IntegrationMixin):
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
-                phys = physics_fn(s, self.grid, self.sigma_coord)
+                phys, _ = physics_fn(s, self.grid, self.sigma_coord)
             tend = latlon_hydrostatic_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
                 self.polar_mask,

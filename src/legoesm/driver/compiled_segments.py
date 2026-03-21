@@ -221,7 +221,7 @@ def build_segment_fn(
     o3_vmr,
     aerosol_od,
     start_day: float,
-    gradient_checkpoint: bool = False,
+    gradient_checkpoint: bool | None = None,
 ):
     """Build a compiled segment function.
 
@@ -261,10 +261,11 @@ def build_segment_fn(
         External forcing (fixed within segment).
     start_day : float
         Start day for the entire run (used to compute step→day).
-    gradient_checkpoint : bool, optional
+    gradient_checkpoint : bool or None, optional
         If True, wrap the scan body with ``jax.checkpoint`` to trade
         recomputation for O(sqrt(N)) memory during reverse-mode AD.
-        Default False (full trajectory stored).
+        If None (default), automatically enable for segments longer
+        than 50 steps to prevent OOM on large grids.
 
     Returns
     -------
@@ -275,6 +276,7 @@ def build_segment_fn(
     from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
 
     do_sat_adjust = (microphysics == "none")
+
 
     # Convert scalars to JAX tracers once.
     _dt = jnp.float32(dt)

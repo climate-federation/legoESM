@@ -125,6 +125,10 @@ class VoronoiMesh(NamedTuple):
     def grid_n_columns(self) -> int:
         return self.nCells
 
+    @property
+    def grid_shape_2d(self) -> tuple[int, ...]:
+        return (self.nCells,)
+
     def to_columns(self, field):
         return field
 

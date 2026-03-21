@@ -143,6 +143,34 @@ class ExperimentConfig(NamedTuple):
     distributed: bool = False
     ensemble_size: int = 1
 
+    def validate_strict(self) -> None:
+        """Raise ValueError for invalid parameter values.
+
+        Called before simulation start to catch configuration errors
+        early, before JIT compilation or data loading.
+        """
+        g = self.grid
+        d = self.dycore
+        errors: list[str] = []
+        if g.resolution <= 0:
+            errors.append(f"grid.resolution must be > 0, got {g.resolution}")
+        if g.nlev <= 0:
+            errors.append(f"grid.nlev must be > 0, got {g.nlev}")
+        if g.p_top_Pa <= 0:
+            errors.append(f"grid.p_top_Pa must be > 0, got {g.p_top_Pa}")
+        if d.dt <= 0:
+            errors.append(f"dycore.dt must be > 0, got {d.dt}")
+        if d.hyperdiff_scale < 0:
+            errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
+        if d.div_damp_scale < 0:
+            errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
+        if self.days <= 0:
+            errors.append(f"days must be > 0, got {self.days}")
+        if errors:
+            raise ValueError(
+                "Invalid ExperimentConfig:\n  " + "\n  ".join(errors)
+            )
+
     def validate(self) -> list[str]:
         """Check for suspicious parameter combinations.
 

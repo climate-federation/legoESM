@@ -102,6 +102,9 @@ class ModelDriver:
 
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
+        # Strict validation — abort early on invalid parameters
+        self.config.validate_strict()
+
         # Config cross-validation
         config_warnings = self.config.validate()
         for w in config_warnings:
@@ -153,13 +156,9 @@ class ModelDriver:
         logger.info(f"  Grid: {gc.grid_type} {gc.resolution}, "
               f"{gc.nlev} levels ({gc.vertical_coord})")
 
-        # Cache lat/lon accessors for grid-agnostic use
-        if gc.grid_type == "voronoi":
-            self._grid_lat = self.grid.latCell
-            self._grid_lon = self.grid.lonCell
-        else:
-            self._grid_lat = self.grid.lat
-            self._grid_lon = self.grid.lon
+        # Cache lat/lon accessors via GridProtocol for grid-agnostic use
+        self._grid_lat = self.grid.grid_lat
+        self._grid_lon = self.grid.grid_lon
 
     def _create_topography(self) -> None:
         """Load or generate topography and land-sea mask."""
@@ -169,15 +168,8 @@ class ModelDriver:
             land_mask_from_topography,
         )
 
-        N = self.config.grid.resolution
         topo = self.config.topography
-
-        if self.config.grid.grid_type == "cubed_sphere":
-            shape_2d = (6, N, N)
-        elif self.config.grid.grid_type == "voronoi":
-            shape_2d = (self.grid.nCells,)
-        else:
-            shape_2d = (self.grid.n_lat, self.grid.n_lon)
+        shape_2d = self.grid.grid_shape_2d
 
         if topo == "flat":
             self._phis_data = jnp.zeros(shape_2d)
@@ -439,6 +431,15 @@ class ModelDriver:
             n_days=self.config.days,
             output_dir=self._output_dir,
         )
+
+    def _sync_and_collect_diagnostics(self, **kwargs) -> dict:
+        """Synchronize device computation and collect diagnostics.
+
+        Consolidates the ``jax.block_until_ready`` + ``diagnostics.collect``
+        pattern into a single method to avoid scattered sync points.
+        """
+        jax.block_until_ready(self.state.u.data)
+        return self.diagnostics.collect(**kwargs)
 
     def _create_friction(self) -> None:
         """Precompute Rayleigh friction decay factors."""
@@ -798,16 +799,8 @@ class ModelDriver:
         sigma_full = self.sigma.sigma_full
         dsigma = self.sigma.dsigma
 
-        if cfg.grid.grid_type == "cubed_sphere":
-            N = cfg.grid.resolution
-            shape_2d = (6, N, N)
-            shape_3d = (6, N, N, cfg.grid.nlev)
-        elif cfg.grid.grid_type == "voronoi":
-            shape_2d = (self.grid.nCells,)
-            shape_3d = (self.grid.nCells, cfg.grid.nlev)
-        else:
-            shape_2d = (self.grid.n_lat, self.grid.n_lon)
-            shape_3d = (*shape_2d, cfg.grid.nlev)
+        shape_2d = self.grid.grid_shape_2d
+        shape_3d = (*shape_2d, cfg.grid.nlev)
 
         # Solar forcing (initial)
         solar_init = get_solar_forcing_at_time(self._solar_config, START_DAY)
@@ -898,7 +891,11 @@ class ModelDriver:
                 o3_vmr=o3_vmr,
                 aerosol_od=aerosol_od,
                 start_day=START_DAY,
-                gradient_checkpoint=cfg.gradient_checkpoint,
+                gradient_checkpoint=(
+                    cfg.gradient_checkpoint
+                    if cfg.gradient_checkpoint
+                    else segment_length > 50
+                ),
             )
 
             # Pack state into carry
@@ -936,8 +933,7 @@ class ModelDriver:
 
             # Diagnostics
             if diag_interval > 0 and current_step % diag_interval == 0:
-                jax.block_until_ready(self.state.u.data)
-                diag_info = self.diagnostics.collect(
+                diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,
                     state=self.state,
@@ -1028,16 +1024,8 @@ class ModelDriver:
         sigma_full = self.sigma.sigma_full
         dsigma = self.sigma.dsigma
 
-        if cfg.grid.grid_type == "cubed_sphere":
-            N = cfg.grid.resolution
-            shape_2d = (6, N, N)
-            shape_3d = (6, N, N, cfg.grid.nlev)
-        elif cfg.grid.grid_type == "voronoi":
-            shape_2d = (self.grid.nCells,)
-            shape_3d = (self.grid.nCells, cfg.grid.nlev)
-        else:
-            shape_2d = (self.grid.n_lat, self.grid.n_lon)
-            shape_3d = (*shape_2d, cfg.grid.nlev)
+        shape_2d = self.grid.grid_shape_2d
+        shape_3d = (*shape_2d, cfg.grid.nlev)
 
         ncol = int(np.prod(np.array(shape_2d)))
         nlev = cfg.grid.nlev
@@ -1225,8 +1213,7 @@ class ModelDriver:
             # Diagnostics
             elapsed_day = day - START_DAY
             if (step + 1) % diag_interval == 0:
-                jax.block_until_ready(self.state.u.data)
-                diag_info = self.diagnostics.collect(
+                diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,
                     state=self.state,

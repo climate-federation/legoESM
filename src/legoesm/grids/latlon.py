@@ -87,6 +87,10 @@ class LatLonGrid(NamedTuple):
     def grid_n_columns(self) -> int:
         return self.n_lat * self.n_lon
 
+    @property
+    def grid_shape_2d(self) -> tuple[int, ...]:
+        return (self.n_lat, self.n_lon)
+
     def to_columns(self, field):
         extra = field.shape[2:]
         return field.reshape(self.n_lat * self.n_lon, *extra)

@@ -336,10 +336,11 @@ def _fail_unsupported(model_type: str, discretization: str, grid_type: str):
 # Future component stubs — ocean, land, ice, coupler
 # =========================================================================
 
-def create_ocean_component(config: ExperimentConfig, grid, vertical_coord):
+def create_ocean_component(_config: ExperimentConfig, _grid, _vertical_coord):
     """Create the configured ocean dynamical core.
 
-    Not yet implemented — placeholder for the next patch.
+    Placeholder for future implementation.  Parameters are prefixed
+    with ``_`` to signal that they are intentionally unused.
     """
     raise NotImplementedError(
         "Ocean component factory is not yet wired. "
@@ -347,30 +348,30 @@ def create_ocean_component(config: ExperimentConfig, grid, vertical_coord):
     )
 
 
-def create_land_component(config: ExperimentConfig, grid):
+def create_land_component(_config: ExperimentConfig, _grid):
     """Create the configured land surface model.
 
-    Not yet implemented — placeholder for the next patch.
+    Placeholder for future implementation.
     """
     raise NotImplementedError(
         "Land component factory is not yet wired."
     )
 
 
-def create_ice_component(config: ExperimentConfig, grid):
+def create_ice_component(_config: ExperimentConfig, _grid):
     """Create the configured sea-ice model.
 
-    Not yet implemented — placeholder for the next patch.
+    Placeholder for future implementation.
     """
     raise NotImplementedError(
         "Ice component factory is not yet wired."
     )
 
 
-def create_coupler(config: ExperimentConfig, components: dict):
+def create_coupler(_config: ExperimentConfig, _components: dict):
     """Create the component coupler.
 
-    Not yet implemented — placeholder for the next patch.
+    Placeholder for future implementation.
     """
     raise NotImplementedError(
         "Coupler factory is not yet wired."

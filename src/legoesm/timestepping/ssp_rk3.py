@@ -23,6 +23,9 @@ from typing import Callable, TypeVar
 
 import jax
 
+from legoesm.timestepping.pytree_ops import pytree_axpy as _pytree_axpy
+from legoesm.timestepping.pytree_ops import pytree_linear_combination as _pytree_linear_combination
+
 State = TypeVar("State")
 
 
@@ -63,16 +66,6 @@ def ssp_rk3_step(
     k3 = _pytree_linear_combination(state, k2_plus_dt_tend2, 1.0 / 3.0, 2.0 / 3.0)
 
     return k3
-
-
-def _pytree_axpy(x, y, alpha):
-    """Compute x + alpha * y for two pytrees with the same structure."""
-    return jax.tree.map(lambda xi, yi: xi + alpha * yi, x, y)
-
-
-def _pytree_linear_combination(x, y, a, b):
-    """Compute a * x + b * y for two pytrees with the same structure."""
-    return jax.tree.map(lambda xi, yi: a * xi + b * yi, x, y)
 
 
 def integrate_scan(

@@ -18,7 +18,6 @@ from typing import TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from legoesm.atmosphere.physics.radiation.rrtmgp import constants
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
