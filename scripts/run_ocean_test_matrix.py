@@ -51,6 +51,7 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
+from scipy.spatial import cKDTree
 
 import matplotlib
 matplotlib.use("Agg")
@@ -123,6 +124,11 @@ def _build_test_matrix() -> list[TestCase]:
     for g in GRID_TYPES:
         matrix.append(TestCase(
             "baroclinic", g, res[g], 10.0, 1.0))
+
+    # --- Phillips two-layer baroclinic: all grids ---
+    for g in GRID_TYPES:
+        matrix.append(TestCase(
+            "phillips_two_layer", g, res[g], 10.0, 1.0))
 
     return matrix
 
@@ -249,6 +255,56 @@ def _run_timeloop(
 # Diagnostic saving
 # ===========================================================================
 
+def _build_latlon_weights(
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    n_lat: int = 181,
+    n_lon: int = 360,
+    k: int = 6,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build KDTree interpolation weights from unstructured to lat-lon grid.
+
+    Returns (idxs, weights) arrays of shape (n_lat*n_lon, K) for K-nearest-
+    neighbor inverse-distance weighting in 3-D Cartesian coordinates.
+    """
+    lon = ((np.asarray(lon_deg, dtype=np.float64).ravel() + 180) % 360) - 180
+    lat = np.clip(np.asarray(lat_deg, dtype=np.float64).ravel(), -90, 90)
+    d2r = np.pi / 180.0
+    src = np.column_stack([
+        np.cos(lat * d2r) * np.cos(lon * d2r),
+        np.cos(lat * d2r) * np.sin(lon * d2r),
+        np.sin(lat * d2r)])
+    lat_1d = np.linspace(-90.0, 90.0, n_lat)
+    lon_1d = np.linspace(-180.0, 180.0, n_lon)
+    lo, la = np.meshgrid(lon_1d, lat_1d)
+    tgt = np.column_stack([
+        np.cos(la.ravel() * d2r) * np.cos(lo.ravel() * d2r),
+        np.cos(la.ravel() * d2r) * np.sin(lo.ravel() * d2r),
+        np.sin(la.ravel() * d2r)])
+    tree = cKDTree(src)
+    K = min(k, src.shape[0])
+    dists, idxs = tree.query(tgt, k=K)
+    if K == 1:
+        dists = dists[:, None]
+        idxs = idxs[:, None]
+    w = 1.0 / np.maximum(dists, 1e-12)
+    w /= w.sum(axis=1, keepdims=True)
+    return idxs, w
+
+
+def _apply_weights(vals: np.ndarray, idxs: np.ndarray, w: np.ndarray,
+                   n_lat: int, n_lon: int) -> np.ndarray:
+    """Apply precomputed IDW weights, handling NaN source values."""
+    v = vals[idxs]
+    v_valid = np.isfinite(v)
+    v_safe = np.where(v_valid, v, 0.0)
+    wm = w * v_valid
+    ws = wm.sum(axis=1, keepdims=True)
+    wn = np.where(ws > 0, wm / np.maximum(ws, 1e-30), 0)
+    result = np.sum(v_safe * wn, axis=1)
+    return np.where(ws.ravel() > 0, result, np.nan).reshape(n_lat, n_lon)
+
+
 def _bin_to_latlon(
     values: np.ndarray,
     lon_deg: np.ndarray,
@@ -256,24 +312,12 @@ def _bin_to_latlon(
     n_lat: int = 181,
     n_lon: int = 360,
 ) -> np.ndarray:
-    """Bin unstructured points onto a regular lat-lon grid."""
+    """Interpolate unstructured points onto a regular lat-lon grid."""
     vals = np.asarray(values, dtype=np.float64).ravel()
-    lon = np.asarray(lon_deg, dtype=np.float64).ravel()
-    lat = np.asarray(lat_deg, dtype=np.float64).ravel()
-    lon = ((lon + 180.0) % 360.0) - 180.0
-    lat = np.clip(lat, -90.0, 90.0)
-    valid = np.isfinite(vals) & np.isfinite(lon) & np.isfinite(lat)
-    if not np.any(valid):
+    if not np.any(np.isfinite(vals)):
         return np.full((n_lat, n_lon), np.nan, dtype=np.float64)
-    lat_edges = np.linspace(-90.0, 90.0, n_lat + 1)
-    lon_edges = np.linspace(-180.0, 180.0, n_lon + 1)
-    s, _, _ = np.histogram2d(
-        lat[valid], lon[valid], bins=(lat_edges, lon_edges),
-        weights=vals[valid])
-    c, _, _ = np.histogram2d(
-        lat[valid], lon[valid], bins=(lat_edges, lon_edges))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(c > 0, s / c, np.nan)
+    idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon)
+    return _apply_weights(vals, idxs, w, n_lat, n_lon)
 
 
 def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
@@ -295,11 +339,12 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     if arr.ndim == 1:
         arr = arr[:, None]
     nlev = arr.shape[-1]
-    out = np.full((181, 360, nlev), np.nan, dtype=np.float64)
+    n_lat, n_lon = 181, 360
     flat = arr.reshape(-1, nlev)
+    idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon)
+    out = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
     for k in range(nlev):
-        out[..., k] = _bin_to_latlon(
-            flat[:, k], lon_deg.ravel(), lat_deg.ravel())
+        out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon)
     return out
 
 
@@ -704,16 +749,8 @@ def _ensure_required_artifacts(output_dir: Path):
     if not (output_dir / "snapshot_times.txt").exists():
         with open(output_dir / "snapshot_times.txt", "w") as f:
             f.write("step,time_seconds,time_days\n")
-    for png_name in [
-        "field_snapshots.png", "mean_timeseries.png",
-        "conservation_timeseries.png",
-        "latitude_vertical_cross_sections.png",
-        "longitude_vertical_cross_sections.png",
-        "vertical_profiles.png",
-    ]:
-        p = output_dir / png_name
-        if not p.exists():
-            _placeholder_plot(p, png_name, "Not produced for this case.")
+    # Note: PNGs are only created by the diagnostic routines when applicable.
+    # No placeholder images are generated to avoid masking real issues.
 
 
 # ===========================================================================
@@ -1346,6 +1383,197 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float
 
 
 # ===========================================================================
+# Runner: Phillips Two-Layer
+# ===========================================================================
+
+def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
+    """Set up Phillips two-layer initial conditions: jet + SSH perturbation."""
+    from legoesm.core.field import Field
+
+    if grid_type == "spectral":
+        from legoesm.grids.gaussian import (
+            sh_analysis, sh_analysis_3d, sh_synthesis_3d)
+        lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lon_2d, lat_2d = np.meshgrid(lon, lat, indexing='xy')
+
+        # Zonal jet in upper layer, weaker reverse in lower
+        u_jet = 0.30 * np.exp(-((lat_2d - 45.0) / 14.0) ** 2)
+        T_hat = state.T_hat.data
+        T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
+        nlev = T_grid.shape[-1]
+        # Set target temperatures
+        T_grid[..., 0] = 16.0 - 10.0 * np.sin(np.radians(lat_2d)) ** 2
+        if nlev > 1:
+            T_grid[..., 1] = 8.0 - 4.0 * np.sin(np.radians(lat_2d)) ** 2
+        new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
+
+        # SSH perturbation
+        eta_pert = 0.05 * np.sin(3.0 * np.radians(lon_2d)) * np.cos(
+            2.0 * np.radians(lat_2d))
+        eta_pert -= np.mean(eta_pert)
+        eta_hat = state.eta_hat.data + sh_analysis(grid, jnp.array(eta_pert))
+
+        return state._replace(
+            T_hat=Field(new_T_hat),
+            eta_hat=Field(eta_hat))
+
+    else:
+        # FV grids (cube, latlon, mpas)
+        if grid_type == "mpas":
+            lat_rad = np.asarray(grid.latCell, dtype=np.float64)
+            lon_rad = np.asarray(grid.lonCell, dtype=np.float64)
+            area = np.asarray(grid.area, dtype=np.float64)
+        else:
+            lat_rad = np.asarray(grid.lat, dtype=np.float64)
+            lon_rad = np.asarray(grid.lon, dtype=np.float64)
+            area = np.asarray(grid.area, dtype=np.float64)
+        lat_deg_arr = lat_rad * 180 / np.pi
+
+        mask = np.asarray(state.land_mask.data, dtype=np.float64)
+        T_data = np.asarray(state.T.data, dtype=np.float64)
+        nlev = T_data.shape[-1]
+
+        # Zonal jet
+        u_jet = 0.30 * np.exp(-((lat_deg_arr - 45.0) / 14.0) ** 2) * mask
+        u_data = np.asarray(state.u.data, dtype=np.float64)
+        u_data[..., 0] = u_jet
+        if nlev > 1:
+            u_data[..., 1] = -0.20 * u_jet
+
+        # Target temperatures
+        T_data[..., 0] = (16.0 - 10.0 * np.sin(lat_rad) ** 2) * mask
+        if nlev > 1:
+            T_data[..., 1] = (8.0 - 4.0 * np.sin(lat_rad) ** 2) * mask
+
+        # SSH perturbation
+        eta_seed = 0.05 * np.sin(3.0 * lon_rad) * np.cos(2.0 * lat_rad) * mask
+        area_w = mask * area
+        eta_seed -= np.sum(eta_seed * area_w) / np.maximum(np.sum(area_w), 1.0)
+        new_eta = state.eta.data + jnp.array(eta_seed)
+
+        state = state._replace(
+            u=Field(jnp.array(u_data)),
+            T=Field(jnp.array(T_data)),
+            eta=Field(new_eta))
+        if hasattr(state, "v"):
+            v_data = np.asarray(state.v.data, dtype=np.float64)
+            v_data[..., 0] *= 0  # start with no meridional flow
+            if nlev > 1:
+                v_data[..., 1] *= 0
+            state = state._replace(v=Field(jnp.array(v_data)))
+        return state
+
+
+def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
+                           ) -> tuple[str, float, str]:
+    """Phillips two-layer baroclinic test with zonal-mean relaxation."""
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc, nlev=2, H_max=3500.0))
+    state = _create_rest_state(tc, grid, z_coord, H_max=3500.0)
+    state = _add_phillips_perturbation(state, tc.grid_type, grid, z_coord)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    # Relaxation forcing toward target temperature profiles
+    if tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import (
+            sh_analysis, sh_analysis_3d, sh_synthesis_3d)
+        lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        _, lat_2d = np.meshgrid(lon, lat, indexing='xy')
+        T_star_upper = 16.0 - 10.0 * np.sin(np.radians(lat_2d)) ** 2
+        T_star_lower = 8.0 - 4.0 * np.sin(np.radians(lat_2d)) ** 2
+        T_star_3d = np.stack([T_star_upper, T_star_lower], axis=-1)
+        T_star_hat = sh_analysis_3d(grid, jnp.array(T_star_3d))
+        tau_relax = 15.0 * 86400.0
+        drag_factor = float(jnp.exp(-dt / (25.0 * 86400.0)))
+
+        def forcing_fn(s, dt_):
+            from legoesm.core.field import Field
+            T_hat = s.T_hat.data
+            dT_hat = -(T_hat - T_star_hat) / tau_relax
+            new_T_hat = T_hat + dt_ * dT_hat
+            new_u_hat = s.u_hat.data * drag_factor
+            new_v_hat = s.v_hat.data * drag_factor
+            return s._replace(
+                T_hat=Field(new_T_hat),
+                u_hat=Field(new_u_hat),
+                v_hat=Field(new_v_hat))
+
+    else:
+        if tc.grid_type == "mpas":
+            lat_rad = np.asarray(grid.latCell, dtype=np.float64)
+        else:
+            lat_rad = np.asarray(grid.lat, dtype=np.float64)
+        T_star_upper = jnp.array(16.0 - 10.0 * np.sin(lat_rad) ** 2)
+        T_star_lower = jnp.array(8.0 - 4.0 * np.sin(lat_rad) ** 2)
+        tau_relax = 15.0 * 86400.0
+        drag_factor = float(jnp.exp(-dt / (25.0 * 86400.0)))
+
+        def forcing_fn(s, dt_):
+            from legoesm.core.field import Field
+            T_data = s.T.data
+            mask = s.land_mask.data
+            dT0 = -(T_data[..., 0] - T_star_upper) / tau_relax * mask
+            dT1 = -(T_data[..., 1] - T_star_lower) / tau_relax * mask
+            T_new = T_data.at[..., 0].set(T_data[..., 0] + dt_ * dT0)
+            T_new = T_new.at[..., 1].set(T_data[..., 1] + dt_ * dT1)
+            mask_3d = mask[..., jnp.newaxis]
+            u_new = s.u.data * drag_factor * mask_3d
+            v_new = s.v.data * drag_factor * mask_3d
+            return s._replace(
+                T=Field(T_new),
+                u=Field(u_new),
+                v=Field(v_new))
+
+    def step_fn(s, dt_):
+        s = model.step(s, dt_)
+        return forcing_fn(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Phillips 2-layer ({tc.grid_type})", total_days=days)
+
+    if tc.grid_type == "spectral":
+        T_drift = _compute_drift(diag.get("mean_T_hat_abs", []))
+    else:
+        T_drift = _compute_drift(diag.get("mean_T", []))
+    notes = f"T drift={T_drift:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"Phillips 2-Layer {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
+        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
+        salt_key="mean_S" if tc.grid_type != "spectral" else "mean_S_hat_abs",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
 # Runner dispatch
 # ===========================================================================
 
@@ -1354,6 +1582,7 @@ RUNNERS: dict[str, Callable] = {
     "barotropic_wave": run_barotropic_wave,
     "wind_gyre": run_wind_gyre,
     "baroclinic": run_baroclinic,
+    "phillips_two_layer": run_phillips_two_layer,
 }
 
 

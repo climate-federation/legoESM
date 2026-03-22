@@ -50,6 +50,7 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp
 import numpy as np
+from scipy.spatial import cKDTree
 
 import matplotlib
 matplotlib.use("Agg")
@@ -360,6 +361,56 @@ def _run_timeloop(
 # Diagnostic saving
 # ===========================================================================
 
+def _build_latlon_weights(
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    n_lat: int = 181,
+    n_lon: int = 360,
+    k: int = 6,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build KDTree interpolation weights from unstructured to lat-lon grid.
+
+    Returns (idxs, weights) arrays of shape (n_lat*n_lon, K) for K-nearest-
+    neighbor inverse-distance weighting in 3-D Cartesian coordinates.
+    """
+    lon = ((np.asarray(lon_deg, dtype=np.float64).ravel() + 180) % 360) - 180
+    lat = np.clip(np.asarray(lat_deg, dtype=np.float64).ravel(), -90, 90)
+    d2r = np.pi / 180.0
+    src = np.column_stack([
+        np.cos(lat * d2r) * np.cos(lon * d2r),
+        np.cos(lat * d2r) * np.sin(lon * d2r),
+        np.sin(lat * d2r)])
+    lat_1d = np.linspace(-90.0, 90.0, n_lat)
+    lon_1d = np.linspace(-180.0, 180.0, n_lon)
+    lo, la = np.meshgrid(lon_1d, lat_1d)
+    tgt = np.column_stack([
+        np.cos(la.ravel() * d2r) * np.cos(lo.ravel() * d2r),
+        np.cos(la.ravel() * d2r) * np.sin(lo.ravel() * d2r),
+        np.sin(la.ravel() * d2r)])
+    tree = cKDTree(src)
+    K = min(k, src.shape[0])
+    dists, idxs = tree.query(tgt, k=K)
+    if K == 1:
+        dists = dists[:, None]
+        idxs = idxs[:, None]
+    w = 1.0 / np.maximum(dists, 1e-12)
+    w /= w.sum(axis=1, keepdims=True)
+    return idxs, w
+
+
+def _apply_weights(vals: np.ndarray, idxs: np.ndarray, w: np.ndarray,
+                   n_lat: int, n_lon: int) -> np.ndarray:
+    """Apply precomputed IDW weights, handling NaN source values."""
+    v = vals[idxs]
+    v_valid = np.isfinite(v)
+    v_safe = np.where(v_valid, v, 0.0)
+    wm = w * v_valid
+    ws = wm.sum(axis=1, keepdims=True)
+    wn = np.where(ws > 0, wm / np.maximum(ws, 1e-30), 0)
+    result = np.sum(v_safe * wn, axis=1)
+    return np.where(ws.ravel() > 0, result, np.nan).reshape(n_lat, n_lon)
+
+
 def _bin_to_latlon(
     values: np.ndarray,
     lon_deg: np.ndarray,
@@ -367,24 +418,12 @@ def _bin_to_latlon(
     n_lat: int = 181,
     n_lon: int = 360,
 ) -> np.ndarray:
-    """Bin unstructured points onto a regular lat-lon grid."""
+    """Interpolate unstructured points onto a regular lat-lon grid."""
     vals = np.asarray(values, dtype=np.float64).ravel()
-    lon = np.asarray(lon_deg, dtype=np.float64).ravel()
-    lat = np.asarray(lat_deg, dtype=np.float64).ravel()
-    lon = ((lon + 180.0) % 360.0) - 180.0
-    lat = np.clip(lat, -90.0, 90.0)
-    valid = np.isfinite(vals) & np.isfinite(lon) & np.isfinite(lat)
-    if not np.any(valid):
+    if not np.any(np.isfinite(vals)):
         return np.full((n_lat, n_lon), np.nan, dtype=np.float64)
-    lat_edges = np.linspace(-90.0, 90.0, n_lat + 1)
-    lon_edges = np.linspace(-180.0, 180.0, n_lon + 1)
-    s, _, _ = np.histogram2d(
-        lat[valid], lon[valid], bins=(lat_edges, lon_edges),
-        weights=vals[valid])
-    c, _, _ = np.histogram2d(
-        lat[valid], lon[valid], bins=(lat_edges, lon_edges))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(c > 0, s / c, np.nan)
+    idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon)
+    return _apply_weights(vals, idxs, w, n_lat, n_lon)
 
 
 def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
@@ -406,11 +445,12 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     if arr.ndim == 1:
         arr = arr[:, None]
     nlev = arr.shape[-1]
-    out = np.full((181, 360, nlev), np.nan, dtype=np.float64)
+    n_lat, n_lon = 181, 360
     flat = arr.reshape(-1, nlev)
+    idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon)
+    out = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
     for k in range(nlev):
-        out[..., k] = _bin_to_latlon(
-            flat[:, k], lon_deg.ravel(), lat_deg.ravel())
+        out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon)
     return out
 
 
@@ -804,16 +844,8 @@ def _ensure_required_artifacts(output_dir: Path):
     if not (output_dir / "snapshot_times.txt").exists():
         with open(output_dir / "snapshot_times.txt", "w") as f:
             f.write("step,time_seconds,time_days\n")
-    for png_name in [
-        "field_snapshots.png", "mean_timeseries.png",
-        "conservation_timeseries.png",
-        "latitude_vertical_cross_sections.png",
-        "longitude_vertical_cross_sections.png",
-        "vertical_profiles.png",
-    ]:
-        p = output_dir / png_name
-        if not p.exists():
-            _placeholder_plot(p, png_name, "Not produced for this case.")
+    # Note: PNGs are only created by the diagnostic routines when applicable.
+    # No placeholder images are generated to avoid masking real issues.
 
 
 # ===========================================================================
