@@ -435,7 +435,7 @@ def _build_rrtmgp_radiation_fn(config):
         sfc_albedo=config.albedo_ocean,
         S_0=S_0,
         use_scan=False,
-        include_clouds=False,
+        include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 
     @jax.jit

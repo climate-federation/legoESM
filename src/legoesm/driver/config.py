@@ -187,6 +187,11 @@ class ExperimentConfig(NamedTuple):
             warns.append(
                 f"dt={self.dycore.dt}s may violate CFL at C{self.grid.resolution}"
             )
+        if self.cloud_scheme != "none" and self.radiation == "gray":
+            warns.append(
+                "cloud_scheme is ignored with gray radiation; "
+                "set radiation='rrtmgp' for cloud-radiation coupling"
+            )
         if self.fix_moisture and self.microphysics != "none":
             warns.append(
                 "fix_moisture with active microphysics may conflict "
