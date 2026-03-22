@@ -59,6 +59,7 @@ class ModelDriver:
         self._f_land = None
         self._fric_decay = None
         self._qv_smooth_coeff = None
+        self._ensemble_size = 1
 
         if output_dir is not None:
             self._output_dir = Path(output_dir)
@@ -116,6 +117,7 @@ class ModelDriver:
         self._create_dycore()
         self._create_forcing()
         self._init_state()
+        self._create_ensemble()
         self._create_physics()
         self._setup_external_forcing()
         self._create_diagnostics()
@@ -325,6 +327,35 @@ class ModelDriver:
             logger.info(f"  State init: T={cfg.T_init}K, q_v={mean_qv:.2f} g/kg, CWV={cwv:.1f} kg/m2")
         else:
             logger.info(f"  State init: T={cfg.T_init}K (dry spectral)")
+
+    def _create_ensemble(self) -> None:
+        """Create ensemble members if ensemble_size > 1.
+
+        Perturbs the initial state and tracers to create *ensemble_size*
+        members.  Each leaf array gains a leading ensemble dimension:
+        ``(n_members, ...)``.  Diagnostics later use ``ensemble_mean``
+        before collecting.
+        """
+        self._ensemble_size = self.config.ensemble_size
+        # Save a single-member template for unpack_carry during ensemble runs
+        self._state_template = self.state
+        if self._ensemble_size <= 1:
+            return
+
+        from legoesm.parallel.ensemble import perturb_initial_conditions
+
+        key = jax.random.PRNGKey(42)
+        self.state = perturb_initial_conditions(
+            self.state, key, self._ensemble_size, scale=0.01,
+        )
+        # Tile tracers: each tracer (S,...) -> (n_members, S,...)
+        for name, arr in self.tracers.items():
+            if arr is not None:
+                self.tracers[name] = jnp.broadcast_to(
+                    arr[None], (self._ensemble_size,) + arr.shape
+                ).copy()  # copy so each member can diverge
+
+        logger.info(f"  Ensemble: {self._ensemble_size} members (IC perturbation scale=0.01)")
 
     def _create_physics(self) -> None:
         """Build the physics pipeline."""
@@ -815,12 +846,16 @@ class ModelDriver:
         step_unified = self.physics.build_step_unified()
 
         # Initial held radiation tendencies
-        held_dT_rad = jnp.zeros(shape_3d)
-        held_sw_net_sfc = jnp.zeros(shape_2d)
-        held_lw_net_sfc = jnp.zeros(shape_2d)
-        held_sw_up_toa = jnp.zeros(shape_2d)
-        held_lw_up_toa = jnp.zeros(shape_2d)
-        held_sw_down_toa = jnp.zeros(shape_2d)
+        # For ensemble runs, each member gets its own held fields
+        _ens = self._ensemble_size
+        _ens_3d = (_ens, *shape_3d) if _ens > 1 else shape_3d
+        _ens_2d = (_ens, *shape_2d) if _ens > 1 else shape_2d
+        held_dT_rad = jnp.zeros(_ens_3d)
+        held_sw_net_sfc = jnp.zeros(_ens_2d)
+        held_lw_net_sfc = jnp.zeros(_ens_2d)
+        held_sw_up_toa = jnp.zeros(_ens_2d)
+        held_lw_up_toa = jnp.zeros(_ens_2d)
+        held_sw_down_toa = jnp.zeros(_ens_2d)
 
         # External forcing
         o3_vmr, aerosol_od = self._precompute_external_forcing(
@@ -905,24 +940,35 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 current_step,
                 target_moisture=_target_moisture,
-                precip_accum=jnp.zeros(shape_2d),
+                precip_accum=jnp.zeros(_ens_2d),
             )
 
             # Time first segment for JIT measurement
             if seg_idx == 0:
                 t_jit_start = time.time()
 
-            # Execute compiled segment
-            carry = run_segment(carry, seg_steps)
+            # Execute compiled segment (vmap over ensemble if needed)
+            if self._ensemble_size > 1:
+                carry = jax.vmap(run_segment, in_axes=(0, None))(carry, seg_steps)
+            else:
+                carry = run_segment(carry, seg_steps)
 
             if seg_idx == 0:
                 jax.block_until_ready(carry.u)
                 t_jit = time.time() - t_jit_start
                 logger.info(f"  Segment 0 (incl. JIT) in {t_jit:.1f}s")
 
-            # Unpack carry back to driver state
-            (self.state, self.q_v, self.q_c, self.q_r,
-             held_tuple, _, seg_precip) = unpack_carry(carry, self.state)
+            # Unpack carry back to driver state.
+            # For ensemble runs, unpack the ensemble-mean for diagnostics;
+            # keep full ensemble in carry for the next segment.
+            if self._ensemble_size > 1:
+                from legoesm.parallel.ensemble import ensemble_mean
+                mean_carry = ensemble_mean(carry)
+                (self.state, self.q_v, self.q_c, self.q_r,
+                 held_tuple, _, seg_precip) = unpack_carry(mean_carry, self._state_template)
+            else:
+                (self.state, self.q_v, self.q_c, self.q_r,
+                 held_tuple, _, seg_precip) = unpack_carry(carry, self.state)
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
 
