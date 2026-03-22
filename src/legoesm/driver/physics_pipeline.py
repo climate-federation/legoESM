@@ -320,8 +320,14 @@ class PhysicsPipeline:
                     sw_up_toa, lw_up_toa, sw_down_toa,
                 )
 
-                new_held = (dT_dt_rad, sw_net_sfc, lw_net_sfc,
-                            sw_up_toa, lw_up_toa, sw_down_toa)
+                # Cast to common dtype so both lax.cond branches match
+                _dt = jnp.result_type(T, p_s)
+                _cast = lambda x: x.astype(_dt) if hasattr(x, 'astype') else x
+                new_held = tuple(_cast(h) for h in (
+                    dT_dt_rad, sw_net_sfc, lw_net_sfc,
+                    sw_up_toa, lw_up_toa, sw_down_toa,
+                ))
+                physics_out = jax.tree.map(_cast, physics_out)
                 return physics_out, new_held
 
             def _no_rad_branch(args):
@@ -337,8 +343,17 @@ class PhysicsPipeline:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 )
 
-                new_held = (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                            held_sw_up_toa, held_lw_up_toa, held_sw_down_toa)
+                # Cast held arrays and physics output to match the dtype
+                # that _rad_branch produces (radiation kernels may return
+                # float64 while held inputs are float32).  Both lax.cond
+                # branches must return identical dtypes.
+                _dt = jnp.result_type(T, p_s)
+                _cast = lambda x: x.astype(_dt) if hasattr(x, 'astype') else x
+                new_held = tuple(_cast(h) for h in (
+                    held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                ))
+                physics_out = jax.tree.map(_cast, physics_out)
                 return physics_out, new_held
 
             args = (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,

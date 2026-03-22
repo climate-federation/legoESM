@@ -150,6 +150,8 @@ class TestSpectralSWModelGuard:
                 f=jnp.zeros((4, 8)), weights=jnp.ones(4),
                 Pnm=jnp.zeros((4, n_sh)), Hnm=jnp.zeros((4, n_sh)),
                 Pnm_oc2=jnp.zeros((4, n_sh)), Dnm=jnp.zeros((4, n_sh)),
+                wPnm=jnp.zeros((4, n_sh)), wHnm=jnp.zeros((4, n_sh)),
+                wPnm_oc2=jnp.zeros((4, n_sh)), wDnm=jnp.zeros((4, n_sh)),
                 n_sh=n_sh,
                 ls=jnp.zeros(n_sh, dtype=jnp.int32),
                 ms=jnp.zeros(n_sh, dtype=jnp.int32),

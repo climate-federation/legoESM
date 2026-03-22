@@ -8,9 +8,12 @@ from pathlib import Path
 
 
 def _load_module():
+    # The main script is now a deprecated wrapper; the actual logic lives
+    # in scripts/legacy/run_parallel_validation.py.
     script_path = (
         Path(__file__).resolve().parents[2]
         / "scripts"
+        / "legacy"
         / "run_parallel_validation.py"
     )
     spec = importlib.util.spec_from_file_location(

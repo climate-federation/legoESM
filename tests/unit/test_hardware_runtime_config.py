@@ -148,10 +148,13 @@ class TestApplyHardwareConfig:
                 }
             }
         )
+        # Clear the lazy cache so the mock is picked up by _resolve_lazy.
+        import legoesm.atmosphere.dynamics as _dyn_mod
+        _dyn_mod._LAZY_CACHE.pop("CDGridShallowWaterModel", None)
         with patch(
             "legoesm.runtime.config.bootstrap_from_yaml_config"
         ) as bootstrap_fn, patch(
-            "legoesm.atmosphere.dynamics.CDGridShallowWaterModel",
+            "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid.CDGridShallowWaterModel",
             return_value=object(),
         ):
             bootstrap_fn.return_value = None  # prevent actual bootstrap

@@ -98,13 +98,12 @@ class TestDeviceMesh:
         assert get_active_config() is config
 
     def test_auto_falls_back_from_invalid_count(self):
-        """Auto mode should fall back to a valid face-partition count."""
+        """Auto mode with 4 devices raises ValueError (4 does not divide 6)."""
         fake_devices = [object(), object(), object(), object()]
         with patch("legoesm.parallel.mesh.jax.devices", return_value=fake_devices):
             with patch("legoesm.parallel.mesh.jax.default_backend", return_value="gpu"):
-                with pytest.warns(RuntimeWarning, match="using 3"):
-                    config = create_device_mesh(n_devices="auto")
-        assert config.n_devices == 3
+                with pytest.raises(ValueError, match="must divide 6"):
+                    create_device_mesh(n_devices="auto")
 
     def test_distributed_mode_uses_local_devices(self):
         """When process_count>1 and no backend override, use local devices."""
@@ -348,17 +347,15 @@ class TestSubFaceTiling:
         assert _best_tile_factorization(384) == (6, 8, 8)  # 6 * 8²
         assert _best_tile_factorization(600) == (6, 10, 10)  # 6 * 10²
 
-    def test_non_square_rounds_down(self):
-        """Non-perfect-square tiles_per_face rounds down to largest k²."""
-        # 12 processes: tiles_per_face=2, isqrt(2)=1 → 6*1*1=6
-        n_groups, tx, ty = _best_tile_factorization(12)
-        assert tx == ty  # always square
-        assert n_groups * tx * ty <= 12
+    def test_non_square_raises(self):
+        """Non-perfect-square tiles_per_face now raises ValueError."""
+        # 12 devices: tiles_per_face=2, not a perfect square
+        with pytest.raises(ValueError, match="perfect square"):
+            _best_tile_factorization(12)
 
-        # 48 processes: tiles_per_face=8, isqrt(8)=2 → 6*2*2=24
-        n_groups, tx, ty = _best_tile_factorization(48)
-        assert tx == ty == 2
-        assert n_groups * tx * ty == 24
+        # 48 devices: tiles_per_face=8, not a perfect square
+        with pytest.raises(ValueError, match="perfect square"):
+            _best_tile_factorization(48)
 
     def test_tile_rank_mapping(self):
         """_tile_rank and _rank_to_tile are inverses."""
