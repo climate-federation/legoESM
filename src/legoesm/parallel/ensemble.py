@@ -207,8 +207,12 @@ def perturb_initial_conditions(
         subkey = jax.random.fold_in(key, i)
         batched_val = getattr(batched, fname)
 
+        # Skip None fields (e.g., optional tracers)
+        if batched_val is None:
+            continue
+
         # Handle Field objects (data is the JAX leaf) vs raw arrays
-        if hasattr(batched_val, 'data'):
+        if hasattr(batched_val, 'data') and hasattr(batched_val, 'replace'):
             data = batched_val.data
             noise = jax.random.normal(subkey, data.shape, dtype=data.dtype)
             if multiplicative:
@@ -216,7 +220,7 @@ def perturb_initial_conditions(
             else:
                 new_data = data + scale * noise
             updates[fname] = batched_val.replace(data=new_data)
-        else:
+        elif hasattr(batched_val, 'shape'):
             noise = jax.random.normal(
                 subkey, batched_val.shape, dtype=batched_val.dtype,
             )
@@ -590,6 +594,8 @@ def ensemble_spread(batched_state: Any) -> dict[str, float]:
     if hasattr(batched_state, '_fields'):
         for fname in batched_state._fields:
             val = getattr(std_state, fname)
+            if val is None:
+                continue
             if hasattr(val, 'data'):
                 val = val.data
             result[fname] = float(jnp.sqrt(jnp.mean(val ** 2)))
