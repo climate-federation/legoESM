@@ -438,46 +438,6 @@ def _fill_nan_section(section: np.ndarray) -> np.ndarray:
     return sec
 
 
-def _axis_cross_section_unstructured(
-    field_3d: np.ndarray,
-    axis_coord: np.ndarray,
-    axis_vals: np.ndarray,
-    *,
-    periodic_lon: bool = False,
-) -> np.ndarray:
-    """Bin unstructured 3D field to a 2D (axis, level) cross-section."""
-    arr = np.asarray(field_3d, dtype=np.float64)
-    if arr.ndim == 1:
-        arr = arr[:, None]
-    flat = arr.reshape(-1, arr.shape[-1])
-
-    axis = np.asarray(axis_coord, dtype=np.float64).ravel()
-    if periodic_lon:
-        axis = ((axis + 180.0) % 360.0) - 180.0
-
-    if axis.size != flat.shape[0]:
-        n = min(axis.size, flat.shape[0])
-        axis = axis[:n]
-        flat = flat[:n, :]
-
-    edges = np.linspace(
-        float(axis_vals[0]), float(axis_vals[-1]), axis_vals.size + 1)
-    out = np.full((axis_vals.size, flat.shape[1]), np.nan, dtype=np.float64)
-    valid_axis = np.isfinite(axis)
-
-    for k in range(flat.shape[1]):
-        vals = flat[:, k]
-        valid = valid_axis & np.isfinite(vals)
-        if not np.any(valid):
-            continue
-        sums, _ = np.histogram(axis[valid], bins=edges, weights=vals[valid])
-        counts, _ = np.histogram(axis[valid], bins=edges)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            out[:, k] = np.where(counts > 0, sums / counts, np.nan)
-
-    return _fill_nan_section(out)
-
-
 # ---------------------------------------------------------------------------
 # File writers
 # ---------------------------------------------------------------------------
@@ -658,14 +618,9 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
 
         for ax, step in zip(axes_arr, valid_steps):
             f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
-            if coord_kind in ("latlon", "gaussian"):
-                ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
-                section = np.nanmean(ll, axis=mean_axis)  # (axis, lev)
-                section = _fill_nan_section(section)
-            else:
-                axis_coord = lat_deg if axis_key == "lat" else lon_deg
-                section = _axis_cross_section_unstructured(
-                    f3d, axis_coord, axis_vals, periodic_lon=(axis_key == "lon"))
+            ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
+            section = np.nanmean(ll, axis=mean_axis)  # (axis, lev)
+            section = _fill_nan_section(section)
             im = ax.imshow(
                 section.T, origin="lower", aspect="auto", cmap="RdBu_r",
                 extent=[axis_vals[0], axis_vals[-1],
