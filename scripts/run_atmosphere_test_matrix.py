@@ -65,6 +65,7 @@ GRID_RESOLUTIONS: dict[str, str] = {
     "cubed_sphere": "C36",
     "latlon": "72x144",
     "icosahedral": "ico5",
+    "spectral": "T21",
 }
 
 GRID_TYPES = list(GRID_RESOLUTIONS.keys())
@@ -81,7 +82,7 @@ class TestCase:
     """A single test case in the matrix."""
     equation_set: str       # shallow_water, hydrostatic, nonhydrostatic
     case: str               # williamson2, held_suarez, dcmip_tc1, etc.
-    grid_type: str          # cubed_sphere, latlon, icosahedral
+    grid_type: str          # cubed_sphere, latlon, icosahedral, spectral
     resolution: str         # C36, 72x144, ico5
     vertical_coord: str     # none, sigma, hybrid, height
     duration_days: float
@@ -1050,13 +1051,71 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         lon_deg = np.linspace(-180, 180, 360, endpoint=False)
         lat_deg = np.linspace(-90, 90, 181)
 
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import create_gaussian_grid, sh_synthesis
+        from legoesm.atmosphere.dynamics.spectral_sw import (
+            SpectralShallowWaterModel, SpectralSWConfig,
+            williamson_test2_spectral, williamson_test5_spectral,
+        )
+        from legoesm import constants
+
+        n_max = int(tc.resolution.replace("T", ""))
+        grid = create_gaussian_grid(n_max)
+        dt = 600.0
+        config = SpectralSWConfig(
+            spectral_filter_order=8 if test_num == 5 else 0,
+        )
+        model = SpectralShallowWaterModel(grid, config)
+        state = (williamson_test2_spectral(grid) if test_num == 2
+                 else williamson_test5_spectral(grid))
+        if test_num == 5:
+            state = model.filter_initial_state(state)
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        def check_fn(s):
+            phi = sh_synthesis(grid, s.phi_hat.data)
+            # Use wind speed for blowup metric (phi is O(10^4), not comparable)
+            vor = sh_synthesis(grid, s.vor_hat.data)
+            return (check_finite({"phi": phi}),
+                    float(jnp.max(jnp.abs(vor))))
+
+        def scalar_fn(s):
+            phi = sh_synthesis(grid, s.phi_hat.data)
+            return {
+                "mean_height": float(jnp.mean(phi / constants.g)),
+                "max_wind": float(jnp.max(jnp.abs(
+                    sh_synthesis(grid, s.vor_hat.data)))),
+            }
+
+        def extract_fn(s):
+            phi = np.asarray(sh_synthesis(grid, s.phi_hat.data),
+                             dtype=np.float64)
+            vor = np.asarray(sh_synthesis(grid, s.vor_hat.data),
+                             dtype=np.float64)
+            return {
+                "height": phi / float(constants.g),
+                "vorticity": vor,
+            }
+
+        key_array_fn = lambda s: s.phi_hat.data
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
     else:
         raise NotImplementedError(
             f"Shallow water not implemented for grid '{tc.grid_type}'")
 
     # --- Time loop ---
-    h_data = state.h if isinstance(state.h, jnp.ndarray) else state.h.data
-    mass_init = float(jnp.mean(h_data))
+    if tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import sh_synthesis as _sh
+        mass_init = float(jnp.mean(
+            _sh(grid, state.phi_hat.data) / constants.g))
+    else:
+        h_data = state.h if isinstance(state.h, jnp.ndarray) else state.h.data
+        mass_init = float(jnp.mean(h_data))
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 20)
 
@@ -1259,6 +1318,68 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         coord_kind = "icosa"
         lon_deg = lon_cell
         lat_deg = lat_cell
+
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid, sh_synthesis_3d,
+        )
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPrimitiveEquationModel, SpectralPEConfig,
+            isothermal_rest_state_spectral, spectral_pe_to_grid,
+        )
+        from legoesm.atmosphere.physics.held_suarez import (
+            held_suarez_forcing_spectral,
+        )
+
+        n_max = int(tc.resolution.replace("T", ""))
+        grid = create_gaussian_grid(n_max)
+        sigma = _create_vertical(nlev, tc.vertical_coord)
+        dt = 600.0
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            spectral_filter_order=8,
+            spectral_filter_strength=0.01,
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
+        state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
+
+        physics_fn = held_suarez_forcing_spectral
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_, physics_fn=physics_fn)
+
+        def check_fn(s):
+            T = sh_synthesis_3d(grid, s.T_hat.data)
+            return (check_finite({"T": T}),
+                    float(jnp.max(jnp.abs(T))))
+
+        def scalar_fn(s):
+            fields = spectral_pe_to_grid(s, grid, sigma)
+            return {
+                "mass": float(jnp.mean(fields['p_s'])),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    fields['u'] ** 2 + fields['v'] ** 2))),
+                "mean_T": float(jnp.mean(fields['T'])),
+            }
+
+        def extract_fn(s):
+            fields = spectral_pe_to_grid(s, grid, sigma)
+            u_sfc = np.asarray(fields['u'][..., -1], dtype=np.float64)
+            v_sfc = np.asarray(fields['v'][..., -1], dtype=np.float64)
+            return {
+                "u": u_sfc,
+                "v": v_sfc,
+                "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
+                "p_s": np.asarray(fields['p_s'], dtype=np.float64),
+                "T_3d": np.asarray(fields['T'], dtype=np.float64),
+            }
+
+        key_array_fn = lambda s: s.T_hat.data
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
     else:
         raise NotImplementedError(
             f"Held-Suarez not implemented for grid '{tc.grid_type}'")
@@ -1458,6 +1579,71 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         coord_kind = "icosa"
         lon_deg = lon_cell
         lat_deg = lat_cell
+
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid, sh_synthesis, sh_synthesis_3d,
+        )
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPrimitiveEquationModel, SpectralPEConfig,
+            baroclinic_wave_init_spectral, spectral_pe_to_grid,
+        )
+
+        n_max = int(tc.resolution.replace("T", ""))
+        grid = create_gaussian_grid(n_max)
+        sigma_for_init = create_sigma_coordinate(nlev)
+        sigma = _create_vertical(nlev, tc.vertical_coord)
+        dt = 600.0
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            spectral_filter_order=8,
+            spectral_filter_strength=0.01,
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
+        state = baroclinic_wave_init_spectral(
+            grid, sigma_for_init, perturbed=True)
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        def check_fn(s):
+            T = sh_synthesis_3d(grid, s.T_hat.data)
+            return (check_finite({"T": T}),
+                    float(jnp.max(jnp.abs(T))))
+
+        ps_init_spec = np.asarray(
+            jnp.exp(sh_synthesis(grid, state.lnps_hat.data)),
+            dtype=np.float64,
+        )
+
+        def scalar_fn(s):
+            fields = spectral_pe_to_grid(s, grid, sigma)
+            return {
+                "mass": float(jnp.mean(fields['p_s'])),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    fields['u'] ** 2 + fields['v'] ** 2))),
+                "ps_perturbation": float(jnp.max(
+                    jnp.abs(fields['p_s'] - ps_init_spec))),
+            }
+
+        def extract_fn(s):
+            fields = spectral_pe_to_grid(s, grid, sigma)
+            u_sfc = np.asarray(fields['u'][..., -1], dtype=np.float64)
+            v_sfc = np.asarray(fields['v'][..., -1], dtype=np.float64)
+            return {
+                "u": u_sfc,
+                "v": v_sfc,
+                "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
+                "p_s": np.asarray(fields['p_s'], dtype=np.float64),
+                "T_3d": np.asarray(fields['T'], dtype=np.float64),
+            }
+
+        key_array_fn = lambda s: s.T_hat.data
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
     else:
         raise NotImplementedError(
             f"Baroclinic wave not implemented for grid '{tc.grid_type}'")
@@ -1703,6 +1889,65 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "icosahedral":
         raise NotImplementedError(
             "AMIP not yet implemented for icosahedral grid")
+
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid, sh_synthesis_3d,
+        )
+        from legoesm.grids.vertical import standard_hybrid_levels
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPrimitiveEquationModel, SpectralPEConfig,
+            isothermal_rest_state_spectral, spectral_pe_to_grid,
+        )
+
+        n_max = int(tc.resolution.replace("T", ""))
+        grid = create_gaussian_grid(n_max)
+        sigma = standard_hybrid_levels(nlev)
+        dt = 600.0
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            spectral_filter_order=8,
+            spectral_filter_strength=0.01,
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
+        state = isothermal_rest_state_spectral(
+            grid, sigma, T_init=280.0)
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        def check_fn(s):
+            T = sh_synthesis_3d(grid, s.T_hat.data)
+            return (check_finite({"T": T}),
+                    float(jnp.max(jnp.abs(T))))
+
+        def scalar_fn(s):
+            fields = spectral_pe_to_grid(s, grid, sigma)
+            return {
+                "mass": float(jnp.mean(fields['p_s'])),
+                "max_wind": float(jnp.max(jnp.sqrt(
+                    fields['u'] ** 2 + fields['v'] ** 2))),
+                "mean_T": float(jnp.mean(fields['T'])),
+                "mean_p_s": float(jnp.mean(fields['p_s'])),
+            }
+
+        def extract_fn(s):
+            fields = spectral_pe_to_grid(s, grid, sigma)
+            u_sfc = np.asarray(fields['u'][..., -1], dtype=np.float64)
+            v_sfc = np.asarray(fields['v'][..., -1], dtype=np.float64)
+            return {
+                "u": u_sfc,
+                "v": v_sfc,
+                "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
+                "p_s": np.asarray(fields['p_s'], dtype=np.float64),
+                "T_3d": np.asarray(fields['T'], dtype=np.float64),
+            }
+
+        key_array_fn = lambda s: s.T_hat.data
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
     else:
         raise NotImplementedError(
             f"AMIP not implemented for grid '{tc.grid_type}'")
@@ -1924,6 +2169,87 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         raise NotImplementedError(
             "DCMIP NH init requires CubedSphereGrid; "
             "lat-lon NH not yet available")
+
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid, sh_synthesis_3d,
+        )
+        from legoesm.atmosphere.dynamics.spectral_nh import (
+            SpectralCompressibleEulerModel, SpectralNHConfig,
+            dcmip25_tc1_init_spectral,
+        )
+
+        if test_case != "tc1":
+            raise NotImplementedError(
+                f"Spectral NH only supports tc1, got {test_case}")
+
+        n_max = int(tc.resolution.replace("T", ""))
+        grid = create_gaussian_grid(n_max)
+        state, hcoord, tmetric = dcmip25_tc1_init_spectral(
+            grid, n_levels=nlev)
+
+        dt = max(0.5, 6.0 * (21.0 / n_max))
+        nh_config = SpectralNHConfig(
+            n_acoustic_substeps=10,
+            semi_implicit_acoustic=True,
+            sponge_width=10000.0,
+            sponge_coeff=0.05,
+            hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+        )
+        model = SpectralCompressibleEulerModel(
+            grid, hcoord, tmetric, nh_config)
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_)
+
+        def check_fn(s):
+            w = sh_synthesis_3d(grid, s.w_hat.data)
+            theta_p = sh_synthesis_3d(grid, s.theta_prime_hat.data)
+            return (check_finite({"w": w, "theta": theta_p}),
+                    float(jnp.max(jnp.abs(w))))
+
+        def scalar_fn(s):
+            w = sh_synthesis_3d(grid, s.w_hat.data)
+            theta_p = sh_synthesis_3d(grid, s.theta_prime_hat.data)
+            rho_p = sh_synthesis_3d(grid, s.rho_prime_hat.data)
+            return {
+                "max_abs_w": float(jnp.max(jnp.abs(w))),
+                "mean_theta_prime": float(jnp.mean(theta_p)),
+                "mean_rho_prime": float(jnp.mean(rho_p)),
+            }
+
+        def extract_fn(s):
+            from legoesm.grids.gaussian import uv_from_vordiv_3d
+            u_cos, v_cos = uv_from_vordiv_3d(
+                grid, s.vor_hat.data, s.div_hat.data)
+            _COS_MIN = 1.0e-6
+            cos3 = jnp.clip(grid.cos_lat[:, None, None], _COS_MIN, None)
+            u_grid = u_cos / cos3
+            v_grid = v_cos / cos3
+            u_sfc = np.asarray(u_grid[..., 0], dtype=np.float64)
+            v_sfc = np.asarray(v_grid[..., 0], dtype=np.float64)
+            w = sh_synthesis_3d(grid, s.w_hat.data)
+            w_idx = min(w.shape[-1] // 2, w.shape[-1] - 1)
+            return {
+                "u": u_sfc,
+                "v": v_sfc,
+                "w_mid": np.asarray(w[..., w_idx], dtype=np.float64),
+                "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
+                "theta_prime_3d": np.asarray(
+                    sh_synthesis_3d(grid, s.theta_prime_hat.data),
+                    dtype=np.float64),
+                "rho_prime_3d": np.asarray(
+                    sh_synthesis_3d(grid, s.rho_prime_hat.data),
+                    dtype=np.float64),
+            }
+
+        key_array_fn = lambda s: s.vor_hat.data
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        z_full = np.asarray(
+            getattr(hcoord, "z_full", np.arange(nlev)), dtype=np.float64)
+
     else:
         raise NotImplementedError(
             f"NH not implemented for grid '{tc.grid_type}'")
@@ -2008,7 +2334,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run only a specific equation set (default: all)")
     p.add_argument(
         "--grid", type=str, default="all",
-        choices=["cubed_sphere", "latlon", "icosahedral", "all"],
+        choices=["cubed_sphere", "latlon", "icosahedral", "spectral", "all"],
         help="Run only a specific grid type (default: all)")
     p.add_argument(
         "--test", type=str, default=None,
