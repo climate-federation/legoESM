@@ -449,9 +449,69 @@ def vorticity_latlon(
         return dv_dx - du_cos_dy / grid.cos_lat[:, None, None]
 
 
+def _neumann_fill_latlon(
+    f: jnp.ndarray,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Fill land cells with nearest meridional ocean-neighbor value.
+
+    Enforces zero-gradient (Neumann) boundary conditions at land-ocean
+    interfaces so that the Laplacian does not see a sharp jump between
+    ocean values and masked zeros.  Without this fill the Laplacian
+    produces spurious diffusive flux at the boundary which, amplified
+    by the 1/cos²(lat) metric near the poles, generates the characteristic
+    horizontal stripes in height and velocity fields.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon) or (n_lat, n_lon, nlev)
+    mask : array, shape (n_lat, n_lon)
+        Ocean mask (1 = ocean, 0 = land).
+
+    Returns
+    -------
+    f_filled : array, same shape as f
+    """
+    m = mask
+    filled = f
+    # Multiple passes to propagate through consecutive land cells
+    # (e.g. 2 land cells between the last ocean cell and the pole).
+    for _ in range(3):
+        # South neighbor (one cell toward south pole)
+        f_s = jnp.concatenate([filled[0:1], filled[:-1]], axis=0)
+        m_s = jnp.concatenate([m[0:1], m[:-1]], axis=0)
+        # North neighbor (one cell toward north pole)
+        f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
+        m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
+
+        is_land = m < 0.5
+        has_south = m_s > 0.5
+        has_north = m_n > 0.5
+
+        if f.ndim > 2:
+            is_land_e = is_land[..., jnp.newaxis]
+            has_south_e = has_south[..., jnp.newaxis]
+            has_north_e = has_north[..., jnp.newaxis]
+        else:
+            is_land_e = is_land
+            has_south_e = has_south
+            has_north_e = has_north
+
+        filled = jnp.where(
+            is_land_e & has_south_e, f_s,
+            jnp.where(is_land_e & has_north_e, f_n, filled),
+        )
+        # Expand the effective mask so the next pass can propagate further.
+        m = jnp.where(is_land & (has_south | has_north), 1.0, m)
+
+    return filled
+
+
 def laplacian_latlon(
     f: jnp.ndarray,
     grid: LatLonGrid,
+    *,
+    mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Scalar Laplacian on a lat-lon grid.
 
@@ -461,6 +521,13 @@ def laplacian_latlon(
     ----------
     f : array, shape (n_lat, n_lon) or (n_lat, n_lon, nlev)
     grid : LatLonGrid
+    mask : array, shape (n_lat, n_lon), optional
+        Ocean mask (1 = ocean, 0 = land).  When provided, land cells are
+        filled with their nearest meridional ocean-neighbor value before
+        computing meridional gradients.  This enforces a zero-flux
+        (Neumann) boundary condition at land-ocean interfaces and
+        prevents the spurious horizontal stripes that otherwise arise
+        from diffusing against a sharp masked discontinuity.
 
     Returns
     -------
@@ -476,8 +543,12 @@ def laplacian_latlon(
     ) / dlon ** 2
 
     # d/dφ(cos φ df/dφ): finite difference with cos(lat) metric
+    # When a mask is provided, fill land cells so meridional gradients
+    # do not see the ocean-to-zero discontinuity.
+    f_merid = _neumann_fill_latlon(f, mask) if mask is not None else f
+
     # Pad in lat with boundary values
-    f_pad = jnp.concatenate([f[0:1], f, f[-1:]], axis=0)
+    f_pad = jnp.concatenate([f_merid[0:1], f_merid, f_merid[-1:]], axis=0)
 
     # df/dφ at half-levels
     df_north = (f_pad[2:] - f_pad[1:-1]) / dlat  # north face of cell i

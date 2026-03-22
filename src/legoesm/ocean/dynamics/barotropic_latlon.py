@@ -105,14 +105,14 @@ def barotropic_substeps_latlon(
         # Optional Laplacian damping
         if config.barotropic_diffusion_alpha > 0.0:
             eta_new = (
-                eta_new + nu_dt * laplacian_latlon(eta_new, grid).astype(eta.dtype)
+                eta_new + nu_dt * laplacian_latlon(eta_new, grid, mask=mask).astype(eta.dtype)
             ) * mask
             eta_new = jnp.maximum(eta_new, eta_floor) * mask
             U_bar_new = (
-                U_bar_new + nu_dt * laplacian_latlon(U_bar_new, grid).astype(eta.dtype)
+                U_bar_new + nu_dt * laplacian_latlon(U_bar_new, grid, mask=mask).astype(eta.dtype)
             ) * mask
             V_bar_new = (
-                V_bar_new + nu_dt * laplacian_latlon(V_bar_new, grid).astype(eta.dtype)
+                V_bar_new + nu_dt * laplacian_latlon(V_bar_new, grid, mask=mask).astype(eta.dtype)
             ) * mask
 
         return (eta_new, U_bar_new, V_bar_new)
