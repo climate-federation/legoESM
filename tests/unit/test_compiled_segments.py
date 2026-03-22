@@ -42,6 +42,11 @@ N = 4          # Small resolution for fast tests
 NLEV = 3
 DT = 600.0     # 10-minute timestep
 
+
+def _copy_carry(carry):
+    """Deep-copy a SegmentCarry so the original survives buffer donation."""
+    return jax.tree.map(lambda x: x.copy() if hasattr(x, 'copy') else x, carry)
+
 # Create a real cubed-sphere grid once (expensive to rebuild per test)
 _GRID = create_cubed_sphere(N)
 
@@ -203,7 +208,7 @@ class TestSegmentCarryRoundtrip:
             step_index=42,
         )
 
-        new_state, qv_out, qc_out, qr_out, held_tuple, step_idx = \
+        new_state, qv_out, qc_out, qr_out, held_tuple, step_idx, precip = \
             unpack_carry(carry, state)
 
         np.testing.assert_array_equal(np.asarray(new_state.T.data),
@@ -376,8 +381,8 @@ class TestBuildSegmentFn:
             step_index=0,
         )
 
+        T_init = np.asarray(carry.T)  # save before donation
         result = run_segment(carry, 10)
-        T_init = np.asarray(carry.T)
         T_final = np.asarray(result.T)
 
         # dynamics adds increment*dt/86400 per step
@@ -521,6 +526,10 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args):
         u_upd = u_new * fric_decay
         v_upd = v_new * fric_decay
 
+        # Accumulate precipitation
+        precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
+        precip_accum = carry.precip_accum + precip_step * dt
+
         carry = SegmentCarry(
             u=u_upd, v=v_upd, T=T_upd,
             p_s=p_s_new, phis=carry.phis,
@@ -532,6 +541,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args):
             held_lw_up_toa=held_new[4],
             held_sw_down_toa=held_new[5],
             step_index=step_idx + 1,
+            target_moisture=carry.target_moisture,
+            precip_accum=precip_accum,
         )
     return carry
 
@@ -562,9 +573,9 @@ class TestEquivalence:
         args = _make_segment_fn_args()
         carry_init = self._make_init_carry()
 
-        # Compiled path
+        # Compiled path (copy carry since run_segment donates buffers)
         run_segment = build_segment_fn(**args)
-        compiled_result = run_segment(carry_init, 1)
+        compiled_result = run_segment(_copy_carry(carry_init), 1)
 
         # Python loop path
         python_result = _run_per_step_python(
@@ -586,7 +597,7 @@ class TestEquivalence:
         carry_init = self._make_init_carry()
 
         run_segment = build_segment_fn(**args)
-        compiled_result = run_segment(carry_init, 5)
+        compiled_result = run_segment(_copy_carry(carry_init), 5)
 
         python_result = _run_per_step_python(
             args["model"], args["step_unified"], 5, carry_init, args,
@@ -607,11 +618,11 @@ class TestEquivalence:
         carry_init = self._make_init_carry()
         run_segment = build_segment_fn(**args)
 
-        # Single segment of 6
-        result_6 = run_segment(carry_init, 6)
+        # Single segment of 6 (copy carry since donation frees buffers)
+        result_6 = run_segment(_copy_carry(carry_init), 6)
 
         # Two segments of 3
-        result_3a = run_segment(carry_init, 3)
+        result_3a = run_segment(_copy_carry(carry_init), 3)
         result_3b = run_segment(result_3a, 3)
 
         for field_name in SegmentCarry._fields:
@@ -665,22 +676,22 @@ class TestCompileTiming:
             step_index=0,
         )
 
-        # First call (includes JIT compile)
+        # First call (includes JIT compile); copy carry to survive donation
         t0 = time.monotonic()
-        result = run_segment(carry, 3)
+        result = run_segment(_copy_carry(carry), 3)
         jax.block_until_ready(result.T)
         first_time = time.monotonic() - t0
 
-        # Warm up
+        # Warm up (feed result back as input to avoid donated-buffer errors)
         for _ in range(3):
-            result = run_segment(carry, 3)
+            result = run_segment(result, 3)
             jax.block_until_ready(result.T)
 
         # Steady-state calls
         n_warm = 5
         t0 = time.monotonic()
         for _ in range(n_warm):
-            result = run_segment(carry, 3)
+            result = run_segment(result, 3)
             jax.block_until_ready(result.T)
         avg_warm = (time.monotonic() - t0) / n_warm
 
@@ -723,12 +734,12 @@ class TestPhysicsSubComponents:
             step_index=0,
         )
 
+        u_init_abs = float(jnp.max(jnp.abs(carry.u)))  # save before donation
         result = run_segment(carry, 10)
 
         # u starts at 0.5 + dynamics increment, then gets multiplied by 0.99
         # each step.  After 10 steps the magnitude should be smaller than
         # what it would be without friction.
-        u_init_abs = float(jnp.max(jnp.abs(carry.u)))
         u_final_abs = float(jnp.max(jnp.abs(result.u)))
         # The dynamics mock only changes T, not u, so u is damped from 0.5
         # by 0.99^10 ≈ 0.904

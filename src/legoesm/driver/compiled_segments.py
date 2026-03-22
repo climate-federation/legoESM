@@ -364,24 +364,32 @@ def build_segment_fn(
         precip_step = phys_out.precipitation if hasattr(phys_out, 'precipitation') else jnp.zeros_like(p_s_new)
         precip_accum = carry.precip_accum + precip_step * _dt
 
+        # Cast all arrays back to carry input dtypes to prevent
+        # float32→float64 promotion from Python float constants
+        # (e.g., constants.L_v, constants.c_pd) breaking jax.lax.scan.
+        def _match_dtype(new_val, ref_val):
+            if hasattr(ref_val, 'dtype') and hasattr(new_val, 'dtype'):
+                return new_val.astype(ref_val.dtype) if new_val.dtype != ref_val.dtype else new_val
+            return new_val
+
         new_carry = SegmentCarry(
-            u=u_upd,
-            v=v_upd,
-            T=T_upd,
-            p_s=p_s_new,
+            u=_match_dtype(u_upd, carry.u),
+            v=_match_dtype(v_upd, carry.v),
+            T=_match_dtype(T_upd, carry.T),
+            p_s=_match_dtype(p_s_new, carry.p_s),
             phis=carry.phis,
-            q_v=q_v_upd,
-            q_c=q_c_upd,
-            q_r=q_r_upd,
-            held_dT_rad=held_new[0],
-            held_sw_net_sfc=held_new[1],
-            held_lw_net_sfc=held_new[2],
-            held_sw_up_toa=held_new[3],
-            held_lw_up_toa=held_new[4],
-            held_sw_down_toa=held_new[5],
+            q_v=_match_dtype(q_v_upd, carry.q_v),
+            q_c=_match_dtype(q_c_upd, carry.q_c),
+            q_r=_match_dtype(q_r_upd, carry.q_r),
+            held_dT_rad=_match_dtype(held_new[0], carry.held_dT_rad),
+            held_sw_net_sfc=_match_dtype(held_new[1], carry.held_sw_net_sfc),
+            held_lw_net_sfc=_match_dtype(held_new[2], carry.held_lw_net_sfc),
+            held_sw_up_toa=_match_dtype(held_new[3], carry.held_sw_up_toa),
+            held_lw_up_toa=_match_dtype(held_new[4], carry.held_lw_up_toa),
+            held_sw_down_toa=_match_dtype(held_new[5], carry.held_sw_down_toa),
             step_index=step_idx + 1,
             target_moisture=carry.target_moisture,
-            precip_accum=precip_accum,
+            precip_accum=_match_dtype(precip_accum, carry.precip_accum),
         )
         return new_carry, None
 
