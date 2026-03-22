@@ -151,15 +151,19 @@ class TestApplyHardwareConfig:
         # Clear the lazy cache so the mock is picked up by _resolve_lazy.
         import legoesm.atmosphere.dynamics as _dyn_mod
         _dyn_mod._LAZY_CACHE.pop("CDGridShallowWaterModel", None)
-        with patch(
-            "legoesm.runtime.config.bootstrap_from_yaml_config"
-        ) as bootstrap_fn, patch(
-            "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid.CDGridShallowWaterModel",
-            return_value=object(),
-        ):
-            bootstrap_fn.return_value = None  # prevent actual bootstrap
-            create_model("shallow_water", legoesm_config=cfg, grid=object())
-        bootstrap_fn.assert_called_once_with(cfg)
+        try:
+            with patch(
+                "legoesm.runtime.config.bootstrap_from_yaml_config"
+            ) as bootstrap_fn, patch(
+                "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid.CDGridShallowWaterModel",
+                return_value=object(),
+            ):
+                bootstrap_fn.return_value = None  # prevent actual bootstrap
+                create_model("shallow_water", legoesm_config=cfg, grid=object())
+            bootstrap_fn.assert_called_once_with(cfg)
+        finally:
+            # Clear cache again so the mock doesn't leak into subsequent tests
+            _dyn_mod._LAZY_CACHE.pop("CDGridShallowWaterModel", None)
 
 
 class TestConservationPrecisionHook:
