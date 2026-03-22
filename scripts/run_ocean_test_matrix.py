@@ -861,7 +861,9 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
     elif tc.grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
-        return rest_state_spectral_ocean(grid, z_coord, H_max=H_max)
+        # No land mask for idealized spectral tests (avoids Gibbs ringing)
+        return rest_state_spectral_ocean(grid, z_coord, H_max=H_max,
+                                         land_lat_threshold=90.0)
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 

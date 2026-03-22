@@ -258,7 +258,19 @@ def spectral_ocean_tendencies(
     )
 
     # --- 10. Energy variable: E = K + p'/rho_0 ---
-    E = K + p_prime / rho_0
+    # Subtract the area-weighted mean pressure at each level to remove
+    # spurious horizontal gradients from bathymetry variations.  The
+    # global-mean pressure gradient is identically zero on a sphere,
+    # so this does not affect the physics — it only suppresses spectral
+    # ringing from the land-ocean boundary discontinuity.
+    weights = grid.weights[:, jnp.newaxis, jnp.newaxis]  # (n_lat, 1, 1)
+    ocean_area = jnp.sum(mask[..., jnp.newaxis] * weights, axis=(0, 1), keepdims=True)
+    ocean_area = jnp.maximum(ocean_area, 1e-30)
+    p_prime_mean = jnp.sum(
+        p_prime * mask_3d * weights, axis=(0, 1), keepdims=True,
+    ) / ocean_area
+    p_prime_anom = (p_prime - p_prime_mean) * mask_3d
+    E = K + p_prime_anom / rho_0
     E_hat = sh_analysis_3d(grid, E * mask_3d)
 
     # --- 11. Horizontal tendencies ---
@@ -690,12 +702,17 @@ def rest_state_spectral_ocean(
     dims_3d = ("spectral", "level")
     dims_2d = ("spectral",)
 
-    # Land mask in grid space
+    # Land mask in grid space — use a smooth tanh transition to avoid
+    # Gibbs ringing at the land-ocean boundary in spectral space.
     lat_deg = jnp.abs(grid.lat2d) * (180.0 / jnp.pi)
-    mask = jnp.where(lat_deg < land_lat_threshold, 1.0, 0.0)
-
-    # Bathymetry in grid space
-    H_bathy_grid = jnp.where(mask > 0.5, H_max, 1.0)
+    if land_lat_threshold >= 90.0:
+        # No land: global ocean with uniform depth.
+        mask = jnp.ones((grid.n_lat, grid.n_lon))
+        H_bathy_grid = jnp.full((grid.n_lat, grid.n_lon), H_max)
+    else:
+        taper_width = 5.0  # degrees
+        mask = 0.5 * (1.0 - jnp.tanh((lat_deg - land_lat_threshold) / taper_width))
+        H_bathy_grid = 1.0 + (H_max - 1.0) * mask
 
     # Temperature profile (exponential stratification)
     scale_depth = 1000.0

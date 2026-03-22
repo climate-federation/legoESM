@@ -878,15 +878,26 @@ def _extract_hydro_cube_latlon(s):
     }
 
 
-def _extract_hydro_mpas(s, lon_deg, lat_deg):
-    """Extract hydrostatic snapshot fields for icosahedral (MPAS)."""
-    u_raw = np.asarray(s.u.data, dtype=np.float64).ravel()
-    if u_raw.size == lon_deg.size:
-        u_ll = _bin_to_latlon(u_raw, lon_deg, lat_deg)
+def _extract_hydro_mpas(s, lon_cell, lat_cell, lon_edge=None, lat_edge=None):
+    """Extract hydrostatic snapshot fields for icosahedral (MPAS).
+
+    MPAS uses C-grid staggering: u on edges, T/p_s on cells.
+    We need separate coordinates for edge-based and cell-based fields.
+    """
+    # Cell-based fields
+    ps_ll = _bin_to_latlon(
+        np.asarray(s.p_s.data, dtype=np.float64), lon_cell, lat_cell)
+
+    # Edge-based u: use edge coordinates if available, else regrid
+    # the cell-reconstructed velocity
+    if lon_edge is not None and lat_edge is not None:
+        u_sfc = np.asarray(s.u.data, dtype=np.float64)
+        if u_sfc.ndim > 1:
+            u_sfc = u_sfc[:, -1]  # surface level
+        u_ll = _bin_to_latlon(u_sfc, lon_edge, lat_edge)
     else:
         u_ll = np.full((181, 360), np.nan, dtype=np.float64)
-    ps_ll = _bin_to_latlon(
-        np.asarray(s.p_s.data, dtype=np.float64), lon_deg, lat_deg)
+
     return {
         "u": u_ll,
         "p_s": ps_ll,
@@ -1310,9 +1321,11 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+        lon_edge = np.asarray(mesh.lonEdge, dtype=np.float64) * 180 / np.pi
+        lat_edge = np.asarray(mesh.latEdge, dtype=np.float64) * 180 / np.pi
 
         def extract_fn(s):
-            return _extract_hydro_mpas(s, lon_cell, lat_cell)
+            return _extract_hydro_mpas(s, lon_cell, lat_cell, lon_edge, lat_edge)
 
         key_array_fn = lambda s: s.T.data
         coord_kind = "icosa"
@@ -1484,13 +1497,12 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
 
     elif tc.grid_type == "latlon":
-        # baroclinic_wave_init is typed for CubedSphereGrid; try it anyway
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
             LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
         from legoesm.atmosphere.physics.baroclinic_wave import (
-            baroclinic_wave_init)
+            baroclinic_wave_init_latlon)
         from legoesm.core.operators_latlon import (
             global_integral as global_integral_ll)
 
@@ -1507,7 +1519,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
             div_damp_coeff=dd, A_h=ah,
             use_conservation_fixer=True, fix_mass=True)
         model = LatLonPrimitiveEquationModel(grid, sigma, config)
-        state = baroclinic_wave_init(grid, sigma_for_init, perturbed=True)
+        state = baroclinic_wave_init_latlon(grid, sigma_for_init, perturbed=True)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
@@ -1571,9 +1583,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+        lon_edge = np.asarray(mesh.lonEdge, dtype=np.float64) * 180 / np.pi
+        lat_edge = np.asarray(mesh.latEdge, dtype=np.float64) * 180 / np.pi
 
         def extract_fn(s):
-            return _extract_hydro_mpas(s, lon_cell, lat_cell)
+            return _extract_hydro_mpas(s, lon_cell, lat_cell, lon_edge, lat_edge)
 
         key_array_fn = lambda s: s.T.data
         coord_kind = "icosa"
@@ -1699,8 +1713,8 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     test_num = tc.run_kwargs["test_num"]
 
     if tc.grid_type != "cubed_sphere":
-        raise NotImplementedError(
-            f"DCMIP transport not yet implemented for grid '{tc.grid_type}'")
+        record(tc, "SKIP", 0.0, f"DCMIP transport only implemented for cubed_sphere")
+        return "SKIP", 0.0, ""
 
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.tracer_transport import (
@@ -1887,8 +1901,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
 
     elif tc.grid_type == "icosahedral":
-        raise NotImplementedError(
-            "AMIP not yet implemented for icosahedral grid")
+        record(tc, "SKIP", 0.0, "AMIP not yet implemented for icosahedral grid")
+        return "SKIP", 0.0, ""
 
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import (
@@ -2081,8 +2095,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         if test_case != "tc1":
-            raise NotImplementedError(
-                f"MPAS NH only supports tc1, got {test_case}")
+            record(tc, "SKIP", 0.0, f"MPAS NH only supports tc1, got {test_case}")
+            return "SKIP", 0.0, ""
 
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
@@ -2108,15 +2122,20 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+        lon_edge = np.asarray(mesh.lonEdge, dtype=np.float64) * 180 / np.pi
+        lat_edge = np.asarray(mesh.latEdge, dtype=np.float64) * 180 / np.pi
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
         def check_fn(s):
-            return (check_finite({
-                "u": s.u.data, "w": s.w.data,
-                "theta": s.theta_prime.data}),
-                float(jnp.max(jnp.abs(s.u.data))))
+            # u is on edges (nEdges, nlev), w/theta on cells (nCells, nlev)
+            # check each independently to avoid shape mismatch
+            u_ok = check_finite({"u": s.u.data})
+            cell_ok = check_finite({
+                "w": s.w.data, "theta": s.theta_prime.data})
+            metric = float(jnp.max(jnp.abs(s.w.data)))
+            return (u_ok and cell_ok, metric)
 
         def scalar_fn(s):
             return {
@@ -2126,10 +2145,13 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             }
 
         def extract_fn(s):
-            u_raw = np.asarray(s.u.data, dtype=np.float64).ravel()
-            u_ll = (_bin_to_latlon(u_raw, lon_cell, lat_cell)
-                    if u_raw.size == lon_cell.size
-                    else np.full((181, 360), np.nan))
+            # u is on edges (nEdges, nlev) — use edge coordinates
+            u_sfc = np.asarray(s.u.data, dtype=np.float64)
+            if u_sfc.ndim > 1:
+                u_sfc = u_sfc[:, -1]  # surface level
+            u_ll = _bin_to_latlon(u_sfc, lon_edge, lat_edge)
+
+            # w is on cells (nCells, nlev+1) — use cell coordinates
             w_arr = np.asarray(s.w.data, dtype=np.float64)
             if w_arr.ndim >= 2 and w_arr.shape[0] == lon_cell.size:
                 w_mid = w_arr[:, min(
@@ -2153,22 +2175,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             getattr(hcoord, "z_full", np.arange(nlev)), dtype=np.float64)
 
     elif tc.grid_type == "latlon":
-        from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
-            FVCompressibleEulerLatLonModel, FVCompressibleEulerLatLonConfig)
-
-        if test_case != "tc1":
-            raise NotImplementedError(
-                f"Lat-lon NH only supports tc1, got {test_case}")
-
-        from tests.test_cases.dcmip2025 import dcmip25_tc1_init
-
-        n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
-        # dcmip25_tc1_init expects CubedSphereGrid; fall back to cube grid
-        # for initialization then reshape — or raise if incompatible
-        raise NotImplementedError(
-            "DCMIP NH init requires CubedSphereGrid; "
-            "lat-lon NH not yet available")
+        record(tc, "SKIP", 0.0, "DCMIP NH init requires CubedSphereGrid; lat-lon NH not yet available")
+        return "SKIP", 0.0, ""
 
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import (
@@ -2264,8 +2272,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         diag_every, key_array_fn,
         label=f"NH {test_case} ({tc.grid_type})", total_days=days)
 
-    w_max = (float(jnp.max(jnp.abs(state.w.data))) if ok
-             else float("nan"))
+    if ok:
+        if hasattr(state, 'w'):
+            w_max = float(jnp.max(jnp.abs(state.w.data)))
+        elif hasattr(state, 'w_hat'):
+            from legoesm.grids.gaussian import sh_synthesis_3d
+            w_max = float(jnp.max(jnp.abs(sh_synthesis_3d(grid, state.w_hat.data))))
+        else:
+            w_max = float("nan")
+    else:
+        w_max = float("nan")
     notes = f"|w|_max={w_max:.4f} m/s, dt={dt:.2f}s"
 
     _write_results_txt(output_dir, {

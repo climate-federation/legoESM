@@ -382,3 +382,52 @@ def baroclinic_wave_init(
         phis=Field(data=jnp.zeros((6, n, n)),
                    name="phis", dims=dims_2d, units="m^2/s^2"),
     )
+
+
+def baroclinic_wave_init_latlon(
+    grid,
+    sigma_coord: SigmaCoordinate,
+    perturbed: bool = True,
+) -> HydrostaticState:
+    """Create baroclinic wave initial conditions for a lat-lon grid.
+
+    Same physics as :func:`baroclinic_wave_init` but for lat-lon grids
+    where ``grid.lat`` is 1-D ``(n_lat,)`` and ``grid.lon`` is 1-D
+    ``(n_lon,)``.  No wind rotation is needed (grid axes = geographic).
+    """
+    nlev = sigma_coord.n_levels
+    # Build 2D coordinate arrays from 1D lat/lon
+    lat_1d = jnp.asarray(grid.lat)   # (n_lat,)
+    lon_1d = jnp.asarray(grid.lon)   # (n_lon,)
+    lat = lat_1d[:, None]            # (n_lat, 1) — broadcasts with (n_lat, n_lon)
+    lon = lon_1d[None, :]            # (1, n_lon)
+    n_lat = lat_1d.size
+    n_lon = lon_1d.size
+
+    sigma_full = sigma_coord.sigma_full
+
+    p_s = jnp.full((n_lat, n_lon), P0)
+    u_3d = jnp.zeros((n_lat, n_lon, nlev))
+    v_3d = jnp.zeros((n_lat, n_lon, nlev))
+    T_3d = jnp.zeros((n_lat, n_lon, nlev))
+
+    for k in range(nlev):
+        p_target = jnp.full((n_lat, n_lon), float(sigma_full[k]) * P0)
+        z_k = find_z_for_pressure(p_target, lat)
+        _, T_k = evaluate_pressure_temperature(z_k, lat)
+        u_k = compute_zonal_wind(z_k, lat, T_k)
+        if perturbed:
+            u_k = u_k + exponential_perturbation(lat, lon, z_k)
+        u_3d = u_3d.at[:, :, k].set(u_k)
+        T_3d = T_3d.at[:, :, k].set(T_k)
+
+    dims_3d = ("lat", "lon", "level")
+    dims_2d = ("lat", "lon")
+    return HydrostaticState(
+        u=Field(data=u_3d, name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=v_3d, name="v", dims=dims_3d, units="m/s"),
+        T=Field(data=T_3d, name="T", dims=dims_3d, units="K"),
+        p_s=Field(data=p_s, name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(data=jnp.zeros((n_lat, n_lon)),
+                   name="phis", dims=dims_2d, units="m^2/s^2"),
+    )
