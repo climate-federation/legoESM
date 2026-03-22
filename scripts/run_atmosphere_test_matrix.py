@@ -1026,6 +1026,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
             williamson_test2_mpas, williamson_test5_mpas,
             compute_error_norms_mpas)
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
@@ -1053,9 +1054,18 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             }
 
         def extract_fn(s):
-            return {"height": _bin_to_latlon(
-                np.asarray(s.h.data, dtype=np.float64),
-                lon_cell, lat_cell)}
+            u_e, v_n = reconstruct_cell_velocity(s.u.data, mesh)
+            u = np.asarray(u_e, dtype=np.float64)
+            v = np.asarray(v_n, dtype=np.float64)
+            return {
+                "u": _bin_to_latlon(u, lon_cell, lat_cell),
+                "v": _bin_to_latlon(v, lon_cell, lat_cell),
+                "wind_speed": _bin_to_latlon(
+                    np.sqrt(u ** 2 + v ** 2), lon_cell, lat_cell),
+                "height": _bin_to_latlon(
+                    np.asarray(s.h.data, dtype=np.float64),
+                    lon_cell, lat_cell),
+            }
 
         key_array_fn = lambda s: s.h.data
         coord_kind = "latlon"  # already regridded
@@ -1063,7 +1073,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         lat_deg = np.linspace(-90, 90, 181)
 
     elif tc.grid_type == "spectral":
-        from legoesm.grids.gaussian import create_gaussian_grid, sh_synthesis
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid, sh_synthesis, uv_from_vordiv)
         from legoesm.atmosphere.dynamics.spectral_sw import (
             SpectralShallowWaterModel, SpectralSWConfig,
             williamson_test2_spectral, williamson_test5_spectral,
@@ -1094,20 +1105,28 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
         def scalar_fn(s):
             phi = sh_synthesis(grid, s.phi_hat.data)
+            u_cos, v_cos = uv_from_vordiv(
+                grid, s.vor_hat.data, s.div_hat.data)
+            cos2d = grid.cos_lat[:, None]
+            ws = jnp.sqrt((u_cos / cos2d) ** 2 + (v_cos / cos2d) ** 2)
             return {
                 "mean_height": float(jnp.mean(phi / constants.g)),
-                "max_wind": float(jnp.max(jnp.abs(
-                    sh_synthesis(grid, s.vor_hat.data)))),
+                "max_wind": float(jnp.max(ws)),
             }
 
         def extract_fn(s):
             phi = np.asarray(sh_synthesis(grid, s.phi_hat.data),
                              dtype=np.float64)
-            vor = np.asarray(sh_synthesis(grid, s.vor_hat.data),
-                             dtype=np.float64)
+            u_cos, v_cos = uv_from_vordiv(
+                grid, s.vor_hat.data, s.div_hat.data)
+            cos2d = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
+            u = np.asarray(u_cos, dtype=np.float64) / cos2d
+            v = np.asarray(v_cos, dtype=np.float64) / cos2d
             return {
+                "u": u,
+                "v": v,
+                "wind_speed": np.sqrt(u ** 2 + v ** 2),
                 "height": phi / float(constants.g),
-                "vorticity": vor,
             }
 
         key_array_fn = lambda s: s.phi_hat.data
