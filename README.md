@@ -152,7 +152,7 @@ python -c "import jax; print(jax.default_backend())"
 
 ## Documentation
 
-- [SPECIFICATION.md](SPECIFICATION.md) — Full technical specification (v3.6)
+- [SPECIFICATION.md](SPECIFICATION.md) — Full technical specification (v3.8)
 - [docs/implementation_summary.md](docs/implementation_summary.md) — Comprehensive summary of all implementations and tests
 - [docs/cmip_readiness.md](docs/cmip_readiness.md) — CMIP production readiness checklist
 - [docs/amip.md](docs/amip.md) — AMIP experiment guide

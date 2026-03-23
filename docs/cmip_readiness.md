@@ -122,10 +122,9 @@ Status of legoESM components for CMIP-class production experiments.
 
 ## Remaining Gaps for CMIP Production
 
-1. **Aerosol-radiation coupling**: AOD is loaded but not applied to SW radiation.
-2. **Ozone-radiation coupling**: Ozone is loaded but not passed to radiation.
-3. **Volcanic forcing**: No stratospheric aerosol injection events.
-4. **Land-use change**: Static land mask, no transient land cover.
-5. **Dynamic vegetation**: No interactive LAI (currently prescribed).
-6. **Spectral solar distribution**: Only broadband TSI, no spectral bands.
-7. **Ice sheet dynamics**: No shallow-ice/shallow-shelf approximation.
+1. **Land-use change**: Static land mask, no transient land cover.
+2. **Dynamic vegetation**: No interactive LAI (currently prescribed).
+3. **Spectral solar distribution**: Only broadband TSI, no spectral bands.
+4. **Interactive aerosol-cloud coupling**: AOD affects radiation but not cloud droplet number concentration.
+5. **Ice sheet dynamics**: No shallow-ice/shallow-shelf approximation.
+6. **Atmospheric chemistry**: No prognostic CH4/N2O/CFC/O3 tracers (prescribed only).

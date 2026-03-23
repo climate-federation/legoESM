@@ -1,6 +1,6 @@
 # legoESM — Implementation Summary
 
-*Last updated: 2026-03-14*
+*Last updated: 2026-03-23*
 
 ## Overview
 
@@ -258,7 +258,7 @@ legoESM is a fully differentiable Earth System Model implemented in JAX, compris
 
 ## 12. Test Suite
 
-**103 test files, 1700+ individual tests** across 7 test directories.
+**123 test files, 2500+ individual tests** across 10 test directories. All tests pass (0 failures; 9 skipped for optional dependencies).
 
 ### Test Categories
 

@@ -1,10 +1,50 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.7
+## Technical Specification v3.8
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-18 (updated from v3.6, 2026-03-14)
+**Date**: 2026-03-23 (updated from v3.7, 2026-03-18)
+
+---
+
+### Changelog (v3.8, 2026-03-23)
+
+**Production hardening, operationalization, and full test-suite stabilization:**
+
+1. **Full test suite stabilization** (35 → 0 failures): Systematic diagnosis and fix of all test regressions across the 2500+ test suite. Fixes spanned 9 distinct bug classes across 30+ files. All atmosphere (spectral, lat-lon FV, MPAS, cubed-sphere) and ocean (cubed-sphere, spectral, MPAS) test cases now pass with physically correct behavior. See §10.
+
+2. **physics_fn NamedTuple unpacking fix** (12 dycore files): All dynamical cores that accept a `physics_fn` callback now correctly distinguish between plain-tuple returns `(tendencies, extra)` and NamedTuple returns (e.g., `HydrostaticTendencies`) using `type(result) is tuple` instead of `isinstance(result, tuple)`. The previous code incorrectly indexed into NamedTuple fields because NamedTuples inherit from tuple. See §4.1.
+
+3. **Solver name resolution priority** (`atmosphere/dynamics/__init__.py`): The two-axis resolver (`dynamics` + `discretization`) now correctly takes priority over the legacy `equations` key when both are present. Previously, a stale default `equations: "shallow_water"` in the YAML config would override explicit `dynamics: "hydrostatic", discretization: "spectral"` selections, routing to the wrong solver. See §9.
+
+4. **jax.lax.scan/cond dtype harmonization** (`compiled_segments.py`, `physics_pipeline.py`, `thermodynamics.py`): Systematic fix for float32→float64 promotion inside JAX functional primitives. Python float constants (e.g., `constants.L_v`, `constants.c_pd`) promoted float32 carry arrays to float64, breaking `jax.lax.scan` type constraints. Fix: (a) `_match_dtype()` in compiled segments casts all carry outputs to input dtypes; (b) both `jax.lax.cond` branches in `build_step_unified()` cast outputs to `jnp.result_type(T, p_s)`; (c) `compute_moist_adiabat` promotes inputs to common dtype before scan. See §3.4, §5.
+
+5. **Ensemble execution wired into ModelDriver** (`driver/model_driver.py`): When `config.ensemble_size > 1`, the driver now: (a) perturbs initial conditions via `perturb_initial_conditions()` to create batched state with leading ensemble dimension `(n_members, 6, n, n, nlev)`; (b) tiles tracers and held radiation arrays; (c) vmaps `run_segment()` over the ensemble dimension; (d) computes ensemble mean for diagnostics. The ensemble dimension flows through `jax.lax.scan` + `jax.vmap` with correct AD semantics. See §6.2.4.
+
+6. **Ensemble infrastructure fixes** (`parallel/ensemble.py`): `perturb_initial_conditions()` and `ensemble_spread()` now skip `None` fields (e.g., optional tracers in `HydrostaticState`) instead of crashing. Field metadata preservation uses `hasattr(val, 'replace')` to distinguish `Field` objects from raw arrays. 32/32 ensemble tests pass. See §6.2.4.
+
+7. **Cloud-radiation coupling wired** (`driver/physics_pipeline.py`, `driver/config.py`): The `ExperimentConfig.cloud_scheme` field now properly gates `include_clouds` in the RRTMGP radiation config. When `cloud_scheme != "none"` (e.g., `"sundqvist"` or `"xu_randall"`), RRTMGP includes cloud optics. Config validation warns when `cloud_scheme` is set with gray radiation. See §4.1.6.
+
+8. **Production config validation** (`driver/config.py`): New `validate_strict()` method raises `ValueError` for invalid parameters (resolution ≤ 0, nlev ≤ 0, dt ≤ 0, p_top_Pa ≤ 0, negative diffusion scales, days ≤ 0). Called at the top of `ModelDriver.setup()` to fail fast before JIT compilation. See §9.
+
+9. **Configurable RRTMGP data directory** (`data_loader_base.py`): Replaced hardcoded `/tmp/netcdf/data` with configurable `LEGOESM_DATA_DIR` environment variable, falling back to a project-relative path. Replaced `assert` statements with proper `FileNotFoundError` for production robustness. See §7.
+
+10. **GridProtocol: grid_shape_2d** (`grids/protocol.py`, 4 grid implementations): New `grid_shape_2d` property on `GridProtocol` returns the native 2D spatial shape for each grid type: `(6, n, n)` for cubed-sphere, `(n_lat, n_lon)` for lat-lon/Gaussian, `(nCells,)` for Voronoi. Eliminates 5+ grid-type string dispatches in `ModelDriver` in favor of Protocol-based access. See §3.1.
+
+11. **Shared pytree arithmetic** (`timestepping/pytree_ops.py`): Extracted `pytree_axpy` and `pytree_linear_combination` into a shared module, eliminating 4 identical copies across `ssp_rk3.py`, `ssp_rk34.py`, `ssp_rk54.py`, and `split_explicit.py`. See §3.4.
+
+12. **Shared polar filter** (`core/filters.py`): Extracted duplicate `_filter_state` function from `primitive_eq_fv_latlon.py` and `primitive_eq_latlon.py` into a shared module. See §3.4.
+
+13. **AMIP forcing I/O safety** (`forcing/amip.py`): Wrapped `xr.open_dataset()` with `try/finally` to prevent file handle leaks on error. Added descriptive error messages for missing files. See §7.
+
+14. **Buffer donation safety in compiled segments** (`compiled_segments.py`): Tests properly handle `donate_argnums=(0,)` buffer donation — input carry is copied before calls when the original needs to survive. See §3.4.
+
+15. **Gradient checkpointing heuristic** (`compiled_segments.py`, `model_driver.py`): Auto-enables `jax.checkpoint` wrapping of the scan body when segment length exceeds 50 steps, preventing OOM during reverse-mode AD on large grids. See §5, §6.
+
+16. **Stale import cleanup**: Ocean tests updated to import from canonical `ocean_pe_cdgrid` instead of deprecated `ocean_pe` wrapper. Test source-inspection assertions updated for C-D grid operator names. See §10.
+
+17. **Test infrastructure**: Optional-dependency tests gated with `pytest.importorskip` (torch, imageio). Lazy-import cache cleanup prevents cross-test contamination from mock patches. **Test suite: 2500+ tests, 0 failures, 9 skipped (optional deps).** See §10.
 
 ---
 
@@ -2550,12 +2590,12 @@ Run for 15 days. Validate:
 | Physics schemes | 25+ across 5 categories |
 | Ocean physics | 12 schemes across 5 categories |
 | Bulk flux schemes | 3 (MOST fixed-z0, COARE 3.0, Large & Yeager 2004) |
-| Test files | 79 (unit + integration + distributed + validation) |
-| Test count | 1350+ (all passing) |
+| Test files | 123 (unit + integration + distributed + validation) |
+| Test count | 2500+ (all passing; 9 skipped for optional deps) |
 | Research scripts | 26 |
-| Grids | 3 (cubed-sphere, lat-lon, Gaussian) |
-| Time integrators | 6 |
-| Discretization families | 5 (centered, FV/PPM, spectral, FC-Gram, C-grid) |
+| Grids | 4 (cubed-sphere, lat-lon, Gaussian, Voronoi/MPAS) |
+| Time integrators | 6 (SSP-RK3, SSP-RK34, SSP-RK54, split-explicit, semi-implicit, leapfrog-RAW) |
+| Discretization families | 6 (C-D grid FV3, FV/PPM, spectral, FC-Gram, C-grid, MPAS/Voronoi) |
 
 ---
 
