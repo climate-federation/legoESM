@@ -59,6 +59,7 @@ class ModelDriver:
         self._f_land = None
         self._fric_decay = None
         self._qv_smooth_coeff = None
+        self._hyperdiffusion_3d_fn = None
         self._ensemble_size = 1
 
         if output_dir is not None:
@@ -494,6 +495,13 @@ class ModelDriver:
         )
         self._fric_decay = jnp.exp(-k_f * DT)
         self._qv_smooth_coeff = self._hyperdiff * 0.5
+
+        # Select grid-appropriate hyperdiffusion operator
+        if cfg.grid.grid_type == "cubed_sphere":
+            from legoesm.core.operators_3d import hyperdiffusion_3d
+        else:
+            from legoesm.core.operators_latlon_3d import hyperdiffusion_3d
+        self._hyperdiffusion_3d_fn = hyperdiffusion_3d
 
     def _save_config(self) -> None:
         """Save experiment config to output directory.
@@ -940,6 +948,7 @@ class ModelDriver:
                     if cfg.gradient_checkpoint
                     else segment_length > 50
                 ),
+                hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
             )
 
             # Pack state into carry
@@ -1059,7 +1068,7 @@ class ModelDriver:
         This path is retained for debugging and as a reference
         implementation.  For production use, prefer ``run(compiled=True)``.
         """
-        from legoesm.core.operators_3d import hyperdiffusion_3d
+        hyperdiffusion_3d = self._hyperdiffusion_3d_fn
         from legoesm.forcing.external import get_solar_forcing_at_time
 
         cfg = self.config

@@ -578,6 +578,24 @@ class HybridSigmaPressureCoordinate(NamedTuple):
         return jnp.diff(self.sigma_full)
 
     @property
+    def ln_ratio(self):
+        """Log ratio ln(p_half[k+1]/p_half[k]) at reference pressure.
+
+        Provides SigmaCoordinate-compatible access for routines like
+        ``compute_geopotential`` that expect a ``ln_ratio`` attribute.
+        """
+        return self.ln_ratio_ref
+
+    @property
+    def alpha(self):
+        """Simmons-Burridge alpha coefficient at reference pressure.
+
+        Provides SigmaCoordinate-compatible access for routines like
+        ``compute_geopotential`` that expect an ``alpha`` attribute.
+        """
+        return self.alpha_ref
+
+    @property
     def fractional_sigma(self):
         """Fractional sigma for sigma-dot computation.
 

@@ -222,6 +222,7 @@ def build_segment_fn(
     aerosol_od,
     start_day: float,
     gradient_checkpoint: bool | None = None,
+    hyperdiffusion_3d_fn=None,
 ):
     """Build a compiled segment function.
 
@@ -272,8 +273,12 @@ def build_segment_fn(
     callable
         ``run_segment(carry: SegmentCarry, n_steps: int) -> SegmentCarry``
     """
-    from legoesm.core.operators_3d import hyperdiffusion_3d
     from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
+
+    if hyperdiffusion_3d_fn is None:
+        from legoesm.core.operators_3d import hyperdiffusion_3d
+    else:
+        hyperdiffusion_3d = hyperdiffusion_3d_fn
 
     do_sat_adjust = (microphysics == "none")
 
