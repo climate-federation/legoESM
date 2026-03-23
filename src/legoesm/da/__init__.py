@@ -1,38 +1,105 @@
-"""Data assimilation module for legoESM (**experimental / stub**).
+"""4D-Var data assimilation module for legoESM.
 
-.. warning::
+Provides grid-agnostic variational data assimilation exploiting JAX's
+automatic differentiation for adjoint-free 4D-Var.
 
-   This module is **experimental** and provides only stub interfaces.
-   No data assimilation functionality is implemented yet.  Importing
-   this module directly (``from legoesm.da import ...``) is fine, but
-   it is intentionally **not** re-exported from the top-level
-   ``legoesm`` package to avoid polluting the public namespace.
-
-Future plans include ensemble-based and variational data assimilation
-methods for parameter estimation and uncertainty quantification.
+Modules
+-------
+control_vector : Control variable <-> state transforms
+background_error : B matrix (diagonal, diffusion, spectral, hybrid)
+observation : Observation containers and operators
+cost_function : 4D-Var cost function J = J_b + J_o
+minimizer : On-device L-BFGS and CG solvers
+preconditioning : Change-of-variable B^{1/2} preconditioning
+incremental : Incremental 4D-Var outer/inner loop driver
+cycling : Sequential analysis-forecast cycling
 """
 
-import logging
-import warnings
-
-__all__: list[str] = []
-
-logger = logging.getLogger(__name__)
-
-_DA_NOT_IMPLEMENTED_MSG = (
-    "legoesm.da is an experimental stub. "
-    "'{name}' is not yet implemented.  "
-    "See the module docstring for current status."
+from legoesm.da.control_vector import (
+    ControlEntry,
+    ControlVectorSpec,
+    build_control_spec,
+    control_to_increment,
+    control_to_state,
+    state_to_control,
+)
+from legoesm.da.background_error import (
+    DiagonalB,
+    DiffusionB,
+    SpectralB,
+    HybridB,
+)
+from legoesm.da.observation import (
+    Observation,
+    DiagonalR,
+    DirectObsOperator,
+    InterpolatingObsOperator,
+    ColumnIntegralObsOperator,
+    CompositeObsOperator,
+    generate_synthetic_obs,
+)
+from legoesm.da.cost_function import (
+    build_cost_fn,
+    build_cost_and_grad_fn,
+)
+from legoesm.da.minimizer import (
+    MinimizationResult,
+    minimize_lbfgs,
+    minimize_cg,
+)
+from legoesm.da.preconditioning import preconditioned_cost_fn
+from legoesm.da.incremental import (
+    IncrementalConfig,
+    IncrementalDiagnostics,
+    incremental_4dvar,
+)
+from legoesm.da.cycling import (
+    CyclingConfig,
+    run_cycling,
+)
+from legoesm.da._diagnostics import (
+    compute_innovation_statistics,
+    log_minimization_progress,
 )
 
-
-def __getattr__(name):
-    """Data assimilation functionality is not yet implemented."""
-    warnings.warn(
-        _DA_NOT_IMPLEMENTED_MSG.format(name=name),
-        stacklevel=2,
-    )
-    raise AttributeError(
-        f"module 'legoesm.da' has no attribute {name!r}. "
-        "The DA module is an experimental stub."
-    )
+__all__ = [
+    # control_vector
+    "ControlEntry",
+    "ControlVectorSpec",
+    "build_control_spec",
+    "control_to_increment",
+    "control_to_state",
+    "state_to_control",
+    # background_error
+    "DiagonalB",
+    "DiffusionB",
+    "SpectralB",
+    "HybridB",
+    # observation
+    "Observation",
+    "DiagonalR",
+    "DirectObsOperator",
+    "InterpolatingObsOperator",
+    "ColumnIntegralObsOperator",
+    "CompositeObsOperator",
+    "generate_synthetic_obs",
+    # cost_function
+    "build_cost_fn",
+    "build_cost_and_grad_fn",
+    # minimizer
+    "MinimizationResult",
+    "minimize_lbfgs",
+    "minimize_cg",
+    # preconditioning
+    "preconditioned_cost_fn",
+    # incremental
+    "IncrementalConfig",
+    "IncrementalDiagnostics",
+    "incremental_4dvar",
+    # cycling
+    "CyclingConfig",
+    "run_cycling",
+    # diagnostics
+    "compute_innovation_statistics",
+    "log_minimization_progress",
+]
