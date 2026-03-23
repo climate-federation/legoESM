@@ -316,6 +316,7 @@ def test_load_s2s_sample_supports_arco_sst_cache_and_land_sea_mask(tmp_path: Pat
 
 
 def test_torch_dataloader_and_iterator_preserve_sfno_s2s_batch_contract(tmp_path: Path):
+    pytest.importorskip("torch", reason="Torch required for DataLoader test")
     target = build_target_grid(3)
     config = _write_minimal_s2s_store(tmp_path)
 
