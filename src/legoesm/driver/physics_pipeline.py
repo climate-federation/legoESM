@@ -443,7 +443,9 @@ def _build_rrtmgp_radiation_fn(config):
                      lat_col, lon_col, day_of_year, seconds_of_day,
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
-                     co2_vmr=None, ch4_vmr=None, n2o_vmr=None):
+                     co2_vmr=None, ch4_vmr=None, n2o_vmr=None,
+                     cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_r_eff_liq=None, cloud_r_eff_ice=None):
         if diurnal:
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
@@ -460,6 +462,10 @@ def _build_rrtmgp_radiation_fn(config):
             o3_vmr=o3_vmr_col,
             aerosol_optical_depth=aerosol_od_col,
             solar_spectral_fraction=solar_weights if solar_weights.size > 0 else None,
+            cloud_path_liq=cloud_path_liq,
+            cloud_path_ice=cloud_path_ice,
+            cloud_r_eff_liq=cloud_r_eff_liq,
+            cloud_r_eff_ice=cloud_r_eff_ice,
         )
 
     return radiation_fn
@@ -491,7 +497,7 @@ def _resolve_convection(config):
     # The original pipeline always used SBM.  With a registry we can
     # support any convection scheme; for now we default to SBM to
     # preserve exact numerical behaviour.
-    scheme = getattr(config, "convection", "sbm")
+    scheme = config.convection
     if scheme == "none":
         # Provide a no-op convection that returns zeros
         return _noop_convection, None

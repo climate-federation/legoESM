@@ -58,6 +58,7 @@ def initialize_distributed(
     return_topology: bool = False,
     return_layout: bool = False,
     global_n: int | None = None,
+    grid_type: str = "cubed_sphere",
 ) -> DeviceConfig | tuple:
     """Initialize JAX distributed runtime and set up MPI halo exchange.
 
@@ -100,6 +101,15 @@ def initialize_distributed(
         if return_layout:
             result.append(_active_layout)
         return tuple(result) if len(result) > 1 else result[0]
+
+    # Distributed mode currently only supports cubed-sphere decomposition.
+    _SUPPORTED_DISTRIBUTED_GRIDS = {"cubed_sphere"}
+    if grid_type not in _SUPPORTED_DISTRIBUTED_GRIDS:
+        raise ValueError(
+            f"Distributed (MPI) execution does not support grid_type={grid_type!r}. "
+            f"Supported: {sorted(_SUPPORTED_DISTRIBUTED_GRIDS)}. "
+            f"Use single-node execution for {grid_type} grids."
+        )
 
     # Validate MPI dependencies before touching JAX distributed runtime.
     _mpi4jax, MPI = _require_mpi_stack()
@@ -174,7 +184,7 @@ def initialize_distributed(
         backend=local_config.backend,
         is_distributed=True,
         tiling=tiling,
-        grid_type="cubed_sphere",
+        grid_type=grid_type,
     )
     set_active_config(config)
 

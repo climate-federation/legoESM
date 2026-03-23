@@ -194,9 +194,12 @@ def bootstrap_from_yaml_config(config) -> RuntimeConfig:
     if n_devices is None:
         n_devices = "auto"
 
+    grid_type = config.get("grid.type", "cubed_sphere")
+
     return bootstrap(
         precision=precision,
         backend=backend,
         n_devices=n_devices,
         distributed=distributed,
+        grid_type=grid_type,
     )

@@ -57,7 +57,7 @@ def setup_devices(
 
     if distributed:
         from legoesm.parallel.distributed import initialize_distributed
-        return initialize_distributed()
+        return initialize_distributed(grid_type=grid_type)
 
     if grid_type == "latlon":
         return _mesh.create_latlon_mesh(n_devices=n_devices, backend=backend)

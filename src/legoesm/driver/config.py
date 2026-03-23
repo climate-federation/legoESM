@@ -102,6 +102,11 @@ class ExperimentConfig(NamedTuple):
     cloud_scheme: str = "none"
     microphysics: str = "none"
 
+    # Convection / Turbulence / GWD
+    convection: str = "sbm"            # sbm, dca, kuo, mass_flux, edmf, none
+    turbulence: str = "none"           # smagorinsky, louis, tke, none
+    gravity_wave_drag: str = "none"    # rayleigh, lindzen, mcfarlane, none
+
     # Conservation
     fix_moisture: bool = False
 
@@ -166,6 +171,14 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
+        # Reject unsupported coupled/ESM modes with actionable errors.
+        if self.carbon_cycle != "none":
+            errors.append(
+                f"carbon_cycle={self.carbon_cycle!r} is not implemented. "
+                f"ModelDriver is atmosphere-only with prescribed SST/SIC. "
+                f"Set carbon_cycle='none' or use a coupled driver."
+            )
+
         if errors:
             raise ValueError(
                 "Invalid ExperimentConfig:\n  " + "\n  ".join(errors)

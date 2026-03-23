@@ -108,6 +108,20 @@ def jax_native_halo_exchange(data, grid, mesh=None):
     """
     if mesh is not None:
         import warnings
+        # ppermute path only works for face-only sharding (6 faces, no tiles).
+        # Reject sub-face tiling to prevent silent incorrect results.
+        from legoesm.parallel.mesh import get_active_config
+        active_cfg = get_active_config()
+        if active_cfg is not None and getattr(active_cfg, 'tiling', (1, 1)) != (1, 1):
+            warnings.warn(
+                "ppermute halo exchange does not support sub-face tiling "
+                f"(tiling={active_cfg.tiling}). Falling back to local/MPI-based "
+                "exchange. Use mesh=None to suppress this warning.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            from legoesm.grids.halo import pad_halo
+            return pad_halo(data)
         warnings.warn(
             "jax_native_halo_exchange: the ppermute-based code path is "
             "experimental and has not been validated at scale. "
