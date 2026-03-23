@@ -1392,29 +1392,48 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import (
-            sh_analysis, sh_analysis_3d, sh_synthesis_3d)
+            sh_analysis, sh_analysis_3d, sh_synthesis_3d,
+            sh_analysis_oc2_3d, sh_analysis_dmu_3d)
         lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
         lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lon_2d, lat_2d = np.meshgrid(lon, lat, indexing='xy')
+        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
 
-        # Zonal jet in upper layer, weaker reverse in lower
-        u_jet = 0.30 * np.exp(-((lat_2d - 45.0) / 14.0) ** 2)
+        # Temperature with land mask (consistent with FV grids)
         T_hat = state.T_hat.data
         T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
         nlev = T_grid.shape[-1]
-        # Set target temperatures
-        T_grid[..., 0] = 16.0 - 10.0 * np.sin(np.radians(lat_2d)) ** 2
+        T_grid[..., 0] = (16.0 - 10.0 * np.sin(np.radians(lat_2d)) ** 2) * mask
         if nlev > 1:
-            T_grid[..., 1] = 8.0 - 4.0 * np.sin(np.radians(lat_2d)) ** 2
+            T_grid[..., 1] = (8.0 - 4.0 * np.sin(np.radians(lat_2d)) ** 2) * mask
         new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
 
-        # SSH perturbation
+        # Zonal jet -> convert to vorticity/divergence
+        cos_lat = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
+        u_jet = 0.30 * np.exp(-((lat_2d - 45.0) / 14.0) ** 2) * mask
+        u_grid = np.zeros(T_grid.shape, dtype=np.float64)
+        u_grid[..., 0] = u_jet
+        if nlev > 1:
+            u_grid[..., 1] = -0.20 * u_jet
+        u_cos = jnp.array(u_grid * cos_lat[..., None])
+        v_cos = jnp.zeros_like(u_cos)
+        a = grid.radius
+        im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+        one_over_a = 1.0 / a
+        vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
+                   + one_over_a * sh_analysis_dmu_3d(grid, u_cos))
+        div_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
+                   - one_over_a * sh_analysis_dmu_3d(grid, v_cos))
+
+        # SSH perturbation with mask
         eta_pert = 0.05 * np.sin(3.0 * np.radians(lon_2d)) * np.cos(
-            2.0 * np.radians(lat_2d))
+            2.0 * np.radians(lat_2d)) * mask
         eta_pert -= np.mean(eta_pert)
         eta_hat = state.eta_hat.data + sh_analysis(grid, jnp.array(eta_pert))
 
         return state._replace(
+            vor_hat=Field(vor_hat),
+            div_hat=Field(div_hat),
             T_hat=Field(new_T_hat),
             eta_hat=Field(eta_hat))
 
