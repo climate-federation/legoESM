@@ -979,9 +979,6 @@ class ModelDriver:
             # Unpack carry back to driver state.
             # For ensemble runs, unpack the ensemble-mean for diagnostics;
             # keep full ensemble in carry for the next segment.
-            # Re-extract target_moisture from the output carry because
-            # donate_argnums=(0,) invalidates the donated input buffers —
-            # the original _target_moisture would be a deleted array.
             _target_moisture = carry.target_moisture
             if self._ensemble_size > 1:
                 from legoesm.parallel.ensemble import ensemble_mean

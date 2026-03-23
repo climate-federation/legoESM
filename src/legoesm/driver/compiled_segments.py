@@ -404,15 +404,14 @@ def build_segment_fn(
     if gradient_checkpoint:
         _step_fn = jax.checkpoint(_single_step, prevent_cse=False)
 
-    @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
+    @partial(jax.jit, static_argnums=(1,))
     def run_segment(carry: SegmentCarry, n_steps: int) -> SegmentCarry:
         """Run n_steps of the atmosphere integration as a compiled kernel.
 
         Parameters
         ----------
         carry : SegmentCarry
-            Input state.  The input buffers are **donated** — XLA may
-            recycle them in-place for the output, reducing peak memory.
+            Input state.
         n_steps : int
             Number of steps to execute.  This is a **static** argument:
             ``jax.lax.scan`` requires a concrete ``length``, so changing
