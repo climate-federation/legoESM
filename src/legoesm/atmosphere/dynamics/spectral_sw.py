@@ -272,12 +272,13 @@ class SpectralShallowWaterModel:
         )
 
     def filter_initial_state(self, state: SpectralSWState) -> SpectralSWState:
-        """Filter all initial spectral fields including topography.
+        """Filter topography and geopotential in the initial state.
 
-        Call this once before time integration when the initial conditions
-        contain non-smooth fields (e.g. conical/step topography in TC5).
-        The spectral filter removes Gibbs oscillations that would otherwise
-        cause nonlinear instability.
+        Only filters phi_hat (geopotential) and phis_hat (topography) to
+        suppress Gibbs oscillations from non-smooth topography (e.g. the
+        conical mountain in TC5).  Vorticity and divergence are left
+        unchanged so that the prescribed initial wind field is exact
+        (e.g. v=0 for Williamson 5).
 
         If no spectral filter is configured, returns the state unchanged.
         """
@@ -285,8 +286,8 @@ class SpectralShallowWaterModel:
             return state
         sf = self._spectral_filter
         return SpectralSWState(
-            vor_hat=state.vor_hat.replace(data=state.vor_hat.data * sf),
-            div_hat=state.div_hat.replace(data=state.div_hat.data * sf),
+            vor_hat=state.vor_hat,
+            div_hat=state.div_hat,
             phi_hat=state.phi_hat.replace(data=state.phi_hat.data * sf),
             phis_hat=state.phis_hat.replace(data=state.phis_hat.data * sf),
         )

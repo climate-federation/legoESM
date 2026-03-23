@@ -584,6 +584,19 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
             idx = np.linspace(0, len(steps) - 1, 8).astype(int)
             steps = [steps[i] for i in idx]
 
+        # Compute shared color limits across all panels
+        all_vals = np.concatenate([
+            _regrid_2d(
+                np.asarray(snapshots[s][field_key], dtype=np.float64),
+                lon_deg, lat_deg, coord_kind,
+            ).ravel() for s in steps
+        ])
+        all_vals = all_vals[np.isfinite(all_vals)]
+        if len(all_vals) > 0:
+            vmin, vmax = float(all_vals.min()), float(all_vals.max())
+        else:
+            vmin, vmax = 0.0, 1.0
+
         n_cols = min(4, len(steps))
         n_rows = (len(steps) + n_cols - 1) // n_cols
         fig, axes = plt.subplots(
@@ -598,7 +611,7 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
             regridded = _regrid_2d(raw, lon_deg, lat_deg, coord_kind)
             im = ax.imshow(
                 regridded, origin="lower", aspect="auto", cmap=cmap,
-                extent=[-180, 180, -90, 90])
+                extent=[-180, 180, -90, 90], vmin=vmin, vmax=vmax)
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             if c == 0:
@@ -1919,6 +1932,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
+        from legoesm.atmosphere.physics.held_suarez import (
+            held_suarez_forcing_spectral,
+        )
 
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
@@ -1933,8 +1949,10 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         state = isothermal_rest_state_spectral(
             grid, sigma, T_init=280.0)
 
+        physics_fn = held_suarez_forcing_spectral
+
         def step_fn(s, dt_):
-            return model.step(s, dt_)
+            return model.step(s, dt_, physics_fn=physics_fn)
 
         def check_fn(s):
             T = sh_synthesis_3d(grid, s.T_hat.data)
