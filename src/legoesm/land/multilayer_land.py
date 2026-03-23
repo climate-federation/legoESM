@@ -156,15 +156,39 @@ def step_multilayer_land(
     evap_rate = lhflx / constants.L_v  # kg/m2/s, positive up
     flux_top = (forcing.precip_total - evap_rate) / rho_w  # m/s, positive down
 
-    # --- Richards equation: update soil moisture ---
-    # Sink term (root uptake) set to zero for now
-    sink = jnp.zeros_like(theta)
+    # --- Root water uptake sink term ---
+    # Exponential root distribution: root_frac(z) ~ exp(-z / root_depth)
+    z_centers = grid.z_node  # (n_layers,) depth below surface [m]
+    root_frac = jnp.exp(-z_centers / config.root_depth)
+    root_frac = root_frac / jnp.sum(root_frac)  # normalize to 1
 
+    # Potential transpiration from latent heat flux (kg/m2/s -> m/s)
+    E_pot = jnp.maximum(evap_rate, 0.0) / rho_w  # m/s, positive = upward
+
+    # Soil moisture stress: beta(theta) = clip((theta - theta_wp)/(theta_fc - theta_wp), 0, 1)
+    beta_root = jnp.clip(
+        (theta - config.theta_wp) / (config.theta_fc - config.theta_wp + 1e-10),
+        0.0, 1.0,
+    )
+    # Sink = root_frac * E_pot * beta_root  [m/s per layer]
+    sink = root_frac[None, :] * E_pot[:, None] * beta_root
+
+    # --- Richards equation: update soil moisture ---
     richards_out = solve_richards(
         psi, theta, grid,
         config.hydraulics, config.richards,
         flux_top, sink, dt,
     )
+
+    # --- Evaporation water budget closure ---
+    # Ensure top-layer theta reflects actual evaporative loss not captured
+    # by infiltration flux alone (e.g., when evap > precip and soil is dry).
+    theta_corrected = jnp.clip(
+        richards_out.theta_new,
+        config.hydraulics.theta_r,
+        config.hydraulics.theta_sat,
+    )
+    richards_out = richards_out._replace(theta_new=theta_corrected)
 
     # --- Soil thermal diffusion: update soil temperature ---
     T_soil_new = solve_soil_thermal(

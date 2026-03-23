@@ -154,6 +154,17 @@ class MPASOceanModel:
                 state_new, state, mesh, z_coord, config,
             )
 
+        # 7. Runtime bounds checks (matching cubed-sphere ocean model)
+        if config.enable_runtime_checks:
+            T_data = state_new.T.data
+            S_data = state_new.S.data
+            T_data = jnp.clip(T_data, config.temperature_min_c, config.temperature_max_c)
+            S_data = jnp.clip(S_data, config.salinity_min_psu, config.salinity_max_psu)
+            state_new = state_new._replace(
+                T=state_new.T.replace(data=T_data * mask[:, jnp.newaxis]),
+                S=state_new.S.replace(data=S_data * mask[:, jnp.newaxis]),
+            )
+
         return state_new
 
     def integrate(

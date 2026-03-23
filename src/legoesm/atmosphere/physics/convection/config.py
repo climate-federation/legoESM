@@ -58,9 +58,16 @@ class DCAConfig(NamedTuple):
         Number of adjustment iterations per call (default 1).
     mixing_fraction : float
         Fraction of adjustment applied per iteration (default 1.0).
+    cape_threshold : float
+        Minimum CAPE [J/kg] to trigger convection (default 100.0).
+        Columns with CAPE below this are not adjusted.
+    cape_sharpness : float
+        Sigmoid sharpness [1/(J/kg)] for smooth CAPE gating (default 0.02).
     """
     n_iterations: int = 1
     mixing_fraction: float = 1.0
+    cape_threshold: float = 100.0
+    cape_sharpness: float = 0.02
 
 
 class KuoConfig(NamedTuple):

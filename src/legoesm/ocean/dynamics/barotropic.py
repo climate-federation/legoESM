@@ -157,7 +157,12 @@ def barotropic_substeps(
         flux_u = H_total_c * U_bar_c
         flux_v = H_total_c * V_bar_c
         div_flux = _divergence_raw(flux_u, flux_v, grid).astype(eta.dtype)
-        eta_new = jnp.maximum(eta_c - dt_s * div_flux, eta_floor) * mask
+        eta_unfloored = (eta_c - dt_s * div_flux) * mask
+        eta_new = jnp.maximum(eta_unfloored, eta_floor) * mask
+        # Redistribute mass added by floor clamping to preserve continuity.
+        mass_added = jnp.sum((eta_new - eta_unfloored) * grid.area * mask)
+        ocean_area = jnp.sum(grid.area * mask)
+        eta_new = (eta_new - mass_added / jnp.maximum(ocean_area, 1.0) * mask)
 
         # Backward: update U_bar, V_bar with UPDATED eta
         deta_dx = _gradient_x_raw(eta_new, grid).astype(eta.dtype)

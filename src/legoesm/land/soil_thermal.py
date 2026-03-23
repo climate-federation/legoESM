@@ -32,6 +32,7 @@ class SoilThermalConfig(NamedTuple):
     k_water: float = 0.57         # water thermal conductivity [W/m/K]
     rho_bulk: float = 1400.0      # bulk density [kg/m3]
     soil_texture: str = "loam"    # "sand" (coarse) or "loam" (fine)
+    Q_geothermal: float = 0.05   # Geothermal heat flux at bottom [W/m2]
 
 
 def compute_heat_capacity(
@@ -155,7 +156,8 @@ def solve_soil_thermal(
     # Top BC: ground heat flux
     rhs = rhs.at[:, 0].add(G_surface)
 
-    # Bottom BC: zero flux (no additional term needed)
+    # Bottom BC: geothermal heat flux (Neumann, positive into soil)
+    rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
 
     # Assemble full arrays
     a = jnp.zeros((ncol, nlayers))

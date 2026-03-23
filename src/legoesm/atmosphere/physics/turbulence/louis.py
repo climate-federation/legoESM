@@ -113,9 +113,9 @@ def louis_turbulence(
     # Smooth blending using sigmoid to avoid if/else branching
     # Unstable (Ri < 0): f(Ri) = 1 - 2b*Ri / (1 + 3b*c * l^2 * |Ri|^0.5 / dz^2)
     # Stable (Ri >= 0): f(Ri) = 1 / (1 + 2b*Ri / sqrt(1 + d*Ri))
-    b_louis = 5.0
-    c_louis = 5.0
-    d_louis = 5.0
+    b_louis = config.b_louis
+    c_louis = config.c_louis
+    d_louis = config.d_louis
 
     # Unstable branch
     Ri_neg = jnp.minimum(Ri, 0.0)

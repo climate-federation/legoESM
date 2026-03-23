@@ -109,7 +109,7 @@ def solve_richards(
     n_iter_count = jnp.zeros(ncol)  # per-column iteration counter
 
     def picard_body(m, carry):
-        psi_m, theta_m, converged, n_iter_count = carry
+        psi_m, theta_m = carry
 
         # Recompute hydraulic properties at current iterate
         K_m = hydraulic_conductivity(psi_m, theta_m, hydro_config)  # (ncol, nlayers)
@@ -120,15 +120,6 @@ def solve_richards(
 
         # Build tridiagonal system: [C/dt + A] * dpsi = rhs
         # A is the diffusion operator from Darcy's law
-
-        # Sub-diagonal (lower), diagonal, super-diagonal (upper)
-        a = jnp.zeros((ncol, nlayers))  # sub-diagonal
-        b = jnp.zeros((ncol, nlayers))  # diagonal
-        c = jnp.zeros((ncol, nlayers))  # super-diagonal
-        rhs = jnp.zeros((ncol, nlayers))
-
-        # Interior fluxes: q_{k+1/2} = K_{k+1/2} * [(psi_{k+1} - psi_k)/dz_{k+1/2} + 1]
-        # The "+1" is gravitational drainage (z positive downward)
 
         # Diffusion coefficients
         coeff = K_half / dz_if  # (ncol, nlayers-1)
@@ -175,34 +166,24 @@ def solve_richards(
 
         dpsi = _thomas_solve_batch(a_full, diag, c_full, rhs)
 
-        # Update psi and theta
+        # Update psi and theta (all columns unconditionally — converged
+        # columns get near-zero dpsi so extra iterations are no-ops).
         psi_new = psi_m + dpsi
         theta_new = theta_from_psi(psi_new, hydro_config)
         theta_new = jnp.clip(theta_new, hydro_config.theta_r, hydro_config.theta_sat)
 
-        # Check convergence
-        max_dtheta = jnp.max(jnp.abs(theta_new - theta_m), axis=1)  # (ncol,)
-        newly_converged = max_dtheta < richards_config.theta_tol
+        return psi_new, theta_new
 
-        # Only update non-converged columns
-        update_mask = ~converged
-        psi_out = jnp.where(update_mask[:, None], psi_new, psi_m)
-        theta_out = jnp.where(update_mask[:, None], theta_new, theta_m)
-        # Increment iteration count for columns that were still active
-        n_iter_out = n_iter_count + jnp.where(update_mask, 1.0, 0.0)
-        converged_out = converged | newly_converged
-
-        return psi_out, theta_out, converged_out, n_iter_out
-
-    converged_init = jnp.zeros(ncol, dtype=bool)
     theta_m_init = theta_from_psi(psi_m, hydro_config)
     theta_m_init = jnp.clip(theta_m_init, hydro_config.theta_r, hydro_config.theta_sat)
 
-    psi_final, theta_final, converged_final, n_iter_final = jax.lax.fori_loop(
+    psi_final, theta_final = jax.lax.fori_loop(
         0, richards_config.max_iter,
         picard_body,
-        (psi_m, theta_m_init, converged_init, n_iter_count),
+        (psi_m, theta_m_init),
     )
+    # Iteration count for diagnostics (computed outside AD tape)
+    n_iter_final = jnp.full(ncol, float(richards_config.max_iter))
 
     # Subsurface runoff: gravitational drainage at bottom
     if richards_config.bottom_bc == "free_drainage":

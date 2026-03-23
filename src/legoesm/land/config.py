@@ -56,6 +56,10 @@ class MultiLayerLandConfig(NamedTuple):
     land_albedo: LandAlbedoConfig = LandAlbedoConfig()
     T_snow_melt: float = 273.15
     snow_melt_rate: float = 5.0e-6
+    # Root water uptake
+    root_depth: float = 1.0       # Root e-folding depth [m]
+    theta_wp: float = 0.15        # Wilting point volumetric water content
+    theta_fc: float = 0.30        # Field capacity volumetric water content
     # Sub-configs
     soil_grid: SoilGridConfig = SoilGridConfig()
     hydraulics: SoilHydraulicsConfig = SoilHydraulicsConfig()

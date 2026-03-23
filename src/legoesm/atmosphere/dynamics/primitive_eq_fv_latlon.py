@@ -38,7 +38,10 @@ from legoesm.core.operators_latlon_3d import (
     hyperdiffusion_3d as _hyperdiffusion_3d,
 )
 from legoesm.core.operators_fv_latlon import fv_flux_divergence_latlon
-from legoesm.core.operators_fv_latlon_3d import fv_scalar_advection_latlon_3d
+from legoesm.core.operators_fv_latlon_3d import (
+    fv_flux_divergence_latlon_3d,
+    fv_scalar_advection_latlon_3d,
+)
 from legoesm.core.conservation import (
     zero_mean_tendency_latlon,
     fix_mass_hydrostatic_latlon,
@@ -149,14 +152,18 @@ def fv_latlon_hydrostatic_tendencies(
 
     # --- 5. Surface pressure tendency and sigma-dot ---
     # CRITICAL: dp_s/dt and σ̇ MUST use the SAME divergence operator.
-    # Using FV flux divergence for dp_s/dt but centered divergence for
-    # σ̇ breaks the discrete continuity closure.
-    div_v = _divergence_3d(u, v, grid)
+    # We use flux-form PPM divergence (Lin 2004) for both, giving
+    # conservative mass transport.  div_v here is -div(1·V) per level
+    # from the FV operator (sign convention: returns -div(q*V)).
+    ones_3d = jnp.ones_like(T)
+    div_v = -fv_flux_divergence_latlon_3d(
+        ones_3d, u, v, grid, limiter=config.use_limiter,
+    )  # positive = convergence → divergence after negation
 
     sigma_top = sigma_coord.sigma_half[0]
     sigma_range = 1.0 - sigma_top
 
-    # dp_s/dt from centered divergence (same operator as σ̇)
+    # dp_s/dt from FV flux divergence (same operator as σ̇)
     D_total = jnp.sum(div_v * dsigma[None, None, :], axis=-1)
     dp_s_dt_data = -p_s * D_total / sigma_range
     dp_s_dt_data = zero_mean_tendency_latlon(dp_s_dt_data, grid)

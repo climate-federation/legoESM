@@ -171,31 +171,69 @@ def ocean_conservation_fixer(
     z_coord: OceanZStarCoordinate,
     config: OceanConfig,
 ) -> OceanState:
-    """Apply all ocean conservation fixers in sequence.
+    """Apply all ocean conservation fixers simultaneously.
 
-    Order: volume first, then heat, then salt.
+    All corrections are computed from the ORIGINAL state_old's layer
+    thicknesses to avoid order-dependent bias between volume, heat,
+    and salt fixers.
     """
+    mask = state_old.land_mask.data
+    min_wc = config.min_water_column_m
+
+    # Precompute layer thicknesses from the OLD state (before any fixer).
+    h_k_old = compute_layer_thickness(
+        state_old.eta.data, state_old.H_bathy.data, z_coord,
+        min_water_column_m=min_wc,
+    )
+
+    # --- Volume (eta) correction ---
+    eta_corrected = state_new.eta.data
     if config.fix_volume:
-        state_new = fix_volume_ocean(
-            state_new,
-            state_old,
-            grid,
-            min_water_column_m=config.min_water_column_m,
-        )
+        weighted_area = mask * grid.area
+        vol_terms = jnp.stack([
+            jnp.sum(state_old.eta.data * weighted_area),
+            jnp.sum(state_new.eta.data * weighted_area),
+            jnp.sum(weighted_area),
+        ])
+        vol_old, vol_new, ocean_area = _ocean_global_sum(vol_terms)
+        eta_correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
+        eta_corrected = state_new.eta.data + eta_correction * mask
+        if min_wc is not None:
+            eta_floor = jnp.asarray(min_wc, dtype=eta_corrected.dtype) - state_new.H_bathy.data
+            eta_corrected = jnp.maximum(eta_corrected, eta_floor) * mask
+
+    # Use OLD h_k for heat/salt corrections (not recomputed from corrected eta)
+    h_k_new_for_fixers = h_k_old  # avoids order dependency
+
+    # --- Heat (T) correction ---
+    T_corrected = state_new.T.data
     if config.fix_heat:
-        state_new = fix_heat_ocean(
-            state_new,
-            state_old,
-            grid,
-            z_coord,
-            min_water_column_m=config.min_water_column_m,
-        )
+        weighted_area = mask * grid.area
+        heat_terms = jnp.stack([
+            jnp.sum(jnp.sum(state_old.T.data * h_k_old, axis=-1) * weighted_area),
+            jnp.sum(jnp.sum(state_new.T.data * h_k_new_for_fixers, axis=-1) * weighted_area),
+            jnp.sum(jnp.sum(h_k_new_for_fixers, axis=-1) * weighted_area),
+        ])
+        heat_old, heat_new, ocean_vol = _ocean_global_sum(heat_terms)
+        T_correction = (heat_old - heat_new) / jnp.maximum(ocean_vol, 1.0)
+        T_corrected = state_new.T.data + T_correction * mask[..., jnp.newaxis]
+
+    # --- Salt (S) correction ---
+    S_corrected = state_new.S.data
     if config.fix_salt:
-        state_new = fix_salt_ocean(
-            state_new,
-            state_old,
-            grid,
-            z_coord,
-            min_water_column_m=config.min_water_column_m,
-        )
-    return state_new
+        weighted_area = mask * grid.area
+        salt_terms = jnp.stack([
+            jnp.sum(jnp.sum(state_old.S.data * h_k_old, axis=-1) * weighted_area),
+            jnp.sum(jnp.sum(state_new.S.data * h_k_new_for_fixers, axis=-1) * weighted_area),
+            jnp.sum(jnp.sum(h_k_new_for_fixers, axis=-1) * weighted_area),
+        ])
+        salt_old, salt_new, ocean_vol = _ocean_global_sum(salt_terms)
+        S_correction = (salt_old - salt_new) / jnp.maximum(ocean_vol, 1.0)
+        S_corrected = state_new.S.data + S_correction * mask[..., jnp.newaxis]
+
+    # Apply all corrections simultaneously
+    return state_new._replace(
+        eta=state_new.eta.replace(data=eta_corrected),
+        T=state_new.T.replace(data=T_corrected),
+        S=state_new.S.replace(data=S_corrected),
+    )

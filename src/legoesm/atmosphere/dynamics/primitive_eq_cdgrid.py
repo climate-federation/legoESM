@@ -277,7 +277,8 @@ def fv3_hydrostatic_tendencies(
     # --- 8. Pressure gradient correction at D-grid corners ---
     ln_ps = jnp.log(p_s)
     dln_dx, dln_dy = _arakawa_lamb_gradient(ln_ps, cdgrid)  # (6, n+1, n+1)
-    T_corner = _interp_center_to_corner(T, cdgrid)  # (6, n+1, n+1, nlev)
+    # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
+    T_corner = 1.0 / _interp_center_to_corner(1.0 / T, cdgrid)  # (6, n+1, n+1, nlev)
     pg_corr_x = R_d * T_corner * dln_dx[..., None]
     pg_corr_y = R_d * T_corner * dln_dy[..., None]
 

@@ -66,6 +66,12 @@ class MPASOceanConfig(NamedTuple):
     barotropic_damping: float = 0.0
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0
+    # Runtime bounds checks (matching cubed-sphere ocean)
+    enable_runtime_checks: bool = False
+    temperature_min_c: float = -5.0
+    temperature_max_c: float = 45.0
+    salinity_min_psu: float = 0.0
+    salinity_max_psu: float = 50.0
 
 
 class MPASSimpleOceanConfig(NamedTuple):

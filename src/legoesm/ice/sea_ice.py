@@ -404,8 +404,10 @@ def _thermo_single(
         jnp.broadcast_to(jnp.array(config.T_freeze_ocean), T_ice.shape),
     )
 
-    # Growth/melt
-    F_ocean = config.k_ice * jnp.maximum(ocean_sst - config.T_freeze_ocean, 0.0) / h_eff
+    # Growth/melt — turbulent ocean heat transfer (not conductive scaling)
+    F_ocean = config.ocean_heat_transfer_coeff * jnp.maximum(
+        ocean_sst - config.T_freeze_ocean, 0.0,
+    )
     dh_dt_ice = (F_cond - F_ocean) / (config.rho_ice * config.L_f)
     freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
     dh_dt_open = freeze_flux_open / (config.rho_ice * config.L_f)

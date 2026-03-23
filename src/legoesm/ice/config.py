@@ -36,6 +36,7 @@ class SeaIceConfig(NamedTuple):
     rho_ocean_ref: float = 1025.0   # Reference ocean density [kg/m3]
     T_freeze_ocean: float = 271.35  # Ocean freezing point [K]
     T_ice_min: float = 180.0        # Lower bound for numerical stability [K]
+    ocean_heat_transfer_coeff: float = 20.0  # Ocean-ice heat transfer [W/m^2/K]
     # Concentration dynamics
     h_new_ice: float = 0.05         # Thickness for new ice formation [m]
     # Bulk flux algorithm

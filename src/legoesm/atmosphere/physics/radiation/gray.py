@@ -93,7 +93,10 @@ def _compute_lw_optical_depth(
         dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
         # Column water [kg/m^2] per layer ≈ q_v * dp / g
         col_water = q_v * dp / constants.g
-        dtau_moist = config.tau_moist_coeff * col_water / p_s[:, None]
+        # NOTE: Prior code divided by p_s here, which made dtau_moist ~1e-5×
+        # too small (dimensionally incorrect: col_water is already in kg/m^2).
+        # tau_moist_coeff has units [m^2/kg] and directly scales column water.
+        dtau_moist = config.tau_moist_coeff * col_water
         dtau = dtau_dry + jnp.maximum(dtau_moist, 0.0)
     else:
         dtau = dtau_dry

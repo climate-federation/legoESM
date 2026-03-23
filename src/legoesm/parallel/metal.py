@@ -132,3 +132,37 @@ def route_to_default(pytree):
     """
     default = jax.devices()[0]
     return jax.device_put(pytree, default)
+
+
+def is_metal_backend() -> bool:
+    """Check if the default JAX backend is Metal."""
+    return get_backend() == "METAL"
+
+
+def ensure_spectral_on_cpu(fn):
+    """Wrap a function so that on Metal, inputs are routed to CPU.
+
+    On Metal, float64 and complex128 are unsupported. This decorator
+    transfers inputs to CPU, runs the function, and transfers results
+    back to the default device.
+
+    On non-Metal backends this is a no-op wrapper.
+    """
+    if not is_metal_backend():
+        return fn
+
+    def wrapper(*args, **kwargs):
+        args_cpu = jax.tree.map(
+            lambda x: jax.device_put(x, jax.devices("cpu")[0])
+            if hasattr(x, "dtype") else x,
+            args,
+        )
+        kwargs_cpu = jax.tree.map(
+            lambda x: jax.device_put(x, jax.devices("cpu")[0])
+            if hasattr(x, "dtype") else x,
+            kwargs,
+        )
+        result = fn(*args_cpu, **kwargs_cpu)
+        return route_to_default(result)
+
+    return wrapper

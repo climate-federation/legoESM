@@ -112,7 +112,7 @@ class SpectralPEConfig(NamedTuple):
     # Set implicit_hyperdiff=True to use this instead of explicit.
     implicit_hyperdiff: bool = False
     # Pressure floor for adiabatic heating (limits 1/p at model top)
-    p_floor: float = 0.0            # Pa; adiabatic uses max(p, p_floor) (0 = off)
+    p_floor: float = 10.0           # Pa; adiabatic uses max(p, p_floor) to prevent omega/p overflow
     # Robert-Asselin filter for leapfrog (controls computational mode)
     robert_asselin_coeff: float = 0.05  # Filter coefficient (0 = off, 0.05-0.1 typical)
 
@@ -235,12 +235,13 @@ def spectral_pe_tendencies(
     vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
     div = sh_synthesis_3d(grid, state.div_hat.data)
     T = sh_synthesis_3d(grid, state.T_hat.data)
-    T = jnp.maximum(T, config.T_min)  # Positivity protection
-    lnps = jnp.clip(
-        sh_synthesis(grid, state.lnps_hat.data),
-        _LNPS_MIN,
-        _LNPS_MAX,
-    )    # (n_lat, n_lon)
+    # Smooth positivity protection (C∞ differentiable, avoids kink in jnp.maximum)
+    T = config.T_min + jax.nn.softplus(T - config.T_min)
+    lnps_raw = sh_synthesis(grid, state.lnps_hat.data)
+    # Smooth two-sided clip via nested softplus
+    lnps = _LNPS_MIN + jax.nn.softplus(lnps_raw - _LNPS_MIN)
+    lnps = _LNPS_MAX - jax.nn.softplus(_LNPS_MAX - lnps)
+    # (n_lat, n_lon)
     phis = sh_synthesis(grid, state.phis_hat.data)
 
     # --- 2. Velocities ---

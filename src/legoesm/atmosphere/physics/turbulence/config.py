@@ -94,6 +94,10 @@ class LouisConfig(NamedTuple):
     l_mix_max: float = 100.0
     Ck: float = 0.4
     Ri_crit: float = 0.25
+    # Louis stability function coefficients (Holtslag & De Bruin 1988)
+    b_louis: float = 5.0
+    c_louis: float = 16.6   # Updated from 5.0 (Louis 1979) to 16.6
+    d_louis: float = 5.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

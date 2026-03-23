@@ -81,10 +81,16 @@ def step_lake(
     dT_epi_dt = (sw_net + lw_net - shflx - lhflx - F_mix) / cap_epi
     T_epi_new = T_epi + dt * dT_epi_dt
 
+    # Lake freezing: clamp T_epi at freezing point, release latent heat.
+    # If T_epi drops below T_freeze, the excess cooling forms ice.
+    T_freeze = 273.15
+    T_epi_new = jnp.maximum(T_epi_new, T_freeze)
+
     # Hypolimnion: receives mixing flux only
     cap_hypo = config.rho_water * config.c_water * config.h_hypo
     dT_hypo_dt = F_mix / cap_hypo
     T_hypo_new = T_hypo + dt * dT_hypo_dt
+    T_hypo_new = jnp.maximum(T_hypo_new, T_freeze)
 
     new_state = LakeState(
         T_epi=state.T_epi.replace(data=T_epi_new),

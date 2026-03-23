@@ -356,8 +356,13 @@ def _make_hydrostatic_radiation(
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
-        # Hydrostatic state is dry-only; pass zero vapor to moist-aware backends.
-        q_v_col = jnp.zeros_like(T_col)
+        # Extract water vapor from tracers if available; else assume dry.
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = _qv_data.reshape(ncol, nlev)
+        else:
+            q_v_col = jnp.zeros_like(T_col)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
@@ -627,8 +632,13 @@ def _make_spectral_pe_radiation(
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
-        # Spectral PE state is dry-only in current formulation.
-        q_v_col = jnp.zeros_like(T_col)
+        # Extract water vapor if spectral state carries tracer coefficients.
+        if hasattr(state, "tracers") and state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = _qv_data.reshape(ncol, nlev)
+        else:
+            q_v_col = jnp.zeros_like(T_col)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,

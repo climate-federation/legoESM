@@ -222,18 +222,22 @@ def dca_convection(
         jnp.arange(config.n_iterations),
     )
 
-    # Convert to tendencies
-    dT_dt = (T_adj - T) / dt
-    dq_v_dt = (q_adj - q_v) / dt
-    precipitation = jnp.clip(precip_total / dt, 0.0, None)
-
-    # CAPE diagnostic (using original profiles)
-    # Use the adjusted profile as parcel temperature for CAPE
+    # CAPE diagnostic BEFORE gating (using original profiles)
     cape = compute_cape(T, T_adj, p_full, p_half)
 
-    # Convective mask: any column that was adjusted
-    adjustment_magnitude = jnp.sum(jnp.abs(T_adj - T) * dp, axis=1)
-    convective_mask = jax.nn.sigmoid(1000.0 * adjustment_magnitude)
+    # Gate tendencies by CAPE: only adjust where CAPE exceeds threshold.
+    # Smooth sigmoid gating preserves differentiability.
+    cape_gate = jax.nn.sigmoid(
+        config.cape_sharpness * (cape - config.cape_threshold)
+    )  # (ncol,)
+
+    # Convert to tendencies, gated by CAPE
+    dT_dt = cape_gate[:, None] * (T_adj - T) / dt
+    dq_v_dt = cape_gate[:, None] * (q_adj - q_v) / dt
+    precipitation = jnp.clip(cape_gate * precip_total / dt, 0.0, None)
+
+    # Convective mask: CAPE-gated
+    convective_mask = cape_gate
 
     return ConvectionOutput(
         dT_dt=dT_dt,
