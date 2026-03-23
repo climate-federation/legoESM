@@ -187,12 +187,18 @@ def load_checkpoint_zarr(
         q_r = root["q_r"] if "q_r" in root else None
         return arrays, step, day, config, diag, q_c, q_r
 
-    T = jnp.array(root["T"][:])
-    u = jnp.array(root["u"][:])
-    v = jnp.array(root["v"][:])
-    p_s = jnp.array(root["p_s"][:])
-    phis = jnp.array(root["phis"][:])
-    q_v = jnp.array(root["q_v"][:])
+    # Load arrays and cast to the active storage dtype so that restarts
+    # are consistent with the current precision policy (e.g. a checkpoint
+    # saved in fp32 can be loaded into an fp64 session without dtype drift).
+    from legoesm.core.precision import get_policy
+    _storage_dtype = get_policy().storage
+
+    T = jnp.array(root["T"][:], dtype=_storage_dtype)
+    u = jnp.array(root["u"][:], dtype=_storage_dtype)
+    v = jnp.array(root["v"][:], dtype=_storage_dtype)
+    p_s = jnp.array(root["p_s"][:], dtype=_storage_dtype)
+    phis = jnp.array(root["phis"][:], dtype=_storage_dtype)
+    q_v = jnp.array(root["q_v"][:], dtype=_storage_dtype)
 
     step = int(root.attrs["step"])
     day = float(root.attrs["day"])
@@ -217,8 +223,8 @@ def load_checkpoint_zarr(
             arr = root[k]
             diag_accumulators[k[5:]] = arr[()] if arr.ndim == 0 else arr[:]
 
-    q_c = jnp.array(root["q_c"][:]) if "q_c" in root else None
-    q_r = jnp.array(root["q_r"][:]) if "q_r" in root else None
+    q_c = jnp.array(root["q_c"][:], dtype=_storage_dtype) if "q_c" in root else None
+    q_r = jnp.array(root["q_r"][:], dtype=_storage_dtype) if "q_r" in root else None
 
     return state, q_v, step, day, config, diag_accumulators, q_c, q_r
 

@@ -102,6 +102,11 @@ def barotropic_substeps_mpas(
         F_slow_eta = jnp.zeros_like(eta)
 
     # Forward-backward substeps via scan
+    # Capture the carry dtype so that mesh-coordinate promotions (float64)
+    # are cast back before returning, keeping jax.lax.scan type-stable.
+    _eta_dtype = eta.dtype
+    _ubar_dtype = u_bar.dtype
+
     def _substep(carry, _):
         eta_c, u_bar_c = carry
 
@@ -128,7 +133,8 @@ def barotropic_substeps_mpas(
         if config.barotropic_damping > 0:
             u_bar_next = u_bar_next * (1.0 - dt_baro * config.barotropic_damping)
 
-        return (eta_next, u_bar_next), None
+        # Cast back to input dtype (mesh ops may promote to float64)
+        return (eta_next.astype(_eta_dtype), u_bar_next.astype(_ubar_dtype)), None
 
     (eta_new, u_bar_new), _ = jax.lax.scan(
         _substep, (eta, u_bar), None, length=n_substeps,

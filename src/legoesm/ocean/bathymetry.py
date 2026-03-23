@@ -32,6 +32,8 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.core.precision import get_policy
+
 
 # ============================================================================
 # Configuration
@@ -696,7 +698,8 @@ def load_bathymetry_cubed_sphere(
     # (the land_mask prevents actual flow on land cells)
     H_bathy = np.where(ocean_mask > 0.5, depth, cfg.H_max)
 
-    return jnp.array(H_bathy, dtype=jnp.float32), jnp.array(ocean_mask, dtype=jnp.float32)
+    dtype = get_policy().storage
+    return jnp.array(H_bathy, dtype=dtype), jnp.array(ocean_mask, dtype=dtype)
 
 
 def load_bathymetry_mpas(
@@ -745,7 +748,8 @@ def load_bathymetry_mpas(
 
     H_bathy = np.where(ocean_mask > 0.5, depth, 0.0)
 
-    return jnp.array(H_bathy), jnp.array(ocean_mask)
+    dtype = get_policy().storage
+    return jnp.array(H_bathy, dtype=dtype), jnp.array(ocean_mask, dtype=dtype)
 
 
 def load_bathymetry_gaussian(
@@ -788,7 +792,8 @@ def load_bathymetry_gaussian(
 
     H_bathy = np.where(ocean_mask > 0.5, depth, cfg.H_max)
 
-    return jnp.array(H_bathy), jnp.array(ocean_mask)
+    dtype = get_policy().storage
+    return jnp.array(H_bathy, dtype=dtype), jnp.array(ocean_mask, dtype=dtype)
 
 
 # ============================================================================

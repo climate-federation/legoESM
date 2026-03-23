@@ -377,7 +377,8 @@ def _validate_metadata(
             f"JAX x64 mode mismatch: restart was saved with "
             f"x64={'enabled' if metadata.jax_x64_enabled else 'disabled'}, "
             f"but current session has "
-            f"x64={'enabled' if _get_jax_x64() else 'disabled'}.",
+            f"x64={'enabled' if _get_jax_x64() else 'disabled'}. "
+            f"Loaded arrays have been cast to the active storage dtype.",
             stacklevel=3,
         )
 

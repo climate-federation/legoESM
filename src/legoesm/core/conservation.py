@@ -22,31 +22,18 @@ from legoesm.core.state import ShallowWaterState, HydrostaticState
 def _accumulation_dtype():
     """Return the best dtype for accumulation: float64 if available, else float32.
 
-    On backends that lack float64 (e.g. Apple Metal), JAX silently
-    truncates .astype(float64) to float32, which is harmless but wastes
-    a cast.  This helper lets callers use the widest available type
-    explicitly, and makes the intent clear.
+    Uses the canonical precision policy (``get_policy().accumulate``) as the
+    source of truth.  On backends that lack float64 (e.g. Apple Metal) or
+    when JAX x64 mode is disabled, the dtype is silently clamped to float32
+    to avoid a wasted cast.
     """
-    from legoesm.core.hardware import (
-        _UNSUPPORTED_F64_BACKENDS,
-        get_backend,
-        get_runtime_precision_dtype,
-    )
+    from legoesm.core.precision import get_policy
+    from legoesm.runtime.backend import supports_float64, is_x64_enabled
 
-    configured = get_runtime_precision_dtype("conservation")
-    if configured is not None:
-        if configured == jnp.float64:
-            if (
-                get_backend() in _UNSUPPORTED_F64_BACKENDS
-                or not jax.config.jax_enable_x64
-            ):
-                return jnp.float32
-            return jnp.float64
+    acc_dtype = get_policy().accumulate
+    if acc_dtype == jnp.float64 and (not supports_float64() or not is_x64_enabled()):
         return jnp.float32
-
-    if get_backend() in _UNSUPPORTED_F64_BACKENDS or not jax.config.jax_enable_x64:
-        return jnp.float32
-    return jnp.float64
+    return acc_dtype
 
 
 def _global_area_sum(array: jax.Array, grid) -> jax.Array:

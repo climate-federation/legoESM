@@ -5,6 +5,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.precision import get_policy
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState
@@ -44,13 +45,14 @@ def idealized_bathymetry(
             f"got {land_lat_threshold!r}",
         )
 
+    dtype = get_policy().storage
     lat_deg = jnp.abs(grid.lat) * (180.0 / jnp.pi)
-    land_mask = jnp.where(lat_deg < land_lat_threshold, 1.0, 0.0).astype(jnp.float32)
+    land_mask = jnp.where(lat_deg < land_lat_threshold, 1.0, 0.0).astype(dtype)
 
     # H_bathy = H_max everywhere (including land) so that the Jacobian
     # (eta + H_bathy) / H_max is smooth across coastlines.  The land_mask
     # prevents any actual flow on land cells.
-    H_bathy = jnp.full_like(land_mask, H_max, dtype=jnp.float32)
+    H_bathy = jnp.full_like(land_mask, H_max)
 
     return H_bathy, land_mask
 
@@ -102,20 +104,21 @@ def rest_state_ocean(
     # z_full_ref is negative, scale depth = 1000m
     scale_depth = 1000.0
     T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
+    dtype = get_policy().storage
     T_3d = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, jnp.newaxis, :],
         (6, n, n, nlev),
-    ).astype(jnp.float32)
+    ).astype(dtype)
     # Note: T is NOT zeroed on land. Keeping the same profile on land
     # ensures smooth gradients at coastlines, preventing pressure gradient
     # errors. Land tendencies are zeroed by the mask in the dynamics.
 
     # Salinity: uniform (same on land and ocean for smooth gradients)
-    S_3d = jnp.full((6, n, n, nlev), S_uniform, dtype=jnp.float32)
+    S_3d = jnp.full((6, n, n, nlev), S_uniform, dtype=dtype)
 
     # Zero velocity
-    zeros_3d = jnp.zeros((6, n, n, nlev), dtype=jnp.float32)
-    zeros_2d = jnp.zeros((6, n, n), dtype=jnp.float32)
+    zeros_3d = jnp.zeros((6, n, n, nlev), dtype=dtype)
+    zeros_2d = jnp.zeros((6, n, n), dtype=dtype)
 
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")

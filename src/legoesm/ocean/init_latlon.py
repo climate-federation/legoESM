@@ -5,6 +5,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.precision import get_policy
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import LatLonOceanState
@@ -39,9 +40,10 @@ def idealized_bathymetry_latlon(
             f"land_lat_threshold must be in [0, 90], got {land_lat_threshold!r}",
         )
 
+    dtype = get_policy().storage
     lat_deg = jnp.abs(grid.lat2d) * (180.0 / jnp.pi)
-    land_mask = jnp.where(lat_deg < land_lat_threshold, 1.0, 0.0).astype(jnp.float32)
-    H_bathy = jnp.full_like(land_mask, H_max, dtype=jnp.float32)
+    land_mask = jnp.where(lat_deg < land_lat_threshold, 1.0, 0.0).astype(dtype)
+    H_bathy = jnp.full_like(land_mask, H_max)
 
     return H_bathy, land_mask
 
@@ -90,14 +92,15 @@ def rest_state_latlon_ocean(
     T_profile = T_deep + (T_surface - T_deep) * jnp.exp(
         z_coord.z_full_ref / scale_depth,
     )
+    dtype = get_policy().storage
     T_3d = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, :], (n_lat, n_lon, nlev),
-    ).astype(jnp.float32)
+    ).astype(dtype)
 
-    S_3d = jnp.full((n_lat, n_lon, nlev), S_uniform, dtype=jnp.float32)
+    S_3d = jnp.full((n_lat, n_lon, nlev), S_uniform, dtype=dtype)
 
-    zeros_3d = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float32)
-    zeros_2d = jnp.zeros((n_lat, n_lon), dtype=jnp.float32)
+    zeros_3d = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
+    zeros_2d = jnp.zeros((n_lat, n_lon), dtype=dtype)
 
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")

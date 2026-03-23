@@ -16,17 +16,20 @@ from legoesm.core.hardware import (
     get_runtime_precision_dtype,
     set_runtime_precision_policy,
 )
+from legoesm.core.precision import PrecisionPolicy, set_policy
 
 
 @pytest.fixture(autouse=True)
 def _reset_precision_policy():
     """Reset global precision policy before and after each test."""
+    set_policy(PrecisionPolicy.fp32())
     set_runtime_precision_policy(
         dynamics="float32",
         ml="bfloat16",
         conservation=None,
     )
     yield
+    set_policy(PrecisionPolicy.fp32())
     set_runtime_precision_policy(
         dynamics="float32",
         ml="bfloat16",
@@ -170,10 +173,14 @@ class TestConservationPrecisionHook:
     """Conservation accumulators should honor runtime precision policy."""
 
     def test_accumulation_dtype_uses_configured_float32(self):
-        set_runtime_precision_policy(conservation="float32")
+        set_policy(PrecisionPolicy.fp32())
         assert _accumulation_dtype() == jnp.float32
 
+    def test_accumulation_dtype_uses_configured_float64(self):
+        set_policy(PrecisionPolicy.mixed())
+        assert _accumulation_dtype() == jnp.float64
+
     def test_accumulation_dtype_falls_back_when_float64_unavailable(self):
-        set_runtime_precision_policy(conservation="float64")
-        with patch("legoesm.core.hardware.get_backend", return_value="METAL"):
+        set_policy(PrecisionPolicy.mixed())
+        with patch("legoesm.runtime.backend.get_backend", return_value="metal"):
             assert _accumulation_dtype() == jnp.float32

@@ -248,14 +248,17 @@ def load_checkpoint(
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
 
+    from legoesm.core.precision import get_policy
+    _storage_dtype = get_policy().storage
+
     data = np.load(str(path), allow_pickle=True)
 
-    T = jnp.array(data["T"])
-    u = jnp.array(data["u"])
-    v = jnp.array(data["v"])
-    p_s = jnp.array(data["p_s"])
-    phis = jnp.array(data["phis"])
-    q_v = jnp.array(data["q_v"])
+    T = jnp.array(data["T"], dtype=_storage_dtype)
+    u = jnp.array(data["u"], dtype=_storage_dtype)
+    v = jnp.array(data["v"], dtype=_storage_dtype)
+    p_s = jnp.array(data["p_s"], dtype=_storage_dtype)
+    phis = jnp.array(data["phis"], dtype=_storage_dtype)
+    q_v = jnp.array(data["q_v"], dtype=_storage_dtype)
 
     step = int(data["step"])
     day = float(data["day"])
@@ -282,7 +285,7 @@ def load_checkpoint(
             diag_accumulators[key[5:]] = data[key]
 
     # Restore hydrometeor fields if present
-    q_c = jnp.array(data["q_c"]) if "q_c" in data.files else None
-    q_r = jnp.array(data["q_r"]) if "q_r" in data.files else None
+    q_c = jnp.array(data["q_c"], dtype=_storage_dtype) if "q_c" in data.files else None
+    q_r = jnp.array(data["q_r"], dtype=_storage_dtype) if "q_r" in data.files else None
 
     return state, q_v, step, day, config, diag_accumulators, q_c, q_r

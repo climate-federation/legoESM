@@ -9,6 +9,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.precision import get_policy
 from legoesm.core.state import MPASOceanState
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -36,8 +37,9 @@ def idealized_bathymetry_mpas(
     land_mask : jnp.ndarray, shape (nCells,)
         1=ocean, 0=land.
     """
+    dtype = get_policy().storage
     lat_deg = jnp.abs(jnp.degrees(mesh.latCell))
-    land_mask = (lat_deg < land_lat_threshold).astype(jnp.float64)
+    land_mask = (lat_deg < land_lat_threshold).astype(dtype)
     H_bathy = H_max * land_mask
     return H_bathy, land_mask
 
@@ -81,20 +83,22 @@ def rest_state_mpas_ocean(
 
     H_bathy, land_mask = idealized_bathymetry_mpas(mesh, H_max, land_lat_threshold)
 
+    dtype = get_policy().storage
+
     # Temperature: exponential profile
     scale_depth = 1000.0  # meters
     z_full = z_coord.z_full_ref  # (nlev,), negative values
     T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_full / scale_depth)
-    T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev))
+    T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev)).astype(dtype)
 
     # Salinity: uniform
-    S_data = jnp.full((nCells, nlev), S_uniform)
+    S_data = jnp.full((nCells, nlev), S_uniform, dtype=dtype)
 
     # Velocity: zero
-    u_data = jnp.zeros((nEdges, nlev))
+    u_data = jnp.zeros((nEdges, nlev), dtype=dtype)
 
     # SSH: zero
-    eta_data = jnp.zeros(nCells)
+    eta_data = jnp.zeros(nCells, dtype=dtype)
 
     return MPASOceanState(
         u=Field(data=u_data, name="u", dims=("nEdges", "nlev"), units="m/s",
