@@ -1,9 +1,26 @@
 #!/usr/bin/env python
 """Ocean test matrix: organized test runner for legoESM ocean dynamical cores.
 
-Runs rest-state adjustment, barotropic gravity wave, wind-driven gyre,
-and baroclinic adjustment tests across cubed-sphere, lat-lon, MPAS, and
-spectral (Gaussian) grids at ~5 degree resolution.
+Runs a comprehensive suite of ocean test cases across cubed-sphere, lat-lon,
+MPAS, and spectral (Gaussian) grids at ~5 degree resolution.
+
+Test cases:
+  Existing:
+    - rest_state          Rest-state adjustment (stability check)
+    - barotropic_wave     Gaussian SSH perturbation propagation
+    - wind_gyre           Wind-driven double-gyre circulation
+    - baroclinic          Meridional temperature front relaxation
+    - phillips_two_layer  Phillips 2-layer baroclinic instability
+
+  Barotropic dynamics (Bishnu et al. 2024):
+    - inertia_gravity_wave  Inertia-gravity (Poincare) wave propagation
+
+  Numerical mixing & dianeutral transport (NEMO; Petersen et al. 2015):
+    - lock_exchange       Density-driven gravity current (RPE diagnostic)
+    - overflow            Dense water descending a bathymetric slope
+
+  Tracer transport (Hecht et al. 2000):
+    - stommel_gyre_tracer Passive tracer in wind-driven Stommel gyre
 
 Output structure:
     results/ocean/<case>/<grid_type>/<resolution>/
@@ -20,10 +37,17 @@ Each case folder contains:
     - longitude_vertical_cross_sections.png
     - results.txt                      (run metadata)
 
+References:
+    Bishnu et al. (2024), JAMES. DOI: 10.1029/2022MS003545
+    Petersen et al. (2015), Ocean Modelling 86, 93-113.
+        DOI: 10.1016/j.ocemod.2014.12.004
+    Hecht et al. (2000), Ocean Modelling 2, 1-15.
+        DOI: 10.1016/S1463-5003(00)00004-4
+
 Usage:
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --quick
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --only rest_state
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --only lock_exchange
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --grid cubed_sphere
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --grid spectral --only baroclinic
 """
@@ -75,6 +99,11 @@ GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
 DEFAULT_DT = 900.0  # seconds
+
+# Physical constants for idealized ocean test cases
+_A_EARTH = 6.37122e6   # Earth radius (m)
+_OMEGA_E = 7.292e-5     # Earth rotation rate (rad/s)
+_G_EARTH = 9.80616      # gravitational acceleration (m/s^2)
 
 
 # ===========================================================================
@@ -129,6 +158,26 @@ def _build_test_matrix() -> list[TestCase]:
     for g in GRID_TYPES:
         matrix.append(TestCase(
             "phillips_two_layer", g, res[g], 10.0, 1.0))
+
+    # --- Inertia-Gravity Wave (Bishnu et al. 2024): all grids ---
+    for g in GRID_TYPES:
+        matrix.append(TestCase(
+            "inertia_gravity_wave", g, res[g], 2.0, 0.2))
+
+    # --- Lock Exchange (NEMO / Petersen et al. 2015): cubed_sphere, latlon ---
+    for g in ["cubed_sphere", "latlon"]:
+        matrix.append(TestCase(
+            "lock_exchange", g, res[g], 1.0, 0.1))
+
+    # --- Overflow (NEMO / Petersen et al. 2015): cubed_sphere, latlon ---
+    for g in ["cubed_sphere", "latlon"]:
+        matrix.append(TestCase(
+            "overflow", g, res[g], 0.5, 0.1))
+
+    # --- Stommel Gyre Tracer (Hecht et al. 2000): cubed_sphere, latlon, mpas ---
+    for g in ["cubed_sphere", "latlon", "mpas"]:
+        matrix.append(TestCase(
+            "stommel_gyre_tracer", g, res[g], 60.0, 5.0))
 
     return matrix
 
@@ -1632,6 +1681,686 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
 
 
 # ===========================================================================
+# Helper: cell-center lat/lon for any grid type
+# ===========================================================================
+
+def _get_cell_latlon_rad(grid_type, grid):
+    """Return (lat, lon) in radians, broadcast to match cell shape."""
+    if grid_type == "mpas":
+        return (np.asarray(grid.latCell, dtype=np.float64),
+                np.asarray(grid.lonCell, dtype=np.float64))
+    elif grid_type in ("latlon", "spectral"):
+        lat_1d = np.asarray(grid.lat, dtype=np.float64)
+        lon_1d = np.asarray(grid.lon, dtype=np.float64)
+        lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d, indexing='xy')
+        return lat_2d, lon_2d
+    else:  # cubed_sphere
+        return (np.asarray(grid.lat, dtype=np.float64),
+                np.asarray(grid.lon, dtype=np.float64))
+
+
+# ===========================================================================
+# Runner: Inertia-Gravity Wave (Bishnu et al. 2024)
+# ===========================================================================
+# Reference: Bishnu et al. (2024), "A Verification Suite of Test Cases for
+# the Barotropic Solver of Ocean Models", JAMES.
+# DOI: 10.1029/2022MS003545
+#
+# Sinusoidal inertia-gravity (Poincare) wave on the sphere.
+# Analytical dispersion: omega^2 = f^2 + g*H*(kx^2 + ky^2)
+# Tests the barotropic pressure-gradient and Coriolis terms.
+# ===========================================================================
+
+def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
+    """Initialize a sinusoidal inertia-gravity wave perturbation.
+
+    Uses wavenumber-2 pattern in both longitude and latitude.
+    Analytical solution for comparison after propagation.
+    """
+    from legoesm.core.field import Field
+
+    H = float(z_coord.H_max)
+    f0 = 1.0e-4  # Coriolis parameter (mid-latitude f-plane value)
+
+    # Wavenumber-2 pattern
+    lat, lon = _get_cell_latlon_rad(grid_type, grid)
+    kx = 2.0  # wavenumber in zonal direction (cycles)
+    ky = 2.0  # wavenumber in meridional direction (cycles)
+
+    # Physical wavenumbers on the sphere (approximate for low wavenumbers)
+    k_phys = kx / _A_EARTH
+    l_phys = ky / _A_EARTH
+
+    # Dispersion relation
+    omega = np.sqrt(f0**2 + _G_EARTH * H * (k_phys**2 + l_phys**2))
+
+    # Initial perturbation (t=0)
+    eta_amp = 1.0  # 1 m amplitude
+    phase = kx * lon + ky * lat
+    eta_pert = eta_amp * np.cos(phase)
+
+    # Velocity from linearized SWE: u, v from eta at t=0
+    # u = g/(omega^2 - f^2) * (omega*kx*cos(phase) - f*ky*sin(phase)) / a
+    # v = g/(omega^2 - f^2) * (omega*ky*cos(phase) + f*kx*sin(phase)) / a
+    denom = omega**2 - f0**2
+    if abs(denom) < 1e-30:
+        denom = 1e-30
+    u_pert = (_G_EARTH / denom) * (
+        omega * k_phys * np.cos(phase) - f0 * l_phys * np.sin(phase))
+    v_pert = (_G_EARTH / denom) * (
+        omega * l_phys * np.cos(phase) + f0 * k_phys * np.sin(phase))
+
+    if grid_type == "spectral":
+        from legoesm.grids.gaussian import (
+            sh_analysis, sh_analysis_oc2_3d, sh_analysis_dmu_3d)
+        eta_hat = sh_analysis(grid, jnp.array(eta_pert))
+        cos_lat = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
+        a = grid.radius
+        nlev = state.T_hat.data.shape[-1]
+        u_cos = jnp.array((u_pert * cos_lat)[..., None] * np.ones((1, 1, nlev)))
+        v_cos = jnp.array((v_pert * cos_lat)[..., None] * np.ones((1, 1, nlev)))
+        im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+        one_over_a = 1.0 / a
+        vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
+                   + one_over_a * sh_analysis_dmu_3d(grid, u_cos))
+        div_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
+                   - one_over_a * sh_analysis_dmu_3d(grid, v_cos))
+        return state._replace(
+            eta_hat=Field(eta_hat),
+            vor_hat=Field(vor_hat),
+            div_hat=Field(div_hat))
+
+    elif grid_type == "mpas":
+        lat_e = np.asarray(grid.latEdge, dtype=np.float64)
+        lon_e = np.asarray(grid.lonEdge, dtype=np.float64)
+        u_data = np.array(state.u.data, dtype=np.float64, copy=True)
+        phase_e = kx * lon_e + ky * lat_e
+        u_e = (_G_EARTH / denom) * (
+            omega * k_phys * np.cos(phase_e) - f0 * l_phys * np.sin(phase_e))
+        v_e = (_G_EARTH / denom) * (
+            omega * l_phys * np.cos(phase_e) + f0 * k_phys * np.sin(phase_e))
+        # Project onto edge normals
+        angle = np.asarray(grid.angleEdge, dtype=np.float64)
+        u_data[..., 0] = u_e * np.cos(angle) + v_e * np.sin(angle)
+        eta_cell = eta_amp * np.cos(kx * lat + ky * lon)
+        return state._replace(
+            eta=Field(jnp.array(eta_cell)),
+            u=Field(jnp.array(u_data)))
+
+    else:  # cubed_sphere, latlon
+        u_data = np.array(state.u.data, dtype=np.float64, copy=True)
+        v_data = np.array(state.v.data, dtype=np.float64, copy=True)
+        u_data[..., 0] = u_pert
+        v_data[..., 0] = v_pert
+        return state._replace(
+            eta=Field(jnp.array(eta_pert)),
+            u=Field(jnp.array(u_data)),
+            v=Field(jnp.array(v_data)))
+
+
+def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
+                              ) -> tuple[str, float, str]:
+    """Bishnu et al. 2024: inertia-gravity (Poincare) wave propagation.
+
+    Single-level (SW-equivalent) ocean model with sinusoidal IGW initial
+    condition. Measures L2 error against analytical solution and checks
+    dispersion properties.
+    """
+    H_max = 1000.0  # equivalent depth (m)
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc, nlev=2, H_max=H_max))
+    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
+    state = _init_inertia_gravity_wave(state, tc.grid_type, grid, z_coord)
+
+    # Store initial eta for error computation
+    if tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import sh_synthesis
+        eta_init = np.asarray(
+            sh_synthesis(grid, state.eta_hat.data), dtype=np.float64)
+    else:
+        eta_init = np.asarray(state.eta.data, dtype=np.float64)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        lambda s, dt_: model.step(s, dt_), state, dt, n_steps,
+        check_fn, scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"IGW ({tc.grid_type})", total_days=days)
+
+    # Compute analytical solution at t_final
+    t_final = days * 86400.0
+    f0 = 1.0e-4
+    kx, ky = 2.0, 2.0
+    k_phys = kx / _A_EARTH
+    l_phys = ky / _A_EARTH
+    omega = np.sqrt(f0**2 + _G_EARTH * H_max * (k_phys**2 + l_phys**2))
+    lat, lon = _get_cell_latlon_rad(tc.grid_type, grid)
+    eta_exact = np.cos(kx * lon + ky * lat - omega * t_final)
+
+    if tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import sh_synthesis
+        eta_final = np.asarray(
+            sh_synthesis(grid, state.eta_hat.data), dtype=np.float64)
+    else:
+        eta_final = np.asarray(state.eta.data, dtype=np.float64)
+
+    l2_err = float(np.sqrt(np.mean((eta_final - eta_exact)**2)) /
+                   max(np.sqrt(np.mean(eta_exact**2)), 1e-30))
+    max_eta = float(np.max(np.abs(eta_final)))
+    notes = f"L2={l2_err:.4f}, max|eta|={max_eta:.3f}m, omega={omega:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "H_max": H_max,
+        "reference": "Bishnu et al. 2024, DOI:10.1029/2022MS003545",
+        "L2_error": l2_err, "omega_analytical": omega,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"IGW Bishnu {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[("eta", "SSH (m)", "RdBu_r")],
+        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
+        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
+        scalar_units={"mean_eta": "m"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
+# Runner: Lock Exchange (NEMO / Petersen et al. 2015)
+# ===========================================================================
+# Reference: Petersen et al. (2015), Ocean Modelling 86, 93-113.
+# DOI: 10.1016/j.ocemod.2014.12.004
+# Also: Ilicak et al. (2012), Ocean Modelling 45-46, 37-49.
+# NEMO test cases: https://sites.nemo-ocean.io/user-guide/tests.html
+#
+# Two fluids of different densities separated by a vertical front.
+# Dense cold water on one side, light warm water on the other.
+# Gravity currents form when the "lock" is removed (t=0).
+# Key diagnostic: Reference Potential Energy (RPE) measures spurious mixing.
+# RPE(t) = g * integral(rho * z_star dV) where z_star is the equilibrium
+# parcel height in a minimum-energy sorted state.
+# ===========================================================================
+
+def _init_lock_exchange(state, grid_type, grid, z_coord):
+    """Initialize lock-exchange: cold dense (western hemisphere) / warm light (eastern).
+
+    Adapted to global ocean grids following Petersen et al. (2015):
+      - Left (lon < 0): T = 5 degC  (dense, rho ~ 1027 kg/m^3)
+      - Right (lon > 0): T = 30 degC (light, rho ~ 1022 kg/m^3)
+      - Salinity: uniform 35 PSU
+      - Velocity: zero (lock released at t=0)
+    """
+    from legoesm.core.field import Field
+
+    T_cold = 5.0    # degC (dense side)
+    T_warm = 30.0   # degC (light side)
+
+    lat, lon = _get_cell_latlon_rad(grid_type, grid)
+
+    if grid_type == "spectral":
+        from legoesm.grids.gaussian import sh_analysis_3d
+        T_hat = state.T_hat.data
+        from legoesm.grids.gaussian import sh_synthesis_3d
+        T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
+        nlev = T_grid.shape[-1]
+        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
+        # Front at prime meridian (lon=0)
+        T_field = np.where(lon[..., None] < 0, T_cold, T_warm) * mask[..., None]
+        new_T_hat = sh_analysis_3d(grid, jnp.array(T_field))
+        return state._replace(T_hat=Field(new_T_hat))
+
+    else:
+        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
+        mask = np.asarray(state.land_mask.data, dtype=np.float64)
+        nlev = T_data.shape[-1]
+        # Temperature front at prime meridian
+        for k in range(nlev):
+            T_data[..., k] = np.where(lon < 0, T_cold, T_warm) * mask
+        return state._replace(T=Field(jnp.array(T_data)))
+
+
+def _compute_rpe(state, grid_type, grid, z_coord):
+    """Compute Reference Potential Energy (Ilicak et al. 2012).
+
+    RPE = g * sum(rho_sorted * z_ref * dz * area)
+    Approximation: sort density profile at each column and compute
+    domain-integrated rho * z.
+    """
+    from legoesm.ocean.eos import wright_eos
+
+    if grid_type == "spectral":
+        from legoesm.grids.gaussian import sh_synthesis_3d
+        T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data), dtype=np.float64)
+        S = np.asarray(sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
+        area = np.asarray(grid.area, dtype=np.float64)
+    elif grid_type == "mpas":
+        T = np.asarray(state.T.data, dtype=np.float64)
+        S = np.asarray(state.S.data, dtype=np.float64)
+        area = np.asarray(grid.areaCell, dtype=np.float64)
+    else:
+        T = np.asarray(state.T.data, dtype=np.float64)
+        S = np.asarray(state.S.data, dtype=np.float64)
+        area = np.asarray(grid.area, dtype=np.float64)
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
+
+    # Compute density at each point using linearized EOS approximation
+    # rho ≈ rho0 * (1 - alpha_T * (T - T_ref))
+    rho0 = 1025.0
+    alpha_T = 2.0e-4  # thermal expansion coefficient
+    T_ref = 15.0
+    rho = rho0 * (1.0 - alpha_T * (T - T_ref))
+
+    # Potential energy: PE = g * sum(rho * z * dz * area)
+    # For RPE, we'd sort density globally, but as approximation compute PE
+    spatial_shape = T.shape[:-1]
+    area_bc = area.reshape(spatial_shape)
+    pe = 0.0
+    for k in range(len(z_full)):
+        pe += float(np.nansum(rho[..., k] * z_full[k] * dz[k] * area_bc))
+    return _G_EARTH * pe
+
+
+def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
+                      ) -> tuple[str, float, str]:
+    """Lock exchange: density-driven gravity currents (Petersen et al. 2015).
+
+    Cold dense water in western hemisphere, warm light in eastern.
+    Monitors potential energy evolution as a proxy for spurious mixing.
+    """
+    H_max = 500.0  # shallow basin
+    nlev = 20
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc, nlev=nlev, H_max=H_max))
+    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
+    state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
+
+    # Compute initial PE
+    pe_init = _compute_rpe(state, tc.grid_type, grid, z_coord)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    # Custom scalar function that includes PE
+    base_scalar_fn = _make_scalar_fn(tc.grid_type)
+
+    def scalar_fn(s):
+        scalars = base_scalar_fn(s)
+        pe = _compute_rpe(s, tc.grid_type, grid, z_coord)
+        scalars["PE"] = pe
+        if abs(pe_init) > 1e-30:
+            scalars["PE_rel"] = (pe - pe_init) / abs(pe_init)
+        else:
+            scalars["PE_rel"] = 0.0
+        return scalars
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        lambda s, dt_: model.step(s, dt_), state, dt, n_steps,
+        check_fn, scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Lock Exchange ({tc.grid_type})", total_days=days,
+        blowup_threshold=200.0)
+
+    pe_drift = _compute_drift(diag.get("PE", []))
+    pe_rel_final = diag["PE_rel"][-1] if diag.get("PE_rel") else 0.0
+    notes = f"PE drift={pe_drift:.2e}, PE_rel_final={pe_rel_final:.4e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": nlev, "H_max": H_max,
+        "reference": "Petersen et al. 2015, DOI:10.1016/j.ocemod.2014.12.004",
+        "PE_drift": pe_drift, "PE_rel_final": pe_rel_final,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"Lock Exchange {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
+        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
+        salt_key="mean_S" if tc.grid_type != "spectral" else "mean_S_hat_abs",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "PE": "J",
+                      "PE_rel": ""})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
+# Runner: Overflow (NEMO / Petersen et al. 2015)
+# ===========================================================================
+# Reference: Petersen et al. (2015), Ocean Modelling 86, 93-113.
+# DOI: 10.1016/j.ocemod.2014.12.004
+# NEMO test cases: https://sites.nemo-ocean.io/user-guide/tests.html
+#
+# Dense water on a shallow shelf overflows and descends a continental slope.
+# Tests numerical mixing near sloping topography.
+# Adapted to global grids: cold dense water at high latitudes flows
+# equatorward over a mid-latitude bathymetric ridge.
+# ===========================================================================
+
+def _init_overflow(state, grid_type, grid, z_coord):
+    """Initialize overflow: dense water at high latitudes over bathymetric slope.
+
+    Adapted from Petersen et al. (2015):
+      - Poleward of 50 deg: cold (T=5 degC, dense)
+      - Equatorward of 50 deg: warm (T=20 degC, light)
+      - Smooth tanh transition at 50 deg latitude
+      - Bathymetric ridge at ~40 deg: shelf at 500m, deep basin at 2000m
+    """
+    from legoesm.core.field import Field
+
+    T_cold = 5.0
+    T_warm = 20.0
+    lat_front = np.radians(50.0)   # front position
+    sigma_front = np.radians(5.0)  # transition width
+
+    # Bathymetry: shelf (500m) poleward of 40 deg, deep (2000m) equatorward
+    lat_shelf = np.radians(40.0)
+    sigma_shelf = np.radians(7.0)
+    d_shallow = 500.0
+    d_deep = float(z_coord.H_max)
+
+    lat, lon = _get_cell_latlon_rad(grid_type, grid)
+    abs_lat = np.abs(lat)
+
+    # Temperature: tanh transition at lat_front
+    T_profile = T_warm + (T_cold - T_warm) * 0.5 * (
+        1.0 + np.tanh((abs_lat - lat_front) / sigma_front))
+
+    # Bathymetry: tanh transition at lat_shelf
+    H_bathy_new = d_shallow + (d_deep - d_shallow) * 0.5 * (
+        1.0 - np.tanh((abs_lat - lat_shelf) / sigma_shelf))
+
+    if grid_type == "spectral":
+        from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
+        T_hat = state.T_hat.data
+        T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
+        nlev = T_grid.shape[-1]
+        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
+        for k in range(nlev):
+            # Decay temperature perturbation with depth
+            depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
+            T_grid[..., k] = (T_profile * (1.0 - 0.5 * depth_frac) + 2.0 * depth_frac) * mask
+        new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
+        # Note: spectral model doesn't easily support variable bathymetry
+        return state._replace(T_hat=Field(new_T_hat))
+
+    else:
+        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
+        mask = np.asarray(state.land_mask.data, dtype=np.float64)
+        nlev = T_data.shape[-1]
+        for k in range(nlev):
+            depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
+            T_data[..., k] = (T_profile * (1.0 - 0.5 * depth_frac) + 2.0 * depth_frac) * mask
+
+        # Update bathymetry
+        H_bathy_new_masked = H_bathy_new * mask
+        # Ensure minimum depth where ocean exists
+        H_bathy_new_masked = np.where(mask > 0.5, np.maximum(H_bathy_new_masked, 50.0), 0.0)
+
+        return state._replace(
+            T=Field(jnp.array(T_data)),
+            H_bathy=Field(jnp.array(H_bathy_new_masked)))
+
+
+def run_overflow(tc: TestCase, output_dir: Path, days: float
+                 ) -> tuple[str, float, str]:
+    """Overflow: dense water descending a bathymetric slope (Petersen et al. 2015).
+
+    Cold dense water at high latitudes flows equatorward over a mid-latitude
+    ridge. Monitors PE evolution and plume descent.
+    """
+    H_max = 2000.0
+    nlev = 20
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc, nlev=nlev, H_max=H_max))
+    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
+    state = _init_overflow(state, tc.grid_type, grid, z_coord)
+
+    pe_init = _compute_rpe(state, tc.grid_type, grid, z_coord)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 30)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+    base_scalar_fn = _make_scalar_fn(tc.grid_type)
+
+    def scalar_fn(s):
+        scalars = base_scalar_fn(s)
+        pe = _compute_rpe(s, tc.grid_type, grid, z_coord)
+        scalars["PE"] = pe
+        if abs(pe_init) > 1e-30:
+            scalars["PE_rel"] = (pe - pe_init) / abs(pe_init)
+        else:
+            scalars["PE_rel"] = 0.0
+        return scalars
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        lambda s, dt_: model.step(s, dt_), state, dt, n_steps,
+        check_fn, scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Overflow ({tc.grid_type})", total_days=days,
+        blowup_threshold=200.0)
+
+    pe_drift = _compute_drift(diag.get("PE", []))
+    pe_rel_final = diag["PE_rel"][-1] if diag.get("PE_rel") else 0.0
+    if tc.grid_type == "spectral":
+        T_drift = _compute_drift(diag.get("mean_T_hat_abs", []))
+    else:
+        T_drift = _compute_drift(diag.get("mean_T", []))
+    notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
+             f"T drift={T_drift:.2e}")
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": nlev, "H_max": H_max,
+        "reference": "Petersen et al. 2015, DOI:10.1016/j.ocemod.2014.12.004",
+        "PE_drift": pe_drift, "PE_rel_final": pe_rel_final,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"Overflow {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
+        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
+        salt_key="mean_S" if tc.grid_type != "spectral" else "mean_S_hat_abs",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "PE": "J"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
+# Runner: Stommel Gyre Tracer (Hecht et al. 2000)
+# ===========================================================================
+# Reference: Hecht, Wingate, Kasahara (2000), "A better, more discriminating
+# test problem for ocean tracer transport", Ocean Modelling 2, 1-15.
+# DOI: 10.1016/S1463-5003(00)00004-4
+#
+# Wind-driven Stommel gyre with a passive tracer (salinity field).
+# The tracer blob is advected through the highly sheared western boundary
+# current, which is a severe test of advection scheme accuracy.
+# Based on MITgcm barotropic gyre setup:
+#   - Domain: global (~1200 km effective gyre scale)
+#   - Wind: tau_x = -tau0 * cos(pi * y / L_y)
+#   - Viscosity: A_h to resolve Munk layer
+#   - Linear bottom drag
+# ===========================================================================
+
+def _init_stommel_gyre_tracer(state, grid_type, grid, z_coord):
+    """Initialize Stommel gyre with passive salinity tracer blob.
+
+    Uses the existing wind-driven gyre initialization for dynamics,
+    then sets salinity as a passive tracer with a Gaussian blob
+    in the subtropical gyre interior.
+    """
+    from legoesm.core.field import Field
+
+    # First set up the wind-gyre dynamics
+    state = _add_wind_gyre_forcing(state, grid_type, grid, z_coord)
+
+    # Add salinity tracer blob (Gaussian, centered at 30N, 30W)
+    lat, lon = _get_cell_latlon_rad(grid_type, grid)
+    lat_c = np.radians(30.0)   # blob center latitude
+    lon_c = np.radians(-30.0)  # blob center longitude
+    sigma = np.radians(10.0)   # blob width (~10 deg)
+    S_bg = 35.0                # background salinity (PSU)
+    S_amp = 2.0                # tracer perturbation amplitude
+
+    r2 = (lat - lat_c)**2 + (np.cos(lat_c) * (lon - lon_c))**2
+    S_blob = S_bg + S_amp * np.exp(-r2 / (2.0 * sigma**2))
+
+    if grid_type == "spectral":
+        from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
+        S_hat = state.S_hat.data
+        S_grid = np.array(sh_synthesis_3d(grid, S_hat), dtype=np.float64)
+        nlev = S_grid.shape[-1]
+        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
+        # Set top-level salinity as tracer, keep deeper levels uniform
+        S_grid[..., 0] = S_blob * mask
+        new_S_hat = sh_analysis_3d(grid, jnp.array(S_grid))
+        return state._replace(S_hat=Field(new_S_hat))
+
+    else:
+        S_data = np.array(state.S.data, dtype=np.float64, copy=True)
+        mask = np.asarray(state.land_mask.data, dtype=np.float64)
+        # Surface salinity blob
+        S_data[..., 0] = S_blob * mask
+        return state._replace(S=Field(jnp.array(S_data)))
+
+
+def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
+                             ) -> tuple[str, float, str]:
+    """Stommel gyre with passive tracer (Hecht et al. 2000).
+
+    Wind-driven gyre with a salinity blob advected through the western
+    boundary current. Monitors tracer conservation (integral, min, max)
+    and transport through the sheared flow.
+    """
+    if tc.grid_type == "spectral":
+        raise NotImplementedError(
+            "Stommel gyre tracer not implemented for spectral grid")
+
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc))
+    rest = _create_rest_state(tc, grid, z_coord)
+    state = _init_stommel_gyre_tracer(rest, tc.grid_type, grid, z_coord)
+
+    # Store initial tracer integral for conservation check
+    if tc.grid_type == "mpas":
+        area = np.asarray(grid.areaCell, dtype=np.float64)
+    else:
+        area = np.asarray(grid.area, dtype=np.float64)
+    S_init_sfc = np.asarray(state.S.data[..., 0], dtype=np.float64)
+    mask = np.asarray(state.land_mask.data, dtype=np.float64)
+    S_integral_init = float(np.sum(S_init_sfc * area * mask))
+    S_min_init = float(np.min(S_init_sfc[mask > 0.5]))
+    S_max_init = float(np.max(S_init_sfc[mask > 0.5]))
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+    base_scalar_fn = _make_scalar_fn(tc.grid_type)
+
+    def scalar_fn(s):
+        scalars = base_scalar_fn(s)
+        S_sfc = np.asarray(s.S.data[..., 0], dtype=np.float64)
+        ocean = mask > 0.5
+        scalars["S_min"] = float(np.min(S_sfc[ocean]))
+        scalars["S_max"] = float(np.max(S_sfc[ocean]))
+        scalars["S_integral"] = float(np.sum(S_sfc * area * mask))
+        if abs(S_integral_init) > 1e-30:
+            scalars["S_integral_rel"] = (
+                (scalars["S_integral"] - S_integral_init) / abs(S_integral_init))
+        else:
+            scalars["S_integral_rel"] = 0.0
+        return scalars
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        lambda s, dt_: model.step(s, dt_), state, dt, n_steps,
+        check_fn, scalar_fn, extract_fn, diag_every,
+        lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Stommel Tracer ({tc.grid_type})", total_days=days)
+
+    S_int_drift = _compute_drift(diag.get("S_integral", []))
+    S_min_final = diag["S_min"][-1] if diag.get("S_min") else 0
+    S_max_final = diag["S_max"][-1] if diag.get("S_max") else 0
+    # Check for new extrema (overshoots/undershoots)
+    overshoot = max(0, S_max_final - S_max_init)
+    undershoot = max(0, S_min_init - S_min_final)
+    notes = (f"S integral drift={S_int_drift:.2e}, "
+             f"overshoot={overshoot:.3f}, undershoot={undershoot:.3f}")
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "reference": "Hecht et al. 2000, DOI:10.1016/S1463-5003(00)00004-4",
+        "S_integral_drift": S_int_drift,
+        "S_overshoot": overshoot, "S_undershoot": undershoot,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+
+    field_specs = [
+        ("eta", "SSH (m)", "RdBu_r"),
+        ("SST", "SST (degC)", "RdYlBu_r"),
+        ("SSS", "SSS (PSU)", "YlGnBu"),
+    ]
+    if tc.grid_type != "mpas":
+        field_specs.append(("speed_sfc", "Surface speed (m/s)", "magma"))
+
+    _save_case_diagnostics(
+        output_dir, f"Stommel Tracer {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=field_specs,
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU",
+                      "S_min": "PSU", "S_max": "PSU", "S_integral": "PSU*m^2"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
 # Runner dispatch
 # ===========================================================================
 
@@ -1641,6 +2370,10 @@ RUNNERS: dict[str, Callable] = {
     "wind_gyre": run_wind_gyre,
     "baroclinic": run_baroclinic,
     "phillips_two_layer": run_phillips_two_layer,
+    "inertia_gravity_wave": run_inertia_gravity_wave,
+    "lock_exchange": run_lock_exchange,
+    "overflow": run_overflow,
+    "stommel_gyre_tracer": run_stommel_gyre_tracer,
 }
 
 

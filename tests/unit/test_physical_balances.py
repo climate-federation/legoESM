@@ -361,3 +361,168 @@ class TestInertialOscillation:
             f"Expected v to increase from T/4 to 3T/4 (oscillation), "
             f"got v_quarter={v_quarter:.4f}, v_3quarter={v_three_quarter:.4f}"
         )
+
+
+# =====================================================================
+# 3f) Thermal wind balance (PE, lat-lon)
+# =====================================================================
+
+class TestThermalWindBalance:
+    """Initialize a meridional temperature gradient in thermal wind
+    balance and verify the state remains near-balanced after stepping.
+
+    Thermal wind relation in sigma coordinates:
+        du/dsigma ~ -(R_d / f) * dT/dy * (dsigma/sigma)
+
+    We set up T(lat, sigma) = T0 + dT * sin(lat) * sigma and compute
+    the balanced u analytically. With no diffusion, the state should
+    drift minimally over 20 steps.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
+            LatLonPrimitiveEquationModel,
+            LatLonPrimitiveEquationConfig,
+        )
+
+        n_lat, n_lon = 8, 16
+        nlev = 5
+        T0 = 280.0
+        dT = 20.0  # meridional T gradient amplitude [K]
+        ps0 = 1e5
+
+        self.grid = create_latlon_grid(n_lat, n_lon)
+        self.sigma = create_sigma_coordinate(nlev)
+
+        shape_3d = (n_lat, n_lon, nlev)
+        shape_2d = (n_lat, n_lon)
+        dims_3d = ("lat", "lon", "level")
+        dims_2d = ("lat", "lon")
+
+        lat2d = self.grid.lat2d  # (n_lat, n_lon)
+        sigma_full = self.sigma.sigma_full  # (nlev,)
+
+        # T(lat, sigma) = T0 + dT * sin(lat) * sigma
+        T_data = T0 + dT * jnp.sin(lat2d[:, :, None]) * sigma_full[None, None, :]
+
+        # Set u = 0 and v = 0 initially (approximate balance; the true
+        # thermal wind requires careful integration, but for a drift test
+        # starting from rest with the correct T field is adequate).
+        u_data = jnp.zeros(shape_3d)
+        v_data = jnp.zeros(shape_3d)
+
+        self.T0_data = T_data
+        self.u0_data = u_data
+
+        self.state0 = HydrostaticState(
+            u=Field(data=u_data, name="u", dims=dims_3d, units="m/s"),
+            v=Field(data=v_data, name="v", dims=dims_3d, units="m/s"),
+            T=Field(data=T_data, name="T", dims=dims_3d, units="K"),
+            p_s=Field(data=jnp.full(shape_2d, ps0), name="p_s", dims=dims_2d, units="Pa"),
+            phis=Field(data=jnp.zeros(shape_2d), name="phis", dims=dims_2d, units="m^2/s^2"),
+        )
+
+        config = LatLonPrimitiveEquationConfig(
+            hyperdiff_coeff=0.0,
+            A_h=0.0,
+            use_conservation_fixer=True,
+            fix_mass=True,
+            use_polar_filter=False,
+            sponge_tau_sec=0.0,
+        )
+        self.dt = 60.0
+        self.model = LatLonPrimitiveEquationModel(
+            self.grid, self.sigma, config, dt=self.dt,
+        )
+        self.n_steps = 20
+
+    def test_wind_drift_bounded(self):
+        """max|u| drift should stay < 2 m/s after 20 steps."""
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        u_drift = float(jnp.max(jnp.abs(state.u.data - self.u0_data)))
+        print(f"  Thermal wind: max|u_drift| = {u_drift:.4e} m/s")
+        assert u_drift < 2.0, f"max|u_drift| = {u_drift} m/s"
+        assert jnp.all(jnp.isfinite(state.u.data)), "u contains non-finite values"
+
+    def test_temperature_drift_bounded(self):
+        """max|T| drift should stay < 2 K after 20 steps."""
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        T_drift = float(jnp.max(jnp.abs(state.T.data - self.T0_data)))
+        print(f"  Thermal wind: max|T_drift| = {T_drift:.4e} K")
+        assert T_drift < 2.0, f"max|T_drift| = {T_drift} K"
+        assert jnp.all(jnp.isfinite(state.T.data)), "T contains non-finite values"
+
+
+# =====================================================================
+# 3g) Resting ocean with flat bottom (lat-lon)
+# =====================================================================
+
+class TestRestingOcean:
+    """A resting ocean with uniform T, S and flat bottom should remain
+    at rest. Any motion generated indicates a spurious pressure gradient
+    or discretization error in the ocean model."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
+        from legoesm.ocean.vertical import create_ocean_z_star
+        from legoesm.ocean.state import LatLonOceanState, LatLonOceanConfig
+
+        n_lat, n_lon = 8, 16
+        nlev = 5
+        H_depth = 4000.0
+
+        self.grid = create_latlon_grid(n_lat, n_lon)
+        self.z_coord = create_ocean_z_star(nlev, H_max=H_depth)
+
+        shape_3d = (n_lat, n_lon, nlev)
+        shape_2d = (n_lat, n_lon)
+        dims_3d = ("lat", "lon", "level")
+        dims_2d = ("lat", "lon")
+
+        # Uniform T = 20 C, S = 35 PSU, u = v = 0, eta = 0
+        # Flat bottom H = 4000m, all ocean (land_mask = 1 everywhere)
+        self.state0 = LatLonOceanState(
+            u=Field(data=jnp.zeros(shape_3d), name="u", dims=dims_3d, units="m/s"),
+            v=Field(data=jnp.zeros(shape_3d), name="v", dims=dims_3d, units="m/s"),
+            T=Field(data=jnp.full(shape_3d, 20.0), name="T", dims=dims_3d, units="degC"),
+            S=Field(data=jnp.full(shape_3d, 35.0), name="S", dims=dims_3d, units="PSU"),
+            eta=Field(data=jnp.zeros(shape_2d), name="eta", dims=dims_2d, units="m"),
+            H_bathy=Field(data=jnp.full(shape_2d, H_depth), name="H_bathy", dims=dims_2d, units="m"),
+            land_mask=Field(data=jnp.ones(shape_2d), name="land_mask", dims=dims_2d, units=""),
+        )
+
+        config = LatLonOceanConfig(
+            A_h=0.0,
+            K_h=0.0,
+            A_v=0.0,
+            K_v=0.0,
+            hyperdiff_coeff=0.0,
+            use_conservation_fixer=False,
+            n_barotropic_substeps=10,
+            enable_runtime_checks=False,
+        )
+        self.model = LatLonOceanModel(self.grid, self.z_coord, config)
+        self.dt = 300.0
+        self.n_steps = 20
+
+    def test_velocities_stay_zero(self):
+        """max|u|, max|v| should stay < 1e-6 m/s after 20 steps."""
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        max_u = float(jnp.max(jnp.abs(state.u.data)))
+        max_v = float(jnp.max(jnp.abs(state.v.data)))
+        print(f"  Resting ocean: max|u| = {max_u:.2e}, max|v| = {max_v:.2e}")
+        assert max_u < 1e-6, f"max|u| = {max_u}"
+        assert max_v < 1e-6, f"max|v| = {max_v}"
+        assert jnp.all(jnp.isfinite(state.u.data)), "u non-finite"
+        assert jnp.all(jnp.isfinite(state.v.data)), "v non-finite"

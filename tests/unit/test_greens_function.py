@@ -290,3 +290,154 @@ class TestLaplacianGreensFunction:
         # The field should be mostly non-negative (diffusion of positive source)
         min_val = float(jnp.min(field))
         assert min_val > -0.1, f"Significant undershoot: min = {min_val:.3e}"
+
+
+# ======================================================================
+# 2e) Quantitative gravity wave speed
+# ======================================================================
+
+class TestGravityWaveQuantitative:
+    """Measure the wavefront radius and verify c = sqrt(g*H) within
+    a generous tolerance at coarse resolution."""
+
+    def test_gravity_wave_c_quantitative(self, ll_grid):
+        """Place a Gaussian bump at (0, pi) and measure the propagation
+        speed against c_analytic = sqrt(g*H0)."""
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig,
+        )
+        from legoesm.core.state import ShallowWaterState
+
+        grid = ll_grid
+        g = constants.g
+        H0 = 1e4
+        c_analytic = float(jnp.sqrt(g * H0))
+
+        # Gaussian bump at (0, pi) with sigma = 10 degrees, amplitude = 500m
+        lat0, lon0 = 0.0, jnp.pi
+        sigma_rad = 10.0 * jnp.pi / 180.0
+        dist_sq = (grid.lat2d - lat0)**2 + (grid.lon2d - lon0)**2
+        bump = 500.0 * jnp.exp(-dist_sq / (2.0 * sigma_rad**2))
+
+        h_data = H0 + bump
+        u_data = jnp.zeros_like(h_data)
+        v_data = jnp.zeros_like(h_data)
+        h_s_data = jnp.zeros_like(h_data)
+
+        state = ShallowWaterState(
+            h=Field(data=h_data, name="h", dims=("lat", "lon"), units="m"),
+            u=Field(data=u_data, name="u", dims=("lat", "lon"), units="m/s"),
+            v=Field(data=v_data, name="v", dims=("lat", "lon"), units="m/s"),
+            h_s=Field(data=h_s_data, name="h_s", dims=("lat", "lon"), units="m"),
+        )
+
+        dt = 30.0
+        N_steps = 100
+        config = FVShallowWaterLatLonConfig(
+            g=g, hyperdiff_coeff=0.0,
+            use_conservation_fixer=False, fix_mass=False, fix_energy=False,
+            use_polar_filter=False,
+        )
+        model = FVShallowWaterLatLonModel(grid, config=config, dt=dt)
+
+        for _ in range(N_steps):
+            state = model.step(state, dt)
+
+        # Measure the RMS radius of the perturbation
+        h_pert = jnp.abs(state.h.data - H0)
+        R_earth = constants.R_earth
+
+        # Great-circle distance from bump center (0, pi)
+        cos_dist = (jnp.sin(grid.lat2d) * jnp.sin(lat0)
+                    + jnp.cos(grid.lat2d) * jnp.cos(lat0)
+                    * jnp.cos(grid.lon2d - lon0))
+        cos_dist = jnp.clip(cos_dist, -1.0, 1.0)
+        gc_dist = R_earth * jnp.arccos(cos_dist)  # meters
+
+        # Area-weighted mean distance of |h - H0|
+        weight = h_pert * grid.area
+        total_weight = float(jnp.sum(weight))
+        if total_weight > 0:
+            rms_radius = float(
+                jnp.sqrt(jnp.sum(weight * gc_dist**2) / total_weight)
+            )
+        else:
+            rms_radius = 0.0
+
+        c_numerical = rms_radius / (N_steps * dt)
+
+        ratio = c_numerical / c_analytic
+        # At coarse 16x32 resolution, the RMS-radius metric is noisy;
+        # we check order-of-magnitude agreement.
+        assert 0.3 < ratio < 4.0, (
+            f"Wave speed ratio c_num/c_ana = {ratio:.3f} "
+            f"(c_num={c_numerical:.1f}, c_ana={c_analytic:.1f})"
+        )
+        assert jnp.all(jnp.isfinite(state.h.data)), "Non-finite h values"
+
+
+# ======================================================================
+# 2f) High-wavenumber damping verification (hyperdiffusion spectral decay)
+# ======================================================================
+
+class TestHyperdiffusionSpectralDecay:
+    """Verify that spectral hyperdiffusion damps high-k modes more
+    than low-k modes, as expected from the n^4 scaling."""
+
+    def test_high_k_damped_more_than_low_k(self):
+        """Create a field = low_mode + high_mode on a Gaussian grid,
+        apply spectral hyperdiffusion, verify high-k is damped more."""
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid, sh_analysis, sh_synthesis,
+            spectral_hyperdiffusion,
+        )
+
+        grid = create_gaussian_grid(10)  # T10 for speed
+
+        # Create a low-wavenumber mode (n=2, m=0) and a high-wavenumber mode (n=8, m=0)
+        n_low, m_low = 2, 0
+        n_high, m_high = 8, 0
+
+        # Build initial field in spectral space
+        coeffs_init = jnp.zeros(grid.n_sh, dtype=jnp.complex128)
+        idx_low = None
+        idx_high = None
+        for i in range(grid.n_sh):
+            if int(grid.ls[i]) == n_low and int(grid.ms[i]) == m_low:
+                idx_low = i
+            if int(grid.ls[i]) == n_high and int(grid.ms[i]) == m_high:
+                idx_high = i
+        assert idx_low is not None, f"Could not find mode (n={n_low}, m={m_low})"
+        assert idx_high is not None, f"Could not find mode (n={n_high}, m={m_high})"
+
+        # Set both modes to amplitude 1.0
+        coeffs_init = coeffs_init.at[idx_low].set(1.0 + 0.0j)
+        coeffs_init = coeffs_init.at[idx_high].set(1.0 + 0.0j)
+
+        amp_low_init = float(jnp.abs(coeffs_init[idx_low]))
+        amp_high_init = float(jnp.abs(coeffs_init[idx_high]))
+
+        # Apply hyperdiffusion stepping: d(coeffs)/dt = hyperdiff_tendency
+        # Use Euler forward stepping
+        nu = 1.0e10  # large enough to see damping in 10 steps
+        dt_step = 1.0
+        coeffs = coeffs_init
+        for _ in range(10):
+            tend = spectral_hyperdiffusion(grid, coeffs, nu, order=2)
+            coeffs = coeffs + dt_step * tend
+
+        amp_low_final = float(jnp.abs(coeffs[idx_low]))
+        amp_high_final = float(jnp.abs(coeffs[idx_high]))
+
+        # Compute amplitude ratios
+        low_ratio = amp_low_final / (amp_low_init + 1e-30)
+        high_ratio = amp_high_final / (amp_high_init + 1e-30)
+
+        # High-k mode should be damped more than low-k mode
+        assert high_ratio < low_ratio, (
+            f"High-k mode not damped more: low_ratio={low_ratio:.6f}, "
+            f"high_ratio={high_ratio:.6f}"
+        )
+        # Both should be damped (ratios < 1)
+        assert low_ratio < 1.0, f"Low-k mode not damped at all: ratio={low_ratio}"
+        assert high_ratio < 1.0, f"High-k mode not damped at all: ratio={high_ratio}"
