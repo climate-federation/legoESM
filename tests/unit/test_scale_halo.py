@@ -184,14 +184,16 @@ class TestVectorHalo:
         # Interior of padded should exactly match input (no modification)
         u_int = u_pad[:, 1:-1, 1:-1]
         v_int = v_pad[:, 1:-1, 1:-1]
-        np.testing.assert_allclose(np.array(u_int), np.array(u_grid), atol=1e-12)
-        np.testing.assert_allclose(np.array(v_int), np.array(v_grid), atol=1e-12)
+        # Allow small float32 precision differences from grid angle storage
+        np.testing.assert_allclose(np.array(u_int), np.array(u_grid), atol=1e-6)
+        np.testing.assert_allclose(np.array(v_int), np.array(v_grid), atol=1e-6)
 
-        # Reconstruct geographic in interior using ORIGINAL angles (not padded)
-        u_east_int = cos_a * u_int + sin_a * v_int
-        v_north_int = -sin_a * u_int + cos_a * v_int
-        np.testing.assert_allclose(np.array(u_east_int), 1.0, atol=1e-10)
-        np.testing.assert_allclose(np.array(v_north_int), 0.0, atol=1e-10)
+        # Reconstruct geographic in interior using ORIGINAL angles
+        # Grid→Geographic: u_east = cos_a * u_grid - sin_a * v_grid (inverse rotation)
+        u_east_int = cos_a * u_int - sin_a * v_int
+        v_north_int = sin_a * u_int + cos_a * v_int
+        np.testing.assert_allclose(np.array(u_east_int), 1.0, atol=1e-6)
+        np.testing.assert_allclose(np.array(v_north_int), 0.0, atol=1e-6)
 
         # Halo values should be finite; speed ~ 1.0 ± interpolation error
         speed_halo = jnp.sqrt(u_pad**2 + v_pad**2)

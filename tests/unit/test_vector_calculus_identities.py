@@ -182,6 +182,76 @@ class TestNullSpace:
         scale = U0 / dx_typical
         assert max_div / scale < 0.05, f"div(solid-body) relative error {max_div/scale:.3e}"
 
+    # --- gradient of constant = 0 on Gaussian grid (spectral) ---
+
+    def test_grad_constant_gaussian(self, gauss_grid):
+        """Gradient of a constant field must be zero on a Gaussian grid.
+
+        On a Gaussian grid, a constant field lives entirely in the n=0, m=0
+        spherical harmonic mode. The spectral gradient of n=0 is zero, so
+        we verify that sh_analysis of a constant yields only the (0,0) mode
+        and that all other coefficients are negligible.
+        """
+        from legoesm.grids.gaussian import sh_analysis, sh_synthesis
+        grid = gauss_grid
+        # Constant field = 42.0 on the Gaussian grid
+        const_field = jnp.full((grid.n_lat, grid.n_lon), 42.0)
+        # Forward SH transform
+        coeffs = sh_analysis(grid, const_field)
+        # Zero out the n=0 mode (the only one that should be nonzero)
+        mask_n0 = grid.ls == 0
+        grad_coeffs = jnp.where(mask_n0, 0.0, coeffs)
+        # All remaining coefficients should be near zero
+        max_grad_coeff = float(jnp.max(jnp.abs(grad_coeffs)))
+        assert max_grad_coeff < 1e-10, (
+            f"Non-zero gradient coefficients for constant field: {max_grad_coeff:.3e}"
+        )
+
+    # --- Laplacian of constant = 0 on Gaussian grid (spectral) ---
+
+    def test_laplacian_constant_gaussian(self, gauss_grid):
+        """Laplacian of a constant must be zero on a Gaussian grid.
+
+        Uses spectral Laplacian: multiply SH coefficients by -n(n+1)/a^2.
+        For a constant field (only n=0 mode), the Laplacian eigenvalue is 0.
+        """
+        from legoesm.grids.gaussian import sh_analysis, sh_synthesis, spectral_laplacian
+        grid = gauss_grid
+        const_field = jnp.full((grid.n_lat, grid.n_lon), 3.14)
+        coeffs = sh_analysis(grid, const_field)
+        lap_coeffs = spectral_laplacian(grid, coeffs)
+        lap_grid = sh_synthesis(grid, lap_coeffs)
+        max_lap = float(jnp.max(jnp.abs(lap_grid)))
+        assert max_lap < 1e-8, (
+            f"Laplacian of constant on Gaussian grid = {max_lap:.3e}, expected ~0"
+        )
+
+    # --- hyperdiffusion of constant = 0 on cubed-sphere ---
+
+    def test_hyperdiff_constant_cubesphere(self, cs_grid):
+        """Hyperdiffusion (nabla^4) of a constant field must be zero on cubed-sphere."""
+        from legoesm.core.operators import hyperdiffusion
+        phi = _constant_field_cs(cs_grid, 5.0)
+        coeff = 1.0e10  # arbitrary nonzero coefficient
+        result = hyperdiffusion(phi, cs_grid, coeff)
+        max_val = float(jnp.max(jnp.abs(result.data)))
+        assert max_val < 1e-6, (
+            f"nabla^4(constant) = {max_val:.3e} on cubed-sphere, expected ~0"
+        )
+
+    # --- hyperdiffusion of constant = 0 on lat-lon ---
+
+    def test_hyperdiff_constant_latlon(self, ll_grid):
+        """Hyperdiffusion (nabla^4) of a constant field must be zero on lat-lon."""
+        from legoesm.core.operators_latlon import hyperdiffusion
+        phi = _constant_field_ll(ll_grid, 5.0)
+        coeff = 1.0e10  # arbitrary nonzero coefficient
+        result = hyperdiffusion(phi, ll_grid, coeff)
+        max_val = float(jnp.max(jnp.abs(result.data)))
+        assert max_val < 1e-6, (
+            f"nabla^4(constant) = {max_val:.3e} on lat-lon, expected ~0"
+        )
+
 
 # ======================================================================
 # 1b) curl(grad(phi)) = 0
