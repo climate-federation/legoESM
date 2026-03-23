@@ -301,14 +301,23 @@ class ModelDriver:
                 self.grid, self.sigma, T_init=cfg.T_init, phis=phis_arg,
             )
         else:
-            from legoesm.atmosphere.physics.held_suarez import held_suarez_init
             if cfg.grid.grid_type == "cubed_sphere":
+                from legoesm.atmosphere.physics.held_suarez import held_suarez_init
                 shape_3d = (6, N, N, NLEV)
+                self.state = held_suarez_init(
+                    self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
+                )
             else:
+                # Lat-lon and Gaussian grids use (n_lat, n_lon, nlev) layout
+                from legoesm.atmosphere.physics.held_suarez_latlon import held_suarez_init_latlon
                 shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
-            self.state = held_suarez_init(
-                self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
-            )
+                self.state = held_suarez_init_latlon(
+                    self.grid, self.sigma, T_init=cfg.T_init,
+                )
+                if jnp.any(self._phis_data != 0):
+                    self.state = self.state._replace(
+                        phis=self.state.phis.replace(data=self._phis_data),
+                    )
 
         # Initialize all tracers via registry
         self.tracers = init_tracers(self.tracer_registry, shape_3d)
