@@ -865,10 +865,18 @@ def _ensure_required_artifacts(output_dir: Path):
 # Shared field extraction helpers
 # ===========================================================================
 
-def _extract_hydro_cube_latlon(s):
-    """Extract hydrostatic snapshot fields for cubed-sphere or lat-lon."""
+def _extract_hydro_cube_latlon(s, cos_angle=None, sin_angle=None):
+    """Extract hydrostatic snapshot fields for cubed-sphere or lat-lon.
+
+    For cubed-sphere grids, pass cos_angle and sin_angle to rotate
+    face-local (u, v) to geographic (u_east, v_north) coordinates.
+    """
     u_sfc = np.asarray(s.u.data[..., -1], dtype=np.float64)
     v_sfc = np.asarray(s.v.data[..., -1], dtype=np.float64)
+    if cos_angle is not None:
+        ca = np.asarray(cos_angle, dtype=np.float64)
+        sa = np.asarray(sin_angle, dtype=np.float64)
+        u_sfc, v_sfc = ca * u_sfc - sa * v_sfc, sa * u_sfc + ca * v_sfc
     return {
         "u": u_sfc,
         "v": v_sfc,
@@ -878,28 +886,30 @@ def _extract_hydro_cube_latlon(s):
     }
 
 
-def _extract_hydro_mpas(s, lon_cell, lat_cell, lon_edge=None, lat_edge=None):
+def _extract_hydro_mpas(s, mesh, lon_cell, lat_cell):
     """Extract hydrostatic snapshot fields for icosahedral (MPAS).
 
-    MPAS uses C-grid staggering: u on edges, T/p_s on cells.
-    We need separate coordinates for edge-based and cell-based fields.
+    Reconstructs cell-centered (u_east, v_north) from edge-normal
+    velocities, then regrids all fields to a regular lat-lon grid.
     """
-    # Cell-based fields
+    from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+
+    u_edge = s.u.data
+    if u_edge.ndim > 1:
+        u_edge = u_edge[:, -1]
+    u_east, v_north = reconstruct_cell_velocity(u_edge, mesh)
+    u_e = np.asarray(u_east, dtype=np.float64)
+    v_n = np.asarray(v_north, dtype=np.float64)
+
+    u_ll = _bin_to_latlon(u_e, lon_cell, lat_cell)
+    v_ll = _bin_to_latlon(v_n, lon_cell, lat_cell)
     ps_ll = _bin_to_latlon(
         np.asarray(s.p_s.data, dtype=np.float64), lon_cell, lat_cell)
 
-    # Edge-based u: use edge coordinates if available, else regrid
-    # the cell-reconstructed velocity
-    if lon_edge is not None and lat_edge is not None:
-        u_sfc = np.asarray(s.u.data, dtype=np.float64)
-        if u_sfc.ndim > 1:
-            u_sfc = u_sfc[:, -1]  # surface level
-        u_ll = _bin_to_latlon(u_sfc, lon_edge, lat_edge)
-    else:
-        u_ll = np.full((181, 360), np.nan, dtype=np.float64)
-
     return {
         "u": u_ll,
+        "v": v_ll,
+        "wind_speed": np.sqrt(u_ll ** 2 + v_ll ** 2),
         "p_s": ps_ll,
         "T_3d": np.asarray(s.T.data, dtype=np.float64),
     }
@@ -967,6 +977,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             v_a = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
             u = np.asarray(u_a, dtype=np.float64)
             v = np.asarray(v_a, dtype=np.float64)
+            # Rotate face-local to geographic
+            ca = np.asarray(grid.cos_angle, dtype=np.float64)
+            sa = np.asarray(grid.sin_angle, dtype=np.float64)
+            u, v = ca * u - sa * v, sa * u + ca * v
             return {"u": u, "v": v,
                     "wind_speed": np.sqrt(u ** 2 + v ** 2),
                     "height": np.asarray(s.h, dtype=np.float64)}
@@ -1247,7 +1261,9 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
                 "mean_T": float(jnp.mean(s.T.data)),
             }
 
-        extract_fn = _extract_hydro_cube_latlon
+        _cos_a = np.asarray(grid.cos_angle, dtype=np.float64)
+        _sin_a = np.asarray(grid.sin_angle, dtype=np.float64)
+        extract_fn = lambda s: _extract_hydro_cube_latlon(s, _cos_a, _sin_a)
         key_array_fn = lambda s: s.T.data
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -1340,11 +1356,9 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
-        lon_edge = np.asarray(mesh.lonEdge, dtype=np.float64) * 180 / np.pi
-        lat_edge = np.asarray(mesh.latEdge, dtype=np.float64) * 180 / np.pi
 
         def extract_fn(s):
-            return _extract_hydro_mpas(s, lon_cell, lat_cell, lon_edge, lat_edge)
+            return _extract_hydro_mpas(s, mesh, lon_cell, lat_cell)
 
         key_array_fn = lambda s: s.T.data
         coord_kind = "icosa"
@@ -1509,7 +1523,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                     jnp.abs(s.p_s.data - ps_init))),
             }
 
-        extract_fn = _extract_hydro_cube_latlon
+        _cos_a = np.asarray(grid.cos_angle, dtype=np.float64)
+        _sin_a = np.asarray(grid.sin_angle, dtype=np.float64)
+        extract_fn = lambda s: _extract_hydro_cube_latlon(s, _cos_a, _sin_a)
         key_array_fn = lambda s: s.T.data
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -1602,11 +1618,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
-        lon_edge = np.asarray(mesh.lonEdge, dtype=np.float64) * 180 / np.pi
-        lat_edge = np.asarray(mesh.latEdge, dtype=np.float64) * 180 / np.pi
 
         def extract_fn(s):
-            return _extract_hydro_mpas(s, lon_cell, lat_cell, lon_edge, lat_edge)
+            return _extract_hydro_mpas(s, mesh, lon_cell, lat_cell)
 
         key_array_fn = lambda s: s.T.data
         coord_kind = "icosa"
@@ -1865,7 +1879,9 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
                 "mean_p_s": float(jnp.mean(s.p_s.data)),
             }
 
-        extract_fn = _extract_hydro_cube_latlon
+        _cos_a = np.asarray(grid.cos_angle, dtype=np.float64)
+        _sin_a = np.asarray(grid.sin_angle, dtype=np.float64)
+        extract_fn = lambda s: _extract_hydro_cube_latlon(s, _cos_a, _sin_a)
         key_array_fn = lambda s: s.T.data
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -2096,9 +2112,14 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 "mean_rho_prime": float(jnp.mean(s.rho_prime.data)),
             }
 
+        _cos_a_nh = np.asarray(grid.cos_angle, dtype=np.float64)
+        _sin_a_nh = np.asarray(grid.sin_angle, dtype=np.float64)
+
         def extract_fn(s):
             u = np.asarray(s.u.data[..., 0], dtype=np.float64)
             v = np.asarray(s.v.data[..., 0], dtype=np.float64)
+            # Rotate face-local to geographic
+            u, v = _cos_a_nh * u - _sin_a_nh * v, _sin_a_nh * u + _cos_a_nh * v
             w_idx = min(s.w.data.shape[-1] // 2, s.w.data.shape[-1] - 1)
             return {
                 "u": u, "v": v,
