@@ -20,4 +20,5 @@ DRY_AIR_KEY = 'dry_air'
 # normalized by the number of moles of dry air.
 DRY_AIR_VMR = 1.0
 # Stefan-Boltzmann constant in W / (m^2 K^4).
-STEFAN_BOLTZMANN = 5.67e-8
+# Aligned with legoesm.constants.sigma_sb for consistency.
+STEFAN_BOLTZMANN = 5.670374419e-8

@@ -563,7 +563,11 @@ class TestSoilThermal(unittest.TestCase):
         self.assertTrue(float(k_wet[0]) > float(k_dry[0]))
 
     def test_energy_conservation(self):
-        """Total energy change should equal integrated flux."""
+        """Total energy change should equal integrated flux.
+
+        The total energy input includes both the surface ground heat flux
+        *and* the geothermal heat flux at the bottom boundary.
+        """
         from legoesm.land.soil_thermal import (
             solve_soil_thermal, compute_heat_capacity,
         )
@@ -575,7 +579,8 @@ class TestSoilThermal(unittest.TestCase):
         T_new = solve_soil_thermal(T, theta, grid, hconfig, tconfig, G, dt)
         C = compute_heat_capacity(theta, hconfig, tconfig)
         dE = jnp.sum(C * grid.dz * (T_new - T), axis=1)  # J/m2
-        expected = G * dt  # J/m2
+        # Energy input = surface flux + geothermal flux at bottom
+        expected = (G + tconfig.Q_geothermal) * dt  # J/m2
         npt.assert_allclose(dE, expected, rtol=1e-6)
 
 
