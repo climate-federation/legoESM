@@ -1423,31 +1423,55 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
         if grid_type == "mpas":
             lat_rad = np.asarray(grid.latCell, dtype=np.float64)
             lon_rad = np.asarray(grid.lonCell, dtype=np.float64)
-            area = np.asarray(grid.area, dtype=np.float64)
+            area = np.asarray(grid.areaCell, dtype=np.float64)
         else:
             lat_rad = np.asarray(grid.lat, dtype=np.float64)
             lon_rad = np.asarray(grid.lon, dtype=np.float64)
             area = np.asarray(grid.area, dtype=np.float64)
-        lat_deg_arr = lat_rad * 180 / np.pi
 
         mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        T_data = np.asarray(state.T.data, dtype=np.float64)
+        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
         nlev = T_data.shape[-1]
 
+        # Broadcast lat to match spatial dimensions of mask
+        lat_deg_arr = lat_rad * 180 / np.pi
+        if lat_deg_arr.ndim < mask.ndim:
+            # latlon grid: lat is (n_lat,), mask is (n_lat, n_lon)
+            lat_deg_arr = np.broadcast_to(
+                lat_deg_arr.reshape(lat_deg_arr.shape + (1,) * (mask.ndim - lat_deg_arr.ndim)),
+                mask.shape)
+            lat_rad_bc = np.broadcast_to(
+                lat_rad.reshape(lat_rad.shape + (1,) * (mask.ndim - lat_rad.ndim)),
+                mask.shape)
+            lon_rad_bc = np.broadcast_to(
+                lon_rad.reshape((1,) * (mask.ndim - lon_rad.ndim) + lon_rad.shape),
+                mask.shape)
+        else:
+            lat_rad_bc = lat_rad
+            lon_rad_bc = lon_rad
+
         # Zonal jet
-        u_jet = 0.30 * np.exp(-((lat_deg_arr - 45.0) / 14.0) ** 2) * mask
-        u_data = np.asarray(state.u.data, dtype=np.float64)
-        u_data[..., 0] = u_jet
-        if nlev > 1:
-            u_data[..., 1] = -0.20 * u_jet
+        u_data = np.array(state.u.data, dtype=np.float64, copy=True)
+        if grid_type == "mpas":
+            # MPAS: u on edges, compute jet on edge latitudes
+            lat_edge_deg = np.asarray(grid.latEdge, dtype=np.float64) * 180 / np.pi
+            u_jet_edge = 0.30 * np.exp(-((lat_edge_deg - 45.0) / 14.0) ** 2)
+            u_data[..., 0] = u_jet_edge
+            if nlev > 1:
+                u_data[..., 1] = -0.20 * u_jet_edge
+        else:
+            u_jet = 0.30 * np.exp(-((lat_deg_arr - 45.0) / 14.0) ** 2) * mask
+            u_data[..., 0] = u_jet
+            if nlev > 1:
+                u_data[..., 1] = -0.20 * u_jet
 
         # Target temperatures
-        T_data[..., 0] = (16.0 - 10.0 * np.sin(lat_rad) ** 2) * mask
+        T_data[..., 0] = (16.0 - 10.0 * np.sin(lat_rad_bc) ** 2) * mask
         if nlev > 1:
-            T_data[..., 1] = (8.0 - 4.0 * np.sin(lat_rad) ** 2) * mask
+            T_data[..., 1] = (8.0 - 4.0 * np.sin(lat_rad_bc) ** 2) * mask
 
         # SSH perturbation
-        eta_seed = 0.05 * np.sin(3.0 * lon_rad) * np.cos(2.0 * lat_rad) * mask
+        eta_seed = 0.05 * np.sin(3.0 * lon_rad_bc) * np.cos(2.0 * lat_rad_bc) * mask
         area_w = mask * area
         eta_seed -= np.sum(eta_seed * area_w) / np.maximum(np.sum(area_w), 1.0)
         new_eta = state.eta.data + jnp.array(eta_seed)
@@ -1457,7 +1481,7 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
             T=Field(jnp.array(T_data)),
             eta=Field(new_eta))
         if hasattr(state, "v"):
-            v_data = np.asarray(state.v.data, dtype=np.float64)
+            v_data = np.array(state.v.data, dtype=np.float64, copy=True)
             v_data[..., 0] *= 0  # start with no meridional flow
             if nlev > 1:
                 v_data[..., 1] *= 0
@@ -1500,22 +1524,30 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
             T_hat = s.T_hat.data
             dT_hat = -(T_hat - T_star_hat) / tau_relax
             new_T_hat = T_hat + dt_ * dT_hat
-            new_u_hat = s.u_hat.data * drag_factor
-            new_v_hat = s.v_hat.data * drag_factor
+            # Spectral ocean uses vor_hat/div_hat, not u_hat/v_hat
+            new_vor_hat = s.vor_hat.data * drag_factor
+            new_div_hat = s.div_hat.data * drag_factor
             return s._replace(
                 T_hat=Field(new_T_hat),
-                u_hat=Field(new_u_hat),
-                v_hat=Field(new_v_hat))
+                vor_hat=Field(new_vor_hat),
+                div_hat=Field(new_div_hat))
 
     else:
         if tc.grid_type == "mpas":
             lat_rad = np.asarray(grid.latCell, dtype=np.float64)
+        elif tc.grid_type == "latlon":
+            # lat is 1D (n_lat,) — broadcast to (n_lat, n_lon)
+            lat_1d = np.asarray(grid.lat, dtype=np.float64)
+            n_lon = grid.n_lon if hasattr(grid, "n_lon") else grid.lon.shape[0]
+            lat_rad = np.broadcast_to(lat_1d[:, None], (lat_1d.size, n_lon))
         else:
             lat_rad = np.asarray(grid.lat, dtype=np.float64)
         T_star_upper = jnp.array(16.0 - 10.0 * np.sin(lat_rad) ** 2)
         T_star_lower = jnp.array(8.0 - 4.0 * np.sin(lat_rad) ** 2)
         tau_relax = 15.0 * 86400.0
         drag_factor = float(jnp.exp(-dt / (25.0 * 86400.0)))
+
+        _is_mpas = (tc.grid_type == "mpas")
 
         def forcing_fn(s, dt_):
             from legoesm.core.field import Field
@@ -1525,8 +1557,15 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
             dT1 = -(T_data[..., 1] - T_star_lower) / tau_relax * mask
             T_new = T_data.at[..., 0].set(T_data[..., 0] + dt_ * dT0)
             T_new = T_new.at[..., 1].set(T_data[..., 1] + dt_ * dT1)
+            # For MPAS, u is on edges — can't multiply by cell mask,
+            # and there is no separate v field.
+            u_new = s.u.data * drag_factor
+            if _is_mpas:
+                return s._replace(
+                    T=Field(T_new),
+                    u=Field(u_new))
             mask_3d = mask[..., jnp.newaxis]
-            u_new = s.u.data * drag_factor * mask_3d
+            u_new = u_new * mask_3d
             v_new = s.v.data * drag_factor * mask_3d
             return s._replace(
                 T=Field(T_new),
