@@ -62,7 +62,7 @@ class GrayRadiationConfig(NamedTuple):
     tau_equator: float = 7.2
     tau_pole: float = 1.8
     linear_frac: float = 0.2
-    tau_moist_coeff: float = 1150.0
+    tau_moist_coeff: float = 0.0115  # [m²/kg] moisture LW optical depth (Frierson 2006)
     lw_diff_factor: float = 1.66
     sfc_emissivity: float = 1.0
     sw_tau_0: float = 0.22

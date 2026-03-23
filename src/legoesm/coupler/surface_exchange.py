@@ -57,8 +57,13 @@ def extract_atm_to_surface(
     u_lowest = state.u.data[..., -1]
     v_lowest = state.v.data[..., -1]
 
-    # Humidity: assume dry if no tracers; use q=0
-    q_lowest = jnp.zeros(shape)
+    # Humidity: extract from tracers if available; else assume dry.
+    if state.tracers is not None and "q_v" in state.tracers:
+        _qv_raw = state.tracers["q_v"]
+        _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+        q_lowest = _qv_data[..., -1]
+    else:
+        q_lowest = jnp.zeros(shape)
 
     # Air density from ideal gas law
     rho_lowest = p_lowest / (constants.R_d * T_lowest)

@@ -242,7 +242,7 @@ def compute_moist_adiabat(
         T_new = T_prev_val + 0.5 * (gamma_1 + gamma_2) * dp
 
         # Ensure temperature stays physical
-        T_new = jnp.clip(T_new, 150.0, 500.0).astype(_dtype)
+        T_new = jnp.clip(T_new, 100.0, 350.0).astype(_dtype)
 
         return (T_new, p_k.astype(_dtype)), T_new
 

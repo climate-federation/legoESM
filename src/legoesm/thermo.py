@@ -23,7 +23,7 @@ def saturation_mixing_ratio(
 ) -> jax.Array:
     """Compute saturation mixing ratio using Tetens formula.
 
-    e_sat = 611.2 * exp(17.67 * (T - 273.15) / (T - 29.65))
+    e_sat = 611.2 * exp(17.67 * T_c / (T_c + 243.5))   where T_c = T - 273.15
     q_sat = epsilon * e_sat / (p - e_sat)
 
     Parameters

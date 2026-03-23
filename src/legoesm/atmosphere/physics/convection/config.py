@@ -67,7 +67,7 @@ class DCAConfig(NamedTuple):
     n_iterations: int = 1
     mixing_fraction: float = 1.0
     cape_threshold: float = 100.0
-    cape_sharpness: float = 0.02
+    cape_sharpness: float = 0.1   # sigmoid(-10)≈5e-5 at CAPE=0; 0.5 at threshold
 
 
 class KuoConfig(NamedTuple):

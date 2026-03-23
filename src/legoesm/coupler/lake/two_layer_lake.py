@@ -79,18 +79,21 @@ def step_lake(
     # Epilimnion energy balance
     cap_epi = config.rho_water * config.c_water * config.h_epi
     dT_epi_dt = (sw_net + lw_net - shflx - lhflx - F_mix) / cap_epi
-    T_epi_new = T_epi + dt * dT_epi_dt
+    T_trial_epi = T_epi + dt * dT_epi_dt
 
-    # Lake freezing: clamp T_epi at freezing point, release latent heat.
-    # If T_epi drops below T_freeze, the excess cooling forms ice.
+    # Lake freezing: clamp T_epi at freezing point.
+    # Energy removed by clamping is tracked as Q_freeze (ice-formation flux).
     T_freeze = 273.15
-    T_epi_new = jnp.maximum(T_epi_new, T_freeze)
+    T_epi_new = jnp.maximum(T_trial_epi, T_freeze)
+    # Ice-formation energy [W/m²], positive when freezing occurs
+    Q_freeze_epi = cap_epi * jnp.maximum(T_freeze - T_trial_epi, 0.0) / dt
 
     # Hypolimnion: receives mixing flux only
     cap_hypo = config.rho_water * config.c_water * config.h_hypo
     dT_hypo_dt = F_mix / cap_hypo
-    T_hypo_new = T_hypo + dt * dT_hypo_dt
-    T_hypo_new = jnp.maximum(T_hypo_new, T_freeze)
+    T_trial_hypo = T_hypo + dt * dT_hypo_dt
+    T_hypo_new = jnp.maximum(T_trial_hypo, T_freeze)
+    Q_freeze_hypo = cap_hypo * jnp.maximum(T_freeze - T_trial_hypo, 0.0) / dt
 
     new_state = LakeState(
         T_epi=state.T_epi.replace(data=T_epi_new),

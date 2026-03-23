@@ -178,7 +178,13 @@ def _make_hydrostatic_microphysics(
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
-        q_v_col = jnp.zeros((ncol, nlev))
+        # Extract water vapor from tracers if available; else assume dry.
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = jnp.maximum(_qv_data.reshape(ncol, nlev), 0.0)
+        else:
+            q_v_col = jnp.zeros((ncol, nlev))
 
         rho = _compute_rho(T_col, p_full_col)
         dz = _compute_heights_from_sigma(T_col, p_half_col)

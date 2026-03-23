@@ -235,12 +235,13 @@ def spectral_pe_tendencies(
     vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
     div = sh_synthesis_3d(grid, state.div_hat.data)
     T = sh_synthesis_3d(grid, state.T_hat.data)
-    # Smooth positivity protection (C∞ differentiable, avoids kink in jnp.maximum)
-    T = config.T_min + jax.nn.softplus(T - config.T_min)
+    # Smooth positivity protection (C∞ differentiable, scaled softplus for ~0.07K bias)
+    _sp_scale = 0.1
+    T = T + _sp_scale * jax.nn.softplus((config.T_min - T) / _sp_scale)
     lnps_raw = sh_synthesis(grid, state.lnps_hat.data)
-    # Smooth two-sided clip via nested softplus
-    lnps = _LNPS_MIN + jax.nn.softplus(lnps_raw - _LNPS_MIN)
-    lnps = _LNPS_MAX - jax.nn.softplus(_LNPS_MAX - lnps)
+    # Smooth two-sided clip with zero bias in interior:
+    # softplus(lo - x) pulls up near lower bound; softplus(x - hi) pulls down near upper
+    lnps = lnps_raw + jax.nn.softplus(_LNPS_MIN - lnps_raw) - jax.nn.softplus(lnps_raw - _LNPS_MAX)
     # (n_lat, n_lon)
     phis = sh_synthesis(grid, state.phis_hat.data)
 

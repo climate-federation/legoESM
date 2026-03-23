@@ -163,6 +163,8 @@ def barotropic_substeps(
         mass_added = jnp.sum((eta_new - eta_unfloored) * grid.area * mask)
         ocean_area = jnp.sum(grid.area * mask)
         eta_new = (eta_new - mass_added / jnp.maximum(ocean_area, 1.0) * mask)
+        # Re-floor after correction to prevent negative water columns
+        eta_new = jnp.maximum(eta_new, eta_floor) * mask
 
         # Backward: update U_bar, V_bar with UPDATED eta
         deta_dx = _gradient_x_raw(eta_new, grid).astype(eta.dtype)

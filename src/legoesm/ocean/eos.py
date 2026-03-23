@@ -72,6 +72,10 @@ def wright_eos(
     -------
     array : In-situ density [kg/m^3].
     """
+    # Clip inputs to Wright EOS valid range [-2, 40]°C, [0, 42] PSU
+    T = jnp.clip(T, -2.0, 40.0)
+    S = jnp.clip(S, 0.0, 42.0)
+
     # Specific volume parameter
     al0 = _a0 + _a1 * T + _a2 * S
 

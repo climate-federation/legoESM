@@ -133,10 +133,16 @@ def morrison_microphysics(
     # 5. Snow aggregation: ice -> snow
     aggregation = config.agg_coeff * jnp.clip(q_i, 0.0) * f_ice
 
-    # 6. Melting near T_freeze: ice/snow -> rain
+    # 6. Melting near T_freeze: ice/snow -> rain (clipped to available mass)
     melt_frac = jax.nn.sigmoid(config.melt_sharpness * (T - T_freeze))
-    melt_ice = config.melt_rate * jnp.clip(q_i, 0.0) * melt_frac
-    melt_snow = config.melt_rate * jnp.clip(q_s, 0.0) * melt_frac
+    melt_ice = jnp.minimum(
+        config.melt_rate * jnp.clip(q_i, 0.0) * melt_frac,
+        jnp.clip(q_i, 0.0) / jnp.maximum(dt, 1e-10),
+    )
+    melt_snow = jnp.minimum(
+        config.melt_rate * jnp.clip(q_s, 0.0) * melt_frac,
+        jnp.clip(q_s, 0.0) / jnp.maximum(dt, 1e-10),
+    )
 
     # === SEDIMENTATION ===
     rho_sfc = rho[:, -1:]

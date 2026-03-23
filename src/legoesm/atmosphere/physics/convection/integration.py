@@ -157,8 +157,13 @@ def _make_hydrostatic_convection(
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
 
-        # No tracers in HydrostaticState — use zero moisture
-        q_v_col = jnp.zeros((ncol, nlev))
+        # Extract water vapor from tracers if available; else assume dry.
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = _qv_data.reshape(ncol, nlev)
+        else:
+            q_v_col = jnp.zeros((ncol, nlev))
 
         conv_prog_out = None
         if conv_fn is None:
@@ -422,7 +427,13 @@ def _make_spectral_pe_convection(
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
-        q_v_col = jnp.zeros((ncol, nlev))
+        # Extract water vapor if spectral state carries tracers.
+        if hasattr(state, "tracers") and state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = _qv_data.reshape(ncol, nlev)
+        else:
+            q_v_col = jnp.zeros((ncol, nlev))
 
         conv_prog_out = None
         if conv_fn is None:
