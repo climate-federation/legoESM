@@ -174,7 +174,13 @@ class TestConservationPrecisionHook:
 
     def test_accumulation_dtype_uses_configured_float32(self):
         set_policy(PrecisionPolicy.fp32())
-        assert _accumulation_dtype() == jnp.float32
+        # When JAX x64 is enabled (e.g. JAX_ENABLE_X64=1), conservation
+        # accumulators intentionally promote to float64 regardless of the
+        # precision policy to prevent catastrophic cancellation.
+        if jax.config.jax_enable_x64:
+            assert _accumulation_dtype() == jnp.float64
+        else:
+            assert _accumulation_dtype() == jnp.float32
 
     def test_accumulation_dtype_uses_configured_float64(self):
         set_policy(PrecisionPolicy.mixed())

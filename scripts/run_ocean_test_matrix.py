@@ -86,12 +86,12 @@ import matplotlib.pyplot as plt
 # Configuration constants
 # ===========================================================================
 
-# ~5 degree resolutions per grid type (ocean is more expensive than atm)
+# ~2.5 degree resolutions per grid type
 GRID_RESOLUTIONS: dict[str, str] = {
-    "cubed_sphere": "C24",
-    "latlon": "36x72",
-    "mpas": "ico3",
-    "spectral": "T21",
+    "cubed_sphere": "C48",
+    "latlon": "72x144",
+    "mpas": "ico4",
+    "spectral": "T42",
 }
 
 GRID_TYPES = list(GRID_RESOLUTIONS.keys())

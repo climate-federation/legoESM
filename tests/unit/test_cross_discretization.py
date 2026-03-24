@@ -441,3 +441,237 @@ class TestBalancedJetCrossGrid:
             f"TC2 mean h disagrees: lat-lon={mean_ll:.2f}, MPAS={mean_mpas:.2f}, "
             f"rel_diff={rel_diff:.4e}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 7f  Spectral SW vs lat-lon gravity wave comparison
+# ---------------------------------------------------------------------------
+
+class TestSpectralVsLatLonGravityWave:
+    """Run a Gaussian bump on spectral and lat-lon SW models.
+    Compare global diagnostics after 30 steps."""
+
+    @pytest.fixture(scope="class")
+    def spectral_result(self):
+        """Run Gaussian bump on spectral T10 shallow water."""
+        from legoesm.grids.gaussian import create_gaussian_grid, sh_analysis, sh_synthesis
+        from legoesm.atmosphere.dynamics.spectral_sw import (
+            SpectralShallowWaterModel,
+            SpectralSWConfig,
+            SpectralSWState,
+        )
+        from legoesm.core.field import Field
+
+        grid = create_gaussian_grid(10)
+        g = constants.g
+        H0 = constants.H_MEAN
+
+        lat0, lon0 = 0.0, 0.0
+        sigma = 15.0 * jnp.pi / 180.0
+        lon_dist = jnp.minimum(grid.lon2d, 2 * jnp.pi - grid.lon2d)
+        dist2 = grid.lat2d**2 + lon_dist**2
+        h_grid = H0 + 100.0 * jnp.exp(-dist2 / (2.0 * sigma**2))
+
+        phi_hat = sh_analysis(grid, g * h_grid)
+        n_sh = grid.n_sh
+        zeros = jnp.zeros(n_sh, dtype=jnp.complex128)
+
+        state = SpectralSWState(
+            vor_hat=Field(data=zeros, name="vor_hat", dims=("n_sh",), units="1/s"),
+            div_hat=Field(data=zeros, name="div_hat", dims=("n_sh",), units="1/s"),
+            phi_hat=Field(data=phi_hat, name="phi_hat", dims=("n_sh",), units="m2/s2"),
+            phis_hat=Field(data=zeros, name="phis_hat", dims=("n_sh",), units="m2/s2"),
+        )
+
+        config = SpectralSWConfig(
+            mean_depth=H0,
+            hyperdiff_coeff=0.0,
+            spectral_filter_order=0,
+        )
+        model = SpectralShallowWaterModel(grid, config)
+
+        dt = 60.0
+        for _ in range(30):
+            state = model.step(state, dt)
+
+        # Recover grid-space h
+        phi_grid = sh_synthesis(grid, state.phi_hat.data)
+        h = phi_grid / g
+        weights = grid.weights
+        n_lon = grid.n_lon
+        # Area-weighted mean h using Gaussian quadrature
+        mean_h = float(jnp.sum(jnp.sum(h, axis=1) * weights) / (n_lon * jnp.sum(weights)))
+
+        return mean_h
+
+    @pytest.fixture(scope="class")
+    def latlon_gw_result(self):
+        """Run Gaussian bump on lat-lon 16x32."""
+        grid = create_latlon_grid(16, 32)
+        config = FVShallowWaterLatLonConfig(
+            hyperdiff_coeff=0.0,
+            use_conservation_fixer=True,
+            fix_mass=True,
+            fix_energy=False,
+            use_polar_filter=True,
+        )
+        model = FVShallowWaterLatLonModel(grid, config, dt=60.0)
+
+        H0 = constants.H_MEAN
+        sigma = 15.0 * jnp.pi / 180.0
+        lon_dist = jnp.minimum(grid.lon2d, 2 * jnp.pi - grid.lon2d)
+        dist2 = grid.lat2d**2 + lon_dist**2
+        h_data = H0 + 100.0 * jnp.exp(-dist2 / (2.0 * sigma**2))
+
+        dims = ("lat", "lon")
+        state = ShallowWaterState(
+            h=Field(data=h_data, name="h", dims=dims, units="m"),
+            u=Field(data=jnp.zeros_like(h_data), name="u", dims=dims, units="m/s"),
+            v=Field(data=jnp.zeros_like(h_data), name="v", dims=dims, units="m/s"),
+            h_s=Field(data=jnp.zeros_like(h_data), name="h_s", dims=dims, units="m"),
+        )
+
+        dt = 60.0
+        for _ in range(30):
+            state = model.step(state, dt)
+
+        area = grid.area
+        mean_h = float(jnp.sum(state.h.data * area) / jnp.sum(area))
+        return mean_h
+
+    def test_mean_h_agreement(self, spectral_result, latlon_gw_result):
+        """Global mean h should agree within 1%."""
+        mean_sp = spectral_result
+        mean_ll = latlon_gw_result
+
+        rel_diff = abs(mean_sp - mean_ll) / abs(mean_ll)
+        assert rel_diff < 0.01, (
+            f"Mean h disagrees: spectral={mean_sp:.2f}, lat-lon={mean_ll:.2f}, "
+            f"rel_diff={rel_diff:.4e}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 7g  PE cross-discretization: lat-lon vs C-D grid (hydrostatic at rest)
+# ---------------------------------------------------------------------------
+
+class TestPECrossDiscretization:
+    """Run an isothermal atmosphere at rest on both lat-lon and C-D grid PE.
+    Both should preserve the resting state (near-zero winds and T drift).
+    This tests that different discretizations agree on the simplest PE solution."""
+
+    @pytest.fixture(scope="class")
+    def latlon_pe_result(self):
+        """Run PE at rest on lat-lon for 10 steps."""
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
+            LatLonPrimitiveEquationModel,
+            LatLonPrimitiveEquationConfig,
+        )
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.core.state import HydrostaticState
+
+        grid = create_latlon_grid(8, 16)
+        sigma = create_sigma_coordinate(5)
+        T0, ps0, nlev = 250.0, 1e5, 5
+
+        state = HydrostaticState(
+            u=Field(data=jnp.zeros((8, 16, nlev)), name="u",
+                    dims=("lat", "lon", "level"), units="m/s"),
+            v=Field(data=jnp.zeros((8, 16, nlev)), name="v",
+                    dims=("lat", "lon", "level"), units="m/s"),
+            T=Field(data=jnp.full((8, 16, nlev), T0), name="T",
+                    dims=("lat", "lon", "level"), units="K"),
+            p_s=Field(data=jnp.full((8, 16), ps0), name="p_s",
+                      dims=("lat", "lon"), units="Pa"),
+            phis=Field(data=jnp.zeros((8, 16)), name="phis",
+                       dims=("lat", "lon"), units="m^2/s^2"),
+        )
+
+        config = LatLonPrimitiveEquationConfig(
+            hyperdiff_coeff=0.0, A_h=0.0,
+            use_conservation_fixer=True, fix_mass=True,
+            use_polar_filter=False, sponge_tau_sec=0.0,
+        )
+        model = LatLonPrimitiveEquationModel(grid, sigma, config, dt=60.0)
+
+        for _ in range(10):
+            state = model.step(state, 60.0)
+
+        max_u = float(jnp.max(jnp.abs(state.u.data)))
+        T_drift = float(jnp.max(jnp.abs(state.T.data - T0)))
+        return max_u, T_drift
+
+    @pytest.fixture(scope="class")
+    def cdgrid_pe_result(self):
+        """Run PE at rest on C-D grid for 10 steps."""
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel,
+            CDGridPrimitiveEquationConfig,
+        )
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.core.state import FV3HydrostaticState
+
+        n, nlev = 4, 5
+        T0, ps0 = 250.0, 1e5
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        sigma = create_sigma_coordinate(nlev)
+
+        d_shape = (6, n + 1, n + 1, nlev)
+        c_shape = (6, n, n, nlev)
+        s_shape = (6, n, n)
+
+        state = FV3HydrostaticState(
+            u_d=Field(data=jnp.zeros(d_shape), name="u_d",
+                      dims=("face", "x", "y", "level"), units="m/s"),
+            v_d=Field(data=jnp.zeros(d_shape), name="v_d",
+                      dims=("face", "x", "y", "level"), units="m/s"),
+            T=Field(data=jnp.full(c_shape, T0), name="T",
+                    dims=("face", "x", "y", "level"), units="K"),
+            p_s=Field(data=jnp.full(s_shape, ps0), name="p_s",
+                      dims=("face", "x", "y"), units="Pa"),
+            phis=Field(data=jnp.zeros(s_shape), name="phis",
+                       dims=("face", "x", "y"), units="m^2/s^2"),
+        )
+
+        config = CDGridPrimitiveEquationConfig(
+            hyperdiff_coeff=0.0, A_h=0.0,
+            use_conservation_fixer=True, fix_mass=True,
+            sponge_tau_sec=0.0,
+        )
+        model = CDGridPrimitiveEquationModel(grid, sigma, config)
+
+        for _ in range(10):
+            state = model.step(state, 60.0)
+
+        max_u = float(jnp.max(jnp.abs(state.u_d.data)))
+        T_drift = float(jnp.max(jnp.abs(state.T.data - T0)))
+        return max_u, T_drift
+
+    def test_both_preserve_rest_state(self, latlon_pe_result, cdgrid_pe_result):
+        """Both discretizations should preserve the resting state."""
+        max_u_ll, T_drift_ll = latlon_pe_result
+        max_u_cs, T_drift_cs = cdgrid_pe_result
+
+        # Both should have near-zero winds
+        assert max_u_ll < 1e-3, f"Lat-lon PE: max|u| = {max_u_ll}"
+        assert max_u_cs < 1e-3, f"C-D grid PE: max|u| = {max_u_cs}"
+
+        # Both should have small T drift
+        assert T_drift_ll < 0.1, f"Lat-lon PE: T drift = {T_drift_ll}"
+        assert T_drift_cs < 0.1, f"C-D grid PE: T drift = {T_drift_cs}"
+
+    def test_wind_magnitudes_similar(self, latlon_pe_result, cdgrid_pe_result):
+        """Spurious wind magnitudes should be of similar order."""
+        max_u_ll, _ = latlon_pe_result
+        max_u_cs, _ = cdgrid_pe_result
+
+        # Both should be very small; check they're within an order of magnitude
+        if max_u_ll > 1e-15 and max_u_cs > 1e-15:
+            ratio = max(max_u_ll, max_u_cs) / min(max_u_ll, max_u_cs)
+            assert ratio < 100, (
+                f"Wind magnitude ratio = {ratio:.1f}, expected < 100. "
+                f"lat-lon={max_u_ll:.3e}, CS={max_u_cs:.3e}"
+            )

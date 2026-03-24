@@ -514,8 +514,10 @@ class TestSoilThermal(unittest.TestCase):
 
     def test_uniform_T_steady(self):
         """Uniform temperature with zero flux should stay constant."""
-        from legoesm.land.soil_thermal import solve_soil_thermal
-        grid, hconfig, tconfig, ncol, nlayers = self._make_state()
+        from legoesm.land.soil_thermal import solve_soil_thermal, SoilThermalConfig
+        grid, hconfig, _tconfig, ncol, nlayers = self._make_state()
+        # Disable geothermal flux so the system is truly zero-flux steady state
+        tconfig = SoilThermalConfig(Q_geothermal=0.0)
         T = jnp.full((ncol, nlayers), 285.0)
         theta = jnp.full((ncol, nlayers), 0.25)
         G = jnp.zeros(ncol)

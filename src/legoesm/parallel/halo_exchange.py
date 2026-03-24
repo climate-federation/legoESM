@@ -172,6 +172,11 @@ def _pad_halo_mpi_face_only(
             padded = _place_strip_h2(padded, face, edge, strip_d0, strip_d1)
 
     if not remote_edges:
+        # Still need to fill corner cells (matching local implementation).
+        if halo == 1:
+            padded = _fill_corners_h1(padded)
+        else:
+            padded = _fill_corners_h2(padded)
         return padded
 
     # --- Single allgather for all remote edges ---

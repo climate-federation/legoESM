@@ -134,7 +134,7 @@ def _forward_transform(x: jax.Array, transform: str) -> jax.Array:
     if transform == "identity":
         return x
     elif transform == "log":
-        return jnp.log(x)
+        return jnp.log(jnp.maximum(x, 1e-30))
     elif transform == "softplus":
         # softplus inverse: log(exp(x) - 1), numerically stable
         return x + jnp.log1p(-jnp.exp(-x))

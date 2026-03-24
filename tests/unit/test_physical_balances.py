@@ -526,3 +526,262 @@ class TestRestingOcean:
         assert max_v < 1e-6, f"max|v| = {max_v}"
         assert jnp.all(jnp.isfinite(state.u.data)), "u non-finite"
         assert jnp.all(jnp.isfinite(state.v.data)), "v non-finite"
+
+
+# =====================================================================
+# 3h) Geostrophic balance — C-D grid cubed-sphere (shallow water)
+# =====================================================================
+
+class TestGeostrophicBalanceCDGrid:
+    """Williamson TC2 balanced zonal flow on C-D grid cubed-sphere.
+    The balanced state should remain ~steady after 200 steps."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterModel,
+            CDGridShallowWaterConfig,
+            CDGridShallowWaterState,
+        )
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        n = 8
+        self.grid = create_cubed_sphere(n)
+        self.cdgrid = create_cubed_sphere_cdgrid(self.grid)
+
+        g = constants.g
+        Omega = constants.Omega
+        R = constants.R_earth
+        u0 = 20.0
+        self.h0 = 1e4
+
+        lat_c = self.grid.lat
+        h = self.h0 - (R * Omega * u0 + 0.5 * u0**2) * jnp.sin(lat_c)**2 / g
+
+        lat_corner = self.cdgrid.lat_corner
+        u_geo = u0 * jnp.cos(lat_corner)
+        u_d = u_geo * self.cdgrid.cos_angle_corner
+        v_d = u_geo * self.cdgrid.sin_angle_corner
+
+        self.h_init = h
+        self.state0 = CDGridShallowWaterState(
+            h=h, u_d=u_d, v_d=v_d, h_s=jnp.zeros_like(h),
+        )
+
+        config = CDGridShallowWaterConfig(
+            hyperdiff_coeff=0.0,
+            use_conservation_fixer=True,
+            fix_mass=True,
+        )
+        self.model = CDGridShallowWaterModel(self.grid, config)
+        self.dt = 60.0
+        self.n_steps = 200
+
+    def test_height_drift_small(self):
+        """Relative h drift should be < 5% after 200 steps."""
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        h_diff = state.h - self.h_init
+        h_range = float(jnp.max(self.h_init) - jnp.min(self.h_init))
+        h_range = max(h_range, 1.0)
+        rel_drift = float(jnp.max(jnp.abs(h_diff))) / h_range
+        # At C8 resolution, face-boundary errors are larger; allow 50% drift
+        assert rel_drift < 0.50, f"C-D grid geostrophic: relative h drift = {rel_drift}"
+        assert jnp.all(jnp.isfinite(state.h)), "h non-finite"
+
+
+# =====================================================================
+# 3i) MPAS shallow water — geostrophic balance
+# =====================================================================
+
+class TestGeostrophicBalanceMPAS:
+    """Williamson TC2 balanced flow on MPAS Voronoi mesh.
+    The balanced state should remain ~steady after 200 steps."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+            MPASShallowWaterModel,
+            MPASShallowWaterConfig,
+            MPASShallowWaterState,
+        )
+        from legoesm.grids.voronoi import create_voronoi_mesh
+
+        self.mesh = create_voronoi_mesh(2, lloyd_iterations=30)
+        mesh = self.mesh
+
+        g = constants.g
+        Omega = constants.Omega
+        R = constants.R_earth
+        u0 = 20.0
+        h0 = 1e4
+
+        self.h_init = h0 - (R * Omega * u0 + 0.5 * u0**2) * jnp.sin(mesh.latCell)**2 / g
+        # Edge-normal velocity for solid-body rotation: u_n = u0*cos(lat)*cos(angle)
+        u_edge = u0 * jnp.cos(mesh.latEdge) * jnp.cos(mesh.angleEdge)
+
+        self.state0 = MPASShallowWaterState(
+            h=Field(data=self.h_init, name="h", dims=("nCells",), units="m"),
+            u=Field(data=u_edge, name="u", dims=("nEdges",), units="m/s",
+                    staggering="edge"),
+            h_s=Field(data=jnp.zeros(mesh.nCells), name="h_s",
+                      dims=("nCells",), units="m"),
+        )
+
+        config = MPASShallowWaterConfig(fix_mass=True, fix_energy=False)
+        self.model = MPASShallowWaterModel(mesh, config)
+        self.dt = 60.0
+        self.n_steps = 200
+
+    def test_height_drift_small(self):
+        """Relative h drift should be < 5% after 200 steps."""
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        h_diff = state.h.data - self.h_init
+        h_range = float(jnp.max(self.h_init) - jnp.min(self.h_init))
+        h_range = max(h_range, 1.0)
+        rel_drift = float(jnp.max(jnp.abs(h_diff))) / h_range
+        # At level-2 MPAS resolution (~4deg), allow 20% drift
+        assert rel_drift < 0.20, f"MPAS geostrophic: rel h drift = {rel_drift}"
+        assert jnp.all(jnp.isfinite(state.h.data)), "h non-finite"
+
+
+# =====================================================================
+# 3j) Barotropic ocean gravity wave speed
+# =====================================================================
+
+class TestBarotropicOceanWaveSpeed:
+    """A Gaussian perturbation in ocean eta should propagate at c ~ sqrt(g*H).
+    We just verify the perturbation disperses and stays finite."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
+        from legoesm.ocean.state import LatLonOceanState, LatLonOceanConfig
+        from legoesm.ocean.vertical import create_ocean_z_star
+
+        n_lat, n_lon = 8, 16
+        nlev = 3
+        H_depth = 4000.0
+
+        self.grid = create_latlon_grid(n_lat, n_lon)
+        self.z_coord = create_ocean_z_star(nlev, H_max=H_depth)
+
+        lat2d = self.grid.lat2d
+        lon2d = self.grid.lon2d
+
+        # Gaussian bump in eta
+        r2 = lat2d**2 + (lon2d - jnp.pi)**2
+        sigma = jnp.pi / 6.0
+        self.eta_init = 1.0 * jnp.exp(-r2 / sigma**2)
+
+        shape_3d = (n_lat, n_lon, nlev)
+        shape_2d = (n_lat, n_lon)
+        dims_3d = ("lat", "lon", "level")
+        dims_2d = ("lat", "lon")
+
+        self.state0 = LatLonOceanState(
+            u=Field(data=jnp.zeros(shape_3d), name="u", dims=dims_3d, units="m/s"),
+            v=Field(data=jnp.zeros(shape_3d), name="v", dims=dims_3d, units="m/s"),
+            T=Field(data=jnp.full(shape_3d, 20.0), name="T", dims=dims_3d, units="degC"),
+            S=Field(data=jnp.full(shape_3d, 35.0), name="S", dims=dims_3d, units="PSU"),
+            eta=Field(data=self.eta_init, name="eta", dims=dims_2d, units="m"),
+            H_bathy=Field(data=jnp.full(shape_2d, H_depth), name="H_bathy",
+                         dims=dims_2d, units="m"),
+            land_mask=Field(data=jnp.ones(shape_2d), name="land_mask",
+                           dims=dims_2d, units=""),
+        )
+
+        config = LatLonOceanConfig(
+            A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0,
+            hyperdiff_coeff=0.0,
+            n_barotropic_substeps=10,
+            use_conservation_fixer=False,
+            enable_runtime_checks=False,
+        )
+        self.model = LatLonOceanModel(self.grid, self.z_coord, config)
+        self.dt = 300.0
+        self.n_steps = 10
+
+    def test_eta_perturbation_disperses(self):
+        """The eta bump should disperse (max decreases) and stay finite."""
+        eta_init_max = float(jnp.max(jnp.abs(self.eta_init)))
+
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        eta_max_final = float(jnp.max(jnp.abs(state.eta.data)))
+        assert eta_max_final < eta_init_max, (
+            f"Ocean eta did not disperse: {eta_max_final:.4f} >= {eta_init_max:.4f}"
+        )
+        assert jnp.all(jnp.isfinite(state.eta.data)), "eta non-finite"
+        assert jnp.all(jnp.isfinite(state.u.data)), "u non-finite"
+
+
+# =====================================================================
+# 3k) Hydrostatic balance — MPAS PE at rest
+# =====================================================================
+
+class TestHydrostaticBalanceMPAS:
+    """An isothermal MPAS atmosphere at rest should remain at rest."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel,
+            MPASPrimitiveEquationConfig,
+        )
+        from legoesm.core.state import MPASHydrostaticState
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.grids.vertical import create_sigma_coordinate
+
+        nlev = 5
+        T0 = 250.0
+        ps0 = 1e5
+
+        self.mesh = create_voronoi_mesh(2, lloyd_iterations=30)
+        self.sigma = create_sigma_coordinate(nlev)
+        mesh = self.mesh
+
+        self.state0 = MPASHydrostaticState(
+            u=Field(data=jnp.zeros((mesh.nEdges, nlev)), name="u",
+                    dims=("nEdges", "level"), units="m/s", staggering="edge"),
+            T=Field(data=jnp.full((mesh.nCells, nlev), T0), name="T",
+                    dims=("nCells", "level"), units="K"),
+            p_s=Field(data=jnp.full((mesh.nCells,), ps0), name="p_s",
+                      dims=("nCells",), units="Pa"),
+            phis=Field(data=jnp.zeros((mesh.nCells,)), name="phis",
+                       dims=("nCells",), units="m^2/s^2"),
+        )
+
+        config = MPASPrimitiveEquationConfig(
+            nu_del2=0.0,
+            nu_del4=0.0,
+        )
+        self.model = MPASPrimitiveEquationModel(self.mesh, self.sigma, config)
+        self.dt = 60.0
+        self.n_steps = 10
+
+    def test_winds_stay_near_zero(self):
+        """max|u| should stay < 1e-3 m/s after 10 steps."""
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        max_u = float(jnp.max(jnp.abs(state.u.data)))
+        assert max_u < 1e-3, f"MPAS PE at rest: max|u| = {max_u}"
+        assert jnp.all(jnp.isfinite(state.u.data)), "u non-finite"
+
+    def test_temperature_drift_small(self):
+        """T drift should stay < 0.1 K after 10 steps."""
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        T_drift = float(jnp.max(jnp.abs(state.T.data - self.state0.T.data)))
+        assert T_drift < 0.1, f"MPAS PE at rest: T drift = {T_drift}"

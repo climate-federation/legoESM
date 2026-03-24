@@ -355,3 +355,252 @@ class TestSpectralLaplacianConvergence:
             f"Spectral Laplacian error = {err:.2e} for n_max={n_max}, "
             f"expected < 1e-10 (should be exact for spectral methods)"
         )
+
+
+# ---------------------------------------------------------------------------
+# 6g  Voronoi gradient operator convergence
+# ---------------------------------------------------------------------------
+
+class TestGradientConvergenceVoronoi:
+    """Gradient of cos(lat)*cos(2*lon) on Voronoi meshes should converge."""
+
+    @staticmethod
+    def _compute_gradient_error(level):
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.core.operators_voronoi import gradient_edge
+
+        mesh = create_voronoi_mesh(level, lloyd_iterations=30)
+        a = mesh.radius
+
+        phi = jnp.cos(mesh.latCell) * jnp.cos(2.0 * mesh.lonCell)
+        grad = gradient_edge(phi, mesh)
+
+        # Analytic gradient projected onto edge normals:
+        # dphi/dx = -2*sin(2*lon) / a
+        # dphi/dy = -sin(lat)*cos(2*lon) / a
+        # edge-normal component: dphi_n = dphi/dx * cos(angle) + dphi/dy * sin(angle)
+        dphi_dx = -2.0 * jnp.sin(2.0 * mesh.lonEdge) / a
+        dphi_dy = -jnp.sin(mesh.latEdge) * jnp.cos(2.0 * mesh.lonEdge) / a
+        grad_exact = dphi_dx * jnp.cos(mesh.angleEdge) + dphi_dy * jnp.sin(mesh.angleEdge)
+
+        err = float(jnp.sqrt(jnp.mean((grad - grad_exact)**2)))
+        return err
+
+    def test_convergence_level2_level3(self):
+        """Error should decrease from level-2 to level-3 mesh."""
+        err_2 = self._compute_gradient_error(2)
+        err_3 = self._compute_gradient_error(3)
+
+        ratio = err_2 / err_3
+        assert ratio > 1.5, (
+            f"err_L2/err_L3 = {ratio:.2f}, expected > 1.5 "
+            f"(err_L2={err_2:.4e}, err_L3={err_3:.4e})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6h  Williamson TC2 convergence on lat-lon FV
+# ---------------------------------------------------------------------------
+
+class TestWilliamsonTC2ConvergenceLatLon:
+    """TC2 (steady geostrophic flow) on lat-lon should converge with resolution."""
+
+    @staticmethod
+    def _run_tc2_latlon(n_lat, n_steps=50, dt=300.0):
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            FVShallowWaterLatLonModel,
+            FVShallowWaterLatLonConfig,
+        )
+        from legoesm.core.state import ShallowWaterState
+        from legoesm.grids.latlon import create_latlon_grid
+
+        n_lon = 2 * n_lat
+        grid = create_latlon_grid(n_lat, n_lon)
+
+        g = constants.g
+        Omega = constants.Omega
+        R = grid.radius
+        u0 = 20.0
+        h0 = 1e4
+
+        lat2d = grid.lat2d
+        h_init = h0 - (R * Omega * u0 + 0.5 * u0**2) * jnp.sin(lat2d)**2 / g
+        u_init = u0 * jnp.cos(lat2d)
+
+        dims = ("lat", "lon")
+        state = ShallowWaterState(
+            h=Field(data=h_init, name="h", dims=dims, units="m"),
+            u=Field(data=u_init, name="u", dims=dims, units="m/s"),
+            v=Field(data=jnp.zeros_like(h_init), name="v", dims=dims, units="m/s"),
+            h_s=Field(data=jnp.zeros_like(h_init), name="h_s", dims=dims, units="m"),
+        )
+
+        config = FVShallowWaterLatLonConfig(
+            hyperdiff_coeff=0.0,
+            use_conservation_fixer=True,
+            fix_mass=True,
+            fix_energy=False,
+            use_polar_filter=True,
+        )
+        model = FVShallowWaterLatLonModel(grid, config, dt=dt)
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        h_err = state.h.data - h_init
+        area = grid.area
+        return float(jnp.sqrt(jnp.sum(h_err**2 * area) / jnp.sum(area)))
+
+    def test_16x32_better_than_8x16(self):
+        """Finer resolution should have smaller TC2 error."""
+        err_8 = self._run_tc2_latlon(8, n_steps=50, dt=600.0)
+        err_16 = self._run_tc2_latlon(16, n_steps=50, dt=300.0)
+
+        assert err_16 < err_8, (
+            f"16x32 error ({err_16:.4e}) should be < 8x16 error ({err_8:.4e})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6i  Williamson TC2 convergence on MPAS
+# ---------------------------------------------------------------------------
+
+class TestWilliamsonTC2ConvergenceMPAS:
+    """TC2 on MPAS Voronoi mesh should converge with resolution."""
+
+    @staticmethod
+    def _run_tc2_mpas(level, n_steps=50, dt=300.0):
+        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+            MPASShallowWaterModel,
+            MPASShallowWaterConfig,
+            MPASShallowWaterState,
+        )
+        from legoesm.grids.voronoi import create_voronoi_mesh
+
+        mesh = create_voronoi_mesh(level, lloyd_iterations=30)
+
+        g = constants.g
+        Omega = constants.Omega
+        R = mesh.radius
+        u0 = 20.0
+        h0 = 1e4
+
+        h_init = h0 - (R * Omega * u0 + 0.5 * u0**2) * jnp.sin(mesh.latCell)**2 / g
+        u_edge = u0 * jnp.cos(mesh.latEdge) * jnp.cos(mesh.angleEdge)
+
+        state = MPASShallowWaterState(
+            h=Field(data=h_init, name="h", dims=("nCells",), units="m"),
+            u=Field(data=u_edge, name="u", dims=("nEdges",), units="m/s",
+                    staggering="edge"),
+            h_s=Field(data=jnp.zeros(mesh.nCells), name="h_s",
+                      dims=("nCells",), units="m"),
+        )
+
+        config = MPASShallowWaterConfig(fix_mass=True, fix_energy=False)
+        model = MPASShallowWaterModel(mesh, config)
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        h_err = state.h.data - h_init
+        area = mesh.areaCell
+        return float(jnp.sqrt(jnp.sum(h_err**2 * area) / jnp.sum(area)))
+
+    def test_level3_better_than_level2(self):
+        """Level-3 mesh should have smaller TC2 error than level-2."""
+        err_2 = self._run_tc2_mpas(2, n_steps=50, dt=600.0)
+        err_3 = self._run_tc2_mpas(3, n_steps=50, dt=300.0)
+
+        assert err_3 < err_2, (
+            f"Level-3 error ({err_3:.4e}) should be < level-2 error ({err_2:.4e})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 6j  Time integrator order verification (spectral SW)
+# ---------------------------------------------------------------------------
+
+class TestTimeIntegratorOrder:
+    """Verify time integrator order by running with dt, dt/2, dt/4
+    and checking that the error ratio matches the expected order.
+
+    Uses the spectral shallow water model which has minimal spatial error,
+    isolating the temporal error.
+    """
+
+    @staticmethod
+    def _run_spectral_sw(n_max, dt, n_steps, H0=1e4):
+        """Run spectral SW with Gaussian bump and return final phi_hat."""
+        from legoesm.grids.gaussian import create_gaussian_grid, sh_analysis
+        from legoesm.atmosphere.dynamics.spectral_sw import (
+            SpectralShallowWaterModel,
+            SpectralSWConfig,
+            SpectralSWState,
+        )
+
+        grid = create_gaussian_grid(n_max)
+        g = constants.g
+
+        # Small Gaussian bump
+        lat0, lon0 = 0.0, jnp.pi
+        sigma_rad = 20.0 * jnp.pi / 180.0
+        dist_sq = (grid.lat2d - lat0)**2 + (grid.lon2d - lon0)**2
+        bump = 10.0 * jnp.exp(-dist_sq / (2.0 * sigma_rad**2))
+
+        h_grid = H0 + bump
+        phi_hat = sh_analysis(grid, g * h_grid)
+
+        state = SpectralSWState(
+            vor_hat=Field(data=jnp.zeros(grid.n_sh, dtype=jnp.complex128),
+                         name="vor_hat", dims=("n_sh",), units="1/s"),
+            div_hat=Field(data=jnp.zeros(grid.n_sh, dtype=jnp.complex128),
+                         name="div_hat", dims=("n_sh",), units="1/s"),
+            phi_hat=Field(data=phi_hat, name="phi_hat", dims=("n_sh",), units="m2/s2"),
+            phis_hat=Field(data=jnp.zeros(grid.n_sh, dtype=jnp.complex128),
+                          name="phis_hat", dims=("n_sh",), units="m2/s2"),
+        )
+
+        config = SpectralSWConfig(
+            mean_depth=H0,
+            hyperdiff_coeff=0.0,
+            spectral_filter_order=0,
+        )
+        model = SpectralShallowWaterModel(grid, config)
+
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+
+        return state.phi_hat.data, grid
+
+    def test_error_decreases_with_smaller_dt(self):
+        """Error should decrease when dt is halved."""
+        n_max = 10
+        total_time = 1800.0  # 30 minutes
+
+        dt1 = 60.0
+        dt2 = 30.0
+        n1 = int(total_time / dt1)
+        n2 = int(total_time / dt2)
+
+        # Use dt/4 as "reference" solution
+        dt_ref = 15.0
+        n_ref = int(total_time / dt_ref)
+
+        phi1, grid = self._run_spectral_sw(n_max, dt1, n1)
+        phi2, _ = self._run_spectral_sw(n_max, dt2, n2)
+        phi_ref, _ = self._run_spectral_sw(n_max, dt_ref, n_ref)
+
+        err1 = float(jnp.sqrt(jnp.sum(jnp.abs(phi1 - phi_ref)**2)))
+        err2 = float(jnp.sqrt(jnp.sum(jnp.abs(phi2 - phi_ref)**2)))
+
+        # Error should decrease when dt halves
+        assert err2 < err1, (
+            f"err(dt={dt2}) = {err2:.4e} should be < err(dt={dt1}) = {err1:.4e}"
+        )
+
+        # For RK3: error ratio should be ~8 (2^3) when dt halves
+        # At coarse resolution with nonlinear dynamics, we just check ratio > 2
+        ratio = err1 / (err2 + 1e-30)
+        assert ratio > 2.0, (
+            f"Error ratio = {ratio:.2f}, expected > 2.0 for at least 1st-order convergence"
+        )

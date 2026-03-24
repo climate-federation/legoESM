@@ -2,7 +2,7 @@
 """Atmosphere test matrix: organized test runner for legoESM dynamical cores.
 
 Runs shallow-water, hydrostatic, and non-hydrostatic tests across
-cubed-sphere, lat-lon, and icosahedral grids at ~2.5 degree resolution.
+cubed-sphere, lat-lon, and icosahedral grids at ~1.25 degree resolution.
 
 Output structure:
     results/atmosphere/<equation_set>/<case>/<grid_type>/<resolution>/<vertical_coord>/
@@ -61,12 +61,12 @@ import matplotlib.pyplot as plt
 # Configuration constants
 # ===========================================================================
 
-# ~2.5 degree resolutions per grid type
+# ~1.25 degree resolutions per grid type
 GRID_RESOLUTIONS: dict[str, str] = {
-    "cubed_sphere": "C36",
-    "latlon": "72x144",
-    "icosahedral": "ico5",
-    "spectral": "T21",
+    "cubed_sphere": "C72",
+    "latlon": "144x288",
+    "icosahedral": "ico6",
+    "spectral": "T42",
 }
 
 GRID_TYPES = list(GRID_RESOLUTIONS.keys())

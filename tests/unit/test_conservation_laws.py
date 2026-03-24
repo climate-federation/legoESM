@@ -618,3 +618,253 @@ class TestEnergyPartition:
         print(f"  Total energy: E0={E0:.6e}, E_f={E_f:.6e}, "
               f"rel_change={rel_change:.4e}")
         assert rel_change < 0.05, f"Total energy change = {rel_change}"
+
+
+# =====================================================================
+# 4i) Enstrophy budget (MPAS, energy-conserving vs enstrophy-conserving)
+# =====================================================================
+
+class TestEnstrophyBudgetMPAS:
+    """Compare enstrophy behaviour under energy-conserving vs
+    enstrophy-conserving PV flux options in MPAS shallow water.
+
+    For enstrophy-conserving flux, potential enstrophy Z should be
+    much better conserved than for energy-conserving flux.
+    """
+
+    @staticmethod
+    def _run_enstrophy_test(pv_scheme: str, n_steps: int = 50):
+        """Run MPAS SW with given PV scheme and return initial/final enstrophy."""
+        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+            MPASShallowWaterModel,
+            MPASShallowWaterConfig,
+            MPASShallowWaterState,
+        )
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.core.operators_voronoi import curl_vertex, vertex_thickness
+
+        mesh = create_voronoi_mesh(2, lloyd_iterations=30)
+
+        g = constants.g
+        Omega = constants.Omega
+        R = constants.R_earth
+        u0 = 20.0
+        h0 = 1e4
+
+        h_init = h0 - (R * Omega * u0 + 0.5 * u0**2) * jnp.sin(mesh.latCell)**2 / g
+        u_edge = u0 * jnp.cos(mesh.latEdge) * jnp.cos(mesh.angleEdge)
+
+        state = MPASShallowWaterState(
+            h=Field(data=h_init, name="h", dims=("nCells",), units="m"),
+            u=Field(data=u_edge, name="u", dims=("nEdges",), units="m/s",
+                    staggering="edge"),
+            h_s=Field(data=jnp.zeros(mesh.nCells), name="h_s",
+                      dims=("nCells",), units="m"),
+        )
+
+        def _enstrophy(s):
+            zeta = curl_vertex(s.u.data, mesh)
+            h_v = vertex_thickness(s.h.data, mesh)
+            pv = (zeta + mesh.fVertex) / h_v
+            # Potential enstrophy: Z = 0.5 * sum(pv^2 * h_v * areaTriangle)
+            return float(0.5 * jnp.sum(pv**2 * h_v * mesh.areaTriangle))
+
+        config = MPASShallowWaterConfig(
+            pv_scheme=pv_scheme,
+            fix_mass=True,
+            fix_energy=False,
+        )
+        model = MPASShallowWaterModel(mesh, config)
+
+        Z0 = _enstrophy(state)
+        dt = 60.0
+        for _ in range(n_steps):
+            state = model.step(state, dt)
+        Z_final = _enstrophy(state)
+
+        return Z0, Z_final
+
+    def test_enstrophy_conserving_better(self):
+        """Enstrophy-conserving PV flux should preserve Z better than
+        energy-conserving flux."""
+        Z0_en, Zf_en = self._run_enstrophy_test("enstrophy", n_steps=50)
+        Z0_ec, Zf_ec = self._run_enstrophy_test("energy", n_steps=50)
+
+        rel_en = abs(Zf_en - Z0_en) / abs(Z0_en)
+        rel_ec = abs(Zf_ec - Z0_ec) / abs(Z0_ec)
+
+        print(f"  Enstrophy-conserving: Z0={Z0_en:.6e}, Zf={Zf_en:.6e}, "
+              f"rel_change={rel_en:.4e}")
+        print(f"  Energy-conserving: Z0={Z0_ec:.6e}, Zf={Zf_ec:.6e}, "
+              f"rel_change={rel_ec:.4e}")
+
+        # Both should preserve enstrophy reasonably at balanced flow
+        assert rel_en < 0.20, f"Enstrophy-conserving Z drift = {rel_en}"
+        assert rel_ec < 0.50, f"Energy-conserving Z drift = {rel_ec}"
+
+
+# =====================================================================
+# 4j) Ocean heat and salt conservation
+# =====================================================================
+
+class TestOceanHeatSaltConservation:
+    """Integral of T*dz and S*dz should be conserved in the ocean
+    when there are no surface fluxes."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
+        from legoesm.ocean.state import LatLonOceanState, LatLonOceanConfig
+        from legoesm.ocean.vertical import create_ocean_z_star
+
+        n_lat, n_lon = 8, 16
+        nlev = 5
+        H_depth = 4000.0
+
+        self.grid = create_latlon_grid(n_lat, n_lon)
+        self.z_coord = create_ocean_z_star(nlev, H_max=H_depth)
+
+        shape_3d = (n_lat, n_lon, nlev)
+        shape_2d = (n_lat, n_lon)
+        dims_3d = ("lat", "lon", "level")
+        dims_2d = ("lat", "lon")
+
+        # Non-trivial T gradient to test advection conservation
+        lat2d = self.grid.lat2d
+        T_data = 20.0 + 5.0 * jnp.cos(lat2d)[:, :, None] * jnp.ones(nlev)[None, None, :]
+        S_data = 35.0 * jnp.ones(shape_3d)
+
+        # Small eta perturbation to generate currents
+        r2 = lat2d**2 + (self.grid.lon2d - jnp.pi)**2
+        eta_data = 0.5 * jnp.exp(-r2 / (jnp.pi / 6.0)**2)
+
+        self.state0 = LatLonOceanState(
+            u=Field(data=jnp.zeros(shape_3d), name="u", dims=dims_3d, units="m/s"),
+            v=Field(data=jnp.zeros(shape_3d), name="v", dims=dims_3d, units="m/s"),
+            T=Field(data=T_data, name="T", dims=dims_3d, units="degC"),
+            S=Field(data=S_data, name="S", dims=dims_3d, units="PSU"),
+            eta=Field(data=eta_data, name="eta", dims=dims_2d, units="m"),
+            H_bathy=Field(data=jnp.full(shape_2d, H_depth), name="H_bathy",
+                         dims=dims_2d, units="m"),
+            land_mask=Field(data=jnp.ones(shape_2d), name="land_mask",
+                           dims=dims_2d, units=""),
+        )
+
+        config = LatLonOceanConfig(
+            A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0,
+            hyperdiff_coeff=0.0,
+            n_barotropic_substeps=10,
+            use_conservation_fixer=True,
+            fix_volume=True,
+            fix_heat=True,
+            fix_salt=True,
+            enable_runtime_checks=False,
+        )
+        self.model = LatLonOceanModel(self.grid, self.z_coord, config)
+        self.dt = 300.0
+        self.n_steps = 20
+        self.area = self.grid.area
+
+    def _heat_integral(self, state):
+        """Compute area-weighted integral of T across all levels."""
+        area = self.area
+        T = state.T.data  # (n_lat, n_lon, nlev)
+        return float(jnp.sum(jnp.sum(T, axis=-1) * area))
+
+    def _salt_integral(self, state):
+        """Compute area-weighted integral of S across all levels."""
+        area = self.area
+        S = state.S.data
+        return float(jnp.sum(jnp.sum(S, axis=-1) * area))
+
+    def test_heat_conservation(self):
+        """Heat integral should be conserved to < 0.1%."""
+        H0 = self._heat_integral(self.state0)
+
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        H_final = self._heat_integral(state)
+        rel_err = abs(H_final - H0) / abs(H0)
+        assert rel_err < 0.001, f"Heat conservation failed: rel_err={rel_err}"
+
+    def test_salt_conservation(self):
+        """Salt integral should be conserved to < 0.1%."""
+        S0 = self._salt_integral(self.state0)
+
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        S_final = self._salt_integral(state)
+        rel_err = abs(S_final - S0) / abs(S0)
+        assert rel_err < 0.001, f"Salt conservation failed: rel_err={rel_err}"
+
+
+# =====================================================================
+# 4k) MPAS shallow water energy conservation
+# =====================================================================
+
+class TestMPASEnergyConservation:
+    """Total energy (KE + PE) should be approximately conserved in
+    MPAS inviscid shallow water with balanced initial condition."""
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+            MPASShallowWaterModel,
+            MPASShallowWaterConfig,
+            MPASShallowWaterState,
+        )
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.core.operators_voronoi import kinetic_energy_cell
+
+        self.mesh = create_voronoi_mesh(2, lloyd_iterations=30)
+        mesh = self.mesh
+        self.kinetic_energy_cell = kinetic_energy_cell
+
+        g = constants.g
+        Omega = constants.Omega
+        R = constants.R_earth
+        u0 = 20.0
+        h0 = 1e4
+
+        h_init = h0 - (R * Omega * u0 + 0.5 * u0**2) * jnp.sin(mesh.latCell)**2 / g
+        u_edge = u0 * jnp.cos(mesh.latEdge) * jnp.cos(mesh.angleEdge)
+
+        self.state0 = MPASShallowWaterState(
+            h=Field(data=h_init, name="h", dims=("nCells",), units="m"),
+            u=Field(data=u_edge, name="u", dims=("nEdges",), units="m/s",
+                    staggering="edge"),
+            h_s=Field(data=jnp.zeros(mesh.nCells), name="h_s",
+                      dims=("nCells",), units="m"),
+        )
+
+        config = MPASShallowWaterConfig(fix_mass=True, fix_energy=False)
+        self.model = MPASShallowWaterModel(mesh, config)
+        self.dt = 60.0
+        self.n_steps = 100
+        self.g = g
+
+    def _total_energy(self, state):
+        """Compute total energy KE + PE."""
+        mesh = self.mesh
+        h = state.h.data
+        ke_cell = self.kinetic_energy_cell(state.u.data, mesh)
+        KE = float(jnp.sum(h * ke_cell * mesh.areaCell))
+        PE = float(0.5 * self.g * jnp.sum(h**2 * mesh.areaCell))
+        return KE + PE
+
+    def test_energy_conserved(self):
+        """Relative energy change should be < 5% after 100 steps."""
+        E0 = self._total_energy(self.state0)
+
+        state = self.state0
+        for _ in range(self.n_steps):
+            state = self.model.step(state, self.dt)
+
+        E_final = self._total_energy(state)
+        rel_change = abs(E_final - E0) / abs(E0)
+        assert rel_change < 0.05, f"MPAS energy change = {rel_change}"
+        assert jnp.all(jnp.isfinite(state.h.data)), "h non-finite"

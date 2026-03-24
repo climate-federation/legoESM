@@ -441,3 +441,175 @@ class TestHyperdiffusionSpectralDecay:
         # Both should be damped (ratios < 1)
         assert low_ratio < 1.0, f"Low-k mode not damped at all: ratio={low_ratio}"
         assert high_ratio < 1.0, f"High-k mode not damped at all: ratio={high_ratio}"
+
+
+# ======================================================================
+# 2g) Gravity wave on cubed-sphere C-D grid
+# ======================================================================
+
+class TestGravityWaveCDGrid:
+    """Gaussian bump on cubed-sphere C-D grid shallow water.
+    Verify perturbation disperses and the model stays stable."""
+
+    def test_gravity_wave_cdgrid(self, cs_grid):
+        """A height perturbation should disperse on the C-D grid SW model."""
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterModel,
+            CDGridShallowWaterConfig,
+            CDGridShallowWaterState,
+        )
+
+        grid = cs_grid
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        n = grid.n
+        H0 = 1e4
+        g = constants.g
+
+        # Gaussian bump at (0, pi)
+        lat0, lon0 = 0.0, jnp.pi
+        sigma_rad = 15.0 * jnp.pi / 180.0
+        dist_sq = (grid.lat - lat0)**2 + (grid.lon - lon0)**2
+        bump = 100.0 * jnp.exp(-dist_sq / (2.0 * sigma_rad**2))
+        h_init = H0 + bump
+
+        state = CDGridShallowWaterState(
+            h=h_init,
+            u_d=jnp.zeros((6, n + 1, n + 1)),
+            v_d=jnp.zeros((6, n + 1, n + 1)),
+            h_s=jnp.zeros_like(h_init),
+        )
+
+        config = CDGridShallowWaterConfig(
+            hyperdiff_coeff=0.0,
+            use_conservation_fixer=True,
+            fix_mass=True,
+        )
+        model = CDGridShallowWaterModel(grid, config)
+
+        h_init_pert = float(jnp.max(jnp.abs(bump)))
+
+        dt = 60.0
+        for _ in range(50):
+            state = model.step(state, dt)
+
+        h_pert = state.h - H0
+        max_pert_final = float(jnp.max(jnp.abs(h_pert)))
+        assert max_pert_final < h_init_pert, (
+            f"Perturbation did not disperse: {max_pert_final:.1f} >= {h_init_pert:.1f}"
+        )
+        assert jnp.all(jnp.isfinite(state.h)), "Non-finite h"
+
+
+# ======================================================================
+# 2h) Gravity wave on spectral shallow water
+# ======================================================================
+
+class TestGravityWaveSpectral:
+    """Gaussian bump on spectral shallow water model.
+    Verify perturbation disperses and speed is approximately sqrt(g*H)."""
+
+    def test_gravity_wave_spectral(self):
+        """A height perturbation should disperse on the spectral SW model."""
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid, sh_analysis, sh_synthesis,
+        )
+        from legoesm.atmosphere.dynamics.spectral_sw import (
+            SpectralShallowWaterModel,
+            SpectralSWConfig,
+            SpectralSWState,
+        )
+
+        grid = create_gaussian_grid(10)
+        g = constants.g
+        H0 = 1e4
+
+        # Gaussian bump at (0, pi)
+        lat0, lon0 = 0.0, jnp.pi
+        sigma_rad = 15.0 * jnp.pi / 180.0
+        dist_sq = (grid.lat2d - lat0)**2 + (grid.lon2d - lon0)**2
+        bump = 100.0 * jnp.exp(-dist_sq / (2.0 * sigma_rad**2))
+
+        # Build initial state in spectral space
+        h_grid = H0 + bump
+        u_grid = jnp.zeros_like(h_grid)
+        v_grid = jnp.zeros_like(h_grid)
+
+        # Compute spectral coefficients for vorticity, divergence, geopotential
+        # vor = curl(u, v), div = div(u, v), phi = g*h
+        vor_hat = jnp.zeros(grid.n_sh, dtype=jnp.complex128)
+        div_hat = jnp.zeros(grid.n_sh, dtype=jnp.complex128)
+        phi_hat = sh_analysis(grid, g * h_grid)
+        phis_hat = jnp.zeros(grid.n_sh, dtype=jnp.complex128)
+
+        state = SpectralSWState(
+            vor_hat=Field(data=vor_hat, name="vor_hat", dims=("n_sh",), units="1/s"),
+            div_hat=Field(data=div_hat, name="div_hat", dims=("n_sh",), units="1/s"),
+            phi_hat=Field(data=phi_hat, name="phi_hat", dims=("n_sh",), units="m2/s2"),
+            phis_hat=Field(data=phis_hat, name="phis_hat", dims=("n_sh",), units="m2/s2"),
+        )
+
+        config = SpectralSWConfig(
+            mean_depth=H0,
+            hyperdiff_coeff=0.0,
+            spectral_filter_order=0,
+        )
+        model = SpectralShallowWaterModel(grid, config)
+
+        phi_init_pert = float(jnp.max(jnp.abs(bump))) * g
+
+        dt = 60.0
+        for _ in range(50):
+            state = model.step(state, dt)
+
+        # Recover grid-space geopotential
+        phi_grid = sh_synthesis(grid, state.phi_hat.data)
+        phi_pert = jnp.abs(phi_grid - g * H0)
+        max_pert_final = float(jnp.max(phi_pert))
+
+        # Perturbation should have dispersed
+        assert max_pert_final < phi_init_pert, (
+            f"Spectral perturbation did not disperse: "
+            f"{max_pert_final:.1f} >= {phi_init_pert:.1f}"
+        )
+        assert jnp.all(jnp.isfinite(phi_grid)), "Non-finite phi"
+
+
+# ======================================================================
+# 2i) Voronoi hyperdiffusion impulse response
+# ======================================================================
+
+class TestDiffusionImpulseVoronoi:
+    """Laplacian diffusion impulse test on MPAS Voronoi mesh.
+    Verify energy decreases and field stays finite."""
+
+    def test_del2_impulse_voronoi(self, voronoi_mesh):
+        """A point impulse on the MPAS mesh should be damped by del2 diffusion."""
+        from legoesm.core.operators_voronoi import vector_laplacian_del2
+        mesh = voronoi_mesh
+
+        # Place impulse at edge nearest to (0, pi)
+        target_lat, target_lon = 0.0, jnp.pi
+        dist = jnp.sqrt(
+            (mesh.latEdge - target_lat)**2 + (mesh.lonEdge - target_lon)**2
+        )
+        nearest_edge = int(jnp.argmin(dist))
+
+        field = jnp.zeros(mesh.nEdges)
+        field = field.at[nearest_edge].set(1.0)
+
+        dx_min = float(jnp.min(mesh.dcEdge))
+        # CFL for del2: nu * dt / dx^2 < 0.25
+        dt = 1.0
+        nu = 0.1 * dx_min**2 / (4.0 * dt)
+
+        energies = [float(jnp.sum(field**2))]
+        for _ in range(10):
+            tendency = nu * vector_laplacian_del2(field, mesh)
+            field = field + dt * tendency
+            energies.append(float(jnp.sum(field**2)))
+
+        assert energies[-1] < energies[0] * 0.99, (
+            f"Energy not damped on Voronoi: {energies[-1]:.6e} vs {energies[0]:.6e}"
+        )
+        assert jnp.all(jnp.isfinite(field))
