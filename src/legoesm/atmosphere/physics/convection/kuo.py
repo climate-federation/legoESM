@@ -79,7 +79,7 @@ def kuo_convection(
     excess = jax.nn.softplus(q_v - q_sat)  # (ncol, nlev)
     MC = jnp.sum(excess * dp, axis=1) / constants.g  # (ncol,) [kg/m^2]
 
-    # 3. Smooth trigger based on moisture convergence
+    # 3. Smooth trigger based on column moisture excess
     trigger = jax.nn.sigmoid(
         config.smooth_trigger_sharpness * (MC - config.me_threshold)
     )  # (ncol,)

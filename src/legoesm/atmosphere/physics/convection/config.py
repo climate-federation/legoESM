@@ -76,11 +76,11 @@ class KuoConfig(NamedTuple):
     Fields
     ------
     alpha_heat : float
-        Fraction of moisture convergence going to heating vs moistening.
+        Fraction of column moisture excess going to heating vs moistening.
     me_threshold : float
         Minimum column moisture excess to trigger convection [kg/m^2].
     smooth_trigger_sharpness : float
-        Sigmoid sharpness on moisture convergence trigger.
+        Sigmoid sharpness on column moisture excess trigger [1/(kg/m^2)].
     tau_relax : float
         Relaxation timescale [s].
     """
@@ -163,7 +163,7 @@ class ConvectionConfig(NamedTuple):
     dca : DCAConfig
         Configuration for Deep Convective Adjustment.
     kuo : KuoConfig
-        Configuration for Kuo moisture convergence.
+        Configuration for Kuo column moisture excess.
     mass_flux : MassFluxConfig
         Configuration for Prognostic Mass-Flux.
     edmf : EDMFConfig

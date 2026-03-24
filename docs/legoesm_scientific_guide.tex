@@ -1004,6 +1004,20 @@ The entraining updraft uses exponential dilution:
 with entrainment rate $\epsilon_0=10^{-3}$~m$^{-1}$ and detrainment
 rate $\delta_0=10^{-3}$~m$^{-1}$.
 
+\paragraph{Precipitation.}
+Precipitation is diagnosed from detrainment of updraft condensate,
+integrated over the column using layer thickness $\Delta z$:
+\begin{equation}
+  P = \sum_k \delta_0\,M_k\,q_{\ell,k}\,\Delta z_k
+  \quad [\text{kg\,m}^{-2}\,\text{s}^{-1}],
+\end{equation}
+where $q_{\ell,k}=\max(q_{u,k}-q_{s,k},\,0)$ is the updraft condensate
+and $M_k=M_c\,m(p_k)$ is the mass flux profile [kg\,m$^{-2}$\,s$^{-1}$].
+The vertical measure $\Delta z$ is used (not $\Delta p/g$) because $M$
+already carries units of mass flux per unit area, so $\delta_0\,M\,q_\ell$
+has units [kg\,m$^{-3}$\,s$^{-1}$] and multiplying by $\Delta z$ [m]
+yields [kg\,m$^{-2}$\,s$^{-1}$].
+
 \subsection{EDMF Convection}
 
 Eddy-Diffusivity Mass-Flux with a prognostic updraft area fraction $a_u$:
@@ -1012,6 +1026,15 @@ Eddy-Diffusivity Mass-Flux with a prognostic updraft area fraction $a_u$:
 \end{equation}
 combining mass-flux (updraft) and eddy-diffusivity (environmental mixing)
 contributions.
+
+\paragraph{Precipitation.}
+As in the mass-flux scheme (\S\ref{sec:microphysics}), precipitation
+is diagnosed from condensate detrainment using $\Delta z$:
+\begin{equation}
+  P = \sum_k \delta_0\,M_{u,k}\,q_{\ell,k}\,\Delta z_k
+  \quad [\text{kg\,m}^{-2}\,\text{s}^{-1}],
+\end{equation}
+with $M_{u,k}=\rho_k\,a_u\,w_{u,k}$ and $\delta_0=2\times10^{-3}$~m$^{-1}$.
 
 \subsection{Deep Convective Adjustment}
 
@@ -1029,8 +1052,14 @@ enthalpy.  Uses sigmoid activation for smooth, differentiable blending.
 Prognostic variables: $q_c$ (cloud water), $q_r$ (rain).
 
 \paragraph{Saturation adjustment.}
-$\Delta q_v = -\sigma(\kappa_s(q_v-q_s))\cdot(q_v-q_s)$, with sigmoid
-sharpness $\kappa_s=100$.
+The saturation excess is converted to a tendency (rate) by dividing by the
+time step $\Delta t$:
+\begin{equation}
+  \frac{\dd q_v}{\dd t}\bigg|_{\mathrm{sat}}
+  = -\frac{\sigma(\kappa_s(q_v-q_s))\cdot(q_v-q_s)}{\Delta t},
+\end{equation}
+with sigmoid sharpness $\kappa_s$.  This ensures all microphysics outputs
+have consistent units of kg\,kg$^{-1}$\,s$^{-1}$.
 
 \paragraph{Autoconversion (cloud $\to$ rain).}
 \begin{equation}
@@ -1431,17 +1460,21 @@ $R_v=\bar V^n-\alpha\bar U^n-\Delta t_s\,g\,\pp\eta/\pp y$.
 \section{Equation of State (Wright 1997)}
 \label{sec:eos}
 
+The ocean prognostic temperature variable $T$ is \textbf{potential
+temperature} [degC].  The Wright~(1997) EOS computes in-situ density
+$\rho(\theta,S,p)$ directly from potential temperature $\theta$,
+salinity $S$~[PSU], and pressure $p$~[Pa]:
 \begin{equation}
-  \rho = \frac{p+p_0(T,S)}{\lambda(T,S)+\alpha_0(T,S)\,(p+p_0)},
+  \rho = \frac{p+p_0(\theta,S)}{\lambda(\theta,S)+\alpha_0(\theta,S)\,(p+p_0)},
 \end{equation}
 where
 \begin{align}
-  \alpha_0 &= a_0+a_1 T+a_2 S, \\
-  p_0 &= (b_0+b_4 S)+T(b_1+T(b_2+b_3 T)+b_5 S), \\
-  \lambda &= (c_0+c_4 S)+T(c_1+T(c_2+c_3 T)+c_5 S).
+  \alpha_0 &= a_0+a_1 \theta+a_2 S, \\
+  p_0 &= (b_0+b_4 S)+\theta(b_1+\theta(b_2+b_3 \theta)+b_5 S), \\
+  \lambda &= (c_0+c_4 S)+\theta(c_1+\theta(c_2+c_3 \theta)+c_5 S).
 \end{align}
 Coefficients follow the MOM6 implementation.  The density perturbation
-$\rho'=\rho(T,S,p)-\rho_0$ is used in the pressure gradient computation.
+$\rho'=\rho(\theta,S,p)-\rho_0$ is used in the pressure gradient computation.
 
 
 \section{Hydrostatic Pressure and Vertical Velocity}
@@ -1485,14 +1518,19 @@ and stability.
 \subsection{Non-Local Transport}
 
 For unstable (convective) boundary layers ($B_f>0$), a non-local
-counter-gradient flux is added to temperature and salinity tendencies
-(LMD94 Eq.~19):
+counter-gradient flux is added to temperature and salinity tendencies.
+The implementation uses a simplified form inspired by LMD94 Eq.~19:
 \begin{equation}
   \frac{\pp T}{\pp t}\bigg|_{\mathrm{NL}} =
   \gamma_T\,\frac{w_s(0)\,G(\sigma)}{w_s(\sigma)\,h}\,
   \frac{\pp T}{\pp z}\bigg|_{\mathrm{sfc}},
 \end{equation}
-where $\gamma_T=6.33$ is the non-local transport coefficient.
+where $\gamma_T=\gamma_S=6.33$ are non-local transport coefficients
+and $w_s(0)\,(\pp T/\pp z)|_{\mathrm{sfc}}$ is a surface heat flux
+proxy [K\,m/s].  This differs from the full LMD94 non-local term, which
+uses the explicit surface buoyancy flux $\overline{w'\theta'}_0$;
+the present form approximates it via the near-surface gradient
+and surface turbulent velocity scale.
 This is active only within the diagnosed boundary layer ($\sigma<1$)
 and only under unstable forcing.
 

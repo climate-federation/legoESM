@@ -45,9 +45,10 @@ def _compute_lw_optical_depth(
 ) -> jnp.ndarray:
     """Compute LW optical depth per layer.
 
-    tau_dry(sigma, lat) = [f_l*sigma + (1-f_l)*sigma^4] * [tau_e + (tau_p - tau_e)*sin^2(lat)]
-    tau_total = tau_dry + tau_moist * q_v
-    delta_tau_k = tau(sigma_{k+1/2}) - tau(sigma_{k-1/2})
+    dtau_dry_k = tau_dry(sigma_{k+1/2}) - tau_dry(sigma_{k-1/2})
+      where tau_dry(sigma) = [f_l*sigma + (1-f_l)*sigma^4] * [tau_e + (tau_p - tau_e)*sin^2(lat)]
+    dtau_moist_k = tau_moist_coeff * q_v_k * dp_k / g   [m^2/kg * kg/kg * Pa / (m/s^2) = dimensionless]
+    dtau_k = dtau_dry_k + dtau_moist_k
 
     Parameters
     ----------

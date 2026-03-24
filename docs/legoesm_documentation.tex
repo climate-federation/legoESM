@@ -775,16 +775,19 @@ where $R_u=\bar U^n+\alpha\bar V^n-\Delta t_s\,g\,\pp\eta/\pp x$ and $R_v=\bar V
 \subsection{Equation of State (Wright 1997)}
 %-----------------------------------------------------------------------------
 
+The ocean prognostic temperature variable $T$ is \textbf{potential temperature}
+[degC].  The Wright~(1997) EOS computes in-situ density directly from
+potential temperature $\theta$, salinity $S$~[PSU], and pressure $p$~[Pa]:
 \begin{equation}
-  \rho = \frac{p+p_0(T,S)}{\lambda(T,S)+\alpha_0(T,S)\,(p+p_0)},
+  \rho = \frac{p+p_0(\theta,S)}{\lambda(\theta,S)+\alpha_0(\theta,S)\,(p+p_0)},
 \end{equation}
 where
 \begin{align}
-  \alpha_0 &= a_0+a_1 T+a_2 S, \\
-  p_0 &= (b_0+b_4 S)+T(b_1+T(b_2+b_3 T)+b_5 S), \\
-  \lambda &= (c_0+c_4 S)+T(c_1+T(c_2+c_3 T)+c_5 S).
+  \alpha_0 &= a_0+a_1 \theta+a_2 S, \\
+  p_0 &= (b_0+b_4 S)+\theta(b_1+\theta(b_2+b_3 \theta)+b_5 S), \\
+  \lambda &= (c_0+c_4 S)+\theta(c_1+\theta(c_2+c_3 \theta)+c_5 S).
 \end{align}
-Coefficients follow the MOM6 implementation.  The density perturbation is $\rho'=\rho(T,S,p)-\rho_0$.
+Coefficients follow the MOM6 implementation.  The density perturbation is $\rho'=\rho(\theta,S,p)-\rho_0$.
 
 %-----------------------------------------------------------------------------
 \subsection{Hydrostatic Pressure and Vertical Velocity}
