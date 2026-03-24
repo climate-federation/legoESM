@@ -314,16 +314,17 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
         result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t))
         return jnp.moveaxis(result_t, 0, -1)
 
-    # 2D case: first-order upwind face values
-    h_pad = _pad_halo_auto(h, cdgrid)  # (6, n+2, n+2)
+    # 2D case: PPM reconstruction for high-order face values
+    h_pad_h2 = _pad_halo_auto_h2(h, cdgrid)  # (6, n+4, n+4)
 
-    h_left_x = h_pad[:, :-1, 1:-1]   # (6, n+1, n)
-    h_right_x = h_pad[:, 1:, 1:-1]   # (6, n+1, n)
-    h_face_x = jnp.where(u_c > 0, h_left_x, h_right_x)
+    # PPM left/right states at x-interfaces: (6, n+1, n)
+    h_L_x, h_R_x = _ppm_reconstruct_x(h_pad_h2)
+    # PPM left/right states at y-interfaces: (6, n, n+1)
+    h_L_y, h_R_y = _ppm_reconstruct_y(h_pad_h2)
 
-    h_left_y = h_pad[:, 1:-1, :-1]   # (6, n, n+1)
-    h_right_y = h_pad[:, 1:-1, 1:]   # (6, n, n+1)
-    h_face_y = jnp.where(v_c > 0, h_left_y, h_right_y)
+    # Upwind selection
+    h_face_x = jnp.where(u_c > 0, h_L_x, h_R_x)
+    h_face_y = jnp.where(v_c > 0, h_L_y, h_R_y)
 
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
@@ -540,15 +541,15 @@ def cdgrid_momentum_tendencies(
     else:
         zeta_abs = zeta + cdgrid.base.f
 
-    # 2. KE at cell centres from C-grid velocities
+    # 2. KE at cell centres — compute at D-grid corners first, then average.
+    # KE = 0.5*(u_d² + v_d²) is rotationally invariant at each corner, so
+    # averaging the scalar KE to cell centres preserves the invariance.
+    # (The old approach of averaging face-local velocity components and then
+    # squaring introduces face-anisotropic errors at cubed-sphere boundaries.)
+    KE_corner = 0.5 * (u_d ** 2 + v_d ** 2)
+    KE = _interp_corner_to_center(KE_corner)
+    # C-grid velocities still needed for mass flux (computed in caller)
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
-    if is_3d:
-        u_center = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])
-        v_center = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])
-    else:
-        u_center = 0.5 * (u_c[:, :-1, :] + u_c[:, 1:, :])
-        v_center = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
-    KE = 0.5 * (u_center ** 2 + v_center ** 2)
 
     # 3. Gradients at corners (Arakawa-Lamb)
     if is_3d:

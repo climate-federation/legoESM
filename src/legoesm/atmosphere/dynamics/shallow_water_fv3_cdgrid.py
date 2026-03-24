@@ -145,19 +145,38 @@ class CDGridShallowWaterModel(IntegrationMixin):
     def _sync_dgrid_boundary(self, state: CDGridShallowWaterState):
         """Synchronize D-grid boundary winds between cubed-sphere faces.
 
-        Converts D-grid to A-grid, does a cross-face vector halo exchange,
-        re-derives D-grid corners, and replaces ONLY the boundary rows/columns
-        (first and last row/column of each face). Interior D-grid values are
-        untouched.
+        Converts D-grid corners to geographic (east/north) first — this is
+        safe to average across faces — then averages to A-grid centres,
+        converts to face-local, uses ``agrid_to_dgrid_vector`` (which does
+        proper cross-face vector halo exchange), and replaces ONLY the
+        boundary rows/columns.
         """
-        from legoesm.core.operators_cdgrid import (
-            dgrid_to_agrid_vector, agrid_to_dgrid_vector,
-        )
+        from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
+
         u_d, v_d = state.u_d, state.v_d
-        u_a, v_a = dgrid_to_agrid_vector(u_d, v_d)
+        ca_c = self.cdgrid.cos_angle_corner
+        sa_c = self.cdgrid.sin_angle_corner
+
+        # 1. D-grid corners → geographic (safe to average across faces)
+        u_east_d = ca_c * u_d - sa_c * v_d
+        v_north_d = sa_c * u_d + ca_c * v_d
+
+        # 2. Average geographic velocities to A-grid centres
+        u_east_a = 0.25 * (u_east_d[:, :-1, :-1] + u_east_d[:, 1:, :-1]
+                           + u_east_d[:, :-1, 1:] + u_east_d[:, 1:, 1:])
+        v_north_a = 0.25 * (v_north_d[:, :-1, :-1] + v_north_d[:, 1:, :-1]
+                            + v_north_d[:, :-1, 1:] + v_north_d[:, 1:, 1:])
+
+        # 3. Geographic A-grid → face-local A-grid
+        ca = self.grid.cos_angle
+        sa = self.grid.sin_angle
+        u_a = ca * u_east_a + sa * v_north_a
+        v_a = -sa * u_east_a + ca * v_north_a
+
+        # 4. A-grid → D-grid with cross-face vector halo exchange
         u_d_sync, v_d_sync = agrid_to_dgrid_vector(u_a, v_a, self.cdgrid)
 
-        # Only replace boundary rows/columns — keep interior intact
+        # 5. Replace boundary rows/columns only
         n = self.grid.n
         u_new = u_d.at[:, 0, :].set(u_d_sync[:, 0, :])
         u_new = u_new.at[:, n, :].set(u_d_sync[:, n, :])
@@ -194,6 +213,9 @@ class CDGridShallowWaterModel(IntegrationMixin):
         state_new = dispatch_integrator(
             state, tendency_fn, dt, self.config.time_integrator,
         )
+
+        # Synchronize D-grid boundary corners across cubed-sphere faces
+        state_new = self._sync_dgrid_boundary(state_new)
 
         # Conservation fixer — anchored to initial mass when available,
         # otherwise to previous step's mass.

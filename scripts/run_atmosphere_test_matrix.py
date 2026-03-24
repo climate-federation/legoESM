@@ -990,19 +990,36 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             hyperdiff_coeff=_hyperdiff_cube(n))
         model = CDGridShallowWaterModel(grid, config)
 
-        # Convert A-grid Williamson state to CDGrid D-grid state
+        # Initialise D-grid corners directly using corner lat/angles.
+        # This avoids the A→D interpolation which mixes face-local velocity
+        # components with different orientations and introduces spurious v.
         sw = williamson_test2(grid) if test_num == 2 else williamson_test5(grid)
-        u_pad, v_pad = pad_halo_vector(
-            sw.u.data, sw.v.data,
-            grid.cos_angle, grid.sin_angle,
-            grid.cos_angle_padded, grid.sin_angle_padded,
-            interp_offsets=grid.halo_interp_offsets,
-        )
-        u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1] +
-                       u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
-        v_d = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1] +
-                       v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
         from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterState
+        cdgrid = model.cdgrid
+        ca_c = cdgrid.cos_angle_corner
+        sa_c = cdgrid.sin_angle_corner
+
+        # Geographic winds at D-grid corners from the A-grid Williamson init
+        # (interpolate geographic winds, not face-local, to corner positions)
+        u_east_a = grid.cos_angle * sw.u.data - grid.sin_angle * sw.v.data
+        v_north_a = grid.sin_angle * sw.u.data + grid.cos_angle * sw.v.data
+        # Pad geographic and average to corners
+        u_east_pad = pad_halo_vector.__wrapped__(
+            u_east_a, v_north_a,
+            jnp.ones_like(grid.cos_angle), jnp.zeros_like(grid.sin_angle),
+            jnp.ones_like(grid.cos_angle_padded), jnp.zeros_like(grid.sin_angle_padded),
+            interp_offsets=grid.halo_interp_offsets,
+        ) if False else (None, None)  # just use pad_halo for scalars
+        from legoesm.grids.halo import pad_halo
+        ue_pad = pad_halo(u_east_a, interp_offsets=grid.halo_interp_offsets)
+        vn_pad = pad_halo(v_north_a, interp_offsets=grid.halo_interp_offsets)
+        u_east_corner = 0.25 * (ue_pad[:, :-1, :-1] + ue_pad[:, 1:, :-1]
+                                + ue_pad[:, :-1, 1:] + ue_pad[:, 1:, 1:])
+        v_north_corner = 0.25 * (vn_pad[:, :-1, :-1] + vn_pad[:, 1:, :-1]
+                                 + vn_pad[:, :-1, 1:] + vn_pad[:, 1:, 1:])
+        # Geographic → face-local at corner positions
+        u_d = ca_c * u_east_corner + sa_c * v_north_corner
+        v_d = -sa_c * u_east_corner + ca_c * v_north_corner
         state = CDGridShallowWaterState(h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
 
         def step_fn(s, dt_):
@@ -1019,17 +1036,21 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             }
 
         def extract_fn(s):
-            # Convert D-grid back to A-grid for diagnostics
-            from legoesm.core.operators_cdgrid import dgrid_to_cgrid
-            u_c, v_c = dgrid_to_cgrid(s.u_d, s.v_d, cdgrid)
-            u_a = 0.5 * (u_c[:, :-1] + u_c[:, 1:])
-            v_a = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
-            u = np.asarray(u_a, dtype=np.float64)
-            v = np.asarray(v_a, dtype=np.float64)
-            # Rotate face-local to geographic
-            ca = np.asarray(grid.cos_angle, dtype=np.float64)
-            sa = np.asarray(grid.sin_angle, dtype=np.float64)
-            u, v = ca * u - sa * v, sa * u + ca * v
+            # Rotate D-grid corners to geographic (east/north) FIRST,
+            # then average to cell centres.  Averaging face-local components
+            # before rotation corrupts boundary cells where corners belong
+            # to different faces with incompatible coordinate systems.
+            u_d = np.asarray(s.u_d, dtype=np.float64)
+            v_d = np.asarray(s.v_d, dtype=np.float64)
+            ca_c = np.asarray(cdgrid.cos_angle_corner, dtype=np.float64)
+            sa_c = np.asarray(cdgrid.sin_angle_corner, dtype=np.float64)
+            u_east_d = ca_c * u_d - sa_c * v_d
+            v_north_d = sa_c * u_d + ca_c * v_d
+            # Average 4 corners → cell centre (now geographic, safe)
+            u = 0.25 * (u_east_d[:, :-1, :-1] + u_east_d[:, 1:, :-1]
+                        + u_east_d[:, :-1, 1:] + u_east_d[:, 1:, 1:])
+            v = 0.25 * (v_north_d[:, :-1, :-1] + v_north_d[:, 1:, :-1]
+                        + v_north_d[:, :-1, 1:] + v_north_d[:, 1:, 1:])
             return {"u": u, "v": v,
                     "wind_speed": np.sqrt(u ** 2 + v ** 2),
                     "height": np.asarray(s.h, dtype=np.float64)}
