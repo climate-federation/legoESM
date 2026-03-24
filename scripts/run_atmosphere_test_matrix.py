@@ -426,22 +426,59 @@ def _bin_to_latlon(
     return _apply_weights(vals, idxs, w, n_lat, n_lon)
 
 
+def _interp_gaussian_to_latlon(field: np.ndarray, lat_gauss_deg: np.ndarray,
+                               n_lat_out: int = 181) -> np.ndarray:
+    """Interpolate a Gaussian-grid latitude axis to a regular lat-lon grid.
+
+    Uses linear interpolation along the latitude dimension so that
+    cross-section plots have smooth rendering instead of blocky stripes.
+
+    Parameters
+    ----------
+    field : (n_lat_gauss, ...) — data on Gaussian latitudes
+    lat_gauss_deg : (n_lat_gauss,) — Gaussian latitudes in degrees
+    n_lat_out : int — number of output latitudes (default 181 for 1-deg)
+
+    Returns
+    -------
+    out : (n_lat_out, ...) — interpolated to regular latitudes
+    """
+    from scipy.interpolate import interp1d
+    lat_out = np.linspace(-90.0, 90.0, n_lat_out)
+    lat_g = np.asarray(lat_gauss_deg, dtype=np.float64).ravel()
+    # interp1d along axis 0
+    f = interp1d(lat_g, field, axis=0, kind='linear',
+                 bounds_error=False, fill_value='extrapolate')
+    return f(lat_out)
+
+
 def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
                coord_kind: str) -> np.ndarray:
     """Regrid a 2D field to (181, 360) lat-lon."""
-    if coord_kind in ("latlon", "gaussian"):
+    if coord_kind == "latlon":
         return np.asarray(field, dtype=np.float64)
+    if coord_kind == "gaussian":
+        # Gaussian grid: interpolate lat axis to regular spacing
+        arr = np.asarray(field, dtype=np.float64)
+        lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
+        return _interp_gaussian_to_latlon(arr, lat_gauss)
     return _bin_to_latlon(field.ravel(), lon_deg.ravel(), lat_deg.ravel())
 
 
 def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
                      lat_deg: np.ndarray, coord_kind: str) -> np.ndarray:
-    """Regrid a 3D field (*, nlev) to (181, 360, nlev)."""
+    """Regrid a 3D field (*, nlev) to (n_lat, n_lon, nlev)."""
     arr = np.asarray(field_3d, dtype=np.float64)
-    if coord_kind in ("latlon", "gaussian"):
+    if coord_kind == "latlon":
         if arr.ndim == 2:
             arr = arr[..., None]
         return arr
+    if coord_kind == "gaussian":
+        if arr.ndim == 2:
+            arr = arr[..., None]
+        # Interpolate the Gaussian latitude axis to regular 1-deg spacing
+        lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
+        return _interp_gaussian_to_latlon(arr, lat_gauss)
     if arr.ndim == 1:
         arr = arr[:, None]
     nlev = arr.shape[-1]
