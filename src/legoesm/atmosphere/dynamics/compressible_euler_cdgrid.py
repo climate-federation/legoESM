@@ -9,7 +9,7 @@ Uses the same C-D grid discretisation as the shallow water and PE solvers:
 * Scalar transport (theta, rho, tracers) via C-grid upwind mass flux.
 * Acoustic substeps for vertically propagating sound waves.
 
-State is stored on the A-grid for compatibility with existing physics
+State is stored on the cell-centre for compatibility with existing physics
 infrastructure. Velocities are converted to D-grid for momentum computation.
 
 References
@@ -35,9 +35,11 @@ from legoesm.core.operators_3d import (
 )
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
+    dgrid_to_center_vector,
     dgrid_vorticity,
     cgrid_mass_flux_divergence,
     _arakawa_lamb_gradient,
+    _broadcast_metric,
     _interp_center_to_corner,
     _interp_corner_to_center,
     _laplacian_dgrid,
@@ -68,7 +70,7 @@ class CDGridCompressibleEulerConfig(NamedTuple):
     This is the recommended cubed-sphere non-hydrostatic solver for
     production AMIP/CMIP simulations.  Uses FV3-style C-D grid staggering
     (Lin 2004, Putman & Lin 2007) which eliminates the Hollingsworth-Kallberg
-    instability that affects A-grid solvers.
+    instability that affects cell-centre solvers.
     """
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
@@ -148,10 +150,9 @@ def cdgrid_compressible_euler_slow_tendencies(
     else:
         abs_vor = zeta
 
-    # --- 5. KE at cell centres ---
-    u_center = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])
-    v_center = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])
-    K = 0.5 * (u_center ** 2 + v_center ** 2)
+    # --- 5. KE at cell centres from D-grid (orthogonal basis) ---
+    u_cc, v_cc = dgrid_to_center_vector(u_d, v_d)
+    K = 0.5 * (u_cc ** 2 + v_cc ** 2)
 
     # --- 6. Gradients at D-grid corners ---
     dK_dx, dK_dy = _arakawa_lamb_gradient(K, cdgrid)
@@ -161,15 +162,22 @@ def cdgrid_compressible_euler_slow_tendencies(
     abs_vor_corner = _interp_center_to_corner(abs_vor, cdgrid)
     theta_corner = _interp_center_to_corner(theta_total, cdgrid)
 
+    # Non-orthogonality correction for v-equation gradients
+    cosa_c = _broadcast_metric(cdgrid.cosa_corner, u_d)
+    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
+
+    dK_dy_perp = (dK_dy - cosa_c * dK_dx) / jnp.maximum(sina_c, 1e-12)
+    dpi_dy_perp = (dpi_dy - cosa_c * dpi_dx) / jnp.maximum(sina_c, 1e-12)
+
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
-    dv_d_dt = -abs_vor_corner * u_d - dK_dy - c_p * theta_corner * dpi_dy
+    dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp
 
     # Laplacian viscosity
     if config.A_h > 0:
         du_d_dt = du_d_dt + config.A_h * _laplacian_dgrid(u_d, cdgrid)
         dv_d_dt = dv_d_dt + config.A_h * _laplacian_dgrid(v_d, cdgrid)
 
-    # --- 8. Convert back to A-grid ---
+    # --- 8. Convert back to cell-centre ---
     du_dt = _interp_corner_to_center(du_d_dt)
     dv_dt = _interp_corner_to_center(dv_d_dt)
 

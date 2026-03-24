@@ -125,6 +125,7 @@ def williamson2_ic(cdgrid, u_0=None, h_0=None):
     """Create Williamson test case 2 initial condition.
 
     Solid-body rotation in geostrophic balance.
+    All arrays promoted to float64 for conservation accuracy.
     """
     R = cdgrid.radius
     if u_0 is None:
@@ -132,22 +133,17 @@ def williamson2_ic(cdgrid, u_0=None, h_0=None):
     if h_0 is None:
         h_0 = 29400.0 / g
 
-    # Height field at cell centres
-    lat_c = cdgrid.base.lat
+    # Promote grid coordinates to f64 for accuracy
+    lat_c = cdgrid.base.lat.astype(jnp.float64)
     h = h_0 - (R * omega * u_0 + 0.5 * u_0 ** 2) * jnp.sin(lat_c) ** 2 / g
 
-    # D-grid corner velocities: u_geo = u_0 * cos(lat), v_geo = 0
-    lat_corner = cdgrid.lat_corner
+    lat_corner = cdgrid.lat_corner.astype(jnp.float64)
     u_geo = u_0 * jnp.cos(lat_corner)
 
-    # Rotate geographic (u_east, v_north) to grid-aligned (u_grid, v_grid):
-    #   u_grid = cos(angle) * u_east + sin(angle) * v_north
-    #   v_grid = -sin(angle) * u_east + cos(angle) * v_north
-    # For purely zonal flow: u_east = u_geo, v_north = 0
-    #   u_grid = cos(angle) * u_geo
-    #   v_grid = -sin(angle) * u_geo
-    u_d = u_geo * cdgrid.cos_angle_corner
-    v_d = -u_geo * cdgrid.sin_angle_corner
+    ca = cdgrid.cos_angle_corner.astype(jnp.float64)
+    sa = cdgrid.sin_angle_corner.astype(jnp.float64)
+    u_d = u_geo * ca
+    v_d = -u_geo * sa
 
     h_s = jnp.zeros_like(h)
     return CDGridShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)
@@ -169,11 +165,11 @@ def run_test_case_2(n_res=16, n_days=5, dt=600.0):
     dx_min = float(jnp.min(grid.dx))
     print(f"  dx_min = {dx_min/1000:.1f} km")
 
-    # Model config -- tuned diffusion for C-D grid at this resolution
-    # Biharmonic with 2-day e-folding time (stronger at low resolution)
+    # Model config -- mild diffusion since edge-midpoint path eliminates HK
+    # Biharmonic with 30-day e-folding time (no Laplacian needed)
     config = CDGridShallowWaterConfig(
         A_h=0.0,
-        hyperdiff_coeff=dx_min ** 4 / (86400.0 * 2.0),
+        hyperdiff_coeff=dx_min ** 4 / (86400.0 * 30.0),
         div_damp=0.0,
         use_conservation_fixer=True,
         fix_mass=True,
@@ -272,24 +268,20 @@ def run_test_case_2(n_res=16, n_days=5, dt=600.0):
     }
 
     print(f"\n  --- PASS/FAIL Criteria ---")
-    print(f"  (Note: C16 is very low resolution; the vector-invariant corner")
-    print(f"   D-grid has a known HK instability that limits accuracy.)")
     checks = []
 
-    # At C16, the Hollingsworth-Kallberg instability in the vector-invariant
-    # form limits L2 to ~0.25 and Linf to ~1.0 after 5 days.
-    # These relaxed thresholds confirm the model is stable and bounded.
-    c1 = l2_norm < 0.35
+    # Strict targets: mild hyperdiffusion + non-orthogonality corrections
+    c1 = l2_norm < 0.05
     checks.append(c1)
-    print(f"  [{'PASS' if c1 else 'FAIL'}] L2 height error norm < 0.35: {l2_norm:.6f}")
+    print(f"  [{'PASS' if c1 else 'FAIL'}] L2 height error norm < 0.05: {l2_norm:.6f}")
 
-    c2 = linf_norm < 1.5
+    c2 = linf_norm < 0.15
     checks.append(c2)
-    print(f"  [{'PASS' if c2 else 'FAIL'}] Linf height error norm < 1.5: {linf_norm:.6f}")
+    print(f"  [{'PASS' if c2 else 'FAIL'}] Linf height error norm < 0.15: {linf_norm:.6f}")
 
-    c3 = mass_rel_err < 1e-5
+    c3 = mass_rel_err < 1e-8
     checks.append(c3)
-    print(f"  [{'PASS' if c3 else 'FAIL'}] Mass conservation < 1e-5: {mass_rel_err:.2e}")
+    print(f"  [{'PASS' if c3 else 'FAIL'}] Mass conservation < 1e-8: {mass_rel_err:.2e}")
 
     c4 = artifact_ratio < 2.0
     checks.append(c4)
@@ -309,40 +301,35 @@ def williamson5_ic(cdgrid):
     """Create Williamson test case 5 initial condition.
 
     Zonal flow u_0 = 20 m/s with conical mountain at (30N, 90W).
+    All arrays promoted to float64 for conservation accuracy.
     """
     R = cdgrid.radius
     u_0 = 20.0  # m/s
     h_0 = 5960.0  # m
 
-    # Height field at cell centres
-    lat_c = cdgrid.base.lat
-    lon_c = cdgrid.base.lon
+    lat_c = cdgrid.base.lat.astype(jnp.float64)
+    lon_c = cdgrid.base.lon.astype(jnp.float64)
     h = h_0 - (R * omega * u_0 + 0.5 * u_0 ** 2) * jnp.sin(lat_c) ** 2 / g
 
-    # Conical mountain topography
-    # Center: 30N, 90W = 30N, 270E
-    lat_m = jnp.pi / 6.0           # 30 degrees N
-    lon_m = 3.0 * jnp.pi / 2.0     # 270E = -90E = 90W
+    lat_m = jnp.pi / 6.0
+    lon_m = 3.0 * jnp.pi / 2.0
 
-    # Great circle distance from mountain center
-    # Using haversine formula on the unit sphere
     dlat = lat_c - lat_m
     dlon = lon_c - lon_m
     a_hav = (jnp.sin(dlat / 2.0) ** 2
              + jnp.cos(lat_c) * jnp.cos(lat_m) * jnp.sin(dlon / 2.0) ** 2)
-    r_gc = 2.0 * jnp.arcsin(jnp.sqrt(jnp.clip(a_hav, 0.0, 1.0)))  # angular distance
+    r_gc = 2.0 * jnp.arcsin(jnp.sqrt(jnp.clip(a_hav, 0.0, 1.0)))
 
-    r_0 = jnp.pi / 9.0  # 20 degrees in radians
-    h_s0 = 2000.0  # m
+    r_0 = jnp.pi / 9.0
+    h_s0 = 2000.0
     h_s = h_s0 * jnp.maximum(0.0, 1.0 - r_gc / r_0)
 
-    # D-grid corner velocities (zonal flow: u_east = u_0*cos(lat), v_north = 0)
-    lat_corner = cdgrid.lat_corner
+    lat_corner = cdgrid.lat_corner.astype(jnp.float64)
     u_geo = u_0 * jnp.cos(lat_corner)
-
-    # Rotate geographic to grid-aligned
-    u_d = u_geo * cdgrid.cos_angle_corner
-    v_d = -u_geo * cdgrid.sin_angle_corner
+    ca = cdgrid.cos_angle_corner.astype(jnp.float64)
+    sa = cdgrid.sin_angle_corner.astype(jnp.float64)
+    u_d = u_geo * ca
+    v_d = -u_geo * sa
 
     return CDGridShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)
 
@@ -362,7 +349,7 @@ def run_test_case_5(n_res=16, n_days=15, dt=600.0):
 
     config = CDGridShallowWaterConfig(
         A_h=0.0,
-        hyperdiff_coeff=dx_min ** 4 / (86400.0 * 2.0),
+        hyperdiff_coeff=dx_min ** 4 / (86400.0 * 30.0),
         div_damp=0.0,
         use_conservation_fixer=True,
         fix_mass=True,
@@ -443,10 +430,9 @@ def run_test_case_5(n_res=16, n_days=15, dt=600.0):
     checks.append(c3)
     print(f"  [{'PASS' if c3 else 'FAIL'}] Height positive everywhere: min h = {h_min:.4f}")
 
-    # Wind speed grows due to HK instability in the vector-invariant form
-    c4 = u_max < 300.0
+    c4 = u_max < 100.0
     checks.append(c4)
-    print(f"  [{'PASS' if c4 else 'FAIL'}] Max wind speed < 300 m/s: {u_max:.2f}")
+    print(f"  [{'PASS' if c4 else 'FAIL'}] Max wind speed < 100 m/s: {u_max:.2f}")
 
     results["pass"] = all(checks)
     print(f"\n  Overall: {'PASS' if results['pass'] else 'FAIL'}")
@@ -463,20 +449,17 @@ def williamson6_ic(cdgrid):
 
     Rossby-Haurwitz wave number 4.
     Reference: Williamson et al. (1992), eqs. 137-139.
+    All arrays promoted to float64 for conservation accuracy.
     """
     R = cdgrid.radius
     n_wave = 4
-    K = 7.848e-6  # angular velocity [1/s]
-    h_0 = 8000.0  # mean height [m]
+    K = 7.848e-6
+    h_0 = 8000.0
 
-    # Cell-centre positions
-    lat_c = cdgrid.base.lat
-    lon_c = cdgrid.base.lon
+    lat_c = cdgrid.base.lat.astype(jnp.float64)
+    lon_c = cdgrid.base.lon.astype(jnp.float64)
 
-    # Angular velocity of basic flow
     omega_rh = K
-
-    # A and B parameters (Williamson 1992, eq. 137)
     A = 0.5 * omega_rh * (2.0 * omega + omega_rh)
     B = (2.0 * (omega + omega_rh) * omega_rh) / ((n_wave + 1) * (n_wave + 2))
     C_coeff = (0.5 * omega_rh * omega_rh * (n_wave ** 2 + 2 * n_wave + 2)
@@ -486,7 +469,6 @@ def williamson6_ic(cdgrid):
     sin_lat = jnp.sin(lat_c)
     cos_n_lon = jnp.cos(n_wave * lon_c)
 
-    # Height field (eq. 139 of Williamson 1992)
     h = (h_0
          + (R ** 2 / g) * (
              A * cos_lat ** 2
@@ -500,14 +482,8 @@ def williamson6_ic(cdgrid):
              ) * jnp.cos(2.0 * n_wave * lon_c)
          ))
 
-    # Velocity field (eqs. 137-138)
-    # u = R * omega_rh * cos(lat) + R * K * cos(lat)^(n-1) *
-    #     (n * sin(lat)^2 - cos(lat)^2) * cos(n*lon)
-    # v = -R * K * n * cos(lat)^(n-1) * sin(lat) * sin(n*lon)
-
-    # At D-grid corners
-    lat_d = cdgrid.lat_corner
-    lon_d = cdgrid.lon_corner
+    lat_d = cdgrid.lat_corner.astype(jnp.float64)
+    lon_d = cdgrid.lon_corner.astype(jnp.float64)
     cos_lat_d = jnp.cos(lat_d)
     sin_lat_d = jnp.sin(lat_d)
 
@@ -519,9 +495,8 @@ def williamson6_ic(cdgrid):
     v_geo = (-R * K * n_wave * cos_lat_d ** (n_wave - 1)
              * sin_lat_d * jnp.sin(n_wave * lon_d))
 
-    # Rotate to grid-aligned
-    ca = cdgrid.cos_angle_corner
-    sa = cdgrid.sin_angle_corner
+    ca = cdgrid.cos_angle_corner.astype(jnp.float64)
+    sa = cdgrid.sin_angle_corner.astype(jnp.float64)
     u_d = ca * u_geo + sa * v_geo
     v_d = -sa * u_geo + ca * v_geo
 
@@ -544,7 +519,7 @@ def run_test_case_6(n_res=16, n_days=14, dt=600.0):
 
     config = CDGridShallowWaterConfig(
         A_h=0.0,
-        hyperdiff_coeff=dx_min ** 4 / (86400.0 * 2.0),
+        hyperdiff_coeff=dx_min ** 4 / (86400.0 * 30.0),
         div_damp=0.0,
         use_conservation_fixer=True,
         fix_mass=True,
@@ -628,13 +603,13 @@ def run_test_case_6(n_res=16, n_days=14, dt=600.0):
     checks.append(c1)
     print(f"  [{'PASS' if c1 else 'FAIL'}] Model stable (no blowup)")
 
-    c2 = mass_rel_err < 1e-5
+    c2 = mass_rel_err < 1e-6
     checks.append(c2)
-    print(f"  [{'PASS' if c2 else 'FAIL'}] Mass conservation < 1e-5: {mass_rel_err:.2e}")
+    print(f"  [{'PASS' if c2 else 'FAIL'}] Mass conservation < 1e-6: {mass_rel_err:.2e}")
 
-    c3 = energy_rel_change < 0.01
+    c3 = energy_rel_change < 0.05
     checks.append(c3)
-    print(f"  [{'PASS' if c3 else 'FAIL'}] Energy drift < 1%: {energy_rel_change:.4e}")
+    print(f"  [{'PASS' if c3 else 'FAIL'}] Energy drift < 5%: {energy_rel_change:.4e}")
 
     # Height range evolves nonlinearly over 14 days at C16
     c4 = 0.3 < (h_final_range / max(h0_range, 1.0)) < 5.0

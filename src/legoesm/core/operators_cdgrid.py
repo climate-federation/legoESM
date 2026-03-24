@@ -295,18 +295,31 @@ def dgrid_to_center_vector(u_d, v_d):
 def dgrid_to_cgrid(u_d, v_d, cdgrid):
     """D-grid corner winds -> C-grid edge-normal velocities.
 
-    Simple 2-point averaging along each edge, consistent with the
-    orthogonal-rotation convention used for D-grid winds.
+    Accounts for non-orthogonality of the cubed-sphere grid:
+    - x-face normal velocity: u_c = u_d*sin(alpha) - v_d*cos(alpha)
+    - y-face normal velocity: v_c = v_d  (e_perp IS the y-face normal)
 
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev).
     """
-    u_c = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
-    v_c = 0.5 * (v_d[:, :-1] + v_d[:, 1:])
+    # x-face (at constant i): average along j, then project onto face normal
+    u_avg = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])    # (6, n+1, n[, nlev])
+    v_avg_x = 0.5 * (v_d[:, :, :-1] + v_d[:, :, 1:])  # (6, n+1, n[, nlev])
+    cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, 1e-12))
+    u_c = u_avg * sina_u - v_avg_x * cosa_u
+
+    # y-face (at constant j): e_perp is the outward normal, so v_c = v_d
+    v_c = 0.5 * (v_d[:, :-1] + v_d[:, 1:])             # (6, n, n+1[, nlev])
     return u_c, v_c
 
 
 def cgrid_to_dgrid(u_c, v_c, cdgrid):
     """Interpolate C-grid edge velocities to D-grid corners.
+
+    Inverse of dgrid_to_cgrid accounting for non-orthogonality:
+    - v_d from v_c (y-face): v_d = v_c (since v_c = v_d)
+    - u_d from u_c (x-face): u_c = u_d*sin(alpha) - v_d*cos(alpha)
+      => u_d = (u_c + v_d*cos(alpha)) / sin(alpha)
 
     Works for both 2D and 3D inputs.
 
@@ -319,13 +332,21 @@ def cgrid_to_dgrid(u_c, v_c, cdgrid):
     -------
     u_d, v_d : jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    pad_u = [(0, 0), (0, 0), (1, 1)] + [(0, 0)] * (u_c.ndim - 3)
-    u_c_pad = jnp.pad(u_c, pad_u, mode='edge')
-    u_d = 0.5 * (u_c_pad[:, :, :-1] + u_c_pad[:, :, 1:])
-
+    # v_d from v_c (y-face normal = e_perp, so v_c = v_d)
     pad_v = [(0, 0), (1, 1), (0, 0)] + [(0, 0)] * (v_c.ndim - 3)
     v_c_pad = jnp.pad(v_c, pad_v, mode='edge')
     v_d = 0.5 * (v_c_pad[:, :-1] + v_c_pad[:, 1:])
+
+    # u_d from u_c (x-face) with inverse non-orthogonality correction
+    pad_u = [(0, 0), (0, 0), (1, 1)] + [(0, 0)] * (u_c.ndim - 3)
+    u_c_pad = jnp.pad(u_c, pad_u, mode='edge')
+    u_c_avg = 0.5 * (u_c_pad[:, :, :-1] + u_c_pad[:, :, 1:])
+
+    cosa = _broadcast_metric(cdgrid.cosa_corner, u_c_avg)
+    sina = jnp.sqrt(jnp.maximum(1.0 - cosa**2, 1e-12))
+
+    u_d = (u_c_avg + v_d * cosa) / jnp.maximum(sina, 1e-12)
+
     return u_d, v_d
 
 
@@ -339,9 +360,11 @@ def dgrid_vorticity(u_d, v_d, cdgrid):
     Uses the integral circulation form: zeta = (1/A) oint v . dl, which is
     exact for the D-grid and avoids the Hollingsworth-Kallberg instability.
 
-    D-grid winds follow the orthogonal-rotation convention (geographic wind
-    rotated by the grid angle into grid-aligned coordinates), so the
-    circulation integral uses the standard orthogonal form.
+    D-grid winds are in the (e_i, e_perp) orthogonal basis where e_perp is
+    perpendicular to e_i (90 deg CCW).  For the circulation integral:
+    - i-edges (south/north, tangent e_i): v . e_i = u_d
+    - j-edges (east/west, tangent e_j): v . e_j = u_d*cos(alpha) + v_d*sin(alpha)
+      where alpha is the angle between e_i and e_j (non-orthogonality).
 
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
 
@@ -353,19 +376,35 @@ def dgrid_vorticity(u_d, v_d, cdgrid):
     -------
     zeta : jax.Array, shape (6, n, n[, nlev])
     """
-    # Edge midpoint velocities via 2-point average (same as c_sw pattern)
+    cosa = _broadcast_metric(cdgrid.cosa_corner, u_d)
+    sina = jnp.sqrt(jnp.maximum(1.0 - cosa**2, 1e-12))
+
+    # South edge (i-direction): v . e_i = u_d
     u_south = 0.5 * (u_d[:, :-1, :-1] + u_d[:, 1:, :-1])
+    # North edge (i-direction): v . e_i = u_d
     u_north = 0.5 * (u_d[:, :-1, 1:] + u_d[:, 1:, 1:])
-    v_east = 0.5 * (v_d[:, 1:, :-1] + v_d[:, 1:, 1:])
-    v_west = 0.5 * (v_d[:, :-1, :-1] + v_d[:, :-1, 1:])
+
+    # East edge (j-direction): v . e_j = u_d*cos(alpha) + v_d*sin(alpha)
+    u_east_raw = 0.5 * (u_d[:, 1:, :-1] + u_d[:, 1:, 1:])
+    v_east_raw = 0.5 * (v_d[:, 1:, :-1] + v_d[:, 1:, 1:])
+    cosa_east = 0.5 * (cosa[:, 1:, :-1] + cosa[:, 1:, 1:])
+    sina_east = 0.5 * (sina[:, 1:, :-1] + sina[:, 1:, 1:])
+    v_cov_east = u_east_raw * cosa_east + v_east_raw * sina_east
+
+    # West edge (j-direction): v . e_j = u_d*cos(alpha) + v_d*sin(alpha)
+    u_west_raw = 0.5 * (u_d[:, :-1, :-1] + u_d[:, :-1, 1:])
+    v_west_raw = 0.5 * (v_d[:, :-1, :-1] + v_d[:, :-1, 1:])
+    cosa_west = 0.5 * (cosa[:, :-1, :-1] + cosa[:, :-1, 1:])
+    sina_west = 0.5 * (sina[:, :-1, :-1] + sina[:, :-1, 1:])
+    v_cov_west = u_west_raw * cosa_west + v_west_raw * sina_west
 
     dx_south = _broadcast_metric(cdgrid.dx_edge_y[:, :, :-1], u_d)
     dx_north = _broadcast_metric(cdgrid.dx_edge_y[:, :, 1:], u_d)
     dy_west = _broadcast_metric(cdgrid.dy_edge_x[:, :-1, :], u_d)
     dy_east = _broadcast_metric(cdgrid.dy_edge_x[:, 1:, :], u_d)
 
-    circ = (u_south * dx_south + v_east * dy_east
-            - u_north * dx_north - v_west * dy_west)
+    circ = (u_south * dx_south + v_cov_east * dy_east
+            - u_north * dx_north - v_cov_west * dy_west)
 
     area = _broadcast_metric(cdgrid.base.area, u_d)
     return circ / area
@@ -626,9 +665,18 @@ def _divergence_damping(u_c, v_c, cdgrid, d2_coeff=0.0, d4_coeff=0.0,
     dd_dx = jnp.zeros_like(div_field)
     dd_dy = jnp.zeros_like(div_field)
 
+    # Non-orthogonality correction helper for v-equation gradient
+    cosa_c = _broadcast_metric(cdgrid.cosa_corner, dd_dx)
+    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
+
+    def _correct_v_grad(grad_x, grad_y):
+        """Correct gradient from e_j to e_perp direction."""
+        return (grad_y - cosa_c * grad_x) / jnp.maximum(sina_c, 1e-12)
+
     # 2nd-order: du += d2_coeff * grad(div)
     if d2_coeff > 0:
         ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_field, cdgrid)
+        ddiv_dy_perp = _correct_v_grad(ddiv_dx, ddiv_dy)
         # Adaptive coefficient
         if dddmp > 0:
             area_min = jnp.min(cdgrid.base.area)
@@ -637,9 +685,9 @@ def _divergence_damping(u_c, v_c, cdgrid, d2_coeff=0.0, d4_coeff=0.0,
             adaptive = area_min * jnp.maximum(
                 d2_bg, jnp.minimum(0.20, dddmp * div_abs))
             adaptive_corner = _interp_center_to_corner(adaptive, cdgrid)
-            return adaptive_corner * ddiv_dx, adaptive_corner * ddiv_dy
+            return adaptive_corner * ddiv_dx, adaptive_corner * ddiv_dy_perp
         else:
-            return d2_coeff * ddiv_dx, d2_coeff * ddiv_dy
+            return d2_coeff * ddiv_dx, d2_coeff * ddiv_dy_perp
 
     # 4th-order: du -= d4_coeff * grad(lap(div))
     if d4_coeff > 0:
@@ -654,7 +702,8 @@ def _divergence_damping(u_c, v_c, cdgrid, d2_coeff=0.0, d4_coeff=0.0,
             )(div_t)
             lap_div = jnp.moveaxis(lap_div_t, 0, -1)
         dlap_dx, dlap_dy = _arakawa_lamb_gradient(lap_div, cdgrid)
-        return -d4_coeff * dlap_dx, -d4_coeff * dlap_dy
+        dlap_dy_perp = _correct_v_grad(dlap_dx, dlap_dy)
+        return -d4_coeff * dlap_dx, -d4_coeff * dlap_dy_perp
 
     return dd_dx, dd_dy
 
@@ -753,15 +802,12 @@ def cdgrid_momentum_tendencies(
     else:
         zeta_abs = zeta + cdgrid.base.f
 
-    # 2. KE at cell centres from C-grid velocities
+    # 2. KE at cell centres from D-grid corners (orthogonal basis)
+    u_cc, v_cc = dgrid_to_center_vector(u_d, v_d)
+    KE = 0.5 * (u_cc ** 2 + v_cc ** 2)
+
+    # Also need C-grid velocities for divergence / mass flux
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
-    if is_3d:
-        u_center = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])
-        v_center = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])
-    else:
-        u_center = 0.5 * (u_c[:, :-1, :] + u_c[:, 1:, :])
-        v_center = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
-    KE = 0.5 * (u_center ** 2 + v_center ** 2)
 
     # 3. Gradients at corners (Arakawa-Lamb)
     if is_3d:
@@ -774,14 +820,25 @@ def cdgrid_momentum_tendencies(
     # 4. Vorticity at corners
     zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
 
+    # Non-orthogonality correction for gradient in v-equation:
+    # The Arakawa-Lamb gradient gives (dB/ds_i, dB/ds_j).
+    # u-equation needs dB/ds_i (no correction).
+    # v-equation needs dB/ds_perp = (dB/ds_j - cos(alpha)*dB/ds_i) / sin(alpha).
+    cosa_c = _broadcast_metric(cdgrid.cosa_corner, u_d)
+    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
+
     # 5. Tendencies
     if is_3d:
+        # Correct v-equation gradient from e_j to e_perp
+        dKE_dy_perp = (dKE_dy - cosa_c * dKE_dx) / jnp.maximum(sina_c, 1e-12)
+
         du_d_dt = zeta_corner * v_d - dKE_dx
-        dv_d_dt = -zeta_corner * u_d - dKE_dy
+        dv_d_dt = -zeta_corner * u_d - dKE_dy_perp
 
         if rho_0 is not None:
+            dp_dy_perp = (dp_dy - cosa_c * dp_dx) / jnp.maximum(sina_c, 1e-12)
             du_d_dt = du_d_dt - dp_dx / rho_0
-            dv_d_dt = dv_d_dt - dp_dy / rho_0
+            dv_d_dt = dv_d_dt - dp_dy_perp / rho_0
 
         if f_3d is not None and u_prime is not None and v_prime is not None:
             f_corner = cdgrid.f_corner[..., None]
@@ -793,8 +850,10 @@ def cdgrid_momentum_tendencies(
             du_d_dt = du_d_dt - 0.5 * u_d * div_corner
             dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
     else:
+        # Correct v-equation gradient from e_j to e_perp
+        dB_dy_perp = (dB_dy - cosa_c * dB_dx) / jnp.maximum(sina_c, 1e-12)
         du_d_dt = zeta_corner * v_d - dB_dx
-        dv_d_dt = -zeta_corner * u_d - dB_dy
+        dv_d_dt = -zeta_corner * u_d - dB_dy_perp
 
     # 6. Laplacian viscosity
     if A_h > 0:
@@ -819,8 +878,10 @@ def cdgrid_momentum_tendencies(
         adaptive_coeff = area_min * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
         ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_field, cdgrid)
+        # Correct v-equation gradient from e_j to e_perp
+        ddiv_dy_perp = (ddiv_dy - cosa_c * ddiv_dx) / jnp.maximum(sina_c, 1e-12)
         du_d_dt = du_d_dt + adaptive_coeff * ddiv_dx
-        dv_d_dt = dv_d_dt + adaptive_coeff * ddiv_dy
+        dv_d_dt = dv_d_dt + adaptive_coeff * ddiv_dy_perp
 
     return du_d_dt, dv_d_dt
 
@@ -917,8 +978,11 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
         interp_offsets=grid.halo_interp_offsets,
     )
 
-    u_c = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])
-    v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])
+    # Average cell-centre velocities to face positions.
+    # The halo exchange already handles cross-face vector rotation,
+    # so the interpolated values are in the correct local basis.
+    u_c = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])  # (6, n+1, n)
+    v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])  # (6, n, n+1)
 
     return u_c, v_c
 

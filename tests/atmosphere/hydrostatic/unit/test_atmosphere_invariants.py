@@ -96,7 +96,7 @@ class TestSolidBodyRotationBehavior:
     """Solid-body flow should remain stable in energy/enstrophy statistics."""
 
     def test_williamson2_energy_enstrophy_stable(self):
-        from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
+        from legoesm.core.operators_cdgrid import center_to_dgrid_vector
         from legoesm.grids.halo import pad_halo_vector
 
         grid = create_cubed_sphere(12)

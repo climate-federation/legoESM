@@ -642,14 +642,14 @@ class TestCDGridVectorCalculus:
         absolute vorticity = (2*Omega - 2*U0/a)*sin(lat).
         We check that discrete vorticity is smooth and has the right sign pattern.
         """
-        from legoesm.core.operators_cdgrid import dgrid_vorticity, agrid_to_dgrid_vector
+        from legoesm.core.operators_cdgrid import dgrid_vorticity, center_to_dgrid_vector
         n = cs_grid.n
         U0 = 10.0
         # Geographic winds at A-grid cell centres
         u_geo = U0 * jnp.cos(cs_grid.lat)
         v_geo = jnp.zeros_like(u_geo)
         # Project to D-grid corners
-        u_d, v_d = agrid_to_dgrid_vector(u_geo, v_geo, cd_grid)
+        u_d, v_d = center_to_dgrid_vector(u_geo, v_geo, cd_grid)
         vort = dgrid_vorticity(u_d, v_d, cd_grid)
         # Vorticity should be finite and have a well-defined pattern
         assert jnp.all(jnp.isfinite(vort)), "Vorticity contains NaN/Inf"

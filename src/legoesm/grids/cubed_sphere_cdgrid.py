@@ -1,6 +1,6 @@
 """FV3-style C-D grid on the cubed-sphere.
 
-Extends the A-grid ``CubedSphereGrid`` with staggered metric fields
+Extends the cell-centre ``CubedSphereGrid`` with staggered metric fields
 needed for the C-D grid discretisation:
 
 * **D-grid** (cell corners): prognostic wind components ``u_d, v_d``
@@ -11,7 +11,7 @@ needed for the C-D grid discretisation:
 
 The key advantage is that vorticity on the D-grid is computed directly
 from corner wind values without spatial averaging, eliminating the
-Hollingsworth-Kallberg instability that plagues A-grid schemes.
+Hollingsworth-Kallberg instability that plagues collocated schemes.
 
 References
 ----------
@@ -37,13 +37,13 @@ from legoesm.grids.halo import _face_gnomonic_to_lonlat
 class CubedSphereCDGrid(NamedTuple):
     """C-D grid metrics for a cubed-sphere grid.
 
-    Wraps a base ``CubedSphereGrid`` (A-grid) and adds the staggered
+    Wraps a base ``CubedSphereGrid`` (cell-centre grid) and adds the staggered
     metric arrays needed by the C-D grid discretisation.
 
     Attributes
     ----------
     base : CubedSphereGrid
-        The underlying A-grid with cell-center metrics.
+        The underlying cell-centre grid with cell-center metrics.
     lon_corner : jax.Array, shape (6, n+1, n+1)
         Longitude at cell corners (D-grid positions).
     lat_corner : jax.Array, shape (6, n+1, n+1)
@@ -71,6 +71,33 @@ class CubedSphereCDGrid(NamedTuple):
     dx_edge_y: jax.Array
     dy_edge_x: jax.Array
     area_corner: jax.Array
+    # Non-orthogonality metrics (FV3 cos_sg / sin_sg)
+    cosa_corner: jax.Array   # (6, n+1, n+1) cos(angle between i and j tangents)
+    rsin2_corner: jax.Array  # (6, n+1, n+1) 1/sin²(angle) for gradient correction
+    cosa_u: jax.Array        # (6, n+1, n) non-orthogonality at u-interfaces
+    cosa_v: jax.Array        # (6, n, n+1) non-orthogonality at v-interfaces
+    rsin_u: jax.Array        # (6, n+1, n) 1/sin at u-interfaces
+    rsin_v: jax.Array        # (6, n, n+1) 1/sin at v-interfaces
+    # --- FV3 edge-midpoint D-grid metrics ---
+    # Edge-midpoint positions
+    lon_edge_x: jax.Array    # (6, n, n+1) lon at x-edge midpoints
+    lat_edge_x: jax.Array    # (6, n, n+1) lat at x-edge midpoints
+    lon_edge_y: jax.Array    # (6, n+1, n) lon at y-edge midpoints
+    lat_edge_y: jax.Array    # (6, n+1, n) lat at y-edge midpoints
+    # Grid angle at edge midpoints
+    angle_edge_x: jax.Array      # (6, n, n+1)
+    cos_angle_edge_x: jax.Array  # (6, n, n+1)
+    sin_angle_edge_x: jax.Array  # (6, n, n+1)
+    angle_edge_y: jax.Array      # (6, n+1, n)
+    cos_angle_edge_y: jax.Array  # (6, n+1, n)
+    sin_angle_edge_y: jax.Array  # (6, n+1, n)
+    # Coriolis at edges
+    f_edge_x: jax.Array      # (6, n, n+1)
+    f_edge_y: jax.Array      # (6, n+1, n)
+    # Cell-centre non-orthogonality metrics (for d2a2c)
+    cosa_cell: jax.Array     # (6, n, n) cos(angle between i and j tangents)
+    sina_cell: jax.Array     # (6, n, n) sin(angle)
+    rsin2_cell: jax.Array    # (6, n, n) 1/sin²(angle)
 
     @property
     def n(self) -> int:
@@ -85,12 +112,12 @@ def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
     omega: float = 7.292e-5,
 ) -> CubedSphereCDGrid:
-    """Create a C-D grid from an existing A-grid.
+    """Create a C-D grid from an existing cell-centre grid.
 
     Parameters
     ----------
     base : CubedSphereGrid
-        A-grid cubed-sphere with cell-center metrics.
+        cell-centre cubed-sphere with cell-center metrics.
     omega : float
         Planetary rotation rate [rad/s].
 
@@ -161,23 +188,46 @@ def create_cubed_sphere_cdgrid(
         dx_ey = radius * 2.0 * jnp.arcsin(jnp.clip(chord_dx / 2.0, 0.0, 1.0))
         all_dx_ey.append(dx_ey)
 
-        # Grid angle at corners (angle between gnomonic x-axis and east)
+        # Grid angle at corners: computed from Cartesian tangent vectors
+        # on extended gnomonic grid (analytical, no centred-difference error).
         dalpha = jnp.pi / (2 * n)
-        # Extend by one cell in each direction for centred differences
-        n_ext = n + 3  # n+1 + 2 for centred diffs
+        n_ext = n + 3
         alpha_ext = jnp.linspace(
-            -jnp.pi / 4 - dalpha,
-            jnp.pi / 4 + dalpha,
-            n_ext,
-        )
+            -jnp.pi / 4 - dalpha, jnp.pi / 4 + dalpha, n_ext)
         ax_ext, ay_ext = jnp.meshgrid(alpha_ext, alpha_ext, indexing='ij')
         lon_ext, lat_ext = _face_gnomonic_to_lonlat(face, ax_ext, ay_ext)
-        dlon = lon_ext[2:, 1:-1] - lon_ext[:-2, 1:-1]
-        dlat = lat_ext[2:, 1:-1] - lat_ext[:-2, 1:-1]
-        dlon = jnp.where(dlon > jnp.pi, dlon - 2 * jnp.pi, dlon)
-        dlon = jnp.where(dlon < -jnp.pi, dlon + 2 * jnp.pi, dlon)
-        cos_lat_ext = jnp.cos(lat_ext[1:-1, 1:-1])
-        face_angle = jnp.arctan2(dlat, dlon * cos_lat_ext)
+        cos_lat_ext_full = jnp.cos(lat_ext)
+        # Cartesian positions on unit sphere (extended grid)
+        px_ext = cos_lat_ext_full * jnp.cos(lon_ext)
+        py_ext = cos_lat_ext_full * jnp.sin(lon_ext)
+        pz_ext = jnp.sin(lat_ext)
+
+        # i-tangent vector at each corner via centred diff of Cartesian
+        # positions → (n+1, n+1) after stripping 1 on each side
+        ti_x = px_ext[2:, 1:-1] - px_ext[:-2, 1:-1]
+        ti_y = py_ext[2:, 1:-1] - py_ext[:-2, 1:-1]
+        ti_z = pz_ext[2:, 1:-1] - pz_ext[:-2, 1:-1]
+        # Project onto tangent plane at corner
+        cx = px_ext[1:-1, 1:-1]
+        cy = py_ext[1:-1, 1:-1]
+        cz = pz_ext[1:-1, 1:-1]
+        dot_i = ti_x * cx + ti_y * cy + ti_z * cz
+        ti_x -= dot_i * cx; ti_y -= dot_i * cy; ti_z -= dot_i * cz
+        norm_i = jnp.sqrt(ti_x**2 + ti_y**2 + ti_z**2 + 1e-30)
+        ti_x /= norm_i; ti_y /= norm_i; ti_z /= norm_i
+
+        # Grid angle = angle between i-tangent and geographic east
+        sin_lon_c = jnp.sin(lon_ext[1:-1, 1:-1])
+        cos_lon_c = jnp.cos(lon_ext[1:-1, 1:-1])
+        sin_lat_c = jnp.sin(lat_ext[1:-1, 1:-1])
+        cos_lat_c = jnp.cos(lat_ext[1:-1, 1:-1])
+        # e_east = (-sin_lon, cos_lon, 0)
+        # e_north = (-sin_lat*cos_lon, -sin_lat*sin_lon, cos_lat)
+        ti_dot_east = -sin_lon_c * ti_x + cos_lon_c * ti_y
+        ti_dot_north = (-sin_lat_c * cos_lon_c * ti_x
+                        - sin_lat_c * sin_lon_c * ti_y
+                        + cos_lat_c * ti_z)
+        face_angle = jnp.arctan2(ti_dot_north, ti_dot_east)
         all_angle_c.append(face_angle)
 
         # Dual-cell area at corners: average of the 4 surrounding cell areas
@@ -205,6 +255,246 @@ def create_cubed_sphere_cdgrid(
     cos_angle_corner = jnp.cos(angle_corner)
     sin_angle_corner = jnp.sin(angle_corner)
 
+    # ------------------------------------------------------------------
+    # Non-orthogonality metrics (FV3 cos_sg / sin_sg)
+    # At each D-grid corner, compute the cosine of the angle between
+    # the i-tangent and j-tangent vectors using Cartesian positions on
+    # the unit sphere from an extended gnomonic grid.
+    # ------------------------------------------------------------------
+    dalpha = jnp.pi / (2 * n)
+    # Extended grid: n+3 points → centred diffs yield (n+1) output
+    alpha_ext = jnp.linspace(
+        -jnp.pi / 4 - dalpha, jnp.pi / 4 + dalpha, n + 3)
+    ax_ext, ay_ext = jnp.meshgrid(alpha_ext, alpha_ext, indexing='ij')
+
+    all_cosa_c = []
+    for face in range(6):
+        lon_ext, lat_ext = _face_gnomonic_to_lonlat(face, ax_ext, ay_ext)
+        cos_lat_ext = jnp.cos(lat_ext)
+        # Cartesian positions on unit sphere
+        px = cos_lat_ext * jnp.cos(lon_ext)
+        py = cos_lat_ext * jnp.sin(lon_ext)
+        pz = jnp.sin(lat_ext)
+
+        # Centre positions (n+1 × n+1) at indices [1:-1, 1:-1]
+        cx = px[1:-1, 1:-1]
+        cy = py[1:-1, 1:-1]
+        cz = pz[1:-1, 1:-1]
+
+        # i-tangent: centred diff in axis-0 → (n+1, n+1)
+        ti_x = px[2:, 1:-1] - px[:-2, 1:-1]
+        ti_y = py[2:, 1:-1] - py[:-2, 1:-1]
+        ti_z = pz[2:, 1:-1] - pz[:-2, 1:-1]
+        # Project onto tangent plane: t -= (t·P)*P
+        dot_i = ti_x * cx + ti_y * cy + ti_z * cz
+        ti_x = ti_x - dot_i * cx
+        ti_y = ti_y - dot_i * cy
+        ti_z = ti_z - dot_i * cz
+        norm_i = jnp.sqrt(ti_x**2 + ti_y**2 + ti_z**2 + 1e-30)
+        ti_x /= norm_i; ti_y /= norm_i; ti_z /= norm_i
+
+        # j-tangent: centred diff in axis-1 → (n+1, n+1)
+        tj_x = px[1:-1, 2:] - px[1:-1, :-2]
+        tj_y = py[1:-1, 2:] - py[1:-1, :-2]
+        tj_z = pz[1:-1, 2:] - pz[1:-1, :-2]
+        dot_j = tj_x * cx + tj_y * cy + tj_z * cz
+        tj_x = tj_x - dot_j * cx
+        tj_y = tj_y - dot_j * cy
+        tj_z = tj_z - dot_j * cz
+        norm_j = jnp.sqrt(tj_x**2 + tj_y**2 + tj_z**2 + 1e-30)
+        tj_x /= norm_j; tj_y /= norm_j; tj_z /= norm_j
+
+        # cosa = dot(t_i, t_j)
+        cosa_face = ti_x * tj_x + ti_y * tj_y + ti_z * tj_z
+        all_cosa_c.append(cosa_face)
+
+    cosa_corner = jnp.stack(all_cosa_c, axis=0)
+    sina_corner = jnp.sqrt(jnp.maximum(1.0 - cosa_corner**2, 1e-12))
+    rsin2_corner = 1.0 / jnp.maximum(sina_corner**2, 1e-12)
+
+    # Average to C-grid positions
+    cosa_u = 0.5 * (cosa_corner[:, :, :-1] + cosa_corner[:, :, 1:])  # (6, n+1, n)
+    cosa_v = 0.5 * (cosa_corner[:, :-1, :] + cosa_corner[:, 1:, :])  # (6, n, n+1)
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, 1e-12))
+    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, 1e-12))
+    rsin_u = 1.0 / sina_u
+    rsin_v = 1.0 / sina_v
+
+    # ------------------------------------------------------------------
+    # FV3 edge-midpoint D-grid metrics
+    # ------------------------------------------------------------------
+    # Edge midpoints are computed via Cartesian averaging on the unit
+    # sphere (avoids longitude wrapping issues at the dateline).
+    # x-edge midpoint: midpoint of corners (i,j) and (i+1,j) → (6,n,n+1)
+    # y-edge midpoint: midpoint of corners (i,j) and (i,j+1) → (6,n+1,n)
+
+    cos_lat_corner = jnp.cos(lat_corner)
+    xc = cos_lat_corner * jnp.cos(lon_corner)
+    yc = cos_lat_corner * jnp.sin(lon_corner)
+    zc = jnp.sin(lat_corner)
+
+    # --- x-edge midpoints (6, n, n+1) ---
+    mx_x = 0.5 * (xc[:, :-1, :] + xc[:, 1:, :])
+    mx_y = 0.5 * (yc[:, :-1, :] + yc[:, 1:, :])
+    mx_z = 0.5 * (zc[:, :-1, :] + zc[:, 1:, :])
+    # Re-project onto sphere
+    mx_norm = jnp.sqrt(mx_x**2 + mx_y**2 + mx_z**2 + 1e-30)
+    mx_x /= mx_norm; mx_y /= mx_norm; mx_z /= mx_norm
+    lat_edge_x = jnp.arcsin(jnp.clip(mx_z, -1.0, 1.0))
+    lon_edge_x = jnp.arctan2(mx_y, mx_x)
+
+    # --- y-edge midpoints (6, n+1, n) ---
+    my_x = 0.5 * (xc[:, :, :-1] + xc[:, :, 1:])
+    my_y = 0.5 * (yc[:, :, :-1] + yc[:, :, 1:])
+    my_z = 0.5 * (zc[:, :, :-1] + zc[:, :, 1:])
+    my_norm = jnp.sqrt(my_x**2 + my_y**2 + my_z**2 + 1e-30)
+    my_x /= my_norm; my_y /= my_norm; my_z /= my_norm
+    lat_edge_y = jnp.arcsin(jnp.clip(my_z, -1.0, 1.0))
+    lon_edge_y = jnp.arctan2(my_y, my_x)
+
+    # --- Grid angle at edge midpoints ---
+    # Use the Cartesian tangent-vector approach on the extended gnomonic
+    # grid.  For x-edges we need i-tangent vectors at (n, n+1) positions,
+    # for y-edges at (n+1, n) positions.
+    all_angle_ex = []
+    all_angle_ey = []
+    all_cosa_cell_list = []
+    dalpha_e = jnp.pi / (2 * n)
+    # Extended grid: n+4 points gives n+2 after centred diff, which is
+    # enough to slice both (n, n+1) and (n+1, n) sub-grids.
+    n_ext2 = n + 4
+    alpha_ext2 = jnp.linspace(
+        -jnp.pi / 4 - 1.5 * dalpha_e,
+        jnp.pi / 4 + 1.5 * dalpha_e,
+        n_ext2,
+    )
+    # For edge midpoints we need positions on half-integer gnomonic lines.
+    # x-edge midpoint (i+0.5, j): gnomonic alpha shifted by half a cell
+    # in the first index.  Use (n+3) points centred on half-integers.
+    alpha_centers = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
+    alpha_half_x = 0.5 * (alpha_centers[:-1] + alpha_centers[1:])  # (n,)
+    alpha_half_y = alpha_half_x  # symmetric grid
+
+    # Build extended half-grid lines for centred differences
+    # x-edge: need alpha_half_x with one extra point on each side for
+    # centred diffs in the i-direction (for grid angle).
+    # Instead of constructing a custom half-grid, we can evaluate
+    # the tangent vectors at the Cartesian edge-midpoints directly.
+
+    for face in range(6):
+        # --- Grid angle at x-edge midpoints (n, n+1) ---
+        # Use finite-difference of Cartesian positions along gnomonic i
+        # at the edge midpoint.  The i-tangent at edge midpoint (i+0.5, j)
+        # is proportional to corner(i+1,j) - corner(i,j).
+        # For the grid angle we need the i-tangent projected onto the
+        # tangent plane, then its angle with geographic east.
+
+        # x-edge: i-tangent from the two adjacent corners
+        ti_xe = xc[face, 1:, :] - xc[face, :-1, :]  # (n, n+1)
+        ti_ye = yc[face, 1:, :] - yc[face, :-1, :]
+        ti_ze = zc[face, 1:, :] - zc[face, :-1, :]
+        # Project onto tangent plane at midpoint
+        dot_ie = ti_xe * mx_x[face] + ti_ye * mx_y[face] + ti_ze * mx_z[face]
+        ti_xe = ti_xe - dot_ie * mx_x[face]
+        ti_ye = ti_ye - dot_ie * mx_y[face]
+        ti_ze = ti_ze - dot_ie * mx_z[face]
+        norm_ie = jnp.sqrt(ti_xe**2 + ti_ye**2 + ti_ze**2 + 1e-30)
+        ti_xe /= norm_ie; ti_ye /= norm_ie; ti_ze /= norm_ie
+
+        # Grid angle: angle between i-tangent and geographic east
+        sin_lon_ex = jnp.sin(lon_edge_x[face])
+        cos_lon_ex = jnp.cos(lon_edge_x[face])
+        sin_lat_ex = jnp.sin(lat_edge_x[face])
+        cos_lat_ex = jnp.cos(lat_edge_x[face])
+        ti_dot_east_ex = -sin_lon_ex * ti_xe + cos_lon_ex * ti_ye
+        ti_dot_north_ex = (-sin_lat_ex * cos_lon_ex * ti_xe
+                           - sin_lat_ex * sin_lon_ex * ti_ye
+                           + cos_lat_ex * ti_ze)
+        angle_ex = jnp.arctan2(ti_dot_north_ex, ti_dot_east_ex)
+        all_angle_ex.append(angle_ex)
+
+        # --- Grid angle at y-edge midpoints (n+1, n) ---
+        # i-tangent at y-edge midpoint (i, j+0.5): use centred diff from
+        # corners (i-1, j+0.5) and (i+1, j+0.5).  Approximate by averaging
+        # the i-tangent from the two adjacent corner rows.
+        # A cleaner approach: use the extended gnomonic grid evaluated at
+        # half-integer j positions.  But for simplicity and consistency,
+        # use the same Cartesian tangent approach with corner differences.
+
+        # For y-edge midpoint (i, j+0.5), the i-tangent can be approximated
+        # from the average of the two neighboring x-edge tangent directions.
+        # However, the most direct approach: use centred diff on corners.
+        # i-tangent at (i, j+0.5) ≈ avg of (corner(i+1,j)-corner(i-1,j))
+        # at j and j+1.  We need padding for the boundary.
+
+        # Use extended gnomonic grid for y-edge tangent vectors
+        lon_ext_f, lat_ext_f = _face_gnomonic_to_lonlat(
+            face, ax_ext, ay_ext)
+        cos_lat_extf = jnp.cos(lat_ext_f)
+        px_e = cos_lat_extf * jnp.cos(lon_ext_f)
+        py_e = cos_lat_extf * jnp.sin(lon_ext_f)
+        pz_e = jnp.sin(lat_ext_f)
+
+        # i-tangent at extended corners via centred diff: (n+1, n+1)
+        # Extended grid indices [1:-1, 1:-1] correspond to corner grid.
+        # For y-edge midpoints (n+1, n) we average j and j+1 slices.
+        # i-tangent at extended: diff in axis-0 → (n+1, n+3)
+        ti_ext_x = px_e[2:, :] - px_e[:-2, :]  # (n+1, n+3)
+        ti_ext_y = py_e[2:, :] - py_e[:-2, :]
+        ti_ext_z = pz_e[2:, :] - pz_e[:-2, :]
+        # Take columns [1:-1] to get (n+1, n+1), then average j, j+1
+        ti_ey_x = 0.5 * (ti_ext_x[:, 1:-2] + ti_ext_x[:, 2:-1])  # (n+1, n)
+        ti_ey_y = 0.5 * (ti_ext_y[:, 1:-2] + ti_ext_y[:, 2:-1])
+        ti_ey_z = 0.5 * (ti_ext_z[:, 1:-2] + ti_ext_z[:, 2:-1])
+
+        # Project onto tangent plane at y-edge midpoint
+        dot_jey = (ti_ey_x * my_x[face] + ti_ey_y * my_y[face]
+                   + ti_ey_z * my_z[face])
+        ti_ey_x = ti_ey_x - dot_jey * my_x[face]
+        ti_ey_y = ti_ey_y - dot_jey * my_y[face]
+        ti_ey_z = ti_ey_z - dot_jey * my_z[face]
+        norm_jey = jnp.sqrt(ti_ey_x**2 + ti_ey_y**2 + ti_ey_z**2 + 1e-30)
+        ti_ey_x /= norm_jey; ti_ey_y /= norm_jey; ti_ey_z /= norm_jey
+
+        sin_lon_ey = jnp.sin(lon_edge_y[face])
+        cos_lon_ey = jnp.cos(lon_edge_y[face])
+        sin_lat_ey = jnp.sin(lat_edge_y[face])
+        cos_lat_ey = jnp.cos(lat_edge_y[face])
+        ti_dot_east_ey = -sin_lon_ey * ti_ey_x + cos_lon_ey * ti_ey_y
+        ti_dot_north_ey = (-sin_lat_ey * cos_lon_ey * ti_ey_x
+                           - sin_lat_ey * sin_lon_ey * ti_ey_y
+                           + cos_lat_ey * ti_ey_z)
+        angle_ey = jnp.arctan2(ti_dot_north_ey, ti_dot_east_ey)
+        all_angle_ey.append(angle_ey)
+
+        # --- cosa at cell centres (n, n) ---
+        # i-tangent and j-tangent at cell centres from extended gnomonic
+        # Cell centre (i+0.5, j+0.5) → average of 4 surrounding corners
+        # in extended grid indices.  Use average of diffs at (i,j+0.5)
+        # and (i+1, j+0.5) for i-tangent, similarly for j-tangent.
+        # Simpler: average cosa_corner at 4 surrounding corners.
+        cc = cosa_corner[face]  # (n+1, n+1)
+        cosa_cell_f = 0.25 * (
+            cc[:-1, :-1] + cc[1:, :-1] + cc[:-1, 1:] + cc[1:, 1:]
+        )  # (n, n)
+        all_cosa_cell_list.append(cosa_cell_f)
+
+    angle_edge_x = jnp.stack(all_angle_ex, axis=0)   # (6, n, n+1)
+    angle_edge_y = jnp.stack(all_angle_ey, axis=0)   # (6, n+1, n)
+    cos_angle_edge_x = jnp.cos(angle_edge_x)
+    sin_angle_edge_x = jnp.sin(angle_edge_x)
+    cos_angle_edge_y = jnp.cos(angle_edge_y)
+    sin_angle_edge_y = jnp.sin(angle_edge_y)
+
+    # Coriolis at edge midpoints
+    f_edge_x = 2.0 * omega * jnp.sin(lat_edge_x)  # (6, n, n+1)
+    f_edge_y = 2.0 * omega * jnp.sin(lat_edge_y)  # (6, n+1, n)
+
+    # Cell-centre non-orthogonality metrics
+    cosa_cell = jnp.stack(all_cosa_cell_list, axis=0)  # (6, n, n)
+    sina_cell = jnp.sqrt(jnp.maximum(1.0 - cosa_cell**2, 1e-12))
+    rsin2_cell = 1.0 / jnp.maximum(sina_cell**2, 1e-12)
+
     _f32 = jnp.float32
     return CubedSphereCDGrid(
         base=base,
@@ -217,4 +507,25 @@ def create_cubed_sphere_cdgrid(
         dx_edge_y=dx_edge_y.astype(_f32),
         dy_edge_x=dy_edge_x.astype(_f32),
         area_corner=area_corner.astype(_f32),
+        cosa_corner=cosa_corner.astype(_f32),
+        rsin2_corner=rsin2_corner.astype(_f32),
+        cosa_u=cosa_u.astype(_f32),
+        cosa_v=cosa_v.astype(_f32),
+        rsin_u=rsin_u.astype(_f32),
+        rsin_v=rsin_v.astype(_f32),
+        lon_edge_x=lon_edge_x.astype(_f32),
+        lat_edge_x=lat_edge_x.astype(_f32),
+        lon_edge_y=lon_edge_y.astype(_f32),
+        lat_edge_y=lat_edge_y.astype(_f32),
+        angle_edge_x=angle_edge_x.astype(_f32),
+        cos_angle_edge_x=cos_angle_edge_x.astype(_f32),
+        sin_angle_edge_x=sin_angle_edge_x.astype(_f32),
+        angle_edge_y=angle_edge_y.astype(_f32),
+        cos_angle_edge_y=cos_angle_edge_y.astype(_f32),
+        sin_angle_edge_y=sin_angle_edge_y.astype(_f32),
+        f_edge_x=f_edge_x.astype(_f32),
+        f_edge_y=f_edge_y.astype(_f32),
+        cosa_cell=cosa_cell.astype(_f32),
+        sina_cell=sina_cell.astype(_f32),
+        rsin2_cell=rsin2_cell.astype(_f32),
     )

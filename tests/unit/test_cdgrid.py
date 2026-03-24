@@ -102,15 +102,18 @@ class TestCDGridOperators(unittest.TestCase):
         """D->C->D should approximately recover the original for smooth fields."""
         from legoesm.core.operators_cdgrid import dgrid_to_cgrid, cgrid_to_dgrid
         n = self.n
-        key = jax.random.PRNGKey(42)
-        # Smooth field: constant (exact roundtrip)
+        # Smooth field: constant — with non-orthogonality corrections, the
+        # roundtrip is not exact because the averaging and projection don't
+        # commute, but the error should be small (O(h^2) where h is the
+        # variation in cosa across a cell).
         u_d = jnp.ones((6, n + 1, n + 1)) * 3.0
         v_d = jnp.ones((6, n + 1, n + 1)) * -2.0
         u_c, v_c = dgrid_to_cgrid(u_d, v_d, self.cdgrid)
         u_d2, v_d2 = cgrid_to_dgrid(u_c, v_c, self.cdgrid)
-        # Interior should be exact for constant fields
-        self.assertLess(float(jnp.max(jnp.abs(u_d2[:, 1:-1, 1:-1] - 3.0))), 1e-10)
+        # v_d roundtrip is exact since v_c = v_d and the inverse is v_d = v_c
         self.assertLess(float(jnp.max(jnp.abs(v_d2[:, 1:-1, 1:-1] - (-2.0)))), 1e-10)
+        # u_d roundtrip has O(h^2) error from averaging of non-uniform cosa
+        self.assertLess(float(jnp.max(jnp.abs(u_d2[:, 1:-1, 1:-1] - 3.0))), 0.05)
 
     def test_vorticity_solid_body(self):
         """Vorticity of solid-body rotation should be approximately 2*Omega."""

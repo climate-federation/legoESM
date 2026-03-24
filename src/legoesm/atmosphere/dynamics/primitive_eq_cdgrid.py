@@ -38,9 +38,11 @@ from legoesm.core.state import (
 )
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
+    dgrid_to_center_vector,
     cgrid_divergence,
     dgrid_vorticity,
     _arakawa_lamb_gradient,
+    _broadcast_metric,
     _interp_center_to_corner,
     _interp_corner_to_center,
     _laplacian_dgrid,
@@ -176,9 +178,8 @@ def fv3_hydrostatic_tendencies(
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
     # u_c: (6, n+1, n, nlev),  v_c: (6, n, n+1, nlev)
 
-    # Cell-centre velocities from C-grid (for scalar advection / KE)
-    u_cell = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])   # (6, n, n, nlev)
-    v_cell = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])   # (6, n, n, nlev)
+    # Cell-centre velocities from D-grid (orthogonal basis, for KE)
+    u_cell, v_cell = dgrid_to_center_vector(u_d, v_d)
 
     # --- 2. Pressure at full levels ---
     if _hybrid:
@@ -218,15 +219,24 @@ def fv3_hydrostatic_tendencies(
     pg_corr_y = R_d * T_corner * dln_dy[..., None]
 
     # --- 9. D-grid momentum tendencies ---
+    # Non-orthogonality correction for v-equation gradients:
+    # Arakawa-Lamb gives (dB/ds_i, dB/ds_j). v-equation needs dB/ds_perp.
+    cosa_c = _broadcast_metric(cdgrid.cosa_corner, u_d)
+    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
+
+    dB_dy_perp = (dB_dy - cosa_c * dB_dx) / jnp.maximum(sina_c, 1e-12)
+    pg_corr_y_perp = (pg_corr_y - cosa_c * pg_corr_x) / jnp.maximum(sina_c, 1e-12)
+
     du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x
-    dv_d_dt = -zeta_corner * u_d - dB_dy - pg_corr_y
+    dv_d_dt = -zeta_corner * u_d - dB_dy_perp - pg_corr_y_perp
 
     # Divergence damping at D-grid
     if config.div_damp_coeff > 0:
         div_v_damp = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
         ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_v_damp, cdgrid)
+        ddiv_dy_perp = (ddiv_dy - cosa_c * ddiv_dx) / jnp.maximum(sina_c, 1e-12)
         du_d_dt = du_d_dt - config.div_damp_coeff * ddiv_dx
-        dv_d_dt = dv_d_dt - config.div_damp_coeff * ddiv_dy
+        dv_d_dt = dv_d_dt - config.div_damp_coeff * ddiv_dy_perp
 
     # --- 10. Surface pressure tendency and vertical motion ---
     # C-grid divergence for continuity

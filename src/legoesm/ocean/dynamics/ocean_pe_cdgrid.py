@@ -7,12 +7,12 @@ FV3-style C-D grid discretisation for the ocean:
 * C-grid velocities at cell edges are diagnosed for mass and tracer transport.
 * Vorticity is computed from the integral circulation, exact on the D-grid.
 * Bernoulli gradient uses the Arakawa-Lamb 4-point formula.
-* Scalars (T, S, h, eta) live at cell centres on the A-grid.
+* Scalars (T, S, h, eta) live at cell centres.
 
-The ocean state containers (``OceanState``, ``OceanTendencies``) use A-grid
+The ocean state containers (``OceanState``, ``OceanTendencies``) use cell-centre
 velocity storage ``(6, n, n, nlev)`` for compatibility with the rest of the
 ocean infrastructure (barotropic solver, conservation fixers, etc.).
-Conversion between A-grid and D-grid is done at the tendency interface.
+Conversion between cell-centre and D-grid is done at the tendency interface.
 
 References
 ----------
@@ -27,14 +27,15 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.operators_cdgrid import (
-    agrid_to_dgrid_vector,
-    dgrid_to_agrid_vector,
+    center_to_dgrid_vector,
+    dgrid_to_center_vector,
     dgrid_to_cgrid,
     cgrid_to_dgrid,
     dgrid_vorticity_3d,
     cgrid_divergence_3d,
     cgrid_mass_flux_divergence_3d,
     _arakawa_lamb_gradient_3d,
+    _broadcast_metric,
     _interp_center_to_corner_3d,
     _laplacian_dgrid,
 )
@@ -54,30 +55,25 @@ from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 
 
 # ==============================================================================
-# A-grid <-> D-grid conversion
+# Cell-centre ↔ D-grid conversion
 # ==============================================================================
 
-def _agrid_to_dgrid_3d(u_a, v_a, cdgrid):
-    """Convert A-grid cell-centre velocities to D-grid corner velocities.
-
-    Delegates to the shared ``agrid_to_dgrid_vector`` which uses
-    ``pad_halo_vector`` for proper rotation across face boundaries.
+def _center_to_dgrid_3d(u_cc, v_cc, cdgrid):
+    """Cell-centre velocities → D-grid corners (with cross-face rotation).
 
     Parameters
     ----------
-    u_a, v_a : jax.Array, shape (6, n, n, nlev)
+    u_cc, v_cc : jax.Array, shape (6, n, n, nlev)
 
     Returns
     -------
     u_d, v_d : jax.Array, shape (6, n+1, n+1, nlev)
     """
-    return agrid_to_dgrid_vector(u_a, v_a, cdgrid)
+    return center_to_dgrid_vector(u_cc, v_cc, cdgrid)
 
 
-def _dgrid_to_agrid_3d(u_d, v_d, cdgrid):
-    """Convert D-grid corner velocities to A-grid cell-centre velocities.
-
-    Delegates to the shared ``dgrid_to_agrid_vector``.
+def _dgrid_to_center_3d(u_d, v_d, cdgrid):
+    """D-grid corner velocities → cell-centre velocities (4-point average).
 
     Parameters
     ----------
@@ -85,9 +81,9 @@ def _dgrid_to_agrid_3d(u_d, v_d, cdgrid):
 
     Returns
     -------
-    u_a, v_a : jax.Array, shape (6, n, n, nlev)
+    u_cc, v_cc : jax.Array, shape (6, n, n, nlev)
     """
-    return dgrid_to_agrid_vector(u_d, v_d)
+    return dgrid_to_center_vector(u_d, v_d)
 
 
 # ==============================================================================
@@ -155,7 +151,7 @@ def ocean_baroclinic_tendencies_cdgrid(
 ) -> OceanTendencies:
     """Compute 3D baroclinic tendencies using C-D grid operators.
 
-    The state uses A-grid storage. Velocities are converted to D-grid
+    The state uses cell-centre storage. Velocities are converted to D-grid
     for the momentum computation, then converted back.
 
     Parameters
@@ -215,13 +211,13 @@ def ocean_baroclinic_tendencies_cdgrid(
     p_prime = p_prime + 0.5 * dp_layer
 
     # --- 4. Convert to D-grid ---
-    u_d, v_d = _agrid_to_dgrid_3d(u_a * mask_3d, v_a * mask_3d, cdgrid)
+    u_d, v_d = _center_to_dgrid_3d(u_a * mask_3d, v_a * mask_3d, cdgrid)
 
     # --- 5. C-grid velocities for mass transport ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
 
     # --- 6. Flux divergence for vertical velocity ---
-    # Use A-grid for flux divergence (cell-centre h_k and velocities)
+    # Use cell-centre for flux divergence (cell-centre h_k and velocities)
     flux_div_k = cgrid_mass_flux_divergence_3d(
         h_k, u_c, v_c, cdgrid,
     )
@@ -233,10 +229,9 @@ def ocean_baroclinic_tendencies_cdgrid(
     # --- 8. Vorticity ---
     zeta = dgrid_vorticity_3d(u_d, v_d, cdgrid)
 
-    # --- 9. KE at cell centres ---
-    u_center = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])
-    v_center = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])
-    KE = 0.5 * (u_center ** 2 + v_center ** 2)
+    # --- 9. KE at cell centres from D-grid (orthogonal basis) ---
+    u_cc_ke, v_cc_ke = dgrid_to_center_vector(u_d, v_d)
+    KE = 0.5 * (u_cc_ke ** 2 + v_cc_ke ** 2)
 
     # --- 10. Bernoulli and pressure gradients at D-grid corners ---
     dKE_dx, dKE_dy = _arakawa_lamb_gradient_3d(KE, cdgrid)
@@ -254,24 +249,31 @@ def ocean_baroclinic_tendencies_cdgrid(
     V_bar_a = jnp.sum(v_a * h_k, axis=-1) / H_total * mask
     u_prime_a = (u_a - U_bar_a[..., jnp.newaxis]) * mask_3d
     v_prime_a = (v_a - V_bar_a[..., jnp.newaxis]) * mask_3d
-    u_prime_d, v_prime_d = _agrid_to_dgrid_3d(u_prime_a, v_prime_a, cdgrid)
+    u_prime_d, v_prime_d = _center_to_dgrid_3d(u_prime_a, v_prime_a, cdgrid)
 
     # --- 13. D-grid momentum tendencies ---
+    # Non-orthogonality correction for v-equation gradients
+    cosa_c = _broadcast_metric(cdgrid.cosa_corner, u_d)
+    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
+
+    dKE_dy_perp = (dKE_dy - cosa_c * dKE_dx) / jnp.maximum(sina_c, 1e-12)
+    dp_dy_perp = (dp_dy - cosa_c * dp_dx) / jnp.maximum(sina_c, 1e-12)
+
     # ζ*v + f*v' (relative vorticity × full velocity, Coriolis × deviation)
     du_d_dt = (zeta_corner * v_d + f_corner_3d * v_prime_d
                - dKE_dx - dp_dx / rho_0)
     dv_d_dt = (-zeta_corner * u_d - f_corner_3d * u_prime_d
-               - dKE_dy - dp_dy / rho_0)
+               - dKE_dy_perp - dp_dy_perp / rho_0)
 
     # Skew-symmetric correction
     div_corner = _interp_center_to_corner_3d(div_v, cdgrid)
     du_d_dt = du_d_dt - 0.5 * u_d * div_corner
     dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
 
-    # --- 14. Convert D-grid tendencies back to A-grid ---
-    du_dt, dv_dt = _dgrid_to_agrid_3d(du_d_dt, dv_d_dt, cdgrid)
+    # --- 14. Convert D-grid tendencies back to cell-centre ---
+    du_dt, dv_dt = _dgrid_to_center_3d(du_d_dt, dv_d_dt, cdgrid)
 
-    # --- 15. Vertical advection of u, v (A-grid) ---
+    # --- 15. Vertical advection of u, v (cell-centre) ---
     du_dt = du_dt + _vertical_advection_ocean(u_a, w, z_coord, J)
     dv_dt = dv_dt + _vertical_advection_ocean(v_a, w, z_coord, J)
 
