@@ -203,8 +203,10 @@ def spectral_nh_slow_tendencies(
     pgf_x = c_p * theta_total * dpi_dx
     pgf_y = c_p * theta_total * dpi_dy
 
-    # --- 6. Kinetic energy ---
-    K = 0.5 * (u**2 + v**2)
+    # --- 6. Kinetic energy (pole-safe via oc2 transform) ---
+    # KE·cos²φ avoids the 1/cos² singularity at the poles; the factor
+    # is absorbed by sh_analysis_oc2_3d below.
+    KE_cos2 = 0.5 * (u_cos * u_cos + v_cos * v_cos)  # KE·cos²φ
 
     # --- 7. Absolute vorticity ---
     abs_vor = vor + grid.f[..., None]
@@ -239,7 +241,7 @@ def spectral_nh_slow_tendencies(
         im_over_a[:, None] * sh_analysis_oc2_3d(grid, B_vor)
         + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
     )
-    K_hat = sh_analysis_3d(grid, K)
+    K_hat = sh_analysis_oc2_3d(grid, KE_cos2)
     pgf_div = (
         im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_u_cos)
         - one_over_a * sh_analysis_dmu_3d(grid, pgf_v_cos)

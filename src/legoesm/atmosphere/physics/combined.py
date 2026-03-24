@@ -205,6 +205,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
         dp_s_dt = first.dp_s_dt.data
         dphis_dt = first.dphis_dt.data
 
+        # Accumulate tracer tendencies from all physics modules
+        combined_tracer_tends = {}
+        if first.tracer_tendencies is not None:
+            for k, v in first.tracer_tendencies.items():
+                combined_tracer_tends[k] = v.data
+
         for fn, accepts_ps, field_name in tagged_fns[1:]:
             if accepts_ps:
                 t, field_val = fn(state, grid, sigma_coord, phys_state=phys_state)
@@ -218,12 +224,29 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             dp_s_dt = dp_s_dt + t.dp_s_dt.data
             dphis_dt = dphis_dt + t.dphis_dt.data
 
+            if t.tracer_tendencies is not None:
+                for k, v in t.tracer_tendencies.items():
+                    if k in combined_tracer_tends:
+                        combined_tracer_tends[k] = combined_tracer_tends[k] + v.data
+                    else:
+                        combined_tracer_tends[k] = v.data
+
+        # Build tracer_tendencies dict with Field wrappers
+        dims_3d = ("face", "x", "y", "level")
+        tracer_tends_out = None
+        if combined_tracer_tends:
+            tracer_tends_out = {
+                k: Field(data=v, name=f"d{k}_dt_phys", dims=dims_3d, units="kg/kg/s")
+                for k, v in combined_tracer_tends.items()
+            }
+
         combined = HydrostaticTendencies(
             du_dt=first.du_dt.replace(data=du_dt),
             dv_dt=first.dv_dt.replace(data=dv_dt),
             dT_dt=first.dT_dt.replace(data=dT_dt),
             dp_s_dt=first.dp_s_dt.replace(data=dp_s_dt),
             dphis_dt=first.dphis_dt.replace(data=dphis_dt),
+            tracer_tendencies=tracer_tends_out,
         )
         phys_state_out = _build_updated_phys_state(phys_state, phys_updates)
         return combined, phys_state_out

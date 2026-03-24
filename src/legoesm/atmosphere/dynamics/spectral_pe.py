@@ -267,8 +267,13 @@ def spectral_pe_tendencies(
     else:
         Phi = _compute_geopotential_gaussian(T, p_s, sigma_coord, phis)
 
-    # --- 5. Kinetic energy ---
-    K = 0.5 * (u * u + v * v)
+    # --- 5. Kinetic energy (pole-safe via oc2 transform) ---
+    # KE = (u²+v²)/2 = (u_cos²+v_cos²)/(2·cos²φ).  Computing KE on the
+    # grid amplifies polar noise by 1/cos².  Instead we keep KE·cos²φ and
+    # let sh_analysis_oc2_3d (which has 1/cos² in the Legendre matrix)
+    # absorb the singularity.  Physical u, v are still needed below for
+    # vertical advection and the adiabatic v·∇(lnps) term.
+    KE_cos2 = 0.5 * (u_cos * u_cos + v_cos * v_cos)  # KE·cos²φ
 
     # --- 6. Absolute vorticity ---
     abs_vor = vor + grid.f[..., None]
@@ -325,8 +330,7 @@ def spectral_pe_tendencies(
     # (-R_d·lnps_0·∇²T') that is unstable when combined with
     # adiabatic heating.
     T_ref = config.si_T_ref
-    KPhi = K + Phi
-    KPhi_hat = sh_analysis_3d(grid, KPhi)
+    KPhi_hat = sh_analysis_oc2_3d(grid, KE_cos2) + sh_analysis_3d(grid, Phi)
 
     # Compute ∇(lnps) on grid (needed for PGF correction and adiabatic)
     dfdlon = sh_synthesis(grid, 1j * grid.ms * state.lnps_hat.data)

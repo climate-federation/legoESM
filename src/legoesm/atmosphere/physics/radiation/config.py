@@ -35,7 +35,8 @@ class GrayRadiationConfig(NamedTuple):
     linear_frac : float
         Fraction f_l of linear sigma weighting vs sigma^4 (default 0.2).
     tau_moist_coeff : float
-        Moisture optical depth coefficient: tau += coeff * q_v (default 1150.0).
+        Moisture optical depth coefficient [m^2/kg]: dtau_k = coeff * q_v * dp_k / g
+        (default 0.0115, Frierson 2006).
     lw_diff_factor : float
         Diffusivity factor D for hemispheric-mean (default 1.66, ~5/3).
     sfc_emissivity : float

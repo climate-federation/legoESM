@@ -28,7 +28,7 @@ The AMIP driver (`scripts/run_amip.py`) couples:
 ### Gray radiation (default)
 
 The Frierson (2006) gray two-stream scheme:
-- LW optical depth depends on latitude and moisture (tau_moist_coeff * q_v)
+- LW optical depth depends on latitude and moisture: dtau_k = tau_moist_coeff * q_v * dp_k / g [m²/kg]
 - SW uses Beer-Lambert absorption (no scattering)
 - Seasonal solar cycle; daily-mean insolation (default) or diurnal cycle
 - Fast, stable, well-tested; suitable for idealized experiments

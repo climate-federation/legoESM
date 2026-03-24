@@ -27,8 +27,8 @@ class RestoringConfig(NamedTuple):
 
 class BulkFormulaConfig(NamedTuple):
     """COARE-like air-sea flux formulation."""
-    C_D: float = 1.2e-3     # Drag coefficient (constant scheme)
-    C_H: float = 1.2e-3     # Sensible heat transfer coefficient (constant)
+    C_D: float = 1.5e-3     # Drag coefficient (constant scheme)
+    C_H: float = 1.5e-3     # Sensible heat transfer coefficient (constant)
     C_E: float = 1.5e-3     # Latent heat transfer coefficient (constant)
     rho_a: float = 1.225    # Air density [kg/m^3]
     c_pa: float = 1004.0    # Specific heat of air [J/(kg·K)]

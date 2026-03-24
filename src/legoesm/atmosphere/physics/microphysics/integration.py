@@ -211,12 +211,29 @@ def _make_hydrostatic_microphysics(
 
         dT_dt = micro_out.dT_dt.reshape(shape_3d)
 
+        # Propagate tracer tendencies from microphysics backend
+        tracer_tends = {
+            "q_v": Field(data=micro_out.dq_v_dt.reshape(shape_3d),
+                         name="dq_v_dt_micro", dims=dims_3d, units="kg/kg/s"),
+            "q_c": Field(data=micro_out.dq_c_dt.reshape(shape_3d),
+                         name="dq_c_dt_micro", dims=dims_3d, units="kg/kg/s"),
+            "q_r": Field(data=micro_out.dq_r_dt.reshape(shape_3d),
+                         name="dq_r_dt_micro", dims=dims_3d, units="kg/kg/s"),
+            "q_i": Field(data=micro_out.dq_i_dt.reshape(shape_3d),
+                         name="dq_i_dt_micro", dims=dims_3d, units="kg/kg/s"),
+            "q_s": Field(data=micro_out.dq_s_dt.reshape(shape_3d),
+                         name="dq_s_dt_micro", dims=dims_3d, units="kg/kg/s"),
+            "q_g": Field(data=micro_out.dq_g_dt.reshape(shape_3d),
+                         name="dq_g_dt_micro", dims=dims_3d, units="kg/kg/s"),
+        }
+
         return HydrostaticTendencies(
             du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_micro", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
             dT_dt=Field(data=dT_dt, name="dT_dt_micro", dims=dims_3d, units="K/s"),
             dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_micro", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
+            tracer_tendencies=tracer_tends,
         )
 
     def reset_state():

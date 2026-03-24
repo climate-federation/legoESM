@@ -56,9 +56,9 @@ def sundqvist_microphysics(
     q_sat = saturation_mixing_ratio(T, p_full)
     RH = q_v / jnp.clip(q_sat, 1e-10)
 
-    # 1. Smooth condensation activation
+    # 1. Smooth condensation activation — convert increment [kg/kg] to tendency [kg/kg/s]
     f = jax.nn.sigmoid(sharpness * (RH - config.RH_crit))
-    condensation = f * jax.nn.softplus(q_v - config.RH_crit * q_sat)
+    condensation = f * jax.nn.softplus(q_v - config.RH_crit * q_sat) / dt  # [kg/kg/s]
 
     # 2. Autoconversion
     P_auto = config.auto_rate * (q_c + condensation)

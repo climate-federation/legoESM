@@ -96,16 +96,14 @@ def spectral_sw_tendencies(
     phi = sh_synthesis(grid, state.phi_hat.data)
     phis = sh_synthesis(grid, state.phis_hat.data)
 
-    # --- 2. Compute velocities ---
+    # --- 2. Compute cos-lat-weighted velocities (pole-safe) ---
     u_cos, v_cos = uv_from_vordiv(grid, state.vor_hat.data, state.div_hat.data)
     # u_cos = u * cos(lat), v_cos = v * cos(lat)
-    cos_lat_2d = grid.cos_lat[:, None]
-    u = u_cos / cos_lat_2d
-    v = v_cos / cos_lat_2d
+    # Physical u, v are NOT computed here to avoid 1/cos(lat) singularity
+    # at the poles.  Kinetic energy uses sh_analysis_oc2 instead (see below).
 
     # --- 3. Nonlinear products on grid ---
     abs_vor = vor + grid.f                # Absolute vorticity (zeta + f)
-    kinetic_energy = 0.5 * (u * u + v * v)
 
     # --- 4. Transform nonlinear products to spectral space ---
     # Spectral div/curl on sphere (Hack & Jakob 1992, Bourke 1972):
@@ -138,8 +136,14 @@ def spectral_sw_tendencies(
                      - one_over_a * sh_analysis_dmu(grid, B_mass))
 
     # Kinetic energy + geopotential + surface geopotential -> Laplacian term
-    E_phi = kinetic_energy + phi + phis
-    E_phi_hat = sh_analysis(grid, E_phi)
+    # KE = (u²+v²)/2 = (u_cos²+v_cos²)/(2·cos²φ).
+    # Computing KE on the grid requires dividing by cos²φ, which blows up
+    # at the poles.  Instead, compute KE·cos²φ on the grid and use
+    # sh_analysis_oc2 (which has 1/cos²φ baked into the Legendre matrix)
+    # to obtain the spectral KE directly.  This is pole-safe and
+    # mathematically equivalent: sh_analysis_oc2(f) = sh_analysis(f/cos²φ).
+    KE_cos2 = 0.5 * (u_cos * u_cos + v_cos * v_cos)  # KE·cos²φ
+    E_phi_hat = sh_analysis_oc2(grid, KE_cos2) + sh_analysis(grid, phi + phis)
 
     # --- 5. Assemble tendencies ---
     # d(vor_hat)/dt = -div((zeta+f)*v)
@@ -470,7 +474,7 @@ def spectral_to_grid(
     h_s = phis / g
 
     u_cos, v_cos = uv_from_vordiv(grid, state.vor_hat.data, state.div_hat.data)
-    cos_lat_2d = grid.cos_lat[:, None]
+    cos_lat_2d = jnp.clip(grid.cos_lat[:, None], 0.01, None)
     u = u_cos / cos_lat_2d
     v = v_cos / cos_lat_2d
 

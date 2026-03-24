@@ -92,12 +92,19 @@ class HydrostaticTendencies(NamedTuple):
 
     Same structure as HydrostaticState. The phis tendency is always zero
     since surface geopotential is static.
+
+    tracer_tendencies : dict[str, Field] | None
+        Optional tracer tendencies from physics (convection, microphysics).
+        Keys match HydrostaticState.tracers (e.g. "q_v", "q_c", "q_r").
+        Values are Fields with shape (6, n, n, nlev) and units "kg/kg/s".
+        None when no physics scheme produces tracer tendencies.
     """
     du_dt: Field
     dv_dt: Field
     dT_dt: Field
     dp_s_dt: Field
     dphis_dt: Field
+    tracer_tendencies: dict[str, Field] | None = None
 
 
 class FV3HydrostaticState(NamedTuple):

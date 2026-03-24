@@ -1,15 +1,15 @@
-"""Kuo moisture convergence convection scheme.
+"""Kuo column moisture-excess convection scheme.
 
-A moisture-convergence-based convection parameterization. Convective
+A column moisture-excess convection scheme (Kuo 1965/1974). Convective
 heating and moistening are proportional to the column-integrated moisture
 excess above saturation, partitioned by alpha_heat.
 
-Algorithm (Kuo 1965/1974 — simplified column formulation):
-1. Compute column moisture excess above saturation
-2. Smooth sigmoid trigger based on moisture convergence
+Algorithm (Kuo 1965/1974 — column moisture-excess formulation):
+1. Compute column moisture excess above saturation [kg/m^2]
+2. Smooth sigmoid trigger based on moisture excess
 3. Compute moist adiabat reference profile
 4. Relax temperature and moisture toward reference profiles
-5. Diagnose precipitation from moisture convergence
+5. Diagnose precipitation from implied condensation
 
 All operations use smooth (differentiable) approximations for
 compatibility with jax.grad.
@@ -47,7 +47,7 @@ def kuo_convection(
     dt: float,
     config: KuoConfig = KuoConfig(),
 ) -> ConvectionOutput:
-    """Compute Kuo moisture convergence convection tendencies.
+    """Compute Kuo column moisture-excess convection tendencies.
 
     Parameters
     ----------
@@ -81,7 +81,7 @@ def kuo_convection(
 
     # 3. Smooth trigger based on moisture convergence
     trigger = jax.nn.sigmoid(
-        config.smooth_trigger_sharpness * (MC - config.mc_threshold)
+        config.smooth_trigger_sharpness * (MC - config.me_threshold)
     )  # (ncol,)
 
     # 4. Moist adiabatic reference profile from surface temperature

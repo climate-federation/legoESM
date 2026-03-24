@@ -853,9 +853,12 @@ Following \citet{Frierson2006}:
 \begin{equation}
   \tau(\sigma,\phi) = \bigl[f_l\,\sigma+(1-f_l)\,\sigma^4\bigr]
   \bigl[\tau_e+(\tau_p-\tau_e)\sin^2\!\phi\bigr]
-  + \tau_{\mathrm{moist}}\,q_v,
+  + \sum_k \tau_{\mathrm{moist}}\,q_{v,k}\,\frac{\Delta p_k}{g},
 \end{equation}
-with $\tau_e=7.2$, $\tau_p=1.8$, $f_l=0.2$, $\tau_{\mathrm{moist}}=1150$.
+where the moisture optical depth per layer is
+$\Delta\tau_{\mathrm{moist},k}=\tau_{\mathrm{moist}}\,q_{v,k}\,\Delta p_k/g$,
+with $\tau_e=7.2$, $\tau_p=1.8$, $f_l=0.2$,
+$\tau_{\mathrm{moist}}=0.0115$~m$^2$\,kg$^{-1}$.
 
 \subsubsection{Two-Stream Longwave Fluxes}
 
@@ -967,11 +970,11 @@ Tendencies:
   P = -\frac{1}{g}\sum_k \frac{\dd q_v}{\dd t}\,\Delta p_k.
 \end{equation}
 
-\subsection{Kuo Moisture Convergence Scheme}
+\subsection{Kuo Column Moisture-Excess Scheme}
 
 Convection proportional to column-integrated moisture excess above
-saturation.  Heating and moistening are partitioned via a parameter
-$\alpha_{\mathrm{heat}}$:
+saturation [kg\,m$^{-2}$].  Heating and moistening are partitioned
+via a parameter $\alpha_{\mathrm{heat}}$:
 \begin{align}
   MC &= \int \max(q_v - q_s, 0)\,\frac{\dd p}{g}, \\
   \frac{\dd T}{\dd t} &= \mathcal{F}\,\alpha_{\mathrm{heat}}\,
@@ -1463,7 +1466,7 @@ Following \citet{LMD1994}:
 \subsection{Boundary Layer Depth}
 
 The boundary layer depth $h$ is diagnosed where the bulk Richardson number
-crosses $\mathrm{Ri}_{\mathrm{crit}}=0.25$:
+crosses $\mathrm{Ri}_{\mathrm{crit}}=0.25$ (LMD94 default):
 \begin{equation}
   \mathrm{Ri}_b(z) = \frac{g\,\Delta\rho\,z}
   {\rho_0\,(|\Delta\vect{V}|^2+V_t^2)},
@@ -1478,6 +1481,20 @@ using sigmoid-weighted averaging for a differentiable diagnosis.
 \end{equation}
 where $w_s$ is the turbulent velocity scale depending on surface fluxes
 and stability.
+
+\subsection{Non-Local Transport}
+
+For unstable (convective) boundary layers ($B_f>0$), a non-local
+counter-gradient flux is added to temperature and salinity tendencies
+(LMD94 Eq.~19):
+\begin{equation}
+  \frac{\pp T}{\pp t}\bigg|_{\mathrm{NL}} =
+  \gamma_T\,\frac{w_s(0)\,G(\sigma)}{w_s(\sigma)\,h}\,
+  \frac{\pp T}{\pp z}\bigg|_{\mathrm{sfc}},
+\end{equation}
+where $\gamma_T=6.33$ is the non-local transport coefficient.
+This is active only within the diagnosed boundary layer ($\sigma<1$)
+and only under unstable forcing.
 
 
 \section{Lateral Mixing}

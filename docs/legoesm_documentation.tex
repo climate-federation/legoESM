@@ -505,9 +505,12 @@ where $\beta\ge 0$ is the off-centering parameter (\texttt{acoustic\_off\_center
 \subsubsection{Longwave optical depth}
 \begin{equation}
   \tau(\sigma,\phi) = \bigl[f_l\,\sigma+(1-f_l)\,\sigma^4\bigr]\bigl[\tau_e+(\tau_p-\tau_e)\sin^2\!\phi\bigr]
-  + \tau_{\mathrm{moist}}\,q_v,
+  + \sum_k \tau_{\mathrm{moist}}\,q_{v,k}\,\frac{\Delta p_k}{g},
 \end{equation}
-with $\tau_e=7.2$, $\tau_p=1.8$, $f_l=0.2$, $\tau_{\mathrm{moist}}=1150$.
+where the moisture optical depth per layer is
+$\Delta\tau_{\mathrm{moist},k}=\tau_{\mathrm{moist}}\,q_{v,k}\,\Delta p_k/g$,
+with $\tau_e=7.2$, $\tau_p=1.8$, $f_l=0.2$,
+$\tau_{\mathrm{moist}}=0.0115$~m$^2$\,kg$^{-1}$.
 
 \subsubsection{Two-stream LW fluxes}
 Layer transmittance and emissivity:

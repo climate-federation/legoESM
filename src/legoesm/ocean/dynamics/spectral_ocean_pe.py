@@ -222,8 +222,10 @@ def spectral_ocean_tendencies(
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer  # at cell center
 
-    # --- 5. Kinetic energy ---
-    K = 0.5 * (u.real**2 + v.real**2)
+    # --- 5. Kinetic energy (pole-safe via oc2 transform) ---
+    # KE·cos²φ avoids the 1/cos² singularity at the poles; the factor
+    # is absorbed by sh_analysis_oc2_3d in the energy variable below.
+    KE_cos2 = 0.5 * (u_cos.real**2 + v_cos.real**2)  # KE·cos²φ
 
     # --- 6. Absolute vorticity ---
     abs_vor = vor + grid.f[..., jnp.newaxis]
@@ -270,8 +272,8 @@ def spectral_ocean_tendencies(
         p_prime * mask_3d * weights, axis=(0, 1), keepdims=True,
     ) / ocean_area
     p_prime_anom = (p_prime - p_prime_mean) * mask_3d
-    E = K + p_prime_anom / rho_0
-    E_hat = sh_analysis_3d(grid, E * mask_3d)
+    E_hat = (sh_analysis_oc2_3d(grid, KE_cos2 * mask_3d)
+             + sh_analysis_3d(grid, (p_prime_anom / rho_0) * mask_3d))
 
     # --- 11. Horizontal tendencies ---
     dvor_hat = -flux_vor_div

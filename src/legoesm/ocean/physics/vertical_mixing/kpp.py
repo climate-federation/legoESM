@@ -240,17 +240,24 @@ def kpp_vertical_mixing(
         in_axes=0, out_axes=0,
     )(tracers)
 
-    # --- Non-local flux for T, S: ONLY for unstable (convective) forcing ---
-    # gamma * w_s * G / h  (LMD94 Eq. 19)
-    # Surface forcing proxy for heat: Q_T ≈ B_f * rho_0 / (g * alpha_T)
-    # Simplified: use surface T gradient scaled by K
+    # --- Non-local flux for T, S (LMD94 Eq. 19) ---
+    # gamma_nl(sigma) = C_s / (w_s(sigma) * h * kappa)  [approximately]
+    # Non-local tendency: -d/dz(K * gamma) where gamma = C_s * F_surface / (w_s * h)
+    # Simplified: dT_nonlocal = gamma_T * w_s(0) * G(sigma) * (dT/dz_surface) / h
+    # where w_s(0) * G at sigma~0 captures the surface forcing scale.
+    # Use the surface turbulent velocity scale for the non-local transport.
+    w_s_sfc = w_s[..., 0]  # Turbulent velocity scale at surface
+
+    # Surface heat flux proxy: Q_T ~ w_s(0) * dT/dz_surface
     dT_dz_sfc = (T[..., 0] - T[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    Q_T = cfg.K_bg * dT_dz_sfc  # [K·m/s]
+    Q_T = w_s_sfc * dT_dz_sfc  # [K·m/s]
 
     # Only apply nonlocal for unstable forcing (B_f > 0)
     is_unstable_col = B_f > 0.0
-    nonlocal_T = cfg.gamma_T * Q_T[..., jnp.newaxis] / jnp.maximum(
-        h_bl[..., jnp.newaxis], eps
+    # LMD94 non-local: gamma_T * Q_T * G(sigma) / (w_s(sigma) * h)
+    # Use G from the shape function already computed
+    nonlocal_T = cfg.gamma_T * Q_T[..., jnp.newaxis] * G / (
+        w_s * jnp.maximum(h_bl[..., jnp.newaxis], eps)
     )
     in_bl_full = sigma < 1.0
     dT_nonlocal = jnp.where(
@@ -258,9 +265,9 @@ def kpp_vertical_mixing(
     )
 
     dS_dz_sfc = (S[..., 0] - S[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    Q_S = cfg.K_bg * dS_dz_sfc
-    nonlocal_S = cfg.gamma_S * Q_S[..., jnp.newaxis] / jnp.maximum(
-        h_bl[..., jnp.newaxis], eps
+    Q_S = w_s_sfc * dS_dz_sfc
+    nonlocal_S = cfg.gamma_S * Q_S[..., jnp.newaxis] * G / (
+        w_s * jnp.maximum(h_bl[..., jnp.newaxis], eps)
     )
     dS_nonlocal = jnp.where(
         in_bl_full & is_unstable_col[..., jnp.newaxis], nonlocal_S, 0.0

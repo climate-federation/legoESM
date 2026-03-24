@@ -1146,7 +1146,10 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
-        dt = 600.0
+        # CFL-safe dt for explicit SSP-RK3: gravity wave CFL ≈ 0.5
+        import math
+        _c_gw = math.sqrt(constants.g * 5960.0)  # shallow-water wave speed
+        dt = min(600.0, 0.5 * grid.radius / (n_max * _c_gw))
         config = SpectralSWConfig(
             spectral_filter_order=8 if test_num == 5 else 0,
         )

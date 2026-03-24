@@ -73,10 +73,10 @@ def kessler_microphysics(
     # Saturation mixing ratio
     q_sat = saturation_mixing_ratio(T, p_full)
 
-    # 1. Saturation adjustment
+    # 1. Saturation adjustment — convert from increment [kg/kg] to tendency [kg/kg/s]
     excess = q_v - q_sat
     cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess
+    condensation = cond_frac * excess / dt  # [kg/kg/s]
 
     dq_v_sat = -condensation
     dq_c_sat = condensation

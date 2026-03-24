@@ -71,10 +71,11 @@ def morrison_microphysics(
     N_c_eff = jnp.where(N_c > 1.0, N_c, config.Nc_0 * jnp.ones_like(N_c))
 
     # === WARM RAIN (same as Seifert-Beheng) ===
+    # Saturation adjustment — convert increment [kg/kg] to tendency [kg/kg/s]
     q_sat = saturation_mixing_ratio(T, p_full)
     excess = q_v - q_sat
     cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess
+    condensation = cond_frac * excess / dt  # [kg/kg/s]
 
     # Autoconversion
     x_c = jnp.clip(q_c, 0.0) * rho / jnp.clip(N_c_eff, 1.0)

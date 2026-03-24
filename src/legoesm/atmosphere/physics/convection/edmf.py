@@ -168,11 +168,13 @@ def edmf_convection(
 
     # 10. Precipitation from condensate detrainment
     condensate = jnp.clip(q_u - saturation_mixing_ratio(T_u, p_full), 0.0, None)
+    # Precipitation: delta_0 [1/m] * M_u [kg/m^2/s] * condensate [kg/kg] * dz [m]
+    # gives [kg/m^2/s]. Using dp/g would introduce an extra density factor.
     precipitation = jnp.clip(
-        jnp.sum(M_u * config.delta_0 * condensate * dp / constants.g, axis=1),
+        jnp.sum(config.delta_0 * M_u * condensate * dz, axis=1),
         0.0,
         None,
-    )  # (ncol,)
+    )  # (ncol,) [kg/m^2/s]
 
     # Convective mask from CAPE activation
     convective_mask = jax.nn.sigmoid(

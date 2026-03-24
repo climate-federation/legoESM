@@ -196,6 +196,17 @@ def _make_hydrostatic_convection(
         dims_3d = ("face", "x", "y", "level")
         dims_2d = ("face", "x", "y")
 
+        # Propagate tracer tendencies from convection backend
+        tracer_tends = None
+        if conv_fn is not None:
+            dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
+            tracer_tends = {
+                "q_v": Field(
+                    data=dq_v_dt, name="dq_v_dt_conv",
+                    dims=dims_3d, units="kg/kg/s",
+                ),
+            }
+
         tendencies = HydrostaticTendencies(
             du_dt=Field(
                 data=jnp.zeros(shape_3d), name="du_dt_conv",
@@ -217,6 +228,7 @@ def _make_hydrostatic_convection(
                 data=jnp.zeros(shape_2d), name="dphis_dt_conv",
                 dims=dims_2d, units="m^2/s^3",
             ),
+            tracer_tendencies=tracer_tends,
         )
         return tendencies, conv_prog_out
 

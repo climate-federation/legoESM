@@ -3,7 +3,7 @@
 Provides configuration NamedTuples for:
 1. Simplified Betts-Miller (SBM) — relaxation-based convection (Frierson 2007)
 2. Deep Convective Adjustment (DCA) — simplest baseline adjustment
-3. Kuo — moisture convergence (Kuo 1965/1974)
+3. Kuo — column moisture-excess (Kuo 1965/1974)
 4. Prognostic Mass-Flux — Arakawa-Wu type (1 prognostic var: M_c)
 5. Simplified EDMF — eddy-diffusivity mass-flux (1 prognostic var: a_u)
 6. Top-level ConvectionConfig that selects the active scheme.
@@ -71,21 +71,21 @@ class DCAConfig(NamedTuple):
 
 
 class KuoConfig(NamedTuple):
-    """Configuration for Kuo moisture convergence convection.
+    """Configuration for Kuo column moisture-excess convection.
 
     Fields
     ------
     alpha_heat : float
         Fraction of moisture convergence going to heating vs moistening.
-    mc_threshold : float
-        Minimum moisture convergence to trigger convection [kg/m^2/s].
+    me_threshold : float
+        Minimum column moisture excess to trigger convection [kg/m^2].
     smooth_trigger_sharpness : float
         Sigmoid sharpness on moisture convergence trigger.
     tau_relax : float
         Relaxation timescale [s].
     """
     alpha_heat: float = 0.75
-    mc_threshold: float = 1e-5
+    me_threshold: float = 1e-5
     smooth_trigger_sharpness: float = 1e4
     tau_relax: float = 3600.0
 

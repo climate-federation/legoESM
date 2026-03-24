@@ -103,6 +103,7 @@ def bulk_formula_surface_forcing(
     du_dt = jnp.zeros(shape_3d, dtype=dtype)
     dv_dt = jnp.zeros(shape_3d, dtype=dtype)
     du_dt = du_dt.at[..., 0].set(tau_x * inv_rho_dz)
+    dv_dt = dv_dt.at[..., 0].set(tau_y * inv_rho_dz)
 
     dT_dt = jnp.zeros(shape_3d, dtype=dtype)
     dT_dt = dT_dt.at[..., 0].set(Q_net * inv_rho_csw_dz)
