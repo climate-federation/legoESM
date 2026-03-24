@@ -1896,6 +1896,8 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.physics.held_suarez import held_suarez_init
         from legoesm.core.operators import global_integral
 
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing
+
         n = int(tc.resolution[1:])
         grid = create_cubed_sphere(n)
         sigma = standard_hybrid_levels(nlev)
@@ -1910,8 +1912,10 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         model = PrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init(grid, sigma, T_init=280.0)
 
+        physics_fn = held_suarez_forcing
+
         def step_fn(s, dt_):
-            return model.step(s, dt_)
+            return model.step_with_physics(s, dt_, physics_fn)
 
         mass_fn = lambda s: float(global_integral(s.p_s, grid))
 
@@ -1942,7 +1946,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
             LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
         from legoesm.atmosphere.physics.held_suarez_latlon import (
-            held_suarez_init_latlon)
+            held_suarez_init_latlon, held_suarez_forcing_latlon)
         from legoesm.core.operators_latlon import (
             global_integral as global_integral_ll)
 
@@ -1960,8 +1964,10 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         model = LatLonPrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init_latlon(grid, sigma)
 
+        physics_fn = held_suarez_forcing_latlon
+
         def step_fn(s, dt_):
-            return model.step(s, dt_)
+            return model.step_with_physics(s, dt_, physics_fn)
 
         mass_fn = lambda s: float(global_integral_ll(s.p_s, grid))
 
@@ -1985,8 +1991,52 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
 
     elif tc.grid_type == "icosahedral":
-        record(tc, "SKIP", 0.0, "AMIP not yet implemented for icosahedral grid")
-        return "SKIP", 0.0, ""
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
+        from legoesm.atmosphere.physics.held_suarez_mpas import (
+            held_suarez_forcing_mpas, held_suarez_init_mpas)
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+
+        level = int(tc.resolution.replace("ico", ""))
+        mesh = create_voronoi_mesh(level)
+        sigma = create_sigma_coordinate(nlev)
+        dt = 200.0
+        ah = _laplacian_visc_ico(mesh)
+        config = MPASPrimitiveEquationConfig(
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+        model = MPASPrimitiveEquationModel(mesh, sigma, config)
+        state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
+        grid = mesh
+
+        def step_fn(s, dt_):
+            return model.step(s, dt_, held_suarez_forcing_mpas)
+
+        mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
+
+        def check_fn(s):
+            return (check_finite({"T": s.T.data, "u": s.u.data}),
+                    float(jnp.max(jnp.abs(s.u.data))))
+
+        def scalar_fn(s):
+            return {
+                "mass": mass_fn(s),
+                "max_wind": float(jnp.max(jnp.abs(s.u.data))),
+                "mean_T": float(jnp.mean(s.T.data)),
+                "mean_p_s": float(jnp.mean(s.p_s.data)),
+            }
+
+        lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+
+        def extract_fn(s):
+            return _extract_hydro_mpas(s, mesh, lon_cell, lat_cell)
+
+        key_array_fn = lambda s: s.T.data
+        coord_kind = "icosa"
+        lon_deg = lon_cell
+        lat_deg = lat_cell
 
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import (
