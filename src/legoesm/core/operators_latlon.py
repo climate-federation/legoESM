@@ -18,7 +18,9 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.grids.halo_latlon import pad_halo_latlon, pad_halo_vector_latlon
+from legoesm.grids.halo_latlon import (
+    pad_halo_latlon, pad_halo_latlon_vector, pad_halo_vector_latlon,
+)
 
 
 # ==============================================================================
@@ -138,8 +140,8 @@ def curl_z(u_field: Field, v_field: Field, grid: LatLonGrid) -> Field:
     v_metric = v * (grid.dy * 0.5)   # v * single-cell dy
     u_metric = u * (grid.dx * 0.5)   # u * single-cell dx (varies with lat)
 
-    v_pad = pad_halo_latlon(v_metric)
-    u_pad = pad_halo_latlon(u_metric)
+    v_pad = pad_halo_latlon_vector(v_metric)
+    u_pad = pad_halo_latlon_vector(u_metric)
 
     dv_dx = v_pad[1:-1, 2:] - v_pad[1:-1, :-2]  # d/dlon
     du_dy = u_pad[2:, 1:-1] - u_pad[:-2, 1:-1]  # d/dlat

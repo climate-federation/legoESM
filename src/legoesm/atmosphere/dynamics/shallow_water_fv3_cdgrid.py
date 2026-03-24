@@ -142,6 +142,35 @@ class CDGridShallowWaterModel(IntegrationMixin):
         """
         self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
 
+    def _sync_dgrid_boundary(self, state: CDGridShallowWaterState):
+        """Synchronize D-grid boundary winds between cubed-sphere faces.
+
+        Converts D-grid to A-grid, does a cross-face vector halo exchange,
+        re-derives D-grid corners, and replaces ONLY the boundary rows/columns
+        (first and last row/column of each face). Interior D-grid values are
+        untouched.
+        """
+        from legoesm.core.operators_cdgrid import (
+            dgrid_to_agrid_vector, agrid_to_dgrid_vector,
+        )
+        u_d, v_d = state.u_d, state.v_d
+        u_a, v_a = dgrid_to_agrid_vector(u_d, v_d)
+        u_d_sync, v_d_sync = agrid_to_dgrid_vector(u_a, v_a, self.cdgrid)
+
+        # Only replace boundary rows/columns — keep interior intact
+        n = self.grid.n
+        u_new = u_d.at[:, 0, :].set(u_d_sync[:, 0, :])
+        u_new = u_new.at[:, n, :].set(u_d_sync[:, n, :])
+        u_new = u_new.at[:, :, 0].set(u_d_sync[:, :, 0])
+        u_new = u_new.at[:, :, n].set(u_d_sync[:, :, n])
+
+        v_new = v_d.at[:, 0, :].set(v_d_sync[:, 0, :])
+        v_new = v_new.at[:, n, :].set(v_d_sync[:, n, :])
+        v_new = v_new.at[:, :, 0].set(v_d_sync[:, :, 0])
+        v_new = v_new.at[:, :, n].set(v_d_sync[:, :, n])
+
+        return state._replace(u_d=u_new, v_d=v_new)
+
     def tendencies(self, state: CDGridShallowWaterState):
         """Compute tendencies (pure function wrapper)."""
         return cdgrid_shallow_water_tendencies(

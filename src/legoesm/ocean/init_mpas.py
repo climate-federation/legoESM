@@ -114,8 +114,16 @@ def rest_state_mpas_ocean(
 def reconstruct_cell_velocity(u_edge, mesh):
     """Reconstruct (u_east, v_north) at cell centers from edge normals.
 
-    Uses area-weighted projection of edge normal velocities onto
-    zonal/meridional directions.
+    Uses the Perot reconstruction: project edge-normal velocities onto
+    zonal/meridional directions, weighted by ``dvEdge * dcEdge / (2 * areaCell)``.
+    This formula is exact for uniform flow on any Voronoi mesh.
+
+    Note: ``edgeSignOnCell`` is NOT used here — it is needed for the
+    divergence operator (flux balance) but not for velocity reconstruction.
+    The edge-normal velocity ``u_edge`` already follows the edge's own
+    normal direction (defined by ``angleEdge``), so projecting with
+    ``cos(angleEdge)`` / ``sin(angleEdge)`` directly gives the correct
+    eastward/northward components.
 
     Parameters
     ----------
@@ -133,25 +141,26 @@ def reconstruct_cell_velocity(u_edge, mesh):
     is_3d = u_edge.ndim == 2
 
     eoc = mesh.edgesOnCell  # (maxEdges, nCells)
-    sign = mesh.edgeSignOnCell  # (maxEdges, nCells)
     mask = (eoc >= 0).astype(u_edge.dtype)  # (maxEdges, nCells)
     eoc_safe = jnp.maximum(eoc, 0)
 
+    # Reconstruction weight: dvEdge * dcEdge / (2 * areaCell)
     dv = mesh.dvEdge[eoc_safe] * mask  # (maxEdges, nCells)
-    angle = mesh.angleEdge[eoc_safe]  # (maxEdges, nCells)
+    dc = mesh.dcEdge[eoc_safe] * mask  # (maxEdges, nCells)
+    angle = mesh.angleEdge[eoc_safe]   # (maxEdges, nCells)
+    weight = dv * dc / (2.0 * mesh.areaCell[jnp.newaxis, :])  # (maxEdges, nCells)
+
+    cos_a = jnp.cos(angle)
+    sin_a = jnp.sin(angle)
 
     if is_3d:
-        # u_edge: (nEdges, nlev) -> u_gathered: (maxEdges, nCells, nlev)
-        u_gathered = u_edge[eoc_safe]  # (maxEdges, nCells, nlev)
-        u_signed = u_gathered * sign[..., jnp.newaxis] * mask[..., jnp.newaxis]
-        dv_3d = dv[..., jnp.newaxis]
-        cos_a = jnp.cos(angle)[..., jnp.newaxis]
-        sin_a = jnp.sin(angle)[..., jnp.newaxis]
-        u_east = jnp.sum(u_signed * dv_3d * cos_a, axis=0) / mesh.areaCell[:, jnp.newaxis]
-        v_north = jnp.sum(u_signed * dv_3d * sin_a, axis=0) / mesh.areaCell[:, jnp.newaxis]
+        u_gathered = u_edge[eoc_safe] * mask[..., jnp.newaxis]
+        w3d = weight[..., jnp.newaxis]
+        u_east = jnp.sum(u_gathered * w3d * cos_a[..., jnp.newaxis], axis=0)
+        v_north = jnp.sum(u_gathered * w3d * sin_a[..., jnp.newaxis], axis=0)
     else:
-        u_gathered = u_edge[eoc_safe] * sign * mask  # (maxEdges, nCells)
-        u_east = jnp.sum(u_gathered * dv * jnp.cos(angle), axis=0) / mesh.areaCell
-        v_north = jnp.sum(u_gathered * dv * jnp.sin(angle), axis=0) / mesh.areaCell
+        u_gathered = u_edge[eoc_safe] * mask
+        u_east = jnp.sum(u_gathered * weight * cos_a, axis=0)
+        v_north = jnp.sum(u_gathered * weight * sin_a, axis=0)
 
     return u_east, v_north

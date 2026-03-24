@@ -98,7 +98,7 @@ GRID_TYPES = list(GRID_RESOLUTIONS.keys())
 
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
-DEFAULT_DT = 900.0  # seconds
+DEFAULT_DT = 300.0  # seconds (scaled for ~2.5 deg resolution CFL)
 
 # Physical constants for idealized ocean test cases
 _A_EARTH = 6.37122e6   # Earth radius (m)
@@ -591,6 +591,55 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                      output_dir / "field_snapshots.png")
 
 
+def _bin_cross_section(
+    f3d: np.ndarray,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+    coord_kind: str,
+    mean_axis: int,
+    n_lat: int = 181,
+    n_lon: int = 360,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute a cross-section by direct binning (no interpolation).
+
+    For regular grids (latlon, gaussian): regrid then nanmean as before.
+    For unstructured grids (cube, mpas): bin source points directly into
+    latitude or longitude bins with adaptive bin count ensuring >= ~10
+    points per bin on average, avoiding IDW interpolation artifacts.
+
+    Parameters
+    ----------
+    mean_axis : int
+        0 = average over latitude → longitude-vertical section
+        1 = average over longitude → latitude-vertical section
+
+    Returns
+    -------
+    section : np.ndarray, shape (n_bins, nlev)
+    bin_centers : np.ndarray, shape (n_bins,) — for plotting extents
+    """
+    # Regrid to regular lat-lon, then average over the requested axis.
+    # Use k=20 neighbors for unstructured grids to avoid aliasing from
+    # cubed-sphere face boundaries or icosahedral grid structure.
+    if coord_kind not in ("latlon", "gaussian"):
+        arr = np.asarray(f3d, dtype=np.float64)
+        if arr.ndim == 1:
+            arr = arr[:, None]
+        flat = arr.reshape(-1, arr.shape[-1])
+        nlev = flat.shape[1]
+        idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon, k=20)
+        ll = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
+        for lev in range(nlev):
+            ll[..., lev] = _apply_weights(flat[:, lev], idxs, w, n_lat, n_lon)
+    else:
+        ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
+
+    section = np.nanmean(ll, axis=mean_axis)
+    if mean_axis == 0:
+        return section, np.linspace(-180, 180, section.shape[0])
+    return section, np.linspace(-90, 90, section.shape[0])
+
+
 def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
                          dt: float, field_3d_key: str, coord_kind: str,
                          lon_deg: np.ndarray, lat_deg: np.ndarray,
@@ -605,12 +654,10 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         valid_steps = [valid_steps[i] for i in idx]
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    lat_axis = np.linspace(-90, 90, 181)
-    lon_axis = np.linspace(-180, 180, 360)
 
-    for fname, axis_vals, axis_key, mean_axis, xlabel in [
-        ("latitude_vertical_cross_sections.png", lat_axis, "lat", 1, "Latitude"),
-        ("longitude_vertical_cross_sections.png", lon_axis, "lon", 0, "Longitude"),
+    for fname, mean_axis, xlabel in [
+        ("latitude_vertical_cross_sections.png", 1, "Latitude"),
+        ("longitude_vertical_cross_sections.png", 0, "Longitude"),
     ]:
         nc = len(valid_steps)
         fig, axes_arr = plt.subplots(
@@ -621,12 +668,12 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
 
         for ax, step in zip(axes_arr, valid_steps):
             f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
-            ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
-            section = np.nanmean(ll, axis=mean_axis)
+            section, bin_centers = _bin_cross_section(
+                f3d, lon_deg, lat_deg, coord_kind, mean_axis)
             section = _fill_nan_section(section)
             im = ax.imshow(
                 section.T, origin="upper", aspect="auto", cmap="RdBu_r",
-                extent=[axis_vals[0], axis_vals[-1],
+                extent=[bin_centers[0], bin_centers[-1],
                         float(levels[-1]), float(levels[0])])
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)

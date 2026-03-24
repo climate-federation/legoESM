@@ -662,6 +662,21 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         ("latitude_vertical_cross_sections.png", lat_axis, "lat", 1, "Latitude"),
         ("longitude_vertical_cross_sections.png", lon_axis, "lon", 0, "Longitude"),
     ]:
+        # Pre-compute all sections to determine shared color limits
+        sections = []
+        for step in valid_steps:
+            f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
+            ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
+            section = np.nanmean(ll, axis=mean_axis)
+            sections.append(_fill_nan_section(section))
+
+        all_vals = np.concatenate([s.ravel() for s in sections])
+        all_finite = all_vals[np.isfinite(all_vals)]
+        if all_finite.size > 0:
+            vmin, vmax = float(all_finite.min()), float(all_finite.max())
+        else:
+            vmin, vmax = 0.0, 1.0
+
         nc = len(valid_steps)
         fig, axes_arr = plt.subplots(
             1, nc, figsize=(4.5 * nc, 5), sharey=True)
@@ -669,13 +684,10 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             axes_arr = [axes_arr]
         im = None
 
-        for ax, step in zip(axes_arr, valid_steps):
-            f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
-            ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
-            section = np.nanmean(ll, axis=mean_axis)  # (axis, lev)
-            section = _fill_nan_section(section)
+        for ax, step, section in zip(axes_arr, valid_steps, sections):
             im = ax.imshow(
                 section.T, origin="lower", aspect="auto", cmap="RdBu_r",
+                vmin=vmin, vmax=vmax,
                 extent=[axis_vals[0], axis_vals[-1],
                         float(levels[0]), float(levels[-1])])
             day = step * dt / 86400.0

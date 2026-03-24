@@ -314,17 +314,16 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
         result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t))
         return jnp.moveaxis(result_t, 0, -1)
 
-    # 2D case: PPM reconstruction
-    h_pad_h2 = _pad_halo_auto_h2(h, cdgrid)  # (6, n+4, n+4)
+    # 2D case: first-order upwind face values
+    h_pad = _pad_halo_auto(h, cdgrid)  # (6, n+2, n+2)
 
-    # PPM left/right states at x-interfaces: (6, n+1, n)
-    h_L_x, h_R_x = _ppm_reconstruct_x(h_pad_h2)
-    # PPM left/right states at y-interfaces: (6, n, n+1)
-    h_L_y, h_R_y = _ppm_reconstruct_y(h_pad_h2)
+    h_left_x = h_pad[:, :-1, 1:-1]   # (6, n+1, n)
+    h_right_x = h_pad[:, 1:, 1:-1]   # (6, n+1, n)
+    h_face_x = jnp.where(u_c > 0, h_left_x, h_right_x)
 
-    # Upwind selection
-    h_face_x = jnp.where(u_c > 0, h_L_x, h_R_x)
-    h_face_y = jnp.where(v_c > 0, h_L_y, h_R_y)
+    h_left_y = h_pad[:, 1:-1, :-1]   # (6, n, n+1)
+    h_right_y = h_pad[:, 1:-1, 1:]   # (6, n, n+1)
+    h_face_y = jnp.where(v_c > 0, h_left_y, h_right_y)
 
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
