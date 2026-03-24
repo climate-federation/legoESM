@@ -63,6 +63,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
     hyperdiff_coeff: float = 0.0  # Biharmonic hyperdiffusion
+    div_damp: float = 0.0         # Divergence damping coefficient [m^2/s]
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
@@ -104,6 +105,7 @@ def cdgrid_shallow_water_tendencies(
         h, u_d, v_d, h_s, cdgrid,
         g=config.g, A_h=config.A_h,
         hyperdiff_coeff=config.hyperdiff_coeff,
+        div_damp=config.div_damp,
     )
 
     return dh_dt, du_d_dt, dv_d_dt
@@ -145,50 +147,117 @@ class CDGridShallowWaterModel(IntegrationMixin):
     def _sync_dgrid_boundary(self, state: CDGridShallowWaterState):
         """Synchronize D-grid boundary winds between cubed-sphere faces.
 
-        Converts D-grid corners to geographic (east/north) first — this is
-        safe to average across faces — then averages to A-grid centres,
-        converts to face-local, uses ``agrid_to_dgrid_vector`` (which does
-        proper cross-face vector halo exchange), and replaces ONLY the
-        boundary rows/columns.
+        FV3-style direct corner-to-corner sync: convert D-grid corner
+        velocities to geographic (east/north) at each shared face edge,
+        average with the neighbouring face's geographic velocity at each
+        shared corner, then convert back to face-local.
+
+        Edge corners (shared by 2 faces) get a pairwise average.
+        Vertex corners (shared by 3 faces) get a 3-way average.
         """
-        from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
+        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
         u_d, v_d = state.u_d, state.v_d
+        n = self.grid.n
         ca_c = self.cdgrid.cos_angle_corner
         sa_c = self.cdgrid.sin_angle_corner
 
-        # 1. D-grid corners → geographic (safe to average across faces)
-        u_east_d = ca_c * u_d - sa_c * v_d
-        v_north_d = sa_c * u_d + ca_c * v_d
+        # 1. Convert all corners to geographic (read-only reference)
+        ue = ca_c * u_d - sa_c * v_d
+        vn = sa_c * u_d + ca_c * v_d
 
-        # 2. Average geographic velocities to A-grid centres
-        u_east_a = 0.25 * (u_east_d[:, :-1, :-1] + u_east_d[:, 1:, :-1]
-                           + u_east_d[:, :-1, 1:] + u_east_d[:, 1:, 1:])
-        v_north_a = 0.25 * (v_north_d[:, :-1, :-1] + v_north_d[:, 1:, :-1]
-                            + v_north_d[:, :-1, 1:] + v_north_d[:, 1:, 1:])
+        # 2. Edge sync: pairwise average (read originals, write to output)
+        ue_out = ue
+        vn_out = vn
 
-        # 3. Geographic A-grid → face-local A-grid
-        ca = self.grid.cos_angle
-        sa = self.grid.sin_angle
-        u_a = ca * u_east_a + sa * v_north_a
-        v_a = -sa * u_east_a + ca * v_north_a
+        def _get_strip(arr, face, edge):
+            if edge == WEST:    return arr[face, 0, :]
+            elif edge == EAST:  return arr[face, n, :]
+            elif edge == SOUTH: return arr[face, :, 0]
+            else:               return arr[face, :, n]
 
-        # 4. A-grid → D-grid with cross-face vector halo exchange
-        u_d_sync, v_d_sync = agrid_to_dgrid_vector(u_a, v_a, self.cdgrid)
+        for face in range(6):
+            for edge in [WEST, EAST, SOUTH, NORTH]:
+                nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+                nbr_ue = _get_strip(ue, nbr_face, nbr_edge)
+                nbr_vn = _get_strip(vn, nbr_face, nbr_edge)
+                if is_reversed:
+                    nbr_ue = nbr_ue[::-1]
+                    nbr_vn = nbr_vn[::-1]
+                local_ue = _get_strip(ue, face, edge)
+                local_vn = _get_strip(vn, face, edge)
+                avg_ue = 0.5 * (local_ue + nbr_ue)
+                avg_vn = 0.5 * (local_vn + nbr_vn)
+                if edge == WEST:
+                    ue_out = ue_out.at[face, 0, :].set(avg_ue)
+                    vn_out = vn_out.at[face, 0, :].set(avg_vn)
+                elif edge == EAST:
+                    ue_out = ue_out.at[face, n, :].set(avg_ue)
+                    vn_out = vn_out.at[face, n, :].set(avg_vn)
+                elif edge == SOUTH:
+                    ue_out = ue_out.at[face, :, 0].set(avg_ue)
+                    vn_out = vn_out.at[face, :, 0].set(avg_vn)
+                else:
+                    ue_out = ue_out.at[face, :, n].set(avg_ue)
+                    vn_out = vn_out.at[face, :, n].set(avg_vn)
 
-        # 5. Replace boundary rows/columns only
-        n = self.grid.n
-        u_new = u_d.at[:, 0, :].set(u_d_sync[:, 0, :])
-        u_new = u_new.at[:, n, :].set(u_d_sync[:, n, :])
-        u_new = u_new.at[:, :, 0].set(u_d_sync[:, :, 0])
-        u_new = u_new.at[:, :, n].set(u_d_sync[:, :, n])
+        # 3. Vertex sync: 3-way average at cube vertices (8 vertices)
+        _vtx = [
+            [(0, 0, 0), (3, n, 0), (5, 0, n)],
+            [(0, n, 0), (1, 0, 0), (5, n, n)],
+            [(0, 0, n), (3, n, n), (4, 0, 0)],
+            [(0, n, n), (1, 0, n), (4, n, 0)],
+            [(1, n, 0), (2, 0, 0), (5, n, 0)],
+            [(1, n, n), (2, 0, n), (4, n, n)],
+            [(2, n, 0), (3, 0, 0), (5, 0, 0)],
+            [(2, n, n), (3, 0, n), (4, 0, n)],
+        ]
+        for vtx in _vtx:
+            ue_avg = sum(ue[f, i, j] for f, i, j in vtx) / 3.0
+            vn_avg = sum(vn[f, i, j] for f, i, j in vtx) / 3.0
+            for f, i, j in vtx:
+                ue_out = ue_out.at[f, i, j].set(ue_avg)
+                vn_out = vn_out.at[f, i, j].set(vn_avg)
 
-        v_new = v_d.at[:, 0, :].set(v_d_sync[:, 0, :])
-        v_new = v_new.at[:, n, :].set(v_d_sync[:, n, :])
-        v_new = v_new.at[:, :, 0].set(v_d_sync[:, :, 0])
-        v_new = v_new.at[:, :, n].set(v_d_sync[:, :, n])
+        # 4. Smooth first interior row: blend with boundary to reduce the
+        #    sharp transition between synced boundary and interior corners.
+        #    This 3-point filter operates in geographic coords (isotropic).
+        w = 0.45  # weight on boundary / 2nd-interior; 0.10 on local
+        for face in range(6):
+            # WEST (i=1): blend with i=0 (synced) and i=2 (interior)
+            ue_out = ue_out.at[face, 1, :].set(
+                w * ue_out[face, 0, :] + (1 - 2*w) * ue_out[face, 1, :]
+                + w * ue_out[face, 2, :])
+            vn_out = vn_out.at[face, 1, :].set(
+                w * vn_out[face, 0, :] + (1 - 2*w) * vn_out[face, 1, :]
+                + w * vn_out[face, 2, :])
+            # EAST (i=n-1)
+            ue_out = ue_out.at[face, n-1, :].set(
+                w * ue_out[face, n, :] + (1 - 2*w) * ue_out[face, n-1, :]
+                + w * ue_out[face, n-2, :])
+            vn_out = vn_out.at[face, n-1, :].set(
+                w * vn_out[face, n, :] + (1 - 2*w) * vn_out[face, n-1, :]
+                + w * vn_out[face, n-2, :])
+            # SOUTH (j=1)
+            ue_out = ue_out.at[face, :, 1].set(
+                w * ue_out[face, :, 0] + (1 - 2*w) * ue_out[face, :, 1]
+                + w * ue_out[face, :, 2])
+            vn_out = vn_out.at[face, :, 1].set(
+                w * vn_out[face, :, 0] + (1 - 2*w) * vn_out[face, :, 1]
+                + w * vn_out[face, :, 2])
+            # NORTH (j=n-1)
+            ue_out = ue_out.at[face, :, n-1].set(
+                w * ue_out[face, :, n] + (1 - 2*w) * ue_out[face, :, n-1]
+                + w * ue_out[face, :, n-2])
+            vn_out = vn_out.at[face, :, n-1].set(
+                w * vn_out[face, :, n] + (1 - 2*w) * vn_out[face, :, n-1]
+                + w * vn_out[face, :, n-2])
 
-        return state._replace(u_d=u_new, v_d=v_new)
+        # 5. Convert back to face-local
+        u_d_new = ca_c * ue_out + sa_c * vn_out
+        v_d_new = -sa_c * ue_out + ca_c * vn_out
+
+        return state._replace(u_d=u_d_new, v_d=v_d_new)
 
     def tendencies(self, state: CDGridShallowWaterState):
         """Compute tendencies (pure function wrapper)."""
@@ -202,6 +271,9 @@ class CDGridShallowWaterModel(IntegrationMixin):
     ) -> CDGridShallowWaterState:
         """Advance one time step using SSP-RK3."""
         def tendency_fn(s):
+            # Synchronise D-grid boundary corners at every RK stage so
+            # that each intermediate state has consistent cross-face winds.
+            s = self._sync_dgrid_boundary(s)
             dh, du, dv = cdgrid_shallow_water_tendencies(
                 s, self.cdgrid, self.config,
             )

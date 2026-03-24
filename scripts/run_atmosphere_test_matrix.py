@@ -63,10 +63,10 @@ import matplotlib.pyplot as plt
 
 # ~1.25 degree resolutions per grid type
 GRID_RESOLUTIONS: dict[str, str] = {
-    "cubed_sphere": "C72",
-    "latlon": "144x288",
-    "icosahedral": "ico6",
-    "spectral": "T42",
+    "cubed_sphere": "C36",
+    "latlon": "72x144",
+    "icosahedral": "ico5",
+    "spectral": "T21",
 }
 
 GRID_TYPES = list(GRID_RESOLUTIONS.keys())
@@ -203,8 +203,8 @@ def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 5e16) -> float:
     return ref_coeff * (ref_n / n) ** 4
 
 
-def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 5e6) -> float:
-    """Scale second-order divergence damping for cubed-sphere."""
+def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 5e7) -> float:
+    """Scale second-order divergence damping for cubed-sphere (FV3-style)."""
     return ref_coeff * (ref_n / n) ** 2
 
 
@@ -987,7 +987,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         cdgrid = create_cubed_sphere_cdgrid(grid)
         dt = 300.0
         config = CDGridShallowWaterConfig(
-            hyperdiff_coeff=_hyperdiff_cube(n))
+            hyperdiff_coeff=_hyperdiff_cube(n),
+            div_damp=_div_damp_cube(n))
         model = CDGridShallowWaterModel(grid, config)
 
         # Initialise D-grid corners directly using corner lat/angles.

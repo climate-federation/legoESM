@@ -88,10 +88,10 @@ import matplotlib.pyplot as plt
 
 # ~2.5 degree resolutions per grid type
 GRID_RESOLUTIONS: dict[str, str] = {
-    "cubed_sphere": "C48",
-    "latlon": "72x144",
-    "mpas": "ico4",
-    "spectral": "T42",
+    "cubed_sphere": "C24",
+    "latlon": "36x72",
+    "mpas": "ico3",
+    "spectral": "T21",
 }
 
 GRID_TYPES = list(GRID_RESOLUTIONS.keys())

@@ -28,7 +28,6 @@ import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import pad_halo
-from legoesm.core.operators_fv import _ppm_reconstruct_x, _ppm_reconstruct_y
 
 
 # ==============================================================================
@@ -283,11 +282,11 @@ def cgrid_divergence(u_c, v_c, cdgrid):
 # ==============================================================================
 
 def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
-    """Conservative mass flux divergence with PPM face values.
+    """Conservative mass flux divergence with first-order upwind face values.
 
-    Uses PPM (Piecewise Parabolic Method) reconstruction with
-    Colella-Woodward monotonicity limiting for high-order face
-    states, then applies upwind selection based on C-grid velocity.
+    Uses first-order upwind reconstruction for face states. This is
+    more robust at cubed-sphere face boundaries than higher-order
+    methods because it only requires halo=1 data.
 
     Works for both 2D and 3D inputs.
 
@@ -302,7 +301,7 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     dh_dt : jax.Array, shape (6, n, n[, nlev])
     """
     if h.ndim == 4:
-        # 3D: apply PPM per level via vmap
+        # 3D: apply per level via vmap
         h_t = jnp.moveaxis(h, -1, 0)       # (nlev, 6, n, n)
         u_c_t = jnp.moveaxis(u_c, -1, 0)   # (nlev, 6, n+1, n)
         v_c_t = jnp.moveaxis(v_c, -1, 0)   # (nlev, 6, n, n+1)
@@ -314,17 +313,16 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
         result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t))
         return jnp.moveaxis(result_t, 0, -1)
 
-    # 2D case: PPM reconstruction for high-order face values
-    h_pad_h2 = _pad_halo_auto_h2(h, cdgrid)  # (6, n+4, n+4)
+    # 2D case: first-order upwind face values
+    h_pad = _pad_halo_auto(h, cdgrid)  # (6, n+2, n+2)
 
-    # PPM left/right states at x-interfaces: (6, n+1, n)
-    h_L_x, h_R_x = _ppm_reconstruct_x(h_pad_h2)
-    # PPM left/right states at y-interfaces: (6, n, n+1)
-    h_L_y, h_R_y = _ppm_reconstruct_y(h_pad_h2)
+    h_left_x = h_pad[:, :-1, 1:-1]   # (6, n+1, n)
+    h_right_x = h_pad[:, 1:, 1:-1]   # (6, n+1, n)
+    h_face_x = jnp.where(u_c > 0, h_left_x, h_right_x)
 
-    # Upwind selection
-    h_face_x = jnp.where(u_c > 0, h_L_x, h_R_x)
-    h_face_y = jnp.where(v_c > 0, h_L_y, h_R_y)
+    h_left_y = h_pad[:, 1:-1, :-1]   # (6, n, n+1)
+    h_right_y = h_pad[:, 1:-1, 1:]   # (6, n, n+1)
+    h_face_y = jnp.where(v_c > 0, h_left_y, h_right_y)
 
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
@@ -488,7 +486,7 @@ def _laplacian_dgrid(u_d, cdgrid):
 
 def cdgrid_momentum_tendencies(
     h_or_p, u_d, v_d, h_s_or_p_prime, cdgrid,
-    g=9.80616, A_h=0.0, hyperdiff_coeff=0.0,
+    g=9.80616, A_h=0.0, hyperdiff_coeff=0.0, div_damp=0.0,
     rho_0=None, div_v=None, f_3d=None,
     u_prime=None, v_prime=None,
 ):
@@ -541,15 +539,15 @@ def cdgrid_momentum_tendencies(
     else:
         zeta_abs = zeta + cdgrid.base.f
 
-    # 2. KE at cell centres — compute at D-grid corners first, then average.
-    # KE = 0.5*(u_d² + v_d²) is rotationally invariant at each corner, so
-    # averaging the scalar KE to cell centres preserves the invariance.
-    # (The old approach of averaging face-local velocity components and then
-    # squaring introduces face-anisotropic errors at cubed-sphere boundaries.)
-    KE_corner = 0.5 * (u_d ** 2 + v_d ** 2)
-    KE = _interp_corner_to_center(KE_corner)
-    # C-grid velocities still needed for mass flux (computed in caller)
+    # 2. KE at cell centres from C-grid velocities
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
+    if is_3d:
+        u_center = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])
+        v_center = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])
+    else:
+        u_center = 0.5 * (u_c[:, :-1, :] + u_c[:, 1:, :])
+        v_center = 0.5 * (v_c[:, :, :-1] + v_c[:, :, 1:])
+    KE = 0.5 * (u_center ** 2 + v_center ** 2)
 
     # 3. Gradients at corners (Arakawa-Lamb)
     if is_3d:
@@ -600,6 +598,13 @@ def cdgrid_momentum_tendencies(
             _laplacian_dgrid(u_d, cdgrid), cdgrid)
         dv_d_dt = dv_d_dt - hyperdiff_coeff * _laplacian_dgrid(
             _laplacian_dgrid(v_d, cdgrid), cdgrid)
+
+    # 8. Divergence damping (FV3-style: damps the divergent mode)
+    if div_damp > 0:
+        div_field = cgrid_divergence(u_c, v_c, cdgrid)
+        ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_field, cdgrid)
+        du_d_dt = du_d_dt + div_damp * ddiv_dx
+        dv_d_dt = dv_d_dt + div_damp * ddiv_dy
 
     return du_d_dt, dv_d_dt
 
