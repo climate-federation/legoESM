@@ -295,9 +295,8 @@ def dgrid_to_center_vector(u_d, v_d):
 def dgrid_to_cgrid(u_d, v_d, cdgrid):
     """D-grid corner winds -> C-grid edge-normal velocities.
 
-    Simple 2-point averaging along each edge. The non-orthogonality
-    correction is applied at the cell-centre stage (in d2cc/d2a2c),
-    not at the edge-averaging stage.
+    Simple 2-point averaging along each edge, consistent with the
+    orthogonal-rotation convention used for D-grid winds.
 
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev).
     """
@@ -339,6 +338,10 @@ def dgrid_vorticity(u_d, v_d, cdgrid):
 
     Uses the integral circulation form: zeta = (1/A) oint v . dl, which is
     exact for the D-grid and avoids the Hollingsworth-Kallberg instability.
+
+    D-grid winds follow the orthogonal-rotation convention (geographic wind
+    rotated by the grid angle into grid-aligned coordinates), so the
+    circulation integral uses the standard orthogonal form.
 
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
 
@@ -868,8 +871,10 @@ def fv3_vorticity(u_d, v_d, cdgrid):
 def fv3_d2cc(u_d, v_d, cdgrid):
     """Edge-midpoint D-grid winds to cell-centre velocities.
 
-    Step 1: Average the two opposing edge velocities to the cell centre.
-    Step 2: Correct for grid non-orthogonality using cosa_cell / sina_cell.
+    Simple average of the two opposing edge velocities to the cell centre.
+    D-grid winds use the orthogonal-rotation convention (geographic wind
+    projected using the grid angle), so no non-orthogonality correction
+    is needed.
 
     Parameters
     ----------
@@ -881,15 +886,8 @@ def fv3_d2cc(u_d, v_d, cdgrid):
     -------
     u_cc, v_cc : jax.Array, shape (6, n, n)
     """
-    u_avg = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
-    v_avg = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
-
-    cosa_cc = cdgrid.cosa_cell
-    rsin2 = cdgrid.rsin2_cell
-
-    u_cc = (u_avg - cosa_cc * v_avg) * rsin2
-    v_cc = (v_avg - cosa_cc * u_avg) * rsin2
-
+    u_cc = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
+    v_cc = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
     return u_cc, v_cc
 
 

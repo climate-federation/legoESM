@@ -55,7 +55,7 @@ def williamson2_initial_condition(cdgrid, u_0=38.61068276698372, h_0=29400.0 / 9
     u_geo = u_0 * cos_lat
 
     u_d = u_geo * cdgrid.cos_angle_corner
-    v_d = u_geo * cdgrid.sin_angle_corner
+    v_d = -u_geo * cdgrid.sin_angle_corner
 
     h_s = jnp.zeros_like(h)
 

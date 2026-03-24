@@ -99,7 +99,7 @@ class TestCDGridOperators(unittest.TestCase):
         self.assertEqual(v_d.shape, (6, n + 1, n + 1))
 
     def test_dgrid_cgrid_roundtrip(self):
-        """D→C→D should approximately recover the original for smooth fields."""
+        """D->C->D should approximately recover the original for smooth fields."""
         from legoesm.core.operators_cdgrid import dgrid_to_cgrid, cgrid_to_dgrid
         n = self.n
         key = jax.random.PRNGKey(42)
@@ -121,10 +121,14 @@ class TestCDGridOperators(unittest.TestCase):
         Omega = 7.292e-5
         R = cdgrid.radius
 
-        # Solid-body rotation: u = Omega*R*cos(lat), v = 0
+        # Solid-body rotation: u_east = Omega*R*cos(lat), v_north = 0
+        # Rotate geographic to grid-aligned:
+        #   u_grid =  cos(angle)*u_east + sin(angle)*v_north =  cos(angle)*u_geo
+        #   v_grid = -sin(angle)*u_east + cos(angle)*v_north = -sin(angle)*u_geo
         cos_lat = jnp.cos(cdgrid.lat_corner)
-        u_d = Omega * R * cos_lat * cdgrid.cos_angle_corner
-        v_d = Omega * R * cos_lat * cdgrid.sin_angle_corner
+        u_geo = Omega * R * cos_lat
+        u_d = u_geo * cdgrid.cos_angle_corner
+        v_d = -u_geo * cdgrid.sin_angle_corner
 
         zeta = dgrid_vorticity(u_d, v_d, cdgrid)
         # For solid-body rotation, ζ = 2Ω·sin(lat) at each cell centre
