@@ -497,6 +497,50 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         self.cdgrid = create_cubed_sphere_cdgrid(grid)
         self._target_mass = None
 
+    def _sync_dgrid_boundary(self, state: FV3HydrostaticState):
+        """Synchronize D-grid boundary corners across cubed-sphere faces."""
+        from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
+
+        u_d, v_d = state.u_d.data, state.v_d.data
+        ca_c = self.cdgrid.cos_angle_corner
+        sa_c = self.cdgrid.sin_angle_corner
+
+        # D-grid → geographic at corners
+        u_east_d = ca_c * u_d - sa_c * v_d
+        v_north_d = sa_c * u_d + ca_c * v_d
+
+        # Average geographic to A-grid centres
+        u_east_a = 0.25 * (u_east_d[:, :-1, :-1] + u_east_d[:, 1:, :-1]
+                           + u_east_d[:, :-1, 1:] + u_east_d[:, 1:, 1:])
+        v_north_a = 0.25 * (v_north_d[:, :-1, :-1] + v_north_d[:, 1:, :-1]
+                            + v_north_d[:, :-1, 1:] + v_north_d[:, 1:, 1:])
+
+        # Geographic → face-local at A-grid
+        ca = self.grid.cos_angle
+        sa = self.grid.sin_angle
+        u_a = ca * u_east_a + sa * v_north_a
+        v_a = -sa * u_east_a + ca * v_north_a
+
+        # A→D with cross-face vector halo exchange
+        u_d_sync, v_d_sync = agrid_to_dgrid_vector(u_a, v_a, self.cdgrid)
+
+        # Replace boundary rows/columns only
+        n = self.grid.n
+        u_new = u_d.at[:, 0, :].set(u_d_sync[:, 0, :])
+        u_new = u_new.at[:, n, :].set(u_d_sync[:, n, :])
+        u_new = u_new.at[:, :, 0].set(u_d_sync[:, :, 0])
+        u_new = u_new.at[:, :, n].set(u_d_sync[:, :, n])
+
+        v_new = v_d.at[:, 0, :].set(v_d_sync[:, 0, :])
+        v_new = v_new.at[:, n, :].set(v_d_sync[:, n, :])
+        v_new = v_new.at[:, :, 0].set(v_d_sync[:, :, 0])
+        v_new = v_new.at[:, :, n].set(v_d_sync[:, :, n])
+
+        return state._replace(
+            u_d=state.u_d.replace(data=u_new),
+            v_d=state.v_d.replace(data=v_new),
+        )
+
     def tendencies(
         self,
         state,
@@ -594,6 +638,9 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         state_new = dispatch_integrator(
             state, tendency_fn, dt, self.config.time_integrator,
         )
+
+        # Synchronize D-grid boundary corners across cubed-sphere faces
+        state_new = self._sync_dgrid_boundary(state_new)
 
         # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
         if self.config.implicit_grav_wave_damping > 0:
