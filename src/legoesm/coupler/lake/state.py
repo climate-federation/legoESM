@@ -14,3 +14,4 @@ class LakeState(NamedTuple):
     """
     T_epi: Field         # Epilimnion temperature [K]
     T_hypo: Field        # Hypolimnion temperature [K]
+    Q_freeze: Field | None = None  # Diagnosed latent freezing flux [W/m²]

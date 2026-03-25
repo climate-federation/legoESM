@@ -404,11 +404,22 @@ def _thermo_single(
         jnp.broadcast_to(jnp.array(config.T_freeze_ocean), T_ice.shape),
     )
 
+    # Surface melt: if T_trial exceeds freezing, the excess enthalpy melts
+    # ice from the top instead of being discarded by the temperature clamp.
+    excess_energy = skin_cap * jnp.maximum(
+        T_trial - config.T_freeze_ocean, 0.0
+    ) / dt  # [W/m²]
+    dh_dt_surface_melt = -excess_energy / (config.rho_ice * config.L_f)
+
     # Growth/melt — turbulent ocean heat transfer (not conductive scaling)
     F_ocean = config.ocean_heat_transfer_coeff * jnp.maximum(
         ocean_sst - config.T_freeze_ocean, 0.0,
     )
-    dh_dt_ice = (F_cond - F_ocean) / (config.rho_ice * config.L_f)
+    dh_dt_basal = (F_cond - F_ocean) / (config.rho_ice * config.L_f)
+
+    # Combine surface and basal melt/growth for existing ice
+    dh_dt_ice = dh_dt_basal + dh_dt_surface_melt
+
     freeze_flux_open = jnp.maximum(-Q_sfc, 0.0)
     dh_dt_open = freeze_flux_open / (config.rho_ice * config.L_f)
     dh_dt = jnp.where(ice_mask, dh_dt_ice, dh_dt_open)

@@ -100,6 +100,11 @@ def step_multilayer_land(
         T_surface, forcing, beta_soil, config, carbon_state, dt,
     )
 
+    # Stomatal reduction factor: ratio of effective beta to soil-only beta.
+    # This captures the stomatal limitation independent of soil moisture,
+    # so it can be applied to updated soil moisture later (same as slab land).
+    stomatal_ratio = beta / jnp.maximum(beta_soil, 1e-10)
+
     # --- Surface saturation humidity ---
     q_sat_sfc = saturation_mixing_ratio(T_surface, forcing.p_surface)
     q_sfc = beta * q_sat_sfc
@@ -190,9 +195,12 @@ def step_multilayer_land(
     melt_rate = snow_melt / dt  # kg/m2/s meltwater entering liquid budget
     flux_top = (precip_rain + melt_rate - evap_bare) / rho_w  # m/s, positive down
 
-    # Root sink: only transpiration portion
+    # Root sink: only transpiration portion.
+    # solve_richards expects sink in [m3/m3/s] (volumetric extraction rate).
+    # Convert from water depth rate [m/s] by dividing by layer thickness.
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w  # m/s
-    sink = root_frac[None, :] * E_pot_transp[:, None] * beta_root
+    dz = grid.dz  # (n_layers,) layer thicknesses [m]
+    sink = root_frac[None, :] * E_pot_transp[:, None] * beta_root / dz[None, :]
 
     # --- Richards equation: update soil moisture ---
     richards_out = solve_richards(
@@ -236,12 +244,15 @@ def step_multilayer_land(
         config.emissivity_land,
     )
 
-    # Recompute q_surface with updated temperature
+    # Recompute q_surface with updated temperature.
+    # Apply stomatal_ratio so q_surface reflects both soil moisture
+    # availability AND stomatal limitation (same as slab land).
     theta_top_new = richards_out.theta_new[:, 0]
     w_frac_new = jnp.clip(
         (theta_top_new - theta_r) / (theta_sat - theta_r + 1e-10), 0.0, 1.0
     )
-    beta_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
+    beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
+    beta_new = stomatal_ratio * beta_soil_new
     q_sfc_new = beta_new * saturation_mixing_ratio(T_surface_new, forcing.p_surface)
 
     # --- Carbon cycle ---

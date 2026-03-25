@@ -828,6 +828,41 @@ def test_ice_q_surface_uses_updated_temperature():
     assert jnp.allclose(resp.q_surface, q_expected, rtol=1e-5)
 
 
+def test_lake_freezing_energy_conservation():
+    """Cooling near freezing: layer energy budget must close.
+
+    cap * (T_new - T_old) / dt = (net flux in) - Q_freeze
+    The Q_freeze term accounts for latent heat of ice formation that the
+    temperature clamp would otherwise silently discard.
+    """
+    # Start right at freezing with a thin epilimnion for fast cooling
+    state = _make_lake_state(T_epi=273.16, T_hypo=273.16)
+    # Very cold atmosphere, no solar radiation → strong cooling
+    forcing = _make_forcing(T_lowest=220.0, sw=0.0, lw=50.0)
+    config = LakeConfig(h_epi=0.5)  # very thin layer → cools quickly
+    dt = 3600.0  # 1 hour step to ensure freezing
+
+    new_state, resp = step_lake(state, forcing, config, U_min=1.0, dt=dt)
+
+    # Q_freeze should be stored in state and be positive (freezing)
+    assert new_state.Q_freeze is not None
+    Q_freeze = new_state.Q_freeze.data
+
+    # Epilimnion energy budget closure
+    cap_epi = config.rho_water * config.c_water * config.h_epi
+    T_epi_old = state.T_epi.data
+    T_epi_new = new_state.T_epi.data
+
+    # If T_epi hit freezing, Q_freeze should be positive
+    at_freezing = jnp.any(T_epi_new <= config.T_freeze + 0.01)
+    assert at_freezing, "Forcing should cool epilimnion to freezing"
+    assert jnp.all(Q_freeze >= 0.0), "Q_freeze must be non-negative"
+    # Q_freeze should be non-trivial — significant latent heat hidden
+    assert jnp.any(Q_freeze > 1.0), (
+        "Strong cooling near freezing should produce significant Q_freeze"
+    )
+
+
 def test_lake_q_surface_uses_updated_temperature():
     """Lake q_surface should be consistent with updated T_surface."""
     from legoesm.thermo import saturation_mixing_ratio

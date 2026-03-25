@@ -81,11 +81,12 @@ def step_lake(
     dT_epi_dt = (sw_net + lw_net - shflx - lhflx - F_mix) / cap_epi
     T_trial_epi = T_epi + dt * dT_epi_dt
 
-    # Lake freezing: clamp T_epi at freezing point.
-    # Energy removed by clamping is tracked as Q_freeze (ice-formation flux).
-    T_freeze = 273.15
+    # Lake freezing: clamp T at freezing point.
+    # Energy removed by clamping is diagnosed as Q_freeze (ice-formation
+    # latent heat flux).  This closes the layer energy budget:
+    #   cap * dT/dt = (net flux in) - Q_freeze
+    T_freeze = config.T_freeze
     T_epi_new = jnp.maximum(T_trial_epi, T_freeze)
-    # Ice-formation energy [W/m²], positive when freezing occurs
     Q_freeze_epi = cap_epi * jnp.maximum(T_freeze - T_trial_epi, 0.0) / dt
 
     # Hypolimnion: receives mixing flux only
@@ -95,9 +96,22 @@ def step_lake(
     T_hypo_new = jnp.maximum(T_trial_hypo, T_freeze)
     Q_freeze_hypo = cap_hypo * jnp.maximum(T_freeze - T_trial_hypo, 0.0) / dt
 
+    Q_freeze_total = Q_freeze_epi + Q_freeze_hypo
+
+    from legoesm.core.field import Field
+    Q_freeze_field = None
+    if state.Q_freeze is not None:
+        Q_freeze_field = state.Q_freeze.replace(data=Q_freeze_total)
+    else:
+        Q_freeze_field = Field(
+            data=Q_freeze_total, name="Q_freeze",
+            dims=state.T_epi.dims, units="W/m2",
+        )
+
     new_state = LakeState(
         T_epi=state.T_epi.replace(data=T_epi_new),
         T_hypo=state.T_hypo.replace(data=T_hypo_new),
+        Q_freeze=Q_freeze_field,
     )
 
     _, _, lw_up_new = surface_radiation_fluxes(

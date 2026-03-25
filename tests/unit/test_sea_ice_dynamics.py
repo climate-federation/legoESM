@@ -769,3 +769,63 @@ class TestDifferentiability:
 
         g = jax.grad(f)(jnp.full(shape, 260.0))
         assert jnp.all(jnp.isfinite(g))
+
+
+# ==============================================================================
+# Surface melt bookkeeping
+# ==============================================================================
+
+class TestSurfaceMelt:
+    """Test that strong positive Q_sfc melts ice instead of silently
+    discarding excess enthalpy at the freezing clamp."""
+
+    def test_warm_forcing_melts_ice(self):
+        """Strong SW forcing at ocean freezing should reduce h, not increase it."""
+        shape = (6, 4, 4)
+        config = SeaIceConfig()
+        state = _make_slab_state(
+            shape=shape, h=1.0, T=config.T_freeze_ocean - 0.1, conc=0.9,
+        )
+        # Very strong SW, warm air → large positive Q_sfc
+        forcing = _make_forcing(shape=shape)
+        forcing = forcing._replace(
+            sw_down=jnp.full(shape, 500.0),
+            lw_down=jnp.full(shape, 350.0),
+            T_lowest=jnp.full(shape, 280.0),
+            q_lowest=jnp.full(shape, 5e-3),
+        )
+        ocean_sst = jnp.full(shape, config.T_freeze_ocean + 0.5)
+
+        new_state, _ = step_sea_ice(
+            state, forcing, ocean_sst,
+            jnp.zeros(shape), jnp.zeros(shape),
+            config, U_min=1.0, dt=3600.0,
+        )
+
+        # With strong warming and T near freezing, ice should thin (melt)
+        assert jnp.all(new_state.h_ice.data < state.h_ice.data), (
+            "Strong positive Q_sfc near freezing must melt ice, not thicken it"
+        )
+
+    def test_temperature_stays_at_freezing(self):
+        """After surface melt, T_ice should not exceed T_freeze_ocean."""
+        shape = (6, 4, 4)
+        config = SeaIceConfig()
+        state = _make_slab_state(
+            shape=shape, h=2.0, T=config.T_freeze_ocean - 0.5, conc=1.0,
+        )
+        forcing = _make_forcing(shape=shape)
+        forcing = forcing._replace(
+            sw_down=jnp.full(shape, 600.0),
+            lw_down=jnp.full(shape, 400.0),
+            T_lowest=jnp.full(shape, 290.0),
+        )
+        ocean_sst = jnp.full(shape, config.T_freeze_ocean)
+
+        new_state, _ = step_sea_ice(
+            state, forcing, ocean_sst,
+            jnp.zeros(shape), jnp.zeros(shape),
+            config, U_min=1.0, dt=3600.0,
+        )
+
+        assert jnp.all(new_state.T_ice.data <= config.T_freeze_ocean + 1e-6)
