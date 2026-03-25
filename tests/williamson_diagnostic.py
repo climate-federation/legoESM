@@ -76,12 +76,8 @@ def integrate(model, state, dt, n_steps, print_every=0):
 
 def total_energy(state, area, g_val=g):
     """Compute total energy (KE + PE) area-weighted."""
-    u_d, v_d = state.u_d, state.v_d
-    # D-grid to cell centre via 4-point average
-    u_cc = 0.25 * (u_d[:, :-1, :-1] + u_d[:, 1:, :-1]
-                    + u_d[:, :-1, 1:] + u_d[:, 1:, 1:])
-    v_cc = 0.25 * (v_d[:, :-1, :-1] + v_d[:, 1:, :-1]
-                    + v_d[:, :-1, 1:] + v_d[:, 1:, 1:])
+    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+    u_cc, v_cc = dgrid_to_center_vector(state.u_d, state.v_d)
     ke = 0.5 * state.h * (u_cc ** 2 + v_cc ** 2)
     pe = 0.5 * g_val * (state.h + state.h_s) ** 2
     return float(jnp.sum((ke + pe) * area))

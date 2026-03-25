@@ -431,6 +431,7 @@ class TestPhysicalBalance:
 class TestConservation:
     """Conservation of mass, energy, and enstrophy."""
 
+    @pytest.mark.slow
     def test_4a_mass_conservation_sw(self, grid_t21):
         """SW mass conservation in TC5 for 500 steps."""
         grid = grid_t21
@@ -456,6 +457,7 @@ class TestConservation:
         dM = abs(Mf - M0) / abs(M0)
         assert dM < 1e-12, f"SW mass conservation: |dM/M| = {dM:.3e}, expected < 1e-12"
 
+    @pytest.mark.slow
     def test_4b_energy_conservation_sw(self, grid_t21):
         """SW total energy conservation in TC2 (no diffusion) for 500 steps."""
         grid = grid_t21
@@ -481,6 +483,7 @@ class TestConservation:
         dE = abs(Ef - E0) / abs(E0)
         assert dE < 1e-6, f"SW energy conservation: |dE/E| = {dE:.3e}, expected < 1e-6"
 
+    @pytest.mark.slow
     def test_4c_enstrophy_conservation_sw(self, grid_t21):
         """SW potential enstrophy conservation in TC2 (no diffusion) for 500 steps."""
         grid = grid_t21
