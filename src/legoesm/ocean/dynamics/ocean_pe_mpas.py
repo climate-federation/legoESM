@@ -32,6 +32,7 @@ from legoesm.core.operators_voronoi import (
     pv_flux_energy_conserving,
     pv_flux_enstrophy_conserving,
     edge_thickness,
+    cell_to_edge_avg,
     vector_laplacian_del2,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
@@ -153,8 +154,8 @@ def mpas_ocean_baroclinic_tendencies(
 
         # ---- Tracer tendencies (flux form) ----
         # Edge tracer values (centered)
-        T_e = 0.5 * (T_k[c1] + T_k[c2])  # (nEdges,)
-        S_e = 0.5 * (S_k[c1] + S_k[c2])
+        T_e = cell_to_edge_avg(T_k, mesh)  # (nEdges,)
+        S_e = cell_to_edge_avg(S_k, mesh)
 
         # Tracer flux: u * h_e * T_e
         T_flux = thickness_flux_k * T_e

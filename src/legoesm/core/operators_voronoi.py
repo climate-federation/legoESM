@@ -141,8 +141,28 @@ def tangential_velocity(u_edge, mesh):
 
 
 # ============================================================================
-# Thickness interpolation
+# Cell-to-edge interpolation
 # ============================================================================
+
+def cell_to_edge_avg(phi_cell, mesh):
+    """Interpolate a cell-centered scalar to edges by simple averaging.
+
+    phi_edge = (phi[cell1] + phi[cell2]) / 2
+
+    Parameters
+    ----------
+    phi_cell : jax.Array, shape (nCells, ...) or (nCells,)
+        Scalar field at cell centers.
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, ...) or (nEdges,)
+    """
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    return 0.5 * (phi_cell[c1] + phi_cell[c2])
+
 
 def edge_thickness(h_cell, mesh):
     """Thickness at edges by simple averaging (Ringler 2010, Eq. 52).
@@ -158,9 +178,7 @@ def edge_thickness(h_cell, mesh):
     -------
     jax.Array, shape (nEdges,)
     """
-    c1 = mesh.cellsOnEdge[0]
-    c2 = mesh.cellsOnEdge[1]
-    return 0.5 * (h_cell[c1] + h_cell[c2])
+    return cell_to_edge_avg(h_cell, mesh)
 
 
 def vertex_thickness(h_cell, mesh):
@@ -302,7 +320,12 @@ def pv_flux_energy_conserving(u_edge, h_cell, q_vertex, mesh):
 def pv_flux_enstrophy_conserving(u_edge, h_cell, q_vertex, mesh):
     """Enstrophy-conserving PV flux (Ringler 2010, Eq. 71-72).
 
-    Uses the average PV at the edge endpoints weighted by thickness.
+    F_q(e) = q_e * Σ_{e'} w(e,e') * h_e(e') * u(e')
+
+    The tangential *thickness flux* is reconstructed via TRiSK weights,
+    i.e., Σ w(e,e') * F(e') where F = h_edge * u_normal.  This is
+    distinct from h_e(e) * v_t(e) because the weights must act on
+    the full flux, not just the velocity.
 
     Parameters
     ----------
@@ -317,7 +340,12 @@ def pv_flux_enstrophy_conserving(u_edge, h_cell, q_vertex, mesh):
     """
     h_e = edge_thickness(h_cell, mesh)
     q_e = pv_edge(q_vertex, mesh)
-    return q_e * h_e * tangential_velocity(u_edge, mesh)
+
+    # Tangential thickness flux: Σ w(e,e') * h_e(e') * u(e')
+    F_normal = h_e * u_edge  # thickness flux at each edge
+    F_tangential = tangential_velocity(F_normal, mesh)  # reuse TRiSK reconstruction
+
+    return q_e * F_tangential
 
 
 # ============================================================================
