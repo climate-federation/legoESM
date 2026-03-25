@@ -219,8 +219,8 @@ class CDGridShallowWaterModel(IntegrationMixin):
             [(2, n, n), (3, 0, n), (4, 0, n)],
         ]
         for vtx in _vtx:
-            ue_avg = sum(ue[f, i, j] for f, i, j in vtx) / 3.0
-            vn_avg = sum(vn[f, i, j] for f, i, j in vtx) / 3.0
+            ue_avg = sum(ue_out[f, i, j] for f, i, j in vtx) / 3.0
+            vn_avg = sum(vn_out[f, i, j] for f, i, j in vtx) / 3.0
             for f, i, j in vtx:
                 ue_out = ue_out.at[f, i, j].set(ue_avg)
                 vn_out = vn_out.at[f, i, j].set(vn_avg)

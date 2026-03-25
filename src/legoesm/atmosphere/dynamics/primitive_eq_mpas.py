@@ -70,8 +70,6 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     nu_del2: float = 0.0          # del2 viscosity [m²/s]
     nu_del4: float = 0.0          # del4 viscosity [m⁴/s]
     K_h: float = 0.0              # scalar diffusion [m²/s]
-    K_ps: float = 0.0             # surface pressure del2 diffusion [m²/s]
-    c_div_damp: float = 0.0       # divergence damping coeff [m²/s]
     pv_scheme: str = "energy"     # "energy" or "enstrophy"
     apvm_scale: float = 0.0       # APVM upwinding (0 = off)
     fix_mass: bool = True
@@ -185,10 +183,8 @@ def mpas_hydrostatic_tendencies(
         if config.nu_del4 > 0:
             du_dt_k = du_dt_k + config.nu_del4 * vector_laplacian_del4(u_k, mesh)
 
-        # Divergence damping: targets C-grid computational mode
+        # Divergence for continuity / sigma-dot
         div_k = divergence_cell(u_k, mesh)  # (nCells,)
-        if config.c_div_damp > 0:
-            du_dt_k = du_dt_k - config.c_div_damp * gradient_edge(div_k, mesh)
 
         # Temperature advection: -v·∇T ≈ centered tracer flux form
         T_edge_centered = cell_to_edge_avg(T_k, mesh)
@@ -242,11 +238,6 @@ def mpas_hydrostatic_tendencies(
         sigma_dot = compute_sigma_dot(div_3d, sigma_coord)
         vert_adv_T = vertical_advection(T_3d, sigma_dot, sigma_coord)
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt, sigma_coord)
-
-    # --- Surface pressure diffusion: del2(p_s) ---
-    if config.K_ps > 0:
-        grad_ps = gradient_edge(p_s, mesh)
-        dp_s_dt = dp_s_dt + config.K_ps * divergence_cell(grad_ps, mesh)
 
     # Vertical advection of u: approximate via edge-averaged sigma-dot
     if _hybrid:

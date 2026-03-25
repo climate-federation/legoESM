@@ -5,8 +5,11 @@ JIT-compatible application for field transfer between grids.
 Supports scalar fields and vector fields with rotation correction.
 
 Methods:
-- Bilinear interpolation using inverse-distance weighting of
-  K nearest neighbors (KD-tree lookup in lat-lon space).
+- Face-aware bilinear interpolation (cubed-sphere → lat-lon):
+  projects each target point onto the correct cube face via gnomonic
+  inversion and interpolates from the 4 surrounding cell centres.
+- Inverse-distance weighting of K nearest neighbors (KD-tree) for
+  general unstructured-to-structured transfers.
 """
 
 from __future__ import annotations
@@ -263,7 +266,282 @@ def regrid_vector(
 
 
 # ==============================================================================
-# Cubed-sphere to regular lat-lon regridding (for output / plotting)
+# Face-aware cubed-sphere to lat-lon regridding
+# ==============================================================================
+
+# Face connectivity (same as halo.py).
+# CONNECTIVITY[face][edge] = (neighbor_face, neighbor_edge, reversed)
+_WEST, _EAST, _SOUTH, _NORTH = 0, 1, 2, 3
+_CONNECTIVITY = {
+    0: {_WEST: (3, _EAST, False), _EAST: (1, _WEST, False),
+        _SOUTH: (5, _NORTH, False), _NORTH: (4, _SOUTH, False)},
+    1: {_WEST: (0, _EAST, False), _EAST: (2, _WEST, False),
+        _SOUTH: (5, _EAST, True), _NORTH: (4, _EAST, False)},
+    2: {_WEST: (1, _EAST, False), _EAST: (3, _WEST, False),
+        _SOUTH: (5, _SOUTH, True), _NORTH: (4, _NORTH, True)},
+    3: {_WEST: (2, _EAST, False), _EAST: (0, _WEST, False),
+        _SOUTH: (5, _WEST, False), _NORTH: (4, _WEST, True)},
+    4: {_WEST: (3, _NORTH, True), _EAST: (1, _NORTH, False),
+        _SOUTH: (0, _NORTH, False), _NORTH: (2, _NORTH, True)},
+    5: {_WEST: (3, _SOUTH, False), _EAST: (1, _SOUTH, True),
+        _SOUTH: (2, _SOUTH, True), _NORTH: (0, _SOUTH, False)},
+}
+
+
+def _pad_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
+    """Create (6, n+2, n+2) padded field with neighbor boundary cells.
+
+    Copies the outermost row/column of each neighbouring face into the
+    halo ring, respecting the CONNECTIVITY reversal flags.  Corners are
+    filled by averaging the two adjacent halo values.
+    """
+    padded = np.zeros((6, n + 2, n + 2), dtype=field.dtype)
+    padded[:, 1:-1, 1:-1] = field
+
+    def _get_nbr_strip(f: int, edge: int) -> np.ndarray:
+        if edge == _WEST:   return field[f, 0, :]
+        if edge == _EAST:   return field[f, -1, :]
+        if edge == _SOUTH:  return field[f, :, 0]
+        return field[f, :, -1]  # NORTH
+
+    for face in range(6):
+        for edge in (_WEST, _EAST, _SOUTH, _NORTH):
+            nbr_face, nbr_edge, rev = _CONNECTIVITY[face][edge]
+            strip = _get_nbr_strip(nbr_face, nbr_edge)
+            if rev:
+                strip = strip[::-1]
+            if edge == _WEST:
+                padded[face, 0, 1:-1] = strip
+            elif edge == _EAST:
+                padded[face, -1, 1:-1] = strip
+            elif edge == _SOUTH:
+                padded[face, 1:-1, 0] = strip
+            else:
+                padded[face, 1:-1, -1] = strip
+
+    # Corners: average of the two adjacent halo neighbours.
+    for face in range(6):
+        padded[face, 0, 0] = 0.5 * (padded[face, 0, 1] + padded[face, 1, 0])
+        padded[face, 0, -1] = 0.5 * (padded[face, 0, -2] + padded[face, 1, -1])
+        padded[face, -1, 0] = 0.5 * (padded[face, -1, 1] + padded[face, -2, 0])
+        padded[face, -1, -1] = 0.5 * (padded[face, -1, -2] + padded[face, -2, -1])
+
+    return padded
+
+
+class CubedSphereToLatLonWeights(NamedTuple):
+    """Precomputed face-aware bilinear interpolation weights.
+
+    Indices (``i0``, ``j0``) refer to the **padded** (n+2)×(n+2) field
+    produced by :func:`_pad_field_for_regrid`, so valid values run from
+    0 (halo) through n+1 (opposite halo).
+
+    Attributes
+    ----------
+    face : int32 array, shape (n_target,)
+        Cube face index (0-5) for each target point.
+    i0, j0 : int32 arrays, shape (n_target,)
+        Lower-left indices in the padded field.
+    wi, wj : float64 arrays, shape (n_target,)
+        Bilinear weights in the i and j directions (0 ≤ w ≤ 1).
+    n_lat, n_lon : int
+        Output grid dimensions.
+    n : int
+        Cubed-sphere tile size (cells per face edge).
+    lon_cent : 1-D array, shape (n_lon,)
+        Longitude centres [degrees].
+    lat_cent : 1-D array, shape (n_lat,)
+        Latitude centres [degrees].
+    """
+    face: np.ndarray
+    i0: np.ndarray
+    j0: np.ndarray
+    wi: np.ndarray
+    wj: np.ndarray
+    n_lat: int
+    n_lon: int
+    n: int
+    lon_cent: np.ndarray
+    lat_cent: np.ndarray
+
+
+def compute_cubedsphere_to_latlon_weights(
+    n: int,
+    n_lon: int = 360,
+    n_lat: int = 181,
+) -> CubedSphereToLatLonWeights:
+    """Precompute face-aware bilinear weights for CS → lat-lon.
+
+    For each target lat-lon point:
+      1. Convert to Cartesian on the unit sphere.
+      2. Select the cube face whose outward normal has the largest projection.
+      3. Invert the gnomonic projection to recover face-local (alpha_x, alpha_y).
+      4. Map gnomonic coordinates to fractional cell-centre indices.
+      5. Shift indices into **padded** (n+2)×(n+2) coordinates so that
+         bilinear interpolation extends smoothly across face boundaries
+         using halo cells from the neighbouring face.
+
+    Parameters
+    ----------
+    n : int
+        Cubed-sphere tile size (cells per face edge).
+    n_lon, n_lat : int
+        Output regular lat-lon grid dimensions.
+
+    Returns
+    -------
+    CubedSphereToLatLonWeights
+    """
+    # Target grid
+    lon_cent = np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
+    lat_cent = np.linspace(-90.0, 90.0, n_lat)
+    lon2d, lat2d = np.meshgrid(lon_cent, lat_cent)
+
+    lon_r = np.deg2rad(lon2d.ravel())
+    lat_r = np.deg2rad(lat2d.ravel())
+    cos_lat = np.cos(lat_r)
+    x = cos_lat * np.cos(lon_r)
+    y = cos_lat * np.sin(lon_r)
+    z = np.sin(lat_r)
+
+    # Face assignment: pick the face whose outward normal has max projection.
+    # Face ordering: 0→+x, 1→+y, 2→−x, 3→−y, 4→+z, 5→−z.
+    proj = np.column_stack([x, y, -x, -y, z, -z])
+    face = np.argmax(proj, axis=1).astype(np.int32)
+
+    # Inverse gnomonic projection per face (vectorised).
+    alpha_x = np.empty(len(x), dtype=np.float64)
+    alpha_y = np.empty(len(x), dtype=np.float64)
+
+    for f in range(6):
+        m = face == f
+        if not np.any(m):
+            continue
+        xm, ym, zm = x[m], y[m], z[m]
+        if f == 0:
+            alpha_x[m] = np.arctan(ym / xm)
+            alpha_y[m] = np.arctan(zm / xm)
+        elif f == 1:
+            alpha_x[m] = np.arctan(-xm / ym)
+            alpha_y[m] = np.arctan(zm / ym)
+        elif f == 2:
+            alpha_x[m] = np.arctan(ym / xm)
+            alpha_y[m] = np.arctan(-zm / xm)
+        elif f == 3:
+            alpha_x[m] = np.arctan(-xm / ym)
+            alpha_y[m] = np.arctan(-zm / ym)
+        elif f == 4:
+            alpha_x[m] = np.arctan(ym / zm)
+            alpha_y[m] = np.arctan(-xm / zm)
+        elif f == 5:
+            alpha_x[m] = np.arctan(-ym / zm)
+            alpha_y[m] = np.arctan(-xm / zm)
+
+    # Map gnomonic coords to fractional cell-centre indices.
+    # Cell centres: alpha[k] = -pi/4 + (k + 0.5) * dalpha, k = 0..n-1.
+    dalpha = np.pi / (2.0 * n)
+    alpha_min = -np.pi / 4.0 + dalpha / 2.0  # centre of first cell
+
+    fi = (alpha_x - alpha_min) / dalpha  # ~ [-0.5, n-0.5]
+    fj = (alpha_y - alpha_min) / dalpha
+
+    # Shift to padded coordinates (interior sits at indices 1..n).
+    fi_pad = fi + 1.0  # ~ [0.5, n+0.5]
+    fj_pad = fj + 1.0
+
+    # Clip to valid padded range.
+    fi_pad = np.clip(fi_pad, 0.0, n + 1.0)
+    fj_pad = np.clip(fj_pad, 0.0, n + 1.0)
+
+    i0 = np.minimum(np.floor(fi_pad).astype(np.int32), n)
+    j0 = np.minimum(np.floor(fj_pad).astype(np.int32), n)
+
+    wi = fi_pad - i0.astype(np.float64)
+    wj = fj_pad - j0.astype(np.float64)
+
+    return CubedSphereToLatLonWeights(
+        face=face, i0=i0, j0=j0, wi=wi, wj=wj,
+        n_lat=n_lat, n_lon=n_lon, n=n,
+        lon_cent=lon_cent, lat_cent=lat_cent,
+    )
+
+
+def apply_cubedsphere_to_latlon(
+    field_faces: np.ndarray,
+    weights: CubedSphereToLatLonWeights,
+) -> np.ndarray:
+    """Apply face-aware bilinear weights to regrid (6, n, n) → (n_lat, n_lon).
+
+    The source field is first padded with one ring of halo cells copied
+    from neighbouring faces (via :func:`_pad_field_for_regrid`) so that
+    bilinear interpolation extends smoothly across cube-face boundaries.
+
+    Parameters
+    ----------
+    field_faces : array, shape (6, n, n)
+        Source cubed-sphere field.
+    weights : CubedSphereToLatLonWeights
+        Precomputed weights from :func:`compute_cubedsphere_to_latlon_weights`.
+
+    Returns
+    -------
+    array, shape (n_lat, n_lon)
+    """
+    n = weights.n
+    field = np.asarray(field_faces, dtype=np.float64).reshape(6, n, n)
+    padded = _pad_field_for_regrid(field, n)  # (6, n+2, n+2)
+
+    i1 = weights.i0 + 1
+    j1 = weights.j0 + 1
+
+    v00 = padded[weights.face, weights.i0, weights.j0]
+    v10 = padded[weights.face, i1, weights.j0]
+    v01 = padded[weights.face, weights.i0, j1]
+    v11 = padded[weights.face, i1, j1]
+
+    result = (v00 * (1.0 - weights.wi) * (1.0 - weights.wj)
+              + v10 * weights.wi * (1.0 - weights.wj)
+              + v01 * (1.0 - weights.wi) * weights.wj
+              + v11 * weights.wi * weights.wj)
+
+    return result.reshape(weights.n_lat, weights.n_lon)
+
+
+def apply_cubedsphere_to_latlon_3d(
+    field_faces: np.ndarray,
+    weights: CubedSphereToLatLonWeights,
+) -> np.ndarray:
+    """Regrid (6, n, n, nlev) → (n_lat, n_lon, nlev) using face-aware bilinear.
+
+    Parameters
+    ----------
+    field_faces : array, shape (6, n, n, nlev) or (6*n*n, nlev)
+        Source cubed-sphere 3-D field.
+    weights : CubedSphereToLatLonWeights
+        Precomputed weights.
+
+    Returns
+    -------
+    array, shape (n_lat, n_lon, nlev)
+    """
+    arr = np.asarray(field_faces, dtype=np.float64)
+    n = weights.n
+    if arr.ndim == 2:
+        nlev = arr.shape[-1]
+        arr = arr.reshape(6, n, n, nlev)
+    elif arr.ndim == 4:
+        nlev = arr.shape[-1]
+    else:
+        raise ValueError(f"Expected 2-D or 4-D input, got shape {arr.shape}")
+
+    out = np.empty((weights.n_lat, weights.n_lon, nlev), dtype=np.float64)
+    for k in range(nlev):
+        out[..., k] = apply_cubedsphere_to_latlon(arr[..., k], weights)
+    return out
+
+
+# ==============================================================================
+# Legacy KD-tree cubed-sphere to lat-lon regridding (kept for compatibility)
 # ==============================================================================
 
 
