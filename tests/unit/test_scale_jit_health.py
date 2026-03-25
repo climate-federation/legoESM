@@ -1,7 +1,10 @@
-"""Category 10: JIT compilation health & memory.
+"""Category 10: JIT compilation health tests.
 
-Tests Field pytree registration, scan carry structure, and compilation
-patterns that affect scalability.
+Tests that:
+- No recompilation occurs on numeric-only changes
+- donate_argnums works correctly
+- Field pytree metadata is static (no spurious recompilations)
+- jax.lax.scan compiles once and reuses
 """
 
 from __future__ import annotations
@@ -10,196 +13,208 @@ import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
-import time
 
 from legoesm.core.field import Field
+from legoesm.driver.compiled_segments import SegmentCarry
 
 
-# =========================================================================
-# 10h) Field pytree — metadata is static
-# =========================================================================
+# ---------------------------------------------------------------------------
+# Field pytree: metadata is static
+# ---------------------------------------------------------------------------
 
-class TestFieldPytree:
-    """Field should be a proper JAX pytree with static metadata."""
+class TestFieldPytreeStatic:
+    """Field aux_data (name, dims, units, etc.) is static => metadata
+    changes cause recompilation but value changes do not."""
 
-    def test_metadata_not_in_leaves(self):
-        """Only .data should appear as a leaf."""
-        field = Field(
-            data=jnp.ones((6, 4, 4)),
-            name="T", dims=("face", "x", "y"), units="K",
-        )
-        leaves = jax.tree_util.tree_leaves(field)
-        assert len(leaves) == 1
-        assert leaves[0] is field.data
-
-    def test_pytree_roundtrip(self):
-        """flatten then unflatten should recover exact Field."""
-        field = Field(
-            data=jnp.ones((6, 4, 4)),
-            name="T", dims=("face", "x", "y"), units="K",
-        )
-        flat, treedef = jax.tree_util.tree_flatten(field)
-        recovered = jax.tree_util.tree_unflatten(treedef, flat)
-        assert recovered.name == "T"
-        assert recovered.dims == ("face", "x", "y")
-        assert recovered.units == "K"
-        np.testing.assert_array_equal(np.array(recovered.data), np.array(field.data))
-
-    def test_field_in_jit(self):
-        """Field should work inside jax.jit."""
-        field = Field(
-            data=jnp.ones((6, 4, 4)),
-            name="T", dims=("face", "x", "y"), units="K",
-        )
+    def test_same_metadata_same_trace(self):
+        """Two Fields with same metadata should compile to same program."""
+        call_count = [0]
 
         @jax.jit
-        def double(f):
-            return f.replace(data=f.data * 2)
+        def f(field):
+            call_count[0] += 1  # only counts Python-level calls
+            return field.data * 2.0
 
-        result = double(field)
-        np.testing.assert_allclose(np.array(result.data), 2.0)
-        assert result.name == "T"
+        f1 = Field(data=jnp.ones(3), name="T", units="K")
+        f2 = Field(data=jnp.array([2.0, 3.0, 4.0]), name="T", units="K")
 
-    def test_field_in_grad(self):
-        """Field should work with jax.grad on .data."""
-        field = Field(
-            data=jnp.ones((4,), dtype=jnp.float64),
-            name="x", dims=("i",), units="m",
-        )
+        _ = f(f1)
+        c1 = call_count[0]
+        _ = f(f2)
+        c2 = call_count[0]
+        # Second call should NOT trigger recompilation
+        assert c2 == c1, "Recompiled when only data changed"
 
-        def loss(data):
-            f = field.replace(data=data)
-            return jnp.sum(f.data ** 2)
+    def test_different_metadata_retrace(self):
+        """Different metadata should trigger recompilation."""
+        call_count = [0]
 
-        grad = jax.grad(loss)(field.data)
-        np.testing.assert_allclose(np.array(grad), 2.0)
+        @jax.jit
+        def f(field):
+            call_count[0] += 1
+            return field.data * 2.0
+
+        f1 = Field(data=jnp.ones(3), name="T", units="K")
+        f2 = Field(data=jnp.ones(3), name="pressure", units="Pa")
+
+        _ = f(f1)
+        c1 = call_count[0]
+        _ = f(f2)
+        c2 = call_count[0]
+        # Different metadata -> should recompile
+        assert c2 > c1, "Did not recompile with different metadata"
+
+    def test_field_flatten_unflatten_roundtrip(self):
+        f = Field(data=jnp.ones(5), name="T", dims=("x",), units="K",
+                  long_name="temperature", staggering="cell")
+        leaves, treedef = jax.tree.flatten(f)
+        assert len(leaves) == 1  # only data is a leaf
+        f2 = treedef.unflatten(leaves)
+        assert f2.name == f.name
+        assert f2.dims == f.dims
+        assert f2.units == f.units
+        np.testing.assert_array_equal(f2.data, f.data)
 
 
-# =========================================================================
-# 10a,b) JIT recompilation behavior
-# =========================================================================
+# ---------------------------------------------------------------------------
+# No recompilation on numeric changes
+# ---------------------------------------------------------------------------
 
-class TestJITRecompilation:
-    """JIT should not recompile on numeric-only changes."""
+class TestNoRecompilationOnNumeric:
+    """JIT should not recompile when only numeric values change
+    (same shape and dtype)."""
 
     def test_no_recompile_on_value_change(self):
-        """Changing array values (not shapes) should not trigger recompilation."""
+        trace_count = [0]
 
         @jax.jit
-        def f(x):
-            return x ** 2
+        def step(x, dt):
+            trace_count[0] += 1
+            return x + dt
 
-        x1 = jnp.ones(10)
-        x2 = jnp.ones(10) * 2.0
-
-        # First call compiles
-        t0 = time.time()
-        _ = f(x1).block_until_ready()
-        t_first = time.time() - t0
-
-        # Second call should be fast (no recompile)
-        t0 = time.time()
-        _ = f(x2).block_until_ready()
-        t_second = time.time() - t0
-
-        # Second should be much faster (at least 2x for a trivial op)
-        # Use generous threshold to avoid flakiness
-        assert t_second < t_first * 2.0 or t_second < 0.01
+        x = jnp.ones((6, 4, 4))
+        _ = step(x, jnp.float32(1.0))
+        c1 = trace_count[0]
+        _ = step(x * 2.0, jnp.float32(2.0))
+        c2 = trace_count[0]
+        assert c2 == c1, "Recompiled when only values changed"
 
     def test_recompile_on_shape_change(self):
-        """Changing array shapes should trigger recompilation."""
+        trace_count = [0]
 
         @jax.jit
-        def f(x):
-            return x ** 2
+        def step(x):
+            trace_count[0] += 1
+            return x * 2.0
 
-        x1 = jnp.ones(10)
-        x2 = jnp.ones(20)
-
-        _ = f(x1).block_until_ready()
-        _ = f(x2).block_until_ready()
-        # Both should produce correct results
-        np.testing.assert_allclose(np.array(f(x1)), 1.0)
-        np.testing.assert_allclose(np.array(f(x2)), 1.0)
+        _ = step(jnp.ones(5))
+        c1 = trace_count[0]
+        _ = step(jnp.ones(10))  # different shape
+        c2 = trace_count[0]
+        assert c2 > c1, "Did not recompile on shape change"
 
 
-# =========================================================================
-# 10f) Scan carry structure stability
-# =========================================================================
+# ---------------------------------------------------------------------------
+# donate_argnums
+# ---------------------------------------------------------------------------
 
-class TestScanCarryStructure:
-    """Scan carry pytree structure should be stable."""
+class TestDonateArgnums:
+    def test_donate_works_in_jit(self):
+        """donate_argnums should be accepted by jit."""
+        @jax.jit
+        def step(state, dt):
+            return state + dt
 
-    def test_namedtuple_structure_preserved(self):
-        """NamedTuple carry in scan should preserve structure."""
-        from collections import namedtuple
-        Carry = namedtuple("Carry", ["x", "step"])
+        # donate_argnums is specified at jit time in modern JAX
+        step_donate = jax.jit(step, donate_argnums=(0,))
+        x = jnp.ones(10)
+        y = step_donate(x, 1.0)
+        np.testing.assert_allclose(y, 2.0)
+
+
+# ---------------------------------------------------------------------------
+# lax.scan compiles once
+# ---------------------------------------------------------------------------
+
+class TestScanCompilation:
+    def test_scan_single_compilation(self):
+        """lax.scan should compile once and run n_steps without retracing.
+        Note: scan length must be a static Python int (not traced)."""
+        trace_count = [0]
 
         def body(carry, _):
-            return Carry(x=carry.x + 1.0, step=carry.step + 1), None
-
-        init = Carry(x=jnp.array(0.0), step=jnp.array(0))
-        final, _ = jax.lax.scan(body, init, None, length=10)
-
-        assert isinstance(final, Carry)
-        np.testing.assert_allclose(float(final.x), 10.0)
-        assert int(final.step) == 10
-
-        # Structure should match
-        td_init = jax.tree_util.tree_structure(init)
-        td_final = jax.tree_util.tree_structure(final)
-        assert td_init == td_final
-
-
-# =========================================================================
-# 10g) Tridiagonal solver — fori_loop
-# =========================================================================
-
-class TestForiLoop:
-    """jax.lax.fori_loop should compile and give correct results."""
-
-    def test_fori_loop_sum(self):
-        """fori_loop computing cumulative sum."""
-
-        def body(i, acc):
-            return acc + i
-
-        result = jax.lax.fori_loop(0, 10, body, 0)
-        assert int(result) == 45  # 0+1+...+9
-
-    def test_fori_loop_in_jit(self):
-        """fori_loop inside jit should compile."""
+            trace_count[0] += 1  # counts Python tracing, not execution
+            return carry + 1.0, carry
 
         @jax.jit
-        def f(n):
-            return jax.lax.fori_loop(0, 10, lambda i, acc: acc + 1.0, 0.0)
+        def run(init):
+            final, trajectory = jax.lax.scan(body, init, None, length=10)
+            return final, trajectory
 
-        result = f(10)
-        np.testing.assert_allclose(float(result), 10.0)
+        init = jnp.array(0.0)
+        final, traj = run(init)
+        np.testing.assert_allclose(final, 10.0)
+        assert traj.shape == (10,)
+
+        # Run again — should NOT retrace body
+        c1 = trace_count[0]
+        final2, _ = run(init)
+        c2 = trace_count[0]
+        assert c2 == c1, "scan body was retraced on second call"
 
 
-# =========================================================================
-# 10i) Conditional branches — structure check
-# =========================================================================
+# ---------------------------------------------------------------------------
+# SegmentCarry: consistent pytree structure
+# ---------------------------------------------------------------------------
 
-class TestLaxCond:
-    """jax.lax.cond branches must return same pytree structure."""
+class TestSegmentCarryJIT:
+    def _make_carry(self, n=4, nlev=3):
+        shape = (6, n, n, nlev)
+        shape2d = (6, n, n)
+        return SegmentCarry(
+            u=jnp.zeros(shape, dtype=jnp.float32),
+            v=jnp.zeros(shape, dtype=jnp.float32),
+            T=jnp.zeros(shape, dtype=jnp.float32),
+            p_s=jnp.zeros(shape2d, dtype=jnp.float32),
+            phis=jnp.zeros(shape2d, dtype=jnp.float32),
+            q_v=jnp.zeros(shape, dtype=jnp.float32),
+            q_c=jnp.zeros(shape, dtype=jnp.float32),
+            q_r=jnp.zeros(shape, dtype=jnp.float32),
+            held_dT_rad=jnp.zeros(shape, dtype=jnp.float32),
+            held_sw_net_sfc=jnp.zeros(shape2d, dtype=jnp.float32),
+            held_lw_net_sfc=jnp.zeros(shape2d, dtype=jnp.float32),
+            held_sw_up_toa=jnp.zeros(shape2d, dtype=jnp.float32),
+            held_lw_up_toa=jnp.zeros(shape2d, dtype=jnp.float32),
+            held_sw_down_toa=jnp.zeros(shape2d, dtype=jnp.float32),
+            step_index=jnp.int32(0),
+            target_moisture=jnp.float32(0.0),
+            precip_accum=jnp.zeros(shape2d, dtype=jnp.float32),
+        )
 
-    def test_cond_same_structure(self):
-        """Both branches of lax.cond return same leaf types."""
+    def test_carry_through_scan(self):
+        """SegmentCarry should pass through lax.scan without issues."""
+        carry = self._make_carry()
 
-        def true_fn(x):
-            return x * 2, x + 1
+        def body(c, _):
+            new_c = c._replace(
+                u=c.u + 1.0,
+                step_index=c.step_index + 1,
+            )
+            return new_c, None
 
-        def false_fn(x):
-            return x * 3, x + 2
+        @jax.jit
+        def run(c):
+            final, _ = jax.lax.scan(body, c, None, length=3)
+            return final
 
-        pred = jnp.array(True)
-        r1 = jax.lax.cond(pred, true_fn, false_fn, jnp.array(1.0))
-        r2 = jax.lax.cond(jnp.array(False), true_fn, false_fn, jnp.array(1.0))
+        result = run(carry)
+        np.testing.assert_allclose(result.u, 3.0)
+        assert int(result.step_index) == 3
 
-        # Both should return tuples of same length
-        assert len(r1) == len(r2) == 2
-        # Dtypes should match
-        assert r1[0].dtype == r2[0].dtype
-        assert r1[1].dtype == r2[1].dtype
+    def test_carry_tree_structure_stable(self):
+        """Two carries with same shapes should have same tree structure."""
+        c1 = self._make_carry()
+        c2 = self._make_carry()
+        _, td1 = jax.tree.flatten(c1)
+        _, td2 = jax.tree.flatten(c2)
+        assert td1 == td2

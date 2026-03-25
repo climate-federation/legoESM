@@ -252,6 +252,28 @@ def _laplacian_visc_ico(mesh, frac: float = 0.1) -> float:
     return frac * c_gw * dx_mean
 
 
+def _scalar_diff_ico(mesh, frac: float = 0.05) -> float:
+    """Scalar diffusion K_h = K_ps = frac * c_gw * dx for icosahedral grid."""
+    import math
+    from legoesm import constants
+    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
+    c_gw = math.sqrt(constants.R_d * 300.0)
+    return frac * c_gw * dx_mean
+
+
+def _div_damp_ico(mesh, frac: float = 0.25) -> float:
+    """Divergence damping coefficient = frac * c_gw * dx for icosahedral grid.
+
+    Stronger than the Laplacian viscosity to suppress the C-grid
+    computational mode without over-damping rotational flow.
+    """
+    import math
+    from legoesm import constants
+    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
+    c_gw = math.sqrt(constants.R_d * 300.0)
+    return frac * c_gw * dx_mean
+
+
 # ---------------------------------------------------------------------------
 # Vertical coordinate creation
 # ---------------------------------------------------------------------------
@@ -1406,8 +1428,11 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         sigma = create_sigma_coordinate(nlev)
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
+        kh = _scalar_diff_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
+            K_h=kh, K_ps=kh, c_div_damp=_div_damp_ico(mesh),
+            apvm_scale=0.5, fix_mass=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma)
         grid = mesh
@@ -1669,8 +1694,11 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         sigma = create_sigma_coordinate(nlev)
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
+        kh = _scalar_diff_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
+            K_h=kh, K_ps=kh, c_div_damp=_div_damp_ico(mesh),
+            apvm_scale=0.5, fix_mass=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
         grid = mesh
@@ -2029,8 +2057,11 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         sigma = create_sigma_coordinate(nlev)
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
+        kh = _scalar_diff_ico(mesh)
         config = MPASPrimitiveEquationConfig(
-            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
+            nu_del4=_hyperdiff_ico(mesh), nu_del2=ah,
+            K_h=kh, K_ps=kh, c_div_damp=_div_damp_ico(mesh),
+            apvm_scale=0.5, fix_mass=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
         state = held_suarez_init_mpas(mesh, sigma, T_init=280.0)
         grid = mesh

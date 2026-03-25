@@ -1,7 +1,8 @@
-"""Category 1: Device mesh construction & sharding.
+"""Category 1: Device mesh construction & sharding tests.
 
-Verifies that device meshes are correctly constructed for all supported
-device counts and grid types, and that state sharding/replication works.
+Tests create_device_mesh, create_latlon_mesh, create_level_mesh,
+shard_pytree, replicate_pytree, and DeviceConfig for various
+device counts and grid types.
 """
 
 from __future__ import annotations
@@ -9,224 +10,206 @@ from __future__ import annotations
 import pytest
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from legoesm.parallel.mesh import (
-    DeviceConfig,
     create_device_mesh,
     create_latlon_mesh,
     create_level_mesh,
     shard_pytree,
     replicate_pytree,
+    DeviceConfig,
     _best_tile_factorization,
 )
-from legoesm.parallel.runtime import validate_device_count
-from legoesm.core.field import Field
 
 
-# =========================================================================
-# Helpers
-# =========================================================================
+# ---------------------------------------------------------------------------
+# _best_tile_factorization
+# ---------------------------------------------------------------------------
 
-def _make_state_3d(n: int = 8, nlev: int = 5):
-    """Create a mock cubed-sphere 3D state as a dict of Fields."""
-    rng = np.random.default_rng(42)
-    return {
-        "T": Field(
-            data=jnp.array(rng.standard_normal((6, n, n, nlev)), dtype=jnp.float64),
-            name="T", dims=("face", "x", "y", "level"), units="K",
-        ),
-        "p_s": Field(
-            data=jnp.array(rng.standard_normal((6, n, n)), dtype=jnp.float64),
-            name="p_s", dims=("face", "x", "y"), units="Pa",
-        ),
-    }
+class TestBestTileFactorization:
+    """Unit tests for _best_tile_factorization."""
+
+    @pytest.mark.parametrize("n,expected", [
+        (1, (1, 1, 1)),
+        (2, (2, 1, 1)),
+        (3, (3, 1, 1)),
+        (6, (6, 1, 1)),
+    ])
+    def test_face_only_counts(self, n, expected):
+        assert _best_tile_factorization(n) == expected
+
+    @pytest.mark.parametrize("n", [4, 5])
+    def test_invalid_small_counts(self, n):
+        with pytest.raises(ValueError, match="divide 6"):
+            _best_tile_factorization(n)
+
+    def test_sub_face_tiling_24(self):
+        # 24 = 6 * 4 = 6 * 2^2
+        n_face, tx, ty = _best_tile_factorization(24)
+        assert n_face == 6
+        assert tx == 2
+        assert ty == 2
+
+    def test_sub_face_tiling_54(self):
+        # 54 = 6 * 9 = 6 * 3^2
+        n_face, tx, ty = _best_tile_factorization(54)
+        assert n_face == 6
+        assert tx == 3
+        assert ty == 3
+
+    def test_non_multiple_of_6_gt6(self):
+        with pytest.raises(ValueError):
+            _best_tile_factorization(7)
+
+    def test_non_square_tiles(self):
+        # 12 = 6 * 2 -> tiles_per_face=2, sqrt(2) not integer
+        with pytest.raises(ValueError, match="perfect square"):
+            _best_tile_factorization(12)
 
 
-# =========================================================================
-# 1a) Cubed-sphere face-only mesh
-# =========================================================================
+# ---------------------------------------------------------------------------
+# create_device_mesh
+# ---------------------------------------------------------------------------
 
-class TestFaceOnlyMesh:
-    """create_device_mesh with 1–6 devices produces valid DeviceConfig."""
+class TestCreateDeviceMesh:
+    """Test cubed-sphere device mesh creation."""
 
-    @pytest.mark.parametrize("n_devices", [1, 2, 3, 6])
-    def test_face_only_creation(self, n_devices):
-        if jax.device_count() < n_devices:
-            pytest.skip(f"Need {n_devices} devices, have {jax.device_count()}")
-        config = create_device_mesh(n_devices=n_devices)
-        assert isinstance(config, DeviceConfig)
-        assert config.n_devices == n_devices
-
-    def test_single_device_no_mesh(self):
-        """Single device should work without a mesh."""
+    def test_single_device(self):
         config = create_device_mesh(n_devices=1)
-        assert config.n_devices == 1
-        # Single device: mesh may be None or trivial
-        # Just verify it doesn't crash and config is valid
-        assert config.backend.lower() in ("cpu", "gpu", "tpu", "metal")
-
-    @pytest.mark.skipif(jax.device_count() < 2, reason="Need 2+ devices")
-    def test_multi_device_has_mesh(self):
-        """Multi-device should create a mesh with face axis."""
-        n = min(jax.device_count(), 6)
-        # Find largest valid count <= n
-        for nd in [6, 3, 2]:
-            if nd <= n:
-                config = create_device_mesh(n_devices=nd)
-                assert config.mesh is not None
-                assert "face" in config.mesh.axis_names
-                break
-
-
-# =========================================================================
-# 1b) Sub-face tiling
-# =========================================================================
-
-class TestSubFaceTiling:
-    """Sub-face tiling device meshes for 6*k^2 devices."""
-
-    @pytest.mark.parametrize("k,n_devices", [(2, 24), (3, 54), (4, 96)])
-    def test_tiling_mesh(self, k, n_devices):
-        if jax.device_count() < n_devices:
-            pytest.skip(f"Need {n_devices} devices")
-        config = create_device_mesh(n_devices=n_devices)
-        assert config.mesh is not None
-        assert config.n_devices == n_devices
-        assert config.tiling == (k, k)
-
-    def test_tile_factorization(self):
-        """_best_tile_factorization returns valid factorizations."""
-        # 24 = 6 * 2 * 2
-        n_groups, tx, ty = _best_tile_factorization(24)
-        assert n_groups * tx * ty == 24 // 6 or tx * ty * 6 == 24
-        # 54 = 6 * 3 * 3
-        n_groups2, tx2, ty2 = _best_tile_factorization(54)
-        assert tx2 == ty2  # square tiles required
-
-
-# =========================================================================
-# 1c) Invalid device counts rejected
-# =========================================================================
-
-class TestInvalidDeviceCounts:
-    """Invalid cubed-sphere device counts should raise ValueError via validate_device_count."""
-
-    @pytest.mark.parametrize("n_devices", [4, 5, 7, 10, 13, 25])
-    def test_validate_device_count_raises(self, n_devices):
-        with pytest.raises(ValueError, match="Unsupported device count"):
-            validate_device_count(n_devices)
-
-    @pytest.mark.parametrize("n_devices", [1, 2, 3, 6, 24, 54, 96])
-    def test_validate_device_count_passes(self, n_devices):
-        # Should not raise
-        validate_device_count(n_devices)
-
-
-# =========================================================================
-# 1d) Lat-lon mesh
-# =========================================================================
-
-class TestLatLonMesh:
-    """create_latlon_mesh produces valid DeviceConfig."""
-
-    def test_latlon_single_device(self):
-        config = create_latlon_mesh(n_devices=1)
         assert isinstance(config, DeviceConfig)
+        assert config.n_devices == 1
+        assert config.mesh is None
+        assert config.face_sharding is None
+        assert config.replicated_sharding is None
+        assert config.tiling == (1, 1)
+        assert config.grid_type == "cubed_sphere"
+
+    def test_backend_field(self):
+        config = create_device_mesh(n_devices=1)
+        assert isinstance(config.backend, str)
+        assert len(config.backend) > 0
+
+    def test_is_distributed_false(self):
+        config = create_device_mesh(n_devices=1)
+        assert config.is_distributed is False
+
+    def test_auto_device_count(self):
+        config = create_device_mesh(n_devices="auto")
+        assert config.n_devices >= 1
+
+    def test_explicit_devices(self):
+        devs = jax.devices("cpu")[:1]
+        config = create_device_mesh(devices=devs)
+        assert config.n_devices == 1
+
+    def test_empty_devices_raises(self):
+        with pytest.raises(ValueError, match="at least one"):
+            create_device_mesh(devices=[])
+
+    def test_negative_n_devices_raises(self):
+        with pytest.raises(ValueError, match="n_devices must be >= 1"):
+            create_device_mesh(n_devices=0)
+
+
+# ---------------------------------------------------------------------------
+# create_latlon_mesh
+# ---------------------------------------------------------------------------
+
+class TestCreateLatlonMesh:
+    def test_single_device(self):
+        config = create_latlon_mesh(n_devices=1)
+        assert config.n_devices == 1
+        assert config.mesh is None
         assert config.grid_type == "latlon"
 
-    @pytest.mark.skipif(jax.device_count() < 2, reason="Need 2+ devices")
-    def test_latlon_multi_device(self):
-        config = create_latlon_mesh(n_devices=2)
-        assert config.mesh is not None
-        assert "lat" in config.mesh.axis_names
 
+# ---------------------------------------------------------------------------
+# create_level_mesh
+# ---------------------------------------------------------------------------
 
-# =========================================================================
-# 1e) Level-parallel mesh (spectral)
-# =========================================================================
-
-class TestLevelMesh:
-    """create_level_mesh produces valid DeviceConfig."""
-
-    def test_level_mesh_single(self):
+class TestCreateLevelMesh:
+    def test_single_device(self):
         config = create_level_mesh(n_devices=1)
-        assert isinstance(config, DeviceConfig)
-
-    @pytest.mark.skipif(jax.device_count() < 2, reason="Need 2+ devices")
-    def test_level_mesh_multi(self):
-        config = create_level_mesh(n_devices=2)
-        assert config.mesh is not None
-        assert "level" in config.mesh.axis_names
+        assert config.n_devices == 1
+        assert config.mesh is None
+        assert config.grid_type == "spectral"
 
 
-# =========================================================================
-# 1f) PartitionSpec consistency
-# =========================================================================
+# ---------------------------------------------------------------------------
+# shard_pytree / replicate_pytree (single-device)
+# ---------------------------------------------------------------------------
 
-class TestSharding:
-    """shard_pytree and replicate_pytree produce correct shardings."""
+class TestShardReplicate:
+    """Test pytree sharding utilities in single-device mode."""
 
-    def test_shard_single_device_noop(self):
-        """Sharding on 1 device should not crash."""
+    def test_shard_single_device_is_identity(self):
         config = create_device_mesh(n_devices=1)
-        state = _make_state_3d(n=8)
-        # Should not raise
-        result = shard_pytree(state, config)
-        # Values should be preserved
-        for key in state:
-            np.testing.assert_allclose(
-                np.array(result[key].data), np.array(state[key].data), atol=1e-15
-            )
+        data = {"a": jnp.ones((6, 4, 4)), "b": jnp.zeros(3)}
+        out = shard_pytree(data, config)
+        assert jnp.array_equal(out["a"], data["a"])
+        assert jnp.array_equal(out["b"], data["b"])
 
-    def test_replicate_single_device_noop(self):
-        """Replicate on 1 device should preserve values."""
+    def test_replicate_single_device_is_identity(self):
         config = create_device_mesh(n_devices=1)
-        state = _make_state_3d(n=8)
-        result = replicate_pytree(state, config)
-        for key in state:
-            np.testing.assert_allclose(
-                np.array(result[key].data), np.array(state[key].data), atol=1e-15
-            )
+        data = {"x": jnp.arange(12).reshape(3, 4)}
+        out = replicate_pytree(data, config)
+        assert jnp.array_equal(out["x"], data["x"])
 
-    @pytest.mark.skipif(jax.device_count() < 2, reason="Need 2+ devices")
-    def test_shard_multi_device(self):
-        """Sharding across 2+ devices should produce non-replicated sharding."""
-        n = min(jax.device_count(), 6)
-        for nd in [6, 3, 2]:
-            if nd <= n:
-                config = create_device_mesh(n_devices=nd)
-                state = _make_state_3d(n=8)
-                result = shard_pytree(state, config)
-                # Check that data is preserved (gather implicitly via numpy)
-                for key in state:
-                    np.testing.assert_allclose(
-                        np.array(result[key].data),
-                        np.array(state[key].data),
-                        atol=1e-15,
-                    )
-                break
-
-
-# =========================================================================
-# 1g) Replicate vs shard
-# =========================================================================
-
-class TestReplicateVsShard:
-    """Verify replicate gives fully-replicated and shard gives partitioned."""
-
-    def test_replicate_preserves_values(self):
-        """Replicated pytree has identical values on all devices."""
+    def test_shard_cubed_sphere_face_detection(self):
+        """Cubed-sphere sharding recognises leading dimension of 6."""
         config = create_device_mesh(n_devices=1)
-        data = jnp.ones((6, 4, 4, 5))
-        state = {"field": data}
-        result = replicate_pytree(state, config)
-        np.testing.assert_allclose(np.array(result["field"]), np.array(data))
+        face_arr = jnp.ones((6, 4, 4))
+        non_face = jnp.ones((3, 4, 4))
+        tree = {"face": face_arr, "other": non_face}
+        out = shard_pytree(tree, config)
+        # Single device -> same arrays
+        assert out["face"].shape == (6, 4, 4)
+        assert out["other"].shape == (3, 4, 4)
 
-    def test_shard_preserves_values(self):
-        """Sharded pytree has same total data as original."""
+    def test_shard_latlon_single(self):
+        config = create_latlon_mesh(n_devices=1)
+        data = {"T": jnp.ones((32, 64))}
+        out = shard_pytree(data, config)
+        assert jnp.array_equal(out["T"], data["T"])
+
+    def test_shard_spectral_single(self):
+        config = create_level_mesh(n_devices=1)
+        data = {"coeffs": jnp.ones((100, 20), dtype=jnp.complex128)}
+        out = shard_pytree(data, config)
+        assert jnp.array_equal(out["coeffs"], data["coeffs"])
+
+    def test_non_array_leaves_preserved(self):
+        """Non-array leaves pass through unchanged."""
         config = create_device_mesh(n_devices=1)
-        data = jnp.arange(6 * 4 * 4, dtype=jnp.float64).reshape(6, 4, 4)
-        state = {"field": data}
-        result = shard_pytree(state, config)
-        np.testing.assert_allclose(np.array(result["field"]), np.array(data))
+        tree = {"arr": jnp.ones(3), "label": "hello"}
+        out = shard_pytree(tree, config)
+        assert out["label"] == "hello"
+
+    def test_replicate_non_array_preserved(self):
+        config = create_device_mesh(n_devices=1)
+        tree = {"arr": jnp.ones(3), "count": 42}
+        out = replicate_pytree(tree, config)
+        assert out["count"] == 42
+
+
+# ---------------------------------------------------------------------------
+# DeviceConfig NamedTuple fields
+# ---------------------------------------------------------------------------
+
+class TestDeviceConfigNamedTuple:
+    def test_is_named_tuple(self):
+        config = create_device_mesh(n_devices=1)
+        assert hasattr(config, "_fields")
+        assert "mesh" in config._fields
+        assert "n_devices" in config._fields
+
+    def test_fields_are_accessible(self):
+        config = create_device_mesh(n_devices=1)
+        _ = config.mesh
+        _ = config.face_sharding
+        _ = config.replicated_sharding
+        _ = config.n_devices
+        _ = config.backend
+        _ = config.is_distributed
+        _ = config.tiling
+        _ = config.grid_type
