@@ -348,14 +348,10 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
 
-    # For multi-device (non-MPI): if the data is sharded, the jnp.sum
-    # above only sums the local shard.  Use psum to combine across
-    # devices.  When not sharded, psum is a no-op identity.
-    config = _get_device_config()
-    if config is not None and config.mesh is not None:
-        axis_names = config.mesh.axis_names
-        local_sum = jax.lax.psum(local_sum, axis_name=axis_names)
-
+    # For multi-device (non-MPI, NamedSharding-based SPMD): jnp.sum on
+    # a face-sharded array already produces the correct global sum —
+    # JAX/XLA automatically inserts an all-reduce when the reduction
+    # spans a sharded axis.  No explicit psum is needed.
     return local_sum
 
 
