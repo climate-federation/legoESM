@@ -404,7 +404,7 @@ def build_segment_fn(
     if gradient_checkpoint:
         _step_fn = jax.checkpoint(_single_step, prevent_cse=False)
 
-    @partial(jax.jit, static_argnums=(1,))
+    @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
     def run_segment(carry: SegmentCarry, n_steps: int) -> SegmentCarry:
         """Run n_steps of the atmosphere integration as a compiled kernel.
 

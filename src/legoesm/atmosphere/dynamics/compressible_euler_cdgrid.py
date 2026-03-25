@@ -38,6 +38,7 @@ from legoesm.core.operators_cdgrid import (
     dgrid_to_center_vector,
     dgrid_vorticity,
     cgrid_mass_flux_divergence,
+    cgrid_divergence,
     _arakawa_lamb_gradient,
     _broadcast_metric,
     _interp_center_to_corner,
@@ -185,19 +186,25 @@ def cdgrid_compressible_euler_slow_tendencies(
     du_dt = du_dt + vertical_advection_height(u, w, dz, dz_half, J)
     dv_dt = dv_dt + vertical_advection_height(v, w, dz, dz_half, J)
 
-    # --- 10. Theta equation: C-grid upwind advection ---
-    dtheta_p_dt = cgrid_mass_flux_divergence(theta_total, u_c, v_c, cdgrid)
+    # --- 10. Theta equation: advective form -v·∇θ ---
+    # The θ equation uses advective form (not divergence/flux form) because
+    # θ is NOT a conserved density — it satisfies dθ/dt = 0, not ∂(ρθ)/∂t = -∇·(ρθv).
+    # Advective form = flux divergence + θ·div(v):  -v·∇θ = -∇·(θv) + θ∇·v
+    div_v = cgrid_divergence(u_c, v_c, cdgrid)
+    dtheta_p_dt = (cgrid_mass_flux_divergence(theta_total, u_c, v_c, cdgrid)
+                   + theta_total * div_v)
 
-    # --- 11. Continuity: C-grid upwind mass flux ---
+    # --- 11. Continuity: C-grid upwind mass flux (divergence form) ---
     drho_p_dt = cgrid_mass_flux_divergence(rho_total, u_c, v_c, cdgrid)
 
-    # --- 12. Tracer advection ---
+    # --- 12. Tracer advection (advective form) ---
     n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
     if n_tracers > 0:
         tracers_t = jnp.moveaxis(tracers, -1, 0)
 
         def _single_tracer(q):
-            horiz = cgrid_mass_flux_divergence(q, u_c, v_c, cdgrid)
+            horiz = (cgrid_mass_flux_divergence(q, u_c, v_c, cdgrid)
+                     + q * div_v)
             vert = vertical_advection_height(q, w, dz, dz_half, J)
             return horiz + vert
 

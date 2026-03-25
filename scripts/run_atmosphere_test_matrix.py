@@ -2239,7 +2239,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=10000.0, sponge_coeff=0.05,
-                hyperdiff_coeff=hd)
+                hyperdiff_coeff=hd,
+                acoustic_off_centering=0.1)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, _ = dcmip25_tc2_init(
@@ -2248,7 +2249,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=5000.0, sponge_coeff=0.1,
-                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd)
+                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
+                acoustic_off_centering=0.1)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, _ = dcmip25_tc3_init(
@@ -2257,7 +2259,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=5000.0, sponge_coeff=0.1,
-                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd)
+                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
+                acoustic_off_centering=0.1)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 

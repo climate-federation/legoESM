@@ -267,7 +267,7 @@ def create_cubed_sphere(
     # models run in float32, so grid arrays must match to avoid scatter
     # cast warnings when jax_enable_x64 is True (e.g., spectral tests).
     _f32 = jnp.float32
-    return CubedSphereGrid(
+    grid = CubedSphereGrid(
         n=n,
         radius=radius,
         lon=lon.astype(_f32),
@@ -296,6 +296,14 @@ def create_cubed_sphere(
         hy_ext_h2=hy_ext_h2.astype(_f32),
         halo_interp_offsets_h2=halo_offsets_h2.astype(_f32),
     )
+
+    # Eagerly populate the vectorized halo index cache so that the
+    # first call to pad_halo (which may happen inside jax.lax.scan)
+    # does not trigger a cache write during JAX tracing.
+    from legoesm.grids.halo import precompute_halo_tables
+    precompute_halo_tables(n)
+
+    return grid
 
 
 def _compute_gnomonic_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
