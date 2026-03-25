@@ -135,7 +135,6 @@ def create_cubed_sphere_cdgrid(
     all_lon_c, all_lat_c = [], []
     all_angle_c = []
     all_dx_ey, all_dy_ex = [], []
-    all_area_c = []
 
     for face in range(6):
         lon_c, lat_c = _face_gnomonic_to_lonlat(face, ax_e, ay_e)
@@ -230,26 +229,19 @@ def create_cubed_sphere_cdgrid(
         face_angle = jnp.arctan2(ti_dot_north, ti_dot_east)
         all_angle_c.append(face_angle)
 
-        # Dual-cell area at corners: average of the 4 surrounding cell areas
-        # For interior corners (1..n-1, 1..n-1), average 4 cells.
-        # For edge/corner of the face, use available cells (1-3).
-        # Approximate: 0.25 * sum of up-to-4 surrounding cell areas
-        area = base.area[face]  # (n, n)
-        area_padded = jnp.pad(area, 1, mode='edge')  # (n+2, n+2)
-        area_c_face = 0.25 * (
-            area_padded[:-1, :-1]
-            + area_padded[1:, :-1]
-            + area_padded[:-1, 1:]
-            + area_padded[1:, 1:]
-        )  # (n+1, n+1)
-        all_area_c.append(area_c_face)
-
     lon_corner = jnp.stack(all_lon_c, axis=0)
     lat_corner = jnp.stack(all_lat_c, axis=0)
     angle_corner = jnp.stack(all_angle_c, axis=0)
     dx_edge_y = jnp.stack(all_dx_ey, axis=0)
     dy_edge_x = jnp.stack(all_dy_ex, axis=0)
-    area_corner = jnp.stack(all_area_c, axis=0)
+    # --- area_corner from halo-exchanged cell areas (cross-face aware) ---
+    from legoesm.grids.halo import pad_halo, _fill_corners_h1
+    area_halo = pad_halo(base.area)            # (6, n+2, n+2)
+    area_halo = _fill_corners_h1(area_halo)    # fill corner ghost cells
+    area_corner = 0.25 * (
+        area_halo[:, :-1, :-1] + area_halo[:, 1:, :-1]
+        + area_halo[:, :-1, 1:] + area_halo[:, 1:, 1:]
+    )  # (6, n+1, n+1)
 
     f_corner = 2.0 * omega * jnp.sin(lat_corner)
     cos_angle_corner = jnp.cos(angle_corner)

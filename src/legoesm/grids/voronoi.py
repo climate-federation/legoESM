@@ -227,9 +227,8 @@ def _spherical_polygon_centroid(vertices):
     centroid = np.zeros(3)
     for i in range(1, n - 1):
         v1, v2 = vertices[i], vertices[i + 1]
-        # Spherical triangle area via cross product
-        cross = np.cross(v1 - v0, v2 - v0)
-        area = np.linalg.norm(cross) * 0.5  # approximate for small triangles
+        # True spherical triangle area via spherical excess
+        area = _spherical_triangle_area(v0, v1, v2, radius=1.0)
         tri_center = (v0 + v1 + v2) / 3.0
         centroid += area * tri_center
         total_area += area
@@ -765,65 +764,137 @@ def _compute_weights_on_edge(nEdges, nCells, maxEdges, maxEdges2,
                               kiteAreasOnVertex, cellsOnVertex,
                               areaCell, vertex_xyz, cell_xyz, edge_xyz,
                               angleEdge, dvEdge, dcEdge, radius):
-    """Compute weights for tangential velocity reconstruction.
+    """Compute TRiSK weights for tangential velocity reconstruction.
 
-    Uses a Perot-style least-squares approach: for each edge e, the
-    weights are chosen so that a uniform vector field is reconstructed
-    exactly. This is the minimum-norm solution of:
-        Σ w_k cos(α_k) = -sin(α_e)
-        Σ w_k sin(α_k) =  cos(α_e)
-    where α_k = angleEdge[e_k].
+    Uses the Thuburn et al. (2009) geometric construction based on kite
+    areas.  Defines the W matrix as ``W(e,e') = sign_e * sign_e' *
+    (S_CCW - A_C/2) / A_C``, which satisfies ``W(e,e') + W(e',e) = 0``
+    (energy conservation, Ringler et al. 2010, Eq. 47-49).
+    Stored weights encode ``weightsOnEdge(e,e') = W * dvEdge(e') / dvEdge(e)``
+    for use in ``vt = sum(weightsOnEdge * u)``.
+
+    References
+    ----------
+    - Thuburn, J., Ringler, T. D., Skamarock, W. C., & Klemp, J. B. (2009).
+      Numerical representation of geostrophic modes on arbitrarily structured
+      C-grids. J. Comput. Phys., 228(22), 8321-8335.
     """
     edgesOnEdge = np.full((maxEdges2, nEdges), -1, dtype=np.int32)
     weightsOnEdge = np.zeros((maxEdges2, nEdges), dtype=np.float64)
     nEdgesOnEdge_arr = np.zeros(nEdges, dtype=np.int32)
 
+    # Pre-read vertex degree from kiteAreasOnVertex shape
+    vertexDegree = kiteAreasOnVertex.shape[0]
+
+    # Precompute per-cell kite areas (by position) and prefix sums.
+    # cell_kite[iCell][k] = kite area at position k
+    # cell_prefix[iCell][k] = sum of kite areas at positions 0..k-1
+    # cell_prefix[iCell][nec] = A_cell (total)
+    # Using prefix sums to compute partial areas via subtraction
+    # guarantees S_fwd + S_rev = A_cell in floating point, which
+    # gives exact (machine-epsilon) antisymmetry.
+    cell_kite_pos = {}    # iCell -> list of kite areas by position
+    cell_prefix = {}      # iCell -> prefix sum array (length nec+1)
+    for iCell in range(nCells):
+        nec = nEdgesOnCell[iCell]
+        kites = []
+        for k in range(nec):
+            v = verticesOnCell[k, iCell]
+            kite_a = 0.0
+            for kk in range(vertexDegree):
+                if cellsOnVertex[kk, v] == iCell:
+                    kite_a = float(kiteAreasOnVertex[kk, v])
+                    break
+            kites.append(kite_a)
+        prefix = [0.0] * (nec + 1)
+        for k in range(nec):
+            prefix[k + 1] = prefix[k] + kites[k]
+        cell_kite_pos[int(iCell)] = kites
+        cell_prefix[int(iCell)] = prefix
+
+    def _ccw_kite_sum(ic, nec, start_pos, end_pos):
+        """Sum of kite areas from position (start_pos+1) to end_pos, CCW.
+
+        Uses the prefix array so that for any pair (e, e') sharing cell C,
+        _ccw_kite_sum(C, n, pos_e, pos_e') + _ccw_kite_sum(C, n, pos_e', pos_e)
+        == A_cell  exactly in floating point.
+        """
+        prefix = cell_prefix[ic]
+        A_cell = prefix[nec]
+        # Number of steps from start_pos+1 to end_pos going CCW
+        steps = (end_pos - start_pos) % nec
+        if steps == 0:
+            return 0.0
+        # Use prefix sums on doubled array: positions start_pos+1 .. start_pos+steps
+        # Map to canonical indices
+        a = (start_pos + 1) % nec  # first position
+        b = end_pos                 # last position
+        if a <= b:
+            return prefix[b + 1] - prefix[a]
+        else:
+            # Wraps around: [a..nec-1] + [0..b]
+            return (prefix[nec] - prefix[a]) + prefix[b + 1]
+
     for iEdge in range(nEdges):
-        c1 = cellsOnEdge[0, iEdge]
-        c2 = cellsOnEdge[1, iEdge]
+        c0 = cellsOnEdge[0, iEdge]
+        c1 = cellsOnEdge[1, iEdge]
 
-        # Build stencil: all edges of c1 and c2, excluding iEdge
-        stencil_set = set()
-        for k in range(nEdgesOnCell[c1]):
-            e = edgesOnCell[k, c1]
-            if e >= 0 and e != iEdge:
-                stencil_set.add(int(e))
-        for k in range(nEdgesOnCell[c2]):
-            e = edgesOnCell[k, c2]
-            if e >= 0 and e != iEdge:
-                stencil_set.add(int(e))
-        stencil_edges = sorted(stencil_set)
-        m = len(stencil_edges)
-        if m == 0:
-            continue
+        stencil = {}   # edge_index -> weight
 
-        # Build least-squares system:
-        # A w = b where A is 2×m, b is 2×1
-        # A[0,k] = cos(angle_k), A[1,k] = sin(angle_k)
-        # b = [-sin(angle_e), cos(angle_e)]
-        A = np.zeros((2, m), dtype=np.float64)
-        for k, ek in enumerate(stencil_edges):
-            A[0, k] = np.cos(angleEdge[ek])
-            A[1, k] = np.sin(angleEdge[ek])
+        # Process each cell of this edge
+        for iCell in (c0, c1):
+            ic = int(iCell)
+            nec = nEdgesOnCell[iCell]
+            prefix = cell_prefix[ic]
+            A_cell = prefix[nec]   # total cell area from prefix sum
 
-        b = np.array([-np.sin(angleEdge[iEdge]),
-                       np.cos(angleEdge[iEdge])], dtype=np.float64)
+            # Find position of iEdge in this cell's edge list
+            edge_pos = -1
+            sign_iEdge = 0
+            for k in range(nec):
+                if edgesOnCell[k, iCell] == iEdge:
+                    edge_pos = k
+                    sign_iEdge = int(edgeSignOnCell[k, iCell])
+                    break
+            if edge_pos < 0:
+                continue
 
-        # Minimum-norm solution: w = A^T (A A^T)^{-1} b
-        AAT = A @ A.T  # 2x2
-        det = AAT[0, 0] * AAT[1, 1] - AAT[0, 1] * AAT[1, 0]
-        if abs(det) < 1e-30:
-            continue
-        AAT_inv = np.array([[AAT[1, 1], -AAT[0, 1]],
-                            [-AAT[1, 0], AAT[0, 0]]]) / det
-        w = A.T @ (AAT_inv @ b)
+            dv_ie = float(dvEdge[iEdge])
+            if dv_ie < 1e-30:
+                continue
 
-        # Store
-        nEdgesOnEdge_arr[iEdge] = m
+            # Walk counterclockwise from iEdge around iCell.
+            # Compute cumulative kite area via prefix sums (subtraction)
+            # to guarantee S(e->e') + S(e'->e) == A_cell exactly.
+            for step in range(1, nec):
+                v_pos = (edge_pos + step) % nec
+
+                # Edge at position v_pos
+                ek = edgesOnCell[v_pos, iCell]
+                if ek < 0 or ek == iEdge:
+                    continue
+
+                area_sum = _ccw_kite_sum(ic, nec, edge_pos, v_pos)
+                sign_ek = int(edgeSignOnCell[v_pos, iCell])
+                dv_ek = float(dvEdge[ek])
+
+                # Thuburn et al. (2009) formula for the W matrix:
+                #   W(e,e') = sign_e * sign_e' * (S_CCW - A_C/2) / A_C
+                # W satisfies: W(e,e') + W(e',e) = 0  (energy conservation)
+                # MPAS weightsOnEdge convention for vt = sum w * u:
+                #   weightsOnEdge(e,e') = W(e,e') * dvEdge(e') / dvEdge(e)
+                w = (sign_iEdge * sign_ek
+                     * (area_sum - 0.5 * A_cell)
+                     * dv_ek / (A_cell * dv_ie))
+                stencil[ek] = stencil.get(ek, 0.0) + w
+
+        # Store in output arrays
+        stencil_edges = sorted(stencil.keys())
+        nEdgesOnEdge_arr[iEdge] = len(stencil_edges)
         for k, ek in enumerate(stencil_edges):
             if k < maxEdges2:
                 edgesOnEdge[k, iEdge] = ek
-                weightsOnEdge[k, iEdge] = w[k]
+                weightsOnEdge[k, iEdge] = stencil[ek]
 
     return edgesOnEdge, weightsOnEdge, nEdgesOnEdge_arr
 

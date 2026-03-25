@@ -900,6 +900,10 @@ def fv3_vorticity(u_d, v_d, cdgrid):
     Uses the exact circulation form: the four edges surrounding each corner
     contribute directly without any spatial interpolation.
 
+    At face boundaries, the halo line integrals are reconstructed from
+    halo-exchanged cell-centre winds to avoid the incorrect ``mode='edge'``
+    padding that would repeat same-face edge values.
+
     Parameters
     ----------
     u_d : jax.Array, shape (6, n, n+1)
@@ -910,19 +914,63 @@ def fv3_vorticity(u_d, v_d, cdgrid):
     -------
     vort : jax.Array, shape (6, n+1, n+1)
     """
+    from legoesm.grids.halo import pad_halo_vector
+
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
+    n = cdgrid.n
 
-    u_dx = u_d * dx
-    v_dy = v_d * dy
+    u_dx = u_d * dx          # (6, n, n+1)
+    v_dy = v_d * dy          # (6, n+1, n)
 
-    u_dx_pad = jnp.pad(u_dx, ((0, 0), (1, 1), (0, 0)), mode='edge')
-    v_dy_pad = jnp.pad(v_dy, ((0, 0), (0, 0), (1, 1)), mode='edge')
+    # --- Halo-aware padding ------------------------------------------------
+    # Interior: direct line integrals (no change).
+    # Boundary halo: reconstruct from halo-exchanged cell-centre winds so
+    # that the circulation at shared cube-face corners is physically
+    # consistent.
 
+    # Cell-centre winds from edge-midpoint D-grid (simple average)
+    u_cc = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
+    v_cc = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
+
+    grid = cdgrid.base
+    u_pad, v_pad = pad_halo_vector(
+        u_cc, v_cc,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=grid.halo_interp_offsets,
+    )   # each (6, n+2, n+2)
+
+    # Reconstruct halo u_dx from padded cell-centre u ----------------------
+    # x-edge at position (i, j) sits between cells (i, j-1) and (i, j).
+    # In padded coords cell (i, j) -> padded (i+1, j+1).
+    # Halo edge i=-1 (padded row 0): average padded[:, 0, j] and [:, 0, j+1]
+    # Halo edge i=n  (padded row n+1): average padded[:, n+1, j] and [:, n+1, j+1]
+    u_dx_west_halo = (0.5 * (u_pad[:, 0:1, :-1] + u_pad[:, 0:1, 1:])
+                      * dx[:, 0:1, :])              # (6, 1, n+1)
+    u_dx_east_halo = (0.5 * (u_pad[:, -1:, :-1] + u_pad[:, -1:, 1:])
+                      * dx[:, -1:, :])              # (6, 1, n+1)
+
+    u_dx_pad = jnp.concatenate([u_dx_west_halo, u_dx, u_dx_east_halo],
+                               axis=1)              # (6, n+2, n+1)
+
+    # Reconstruct halo v_dy from padded cell-centre v ----------------------
+    # y-edge at position (i, j) sits between cells (i-1, j) and (i, j).
+    # Halo edge j=-1 (padded col 0): average padded[:, i, 0] and [:, i+1, 0]
+    # Halo edge j=n  (padded col n+1): average padded[:, i, n+1] and [:, i+1, n+1]
+    v_dy_south_halo = (0.5 * (v_pad[:, :-1, 0:1] + v_pad[:, 1:, 0:1])
+                       * dy[:, :, 0:1])             # (6, n+1, 1)
+    v_dy_north_halo = (0.5 * (v_pad[:, :-1, -1:] + v_pad[:, 1:, -1:])
+                       * dy[:, :, -1:])             # (6, n+1, 1)
+
+    v_dy_pad = jnp.concatenate([v_dy_south_halo, v_dy, v_dy_north_halo],
+                               axis=2)              # (6, n+1, n+2)
+
+    # --- Circulation -------------------------------------------------------
     u_south = u_dx_pad[:, :-1, :]
     u_north = u_dx_pad[:, 1:, :]
-    v_west = v_dy_pad[:, :, :-1]
-    v_east = v_dy_pad[:, :, 1:]
+    v_west  = v_dy_pad[:, :, :-1]
+    v_east  = v_dy_pad[:, :, 1:]
 
     circ = u_south - u_north + v_east - v_west
 
