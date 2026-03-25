@@ -302,6 +302,105 @@ class TestFreshwaterFromCoupler:
         # Melting (h decreases) should give positive ice_fw
         assert jnp.all(fw.ice_fw > 0)
 
+    def test_ice_fw_thickness_only_melt(self):
+        """Thickness-only melt (fixed concentration) → correct mass change."""
+        from legoesm.core.field import Field
+        from legoesm.ice.state import SeaIceState
+        from legoesm.ice.config import SeaIceConfig
+
+        n, dt = 5, 3600.0
+        shape = (n,)
+        rho_ice = SeaIceConfig().rho_ice
+        h_old, h_new, conc = 2.0, 1.5, 0.8
+
+        ice_old = SeaIceState(
+            h_ice=Field(data=jnp.full(shape, h_old), name="h", dims=("c",), units="m"),
+            T_ice=Field(data=jnp.full(shape, 260.0), name="T", dims=("c",), units="K"),
+            concentration=Field(data=jnp.full(shape, conc), name="A", dims=("c",), units="1"),
+        )
+        ice_new = SeaIceState(
+            h_ice=Field(data=jnp.full(shape, h_new), name="h", dims=("c",), units="m"),
+            T_ice=Field(data=jnp.full(shape, 260.0), name="T", dims=("c",), units="K"),
+            concentration=Field(data=jnp.full(shape, conc), name="A", dims=("c",), units="1"),
+        )
+
+        fw = freshwater_from_coupler(
+            jnp.zeros(n), jnp.zeros(n), 2.5e6,
+            ice_state_old=ice_old, ice_state_new=ice_new,
+            ice_config=SeaIceConfig(), dt=dt,
+        )
+        expected = rho_ice * (h_old - h_new) * conc / dt
+        assert jnp.allclose(fw.ice_fw, expected, rtol=1e-10)
+
+    def test_ice_fw_concentration_only(self):
+        """Concentration change at fixed thickness → correct mass change."""
+        from legoesm.core.field import Field
+        from legoesm.ice.state import SeaIceState
+        from legoesm.ice.config import SeaIceConfig
+
+        n, dt = 5, 3600.0
+        shape = (n,)
+        rho_ice = SeaIceConfig().rho_ice
+        h, A_old, A_new = 1.0, 0.8, 0.6
+
+        ice_old = SeaIceState(
+            h_ice=Field(data=jnp.full(shape, h), name="h", dims=("c",), units="m"),
+            T_ice=Field(data=jnp.full(shape, 260.0), name="T", dims=("c",), units="K"),
+            concentration=Field(data=jnp.full(shape, A_old), name="A", dims=("c",), units="1"),
+        )
+        ice_new = SeaIceState(
+            h_ice=Field(data=jnp.full(shape, h), name="h", dims=("c",), units="m"),
+            T_ice=Field(data=jnp.full(shape, 260.0), name="T", dims=("c",), units="K"),
+            concentration=Field(data=jnp.full(shape, A_new), name="A", dims=("c",), units="1"),
+        )
+
+        fw = freshwater_from_coupler(
+            jnp.zeros(n), jnp.zeros(n), 2.5e6,
+            ice_state_old=ice_old, ice_state_new=ice_new,
+            ice_config=SeaIceConfig(), dt=dt,
+        )
+        expected = rho_ice * h * (A_old - A_new) / dt
+        assert jnp.allclose(fw.ice_fw, expected, rtol=1e-10)
+
+    def test_ice_fw_multi_category(self):
+        """Multi-category ice: total areal mass change is summed."""
+        from legoesm.core.field import Field
+        from legoesm.ice.state import SeaIceState
+        from legoesm.ice.config import SeaIceConfig
+
+        n, n_cat, dt = 5, 3, 3600.0
+        shape = (n,)
+        rho_ice = SeaIceConfig().rho_ice
+
+        # Multi-cat: shape (n, n_cat)
+        h_old = jnp.ones((n, n_cat)) * jnp.array([0.5, 1.0, 2.0])
+        h_new = jnp.ones((n, n_cat)) * jnp.array([0.4, 0.9, 1.8])
+        A_old = jnp.ones((n, n_cat)) * 0.3
+        A_new = jnp.ones((n, n_cat)) * 0.3
+
+        ice_old = SeaIceState(
+            h_ice=Field(data=h_old, name="h", dims=("c", "cat"), units="m"),
+            T_ice=Field(data=jnp.full((n, n_cat), 260.0), name="T", dims=("c", "cat"), units="K"),
+            concentration=Field(data=A_old, name="A", dims=("c", "cat"), units="1"),
+        )
+        ice_new = SeaIceState(
+            h_ice=Field(data=h_new, name="h", dims=("c", "cat"), units="m"),
+            T_ice=Field(data=jnp.full((n, n_cat), 260.0), name="T", dims=("c", "cat"), units="K"),
+            concentration=Field(data=A_new, name="A", dims=("c", "cat"), units="1"),
+        )
+
+        fw = freshwater_from_coupler(
+            jnp.zeros(n), jnp.zeros(n), 2.5e6,
+            ice_state_old=ice_old, ice_state_new=ice_new,
+            ice_config=SeaIceConfig(), dt=dt,
+        )
+        # Should be shape (n,) — summed over categories
+        assert fw.ice_fw.shape == (n,)
+        mass_old = rho_ice * jnp.sum(h_old * A_old, axis=-1)
+        mass_new = rho_ice * jnp.sum(h_new * A_new, axis=-1)
+        expected = -(mass_new - mass_old) / dt
+        assert jnp.allclose(fw.ice_fw, expected, rtol=1e-10)
+
 
 # ============================================================================
 # Config fields

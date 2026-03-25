@@ -190,14 +190,25 @@ def freshwater_from_coupler(
     else:
         runoff = jnp.zeros(nCells)
 
-    # Ice freshwater: fw = -rho_ice * dh/dt * A_ice
-    # Melting (dh < 0) puts freshwater into ocean (positive fw).
+    # Ice freshwater: based on areal ice mass change.
+    # ice_mass = rho_ice * h * A  (per unit area of grid cell)
+    # ice_fw = -(ice_mass_new - ice_mass_old) / dt
+    # Melting (mass decrease) puts freshwater into ocean (positive fw).
+    # Supports both single-category and multi-category ice.
     if ice_state_old is not None and ice_state_new is not None and ice_config is not None:
         h_old = ice_state_old.h_ice.data
         h_new = ice_state_new.h_ice.data
-        conc = ice_state_old.concentration.data
+        A_old = ice_state_old.concentration.data
+        A_new = ice_state_new.concentration.data
         rho_ice = ice_config.rho_ice
-        ice_fw = -rho_ice * (h_new - h_old) / jnp.maximum(dt, 1e-10) * conc
+        ice_mass_old = rho_ice * h_old * A_old
+        ice_mass_new = rho_ice * h_new * A_new
+        # Multi-category: h has more dims than precip_total; sum categories.
+        n_extra = ice_mass_old.ndim - precip_total.ndim
+        for _ in range(n_extra):
+            ice_mass_old = jnp.sum(ice_mass_old, axis=-1)
+            ice_mass_new = jnp.sum(ice_mass_new, axis=-1)
+        ice_fw = -(ice_mass_new - ice_mass_old) / jnp.maximum(dt, 1e-10)
     else:
         ice_fw = jnp.zeros(nCells)
 

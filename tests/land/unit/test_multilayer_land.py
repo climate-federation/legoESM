@@ -751,5 +751,120 @@ class TestMultilayerLandStep(unittest.TestCase):
         npt.assert_allclose(new_state.runoff_surface, 0.0, atol=1e-10)
 
 
+    def test_transpiration_sink_water_budget(self):
+        """No-precip, zero-bottom-flux: total soil water loss matches
+        latent-heat-implied evaporation."""
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.multilayer_land import (
+            step_multilayer_land, init_multilayer_land_state,
+        )
+        from legoesm.land.richards import RichardsConfig
+        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm import constants
+
+        config = MultiLayerLandConfig(
+            richards=RichardsConfig(bottom_bc="zero_flux"),
+        )
+        ncol = 4
+        state = init_multilayer_land_state(
+            ncol, config, T_init=290.0, theta_init=0.35,
+        )
+        # No precip, warm sunny → drives evaporation from soil
+        forcing = AtmToSurface(
+            sw_down=jnp.full(ncol, 300.0),
+            lw_down=jnp.full(ncol, 350.0),
+            precip_total=jnp.zeros(ncol),
+            precip_snow=jnp.zeros(ncol),
+            T_lowest=jnp.full(ncol, 295.0),
+            q_lowest=jnp.full(ncol, 0.005),
+            u_lowest=jnp.full(ncol, 3.0),
+            v_lowest=jnp.zeros(ncol),
+            p_lowest=jnp.full(ncol, 95000.0),
+            p_surface=jnp.full(ncol, 100000.0),
+            rho_lowest=jnp.full(ncol, 1.2),
+            cos_zenith=jnp.full(ncol, 0.5),
+            co2_ppmv=jnp.full(ncol, 400.0),
+            has_radiation=jnp.ones(ncol),
+            has_precipitation=jnp.ones(ncol),
+        )
+        dt = 600.0
+        from legoesm.land.soil_grid import make_soil_grid
+        grid = make_soil_grid(config.soil_grid)
+        dz = grid.dz
+
+        theta_old = state.theta_soil
+        new_state, response, _ = step_multilayer_land(
+            state, forcing, config, U_min=1.0, dt=dt,
+        )
+        theta_new = new_state.theta_soil
+
+        # Total water change (m of water per unit area)
+        dwater = jnp.sum((theta_new - theta_old) * dz[None, :], axis=-1)
+        # lhflx → evap [m/s]: E = lhflx / L_v / rho_w
+        evap_m = response.lhflx / constants.L_v / 1000.0  # m/s
+        expected_loss = -evap_m * dt  # m (negative = loss)
+        # Also subtract any runoff
+        runoff_m = (new_state.runoff_surface + new_state.runoff_subsurface) / 1000.0 * dt
+
+        # Water budget: dwater ≈ expected_loss - runoff
+        budget_err = jnp.abs(dwater - expected_loss + runoff_m)
+        # Allow tolerance for Picard iteration convergence
+        self.assertTrue(
+            jnp.all(budget_err < 5e-4),
+            f"Water budget error {float(budget_err.max()):.6f} exceeds 5e-4 m"
+        )
+
+    def test_q_surface_stomatal_limitation(self):
+        """Under dark conditions stomata close and q_surface reflects this."""
+        from legoesm.land.config import MultiLayerLandConfig
+        from legoesm.land.multilayer_land import (
+            step_multilayer_land, init_multilayer_land_state,
+        )
+        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.thermo import saturation_mixing_ratio
+        from legoesm.land.carbon.stomata import StomataConfig
+
+        # Enable stomata with Jarvis model (simple conductance reduction)
+        config = MultiLayerLandConfig(stomata=StomataConfig(enabled=True))
+        ncol = 4
+        state = init_multilayer_land_state(
+            ncol, config, T_init=290.0, theta_init=0.35,
+        )
+
+        # Dark conditions: zero shortwave → stomata close
+        forcing = AtmToSurface(
+            sw_down=jnp.zeros(ncol),  # no sunlight → stomata shut
+            lw_down=jnp.full(ncol, 350.0),
+            precip_total=jnp.zeros(ncol),
+            precip_snow=jnp.zeros(ncol),
+            T_lowest=jnp.full(ncol, 290.0),
+            q_lowest=jnp.full(ncol, 0.008),
+            u_lowest=jnp.full(ncol, 3.0),
+            v_lowest=jnp.zeros(ncol),
+            p_lowest=jnp.full(ncol, 95000.0),
+            p_surface=jnp.full(ncol, 100000.0),
+            rho_lowest=jnp.full(ncol, 1.2),
+            cos_zenith=jnp.zeros(ncol),  # nighttime
+            co2_ppmv=jnp.full(ncol, 400.0),
+            has_radiation=jnp.ones(ncol),
+            has_precipitation=jnp.ones(ncol),
+        )
+        dt = 600.0
+        _, response, _ = step_multilayer_land(
+            state, forcing, config, U_min=1.0, dt=dt,
+        )
+
+        # The returned q_surface should be LESS than fully saturated
+        T_sfc = response.T_surface
+        q_sat = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+
+        # q_surface should be strictly less than q_sat (stomata limiting)
+        ratio = response.q_surface / jnp.maximum(q_sat, 1e-20)
+        self.assertTrue(
+            jnp.all(ratio < 1.0 - 1e-6),
+            f"q_surface/q_sat = {float(ratio.mean()):.4f}; stomata should limit"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
