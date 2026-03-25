@@ -1000,7 +1000,7 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         ca_c = cdgrid.cos_angle_corner
         sa_c = cdgrid.sin_angle_corner
 
-        # Geographic winds at D-grid corners from the A-grid Williamson init
+        # Geographic winds at D-grid corners from the cell-centre Williamson init
         # (interpolate geographic winds, not face-local, to corner positions)
         u_east_a = grid.cos_angle * sw.u.data - grid.sin_angle * sw.v.data
         v_north_a = grid.sin_angle * sw.u.data + grid.cos_angle * sw.v.data

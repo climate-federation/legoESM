@@ -8,7 +8,7 @@ discretisation (Lin 2004, Putman & Lin 2007):
 - **D-grid** winds (cell corners) are prognostic for momentum.
 - **C-grid** velocities (cell edges) are diagnosed for mass/scalar transport.
 - **Vorticity** from circulation (exact on D-grid, avoids the
-  Hollingsworth-Kallberg instability that plagues A-grid solvers).
+  Hollingsworth-Kallberg instability that plagues collocated solvers).
 - The same ``operators_cdgrid`` module is shared by the atmosphere
   (shallow water, hydrostatic PE, non-hydrostatic CE) and the ocean.
 

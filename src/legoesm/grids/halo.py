@@ -299,9 +299,6 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     lo = jnp.clip(lo, 0, n - 2)
     w = idx - lo.astype(offsets_1d.dtype)
     w = jnp.clip(w, 0.0, 1.0)
-    # Keep output dtype aligned with the source strip to avoid future JAX
-    # scatter type errors when writing interpolated halo values back into
-    # float16/bfloat16 halo buffers.
     interp = (1.0 - w) * strip[lo] + w * strip[lo + 1]
     return interp.astype(strip.dtype)
 

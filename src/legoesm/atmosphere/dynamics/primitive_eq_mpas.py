@@ -40,6 +40,7 @@ from legoesm.core.operators_voronoi import (
     vector_laplacian_del2,
     vector_laplacian_del4,
     edge_thickness,
+    cell_to_edge_avg,
     apvm_correction,
 )
 from legoesm.grids.voronoi import VoronoiMesh
@@ -152,7 +153,7 @@ def mpas_hydrostatic_tendencies(
         grad_B = gradient_edge(bernoulli, mesh)  # (nEdges,)
 
         # Pressure gradient correction: R_d * T_edge * grad(ln p_s)
-        T_edge = 0.5 * (T_k[c1] + T_k[c2])  # (nEdges,)
+        T_edge = cell_to_edge_avg(T_k, mesh)  # (nEdges,)
         pg_corr = R_d * T_edge * grad_ln_ps
 
         # PV flux
@@ -186,7 +187,7 @@ def mpas_hydrostatic_tendencies(
         div_k = divergence_cell(u_k, mesh)  # (nCells,)
 
         # Temperature advection: -v·∇T ≈ centered tracer flux form
-        T_edge_centered = 0.5 * (T_k[c1] + T_k[c2])
+        T_edge_centered = cell_to_edge_avg(T_k, mesh)
         flux_T = u_k * T_edge_centered  # (nEdges,)
         div_uT = divergence_cell(flux_T, mesh)  # (nCells,)
         horiz_adv_T = -div_uT + T_k * div_k  # advective form

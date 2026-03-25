@@ -1,10 +1,10 @@
 """FV3 Hydrostatic Primitive Equations on the cubed-sphere (D-grid dynamics).
 
-Prognostic winds are stored on the D-grid (cell corners). This eliminates
-the A-to-D round-trip that plagued the earlier A-grid implementation and
-caused a 62%-per-step Hollingsworth-type energy inconsistency.
+Prognostic winds are stored on the D-grid (cell corners). The C-grid
+velocities are diagnosed for mass flux and kinetic energy computation.
 
-Physics coupling converts D->A at the interface boundary only (diagnostic).
+Physics coupling converts D-grid to cell-centre at the interface boundary
+only (diagnostic).
 
 Operator staggering
 -------------------
@@ -12,8 +12,8 @@ Operator staggering
 - Vorticity: cell centres (from D-grid circulation)
 - Bernoulli / pressure gradient: Arakawa-Lamb gradient at D-grid corners
 - Divergence: C-grid flux-form (exact mass conservation)
-- Scalar diffusion: A-grid (proper inter-face halo exchange)
-- Wind diffusion: D-grid Laplacian (A-grid round-trip with halo)
+- Scalar diffusion: cell-centre (proper inter-face halo exchange)
+- Wind diffusion: D-grid Laplacian with halo
 
 References
 ----------
@@ -33,15 +33,16 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.state import (
     HydrostaticState,
-    HydrostaticTendencies,
     FV3HydrostaticState,
     FV3HydrostaticTendencies,
 )
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
+    dgrid_to_center_vector,
     cgrid_divergence,
     dgrid_vorticity,
     _arakawa_lamb_gradient,
+    _broadcast_metric,
     _interp_center_to_corner,
     _interp_corner_to_center,
     _laplacian_dgrid,
@@ -127,70 +128,6 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
 
 
 # ==============================================================================
-# Legacy A-grid tendency function (backward compatibility)
-# ==============================================================================
-
-def cdgrid_hydrostatic_tendencies(
-    state: HydrostaticState,
-    grid: CubedSphereGrid,
-    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
-    cdgrid: CubedSphereCDGrid,
-    config: CDGridPrimitiveEquationConfig = CDGridPrimitiveEquationConfig(),
-    physics_tendency: HydrostaticTendencies | None = None,
-) -> HydrostaticTendencies:
-    """Compute tendencies for the hydrostatic PE (A-grid state interface).
-
-    Internally converts A-grid state to FV3 D-grid state, calls the
-    D-grid tendency function, then converts the momentum tendencies
-    back to A-grid.  This is a backward-compatibility wrapper; for new
-    code use ``fv3_hydrostatic_tendencies`` with ``FV3HydrostaticState``.
-    """
-    from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
-
-    # Convert physics tendency to D-grid if provided
-    phys_tend_dgrid = None
-    if physics_tendency is not None:
-        pu_d, pv_d = agrid_to_dgrid_vector(
-            physics_tendency.du_dt.data, physics_tendency.dv_dt.data, cdgrid,
-        )
-        phys_tend_dgrid = FV3HydrostaticTendencies(
-            du_d_dt=physics_tendency.du_dt.replace(data=pu_d),
-            dv_d_dt=physics_tendency.dv_dt.replace(data=pv_d),
-            dT_dt=physics_tendency.dT_dt,
-            dp_s_dt=physics_tendency.dp_s_dt,
-            dphis_dt=physics_tendency.dphis_dt,
-        )
-
-    # Convert A-grid winds to D-grid
-    u_d, v_d = agrid_to_dgrid_vector(state.u.data, state.v.data, cdgrid)
-    fv3_state = FV3HydrostaticState(
-        u_d=state.u.replace(data=u_d, name="u_d"),
-        v_d=state.v.replace(data=v_d, name="v_d"),
-        T=state.T,
-        p_s=state.p_s,
-        phis=state.phis,
-        tracers=state.tracers,
-    )
-
-    fv3_tend = fv3_hydrostatic_tendencies(
-        fv3_state, grid, sigma_coord, cdgrid, config, phys_tend_dgrid,
-    )
-
-    # Convert D-grid tendencies back to A-grid
-    du_a = _interp_corner_to_center(fv3_tend.du_d_dt.data)
-    dv_a = _interp_corner_to_center(fv3_tend.dv_d_dt.data)
-
-    dims_3d = ("face", "x", "y", "level")
-    return HydrostaticTendencies(
-        du_dt=Field(data=du_a, name="du_dt", dims=dims_3d, units="m/s^2"),
-        dv_dt=Field(data=dv_a, name="dv_dt", dims=dims_3d, units="m/s^2"),
-        dT_dt=fv3_tend.dT_dt,
-        dp_s_dt=fv3_tend.dp_s_dt,
-        dphis_dt=fv3_tend.dphis_dt,
-    )
-
-
-# ==============================================================================
 # FV3 D-grid tendency function (core implementation)
 # ==============================================================================
 
@@ -204,9 +141,9 @@ def fv3_hydrostatic_tendencies(
 ) -> FV3HydrostaticTendencies:
     """Compute tendencies for the FV3 hydrostatic PE with D-grid winds.
 
-    The prognostic momentum is stored at D-grid cell corners, so there
-    is NO A-to-D conversion.  The C-grid velocities are diagnosed from
-    the D-grid winds for mass flux and KE computation.
+    The prognostic momentum is stored at D-grid cell corners.  The C-grid
+    velocities are diagnosed from the D-grid winds for mass flux and KE
+    computation.
 
     Parameters
     ----------
@@ -241,9 +178,8 @@ def fv3_hydrostatic_tendencies(
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
     # u_c: (6, n+1, n, nlev),  v_c: (6, n, n+1, nlev)
 
-    # Cell-centre velocities from C-grid (for scalar advection / KE)
-    u_cell = 0.5 * (u_c[:, :-1, :, :] + u_c[:, 1:, :, :])   # (6, n, n, nlev)
-    v_cell = 0.5 * (v_c[:, :, :-1, :] + v_c[:, :, 1:, :])   # (6, n, n, nlev)
+    # Cell-centre velocities from D-grid (orthogonal basis, for KE)
+    u_cell, v_cell = dgrid_to_center_vector(u_d, v_d)
 
     # --- 2. Pressure at full levels ---
     if _hybrid:
@@ -283,15 +219,24 @@ def fv3_hydrostatic_tendencies(
     pg_corr_y = R_d * T_corner * dln_dy[..., None]
 
     # --- 9. D-grid momentum tendencies ---
+    # Non-orthogonality correction for v-equation gradients:
+    # Arakawa-Lamb gives (dB/ds_i, dB/ds_j). v-equation needs dB/ds_perp.
+    cosa_c = _broadcast_metric(cdgrid.cosa_corner, u_d)
+    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
+
+    dB_dy_perp = (dB_dy - cosa_c * dB_dx) / jnp.maximum(sina_c, 1e-12)
+    pg_corr_y_perp = (pg_corr_y - cosa_c * pg_corr_x) / jnp.maximum(sina_c, 1e-12)
+
     du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x
-    dv_d_dt = -zeta_corner * u_d - dB_dy - pg_corr_y
+    dv_d_dt = -zeta_corner * u_d - dB_dy_perp - pg_corr_y_perp
 
     # Divergence damping at D-grid
     if config.div_damp_coeff > 0:
         div_v_damp = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
         ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_v_damp, cdgrid)
+        ddiv_dy_perp = (ddiv_dy - cosa_c * ddiv_dx) / jnp.maximum(sina_c, 1e-12)
         du_d_dt = du_d_dt - config.div_damp_coeff * ddiv_dx
-        dv_d_dt = dv_d_dt - config.div_damp_coeff * ddiv_dy
+        dv_d_dt = dv_d_dt - config.div_damp_coeff * ddiv_dy_perp
 
     # --- 10. Surface pressure tendency and vertical motion ---
     # C-grid divergence for continuity
@@ -305,14 +250,14 @@ def fv3_hydrostatic_tendencies(
         mass_flux = compute_mass_flux_hybrid(div_v, p_s, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
 
-        # Vertical advection of D-grid winds: interpolate to A-grid,
-        # compute vertical advection, interpolate back to D-grid.
-        u_a = _interp_corner_to_center(u_d)  # (6, n, n, nlev)
-        v_a = _interp_corner_to_center(v_d)
-        vert_adv_u_a = vertical_advection_hybrid(u_a, mass_flux, p_s, sigma_coord)
-        vert_adv_v_a = vertical_advection_hybrid(v_a, mass_flux, p_s, sigma_coord)
-        vert_adv_u_d = _interp_center_to_corner(vert_adv_u_a, cdgrid)
-        vert_adv_v_d = _interp_center_to_corner(vert_adv_v_a, cdgrid)
+        # Vertical advection of D-grid winds: interpolate to cell centres,
+        # compute vertical advection, interpolate back to D-grid corners.
+        u_cc = _interp_corner_to_center(u_d)  # (6, n, n, nlev)
+        v_cc = _interp_corner_to_center(v_d)
+        vert_adv_u_cc = vertical_advection_hybrid(u_cc, mass_flux, p_s, sigma_coord)
+        vert_adv_v_cc = vertical_advection_hybrid(v_cc, mass_flux, p_s, sigma_coord)
+        vert_adv_u_d = _interp_center_to_corner(vert_adv_u_cc, cdgrid)
+        vert_adv_v_d = _interp_center_to_corner(vert_adv_v_cc, cdgrid)
 
         omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
@@ -328,13 +273,13 @@ def fv3_hydrostatic_tendencies(
         sigma_dot = compute_sigma_dot(div_v, sigma_coord)
         vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
 
-        # Vertical advection of D-grid winds via A-grid round-trip
-        u_a = _interp_corner_to_center(u_d)
-        v_a = _interp_corner_to_center(v_d)
-        vert_adv_u_a = vertical_advection(u_a, sigma_dot, sigma_coord)
-        vert_adv_v_a = vertical_advection(v_a, sigma_dot, sigma_coord)
-        vert_adv_u_d = _interp_center_to_corner(vert_adv_u_a, cdgrid)
-        vert_adv_v_d = _interp_center_to_corner(vert_adv_v_a, cdgrid)
+        # Vertical advection of D-grid winds via cell-centre interpolation
+        u_cc = _interp_corner_to_center(u_d)
+        v_cc = _interp_corner_to_center(v_d)
+        vert_adv_u_cc = vertical_advection(u_cc, sigma_dot, sigma_coord)
+        vert_adv_v_cc = vertical_advection(v_cc, sigma_dot, sigma_coord)
+        vert_adv_u_d = _interp_center_to_corner(vert_adv_u_cc, cdgrid)
+        vert_adv_v_d = _interp_center_to_corner(vert_adv_v_cc, cdgrid)
 
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt_data, sigma_coord)
         p_adiab = jnp.maximum(p_full, config.p_floor)
@@ -349,7 +294,7 @@ def fv3_hydrostatic_tendencies(
     horiz_adv_T = -(u_cell * dT_dx + v_cell * dT_dy)
 
     # Adiabatic heating: kappa * T * omega / p
-    # ln_ps gradient at A-grid for the v.grad(ln ps) correction
+    # ln_ps gradient at cell centres for the v.grad(ln ps) correction
     ln_ps_field = Field(data=ln_ps, name="ln_ps", dims=("face", "x", "y"),
                         units="", staggering="cell")
     dln_ps_dx = gradient_x(ln_ps_field, grid).data  # (6, n, n)
@@ -373,7 +318,7 @@ def fv3_hydrostatic_tendencies(
     if config.A_h > 0:
         du_d_dt = du_d_dt + config.A_h * _laplacian_dgrid(u_d, cdgrid)
         dv_d_dt = dv_d_dt + config.A_h * _laplacian_dgrid(v_d, cdgrid)
-        # Temperature: A-grid Laplacian (proper halo exchange)
+        # Temperature: cell-centre Laplacian (proper halo exchange)
         lap_T = _laplacian_compact_3d(T, grid)
         dT_dt_data = dT_dt_data + config.A_h * lap_T
 
@@ -383,10 +328,10 @@ def fv3_hydrostatic_tendencies(
             _laplacian_dgrid(u_d, cdgrid), cdgrid)
         dv_d_dt = dv_d_dt - config.hyperdiff_coeff * _laplacian_dgrid(
             _laplacian_dgrid(v_d, cdgrid), cdgrid)
-        # Temperature: A-grid hyperdiffusion (proper halo exchange)
+        # Temperature: cell-centre hyperdiffusion (proper halo exchange)
         dT_dt_data = dT_dt_data + _hyperdiffusion_3d(T, grid, config.hyperdiff_coeff)
 
-    # Surface pressure hyperdiffusion (A-grid)
+    # Surface pressure hyperdiffusion (cell-centre)
     if config.hyperdiff_ps_coeff > 0:
         from legoesm.core.operators import hyperdiffusion
         ps_field = Field(data=p_s, name="p_s", dims=("face", "x", "y"),
@@ -427,36 +372,22 @@ def fv3_hydrostatic_tendencies(
 
 
 # ==============================================================================
-# Adapter functions: A-grid <-> D-grid conversion
+# Adapter: D-grid to cell-centre conversion
 # ==============================================================================
-
-def hydrostatic_to_fv3(
-    state: HydrostaticState,
-    cdgrid: CubedSphereCDGrid,
-) -> FV3HydrostaticState:
-    """Convert A-grid HydrostaticState to FV3 D-grid state."""
-    from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
-    u_d, v_d = agrid_to_dgrid_vector(state.u.data, state.v.data, cdgrid)
-    return FV3HydrostaticState(
-        u_d=state.u.replace(data=u_d, name="u_d"),
-        v_d=state.v.replace(data=v_d, name="v_d"),
-        T=state.T,
-        p_s=state.p_s,
-        phis=state.phis,
-        tracers=state.tracers,
-    )
-
 
 def fv3_to_hydrostatic(
     state: FV3HydrostaticState,
     cdgrid: CubedSphereCDGrid,
 ) -> HydrostaticState:
-    """Convert FV3 D-grid state to A-grid HydrostaticState."""
-    u_a = _interp_corner_to_center(state.u_d.data)
-    v_a = _interp_corner_to_center(state.v_d.data)
+    """Convert FV3 D-grid state to cell-centre HydrostaticState.
+
+    Uses corner-to-centre interpolation for the wind components.
+    """
+    u_cc = _interp_corner_to_center(state.u_d.data)
+    v_cc = _interp_corner_to_center(state.v_d.data)
     return HydrostaticState(
-        u=state.u_d.replace(data=u_a, name="u"),
-        v=state.v_d.replace(data=v_a, name="v"),
+        u=state.u_d.replace(data=u_cc, name="u"),
+        v=state.v_d.replace(data=v_cc, name="v"),
         T=state.T,
         p_s=state.p_s,
         phis=state.phis,
@@ -474,9 +405,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
     Prognostic winds live on the D-grid (cell corners).  The model
     accepts and returns ``FV3HydrostaticState`` from ``step()``.
 
-    For backward compatibility with code that passes ``HydrostaticState``,
-    use the ``step_agrid()`` method or the ``hydrostatic_to_fv3`` /
-    ``fv3_to_hydrostatic`` adapters.
+    For backward compatibility with code that passes ``HydrostaticState``
+    (cell-centre winds), use ``step_cell_centre()`` or ``fv3_to_hydrostatic``.
 
     Parameters
     ----------
@@ -498,47 +428,106 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         self._target_mass = None
 
     def _sync_dgrid_boundary(self, state: FV3HydrostaticState):
-        """Synchronize D-grid boundary corners across cubed-sphere faces."""
-        from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
+        """Synchronize D-grid boundary corners across cubed-sphere faces.
 
-        u_d, v_d = state.u_d.data, state.v_d.data
-        ca_c = self.cdgrid.cos_angle_corner
-        sa_c = self.cdgrid.sin_angle_corner
+        FV3-style direct corner-to-corner sync: convert D-grid corner
+        velocities to geographic (east/north) at each shared face edge,
+        average with the neighbouring face, then convert back to face-local.
 
-        # D-grid → geographic at corners
-        u_east_d = ca_c * u_d - sa_c * v_d
-        v_north_d = sa_c * u_d + ca_c * v_d
+        Edge corners (shared by 2 faces) get a pairwise average.
+        Vertex corners (shared by 3 faces) get a 3-way average.
+        A 3-point smoothing filter blends the synced boundary into the
+        interior (first interior row, weight w=0.45).
 
-        # Average geographic to A-grid centres
-        u_east_a = 0.25 * (u_east_d[:, :-1, :-1] + u_east_d[:, 1:, :-1]
-                           + u_east_d[:, :-1, 1:] + u_east_d[:, 1:, 1:])
-        v_north_a = 0.25 * (v_north_d[:, :-1, :-1] + v_north_d[:, 1:, :-1]
-                            + v_north_d[:, :-1, 1:] + v_north_d[:, 1:, 1:])
+        For 3D fields (6, n+1, n+1, nlev), the sync is vmapped over
+        vertical levels.
+        """
+        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
-        # Geographic → face-local at A-grid
-        ca = self.grid.cos_angle
-        sa = self.grid.sin_angle
-        u_a = ca * u_east_a + sa * v_north_a
-        v_a = -sa * u_east_a + ca * v_north_a
+        def _sync_2d(u_d_2d, v_d_2d):
+            """Sync a single 2D level slice (6, n+1, n+1)."""
+            n = self.grid.n
+            ca_c = self.cdgrid.cos_angle_corner
+            sa_c = self.cdgrid.sin_angle_corner
 
-        # A→D with cross-face vector halo exchange
-        u_d_sync, v_d_sync = agrid_to_dgrid_vector(u_a, v_a, self.cdgrid)
+            # 1. Convert all corners to geographic (read-only reference)
+            ue = ca_c * u_d_2d - sa_c * v_d_2d
+            vn = sa_c * u_d_2d + ca_c * v_d_2d
 
-        # Replace boundary rows/columns only
-        n = self.grid.n
-        u_new = u_d.at[:, 0, :].set(u_d_sync[:, 0, :])
-        u_new = u_new.at[:, n, :].set(u_d_sync[:, n, :])
-        u_new = u_new.at[:, :, 0].set(u_d_sync[:, :, 0])
-        u_new = u_new.at[:, :, n].set(u_d_sync[:, :, n])
+            # 2. Edge sync: pairwise average with neighbour faces
+            ue_out = ue
+            vn_out = vn
 
-        v_new = v_d.at[:, 0, :].set(v_d_sync[:, 0, :])
-        v_new = v_new.at[:, n, :].set(v_d_sync[:, n, :])
-        v_new = v_new.at[:, :, 0].set(v_d_sync[:, :, 0])
-        v_new = v_new.at[:, :, n].set(v_d_sync[:, :, n])
+            def _get_strip(arr, face, edge):
+                if edge == WEST:    return arr[face, 0, :]
+                elif edge == EAST:  return arr[face, n, :]
+                elif edge == SOUTH: return arr[face, :, 0]
+                else:               return arr[face, :, n]
+
+            for face in range(6):
+                for edge in [WEST, EAST, SOUTH, NORTH]:
+                    nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+                    nbr_ue = _get_strip(ue, nbr_face, nbr_edge)
+                    nbr_vn = _get_strip(vn, nbr_face, nbr_edge)
+                    if is_reversed:
+                        nbr_ue = nbr_ue[::-1]
+                        nbr_vn = nbr_vn[::-1]
+                    local_ue = _get_strip(ue, face, edge)
+                    local_vn = _get_strip(vn, face, edge)
+                    avg_ue = 0.5 * (local_ue + nbr_ue)
+                    avg_vn = 0.5 * (local_vn + nbr_vn)
+                    if edge == WEST:
+                        ue_out = ue_out.at[face, 0, :].set(avg_ue)
+                        vn_out = vn_out.at[face, 0, :].set(avg_vn)
+                    elif edge == EAST:
+                        ue_out = ue_out.at[face, n, :].set(avg_ue)
+                        vn_out = vn_out.at[face, n, :].set(avg_vn)
+                    elif edge == SOUTH:
+                        ue_out = ue_out.at[face, :, 0].set(avg_ue)
+                        vn_out = vn_out.at[face, :, 0].set(avg_vn)
+                    else:
+                        ue_out = ue_out.at[face, :, n].set(avg_ue)
+                        vn_out = vn_out.at[face, :, n].set(avg_vn)
+
+            # 3. Vertex sync: 3-way average at cube vertices (8 vertices)
+            _vtx = [
+                [(0, 0, 0), (3, n, 0), (5, 0, n)],
+                [(0, n, 0), (1, 0, 0), (5, n, n)],
+                [(0, 0, n), (3, n, n), (4, 0, 0)],
+                [(0, n, n), (1, 0, n), (4, n, 0)],
+                [(1, n, 0), (2, 0, 0), (5, n, 0)],
+                [(1, n, n), (2, 0, n), (4, n, n)],
+                [(2, n, 0), (3, 0, 0), (5, 0, 0)],
+                [(2, n, n), (3, 0, n), (4, 0, n)],
+            ]
+            for vtx in _vtx:
+                ue_avg = sum(ue[f, i, j] for f, i, j in vtx) / 3.0
+                vn_avg = sum(vn[f, i, j] for f, i, j in vtx) / 3.0
+                for f, i, j in vtx:
+                    ue_out = ue_out.at[f, i, j].set(ue_avg)
+                    vn_out = vn_out.at[f, i, j].set(vn_avg)
+
+            # 4. Convert back to face-local (no boundary smoothing needed
+            #    with FV3-faithful d2a2c non-orthogonality correction)
+            u_d_new = ca_c * ue_out + sa_c * vn_out
+            v_d_new = -sa_c * ue_out + ca_c * vn_out
+            return u_d_new, v_d_new
+
+        u_d = state.u_d.data  # (6, n+1, n+1, nlev)
+        v_d = state.v_d.data
+
+        # vmap the 2D sync over vertical levels
+        # Reshape: (6, n+1, n+1, nlev) → (nlev, 6, n+1, n+1)
+        u_transposed = jnp.moveaxis(u_d, -1, 0)
+        v_transposed = jnp.moveaxis(v_d, -1, 0)
+        u_synced, v_synced = jax.vmap(_sync_2d)(u_transposed, v_transposed)
+        # Reshape back: (nlev, 6, n+1, n+1) → (6, n+1, n+1, nlev)
+        u_d_new = jnp.moveaxis(u_synced, 0, -1)
+        v_d_new = jnp.moveaxis(v_synced, 0, -1)
 
         return state._replace(
-            u_d=state.u_d.replace(data=u_new),
-            v_d=state.v_d.replace(data=v_new),
+            u_d=state.u_d.replace(data=u_d_new),
+            v_d=state.v_d.replace(data=v_d_new),
         )
 
     def tendencies(
@@ -546,14 +535,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         state,
         physics_tendency=None,
     ):
-        """Compute tendencies. Accepts FV3HydrostaticState or HydrostaticState."""
-        if isinstance(state, FV3HydrostaticState):
-            return fv3_hydrostatic_tendencies(
-                state, self.grid, self.sigma_coord, self.cdgrid,
-                self.config, physics_tendency,
-            )
-        # Legacy A-grid path: convert → compute → convert back
-        return cdgrid_hydrostatic_tendencies(
+        """Compute tendencies for FV3HydrostaticState."""
+        return fv3_hydrostatic_tendencies(
             state, self.grid, self.sigma_coord, self.cdgrid,
             self.config, physics_tendency,
         )
@@ -561,10 +544,9 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
     def step(self, state, dt, physics_fn=None):
         """Advance one time step.
 
-        Accepts both ``FV3HydrostaticState`` (D-grid) and
-        ``HydrostaticState`` (A-grid, legacy).  When given A-grid
-        state, converts to D-grid at the boundary, runs the D-grid
-        dycore, and converts back.
+        Accepts ``FV3HydrostaticState`` (D-grid prognostic winds).
+        For legacy ``HydrostaticState`` input, uses the cell-centre
+        adapter path.
 
         Parameters
         ----------
@@ -587,8 +569,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
         if isinstance(state, FV3HydrostaticState):
             return self._step_fv3(state, dt, physics_fn=physics_fn)
-        # Legacy A-grid path
-        return self._step_agrid(state, dt, physics_fn=physics_fn)
+        # Legacy cell-centre state path
+        return self._step_cell_centre(state, dt, physics_fn=physics_fn)
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_fv3(
@@ -598,27 +580,24 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
     ) -> FV3HydrostaticState:
         """Advance one time step with D-grid prognostic winds."""
-        from legoesm.core.operators_cdgrid import agrid_to_dgrid_vector
-
         cdgrid = self.cdgrid
 
         def tendency_fn(s):
             phys_tend_dgrid = None
             if physics_fn is not None:
-                # Convert D-grid state to A-grid for physics
-                s_agrid = fv3_to_hydrostatic(s, cdgrid)
-                _phys_result = physics_fn(s_agrid, self.grid, self.sigma_coord)
-                phys_agrid = _phys_result[0] if type(_phys_result) is tuple else _phys_result
-                # Convert A-grid physics tendencies to D-grid
-                pu_d, pv_d = agrid_to_dgrid_vector(
-                    phys_agrid.du_dt.data, phys_agrid.dv_dt.data, cdgrid,
-                )
+                # Convert D-grid state to cell-centre for physics
+                s_cc = fv3_to_hydrostatic(s, cdgrid)
+                _phys_result = physics_fn(s_cc, self.grid, self.sigma_coord)
+                phys_cc = _phys_result[0] if type(_phys_result) is tuple else _phys_result
+                # Convert cell-centre physics tendencies to D-grid corners
+                pu_d = _interp_center_to_corner(phys_cc.du_dt.data, cdgrid)
+                pv_d = _interp_center_to_corner(phys_cc.dv_dt.data, cdgrid)
                 phys_tend_dgrid = FV3HydrostaticTendencies(
-                    du_d_dt=phys_agrid.du_dt.replace(data=pu_d, name="du_d_dt"),
-                    dv_d_dt=phys_agrid.dv_dt.replace(data=pv_d, name="dv_d_dt"),
-                    dT_dt=phys_agrid.dT_dt,
-                    dp_s_dt=phys_agrid.dp_s_dt,
-                    dphis_dt=phys_agrid.dphis_dt,
+                    du_d_dt=phys_cc.du_dt.replace(data=pu_d, name="du_d_dt"),
+                    dv_d_dt=phys_cc.dv_dt.replace(data=pv_d, name="dv_d_dt"),
+                    dT_dt=phys_cc.dT_dt,
+                    dp_s_dt=phys_cc.dp_s_dt,
+                    dphis_dt=phys_cc.dphis_dt,
                 )
 
             tend = fv3_hydrostatic_tendencies(
@@ -675,25 +654,106 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         return state_new
 
     @partial(jax.jit, static_argnums=(0, 3))
-    def _step_agrid(
+    def _step_cell_centre(
         self,
         state: HydrostaticState,
         dt: float,
         physics_fn=None,
     ) -> HydrostaticState:
-        """Advance one step, accepting and returning A-grid state.
+        """Advance one step, accepting and returning cell-centre state.
 
         This is a convenience wrapper for code that still works with
-        ``HydrostaticState``.  The A->D->A conversion happens only at
-        the outer boundary of the step; internally the dycore operates
-        entirely on D-grid winds.
+        ``HydrostaticState``.  Cell-centre winds are interpolated to
+        D-grid corners at entry and back to cell centres at exit;
+        internally the dycore operates entirely on D-grid winds.
         """
-        fv3_state = hydrostatic_to_fv3(state, self.cdgrid)
+        u_d = _interp_center_to_corner(state.u.data, self.cdgrid)
+        v_d = _interp_center_to_corner(state.v.data, self.cdgrid)
+        fv3_state = FV3HydrostaticState(
+            u_d=state.u.replace(data=u_d, name="u_d"),
+            v_d=state.v.replace(data=v_d, name="v_d"),
+            T=state.T,
+            p_s=state.p_s,
+            phis=state.phis,
+            tracers=state.tracers,
+        )
         fv3_new = self._step_fv3(fv3_state, dt, physics_fn=physics_fn)
         return fv3_to_hydrostatic(fv3_new, self.cdgrid)
 
     # Backward-compatible aliases
-    step_agrid = _step_agrid
+    step_cell_centre = _step_cell_centre
 
     def step_with_physics(self, state, dt, physics_fn=None):
         return self.step(state, dt, physics_fn=physics_fn)
+
+
+# ==============================================================================
+# Backward-compatible aliases referenced by __init__.py
+# ==============================================================================
+
+def cdgrid_hydrostatic_tendencies(
+    state,
+    grid: CubedSphereGrid,
+    sigma_coord,
+    cdgrid: CubedSphereCDGrid,
+    config: CDGridPrimitiveEquationConfig = CDGridPrimitiveEquationConfig(),
+    physics_tendency=None,
+):
+    """Compute hydrostatic tendencies, accepting either HydrostaticState or FV3HydrostaticState.
+
+    If given a HydrostaticState (cell-centre winds), converts to D-grid internally,
+    calls fv3_hydrostatic_tendencies, and returns HydrostaticTendencies (cell-centre).
+
+    If given a FV3HydrostaticState, delegates directly to fv3_hydrostatic_tendencies.
+    """
+    from legoesm.core.state import HydrostaticTendencies
+
+    if isinstance(state, FV3HydrostaticState):
+        return fv3_hydrostatic_tendencies(state, grid, sigma_coord, cdgrid, config, physics_tendency)
+
+    # HydrostaticState path: convert cell-centre -> D-grid
+    u_d = _interp_center_to_corner(state.u.data, cdgrid)
+    v_d = _interp_center_to_corner(state.v.data, cdgrid)
+    fv3_state = FV3HydrostaticState(
+        u_d=state.u.replace(data=u_d, name="u_d"),
+        v_d=state.v.replace(data=v_d, name="v_d"),
+        T=state.T,
+        p_s=state.p_s,
+        phis=state.phis,
+        tracers=getattr(state, 'tracers', None),
+    )
+    fv3_tend = fv3_hydrostatic_tendencies(fv3_state, grid, sigma_coord, cdgrid, config, physics_tendency)
+
+    # Convert D-grid tendencies back to cell-centre
+    du_cc = _interp_corner_to_center(fv3_tend.du_d_dt.data)
+    dv_cc = _interp_corner_to_center(fv3_tend.dv_d_dt.data)
+
+    dims_3d = ("face", "x", "y", "level")
+    dims_2d = ("face", "x", "y")
+    return HydrostaticTendencies(
+        du_dt=Field(data=du_cc, name="du_dt", dims=dims_3d, units="m/s^2"),
+        dv_dt=Field(data=dv_cc, name="dv_dt", dims=dims_3d, units="m/s^2"),
+        dT_dt=fv3_tend.dT_dt,
+        dp_s_dt=fv3_tend.dp_s_dt,
+        dphis_dt=fv3_tend.dphis_dt,
+    )
+
+
+def hydrostatic_to_fv3(
+    state: HydrostaticState,
+    cdgrid: CubedSphereCDGrid,
+) -> FV3HydrostaticState:
+    """Convert cell-centre HydrostaticState to FV3 D-grid state.
+
+    Uses centre-to-corner interpolation for the wind components.
+    """
+    u_d = _interp_center_to_corner(state.u.data, cdgrid)
+    v_d = _interp_center_to_corner(state.v.data, cdgrid)
+    return FV3HydrostaticState(
+        u_d=state.u.replace(data=u_d, name="u_d"),
+        v_d=state.v.replace(data=v_d, name="v_d"),
+        T=state.T,
+        p_s=state.p_s,
+        phis=state.phis,
+        tracers=getattr(state, 'tracers', None),
+    )

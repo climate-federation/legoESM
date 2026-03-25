@@ -38,6 +38,7 @@ from legoesm.core.operators_voronoi import (
     pv_flux_energy_conserving,
     pv_flux_enstrophy_conserving,
     edge_thickness,
+    cell_to_edge_avg,
     vector_laplacian_del2,
     vector_laplacian_del4,
 )
@@ -124,7 +125,7 @@ def mpas_compressible_euler_slow_tendencies(
         grad_pi = gradient_edge(pi_k, mesh)  # (nEdges,)
 
         # Theta at edges for PGF
-        theta_e = 0.5 * (theta_k[c1] + theta_k[c2])
+        theta_e = cell_to_edge_avg(theta_k, mesh)
 
         # KE gradient at edges
         grad_ke = gradient_edge(ke, mesh)
@@ -150,13 +151,13 @@ def mpas_compressible_euler_slow_tendencies(
             du_dt_k = du_dt_k + config.nu_del4 * vector_laplacian_del4(u_k, mesh)
 
         # Horizontal divergence of rho*u for continuity
-        rho_e = 0.5 * (rho_k[c1] + rho_k[c2])  # (nEdges,)
+        rho_e = cell_to_edge_avg(rho_k, mesh)  # (nEdges,)
         div_rho_v = divergence_cell(rho_e * u_k, mesh)  # (nCells,)
 
         # Horizontal theta advection: -v·∇θ
         grad_theta = gradient_edge(theta_k, mesh)
         # Reconstruct v·∇θ at cells via flux form
-        theta_e_adv = 0.5 * (theta_k[c1] + theta_k[c2])
+        theta_e_adv = cell_to_edge_avg(theta_k, mesh)
         div_u_theta = divergence_cell(u_k * theta_e_adv, mesh)
         div_u = divergence_cell(u_k, mesh)
         horiz_adv_theta = -(div_u_theta - theta_k * div_u)
