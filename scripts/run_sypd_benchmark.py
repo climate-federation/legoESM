@@ -38,6 +38,7 @@ import multiprocessing
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -104,6 +105,56 @@ def make_cuda_visible_str(n_gpus: int, available_gpus: list[int]) -> str:
     return ",".join(str(g) for g in selected)
 
 
+def create_cpu_wrapper(script_path: str) -> str:
+    """Create a temporary wrapper script that suppresses the CUDA plugin.
+
+    On GPU nodes, JAX's xla_cuda12 plugin crashes during initialization
+    when CUDA_VISIBLE_DEVICES is set to hide GPUs. This wrapper
+    monkey-patches the plugin's initialize() function to a no-op before
+    running the actual script via runpy, preserving argv and __file__.
+
+    Returns the path to the temporary wrapper script.
+    """
+    # Resolve to absolute path so the wrapper works regardless of cwd
+    abs_script = os.path.abspath(script_path)
+    script_dir = os.path.dirname(abs_script)
+    project_dir = os.getcwd()
+
+    wrapper_code = f"""\
+import sys
+import os
+
+# Ensure CPU-only environment
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["JAX_PLATFORMS"] = "cpu"
+
+# Set working directory to the project root (where the original command ran)
+os.chdir({repr(project_dir)})
+
+# Add the script's own directory to sys.path so relative imports work
+# (e.g. "from _deprecated_wrapper import ...")
+script_dir = {repr(script_dir)}
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
+# Monkey-patch the CUDA plugin so it doesn't try to init
+try:
+    import jax_plugins.xla_cuda12 as _cuda_plugin
+    _cuda_plugin.initialize = lambda: None
+except (ImportError, ModuleNotFoundError):
+    pass
+
+# Run the actual script via runpy so argparse, __file__ etc. work
+import runpy
+sys.argv[0] = {repr(abs_script)}
+runpy.run_path({repr(abs_script)}, run_name="__main__")
+"""
+    fd, path = tempfile.mkstemp(suffix="_cpu_wrapper.py", prefix="legoesm_")
+    with os.fdopen(fd, "w") as f:
+        f.write(wrapper_code)
+    return path
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Core benchmark runner
 # ─────────────────────────────────────────────────────────────────────
@@ -141,6 +192,15 @@ def run_single_benchmark(
         cmd += ["--dt", str(dt)]
     if not perturbed:
         cmd.append("--no-perturbation")
+
+    # Give each run its own output directory so results don't overwrite
+    pert_str = "perturbed" if perturbed else "steady_state"
+    run_output = (
+        f"results/baroclinic_wave_{pert_str}_C{resolution}_L{levels}"
+        f"_{device_type}{n_devices}"
+    )
+    cmd += ["--output", run_output]
+
     if extra_args:
         cmd.extend(extra_args)
 
@@ -149,6 +209,7 @@ def run_single_benchmark(
     env["PYTHONUNBUFFERED"] = "1"
 
     if device_type == "gpu":
+        wrapper_path = None
         if available_gpus and n_devices > 0:
             cuda_str = make_cuda_visible_str(n_devices, available_gpus)
             env["CUDA_VISIBLE_DEVICES"] = cuda_str
@@ -158,27 +219,56 @@ def run_single_benchmark(
             env["JAX_PLATFORMS"] = "cpu"
             device_label = "CPU fallback (no GPUs)"
     else:
-        # CPU mode: hide all GPUs, control thread parallelism
-        env["CUDA_VISIBLE_DEVICES"] = ""
+        # CPU mode: hide all GPUs, control thread parallelism.
+        #
+        # On GPU nodes, JAX's xla_cuda12 plugin tries to initialize even
+        # when JAX_PLATFORMS=cpu, which crashes if CUDA_VISIBLE_DEVICES
+        # is empty. We use a multi-pronged approach:
+        #   1. CUDA_VISIBLE_DEVICES=-1  (hide GPUs from CUDA runtime)
+        #   2. JAX_PLATFORMS=cpu         (tell JAX to only use CPU)
+        #   3. Write a tiny wrapper script that monkey-patches the CUDA
+        #      plugin before running the actual script via runpy.
+        env["CUDA_VISIBLE_DEVICES"] = "-1"
         env["JAX_PLATFORMS"] = "cpu"
 
         n_threads = str(n_devices)
 
-        # XLA (JAX backend) thread control
-        env["XLA_FLAGS"] = (
-            f"--xla_cpu_multi_thread_eigen=true "
-            f"--xla_force_host_platform_device_count=1 "
-            f"--xla_cpu_num_threads={n_threads}"
-        )
+        # JAX/XLA CPU thread control.
+        # The intra-op thread count is controlled via the environment
+        # variable below (not via XLA_FLAGS, which varies by version).
+        # xla_force_host_platform_device_count is also version-dependent
+        # and can crash, so we skip XLA_FLAGS entirely and rely on
+        # the standard thread-control env vars.
+        env["XLA_NUM_THREADS"] = n_threads
+
+        # Remove any pre-existing XLA_FLAGS that might conflict
+        # (keep them only if the user explicitly set them)
+        if "XLA_FLAGS" in env:
+            # Strip any flags we may have injected in previous iterations
+            existing = env["XLA_FLAGS"]
+            if "xla_cpu_num_threads" in existing or "xla_cpu_multi_thread" in existing:
+                env.pop("XLA_FLAGS", None)
 
         # OpenMP / MKL / BLAS thread control (for NumPy, SciPy, etc.)
+        # These control parallelism in the BLAS/LAPACK layer underneath JAX
         env["OMP_NUM_THREADS"] = n_threads
         env["MKL_NUM_THREADS"] = n_threads
         env["OPENBLAS_NUM_THREADS"] = n_threads
         env["VECLIB_MAXIMUM_THREADS"] = n_threads
         env["NUMEXPR_NUM_THREADS"] = n_threads
 
+        # Also control Eigen/TBB threads used by XLA CPU backend
+        env["TF_NUM_INTRAOP_THREADS"] = n_threads
+        env["TF_NUM_INTEROP_THREADS"] = n_threads
+
         device_label = f"{n_devices} CPU thread(s)"
+
+        # Use a wrapper script to suppress the CUDA plugin
+        wrapper_path = create_cpu_wrapper(script_path)
+        # Replace the script in cmd with the wrapper; keep all other args
+        # cmd is: [python, script_path, --resolution, ...]
+        # The wrapper will internally run script_path via runpy
+        cmd[1] = wrapper_path
 
     print(f"\n{'='*70}")
     print(
@@ -192,6 +282,13 @@ def run_single_benchmark(
     t_start = time.time()
     stdout_lines = []
     stderr_lines = []
+
+    def _cleanup_wrapper():
+        if wrapper_path and os.path.exists(wrapper_path):
+            try:
+                os.unlink(wrapper_path)
+            except OSError:
+                pass
 
     try:
         proc = subprocess.Popen(
@@ -219,6 +316,7 @@ def run_single_benchmark(
         if proc.returncode != 0:
             print(f"  *** FAILED (exit code {proc.returncode}) ***")
             print(f"  stderr: {stderr[:500]}")
+            _cleanup_wrapper()
             return {
                 "resolution": resolution,
                 "levels": levels,
@@ -236,6 +334,7 @@ def run_single_benchmark(
     except subprocess.TimeoutExpired:
         proc.kill()
         print(f"  *** TIMEOUT ***")
+        _cleanup_wrapper()
         return {
             "resolution": resolution,
             "levels": levels,
@@ -311,6 +410,7 @@ def run_single_benchmark(
     if "steps_per_sec" in info:
         print(f"  Steps/sec: {info['steps_per_sec']:.1f}")
 
+    _cleanup_wrapper()
     return info
 
 
@@ -798,22 +898,30 @@ def main():
         for res in resolutions:
             for dtype, ndev in run_plan:
                 idx += 1
+                pert_str = "perturbed"
+                run_out = (
+                    f"results/baroclinic_wave_{pert_str}_C{res}"
+                    f"_L{args.levels}_{dtype}{ndev}"
+                )
                 if dtype == "gpu":
                     cuda = make_cuda_visible_str(ndev, available_gpus)
                     env_str = f"CUDA_VISIBLE_DEVICES={cuda}"
                 else:
                     env_str = (
-                        f"CUDA_VISIBLE_DEVICES='' JAX_PLATFORMS=cpu "
-                        f"XLA_FLAGS='--xla_cpu_num_threads={ndev}' "
-                        f"OMP_NUM_THREADS={ndev}"
+                        f"CUDA_VISIBLE_DEVICES=-1 JAX_PLATFORMS=cpu "
+                        f"OMP_NUM_THREADS={ndev} "
+                        f"MKL_NUM_THREADS={ndev} "
+                        f"(via CUDA-suppressing wrapper)"
                     )
                 cmd = (
                     f"python {args.script} --resolution {res} "
-                    f"--levels {args.levels} --days {args.days}"
+                    f"--levels {args.levels} --days {args.days} "
+                    f"--output {run_out}"
                 )
                 print(
                     f"  [{idx}/{total_runs}] [{dtype.upper()} x{ndev}] "
-                    f"{env_str} {cmd}"
+                    f"{env_str}\n"
+                    f"    {cmd}"
                 )
         return
 
@@ -908,16 +1016,22 @@ def main():
         if not r.get("perturbed", True):
             continue
         dtype = r.get("device_type", "gpu").upper()[:3]
+        sypd_val = r.get("sypd")
+        sypd_str = f"{sypd_val:>10.4f}" if sypd_val is not None else f"{'N/A':>10}"
+        sps_val = r.get("steps_per_sec")
+        sps_str = f"{sps_val:>8.1f}" if sps_val is not None else f"{'N/A':>8}"
+        int_val = r.get("integration_time")
+        int_str = f"{int_val:>8.1f}" if int_val is not None else f"{'N/A':>8}"
         print(
             f"C{r['resolution']:>4} "
             f"{dtype:>4} "
             f"{r.get('n_devices', 1):>5} "
-            f"{r.get('grid_km', 0):>7.0f} "
+            f"{r.get('grid_km', 0) or 0:>7.0f} "
             f"{r['status']:>8} "
             f"{r.get('wall_time', 0):>8.1f} "
-            f"{r.get('integration_time', 0):>8.1f} "
-            f"{r.get('sypd', 0):>10.4f} "
-            f"{r.get('steps_per_sec', 0):>8.1f}"
+            f"{int_str} "
+            f"{sypd_str} "
+            f"{sps_str}"
         )
 
     print(f"\nTotal benchmark time: {total_time:.0f}s ({total_time/60:.1f} min)")
