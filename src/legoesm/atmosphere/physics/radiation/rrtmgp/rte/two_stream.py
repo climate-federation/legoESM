@@ -286,6 +286,23 @@ def solve_sw(
     # numerical identifiers.
     vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_sw)
 
+  # --- Per-column day/night handling ---
+  # ``zenith`` may be a scalar (single-column) or an array with a column
+  # dimension, e.g. shape ``(ncol, 1)``.  To avoid division-by-zero in
+  # ``exp(-tau / cos(zenith))`` for nighttime columns (cos(zenith) ~ 0),
+  # we clamp the zenith used in the solve to at most ~89.4 degrees
+  # (cos > 0.01).  After the solve, nighttime columns are zeroed out.
+  _ZENITH_MAX = jnp.arccos(jnp.asarray(0.01, dtype=temperature.dtype))
+  safe_zenith = jnp.minimum(zenith, _ZENITH_MAX)
+
+  # Build a per-column boolean mask that is True for daytime columns.
+  # Works for both scalar zenith and array zenith.
+  is_day_col = zenith < 0.5 * jnp.pi  # shape () or (ncol, 1)
+
+  # Check whether *any* column is illuminated to short-circuit a global
+  # nighttime domain (preserves the original optimisation).
+  any_day = jnp.any(is_day_col)
+
   def step_fn(igpt, partial_fluxes):
     sw_optical_props = optics_lib.compute_sw_optical_properties(
         pressure,
@@ -321,15 +338,15 @@ def solve_sw(
           'asymmetry_factor': g_tot,
       }
     optical_props_2stream = monochromatic_two_stream.sw_cell_properties(
-        zenith,
+        safe_zenith,
         sw_optical_props['optical_depth'],
         sw_optical_props['ssa'],
         sw_optical_props['asymmetry_factor'],
     )
 
-    # Create an xy plane for the surface albedo and top-of-atmospehre flux, but
-    # keep the same horizontal sharding as the temperature.
-    sfc_albedo = atmos_state.sfc_alb * jnp.ones_like(temperature)[:, :, 0]
+    # Surface albedo: broadcast per-column array or scalar to 2D plane
+    # with the same horizontal sharding as the temperature.
+    sfc_albedo = atmos_state.sfc_alb * jnp.ones_like(temperature[:, :, 0])
 
     # Monochromatic top of atmosphere flux.
     if solar_fraction_by_gpt is None:
@@ -337,7 +354,7 @@ def solve_sw(
     else:
       spectral_weight = solar_fraction_by_gpt[igpt]
     solar_flux = atmos_state.irrad * spectral_weight
-    toa_flux = solar_flux * jnp.ones_like(temperature)[:, :, 0]
+    toa_flux = solar_flux * jnp.ones_like(temperature[:, :, 0])
 
     sources_2stream = monochromatic_two_stream.sw_cell_source(
         t_dir=optical_props_2stream['t_dir'],
@@ -345,7 +362,7 @@ def solve_sw(
         optical_depth=sw_optical_props['optical_depth'],
         toa_flux=toa_flux,
         sfc_albedo_direct=sfc_albedo,
-        zenith=zenith,
+        zenith=safe_zenith,
         use_scan=use_scan,
     )
 
@@ -372,13 +389,19 @@ def solve_sw(
     # boundary.
     for key in flux_keys:
       fluxes[key] = _replace_top_flux(fluxes[key])
+
+    # Zero out nighttime columns.  ``is_day_col`` broadcasts from
+    # shape ``()`` or ``(ncol, 1)`` against ``(ncol, 1, nlev+2)``.
+    day_mask_3d = jnp.asarray(is_day_col, dtype=temperature.dtype)
+    for key in flux_keys:
+      fluxes[key] = fluxes[key] * day_mask_3d
     return fluxes
 
-  # Use JAX control flow to avoid Python boolean conversion on tracers
+  # Short-circuit: if the entire domain is nighttime, skip the solve.
   return jax.lax.cond(
-      zenith >= 0.5 * jnp.pi,
-      lambda _: fluxes_0,
+      any_day,
       _compute_fluxes,
+      lambda _: fluxes_0,
       operand=None,
   )
 

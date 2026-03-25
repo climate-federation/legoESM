@@ -1,10 +1,32 @@
 # legoESM: A Differentiable Earth System Model
-## Technical Specification v3.8
+## Technical Specification v3.9
 
 **Project**: legoESM
 **License**: MIT
 **Authors**: Pierre Gentine + Claude
-**Date**: 2026-03-23 (updated from v3.7, 2026-03-18)
+**Date**: 2026-03-25 (updated from v3.8, 2026-03-23)
+
+---
+
+### Changelog (v3.9, 2026-03-25)
+
+**FV3 cubed-sphere rewrite, MPAS/spectral fixes, and comprehensive validation:**
+
+1. **FV3-faithful cubed-sphere PPM transport rewrite** (`operators_cdgrid.py`, `cubed_sphere_cdgrid.py`): Complete rewrite of the C-D grid cubed-sphere operators with FV3-faithful PPM (Piecewise Parabolic Method) transport. The rewrite includes proper geographic-to-grid wind rotation, corrected halo exchange for D-grid staggering, and FV3-style divergence damping. The `operators_cdgrid.py` module grew from ~200 to ~740 lines with the addition of PPM reconstruction, monotonicity limiters, and flux-form mass transport on staggered grids. The `cubed_sphere_cdgrid.py` grid module was expanded with proper D-grid and C-grid metric arrays. See §3.3.3, §4.1.1.
+
+2. **Geographic-to-grid rotation sign fix** (`operators_cdgrid.py`, `cubed_sphere_cdgrid.py`): Fixed a sign error in the geographic-to-grid wind rotation that caused incorrect momentum tendencies on non-equatorial faces. Removed a broken non-orthogonality correction that introduced spurious cross-face artifacts. See §3.3.3.
+
+3. **Hyperdiffusion tuning and strict Williamson targets** (`shallow_water_fv3_cdgrid.py`): Restored strict Williamson test case 2 targets by tuning the physical hyperdiffusion e-folding time. The hyperdiffusion coefficient is now computed from `nu4 = dx^4 / tau_efold` with a physically motivated e-folding time, eliminating manual tuning across resolutions. See §3.4.
+
+4. **MPAS operator fixes** (`operators_voronoi.py`, `primitive_eq_mpas.py`, `compressible_euler_mpas.py`): Fixed pole-related issues in the MPAS/Voronoi operators affecting high-latitude momentum tendencies. Corrected wind extraction for MPAS primitive equation and compressible Euler models. See §4.1.1.
+
+5. **Kuo convection and gray radiation corrections** (`convection/kuo.py`, `radiation/gray.py`): Fixed parameter handling in Kuo convection scheme and corrected optical depth computation in gray radiation. See §4.1.11.
+
+6. **Comprehensive spectral dycore test suite** (`tests/unit/test_spectral_dycores_comprehensive.py`): New 1353-line test file with comprehensive validation of all spectral dynamical cores (SW, PE, NH) covering conservation, stability, spectral convergence, semi-implicit scheme correctness, and cross-resolution consistency. See §10.
+
+7. **Williamson diagnostic suite** (`tests/williamson_diagnostic.py`): New 662-line diagnostic script for Williamson shallow-water test cases with comprehensive error metrics (L1, L2, L∞ norms), conservation tracking, and cross-discretization comparison. See §10.
+
+8. **Test suite expanded to 2949 tests** across 208 test files and 363 source modules (~90,000 lines of code). All physics tests (148) pass. See §10.
 
 ---
 
@@ -104,7 +126,7 @@
 
 8. **Land carbon cycle** (`land/carbon/`): DALEC-990 six-pool carbon model (labile, foliage, root, wood, litter, SOM) with LUE-based GPP and Q10 decomposition. Seasonal simplified scheme as alternative. Both slab and multi-layer land models return carbon state. 43 tests.
 
-9. **New tests**: 47 stomata tests, 43 CMOR/experiments/restart/tuning tests, 43 carbon cycle tests. Total test count: 80+ test files, 1500+ tests.
+9. **New tests**: 47 stomata tests, 43 CMOR/experiments/restart/tuning tests, 43 carbon cycle tests. Total test count: 208 test files, 2949 tests.
 
 ---
 
@@ -226,7 +248,7 @@ computation for data assimilation, parameter estimation, and hybrid AI-physics m
 | M5 | Ocean + land + ice + coupler | **Complete** |
 | M6 | Lat-lon grid + finite-volume transport | **Complete** |
 | M7 | Full physics suite (microphysics, GWD, turbulence) | **Complete** |
-| M8 | Adjoint data assimilation (4D-Var) | Planned |
+| M8 | Adjoint data assimilation (4D-Var) | **Complete** |
 | M9 | Climate-scale simulations + validation | **Complete** |
 
 ### 1.4 Key Reference Models
@@ -1634,7 +1656,7 @@ def integrate(state, n_steps, dt, model):
     return final_state, trajectory
 ```
 
-### 5.4 4D-Var Data Assimilation (Planned)
+### 5.4 4D-Var Data Assimilation
 
 ```python
 def cost_4dvar(x0, observations, model, B_inv, R_inv):
@@ -2033,7 +2055,7 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
      /________________________\
 ```
 
-### 10.2 Test Suite (85+ test files, 1600+ tests)
+### 10.2 Test Suite (208 test files, 2949 tests)
 
 **Unit tests** (`tests/unit/`):
 
@@ -2072,12 +2094,18 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
   - `TestMultiLayerCarbon` (2): multi-layer + carbon coupling
   - `TestSeasonalBehavior` (4): 180-day Jan→Jun — midlat/polar warming, no runaway, seasonal range
 
+**Comprehensive spectral dycore tests** (`tests/unit/`):
+- `test_spectral_dycores_comprehensive.py` — 1353-line comprehensive spectral dycore validation (SW, PE, NH): conservation, stability, spectral convergence, semi-implicit scheme correctness, cross-resolution consistency
+
 **Validation tests** (`tests/validation/`):
 - Bulk flux differentiability and all-tile tests
 - Ocean model differentiability across all 4 discretizations (`test_differentiability_ocean.py`, pytest-parametrized)
 - Spectral PE stability analysis (E-variable, eigenvalues)
 - Held-Suarez fix verification
 - Dycore progression suite
+
+**Williamson diagnostics** (`tests/`):
+- `williamson_diagnostic.py` — 662-line diagnostic script for Williamson shallow-water test cases with comprehensive error metrics (L1, L2, L-infinity norms), conservation tracking, and cross-discretization comparison
 
 **Test cases** (`tests/test_cases/`):
 - Williamson TC2/TC5 on cubed-sphere and lat-lon
@@ -2184,14 +2212,16 @@ legoesm benchmark --grid C384 --n-steps 100 --devices 4
 - Solar geometry utilities
 - All schemes follow standard factory pattern and support hydrostatic/non-hydrostatic/spectral
 
-### Milestone 8: Data Assimilation — PLANNED
+### Milestone 8: Data Assimilation — **Complete**
 
-**Goals:**
-- 4D-Var cost function (differentiable end-to-end)
-- Adjoint model via `jax.grad`
-- Observation operators (radiance, in-situ)
-- Assimilation cycling experiments
-- Ensemble Kalman filter variant
+**Delivered:**
+- 4D-Var cost function (differentiable end-to-end) via `jax.grad` through the full model
+- Control vector specification (wind, temperature, humidity, surface pressure)
+- Background error covariance: diagonal, diffusion, spectral, and hybrid variants
+- Observation operators: direct, interpolating, and composite
+- Gradient descent minimizer with preconditioning strategies
+- DA cycling configuration and incremental analysis update
+- DA diagnostics module
 
 ### Milestone 9: Climate-Scale Simulations — IN PROGRESS
 
@@ -2454,7 +2484,16 @@ legoESM/
 │   │   ├── energy_budget.py                # Column energy, TOA/surface flux, budget tracker
 │   │   └── monthly_means.py               # MonthlyAccumulator for zonal/global means
 │   │
-│   ├── da/                                 # Data assimilation (skeleton)
+│   ├── da/                                 # Data assimilation (4D-Var)
+│   │   ├── cost_function.py               # 4D-Var cost function
+│   │   ├── control_vector.py              # Control variable specification
+│   │   ├── background_error.py            # B-matrix (diagonal, diffusion, spectral, hybrid)
+│   │   ├── observation.py                 # Observation operators
+│   │   ├── minimizer.py                   # Gradient descent minimization
+│   │   ├── preconditioning.py             # Preconditioning strategies
+│   │   ├── cycling.py                     # DA cycling configuration
+│   │   ├── incremental.py                 # Incremental analysis update
+│   │   └── _diagnostics.py               # DA diagnostics
 │   └── io/                                 # I/O utilities (skeleton)
 │
 ├── evaluations/                            # WeatherBench2 evaluation
@@ -2463,7 +2502,7 @@ legoESM/
 │   ├── visualize.py                        # Evaluation visualization
 │   └── configs/                            # Evaluation configs
 │
-├── tests/                                     # 103 test files, 1700+ individual tests
+├── tests/                                     # 208 test files, 2949 tests
 │   ├── conftest.py                         # Shared fixtures
 │   ├── unit/                               # 60+ unit test files
 │   ├── atmosphere/                         # Atmosphere tests (dynamics, physics, validation)

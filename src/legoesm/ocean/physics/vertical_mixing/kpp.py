@@ -241,36 +241,64 @@ def kpp_vertical_mixing(
     )(tracers)
 
     # --- Non-local flux for T, S (LMD94 Eq. 19) ---
-    # gamma_nl(sigma) = C_s / (w_s(sigma) * h * kappa)  [approximately]
-    # Non-local tendency: -d/dz(K * gamma) where gamma = C_s * F_surface / (w_s * h)
-    # Simplified: dT_nonlocal = gamma_T * w_s(0) * G(sigma) * (dT/dz_surface) / h
-    # where w_s(0) * G at sigma~0 captures the surface forcing scale.
-    # Use the surface turbulent velocity scale for the non-local transport.
-    w_s_sfc = w_s[..., 0]  # Turbulent velocity scale at surface
+    #
+    # LMD94 defines a counter-gradient term:
+    #   gamma_T(sigma) = C_s * Q_0 / (w_s(sigma) * h)   [K/m]
+    # where Q_0 is the surface kinematic heat flux [K*m/s].
+    #
+    # The non-local tendency is  -d/dz(K_bl * gamma_T).
+    # Substituting K_bl = h * w_s * G(sigma):
+    #   K_bl * gamma_T = h * w_s * G * C_s * Q_0 / (w_s * h) = C_s * Q_0 * G(sigma)
+    #
+    # So the non-local tendency reduces to:
+    #   dT/dt_nonlocal = -d/dz[ C_s * Q_0 * G(sigma) ]            [K/s]
+    #
+    # We discretize this as the vertical divergence of the non-local
+    # flux F_nl = C_s * Q_0 * G(sigma) evaluated at interfaces.
 
-    # Surface heat flux proxy: Q_T ~ w_s(0) * dT/dz_surface
+    # Surface kinematic heat flux proxy: Q_0 = K_sfc * dT/dz  [K*m/s]
+    # Use the BL diffusivity at the surface as the flux velocity scale.
     dT_dz_sfc = (T[..., 0] - T[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    Q_T = w_s_sfc * dT_dz_sfc  # [K·m/s]
-
-    # Only apply nonlocal for unstable forcing (B_f > 0)
-    is_unstable_col = B_f > 0.0
-    # LMD94 non-local: gamma_T * Q_T * G(sigma) / (w_s(sigma) * h)
-    # Use G from the shape function already computed
-    nonlocal_T = cfg.gamma_T * Q_T[..., jnp.newaxis] * G / (
-        w_s * jnp.maximum(h_bl[..., jnp.newaxis], eps)
-    )
-    in_bl_full = sigma < 1.0
-    dT_nonlocal = jnp.where(
-        in_bl_full & is_unstable_col[..., jnp.newaxis], nonlocal_T, 0.0
-    )
+    K_sfc = K_bl_full[..., 0]  # BL diffusivity at surface level [m^2/s]
+    Q_T = K_sfc * dT_dz_sfc    # [K*m/s]
 
     dS_dz_sfc = (S[..., 0] - S[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    Q_S = w_s_sfc * dS_dz_sfc
-    nonlocal_S = cfg.gamma_S * Q_S[..., jnp.newaxis] * G / (
-        w_s * jnp.maximum(h_bl[..., jnp.newaxis], eps)
+    Q_S = K_sfc * dS_dz_sfc    # [psu*m/s]
+
+    # Only apply non-local transport for unstable (convective) columns.
+    is_unstable_col = B_f > 0.0
+
+    # G(sigma) at interior interfaces (half levels between full levels)
+    sigma_half_full = z_half_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
+    sigma_half_clip = jnp.clip(sigma_half_full, 0.0, 1.0)
+    G_half = sigma_half_clip * (1.0 - sigma_half_clip) ** 2  # (..., nlev-1)
+
+    in_bl_full = sigma < 1.0
+
+    # --- Temperature non-local tendency ---
+    # Non-local flux at interfaces: F_nl = C_s * Q_T * G_half  [K*m/s]
+    F_T = cfg.gamma_T * Q_T[..., jnp.newaxis] * G_half  # (..., nlev-1)
+    # Tendency = -dF/dz at full levels (zero-flux BCs at surface and bottom)
+    dT_nonlocal_top = -F_T[..., :1] / dz_actual[..., :1]
+    dT_nonlocal_int = (F_T[..., :-1] - F_T[..., 1:]) / dz_actual[..., 1:-1]
+    dT_nonlocal_bot = F_T[..., -1:] / dz_actual[..., -1:]
+    dT_nonlocal = jnp.concatenate(
+        [dT_nonlocal_top, dT_nonlocal_int, dT_nonlocal_bot], axis=-1
+    )  # (..., nlev)  [K/s]
+    dT_nonlocal = jnp.where(
+        in_bl_full & is_unstable_col[..., jnp.newaxis], dT_nonlocal, 0.0
     )
+
+    # --- Salinity non-local tendency ---
+    F_S = cfg.gamma_S * Q_S[..., jnp.newaxis] * G_half  # (..., nlev-1)
+    dS_nonlocal_top = -F_S[..., :1] / dz_actual[..., :1]
+    dS_nonlocal_int = (F_S[..., :-1] - F_S[..., 1:]) / dz_actual[..., 1:-1]
+    dS_nonlocal_bot = F_S[..., -1:] / dz_actual[..., -1:]
+    dS_nonlocal = jnp.concatenate(
+        [dS_nonlocal_top, dS_nonlocal_int, dS_nonlocal_bot], axis=-1
+    )  # (..., nlev)  [psu/s]
     dS_nonlocal = jnp.where(
-        in_bl_full & is_unstable_col[..., jnp.newaxis], nonlocal_S, 0.0
+        in_bl_full & is_unstable_col[..., jnp.newaxis], dS_nonlocal, 0.0
     )
 
     return VerticalMixingOutput(

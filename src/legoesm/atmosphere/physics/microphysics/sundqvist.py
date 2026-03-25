@@ -61,7 +61,8 @@ def sundqvist_microphysics(
     condensation = f * jax.nn.softplus(q_v - config.RH_crit * q_sat) / dt  # [kg/kg/s]
 
     # 2. Autoconversion
-    P_auto = config.auto_rate * (q_c + condensation)
+    # condensation is a tendency [kg/kg/s]; multiply by dt to get increment [kg/kg]
+    P_auto = config.auto_rate * (q_c + condensation * dt)
 
     # 3. Sub-cloud evaporation
     evap_mask = jax.nn.sigmoid(sharpness * (config.RH_crit - RH))

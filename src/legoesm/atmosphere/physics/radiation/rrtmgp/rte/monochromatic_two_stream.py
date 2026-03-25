@@ -405,7 +405,10 @@ def sw_cell_source(
   mu = jnp.cos(zenith)
 
   # The vertical component of incident flux at the top boundary.
-  flux_down_direct_bc = toa_flux * mu
+  # ``mu`` may be 3-D ``(ncol, 1, 1)`` for per-column zenith; reshape to
+  # match the 2-D ``toa_flux`` shape ``(ncol, 1)``.
+  mu_2d = mu.reshape(toa_flux.shape) if jnp.ndim(mu) > jnp.ndim(toa_flux) else mu
+  flux_down_direct_bc = toa_flux * mu_2d
 
   # Global recurrent accumulation for the direct-beam downward flux at the
   # bottom cell face unraveling from the top of the atmosphere down to the

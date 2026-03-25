@@ -206,10 +206,10 @@ def rrtmgp_radiation(
     config : RRTMGPConfig
     sfc_albedo_override : jnp.ndarray | float | None
         If provided, overrides config.sfc_albedo.  For AMIP, this is the
-        ice/ocean blended column-mean albedo.  The jax-rrtmgp solver uses a
-        scalar (column-averaged) albedo; if an array is passed, the column
-        mean is taken.  This is standard practice for column radiation at
-        coarse resolution (see limitations in docs/amip.md).
+        ice/ocean blended albedo per column (ncol,).  Per-column values
+        are passed through to the two-stream solver so that surface
+        heterogeneity (e.g. ice vs ocean) is retained in the radiation.
+        A scalar is broadcast to all columns.
     sfc_emissivity_override : jnp.ndarray | float | None
         Same as sfc_albedo_override but for surface emissivity.
     o3_vmr : jnp.ndarray | None
@@ -285,27 +285,38 @@ def rrtmgp_radiation(
     # --- 3. Get optics and build atmospheric state ---
     optics_lib, vmr_lib = _get_optics(config)
 
-    # Compute a mean zenith angle (scalar) — bundled API uses a scalar zenith
-    zenith = jnp.arccos(jnp.clip(jnp.mean(cos_zenith), 0.0, 1.0))
+    # Per-column zenith angle: shape (ncol, 1, 1) so it broadcasts against
+    # the (ncol, 1, nlev+2) fields in the two-stream solver.  Clipping
+    # cos_zenith to [0, 1] handles nighttime columns (cos <= 0) by
+    # clamping to horizon; the solver zeros out nighttime contributions
+    # via per-column masking.
+    cos_z_col = jnp.clip(cos_zenith, 0.0, 1.0)        # (ncol,)
+    zenith_col = jnp.arccos(cos_z_col)[:, None, None]  # (ncol, 1, 1)
 
     # Surface properties: use overrides if provided (e.g. ice/ocean blend),
-    # otherwise fall back to config defaults.
+    # otherwise fall back to config defaults.  Keep per-column structure
+    # so that surface heterogeneity is retained in the radiation solve.
     if sfc_albedo_override is not None:
-        # Keep this as a JAX scalar (not Python float) so rrtmgp_radiation
-        # remains JIT-safe when called from traced AMIP operator-split paths.
-        eff_albedo = jnp.asarray(jnp.mean(jnp.asarray(sfc_albedo_override)), dtype=p_3d.dtype)
+        eff_albedo = jnp.asarray(sfc_albedo_override, dtype=p_3d.dtype)
+        # Ensure shape is (ncol, 1) for broadcasting.
+        if eff_albedo.ndim == 0:
+            eff_albedo = jnp.broadcast_to(eff_albedo, (ncol,))
+        eff_albedo = eff_albedo.reshape(ncol, 1)
     else:
-        eff_albedo = jnp.asarray(config.sfc_albedo, dtype=p_3d.dtype)
+        eff_albedo = jnp.full((ncol, 1), config.sfc_albedo, dtype=p_3d.dtype)
 
     if sfc_emissivity_override is not None:
-        eff_emis = jnp.asarray(jnp.mean(jnp.asarray(sfc_emissivity_override)), dtype=p_3d.dtype)
+        eff_emis = jnp.asarray(sfc_emissivity_override, dtype=p_3d.dtype)
+        if eff_emis.ndim == 0:
+            eff_emis = jnp.broadcast_to(eff_emis, (ncol,))
+        eff_emis = eff_emis.reshape(ncol, 1)
     else:
-        eff_emis = jnp.asarray(config.sfc_emissivity, dtype=p_3d.dtype)
+        eff_emis = jnp.full((ncol, 1), config.sfc_emissivity, dtype=p_3d.dtype)
 
     atmos_state = AtmosphericState(
         sfc_emis=eff_emis,
         sfc_alb=eff_albedo,
-        zenith=zenith,
+        zenith=zenith_col,
         irrad=config.S_0,
         vmr=vmr_lib,
         toa_flux_lw=0.0,

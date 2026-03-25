@@ -60,7 +60,7 @@
   \includegraphics[width=0.35\textwidth]{../legoESM.png}\\[12pt]
   \textbf{legoESM Scientific Guide}\\[6pt]
   {\Large A Fully Differentiable Earth System Model in JAX}\\[6pt]
-  {\large Version 3.8 --- March 2026}
+  {\large Version 3.9 --- March 2026}
 }
 \author{legoESM Development Team}
 \date{}
@@ -493,6 +493,21 @@ Scalar transport uses upwind C-grid mass fluxes:
   +(hv_c)_{i,j+\half}-(hv_c)_{i,j-\half}\bigr].
 \end{equation}
 
+\paragraph{FV3-faithful PPM transport (v3.9).}
+As of v3.9, the C-D grid operator module underwent a complete rewrite
+to implement FV3-faithful Piecewise Parabolic Method (PPM) transport
+\citep{ColellaWoodward1984} on staggered D/C grids.  Key elements include:
+\begin{itemize}[nosep]
+  \item PPM reconstruction with Colella--Woodward monotonicity limiters
+    for all scalar fields;
+  \item Flux-form mass transport on staggered D-grid and C-grid;
+  \item Corrected geographic-to-grid wind rotation eliminating
+    sign errors in cross-face interpolation;
+  \item Tuned hyperdiffusion with physical $e$-folding time
+    ($\nu_4 = \Delta x^4/\tau_{\mathrm{efold}}$).
+\end{itemize}
+The module spans approximately 740~lines of JAX code.
+
 \subsection{Lat-Lon Finite Volume Discretisation}
 
 A-grid staggering on a uniform $n_{\mathrm{lat}}\times n_{\mathrm{lon}}$
@@ -624,6 +639,13 @@ where $\lambda_n = n(n+1)/a^2$ is the Laplacian eigenvalue and $\mathbf{\Gamma}$
 is the vertical coupling matrix.  This is pre-factored (LU decomposition)
 for each wavenumber $n$ at initialisation, removing the gravity-wave CFL
 constraint and allowing 3--4$\times$ larger timesteps.
+
+\paragraph{Verification (v3.9).}
+A comprehensive spectral dycore test suite validates conservation
+(mass, energy, enstrophy), long-integration stability under
+Held--Suarez forcing, spectral convergence with increasing truncation
+wavenumber, and semi-implicit scheme correctness.  See
+Chapter~\ref{ch:verification} for details.
 
 \subsection{Lat-Lon Finite-Volume Discretisation}
 
@@ -1897,8 +1919,21 @@ as the conventional spectral cores.
 
 \section{Incremental 4D-Var}
 
-legoESM supports incremental 4D-Var data assimilation with fully
-differentiable adjoints provided by JAX's automatic differentiation.
+legoESM provides a fully implemented incremental 4D-Var data assimilation
+system, leveraging JAX's automatic differentiation to compute exact
+adjoints without hand-coded tangent-linear or adjoint models.
+
+\subsection{Control Vector}
+
+The control vector $\vect{x}$ comprises the prognostic atmospheric fields:
+\begin{itemize}[nosep]
+  \item Horizontal winds $(u, v)$;
+  \item Temperature $T$;
+  \item Specific humidity $q$;
+  \item Surface pressure $p_s$.
+\end{itemize}
+The control vector specification supports both grid-point and spectral
+representations, with configurable variable subsets for targeted assimilation.
 
 \subsection{Cost Function}
 
@@ -1931,10 +1966,35 @@ $\mathbf{B}^{1/2}$ preconditioning for improved convergence.
 The gradient $\grad_{\vect{x}}J$ is computed exactly via
 \texttt{jax.grad} through the full forward model trajectory.
 
+\subsection{Observation Operators}
+
+Three observation operator types:
+\begin{itemize}[nosep]
+  \item \textbf{Direct}: Identity mapping for in-situ observations on model
+    grid points;
+  \item \textbf{Interpolating}: Bilinear/trilinear interpolation from model
+    grid to observation locations;
+  \item \textbf{Composite}: Chained operators for derived quantities
+    (e.g., satellite radiances via a forward radiative transfer step).
+\end{itemize}
+All operators are JAX-differentiable, so \texttt{jax.grad} propagates
+through observation-space transformations seamlessly.
+
 \subsection{Analysis--Forecast Cycling}
 
 Sequential cycling: the analysis from one assimilation window becomes the
 background for the next, with checkpoint/restart support.
+
+\subsection{Incremental Analysis Update}
+
+To reduce initialisation shocks, the analysis increment
+$\delta\vect{x}=\vect{x}_a-\vect{x}_b$ is applied gradually over an
+IAU window of $N_{\mathrm{IAU}}$ timesteps:
+\begin{equation}
+  \vect{x}^{n+1} = \mathcal{M}(\vect{x}^n) + \frac{\delta\vect{x}}{N_{\mathrm{IAU}}},
+  \qquad n = 0,\ldots,N_{\mathrm{IAU}}-1.
+\end{equation}
+This produces dynamically balanced analyses and is the default cycling mode.
 
 
 % #############################################################################
@@ -2042,6 +2102,58 @@ Template & Period & Forcing & CO$_2$ range \\
 Each restart file includes a \texttt{.meta.json} sidecar with SHA-256
 state digest, config hash, platform identifier, JAX version, x64 mode,
 and git hash.
+
+
+% #############################################################################
+\chapter{Verification and Testing}
+\label{ch:verification}
+% #############################################################################
+
+The legoESM codebase comprises approximately 363~source modules
+($\sim$90{,}000~lines of code), validated by 2{,}949~tests across
+208~test files.
+
+\section{Williamson Standard Test Cases}
+\label{sec:williamson}
+
+The shallow water dynamical cores are verified against the standard
+Williamson test suite \citep{Williamson1992}, including:
+\begin{itemize}[nosep]
+  \item \textbf{Case 1}: Advection of a cosine bell;
+  \item \textbf{Case 2}: Global steady-state nonlinear geostrophic flow;
+  \item \textbf{Case 5}: Zonal flow over an isolated mountain;
+  \item \textbf{Case 6}: Rossby--Haurwitz wave.
+\end{itemize}
+A comprehensive diagnostic suite (\texttt{williamson\_diagnostic.py})
+computes $L_1$, $L_2$, and $L_\infty$ error norms against analytical
+solutions where available, and performs cross-discretisation comparison
+across all five grid families (cubed-sphere C-D, spectral, finite-volume
+lat-lon, C-grid lat-lon, and MPAS/Voronoi).
+
+\section{Spectral Dynamical Core Test Suite}
+\label{sec:spectral-tests}
+
+The spectral transform dynamical cores (shallow water and primitive
+equation) are validated by a dedicated comprehensive test suite covering:
+\begin{itemize}[nosep]
+  \item \textbf{Conservation}: Total mass, energy, and enstrophy
+    conservation to machine precision (shallow water) and within
+    bounded drift (primitive equation with hyperdiffusion);
+  \item \textbf{Stability}: Long-integration stability under
+    Held--Suarez forcing at T21/L40 and T42/L40 resolutions;
+  \item \textbf{Spectral convergence}: Verification that error norms
+    decrease with increasing truncation wavenumber;
+  \item \textbf{Semi-implicit correctness}: Validation that the implicit
+    gravity-wave solver matches reference solutions and permits
+    CFL numbers $>1$ for gravity-wave modes.
+\end{itemize}
+
+\section{Cross-Discretisation Intercomparison}
+
+All five shallow water discretisations are compared on the same test
+problems, verifying consistent convergence rates and inter-scheme
+agreement in error norms.  This ensures that the shared physics interface
+produces consistent results regardless of the dynamical core choice.
 
 
 % #############################################################################
@@ -2297,6 +2409,12 @@ Relationship between wind speed and gas exchange over the ocean revisited.
 Williams, P.D., 2009:
 A proposed modification to the Robert--Asselin time filter.
 \textit{Mon.\ Wea.\ Rev.}, \textbf{137}, 2538--2546.
+
+\bibitem[Williamson et al.(1992)]{Williamson1992}
+Williamson, D.L., J.B.~Drake, J.J.~Hack, R.~Jakob, and P.N.~Swarztrauber, 1992:
+A standard test set for numerical approximations to the shallow water
+equations in spherical geometry.
+\textit{J.\ Comput.\ Phys.}, \textbf{102}, 211--224.
 
 \bibitem[Wright(1997)]{Wright1997}
 Wright, D.G., 1997:

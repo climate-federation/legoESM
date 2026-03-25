@@ -166,8 +166,9 @@ def _make_hydrostatic_turbulence(
     ``phys_state.tke`` and the updated TKE is returned as the second
     element of the result tuple.
 
-    Note: HydrostaticState has no tracers, so q_v is set to zero.
     Turbulence produces nonzero du_dt, dv_dt (unlike convection/radiation).
+    When tracers are available, q_v is read from ``state.tracers["q_v"]``
+    and the moisture tendency ``dq_v_dt`` is returned via ``tracer_tendencies``.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
@@ -204,8 +205,13 @@ def _make_hydrostatic_turbulence(
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
 
-        # No tracers in HydrostaticState
-        q_v_col = jnp.zeros((ncol, nlev))
+        # Extract water vapor from tracers if available; else assume dry.
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = _qv_data.reshape(ncol, nlev)
+        else:
+            q_v_col = jnp.zeros((ncol, nlev))
 
         dims_3d = ("face", "x", "y", "level")
         dims_2d = ("face", "x", "y")
@@ -268,12 +274,22 @@ def _make_hydrostatic_turbulence(
         dv_dt = turb_out.dv_dt.reshape(shape_3d)
         dT_dt = turb_out.dT_dt.reshape(shape_3d)
 
+        # Propagate moisture tendency from turbulence backend
+        tracer_tends = {
+            "q_v": Field(
+                data=turb_out.dq_v_dt.reshape(shape_3d),
+                name="dq_v_dt_turb",
+                dims=dims_3d, units="kg/kg/s",
+            ),
+        }
+
         tendencies = HydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
             dT_dt=Field(data=dT_dt, name="dT_dt_turb", dims=dims_3d, units="K/s"),
             dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
+            tracer_tendencies=tracer_tends,
         )
         return tendencies, tke_out
 
