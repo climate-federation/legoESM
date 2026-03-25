@@ -35,6 +35,7 @@ from legoesm.runtime.backend import (      # noqa: F401
     supports_float64,
     enable_x64,
     is_x64_enabled,
+    require_x64,
     check_spectral_backend,
     configure_backend,
 )
@@ -68,6 +69,7 @@ __all__ = [
     "supports_float64",
     "enable_x64",
     "is_x64_enabled",
+    "require_x64",
     "check_spectral_backend",
     "configure_backend",
     # Precision

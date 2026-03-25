@@ -931,6 +931,9 @@ def create_voronoi_mesh(
     -------
     VoronoiMesh
     """
+    from legoesm.runtime.backend import require_x64
+    require_x64("Voronoi/MPAS mesh construction")
+
     # Step 1: Icosahedral base
     verts, triangles = _icosahedral_base()
 
