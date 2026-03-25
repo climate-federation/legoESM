@@ -196,7 +196,9 @@ def run_single_benchmark(
 
     # Give each run its own output directory so results don't overwrite
     pert_str = "perturbed" if perturbed else "steady_state"
-    run_subdir = f"baroclinic_wave_{pert_str}_C{resolution}_L{levels}_{device_type}{n_devices}"
+    run_subdir = (
+        f"baroclinic_wave_{pert_str}_C{resolution}_L{levels}_{device_type}{n_devices}"
+    )
     if output_dir is not None:
         run_output = str(output_dir / run_subdir)
     else:
@@ -221,55 +223,26 @@ def run_single_benchmark(
             env["JAX_PLATFORMS"] = "cpu"
             device_label = "CPU fallback (no GPUs)"
     else:
-        # CPU mode: hide all GPUs, control thread parallelism.
-        #
-        # On GPU nodes, JAX's xla_cuda12 plugin tries to initialize even
-        # when JAX_PLATFORMS=cpu, which crashes if CUDA_VISIBLE_DEVICES
-        # is empty. We use a multi-pronged approach:
-        #   1. CUDA_VISIBLE_DEVICES=-1  (hide GPUs from CUDA runtime)
-        #   2. JAX_PLATFORMS=cpu         (tell JAX to only use CPU)
-        #   3. Write a tiny wrapper script that monkey-patches the CUDA
-        #      plugin before running the actual script via runpy.
+        # CPU mode: Control logical device partitioning and thread counts
         env["CUDA_VISIBLE_DEVICES"] = "-1"
         env["JAX_PLATFORMS"] = "cpu"
 
+        # IMPORTANT: This forces JAX to partition the CPU into N devices.
+        # This allows pmap/sharding to actually distribute work.
+        xla_flags = env.get("XLA_FLAGS", "")
+        # Add the device count flag while preserving existing flags
+        xla_flags += f" --xla_force_host_platform_device_count={n_devices}"
+        env["XLA_FLAGS"] = xla_flags.strip()
+
+        # Thread control for XLA and BLAS
         n_threads = str(n_devices)
-
-        # JAX/XLA CPU thread control.
-        # The intra-op thread count is controlled via the environment
-        # variable below (not via XLA_FLAGS, which varies by version).
-        # xla_force_host_platform_device_count is also version-dependent
-        # and can crash, so we skip XLA_FLAGS entirely and rely on
-        # the standard thread-control env vars.
         env["XLA_NUM_THREADS"] = n_threads
+        env["OMP_NUM_THREADS"] = "1"  # Often better to let XLA handle parallelism
+        env["MKL_NUM_THREADS"] = "1"
+        env["OPENBLAS_NUM_THREADS"] = "1"
 
-        # Remove any pre-existing XLA_FLAGS that might conflict
-        # (keep them only if the user explicitly set them)
-        if "XLA_FLAGS" in env:
-            # Strip any flags we may have injected in previous iterations
-            existing = env["XLA_FLAGS"]
-            if "xla_cpu_num_threads" in existing or "xla_cpu_multi_thread" in existing:
-                env.pop("XLA_FLAGS", None)
-
-        # OpenMP / MKL / BLAS thread control (for NumPy, SciPy, etc.)
-        # These control parallelism in the BLAS/LAPACK layer underneath JAX
-        env["OMP_NUM_THREADS"] = n_threads
-        env["MKL_NUM_THREADS"] = n_threads
-        env["OPENBLAS_NUM_THREADS"] = n_threads
-        env["VECLIB_MAXIMUM_THREADS"] = n_threads
-        env["NUMEXPR_NUM_THREADS"] = n_threads
-
-        # Also control Eigen/TBB threads used by XLA CPU backend
-        env["TF_NUM_INTRAOP_THREADS"] = n_threads
-        env["TF_NUM_INTEROP_THREADS"] = n_threads
-
-        device_label = f"{n_devices} CPU thread(s)"
-
-        # Use a wrapper script to suppress the CUDA plugin
+        device_label = f"{n_devices} Logical CPU Device(s)"
         wrapper_path = create_cpu_wrapper(script_path)
-        # Replace the script in cmd with the wrapper; keep all other args
-        # cmd is: [python, script_path, --resolution, ...]
-        # The wrapper will internally run script_path via runpy
         cmd[1] = wrapper_path
 
     print(f"\n{'='*70}")
@@ -902,7 +875,8 @@ def main():
                 idx += 1
                 pert_str = "perturbed"
                 run_out = str(
-                    output_dir / f"baroclinic_wave_{pert_str}_C{res}_L{args.levels}_{dtype}{ndev}"
+                    output_dir
+                    / f"baroclinic_wave_{pert_str}_C{res}_L{args.levels}_{dtype}{ndev}"
                 )
                 if dtype == "gpu":
                     cuda = make_cuda_visible_str(ndev, available_gpus)
@@ -931,7 +905,17 @@ def main():
     t_total_start = time.time()
     idx = 0
 
+    # Define a baseline for the CFL condition.
+    # C16 typically runs well at 600s.
+    BASE_RES = 16
+    BASE_DT = 600.0
+
     for res in resolutions:
+        # Calculate a stable dt inversely proportional to resolution
+        # Example: C16 -> 600s, C32 -> 300s, C64 -> 150s, C96 -> 100s
+        stable_dt = BASE_DT * (BASE_RES / res)
+
+        print(f"\n--- Scaling for C{res}: Using dt = {stable_dt:.1f}s ---")
         for dtype, ndev in run_plan:
             idx += 1
             print(f"\n  [{idx}/{total_runs}]", end="")
@@ -943,6 +927,7 @@ def main():
                 n_devices=ndev,
                 available_gpus=available_gpus,
                 levels=args.levels,
+                dt=stable_dt,  # Passes the calculated stable time step
                 perturbed=True,
                 script_path=args.script,
                 output_dir=output_dir,
@@ -959,6 +944,7 @@ def main():
                     n_devices=ndev,
                     available_gpus=available_gpus,
                     levels=args.levels,
+                    dt=stable_dt,  # Also apply to steady state
                     perturbed=False,
                     script_path=args.script,
                     output_dir=output_dir,
