@@ -235,8 +235,8 @@ def fv3_hydrostatic_tendencies(
         div_v_damp = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
         ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_v_damp, cdgrid)
         ddiv_dy_perp = (ddiv_dy - cosa_c * ddiv_dx) / jnp.maximum(sina_c, 1e-12)
-        du_d_dt = du_d_dt - config.div_damp_coeff * ddiv_dx
-        dv_d_dt = dv_d_dt - config.div_damp_coeff * ddiv_dy_perp
+        du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
+        dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
 
     # --- 10. Surface pressure tendency and vertical motion ---
     # C-grid divergence for continuity
