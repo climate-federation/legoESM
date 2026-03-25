@@ -171,6 +171,7 @@ def run_single_benchmark(
     perturbed: bool = True,
     script_path: str = "scripts/run_baroclinic_wave.py",
     extra_args: list[str] | None = None,
+    output_dir: Path | None = None,
 ) -> dict:
     """Run a single baroclinic wave benchmark and parse the output.
 
@@ -195,10 +196,11 @@ def run_single_benchmark(
 
     # Give each run its own output directory so results don't overwrite
     pert_str = "perturbed" if perturbed else "steady_state"
-    run_output = (
-        f"results/baroclinic_wave_{pert_str}_C{resolution}_L{levels}"
-        f"_{device_type}{n_devices}"
-    )
+    run_subdir = f"baroclinic_wave_{pert_str}_C{resolution}_L{levels}_{device_type}{n_devices}"
+    if output_dir is not None:
+        run_output = str(output_dir / run_subdir)
+    else:
+        run_output = f"results/{run_subdir}"
     cmd += ["--output", run_output]
 
     if extra_args:
@@ -899,9 +901,8 @@ def main():
             for dtype, ndev in run_plan:
                 idx += 1
                 pert_str = "perturbed"
-                run_out = (
-                    f"results/baroclinic_wave_{pert_str}_C{res}"
-                    f"_L{args.levels}_{dtype}{ndev}"
+                run_out = str(
+                    output_dir / f"baroclinic_wave_{pert_str}_C{res}_L{args.levels}_{dtype}{ndev}"
                 )
                 if dtype == "gpu":
                     cuda = make_cuda_visible_str(ndev, available_gpus)
@@ -944,6 +945,7 @@ def main():
                 levels=args.levels,
                 perturbed=True,
                 script_path=args.script,
+                output_dir=output_dir,
             )
             all_results.append(result)
 
@@ -959,6 +961,7 @@ def main():
                     levels=args.levels,
                     perturbed=False,
                     script_path=args.script,
+                    output_dir=output_dir,
                 )
                 all_results.append(result_ss)
 
