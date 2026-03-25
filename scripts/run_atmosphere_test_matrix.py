@@ -452,17 +452,46 @@ def _interp_gaussian_to_latlon(field: np.ndarray, lat_gauss_deg: np.ndarray,
     return f(lat_out)
 
 
+_cs_weights_cache: dict[tuple[int, int, int], object] = {}
+
+
+def _get_cs_weights(n: int, n_lat: int = 181, n_lon: int = 360):
+    """Get (or compute and cache) face-aware bilinear CS→latlon weights."""
+    key = (n, n_lat, n_lon)
+    if key not in _cs_weights_cache:
+        from legoesm.grids.regridding import compute_cubedsphere_to_latlon_weights
+        _cs_weights_cache[key] = compute_cubedsphere_to_latlon_weights(
+            n, n_lon=n_lon, n_lat=n_lat)
+    return _cs_weights_cache[key]
+
+
 def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
                coord_kind: str) -> np.ndarray:
     """Regrid a 2D field to (181, 360) lat-lon."""
+    arr = np.asarray(field, dtype=np.float64)
     if coord_kind == "latlon":
-        return np.asarray(field, dtype=np.float64)
+        return arr
     if coord_kind == "gaussian":
         # Gaussian grid: interpolate lat axis to regular spacing
-        arr = np.asarray(field, dtype=np.float64)
         lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
         return _interp_gaussian_to_latlon(arr, lat_gauss)
-    return _bin_to_latlon(field.ravel(), lon_deg.ravel(), lat_deg.ravel())
+    if coord_kind == "icosa":
+        # Some MPAS extractors already return regular lat-lon fields for 2D
+        # quantities because edge- and cell-based variables need different
+        # source coordinates. Do not remap those arrays again.
+        if arr.shape == (181, 360):
+            return arr
+        idxs, w = _build_latlon_weights(lon_deg, lat_deg, k=20)
+        return _apply_weights(arr.ravel(), idxs, w, 181, 360)
+    # Cubed-sphere: use face-aware bilinear interpolation
+    from legoesm.grids.regridding import apply_cubedsphere_to_latlon
+    if arr.ndim >= 3 and arr.shape[0] == 6:
+        n = arr.shape[1]
+    else:
+        n = int(round(np.sqrt(arr.size / 6)))
+        arr = arr.reshape(6, n, n)
+    w = _get_cs_weights(n)
+    return apply_cubedsphere_to_latlon(arr, w)
 
 
 def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
@@ -479,16 +508,30 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
         # Interpolate the Gaussian latitude axis to regular 1-deg spacing
         lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
         return _interp_gaussian_to_latlon(arr, lat_gauss)
+    if coord_kind == "icosa":
+        if arr.ndim == 1:
+            arr = arr[:, None]
+        if arr.ndim >= 3 and arr.shape[:2] == (181, 360):
+            return arr
+        nlev = arr.shape[-1]
+        idxs, w = _build_latlon_weights(lon_deg, lat_deg, k=20)
+        flat = arr.reshape(-1, nlev)
+        out = np.full((181, 360, nlev), np.nan, dtype=np.float64)
+        for k in range(nlev):
+            out[..., k] = _apply_weights(flat[:, k], idxs, w, 181, 360)
+        return out
+    # Cubed-sphere: use face-aware bilinear interpolation
+    from legoesm.grids.regridding import apply_cubedsphere_to_latlon_3d
     if arr.ndim == 1:
         arr = arr[:, None]
-    nlev = arr.shape[-1]
-    n_lat, n_lon = 181, 360
-    flat = arr.reshape(-1, nlev)
-    idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon)
-    out = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
-    for k in range(nlev):
-        out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon)
-    return out
+    if arr.ndim >= 4 and arr.shape[0] == 6:
+        n = arr.shape[1]
+    else:
+        nlev = arr.shape[-1]
+        n = int(round(np.sqrt(arr.size / (6 * nlev))))
+        arr = arr.reshape(6, n, n, nlev)
+    w = _get_cs_weights(n)
+    return apply_cubedsphere_to_latlon_3d(arr, w)
 
 
 def _fill_nan_profile(profile: np.ndarray) -> np.ndarray:

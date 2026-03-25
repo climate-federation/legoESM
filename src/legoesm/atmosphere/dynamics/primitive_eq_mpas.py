@@ -166,7 +166,7 @@ def mpas_hydrostatic_tendencies(
 
         q_v = potential_vorticity_vertex(u_k, h_proxy, mesh.fVertex, mesh)
 
-        if config.apvm_scale > 0 and dt > 0:
+        if config.apvm_scale > 0:
             q_v = apvm_correction(q_v, u_k, mesh, config.apvm_scale * dt)
 
         if config.pv_scheme == "enstrophy":
@@ -251,34 +251,15 @@ def mpas_hydrostatic_tendencies(
     # Adiabatic heating: κ·T·ω/p
     adiabatic = kappa * T_3d * omega / p_full
 
-    # Missing v·∇(ln p_s) contribution:
-    # Need u_edge * grad(ln p_s) averaged to cells.
-    # flux = u * grad_ln_ps per edge, then divergence gives cell avg
-    # Actually: v·∇(ln p_s) at cells ≈ div(u * ln_ps) - ln_ps * div(u)
-    # Simpler: direct edge-to-cell reconstruction
-    u_grad_lnps = u_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
+    # v·∇(ln p_s) at cells: div(u * ln_ps_edge) - ln_ps * div(u)
+    ln_ps_edge = cell_to_edge_avg(ln_ps, mesh)  # (nEdges,)
 
-    def _cell_avg_scalar_product(k):
-        """Reconstruct v·∇(ln p_s) at cells for level k."""
-        # Use divergence of flux minus scalar times divergence
-        flux_k = u_grad_lnps[:, k]  # nEdges
-        # Weighted sum at cells using edge contributions
-        eoc = mesh.edgesOnCell  # (maxEdges, nCells)
-        mask = (eoc >= 0).astype(flux_k.dtype)
-        eoc_safe = jnp.maximum(eoc, 0)
-        # dcEdge * dvEdge gives edge area; simplify with area averaging
-        vals = flux_k[eoc_safe] * mesh.dvEdge[eoc_safe] * mesh.edgeSignOnCell * mask
-        # This is basically divergence * p_s of ln_ps... Actually let's use
-        # the simpler approach: v·∇(ln p_s) ≈ (1/A_c) Σ_e u_e * grad_ln_ps_e * l_e
-        # but grad_ln_ps is already the normal gradient.  The dot product
-        # v·∇φ at cell c ≈ div(u * φ) - φ * div(u) = divergence_cell(u*ln_ps) - ln_ps * div(u)
-        ln_ps_edge = 0.5 * (ln_ps[c1] + ln_ps[c2])
-        return divergence_cell(u_3d[:, k] * ln_ps_edge, mesh) - ln_ps * div_3d[:, k]
+    def _cell_avg_scalar_product(carry, k):
+        flux = u_3d[:, k] * ln_ps_edge
+        return carry, divergence_cell(flux, mesh) - ln_ps * div_3d[:, k]
 
-    # Vectorize over levels
     _, v_grad_lnps_all = jax.lax.scan(
-        lambda carry, k: (carry, _cell_avg_scalar_product(k)),
-        None, jnp.arange(nlev),
+        _cell_avg_scalar_product, None, jnp.arange(nlev),
     )
     v_grad_lnps = jnp.moveaxis(v_grad_lnps_all, 0, -1)  # (nCells, nlev)
 

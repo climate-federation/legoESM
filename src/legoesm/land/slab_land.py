@@ -1,13 +1,16 @@
 """Slab thermal + bucket hydrology land model.
 
 Energy balance:
-    C_soil * d_soil * dT/dt = SW_net + LW_net - SH - LH
+    C_soil * d_soil * dT/dt = SW_net + LW_net - SH - LH - L_f * melt_rate
 
 Bucket hydrology:
-    dW/dt = precip - E,   W in [0, W_max]
+    dW/dt = precip_rain + melt - E,   W in [0, W_max]
 
 Snow:
     d(snow)/dt = precip_snow - melt
+    Energy-limited melt: melt = min(snow, max(0, Q_net * dt / L_f))
+    Melt energy is subtracted from the surface energy budget.
+    Meltwater enters the soil water bucket.
     Snow cover fraction and albedo feedback (Task 10).
 """
 
@@ -67,16 +70,10 @@ def step_land(
     snow = state.snow_depth.data
     snow_age = state.snow_age.data
 
-    # --- Snow budget ---
-    snow_new, snow_age_new = update_snow(
-        snow, snow_age, T_soil, forcing.precip_snow,
-        config.snow_melt_rate, config.T_snow_melt, dt,
-    )
-
-    # --- Surface albedo ---
+    # --- Surface albedo (from current snow state) ---
     if config.snow_albedo_feedback and lat is not None:
         alpha = compute_land_albedo(
-            lat, snow_new, snow_age_new, config.land_albedo,
+            lat, snow, snow_age, config.land_albedo,
         )
     else:
         alpha = jnp.broadcast_to(jnp.array(config.albedo_land), T_soil.shape)
@@ -94,6 +91,11 @@ def step_land(
     beta, gpp_farq = compute_effective_beta(
         T_soil, forcing, beta_soil, config, carbon_state, dt,
     )
+
+    # Stomatal reduction factor: ratio of effective beta to soil-only beta.
+    # This captures the stomatal limitation independent of soil moisture,
+    # so it can be applied to updated soil moisture later.
+    stomatal_ratio = beta / jnp.maximum(beta_soil, 1e-10)
 
     # Surface saturation humidity
     q_sat_sfc = saturation_mixing_ratio(T_soil, forcing.p_surface)
@@ -127,14 +129,32 @@ def step_land(
         config.emissivity_land,
     )
 
-    # Energy balance: dT/dt
+    # --- Net surface energy flux (positive = energy into soil) ---
+    Q_net = sw_net + lw_net - shflx - lhflx
+
+    # --- Snow budget (energy-limited melt) ---
+    # Q_net drives the melt rate: M = max(0, Q_net * dt / L_f)
+    snow_new, snow_age_new, snow_melt = update_snow(
+        snow, snow_age, T_soil, forcing.precip_snow, dt,
+        Q_net=Q_net,
+        snow_melt_rate=config.snow_melt_rate,
+        T_snow_melt=config.T_snow_melt,
+    )
+
+    # --- Energy balance: dT/dt ---
+    # The melt consumes latent heat of fusion, reducing the energy
+    # available for warming the soil slab.
     heat_cap = config.C_soil * config.d_soil
-    dT_dt = (sw_net + lw_net - shflx - lhflx) / heat_cap
+    melt_energy = snow_melt * constants.L_f / dt  # W/m2 consumed by melt
+    dT_dt = (Q_net - melt_energy) / heat_cap
     T_soil_new = T_soil + dt * dT_dt
 
-    # Bucket hydrology
+    # --- Bucket hydrology ---
+    # Rain and snow meltwater enter the bucket; snow goes to snowpack.
     evap_rate = lhflx / constants.L_v  # kg/m2/s (positive = upward)
-    dW_dt = forcing.precip_total - evap_rate
+    precip_rain = forcing.precip_total - forcing.precip_snow
+    melt_rate = snow_melt / dt  # kg/m2/s entering liquid budget
+    dW_dt = precip_rain + melt_rate - evap_rate
     W_new = W + dt * dW_dt
     W_new = jnp.clip(W_new, 0.0, config.W_max)
 
@@ -151,9 +171,12 @@ def step_land(
         config.emissivity_land,
     )
 
-    # Recompute q_surface from updated T and moisture for consistency
+    # Recompute q_surface from updated T and moisture for consistency.
+    # Apply the stomatal reduction factor so that q_surface reflects both
+    # soil moisture availability AND stomatal conductance limitation.
     w_frac_new = jnp.clip(W_new / config.W_max, 0.0, 1.0)
-    beta_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
+    beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
+    beta_new = stomatal_ratio * beta_soil_new
     q_sfc_new = beta_new * saturation_mixing_ratio(T_soil_new, forcing.p_surface)
 
     # --- Carbon cycle ---

@@ -178,18 +178,33 @@ def _make_hydrostatic_microphysics(
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
+        # Helper: extract a tracer from the tracer dict, returning a
+        # column-reshaped (ncol, nlev) array clipped to non-negative.
+        def _get_tracer(name):
+            if state.tracers is not None and name in state.tracers:
+                raw = state.tracers[name]
+                data = raw.data if hasattr(raw, "data") else raw
+                return jnp.maximum(data.reshape(ncol, nlev), 0.0)
+            return jnp.zeros((ncol, nlev))
+
         # Extract water vapor from tracers if available; else assume dry.
-        if state.tracers is not None and "q_v" in state.tracers:
-            _qv_raw = state.tracers["q_v"]
-            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
-            q_v_col = jnp.maximum(_qv_data.reshape(ncol, nlev), 0.0)
-        else:
-            q_v_col = jnp.zeros((ncol, nlev))
+        q_v_col = _get_tracer("q_v")
 
         rho = _compute_rho(T_col, p_full_col)
         dz = _compute_heights_from_sigma(T_col, p_half_col)
 
-        hydrometeors = make_zero_hydrometeors(ncol, nlev)
+        # Extract actual hydrometeor state from tracers (fall back to zero
+        # for any species not present in the tracer registry).
+        hydrometeors = HydrometeorState(
+            q_c=_get_tracer("q_c"),
+            q_r=_get_tracer("q_r"),
+            q_i=_get_tracer("q_i"),
+            q_s=_get_tracer("q_s"),
+            q_g=_get_tracer("q_g"),
+            N_c=_get_tracer("N_c"),
+            N_r=_get_tracer("N_r"),
+            N_i=_get_tracer("N_i"),
+        )
 
         if is_ml:
             if _ml_model_cache[0] is None:

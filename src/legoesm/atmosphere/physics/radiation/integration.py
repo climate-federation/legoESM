@@ -364,6 +364,18 @@ def _make_hydrostatic_radiation(
         else:
             q_v_col = jnp.zeros_like(T_col)
 
+        # Extract cloud condensate from tracers for cloud-radiation coupling.
+        q_cloud_col = None
+        q_ice_col = None
+        if state.tracers is not None and "q_c" in state.tracers:
+            _qc_raw = state.tracers["q_c"]
+            _qc_data = _qc_raw.data if hasattr(_qc_raw, "data") else _qc_raw
+            q_cloud_col = jnp.maximum(_qc_data.reshape(ncol, nlev), 0.0)
+        if state.tracers is not None and "q_i" in state.tracers:
+            _qi_raw = state.tracers["q_i"]
+            _qi_data = _qi_raw.data if hasattr(_qi_raw, "data") else _qi_raw
+            q_ice_col = jnp.maximum(_qi_data.reshape(ncol, nlev), 0.0)
+
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col,
@@ -374,6 +386,8 @@ def _make_hydrostatic_radiation(
             q_v=q_v_col,
             insolation=insol_col,
             cos_sza=cos_sza_col,
+            q_cloud=q_cloud_col,
+            q_ice=q_ice_col,
         )
 
         # Reshape heating rate back to (6, n, n, nlev)
@@ -640,6 +654,18 @@ def _make_spectral_pe_radiation(
         else:
             q_v_col = jnp.zeros_like(T_col)
 
+        # Extract cloud condensate from tracers for cloud-radiation coupling.
+        q_cloud_col = None
+        q_ice_col = None
+        if hasattr(state, "tracers") and state.tracers is not None and "q_c" in state.tracers:
+            _qc_raw = state.tracers["q_c"]
+            _qc_data = _qc_raw.data if hasattr(_qc_raw, "data") else _qc_raw
+            q_cloud_col = jnp.maximum(_qc_data.reshape(ncol, nlev), 0.0)
+        if hasattr(state, "tracers") and state.tracers is not None and "q_i" in state.tracers:
+            _qi_raw = state.tracers["q_i"]
+            _qi_data = _qi_raw.data if hasattr(_qi_raw, "data") else _qi_raw
+            q_ice_col = jnp.maximum(_qi_data.reshape(ncol, nlev), 0.0)
+
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col,
@@ -650,6 +676,8 @@ def _make_spectral_pe_radiation(
             q_v=q_v_col,
             insolation=insol_col,
             cos_sza=cos_sza_col,
+            q_cloud=q_cloud_col,
+            q_ice=q_ice_col,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)

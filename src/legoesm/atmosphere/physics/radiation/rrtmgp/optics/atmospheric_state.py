@@ -24,12 +24,19 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_volume_mix
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class AtmosphericState:
-  """Atmospheric gas concentrations and miscellaneous optical properties."""
-  # Surface emissivity; the same for all bands.
-  sfc_emis: float
-  # Surface albedo; the same for all bands.
-  sfc_alb: float
-  # The solar zenith angle (scalar; may be a JAX array for AD tracing).
+  """Atmospheric gas concentrations and miscellaneous optical properties.
+
+  Surface emissivity and surface albedo may be scalars (single-column mode)
+  or per-column JAX arrays of shape ``(ncol, 1)`` (multi-column AMIP mode).
+  The zenith angle may be a scalar or a per-column array of shape
+  ``(ncol, 1, 1)`` so that it broadcasts correctly against the 3-D
+  ``(ncol, 1, nlev+2)`` optical-depth fields in the two-stream solver.
+  """
+  # Surface emissivity; scalar or per-column array (ncol, 1).
+  sfc_emis: float | jax.Array
+  # Surface albedo; scalar or per-column array (ncol, 1).
+  sfc_alb: float | jax.Array
+  # Solar zenith angle; scalar or per-column array (ncol, 1).
   zenith: float | jax.Array
   # The total solar irradiance (in W/m²).
   irrad: float

@@ -66,11 +66,12 @@ def prescribed_surface_forcing(
     dT_dt = jnp.zeros(shape_3d, dtype=dtype)
     dT_dt = dT_dt.at[..., 0].set(Q_net * inv_rho_csw_dz)
 
-    # Freshwater (virtual salt flux): dS/dt = -S * E_minus_P / dz_0
+    # Freshwater (virtual salt flux): dS/dt = +S * E_minus_P / dz_0
+    # Positive E-P means net evaporation → water leaves → salt concentrates → dS/dt > 0
     dS_dt = jnp.zeros(shape_3d, dtype=dtype)
     if cfg.E_minus_P != 0.0:
         inv_dz = 1.0 / jnp.maximum(dz_0, 1e-10)
-        dS_dt = dS_dt.at[..., 0].set(-S[..., 0] * cfg.E_minus_P * inv_dz)
+        dS_dt = dS_dt.at[..., 0].set(S[..., 0] * cfg.E_minus_P * inv_dz)
 
     return SurfaceForcingOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dS_dt=dS_dt,

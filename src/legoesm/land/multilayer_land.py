@@ -126,16 +126,10 @@ def step_multilayer_land(
             config.Cd_land, config.Ch_land,
         )
 
-    # --- Snow budget ---
-    snow_new, snow_age_new = update_snow(
-        snow, snow_age, T_surface, forcing.precip_snow,
-        config.snow_melt_rate, config.T_snow_melt, dt,
-    )
-
-    # --- Surface albedo ---
+    # --- Surface albedo (from current snow state) ---
     if config.snow_albedo_feedback and lat is not None:
         alpha = compute_land_albedo(
-            lat, snow_new, snow_age_new, config.land_albedo,
+            lat, snow, snow_age, config.land_albedo,
         )
     else:
         alpha = jnp.broadcast_to(jnp.array(config.albedo_land), T_surface.shape)
@@ -149,6 +143,20 @@ def step_multilayer_land(
     # --- Ground heat flux (residual of surface energy balance) ---
     # G = SW_net + LW_net - SH - LH  (positive into soil)
     G_surface = sw_net + lw_net - shflx - lhflx
+
+    # --- Snow budget (energy-limited melt) ---
+    # G_surface drives the melt: M = max(0, G * dt / L_f)
+    snow_new, snow_age_new, snow_melt = update_snow(
+        snow, snow_age, T_surface, forcing.precip_snow, dt,
+        Q_net=G_surface,
+        snow_melt_rate=config.snow_melt_rate,
+        T_snow_melt=config.T_snow_melt,
+    )
+
+    # Subtract melt energy from ground heat flux before soil thermal solve.
+    # Melting snow consumes L_f per kg, reducing the energy entering the soil.
+    melt_energy = snow_melt * constants.L_f / dt  # W/m2 consumed by melt
+    G_surface = G_surface - melt_energy
 
     # --- Infiltration flux for Richards equation ---
     # Convert precip (kg/m2/s) and evap (kg/m2/s) to water depth rate (m/s)
@@ -176,8 +184,11 @@ def step_multilayer_land(
     evap_bare = evap_rate * (1.0 - f_veg)      # bare-soil evaporation
     evap_transp = evap_rate * f_veg             # transpiration (root-mediated)
 
-    # Infiltration: only bare-soil evap subtracted (transpiration handled by sink)
-    flux_top = (forcing.precip_total - evap_bare) / rho_w  # m/s, positive down
+    # Infiltration: rain + snow meltwater enter the soil; snow goes to snowpack.
+    # Only bare-soil evap subtracted (transpiration handled by sink).
+    precip_rain = forcing.precip_total - forcing.precip_snow
+    melt_rate = snow_melt / dt  # kg/m2/s meltwater entering liquid budget
+    flux_top = (precip_rain + melt_rate - evap_bare) / rho_w  # m/s, positive down
 
     # Root sink: only transpiration portion
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w  # m/s

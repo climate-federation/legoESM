@@ -82,7 +82,8 @@ def kessler_microphysics(
     dq_c_sat = condensation
 
     # 2. Autoconversion: cloud -> rain (smooth softplus)
-    q_c_updated = q_c + dq_c_sat
+    # dq_c_sat is a tendency [kg/kg/s]; multiply by dt to get increment [kg/kg]
+    q_c_updated = q_c + dq_c_sat * dt
     autoconv = config.autoconversion_rate * jax.nn.softplus(
         q_c_updated - config.autoconversion_threshold
     )

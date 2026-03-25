@@ -47,7 +47,7 @@
 \section{Introduction}
 %=============================================================================
 
-legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, sea-ice, and biogeochemical components on the sphere, with 25+ dynamical cores spanning five discretisation families (C-D grid FV3, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and over thirty physics parameterisations.  The cubed-sphere implementation is unified around a single FV3-style C-D grid discretisation (Lin 2004, Putman \& Lin 2007) shared by atmosphere (shallow water, hydrostatic PE, non-hydrostatic CE) and ocean, eliminating the Hollingsworth--Kallberg instability.  The model includes a land carbon cycle with Farquhar photosynthesis and stomatal conductance, ocean biogeochemistry (abiotic carbon + NPZD ecosystem), sea-ice dynamics with EVP rheology and multi-category ice, and CMIP6-class infrastructure (CF/CMOR output, experiment templates, restart reproducibility, documented tuning).
+legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, sea-ice, and biogeochemical components on the sphere, with 25+ dynamical cores spanning five discretisation families (C-D grid FV3, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and 30+ physics parameterisations.  The cubed-sphere implementation is unified around a single FV3-style C-D grid discretisation (Lin 2004, Putman \& Lin 2007) shared by atmosphere (shallow water, hydrostatic PE, non-hydrostatic CE) and ocean, eliminating the Hollingsworth--Kallberg instability.  As of v3.9, the cubed-sphere transport uses an FV3-faithful PPM reconstruction with monotonicity limiters and flux-form mass transport on staggered grids.  The model includes a land carbon cycle with Farquhar photosynthesis and stomatal conductance, ocean biogeochemistry (abiotic carbon + NPZD ecosystem), sea-ice dynamics with EVP rheology and multi-category ice, CMIP6-class infrastructure (CF/CMOR output, experiment templates, restart reproducibility, documented tuning), and a fully differentiable 4D-Var data assimilation system leveraging JAX autodiff for adjoint-free gradient computation.  The codebase comprises approximately 363 source modules (${\sim}$90,000 lines of code) validated by 2949 tests across 208 test files.
 
 \paragraph{Design principles.}
 \begin{itemize}[nosep]
@@ -235,6 +235,9 @@ where $h_x=\Delta x/2$, $h_y=\Delta y/2$ are half-edge lengths and $A$ is the ce
 \subsection{C-D Grid Operators (FV3-style, \texttt{operators\_cdgrid.py})}
 
 The canonical cubed-sphere operator module uses FV3-style C-D grid staggering (Lin 2004, Putman \& Lin 2007), shared by all atmosphere (SW, PE, CE) and ocean dynamical cores.  D-grid winds at cell corners~$(6,n\!+\!1,n\!+\!1)$ are prognostic; C-grid velocities at cell edges are diagnosed for mass/scalar transport.
+
+\paragraph{FV3-faithful PPM transport (v3.9).}
+The operator module was rewritten (${\sim}$740 lines) with proper PPM reconstruction, Colella--Woodward monotonicity limiters, and flux-form mass transport on staggered grids, faithfully following the FV3 algorithm of Putman \& Lin~(2007).  This replaces the earlier simplified A-grid transport with a fully staggered C-D grid transport that correctly handles cross-face halo exchange, geographic-to-grid wind rotation, and corner interpolation for the cubed sphere.
 
 \paragraph{D-grid vorticity.}
 Vorticity at each cell corner is the discrete circulation integral divided by the corner dual-cell area~$A_c$:
@@ -1102,6 +1105,59 @@ The function \texttt{verify\_reproducibility()} compares two restart files and r
 A registry of 16 tunable parameters across five categories (dynamics, radiation, convection, diffusion, surface) with valid ranges, default values, sensitivity ratings, and physical notes.  \texttt{validate\_tuning(config)} checks CFL consistency, range violations, and conflicting options.  \texttt{recommended\_params(resolution, nlev)} provides resolution-appropriate defaults.
 
 %=============================================================================
+\section{4D-Var Data Assimilation (v3.9)}
+%=============================================================================
+
+The model includes a fully differentiable 4D-Var data assimilation system that exploits JAX's automatic differentiation to compute exact gradients of the cost function without hand-coded adjoints.
+
+\subsection{Cost Function}
+
+The 4D-Var cost function minimised over the assimilation window $[t_0,t_N]$ is
+\begin{equation}
+  J(\bm x_0) = \half(\bm x_0-\bm x_b)^T \bm B^{-1}(\bm x_0-\bm x_b)
+  + \half\sum_{i=1}^{N}\bigl(\mathcal H_i[\mathcal M_{0\to i}(\bm x_0)]-\bm y_i\bigr)^T \bm R_i^{-1}\bigl(\mathcal H_i[\mathcal M_{0\to i}(\bm x_0)]-\bm y_i\bigr),
+\end{equation}
+where $\bm x_b$ is the background state, $\bm B$ the background error covariance, $\mathcal M_{0\to i}$ the nonlinear model propagator, $\mathcal H_i$ the observation operator at time $t_i$, $\bm y_i$ the observations, and $\bm R_i$ the observation error covariance.  Gradients $\nabla_{\bm x_0}J$ are computed via \texttt{jax.grad} through the full forward model trajectory.
+
+\subsection{Control Vector}
+
+The control vector comprises perturbations to:
+\begin{itemize}[nosep]
+  \item Horizontal wind components ($u$, $v$),
+  \item Temperature ($T$),
+  \item Specific humidity ($q_v$),
+  \item Surface pressure ($p_s$).
+\end{itemize}
+Increments are applied in model space and can optionally be preconditioned by the square root of $\bm B$ (i.e.\ $\bm x_0 = \bm x_b + \bm B^{1/2}\bm\chi$ with minimisation in $\bm\chi$-space).
+
+\subsection{Background Error Covariance}
+
+Four background error covariance formulations are implemented:
+\begin{enumerate}[nosep]
+  \item \textbf{Diagonal}: $\bm B = \mathrm{diag}(\sigma_b^2)$, the simplest variance-only model.
+  \item \textbf{Diffusion}: $\bm B = \bm\Sigma\,\bm C\,\bm\Sigma$ where $\bm C$ is a correlation matrix defined implicitly via iterated Laplacian diffusion on the model grid.
+  \item \textbf{Spectral}: $\bm B$ is diagonal in spectral space, with variance specified per total wavenumber; correlations arise naturally from the spectral truncation.
+  \item \textbf{Hybrid}: $\bm B = \beta_1\bm B_{\mathrm{static}} + \beta_2\bm B_{\mathrm{ensemble}}$, blending a static covariance with flow-dependent ensemble covariance.
+\end{enumerate}
+
+\subsection{Observation Operators}
+
+Three observation operator types are provided:
+\begin{itemize}[nosep]
+  \item \textbf{Direct}: identity mapping from model grid points to observed quantities.
+  \item \textbf{Interpolating}: bilinear (horizontal) and linear (vertical) interpolation from the model grid to observation locations.
+  \item \textbf{Composite}: chains multiple operators (e.g.\ interpolation followed by a forward radiative transfer calculation).
+\end{itemize}
+
+\subsection{Minimiser}
+
+The cost function is minimised using preconditioned gradient descent.  The preconditioner is the square root of $\bm B$, transforming the problem to $\bm\chi$-space where the background term becomes isotropic.  The minimiser supports configurable iteration counts and convergence tolerances, and all operations are JIT-compiled.
+
+\subsection{DA Cycling and Incremental Analysis}
+
+For operational-style cycling, the analysis from each window serves as the background for the next.  An incremental analysis update (IAU) option distributes the analysis increment gradually over the subsequent forecast window rather than inserting it as an instantaneous shock, reducing initialisation imbalance and gravity-wave noise.
+
+%=============================================================================
 \section{References}
 %=============================================================================
 
@@ -1166,6 +1222,10 @@ A proposal for the intercomparison of the dynamical cores of atmospheric general
 Diurnal to decadal global forcing for ocean and sea-ice models: The data sets and flux climatologies.
 \textit{NCAR Technical Note}, NCAR/TN-460+STR.
 
+\item[Lin, S.-J.\ (2004)]
+A ``vertically Lagrangian'' finite-volume dynamical core for global models.
+\textit{Mon.\ Wea.\ Rev.}, \textbf{132}, 2293--2307.
+
 \item[Lipscomb, W.H.\ (2001)]
 Remapping the thickness distribution in sea ice models.
 \textit{J.\ Geophys.\ Res.}, \textbf{106}(C7), 13989--14000.
@@ -1177,6 +1237,10 @@ A parametric model of vertical eddy fluxes in the atmosphere.
 \item[Medlyn, B.E.\ et al.\ (2011)]
 Reconciling the optimal and empirical approaches to modelling stomatal conductance.
 \textit{Global Change Biol.}, \textbf{17}, 2134--2144.
+
+\item[Putman, W.M.\ and S.-J.\ Lin (2007)]
+Finite-volume transport on various cubed-sphere grids.
+\textit{J.\ Comput.\ Phys.}, \textbf{227}, 55--78.
 
 \item[Shu, C.-W.\ and S.\ Osher (1988)]
 Efficient implementation of essentially non-oscillatory shock-capturing schemes.
