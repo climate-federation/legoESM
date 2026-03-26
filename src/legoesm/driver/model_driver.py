@@ -1004,6 +1004,10 @@ class ModelDriver:
                 tau_pole=cfg.tau_pole,
                 sbm_tau_c=cfg.sbm_tau_c,
                 sbm_RH_ref=cfg.sbm_RH_ref,
+                C_H=cfg.C_H,
+                C_E=cfg.C_E,
+                albedo_ice=cfg.albedo_ice,
+                albedo_ocean=cfg.albedo_ocean,
             )
 
             # Pack state into carry

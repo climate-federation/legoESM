@@ -394,7 +394,8 @@ class PhysicsPipeline:
                     solar_weights, s_0, o3_vmr, aerosol_od,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-                    tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref)
+                    tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
+                    C_H, C_E, albedo_ice, albedo_ocean)
 
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 
