@@ -32,6 +32,7 @@ from legoesm.core.operators_cdgrid import (
     cgrid_to_dgrid,
     cgrid_mass_flux_divergence,
     cdgrid_momentum_tendencies,
+    _extrapolate_boundary_corners,
     fv3_sw_tendencies,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -77,56 +78,6 @@ class CDGridShallowWaterConfig(NamedTuple):
 # Tendencies
 # ==============================================================================
 
-def _fix_boundary_tendencies(du, dv, n):
-    """Blend face-boundary momentum tendencies with interior values.
-
-    D-grid operators at face-boundary corners have larger truncation
-    errors than interior corners due to non-orthogonality.  Blend
-    boundary-corner tendencies with their nearest interior neighbour
-    to reduce the edge error.  Vertices (where 3 faces meet) are
-    replaced entirely with the average of their 2 edge neighbours.
-
-    Parameters
-    ----------
-    du, dv : jax.Array, shape (6, n+1, n+1)
-    n : int
-
-    Returns
-    -------
-    du, dv : jax.Array with smoothed boundary values
-    """
-    # Blend weight: 0 = keep original, 1 = use interior neighbor
-    w = 0.5
-
-    # Edge blending (excluding corners which get special treatment)
-    # West (i=0), blend with i=1
-    du = du.at[:, 0, 1:-1].set((1 - w) * du[:, 0, 1:-1] + w * du[:, 1, 1:-1])
-    dv = dv.at[:, 0, 1:-1].set((1 - w) * dv[:, 0, 1:-1] + w * dv[:, 1, 1:-1])
-    # East (i=n), blend with i=n-1
-    du = du.at[:, n, 1:-1].set((1 - w) * du[:, n, 1:-1] + w * du[:, n - 1, 1:-1])
-    dv = dv.at[:, n, 1:-1].set((1 - w) * dv[:, n, 1:-1] + w * dv[:, n - 1, 1:-1])
-    # South (j=0), blend with j=1
-    du = du.at[:, 1:-1, 0].set((1 - w) * du[:, 1:-1, 0] + w * du[:, 1:-1, 1])
-    dv = dv.at[:, 1:-1, 0].set((1 - w) * dv[:, 1:-1, 0] + w * dv[:, 1:-1, 1])
-    # North (j=n), blend with j=n-1
-    du = du.at[:, 1:-1, n].set((1 - w) * du[:, 1:-1, n] + w * du[:, 1:-1, n - 1])
-    dv = dv.at[:, 1:-1, n].set((1 - w) * dv[:, 1:-1, n] + w * dv[:, 1:-1, n - 1])
-
-    # Vertex corners: replace with average of 2 nearest edge neighbours
-    corners = [
-        ((0, 0), (1, 0), (0, 1)),
-        ((n, 0), (n - 1, 0), (n, 1)),
-        ((0, n), (1, n), (0, n - 1)),
-        ((n, n), (n - 1, n), (n, n - 1)),
-    ]
-    for (ci, cj), (n1i, n1j), (n2i, n2j) in corners:
-        avg_du = 0.5 * (du[:, n1i, n1j] + du[:, n2i, n2j])
-        avg_dv = 0.5 * (dv[:, n1i, n1j] + dv[:, n2i, n2j])
-        du = du.at[:, ci, cj].set(avg_du)
-        dv = dv.at[:, ci, cj].set(avg_dv)
-    return du, dv
-
-
 def cdgrid_shallow_water_tendencies(
     state: CDGridShallowWaterState,
     cdgrid: CubedSphereCDGrid,
@@ -165,10 +116,12 @@ def cdgrid_shallow_water_tendencies(
         div_damp=config.div_damp,
     )
 
-    # 3. Fix tendencies at cube vertices where the D-grid stencil
-    #    breaks down due to extreme non-orthogonality (cosa = +/-0.5).
+    # 3. Blend face-boundary corner tendencies toward interior values.
+    #    The advective tendencies have O(1) cancellation error at face
+    #    boundaries.  Blending with the nearest interior row removes
+    #    most of this error.
     n = cdgrid.n
-    du_d_dt, dv_d_dt = _fix_boundary_tendencies(du_d_dt, dv_d_dt, n)
+    du_d_dt, dv_d_dt = _extrapolate_boundary_corners(du_d_dt, dv_d_dt, n)
 
     return dh_dt, du_d_dt, dv_d_dt
 
@@ -346,8 +299,13 @@ class FV3EdgeShallowWaterState(NamedTuple):
 class FV3EdgeShallowWaterModel(IntegrationMixin):
     """FV3-style shallow water model with edge-midpoint D-grid stagger.
 
-    Uses PPM transport, d2a2c with non-orthogonality correction,
-    and adaptive divergence damping.
+    Edge-midpoint D-grid winds sit half a cell from any face boundary,
+    eliminating boundary sync entirely and removing edge artifacts.
+
+    Momentum tendencies are computed at cell corners (compact stencil)
+    and averaged to edge-midpoint positions.  A light D-A-D filter
+    after each time step suppresses the grid-scale computational mode
+    inherent to the edge-midpoint stagger.
     """
 
     def __init__(self, grid, config=None):
@@ -359,17 +317,11 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
     def set_initial_mass(self, state):
         self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
 
-    def _sync_dgrid_boundary(self, state):
-        """Sync edge-midpoint D-grid winds at face boundaries.
-
-        The d2a2c handles cross-face via halo exchange with
-        non-orthogonality correction, so no explicit sync needed.
-        """
-        return state
-
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step."""
+        from legoesm.core.operators_cdgrid import fv3_d2cc, _pad_halo_auto
+
         def tendency_fn(s):
             dh, du, dv = fv3_sw_tendencies(
                 s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
@@ -385,6 +337,21 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         state_new = dispatch_integrator(
             state, tendency_fn, dt, self.config.time_integrator,
         )
+
+        # D-A-D filter: suppress grid-scale computational mode by
+        # blending edge-midpoint winds with cell-centre-averaged values.
+        # alpha=0.2 reliably prevents the computational mode while
+        # keeping dissipation acceptable for multi-day integrations.
+        alpha = 0.2
+        n = self.cdgrid.n
+        u_cc, v_cc = fv3_d2cc(state_new.u_d, state_new.v_d, self.cdgrid)
+        u_cc_pad = _pad_halo_auto(u_cc, self.cdgrid)
+        v_cc_pad = _pad_halo_auto(v_cc, self.cdgrid)
+        u_dad = 0.5 * (u_cc_pad[:, 1:-1, :-1] + u_cc_pad[:, 1:-1, 1:])
+        v_dad = 0.5 * (v_cc_pad[:, :-1, 1:-1] + v_cc_pad[:, 1:, 1:-1])
+        u_f = (1.0 - alpha) * state_new.u_d + alpha * u_dad[:, :n, :n+1]
+        v_f = (1.0 - alpha) * state_new.v_d + alpha * v_dad[:, :n+1, :n]
+        state_new = state_new._replace(u_d=u_f, v_d=v_f)
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
