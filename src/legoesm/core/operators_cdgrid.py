@@ -756,6 +756,59 @@ def _laplacian_dgrid(u_d, cdgrid):
 # Vector-invariant momentum tendencies (unified 2D/3D)
 # ==============================================================================
 
+def _extrapolate_boundary_corners(du, dv, n):
+    """Blend D-grid boundary-corner tendencies toward interior values.
+
+    The D-grid vorticity flux and Bernoulli gradient suffer from poor
+    geostrophic cancellation at face-boundary corners because the
+    vorticity stencil uses face-local D-grid data while the gradient
+    stencil uses cross-face haloed cell-centre data.  The mismatch is
+    largest at cube vertices where cos(alpha) = +/-0.5.
+
+    Blends boundary-row tendency values with the nearest interior
+    neighbour (w=0.5).  Vertices (where 3 faces meet) are replaced with
+    the average of the two adjacent edge values.
+
+    Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
+
+    Parameters
+    ----------
+    du, dv : jax.Array, shape (6, n+1, n+1[, nlev])
+    n : int  (face tile size; corner indices run 0..n)
+
+    Returns
+    -------
+    du, dv : jax.Array with blended boundary values
+    """
+    w = 0.5
+
+    # West (i=0): blend with i=1
+    du = du.at[:, 0, 1:-1].set((1 - w) * du[:, 0, 1:-1] + w * du[:, 1, 1:-1])
+    dv = dv.at[:, 0, 1:-1].set((1 - w) * dv[:, 0, 1:-1] + w * dv[:, 1, 1:-1])
+    # East (i=n): blend with i=n-1
+    du = du.at[:, n, 1:-1].set((1 - w) * du[:, n, 1:-1] + w * du[:, n - 1, 1:-1])
+    dv = dv.at[:, n, 1:-1].set((1 - w) * dv[:, n, 1:-1] + w * dv[:, n - 1, 1:-1])
+    # South (j=0): blend with j=1
+    du = du.at[:, 1:-1, 0].set((1 - w) * du[:, 1:-1, 0] + w * du[:, 1:-1, 1])
+    dv = dv.at[:, 1:-1, 0].set((1 - w) * dv[:, 1:-1, 0] + w * dv[:, 1:-1, 1])
+    # North (j=n): blend with j=n-1
+    du = du.at[:, 1:-1, n].set((1 - w) * du[:, 1:-1, n] + w * du[:, 1:-1, n - 1])
+    dv = dv.at[:, 1:-1, n].set((1 - w) * dv[:, 1:-1, n] + w * dv[:, 1:-1, n - 1])
+
+    # Vertex corners: average of the two adjacent edge values
+    corners = [
+        ((0, 0), (1, 0), (0, 1)),
+        ((n, 0), (n - 1, 0), (n, 1)),
+        ((0, n), (1, n), (0, n - 1)),
+        ((n, n), (n - 1, n), (n, n - 1)),
+    ]
+    for (ci, cj), (n1i, n1j), (n2i, n2j) in corners:
+        du = du.at[:, ci, cj].set(0.5 * (du[:, n1i, n1j] + du[:, n2i, n2j]))
+        dv = dv.at[:, ci, cj].set(0.5 * (dv[:, n1i, n1j] + dv[:, n2i, n2j]))
+
+    return du, dv
+
+
 def cdgrid_momentum_tendencies(
     h_or_p, u_d, v_d, h_s_or_p_prime, cdgrid,
     g=9.80616, A_h=0.0, hyperdiff_coeff=0.0, div_damp=0.0,
@@ -1065,12 +1118,15 @@ def fv3_sw_tendencies(
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
-    Vector-invariant form with:
-    - Exact corner vorticity from edge circulations
-    - Bernoulli function at cell centres with Arakawa-Lamb gradient
-    - PPM mass transport
-    - d2cc2c conversion for C-grid velocities and KE
-    - Divergence damping
+    Uses a corner-based momentum computation for stability (compact
+    stencil avoids the wide-stencil computational mode), with
+    edge-midpoint mass transport via PPM:
+
+    1. Edge-midpoint D-grid -> cell-centre -> C-grid (mass transport)
+    2. Corner winds from D-grid edge averages (pad + average to corners)
+    3. Corner momentum tendencies (Arakawa-Lamb gradient + vorticity)
+    4. Corner tendencies averaged back to edge-midpoint positions
+    5. Biharmonic hyperdiffusion at cell centres projected to edges
 
     Parameters
     ----------
@@ -1087,58 +1143,35 @@ def fv3_sw_tendencies(
     """
     n = cdgrid.n
 
-    # (a) D -> cell-centre -> C-grid velocities
+    # (a) D -> cell-centre -> C-grid velocities for mass transport
     u_cc, v_cc, u_c, v_c = fv3_d2cc2c(u_d, v_d, cdgrid)
 
     # (b) Height tendency (PPM mass flux divergence)
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
 
-    # (c) Exact corner vorticity from edge circulations
-    vort = fv3_vorticity(u_d, v_d, cdgrid)
-    vort_abs = vort + cdgrid.f_corner
+    # Zero-mean correction for mass conservation
+    total_area = jnp.sum(cdgrid.base.area)
+    dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
-    # (d) Bernoulli function at CELL CENTRES
-    KE = 0.5 * (u_cc ** 2 + v_cc ** 2)
-    B = KE + g * (h + h_s)
+    # (c) Corner winds from D-grid edge midpoints
+    # u_d (n, n+1) -> pad in i -> average to get (n+1, n+1)
+    u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    u_corner = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])
+    # v_d (n+1, n) -> pad in j -> average to get (n+1, n+1)
+    v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    v_corner = 0.5 * (v_d_pad[:, :, :-1] + v_d_pad[:, :, 1:])
 
-    # Absorb divergence damping into B
-    if div_damp > 0:
-        div_field = cgrid_divergence(u_c, v_c, cdgrid)
-        area_min = jnp.min(cdgrid.base.area)
-        d2_bg = div_damp / area_min
-        dddmp = 0.2
-        adaptive = area_min * jnp.maximum(
-            d2_bg, jnp.minimum(0.20, dddmp * jnp.abs(div_field)))
-        B = B + adaptive * div_field
+    # (d) Corner-based momentum tendencies (stable compact stencil)
+    du_corner, dv_corner = cdgrid_momentum_tendencies(
+        h, u_corner, v_corner, h_s, cdgrid,
+        g=g, A_h=0.0,
+        hyperdiff_coeff=hyperdiff_coeff,
+        div_damp=div_damp,
+    )
 
-    # (e) Bernoulli gradient at CORNERS (Arakawa-Lamb)
-    dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
-
-    # Interpolate corner gradient to edge positions
-    dB_dx_at_u = 0.5 * (dB_dx[:, :-1, :] + dB_dx[:, 1:, :])
-    dB_dy_at_v = 0.5 * (dB_dy[:, :, :-1] + dB_dy[:, :, 1:])
-
-    # (f) Average corner vorticity to edge positions
-    vort_abs_at_u = 0.5 * (vort_abs[:, :-1, :] + vort_abs[:, 1:, :])
-    vort_abs_at_v = 0.5 * (vort_abs[:, :, :-1] + vort_abs[:, :, 1:])
-
-    # (g) Momentum tendencies
-    du_d_dt = vort_abs_at_u * v_c - dB_dx_at_u
-    dv_d_dt = -vort_abs_at_v * u_c - dB_dy_at_v
-
-    # (h) Biharmonic hyperdiffusion
-    if hyperdiff_coeff > 0:
-        from legoesm.core.operators import laplacian_compact
-        lap_u = laplacian_compact(u_cc, cdgrid.base)
-        lap_v = laplacian_compact(v_cc, cdgrid.base)
-        bilap_u = laplacian_compact(lap_u, cdgrid.base)
-        bilap_v = laplacian_compact(lap_v, cdgrid.base)
-        bilap_u_pad = _pad_halo_auto(bilap_u, cdgrid)
-        bilap_v_pad = _pad_halo_auto(bilap_v, cdgrid)
-        hyp_du = 0.5 * (bilap_u_pad[:, 1:-1, :-1] + bilap_u_pad[:, 1:-1, 1:])
-        hyp_dv = 0.5 * (bilap_v_pad[:, :-1, 1:-1] + bilap_v_pad[:, 1:, 1:-1])
-        du_d_dt = du_d_dt - hyperdiff_coeff * hyp_du[:, :n, :n+1]
-        dv_d_dt = dv_d_dt - hyperdiff_coeff * hyp_dv[:, :n+1, :n]
+    # (e) Average corner tendencies to edge-midpoint positions
+    du_d_dt = 0.5 * (du_corner[:, :-1, :] + du_corner[:, 1:, :])   # (6, n, n+1)
+    dv_d_dt = 0.5 * (dv_corner[:, :, :-1] + dv_corner[:, :, 1:])   # (6, n+1, n)
 
     return dh_dt, du_d_dt, dv_d_dt
 

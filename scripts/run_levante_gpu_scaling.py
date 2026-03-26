@@ -1,9 +1,12 @@
 #!/usr/bin/env python
 """GPU scaling benchmark for Levante (DKRZ) -- replicates CliMA Figures 11 & 12.
 
-Runs the Jablonowski-Williamson baroclinic wave test case on the cubed-sphere
-C-D grid hydrostatic PE dycore, measuring wall-clock time per step and SYPD
-across varying GPU counts and resolutions.
+Runs the Jablonowski-Williamson baroclinic wave test case, measuring
+wall-clock time per step and SYPD across varying GPU counts and resolutions.
+
+Supported grids:
+  spectral      -- Gaussian grid + spectral PE dycore (default)
+  cubed-sphere  -- Cubed-sphere C-D grid + FV3 PE dycore
 
 Two modes:
   weak   -- fix problem size per GPU, increase resolution with GPU count
@@ -16,7 +19,7 @@ Usage
 Single-node (4 A100s)::
 
     python scripts/run_levante_gpu_scaling.py --mode weak --precision float32
-    python scripts/run_levante_gpu_scaling.py --mode strong --precision both
+    python scripts/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong --precision both
 
 Multi-node via MPI (set up by the companion SLURM script)::
 
@@ -92,6 +95,8 @@ class ScalingReport:
             self.timestamp_utc = datetime.now(timezone.utc).isoformat()
 
 
+GRID_CHOICES = ("spectral", "cubed-sphere")
+
 # ===========================================================================
 # Resolution/GPU ladders
 # ===========================================================================
@@ -103,13 +108,14 @@ class ScalingReport:
 WEAK_SCALING_BASE_N = 24  # ~24x24 per face on 1 GPU => ~400 km
 
 def _weak_resolution(n_gpus: int, base_n: int = WEAK_SCALING_BASE_N) -> int:
-    """Compute cubed-sphere N for weak scaling at a given GPU count."""
+    """Compute resolution for weak scaling at a given GPU count."""
     n_raw = base_n * math.sqrt(n_gpus)
     n_rounded = max(4, 2 * round(n_raw / 2))  # even number, min 4
     return n_rounded
 
 # Strong scaling: fixed resolutions, sweep GPU counts.
-STRONG_RESOLUTIONS = [48, 96, 192]  # ~200 km, ~100 km, ~50 km
+STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km
+STRONG_RESOLUTIONS_SP = [42, 85, 170]   # spectral: T42, T85, T170
 
 # GPU counts to sweep (must satisfy cubed-sphere tiling constraints).
 GPU_COUNTS = [1, 2, 3, 6, 24, 54, 96]  # 1-6 divide faces; >6 must be 6*k^2
@@ -137,16 +143,21 @@ def _valid_gpu_counts(max_gpus: int) -> list[int]:
 # CFL-safe timestep
 # ===========================================================================
 
-def _auto_dt(n_grid: int) -> float:
+def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     """Choose a CFL-safe timestep for the hydrostatic PE at resolution n_grid.
 
     For a jet speed ~50 m/s and the PE semi-implicit scheme, the advective
     CFL constraint is dt < 0.8 * dx_min / u_max.  We use a conservative
     estimate.
     """
-    # dx_min ~ (pi/2) * R / (n * sqrt(3))
     R = 6.371229e6
-    dx_min = (math.pi / 2) * R / (n_grid * math.sqrt(3))
+    if grid_type == "spectral":
+        # Gaussian grid: dx_min ~ pi * R / n_lon at equator, n_lon = 2*(n_max+1)
+        n_lon = 2 * (n_grid + 1)
+        dx_min = math.pi * R / n_lon
+    else:
+        # Cubed sphere: dx_min ~ (pi/2) * R / (n * sqrt(3))
+        dx_min = (math.pi / 2) * R / (n_grid * math.sqrt(3))
     u_max = 60.0
     cfl = 0.7
     dt = cfl * dx_min / u_max
@@ -159,10 +170,14 @@ def _auto_dt(n_grid: int) -> float:
 # Hyperdiffusion scaling
 # ===========================================================================
 
-def _hyperdiff_coeff(n_grid: int) -> float:
+def _hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     """Scale \\nabla^4 hyperdiffusion coefficient with resolution."""
-    ref_n = 48
-    ref_coeff = 5e16
+    if grid_type == "spectral":
+        ref_n = 42
+        ref_coeff = 2.5e16
+    else:
+        ref_n = 48
+        ref_coeff = 5e16
     return ref_coeff * (ref_n / n_grid) ** 4
 
 
@@ -180,6 +195,7 @@ def run_benchmark(
     n_warmup: int,
     n_timing: int,
     dt: float | None = None,
+    grid_type: str = "spectral",
 ) -> TimingResult:
     """Run the baroclinic wave dycore benchmark and return timing results."""
 
@@ -191,40 +207,62 @@ def run_benchmark(
         jax.config.update("jax_enable_x64", True)
     dtype = jnp.float64 if precision == "float64" else jnp.float32
 
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
-        CDGridPrimitiveEquationModel,
-        CDGridPrimitiveEquationConfig,
-    )
-    from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
     from legoesm.parallel.mesh import create_device_mesh, shard_pytree
 
     # Choose timestep
     if dt is None:
-        dt = _auto_dt(n_grid)
+        dt = _auto_dt(n_grid, grid_type)
 
     # Set up device mesh
     dev_config = create_device_mesh(n_devices=n_gpus)
     backend = dev_config.backend
 
-    # Create grid
-    grid = create_cubed_sphere(n_grid)
     sigma = create_sigma_coordinate(n_levels)
 
-    # Hyperdiffusion
-    hd = _hyperdiff_coeff(n_grid)
-    config = CDGridPrimitiveEquationConfig(
-        hyperdiff_coeff=hd,
-        hyperdiff_ps_coeff=hd,
-        use_conservation_fixer=True,
-        fix_mass=True,
-    )
-    model = CDGridPrimitiveEquationModel(grid, sigma, config)
+    if grid_type == "spectral":
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPrimitiveEquationModel,
+            SpectralPEConfig,
+            baroclinic_wave_init_spectral,
+        )
 
-    # Initial conditions (perturbed baroclinic wave)
-    state = baroclinic_wave_init(grid, sigma, perturbed=True)
+        grid = create_gaussian_grid(n_grid)
+        hd = _hyperdiff_coeff(n_grid, grid_type)
+        config = SpectralPEConfig(
+            hyperdiff_coeff=hd,
+            hyperdiff_order=4,
+            spectral_filter_strength=0.01,
+            spectral_filter_order=8,
+            time_integrator="ssp_rk3",
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma, config)
+        state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True)
+
+        n_lat = grid.n_lat
+        n_lon = grid.n_lon
+        total_cells = n_lat * n_lon * n_levels
+    else:
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel,
+            CDGridPrimitiveEquationConfig,
+        )
+        from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
+
+        grid = create_cubed_sphere(n_grid)
+        hd = _hyperdiff_coeff(n_grid, grid_type)
+        config = CDGridPrimitiveEquationConfig(
+            hyperdiff_coeff=hd,
+            hyperdiff_ps_coeff=hd,
+            use_conservation_fixer=True,
+            fix_mass=True,
+        )
+        model = CDGridPrimitiveEquationModel(grid, sigma, config)
+        state = baroclinic_wave_init(grid, sigma, perturbed=True)
+
+        total_cells = 6 * n_grid * n_grid * n_levels
 
     # Cast to desired precision
     def _cast(x):
@@ -237,11 +275,11 @@ def run_benchmark(
     if dev_config.n_devices > 1:
         state = shard_pytree(state, dev_config)
 
-    total_cells = 6 * n_grid * n_grid * n_levels
     cells_per_gpu = total_cells // max(1, n_gpus)
 
+    res_label = f"T{n_grid}" if grid_type == "spectral" else f"C{n_grid}"
     print(
-        f"  [{precision}] C{n_grid}/L{n_levels} on {n_gpus} GPU(s) | "
+        f"  [{precision}] {res_label}/L{n_levels} on {n_gpus} GPU(s) | "
         f"dt={dt:.0f}s | cells={total_cells:,} | cells/GPU={cells_per_gpu:,}",
         flush=True,
     )
@@ -323,14 +361,16 @@ def run_weak_scaling(
     n_warmup: int,
     n_timing: int,
     base_n: int = WEAK_SCALING_BASE_N,
+    grid_type: str = "spectral",
 ) -> list[TimingResult]:
     """Run weak scaling: fix cells/GPU, sweep GPU counts up to n_gpus."""
 
     gpu_counts = _valid_gpu_counts(n_gpus)
     results: list[TimingResult] = []
 
+    res_prefix = "T" if grid_type == "spectral" else "C"
     print(f"\n{'='*72}")
-    print(f"WEAK SCALING (base N={base_n}, {n_levels} levels)")
+    print(f"WEAK SCALING ({grid_type}, base N={base_n}, {n_levels} levels)")
     print(f"GPU counts: {gpu_counts}")
     print(f"{'='*72}")
 
@@ -338,7 +378,7 @@ def run_weak_scaling(
         _configure_jax(prec)
         for ng in gpu_counts:
             n_grid = _weak_resolution(ng, base_n)
-            print(f"\n--- {ng} GPU(s), C{n_grid} ---")
+            print(f"\n--- {ng} GPU(s), {res_prefix}{n_grid} ---")
             try:
                 result = run_benchmark(
                     n_grid=n_grid,
@@ -348,6 +388,7 @@ def run_weak_scaling(
                     mode="weak",
                     n_warmup=n_warmup,
                     n_timing=n_timing,
+                    grid_type=grid_type,
                 )
                 results.append(result)
             except Exception as exc:
@@ -377,20 +418,23 @@ def run_strong_scaling(
     n_warmup: int,
     n_timing: int,
     resolutions: list[int] | None = None,
+    grid_type: str = "spectral",
 ) -> list[TimingResult]:
     """Run strong scaling: fix resolution, sweep GPU counts up to n_gpus."""
 
     gpu_counts = _valid_gpu_counts(n_gpus)
     if resolutions is None:
-        resolutions = [r for r in STRONG_RESOLUTIONS if r >= 2 * min(gpu_counts)]
+        defaults = STRONG_RESOLUTIONS_SP if grid_type == "spectral" else STRONG_RESOLUTIONS_CS
+        resolutions = [r for r in defaults if r >= 2 * min(gpu_counts)]
         if not resolutions:
-            resolutions = [48]
+            resolutions = [defaults[0]]
 
     results: list[TimingResult] = []
 
+    res_prefix = "T" if grid_type == "spectral" else "C"
     print(f"\n{'='*72}")
-    print(f"STRONG SCALING ({n_levels} levels)")
-    print(f"Resolutions: {['C'+str(r) for r in resolutions]}")
+    print(f"STRONG SCALING ({grid_type}, {n_levels} levels)")
+    print(f"Resolutions: {[res_prefix+str(r) for r in resolutions]}")
     print(f"GPU counts:  {gpu_counts}")
     print(f"{'='*72}")
 
@@ -398,17 +442,18 @@ def run_strong_scaling(
         _configure_jax(prec)
         for n_grid in resolutions:
             for ng in gpu_counts:
-                # Skip if grid is too small for this many GPUs
-                cells_per_face = n_grid * n_grid
-                if ng > 6 and cells_per_face < 16:
-                    print(
-                        f"\n--- {ng} GPU(s), C{n_grid} --- SKIPPED "
-                        f"(grid too small for sub-face tiling)",
-                        flush=True,
-                    )
-                    continue
+                # Skip if grid is too small for this many GPUs (cubed-sphere only)
+                if grid_type == "cubed-sphere":
+                    cells_per_face = n_grid * n_grid
+                    if ng > 6 and cells_per_face < 16:
+                        print(
+                            f"\n--- {ng} GPU(s), {res_prefix}{n_grid} --- SKIPPED "
+                            f"(grid too small for sub-face tiling)",
+                            flush=True,
+                        )
+                        continue
 
-                print(f"\n--- {ng} GPU(s), C{n_grid} [{prec}] ---")
+                print(f"\n--- {ng} GPU(s), {res_prefix}{n_grid} [{prec}] ---")
                 try:
                     result = run_benchmark(
                         n_grid=n_grid,
@@ -418,6 +463,7 @@ def run_strong_scaling(
                         mode="strong",
                         n_warmup=n_warmup,
                         n_timing=n_timing,
+                        grid_type=grid_type,
                     )
                     results.append(result)
                 except Exception as exc:
@@ -692,6 +738,10 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument(
+        "--grid", choices=list(GRID_CHOICES), default="spectral",
+        help="Grid / dycore type.",
+    )
+    p.add_argument(
         "--mode", choices=["weak", "strong", "both"], default="both",
         help="Scaling mode: weak, strong, or both.",
     )
@@ -717,11 +767,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--weak-base-n", type=int, default=WEAK_SCALING_BASE_N,
-        help="Base cubed-sphere N for weak scaling (per 1 GPU).",
+        help="Base N for weak scaling (per 1 GPU).",
     )
     p.add_argument(
-        "--strong-resolutions", type=str, default="48,96,192",
-        help="Comma-separated resolutions for strong scaling.",
+        "--strong-resolutions", type=str, default=None,
+        help="Comma-separated resolutions for strong scaling "
+             "(default: 42,85,170 spectral / 48,96,192 cubed-sphere).",
     )
     p.add_argument(
         "--output-dir", type=str, default="output/scaling",
@@ -736,6 +787,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    grid_type = args.grid
 
     # Resolve precision list
     if args.precision == "both":
@@ -759,7 +811,10 @@ def main() -> int:
         max_gpus = 1
 
     # Resolve strong scaling resolutions
-    strong_res = [int(x.strip()) for x in args.strong_resolutions.split(",") if x.strip()]
+    if args.strong_resolutions is not None:
+        strong_res = [int(x.strip()) for x in args.strong_resolutions.split(",") if x.strip()]
+    else:
+        strong_res = None  # let run_strong_scaling pick defaults per grid type
 
     # Output directory
     output_dir = Path(args.output_dir)
@@ -778,6 +833,7 @@ def main() -> int:
     print("=" * 72)
     print("  legoESM GPU Scaling Benchmark")
     print("=" * 72)
+    print(f"  Grid:        {grid_type}")
     print(f"  Backend:     {backend}")
     print(f"  Hostname:    {hostname}")
     print(f"  Max GPUs:    {max_gpus}")
@@ -803,6 +859,7 @@ def main() -> int:
             n_warmup=args.n_warmup,
             n_timing=args.n_timing,
             base_n=args.weak_base_n,
+            grid_type=grid_type,
         )
         all_results.extend(weak_results)
         print_summary_table(weak_results, "weak")
@@ -831,6 +888,7 @@ def main() -> int:
             n_warmup=args.n_warmup,
             n_timing=args.n_timing,
             resolutions=strong_res,
+            grid_type=grid_type,
         )
         all_results.extend(strong_results)
         print_summary_table(strong_results, "strong")
@@ -857,6 +915,7 @@ def main() -> int:
     # Save metadata
     meta = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "grid_type": grid_type,
         "backend": backend,
         "hostname": hostname,
         "max_gpus": max_gpus,
