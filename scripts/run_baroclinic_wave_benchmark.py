@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Dry baroclinic wave benchmark replicating CliMA Figure 3 (Yatunin et al. 2026).
 
-Runs a 10-day Jablonowski-Williamson (2006) baroclinic instability test on the
-C-D grid cubed-sphere dynamical core and generates:
+Runs a 10-day Jablonowski-Williamson (2006) baroclinic instability test and
+generates:
 
 1. **6-panel figure** (baroclinic_wave_benchmark.png):
    - Top row: Surface pressure perturbation at days 8 and 10
@@ -18,9 +18,14 @@ C-D grid cubed-sphere dynamical core and generates:
 
 3. **NPZ diagnostics** (baroclinic_wave_diagnostics.npz)
 
+Supported grids:
+  spectral      -- Gaussian grid + spectral PE dycore (default)
+  cubed-sphere  -- Cubed-sphere C-D grid + FV3 PE dycore
+
 Usage:
     JAX_ENABLE_X64=1 python scripts/run_baroclinic_wave_benchmark.py
-    JAX_ENABLE_X64=1 python scripts/run_baroclinic_wave_benchmark.py --resolution 48 --nlev 26 --dt 450 --days 10
+    JAX_ENABLE_X64=1 python scripts/run_baroclinic_wave_benchmark.py --grid cubed-sphere --resolution C48
+    JAX_ENABLE_X64=1 python scripts/run_baroclinic_wave_benchmark.py --grid spectral --resolution T42 --dt 600 --days 10
 
 References:
     Jablonowski & Williamson (2006), QJRMS 132, 2943-2975.
@@ -47,12 +52,6 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------------
 # legoESM imports
 # ---------------------------------------------------------------------------
-from legoesm.grids.cubed_sphere import (
-    CubedSphereGrid,
-    create_cubed_sphere,
-    rotate_winds_grid_to_geo,
-)
-from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.grids.vertical import (
     SigmaCoordinate,
     create_sigma_coordinate,
@@ -61,20 +60,16 @@ from legoesm.grids.vertical import (
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState, FV3HydrostaticState
 from legoesm.core.operators import global_integral
-from legoesm.core.operators_cdgrid import dgrid_vorticity, dgrid_to_center_vector
-from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
-    CDGridPrimitiveEquationModel,
-    CDGridPrimitiveEquationConfig,
-    hydrostatic_to_fv3,
-    fv3_to_hydrostatic,
-)
-from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init, P0
+from legoesm.atmosphere.physics.baroclinic_wave import P0
 from legoesm.core.cfl import (
     adaptive_hyperdiff_coeff,
     estimate_min_dx_cubed_sphere,
+    estimate_min_dx_gaussian,
     cfl_check_and_adjust,
 )
 from legoesm import constants
+
+GRID_CHOICES = ("spectral", "cubed-sphere")
 
 
 # ---------------------------------------------------------------------------
@@ -197,21 +192,48 @@ def compute_dry_mass(
 # Main benchmark
 # ---------------------------------------------------------------------------
 
+def _parse_resolution(res_str: str, grid_type: str) -> int:
+    """Parse a resolution string like 'C48', 'T42', or plain '48'."""
+    s = res_str.strip().upper()
+    if grid_type == "spectral":
+        return int(s.lstrip("T"))
+    else:
+        return int(s.lstrip("C"))
+
+
+def _default_resolution(grid_type: str) -> str:
+    """Return a sensible default resolution string for each grid type."""
+    if grid_type == "spectral":
+        return "T42"
+    return "C48"
+
+
+def _default_dt(grid_type: str) -> float:
+    if grid_type == "spectral":
+        return 600.0
+    return 450.0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Dry baroclinic wave benchmark (CliMA Figure 3 reproduction)"
     )
     parser.add_argument(
-        "--resolution", type=str, default="C48",
-        help="Cubed-sphere resolution, e.g. C48, C24 (default: C48)"
+        "--grid", type=str, choices=GRID_CHOICES, default="spectral",
+        help="Grid / dycore type (default: spectral)"
+    )
+    parser.add_argument(
+        "--resolution", type=str, default=None,
+        help="Resolution: T<n> for spectral (e.g. T42), C<n> for cubed-sphere "
+             "(e.g. C48).  Defaults: T42 / C48."
     )
     parser.add_argument(
         "--nlev", type=int, default=26,
         help="Number of sigma levels (default: 26)"
     )
     parser.add_argument(
-        "--dt", type=float, default=450.0,
-        help="Time step in seconds (default: 450)"
+        "--dt", type=float, default=None,
+        help="Time step in seconds (default: 600 spectral, 450 cubed-sphere)"
     )
     parser.add_argument(
         "--days", type=int, default=10,
@@ -223,14 +245,15 @@ def main():
     )
     args = parser.parse_args()
 
-    # Parse resolution string (accept "C48" or "48")
-    res_str = args.resolution.upper().lstrip("C")
-    N_GRID = int(res_str)
+    grid_type = args.grid
+    res_str = args.resolution or _default_resolution(grid_type)
+    N_GRID = _parse_resolution(res_str, grid_type)
     N_LEV = args.nlev
-    DT = args.dt
+    DT = args.dt if args.dt is not None else _default_dt(grid_type)
     N_DAYS = args.days
     OUTPUT_DIR = Path(args.output_dir)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    USE_SPECTRAL = grid_type == "spectral"
 
     # CFL check
     DT = cfl_check_and_adjust(
@@ -238,14 +261,19 @@ def main():
         max_wind=60.0, gravity_wave_speed=300.0,
     )
 
-    # Hyperdiffusion: physically tuned via adaptive_hyperdiff_coeff
-    dx_min = estimate_min_dx_cubed_sphere(N_GRID)
+    # Hyperdiffusion
+    if USE_SPECTRAL:
+        dx_min = estimate_min_dx_gaussian(N_GRID)
+    else:
+        dx_min = estimate_min_dx_cubed_sphere(N_GRID)
     nu4 = adaptive_hyperdiff_coeff(dx_min, DT, order=4, safety=0.5)
 
+    res_label = f"T{N_GRID}" if USE_SPECTRAL else f"C{N_GRID}"
     print("=" * 72)
     print("  Dry Baroclinic Wave Benchmark (CliMA Figure 3)")
     print("=" * 72)
-    print(f"  Resolution:      C{N_GRID} ({N_GRID}x{N_GRID} per face, 6 faces)")
+    print(f"  Grid:            {grid_type}")
+    print(f"  Resolution:      {res_label}")
     print(f"  Vertical levels: {N_LEV}")
     print(f"  Time step:       {DT:.0f} s")
     print(f"  Duration:        {N_DAYS} days")
@@ -258,35 +286,94 @@ def main():
     # Grid and initial conditions
     # -----------------------------------------------------------------------
     print("Creating grid...")
-    grid = create_cubed_sphere(N_GRID)
-    cdgrid = create_cubed_sphere_cdgrid(grid)
     sigma = create_sigma_coordinate(N_LEV)
 
-    print("Initializing Jablonowski-Williamson baroclinic wave...")
-    state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
+    if USE_SPECTRAL:
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.atmosphere.dynamics.spectral_pe import (
+            SpectralPrimitiveEquationModel,
+            SpectralPEConfig,
+            baroclinic_wave_init_spectral,
+            spectral_pe_to_grid,
+        )
 
-    # Store initial surface pressure for perturbation computation
-    ps_init = np.array(state_cc.p_s.data)
+        grid = create_gaussian_grid(N_GRID)
+        cdgrid = None
 
-    print(f"  Initial max |u|: {float(jnp.max(jnp.abs(state_cc.u.data))):.1f} m/s")
-    print(f"  Initial mean T:  {float(jnp.mean(state_cc.T.data)):.1f} K")
-    print(f"  Initial p_s:     {float(jnp.mean(state_cc.p_s.data)) / 100:.1f} hPa")
+        print("Initializing Jablonowski-Williamson baroclinic wave (spectral)...")
+        state = baroclinic_wave_init_spectral(grid, sigma, perturbed=True)
 
-    # Convert to FV3 D-grid state for the C-D grid dycore
-    state = hydrostatic_to_fv3(state_cc, cdgrid)
+        # Diagnostics from grid-point fields
+        gp = spectral_pe_to_grid(state, grid, sigma)
+        ps_init = np.array(gp['p_s'])
+        print(f"  Initial max |u|: {float(jnp.max(jnp.abs(gp['u']))):.1f} m/s")
+        print(f"  Initial mean T:  {float(jnp.mean(gp['T'])):.1f} K")
+        print(f"  Initial p_s:     {float(jnp.mean(gp['p_s'])) / 100:.1f} hPa")
+
+        config = SpectralPEConfig(
+            hyperdiff_coeff=nu4,
+            hyperdiff_order=4,
+            spectral_filter_strength=0.01,
+            spectral_filter_order=8,
+            time_integrator="ssp_rk3",
+        )
+        model = SpectralPrimitiveEquationModel(grid, sigma, config)
+
+    else:
+        from legoesm.grids.cubed_sphere import (
+            CubedSphereGrid,
+            create_cubed_sphere,
+            rotate_winds_grid_to_geo,
+        )
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.operators_cdgrid import dgrid_vorticity, dgrid_to_center_vector
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel,
+            CDGridPrimitiveEquationConfig,
+            hydrostatic_to_fv3,
+            fv3_to_hydrostatic,
+        )
+        from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
+
+        grid = create_cubed_sphere(N_GRID)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        print("Initializing Jablonowski-Williamson baroclinic wave...")
+        state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
+        ps_init = np.array(state_cc.p_s.data)
+        print(f"  Initial max |u|: {float(jnp.max(jnp.abs(state_cc.u.data))):.1f} m/s")
+        print(f"  Initial mean T:  {float(jnp.mean(state_cc.T.data)):.1f} K")
+        print(f"  Initial p_s:     {float(jnp.mean(state_cc.p_s.data)) / 100:.1f} hPa")
+
+        state = hydrostatic_to_fv3(state_cc, cdgrid)
+
+        config = CDGridPrimitiveEquationConfig(
+            hyperdiff_coeff=nu4,
+            hyperdiff_ps_coeff=nu4,
+            use_conservation_fixer=True,
+            fix_mass=True,
+            anchor_mass_to_initial=True,
+            time_integrator="ssp_rk3",
+        )
+        model = CDGridPrimitiveEquationModel(grid, sigma, config)
 
     # -----------------------------------------------------------------------
-    # Model configuration
+    # Helper closures for grid-dependent diagnostics
     # -----------------------------------------------------------------------
-    config = CDGridPrimitiveEquationConfig(
-        hyperdiff_coeff=nu4,
-        hyperdiff_ps_coeff=nu4,
-        use_conservation_fixer=True,
-        fix_mass=True,
-        anchor_mass_to_initial=True,
-        time_integrator="ssp_rk3",
-    )
-    model = CDGridPrimitiveEquationModel(grid, sigma, config)
+    def _get_grid_fields(st):
+        """Return (p_s, u, v, T) as numpy arrays from the current state."""
+        if USE_SPECTRAL:
+            gp = spectral_pe_to_grid(st, grid, sigma)
+            return gp['p_s'], gp['u'], gp['v'], gp['T']
+        else:
+            cc = fv3_to_hydrostatic(st, cdgrid)
+            u_c, v_c = dgrid_to_center_vector(st.u_d.data, st.v_d.data)
+            return cc.p_s.data, u_c, v_c, cc.T.data
+
+    def _blowup_check(st):
+        ps, _, _, _ = _get_grid_fields(st)
+        ps_max = float(jnp.max(ps))
+        return jnp.all(jnp.isfinite(ps)) and ps_max < 2e5
 
     # -----------------------------------------------------------------------
     # Time integration with diagnostic collection
@@ -306,18 +393,29 @@ def main():
     diag_max_wind = []
 
     # Initial diagnostics
-    state_cc_init = fv3_to_hydrostatic(state, cdgrid)
-    mass_init = compute_dry_mass(state_cc_init, grid)
-    energy_init = compute_total_energy(state_cc_init, grid, sigma)
+    ps0, u0, v0, T0 = _get_grid_fields(state)
+    if USE_SPECTRAL:
+        area = grid.area  # (n_lat, n_lon)
+        dsigma = sigma.dsigma
+        mass_init = float(jnp.sum(ps0 * area) / constants.g)
+        dp0 = ps0[..., None] * dsigma
+        KE0 = 0.5 * (u0 ** 2 + v0 ** 2)
+        energy_init = float(jnp.sum(
+            jnp.sum((KE0 + constants.c_vd * T0) * dp0 / constants.g, axis=-1)
+            * area
+        ))
+    else:
+        state_cc_init = fv3_to_hydrostatic(state, cdgrid)
+        mass_init = compute_dry_mass(state_cc_init, grid)
+        energy_init = compute_total_energy(state_cc_init, grid, sigma)
 
     diag_times.append(0.0)
     diag_dry_mass.append(mass_init)
     diag_total_energy.append(energy_init)
-    diag_ps_min.append(float(jnp.min(state.p_s.data)))
-    u_cc, v_cc = dgrid_to_center_vector(state.u_d.data, state.v_d.data)
-    diag_max_wind.append(float(jnp.max(jnp.sqrt(u_cc ** 2 + v_cc ** 2))))
+    diag_ps_min.append(float(jnp.min(ps0)))
+    diag_max_wind.append(float(jnp.max(jnp.sqrt(u0 ** 2 + v0 ** 2))))
 
-    # Snapshot storage: day -> HydrostaticState (cell-centre)
+    # Snapshot storage: day -> dict with 'p_s', 'u', 'v', 'T' as numpy
     snapshots = {}
 
     print(f"\nIntegrating for {n_steps_total} steps...")
@@ -326,7 +424,7 @@ def main():
     print("  JIT compiling (first step)...", end=" ", flush=True)
     t_jit = time.time()
     state = model.step(state, DT)
-    jax.block_until_ready(state.p_s.data)
+    jax.block_until_ready(jax.tree.leaves(state))
     print(f"done ({time.time() - t_jit:.1f}s)")
 
     t_start = time.time()
@@ -340,35 +438,42 @@ def main():
 
         # Blowup check every 100 steps
         if current_step % 100 == 0:
-            ps_max_check = float(jnp.max(state.p_s.data))
-            if not jnp.all(jnp.isfinite(state.p_s.data)) or ps_max_check > 2e5:
+            if not _blowup_check(state):
                 print(f"\n  *** BLOWUP at day {day:.2f}, step {current_step} ***")
                 sys.exit(1)
 
         # Hourly diagnostics
         if current_step % diag_interval_steps == 0:
-            state_cc_now = fv3_to_hydrostatic(state, cdgrid)
-            mass_now = compute_dry_mass(state_cc_now, grid)
-            energy_now = compute_total_energy(state_cc_now, grid, sigma)
-            ps_min_now = float(jnp.min(state.p_s.data))
-            u_cc_now, v_cc_now = dgrid_to_center_vector(
-                state.u_d.data, state.v_d.data
-            )
-            wind_max_now = float(
-                jnp.max(jnp.sqrt(u_cc_now ** 2 + v_cc_now ** 2))
-            )
+            ps_now, u_now, v_now, T_now = _get_grid_fields(state)
+            if USE_SPECTRAL:
+                mass_now = float(jnp.sum(ps_now * area) / constants.g)
+                dp_now = ps_now[..., None] * dsigma
+                KE_now = 0.5 * (u_now ** 2 + v_now ** 2)
+                energy_now = float(jnp.sum(
+                    jnp.sum((KE_now + constants.c_vd * T_now) * dp_now / constants.g, axis=-1)
+                    * area
+                ))
+            else:
+                cc_now = fv3_to_hydrostatic(state, cdgrid)
+                mass_now = compute_dry_mass(cc_now, grid)
+                energy_now = compute_total_energy(cc_now, grid, sigma)
 
             diag_times.append(day)
             diag_dry_mass.append(mass_now)
             diag_total_energy.append(energy_now)
-            diag_ps_min.append(ps_min_now)
-            diag_max_wind.append(wind_max_now)
+            diag_ps_min.append(float(jnp.min(ps_now)))
+            diag_max_wind.append(float(jnp.max(jnp.sqrt(u_now ** 2 + v_now ** 2))))
 
         # Save snapshots
         if current_step in snapshot_steps:
             snap_day = snapshot_steps[current_step]
-            state_cc_snap = fv3_to_hydrostatic(state, cdgrid)
-            snapshots[snap_day] = jax.tree.map(lambda x: np.array(x), state_cc_snap)
+            ps_s, u_s, v_s, T_s = _get_grid_fields(state)
+            snapshots[snap_day] = {
+                'p_s': np.array(ps_s),
+                'u': np.array(u_s),
+                'v': np.array(v_s),
+                'T': np.array(T_s),
+            }
             print(f"  Snapshot saved at day {snap_day}")
 
         # Progress reporting every 30 seconds
@@ -378,7 +483,8 @@ def main():
             steps_done = step
             steps_per_sec = steps_done / elapsed
             eta = (n_steps_total - current_step) / steps_per_sec
-            ps_min_cur = float(jnp.min(state.p_s.data))
+            ps_now, _, _, _ = _get_grid_fields(state)
+            ps_min_cur = float(jnp.min(ps_now))
             print(
                 f"  Day {day:6.2f}/{N_DAYS} | "
                 f"ps_min={ps_min_cur / 100:.1f} hPa | "
@@ -419,17 +525,7 @@ def main():
     # -----------------------------------------------------------------------
     # Regridding setup for plotting
     # -----------------------------------------------------------------------
-    print("\nRegridding snapshots to lat-lon for plotting...")
-
-    lon_cs = np.array(grid.lon)  # (6, n, n), radians
-    lat_cs = np.array(grid.lat)  # (6, n, n), radians
-    angle_cs = np.array(grid.angle)
-
-    # Target lat-lon grid for plotting
-    n_lon_plot = 360
-    n_lat_plot = 180
-    lon_ll = np.linspace(0, 2 * np.pi, n_lon_plot, endpoint=False)
-    lat_ll = np.linspace(-np.pi / 2, np.pi / 2, n_lat_plot)
+    print("\nPreparing snapshots for plotting...")
 
     # Find sigma level closest to 850 hPa (sigma = 0.85)
     sigma_full = np.array(sigma.sigma_full)
@@ -437,18 +533,39 @@ def main():
     p_850_actual = sigma_full[k_850] * 1000  # hPa
     print(f"  850 hPa level: k={k_850}, actual p={p_850_actual:.0f} hPa")
 
+    if USE_SPECTRAL:
+        # Spectral: data is already on a lat-lon (Gaussian) grid
+        lon_ll = np.array(grid.lon)   # (n_lon,), radians
+        lat_ll = np.array(grid.lat)   # (n_lat,), radians
+
+        def _field_to_latlon(field_2d):
+            """Identity — spectral data is already (n_lat, n_lon)."""
+            return np.array(field_2d)
+    else:
+        from legoesm.grids.cubed_sphere import rotate_winds_grid_to_geo
+        lon_cs = np.array(grid.lon)   # (6, n, n), radians
+        lat_cs = np.array(grid.lat)   # (6, n, n), radians
+
+        n_lon_plot = 360
+        n_lat_plot = 180
+        lon_ll = np.linspace(0, 2 * np.pi, n_lon_plot, endpoint=False)
+        lat_ll = np.linspace(-np.pi / 2, np.pi / 2, n_lat_plot)
+
+        def _field_to_latlon(field_cs):
+            return regrid_cubed_sphere_to_latlon(
+                field_cs, lon_cs, lat_cs, lon_ll, lat_ll
+            )
+
     # -----------------------------------------------------------------------
     # Figure 1: 6-panel CliMA Figure 3 reproduction
     # -----------------------------------------------------------------------
     print("Generating 6-panel benchmark figure...")
 
     plot_days = [8, 10]
-    # Verify we have the needed snapshots
     missing = [d for d in plot_days if d not in snapshots]
     if missing:
         print(f"  WARNING: Missing snapshots for days {missing}. "
               f"Available: {sorted(snapshots.keys())}")
-        # Fall back to whatever we have
         plot_days = sorted([d for d in plot_days if d in snapshots])
 
     if len(plot_days) >= 2:
@@ -468,7 +585,6 @@ def main():
 
         lon_deg = np.degrees(lon_ll)
         lat_deg = np.degrees(lat_ll)
-        # Northern hemisphere mask
         nh_mask = lat_deg >= 0
         lat_nh = lat_deg[nh_mask]
 
@@ -476,11 +592,9 @@ def main():
             snap = snapshots[day]
 
             # --- Surface pressure perturbation ---
-            ps_pert = np.array(snap.p_s.data) - ps_init
-            ps_pert_ll = regrid_cubed_sphere_to_latlon(
-                ps_pert, lon_cs, lat_cs, lon_ll, lat_ll
-            )
-            ps_pert_nh = ps_pert_ll[nh_mask, :] / 100  # convert to hPa
+            ps_pert = snap['p_s'] - ps_init
+            ps_pert_ll = _field_to_latlon(ps_pert)
+            ps_pert_nh = ps_pert_ll[nh_mask, :] / 100  # hPa
 
             ax = axes[0, col]
             if has_cartopy:
@@ -512,10 +626,8 @@ def main():
             ax.set_title(f"Surface pressure perturbation, day {day}", fontsize=11)
 
             # --- 850 hPa temperature ---
-            T_850 = np.array(snap.T.data)[..., k_850]
-            T_850_ll = regrid_cubed_sphere_to_latlon(
-                T_850, lon_cs, lat_cs, lon_ll, lat_ll
-            )
+            T_850 = snap['T'][..., k_850]
+            T_850_ll = _field_to_latlon(T_850)
             T_850_nh = T_850_ll[nh_mask, :]
 
             ax = axes[1, col]
@@ -541,47 +653,38 @@ def main():
             ax.set_title(f"850 hPa temperature, day {day}", fontsize=11)
 
             # --- 850 hPa relative vorticity ---
-            # Compute vorticity from cell-centre winds using finite differences
-            u_grid = np.array(snap.u.data)
-            v_grid = np.array(snap.v.data)
+            u_snap = snap['u']
+            v_snap = snap['v']
 
-            # Rotate grid-aligned winds to geographic (east, north)
-            u_east_3d = np.zeros_like(u_grid)
-            v_north_3d = np.zeros_like(v_grid)
-            for k in range(N_LEV):
-                u_e, v_n = rotate_winds_grid_to_geo(
-                    jnp.array(u_grid[..., k]),
-                    jnp.array(v_grid[..., k]),
-                    grid.angle,
-                )
-                u_east_3d[..., k] = np.array(u_e)
-                v_north_3d[..., k] = np.array(v_n)
+            if USE_SPECTRAL:
+                # Winds are already geographic (east, north) on lat-lon
+                u_east_850_ll = u_snap[..., k_850]
+                v_north_850_ll = v_snap[..., k_850]
+            else:
+                # Rotate grid-aligned winds to geographic
+                u_east_3d = np.zeros_like(u_snap)
+                v_north_3d = np.zeros_like(v_snap)
+                for k in range(N_LEV):
+                    u_e, v_n = rotate_winds_grid_to_geo(
+                        jnp.array(u_snap[..., k]),
+                        jnp.array(v_snap[..., k]),
+                        grid.angle,
+                    )
+                    u_east_3d[..., k] = np.array(u_e)
+                    v_north_3d[..., k] = np.array(v_n)
 
-            # Compute relative vorticity at 850 hPa:
-            # zeta = (1/(a*cos(lat))) * dv/dlon - (1/a) * d(u*cos(lat))/dlat
-            # Approximate on the regridded lat-lon grid
-            u_east_850 = u_east_3d[..., k_850]
-            v_north_850 = v_north_3d[..., k_850]
-
-            u_east_850_ll = regrid_cubed_sphere_to_latlon(
-                u_east_850, lon_cs, lat_cs, lon_ll, lat_ll
-            )
-            v_north_850_ll = regrid_cubed_sphere_to_latlon(
-                v_north_850, lon_cs, lat_cs, lon_ll, lat_ll
-            )
+                u_east_850_ll = _field_to_latlon(u_east_3d[..., k_850])
+                v_north_850_ll = _field_to_latlon(v_north_3d[..., k_850])
 
             a = float(constants.R_earth)
             dlon = lon_ll[1] - lon_ll[0]
             dlat = lat_ll[1] - lat_ll[0]
             cos_lat_2d = np.cos(lat_ll)[:, None]
 
-            # dv/dlon
             dvdlon = np.gradient(v_north_850_ll, dlon, axis=1)
-            # d(u*cos(lat))/dlat
             u_cos = u_east_850_ll * cos_lat_2d
             du_cos_dlat = np.gradient(u_cos, dlat, axis=0)
 
-            # Avoid division by zero at poles
             cos_lat_safe = np.maximum(cos_lat_2d, 1e-6)
             vort_ll = (1.0 / (a * cos_lat_safe)) * dvdlon - (1.0 / a) * du_cos_dlat / cos_lat_safe
             vort_nh = vort_ll[nh_mask, :]
@@ -614,9 +717,10 @@ def main():
                 ax.set_ylim(0, 90)
             ax.set_title(f"850 hPa relative vorticity, day {day}", fontsize=11)
 
+        dycore_label = "spectral PE" if USE_SPECTRAL else "C-D grid PE"
         plt.suptitle(
-            f"Dry Baroclinic Wave Benchmark  |  C{N_GRID} L{N_LEV}  |  "
-            f"dt={DT:.0f}s  |  legoESM C-D grid PE",
+            f"Dry Baroclinic Wave Benchmark  |  {res_label} L{N_LEV}  |  "
+            f"dt={DT:.0f}s  |  legoESM {dycore_label}",
             fontsize=13, y=1.01,
         )
         plt.tight_layout()
@@ -667,7 +771,7 @@ def main():
     axes[1, 1].set_xlabel("Time [days]")
 
     plt.suptitle(
-        f"Baroclinic Wave Conservation  |  C{N_GRID} L{N_LEV}  |  "
+        f"Baroclinic Wave Conservation  |  {res_label} L{N_LEV}  |  "
         f"dt={DT:.0f}s",
         fontsize=13,
     )
@@ -683,7 +787,7 @@ def main():
     print("\n" + "=" * 72)
     print("  Summary")
     print("=" * 72)
-    print(f"  Resolution:      C{N_GRID} L{N_LEV}")
+    print(f"  Resolution:      {res_label} L{N_LEV}")
     print(f"  Duration:        {N_DAYS} days ({n_steps_total} steps)")
     print(f"  Wall time:       {elapsed_total:.0f}s "
           f"({n_steps_total / elapsed_total:.1f} steps/s)")
