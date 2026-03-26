@@ -602,3 +602,145 @@ def scatter_to_local(
         "vertex": partition.local_vertices,
     }[entity]
     return global_field[idx]
+
+
+# ============================================================================
+# Mesh reordering for JAX SPMD sharding
+# ============================================================================
+
+def reorder_voronoi_for_sharding(
+    mesh: VoronoiMesh,
+    n_devices: int,
+    *,
+    method: str = "geometric",
+) -> VoronoiMesh:
+    """Reorder a Voronoi mesh so that JAX NamedSharding gives spatial locality.
+
+    Partitions cells via RCB (or METIS), then reorders cells, edges, and
+    vertices so that entities owned by device 0 come first, then device 1,
+    etc.  When JAX splits the reordered arrays into ``n_devices`` contiguous
+    chunks along axis 0, each chunk corresponds to a spatially contiguous
+    domain — minimizing cross-device communication in TRiSK stencils.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+        Original global mesh.
+    n_devices : int
+        Number of devices (partitions).
+    method : str
+        ``"geometric"`` (RCB) or ``"metis"``.
+
+    Returns
+    -------
+    VoronoiMesh
+        Mesh with reordered entities and remapped connectivity.
+    """
+    if n_devices <= 1:
+        return mesh
+
+    # --- Partition cells ---
+    if method == "geometric":
+        cell_owner = partition_cells_geometric(mesh, n_devices)
+    else:
+        cell_owner = partition_cells_metis(mesh, n_devices)
+
+    # --- Cell permutation: group by owner, stable sort within each group ---
+    cell_perm = np.argsort(cell_owner, kind="stable")
+    cell_inv = np.empty_like(cell_perm)
+    cell_inv[cell_perm] = np.arange(len(cell_perm))
+
+    # --- Edge owner: owner of the cell with the smaller global index ---
+    cellsOnEdge_np = np.asarray(mesh.cellsOnEdge)  # (2, nEdges)
+    c0 = cellsOnEdge_np[0]
+    c1 = cellsOnEdge_np[1]
+    edge_owner = cell_owner[np.minimum(c0, c1)]
+    edge_perm = np.argsort(edge_owner, kind="stable")
+    edge_inv = np.empty_like(edge_perm)
+    edge_inv[edge_perm] = np.arange(len(edge_perm))
+
+    # --- Vertex owner: owner of the cell with the smallest global index ---
+    cellsOnVertex_np = np.asarray(mesh.cellsOnVertex)  # (vertexDegree, nVertices)
+    cov_safe = np.where(cellsOnVertex_np >= 0, cellsOnVertex_np, mesh.nCells)
+    min_cell_v = np.min(cov_safe, axis=0)
+    vertex_owner = np.where(
+        min_cell_v < mesh.nCells,
+        cell_owner[np.minimum(min_cell_v, mesh.nCells - 1)],
+        0,
+    ).astype(np.int32)
+    vert_perm = np.argsort(vertex_owner, kind="stable")
+    vert_inv = np.empty_like(vert_perm)
+    vert_inv[vert_perm] = np.arange(len(vert_perm))
+
+    # --- Helper: remap connectivity values through an inverse permutation ---
+    def remap_conn(conn, inv_perm):
+        """Remap integer connectivity array: old_global → new_global."""
+        arr = np.asarray(conn)
+        valid = arr >= 0
+        safe = np.where(valid, arr, 0)
+        remapped = np.where(valid, inv_perm[safe], -1)
+        return jnp.array(remapped, dtype=conn.dtype)
+
+    # --- Helper: reorder along entity axis (last axis for (K, nEntities)) ---
+    def reorder_col(arr, perm):
+        """Reorder columns: arr[:, perm] for 2D, arr[perm] for 1D."""
+        a = np.asarray(arr)
+        if a.ndim == 1:
+            return jnp.array(a[perm], dtype=arr.dtype)
+        return jnp.array(a[:, perm], dtype=arr.dtype)
+
+    def reorder_1d(arr, perm):
+        a = np.asarray(arr)
+        return jnp.array(a[perm], dtype=arr.dtype)
+
+    return VoronoiMesh(
+        nCells=mesh.nCells,
+        nEdges=mesh.nEdges,
+        nVertices=mesh.nVertices,
+        maxEdges=mesh.maxEdges,
+        vertexDegree=mesh.vertexDegree,
+        radius=mesh.radius,
+        # Cell coordinates (reorder by cell_perm)
+        latCell=reorder_1d(mesh.latCell, cell_perm),
+        lonCell=reorder_1d(mesh.lonCell, cell_perm),
+        xCell=reorder_1d(mesh.xCell, cell_perm),
+        yCell=reorder_1d(mesh.yCell, cell_perm),
+        zCell=reorder_1d(mesh.zCell, cell_perm),
+        # Edge coordinates (reorder by edge_perm)
+        latEdge=reorder_1d(mesh.latEdge, edge_perm),
+        lonEdge=reorder_1d(mesh.lonEdge, edge_perm),
+        xEdge=reorder_1d(mesh.xEdge, edge_perm),
+        yEdge=reorder_1d(mesh.yEdge, edge_perm),
+        zEdge=reorder_1d(mesh.zEdge, edge_perm),
+        # Vertex coordinates (reorder by vert_perm)
+        latVertex=reorder_1d(mesh.latVertex, vert_perm),
+        lonVertex=reorder_1d(mesh.lonVertex, vert_perm),
+        xVertex=reorder_1d(mesh.xVertex, vert_perm),
+        yVertex=reorder_1d(mesh.yVertex, vert_perm),
+        zVertex=reorder_1d(mesh.zVertex, vert_perm),
+        # Connectivity: reorder columns AND remap values
+        cellsOnEdge=remap_conn(reorder_col(mesh.cellsOnEdge, edge_perm), cell_inv),
+        edgesOnCell=remap_conn(reorder_col(mesh.edgesOnCell, cell_perm), edge_inv),
+        verticesOnCell=remap_conn(reorder_col(mesh.verticesOnCell, cell_perm), vert_inv),
+        verticesOnEdge=remap_conn(reorder_col(mesh.verticesOnEdge, edge_perm), vert_inv),
+        edgesOnVertex=remap_conn(reorder_col(mesh.edgesOnVertex, vert_perm), edge_inv),
+        cellsOnVertex=remap_conn(reorder_col(mesh.cellsOnVertex, vert_perm), cell_inv),
+        cellsOnCell=remap_conn(reorder_col(mesh.cellsOnCell, cell_perm), cell_inv),
+        edgesOnEdge=remap_conn(reorder_col(mesh.edgesOnEdge, edge_perm), edge_inv),
+        nEdgesOnCell=reorder_1d(mesh.nEdgesOnCell, cell_perm),
+        nEdgesOnEdge=reorder_1d(mesh.nEdgesOnEdge, edge_perm),
+        # Geometry (reorder by entity)
+        areaCell=reorder_1d(mesh.areaCell, cell_perm),
+        areaTriangle=reorder_1d(mesh.areaTriangle, vert_perm),
+        dcEdge=reorder_1d(mesh.dcEdge, edge_perm),
+        dvEdge=reorder_1d(mesh.dvEdge, edge_perm),
+        angleEdge=reorder_1d(mesh.angleEdge, edge_perm),
+        # Weights and signs (reorder columns by entity)
+        weightsOnEdge=reorder_col(mesh.weightsOnEdge, edge_perm),
+        kiteAreasOnVertex=reorder_col(mesh.kiteAreasOnVertex, vert_perm),
+        fEdge=reorder_1d(mesh.fEdge, edge_perm),
+        fVertex=reorder_1d(mesh.fVertex, vert_perm),
+        edgeSignOnCell=reorder_col(mesh.edgeSignOnCell, cell_perm),
+        edgeSignOnVertex=reorder_col(mesh.edgeSignOnVertex, vert_perm),
+        meshDensity=reorder_1d(mesh.meshDensity, cell_perm),
+    )

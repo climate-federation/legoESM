@@ -49,6 +49,7 @@ class DeviceConfig(NamedTuple):
         JAX device mesh.  ``None`` for single-device execution.
     face_sharding : NamedSharding or None
         Sharding specification for face-first arrays ``(6, n, n, ...)``.
+        For voronoi grids, this is the primary (cell/edge) sharding.
     replicated_sharding : NamedSharding or None
         Sharding that replicates data across all devices.
     n_devices : int
@@ -61,7 +62,11 @@ class DeviceConfig(NamedTuple):
         Sub-face tile grid ``(tx, ty)``.  ``(1, 1)`` means face-only
         sharding (no sub-face tiling).
     grid_type : str
-        ``"cubed_sphere"`` or ``"latlon"`` or ``"spectral"``.
+        ``"cubed_sphere"``, ``"latlon"``, ``"spectral"``, or ``"voronoi"``.
+    voronoi_dims : tuple[int, int, int] or None
+        ``(nCells, nEdges, nVertices)`` for voronoi grids.  ``None`` for
+        other grid types.  Used by :func:`shard_pytree` to identify which
+        arrays to shard along axis 0.
     """
     mesh: Mesh | None
     face_sharding: NamedSharding | None
@@ -71,6 +76,7 @@ class DeviceConfig(NamedTuple):
     is_distributed: bool
     tiling: tuple[int, int] = (1, 1)
     grid_type: str = "cubed_sphere"
+    voronoi_dims: tuple[int, int, int] | None = None
 
 
 # Singleton — set once at startup, queried by the rest of the code.
@@ -450,6 +456,107 @@ def create_level_mesh(
 
 
 # ==============================================================================
+# Voronoi (icosahedral) mesh parallelism
+# ==============================================================================
+
+def create_voronoi_device_mesh(
+    nCells: int,
+    nEdges: int,
+    nVertices: int,
+    n_devices: int | str = "auto",
+    backend: str | None = None,
+    devices: Sequence | None = None,
+) -> DeviceConfig:
+    """Create a JAX device mesh for Voronoi (MPAS) mesh parallelism.
+
+    Shards cell- and edge-centered arrays along axis 0 across devices.
+    For best performance, reorder the mesh with
+    :func:`legoesm.parallel.voronoi_partition.reorder_voronoi_for_sharding`
+    before sharding so that each device gets a spatially contiguous cell
+    cluster.
+
+    Parameters
+    ----------
+    nCells : int
+        Number of Voronoi cells in the mesh.
+    nEdges : int
+        Number of edges in the mesh.
+    nVertices : int
+        Number of vertices (Delaunay triangle centers) in the mesh.
+    n_devices : int or ``"auto"``
+        Number of devices.  ``"auto"`` uses all available.
+    backend : str or None
+        JAX backend.  ``None`` = auto.
+    devices : sequence or None
+        Optional explicit device list.
+
+    Returns
+    -------
+    DeviceConfig
+        Config with ``grid_type="voronoi"`` and ``voronoi_dims`` set.
+    """
+    global _active_config
+
+    if devices is not None:
+        devices = list(devices)
+    elif backend is not None:
+        try:
+            devices = jax.devices(backend)
+        except RuntimeError:
+            devices = jax.devices()
+    else:
+        devices = jax.devices()
+
+    all_count = len(devices)
+    first_platform = str(getattr(devices[0], "platform", "")) if devices else ""
+    backend_name = (first_platform or jax.default_backend()).upper()
+
+    if n_devices == "auto":
+        n_dev = all_count
+    else:
+        n_dev = min(int(n_devices), all_count)
+
+    if n_dev <= 1:
+        config = DeviceConfig(
+            mesh=None,
+            face_sharding=None,
+            replicated_sharding=None,
+            n_devices=1,
+            backend=backend_name,
+            is_distributed=False,
+            tiling=(1, 1),
+            grid_type="voronoi",
+            voronoi_dims=(nCells, nEdges, nVertices),
+        )
+        _active_config = config
+        return config
+
+    selected = devices[:n_dev]
+    mesh = Mesh(selected, axis_names=("device",))
+    primary_sharding = NamedSharding(mesh, P("device"))
+    replicated_sharding = NamedSharding(mesh, P())
+
+    config = DeviceConfig(
+        mesh=mesh,
+        face_sharding=primary_sharding,
+        replicated_sharding=replicated_sharding,
+        n_devices=n_dev,
+        backend=backend_name,
+        is_distributed=False,
+        tiling=(1, 1),
+        grid_type="voronoi",
+        voronoi_dims=(nCells, nEdges, nVertices),
+    )
+    _active_config = config
+    logger.info(
+        "legoESM: %d-device voronoi mesh on %s "
+        "(nCells=%d, nEdges=%d, nVertices=%d)",
+        n_dev, backend_name, nCells, nEdges, nVertices,
+    )
+    return config
+
+
+# ==============================================================================
 # Pytree sharding utilities
 # ==============================================================================
 
@@ -515,6 +622,15 @@ def shard_pytree(pytree, config: DeviceConfig):
             if leaf.ndim == 1:
                 # 1D arrays (e.g., lnps_hat): replicate across devices.
                 return jax.device_put(leaf, config.replicated_sharding)
+            return jax.device_put(leaf, config.replicated_sharding)
+
+        elif config.grid_type == "voronoi":
+            # Voronoi state arrays: shard cell- and edge-centered arrays
+            # along axis 0.  Vertex arrays and small arrays are replicated.
+            if config.voronoi_dims is not None and leaf.ndim >= 1:
+                nCells, nEdges, _nVerts = config.voronoi_dims
+                if leaf.shape[0] in (nCells, nEdges):
+                    return jax.device_put(leaf, config.face_sharding)
             return jax.device_put(leaf, config.replicated_sharding)
 
         # Default: replicate

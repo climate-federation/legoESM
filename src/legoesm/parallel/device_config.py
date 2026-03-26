@@ -456,6 +456,10 @@ def get_optimal_mesh(
     config: HardwareConfig,
     grid_type: str = "cubed_sphere",
     nlev: int = 40,
+    *,
+    nCells: int = 0,
+    nEdges: int = 0,
+    nVertices: int = 0,
 ):
     """Create the optimal device mesh for the given hardware and grid.
 
@@ -468,9 +472,15 @@ def get_optimal_mesh(
     config : HardwareConfig
         Output of :func:`detect_devices`.
     grid_type : str
-        ``'cubed_sphere'``, ``'latlon'``, or ``'spectral'``.
+        ``'cubed_sphere'``, ``'latlon'``, ``'spectral'``, or ``'voronoi'``.
     nlev : int
         Number of vertical levels (used for level-parallel spectral mesh).
+    nCells : int
+        Number of Voronoi cells (required for ``grid_type='voronoi'``).
+    nEdges : int
+        Number of Voronoi edges (required for ``grid_type='voronoi'``).
+    nVertices : int
+        Number of Voronoi vertices (required for ``grid_type='voronoi'``).
 
     Returns
     -------
@@ -497,11 +507,16 @@ def get_optimal_mesh(
     **Spectral:**
     - Level-parallel sharding when nlev > device_count.
     - Falls back to single-device when device_count == 1.
+
+    **Voronoi (icosahedral):**
+    - Cell/edge dimension sharding across all devices.
+    - Reorder mesh with ``reorder_voronoi_for_sharding`` for best locality.
     """
     from legoesm.parallel.mesh import (
         create_device_mesh,
         create_latlon_mesh,
         create_level_mesh,
+        create_voronoi_device_mesh,
     )
 
     n_dev = config.devices_per_host
@@ -515,8 +530,18 @@ def get_optimal_mesh(
         # Clamp device count to not exceed nlev.
         effective = min(n_dev, nlev)
         return create_level_mesh(n_devices=effective)
+    elif grid_type == "voronoi":
+        if nCells <= 0 or nEdges <= 0 or nVertices <= 0:
+            raise ValueError(
+                "For grid_type='voronoi', nCells, nEdges, and nVertices "
+                "must be provided (positive integers)."
+            )
+        return create_voronoi_device_mesh(
+            nCells=nCells, nEdges=nEdges, nVertices=nVertices,
+            n_devices=n_dev,
+        )
     else:
         raise ValueError(
             f"Unknown grid_type {grid_type!r}. "
-            f"Use 'cubed_sphere', 'latlon', or 'spectral'."
+            f"Use 'cubed_sphere', 'latlon', 'spectral', or 'voronoi'."
         )

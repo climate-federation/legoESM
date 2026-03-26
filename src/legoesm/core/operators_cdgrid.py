@@ -776,22 +776,7 @@ def _extrapolate_boundary_corners(du, dv, n):
     -------
     du, dv : jax.Array with fixed boundary values
     """
-    # Edge boundaries: replace with one cell inward (excludes vertices).
-    # West (i=0): from i=1
-    du = du.at[:, 0, 1:-1].set(du[:, 1, 1:-1])
-    dv = dv.at[:, 0, 1:-1].set(dv[:, 1, 1:-1])
-    # East (i=n): from i=n-1
-    du = du.at[:, n, 1:-1].set(du[:, n - 1, 1:-1])
-    dv = dv.at[:, n, 1:-1].set(dv[:, n - 1, 1:-1])
-    # South (j=0): from j=1
-    du = du.at[:, 1:-1, 0].set(du[:, 1:-1, 1])
-    dv = dv.at[:, 1:-1, 0].set(dv[:, 1:-1, 1])
-    # North (j=n): from j=n-1
-    du = du.at[:, 1:-1, n].set(du[:, 1:-1, n - 1])
-    dv = dv.at[:, 1:-1, n].set(dv[:, 1:-1, n - 1])
-
-    # Vertex corners: average of two edge-interior neighbours
-    # (uses already-corrected edge values from above)
+    # Vertex corners: average of two nearest edge-interior neighbours
     corners = [
         ((0, 0), (1, 0), (0, 1)),
         ((n, 0), (n - 1, 0), (n, 1)),
@@ -1134,13 +1119,22 @@ def fv3_sw_tendencies(
     total_area = jnp.sum(cdgrid.base.area)
     dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
-    # (c) Corner winds from D-grid edge midpoints
-    # u_d (n, n+1) -> pad in i -> average to get (n+1, n+1)
-    u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    u_corner = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])
-    # v_d (n+1, n) -> pad in j -> average to get (n+1, n+1)
-    v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    v_corner = 0.5 * (v_d_pad[:, :, :-1] + v_d_pad[:, :, 1:])
+    # (c) Corner winds via haloed cell-centre round-trip.
+    # Direct edge-midpoint padding with mode='edge' fails at face
+    # boundaries (copies boundary value instead of cross-face data).
+    # Instead: edge-midpoint -> cell-centre -> halo exchange -> corners.
+    from legoesm.grids.halo import pad_halo_vector
+    grid = cdgrid.base
+    u_pad, v_pad = pad_halo_vector(
+        u_cc, v_cc,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=grid.halo_interp_offsets,
+    )
+    u_corner = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
+                        + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
+    v_corner = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1]
+                        + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
 
     # (d) Corner-based momentum tendencies (stable compact stencil)
     du_corner, dv_corner = cdgrid_momentum_tendencies(

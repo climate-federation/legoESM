@@ -141,8 +141,16 @@ STRONG_RESOLUTIONS_ICO = [4, 5, 6]      # icosahedral: levels 4, 5, 6
 GPU_COUNTS = [1, 2, 3, 6, 24, 54, 96]  # 1-6 divide faces; >6 must be 6*k^2
 
 
-def _valid_gpu_counts(max_gpus: int) -> list[int]:
-    """Return valid cubed-sphere GPU counts up to max_gpus."""
+def _valid_gpu_counts(max_gpus: int, grid_type: str = "cubed-sphere") -> list[int]:
+    """Return valid GPU counts up to max_gpus for the given grid type.
+
+    Cubed-sphere requires divisors of 6 (face sharding) or 6*k^2 (tiling).
+    Icosahedral and spectral grids support any GPU count.
+    """
+    if grid_type in ("icosahedral", "spectral"):
+        return list(range(1, max_gpus + 1))
+
+    # Cubed-sphere constraints
     valid = []
     # face-only: divisors of 6
     for n in [1, 2, 3, 6]:
@@ -243,15 +251,13 @@ def run_benchmark(
     dtype = jnp.float64 if precision == "float64" else jnp.float32
 
     from legoesm.grids.vertical import create_sigma_coordinate
-    from legoesm.parallel.mesh import create_device_mesh, shard_pytree
+    from legoesm.parallel.mesh import (
+        create_device_mesh, create_voronoi_device_mesh, shard_pytree,
+    )
 
     # Choose timestep
     if dt is None:
         dt = _auto_dt(n_grid, grid_type)
-
-    # Set up device mesh
-    dev_config = create_device_mesh(n_devices=n_gpus)
-    backend = dev_config.backend
 
     sigma = create_sigma_coordinate(n_levels)
 
@@ -278,6 +284,7 @@ def run_benchmark(
         n_lat = grid.n_lat
         n_lon = grid.n_lon
         total_cells = n_lat * n_lon * n_levels
+        dev_config = create_device_mesh(n_devices=n_gpus)
     elif grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
@@ -287,6 +294,14 @@ def run_benchmark(
         from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
 
         grid = create_voronoi_mesh(subdivision_level=n_grid)
+
+        # Reorder mesh for spatial locality when sharding across GPUs.
+        if n_gpus > 1:
+            from legoesm.parallel.voronoi_partition import (
+                reorder_voronoi_for_sharding,
+            )
+            grid = reorder_voronoi_for_sharding(grid, n_gpus)
+
         hd = _hyperdiff_coeff(n_grid, grid_type)
         config = MPASPrimitiveEquationConfig(
             nu_del4=hd,
@@ -298,6 +313,12 @@ def run_benchmark(
         state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
 
         total_cells = grid.nCells * n_levels
+        dev_config = create_voronoi_device_mesh(
+            nCells=grid.nCells,
+            nEdges=grid.nEdges,
+            nVertices=grid.nVertices,
+            n_devices=n_gpus,
+        )
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
@@ -318,6 +339,9 @@ def run_benchmark(
         state = baroclinic_wave_init(grid, sigma, perturbed=True)
 
         total_cells = 6 * n_grid * n_grid * n_levels
+        dev_config = create_device_mesh(n_devices=n_gpus)
+
+    backend = dev_config.backend
 
     # Cast to desired precision
     def _cast(x):
@@ -425,7 +449,7 @@ def run_weak_scaling(
 ) -> list[TimingResult]:
     """Run weak scaling: fix cells/GPU, sweep GPU counts up to n_gpus."""
 
-    gpu_counts = _valid_gpu_counts(n_gpus)
+    gpu_counts = _valid_gpu_counts(n_gpus, grid_type)
     results: list[TimingResult] = []
 
     if grid_type == "spectral":
@@ -490,7 +514,7 @@ def run_strong_scaling(
 ) -> list[TimingResult]:
     """Run strong scaling: fix resolution, sweep GPU counts up to n_gpus."""
 
-    gpu_counts = _valid_gpu_counts(n_gpus)
+    gpu_counts = _valid_gpu_counts(n_gpus, grid_type)
     if resolutions is None:
         if grid_type == "spectral":
             defaults = STRONG_RESOLUTIONS_SP
@@ -928,7 +952,7 @@ def main() -> int:
     print(f"  Backend:     {backend}")
     print(f"  Hostname:    {hostname}")
     print(f"  Max GPUs:    {max_gpus}")
-    print(f"  Valid GPUs:  {_valid_gpu_counts(max_gpus)}")
+    print(f"  Valid GPUs:  {_valid_gpu_counts(max_gpus, grid_type)}")
     print(f"  Precisions:  {precisions}")
     print(f"  Modes:       {modes}")
     print(f"  Levels:      {args.n_levels}")

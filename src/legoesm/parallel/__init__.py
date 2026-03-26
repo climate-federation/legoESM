@@ -66,6 +66,7 @@ from legoesm.parallel.mesh import (
     create_device_mesh,
     create_latlon_mesh,
     create_level_mesh,
+    create_voronoi_device_mesh,
     get_active_config,
     replicate_pytree,
     shard_pytree,
@@ -80,6 +81,7 @@ from legoesm.parallel.voronoi_partition import (
     partition_voronoi_mesh,
     build_local_mesh,
     scatter_to_local,
+    reorder_voronoi_for_sharding,
 )
 
 from legoesm.parallel.halo_exchange_voronoi import (
@@ -180,6 +182,7 @@ __all__ = [
     "create_device_mesh",
     "create_latlon_mesh",
     "create_level_mesh",
+    "create_voronoi_device_mesh",
     "get_active_config",
     "replicate_pytree",
     "shard_pytree",
@@ -192,6 +195,7 @@ __all__ = [
     "partition_voronoi_mesh",
     "build_local_mesh",
     "scatter_to_local",
+    "reorder_voronoi_for_sharding",
     "VoronoiHaloExchange",
     "exchange_local_simulated",
     # Ensemble parallelism
