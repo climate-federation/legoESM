@@ -77,6 +77,56 @@ class CDGridShallowWaterConfig(NamedTuple):
 # Tendencies
 # ==============================================================================
 
+def _fix_boundary_tendencies(du, dv, n):
+    """Blend face-boundary momentum tendencies with interior values.
+
+    D-grid operators at face-boundary corners have larger truncation
+    errors than interior corners due to non-orthogonality.  Blend
+    boundary-corner tendencies with their nearest interior neighbour
+    to reduce the edge error.  Vertices (where 3 faces meet) are
+    replaced entirely with the average of their 2 edge neighbours.
+
+    Parameters
+    ----------
+    du, dv : jax.Array, shape (6, n+1, n+1)
+    n : int
+
+    Returns
+    -------
+    du, dv : jax.Array with smoothed boundary values
+    """
+    # Blend weight: 0 = keep original, 1 = use interior neighbor
+    w = 0.5
+
+    # Edge blending (excluding corners which get special treatment)
+    # West (i=0), blend with i=1
+    du = du.at[:, 0, 1:-1].set((1 - w) * du[:, 0, 1:-1] + w * du[:, 1, 1:-1])
+    dv = dv.at[:, 0, 1:-1].set((1 - w) * dv[:, 0, 1:-1] + w * dv[:, 1, 1:-1])
+    # East (i=n), blend with i=n-1
+    du = du.at[:, n, 1:-1].set((1 - w) * du[:, n, 1:-1] + w * du[:, n - 1, 1:-1])
+    dv = dv.at[:, n, 1:-1].set((1 - w) * dv[:, n, 1:-1] + w * dv[:, n - 1, 1:-1])
+    # South (j=0), blend with j=1
+    du = du.at[:, 1:-1, 0].set((1 - w) * du[:, 1:-1, 0] + w * du[:, 1:-1, 1])
+    dv = dv.at[:, 1:-1, 0].set((1 - w) * dv[:, 1:-1, 0] + w * dv[:, 1:-1, 1])
+    # North (j=n), blend with j=n-1
+    du = du.at[:, 1:-1, n].set((1 - w) * du[:, 1:-1, n] + w * du[:, 1:-1, n - 1])
+    dv = dv.at[:, 1:-1, n].set((1 - w) * dv[:, 1:-1, n] + w * dv[:, 1:-1, n - 1])
+
+    # Vertex corners: replace with average of 2 nearest edge neighbours
+    corners = [
+        ((0, 0), (1, 0), (0, 1)),
+        ((n, 0), (n - 1, 0), (n, 1)),
+        ((0, n), (1, n), (0, n - 1)),
+        ((n, n), (n - 1, n), (n, n - 1)),
+    ]
+    for (ci, cj), (n1i, n1j), (n2i, n2j) in corners:
+        avg_du = 0.5 * (du[:, n1i, n1j] + du[:, n2i, n2j])
+        avg_dv = 0.5 * (dv[:, n1i, n1j] + dv[:, n2i, n2j])
+        du = du.at[:, ci, cj].set(avg_du)
+        dv = dv.at[:, ci, cj].set(avg_dv)
+    return du, dv
+
+
 def cdgrid_shallow_water_tendencies(
     state: CDGridShallowWaterState,
     cdgrid: CubedSphereCDGrid,
@@ -115,6 +165,11 @@ def cdgrid_shallow_water_tendencies(
         div_damp=config.div_damp,
     )
 
+    # 3. Fix tendencies at cube vertices where the D-grid stencil
+    #    breaks down due to extreme non-orthogonality (cosa = +/-0.5).
+    n = cdgrid.n
+    du_d_dt, dv_d_dt = _fix_boundary_tendencies(du_d_dt, dv_d_dt, n)
+
     return dh_dt, du_d_dt, dv_d_dt
 
 
@@ -150,16 +205,15 @@ class CDGridShallowWaterModel(IntegrationMixin):
         self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
 
     def _sync_dgrid_boundary(self, state: CDGridShallowWaterState):
-        """Synchronize D-grid boundary winds between cubed-sphere faces.
+        """Owner-based sync of D-grid corner winds at shared edges.
 
-        FV3-style direct corner-to-corner sync: convert D-grid corner
-        velocities to geographic (east/north) at each shared face edge,
-        average with the neighbouring face, then convert back to face-local.
+        For each shared face edge, the lower face index is the "owner".
+        The non-owner face COPIES the owner's geographic wind — no
+        averaging.  This ensures bitwise-identical corner values at
+        shared boundaries without the edge-selective dissipation that
+        pairwise averaging introduces.
 
-        Edge corners (shared by 2 faces) get a pairwise average.
-        Vertex corners (shared by 3 faces) get a 3-way average.
-        No boundary smoothing is applied -- the d2a2c non-orthogonality
-        correction handles cross-face continuity naturally.
+        Vertices (shared by 3 faces) are owned by the lowest face index.
         """
         from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
@@ -168,13 +222,9 @@ class CDGridShallowWaterModel(IntegrationMixin):
         ca_c = self.cdgrid.cos_angle_corner
         sa_c = self.cdgrid.sin_angle_corner
 
-        # 1. Convert all corners to geographic
+        # Convert all corners to geographic
         ue = ca_c * u_d - sa_c * v_d
         vn = sa_c * u_d + ca_c * v_d
-
-        # 2. Edge sync: pairwise average
-        ue_out = ue
-        vn_out = vn
 
         def _get_strip(arr, face, edge):
             if edge == WEST:    return arr[face, 0, :]
@@ -182,32 +232,31 @@ class CDGridShallowWaterModel(IntegrationMixin):
             elif edge == SOUTH: return arr[face, :, 0]
             else:               return arr[face, :, n]
 
+        # Edge sync: non-owner copies from owner (lower face index)
         for face in range(6):
             for edge in [WEST, EAST, SOUTH, NORTH]:
                 nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
-                nbr_ue = _get_strip(ue, nbr_face, nbr_edge)
-                nbr_vn = _get_strip(vn, nbr_face, nbr_edge)
-                if is_reversed:
-                    nbr_ue = nbr_ue[::-1]
-                    nbr_vn = nbr_vn[::-1]
-                local_ue = _get_strip(ue, face, edge)
-                local_vn = _get_strip(vn, face, edge)
-                avg_ue = 0.5 * (local_ue + nbr_ue)
-                avg_vn = 0.5 * (local_vn + nbr_vn)
-                if edge == WEST:
-                    ue_out = ue_out.at[face, 0, :].set(avg_ue)
-                    vn_out = vn_out.at[face, 0, :].set(avg_vn)
-                elif edge == EAST:
-                    ue_out = ue_out.at[face, n, :].set(avg_ue)
-                    vn_out = vn_out.at[face, n, :].set(avg_vn)
-                elif edge == SOUTH:
-                    ue_out = ue_out.at[face, :, 0].set(avg_ue)
-                    vn_out = vn_out.at[face, :, 0].set(avg_vn)
-                else:
-                    ue_out = ue_out.at[face, :, n].set(avg_ue)
-                    vn_out = vn_out.at[face, :, n].set(avg_vn)
+                if nbr_face < face:
+                    # nbr_face owns → copy FROM neighbor
+                    nbr_ue = _get_strip(ue, nbr_face, nbr_edge)
+                    nbr_vn = _get_strip(vn, nbr_face, nbr_edge)
+                    if is_reversed:
+                        nbr_ue = nbr_ue[::-1]
+                        nbr_vn = nbr_vn[::-1]
+                    if edge == WEST:
+                        ue = ue.at[face, 0, :].set(nbr_ue)
+                        vn = vn.at[face, 0, :].set(nbr_vn)
+                    elif edge == EAST:
+                        ue = ue.at[face, n, :].set(nbr_ue)
+                        vn = vn.at[face, n, :].set(nbr_vn)
+                    elif edge == SOUTH:
+                        ue = ue.at[face, :, 0].set(nbr_ue)
+                        vn = vn.at[face, :, 0].set(nbr_vn)
+                    else:
+                        ue = ue.at[face, :, n].set(nbr_ue)
+                        vn = vn.at[face, :, n].set(nbr_vn)
 
-        # 3. Vertex sync: 3-way average at cube vertices (8 vertices)
+        # Vertex sync: lowest face index owns
         _vtx = [
             [(0, 0, 0), (3, n, 0), (5, 0, n)],
             [(0, n, 0), (1, 0, 0), (5, n, n)],
@@ -219,16 +268,16 @@ class CDGridShallowWaterModel(IntegrationMixin):
             [(2, n, n), (3, 0, n), (4, 0, n)],
         ]
         for vtx in _vtx:
-            ue_avg = sum(ue_out[f, i, j] for f, i, j in vtx) / 3.0
-            vn_avg = sum(vn_out[f, i, j] for f, i, j in vtx) / 3.0
-            for f, i, j in vtx:
-                ue_out = ue_out.at[f, i, j].set(ue_avg)
-                vn_out = vn_out.at[f, i, j].set(vn_avg)
+            owner = vtx[0]  # already sorted by face index
+            ue_own = ue[owner[0], owner[1], owner[2]]
+            vn_own = vn[owner[0], owner[1], owner[2]]
+            for f, i, j in vtx[1:]:
+                ue = ue.at[f, i, j].set(ue_own)
+                vn = vn.at[f, i, j].set(vn_own)
 
-        # 4. Convert back to face-local (NO boundary smoothing)
-        u_d_new = ca_c * ue_out + sa_c * vn_out
-        v_d_new = -sa_c * ue_out + ca_c * vn_out
-
+        # Convert back to face-local
+        u_d_new = ca_c * ue + sa_c * vn
+        v_d_new = -sa_c * ue + ca_c * vn
         return state._replace(u_d=u_d_new, v_d=v_d_new)
 
     def tendencies(self, state: CDGridShallowWaterState):
@@ -243,7 +292,6 @@ class CDGridShallowWaterModel(IntegrationMixin):
     ) -> CDGridShallowWaterState:
         """Advance one time step using SSP-RK3."""
         def tendency_fn(s):
-            s = self._sync_dgrid_boundary(s)
             dh, du, dv = cdgrid_shallow_water_tendencies(
                 s, self.cdgrid, self.config,
             )
@@ -256,7 +304,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
             state, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Synchronize D-grid boundary corners across cubed-sphere faces
+        # Owner-based sync: once per time step, after integrator
         state_new = self._sync_dgrid_boundary(state_new)
 
         # Conservation fixer

@@ -227,9 +227,8 @@ def _spherical_polygon_centroid(vertices):
     centroid = np.zeros(3)
     for i in range(1, n - 1):
         v1, v2 = vertices[i], vertices[i + 1]
-        # Spherical triangle area via cross product
-        cross = np.cross(v1 - v0, v2 - v0)
-        area = np.linalg.norm(cross) * 0.5  # approximate for small triangles
+        # True spherical triangle area via spherical excess
+        area = _spherical_triangle_area(v0, v1, v2, radius=1.0)
         tri_center = (v0 + v1 + v2) / 3.0
         centroid += area * tri_center
         total_area += area
@@ -860,6 +859,9 @@ def create_voronoi_mesh(
     -------
     VoronoiMesh
     """
+    from legoesm.runtime.backend import require_x64
+    require_x64("Voronoi/MPAS mesh construction")
+
     # Step 1: Icosahedral base
     verts, triangles = _icosahedral_base()
 

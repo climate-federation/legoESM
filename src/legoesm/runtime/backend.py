@@ -68,6 +68,26 @@ def is_x64_enabled() -> bool:
     return bool(jax.config.jax_enable_x64)
 
 
+def require_x64(component: str) -> None:
+    """Raise ``RuntimeError`` if JAX x64 is not enabled.
+
+    Parameters
+    ----------
+    component : str
+        Human-readable name of the component that needs x64
+        (used in the error message).
+    """
+    if not is_x64_enabled():
+        raise RuntimeError(
+            f"{component} requires float64 precision, but JAX is running "
+            f"in 32-bit mode (jax_enable_x64 is not set).\n\n"
+            f"Enable 64-bit mode before constructing the mesh:\n"
+            f"  - environment variable: JAX_ENABLE_X64=1\n"
+            f"  - Python:  jax.config.update('jax_enable_x64', True)\n"
+            f"  - legoESM: from legoesm.runtime import enable_x64; enable_x64()"
+        )
+
+
 # ---------------------------------------------------------------------------
 # XLA flag helpers (from parallel.device_config)
 # ---------------------------------------------------------------------------

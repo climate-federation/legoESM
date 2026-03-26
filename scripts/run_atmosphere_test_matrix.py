@@ -199,11 +199,11 @@ def _compute_drift(values: list[float]) -> float:
 # Hyperdiffusion helpers
 # ---------------------------------------------------------------------------
 
-def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 5e16) -> float:
+def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 1e16) -> float:
     return ref_coeff * (ref_n / n) ** 4
 
 
-def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 5e7) -> float:
+def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 1.5e7) -> float:
     """Scale second-order divergence damping for cubed-sphere (FV3-style)."""
     return ref_coeff * (ref_n / n) ** 2
 
@@ -222,10 +222,11 @@ def _hyperdiff_ico(mesh) -> float:
     return dx_mean ** 4 / (48.0 * 3600.0)
 
 
-def _laplacian_visc_cube(n: int, frac: float = 0.1) -> float:
+def _laplacian_visc_cube(n: int, frac: float = 0.0) -> float:
     """Laplacian viscosity A_h = frac * c_gw * dx for cubed-sphere.
 
-    Damps intermediate-scale modes that ∇⁴ hyperdiffusion misses.
+    Disabled by default (frac=0): hyperdiffusion provides sufficient
+    scale-selective damping without over-diffusing the baroclinic jet.
     """
     import math
     from legoesm import constants
@@ -483,8 +484,12 @@ def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
             return arr
         idxs, w = _build_latlon_weights(lon_deg, lat_deg, k=20)
         return _apply_weights(arr.ravel(), idxs, w, 181, 360)
-    # Cubed-sphere: use face-aware bilinear interpolation
+    # Cubed-sphere: use face-aware bilinear interpolation.
+    # If a field was already regridded (e.g. wind from corner-based remap),
+    # its shape is (n_lat, n_lon) — return it as-is.
     from legoesm.grids.regridding import apply_cubedsphere_to_latlon
+    if arr.ndim == 2 and arr.shape[0] != 6:
+        return arr
     if arr.ndim >= 3 and arr.shape[0] == 6:
         n = arr.shape[1]
     else:
@@ -1019,8 +1024,9 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-            CDGridShallowWaterModel, CDGridShallowWaterConfig)
-        from legoesm.grids.halo import pad_halo_vector
+            FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
+            CDGridShallowWaterConfig)
+        from legoesm.core.operators_cdgrid import fv3_d2cc
         from tests.test_cases.williamson import (
             williamson_test2, williamson_test5,
             williamson_test2_exact, compute_error_norms)
@@ -1032,39 +1038,33 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=_hyperdiff_cube(n),
             div_damp=_div_damp_cube(n))
-        model = CDGridShallowWaterModel(grid, config)
+        model = FV3EdgeShallowWaterModel(grid, config)
 
-        # Initialise D-grid corners directly using corner lat/angles.
-        # This avoids the A→D interpolation which mixes face-local velocity
-        # components with different orientations and introduces spurious v.
+        # Get Williamson initial condition for height and topography
         sw = williamson_test2(grid) if test_num == 2 else williamson_test5(grid)
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterState
         cdgrid = model.cdgrid
-        ca_c = cdgrid.cos_angle_corner
-        sa_c = cdgrid.sin_angle_corner
 
-        # Geographic winds at D-grid corners from the cell-centre Williamson init
-        # (interpolate geographic winds, not face-local, to corner positions)
-        u_east_a = grid.cos_angle * sw.u.data - grid.sin_angle * sw.v.data
-        v_north_a = grid.sin_angle * sw.u.data + grid.cos_angle * sw.v.data
-        # Pad geographic and average to corners
-        u_east_pad = pad_halo_vector.__wrapped__(
-            u_east_a, v_north_a,
-            jnp.ones_like(grid.cos_angle), jnp.zeros_like(grid.sin_angle),
-            jnp.ones_like(grid.cos_angle_padded), jnp.zeros_like(grid.sin_angle_padded),
-            interp_offsets=grid.halo_interp_offsets,
-        ) if False else (None, None)  # just use pad_halo for scalars
-        from legoesm.grids.halo import pad_halo
-        ue_pad = pad_halo(u_east_a, interp_offsets=grid.halo_interp_offsets)
-        vn_pad = pad_halo(v_north_a, interp_offsets=grid.halo_interp_offsets)
-        u_east_corner = 0.25 * (ue_pad[:, :-1, :-1] + ue_pad[:, 1:, :-1]
-                                + ue_pad[:, :-1, 1:] + ue_pad[:, 1:, 1:])
-        v_north_corner = 0.25 * (vn_pad[:, :-1, :-1] + vn_pad[:, 1:, :-1]
-                                 + vn_pad[:, :-1, 1:] + vn_pad[:, 1:, 1:])
-        # Geographic → face-local at corner positions
-        u_d = ca_c * u_east_corner + sa_c * v_north_corner
-        v_d = -sa_c * u_east_corner + ca_c * v_north_corner
-        state = CDGridShallowWaterState(h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        # Initialise edge-midpoint D-grid winds analytically.
+        # Edge-midpoint winds sit INSIDE the face (half a cell from any
+        # boundary), so no boundary sync is needed.
+        from legoesm import constants as _c
+        R = grid.radius
+        if test_num == 2:
+            u_0 = 2.0 * jnp.pi * R / (12.0 * 86400.0)
+        else:
+            u_0 = 20.0
+
+        # u_d at x-edge midpoints (6, n, n+1): u_east projected to face-local
+        u_east_ex = u_0 * jnp.cos(cdgrid.lat_edge_x)   # (6, n, n+1)
+        # v_north = 0 everywhere for solid-body rotation
+        u_d = cdgrid.cos_angle_edge_x * u_east_ex       # (6, n, n+1)
+
+        # v_d at y-edge midpoints (6, n+1, n): v component from u_east
+        u_east_ey = u_0 * jnp.cos(cdgrid.lat_edge_y)   # (6, n+1, n)
+        v_d = -cdgrid.sin_angle_edge_y * u_east_ey      # (6, n+1, n)
+
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
@@ -1079,24 +1079,27 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 "max_wind": float(jnp.max(jnp.abs(s.u_d))),
             }
 
+        # Edge-midpoint D-grid winds → cell-centre geographic → regrid.
+        # Cell-centre winds (6, n, n) from fv3_d2cc are already interior,
+        # so standard cell-centre regridding works without edge artifacts.
+        from legoesm.grids.regridding import apply_cubedsphere_to_latlon
+        _cs_w = _get_cs_weights(n)
+        _ca_cc = np.asarray(grid.cos_angle, dtype=np.float64)
+        _sa_cc = np.asarray(grid.sin_angle, dtype=np.float64)
+
         def extract_fn(s):
-            # Rotate D-grid corners to geographic (east/north) FIRST,
-            # then average to cell centres.  Averaging face-local components
-            # before rotation corrupts boundary cells where corners belong
-            # to different faces with incompatible coordinate systems.
-            u_d = np.asarray(s.u_d, dtype=np.float64)
-            v_d = np.asarray(s.v_d, dtype=np.float64)
-            ca_c = np.asarray(cdgrid.cos_angle_corner, dtype=np.float64)
-            sa_c = np.asarray(cdgrid.sin_angle_corner, dtype=np.float64)
-            u_east_d = ca_c * u_d - sa_c * v_d
-            v_north_d = sa_c * u_d + ca_c * v_d
-            # Average 4 corners → cell centre (now geographic, safe)
-            u = 0.25 * (u_east_d[:, :-1, :-1] + u_east_d[:, 1:, :-1]
-                        + u_east_d[:, :-1, 1:] + u_east_d[:, 1:, 1:])
-            v = 0.25 * (v_north_d[:, :-1, :-1] + v_north_d[:, 1:, :-1]
-                        + v_north_d[:, :-1, 1:] + v_north_d[:, 1:, 1:])
-            return {"u": u, "v": v,
-                    "wind_speed": np.sqrt(u ** 2 + v ** 2),
+            # D-grid edge → cell-centre face-local winds
+            u_cc, v_cc = fv3_d2cc(s.u_d, s.v_d, cdgrid)
+            u_cc_np = np.asarray(u_cc, dtype=np.float64)
+            v_cc_np = np.asarray(v_cc, dtype=np.float64)
+            # Rotate cell-centre face-local → geographic (east/north)
+            u_east = _ca_cc * u_cc_np - _sa_cc * v_cc_np
+            v_north = _sa_cc * u_cc_np + _ca_cc * v_cc_np
+            # Regrid (6, n, n) cell-centre → lat-lon
+            u_ll = apply_cubedsphere_to_latlon(u_east, _cs_w)
+            v_ll = apply_cubedsphere_to_latlon(v_north, _cs_w)
+            return {"u": u_ll, "v": v_ll,
+                    "wind_speed": np.sqrt(u_ll ** 2 + v_ll ** 2),
                     "height": np.asarray(s.h, dtype=np.float64)}
 
         key_array_fn = lambda s: s.h
@@ -2239,7 +2242,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=10000.0, sponge_coeff=0.05,
-                hyperdiff_coeff=hd)
+                hyperdiff_coeff=hd,
+                acoustic_off_centering=0.1)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
             state, hcoord, tmetric, _ = dcmip25_tc2_init(
@@ -2248,7 +2252,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=5000.0, sponge_coeff=0.1,
-                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd)
+                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
+                acoustic_off_centering=0.1)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, _ = dcmip25_tc3_init(
@@ -2257,7 +2262,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=5000.0, sponge_coeff=0.1,
-                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd)
+                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
+                acoustic_off_centering=0.1)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 

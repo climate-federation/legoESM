@@ -321,8 +321,12 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
 
     integral = sum(field * area) over all cells.
 
-    When running under MPI (distributed halo backend), the local
-    partial sum is combined across all ranks via ``allreduce(SUM)``.
+    Supports three execution modes:
+
+    - **Single device**: plain ``jnp.sum``.
+    - **Multi-device (JAX SPMD)**: ``jax.lax.psum`` across the device
+      mesh for correct cross-device reduction.
+    - **MPI distributed**: ``allreduce(SUM)`` via ``mpi4jax``.
 
     Parameters
     ----------
@@ -339,9 +343,15 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     acc = _accumulation_dtype()
     prod = field.data.astype(acc) * grid.area.astype(acc)
     local_sum = jnp.sum(prod)
+
     if _is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
+
+    # For multi-device (non-MPI, NamedSharding-based SPMD): jnp.sum on
+    # a face-sharded array already produces the correct global sum —
+    # JAX/XLA automatically inserts an all-reduce when the reduction
+    # spans a sharded axis.  No explicit psum is needed.
     return local_sum
 
 
@@ -349,6 +359,12 @@ def _is_distributed() -> bool:
     """Check if the MPI halo backend is active."""
     from legoesm.grids.halo import get_halo_backend
     return get_halo_backend() == "mpi"
+
+
+def _get_device_config():
+    """Return the active DeviceConfig, or None."""
+    from legoesm.parallel.mesh import get_active_config
+    return get_active_config()
 
 
 def global_mean(field: Field, grid: CubedSphereGrid) -> jax.Array:

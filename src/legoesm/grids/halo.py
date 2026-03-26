@@ -425,46 +425,53 @@ def _pad_halo_local(
     data: jax.Array,
     interp_offsets: jax.Array | None = None,
 ) -> jax.Array:
-    """Local (single-node) scalar halo exchange implementation."""
-    n = data.shape[1]
-    padded = jnp.zeros((6, n + 2, n + 2), dtype=data.dtype)
+    """Local (single-node) scalar halo exchange implementation.
 
-    # Place interior data
+    Uses precomputed index tables for a vectorized gather+scatter instead
+    of 24 sequential Python-loop iterations.  This reduces XLA IR size
+    and enables better fusion across the halo operation.
+    """
+    n = data.shape[1]
+    tables = _get_halo_tables_h1(n)
+    src_f, src_i, src_j, dst_f, dst_i, dst_j = tables
+
+    padded = jnp.zeros((6, n + 2, n + 2), dtype=data.dtype)
     padded = padded.at[:, 1:-1, 1:-1].set(data)
 
-    edges = [WEST, EAST, SOUTH, NORTH]
+    if interp_offsets is None:
+        # Nearest-neighbor copy: single gather + single scatter
+        values = data[src_f, src_i, src_j]
+        padded = padded.at[dst_f, dst_i, dst_j].set(values)
+    else:
+        # Interpolated exchange: two gathers + lerp + scatter
+        # Offsets (6, 4, n) → (24*n,) matching strip order
+        flat_offsets = interp_offsets.reshape(-1)
+        n_int = int(n)
+        strip_base = jnp.repeat(jnp.arange(24) * n_int, n_int)  # (24*n,)
+        j_local = jnp.tile(jnp.arange(n_int), 24)  # position within strip
 
-    # Fill halo strips from neighbors
-    for face in range(6):
-        for edge_idx, edge in enumerate(edges):
-            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+        frac = j_local + flat_offsets
+        frac = jnp.clip(frac, 0.0, n_int - 1.0)
+        lo = jnp.floor(frac).astype(jnp.int32)
+        lo = jnp.clip(lo, 0, n_int - 2)
+        hi = lo + 1
+        w = jnp.clip(frac - lo.astype(frac.dtype), 0.0, 1.0)
 
-            # Extract the neighbor's edge strip
-            strip = _extract_edge_strip(data, nbr_face, nbr_edge)
+        # Map strip-local lo/hi to data indices.  lo/hi are traced
+        # (depend on interp_offsets), so convert source tables to JAX
+        # arrays to allow traced-index gather.
+        _sf = jnp.asarray(src_f)
+        _si = jnp.asarray(src_i)
+        _sj = jnp.asarray(src_j)
+        lo_global = strip_base + lo
+        hi_global = strip_base + hi
+        vals_lo = data[_sf[lo_global], _si[lo_global], _sj[lo_global]]
+        vals_hi = data[_sf[hi_global], _si[hi_global], _sj[hi_global]]
+        values = ((1.0 - w) * vals_lo + w * vals_hi).astype(data.dtype)
+        padded = padded.at[dst_f, dst_i, dst_j].set(values)
 
-            # Reverse if needed
-            if is_reversed:
-                strip = strip[::-1]
-
-            # Interpolate to correct physical position if offsets provided
-            if interp_offsets is not None:
-                strip = _interp_strip(strip, interp_offsets[face, edge_idx])
-
-            # Place in halo position
-            if edge == WEST:
-                padded = padded.at[face, 0, 1:-1].set(strip)
-            elif edge == EAST:
-                padded = padded.at[face, -1, 1:-1].set(strip)
-            elif edge == SOUTH:
-                padded = padded.at[face, 1:-1, 0].set(strip)
-            elif edge == NORTH:
-                padded = padded.at[face, 1:-1, -1].set(strip)
-
-    # Fill corner cells by averaging the two adjacent edge-halo values.
-    # This avoids zeros at the 4 corner cells per face that can pollute
-    # operators with larger stencils.
+    # Fill corner cells (vectorized)
     padded = _fill_corners_h1(padded)
-
     return padded
 
 
@@ -531,12 +538,97 @@ def _pad_halo_local_h2(
     return padded
 
 
+# ==============================================================================
+# Precomputed index tables for vectorized halo exchange
+# ==============================================================================
+
+_halo_table_cache_h1: dict[int, tuple] = {}
+
+
+def _build_halo_tables_h1(n: int) -> tuple:
+    """Build source/destination index arrays for vectorized halo=1 exchange.
+
+    For each of the 24*n halo cells (6 faces × 4 edges × n cells per edge),
+    stores the (face, i, j) source coordinates in the original data array
+    and the (face, i, j) destination coordinates in the padded array.
+
+    Source indices already account for edge geometry and reversal, so the
+    runtime exchange is a single gather + scatter.
+    """
+    edges = [WEST, EAST, SOUTH, NORTH]
+    total = 24 * n
+
+    src_f = np.zeros(total, dtype=np.int32)
+    src_i = np.zeros(total, dtype=np.int32)
+    src_j = np.zeros(total, dtype=np.int32)
+    dst_f = np.zeros(total, dtype=np.int32)
+    dst_i = np.zeros(total, dtype=np.int32)
+    dst_j = np.zeros(total, dtype=np.int32)
+
+    idx = 0
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+
+            for j in range(n):
+                # Position in strip after reversal
+                k = (n - 1 - j) if is_reversed else j
+
+                # Source cell from neighbor edge
+                if nbr_edge == WEST:
+                    src_f[idx], src_i[idx], src_j[idx] = nbr_face, 0, k
+                elif nbr_edge == EAST:
+                    src_f[idx], src_i[idx], src_j[idx] = nbr_face, n - 1, k
+                elif nbr_edge == SOUTH:
+                    src_f[idx], src_i[idx], src_j[idx] = nbr_face, k, 0
+                else:  # NORTH
+                    src_f[idx], src_i[idx], src_j[idx] = nbr_face, k, n - 1
+
+                # Destination in padded array (n+2 × n+2)
+                if edge == WEST:
+                    dst_f[idx], dst_i[idx], dst_j[idx] = face, 0, j + 1
+                elif edge == EAST:
+                    dst_f[idx], dst_i[idx], dst_j[idx] = face, n + 1, j + 1
+                elif edge == SOUTH:
+                    dst_f[idx], dst_i[idx], dst_j[idx] = face, j + 1, 0
+                else:  # NORTH
+                    dst_f[idx], dst_i[idx], dst_j[idx] = face, j + 1, n + 1
+
+                idx += 1
+
+    # Return numpy arrays (not jnp) so that caching doesn't leak JAX
+    # tracers when pad_halo is called inside jax.lax.scan.  JAX treats
+    # numpy arrays as static constants during tracing.
+    return (src_f, src_i, src_j, dst_f, dst_i, dst_j)
+
+
+def _get_halo_tables_h1(n: int) -> tuple:
+    """Return cached halo index tables for grid size n.
+
+    Safe to call inside JAX transforms: tables are built with pure
+    numpy (no JAX tracers).  The ``int(n)`` call ensures concrete
+    Python int even if ``n`` comes from a traced shape dimension.
+    """
+    n = int(n)
+    if n not in _halo_table_cache_h1:
+        _halo_table_cache_h1[n] = _build_halo_tables_h1(n)
+    return _halo_table_cache_h1[n]
+
+
+def precompute_halo_tables(n: int) -> None:
+    """Eagerly populate the halo index cache for grid size n.
+
+    Call this at grid creation time (outside JIT) to avoid cache
+    writes during JAX tracing.
+    """
+    _get_halo_tables_h1(int(n))
+
+
 def _fill_corners_h1(padded: jax.Array) -> jax.Array:
     """Fill corner cells of halo=1 padded array by averaging adjacent edge halos.
 
-    Each face has 4 corner cells in the padded array that are not filled
-    by the edge-strip exchange.  We fill each corner as the average of
-    the two neighbouring edge-halo cells that share a side with it.
+    Vectorized: all 24 corners (6 faces × 4 corners) in a single
+    gather + average + scatter.
 
     Parameters
     ----------
@@ -546,23 +638,23 @@ def _fill_corners_h1(padded: jax.Array) -> jax.Array:
     -------
     jax.Array, shape (6, n+2, n+2)
     """
-    for f in range(6):
-        # SW corner (0, 0): average of WEST halo at j=1 and SOUTH halo at i=1
-        padded = padded.at[f, 0, 0].set(
-            0.5 * (padded[f, 0, 1] + padded[f, 1, 0])
-        )
-        # SE corner (-1, 0): average of EAST halo at j=1 and SOUTH halo at i=-2
-        padded = padded.at[f, -1, 0].set(
-            0.5 * (padded[f, -1, 1] + padded[f, -2, 0])
-        )
-        # NW corner (0, -1): average of WEST halo at j=-2 and NORTH halo at i=1
-        padded = padded.at[f, 0, -1].set(
-            0.5 * (padded[f, 0, -2] + padded[f, 1, -1])
-        )
-        # NE corner (-1, -1): average of EAST halo at j=-2 and NORTH halo at i=-2
-        padded = padded.at[f, -1, -1].set(
-            0.5 * (padded[f, -1, -2] + padded[f, -2, -1])
-        )
+    n2i = padded.shape[1] - 1  # n+1 (last index in padded)
+
+    # All 24 corner cells: (face, i, j) and their two adjacent halo cells
+    f_idx = jnp.arange(6)
+    # SW(0,0), SE(n+1,0), NW(0,n+1), NE(n+1,n+1) per face
+    cf = jnp.repeat(f_idx, 4)
+    ci = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
+    cj = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
+    # Adjacent cell 1
+    a1i = jnp.tile(jnp.array([0, n2i, 0, n2i]), 6)
+    a1j = jnp.tile(jnp.array([1, 1, n2i - 1, n2i - 1]), 6)
+    # Adjacent cell 2
+    a2i = jnp.tile(jnp.array([1, n2i - 1, 1, n2i - 1]), 6)
+    a2j = jnp.tile(jnp.array([0, 0, n2i, n2i]), 6)
+
+    corner_vals = 0.5 * (padded[cf, a1i, a1j] + padded[cf, a2i, a2j])
+    padded = padded.at[cf, ci, cj].set(corner_vals)
     return padded
 
 

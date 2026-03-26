@@ -235,7 +235,7 @@ def main():
     # CFL check
     DT = cfl_check_and_adjust(
         DT, N_GRID, model_type="primitive_eq",
-        max_wind=60.0, gravity_wave_speed=0.0,
+        max_wind=60.0, gravity_wave_speed=300.0,
     )
 
     # Hyperdiffusion: physically tuned via adaptive_hyperdiff_coeff

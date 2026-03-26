@@ -234,8 +234,8 @@ def latlon_hydrostatic_tendencies(
         # div_v already computed above: (..., nlev)
         div_dx = _gradient_x_3d(div_v, grid)
         div_dy = _gradient_y_3d(div_v, grid)
-        du_dt_data = du_dt_data - config.div_damp_coeff * div_dx
-        dv_dt_data = dv_dt_data - config.div_damp_coeff * div_dy
+        du_dt_data = du_dt_data + config.div_damp_coeff * div_dx
+        dv_dt_data = dv_dt_data + config.div_damp_coeff * div_dy
 
     # --- 9b. Temperature floor ---
     # (Applied later via state clipping in the model step)

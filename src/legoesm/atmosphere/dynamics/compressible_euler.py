@@ -589,6 +589,7 @@ def acoustic_substeps_semi_implicit(
     theta_0 = height_coord.theta_ref
     rho_0 = height_coord.rho_ref
     J = terrain_metric.jacobian  # (6, n, n)
+    beta = euler_config.acoustic_off_centering
 
     # Linearized sound speed squared: c_s^2 = gamma * R_d * T_ref
     # where T_ref = theta_0 * pi_0 and gamma = c_p / c_v
@@ -673,6 +674,9 @@ def acoustic_substeps_semi_implicit(
         vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
         vert_div = vert_div / J[..., None]
         rho_p_new = rho_p_c - dt_s * vert_div
+
+        # Off-centering: damp acoustic mode (Skamarock & Klemp 2008)
+        rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
         # --- Backward: update theta' using vertical w advection ---
         w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])

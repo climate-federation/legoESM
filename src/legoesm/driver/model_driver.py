@@ -61,6 +61,7 @@ class ModelDriver:
         self._qv_smooth_coeff = None
         self._hyperdiffusion_3d_fn = None
         self._ensemble_size = 1
+        self._device_config = None
 
         if output_dir is not None:
             self._output_dir = Path(output_dir)
@@ -124,6 +125,7 @@ class ModelDriver:
         self._create_diagnostics()
         self._create_friction()
         self._save_config()
+        self._setup_parallel()
 
     def _create_grid(self) -> None:
         """Create horizontal grid and vertical coordinate."""
@@ -476,10 +478,17 @@ class ModelDriver:
     def _sync_and_collect_diagnostics(self, **kwargs) -> dict:
         """Synchronize device computation and collect diagnostics.
 
-        Consolidates the ``jax.block_until_ready`` + ``diagnostics.collect``
-        pattern into a single method to avoid scattered sync points.
+        When running in multi-device mode, gathers the state from all
+        devices before diagnostic collection.  Consolidates the
+        ``jax.block_until_ready`` + ``diagnostics.collect`` pattern
+        into a single method to avoid scattered sync points.
         """
-        jax.block_until_ready(self.state.u.data)
+        # Gather sharded state back to single device for host-side diagnostics
+        if self._device_config is not None and self._device_config.mesh is not None:
+            from legoesm.parallel.sharded_dynamics import gather_state
+            gathered = gather_state(kwargs.get('state', self.state), self._device_config)
+            kwargs['state'] = gathered
+        jax.block_until_ready(kwargs.get('state', self.state).u.data)
         return self.diagnostics.collect(**kwargs)
 
     def _create_friction(self) -> None:
@@ -515,6 +524,48 @@ class ModelDriver:
         # Legacy AMIP-format sidecar (serialization boundary adapter)
         from legoesm.forcing.amip_config import save_config as _save_amip
         _save_amip(self.config.to_amip_config(), self._output_dir / "amip_config.json")
+
+    def _setup_parallel(self) -> None:
+        """Set up multi-device parallelism if available.
+
+        Detects available devices and creates a device mesh for
+        cubed-sphere face sharding.  Shards the state and tracers
+        across devices so the compiled segment loop runs in SPMD mode.
+        """
+        from legoesm.parallel.device_config import detect_devices, configure_jax_for_device
+
+        self._device_config = None
+        hw = detect_devices()
+        configure_jax_for_device(hw)
+
+        if hw.device_count <= 1:
+            return
+        if self.config.grid.grid_type != "cubed_sphere":
+            return  # only cubed-sphere supports face sharding
+
+        from legoesm.parallel.mesh import create_device_mesh
+
+        try:
+            self._device_config = create_device_mesh(n_devices=hw.device_count)
+        except ValueError:
+            logger.warning(
+                f"Cannot create cubed-sphere mesh for {hw.device_count} "
+                f"devices; using single-device mode"
+            )
+            return
+
+        # Shard state across devices (face axis)
+        from legoesm.parallel.sharded_dynamics import shard_state
+        self.state = shard_state(self.state, self._device_config)
+
+        # Shard tracers
+        from legoesm.parallel.mesh import shard_pytree
+        self.tracers = shard_pytree(self.tracers, self._device_config)
+
+        logger.info(
+            f"  Parallel: {hw.device_count} devices, "
+            f"tiling={self._device_config.tiling}"
+        )
 
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save checkpoint to output directory using unified restart API.
@@ -960,6 +1011,11 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 precip_accum=jnp.zeros(_ens_2d),
             )
+
+            # Shard carry across devices for SPMD execution
+            if self._device_config is not None and self._device_config.mesh is not None:
+                from legoesm.parallel.mesh import shard_pytree
+                carry = shard_pytree(carry, self._device_config)
 
             # Time first segment for JIT measurement
             if seg_idx == 0:
