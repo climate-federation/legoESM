@@ -42,7 +42,6 @@ from legoesm.core.operators_cdgrid import (
     cgrid_divergence,
     dgrid_vorticity,
     _arakawa_lamb_gradient,
-    _broadcast_metric,
     _interp_center_to_corner,
     _interp_corner_to_center,
     _laplacian_dgrid,
@@ -208,33 +207,24 @@ def fv3_hydrostatic_tendencies(
     zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)  # (6, n+1, n+1, nlev)
 
     # --- 7. Bernoulli gradient at D-grid corners (Arakawa-Lamb) ---
-    dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)  # (6, n+1, n+1, nlev)
+    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)  # (6, n+1, n+1, nlev)
 
     # --- 8. Pressure gradient correction at D-grid corners ---
     ln_ps = jnp.log(p_s)
-    dln_dx, dln_dy = _arakawa_lamb_gradient(ln_ps, cdgrid)  # (6, n+1, n+1)
+    dln_dx, dln_dy_perp = _arakawa_lamb_gradient(ln_ps, cdgrid)  # (6, n+1, n+1)
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
     T_corner = 1.0 / _interp_center_to_corner(1.0 / T, cdgrid)  # (6, n+1, n+1, nlev)
     pg_corr_x = R_d * T_corner * dln_dx[..., None]
-    pg_corr_y = R_d * T_corner * dln_dy[..., None]
+    pg_corr_y_perp = R_d * T_corner * dln_dy_perp[..., None]
 
     # --- 9. D-grid momentum tendencies ---
-    # Non-orthogonality correction for v-equation gradients:
-    # Arakawa-Lamb gives (dB/ds_i, dB/ds_j). v-equation needs dB/ds_perp.
-    cosa_c = _broadcast_metric(cdgrid.cosa_corner, u_d)
-    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
-
-    dB_dy_perp = (dB_dy - cosa_c * dB_dx) / jnp.maximum(sina_c, 1e-12)
-    pg_corr_y_perp = (pg_corr_y - cosa_c * pg_corr_x) / jnp.maximum(sina_c, 1e-12)
-
     du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x
     dv_d_dt = -zeta_corner * u_d - dB_dy_perp - pg_corr_y_perp
 
     # Divergence damping at D-grid
     if config.div_damp_coeff > 0:
         div_v_damp = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
-        ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_v_damp, cdgrid)
-        ddiv_dy_perp = (ddiv_dy - cosa_c * ddiv_dx) / jnp.maximum(sina_c, 1e-12)
+        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v_damp, cdgrid)
         du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
         dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
 

@@ -545,7 +545,13 @@ def cgrid_scalar_advection(q, u_c, v_c, cdgrid):
 # ==============================================================================
 
 def _arakawa_lamb_gradient(B, cdgrid):
-    """4-point Arakawa-Lamb gradient of cell-centre field at D-grid corners.
+    """4-point Arakawa-Lamb gradient at D-grid corners.
+
+    Returns the gradient in physical (e_x, e_perp) coordinates using a
+    precomputed transformation matrix derived from 3D Cartesian geometry.
+    This eliminates the separate non-orthogonality correction and gives
+    correct gradients at face boundaries and cube vertices where face-local
+    metrics are inconsistent across faces.
 
     Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
 
@@ -555,7 +561,8 @@ def _arakawa_lamb_gradient(B, cdgrid):
 
     Returns
     -------
-    dB_dx, dB_dy : jax.Array, shape (6, n+1, n+1[, nlev])
+    dB_dx, dB_dy_perp : jax.Array, shape (6, n+1, n+1[, nlev])
+        Gradient along face-local e_x and perpendicular to e_x.
     """
     B_pad = _pad_halo_auto(B, cdgrid)
 
@@ -570,22 +577,20 @@ def _arakawa_lamb_gradient(B, cdgrid):
         B_nw = B_pad[:, :-1, 1:, :]
         B_ne = B_pad[:, 1:, 1:, :]
 
-    # Use proper halo exchange for metrics (not mode='edge' which fails
-    # at equatorial-polar face boundaries where axes swap).
-    dx_pad = _pad_halo_auto(cdgrid.base.dx, cdgrid)
-    dy_pad = _pad_halo_auto(cdgrid.base.dy, cdgrid)
-    dx_dual = 0.25 * (dx_pad[:, :-1, :-1] + dx_pad[:, 1:, :-1]
-                       + dx_pad[:, :-1, 1:] + dx_pad[:, 1:, 1:])
-    dy_dual = 0.25 * (dy_pad[:, :-1, :-1] + dy_pad[:, 1:, :-1]
-                       + dy_pad[:, :-1, 1:] + dy_pad[:, 1:, 1:])
+    # Raw 4-point finite-difference quantities
+    dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)  # east − west
+    dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)  # north − south
 
-    dx_dual_b = _broadcast_metric(dx_dual, B_sw)
-    dy_dual_b = _broadcast_metric(dy_dual, B_sw)
+    # Precomputed 2×2 gradient matrix (3D Cartesian → face-local)
+    c00 = _broadcast_metric(cdgrid.grad_c00, dB_raw_x)
+    c01 = _broadcast_metric(cdgrid.grad_c01, dB_raw_x)
+    c10 = _broadcast_metric(cdgrid.grad_c10, dB_raw_x)
+    c11 = _broadcast_metric(cdgrid.grad_c11, dB_raw_x)
 
-    dB_dx = ((B_se + B_ne) - (B_sw + B_nw)) / jnp.maximum(dx_dual_b, 1e-10)
-    dB_dy = ((B_nw + B_ne) - (B_sw + B_se)) / jnp.maximum(dy_dual_b, 1e-10)
+    dB_dx = c00 * dB_raw_x + c01 * dB_raw_y
+    dB_dy_perp = c10 * dB_raw_x + c11 * dB_raw_y
 
-    return dB_dx, dB_dy
+    return dB_dx, dB_dy_perp
 
 
 # ==============================================================================
@@ -667,18 +672,9 @@ def _divergence_damping(u_c, v_c, cdgrid, d2_coeff=0.0, d4_coeff=0.0,
     dd_dx = jnp.zeros_like(div_field)
     dd_dy = jnp.zeros_like(div_field)
 
-    # Non-orthogonality correction helper for v-equation gradient
-    cosa_c = _broadcast_metric(cdgrid.cosa_corner, dd_dx)
-    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
-
-    def _correct_v_grad(grad_x, grad_y):
-        """Correct gradient from e_j to e_perp direction."""
-        return (grad_y - cosa_c * grad_x) / jnp.maximum(sina_c, 1e-12)
-
     # 2nd-order: du += d2_coeff * grad(div)
     if d2_coeff > 0:
-        ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_field, cdgrid)
-        ddiv_dy_perp = _correct_v_grad(ddiv_dx, ddiv_dy)
+        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_field, cdgrid)
         # Adaptive coefficient
         if dddmp > 0:
             area_min = jnp.min(cdgrid.base.area)
@@ -703,8 +699,7 @@ def _divergence_damping(u_c, v_c, cdgrid, d2_coeff=0.0, d4_coeff=0.0,
                 lambda d: laplacian_compact(d, cdgrid.base)
             )(div_t)
             lap_div = jnp.moveaxis(lap_div_t, 0, -1)
-        dlap_dx, dlap_dy = _arakawa_lamb_gradient(lap_div, cdgrid)
-        dlap_dy_perp = _correct_v_grad(dlap_dx, dlap_dy)
+        dlap_dx, dlap_dy_perp = _arakawa_lamb_gradient(lap_div, cdgrid)
         return -d4_coeff * dlap_dx, -d4_coeff * dlap_dy_perp
 
     return dd_dx, dd_dy
@@ -757,18 +752,18 @@ def _laplacian_dgrid(u_d, cdgrid):
 # ==============================================================================
 
 def _extrapolate_boundary_corners(du, dv, n):
-    """Fix momentum tendencies at the 8 cube vertices.
+    """Fix momentum tendencies at all face-boundary corners.
 
-    The Bernoulli gradient has an O(1) cancellation error at cube
-    vertices (where cosa = ±0.5) because the non-orthogonality
-    correction amplifies the gradient truncation error.  Diagnostic
-    analysis shows the error is 100x larger at vertices than at
-    edge-interior points, which have normal-sized errors.
+    The Arakawa-Lamb gradient and vorticity interpolation at boundary
+    corners (i=0, i=n, j=0, j=n) use haloed cell-centre data with
+    O(dx^2) interpolation error, giving O(dx) gradient error -- 12-60x
+    larger than interior O(dx^2) error.  Replace boundary tendency values
+    with their nearest-interior neighbours, which use only on-face
+    cell-centre data and have O(dx^2) accuracy.
 
-    Replace vertex-corner tendencies with the average of their 2
-    nearest edge-interior neighbours.  Edge-interior corners (along
-    face boundaries but NOT at vertices) are left unchanged — their
-    errors are comparable to interior points.
+    Edge-interior corners are set from one cell inward (i=1 or j=1).
+    Vertex corners (shared by 3 faces) use the average of two edge
+    neighbours (already corrected by the edge fix).
 
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
 
@@ -779,8 +774,24 @@ def _extrapolate_boundary_corners(du, dv, n):
 
     Returns
     -------
-    du, dv : jax.Array with fixed vertex values
+    du, dv : jax.Array with fixed boundary values
     """
+    # Edge boundaries: replace with one cell inward (excludes vertices).
+    # West (i=0): from i=1
+    du = du.at[:, 0, 1:-1].set(du[:, 1, 1:-1])
+    dv = dv.at[:, 0, 1:-1].set(dv[:, 1, 1:-1])
+    # East (i=n): from i=n-1
+    du = du.at[:, n, 1:-1].set(du[:, n - 1, 1:-1])
+    dv = dv.at[:, n, 1:-1].set(dv[:, n - 1, 1:-1])
+    # South (j=0): from j=1
+    du = du.at[:, 1:-1, 0].set(du[:, 1:-1, 1])
+    dv = dv.at[:, 1:-1, 0].set(dv[:, 1:-1, 1])
+    # North (j=n): from j=n-1
+    du = du.at[:, 1:-1, n].set(du[:, 1:-1, n - 1])
+    dv = dv.at[:, 1:-1, n].set(dv[:, 1:-1, n - 1])
+
+    # Vertex corners: average of two edge-interior neighbours
+    # (uses already-corrected edge values from above)
     corners = [
         ((0, 0), (1, 0), (0, 1)),
         ((n, 0), (n - 1, 0), (n, 1)),
@@ -851,32 +862,21 @@ def cdgrid_momentum_tendencies(
 
     # 3. Gradients at corners (Arakawa-Lamb)
     if is_3d:
-        dKE_dx, dKE_dy = _arakawa_lamb_gradient(KE, cdgrid)
-        dp_dx, dp_dy = _arakawa_lamb_gradient(h_or_p, cdgrid)
+        dKE_dx, dKE_dy_perp = _arakawa_lamb_gradient(KE, cdgrid)
+        dp_dx, dp_dy_perp = _arakawa_lamb_gradient(h_or_p, cdgrid)
     else:
         B = KE + g * (h_or_p + h_s_or_p_prime)
-        dB_dx, dB_dy = _arakawa_lamb_gradient(B, cdgrid)
+        dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
     # 4. Vorticity at corners
     zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
 
-    # Non-orthogonality correction for gradient in v-equation:
-    # The Arakawa-Lamb gradient gives (dB/ds_i, dB/ds_j).
-    # u-equation needs dB/ds_i (no correction).
-    # v-equation needs dB/ds_perp = (dB/ds_j - cos(alpha)*dB/ds_i) / sin(alpha).
-    cosa_c = _broadcast_metric(cdgrid.cosa_corner, u_d)
-    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
-
-    # 5. Tendencies
+    # 5. Tendencies (gradient already in physical e_x / e_perp coordinates)
     if is_3d:
-        # Correct v-equation gradient from e_j to e_perp
-        dKE_dy_perp = (dKE_dy - cosa_c * dKE_dx) / jnp.maximum(sina_c, 1e-12)
-
         du_d_dt = zeta_corner * v_d - dKE_dx
         dv_d_dt = -zeta_corner * u_d - dKE_dy_perp
 
         if rho_0 is not None:
-            dp_dy_perp = (dp_dy - cosa_c * dp_dx) / jnp.maximum(sina_c, 1e-12)
             du_d_dt = du_d_dt - dp_dx / rho_0
             dv_d_dt = dv_d_dt - dp_dy_perp / rho_0
 
@@ -890,8 +890,6 @@ def cdgrid_momentum_tendencies(
             du_d_dt = du_d_dt - 0.5 * u_d * div_corner
             dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
     else:
-        # Correct v-equation gradient from e_j to e_perp
-        dB_dy_perp = (dB_dy - cosa_c * dB_dx) / jnp.maximum(sina_c, 1e-12)
         du_d_dt = zeta_corner * v_d - dB_dx
         dv_d_dt = -zeta_corner * u_d - dB_dy_perp
 
@@ -917,9 +915,7 @@ def cdgrid_momentum_tendencies(
         div_abs_corner = _interp_center_to_corner(div_abs, cdgrid)
         adaptive_coeff = area_min * jnp.maximum(
             d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
-        ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_field, cdgrid)
-        # Correct v-equation gradient from e_j to e_perp
-        ddiv_dy_perp = (ddiv_dy - cosa_c * ddiv_dx) / jnp.maximum(sina_c, 1e-12)
+        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_field, cdgrid)
         du_d_dt = du_d_dt + adaptive_coeff * ddiv_dx
         dv_d_dt = dv_d_dt + adaptive_coeff * ddiv_dy_perp
 

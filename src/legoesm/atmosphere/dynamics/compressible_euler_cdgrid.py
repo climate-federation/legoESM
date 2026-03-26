@@ -40,7 +40,6 @@ from legoesm.core.operators_cdgrid import (
     cgrid_mass_flux_divergence,
     cgrid_divergence,
     _arakawa_lamb_gradient,
-    _broadcast_metric,
     _interp_center_to_corner,
     _interp_corner_to_center,
     _laplacian_dgrid,
@@ -156,19 +155,12 @@ def cdgrid_compressible_euler_slow_tendencies(
     K = 0.5 * (u_cc ** 2 + v_cc ** 2)
 
     # --- 6. Gradients at D-grid corners ---
-    dK_dx, dK_dy = _arakawa_lamb_gradient(K, cdgrid)
-    dpi_dx, dpi_dy = _arakawa_lamb_gradient(pi_prime, cdgrid)
+    dK_dx, dK_dy_perp = _arakawa_lamb_gradient(K, cdgrid)
+    dpi_dx, dpi_dy_perp = _arakawa_lamb_gradient(pi_prime, cdgrid)
 
     # --- 7. D-grid momentum tendencies ---
     abs_vor_corner = _interp_center_to_corner(abs_vor, cdgrid)
     theta_corner = _interp_center_to_corner(theta_total, cdgrid)
-
-    # Non-orthogonality correction for v-equation gradients
-    cosa_c = _broadcast_metric(cdgrid.cosa_corner, u_d)
-    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
-
-    dK_dy_perp = (dK_dy - cosa_c * dK_dx) / jnp.maximum(sina_c, 1e-12)
-    dpi_dy_perp = (dpi_dy - cosa_c * dpi_dx) / jnp.maximum(sina_c, 1e-12)
 
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx
     dv_d_dt = -abs_vor_corner * u_d - dK_dy_perp - c_p * theta_corner * dpi_dy_perp

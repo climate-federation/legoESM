@@ -197,97 +197,74 @@ def held_suarez_init_mpas(
 
 def baroclinic_wave_init_mpas(
     mesh: VoronoiMesh,
-    sigma_coord: SigmaCoordinate,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     perturbed: bool = True,
 ) -> MPASHydrostaticState:
     """Initialize Jablonowski-Williamson baroclinic wave on MPAS mesh.
 
-    Follows Jablonowski & Williamson (2006) with:
-    - Balanced zonal jet at 45° latitude
-    - Optional Gaussian perturbation to trigger instability
+    Uses the same DCMIP 2016 analytic solution as the cubed-sphere and
+    spectral initializations (see :mod:`baroclinic_wave`), ensuring
+    identical balanced states across all grid types.  The height-based
+    formulation is inverted to sigma levels via bisection.
 
     Parameters
     ----------
     mesh : VoronoiMesh
-    sigma_coord : SigmaCoordinate
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
     perturbed : bool
-        If True, add perturbation to trigger instability.
+        If True, add the exponential perturbation to trigger instability.
 
     Returns
     -------
     MPASHydrostaticState
     """
+    from legoesm.atmosphere.physics.baroclinic_wave import (
+        P0,
+        evaluate_pressure_temperature,
+        find_z_for_pressure,
+        compute_zonal_wind,
+        exponential_perturbation,
+    )
+
     nCells = mesh.nCells
     nEdges = mesh.nEdges
     nlev = sigma_coord.n_levels
     sigma_full = sigma_coord.sigma_full  # (nlev,)
 
-    R_d = constants.R_d
-    g = constants.g
-    Omega = constants.Omega
-    a = constants.R_earth
-
-    # Jablonowski-Williamson parameters
-    u0 = 35.0        # max jet speed [m/s]
-    T0 = 288.0       # equatorial surface temperature [K]
-    T_strato = 200.0  # stratospheric temperature [K]
-    lapse = 0.005     # lapse rate [K/m]
-    eta_t = 0.2       # tropopause sigma level
-
-    # Compute eta-based temperature profile and surface pressure
-    # T(eta, lat) and p_s(lat) from balanced wind profile
-
     lat_c = mesh.latCell   # (nCells,)
-    lon_c = mesh.lonCell   # (nCells,)
     lat_e = mesh.latEdge   # (nEdges,)
     lon_e = mesh.lonEdge   # (nEdges,)
-
-    # Reference pressure
-    p0 = 1.0e5
-
-    # Surface pressure: hydrostatically balanced
-    # Using simplified Jablonowski approach
-    cos_lat = jnp.cos(lat_c)
-    sin_lat = jnp.sin(lat_c)
-
-    # Zonal wind profile u(eta, lat)
-    eta = sigma_full[None, :]  # (1, nlev)
-    eta_v = (eta - 0.252) * jnp.pi / 2.0
-    u_wind_cell = u0 * jnp.cos(eta_v) ** 1.5 * jnp.sin(2.0 * lat_c[:, None]) ** 2
-
-    # Temperature from thermal wind balance
-    T_mean = T0 * eta ** (R_d * lapse / g)
-    T_mean = jnp.where(eta < eta_t, T_strato, T_mean)
-    # Latitude-dependent perturbation from thermal wind
-    T_pert = (3.0 / 4.0) * (eta * jnp.pi * u0 / R_d) * jnp.sin(eta_v) * jnp.sqrt(jnp.cos(eta_v))
-    T_pert = T_pert * (
-        (-2.0 * sin_lat[:, None] ** 6 * (cos_lat[:, None] ** 2 + 1.0 / 3.0) + 10.0 / 63.0)
-        * 2.0 * u0 * jnp.cos(eta_v) ** 1.5
-    )
-    T_data = jnp.broadcast_to(T_mean, (nCells, nlev)) + T_pert
-    T_data = jnp.maximum(T_data, T_strato)
-
-    # Surface pressure (approximate balance)
-    p_s_data = jnp.full((nCells,), p0)
-
-    # Edge-normal velocity from zonal wind
     cos_angle = jnp.cos(mesh.angleEdge)  # (nEdges,)
-    sin_angle = jnp.sin(mesh.angleEdge)
-    eta_e = sigma_full[None, :]
-    eta_v_e = (eta_e - 0.252) * jnp.pi / 2.0
-    u_zonal_edge = u0 * jnp.cos(eta_v_e) ** 1.5 * jnp.sin(2.0 * lat_e[:, None]) ** 2
-    # Project zonal wind to edge normal: u_n = u_east * cos(angle) + v_north * sin(angle)
-    # For zonal-only: v_north = 0
-    u_data = u_zonal_edge * cos_angle[:, None]
 
-    # Optional perturbation (Gaussian bump)
-    if perturbed:
-        lon_c_pert = 2.0 * jnp.pi / 9.0   # 40°E
-        lat_c_pert = 2.0 * jnp.pi / 9.0   # 40°N
-        up = 1.0  # m/s perturbation amplitude
-        r2 = ((lon_e - lon_c_pert) ** 2 + (lat_e - lat_c_pert) ** 2) / (0.1 ** 2)
-        u_pert_edge = up * jnp.exp(-r2)
-        u_data = u_data + u_pert_edge[:, None] * cos_angle[:, None]
+    # Surface pressure: constant (no topography)
+    p_s_data = jnp.full((nCells,), P0)
+
+    # Compute T at cell centers and u at edges, level by level
+    T_data = jnp.zeros((nCells, nlev))
+    u_data = jnp.zeros((nEdges, nlev))
+
+    for k in range(nlev):
+        sig_k = float(sigma_full[k])
+
+        # --- Temperature at cell centers ---
+        p_target_c = jnp.full((nCells,), sig_k * P0)
+        z_c = find_z_for_pressure(p_target_c, lat_c)
+        _, T_k = evaluate_pressure_temperature(z_c, lat_c)
+        T_data = T_data.at[:, k].set(T_k)
+
+        # --- Zonal wind at edge midpoints ---
+        p_target_e = jnp.full((nEdges,), sig_k * P0)
+        z_e = find_z_for_pressure(p_target_e, lat_e)
+        _, T_e = evaluate_pressure_temperature(z_e, lat_e)
+        u_zonal = compute_zonal_wind(z_e, lat_e, T_e)
+
+        # Add perturbation (eastward direction, projected to edge normal)
+        if perturbed:
+            u_zonal = u_zonal + exponential_perturbation(lat_e, lon_e, z_e)
+
+        # Project zonal wind to edge normal: u_n = u_east * cos(angle)
+        # (v_north = 0 for this test case)
+        u_data = u_data.at[:, k].set(u_zonal * cos_angle)
 
     # Surface geopotential: flat
     phis_data = jnp.zeros((nCells,))

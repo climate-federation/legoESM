@@ -98,6 +98,15 @@ class CubedSphereCDGrid(NamedTuple):
     cosa_cell: jax.Array     # (6, n, n) cos(angle between i and j tangents)
     sina_cell: jax.Array     # (6, n, n) sin(angle)
     rsin2_cell: jax.Array    # (6, n, n) 1/sin²(angle)
+    # Precomputed Arakawa-Lamb gradient transformation matrix.
+    # Maps 4-point finite-difference quantities (ΔB_x, ΔB_y) directly to
+    # physical gradient (dB/dx along e_i, dB/dy_perp ⊥ e_i).  Derived from
+    # 3D Cartesian geometry of haloed cell centers → correct at face
+    # boundaries and cube vertices where face-local metrics are inconsistent.
+    grad_c00: jax.Array    # (6, n+1, n+1)
+    grad_c01: jax.Array    # (6, n+1, n+1)
+    grad_c10: jax.Array    # (6, n+1, n+1)
+    grad_c11: jax.Array    # (6, n+1, n+1)
 
     @property
     def n(self) -> int:
@@ -554,6 +563,89 @@ def create_cubed_sphere_cdgrid(
     sina_cell = jnp.sqrt(jnp.maximum(1.0 - cosa_cell**2, 1e-12))
     rsin2_cell = 1.0 / jnp.maximum(sina_cell**2, 1e-12)
 
+    # ------------------------------------------------------------------
+    # Precompute Arakawa-Lamb gradient transformation matrix.
+    #
+    # At each D-grid corner the 4-point stencil produces raw differences
+    #   ΔB_x = (B_se + B_ne) - (B_sw + B_nw)
+    #   ΔB_y = (B_nw + B_ne) - (B_sw + B_se)
+    # The physical gradient is then:
+    #   dB/dx     = grad_c00 * ΔB_x + grad_c01 * ΔB_y
+    #   dB/d_perp = grad_c10 * ΔB_x + grad_c11 * ΔB_y
+    #
+    # The matrix is the inverse of the 2×2 system formed by projecting
+    # the 3D displacement vectors of the haloed cell-center stencil onto
+    # the face-local tangent directions (e_x, e_perp) at each corner.
+    # This gives a physically correct gradient everywhere — including at
+    # face boundaries and cube vertices where face-local dx/dy metrics
+    # are inconsistent across faces.
+    # ------------------------------------------------------------------
+
+    # Cell-centre 3D Cartesian positions on the unit sphere
+    cos_lat_cc = jnp.cos(base.lat)
+    x_cc = cos_lat_cc * jnp.cos(base.lon)   # (6, n, n)
+    y_cc = cos_lat_cc * jnp.sin(base.lon)
+    z_cc = jnp.sin(base.lat)
+
+    # Pad with the same halo exchange used for field values at runtime
+    x_pad = pad_halo(x_cc, interp_offsets=base.halo_interp_offsets)
+    y_pad = pad_halo(y_cc, interp_offsets=base.halo_interp_offsets)
+    z_pad = pad_halo(z_cc, interp_offsets=base.halo_interp_offsets)
+    x_pad = _fill_corners_h1(x_pad)
+    y_pad = _fill_corners_h1(y_pad)
+    z_pad = _fill_corners_h1(z_pad)
+
+    # 4-point stencil cell positions at each corner
+    x_sw, x_se = x_pad[:, :-1, :-1], x_pad[:, 1:, :-1]
+    x_nw, x_ne = x_pad[:, :-1, 1:], x_pad[:, 1:, 1:]
+    y_sw, y_se = y_pad[:, :-1, :-1], y_pad[:, 1:, :-1]
+    y_nw, y_ne = y_pad[:, :-1, 1:], y_pad[:, 1:, 1:]
+    z_sw, z_se = z_pad[:, :-1, :-1], z_pad[:, 1:, :-1]
+    z_nw, z_ne = z_pad[:, :-1, 1:], z_pad[:, 1:, 1:]
+
+    # Displacement vectors (east−west, north−south) in 3D Cartesian
+    drx_x = (x_se + x_ne) - (x_sw + x_nw)
+    drx_y = (y_se + y_ne) - (y_sw + y_nw)
+    drx_z = (z_se + z_ne) - (z_sw + z_nw)
+    dry_x = (x_nw + x_ne) - (x_sw + x_se)
+    dry_y = (y_nw + y_ne) - (y_sw + y_se)
+    dry_z = (z_nw + z_ne) - (z_sw + z_se)
+
+    # Corner unit normal = position on unit sphere (reuse xc, yc, zc
+    # computed above for edge-midpoint metrics)
+    _nx, _ny, _nz = xc, yc, zc
+
+    # e_x: face-local i-tangent direction at each corner
+    # e_x = cos(angle) * ê_east + sin(angle) * ê_north
+    _sl = jnp.sin(lon_corner)
+    _cl = jnp.cos(lon_corner)
+    _slat = jnp.sin(lat_corner)
+    _ca = cos_angle_corner
+    _sa = sin_angle_corner
+    _ex_x = _ca * (-_sl) + _sa * (-_slat * _cl)
+    _ex_y = _ca * _cl + _sa * (-_slat * _sl)
+    _ex_z = _sa * cos_lat_corner
+
+    # e_perp = n̂ × e_x  (tangent direction perpendicular to e_x)
+    _ep_x = _ny * _ex_z - _nz * _ex_y
+    _ep_y = _nz * _ex_x - _nx * _ex_z
+    _ep_z = _nx * _ex_y - _ny * _ex_x
+
+    # 2×2 matrix elements: a_ij = Δr_i · e_j
+    # (dot product with tangent vectors auto-projects onto tangent plane)
+    _a11 = drx_x * _ex_x + drx_y * _ex_y + drx_z * _ex_z
+    _a12 = drx_x * _ep_x + drx_y * _ep_y + drx_z * _ep_z
+    _a21 = dry_x * _ex_x + dry_y * _ex_y + dry_z * _ex_z
+    _a22 = dry_x * _ep_x + dry_y * _ep_y + dry_z * _ep_z
+
+    # Inverse matrix scaled by 1/radius → gradient coefficients
+    _det = _a11 * _a22 - _a12 * _a21
+    _inv_Rd = 1.0 / (radius * jnp.maximum(_det, 1e-20))
+    grad_c00 = _a22 * _inv_Rd
+    grad_c01 = -_a12 * _inv_Rd
+    grad_c10 = -_a21 * _inv_Rd
+    grad_c11 = _a11 * _inv_Rd
+
     _f32 = jnp.float32
     return CubedSphereCDGrid(
         base=base,
@@ -587,4 +679,8 @@ def create_cubed_sphere_cdgrid(
         cosa_cell=cosa_cell.astype(_f32),
         sina_cell=sina_cell.astype(_f32),
         rsin2_cell=rsin2_cell.astype(_f32),
+        grad_c00=grad_c00.astype(_f32),
+        grad_c01=grad_c01.astype(_f32),
+        grad_c10=grad_c10.astype(_f32),
+        grad_c11=grad_c11.astype(_f32),
     )

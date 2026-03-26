@@ -116,10 +116,9 @@ def cdgrid_shallow_water_tendencies(
         div_damp=config.div_damp,
     )
 
-    # 3. Blend face-boundary corner tendencies toward interior values.
-    #    The advective tendencies have O(1) cancellation error at face
-    #    boundaries.  Blending with the nearest interior row removes
-    #    most of this error.
+    # Boundary-corner fix: halo interpolation gives O(dx) gradient error
+    # at all face-boundary corners (12-60x larger than interior).
+    # Replace with nearest-interior values that have O(dx^2) accuracy.
     n = cdgrid.n
     du_d_dt, dv_d_dt = _extrapolate_boundary_corners(du_d_dt, dv_d_dt, n)
 

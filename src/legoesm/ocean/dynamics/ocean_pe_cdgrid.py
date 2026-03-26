@@ -35,7 +35,6 @@ from legoesm.core.operators_cdgrid import (
     cgrid_divergence_3d,
     cgrid_mass_flux_divergence_3d,
     _arakawa_lamb_gradient_3d,
-    _broadcast_metric,
     _interp_center_to_corner_3d,
     _laplacian_dgrid,
 )
@@ -234,8 +233,8 @@ def ocean_baroclinic_tendencies_cdgrid(
     KE = 0.5 * (u_cc_ke ** 2 + v_cc_ke ** 2)
 
     # --- 10. Bernoulli and pressure gradients at D-grid corners ---
-    dKE_dx, dKE_dy = _arakawa_lamb_gradient_3d(KE, cdgrid)
-    dp_dx, dp_dy = _arakawa_lamb_gradient_3d(p_prime, cdgrid)
+    dKE_dx, dKE_dy_perp = _arakawa_lamb_gradient_3d(KE, cdgrid)
+    dp_dx, dp_dy_perp = _arakawa_lamb_gradient_3d(p_prime, cdgrid)
 
     # --- 11. Vorticity at corners (relative only) ---
     zeta_corner = _interp_center_to_corner_3d(zeta, cdgrid)
@@ -252,13 +251,6 @@ def ocean_baroclinic_tendencies_cdgrid(
     u_prime_d, v_prime_d = _center_to_dgrid_3d(u_prime_a, v_prime_a, cdgrid)
 
     # --- 13. D-grid momentum tendencies ---
-    # Non-orthogonality correction for v-equation gradients
-    cosa_c = _broadcast_metric(cdgrid.cosa_corner, u_d)
-    sina_c = jnp.sqrt(jnp.maximum(1.0 - cosa_c**2, 1e-12))
-
-    dKE_dy_perp = (dKE_dy - cosa_c * dKE_dx) / jnp.maximum(sina_c, 1e-12)
-    dp_dy_perp = (dp_dy - cosa_c * dp_dx) / jnp.maximum(sina_c, 1e-12)
-
     # ζ*v + f*v' (relative vorticity × full velocity, Coriolis × deviation)
     du_d_dt = (zeta_corner * v_d + f_corner_3d * v_prime_d
                - dKE_dx - dp_dx / rho_0)
