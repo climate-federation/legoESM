@@ -428,107 +428,15 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         self._target_mass = None
 
     def _sync_dgrid_boundary(self, state: FV3HydrostaticState):
-        """Synchronize D-grid boundary corners across cubed-sphere faces.
+        """No-op: cross-face continuity is handled by halo exchange.
 
-        FV3-style direct corner-to-corner sync: convert D-grid corner
-        velocities to geographic (east/north) at each shared face edge,
-        average with the neighbouring face, then convert back to face-local.
-
-        Edge corners (shared by 2 faces) get a pairwise average.
-        Vertex corners (shared by 3 faces) get a 3-way average.
-        A 3-point smoothing filter blends the synced boundary into the
-        interior (first interior row, weight w=0.45).
-
-        For 3D fields (6, n+1, n+1, nlev), the sync is vmapped over
-        vertical levels.
+        The FV3 approach relies on halo exchange in the d2a2c operators
+        (dgrid_to_cgrid, cdgrid_momentum_tendencies) to handle cross-
+        face data, not explicit boundary syncing.  Any explicit sync
+        (whether averaging or owner-copy) acts as edge-selective
+        dissipation that seeds spurious v-wind in steady-state flows.
         """
-        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
-
-        def _sync_2d(u_d_2d, v_d_2d):
-            """Sync a single 2D level slice (6, n+1, n+1)."""
-            n = self.grid.n
-            ca_c = self.cdgrid.cos_angle_corner
-            sa_c = self.cdgrid.sin_angle_corner
-
-            # 1. Convert all corners to geographic (read-only reference)
-            ue = ca_c * u_d_2d - sa_c * v_d_2d
-            vn = sa_c * u_d_2d + ca_c * v_d_2d
-
-            # 2. Edge sync: pairwise average with neighbour faces
-            ue_out = ue
-            vn_out = vn
-
-            def _get_strip(arr, face, edge):
-                if edge == WEST:    return arr[face, 0, :]
-                elif edge == EAST:  return arr[face, n, :]
-                elif edge == SOUTH: return arr[face, :, 0]
-                else:               return arr[face, :, n]
-
-            for face in range(6):
-                for edge in [WEST, EAST, SOUTH, NORTH]:
-                    nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
-                    nbr_ue = _get_strip(ue, nbr_face, nbr_edge)
-                    nbr_vn = _get_strip(vn, nbr_face, nbr_edge)
-                    if is_reversed:
-                        nbr_ue = nbr_ue[::-1]
-                        nbr_vn = nbr_vn[::-1]
-                    local_ue = _get_strip(ue, face, edge)
-                    local_vn = _get_strip(vn, face, edge)
-                    avg_ue = 0.5 * (local_ue + nbr_ue)
-                    avg_vn = 0.5 * (local_vn + nbr_vn)
-                    if edge == WEST:
-                        ue_out = ue_out.at[face, 0, :].set(avg_ue)
-                        vn_out = vn_out.at[face, 0, :].set(avg_vn)
-                    elif edge == EAST:
-                        ue_out = ue_out.at[face, n, :].set(avg_ue)
-                        vn_out = vn_out.at[face, n, :].set(avg_vn)
-                    elif edge == SOUTH:
-                        ue_out = ue_out.at[face, :, 0].set(avg_ue)
-                        vn_out = vn_out.at[face, :, 0].set(avg_vn)
-                    else:
-                        ue_out = ue_out.at[face, :, n].set(avg_ue)
-                        vn_out = vn_out.at[face, :, n].set(avg_vn)
-
-            # 3. Vertex sync: 3-way average at cube vertices (8 vertices)
-            _vtx = [
-                [(0, 0, 0), (3, n, 0), (5, 0, n)],
-                [(0, n, 0), (1, 0, 0), (5, n, n)],
-                [(0, 0, n), (3, n, n), (4, 0, 0)],
-                [(0, n, n), (1, 0, n), (4, n, 0)],
-                [(1, n, 0), (2, 0, 0), (5, n, 0)],
-                [(1, n, n), (2, 0, n), (4, n, n)],
-                [(2, n, 0), (3, 0, 0), (5, 0, 0)],
-                [(2, n, n), (3, 0, n), (4, 0, n)],
-            ]
-            for vtx in _vtx:
-                ue_avg = sum(ue[f, i, j] for f, i, j in vtx) / 3.0
-                vn_avg = sum(vn[f, i, j] for f, i, j in vtx) / 3.0
-                for f, i, j in vtx:
-                    ue_out = ue_out.at[f, i, j].set(ue_avg)
-                    vn_out = vn_out.at[f, i, j].set(vn_avg)
-
-            # 4. Convert back to face-local (no boundary smoothing needed
-            #    with FV3-faithful d2a2c non-orthogonality correction)
-            u_d_new = ca_c * ue_out + sa_c * vn_out
-            v_d_new = -sa_c * ue_out + ca_c * vn_out
-            return u_d_new, v_d_new
-
-        u_d = state.u_d.data  # (6, n+1, n+1, nlev)
-        v_d = state.v_d.data
-
-        # vmap the 2D sync over vertical levels
-        # Reshape: (6, n+1, n+1, nlev) → (nlev, 6, n+1, n+1)
-        u_transposed = jnp.moveaxis(u_d, -1, 0)
-        v_transposed = jnp.moveaxis(v_d, -1, 0)
-        u_synced, v_synced = jax.vmap(_sync_2d)(u_transposed, v_transposed)
-        # Reshape back: (nlev, 6, n+1, n+1) → (6, n+1, n+1, nlev)
-        u_d_new = jnp.moveaxis(u_synced, 0, -1)
-        v_d_new = jnp.moveaxis(v_synced, 0, -1)
-
-        return state._replace(
-            u_d=state.u_d.replace(data=u_d_new),
-            v_d=state.v_d.replace(data=v_d_new),
-        )
+        return state
 
     def tendencies(
         self,

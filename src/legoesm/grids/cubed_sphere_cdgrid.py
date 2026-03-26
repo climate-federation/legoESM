@@ -234,6 +234,73 @@ def create_cubed_sphere_cdgrid(
     angle_corner = jnp.stack(all_angle_c, axis=0)
     dx_edge_y = jnp.stack(all_dx_ey, axis=0)
     dy_edge_x = jnp.stack(all_dy_ex, axis=0)
+
+    # ------------------------------------------------------------------
+    # Owner-based sync of corner lon/lat at shared edges/vertices.
+    # Each shared edge is owned by the lower face index; each shared
+    # vertex is owned by the lowest face index among the 3 faces
+    # meeting there.  This ensures that lon_corner and lat_corner are
+    # bitwise identical on both sides of every face boundary.
+    #
+    # NOTE: angle_corner is NOT synced because it is face-local (the
+    # angle between that face's i-tangent and geographic east), and is
+    # therefore inherently different on each face even at shared points.
+    # ------------------------------------------------------------------
+    from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+
+    def _get_strip_corner(arr, face, edge, n_):
+        if edge == WEST:    return arr[face, 0, :]
+        elif edge == EAST:  return arr[face, n_, :]
+        elif edge == SOUTH: return arr[face, :, 0]
+        else:               return arr[face, :, n_]
+
+    for face in range(6):
+        for edge in [WEST, EAST, SOUTH, NORTH]:
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+            if nbr_face >= face:
+                continue  # only non-owner faces copy from owner
+            for arr_name in ['lon_corner', 'lat_corner']:
+                arr = locals()[arr_name]
+                owner_strip = _get_strip_corner(arr, nbr_face, nbr_edge, n)
+                if is_reversed:
+                    owner_strip = owner_strip[::-1]
+                if edge == WEST:
+                    arr = arr.at[face, 0, :].set(owner_strip)
+                elif edge == EAST:
+                    arr = arr.at[face, n, :].set(owner_strip)
+                elif edge == SOUTH:
+                    arr = arr.at[face, :, 0].set(owner_strip)
+                else:
+                    arr = arr.at[face, :, n].set(owner_strip)
+                if arr_name == 'lon_corner':
+                    lon_corner = arr
+                else:
+                    lat_corner = arr
+
+    # Vertex sync: lowest face index owns
+    _vtx_corners = [
+        [(0, 0, 0), (3, n, 0), (5, 0, n)],
+        [(0, n, 0), (1, 0, 0), (5, n, n)],
+        [(0, 0, n), (3, n, n), (4, 0, 0)],
+        [(0, n, n), (1, 0, n), (4, n, 0)],
+        [(1, n, 0), (2, 0, 0), (5, n, 0)],
+        [(1, n, n), (2, 0, n), (4, n, n)],
+        [(2, n, 0), (3, 0, 0), (5, 0, 0)],
+        [(2, n, n), (3, 0, n), (4, 0, n)],
+    ]
+    for vtx in _vtx_corners:
+        owner = min(vtx, key=lambda x: x[0])
+        for arr_name in ['lon_corner', 'lat_corner']:
+            arr = locals()[arr_name]
+            val = arr[owner[0], owner[1], owner[2]]
+            for f, i, j in vtx:
+                if (f, i, j) != owner:
+                    arr = arr.at[f, i, j].set(val)
+            if arr_name == 'lon_corner':
+                lon_corner = arr
+            else:
+                lat_corner = arr
+
     # --- area_corner from halo-exchanged cell areas (cross-face aware) ---
     from legoesm.grids.halo import pad_halo, _fill_corners_h1
     area_halo = pad_halo(base.area)            # (6, n+2, n+2)

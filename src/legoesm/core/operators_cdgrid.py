@@ -570,8 +570,10 @@ def _arakawa_lamb_gradient(B, cdgrid):
         B_nw = B_pad[:, :-1, 1:, :]
         B_ne = B_pad[:, 1:, 1:, :]
 
-    dx_pad = jnp.pad(cdgrid.base.dx, ((0, 0), (1, 1), (1, 1)), mode='edge')
-    dy_pad = jnp.pad(cdgrid.base.dy, ((0, 0), (1, 1), (1, 1)), mode='edge')
+    # Use proper halo exchange for metrics (not mode='edge' which fails
+    # at equatorial-polar face boundaries where axes swap).
+    dx_pad = _pad_halo_auto(cdgrid.base.dx, cdgrid)
+    dy_pad = _pad_halo_auto(cdgrid.base.dy, cdgrid)
     dx_dual = 0.25 * (dx_pad[:, :-1, :-1] + dx_pad[:, 1:, :-1]
                        + dx_pad[:, :-1, 1:] + dx_pad[:, 1:, 1:])
     dy_dual = 0.25 * (dy_pad[:, :-1, :-1] + dy_pad[:, 1:, :-1]
