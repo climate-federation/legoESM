@@ -223,6 +223,10 @@ def build_segment_fn(
     start_day: float,
     gradient_checkpoint: bool | None = None,
     hyperdiffusion_3d_fn=None,
+    tau_equator=None,
+    tau_pole=None,
+    sbm_tau_c=None,
+    sbm_RH_ref=None,
 ):
     """Build a compiled segment function.
 
@@ -294,6 +298,10 @@ def build_segment_fn(
     _o3_vmr = jnp.asarray(o3_vmr)
     _aerosol_od = jnp.asarray(aerosol_od)
     _fric_decay = jnp.asarray(fric_decay)
+    _tau_equator = jnp.float32(tau_equator) if tau_equator is not None else None
+    _tau_pole = jnp.float32(tau_pole) if tau_pole is not None else None
+    _sbm_tau_c = jnp.float32(sbm_tau_c) if sbm_tau_c is not None else None
+    _sbm_RH_ref = jnp.float32(sbm_RH_ref) if sbm_RH_ref is not None else None
 
     def _single_step(carry: SegmentCarry, _unused) -> tuple:
         """One atmosphere step: dynamics → physics → fixers."""
@@ -332,6 +340,8 @@ def build_segment_fn(
             _o3_vmr, _aerosol_od,
             carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
             carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
+            tau_equator=_tau_equator, tau_pole=_tau_pole,
+            sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
         )
 
         # --- State update ---

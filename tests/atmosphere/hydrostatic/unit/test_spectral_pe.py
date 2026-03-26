@@ -69,8 +69,10 @@ def sigma_coord():
 
 @pytest.fixture(scope="module")
 def rest_state(grid, sigma_coord):
-    """Isothermal rest-state initial condition."""
-    return isothermal_rest_state_spectral(grid, sigma_coord)
+    """Isothermal rest-state initial condition (no perturbation for exact tests)."""
+    return isothermal_rest_state_spectral(
+        grid, sigma_coord, perturbation_amplitude=0.0,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -332,7 +334,9 @@ class TestSpectralPEModel:
             grid, sigma_coord, config,
             allow_unsupported_backend=True,
         )
-        state = isothermal_rest_state_spectral(grid, sigma_coord)
+        state = isothermal_rest_state_spectral(
+            grid, sigma_coord, perturbation_amplitude=0.0,
+        )
         dt = 600.0
         new_state = model.step(state, dt)
 
@@ -347,7 +351,9 @@ class TestSpectralPEModel:
             grid, sigma_coord, config,
             allow_unsupported_backend=True,
         )
-        state = isothermal_rest_state_spectral(grid, sigma_coord)
+        state = isothermal_rest_state_spectral(
+            grid, sigma_coord, perturbation_amplitude=0.0,
+        )
         dt = 300.0
 
         for _ in range(50):

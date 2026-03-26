@@ -119,18 +119,21 @@ def _weak_resolution(n_gpus: int, base_n: int = WEAK_SCALING_BASE_N) -> int:
     n_rounded = max(4, 2 * round(n_raw / 2))  # even number, min 4
     return n_rounded
 
+MAX_SUBDIVISION_LEVEL = 8  # 10*4^8+2 = 655,362 cells — safe upper bound
+
 def _weak_resolution_ico(n_gpus: int, base_level: int = WEAK_SCALING_BASE_LEVEL_ICO) -> int:
     """Compute icosahedral subdivision level for weak scaling."""
+    base_level = min(base_level, MAX_SUBDIVISION_LEVEL)
     base_cells = 10 * 4 ** base_level + 2
     target_cells = base_cells * n_gpus
     # Find level whose cell count is closest to target
     best_level = base_level
-    for lev in range(2, 10):
+    for lev in range(2, MAX_SUBDIVISION_LEVEL + 1):
         cells = 10 * 4 ** lev + 2
         if cells >= target_cells * 0.7:
             best_level = lev
             break
-    return best_level
+    return min(best_level, MAX_SUBDIVISION_LEVEL)
 
 # Strong scaling: fixed resolutions, sweep GPU counts.
 STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km
@@ -306,6 +309,7 @@ def run_benchmark(
         hd = _hyperdiff_coeff(n_grid, grid_type)
         config = MPASPrimitiveEquationConfig(
             nu_del4=hd,
+            nu_del4_ps=hd,
             fix_mass=True,
             pv_scheme="energy",
             time_integrator="ssp_rk3",
@@ -465,8 +469,12 @@ def run_weak_scaling(
         res_prefix = "I"
     else:
         res_prefix = "C"
+    if grid_type == "icosahedral":
+        base_label = f"base level={base_level_ico} ({10 * 4**base_level_ico + 2} cells)"
+    else:
+        base_label = f"base N={base_n}"
     print(f"\n{'='*72}")
-    print(f"WEAK SCALING ({grid_type}, base N={base_n}, {n_levels} levels)")
+    print(f"WEAK SCALING ({grid_type}, {base_label}, {n_levels} levels)")
     print(f"GPU counts: {gpu_counts}")
     print(f"{'='*72}")
 

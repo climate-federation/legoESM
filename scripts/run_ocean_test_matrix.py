@@ -1111,44 +1111,56 @@ def _key_array_fn(state, grid_type: str):
 # ===========================================================================
 
 def _add_barotropic_wave_perturbation(state, grid_type: str, grid, z_coord):
-    """Add a Gaussian SSH perturbation to the rest state."""
+    """Add a Gaussian SSH perturbation to the rest state.
+
+    Uses great-circle distance centered at (180E, 0N) with sigma=10 deg,
+    consistent across all grid types.
+    """
     from legoesm.core.field import Field
 
     eta_amp = 1.0  # 1 m SSH perturbation
-    sigma_deg = 10.0  # Gaussian width in degrees
+    sigma_rad = 10.0 * np.pi / 180.0  # Gaussian width in radians
+    lon0 = np.pi   # 180 degrees east
+    lat0 = 0.0     # equator
+
+    def _great_circle_perturbation(lon_rad, lat_rad):
+        """Compute Gaussian SSH perturbation using great-circle distance."""
+        dlon = lon_rad - lon0
+        dist = np.arccos(np.clip(
+            np.sin(lat_rad) * np.sin(lat0)
+            + np.cos(lat_rad) * np.cos(lat0) * np.cos(dlon),
+            -1.0, 1.0,
+        ))
+        return eta_amp * np.exp(-0.5 * (dist / sigma_rad) ** 2)
 
     if grid_type == "cubed_sphere":
-        lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
-        lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
-        perturb = eta_amp * np.exp(
-            -(lon ** 2 + lat ** 2) / (2 * sigma_deg ** 2))
+        lon = np.asarray(grid.lon, dtype=np.float64)
+        lat = np.asarray(grid.lat, dtype=np.float64)
+        perturb = _great_circle_perturbation(lon, lat)
         new_eta = state.eta.data + jnp.array(perturb)
         return state._replace(eta=Field(new_eta))
 
     elif grid_type == "latlon":
-        lon_1d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
-        lat_1d = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        lon_1d = np.asarray(grid.lon, dtype=np.float64)
+        lat_1d = np.asarray(grid.lat, dtype=np.float64)
         lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d, indexing='xy')
-        perturb = eta_amp * np.exp(
-            -(lon_2d ** 2 + lat_2d ** 2) / (2 * sigma_deg ** 2))
+        perturb = _great_circle_perturbation(lon_2d, lat_2d)
         new_eta = state.eta.data + jnp.array(perturb)
         return state._replace(eta=Field(new_eta))
 
     elif grid_type == "mpas":
-        lon = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
-        lat = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
-        perturb = eta_amp * np.exp(
-            -(lon ** 2 + lat ** 2) / (2 * sigma_deg ** 2))
+        lon = np.asarray(grid.lonCell, dtype=np.float64)
+        lat = np.asarray(grid.latCell, dtype=np.float64)
+        perturb = _great_circle_perturbation(lon, lat)
         new_eta = state.eta.data + jnp.array(perturb)
         return state._replace(eta=Field(new_eta))
 
     elif grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_analysis, sh_synthesis
-        lon_1d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
-        lat_1d = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        from legoesm.grids.gaussian import sh_analysis
+        lon_1d = np.asarray(grid.lon, dtype=np.float64)
+        lat_1d = np.asarray(grid.lat, dtype=np.float64)
         lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d, indexing='xy')
-        perturb = eta_amp * np.exp(
-            -(lon_2d ** 2 + lat_2d ** 2) / (2 * sigma_deg ** 2))
+        perturb = _great_circle_perturbation(lon_2d, lat_2d)
         perturb_hat = sh_analysis(grid, jnp.array(perturb))
         new_eta_hat = state.eta_hat.data + perturb_hat
         return state._replace(eta_hat=Field(new_eta_hat))

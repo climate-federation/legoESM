@@ -137,15 +137,15 @@ class TestInitialization:
         assert land_mask.shape == (mesh.nCells,)
 
     def test_bathymetry_values(self, mesh):
-        """Bathymetry positive where ocean, zero where land."""
+        """Bathymetry is H_max everywhere for smooth z-star Jacobian."""
         H_bathy, land_mask = idealized_bathymetry_mpas(mesh, H_max=1000.0)
-        # Ocean cells have H_bathy > 0
+        # H_bathy = H_max everywhere (including land) so that the z-star
+        # Jacobian (eta + H)/H_max is smooth across coastlines.
+        # The land_mask prevents actual flow on land cells.
+        assert jnp.allclose(H_bathy, 1000.0)
+        # Ocean cells identified correctly
         ocean_h = H_bathy[land_mask > 0.5]
         assert jnp.all(ocean_h > 0)
-        # Land cells have H_bathy = 0
-        land_h = H_bathy[land_mask < 0.5]
-        if land_h.size > 0:
-            assert jnp.allclose(land_h, 0.0)
 
     def test_land_mask_threshold(self, mesh):
         """Land mask respects latitude threshold."""

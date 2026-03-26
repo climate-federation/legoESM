@@ -96,9 +96,6 @@ def williamson_test5_latlon(grid: LatLonGrid) -> ShallowWaterState:
     u_data = u_0 * jnp.cos(lat)
     v_data = jnp.zeros_like(lat)
 
-    # Height field
-    h_data = (gh_0 - (R * Omega * u_0 + u_0**2 / 2.0) * jnp.sin(lat)**2) / g
-
     # Mountain topography
     lon_c = 3.0 * jnp.pi / 2.0
     lat_c = jnp.pi / 6.0
@@ -113,6 +110,11 @@ def williamson_test5_latlon(grid: LatLonGrid) -> ShallowWaterState:
     ))
 
     h_s_data = jnp.where(r < R_m, h_s0 * (1.0 - r / R_m), 0.0)
+
+    # Height field: h is fluid depth (column above topography).
+    # Solver uses B = KE + g*(h + h_s), so h = h_free - h_s.
+    h_free = (gh_0 - (R * Omega * u_0 + u_0**2 / 2.0) * jnp.sin(lat)**2) / g
+    h_data = h_free - h_s_data
 
     dims = ("lat", "lon")
 

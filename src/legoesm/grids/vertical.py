@@ -1259,7 +1259,8 @@ def create_height_coordinate(
         theta_ref_fn = _default_theta_ref
 
     # z* grid: top-to-bottom (z_half[0] = H, z_half[-1] = 0)
-    z_half = jnp.linspace(H, 0.0, n_levels + 1, dtype=jnp.float32)
+    # Use JAX default dtype (float64 when x64 is enabled, float32 otherwise)
+    z_half = jnp.linspace(H, 0.0, n_levels + 1)
     z_full = 0.5 * (z_half[:-1] + z_half[1:])  # (nlev,)
     dz = z_half[:-1] - z_half[1:]  # (nlev,) positive
     dz_half = z_full[:-1] - z_full[1:]  # (nlev-1,) positive

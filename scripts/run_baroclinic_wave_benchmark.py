@@ -394,6 +394,7 @@ def main():
 
         config = MPASPrimitiveEquationConfig(
             nu_del4=nu4,
+            nu_del4_ps=nu4,
             fix_mass=True,
             pv_scheme="energy",
             time_integrator="ssp_rk3",

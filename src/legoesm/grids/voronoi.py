@@ -862,6 +862,14 @@ def create_voronoi_mesh(
     from legoesm.runtime.backend import require_x64
     require_x64("Voronoi/MPAS mesh construction")
 
+    if subdivision_level > 8:
+        n_cells = 10 * 4 ** subdivision_level + 2
+        raise ValueError(
+            f"subdivision_level={subdivision_level} would create {n_cells:.2e} cells. "
+            f"Maximum supported level is 8 (655,362 cells). "
+            f"For higher resolutions, use load_mpas_mesh() with a pre-built mesh file."
+        )
+
     # Step 1: Icosahedral base
     verts, triangles = _icosahedral_base()
 

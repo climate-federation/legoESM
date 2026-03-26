@@ -141,9 +141,6 @@ def williamson_test5(grid: CubedSphereGrid) -> ShallowWaterState:
     u_grid = cos_a * u_east + sin_a * v_north
     v_grid = -sin_a * u_east + cos_a * v_north
 
-    # Height field (geostrophic balance, without topography)
-    h_data = (gh_0 - (R * Omega * u_0 + u_0**2 / 2.0) * jnp.sin(lat)**2) / g
-
     # Mountain topography
     lon_c = 3.0 * jnp.pi / 2.0   # 270E = 90W
     lat_c = jnp.pi / 6.0          # 30N
@@ -151,10 +148,6 @@ def williamson_test5(grid: CubedSphereGrid) -> ShallowWaterState:
     h_s0 = 2000.0                  # Mountain peak height [m]
 
     # Great-circle angular distance from mountain center
-    r = jnp.sqrt(
-        jnp.minimum(R_m**2, (lon - lon_c)**2 + (lat - lat_c)**2)
-    )
-    # More accurate great-circle distance
     r = jnp.arccos(jnp.clip(
         jnp.sin(lat_c) * jnp.sin(lat) +
         jnp.cos(lat_c) * jnp.cos(lat) * jnp.cos(lon - lon_c),
@@ -162,6 +155,12 @@ def williamson_test5(grid: CubedSphereGrid) -> ShallowWaterState:
     ))
 
     h_s_data = jnp.where(r < R_m, h_s0 * (1.0 - r / R_m), 0.0)
+
+    # Height field: h is fluid depth (column above topography).
+    # Free-surface height h_free is in geostrophic balance; the solver
+    # computes B = KE + g*(h + h_s), so h must be h_free - h_s.
+    h_free = (gh_0 - (R * Omega * u_0 + u_0**2 / 2.0) * jnp.sin(lat)**2) / g
+    h_data = h_free - h_s_data
 
     dims = ("face", "x", "y")
 

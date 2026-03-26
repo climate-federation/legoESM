@@ -22,6 +22,7 @@ from legoesm.atmosphere.physics.held_suarez import (
     held_suarez_equilibrium_temperature,
     K_A, K_S, K_F, SIGMA_B,
 )
+from legoesm import constants
 
 
 def held_suarez_forcing_latlon(
@@ -110,6 +111,7 @@ def held_suarez_init_latlon(
     p_s_init: float = 1.0e5,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
+    phis: jnp.ndarray | None = None,
 ) -> HydrostaticState:
     """Create initial conditions for the Held-Suarez test on a lat-lon grid.
 
@@ -130,6 +132,10 @@ def held_suarez_init_latlon(
         Amplitude of temperature perturbation [K].
     seed : int
         Random seed for perturbation.
+    phis : jnp.ndarray or None
+        Surface geopotential [m^2/s^2], shape (n_lat, n_lon). If None,
+        flat terrain is used. When provided, surface pressure is reduced
+        hydrostatically: p_s = p_s_init * exp(-phis / (R_d * T_init)).
 
     Returns
     -------
@@ -143,6 +149,15 @@ def held_suarez_init_latlon(
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")
 
+    # Surface geopotential
+    if phis is None:
+        phis_data = jnp.zeros(shape_2d)
+    else:
+        phis_data = phis
+
+    # Surface pressure (hydrostatic adjustment for topography)
+    p_s_data = p_s_init * jnp.exp(-phis_data / (constants.R_d * T_init))
+
     # Uniform temperature
     T_data = jnp.ones(shape_3d) * T_init
 
@@ -155,6 +170,6 @@ def held_suarez_init_latlon(
         u=Field(data=jnp.zeros(shape_3d), name="u", dims=dims_3d, units="m/s"),
         v=Field(data=jnp.zeros(shape_3d), name="v", dims=dims_3d, units="m/s"),
         T=Field(data=T_data, name="T", dims=dims_3d, units="K"),
-        p_s=Field(data=jnp.ones(shape_2d) * p_s_init, name="p_s", dims=dims_2d, units="Pa"),
-        phis=Field(data=jnp.zeros(shape_2d), name="phis", dims=dims_2d, units="m^2/s^2"),
+        p_s=Field(data=p_s_data, name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(data=phis_data, name="phis", dims=dims_2d, units="m^2/s^2"),
     )

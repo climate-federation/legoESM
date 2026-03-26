@@ -264,21 +264,49 @@ def create_atmosphere_dycore(
 
     # ----- Lat-lon FV solvers -----
     if solver_name == "fv_shallow_water_latlon":
-        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import FVShallowWaterLatLonModel
-        return FVShallowWaterLatLonModel(grid=grid)
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig,
+        )
+        cfg = FVShallowWaterLatLonConfig(
+            hyperdiff_coeff=diff.hyperdiff,
+            use_conservation_fixer=dc.conservation_fixer,
+            fix_mass=dc.fix_mass,
+        )
+        return FVShallowWaterLatLonModel(grid=grid, config=cfg)
 
     if solver_name == "fv_primitive_equations_latlon":
-        from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import FVLatLonPrimitiveEquationModel
-        return FVLatLonPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
+            FVLatLonPrimitiveEquationModel, FVLatLonPrimitiveEquationConfig,
+        )
+        cfg = FVLatLonPrimitiveEquationConfig(
+            A_h=diff.A_h,
+            hyperdiff_coeff=diff.hyperdiff,
+            hyperdiff_ps_coeff=diff.hyperdiff,
+            use_conservation_fixer=dc.conservation_fixer,
+            fix_mass=dc.fix_mass,
+        )
+        return FVLatLonPrimitiveEquationModel(grid=grid, sigma_coord=sigma, config=cfg)
 
     if solver_name == "fv_compressible_euler_latlon":
-        from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import FVCompressibleEulerLatLonModel
-        return FVCompressibleEulerLatLonModel(grid=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
+            FVCompressibleEulerLatLonModel, FVCompressibleEulerLatLonConfig,
+        )
+        cfg = FVCompressibleEulerLatLonConfig(
+            hyperdiff_coeff=diff.hyperdiff,
+        )
+        return FVCompressibleEulerLatLonModel(grid=grid, sigma_coord=sigma, config=cfg)
 
     # ----- MPAS icosahedral -----
     if solver_name == "mpas_primitive_equations":
-        from legoesm.atmosphere.dynamics.primitive_eq_mpas import MPASPrimitiveEquationModel
-        return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma)
+        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
+        )
+        cfg = MPASPrimitiveEquationConfig(
+            nu_del4=diff.hyperdiff,
+            nu_del4_ps=diff.hyperdiff,
+            fix_mass=dc.fix_mass,
+        )
+        return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
     if solver_name == "mpas_compressible_euler":
         from legoesm.atmosphere.dynamics.compressible_euler_mpas import MPASCompressibleEulerModel

@@ -40,7 +40,10 @@ def idealized_bathymetry_mpas(
     dtype = get_policy().storage
     lat_deg = jnp.abs(jnp.degrees(mesh.latCell))
     land_mask = (lat_deg < land_lat_threshold).astype(dtype)
-    H_bathy = H_max * land_mask
+    # H_bathy = H_max everywhere (including land) so that the z-star
+    # Jacobian (eta + H_bathy) / H_max is smooth across coastlines.
+    # The land_mask prevents actual flow on land cells.
+    H_bathy = jnp.full_like(land_mask, H_max)
     return H_bathy, land_mask
 
 

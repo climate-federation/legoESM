@@ -65,7 +65,7 @@ def _schaer_mountain_mpas(
 
 def dcmip25_tc1_init_mpas(
     mesh: VoronoiMesh,
-    n_levels: int = 40,
+    n_levels: int = 88,
     params: dict | None = None,
 ) -> tuple[MPASNonHydrostaticState, HeightCoordinate, TerrainMetric]:
     """Initialize DCMIP-2025 Test Case 1 on MPAS Voronoi mesh.

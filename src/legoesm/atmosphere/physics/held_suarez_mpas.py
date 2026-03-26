@@ -84,7 +84,7 @@ def held_suarez_forcing_mpas(
     if _hybrid:
         p_full = pressure_from_hybrid(sigma_coord, p_s)  # (nCells, nlev)
         # Effective sigma for BL parameterization
-        sigma_eff = p_full / p_s[:, None]
+        sigma_eff = p_full / jnp.maximum(p_s[:, None], 1.0)
     else:
         sigma_full = sigma_coord.sigma_full  # (nlev,)
         p_full = pressure_from_sigma(sigma_full, p_s)    # (nCells, nlev)
@@ -146,6 +146,7 @@ def held_suarez_init_mpas(
     p_s_init: float = 1.0e5,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
+    phis: jnp.ndarray | None = None,
 ) -> MPASHydrostaticState:
     """Create isothermal rest-state initial conditions for Held-Suarez on MPAS.
 
@@ -163,6 +164,10 @@ def held_suarez_init_mpas(
         Amplitude of random T perturbation at lowest level [K].
     seed : int
         Random seed.
+    phis : jnp.ndarray or None
+        Surface geopotential [m^2/s^2], shape (nCells,). If None, flat
+        terrain is used. When provided, surface pressure is reduced
+        hydrostatically: p_s = p_s_init * exp(-phis / (R_d * T_init)).
 
     Returns
     -------
@@ -172,8 +177,14 @@ def held_suarez_init_mpas(
     nEdges = mesh.nEdges
     nlev = sigma_coord.n_levels
 
-    # Surface pressure: uniform
-    p_s_data = jnp.full((nCells,), p_s_init)
+    # Surface geopotential
+    if phis is None:
+        phis_data = jnp.zeros((nCells,))
+    else:
+        phis_data = phis
+
+    # Surface pressure (hydrostatic adjustment for topography)
+    p_s_data = p_s_init * jnp.exp(-phis_data / (constants.R_d * T_init))
 
     # Temperature: uniform with small perturbation at lowest level
     T_data = jnp.full((nCells, nlev), T_init)
@@ -183,9 +194,6 @@ def held_suarez_init_mpas(
 
     # Velocity: at rest
     u_data = jnp.zeros((nEdges, nlev))
-
-    # Surface geopotential: flat
-    phis_data = jnp.zeros((nCells,))
 
     return MPASHydrostaticState(
         u=Field(data=u_data, name="u", dims=("nEdges", "level"), units="m/s"),

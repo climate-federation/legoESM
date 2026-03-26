@@ -704,18 +704,27 @@ def _make_rest_case(grid, z_coord):
 
 
 def _make_gravity_wave_case(grid, z_coord):
+    """Barotropic gravity wave: Gaussian SSH perturbation using great-circle
+    distance centered at (180E, 0N) with sigma=10 deg.  Consistent with
+    the cubed-sphere reference formulation in run_ocean_tests.py."""
     state = _make_rest_case(grid, z_coord)
     mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
     eta0 = np.asarray(sh_synthesis(grid, state.eta_hat.data).real, dtype=np.float64)
     lon = np.asarray(grid.lon2d, dtype=np.float64)
     lat = np.asarray(grid.lat2d, dtype=np.float64)
-    lon0 = np.pi
-    lat0 = 0.0
-    dlon = ((lon - lon0 + np.pi) % (2.0 * np.pi)) - np.pi
-    dlat = lat - lat0
+    lon0 = np.pi   # 180 degrees east
+    lat0 = 0.0     # equator
     amp = 1.0
-    width = 0.18
-    eta_pert = amp * np.exp(-0.5 * ((dlon / width) ** 2 + (dlat / width) ** 2))
+    sigma_rad = 10.0 * np.pi / 180.0  # 10 degrees in radians
+
+    # Great-circle distance from perturbation center
+    dlon = lon - lon0
+    dist = np.arccos(np.clip(
+        np.sin(lat) * np.sin(lat0)
+        + np.cos(lat) * np.cos(lat0) * np.cos(dlon),
+        -1.0, 1.0,
+    ))
+    eta_pert = amp * np.exp(-0.5 * (dist / sigma_rad) ** 2)
     eta = (eta0 + eta_pert) * mask
     return state._replace(
         eta_hat=state.eta_hat.replace(data=sh_analysis(grid, jnp.asarray(eta))),

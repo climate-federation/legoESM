@@ -1023,11 +1023,15 @@ def isothermal_rest_state_spectral(
     T_init: float = 300.0,
     p_s_init: float = 1e5,
     phis: jnp.ndarray | None = None,
+    perturbation_amplitude: float = 1.0,
+    seed: int = 42,
 ) -> SpectralHydrostaticState:
     """Create an isothermal rest-state initial condition in spectral space.
 
     All fields are at rest (zero winds) with uniform temperature and
-    uniform surface pressure.
+    uniform surface pressure.  A small random temperature perturbation
+    is added at the lowest level to break symmetry and trigger baroclinic
+    instability, matching the cubed-sphere and lat-lon Held-Suarez inits.
 
     Parameters
     ----------
@@ -1043,7 +1047,13 @@ def isothermal_rest_state_spectral(
         Surface geopotential [m^2/s^2], shape (n_lat, n_lon). If None,
         flat terrain is used. When provided, surface pressure is reduced
         hydrostatically: p_s = p_s_init * exp(-phis / (R_d * T_init)).
+    perturbation_amplitude : float
+        Amplitude of temperature perturbation [K] at the lowest level.
+        Set to 0.0 to disable.
+    seed : int
+        Random seed for temperature perturbation.
     """
+    import jax
     from legoesm import constants
 
     nlev = sigma_coord.n_levels
@@ -1056,10 +1066,22 @@ def isothermal_rest_state_spectral(
     vor_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
     div_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
 
-    # Uniform temperature: only the n=0,m=0 mode is nonzero
+    # Uniform temperature with perturbation at lowest level
     T_grid = jnp.full((grid.n_lat, grid.n_lon), T_init, dtype=jnp.float64)
-    T_hat_2d = sh_analysis(grid, T_grid)  # (n_sh,)
-    T_hat = jnp.broadcast_to(T_hat_2d[:, None], (n_sh, nlev)).copy()
+    if perturbation_amplitude != 0.0:
+        key = jax.random.PRNGKey(seed)
+        noise = jax.random.normal(key, (grid.n_lat, grid.n_lon),
+                                  dtype=jnp.float64)
+        T_grid_pert = T_grid + perturbation_amplitude * noise
+    else:
+        T_grid_pert = T_grid
+
+    # Spectral transform: perturbed field for lowest level, uniform elsewhere
+    T_hat_uniform = sh_analysis(grid, T_grid)  # (n_sh,)
+    T_hat = jnp.broadcast_to(T_hat_uniform[:, None], (n_sh, nlev)).copy()
+    if perturbation_amplitude != 0.0:
+        T_hat_pert = sh_analysis(grid, T_grid_pert)  # (n_sh,)
+        T_hat = T_hat.at[:, -1].set(T_hat_pert)
 
     # Surface pressure (hydrostatic adjustment for topography)
     if phis is not None:

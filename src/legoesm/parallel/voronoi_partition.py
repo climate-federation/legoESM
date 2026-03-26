@@ -605,6 +605,101 @@ def scatter_to_local(
 
 
 # ============================================================================
+# Mesh padding for even sharding
+# ============================================================================
+
+def _pad_voronoi_for_sharding(mesh: VoronoiMesh, n_devices: int) -> VoronoiMesh:
+    """Pad cell/edge arrays so their sizes are divisible by *n_devices*.
+
+    Adds ghost cells/edges that are inert in physics:
+    - Ghost cells: ``areaCell=1`` (avoids 0/0 NaN in divergence), all
+      connectivity = -1 (masked by operators), signs/weights = 0.
+    - Ghost edges: ``dvEdge=0`` (zero flux contribution), ``dcEdge=1``
+      (avoids 0/0 in gradient), ``cellsOnEdge=[0,0]`` (valid references
+      for unmasked operators like ``gradient_edge`` and ``cell_to_edge_avg``).
+
+    Returns *mesh* unchanged when no padding is required.
+    """
+    pad_cells = (-mesh.nCells) % n_devices
+    pad_edges = (-mesh.nEdges) % n_devices
+
+    if pad_cells == 0 and pad_edges == 0:
+        return mesh
+
+    # --- helpers ---
+    def pad_1d(arr, n_pad, fill=0.0):
+        if n_pad == 0:
+            return arr
+        return jnp.concatenate([arr, jnp.full((n_pad,), fill, dtype=arr.dtype)])
+
+    def pad_2d_col(arr, n_pad, fill=0):
+        """Pad along axis 1 (entity axis for (K, nEntities) layout)."""
+        if n_pad == 0:
+            return arr
+        K = arr.shape[0]
+        return jnp.concatenate(
+            [arr, jnp.full((K, n_pad), fill, dtype=arr.dtype)], axis=1,
+        )
+
+    return VoronoiMesh(
+        # --- dimensions ---
+        nCells=mesh.nCells + pad_cells,
+        nEdges=mesh.nEdges + pad_edges,
+        nVertices=mesh.nVertices,
+        maxEdges=mesh.maxEdges,
+        vertexDegree=mesh.vertexDegree,
+        radius=mesh.radius,
+        # --- cell coordinates (ghost at origin) ---
+        latCell=pad_1d(mesh.latCell, pad_cells, 0.0),
+        lonCell=pad_1d(mesh.lonCell, pad_cells, 0.0),
+        xCell=pad_1d(mesh.xCell, pad_cells, 0.0),
+        yCell=pad_1d(mesh.yCell, pad_cells, 0.0),
+        zCell=pad_1d(mesh.zCell, pad_cells, 0.0),
+        # --- edge coordinates (ghost at origin) ---
+        latEdge=pad_1d(mesh.latEdge, pad_edges, 0.0),
+        lonEdge=pad_1d(mesh.lonEdge, pad_edges, 0.0),
+        xEdge=pad_1d(mesh.xEdge, pad_edges, 0.0),
+        yEdge=pad_1d(mesh.yEdge, pad_edges, 0.0),
+        zEdge=pad_1d(mesh.zEdge, pad_edges, 0.0),
+        # --- vertex coordinates (unchanged) ---
+        latVertex=mesh.latVertex,
+        lonVertex=mesh.lonVertex,
+        xVertex=mesh.xVertex,
+        yVertex=mesh.yVertex,
+        zVertex=mesh.zVertex,
+        # --- connectivity ---
+        # cellsOnEdge: operators (gradient_edge, cell_to_edge_avg) index
+        # directly without masking, so ghost edges need valid cell refs.
+        cellsOnEdge=pad_2d_col(mesh.cellsOnEdge, pad_edges, fill=0),
+        edgesOnCell=pad_2d_col(mesh.edgesOnCell, pad_cells, fill=-1),
+        verticesOnCell=pad_2d_col(mesh.verticesOnCell, pad_cells, fill=-1),
+        verticesOnEdge=pad_2d_col(mesh.verticesOnEdge, pad_edges, fill=0),
+        edgesOnVertex=mesh.edgesOnVertex,  # vertex-indexed, unchanged
+        cellsOnVertex=mesh.cellsOnVertex,  # vertex-indexed, unchanged
+        cellsOnCell=pad_2d_col(mesh.cellsOnCell, pad_cells, fill=-1),
+        edgesOnEdge=pad_2d_col(mesh.edgesOnEdge, pad_edges, fill=-1),
+        nEdgesOnCell=pad_1d(mesh.nEdgesOnCell, pad_cells, fill=0),
+        nEdgesOnEdge=pad_1d(mesh.nEdgesOnEdge, pad_edges, fill=0),
+        # --- geometry ---
+        # areaCell=1 for ghosts avoids 0/0 NaN in divergence (numerator is
+        # exactly zero because all connectivity = -1 and signs = 0).
+        areaCell=pad_1d(mesh.areaCell, pad_cells, fill=1.0),
+        areaTriangle=mesh.areaTriangle,  # vertex-indexed, unchanged
+        dcEdge=pad_1d(mesh.dcEdge, pad_edges, fill=1.0),  # avoid /0
+        dvEdge=pad_1d(mesh.dvEdge, pad_edges, fill=0.0),  # zero flux
+        angleEdge=pad_1d(mesh.angleEdge, pad_edges, fill=0.0),
+        # --- weights and signs ---
+        weightsOnEdge=pad_2d_col(mesh.weightsOnEdge, pad_edges, fill=0.0),
+        kiteAreasOnVertex=mesh.kiteAreasOnVertex,  # vertex-indexed
+        fEdge=pad_1d(mesh.fEdge, pad_edges, fill=0.0),
+        fVertex=mesh.fVertex,  # vertex-indexed, unchanged
+        edgeSignOnCell=pad_2d_col(mesh.edgeSignOnCell, pad_cells, fill=0.0),
+        edgeSignOnVertex=mesh.edgeSignOnVertex,  # vertex-indexed
+        meshDensity=pad_1d(mesh.meshDensity, pad_cells, fill=0.0),
+    )
+
+
+# ============================================================================
 # Mesh reordering for JAX SPMD sharding
 # ============================================================================
 
@@ -693,7 +788,7 @@ def reorder_voronoi_for_sharding(
         a = np.asarray(arr)
         return jnp.array(a[perm], dtype=arr.dtype)
 
-    return VoronoiMesh(
+    reordered = VoronoiMesh(
         nCells=mesh.nCells,
         nEdges=mesh.nEdges,
         nVertices=mesh.nVertices,
@@ -744,3 +839,6 @@ def reorder_voronoi_for_sharding(
         edgeSignOnVertex=reorder_col(mesh.edgeSignOnVertex, vert_perm),
         meshDensity=reorder_1d(mesh.meshDensity, cell_perm),
     )
+
+    # --- Pad so that nCells and nEdges are divisible by n_devices ---
+    return _pad_voronoi_for_sharding(reordered, n_devices)

@@ -69,7 +69,9 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     g: float = constants.g
     nu_del2: float = 0.0          # del2 viscosity [m²/s]
     nu_del4: float = 0.0          # del4 viscosity [m⁴/s]
+    nu_del4_ps: float = 0.0       # del4 diffusion for surface pressure [m⁴/s]
     K_h: float = 0.0              # scalar diffusion [m²/s]
+    T_min: float = 50.0           # temperature floor [K]
     pv_scheme: str = "energy"     # "energy" or "enstrophy"
     apvm_scale: float = 0.0       # APVM upwinding (0 = off)
     fix_mass: bool = True
@@ -239,6 +241,12 @@ def mpas_hydrostatic_tendencies(
         vert_adv_T = vertical_advection(T_3d, sigma_dot, sigma_coord)
         omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt, sigma_coord)
 
+    # Surface pressure hyperdiffusion: -nu * del2(del2(p_s))
+    if config.nu_del4_ps > 0:
+        del2_ps = divergence_cell(gradient_edge(p_s, mesh), mesh)
+        del4_ps = divergence_cell(gradient_edge(del2_ps, mesh), mesh)
+        dp_s_dt = dp_s_dt - config.nu_del4_ps * del4_ps
+
     # Vertical advection of u: approximate via edge-averaged sigma-dot
     if _hybrid:
         vert_adv_u = _vertical_advection_edge(u_3d, mass_flux, sigma_coord, mesh, hybrid=True, p_s=p_s)
@@ -381,6 +389,13 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         state_new = dispatch_integrator(
             state, tendency_fn, dt, self.config.time_integrator,
         )
+
+        # Temperature floor
+        if self.config.T_min > 0:
+            T_clipped = jnp.maximum(state_new.T.data, self.config.T_min)
+            state_new = state_new._replace(
+                T=state_new.T.replace(data=T_clipped),
+            )
 
         if self.config.fix_mass:
             state_new = _fix_mass_mpas_hydro(state_new, state, self.mesh)

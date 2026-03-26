@@ -1000,6 +1000,10 @@ class ModelDriver:
                     else segment_length > 50
                 ),
                 hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
+                tau_equator=cfg.tau_equator,
+                tau_pole=cfg.tau_pole,
+                sbm_tau_c=cfg.sbm_tau_c,
+                sbm_RH_ref=cfg.sbm_RH_ref,
             )
 
             # Pack state into carry

@@ -134,8 +134,13 @@ class PhysicsPipeline:
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
-                            sw_up_toa, lw_up_toa, sw_down_toa):
+                            sw_up_toa, lw_up_toa, sw_down_toa,
+                            sbm_tau_c=None, sbm_RH_ref=None,
+                            C_H=None, C_E=None):
         """Convection + microphysics + BL exchange with held radiation."""
+        _C_H = self.C_H if C_H is None else C_H
+        _C_E = self.C_E if C_E is None else C_E
+
         ad = self.adapter
         nlev = self.sigma_full.shape[0]
         shape_3d = T.shape
@@ -152,10 +157,17 @@ class PhysicsPipeline:
         p_half_col = p_half.reshape(ad.ncol, nlev + 1)
         q_v_col = ad.flatten_3d(q_v)
 
+        # Override convection config with traced values when provided
+        _conv_cfg = self.convection_config
+        if sbm_tau_c is not None and _conv_cfg is not None:
+            _conv_cfg = _conv_cfg._replace(tau_c=sbm_tau_c)
+        if sbm_RH_ref is not None and _conv_cfg is not None:
+            _conv_cfg = _conv_cfg._replace(RH_ref=sbm_RH_ref)
+
         # Convection (resolved kernel — no dispatch here)
         conv_out = self.convection_fn(
             T=T_col, q_v=q_v_col, p_full=p_full_col, p_half=p_half_col,
-            dt=dt, config=self.convection_config,
+            dt=dt, config=_conv_cfg,
         )
         dT_dt_conv = ad.unflatten_3d(conv_out.dT_dt)
         dq_v_dt_conv = ad.unflatten_3d(conv_out.dq_v_dt)
@@ -198,9 +210,9 @@ class PhysicsPipeline:
         wind_speed = jnp.sqrt(u[..., -1] ** 2 + v[..., -1] ** 2 + 1.0)
         dp_low = p_s * (self.sigma_half[-1] - self.sigma_half[-2])
 
-        shflx = rho_low * constants.c_pd * self.C_H * wind_speed * (T_sfc - T[..., -1])
+        shflx = rho_low * constants.c_pd * _C_H * wind_speed * (T_sfc - T[..., -1])
         q_sat_sfc = saturation_mixing_ratio(T_sfc, p_s)
-        lhflx = rho_low * constants.L_v * self.C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
+        lhflx = rho_low * constants.L_v * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
         evap_rate = lhflx / constants.L_v
 
         dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
@@ -228,7 +240,9 @@ class PhysicsPipeline:
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
                                day_of_year, seconds_of_day,
                                solar_weights, s_0,
-                               o3_vmr_precomputed, aerosol_od_precomputed):
+                               o3_vmr_precomputed, aerosol_od_precomputed,
+                               tau_equator=None, tau_pole=None,
+                               albedo_ice=None, albedo_ocean=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
@@ -236,11 +250,14 @@ class PhysicsPipeline:
         """
         from legoesm.forcing.surface_utils import blend_surface_property
 
+        _albedo_ice = self.albedo_ice if albedo_ice is None else albedo_ice
+        _albedo_ocean = self.albedo_ocean if albedo_ocean is None else albedo_ocean
+
         ad = self.adapter
         nlev = self.sigma_full.shape[0]
 
         T_sfc = blend_surface_temperature(sst, sic, self.T_ice)
-        albedo = blend_surface_property(sic, self.albedo_ice, self.albedo_ocean)
+        albedo = blend_surface_property(sic, _albedo_ice, _albedo_ocean)
         emissivity = blend_surface_property(sic, self.emissivity_ice, self.emissivity_ocean)
 
         p_full = p_s[..., None] * self.sigma_full
@@ -264,6 +281,7 @@ class PhysicsPipeline:
             albedo_col, emis_col,
             o3_vmr_precomputed, aerosol_od_precomputed,
             solar_weights, s_0,
+            tau_equator=tau_equator, tau_pole=tau_pole,
         )
 
         # Unflatten back to native grid shape via adapter
@@ -297,14 +315,21 @@ class PhysicsPipeline:
                          solar_weights, s_0,
                          o3_vmr, aerosol_od,
                          held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa):
+                         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                         tau_equator=None, tau_pole=None,
+                         sbm_tau_c=None, sbm_RH_ref=None,
+                         C_H=pipeline.C_H, C_E=pipeline.C_E,
+                         albedo_ice=pipeline.albedo_ice,
+                         albedo_ocean=pipeline.albedo_ocean):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
                  day_of_year, seconds_of_day, dt,
                  solar_weights, s_0, o3_vmr, aerosol_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = args
+                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                 tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
+                 C_H, C_E, albedo_ice, albedo_ocean) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa) = \
@@ -312,12 +337,16 @@ class PhysicsPipeline:
                         T, p_s, q_v, sst, sic, lat, lon,
                         day_of_year, seconds_of_day,
                         solar_weights, s_0, o3_vmr, aerosol_od,
+                        tau_equator=tau_equator, tau_pole=tau_pole,
+                        albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
                     dT_dt_rad, sw_net_sfc, lw_net_sfc,
                     sw_up_toa, lw_up_toa, sw_down_toa,
+                    sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
+                    C_H=C_H, C_E=C_E,
                 )
 
                 # Cast to common dtype so both lax.cond branches match
@@ -335,12 +364,16 @@ class PhysicsPipeline:
                  day_of_year, seconds_of_day, dt,
                  solar_weights, s_0, o3_vmr, aerosol_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = args
+                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                 tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
+                 C_H, C_E, albedo_ice, albedo_ocean) = args
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                    sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
+                    C_H=C_H, C_E=C_E,
                 )
 
                 # Cast held arrays and physics output to match the dtype
@@ -360,7 +393,8 @@ class PhysicsPipeline:
                     day_of_year, seconds_of_day, dt,
                     solar_weights, s_0, o3_vmr, aerosol_od,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa)
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                    tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref)
 
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 
@@ -397,7 +431,15 @@ def _build_gray_radiation_fn(config):
     def radiation_fn(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
                      lat_col, lon_col, day_of_year, seconds_of_day,
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
-                     solar_weights, s_0=S_0):
+                     solar_weights, s_0=S_0,
+                     tau_equator=None, tau_pole=None):
+        # Rebuild config with traced tau values when provided
+        _cfg = gray_config
+        if tau_equator is not None:
+            _cfg = _cfg._replace(tau_equator=tau_equator)
+        if tau_pole is not None:
+            _cfg = _cfg._replace(tau_pole=tau_pole)
+
         if diurnal:
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
@@ -407,7 +449,7 @@ def _build_gray_radiation_fn(config):
         return gray_radiation(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, lat=lat_col,
-            q_v=q_v_col, insolation=insol, config=gray_config,
+            q_v=q_v_col, insolation=insol, config=_cfg,
         )
 
     return radiation_fn

@@ -339,6 +339,11 @@ def spectral_nh_slow_tendencies(
         dvor_hat = dvor_hat - sponge * state.vor_hat.data
         ddiv_hat = ddiv_hat - sponge * state.div_hat.data
         dtheta_p_hat = dtheta_p_hat - sponge * state.theta_prime_hat.data
+        # Damp w at half-levels (matching cubed-sphere and MPAS dycores)
+        sponge_half = _sponge_profile(
+            height_coord.z_half, H, config.sponge_width, config.sponge_coeff,
+        )  # (nlev+1,)
+        dw_hat = dw_hat - sponge_half * state.w_hat.data
 
     # --- 17. Spectral hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
@@ -732,7 +737,7 @@ class SpectralCompressibleEulerModel:
 
 def dcmip25_tc1_init_spectral(
     grid: GaussianGrid,
-    n_levels: int = 40,
+    n_levels: int = 88,
     params: dict | None = None,
 ) -> tuple['SpectralNHState', HeightCoordinate, 'TerrainMetric']:
     """Initialize DCMIP-2025 TC1 (gravity waves) on Gaussian grid.
