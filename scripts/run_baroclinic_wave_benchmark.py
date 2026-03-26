@@ -21,11 +21,13 @@ generates:
 Supported grids:
   spectral      -- Gaussian grid + spectral PE dycore (default)
   cubed-sphere  -- Cubed-sphere C-D grid + FV3 PE dycore
+  icosahedral   -- MPAS Voronoi mesh + TRiSK PE dycore
 
 Usage:
     JAX_ENABLE_X64=1 python scripts/run_baroclinic_wave_benchmark.py
     JAX_ENABLE_X64=1 python scripts/run_baroclinic_wave_benchmark.py --grid cubed-sphere --resolution C48
     JAX_ENABLE_X64=1 python scripts/run_baroclinic_wave_benchmark.py --grid spectral --resolution T42 --dt 600 --days 10
+    JAX_ENABLE_X64=1 python scripts/run_baroclinic_wave_benchmark.py --grid icosahedral --resolution 5 --dt 150 --days 10
 
 References:
     Jablonowski & Williamson (2006), QJRMS 132, 2943-2975.
@@ -69,7 +71,7 @@ from legoesm.core.cfl import (
 )
 from legoesm import constants
 
-GRID_CHOICES = ("spectral", "cubed-sphere")
+GRID_CHOICES = ("spectral", "cubed-sphere", "icosahedral")
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +195,12 @@ def compute_dry_mass(
 # ---------------------------------------------------------------------------
 
 def _parse_resolution(res_str: str, grid_type: str) -> int:
-    """Parse a resolution string like 'C48', 'T42', or plain '48'."""
+    """Parse a resolution string like 'C48', 'T42', 'I5', or plain '48'."""
     s = res_str.strip().upper()
     if grid_type == "spectral":
         return int(s.lstrip("T"))
+    elif grid_type == "icosahedral":
+        return int(s.lstrip("I"))
     else:
         return int(s.lstrip("C"))
 
@@ -205,13 +209,38 @@ def _default_resolution(grid_type: str) -> str:
     """Return a sensible default resolution string for each grid type."""
     if grid_type == "spectral":
         return "T42"
+    elif grid_type == "icosahedral":
+        return "5"  # subdivision level 5 → 10242 cells (~120 km)
     return "C48"
 
 
 def _default_dt(grid_type: str) -> float:
     if grid_type == "spectral":
         return 600.0
+    elif grid_type == "icosahedral":
+        return 150.0
     return 450.0
+
+
+def _estimate_min_dx_icosahedral(level: int, radius: float = 6.371229e6) -> float:
+    """Estimate minimum grid spacing on an icosahedral Voronoi mesh.
+
+    Parameters
+    ----------
+    level : int
+        Subdivision level.  nCells = 10 * 4^level + 2.
+    radius : float
+        Sphere radius [m].
+
+    Returns
+    -------
+    dx_min : float
+        Approximate minimum grid spacing [m].
+    """
+    n_cells = 10 * 4 ** level + 2
+    dx_avg = radius * np.sqrt(4.0 * np.pi / n_cells)
+    # SCVT meshes are very uniform; min dx ≈ 0.9 * mean dx
+    return float(0.9 * dx_avg)
 
 
 def main():
@@ -225,7 +254,8 @@ def main():
     parser.add_argument(
         "--resolution", type=str, default=None,
         help="Resolution: T<n> for spectral (e.g. T42), C<n> for cubed-sphere "
-             "(e.g. C48).  Defaults: T42 / C48."
+             "(e.g. C48), subdivision level for icosahedral (e.g. 5).  "
+             "Defaults: T42 / C48 / 5."
     )
     parser.add_argument(
         "--nlev", type=int, default=26,
@@ -233,7 +263,7 @@ def main():
     )
     parser.add_argument(
         "--dt", type=float, default=None,
-        help="Time step in seconds (default: 600 spectral, 450 cubed-sphere)"
+        help="Time step in seconds (default: 600 spectral, 450 cubed-sphere, 150 icosahedral)"
     )
     parser.add_argument(
         "--days", type=int, default=10,
@@ -254,21 +284,44 @@ def main():
     OUTPUT_DIR = Path(args.output_dir)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     USE_SPECTRAL = grid_type == "spectral"
+    USE_ICOSAHEDRAL = grid_type == "icosahedral"
 
-    # CFL check
-    DT = cfl_check_and_adjust(
-        DT, N_GRID, model_type="primitive_eq",
-        max_wind=60.0, gravity_wave_speed=300.0,
-    )
-
-    # Hyperdiffusion
+    # Grid spacing estimate
     if USE_SPECTRAL:
         dx_min = estimate_min_dx_gaussian(N_GRID)
+    elif USE_ICOSAHEDRAL:
+        dx_min = _estimate_min_dx_icosahedral(N_GRID)
     else:
         dx_min = estimate_min_dx_cubed_sphere(N_GRID)
+
+    # CFL check (manual for icosahedral since cfl_check_and_adjust expects
+    # cubed-sphere resolution parameter)
+    if USE_ICOSAHEDRAL:
+        from legoesm.core.cfl import cfl_max_dt
+        dt_max = cfl_max_dt(dx_min, 60.0 + 300.0, cfl_number=0.8, ndim=2)
+        if DT > dt_max:
+            nice_values = [600, 450, 300, 240, 200, 180, 150, 120, 100, 90, 60, 45, 30]
+            DT = dt_max
+            for nv in nice_values:
+                if nv <= dt_max:
+                    DT = float(nv)
+                    break
+    else:
+        DT = cfl_check_and_adjust(
+            DT, N_GRID, model_type="primitive_eq",
+            max_wind=60.0, gravity_wave_speed=300.0,
+        )
+
+    # Hyperdiffusion
     nu4 = adaptive_hyperdiff_coeff(dx_min, DT, order=4, safety=0.5)
 
-    res_label = f"T{N_GRID}" if USE_SPECTRAL else f"C{N_GRID}"
+    if USE_SPECTRAL:
+        res_label = f"T{N_GRID}"
+    elif USE_ICOSAHEDRAL:
+        n_cells = 10 * 4 ** N_GRID + 2
+        res_label = f"I{N_GRID}({n_cells})"
+    else:
+        res_label = f"C{N_GRID}"
     print("=" * 72)
     print("  Dry Baroclinic Wave Benchmark (CliMA Figure 3)")
     print("=" * 72)
@@ -319,6 +372,34 @@ def main():
         )
         model = SpectralPrimitiveEquationModel(grid, sigma, config)
 
+    elif USE_ICOSAHEDRAL:
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel,
+            MPASPrimitiveEquationConfig,
+        )
+        from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+
+        grid = create_voronoi_mesh(subdivision_level=N_GRID)
+        cdgrid = None
+
+        print("Initializing Jablonowski-Williamson baroclinic wave (icosahedral)...")
+        state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
+        ps_init = np.array(state.p_s.data)
+        u_e, v_n = reconstruct_cell_velocity(state.u.data, grid)
+        print(f"  Initial max |u|: {float(jnp.max(jnp.sqrt(u_e**2 + v_n**2))):.1f} m/s")
+        print(f"  Initial mean T:  {float(jnp.mean(state.T.data)):.1f} K")
+        print(f"  Initial p_s:     {float(jnp.mean(state.p_s.data)) / 100:.1f} hPa")
+
+        config = MPASPrimitiveEquationConfig(
+            nu_del4=nu4,
+            fix_mass=True,
+            pv_scheme="energy",
+            time_integrator="ssp_rk3",
+        )
+        model = MPASPrimitiveEquationModel(grid, sigma, config)
+
     else:
         from legoesm.grids.cubed_sphere import (
             CubedSphereGrid,
@@ -365,6 +446,9 @@ def main():
         if USE_SPECTRAL:
             gp = spectral_pe_to_grid(st, grid, sigma)
             return gp['p_s'], gp['u'], gp['v'], gp['T']
+        elif USE_ICOSAHEDRAL:
+            u_e, v_n = reconstruct_cell_velocity(st.u.data, grid)
+            return st.p_s.data, u_e, v_n, st.T.data
         else:
             cc = fv3_to_hydrostatic(st, cdgrid)
             u_c, v_c = dgrid_to_center_vector(st.u_d.data, st.v_d.data)
@@ -399,6 +483,16 @@ def main():
         dsigma = sigma.dsigma
         mass_init = float(jnp.sum(ps0 * area) / constants.g)
         dp0 = ps0[..., None] * dsigma
+        KE0 = 0.5 * (u0 ** 2 + v0 ** 2)
+        energy_init = float(jnp.sum(
+            jnp.sum((KE0 + constants.c_vd * T0) * dp0 / constants.g, axis=-1)
+            * area
+        ))
+    elif USE_ICOSAHEDRAL:
+        area = grid.areaCell  # (nCells,)
+        dsigma = sigma.dsigma
+        mass_init = float(jnp.sum(ps0 * area) / constants.g)
+        dp0 = ps0[..., None] * dsigma  # (nCells, nlev)
         KE0 = 0.5 * (u0 ** 2 + v0 ** 2)
         energy_init = float(jnp.sum(
             jnp.sum((KE0 + constants.c_vd * T0) * dp0 / constants.g, axis=-1)
@@ -445,7 +539,7 @@ def main():
         # Hourly diagnostics
         if current_step % diag_interval_steps == 0:
             ps_now, u_now, v_now, T_now = _get_grid_fields(state)
-            if USE_SPECTRAL:
+            if USE_SPECTRAL or USE_ICOSAHEDRAL:
                 mass_now = float(jnp.sum(ps_now * area) / constants.g)
                 dp_now = ps_now[..., None] * dsigma
                 KE_now = 0.5 * (u_now ** 2 + v_now ** 2)
@@ -541,6 +635,42 @@ def main():
         def _field_to_latlon(field_2d):
             """Identity — spectral data is already (n_lat, n_lon)."""
             return np.array(field_2d)
+    elif USE_ICOSAHEDRAL:
+        # Icosahedral: regrid unstructured cell-center data to regular lat-lon
+        lon_cell = np.array(grid.lonCell)   # (nCells,), radians
+        lat_cell = np.array(grid.latCell)   # (nCells,), radians
+
+        n_lon_plot = 360
+        n_lat_plot = 180
+        lon_ll = np.linspace(0, 2 * np.pi, n_lon_plot, endpoint=False)
+        lat_ll = np.linspace(-np.pi / 2, np.pi / 2, n_lat_plot)
+
+        # Build k-d tree once for reuse across all fields
+        from scipy.spatial import cKDTree
+        cos_lat_c = np.cos(lat_cell)
+        _ico_tree = cKDTree(np.column_stack([
+            cos_lat_c * np.cos(lon_cell),
+            cos_lat_c * np.sin(lon_cell),
+            np.sin(lat_cell),
+        ]))
+        lon2d_t, lat2d_t = np.meshgrid(lon_ll, lat_ll)
+        cos_lat_t = np.cos(lat2d_t.ravel())
+        _ico_target_xyz = np.column_stack([
+            cos_lat_t * np.cos(lon2d_t.ravel()),
+            cos_lat_t * np.sin(lon2d_t.ravel()),
+            np.sin(lat2d_t.ravel()),
+        ])
+        _ico_dist, _ico_idx = _ico_tree.query(_ico_target_xyz, k=4)
+        _ico_dist = np.maximum(_ico_dist, 1e-15)
+        _ico_w = 1.0 / _ico_dist
+        _ico_w /= _ico_w.sum(axis=1, keepdims=True)
+
+        def _field_to_latlon(field_cells):
+            """IDW interpolation from unstructured cells to lat-lon."""
+            flat = np.asarray(field_cells).ravel()
+            return np.sum(_ico_w * flat[_ico_idx], axis=1).reshape(
+                len(lat_ll), len(lon_ll)
+            )
     else:
         from legoesm.grids.cubed_sphere import rotate_winds_grid_to_geo
         lon_cs = np.array(grid.lon)   # (6, n, n), radians
@@ -656,10 +786,17 @@ def main():
             u_snap = snap['u']
             v_snap = snap['v']
 
-            if USE_SPECTRAL:
-                # Winds are already geographic (east, north) on lat-lon
-                u_east_850_ll = u_snap[..., k_850]
-                v_north_850_ll = v_snap[..., k_850]
+            if USE_SPECTRAL or USE_ICOSAHEDRAL:
+                # Winds are already geographic (east, north);
+                # for icosahedral, Perot reconstruction gives (u_east, v_north)
+                u_850 = u_snap[..., k_850]
+                v_850 = v_snap[..., k_850]
+                if USE_ICOSAHEDRAL:
+                    u_east_850_ll = _field_to_latlon(u_850)
+                    v_north_850_ll = _field_to_latlon(v_850)
+                else:
+                    u_east_850_ll = u_850
+                    v_north_850_ll = v_850
             else:
                 # Rotate grid-aligned winds to geographic
                 u_east_3d = np.zeros_like(u_snap)
@@ -717,7 +854,12 @@ def main():
                 ax.set_ylim(0, 90)
             ax.set_title(f"850 hPa relative vorticity, day {day}", fontsize=11)
 
-        dycore_label = "spectral PE" if USE_SPECTRAL else "C-D grid PE"
+        if USE_SPECTRAL:
+            dycore_label = "spectral PE"
+        elif USE_ICOSAHEDRAL:
+            dycore_label = "MPAS TRiSK PE"
+        else:
+            dycore_label = "C-D grid PE"
         plt.suptitle(
             f"Dry Baroclinic Wave Benchmark  |  {res_label} L{N_LEV}  |  "
             f"dt={DT:.0f}s  |  legoESM {dycore_label}",

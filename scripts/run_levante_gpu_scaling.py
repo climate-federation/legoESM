@@ -7,6 +7,7 @@ wall-clock time per step and SYPD across varying GPU counts and resolutions.
 Supported grids:
   spectral      -- Gaussian grid + spectral PE dycore (default)
   cubed-sphere  -- Cubed-sphere C-D grid + FV3 PE dycore
+  icosahedral   -- MPAS Voronoi mesh + TRiSK PE dycore
 
 Two modes:
   weak   -- fix problem size per GPU, increase resolution with GPU count
@@ -95,7 +96,7 @@ class ScalingReport:
             self.timestamp_utc = datetime.now(timezone.utc).isoformat()
 
 
-GRID_CHOICES = ("spectral", "cubed-sphere")
+GRID_CHOICES = ("spectral", "cubed-sphere", "icosahedral")
 
 # ===========================================================================
 # Resolution/GPU ladders
@@ -107,15 +108,34 @@ GRID_CHOICES = ("spectral", "cubed-sphere")
 # => N = N_base * sqrt(k).  We round to the nearest even integer.
 WEAK_SCALING_BASE_N = 24  # ~24x24 per face on 1 GPU => ~400 km
 
+# Icosahedral weak scaling: subdivision level as base.
+# nCells = 10*4^level + 2.  With k GPUs we want roughly k times as many
+# cells, so pick the level whose cell count best matches k * base_cells.
+WEAK_SCALING_BASE_LEVEL_ICO = 4  # 2562 cells on 1 GPU
+
 def _weak_resolution(n_gpus: int, base_n: int = WEAK_SCALING_BASE_N) -> int:
     """Compute resolution for weak scaling at a given GPU count."""
     n_raw = base_n * math.sqrt(n_gpus)
     n_rounded = max(4, 2 * round(n_raw / 2))  # even number, min 4
     return n_rounded
 
+def _weak_resolution_ico(n_gpus: int, base_level: int = WEAK_SCALING_BASE_LEVEL_ICO) -> int:
+    """Compute icosahedral subdivision level for weak scaling."""
+    base_cells = 10 * 4 ** base_level + 2
+    target_cells = base_cells * n_gpus
+    # Find level whose cell count is closest to target
+    best_level = base_level
+    for lev in range(2, 10):
+        cells = 10 * 4 ** lev + 2
+        if cells >= target_cells * 0.7:
+            best_level = lev
+            break
+    return best_level
+
 # Strong scaling: fixed resolutions, sweep GPU counts.
 STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km
 STRONG_RESOLUTIONS_SP = [42, 85, 170]   # spectral: T42, T85, T170
+STRONG_RESOLUTIONS_ICO = [4, 5, 6]      # icosahedral: levels 4, 5, 6
 
 # GPU counts to sweep (must satisfy cubed-sphere tiling constraints).
 GPU_COUNTS = [1, 2, 3, 6, 24, 54, 96]  # 1-6 divide faces; >6 must be 6*k^2
@@ -155,6 +175,11 @@ def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
         # Gaussian grid: dx_min ~ pi * R / n_lon at equator, n_lon = 2*(n_max+1)
         n_lon = 2 * (n_grid + 1)
         dx_min = math.pi * R / n_lon
+    elif grid_type == "icosahedral":
+        # Voronoi SCVT: n_grid is subdivision level, nCells = 10*4^level + 2
+        n_cells = 10 * 4 ** n_grid + 2
+        dx_avg = R * math.sqrt(4.0 * math.pi / n_cells)
+        dx_min = 0.9 * dx_avg
     else:
         # Cubed sphere: dx_min ~ (pi/2) * R / (n * sqrt(3))
         dx_min = (math.pi / 2) * R / (n_grid * math.sqrt(3))
@@ -175,6 +200,16 @@ def _hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     if grid_type == "spectral":
         ref_n = 42
         ref_coeff = 2.5e16
+    elif grid_type == "icosahedral":
+        # For icosahedral, n_grid is a subdivision level.  Scale the
+        # coefficient with dx^4 relative to level 5 (~120 km).
+        R = 6.371229e6
+        ref_cells = 10 * 4 ** 5 + 2
+        cur_cells = 10 * 4 ** n_grid + 2
+        dx_ref = R * math.sqrt(4.0 * math.pi / ref_cells)
+        dx_cur = R * math.sqrt(4.0 * math.pi / cur_cells)
+        ref_coeff = 5e16
+        return ref_coeff * (dx_cur / dx_ref) ** 4
     else:
         ref_n = 48
         ref_coeff = 5e16
@@ -243,6 +278,26 @@ def run_benchmark(
         n_lat = grid.n_lat
         n_lon = grid.n_lon
         total_cells = n_lat * n_lon * n_levels
+    elif grid_type == "icosahedral":
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+            MPASPrimitiveEquationModel,
+            MPASPrimitiveEquationConfig,
+        )
+        from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
+
+        grid = create_voronoi_mesh(subdivision_level=n_grid)
+        hd = _hyperdiff_coeff(n_grid, grid_type)
+        config = MPASPrimitiveEquationConfig(
+            nu_del4=hd,
+            fix_mass=True,
+            pv_scheme="energy",
+            time_integrator="ssp_rk3",
+        )
+        model = MPASPrimitiveEquationModel(grid, sigma, config)
+        state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
+
+        total_cells = grid.nCells * n_levels
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
@@ -277,7 +332,12 @@ def run_benchmark(
 
     cells_per_gpu = total_cells // max(1, n_gpus)
 
-    res_label = f"T{n_grid}" if grid_type == "spectral" else f"C{n_grid}"
+    if grid_type == "spectral":
+        res_label = f"T{n_grid}"
+    elif grid_type == "icosahedral":
+        res_label = f"I{n_grid}"
+    else:
+        res_label = f"C{n_grid}"
     print(
         f"  [{precision}] {res_label}/L{n_levels} on {n_gpus} GPU(s) | "
         f"dt={dt:.0f}s | cells={total_cells:,} | cells/GPU={cells_per_gpu:,}",
@@ -368,7 +428,12 @@ def run_weak_scaling(
     gpu_counts = _valid_gpu_counts(n_gpus)
     results: list[TimingResult] = []
 
-    res_prefix = "T" if grid_type == "spectral" else "C"
+    if grid_type == "spectral":
+        res_prefix = "T"
+    elif grid_type == "icosahedral":
+        res_prefix = "I"
+    else:
+        res_prefix = "C"
     print(f"\n{'='*72}")
     print(f"WEAK SCALING ({grid_type}, base N={base_n}, {n_levels} levels)")
     print(f"GPU counts: {gpu_counts}")
@@ -377,7 +442,10 @@ def run_weak_scaling(
     for prec in precisions:
         _configure_jax(prec)
         for ng in gpu_counts:
-            n_grid = _weak_resolution(ng, base_n)
+            if grid_type == "icosahedral":
+                n_grid = _weak_resolution_ico(ng, base_n)
+            else:
+                n_grid = _weak_resolution(ng, base_n)
             print(f"\n--- {ng} GPU(s), {res_prefix}{n_grid} ---")
             try:
                 result = run_benchmark(
@@ -424,14 +492,27 @@ def run_strong_scaling(
 
     gpu_counts = _valid_gpu_counts(n_gpus)
     if resolutions is None:
-        defaults = STRONG_RESOLUTIONS_SP if grid_type == "spectral" else STRONG_RESOLUTIONS_CS
-        resolutions = [r for r in defaults if r >= 2 * min(gpu_counts)]
+        if grid_type == "spectral":
+            defaults = STRONG_RESOLUTIONS_SP
+        elif grid_type == "icosahedral":
+            defaults = STRONG_RESOLUTIONS_ICO
+        else:
+            defaults = STRONG_RESOLUTIONS_CS
+        if grid_type == "icosahedral":
+            resolutions = defaults  # levels don't need GPU-count filtering
+        else:
+            resolutions = [r for r in defaults if r >= 2 * min(gpu_counts)]
         if not resolutions:
             resolutions = [defaults[0]]
 
     results: list[TimingResult] = []
 
-    res_prefix = "T" if grid_type == "spectral" else "C"
+    if grid_type == "spectral":
+        res_prefix = "T"
+    elif grid_type == "icosahedral":
+        res_prefix = "I"
+    else:
+        res_prefix = "C"
     print(f"\n{'='*72}")
     print(f"STRONG SCALING ({grid_type}, {n_levels} levels)")
     print(f"Resolutions: {[res_prefix+str(r) for r in resolutions]}")
@@ -442,8 +523,17 @@ def run_strong_scaling(
         _configure_jax(prec)
         for n_grid in resolutions:
             for ng in gpu_counts:
-                # Skip if grid is too small for this many GPUs (cubed-sphere only)
-                if grid_type == "cubed-sphere":
+                # Skip if grid is too small for this many GPUs
+                if grid_type == "icosahedral":
+                    n_cells_ico = 10 * 4 ** n_grid + 2
+                    if n_cells_ico < ng * 10:
+                        print(
+                            f"\n--- {ng} GPU(s), {res_prefix}{n_grid} --- SKIPPED "
+                            f"(grid too small for {ng} GPUs)",
+                            flush=True,
+                        )
+                        continue
+                elif grid_type == "cubed-sphere":
                     cells_per_face = n_grid * n_grid
                     if ng > 6 and cells_per_face < 16:
                         print(
@@ -539,7 +629,7 @@ def print_summary_table(results: list[TimingResult], mode: str) -> None:
 
     for r in sorted(results, key=lambda x: (x.precision, x.resolution, x.n_gpus)):
         print(
-            f"{r.precision:>7s} | {r.n_gpus:>5d} | C{r.resolution:<4d} | "
+            f"{r.precision:>7s} | {r.n_gpus:>5d} | {r.resolution:<5d} | "
             f"{r.n_levels:>3d} | {r.dt_seconds:>6.0f} | "
             f"{r.time_per_step_ms:>9.2f} | {r.sypd:>8.3f} | "
             f"{r.mcells_per_s:>9.1f} | {r.scaling_efficiency:>5.1%}"
@@ -579,7 +669,7 @@ def plot_weak_scaling(results: list[TimingResult], output_dir: Path) -> None:
             continue
         gpus = [r.n_gpus for r in prec_data]
         ms_per_step = [r.time_per_step_ms for r in prec_data]
-        resolutions = [f"C{r.resolution}" for r in prec_data]
+        resolutions = [f"{r.resolution}" for r in prec_data]
 
         ax.plot(
             gpus, ms_per_step,
@@ -671,7 +761,7 @@ def plot_strong_scaling(results: list[TimingResult], output_dir: Path) -> None:
             gpus = [r.n_gpus for r in group]
             sypd = [r.sypd for r in group]
 
-            label = f"C{n_grid} ({prec})"
+            label = f"{n_grid} ({prec})"
             color = resolution_colors.get(n_grid, "#666")
 
             ax.plot(
@@ -772,7 +862,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--strong-resolutions", type=str, default=None,
         help="Comma-separated resolutions for strong scaling "
-             "(default: 42,85,170 spectral / 48,96,192 cubed-sphere).",
+             "(default: 42,85,170 spectral / 48,96,192 cubed-sphere / "
+             "4,5,6 icosahedral).",
     )
     p.add_argument(
         "--output-dir", type=str, default="output/scaling",

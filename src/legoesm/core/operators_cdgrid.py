@@ -757,17 +757,18 @@ def _laplacian_dgrid(u_d, cdgrid):
 # ==============================================================================
 
 def _extrapolate_boundary_corners(du, dv, n):
-    """Blend D-grid boundary-corner tendencies toward interior values.
+    """Fix momentum tendencies at the 8 cube vertices.
 
-    The D-grid vorticity flux and Bernoulli gradient suffer from poor
-    geostrophic cancellation at face-boundary corners because the
-    vorticity stencil uses face-local D-grid data while the gradient
-    stencil uses cross-face haloed cell-centre data.  The mismatch is
-    largest at cube vertices where cos(alpha) = +/-0.5.
+    The Bernoulli gradient has an O(1) cancellation error at cube
+    vertices (where cosa = ±0.5) because the non-orthogonality
+    correction amplifies the gradient truncation error.  Diagnostic
+    analysis shows the error is 100x larger at vertices than at
+    edge-interior points, which have normal-sized errors.
 
-    Blends boundary-row tendency values with the nearest interior
-    neighbour (w=0.5).  Vertices (where 3 faces meet) are replaced with
-    the average of the two adjacent edge values.
+    Replace vertex-corner tendencies with the average of their 2
+    nearest edge-interior neighbours.  Edge-interior corners (along
+    face boundaries but NOT at vertices) are left unchanged — their
+    errors are comparable to interior points.
 
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
 
@@ -778,24 +779,8 @@ def _extrapolate_boundary_corners(du, dv, n):
 
     Returns
     -------
-    du, dv : jax.Array with blended boundary values
+    du, dv : jax.Array with fixed vertex values
     """
-    w = 0.5
-
-    # West (i=0): blend with i=1
-    du = du.at[:, 0, 1:-1].set((1 - w) * du[:, 0, 1:-1] + w * du[:, 1, 1:-1])
-    dv = dv.at[:, 0, 1:-1].set((1 - w) * dv[:, 0, 1:-1] + w * dv[:, 1, 1:-1])
-    # East (i=n): blend with i=n-1
-    du = du.at[:, n, 1:-1].set((1 - w) * du[:, n, 1:-1] + w * du[:, n - 1, 1:-1])
-    dv = dv.at[:, n, 1:-1].set((1 - w) * dv[:, n, 1:-1] + w * dv[:, n - 1, 1:-1])
-    # South (j=0): blend with j=1
-    du = du.at[:, 1:-1, 0].set((1 - w) * du[:, 1:-1, 0] + w * du[:, 1:-1, 1])
-    dv = dv.at[:, 1:-1, 0].set((1 - w) * dv[:, 1:-1, 0] + w * dv[:, 1:-1, 1])
-    # North (j=n): blend with j=n-1
-    du = du.at[:, 1:-1, n].set((1 - w) * du[:, 1:-1, n] + w * du[:, 1:-1, n - 1])
-    dv = dv.at[:, 1:-1, n].set((1 - w) * dv[:, 1:-1, n] + w * dv[:, 1:-1, n - 1])
-
-    # Vertex corners: average of the two adjacent edge values
     corners = [
         ((0, 0), (1, 0), (0, 1)),
         ((n, 0), (n - 1, 0), (n, 1)),
