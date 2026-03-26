@@ -1024,8 +1024,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-            CDGridShallowWaterModel, CDGridShallowWaterConfig)
-        from legoesm.grids.halo import pad_halo_vector
+            FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
+            CDGridShallowWaterConfig)
         from tests.test_cases.williamson import (
             williamson_test2, williamson_test5,
             williamson_test2_exact, compute_error_norms)
@@ -1037,28 +1037,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=_hyperdiff_cube(n),
             div_damp=_div_damp_cube(n))
-        model = CDGridShallowWaterModel(grid, config)
-
-        # Initialise D-grid corners directly using corner lat/angles.
-        sw = williamson_test2(grid) if test_num == 2 else williamson_test5(grid)
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterState
+        model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
-        ca_c = cdgrid.cos_angle_corner
-        sa_c = cdgrid.sin_angle_corner
 
-        # Geographic winds at D-grid corners from the cell-centre Williamson init
-        u_east_a = grid.cos_angle * sw.u.data - grid.sin_angle * sw.v.data
-        v_north_a = grid.sin_angle * sw.u.data + grid.cos_angle * sw.v.data
-        from legoesm.grids.halo import pad_halo
-        ue_pad = pad_halo(u_east_a, interp_offsets=grid.halo_interp_offsets)
-        vn_pad = pad_halo(v_north_a, interp_offsets=grid.halo_interp_offsets)
-        u_east_corner = 0.25 * (ue_pad[:, :-1, :-1] + ue_pad[:, 1:, :-1]
-                                + ue_pad[:, :-1, 1:] + ue_pad[:, 1:, 1:])
-        v_north_corner = 0.25 * (vn_pad[:, :-1, :-1] + vn_pad[:, 1:, :-1]
-                                 + vn_pad[:, :-1, 1:] + vn_pad[:, 1:, 1:])
-        u_d = ca_c * u_east_corner + sa_c * v_north_corner
-        v_d = -sa_c * u_east_corner + ca_c * v_north_corner
-        state = CDGridShallowWaterState(h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        # Initialise edge-midpoint D-grid winds analytically.
+        sw = williamson_test2(grid) if test_num == 2 else williamson_test5(grid)
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
+        u_d = cdgrid.cos_angle_edge_x * u_east_x
+        u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
+        v_d = -cdgrid.sin_angle_edge_y * u_east_y
+        state = FV3EdgeShallowWaterState(
+            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
+        model.set_initial_mass(state)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
@@ -1073,20 +1064,21 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 "max_wind": float(jnp.max(jnp.abs(s.u_d))),
             }
 
-        # Regrid wind from D-grid corners to lat-lon (no edge artifacts
-        # because boundary corners are synced).
-        from legoesm.grids.regridding import apply_cubedsphere_corners_to_latlon
+        # Regrid wind from cell-centre averages of edge-midpoint winds.
         _cs_w = _get_cs_weights(n)
 
         def extract_fn(s):
-            u_d = np.asarray(s.u_d, dtype=np.float64)
-            v_d = np.asarray(s.v_d, dtype=np.float64)
-            ca_c = np.asarray(cdgrid.cos_angle_corner, dtype=np.float64)
-            sa_c = np.asarray(cdgrid.sin_angle_corner, dtype=np.float64)
-            u_east_d = ca_c * u_d - sa_c * v_d
-            v_north_d = sa_c * u_d + ca_c * v_d
-            u_ll = apply_cubedsphere_corners_to_latlon(u_east_d, _cs_w)
-            v_ll = apply_cubedsphere_corners_to_latlon(v_north_d, _cs_w)
+            # Average edge-midpoint winds to cell centres, then regrid
+            u_cc = 0.5 * (np.asarray(s.u_d, dtype=np.float64)[:, :, :-1]
+                          + np.asarray(s.u_d, dtype=np.float64)[:, :, 1:])
+            v_cc = 0.5 * (np.asarray(s.v_d, dtype=np.float64)[:, :-1, :]
+                          + np.asarray(s.v_d, dtype=np.float64)[:, 1:, :])
+            ca = np.asarray(grid.cos_angle, dtype=np.float64)
+            sa = np.asarray(grid.sin_angle, dtype=np.float64)
+            u_east = ca * u_cc - sa * v_cc
+            v_north = sa * u_cc + ca * v_cc
+            u_ll = _regrid_2d(u_east, lon_deg, lat_deg, coord_kind)
+            v_ll = _regrid_2d(v_north, lon_deg, lat_deg, coord_kind)
             return {"u": u_ll, "v": v_ll,
                     "wind_speed": np.sqrt(u_ll ** 2 + v_ll ** 2),
                     "height": np.asarray(s.h, dtype=np.float64)}

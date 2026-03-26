@@ -344,8 +344,15 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         alpha = 0.2
         n = self.cdgrid.n
         u_cc, v_cc = fv3_d2cc(state_new.u_d, state_new.v_d, self.cdgrid)
-        u_cc_pad = _pad_halo_auto(u_cc, self.cdgrid)
-        v_cc_pad = _pad_halo_auto(v_cc, self.cdgrid)
+        # Vector halo exchange: rotates wind components at face boundaries
+        from legoesm.grids.halo import pad_halo_vector
+        grid = self.cdgrid.base
+        u_cc_pad, v_cc_pad = pad_halo_vector(
+            u_cc, v_cc,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=grid.halo_interp_offsets,
+        )
         u_dad = 0.5 * (u_cc_pad[:, 1:-1, :-1] + u_cc_pad[:, 1:-1, 1:])
         v_dad = 0.5 * (v_cc_pad[:, :-1, 1:-1] + v_cc_pad[:, 1:, 1:-1])
         u_f = (1.0 - alpha) * state_new.u_d + alpha * u_dad[:, :n, :n+1]

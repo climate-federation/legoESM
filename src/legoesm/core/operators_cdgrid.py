@@ -1047,10 +1047,15 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
         interp_offsets=grid.halo_interp_offsets,
     )
 
-    # Average cell-centre velocities to face positions.
-    # The halo exchange already handles cross-face vector rotation,
-    # so the interpolated values are in the correct local basis.
-    u_c = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])  # (6, n+1, n)
+    # Average cell-centre velocities to C-grid face positions with
+    # non-orthogonality correction for the edge-normal projection
+    # (same correction that dgrid_to_cgrid applies for corner D-grid).
+    u_avg = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])  # (6, n+1, n)
+    v_at_u = 0.5 * (v_pad[:, :-1, 1:-1] + v_pad[:, 1:, 1:-1])  # v at u_c pos
+    cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, 1e-12))
+    u_c = u_avg * sina_u - v_at_u * cosa_u
+
     v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])  # (6, n, n+1)
 
     return u_c, v_c
@@ -1109,42 +1114,64 @@ def fv3_sw_tendencies(
     """
     n = cdgrid.n
 
-    # (a) D -> cell-centre -> C-grid velocities for mass transport
+    # (a) Cell-centre and C-grid velocities for mass transport
     u_cc, v_cc, u_c, v_c = fv3_d2cc2c(u_d, v_d, cdgrid)
 
     # (b) Height tendency (PPM mass flux divergence)
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
-
-    # Zero-mean correction for mass conservation
     total_area = jnp.sum(cdgrid.base.area)
     dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
-    # (c) Corner winds via haloed cell-centre round-trip.
-    # Direct edge-midpoint padding with mode='edge' fails at face
-    # boundaries (copies boundary value instead of cross-face data).
-    # Instead: edge-midpoint -> cell-centre -> halo exchange -> corners.
-    from legoesm.grids.halo import pad_halo_vector
-    grid = cdgrid.base
-    u_pad, v_pad = pad_halo_vector(
-        u_cc, v_cc,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
-    )
-    u_corner = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
-                        + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
-    v_corner = 0.25 * (v_pad[:, :-1, :-1] + v_pad[:, 1:, :-1]
-                        + v_pad[:, :-1, 1:] + v_pad[:, 1:, 1:])
+    # (c) Bernoulli function from ORIGINAL cell-centre winds.
+    # Computing KE here (not inside cdgrid_momentum_tendencies) avoids
+    # the double-averaging that occurs when corner winds are averaged
+    # back to cell centres for KE.
+    KE = 0.5 * (u_cc ** 2 + v_cc ** 2)
+    B = KE + g * (h + h_s)
+    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
-    # (d) Corner-based momentum tendencies (stable compact stencil)
-    du_corner, dv_corner = cdgrid_momentum_tendencies(
-        h, u_corner, v_corner, h_s, cdgrid,
-        g=g, A_h=0.0,
-        hyperdiff_coeff=hyperdiff_coeff,
-        div_damp=div_damp,
-    )
+    # (d) Corner winds from edge midpoints for vorticity computation.
+    # mode='edge' padding is acceptable here because the vorticity
+    # circulation uses edge lengths (exact) and the boundary error
+    # is limited to the outermost cell row.
+    u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    u_corner = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])
+    v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    v_corner = 0.5 * (v_d_pad[:, :, :-1] + v_d_pad[:, :, 1:])
 
-    # (e) Average corner tendencies to edge-midpoint positions
+    # (e) Vorticity at cell centres → interpolated to corners
+    zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
+    zeta_abs = zeta + cdgrid.base.f
+    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
+
+    # (f) Momentum tendencies at D-grid corners
+    du_corner = zeta_corner * v_corner - dB_dx
+    dv_corner = -zeta_corner * u_corner - dB_dy_perp
+
+    # (g) Divergence damping
+    if div_damp > 0:
+        div_field = cgrid_divergence(u_c, v_c, cdgrid)
+        area_min = jnp.min(cdgrid.base.area)
+        d2_bg = div_damp / area_min
+        dddmp = 0.2
+        div_abs_corner = _interp_center_to_corner(jnp.abs(div_field), cdgrid)
+        adaptive_coeff = area_min * jnp.maximum(
+            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
+        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_field, cdgrid)
+        du_corner = du_corner + adaptive_coeff * ddiv_dx
+        dv_corner = dv_corner + adaptive_coeff * ddiv_dy_perp
+
+    # (h) Biharmonic hyperdiffusion
+    if hyperdiff_coeff > 0:
+        du_corner = du_corner - hyperdiff_coeff * _laplacian_dgrid(
+            _laplacian_dgrid(u_corner, cdgrid), cdgrid)
+        dv_corner = dv_corner - hyperdiff_coeff * _laplacian_dgrid(
+            _laplacian_dgrid(v_corner, cdgrid), cdgrid)
+
+    # (i) Vertex fix
+    du_corner, dv_corner = _extrapolate_boundary_corners(du_corner, dv_corner, n)
+
+    # (j) Average corner tendencies to edge-midpoint positions
     du_d_dt = 0.5 * (du_corner[:, :-1, :] + du_corner[:, 1:, :])   # (6, n, n+1)
     dv_d_dt = 0.5 * (dv_corner[:, :, :-1] + dv_corner[:, :, 1:])   # (6, n+1, n)
 

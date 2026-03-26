@@ -174,9 +174,9 @@ def _valid_gpu_counts(max_gpus: int, grid_type: str = "cubed-sphere") -> list[in
 def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     """Choose a CFL-safe timestep for the hydrostatic PE at resolution n_grid.
 
-    For a jet speed ~50 m/s and the PE semi-implicit scheme, the advective
-    CFL constraint is dt < 0.8 * dx_min / u_max.  We use a conservative
-    estimate.
+    For explicit ssp_rk3 integration the CFL constraint must account for
+    both the advective speed (~60 m/s) and the external gravity wave
+    speed (~300 m/s):  dt < cfl * dx_min / (u_max + c_grav).
     """
     R = 6.371229e6
     if grid_type == "spectral":
@@ -192,8 +192,9 @@ def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
         # Cubed sphere: dx_min ~ (pi/2) * R / (n * sqrt(3))
         dx_min = (math.pi / 2) * R / (n_grid * math.sqrt(3))
     u_max = 60.0
+    c_grav = 300.0  # external gravity wave speed [m/s]
     cfl = 0.7
-    dt = cfl * dx_min / u_max
+    dt = cfl * dx_min / (u_max + c_grav)
     # Round down to a nice number
     dt = max(30.0, 30.0 * int(dt / 30.0))
     return dt
@@ -321,22 +322,27 @@ def run_benchmark(
         )
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
             CDGridPrimitiveEquationConfig,
+            hydrostatic_to_fv3,
         )
         from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
 
         grid = create_cubed_sphere(n_grid)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
         hd = _hyperdiff_coeff(n_grid, grid_type)
         config = CDGridPrimitiveEquationConfig(
             hyperdiff_coeff=hd,
             hyperdiff_ps_coeff=hd,
             use_conservation_fixer=True,
             fix_mass=True,
+            anchor_mass_to_initial=True,
         )
         model = CDGridPrimitiveEquationModel(grid, sigma, config)
-        state = baroclinic_wave_init(grid, sigma, perturbed=True)
+        state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
+        state = hydrostatic_to_fv3(state_cc, cdgrid)
 
         total_cells = 6 * n_grid * n_grid * n_levels
         dev_config = create_device_mesh(n_devices=n_gpus)
@@ -445,6 +451,7 @@ def run_weak_scaling(
     n_warmup: int,
     n_timing: int,
     base_n: int = WEAK_SCALING_BASE_N,
+    base_level_ico: int = WEAK_SCALING_BASE_LEVEL_ICO,
     grid_type: str = "spectral",
 ) -> list[TimingResult]:
     """Run weak scaling: fix cells/GPU, sweep GPU counts up to n_gpus."""
@@ -467,7 +474,7 @@ def run_weak_scaling(
         _configure_jax(prec)
         for ng in gpu_counts:
             if grid_type == "icosahedral":
-                n_grid = _weak_resolution_ico(ng, base_n)
+                n_grid = _weak_resolution_ico(ng, base_level_ico)
             else:
                 n_grid = _weak_resolution(ng, base_n)
             print(f"\n--- {ng} GPU(s), {res_prefix}{n_grid} ---")
