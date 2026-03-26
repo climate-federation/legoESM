@@ -484,8 +484,12 @@ def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
             return arr
         idxs, w = _build_latlon_weights(lon_deg, lat_deg, k=20)
         return _apply_weights(arr.ravel(), idxs, w, 181, 360)
-    # Cubed-sphere: use face-aware bilinear interpolation
+    # Cubed-sphere: use face-aware bilinear interpolation.
+    # If a field was already regridded (e.g. wind from corner-based remap),
+    # its shape is (n_lat, n_lon) — return it as-is.
     from legoesm.grids.regridding import apply_cubedsphere_to_latlon
+    if arr.ndim == 2 and arr.shape[0] != 6:
+        return arr
     if arr.ndim >= 3 and arr.shape[0] == 6:
         n = arr.shape[1]
     else:
@@ -1080,24 +1084,26 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
                 "max_wind": float(jnp.max(jnp.abs(s.u_d))),
             }
 
+        # Precompute regridding weights for corner-based wind remapping.
+        # D-grid boundary corners are synchronised across faces, so
+        # regridding from corners avoids the edge artifact that appears
+        # when cell-centre winds are computed independently per face.
+        from legoesm.grids.regridding import apply_cubedsphere_corners_to_latlon
+        _cs_w = _get_cs_weights(n)
+
         def extract_fn(s):
-            # Rotate D-grid corners to geographic (east/north) FIRST,
-            # then average to cell centres.  Averaging face-local components
-            # before rotation corrupts boundary cells where corners belong
-            # to different faces with incompatible coordinate systems.
             u_d = np.asarray(s.u_d, dtype=np.float64)
             v_d = np.asarray(s.v_d, dtype=np.float64)
             ca_c = np.asarray(cdgrid.cos_angle_corner, dtype=np.float64)
             sa_c = np.asarray(cdgrid.sin_angle_corner, dtype=np.float64)
+            # Geographic (east/north) winds at D-grid corners (6, n+1, n+1)
             u_east_d = ca_c * u_d - sa_c * v_d
             v_north_d = sa_c * u_d + ca_c * v_d
-            # Average 4 corners → cell centre (now geographic, safe)
-            u = 0.25 * (u_east_d[:, :-1, :-1] + u_east_d[:, 1:, :-1]
-                        + u_east_d[:, :-1, 1:] + u_east_d[:, 1:, 1:])
-            v = 0.25 * (v_north_d[:, :-1, :-1] + v_north_d[:, 1:, :-1]
-                        + v_north_d[:, :-1, 1:] + v_north_d[:, 1:, 1:])
-            return {"u": u, "v": v,
-                    "wind_speed": np.sqrt(u ** 2 + v ** 2),
+            # Regrid corners → lat-lon (no face-boundary artifacts)
+            u_ll = apply_cubedsphere_corners_to_latlon(u_east_d, _cs_w)
+            v_ll = apply_cubedsphere_corners_to_latlon(v_north_d, _cs_w)
+            return {"u": u_ll, "v": v_ll,
+                    "wind_speed": np.sqrt(u_ll ** 2 + v_ll ** 2),
                     "height": np.asarray(s.h, dtype=np.float64)}
 
         key_array_fn = lambda s: s.h

@@ -507,6 +507,91 @@ def apply_cubedsphere_to_latlon(
     return result.reshape(weights.n_lat, weights.n_lon)
 
 
+# ---------------------------------------------------------------------------
+# Corner-based regridding (smooth wind fields at face boundaries)
+# ---------------------------------------------------------------------------
+
+
+def _pad_corner_field_for_regrid(field: np.ndarray, n: int) -> np.ndarray:
+    """Pad (6, n+1, n+1) D-grid corner data → (6, n+3, n+3).
+
+    Corner indices 0 and n sit ON the face boundary (shared with the
+    neighbouring face).  The halo copies the *second-from-boundary*
+    corner on the neighbour, which is one gnomonic cell-spacing inside
+    the adjacent face.
+    """
+    padded = np.zeros((6, n + 3, n + 3), dtype=field.dtype)
+    padded[:, 1:-1, 1:-1] = field
+
+    def _nbr_strip(f: int, edge: int) -> np.ndarray:
+        """Return the corner strip one step inside from the shared boundary."""
+        if edge == _WEST:   return field[f, 1, :]
+        if edge == _EAST:   return field[f, -2, :]
+        if edge == _SOUTH:  return field[f, :, 1]
+        return field[f, :, -2]
+
+    for face in range(6):
+        for edge in (_WEST, _EAST, _SOUTH, _NORTH):
+            nbr_face, nbr_edge, rev = _CONNECTIVITY[face][edge]
+            strip = _nbr_strip(nbr_face, nbr_edge)
+            if rev:
+                strip = strip[::-1]
+            if edge == _WEST:
+                padded[face, 0, 1:-1] = strip
+            elif edge == _EAST:
+                padded[face, -1, 1:-1] = strip
+            elif edge == _SOUTH:
+                padded[face, 1:-1, 0] = strip
+            else:
+                padded[face, 1:-1, -1] = strip
+
+    for face in range(6):
+        padded[face, 0, 0] = 0.5 * (padded[face, 0, 1] + padded[face, 1, 0])
+        padded[face, 0, -1] = 0.5 * (padded[face, 0, -2] + padded[face, 1, -1])
+        padded[face, -1, 0] = 0.5 * (padded[face, -1, 1] + padded[face, -2, 0])
+        padded[face, -1, -1] = 0.5 * (padded[face, -1, -2] + padded[face, -2, -1])
+
+    return padded
+
+
+def apply_cubedsphere_corners_to_latlon(
+    corner_field: np.ndarray,
+    weights: CubedSphereToLatLonWeights,
+) -> np.ndarray:
+    """Regrid D-grid corner data (6, n+1, n+1) → (n_lat, n_lon).
+
+    1. Pad corners with cross-face halo  → (6, n+3, n+3)
+    2. Average 4 corners → padded cell centres (6, n+2, n+2)
+    3. Apply cell-centre bilinear weights
+
+    Boundary corners are synchronized across faces, so the resulting
+    cell-centre field is seamless at face boundaries — no edge artifacts.
+    """
+    n = weights.n
+    corner = np.asarray(corner_field, dtype=np.float64).reshape(6, n + 1, n + 1)
+    padded_corners = _pad_corner_field_for_regrid(corner, n)
+
+    padded = 0.25 * (
+        padded_corners[:, :-1, :-1] + padded_corners[:, 1:, :-1]
+        + padded_corners[:, :-1, 1:] + padded_corners[:, 1:, 1:]
+    )  # (6, n+2, n+2) — same layout as _pad_field_for_regrid output
+
+    i1 = weights.i0 + 1
+    j1 = weights.j0 + 1
+
+    v00 = padded[weights.face, weights.i0, weights.j0]
+    v10 = padded[weights.face, i1, weights.j0]
+    v01 = padded[weights.face, weights.i0, j1]
+    v11 = padded[weights.face, i1, j1]
+
+    result = (v00 * (1.0 - weights.wi) * (1.0 - weights.wj)
+              + v10 * weights.wi * (1.0 - weights.wj)
+              + v01 * (1.0 - weights.wi) * weights.wj
+              + v11 * weights.wi * weights.wj)
+
+    return result.reshape(weights.n_lat, weights.n_lon)
+
+
 def apply_cubedsphere_to_latlon_3d(
     field_faces: np.ndarray,
     weights: CubedSphereToLatLonWeights,
