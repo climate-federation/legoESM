@@ -5,15 +5,9 @@ This driver standardizes outputs under ``results/ocean/<grid_type>/...``, double
 horizontal resolution relative to baseline defaults, and runs finite-volume and
 spectral-style options where available.
 
-Requested idealized ocean cases covered by ``scripts/run_ocean_tests.py``:
-  - rest_state
-  - gravity_wave
-  - wind_gyre
-  - adiabatic_topography
-  - holland_lin_gyre
-  - thermohaline
-  - phillips_two_layer
-  - taylor_column
+Canonical test cases are covered by ``scripts/run_ocean_test_matrix.py``:
+  - rest_state, barotropic_wave, wind_gyre, baroclinic, phillips_two_layer,
+    inertia_gravity_wave, lock_exchange, overflow, stommel_gyre_tracer
 """
 
 from __future__ import annotations
@@ -221,7 +215,7 @@ def main() -> int:
         "--cube-discretizations",
         type=str,
         default="finite_volume,fc_gram",
-        help="Comma-separated run_ocean_tests discretizations.",
+        help="Comma-separated cubed-sphere discretizations.",
     )
 
     parser.add_argument("--spectral-base-truncation", type=int, default=8)
@@ -294,19 +288,15 @@ def main() -> int:
             def build_cube_cmd(dt_now: float) -> list[str]:
                 return [
                     args.python,
-                    "scripts/run_ocean_tests.py",
+                    "scripts/run_ocean_test_matrix.py",
+                    "--grid",
+                    "cubed_sphere",
                     "--resolution",
-                    str(cube_res),
+                    f"C{cube_res}",
                     "--levels",
                     str(args.levels),
                     "--dt",
                     f"{dt_now:.12g}",
-                    "--days",
-                    f"{args.days:.12g}",
-                    "--test",
-                    "all",
-                    "--discretization",
-                    disc,
                     "--output",
                     str(out_dir),
                 ]
@@ -338,19 +328,15 @@ def main() -> int:
             def build_latlon_projection_cmd(dt_now: float) -> list[str]:
                 return [
                     args.python,
-                    "scripts/run_ocean_tests.py",
+                    "scripts/run_ocean_test_matrix.py",
+                    "--grid",
+                    "cubed_sphere",
                     "--resolution",
-                    str(cube_res),
+                    f"C{cube_res}",
                     "--levels",
                     str(args.levels),
                     "--dt",
                     f"{dt_now:.12g}",
-                    "--days",
-                    f"{args.days:.12g}",
-                    "--test",
-                    "all",
-                    "--discretization",
-                    disc,
                     "--output",
                     str(out_dir),
                 ]

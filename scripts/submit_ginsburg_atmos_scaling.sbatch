@@ -1,1 +1,0 @@
-legacy/submit_ginsburg_atmos_scaling.sbatch

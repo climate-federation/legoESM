@@ -2517,21 +2517,17 @@ legoESM/
 │   ├── run_amip.py                         # AMIP simulation (gray/RRTMG, checkpoint)
 │   ├── run_amip_spectral.py                # AMIP spectral PE simulation
 │   ├── run_100day.py                       # 100-day atmospheric simulation
-│   ├── run_100day_spectral.py              # 100-day spectral simulation
-│   ├── run_held_suarez.py                  # Held-Suarez experiment
-│   ├── run_held_suarez_latlon.py           # Held-Suarez on lat-lon
-│   ├── run_held_suarez_spectral.py         # Held-Suarez spectral
-│   ├── run_dycore_tests.py                 # Comprehensive dycore suite
-│   ├── run_williamson_spectral.py          # Spectral Williamson tests
-│   ├── run_dcmip2025.py                    # DCMIP-2025 intercomparison
-│   ├── run_ocean_tests.py                  # Ocean validation
-│   ├── run_ocean_realistic.py              # Realistic ocean simulations
-│   ├── run_rce_25deg.py                    # Radiative-convective equilibrium
-│   ├── run_rce_slab_ocean.py               # RCE with slab ocean
-│   ├── run_rce_slab_land.py                # RCE with slab land
-│   ├── run_parallel_validation.py          # Multi-device scaling validation
-│   ├── run_baroclinic_wave.py              # Baroclinic wave experiment
-│   └── ...                                 # 26 total run scripts
+│   ├── run_amip.py                         # Production AMIP CLI (ModelDriver)
+│   ├── run_atmosphere_test_matrix.py       # Master atmosphere test suite (64+ cases)
+│   ├── run_ocean_test_matrix.py            # Master ocean test suite (4 grids × 9 cases)
+│   ├── run_ocean_spectral_tests.py         # Spectral ocean (Gaussian grid)
+│   ├── run_baroclinic_wave_benchmark.py    # Publication figures (CliMA Fig 3)
+│   ├── validate_cubed_sphere_fv3_atmos.py  # FV3 C-D grid edge validation
+│   ├── run_levante_gpu_scaling.py          # GPU scaling benchmarks
+│   ├── run_levante_gpu_scaling.sh          # SLURM batch driver
+│   ├── run_w2_mpas_convergence.py          # MPAS convergence study
+│   ├── run_sfno_campaign.py                # ML inference campaign
+│   └── sfno_slab.py                        # SFNO slab-ocean CLI wrapper
 │
 ├── config/                                 # Configuration templates
 │   ├── williamson_test2.yaml

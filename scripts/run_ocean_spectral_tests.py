@@ -706,7 +706,7 @@ def _make_rest_case(grid, z_coord):
 def _make_gravity_wave_case(grid, z_coord):
     """Barotropic gravity wave: Gaussian SSH perturbation using great-circle
     distance centered at (180E, 0N) with sigma=10 deg.  Consistent with
-    the cubed-sphere reference formulation in run_ocean_tests.py."""
+    the cubed-sphere reference formulation in run_ocean_test_matrix.py."""
     state = _make_rest_case(grid, z_coord)
     mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
     eta0 = np.asarray(sh_synthesis(grid, state.eta_hat.data).real, dtype=np.float64)

@@ -63,7 +63,9 @@
 - Install: `pip install -e ".[dev]"`
 - General tests: `.venv/bin/python -m pytest tests/`
 - Targeted scientific tests: `JAX_ENABLE_X64=1 .venv/bin/python -m pytest <target>`
-- Parallel validation entry point: `.venv/bin/python scripts/run_parallel_validation.py`
+- Atmosphere test matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py`
+- Ocean test matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py`
+- AMIP production: `.venv/bin/python scripts/run_amip.py`
 - Dycore progression suite: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
 
 ## How To Think About Bugs
