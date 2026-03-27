@@ -124,6 +124,7 @@ from legoesm.parallel.sharded_dynamics import (
     StepCacheKey,
     CompiledShardedStep,
     make_sharded_step,
+    make_voronoi_sharded_step,
     shard_state as shard_state_to_devices,
     gather_state as gather_state_from_devices,
     create_output_shardings,

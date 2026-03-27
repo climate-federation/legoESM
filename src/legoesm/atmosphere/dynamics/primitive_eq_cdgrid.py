@@ -305,19 +305,39 @@ def fv3_hydrostatic_tendencies(
 
     # --- 12. Diffusion ---
     # 12a. Laplacian viscosity on D-grid winds
+    #
+    # Apply the compact Laplacian at cell centres (full-strength damping
+    # on all modes) and interpolate the tendency back to D-grid corners.
+    # This avoids the corner-centre-corner round-trip of _laplacian_dgrid
+    # which attenuates the grid-scale mode to near zero.
     if config.A_h > 0:
-        du_d_dt = du_d_dt + config.A_h * _laplacian_dgrid(u_d, cdgrid)
-        dv_d_dt = dv_d_dt + config.A_h * _laplacian_dgrid(v_d, cdgrid)
+        lap_u_cc = _laplacian_compact_3d(u_cell, grid)
+        lap_v_cc = _laplacian_compact_3d(v_cell, grid)
+        du_d_dt = du_d_dt + config.A_h * _interp_center_to_corner(lap_u_cc, cdgrid)
+        dv_d_dt = dv_d_dt + config.A_h * _interp_center_to_corner(lap_v_cc, cdgrid)
         # Temperature: cell-centre Laplacian (proper halo exchange)
         lap_T = _laplacian_compact_3d(T, grid)
         dT_dt_data = dT_dt_data + config.A_h * lap_T
 
     # 12b. Hyperdiffusion on D-grid winds (biharmonic)
+    #
+    # Apply the biharmonic at cell centres (where the compact Laplacian
+    # works at full strength) and interpolate the tendency back to
+    # D-grid corners.  The previous approach
+    #   -nu4 * lap_dgrid(lap_dgrid(u_d))
+    # performed TWO centre-corner round-trips, each of which attenuates
+    # the grid-scale mode by ~cos(kh/2)^2.  At the highest resolved
+    # wavenumber the effective damping was near zero, leaving the
+    # cubed-sphere systematically over-energetic.  The cell-centre
+    # path uses only ONE round-trip (centre -> corner) for the final
+    # tendency projection, giving full-strength biharmonic damping on
+    # the wind field — the same as for temperature.
     if config.hyperdiff_coeff > 0:
-        du_d_dt = du_d_dt - config.hyperdiff_coeff * _laplacian_dgrid(
-            _laplacian_dgrid(u_d, cdgrid), cdgrid)
-        dv_d_dt = dv_d_dt - config.hyperdiff_coeff * _laplacian_dgrid(
-            _laplacian_dgrid(v_d, cdgrid), cdgrid)
+        # Cell-centre winds are already computed: u_cell, v_cell (6,n,n,nlev)
+        hyperdiff_u_cc = _hyperdiffusion_3d(u_cell, grid, config.hyperdiff_coeff)
+        hyperdiff_v_cc = _hyperdiffusion_3d(v_cell, grid, config.hyperdiff_coeff)
+        du_d_dt = du_d_dt + _interp_center_to_corner(hyperdiff_u_cc, cdgrid)
+        dv_d_dt = dv_d_dt + _interp_center_to_corner(hyperdiff_v_cc, cdgrid)
         # Temperature: cell-centre hyperdiffusion (proper halo exchange)
         dT_dt_data = dT_dt_data + _hyperdiffusion_3d(T, grid, config.hyperdiff_coeff)
 
@@ -433,8 +453,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         state,
         physics_tendency=None,
     ):
-        """Compute tendencies for FV3HydrostaticState."""
-        return fv3_hydrostatic_tendencies(
+        """Compute tendencies, accepting FV3HydrostaticState or HydrostaticState."""
+        return cdgrid_hydrostatic_tendencies(
             state, self.grid, self.sigma_coord, self.cdgrid,
             self.config, physics_tendency,
         )

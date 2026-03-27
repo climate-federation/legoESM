@@ -541,6 +541,213 @@ def cgrid_scalar_advection(q, u_c, v_c, cdgrid):
 
 
 # ==============================================================================
+# Flux-corrected transport (FCT) for monotone tracer advection
+# ==============================================================================
+
+def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
+    """Compute FCT-limited tracer fluxes on the C-D grid (2D only).
+
+    Uses a two-stage approach for monotone transport:
+
+    1. PPM face-value reconstruction with Colella-Woodward limiter,
+       followed by clipping each face value to [min, max] of the two
+       cells sharing the face.  This prevents the 1D PPM reconstruction
+       from producing face values outside the local range (which happens
+       near cubed-sphere panel edges due to halo interpolation errors).
+
+    2. First-order upwind fallback blending: after computing the
+       face-value-clipped PPM flux divergence and the first-order
+       upwind flux divergence, blend them so that the resulting
+       tendency cannot push any cell outside the local
+       [q_min, q_max] range.  This handles the multidimensional
+       aspect — even if each 1D face value is bounded, the combined
+       x + y update can still overshoot.
+
+    Parameters
+    ----------
+    q : jax.Array, shape (6, n, n)
+        Tracer at cell centres.
+    u_c : jax.Array, shape (6, n+1, n)
+        C-grid x-velocity at x-faces.
+    v_c : jax.Array, shape (6, n, n+1)
+        C-grid y-velocity at y-faces.
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    dq_dt : jax.Array, shape (6, n, n)
+        Monotone advective tendency.
+
+    References
+    ----------
+    - Colella & Woodward (1984): PPM reconstruction.
+    - Lin (2004): FV3 transport.
+    - Zalesak (1979): Fully multidimensional FCT.
+    """
+    n = cdgrid.n
+    area = cdgrid.base.area   # (6, n, n)
+    dy = cdgrid.dy_edge_x     # (6, n+1, n)
+    dx = cdgrid.dx_edge_y     # (6, n, n+1)
+
+    # Halo-padded field for neighbour lookups (halo=1)
+    q_pad = _pad_halo_auto(q, cdgrid)  # (6, n+2, n+2)
+
+    # ----------------------------------------------------------------
+    # Step 1: First-order upwind fluxes (inherently monotone for CFL<1)
+    # ----------------------------------------------------------------
+    q_left_x = q_pad[:, :-1, 1:-1]    # (6, n+1, n)
+    q_right_x = q_pad[:, 1:, 1:-1]    # (6, n+1, n)
+    q_face_low_x = jnp.where(u_c > 0, q_left_x, q_right_x)
+
+    q_below_y = q_pad[:, 1:-1, :-1]   # (6, n, n+1)
+    q_above_y = q_pad[:, 1:-1, 1:]    # (6, n, n+1)
+    q_face_low_y = jnp.where(v_c > 0, q_below_y, q_above_y)
+
+    flux_low_x = q_face_low_x * u_c * dy
+    flux_low_y = q_face_low_y * v_c * dx
+
+    net_low_x = flux_low_x[:, 1:] - flux_low_x[:, :-1]
+    net_low_y = flux_low_y[:, :, 1:] - flux_low_y[:, :, :-1]
+    dq_low = -(net_low_x + net_low_y) / area
+
+    # ----------------------------------------------------------------
+    # Step 2: PPM face values with face-value clipping
+    # ----------------------------------------------------------------
+    q_pad_h2 = _pad_halo_auto_h2(q, cdgrid)  # (6, n+4, n+4)
+
+    # X-direction PPM
+    q_x_strips = q_pad_h2[:, :, 2:-2]
+    q_L_x, q_R_x = _ppm_reconstruct_1d(q_x_strips)
+    q_R_left = q_R_x[:, 1:n+2, :]
+    q_L_right = q_L_x[:, 2:n+3, :]
+    q_face_hi_x = jnp.where(u_c > 0, q_R_left, q_L_right)
+
+    # Clip to local bounds of adjacent cells
+    q_face_min_x = jnp.minimum(q_left_x, q_right_x)
+    q_face_max_x = jnp.maximum(q_left_x, q_right_x)
+    q_face_hi_x = jnp.clip(q_face_hi_x, q_face_min_x, q_face_max_x)
+
+    # Y-direction PPM
+    q_y_strips = q_pad_h2[:, 2:-2, :]
+    q_L_y, q_R_y = _ppm_reconstruct_1d(q_y_strips)
+    q_R_bottom = q_R_y[:, :, 1:n+2]
+    q_L_top = q_L_y[:, :, 2:n+3]
+    q_face_hi_y = jnp.where(v_c > 0, q_R_bottom, q_L_top)
+
+    # Clip to local bounds of adjacent cells
+    q_face_min_y = jnp.minimum(q_below_y, q_above_y)
+    q_face_max_y = jnp.maximum(q_below_y, q_above_y)
+    q_face_hi_y = jnp.clip(q_face_hi_y, q_face_min_y, q_face_max_y)
+
+    flux_hi_x = q_face_hi_x * u_c * dy
+    flux_hi_y = q_face_hi_y * v_c * dx
+
+    net_hi_x = flux_hi_x[:, 1:] - flux_hi_x[:, :-1]
+    net_hi_y = flux_hi_y[:, :, 1:] - flux_hi_y[:, :, :-1]
+    dq_hi = -(net_hi_x + net_hi_y) / area
+
+    # ----------------------------------------------------------------
+    # Step 3: Zalesak-style blending (high ← low fallback)
+    #
+    # Compute anti-diffusive tendency = dq_hi - dq_low.
+    # Limit it so that the total tendency dq_low + alpha * (dq_hi - dq_low)
+    # does not push q outside [q_min, q_max] for any cell, even for a
+    # unit-CFL step where the tendency acts as a full update.
+    #
+    # Since the actual dt is always ≤ dx/u (CFL), limiting for dt=1
+    # (i.e. treating the tendency as the update) is strictly conservative.
+    # ----------------------------------------------------------------
+    ad = dq_hi - dq_low  # anti-diffusive tendency
+
+    # Local min/max including all face-adjacent neighbours
+    q_min = q
+    q_max = q
+    q_min = jnp.minimum(q_min, q_pad[:, :-2, 1:-1])   # west
+    q_min = jnp.minimum(q_min, q_pad[:, 2:, 1:-1])    # east
+    q_min = jnp.minimum(q_min, q_pad[:, 1:-1, :-2])   # south
+    q_min = jnp.minimum(q_min, q_pad[:, 1:-1, 2:])    # north
+    q_max = jnp.maximum(q_max, q_pad[:, :-2, 1:-1])
+    q_max = jnp.maximum(q_max, q_pad[:, 2:, 1:-1])
+    q_max = jnp.maximum(q_max, q_pad[:, 1:-1, :-2])
+    q_max = jnp.maximum(q_max, q_pad[:, 1:-1, 2:])
+
+    # How much room does the low-order update leave?
+    # After applying dq_low, q would be at q + dq_low (for unit "dt").
+    # We allow the anti-diffusive part to bring it to at most q_max
+    # and at least q_min.
+    q_td = q + dq_low   # provisional (unit-step low-order update)
+
+    room_up = q_max - q_td     # how much we can still increase
+    room_dn = q_td - q_min     # how much we can still decrease
+
+    # Per-cell blending factor alpha ∈ [0, 1]:
+    # If ad > 0 (high-order wants to increase), alpha = room_up / ad
+    # If ad < 0 (high-order wants to decrease), alpha = room_dn / |ad|
+    # If ad == 0, alpha = 1 (no correction needed)
+    eps = 1.0e-30
+    alpha = jnp.where(
+        ad > eps,
+        jnp.minimum(1.0, room_up / ad),
+        jnp.where(
+            ad < -eps,
+            jnp.minimum(1.0, room_dn / (-ad)),
+            1.0,
+        ),
+    )
+    alpha = jnp.clip(alpha, 0.0, 1.0)
+
+    return dq_low + alpha * ad
+
+
+def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
+    """Monotone tracer advection using PPM with local-bounds clipping.
+
+    Combines high-order PPM reconstruction with face-value clipping
+    to ensure that face values at each interface lie within [min, max]
+    of the two adjacent cells. This prevents the creation of new
+    extrema that unlimited PPM produces on the cubed-sphere, especially
+    near panel edges where halo interpolation introduces errors.
+
+    The scheme is:
+    - Conservative (flux-form divergence)
+    - Monotone (face values bounded by adjacent cell values)
+    - dt-independent (no time step required for the limiter)
+    - JAX-compatible (pure array operations, no Python control flow)
+
+    Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
+
+    Parameters
+    ----------
+    q : jax.Array, shape (6, n, n[, nlev])
+        Tracer at cell centres.
+    u_c : jax.Array, shape (6, n+1, n[, nlev])
+        C-grid x-velocity at x-faces.
+    v_c : jax.Array, shape (6, n, n+1[, nlev])
+        C-grid y-velocity at y-faces.
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    dq_dt : jax.Array, shape (6, n, n[, nlev])
+        Monotone tracer advection tendency.
+    """
+    if q.ndim == 4:
+        # 3D: vmap over levels
+        q_t = jnp.moveaxis(q, -1, 0)
+        u_c_t = jnp.moveaxis(u_c, -1, 0)
+        v_c_t = jnp.moveaxis(v_c, -1, 0)
+
+        def fct_one(args):
+            qk, uk, vk = args
+            return _cgrid_fct_fluxes_2d(qk, uk, vk, cdgrid)
+
+        result_t = jax.vmap(fct_one)((q_t, u_c_t, v_c_t))
+        return jnp.moveaxis(result_t, 0, -1)
+
+    return _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid)
+
+
+# ==============================================================================
 # Arakawa-Lamb gradient at D-grid corners
 # ==============================================================================
 

@@ -190,24 +190,6 @@ class TestOceanDiscretizationAliases:
 
 
 # ===================================================================
-# Ocean PE wrapper modules
-# ===================================================================
-
-class TestOceanPEWrapperModules:
-    """ocean_pe.py and ocean_pe_fv.py emit deprecation warnings."""
-
-    def test_ocean_pe_fv_warns(self):
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            from legoesm.ocean.dynamics.ocean_pe_fv import (
-                ocean_baroclinic_tendencies_fv,
-            )
-            # The function itself warns on call, not on import
-            # Just verify the function exists
-            assert callable(ocean_baroclinic_tendencies_fv)
-
-
-# ===================================================================
 # Conservation latlon aliases
 # ===================================================================
 
@@ -288,8 +270,8 @@ class TestSupportedMatrix:
         from legoesm.supported_matrix import (
             ATMOSPHERE_MATRIX, OCEAN_MATRIX,
         )
-        # 15 atmosphere + 5 ocean = 20 genuinely distinct implementations
-        assert len(ATMOSPHERE_MATRIX) == 15
+        # 14 atmosphere + 5 ocean = 19 genuinely distinct implementations
+        assert len(ATMOSPHERE_MATRIX) == 14
         assert len(OCEAN_MATRIX) == 5
 
     def test_canonical_solver_names_helper(self):

@@ -623,8 +623,12 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega):
     fVertex = 2.0 * omega * np.sin(latVertex)
 
     # --- Convert all arrays to JAX ---
+    # Use float64 when x64 is enabled for geometry precision, float32 otherwise.
+    import jax
+    _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+
     def to_jax_f(arr):
-        return jnp.array(arr, dtype=jnp.float64)
+        return jnp.array(arr, dtype=_fdtype)
 
     def to_jax_i(arr):
         return jnp.array(arr, dtype=jnp.int32)
@@ -859,9 +863,6 @@ def create_voronoi_mesh(
     -------
     VoronoiMesh
     """
-    from legoesm.runtime.backend import require_x64
-    require_x64("Voronoi/MPAS mesh construction")
-
     if subdivision_level > 8:
         n_cells = 10 * 4 ** subdivision_level + 2
         raise ValueError(
@@ -919,6 +920,9 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
 
     radius = float(ds.sphere_radius) if hasattr(ds, 'sphere_radius') else 6371229.0
 
+    import jax
+    _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+
     mesh_data = {
         'nCells': nCells, 'nEdges': nEdges, 'nVertices': nVertices,
         'maxEdges': maxEdges, 'vertexDegree': vertexDegree, 'radius': radius,
@@ -927,12 +931,12 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
     # Coordinates
     for name in ['latCell', 'lonCell', 'latEdge', 'lonEdge',
                  'latVertex', 'lonVertex']:
-        mesh_data[name] = jnp.array(read_var(name), dtype=jnp.float64)
+        mesh_data[name] = jnp.array(read_var(name), dtype=_fdtype)
 
     for prefix in ['Cell', 'Edge', 'Vertex']:
         for coord in ['x', 'y', 'z']:
             name = f'{coord}{prefix}'
-            mesh_data[name] = jnp.array(read_var(name), dtype=jnp.float64)
+            mesh_data[name] = jnp.array(read_var(name), dtype=_fdtype)
 
     # Connectivity (transpose to match our (maxEdges, nCells) convention)
     conn_names = {
@@ -954,7 +958,7 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
     for name in ['areaCell', 'areaTriangle', 'dcEdge', 'dvEdge', 'angleEdge',
                  'fEdge', 'fVertex', 'meshDensity']:
         if name in ds.variables:
-            mesh_data[name] = jnp.array(read_var(name), dtype=jnp.float64)
+            mesh_data[name] = jnp.array(read_var(name), dtype=_fdtype)
 
     # Weights
     maxEdges2 = 2 * maxEdges - 2
@@ -964,7 +968,7 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
         if woe.ndim == 2:
             woe = woe.T if woe.shape[0] != maxEdges2 else woe
             eoe = eoe.T if eoe.shape[0] != maxEdges2 else eoe
-        mesh_data['weightsOnEdge'] = jnp.array(woe, dtype=jnp.float64)
+        mesh_data['weightsOnEdge'] = jnp.array(woe, dtype=_fdtype)
         mesh_data['edgesOnEdge'] = jnp.array(eoe, dtype=jnp.int32)
     else:
         mesh_data['weightsOnEdge'] = jnp.zeros((maxEdges2, nEdges))
@@ -975,7 +979,7 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
         ka = read_var('kiteAreasOnVertex')
         if ka.ndim == 2:
             ka = ka.T if ka.shape[0] != vertexDegree else ka
-        mesh_data['kiteAreasOnVertex'] = jnp.array(ka, dtype=jnp.float64)
+        mesh_data['kiteAreasOnVertex'] = jnp.array(ka, dtype=_fdtype)
     else:
         mesh_data['kiteAreasOnVertex'] = jnp.zeros((vertexDegree, nVertices))
 

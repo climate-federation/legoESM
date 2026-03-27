@@ -65,7 +65,7 @@ def compute_polar_filter_mask(
     # Build mask
     n_freq = grid.n_lon // 2 + 1
     wavenumbers = jnp.arange(n_freq)
-    mask = (wavenumbers[None, :] <= max_k[:, None]).astype(jnp.float64)
+    mask = (wavenumbers[None, :] <= max_k[:, None]).astype(jnp.float32)
 
     return mask
 

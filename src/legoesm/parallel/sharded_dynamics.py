@@ -998,6 +998,80 @@ def sharded_integrate_scan(
 
 
 # ======================================================================
+# Voronoi (MPAS) multi-GPU sharded step
+# ======================================================================
+
+def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
+    """Create an efficient multi-GPU step for Voronoi (MPAS/TRiSK) grids.
+
+    TRiSK operators rely on indirect indexing through connectivity arrays
+    (``cellsOnEdge``, ``edgesOnCell``, etc.).  When state arrays are
+    naively sharded along the entity axis, each index operation generates
+    a cross-device gather — producing O(n_operators) collectives per step
+    (30-40+ for SSP-RK3 with full physics).
+
+    This wrapper replaces that pathological pattern with exactly **two**
+    bulk collectives per step:
+
+    1. **All-gather** the sharded state to replicate it on every device
+       (via ``with_sharding_constraint``).
+    2. Compute the step on replicated data — each device executes the
+       full graph locally with no cross-device traffic.
+    3. **Re-shard** the output (local slice, no communication).
+
+    The trade-off is redundant compute (every device evaluates the full
+    step), but for problem sizes up to ~4 M cells the compute is fast
+    enough that the communication savings dominate.
+
+    Parameters
+    ----------
+    model
+        MPAS model with a ``.step(state, dt)`` method.
+    dev_config : DeviceConfig
+        From :func:`~legoesm.parallel.mesh.create_voronoi_device_mesh`.
+
+    Returns
+    -------
+    Callable[[state, float], state]
+        JIT-compiled step function.
+    """
+    if dev_config.n_devices <= 1 or dev_config.mesh is None:
+        return model.step
+
+    rep_sharding = dev_config.replicated_sharding
+    face_sharding = dev_config.face_sharding
+    voronoi_dims = dev_config.voronoi_dims
+    if voronoi_dims is None:
+        raise ValueError("dev_config.voronoi_dims must be set for Voronoi grids")
+    nCells, nEdges, _nVerts = voronoi_dims
+
+    def _replicate(x):
+        """Force replicated sharding (triggers one all-gather)."""
+        if isinstance(x, (jax.Array, jnp.ndarray)):
+            return jax.lax.with_sharding_constraint(x, rep_sharding)
+        return x
+
+    def _reshard(x):
+        """Re-shard output: cell/edge arrays sharded, rest replicated."""
+        if not isinstance(x, (jax.Array, jnp.ndarray)):
+            return x
+        if x.ndim >= 1 and x.shape[0] in (nCells, nEdges):
+            return jax.lax.with_sharding_constraint(x, face_sharding)
+        return jax.lax.with_sharding_constraint(x, rep_sharding)
+
+    @jax.jit
+    def _step(state, dt):
+        # Phase 1: all-gather state to replicate on all devices.
+        rep = jax.tree.map(_replicate, state)
+        # Phase 2: compute step locally (no cross-device ops).
+        new = model.step(rep, dt)
+        # Phase 3: re-shard output (local slice, no communication).
+        return jax.tree.map(_reshard, new)
+
+    return _step
+
+
+# ======================================================================
 # Utility: check sharding health
 # ======================================================================
 

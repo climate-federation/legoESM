@@ -1,8 +1,8 @@
-"""Tests that Voronoi/MPAS mesh construction requires float64.
+"""Tests that Voronoi/MPAS mesh construction works in both float32 and float64.
 
-Verifies the fail-fast guard: ``create_voronoi_mesh`` must raise
-a clear ``RuntimeError`` when JAX x64 is disabled, and produce
-float64 geometry arrays when x64 is enabled.
+Verifies that ``create_voronoi_mesh`` works in float32 mode (producing
+float32 geometry) and in float64 mode (producing float64 geometry via
+NumPy internals that are then stored as float32 JAX arrays by default).
 """
 
 from __future__ import annotations
@@ -38,25 +38,25 @@ def _run_snippet(code: str, *, env_extra: dict[str, str] | None = None):
 # ---------------------------------------------------------------------------
 
 class TestVoronoiPrecisionGuard:
-    """Verify that create_voronoi_mesh enforces x64."""
+    """Verify that create_voronoi_mesh works in both float32 and float64."""
 
-    def test_raises_without_x64(self):
-        """Must raise RuntimeError when JAX x64 is disabled."""
+    def test_succeeds_without_x64(self):
+        """Must succeed in float32 mode and produce float32 geometry."""
         code = """\
         from legoesm.grids.voronoi import create_voronoi_mesh
-        create_voronoi_mesh(1, lloyd_iterations=2)
+        m = create_voronoi_mesh(1, lloyd_iterations=2)
+        assert m.areaCell.dtype.name == "float32", f"areaCell dtype: {m.areaCell.dtype}"
+        print("OK")
         """
         rc, stdout, stderr = _run_snippet(code)
-        assert rc != 0, (
-            "create_voronoi_mesh should have failed without x64, "
-            f"but exited 0.\nstdout: {stdout}\nstderr: {stderr}"
+        assert rc == 0, (
+            "create_voronoi_mesh should work without x64, "
+            f"but exited {rc}.\nstdout: {stdout}\nstderr: {stderr}"
         )
-        assert "requires float64" in stderr, (
-            f"Error message should mention 'requires float64'.\nstderr: {stderr}"
-        )
+        assert "OK" in stdout
 
     def test_succeeds_with_x64(self):
-        """Must succeed and return float64 geometry with x64 enabled."""
+        """Must succeed with x64 and produce float64 geometry."""
         code = """\
         from legoesm.grids.voronoi import create_voronoi_mesh
         import jax
@@ -77,7 +77,7 @@ class TestVoronoiPrecisionGuard:
         assert "OK" in stdout
 
     def test_env_var_enables_x64(self):
-        """JAX_ENABLE_X64=1 env var should be sufficient."""
+        """JAX_ENABLE_X64=1 env var should produce float64 geometry."""
         code = """\
         from legoesm.grids.voronoi import create_voronoi_mesh
         m = create_voronoi_mesh(1, lloyd_iterations=2)

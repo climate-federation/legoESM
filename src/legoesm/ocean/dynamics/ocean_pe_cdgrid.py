@@ -34,6 +34,7 @@ from legoesm.core.operators_cdgrid import (
     dgrid_vorticity_3d,
     cgrid_divergence_3d,
     cgrid_mass_flux_divergence_3d,
+    cgrid_tracer_advection_fct,
     _arakawa_lamb_gradient_3d,
     _interp_center_to_corner_3d,
     _laplacian_dgrid,
@@ -274,8 +275,11 @@ def ocean_baroclinic_tendencies_cdgrid(
     tracers = jnp.stack([T, S], axis=0)
 
     def tracer_tendency(tr):
-        # Horizontal: upwind advection with C-grid velocities
-        dtr_dt = cgrid_mass_flux_divergence_3d(tr, u_c, v_c, cdgrid)
+        # Horizontal: FCT-limited advection with C-grid velocities
+        # Uses Zalesak (1979) flux-corrected transport to ensure
+        # monotonicity — eliminates overshoot/undershoot that unlimited
+        # PPM produces on the cubed-sphere near panel boundaries.
+        dtr_dt = cgrid_tracer_advection_fct(tr, u_c, v_c, cdgrid)
         # Vertical advection
         dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
 

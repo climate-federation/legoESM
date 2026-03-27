@@ -105,7 +105,7 @@ def compute_cs_to_gauss_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float64),
+        weights=jnp.array(weights, dtype=jnp.float32),
         target_shape=target_shape,
         src_flat_size=src_flat_size,
     )
@@ -155,7 +155,7 @@ def compute_gauss_to_cs_weights(
 
     return RegridWeights(
         src_indices=jnp.array(indices, dtype=jnp.int32),
-        weights=jnp.array(weights, dtype=jnp.float64),
+        weights=jnp.array(weights, dtype=jnp.float32),
         target_shape=target_shape,
         src_flat_size=src_flat_size,
     )

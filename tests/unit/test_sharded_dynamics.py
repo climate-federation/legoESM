@@ -484,3 +484,46 @@ class TestCreateOutputShardings:
 
         for leaf in jax.tree.leaves(out):
             assert leaf is None
+
+
+# ===========================================================================
+# TestMakeVoronoiShardedStep
+# ===========================================================================
+
+class TestMakeVoronoiShardedStep:
+    """Tests for make_voronoi_sharded_step."""
+
+    def test_single_device_returns_model_step(self):
+        """On single device, returns model.step directly (not wrapped)."""
+        from legoesm.parallel.sharded_dynamics import make_voronoi_sharded_step
+        from legoesm.parallel.mesh import DeviceConfig
+
+        config = DeviceConfig(
+            mesh=None, face_sharding=None, replicated_sharding=None,
+            n_devices=1, backend="CPU", is_distributed=False,
+            grid_type="voronoi", voronoi_dims=(100, 200, 50),
+        )
+        model = _MockModel()
+        step_fn = make_voronoi_sharded_step(model, config)
+        # Bound methods are not singletons, but the underlying function is.
+        assert step_fn.__func__ is model.step.__func__
+
+    def test_raises_without_voronoi_dims(self):
+        """Raises ValueError when voronoi_dims is None on multi-device."""
+        from legoesm.parallel.sharded_dynamics import make_voronoi_sharded_step
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+
+        devices = jax.devices()[:1]
+        mesh = Mesh(devices, axis_names=("device",))
+        config = DeviceConfig(
+            mesh=mesh,
+            face_sharding=NamedSharding(mesh, P("device")),
+            replicated_sharding=NamedSharding(mesh, P()),
+            n_devices=1, backend="CPU", is_distributed=False,
+            grid_type="voronoi", voronoi_dims=None,
+        )
+        # n_devices=1 → returns model.step, so force multi-device config
+        config = config._replace(n_devices=2)
+        model = _MockModel()
+        with pytest.raises(ValueError, match="voronoi_dims"):
+            make_voronoi_sharded_step(model, config)

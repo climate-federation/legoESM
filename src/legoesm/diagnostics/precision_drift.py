@@ -24,6 +24,11 @@ import jax
 import jax.numpy as jnp
 
 
+def _best_float():
+    """Return float64 if x64 is enabled, else float32."""
+    return jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+
+
 # ---------------------------------------------------------------------------
 # Drift checker — compare FP64 reference vs FP32/mixed test
 # ---------------------------------------------------------------------------
@@ -46,7 +51,7 @@ class DriftSnapshot(NamedTuple):
 def _rms(a: jax.Array, b: jax.Array) -> jax.Array:
     """Root-mean-square difference."""
     diff = a.ravel() - b.ravel()
-    return jnp.sqrt(jnp.mean(diff.astype(jnp.float64) ** 2))
+    return jnp.sqrt(jnp.mean(diff.astype(_best_float()) ** 2))
 
 
 def _linf(a: jax.Array, b: jax.Array) -> jax.Array:
@@ -80,14 +85,15 @@ def compare_states(
     -------
     DriftSnapshot
     """
-    ref_T = ref_state.T.data.astype(jnp.float64)
-    test_T = test_state.T.data.astype(jnp.float64)
-    ref_u = ref_state.u.data.astype(jnp.float64)
-    test_u = test_state.u.data.astype(jnp.float64)
-    ref_ps = ref_state.p_s.data.astype(jnp.float64)
-    test_ps = test_state.p_s.data.astype(jnp.float64)
+    _acc = _best_float()
+    ref_T = ref_state.T.data.astype(_acc)
+    test_T = test_state.T.data.astype(_acc)
+    ref_u = ref_state.u.data.astype(_acc)
+    test_u = test_state.u.data.astype(_acc)
+    ref_ps = ref_state.p_s.data.astype(_acc)
+    test_ps = test_state.p_s.data.astype(_acc)
 
-    area = grid.area.astype(jnp.float64)
+    area = grid.area.astype(_acc)
     total_area = jnp.sum(area)
 
     # Global mass = ∫ p_s dA / g
@@ -98,7 +104,7 @@ def compare_states(
     # Global energy (approximate: internal only)
     c_p = 1004.64
     if sigma_coord is not None:
-        dsigma = jnp.asarray(sigma_coord.dsigma, dtype=jnp.float64)
+        dsigma = jnp.asarray(sigma_coord.dsigma, dtype=_acc)
         energy_ref = jnp.sum(
             c_p * ref_T * ref_ps[..., None] * dsigma * area[..., None]
         ) / g
@@ -343,18 +349,19 @@ def precision_health_report(
 
     # Energy drift rate
     if state_prev is not None and grid is not None:
-        area = grid.area.astype(jnp.float64)
+        _acc = _best_float()
+        area = grid.area.astype(_acc)
         c_p = 1004.64
         g = 9.80616
         energy_now = float(jnp.sum(
-            c_p * T.astype(jnp.float64) * ps.astype(jnp.float64)[..., None]
-            * area.astype(jnp.float64)[..., None]
+            c_p * T.astype(_acc) * ps.astype(_acc)[..., None]
+            * area[..., None]
         )) / g
         T_prev = state_prev.T.data
         ps_prev = state_prev.p_s.data
         energy_prev = float(jnp.sum(
-            c_p * T_prev.astype(jnp.float64) * ps_prev.astype(jnp.float64)[..., None]
-            * area.astype(jnp.float64)[..., None]
+            c_p * T_prev.astype(_acc) * ps_prev.astype(_acc)[..., None]
+            * area[..., None]
         )) / g
         dE = abs(energy_now - energy_prev)
         dE_rel = dE / max(abs(energy_prev), 1e-30)

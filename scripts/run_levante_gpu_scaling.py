@@ -306,6 +306,20 @@ def run_benchmark(
             )
             grid = reorder_voronoi_for_sharding(grid, n_gpus)
 
+        total_cells = grid.nCells * n_levels
+        dev_config = create_voronoi_device_mesh(
+            nCells=grid.nCells,
+            nEdges=grid.nEdges,
+            nVertices=grid.nVertices,
+            n_devices=n_gpus,
+        )
+
+        # Replicate mesh on all devices so JIT-compiled operators
+        # find connectivity arrays locally without cross-device gathers.
+        if dev_config.n_devices > 1:
+            from legoesm.parallel.mesh import replicate_pytree
+            grid = replicate_pytree(grid, dev_config)
+
         hd = _hyperdiff_coeff(n_grid, grid_type)
         config = MPASPrimitiveEquationConfig(
             nu_del4=hd,
@@ -316,14 +330,6 @@ def run_benchmark(
         )
         model = MPASPrimitiveEquationModel(grid, sigma, config)
         state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
-
-        total_cells = grid.nCells * n_levels
-        dev_config = create_voronoi_device_mesh(
-            nCells=grid.nCells,
-            nEdges=grid.nEdges,
-            nVertices=grid.nVertices,
-            n_devices=n_gpus,
-        )
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -364,6 +370,16 @@ def run_benchmark(
     if dev_config.n_devices > 1:
         state = shard_pytree(state, dev_config)
 
+    # For Voronoi multi-GPU: wrap step to avoid per-operator collectives.
+    # TRiSK's indirect indexing generates O(n_ops) cross-device gathers
+    # when state is naively sharded.  The wrapper replicates state first
+    # (one all-gather), computes locally, and re-shards (local slice).
+    if grid_type == "icosahedral" and dev_config.n_devices > 1:
+        from legoesm.parallel.sharded_dynamics import make_voronoi_sharded_step
+        step_fn = make_voronoi_sharded_step(model, dev_config)
+    else:
+        step_fn = model.step
+
     cells_per_gpu = total_cells // max(1, n_gpus)
 
     if grid_type == "spectral":
@@ -382,7 +398,7 @@ def run_benchmark(
     # JIT compilation (first call)
     # ---------------------------------------------------------------
     t_compile_start = time.perf_counter()
-    state = model.step(state, dt)
+    state = step_fn(state, dt)
     jax.block_until_ready(jax.tree.leaves(state))
     compile_time = time.perf_counter() - t_compile_start
     print(f"    JIT compile: {compile_time:.2f}s", flush=True)
@@ -392,7 +408,7 @@ def run_benchmark(
     # ---------------------------------------------------------------
     t_warmup_start = time.perf_counter()
     for _ in range(n_warmup):
-        state = model.step(state, dt)
+        state = step_fn(state, dt)
     jax.block_until_ready(jax.tree.leaves(state))
     warmup_time = time.perf_counter() - t_warmup_start
 
@@ -401,7 +417,7 @@ def run_benchmark(
     # ---------------------------------------------------------------
     t0 = time.perf_counter()
     for _ in range(n_timing):
-        state = model.step(state, dt)
+        state = step_fn(state, dt)
     jax.block_until_ready(jax.tree.leaves(state))
     t1 = time.perf_counter()
 

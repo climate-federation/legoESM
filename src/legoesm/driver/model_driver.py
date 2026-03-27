@@ -417,7 +417,7 @@ class ModelDriver:
                 solar_init["solar_fraction_by_gpt"]
             )
         else:
-            self._solar_weights_template = jnp.array([], dtype=jnp.float64)
+            self._solar_weights_template = jnp.array([], dtype=jnp.float32)
 
         # CMIP experiment GHG override
         self._experiment = cfg.experiment

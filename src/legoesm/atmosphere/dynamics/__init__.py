@@ -28,7 +28,6 @@ dynamics                     discretization  solver
 ``shallow_water``            spectral        SpectralShallowWaterModel
 ``shallow_water``            sfno            SFNOShallowWaterModel
 ``shallow_water``            latlon_fv       FVShallowWaterLatLonModel
-``shallow_water``            latlon_cgrid    CGShallowWaterLatLonModel
 ``hydrostatic``              cdgrid          CDGridPrimitiveEquationModel
 ``hydrostatic``              spectral        SpectralPrimitiveEquationModel
 ``hydrostatic``              sfno            SFNOPrimitiveEquationModel
@@ -98,11 +97,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # --- Lat-lon cores ---
     "FVShallowWaterLatLonModel": ("legoesm.atmosphere.dynamics.shallow_water_fv_latlon", "FVShallowWaterLatLonModel"),
     "fv_shallow_water_tendencies_latlon": ("legoesm.atmosphere.dynamics.shallow_water_fv_latlon", "fv_shallow_water_tendencies_latlon"),
-    "CGShallowWaterLatLonModel": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "CGShallowWaterLatLonModel"),
-    "CGShallowWaterConfig": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "CGShallowWaterConfig"),
-    "cgrid_shallow_water_tendencies_latlon": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "cgrid_shallow_water_tendencies"),
-    "a_to_cgrid": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "a_to_cgrid"),
-    "cgrid_to_a": ("legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon", "cgrid_to_a"),
     "FVLatLonPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.primitive_eq_fv_latlon", "FVLatLonPrimitiveEquationModel"),
     "fv_latlon_hydrostatic_tendencies": ("legoesm.atmosphere.dynamics.primitive_eq_fv_latlon", "fv_latlon_hydrostatic_tendencies"),
     "FVCompressibleEulerLatLonModel": ("legoesm.atmosphere.dynamics.compressible_euler_fv_latlon", "FVCompressibleEulerLatLonModel"),
@@ -201,7 +195,6 @@ AVAILABLE_SOLVERS = [
     "fv_shallow_water_latlon",
     "fv_primitive_equations_latlon",
     "fv_compressible_euler_latlon",
-    "cgrid_shallow_water_latlon",
     "mpas_primitive_equations",
     "mpas_compressible_euler",
     "tracer_transport",
@@ -225,7 +218,7 @@ _ALL_SOLVER_NAMES = AVAILABLE_SOLVERS + list(_DEPRECATED_SOLVER_NAMES)
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["cdgrid", "spectral", "sfno", "latlon_fv", "latlon_cgrid", "mpas"]
+DISCRETIZATION_OPTIONS = ["cdgrid", "spectral", "sfno", "latlon_fv", "mpas"]
 
 # Deprecated discretization names
 _DEPRECATED_DISCRETIZATIONS = {
@@ -241,7 +234,6 @@ _AXIS_TO_SOLVER = {
     ("shallow_water", "spectral"): "spectral_shallow_water",
     ("shallow_water", "sfno"): "sfno_shallow_water",
     ("shallow_water", "latlon_fv"): "fv_shallow_water_latlon",
-    ("shallow_water", "latlon_cgrid"): "cgrid_shallow_water_latlon",
     ("hydrostatic", "cdgrid"): "cdgrid_primitive_equations",
     ("hydrostatic", "spectral"): "spectral_primitive_equations",
     ("hydrostatic", "sfno"): "sfno_primitive_equations",
@@ -379,7 +371,6 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         "fv_shallow_water_latlon": "FVShallowWaterLatLonModel",
         "fv_primitive_equations_latlon": "FVLatLonPrimitiveEquationModel",
         "fv_compressible_euler_latlon": "FVCompressibleEulerLatLonModel",
-        "cgrid_shallow_water_latlon": "CGShallowWaterLatLonModel",
         "tracer_transport": "TracerTransportModel",
         "mpas_primitive_equations": "MPASPrimitiveEquationModel",
         "mpas_compressible_euler": "MPASCompressibleEulerModel",

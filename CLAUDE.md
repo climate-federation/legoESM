@@ -73,6 +73,14 @@
 - For performance regressions: look for retracing, host callbacks, excessive scatters, poor sharding, and accidental Python loops.
 - For cross-backend discrepancies: inspect dtype assumptions, x64 requirements, unsupported kernels, and communication semantics.
 
+## Code Hygiene Rules
+- Every new `.py` source file must have at least one test that imports and exercises it. Do not add files to `__init__.py` lazy imports or `supported_matrix.py` without a corresponding test.
+- New config dispatch branches (new Literal values in config NamedTuples + factory cases in `integration.py`) must have a test exercising that branch.
+- When removing a source module, also remove: its `__init__.py` re-export, its `supported_matrix.py` entry, its dispatch entry, its test file, and any stale `__pycache__` files.
+- Do not add deprecated backward-compatibility wrappers. If an API changes, update call sites directly.
+- Grid-specific variants are legitimate when they have genuinely different numerics. Copy-paste with only indexing changes is forbidden — factor shared logic into a common function.
+- Run the slopbuster agent (`/slopbuster audit all` or `/slopbuster review`) periodically, especially before releases.
+
 ## Existing Claude Assets
 - Specialized agents already exist under `.claude/agents/` for dycore expertise, validation, differentiability, physics, land/ice, and scalability.
 - Use those specialized agents when a task is deep in one of those domains rather than handling everything as generic coding work.

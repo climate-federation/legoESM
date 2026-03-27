@@ -57,11 +57,6 @@ from legoesm.da.cycling import (
     CyclingConfig,
     run_cycling,
 )
-from legoesm.da._diagnostics import (
-    compute_innovation_statistics,
-    log_minimization_progress,
-)
-
 __all__ = [
     # control_vector
     "ControlEntry",
@@ -99,7 +94,4 @@ __all__ = [
     # cycling
     "CyclingConfig",
     "run_cycling",
-    # diagnostics
-    "compute_innovation_statistics",
-    "log_minimization_progress",
 ]

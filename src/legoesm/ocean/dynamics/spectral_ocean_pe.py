@@ -40,6 +40,7 @@ from legoesm.grids.gaussian import (
     sh_analysis_oc2_3d,
     sh_analysis_dmu_3d,
     uv_from_vordiv_3d,
+    spectral_hyperdiffusion,
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
@@ -398,6 +399,27 @@ def spectral_ocean_tendencies(
             out_axes=0,
         )(tracers_hat)
 
+    # --- 17b. Barotropic (eta) hyperdiffusion ---
+    # The spectral solver uses unsplit SSP-RK3 for the entire system,
+    # including the fast barotropic gravity-wave mode.  For T21 and
+    # typical ocean time steps (dt ~ 3600 s), the barotropic CFL
+    # (omega*dt = c*n/a*dt) exceeds the RK3 imaginary-axis stability
+    # limit (~1.73) at wavenumbers n > ~12.  Without explicit damping
+    # on eta, those modes amplify each step, producing SSH amplitudes
+    # ~12x larger than the split-explicit (forward-backward) solvers
+    # used on cubed-sphere/lat-lon/MPAS grids.
+    #
+    # Adding biharmonic hyperdiffusion on eta_hat compensates for the
+    # RK3 growth factor.  The damping is scale-selective: negligible at
+    # planetary scales (n < 5) and strong at small scales (n > 15),
+    # preserving the physical gravity-wave frequency and large-scale
+    # amplitude while stabilising the high-wavenumber tail.
+    if config.eta_hyperdiff_coeff > 0:
+        deta_hat = deta_hat + spectral_hyperdiffusion(
+            grid, state.eta_hat.data,
+            config.eta_hyperdiff_coeff, config.hyperdiff_order,
+        )
+
     dT_hat = dtr_hat[0]
     dS_hat = dtr_hat[1]
 
@@ -538,6 +560,7 @@ class SpectralOceanModel:
             "A_v": config.A_v,
             "K_v": config.K_v,
             "hyperdiff_coeff": config.hyperdiff_coeff,
+            "eta_hyperdiff_coeff": config.eta_hyperdiff_coeff,
         }
         for name, value in nonnegative.items():
             if value < 0.0:

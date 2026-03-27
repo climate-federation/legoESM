@@ -97,13 +97,6 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.compressible_euler_fv_latlon",
     ),
 
-    # -- Lat-lon C-grid --
-    SolverEntry(
-        "atmosphere", "shallow_water", "latlon_cgrid",
-        "cgrid_shallow_water_latlon", "CGShallowWaterLatLonModel",
-        "legoesm.atmosphere.dynamics.shallow_water_cgrid_latlon",
-    ),
-
     # -- MPAS icosahedral --
     SolverEntry(
         "atmosphere", "hydrostatic", "mpas_voronoi",

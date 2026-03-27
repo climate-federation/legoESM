@@ -75,7 +75,7 @@ def _horiz_mean(f: Array) -> Array:
   Returns:
     The horizontal mean of `f`.
   """
-  return jnp.mean(f, axis=(0, 1), dtype=jnp.float64).astype(jnp.float32)
+  return jnp.mean(f, axis=(0, 1)).astype(jnp.float32)
 
 
 class RRTMGP:

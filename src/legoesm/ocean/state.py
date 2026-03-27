@@ -148,6 +148,13 @@ class SpectralOceanConfig(NamedTuple):
     n_barotropic_substeps: int = 1
     hyperdiff_coeff: float = 1.0e15
     hyperdiff_order: int = 2
+    # Biharmonic hyperdiffusion on eta (SSH) to stabilise the barotropic
+    # gravity-wave mode under unsplit SSP-RK3 time stepping.  Without this,
+    # high-wavenumber barotropic modes exceed the RK3 imaginary-axis stability
+    # limit (|omega*dt| > ~1.73) and amplify, producing SSH amplitudes ~12x
+    # larger than split-explicit solvers.  Uses the same ``hyperdiff_order``
+    # as the 3D fields.  Set to 0 to disable.
+    eta_hyperdiff_coeff: float = 2.5e18
     use_conservation_fixer: bool = True
     min_water_column_m: float = 0.5
     time_integrator: str = "ssp_rk3"
