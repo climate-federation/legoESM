@@ -122,18 +122,35 @@ def _weak_resolution(n_gpus: int, base_n: int = WEAK_SCALING_BASE_N) -> int:
 MAX_SUBDIVISION_LEVEL = 8  # 10*4^8+2 = 655,362 cells — safe upper bound
 
 def _weak_resolution_ico(n_gpus: int, base_level: int = WEAK_SCALING_BASE_LEVEL_ICO) -> int:
-    """Compute icosahedral subdivision level for weak scaling."""
+    """Compute icosahedral subdivision level for weak scaling.
+
+    Weak scaling holds cells/GPU roughly constant.  With ``n_gpus`` devices
+    the target total cell count is ``n_gpus * base_cells``.  We pick the
+    subdivision level whose cells-per-GPU ratio is nearest to ``base_cells``
+    (in log-space).  Ties are broken in favour of the level with *more*
+    cells per GPU so that devices are not underutilised.
+
+    Note: icosahedral levels jump by 4× in cell count, so perfect weak
+    scaling at non-power-of-4 GPU counts is impossible.
+    """
     base_level = min(base_level, MAX_SUBDIVISION_LEVEL)
     base_cells = 10 * 4 ** base_level + 2
-    target_cells = base_cells * n_gpus
-    # Find level whose cell count is closest to target
+
     best_level = base_level
-    for lev in range(2, MAX_SUBDIVISION_LEVEL + 1):
+    best_ratio = float("inf")
+
+    for lev in range(base_level, MAX_SUBDIVISION_LEVEL + 1):
         cells = 10 * 4 ** lev + 2
-        if cells >= target_cells * 0.7:
+        cells_per_gpu = cells / n_gpus
+        # How far from ideal cells/GPU (ratio ≥ 1, lower is better)
+        ratio = max(cells_per_gpu / base_cells, base_cells / cells_per_gpu)
+        if ratio < best_ratio or (
+            ratio == best_ratio and cells_per_gpu >= base_cells
+        ):
+            best_ratio = ratio
             best_level = lev
-            break
-    return min(best_level, MAX_SUBDIVISION_LEVEL)
+
+    return best_level
 
 # Strong scaling: fixed resolutions, sweep GPU counts.
 STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km

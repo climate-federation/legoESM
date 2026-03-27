@@ -95,6 +95,7 @@ def _mock_step_unified(
     o3_vmr, aerosol_od,
     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+    **kwargs,
 ):
     """Mock physics step: small constant warming + no moisture change."""
     shape_3d = T.shape

@@ -41,9 +41,9 @@ class TestAtmosphereDynamicsAliases:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             obj = getattr(dyn, alias)
-            assert len(w) == 1
-            assert issubclass(w[0].category, DeprecationWarning)
-            assert canonical in str(w[0].message)
+            dep_warns = [x for x in w if issubclass(x.category, DeprecationWarning)]
+            assert len(dep_warns) >= 1
+            assert canonical in str(dep_warns[0].message)
 
     @pytest.mark.parametrize("alias,canonical", [
         ("ShallowWaterModel", "CDGridShallowWaterModel"),

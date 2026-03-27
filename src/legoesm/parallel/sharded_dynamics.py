@@ -1001,32 +1001,310 @@ def sharded_integrate_scan(
 # Voronoi (MPAS) multi-GPU sharded step
 # ======================================================================
 
+def _pad_local_mesh_to(mesh, target_nCells, target_nEdges, target_nVertices):
+    """Pad a local VoronoiMesh to target dimensions with inert ghost entities.
+
+    Ghost cells have ``areaCell=1``, zero signs/weights, and connectivity
+    pointing to index 0.  Ghost edges have ``dvEdge=0`` (zero flux),
+    ``dcEdge=1``, and ``cellsOnEdge=[0,0]``.
+    """
+    from legoesm.grids.voronoi import VoronoiMesh
+
+    pad_c = target_nCells - mesh.nCells
+    pad_e = target_nEdges - mesh.nEdges
+    pad_v = target_nVertices - mesh.nVertices
+    if pad_c == 0 and pad_e == 0 and pad_v == 0:
+        return mesh
+
+    def pad1(arr, n, fill=0.0):
+        if n <= 0:
+            return arr
+        return jnp.concatenate([arr, jnp.full((n,), fill, dtype=arr.dtype)])
+
+    def pad2_col(arr, n, fill=0):
+        if n <= 0:
+            return arr
+        K = arr.shape[0]
+        return jnp.concatenate(
+            [arr, jnp.full((K, n), fill, dtype=arr.dtype)], axis=1,
+        )
+
+    return VoronoiMesh(
+        nCells=target_nCells,
+        nEdges=target_nEdges,
+        nVertices=target_nVertices,
+        maxEdges=mesh.maxEdges,
+        vertexDegree=mesh.vertexDegree,
+        radius=mesh.radius,
+        # Cell coords
+        latCell=pad1(mesh.latCell, pad_c),
+        lonCell=pad1(mesh.lonCell, pad_c),
+        xCell=pad1(mesh.xCell, pad_c),
+        yCell=pad1(mesh.yCell, pad_c),
+        zCell=pad1(mesh.zCell, pad_c),
+        # Edge coords
+        latEdge=pad1(mesh.latEdge, pad_e),
+        lonEdge=pad1(mesh.lonEdge, pad_e),
+        xEdge=pad1(mesh.xEdge, pad_e),
+        yEdge=pad1(mesh.yEdge, pad_e),
+        zEdge=pad1(mesh.zEdge, pad_e),
+        # Vertex coords
+        latVertex=pad1(mesh.latVertex, pad_v),
+        lonVertex=pad1(mesh.lonVertex, pad_v),
+        xVertex=pad1(mesh.xVertex, pad_v),
+        yVertex=pad1(mesh.yVertex, pad_v),
+        zVertex=pad1(mesh.zVertex, pad_v),
+        # Connectivity — ghost entries point to 0 (safe index)
+        cellsOnEdge=pad2_col(mesh.cellsOnEdge, pad_e, fill=0),
+        edgesOnCell=pad2_col(mesh.edgesOnCell, pad_c, fill=0),
+        verticesOnCell=pad2_col(mesh.verticesOnCell, pad_c, fill=0),
+        verticesOnEdge=pad2_col(mesh.verticesOnEdge, pad_e, fill=0),
+        edgesOnVertex=pad2_col(mesh.edgesOnVertex, pad_v, fill=0),
+        cellsOnVertex=pad2_col(mesh.cellsOnVertex, pad_v, fill=0),
+        cellsOnCell=pad2_col(mesh.cellsOnCell, pad_c, fill=0),
+        edgesOnEdge=pad2_col(mesh.edgesOnEdge, pad_e, fill=0),
+        nEdgesOnCell=pad1(mesh.nEdgesOnCell, pad_c, fill=0),
+        nEdgesOnEdge=pad1(mesh.nEdgesOnEdge, pad_e, fill=0),
+        # Geometry
+        areaCell=pad1(mesh.areaCell, pad_c, fill=1.0),
+        areaTriangle=pad1(mesh.areaTriangle, pad_v, fill=1.0),
+        dcEdge=pad1(mesh.dcEdge, pad_e, fill=1.0),
+        dvEdge=pad1(mesh.dvEdge, pad_e, fill=0.0),
+        angleEdge=pad1(mesh.angleEdge, pad_e, fill=0.0),
+        # Weights / signs — zero for ghosts
+        weightsOnEdge=pad2_col(mesh.weightsOnEdge, pad_e, fill=0.0),
+        kiteAreasOnVertex=pad2_col(mesh.kiteAreasOnVertex, pad_v, fill=0.0),
+        fEdge=pad1(mesh.fEdge, pad_e, fill=0.0),
+        fVertex=pad1(mesh.fVertex, pad_v, fill=0.0),
+        edgeSignOnCell=pad2_col(mesh.edgeSignOnCell, pad_c, fill=0.0),
+        edgeSignOnVertex=pad2_col(mesh.edgeSignOnVertex, pad_v, fill=0.0),
+        meshDensity=pad1(mesh.meshDensity, pad_c, fill=0.0),
+    )
+
+
+def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
+    """Pre-compute per-device local meshes and gather/scatter indices.
+
+    After ``reorder_voronoi_for_sharding`` the global mesh has *both*
+    cells and edges ordered by contiguous device blocks.  We compute
+    partitions whose owned-entity boundaries exactly match the shard
+    boundaries (``cells_per = nCells // n_dev``, ``edges_per = nEdges //
+    n_dev``), then build local meshes with remapped connectivity.
+
+    Using ``partition_voronoi_mesh`` directly is unsuitable because it
+    derives edge ownership from cell ownership, producing an uneven edge
+    split that mismatches the even shard split.  Instead we construct the
+    :class:`VoronoiPartition` objects manually with contiguous-block
+    ownership for both cells **and** edges.
+
+    Returns
+    -------
+    stacked_meshes : VoronoiMesh
+        Each leaf has shape ``(n_dev, max_local_*)``.
+    gather_cells : jnp.ndarray, (n_dev, max_local_cells)
+    gather_edges : jnp.ndarray, (n_dev, max_local_edges)
+    n_owned_cells : list[int]
+    n_owned_edges : list[int]
+    """
+    import numpy as np
+    from legoesm.parallel.voronoi_partition import (
+        VoronoiPartition,
+        HaloCommSchedule,
+        build_local_mesh,
+        _compute_halo_cells,
+    )
+
+    nCells = global_mesh.nCells
+    nEdges = global_mesh.nEdges
+    nVertices = global_mesh.nVertices
+    cells_per = nCells // n_dev
+    edges_per = nEdges // n_dev
+    verts_per = nVertices // n_dev
+
+    # Convert mesh arrays to numpy for setup.
+    gm_np = jax.tree.map(
+        lambda x: np.asarray(x) if hasattr(x, "shape") else x,
+        global_mesh,
+    )
+    cellsOnCell_np = np.asarray(gm_np.cellsOnCell)       # (maxEdges, nCells)
+    cellsOnEdge_np = np.asarray(gm_np.cellsOnEdge)       # (2, nEdges)
+    cellsOnVertex_np = np.asarray(gm_np.cellsOnVertex)    # (vDeg, nVerts)
+    verticesOnCell_np = np.asarray(gm_np.verticesOnCell)   # (maxEdges, nCells)
+    verticesOnEdge_np = np.asarray(gm_np.verticesOnEdge)   # (2, nEdges)
+    maxEdges = int(gm_np.maxEdges)
+    vDeg = int(gm_np.vertexDegree)
+
+    # Contiguous-block cell ownership (matches shard layout).
+    cell_owner = np.repeat(np.arange(n_dev, dtype=np.int32), cells_per)
+    if len(cell_owner) < nCells:
+        cell_owner = np.concatenate([
+            cell_owner,
+            np.full(nCells - len(cell_owner), n_dev - 1, dtype=np.int32),
+        ])
+
+    # Dummy comm schedule (not needed for shard_map path).
+    _dummy_comm = HaloCommSchedule(
+        neighbor_ranks=(), send_counts=(), recv_counts=(),
+        send_idx=jnp.empty(0, dtype=jnp.int32),
+        recv_idx=jnp.empty(0, dtype=jnp.int32),
+    )
+
+    partitions = []
+    local_meshes_raw = []
+
+    for rank in range(n_dev):
+        # ----- Owned entities (contiguous blocks) ----- #
+        c_start, c_end = rank * cells_per, (rank + 1) * cells_per
+        e_start, e_end = rank * edges_per, (rank + 1) * edges_per
+        v_start, v_end = rank * verts_per, (rank + 1) * verts_per
+
+        owned_cells = np.arange(c_start, c_end, dtype=np.int64)
+        owned_edges = np.arange(e_start, e_end, dtype=np.int64)
+        owned_vertices = np.arange(v_start, v_end, dtype=np.int64)
+        owned_cells_set = set(owned_cells.tolist())
+        owned_edges_set = set(owned_edges.tolist())
+
+        # ----- Halo cells: k-ring neighbours of owned cells ----- #
+        halo_cells_set = _compute_halo_cells(
+            cell_owner, cellsOnCell_np, maxEdges, rank, halo_depth,
+        )
+        halo_cells = np.array(sorted(halo_cells_set), dtype=np.int64)
+        local_cells = np.concatenate([owned_cells, halo_cells])
+        local_cells_set = set(local_cells.tolist())
+
+        # ----- Halo edges: edges connected to local cells ----- #
+        local_edges_set = set()
+        for e in range(nEdges):
+            c0 = int(cellsOnEdge_np[0, e])
+            c1 = int(cellsOnEdge_np[1, e])
+            if c0 in local_cells_set or c1 in local_cells_set:
+                local_edges_set.add(e)
+        halo_edges = np.array(
+            sorted(local_edges_set - owned_edges_set), dtype=np.int64,
+        )
+        local_edges = np.concatenate([owned_edges, halo_edges])
+
+        # ----- Halo vertices: vertices connected to local cells/edges ----- #
+        local_verts_set = set()
+        for c in local_cells:
+            for j in range(maxEdges):
+                v = int(verticesOnCell_np[j, c])
+                if 0 <= v < nVertices:
+                    local_verts_set.add(v)
+        for e in local_edges:
+            for j in range(2):
+                v = int(verticesOnEdge_np[j, e])
+                if 0 <= v < nVertices:
+                    local_verts_set.add(v)
+        owned_verts_set = set(owned_vertices.tolist())
+        halo_vertices = np.array(
+            sorted(local_verts_set - owned_verts_set), dtype=np.int64,
+        )
+        local_vertices = np.concatenate([owned_vertices, halo_vertices])
+
+        # ----- Global-to-local maps ----- #
+        cell_g2l = np.full(nCells, -1, dtype=np.int64)
+        for i, g in enumerate(local_cells):
+            cell_g2l[g] = i
+        edge_g2l = np.full(nEdges, -1, dtype=np.int64)
+        for i, g in enumerate(local_edges):
+            edge_g2l[g] = i
+        vertex_g2l = np.full(nVertices, -1, dtype=np.int64)
+        for i, g in enumerate(local_vertices):
+            vertex_g2l[g] = i
+
+        part = VoronoiPartition(
+            rank=rank,
+            n_ranks=n_dev,
+            nCells_global=nCells,
+            nEdges_global=nEdges,
+            nVertices_global=nVertices,
+            n_owned_cells=len(owned_cells),
+            n_owned_edges=len(owned_edges),
+            n_owned_vertices=len(owned_vertices),
+            n_local_cells=len(local_cells),
+            n_local_edges=len(local_edges),
+            n_local_vertices=len(local_vertices),
+            local_cells=local_cells,
+            local_edges=local_edges,
+            local_vertices=local_vertices,
+            cell_g2l=cell_g2l,
+            edge_g2l=edge_g2l,
+            vertex_g2l=vertex_g2l,
+            cell_comm=_dummy_comm,
+            edge_comm=_dummy_comm,
+            vertex_comm=_dummy_comm,
+        )
+        lm = build_local_mesh(gm_np, part)
+        partitions.append(part)
+        local_meshes_raw.append(lm)
+
+    # Uniform padding to the maximum local sizes across all devices.
+    max_lc = max(p.n_local_cells for p in partitions)
+    max_le = max(p.n_local_edges for p in partitions)
+    max_lv = max(p.n_local_vertices for p in partitions)
+
+    local_meshes = [
+        _pad_local_mesh_to(lm, max_lc, max_le, max_lv)
+        for lm in local_meshes_raw
+    ]
+
+    # Stack into a single pytree with a leading device dimension.
+    stacked_meshes = jax.tree.map(
+        lambda *leaves: jnp.stack(leaves, axis=0),
+        *local_meshes,
+    )
+
+    # Gather indices: for each device, global cell/edge indices of its
+    # local entities (owned + halo), padded with 0 for ghost slots.
+    gather_cells = np.zeros((n_dev, max_lc), dtype=np.int64)
+    gather_edges = np.zeros((n_dev, max_le), dtype=np.int64)
+    n_owned_cells = []
+    n_owned_edges = []
+    for rank, part in enumerate(partitions):
+        gather_cells[rank, : part.n_local_cells] = part.local_cells
+        gather_edges[rank, : part.n_local_edges] = part.local_edges
+        n_owned_cells.append(part.n_owned_cells)
+        n_owned_edges.append(part.n_owned_edges)
+
+    return (
+        stacked_meshes,
+        jnp.array(gather_cells),
+        jnp.array(gather_edges),
+        n_owned_cells,
+        n_owned_edges,
+        max_lc,
+        max_le,
+    )
+
+
 def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
-    """Create an efficient multi-GPU step for Voronoi (MPAS/TRiSK) grids.
+    """Create a halo-partitioned multi-GPU step for Voronoi (MPAS/TRiSK) grids.
 
-    TRiSK operators rely on indirect indexing through connectivity arrays
-    (``cellsOnEdge``, ``edgesOnCell``, etc.).  When state arrays are
-    naively sharded along the entity axis, each index operation generates
-    a cross-device gather — producing O(n_operators) collectives per step
-    (30-40+ for SSP-RK3 with full physics).
+    Instead of replicating the full state and redundantly computing the
+    full step on every device, this implementation:
 
-    This wrapper replaces that pathological pattern with exactly **two**
-    bulk collectives per step:
+    1. Pre-computes per-device local meshes (owned cells/edges + halo)
+       at setup time via domain decomposition.
+    2. At each SSP-RK3 stage:
+       a. **All-gather** the owned state shards to form the full state.
+       b. Each device gathers its local state (owned + halo) from the
+          full array via pre-computed indices.
+       c. Each device computes tendencies on its **local mesh only**
+          (O(N/p) work instead of O(N)).
+       d. Each device extracts the owned portion for the RK update.
+    3. After 3 stages, applies temperature floor and mass conservation
+       fix, then returns the sharded result.
 
-    1. **All-gather** the sharded state to replicate it on every device
-       (via ``with_sharding_constraint``).
-    2. Compute the step on replicated data — each device executes the
-       full graph locally with no cross-device traffic.
-    3. **Re-shard** the output (local slice, no communication).
-
-    The trade-off is redundant compute (every device evaluates the full
-    step), but for problem sizes up to ~4 M cells the compute is fast
-    enough that the communication savings dominate.
+    Communication is O(N) per stage (all-gather), but compute is O(N/p).
+    For the halo exchange, 2-ring halo depth is used to support del4
+    hyperdiffusion.
 
     Parameters
     ----------
     model
-        MPAS model with a ``.step(state, dt)`` method.
+        ``MPASPrimitiveEquationModel`` with ``.mesh``, ``.sigma_coord``,
+        ``.config``.
     dev_config : DeviceConfig
         From :func:`~legoesm.parallel.mesh.create_voronoi_device_mesh`.
 
@@ -1038,35 +1316,184 @@ def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
     if dev_config.n_devices <= 1 or dev_config.mesh is None:
         return model.step
 
-    rep_sharding = dev_config.replicated_sharding
-    face_sharding = dev_config.face_sharding
+    import numpy as np
+    try:
+        from jax.shard_map import shard_map
+    except ImportError:  # JAX < 0.8
+        from jax.experimental.shard_map import shard_map
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        mpas_hydrostatic_tendencies,
+    )
+    from legoesm.core.state import MPASHydrostaticState
+
+    n_dev = dev_config.n_devices
     voronoi_dims = dev_config.voronoi_dims
     if voronoi_dims is None:
         raise ValueError("dev_config.voronoi_dims must be set for Voronoi grids")
     nCells, nEdges, _nVerts = voronoi_dims
+    jax_mesh = dev_config.mesh
+    face_sharding = dev_config.face_sharding
 
-    def _replicate(x):
-        """Force replicated sharding (triggers one all-gather)."""
-        if isinstance(x, (jax.Array, jnp.ndarray)):
-            return jax.lax.with_sharding_constraint(x, rep_sharding)
-        return x
+    cells_per = nCells // n_dev
+    edges_per = nEdges // n_dev
 
-    def _reshard(x):
-        """Re-shard output: cell/edge arrays sharded, rest replicated."""
-        if not isinstance(x, (jax.Array, jnp.ndarray)):
-            return x
-        if x.ndim >= 1 and x.shape[0] in (nCells, nEdges):
-            return jax.lax.with_sharding_constraint(x, face_sharding)
-        return jax.lax.with_sharding_constraint(x, rep_sharding)
+    global_mesh = model.mesh
+    sigma = model.sigma_coord
+    cfg = model.config
+
+    # ------------------------------------------------------------------
+    # Setup: build per-device local meshes and gather indices
+    # ------------------------------------------------------------------
+    logger.info(
+        "Building halo-partitioned infrastructure for %d device(s) "
+        "(nCells=%d, nEdges=%d, halo_depth=2) ...",
+        n_dev, nCells, nEdges,
+    )
+    t0 = time.time()
+    (
+        stacked_meshes,   # VoronoiMesh pytree with (n_dev, max_l*) leaves
+        gather_cells,     # (n_dev, max_lc)
+        gather_edges,     # (n_dev, max_le)
+        _n_owned_cells,
+        _n_owned_edges,
+        max_lc,
+        max_le,
+    ) = _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2)
+    logger.info(
+        "  partition setup done in %.2fs  "
+        "(max_local_cells=%d, max_local_edges=%d, cells_per=%d, edges_per=%d)",
+        time.time() - t0, max_lc, max_le, cells_per, edges_per,
+    )
+
+    # Replicate the stacked meshes so every device can index its slice.
+    rep_sharding = dev_config.replicated_sharding
+    stacked_meshes = jax.tree.map(
+        lambda x: jax.device_put(x, rep_sharding) if hasattr(x, "shape") else x,
+        stacked_meshes,
+    )
+    gather_cells = jax.device_put(gather_cells, rep_sharding)
+    gather_edges = jax.device_put(gather_edges, rep_sharding)
+
+    # ------------------------------------------------------------------
+    # shard_map kernel: all-gather → local gather → local tendency
+    # ------------------------------------------------------------------
+
+    def _local_tendency(u_shard, T_shard, ps_shard, phis_shard, dt_val):
+        """Inside shard_map: compute tendency for this device's partition."""
+        # 1. All-gather to get full state on this device.
+        u_full = jax.lax.all_gather(u_shard, "device", axis=0, tiled=True)
+        T_full = jax.lax.all_gather(T_shard, "device", axis=0, tiled=True)
+        ps_full = jax.lax.all_gather(ps_shard, "device", axis=0, tiled=True)
+        phis_full = jax.lax.all_gather(phis_shard, "device", axis=0, tiled=True)
+
+        # 2. Gather this device's local state (owned + halo).
+        dev_idx = jax.lax.axis_index("device")
+        my_cell_idx = gather_cells[dev_idx]   # (max_lc,)
+        my_edge_idx = gather_edges[dev_idx]   # (max_le,)
+
+        T_local = T_full[my_cell_idx]         # (max_lc, nlev)
+        ps_local = ps_full[my_cell_idx]       # (max_lc,)
+        phis_local = phis_full[my_cell_idx]   # (max_lc,)
+        u_local = u_full[my_edge_idx]         # (max_le, nlev)
+
+        # 3. Get this device's local mesh.
+        my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
+
+        # 4. Build local state and compute tendency.
+        local_state = MPASHydrostaticState(
+            u=model.mesh.nCells,  # placeholder — replaced below
+            T=model.mesh.nCells,
+            p_s=model.mesh.nCells,
+            phis=model.mesh.nCells,
+        )
+        # Construct properly typed Field objects using the model's state
+        # field metadata (name, dims, units, etc.).
+        from legoesm.core.field import Field
+        local_state = MPASHydrostaticState(
+            u=Field(data=u_local, name="u",
+                    dims=("nEdges", "nlev"), units="m/s",
+                    long_name="normal velocity", staggering="edge"),
+            T=Field(data=T_local, name="T",
+                    dims=("nCells", "nlev"), units="K",
+                    long_name="temperature", staggering="cell"),
+            p_s=Field(data=ps_local, name="p_s",
+                      dims=("nCells",), units="Pa",
+                      long_name="surface pressure", staggering="cell"),
+            phis=Field(data=phis_local, name="phis",
+                       dims=("nCells",), units="m^2/s^2",
+                       long_name="surface geopotential", staggering="cell"),
+        )
+
+        tend = mpas_hydrostatic_tendencies(
+            local_state, my_mesh, sigma, cfg, dt=dt_val,
+        )
+
+        # 5. Return only the owned shard of the tendency.
+        du = tend.du_dt.data[:edges_per]
+        dT = tend.dT_dt.data[:cells_per]
+        dps = tend.dp_s_dt.data[:cells_per]
+
+        return du, dT, dps
+
+    _shard_tendency = shard_map(
+        _local_tendency,
+        mesh=jax_mesh,
+        in_specs=(P("device"), P("device"), P("device"), P("device"), P()),
+        out_specs=(P("device"), P("device"), P("device")),
+        check_rep=False,
+    )
+
+    # ------------------------------------------------------------------
+    # JIT-compiled step: SSP-RK3 with halo refresh between stages
+    # ------------------------------------------------------------------
 
     @jax.jit
     def _step(state, dt):
-        # Phase 1: all-gather state to replicate on all devices.
-        rep = jax.tree.map(_replicate, state)
-        # Phase 2: compute step locally (no cross-device ops).
-        new = model.step(rep, dt)
-        # Phase 3: re-shard output (local slice, no communication).
-        return jax.tree.map(_reshard, new)
+        u = state.u.data       # (nEdges, nlev) sharded
+        T = state.T.data       # (nCells, nlev) sharded
+        ps = state.p_s.data    # (nCells,) sharded
+        phis = state.phis.data # (nCells,) sharded
+
+        # --- Stage 1: k1 = state + dt * F(state) ---
+        du1, dT1, dps1 = _shard_tendency(u, T, ps, phis, dt)
+        u1 = u + dt * du1
+        T1 = T + dt * dT1
+        ps1 = ps + dt * dps1
+
+        # --- Stage 2: k2 = 3/4*state + 1/4*(k1 + dt*F(k1)) ---
+        du2, dT2, dps2 = _shard_tendency(u1, T1, ps1, phis, dt)
+        u2 = 0.75 * u + 0.25 * (u1 + dt * du2)
+        T2 = 0.75 * T + 0.25 * (T1 + dt * dT2)
+        ps2 = 0.75 * ps + 0.25 * (ps1 + dt * dps2)
+
+        # --- Stage 3: k3 = 1/3*state + 2/3*(k2 + dt*F(k2)) ---
+        du3, dT3, dps3 = _shard_tendency(u2, T2, ps2, phis, dt)
+        u_new = (1.0 / 3.0) * u + (2.0 / 3.0) * (u2 + dt * du3)
+        T_new = (1.0 / 3.0) * T + (2.0 / 3.0) * (T2 + dt * dT3)
+        ps_new = (1.0 / 3.0) * ps + (2.0 / 3.0) * (ps2 + dt * dps3)
+
+        # --- Post-processing (mirrors model.step) ---
+        if cfg.T_min > 0:
+            T_new = jnp.maximum(T_new, cfg.T_min)
+
+        if cfg.fix_mass:
+            # Global mass fixer via all-reduce (works on sharded arrays).
+            area_full = global_mesh.areaCell      # replicated
+            ps_old_full = jax.lax.with_sharding_constraint(
+                ps, rep_sharding)
+            ps_new_full = jax.lax.with_sharding_constraint(
+                ps_new, rep_sharding)
+            mass_old = jnp.sum(ps_old_full * area_full)
+            mass_new = jnp.sum(ps_new_full * area_full)
+            correction = (mass_old - mass_new) / jnp.sum(area_full)
+            ps_new = ps_new + correction
+
+        return MPASHydrostaticState(
+            u=state.u.replace(data=u_new),
+            T=state.T.replace(data=T_new),
+            p_s=state.p_s.replace(data=ps_new),
+            phis=state.phis,
+        )
 
     return _step
 

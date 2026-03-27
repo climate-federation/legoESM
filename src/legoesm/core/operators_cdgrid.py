@@ -684,19 +684,61 @@ def _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid):
     # If ad > 0 (high-order wants to increase), alpha = room_up / ad
     # If ad < 0 (high-order wants to decrease), alpha = room_dn / |ad|
     # If ad == 0, alpha = 1 (no correction needed)
+    #
+    # NOTE: jnp.where evaluates BOTH branches for all elements before
+    # selecting.  Division by ad when ad ≈ 0 produces inf/NaN values
+    # that are discarded in the forward pass but propagate through
+    # jax.grad.  Use safe denominators clamped away from zero so that
+    # the unevaluated branch never divides by zero.
     eps = 1.0e-30
+    safe_ad_pos = jnp.maximum(ad, eps)    # always > 0 — safe for branch ad > eps
+    safe_ad_neg = jnp.minimum(ad, -eps)   # always < 0 — safe for branch ad < -eps
     alpha = jnp.where(
         ad > eps,
-        jnp.minimum(1.0, room_up / ad),
+        jnp.minimum(1.0, room_up / safe_ad_pos),
         jnp.where(
             ad < -eps,
-            jnp.minimum(1.0, room_dn / (-ad)),
+            jnp.minimum(1.0, room_dn / (-safe_ad_neg)),
             1.0,
         ),
     )
     alpha = jnp.clip(alpha, 0.0, 1.0)
 
     return dq_low + alpha * ad
+
+
+def _make_fct_2d_differentiable(cdgrid):
+    """Create a differentiable FCT function that closes over cdgrid.
+
+    Returns a ``custom_jvp``-wrapped function whose forward pass uses the
+    full FCT limiter (monotone) and whose JVP linearizes through the
+    unlimited PPM scheme (always differentiable).
+
+    ``cdgrid`` is captured by closure so that JAX never traces its
+    integer fields (``n``, etc.) as differentiable primals.
+
+    This is the standard approach for non-smooth limiters in
+    differentiable simulation: the limiter is a nonlinear correction
+    whose linearization is the unlimited high-order scheme.
+    """
+
+    @jax.custom_jvp
+    def _fct(q, u_c, v_c):
+        return _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid)
+
+    @_fct.defjvp
+    def _fct_jvp(primals, tangents):
+        q, u_c, v_c = primals
+        dq, du_c, dv_c = tangents
+        primal_out = _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid)
+        _, tangent_out = jax.jvp(
+            lambda q_, u_, v_: cgrid_mass_flux_divergence(q_, u_, v_, cdgrid),
+            (q, u_c, v_c),
+            (dq, du_c, dv_c),
+        )
+        return primal_out, tangent_out
+
+    return _fct
 
 
 def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
@@ -712,6 +754,7 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
     - Conservative (flux-form divergence)
     - Monotone (face values bounded by adjacent cell values)
     - dt-independent (no time step required for the limiter)
+    - Differentiable (custom JVP linearizes through unlimited PPM)
     - JAX-compatible (pure array operations, no Python control flow)
 
     Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
@@ -731,6 +774,8 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
     dq_dt : jax.Array, shape (6, n, n[, nlev])
         Monotone tracer advection tendency.
     """
+    fct_fn = _make_fct_2d_differentiable(cdgrid)
+
     if q.ndim == 4:
         # 3D: vmap over levels
         q_t = jnp.moveaxis(q, -1, 0)
@@ -739,12 +784,12 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
 
         def fct_one(args):
             qk, uk, vk = args
-            return _cgrid_fct_fluxes_2d(qk, uk, vk, cdgrid)
+            return fct_fn(qk, uk, vk)
 
         result_t = jax.vmap(fct_one)((q_t, u_c_t, v_c_t))
         return jnp.moveaxis(result_t, 0, -1)
 
-    return _cgrid_fct_fluxes_2d(q, u_c, v_c, cdgrid)
+    return fct_fn(q, u_c, v_c)
 
 
 # ==============================================================================
