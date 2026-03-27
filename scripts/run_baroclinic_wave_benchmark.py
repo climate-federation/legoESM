@@ -286,16 +286,26 @@ def main():
     USE_SPECTRAL = grid_type == "spectral"
     USE_ICOSAHEDRAL = grid_type == "icosahedral"
 
-    # Grid spacing estimate
+    # Grid spacing estimate.
+    # For icosahedral, create the mesh early so we can compute dx_min
+    # from actual mesh metrics.  The TRiSK vector Laplacian uses both
+    # dcEdge (cell-cell) and dvEdge (vertex-vertex), and dvEdge can be
+    # ~0.5× dcEdge on SCVT meshes.  Using the formula-based estimate
+    # would over-estimate dx_min and produce an unstable diffusion coeff.
+    _ico_mesh = None
     if USE_SPECTRAL:
         dx_min = estimate_min_dx_gaussian(N_GRID)
     elif USE_ICOSAHEDRAL:
-        dx_min = _estimate_min_dx_icosahedral(N_GRID)
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        _ico_mesh = create_voronoi_mesh(subdivision_level=N_GRID)
+        dx_min = float(jnp.minimum(jnp.min(_ico_mesh.dcEdge),
+                                    jnp.min(_ico_mesh.dvEdge)))
     else:
         dx_min = estimate_min_dx_cubed_sphere(N_GRID)
 
     # CFL check (manual for icosahedral since cfl_check_and_adjust expects
     # cubed-sphere resolution parameter)
+    DT_requested = DT
     if USE_ICOSAHEDRAL:
         from legoesm.core.cfl import cfl_max_dt
         dt_max = cfl_max_dt(dx_min, 60.0 + 300.0, cfl_number=0.8, ndim=2)
@@ -306,6 +316,9 @@ def main():
                 if nv <= dt_max:
                     DT = float(nv)
                     break
+            print(f"  WARNING: --dt {DT_requested:.0f}s exceeds CFL limit "
+                  f"(dt_max={dt_max:.0f}s at dx_min={dx_min/1000:.1f}km). "
+                  f"Reducing to dt={DT:.0f}s.")
     else:
         DT = cfl_check_and_adjust(
             DT, N_GRID, model_type="primitive_eq",
@@ -373,7 +386,6 @@ def main():
         model = SpectralPrimitiveEquationModel(grid, sigma, config)
 
     elif USE_ICOSAHEDRAL:
-        from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
             MPASPrimitiveEquationModel,
             MPASPrimitiveEquationConfig,
@@ -381,7 +393,7 @@ def main():
         from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 
-        grid = create_voronoi_mesh(subdivision_level=N_GRID)
+        grid = _ico_mesh  # already created during dx_min computation
         cdgrid = None
 
         print("Initializing Jablonowski-Williamson baroclinic wave (icosahedral)...")
