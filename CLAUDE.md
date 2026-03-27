@@ -86,11 +86,17 @@
 ## Physics Constants and Shared Functions
 - **All physical constants** (g, R_d, R_v, c_pd, L_v, T_freeze, sigma_sb, etc.) are defined in `src/legoesm/constants.py`. Never redefine these values locally — always `from legoesm import constants` or import the specific name.
 - **RRTMGP constants** (`radiation/rrtmgp/constants.py`, `optics/constants.py`) re-export from `legoesm.constants` with SCREAMING_CASE aliases. Do not add new hardcoded values there.
-- **NamedTuple config defaults** (e.g. `BulkFormulaConfig.c_pa`) should use literal floats matching the central constants. Add a comment referencing the canonical name (e.g. `# = constants.c_pd`).
-- **Ocean/seawater constants** (`rho_0`, `c_sw`) live in `ocean/eos.py` and ocean-specific freezing points (271.35 K for seawater) in domain configs. These are intentionally different from freshwater `T_freeze = 273.15 K`.
-- **Saturation vapor pressure**: use `legoesm.thermo.saturation_mixing_ratio` (water) and `saturation_mixing_ratio_ice` (ice). Do not inline Tetens/Clausius-Clapeyron formulas in physics modules.
-- **Column physics helpers** (hydrostatic heights, density, virtual temperature): use `atmosphere.physics._shared`. Do not duplicate these in integration bridges.
-- **When adding a new physics parameterization**: import thermodynamic helpers from `thermo.py` and column utilities from `_shared.py`. Do not copy-paste implementations from neighboring schemes.
+- **NamedTuple config defaults** (e.g. `BulkFormulaConfig.c_pa`, `SeaIceConfig.rho_ice`) should use literal floats matching the central constants. Add a comment referencing the canonical name (e.g. `# = constants.c_pd`).
+- **Ocean-specific constants** (`rho_0`, `c_sw`, `T_freeze_ocean`, `scale_depth`) live in `ocean/eos.py`. The ocean freezing point (271.35 K for seawater) is intentionally different from freshwater `T_freeze = 273.15 K` in `constants.py`.
+- **Ocean physics helpers** (`compute_ocean_rho`, `compute_ocean_rho_and_pressure`) live in `ocean/eos.py`. Do not duplicate EOS + hydrostatic pressure calls in ocean integration bridges.
+- **Saturation thermodynamics**: use `legoesm.thermo` for all saturation computations:
+  - `saturation_vapor_pressure(T)` → e_sat [Pa]
+  - `saturation_mixing_ratio(T, p)` → q_sat [kg/kg]
+  - `saturation_mixing_ratio_ice(T, p)` → q_sat_ice [kg/kg]
+  - Do not inline Tetens/Magnus/Clausius-Clapeyron formulas anywhere.
+- **Atmosphere column helpers** (hydrostatic heights, density, virtual temperature): use `atmosphere.physics._shared`. Do not duplicate in integration bridges.
+- **Function defaults** for `g` should use `constants.g`, not the literal `9.80616`. Same for other constants used as default parameter values.
+- **When adding a new parameterization** (atmosphere, ocean, or land): import thermodynamic helpers from `thermo.py`, constants from `constants.py`, ocean constants from `eos.py`. Do not copy-paste from neighboring schemes.
 
 ## Existing Claude Assets
 - Specialized agents already exist under `.claude/agents/` for dycore expertise, validation, differentiability, physics, land/ice, and scalability.

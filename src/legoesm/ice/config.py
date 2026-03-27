@@ -19,10 +19,10 @@ class SeaIceConfig(NamedTuple):
     - ``n_categories=1``: Single-category slab (default, backward compatible).
     - ``n_categories=5``: 5-category CICE-standard ITD.
     """
-    rho_ice: float = 917.0          # Ice density [kg/m3]
-    c_ice: float = 2106.0           # Ice specific heat [J/kg/K]
+    rho_ice: float = 917.0          # Ice density [kg/m3] (= constants.rho_ice)
+    c_ice: float = 2106.0           # Ice specific heat [J/kg/K] (= constants.c_pi)
     k_ice: float = 2.04             # Ice thermal conductivity [W/m/K]
-    L_f: float = 3.337e5            # Latent heat of fusion [J/kg]
+    L_f: float = 3.337e5            # Latent heat of fusion [J/kg] (= constants.L_f)
     h_ice_min: float = 0.01         # Min ice thickness for smooth ops [m]
     albedo_ice: float = 0.65        # Fallback constant albedo
     emissivity_ice: float = 0.97
@@ -33,8 +33,8 @@ class SeaIceConfig(NamedTuple):
     drag_ocean: float = 5.5e-3      # Ocean-ice drag coefficient
     drag_atm: float = 1.3e-3        # Air-ice drag coefficient
     rho_air_ref: float = 1.225      # Reference air density [kg/m3]
-    rho_ocean_ref: float = 1025.0   # Reference ocean density [kg/m3]
-    T_freeze_ocean: float = 271.35  # Ocean freezing point [K]
+    rho_ocean_ref: float = 1025.0   # Reference ocean density [kg/m3] (= eos.rho_0)
+    T_freeze_ocean: float = 271.35  # Ocean freezing point [K] (= eos.T_freeze_ocean)
     T_ice_min: float = 180.0        # Lower bound for numerical stability [K]
     ocean_heat_transfer_coeff: float = 20.0  # Ocean-ice heat transfer [W/m^2/K]
     # Concentration dynamics

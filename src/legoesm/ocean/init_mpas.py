@@ -12,6 +12,7 @@ from legoesm.core.field import Field
 from legoesm.core.precision import get_policy
 from legoesm.core.state import MPASOceanState
 from legoesm.grids.voronoi import VoronoiMesh
+from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 
@@ -89,9 +90,8 @@ def rest_state_mpas_ocean(
     dtype = get_policy().storage
 
     # Temperature: exponential profile
-    scale_depth = 1000.0  # meters
     z_full = z_coord.z_full_ref  # (nlev,), negative values
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_full / scale_depth)
+    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
     T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev)).astype(dtype)
 
     # Salinity: uniform

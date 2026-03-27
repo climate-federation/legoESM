@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.precision import get_policy
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import LatLonOceanState
 
@@ -88,9 +89,8 @@ def rest_state_latlon_ocean(
     H_bathy, land_mask = idealized_bathymetry_latlon(grid, H_max, land_lat_threshold)
 
     # Exponential T stratification
-    scale_depth = 1000.0
     T_profile = T_deep + (T_surface - T_deep) * jnp.exp(
-        z_coord.z_full_ref / scale_depth,
+        z_coord.z_full_ref / _SCALE_DEPTH,
     )
     dtype = get_policy().storage
     T_3d = jnp.broadcast_to(

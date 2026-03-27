@@ -5,30 +5,18 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
 from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+_P_ATM = 101325.0  # Standard atmosphere [Pa]
+
 
 def _saturation_specific_humidity(T_K: jnp.ndarray) -> jnp.ndarray:
-    """Clausius-Clapeyron saturation specific humidity over water.
-
-    Uses the August-Roche-Magnus formula.
-
-    Parameters
-    ----------
-    T_K : array
-        Temperature [K].
-
-    Returns
-    -------
-    array : Saturation specific humidity [kg/kg].
-    """
-    T_C = T_K - 273.15
-    e_s = 611.2 * jnp.exp(17.67 * T_C / (T_C + 243.5))
-    p_atm = 101325.0  # Standard atmosphere [Pa]
-    return constants.epsilon * e_s / (p_atm - (1.0 - constants.epsilon) * e_s)
+    """Saturation specific humidity at standard atmosphere pressure."""
+    return saturation_mixing_ratio(T_K, jnp.full_like(T_K, _P_ATM))
 
 
 def bulk_formula_surface_forcing(

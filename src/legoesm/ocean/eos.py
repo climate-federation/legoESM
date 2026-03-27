@@ -14,11 +14,15 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
+
 # ==============================================================================
 # Ocean constants
 # ==============================================================================
 rho_0 = 1025.0          # Reference seawater density [kg/m^3]
 c_sw = 3994.0           # Specific heat of seawater [J/(kg*K)]
+T_freeze_ocean = 271.35  # Freezing point of seawater [K] (~-1.8 C)
+scale_depth = 1000.0     # Reference e-folding depth for stratification [m]
 
 # ==============================================================================
 # Wright (1997) EOS coefficients — from MOM6 (MOM_EOS_Wright.F90)
@@ -118,7 +122,7 @@ def compute_hydrostatic_pressure(
     dz: jnp.ndarray,
     jacobian: jnp.ndarray,
     rho_ref: float = rho_0,
-    g: float = 9.80616,
+    g: float = constants.g,
 ) -> jnp.ndarray:
     """Compute hydrostatic pressure at full levels.
 
@@ -169,7 +173,7 @@ def compute_buoyancy_frequency(
     dz: jnp.ndarray,
     jacobian: jnp.ndarray,
     rho_ref: float = rho_0,
-    g: float = 9.80616,
+    g: float = constants.g,
 ) -> jnp.ndarray:
     """Compute Brunt-Vaisala frequency N^2.
 
@@ -202,3 +206,53 @@ def compute_buoyancy_frequency(
     drho_dz = (rho[..., :-1] - rho[..., 1:]) / dz_interface
 
     return -(g / rho_ref) * drho_dz
+
+
+# ==============================================================================
+# Shared helpers for ocean physics integration modules
+# ==============================================================================
+
+def compute_ocean_rho(state, z_coord, jacobian):
+    """Compute in-situ density from ocean state via Wright EOS.
+
+    Used by vertical mixing, lateral mixing, and convection integration
+    bridges. Avoids triplicating the same hydrostatic pressure + EOS call.
+
+    Parameters
+    ----------
+    state : OceanState
+        Must have .T, .S, .eta fields.
+    z_coord : OceanZStarCoordinate
+        Vertical coordinate with .dz_ref.
+    jacobian : array
+        Dynamic Jacobian (eta + H) / H.
+
+    Returns
+    -------
+    array : In-situ density [kg/m^3].
+    """
+    p_hydro = compute_hydrostatic_pressure(
+        jnp.full_like(state.T.data, rho_0),
+        state.eta.data, z_coord.dz_ref, jacobian, rho_0,
+    )
+    return wright_eos(state.T.data, state.S.data, p_hydro)
+
+
+def compute_ocean_rho_and_pressure(state, z_coord, jacobian):
+    """Compute in-situ density and hydrostatic pressure from ocean state.
+
+    Parameters
+    ----------
+    state, z_coord, jacobian : same as ``compute_ocean_rho``.
+
+    Returns
+    -------
+    rho : array — in-situ density [kg/m^3].
+    p_hydro : array — hydrostatic pressure [Pa].
+    """
+    p_hydro = compute_hydrostatic_pressure(
+        jnp.full_like(state.T.data, rho_0),
+        state.eta.data, z_coord.dz_ref, jacobian, rho_0,
+    )
+    rho = wright_eos(state.T.data, state.S.data, p_hydro)
+    return rho, p_hydro

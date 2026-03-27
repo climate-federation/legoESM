@@ -27,6 +27,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.eos import (
     wright_eos,
     compute_buoyancy_frequency,
@@ -48,7 +49,7 @@ def _boundary_layer_depth(
     u_star: jnp.ndarray,
     B_f: jnp.ndarray,
     cfg: KPPConfig,
-    g: float = 9.80616,
+    g: float = constants.g,
 ) -> jnp.ndarray:
     """Estimate boundary layer depth h via bulk Richardson number.
 
@@ -117,7 +118,7 @@ def kpp_vertical_mixing(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
     cfg: KPPConfig,
-    g: float = 9.80616,
+    g: float = constants.g,
     tau_x: jnp.ndarray | None = None,
     tau_y: jnp.ndarray | None = None,
     B_f: jnp.ndarray | None = None,

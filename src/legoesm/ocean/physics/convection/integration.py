@@ -8,7 +8,11 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, rho_0 as rho_0_ref
+from legoesm.ocean.eos import (
+    wright_eos, compute_hydrostatic_pressure, rho_0 as rho_0_ref,
+    compute_ocean_rho as _compute_rho,
+    compute_ocean_rho_and_pressure as _compute_rho_and_pressure,
+)
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
@@ -77,24 +81,6 @@ def _make_plume(config: OceanConvectionConfig) -> Callable:
         return _wrap_tendencies(z3, z3, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
-
-# --- Helpers ---
-
-def _compute_rho(state, z_coord, J, g=9.80616):
-    p_hydro = compute_hydrostatic_pressure(
-        jnp.full_like(state.T.data, rho_0_ref),
-        state.eta.data, z_coord.dz_ref, J, rho_0_ref, g,
-    )
-    return wright_eos(state.T.data, state.S.data, p_hydro)
-
-
-def _compute_rho_and_pressure(state, z_coord, J, g=9.80616):
-    p_hydro = compute_hydrostatic_pressure(
-        jnp.full_like(state.T.data, rho_0_ref),
-        state.eta.data, z_coord.dz_ref, J, rho_0_ref, g,
-    )
-    rho = wright_eos(state.T.data, state.S.data, p_hydro)
-    return rho, p_hydro
 
 
 def _zero_tendencies(state: OceanState) -> OceanTendencies:

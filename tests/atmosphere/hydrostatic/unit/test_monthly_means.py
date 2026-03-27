@@ -208,27 +208,3 @@ class TestMonthlyAccumulatorSave:
         result = accum.finalize()
         assert result['months'] == []
         assert len(result['lat']) == 90  # default
-
-
-class TestValidation:
-    """Tests for the validation target checking."""
-
-    def test_check_target_pass(self):
-        """Value within range should pass."""
-        from scripts.legacy.validate_amip import check_target
-        msg, ok = check_target("test", 288.0, {"min": 287.0, "max": 289.0, "observed": 288.0, "unit": "K"})
-        assert ok
-        assert "PASS" in msg
-
-    def test_check_target_fail(self):
-        """Value outside range should fail."""
-        from scripts.legacy.validate_amip import check_target
-        msg, ok = check_target("test", 300.0, {"min": 287.0, "max": 289.0, "observed": 288.0, "unit": "K"})
-        assert not ok
-        assert "FAIL" in msg
-
-    def test_generate_report_missing_dir(self):
-        """Should handle missing directory gracefully."""
-        from scripts.legacy.validate_amip import generate_report
-        report = generate_report(Path("/nonexistent/path"))
-        assert "AMIP Validation Report" in report

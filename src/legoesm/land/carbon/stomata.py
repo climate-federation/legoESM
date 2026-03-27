@@ -39,6 +39,9 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm import constants
+from legoesm.thermo import saturation_vapor_pressure
+
 
 # =====================================================================
 # Constants
@@ -269,8 +272,8 @@ def jarvis_gs(
     f_T = jnp.maximum(1.0 - dT ** 2, 0.0)
 
     # VPD response (linear decrease)
-    e_sat = 611.2 * jnp.exp(17.67 * (T - 273.15) / (T - 29.65))
-    e_air = q_air * p_surface / (0.622 + q_air)
+    e_sat = saturation_vapor_pressure(T)
+    e_air = q_air * p_surface / (constants.epsilon + q_air)
     VPD_hPa = jnp.maximum(e_sat - e_air, 0.0) / 100.0
     f_VPD = jnp.clip(1.0 - config.a_vpd * VPD_hPa, 0.01, 1.0)
 
@@ -331,8 +334,8 @@ def coupled_farquhar_stomata(
         jnp.asarray(co2_ppmv, dtype=T_leaf.dtype), T_leaf.shape)
 
     # Vapour pressure deficit and relative humidity
-    e_sat = 611.2 * jnp.exp(17.67 * (T_leaf - 273.15) / (T_leaf - 29.65))
-    e_air = q_air * p_surface / (0.622 + q_air)
+    e_sat = saturation_vapor_pressure(T_leaf)
+    e_air = q_air * p_surface / (constants.epsilon + q_air)
     VPD_kPa = jnp.maximum(e_sat - e_air, 0.0) / 1000.0
     RH = jnp.clip(e_air / jnp.maximum(e_sat, 1.0), 0.0, 1.0)
 

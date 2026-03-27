@@ -7,6 +7,7 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.precision import get_policy
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState
 
@@ -102,8 +103,7 @@ def rest_state_ocean(
 
     # Temperature: exponential stratification
     # z_full_ref is negative, scale depth = 1000m
-    scale_depth = 1000.0
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
+    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_coord.z_full_ref / _SCALE_DEPTH)
     dtype = get_policy().storage
     T_3d = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, jnp.newaxis, :],
