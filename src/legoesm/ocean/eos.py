@@ -79,11 +79,11 @@ def wright_eos(
     # Specific volume parameter
     al0 = _a0 + _a1 * T + _a2 * S
 
-    # Pressure offset
-    p0 = (_b0 + _b4 * S) + T * (_b1 + T * (_b2 + _b3 * T) + _b5 * S)
+    # Pressure offset — Horner form: (b0 + b4*S) + T*((b1 + b5*S) + T*(b2 + b3*T))
+    p0 = (_b0 + _b4 * S) + T * ((_b1 + _b5 * S) + T * (_b2 + _b3 * T))
 
-    # Lambda
-    lam = (_c0 + _c4 * S) + T * (_c1 + T * (_c2 + _c3 * T) + _c5 * S)
+    # Lambda — Horner form: (c0 + c4*S) + T*((c1 + c5*S) + T*(c2 + c3*T))
+    lam = (_c0 + _c4 * S) + T * ((_c1 + _c5 * S) + T * (_c2 + _c3 * T))
 
     # Density: rho = (p + p0) / (lambda + al0 * (p + p0))
     p_plus_p0 = p + p0

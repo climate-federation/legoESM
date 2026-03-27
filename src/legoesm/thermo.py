@@ -16,6 +16,11 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
+# Tetens formula constants (over liquid water)
+_E0_Pa = 611.2        # Saturation vapour pressure at 0 °C [Pa]
+_A_tetens = 17.76     # Dimensionless slope coefficient
+_B_tetens = 243.5     # Temperature offset [°C]
+
 
 def saturation_mixing_ratio(
     T: jax.Array,
@@ -23,7 +28,7 @@ def saturation_mixing_ratio(
 ) -> jax.Array:
     """Compute saturation mixing ratio using Tetens formula.
 
-    e_sat = 611.2 * exp(17.67 * T_c / (T_c + 243.5))   where T_c = T - 273.15
+    e_sat = E0 * exp(A * T_c / (T_c + B))   where T_c = T - 273.15
     q_sat = epsilon * e_sat / (p - e_sat)
 
     Parameters
@@ -39,7 +44,7 @@ def saturation_mixing_ratio(
         Saturation mixing ratio [kg/kg].
     """
     T_c = T - constants.T_freeze  # Celsius
-    e_sat = 611.2 * jnp.exp(17.67 * T_c / (T_c + 243.5))
+    e_sat = _E0_Pa * jnp.exp(_A_tetens * T_c / (T_c + _B_tetens))
     # Clip denominator to avoid division by zero when e_sat >= p
     denom = jnp.maximum(p - e_sat, 1.0)
     q_sat = constants.epsilon * e_sat / denom

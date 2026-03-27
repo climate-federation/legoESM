@@ -49,8 +49,7 @@ def _global_area_sum(array: jax.Array, grid) -> jax.Array:
     precision loss in large-scale global integrals.
     """
     acc = _accumulation_dtype()
-    prod = array.astype(acc) * grid.area.astype(acc)
-    local_sum = jnp.sum(prod)
+    local_sum = jnp.dot(array.astype(acc).ravel(), grid.area.astype(acc).ravel())
     if _is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)

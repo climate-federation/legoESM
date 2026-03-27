@@ -95,7 +95,8 @@ def thomas_solve(
         d_prev = d_star_c[..., k - 1]
 
         denom = bk - ak * c_prev
-        denom = jnp.where(jnp.abs(denom) < 1e-30, 1e-30, denom)
+        sign = jnp.where(denom >= 0, 1.0, -1.0)
+        denom = sign * jnp.maximum(jnp.abs(denom), 1e-30)
 
         c_star_k = ck / denom
         d_star_k = (dk - ak * d_prev) / denom
