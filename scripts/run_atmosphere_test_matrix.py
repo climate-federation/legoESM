@@ -199,11 +199,11 @@ def _compute_drift(values: list[float]) -> float:
 # Hyperdiffusion helpers
 # ---------------------------------------------------------------------------
 
-def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 1e16) -> float:
+def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 2.5e16) -> float:
     return ref_coeff * (ref_n / n) ** 4
 
 
-def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 1.5e7) -> float:
+def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 2.5e7) -> float:
     """Scale second-order divergence damping for cubed-sphere (FV3-style)."""
     return ref_coeff * (ref_n / n) ** 2
 
@@ -222,11 +222,12 @@ def _hyperdiff_ico(mesh) -> float:
     return dx_mean ** 4 / (48.0 * 3600.0)
 
 
-def _laplacian_visc_cube(n: int, frac: float = 0.0) -> float:
+def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
     """Laplacian viscosity A_h = frac * c_gw * dx for cubed-sphere.
 
-    Disabled by default (frac=0): hyperdiffusion provides sufficient
-    scale-selective damping without over-diffusing the baroclinic jet.
+    A modest Laplacian viscosity (frac=0.05) is needed alongside
+    biharmonic hyperdiffusion to damp grid-scale energy that the C-D
+    grid staggering does not fully resolve.
     """
     import math
     from legoesm import constants

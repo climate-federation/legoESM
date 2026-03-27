@@ -200,7 +200,7 @@ def create_atmosphere_dycore(
         )
         cfg = CDGridPrimitiveEquationConfig(
             A_h=diff.A_h,
-            hyperdiff_coeff=diff.hyperdiff, hyperdiff_ps_coeff=0.0,
+            hyperdiff_coeff=diff.hyperdiff, hyperdiff_ps_coeff=diff.hyperdiff,
             div_damp_coeff=diff.div_damp,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
