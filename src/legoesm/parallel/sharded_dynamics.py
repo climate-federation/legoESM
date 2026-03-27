@@ -1105,6 +1105,12 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
     gather_edges : jnp.ndarray, (n_dev, max_local_edges)
     n_owned_cells : list[int]
     n_owned_edges : list[int]
+    max_lc : int
+    max_le : int
+    partitions : list[VoronoiPartition]
+        Per-device partition descriptors (for ppermute schedule building).
+    cell_owner : np.ndarray, (nCells,)
+        Cell ownership array.
     """
     import numpy as np
     from legoesm.parallel.voronoi_partition import (
@@ -1275,10 +1281,215 @@ def _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2):
         n_owned_edges,
         max_lc,
         max_le,
+        partitions,
+        cell_owner,
     )
 
 
-def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
+def _build_ppermute_schedule(partitions, cell_owner, n_dev, cells_per,
+                             edges_per, max_lc, max_le):
+    """Build a ppermute-based halo exchange schedule.
+
+    Instead of all-gathering the full state (O(N) communication),
+    this schedule uses ``jax.lax.ppermute`` to exchange only halo data
+    between neighboring devices.  The communication graph is edge-colored
+    so that each round of ppermute moves data between non-conflicting
+    pairs simultaneously.
+
+    Parameters
+    ----------
+    partitions : list[VoronoiPartition]
+    cell_owner : np.ndarray, (nCells,)
+    n_dev, cells_per, edges_per : int
+    max_lc, max_le : int
+        Maximum local cell/edge counts (owned + halo) across devices.
+
+    Returns
+    -------
+    dict with keys:
+        n_rounds, ppermute_perms, send_cell_idx, recv_cell_pos,
+        send_edge_idx, recv_edge_pos, halo_cells_per_round,
+        halo_edges_per_round.
+    """
+    import numpy as np
+    from collections import defaultdict
+
+    # ------------------------------------------------------------------
+    # 1. For each device pair, find which cells/edges cross the boundary
+    # ------------------------------------------------------------------
+    # halo_cells_from[d][d'] = global indices of d's halo cells owned by d'
+    halo_cells_from: dict[int, dict[int, list[int]]] = defaultdict(
+        lambda: defaultdict(list))
+    halo_edges_from: dict[int, dict[int, list[int]]] = defaultdict(
+        lambda: defaultdict(list))
+
+    for d, part in enumerate(partitions):
+        for h_idx in range(part.n_owned_cells, part.n_local_cells):
+            g = int(part.local_cells[h_idx])
+            owner = int(cell_owner[g])
+            halo_cells_from[d][owner].append(g)
+
+        for h_idx in range(part.n_owned_edges, part.n_local_edges):
+            g = int(part.local_edges[h_idx])
+            owner = min(g // edges_per, n_dev - 1)
+            halo_edges_from[d][owner].append(g)
+
+    # ------------------------------------------------------------------
+    # 2. Build undirected communication graph
+    # ------------------------------------------------------------------
+    comm_pairs: set[tuple[int, int]] = set()
+    for d in range(n_dev):
+        for d_prime in halo_cells_from[d]:
+            if d != d_prime:
+                comm_pairs.add((min(d, d_prime), max(d, d_prime)))
+        for d_prime in halo_edges_from[d]:
+            if d != d_prime:
+                comm_pairs.add((min(d, d_prime), max(d, d_prime)))
+
+    if not comm_pairs:
+        return {
+            'n_rounds': 0,
+            'ppermute_perms': [],
+            'send_cell_idx': [],
+            'recv_cell_pos': [],
+            'send_edge_idx': [],
+            'recv_edge_pos': [],
+            'halo_cells_per_round': [],
+            'halo_edges_per_round': [],
+        }
+
+    # ------------------------------------------------------------------
+    # 3. Edge-color the graph (greedy)
+    # ------------------------------------------------------------------
+    vertex_colors: dict[int, set[int]] = defaultdict(set)
+    edge_colors: dict[tuple[int, int], int] = {}
+    for u, v in sorted(comm_pairs):
+        used = vertex_colors[u] | vertex_colors[v]
+        color = 0
+        while color in used:
+            color += 1
+        edge_colors[(u, v)] = color
+        vertex_colors[u].add(color)
+        vertex_colors[v].add(color)
+
+    n_rounds = max(edge_colors.values()) + 1
+    rounds: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for (u, v), color in edge_colors.items():
+        rounds[color].append((u, v))
+
+    # ------------------------------------------------------------------
+    # 4. Build directed send/recv maps for each device pair
+    # ------------------------------------------------------------------
+    # cell_send_map[(src, dst)] = list of owned-local indices in src to send
+    # cell_recv_map[(dst, src)] = list of local positions in dst to place data
+    cell_send_map: dict[tuple[int, int], list[int]] = {}
+    cell_recv_map: dict[tuple[int, int], list[int]] = {}
+    edge_send_map: dict[tuple[int, int], list[int]] = {}
+    edge_recv_map: dict[tuple[int, int], list[int]] = {}
+
+    for d in range(n_dev):
+        for d_prime, cells_g in halo_cells_from[d].items():
+            if d_prime == d:
+                continue
+            # d_prime sends its owned cells that d needs as halo
+            cell_send_map[(d_prime, d)] = [
+                g - d_prime * cells_per for g in cells_g]
+            cell_recv_map[(d, d_prime)] = [
+                int(partitions[d].cell_g2l[g]) for g in cells_g]
+
+        for d_prime, edges_g in halo_edges_from[d].items():
+            if d_prime == d:
+                continue
+            edge_send_map[(d_prime, d)] = [
+                g - d_prime * edges_per for g in edges_g]
+            edge_recv_map[(d, d_prime)] = [
+                int(partitions[d].edge_g2l[g]) for g in edges_g]
+
+    # ------------------------------------------------------------------
+    # 5. Assemble per-round ppermute patterns and index arrays
+    # ------------------------------------------------------------------
+    ppermute_perms_out: list[list[tuple[int, int]]] = []
+    send_cell_idx_out: list[jnp.ndarray] = []
+    recv_cell_pos_out: list[jnp.ndarray] = []
+    send_edge_idx_out: list[jnp.ndarray] = []
+    recv_edge_pos_out: list[jnp.ndarray] = []
+    halo_cells_per_round: list[int] = []
+    halo_edges_per_round: list[int] = []
+
+    for r in range(n_rounds):
+        # Max halo size across all pairs in this round
+        max_c = 0
+        max_e = 0
+        for u, v in rounds[r]:
+            for src, dst in [(u, v), (v, u)]:
+                max_c = max(max_c, len(cell_send_map.get((src, dst), [])))
+                max_e = max(max_e, len(edge_send_map.get((src, dst), [])))
+        max_c = max(max_c, 1)  # at least 1 for array shape
+        max_e = max(max_e, 1)
+        halo_cells_per_round.append(max_c)
+        halo_edges_per_round.append(max_e)
+
+        # Bidirectional ppermute pattern
+        perm: list[tuple[int, int]] = []
+        partner: dict[int, int] = {}
+        for u, v in rounds[r]:
+            perm.append((u, v))
+            perm.append((v, u))
+            partner[u] = v
+            partner[v] = u
+        ppermute_perms_out.append(perm)
+
+        # Per-device index arrays (padded with safe defaults)
+        sc = np.zeros((n_dev, max_c), dtype=np.int64)
+        # Garbage slot: writes go to max_lc (trimmed off later)
+        rc = np.full((n_dev, max_c), max_lc, dtype=np.int64)
+        se = np.zeros((n_dev, max_e), dtype=np.int64)
+        re = np.full((n_dev, max_e), max_le, dtype=np.int64)
+
+        for d in range(n_dev):
+            if d not in partner:
+                continue
+            dp = partner[d]
+
+            cs = cell_send_map.get((d, dp), [])
+            for j, idx in enumerate(cs):
+                sc[d, j] = idx
+
+            cr = cell_recv_map.get((d, dp), [])
+            for j, pos in enumerate(cr):
+                rc[d, j] = pos
+
+            es = edge_send_map.get((d, dp), [])
+            for j, idx in enumerate(es):
+                se[d, j] = idx
+
+            er = edge_recv_map.get((d, dp), [])
+            for j, pos in enumerate(er):
+                re[d, j] = pos
+
+        send_cell_idx_out.append(jnp.array(sc))
+        recv_cell_pos_out.append(jnp.array(rc))
+        send_edge_idx_out.append(jnp.array(se))
+        recv_edge_pos_out.append(jnp.array(re))
+
+    return {
+        'n_rounds': n_rounds,
+        'ppermute_perms': ppermute_perms_out,
+        'send_cell_idx': send_cell_idx_out,
+        'recv_cell_pos': recv_cell_pos_out,
+        'send_edge_idx': send_edge_idx_out,
+        'recv_edge_pos': recv_edge_pos_out,
+        'halo_cells_per_round': halo_cells_per_round,
+        'halo_edges_per_round': halo_edges_per_round,
+    }
+
+
+def make_voronoi_sharded_step(
+    model,
+    dev_config: DeviceConfig,
+    *,
+    halo_strategy: str = "ppermute",
+):
     """Create a halo-partitioned multi-GPU step for Voronoi (MPAS/TRiSK) grids.
 
     Instead of replicating the full state and redundantly computing the
@@ -1286,19 +1497,11 @@ def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
 
     1. Pre-computes per-device local meshes (owned cells/edges + halo)
        at setup time via domain decomposition.
-    2. At each SSP-RK3 stage:
-       a. **All-gather** the owned state shards to form the full state.
-       b. Each device gathers its local state (owned + halo) from the
-          full array via pre-computed indices.
-       c. Each device computes tendencies on its **local mesh only**
-          (O(N/p) work instead of O(N)).
-       d. Each device extracts the owned portion for the RK update.
+    2. At each SSP-RK3 stage, exchanges only halo data between
+       neighboring devices (not the full state), then computes
+       tendencies on the local mesh.
     3. After 3 stages, applies temperature floor and mass conservation
        fix, then returns the sharded result.
-
-    Communication is O(N) per stage (all-gather), but compute is O(N/p).
-    For the halo exchange, 2-ring halo depth is used to support del4
-    hyperdiffusion.
 
     Parameters
     ----------
@@ -1307,6 +1510,11 @@ def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
         ``.config``.
     dev_config : DeviceConfig
         From :func:`~legoesm.parallel.mesh.create_voronoi_device_mesh`.
+    halo_strategy : str
+        ``"ppermute"`` (default) uses neighbor-only exchange via
+        ``jax.lax.ppermute`` — O(halo) communication.
+        ``"allgather"`` uses the legacy full-state all-gather —
+        O(N) communication.  Useful for debugging or as a fallback.
 
     Returns
     -------
@@ -1346,8 +1554,8 @@ def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
     # ------------------------------------------------------------------
     logger.info(
         "Building halo-partitioned infrastructure for %d device(s) "
-        "(nCells=%d, nEdges=%d, halo_depth=2) ...",
-        n_dev, nCells, nEdges,
+        "(nCells=%d, nEdges=%d, halo_depth=2, strategy=%s) ...",
+        n_dev, nCells, nEdges, halo_strategy,
     )
     t0 = time.time()
     (
@@ -1358,6 +1566,8 @@ def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
         _n_owned_edges,
         max_lc,
         max_le,
+        partitions_out,   # list[VoronoiPartition] (for ppermute schedule)
+        cell_owner_out,   # np.ndarray (nCells,) cell ownership
     ) = _build_voronoi_partition_infra(global_mesh, n_dev, halo_depth=2)
     logger.info(
         "  partition setup done in %.2fs  "
@@ -1371,79 +1581,186 @@ def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
         lambda x: jax.device_put(x, rep_sharding) if hasattr(x, "shape") else x,
         stacked_meshes,
     )
-    gather_cells = jax.device_put(gather_cells, rep_sharding)
-    gather_edges = jax.device_put(gather_edges, rep_sharding)
-
-    # ------------------------------------------------------------------
-    # shard_map kernel: all-gather → local gather → local tendency
-    # ------------------------------------------------------------------
 
     nlev = model.sigma_coord.n_levels
 
-    def _local_tendency(u_shard, T_shard, ps_shard, phis_shard, dt_val):
-        """Inside shard_map: compute tendency for this device's partition."""
-        # 1. Pack cell scalars into a single buffer to reduce collective
-        #    count from 4 to 2 (one cell-gather, one edge-gather).
-        #    Each all_gather has fixed latency overhead; fewer collectives
-        #    directly improves scaling, especially at non-power-of-2 counts
-        #    where XLA may use slower ring topologies.
-        cell_pack = jnp.concatenate([
-            T_shard,                                      # (cells_per, nlev)
-            ps_shard[:, jnp.newaxis],                     # (cells_per, 1)
-            phis_shard[:, jnp.newaxis],                   # (cells_per, 1)
-        ], axis=-1)                                       # (cells_per, nlev+2)
-        cell_full = jax.lax.all_gather(cell_pack, "device", axis=0, tiled=True)
-        u_full = jax.lax.all_gather(u_shard, "device", axis=0, tiled=True)
+    # ------------------------------------------------------------------
+    # Strategy dispatch: ppermute (O(halo)) vs allgather (O(N))
+    # ------------------------------------------------------------------
 
-        # 2. Gather this device's local state (owned + halo).
-        dev_idx = jax.lax.axis_index("device")
-        my_cell_idx = gather_cells[dev_idx]   # (max_lc,)
-        my_edge_idx = gather_edges[dev_idx]   # (max_le,)
+    use_ppermute = halo_strategy == "ppermute"
 
-        cell_local = cell_full[my_cell_idx]              # (max_lc, nlev+2)
-        T_local = cell_local[:, :nlev]                   # (max_lc, nlev)
-        ps_local = cell_local[:, nlev]                   # (max_lc,)
-        phis_local = cell_local[:, nlev + 1]             # (max_lc,)
-        u_local = u_full[my_edge_idx]                    # (max_le, nlev)
-
-        # 3. Get this device's local mesh.
-        my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
-
-        # 4. Build local state and compute tendency.
-        local_state = MPASHydrostaticState(
-            u=model.mesh.nCells,  # placeholder — replaced below
-            T=model.mesh.nCells,
-            p_s=model.mesh.nCells,
-            phis=model.mesh.nCells,
+    if use_ppermute:
+        # Build ppermute schedule: neighbor-only halo exchange
+        t1 = time.time()
+        pp_sched = _build_ppermute_schedule(
+            partitions_out, cell_owner_out, n_dev,
+            cells_per, edges_per, max_lc, max_le,
         )
-        # Construct properly typed Field objects using the model's state
-        # field metadata (name, dims, units, etc.).
-        from legoesm.core.field import Field
-        local_state = MPASHydrostaticState(
-            u=Field(data=u_local, name="u",
-                    dims=("nEdges", "nlev"), units="m/s",
-                    long_name="normal velocity", staggering="edge"),
-            T=Field(data=T_local, name="T",
-                    dims=("nCells", "nlev"), units="K",
-                    long_name="temperature", staggering="cell"),
-            p_s=Field(data=ps_local, name="p_s",
-                      dims=("nCells",), units="Pa",
-                      long_name="surface pressure", staggering="cell"),
-            phis=Field(data=phis_local, name="phis",
-                       dims=("nCells",), units="m^2/s^2",
-                       long_name="surface geopotential", staggering="cell"),
+        n_rounds = pp_sched['n_rounds']
+        ppermute_perms = pp_sched['ppermute_perms']
+
+        # Replicate index arrays on all devices
+        send_cell_idx = [
+            jax.device_put(a, rep_sharding) for a in pp_sched['send_cell_idx']]
+        recv_cell_pos = [
+            jax.device_put(a, rep_sharding) for a in pp_sched['recv_cell_pos']]
+        send_edge_idx = [
+            jax.device_put(a, rep_sharding) for a in pp_sched['send_edge_idx']]
+        recv_edge_pos = [
+            jax.device_put(a, rep_sharding) for a in pp_sched['recv_edge_pos']]
+
+        # Log halo exchange statistics
+        total_halo_cells = sum(pp_sched['halo_cells_per_round'])
+        total_halo_edges = sum(pp_sched['halo_edges_per_round'])
+        total_pp_bytes = sum(
+            hc * (nlev + 2) + he * nlev
+            for hc, he in zip(pp_sched['halo_cells_per_round'],
+                              pp_sched['halo_edges_per_round'])
+        ) * 4  # float32
+        ag_bytes = (nCells * (nlev + 2) + nEdges * nlev) * 4
+        logger.info(
+            "  ppermute schedule: %d rounds, max halo cells/edges per round: %s / %s",
+            n_rounds,
+            pp_sched['halo_cells_per_round'],
+            pp_sched['halo_edges_per_round'],
         )
-
-        tend = mpas_hydrostatic_tendencies(
-            local_state, my_mesh, sigma, cfg, dt=dt_val,
+        logger.info(
+            "  comm volume per stage: ppermute ~%.1f KB vs allgather ~%.1f KB (%.1fx reduction)",
+            total_pp_bytes / 1024,
+            ag_bytes / 1024,
+            ag_bytes / max(total_pp_bytes, 1),
         )
+        logger.info("  ppermute schedule built in %.3fs", time.time() - t1)
 
-        # 5. Return only the owned shard of the tendency.
-        du = tend.du_dt.data[:edges_per]
-        dT = tend.dT_dt.data[:cells_per]
-        dps = tend.dp_s_dt.data[:cells_per]
+        # ---- ppermute-based shard_map kernel ----
 
-        return du, dT, dps
+        def _local_tendency(u_shard, T_shard, ps_shard, phis_shard, dt_val):
+            """Inside shard_map: ppermute halo exchange → local tendency."""
+            dev_idx = jax.lax.axis_index("device")
+
+            # Pack cell fields into a single buffer: (cells_per, nlev+2)
+            cell_pack = jnp.concatenate([
+                T_shard,                           # (cells_per, nlev)
+                ps_shard[:, jnp.newaxis],          # (cells_per, 1)
+                phis_shard[:, jnp.newaxis],        # (cells_per, 1)
+            ], axis=-1)
+
+            # Initialize local arrays with +1 garbage slot for safe padding
+            cell_local = jnp.zeros((max_lc + 1, nlev + 2), dtype=cell_pack.dtype)
+            cell_local = cell_local.at[:cells_per].set(cell_pack)
+            u_local = jnp.zeros((max_le + 1, nlev), dtype=u_shard.dtype)
+            u_local = u_local.at[:edges_per].set(u_shard)
+
+            # Exchange halos via ppermute rounds (one per edge-color)
+            for r in range(n_rounds):
+                # Pack send buffers (this device's owned cells/edges
+                # that the round's partner needs as halo)
+                sc_idx = send_cell_idx[r][dev_idx]   # (halo_c_r,)
+                se_idx = send_edge_idx[r][dev_idx]   # (halo_e_r,)
+                send_c = cell_pack[sc_idx]
+                send_e = u_shard[se_idx]
+
+                # ppermute: device-to-device exchange via NCCL/ICI
+                recv_c = jax.lax.ppermute(
+                    send_c, "device", perm=ppermute_perms[r])
+                recv_e = jax.lax.ppermute(
+                    send_e, "device", perm=ppermute_perms[r])
+
+                # Scatter received data into halo positions
+                # (padding entries target the garbage slot at max_lc/max_le)
+                rc_pos = recv_cell_pos[r][dev_idx]   # (halo_c_r,)
+                re_pos = recv_edge_pos[r][dev_idx]   # (halo_e_r,)
+                cell_local = cell_local.at[rc_pos].set(recv_c)
+                u_local = u_local.at[re_pos].set(recv_e)
+
+            # Trim garbage slot
+            cell_local = cell_local[:max_lc]
+            u_local = u_local[:max_le]
+
+            # Unpack cell fields
+            T_local = cell_local[:, :nlev]
+            ps_local = cell_local[:, nlev]
+            phis_local = cell_local[:, nlev + 1]
+
+            # Get this device's local mesh
+            my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
+
+            # Build local state and compute tendency
+            from legoesm.core.field import Field
+            local_state = MPASHydrostaticState(
+                u=Field(data=u_local, name="u",
+                        dims=("nEdges", "nlev"), units="m/s",
+                        long_name="normal velocity", staggering="edge"),
+                T=Field(data=T_local, name="T",
+                        dims=("nCells", "nlev"), units="K",
+                        long_name="temperature", staggering="cell"),
+                p_s=Field(data=ps_local, name="p_s",
+                          dims=("nCells",), units="Pa",
+                          long_name="surface pressure", staggering="cell"),
+                phis=Field(data=phis_local, name="phis",
+                           dims=("nCells",), units="m^2/s^2",
+                           long_name="surface geopotential",
+                           staggering="cell"),
+            )
+            tend = mpas_hydrostatic_tendencies(
+                local_state, my_mesh, sigma, cfg, dt=dt_val,
+            )
+
+            # Return only the owned shard of the tendency
+            return (tend.du_dt.data[:edges_per],
+                    tend.dT_dt.data[:cells_per],
+                    tend.dp_s_dt.data[:cells_per])
+
+    else:
+        # ---- Legacy all-gather shard_map kernel ----
+        gather_cells_rep = jax.device_put(gather_cells, rep_sharding)
+        gather_edges_rep = jax.device_put(gather_edges, rep_sharding)
+
+        def _local_tendency(u_shard, T_shard, ps_shard, phis_shard, dt_val):
+            """Inside shard_map: all-gather → local gather → tendency."""
+            cell_pack = jnp.concatenate([
+                T_shard,
+                ps_shard[:, jnp.newaxis],
+                phis_shard[:, jnp.newaxis],
+            ], axis=-1)
+            cell_full = jax.lax.all_gather(
+                cell_pack, "device", axis=0, tiled=True)
+            u_full = jax.lax.all_gather(
+                u_shard, "device", axis=0, tiled=True)
+
+            dev_idx = jax.lax.axis_index("device")
+            cell_local = cell_full[gather_cells_rep[dev_idx]]
+            u_local = u_full[gather_edges_rep[dev_idx]]
+
+            T_local = cell_local[:, :nlev]
+            ps_local = cell_local[:, nlev]
+            phis_local = cell_local[:, nlev + 1]
+
+            my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
+
+            from legoesm.core.field import Field
+            local_state = MPASHydrostaticState(
+                u=Field(data=u_local, name="u",
+                        dims=("nEdges", "nlev"), units="m/s",
+                        long_name="normal velocity", staggering="edge"),
+                T=Field(data=T_local, name="T",
+                        dims=("nCells", "nlev"), units="K",
+                        long_name="temperature", staggering="cell"),
+                p_s=Field(data=ps_local, name="p_s",
+                          dims=("nCells",), units="Pa",
+                          long_name="surface pressure", staggering="cell"),
+                phis=Field(data=phis_local, name="phis",
+                           dims=("nCells",), units="m^2/s^2",
+                           long_name="surface geopotential",
+                           staggering="cell"),
+            )
+            tend = mpas_hydrostatic_tendencies(
+                local_state, my_mesh, sigma, cfg, dt=dt_val,
+            )
+            return (tend.du_dt.data[:edges_per],
+                    tend.dT_dt.data[:cells_per],
+                    tend.dp_s_dt.data[:cells_per])
 
     _shard_tendency = shard_map(
         _local_tendency,
@@ -1487,10 +1804,6 @@ def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
             T_new = jnp.maximum(T_new, cfg.T_min)
 
         if cfg.fix_mass:
-            # Global mass fixer via sharded reduce — no replication needed.
-            # jnp.sum on a sharded array automatically inserts all_reduce,
-            # which is O(1) per device instead of the O(N) all-gather that
-            # with_sharding_constraint(x, replicated) would require.
             area_sharded = jax.lax.with_sharding_constraint(
                 global_mesh.areaCell, face_sharding)
             mass_old = jnp.sum(ps * area_sharded)

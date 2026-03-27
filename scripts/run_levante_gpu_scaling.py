@@ -938,8 +938,14 @@ def build_parser() -> argparse.ArgumentParser:
              "4,5,6 icosahedral).",
     )
     p.add_argument(
-        "--output-dir", type=str, default="output/scaling",
-        help="Output directory for results and plots.",
+        "--output-dir", type=str, default="results/scaling",
+        help="Base output directory for results and plots.",
+    )
+    p.add_argument(
+        "--no-timestamp", action="store_true",
+        help="Do not append a UTC timestamp sub-directory to --output-dir. "
+             "Without this flag each run gets its own sub-directory, "
+             "preventing accidental overwrite of previous results.",
     )
     p.add_argument(
         "--no-plot", action="store_true",
@@ -979,8 +985,12 @@ def main() -> int:
     else:
         strong_res = None  # let run_strong_scaling pick defaults per grid type
 
-    # Output directory
+    # Output directory — append a UTC timestamp sub-directory by default
+    # so that successive runs never silently overwrite each other.
     output_dir = Path(args.output_dir)
+    if not args.no_timestamp:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        output_dir = output_dir / ts
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine modes to run

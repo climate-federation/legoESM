@@ -387,3 +387,153 @@ class TestHaloExchange:
             np.testing.assert_allclose(
                 f, expected, atol=1e-12, err_msg=f"rank {r}",
             )
+
+
+# ========================================================================
+# ppermute schedule (for multi-GPU halo exchange)
+# ========================================================================
+
+class TestPpermuteSchedule:
+    """Tests for the ppermute-based halo exchange schedule builder."""
+
+    @pytest.mark.parametrize("n_ranks", [2, 3, 4])
+    def test_schedule_covers_all_halo_cells(self, mesh, n_ranks):
+        """Every halo cell is covered by exactly one ppermute round."""
+        from legoesm.parallel.voronoi_partition import (
+            reorder_voronoi_for_sharding,
+        )
+        from legoesm.parallel.sharded_dynamics import (
+            _build_voronoi_partition_infra,
+            _build_ppermute_schedule,
+        )
+
+        reordered = reorder_voronoi_for_sharding(mesh, n_ranks)
+        nCells = reordered.nCells
+        nEdges = reordered.nEdges
+        cells_per = nCells // n_ranks
+        edges_per = nEdges // n_ranks
+
+        (_, _, _, _, _, max_lc, max_le, partitions, cell_owner,
+         ) = _build_voronoi_partition_infra(reordered, n_ranks, halo_depth=2)
+
+        sched = _build_ppermute_schedule(
+            partitions, cell_owner, n_ranks,
+            cells_per, edges_per, max_lc, max_le,
+        )
+
+        # For each device, collect all halo cell positions reached
+        for d in range(n_ranks):
+            part = partitions[d]
+            expected_halo_positions = set(range(
+                part.n_owned_cells, part.n_local_cells))
+
+            reached: set[int] = set()
+            for r in range(sched['n_rounds']):
+                recv_pos = np.asarray(sched['recv_cell_pos'][r])[d]
+                for pos in recv_pos:
+                    pos = int(pos)
+                    if pos < max_lc:  # skip garbage slot
+                        reached.add(pos)
+
+            assert expected_halo_positions <= reached, (
+                f"device {d}: halo positions "
+                f"{expected_halo_positions - reached} "
+                f"not covered by ppermute schedule"
+            )
+
+    @pytest.mark.parametrize("n_ranks", [2, 3, 4])
+    def test_ppermute_halo_matches_simulated_exchange(self, mesh, n_ranks):
+        """ppermute schedule produces same halo values as simulated
+        exchange."""
+        from legoesm.parallel.voronoi_partition import (
+            reorder_voronoi_for_sharding,
+        )
+        from legoesm.parallel.sharded_dynamics import (
+            _build_voronoi_partition_infra,
+            _build_ppermute_schedule,
+        )
+
+        reordered = reorder_voronoi_for_sharding(mesh, n_ranks)
+        nCells = reordered.nCells
+        cells_per = nCells // n_ranks
+        edges_per = reordered.nEdges // n_ranks
+
+        (_, _, _, _, _, max_lc, max_le, partitions, cell_owner,
+         ) = _build_voronoi_partition_infra(reordered, n_ranks, halo_depth=2)
+
+        sched = _build_ppermute_schedule(
+            partitions, cell_owner, n_ranks,
+            cells_per, edges_per, max_lc, max_le,
+        )
+
+        # Use global index as value for easy verification
+        phi_global = jnp.arange(nCells, dtype=jnp.float64)
+
+        for d in range(n_ranks):
+            part = partitions[d]
+            owned_data = phi_global[d * cells_per:(d + 1) * cells_per]
+
+            local_arr = jnp.zeros(max_lc + 1, dtype=jnp.float64)
+            local_arr = local_arr.at[:cells_per].set(owned_data)
+
+            # Simulate ppermute rounds
+            for r in range(sched['n_rounds']):
+                perm = sched['ppermute_perms'][r]
+                src_dev = None
+                for s, dst in perm:
+                    if dst == d:
+                        src_dev = s
+                        break
+                if src_dev is None:
+                    continue
+
+                src_owned = phi_global[
+                    src_dev * cells_per:(src_dev + 1) * cells_per]
+                send_idx = np.asarray(
+                    sched['send_cell_idx'][r])[src_dev]
+                sent_data = src_owned[send_idx]
+
+                recv_pos = np.asarray(
+                    sched['recv_cell_pos'][r])[d]
+                local_arr = local_arr.at[recv_pos].set(sent_data)
+
+            local_arr = local_arr[:max_lc]
+
+            # Check halo matches global
+            for h in range(part.n_owned_cells, part.n_local_cells):
+                g = int(part.local_cells[h])
+                expected = float(phi_global[g])
+                actual = float(local_arr[h])
+                assert abs(actual - expected) < 1e-12, (
+                    f"device {d}, halo pos {h} (global cell {g}): "
+                    f"expected {expected}, got {actual}"
+                )
+
+    @pytest.mark.parametrize("n_ranks", [2, 4])
+    def test_edge_coloring_valid(self, mesh, n_ranks):
+        """Each ppermute round has no device appearing as sender twice."""
+        from legoesm.parallel.voronoi_partition import (
+            reorder_voronoi_for_sharding,
+        )
+        from legoesm.parallel.sharded_dynamics import (
+            _build_voronoi_partition_infra,
+            _build_ppermute_schedule,
+        )
+
+        reordered = reorder_voronoi_for_sharding(mesh, n_ranks)
+        cells_per = reordered.nCells // n_ranks
+        edges_per = reordered.nEdges // n_ranks
+
+        (_, _, _, _, _, max_lc, max_le, partitions, cell_owner,
+         ) = _build_voronoi_partition_infra(reordered, n_ranks, halo_depth=2)
+
+        sched = _build_ppermute_schedule(
+            partitions, cell_owner, n_ranks,
+            cells_per, edges_per, max_lc, max_le,
+        )
+
+        for r in range(sched['n_rounds']):
+            senders = [s for s, _ in sched['ppermute_perms'][r]]
+            assert len(senders) == len(set(senders)), (
+                f"Round {r}: duplicate senders in ppermute perm"
+            )

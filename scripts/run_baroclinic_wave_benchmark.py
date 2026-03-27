@@ -273,6 +273,13 @@ def main():
         "--output-dir", type=str, default="output",
         help="Output directory (default: output/)"
     )
+    parser.add_argument(
+        "--tag", type=str, default=None,
+        help="Tag appended to output filenames (default: auto-generated from "
+             "grid, resolution, and timestamp, e.g. "
+             "'spectral_T42_20260327_143022'). "
+             "Pass --tag '' to use plain filenames (old behavior)."
+    )
     args = parser.parse_args()
 
     grid_type = args.grid
@@ -283,6 +290,23 @@ def main():
     N_DAYS = args.days
     OUTPUT_DIR = Path(args.output_dir)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Build output filename tag
+    if args.tag is None:
+        # Auto-generate: {grid}_{resolution}_{YYYYMMDD_HHMMSS}
+        from datetime import datetime
+        _res = res_str
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        _file_tag = f"_{grid_type}_{_res}_{_ts}"
+    elif args.tag == "":
+        _file_tag = ""
+    else:
+        _file_tag = f"_{args.tag}"
+
+    def _out(basename: str, ext: str) -> Path:
+        """Build output path: OUTPUT_DIR / {basename}{_file_tag}.{ext}"""
+        return OUTPUT_DIR / f"{basename}{_file_tag}.{ext}"
+
     USE_SPECTRAL = grid_type == "spectral"
     USE_ICOSAHEDRAL = grid_type == "icosahedral"
 
@@ -614,7 +638,7 @@ def main():
     # -----------------------------------------------------------------------
     # Save NPZ diagnostics
     # -----------------------------------------------------------------------
-    npz_path = OUTPUT_DIR / "baroclinic_wave_diagnostics.npz"
+    npz_path = _out("baroclinic_wave_diagnostics", "npz")
     np.savez(
         npz_path,
         times_days=diag_times,
@@ -723,7 +747,7 @@ def main():
         fig, axes = plt.subplots(
             3, 2,
             figsize=(14, 15),
-            subplot_kw={"projection": ccrs.PlateCarree()} if has_cartopy else {},
+            subplot_kw={"projection": ccrs.PlateCarree(central_longitude=180)} if has_cartopy else {},
         )
 
         lon_deg = np.degrees(lon_ll)
@@ -879,7 +903,7 @@ def main():
             fontsize=13, y=1.01,
         )
         plt.tight_layout()
-        fig_path = OUTPUT_DIR / "baroclinic_wave_benchmark.png"
+        fig_path = _out("baroclinic_wave_benchmark", "png")
         plt.savefig(fig_path, dpi=200, bbox_inches="tight")
         plt.close()
         print(f"  Saved {fig_path}")
@@ -931,7 +955,7 @@ def main():
         fontsize=13,
     )
     plt.tight_layout()
-    cons_path = OUTPUT_DIR / "baroclinic_wave_conservation.png"
+    cons_path = _out("baroclinic_wave_conservation", "png")
     plt.savefig(cons_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved {cons_path}")
@@ -951,9 +975,9 @@ def main():
     print(f"  Min p_s (final): {diag_ps_min[-1] / 100:.1f} hPa")
     print(f"  Max wind (final):{diag_max_wind[-1]:.1f} m/s")
     print(f"\n  Outputs:")
-    print(f"    {OUTPUT_DIR / 'baroclinic_wave_benchmark.png'}")
-    print(f"    {OUTPUT_DIR / 'baroclinic_wave_conservation.png'}")
-    print(f"    {OUTPUT_DIR / 'baroclinic_wave_diagnostics.npz'}")
+    print(f"    {_out('baroclinic_wave_benchmark', 'png')}")
+    print(f"    {_out('baroclinic_wave_conservation', 'png')}")
+    print(f"    {_out('baroclinic_wave_diagnostics', 'npz')}")
     print()
 
 
