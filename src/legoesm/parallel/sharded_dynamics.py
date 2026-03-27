@@ -1378,23 +1378,33 @@ def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
     # shard_map kernel: all-gather → local gather → local tendency
     # ------------------------------------------------------------------
 
+    nlev = model.sigma_coord.n_levels
+
     def _local_tendency(u_shard, T_shard, ps_shard, phis_shard, dt_val):
         """Inside shard_map: compute tendency for this device's partition."""
-        # 1. All-gather to get full state on this device.
+        # 1. Pack cell scalars into a single buffer to reduce collective
+        #    count from 4 to 2 (one cell-gather, one edge-gather).
+        #    Each all_gather has fixed latency overhead; fewer collectives
+        #    directly improves scaling, especially at non-power-of-2 counts
+        #    where XLA may use slower ring topologies.
+        cell_pack = jnp.concatenate([
+            T_shard,                                      # (cells_per, nlev)
+            ps_shard[:, jnp.newaxis],                     # (cells_per, 1)
+            phis_shard[:, jnp.newaxis],                   # (cells_per, 1)
+        ], axis=-1)                                       # (cells_per, nlev+2)
+        cell_full = jax.lax.all_gather(cell_pack, "device", axis=0, tiled=True)
         u_full = jax.lax.all_gather(u_shard, "device", axis=0, tiled=True)
-        T_full = jax.lax.all_gather(T_shard, "device", axis=0, tiled=True)
-        ps_full = jax.lax.all_gather(ps_shard, "device", axis=0, tiled=True)
-        phis_full = jax.lax.all_gather(phis_shard, "device", axis=0, tiled=True)
 
         # 2. Gather this device's local state (owned + halo).
         dev_idx = jax.lax.axis_index("device")
         my_cell_idx = gather_cells[dev_idx]   # (max_lc,)
         my_edge_idx = gather_edges[dev_idx]   # (max_le,)
 
-        T_local = T_full[my_cell_idx]         # (max_lc, nlev)
-        ps_local = ps_full[my_cell_idx]       # (max_lc,)
-        phis_local = phis_full[my_cell_idx]   # (max_lc,)
-        u_local = u_full[my_edge_idx]         # (max_le, nlev)
+        cell_local = cell_full[my_cell_idx]              # (max_lc, nlev+2)
+        T_local = cell_local[:, :nlev]                   # (max_lc, nlev)
+        ps_local = cell_local[:, nlev]                   # (max_lc,)
+        phis_local = cell_local[:, nlev + 1]             # (max_lc,)
+        u_local = u_full[my_edge_idx]                    # (max_le, nlev)
 
         # 3. Get this device's local mesh.
         my_mesh = jax.tree.map(lambda x: x[dev_idx], stacked_meshes)
@@ -1477,15 +1487,16 @@ def make_voronoi_sharded_step(model, dev_config: DeviceConfig):
             T_new = jnp.maximum(T_new, cfg.T_min)
 
         if cfg.fix_mass:
-            # Global mass fixer via all-reduce (works on sharded arrays).
-            area_full = global_mesh.areaCell      # replicated
-            ps_old_full = jax.lax.with_sharding_constraint(
-                ps, rep_sharding)
-            ps_new_full = jax.lax.with_sharding_constraint(
-                ps_new, rep_sharding)
-            mass_old = jnp.sum(ps_old_full * area_full)
-            mass_new = jnp.sum(ps_new_full * area_full)
-            correction = (mass_old - mass_new) / jnp.sum(area_full)
+            # Global mass fixer via sharded reduce — no replication needed.
+            # jnp.sum on a sharded array automatically inserts all_reduce,
+            # which is O(1) per device instead of the O(N) all-gather that
+            # with_sharding_constraint(x, replicated) would require.
+            area_sharded = jax.lax.with_sharding_constraint(
+                global_mesh.areaCell, face_sharding)
+            mass_old = jnp.sum(ps * area_sharded)
+            mass_new = jnp.sum(ps_new * area_sharded)
+            total_area = jnp.sum(area_sharded)
+            correction = (mass_old - mass_new) / total_area
             ps_new = ps_new + correction
 
         return MPASHydrostaticState(
