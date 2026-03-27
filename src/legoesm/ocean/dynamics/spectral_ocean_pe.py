@@ -266,6 +266,12 @@ def spectral_ocean_tendencies(
     # global-mean pressure gradient is identically zero on a sphere,
     # so this does not affect the physics — it only suppresses spectral
     # ringing from the land-ocean boundary discontinuity.
+    #
+    # NOTE: The barotropic PGF g*grad(eta) is NOT included here because
+    # the spectral model uses unsplit SSP-RK3 which cannot resolve the
+    # fast barotropic gravity wave mode (CFL > 1.73 at T21).  The
+    # barotropic mode is controlled by eta_hyperdiff instead.  A proper
+    # semi-implicit Helmholtz solve would be needed to include g*eta.
     weights = grid.weights[:, jnp.newaxis, jnp.newaxis]  # (n_lat, 1, 1)
     ocean_area = jnp.sum(mask[..., jnp.newaxis] * weights, axis=(0, 1), keepdims=True)
     ocean_area = jnp.maximum(ocean_area, 1e-30)

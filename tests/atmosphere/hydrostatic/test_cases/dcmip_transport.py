@@ -128,6 +128,529 @@ _zz = 1000.0                  # Vertical half-width (m)
 _z0 = 5000.0                  # Vertical center (m)
 
 
+# ============================================================================
+# Grid-independent (geographic) helpers — shared across all grid types
+# ============================================================================
+
+
+def dcmip11_tracers_at_points(
+    lon: jax.Array,
+    lat: jax.Array,
+    z: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Compute DCMIP Test 1-1 tracer values at arbitrary (lon, lat, z) points.
+
+    Parameters
+    ----------
+    lon, lat : jax.Array
+        Horizontal coordinates in radians, arbitrary shape ``(*spatial)``.
+    z : jax.Array
+        Geometric height [m], shape broadcasting with ``(*spatial)`` (may
+        include a trailing level dimension, e.g. ``(*spatial, nlev)``).
+
+    Returns
+    -------
+    q1, q2, q3, q4 : jax.Array
+        Tracer values, each with shape ``broadcast(lon, lat, z)``.
+    """
+    lon_b = jnp.asarray(lon)
+    lat_b = jnp.asarray(lat)
+    z_b = jnp.asarray(z)
+
+    # Ensure lon/lat and z broadcast to (*spatial, nlev).
+    # Two cases:
+    #   (a) z already has the spatial+level shape (e.g. from orography): use as-is.
+    #   (b) z is purely vertical (nlev,): add trailing dim to lon/lat and
+    #       prepend unit dims to z so shapes align.
+    if lon_b.ndim >= z_b.ndim:
+        # Case (b): lon (*spatial), z (nlev,) -> (*spatial, nlev)
+        lon_b = lon_b[..., None]
+        lat_b = lat_b[..., None]
+        z_b = z_b.reshape((1,) * lon.ndim + z_b.shape)
+
+    # Great-circle distances to two tracer centres (radians / a).
+    r1 = jnp.arccos(jnp.clip(
+        jnp.sin(lat_b) * jnp.sin(_phi0)
+        + jnp.cos(lat_b) * jnp.cos(_phi0) * jnp.cos(lon_b - _lambda0),
+        -1.0, 1.0,
+    ))
+    r2 = jnp.arccos(jnp.clip(
+        jnp.sin(lat_b) * jnp.sin(_phi1)
+        + jnp.cos(lat_b) * jnp.cos(_phi1) * jnp.cos(lon_b - _lambda1),
+        -1.0, 1.0,
+    ))
+
+    # Combined horizontal + vertical distance: d = min(1, (r/rr)^2 + ((z-z0)/zz)^2)
+    d1 = jnp.minimum(1.0, (r1 / _rr) ** 2 + ((z_b - _z0) / _zz) ** 2)
+    d2 = jnp.minimum(1.0, (r2 / _rr) ** 2 + ((z_b - _z0) / _zz) ** 2)
+
+    # q1: 3D cosine bells
+    q1 = 0.5 * (1.0 + jnp.cos(jnp.pi * d1)) + 0.5 * (1.0 + jnp.cos(jnp.pi * d2))
+
+    # q2: Correlated cosine bell
+    q2 = 0.9 - 0.8 * q1 ** 2
+
+    # q3: Slotted ellipse — inside if d < rr, else 0.1
+    q3 = jnp.where(d1 <= _rr, 1.0, jnp.where(d2 <= _rr, 1.0, 0.1))
+    # Slot: remove where z > z0 and |lat| < 0.125 rad
+    q3 = jnp.where((z_b > _z0) & (jnp.abs(lat_b) < 0.125), 0.1, q3)
+
+    # q4: conservation tracer
+    q4 = 1.0 - 0.3 * (q1 + q2 + q3)
+
+    return q1, q2, q3, q4
+
+
+def dcmip11_wind_geo(
+    t: float | jax.Array,
+    lon: jax.Array,
+    lat: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Geographic wind components for DCMIP Test 1-1 at arbitrary points.
+
+    Parameters
+    ----------
+    t : float or scalar array
+        Current time [s].
+    lon, lat : jax.Array
+        Horizontal coordinates in radians, arbitrary shape ``(*spatial)``.
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    u_east : jax.Array, shape ``(*spatial, nlev)``
+        Eastward wind component.
+    v_north : jax.Array, shape ``(*spatial, nlev)``
+        Northward wind component.
+    sigma_dot : jax.Array, shape ``(*spatial, nlev+1)``
+        Sigma-coordinate vertical velocity at half levels.
+    """
+    # Height and pressure at full levels: (nlev,)
+    z_full = _height_from_sigma(sigma_coord.sigma_full)
+    p = sigma_coord.sigma_full * _p0  # (nlev,)
+
+    # Translating longitude: (*spatial, nlev)
+    lonp = lon[..., None] - 2.0 * jnp.pi * t / _tau11
+
+    # Shape function (v5)
+    s = (1.0 + jnp.exp((_ptop - _p0) / (_bs * _ptop))
+         - jnp.exp((p - _p0) / (_bs * _ptop))
+         - jnp.exp((_ptop - p) / (_bs * _ptop)))
+
+    # Divergent part of u (v5)
+    ud = ((_omega0 * _a) / (_bs * _ptop)
+          * jnp.cos(lonp) * jnp.cos(lat[..., None]) ** 2
+          * jnp.cos(2.0 * jnp.pi * t / _tau11)
+          * (-jnp.exp((p - _p0) / (_bs * _ptop))
+             + jnp.exp((_ptop - p) / (_bs * _ptop))))
+
+    # Zonal wind (geographic east)
+    u_east = (_k0 * jnp.sin(lonp) ** 2 * jnp.sin(2.0 * lat[..., None])
+              * jnp.cos(jnp.pi * t / _tau11)
+              + _u0_11 * jnp.cos(lat[..., None])
+              + ud)
+
+    # Meridional wind (geographic north)
+    v_north = (_k0 * jnp.sin(2.0 * lonp) * jnp.cos(lat[..., None])
+               * jnp.cos(jnp.pi * t / _tau11))
+
+    # Vertical velocity w in z-coordinates (v5)
+    w = ((-(_Rd * _T0) / (_g * p)) * _omega0
+         * jnp.sin(lonp) * jnp.cos(lat[..., None])
+         * jnp.cos(2.0 * jnp.pi * t / _tau11) * s)
+
+    # Convert w to sigma_dot at interfaces
+    w_half = _interpolate_to_half_levels(w, sigma_coord)
+    sigma_half = sigma_coord.sigma_half  # (nlev+1,)
+    sigma_dot = -_g * sigma_half * w_half / (_Rd * _T0)
+
+    # Enforce boundary conditions
+    sigma_dot = sigma_dot.at[..., 0].set(0.0)
+    sigma_dot = sigma_dot.at[..., -1].set(0.0)
+
+    return u_east, v_north, sigma_dot
+
+
+def dcmip12_tracers_at_points(z: jax.Array) -> jax.Array:
+    """Compute DCMIP Test 1-2 tracer value at arbitrary heights.
+
+    Parameters
+    ----------
+    z : jax.Array
+        Geometric height [m], arbitrary shape.
+
+    Returns
+    -------
+    q1 : jax.Array
+        Tracer value (vertical cosine-bell layer), same shape as *z*.
+    """
+    q1 = jnp.where(
+        (z > _z1_12) & (z < _z2_12),
+        0.5 * (1.0 + jnp.cos(2.0 * jnp.pi * (z - _z0_12) / (_z2_12 - _z1_12))),
+        0.0,
+    )
+    return q1
+
+
+def dcmip12_wind_geo(
+    t: float | jax.Array,
+    lon: jax.Array,
+    lat: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Geographic wind components for DCMIP Test 1-2 at arbitrary points.
+
+    Parameters
+    ----------
+    t : float or scalar array
+        Current time [s].
+    lon, lat : jax.Array
+        Horizontal coordinates in radians, arbitrary shape ``(*spatial)``.
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    u_east : jax.Array, shape ``(*spatial, nlev)``
+    v_north : jax.Array, shape ``(*spatial, nlev)``
+    sigma_dot : jax.Array, shape ``(*spatial, nlev+1)``
+    """
+    z_full = _height_from_sigma(sigma_coord.sigma_full)  # (nlev,)
+    p = sigma_coord.sigma_full * _p0  # (nlev,)
+
+    # Reference density ratio: rho0/rho = p0/p (isothermal)
+    rho_ratio = _p0 / p  # (nlev,)
+
+    cos_t = jnp.cos(jnp.pi * t / _tau12)
+
+    # Zonal wind (geographic)
+    u_east = _u0_12 * jnp.cos(lat[..., None]) * jnp.ones_like(z_full)
+
+    # Meridional wind (v5: multiply by rho0/rho)
+    v_north = (-rho_ratio * (_a * _w0_12 * jnp.pi) / (_K12 * _ztop12)
+               * jnp.cos(lat[..., None])
+               * jnp.sin(_K12 * lat[..., None])
+               * jnp.cos(jnp.pi * z_full / _ztop12)
+               * cos_t)
+
+    # Vertical velocity w (v5: multiply by rho0/rho)
+    w = (rho_ratio * (_w0_12 / _K12)
+         * (-2.0 * jnp.sin(_K12 * lat[..., None]) * jnp.sin(lat[..., None])
+            + _K12 * jnp.cos(lat[..., None]) * jnp.cos(_K12 * lat[..., None]))
+         * jnp.sin(jnp.pi * z_full / _ztop12)
+         * cos_t)
+
+    # Convert w to sigma_dot at interfaces
+    w_half = _interpolate_to_half_levels(w, sigma_coord)
+    sigma_half = sigma_coord.sigma_half  # (nlev+1,)
+    sigma_dot = -_g * sigma_half * w_half / (_Rd * _T0)
+    sigma_dot = sigma_dot.at[..., 0].set(0.0)
+    sigma_dot = sigma_dot.at[..., -1].set(0.0)
+
+    return u_east, v_north, sigma_dot
+
+
+def dcmip13_tracers_at_points(
+    lon: jax.Array,
+    lat: jax.Array,
+    z: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Compute DCMIP Test 1-3 cloud tracer values at arbitrary points.
+
+    The caller is responsible for computing *z* correctly, accounting for
+    orography: ``z = -H * ln(sigma) + z_s`` in the isothermal case.
+
+    Parameters
+    ----------
+    lon, lat : jax.Array
+        Horizontal coordinates in radians, arbitrary shape ``(*spatial)``.
+    z : jax.Array
+        Geometric height [m], shape ``(*spatial, nlev)`` (must include the
+        orographic contribution).
+
+    Returns
+    -------
+    q1, q2, q3, q4 : jax.Array
+        Cloud tracer values, each shape ``(*spatial, nlev)``.
+    """
+    # Great-circle distance from cloud centre
+    r = jnp.arccos(jnp.clip(
+        jnp.sin(_phip) * jnp.sin(lat)
+        + jnp.cos(_phip) * jnp.cos(lat) * jnp.cos(lon - _lambdap),
+        -1.0, 1.0,
+    ))
+    # Broadcast r to match z if needed (add level dim)
+    if r.ndim < z.ndim:
+        r = r[..., None]
+
+    # q1: Cloud at zp1
+    rz1 = jnp.abs(z - _zp1)
+    q1 = jnp.where(
+        (rz1 < 0.5 * _dzp1) & (r < _rp),
+        0.25 * (1.0 + jnp.cos(2.0 * jnp.pi * rz1 / _dzp1)) * (1.0 + jnp.cos(jnp.pi * r / _rp)),
+        0.0,
+    )
+
+    # q2: Cloud at zp2
+    rz2 = jnp.abs(z - _zp2)
+    q2 = jnp.where(
+        (rz2 < 0.5 * _dzp2) & (r < _rp),
+        0.25 * (1.0 + jnp.cos(2.0 * jnp.pi * rz2 / _dzp2)) * (1.0 + jnp.cos(jnp.pi * r / _rp)),
+        0.0,
+    )
+
+    # q3: Thin cloud at zp3 (step function)
+    rz3 = jnp.abs(z - _zp3)
+    q3 = jnp.where(
+        (rz3 < 0.5 * _dzp3) & (r < _rp),
+        1.0,
+        0.0,
+    )
+
+    # q4: Sum of all clouds
+    q4 = q1 + q2 + q3
+
+    return q1, q2, q3, q4
+
+
+def dcmip13_wind_geo(
+    t: float | jax.Array,
+    lon: jax.Array,
+    lat: jax.Array,
+    sigma_coord: SigmaCoordinate,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Geographic wind components for DCMIP Test 1-3 at arbitrary points.
+
+    The horizontal wind is time-independent solid-body rotation with
+    inclination angle alpha. The physical vertical velocity is zero, but
+    terrain-following coordinates generate a non-zero sigma_dot.
+
+    Parameters
+    ----------
+    t : float or scalar array
+        Current time [s] (unused — included for API consistency).
+    lon, lat : jax.Array
+        Horizontal coordinates in radians, arbitrary shape ``(*spatial)``.
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    u_east : jax.Array, shape ``(*spatial, nlev)``
+    v_north : jax.Array, shape ``(*spatial, nlev)``
+    sigma_dot : jax.Array, shape ``(*spatial, nlev+1)``
+    """
+    nlev = sigma_coord.n_levels
+
+    # Solid-body rotation (geographic, 2-D)
+    u_east = _u0_13 * (jnp.cos(lat) * jnp.cos(_alpha13)
+                        + jnp.sin(lat) * jnp.cos(lon) * jnp.sin(_alpha13))
+    v_north = -_u0_13 * jnp.sin(lon) * jnp.sin(_alpha13)
+
+    # Expand to 3-D: (*spatial) -> (*spatial, nlev)
+    u_east_3d = u_east[..., None] * jnp.ones(nlev)
+    v_north_3d = v_north[..., None] * jnp.ones(nlev)
+
+    # Terrain-following sigma velocity (Appendix F.3 Eq. 220).
+    _, dzs_dlon, dzs_dlat = _mountain_height_with_gradients(lon, lat)
+    cos_lat = jnp.clip(jnp.cos(lat), 1e-8, None)
+    terrain_crossing = (
+        u_east * dzs_dlon / (_a * cos_lat) + v_north * dzs_dlat / _a
+    )  # (*spatial), units m/s
+
+    sigma_half = sigma_coord.sigma_half  # (nlev+1,)
+    sigma_dot = sigma_half * terrain_crossing[..., None] / _H  # (*spatial, nlev+1)
+
+    return u_east_3d, v_north_3d, sigma_dot
+
+
+# ============================================================================
+# Grid-specific init wrappers (lat-lon and MPAS)
+# ============================================================================
+
+
+def dcmip11_init_latlon(grid, sigma_coord: SigmaCoordinate) -> TracerState:
+    """Initialize DCMIP Test 1-1 tracers on a lat-lon grid.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    TracerState with tracers shape (n_lat, n_lon, nlev, 4).
+    """
+    lon = grid.lon2d  # (n_lat, n_lon)
+    lat = grid.lat2d
+    z = _height_from_sigma(sigma_coord.sigma_full)  # (nlev,)
+
+    q1, q2, q3, q4 = dcmip11_tracers_at_points(lon, lat, z)
+    tracers_data = jnp.stack([q1, q2, q3, q4], axis=-1)
+
+    tracers = Field(
+        data=tracers_data,
+        name="tracers",
+        dims=("lat", "lon", "level", "tracer"),
+        units="kg/kg",
+    )
+    time = Field(data=jnp.array(0.0), name="time", dims=(), units="s")
+    return TracerState(tracers=tracers, time=time)
+
+
+def dcmip11_init_mpas(mesh, sigma_coord: SigmaCoordinate) -> TracerState:
+    """Initialize DCMIP Test 1-1 tracers on an MPAS Voronoi mesh.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    TracerState with tracers shape (nCells, nlev, 4).
+    """
+    lon = mesh.lonCell  # (nCells,)
+    lat = mesh.latCell
+    z = _height_from_sigma(sigma_coord.sigma_full)  # (nlev,)
+
+    q1, q2, q3, q4 = dcmip11_tracers_at_points(lon, lat, z)
+    tracers_data = jnp.stack([q1, q2, q3, q4], axis=-1)
+
+    tracers = Field(
+        data=tracers_data,
+        name="tracers",
+        dims=("cell", "level", "tracer"),
+        units="kg/kg",
+    )
+    time = Field(data=jnp.array(0.0), name="time", dims=(), units="s")
+    return TracerState(tracers=tracers, time=time)
+
+
+def dcmip12_init_latlon(grid, sigma_coord: SigmaCoordinate) -> TracerState:
+    """Initialize DCMIP Test 1-2 tracer on a lat-lon grid.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    TracerState with tracers shape (n_lat, n_lon, nlev, 1).
+    """
+    z = _height_from_sigma(sigma_coord.sigma_full)  # (nlev,)
+    q1 = dcmip12_tracers_at_points(z)  # (nlev,)
+    # Broadcast to full horizontal shape
+    q1 = jnp.broadcast_to(q1, (grid.n_lat, grid.n_lon, sigma_coord.n_levels))
+
+    tracers_data = q1[..., None]  # (n_lat, n_lon, nlev, 1)
+    tracers = Field(
+        data=tracers_data,
+        name="tracers",
+        dims=("lat", "lon", "level", "tracer"),
+        units="kg/kg",
+    )
+    time = Field(data=jnp.array(0.0), name="time", dims=(), units="s")
+    return TracerState(tracers=tracers, time=time)
+
+
+def dcmip12_init_mpas(mesh, sigma_coord: SigmaCoordinate) -> TracerState:
+    """Initialize DCMIP Test 1-2 tracer on an MPAS Voronoi mesh.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    TracerState with tracers shape (nCells, nlev, 1).
+    """
+    z = _height_from_sigma(sigma_coord.sigma_full)  # (nlev,)
+    q1 = dcmip12_tracers_at_points(z)  # (nlev,)
+    # Broadcast to full shape
+    q1 = jnp.broadcast_to(q1, (mesh.nCells, sigma_coord.n_levels))
+
+    tracers_data = q1[..., None]  # (nCells, nlev, 1)
+    tracers = Field(
+        data=tracers_data,
+        name="tracers",
+        dims=("cell", "level", "tracer"),
+        units="kg/kg",
+    )
+    time = Field(data=jnp.array(0.0), name="time", dims=(), units="s")
+    return TracerState(tracers=tracers, time=time)
+
+
+def dcmip13_init_latlon(grid, sigma_coord: SigmaCoordinate) -> TracerState:
+    """Initialize DCMIP Test 1-3 tracers on a lat-lon grid.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    TracerState with tracers shape (n_lat, n_lon, nlev, 4).
+    """
+    lon = grid.lon2d  # (n_lat, n_lon)
+    lat = grid.lat2d
+    zs = _mountain_height(lon, lat)  # (n_lat, n_lon)
+
+    sigma_full = sigma_coord.sigma_full  # (nlev,)
+    z = -_H * jnp.log(sigma_full) + zs[..., None]  # (n_lat, n_lon, nlev)
+
+    q1, q2, q3, q4 = dcmip13_tracers_at_points(lon, lat, z)
+    tracers_data = jnp.stack([q1, q2, q3, q4], axis=-1)
+
+    tracers = Field(
+        data=tracers_data,
+        name="tracers",
+        dims=("lat", "lon", "level", "tracer"),
+        units="kg/kg",
+    )
+    time = Field(data=jnp.array(0.0), name="time", dims=(), units="s")
+    return TracerState(tracers=tracers, time=time)
+
+
+def dcmip13_init_mpas(mesh, sigma_coord: SigmaCoordinate) -> TracerState:
+    """Initialize DCMIP Test 1-3 tracers on an MPAS Voronoi mesh.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+    sigma_coord : SigmaCoordinate
+
+    Returns
+    -------
+    TracerState with tracers shape (nCells, nlev, 4).
+    """
+    lon = mesh.lonCell  # (nCells,)
+    lat = mesh.latCell
+    zs = _mountain_height(lon, lat)  # (nCells,)
+
+    sigma_full = sigma_coord.sigma_full  # (nlev,)
+    z = -_H * jnp.log(sigma_full) + zs[..., None]  # (nCells, nlev)
+
+    q1, q2, q3, q4 = dcmip13_tracers_at_points(lon, lat, z)
+    tracers_data = jnp.stack([q1, q2, q3, q4], axis=-1)
+
+    tracers = Field(
+        data=tracers_data,
+        name="tracers",
+        dims=("cell", "level", "tracer"),
+        units="kg/kg",
+    )
+    time = Field(data=jnp.array(0.0), name="time", dims=(), units="s")
+    return TracerState(tracers=tracers, time=time)
+
+
+# ============================================================================
+# Cubed-sphere-specific functions (original API — unchanged)
+# ============================================================================
+
+
 def dcmip11_wind(
     t: float | jax.Array,
     grid: CubedSphereGrid,

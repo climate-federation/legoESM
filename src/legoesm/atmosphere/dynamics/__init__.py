@@ -111,6 +111,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # --- Tracer transport ---
     "TracerTransportModel": ("legoesm.atmosphere.dynamics.tracer_transport", "TracerTransportModel"),
     "tracer_tendencies": ("legoesm.atmosphere.dynamics.tracer_transport", "tracer_tendencies"),
+    "TracerTransportLatLonModel": ("legoesm.atmosphere.dynamics.tracer_transport_latlon", "TracerTransportLatLonModel"),
+    "tracer_tendencies_latlon": ("legoesm.atmosphere.dynamics.tracer_transport_latlon", "tracer_tendencies_latlon"),
+    "TracerTransportMPASModel": ("legoesm.atmosphere.dynamics.tracer_transport_mpas", "TracerTransportMPASModel"),
+    "tracer_tendencies_mpas": ("legoesm.atmosphere.dynamics.tracer_transport_mpas", "tracer_tendencies_mpas"),
     # --- Shared utilities (acoustic substeps, sponge, Exner) ---
     "CompressibleEulerConfig": ("legoesm.atmosphere.dynamics.compressible_euler", "CompressibleEulerConfig"),
     "compute_exner_perturbation": ("legoesm.atmosphere.dynamics.compressible_euler", "compute_exner_perturbation"),
@@ -198,6 +202,8 @@ AVAILABLE_SOLVERS = [
     "mpas_primitive_equations",
     "mpas_compressible_euler",
     "tracer_transport",
+    "tracer_transport_latlon",
+    "tracer_transport_mpas",
 ]
 
 # Deprecated flat names that alias a canonical solver
@@ -372,6 +378,8 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         "fv_primitive_equations_latlon": "FVLatLonPrimitiveEquationModel",
         "fv_compressible_euler_latlon": "FVCompressibleEulerLatLonModel",
         "tracer_transport": "TracerTransportModel",
+        "tracer_transport_latlon": "TracerTransportLatLonModel",
+        "tracer_transport_mpas": "TracerTransportMPASModel",
         "mpas_primitive_equations": "MPASPrimitiveEquationModel",
         "mpas_compressible_euler": "MPASCompressibleEulerModel",
     }

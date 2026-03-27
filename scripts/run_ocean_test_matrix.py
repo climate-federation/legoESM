@@ -1816,8 +1816,13 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         cos_lat = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
         a = grid.radius
         nlev = state.T_hat.data.shape[-1]
-        u_cos = jnp.array((u_pert * cos_lat)[..., None] * np.ones((1, 1, nlev)))
-        v_cos = jnp.array((v_pert * cos_lat)[..., None] * np.ones((1, 1, nlev)))
+        # Only perturb level 0 (consistent with cubed-sphere / lat-lon init)
+        u_cos_2d = jnp.array(u_pert * cos_lat)    # (n_lat, n_lon)
+        v_cos_2d = jnp.array(v_pert * cos_lat)
+        u_cos = jnp.concatenate([u_cos_2d[..., None],
+                                 jnp.zeros((*u_cos_2d.shape, nlev - 1))], axis=-1)
+        v_cos = jnp.concatenate([v_cos_2d[..., None],
+                                 jnp.zeros((*v_cos_2d.shape, nlev - 1))], axis=-1)
         im_over_a = 1j * grid.ms.astype(jnp.float64) / a
         one_over_a = 1.0 / a
         vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
