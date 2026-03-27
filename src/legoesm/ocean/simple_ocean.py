@@ -41,7 +41,7 @@ class SimpleOceanConfig(NamedTuple):
     Cd_ocean: float = 1.5e-3         # Drag coefficient
     Ch_ocean: float = 1.5e-3         # Heat transfer coefficient
     U_min: float = 1.0               # Smooth wind floor [m/s]
-    T_freeze: float = 271.35         # Freezing clamp [K]
+    T_freeze: float = 271.35         # Freezing clamp [K] (= constants.T_freeze_ocean)
     # Two-layer additions
     h_deep: float = 200.0            # Deep layer depth [m]
     k_mix: float = 1.0e-4            # Vertical mixing coefficient [m2/s]

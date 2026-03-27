@@ -21,7 +21,7 @@ from legoesm import constants
 # ==============================================================================
 rho_0 = 1025.0          # Reference seawater density [kg/m^3]
 c_sw = 3994.0           # Specific heat of seawater [J/(kg*K)]
-T_freeze_ocean = 271.35  # Freezing point of seawater [K] (~-1.8 C)
+T_freeze_ocean = constants.T_freeze_ocean  # re-export from central constants
 scale_depth = 1000.0     # Reference e-folding depth for stratification [m]
 
 # ==============================================================================

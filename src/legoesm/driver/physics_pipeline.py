@@ -495,9 +495,11 @@ def _build_rrtmgp_radiation_fn(config):
                      lat_col, lon_col, day_of_year, seconds_of_day,
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
+                     tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None):
+        del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         if diurnal:
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)

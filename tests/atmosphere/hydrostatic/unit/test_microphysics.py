@@ -648,11 +648,12 @@ class TestSchemeSelection:
             make_microphysics_physics(config, "invalid", dt=300.0)
 
 
-class TestBackwardCompatKessler:
+class TestKesslerNonhydrostatic:
 
-    def test_backward_compat_kessler_tendencies(self):
-        """The old kessler_tendencies API still works."""
-        from legoesm.atmosphere.physics.kessler import kessler_tendencies, KesslerConfig
+    def test_kessler_nonhydrostatic_tendencies(self):
+        """Kessler microphysics via integration bridge on nonhydrostatic state."""
+        from legoesm.atmosphere.physics.microphysics.config import KesslerConfig, MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import (
             create_height_coordinate,
@@ -694,18 +695,12 @@ class TestBackwardCompatKessler:
         )
 
         config = KesslerConfig()
-        tend = kessler_tendencies(state, grid, hc, tm, config)
+        micro_config = MicrophysicsConfig(scheme="kessler", kessler=config)
+        physics_fn = make_microphysics_physics(micro_config, model_type="nonhydrostatic", dt=1.0)
+        tend = physics_fn(state, grid, hc, tm)
         assert tend.dtheta_prime_dt.data.shape == shape_3d
         assert tend.dtracers_dt.data.shape == (*shape_3d, 3)
         assert jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data))
-
-    def test_saturation_mixing_ratio_import(self):
-        """saturation_mixing_ratio can still be imported from kessler module."""
-        from legoesm.thermo import saturation_mixing_ratio
-        T = jnp.array(280.0)
-        p = jnp.array(1e5)
-        q = saturation_mixing_ratio(T, p)
-        assert float(q) > 0
 
 
 # ======================================================================

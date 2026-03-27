@@ -34,6 +34,7 @@ L_f = 3.337e5                   # Latent heat of fusion at 0C [J/kg]
 rho_water = 1000.0              # Density of liquid water [kg/m^3]
 rho_ice = 917.0                 # Density of ice [kg/m^3]
 T_freeze = 273.15               # Freezing point of water [K]
+T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
 
 # ==============================================================================
 # Moisture Parameters

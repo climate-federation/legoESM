@@ -17,6 +17,7 @@ from legoesm.forcing.external import (
     SolarConfig,
     ExternalForcingConfig,
     get_ghg_at_time,
+    ghg_concentrations_to_vmr,
     get_ozone_at_time,
     get_aerosol_at_time,
     get_solar_forcing_at_time,
@@ -64,6 +65,23 @@ def _make_solar_spectral_nc(path, times, tsi, spectral):
         tsi_v[:] = tsi
         spec_v = ds.createVariable("solar_fraction_by_gpt", "f8", ("time", "gpt"))
         spec_v[:] = spectral
+
+
+def _make_ghg_annual_nc(path, years, co2, ch4, n2o, cfc11, cfc12):
+    """Write a CMIP6-style annual global-mean GHG file (time, lat=1, lon=1)."""
+    import netCDF4
+    n = len(years)
+    with netCDF4.Dataset(path, "w") as ds:
+        ds.createDimension("time", n)
+        ds.createDimension("lat", 1)
+        ds.createDimension("lon", 1)
+        t = ds.createVariable("time", "f8", ("time",))
+        t[:] = years
+        t.units = "year as %Y.%f"
+        for name, vals in [("CO2", co2), ("CH4", ch4), ("N2O", n2o),
+                           ("CFC_11", cfc11), ("CFC_12", cfc12)]:
+            v = ds.createVariable(name, "f8", ("time", "lat", "lon"))
+            v[:] = vals[:, None, None]
 
 
 def _make_monthly_zonal_nc(path, varname, lat, data_12):
@@ -122,6 +140,74 @@ class TestGHG:
         cfg = GHGConfig(source="magic")
         with pytest.raises(ValueError, match="Unknown GHG source"):
             get_ghg_at_time(cfg, day=0.0)
+
+    def test_constant_mode_returns_cfcs(self):
+        cfg = GHGConfig(cfc11_pptv=250.0, cfc12_pptv=540.0)
+        result = get_ghg_at_time(cfg, day=0.0)
+        assert result["cfc11_pptv"] == 250.0
+        assert result["cfc12_pptv"] == 540.0
+
+    def test_annual_file_interpolation(self, tmp_path):
+        nc_path = str(tmp_path / "ghg_annual.nc")
+        years = np.array([1979.0, 1980.0, 1981.0])
+        co2 = np.array([336.8, 338.7, 340.1])
+        ch4 = np.array([1547.0, 1578.0, 1610.0])
+        n2o = np.array([301.0, 302.0, 303.0])
+        cfc11 = np.array([160.0, 165.0, 170.0])
+        cfc12 = np.array([300.0, 320.0, 340.0])
+        _make_ghg_annual_nc(nc_path, years, co2, ch4, n2o, cfc11, cfc12)
+
+        cfg = GHGConfig(source="annual_file", path=nc_path, start_year=1979)
+        # At day 0 → year 1979.0
+        r0 = get_ghg_at_time(cfg, day=0.0)
+        assert abs(r0["co2_ppmv"] - 336.8) < 1e-4
+        assert abs(r0["ch4_ppbv"] - 1547.0) < 1e-2
+        assert abs(r0["n2o_ppbv"] - 301.0) < 1e-4
+        assert abs(r0["cfc11_pptv"] - 160.0) < 1e-4
+        assert abs(r0["cfc12_pptv"] - 300.0) < 1e-4
+
+        # At day 365.25 → year 1980.0
+        r1 = get_ghg_at_time(cfg, day=365.25)
+        assert abs(r1["co2_ppmv"] - 338.7) < 1e-4
+
+        # Interpolated at day 365.25/2 → year 1979.5
+        r_mid = get_ghg_at_time(cfg, day=365.25 / 2)
+        expected_co2_mid = (336.8 + 338.7) / 2
+        assert abs(r_mid["co2_ppmv"] - expected_co2_mid) < 0.1
+
+    def test_annual_file_missing_path_raises(self):
+        cfg = GHGConfig(source="annual_file", path="")
+        with pytest.raises(ValueError, match="path must be set"):
+            get_ghg_at_time(cfg, day=0.0)
+
+    def test_ghg_concentrations_to_vmr(self):
+        ghg = {
+            "co2_ppmv": 400.0,
+            "ch4_ppbv": 1800.0,
+            "n2o_ppbv": 320.0,
+            "cfc11_pptv": 240.0,
+            "cfc12_pptv": 530.0,
+        }
+        vmr = ghg_concentrations_to_vmr(ghg)
+        assert abs(vmr["co2"] - 400.0e-6) < 1e-12
+        assert abs(vmr["ch4"] - 1800.0e-9) < 1e-15
+        assert abs(vmr["n2o"] - 320.0e-9) < 1e-15
+        assert abs(vmr["cfc11"] - 240.0e-12) < 1e-18
+        assert abs(vmr["cfc12"] - 530.0e-12) < 1e-18
+
+    def test_file_mode_returns_default_cfcs(self, tmp_path):
+        """File-based GHG (old format) returns config default CFCs."""
+        nc_path = str(tmp_path / "ghg_old.nc")
+        times = np.array([0.0, 365.0])
+        co2 = np.array([300.0, 350.0])
+        ch4 = np.array([1500.0, 1600.0])
+        n2o = np.array([280.0, 290.0])
+        _make_ghg_nc(nc_path, times, co2, ch4, n2o)
+
+        cfg = GHGConfig(source="file", path=nc_path, cfc11_pptv=222.0, cfc12_pptv=555.0)
+        r = get_ghg_at_time(cfg, day=0.0)
+        assert r["cfc11_pptv"] == 222.0
+        assert r["cfc12_pptv"] == 555.0
 
 
 # ==============================================================================

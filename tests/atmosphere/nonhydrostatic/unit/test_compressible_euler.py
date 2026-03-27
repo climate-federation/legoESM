@@ -388,10 +388,13 @@ class TestKesslerMicrophysics:
 
     def test_dry_air_no_tendency(self, grid, height_coord, terrain_metric):
         """Dry air (no moisture) produces zero microphysics tendencies."""
-        from legoesm.atmosphere.physics.kessler import kessler_tendencies, KesslerConfig
+        from legoesm.atmosphere.physics.microphysics.config import KesslerConfig, MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
         state = _make_nh_state(grid, height_coord, n_tracers=3)
         config = KesslerConfig()
-        tend = kessler_tendencies(state, grid, height_coord, terrain_metric, config)
+        micro_config = MicrophysicsConfig(scheme="kessler", kessler=config)
+        physics_fn = make_microphysics_physics(micro_config, model_type="nonhydrostatic", dt=1.0)
+        tend = physics_fn(state, grid, height_coord, terrain_metric)
         # With zero moisture, tendencies should be near zero
         assert float(jnp.max(jnp.abs(tend.dtracers_dt.data))) < 1e-2
 
@@ -408,13 +411,16 @@ class TestKesslerMicrophysics:
 
     def test_kessler_tendencies_finite(self, grid, height_coord, terrain_metric):
         """Kessler tendencies are finite with moisture."""
-        from legoesm.atmosphere.physics.kessler import kessler_tendencies, KesslerConfig
+        from legoesm.atmosphere.physics.microphysics.config import KesslerConfig, MicrophysicsConfig
+        from legoesm.atmosphere.physics.microphysics.integration import make_microphysics_physics
         state = _make_nh_state(grid, height_coord, n_tracers=3)
         # Add some moisture
         tracers = state.tracers.data.at[..., 0].set(0.01)  # q_vapor = 10 g/kg
         state = state._replace(tracers=state.tracers.replace(data=tracers))
         config = KesslerConfig()
-        tend = kessler_tendencies(state, grid, height_coord, terrain_metric, config)
+        micro_config = MicrophysicsConfig(scheme="kessler", kessler=config)
+        physics_fn = make_microphysics_physics(micro_config, model_type="nonhydrostatic", dt=1.0)
+        tend = physics_fn(state, grid, height_coord, terrain_metric)
         assert jnp.all(jnp.isfinite(tend.dtracers_dt.data))
         assert jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data))
 

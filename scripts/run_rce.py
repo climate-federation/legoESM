@@ -147,7 +147,7 @@ def main():
         C_sfc = C_soil * h_soil
         T_sfc = jnp.full(shape_2d, args.sst_init)
         sfc_albedo = 0.25
-        T_freeze = 271.35
+        T_freeze = constants.T_freeze  # 273.15 K (freshwater)
         # Bucket hydrology
         W_max = 150.0      # kg/m2
         beta_min = 0.1     # minimum evaporation efficiency
@@ -299,7 +299,7 @@ def main():
 
     for step in range(n_steps):
         # (1) Dynamics only (no inline physics)
-        state = model.step_with_physics(state, DT)
+        state = model.step(state, DT)
 
         # (2) Operator-split physics
         dT_dt, dq_dt, T_sfc, W_bucket, precip = physics_step(
