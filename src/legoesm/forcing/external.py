@@ -130,7 +130,9 @@ def _load_nc_monthly_zonal_with_levels(path: str, varname: str):
     with netCDF4.Dataset(path, "r") as ds:
         if varname not in ds.variables:
             raise ValueError(f"Variable {varname!r} not found in {path!r}")
-        data = np.asarray(ds.variables[varname][:], dtype=np.float64)
+        var = ds.variables[varname]
+        data = np.asarray(var[:], dtype=np.float64)
+        dims = list(var.dimensions) if hasattr(var, "dimensions") else []
         if "lat" in ds.variables:
             lat = np.asarray(ds.variables["lat"][:], dtype=np.float64)
         elif "latitude" in ds.variables:
@@ -146,7 +148,36 @@ def _load_nc_monthly_zonal_with_levels(path: str, varname: str):
         for vname in ("plev", "level", "lev"):
             if vname in ds.variables:
                 plev = np.asarray(ds.variables[vname][:], dtype=np.float64)
+                # Convert hPa → Pa if needed (detect via units attr or magnitude)
+                units = getattr(ds.variables[vname], "units", "")
+                if units in ("hPa", "millibar", "mbar", "mb"):
+                    plev = plev * 100.0
+                elif not units and plev.size > 0 and np.max(plev) < 1500.0:
+                    # Heuristic: surface pressure ~1013 hPa; if max < 1500 assume hPa
+                    plev = plev * 100.0
                 break
+
+        # Average over longitude if present → zonal mean
+        lon_names = ("lon", "longitude")
+        for lname in lon_names:
+            if lname in dims:
+                lon_ax = dims.index(lname)
+                data = np.nanmean(data, axis=lon_ax)
+                dims.pop(lon_ax)
+                break
+
+        # Ensure dimension order is (time, lat, plev) for downstream code.
+        # CMIP6 files often have (time, plev, lat); swap if needed.
+        if plev is not None and data.ndim == 3:
+            lat_name = "lat" if "lat" in dims else "latitude"
+            plev_name = next((v for v in ("plev", "level", "lev") if v in dims), None)
+            if plev_name and lat_name in dims and plev_name in dims:
+                lat_ax = dims.index(lat_name)
+                plev_ax = dims.index(plev_name)
+                if plev_ax < lat_ax:
+                    # (time, plev, lat) → (time, lat, plev)
+                    data = np.swapaxes(data, plev_ax, lat_ax)
+
     return mid_days, lat, plev, data
 
 
@@ -286,6 +317,10 @@ class GHGConfig(NamedTuple):
     When source="constant", the specified concentrations are used at
     all times. When source="file", values are linearly interpolated
     from a NetCDF time series containing co2_ppmv, ch4_ppbv, n2o_ppbv.
+    When source="annual_file", values are loaded from a CMIP6-style
+    annual global-mean file (e.g. greenhouse_historical_plus.nc) with
+    variables CO2, CH4, N2O, CFC_11, CFC_12 dimensioned (time, lat, lon)
+    where lat=1, lon=1 and time is in fractional years.
 
     The concentrations are consumed by RRTMGP radiation (not gray).
 
@@ -297,16 +332,68 @@ class GHGConfig(NamedTuple):
         CH4 concentration [ppbv].
     n2o_ppbv : float
         N2O concentration [ppbv].
+    cfc11_pptv : float
+        CFC-11 concentration [pptv].
+    cfc12_pptv : float
+        CFC-12 concentration [pptv].
     source : str
-        "constant" (use values above) or "file" (load from NetCDF).
+        "constant", "file" (1-D time series), or "annual_file" (CMIP6
+        annual global-mean file with year-indexed time axis).
     path : str
-        Path to time-varying GHG file (only used if source="file").
+        Path to time-varying GHG file (only used if source="file" or
+        "annual_file").
+    start_year : int
+        Simulation start year, used to convert simulation day → calendar
+        year when source="annual_file".
     """
     co2_ppmv: float = 348.0
     ch4_ppbv: float = 1650.0
     n2o_ppbv: float = 306.0
+    cfc11_pptv: float = 240.0
+    cfc12_pptv: float = 530.0
     source: str = "constant"
     path: str = ""
+    start_year: int = 1979
+
+
+@lru_cache(maxsize=4)
+def _load_ghg_annual_file(path: str) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Load CMIP6-style annual global-mean GHG file.
+
+    Expected format: variables CO2, CH4, N2O, CFC_11, CFC_12 with
+    dimensions (time, lat, lon) where lat=1, lon=1.  The time axis
+    uses units ``"year as %Y.%f"`` giving fractional year values
+    (e.g. 1850.0, 1851.0, ...).
+
+    Returns
+    -------
+    (years, data) where years is shape (N,) and data maps variable
+    names to 1-D numpy arrays of length N.  Values are in the file's
+    native units (CO2 in 1e-6, CH4/N2O in 1e-9, CFCs in 1e-12).
+    """
+    import netCDF4
+
+    with netCDF4.Dataset(path, "r") as ds:
+        if "time" not in ds.dimensions:
+            raise ValueError(f"GHG file {path!r} has no 'time' dimension")
+        years = np.asarray(ds.variables["time"][:], dtype=np.float64)
+
+        data = {}
+        for varname in ("CO2", "CH4", "N2O", "CFC_11", "CFC_12"):
+            if varname not in ds.variables:
+                raise ValueError(f"Variable {varname!r} not found in {path!r}")
+            arr = np.asarray(ds.variables[varname][:], dtype=np.float64)
+            # Squeeze spatial dimensions (lat=1, lon=1) → 1-D time series
+            arr = arr.squeeze()
+            if arr.ndim != 1 or arr.shape[0] != years.shape[0]:
+                raise ValueError(
+                    f"Variable {varname!r} must reduce to 1-D after "
+                    f"squeezing (got shape {arr.shape}, expected "
+                    f"({years.shape[0]},))"
+                )
+            data[varname] = arr
+
+    return years, data
 
 
 def get_ghg_at_time(config: GHGConfig, day: float) -> dict:
@@ -320,22 +407,69 @@ def get_ghg_at_time(config: GHGConfig, day: float) -> dict:
 
     Returns
     -------
-    dict with keys "co2_ppmv", "ch4_ppbv", "n2o_ppbv"
+    dict with keys "co2_ppmv", "ch4_ppbv", "n2o_ppbv", "cfc11_pptv",
+    "cfc12_pptv".
     """
     if config.source == "constant":
         return {
             "co2_ppmv": config.co2_ppmv,
             "ch4_ppbv": config.ch4_ppbv,
             "n2o_ppbv": config.n2o_ppbv,
+            "cfc11_pptv": config.cfc11_pptv,
+            "cfc12_pptv": config.cfc12_pptv,
         }
     elif config.source == "file":
         if not config.path:
             raise ValueError("GHGConfig.path must be set when source='file'")
         varnames = ("co2_ppmv", "ch4_ppbv", "n2o_ppbv")
         times, data = _load_nc_timeseries(config.path, varnames)
-        return {v: _interp_1d(times, data[v], day) for v in varnames}
+        result = {v: _interp_1d(times, data[v], day) for v in varnames}
+        result["cfc11_pptv"] = config.cfc11_pptv
+        result["cfc12_pptv"] = config.cfc12_pptv
+        return result
+    elif config.source == "annual_file":
+        if not config.path:
+            raise ValueError(
+                "GHGConfig.path must be set when source='annual_file'"
+            )
+        years, data = _load_ghg_annual_file(config.path)
+        # Convert simulation day → fractional year
+        year = config.start_year + day / 365.25
+        # File stores mole fractions scaled by unit metadata:
+        # CO2 in 1e-6 (ppmv), CH4/N2O in 1e-9 (ppbv), CFCs in 1e-12 (pptv)
+        return {
+            "co2_ppmv": _interp_1d(years, data["CO2"], year),
+            "ch4_ppbv": _interp_1d(years, data["CH4"], year),
+            "n2o_ppbv": _interp_1d(years, data["N2O"], year),
+            "cfc11_pptv": _interp_1d(years, data["CFC_11"], year),
+            "cfc12_pptv": _interp_1d(years, data["CFC_12"], year),
+        }
     else:
         raise ValueError(f"Unknown GHG source: {config.source!r}")
+
+
+def ghg_concentrations_to_vmr(ghg: dict) -> dict:
+    """Convert GHG concentrations dict to volume mixing ratios.
+
+    Parameters
+    ----------
+    ghg : dict
+        As returned by ``get_ghg_at_time`` (ppmv/ppbv/pptv units).
+
+    Returns
+    -------
+    dict mapping RRTMGP gas names to VMR (dimensionless mole fractions).
+    """
+    vmr = {
+        "co2": ghg["co2_ppmv"] * 1.0e-6,
+        "ch4": ghg["ch4_ppbv"] * 1.0e-9,
+        "n2o": ghg["n2o_ppbv"] * 1.0e-9,
+    }
+    if "cfc11_pptv" in ghg:
+        vmr["cfc11"] = ghg["cfc11_pptv"] * 1.0e-12
+    if "cfc12_pptv" in ghg:
+        vmr["cfc12"] = ghg["cfc12_pptv"] * 1.0e-12
+    return vmr
 
 
 # ==============================================================================
@@ -351,7 +485,8 @@ class OzoneConfig(NamedTuple):
     model grid.
 
     Expected NetCDF schema for climatology:
-    - Variable: 'ozone' with dims (time=12, lat[, plev])
+    - Variable: 'ozone', 'vmro3', 'o3', 'O3', or 'tro3' (auto-detected)
+      with dims (time=12, lat[, plev])
     - Units: volume mixing ratio [mol/mol]
     - 'lat' in degrees, 'plev' in Pa (if 3D)
 
@@ -407,6 +542,27 @@ def _reference_ozone_profile(
     return jnp.clip(o3, 1.0e-10, None)
 
 
+_OZONE_VARNAMES = ("ozone", "vmro3", "o3", "O3", "tro3")
+
+
+@lru_cache(maxsize=16)
+def _detect_ozone_varname(path: str) -> str:
+    """Auto-detect the ozone variable name in a NetCDF file.
+
+    Tries common names: 'ozone', 'vmro3' (CMIP6), 'o3', 'O3', 'tro3'.
+    """
+    import netCDF4
+
+    with netCDF4.Dataset(path, "r") as ds:
+        for name in _OZONE_VARNAMES:
+            if name in ds.variables:
+                return name
+    raise ValueError(
+        f"No ozone variable found in {path!r}. "
+        f"Expected one of {_OZONE_VARNAMES}"
+    )
+
+
 def get_ozone_at_time(config: OzoneConfig, day: float,
                        lat_grid: jnp.ndarray | None = None,
                        p_grid: jnp.ndarray | None = None):
@@ -445,8 +601,9 @@ def get_ozone_at_time(config: OzoneConfig, day: float,
             "use_reference_if_missing=True",
         )
 
+    varname = _detect_ozone_varname(config.path)
     mid_days, lat, plev, data = _load_nc_monthly_zonal_with_levels(
-        config.path, "ozone"
+        config.path, varname
     )
     ozone_interp = _interp_monthly_cyclic(mid_days, data, day)
 

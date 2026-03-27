@@ -375,10 +375,11 @@ class ModelDriver:
         logger.info(f"  Physics: {self.config.radiation} + SBM convection")
 
     def _setup_external_forcing(self) -> None:
-        """Configure external forcing: solar, ozone, aerosol, CMIP GHG."""
+        """Configure external forcing: solar, ozone, aerosol, GHG."""
         from legoesm.forcing.external import (
-            SolarConfig, OzoneConfig, AerosolConfig,
+            SolarConfig, OzoneConfig, AerosolConfig, GHGConfig,
             get_solar_forcing_at_time, get_ozone_at_time, get_aerosol_at_time,
+            get_ghg_at_time, ghg_concentrations_to_vmr,
         )
 
         cfg = self.config
@@ -426,12 +427,45 @@ class ModelDriver:
             from legoesm.forcing.experiments import ghg_at_year
             co2, ch4, n2o = ghg_at_year(self._experiment, self._start_year)
             self.config = cfg._replace(co2_ppmv=co2, ch4_ppbv=ch4, n2o_ppbv=n2o)
+            cfg = self.config
             logger.info(f"  CMIP: {self._experiment} (year {self._start_year}), "
                   f"CO2={co2:.1f} ppmv")
 
+        # GHG forcing config
+        self._ghg_active = (cfg.radiation in ("rrtmg", "rrtmgp")
+                            and cfg.ghg_forcing == "external")
+        if self._ghg_active:
+            self._ghg_config = GHGConfig(
+                co2_ppmv=cfg.co2_ppmv,
+                ch4_ppbv=cfg.ch4_ppbv,
+                n2o_ppbv=cfg.n2o_ppbv,
+                source="annual_file",
+                path=cfg.ghg_file,
+                start_year=cfg.start_year,
+            )
+            # Log initial GHG values
+            ghg_init = get_ghg_at_time(self._ghg_config, cfg.start_day)
+            logger.info(
+                f"  GHG external: CO2={ghg_init['co2_ppmv']:.1f}ppmv, "
+                f"CH4={ghg_init['ch4_ppbv']:.0f}ppbv, "
+                f"N2O={ghg_init['n2o_ppbv']:.1f}ppbv, "
+                f"CFC11={ghg_init['cfc11_pptv']:.0f}pptv, "
+                f"CFC12={ghg_init['cfc12_pptv']:.0f}pptv"
+            )
+        else:
+            self._ghg_config = GHGConfig(
+                co2_ppmv=cfg.co2_ppmv,
+                ch4_ppbv=cfg.ch4_ppbv,
+                n2o_ppbv=cfg.n2o_ppbv,
+                source="constant",
+            )
+
     def _precompute_external_forcing(self, day, p_s, lat):
-        """Pre-compute ozone/aerosol fields outside JIT boundary."""
-        from legoesm.forcing.external import get_ozone_at_time, get_aerosol_at_time
+        """Pre-compute ozone/aerosol/GHG fields outside JIT boundary."""
+        from legoesm.forcing.external import (
+            get_ozone_at_time, get_aerosol_at_time,
+            get_ghg_at_time, ghg_concentrations_to_vmr,
+        )
         from legoesm.forcing.surface_utils import distribute_column_aod_to_layers
 
         nlev = self.sigma.sigma_full.shape[0]
@@ -460,7 +494,13 @@ class ModelDriver:
                 jnp.asarray(aerosol_col), p_half_col,
             )
 
-        return o3_vmr, aerosol_od
+        # GHG VMR override (None for gray radiation / constant forcing)
+        ghg_vmr = None
+        if self._ghg_active:
+            ghg_conc = get_ghg_at_time(self._ghg_config, day)
+            ghg_vmr = ghg_concentrations_to_vmr(ghg_conc)
+
+        return o3_vmr, aerosol_od, ghg_vmr
 
     def _create_diagnostics(self) -> None:
         """Set up diagnostic collection."""
@@ -926,7 +966,7 @@ class ModelDriver:
         held_sw_down_toa = jnp.zeros(_ens_2d)
 
         # External forcing
-        o3_vmr, aerosol_od = self._precompute_external_forcing(
+        o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
             START_DAY, self.state.p_s.data, self._grid_lat,
         )
 
@@ -964,7 +1004,7 @@ class ModelDriver:
                 current_s_0 = float(solar_now["tsi"])
                 if self._use_solar_spectral:
                     solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
-                o3_vmr, aerosol_od = self._precompute_external_forcing(
+                o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
                     day, self.state.p_s.data, self._grid_lat,
                 )
 
@@ -1008,6 +1048,7 @@ class ModelDriver:
                 C_E=cfg.C_E,
                 albedo_ice=cfg.albedo_ice,
                 albedo_ocean=cfg.albedo_ocean,
+                ghg_vmr_override=ghg_vmr,
             )
 
             # Pack state into carry
@@ -1180,7 +1221,7 @@ class ModelDriver:
         held_sw_down_toa = jnp.zeros(shape_2d)
 
         # External forcing (pre-compute outside JIT)
-        o3_vmr, aerosol_od = self._precompute_external_forcing(
+        o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
             START_DAY, self.state.p_s.data, self._grid_lat,
         )
 
@@ -1217,6 +1258,7 @@ class ModelDriver:
                 o3_vmr, aerosol_od,
                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                ghg_vmr_override=ghg_vmr,
             )
 
         # Apply warmup tendencies
@@ -1269,8 +1311,8 @@ class ModelDriver:
                 if self._use_solar_spectral:
                     solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
 
-                # Ozone + aerosol
-                o3_vmr, aerosol_od = self._precompute_external_forcing(
+                # Ozone + aerosol + GHG
+                o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
                     day, self.state.p_s.data, self._grid_lat,
                 )
 
@@ -1295,6 +1337,7 @@ class ModelDriver:
                     o3_vmr, aerosol_od,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                    ghg_vmr_override=ghg_vmr,
                 )
 
             # (c) Update state

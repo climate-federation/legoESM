@@ -84,6 +84,11 @@ def main():
     parser.add_argument("--ozone-forcing", type=str, default="inline",
                         choices=["inline", "external", "off"])
     parser.add_argument("--ozone-file", type=str, default="")
+    parser.add_argument("--ghg-forcing", type=str, default="constant",
+                        choices=["constant", "external"],
+                        help="GHG forcing mode: constant (default) or external (time-varying from file)")
+    parser.add_argument("--ghg-file", type=str, default="",
+                        help="Path to CMIP6 annual GHG concentration file (greenhouse_historical_plus.nc)")
 
     # Solar
     parser.add_argument("--solar-source", type=str, default="constant",
@@ -147,6 +152,8 @@ def main():
         parser.error("--forcing-path required (unless --dataset analytical or --restart-from)")
     if args.solar_source in ("file", "spectral_file") and not args.solar_file:
         parser.error("--solar-file required when --solar-source is file/spectral_file")
+    if args.ghg_forcing == "external" and not args.ghg_file:
+        parser.error("--ghg-file required when --ghg-forcing is external")
 
     # Auto-configure for spectral discretization
     if args.discretization == "spectral" or args.truncation is not None:
@@ -201,6 +208,8 @@ def main():
         ozone_source=args.ozone_source,
         ozone_forcing=args.ozone_forcing,
         ozone_file=args.ozone_file,
+        ghg_forcing=args.ghg_forcing,
+        ghg_file=args.ghg_file,
         solar_source=args.solar_source,
         solar_file=args.solar_file,
         solar_spectral_var=args.solar_spectral_var,

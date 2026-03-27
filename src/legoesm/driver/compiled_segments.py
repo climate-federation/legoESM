@@ -231,6 +231,7 @@ def build_segment_fn(
     C_E=None,
     albedo_ice=None,
     albedo_ocean=None,
+    ghg_vmr_override=None,
 ):
     """Build a compiled segment function.
 
@@ -310,6 +311,12 @@ def build_segment_fn(
     _C_E = jnp.float32(C_E) if C_E is not None else None
     _albedo_ice = jnp.float32(albedo_ice) if albedo_ice is not None else None
     _albedo_ocean = jnp.float32(albedo_ocean) if albedo_ocean is not None else None
+    # Convert GHG VMR override dict values to JAX arrays for tracing.
+    _ghg_vmr_override = None
+    if ghg_vmr_override is not None:
+        _ghg_vmr_override = {
+            k: jnp.float64(v) for k, v in ghg_vmr_override.items()
+        }
 
     def _single_step(carry: SegmentCarry, _unused) -> tuple:
         """One atmosphere step: dynamics → physics → fixers."""
@@ -352,6 +359,7 @@ def build_segment_fn(
             sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
             C_H=_C_H, C_E=_C_E,
             albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+            ghg_vmr_override=_ghg_vmr_override,
         )
 
         # --- State update ---

@@ -85,6 +85,8 @@ class ExperimentConfig(NamedTuple):
     ozone_source: str = "standard"
     ozone_forcing: str = "inline"       # inline, external, off
     ozone_file: str = ""
+    ghg_forcing: str = "constant"       # constant, external
+    ghg_file: str = ""
 
     # Solar
     solar_source: str = "constant"      # constant, file, spectral_file

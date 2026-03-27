@@ -242,7 +242,8 @@ class PhysicsPipeline:
                                solar_weights, s_0,
                                o3_vmr_precomputed, aerosol_od_precomputed,
                                tau_equator=None, tau_pole=None,
-                               albedo_ice=None, albedo_ocean=None):
+                               albedo_ice=None, albedo_ocean=None,
+                               ghg_vmr_override=None):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
@@ -282,6 +283,7 @@ class PhysicsPipeline:
             o3_vmr_precomputed, aerosol_od_precomputed,
             solar_weights, s_0,
             tau_equator=tau_equator, tau_pole=tau_pole,
+            ghg_vmr_override=ghg_vmr_override,
         )
 
         # Unflatten back to native grid shape via adapter
@@ -320,7 +322,8 @@ class PhysicsPipeline:
                          sbm_tau_c=None, sbm_RH_ref=None,
                          C_H=pipeline.C_H, C_E=pipeline.C_E,
                          albedo_ice=pipeline.albedo_ice,
-                         albedo_ocean=pipeline.albedo_ocean):
+                         albedo_ocean=pipeline.albedo_ocean,
+                         ghg_vmr_override=None):
 
             def _rad_branch(args):
                 (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
@@ -329,7 +332,8 @@ class PhysicsPipeline:
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
-                 C_H, C_E, albedo_ice, albedo_ocean) = args
+                 C_H, C_E, albedo_ice, albedo_ocean,
+                 ghg_vmr_override) = args
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa) = \
@@ -339,6 +343,7 @@ class PhysicsPipeline:
                         solar_weights, s_0, o3_vmr, aerosol_od,
                         tau_equator=tau_equator, tau_pole=tau_pole,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
+                        ghg_vmr_override=ghg_vmr_override,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -366,7 +371,8 @@ class PhysicsPipeline:
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                  held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                  tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
-                 C_H, C_E, albedo_ice, albedo_ocean) = args
+                 C_H, C_E, albedo_ice, albedo_ocean,
+                 ghg_vmr_override) = args
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
@@ -395,7 +401,8 @@ class PhysicsPipeline:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     tau_equator, tau_pole, sbm_tau_c, sbm_RH_ref,
-                    C_H, C_E, albedo_ice, albedo_ocean)
+                    C_H, C_E, albedo_ice, albedo_ocean,
+                    ghg_vmr_override)
 
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 
@@ -433,7 +440,9 @@ def _build_gray_radiation_fn(config):
                      lat_col, lon_col, day_of_year, seconds_of_day,
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
-                     tau_equator=None, tau_pole=None):
+                     tau_equator=None, tau_pole=None,
+                     ghg_vmr_override=None):
+        del ghg_vmr_override  # gray radiation does not use GHG concentrations
         # Rebuild config with traced tau values when provided
         _cfg = gray_config
         if tau_equator is not None:
@@ -486,7 +495,7 @@ def _build_rrtmgp_radiation_fn(config):
                      lat_col, lon_col, day_of_year, seconds_of_day,
                      albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
                      solar_weights, s_0=S_0,
-                     co2_vmr=None, ch4_vmr=None, n2o_vmr=None,
+                     ghg_vmr_override=None,
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None):
         if diurnal:
@@ -505,6 +514,7 @@ def _build_rrtmgp_radiation_fn(config):
             o3_vmr=o3_vmr_col,
             aerosol_optical_depth=aerosol_od_col,
             solar_spectral_fraction=solar_weights if solar_weights.size > 0 else None,
+            ghg_vmr_override=ghg_vmr_override,
             cloud_path_liq=cloud_path_liq,
             cloud_path_ice=cloud_path_ice,
             cloud_r_eff_liq=cloud_r_eff_liq,

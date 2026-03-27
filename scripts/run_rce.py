@@ -14,6 +14,8 @@ Usage:
     JAX_ENABLE_X64=1 python scripts/run_rce.py --days 200
     JAX_ENABLE_X64=1 python scripts/run_rce.py --mode land --days 100
     JAX_ENABLE_X64=1 python scripts/run_rce.py --resolution 24 --dt 300 --days 500
+    JAX_ENABLE_X64=1 python scripts/run_rce.py --grid-type gaussian --truncation 21
+    JAX_ENABLE_X64=1 python scripts/run_rce.py --grid-type latlon --resolution 32
 """
 
 from __future__ import annotations
@@ -35,7 +37,8 @@ def main():
     parser.add_argument("--mode", choices=["ocean", "land"], default="ocean",
                         help="Surface type: slab ocean or slab land")
     parser.add_argument("--days", type=int, default=200)
-    parser.add_argument("--resolution", type=int, default=16, help="Cubed-sphere N")
+    parser.add_argument("--resolution", type=int, default=16,
+                        help="Grid resolution (N for cubed-sphere, n_max for spectral, etc.)")
     parser.add_argument("--nlev", type=int, default=20)
     parser.add_argument("--dt", type=float, default=None,
                         help="Timestep [s] (auto: 600 for N<=24, 300 for N>24)")
@@ -43,7 +46,22 @@ def main():
     parser.add_argument("--sst-init", type=float, default=300.0,
                         help="Initial SST [K] (ocean) or soil T [K] (land)")
     parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--grid-type", type=str, default="cubed_sphere",
+                        choices=["cubed_sphere", "gaussian", "latlon", "voronoi"],
+                        help="Horizontal grid type")
+    parser.add_argument("--discretization", type=str, default="cdgrid",
+                        choices=["cdgrid", "spectral", "latlon_fv", "mpas"],
+                        help="Discretization method")
+    parser.add_argument("--truncation", type=int, default=None,
+                        help="Spectral truncation (T21, T42, etc.). Sets grid_type=gaussian.")
     args = parser.parse_args()
+
+    # Auto-configure for spectral discretization
+    if args.discretization == "spectral" or args.truncation is not None:
+        args.discretization = "spectral"
+        args.grid_type = "gaussian"
+        if args.truncation is not None:
+            args.resolution = args.truncation
 
     N = args.resolution
     NLEV = args.nlev
@@ -54,18 +72,34 @@ def main():
     # ---------------------------------------------------------------
     # Grid, vertical coordinate, dynamical core
     # ---------------------------------------------------------------
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.driver.component_factory import create_atmosphere_dycore, compute_diffusion
     from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
 
-    grid = create_cubed_sphere(N)
+    grid_type = args.grid_type
+    discretization = args.discretization
+
+    if grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        grid = create_cubed_sphere(N)
+    elif grid_type == "gaussian":
+        from legoesm.grids.gaussian import create_gaussian_grid
+        grid = create_gaussian_grid(N)
+    elif grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(N)
+    elif grid_type == "voronoi":
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        grid = create_voronoi_mesh(N, lloyd_iterations=50)
+    else:
+        raise ValueError(f"Unknown grid type: {grid_type}")
+
     sigma = create_sigma_coordinate(NLEV)
-    shape_2d = (6, N, N)
+    shape_2d = grid.grid_shape_2d
 
     config = ExperimentConfig(
-        grid=GridConfig(resolution=N, nlev=NLEV),
-        dycore=DycoreConfig(dt=DT),
+        grid=GridConfig(grid_type=grid_type, resolution=N, nlev=NLEV),
+        dycore=DycoreConfig(discretization=discretization, dt=DT),
     )
     model = create_atmosphere_dycore(config, grid, sigma)
     HYPERDIFF = compute_diffusion(grid, config.dycore).hyperdiff
@@ -73,8 +107,15 @@ def main():
     # ---------------------------------------------------------------
     # Initial atmospheric state (isothermal 280 K, at rest)
     # ---------------------------------------------------------------
-    from legoesm.atmosphere.physics.held_suarez import held_suarez_init
-    state = held_suarez_init(grid, sigma, T_init=280.0)
+    if grid_type == "cubed_sphere":
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        state = held_suarez_init(grid, sigma, T_init=280.0)
+    elif grid_type == "voronoi":
+        from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_init_mpas
+        state = held_suarez_init_mpas(grid, sigma, T_init=280.0)
+    else:
+        from legoesm.atmosphere.physics.held_suarez_latlon import held_suarez_init_latlon
+        state = held_suarez_init_latlon(grid, sigma, T_init=280.0)
 
     # Moisture: 60% RH with sigma^2 vertical decay
     from legoesm import constants
@@ -122,8 +163,16 @@ def main():
     from legoesm.atmosphere.physics.radiation.gray import gray_radiation
     from legoesm.atmosphere.physics.radiation.solar import perpetual_equinox_insolation
     from legoesm.atmosphere.physics.convection.sbm import sbm_convection
-    from legoesm.core.operators_3d import hyperdiffusion_3d
     from legoesm.diagnostics.column_integrals import column_water_vapor
+
+    # Grid-specific hyperdiffusion (spectral/voronoi handle diffusion in dycore)
+    _apply_hyperdiff = None
+    if grid_type == "cubed_sphere":
+        from legoesm.core.operators_3d import hyperdiffusion_3d
+        _apply_hyperdiff = lambda q, coeff: hyperdiffusion_3d(q, grid, coeff)
+    elif grid_type == "latlon":
+        from legoesm.core.operators_latlon_3d import hyperdiffusion_3d as hyperdiffusion_3d_ll
+        _apply_hyperdiff = lambda q, coeff: hyperdiffusion_3d_ll(q, grid, coeff)
 
     gray_config = GrayRadiationConfig(
         tau_equator=7.2, tau_pole=1.8, S_0=1360.0,
@@ -219,8 +268,9 @@ def main():
         dq_dt = dq_conv
         dq_dt = dq_dt.at[..., -1].add(dq_BL)
 
-        # Hyperdiffusion on q_v (dampen 2Δx noise)
-        dq_dt = dq_dt + hyperdiffusion_3d(q_v, grid, HYPERDIFF)
+        # Hyperdiffusion on q_v (dampen 2Δx noise; spectral/voronoi handle in dycore)
+        if _apply_hyperdiff is not None:
+            dq_dt = dq_dt + _apply_hyperdiff(q_v, HYPERDIFF)
 
         return dT_dt, dq_dt, T_sfc_new, W_new, precip
 
@@ -233,7 +283,12 @@ def main():
     print("=" * 70)
     print(f"  Moist RCE: slab {args.mode} + gray radiation + SBM convection")
     print("=" * 70)
-    print(f"  Grid:     C{N}/L{NLEV},  dt={DT:.0f}s,  {args.days} days")
+    _grid_labels = {
+        "cubed_sphere": f"C{N}", "gaussian": f"T{N}",
+        "latlon": f"LL{N}", "voronoi": f"V{N}",
+    }
+    print(f"  Grid:     {_grid_labels[grid_type]}/L{NLEV} ({grid_type}/{discretization})"
+          f",  dt={DT:.0f}s,  {args.days} days")
     print(f"  Surface:  T_init={args.sst_init:.0f}K, C_sfc={C_sfc:.2e} J/m2/K")
     print()
     print(f"  {'Day':>6s}  {'<T_sfc>':>8s}  {'<T_atm>':>8s}  {'<Precip>':>8s}"
@@ -250,7 +305,7 @@ def main():
         dT_dt, dq_dt, T_sfc, W_bucket, precip = physics_step(
             state.T.data, state.p_s.data, q_v,
             state.u.data, state.v.data,
-            T_sfc, W_bucket, grid.lat, DT,
+            T_sfc, W_bucket, grid.grid_lat, DT,
         )
         new_T = state.T.data + DT * dT_dt
         q_v = jnp.maximum(q_v + DT * dq_dt, 0.0)
