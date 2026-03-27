@@ -218,8 +218,15 @@ def _div_damp_latlon(n_lat: int, ref_n: int = 64, ref_coeff: float = 5e6) -> flo
 
 
 def _hyperdiff_ico(mesh) -> float:
-    dx_mean = float(jnp.sqrt(4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
-    return dx_mean ** 4 / (48.0 * 3600.0)
+    """Biharmonic hyperdiffusion for icosahedral mesh.
+
+    Uses the minimum of dcEdge and dvEdge because the TRiSK vector
+    Laplacian has eigenvalues governed by min(dc, dv), not the mean
+    cell spacing.  A 48-hour e-folding time keeps the coefficient
+    conservative.
+    """
+    dx = float(jnp.minimum(jnp.min(mesh.dcEdge), jnp.min(mesh.dvEdge)))
+    return dx ** 4 / (48.0 * 3600.0)
 
 
 def _laplacian_visc_cube(n: int, frac: float = 0.05) -> float:
@@ -1845,43 +1852,151 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 
 def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
                         radiation: str = "gray") -> tuple[str, float, str]:
+    """Run DCMIP-2012 transport test cases (Tests 1-1, 1-2, 1-3).
+
+    Supports cubed-sphere, lat-lon, and icosahedral grids.
+    Spectral grids are skipped (no tracer advection infrastructure).
+
+    Produces tracer snapshots, lat/lon cross-sections, and vertical profiles
+    via _save_case_diagnostics.
+    """
     test_num = tc.run_kwargs["test_num"]
 
-    if tc.grid_type != "cubed_sphere":
-        record(tc, "SKIP", 0.0, f"DCMIP transport only implemented for cubed_sphere")
+    if tc.grid_type == "spectral":
+        record(tc, "SKIP", 0.0,
+               "DCMIP transport not implemented for spectral grid")
         return "SKIP", 0.0, ""
 
-    from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.tracer_transport import (
-        TracerTransportModel, TracerTransportConfig)
+    # --- Shared imports (grid-independent IC/wind helpers) ---
     from tests.test_cases.dcmip_transport import (
-        dcmip11_wind, dcmip11_init, dcmip12_wind, dcmip12_init,
-        dcmip13_wind, dcmip13_init,
-        compute_tracer_error_norms, create_dcmip_sigma)
+        create_dcmip_sigma,
+        dcmip11_wind_geo, dcmip11_tracers_at_points,
+        dcmip12_wind_geo, dcmip12_tracers_at_points,
+        dcmip13_wind_geo, dcmip13_tracers_at_points,
+    )
 
     TC_CFGS = {
-        11: {"wind": dcmip11_wind, "init": dcmip11_init,
-             "period": 12.0, "dt": 1800.0, "n_tracers": 4},
-        12: {"wind": dcmip12_wind, "init": dcmip12_init,
-             "period": 1.0, "dt": 600.0, "n_tracers": 1},
-        13: {"wind": dcmip13_wind, "init": dcmip13_init,
-             "period": 12.0, "dt": 1800.0, "n_tracers": 4},
+        11: {"wind_geo": dcmip11_wind_geo, "period": 12.0,
+             "dt": 1800.0, "n_tracers": 4},
+        12: {"wind_geo": dcmip12_wind_geo, "period": 1.0,
+             "dt": 600.0, "n_tracers": 1},
+        13: {"wind_geo": dcmip13_wind_geo, "period": 12.0,
+             "dt": 1800.0, "n_tracers": 4},
     }
     cfg = TC_CFGS[test_num]
-
-    n = int(tc.resolution[1:])
     nlev = 30
     dt = cfg["dt"]
-    grid = create_cubed_sphere(n)
     sigma_coord = create_dcmip_sigma(nlev)
 
-    state_init = cfg["init"](grid, sigma_coord)
-    config = TracerTransportConfig(hyperdiff_coeff=0.0)
-    model = TracerTransportModel(grid, sigma_coord, cfg["wind"], config)
+    # --- Grid-specific setup ---
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import (
+            create_cubed_sphere, rotate_winds_geo_to_grid)
+        from legoesm.atmosphere.dynamics.tracer_transport import (
+            TracerTransportModel, TracerTransportConfig)
+        from tests.test_cases.dcmip_transport import (
+            dcmip11_wind, dcmip11_init, dcmip12_wind, dcmip12_init,
+            dcmip13_wind, dcmip13_init, compute_tracer_error_norms)
 
-    period = min(days, cfg["period"])
-    n_steps = int(period * 86400.0 / dt)
-    diag_every = max(1, n_steps // 20)
+        n = int(tc.resolution[1:])
+        grid = create_cubed_sphere(n)
+        wind_fns = {11: dcmip11_wind, 12: dcmip12_wind, 13: dcmip13_wind}
+        init_fns = {11: dcmip11_init, 12: dcmip12_init, 13: dcmip13_init}
+        state_init = init_fns[test_num](grid, sigma_coord)
+        model = TracerTransportModel(
+            grid, sigma_coord, wind_fns[test_num],
+            TracerTransportConfig(hyperdiff_coeff=0.0))
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.tracer_transport_latlon import (
+            TracerTransportLatLonModel, TracerTransportLatLonConfig)
+        from tests.test_cases.dcmip_transport import (
+            dcmip11_init_latlon, dcmip12_init_latlon, dcmip13_init_latlon)
+
+        n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
+        grid = create_latlon_grid(n_lat, n_lon)
+
+        # Wind wrapper: shared _geo returns geographic (u, v, sigma_dot),
+        # no rotation needed for lat-lon.  Must meshgrid 1D lon/lat.
+        wind_geo_fn = cfg["wind_geo"]
+
+        def ll_wind(t, g, sc):
+            return wind_geo_fn(t, g.lon2d, g.lat2d, sc)
+
+        init_fns = {
+            11: dcmip11_init_latlon,
+            12: dcmip12_init_latlon,
+            13: dcmip13_init_latlon,
+        }
+        state_init = init_fns[test_num](grid, sigma_coord)
+        model = TracerTransportLatLonModel(
+            grid, sigma_coord, ll_wind,
+            TracerTransportLatLonConfig(hyperdiff_coeff=0.0))
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+    elif tc.grid_type == "icosahedral":
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.atmosphere.dynamics.tracer_transport_mpas import (
+            TracerTransportMPASModel, TracerTransportMPASConfig)
+        from tests.test_cases.dcmip_transport import (
+            dcmip11_init_mpas, dcmip12_init_mpas, dcmip13_init_mpas)
+
+        level = int(tc.resolution.replace("ico", ""))
+        grid = create_voronoi_mesh(level)
+
+        # Wind wrapper: convert geographic (u_east, v_north) to edge-normal.
+        wind_geo_fn = cfg["wind_geo"]
+
+        def mpas_wind(t, mesh, sc):
+            u_east, v_north, sigma_dot = wind_geo_fn(
+                t, mesh.lonCell, mesh.latCell, sc)
+            # Project geographic winds to edge-normal at each level.
+            # u_edge = u_east(cell) * cos(angleEdge) + v_north(cell) * sin(angleEdge)
+            # Average the two cells straddling each edge.
+            c1 = mesh.cellsOnEdge[0]  # (nEdges,)
+            c2 = mesh.cellsOnEdge[1]
+            cos_a = jnp.cos(mesh.angleEdge)  # (nEdges,)
+            sin_a = jnp.sin(mesh.angleEdge)
+            ue_c1 = u_east[c1] * cos_a[:, None] + v_north[c1] * sin_a[:, None]
+            ue_c2 = u_east[c2] * cos_a[:, None] + v_north[c2] * sin_a[:, None]
+            u_edge = 0.5 * (ue_c1 + ue_c2)  # (nEdges, nlev)
+            return u_edge, sigma_dot
+
+        init_fns = {
+            11: dcmip11_init_mpas,
+            12: dcmip12_init_mpas,
+            13: dcmip13_init_mpas,
+        }
+        state_init = init_fns[test_num](grid, sigma_coord)
+        model = TracerTransportMPASModel(
+            grid, sigma_coord, mpas_wind,
+            TracerTransportMPASConfig(hyperdiff_coeff=0.0))
+        coord_kind = "icosa"
+        lon_deg = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
+    else:
+        record(tc, "SKIP", 0.0,
+               f"DCMIP transport not implemented for grid '{tc.grid_type}'")
+        return "SKIP", 0.0, ""
+
+    # --- Extract function for tracer snapshots ---
+    n_tracers = cfg["n_tracers"]
+
+    def extract_fn(s):
+        q = np.asarray(s.tracers.data, dtype=np.float64)
+        out = {}
+        # Surface-level (bottom) tracer for 2D map snapshots
+        for i in range(min(n_tracers, 4)):
+            out[f"q{i+1}"] = q[..., -1, i]
+        # Full 3D for cross-sections (first tracer)
+        out["q1_3d"] = q[..., 0]
+        return out
 
     def step_fn(s, dt_):
         return model.step(s, dt_)
@@ -1898,36 +2013,47 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
             "q1_mean": float(jnp.mean(q[..., 0])),
         }
 
-    def extract_fn(s):
-        return {}  # tracer snapshots not plotted as 2D maps
+    def key_array_fn(s):
+        return s.tracers.data
 
-    state = state_init
-    t0 = time.time()
-    for i in range(n_steps):
-        state = step_fn(state, dt)
-        if (i + 1) % diag_every == 0:
-            q = state.tracers.data
-            progress = (i + 1) / n_steps * 100
-            print(f"    Step {i + 1:6d}/{n_steps} ({progress:5.1f}%) | "
-                  f"q1: [{float(jnp.min(q[..., 0])):.4f}, "
-                  f"{float(jnp.max(q[..., 0])):.4f}]")
-    jax.block_until_ready(state.tracers.data)
-    wall = time.time() - t0
+    # --- Time loop ---
+    period = min(days, cfg["period"])
+    n_steps = int(period * 86400.0 / dt)
+    diag_every = max(1, n_steps // 20)
 
-    ok = check_finite({"tracers": state.tracers.data})
+    state_final, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state_init, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, key_array_fn,
+        label=f"DCMIP transport {test_num} ({tc.grid_type})",
+        total_days=period)
 
+    # --- Error norms (for flow-reversal tests on cubed-sphere) ---
     notes = ""
-    if test_num in (11, 12):
-        norms = compute_tracer_error_norms(state, state_init, grid)
+    if test_num in (11, 12) and tc.grid_type == "cubed_sphere":
+        norms = compute_tracer_error_norms(state_final, state_init, grid)
         norm_strs = [f"q{i + 1} L2={norms['l2'][i]:.4e}"
-                     for i in range(cfg["n_tracers"])]
+                     for i in range(n_tracers)]
         notes = ", ".join(norm_strs)
+
+    # --- Diagnostics output ---
+    level_values = np.asarray(sigma_coord.sigma_full, dtype=np.float64)
+    field_specs_2d = [(f"q{i+1}", f"Tracer q{i+1}", "viridis")
+                      for i in range(min(n_tracers, 4))]
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
         "levels": nlev, "period_days": period, "dt": dt,
         "status": "PASS" if ok else "FAIL", "notes": notes,
         "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir,
+        f"DCMIP transport {test_num} {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=field_specs_2d,
+        field_3d_key="q1_3d", level_values=level_values,
+        level_label="Sigma level",
+        scalar_units={"q1_min": "kg/kg", "q1_max": "kg/kg",
+                      "q1_mean": "kg/kg"})
 
     return "PASS" if ok else "FAIL", wall, notes
 
