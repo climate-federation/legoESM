@@ -85,10 +85,10 @@ class DirectObsOperator:
 # ---------------------------------------------------------------------------
 
 class InterpolatingObsOperator:
-    """Observation at arbitrary (lat, lon) via bilinear interpolation.
+    """Observation at arbitrary (lat, lon) via nearest-neighbor lookup.
 
-    Interpolation weights are precomputed at init. Only the weighted
-    sum is inside the AD tape.
+    The nearest grid column is found by great-circle distance at init
+    time; only the index gather is inside the AD tape.
 
     Parameters
     ----------
@@ -160,9 +160,13 @@ class InterpolatingObsOperator:
 # ---------------------------------------------------------------------------
 
 class ColumnIntegralObsOperator:
-    """Observe a column-integrated quantity.
+    """Observe a column-integrated quantity (equal-weight vertical sum).
 
-    H(x) = sum over levels of x[field].data * dp / g
+    H(x) = sum over levels of x[field].data at selected columns.
+
+    Currently uses equal weights per level (simple sum). For
+    mass-weighted integration (dp/g weighting), pass a vertical_coord
+    that provides layer thicknesses (not yet implemented).
 
     Parameters
     ----------
@@ -170,8 +174,8 @@ class ColumnIntegralObsOperator:
         State field to integrate.
     grid : GridProtocol
         Model grid.
-    vertical_coord : object
-        Must provide dp or level thickness information.
+    vertical_coord : object, optional
+        Reserved for future mass-weighted integration.
     obs_columns : jax.Array
         Column indices to observe, shape (n_obs,).
     """

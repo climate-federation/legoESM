@@ -101,7 +101,7 @@ def pack_carry(state, q_v, q_c, q_r,
                target_moisture=None, precip_accum=None):
     """Pack driver state into a SegmentCarry for the compiled kernel."""
     if target_moisture is None:
-        target_moisture = jnp.float32(0.0)
+        target_moisture = jnp.asarray(0.0)
     if precip_accum is None:
         precip_accum = jnp.zeros_like(state.p_s.data)
     return SegmentCarry(
@@ -293,25 +293,27 @@ def build_segment_fn(
 
 
     # Convert scalars to JAX tracers once.
-    _dt = jnp.float32(dt)
-    _day_of_year = jnp.float32(day_of_year)
-    _seconds_of_day = jnp.float32(seconds_of_day)
-    _s_0 = jnp.float32(s_0)
+    # Use jnp.asarray so the dtype follows the ambient precision
+    # (float32 by default, float64 when jax_enable_x64 is set).
+    _dt = jnp.asarray(dt)
+    _day_of_year = jnp.asarray(day_of_year)
+    _seconds_of_day = jnp.asarray(seconds_of_day)
+    _s_0 = jnp.asarray(s_0)
     _solar_weights = jnp.asarray(solar_weights)
     _sst = jnp.asarray(sst)
     _sic = jnp.asarray(sic)
     _o3_vmr = jnp.asarray(o3_vmr)
     _aerosol_od = jnp.asarray(aerosol_od)
     _fric_decay = jnp.asarray(fric_decay)
-    _tau_equator = jnp.float32(tau_equator) if tau_equator is not None else None
-    _tau_pole = jnp.float32(tau_pole) if tau_pole is not None else None
-    _sbm_tau_c = jnp.float32(sbm_tau_c) if sbm_tau_c is not None else None
-    _sbm_RH_ref = jnp.float32(sbm_RH_ref) if sbm_RH_ref is not None else None
-    _C_H = jnp.float32(C_H) if C_H is not None else None
-    _C_E = jnp.float32(C_E) if C_E is not None else None
-    _albedo_ice = jnp.float32(albedo_ice) if albedo_ice is not None else None
-    _albedo_ocean = jnp.float32(albedo_ocean) if albedo_ocean is not None else None
-    # Convert GHG VMR override dict values to JAX arrays for tracing.
+    _tau_equator = jnp.asarray(tau_equator) if tau_equator is not None else None
+    _tau_pole = jnp.asarray(tau_pole) if tau_pole is not None else None
+    _sbm_tau_c = jnp.asarray(sbm_tau_c) if sbm_tau_c is not None else None
+    _sbm_RH_ref = jnp.asarray(sbm_RH_ref) if sbm_RH_ref is not None else None
+    _C_H = jnp.asarray(C_H) if C_H is not None else None
+    _C_E = jnp.asarray(C_E) if C_E is not None else None
+    _albedo_ice = jnp.asarray(albedo_ice) if albedo_ice is not None else None
+    _albedo_ocean = jnp.asarray(albedo_ocean) if albedo_ocean is not None else None
+    # GHG VMR needs float64 for spectral accuracy in radiation.
     _ghg_vmr_override = None
     if ghg_vmr_override is not None:
         _ghg_vmr_override = {

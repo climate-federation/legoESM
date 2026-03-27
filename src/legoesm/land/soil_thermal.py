@@ -19,6 +19,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 from legoesm.land.soil_grid import SoilGrid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 
@@ -177,13 +179,13 @@ def _thomas_solve_batch(a, b, c, d):
         def fwd(carry, k):
             c_p, d_p = carry
             denom = b_col[k] - a_col[k] * c_p
-            denom = jnp.where(jnp.abs(denom) < 1e-30,
-                             jnp.sign(denom) * 1e-30 + 1e-30, denom)
+            denom = jnp.where(jnp.abs(denom) < _TINY,
+                             jnp.sign(denom) * _TINY + _TINY, denom)
             c_new = c_col[k] / denom
             d_new = (d_col[k] - a_col[k] * d_p) / denom
             return (c_new, d_new), (c_new, d_new)
 
-        denom0 = jnp.where(jnp.abs(b_col[0]) < 1e-30, 1e-30, b_col[0])
+        denom0 = jnp.where(jnp.abs(b_col[0]) < _TINY, _TINY, b_col[0])
         init = (c_col[0] / denom0, d_col[0] / denom0)
         _, (c_primes, d_primes) = jax.lax.scan(fwd, init, jnp.arange(1, n))
         c_all = jnp.concatenate([jnp.array([init[0]]), c_primes])

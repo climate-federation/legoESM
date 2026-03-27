@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 from legoesm.ocean.vertical import compute_layer_thickness
 
 
@@ -70,7 +72,7 @@ def fix_volume_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None
     vol_new = _ocean_area_sum_mpas(eta_new, mask, mesh)
     ocean_area = _ocean_area_sum_mpas(jnp.ones_like(mask), mask, mesh)
 
-    correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1e-30)
+    correction = (vol_old - vol_new) / jnp.maximum(ocean_area, _TINY)
     eta_fixed = eta_new + correction * mask
 
     # Ensure minimum water column (ocean cells only)
@@ -118,7 +120,7 @@ def fix_heat_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
         jnp.ones_like(state_new.T.data), h_k_new, mask, mesh,
     )
 
-    correction = (heat_old - heat_new) / jnp.maximum(vol_new, 1e-30)
+    correction = (heat_old - heat_new) / jnp.maximum(vol_new, _TINY)
     T_fixed = state_new.T.data + correction * mask[:, jnp.newaxis]
 
     return state_new._replace(
@@ -158,7 +160,7 @@ def fix_salt_mpas(state_new, state_old, mesh, z_coord, min_water_column_m=None):
         jnp.ones_like(state_new.S.data), h_k_new, mask, mesh,
     )
 
-    correction = (salt_old - salt_new) / jnp.maximum(vol_new, 1e-30)
+    correction = (salt_old - salt_new) / jnp.maximum(vol_new, _TINY)
     S_fixed = state_new.S.data + correction * mask[:, jnp.newaxis]
 
     return state_new._replace(

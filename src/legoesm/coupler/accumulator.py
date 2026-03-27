@@ -11,6 +11,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 from legoesm.coupler.coupling_fields import SurfaceToAtm
 
 
@@ -77,7 +79,7 @@ def accumulate(
 
 def mean_accumulator(acc: FluxAccumulator) -> SurfaceToAtm:
     """Compute dt-weighted mean from the accumulator."""
-    inv_dt = 1.0 / jnp.clip(acc.total_dt, 1e-30, None)
+    inv_dt = 1.0 / jnp.clip(acc.total_dt, _TINY, None)
     return SurfaceToAtm(
         T_surface=acc.sum_T_surface * inv_dt,
         albedo=acc.sum_albedo * inv_dt,

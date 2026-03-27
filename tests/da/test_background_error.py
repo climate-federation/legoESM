@@ -88,7 +88,7 @@ class TestGaspariCohn:
         assert jnp.allclose(_gaspari_cohn(jnp.array(2.0), 1.0), 0.0, atol=1e-6)
 
     def test_beyond_2c(self):
-        assert jnp.allclose(_gaspari_cohn(jnp.array(3.0), 1.0), 0.0, atol=1e-14)
+        assert jnp.allclose(_gaspari_cohn(jnp.array(3.0), 1.0), 0.0, atol=1e-6)
 
     def test_monotonically_decreasing(self):
         r = jnp.linspace(0, 2.0, 100)
@@ -98,4 +98,4 @@ class TestGaspariCohn:
     def test_non_negative(self):
         r = jnp.linspace(0, 3.0, 200)
         vals = _gaspari_cohn(r, 1.0)
-        assert jnp.all(vals >= -1e-10)
+        assert jnp.all(vals >= -1e-6)  # float32-safe tolerance

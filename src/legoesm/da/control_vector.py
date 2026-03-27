@@ -14,6 +14,8 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 
 # Fields that are never included in the control vector (boundary conditions).
 _STATIC_FIELDS = frozenset({
@@ -134,7 +136,7 @@ def _forward_transform(x: jax.Array, transform: str) -> jax.Array:
     if transform == "identity":
         return x
     elif transform == "log":
-        return jnp.log(jnp.maximum(x, 1e-30))
+        return jnp.log(jnp.maximum(x, _TINY))
     elif transform == "softplus":
         # softplus inverse: log(exp(x) - 1), numerically stable
         return x + jnp.log1p(-jnp.exp(-x))

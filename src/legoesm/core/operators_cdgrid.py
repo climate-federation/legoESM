@@ -29,6 +29,8 @@ import jax.numpy as jnp
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.grids.halo import pad_halo
 
+_EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
+
 
 # ==============================================================================
 # Internal: halo padding that works for both 2D and 3D
@@ -305,7 +307,7 @@ def dgrid_to_cgrid(u_d, v_d, cdgrid):
     u_avg = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])    # (6, n+1, n[, nlev])
     v_avg_x = 0.5 * (v_d[:, :, :-1] + v_d[:, :, 1:])  # (6, n+1, n[, nlev])
     cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, 1e-12))
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
     u_c = u_avg * sina_u - v_avg_x * cosa_u
 
     # y-face (at constant j): e_perp is the outward normal, so v_c = v_d
@@ -343,9 +345,9 @@ def cgrid_to_dgrid(u_c, v_c, cdgrid):
     u_c_avg = 0.5 * (u_c_pad[:, :, :-1] + u_c_pad[:, :, 1:])
 
     cosa = _broadcast_metric(cdgrid.cosa_corner, u_c_avg)
-    sina = jnp.sqrt(jnp.maximum(1.0 - cosa**2, 1e-12))
+    sina = jnp.sqrt(jnp.maximum(1.0 - cosa**2, _EPS))
 
-    u_d = (u_c_avg + v_d * cosa) / jnp.maximum(sina, 1e-12)
+    u_d = (u_c_avg + v_d * cosa) / jnp.maximum(sina, _EPS)
 
     return u_d, v_d
 
@@ -377,7 +379,7 @@ def dgrid_vorticity(u_d, v_d, cdgrid):
     zeta : jax.Array, shape (6, n, n[, nlev])
     """
     cosa = _broadcast_metric(cdgrid.cosa_corner, u_d)
-    sina = jnp.sqrt(jnp.maximum(1.0 - cosa**2, 1e-12))
+    sina = jnp.sqrt(jnp.maximum(1.0 - cosa**2, _EPS))
 
     # South edge (i-direction): v . e_i = u_d
     u_south = 0.5 * (u_d[:, :-1, :-1] + u_d[:, 1:, :-1])
@@ -1305,7 +1307,7 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
     u_avg = 0.5 * (u_pad[:, :-1, 1:-1] + u_pad[:, 1:, 1:-1])  # (6, n+1, n)
     v_at_u = 0.5 * (v_pad[:, :-1, 1:-1] + v_pad[:, 1:, 1:-1])  # v at u_c pos
     cosa_u = _broadcast_metric(cdgrid.cosa_u, u_avg)
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, 1e-12))
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
     u_c = u_avg * sina_u - v_at_u * cosa_u
 
     v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])  # (6, n, n+1)

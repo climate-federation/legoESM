@@ -15,6 +15,8 @@ from legoesm.ocean.physics.vertical_mixing.config import RichardsonVerticalMixin
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+_EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
+
 
 def richardson_vertical_mixing(
     u: jnp.ndarray,
@@ -42,7 +44,7 @@ def richardson_vertical_mixing(
     -------
     VerticalMixingOutput
     """
-    eps = 1e-12
+    eps = _EPS
 
     # N^2 at interfaces
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)

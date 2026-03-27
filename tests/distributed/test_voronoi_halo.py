@@ -34,6 +34,15 @@ from legoesm.parallel.halo_exchange_voronoi import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _enable_x64():
+    """Tight tolerances require float64 precision."""
+    orig = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", orig)
+
+
 @pytest.fixture(scope="module")
 def mesh():
     """Small SCVT mesh for testing (162 cells)."""

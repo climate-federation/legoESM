@@ -11,6 +11,8 @@ from typing import Callable, NamedTuple
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 
 class MinimizationResult(NamedTuple):
     """Result of a minimization run."""
@@ -174,7 +176,7 @@ def minimize_lbfgs(
         gamma = jnp.where(
             state.n_stored > 0,
             jnp.sum(state.S[last_idx] * state.Y[last_idx])
-            / jnp.maximum(jnp.sum(state.Y[last_idx] * state.Y[last_idx]), 1e-30),
+            / jnp.maximum(jnp.sum(state.Y[last_idx] * state.Y[last_idx]), _TINY),
             1.0,
         )
         r = gamma * q
@@ -199,7 +201,7 @@ def minimize_lbfgs(
         s_k = x_new - state.x
         y_k = g_new - state.g
         sy = jnp.sum(s_k * y_k)
-        rho_k = jnp.where(jnp.abs(sy) > 1e-30, 1.0 / sy, 0.0)
+        rho_k = jnp.where(jnp.abs(sy) > _TINY, 1.0 / sy, 0.0)
 
         store_idx = state.k % m
         S_new = state.S.at[store_idx].set(s_k)
@@ -304,7 +306,7 @@ def minimize_cg(
 
         # Polak-Ribière beta
         beta = jnp.sum(z_new * (g_new - state.g)) / jnp.maximum(
-            jnp.sum(state.z * state.g), 1e-30
+            jnp.sum(state.z * state.g), _TINY
         )
         beta = jnp.maximum(beta, 0.0)  # Restart if beta < 0
 

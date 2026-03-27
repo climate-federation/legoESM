@@ -24,7 +24,7 @@ def build_cost_fn(
     template_state,
     dt: float,
     n_steps: int,
-    checkpoint_every: int = 1,
+    checkpoint: bool = True,
 ) -> Callable[[jax.Array], jax.Array]:
     """Build a JIT-compilable 4D-Var cost function.
 
@@ -51,8 +51,11 @@ def build_cost_fn(
         Model time step [s].
     n_steps : int
         Number of time steps in assimilation window.
-    checkpoint_every : int
-        Gradient checkpointing interval (1 = checkpoint every step).
+    checkpoint : bool
+        If True (default), apply ``jax.checkpoint`` to the scan body
+        so intermediates are recomputed during the backward pass,
+        trading compute for memory.  Set False to store all
+        intermediates (faster but O(n_steps) memory).
     """
 
     def cost_fn(x: jax.Array) -> jax.Array:
@@ -67,8 +70,8 @@ def build_cost_fn(
             s_new = model.step(carry, dt)
             return s_new, s_new
 
-        # Apply checkpointing
-        if checkpoint_every > 1:
+        # Apply gradient checkpointing to reduce memory
+        if checkpoint:
             scan_step_ckpt = jax.checkpoint(
                 scan_step,
                 prevent_cse=False,
@@ -80,8 +83,8 @@ def build_cost_fn(
             scan_step_ckpt, state_0, jnp.arange(n_steps)
         )
 
-        # Observation term
-        J_o = jnp.float32(0.0)
+        # Observation term — match dtype of background term
+        J_o = jnp.zeros((), dtype=J_b.dtype)
         for obs in observations:
             state_t = jax.tree.map(lambda arr: arr[obs.time_index], trajectory)
             H_x = obs.operator(state_t)
@@ -103,7 +106,7 @@ def build_cost_and_grad_fn(
     template_state,
     dt: float,
     n_steps: int,
-    checkpoint_every: int = 1,
+    checkpoint: bool = True,
 ) -> Callable[[jax.Array], tuple[jax.Array, jax.Array]]:
     """Build JIT-compiled (J, nabla J) function.
 
@@ -112,6 +115,6 @@ def build_cost_and_grad_fn(
     """
     cost_fn = build_cost_fn(
         model, background, observations, B, control_spec,
-        template_state, dt, n_steps, checkpoint_every,
+        template_state, dt, n_steps, checkpoint,
     )
     return jax.value_and_grad(cost_fn)

@@ -16,6 +16,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 
 def implicit_vertical_diffusion(
     phi: jax.Array,
@@ -103,7 +105,7 @@ def implicit_vertical_diffusion(
         b_prev_mod, rhs_prev_mod = carry
         a_k, b_k, c_prev_k, rhs_k = inputs
 
-        w = a_k / jnp.clip(b_prev_mod, 1e-30, None)
+        w = a_k / jnp.clip(b_prev_mod, _TINY, None)
         b_k_mod = b_k - w * c_prev_k
         rhs_k_mod = rhs_k + w * rhs_prev_mod
         return (b_k_mod, rhs_k_mod), (b_k_mod, rhs_k_mod)
@@ -120,12 +122,12 @@ def implicit_vertical_diffusion(
 
     # --- Back substitution: scan from bottom to top ---
     # phi[nlev-1] = d'[nlev-1] / b'[nlev-1]
-    phi_bottom = rhs_mod[-1] / jnp.clip(b_mod[-1], 1e-30, None)
+    phi_bottom = rhs_mod[-1] / jnp.clip(b_mod[-1], _TINY, None)
 
     # phi[k] = (d'[k] + c[k] * phi[k+1]) / b'[k]
     def back_step(phi_below, inputs):
         b_k, c_k, rhs_k = inputs
-        phi_k = (rhs_k + c_k * phi_below) / jnp.clip(b_k, 1e-30, None)
+        phi_k = (rhs_k + c_k * phi_below) / jnp.clip(b_k, _TINY, None)
         return phi_k, phi_k
 
     _, phi_upper_rev = jax.lax.scan(

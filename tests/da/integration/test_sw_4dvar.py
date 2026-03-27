@@ -101,7 +101,7 @@ class TestSWTwinExperiment:
         config = IncrementalConfig(
             n_outer=2, n_inner=30, inner_gtol=1e-5,
             inner_method="lbfgs", use_preconditioning=False,
-            checkpoint_every=1,
+            checkpoint=True,
         )
 
         analysis, diag = incremental_4dvar(

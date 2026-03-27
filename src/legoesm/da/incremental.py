@@ -32,7 +32,7 @@ class IncrementalConfig(NamedTuple):
     inner_gtol: float = 1e-5
     inner_method: str = "cg"       # "cg" or "lbfgs"
     use_preconditioning: bool = True
-    checkpoint_every: int = 1
+    checkpoint: bool = True
 
 
 class IncrementalDiagnostics(NamedTuple):
@@ -100,7 +100,7 @@ def incremental_4dvar(
 
         cost_fn = build_cost_fn(
             model, x_b, observations, B, control_spec,
-            template, dt, n_steps, config.checkpoint_every,
+            template, dt, n_steps, config.checkpoint,
         )
         cost_and_grad = jax.value_and_grad(cost_fn)
 

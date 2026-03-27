@@ -36,6 +36,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 
 class SoilHydraulicsConfig(NamedTuple):
     """Configuration for soil hydraulic properties."""
@@ -218,7 +220,7 @@ def _pdi_Sc(h: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     """
     Gamma_h = _pdi_Gamma(h, config)
     Gamma_h0 = _pdi_Gamma(jnp.array(config.h0_pdi), config)
-    Sc = (Gamma_h - Gamma_h0) / (1.0 - Gamma_h0 + 1e-30)
+    Sc = (Gamma_h - Gamma_h0) / (1.0 - Gamma_h0 + _TINY)
     return jnp.clip(Sc, 0.0, 1.0)
 
 
@@ -232,14 +234,14 @@ def _pdi_Snc(h: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     ha = _pdi_ha(config)
 
     # Smoothing parameter b (Iden & Durner 2014)
-    theta_range = config.theta_sat - config.theta_r + 1e-30
+    theta_range = config.theta_sat - config.theta_r + _TINY
     b1 = (config.theta_r / theta_range) ** 2
     b0 = 0.1 * jnp.log(10.0)
     b = b0 * (1.0 + 2.0 * (1.0 - jnp.exp(-b1 * config.n_vg ** 2)))
 
     h_safe = jnp.clip(h, 1e-10, h0)
     numerator = jnp.log(h0 / h_safe) - b * jnp.log(1.0 + (h_safe / ha) ** (1.0 / b))
-    denominator = jnp.log(h0 / ha) + 1e-30
+    denominator = jnp.log(h0 / ha) + _TINY
     Snc = numerator / denominator
     # Clamp: Snc=1 for h <= ha, Snc=0 at h0
     Snc = jnp.clip(Snc, 0.0, 1.0)
@@ -305,7 +307,7 @@ def pdi_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     x = jnp.log10(jnp.clip(h, 1e-10, None))
     x_crit = jnp.log10(h_crit)
     x_s = jnp.log10(1e-10)  # effectively h ~ 0
-    frac = jnp.clip((x - x_s) / (x_crit - x_s + 1e-30), 0.0, 1.0)
+    frac = jnp.clip((x - x_s) / (x_crit - x_s + _TINY), 0.0, 1.0)
     Kr_interp = 1.0 + 0.5 * (1.0 + jnp.cos(jnp.pi * frac)) * (Kr_crit - 1.0)
 
     # Use interpolated K when h < h_crit, otherwise standard capillary
@@ -406,7 +408,7 @@ def lu_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     """
     theta = lu_theta(psi, config)
     Se = jnp.clip(
-        (theta - config.theta_r) / (config.theta_sat - config.theta_r + 1e-30),
+        (theta - config.theta_r) / (config.theta_sat - config.theta_r + _TINY),
         1e-10, 1.0,
     )
     m = 1.0 - 1.0 / config.n_vg

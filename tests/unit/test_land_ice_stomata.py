@@ -12,6 +12,17 @@ from legoesm.land.carbon.stomata import (
     StomataConfig,
 )
 
+
+@pytest.fixture(autouse=True)
+def _enable_x64():
+    """Tight tolerances require float64 precision."""
+    import jax
+    orig = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", orig)
+
+
 CFG = StomataConfig(enabled=True)
 SHAPE = (4,)
 

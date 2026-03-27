@@ -14,6 +14,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 from legoesm.core.operators import global_integral, _is_distributed
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.core.state import ShallowWaterState, HydrostaticState
@@ -145,7 +147,7 @@ def fix_energy_shallow_water(
 
     KE_target = E_old - PE_new
     KE_target = jnp.maximum(KE_target, 0.0)
-    scale = jnp.where(KE_new > 1e-30, jnp.sqrt(KE_target / KE_new), 1.0)
+    scale = jnp.where(KE_new > _TINY, jnp.sqrt(KE_target / KE_new), 1.0)
 
     u_fixed = state_new.u.replace(data=u_new * scale)
     v_fixed = state_new.v.replace(data=v_new * scale)
@@ -369,7 +371,7 @@ def fix_moisture_hydrostatic(
     jax.Array : Moisture-conserving q_v with same shape as input.
     """
     current = compute_global_moisture(q_v, p_s, dsigma, grid)
-    scale = jnp.where(current > 1e-30, target_moisture / current, 1.0)
+    scale = jnp.where(current > _TINY, target_moisture / current, 1.0)
     return q_v * scale
 
 
@@ -406,7 +408,7 @@ def fix_total_water(
     """
     total_q = sum(tracers[n] for n in water_names if n in tracers)
     current = compute_global_moisture(total_q, p_s, dsigma, grid)
-    scale = jnp.where(current > 1e-30, target_total_water / current, 1.0)
+    scale = jnp.where(current > _TINY, target_total_water / current, 1.0)
 
     result = dict(tracers)
     for name in water_names:
@@ -773,6 +775,6 @@ def fix_energy_mpas(state, target_energy, mesh, g=9.80616):
     PE = jnp.sum(0.5 * g * (h + h_s) ** 2 * area)
 
     KE_target = jnp.maximum(target_energy - PE, 0.0)
-    scale = jnp.where(KE > 1e-30, jnp.sqrt(KE_target / KE), 1.0)
+    scale = jnp.where(KE > _TINY, jnp.sqrt(KE_target / KE), 1.0)
     u_fixed = state.u.replace(data=u * scale)
     return state._replace(u=u_fixed)

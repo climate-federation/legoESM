@@ -37,6 +37,8 @@ from typing import Callable, NamedTuple
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 from legoesm import constants
 
 
@@ -123,7 +125,7 @@ def create_sigma_coordinate(
     dsigma = sigma_half[1:] - sigma_half[:-1]
 
     # Precompute constants for geopotential (avoids log calls in hot loop)
-    sigma_half_safe = jnp.clip(sigma_half, 1e-30, None)
+    sigma_half_safe = jnp.clip(sigma_half, _TINY, None)
     ln_ratio = jnp.log(sigma_half_safe[1:] / sigma_half_safe[:-1])  # (n_levels,)
     # Exact Simmons-Burridge (1981) alpha coefficient:
     #   α_k = 1 - (σ_{k-1/2} / Δσ_k) * ln(σ_{k+1/2} / σ_{k-1/2})

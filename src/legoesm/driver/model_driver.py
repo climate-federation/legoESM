@@ -972,7 +972,7 @@ class ModelDriver:
 
         # Compute fixed moisture target for conservation fixer
         from legoesm.core.conservation import compute_global_moisture
-        _target_moisture = jnp.float32(0.0)
+        _target_moisture = jnp.asarray(0.0)
         if cfg.fix_moisture:
             _target_moisture = compute_global_moisture(
                 self.q_v, self.state.p_s.data, dsigma, self.grid,

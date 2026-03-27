@@ -43,6 +43,8 @@ from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+_EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
+
 
 def _compute_tapered_slopes(
     rho: jnp.ndarray,
@@ -60,7 +62,7 @@ def _compute_tapered_slopes(
     taper : (6, n, n, nlev-1)
         Taper factor in [0, 1].
     """
-    eps = 1e-12
+    eps = _EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 
     # Horizontal density gradients at full levels
@@ -119,7 +121,7 @@ def _tracer_tendency_gm_redi(
     S_x, S_y : (6, n, n, nlev-1)
         Tapered isopycnal slopes at interfaces.
     """
-    eps = 1e-12
+    eps = _EPS
     nlev = q.shape[-1]
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 

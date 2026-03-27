@@ -23,6 +23,8 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 
 def thomas_solve(
     a: jax.Array,
@@ -65,14 +67,14 @@ def thomas_solve(
 
         # For k=0, a[0]=0 so m=0; c_star=c/b, d_star=d/b
         m = jnp.where(k > 0, ak / (bk - ak * c_prev), 0.0)
-        c_star = ck / (bk - ak * c_prev + 1e-30)
-        d_star = (dk - ak * d_prev) / (bk - ak * c_prev + 1e-30)
+        c_star = ck / (bk - ak * c_prev + _TINY)
+        d_star = (dk - ak * d_prev) / (bk - ak * c_prev + _TINY)
 
         return (c_star, d_star), (c_star, d_star)
 
     # Initialize: for k=0, c_star = c[0]/b[0], d_star = d[0]/b[0]
-    c0_star = c[..., 0] / (b[..., 0] + 1e-30)
-    d0_star = d[..., 0] / (b[..., 0] + 1e-30)
+    c0_star = c[..., 0] / (b[..., 0] + _TINY)
+    d0_star = d[..., 0] / (b[..., 0] + _TINY)
 
     # We'll do the sweep manually with lax.scan over k=1..n-1
     # But lax.scan needs fixed-size arrays. Instead, build vectorized.
@@ -95,7 +97,7 @@ def thomas_solve(
         d_prev = d_star_c[..., k - 1]
 
         denom = bk - ak * c_prev
-        denom = jnp.where(jnp.abs(denom) < 1e-30, 1e-30, denom)
+        denom = jnp.where(jnp.abs(denom) < _TINY, _TINY, denom)
 
         c_star_k = ck / denom
         d_star_k = (dk - ak * d_prev) / denom

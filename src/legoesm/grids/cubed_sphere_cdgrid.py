@@ -27,6 +27,9 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+_EPS = float(jnp.finfo(jnp.float32).eps)    # Float32 machine epsilon (~1.19e-7)
+
 from legoesm.grids.cubed_sphere import (
     CubedSphereGrid,
     _face_to_cartesian,
@@ -221,7 +224,7 @@ def create_cubed_sphere_cdgrid(
         cz = pz_ext[1:-1, 1:-1]
         dot_i = ti_x * cx + ti_y * cy + ti_z * cz
         ti_x -= dot_i * cx; ti_y -= dot_i * cy; ti_z -= dot_i * cz
-        norm_i = jnp.sqrt(ti_x**2 + ti_y**2 + ti_z**2 + 1e-30)
+        norm_i = jnp.sqrt(ti_x**2 + ti_y**2 + ti_z**2 + _TINY)
         ti_x /= norm_i; ti_y /= norm_i; ti_z /= norm_i
 
         # Grid angle = angle between i-tangent and geographic east
@@ -358,7 +361,7 @@ def create_cubed_sphere_cdgrid(
         ti_x = ti_x - dot_i * cx
         ti_y = ti_y - dot_i * cy
         ti_z = ti_z - dot_i * cz
-        norm_i = jnp.sqrt(ti_x**2 + ti_y**2 + ti_z**2 + 1e-30)
+        norm_i = jnp.sqrt(ti_x**2 + ti_y**2 + ti_z**2 + _TINY)
         ti_x /= norm_i; ti_y /= norm_i; ti_z /= norm_i
 
         # j-tangent: centred diff in axis-1 → (n+1, n+1)
@@ -369,7 +372,7 @@ def create_cubed_sphere_cdgrid(
         tj_x = tj_x - dot_j * cx
         tj_y = tj_y - dot_j * cy
         tj_z = tj_z - dot_j * cz
-        norm_j = jnp.sqrt(tj_x**2 + tj_y**2 + tj_z**2 + 1e-30)
+        norm_j = jnp.sqrt(tj_x**2 + tj_y**2 + tj_z**2 + _TINY)
         tj_x /= norm_j; tj_y /= norm_j; tj_z /= norm_j
 
         # cosa = dot(t_i, t_j)
@@ -377,14 +380,14 @@ def create_cubed_sphere_cdgrid(
         all_cosa_c.append(cosa_face)
 
     cosa_corner = jnp.stack(all_cosa_c, axis=0)
-    sina_corner = jnp.sqrt(jnp.maximum(1.0 - cosa_corner**2, 1e-12))
-    rsin2_corner = 1.0 / jnp.maximum(sina_corner**2, 1e-12)
+    sina_corner = jnp.sqrt(jnp.maximum(1.0 - cosa_corner**2, _EPS))
+    rsin2_corner = 1.0 / jnp.maximum(sina_corner**2, _EPS)
 
     # Average to C-grid positions
     cosa_u = 0.5 * (cosa_corner[:, :, :-1] + cosa_corner[:, :, 1:])  # (6, n+1, n)
     cosa_v = 0.5 * (cosa_corner[:, :-1, :] + cosa_corner[:, 1:, :])  # (6, n, n+1)
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, 1e-12))
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, 1e-12))
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
+    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
     rsin_u = 1.0 / sina_u
     rsin_v = 1.0 / sina_v
 
@@ -406,7 +409,7 @@ def create_cubed_sphere_cdgrid(
     mx_y = 0.5 * (yc[:, :-1, :] + yc[:, 1:, :])
     mx_z = 0.5 * (zc[:, :-1, :] + zc[:, 1:, :])
     # Re-project onto sphere
-    mx_norm = jnp.sqrt(mx_x**2 + mx_y**2 + mx_z**2 + 1e-30)
+    mx_norm = jnp.sqrt(mx_x**2 + mx_y**2 + mx_z**2 + _TINY)
     mx_x /= mx_norm; mx_y /= mx_norm; mx_z /= mx_norm
     lat_edge_x = jnp.arcsin(jnp.clip(mx_z, -1.0, 1.0))
     lon_edge_x = jnp.arctan2(mx_y, mx_x)
@@ -415,7 +418,7 @@ def create_cubed_sphere_cdgrid(
     my_x = 0.5 * (xc[:, :, :-1] + xc[:, :, 1:])
     my_y = 0.5 * (yc[:, :, :-1] + yc[:, :, 1:])
     my_z = 0.5 * (zc[:, :, :-1] + zc[:, :, 1:])
-    my_norm = jnp.sqrt(my_x**2 + my_y**2 + my_z**2 + 1e-30)
+    my_norm = jnp.sqrt(my_x**2 + my_y**2 + my_z**2 + _TINY)
     my_x /= my_norm; my_y /= my_norm; my_z /= my_norm
     lat_edge_y = jnp.arcsin(jnp.clip(my_z, -1.0, 1.0))
     lon_edge_y = jnp.arctan2(my_y, my_x)
@@ -466,7 +469,7 @@ def create_cubed_sphere_cdgrid(
         ti_xe = ti_xe - dot_ie * mx_x[face]
         ti_ye = ti_ye - dot_ie * mx_y[face]
         ti_ze = ti_ze - dot_ie * mx_z[face]
-        norm_ie = jnp.sqrt(ti_xe**2 + ti_ye**2 + ti_ze**2 + 1e-30)
+        norm_ie = jnp.sqrt(ti_xe**2 + ti_ye**2 + ti_ze**2 + _TINY)
         ti_xe /= norm_ie; ti_ye /= norm_ie; ti_ze /= norm_ie
 
         # Grid angle: angle between i-tangent and geographic east
@@ -521,7 +524,7 @@ def create_cubed_sphere_cdgrid(
         ti_ey_x = ti_ey_x - dot_jey * my_x[face]
         ti_ey_y = ti_ey_y - dot_jey * my_y[face]
         ti_ey_z = ti_ey_z - dot_jey * my_z[face]
-        norm_jey = jnp.sqrt(ti_ey_x**2 + ti_ey_y**2 + ti_ey_z**2 + 1e-30)
+        norm_jey = jnp.sqrt(ti_ey_x**2 + ti_ey_y**2 + ti_ey_z**2 + _TINY)
         ti_ey_x /= norm_jey; ti_ey_y /= norm_jey; ti_ey_z /= norm_jey
 
         sin_lon_ey = jnp.sin(lon_edge_y[face])
@@ -560,8 +563,8 @@ def create_cubed_sphere_cdgrid(
 
     # Cell-centre non-orthogonality metrics
     cosa_cell = jnp.stack(all_cosa_cell_list, axis=0)  # (6, n, n)
-    sina_cell = jnp.sqrt(jnp.maximum(1.0 - cosa_cell**2, 1e-12))
-    rsin2_cell = 1.0 / jnp.maximum(sina_cell**2, 1e-12)
+    sina_cell = jnp.sqrt(jnp.maximum(1.0 - cosa_cell**2, _EPS))
+    rsin2_cell = 1.0 / jnp.maximum(sina_cell**2, _EPS)
 
     # ------------------------------------------------------------------
     # Precompute Arakawa-Lamb gradient transformation matrix.

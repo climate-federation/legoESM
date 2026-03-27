@@ -131,10 +131,15 @@ class DiffusionB:
         return self.sigma * smoothed
 
     def inv_multiply(self, x: jax.Array) -> jax.Array:
-        """Apply B^{-1} to control vector x. Differentiable.
+        """Apply approximate B^{-1} to control vector x. Differentiable.
 
         B^{-1} = Sigma^{-1} @ C^{-1} @ Sigma^{-1}.
-        C^{-1} is approximated by applying the forward diffusion operator.
+        C^{-1} is approximated by reversing the diffusion smoothing
+        (subtracting rather than adding the relaxation). This is a
+        first-order approximation that is accurate for small kappa but
+        degrades for large length scales or many iterations.  The
+        approximation is sufficient for preconditioning but should not
+        be relied upon for exact inverse operations.
         """
         # First divide by sigma
         x_scaled = x / self.sigma
@@ -293,6 +298,17 @@ class HybridB:
         return static_part + ens_part
 
     def inv_multiply(self, x: jax.Array) -> jax.Array:
-        """Apply B^{-1} x (approximate via static component only)."""
-        # Full hybrid inverse is expensive; use static B^{-1} as approximation
+        """Apply approximate B^{-1} x using static component only.
+
+        The full hybrid inverse (B_static + B_ensemble)^{-1} requires
+        a Sherman-Morrison-Woodbury solve per evaluation, which is
+        expensive.  This approximation uses B_static^{-1} / beta_s
+        instead.  It is adequate when:
+        - beta_static is close to 1 (ensemble weight is small), or
+        - the ensemble subspace is nearly orthogonal to x.
+
+        It degrades when beta_ensemble is large and x projects strongly
+        onto the ensemble subspace.  For preconditioning the inner loop
+        this is usually acceptable.
+        """
         return self.static_B.inv_multiply(x) / self.beta_s

@@ -20,6 +20,8 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
+_EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
+
 
 def prognostic_spectral_gwd(
     u: jax.Array,
@@ -123,7 +125,7 @@ def prognostic_spectral_gwd(
         config.breaking_threshold * rho_4d * intrinsic_abs ** 3
         / (jnp.clip(N_4d, 1e-6, None) * wavelength[None, None, :, None])
     )  # (ncol, n_az, n_wn, nlev)
-    tau_sat = jnp.clip(tau_sat, 1e-12, None)
+    tau_sat = jnp.clip(tau_sat, _EPS, None)
 
     # Scan from surface (level -1) to top (level 0)
     # Flatten spectral dims for scan: (ncol * n_az * n_wn,)

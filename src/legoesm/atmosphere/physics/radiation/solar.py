@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 from legoesm import constants
 
 
@@ -123,7 +125,7 @@ def daily_mean_insolation(
 
     # Sunset hour angle
     # cos(h_s) = -tan(lat) * tan(delta), clipped for polar day/night
-    cos_hs = jnp.clip(-sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, 1e-30, None), -1.0, 1.0)
+    cos_hs = jnp.clip(-sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, _TINY, None), -1.0, 1.0)
     h_s = jnp.arccos(cos_hs)
 
     # Daily-mean insolation

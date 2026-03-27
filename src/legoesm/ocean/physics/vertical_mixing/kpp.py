@@ -39,6 +39,8 @@ from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+_EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
+
 
 def _boundary_layer_depth(
     rho: jnp.ndarray,
@@ -58,7 +60,7 @@ def _boundary_layer_depth(
 
     Returns shape (...) boundary layer depth [m, positive downward].
     """
-    eps = 1e-12
+    eps = _EPS
     nlev = rho.shape[-1]
 
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
@@ -145,7 +147,7 @@ def kpp_vertical_mixing(
     -------
     VerticalMixingOutput
     """
-    eps = 1e-12
+    eps = _EPS
     nlev = u.shape[-1]
 
     # --- Friction velocity ---

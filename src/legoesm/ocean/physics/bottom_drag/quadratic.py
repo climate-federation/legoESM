@@ -8,6 +8,8 @@ from legoesm.ocean.physics.bottom_drag.config import QuadraticDragConfig
 from legoesm.ocean.physics.bottom_drag.output import BottomDragOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
+_EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
+
 
 def quadratic_bottom_drag(
     u: jnp.ndarray,
@@ -29,7 +31,7 @@ def quadratic_bottom_drag(
     -------
     BottomDragOutput
     """
-    eps = 1e-12
+    eps = _EPS
 
     # Bottom layer thickness
     dz_bottom = z_coord.dz_ref[-1] * jacobian  # (6, n, n)

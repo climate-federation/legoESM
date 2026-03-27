@@ -29,6 +29,8 @@ import warnings
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 from legoesm.core.field import Field
 from legoesm.core.operators import _is_distributed
 from legoesm.grids.gaussian import (
@@ -274,7 +276,7 @@ def spectral_ocean_tendencies(
     # semi-implicit Helmholtz solve would be needed to include g*eta.
     weights = grid.weights[:, jnp.newaxis, jnp.newaxis]  # (n_lat, 1, 1)
     ocean_area = jnp.sum(mask[..., jnp.newaxis] * weights, axis=(0, 1), keepdims=True)
-    ocean_area = jnp.maximum(ocean_area, 1e-30)
+    ocean_area = jnp.maximum(ocean_area, _TINY)
     p_prime_mean = jnp.sum(
         p_prime * mask_3d * weights, axis=(0, 1), keepdims=True,
     ) / ocean_area

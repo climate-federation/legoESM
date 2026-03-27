@@ -30,8 +30,8 @@ from legoesm.core.operators_latlon import (
     curl_z, divergence, gradient_x, gradient_y, hyperdiffusion,
 )
 from legoesm.core.conservation import (
-    apply_conservation_fixer_latlon,
-    zero_mean_tendency_latlon,
+    apply_conservation_fixer,
+    zero_mean_tendency,
 )
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.polar_filter import compute_polar_filter_mask, fourier_filter
@@ -84,7 +84,7 @@ def fv_shallow_water_tendencies_latlon(
     hu = h.replace(data=h.data * u.data)
     hv = h.replace(data=h.data * v.data)
     dh_dt_data = -divergence(hu, hv, grid).data
-    dh_dt_data = zero_mean_tendency_latlon(dh_dt_data, grid)
+    dh_dt_data = zero_mean_tendency(dh_dt_data, grid)
 
     # --- Relative vorticity ---
     zeta = curl_z(u, v, grid).data
@@ -197,7 +197,7 @@ class FVShallowWaterLatLonModel(IntegrationMixin):
 
         # Apply conservation fixers
         if self.config.use_conservation_fixer:
-            state_new = apply_conservation_fixer_latlon(
+            state_new = apply_conservation_fixer(
                 state_new, state, self.grid,
                 fix_mass=self.config.fix_mass,
                 fix_energy=self.config.fix_energy,

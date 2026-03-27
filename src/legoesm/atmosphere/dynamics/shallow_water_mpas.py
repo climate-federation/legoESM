@@ -26,6 +26,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 from legoesm.core.field import Field
 from legoesm.core.state import MPASShallowWaterState, MPASShallowWaterTendencies
 from legoesm.core.operators_voronoi import (
@@ -235,7 +237,7 @@ def _fix_energy_mpas(state_new, state_old, mesh, g):
     PE_new = jnp.sum(0.5 * g * (h_new + state_new.h_s.data) ** 2 * area)
 
     KE_target = jnp.maximum(E_old - PE_new, 0.0)
-    scale = jnp.where(KE_new > 1e-30, jnp.sqrt(KE_target / KE_new), 1.0)
+    scale = jnp.where(KE_new > _TINY, jnp.sqrt(KE_target / KE_new), 1.0)
 
     u_fixed = state_new.u.replace(data=u_new * scale)
     return state_new._replace(u=u_fixed)

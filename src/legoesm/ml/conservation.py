@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+
 from legoesm.grids.gaussian import GaussianGrid
 
 
@@ -102,7 +104,7 @@ def correct_moisture(
     global_new = jnp.sum(col_new * w)
 
     # Proportional correction factor
-    ratio = global_old / jnp.maximum(global_new, 1e-30)
+    ratio = global_old / jnp.maximum(global_new, _TINY)
 
     return q_new * ratio
 
