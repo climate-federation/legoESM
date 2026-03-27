@@ -14,20 +14,21 @@
 
 """Commonly used physical constants.
 
-Values are aligned with legoesm.constants to ensure consistent heating rates
-and column density calculations between RRTMGP and the host model.
+Thermodynamic constants are imported from the central ``legoesm.constants``
+module to guarantee consistency in heating rates and column density
+calculations between RRTMGP and the host model.
 """
 
-# Use the same values as legoesm.constants for consistency in heating rate
-# computation (g/c_pd) and column density (dp/g). The original swirl_jatmos
-# values were G=9.81, R_D=286.69 which differ by ~0.1% and cause a small
-# but unnecessary inconsistency in radiation-dynamics coupling.
-G = 9.80616  # Gravitational acceleration [m/s^2].
-R_D = 287.05  # The gas constant for dry air [J/kg/K].
-R_V = 461.51  # The gas constant for water vapor [J/kg/K].
-CP_D = 1004.64  # Constant-pressure heat capacity of dry air [J/kg/K].
-CV_D = 717.56  # Constant-volume heat capacity of dry air [J/kg/K].
-CP_V = 1846.0  # Constant-pressure specific heat of water vapor [J/kg/K].
+from legoesm.constants import (
+    g as G,
+    R_d as R_D,
+    R_v as R_V,
+    c_pd as CP_D,
+    c_vd as CV_D,
+    c_pv as CP_V,
+)
+
+# Molecular constants specific to RRTMGP spectral calculations.
 DRY_AIR_MOL_MASS = 0.0289647  # The molecular mass of dry air (kg/mol).
 WATER_MOL_MASS = 0.0180153  # The molecular mass of water (kg/mol).
 AVOGADRO = 6.022e23  # Avogadro's number.

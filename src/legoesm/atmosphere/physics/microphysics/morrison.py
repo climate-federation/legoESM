@@ -19,21 +19,13 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice as _saturation_mixing_ratio_ice
 from legoesm.atmosphere.physics.microphysics.config import MorrisonConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
     sedimentation_tendency,
 )
-
-
-def _saturation_mixing_ratio_ice(T, p):
-    """Ice saturation mixing ratio (Clausius-Clapeyron over ice)."""
-    e_sat_i = 611.2 * jnp.exp(
-        constants.L_s / constants.R_v * (1.0 / constants.T_freeze - 1.0 / T)
-    )
-    return constants.epsilon * e_sat_i / jnp.clip(p - e_sat_i, 1.0)
 
 
 def morrison_microphysics(

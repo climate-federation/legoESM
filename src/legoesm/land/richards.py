@@ -24,6 +24,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.land.soil_grid import SoilGrid
 from legoesm.land.soil_hydraulics import (
     SoilHydraulicsConfig,
@@ -193,9 +194,8 @@ def solve_richards(
         runoff_subsurface = jnp.zeros(ncol)
 
     # Convert runoff from m/s of water to kg/m2/s
-    rho_w = 1000.0
-    runoff_surface_kgm2s = runoff_surface * rho_w
-    runoff_subsurface_kgm2s = runoff_subsurface * rho_w
+    runoff_surface_kgm2s = runoff_surface * constants.rho_water
+    runoff_subsurface_kgm2s = runoff_subsurface * constants.rho_water
 
     return RichardsOutput(
         psi_new=psi_final,

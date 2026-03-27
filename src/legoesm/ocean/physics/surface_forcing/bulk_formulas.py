@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
 from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
@@ -27,7 +28,7 @@ def _saturation_specific_humidity(T_K: jnp.ndarray) -> jnp.ndarray:
     T_C = T_K - 273.15
     e_s = 611.2 * jnp.exp(17.67 * T_C / (T_C + 243.5))
     p_atm = 101325.0  # Standard atmosphere [Pa]
-    return 0.622 * e_s / (p_atm - 0.378 * e_s)
+    return constants.epsilon * e_s / (p_atm - (1.0 - constants.epsilon) * e_s)
 
 
 def bulk_formula_surface_forcing(
@@ -61,9 +62,8 @@ def bulk_formula_surface_forcing(
     q_sat = _saturation_specific_humidity(T_s)
 
     # Upward longwave: Q_lw_up = epsilon * sigma * T_s^4
-    sigma_sb = 5.67e-8
     emissivity = 0.97
-    Q_lw_up = emissivity * sigma_sb * T_s ** 4
+    Q_lw_up = emissivity * constants.sigma_sb * T_s ** 4
 
     if cfg.bulk_scheme in ("coare3", "large_yeager"):
         from legoesm.coupler.bulk_flux import compute_most_fluxes

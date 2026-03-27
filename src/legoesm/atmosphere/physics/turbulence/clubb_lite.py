@@ -46,6 +46,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio as _q_sat
 from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -55,17 +56,6 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
 )
-
-
-# ---------------------------------------------------------------------------
-# Helper: saturation mixing ratio (inline to avoid circular import)
-# ---------------------------------------------------------------------------
-
-def _q_sat(T: jax.Array, p: jax.Array) -> jax.Array:
-    """Saturation mixing ratio from Tetens formula."""
-    e_sat = 611.2 * jnp.exp(17.67 * (T - constants.T_freeze) /
-                             (T - constants.T_freeze + 243.5))
-    return constants.epsilon * e_sat / jnp.clip(p - e_sat, 1.0)
 
 
 def _dqsat_dT(T: jax.Array, p: jax.Array) -> jax.Array:

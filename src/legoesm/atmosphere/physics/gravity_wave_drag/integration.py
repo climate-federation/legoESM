@@ -75,24 +75,10 @@ def _get_gwd_fn(config: GravityWaveDragConfig):
         raise ValueError(f"Unknown GWD scheme: {config.scheme!r}")
 
 
-def _compute_heights_from_sigma(T, p_half):
-    """Approximate heights from hydrostatic balance."""
-    ncol, nlev = T.shape
-    dp = p_half[:, 1:] - p_half[:, :-1]
-    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    dz = constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
-    dz = jnp.abs(dz)
-    dz_rev = dz[:, ::-1]
-    z_half_cumsum = jnp.cumsum(dz_rev, axis=1)
-    z_half_inner = z_half_cumsum[:, ::-1]
-    z_half = jnp.concatenate([z_half_inner, jnp.zeros((ncol, 1))], axis=1)
-    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
-    return z_full, z_half
-
-
-def _compute_rho(T, p_full):
-    """Compute air density from ideal gas law."""
-    return p_full / (constants.R_d * jnp.clip(T, 1.0, None))
+from legoesm.atmosphere.physics._shared import (
+    compute_heights_from_sigma as _compute_heights_from_sigma,
+    compute_rho as _compute_rho,
+)
 
 
 def make_gwd_physics(

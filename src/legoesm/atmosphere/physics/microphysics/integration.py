@@ -80,19 +80,10 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
         raise ValueError(f"Unknown microphysics scheme: {config.scheme!r}")
 
 
-def _compute_heights_from_sigma(T, p_half):
-    """Approximate heights from hydrostatic balance."""
-    ncol, nlev = T.shape
-    dp = p_half[:, 1:] - p_half[:, :-1]
-    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    dz = constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0))
-    dz = jnp.abs(dz)
-    return dz
-
-
-def _compute_rho(T, p_full):
-    """Compute air density from ideal gas law."""
-    return p_full / (constants.R_d * jnp.clip(T, 1.0))
+from legoesm.atmosphere.physics._shared import (
+    compute_layer_dz as _compute_heights_from_sigma,
+    compute_rho as _compute_rho,
+)
 
 
 def make_microphysics_physics(

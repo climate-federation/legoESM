@@ -14,11 +14,10 @@
 
 """Central place for all the constants and common keys in the optics library."""
 
+from legoesm.constants import sigma_sb as STEFAN_BOLTZMANN
+
 DRY_AIR_INDEX = 0
 DRY_AIR_KEY = 'dry_air'
 # Volume mixing ratio (VMR) of dry air is always 1 by definition, as VMR is
 # normalized by the number of moles of dry air.
 DRY_AIR_VMR = 1.0
-# Stefan-Boltzmann constant in W / (m^2 K^4).
-# Aligned with legoesm.constants.sigma_sb for consistency.
-STEFAN_BOLTZMANN = 5.670374419e-8

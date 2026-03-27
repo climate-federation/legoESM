@@ -32,6 +32,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
 from legoesm.core.precision import get_policy
 
 
@@ -383,7 +384,7 @@ def _laplacian_smooth_voronoi(
 
 def _haversine_km(lat1_deg, lon1_deg, lat2_deg, lon2_deg):
     """Great-circle distance in km between two points (degrees)."""
-    R = 6371.0  # Earth radius [km]
+    R = constants.R_earth * 1e-3  # Earth radius [km]
     lat1, lon1 = np.radians(lat1_deg), np.radians(lon1_deg)
     lat2, lon2 = np.radians(lat2_deg), np.radians(lon2_deg)
     dlat = lat2 - lat1
@@ -727,9 +728,8 @@ def load_bathymetry_mpas(
 
     # Estimate grid spacing from mean cell area
     mean_area = float(np.mean(np.asarray(mesh.areaCell)))
-    R_earth = 6371.0e3  # [m]
     grid_spacing_m = np.sqrt(mean_area)
-    grid_spacing_deg = grid_spacing_m / R_earth * 180.0 / np.pi
+    grid_spacing_deg = grid_spacing_m / constants.R_earth * 180.0 / np.pi
 
     depth, ocean_mask = load_bathymetry(
         lat_deg, lon_deg, cfg, grid_spacing_deg=grid_spacing_deg,

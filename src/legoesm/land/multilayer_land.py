@@ -165,7 +165,7 @@ def step_multilayer_land(
 
     # --- Infiltration flux for Richards equation ---
     # Convert precip (kg/m2/s) and evap (kg/m2/s) to water depth rate (m/s)
-    rho_w = 1000.0
+    rho_w = constants.rho_water
     evap_rate = lhflx / constants.L_v  # kg/m2/s, positive up
 
     # --- Root water uptake sink term ---

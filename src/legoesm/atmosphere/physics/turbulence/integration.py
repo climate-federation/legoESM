@@ -82,38 +82,10 @@ def _get_turbulence_fn(config: TurbulenceConfig):
         raise ValueError(f"Unknown turbulence scheme: {config.scheme!r}")
 
 
-def _compute_heights_from_sigma(T, p_half):
-    """Approximate heights from hydrostatic balance.
-
-    z[k] ≈ R_d * T[k] / g * ln(p_half[k+1] / p_half[k])
-    integrated from the surface upward.
-    """
-    ncol, nlev = T.shape
-
-    # Layer thickness from hydrostatic balance: dz = R_d * T * dp / (g * p)
-    dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
-    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
-    dz = constants.R_d * T * dp / (constants.g * jnp.clip(p_mid, 1.0, None))
-    dz = jnp.abs(dz)
-
-    # Integrate from surface upward to get z at half-levels
-    # z_half[-1] = 0 (surface), z_half[-2] = dz[-1], etc.
-    dz_rev = dz[:, ::-1]  # surface first
-    z_half_cumsum = jnp.cumsum(dz_rev, axis=1)  # (ncol, nlev)
-    z_half_inner = z_half_cumsum[:, ::-1]  # top first
-
-    # z_half: (ncol, nlev+1)
-    z_half = jnp.concatenate([z_half_inner, jnp.zeros((ncol, 1))], axis=1)
-
-    # z_full at cell centers
-    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
-
-    return z_full, z_half
-
-
-def _compute_rho(T, p_full):
-    """Compute air density from ideal gas law: rho = p / (R_d * T)."""
-    return p_full / (constants.R_d * jnp.clip(T, 1.0, None))
+from legoesm.atmosphere.physics._shared import (
+    compute_heights_from_sigma as _compute_heights_from_sigma,
+    compute_rho as _compute_rho,
+)
 
 
 def make_turbulence_physics(
