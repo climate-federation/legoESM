@@ -14,6 +14,14 @@
 - The canonical parallel entry point is `ParallelRuntime.create()`.
 - The codebase supports cubed-sphere, lat-lon, Gaussian/spectral, Voronoi/MPAS, and icosahedral pathways.
 
+## Training Infrastructure (`src/legoesm/training/`)
+- **Three training modes**: physics parameter tuning, neural GCM, SFNO coupled to dycore.
+- All modes use `build_segment_fn(...).raw` (non-JIT, non-donating) inside `eqx.filter_value_and_grad` for AD compatibility.
+- `SegmentForcing` is an explicit argument to `run_segment`, not closure-captured — prevents recompilation when forcing changes.
+- `TrainablePhysicsParams` wraps 8 physics parameters as an Equinox module with sigmoid constraints.
+- ERA5 data: `era5_to_state.py` handles lat-lon → model grid conversion with local Zarr cache.
+- Losses: `training/losses.py` imports from `ml/loss.py` — never duplicate loss functions.
+
 ## Operating Mode
 - For any nontrivial task, start with a short plan before editing.
 - Read nearby implementation and tests before proposing or making changes.
@@ -29,10 +37,13 @@
 - Prefer `jax.lax.scan` for time integration and structured loops.
 - Prefer `jax.vmap` or batched array expressions over Python loops on array dimensions.
 - Use `jnp.where`, `jax.lax.cond`, `jax.lax.fori_loop`, or `scan` instead of Python control flow on traced values.
+- **But**: for on/off feature gating (e.g., `fix_mass`, `fix_moisture`), use Python `if` on a static bool captured in the closure — NOT `jnp.where`, which traces both branches and wastes compute. `jnp.where` is for data-dependent selection on traced values only.
 - Preserve stable shapes and avoid unnecessary retracing.
 - Be explicit about dtype behavior. Spectral solvers expect x64 and complex128; finite-volume pathways may intentionally run in float32.
 - Avoid host/device thrash, unnecessary materialization, or ad hoc NumPy fallbacks inside traced code.
 - Do not introduce hidden non-JAX side effects that break JIT, grad, checkpointing, or sharding.
+- **Buffer donation and `jax.grad`**: `@jax.jit(donate_argnums=...)` frees input buffers after the call. This conflicts with reverse-mode AD, which needs inputs for the backward pass. When a JIT-compiled function will be called inside `jax.grad` or `eqx.filter_value_and_grad`, provide a non-donating variant (e.g., `.raw` attribute) and use that for training. See `build_segment_fn` for the pattern.
+- **Closures vs explicit args for JIT reuse**: values captured in a Python closure become compile-time constants. If a value changes every iteration (e.g., SST, solar forcing), pass it as an explicit traced argument — not a closure capture — so the compiled kernel is reused. See `SegmentForcing` for the pattern.
 
 ## Earth System Modeling Rules
 - Treat conservation, metric consistency, staggered-grid consistency, and halo correctness as first-class requirements.
@@ -82,6 +93,33 @@
 - Do not add deprecated backward-compatibility wrappers. If an API changes, update call sites directly.
 - Grid-specific variants are legitimate when they have genuinely different numerics. Copy-paste with only indexing changes is forbidden — factor shared logic into a common function.
 - Run the slopbuster agent (`/slopbuster audit all` or `/slopbuster review`) periodically, especially before releases.
+
+## Common Mistakes to Avoid
+These are recurring mistakes caught by slopbuster. Check for them before submitting code:
+
+### NamedTuple field names
+- When accessing NamedTuple fields, **verify the actual field name** — not what you think it should be. Example: `PhysicsOutput` has `precip`, not `precipitation`. A `hasattr` guard silently degrades to a fallback instead of catching the typo.
+- When adding fields to a NamedTuple (e.g., `SegmentCarry`), **update every call site** that constructs the NamedTuple. Search with `grep -rn "SegmentCarry(" --include="*.py"` for all constructors. Missing a field causes a runtime error, but tests in other files may not run until CI catches it.
+
+### Reuse before writing
+- **Column integrals**: use `diagnostics.column_integrals.column_water_vapor()` — do not inline `jnp.sum(q * p_s * dsigma) / g`.
+- **Loss functions**: import from `ml/loss.py` (`area_weighted_mse`, `spectral_loss`, `per_variable_mse`) — do not reimplement.
+- **Optimizer setup**: use `ml/training.create_optimizer()` for warmup + cosine decay + grad clipping — do not inline bare `optax.adam()` without schedule.
+- **SFNO model**: import from `ml/sfno.py` — do not create new neural operator architectures in training code.
+- **Channel packing**: import from `ml/channel_packing.py` (`PE3DChannelSpec`, `pack_pe_state`, `unpack_pe_output`) — do not reimplement state↔tensor conversion.
+
+### JIT and compilation
+- **Never build closures inside training loops**: `build_segment_fn` creates a new function object each call. If called inside a `for epoch` loop or inside `_loss_fn`, it causes JIT recompilation every iteration. Build once outside the loop; pass changing values as explicit arguments.
+- **Helper functions inside `lax.scan` bodies**: Python function definitions inside `_single_step` (the scan body) are recreated every trace. Move helpers (e.g., `_match_dtype`) to module scope.
+- **Dead code from iteration**: when refactoring, search for variables that were assigned but never used (e.g., building a segment function then immediately rebuilding inside a nested `_loss_fn`).
+
+### Imports
+- Do not import private (`_`-prefixed) functions from other modules. If you need internal functionality, add a public wrapper in the source module.
+- Remove unused imports before committing. Check with `grep -n "^from\|^import" <file>` and verify each is used.
+
+### SegmentCarry discipline
+- `SegmentCarry` is the canonical hot-loop state. Adding a field is a **cross-cutting change** — update: the NamedTuple definition, `pack_carry`, `unpack_carry` docstring, the per-step Python reference loop in `test_compiled_segments.py`, `test_scale_tpu_compat.py`, `test_scale_jit_health.py`, and any direct `SegmentCarry(...)` constructors in validation tests.
+- New carry fields used only for diagnostics (e.g., `max_cfl`) should be reset to zero at the start of each segment, not accumulated across segments.
 
 ## Physics Constants and Shared Functions
 - **All physical constants** (g, R_d, R_v, c_pd, L_v, T_freeze, sigma_sb, etc.) are defined in `src/legoesm/constants.py`. Never redefine these values locally — always `from legoesm import constants` or import the specific name.
