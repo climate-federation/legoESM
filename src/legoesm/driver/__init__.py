@@ -35,3 +35,4 @@ from legoesm.driver.kernel_registry import (
 )
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.model_driver import ModelDriver
+from legoesm.driver.earth_system_driver import EarthSystemDriver
