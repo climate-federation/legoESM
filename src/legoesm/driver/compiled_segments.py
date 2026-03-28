@@ -483,8 +483,8 @@ def build_segment_fn(
         return _single_step
 
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
-    def run_segment(carry: SegmentCarry, n_steps: int,
-                    forcing: SegmentForcing) -> SegmentCarry:
+    def run_segment_jit(carry: SegmentCarry, n_steps: int,
+                        forcing: SegmentForcing) -> SegmentCarry:
         """Run n_steps of the atmosphere integration as a compiled kernel.
 
         Parameters
@@ -513,7 +513,23 @@ def build_segment_fn(
         final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
         return final_carry
 
-    return run_segment
+    def run_segment(carry: SegmentCarry, n_steps: int,
+                    forcing: SegmentForcing) -> SegmentCarry:
+        """Non-JIT version for use inside jax.grad / eqx.filter_value_and_grad.
+
+        Same as run_segment_jit but without JIT wrapping or buffer
+        donation, which conflict with outer AD transforms. The outer
+        grad call handles compilation.
+        """
+        _step_fn = _make_single_step(forcing)
+        if gradient_checkpoint:
+            _step_fn = jax.checkpoint(_step_fn, prevent_cse=False)
+        final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
+        return final_carry
+
+    # Attach both variants; default is the JIT version for inference
+    run_segment_jit.raw = run_segment
+    return run_segment_jit
 
 
 def _rebuild_state(carry: SegmentCarry, model):
