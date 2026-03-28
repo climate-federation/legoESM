@@ -66,16 +66,13 @@ def _compute_cloud_path(
 def _horiz_mean(f: Array) -> Array:
   """Compute the horizontal mean of `f`.
 
-  Accumulate means in float64 to avoid potential numerical issues when
-  accumulating, but then convert back to float32.
-
   Args:
     f: The array to compute the horizontal mean of.
 
   Returns:
-    The horizontal mean of `f`.
+    The horizontal mean of `f`, preserving the input dtype.
   """
-  return jnp.mean(f, axis=(0, 1)).astype(jnp.float32)
+  return jnp.mean(f, axis=(0, 1))
 
 
 class RRTMGP:

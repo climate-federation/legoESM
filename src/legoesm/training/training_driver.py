@@ -100,10 +100,30 @@ def _training_loop(
         epoch_loss = 0.0
         t0 = time.time()
 
-        for ic, target, forcing in zip(initial_carries, target_carries, forcings):
+        for sample_idx, (ic, target, forcing) in enumerate(
+            zip(initial_carries, target_carries, forcings)
+        ):
             loss_fn = make_loss_fn(params, ic, target, forcing)
             loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
-            epoch_loss += float(loss)
+
+            # --- NaN / Inf detection (outside JIT, values are materialized) ---
+            loss_val = float(loss)
+            if jnp.isnan(loss) or jnp.isinf(loss):
+                raise RuntimeError(
+                    f"NaN/Inf loss detected at epoch {epoch}, sample {sample_idx} "
+                    f"(loss={loss_val}). "
+                    "Check CFL conditions, parameter bounds, and input data."
+                )
+            grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
+            grad_norm_val = float(grad_norm)
+            if jnp.isnan(grad_norm) or jnp.isinf(grad_norm):
+                raise RuntimeError(
+                    f"NaN/Inf gradient detected at epoch {epoch}, sample "
+                    f"{sample_idx} (grad_norm={grad_norm_val}). "
+                    "Consider reducing learning rate or adding gradient clipping."
+                )
+
+            epoch_loss += loss_val
 
             updates, opt_state = optimizer.update(
                 eqx.filter(grads, eqx.is_array),
@@ -117,7 +137,11 @@ def _training_loop(
 
         if epoch % log_every == 0 or epoch == n_epochs - 1:
             elapsed = time.time() - t0
-            msg = f"Epoch {epoch:4d}: loss={avg_loss:.6f}, time={elapsed:.1f}s"
+            # Compute gradient norm for the last sample of the epoch
+            msg = (
+                f"Epoch {epoch:4d}: loss={avg_loss:.6f}, "
+                f"grad_norm={grad_norm_val:.6e}, time={elapsed:.1f}s"
+            )
             if log_params and hasattr(params, 'as_dict'):
                 phys = params.as_dict()
                 param_str = ", ".join(f"{k}={float(v):.4f}" for k, v in phys.items())

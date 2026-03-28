@@ -175,6 +175,14 @@ def create_gaussian_grid(
     processes, consider caching grid instances or implementing lazy loading
     strategies if memory becomes a bottleneck.
     """
+    # Hard guard: spectral transforms require float64/complex128
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError(
+            "Spectral/Gaussian grids require JAX_ENABLE_X64=True. "
+            "Set the environment variable JAX_ENABLE_X64=1 or call "
+            "jax.config.update('jax_enable_x64', True) before importing."
+        )
+
     # Extract allow_unsupported from global config if provided
     if legoesm_config is not None:
         allow_unsupported_backend = bool(

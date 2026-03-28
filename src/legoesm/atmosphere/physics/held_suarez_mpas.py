@@ -25,30 +25,13 @@ from legoesm.grids.vertical import (
     pressure_from_hybrid,
 )
 from legoesm import constants
-
-# Held-Suarez parameters (Table 1)
-K_A = 1.0 / (40.0 * 86400.0)     # free atmosphere relaxation [1/s]
-K_S = 1.0 / (4.0 * 86400.0)      # surface relaxation [1/s]
-K_F = 1.0 / (1.0 * 86400.0)      # Rayleigh friction [1/s]
-SIGMA_B = 0.7
-DELTA_T_Y = 60.0                  # meridional gradient [K]
-DELTA_THETA_Z = 10.0              # vertical gradient [K]
-T_MIN = 200.0                     # minimum T_eq [K]
-P_0 = 1.0e5                      # reference pressure [Pa]
-
-
-def held_suarez_equilibrium_temperature(lat, p):
-    """Compute Held-Suarez T_eq. Works with any array shapes."""
-    kappa = constants.kappa
-    sin_lat = jnp.sin(lat)
-    cos_lat = jnp.cos(lat)
-    p_ratio = p / P_0
-    T_eq = (
-        (315.0 - DELTA_T_Y * sin_lat**2
-         - DELTA_THETA_Z * jnp.log(p_ratio) * cos_lat**2)
-        * p_ratio**kappa
-    )
-    return jnp.maximum(T_eq, T_MIN)
+from legoesm.atmosphere.physics.held_suarez import (
+    K_A,
+    K_S,
+    K_F,
+    SIGMA_B,
+    held_suarez_equilibrium_temperature,
+)
 
 
 def held_suarez_forcing_mpas(

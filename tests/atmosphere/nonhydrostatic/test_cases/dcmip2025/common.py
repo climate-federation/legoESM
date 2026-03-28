@@ -125,6 +125,53 @@ def piecewise_lapse_theta_ref(
 # Topography generators
 # ==============================================================================
 
+def schaer_mountain_profile(
+    lat: jnp.ndarray,
+    lon: jnp.ndarray,
+    radius: float,
+    h0: float = 2000.0,
+    halfwidth: float = 72.0e3,
+    lat0: float = 0.349,  # ~20 deg N
+    lon0: float = 0.0,
+) -> jnp.ndarray:
+    """Compute Schaer-type mountain topography from lat/lon arrays.
+
+    z_s = h0 * exp(-((d/halfwidth)^2))
+
+    where d is the great-circle distance from (lat0, lon0).
+    Grid-agnostic: works with any lat/lon arrays of any shape.
+
+    Parameters
+    ----------
+    lat : jnp.ndarray
+        Latitude in radians, any shape.
+    lon : jnp.ndarray
+        Longitude in radians, same shape as lat.
+    radius : float
+        Sphere radius [m].
+    h0 : float
+        Mountain peak height [m].
+    halfwidth : float
+        Mountain half-width [m] (e-folding distance).
+    lat0 : float
+        Mountain center latitude [rad].
+    lon0 : float
+        Mountain center longitude [rad].
+
+    Returns
+    -------
+    jnp.ndarray
+        Surface elevation z_s, same shape as lat.
+    """
+    dlat = lat - lat0
+    dlon = lon - lon0
+    a = (jnp.sin(dlat / 2) ** 2
+         + jnp.cos(lat) * jnp.cos(lat0) * jnp.sin(dlon / 2) ** 2)
+    angular_dist = 2.0 * jnp.arcsin(jnp.sqrt(jnp.clip(a, 0.0, 1.0)))
+    dist = angular_dist * radius
+    return h0 * jnp.exp(-(dist / halfwidth) ** 2)
+
+
 def schaer_mountain(
     grid: CubedSphereGrid,
     h0: float = 2000.0,
@@ -132,11 +179,9 @@ def schaer_mountain(
     lat0: float = 0.349,  # ~20 deg N
     lon0: float = 0.0,
 ) -> jnp.ndarray:
-    """Generate Schaer-type mountain topography.
+    """Generate Schaer-type mountain topography on a cubed-sphere grid.
 
-    z_s = h0 * exp(-((d/halfwidth)^2))
-
-    where d is the great-circle distance from (lat0, lon0).
+    Thin wrapper around :func:`schaer_mountain_profile`.
 
     Parameters
     ----------
@@ -155,19 +200,10 @@ def schaer_mountain(
     jnp.ndarray
         Surface elevation z_s, shape (6, n, n).
     """
-    # Great-circle distance
-    lat = grid.lat  # (6, n, n)
-    lon = grid.lon
-
-    # Haversine-like angular distance
-    dlat = lat - lat0
-    dlon = lon - lon0
-    a = jnp.sin(dlat / 2) ** 2 + jnp.cos(lat) * jnp.cos(lat0) * jnp.sin(dlon / 2) ** 2
-    angular_dist = 2.0 * jnp.arcsin(jnp.sqrt(jnp.clip(a, 0.0, 1.0)))
-    dist = angular_dist * grid.radius  # physical distance [m]
-
-    z_s = h0 * jnp.exp(-(dist / halfwidth) ** 2)
-    return z_s
+    return schaer_mountain_profile(
+        grid.lat, grid.lon, grid.radius,
+        h0=h0, halfwidth=halfwidth, lat0=lat0, lon0=lon0,
+    )
 
 
 def gaussian_mountain(

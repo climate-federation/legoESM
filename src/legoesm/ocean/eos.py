@@ -75,8 +75,23 @@ def wright_eos(
     Returns
     -------
     array : In-situ density [kg/m^3].
+
+    Notes
+    -----
+    Intermediate computation is promoted to float64 to avoid precision
+    loss from large polynomial coefficients (e.g., _b0 ~ 5.79e8).
+    If ``JAX_ENABLE_X64=1`` is not set, the astype calls are no-ops
+    (safe but no precision improvement).  ``jnp.astype`` is
+    differentiable in JAX.
     """
-    # Clip inputs to Wright EOS valid range [-2, 40]°C, [0, 42] PSU
+    orig_dtype = T.dtype
+
+    # Promote to float64 for intermediate polynomial evaluation
+    T = T.astype(jnp.float64)
+    S = S.astype(jnp.float64)
+    p = p.astype(jnp.float64)
+
+    # Clip inputs to Wright EOS valid range [-2, 40] degC, [0, 42] PSU
     T = jnp.clip(T, -2.0, 40.0)
     S = jnp.clip(S, 0.0, 42.0)
 
@@ -91,7 +106,9 @@ def wright_eos(
 
     # Density: rho = (p + p0) / (lambda + al0 * (p + p0))
     p_plus_p0 = p + p0
-    return p_plus_p0 / (lam + al0 * p_plus_p0)
+    rho = p_plus_p0 / (lam + al0 * p_plus_p0)
+
+    return rho.astype(orig_dtype)
 
 
 def density_perturbation(

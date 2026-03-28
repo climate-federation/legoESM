@@ -124,7 +124,7 @@ def adaptive_hyperdiff_coeff(
 
 
 def cfl_number_from_state(
-    u, v, dx_min: float, dt: float,
+    u, v, dx_min: float, dt: float, runtime=None,
 ):
     """Compute the advective CFL number from wind fields (JAX-traceable).
 
@@ -138,6 +138,13 @@ def cfl_number_from_state(
         Minimum grid spacing [m].
     dt : float
         Time step [s].
+    runtime : ParallelRuntime or None, optional
+        Parallel runtime for cross-rank global max in MPI mode.
+        In multi-device SPMD mode (no MPI), ``jnp.max`` on a sharded
+        array already produces the correct global result via XLA's
+        automatic all-reduce, so this parameter is not needed.
+        In MPI mode, pass the runtime so that the local max is
+        combined across ranks.  If None, only the local max is used.
 
     Returns
     -------
@@ -146,7 +153,16 @@ def cfl_number_from_state(
     """
     import jax.numpy as jnp
     speed = jnp.sqrt(u ** 2 + v ** 2)
-    return jnp.max(speed) * dt * jnp.sqrt(2.0) / dx_min
+    local_max_speed = jnp.max(speed)
+
+    # In MPI mode, each rank has genuinely separate data and jnp.max
+    # only sees the local shard.  Use the runtime's global_max to
+    # combine across ranks.  In single-process multi-device SPMD,
+    # jnp.max on a sharded array already inserts an XLA all-reduce.
+    if runtime is not None:
+        local_max_speed = runtime.global_max(local_max_speed)
+
+    return local_max_speed * dt * jnp.sqrt(2.0) / dx_min
 
 
 def cfl_check_and_adjust(

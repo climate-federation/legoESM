@@ -296,7 +296,7 @@ class ParallelRuntime:
             layout = make_layout(0, 1, _gn)
             mode = "multi_device"
             halo = HaloBackend.JAX_SPMD
-            reduction = ReductionBackend.LOCAL
+            reduction = ReductionBackend.JAX_PSUM
 
         elif is_mpi and n_local <= 1:
             # MPI, one device per rank
@@ -401,21 +401,97 @@ class ParallelRuntime:
     # Reduction dispatch
     # ------------------------------------------------------------------
 
+    def _mesh_axis_names(self) -> tuple[str, ...] | None:
+        """Return the device mesh axis names, or None if no mesh."""
+        if self.device_config is None:
+            return None
+        mesh = self.device_config.mesh
+        if mesh is None:
+            return None
+        return tuple(mesh.axis_names)
+
     def global_sum(self, local_value):
-        """Global sum across all ranks/devices."""
-        if self.reduction_backend in (ReductionBackend.LOCAL, ReductionBackend.JAX_PSUM):
+        """Global sum across all ranks/devices.
+
+        - LOCAL: identity (single device, jnp.sum already correct).
+        - JAX_PSUM: ``jax.lax.psum`` across the device mesh.  This is
+          needed when the caller has computed a partial sum on each
+          device shard (e.g. via ``jnp.sum`` on local data within a
+          ``shard_map`` or manual partitioning).  For standard
+          NamedSharding SPMD, ``jnp.sum`` on a sharded array already
+          inserts an XLA all-reduce, so callers doing full-array
+          ``jnp.sum`` do not need this method.
+        - MPI / HYBRID: ``allreduce(SUM)`` via mpi4jax.
+        """
+        if self.reduction_backend == ReductionBackend.LOCAL:
             return local_value
 
+        if self.reduction_backend == ReductionBackend.JAX_PSUM:
+            axis_names = self._mesh_axis_names()
+            if axis_names is not None:
+                return jax.lax.psum(local_value, axis_name=axis_names)
+            # No mesh available — fall back to identity (single device).
+            return local_value
+
+        if self.reduction_backend == ReductionBackend.HYBRID:
+            # Intra-rank psum, then inter-rank MPI allreduce.
+            axis_names = self._mesh_axis_names()
+            if axis_names is not None:
+                local_value = jax.lax.psum(local_value, axis_name=axis_names)
+            from legoesm.parallel.reductions import global_sum_mpi
+            return global_sum_mpi(local_value)
+
+        # MPI
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_value)
 
     def global_max(self, local_value):
-        """Global max across all ranks/devices."""
-        if self.reduction_backend in (ReductionBackend.LOCAL, ReductionBackend.JAX_PSUM):
+        """Global max across all ranks/devices.
+
+        Same dispatch logic as ``global_sum`` but using ``pmax``/``MPI.MAX``.
+        """
+        if self.reduction_backend == ReductionBackend.LOCAL:
             return local_value
+
+        if self.reduction_backend == ReductionBackend.JAX_PSUM:
+            axis_names = self._mesh_axis_names()
+            if axis_names is not None:
+                return jax.lax.pmax(local_value, axis_name=axis_names)
+            return local_value
+
+        if self.reduction_backend == ReductionBackend.HYBRID:
+            axis_names = self._mesh_axis_names()
+            if axis_names is not None:
+                local_value = jax.lax.pmax(local_value, axis_name=axis_names)
+            from legoesm.parallel.reductions import global_max_mpi
+            return global_max_mpi(local_value)
 
         from legoesm.parallel.reductions import global_max_mpi
         return global_max_mpi(local_value)
+
+    def global_min(self, local_value):
+        """Global min across all ranks/devices.
+
+        Same dispatch logic as ``global_sum`` but using ``pmin``/``MPI.MIN``.
+        """
+        if self.reduction_backend == ReductionBackend.LOCAL:
+            return local_value
+
+        if self.reduction_backend == ReductionBackend.JAX_PSUM:
+            axis_names = self._mesh_axis_names()
+            if axis_names is not None:
+                return jax.lax.pmin(local_value, axis_name=axis_names)
+            return local_value
+
+        if self.reduction_backend == ReductionBackend.HYBRID:
+            axis_names = self._mesh_axis_names()
+            if axis_names is not None:
+                local_value = jax.lax.pmin(local_value, axis_name=axis_names)
+            from legoesm.parallel.reductions import global_min_mpi
+            return global_min_mpi(local_value)
+
+        from legoesm.parallel.reductions import global_min_mpi
+        return global_min_mpi(local_value)
 
     # ------------------------------------------------------------------
     # Data movement

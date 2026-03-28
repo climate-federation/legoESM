@@ -131,9 +131,33 @@ class TestParallelRuntimeSerial:
         x = jnp.array(42.0)
         assert float(rt.global_sum(x)) == 42.0
 
+    def test_global_max_identity(self):
+        """In serial mode, global_max is identity."""
+        import jax.numpy as jnp
+        rt = ParallelRuntime.create(n_devices=1)
+        x = jnp.array(7.5)
+        assert float(rt.global_max(x)) == 7.5
+
+    def test_global_min_identity(self):
+        """In serial mode, global_min is identity."""
+        import jax.numpy as jnp
+        rt = ParallelRuntime.create(n_devices=1)
+        x = jnp.array(3.14)
+        assert float(rt.global_min(x)) == 3.14
+
     def test_grid_type_preserved(self):
         rt = ParallelRuntime.create(n_devices=1, grid_type="latlon")
         assert rt.grid_type == "latlon"
+
+    def test_multi_device_uses_jax_psum_backend(self):
+        """Multi-device mode must use JAX_PSUM, not LOCAL."""
+        import jax
+        n_local = len(jax.devices())
+        if n_local < 2:
+            pytest.skip("Need >= 2 devices for multi_device mode")
+        rt = ParallelRuntime.create(n_devices=n_local, grid_type="latlon")
+        assert rt.mode == "multi_device"
+        assert rt.reduction_backend == ReductionBackend.JAX_PSUM
 
 
 # -----------------------------------------------------------------------

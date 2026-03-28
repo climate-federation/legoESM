@@ -41,11 +41,20 @@ def _accumulation_dtype():
 
 
 def _global_area_sum(array: jax.Array, grid) -> jax.Array:
-    """Area-weighted global sum of a raw array, MPI-aware.
+    """Area-weighted global sum of a raw array, distributed-aware.
 
     Works on any grid with a ``.area`` attribute (CubedSphereGrid,
-    LatLonGrid, etc.).  Under MPI, local sums are combined via
-    ``allreduce(SUM)`` to produce the true global total.
+    LatLonGrid, etc.).
+
+    Execution modes:
+
+    - **Single device**: plain ``jnp.sum``.
+    - **Multi-device SPMD** (NamedSharding): ``jnp.sum`` on a
+      face-sharded array already produces the correct global sum --
+      JAX/XLA automatically inserts an all-reduce when the reduction
+      spans a sharded axis.  No explicit ``psum`` is needed.
+    - **MPI distributed**: local sums are combined via
+      ``allreduce(SUM)`` to produce the true global total.
 
     The accumulation is performed in float64 (if available) to avoid
     precision loss in large-scale global integrals.

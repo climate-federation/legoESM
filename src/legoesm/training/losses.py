@@ -96,7 +96,7 @@ def carry_mse(
     """
     lev_w = level_weights(sigma_full, config=config)
 
-    loss = jnp.float32(0.0)
+    loss = jnp.float64(0.0)
 
     # Temperature: (..., nlev)
     dT = pred_carry.T - target_carry.T
@@ -175,6 +175,12 @@ def carry_spectral_loss(
     scalar — spectral L2 loss on T
     """
     from legoesm.grids.gaussian import sh_analysis_3d
+
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError(
+            "carry_spectral_loss requires JAX_ENABLE_X64=True for "
+            "float64 spectral transforms."
+        )
 
     # Reshape for SH analysis: (..., nlev) → (n_lat, n_lon, nlev)
     pred_T = pred_carry.T.astype(jnp.float64)

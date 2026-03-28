@@ -610,6 +610,23 @@ class SpectralPrimitiveEquationModel:
         allow_unsupported_backend: bool = False,
         legoesm_config=None,
     ):
+        # Guard: spectral transforms require global data on a single rank.
+        # Proper gather/scatter support is a large architectural change;
+        # for now, raise a clear error so users know to switch dycores.
+        _mpi_world = 1
+        try:
+            from mpi4py import MPI
+            _mpi_world = MPI.COMM_WORLD.Get_size()
+        except ImportError:
+            pass
+        if _mpi_world > 1:
+            raise RuntimeError(
+                "Spectral PE dynamics do not yet support distributed (MPI) "
+                "execution.  Spherical harmonic transforms require global "
+                "data on every rank.  Use a single process or switch to a "
+                "finite-volume dycore for MPI runs."
+            )
+
         self.sigma_coord = sigma_coord
         cfg = config or SpectralPEConfig()
 

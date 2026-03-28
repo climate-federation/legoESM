@@ -124,7 +124,7 @@ def train_step(
         pred = jax.vmap(lambda x: model(x, grid))(batch_input)
         return area_weighted_mse(
             pred, batch_target,
-            grid.weights.astype(jnp.float32),
+            grid.weights,
         )
 
     loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
@@ -199,7 +199,7 @@ def validate_step(
         Area-weighted MSE and MAE on the validation batch.
     """
     pred = jax.vmap(lambda x: model(x, grid))(batch_input)
-    w = grid.weights.astype(jnp.float32)
+    w = grid.weights
     mse = area_weighted_mse(pred, batch_target, w)
     mae = weighted_mae(pred, batch_target, w)
     return mse, mae

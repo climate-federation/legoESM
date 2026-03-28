@@ -132,8 +132,10 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "hydrostatic", "amip", g, res[g], "hybrid", 365, 30))
 
-    # --- Non-hydrostatic: all grids, height coord ---
-    for g in GRID_TYPES:
+    # --- Non-hydrostatic: cubed-sphere, icosahedral, and spectral only ---
+    # (lat-lon NH dycore does not exist)
+    nh_grids = ["cubed_sphere", "icosahedral", "spectral"]
+    for g in nh_grids:
         for case, dur, quick, kw in [
             ("dcmip_tc1", 3 / 24, 0.5 / 24, {"test_case": "tc1"}),
             ("dcmip_tc2", 6 / 24, 5 / (24 * 60), {"test_case": "tc2a"}),

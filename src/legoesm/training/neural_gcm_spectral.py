@@ -140,6 +140,12 @@ def carry_to_spectral_state(
     -------
     SpectralHydrostaticState
     """
+    if not jax.config.jax_enable_x64:
+        raise RuntimeError(
+            "carry_to_spectral_state requires JAX_ENABLE_X64=True for "
+            "float64 spectral transforms."
+        )
+
     u = carry.u.astype(jnp.float64)
     v = carry.v.astype(jnp.float64)
     T = carry.T.astype(jnp.float64)
@@ -704,11 +710,30 @@ def _train_spectral_loop(
     for epoch in range(config.n_epochs):
         epoch_loss = 0.0
         t0 = time.time()
+        grad_norm_val = 0.0
 
-        for ic, target in zip(ic_states, target_carries):
+        for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
             loss_fn = make_loss_fn(ic, target)
             loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
-            epoch_loss += float(loss)
+
+            # --- NaN / Inf detection (outside JIT, values are materialized) ---
+            loss_val = float(loss)
+            if jnp.isnan(loss) or jnp.isinf(loss):
+                raise RuntimeError(
+                    f"NaN/Inf loss detected at epoch {epoch}, sample {sample_idx} "
+                    f"(loss={loss_val}). "
+                    "Check CFL conditions, parameter bounds, and input data."
+                )
+            grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
+            grad_norm_val = float(grad_norm)
+            if jnp.isnan(grad_norm) or jnp.isinf(grad_norm):
+                raise RuntimeError(
+                    f"NaN/Inf gradient detected at epoch {epoch}, sample "
+                    f"{sample_idx} (grad_norm={grad_norm_val}). "
+                    "Consider reducing learning rate or adding gradient clipping."
+                )
+
+            epoch_loss += loss_val
 
             updates, opt_state = optimizer.update(
                 eqx.filter(grads, eqx.is_array),
@@ -722,7 +747,10 @@ def _train_spectral_loop(
 
         if epoch % config.log_every == 0 or epoch == config.n_epochs - 1:
             elapsed = time.time() - t0
-            logger.info(f"Epoch {epoch:4d}: loss={avg_loss:.6f}, time={elapsed:.1f}s")
+            logger.info(
+                f"Epoch {epoch:4d}: loss={avg_loss:.6f}, "
+                f"grad_norm={grad_norm_val:.6e}, time={elapsed:.1f}s"
+            )
 
         if (epoch + 1) % 10 == 0 or epoch == config.n_epochs - 1:
             from pathlib import Path

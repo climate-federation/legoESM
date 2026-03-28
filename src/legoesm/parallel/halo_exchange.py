@@ -77,6 +77,18 @@ _EDGES = (WEST, EAST, SOUTH, NORTH)
 _DIR_TO_EDGE = {"west": WEST, "east": EAST, "south": SOUTH, "north": NORTH}
 _OPPOSITE_EDGE = {WEST: EAST, EAST: WEST, SOUTH: NORTH, NORTH: SOUTH}
 
+# MPI tag computation.  Tags must be unique per (edge, rank) pair and
+# fit within MPI's tag space (guaranteed at least 2^15-1 = 32767, but
+# most implementations support up to 2^31-1).
+#
+# Old scheme ``edge * 1000 + rank`` collides when rank >= 1000 because
+# the edge term (0-3) * 1000 overlaps with the rank offset.
+#
+# New scheme: ``edge * _MPI_TAG_RANK_STRIDE + rank`` with a stride of
+# 100_000, supporting up to 99_999 ranks without collision.  Maximum
+# tag value = 3 * 100_000 + 99_999 = 399_999, well within 2^31-1.
+_MPI_TAG_RANK_STRIDE = 100_000
+
 
 def _place_strip(padded: jax.Array, face: int, edge: int, strip: jax.Array) -> jax.Array:
     """Place a received strip into the correct halo position."""
@@ -278,12 +290,13 @@ def _pad_halo_mpi_tiled(
                 send_strip = jnp.concatenate(parts)
 
             # Point-to-point exchange with this neighbor.
-            tag = edge * 1000 + rank
+            tag = edge * _MPI_TAG_RANK_STRIDE + rank
             recv_strip = _mpi4jax_array_result(
                 mpi4jax.sendrecv(
                     send_strip, jnp.zeros_like(send_strip),
                     source=tile_nbr_rank, dest=tile_nbr_rank,
-                    sendtag=tag, recvtag=opp * 1000 + tile_nbr_rank,
+                    sendtag=tag,
+                    recvtag=opp * _MPI_TAG_RANK_STRIDE + tile_nbr_rank,
                     comm=comm,
                 ),
             )
@@ -309,12 +322,13 @@ def _pad_halo_mpi_tiled(
                     parts.append(_extract_edge_strip_at_depth(data, face, edge, depth))
                 send_strip = jnp.concatenate(parts)
 
-            tag = edge * 1000 + rank
+            tag = edge * _MPI_TAG_RANK_STRIDE + rank
             recv_strip = _mpi4jax_array_result(
                 mpi4jax.sendrecv(
                     send_strip, jnp.zeros_like(send_strip),
                     source=nbr_rank, dest=nbr_rank,
-                    sendtag=tag, recvtag=nbr_edge * 1000 + nbr_rank,
+                    sendtag=tag,
+                    recvtag=nbr_edge * _MPI_TAG_RANK_STRIDE + nbr_rank,
                     comm=comm,
                 ),
             )

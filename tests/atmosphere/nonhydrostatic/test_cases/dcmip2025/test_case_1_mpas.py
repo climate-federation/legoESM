@@ -18,7 +18,7 @@ from legoesm.grids.vertical import (
     create_height_coordinate,
     compute_terrain_metric,
 )
-from .common import piecewise_lapse_theta_ref
+from .common import piecewise_lapse_theta_ref, schaer_mountain_profile
 from legoesm import constants
 
 
@@ -35,32 +35,6 @@ TC1_PARAMS = {
     "mountain_height": 2000.0,
     "mountain_halfwidth": 72.0e3,
 }
-
-
-def _schaer_mountain_mpas(
-    mesh: VoronoiMesh,
-    h0: float = 2000.0,
-    halfwidth: float = 72.0e3,
-    lat0: float = 0.349,
-    lon0: float = 0.0,
-) -> jnp.ndarray:
-    """Generate Schaer-type mountain topography on MPAS cell centers.
-
-    z_s = h0 * exp(-((d/halfwidth)^2))
-
-    Returns shape (nCells,).
-    """
-    lat = mesh.latCell
-    lon = mesh.lonCell
-
-    dlat = lat - lat0
-    dlon = lon - lon0
-    a = (jnp.sin(dlat / 2) ** 2
-         + jnp.cos(lat) * jnp.cos(lat0) * jnp.sin(dlon / 2) ** 2)
-    angular_dist = 2.0 * jnp.arcsin(jnp.sqrt(jnp.clip(a, 0.0, 1.0)))
-    dist = angular_dist * mesh.radius
-
-    return h0 * jnp.exp(-(dist / halfwidth) ** 2)
 
 
 def dcmip25_tc1_init_mpas(
@@ -99,8 +73,8 @@ def dcmip25_tc1_init_mpas(
     height_coord = create_height_coordinate(n_levels, p["H"], theta_fn)
 
     # Mountain topography (nCells,)
-    z_s = _schaer_mountain_mpas(
-        mesh,
+    z_s = schaer_mountain_profile(
+        mesh.latCell, mesh.lonCell, mesh.radius,
         h0=p["mountain_height"],
         halfwidth=p["mountain_halfwidth"],
         lat0=p["mountain_lat"],
