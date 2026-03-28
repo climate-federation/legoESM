@@ -458,3 +458,152 @@ class EnergyBudgetTracker:
         status = "PASS" if np.max(np.abs(res)) < 1.0 else "CHECK"
         lines.append(f"  Status:            {status}")
         return "\n".join(lines)
+
+
+# ======================================================================
+# Moisture Budget Tracker
+# ======================================================================
+
+class MoistureBudget(NamedTuple):
+    """Snapshot of moisture budget diagnostics (global means)."""
+    column_water: float      # column-integrated water vapor [kg/m²]
+    dW_dt: float             # water vapor tendency [kg/m²/s]
+    precip_rate: float       # precipitation rate [mm/day]
+    evap_rate: float         # evaporation rate [mm/day] (if available)
+    residual: float          # dW/dt + P - E [mm/day]
+
+
+class MoistureBudgetTracker:
+    """Track moisture budget evolution over a simulation.
+
+    Tracks column-integrated water vapor and its tendency, precipitation,
+    and the moisture budget residual.  For a well-conserving model,
+    the annual-mean residual should be < 0.01 mm/day.
+
+    Usage
+    -----
+    tracker = MoistureBudgetTracker()
+    tracker.update(q_v, p_s, dsigma, precip, elapsed_seconds)
+    print(tracker.summary())
+    """
+
+    def __init__(self):
+        self.times: list[float] = []
+        self.column_water: list[float] = []
+        self.precip_rate: list[float] = []
+        self.dW_dt: list[float] = []
+        self.residual: list[float] = []
+        self._prev_water: float | None = None
+        self._prev_time: float | None = None
+
+    def update(
+        self,
+        q_v: jax.Array,
+        p_s: jax.Array,
+        dsigma: jax.Array,
+        precip: jax.Array,
+        elapsed_seconds: float,
+    ) -> MoistureBudget:
+        """Compute and record moisture budget at current time.
+
+        Parameters
+        ----------
+        q_v : array, shape (..., nlev)
+            Specific humidity [kg/kg].
+        p_s : array, shape (...)
+            Surface pressure [Pa].
+        dsigma : array, shape (nlev,)
+            Sigma layer thicknesses.
+        precip : array, shape (...)
+            Precipitation rate [kg/m²/s].
+        elapsed_seconds : float
+            Time since simulation start [s].
+
+        Returns
+        -------
+        MoistureBudget
+        """
+        g = constants.g
+
+        # Column water vapor: W = (1/g) * integral(q_v * dp)
+        # dp = p_s * dsigma for each level
+        dp = p_s[..., None] * dsigma  # (..., nlev)
+        W = jnp.sum(q_v * dp, axis=-1) / g  # (...) [kg/m²]
+        mean_W = float(jnp.mean(W))
+
+        # Precipitation in mm/day
+        mean_P = float(jnp.mean(precip)) * 86400.0  # kg/m²/s → mm/day
+
+        # Tendency
+        if self._prev_water is not None and self._prev_time is not None:
+            dt = elapsed_seconds - self._prev_time
+            if dt > 0:
+                dW_dt = (mean_W - self._prev_water) / dt
+            else:
+                dW_dt = 0.0
+            # Residual: dW/dt + P ≈ E (evaporation)
+            # Residual = dW/dt + P - E; without explicit E, residual = dW/dt + P
+            # For a closed system: dW/dt = E - P → residual = dW/dt + P - E = 0
+            # We compute dW/dt + P as the "net source" — should be ~0 if E ≈ P over time
+            residual_mm_day = dW_dt * 86400.0 + mean_P
+        else:
+            dW_dt = 0.0
+            residual_mm_day = 0.0
+
+        self._prev_water = mean_W
+        self._prev_time = elapsed_seconds
+
+        budget = MoistureBudget(
+            column_water=mean_W,
+            dW_dt=dW_dt,
+            precip_rate=mean_P,
+            evap_rate=0.0,  # not tracked separately
+            residual=residual_mm_day,
+        )
+
+        self.times.append(elapsed_seconds)
+        self.column_water.append(mean_W)
+        self.precip_rate.append(mean_P)
+        self.dW_dt.append(dW_dt)
+        self.residual.append(residual_mm_day)
+
+        return budget
+
+    def flush_to_lists(self) -> dict[str, list]:
+        """Return and clear accumulated lists (for periodic flush)."""
+        data = {
+            "times": self.times,
+            "column_water": self.column_water,
+            "precip_rate": self.precip_rate,
+            "dW_dt": self.dW_dt,
+            "residual": self.residual,
+        }
+        self.times = []
+        self.column_water = []
+        self.precip_rate = []
+        self.dW_dt = []
+        self.residual = []
+        return data
+
+    def summary(self) -> str:
+        """Return a formatted summary of the moisture budget."""
+        if len(self.times) < 2:
+            return "Moisture budget: not enough data points for summary."
+
+        import numpy as np
+        res = np.array(self.residual[1:])
+        W = np.array(self.column_water[1:])
+        P = np.array(self.precip_rate[1:])
+
+        lines = [
+            "Moisture Budget Summary",
+            "=" * 40,
+            f"  Samples:           {len(res)}",
+            f"  <CWV>:             {np.mean(W):.2f} kg/m²",
+            f"  <Precip>:          {np.mean(P):.2f} mm/day",
+            f"  <dW/dt + P>:       {np.mean(res):+.4f} mm/day",
+            f"  |Residual| max:    {np.max(np.abs(res)):.4f} mm/day",
+        ]
+        status = "PASS" if np.max(np.abs(res)) < 0.1 else "CHECK"
+        lines.append(f"  Status:            {status}")
+        return "\n".join(lines)

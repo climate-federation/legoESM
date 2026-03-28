@@ -600,3 +600,73 @@ def ensemble_spread(batched_state: Any) -> dict[str, float]:
                 val = val.data
             result[fname] = float(jnp.sqrt(jnp.mean(val ** 2)))
     return result
+
+
+def ensemble_crps(
+    ensemble_vals: jax.Array,
+    observation: jax.Array,
+) -> jax.Array:
+    """Continuous Ranked Probability Score (CRPS) for an ensemble forecast.
+
+    CRPS = E|X - y| - 0.5 * E|X - X'|
+
+    where X, X' are independent ensemble members and y is the observation.
+    Lower is better; CRPS = 0 for a perfect deterministic forecast.
+
+    Parameters
+    ----------
+    ensemble_vals : array, shape (n_members, ...)
+        Ensemble forecast values.
+    observation : array, shape (...)
+        Observed / analysis values.
+
+    Returns
+    -------
+    scalar — spatially averaged CRPS.
+    """
+    n = ensemble_vals.shape[0]
+    # E|X - y|: mean absolute error across members
+    mae = jnp.mean(jnp.abs(ensemble_vals - observation[None]), axis=0)
+    # E|X - X'|: mean pairwise absolute difference
+    # Efficient: sum_{i<j} |x_i - x_j| * 2 / n^2
+    spread_term = jnp.float32(0.0)
+    # Use sorted ensemble for O(n log n) instead of O(n^2)
+    sorted_ens = jnp.sort(ensemble_vals, axis=0)
+    # For sorted values: sum_{i<j}(x_j - x_i) = sum_k (2k - n + 1) * x_k
+    weights = 2.0 * jnp.arange(n).astype(ensemble_vals.dtype) - n + 1.0
+    # Reshape weights for broadcasting
+    w_shape = (n,) + (1,) * (ensemble_vals.ndim - 1)
+    spread_term = jnp.sum(weights.reshape(w_shape) * sorted_ens, axis=0) / (n * n)
+
+    crps = mae - 0.5 * spread_term
+    return jnp.mean(crps)
+
+
+def ensemble_rank_histogram(
+    ensemble_vals: jax.Array,
+    observation: jax.Array,
+) -> jax.Array:
+    """Compute rank histogram (Talagrand diagram) bin counts.
+
+    For each grid point, find the rank of the observation within the
+    sorted ensemble. A flat histogram indicates a well-calibrated ensemble.
+
+    Parameters
+    ----------
+    ensemble_vals : array, shape (n_members, ...)
+        Ensemble forecast values.
+    observation : array, shape (...)
+        Observed / analysis values.
+
+    Returns
+    -------
+    array, shape (n_members + 1,) — histogram bin counts.
+    """
+    n = ensemble_vals.shape[0]
+    # Rank = number of ensemble members below the observation
+    ranks = jnp.sum(ensemble_vals < observation[None], axis=0)  # (...)
+    # Flatten and bin
+    flat_ranks = ranks.ravel()
+    bins = jnp.arange(n + 2)
+    hist = jnp.histogram(flat_ranks, bins=bins)[0]
+    return hist

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -78,6 +79,10 @@ class DiagnosticCollector:
 
         # Energy budget tracker
         self.energy_tracker = EnergyBudgetTracker()
+
+        # Moisture budget tracker
+        from legoesm.diagnostics.energy_budget import MoistureBudgetTracker
+        self.moisture_tracker = MoistureBudgetTracker()
 
         # Monthly means
         self.monthly_means = monthly_means
@@ -218,6 +223,12 @@ class DiagnosticCollector:
             elapsed_seconds=elapsed_s,
         )
 
+        # Moisture budget
+        self.moisture_tracker.update(
+            q_v, state.p_s.data, self.dsigma,
+            precip_total, elapsed_seconds=elapsed_s,
+        )
+
         # Monthly means
         if self.monthly_means and self.monthly_accum is not None and lat_deg_grid is not None:
             doy, _ = day_to_calendar(day)
@@ -351,6 +362,9 @@ class DiagnosticCollector:
             energy_column=np.array(self.energy_tracker.column_energy),
             energy_dE_dt=np.array(self.energy_tracker.dE_dt),
             energy_residual=np.array(self.energy_tracker.residual),
+            moisture_column_water=np.array(self.moisture_tracker.column_water),
+            moisture_precip_rate=np.array(self.moisture_tracker.precip_rate),
+            moisture_residual=np.array(self.moisture_tracker.residual),
         )
 
         if self.monthly_means and self.monthly_accum is not None:
@@ -364,7 +378,10 @@ class DiagnosticCollector:
 
     def print_summary(self) -> str:
         """Return end-of-run summary string."""
-        return self.energy_tracker.summary()
+        parts = [self.energy_tracker.summary()]
+        if len(self.moisture_tracker.times) >= 2:
+            parts.append(self.moisture_tracker.summary())
+        return "\n\n".join(parts)
 
     def check_stability(self, state, elapsed_day: float) -> str | None:
         """Check for blow-up conditions.
@@ -407,3 +424,130 @@ class DiagnosticCollector:
                 )
 
         return None
+
+
+class EnsembleDiagnosticCollector:
+    """Collects ensemble-specific diagnostics: spread, CRPS, rank histograms.
+
+    Wraps a base ``DiagnosticCollector`` (which handles ensemble-mean diagnostics)
+    and adds per-member spread tracking, per-member checkpointing, and
+    probabilistic verification scores.
+
+    Parameters
+    ----------
+    base_collector : DiagnosticCollector
+        The base collector (operates on ensemble-mean state).
+    n_members : int
+        Number of ensemble members.
+    """
+
+    def __init__(self, base_collector: DiagnosticCollector, n_members: int):
+        self.base = base_collector
+        self.n_members = n_members
+
+        # Time-series of ensemble spread
+        self.spread_T: list[float] = []
+        self.spread_u: list[float] = []
+        self.spread_ps: list[float] = []
+        self.spread_times: list[float] = []
+
+    def collect_ensemble(
+        self,
+        elapsed_day: float,
+        full_carry,
+        mean_carry,
+    ) -> dict[str, float]:
+        """Collect ensemble spread diagnostics from the full ensemble carry.
+
+        Parameters
+        ----------
+        elapsed_day : float
+            Days since simulation start.
+        full_carry : SegmentCarry with leading (n_members, ...) dimension
+            Full ensemble state.
+        mean_carry : SegmentCarry without ensemble dimension
+            Ensemble mean (for base collector).
+
+        Returns
+        -------
+        dict with spread metrics.
+        """
+        from legoesm.parallel.ensemble import ensemble_spread
+
+        spread = ensemble_spread(full_carry)
+        self.spread_times.append(elapsed_day)
+        self.spread_T.append(spread.get('T', 0.0))
+        self.spread_u.append(spread.get('u', 0.0))
+        self.spread_ps.append(spread.get('p_s', 0.0))
+
+        return {
+            'spread_T': spread.get('T', 0.0),
+            'spread_u': spread.get('u', 0.0),
+            'spread_ps': spread.get('p_s', 0.0),
+        }
+
+    def save_member_checkpoint(
+        self,
+        full_carry,
+        step: int,
+        day: float,
+        output_dir,
+        config,
+    ) -> None:
+        """Save per-member checkpoints for the full ensemble.
+
+        Each member is saved as a separate checkpoint file:
+        ``ensemble_member_NNN_day_DDDD.npz``.
+        """
+        from legoesm.driver.compiled_segments import unpack_carry
+        from legoesm.io.restart import save_restart
+        from legoesm.core.field import Field
+        from legoesm.core.state import HydrostaticState
+
+        output_dir = Path(output_dir)
+        n = self.n_members
+
+        for m in range(n):
+            # Extract single member from batched carry
+            member_carry = jax.tree.map(lambda x: x[m], full_carry)
+
+            # Build a minimal state for save_restart
+            dims_3d = ("face", "x", "y", "level")
+            dims_2d = ("face", "x", "y")
+            member_state = HydrostaticState(
+                u=Field(member_carry.u, name="u", dims=dims_3d, units="m/s"),
+                v=Field(member_carry.v, name="v", dims=dims_3d, units="m/s"),
+                T=Field(member_carry.T, name="T", dims=dims_3d, units="K"),
+                p_s=Field(member_carry.p_s, name="p_s", dims=dims_2d, units="Pa"),
+                phis=Field(member_carry.phis, name="phis", dims=dims_2d, units="m2/s2"),
+            )
+
+            elapsed = day - config.start_day
+            path = output_dir / f"ensemble_member_{m:03d}_day_{int(elapsed):04d}.npz"
+            save_restart(
+                path=path,
+                state=member_state,
+                q_v=member_carry.q_v,
+                step=step,
+                day=day,
+                config=config,
+                q_c=member_carry.q_c,
+                q_r=member_carry.q_r,
+            )
+
+    def save(self, output_dir) -> None:
+        """Save ensemble diagnostics alongside base diagnostics."""
+        output_dir = Path(output_dir)
+
+        # Save spread timeseries
+        if self.spread_times:
+            np.savez(
+                output_dir / "ensemble_spread.npz",
+                days=np.array(self.spread_times),
+                spread_T=np.array(self.spread_T),
+                spread_u=np.array(self.spread_u),
+                spread_ps=np.array(self.spread_ps),
+            )
+
+        # Base diagnostics
+        self.base.save(output_dir)
