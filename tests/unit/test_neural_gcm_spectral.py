@@ -1,0 +1,312 @@
+"""Tests for NeuralGCM spectral training (legoesm.training.neural_gcm_spectral).
+
+Validates:
+- State conversion: SegmentCarry <-> SpectralHydrostaticState
+- SFNO spectral physics wrapper produces valid tendencies
+- Spectral rollout runs for a few steps without NaN
+- Loss function returns a finite scalar
+- Gradient flows through the full pipeline (SFNO weights)
+
+Uses synthetic data only — no GCS/ERA5 access required.
+"""
+
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import equinox as eqx
+import pytest
+
+from legoesm.core.field import Field
+from legoesm.core.state import HydrostaticState
+from legoesm.driver.compiled_segments import pack_carry
+from legoesm.grids.gaussian import create_gaussian_grid
+from legoesm.grids.vertical import create_sigma_coordinate
+from legoesm.ml.sfno import SFNO, SFNOConfig
+from legoesm.ml.channel_packing import PE3DChannelSpec
+
+# Small grid for fast tests: T10 with 3 levels
+N_MAX = 10
+NLEV = 3
+_GRID = create_gaussian_grid(N_MAX, dealiasing="quadratic")
+_SIGMA = create_sigma_coordinate(NLEV, sigma_top=0.1)
+
+
+def _make_gaussian_carry(T_val=280.0, p_s_val=101325.0):
+    """Create a synthetic SegmentCarry on the Gaussian grid."""
+    n_lat = _GRID.lat.shape[0]
+    n_lon = _GRID.lon.shape[0]
+    s3 = (n_lat, n_lon, NLEV)
+    s2 = (n_lat, n_lon)
+
+    state = HydrostaticState(
+        u=Field(jnp.zeros(s3), name="u", dims=("lat", "lon", "lev"), units="m/s"),
+        v=Field(jnp.zeros(s3), name="v", dims=("lat", "lon", "lev"), units="m/s"),
+        T=Field(jnp.full(s3, T_val), name="T", dims=("lat", "lon", "lev"), units="K"),
+        p_s=Field(jnp.full(s2, p_s_val), name="p_s", dims=("lat", "lon"), units="Pa"),
+        phis=Field(jnp.zeros(s2), name="phis", dims=("lat", "lon"), units="m2/s2"),
+    )
+    return pack_carry(
+        state,
+        q_v=jnp.ones(s3) * 0.005,
+        q_c=jnp.zeros(s3),
+        q_r=jnp.zeros(s3),
+        held_dT_rad=jnp.zeros(s3),
+        held_sw_net_sfc=jnp.zeros(s2),
+        held_lw_net_sfc=jnp.zeros(s2),
+        held_sw_up_toa=jnp.zeros(s2),
+        held_lw_up_toa=jnp.zeros(s2),
+        held_sw_down_toa=jnp.zeros(s2),
+        step_index=0,
+    )
+
+
+def _make_small_sfno():
+    """Create a small SFNO for testing."""
+    spec = PE3DChannelSpec(nlev=NLEV)
+    config = SFNOConfig(
+        in_channels=spec.n_channels,
+        out_channels=spec.n_channels,
+        embed_dim=16,
+        n_blocks=1,
+        mlp_expansion=2,
+        residual_prediction=False,
+    )
+    return SFNO(config, _GRID, key=jax.random.PRNGKey(42))
+
+
+# ---------------------------------------------------------------------------
+# 1. carry_to_spectral_state
+# ---------------------------------------------------------------------------
+
+class TestCarryToSpectralState:
+
+    def test_produces_spectral_state(self):
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        assert state.vor_hat.data.shape == (_GRID.n_sh, NLEV)
+        assert state.T_hat.data.shape == (_GRID.n_sh, NLEV)
+        assert state.lnps_hat.data.shape == (_GRID.n_sh,)
+        assert state.phis_hat.data.shape == (_GRID.n_sh,)
+
+    def test_dtypes_are_complex128(self):
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        assert state.T_hat.data.dtype == jnp.complex128
+        assert state.vor_hat.data.dtype == jnp.complex128
+
+    def test_finite_values(self):
+        from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        for field in state:
+            assert jnp.all(jnp.isfinite(field.data)), f"NaN in {field.name}"
+
+
+# ---------------------------------------------------------------------------
+# 2. make_sfno_spectral_physics
+# ---------------------------------------------------------------------------
+
+class TestSFNOSpectralPhysics:
+
+    def test_returns_spectral_tendencies(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        sfno = _make_small_sfno()
+
+        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
+        tendencies = physics_fn(state, _GRID, _SIGMA)
+
+        # Should return SpectralHydrostaticState
+        assert hasattr(tendencies, 'vor_hat')
+        assert tendencies.T_hat.data.shape == state.T_hat.data.shape
+        assert tendencies.phis_hat.data.shape == state.phis_hat.data.shape
+
+    def test_tendencies_finite(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        sfno = _make_small_sfno()
+
+        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
+        tendencies = physics_fn(state, _GRID, _SIGMA)
+
+        for field in tendencies:
+            assert jnp.all(jnp.isfinite(field.data)), f"NaN in tendency {field.name}"
+
+
+# ---------------------------------------------------------------------------
+# 3. spectral_rollout
+# ---------------------------------------------------------------------------
+
+class TestSpectralRollout:
+
+    def test_runs_without_nan(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+            spectral_rollout,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        sfno = _make_small_sfno()
+        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
+
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=1e14,
+            time_integrator="ssp_rk3",
+        )
+
+        result = spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=2,
+        )
+
+        for field in result:
+            assert jnp.all(jnp.isfinite(field.data)), f"NaN in rollout result {field.name}"
+
+    def test_output_same_shape(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+            spectral_rollout,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        sfno = _make_small_sfno()
+        physics_fn = make_sfno_spectral_physics(sfno, _GRID)
+
+        pe_config = SpectralPEConfig(time_integrator="ssp_rk3")
+
+        result = spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=1,
+        )
+
+        assert result.T_hat.data.shape == state.T_hat.data.shape
+        assert result.lnps_hat.data.shape == state.lnps_hat.data.shape
+
+
+# ---------------------------------------------------------------------------
+# 4. Loss function
+# ---------------------------------------------------------------------------
+
+class TestLoss:
+
+    def test_finite_scalar(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            spectral_state_vs_carry_loss,
+        )
+        carry_ic = _make_gaussian_carry(T_val=280.0)
+        carry_target = _make_gaussian_carry(T_val=282.0)
+        state = carry_to_spectral_state(carry_ic, _GRID)
+
+        sigma_full = jnp.asarray(_SIGMA.sigma_full)
+        loss = spectral_state_vs_carry_loss(
+            state, carry_target, _GRID, _SIGMA, sigma_full,
+        )
+
+        assert loss.shape == ()
+        assert jnp.isfinite(loss)
+        assert float(loss) > 0.0
+
+    def test_zero_loss_for_identical(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            spectral_state_vs_carry_loss,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        sigma_full = jnp.asarray(_SIGMA.sigma_full)
+
+        loss = spectral_state_vs_carry_loss(
+            state, carry, _GRID, _SIGMA, sigma_full,
+        )
+        # Not exactly zero due to SH analysis/synthesis roundtrip, but small
+        assert float(loss) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# 5. Gradient flow through full pipeline
+# ---------------------------------------------------------------------------
+
+class TestGradientFlow:
+
+    def test_grad_through_rollout(self):
+        """Verify gradients flow from loss through rollout to SFNO weights."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_sfno_spectral_physics,
+            spectral_rollout,
+            spectral_state_vs_carry_loss,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry_ic = _make_gaussian_carry(T_val=280.0)
+        carry_target = _make_gaussian_carry(T_val=282.0)
+        state = carry_to_spectral_state(carry_ic, _GRID)
+        sigma_full = jnp.asarray(_SIGMA.sigma_full)
+
+        sfno = _make_small_sfno()
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=1e14,
+            time_integrator="ssp_rk3",
+        )
+
+        def loss_fn(model):
+            physics_fn = make_sfno_spectral_physics(model, _GRID)
+            pred = spectral_rollout(
+                state, physics_fn, _GRID, _SIGMA, pe_config,
+                dt=1800.0, n_steps=1,
+            )
+            return spectral_state_vs_carry_loss(
+                pred, carry_target, _GRID, _SIGMA, sigma_full,
+            )
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(sfno)
+
+        # Loss should be finite
+        assert jnp.isfinite(loss)
+
+        # Grads should be finite and non-zero for at least some params
+        grad_leaves = jax.tree.leaves(eqx.filter(grads, eqx.is_array))
+        assert len(grad_leaves) > 0
+        all_finite = all(jnp.all(jnp.isfinite(g)) for g in grad_leaves)
+        assert all_finite, "Some gradients are NaN/Inf"
+
+        has_nonzero = any(jnp.any(g != 0) for g in grad_leaves)
+        assert has_nonzero, "All gradients are zero — no signal flows"
+
+
+# ---------------------------------------------------------------------------
+# 6. Config
+# ---------------------------------------------------------------------------
+
+class TestConfig:
+
+    def test_default_config(self):
+        from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
+        cfg = NeuralGCMSpectralConfig()
+        assert cfg.n_max == 42
+        assert cfg.n_levels == 10
+        assert cfg.dt == 600.0
+
+    def test_channel_count(self):
+        from legoesm.training.neural_gcm_spectral import NeuralGCMSpectralConfig
+        cfg = NeuralGCMSpectralConfig()
+        spec = PE3DChannelSpec(nlev=cfg.n_levels)
+        assert spec.n_channels == 4 * 10 + 2  # 42 channels

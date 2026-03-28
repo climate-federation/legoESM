@@ -31,6 +31,7 @@ def _resolve_var(ds, name):
         'v_component_of_wind': 'v', 'specific_humidity': 'q',
         'surface_pressure': 'sp', 'skin_temperature': 'skt',
         'geopotential': 'z',
+        'geopotential_at_surface': 'z_sfc',
     }
     if name in ds:
         return name
@@ -98,8 +99,8 @@ class TrainingERA5Config(NamedTuple):
     )
     surface_variables: tuple = (
         "surface_pressure",
-        "skin_temperature",       # SST proxy
-        "geopotential",           # z at surface for phis
+        "skin_temperature",           # SST proxy
+        "geopotential_at_surface",    # surface geopotential for phis [m2/s2]
     )
     levels: tuple = WB2_PRESSURE_LEVELS
     time_range: tuple = ("1979-01-01", "2020-12-31")
@@ -234,13 +235,19 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
 
     def _get_2d(name):
         """Extract a 2D surface variable as (lat, lon)."""
-        resolved = [v for v in [_resolve_var(ds_t, name)] if v]
-        if not resolved:
-            return np.zeros((len(lat), len(lon)), dtype=np.float32)
-        data = ds_t[resolved[0]].values
-        if data.ndim == 3:
-            # Some surface vars have a singleton level dim
-            data = data.squeeze()
+        # Try time-selected dataset first, then full dataset for static fields
+        resolved = _resolve_var(ds_t, name)
+        if resolved is None:
+            resolved = _resolve_var(ds, name)
+            if resolved is None:
+                return np.zeros((len(lat), len(lon)), dtype=np.float32)
+            data = ds[resolved].values
+        else:
+            data = ds_t[resolved].values
+        # Drop singleton dimensions and take first slice of any extra dims
+        data = data.squeeze()
+        while data.ndim > 2:
+            data = data[0]
         return data.astype(np.float32)
 
     return ERA5Slice(
@@ -250,7 +257,7 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
         q=_get_3d("specific_humidity"),
         p_s=_get_2d("surface_pressure"),
         sst=_get_2d("skin_temperature"),
-        phis=_get_2d("geopotential"),  # z_surface * g — already in m²/s²
+        phis=_get_2d("geopotential_at_surface"),  # already in m²/s²
         lat=lat,
         lon=lon,
         plev_Pa=plev_Pa,
