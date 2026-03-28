@@ -85,7 +85,6 @@ def train_physics_params(
     list[float] — loss history
     """
     from legoesm.training.trainable_params import TrainablePhysicsParams
-    from legoesm.ml.training import create_optimizer
 
     # Initialize learnable parameters
     params = TrainablePhysicsParams.from_defaults()
@@ -96,7 +95,6 @@ def train_physics_params(
 
     sigma_full = jnp.asarray(sigma.sigma_full)
     step_unified = physics_pipeline.build_step_unified()
-    steps_per_day = int(86400 / dt)
 
     loss_history = []
 
@@ -199,7 +197,6 @@ def train_neural_gcm(
     opt_state = optimizer.init(eqx.filter(neural_physics, eqx.is_array))
 
     sigma_full = jnp.asarray(sigma.sigma_full)
-    steps_per_day = int(86400 / dt)
     loss_history = []
 
     for epoch in range(n_epochs):

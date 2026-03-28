@@ -469,8 +469,7 @@ class MoistureBudget(NamedTuple):
     column_water: float      # column-integrated water vapor [kg/m²]
     dW_dt: float             # water vapor tendency [kg/m²/s]
     precip_rate: float       # precipitation rate [mm/day]
-    evap_rate: float         # evaporation rate [mm/day] (if available)
-    residual: float          # dW/dt + P - E [mm/day]
+    residual: float          # dW/dt + P [mm/day]
 
 
 class MoistureBudgetTracker:
@@ -523,12 +522,9 @@ class MoistureBudgetTracker:
         -------
         MoistureBudget
         """
-        g = constants.g
+        from legoesm.diagnostics.column_integrals import column_water_vapor
 
-        # Column water vapor: W = (1/g) * integral(q_v * dp)
-        # dp = p_s * dsigma for each level
-        dp = p_s[..., None] * dsigma  # (..., nlev)
-        W = jnp.sum(q_v * dp, axis=-1) / g  # (...) [kg/m²]
+        W = column_water_vapor(q_v, p_s, dsigma)
         mean_W = float(jnp.mean(W))
 
         # Precipitation in mm/day
@@ -557,7 +553,6 @@ class MoistureBudgetTracker:
             column_water=mean_W,
             dW_dt=dW_dt,
             precip_rate=mean_P,
-            evap_rate=0.0,  # not tracked separately
             residual=residual_mm_day,
         )
 

@@ -152,7 +152,7 @@ def unpack_carry(carry, state_template):
 
     Returns
     -------
-    state, q_v, q_c, q_r, held_tuple, step_index
+    state, q_v, q_c, q_r, held_tuple, step_index, precip_accum
     """
     new_state = state_template._replace(
         u=state_template.u.replace(data=carry.u),
