@@ -402,6 +402,39 @@ class EnergyBudgetTracker:
 
         return budget
 
+    def flush_to_lists(self) -> dict[str, list]:
+        """Return all accumulated lists and clear internal storage.
+
+        Used by DiagnosticCollector.flush_to_disk() to periodically
+        persist energy budget data without unbounded memory growth.
+        """
+        data = {
+            "times": self.times,
+            "toa_net": self.toa_net,
+            "toa_sw_down": self.toa_sw_down,
+            "toa_sw_up": self.toa_sw_up,
+            "toa_lw_up": self.toa_lw_up,
+            "sfc_sw_net": self.sfc_sw_net,
+            "sfc_lw_net": self.sfc_lw_net,
+            "sfc_net": self.sfc_net,
+            "column_energy": self.column_energy,
+            "dE_dt": self.dE_dt,
+            "residual": self.residual,
+        }
+        # Clear lists but preserve _prev state for continuity
+        self.times = []
+        self.toa_net = []
+        self.toa_sw_down = []
+        self.toa_sw_up = []
+        self.toa_lw_up = []
+        self.sfc_sw_net = []
+        self.sfc_lw_net = []
+        self.sfc_net = []
+        self.column_energy = []
+        self.dE_dt = []
+        self.residual = []
+        return data
+
     def summary(self) -> str:
         """Return a formatted summary of the energy budget."""
         if len(self.times) < 2:

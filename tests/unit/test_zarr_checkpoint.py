@@ -154,7 +154,7 @@ class TestAutoDetect:
         path = tmp_dir / "test.npz"
 
         save_checkpoint(path, state, q_v, step=42, day=21.0, config=config)
-        s2, qv2, step2, day2, cfg2, diag2, qc2, qr2 = load_checkpoint_auto(
+        s2, qv2, step2, day2, cfg2, diag2, qc2, qr2, carry_aux2 = load_checkpoint_auto(
             path, grid, sigma
         )
         assert step2 == 42
@@ -169,7 +169,7 @@ class TestAutoDetect:
         path = tmp_dir / "test.zarr"
 
         save_checkpoint_zarr(path, state, q_v, step=77, day=38.5, config=config)
-        s2, qv2, step2, day2, cfg2, diag2, qc2, qr2 = load_checkpoint_auto(
+        s2, qv2, step2, day2, cfg2, diag2, qc2, qr2, carry_aux2 = load_checkpoint_auto(
             path, grid, sigma
         )
         assert step2 == 77

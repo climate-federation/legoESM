@@ -28,6 +28,7 @@ from legoesm.driver.compiled_segments import (
     unpack_carry,
     compute_segment_length,
     build_segment_fn,
+    pack_forcing,
 )
 from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -270,6 +271,23 @@ class TestSegmentCarryRoundtrip:
 # 3. build_segment_fn
 # ===========================================================================
 
+def _make_forcing():
+    """Build a default SegmentForcing for tests."""
+    return pack_forcing(
+        sst=jnp.full((N_FACES, N, N), 300.0),
+        sic=jnp.zeros((N_FACES, N, N)),
+        day_of_year=1.0,
+        seconds_of_day=0.0,
+        solar_weights=jnp.ones(14),
+        s_0=1361.0,
+        o3_vmr=jnp.zeros((N_FACES, N, N, NLEV)),
+        aerosol_od=jnp.zeros((N_FACES, N, N)),
+    )
+
+
+_FORCING = _make_forcing()
+
+
 def _make_segment_fn_args(fix_moisture=False):
     """Build all arguments for build_segment_fn with mock components."""
     return dict(
@@ -284,16 +302,8 @@ def _make_segment_fn_args(fix_moisture=False):
         fix_moisture=fix_moisture,
         fric_decay=jnp.ones((NLEV,)),  # no friction
         qv_smooth_coeff=0.0,
-        sst=jnp.full((N_FACES, N, N), 300.0),
-        sic=jnp.zeros((N_FACES, N, N)),
         lat=_GRID.lat,
         lon=_GRID.lon,
-        day_of_year=1.0,
-        seconds_of_day=0.0,
-        solar_weights=jnp.ones(14),
-        s_0=1361.0,
-        o3_vmr=jnp.zeros((N_FACES, N, N, NLEV)),
-        aerosol_od=jnp.zeros((N_FACES, N, N)),
         start_day=0.0,
     )
 
@@ -328,7 +338,7 @@ class TestBuildSegmentFn:
             step_index=0,
         )
 
-        result = run_segment(carry, 1)
+        result = run_segment(carry, 1, _FORCING)
         jax.block_until_ready(result.T)
 
         assert result.T.shape == shape_3d
@@ -356,7 +366,7 @@ class TestBuildSegmentFn:
             step_index=10,
         )
 
-        result = run_segment(carry, 5)
+        result = run_segment(carry, 5, _FORCING)
         jax.block_until_ready(result.T)
         assert result.step_index == 15
 
@@ -383,7 +393,7 @@ class TestBuildSegmentFn:
         )
 
         T_init = np.asarray(carry.T)  # save before donation
-        result = run_segment(carry, 10)
+        result = run_segment(carry, 10, _FORCING)
         T_final = np.asarray(result.T)
 
         # dynamics adds increment*dt/86400 per step
@@ -413,7 +423,7 @@ class TestBuildSegmentFn:
             step_index=0,
         )
 
-        result = run_segment(carry, 5)
+        result = run_segment(carry, 5, _FORCING)
 
         for field_name in SegmentCarry._fields:
             arr = np.asarray(getattr(result, field_name))
@@ -441,7 +451,7 @@ class TestBuildSegmentFn:
             step_index=0,
         )
 
-        result = run_segment(carry, 10)
+        result = run_segment(carry, 10, _FORCING)
         assert np.all(np.asarray(result.q_v) >= 0.0)
         assert np.all(np.asarray(result.q_c) >= 0.0)
         assert np.all(np.asarray(result.q_r) >= 0.0)
@@ -451,7 +461,8 @@ class TestBuildSegmentFn:
 # 4. Equivalence: compiled segment vs per-step Python loop
 # ===========================================================================
 
-def _run_per_step_python(model, step_unified, n_steps, carry_init, args):
+def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
+                         forcing=None):
     """Run the same physics+dynamics loop step-by-step in Python.
 
     Replicates the logic inside _single_step but without lax.scan,
@@ -461,6 +472,9 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args):
     from legoesm import constants
     from legoesm.core.operators_3d import hyperdiffusion_3d
     from legoesm.driver.compiled_segments import _rebuild_state
+
+    if forcing is None:
+        forcing = _FORCING
 
     dt = args["dt"]
     sigma_full = jnp.asarray(args["sigma_full"])
@@ -490,15 +504,15 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args):
             T_new, p_s_new,
             carry.q_v, carry.q_c, carry.q_r,
             u_new, v_new,
-            args["sst"], args["sic"],
+            forcing.sst, forcing.sic,
             args["lat"], args["lon"],
-            jnp.float32(args["day_of_year"]),
-            jnp.float32(args["seconds_of_day"]),
+            forcing.day_of_year,
+            forcing.seconds_of_day,
             jnp.float32(dt),
-            jnp.asarray(args["solar_weights"]),
-            jnp.float32(args["s_0"]),
-            jnp.asarray(args["o3_vmr"]),
-            jnp.asarray(args["aerosol_od"]),
+            forcing.solar_weights,
+            forcing.s_0,
+            forcing.o3_vmr,
+            forcing.aerosol_od,
             carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
             carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
         )
@@ -527,6 +541,12 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args):
         u_upd = u_new * fric_decay
         v_upd = v_new * fric_decay
 
+        # CFL monitoring
+        from legoesm.core.cfl import cfl_number_from_state, estimate_min_dx_cubed_sphere
+        _dx_min = estimate_min_dx_cubed_sphere(grid.n)
+        step_cfl = cfl_number_from_state(u_upd, v_upd, _dx_min, dt)
+        max_cfl = jnp.maximum(carry.max_cfl, step_cfl)
+
         # Accumulate precipitation
         precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
         precip_accum = carry.precip_accum + precip_step * dt
@@ -543,6 +563,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args):
             held_sw_down_toa=held_new[5],
             step_index=step_idx + 1,
             target_moisture=carry.target_moisture,
+            target_mass=carry.target_mass,
+            max_cfl=max_cfl,
             precip_accum=precip_accum,
         )
     return carry
@@ -576,7 +598,7 @@ class TestEquivalence:
 
         # Compiled path (copy carry since run_segment donates buffers)
         run_segment = build_segment_fn(**args)
-        compiled_result = run_segment(_copy_carry(carry_init), 1)
+        compiled_result = run_segment(_copy_carry(carry_init), 1, _FORCING)
 
         # Python loop path
         python_result = _run_per_step_python(
@@ -598,7 +620,7 @@ class TestEquivalence:
         carry_init = self._make_init_carry()
 
         run_segment = build_segment_fn(**args)
-        compiled_result = run_segment(_copy_carry(carry_init), 5)
+        compiled_result = run_segment(_copy_carry(carry_init), 5, _FORCING)
 
         python_result = _run_per_step_python(
             args["model"], args["step_unified"], 5, carry_init, args,
@@ -620,11 +642,11 @@ class TestEquivalence:
         run_segment = build_segment_fn(**args)
 
         # Single segment of 6 (copy carry since donation frees buffers)
-        result_6 = run_segment(_copy_carry(carry_init), 6)
+        result_6 = run_segment(_copy_carry(carry_init), 6, _FORCING)
 
         # Two segments of 3
-        result_3a = run_segment(_copy_carry(carry_init), 3)
-        result_3b = run_segment(result_3a, 3)
+        result_3a = run_segment(_copy_carry(carry_init), 3, _FORCING)
+        result_3b = run_segment(result_3a, 3, _FORCING)
 
         for field_name in SegmentCarry._fields:
             arr_6 = np.asarray(getattr(result_6, field_name))
@@ -641,10 +663,10 @@ class TestEquivalence:
         carry_init = self._make_init_carry()
         run_segment = build_segment_fn(**args)
 
-        r1 = run_segment(carry_init, 4)
+        r1 = run_segment(carry_init, 4, _FORCING)
         assert r1.step_index == 4
 
-        r2 = run_segment(r1, 3)
+        r2 = run_segment(r1, 3, _FORCING)
         assert r2.step_index == 7
 
 
@@ -679,20 +701,20 @@ class TestCompileTiming:
 
         # First call (includes JIT compile); copy carry to survive donation
         t0 = time.monotonic()
-        result = run_segment(_copy_carry(carry), 3)
+        result = run_segment(_copy_carry(carry), 3, _FORCING)
         jax.block_until_ready(result.T)
         first_time = time.monotonic() - t0
 
         # Warm up (feed result back as input to avoid donated-buffer errors)
         for _ in range(3):
-            result = run_segment(result, 3)
+            result = run_segment(result, 3, _FORCING)
             jax.block_until_ready(result.T)
 
         # Steady-state calls
         n_warm = 5
         t0 = time.monotonic()
         for _ in range(n_warm):
-            result = run_segment(result, 3)
+            result = run_segment(result, 3, _FORCING)
             jax.block_until_ready(result.T)
         avg_warm = (time.monotonic() - t0) / n_warm
 
@@ -736,7 +758,7 @@ class TestPhysicsSubComponents:
         )
 
         u_init_abs = float(jnp.max(jnp.abs(carry.u)))  # save before donation
-        result = run_segment(carry, 10)
+        result = run_segment(carry, 10, _FORCING)
 
         # u starts at 0.5 + dynamics increment, then gets multiplied by 0.99
         # each step.  After 10 steps the magnitude should be smaller than
@@ -770,7 +792,7 @@ class TestPhysicsSubComponents:
             step_index=0,
         )
 
-        result = run_segment(carry, 5)
+        result = run_segment(carry, 5, _FORCING)
         # dynamics mock doesn't modify u, and fric_decay=1, so u should stay 0.5
         np.testing.assert_allclose(
             np.asarray(result.u),

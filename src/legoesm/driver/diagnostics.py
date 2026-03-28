@@ -259,6 +259,69 @@ class DiagnosticCollector:
             'mean_lw_sfc': mean_lw_sfc,
         }
 
+    def flush_to_disk(self, output_dir: str | Path) -> None:
+        """Flush accumulated timeseries to disk and clear in-memory lists.
+
+        Appends to ``timeseries_incremental/`` directory as numbered
+        chunks.  Called periodically (e.g. annually) during long runs
+        to prevent unbounded memory growth.
+        """
+        output_dir = Path(output_dir)
+        incr_dir = output_dir / "timeseries_incremental"
+        incr_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find next chunk number
+        existing = sorted(incr_dir.glob("chunk_*.npz"))
+        chunk_idx = len(existing)
+
+        if not self.times:
+            return  # nothing to flush
+
+        sigma = np.asarray(self.sigma_full)
+
+        # Save current batch
+        np.savez(
+            incr_dir / f"chunk_{chunk_idx:04d}.npz",
+            days=np.array(self.times),
+            T_atm=np.array(self.T_atm),
+            T_low=np.array(self.T_low),
+            max_wind=np.array(self.max_wind),
+            precip=np.array(self.precip),
+            CWV=np.array(self.CWV),
+            sw_up_toa=np.array(self.sw_up_toa),
+            lw_up_toa=np.array(self.lw_up_toa),
+            sw_net_sfc=np.array(self.sw_net_sfc),
+            lw_net_sfc=np.array(self.lw_net_sfc),
+            dry_mass_ps=np.array(self.dry_mass),
+            profiles_T=np.array(self.profiles_T) if self.profiles_T else np.array([]),
+            profiles_qv=np.array(self.profiles_qv) if self.profiles_qv else np.array([]),
+        )
+
+        # Also flush energy tracker
+        energy_data = self.energy_tracker.flush_to_lists()
+        if energy_data["times"]:
+            np.savez(
+                incr_dir / f"energy_chunk_{chunk_idx:04d}.npz",
+                **{k: np.array(v) for k, v in energy_data.items()},
+            )
+
+        # Clear all timeseries lists (snapshots and monthly accum preserved)
+        self.times.clear()
+        self.sst.clear()
+        self.sic.clear()
+        self.T_atm.clear()
+        self.T_low.clear()
+        self.max_wind.clear()
+        self.precip.clear()
+        self.CWV.clear()
+        self.sw_up_toa.clear()
+        self.lw_up_toa.clear()
+        self.sw_net_sfc.clear()
+        self.lw_net_sfc.clear()
+        self.dry_mass.clear()
+        self.profiles_T.clear()
+        self.profiles_qv.clear()
+
     def save(self, output_dir: str | Path) -> None:
         """Save all accumulated diagnostics to disk."""
         output_dir = Path(output_dir)

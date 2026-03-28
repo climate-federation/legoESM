@@ -157,7 +157,8 @@ def _get_git_hash() -> str:
     return ""
 
 
-def _state_arrays_from_checkpoint_args(state, q_v, q_c=None, q_r=None) -> dict[str, np.ndarray]:
+def _state_arrays_from_checkpoint_args(state, q_v, q_c=None, q_r=None,
+                                       carry_aux=None) -> dict[str, np.ndarray]:
     """Build a dict of numpy arrays mirroring save_checkpoint layout."""
     arrays: dict[str, np.ndarray] = {
         "T": np.asarray(state.T.data),
@@ -171,6 +172,9 @@ def _state_arrays_from_checkpoint_args(state, q_v, q_c=None, q_r=None) -> dict[s
         arrays["q_c"] = np.asarray(q_c)
     if q_r is not None:
         arrays["q_r"] = np.asarray(q_r)
+    if carry_aux:
+        for k, v in carry_aux.items():
+            arrays[f"carry_{k}"] = np.asarray(v)
     return arrays
 
 
@@ -210,6 +214,7 @@ def save_restart(
     diag_accumulators=None,
     q_c=None,
     q_r=None,
+    carry_aux=None,
     model_version: str = "0.1.0",
     backend: str = "npz",
 ) -> None:
@@ -259,6 +264,7 @@ def save_restart(
             diag_accumulators=diag_accumulators,
             q_c=q_c,
             q_r=q_r,
+            carry_aux=carry_aux,
         )
 
     # 2. Compute integrity hashes
@@ -332,7 +338,7 @@ def load_restart(
     # 1. Delegate to auto-detecting loader (handles both .npz and .zarr)
     from legoesm.io.checkpoint import load_checkpoint_auto
 
-    state, q_v, step, day, loaded_amip_config, diag_accumulators, q_c, q_r = (
+    state, q_v, step, day, loaded_amip_config, diag_accumulators, q_c, q_r, carry_aux = (
         load_checkpoint_auto(path, grid, sigma)
     )
 
@@ -359,7 +365,7 @@ def load_restart(
                 stacklevel=2,
             )
 
-    return state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r, metadata
+    return state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r, metadata, carry_aux
 
 
 def _validate_metadata(

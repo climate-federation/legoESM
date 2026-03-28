@@ -446,6 +446,35 @@ def fix_mass_hydrostatic_target(
     return state_new._replace(p_s=p_s_fixed)
 
 
+def fix_ps_mass_target(
+    p_s: jax.Array,
+    target_mass: jax.Array,
+    grid: CubedSphereGrid,
+) -> jax.Array:
+    """Fix dry mass conservation on raw p_s array, anchored to a fixed target.
+
+    This is the raw-array version of ``fix_mass_hydrostatic_target``,
+    suitable for use inside ``jax.lax.scan`` where we work with raw
+    arrays rather than Field-wrapped NamedTuples.
+
+    Parameters
+    ----------
+    p_s : jax.Array, shape (6, n, n)
+        Surface pressure after dynamics.
+    target_mass : jax.Array (scalar)
+        Target global mass integral (∫ p_s * dA at t=0).
+    grid : CubedSphereGrid
+
+    Returns
+    -------
+    jax.Array : Corrected p_s with same shape.
+    """
+    acc = _accumulation_dtype()
+    mass_new = jnp.sum(p_s.astype(acc) * grid.area.astype(acc))
+    correction = (target_mass - mass_new) / grid.total_area
+    return p_s + correction
+
+
 def compute_nh_dry_mass(
     rho_prime: jax.Array,
     height_coord,

@@ -144,6 +144,7 @@ class ExperimentConfig(NamedTuple):
     k_free_per_day: float = 0.1
 
     # Performance
+    precision: str = "fp32"           # fp32, fp64, or mixed
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
 
     # Distributed
@@ -171,6 +172,10 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
+        if self.precision not in ("fp32", "fp64", "mixed"):
+            errors.append(
+                f"precision must be 'fp32', 'fp64', or 'mixed', got {self.precision!r}"
+            )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
         # Reject unsupported coupled/ESM modes with actionable errors.

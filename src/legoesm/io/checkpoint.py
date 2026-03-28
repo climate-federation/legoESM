@@ -241,13 +241,18 @@ def load_checkpoint_auto(path, grid, sigma):
     Returns
     -------
     tuple
-        Same 8-tuple as ``load_checkpoint``.
+        9-tuple: (state, q_v, step, day, config, diag_accumulators,
+        q_c, q_r, carry_aux).
     """
     from legoesm.forcing.amip_config import load_checkpoint as load_npz
 
     path = Path(path)
     # Zarr stores are directories; detect by presence of zarr metadata
     if path.is_dir():
-        return load_checkpoint_zarr(path, grid, sigma)
+        result = load_checkpoint_zarr(path, grid, sigma)
+        # Zarr path returns 8-tuple; pad with empty carry_aux
+        if len(result) == 8:
+            return (*result, {})
+        return result
     else:
         return load_npz(path, grid, sigma)

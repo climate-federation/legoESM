@@ -72,6 +72,13 @@ class SegmentCarry(NamedTuple):
     target_moisture : jax.Array
         Scalar float — fixed global moisture target for the fixer,
         computed once at initialization to prevent cross-step drift.
+    target_mass : jax.Array
+        Scalar float — fixed global dry mass target (∫ p_s * dA at t=0),
+        used for target-anchored mass conservation in long runs.
+        Zero disables the fixer.
+    max_cfl : jax.Array
+        Scalar float — maximum CFL number observed during the segment.
+        Monitored at segment boundaries for adaptive dt.
     precip_accum : jax.Array
         Accumulated precipitation over the segment [kg/m2].
     """
@@ -91,6 +98,8 @@ class SegmentCarry(NamedTuple):
     held_sw_down_toa: jax.Array
     step_index: jax.Array
     target_moisture: jax.Array
+    target_mass: jax.Array
+    max_cfl: jax.Array
     precip_accum: jax.Array
 
 
@@ -98,10 +107,15 @@ def pack_carry(state, q_v, q_c, q_r,
                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                step_index,
-               target_moisture=None, precip_accum=None):
+               target_moisture=None, target_mass=None,
+               max_cfl=None, precip_accum=None):
     """Pack driver state into a SegmentCarry for the compiled kernel."""
     if target_moisture is None:
         target_moisture = jnp.asarray(0.0)
+    if target_mass is None:
+        target_mass = jnp.asarray(0.0)
+    if max_cfl is None:
+        max_cfl = jnp.asarray(0.0)
     if precip_accum is None:
         precip_accum = jnp.zeros_like(state.p_s.data)
     return SegmentCarry(
@@ -121,6 +135,8 @@ def pack_carry(state, q_v, q_c, q_r,
         held_sw_down_toa=held_sw_down_toa,
         step_index=jnp.int32(step_index),
         target_moisture=jnp.asarray(target_moisture),
+        target_mass=jnp.asarray(target_mass),
+        max_cfl=jnp.asarray(max_cfl),
         precip_accum=precip_accum,
     )
 
@@ -198,6 +214,40 @@ def compute_segment_length(
 # Compiled segment builder
 # ======================================================================
 
+class SegmentForcing(NamedTuple):
+    """Per-segment external forcing arrays.
+
+    These change at every segment boundary (SST, solar, ozone, etc.)
+    and are passed as explicit arguments to ``run_segment`` so that the
+    compiled kernel can be reused across segments without recompilation.
+    """
+    sst: jax.Array
+    sic: jax.Array
+    day_of_year: jax.Array
+    seconds_of_day: jax.Array
+    solar_weights: jax.Array
+    s_0: jax.Array
+    o3_vmr: jax.Array
+    aerosol_od: jax.Array
+
+
+def pack_forcing(
+    sst, sic, day_of_year, seconds_of_day,
+    solar_weights, s_0, o3_vmr, aerosol_od,
+) -> SegmentForcing:
+    """Pack per-segment forcing into a SegmentForcing pytree."""
+    return SegmentForcing(
+        sst=jnp.asarray(sst),
+        sic=jnp.asarray(sic),
+        day_of_year=jnp.asarray(day_of_year),
+        seconds_of_day=jnp.asarray(seconds_of_day),
+        solar_weights=jnp.asarray(solar_weights),
+        s_0=jnp.asarray(s_0),
+        o3_vmr=jnp.asarray(o3_vmr),
+        aerosol_od=jnp.asarray(aerosol_od),
+    )
+
+
 def build_segment_fn(
     model,
     step_unified,
@@ -210,16 +260,8 @@ def build_segment_fn(
     fix_moisture: bool,
     fric_decay,
     qv_smooth_coeff,
-    sst,
-    sic,
     lat,
     lon,
-    day_of_year,
-    seconds_of_day,
-    solar_weights,
-    s_0,
-    o3_vmr,
-    aerosol_od,
     start_day: float,
     gradient_checkpoint: bool | None = None,
     hyperdiffusion_3d_fn=None,
@@ -238,6 +280,11 @@ def build_segment_fn(
     The returned function runs ``n_steps`` of the full atmosphere
     integration (dynamics + physics + fixers) inside ``jax.lax.scan``,
     compiled as a single XLA program.
+
+    Per-segment forcing (SST, SIC, solar, ozone, aerosol) is passed as
+    a ``SegmentForcing`` argument to the returned function, **not**
+    captured in the closure.  This allows the same compiled kernel to be
+    reused across segments without JIT recompilation.
 
     Parameters
     ----------
@@ -259,16 +306,8 @@ def build_segment_fn(
         Whether to apply moisture fixer.
     fric_decay, qv_smooth_coeff
         Rayleigh friction and smoothing parameters.
-    sst, sic : jax.Array
-        Sea surface temperature and ice concentration (fixed within segment).
     lat, lon : jax.Array
         Grid coordinates.
-    day_of_year, seconds_of_day : float
-        Time state (fixed within segment — updated at segment boundaries).
-    solar_weights, s_0 : jax.Array / float
-        Solar forcing (fixed within segment).
-    o3_vmr, aerosol_od : jax.Array
-        External forcing (fixed within segment).
     start_day : float
         Start day for the entire run (used to compute step→day).
     gradient_checkpoint : bool or None, optional
@@ -280,9 +319,17 @@ def build_segment_fn(
     Returns
     -------
     callable
-        ``run_segment(carry: SegmentCarry, n_steps: int) -> SegmentCarry``
+        ``run_segment(carry: SegmentCarry, n_steps: int,
+        forcing: SegmentForcing) -> SegmentCarry``
     """
-    from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
+    from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic, fix_ps_mass_target
+    from legoesm.core.cfl import cfl_number_from_state, estimate_min_dx_cubed_sphere
+
+    # Precompute minimum grid spacing for CFL monitoring
+    if hasattr(grid, 'n'):
+        _dx_min = jnp.asarray(estimate_min_dx_cubed_sphere(grid.n))
+    else:
+        _dx_min = jnp.asarray(1e6)  # safe default for non-cubed-sphere grids
 
     if hyperdiffusion_3d_fn is None:
         from legoesm.core.operators_3d import hyperdiffusion_3d
@@ -291,19 +338,8 @@ def build_segment_fn(
 
     do_sat_adjust = (microphysics == "none")
 
-
-    # Convert scalars to JAX tracers once.
-    # Use jnp.asarray so the dtype follows the ambient precision
-    # (float32 by default, float64 when jax_enable_x64 is set).
+    # Convert static scalars to JAX arrays once (these don't change per segment).
     _dt = jnp.asarray(dt)
-    _day_of_year = jnp.asarray(day_of_year)
-    _seconds_of_day = jnp.asarray(seconds_of_day)
-    _s_0 = jnp.asarray(s_0)
-    _solar_weights = jnp.asarray(solar_weights)
-    _sst = jnp.asarray(sst)
-    _sic = jnp.asarray(sic)
-    _o3_vmr = jnp.asarray(o3_vmr)
-    _aerosol_od = jnp.asarray(aerosol_od)
     _fric_decay = jnp.asarray(fric_decay)
     _tau_equator = jnp.asarray(tau_equator) if tau_equator is not None else None
     _tau_pole = jnp.asarray(tau_pole) if tau_pole is not None else None
@@ -320,122 +356,135 @@ def build_segment_fn(
             k: jnp.float64(v) for k, v in ghg_vmr_override.items()
         }
 
-    def _single_step(carry: SegmentCarry, _unused) -> tuple:
-        """One atmosphere step: dynamics → physics → fixers."""
-        step_idx = carry.step_index
+    def _make_single_step(forcing: SegmentForcing):
+        """Create the scan body closed over a specific forcing pytree.
 
-        # --- Dynamics ---
-        # Reconstruct a minimal state for the model.step call.
-        # The model operates on Field-wrapped NamedTuples, but inside
-        # lax.scan we work with raw arrays.  We rely on the model's
-        # internal JIT handling array inputs.
-        dyn_state = model.step(
-            _rebuild_state(carry, model),
-            _dt,
-        )
+        The forcing is passed through the scan as a constant (not
+        varying per step), so closing here is equivalent to passing it
+        in scan's xs — but simpler.
+        """
+        def _single_step(carry: SegmentCarry, _unused) -> tuple:
+            """One atmosphere step: dynamics → physics → fixers."""
+            step_idx = carry.step_index
 
-        T_new = dyn_state.T.data
-        u_new = dyn_state.u.data
-        v_new = dyn_state.v.data
-        p_s_new = dyn_state.p_s.data
-
-        # --- Physics with radiation sub-cycling ---
-        need_rad = jnp.where(
-            rad_update_steps <= 1,
-            jnp.bool_(True),
-            ((step_idx + 1) % rad_update_steps) == 0,
-        )
-
-        phys_out, held_new = step_unified(
-            need_rad,
-            T_new, p_s_new,
-            carry.q_v, carry.q_c, carry.q_r,
-            u_new, v_new,
-            _sst, _sic, lat, lon,
-            _day_of_year, _seconds_of_day, _dt,
-            _solar_weights, _s_0,
-            _o3_vmr, _aerosol_od,
-            carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
-            carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
-            tau_equator=_tau_equator, tau_pole=_tau_pole,
-            sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
-            C_H=_C_H, C_E=_C_E,
-            albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
-            ghg_vmr_override=_ghg_vmr_override,
-        )
-
-        # --- State update ---
-        T_upd = T_new + _dt * phys_out.dT_dt
-        q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
-        q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
-        q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
-
-        # --- Saturation adjustment ---
-        if do_sat_adjust:
-            p_full = p_s_new[..., None] * sigma_full
-            q_sat = saturation_mixing_ratio(T_upd, p_full)
-            excess = jnp.maximum(q_v_upd - q_sat, 0.0)
-            q_v_upd = q_v_upd - excess
-            T_upd = T_upd + constants.L_v * excess / constants.c_pd
-
-        # --- Moisture fixer (uses fixed target from initialization) ---
-        if fix_moisture:
-            q_v_upd = fix_moisture_hydrostatic(
-                q_v_upd, carry.target_moisture,
-                p_s_new, dsigma, grid,
+            # --- Dynamics ---
+            dyn_state = model.step(
+                _rebuild_state(carry, model),
+                _dt,
             )
 
-        # --- Moisture smoothing ---
-        q_v_upd = jnp.maximum(
-            q_v_upd + _dt * hyperdiffusion_3d(q_v_upd, grid, qv_smooth_coeff),
-            0.0,
-        )
+            T_new = dyn_state.T.data
+            u_new = dyn_state.u.data
+            v_new = dyn_state.v.data
+            p_s_new = dyn_state.p_s.data
 
-        # --- Rayleigh friction ---
-        u_upd = u_new * _fric_decay
-        v_upd = v_new * _fric_decay
+            # --- Dry mass fixer (target-anchored) ---
+            # Only active when target_mass > 0 (set at initialization).
+            p_s_new = jnp.where(
+                carry.target_mass > 0.0,
+                fix_ps_mass_target(p_s_new, carry.target_mass, grid),
+                p_s_new,
+            )
 
-        # --- Accumulate precipitation ---
-        precip_step = phys_out.precipitation if hasattr(phys_out, 'precipitation') else jnp.zeros_like(p_s_new)
-        precip_accum = carry.precip_accum + precip_step * _dt
+            # --- Physics with radiation sub-cycling ---
+            need_rad = jnp.where(
+                rad_update_steps <= 1,
+                jnp.bool_(True),
+                ((step_idx + 1) % rad_update_steps) == 0,
+            )
 
-        # Cast all arrays back to carry input dtypes to prevent
-        # float32→float64 promotion from Python float constants
-        # (e.g., constants.L_v, constants.c_pd) breaking jax.lax.scan.
-        def _match_dtype(new_val, ref_val):
-            if hasattr(ref_val, 'dtype') and hasattr(new_val, 'dtype'):
-                return new_val.astype(ref_val.dtype) if new_val.dtype != ref_val.dtype else new_val
-            return new_val
+            phys_out, held_new = step_unified(
+                need_rad,
+                T_new, p_s_new,
+                carry.q_v, carry.q_c, carry.q_r,
+                u_new, v_new,
+                forcing.sst, forcing.sic, lat, lon,
+                forcing.day_of_year, forcing.seconds_of_day, _dt,
+                forcing.solar_weights, forcing.s_0,
+                forcing.o3_vmr, forcing.aerosol_od,
+                carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
+                carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
+                tau_equator=_tau_equator, tau_pole=_tau_pole,
+                sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
+                C_H=_C_H, C_E=_C_E,
+                albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                ghg_vmr_override=_ghg_vmr_override,
+            )
 
-        new_carry = SegmentCarry(
-            u=_match_dtype(u_upd, carry.u),
-            v=_match_dtype(v_upd, carry.v),
-            T=_match_dtype(T_upd, carry.T),
-            p_s=_match_dtype(p_s_new, carry.p_s),
-            phis=carry.phis,
-            q_v=_match_dtype(q_v_upd, carry.q_v),
-            q_c=_match_dtype(q_c_upd, carry.q_c),
-            q_r=_match_dtype(q_r_upd, carry.q_r),
-            held_dT_rad=_match_dtype(held_new[0], carry.held_dT_rad),
-            held_sw_net_sfc=_match_dtype(held_new[1], carry.held_sw_net_sfc),
-            held_lw_net_sfc=_match_dtype(held_new[2], carry.held_lw_net_sfc),
-            held_sw_up_toa=_match_dtype(held_new[3], carry.held_sw_up_toa),
-            held_lw_up_toa=_match_dtype(held_new[4], carry.held_lw_up_toa),
-            held_sw_down_toa=_match_dtype(held_new[5], carry.held_sw_down_toa),
-            step_index=step_idx + 1,
-            target_moisture=carry.target_moisture,
-            precip_accum=_match_dtype(precip_accum, carry.precip_accum),
-        )
-        return new_carry, None
+            # --- State update ---
+            T_upd = T_new + _dt * phys_out.dT_dt
+            q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
+            q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
+            q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
 
-    # Optionally wrap scan body with gradient checkpointing so that
-    # reverse-mode AD uses O(sqrt(N)) memory instead of O(N).
-    _step_fn = _single_step
-    if gradient_checkpoint:
-        _step_fn = jax.checkpoint(_single_step, prevent_cse=False)
+            # --- Saturation adjustment ---
+            if do_sat_adjust:
+                p_full = p_s_new[..., None] * sigma_full
+                q_sat = saturation_mixing_ratio(T_upd, p_full)
+                excess = jnp.maximum(q_v_upd - q_sat, 0.0)
+                q_v_upd = q_v_upd - excess
+                T_upd = T_upd + constants.L_v * excess / constants.c_pd
+
+            # --- Moisture fixer (uses fixed target from initialization) ---
+            if fix_moisture:
+                q_v_upd = fix_moisture_hydrostatic(
+                    q_v_upd, carry.target_moisture,
+                    p_s_new, dsigma, grid,
+                )
+
+            # --- Moisture smoothing ---
+            q_v_upd = jnp.maximum(
+                q_v_upd + _dt * hyperdiffusion_3d(q_v_upd, grid, qv_smooth_coeff),
+                0.0,
+            )
+
+            # --- Rayleigh friction ---
+            u_upd = u_new * _fric_decay
+            v_upd = v_new * _fric_decay
+
+            # --- CFL monitoring ---
+            step_cfl = cfl_number_from_state(u_upd, v_upd, _dx_min, _dt)
+            max_cfl = jnp.maximum(carry.max_cfl, step_cfl)
+
+            # --- Accumulate precipitation ---
+            precip_step = phys_out.precipitation if hasattr(phys_out, 'precipitation') else jnp.zeros_like(p_s_new)
+            precip_accum = carry.precip_accum + precip_step * _dt
+
+            # Cast all arrays back to carry input dtypes to prevent
+            # float32→float64 promotion from Python float constants
+            # (e.g., constants.L_v, constants.c_pd) breaking jax.lax.scan.
+            def _match_dtype(new_val, ref_val):
+                if hasattr(ref_val, 'dtype') and hasattr(new_val, 'dtype'):
+                    return new_val.astype(ref_val.dtype) if new_val.dtype != ref_val.dtype else new_val
+                return new_val
+
+            new_carry = SegmentCarry(
+                u=_match_dtype(u_upd, carry.u),
+                v=_match_dtype(v_upd, carry.v),
+                T=_match_dtype(T_upd, carry.T),
+                p_s=_match_dtype(p_s_new, carry.p_s),
+                phis=carry.phis,
+                q_v=_match_dtype(q_v_upd, carry.q_v),
+                q_c=_match_dtype(q_c_upd, carry.q_c),
+                q_r=_match_dtype(q_r_upd, carry.q_r),
+                held_dT_rad=_match_dtype(held_new[0], carry.held_dT_rad),
+                held_sw_net_sfc=_match_dtype(held_new[1], carry.held_sw_net_sfc),
+                held_lw_net_sfc=_match_dtype(held_new[2], carry.held_lw_net_sfc),
+                held_sw_up_toa=_match_dtype(held_new[3], carry.held_sw_up_toa),
+                held_lw_up_toa=_match_dtype(held_new[4], carry.held_lw_up_toa),
+                held_sw_down_toa=_match_dtype(held_new[5], carry.held_sw_down_toa),
+                step_index=step_idx + 1,
+                target_moisture=carry.target_moisture,
+                target_mass=carry.target_mass,
+                max_cfl=max_cfl,
+                precip_accum=_match_dtype(precip_accum, carry.precip_accum),
+            )
+            return new_carry, None
+        return _single_step
 
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
-    def run_segment(carry: SegmentCarry, n_steps: int) -> SegmentCarry:
+    def run_segment(carry: SegmentCarry, n_steps: int,
+                    forcing: SegmentForcing) -> SegmentCarry:
         """Run n_steps of the atmosphere integration as a compiled kernel.
 
         Parameters
@@ -448,12 +497,19 @@ def build_segment_fn(
             ``n_steps`` triggers recompilation.  In practice the segment
             length is constant (the GCD of cadence intervals), so this
             causes at most one extra compile for the final short segment.
+        forcing : SegmentForcing
+            Per-segment external forcing (SST, SIC, solar, ozone, etc.).
+            Traced as a dynamic argument — changing forcing values does
+            **not** trigger recompilation.
 
         Returns
         -------
         SegmentCarry
             Updated state after n_steps.
         """
+        _step_fn = _make_single_step(forcing)
+        if gradient_checkpoint:
+            _step_fn = jax.checkpoint(_step_fn, prevent_cse=False)
         final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
         return final_carry
 

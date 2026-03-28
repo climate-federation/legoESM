@@ -165,6 +165,7 @@ def save_checkpoint(
     diag_accumulators: dict | None = None,
     q_c: jnp.ndarray | None = None,
     q_r: jnp.ndarray | None = None,
+    carry_aux: dict | None = None,
 ) -> None:
     """Save a checkpoint for restart.
 
@@ -214,6 +215,11 @@ def save_checkpoint(
     if diag_accumulators:
         for k, v in diag_accumulators.items():
             arrays[f"diag_{k}"] = np.asarray(v)
+
+    # Save carry auxiliary fields (held radiation, target_moisture, etc.)
+    if carry_aux:
+        for k, v in carry_aux.items():
+            arrays[f"carry_{k}"] = np.asarray(v)
 
     np.savez(str(path), **arrays)
 
@@ -288,4 +294,10 @@ def load_checkpoint(
     q_c = jnp.array(data["q_c"], dtype=_storage_dtype) if "q_c" in data.files else None
     q_r = jnp.array(data["q_r"], dtype=_storage_dtype) if "q_r" in data.files else None
 
-    return state, q_v, step, day, config, diag_accumulators, q_c, q_r
+    # Restore carry auxiliary fields (held radiation, etc.)
+    carry_aux = {}
+    for key in data.files:
+        if key.startswith("carry_"):
+            carry_aux[key[6:]] = jnp.array(data[key], dtype=_storage_dtype)
+
+    return state, q_v, step, day, config, diag_accumulators, q_c, q_r, carry_aux

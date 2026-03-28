@@ -188,6 +188,8 @@ class TestSegmentCarryJIT:
             held_sw_down_toa=jnp.zeros(shape2d, dtype=jnp.float32),
             step_index=jnp.int32(0),
             target_moisture=jnp.float32(0.0),
+            target_mass=jnp.float32(0.0),
+            max_cfl=jnp.float32(0.0),
             precip_accum=jnp.zeros(shape2d, dtype=jnp.float32),
         )
 

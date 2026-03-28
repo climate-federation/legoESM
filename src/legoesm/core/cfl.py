@@ -123,6 +123,32 @@ def adaptive_hyperdiff_coeff(
     return safety * C_n * dx_min ** order / dt
 
 
+def cfl_number_from_state(
+    u, v, dx_min: float, dt: float,
+):
+    """Compute the advective CFL number from wind fields (JAX-traceable).
+
+    CFL = max(|u|, |v|) * dt * sqrt(2) / dx_min
+
+    Parameters
+    ----------
+    u, v : jax.Array
+        Wind components, any shape.
+    dx_min : float
+        Minimum grid spacing [m].
+    dt : float
+        Time step [s].
+
+    Returns
+    -------
+    jax.Array (scalar)
+        Maximum CFL number across all grid points and levels.
+    """
+    import jax.numpy as jnp
+    speed = jnp.sqrt(u ** 2 + v ** 2)
+    return jnp.max(speed) * dt * jnp.sqrt(2.0) / dx_min
+
+
 def cfl_check_and_adjust(
     dt: float,
     n: int,

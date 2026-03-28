@@ -131,6 +131,9 @@ def main():
     parser.add_argument("--clear-sky-diag", action="store_true", default=False)
 
     # Performance
+    parser.add_argument("--precision", type=str, default="fp32",
+                        choices=["fp32", "fp64", "mixed"],
+                        help="Precision mode: fp32, fp64, or mixed")
     parser.add_argument("--gradient-checkpoint", action="store_true", default=False,
                         help="Enable gradient checkpointing for O(sqrt(N)) AD memory")
     parser.add_argument("--profile", type=int, default=0, metavar="N_STEPS",
@@ -227,6 +230,7 @@ def main():
         dynamic_albedo=args.dynamic_albedo,
         experiment=args.experiment,
         start_year=args.start_year,
+        precision=args.precision,
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
         ensemble_size=args.ensemble_size,

@@ -62,6 +62,7 @@ class ModelDriver:
         self._hyperdiffusion_3d_fn = None
         self._ensemble_size = 1
         self._device_config = None
+        self._carry_aux: dict = {}  # held radiation + carry metadata for checkpoint
 
         if output_dir is not None:
             self._output_dir = Path(output_dir)
@@ -107,6 +108,11 @@ class ModelDriver:
         """Initialize grid, dycore, physics, forcing, and state."""
         # Strict validation — abort early on invalid parameters
         self.config.validate_strict()
+
+        # Activate precision policy before any JAX array creation.
+        from legoesm.runtime.precision import apply_precision
+        apply_precision(self.config.precision)
+        logger.info(f"  Precision: {self.config.precision}")
 
         # Config cross-validation
         config_warnings = self.config.validate()
@@ -627,6 +633,7 @@ class ModelDriver:
             config=self.config,
             q_c=self.q_c,
             q_r=self.q_r,
+            carry_aux=self._carry_aux if self._carry_aux else None,
             backend=backend,
         )
         logger.info(f"  Checkpoint: {ckpt_path.name}")
@@ -639,13 +646,14 @@ class ModelDriver:
         result = load_restart(
             Path(path), self.grid, self.sigma, strict=True,
         )
-        state, q_v, step, day, _, _, q_c, q_r, metadata = result
+        state, q_v, step, day, _, _, q_c, q_r, metadata, carry_aux = result
         self.state = state
         self.q_v = q_v
         if q_c is not None:
             self.q_c = q_c
         if q_r is not None:
             self.q_r = q_r
+        self._carry_aux = carry_aux if carry_aux else {}
         if metadata:
             logger.info(f"  Loaded restart: step={step}, day={day}, "
                        f"digest={metadata.state_digest[:16]}...")
@@ -912,7 +920,7 @@ class ModelDriver:
         from legoesm.forcing.external import get_solar_forcing_at_time
         from legoesm.driver.compiled_segments import (
             SegmentCarry, pack_carry, unpack_carry,
-            compute_segment_length, build_segment_fn,
+            compute_segment_length, build_segment_fn, pack_forcing,
         )
 
         cfg = self.config
@@ -953,34 +961,80 @@ class ModelDriver:
         # Build JIT-compiled unified physics step
         step_unified = self.physics.build_step_unified()
 
-        # Initial held radiation tendencies
-        # For ensemble runs, each member gets its own held fields
+        # Initial held radiation tendencies — restore from checkpoint if available
         _ens = self._ensemble_size
         _ens_3d = (_ens, *shape_3d) if _ens > 1 else shape_3d
         _ens_2d = (_ens, *shape_2d) if _ens > 1 else shape_2d
-        held_dT_rad = jnp.zeros(_ens_3d)
-        held_sw_net_sfc = jnp.zeros(_ens_2d)
-        held_lw_net_sfc = jnp.zeros(_ens_2d)
-        held_sw_up_toa = jnp.zeros(_ens_2d)
-        held_lw_up_toa = jnp.zeros(_ens_2d)
-        held_sw_down_toa = jnp.zeros(_ens_2d)
+        _aux = self._carry_aux
+        held_dT_rad = _aux.get("held_dT_rad", jnp.zeros(_ens_3d))
+        held_sw_net_sfc = _aux.get("held_sw_net_sfc", jnp.zeros(_ens_2d))
+        held_lw_net_sfc = _aux.get("held_lw_net_sfc", jnp.zeros(_ens_2d))
+        held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d))
+        held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d))
+        held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d))
 
         # External forcing
         o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
             START_DAY, self.state.p_s.data, self._grid_lat,
         )
 
-        # Compute fixed moisture target for conservation fixer
+        # Compute fixed moisture target for conservation fixer —
+        # restore from checkpoint if available, else compute from IC.
         from legoesm.core.conservation import compute_global_moisture
-        _target_moisture = jnp.asarray(0.0)
-        if cfg.fix_moisture:
+        _target_moisture = _aux.get("target_moisture", jnp.asarray(0.0))
+        if cfg.fix_moisture and float(_target_moisture) == 0.0:
             _target_moisture = compute_global_moisture(
                 self.q_v, self.state.p_s.data, dsigma, self.grid,
             )
             logger.info(f"  Moisture target: {float(_target_moisture):.6e} kg")
 
+        # Compute fixed dry mass target for target-anchored conservation
+        from legoesm.core.operators import global_integral
+        from legoesm.core.field import Field
+        _p_s_field = Field(self.state.p_s.data, name="p_s", dims=("face", "x", "y"), units="Pa")
+        _target_mass = _aux.get("target_mass", jnp.asarray(0.0))
+        if cfg.dycore.fix_mass and float(_target_mass) == 0.0:
+            _target_mass = global_integral(_p_s_field, self.grid)
+            logger.info(f"  Mass target: {float(_target_mass):.6e} Pa·m²")
+
         run_status = "COMPLETED"
         lat_deg_grid = np.degrees(np.asarray(self._grid_lat))
+
+        # Build the compiled segment function ONCE (outside the loop).
+        # Per-segment forcing (SST, SIC, solar, ozone, aerosol) is now
+        # passed as an explicit SegmentForcing argument to run_segment,
+        # so changing forcing values does NOT trigger JIT recompilation.
+        run_segment = build_segment_fn(
+            model=self.model,
+            step_unified=step_unified,
+            grid=self.grid,
+            sigma_full=sigma_full,
+            dsigma=dsigma,
+            dt=DT,
+            rad_update_steps=RAD_UPDATE_STEPS,
+            microphysics=cfg.microphysics,
+            fix_moisture=cfg.fix_moisture,
+            fric_decay=self._fric_decay,
+            qv_smooth_coeff=self._qv_smooth_coeff,
+            lat=self._grid_lat,
+            lon=self._grid_lon,
+            start_day=START_DAY,
+            gradient_checkpoint=(
+                cfg.gradient_checkpoint
+                if cfg.gradient_checkpoint
+                else segment_length > 50
+            ),
+            hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
+            tau_equator=cfg.tau_equator,
+            tau_pole=cfg.tau_pole,
+            sbm_tau_c=cfg.sbm_tau_c,
+            sbm_RH_ref=cfg.sbm_RH_ref,
+            C_H=cfg.C_H,
+            C_E=cfg.C_E,
+            albedo_ice=cfg.albedo_ice,
+            albedo_ocean=cfg.albedo_ocean,
+            ghg_vmr_override=ghg_vmr,
+        )
 
         logger.info(
             f"Starting compiled run: {n_steps_remaining} steps, "
@@ -1008,47 +1062,12 @@ class ModelDriver:
                     day, self.state.p_s.data, self._grid_lat,
                 )
 
-            # Build the compiled segment function.
-            # On the first call this triggers JIT compilation; subsequent
-            # calls with the same segment_length reuse the cached executable.
-            run_segment = build_segment_fn(
-                model=self.model,
-                step_unified=step_unified,
-                grid=self.grid,
-                sigma_full=sigma_full,
-                dsigma=dsigma,
-                dt=DT,
-                rad_update_steps=RAD_UPDATE_STEPS,
-                microphysics=cfg.microphysics,
-                fix_moisture=cfg.fix_moisture,
-                fric_decay=self._fric_decay,
-                qv_smooth_coeff=self._qv_smooth_coeff,
-                sst=sst,
-                sic=sic,
-                lat=self._grid_lat,
-                lon=self._grid_lon,
-                day_of_year=day_of_year,
-                seconds_of_day=seconds_of_day,
-                solar_weights=solar_weights,
-                s_0=current_s_0,
-                o3_vmr=o3_vmr,
-                aerosol_od=aerosol_od,
-                start_day=START_DAY,
-                gradient_checkpoint=(
-                    cfg.gradient_checkpoint
-                    if cfg.gradient_checkpoint
-                    else segment_length > 50
-                ),
-                hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
-                tau_equator=cfg.tau_equator,
-                tau_pole=cfg.tau_pole,
-                sbm_tau_c=cfg.sbm_tau_c,
-                sbm_RH_ref=cfg.sbm_RH_ref,
-                C_H=cfg.C_H,
-                C_E=cfg.C_E,
-                albedo_ice=cfg.albedo_ice,
-                albedo_ocean=cfg.albedo_ocean,
-                ghg_vmr_override=ghg_vmr,
+            # Pack per-segment forcing into a SegmentForcing pytree.
+            forcing = pack_forcing(
+                sst=sst, sic=sic,
+                day_of_year=day_of_year, seconds_of_day=seconds_of_day,
+                solar_weights=solar_weights, s_0=current_s_0,
+                o3_vmr=o3_vmr, aerosol_od=aerosol_od,
             )
 
             # Pack state into carry
@@ -1058,6 +1077,7 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 current_step,
                 target_moisture=_target_moisture,
+                target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d),
             )
 
@@ -1072,9 +1092,9 @@ class ModelDriver:
 
             # Execute compiled segment (vmap over ensemble if needed)
             if self._ensemble_size > 1:
-                carry = jax.vmap(run_segment, in_axes=(0, None))(carry, seg_steps)
+                carry = jax.vmap(run_segment, in_axes=(0, None, None))(carry, seg_steps, forcing)
             else:
-                carry = run_segment(carry, seg_steps)
+                carry = run_segment(carry, seg_steps, forcing)
 
             if seg_idx == 0:
                 jax.block_until_ready(carry.u)
@@ -1085,6 +1105,8 @@ class ModelDriver:
             # For ensemble runs, unpack the ensemble-mean for diagnostics;
             # keep full ensemble in carry for the next segment.
             _target_moisture = carry.target_moisture
+            _target_mass = carry.target_mass
+            _seg_max_cfl = float(carry.max_cfl)
             if self._ensemble_size > 1:
                 from legoesm.parallel.ensemble import ensemble_mean
                 mean_carry = ensemble_mean(carry)
@@ -1095,6 +1117,18 @@ class ModelDriver:
                  held_tuple, _, seg_precip) = unpack_carry(carry, self.state)
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
+
+            # Keep carry auxiliary fields for checkpoint persistence
+            self._carry_aux = {
+                "held_dT_rad": held_dT_rad,
+                "held_sw_net_sfc": held_sw_net_sfc,
+                "held_lw_net_sfc": held_lw_net_sfc,
+                "held_sw_up_toa": held_sw_up_toa,
+                "held_lw_up_toa": held_lw_up_toa,
+                "held_sw_down_toa": held_sw_down_toa,
+                "target_moisture": _target_moisture,
+                "target_mass": _target_mass,
+            }
 
             current_step = seg_end_step
 
@@ -1135,6 +1169,10 @@ class ModelDriver:
                     f"{eta_str}"
                 )
 
+                # CFL monitoring
+                if _seg_max_cfl > 0:
+                    logger.info(f"    CFL max: {_seg_max_cfl:.2f}")
+
                 # Stability check
                 error = self.diagnostics.check_stability(self.state, elapsed_day)
                 if error:
@@ -1142,9 +1180,45 @@ class ModelDriver:
                     run_status = error
                     break
 
+                # Adaptive dt: if CFL exceeds threshold, halve dt and rebuild
+                if _seg_max_cfl > 1.0:
+                    DT = DT / 2.0
+                    logger.warning(
+                        f"  CFL={_seg_max_cfl:.2f} > 1.0 at day {elapsed_day:.0f}. "
+                        f"Halving dt to {DT:.0f}s."
+                    )
+                    n_steps_total = int(cfg.days * 86400 / DT)
+                    diag_interval = int(cfg.output.diag_days * 86400 / DT)
+                    checkpoint_interval = (
+                        int(cfg.output.checkpoint_days * 86400 / DT)
+                        if cfg.output.checkpoint_days > 0 else 0
+                    )
+                    segment_length = compute_segment_length(
+                        diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
+                    )
+                    run_segment = build_segment_fn(
+                        model=self.model, step_unified=step_unified,
+                        grid=self.grid, sigma_full=sigma_full, dsigma=dsigma,
+                        dt=DT, rad_update_steps=RAD_UPDATE_STEPS,
+                        microphysics=cfg.microphysics, fix_moisture=cfg.fix_moisture,
+                        fric_decay=self._fric_decay, qv_smooth_coeff=self._qv_smooth_coeff,
+                        lat=self._grid_lat, lon=self._grid_lon, start_day=START_DAY,
+                        gradient_checkpoint=cfg.gradient_checkpoint or segment_length > 50,
+                        hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
+                        tau_equator=cfg.tau_equator, tau_pole=cfg.tau_pole,
+                        sbm_tau_c=cfg.sbm_tau_c, sbm_RH_ref=cfg.sbm_RH_ref,
+                        C_H=cfg.C_H, C_E=cfg.C_E,
+                        albedo_ice=cfg.albedo_ice, albedo_ocean=cfg.albedo_ocean,
+                        ghg_vmr_override=ghg_vmr,
+                    )
+
             # Checkpoint
             if checkpoint_interval > 0 and current_step % checkpoint_interval == 0:
                 self.save_checkpoint(current_step, day)
+
+            # Periodic diagnostic flush (every ~365 days) to cap memory
+            if elapsed_day > 0 and int(elapsed_day) % 365 == 0 and diag_interval > 0 and current_step % diag_interval == 0:
+                self.diagnostics.flush_to_disk(self._output_dir)
 
         # Finalize
         jax.block_until_ready(self.state.u.data)
