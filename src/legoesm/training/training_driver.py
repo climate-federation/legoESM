@@ -13,32 +13,118 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import NamedTuple
+from typing import Callable
 
-import jax
 import jax.numpy as jnp
 import equinox as eqx
 import optax
 
-from legoesm.driver.compiled_segments import (
-    build_segment_fn,
-    pack_forcing,
-    SegmentForcing,
-)
+from legoesm.driver.compiled_segments import build_segment_fn
 from legoesm.training.losses import combined_loss, LossConfig
-from legoesm.training.dycore_rollout import (
-    RolloutConfig,
-    single_day_rollout,
-    differentiable_rollout,
-)
+from legoesm.training.dycore_rollout import single_day_rollout
 
 logger = logging.getLogger(__name__)
 
 
-class TrainingState(NamedTuple):
-    """Mutable training state."""
-    step: int
-    best_loss: float
+# ======================================================================
+# Shared helpers (avoid copy-paste across modes)
+# ======================================================================
+
+def _build_training_segment(model, step_unified, grid, sigma, dt, **extra_kwargs):
+    """Build a segment function with standard training defaults.
+
+    Encapsulates the boilerplate kwargs shared by all training modes.
+    Returns the compiled segment function (use ``.raw`` for AD).
+    """
+    sigma_full = jnp.asarray(sigma.sigma_full)
+    return build_segment_fn(
+        model=model,
+        step_unified=step_unified,
+        grid=grid,
+        sigma_full=sigma_full,
+        dsigma=jnp.asarray(sigma.dsigma),
+        dt=dt,
+        rad_update_steps=1,
+        microphysics="none",
+        fix_moisture=False,
+        fix_mass=False,
+        fric_decay=jnp.ones(sigma_full.shape[0]),
+        qv_smooth_coeff=0.0,
+        lat=grid.lat,
+        lon=grid.lon,
+        start_day=0.0,
+        gradient_checkpoint=True,
+        **extra_kwargs,
+    )
+
+
+def _training_loop(
+    make_loss_fn: Callable,
+    params,
+    optimizer,
+    initial_carries,
+    target_carries,
+    forcings,
+    sigma_full,
+    *,
+    n_epochs: int = 100,
+    loss_config: LossConfig = LossConfig(),
+    log_every: int = 10,
+    log_params: bool = False,
+):
+    """Generic training loop shared by all modes.
+
+    Parameters
+    ----------
+    make_loss_fn : callable
+        ``(params, ic, target, forcing) -> scalar_loss``
+        Factory that creates the differentiable loss for one sample.
+    params : eqx.Module
+        Initial learnable parameters.
+    optimizer : optax.GradientTransformation
+    initial_carries, target_carries, forcings : lists of training data
+    sigma_full : jax.Array
+    n_epochs, loss_config, log_every : training config
+    log_params : bool
+        If True, log parameter values each epoch (for physics param tuning).
+
+    Returns
+    -------
+    params : updated parameters
+    loss_history : list[float]
+    """
+    opt_state = optimizer.init(eqx.filter(params, eqx.is_array))
+    loss_history = []
+
+    for epoch in range(n_epochs):
+        epoch_loss = 0.0
+        t0 = time.time()
+
+        for ic, target, forcing in zip(initial_carries, target_carries, forcings):
+            loss_fn = make_loss_fn(params, ic, target, forcing)
+            loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
+            epoch_loss += float(loss)
+
+            updates, opt_state = optimizer.update(
+                eqx.filter(grads, eqx.is_array),
+                opt_state,
+                eqx.filter(params, eqx.is_array),
+            )
+            params = eqx.apply_updates(params, updates)
+
+        avg_loss = epoch_loss / max(len(initial_carries), 1)
+        loss_history.append(avg_loss)
+
+        if epoch % log_every == 0 or epoch == n_epochs - 1:
+            elapsed = time.time() - t0
+            msg = f"Epoch {epoch:4d}: loss={avg_loss:.6f}, time={elapsed:.1f}s"
+            if log_params and hasattr(params, 'as_dict'):
+                phys = params.as_dict()
+                param_str = ", ".join(f"{k}={float(v):.4f}" for k, v in phys.items())
+                msg += f", params=[{param_str}]"
+            logger.info(msg)
+
+    return params, loss_history
 
 
 # ======================================================================
@@ -56,7 +142,6 @@ def train_physics_params(
     *,
     n_epochs: int = 100,
     lr: float = 1e-3,
-    rollout_days: int = 1,
     dt: float = 600.0,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
@@ -72,12 +157,7 @@ def train_physics_params(
     initial_carries : list of SegmentCarry — ICs from ERA5
     target_carries : list of SegmentCarry — targets from ERA5
     forcings : list of SegmentForcing — SST/SIC forcing per sample
-    n_epochs : int
-    lr : float — learning rate
-    rollout_days : int — days per rollout
-    dt : float — timestep
-    loss_config : LossConfig
-    log_every : int
+    n_epochs, lr, dt, loss_config, log_every : training config
 
     Returns
     -------
@@ -86,73 +166,26 @@ def train_physics_params(
     """
     from legoesm.training.trainable_params import TrainablePhysicsParams
 
-    # Initialize learnable parameters
     params = TrainablePhysicsParams.from_defaults()
-
-    # Optimizer
-    optimizer = optax.adam(lr)
-    opt_state = optimizer.init(eqx.filter(params, eqx.is_array))
-
-    sigma_full = jnp.asarray(sigma.sigma_full)
     step_unified = physics_pipeline.build_step_unified()
+    sigma_full = jnp.asarray(sigma.sigma_full)
 
-    loss_history = []
-
-    for epoch in range(n_epochs):
-        epoch_loss = 0.0
-        t0 = time.time()
-
-        for i, (ic, target, forcing) in enumerate(
-            zip(initial_carries, target_carries, forcings)
-        ):
-            def _loss_fn(params_):
-                seg_kw = params_.to_segment_kwargs()
-                run_seg = build_segment_fn(
-                    model=model,
-                    step_unified=step_unified,
-                    grid=grid,
-                    sigma_full=sigma_full,
-                    dsigma=jnp.asarray(sigma.dsigma),
-                    dt=dt,
-                    rad_update_steps=1,
-                    microphysics="none",
-                    fix_moisture=False,
-                    fix_mass=False,
-                    fric_decay=jnp.ones(sigma_full.shape[0]),
-                    qv_smooth_coeff=0.0,
-                    lat=grid.lat,
-                    lon=grid.lon,
-                    start_day=0.0,
-                    gradient_checkpoint=True,
-                    **seg_kw,
-                )
-                pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
-                return combined_loss(pred, target, sigma_full, config=loss_config)
-
-            loss, grads = eqx.filter_value_and_grad(_loss_fn)(params)
-            epoch_loss += float(loss)
-
-            # Update parameters
-            updates, opt_state = optimizer.update(
-                eqx.filter(grads, eqx.is_array),
-                opt_state,
-                eqx.filter(params, eqx.is_array),
+    def make_loss_fn(_params, ic, target, forcing):
+        def loss_fn(params_):
+            seg_kw = params_.to_segment_kwargs()
+            run_seg = _build_training_segment(
+                model, step_unified, grid, sigma, dt, **seg_kw,
             )
-            params = eqx.apply_updates(params, updates)
+            pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
+            return combined_loss(pred, target, sigma_full, config=loss_config)
+        return loss_fn
 
-        avg_loss = epoch_loss / max(len(initial_carries), 1)
-        loss_history.append(avg_loss)
-
-        if epoch % log_every == 0 or epoch == n_epochs - 1:
-            elapsed = time.time() - t0
-            phys = params.as_dict()
-            param_str = ", ".join(f"{k}={float(v):.4f}" for k, v in phys.items())
-            logger.info(
-                f"Epoch {epoch:4d}: loss={avg_loss:.6f}, "
-                f"time={elapsed:.1f}s, params=[{param_str}]"
-            )
-
-    return params, loss_history
+    return _training_loop(
+        make_loss_fn, params, optax.adam(lr),
+        initial_carries, target_carries, forcings, sigma_full,
+        n_epochs=n_epochs, loss_config=loss_config,
+        log_every=log_every, log_params=True,
+    )
 
 
 # ======================================================================
@@ -176,10 +209,6 @@ def train_neural_gcm(
 ):
     """Train a neural physics network coupled to the dycore.
 
-    The neural_physics module (eqx.Module) provides tendencies
-    that replace or augment traditional physics inside the compiled
-    segment loop.
-
     Parameters
     ----------
     neural_physics : NeuralPhysics (eqx.Module)
@@ -193,58 +222,23 @@ def train_neural_gcm(
     """
     from legoesm.training.neural_physics import make_neural_step_unified
 
-    optimizer = optax.adamw(lr, weight_decay=1e-5)
-    opt_state = optimizer.init(eqx.filter(neural_physics, eqx.is_array))
-
     sigma_full = jnp.asarray(sigma.sigma_full)
-    loss_history = []
 
-    for epoch in range(n_epochs):
-        epoch_loss = 0.0
-        t0 = time.time()
-
-        for ic, target, forcing in zip(initial_carries, target_carries, forcings):
-
-            def _loss_fn(nn_phys):
-                step_unified = make_neural_step_unified(nn_phys, grid)
-                run_seg = build_segment_fn(
-                    model=model,
-                    step_unified=step_unified,
-                    grid=grid,
-                    sigma_full=sigma_full,
-                    dsigma=jnp.asarray(sigma.dsigma),
-                    dt=dt,
-                    rad_update_steps=1,
-                    microphysics="none",
-                    fix_moisture=False,
-                    fix_mass=False,
-                    fric_decay=jnp.ones(sigma_full.shape[0]),
-                    qv_smooth_coeff=0.0,
-                    lat=grid.lat,
-                    lon=grid.lon,
-                    start_day=0.0,
-                    gradient_checkpoint=True,
-                )
-                pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
-                return combined_loss(pred, target, sigma_full, config=loss_config)
-
-            loss, grads = eqx.filter_value_and_grad(_loss_fn)(neural_physics)
-            epoch_loss += float(loss)
-
-            updates, opt_state = optimizer.update(
-                eqx.filter(grads, eqx.is_array),
-                opt_state,
-                eqx.filter(neural_physics, eqx.is_array),
+    def make_loss_fn(_params, ic, target, forcing):
+        def loss_fn(nn_phys):
+            step_unified = make_neural_step_unified(nn_phys, grid)
+            run_seg = _build_training_segment(
+                model, step_unified, grid, sigma, dt,
             )
-            neural_physics = eqx.apply_updates(neural_physics, updates)
+            pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
+            return combined_loss(pred, target, sigma_full, config=loss_config)
+        return loss_fn
 
-        avg_loss = epoch_loss / max(len(initial_carries), 1)
-        loss_history.append(avg_loss)
-
-        if epoch % log_every == 0:
-            logger.info(f"Epoch {epoch:4d}: loss={avg_loss:.6f}, time={time.time()-t0:.1f}s")
-
-    return neural_physics, loss_history
+    return _training_loop(
+        make_loss_fn, neural_physics, optax.adamw(lr, weight_decay=1e-5),
+        initial_carries, target_carries, forcings, sigma_full,
+        n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
+    )
 
 
 # ======================================================================
@@ -272,9 +266,7 @@ def train_sfno_coupled(
     Parameters
     ----------
     sfno_physics : SFNOPhysics (eqx.Module)
-        SFNO wrapped for physics interface compatibility.
-    coupling_mode : str
-        "correction" (SFNO adds to physics) or "replacement" (SFNO replaces physics).
+    coupling_mode : "correction" or "replacement"
     (other params same as train_neural_gcm)
 
     Returns
@@ -284,57 +276,22 @@ def train_sfno_coupled(
     """
     from legoesm.training.sfno_dycore_coupling import make_sfno_step_unified
 
-    optimizer = optax.adamw(lr, weight_decay=1e-5)
-    opt_state = optimizer.init(eqx.filter(sfno_physics, eqx.is_array))
-
     sigma_full = jnp.asarray(sigma.sigma_full)
-    loss_history = []
 
-    for epoch in range(n_epochs):
-        epoch_loss = 0.0
-        t0 = time.time()
-
-        for ic, target, forcing in zip(initial_carries, target_carries, forcings):
-
-            def _loss_fn(sfno_ph):
-                step_unified = make_sfno_step_unified(
-                    sfno_ph, grid, mode=coupling_mode,
-                )
-                run_seg = build_segment_fn(
-                    model=model,
-                    step_unified=step_unified,
-                    grid=grid,
-                    sigma_full=sigma_full,
-                    dsigma=jnp.asarray(sigma.dsigma),
-                    dt=dt,
-                    rad_update_steps=1,
-                    microphysics="none",
-                    fix_moisture=False,
-                    fix_mass=False,
-                    fric_decay=jnp.ones(sigma_full.shape[0]),
-                    qv_smooth_coeff=0.0,
-                    lat=grid.lat,
-                    lon=grid.lon,
-                    start_day=0.0,
-                    gradient_checkpoint=True,
-                )
-                pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
-                return combined_loss(pred, target, sigma_full, config=loss_config)
-
-            loss, grads = eqx.filter_value_and_grad(_loss_fn)(sfno_physics)
-            epoch_loss += float(loss)
-
-            updates, opt_state = optimizer.update(
-                eqx.filter(grads, eqx.is_array),
-                opt_state,
-                eqx.filter(sfno_physics, eqx.is_array),
+    def make_loss_fn(_params, ic, target, forcing):
+        def loss_fn(sfno_ph):
+            step_unified = make_sfno_step_unified(
+                sfno_ph, grid, mode=coupling_mode,
             )
-            sfno_physics = eqx.apply_updates(sfno_physics, updates)
+            run_seg = _build_training_segment(
+                model, step_unified, grid, sigma, dt,
+            )
+            pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
+            return combined_loss(pred, target, sigma_full, config=loss_config)
+        return loss_fn
 
-        avg_loss = epoch_loss / max(len(initial_carries), 1)
-        loss_history.append(avg_loss)
-
-        if epoch % log_every == 0:
-            logger.info(f"Epoch {epoch:4d}: loss={avg_loss:.6f}, time={time.time()-t0:.1f}s")
-
-    return sfno_physics, loss_history
+    return _training_loop(
+        make_loss_fn, sfno_physics, optax.adamw(lr, weight_decay=1e-5),
+        initial_carries, target_carries, forcings, sigma_full,
+        n_epochs=n_epochs, loss_config=loss_config, log_every=log_every,
+    )

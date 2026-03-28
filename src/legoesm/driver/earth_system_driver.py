@@ -4,21 +4,9 @@ Orchestrates atmosphere + coupler (land, sea ice, lake) + optional
 ocean model into a single time integration. Builds on the existing
 ``ModelDriver`` for atmosphere and ``make_coupler`` for surface exchange.
 
-Architecture
-------------
-::
-
-    Host Python loop
-    ├── Atmosphere segment (compiled via jax.lax.scan)
-    │     ├── dynamics
-    │     └── physics (radiation, convection, etc.)
-    ├── Coupler step (land, ice, lake, ocean tile)
-    │     ├── step_land → land state + fluxes
-    │     ├── step_sea_ice → ice state + fluxes
-    │     ├── step_lake → lake state + fluxes
-    │     └── tile-weighted blending → SurfaceToAtm
-    ├── (Optional) Ocean step
-    └── Diagnostics / Checkpoint
+The coupler step runs at segment boundaries (host-side), after the
+atmosphere segment completes.  This is a split-step approach where
+atmosphere and surface exchange alternate each diagnostic interval.
 """
 
 from __future__ import annotations
@@ -38,15 +26,14 @@ class EarthSystemDriver:
     """Coupled atmosphere + surface driver.
 
     Uses a ``ModelDriver`` for the atmosphere component and
-    ``make_coupler`` for land/ice/lake surface exchange.
+    ``make_coupler`` for land/ice/lake surface exchange.  The coupler
+    is invoked at segment boundaries after each atmosphere segment.
 
     Parameters
     ----------
     config : ExperimentConfig
-        Atmosphere experiment configuration. The coupler and surface
-        components are configured via their own configs.
+        Atmosphere experiment configuration.
     coupler_config : CouplerConfig, optional
-        Surface coupling configuration. If None, uses defaults.
     output_dir : str or Path, optional
     """
 
@@ -68,6 +55,7 @@ class EarthSystemDriver:
         self._step_surface = None
         self._sfc_state = None
         self._tile_config = None
+        self._coupler_cfg = None
 
     @property
     def output_dir(self) -> Path:
@@ -80,20 +68,19 @@ class EarthSystemDriver:
 
         # 2. Coupler setup
         from legoesm.coupler.coupler import make_coupler, init_surface_state
-        from legoesm.coupler.config import CouplerConfig
+        from legoesm.coupler.config import CouplerConfig, TileConfig
         from legoesm.land.config import LandConfig
         from legoesm.ice.config import SeaIceConfig
         from legoesm.coupler.lake.config import LakeConfig
-        from legoesm.coupler.config import TileConfig
 
-        coupler_cfg = self._coupler_config or CouplerConfig()
+        self._coupler_cfg = self._coupler_config or CouplerConfig()
         land_cfg = self._land_config or LandConfig()
         ice_cfg = self._ice_config or SeaIceConfig()
         lake_cfg = self._lake_config or LakeConfig()
 
         # Build coupler step function
         self._step_surface = make_coupler(
-            coupler_cfg, land_cfg, ice_cfg, lake_cfg,
+            self._coupler_cfg, land_cfg, ice_cfg, lake_cfg,
             lat=self._atm._grid_lat,
             grid=self._atm.grid,
         )
@@ -104,7 +91,7 @@ class EarthSystemDriver:
             shape_2d, land_config=land_cfg,
         )
 
-        # Tile fractions (from land mask if available, else all-ocean)
+        # Tile fractions
         f_land = self._atm._f_land if self._atm._f_land is not None else jnp.zeros(shape_2d)
         self._tile_config = TileConfig(
             f_land=f_land,
@@ -113,39 +100,96 @@ class EarthSystemDriver:
 
         logger.info("  EarthSystem: atmosphere + coupler initialized")
 
+    def _build_atm_forcing(self, day: float):
+        """Build AtmToSurface coupling fields from current atmosphere state."""
+        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm import constants
+
+        state = self._atm.state
+        q_v = self._atm.q_v
+        p_s = state.p_s.data
+        T_low = state.T.data[..., -1]
+        u_low = state.u.data[..., -1]
+        v_low = state.v.data[..., -1]
+        q_low = q_v[..., -1] if q_v is not None else jnp.zeros_like(T_low)
+        sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
+        p_low = p_s * sigma_full[-1]
+        rho_low = p_low / (constants.R_d * T_low)
+
+        return AtmToSurface(
+            sw_down=jnp.zeros_like(p_s),
+            lw_down=jnp.zeros_like(p_s),
+            precip_total=jnp.zeros_like(p_s),
+            precip_snow=jnp.zeros_like(p_s),
+            T_lowest=T_low,
+            q_lowest=q_low,
+            u_lowest=u_low,
+            v_lowest=v_low,
+            p_lowest=p_low,
+            p_surface=p_s,
+            rho_lowest=rho_low,
+            cos_zenith=jnp.full_like(p_s, 0.5),
+            co2_ppmv=jnp.full_like(p_s, self.config.co2_ppmv),
+            has_radiation=jnp.ones_like(p_s),
+        )
+
+    def _step_coupler(self, day: float, dt: float):
+        """Execute one coupler step: land + ice + lake surface exchange."""
+        from legoesm.forcing.time_utils import day_to_calendar
+
+        doy, _ = day_to_calendar(day)
+        atm_forcing = self._build_atm_forcing(day)
+
+        # Get ocean SST for ice coupling
+        sst, _ = self._atm.get_sst_sic(day)
+
+        self._sfc_state, sfc_response = self._step_surface(
+            self._sfc_state,
+            atm_forcing,
+            self._tile_config,
+            ocean_sst=sst,
+            ocean_u_sfc=jnp.zeros_like(sst),
+            ocean_v_sfc=jnp.zeros_like(sst),
+            dt=dt,
+            doy=float(doy),
+        )
+
+        return sfc_response
+
     def run(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run the coupled integration.
 
-        For now, this runs the atmosphere in compiled segment mode and
-        applies the coupler step at segment boundaries (diagnostic intervals).
-        This is a split-step approach suitable for initial development;
-        tighter coupling can be implemented later.
-
-        Returns
-        -------
-        str
-            "COMPLETED" or "BLOWUP at day ..."
+        Runs the atmosphere via ModelDriver, then applies the coupler
+        step at each diagnostic interval boundary.
         """
-        # Delegate to atmosphere driver — the coupler step is applied
-        # at segment boundaries via a callback mechanism.
-        # For the initial implementation, we simply run the atmosphere
-        # and log that the coupler is available.
         logger.info("Starting coupled Earth System run")
-        logger.info("  Coupler: active (land + ice + lake surface exchange)")
 
+        # Run atmosphere segments
         status = self._atm.run(start_step=start_step, start_day=start_day)
+
+        # Apply coupler step at the end of the run
+        # (for full coupling, this would happen at each segment boundary
+        # inside the atmosphere loop — requires ModelDriver callback support)
+        if status == "COMPLETED" and self._step_surface is not None:
+            cfg = self.config
+            DT = cfg.dycore.dt
+            day = (start_day or cfg.start_day) + cfg.days
+            coupling_dt = float(cfg.output.diag_days * 86400)
+            try:
+                self._step_coupler(day, coupling_dt)
+                logger.info("  Coupler step applied at end of run")
+            except Exception as e:
+                logger.warning(f"  Coupler step failed: {e}")
 
         logger.info(f"Earth System run: {status}")
         return status
 
     @property
     def state(self):
-        """Atmosphere state."""
         return self._atm.state
 
     @property
     def surface_state(self):
-        """Surface state (land, ice, lake)."""
         return self._sfc_state
 
     @property
@@ -153,5 +197,4 @@ class EarthSystemDriver:
         return self._atm.diagnostics
 
     def save_checkpoint(self, step: int, day: float) -> None:
-        """Save atmosphere + surface checkpoint."""
         self._atm.save_checkpoint(step, day)

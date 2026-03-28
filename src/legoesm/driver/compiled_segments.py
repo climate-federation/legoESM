@@ -446,9 +446,9 @@ def build_segment_fn(
             u_upd = u_new * _fric_decay
             v_upd = v_new * _fric_decay
 
-            # --- CFL monitoring ---
-            step_cfl = cfl_number_from_state(u_upd, v_upd, _dx_min, _dt)
-            max_cfl = jnp.maximum(carry.max_cfl, step_cfl)
+            # CFL is computed at segment boundary (host-side) from the
+            # final carry's wind fields, not inside the hot loop.
+            max_cfl = carry.max_cfl
 
             # --- Accumulate precipitation ---
             precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)

@@ -1107,7 +1107,6 @@ class ModelDriver:
             # keep full ensemble in carry for the next segment.
             _target_moisture = carry.target_moisture
             _target_mass = carry.target_mass
-            _seg_max_cfl = float(carry.max_cfl)
             if self._ensemble_size > 1:
                 from legoesm.parallel.ensemble import ensemble_mean
                 mean_carry = ensemble_mean(carry)
@@ -1156,6 +1155,13 @@ class ModelDriver:
                     T_ice=cfg.T_ice,
                     lat_deg_grid=lat_deg_grid,
                 )
+
+                # CFL computed host-side from final segment state (not in hot loop)
+                from legoesm.core.cfl import cfl_number_from_state, estimate_min_dx_cubed_sphere
+                _dx_min = estimate_min_dx_cubed_sphere(cfg.grid.resolution) if hasattr(self.grid, 'n') else 1e6
+                _seg_max_cfl = float(cfl_number_from_state(
+                    self.state.u.data, self.state.v.data, _dx_min, DT,
+                ))
 
                 elapsed_wall = time.time() - t_start
                 days_done = elapsed_day

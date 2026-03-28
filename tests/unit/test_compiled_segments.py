@@ -542,11 +542,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         u_upd = u_new * fric_decay
         v_upd = v_new * fric_decay
 
-        # CFL monitoring
-        from legoesm.core.cfl import cfl_number_from_state, estimate_min_dx_cubed_sphere
-        _dx_min = estimate_min_dx_cubed_sphere(grid.n)
-        step_cfl = cfl_number_from_state(u_upd, v_upd, _dx_min, dt)
-        max_cfl = jnp.maximum(carry.max_cfl, step_cfl)
+        # CFL is computed at segment boundary (host-side), not per step
+        max_cfl = carry.max_cfl
 
         # Accumulate precipitation
         precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)

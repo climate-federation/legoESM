@@ -22,17 +22,71 @@ from legoesm.ml.data.era5_loader import (
     ERA5Config,
     WB2_ERA5_ZARR,
     create_era5_dataset,
-    _open_gcs_zarr,
-    _normalize_dims,
-    _resolve_variables,
 )
 from legoesm.ml.channel_packing import WB2_PRESSURE_LEVELS
+def _resolve_var(ds, name):
+    """Find a variable in the dataset, trying common aliases."""
+    aliases = {
+        'temperature': 't', 'u_component_of_wind': 'u',
+        'v_component_of_wind': 'v', 'specific_humidity': 'q',
+        'surface_pressure': 'sp', 'skin_temperature': 'skt',
+        'geopotential': 'z',
+    }
+    if name in ds:
+        return name
+    if name in aliases and aliases[name] in ds:
+        return aliases[name]
+    for k, v in aliases.items():
+        if name == k and v in ds:
+            return v
+    return None
+
+
 from legoesm.training.vertical_interp import (
     interp_pressure_to_sigma,
     interp_pressure_to_hybrid,
 )
 
 logger = logging.getLogger(__name__)
+
+# Module-level cache for regridding weights (expensive to recompute)
+_CS_WEIGHT_CACHE: dict[tuple, object] = {}
+
+
+def _get_cs_weights(n_lon_era5: int, grid):
+    """Get or compute cached cubed-sphere regridding weights."""
+    key = (n_lon_era5, id(grid))
+    if key not in _CS_WEIGHT_CACHE:
+        from legoesm.grids.regridding import compute_gauss_to_cs_weights
+        from legoesm.grids.gaussian import create_gaussian_grid
+        gauss_proxy = create_gaussian_grid(
+            n_max=n_lon_era5 // 2 - 1, dealiasing="linear",
+        )
+        _CS_WEIGHT_CACHE[key] = compute_gauss_to_cs_weights(gauss_proxy, grid)
+    return _CS_WEIGHT_CACHE[key]
+
+
+def _open_era5_zarr(zarr_path: str):
+    """Open an ERA5 Zarr store with dimension normalization.
+
+    Public wrapper around the ERA5 loader's internal helpers.
+    """
+    import xarray as xr
+    if zarr_path.startswith("gs://"):
+        import gcsfs
+        fs = gcsfs.GCSFileSystem(token="anon")
+        store = fs.get_mapper(zarr_path)
+        ds = xr.open_zarr(store, chunks=None)
+    else:
+        ds = xr.open_zarr(zarr_path, chunks=None)
+    # Normalize dimension names
+    rename = {}
+    for short, long in [("lat", "latitude"), ("lon", "longitude")]:
+        if long in ds.dims and short not in ds.dims:
+            rename[long] = short
+    if rename:
+        ds = ds.rename(rename)
+    return ds
 
 
 # Extended config with surface variables needed for dycore IC + forcing
@@ -102,12 +156,11 @@ def ensure_local_cache(
     ds = create_era5_dataset(era5_cfg)
 
     # Also grab surface variables
-    ds_full = _open_gcs_zarr(config.zarr_store)
-    ds_full = _normalize_dims(ds_full)
+    ds_full = _open_era5_zarr(config.zarr_store)
     ds_full = ds_full.sel(time=slice(f"{years[0]}-01-01", f"{years[1]}-12-31"))
 
     for svar in config.surface_variables:
-        resolved = _resolve_variables(ds_full, (svar,))
+        resolved = [v for v in [_resolve_var(ds_full, svar)] if v]
         for r in resolved:
             if r in ds_full and r not in ds:
                 ds[r] = ds_full[r]
@@ -151,8 +204,7 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
     ERA5Slice with all fields on the native ERA5 lat-lon grid.
     """
     store = config.local_cache_dir if config.local_cache_dir else config.zarr_store
-    ds = _open_gcs_zarr(store)
-    ds = _normalize_dims(ds)
+    ds = _open_era5_zarr(store)
 
     # Select time
     ds_t = ds.isel(time=time_idx)
@@ -168,7 +220,7 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
 
     def _get_3d(name):
         """Extract a 3D variable as (lat, lon, level) with levels ascending in pressure."""
-        resolved = _resolve_variables(ds_t, (name,))
+        resolved = [v for v in [_resolve_var(ds_t, name)] if v]
         if not resolved:
             return np.zeros((len(lat), len(lon), len(plev_Pa)))
         data = ds_t[resolved[0]].sel({level_dim: list(config.levels)}).values
@@ -185,7 +237,7 @@ def load_era5_slice(config: TrainingERA5Config, time_idx: int) -> ERA5Slice:
 
     def _get_2d(name):
         """Extract a 2D surface variable as (lat, lon)."""
-        resolved = _resolve_variables(ds_t, (name,))
+        resolved = [v for v in [_resolve_var(ds_t, name)] if v]
         if not resolved:
             return np.zeros((len(lat), len(lon)), dtype=np.float32)
         data = ds_t[resolved[0]].values
@@ -310,26 +362,14 @@ def era5_to_cubedsphere_carry(
     -------
     SegmentCarry
     """
-    from legoesm.grids.regridding import compute_gauss_to_cs_weights, regrid_scalar
-    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.regridding import regrid_scalar
     from legoesm.driver.compiled_segments import pack_carry
     from legoesm.core.field import Field
     from legoesm.core.state import HydrostaticState
 
     sigma_full = np.asarray(sigma.sigma_full)
-
-    # Create a temporary Gaussian grid matching ERA5 resolution for regridding
-    # ERA5 is 1440x721 ≈ T639 but we just need the lat/lon for weight computation
-    n_lat_era5 = era5.T.shape[0]
     n_lon_era5 = era5.T.shape[1]
-
-    # Compute regridding weights (lat-lon → cubed-sphere)
-    # Use the existing Gaussian→CS weights with ERA5 treated as a Gaussian grid
-    gauss_proxy = create_gaussian_grid(
-        n_max=n_lon_era5 // 2 - 1,
-        dealiasing="linear",
-    )
-    weights = compute_gauss_to_cs_weights(gauss_proxy, grid)
+    weights = _get_cs_weights(n_lon_era5, grid)
 
     # Regrid 3D fields
     def _regrid_3d(field_ll):
@@ -416,13 +456,9 @@ def era5_sst_to_forcing(
         n_plev = era5.T.shape[-1]
         o3_shape = (*sst.shape, n_plev)
     else:
-        # Cubed-sphere: need regridding
-        from legoesm.grids.regridding import compute_gauss_to_cs_weights, regrid_scalar
-        from legoesm.grids.gaussian import create_gaussian_grid
-        gauss_proxy = create_gaussian_grid(
-            n_max=era5.T.shape[1] // 2 - 1, dealiasing="linear",
-        )
-        weights = compute_gauss_to_cs_weights(gauss_proxy, grid)
+        # Cubed-sphere: use cached regridding weights
+        from legoesm.grids.regridding import regrid_scalar
+        weights = _get_cs_weights(era5.T.shape[1], grid)
         sst = regrid_scalar(jnp.asarray(era5.sst.ravel()), weights)
         sic = jnp.zeros_like(sst)
         n_plev = era5.T.shape[-1]
