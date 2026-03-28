@@ -322,7 +322,12 @@ def _run_timeloop(
     """
     snap_targets = _snapshot_steps(n_steps, n_snaps)
     snapshots: dict[int, dict[str, np.ndarray]] = {0: extract_fn(state)}
-    diag: dict[str, list] = {"times": [], "steps": []}
+    # Record step-0 diagnostics so conservation plots have the true
+    # initial value (important for perturbation variables starting at 0).
+    scalars_0 = scalar_fn(state)
+    diag: dict[str, list] = {"times": [0.0], "steps": [0]}
+    for k, v in scalars_0.items():
+        diag.setdefault(k, []).append(v)
 
     t0 = time.time()
     last_print = t0
@@ -629,24 +634,46 @@ def _save_conservation(output_dir: Path, case_name: str, diag: dict,
     mass = np.array(mass_vals, dtype=np.float64)
     energy = np.array(energy_vals, dtype=np.float64)
     t = np.array(times, dtype=np.float64)
-    mass_rel = (mass - mass[0]) / max(abs(mass[0]), 1e-30)
-    energy_rel = (energy - energy[0]) / max(abs(energy[0]), 1e-30)
+
+    # Decide between relative-drift and absolute-value mode.
+    # For quantities with a large initial value (e.g. total mass,
+    # mean height), normalise by the initial value to show fractional
+    # drift.  For perturbation variables that start near zero
+    # (e.g. rho_prime, theta_prime in NH), plot absolute values
+    # directly since relative drift is meaningless.
+    _PERTURBATION_THRESHOLD = 1e-10  # initial value below this ⇒ perturbation mode
+    mass_is_perturbation = abs(mass[0]) < _PERTURBATION_THRESHOLD
+    energy_is_perturbation = abs(energy[0]) < _PERTURBATION_THRESHOLD
+
+    if mass_is_perturbation:
+        mass_plot = mass
+        mass_ylabel = f"{mass_key} (absolute)"
+    else:
+        mass_plot = (mass - mass[0]) / abs(mass[0])
+        mass_ylabel = f"Relative {mass_key} drift"
+
+    if energy_is_perturbation:
+        energy_plot = energy
+        energy_ylabel = f"{energy_key} (absolute)"
+    else:
+        energy_plot = (energy - energy[0]) / abs(energy[0])
+        energy_ylabel = f"Relative {energy_key} drift"
 
     with open(output_dir / "conservation_timeseries.csv", "w") as f:
-        f.write("time_days,mass_proxy,energy_proxy,mass_rel,energy_rel\n")
+        f.write("time_days,mass_proxy,energy_proxy,mass_plot,energy_plot\n")
         for i in range(t.size):
             f.write(f"{t[i]:.8f},{mass[i]:.12e},{energy[i]:.12e},"
-                    f"{mass_rel[i]:.12e},{energy_rel[i]:.12e}\n")
+                    f"{mass_plot[i]:.12e},{energy_plot[i]:.12e}\n")
 
     fig, axes = plt.subplots(2, 1, figsize=(9, 6), sharex=True)
-    axes[0].plot(t, mass_rel, lw=1.5)
+    axes[0].plot(t, mass_plot, lw=1.5)
     axes[0].axhline(0, color="0.3", ls="--", lw=0.8)
-    axes[0].set_ylabel(f"Relative {mass_key} drift")
+    axes[0].set_ylabel(mass_ylabel)
     axes[0].set_title(f"{mass_key} conservation")
     axes[0].grid(True, alpha=0.25)
-    axes[1].plot(t, energy_rel, lw=1.5, color="tab:red")
+    axes[1].plot(t, energy_plot, lw=1.5, color="tab:red")
     axes[1].axhline(0, color="0.3", ls="--", lw=0.8)
-    axes[1].set_ylabel(f"Relative {energy_key} drift")
+    axes[1].set_ylabel(energy_ylabel)
     axes[1].set_xlabel("Time (days)")
     axes[1].set_title(f"{energy_key} conservation")
     axes[1].grid(True, alpha=0.25)
@@ -2397,8 +2424,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         _sin_a_nh = np.asarray(grid.sin_angle, dtype=np.float64)
 
         def extract_fn(s):
-            u = np.asarray(s.u.data[..., 0], dtype=np.float64)
-            v = np.asarray(s.v.data[..., 0], dtype=np.float64)
+            # Use surface level (k=-1) instead of model top (k=0) which
+            # is inside the sponge layer and gets damped to zero.
+            u = np.asarray(s.u.data[..., -1], dtype=np.float64)
+            v = np.asarray(s.v.data[..., -1], dtype=np.float64)
             # Rotate face-local to geographic
             u, v = _cos_a_nh * u - _sin_a_nh * v, _sin_a_nh * u + _cos_a_nh * v
             w_idx = min(s.w.data.shape[-1] // 2, s.w.data.shape[-1] - 1)
@@ -2560,8 +2589,10 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             cos3 = jnp.clip(grid.cos_lat[:, None, None], _COS_MIN, None)
             u_grid = u_cos / cos3
             v_grid = v_cos / cos3
-            u_sfc = np.asarray(u_grid[..., 0], dtype=np.float64)
-            v_sfc = np.asarray(v_grid[..., 0], dtype=np.float64)
+            # Use surface level (k=-1) instead of model top (k=0)
+            # which is inside the sponge layer and gets damped to zero.
+            u_sfc = np.asarray(u_grid[..., -1], dtype=np.float64)
+            v_sfc = np.asarray(v_grid[..., -1], dtype=np.float64)
             w = sh_synthesis_3d(grid, s.w_hat.data)
             w_idx = min(w.shape[-1] // 2, w.shape[-1] - 1)
             return {
