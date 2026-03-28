@@ -1,36 +1,29 @@
-"""NeuralGCM-style training: SFNO physics + spectral PE dynamical core.
+"""Learned physics + spectral PE dycore: SFNO or column MLP modes.
 
-Couples a Spherical Fourier Neural Operator (SFNO) as a learned physics
-parameterization to the spectral primitive equation dynamical core, with
-end-to-end gradient flow through both.  The SFNO replaces all subgrid
-physics (radiation, convection, boundary layer, etc.) while the spectral
-PE dycore handles resolved dynamics (advection, pressure gradient,
-Coriolis, vertical transport).
+Couples a learned physics parameterization to the spectral primitive
+equation dynamical core, with end-to-end gradient flow.  Two modes:
 
-Training pipeline::
+- **SFNO** (Kochkov et al. 2024): global SFNO predicts tendencies for
+  all variables (u, v, T, q, lnps) on the Gaussian grid.
+- **Column MLP** (Rasp et al. 2018): per-column MLP predicts T
+  tendencies from local column state (T, u, v, q, p_s).  No spatial
+  coupling — physically motivated for subgrid physics.
+
+Both modes share the same pipeline::
 
     ERA5 (daily snapshots)
-      -> carry_to_spectral_state  [SH analysis]
-      -> spectral_rollout          [lax.scan: dycore + SFNO physics]
+      -> carry_to_spectral_state   [SH analysis]
+      -> spectral_rollout           [lax.scan: dycore + learned physics]
       -> spectral_state_vs_carry_loss  [SH synthesis + MSE vs ERA5 target]
       -> eqx.filter_value_and_grad -> optax update
 
-Architecture follows Kochkov et al. (2024) "Neural General Circulation
-Models for Weather and Climate", Nature 632, 1060-1066.
-
-Relationship to other SFNO modules
------------------------------------
-- ``sfno_dycore_coupling.py`` couples SFNO as physics for *grid-space*
-  dycores (cubed-sphere, FV) via ``build_segment_fn`` / ``SegmentCarry``.
-  Does NOT work with the spectral PE dycore.
-- ``sfno_pe.py`` uses SFNO as the *entire dycore* (replaces PE dynamics).
-  NeuralGCM keeps the traditional PE dycore and adds SFNO *physics*.
-- This module bridges the gap: SFNO physics tendencies are passed to
-  ``spectral_pe_tendencies(..., physics_tendency=sfno_output)`` so that
-  the SFNO augments (not replaces) the spectral PE dynamics.
-- Building blocks reused: ``SFNO``, ``pack_pe_state``, ``unpack_pe_output``,
-  ``PE3DChannelSpec``, ``dispatch_integrator``, ``spectral_pe_tendencies``,
-  ERA5 pipeline, loss functions.
+Relationship to other modules
+-----------------------------
+- ``sfno_dycore_coupling.py`` / ``neural_physics.py``: couple learned
+  physics to *grid-space* dycores via ``build_segment_fn``.
+- ``sfno_pe.py``: SFNO replaces the entire dycore.
+- This module: learned physics *augments* the spectral PE dycore via
+  ``spectral_pe_tendencies(..., physics_tendency=learned_output)``.
 """
 
 from __future__ import annotations
@@ -273,6 +266,82 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
         return unpack_pe_output(
             output.astype(jnp.float64), state, grid_, mode="tendencies",
         )
+
+    return physics_fn
+
+
+# =============================================================================
+# Column MLP as spectral physics (Rasp et al. 2018 style)
+# =============================================================================
+
+# The column MLP physics component lives in the physics directory:
+#   legoesm.atmosphere.physics.learned_column
+# Re-export the coupling function for training convenience.
+from legoesm.atmosphere.physics.learned_column import (  # noqa: E402
+    make_column_physics_fn as make_column_mlp_spectral_physics,
+    build_column_physics,
+)
+
+
+# =============================================================================
+# Physics-based parameterizations with trainable parameters
+# =============================================================================
+
+def make_physics_params_spectral_physics(params, grid, dt):
+    """Create a spectral PE physics_fn from trainable physics parameters.
+
+    Rebuilds the combined physics (radiation + convection + turbulence + ...)
+    with the current parameter values as JAX arrays so that gradients
+    flow through the physics computations back to the parameters.
+
+    The trainable parameters are injected into the scheme configs:
+    - ``tau_equator``, ``tau_pole`` → gray radiation optical depth
+    - ``sbm_tau_c``, ``sbm_RH_ref`` → SBM convection timescale/humidity
+
+    Parameters
+    ----------
+    params : TrainablePhysicsParams
+        Current trainable parameter values (eqx.Module).
+    grid : GaussianGrid
+        Grid for spectral transforms.
+    dt : float
+        Dycore timestep [s].
+
+    Returns
+    -------
+    callable
+        ``physics_fn(state, grid, sigma_coord) -> SpectralHydrostaticState``
+    """
+    from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+    from legoesm.atmosphere.physics.radiation.config import (
+        RadiationConfig, GrayRadiationConfig,
+    )
+    from legoesm.atmosphere.physics.convection.config import (
+        ConvectionConfig, SBMConfig,
+    )
+
+    p = params.as_dict()
+
+    # Build gray radiation config with trainable tau
+    gray_cfg = GrayRadiationConfig(
+        tau_equator=p.get('tau_equator', 7.2),
+        tau_pole=p.get('tau_pole', 1.8),
+    )
+    rad_cfg = RadiationConfig(scheme="gray", gray=gray_cfg)
+
+    # Build SBM convection config with trainable timescale + RH
+    sbm_cfg = SBMConfig(
+        tau_c=p.get('sbm_tau_c', 7200.0),
+        RH_ref=p.get('sbm_RH_ref', 0.7),
+    )
+    conv_cfg = ConvectionConfig(scheme="sbm", sbm=sbm_cfg)
+
+    physics_config = PhysicsConfig(radiation=rad_cfg, convection=conv_cfg)
+    raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt)
+
+    def physics_fn(state, grid_, sigma_coord):
+        result = raw_fn(state, grid_, sigma_coord)
+        return result[0] if isinstance(result, tuple) else result
 
     return physics_fn
 
@@ -558,76 +627,43 @@ def load_training_data(
 # Training entry point
 # =============================================================================
 
-def train_neural_gcm_spectral(
-    config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
-    cache_dir: str = "data/era5_cache",
-    seed: int = 0,
+def _train_spectral_loop(
+    model: eqx.Module,
+    make_physics_fn,
+    grid: GaussianGrid,
+    sigma: SigmaCoordinate,
+    ic_states,
+    target_carries,
+    config: NeuralGCMSpectralConfig,
 ):
-    """Train a NeuralGCM: SFNO physics coupled to spectral PE dycore.
-
-    End-to-end differentiable training where gradients flow through
-    both the SFNO weights and the spectral dynamical core.
+    """Shared training loop for any learned-physics model coupled to the
+    spectral PE dycore.
 
     Parameters
     ----------
-    config : NeuralGCMSpectralConfig
-        Full training configuration.
-    cache_dir : str
-        Local cache directory for ERA5 data.
-    seed : int
-        Random seed for SFNO weight initialization.
+    model : eqx.Module
+        Learnable model (SFNO or NeuralPhysics).
+    make_physics_fn : callable
+        ``(model, grid) -> physics_fn`` factory.
+    grid, sigma : grid and vertical coordinate.
+    ic_states : list of SpectralHydrostaticState.
+    target_carries : list of SegmentCarry.
+    config : NeuralGCMSpectralConfig.
 
     Returns
     -------
-    sfno : SFNO
-        Trained SFNO model.
+    model : updated eqx.Module
     loss_history : list[float]
-        Per-epoch average loss.
     """
-    # --- 1. Create grid and vertical coordinate ---
-    logger.info(
-        f"Creating T{config.n_max} grid with {config.n_levels} levels"
-    )
-    grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
-    sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
     sigma_full = jnp.asarray(sigma.sigma_full)
-
-    # --- 2. Build SFNO ---
-    spec = PE3DChannelSpec(nlev=config.n_levels)
-    n_ch = spec.n_channels
-    sfno_config = SFNOConfig(
-        in_channels=n_ch,
-        out_channels=n_ch,
-        embed_dim=config.sfno_embed_dim,
-        n_blocks=config.sfno_n_blocks,
-        mlp_expansion=config.sfno_mlp_expansion,
-        residual_prediction=False,  # predict tendencies, not states
-    )
-    key = jax.random.PRNGKey(seed)
-    sfno = SFNO(sfno_config, grid, key=key)
-
-    n_params = sum(
-        x.size for x in jax.tree.leaves(eqx.filter(sfno, eqx.is_array))
-    )
-    logger.info(
-        f"SFNO: {n_ch} channels, {config.sfno_embed_dim}d embed, "
-        f"{config.sfno_n_blocks} blocks, {n_params:,} parameters"
-    )
-
-    # --- 3. Load ERA5 training data ---
-    ic_states, target_carries = load_training_data(
-        config, grid, sigma, cache_dir,
-    )
-
-    # --- 4. Precompute dycore filters ---
     pe_config = config.pe_config
+
     sponge_factor = None
     if pe_config.sponge_tau > 0:
         sponge_factor = _compute_sponge_factor(
             sigma.sigma_full, pe_config.sponge_sigma,
             pe_config.sponge_tau, config.dt,
         )
-
     spectral_filter = None
     if pe_config.spectral_filter_strength > 0:
         spectral_filter = _compute_spectral_filter(
@@ -636,14 +672,12 @@ def train_neural_gcm_spectral(
             cutoff_fraction=pe_config.spectral_filter_strength,
         )
 
-    # --- 5. Optimizer ---
     optimizer = optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
         optax.adamw(config.lr, weight_decay=config.weight_decay),
     )
-    opt_state = optimizer.init(eqx.filter(sfno, eqx.is_array))
+    opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
 
-    # --- 6. Training loop ---
     n_steps_per_day = int(86400 / config.dt)
     loss_history = []
 
@@ -654,9 +688,8 @@ def train_neural_gcm_spectral(
     )
 
     def make_loss_fn(ic_spectral, target_carry):
-        """Build differentiable loss for one IC/target pair."""
-        def loss_fn(model):
-            physics_fn = make_sfno_spectral_physics(model, grid)
+        def loss_fn(m):
+            physics_fn = make_physics_fn(m, grid)
             pred = spectral_rollout(
                 ic_spectral, physics_fn, grid, sigma, pe_config,
                 config.dt, n_steps_per_day,
@@ -674,34 +707,142 @@ def train_neural_gcm_spectral(
 
         for ic, target in zip(ic_states, target_carries):
             loss_fn = make_loss_fn(ic, target)
-            loss, grads = eqx.filter_value_and_grad(loss_fn)(sfno)
+            loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
             epoch_loss += float(loss)
 
             updates, opt_state = optimizer.update(
                 eqx.filter(grads, eqx.is_array),
                 opt_state,
-                eqx.filter(sfno, eqx.is_array),
+                eqx.filter(model, eqx.is_array),
             )
-            sfno = eqx.apply_updates(sfno, updates)
+            model = eqx.apply_updates(model, updates)
 
         avg_loss = epoch_loss / max(len(ic_states), 1)
         loss_history.append(avg_loss)
 
         if epoch % config.log_every == 0 or epoch == config.n_epochs - 1:
             elapsed = time.time() - t0
-            logger.info(
-                f"Epoch {epoch:4d}: loss={avg_loss:.6f}, "
-                f"time={elapsed:.1f}s"
-            )
+            logger.info(f"Epoch {epoch:4d}: loss={avg_loss:.6f}, time={elapsed:.1f}s")
 
-        # Checkpoint
         if (epoch + 1) % 10 == 0 or epoch == config.n_epochs - 1:
             from pathlib import Path
             from legoesm.ml.training import save_checkpoint
             ckpt_dir = Path(config.checkpoint_dir)
             ckpt_dir.mkdir(parents=True, exist_ok=True)
             ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
-            save_checkpoint(sfno, ckpt_path)
+            save_checkpoint(model, ckpt_path)
             logger.info(f"Saved checkpoint: {ckpt_path}")
 
-    return sfno, loss_history
+    return model, loss_history
+
+
+def train_neural_gcm_spectral(
+    config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
+    cache_dir: str = "data/era5_cache",
+    seed: int = 0,
+):
+    """Train NeuralGCM: SFNO physics + spectral PE dycore.
+
+    Returns (trained_sfno, loss_history).
+    """
+    grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
+    sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
+
+    spec = PE3DChannelSpec(nlev=config.n_levels)
+    sfno = SFNO(
+        SFNOConfig(
+            in_channels=spec.n_channels,
+            out_channels=spec.n_channels,
+            embed_dim=config.sfno_embed_dim,
+            n_blocks=config.sfno_n_blocks,
+            mlp_expansion=config.sfno_mlp_expansion,
+            residual_prediction=False,
+        ),
+        grid,
+        key=jax.random.PRNGKey(seed),
+    )
+    n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(sfno, eqx.is_array)))
+    logger.info(f"SFNO: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
+                f"{config.sfno_n_blocks} blocks, {n_p:,} params")
+
+    ic_states, target_carries = load_training_data(config, grid, sigma, cache_dir)
+
+    return _train_spectral_loop(
+        sfno, make_sfno_spectral_physics,
+        grid, sigma, ic_states, target_carries, config,
+    )
+
+
+def train_column_mlp_spectral(
+    config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
+    cache_dir: str = "data/era5_cache",
+    seed: int = 0,
+    hidden_dim: int = 256,
+    n_layers: int = 4,
+    residual_scale: float = 0.01,
+):
+    """Train column MLP physics (Rasp 2018) + spectral PE dycore.
+
+    Returns (trained_neural_physics, loss_history).
+    """
+    grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
+    sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
+
+    nn_phys = build_column_physics(
+        nlev=config.n_levels,
+        hidden_dim=hidden_dim,
+        n_layers=n_layers,
+        residual_scale=residual_scale,
+        key=jax.random.PRNGKey(seed),
+    )
+    n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(nn_phys, eqx.is_array)))
+    logger.info(f"Column MLP: {config.n_levels} levels, {hidden_dim}d, "
+                f"{n_layers} layers, {n_p:,} params")
+
+    ic_states, target_carries = load_training_data(config, grid, sigma, cache_dir)
+
+    return _train_spectral_loop(
+        nn_phys, make_column_mlp_spectral_physics,
+        grid, sigma, ic_states, target_carries, config,
+    )
+
+
+def train_physics_params_spectral(
+    config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
+    cache_dir: str = "data/era5_cache",
+):
+    """Train physics-based parameterization parameters + spectral PE dycore.
+
+    Tunes the parameters of combined physics schemes (gray radiation,
+    SBM convection) by backpropagating through both the physics
+    computations and the spectral dynamical core.
+
+    Trainable parameters (via ``TrainablePhysicsParams``):
+    - ``tau_equator``, ``tau_pole``: gray radiation optical depths
+    - ``sbm_tau_c``: SBM convection relaxation timescale
+    - ``sbm_RH_ref``: SBM convection reference relative humidity
+
+    Returns (trained_params, loss_history).
+    """
+    from legoesm.training.trainable_params import TrainablePhysicsParams
+
+    grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
+    sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
+
+    params = TrainablePhysicsParams.from_defaults()
+    n_p = len(params.raw_values)
+    logger.info(f"Physics params: {n_p} trainable ({', '.join(params.raw_values)})")
+    for k, v in params.as_dict().items():
+        logger.info(f"  {k} = {float(v):.4f}")
+
+    ic_states, target_carries = load_training_data(config, grid, sigma, cache_dir)
+
+    dt = config.dt
+
+    def _make_physics_fn(p, grid_):
+        return make_physics_params_spectral_physics(p, grid_, dt)
+
+    return _train_spectral_loop(
+        params, _make_physics_fn,
+        grid, sigma, ic_states, target_carries, config,
+    )

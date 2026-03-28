@@ -310,3 +310,179 @@ class TestConfig:
         cfg = NeuralGCMSpectralConfig()
         spec = PE3DChannelSpec(nlev=cfg.n_levels)
         assert spec.n_channels == 4 * 10 + 2  # 42 channels
+
+
+# ---------------------------------------------------------------------------
+# 7. Column MLP spectral physics (Rasp 2018 style)
+# ---------------------------------------------------------------------------
+
+def _make_small_column_mlp():
+    """Create a small NeuralPhysics for testing."""
+    from legoesm.training.neural_physics import NeuralPhysics
+    return NeuralPhysics(
+        nlev=NLEV, hidden_dim=16, n_layers=2,
+        key=jax.random.PRNGKey(99), residual_scale=0.01,
+    )
+
+
+class TestColumnMLPSpectralPhysics:
+
+    def test_returns_spectral_tendencies(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_column_mlp_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        nn = _make_small_column_mlp()
+
+        physics_fn = make_column_mlp_spectral_physics(nn, _GRID)
+        tend = physics_fn(state, _GRID, _SIGMA)
+
+        assert tend.T_hat.data.shape == state.T_hat.data.shape
+        # Column physics only affects T — vor/div/lnps should be zero
+        assert jnp.allclose(tend.vor_hat.data, 0.0)
+        assert jnp.allclose(tend.div_hat.data, 0.0)
+        assert jnp.allclose(tend.lnps_hat.data, 0.0)
+        # T tendency should be non-zero (random MLP)
+        assert jnp.any(tend.T_hat.data != 0.0)
+
+    def test_tendencies_finite(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_column_mlp_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        nn = _make_small_column_mlp()
+
+        physics_fn = make_column_mlp_spectral_physics(nn, _GRID)
+        tend = physics_fn(state, _GRID, _SIGMA)
+
+        for field in tend:
+            assert jnp.all(jnp.isfinite(field.data))
+
+    def test_rollout_with_column_mlp(self):
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_column_mlp_spectral_physics,
+            spectral_rollout,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        nn = _make_small_column_mlp()
+        physics_fn = make_column_mlp_spectral_physics(nn, _GRID)
+
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=1e14, time_integrator="ssp_rk3",
+        )
+        result = spectral_rollout(
+            state, physics_fn, _GRID, _SIGMA, pe_config,
+            dt=1800.0, n_steps=2,
+        )
+        for field in result:
+            assert jnp.all(jnp.isfinite(field.data))
+
+    def test_grad_through_column_mlp(self):
+        """Gradients flow from loss through dycore to column MLP weights."""
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_column_mlp_spectral_physics,
+            spectral_rollout,
+            spectral_state_vs_carry_loss,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry_ic = _make_gaussian_carry(T_val=280.0)
+        carry_target = _make_gaussian_carry(T_val=282.0)
+        state = carry_to_spectral_state(carry_ic, _GRID)
+        sigma_full = jnp.asarray(_SIGMA.sigma_full)
+
+        nn = _make_small_column_mlp()
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=1e14, time_integrator="ssp_rk3",
+        )
+
+        def loss_fn(model):
+            physics_fn = make_column_mlp_spectral_physics(model, _GRID)
+            pred = spectral_rollout(
+                state, physics_fn, _GRID, _SIGMA, pe_config,
+                dt=1800.0, n_steps=1,
+            )
+            return spectral_state_vs_carry_loss(
+                pred, carry_target, _GRID, _SIGMA, sigma_full,
+            )
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(nn)
+
+        assert jnp.isfinite(loss)
+        grad_leaves = jax.tree.leaves(eqx.filter(grads, eqx.is_array))
+        assert all(jnp.all(jnp.isfinite(g)) for g in grad_leaves)
+        assert any(jnp.any(g != 0) for g in grad_leaves)
+
+
+# ---------------------------------------------------------------------------
+# 8. Physics-based params + spectral PE
+# ---------------------------------------------------------------------------
+
+class TestPhysicsParamsSpectral:
+
+    def test_make_physics_fn(self):
+        from legoesm.training.trainable_params import TrainablePhysicsParams
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_physics_params_spectral_physics,
+        )
+        carry = _make_gaussian_carry()
+        state = carry_to_spectral_state(carry, _GRID)
+        params = TrainablePhysicsParams.from_defaults()
+
+        physics_fn = make_physics_params_spectral_physics(params, _GRID, dt=600.0)
+        tend = physics_fn(state, _GRID, _SIGMA)
+
+        assert tend.T_hat.data.shape == state.T_hat.data.shape
+        for field in tend:
+            assert jnp.all(jnp.isfinite(field.data))
+
+    def test_grad_through_physics_params(self):
+        """Gradients flow through physics + dycore to trainable params."""
+        from legoesm.training.trainable_params import TrainablePhysicsParams
+        from legoesm.training.neural_gcm_spectral import (
+            carry_to_spectral_state,
+            make_physics_params_spectral_physics,
+            spectral_rollout,
+            spectral_state_vs_carry_loss,
+        )
+        from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+
+        carry_ic = _make_gaussian_carry(T_val=280.0)
+        carry_target = _make_gaussian_carry(T_val=282.0)
+        state = carry_to_spectral_state(carry_ic, _GRID)
+        sigma_full = jnp.asarray(_SIGMA.sigma_full)
+
+        params = TrainablePhysicsParams.from_defaults()
+        pe_config = SpectralPEConfig(
+            hyperdiff_coeff=1e14, time_integrator="ssp_rk3",
+        )
+
+        def loss_fn(p):
+            physics_fn = make_physics_params_spectral_physics(p, _GRID, dt=1800.0)
+            pred = spectral_rollout(
+                state, physics_fn, _GRID, _SIGMA, pe_config,
+                dt=1800.0, n_steps=1,
+            )
+            return spectral_state_vs_carry_loss(
+                pred, carry_target, _GRID, _SIGMA, sigma_full,
+            )
+
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(params)
+
+        assert jnp.isfinite(loss)
+        # Grads should be finite for all raw_values
+        for name, g in grads.raw_values.items():
+            assert jnp.isfinite(g), f"Non-finite grad for {name}"
+        # At least some grads should be non-zero
+        has_nonzero = any(g != 0 for g in grads.raw_values.values())
+        assert has_nonzero, "All physics param gradients are zero"
