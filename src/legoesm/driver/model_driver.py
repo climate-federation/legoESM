@@ -20,9 +20,9 @@ from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import day_to_calendar
 
 from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
-from legoesm.core.tracers import TracerRegistry, make_moisture_registry, init_tracers, clip_positive_definite
+from legoesm.core.tracers import TracerRegistry, make_moisture_registry, init_tracers
 from legoesm.driver.config import ExperimentConfig
-from legoesm.driver.physics_pipeline import PhysicsPipeline, build_physics_pipeline
+from legoesm.driver.physics_pipeline import build_physics_pipeline
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.io.restart import save_restart, load_restart
 

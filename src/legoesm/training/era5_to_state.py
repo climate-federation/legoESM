@@ -42,10 +42,7 @@ def _resolve_var(ds, name):
     return None
 
 
-from legoesm.training.vertical_interp import (
-    interp_pressure_to_sigma,
-    interp_pressure_to_hybrid,
-)
+from legoesm.training.vertical_interp import interp_pressure_to_sigma
 
 logger = logging.getLogger(__name__)
 

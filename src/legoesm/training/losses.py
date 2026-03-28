@@ -12,7 +12,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.ml.loss import area_weighted_mse, spectral_loss
+from legoesm.ml.loss import spectral_loss
 
 
 class LossConfig(NamedTuple):

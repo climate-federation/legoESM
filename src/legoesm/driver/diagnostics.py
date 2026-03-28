@@ -6,13 +6,11 @@ logic from run_amip.py into a reusable class.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import jax
 import jax.numpy as jnp
 
-from legoesm import constants
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import EnergyBudgetTracker
 from legoesm.forcing.time_utils import day_to_calendar
