@@ -147,6 +147,7 @@ def _make_segment_fn_args() -> dict:
         rad_update_steps=1,
         microphysics="none",
         fix_moisture=False,
+                    fix_mass=False,
         fric_decay=jnp.ones((NLEV,)),
         qv_smooth_coeff=0.0,
         lat=_GRID.lat,

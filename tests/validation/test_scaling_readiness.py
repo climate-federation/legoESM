@@ -143,7 +143,7 @@ class TestScalingReadiness:
             model=M(), step_unified=mock, grid=grid,
             sigma_full=jnp.linspace(0.1, 1.0, 3),
             dsigma=jnp.full(3, 1.0/3), dt=600.0, rad_update_steps=1,
-            microphysics="none", fix_moisture=False,
+            microphysics="none", fix_moisture=False, fix_mass=False,
             fric_decay=jnp.ones(3), qv_smooth_coeff=0.0,
             lat=grid.lat, lon=grid.lon, start_day=0.0,
         )

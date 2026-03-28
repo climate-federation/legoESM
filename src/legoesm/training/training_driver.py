@@ -107,32 +107,8 @@ def train_physics_params(
         for i, (ic, target, forcing) in enumerate(
             zip(initial_carries, target_carries, forcings)
         ):
-            # Build segment function with current learnable params
-            seg_kwargs = params.to_segment_kwargs()
-
-            run_segment = build_segment_fn(
-                model=model,
-                step_unified=step_unified,
-                grid=grid,
-                sigma_full=sigma_full,
-                dsigma=jnp.asarray(sigma.dsigma),
-                dt=dt,
-                rad_update_steps=1,
-                microphysics="none",
-                fix_moisture=False,
-                fric_decay=jnp.ones(sigma_full.shape[0]),
-                qv_smooth_coeff=0.0,
-                lat=grid.lat if hasattr(grid, 'lat') else grid.lat,
-                lon=grid.lon if hasattr(grid, 'lon') else grid.lon,
-                start_day=0.0,
-                gradient_checkpoint=True,
-                **seg_kwargs,
-            )
-
-            # Differentiable loss
             def _loss_fn(params_):
                 seg_kw = params_.to_segment_kwargs()
-                # Rebuild segment with updated params
                 run_seg = build_segment_fn(
                     model=model,
                     step_unified=step_unified,
@@ -143,15 +119,16 @@ def train_physics_params(
                     rad_update_steps=1,
                     microphysics="none",
                     fix_moisture=False,
+                    fix_mass=False,
                     fric_decay=jnp.ones(sigma_full.shape[0]),
                     qv_smooth_coeff=0.0,
-                    lat=grid.lat if hasattr(grid, 'lat') else grid.lat,
-                    lon=grid.lon if hasattr(grid, 'lon') else grid.lon,
+                    lat=grid.lat,
+                    lon=grid.lon,
                     start_day=0.0,
                     gradient_checkpoint=True,
                     **seg_kw,
                 )
-                pred = single_day_rollout(ic, forcing, run_seg, dt=dt)
+                pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
                 return combined_loss(pred, target, sigma_full, config=loss_config)
 
             loss, grads = eqx.filter_value_and_grad(_loss_fn)(params)
@@ -243,6 +220,7 @@ def train_neural_gcm(
                     rad_update_steps=1,
                     microphysics="none",
                     fix_moisture=False,
+                    fix_mass=False,
                     fric_decay=jnp.ones(sigma_full.shape[0]),
                     qv_smooth_coeff=0.0,
                     lat=grid.lat,
@@ -250,7 +228,7 @@ def train_neural_gcm(
                     start_day=0.0,
                     gradient_checkpoint=True,
                 )
-                pred = single_day_rollout(ic, forcing, run_seg, dt=dt)
+                pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
                 return combined_loss(pred, target, sigma_full, config=loss_config)
 
             loss, grads = eqx.filter_value_and_grad(_loss_fn)(neural_physics)
@@ -335,6 +313,7 @@ def train_sfno_coupled(
                     rad_update_steps=1,
                     microphysics="none",
                     fix_moisture=False,
+                    fix_mass=False,
                     fric_decay=jnp.ones(sigma_full.shape[0]),
                     qv_smooth_coeff=0.0,
                     lat=grid.lat,
@@ -342,7 +321,7 @@ def train_sfno_coupled(
                     start_day=0.0,
                     gradient_checkpoint=True,
                 )
-                pred = single_day_rollout(ic, forcing, run_seg, dt=dt)
+                pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
                 return combined_loss(pred, target, sigma_full, config=loss_config)
 
             loss, grads = eqx.filter_value_and_grad(_loss_fn)(sfno_physics)

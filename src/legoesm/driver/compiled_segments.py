@@ -214,6 +214,13 @@ def compute_segment_length(
 # Compiled segment builder
 # ======================================================================
 
+def _match_dtype(new_val, ref_val):
+    """Cast new_val to ref_val's dtype if they differ."""
+    if hasattr(ref_val, 'dtype') and hasattr(new_val, 'dtype'):
+        return new_val.astype(ref_val.dtype) if new_val.dtype != ref_val.dtype else new_val
+    return new_val
+
+
 class SegmentForcing(NamedTuple):
     """Per-segment external forcing arrays.
 
@@ -258,6 +265,7 @@ def build_segment_fn(
     rad_update_steps: int,
     microphysics: str,
     fix_moisture: bool,
+    fix_mass: bool,
     fric_decay,
     qv_smooth_coeff,
     lat,
@@ -379,12 +387,8 @@ def build_segment_fn(
             p_s_new = dyn_state.p_s.data
 
             # --- Dry mass fixer (target-anchored) ---
-            # Only active when target_mass > 0 (set at initialization).
-            p_s_new = jnp.where(
-                carry.target_mass > 0.0,
-                fix_ps_mass_target(p_s_new, carry.target_mass, grid),
-                p_s_new,
-            )
+            if fix_mass:
+                p_s_new = fix_ps_mass_target(p_s_new, carry.target_mass, grid)
 
             # --- Physics with radiation sub-cycling ---
             need_rad = jnp.where(
@@ -447,17 +451,12 @@ def build_segment_fn(
             max_cfl = jnp.maximum(carry.max_cfl, step_cfl)
 
             # --- Accumulate precipitation ---
-            precip_step = phys_out.precipitation if hasattr(phys_out, 'precipitation') else jnp.zeros_like(p_s_new)
+            precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
             precip_accum = carry.precip_accum + precip_step * _dt
 
             # Cast all arrays back to carry input dtypes to prevent
             # float32→float64 promotion from Python float constants
             # (e.g., constants.L_v, constants.c_pd) breaking jax.lax.scan.
-            def _match_dtype(new_val, ref_val):
-                if hasattr(ref_val, 'dtype') and hasattr(new_val, 'dtype'):
-                    return new_val.astype(ref_val.dtype) if new_val.dtype != ref_val.dtype else new_val
-                return new_val
-
             new_carry = SegmentCarry(
                 u=_match_dtype(u_upd, carry.u),
                 v=_match_dtype(v_upd, carry.v),

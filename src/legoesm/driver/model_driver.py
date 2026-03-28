@@ -1014,6 +1014,7 @@ class ModelDriver:
             rad_update_steps=RAD_UPDATE_STEPS,
             microphysics=cfg.microphysics,
             fix_moisture=cfg.fix_moisture,
+            fix_mass=cfg.dycore.fix_mass,
             fric_decay=self._fric_decay,
             qv_smooth_coeff=self._qv_smooth_coeff,
             lat=self._grid_lat,

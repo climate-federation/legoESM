@@ -87,7 +87,7 @@ def _build(gradient_checkpoint, tau_equator=7.2):
         model=_MockModel(), step_unified=_mock_step_unified, grid=_GRID,
         sigma_full=jnp.linspace(0.1, 1.0, NLEV),
         dsigma=jnp.full(NLEV, 1.0/NLEV), dt=600.0, rad_update_steps=1,
-        microphysics="none", fix_moisture=False,
+        microphysics="none", fix_moisture=False, fix_mass=False,
         fric_decay=jnp.ones(NLEV), qv_smooth_coeff=0.0,
         lat=_GRID.lat, lon=_GRID.lon, start_day=0.0,
         gradient_checkpoint=gradient_checkpoint,

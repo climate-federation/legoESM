@@ -333,6 +333,14 @@ class DiagnosticCollector:
         self.profiles_T.clear()
         self.profiles_qv.clear()
 
+        # Also flush moisture tracker
+        moisture_data = self.moisture_tracker.flush_to_lists()
+        if moisture_data["times"]:
+            np.savez(
+                incr_dir / f"moisture_chunk_{chunk_idx:04d}.npz",
+                **{k: np.array(v) for k, v in moisture_data.items()},
+            )
+
     def save(self, output_dir: str | Path) -> None:
         """Save all accumulated diagnostics to disk."""
         output_dir = Path(output_dir)

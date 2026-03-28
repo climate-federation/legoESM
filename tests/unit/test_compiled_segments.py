@@ -300,6 +300,7 @@ def _make_segment_fn_args(fix_moisture=False):
         rad_update_steps=1,
         microphysics="none",
         fix_moisture=fix_moisture,
+        fix_mass=False,
         fric_decay=jnp.ones((NLEV,)),  # no friction
         qv_smooth_coeff=0.0,
         lat=_GRID.lat,
