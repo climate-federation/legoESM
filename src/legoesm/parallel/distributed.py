@@ -120,19 +120,21 @@ def initialize_distributed(
     rank = comm.Get_rank()
     n_processes = comm.Get_size()
 
-    # Initialize JAX distributed runtime with MPI-derived coordinator info.
-    # Under plain mpirun (no SLURM/GKE), JAX needs explicit coordinator
-    # address, process count, and process ID.
+    # Determine whether this is a multi-node run.  When all ranks share
+    # the same hostname, JAX's distributed runtime (gRPC coordinator) is
+    # unnecessary — each rank can already see all local devices.  MPI halo
+    # exchange and reductions work via mpi4jax regardless.
+    _is_multi_node = False
     if n_processes > 1:
         import socket
-        # Rank 0 broadcasts its hostname as coordinator address.
-        if rank == 0:
-            coordinator_address = socket.gethostname()
-        else:
-            coordinator_address = None
-        coordinator_address = comm.bcast(coordinator_address, root=0)
+        my_hostname = socket.gethostname()
+        all_hostnames = comm.allgather(my_hostname)
+        _is_multi_node = len(set(all_hostnames)) > 1
 
-        # Use a fixed port for the coordinator (JAX default is 1234).
+    if _is_multi_node:
+        # Multi-node: initialize JAX distributed runtime with MPI-derived
+        # coordinator info.  Rank 0's hostname serves as coordinator.
+        coordinator_address = all_hostnames[0]
         coordinator_port = 1234
         coordinator_bind = f"{coordinator_address}:{coordinator_port}"
 
@@ -150,12 +152,8 @@ def initialize_distributed(
                 f"and all ranks can reach {coordinator_address}. "
                 f"Original error: {e}"
             ) from e
-    else:
-        # Single rank: no distributed init needed, but still using MPI.
-        pass
 
-    # Validate JAX agrees with MPI (if multi-process).
-    if n_processes > 1:
+        # Validate JAX agrees with MPI.
         jax_rank = jax.process_index()
         jax_size = jax.process_count()
         if jax_rank != rank or jax_size != n_processes:
@@ -165,6 +163,11 @@ def initialize_distributed(
                 RuntimeWarning,
                 stacklevel=2,
             )
+    elif n_processes > 1:
+        # Single-node MPI: skip jax.distributed.initialize().
+        # All ranks share the same local devices; MPI halo exchange and
+        # reductions work via mpi4jax independently.
+        pass
 
     # Build communication topology for this rank.
     topology = build_comm_topology(rank, n_processes)

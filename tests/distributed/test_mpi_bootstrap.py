@@ -11,11 +11,9 @@ These tests verify that the MPI bootstrap path correctly:
 - Assigns faces so that every face is covered and no face overlaps
 - Performs a working MPI halo exchange
 
-Note: we replicate the logic of ``initialize_distributed`` without
-calling ``jax.distributed.initialize()`` (which requires a gRPC
-coordinator and hangs on macOS single-host oversubscribed MPI).
-The individual components are the same ones ``initialize_distributed``
-uses internally.
+Uses ``initialize_distributed()`` directly, which detects single-node
+MPI and skips ``jax.distributed.initialize()`` (the gRPC coordinator
+hangs on macOS single-host oversubscribed MPI).
 """
 
 import jax
@@ -26,11 +24,8 @@ import pytest
 mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
-from legoesm.parallel.comm import CommTopology, build_comm_topology
 from legoesm.parallel.mesh import (
     DeviceConfig,
-    create_device_mesh,
-    set_active_config,
     get_active_config,
 )
 from legoesm.grids.halo import get_halo_backend, set_halo_backend
@@ -39,32 +34,17 @@ from legoesm.grids.halo import get_halo_backend, set_halo_backend
 # ---------------------------------------------------------------------------
 # Module-level MPI bootstrap (runs once per rank, shared by all tests)
 # ---------------------------------------------------------------------------
-# Replicate the key steps of initialize_distributed() without the gRPC
-# coordinator (jax.distributed.initialize) which hangs on macOS.
+# Now that initialize_distributed() detects single-node MPI and skips
+# jax.distributed.initialize(), we can use it directly.
 
 _comm = MPI.COMM_WORLD
 _rank = _comm.Get_rank()
 _size = _comm.Get_size()
 
-# 1. Build communication topology.
-_topology = build_comm_topology(_rank, _size)
+from legoesm.parallel.distributed import initialize_distributed, get_active_topology
 
-# 2. Set MPI halo backend.
-set_halo_backend("mpi", _topology)
-
-# 3. Create device config with distributed flag.
-_local_config = create_device_mesh(n_devices=1)
-_config = DeviceConfig(
-    mesh=_local_config.mesh,
-    face_sharding=_local_config.face_sharding,
-    replicated_sharding=_local_config.replicated_sharding,
-    n_devices=_local_config.n_devices,
-    backend=_local_config.backend,
-    is_distributed=True,
-    tiling=_topology.tiling,
-    grid_type="cubed_sphere",
-)
-set_active_config(_config)
+_config = initialize_distributed()
+_topology = get_active_topology()
 
 
 # ---------------------------------------------------------------------------

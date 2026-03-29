@@ -529,15 +529,34 @@ class ModelDriver:
         ``jax.block_until_ready`` + ``diagnostics.collect`` pattern
         into a single method to avoid scattered sync points.
 
-        In ``perf_mode``, skips the full-state gather and uses only
-        device-local data.  This avoids the O(n_devices) all-gather
-        overhead that dominates strong-scaling benchmarks but may
-        produce incomplete global diagnostics (e.g., global means
-        will only reflect the local shard).
+        In ``perf_mode``, uses ``collect_lightweight()`` which computes
+        only scalar reductions (``jnp.mean``, ``jnp.max``) directly on
+        the sharded arrays — no full-state gather, no host materialization
+        via ``np.asarray()``.  JAX handles the cross-device reductions
+        internally for SPMD-sharded arrays, so global means and max-wind
+        are still correct.  Snapshots, profiles, and monthly means are
+        skipped.
         """
         perf_mode = kwargs.pop("perf_mode", False)
 
-        if not perf_mode and self._device_config is not None and self._device_config.mesh is not None:
+        if perf_mode:
+            # Lightweight path: scalar reductions only, no gather.
+            state = kwargs.get('state', self.state)
+            jax.block_until_ready(state.u.data)
+            return self.diagnostics.collect_lightweight(
+                elapsed_day=kwargs.get('elapsed_day', 0.0),
+                state=state,
+                q_v=kwargs.get('q_v', None),
+                sst=kwargs.get('sst', None),
+                sic=kwargs.get('sic', None),
+                precip_total=kwargs.get('precip_total', None),
+                sw_up_toa=kwargs.get('sw_up_toa', None),
+                lw_up_toa=kwargs.get('lw_up_toa', None),
+                sw_net_sfc=kwargs.get('sw_net_sfc', None),
+                lw_net_sfc=kwargs.get('lw_net_sfc', None),
+            )
+
+        if self._device_config is not None and self._device_config.mesh is not None:
             from legoesm.parallel.sharded_dynamics import gather_state
             gathered = gather_state(kwargs.get('state', self.state), self._device_config)
             kwargs['state'] = gathered

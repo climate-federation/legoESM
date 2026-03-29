@@ -61,6 +61,11 @@ def _maybe_init_distributed() -> tuple[int, int]:
     """Detect and initialize distributed JAX if under MPI or SLURM.
 
     Returns (rank, world_size). For single-process, returns (0, 1).
+
+    On single-node MPI (all ranks on same host), skips
+    ``jax.distributed.initialize()`` — it requires a gRPC coordinator
+    that doesn't work with oversubscribed single-host MPI.  MPI
+    reductions and halo exchange still work via mpi4jax.
     """
     # Check for MPI environment
     if "OMPI_COMM_WORLD_SIZE" in os.environ or "PMI_SIZE" in os.environ:
@@ -71,18 +76,18 @@ def _maybe_init_distributed() -> tuple[int, int]:
             world_size = comm.Get_size()
             if world_size > 1:
                 import socket
-                if rank == 0:
-                    coordinator = socket.gethostname()
-                else:
-                    coordinator = None
-                coordinator = comm.bcast(coordinator, root=0)
+                my_host = socket.gethostname()
+                all_hosts = comm.allgather(my_host)
+                is_multi_node = len(set(all_hosts)) > 1
 
-                import jax
-                jax.distributed.initialize(
-                    coordinator_address=f"{coordinator}:1234",
-                    num_processes=world_size,
-                    process_id=rank,
-                )
+                if is_multi_node:
+                    import jax
+                    jax.distributed.initialize(
+                        coordinator_address=f"{all_hosts[0]}:1234",
+                        num_processes=world_size,
+                        process_id=rank,
+                    )
+                # Single-node MPI: don't call jax.distributed.initialize
                 return rank, world_size
         except ImportError:
             pass

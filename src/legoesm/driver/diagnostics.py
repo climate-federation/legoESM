@@ -268,6 +268,78 @@ class DiagnosticCollector:
             'mean_lw_sfc': mean_lw_sfc,
         }
 
+    def collect_lightweight(
+        self,
+        elapsed_day: float,
+        state,
+        q_v,
+        sst,
+        sic,
+        precip_total,
+        sw_up_toa,
+        lw_up_toa,
+        sw_net_sfc,
+        lw_net_sfc,
+    ) -> dict:
+        """Collect only scalar reduction diagnostics (no host materialization).
+
+        This is the performance-mode alternative to :meth:`collect`.
+        It computes global means and max-wind via ``jnp.mean``/``jnp.max``
+        which work correctly on SPMD-sharded arrays (JAX handles
+        cross-device reductions internally).  No ``np.asarray()`` calls,
+        no snapshot capture, no profile extraction, no monthly means.
+
+        Use this for scaling benchmarks where diagnostic overhead must
+        not dominate wall-clock time.
+
+        Returns the same dict keys as ``collect`` for logging compatibility.
+        """
+        mean_sst = float(jnp.mean(sst))
+        mean_sic = float(jnp.mean(sic))
+        mean_T = float(jnp.mean(state.T.data))
+        mean_T_low = float(jnp.mean(state.T.data[..., -1]))
+        if hasattr(state, 'v'):
+            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+        else:
+            max_v = float(jnp.max(jnp.abs(state.u.data)))
+        mean_precip = float(jnp.mean(precip_total)) * 86400.0
+        cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
+        mean_cwv = float(jnp.mean(cwv))
+        mean_sw_toa = float(jnp.mean(sw_up_toa))
+        mean_lw_toa = float(jnp.mean(lw_up_toa))
+        mean_ps = float(jnp.mean(state.p_s.data))
+        mean_sw_sfc = float(jnp.mean(sw_net_sfc))
+        mean_lw_sfc = float(jnp.mean(lw_net_sfc))
+
+        # Append to time-series (same as collect, for continuity).
+        self.times.append(elapsed_day)
+        self.sst.append(mean_sst)
+        self.sic.append(mean_sic)
+        self.T_atm.append(mean_T)
+        self.T_low.append(mean_T_low)
+        self.max_wind.append(max_v)
+        self.precip.append(mean_precip)
+        self.CWV.append(mean_cwv)
+        self.sw_up_toa.append(mean_sw_toa)
+        self.lw_up_toa.append(mean_lw_toa)
+        self.sw_net_sfc.append(mean_sw_sfc)
+        self.lw_net_sfc.append(mean_lw_sfc)
+        self.dry_mass.append(mean_ps)
+
+        return {
+            'mean_sst': mean_sst,
+            'mean_sic': mean_sic,
+            'mean_T': mean_T,
+            'mean_T_low': mean_T_low,
+            'max_v': max_v,
+            'mean_precip': mean_precip,
+            'mean_cwv': mean_cwv,
+            'mean_sw_toa': mean_sw_toa,
+            'mean_lw_toa': mean_lw_toa,
+            'mean_sw_sfc': mean_sw_sfc,
+            'mean_lw_sfc': mean_lw_sfc,
+        }
+
     def flush_to_disk(self, output_dir: str | Path) -> None:
         """Flush accumulated timeseries to disk and clear in-memory lists.
 
