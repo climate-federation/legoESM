@@ -69,6 +69,8 @@
 - If touching conservation, reductions, or coupler logic, check mass and energy diagnostics explicitly.
 - If touching parallel code, verify unsharded vs sharded or single-rank vs MPI agreement.
 - If full validation is too expensive, say exactly what was run, what was not run, and what residual risk remains.
+- **CRITICAL — Visual verification for spatial/grid artifacts**: Passing unit tests and error norms is NECESSARY but NOT SUFFICIENT when modifying cubed-sphere operators, halo exchange, diffusion coefficients, or grid metrics. Edge artifacts, cube imprint, and grid-scale noise are ONLY reliably detected by visual inspection of field snapshots (especially v-wind in Williamson 2, wind_speed in Williamson 5). Always run the atmosphere test matrix quick mode (`--only sw --grid cubed_sphere --quick`) and inspect the generated snapshot PNGs before claiming a fix works. Compare against a known-good baseline image. Error norms can improve while visual artifacts get worse (e.g., if artifacts shift location or change character). Never claim "tests pass, edge artifacts fixed" based on pytest results alone.
+- **Diffusion coefficient sensitivity**: Divergence damping and hyperdiffusion coefficients AMPLIFY halo-exchange gradient errors at cubed-sphere face boundaries. Increasing these coefficients (even modestly) can worsen edge artifacts. Always check visual impact on Williamson 2 v-wind when changing `_hyperdiff_cube`, `_div_damp_cube`, or any diffusion parameter.
 
 ## Project-Specific Commands
 - Install: `pip install -e ".[dev]"`

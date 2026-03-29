@@ -281,7 +281,11 @@ def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
 
 
 def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
-    """Linearly interpolate *strip* at positions ``j + offsets_1d[j]``.
+    """Quadratically interpolate *strip* at positions ``j + offsets_1d[j]``.
+
+    Uses 3-point Lagrange interpolation, which reduces the gradient error
+    at face boundaries from O(dx) (linear) to O(dx^2) (quadratic).
+    Falls back to linear for very short strips (n < 3).
 
     Parameters
     ----------
@@ -295,11 +299,21 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     n = strip.shape[0]
     idx = jnp.arange(n, dtype=offsets_1d.dtype) + offsets_1d
     idx = jnp.clip(idx, 0.0, n - 1.0)
-    lo = jnp.floor(idx).astype(jnp.int32)
-    lo = jnp.clip(lo, 0, n - 2)
-    w = idx - lo.astype(offsets_1d.dtype)
-    w = jnp.clip(w, 0.0, 1.0)
-    interp = (1.0 - w) * strip[lo] + w * strip[lo + 1]
+
+    if n < 3:
+        # Fall back to linear for very coarse grids
+        lo = jnp.clip(jnp.floor(idx).astype(jnp.int32), 0, n - 2)
+        w = jnp.clip(idx - lo.astype(offsets_1d.dtype), 0.0, 1.0)
+        return ((1.0 - w) * strip[lo] + w * strip[lo + 1]).astype(strip.dtype)
+
+    # 3-point Lagrange: stencil centre clamped to [1, n-2] so all
+    # three indices {jc-1, jc, jc+1} are in bounds.
+    jc = jnp.clip(jnp.round(idx).astype(jnp.int32), 1, n - 2)
+    f = idx - jc.astype(offsets_1d.dtype)
+    c_m1 = 0.5 * f * (f - 1.0)
+    c_0 = 1.0 - f * f
+    c_p1 = 0.5 * f * (f + 1.0)
+    interp = c_m1 * strip[jc - 1] + c_0 * strip[jc] + c_p1 * strip[jc + 1]
     return interp.astype(strip.dtype)
 
 
