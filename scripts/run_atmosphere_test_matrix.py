@@ -201,11 +201,11 @@ def _compute_drift(values: list[float]) -> float:
 # Hyperdiffusion helpers
 # ---------------------------------------------------------------------------
 
-def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 2.5e16) -> float:
+def _hyperdiff_cube(n: int, ref_n: int = 48, ref_coeff: float = 1e16) -> float:
     return ref_coeff * (ref_n / n) ** 4
 
 
-def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 2.5e7) -> float:
+def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 1.5e7) -> float:
     """Scale second-order divergence damping for cubed-sphere (FV3-style)."""
     return ref_coeff * (ref_n / n) ** 2
 

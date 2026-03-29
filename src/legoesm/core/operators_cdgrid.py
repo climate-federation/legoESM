@@ -1006,7 +1006,7 @@ def _laplacian_dgrid(u_d, cdgrid):
 # ==============================================================================
 
 def _extrapolate_boundary_corners(du, dv, n):
-    """Fix momentum tendencies at all face-boundary D-grid points.
+    """Fix momentum tendencies at all face-boundary corners.
 
     The Arakawa-Lamb gradient and vorticity interpolation at boundary
     corners (i=0, i=n, j=0, j=n) use haloed cell-centre data with
@@ -1015,8 +1015,9 @@ def _extrapolate_boundary_corners(du, dv, n):
     with their nearest-interior neighbours, which use only on-face
     cell-centre data and have O(dx^2) accuracy.
 
-    Order: (1) edge rows/columns from one cell inward, then (2) vertex
-    corners as the average of two corrected edge neighbours.
+    Edge-interior corners are set from one cell inward (i=1 or j=1).
+    Vertex corners (shared by 3 faces) use the average of two edge
+    neighbours (already corrected by the edge fix).
 
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
 
@@ -1029,19 +1030,7 @@ def _extrapolate_boundary_corners(du, dv, n):
     -------
     du, dv : jax.Array with fixed boundary values
     """
-    # 1. Edge rows/columns: copy from one cell inward (excludes vertex corners)
-    s = slice(1, n)  # interior edge indices (excludes vertex corners)
-    du = du.at[:, 0, s].set(du[:, 1, s])      # bottom row
-    du = du.at[:, n, s].set(du[:, n - 1, s])   # top row
-    du = du.at[:, s, 0].set(du[:, s, 1])       # left column
-    du = du.at[:, s, n].set(du[:, s, n - 1])   # right column
-
-    dv = dv.at[:, 0, s].set(dv[:, 1, s])
-    dv = dv.at[:, n, s].set(dv[:, n - 1, s])
-    dv = dv.at[:, s, 0].set(dv[:, s, 1])
-    dv = dv.at[:, s, n].set(dv[:, s, n - 1])
-
-    # 2. Vertex corners: average of two nearest (now corrected) edge neighbours
+    # Vertex corners: average of two nearest edge-interior neighbours
     corners = [
         ((0, 0), (1, 0), (0, 1)),
         ((n, 0), (n - 1, 0), (n, 1)),
