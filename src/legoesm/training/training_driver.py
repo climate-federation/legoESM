@@ -245,12 +245,14 @@ def train_neural_gcm(
     list[float] — loss history
     """
     from legoesm.training.neural_physics import make_neural_step_unified
+    from legoesm.driver.grid_adapters import make_adapter
 
     sigma_full = jnp.asarray(sigma.sigma_full)
+    adapter = make_adapter(grid)
 
     def make_loss_fn(_params, ic, target, forcing):
         def loss_fn(nn_phys):
-            step_unified = make_neural_step_unified(nn_phys, grid)
+            step_unified = make_neural_step_unified(nn_phys, adapter)
             run_seg = _build_training_segment(
                 model, step_unified, grid, sigma, dt,
             )
@@ -282,6 +284,7 @@ def train_sfno_coupled(
     lr: float = 5e-4,
     dt: float = 600.0,
     coupling_mode: str = "correction",
+    physics_pipeline=None,
     loss_config: LossConfig = LossConfig(),
     log_every: int = 10,
 ):
@@ -291,6 +294,9 @@ def train_sfno_coupled(
     ----------
     sfno_physics : SFNOPhysics (eqx.Module)
     coupling_mode : "correction" or "replacement"
+    physics_pipeline : PhysicsPipeline, optional
+        Required when coupling_mode="correction" to provide the traditional
+        physics step that SFNO corrects.
     (other params same as train_neural_gcm)
 
     Returns
@@ -302,10 +308,23 @@ def train_sfno_coupled(
 
     sigma_full = jnp.asarray(sigma.sigma_full)
 
+    # Build traditional physics step for correction mode.
+    traditional_step = None
+    if coupling_mode == "correction":
+        if physics_pipeline is None:
+            raise ValueError(
+                "physics_pipeline is required when coupling_mode='correction'. "
+                "Pass the PhysicsPipeline so the SFNO can compute corrections "
+                "on top of traditional physics."
+            )
+        traditional_step = physics_pipeline.build_step_unified()
+
     def make_loss_fn(_params, ic, target, forcing):
         def loss_fn(sfno_ph):
             step_unified = make_sfno_step_unified(
-                sfno_ph, grid, mode=coupling_mode,
+                sfno_ph,
+                mode=coupling_mode,
+                traditional_step_unified=traditional_step,
             )
             run_seg = _build_training_segment(
                 model, step_unified, grid, sigma, dt,

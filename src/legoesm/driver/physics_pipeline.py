@@ -157,11 +157,13 @@ class PhysicsPipeline:
         p_half_col = p_half.reshape(ad.ncol, nlev + 1)
         q_v_col = ad.flatten_3d(q_v)
 
-        # Override convection config with traced values when provided
+        # Override convection config with traced values when provided.
+        # Only SBMConfig has tau_c/RH_ref — guard with hasattr to prevent
+        # crashes when a different convection scheme is active.
         _conv_cfg = self.convection_config
-        if sbm_tau_c is not None and _conv_cfg is not None:
+        if sbm_tau_c is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'tau_c'):
             _conv_cfg = _conv_cfg._replace(tau_c=sbm_tau_c)
-        if sbm_RH_ref is not None and _conv_cfg is not None:
+        if sbm_RH_ref is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'RH_ref'):
             _conv_cfg = _conv_cfg._replace(RH_ref=sbm_RH_ref)
 
         # Convection (resolved kernel — no dispatch here)

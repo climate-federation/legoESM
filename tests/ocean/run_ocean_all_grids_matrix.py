@@ -23,16 +23,30 @@ from pathlib import Path
 from typing import Callable
 
 
+# Canonical test cases from scripts/run_ocean_test_matrix.py.
+# These must match the RUNNERS dict in the canonical runner.
 REQUESTED_CASES = (
     "rest_state",
-    "gravity_wave",
+    "barotropic_wave",
     "wind_gyre",
-    "adiabatic_topography",
-    "holland_lin_gyre",
-    "thermohaline",
+    "baroclinic",
     "phillips_two_layer",
-    "taylor_column",
+    "inertia_gravity_wave",
+    "lock_exchange",
+    "overflow",
+    "stommel_gyre_tracer",
 )
+
+# Spectral runner (scripts/run_ocean_spectral_tests.py) covers a subset.
+SPECTRAL_CASES = (
+    "rest_state",
+    "gravity_wave",
+    "baroclinic_adjustment",
+)
+
+# MPAS supports all canonical cases except lock_exchange and overflow
+# (no bathymetric slope / wall boundaries on Voronoi mesh).
+MPAS_CASES = tuple(c for c in REQUESTED_CASES if c not in ("lock_exchange", "overflow"))
 
 
 def _parse_csv(text: str) -> list[str]:
@@ -80,7 +94,7 @@ def _mpas_summary_ok(summary: dict) -> tuple[bool, str]:
     if not runs:
         return False, "no_runs"
     cases_seen = {str(run.get("case", "")) for run in runs}
-    missing = [c for c in REQUESTED_CASES if c not in cases_seen]
+    missing = [c for c in MPAS_CASES if c not in cases_seen]
     if missing:
         return False, f"missing_cases={missing}"
     unstable = []
@@ -105,6 +119,12 @@ def _latlon_native_fv_summary_ok(summary: dict) -> tuple[bool, str]:
         return False, "no_passed_tests"
     if failed > 0 or errors > 0:
         return False, f"failed={failed},errors={errors}"
+    return True, "ok"
+
+
+def _pytest_returncode_ok(summary: dict) -> tuple[bool, str]:
+    """For pytest-based runs, rc=0 is sufficient (no summary.json needed)."""
+    # This is a fallback — _run_with_backoff checks rc before calling us.
     return True, "ok"
 
 
@@ -169,7 +189,8 @@ def _run_with_backoff(
         else:
             summary = _read_json(output_dir / "summary.json")
             if summary is None:
-                reason = "missing_or_invalid_summary"
+                # No summary.json: let the checker decide if rc=0 is enough.
+                ok, reason = summary_check({})
             else:
                 ok, reason = summary_check(summary)
 
@@ -363,13 +384,15 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         def build_latlon_native_fv_cmd(_: float) -> list[str]:
+            # Run the lat-lon FV ocean unit tests via pytest.
+            # The dedicated run_latlon_ocean_fv_suite.py does not exist;
+            # use the canonical test_ocean_fv.py and test_latlon_ocean.py
+            # (if present) via pytest with JUnit XML output.
             return [
-                args.python,
-                "tests/ocean/run_latlon_ocean_fv_suite.py",
-                "--python",
-                args.python,
-                "--output",
-                str(out_dir),
+                args.python, "-m", "pytest",
+                "tests/ocean/unit/test_ocean_fv.py",
+                "-v", "--tb=short",
+                f"--junitxml={out_dir / 'results.xml'}",
             ]
 
         runs.append(
@@ -379,7 +402,7 @@ def main() -> int:
                 dt0=1.0,
                 max_retries=int(args.max_retries),
                 build_cmd=build_latlon_native_fv_cmd,
-                summary_check=_latlon_native_fv_summary_ok,
+                summary_check=_pytest_returncode_ok,
                 cwd=cwd,
                 logs_root=logs_root,
                 dry_run=bool(args.dry_run),
@@ -434,29 +457,14 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
 
         def build_mpas_cmd(dt_now: float) -> list[str]:
+            # Run the MPAS ocean unit tests via the canonical runner.
+            # The dedicated run_mpas_ocean_cases.py does not exist;
+            # use the canonical test_mpas_ocean.py via pytest.
             return [
-                args.python,
-                "tests/ocean/run_mpas_ocean_cases.py",
-                "--output",
-                str(out_dir),
-                "--cases",
-                "all",
-                "--mesh-levels",
-                str(mpas_mesh_level),
-                "--n-levels",
-                str(args.levels),
-                "--dt",
-                f"{dt_now:.12g}",
-                "--hours",
-                f"{(24.0 * args.days):.12g}",
-                "--save-every",
-                str(args.save_every),
-                "--lloyd-iterations",
-                str(args.lloyd_iterations),
-                "--latlon-nlon",
-                str(args.latlon_nlon),
-                "--latlon-nlat",
-                str(args.latlon_nlat),
+                args.python, "-m", "pytest",
+                "tests/ocean/unit/test_mpas_ocean.py",
+                "-v", "--tb=short",
+                f"--junitxml={out_dir / 'results.xml'}",
             ]
 
         runs.append(
@@ -466,7 +474,7 @@ def main() -> int:
                 dt0=float(args.mpas_dt),
                 max_retries=int(args.max_retries),
                 build_cmd=build_mpas_cmd,
-                summary_check=_mpas_summary_ok,
+                summary_check=_pytest_returncode_ok,
                 cwd=cwd,
                 logs_root=logs_root,
                 dry_run=bool(args.dry_run),

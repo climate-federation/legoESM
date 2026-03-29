@@ -36,6 +36,43 @@ DEFAULT_TRAINABLE = [
     ParamConstraint("albedo_ocean", 0.02, 0.12, "sigmoid"),
 ]
 
+# Non-convection trainable parameters (shared by all schemes)
+_COMMON_TRAINABLE = [
+    ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
+    ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
+    ParamConstraint("C_H", 0.001, 0.01, "sigmoid"),
+    ParamConstraint("C_E", 0.001, 0.01, "sigmoid"),
+    ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
+    ParamConstraint("albedo_ocean", 0.02, 0.12, "sigmoid"),
+]
+
+# SBM-specific convection parameters
+_SBM_TRAINABLE = [
+    ParamConstraint("sbm_tau_c", 3600.0, 14400.0, "sigmoid"),
+    ParamConstraint("sbm_RH_ref", 0.5, 0.9, "sigmoid"),
+]
+
+
+def trainable_constraints_for_scheme(
+    convection_scheme: str = "sbm",
+) -> list[ParamConstraint]:
+    """Return trainable parameter constraints appropriate for the given scheme.
+
+    Parameters
+    ----------
+    convection_scheme : str
+        Convection scheme name: "sbm", "dca", "kuo", "mass_flux", "edmf", "none".
+        Only SBM has scheme-specific trainable parameters.
+
+    Returns
+    -------
+    list[ParamConstraint]
+    """
+    if convection_scheme == "sbm":
+        return _COMMON_TRAINABLE + _SBM_TRAINABLE
+    else:
+        return list(_COMMON_TRAINABLE)
+
 
 def _sigmoid_to_range(raw: jax.Array, lo: float, hi: float) -> jax.Array:
     """Map unconstrained raw value to [lo, hi] via sigmoid."""
@@ -73,6 +110,13 @@ class TrainablePhysicsParams(eqx.Module):
         if constraints is None:
             constraints = DEFAULT_TRAINABLE
 
+        # Resolve dtype from precision policy (default float32).
+        try:
+            from legoesm.core.precision import get_policy
+            param_dtype = get_policy().compute
+        except Exception:
+            param_dtype = jnp.float32
+
         raw = {}
         for c in constraints:
             # Look up default from registry, fallback to midpoint
@@ -82,11 +126,17 @@ class TrainablePhysicsParams(eqx.Module):
                 default = (c.min_val + c.max_val) / 2.0
 
             if c.transform == "sigmoid":
-                raw[c.name] = jnp.float32(_range_to_sigmoid(default, c.min_val, c.max_val))
+                raw[c.name] = jnp.array(
+                    _range_to_sigmoid(default, c.min_val, c.max_val),
+                    dtype=param_dtype,
+                )
             elif c.transform == "softplus":
-                raw[c.name] = jnp.float32(jnp.log(jnp.exp(default) - 1.0))
+                raw[c.name] = jnp.array(
+                    float(jnp.log(jnp.exp(default) - 1.0)),
+                    dtype=param_dtype,
+                )
             else:
-                raw[c.name] = jnp.float32(default)
+                raw[c.name] = jnp.array(default, dtype=param_dtype)
 
         return TrainablePhysicsParams(raw_values=raw, constraints=constraints)
 

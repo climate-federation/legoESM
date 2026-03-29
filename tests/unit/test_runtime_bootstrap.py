@@ -226,6 +226,64 @@ class TestDistributedGuardrails:
             mock_init.assert_called_once()
             assert rc.distributed is True
 
+    def test_distributed_mpi_coordinator_setup(self):
+        """MPI bootstrap should derive coordinator info from MPI comm."""
+        mock_comm = MagicMock()
+        mock_comm.Get_rank.return_value = 0
+        mock_comm.Get_size.return_value = 2
+        mock_comm.bcast.return_value = "localhost"
+
+        mock_MPI = MagicMock()
+        mock_MPI.COMM_WORLD = mock_comm
+
+        mock_mpi4jax = MagicMock()
+
+        with patch(
+            "legoesm.parallel.distributed._require_mpi_stack",
+            return_value=(mock_mpi4jax, mock_MPI),
+        ), patch(
+            "legoesm.parallel.distributed.jax.distributed.initialize",
+        ) as mock_jax_init, patch(
+            "legoesm.parallel.distributed.jax.local_devices",
+            return_value=[MagicMock()],
+        ), patch(
+            "legoesm.parallel.distributed.create_device_mesh",
+            return_value=MagicMock(
+                mesh=None, face_sharding=None, replicated_sharding=None,
+                n_devices=1, backend="cpu",
+            ),
+        ), patch(
+            "legoesm.parallel.distributed.set_active_config",
+        ), patch(
+            "legoesm.parallel.distributed.build_comm_topology",
+            return_value=MagicMock(tiling=None),
+        ), patch(
+            "legoesm.grids.halo.set_halo_backend",
+        ), patch(
+            "legoesm.parallel.distributed.jax.process_index",
+            return_value=0,
+        ), patch(
+            "legoesm.parallel.distributed.jax.process_count",
+            return_value=2,
+        ):
+            # Reset module state for clean test
+            import legoesm.parallel.distributed as dist_mod
+            dist_mod._active_topology = None
+            dist_mod._active_layout = None
+
+            try:
+                dist_mod.initialize_distributed()
+                # Verify JAX distributed was called with coordinator info
+                mock_jax_init.assert_called_once_with(
+                    coordinator_address="localhost:1234",
+                    num_processes=2,
+                    process_id=0,
+                )
+            finally:
+                # Clean up module state
+                dist_mod._active_topology = None
+                dist_mod._active_layout = None
+
 
 # =========================================================================
 # 6. YAML config bootstrap

@@ -234,3 +234,110 @@ class TestTrainingDriver:
         )
         assert callable(fn)
         assert hasattr(fn, 'raw')
+
+
+# ---------------------------------------------------------------------------
+# 9. API signature guards
+# ---------------------------------------------------------------------------
+
+class TestTrainingAPISignatures:
+    """Verify training entrypoint signatures match their callees."""
+
+    def test_neural_gcm_uses_adapter(self):
+        """train_neural_gcm must create a ColumnAdapter, not pass grid directly."""
+        from legoesm.training.neural_physics import make_neural_step_unified
+        from legoesm.driver.grid_adapters import make_adapter, ColumnAdapter
+        import inspect
+
+        sig = inspect.signature(make_neural_step_unified)
+        params = list(sig.parameters.keys())
+        # Second param should be 'adapter', not 'grid'
+        assert params[1] == "adapter"
+
+        # Verify make_adapter produces a ColumnAdapter
+        adapter = make_adapter(_GRID)
+        assert isinstance(adapter, ColumnAdapter)
+        assert adapter.ncol == 6 * N * N
+
+    def test_sfno_step_unified_no_grid_param(self):
+        """make_sfno_step_unified must NOT accept a grid positional argument."""
+        from legoesm.training.sfno_dycore_coupling import make_sfno_step_unified
+        import inspect
+
+        sig = inspect.signature(make_sfno_step_unified)
+        params = list(sig.parameters.keys())
+        assert "grid" not in params
+        assert params == ["sfno_physics", "mode", "traditional_step_unified"]
+
+    def test_sfno_correction_mode_requires_pipeline(self):
+        """train_sfno_coupled with mode='correction' must require physics_pipeline."""
+        from legoesm.training.training_driver import train_sfno_coupled
+        import inspect
+
+        sig = inspect.signature(train_sfno_coupled)
+        assert "physics_pipeline" in sig.parameters
+
+    def test_sfno_replacement_mode_no_pipeline(self):
+        """train_sfno_coupled with mode='replacement' should not require physics_pipeline."""
+        from legoesm.training.training_driver import train_sfno_coupled
+        import inspect
+
+        sig = inspect.signature(train_sfno_coupled)
+        # physics_pipeline should default to None
+        assert sig.parameters["physics_pipeline"].default is None
+
+
+# ---------------------------------------------------------------------------
+# 10. trainable_params scheme awareness
+# ---------------------------------------------------------------------------
+
+class TestTrainableParamsSchemeAware:
+    """Trainable parameters must be scheme-aware and not crash for non-SBM."""
+
+    def test_sbm_includes_convection_params(self):
+        from legoesm.training.trainable_params import trainable_constraints_for_scheme
+        constraints = trainable_constraints_for_scheme("sbm")
+        names = [c.name for c in constraints]
+        assert "sbm_tau_c" in names
+        assert "sbm_RH_ref" in names
+        assert "tau_equator" in names
+
+    def test_dca_excludes_sbm_params(self):
+        from legoesm.training.trainable_params import trainable_constraints_for_scheme
+        constraints = trainable_constraints_for_scheme("dca")
+        names = [c.name for c in constraints]
+        assert "sbm_tau_c" not in names
+        assert "sbm_RH_ref" not in names
+        assert "tau_equator" in names
+
+    def test_none_scheme_excludes_sbm_params(self):
+        from legoesm.training.trainable_params import trainable_constraints_for_scheme
+        constraints = trainable_constraints_for_scheme("none")
+        names = [c.name for c in constraints]
+        assert "sbm_tau_c" not in names
+        assert "tau_equator" in names
+
+    def test_from_defaults_with_non_sbm(self):
+        from legoesm.training.trainable_params import (
+            TrainablePhysicsParams, trainable_constraints_for_scheme,
+        )
+        constraints = trainable_constraints_for_scheme("dca")
+        params = TrainablePhysicsParams.from_defaults(constraints=constraints)
+        d = params.as_dict()
+        assert "sbm_tau_c" not in d
+        assert "tau_equator" in d
+
+    def test_sbm_params_gradient_flow(self):
+        from legoesm.training.trainable_params import (
+            TrainablePhysicsParams, trainable_constraints_for_scheme,
+        )
+        import equinox as eqx
+
+        for scheme in ["sbm", "dca", "none"]:
+            constraints = trainable_constraints_for_scheme(scheme)
+            p = TrainablePhysicsParams.from_defaults(constraints=constraints)
+            loss_fn = lambda p_: sum(v**2 for v in p_.as_dict().values())
+            _, grads = eqx.filter_value_and_grad(loss_fn)(p)
+            assert all(jnp.isfinite(v) for v in grads.raw_values.values()), (
+                f"Non-finite grad for scheme={scheme}"
+            )

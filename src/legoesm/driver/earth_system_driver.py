@@ -131,6 +131,7 @@ class EarthSystemDriver:
             cos_zenith=jnp.full_like(p_s, 0.5),
             co2_ppmv=jnp.full_like(p_s, self.config.co2_ppmv),
             has_radiation=jnp.ones_like(p_s),
+            has_precipitation=jnp.zeros_like(p_s),
         )
 
     def _step_coupler(self, day: float, dt: float):
@@ -175,11 +176,8 @@ class EarthSystemDriver:
             DT = cfg.dycore.dt
             day = (start_day or cfg.start_day) + cfg.days
             coupling_dt = float(cfg.output.diag_days * 86400)
-            try:
-                self._step_coupler(day, coupling_dt)
-                logger.info("  Coupler step applied at end of run")
-            except Exception as e:
-                logger.warning(f"  Coupler step failed: {e}")
+            self._step_coupler(day, coupling_dt)
+            logger.info("  Coupler step applied at end of run")
 
         logger.info(f"Earth System run: {status}")
         return status

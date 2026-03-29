@@ -125,6 +125,10 @@ def bootstrap(
     from legoesm.runtime.precision import apply_precision
     policy = apply_precision(precision)
 
+    # Verify float64 is actually available if required.
+    from legoesm.core.precision import validate_policy
+    validate_policy(policy)
+
     # 4. Device mesh ---------------------------------------------------------
     from legoesm.runtime.devices import setup_devices
     device_config = setup_devices(

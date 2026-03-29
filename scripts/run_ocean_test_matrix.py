@@ -1268,7 +1268,12 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         eta_drift = _compute_drift(diag.get("max_eta_hat_abs", []))
         T_drift = _compute_drift(diag.get("mean_T_hat_abs", []))
     else:
-        eta_drift = _compute_drift(diag.get("mean_eta", []))
+        # Use absolute drift normalized by ocean depth (DEFAULT_H_MAX) rather than
+        # relative drift: _compute_drift divides by |initial|, which is ~0 for mean_eta
+        # in a rest state (initial eta=0), yielding meaningless large relative values.
+        eta_list = diag.get("mean_eta", [])
+        eta_drift = (abs(eta_list[-1] - eta_list[0]) / DEFAULT_H_MAX
+                     if len(eta_list) >= 2 else 0.0)
         T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
 
@@ -1397,7 +1402,12 @@ def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
     else:
         speed_key = "max_speed"
     max_speed = diag[speed_key][-1] if diag.get(speed_key) else 0
-    eta_drift = _compute_drift(diag.get("mean_eta", []))
+    # Use absolute drift normalized by ocean depth (DEFAULT_H_MAX) rather than relative
+    # drift: initial mean_eta is ~0 in the wind gyre quick run, making relative drift
+    # meaningless (division by ~0).
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0]) / DEFAULT_H_MAX
+                 if len(eta_list) >= 2 else 0.0)
     notes = f"max speed={max_speed:.4f} m/s, eta drift={eta_drift:.2e}"
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)

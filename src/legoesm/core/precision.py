@@ -124,6 +124,27 @@ def get_policy() -> PrecisionPolicy:
     return _ACTIVE_POLICY[0]
 
 
+def validate_policy(policy: PrecisionPolicy | None = None) -> None:
+    """Verify the active precision policy is actually achievable.
+
+    Raises
+    ------
+    RuntimeError
+        If the policy requires float64 but JAX x64 mode is not enabled.
+    """
+    if policy is None:
+        policy = get_policy()
+    needs_x64 = jnp.float64 in (
+        policy.storage, policy.compute, policy.accumulate, policy.control,
+    )
+    if needs_x64 and not jax.config.jax_enable_x64:
+        raise RuntimeError(
+            "Precision policy requires float64 but JAX x64 mode is not enabled. "
+            "Set JAX_ENABLE_X64=1 or call jax.config.update('jax_enable_x64', True) "
+            "before bootstrapping."
+        )
+
+
 def set_module_override(module: str, **role_overrides: str) -> None:
     """Override precision roles for a specific module.
 

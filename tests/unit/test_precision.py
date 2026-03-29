@@ -633,3 +633,68 @@ class TestJITCompatibility:
         result = f(x)
         assert result.shape == (4,)
         assert result.dtype == jnp.float64
+
+
+# ===========================================================================
+# Part 12: Precision enforcement
+# ===========================================================================
+
+class TestPrecisionEnforcement:
+    """Verify precision policy enforcement at bootstrap time."""
+
+    def setup_method(self):
+        set_policy(PrecisionPolicy.fp32())
+        clear_module_overrides()
+
+    def teardown_method(self):
+        set_policy(PrecisionPolicy.fp32())
+        clear_module_overrides()
+
+    def test_validate_fp32_always_ok(self):
+        from legoesm.core.precision import validate_policy
+        set_policy(PrecisionPolicy.fp32())
+        validate_policy()  # Should not raise
+
+    def test_validate_fp64_with_x64_enabled(self):
+        from legoesm.core.precision import validate_policy
+        jax.config.update("jax_enable_x64", True)
+        set_policy(PrecisionPolicy.fp64())
+        validate_policy()  # Should not raise
+
+    def test_validate_fp64_without_x64_raises(self):
+        from legoesm.core.precision import validate_policy
+        original = jax.config.jax_enable_x64
+        try:
+            jax.config.update("jax_enable_x64", False)
+            with pytest.raises(RuntimeError, match="float64.*x64"):
+                validate_policy(PrecisionPolicy.fp64())
+        finally:
+            jax.config.update("jax_enable_x64", original)
+
+    def test_validate_mixed_without_x64_raises(self):
+        from legoesm.core.precision import validate_policy
+        original = jax.config.jax_enable_x64
+        try:
+            jax.config.update("jax_enable_x64", False)
+            with pytest.raises(RuntimeError, match="float64.*x64"):
+                validate_policy(PrecisionPolicy.mixed())
+        finally:
+            jax.config.update("jax_enable_x64", original)
+
+    def test_trainable_params_dtype_matches_policy(self):
+        from legoesm.training.trainable_params import TrainablePhysicsParams
+        # With fp64 policy, raw values should be float64
+        jax.config.update("jax_enable_x64", True)
+        set_policy(PrecisionPolicy.fp64())
+        params = TrainablePhysicsParams.from_defaults()
+        for name, val in params.raw_values.items():
+            assert val.dtype == jnp.float64, f"{name} has dtype {val.dtype}, expected float64"
+        # Restore
+        set_policy(PrecisionPolicy.fp32())
+
+    def test_trainable_params_default_fp32(self):
+        from legoesm.training.trainable_params import TrainablePhysicsParams
+        set_policy(PrecisionPolicy.fp32())
+        params = TrainablePhysicsParams.from_defaults()
+        for name, val in params.raw_values.items():
+            assert val.dtype == jnp.float32, f"{name} has dtype {val.dtype}, expected float32"

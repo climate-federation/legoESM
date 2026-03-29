@@ -114,25 +114,57 @@ def initialize_distributed(
     # Validate MPI dependencies before touching JAX distributed runtime.
     _mpi4jax, MPI = _require_mpi_stack()
 
-    # Initialize JAX distributed runtime.
-    jax.distributed.initialize()
-
-    # Use MPI as the authoritative source for rank/size.
+    # Get rank/size from MPI BEFORE initializing JAX distributed runtime.
+    # This is the authoritative source — MPI is always available under mpirun.
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     n_processes = comm.Get_size()
 
-    # Validate JAX agrees with MPI.
-    jax_rank = jax.process_index()
-    jax_size = jax.process_count()
-    if jax_rank != rank or jax_size != n_processes:
-        import warnings
-        warnings.warn(
-            f"JAX process_index/count ({jax_rank}/{jax_size}) differs from "
-            f"MPI rank/size ({rank}/{n_processes}). Using MPI values.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+    # Initialize JAX distributed runtime with MPI-derived coordinator info.
+    # Under plain mpirun (no SLURM/GKE), JAX needs explicit coordinator
+    # address, process count, and process ID.
+    if n_processes > 1:
+        import socket
+        # Rank 0 broadcasts its hostname as coordinator address.
+        if rank == 0:
+            coordinator_address = socket.gethostname()
+        else:
+            coordinator_address = None
+        coordinator_address = comm.bcast(coordinator_address, root=0)
+
+        # Use a fixed port for the coordinator (JAX default is 1234).
+        coordinator_port = 1234
+        coordinator_bind = f"{coordinator_address}:{coordinator_port}"
+
+        try:
+            jax.distributed.initialize(
+                coordinator_address=coordinator_bind,
+                num_processes=n_processes,
+                process_id=rank,
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"jax.distributed.initialize() failed on rank {rank}/{n_processes} "
+                f"with coordinator={coordinator_bind}. "
+                f"Ensure the coordinator port {coordinator_port} is not in use "
+                f"and all ranks can reach {coordinator_address}. "
+                f"Original error: {e}"
+            ) from e
+    else:
+        # Single rank: no distributed init needed, but still using MPI.
+        pass
+
+    # Validate JAX agrees with MPI (if multi-process).
+    if n_processes > 1:
+        jax_rank = jax.process_index()
+        jax_size = jax.process_count()
+        if jax_rank != rank or jax_size != n_processes:
+            warnings.warn(
+                f"JAX process_index/count ({jax_rank}/{jax_size}) differs from "
+                f"MPI rank/size ({rank}/{n_processes}). Using MPI values.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
     # Build communication topology for this rank.
     topology = build_comm_topology(rank, n_processes)
