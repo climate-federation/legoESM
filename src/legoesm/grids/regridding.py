@@ -466,6 +466,20 @@ def compute_cubedsphere_to_latlon_weights(
     )
 
 
+_cs_weights_cache: dict[tuple[int, int, int], CubedSphereToLatLonWeights] = {}
+
+
+def get_cubedsphere_to_latlon_weights(
+    n: int, n_lon: int = 360, n_lat: int = 181,
+) -> CubedSphereToLatLonWeights:
+    """Cached version of :func:`compute_cubedsphere_to_latlon_weights`."""
+    key = (n, n_lat, n_lon)
+    if key not in _cs_weights_cache:
+        _cs_weights_cache[key] = compute_cubedsphere_to_latlon_weights(
+            n, n_lon=n_lon, n_lat=n_lat)
+    return _cs_weights_cache[key]
+
+
 def apply_cubedsphere_to_latlon(
     field_faces: np.ndarray,
     weights: CubedSphereToLatLonWeights,

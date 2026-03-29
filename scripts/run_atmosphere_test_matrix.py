@@ -468,17 +468,10 @@ def _interp_gaussian_to_latlon(field: np.ndarray, lat_gauss_deg: np.ndarray,
     return f(lat_out)
 
 
-_cs_weights_cache: dict[tuple[int, int, int], object] = {}
-
-
 def _get_cs_weights(n: int, n_lat: int = 181, n_lon: int = 360):
     """Get (or compute and cache) face-aware bilinear CS→latlon weights."""
-    key = (n, n_lat, n_lon)
-    if key not in _cs_weights_cache:
-        from legoesm.grids.regridding import compute_cubedsphere_to_latlon_weights
-        _cs_weights_cache[key] = compute_cubedsphere_to_latlon_weights(
-            n, n_lon=n_lon, n_lat=n_lat)
-    return _cs_weights_cache[key]
+    from legoesm.grids.regridding import get_cubedsphere_to_latlon_weights
+    return get_cubedsphere_to_latlon_weights(n, n_lon=n_lon, n_lat=n_lat)
 
 
 def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,

@@ -369,19 +369,6 @@ def _bin_to_latlon(
     return _apply_weights(vals, idxs, w, n_lat, n_lon)
 
 
-_cs_weights_cache: dict[tuple[int, int, int], object] = {}
-
-
-def _get_cs_weights(n: int, n_lat: int = 181, n_lon: int = 360):
-    """Get (or compute and cache) face-aware bilinear CS→latlon weights."""
-    key = (n, n_lat, n_lon)
-    if key not in _cs_weights_cache:
-        from legoesm.grids.regridding import compute_cubedsphere_to_latlon_weights
-        _cs_weights_cache[key] = compute_cubedsphere_to_latlon_weights(
-            n, n_lon=n_lon, n_lat=n_lat)
-    return _cs_weights_cache[key]
-
-
 def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
                lat_deg: np.ndarray, coord_kind: str) -> np.ndarray:
     """Regrid a 2D field to (181, 360) lat-lon."""
@@ -389,14 +376,15 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
         return np.asarray(field_arr, dtype=np.float64)
     # Cubed-sphere: use face-aware bilinear interpolation (no edge artifacts).
     if coord_kind == "cube":
-        from legoesm.grids.regridding import apply_cubedsphere_to_latlon
+        from legoesm.grids.regridding import (
+            apply_cubedsphere_to_latlon, get_cubedsphere_to_latlon_weights)
         arr = np.asarray(field_arr, dtype=np.float64)
         if arr.ndim >= 3 and arr.shape[0] == 6:
             n = arr.shape[1]
         else:
             n = int(round(np.sqrt(arr.size / 6)))
             arr = arr.reshape(6, n, n)
-        w = _get_cs_weights(n)
+        w = get_cubedsphere_to_latlon_weights(n)
         return apply_cubedsphere_to_latlon(arr, w)
     return _bin_to_latlon(field_arr.ravel(), lon_deg.ravel(), lat_deg.ravel())
 
@@ -411,14 +399,15 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
         return arr
     # Cubed-sphere: use face-aware bilinear interpolation.
     if coord_kind == "cube":
-        from legoesm.grids.regridding import apply_cubedsphere_to_latlon_3d
+        from legoesm.grids.regridding import (
+            apply_cubedsphere_to_latlon_3d, get_cubedsphere_to_latlon_weights)
         if arr.ndim >= 3 and arr.shape[0] == 6:
             n = arr.shape[1]
         else:
             nlev = arr.shape[-1]
             n = int(round(np.sqrt(arr.size / (6 * nlev))))
             arr = arr.reshape(6, n, n, nlev)
-        w = _get_cs_weights(n)
+        w = get_cubedsphere_to_latlon_weights(n)
         return apply_cubedsphere_to_latlon_3d(arr, w)
     if arr.ndim == 1:
         arr = arr[:, None]
