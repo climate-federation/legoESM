@@ -4,7 +4,7 @@ This runbook describes how to run real-hardware scaling tests for legoESM
 atmosphere and ocean components on CPUs/GPUs and MPI clusters.
 
 It is focused on commands that already exist in this repository:
-- `scripts/run_parallel_validation.py` (atmosphere scaling + MPI validation)
+- `scripts/run_levante_gpu_scaling.py` (atmosphere scaling + MPI validation)
 - `scripts/run_ocean_regression_matrix.py` (ocean runtime/regression matrix)
 - `tests/distributed/test_halo_mpi.py` and `tests/distributed/test_ocean_mpi_conservation.py` (MPI ocean/distributed checks)
 
@@ -43,7 +43,7 @@ mkdir -p "$OUTDIR"
 
 ## 3. Atmosphere Scaling (Multi-GPU + MPI)
 
-Use `scripts/run_parallel_validation.py` with `--scaling-workload atmosphere_sw`.
+Use `scripts/run_levante_gpu_scaling.py` for atmosphere scaling benchmarks.
 This includes:
 - compile time
 - steady-state time per step
@@ -53,56 +53,37 @@ This includes:
 ### 3.1 Single-node multi-GPU (or multi-CPU) scaling
 
 ```bash
-JAX_PLATFORMS=gpu .venv/bin/python scripts/run_parallel_validation.py \
-  --output "$OUTDIR/atm_gpu" \
-  --scaling-workload atmosphere_sw \
-  --scaling-backends gpu \
-  --scaling-gpu-devices 1,2,3,6 \
-  --scaling-strong-grid 256 \
-  --scaling-weak-base-grid 256 \
-  --scaling-iterations 20 \
-  --scaling-warmup 3 \
-  --scaling-dt 300 \
-  --timeout-sec 3600
+JAX_PLATFORMS=gpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
+  --grid cubed-sphere \
+  --mode strong \
+  --precision float32 \
+  --n-levels 26 \
+  --n-warmup 3 \
+  --n-timing 100 \
+  --output-dir "$OUTDIR/atm_gpu"
 ```
 
 CPU comparison:
 
 ```bash
-JAX_PLATFORMS=cpu .venv/bin/python scripts/run_parallel_validation.py \
-  --output "$OUTDIR/atm_cpu" \
-  --scaling-workload atmosphere_sw \
-  --scaling-backends cpu \
-  --scaling-cpu-devices 1,2,3,6 \
-  --scaling-strong-grid 256 \
-  --scaling-weak-base-grid 256
+JAX_PLATFORMS=cpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
+  --grid cubed-sphere \
+  --mode strong \
+  --precision float32 \
+  --n-levels 26 \
+  --output-dir "$OUTDIR/atm_cpu"
 ```
 
 ### 3.2 MPI rank scaling (real cluster)
 
 ```bash
-.venv/bin/python scripts/run_parallel_validation.py \
-  --output "$OUTDIR/atm_mpi" \
-  --mpi-ranks 2,3,6 \
-  --scaling-workload atmosphere_sw \
-  --mpi-scaling \
-  --mpi-scaling-strong-grid 96 \
-  --mpi-scaling-weak-base-grid 96 \
-  --mpi-scaling-iterations 12 \
-  --mpi-scaling-warmup 2
-```
-
-Portability knobs for restricted environments:
-
-```bash
-.venv/bin/python scripts/run_parallel_validation.py \
-  --output "$OUTDIR/atm_mpi_portable" \
-  --mpi-launcher mpirun \
-  --mpi-ranks 2,3,6 \
-  --mpi-interface eth0 \
-  --mpi-mca "btl=self,tcp;pml=ob1" \
-  --mpi-env OMPI_MCA_btl_tcp_if_include=eth0 \
-  --mpi-extra-args "--bind-to none --map-by slot"
+mpirun -np 6 .venv/bin/python scripts/run_levante_gpu_scaling.py \
+  --grid cubed-sphere \
+  --mode strong \
+  --precision float32 \
+  --n-levels 26 \
+  --n-gpus 6 \
+  --output-dir "$OUTDIR/atm_mpi"
 ```
 
 ### 3.3 Atmosphere outputs to inspect
@@ -124,7 +105,7 @@ Key metrics are in `scaling_validation` and `mpi_validation.scaling`:
 ## 4. Ocean Scaling and MPI Hardware Tests
 
 There is currently no single ocean script equivalent to atmosphere
-`run_parallel_validation.py` for automated strong/weak MPI+multi-GPU gating.
+`run_levante_gpu_scaling.py` for automated strong/weak MPI+multi-GPU gating.
 Use the workflow below to cover real ocean hardware behavior.
 
 ### 4.1 Ocean scaling matrix (single-process runtime/perf trend)
@@ -209,7 +190,7 @@ Record `real` time and compare speedup/efficiency manually.
 
 ## 5. Pass/Fail Interpretation
 
-Atmosphere (`run_parallel_validation.py` defaults):
+Atmosphere (`run_levante_gpu_scaling.py` defaults):
 - compile time threshold: `--scaling-compile-time-max-s` (default 30s)
 - strong efficiency threshold: `--strong-min-efficiency` (default 0.12)
 - weak step growth threshold: `--weak-max-step-growth` (default 2.5)

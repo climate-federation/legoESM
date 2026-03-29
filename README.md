@@ -94,7 +94,7 @@ pytest tests/
 | Finite-volume dycores + ocean (single-process) | Apple Silicon Metal (`jax-metal`) | N/A | `>=0.8,<0.10` | N/A | FV solvers only (`float32`); no `float64` |
 | Spectral solvers (atmosphere/ocean) | CPU (`JAX_PLATFORMS=cpu`) | N/A | `>=0.8,<0.10` | N/A | Requires `float64`/`complex128`; not Metal-compatible |
 | Distributed MPI halo/reductions | CPU + OpenMPI (`mpirun`) | OpenMPI 4.x/5.x | `>=0.8,<0.10` | `>=0.8,<0.9` | Validated with `mpirun -np 2/3/6` |
-| Multi-device scaling suite | CPU/GPU (if available) | Optional | `>=0.8,<0.10` | `>=0.8,<0.9` (MPI mode) | `scripts/run_parallel_validation.py` |
+| Multi-device scaling suite | CPU/GPU (if available) | Optional | `>=0.8,<0.10` | `>=0.8,<0.9` (MPI mode) | `scripts/run_levante_gpu_scaling.py` |
 
 JAX versions outside the tested range may work but are not guaranteed. Versions below the install minimum will fail at `pip install`.
 

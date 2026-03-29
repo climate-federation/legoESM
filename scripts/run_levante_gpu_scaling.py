@@ -57,6 +57,46 @@ def _configure_jax(precision: str) -> None:
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
 
 
+def _maybe_init_distributed() -> tuple[int, int]:
+    """Detect and initialize distributed JAX if under MPI or SLURM.
+
+    Returns (rank, world_size). For single-process, returns (0, 1).
+    """
+    # Check for MPI environment
+    if "OMPI_COMM_WORLD_SIZE" in os.environ or "PMI_SIZE" in os.environ:
+        try:
+            from mpi4py import MPI
+            comm = MPI.COMM_WORLD
+            rank = comm.Get_rank()
+            world_size = comm.Get_size()
+            if world_size > 1:
+                import socket
+                if rank == 0:
+                    coordinator = socket.gethostname()
+                else:
+                    coordinator = None
+                coordinator = comm.bcast(coordinator, root=0)
+
+                import jax
+                jax.distributed.initialize(
+                    coordinator_address=f"{coordinator}:1234",
+                    num_processes=world_size,
+                    process_id=rank,
+                )
+                return rank, world_size
+        except ImportError:
+            pass
+
+    # Check for SLURM multi-node
+    slurm_ntasks = os.environ.get("SLURM_NTASKS")
+    if slurm_ntasks and int(slurm_ntasks) > 1:
+        import jax
+        jax.distributed.initialize()
+        return jax.process_index(), jax.process_count()
+
+    return 0, 1
+
+
 # ===========================================================================
 # Dataclasses for results
 # ===========================================================================
@@ -273,7 +313,7 @@ def run_benchmark(
 
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.parallel.mesh import (
-        create_device_mesh, create_voronoi_device_mesh, shard_pytree,
+        create_device_mesh, create_level_mesh, create_voronoi_device_mesh, shard_pytree,
     )
 
     # Choose timestep
@@ -305,7 +345,7 @@ def run_benchmark(
         n_lat = grid.n_lat
         n_lon = grid.n_lon
         total_cells = n_lat * n_lon * n_levels
-        dev_config = create_device_mesh(n_devices=n_gpus)
+        dev_config = create_level_mesh(n_devices=n_gpus)
     elif grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
@@ -387,6 +427,17 @@ def run_benchmark(
     if dev_config.n_devices > 1:
         state = shard_pytree(state, dev_config)
 
+    # Verify sharding is effective (not accidentally replicated)
+    if dev_config.n_devices > 1:
+        sample_leaf = jax.tree.leaves(state)[0]
+        if hasattr(sample_leaf, 'sharding'):
+            is_replicated = all(
+                s == 1 for s in getattr(sample_leaf.sharding, 'shape', (1,))
+            )
+            if is_replicated and grid_type != "icosahedral":
+                print("    WARNING: State appears fully replicated — "
+                      "sharding may not be effective", flush=True)
+
     # For Voronoi multi-GPU: wrap step to avoid per-operator collectives.
     # TRiSK's indirect indexing generates O(n_ops) cross-device gathers
     # when state is naively sharded.  The wrapper replicates state first
@@ -432,10 +483,28 @@ def run_benchmark(
     # ---------------------------------------------------------------
     # Timed steps
     # ---------------------------------------------------------------
+    # Synchronize all ranks before timing for fair measurement
+    try:
+        from mpi4py import MPI as _MPI
+        if _MPI.COMM_WORLD.Get_size() > 1:
+            jax.block_until_ready(jax.tree.leaves(state))
+            _MPI.COMM_WORLD.Barrier()
+    except ImportError:
+        pass
+
     t0 = time.perf_counter()
     for _ in range(n_timing):
         state = step_fn(state, dt)
     jax.block_until_ready(jax.tree.leaves(state))
+
+    # Synchronize all ranks after timing for fair measurement
+    try:
+        from mpi4py import MPI as _MPI
+        if _MPI.COMM_WORLD.Get_size() > 1:
+            _MPI.COMM_WORLD.Barrier()
+    except ImportError:
+        pass
+
     t1 = time.perf_counter()
 
     timing_time = t1 - t0
@@ -969,15 +1038,32 @@ def main() -> int:
 
     import jax
 
+    # Initialize distributed runtime if under MPI/SLURM
+    rank, world_size = _maybe_init_distributed()
+    is_rank0 = (rank == 0)
+
     # Resolve GPU count
-    max_gpus = args.n_gpus
-    if max_gpus <= 0:
-        try:
-            max_gpus = len(jax.devices("gpu"))
-        except RuntimeError:
-            max_gpus = len(jax.devices())
-    if max_gpus < 1:
-        max_gpus = 1
+    if world_size > 1:
+        # Distributed mode: total GPUs = local devices * world_size
+        local_devices = jax.local_devices()
+        local_gpu_count = len(local_devices)
+        max_gpus = local_gpu_count * world_size
+        if args.n_gpus > 0 and args.n_gpus != max_gpus:
+            if is_rank0:
+                print(
+                    f"  WARNING: --n-gpus={args.n_gpus} overridden by "
+                    f"distributed world: {local_gpu_count} local × "
+                    f"{world_size} ranks = {max_gpus} GPUs"
+                )
+    else:
+        max_gpus = args.n_gpus
+        if max_gpus <= 0:
+            try:
+                max_gpus = len(jax.devices("gpu"))
+            except RuntimeError:
+                max_gpus = len(jax.devices())
+        if max_gpus < 1:
+            max_gpus = 1
 
     # Resolve strong scaling resolutions
     if args.strong_resolutions is not None:
@@ -991,7 +1077,8 @@ def main() -> int:
     if not args.no_timestamp:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         output_dir = output_dir / ts
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if is_rank0:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine modes to run
     modes = []
@@ -1003,21 +1090,22 @@ def main() -> int:
     hostname = os.environ.get("HOSTNAME", os.environ.get("SLURM_NODELIST", "unknown"))
     backend = jax.default_backend().upper()
 
-    print("=" * 72)
-    print("  legoESM GPU Scaling Benchmark")
-    print("=" * 72)
-    print(f"  Grid:        {grid_type}")
-    print(f"  Backend:     {backend}")
-    print(f"  Hostname:    {hostname}")
-    print(f"  Max GPUs:    {max_gpus}")
-    print(f"  Valid GPUs:  {_valid_gpu_counts(max_gpus, grid_type)}")
-    print(f"  Precisions:  {precisions}")
-    print(f"  Modes:       {modes}")
-    print(f"  Levels:      {args.n_levels}")
-    print(f"  Warmup:      {args.n_warmup} steps")
-    print(f"  Timing:      {args.n_timing} steps")
-    print(f"  Output:      {output_dir}")
-    print("=" * 72)
+    if is_rank0:
+        print("=" * 72)
+        print("  legoESM GPU Scaling Benchmark")
+        print("=" * 72)
+        print(f"  Grid:        {grid_type}")
+        print(f"  Backend:     {backend}")
+        print(f"  Hostname:    {hostname}")
+        print(f"  Max GPUs:    {max_gpus}")
+        print(f"  Valid GPUs:  {_valid_gpu_counts(max_gpus, grid_type)}")
+        print(f"  Precisions:  {precisions}")
+        print(f"  Modes:       {modes}")
+        print(f"  Levels:      {args.n_levels}")
+        print(f"  Warmup:      {args.n_warmup} steps")
+        print(f"  Timing:      {args.n_timing} steps")
+        print(f"  Output:      {output_dir}")
+        print("=" * 72)
 
     all_results: list[TimingResult] = []
 
@@ -1035,20 +1123,21 @@ def main() -> int:
             grid_type=grid_type,
         )
         all_results.extend(weak_results)
-        print_summary_table(weak_results, "weak")
+        if is_rank0:
+            print_summary_table(weak_results, "weak")
 
-        weak_report = ScalingReport(
-            mode="weak",
-            precisions=precisions,
-            results=weak_results,
-            backend=backend,
-            hostname=hostname,
-        )
-        write_csv(weak_results, output_dir / "weak_scaling.csv")
-        write_json(weak_report, output_dir / "weak_scaling.json")
+            weak_report = ScalingReport(
+                mode="weak",
+                precisions=precisions,
+                results=weak_results,
+                backend=backend,
+                hostname=hostname,
+            )
+            write_csv(weak_results, output_dir / "weak_scaling.csv")
+            write_json(weak_report, output_dir / "weak_scaling.json")
 
-        if not args.no_plot:
-            plot_weak_scaling(weak_results, output_dir)
+            if not args.no_plot:
+                plot_weak_scaling(weak_results, output_dir)
 
     # ---------------------------------------------------------------
     # Strong scaling
@@ -1064,54 +1153,56 @@ def main() -> int:
             grid_type=grid_type,
         )
         all_results.extend(strong_results)
-        print_summary_table(strong_results, "strong")
+        if is_rank0:
+            print_summary_table(strong_results, "strong")
 
-        strong_report = ScalingReport(
-            mode="strong",
-            precisions=precisions,
-            results=strong_results,
-            backend=backend,
-            hostname=hostname,
-        )
-        write_csv(strong_results, output_dir / "strong_scaling.csv")
-        write_json(strong_report, output_dir / "strong_scaling.json")
+            strong_report = ScalingReport(
+                mode="strong",
+                precisions=precisions,
+                results=strong_results,
+                backend=backend,
+                hostname=hostname,
+            )
+            write_csv(strong_results, output_dir / "strong_scaling.csv")
+            write_json(strong_report, output_dir / "strong_scaling.json")
 
-        if not args.no_plot:
-            plot_strong_scaling(strong_results, output_dir)
+            if not args.no_plot:
+                plot_strong_scaling(strong_results, output_dir)
 
     # ---------------------------------------------------------------
     # Combined output
     # ---------------------------------------------------------------
-    if all_results:
-        write_csv(all_results, output_dir / "all_scaling.csv")
+    if is_rank0:
+        if all_results:
+            write_csv(all_results, output_dir / "all_scaling.csv")
 
-    # Save metadata
-    meta = {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "grid_type": grid_type,
-        "backend": backend,
-        "hostname": hostname,
-        "max_gpus": max_gpus,
-        "valid_gpu_counts": _valid_gpu_counts(max_gpus),
-        "precisions": precisions,
-        "modes": modes,
-        "n_levels": args.n_levels,
-        "n_warmup": args.n_warmup,
-        "n_timing": args.n_timing,
-        "weak_base_n": args.weak_base_n,
-        "strong_resolutions": strong_res,
-        "jax_version": jax.__version__,
-        "python_version": sys.version,
-        "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
-        "slurm_nodelist": os.environ.get("SLURM_NODELIST", ""),
-    }
-    meta_path = output_dir / "metadata.json"
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, indent=2)
-    print(f"  Metadata: {meta_path}")
+        # Save metadata
+        meta = {
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "grid_type": grid_type,
+            "backend": backend,
+            "hostname": hostname,
+            "max_gpus": max_gpus,
+            "valid_gpu_counts": _valid_gpu_counts(max_gpus),
+            "precisions": precisions,
+            "modes": modes,
+            "n_levels": args.n_levels,
+            "n_warmup": args.n_warmup,
+            "n_timing": args.n_timing,
+            "weak_base_n": args.weak_base_n,
+            "strong_resolutions": strong_res,
+            "jax_version": jax.__version__,
+            "python_version": sys.version,
+            "slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+            "slurm_nodelist": os.environ.get("SLURM_NODELIST", ""),
+        }
+        meta_path = output_dir / "metadata.json"
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+        print(f"  Metadata: {meta_path}")
 
-    print(f"\nAll results saved to {output_dir}/")
-    print("Done.")
+        print(f"\nAll results saved to {output_dir}/")
+        print("Done.")
     return 0
 
 

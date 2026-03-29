@@ -528,9 +528,16 @@ class ModelDriver:
         devices before diagnostic collection.  Consolidates the
         ``jax.block_until_ready`` + ``diagnostics.collect`` pattern
         into a single method to avoid scattered sync points.
+
+        In ``perf_mode``, skips the full-state gather and uses only
+        device-local data.  This avoids the O(n_devices) all-gather
+        overhead that dominates strong-scaling benchmarks but may
+        produce incomplete global diagnostics (e.g., global means
+        will only reflect the local shard).
         """
-        # Gather sharded state back to single device for host-side diagnostics
-        if self._device_config is not None and self._device_config.mesh is not None:
+        perf_mode = kwargs.pop("perf_mode", False)
+
+        if not perf_mode and self._device_config is not None and self._device_config.mesh is not None:
             from legoesm.parallel.sharded_dynamics import gather_state
             gathered = gather_state(kwargs.get('state', self.state), self._device_config)
             kwargs['state'] = gathered
@@ -574,42 +581,60 @@ class ModelDriver:
     def _setup_parallel(self) -> None:
         """Set up multi-device parallelism if available.
 
-        Detects available devices and creates a device mesh for
-        cubed-sphere face sharding.  Shards the state and tracers
-        across devices so the compiled segment loop runs in SPMD mode.
+        Tries to use the canonical ``ParallelRuntime`` for device mesh
+        creation and state sharding.  Falls back to local device
+        detection for backward compatibility when ``ParallelRuntime``
+        is not configured (e.g., non-MPI single-node runs).
         """
-        from legoesm.parallel.device_config import detect_devices, configure_jax_for_device
-
         self._device_config = None
-        hw = detect_devices()
-        configure_jax_for_device(hw)
 
-        if hw.device_count <= 1:
-            return
-        if self.config.grid.grid_type != "cubed_sphere":
-            return  # only cubed-sphere supports face sharding
-
-        from legoesm.parallel.mesh import create_device_mesh
-
+        # Try canonical ParallelRuntime path first (handles distributed/MPI).
         try:
-            self._device_config = create_device_mesh(n_devices=hw.device_count)
-        except ValueError:
-            logger.warning(
-                f"Cannot create cubed-sphere mesh for {hw.device_count} "
-                f"devices; using single-device mode"
-            )
+            from legoesm.parallel.mesh import get_active_config
+            active = get_active_config()
+            if active is not None and active.n_devices > 1:
+                self._device_config = active
+                logger.info(
+                    f"  Parallel: using active config — "
+                    f"{active.n_devices} devices, "
+                    f"distributed={active.is_distributed}"
+                )
+        except Exception:
+            pass
+
+        # Fall back to local device detection.
+        if self._device_config is None:
+            from legoesm.parallel.device_config import detect_devices, configure_jax_for_device
+            hw = detect_devices()
+            configure_jax_for_device(hw)
+
+            if hw.device_count <= 1:
+                return
+            if self.config.grid.grid_type != "cubed_sphere":
+                return
+
+            from legoesm.parallel.mesh import create_device_mesh
+            try:
+                self._device_config = create_device_mesh(n_devices=hw.device_count)
+            except ValueError:
+                logger.warning(
+                    f"Cannot create cubed-sphere mesh for {hw.device_count} "
+                    f"devices; using single-device mode"
+                )
+                return
+
+        if self._device_config is None:
             return
 
-        # Shard state across devices (face axis)
+        # Shard state across devices
         from legoesm.parallel.sharded_dynamics import shard_state
         self.state = shard_state(self.state, self._device_config)
 
-        # Shard tracers
         from legoesm.parallel.mesh import shard_pytree
         self.tracers = shard_pytree(self.tracers, self._device_config)
 
         logger.info(
-            f"  Parallel: {hw.device_count} devices, "
+            f"  Parallel: {self._device_config.n_devices} devices, "
             f"tiling={self._device_config.tiling}"
         )
 

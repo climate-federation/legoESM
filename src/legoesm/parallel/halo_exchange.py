@@ -37,20 +37,30 @@ per rank.
 
 Sub-face tiling mode: one sendrecv per edge direction (4 total).
 
-TODO: Non-blocking MPI Support
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Currently all halo exchanges use blocking ``sendrecv`` via ``mpi4jax``.
-To enable true asynchronous communication overlap, consider:
+Limitations and Known Bottlenecks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+1. **Blocking sendrecv**: All halo exchanges use blocking ``sendrecv``
+   via ``mpi4jax``.  ``mpi4jax`` does not yet expose ``Isend``/``Irecv``
+   non-blocking primitives, so true computation-communication overlap
+   is not possible at this level.
 
-1. **mpi4jax non-blocking support**: Replace blocking ``sendrecv`` with
-   ``Isend``/``Irecv`` once ``mpi4jax`` exposes these primitives.
+2. **Face-only mode uses allgather**: When rank count ≤ 6, a single
+   ``allgather`` replaces N sequential sendrecv calls.  This reduces
+   message count but is O(N) in bandwidth.  For >6 ranks, the tiled
+   mode uses point-to-point sendrecv with only actual neighbors.
 
-2. **JAX-native collective permute**: Use ``jax.lax.ppermute`` for
-   device-to-device communication on multi-GPU/TPU systems. This avoids
-   MPI entirely and integrates natively with XLA's compiler stack.
+3. **Tiled mode is sequential per edge**: The 4 edge directions are
+   exchanged in sequence (not pipelined).  Each sendrecv blocks until
+   both send and receive complete.
 
-See :func:`jax_native_halo_exchange` in :mod:`legoesm.parallel.async_halo`
-for a placeholder implementation demonstrating the API and fallback strategy.
+Near-term improvement path:
+  - Batch edge packing into a single contiguous buffer per neighbor
+    rank and do one sendrecv per neighbor (reduces from 4 to ≤4
+    messages per rank, with larger messages for better bandwidth).
+  - When ``mpi4jax`` gains ``Isend``/``Irecv``, convert to non-blocking
+    with ``Waitall`` after all sends/receives are posted.
+  - For pure multi-GPU (no MPI), ``jax.lax.ppermute`` is the preferred
+    path and integrates with XLA's SPMD partitioner.
 """
 
 from __future__ import annotations
