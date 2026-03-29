@@ -365,6 +365,12 @@ def gather_state(local_state, topology: CommTopology | None = None):
     This legacy function uses ``allreduce(SUM)`` on the zero-masked
     global arrays (each rank contributes its local faces, zeros elsewhere).
     """
+    warnings.warn(
+        "gather_state is deprecated. Use gather_to_global() with "
+        "rank-local data from scatter_to_local().",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     topology = topology or _active_topology
     if topology is None:
         raise ValueError(

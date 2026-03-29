@@ -91,6 +91,42 @@ def _to_numpy(arr) -> np.ndarray:
     return np.asarray(arr)
 
 
+def _resolve_output_dtype(explicit_dtype: str | None) -> np.dtype:
+    """Resolve the output dtype for CMOR variable data.
+
+    Priority:
+    1. Explicit dtype string (e.g. ``"float64"``) — always wins.
+    2. Precision policy's storage dtype — used as a fallback.
+       Float32 storage maps to ``np.float32``; anything wider maps
+       to ``np.float64``.
+    3. ``np.float32`` — safe default if the precision system is
+       unavailable.
+
+    Parameters
+    ----------
+    explicit_dtype : str or None
+        If not None, a NumPy dtype string (e.g. ``"float32"``).
+
+    Returns
+    -------
+    np.dtype
+        Resolved NumPy dtype for on-disk variable data.
+    """
+    if explicit_dtype is not None:
+        return np.dtype(explicit_dtype)
+
+    try:
+        from legoesm.core.precision import get_policy
+        import jax.numpy as jnp
+
+        policy_dtype = get_policy().storage
+        if policy_dtype == jnp.float32:
+            return np.dtype(np.float32)
+        return np.dtype(np.float64)
+    except Exception:
+        return np.dtype(np.float32)
+
+
 # =========================================================================
 # CMOR Variable Tables
 # =========================================================================
@@ -764,8 +800,9 @@ class CFWriter:
 
     def _encoding_for(self, var_name: str) -> Dict[str, Any]:
         """Return NetCDF encoding dict for a variable."""
+        output_dtype = _resolve_output_dtype(None)
         enc: Dict[str, Any] = {
-            "dtype": "float32",
+            "dtype": output_dtype.str,
         }
         if self.compress_level > 0:
             enc["zlib"] = True
@@ -833,7 +870,8 @@ class CFWriter:
         """
         xr = _import_xarray()
         table_id, entry = lookup_cmor_entry(var_name, table=table)
-        data_np = _to_numpy(data).astype(np.float32)
+        output_dtype = _resolve_output_dtype(None)
+        data_np = _to_numpy(data).astype(output_dtype)
 
         # --- Build coordinates ---
         coords: Dict[str, Any] = {}
@@ -978,6 +1016,7 @@ class CFWriter:
         nlat = lat_np.shape[0]
         nlon = lon_np.shape[0]
         n_months = len(months)
+        output_dtype = _resolve_output_dtype(None)
 
         # Days in each month (noleap / 365_day calendar)
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -1047,7 +1086,7 @@ class CFWriter:
                         np.linspace(-90, 90, arr.shape[1]),
                     ))
                     from numpy import interp as np_interp
-                    new_arr = np.empty((n_months, nlat), dtype=np.float32)
+                    new_arr = np.empty((n_months, nlat), dtype=output_dtype)
                     for t in range(n_months):
                         new_arr[t] = np_interp(lat_np, acc_lat, arr[t])
                     arr = new_arr
@@ -1056,7 +1095,7 @@ class CFWriter:
                 field = np.broadcast_to(
                     arr[:, :, np.newaxis],
                     (n_months, nlat, nlon),
-                ).copy().astype(np.float32)
+                ).copy().astype(output_dtype)
 
             elif key.startswith("profile_"):
                 # arr shape: (n_months, n_lat_bins, nlev)
@@ -1075,7 +1114,7 @@ class CFWriter:
                     ))
                     from numpy import interp as np_interp
                     new_arr = np.empty(
-                        (n_months, nlat, nplev), dtype=np.float32,
+                        (n_months, nlat, nplev), dtype=output_dtype,
                     )
                     for t in range(n_months):
                         for k in range(nplev):
@@ -1090,7 +1129,7 @@ class CFWriter:
                 field = np.broadcast_to(
                     arr_transposed[:, :, :, np.newaxis],
                     (n_months, nplev, nlat, nlon),
-                ).copy().astype(np.float32)
+                ).copy().astype(output_dtype)
 
             elif key.startswith("scalar_"):
                 # arr shape: (n_months,)
@@ -1098,7 +1137,7 @@ class CFWriter:
                 field = np.broadcast_to(
                     arr[:, np.newaxis, np.newaxis],
                     (n_months, nlat, nlon),
-                ).copy().astype(np.float32)
+                ).copy().astype(output_dtype)
 
             else:
                 continue

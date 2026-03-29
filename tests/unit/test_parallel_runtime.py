@@ -175,3 +175,28 @@ class TestDeprecation:
         from legoesm.parallel.distributed import partition_state
         with pytest.warns(DeprecationWarning, match="deprecated"):
             partition_state(state, topo)
+
+    def test_gather_state_emits_deprecation_warning(self):
+        """gather_state should emit DeprecationWarning."""
+        from legoesm.parallel.distributed import gather_state
+        from legoesm.parallel.comm import build_comm_topology
+        from unittest.mock import patch, MagicMock
+        import jax.numpy as jnp
+
+        topo = build_comm_topology(0, 1)
+        state = jnp.ones((6, 4, 4))
+
+        # gather_state calls _require_mpi_stack and allreduce, so mock those
+        mock_mpi4jax = MagicMock()
+        mock_MPI = MagicMock()
+
+        def mock_allreduce(leaf, op, comm):
+            return (leaf, MagicMock())
+
+        mock_mpi4jax.allreduce = mock_allreduce
+
+        with patch(
+            "legoesm.parallel.distributed._require_mpi_stack",
+            return_value=(mock_mpi4jax, mock_MPI),
+        ), pytest.warns(DeprecationWarning, match="deprecated"):
+            gather_state(state, topo)

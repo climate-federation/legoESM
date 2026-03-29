@@ -698,3 +698,94 @@ class TestPrecisionEnforcement:
         params = TrainablePhysicsParams.from_defaults()
         for name, val in params.raw_values.items():
             assert val.dtype == jnp.float32, f"{name} has dtype {val.dtype}, expected float32"
+
+
+# ===========================================================================
+# Part 13: Precision wiring into compute kernels
+# ===========================================================================
+
+class TestPrecisionWiring:
+    """Verify precision casting is wired into key compute kernels."""
+
+    def setup_method(self):
+        set_recommended_overrides("mixed")
+
+    def teardown_method(self):
+        set_policy(PrecisionPolicy.fp32())
+        clear_module_overrides()
+
+    def test_ocean_area_sum_uses_accumulate_precision(self):
+        """Ocean area sum should upcast to accumulation dtype in mixed mode."""
+        from legoesm.ocean.conservation import _ocean_area_sum
+        from types import SimpleNamespace
+
+        field = jnp.ones((6, 4, 4), dtype=jnp.float32)
+        mask = jnp.ones((6, 4, 4), dtype=jnp.float32)
+        grid = SimpleNamespace(area=jnp.ones((6, 4, 4), dtype=jnp.float32))
+        result = _ocean_area_sum(field, mask, grid)
+        # In mixed mode, ocean_diagnostics accumulate is float64
+        assert result.dtype == jnp.float64
+
+    def test_ocean_area_sum_fp32_mode(self):
+        """Ocean area sum stays fp32 when policy is fp32."""
+        set_policy(PrecisionPolicy.fp32())
+        clear_module_overrides()
+        from legoesm.ocean.conservation import _ocean_area_sum
+        from types import SimpleNamespace
+
+        field = jnp.ones((6, 4, 4), dtype=jnp.float32)
+        mask = jnp.ones((6, 4, 4), dtype=jnp.float32)
+        grid = SimpleNamespace(area=jnp.ones((6, 4, 4), dtype=jnp.float32))
+        result = _ocean_area_sum(field, mask, grid)
+        assert result.dtype == jnp.float32
+
+    def test_ocean_volume_sum_uses_accumulate_precision(self):
+        """Ocean volume sum should upcast to accumulation dtype."""
+        from legoesm.ocean.conservation import _ocean_volume_sum
+        from types import SimpleNamespace
+
+        field_3d = jnp.ones((6, 4, 4, 5), dtype=jnp.float32)
+        h_k = jnp.ones((6, 4, 4, 5), dtype=jnp.float32)
+        mask = jnp.ones((6, 4, 4), dtype=jnp.float32)
+        grid = SimpleNamespace(area=jnp.ones((6, 4, 4), dtype=jnp.float32))
+        result = _ocean_volume_sum(field_3d, h_k, mask, grid)
+        assert result.dtype == jnp.float64
+
+    def test_sigma_coordinate_explicit_dtype(self):
+        """Sigma coordinate should respect explicit dtype parameter."""
+        from legoesm.grids.vertical import create_sigma_coordinate
+        sigma = create_sigma_coordinate(10, dtype=jnp.float64)
+        assert sigma.sigma_full.dtype == jnp.float64
+        assert sigma.sigma_half.dtype == jnp.float64
+        assert sigma.dsigma.dtype == jnp.float64
+
+    def test_sigma_coordinate_default_fp32(self):
+        """Sigma coordinate default dtype should be float32 under fp32 policy."""
+        from legoesm.grids.vertical import create_sigma_coordinate
+        set_policy(PrecisionPolicy.fp32())
+        clear_module_overrides()
+        sigma = create_sigma_coordinate(10)
+        assert sigma.sigma_full.dtype == jnp.float32
+
+    def test_hybrid_coordinate_explicit_dtype(self):
+        """Hybrid coordinate should respect explicit dtype parameter."""
+        from legoesm.grids.vertical import create_hybrid_coordinate
+        import numpy as np
+        n = 5
+        A_half = np.linspace(0.1, 0.0, n + 1)
+        B_half = np.linspace(0.0, 1.0, n + 1)
+        coord = create_hybrid_coordinate(n, A_half, B_half, dtype=jnp.float64)
+        assert coord.A_half.dtype == jnp.float64
+        assert coord.B_half.dtype == jnp.float64
+
+    def test_hybrid_coordinate_default_fp32(self):
+        """Hybrid coordinate default dtype should be float32 under fp32 policy."""
+        from legoesm.grids.vertical import create_hybrid_coordinate
+        import numpy as np
+        set_policy(PrecisionPolicy.fp32())
+        clear_module_overrides()
+        n = 5
+        A_half = np.linspace(0.1, 0.0, n + 1)
+        B_half = np.linspace(0.0, 1.0, n + 1)
+        coord = create_hybrid_coordinate(n, A_half, B_half)
+        assert coord.A_half.dtype == jnp.float32

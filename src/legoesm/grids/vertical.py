@@ -100,6 +100,7 @@ class SigmaCoordinate(NamedTuple):
 def create_sigma_coordinate(
     n_levels: int,
     sigma_top: float = 0.01,
+    dtype=None,
 ) -> SigmaCoordinate:
     """Create a uniformly spaced sigma coordinate.
 
@@ -111,16 +112,27 @@ def create_sigma_coordinate(
         Sigma value at the model top. Default 0.01 corresponds to
         p_top ≈ 10 hPa when p_s = 1000 hPa. Must be > 0 to avoid
         log(0) in the hydrostatic geopotential integration.
+    dtype : jnp.dtype or None
+        Dtype for coordinate arrays. If None, uses the precision
+        policy's compute dtype (defaults to float32 when no policy
+        is active). Explicit dtype overrides the policy.
 
     Returns
     -------
     SigmaCoordinate
         The vertical coordinate definition.
     """
-    # Always use float32 for sigma coordinate arrays. The PE and tracer
+    # Resolve dtype from precision policy if not explicitly provided.
+    # Default to float32 for backward compatibility (PE and tracer
     # transport models run in float32, and mixing float64 sigma arrays
-    # with float32 state arrays triggers scatter-cast warnings.
-    sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=jnp.float32)
+    # with float32 state arrays triggers scatter-cast warnings).
+    if dtype is None:
+        try:
+            from legoesm.core.precision import get_policy
+            dtype = get_policy().compute
+        except Exception:
+            dtype = jnp.float32
+    sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=dtype)
     sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
     dsigma = sigma_half[1:] - sigma_half[:-1]
 
@@ -618,6 +630,7 @@ def create_hybrid_coordinate(
     A_half: jax.Array,
     B_half: jax.Array,
     p_ref: float = 1e5,
+    dtype=None,
 ) -> HybridSigmaPressureCoordinate:
     """Create a hybrid sigma-pressure coordinate from A/B coefficients.
 
@@ -631,13 +644,23 @@ def create_hybrid_coordinate(
         Interface B coefficients, shape (nlev+1,).
     p_ref : float
         Reference surface pressure [Pa].
+    dtype : jnp.dtype or None
+        Dtype for coordinate arrays. If None, uses the precision
+        policy's compute dtype (defaults to float32 when no policy
+        is active).
 
     Returns
     -------
     HybridSigmaPressureCoordinate
     """
-    A_half = jnp.asarray(A_half, dtype=jnp.float32)
-    B_half = jnp.asarray(B_half, dtype=jnp.float32)
+    if dtype is None:
+        try:
+            from legoesm.core.precision import get_policy
+            dtype = get_policy().compute
+        except Exception:
+            dtype = jnp.float32
+    A_half = jnp.asarray(A_half, dtype=dtype)
+    B_half = jnp.asarray(B_half, dtype=dtype)
 
     A_full = 0.5 * (A_half[:-1] + A_half[1:])
     B_full = 0.5 * (B_half[:-1] + B_half[1:])

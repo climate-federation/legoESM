@@ -20,6 +20,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y, divergence, laplacian
+from legoesm.core.precision import cast
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
@@ -93,15 +94,19 @@ def barotropic_substeps(
     -------
     OceanState : State with updated eta and velocity correction.
     """
-    g = jnp.asarray(config.g)
-    H_bathy = state.H_bathy.data
-    mask = state.land_mask.data
-    u = state.u.data
-    v = state.v.data
-    eta_raw = state.eta.data
-    min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta_raw.dtype)
-    dt_s = jnp.asarray(dt_s, dtype=eta_raw.dtype)
-    g = g.astype(eta_raw.dtype)
+    # --- Precision management ---
+    # Upcast key arrays to barotropic solver compute precision (fp64 in mixed
+    # mode). The fori_loop/scan carry must have uniform dtype, so we cast
+    # before any loop setup and downcast after the loop exits.
+    _M = "barotropic_solver"
+    g = cast(jnp.asarray(config.g), _M, "compute")
+    H_bathy = cast(state.H_bathy.data, _M, "compute")
+    mask = cast(state.land_mask.data, _M, "compute")
+    u = cast(state.u.data, _M, "compute")
+    v = cast(state.v.data, _M, "compute")
+    eta_raw = cast(state.eta.data, _M, "compute")
+    min_water_col = cast(jnp.asarray(config.min_water_column_m), _M, "compute")
+    dt_s = cast(jnp.asarray(dt_s), _M, "compute")
     eta_floor = min_water_col - H_bathy
     eta = jnp.maximum(eta_raw, eta_floor) * mask
 
@@ -216,6 +221,11 @@ def barotropic_substeps(
     v_baro_prime = v - V_bar[..., jnp.newaxis]
     u_new = (u_baro_prime + U_bar_f[..., jnp.newaxis]) * mask[..., jnp.newaxis]
     v_new = (v_baro_prime + V_bar_f[..., jnp.newaxis]) * mask[..., jnp.newaxis]
+
+    # Downcast results back to storage precision
+    eta_f = cast(eta_f, _M, "storage")
+    u_new = cast(u_new, _M, "storage")
+    v_new = cast(v_new, _M, "storage")
 
     return state._replace(
         eta=state.eta.replace(data=eta_f),

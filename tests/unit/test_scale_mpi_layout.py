@@ -244,3 +244,51 @@ class TestScatterTiled:
         nt = N // 2
         expected = arr[0, :nt, :nt]
         np.testing.assert_array_equal(local[0], expected)
+
+
+# ===========================================================================
+# Subprocess wrapper: run MPI bootstrap test via mpirun
+# ===========================================================================
+
+import shutil
+import subprocess
+import sys
+
+
+class TestMPIBootstrapSubprocess:
+    """Run MPI bootstrap integration test via subprocess.
+
+    This allows the MPI test to be discovered by the regular pytest suite
+    without requiring the user to invoke mpirun directly.
+    """
+
+    @pytest.fixture(autouse=True)
+    def check_mpi(self):
+        """Skip if mpirun or mpi4py is not available."""
+        if shutil.which("mpirun") is None:
+            pytest.skip("mpirun not available")
+        try:
+            import mpi4py  # noqa: F401
+        except ImportError:
+            pytest.skip("mpi4py not installed")
+
+    def test_mpi_bootstrap_2_ranks(self):
+        """MPI bootstrap with 2 ranks should succeed."""
+        result = subprocess.run(
+            [
+                "mpirun", "-np", "2", "--oversubscribe",
+                sys.executable, "-m", "pytest",
+                "tests/distributed/test_mpi_bootstrap.py",
+                "-v", "--tb=short", "-x",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        # Print output for debugging on failure.
+        if result.returncode != 0:
+            print("STDOUT:", result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout)
+            print("STDERR:", result.stderr[-2000:] if len(result.stderr) > 2000 else result.stderr)
+        assert result.returncode == 0, (
+            f"MPI bootstrap test failed with rc={result.returncode}"
+        )

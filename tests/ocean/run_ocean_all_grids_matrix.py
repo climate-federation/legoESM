@@ -385,12 +385,9 @@ def main() -> int:
 
         def build_latlon_native_fv_cmd(_: float) -> list[str]:
             # Run the lat-lon FV ocean unit tests via pytest.
-            # The dedicated run_latlon_ocean_fv_suite.py does not exist;
-            # use the canonical test_ocean_fv.py and test_latlon_ocean.py
-            # (if present) via pytest with JUnit XML output.
             return [
                 args.python, "-m", "pytest",
-                "tests/ocean/unit/test_ocean_fv.py",
+                "tests/ocean/unit/test_latlon_ocean_fv.py",
                 "-v", "--tb=short",
                 f"--junitxml={out_dir / 'results.xml'}",
             ]
