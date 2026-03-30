@@ -399,8 +399,10 @@ def create_cubed_sphere_cdgrid(
     cosa_v = 0.5 * (cosa_corner[:, :-1, :] + cosa_corner[:, 1:, :])  # (6, n, n+1)
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
-    rsin_u = 1.0 / sina_u
-    rsin_v = 1.0 / sina_v
+    # FV3 convention: rsin_u = 1/sin²(α), NOT 1/sin(α)
+    # (fv_grid_utils.F90:502-561)
+    rsin_u = 1.0 / jnp.maximum(sina_u ** 2, _EPS)
+    rsin_v = 1.0 / jnp.maximum(sina_v ** 2, _EPS)
 
     # ------------------------------------------------------------------
     # FV3 edge-midpoint D-grid metrics
