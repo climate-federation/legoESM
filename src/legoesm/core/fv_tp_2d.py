@@ -137,7 +137,8 @@ def _ppm_flux_1d(q_L, q_R, q_c, courant):
 # 2-D dimensional-split transport
 # ==============================================================================
 
-def fv_tp_2d(q, crx, cry, xfx, yfx, cdgrid, *, area=None):
+def fv_tp_2d(q, crx, cry, xfx, yfx, cdgrid, *, area=None,
+             return_fluxes=False):
     """Dimensionally-split PPM transport of a cell-centre scalar.
 
     Implements the averaged Strang splitting: Y-then-X and X-then-Y
@@ -152,10 +153,17 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, cdgrid, *, area=None):
     yfx : (6, n, n+1) — area flux at y-faces [m² per timestep]
     cdgrid : CubedSphereCDGrid
     area : (6, n, n) or None — cell areas (default: cdgrid.base.area)
+    return_fluxes : bool — if True, return (fx, fy) raw face-value fluxes
+        instead of the divergence.  The fluxes are the PPM-reconstructed
+        scalar value at each face (NOT multiplied by mass flux).
 
     Returns
     -------
-    q_update : (6, n, n) — tendency * dt  (add to q for the updated value)
+    If ``return_fluxes=False`` (default):
+        q_update : (6, n, n) — divergence (add to q for updated value)
+    If ``return_fluxes=True``:
+        fx : (6, n+1, n) — averaged PPM face value at x-faces
+        fy : (6, n, n+1) — averaged PPM face value at y-faces
     """
     n = cdgrid.n
     if area is None:
@@ -208,5 +216,6 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, cdgrid, *, area=None):
     fx = 0.5 * (fx_1 + fx_2)
     fy = 0.5 * (fy_1 + fy_2)
 
-    # Return the divergence as a tendency (to be added to q)
+    if return_fluxes:
+        return fx, fy
     return _divergence(fx, fy, xfx, yfx)

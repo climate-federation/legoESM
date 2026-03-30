@@ -74,7 +74,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
     use_owner_sync: bool = False  # Non-FV3 compatibility path; keep disabled by default
-    use_fv3_core: bool = False    # FV3 forward-backward d_sw (experimental)
+    use_fv3_core: bool = False    # FV3 d_sw (experimental — 37x imbalance)
 
 
 # ==============================================================================
