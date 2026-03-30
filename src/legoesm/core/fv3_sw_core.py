@@ -1,11 +1,15 @@
-"""FV3-style D-grid shallow water core (d_sw).
+"""FV3-style D-grid shallow water core with forward-backward stepping.
 
-Covariant velocity formulation with PPM-transported KE at corners.
-The KE uses the SAME contravariant transport velocities as the vorticity
-flux, ensuring exact discrete geostrophic balance and eliminating
-cubed-sphere edge artifacts.
+True covariant velocity formulation: the momentum equation operates in
+**coordinate space** where the Bernoulli gradient is a bare difference
+and no non-orthogonality cross-term is needed.  Internally converts
+between physical (stored) and covariant (computed) velocities.
 
-Reusable by 3D atmosphere PE and ocean PE dycores (vmap over levels).
+Forward-backward split: mass is advanced first, then the new mass is
+used for the momentum update.  KE at corners uses the same contravariant
+velocities as the vorticity flux, ensuring discrete geostrophic balance.
+
+This is a FULL-STEP function (advances state by dt), not a tendency.
 
 References
 ----------
@@ -20,7 +24,6 @@ import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.core.d2a2c_vect import d2a2c_vect
-from legoesm.core.fv_tp_2d import fv_tp_2d, _ppm_face_values, _ppm_flux_1d
 from legoesm.core.operators_cdgrid import (
     cgrid_mass_flux_divergence,
     _interp_center_to_corner,
@@ -28,99 +31,61 @@ from legoesm.core.operators_cdgrid import (
     fv3_vorticity,
 )
 
-
-# ==============================================================================
-# 1-D PPM wind advection to corners (xtp_u, ytp_v)
-# ==============================================================================
-
-def _ytp_v(vb, u_d, cdgrid):
-    """Upwind-interpolate covariant u to corners using vb direction.
-
-    At each corner (i, j), selects the covariant u from the upwind
-    i-edge based on the sign of the contravariant v (``vb``).
-    This ensures the KE contraction ``vb * u_adv`` uses the SAME
-    directional bias as the vorticity flux ``ζ * vb``.
-
-    Will be upgraded to PPM reconstruction for higher accuracy.
-
-    Parameters
-    ----------
-    vb : (6, n+1, n+1) — contravariant v at corners
-    u_d : (6, n, n+1) — covariant u at x-edge midpoints
-
-    Returns
-    -------
-    u_adv : (6, n+1, n+1)
-    """
-    u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    u_left = u_d_pad[:, :-1, :]   # u from i-1 side (upwind for vb > 0)
-    u_right = u_d_pad[:, 1:, :]   # u from i side (upwind for vb < 0)
-    return jnp.where(vb > 0, u_left, u_right)
+_EPS = 1e-30
 
 
-def _xtp_u(ub, v_d, cdgrid):
-    """Upwind-interpolate covariant v to corners using ub direction.
+def fv3_d_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
+                   div_damp=0.0, hyperdiff_coeff=0.0):
+    """FV3 forward-backward shallow water step.
 
-    Same as _ytp_v but for the x-direction.
-    """
-    v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    v_left = v_d_pad[:, :, :-1]   # v from j-1 side
-    v_right = v_d_pad[:, :, 1:]   # v from j side
-    return jnp.where(ub > 0, v_left, v_right)
+    Advances (h, u_d, v_d) by one time step ``dt``.
 
+    The momentum equation is in **coordinate space** (covariant):
 
-def fv3_d_sw(
-    h, u_d, v_d, h_s, cdgrid,
-    g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
-):
-    """FV3 D-grid shallow water tendencies with covariant KE.
+        u_line_new = u_line_old + dt * [-dB + vort_flux]
+
+    where ``u_line = u_phys * dx`` is the line integral.
+    This avoids the non-orthogonality cross-term entirely.
 
     Parameters
     ----------
     h : (6, n, n)     — height at cell centres
-    u_d : (6, n, n+1) — x-velocity at x-edge midpoints
-    v_d : (6, n+1, n) — y-velocity at y-edge midpoints
+    u_d : (6, n, n+1) — physical x-velocity at x-edge midpoints
+    v_d : (6, n+1, n) — physical y-velocity at y-edge midpoints
     h_s : (6, n, n)   — surface topography
     cdgrid : CubedSphereCDGrid
-    g, div_damp, hyperdiff_coeff : float
+    dt : float         — time step [s]
+    g : float          — gravity
+    div_damp, hyperdiff_coeff : float
 
     Returns
     -------
-    dh_dt : (6, n, n), du_d_dt : (6, n, n+1), dv_d_dt : (6, n+1, n)
+    h_new, u_d_new, v_d_new : updated state (same shapes)
     """
     n = cdgrid.n
     grid = cdgrid.base
-    dx = cdgrid.dx_edge_y   # (6, n, n+1)
-    dy = cdgrid.dy_edge_x   # (6, n+1, n)
+    dx = cdgrid.dx_edge_y   # (6, n, n+1) — x-edge physical length
+    dy = cdgrid.dy_edge_x   # (6, n+1, n) — y-edge physical length
+    area = grid.area         # (6, n, n)
+    dt2 = 0.5 * dt
 
     # ==================================================================
-    # (a) D→A→C conversion (4th-order interior)
+    # Step 1: D→A→C conversion (4th-order interior)
     # ==================================================================
     ua, va, uc, vc = d2a2c_vect(u_d, v_d, cdgrid)
 
     # ==================================================================
-    # (b) Height tendency — PPM mass flux divergence (UNCHANGED)
+    # Step 2: Mass transport — forward step
     # ==================================================================
-    dh_dt = cgrid_mass_flux_divergence(h, uc, vc, cdgrid)
-    total_area = jnp.sum(grid.area)
-    dh_dt = dh_dt - jnp.sum(dh_dt * grid.area) / total_area
+    dh = cgrid_mass_flux_divergence(h, uc, vc, cdgrid)
+    total_area = jnp.sum(area)
+    dh = dh - jnp.sum(dh * area) / total_area
+    h_new = h + dt * dh
 
     # ==================================================================
-    # (c,d) KE at cell centres from contravariant × covariant contraction.
+    # Step 3: Contravariant transport velocities at corners
     # ==================================================================
-    # Use d2a2c_vect's contravariant (ua, va) and the simple covariant
-    # cell-centre winds (u_cc, v_cc) for KE.  This ensures the KE data
-    # path goes through the SAME cell-centre halo exchange as g*h,
-    # giving consistent B = KE + g*h at cell centres.
-    u_cc = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # covariant cc
-    v_cc = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
-    KE_cc = 0.5 * (ua * u_cc + va * v_cc)            # contraction (6, n, n)
-
-    # B at cell centres → interpolate to corners → bare-difference gradient
-    B_cc = KE_cc + g * (h + h_s)
-    B_corner = _interp_center_to_corner(B_cc, cdgrid)
-
-    # Contravariant at corners from the SAME cell-centre data (for vort flux)
+    # Use haloed cell-centre contravariant from d2a2c_vect.
     from legoesm.grids.halo import pad_halo_vector
     ua_pad, va_pad = pad_halo_vector(
         ua, va,
@@ -128,71 +93,94 @@ def fv3_d_sw(
         grid.cos_angle_padded, grid.sin_angle_padded,
         interp_offsets=grid.halo_interp_offsets,
     )
-    ub_corner = 0.25 * (ua_pad[:, :-1, :-1] + ua_pad[:, 1:, :-1]
-                         + ua_pad[:, :-1, 1:] + ua_pad[:, 1:, 1:])
-    vb_corner = 0.25 * (va_pad[:, :-1, :-1] + va_pad[:, 1:, :-1]
-                         + va_pad[:, :-1, 1:] + va_pad[:, 1:, 1:])
+    # Average contravariant to corners — used for BOTH KE and vort flux
+    ub_c = 0.25 * (ua_pad[:, :-1, :-1] + ua_pad[:, 1:, :-1]
+                    + ua_pad[:, :-1, 1:] + ua_pad[:, 1:, 1:])  # (6, n+1, n+1)
+    vb_c = 0.25 * (va_pad[:, :-1, :-1] + va_pad[:, 1:, :-1]
+                    + va_pad[:, :-1, 1:] + va_pad[:, 1:, 1:])  # (6, n+1, n+1)
 
-    # B_corner already computed above from B_cc = KE_cc + g*(h+h_s)
-
-    # ==================================================================
-    # (f) Bernoulli gradient — BARE DIFFERENCE at edge midpoints
-    # ==================================================================
-    dB_u = (B_corner[:, :-1, :] - B_corner[:, 1:, :]) / dx  # (6, n, n+1)
-    dB_v = (B_corner[:, :, :-1] - B_corner[:, :, 1:]) / dy  # (6, n+1, n)
+    # Scale by dt/2 for KE (following FV3 convention)
+    ub = dt2 * ub_c
+    vb = dt2 * vb_c
 
     # ==================================================================
-    # (g) Vorticity — exact Stokes circulation at corners
+    # Step 4: KE at corners — contraction of physical vel × contravariant
     # ==================================================================
-    zeta = fv3_vorticity(u_d, v_d, cdgrid)
+    # FV3 KE: ke = 0.5*(vb * u_phys + ub * v_phys) where vb = dt/2*v_contra.
+    # u_phys at corners: average u_d (physical velocity, NOT line integral)
+    u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    u_c = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])      # (6, n+1, n+1)
+    v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    v_c = 0.5 * (v_d_pad[:, :, :-1] + v_d_pad[:, :, 1:])       # (6, n+1, n+1)
+
+    # ke has units [m²/s]: dt/2 * m/s * m/s = m²/s.
+    ke = 0.5 * (vb * u_c + ub * v_c)
+
+    # ==================================================================
+    # Step 5: Geopotential height at corners (using UPDATED height)
+    # ==================================================================
+    gh_corner = g * _interp_center_to_corner(h_new + h_s, cdgrid)
+
+    # ==================================================================
+    # Step 6: Vorticity at corners — exact Stokes circulation
+    # ==================================================================
+    zeta = fv3_vorticity(u_d, v_d, cdgrid)     # (6, n+1, n+1)
     zeta_abs = zeta + cdgrid.f_corner
 
     # ==================================================================
-    # (h) Vorticity flux at edges using the SAME contravariant velocities
+    # Step 7: Vorticity flux at edges using the SAME ub_c/vb_c
     # ==================================================================
-    # Average absolute vorticity to edge midpoints
+    # Average absolute vorticity to edges
     zeta_u = 0.5 * (zeta_abs[:, :-1, :] + zeta_abs[:, 1:, :])  # (6, n, n+1)
     zeta_v = 0.5 * (zeta_abs[:, :, :-1] + zeta_abs[:, :, 1:])  # (6, n+1, n)
 
-    # Perpendicular contravariant velocity at edges from the SAME
-    # ub_corner/vb_corner used for KE.
-    # At u_d edge (i, j): contravariant v ≈ average of vb_corner
-    vb_at_u = 0.5 * (vb_corner[:, :-1, :] + vb_corner[:, 1:, :])  # (6, n, n+1)
-    ub_at_v = 0.5 * (ub_corner[:, :, :-1] + ub_corner[:, :, 1:])  # (6, n+1, n)
+    # Perpendicular contravariant at edges (from SAME corner data)
+    vb_at_u = 0.5 * (vb_c[:, :-1, :] + vb_c[:, 1:, :])   # (6, n, n+1)
+    ub_at_v = 0.5 * (ub_c[:, :, :-1] + ub_c[:, :, 1:])    # (6, n+1, n)
 
-    vort_flux_u = zeta_u * vb_at_u
-    vort_flux_v = -zeta_v * ub_at_v
-
-    # ==================================================================
-    # (i) Momentum tendencies at edge midpoints
-    # ==================================================================
-    du_d_dt = dB_u + vort_flux_u
-    dv_d_dt = dB_v + vort_flux_v
+    # Vorticity flux in line-integral units [m²/s]:
+    # fy = dt * ζ * v_contra * dx_edge (perpendicular flux × edge length)
+    fy_u = dt * zeta_u * vb_at_u * dx                        # (6, n, n+1)
+    fx_v = dt * zeta_v * ub_at_v * dy                        # (6, n+1, n)
 
     # ==================================================================
-    # (j) Divergence damping
+    # Step 8: Momentum update in COORDINATE SPACE (line integrals)
+    # ==================================================================
+    # u_line_new = u_line_old + [ke(i,j) - ke(i+1,j)] + fy
+    #   where ke already includes dt/2 factor
+    # The ke difference: ke at corner (i,j) minus ke at corner (i+1,j)
+    #   for u_d at x-edge between these corners.
+
+    u_line_old = u_d * dx   # (6, n, n+1)
+    v_line_old = v_d * dy   # (6, n+1, n)
+
+    # Bernoulli gradient in coordinate space (includes gh + ke):
+    # B_corner = ke + dt * gh_corner  (ke already has dt/2 from step 4)
+    B_corner = ke + dt * gh_corner
+
+    u_line_new = u_line_old + (B_corner[:, :-1, :] - B_corner[:, 1:, :]) + fy_u
+    v_line_new = v_line_old + (B_corner[:, :, :-1] - B_corner[:, :, 1:]) - fx_v
+
+    # ==================================================================
+    # Step 9: Divergence damping
     # ==================================================================
     if div_damp > 0:
         from legoesm.core.operators_cdgrid import cgrid_divergence
         div_field = cgrid_divergence(uc, vc, cdgrid)
-        area_min = jnp.min(grid.area)
+        div_corner = _interp_center_to_corner(div_field, cdgrid)
+        area_min = jnp.min(area)
         d2_bg = div_damp / area_min
         dddmp = 0.2
         div_abs_corner = _interp_center_to_corner(jnp.abs(div_field), cdgrid)
-        adapt_u = 0.5 * (div_abs_corner[:, :-1, :] + div_abs_corner[:, 1:, :])
-        adapt_v = 0.5 * (div_abs_corner[:, :, :-1] + div_abs_corner[:, :, 1:])
-        coeff_u = area_min * jnp.maximum(
-            d2_bg, jnp.minimum(0.20, dddmp * adapt_u))
-        coeff_v = area_min * jnp.maximum(
-            d2_bg, jnp.minimum(0.20, dddmp * adapt_v))
-        div_corner = _interp_center_to_corner(div_field, cdgrid)
-        ddiv_u = (div_corner[:, :-1, :] - div_corner[:, 1:, :]) / dx
-        ddiv_v = (div_corner[:, :, :-1] - div_corner[:, :, 1:]) / dy
-        du_d_dt = du_d_dt + coeff_u * ddiv_u
-        dv_d_dt = dv_d_dt + coeff_v * ddiv_v
+        adaptive = area_min * jnp.maximum(
+            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
+        # Add damping to ke (modifies the B gradient)
+        damp_corner = dt * adaptive * div_corner
+        u_line_new = u_line_new + (damp_corner[:, :-1, :] - damp_corner[:, 1:, :])
+        v_line_new = v_line_new + (damp_corner[:, :, :-1] - damp_corner[:, :, 1:])
 
     # ==================================================================
-    # (k) Biharmonic hyperdiffusion
+    # Step 10: Biharmonic hyperdiffusion
     # ==================================================================
     if hyperdiff_coeff > 0:
         from legoesm.core.operators import laplacian_compact
@@ -201,12 +189,37 @@ def fv3_d_sw(
         lap_u = laplacian_compact(u_cc, grid)
         lap2_u = laplacian_compact(lap_u, grid)
         lap2_u_pad = _pad_halo_auto(lap2_u, cdgrid)
-        du_d_dt = du_d_dt - hyperdiff_coeff * 0.5 * (
+        u_line_new = u_line_new - dt * hyperdiff_coeff * dx * 0.5 * (
             lap2_u_pad[:, 1:-1, :-1] + lap2_u_pad[:, 1:-1, 1:])
         lap_v = laplacian_compact(v_cc, grid)
         lap2_v = laplacian_compact(lap_v, grid)
         lap2_v_pad = _pad_halo_auto(lap2_v, cdgrid)
-        dv_d_dt = dv_d_dt - hyperdiff_coeff * 0.5 * (
+        v_line_new = v_line_new - dt * hyperdiff_coeff * dy * 0.5 * (
             lap2_v_pad[:, :-1, 1:-1] + lap2_v_pad[:, 1:, 1:-1])
 
-    return dh_dt, du_d_dt, dv_d_dt
+    # ==================================================================
+    # Step 11: Convert line integrals back to physical velocities
+    # ==================================================================
+    u_d_new = u_line_new / dx
+    v_d_new = v_line_new / dy
+
+    return h_new, u_d_new, v_d_new
+
+
+# Legacy tendency-based wrapper for RK3 compatibility
+def fv3_d_sw(h, u_d, v_d, h_s, cdgrid,
+             g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0):
+    """Tendency wrapper around :func:`fv3_d_sw_step` for RK3 integrators.
+
+    NOTE: This is an APPROXIMATION — the forward-backward split in
+    ``fv3_d_sw_step`` uses the updated height for the momentum step,
+    which cannot be exactly represented as a tendency.  For proper
+    FV3 behavior, use ``fv3_d_sw_step`` directly.
+    """
+    # Use a tiny dt for tendency estimation
+    # The caller's RK3 will apply its own dt scaling
+    _dt = 1.0  # unit time step — tendencies are per second
+    h_new, u_new, v_new = fv3_d_sw_step(
+        h, u_d, v_d, h_s, cdgrid, _dt,
+        g=g, div_damp=div_damp, hyperdiff_coeff=hyperdiff_coeff)
+    return h_new - h, u_new - u_d, v_new - v_d
