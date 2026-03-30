@@ -1072,7 +1072,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
         # Initialise edge-midpoint D-grid winds analytically.
         sw = williamson_test2(grid) if test_num == 2 else williamson_test5(grid)
-        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        u0 = (2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+              if test_num == 2 else 20.0)
         u_east_x = u0 * jnp.cos(cdgrid.lat_edge_x)
         u_d = cdgrid.cos_angle_edge_x * u_east_x
         u_east_y = u0 * jnp.cos(cdgrid.lat_edge_y)
