@@ -5,9 +5,11 @@ Runs a 10-day Jablonowski-Williamson (2006) baroclinic instability test and
 generates:
 
 1. **6-panel figure** (baroclinic_wave_benchmark.png):
-   - Top row: Surface pressure perturbation at days 8 and 10
-   - Middle row: 850 hPa temperature at days 8 and 10
-   - Bottom row: 850 hPa relative vorticity at days 8 and 10
+   - Top row: Surface pressure perturbation at the last two snapshot days
+   - Middle row: 850 hPa temperature at the last two snapshot days
+   - Bottom row: 850 hPa relative vorticity at the last two snapshot days
+   Snapshots are taken every 2 days.  For a 10-day run the figure shows
+   days 8 and 10; for a 20-day run it shows days 18 and 20.
    Northern Hemisphere only (0-90N), PlateCarree projection.
 
 2. **Conservation timeseries** (baroclinic_wave_conservation.png):
@@ -502,9 +504,12 @@ def main():
     n_steps_total = int(N_DAYS * 86400 / DT)
     diag_interval_steps = max(1, int(3600 / DT))  # every hour
 
-    # Snapshot days for the 6-panel figure
-    snapshot_days = [4, 6, 8, 10]
-    snapshot_steps = {int(d * 86400 / DT): d for d in snapshot_days if d <= N_DAYS}
+    # Snapshot days for the 6-panel figure — every 2 days, always including
+    # the final day so long runs (--days 20, 30, …) get late-time snapshots.
+    snapshot_days = list(range(2, N_DAYS + 1, 2))
+    if N_DAYS not in snapshot_days:
+        snapshot_days.append(N_DAYS)
+    snapshot_steps = {int(d * 86400 / DT): d for d in snapshot_days}
 
     # Diagnostic storage
     diag_times = []
@@ -728,12 +733,12 @@ def main():
     # -----------------------------------------------------------------------
     print("Generating 6-panel benchmark figure...")
 
-    plot_days = [8, 10]
-    missing = [d for d in plot_days if d not in snapshots]
-    if missing:
-        print(f"  WARNING: Missing snapshots for days {missing}. "
-              f"Available: {sorted(snapshots.keys())}")
-        plot_days = sorted([d for d in plot_days if d in snapshots])
+    # Use the last two snapshot days for the 6-panel figure
+    available_days = sorted(snapshots.keys())
+    if len(available_days) >= 2:
+        plot_days = available_days[-2:]
+    else:
+        plot_days = available_days
 
     if len(plot_days) >= 2:
         try:
