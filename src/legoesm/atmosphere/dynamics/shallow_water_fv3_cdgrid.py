@@ -35,6 +35,7 @@ from legoesm.core.operators_cdgrid import (
     _extrapolate_boundary_corners,
     fv3_sw_tendencies,
 )
+from legoesm.core.fv3_sw_core import fv3_d_sw
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -72,6 +73,8 @@ class CDGridShallowWaterConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
+    use_owner_sync: bool = False  # Non-FV3 compatibility path; keep disabled by default
+    use_fv3_core: bool = False    # Covariant d_sw momentum (needs xtp_u/ytp_v to work)
 
 
 # ==============================================================================
@@ -256,8 +259,10 @@ class CDGridShallowWaterModel(IntegrationMixin):
             state, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Owner-based sync: once per time step, after integrator
-        state_new = self._sync_dgrid_boundary(state_new)
+        # Optional non-FV3 compatibility path.
+        # FV3 relies on halo-exchanged operators, not explicit edge owner-sync.
+        if self.config.use_owner_sync:
+            state_new = self._sync_dgrid_boundary(state_new)
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
@@ -321,8 +326,10 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         """Advance one time step."""
         from legoesm.core.operators_cdgrid import fv3_d2cc, _pad_halo_auto
 
+        _tend_fn = fv3_d_sw if self.config.use_fv3_core else fv3_sw_tendencies
+
         def tendency_fn(s):
-            dh, du, dv = fv3_sw_tendencies(
+            dh, du, dv = _tend_fn(
                 s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
                 g=self.config.g,
                 div_damp=self.config.div_damp,
