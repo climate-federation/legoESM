@@ -76,8 +76,24 @@ def _parse_windows(values: Sequence[str] | None) -> tuple[LeadTimeWindow, ...]:
         return DEFAULT_S2S_WINDOWS
     windows: list[LeadTimeWindow] = []
     for value in values:
-        name, start, end = value.split(":", 2)
-        windows.append(LeadTimeWindow(name, int(start), int(end)))
+        parts = value.split(":", 2)
+        if len(parts) != 3:
+            raise ValueError(
+                f"Invalid window {value!r}. Expected NAME:START:END, for example wk3_4:15:28."
+            )
+        name, start, end = parts
+        try:
+            start_day = int(start)
+            end_day = int(end)
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid window {value!r}. START and END must be integers."
+            ) from exc
+        if start_day <= 0 or end_day <= 0 or start_day > end_day:
+            raise ValueError(
+                f"Invalid window {value!r}. Require 0 < START <= END."
+            )
+        windows.append(LeadTimeWindow(name, start_day, end_day))
     return tuple(windows)
 
 
@@ -342,8 +358,24 @@ def _run_ensemble_inference(args: argparse.Namespace) -> None:
 def _resolve_case_dirs(args: argparse.Namespace) -> list[Path]:
     if args.case_dir:
         return [Path(case_dir) for case_dir in args.case_dir]
+    if getattr(args, "campaign_dir", None):
+        case_dirs: list[Path] = []
+        for campaign_dir in args.campaign_dir:
+            campaign_path = Path(campaign_dir)
+            matches = sorted(
+                path for path in campaign_path.glob("inference_*")
+                if path.is_dir()
+            )
+            if not matches:
+                raise ValueError(
+                    f"No inference_* case directories found under campaign dir {campaign_path}"
+                )
+            case_dirs.extend(matches)
+        return case_dirs
     if args.year is None:
-        raise ValueError("postprocess-campaign requires either --case-dir or --year")
+        raise ValueError(
+            "postprocess-campaign requires --case-dir, --campaign-dir, or --year"
+        )
     start_times = filter_start_times_to_year(
         generate_semimonthly_start_times(
             int(args.year),
@@ -488,6 +520,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     campaign_parser = subparsers.add_parser("postprocess-campaign", help="Aggregate multiple init dates")
     campaign_parser.add_argument("--case-dir", action="append", default=[])
+    campaign_parser.add_argument(
+        "--campaign-dir",
+        action="append",
+        default=[],
+        help="Campaign directory containing inference_YYYYMMDD case subdirectories",
+    )
     campaign_parser.add_argument("--output-dir", type=Path, required=True)
     campaign_parser.add_argument("--year", type=int, default=None)
     campaign_parser.add_argument("--months", default="1,2,3,4,5,6,7,8,9,10,11,12")

@@ -32,6 +32,20 @@ def _run(cmd: list[str], *, dry_run: bool) -> None:
     subprocess.run(cmd, check=True)
 
 
+def _resolve_runtime_selector(
+    *,
+    python_executable: str | None,
+    conda_env: str | None,
+) -> list[str]:
+    if python_executable and conda_env:
+        raise ValueError("Use only one of --python or --conda-env.")
+    if python_executable:
+        return [python_executable]
+    if conda_env:
+        return ["conda", "run", "--no-capture-output", "-n", conda_env, "python"]
+    return [sys.executable]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run semimonthly NeuralGCM slab campaigns")
     parser.add_argument("--years", default="2022,2023")
@@ -54,11 +68,16 @@ def main() -> None:
     parser.add_argument("--window", action="append", default=[])
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--run-center-crps", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--python", default=None, help="Explicit Python executable for commands")
+    parser.add_argument("--conda-env", default=None, help="Conda environment name for commands")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     script_path = Path(__file__).resolve().parent / "neuralgcm_slab.py"
+    python_prefix = _resolve_runtime_selector(
+        python_executable=args.python,
+        conda_env=args.conda_env,
+    )
     years = _parse_csv_ints(args.years)
     months = _parse_csv_ints(args.months)
     days = _parse_csv_ints(args.days)
@@ -94,7 +113,7 @@ def main() -> None:
             )
             case_dirs.append(case_dir)
             cmd = [
-                args.python,
+                *python_prefix,
                 str(script_path),
                 "ensemble-inference",
                 "--start-time",
@@ -127,7 +146,7 @@ def main() -> None:
             _run(cmd, dry_run=bool(args.dry_run))
 
         cmd = [
-            args.python,
+            *python_prefix,
             str(script_path),
             "postprocess-campaign",
             "--output-dir",
@@ -146,7 +165,7 @@ def main() -> None:
             forecast_days=int(args.forecast_days),
         )
         cmd = [
-            args.python,
+            *python_prefix,
             str(script_path),
             "postprocess-center-crps",
             "--output-dir",

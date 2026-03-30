@@ -78,6 +78,20 @@ def _runtime_command(
     return [sys.executable, *command]
 
 
+def _resolve_runtime_selector(
+    *,
+    python_executable: str | None,
+    conda_env: str | None,
+) -> tuple[str | None, str | None]:
+    if python_executable and conda_env:
+        raise ValueError("Use only one of --python or --conda-env.")
+    if python_executable:
+        return python_executable, None
+    if conda_env:
+        return None, conda_env
+    return sys.executable, None
+
+
 def _write_job_script(
     *,
     script_path: Path,
@@ -158,8 +172,8 @@ def main() -> None:
     parser.add_argument("--case-mem", default="150G")
     parser.add_argument("--post-mem", default="24G")
     parser.add_argument("--case-gres", default="gpu:1")
-    parser.add_argument("--python", default=sys.executable)
-    parser.add_argument("--conda-env", default=None)
+    parser.add_argument("--python", default=None, help="Explicit Python executable for batch jobs")
+    parser.add_argument("--conda-env", default=None, help="Conda environment name for batch jobs")
     parser.add_argument("--cuda-module", default=None)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--jobs-dir", type=Path, default=None)
@@ -171,6 +185,10 @@ def main() -> None:
     days = _parse_csv_ints(args.days)
     repo_root = args.repo_root.resolve()
     base_output_dir = args.base_output_dir.resolve()
+    python_executable, conda_env = _resolve_runtime_selector(
+        python_executable=args.python,
+        conda_env=args.conda_env,
+    )
     base_output_dir.mkdir(parents=True, exist_ok=True)
     jobs_dir = (args.jobs_dir or (base_output_dir / "slurm_jobs")).resolve()
     jobs_dir.mkdir(parents=True, exist_ok=True)
@@ -250,8 +268,8 @@ def main() -> None:
                     ]
                     run_commands.append(
                         _runtime_command(
-                            python_executable=args.python,
-                            conda_env=None if args.python else args.conda_env,
+                            python_executable=python_executable,
+                            conda_env=conda_env,
                             command=member_command,
                         )
                     )
@@ -271,8 +289,8 @@ def main() -> None:
                     postprocess_command.extend(["--window", window])
                 run_commands.append(
                     _runtime_command(
-                        python_executable=args.python,
-                        conda_env=None if args.python else args.conda_env,
+                        python_executable=python_executable,
+                        conda_env=conda_env,
                         command=postprocess_command,
                     )
                 )
@@ -309,8 +327,8 @@ def main() -> None:
                     command.append("--skip-existing")
                 run_commands.append(
                     _runtime_command(
-                        python_executable=args.python,
-                        conda_env=None if args.python else args.conda_env,
+                        python_executable=python_executable,
+                        conda_env=conda_env,
                         command=command,
                     )
                 )
@@ -371,8 +389,8 @@ def main() -> None:
             campaign_command.extend(["--window", window])
         center_run_commands.append(
             _runtime_command(
-                python_executable=args.python,
-                conda_env=None if args.python else args.conda_env,
+                python_executable=python_executable,
+                conda_env=conda_env,
                 command=campaign_command,
             )
         )
@@ -391,8 +409,8 @@ def main() -> None:
         center_command.extend(["--window", window])
     center_run_commands.append(
         _runtime_command(
-            python_executable=args.python,
-            conda_env=None if args.python else args.conda_env,
+            python_executable=python_executable,
+            conda_env=conda_env,
             command=center_command,
         )
     )

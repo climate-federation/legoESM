@@ -14,10 +14,49 @@ from legoesm import constants
 from legoesm.ml.s2s.neuralgcm_slab.metrics import DEFAULT_FIELD_SPECS, build_daily_metric_table
 
 
+_RMSE_VARIABLES = ("temperature", "geopotential", "specific_humidity")
+
+
 def _open_dataset(path: Path) -> xr.Dataset:
     if path.suffix == ".zarr":
         return xr.open_zarr(path)
     return xr.open_dataset(path)
+
+
+def _require_variables(dataset: xr.Dataset, variables: tuple[str, ...], *, label: str) -> None:
+    missing = [name for name in variables if name not in dataset.data_vars]
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"{label} is missing required variable(s): {joined}")
+
+
+def _validate_plot_inputs(
+    coupled: xr.Dataset,
+    uncoupled: xr.Dataset | None,
+    truth: xr.Dataset | None,
+) -> None:
+    if "lead_day" not in coupled.dims:
+        raise ValueError("Coupled forecast must have a lead_day dimension.")
+    _require_variables(coupled, ("sea_surface_temperature",), label="Coupled forecast")
+    if uncoupled is not None:
+        if "lead_day" not in uncoupled.dims:
+            raise ValueError("Uncoupled forecast must have a lead_day dimension.")
+        _require_variables(uncoupled, ("sea_surface_temperature",), label="Uncoupled forecast")
+        if not np.array_equal(np.asarray(coupled["lead_day"]), np.asarray(uncoupled["lead_day"])):
+            raise ValueError("Coupled and uncoupled lead_day coordinates must match.")
+    if truth is None:
+        return
+    _require_variables(truth, ("sea_surface_temperature",), label="Truth dataset")
+    if "time" not in truth.dims and "lead_day" not in truth.dims:
+        raise ValueError("Truth dataset must have a time or lead_day dimension.")
+    _require_variables(coupled, _RMSE_VARIABLES, label="Coupled forecast")
+    _require_variables(truth, _RMSE_VARIABLES, label="Truth dataset")
+    if uncoupled is not None:
+        _require_variables(uncoupled, _RMSE_VARIABLES, label="Uncoupled forecast")
+    if "time" in truth.dims and int(truth.sizes["time"]) < int(coupled.sizes["lead_day"]):
+        raise ValueError(
+            "Truth dataset has fewer time steps than the coupled forecast lead days."
+        )
 
 
 def _global_mean(field: xr.DataArray) -> np.ndarray:
@@ -151,6 +190,7 @@ def main() -> None:
     coupled = _open_dataset(args.coupled)
     uncoupled = _open_dataset(args.uncoupled) if args.uncoupled is not None else None
     truth = _open_dataset(args.truth) if args.truth is not None else None
+    _validate_plot_inputs(coupled, uncoupled, truth)
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
 

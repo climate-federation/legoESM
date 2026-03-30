@@ -42,11 +42,26 @@ class PreparationConfig:
 
 def _open_era5_store(store: str) -> xr.Dataset:
     storage_options = {"token": "anon"} if store.startswith("gs://") else None
-    return xr.open_zarr(store, chunks=None, consolidated=None, storage_options=storage_options)
+    try:
+        return xr.open_zarr(store, chunks=None, consolidated=None, storage_options=storage_options)
+    except (ImportError, ModuleNotFoundError) as exc:
+        dependency_hint = "Opening ERA5 Zarr stores requires zarr/fsspec"
+        if store.startswith("gs://"):
+            dependency_hint += " and gcsfs for gs:// access"
+        raise ImportError(
+            f"{dependency_hint}. Install legoesm[data] before running NeuralGCM preparation "
+            f"(store={store!r})."
+        ) from exc
 
 
 def _import_dinosaur() -> tuple[Any, Any, Any]:
-    from dinosaur import horizontal_interpolation, spherical_harmonic, xarray_utils
+    try:
+        from dinosaur import horizontal_interpolation, spherical_harmonic, xarray_utils
+    except ImportError as exc:
+        raise ImportError(
+            "NeuralGCM preparation requires the dinosaur package. Install the NeuralGCM "
+            "preparation dependencies before running prepare or ensemble-inference."
+        ) from exc
 
     return horizontal_interpolation, spherical_harmonic, xarray_utils
 

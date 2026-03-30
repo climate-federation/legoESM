@@ -20,6 +20,8 @@ Shared scripts now live under:
 - `scripts/s2s/submit_neuralgcm_campaign.py`
 - `scripts/s2s/plot_coupling_diagnostics.py`
 
+Legacy `legoesm.ml.sfno_s2s` imports and the old top-level slab scripts were removed in this refactor. Downstream callers should use the `legoesm.ml.s2s.*` packages and `scripts/s2s/*` entry points directly.
+
 Canonical results roots now live under:
 
 - `results/ml/s2s/sfno_slab`

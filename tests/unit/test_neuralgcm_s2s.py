@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import csv
+import importlib.util
+import builtins
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from legoesm.ml.s2s.neuralgcm_slab import preparation as neuralgcm_preparation
@@ -19,6 +23,18 @@ from legoesm.ml.s2s.neuralgcm_slab.ensemble import (
 )
 from legoesm.ml.s2s.neuralgcm_slab.postprocess import postprocess_campaign, postprocess_case
 from legoesm.ml.s2s.neuralgcm_slab.slab_coupling import rollout_coupled_daily
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_script_module(module_name: str, relative_path: str):
+    path = REPO_ROOT / relative_path
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class _FakeBackendConfig:
@@ -486,3 +502,83 @@ def test_postprocess_case_and_campaign_write_expected_metric_tables(tmp_path: Pa
     assert {"init_time", "experiment", "field", "metric", "lead_day", "value"}.issubset(
         campaign_rows[0].keys()
     )
+
+
+def test_open_era5_store_raises_friendly_dependency_error(monkeypatch) -> None:
+    def _boom(*args, **kwargs):
+        raise ModuleNotFoundError("No module named 'gcsfs'")
+
+    monkeypatch.setattr(xr, "open_zarr", _boom)
+
+    with pytest.raises(ImportError, match="Install legoesm\\[data\\]"):
+        neuralgcm_preparation._open_era5_store("gs://example-bucket/test.zarr")
+
+
+def test_import_dinosaur_raises_friendly_dependency_error(monkeypatch) -> None:
+    original_import = builtins.__import__
+
+    def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "dinosaur":
+            raise ModuleNotFoundError("No module named 'dinosaur'")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    with pytest.raises(ImportError, match="requires the dinosaur package"):
+        neuralgcm_preparation._import_dinosaur()
+
+
+def test_resolve_case_dirs_accepts_campaign_dir(tmp_path: Path) -> None:
+    neuralgcm_cli = _load_script_module(
+        "neuralgcm_cli_test",
+        "src/legoesm/ml/s2s/neuralgcm_slab/cli.py",
+    )
+    campaign_dir = tmp_path / "campaign"
+    first = campaign_dir / "inference_20220101"
+    second = campaign_dir / "inference_20220115"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+
+    args = argparse.Namespace(
+        case_dir=[],
+        campaign_dir=[campaign_dir],
+        year=None,
+        months="1,15",
+        days="1,15",
+        forecast_days=42,
+        checkpoint="dummy",
+        base_output_dir=tmp_path,
+    )
+
+    assert neuralgcm_cli._resolve_case_dirs(args) == [first, second]
+
+
+def test_submit_runtime_selector_rejects_python_and_conda_env() -> None:
+    module = _load_script_module(
+        "submit_neuralgcm_campaign_test",
+        "scripts/s2s/submit_neuralgcm_campaign.py",
+    )
+
+    with pytest.raises(ValueError, match="Use only one of --python or --conda-env"):
+        module._resolve_runtime_selector(
+            python_executable="/usr/bin/python",
+            conda_env="legoesm",
+        )
+
+
+def test_plot_coupling_diagnostics_validates_inputs() -> None:
+    module = _load_script_module(
+        "plot_coupling_diagnostics_test",
+        "scripts/s2s/plot_coupling_diagnostics.py",
+    )
+    coupled = xr.Dataset(
+        {
+            "sea_surface_temperature": xr.DataArray(
+                np.ones((2, 2, 2), dtype=np.float32),
+                dims=("time", "latitude", "longitude"),
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="lead_day"):
+        module._validate_plot_inputs(coupled, uncoupled=None, truth=None)
