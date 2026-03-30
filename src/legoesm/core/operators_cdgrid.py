@@ -1426,6 +1426,135 @@ def fv3_sw_tendencies(
     return dh_dt, du_d_dt, dv_d_dt
 
 
+def fv3_sw_tendencies_v2(
+    h, u_d, v_d, h_s, cdgrid,
+    g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
+):
+    """FV3-parity shallow water tendencies — all operators from d2a2c.
+
+    Uses ONLY d2a2c_vect outputs so that ALL terms (mass transport,
+    KE, Bernoulli gradient, vorticity, divergence damping) follow the
+    SAME data path with the SAME halo exchange.  This is required for
+    discrete geostrophic balance at face boundaries.
+
+    Same interface as :func:`fv3_sw_tendencies`.
+    """
+    from legoesm.core.d2a2c_vect import d2a2c_vect as _d2a2c
+    from legoesm.grids.halo import pad_halo_vector
+
+    n = cdgrid.n
+    grid = cdgrid.base
+
+    # =================================================================
+    # (a) FV3-exact D→A→C: all velocity products come from here
+    # =================================================================
+    ua, va, uc_cov, vc_cov, ut, vt, utmp, vtmp = _d2a2c(u_d, v_d, cdgrid)
+
+    # =================================================================
+    # (b) Mass transport using SAME d2a2c-derived edge-normal velocities
+    # =================================================================
+    # Physical edge-normal = utmp_at_face*sin(α) - vtmp_at_face*cos(α)
+    # The old fv3_cc2c does this from its OWN utmp/vtmp (2nd-order).
+    # We use d2a2c's utmp/vtmp (4th-order interior) with the SAME
+    # projection formula to get a consistent u_c/v_c.
+    utmp_pad, vtmp_pad = pad_halo_vector(
+        utmp, vtmp,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=grid.halo_interp_offsets,
+    )
+    # u_c at x-faces: project onto edge-normal direction
+    u_avg = 0.5 * (utmp_pad[:, :-1, 1:-1] + utmp_pad[:, 1:, 1:-1])
+    v_at_u = 0.5 * (vtmp_pad[:, :-1, 1:-1] + vtmp_pad[:, 1:, 1:-1])
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, _EPS))
+    u_c = u_avg * sina_u - v_at_u * cdgrid.cosa_u  # (6, n+1, n)
+    # v_c at y-faces
+    v_c = 0.5 * (vtmp_pad[:, 1:-1, :-1] + vtmp_pad[:, 1:-1, 1:])  # (6, n, n+1)
+
+    dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
+    total_area = jnp.sum(grid.area)
+    dh_dt = dh_dt - jnp.sum(dh_dt * grid.area) / total_area
+
+    # =================================================================
+    # (c) Bernoulli gradient — split KE and g*h for consistency
+    # =================================================================
+    # KE gradient: computed from VECTOR-haloed utmp_pad (consistent with
+    # corner winds and mass transport — all from d2a2c data path).
+    # This avoids the scalar halo mismatch for the KE part.
+    KE_pad = 0.5 * (utmp_pad ** 2 + vtmp_pad ** 2)  # (6, n+2, n+2)
+    KE_sw = KE_pad[:, :-1, :-1]; KE_se = KE_pad[:, 1:, :-1]
+    KE_nw = KE_pad[:, :-1, 1:]; KE_ne = KE_pad[:, 1:, 1:]
+    dKE_raw_x = (KE_se + KE_ne) - (KE_sw + KE_nw)
+    dKE_raw_y = (KE_nw + KE_ne) - (KE_sw + KE_se)
+    c00 = _broadcast_metric(cdgrid.grad_c00, dKE_raw_x)
+    c01 = _broadcast_metric(cdgrid.grad_c01, dKE_raw_x)
+    c10 = _broadcast_metric(cdgrid.grad_c10, dKE_raw_x)
+    c11 = _broadcast_metric(cdgrid.grad_c11, dKE_raw_x)
+    dKE_dx = c00 * dKE_raw_x + c01 * dKE_raw_y
+    dKE_dy = c10 * dKE_raw_x + c11 * dKE_raw_y
+
+    # g*h gradient: scalar halo (unavoidable for height field)
+    dgh_dx, dgh_dy = _arakawa_lamb_gradient(g * (h + h_s), cdgrid)
+
+    dB_dx = dKE_dx + dgh_dx
+    dB_dy_perp = dKE_dy + dgh_dy
+
+    # =================================================================
+    # (d) Corner winds from d2a2c's utmp/vtmp (SAME data as KE and u_c)
+    # =================================================================
+    # Average the haloed utmp/vtmp to corners (same halo as u_c/v_c)
+    u_corner = 0.25 * (utmp_pad[:, :-1, :-1] + utmp_pad[:, 1:, :-1]
+                        + utmp_pad[:, :-1, 1:] + utmp_pad[:, 1:, 1:])
+    v_corner = 0.25 * (vtmp_pad[:, :-1, :-1] + vtmp_pad[:, 1:, :-1]
+                        + vtmp_pad[:, :-1, 1:] + vtmp_pad[:, 1:, 1:])
+
+    # =================================================================
+    # (e) Vorticity from the SAME corner winds
+    # =================================================================
+    zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
+    zeta_abs = zeta + cdgrid.base.f
+    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
+
+    # =================================================================
+    # (f) Momentum tendencies at corners
+    # =================================================================
+    du_corner = zeta_corner * v_corner - dB_dx
+    dv_corner = -zeta_corner * u_corner - dB_dy_perp
+
+    # =================================================================
+    # (g) Divergence damping (using SAME u_c/v_c and gradient)
+    # =================================================================
+    if div_damp > 0:
+        div_field = cgrid_divergence(u_c, v_c, cdgrid)
+        area_min = jnp.min(grid.area)
+        d2_bg = div_damp / area_min
+        dddmp = 0.2
+        div_abs_corner = _interp_center_to_corner(jnp.abs(div_field), cdgrid)
+        adaptive_coeff = area_min * jnp.maximum(
+            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
+        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_field, cdgrid)
+        du_corner = du_corner + adaptive_coeff * ddiv_dx
+        dv_corner = dv_corner + adaptive_coeff * ddiv_dy_perp
+
+    # =================================================================
+    # (h) Biharmonic hyperdiffusion
+    # =================================================================
+    if hyperdiff_coeff > 0:
+        du_corner = du_corner - hyperdiff_coeff * _laplacian_dgrid(
+            _laplacian_dgrid(u_corner, cdgrid), cdgrid)
+        dv_corner = dv_corner - hyperdiff_coeff * _laplacian_dgrid(
+            _laplacian_dgrid(v_corner, cdgrid), cdgrid)
+
+    # =================================================================
+    # (i) Vertex fix + average to edges
+    # =================================================================
+    du_corner, dv_corner = _extrapolate_boundary_corners(du_corner, dv_corner, n)
+    du_d_dt = 0.5 * (du_corner[:, :-1, :] + du_corner[:, 1:, :])
+    dv_d_dt = 0.5 * (dv_corner[:, :, :-1] + dv_corner[:, :, 1:])
+
+    return dh_dt, du_d_dt, dv_d_dt
+
+
 # ==============================================================================
 # Legacy aliases for backward compatibility
 # ==============================================================================

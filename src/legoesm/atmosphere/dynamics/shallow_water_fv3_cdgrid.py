@@ -34,6 +34,7 @@ from legoesm.core.operators_cdgrid import (
     cdgrid_momentum_tendencies,
     _extrapolate_boundary_corners,
     fv3_sw_tendencies,
+    fv3_sw_tendencies_v2,
 )
 from legoesm.core.fv3_sw_core import fv3_d_sw, fv3_d_sw_step
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -74,7 +75,8 @@ class CDGridShallowWaterConfig(NamedTuple):
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
     use_owner_sync: bool = False  # Non-FV3 compatibility path; keep disabled by default
-    use_fv3_core: bool = False    # FV3 d_sw (experimental — 37x imbalance)
+    use_fv3_core: bool = False    # FV3 forward-backward d_sw (experimental)
+    use_d2a2c: bool = True        # FV3-parity d2a2c for all operators
 
 
 # ==============================================================================
@@ -337,8 +339,11 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             state_new = FV3EdgeShallowWaterState(
                 h=h_new, u_d=u_new, v_d=v_new, h_s=state.h_s)
         else:
+            _tend = (fv3_sw_tendencies_v2 if self.config.use_d2a2c
+                     else fv3_sw_tendencies)
+
             def tendency_fn(s):
-                dh, du, dv = fv3_sw_tendencies(
+                dh, du, dv = _tend(
                     s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
                     g=self.config.g,
                     div_damp=self.config.div_damp,
