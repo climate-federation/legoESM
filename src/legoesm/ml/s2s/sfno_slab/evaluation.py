@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 
-from legoesm.ml.sfno_s2s.regrid import build_target_grid
+from legoesm.ml.s2s.sfno_slab.regrid import build_target_grid
 
 
 def parse_window_specs(text: str) -> dict[str, tuple[int, int]]:

@@ -16,7 +16,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from legoesm.ml.sfno_s2s import (
+from legoesm.ml.s2s.paths import SFNO_SLAB_RESULTS_ROOT
+from legoesm.ml.s2s.sfno_slab import (
     CHAOSBENCH_ATMOS_VARS,
     CHAOSBENCH_DATA_DIR,
     CHAOSBENCH_PRESSURE_LEVELS,
@@ -257,7 +258,7 @@ def _run_case(
     case_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         python_executable,
-        "scripts/sfno_slab.py",
+        str(Path(__file__).resolve().parent / "sfno_slab.py"),
         "ensemble-inference",
         "--checkpoint",
         str(checkpoint),
