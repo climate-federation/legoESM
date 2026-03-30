@@ -869,6 +869,25 @@ def plot_weak_scaling(results: list[TimingResult], output_dir: Path) -> None:
     print(f"  Plot: {path}")
 
 
+def _resolution_color_map(resolutions: list[int]) -> dict[int, str]:
+    """Build a color map for an arbitrary set of resolution values.
+
+    Uses a qualitative palette so every resolution gets a distinct,
+    easy-to-read color regardless of grid type.
+    """
+    palette = [
+        "#4CAF50",  # green
+        "#2196F3",  # blue
+        "#F44336",  # red
+        "#9C27B0",  # purple
+        "#FF9800",  # orange
+        "#00BCD4",  # cyan
+        "#795548",  # brown
+        "#E91E63",  # pink
+    ]
+    return {res: palette[i % len(palette)] for i, res in enumerate(sorted(resolutions))}
+
+
 def plot_strong_scaling(results: list[TimingResult], output_dir: Path) -> None:
     """Generate strong scaling plot (SYPD vs GPUs, CliMA Fig 12 style)."""
     try:
@@ -882,18 +901,13 @@ def plot_strong_scaling(results: list[TimingResult], output_dir: Path) -> None:
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 5.5))
 
-    resolution_colors = {
-        48: "#4CAF50",
-        96: "#2196F3",
-        192: "#F44336",
-        384: "#9C27B0",
-    }
     prec_linestyles = {"float32": "-", "float64": "--"}
     prec_markers = {"float32": "o", "float64": "s"}
 
     precisions = sorted(set(r.precision for r in results))
     resolutions = sorted(set(r.resolution for r in results))
     all_gpus = sorted(set(r.n_gpus for r in results))
+    resolution_colors = _resolution_color_map(resolutions)
 
     for n_grid in resolutions:
         for prec in precisions:
@@ -908,7 +922,7 @@ def plot_strong_scaling(results: list[TimingResult], output_dir: Path) -> None:
             sypd = [r.sypd for r in group]
 
             label = f"{n_grid} ({prec})"
-            color = resolution_colors.get(n_grid, "#666")
+            color = resolution_colors[n_grid]
 
             ax.plot(
                 gpus, sypd,
@@ -936,7 +950,7 @@ def plot_strong_scaling(results: list[TimingResult], output_dir: Path) -> None:
             ideal_sypd = baseline.sypd * (gpu_range / baseline.n_gpus)
             ax.plot(
                 gpu_range, ideal_sypd,
-                color=resolution_colors.get(n_grid, "#666"),
+                color=resolution_colors[n_grid],
                 linestyle=":",
                 alpha=0.35,
                 linewidth=1,
