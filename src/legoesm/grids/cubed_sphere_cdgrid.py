@@ -110,6 +110,25 @@ class CubedSphereCDGrid(NamedTuple):
     grad_c01: jax.Array    # (6, n+1, n+1)
     grad_c10: jax.Array    # (6, n+1, n+1)
     grad_c11: jax.Array    # (6, n+1, n+1)
+    # --- Duo-Grid sub-grid metrics (Mouallem, Harris & Chen 2023) ---
+    # 9-point supergrid layout per cell:
+    #      9---4---8
+    #      |       |
+    #      1   5   3
+    #      |       |
+    #      6---2---7
+    # 0-indexed: 0=W, 1=S, 2=E, 3=N edge midpoints; 4=center;
+    #            5=SW, 6=SE, 7=NE, 8=NW corners
+    sin_sg: jax.Array      # (6, n, n, 9) sin(angle) at 9 sub-grid positions
+    cos_sg: jax.Array      # (6, n, n, 9) cos(angle) at 9 sub-grid positions
+    # --- FV3 c_sw grid metrics ---
+    # Center-to-center distances across C-grid faces, used for the FV3
+    # 2-point Bernoulli/KE gradient (replaces Arakawa-Lamb 4-point stencil).
+    dxc: jax.Array         # (6, n+1, n) distance between cell (i-1,j) and (i,j)
+    dyc: jax.Array         # (6, n, n+1) distance between cell (i,j-1) and (i,j)
+    rdxc: jax.Array        # (6, n+1, n) 1/dxc
+    rdyc: jax.Array        # (6, n, n+1) 1/dyc
+    rarea_c: jax.Array     # (6, n+1, n+1) 1/area_corner
 
     @property
     def n(self) -> int:
@@ -118,6 +137,113 @@ class CubedSphereCDGrid(NamedTuple):
     @property
     def radius(self) -> float:
         return self.base.radius
+
+
+def _compute_sin_cos_sg(n, face_gnomonic_to_lonlat):
+    """Compute Duo-Grid sub-grid metrics at 9 positions per cell.
+
+    Uses a supergrid (half the cell spacing) to evaluate the angle between
+    i-tangent and j-tangent at each sub-grid position via centred
+    differences of 3D Cartesian positions.
+
+    Parameters
+    ----------
+    n : int
+        Number of cells per face edge.
+    face_gnomonic_to_lonlat : callable
+        ``_face_gnomonic_to_lonlat(face, ax, ay) -> (lon, lat)``
+
+    Returns
+    -------
+    sin_sg : jax.Array, shape (6, n, n, 9)
+    cos_sg : jax.Array, shape (6, n, n, 9)
+    """
+    dalpha = jnp.pi / (2 * n)
+
+    # Supergrid: 2n+3 positions per axis.
+    # Index mapping (0-based):
+    #   0: -pi/4 - dalpha/2   (padding for centred diff)
+    #   1: -pi/4              (corner 0)
+    #   2: -pi/4 + dalpha/2   (cell centre 0)
+    #   2k+1: corner k        for k = 0..n
+    #   2k+2: cell centre k   for k = 0..n-1
+    #   2n+2: pi/4 + dalpha/2 (padding)
+    n_sg = 2 * n + 3
+    alpha_sg = jnp.linspace(-jnp.pi / 4 - dalpha / 2,
+                            jnp.pi / 4 + dalpha / 2, n_sg)
+    ax_sg, ay_sg = jnp.meshgrid(alpha_sg, alpha_sg, indexing='ij')
+
+    all_cos_sg = []
+    for face in range(6):
+        lon_sg, lat_sg = face_gnomonic_to_lonlat(face, ax_sg, ay_sg)
+        cos_lat = jnp.cos(lat_sg)
+        px = cos_lat * jnp.cos(lon_sg)
+        py = cos_lat * jnp.sin(lon_sg)
+        pz = jnp.sin(lat_sg)
+
+        # Centre positions for tangent-plane projection: (2n+1, 2n+1)
+        cx = px[1:-1, 1:-1]
+        cy = py[1:-1, 1:-1]
+        cz = pz[1:-1, 1:-1]
+
+        # i-tangent via centred diff in axis 0: (2n+1, 2n+1)
+        ti_x = px[2:, 1:-1] - px[:-2, 1:-1]
+        ti_y = py[2:, 1:-1] - py[:-2, 1:-1]
+        ti_z = pz[2:, 1:-1] - pz[:-2, 1:-1]
+        dot_i = ti_x * cx + ti_y * cy + ti_z * cz
+        ti_x = ti_x - dot_i * cx
+        ti_y = ti_y - dot_i * cy
+        ti_z = ti_z - dot_i * cz
+        norm_i = jnp.sqrt(ti_x ** 2 + ti_y ** 2 + ti_z ** 2 + _TINY)
+        ti_x = ti_x / norm_i
+        ti_y = ti_y / norm_i
+        ti_z = ti_z / norm_i
+
+        # j-tangent via centred diff in axis 1: (2n+1, 2n+1)
+        tj_x = px[1:-1, 2:] - px[1:-1, :-2]
+        tj_y = py[1:-1, 2:] - py[1:-1, :-2]
+        tj_z = pz[1:-1, 2:] - pz[1:-1, :-2]
+        dot_j = tj_x * cx + tj_y * cy + tj_z * cz
+        tj_x = tj_x - dot_j * cx
+        tj_y = tj_y - dot_j * cy
+        tj_z = tj_z - dot_j * cz
+        norm_j = jnp.sqrt(tj_x ** 2 + tj_y ** 2 + tj_z ** 2 + _TINY)
+        tj_x = tj_x / norm_j
+        tj_y = tj_y / norm_j
+        tj_z = tj_z / norm_j
+
+        # cos(angle) at all supergrid interior positions
+        cosa = ti_x * tj_x + ti_y * tj_y + ti_z * tj_z  # (2n+1, 2n+1)
+
+        # Extract 9 sub-grid positions for each cell (i,j), i,j = 0..n-1.
+        # In the cosa array (indexed 0..2n):
+        #   corner (i,j)       → (2i, 2j)
+        #   cell centre (i)    → (2i+1, ...)
+        #   W edge of cell i,j → (2i, 2j+1)      [corner-i, centre-j]
+        #   E edge             → (2i+2, 2j+1)    [corner-i+1, centre-j]
+        #   S edge             → (2i+1, 2j)      [centre-i, corner-j]
+        #   N edge             → (2i+1, 2j+2)    [centre-i, corner-j+1]
+        #   Centre             → (2i+1, 2j+1)
+
+        m = 2 * n  # shorthand
+        cos_sg_face = jnp.stack([
+            cosa[0:m:2,   1:m + 1:2],   # 0: W edge
+            cosa[1:m + 1:2, 0:m:2],     # 1: S edge
+            cosa[2:m + 1:2, 1:m + 1:2], # 2: E edge
+            cosa[1:m + 1:2, 2:m + 1:2], # 3: N edge
+            cosa[1:m + 1:2, 1:m + 1:2], # 4: Centre
+            cosa[0:m:2,   0:m:2],       # 5: SW corner
+            cosa[2:m + 1:2, 0:m:2],     # 6: SE corner
+            cosa[2:m + 1:2, 2:m + 1:2], # 7: NE corner
+            cosa[0:m:2,   2:m + 1:2],   # 8: NW corner
+        ], axis=-1)  # (n, n, 9)
+
+        all_cos_sg.append(cos_sg_face)
+
+    cos_sg = jnp.stack(all_cos_sg, axis=0)  # (6, n, n, 9)
+    sin_sg = jnp.sqrt(jnp.maximum(1.0 - cos_sg ** 2, 0.0))
+
+    return sin_sg, cos_sg
 
 
 def create_cubed_sphere_cdgrid(
@@ -567,6 +693,24 @@ def create_cubed_sphere_cdgrid(
     rsin2_cell = 1.0 / jnp.maximum(sina_cell**2, _EPS)
 
     # ------------------------------------------------------------------
+    # Duo-Grid sub-grid metrics (sin_sg, cos_sg) at 9 positions per cell.
+    #
+    # The 9-point supergrid per cell uses the GFDL convention:
+    #      9---4---8
+    #      |       |        0-indexed: 0=W, 1=S, 2=E, 3=N (edge midpoints)
+    #      1   5   3                   4=center
+    #      |       |                   5=SW, 6=SE, 7=NE, 8=NW (corners)
+    #      6---2---7
+    #
+    # At each position we compute the angle between the face-local
+    # i-tangent and j-tangent.  At face boundaries, neighbouring cells
+    # on different faces have DIFFERENT angle measurements at their
+    # shared edge — using the upstream cell's measurement (upwind
+    # selection) is the core of the Duo-Grid fix for edge artefacts.
+    # ------------------------------------------------------------------
+    sin_sg, cos_sg = _compute_sin_cos_sg(n, _face_gnomonic_to_lonlat)
+
+    # ------------------------------------------------------------------
     # Precompute Arakawa-Lamb gradient transformation matrix.
     #
     # At each D-grid corner the 4-point stencil produces raw differences
@@ -597,6 +741,34 @@ def create_cubed_sphere_cdgrid(
     x_pad = _fill_corners_h1(x_pad)
     y_pad = _fill_corners_h1(y_pad)
     z_pad = _fill_corners_h1(z_pad)
+
+    # ------------------------------------------------------------------
+    # FV3 c_sw metrics: center-to-center distances across C-grid faces.
+    # dxc(i,j) = great-circle distance between cell (i-1,j) and cell (i,j)
+    #            at x-interface i, shape (6, n+1, n).
+    # dyc(i,j) = distance between cell (i,j-1) and cell (i,j)
+    #            at y-interface j, shape (6, n, n+1).
+    # In padded coords: cell (i,j) → padded (i+1, j+1).
+    # ------------------------------------------------------------------
+    # x-direction: adjacent cells in i-direction
+    chord_xc = jnp.sqrt(
+        (x_pad[:, :-1, 1:-1] - x_pad[:, 1:, 1:-1]) ** 2
+        + (y_pad[:, :-1, 1:-1] - y_pad[:, 1:, 1:-1]) ** 2
+        + (z_pad[:, :-1, 1:-1] - z_pad[:, 1:, 1:-1]) ** 2
+    )  # (6, n+1, n)
+    dxc = radius * 2.0 * jnp.arcsin(jnp.clip(chord_xc / 2.0, 0.0, 1.0))
+
+    # y-direction: adjacent cells in j-direction
+    chord_yc = jnp.sqrt(
+        (x_pad[:, 1:-1, :-1] - x_pad[:, 1:-1, 1:]) ** 2
+        + (y_pad[:, 1:-1, :-1] - y_pad[:, 1:-1, 1:]) ** 2
+        + (z_pad[:, 1:-1, :-1] - z_pad[:, 1:-1, 1:]) ** 2
+    )  # (6, n, n+1)
+    dyc = radius * 2.0 * jnp.arcsin(jnp.clip(chord_yc / 2.0, 0.0, 1.0))
+
+    rdxc = 1.0 / jnp.maximum(dxc, _TINY)
+    rdyc = 1.0 / jnp.maximum(dyc, _TINY)
+    rarea_c = 1.0 / jnp.maximum(area_corner, _TINY)
 
     # 4-point stencil cell positions at each corner
     x_sw, x_se = x_pad[:, :-1, :-1], x_pad[:, 1:, :-1]
@@ -686,4 +858,11 @@ def create_cubed_sphere_cdgrid(
         grad_c01=grad_c01.astype(_f32),
         grad_c10=grad_c10.astype(_f32),
         grad_c11=grad_c11.astype(_f32),
+        sin_sg=sin_sg.astype(_f32),
+        cos_sg=cos_sg.astype(_f32),
+        dxc=dxc.astype(_f32),
+        dyc=dyc.astype(_f32),
+        rdxc=rdxc.astype(_f32),
+        rdyc=rdyc.astype(_f32),
+        rarea_c=rarea_c.astype(_f32),
     )

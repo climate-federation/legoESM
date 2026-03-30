@@ -1567,10 +1567,11 @@ def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
         div_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
                    - one_over_a * sh_analysis_dmu_3d(grid, v_cos))
 
-        # SSH perturbation with mask
+        # SSH perturbation with mask (area-weighted mean subtraction)
         eta_pert = 0.05 * np.sin(3.0 * np.radians(lon_2d)) * np.cos(
             2.0 * np.radians(lat_2d)) * mask
-        eta_pert -= np.mean(eta_pert)
+        w = np.asarray(grid.weights, dtype=np.float64)[:, None] * mask
+        eta_pert -= np.sum(eta_pert * w) / np.maximum(np.sum(w), 1e-30)
         eta_hat = state.eta_hat.data + sh_analysis(grid, jnp.array(eta_pert))
 
         return state._replace(
@@ -1880,7 +1881,7 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         # Project onto edge normals
         angle = np.asarray(grid.angleEdge, dtype=np.float64)
         u_data[..., 0] = u_e * np.cos(angle) + v_e * np.sin(angle)
-        eta_cell = eta_amp * np.cos(kx * lat + ky * lon)
+        eta_cell = eta_amp * np.cos(kx * lon + ky * lat)
         return state._replace(
             eta=Field(jnp.array(eta_cell)),
             u=Field(jnp.array(u_data)))

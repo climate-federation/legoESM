@@ -1,7 +1,7 @@
 """CFL (Courant-Friedrichs-Lewy) condition utilities.
 
 Provides automatic time step estimation for explicit time integrators
-on cubed-sphere and Gaussian grids.
+on cubed-sphere, Gaussian, and lat-lon grids.
 """
 from __future__ import annotations
 
@@ -32,6 +32,33 @@ def estimate_min_dx_cubed_sphere(n: int, radius: float = 6.371229e6) -> float:
     dx_nominal = (np.pi / 2) * radius / n
     dx_min = dx_nominal / np.sqrt(3)
     return float(dx_min)
+
+
+def estimate_min_dx_latlon(n_lat: int, radius: float = 6.371229e6) -> float:
+    """Estimate minimum grid spacing on a latitude-longitude grid.
+
+    Parameters
+    ----------
+    n_lat : int
+        Number of latitude points.
+    radius : float
+        Sphere radius [m].
+
+    Returns
+    -------
+    dx_min : float
+        Approximate minimum single-cell grid spacing [m].
+        Occurs at the polar-most row where cos(lat) is smallest.
+    """
+    dlat = np.pi / n_lat
+    dlon = 2.0 * np.pi / (2 * n_lat)  # n_lon = 2 * n_lat
+    # Polar-most cell center is at lat = pi/2 - dlat/2
+    cos_lat_pole = np.cos(np.pi / 2.0 - dlat / 2.0)
+    # Single-cell dx at the polar-most row
+    dx_pole = radius * dlon * cos_lat_pole
+    # dy is constant: single-cell dy = radius * dlat
+    dy = radius * dlat
+    return float(min(dx_pole, dy))
 
 
 def estimate_min_dx_gaussian(n_max: int, radius: float = 6.371229e6) -> float:
@@ -174,6 +201,7 @@ def cfl_check_and_adjust(
     cfl_number: float = 0.8,
     radius: float = 6.371229e6,
     verbose: bool = True,
+    grid_type: str = "cubed_sphere",
 ) -> float:
     """Check CFL condition and reduce dt if needed.
 
@@ -182,7 +210,7 @@ def cfl_check_and_adjust(
     dt : float
         Requested time step [s].
     n : int
-        Grid resolution (cubed-sphere N or spectral truncation).
+        Grid resolution (cubed-sphere N, spectral truncation, or n_lat).
     model_type : str
         One of 'shallow_water', 'primitive_eq', 'compressible'.
     max_wind : float
@@ -196,13 +224,20 @@ def cfl_check_and_adjust(
         Sphere radius [m].
     verbose : bool
         Print CFL diagnostics.
+    grid_type : str
+        Grid type: 'cubed_sphere', 'gaussian', or 'latlon'.
 
     Returns
     -------
     dt_safe : float
         Adjusted time step (≤ dt) that satisfies CFL.
     """
-    dx_min = estimate_min_dx_cubed_sphere(n, radius)
+    if grid_type == "latlon":
+        dx_min = estimate_min_dx_latlon(n, radius)
+    elif grid_type == "gaussian":
+        dx_min = estimate_min_dx_gaussian(n, radius)
+    else:
+        dx_min = estimate_min_dx_cubed_sphere(n, radius)
 
     # Total wave speed = max(wind) + gravity_wave_speed
     c_total = max_wind + gravity_wave_speed
