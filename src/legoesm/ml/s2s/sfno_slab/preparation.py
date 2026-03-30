@@ -9,8 +9,8 @@ from typing import Sequence
 import numpy as np
 import xarray as xr
 
-from legoesm.ml.sfno_s2s.config import CHAOSBENCH_DATA_DIR
-from legoesm.ml.sfno_s2s.regrid import build_target_grid, regrid_channels_to_gaussian
+from legoesm.ml.s2s.sfno_slab.config import CHAOSBENCH_DATA_DIR
+from legoesm.ml.s2s.sfno_slab.regrid import build_target_grid, regrid_channels_to_gaussian
 
 
 DEFAULT_ARCO_ERA5_STORE = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"

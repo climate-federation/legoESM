@@ -12,7 +12,7 @@ import numpy as np
 import xarray as xr
 
 from legoesm.ml.sfno import SFNO, SFNOConfig
-from legoesm.ml.sfno_s2s.data import (
+from legoesm.ml.s2s.sfno_slab.data import (
     atmospheric_param_labels,
     available_s2s_dates,
     denormalize_atmospheric_channels,
@@ -22,8 +22,8 @@ from legoesm.ml.sfno_s2s.data import (
     load_s2s_sample,
     resolve_s2s_sample_dates,
 )
-from legoesm.ml.sfno_s2s.regrid import build_target_grid
-from legoesm.ml.sfno_s2s.training import (
+from legoesm.ml.s2s.sfno_slab.regrid import build_target_grid
+from legoesm.ml.s2s.sfno_slab.training import (
     S2SStochasticConfig,
     cast_model_to_float32,
     rollout_with_forcing,

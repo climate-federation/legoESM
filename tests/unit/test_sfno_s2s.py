@@ -17,9 +17,9 @@ import xarray as xr
 
 from legoesm.ml.loss import almost_fair_crps
 from legoesm.ml.sfno import SFNO, SFNOConfig
-from legoesm.ml.sfno_s2s import coupling as s2s_coupling
-from legoesm.ml.sfno_s2s import training as s2s_training
-from legoesm.ml.sfno_s2s import (
+from legoesm.ml.s2s.sfno_slab import coupling as s2s_coupling
+from legoesm.ml.s2s.sfno_slab import training as s2s_training
+from legoesm.ml.s2s.sfno_slab import (
     ArcoSurfaceForcingConfig,
     ChaosBenchS2SConfig,
     LAND_SEA_MASK_VAR,

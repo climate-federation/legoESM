@@ -10,6 +10,7 @@ output/
 .mypy_cache/
 .DS_Store
 Icon?
+.ipynb_checkpoints/
 
 # LaTeX build artifacts
 *.aux

@@ -5,7 +5,7 @@ and evaluation workflow and is separate from the older one-step WB2/ERA5
 training path in :mod:`legoesm.ml`.
 """
 
-from legoesm.ml.sfno_s2s.config import (
+from legoesm.ml.s2s.sfno_slab.config import (
     CHAOSBENCH_ATMOS_VARS,
     CHAOSBENCH_DATA_DIR,
     CHAOSBENCH_PRESSURE_LEVELS,
@@ -14,11 +14,11 @@ from legoesm.ml.sfno_s2s.config import (
     DEFAULT_ARCO_SST_STATS_PATH,
     LAND_SEA_MASK_VAR,
 )
-from legoesm.ml.sfno_s2s.coupling import (
+from legoesm.ml.s2s.sfno_slab.coupling import (
     S2SSlabCouplingConfig,
     coupled_rollout_to_dataset,
 )
-from legoesm.ml.sfno_s2s.data import (
+from legoesm.ml.s2s.sfno_slab.data import (
     SFNOS2SDataset,
     atmospheric_param_labels,
     available_s2s_dates,
@@ -34,7 +34,7 @@ from legoesm.ml.sfno_s2s.data import (
     normalize_forcing_channels,
     resolve_s2s_sample_dates,
 )
-from legoesm.ml.sfno_s2s.preparation import (
+from legoesm.ml.s2s.sfno_slab.preparation import (
     ArcoSSTCacheConfig,
     ArcoSurfaceForcingConfig,
     DEFAULT_ARCO_ERA5_STORE,
@@ -42,7 +42,7 @@ from legoesm.ml.sfno_s2s.preparation import (
     prepare_arco_surface_forcing,
 )
 # postprocess requires optional imageio; lazy-import via __getattr__ below.
-from legoesm.ml.sfno_s2s.evaluation import (
+from legoesm.ml.s2s.sfno_slab.evaluation import (
     aggregate_long_records,
     compute_ensemble_daily_metrics,
     compute_daily_metrics,
@@ -51,12 +51,12 @@ from legoesm.ml.sfno_s2s.evaluation import (
     summarize_window_metrics,
     write_metric_rows,
 )
-from legoesm.ml.sfno_s2s.regrid import (
+from legoesm.ml.s2s.sfno_slab.regrid import (
     TargetGridSpec,
     build_target_grid,
     regrid_channels_to_gaussian,
 )
-from legoesm.ml.sfno_s2s.rollout import (
+from legoesm.ml.s2s.sfno_slab.rollout import (
     build_sfno_from_checkpoint,
     load_training_metadata,
     metadata_path_for_checkpoint,
@@ -64,7 +64,7 @@ from legoesm.ml.sfno_s2s.rollout import (
     sample_index_from_date,
     save_training_metadata,
 )
-from legoesm.ml.sfno_s2s.training import (
+from legoesm.ml.s2s.sfno_slab.training import (
     S2SStochasticConfig,
     S2STrainingConfig,
     cast_model_to_float32,
@@ -87,7 +87,7 @@ _POSTPROCESS_NAMES = {
 
 def __getattr__(name):
     if name in _POSTPROCESS_NAMES:
-        from legoesm.ml.sfno_s2s import postprocess
+        from legoesm.ml.s2s.sfno_slab import postprocess
         return getattr(postprocess, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

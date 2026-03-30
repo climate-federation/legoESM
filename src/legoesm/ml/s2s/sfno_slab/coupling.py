@@ -12,7 +12,7 @@ import xarray as xr
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.coupler.coupling_fields import AtmToSurface
-from legoesm.ml.sfno_s2s.data import (
+from legoesm.ml.s2s.sfno_slab.data import (
     atmospheric_param_labels,
     denormalize_atmospheric_channels,
     denormalize_forcing_channels,
@@ -23,8 +23,8 @@ from legoesm.ml.sfno_s2s.data import (
     normalize_forcing_channels,
     resolve_s2s_sample_dates,
 )
-from legoesm.ml.sfno_s2s.regrid import build_target_grid
-from legoesm.ml.sfno_s2s.training import S2SStochasticConfig, predict_next_atmosphere
+from legoesm.ml.s2s.sfno_slab.regrid import build_target_grid
+from legoesm.ml.s2s.sfno_slab.training import S2SStochasticConfig, predict_next_atmosphere
 from legoesm.ocean.simple_ocean import SimpleOceanConfig, SlabOceanState, make_ocean
 
 
