@@ -34,9 +34,7 @@ from legoesm.core.operators_cdgrid import (
     cdgrid_momentum_tendencies,
     _extrapolate_boundary_corners,
     fv3_sw_tendencies,
-    fv3_sw_tendencies_v2,
 )
-from legoesm.core.fv3_sw_core import fv3_d_sw, fv3_d_sw_step
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
@@ -74,9 +72,6 @@ class CDGridShallowWaterConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
-    use_owner_sync: bool = False  # Non-FV3 compatibility path; keep disabled by default
-    use_fv3_core: bool = False    # FV3 forward-backward d_sw (experimental)
-    use_d2a2c: bool = True        # FV3-parity d2a2c for all operators
 
 
 # ==============================================================================
@@ -261,10 +256,8 @@ class CDGridShallowWaterModel(IntegrationMixin):
             state, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Optional non-FV3 compatibility path.
-        # FV3 relies on halo-exchanged operators, not explicit edge owner-sync.
-        if self.config.use_owner_sync:
-            state_new = self._sync_dgrid_boundary(state_new)
+        # Owner-based sync: once per time step, after integrator
+        state_new = self._sync_dgrid_boundary(state_new)
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
@@ -328,34 +321,21 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         """Advance one time step."""
         from legoesm.core.operators_cdgrid import fv3_d2cc, _pad_halo_auto
 
-        if self.config.use_fv3_core:
-            # FV3 forward-backward step (not RK3 — dt is embedded)
-            h_new, u_new, v_new = fv3_d_sw_step(
-                state.h, state.u_d, state.v_d, state.h_s, self.cdgrid, dt,
+        def tendency_fn(s):
+            dh, du, dv = fv3_sw_tendencies(
+                s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
                 g=self.config.g,
                 div_damp=self.config.div_damp,
                 hyperdiff_coeff=self.config.hyperdiff_coeff,
             )
-            state_new = FV3EdgeShallowWaterState(
-                h=h_new, u_d=u_new, v_d=v_new, h_s=state.h_s)
-        else:
-            _tend = (fv3_sw_tendencies_v2 if self.config.use_d2a2c
-                     else fv3_sw_tendencies)
-
-            def tendency_fn(s):
-                dh, du, dv = _tend(
-                    s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
-                    g=self.config.g,
-                    div_damp=self.config.div_damp,
-                    hyperdiff_coeff=self.config.hyperdiff_coeff,
-                )
-                return FV3EdgeShallowWaterState(
-                    h=dh, u_d=du, v_d=dv,
-                    h_s=jnp.zeros_like(s.h_s),
-                )
-            state_new = dispatch_integrator(
-                state, tendency_fn, dt, self.config.time_integrator,
+            return FV3EdgeShallowWaterState(
+                h=dh, u_d=du, v_d=dv,
+                h_s=jnp.zeros_like(s.h_s),
             )
+
+        state_new = dispatch_integrator(
+            state, tendency_fn, dt, self.config.time_integrator,
+        )
 
         # D-A-D filter: suppress grid-scale computational mode by
         # blending edge-midpoint winds with cell-centre-averaged values.

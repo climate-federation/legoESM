@@ -101,17 +101,6 @@ class CubedSphereCDGrid(NamedTuple):
     cosa_cell: jax.Array     # (6, n, n) cos(angle between i and j tangents)
     sina_cell: jax.Array     # (6, n, n) sin(angle)
     rsin2_cell: jax.Array    # (6, n, n) 1/sin²(angle)
-    # Per-cell non-orthogonality at the 4 edge midpoints (FV3 sin_sg/cos_sg).
-    # Used by fv_tp_2d for upstream-dependent mass flux at face boundaries.
-    # Component k: 1=WEST, 2=SOUTH, 3=EAST, 4=NORTH edge of the cell.
-    cos_sg1: jax.Array     # (6, n, n) — WEST edge midpoint
-    cos_sg2: jax.Array     # (6, n, n) — SOUTH
-    cos_sg3: jax.Array     # (6, n, n) — EAST
-    cos_sg4: jax.Array     # (6, n, n) — NORTH
-    sin_sg1: jax.Array     # (6, n, n)
-    sin_sg2: jax.Array     # (6, n, n)
-    sin_sg3: jax.Array     # (6, n, n)
-    sin_sg4: jax.Array     # (6, n, n)
     # Precomputed Arakawa-Lamb gradient transformation matrix.
     # Maps 4-point finite-difference quantities (ΔB_x, ΔB_y) directly to
     # physical gradient (dB/dx along e_i, dB/dy_perp ⊥ e_i).  Derived from
@@ -399,10 +388,8 @@ def create_cubed_sphere_cdgrid(
     cosa_v = 0.5 * (cosa_corner[:, :-1, :] + cosa_corner[:, 1:, :])  # (6, n, n+1)
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
-    # FV3 convention: rsin_u = 1/sin²(α), NOT 1/sin(α)
-    # (fv_grid_utils.F90:502-561)
-    rsin_u = 1.0 / jnp.maximum(sina_u ** 2, _EPS)
-    rsin_v = 1.0 / jnp.maximum(sina_v ** 2, _EPS)
+    rsin_u = 1.0 / sina_u
+    rsin_v = 1.0 / sina_v
 
     # ------------------------------------------------------------------
     # FV3 edge-midpoint D-grid metrics
@@ -579,22 +566,6 @@ def create_cubed_sphere_cdgrid(
     sina_cell = jnp.sqrt(jnp.maximum(1.0 - cosa_cell**2, _EPS))
     rsin2_cell = 1.0 / jnp.maximum(sina_cell**2, _EPS)
 
-    # Per-cell edge-midpoint non-orthogonality (sin_sg / cos_sg).
-    # cos_sg_k = cos(α) at the k-th edge midpoint of cell (i,j),
-    # averaged from the two corners on that edge that belong to this cell.
-    # WEST edge of cell (i,j): corners (i,j) and (i,j+1)
-    cos_sg1 = 0.5 * (cosa_corner[:, :-1, :-1] + cosa_corner[:, :-1, 1:])
-    # SOUTH edge: corners (i,j) and (i+1,j)
-    cos_sg2 = 0.5 * (cosa_corner[:, :-1, :-1] + cosa_corner[:, 1:, :-1])
-    # EAST edge: corners (i+1,j) and (i+1,j+1)
-    cos_sg3 = 0.5 * (cosa_corner[:, 1:, :-1] + cosa_corner[:, 1:, 1:])
-    # NORTH edge: corners (i,j+1) and (i+1,j+1)
-    cos_sg4 = 0.5 * (cosa_corner[:, :-1, 1:] + cosa_corner[:, 1:, 1:])
-    sin_sg1 = jnp.sqrt(jnp.maximum(1.0 - cos_sg1**2, _EPS))
-    sin_sg2 = jnp.sqrt(jnp.maximum(1.0 - cos_sg2**2, _EPS))
-    sin_sg3 = jnp.sqrt(jnp.maximum(1.0 - cos_sg3**2, _EPS))
-    sin_sg4 = jnp.sqrt(jnp.maximum(1.0 - cos_sg4**2, _EPS))
-
     # ------------------------------------------------------------------
     # Precompute Arakawa-Lamb gradient transformation matrix.
     #
@@ -711,14 +682,6 @@ def create_cubed_sphere_cdgrid(
         cosa_cell=cosa_cell.astype(_f32),
         sina_cell=sina_cell.astype(_f32),
         rsin2_cell=rsin2_cell.astype(_f32),
-        cos_sg1=cos_sg1.astype(_f32),
-        cos_sg2=cos_sg2.astype(_f32),
-        cos_sg3=cos_sg3.astype(_f32),
-        cos_sg4=cos_sg4.astype(_f32),
-        sin_sg1=sin_sg1.astype(_f32),
-        sin_sg2=sin_sg2.astype(_f32),
-        sin_sg3=sin_sg3.astype(_f32),
-        sin_sg4=sin_sg4.astype(_f32),
         grad_c00=grad_c00.astype(_f32),
         grad_c01=grad_c01.astype(_f32),
         grad_c10=grad_c10.astype(_f32),
