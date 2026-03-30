@@ -1377,17 +1377,11 @@ def fv3_sw_tendencies(
     dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
     # (c) Bernoulli function from ORIGINAL cell-centre winds.
-    # Computing KE here (not inside cdgrid_momentum_tendencies) avoids
-    # the double-averaging that occurs when corner winds are averaged
-    # back to cell centres for KE.
     KE = 0.5 * (u_cc ** 2 + v_cc ** 2)
     B = KE + g * (h + h_s)
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
     # (d) Corner winds from edge midpoints for vorticity computation.
-    # mode='edge' padding is acceptable here because the vorticity
-    # circulation uses edge lengths (exact) and the boundary error
-    # is limited to the outermost cell row.
     u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
     u_corner = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])
     v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
