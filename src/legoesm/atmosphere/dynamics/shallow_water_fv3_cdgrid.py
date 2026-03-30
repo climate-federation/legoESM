@@ -34,6 +34,7 @@ from legoesm.core.operators_cdgrid import (
     cdgrid_momentum_tendencies,
     _extrapolate_boundary_corners,
     fv3_sw_tendencies,
+    fv3_c_sw_tendencies,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
@@ -72,6 +73,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
+    use_csw: bool = False  # Use FV3 c_sw paper-exact operators (no Arakawa-Lamb)
 
 
 # ==============================================================================
@@ -322,12 +324,20 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         from legoesm.core.operators_cdgrid import fv3_d2cc, _pad_halo_auto
 
         def tendency_fn(s):
-            dh, du, dv = fv3_sw_tendencies(
-                s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
-                g=self.config.g,
-                div_damp=self.config.div_damp,
-                hyperdiff_coeff=self.config.hyperdiff_coeff,
-            )
+            if self.config.use_csw:
+                dh, du, dv = fv3_c_sw_tendencies(
+                    s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
+                    g=self.config.g,
+                    div_damp=self.config.div_damp,
+                    hyperdiff_coeff=self.config.hyperdiff_coeff,
+                )
+            else:
+                dh, du, dv = fv3_sw_tendencies(
+                    s.h, s.u_d, s.v_d, s.h_s, self.cdgrid,
+                    g=self.config.g,
+                    div_damp=self.config.div_damp,
+                    hyperdiff_coeff=self.config.hyperdiff_coeff,
+                )
             return FV3EdgeShallowWaterState(
                 h=dh, u_d=du, v_d=dv,
                 h_s=jnp.zeros_like(s.h_s),

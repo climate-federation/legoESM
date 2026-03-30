@@ -121,6 +121,14 @@ class CubedSphereCDGrid(NamedTuple):
     #            5=SW, 6=SE, 7=NE, 8=NW corners
     sin_sg: jax.Array      # (6, n, n, 9) sin(angle) at 9 sub-grid positions
     cos_sg: jax.Array      # (6, n, n, 9) cos(angle) at 9 sub-grid positions
+    # --- FV3 c_sw grid metrics ---
+    # Center-to-center distances across C-grid faces, used for the FV3
+    # 2-point Bernoulli/KE gradient (replaces Arakawa-Lamb 4-point stencil).
+    dxc: jax.Array         # (6, n+1, n) distance between cell (i-1,j) and (i,j)
+    dyc: jax.Array         # (6, n, n+1) distance between cell (i,j-1) and (i,j)
+    rdxc: jax.Array        # (6, n+1, n) 1/dxc
+    rdyc: jax.Array        # (6, n, n+1) 1/dyc
+    rarea_c: jax.Array     # (6, n+1, n+1) 1/area_corner
 
     @property
     def n(self) -> int:
@@ -734,6 +742,34 @@ def create_cubed_sphere_cdgrid(
     y_pad = _fill_corners_h1(y_pad)
     z_pad = _fill_corners_h1(z_pad)
 
+    # ------------------------------------------------------------------
+    # FV3 c_sw metrics: center-to-center distances across C-grid faces.
+    # dxc(i,j) = great-circle distance between cell (i-1,j) and cell (i,j)
+    #            at x-interface i, shape (6, n+1, n).
+    # dyc(i,j) = distance between cell (i,j-1) and cell (i,j)
+    #            at y-interface j, shape (6, n, n+1).
+    # In padded coords: cell (i,j) → padded (i+1, j+1).
+    # ------------------------------------------------------------------
+    # x-direction: adjacent cells in i-direction
+    chord_xc = jnp.sqrt(
+        (x_pad[:, :-1, 1:-1] - x_pad[:, 1:, 1:-1]) ** 2
+        + (y_pad[:, :-1, 1:-1] - y_pad[:, 1:, 1:-1]) ** 2
+        + (z_pad[:, :-1, 1:-1] - z_pad[:, 1:, 1:-1]) ** 2
+    )  # (6, n+1, n)
+    dxc = radius * 2.0 * jnp.arcsin(jnp.clip(chord_xc / 2.0, 0.0, 1.0))
+
+    # y-direction: adjacent cells in j-direction
+    chord_yc = jnp.sqrt(
+        (x_pad[:, 1:-1, :-1] - x_pad[:, 1:-1, 1:]) ** 2
+        + (y_pad[:, 1:-1, :-1] - y_pad[:, 1:-1, 1:]) ** 2
+        + (z_pad[:, 1:-1, :-1] - z_pad[:, 1:-1, 1:]) ** 2
+    )  # (6, n, n+1)
+    dyc = radius * 2.0 * jnp.arcsin(jnp.clip(chord_yc / 2.0, 0.0, 1.0))
+
+    rdxc = 1.0 / jnp.maximum(dxc, _TINY)
+    rdyc = 1.0 / jnp.maximum(dyc, _TINY)
+    rarea_c = 1.0 / jnp.maximum(area_corner, _TINY)
+
     # 4-point stencil cell positions at each corner
     x_sw, x_se = x_pad[:, :-1, :-1], x_pad[:, 1:, :-1]
     x_nw, x_ne = x_pad[:, :-1, 1:], x_pad[:, 1:, 1:]
@@ -824,4 +860,9 @@ def create_cubed_sphere_cdgrid(
         grad_c11=grad_c11.astype(_f32),
         sin_sg=sin_sg.astype(_f32),
         cos_sg=cos_sg.astype(_f32),
+        dxc=dxc.astype(_f32),
+        dyc=dyc.astype(_f32),
+        rdxc=rdxc.astype(_f32),
+        rdyc=rdyc.astype(_f32),
+        rarea_c=rarea_c.astype(_f32),
     )
