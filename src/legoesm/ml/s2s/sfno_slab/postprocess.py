@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-from io import BytesIO
 from io import StringIO
 from pathlib import Path
 from typing import Sequence
@@ -20,7 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 
-from legoesm.ml.sfno_s2s.evaluation import (
+from legoesm.ml.s2s.plotting import frame_to_image as _frame_to_image, plot_latlon_map as _plot_map
+from legoesm.ml.s2s.sfno_slab.evaluation import (
     aggregate_long_records,
     compute_ensemble_daily_metrics,
     summarize_window_metrics,
@@ -70,35 +70,6 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
 def _channel_index(ds: xr.Dataset, label: str) -> int:
     labels = [str(value) for value in ds["channel"].values.tolist()]
     return labels.index(label)
-
-
-def _plot_map(ax: plt.Axes, field: xr.DataArray, title: str, *, vmin: float, vmax: float) -> None:
-    plot_field = field.transpose("latitude", "longitude")
-    plot_field.plot(
-        ax=ax,
-        x="longitude",
-        y="latitude",
-        cmap="viridis",
-        vmin=vmin,
-        vmax=vmax,
-        add_colorbar=False,
-    )
-    ax.set_title(title)
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-
-
-def _frame_to_image(fig: plt.Figure) -> np.ndarray:
-    if imageio is None:
-        raise ImportError(
-            "imageio is required for GIF postprocessing. "
-            "Install it with: pip install 'legoesm[ml]'"
-        )
-    buffer = BytesIO()
-    fig.savefig(buffer, format="png", dpi=110)
-    plt.close(fig)
-    buffer.seek(0)
-    return imageio.imread(buffer)
 
 
 def _sst_truth(ds: xr.Dataset) -> xr.DataArray:

@@ -79,6 +79,6 @@ def __getattr__(name):
         "write_metric_rows",
     }
     if name in s2s_names:
-        from legoesm.ml import sfno_s2s
-        return getattr(sfno_s2s, name)
+        from legoesm.ml.s2s import sfno_slab
+        return getattr(sfno_slab, name)
     raise AttributeError(f"module 'legoesm.ml' has no attribute {name!r}")

@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import numpy as np
 import xarray as xr
 
-from legoesm.ml.sfno_s2s.config import (
+from legoesm.ml.s2s.sfno_slab.config import (
     ChaosBenchS2SConfig,
     LAND_SEA_MASK_VAR,
 )
-from legoesm.ml.sfno_s2s.regrid import TargetGridSpec, build_target_grid, regrid_channels_to_gaussian
+from legoesm.ml.s2s.sfno_slab.regrid import TargetGridSpec, build_target_grid, regrid_channels_to_gaussian
 
 try:
     import torch

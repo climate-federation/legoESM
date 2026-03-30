@@ -13,7 +13,8 @@ import xarray as xr
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.ml.sfno import SFNO, SFNOConfig
-from legoesm.ml.sfno_s2s import (
+from legoesm.ml.s2s.paths import SFNO_SLAB_RESULTS_ROOT
+from legoesm.ml.s2s.sfno_slab import (
     ArcoSSTCacheConfig,
     CHAOSBENCH_ATMOS_VARS,
     CHAOSBENCH_DATA_DIR,
@@ -256,7 +257,7 @@ def _add_train_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("results/sfno_slab"),
+        default=SFNO_SLAB_RESULTS_ROOT,
         help="Checkpoint root directory",
     )
     parser.add_argument("--wandb-project", default=None, help="Optional Weights & Biases project name")
