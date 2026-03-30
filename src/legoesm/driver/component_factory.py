@@ -272,7 +272,7 @@ def create_atmosphere_dycore(
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
         )
-        return FVShallowWaterLatLonModel(grid=grid, config=cfg)
+        return FVShallowWaterLatLonModel(grid=grid, config=cfg, dt=dc.dt)
 
     if solver_name == "fv_primitive_equations_latlon":
         from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
@@ -285,7 +285,7 @@ def create_atmosphere_dycore(
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
         )
-        return FVLatLonPrimitiveEquationModel(grid=grid, sigma_coord=sigma, config=cfg)
+        return FVLatLonPrimitiveEquationModel(grid=grid, sigma_coord=sigma, config=cfg, dt=dc.dt)
 
     if solver_name == "fv_compressible_euler_latlon":
         from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
@@ -294,7 +294,7 @@ def create_atmosphere_dycore(
         cfg = FVCompressibleEulerLatLonConfig(
             hyperdiff_coeff=diff.hyperdiff,
         )
-        return FVCompressibleEulerLatLonModel(grid=grid, sigma_coord=sigma, config=cfg)
+        return FVCompressibleEulerLatLonModel(grid=grid, sigma_coord=sigma, config=cfg, dt=dc.dt)
 
     # ----- MPAS icosahedral -----
     if solver_name == "mpas_primitive_equations":

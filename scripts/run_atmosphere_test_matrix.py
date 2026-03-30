@@ -1724,13 +1724,14 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
 
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
-        sigma = create_sigma_coordinate(nlev)
+        sigma_for_init = create_sigma_coordinate(nlev)
+        sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
             nu_del4=_hyperdiff_ico(mesh), nu_del2=ah, fix_mass=True)
         model = MPASPrimitiveEquationModel(mesh, sigma, config)
-        state = baroclinic_wave_init_mpas(mesh, sigma, perturbed=True)
+        state = baroclinic_wave_init_mpas(mesh, sigma_for_init, perturbed=True)
         grid = mesh
 
         def step_fn(s, dt_):
@@ -2377,23 +2378,25 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
                 acoustic_off_centering=0.1)
         elif test_case == "tc2a":
             from tests.test_cases.dcmip2025 import dcmip25_tc2_init
-            state, hcoord, tmetric, _ = dcmip25_tc2_init(
+            state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
                 grid, n_levels=nlev)
+            grid = small_grid
             dt = max(0.2, 4.0 * (16.0 / n))
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=5000.0, sponge_coeff=0.1,
-                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
+                hyperdiff_coeff=hd,
                 acoustic_off_centering=0.1)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
-            state, hcoord, tmetric, _ = dcmip25_tc3_init(
+            state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
                 grid, n_levels=nlev)
+            grid = small_grid
             dt = max(0.1, 2.0 * (16.0 / n))
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
                 sponge_width=5000.0, sponge_coeff=0.1,
-                small_earth_factor=1.0 / 120.0, hyperdiff_coeff=hd,
+                hyperdiff_coeff=hd,
                 acoustic_off_centering=0.1)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")

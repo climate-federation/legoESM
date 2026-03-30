@@ -457,32 +457,34 @@ def _pad_halo_local(
         values = data[src_f, src_i, src_j]
         padded = padded.at[dst_f, dst_i, dst_j].set(values)
     else:
-        # Interpolated exchange: two gathers + lerp + scatter
-        # Offsets (6, 4, n) → (24*n,) matching strip order
-        flat_offsets = interp_offsets.reshape(-1)
-        n_int = int(n)
-        strip_base = jnp.repeat(jnp.arange(24) * n_int, n_int)  # (24*n,)
-        j_local = jnp.tile(jnp.arange(n_int), 24)  # position within strip
+        # Interpolated exchange via per-strip quadratic interpolation.
+        # Uses _interp_strip (3-point Lagrange) which reduces gradient
+        # error at face boundaries from O(dx) to O(dx²).
+        from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+        edges = [WEST, EAST, SOUTH, NORTH]
 
-        frac = j_local + flat_offsets
-        frac = jnp.clip(frac, 0.0, n_int - 1.0)
-        lo = jnp.floor(frac).astype(jnp.int32)
-        lo = jnp.clip(lo, 0, n_int - 2)
-        hi = lo + 1
-        w = jnp.clip(frac - lo.astype(frac.dtype), 0.0, 1.0)
+        for face in range(6):
+            for edge_idx, edge in enumerate(edges):
+                nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
 
-        # Map strip-local lo/hi to data indices.  lo/hi are traced
-        # (depend on interp_offsets), so convert source tables to JAX
-        # arrays to allow traced-index gather.
-        _sf = jnp.asarray(src_f)
-        _si = jnp.asarray(src_i)
-        _sj = jnp.asarray(src_j)
-        lo_global = strip_base + lo
-        hi_global = strip_base + hi
-        vals_lo = data[_sf[lo_global], _si[lo_global], _sj[lo_global]]
-        vals_hi = data[_sf[hi_global], _si[hi_global], _sj[hi_global]]
-        values = ((1.0 - w) * vals_lo + w * vals_hi).astype(data.dtype)
-        padded = padded.at[dst_f, dst_i, dst_j].set(values)
+                strip = _extract_edge_strip(data, nbr_face, nbr_edge)
+                if is_reversed:
+                    strip = strip[::-1]
+
+                strip = _interp_strip(strip, interp_offsets[face, edge_idx])
+
+                if edge == WEST:
+                    padded = padded.at[face, 0, 1:-1].set(strip)
+                elif edge == EAST:
+                    padded = padded.at[face, -1, 1:-1].set(strip)
+                elif edge == SOUTH:
+                    padded = padded.at[face, 1:-1, 0].set(strip)
+                else:  # NORTH
+                    padded = padded.at[face, 1:-1, -1].set(strip)
+
+        # Note: this loop-based approach produces larger XLA IR than the
+        # vectorized version, but ensures _interp_strip's quadratic
+        # interpolation is used consistently.
 
     # Fill corner cells (vectorized)
     padded = _fill_corners_h1(padded)

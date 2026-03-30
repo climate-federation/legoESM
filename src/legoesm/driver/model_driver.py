@@ -230,6 +230,7 @@ class ModelDriver:
         dt_safe = cfl_check_and_adjust(
             dc.dt, gc.resolution, model_type=cfl_model,
             radius=getattr(self.grid, 'radius', 6.371229e6),
+            grid_type=gc.grid_type,
         )
         if dt_safe < dc.dt:
             logger.warning(
