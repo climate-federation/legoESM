@@ -644,8 +644,7 @@ def main():
     # Save NPZ diagnostics
     # -----------------------------------------------------------------------
     npz_path = _out("baroclinic_wave_diagnostics", "npz")
-    np.savez(
-        npz_path,
+    npz_data = dict(
         times_days=diag_times,
         dry_mass=diag_dry_mass,
         total_energy=diag_total_energy,
@@ -655,7 +654,13 @@ def main():
         resolution=N_GRID,
         nlev=N_LEV,
         dt=DT,
+        snapshot_days=np.array(sorted(snapshots.keys())),
     )
+    # Save all snapshot fields so long runs preserve intermediate data.
+    for snap_day in sorted(snapshots.keys()):
+        for var, arr in snapshots[snap_day].items():
+            npz_data[f"snapshot_day{snap_day:03d}_{var}"] = arr
+    np.savez(npz_path, **npz_data)
     print(f"  Diagnostics saved to {npz_path}")
 
     # -----------------------------------------------------------------------

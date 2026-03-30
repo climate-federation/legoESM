@@ -178,7 +178,6 @@ def main():
     dycore_config = DycoreConfig(
         discretization=args.discretization,
         dt=args.dt,
-        hyperdiff_scale=5e16,
     )
 
     output_config = OutputConfig(
