@@ -55,17 +55,19 @@ def _configure_jax(precision: str) -> None:
     os.environ.setdefault("JAX_PLATFORMS", "gpu,cpu")
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
-    # Enable XLA GPU scheduling optimizations for multi-device scaling:
-    # - Latency-hiding scheduler overlaps compute with NCCL collectives
-    # - Async collectives allow non-blocking collective operations
-    xla_flags = os.environ.get("XLA_FLAGS", "")
-    for flag in [
-        "--xla_gpu_enable_latency_hiding_scheduler=true",
-        "--xla_gpu_enable_async_collectives=true",
-    ]:
-        if flag not in xla_flags:
-            xla_flags = f"{xla_flags} {flag}" if xla_flags else flag
-    os.environ["XLA_FLAGS"] = xla_flags
+    # Enable XLA GPU scheduling optimizations for multi-device scaling.
+    # Only set GPU-specific flags when JAX_PLATFORMS includes "gpu" to
+    # avoid crashes on CPU-only runs.
+    platforms = os.environ.get("JAX_PLATFORMS", "gpu,cpu")
+    if "gpu" in platforms:
+        xla_flags = os.environ.get("XLA_FLAGS", "")
+        for flag in [
+            "--xla_gpu_enable_latency_hiding_scheduler=true",
+            "--xla_gpu_enable_async_collectives=true",
+        ]:
+            if flag not in xla_flags:
+                xla_flags = f"{xla_flags} {flag}" if xla_flags else flag
+        os.environ["XLA_FLAGS"] = xla_flags
 
 
 def _maybe_init_distributed(
@@ -147,7 +149,7 @@ class ScalingReport:
             self.timestamp_utc = datetime.now(timezone.utc).isoformat()
 
 
-GRID_CHOICES = ("spectral", "cubed-sphere", "icosahedral")
+GRID_CHOICES = ("spectral", "cubed-sphere", "icosahedral", "latlon")
 
 # ===========================================================================
 # Resolution/GPU ladders
@@ -203,10 +205,20 @@ def _weak_resolution_ico(n_gpus: int, base_level: int = WEAK_SCALING_BASE_LEVEL_
 
     return best_level
 
+# Lat-lon weak scaling: same approach as cubed-sphere.
+WEAK_SCALING_BASE_N_LL = 64  # ~64x128 on 1 GPU
+
+def _weak_resolution_ll(n_gpus: int, base_n: int = WEAK_SCALING_BASE_N_LL) -> int:
+    """Compute lat-lon resolution for weak scaling at a given GPU count."""
+    n_raw = base_n * math.sqrt(n_gpus)
+    n_rounded = max(8, 2 * round(n_raw / 2))  # even number, min 8
+    return n_rounded
+
 # Strong scaling: fixed resolutions, sweep GPU counts.
 STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km
 STRONG_RESOLUTIONS_SP = [42, 85, 170]   # spectral: T42, T85, T170
 STRONG_RESOLUTIONS_ICO = [4, 5, 6]      # icosahedral: levels 4, 5, 6
+STRONG_RESOLUTIONS_LL = [64, 128, 256]  # lat-lon: n_lat
 
 # GPU counts to sweep (must satisfy cubed-sphere tiling constraints).
 GPU_COUNTS = [1, 2, 3, 6, 24, 54, 96]  # 1-6 divide faces; >6 must be 6*k^2
@@ -218,7 +230,7 @@ def _valid_gpu_counts(max_gpus: int, grid_type: str = "cubed-sphere") -> list[in
     Cubed-sphere requires divisors of 6 (face sharding) or 6*k^2 (tiling).
     Icosahedral and spectral grids support any GPU count.
     """
-    if grid_type in ("icosahedral", "spectral"):
+    if grid_type in ("icosahedral", "spectral", "latlon"):
         return list(range(1, max_gpus + 1))
 
     # Cubed-sphere constraints
@@ -259,6 +271,10 @@ def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
         n_cells = 10 * 4 ** n_grid + 2
         dx_avg = R * math.sqrt(4.0 * math.pi / n_cells)
         dx_min = 0.9 * dx_avg
+    elif grid_type == "latlon":
+        # Lat-lon grid: dx_min ~ pi * R / n_lon at equator, n_lon = 2 * n_lat
+        n_lon = 2 * n_grid
+        dx_min = math.pi * R / n_lon
     else:
         # Cubed sphere: dx_min ~ (pi/2) * R / (n * sqrt(3))
         dx_min = (math.pi / 2) * R / (n_grid * math.sqrt(3))
@@ -290,6 +306,9 @@ def _hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
         dx_cur = R * math.sqrt(4.0 * math.pi / cur_cells)
         ref_coeff = 5e16
         return ref_coeff * (dx_cur / dx_ref) ** 4
+    elif grid_type == "latlon":
+        ref_n = 64
+        ref_coeff = 5e16
     else:
         ref_n = 48
         ref_coeff = 5e16
@@ -399,6 +418,32 @@ def run_benchmark(
         )
         model = MPASPrimitiveEquationModel(grid, sigma, config)
         state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
+    elif grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
+            FVLatLonPrimitiveEquationModel,
+            FVLatLonPrimitiveEquationConfig,
+        )
+        from legoesm.atmosphere.physics.baroclinic_wave import (
+            baroclinic_wave_init_latlon,
+        )
+
+        n_lat = n_grid
+        n_lon = 2 * n_grid
+        grid = create_latlon_grid(n_lat, n_lon)
+        hd = _hyperdiff_coeff(n_grid, grid_type)
+        config = FVLatLonPrimitiveEquationConfig(
+            hyperdiff_coeff=hd,
+            hyperdiff_ps_coeff=hd,
+            use_conservation_fixer=not no_conservation,
+            fix_mass=not no_conservation,
+            use_polar_filter=False,
+        )
+        model = FVLatLonPrimitiveEquationModel(grid, sigma, config)
+        state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
+
+        total_cells = n_lat * n_lon * n_levels
+        dev_config = create_device_mesh(n_devices=n_gpus)
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -494,6 +539,8 @@ def run_benchmark(
         res_label = f"T{n_grid}"
     elif grid_type == "icosahedral":
         res_label = f"I{n_grid}"
+    elif grid_type == "latlon":
+        res_label = f"LL{n_grid}"
     else:
         res_label = f"C{n_grid}"
     print(
@@ -638,10 +685,14 @@ def run_weak_scaling(
         res_prefix = "T"
     elif grid_type == "icosahedral":
         res_prefix = "I"
+    elif grid_type == "latlon":
+        res_prefix = "LL"
     else:
         res_prefix = "C"
     if grid_type == "icosahedral":
         base_label = f"base level={base_level_ico} ({10 * 4**base_level_ico + 2} cells)"
+    elif grid_type == "latlon":
+        base_label = f"base N={WEAK_SCALING_BASE_N_LL}"
     else:
         base_label = f"base N={base_n}"
     print(f"\n{'='*72}")
@@ -654,6 +705,8 @@ def run_weak_scaling(
         for ng in gpu_counts:
             if grid_type == "icosahedral":
                 n_grid = _weak_resolution_ico(ng, base_level_ico)
+            elif grid_type == "latlon":
+                n_grid = _weak_resolution_ll(ng)
             else:
                 n_grid = _weak_resolution(ng, base_n)
             print(f"\n--- {ng} GPU(s), {res_prefix}{n_grid} ---")
@@ -708,6 +761,8 @@ def run_strong_scaling(
             defaults = STRONG_RESOLUTIONS_SP
         elif grid_type == "icosahedral":
             defaults = STRONG_RESOLUTIONS_ICO
+        elif grid_type == "latlon":
+            defaults = STRONG_RESOLUTIONS_LL
         else:
             defaults = STRONG_RESOLUTIONS_CS
         if grid_type == "icosahedral":
@@ -723,6 +778,8 @@ def run_strong_scaling(
         res_prefix = "T"
     elif grid_type == "icosahedral":
         res_prefix = "I"
+    elif grid_type == "latlon":
+        res_prefix = "LL"
     else:
         res_prefix = "C"
     print(f"\n{'='*72}")
@@ -742,6 +799,15 @@ def run_strong_scaling(
                         print(
                             f"\n--- {ng} GPU(s), {res_prefix}{n_grid} --- SKIPPED "
                             f"(grid too small for {ng} GPUs)",
+                            flush=True,
+                        )
+                        continue
+                elif grid_type == "latlon":
+                    # Lat-lon sharding requires n_lat divisible by n_gpus
+                    if n_grid % ng != 0:
+                        print(
+                            f"\n--- {ng} GPU(s), {res_prefix}{n_grid} --- SKIPPED "
+                            f"(n_lat={n_grid} not divisible by {ng})",
                             flush=True,
                         )
                         continue
