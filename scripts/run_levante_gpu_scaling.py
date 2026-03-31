@@ -375,6 +375,309 @@ def _build_physics_fn(physics_level: str, grid_type: str):
 
 
 # ===========================================================================
+# Segment-based benchmark (gray_sbm / rrtmg_full)
+# ===========================================================================
+
+def _grid_config_name(grid_type: str) -> str:
+    """Map CLI grid name to ExperimentConfig grid_type."""
+    return {"cubed-sphere": "cubed_sphere", "latlon": "latlon"}.get(grid_type, grid_type)
+
+
+def _disc_name(grid_type: str) -> str:
+    """Map CLI grid name to ExperimentConfig discretization."""
+    return {
+        "cubed-sphere": "cdgrid",
+        "latlon": "finite_volume",
+    }.get(grid_type, grid_type)
+
+
+def _build_segment_benchmark(
+    *,
+    physics_level: str,
+    grid_type: str,
+    n_grid: int,
+    n_levels: int,
+    n_gpus: int,
+    precision: str,
+    dt: float | None = None,
+):
+    """Build a segment-based benchmark for moist physics tiers.
+
+    Uses ModelDriver to construct the full AMIP pipeline (dynamics +
+    radiation + convection + microphysics) with analytical forcing.
+    Returns (step_fn, state_carry, dt, total_cells, cells_per_gpu)
+    where step_fn wraps run_segment(carry, 1, forcing).
+    """
+    import jax
+    import jax.numpy as jnp
+    from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig, OutputConfig
+    from legoesm.driver.model_driver import ModelDriver
+
+    if dt is None:
+        dt = _auto_dt(n_grid, grid_type)
+
+    rad_scheme = "gray" if physics_level == "gray_sbm" else "rrtmgp"
+    conv_scheme = "sbm"
+    micro_scheme = "kessler" if physics_level == "rrtmg_full" else "none"
+
+    config = ExperimentConfig(
+        grid=GridConfig(
+            grid_type=_grid_config_name(grid_type),
+            resolution=n_grid,
+            nlev=n_levels,
+        ),
+        dycore=DycoreConfig(
+            model_type="hydrostatic",
+            discretization=_disc_name(grid_type),
+            dt=dt,
+            fix_mass=True,
+        ),
+        output=OutputConfig(diag_days=999, checkpoint_days=0),
+        dataset="analytical",
+        radiation=rad_scheme,
+        convection=conv_scheme,
+        microphysics=micro_scheme,
+        topography="flat",
+        days=1,
+        precision="fp64" if precision == "float64" else "fp32",
+        fix_moisture=False,
+    )
+
+    driver = ModelDriver(config)
+    driver.setup()
+
+    # Prepare run context (builds physics pipeline, solar, ozone, etc.)
+    ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
+
+    # Build segment function
+    from legoesm.driver.compiled_segments import (
+        build_segment_fn, pack_carry, pack_forcing, compute_segment_length,
+    )
+
+    sigma_full = ctx["sigma_full"]
+    dsigma = ctx["dsigma"]
+    step_unified = ctx["step_unified"]
+    RAD_UPDATE_STEPS = ctx["RAD_UPDATE_STEPS"]
+
+    segment_length = compute_segment_length(
+        ctx["diag_interval"], ctx["checkpoint_interval"], RAD_UPDATE_STEPS,
+    )
+
+    run_segment_obj = build_segment_fn(
+        model=driver.model,
+        step_unified=step_unified,
+        grid=driver.grid,
+        sigma_full=sigma_full,
+        dsigma=dsigma,
+        dt=dt,
+        rad_update_steps=RAD_UPDATE_STEPS,
+        microphysics=config.microphysics,
+        fix_moisture=config.fix_moisture,
+        fix_mass=config.dycore.fix_mass,
+        fric_decay=driver._fric_decay,
+        qv_smooth_coeff=driver._qv_smooth_coeff,
+        lat=driver._grid_lat,
+        lon=driver._grid_lon,
+        start_day=config.start_day,
+        gradient_checkpoint=False,
+        hyperdiffusion_3d_fn=driver._hyperdiffusion_3d_fn,
+        tau_equator=config.tau_equator,
+        tau_pole=config.tau_pole,
+        sbm_tau_c=config.sbm_tau_c,
+        sbm_RH_ref=config.sbm_RH_ref,
+        C_H=config.C_H,
+        C_E=config.C_E,
+        albedo_ice=config.albedo_ice,
+        albedo_ocean=config.albedo_ocean,
+        ghg_vmr_override=ctx.get("ghg_vmr"),
+        owned_face_ids=None,
+    )
+    # Use the non-donating variant for benchmarking (safe with scan)
+    run_segment = run_segment_obj.raw
+
+    # Pack initial carry
+    shape_2d = ctx["shape_2d"]
+    shape_3d = ctx["shape_3d"]
+    _sd = ctx["_sd"]
+
+    carry = pack_carry(
+        driver.state, driver.q_v, driver.q_c, driver.q_r,
+        ctx["held_dT_rad"], ctx["held_sw_net_sfc"], ctx["held_lw_net_sfc"],
+        ctx["held_sw_up_toa"], ctx["held_lw_up_toa"], ctx["held_sw_down_toa"],
+        step_index=0,
+    )
+
+    # Pack forcing (constant during benchmark)
+    sst, sic = driver.get_sst_sic(config.start_day)
+    day_of_year = jnp.asarray(config.start_day % 365.25)
+    seconds_of_day = jnp.asarray(0.0)
+
+    forcing = pack_forcing(
+        sst=sst, sic=sic,
+        day_of_year=day_of_year, seconds_of_day=seconds_of_day,
+        solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
+        o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
+    )
+
+    # Total cells
+    if grid_type == "cubed-sphere":
+        total_cells = 6 * n_grid * n_grid * n_levels
+    else:  # latlon
+        total_cells = n_grid * (2 * n_grid) * n_levels
+
+    cells_per_gpu = total_cells // max(1, n_gpus)
+
+    # Wrap as (carry, dt) -> carry for the timing loop
+    _forcing = forcing
+    _run_seg = run_segment
+
+    def step_fn(c, _dt):
+        return _run_seg(c, 1, _forcing)
+
+    return step_fn, carry, dt, total_cells, cells_per_gpu
+
+
+def _run_segment_benchmark(
+    *,
+    physics_level: str,
+    grid_type: str,
+    n_grid: int,
+    n_levels: int,
+    n_gpus: int,
+    precision: str,
+    mode: str,
+    n_warmup: int,
+    n_timing: int,
+    dt: float | None = None,
+) -> TimingResult:
+    """Run a segment-based benchmark for moist physics tiers."""
+    import jax
+    import jax.numpy as jnp
+
+    if precision == "float64":
+        jax.config.update("jax_enable_x64", True)
+
+    # Preload RRTMG optics before JIT to avoid filesystem races
+    if physics_level == "rrtmg_full":
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            preload_rrtmgp_optics,
+        )
+        from legoesm.driver.config import ExperimentConfig
+        # Preload with defaults (the ModelDriver setup will also preload,
+        # but doing it here ensures it happens before any JIT)
+
+    step_fn, carry, dt_used, total_cells, cells_per_gpu = _build_segment_benchmark(
+        physics_level=physics_level,
+        grid_type=grid_type,
+        n_grid=n_grid,
+        n_levels=n_levels,
+        n_gpus=n_gpus,
+        precision=precision,
+        dt=dt,
+    )
+
+    if grid_type == "latlon":
+        res_label = f"LL{n_grid}"
+    else:
+        res_label = f"C{n_grid}"
+
+    print(
+        f"  [{precision}] {res_label}/L{n_levels} on {n_gpus} GPU(s) | "
+        f"dt={dt_used:.0f}s | cells={total_cells:,} | cells/GPU={cells_per_gpu:,}"
+        f" | physics={physics_level} (segment)",
+        flush=True,
+    )
+
+    # JIT compilation
+    t_compile_start = time.perf_counter()
+    carry = step_fn(carry, dt_used)
+    jax.block_until_ready(jax.tree.leaves(carry))
+    compile_time = time.perf_counter() - t_compile_start
+    print(f"    JIT compile: {compile_time:.2f}s", flush=True)
+
+    # Warmup
+    t_warmup_start = time.perf_counter()
+    for _ in range(n_warmup):
+        carry = step_fn(carry, dt_used)
+    jax.block_until_ready(jax.tree.leaves(carry))
+    warmup_time = time.perf_counter() - t_warmup_start
+
+    # Timed steps via lax.scan
+    input_dtypes = jax.tree.map(
+        lambda x: x.dtype if hasattr(x, "dtype") else None, carry)
+
+    @jax.jit
+    def _scan_run(c, dt_val):
+        def _body(carry, _):
+            new = step_fn(carry, dt_val)
+            new = jax.tree.map(
+                lambda x, d: x.astype(d)
+                if d is not None and hasattr(x, "astype") else x,
+                new, input_dtypes,
+            )
+            return new, None
+        return jax.lax.scan(_body, c, None, length=n_timing)[0]
+
+    # Pre-compile scan
+    carry = _scan_run(carry, dt_used)
+    jax.block_until_ready(jax.tree.leaves(carry))
+
+    # MPI barrier before timing
+    try:
+        from mpi4py import MPI as _MPI
+        if _MPI.COMM_WORLD.Get_size() > 1:
+            jax.block_until_ready(jax.tree.leaves(carry))
+            _MPI.COMM_WORLD.Barrier()
+    except ImportError:
+        pass
+
+    t0 = time.perf_counter()
+    carry = _scan_run(carry, dt_used)
+    jax.block_until_ready(jax.tree.leaves(carry))
+
+    try:
+        from mpi4py import MPI as _MPI
+        if _MPI.COMM_WORLD.Get_size() > 1:
+            _MPI.COMM_WORLD.Barrier()
+    except ImportError:
+        pass
+
+    t1 = time.perf_counter()
+
+    timing_time = t1 - t0
+    time_per_step = timing_time / n_timing
+    time_per_step_ms = time_per_step * 1000.0
+    sypd = (dt_used / time_per_step) / (365.25 * 86400) * 86400.0
+    mcells_per_s = (total_cells / time_per_step) / 1e6
+
+    print(
+        f"    Timing: {time_per_step_ms:.2f} ms/step | "
+        f"SYPD={sypd:.3f} | {mcells_per_s:.1f} Mcells/s",
+        flush=True,
+    )
+
+    return TimingResult(
+        n_gpus=n_gpus,
+        resolution=n_grid,
+        n_levels=n_levels,
+        precision=precision,
+        mode=mode,
+        physics_level=physics_level,
+        dt_seconds=dt_used,
+        n_warmup=n_warmup,
+        n_timing=n_timing,
+        compile_time_s=compile_time,
+        warmup_time_s=warmup_time,
+        timing_time_s=timing_time,
+        time_per_step_ms=time_per_step_ms,
+        sypd=sypd,
+        total_cells=total_cells,
+        cells_per_gpu=cells_per_gpu,
+        mcells_per_s=mcells_per_s,
+    )
+
+
+# ===========================================================================
 # Core benchmark runner
 # ===========================================================================
 
@@ -399,6 +702,22 @@ def run_benchmark(
     physics tendencies are included in each RK stage.
     """
     _validate_physics(grid_type, physics_level)
+
+    # Moist physics tiers use the ModelDriver segment path instead of
+    # the bare dycore step.  This branch handles gray_sbm and rrtmg_full.
+    if physics_level in ("gray_sbm", "rrtmg_full"):
+        return _run_segment_benchmark(
+            physics_level=physics_level,
+            grid_type=grid_type,
+            n_grid=n_grid,
+            n_levels=n_levels,
+            n_gpus=n_gpus,
+            precision=precision,
+            mode=mode,
+            n_warmup=n_warmup,
+            n_timing=n_timing,
+            dt=dt,
+        )
 
     import jax
     import jax.numpy as jnp
