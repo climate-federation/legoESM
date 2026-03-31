@@ -20,7 +20,7 @@ The AMIP driver (`scripts/run_amip.py`) couples:
 - **Ozone**: Selectable via `--ozone-source {standard,analytical,none}`
 - **Friction**: Rayleigh drag (strong in BL, weak free-atmosphere)
 - **Surface**: Prescribed SST + SIC from NetCDF, blending surface temperature,
-  albedo, and emissivity. Optional dynamic albedo (`--dynamic-albedo`)
+  albedo, and emissivity
 - **Diagnostics**: Energy budget tracking, optional monthly-mean accumulation (`--monthly-means`)
 
 ## Radiation modes
@@ -173,7 +173,6 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
     --ozone-source analytical \
     --clouds xu_randall \
     --microphysics kessler \
-    --dynamic-albedo \
     --monthly-means \
     --rad-update-steps 3 \
     --checkpoint-days 30 \
@@ -182,15 +181,23 @@ JAX_ENABLE_X64=1 python scripts/run_amip.py \
 
 ### Production 10-year AMIP
 
-Use the production launcher script:
-
 ```bash
-bash scripts/run_amip_production.sh /path/to/COBE-SST2.nc
+JAX_ENABLE_X64=1 python scripts/run_amip.py \
+    --radiation rrtmg \
+    --dataset cobe --forcing-path /path/to/COBE-SST2.nc \
+    --days 3650 --resolution 48 --nlev 40 --dt 450 \
+    --diurnal-cycle \
+    --ozone-source analytical \
+    --clouds xu_randall \
+    --microphysics kessler \
+    --monthly-means \
+    --rad-update-steps 6 \
+    --checkpoint-days 30 \
+    --output results/amip_production_10yr
 ```
 
 This runs C48/L40 with RRTMG, diurnal cycle, analytical ozone, Xu-Randall
-clouds, Kessler microphysics, dynamic albedo, and monthly-mean diagnostics.
-Validation is run automatically on completion.
+clouds, Kessler microphysics, and monthly-mean diagnostics.
 
 ### Restart from checkpoint
 

@@ -118,7 +118,6 @@ def main():
     parser.add_argument("--topo-edge-blend", type=float, default=0.3)
 
     # Surface
-    parser.add_argument("--dynamic-albedo", action="store_true", default=False)
     parser.add_argument("--monthly-means", action="store_true", default=False)
 
     # Moisture conservation
@@ -226,7 +225,7 @@ def main():
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
-        dynamic_albedo=args.dynamic_albedo,
+        dynamic_albedo=False,
         experiment=args.experiment,
         start_year=args.start_year,
         precision=args.precision,
@@ -240,19 +239,34 @@ def main():
     print("Setup...")
     driver.setup()
 
-    # Profiling mode: trace a few steps, save profile, and exit
+    # Load checkpoint if restarting
+    start_step = 0
+    start_day = None
+    if args.restart_from:
+        restart_path = Path(args.restart_from)
+        if not restart_path.exists():
+            print(f"ERROR: restart file not found: {restart_path}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Loading checkpoint: {restart_path}")
+        start_step, start_day = driver.load_checkpoint(restart_path)
+        print(f"  Resumed at step={start_step}, day={start_day:.2f}")
+
+    # Profiling mode: trace first N steps, save profile, and exit
     if args.profile > 0:
         import jax
         profile_dir = str(Path(driver.output_dir) / "jax_profile")
         print(f"Profiling {args.profile} steps → {profile_dir}")
+        # Override days so run() only executes args.profile steps
+        n_profile_days = args.profile * args.dt / 86400.0
+        driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
-            driver.run()
+            driver.run(start_step=start_step, start_day=start_day)
         print(f"Profile saved to {profile_dir}")
         print("View with: tensorboard --logdir " + profile_dir)
         return
 
     print("Running...")
-    driver.run()
+    driver.run(start_step=start_step, start_day=start_day)
     print(f"Complete. Output: {driver.output_dir}")
 
 

@@ -119,6 +119,12 @@ class ModelDriver:
         for w in config_warnings:
             logger.warning(f"  Config: {w}")
 
+        # Bootstrap MPI distributed runtime before any JAX array creation.
+        # This must happen before _create_grid() so that _setup_parallel()
+        # later finds an active topology/config.
+        if self.config.distributed:
+            self._bootstrap_distributed()
+
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._create_grid()
         self._create_topography()
@@ -557,16 +563,17 @@ class ModelDriver:
                 lw_net_sfc=kwargs.get('lw_net_sfc', None),
             )
 
-        if self._device_config is not None and self._device_config.mesh is not None:
+        if self._device_config is not None:
             if self._device_config.is_distributed:
                 # MPI: reconstruct global state from rank-local data
                 from legoesm.parallel.distributed import gather_to_global
                 gathered = gather_to_global(kwargs.get('state', self.state))
-            else:
+                kwargs['state'] = gathered
+            elif self._device_config.mesh is not None:
                 # Multi-GPU single-node: replicate sharded → full
                 from legoesm.parallel.sharded_dynamics import gather_state
                 gathered = gather_state(kwargs.get('state', self.state), self._device_config)
-            kwargs['state'] = gathered
+                kwargs['state'] = gathered
         jax.block_until_ready(kwargs.get('state', self.state).u.data)
         return self.diagnostics.collect(**kwargs)
 
@@ -603,6 +610,29 @@ class ModelDriver:
         # Legacy AMIP-format sidecar (serialization boundary adapter)
         from legoesm.forcing.amip_config import save_config as _save_amip
         _save_amip(self.config.to_amip_config(), self._output_dir / "amip_config.json")
+
+    def _bootstrap_distributed(self) -> None:
+        """Initialize MPI distributed runtime when --distributed is set.
+
+        Must be called before any grid/state creation so that
+        ``_setup_parallel()`` can find the active topology and config.
+        The grid resolution is not yet known, so the layout is deferred
+        to ``_setup_parallel()`` where it can read the grid shape.
+        """
+        from legoesm.parallel.distributed import initialize_distributed
+        grid_type = self.config.grid.grid_type
+        config = initialize_distributed(
+            return_topology=False,
+            return_layout=False,
+            global_n=None,          # deferred — grid not created yet
+            grid_type=grid_type,
+        )
+        self._device_config = config
+        logger.info(
+            f"  Distributed: initialized MPI runtime, "
+            f"{config.n_devices} local devices, "
+            f"grid_type={grid_type}"
+        )
 
     def _setup_parallel(self) -> None:
         """Set up multi-device parallelism if available.
@@ -669,8 +699,39 @@ class ModelDriver:
                     set_active_layout(layout)
             if layout is not None:
                 self.state = scatter_to_local(self.state, layout)
-                from legoesm.parallel.layout import scatter_pytree
+                from legoesm.parallel.layout import scatter_pytree, scatter
                 self.tracers = scatter_pytree(self.tracers, layout)
+
+                # Scatter auxiliary 2-D fields to rank-local shapes
+                self._grid_lat = scatter(self._grid_lat, layout)
+                self._grid_lon = scatter(self._grid_lon, layout)
+                if self._phis_data is not None and self._phis_data.ndim >= 3:
+                    self._phis_data = scatter(self._phis_data, layout)
+                if self._f_land is not None and self._f_land.ndim >= 3:
+                    self._f_land = scatter(self._f_land, layout)
+
+                # Rebuild physics adapter to match rank-local shapes
+                from legoesm.driver.grid_adapters import ColumnAdapter
+                local_shape_2d = tuple(int(s) for s in self._grid_lat.shape)
+                local_ncol = 1
+                for s in local_shape_2d:
+                    local_ncol *= s
+                local_adapter = ColumnAdapter(ncol=local_ncol, shape_2d=local_shape_2d)
+                if self.physics is not None:
+                    self.physics.adapter = local_adapter
+
+                # Wrap SST/SIC forcing to return rank-local arrays
+                _global_get_sst_sic = self.get_sst_sic
+                def _local_get_sst_sic(day, _layout=layout, _fn=_global_get_sst_sic):
+                    sst, sic = _fn(day)
+                    sst = jnp.asarray(sst)
+                    sic = jnp.asarray(sic)
+                    if sst.ndim >= 3 and sst.shape[0] == 6:
+                        sst = scatter(sst, _layout)
+                        sic = scatter(sic, _layout)
+                    return sst, sic
+                self.get_sst_sic = _local_get_sst_sic
+
                 logger.info(
                     f"  Parallel: MPI distributed — "
                     f"rank-local shape {layout.local_shape_2d}"
@@ -1102,7 +1163,10 @@ class ModelDriver:
         sigma_full = self.sigma.sigma_full
         dsigma = self.sigma.dsigma
 
-        shape_2d = self.grid.grid_shape_2d
+        # Use actual state shape (rank-local after MPI scatter, global otherwise)
+        shape_2d = self.state.p_s.data.shape
+        if self._ensemble_size > 1:
+            shape_2d = shape_2d[1:]  # strip leading ensemble dim
         shape_3d = (*shape_2d, cfg.grid.nlev)
 
         # Solar forcing (initial)
@@ -1431,7 +1495,10 @@ class ModelDriver:
         sigma_full = self.sigma.sigma_full
         dsigma = self.sigma.dsigma
 
-        shape_2d = self.grid.grid_shape_2d
+        # Use actual state shape (rank-local after MPI scatter, global otherwise)
+        shape_2d = self.state.p_s.data.shape
+        if self._ensemble_size > 1:
+            shape_2d = shape_2d[1:]  # strip leading ensemble dim
         shape_3d = (*shape_2d, cfg.grid.nlev)
 
         ncol = int(np.prod(np.array(shape_2d)))
