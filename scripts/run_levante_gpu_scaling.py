@@ -55,6 +55,17 @@ def _configure_jax(precision: str) -> None:
     os.environ.setdefault("JAX_PLATFORMS", "gpu,cpu")
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
+    # Enable XLA GPU scheduling optimizations for multi-device scaling:
+    # - Latency-hiding scheduler overlaps compute with NCCL collectives
+    # - Async collectives allow non-blocking collective operations
+    xla_flags = os.environ.get("XLA_FLAGS", "")
+    for flag in [
+        "--xla_gpu_enable_latency_hiding_scheduler=true",
+        "--xla_gpu_enable_async_collectives=true",
+    ]:
+        if flag not in xla_flags:
+            xla_flags = f"{xla_flags} {flag}" if xla_flags else flag
+    os.environ["XLA_FLAGS"] = xla_flags
 
 
 def _maybe_init_distributed(
@@ -507,8 +518,37 @@ def run_benchmark(
     warmup_time = time.perf_counter() - t_warmup_start
 
     # ---------------------------------------------------------------
-    # Timed steps
+    # Timed steps — use lax.scan to compile all timing steps into a
+    # single XLA program, eliminating per-step host dispatch overhead
+    # and enabling XLA's latency-hiding scheduler to pipeline
+    # collectives across steps.
     # ---------------------------------------------------------------
+
+    # Build dtype-safe scan runner (prevents float32→float64 promotion
+    # from breaking scan's type-matching requirement).
+    input_dtypes = jax.tree.map(
+        lambda x: x.dtype if hasattr(x, "dtype") else None, state)
+
+    def _make_scan_runner(n):
+        @jax.jit
+        def _run(st, dt_val):
+            def _body(carry, _):
+                new = step_fn(carry, dt_val)
+                new = jax.tree.map(
+                    lambda x, d: x.astype(d)
+                    if d is not None and hasattr(x, "astype") else x,
+                    new, input_dtypes,
+                )
+                return new, None
+            return jax.lax.scan(_body, st, None, length=n)[0]
+        return _run
+
+    scan_runner = _make_scan_runner(n_timing)
+
+    # Pre-compile the scan runner
+    state = scan_runner(state, dt)
+    jax.block_until_ready(jax.tree.leaves(state))
+
     # Synchronize all ranks before timing for fair measurement
     try:
         from mpi4py import MPI as _MPI
@@ -519,8 +559,7 @@ def run_benchmark(
         pass
 
     t0 = time.perf_counter()
-    for _ in range(n_timing):
-        state = step_fn(state, dt)
+    state = scan_runner(state, dt)
     jax.block_until_ready(jax.tree.leaves(state))
 
     # Synchronize all ranks after timing for fair measurement

@@ -48,6 +48,7 @@ _MODE_FACTORIES = {
     "fp64": PrecisionPolicy.fp64,
     "float64": PrecisionPolicy.fp64,
     "mixed": PrecisionPolicy.mixed,
+    "mixed_fp64_storage": PrecisionPolicy.mixed_fp64_storage,
 }
 
 
@@ -84,7 +85,7 @@ def apply_precision(mode: str = "fp32") -> PrecisionPolicy:
     set_policy(policy)
 
     # Apply recommended per-module overrides when in mixed mode.
-    if mode.strip().lower() == "mixed":
+    if mode.strip().lower() in ("mixed", "mixed_fp64_storage"):
         set_recommended_overrides("mixed")
 
     return policy

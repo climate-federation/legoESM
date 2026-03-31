@@ -4,12 +4,12 @@
 Runs a 10-day Jablonowski-Williamson (2006) baroclinic instability test and
 generates:
 
-1. **6-panel figure** (baroclinic_wave_benchmark.png):
-   - Top row: Surface pressure perturbation at the last two snapshot days
-   - Middle row: 850 hPa temperature at the last two snapshot days
-   - Bottom row: 850 hPa relative vorticity at the last two snapshot days
+1. **12-panel figure** (baroclinic_wave_benchmark.png):
+   - Top row: Surface pressure perturbation at 4 evenly-spaced snapshot days
+   - Middle row: 850 hPa temperature at those same days
+   - Bottom row: 850 hPa relative vorticity at those same days
    Snapshots are taken every 2 days.  For a 10-day run the figure shows
-   days 8 and 10; for a 20-day run it shows days 18 and 20.
+   days 2, 4, 8, and 10 (similar to Fig. 5 of Jablonowski & Williamson 2006).
    Northern Hemisphere only (0-90N), PlateCarree projection.
 
 2. **Conservation timeseries** (baroclinic_wave_conservation.png):
@@ -504,7 +504,7 @@ def main():
     n_steps_total = int(N_DAYS * 86400 / DT)
     diag_interval_steps = max(1, int(3600 / DT))  # every hour
 
-    # Snapshot days for the 6-panel figure — every 2 days, always including
+    # Snapshot days for the benchmark figure — every 2 days, always including
     # the final day so long runs (--days 20, 30, …) get late-time snapshots.
     snapshot_days = list(range(2, N_DAYS + 1, 2))
     if N_DAYS not in snapshot_days:
@@ -734,16 +734,20 @@ def main():
             )
 
     # -----------------------------------------------------------------------
-    # Figure 1: 6-panel CliMA Figure 3 reproduction
+    # Figure 1: 12-panel benchmark figure (JW2006 Figure 5 style)
     # -----------------------------------------------------------------------
-    print("Generating 6-panel benchmark figure...")
-
-    # Use the last two snapshot days for the 6-panel figure
+    N_PLOT_COLS = 4
     available_days = sorted(snapshots.keys())
-    if len(available_days) >= 2:
-        plot_days = available_days[-2:]
+
+    # Pick N_PLOT_COLS evenly-spaced snapshots from the available set.
+    if len(available_days) >= N_PLOT_COLS:
+        indices = np.linspace(0, len(available_days) - 1, N_PLOT_COLS).round().astype(int)
+        plot_days = [available_days[i] for i in indices]
     else:
         plot_days = available_days
+
+    print(f"Generating {3 * len(plot_days)}-panel benchmark figure "
+          f"(days {', '.join(str(d) for d in plot_days)})...")
 
     if len(plot_days) >= 2:
         try:
@@ -754,18 +758,22 @@ def main():
             print("  WARNING: cartopy not installed, using basic projection")
             has_cartopy = False
 
+        n_cols = len(plot_days)
         fig, axes = plt.subplots(
-            3, 2,
-            figsize=(14, 15),
+            3, n_cols,
+            figsize=(5.5 * n_cols, 15),
             subplot_kw={"projection": ccrs.PlateCarree(central_longitude=180)} if has_cartopy else {},
         )
+        # Ensure axes is 2D even when n_cols == 1
+        if axes.ndim == 1:
+            axes = axes[:, None]
 
         lon_deg = np.degrees(lon_ll)
         lat_deg = np.degrees(lat_ll)
         nh_mask = lat_deg >= 0
         lat_nh = lat_deg[nh_mask]
 
-        for col, day in enumerate(plot_days[:2]):
+        for col, day in enumerate(plot_days):
             snap = snapshots[day]
 
             # --- Surface pressure perturbation ---
@@ -918,7 +926,7 @@ def main():
         plt.close()
         print(f"  Saved {fig_path}")
     else:
-        print("  Skipping 6-panel figure (not enough snapshots)")
+        print("  Skipping benchmark figure (not enough snapshots)")
 
     # -----------------------------------------------------------------------
     # Figure 2: Conservation timeseries (CliMA Figure 9 style)

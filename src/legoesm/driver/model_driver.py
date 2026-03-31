@@ -182,9 +182,11 @@ class ModelDriver:
         topo = self.config.topography
         shape_2d = self.grid.grid_shape_2d
 
+        from legoesm.core.precision import get_policy
+        _sd = get_policy().storage
         if topo == "flat":
-            self._phis_data = jnp.zeros(shape_2d)
-            self._f_land = jnp.zeros(shape_2d)
+            self._phis_data = jnp.zeros(shape_2d, dtype=_sd)
+            self._f_land = jnp.zeros(shape_2d, dtype=_sd)
         elif topo == "gaussian":
             z_s = gaussian_mountain(self.grid)
             self._phis_data = phis_from_topography(z_s)
@@ -485,14 +487,14 @@ class ModelDriver:
         p_half_col = p_half.reshape(ncol, nlev + 1)
         lat_col = lat.reshape(ncol)
 
-        o3_vmr = jnp.zeros((ncol, nlev))
+        o3_vmr = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
         if self._ozone_ext_active:
             o3_vmr = jnp.asarray(get_ozone_at_time(
                 self._ozone_ext_config, day,
                 lat_grid=lat_col, p_grid=p_full_col,
             ))
 
-        aerosol_od = jnp.zeros((ncol, nlev))
+        aerosol_od = jnp.zeros((ncol, nlev), dtype=p_s.dtype)
         if self._aerosol_active:
             aerosol_col = get_aerosol_at_time(
                 self._aerosol_config, day, lat_grid=lat_col,
@@ -1128,12 +1130,13 @@ class ModelDriver:
         _ens_3d = (_ens, *shape_3d) if _ens > 1 else shape_3d
         _ens_2d = (_ens, *shape_2d) if _ens > 1 else shape_2d
         _aux = self._carry_aux if restore_carry else {}
-        held_dT_rad = _aux.get("held_dT_rad", jnp.zeros(_ens_3d))
-        held_sw_net_sfc = _aux.get("held_sw_net_sfc", jnp.zeros(_ens_2d))
-        held_lw_net_sfc = _aux.get("held_lw_net_sfc", jnp.zeros(_ens_2d))
-        held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d))
-        held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d))
-        held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d))
+        _sd = self.state.T.data.dtype  # inherit storage dtype from state
+        held_dT_rad = _aux.get("held_dT_rad", jnp.zeros(_ens_3d, dtype=_sd))
+        held_sw_net_sfc = _aux.get("held_sw_net_sfc", jnp.zeros(_ens_2d, dtype=_sd))
+        held_lw_net_sfc = _aux.get("held_lw_net_sfc", jnp.zeros(_ens_2d, dtype=_sd))
+        held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
+        held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
+        held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d, dtype=_sd))
 
         # External forcing
         o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
@@ -1333,7 +1336,7 @@ class ModelDriver:
                 current_step,
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
-                precip_accum=jnp.zeros(_ens_2d),
+                precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
             )
 
             # Shard carry across devices for SPMD execution
@@ -1662,7 +1665,7 @@ class ModelDriver:
                     excess * self.state.p_s.data[..., None] * dsigma, axis=-1
                 ) / (constants.g * DT)
             else:
-                precip_ls = jnp.zeros(shape_2d)
+                precip_ls = jnp.zeros(shape_2d, dtype=new_T.dtype)
 
             self.state = self.state._replace(
                 T=self.state.T.replace(data=new_T)

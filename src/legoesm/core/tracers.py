@@ -101,7 +101,9 @@ def init_tracers(
     dict[str, jax.Array]
         Mapping from tracer name to zero-filled array of *shape_3d*.
     """
-    return {info.name: jnp.zeros(shape_3d) for info in registry.tracers}
+    from legoesm.core.precision import get_policy
+    _sd = get_policy().storage
+    return {info.name: jnp.zeros(shape_3d, dtype=_sd) for info in registry.tracers}
 
 
 def stack_tracers(

@@ -106,24 +106,26 @@ def init_surface_state(
         initialises prognostic carbon pools.
     """
     dims_2d = ("face", "x", "y")
+    from legoesm.core.precision import get_policy
+    _sd = get_policy().storage
 
     land = LandState(
-        T_soil=Field(data=jnp.full(shape, T_soil_init),
+        T_soil=Field(data=jnp.full(shape, T_soil_init, dtype=_sd),
                      name="T_soil", dims=dims_2d, units="K"),
-        W_bucket=Field(data=jnp.full(shape, W_bucket_init),
+        W_bucket=Field(data=jnp.full(shape, W_bucket_init, dtype=_sd),
                        name="W_bucket", dims=dims_2d, units="kg/m2"),
-        snow_depth=Field(data=jnp.zeros(shape),
+        snow_depth=Field(data=jnp.zeros(shape, dtype=_sd),
                          name="snow_depth", dims=dims_2d, units="kg/m2"),
-        snow_age=Field(data=jnp.zeros(shape),
+        snow_age=Field(data=jnp.zeros(shape, dtype=_sd),
                        name="snow_age", dims=dims_2d, units="s"),
     )
 
     ice = SeaIceState(
-        h_ice=Field(data=jnp.zeros(shape),
+        h_ice=Field(data=jnp.zeros(shape, dtype=_sd),
                     name="h_ice", dims=dims_2d, units="m"),
-        T_ice=Field(data=jnp.full(shape, T_ice_init),
+        T_ice=Field(data=jnp.full(shape, T_ice_init, dtype=_sd),
                     name="T_ice", dims=dims_2d, units="K"),
-        concentration=Field(data=jnp.zeros(shape),
+        concentration=Field(data=jnp.zeros(shape, dtype=_sd),
                            name="ice_concentration", dims=dims_2d, units="1"),
     )
 

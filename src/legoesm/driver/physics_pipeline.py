@@ -176,11 +176,12 @@ class PhysicsPipeline:
         precip = ad.unflatten_2d(conv_out.precipitation)
 
         # Microphysics (resolved kernel — no dispatch here)
-        dT_dt_micro = jnp.zeros(shape_3d)
-        dq_v_dt_micro = jnp.zeros(shape_3d)
-        dq_c_dt = jnp.zeros(shape_3d)
-        dq_r_dt = jnp.zeros(shape_3d)
-        precip_micro = jnp.zeros(shape_2d)
+        _sd = T.dtype  # inherit storage dtype from state arrays
+        dT_dt_micro = jnp.zeros(shape_3d, dtype=_sd)
+        dq_v_dt_micro = jnp.zeros(shape_3d, dtype=_sd)
+        dq_c_dt = jnp.zeros(shape_3d, dtype=_sd)
+        dq_r_dt = jnp.zeros(shape_3d, dtype=_sd)
+        precip_micro = jnp.zeros(shape_2d, dtype=_sd)
 
         if self.micro_fn is not None:
             from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
@@ -577,7 +578,7 @@ def _noop_convection(T, q_v, p_full, p_half, dt, config):
     from legoesm.atmosphere.physics.convection.output import ConvectionOutput
     ncol, nlev = T.shape
     z2 = jnp.zeros_like(T)
-    z1 = jnp.zeros((ncol,))
+    z1 = jnp.zeros((ncol,), dtype=T.dtype)
     return ConvectionOutput(
         dT_dt=z2, dq_v_dt=z2, precipitation=z1, cape=z1, convective_mask=z1,
     )

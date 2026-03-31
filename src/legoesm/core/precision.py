@@ -123,6 +123,22 @@ class PrecisionPolicy(NamedTuple):
             control=jnp.float64,
         )
 
+    @staticmethod
+    def mixed_fp64_storage() -> PrecisionPolicy:
+        """Mixed mode with float64 storage, float32 compute.
+
+        State arrays are stored in float64 for maximum precision in
+        I/O, checkpointing, and long-run accumulation.  Compute kernels
+        run in float32 for GPU throughput.  Accumulation and control
+        remain float64.
+        """
+        return PrecisionPolicy(
+            storage=jnp.float64,
+            compute=jnp.float32,
+            accumulate=jnp.float64,
+            control=jnp.float64,
+        )
+
 
 # Module-level recommended dtypes: maps (module_name, role) -> role override.
 # When a module has a specific precision requirement, it overrides the global

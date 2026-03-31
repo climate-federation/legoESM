@@ -181,12 +181,13 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             shape_2d = state.p_s.data.shape
             dims_3d = ("face", "x", "y", "level")
             dims_2d = ("face", "x", "y")
+            _sd = state.T.data.dtype
             zero_tend = HydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_phys", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_phys", dims=dims_3d, units="m/s^2"),
-                dT_dt=Field(data=jnp.zeros(shape_3d), name="dT_dt_phys", dims=dims_3d, units="K/s"),
-                dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_phys", dims=dims_2d, units="Pa/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_phys", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="du_dt_phys", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="dv_dt_phys", dims=dims_3d, units="m/s^2"),
+                dT_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="dT_dt_phys", dims=dims_3d, units="K/s"),
+                dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=_sd), name="dp_s_dt_phys", dims=dims_2d, units="Pa/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_sd), name="dphis_dt_phys", dims=dims_2d, units="m^2/s^3"),
             )
             return zero_tend, None
 
@@ -295,13 +296,14 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             dims_w = ("face", "x", "y", "level_half")
             dims_2d = ("face", "x", "y")
             dims_tr = ("face", "x", "y", "level", "tracer")
+            _sd = state.theta_prime.data.dtype
             zero_tend = NonHydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_phys", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_phys", dims=dims_3d, units="m/s^2"),
-                dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_phys", dims=dims_w, units="m/s^2"),
-                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d), name="dtheta_prime_dt_phys", dims=dims_3d, units="K/s"),
-                drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_phys", dims=dims_3d, units="kg/m^3/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_phys", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="du_dt_phys", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="dv_dt_phys", dims=dims_3d, units="m/s^2"),
+                dw_dt=Field(data=jnp.zeros(shape_w, dtype=_sd), name="dw_dt_phys", dims=dims_w, units="m/s^2"),
+                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="dtheta_prime_dt_phys", dims=dims_3d, units="K/s"),
+                drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="drho_prime_dt_phys", dims=dims_3d, units="kg/m^3/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_sd), name="dphis_dt_phys", dims=dims_2d, units="m^2/s^3"),
                 dtracers_dt=Field(data=jnp.zeros_like(state.tracers.data), name="dtracers_dt_phys", dims=dims_tr, units="1/s"),
             )
             return zero_tend, None

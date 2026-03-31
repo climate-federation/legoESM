@@ -78,6 +78,10 @@ class FVLatLonPrimitiveEquationConfig(NamedTuple):
     use_polar_filter: bool = True
     polar_filter_cutoff_deg: float = 60.0
     polar_filter_max_wave_speed: float = 300.0
+    T_min: float = 150.0               # temperature floor [K]
+    p_floor: float = 50.0              # surface pressure floor [Pa]
+    sponge_sigma: float = 0.15         # Rayleigh sponge activates above this sigma
+    sponge_tau_sec: float = 3600.0     # e-folding time at model top [s]
 
 
 def fv_latlon_hydrostatic_tendencies(
@@ -226,6 +230,16 @@ def fv_latlon_hydrostatic_tendencies(
         dT_dt_data = fourier_filter_3d(dT_dt_data, grid, polar_mask)
         dp_s_dt_data = fourier_filter(dp_s_dt_data, grid, polar_mask)
 
+    # --- 9c. Upper-atmosphere Rayleigh sponge ---
+    if config.sponge_tau_sec > 0 and config.sponge_sigma > 0:
+        sigma_full = sigma_coord.sigma_full  # (nlev,)
+        sponge_frac = jnp.clip(
+            (config.sponge_sigma - sigma_full) / config.sponge_sigma, 0.0, 1.0
+        )
+        sponge_rate = sponge_frac**2 / config.sponge_tau_sec  # (nlev,)
+        du_dt_data = du_dt_data - sponge_rate * u
+        dv_dt_data = dv_dt_data - sponge_rate * v
+
     # --- 10. Physics ---
     if physics_tendency is not None:
         du_dt_data = du_dt_data + physics_tendency.du_dt.data
@@ -321,6 +335,14 @@ class FVLatLonPrimitiveEquationModel(IntegrationMixin):
 
         state_new = dispatch_integrator(
             state, tendency_fn, dt, self.config.time_integrator,
+        )
+
+        # Temperature and pressure floors
+        T_new = jnp.clip(state_new.T.data, self.config.T_min, None)
+        p_s_new = jnp.clip(state_new.p_s.data, self.config.p_floor, None)
+        state_new = state_new._replace(
+            T=state_new.T.replace(data=T_new),
+            p_s=state_new.p_s.replace(data=p_s_new),
         )
 
         if self.config.use_conservation_fixer and self.config.fix_mass:

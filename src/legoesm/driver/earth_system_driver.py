@@ -92,10 +92,12 @@ class EarthSystemDriver:
         )
 
         # Tile fractions
-        f_land = self._atm._f_land if self._atm._f_land is not None else jnp.zeros(shape_2d)
+        from legoesm.core.precision import get_policy
+        _sd = get_policy().storage
+        f_land = self._atm._f_land if self._atm._f_land is not None else jnp.zeros(shape_2d, dtype=_sd)
         self._tile_config = TileConfig(
             f_land=f_land,
-            f_lake=jnp.zeros(shape_2d),
+            f_lake=jnp.zeros(shape_2d, dtype=_sd),
         )
 
         logger.info("  EarthSystem: atmosphere + coupler initialized")

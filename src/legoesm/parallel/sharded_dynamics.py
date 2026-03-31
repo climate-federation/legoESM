@@ -1652,20 +1652,29 @@ def make_voronoi_sharded_step(
             u_local = jnp.zeros((max_le + 1, nlev), dtype=u_shard.dtype)
             u_local = u_local.at[:edges_per].set(u_shard)
 
-            # Exchange halos via ppermute rounds (one per edge-color)
+            # Exchange halos via ppermute rounds (one per edge-color).
+            # Cell and edge data are packed into a single flat buffer per
+            # round so that each round issues ONE ppermute instead of two,
+            # halving NCCL collective overhead.
             for r in range(n_rounds):
-                # Pack send buffers (this device's owned cells/edges
-                # that the round's partner needs as halo)
+                # Gather send buffers
                 sc_idx = send_cell_idx[r][dev_idx]   # (halo_c_r,)
                 se_idx = send_edge_idx[r][dev_idx]   # (halo_e_r,)
-                send_c = cell_pack[sc_idx]
-                send_e = u_shard[se_idx]
+                send_c = cell_pack[sc_idx]            # (hc, nlev+2)
+                send_e = u_shard[se_idx]              # (he, nlev)
 
-                # ppermute: device-to-device exchange via NCCL/ICI
-                recv_c = jax.lax.ppermute(
-                    send_c, "device", perm=ppermute_perms[r])
-                recv_e = jax.lax.ppermute(
-                    send_e, "device", perm=ppermute_perms[r])
+                # Pack into single flat buffer for one ppermute
+                send_c_flat = send_c.ravel()
+                send_e_flat = send_e.ravel()
+                send_packed = jnp.concatenate([send_c_flat, send_e_flat])
+
+                recv_packed = jax.lax.ppermute(
+                    send_packed, "device", perm=ppermute_perms[r])
+
+                # Unpack: split at the cell/edge boundary and reshape
+                split_at = send_c_flat.shape[0]  # hc * (nlev+2), static
+                recv_c = recv_packed[:split_at].reshape(send_c.shape)
+                recv_e = recv_packed[split_at:].reshape(send_e.shape)
 
                 # Scatter received data into halo positions
                 # (padding entries target the garbage slot at max_lc/max_le)
@@ -1771,6 +1780,13 @@ def make_voronoi_sharded_step(
     )
 
     # ------------------------------------------------------------------
+    # Pre-compute mass conservation constants (avoid per-step allreduce)
+    # ------------------------------------------------------------------
+    if cfg.fix_mass:
+        _area_for_mass = jax.device_put(global_mesh.areaCell, face_sharding)
+        _total_area = float(jnp.sum(global_mesh.areaCell))
+
+    # ------------------------------------------------------------------
     # JIT-compiled step: SSP-RK3 with halo refresh between stages
     # ------------------------------------------------------------------
 
@@ -1804,12 +1820,9 @@ def make_voronoi_sharded_step(
             T_new = jnp.maximum(T_new, cfg.T_min)
 
         if cfg.fix_mass:
-            area_sharded = jax.lax.with_sharding_constraint(
-                global_mesh.areaCell, face_sharding)
-            mass_old = jnp.sum(ps * area_sharded)
-            mass_new = jnp.sum(ps_new * area_sharded)
-            total_area = jnp.sum(area_sharded)
-            correction = (mass_old - mass_new) / total_area
+            mass_old = jnp.sum(ps * _area_for_mass)
+            mass_new = jnp.sum(ps_new * _area_for_mass)
+            correction = (mass_old - mass_new) / _total_area
             ps_new = ps_new + correction
 
         return MPASHydrostaticState(

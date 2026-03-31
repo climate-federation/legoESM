@@ -37,12 +37,15 @@ class GWDOutput(NamedTuple):
     eps_gwd: jax.Array
 
 
-def make_zero_output(ncol: int, nlev: int) -> GWDOutput:
+def make_zero_output(ncol: int, nlev: int, dtype=None) -> GWDOutput:
     """Create a zero-valued GWDOutput for the given dimensions."""
-    z = jnp.zeros((ncol, nlev))
+    if dtype is None:
+        from legoesm.core.precision import get_policy
+        dtype = get_policy().storage
+    z = jnp.zeros((ncol, nlev), dtype=dtype)
     return GWDOutput(
         du_dt=z,
         dv_dt=z,
         dT_dt=z,
-        eps_gwd=jnp.zeros((ncol,)),
+        eps_gwd=jnp.zeros((ncol,), dtype=dtype),
     )
