@@ -2,8 +2,10 @@
 
 Provides two sets of operators:
 
-1. **Horizontal operators** (vmap of 2D operators over vertical levels):
-   vorticity_3d, gradient_x_3d, gradient_y_3d, divergence_3d, hyperdiffusion_3d.
+1. **Horizontal operators** using native 4D halo exchange (one
+   communication for all vertical levels):
+   vorticity_3d, gradient_x_3d, gradient_y_3d, divergence_3d,
+   hyperdiffusion_3d, laplacian_compact_3d.
 
 2. **Vertical operators for height coordinates** (non-hydrostatic):
    vertical_gradient_full_to_half, vertical_gradient_half_to_full,
@@ -31,144 +33,146 @@ from legoesm.core.operators_fv import (
     fv_scalar_advection as _fv_scalar_advection_2d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import pad_halo_4d, pad_halo_vector_4d
 
 
 def vorticity_3d(
     u_3d: jax.Array, v_3d: jax.Array, grid: CubedSphereGrid,
 ) -> jax.Array:
-    """Compute vorticity at all levels via vmap of 2D curl_z.
+    """Compute vorticity at all levels using native 4D halo exchange.
 
     Parameters
     ----------
     u_3d, v_3d : jax.Array
         Wind components, shape (6, n, n, nlev).
     grid : CubedSphereGrid
-        Horizontal grid.
 
     Returns
     -------
     jax.Array : Vorticity, shape (6, n, n, nlev).
     """
-    def single_level(u_k, v_k):
-        u_f = Field(data=u_k, name="u", dims=("face", "x", "y"), units="m/s")
-        v_f = Field(data=v_k, name="v", dims=("face", "x", "y"), units="m/s")
-        return curl_z(u_f, v_f, grid).data
+    # One 4D vector halo exchange = 2 MPI messages (instead of 2*nlev)
+    u_pad, v_pad = pad_halo_vector_4d(
+        u_3d, v_3d,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=grid.halo_interp_offsets,
+    )
 
-    u_t = jnp.moveaxis(u_3d, -1, 0)   # (nlev, 6, n, n)
-    v_t = jnp.moveaxis(v_3d, -1, 0)
-    result = jax.vmap(single_level)(u_t, v_t)  # (nlev, 6, n, n)
-    return jnp.moveaxis(result, 0, -1)  # (6, n, n, nlev)
+    # Stencil identical to 2D curl_z but with trailing level axis
+    vort_x = v_pad * grid.hy_ext[..., None]
+    vort_y = u_pad * grid.hx_ext[..., None]
+
+    d_vort_x = vort_x[:, 2:, 1:-1, :] - vort_x[:, :-2, 1:-1, :]
+    d_vort_y = vort_y[:, 1:-1, 2:, :] - vort_y[:, 1:-1, :-2, :]
+
+    return (d_vort_x - d_vort_y) / (2.0 * grid.area[..., None])
 
 
 def gradient_x_3d(
     field_3d: jax.Array, grid: CubedSphereGrid,
 ) -> jax.Array:
-    """Compute x-gradient at all levels via vmap.
+    """Compute x-gradient at all levels using native 4D halo exchange.
 
     Parameters
     ----------
-    field_3d : jax.Array
-        Scalar field, shape (6, n, n, nlev).
+    field_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
 
     Returns
     -------
     jax.Array : d(field)/dx, shape (6, n, n, nlev).
     """
-    def single_level(f_k):
-        f_field = Field(data=f_k, name="f", dims=("face", "x", "y"),
-                        units="", staggering="cell")
-        return gradient_x(f_field, grid).data
-
-    f_t = jnp.moveaxis(field_3d, -1, 0)
-    result = jax.vmap(single_level)(f_t)
-    return jnp.moveaxis(result, 0, -1)
+    # One 4D halo exchange = 1 MPI message set (instead of nlev)
+    padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+    return (padded[:, 2:, 1:-1, :] - padded[:, :-2, 1:-1, :]) / grid.dx[..., None]
 
 
 def gradient_y_3d(
     field_3d: jax.Array, grid: CubedSphereGrid,
 ) -> jax.Array:
-    """Compute y-gradient at all levels via vmap.
+    """Compute y-gradient at all levels using native 4D halo exchange.
 
     Parameters
     ----------
-    field_3d : jax.Array
-        Scalar field, shape (6, n, n, nlev).
+    field_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
 
     Returns
     -------
     jax.Array : d(field)/dy, shape (6, n, n, nlev).
     """
-    def single_level(f_k):
-        f_field = Field(data=f_k, name="f", dims=("face", "x", "y"),
-                        units="", staggering="cell")
-        return gradient_y(f_field, grid).data
-
-    f_t = jnp.moveaxis(field_3d, -1, 0)
-    result = jax.vmap(single_level)(f_t)
-    return jnp.moveaxis(result, 0, -1)
+    padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+    return (padded[:, 1:-1, 2:, :] - padded[:, 1:-1, :-2, :]) / grid.dy[..., None]
 
 
 def divergence_3d(
     u_3d: jax.Array, v_3d: jax.Array, grid: CubedSphereGrid,
 ) -> jax.Array:
-    """Compute divergence at all levels via vmap.
+    """Compute divergence at all levels using native 4D halo exchange.
 
     Parameters
     ----------
-    u_3d, v_3d : jax.Array
-        Vector field components, shape (6, n, n, nlev).
+    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
 
     Returns
     -------
     jax.Array : Divergence, shape (6, n, n, nlev).
     """
-    def single_level(u_k, v_k):
-        u_f = Field(data=u_k, name="u", dims=("face", "x", "y"), units="m/s")
-        v_f = Field(data=v_k, name="v", dims=("face", "x", "y"), units="m/s")
-        return divergence(u_f, v_f, grid).data
+    # One 4D vector halo exchange = 2 MPI messages (instead of 2*nlev)
+    u_pad, v_pad = pad_halo_vector_4d(
+        u_3d, v_3d,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=grid.halo_interp_offsets,
+    )
 
-    u_t = jnp.moveaxis(u_3d, -1, 0)
-    v_t = jnp.moveaxis(v_3d, -1, 0)
-    result = jax.vmap(single_level)(u_t, v_t)
-    return jnp.moveaxis(result, 0, -1)
+    flux_x_pad = u_pad * grid.hy_ext[..., None]
+    flux_y_pad = v_pad * grid.hx_ext[..., None]
+
+    d_flux_x = flux_x_pad[:, 2:, 1:-1, :] - flux_x_pad[:, :-2, 1:-1, :]
+    d_flux_y = flux_y_pad[:, 1:-1, 2:, :] - flux_y_pad[:, 1:-1, :-2, :]
+
+    return (d_flux_x + d_flux_y) / (2.0 * grid.area[..., None])
 
 
 def hyperdiffusion_3d(
     field_3d: jax.Array, grid: CubedSphereGrid, coeff: float,
 ) -> jax.Array:
-    """Compute hyperdiffusion at all levels via vmap.
+    """Compute hyperdiffusion at all levels using native 4D halo.
+
+    -coeff * nabla^4(field) where the inner Laplacian is the compact
+    stencil and the outer is the standard div(grad) form.
+
+    Total halo exchanges: 5 (regardless of nlev), down from 5*nlev.
 
     Parameters
     ----------
-    field_3d : jax.Array
-        Scalar field, shape (6, n, n, nlev).
+    field_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
     coeff : float
-        Hyperdiffusion coefficient.
 
     Returns
     -------
     jax.Array : Hyperdiffusion tendency, shape (6, n, n, nlev).
     """
-    def single_level(f_k):
-        f_field = Field(data=f_k, name="f", dims=("face", "x", "y"), units="")
-        return hyperdiffusion(f_field, grid, coeff).data
-
-    f_t = jnp.moveaxis(field_3d, -1, 0)
-    result = jax.vmap(single_level)(f_t)
-    return jnp.moveaxis(result, 0, -1)
+    # Inner ∇² (compact): 1 halo exchange
+    lap1 = laplacian_compact_3d(field_3d, grid)
+    # Outer ∇² = div(grad): gradient_x + gradient_y + divergence = 1+1+2 = 4 halo exchanges
+    gx = gradient_x_3d(lap1, grid)
+    gy = gradient_y_3d(lap1, grid)
+    lap2 = divergence_3d(gx, gy, grid)
+    return -coeff * lap2
 
 
 def laplacian_compact_3d(
     field_3d: jax.Array, grid: CubedSphereGrid,
 ) -> jax.Array:
-    """Compact-stencil Laplacian at all levels via vmap.
+    """Compact-stencil Laplacian at all levels using native 4D halo.
 
-    Unlike the standard Laplacian (div(grad)), this uses adjacent-cell
-    second differences and resolves the 2Δx checkerboard mode.
+    Uses adjacent-cell second differences and resolves the 2Δx
+    checkerboard mode.  One halo exchange for all levels.
 
     Parameters
     ----------
@@ -179,12 +183,15 @@ def laplacian_compact_3d(
     -------
     jax.Array : ∇²f, shape (6, n, n, nlev)
     """
-    def single_level(f_k):
-        return laplacian_compact(f_k, grid)
+    padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+    interior = padded[:, 1:-1, 1:-1, :]
+    hx_sq = (grid.dx / 2.0) ** 2
+    hy_sq = (grid.dy / 2.0) ** 2
 
-    f_t = jnp.moveaxis(field_3d, -1, 0)
-    result = jax.vmap(single_level)(f_t)
-    return jnp.moveaxis(result, 0, -1)
+    d2f_dx2 = (padded[:, 2:, 1:-1, :] - 2.0 * interior + padded[:, :-2, 1:-1, :]) / hx_sq[..., None]
+    d2f_dy2 = (padded[:, 1:-1, 2:, :] - 2.0 * interior + padded[:, 1:-1, :-2, :]) / hy_sq[..., None]
+
+    return d2f_dx2 + d2f_dy2
 
 
 def fv_flux_divergence_3d(

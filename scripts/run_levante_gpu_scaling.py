@@ -57,38 +57,33 @@ def _configure_jax(precision: str) -> None:
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
 
 
-def _maybe_init_distributed() -> tuple[int, int]:
+def _maybe_init_distributed(
+    global_n: int | None = None,
+) -> tuple[int, int]:
     """Detect and initialize distributed JAX if under MPI or SLURM.
 
     Returns (rank, world_size). For single-process, returns (0, 1).
 
-    On single-node MPI (all ranks on same host), skips
-    ``jax.distributed.initialize()`` — it requires a gRPC coordinator
-    that doesn't work with oversubscribed single-host MPI.  MPI
-    reductions and halo exchange still work via mpi4jax.
+    When MPI is detected, uses ``initialize_distributed()`` from
+    ``legoesm.parallel.distributed`` which sets the MPI halo backend,
+    builds the CommTopology, creates the DeviceConfig, and (when
+    ``global_n`` is provided) builds the :class:`DistributedLayout`
+    so that :func:`scatter_to_local` / :func:`gather_to_global` work.
+
+    Parameters
+    ----------
+    global_n : int, optional
+        Per-face grid resolution.  When provided, the distributed
+        layout is constructed so state can be scattered to rank-local.
     """
     # Check for MPI environment
     if "OMPI_COMM_WORLD_SIZE" in os.environ or "PMI_SIZE" in os.environ:
         try:
+            from legoesm.parallel.distributed import initialize_distributed
+            initialize_distributed(global_n=global_n)
             from mpi4py import MPI
             comm = MPI.COMM_WORLD
-            rank = comm.Get_rank()
-            world_size = comm.Get_size()
-            if world_size > 1:
-                import socket
-                my_host = socket.gethostname()
-                all_hosts = comm.allgather(my_host)
-                is_multi_node = len(set(all_hosts)) > 1
-
-                if is_multi_node:
-                    import jax
-                    jax.distributed.initialize(
-                        coordinator_address=f"{all_hosts[0]}:1234",
-                        num_processes=world_size,
-                        process_id=rank,
-                    )
-                # Single-node MPI: don't call jax.distributed.initialize
-                return rank, world_size
+            return comm.Get_rank(), comm.Get_size()
         except ImportError:
             pass
 
@@ -305,6 +300,7 @@ def run_benchmark(
     n_timing: int,
     dt: float | None = None,
     grid_type: str = "spectral",
+    no_conservation: bool = False,
 ) -> TimingResult:
     """Run the baroclinic wave dycore benchmark and return timing results."""
 
@@ -408,16 +404,24 @@ def run_benchmark(
         config = CDGridPrimitiveEquationConfig(
             hyperdiff_coeff=hd,
             hyperdiff_ps_coeff=hd,
-            use_conservation_fixer=True,
-            fix_mass=True,
-            anchor_mass_to_initial=True,
+            use_conservation_fixer=not no_conservation,
+            fix_mass=not no_conservation,
+            anchor_mass_to_initial=not no_conservation,
+            zero_mean_ps_tendency=not no_conservation,
         )
         model = CDGridPrimitiveEquationModel(grid, sigma, config)
         state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
         state = hydrostatic_to_fv3(state_cc, cdgrid)
 
         total_cells = 6 * n_grid * n_grid * n_levels
-        dev_config = create_device_mesh(n_devices=n_gpus)
+
+        # MPI distributed: use per-rank local device count, not total
+        from legoesm.parallel.mesh import get_active_config
+        active_cfg = get_active_config()
+        if active_cfg is not None and active_cfg.is_distributed:
+            dev_config = active_cfg
+        else:
+            dev_config = create_device_mesh(n_devices=n_gpus)
 
     backend = dev_config.backend
 
@@ -428,8 +432,22 @@ def run_benchmark(
         return x
     state = jax.tree.map(_cast, state)
 
-    # Shard across devices
-    if dev_config.n_devices > 1:
+    # MPI distributed: build layout (deferred) and scatter to rank-local
+    from legoesm.parallel.distributed import get_active_layout
+    if dev_config.is_distributed and get_active_layout() is None:
+        from legoesm.parallel.distributed import get_active_topology, set_active_layout
+        from legoesm.parallel.layout import make_layout
+        topo = get_active_topology()
+        if topo is not None:
+            set_active_layout(make_layout(topo.rank, topo.n_processes, n_grid))
+
+    layout = get_active_layout()
+    if layout is not None and hasattr(layout, 'is_tiled'):
+        from legoesm.parallel.distributed import scatter_to_local
+        state = scatter_to_local(state, layout)
+
+    # Shard across devices (SPMD for multi-GPU single-node)
+    if dev_config.n_devices > 1 and not dev_config.is_distributed:
         state = shard_pytree(state, dev_config)
 
     # Verify sharding is effective (not accidentally replicated)
@@ -450,6 +468,9 @@ def run_benchmark(
     if grid_type == "icosahedral" and dev_config.n_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_voronoi_sharded_step
         step_fn = make_voronoi_sharded_step(model, dev_config)
+    elif grid_type == "cubed-sphere" and dev_config.n_devices > 1:
+        from legoesm.parallel.sharded_dynamics import make_sharded_step
+        step_fn = make_sharded_step(model, dev_config)
     else:
         step_fn = model.step
 
@@ -564,6 +585,7 @@ def run_weak_scaling(
     base_n: int = WEAK_SCALING_BASE_N,
     base_level_ico: int = WEAK_SCALING_BASE_LEVEL_ICO,
     grid_type: str = "spectral",
+    no_conservation: bool = False,
 ) -> list[TimingResult]:
     """Run weak scaling: fix cells/GPU, sweep GPU counts up to n_gpus."""
 
@@ -603,6 +625,7 @@ def run_weak_scaling(
                     n_warmup=n_warmup,
                     n_timing=n_timing,
                     grid_type=grid_type,
+                    no_conservation=no_conservation,
                 )
                 results.append(result)
             except Exception as exc:
@@ -633,6 +656,7 @@ def run_strong_scaling(
     n_timing: int,
     resolutions: list[int] | None = None,
     grid_type: str = "spectral",
+    no_conservation: bool = False,
 ) -> list[TimingResult]:
     """Run strong scaling: fix resolution, sweep GPU counts up to n_gpus."""
 
@@ -700,6 +724,7 @@ def run_strong_scaling(
                         n_warmup=n_warmup,
                         n_timing=n_timing,
                         grid_type=grid_type,
+                        no_conservation=no_conservation,
                     )
                     results.append(result)
                 except Exception as exc:
@@ -1039,6 +1064,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-plot", action="store_true",
         help="Skip plot generation.",
     )
+    p.add_argument(
+        "--no-conservation", action="store_true",
+        help="Disable conservation fixer and zero-mean tendency correction. "
+             "Reduces global sync count for cleaner perf scaling measurement.",
+    )
     return p
 
 
@@ -1140,6 +1170,7 @@ def main() -> int:
             n_timing=args.n_timing,
             base_n=args.weak_base_n,
             grid_type=grid_type,
+            no_conservation=args.no_conservation,
         )
         all_results.extend(weak_results)
         if is_rank0:
@@ -1170,6 +1201,7 @@ def main() -> int:
             n_timing=args.n_timing,
             resolutions=strong_res,
             grid_type=grid_type,
+            no_conservation=args.no_conservation,
         )
         all_results.extend(strong_results)
         if is_rank0:

@@ -223,7 +223,14 @@ def create_device_mesh(
     if n_dev < 1:
         raise ValueError(f"n_devices must be >= 1, got {n_dev!r}.")
 
-    n_dev = min(n_dev, all_count)
+    if n_dev > all_count:
+        logger.warning(
+            "create_device_mesh: requested %d devices but only %d available "
+            "locally (clamping).  Under MPI, pass per-rank device count, "
+            "not the total across all ranks.",
+            n_dev, all_count,
+        )
+        n_dev = all_count
 
     # Single-device fast path.
     if n_dev == 1:

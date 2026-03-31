@@ -558,8 +558,14 @@ class ModelDriver:
             )
 
         if self._device_config is not None and self._device_config.mesh is not None:
-            from legoesm.parallel.sharded_dynamics import gather_state
-            gathered = gather_state(kwargs.get('state', self.state), self._device_config)
+            if self._device_config.is_distributed:
+                # MPI: reconstruct global state from rank-local data
+                from legoesm.parallel.distributed import gather_to_global
+                gathered = gather_to_global(kwargs.get('state', self.state))
+            else:
+                # Multi-GPU single-node: replicate sharded → full
+                from legoesm.parallel.sharded_dynamics import gather_state
+                gathered = gather_state(kwargs.get('state', self.state), self._device_config)
             kwargs['state'] = gathered
         jax.block_until_ready(kwargs.get('state', self.state).u.data)
         return self.diagnostics.collect(**kwargs)
@@ -612,7 +618,7 @@ class ModelDriver:
         try:
             from legoesm.parallel.mesh import get_active_config
             active = get_active_config()
-            if active is not None and active.n_devices > 1:
+            if active is not None and (active.n_devices > 1 or active.is_distributed):
                 self._device_config = active
                 logger.info(
                     f"  Parallel: using active config — "
@@ -646,12 +652,36 @@ class ModelDriver:
         if self._device_config is None:
             return
 
-        # Shard state across devices
-        from legoesm.parallel.sharded_dynamics import shard_state
-        self.state = shard_state(self.state, self._device_config)
+        if self._device_config.is_distributed:
+            # MPI: scatter global state to rank-local data via layout
+            from legoesm.parallel.distributed import (
+                scatter_to_local, get_active_layout, set_active_layout,
+                get_active_topology,
+            )
+            layout = get_active_layout()
+            if layout is None:
+                # Deferred layout: grid_n wasn't known at init time
+                topo = get_active_topology()
+                if topo is not None:
+                    from legoesm.parallel.layout import make_layout
+                    n = self.state.T.data.shape[1]  # per-face resolution
+                    layout = make_layout(topo.rank, topo.n_processes, n)
+                    set_active_layout(layout)
+            if layout is not None:
+                self.state = scatter_to_local(self.state, layout)
+                from legoesm.parallel.layout import scatter_pytree
+                self.tracers = scatter_pytree(self.tracers, layout)
+                logger.info(
+                    f"  Parallel: MPI distributed — "
+                    f"rank-local shape {layout.local_shape_2d}"
+                )
+        else:
+            # Multi-GPU single-node: SPMD sharding
+            from legoesm.parallel.sharded_dynamics import shard_state
+            self.state = shard_state(self.state, self._device_config)
 
-        from legoesm.parallel.mesh import shard_pytree
-        self.tracers = shard_pytree(self.tracers, self._device_config)
+            from legoesm.parallel.mesh import shard_pytree
+            self.tracers = shard_pytree(self.tracers, self._device_config)
 
         logger.info(
             f"  Parallel: {self._device_config.n_devices} devices, "
@@ -661,12 +691,44 @@ class ModelDriver:
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save checkpoint to output directory using unified restart API.
 
-        Accepts ``ExperimentConfig`` directly — the restart layer handles
-        the AMIP wire-format conversion internally.
+        When running under MPI (``is_distributed``), uses per-rank
+        distributed checkpoint to avoid gathering the full state.
         """
         elapsed_day = day - self.config.start_day
-        ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
 
+        # Distributed path: per-rank checkpoint (no gather needed)
+        if (self._device_config is not None
+                and self._device_config.is_distributed):
+            from legoesm.io.distributed_checkpoint import (
+                save_checkpoint_distributed,
+            )
+            from legoesm.parallel.distributed import get_active_topology
+            topology = get_active_topology()
+            if topology is not None:
+                ckpt_dir = (
+                    self._output_dir
+                    / f"checkpoint_day_{int(elapsed_day):04d}"
+                )
+                save_checkpoint_distributed(
+                    path=ckpt_dir,
+                    state=self.state,
+                    rank=topology.rank,
+                    n_ranks=topology.n_processes,
+                    step=step,
+                    day=day,
+                    config=self.config,
+                    q_v=self.q_v,
+                    q_c=self.q_c,
+                    q_r=self.q_r,
+                )
+                logger.info(
+                    f"  Distributed checkpoint: {ckpt_dir.name} "
+                    f"(rank {topology.rank}/{topology.n_processes})"
+                )
+                return
+
+        # Single-process path
+        ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
 
         save_restart(
@@ -686,10 +748,59 @@ class ModelDriver:
     def load_checkpoint(self, path: str | Path) -> tuple[int, float]:
         """Load state from a checkpoint using unified restart API.
 
-        Returns (step, day).
+        Returns (step, day).  Detects distributed checkpoint directories
+        and loads per-rank data when running under MPI.
         """
+        path = Path(path)
+
+        # Distributed path: directory with per-rank .npz files
+        if (path.is_dir()
+                and self._device_config is not None
+                and self._device_config.is_distributed):
+            from legoesm.io.distributed_checkpoint import (
+                load_checkpoint_distributed,
+            )
+            from legoesm.parallel.distributed import get_active_topology
+            topology = get_active_topology()
+            if topology is not None:
+                arrays, step, day, _, _ = load_checkpoint_distributed(
+                    path, topology.rank, topology.n_processes,
+                )
+                from legoesm.core.state import HydrostaticState
+                from legoesm.core.field import Field
+                import jax.numpy as jnp
+                self.state = HydrostaticState(
+                    T=Field(data=jnp.asarray(arrays["T"]),
+                            name="T", dims=("face", "x", "y", "level"),
+                            units="K"),
+                    u=Field(data=jnp.asarray(arrays["u"]),
+                            name="u", dims=("face", "x", "y", "level"),
+                            units="m/s"),
+                    v=Field(data=jnp.asarray(arrays["v"]),
+                            name="v", dims=("face", "x", "y", "level"),
+                            units="m/s"),
+                    p_s=Field(data=jnp.asarray(arrays["p_s"]),
+                              name="p_s", dims=("face", "x", "y"),
+                              units="Pa"),
+                    phis=Field(data=jnp.asarray(arrays["phis"]),
+                               name="phis", dims=("face", "x", "y"),
+                               units="m2/s2"),
+                )
+                if "q_v" in arrays:
+                    self.q_v = jnp.asarray(arrays["q_v"])
+                if "q_c" in arrays:
+                    self.q_c = jnp.asarray(arrays["q_c"])
+                if "q_r" in arrays:
+                    self.q_r = jnp.asarray(arrays["q_r"])
+                logger.info(
+                    f"  Loaded distributed restart: step={step}, day={day}, "
+                    f"rank={topology.rank}"
+                )
+                return step, day
+
+        # Single-process path
         result = load_restart(
-            Path(path), self.grid, self.sigma, strict=True,
+            path, self.grid, self.sigma, strict=True,
         )
         state, q_v, step, day, _, _, q_c, q_r, metadata, carry_aux = result
         self.state = state

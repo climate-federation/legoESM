@@ -124,6 +124,11 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Typically not needed when A_h (Laplacian viscosity) is used,
         # since A_h already damps intermediate-scale T noise.
         # Typical range when used: 0.1-0.5.  0 disables (default).
+    zero_mean_ps_tendency: bool = True
+        # Apply zero_mean_tendency() to dp_s/dt every RK stage.
+        # Ensures exact mass conservation to machine precision but
+        # requires a global reduction (MPI allreduce when distributed).
+        # Disable for pure performance benchmarks to eliminate sync.
 
 
 # ==============================================================================
@@ -235,7 +240,8 @@ def fv3_hydrostatic_tendencies(
     if _hybrid:
         D_total_p = jnp.sum(div_v * dp, axis=-1)
         dp_s_dt_data = -D_total_p / sigma_coord.B_range
-        dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
+        if config.zero_mean_ps_tendency:
+            dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
         mass_flux = compute_mass_flux_hybrid(div_v, p_s, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
@@ -258,7 +264,8 @@ def fv3_hydrostatic_tendencies(
 
         D_total = jnp.sum(div_v * dsigma, axis=-1)
         dp_s_dt_data = -p_s * D_total / sigma_range
-        dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
+        if config.zero_mean_ps_tendency:
+            dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
         sigma_dot = compute_sigma_dot(div_v, sigma_coord)
         vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)

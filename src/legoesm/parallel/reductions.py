@@ -207,6 +207,9 @@ def _mpi4jax_array_result(result):
 def global_sum_mpi(local_value: jax.Array) -> jax.Array:
     """Compute a global sum across all MPI ranks.
 
+    **Differentiable**: uses ``allreduce(SUM)`` which has full JVP and
+    VJP support in mpi4jax.  Safe to use inside ``jax.grad``.
+
     Parameters
     ----------
     local_value : jax.Array
@@ -227,6 +230,10 @@ def global_sum_mpi(local_value: jax.Array) -> jax.Array:
 
 def global_max_mpi(local_value: jax.Array) -> jax.Array:
     """Compute a global maximum across all MPI ranks.
+
+    **Not differentiable**: ``allreduce(MAX)`` has no meaningful gradient.
+    Use only in diagnostics, logging, or CFL monitoring — never in a
+    loss function or inside ``jax.grad``.
 
     Parameters
     ----------
@@ -249,6 +256,10 @@ def global_max_mpi(local_value: jax.Array) -> jax.Array:
 def global_min_mpi(local_value: jax.Array) -> jax.Array:
     """Compute a global minimum across all MPI ranks.
 
+    **Not differentiable**: ``allreduce(MIN)`` has no meaningful gradient.
+    Use only in diagnostics, logging, or CFL monitoring — never in a
+    loss function or inside ``jax.grad``.
+
     Parameters
     ----------
     local_value : jax.Array
@@ -269,6 +280,10 @@ def global_min_mpi(local_value: jax.Array) -> jax.Array:
 
 def allgather_mpi(local_value: jax.Array) -> jax.Array:
     """Gather arrays from all MPI ranks.
+
+    **Not differentiable**: ``mpi4jax.allgather`` has no JVP or VJP
+    rules.  Use only for I/O, checkpoint gathering, and diagnostics
+    — never inside ``jax.grad``.
 
     Parameters
     ----------
@@ -370,6 +385,9 @@ def batch_allreduce_mpi(
 
 def broadcast_mpi(value: jax.Array, root: int = 0) -> jax.Array:
     """Broadcast an array from one rank to all others.
+
+    **Not differentiable**: ``mpi4jax.bcast`` has no JVP or VJP rules.
+    Use only for initialization and I/O — never inside ``jax.grad``.
 
     Parameters
     ----------

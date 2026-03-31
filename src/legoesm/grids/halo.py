@@ -435,6 +435,179 @@ def pad_halo(
         return _pad_halo_local_h2(data, interp_offsets)
 
 
+def pad_halo_4d(
+    data: jax.Array,
+    halo: int = 1,
+    interp_offsets: jax.Array | None = None,
+) -> jax.Array:
+    """Pad a 4D scalar field with inter-face halo data.
+
+    Like :func:`pad_halo` but operates on all vertical levels at once,
+    issuing a single communication instead of one per level.  This
+    reduces MPI messages by a factor of ``nlev``.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (6, n, n, nlev)
+        Scalar field on the cubed-sphere with a trailing level axis.
+    halo : int
+        Halo width (1 or 2).
+    interp_offsets : jax.Array or None
+        Precomputed fractional-index offsets, shape (6, 4, n).
+
+    Returns
+    -------
+    padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
+    """
+    if data.ndim != 4:
+        raise ValueError(f"pad_halo_4d expects 4D input, got {data.ndim}D")
+    if halo not in (1, 2):
+        raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
+
+    # MPI dispatch.
+    if _halo_backend == "mpi":
+        from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
+        return pad_halo_mpi_4d(data, _mpi_topology, halo=halo)
+
+    if halo == 1:
+        return _pad_halo_local_4d(data, interp_offsets)
+    else:
+        return _pad_halo_local_h2_4d(data, interp_offsets)
+
+
+def _pad_halo_local_4d(
+    data: jax.Array,
+    interp_offsets: jax.Array | None = None,
+) -> jax.Array:
+    """Local 4D scalar halo exchange for halo=1.
+
+    Uses the same precomputed index tables as the 2D version.  The
+    trailing level axis is preserved via ``data[src_f, src_i, src_j]``
+    which yields shape ``(24*n, nlev)`` when data is ``(6, n, n, nlev)``.
+    """
+    n = data.shape[1]
+    nlev = data.shape[3]
+    tables = _get_halo_tables_h1(n)
+    src_f, src_i, src_j, dst_f, dst_i, dst_j = tables
+
+    padded = jnp.zeros((6, n + 2, n + 2, nlev), dtype=data.dtype)
+    padded = padded.at[:, 1:-1, 1:-1, :].set(data)
+
+    if interp_offsets is None:
+        # Nearest-neighbor: gather (24*n, nlev) then scatter
+        values = data[src_f, src_i, src_j]  # (24*n, nlev)
+        padded = padded.at[dst_f, dst_i, dst_j].set(values)
+    else:
+        # Interpolated exchange: two gathers + lerp + scatter
+        flat_offsets = interp_offsets.reshape(-1)
+        n_int = int(n)
+        strip_base = jnp.repeat(jnp.arange(24) * n_int, n_int)
+        j_local = jnp.tile(jnp.arange(n_int), 24)
+
+        frac = j_local + flat_offsets
+        frac = jnp.clip(frac, 0.0, n_int - 1.0)
+        lo = jnp.floor(frac).astype(jnp.int32)
+        lo = jnp.clip(lo, 0, n_int - 2)
+        hi = lo + 1
+        w = jnp.clip(frac - lo.astype(frac.dtype), 0.0, 1.0)
+
+        _sf = jnp.asarray(src_f)
+        _si = jnp.asarray(src_i)
+        _sj = jnp.asarray(src_j)
+        lo_global = strip_base + lo
+        hi_global = strip_base + hi
+        vals_lo = data[_sf[lo_global], _si[lo_global], _sj[lo_global]]  # (24*n, nlev)
+        vals_hi = data[_sf[hi_global], _si[hi_global], _sj[hi_global]]
+        values = ((1.0 - w[:, None]) * vals_lo + w[:, None] * vals_hi).astype(data.dtype)
+        padded = padded.at[dst_f, dst_i, dst_j].set(values)
+
+    padded = _fill_corners_h1(padded)
+    return padded
+
+
+def _pad_halo_local_h2_4d(
+    data: jax.Array,
+    interp_offsets: jax.Array | None = None,
+) -> jax.Array:
+    """Local 4D scalar halo exchange for halo=2.
+
+    Loop-based exchange (same as 2D version) — the scalar indexing
+    ``data[face, i, j]`` naturally returns shape ``(nlev,)`` for 4D.
+    """
+    n = data.shape[1]
+    nlev = data.shape[3]
+    padded = jnp.zeros((6, n + 4, n + 4, nlev), dtype=data.dtype)
+    padded = padded.at[:, 2:-2, 2:-2, :].set(data)
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+
+            for depth in range(2):
+                strip = _extract_edge_strip_at_depth(
+                    data, nbr_face, nbr_edge, depth,
+                )  # (n,) for 3D or (n, nlev) for 4D
+
+                if is_reversed:
+                    strip = strip[::-1]
+
+                if interp_offsets is not None:
+                    strip = _interp_strip(
+                        strip, interp_offsets[face, edge_idx, depth],
+                    )
+
+                if edge == WEST:
+                    padded = padded.at[face, 1 - depth, 2:-2].set(strip)
+                elif edge == EAST:
+                    padded = padded.at[face, n + 2 + depth, 2:-2].set(strip)
+                elif edge == SOUTH:
+                    padded = padded.at[face, 2:-2, 1 - depth].set(strip)
+                elif edge == NORTH:
+                    padded = padded.at[face, 2:-2, n + 2 + depth].set(strip)
+
+    padded = _fill_corners_h2(padded)
+    return padded
+
+
+def pad_halo_vector_4d(
+    u_data: jax.Array,
+    v_data: jax.Array,
+    cos_angle: jax.Array,
+    sin_angle: jax.Array,
+    cos_angle_padded: jax.Array,
+    sin_angle_padded: jax.Array,
+    interp_offsets: jax.Array | None = None,
+    halo: int = 1,
+) -> tuple[jax.Array, jax.Array]:
+    """4D vector halo exchange (rotation + pad for all levels at once).
+
+    Same logic as :func:`pad_halo_vector` but using :func:`pad_halo_4d`.
+    Inputs are (6, n, n, nlev); rotation angles are (6, n, n) and get
+    broadcast over the trailing level axis.
+
+    Returns
+    -------
+    u_padded, v_padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
+    """
+    # Broadcast 2D angles to match 4D data
+    ca = cos_angle[..., None]
+    sa = sin_angle[..., None]
+    # Step 1: convert to geographic
+    u_east = ca * u_data - sa * v_data
+    v_north = sa * u_data + ca * v_data
+    # Step 2: pad as scalars (one communication per component)
+    u_east_padded = pad_halo_4d(u_east, halo=halo, interp_offsets=interp_offsets)
+    v_north_padded = pad_halo_4d(v_north, halo=halo, interp_offsets=interp_offsets)
+    # Step 3: convert back using padded angles
+    cap = cos_angle_padded[..., None]
+    sap = sin_angle_padded[..., None]
+    u_padded = cap * u_east_padded + sap * v_north_padded
+    v_padded = -sap * u_east_padded + cap * v_north_padded
+    return u_padded, v_padded
+
+
 def _pad_halo_local(
     data: jax.Array,
     interp_offsets: jax.Array | None = None,
