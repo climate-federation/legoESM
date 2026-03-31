@@ -222,9 +222,17 @@ legoESM is a fully differentiable Earth System Model implemented in JAX, compris
 - Statistics: `ensemble_mean()`, `ensemble_std()`, `ensemble_percentile()`, `ensemble_spread()`
 - Gradient checkpointing via `jax.checkpoint` for O(sqrt(n)) memory in reverse-mode AD
 
-### MPI (`parallel/distributed.py`, `halo_exchange.py`, `reductions.py`)
-- mpi4jax-based halo exchange and global reductions
-- MPI version compatibility guardrails
+### MPI Distributed (`parallel/distributed.py`, `halo_exchange.py`, `reductions.py`, `layout.py`)
+- `initialize_distributed(global_n=N)` → CommTopology + DeviceConfig + DistributedLayout
+- `scatter_to_local()` / `gather_to_global()` for rank-local data ownership
+- **Native 4D halo exchange**: `pad_halo_4d()` / `pad_halo_vector_4d()` — one MPI message per neighbor for all vertical levels
+- Face-only mode uses batched neighbor `sendrecv` (not allgather)
+- Sub-face tiling for >6 ranks (6 × k² decomposition)
+- `_sendrecv_vjp` (`@jax.custom_vjp`): reverse-mode AD through MPI halo exchange
+- `global_sum_mpi` (allreduce SUM): fully differentiable; `global_max/min_mpi`: diagnostics only
+- `batch_allreduce_mpi()`: pack multiple reductions into one MPI call
+- Per-rank distributed checkpoint (`io/distributed_checkpoint.py`)
+- mpi4jax 0.8.x version compatibility guardrails
 
 ### Apple Silicon (`parallel/metal.py`)
 - Metal/CPU hybrid routing for mixed-precision workloads

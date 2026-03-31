@@ -76,6 +76,11 @@ JAX_PLATFORMS=cpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
 
 ### 3.2 MPI rank scaling (real cluster)
 
+The benchmark uses `initialize_distributed(global_n=...)` to build the MPI
+topology and distributed layout, then scatters the global initial state to
+rank-local data via `scatter_to_local()`.  Each rank steps on its local
+subset; results are gathered only for I/O.
+
 ```bash
 mpirun -np 6 .venv/bin/python scripts/run_levante_gpu_scaling.py \
   --grid cubed-sphere \
@@ -84,6 +89,20 @@ mpirun -np 6 .venv/bin/python scripts/run_levante_gpu_scaling.py \
   --n-levels 26 \
   --n-gpus 6 \
   --output-dir "$OUTDIR/atm_mpi"
+```
+
+For pure communication-scaling measurement (no global sync from
+conservation fixers):
+
+```bash
+mpirun -np 6 .venv/bin/python scripts/run_levante_gpu_scaling.py \
+  --grid cubed-sphere \
+  --mode strong \
+  --precision float32 \
+  --n-levels 26 \
+  --n-gpus 6 \
+  --no-conservation \
+  --output-dir "$OUTDIR/atm_mpi_nofix"
 ```
 
 ### 3.3 Atmosphere outputs to inspect
@@ -188,7 +207,49 @@ done
 
 Record `real` time and compare speedup/efficiency manually.
 
-## 5. Pass/Fail Interpretation
+## 5. MPI Distributed Correctness and Differentiability
+
+### 5.1 Distributed correctness regression
+
+Verifies that multi-rank execution (scatter → step → gather) matches a
+single-rank reference within machine precision:
+
+```bash
+for np in 2 3 6; do
+  mpirun -np "$np" .venv/bin/python -m pytest -q \
+    tests/distributed/test_mpi_driver.py::TestMPIDriverPath::test_distributed_3_steps_matches_single_rank
+done
+```
+
+### 5.2 MPI reverse-mode AD (gradient) tests
+
+Verifies that `jax.grad` flows correctly through MPI halo exchange
+(`sendrecv` with `custom_vjp`) and global reductions (`allreduce SUM`):
+
+```bash
+for np in 2 3 6; do
+  mpirun -np "$np" .venv/bin/python -m pytest -q \
+    tests/distributed/test_mpi_differentiability.py
+done
+```
+
+Key tests:
+- `test_global_sum_mpi_grad` — gradient through `allreduce(SUM)`
+- `test_pad_halo_mpi_grad_matches_local` — MPI halo gradient matches local
+- `test_pad_halo_4d_mpi_grad_matches_local` — 4D variant
+- `test_fix_mass_mpi_grad` — conservation fixer gradient through MPI
+
+### 5.3 AD-safety reference
+
+| MPI Primitive | AD Status | Use in Differentiable Path |
+|---------------|-----------|---------------------------|
+| `allreduce(SUM)` | Differentiable (JVP + VJP) | Conservation fixers, global integrals |
+| `sendrecv` | Differentiable via `_sendrecv_vjp` | Halo exchange |
+| `allreduce(MAX/MIN)` | NOT differentiable | CFL diagnostics only |
+| `allgather` | NOT differentiable | I/O gathering only |
+| `bcast` | NOT differentiable | Initialization only |
+
+## 6. Pass/Fail Interpretation
 
 Atmosphere (`run_levante_gpu_scaling.py` defaults):
 - compile time threshold: `--scaling-compile-time-max-s` (default 30s)
@@ -207,7 +268,7 @@ Recommended practice for real hardware reports:
 - keep one run with cold compile and one with warm cache
 - include hardware metadata (GPU model, driver/CUDA, MPI version, node count)
 
-## 6. Common Issues
+## 7. Common Issues
 
 - MPI runs marked `skipped` due launcher/socket policy:
   - use `--mpi-interface`, `--mpi-mca`, and `--mpi-extra-args`
@@ -218,7 +279,7 @@ Recommended practice for real hardware reports:
 - No GPU detected:
   - check `JAX_PLATFORMS`, device visibility, and runtime install (`jaxlib`)
 
-## 7. Suggested Report Template
+## 8. Suggested Report Template
 
 For each machine/cluster:
 - software stack: Python/JAX/jaxlib/mpi4py/mpi4jax/OpenMPI versions

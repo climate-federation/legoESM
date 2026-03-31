@@ -21,6 +21,7 @@
 - `TrainablePhysicsParams` wraps 8 physics parameters as an Equinox module with sigmoid constraints.
 - ERA5 data: `era5_to_state.py` handles lat-lon → model grid conversion with local Zarr cache.
 - Losses: `training/losses.py` imports from `ml/loss.py` — never duplicate loss functions.
+- **MPI AD compatibility**: `global_sum_mpi` (allreduce SUM) has full VJP support; MPI halo exchange uses `_sendrecv_vjp` custom_vjp wrapper. Conservation fixers (`fix_mass`, `zero_mean_tendency`) flow gradients correctly through global reductions. `global_max_mpi` / `global_min_mpi` are NOT differentiable — keep them out of loss functions.
 
 ## Operating Mode
 - For any nontrivial task, start with a short plan before editing.
@@ -60,6 +61,10 @@
 - Then verify rank/device equivalence on the smallest meaningful distributed case.
 - Do not assume Metal, GPU, CPU, spectral, and MPI backends have identical dtype or kernel constraints.
 - On Apple Silicon, keep spectral work on CPU.
+- **MPI distributed path**: `initialize_distributed(global_n=N)` → `scatter_to_local()` → rank-local stepping → `gather_to_global()` for I/O only. Both ModelDriver and the benchmark script use this path. Never create a full global state per rank — always scatter.
+- **Native 4D halo exchange**: `pad_halo_4d()` and `pad_halo_vector_4d()` exchange all vertical levels in one MPI message. All 3D operators in `operators_3d.py` use the 4D path. Do not revert to `vmap(pad_halo)` which issues `nlev` separate messages.
+- **MPI halo AD safety**: All `sendrecv` calls go through `_sendrecv_vjp` (`@jax.custom_vjp` wrapper in `halo_exchange.py`) that swaps source/dest in the backward pass. This enables `jax.grad` through MPI halo exchange. Only `allreduce(SUM)` is AD-safe among MPI reductions; `MAX`, `MIN`, `allgather`, and `bcast` are not differentiable — use only in diagnostics.
+- **Device mesh under MPI**: Pass per-rank device count to `create_device_mesh()`, not the total across all ranks. The function warns when clamping.
 
 ## Validation Rules
 - Always run the narrowest relevant test after edits.
@@ -80,6 +85,9 @@
 - Ocean test matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py`
 - AMIP production: `.venv/bin/python scripts/run_amip.py`
 - Dycore progression suite: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
+- GPU/MPI scaling benchmark: `.venv/bin/python scripts/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (see `docs/REAL_HARDWARE_SCALING.md`)
+- MPI distributed tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/`
+- MPI differentiability tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py`
 
 ## How To Think About Bugs
 - For instability: check CFL, boundary treatment, metric terms, halo exchange, pressure-gradient formulation, diffusion, and dtype first.
