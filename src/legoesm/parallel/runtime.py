@@ -45,8 +45,6 @@ Usage
 from __future__ import annotations
 
 import logging
-import warnings
-from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp

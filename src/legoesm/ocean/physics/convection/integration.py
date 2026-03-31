@@ -9,7 +9,6 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import (
-    wright_eos, compute_hydrostatic_pressure, rho_0 as rho_0_ref,
     compute_ocean_rho as _compute_rho,
     compute_ocean_rho_and_pressure as _compute_rho_and_pressure,
 )

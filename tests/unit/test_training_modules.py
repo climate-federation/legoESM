@@ -145,13 +145,13 @@ class TestDycoreRollout:
 class TestNeuralPhysics:
 
     def test_import_and_construct(self):
-        from legoesm.training.neural_physics import NeuralPhysics
+        from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
         key = jax.random.PRNGKey(0)
         nn = NeuralPhysics(nlev=NLEV, key=key)
         assert hasattr(nn, '__call__')
 
     def test_produces_tendencies(self):
-        from legoesm.training.neural_physics import NeuralPhysics
+        from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
         key = jax.random.PRNGKey(0)
         nn = NeuralPhysics(nlev=NLEV, key=key)
         # NeuralPhysics takes a single packed column vector
@@ -245,7 +245,7 @@ class TestTrainingAPISignatures:
 
     def test_neural_gcm_uses_adapter(self):
         """train_neural_gcm must create a ColumnAdapter, not pass grid directly."""
-        from legoesm.training.neural_physics import make_neural_step_unified
+        from legoesm.atmosphere.physics.neural_physics import make_neural_step_unified
         from legoesm.driver.grid_adapters import make_adapter, ColumnAdapter
         import inspect
 

@@ -19,8 +19,8 @@ Both modes share the same pipeline::
 
 Relationship to other modules
 -----------------------------
-- ``sfno_dycore_coupling.py`` / ``neural_physics.py``: couple learned
-  physics to *grid-space* dycores via ``build_segment_fn``.
+- ``sfno_dycore_coupling.py`` / ``atmosphere.physics.neural_physics``: couple
+  learned physics to *grid-space* dycores via ``build_segment_fn``.
 - ``sfno_pe.py``: SFNO replaces the entire dycore.
 - This module: learned physics *augments* the spectral PE dycore via
   ``spectral_pe_tendencies(..., physics_tendency=learned_output)``.
@@ -62,8 +62,6 @@ from legoesm.ml.channel_packing import PE3DChannelSpec, pack_pe_state, unpack_pe
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.training.era5_to_state import (
     TrainingERA5Config,
-    ensure_local_cache,
-    load_era5_slice,
     era5_to_spectral_carry,
 )
 from legoesm.training.losses import LossConfig, level_weights

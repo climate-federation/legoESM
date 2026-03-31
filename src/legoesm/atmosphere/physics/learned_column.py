@@ -33,7 +33,7 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
     spectral_pe_to_grid,
 )
 from legoesm.grids.gaussian import GaussianGrid, sh_analysis_3d
-from legoesm.training.neural_physics import NeuralPhysics, _pack_column_features
+from legoesm.atmosphere.physics.neural_physics import NeuralPhysics, _pack_column_features
 
 
 def build_column_physics(

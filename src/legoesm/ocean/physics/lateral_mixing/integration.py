@@ -8,10 +8,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.ocean.eos import (
-    wright_eos, compute_hydrostatic_pressure, rho_0 as rho_0_ref,
-    compute_ocean_rho as _compute_rho,
-)
+from legoesm.ocean.eos import compute_ocean_rho as _compute_rho
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig

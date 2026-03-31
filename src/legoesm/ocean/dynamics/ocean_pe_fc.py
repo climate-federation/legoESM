@@ -1,11 +1,12 @@
 """FC-Gram Boussinesq Ocean PE on the cubed-sphere.
 
 Replaces all horizontal operators with FC spectral versions.
-Everything else is identical to ocean_pe.py: Wright EOS, hydrostatic
+Everything else is identical to ocean_pe_cdgrid: Wright EOS, hydrostatic
 pressure, layer thickness, w diagnosis, skew-symmetric momentum,
 vertical advection, vertical diffusion, land masking.
 
-Note: mask AFTER operators, not before (same pattern as ocean_pe.py).
+Divergence damping is applied when fc_config.div_damp_2 or
+fc_config.div_damp_4 are nonzero.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from legoesm.core.operators_fc_3d import (
     fc_hyperdiffusion_3d,
     fc_scalar_advection_3d,
     fc_laplacian_3d,
+    fc_divergence_damping_3d,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
@@ -129,6 +131,13 @@ def ocean_baroclinic_tendencies_fc(
              - 0.5 * u * div_v - dp_dx / rho_0)
     dv_dt = (-zeta * u - f_3d * u_prime - dK_dy
              - 0.5 * v * div_v - dp_dy / rho_0)
+
+    # --- Divergence damping (only if fc_config requests it) ---
+    if fc_config.div_damp_2 > 0 or fc_config.div_damp_4 > 0:
+        du_damp, dv_damp = fc_divergence_damping_3d(
+            u * mask_3d, v * mask_3d, grid, fc_config)
+        du_dt = du_dt + du_damp
+        dv_dt = dv_dt + dv_damp
 
     # --- 8. Vertical advection of u, v ---
     du_dt = du_dt + _vertical_advection_ocean(u, w, z_coord, J)

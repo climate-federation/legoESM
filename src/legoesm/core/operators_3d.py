@@ -24,9 +24,6 @@ from legoesm.core.operators import (
     gradient_x,
     gradient_y,
     divergence,
-    curl_z,
-    hyperdiffusion,
-    laplacian_compact,
 )
 from legoesm.core.operators_fv import (
     fv_flux_divergence as _fv_flux_divergence_2d,

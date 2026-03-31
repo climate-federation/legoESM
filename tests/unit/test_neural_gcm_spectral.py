@@ -318,7 +318,7 @@ class TestConfig:
 
 def _make_small_column_mlp():
     """Create a small NeuralPhysics for testing."""
-    from legoesm.training.neural_physics import NeuralPhysics
+    from legoesm.atmosphere.physics.neural_physics import NeuralPhysics
     return NeuralPhysics(
         nlev=NLEV, hidden_dim=16, n_layers=2,
         key=jax.random.PRNGKey(99), residual_scale=0.01,

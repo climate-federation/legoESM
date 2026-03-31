@@ -23,7 +23,8 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.ocean.init import rest_state_ocean
-from legoesm.ocean.dynamics.ocean_pe import ocean_baroclinic_tendencies
+from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 from legoesm.ocean.dynamics.ocean_model import OceanModel
 from legoesm.ocean.conservation import (
@@ -40,6 +41,11 @@ from legoesm.ocean.conservation import (
 @pytest.fixture
 def grid():
     return create_cubed_sphere(8)
+
+
+@pytest.fixture
+def cdgrid(grid):
+    return create_cubed_sphere_cdgrid(grid)
 
 
 @pytest.fixture
@@ -88,9 +94,9 @@ class TestMetalCompatibility:
         assert jnp.isfinite(rho)
         assert 1020.0 < float(rho) < 1030.0
 
-    def test_tendencies_finite(self, state, grid, z_coord, config):
+    def test_tendencies_finite(self, state, grid, cdgrid, z_coord, config):
         """Baroclinic tendencies should be finite (works in any precision)."""
-        tend = ocean_baroclinic_tendencies(state, grid, z_coord, config)
+        tend = ocean_baroclinic_tendencies_cdgrid(state, grid, z_coord, cdgrid, config)
         for leaf in jax.tree.leaves(tend):
             if hasattr(leaf, 'dtype') and jnp.issubdtype(leaf.dtype, jnp.floating):
                 assert jnp.all(jnp.isfinite(leaf))
@@ -184,12 +190,12 @@ class TestSharding:
                     f"Expected face dim 6, got shape {leaf.shape}"
                 )
 
-    def test_tendencies_shardable(self, state, grid, z_coord, config):
+    def test_tendencies_shardable(self, state, grid, cdgrid, z_coord, config):
         """OceanTendencies should be shardable."""
         from legoesm.parallel.mesh import create_device_mesh, shard_pytree
 
         dc = create_device_mesh(n_devices=1)
-        tend = ocean_baroclinic_tendencies(state, grid, z_coord, config)
+        tend = ocean_baroclinic_tendencies_cdgrid(state, grid, z_coord, cdgrid, config)
         sharded_tend = shard_pytree(tend, dc)
         assert sharded_tend.du_dt.data.shape == tend.du_dt.data.shape
 
@@ -322,25 +328,25 @@ class TestDifferentiability:
         grad = jax.grad(loss)(jnp.array(1025.0))
         assert jnp.isfinite(grad)
 
-    def test_grad_through_tendencies(self, state, grid, z_coord, config):
+    def test_grad_through_tendencies(self, state, grid, cdgrid, z_coord, config):
         """jax.grad should work through baroclinic tendency computation."""
         def loss_fn(eta_data):
             s = state._replace(
                 eta=state.eta.replace(data=eta_data),
             )
-            tend = ocean_baroclinic_tendencies(s, grid, z_coord, config)
+            tend = ocean_baroclinic_tendencies_cdgrid(s, grid, z_coord, cdgrid, config)
             return jnp.sum(tend.du_dt.data ** 2)
 
         grad = jax.grad(loss_fn)(state.eta.data)
         assert jnp.all(jnp.isfinite(grad))
 
-    def test_grad_through_temperature(self, state, grid, z_coord, config):
+    def test_grad_through_temperature(self, state, grid, cdgrid, z_coord, config):
         """jax.grad should work through temperature tendencies."""
         def loss_fn(T_data):
             s = state._replace(
                 T=state.T.replace(data=T_data),
             )
-            tend = ocean_baroclinic_tendencies(s, grid, z_coord, config)
+            tend = ocean_baroclinic_tendencies_cdgrid(s, grid, z_coord, cdgrid, config)
             return jnp.sum(tend.dT_dt.data ** 2)
 
         grad = jax.grad(loss_fn)(state.T.data)
@@ -406,11 +412,11 @@ class TestDifferentiability:
         assert rho_batch.shape == (5,)
         assert jnp.all(jnp.isfinite(rho_batch))
 
-    def test_jit_through_tendencies(self, state, grid, z_coord, config):
+    def test_jit_through_tendencies(self, state, grid, cdgrid, z_coord, config):
         """jax.jit should work through tendency computation."""
         @jax.jit
         def compute_tend(s):
-            return ocean_baroclinic_tendencies(s, grid, z_coord, config)
+            return ocean_baroclinic_tendencies_cdgrid(s, grid, z_coord, cdgrid, config)
 
         tend = compute_tend(state)
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
@@ -509,13 +515,13 @@ class TestLandMaskingTransformations:
             assert float(jnp.max(jnp.abs(new_state.v.data[land]))) == 0.0
             assert float(jnp.max(jnp.abs(new_state.eta.data[land]))) == 0.0
 
-    def test_land_mask_preserved_through_grad(self, state, grid, z_coord, config):
+    def test_land_mask_preserved_through_grad(self, state, grid, cdgrid, z_coord, config):
         """Gradients should respect land masking (zero on land)."""
         def loss_fn(eta_data):
             s = state._replace(
                 eta=state.eta.replace(data=eta_data),
             )
-            tend = ocean_baroclinic_tendencies(s, grid, z_coord, config)
+            tend = ocean_baroclinic_tendencies_cdgrid(s, grid, z_coord, cdgrid, config)
             return jnp.sum(tend.deta_dt.data ** 2)
 
         grad = jax.grad(loss_fn)(state.eta.data)

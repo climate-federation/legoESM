@@ -47,7 +47,7 @@
 \section{Introduction}
 %=============================================================================
 
-legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, sea-ice, and biogeochemical components on the sphere, with 25+ dynamical cores spanning five discretisation families (C-D grid FV3, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and 30+ physics parameterisations.  The cubed-sphere implementation is unified around a single FV3-style C-D grid discretisation (Lin 2004, Putman \& Lin 2007) shared by atmosphere (shallow water, hydrostatic PE, non-hydrostatic CE) and ocean, eliminating the Hollingsworth--Kallberg instability.  As of v3.9, the cubed-sphere transport uses an FV3-faithful PPM reconstruction with monotonicity limiters and flux-form mass transport on staggered grids.  The model includes a land carbon cycle with Farquhar photosynthesis and stomatal conductance, ocean biogeochemistry (abiotic carbon + NPZD ecosystem), sea-ice dynamics with EVP rheology and multi-category ice, CMIP6-class infrastructure (CF/CMOR output, experiment templates, restart reproducibility, documented tuning), and a fully differentiable 4D-Var data assimilation system leveraging JAX autodiff for adjoint-free gradient computation.  The codebase comprises approximately 363 source modules (${\sim}$90,000 lines of code) validated by 2949 tests across 208 test files.
+legoESM is a modular Earth System Model written entirely in JAX, supporting automatic differentiation through all components.  The model couples atmospheric, oceanic, land, sea-ice, and biogeochemical components on the sphere, with 25+ dynamical cores spanning five discretisation families (C-D grid FV3, finite-volume PPM, pseudospectral, FC-Gram, C-grid) and 35+ physics parameterisations.  The cubed-sphere implementation is unified around a single FV3-style C-D grid discretisation (Lin 2004, Putman \& Lin 2007) shared by atmosphere (shallow water, hydrostatic PE, non-hydrostatic CE) and ocean, eliminating the Hollingsworth--Kallberg instability.  The cubed-sphere transport uses an FV3-faithful PPM reconstruction with monotonicity limiters and flux-form mass transport on staggered grids, complemented by an FV3-exact forward--backward shallow-water core (\texttt{fv3\_sw\_core.py}) implementing the full c\_sw/d\_sw stepping and d2a2c\_vect (D-grid $\to$ A-grid $\to$ C-grid) vector conversion with duo-grid sub-grid metrics ($\sin\alpha_{\mathrm{sg}}$, $\cos\alpha_{\mathrm{sg}}$) following Mouallem et al.\ (2023).  The model includes a land carbon cycle with Farquhar photosynthesis and stomatal conductance, ocean biogeochemistry (abiotic carbon + NPZD ecosystem), sea-ice dynamics with EVP rheology and multi-category ice, CMIP6-class infrastructure (CF/CMOR output across four tables, experiment templates, restart reproducibility, documented tuning), and a fully differentiable 4D-Var data assimilation system leveraging JAX autodiff for adjoint-free gradient computation.  The MPI-distributed runtime supports native 4D halo exchange (one message per neighbour for all vertical levels), reverse-mode AD through MPI via a custom \texttt{sendrecv} VJP wrapper, and AD-safe \texttt{allreduce(SUM)} for gradient-compatible global reductions.  The codebase comprises approximately 385 source modules (${\sim}$102,000 lines of code) validated by 3489 tests across 216 test files.
 
 \paragraph{Design principles.}
 \begin{itemize}[nosep]
@@ -105,6 +105,8 @@ Wind rotation between geographic $(u_E,v_N)$ and grid-aligned $(u_g,v_g)$:
 Scalar fields are exchanged directly across the six-face connectivity table.  Vector fields are first rotated to geographic components, padded as scalars, then rotated back using the padded grid angle.
 
 Two halo widths are supported.  \textbf{Halo\,=\,1} (one ghost cell per side) suffices for second-order centred differences and MUSCL reconstruction.  \textbf{Halo\,=\,2} (two ghost cells per side) is required by higher-order reconstruction stencils (PPM, WENO5).  The halo exchange interpolates neighbour-face strips to the correct gnomonic position at each depth, removing the O($\Delta\alpha$) mismatch near cube corners.
+
+Under MPI, the native \textbf{4D halo exchange} path (\texttt{pad\_halo\_4d}, \texttt{pad\_halo\_vector\_4d}) exchanges all vertical levels in a single MPI message per neighbour, replacing the earlier per-level \texttt{vmap(pad\_halo)} path.  All \texttt{sendrecv} calls go through a \texttt{@jax.custom\_vjp} wrapper that swaps source/dest in the backward pass, enabling \texttt{jax.grad} through distributed halo exchange for differentiable MPI simulations.
 
 %-----------------------------------------------------------------------------
 \subsection{Gaussian Grid and Spectral Transforms}
@@ -261,6 +263,18 @@ Scalar transport uses upwind C-grid mass fluxes:
   \frac{\dd h}{\dd t} = -\frac{1}{A}\bigl[(h u_c)_{i+\half,j}-(h u_c)_{i-\half,j}+(h v_c)_{i,j+\half}-(h v_c)_{i,j-\half}\bigr],
 \end{equation}
 where $u_c,v_c$ are diagnosed from $u_d,v_d$ by face-edge averaging.
+
+\paragraph{FV3 forward--backward shallow-water core (\texttt{fv3\_sw\_core.py}).}
+An FV3-exact implementation of the complete c\_sw/d\_sw forward--backward stepping algorithm (Lin 2004).  The forward step (c\_sw) computes C-grid mass fluxes and height tendencies; the backward step (d\_sw) updates D-grid winds using the vorticity flux and pressure gradient.  Key components:
+\begin{itemize}[nosep]
+  \item \textbf{d2a2c\_vect}: D-grid $\to$ A-grid $\to$ C-grid vector conversion, faithfully porting the GFDL FV3 algorithm including edge-boundary stencils, one-sided interpolation near cube edges, and non-orthogonality corrections via $\cos\alpha$/$\sin^{-2}\!\alpha$ metrics.
+  \item \textbf{PPM wind advection}: Piecewise Parabolic Method reconstruction for C-grid wind tendencies (\texttt{xtp\_u}, \texttt{ytp\_v}), with FV3-specific interpolation coefficients ($A_1$, $A_2$, $C_1$--$C_3$).
+  \item \textbf{PPM vorticity transport}: Monotonic PPM reconstruction for the absolute vorticity flux, stabilising the D-grid wind update.
+  \item \textbf{Kinetic energy}: Cell-centred kinetic energy computed from A-grid velocities with optional 4th-order averaging via \texttt{a2b\_ord4}.
+\end{itemize}
+
+\paragraph{Duo-grid sub-grid metrics (Mouallem et al.\ 2023).}
+The cubed-sphere C-D grid includes 9-point sub-grid angle metrics per cell, stored as $\sin\alpha_{\mathrm{sg}}$ and $\cos\alpha_{\mathrm{sg}}$ arrays of shape $(6,n,n,9)$.  These encode the local deviation from orthogonality at cell centres, edge midpoints, and corners, enabling FV3-faithful flux scaling at cube-face boundaries where the gnomonic projection introduces non-orthogonality.  Additional C-D grid metrics include centre-to-centre distances $\Delta x_c$, $\Delta y_c$, and non-orthogonality factors $\cos\alpha_{\mathrm{corner}}$, $(\sin^2\!\alpha_{\mathrm{corner}})^{-1}$ at D-grid corners.
 
 \subsection{Laplacian and Hyperdiffusion}
 \begin{equation}
@@ -1072,7 +1086,7 @@ where $\mu_P = \mu_{\max}\,f(T)\,\min(L_N,L_I)$ with Michaelis-Menten nutrient l
 
 \subsection{CF/CMOR-Compliant Output}
 
-The \texttt{CFWriter} class produces CF-1.8 NetCDF4 files with CMIP6 Data Reference Syntax (DRS) filenames: \texttt{<var>\_<table>\_<model>\_<expt>\_<variant>\_<grid>.nc}.  Two CMOR tables are provided: \texttt{Amon} (21 atmospheric variables) and \texttt{Lmon} (6 land variables).
+The \texttt{CFWriter} class produces CF-1.8 NetCDF4 files with CMIP6 Data Reference Syntax (DRS) filenames: \texttt{<var>\_<table>\_<model>\_<expt>\_<variant>\_<grid>.nc}.  Four CMOR tables are provided: \texttt{Amon} (33 atmospheric variables including clear-sky radiative fluxes, cloud condensate, and relative humidity), \texttt{Lmon} (6 land variables), \texttt{Omon} (2 ocean variables: SST and sea-ice fraction), and \texttt{Aday} (5 daily atmospheric variables).  3-D fields are interpolated to a standard CMIP6 19-level pressure grid.
 
 \subsection{Experiment Templates}
 
@@ -1237,6 +1251,10 @@ A parametric model of vertical eddy fluxes in the atmosphere.
 \item[Medlyn, B.E.\ et al.\ (2011)]
 Reconciling the optimal and empirical approaches to modelling stomatal conductance.
 \textit{Global Change Biol.}, \textbf{17}, 2134--2144.
+
+\item[Mouallem, J., L.M.\ Harris, and R.\ Benson (2023)]
+A duo-grid methodology for cubed-sphere shallow water models.
+\textit{J.\ Comput.\ Phys.}, \textbf{485}, 112097.
 
 \item[Putman, W.M.\ and S.-J.\ Lin (2007)]
 Finite-volume transport on various cubed-sphere grids.

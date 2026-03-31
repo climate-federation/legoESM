@@ -9,7 +9,6 @@ from legoesm.ocean.init import rest_state_ocean
 from legoesm.ocean.state import OceanConfig
 from legoesm.ocean.eos import wright_eos
 from legoesm.ocean.dynamics.ocean_pe_fc import ocean_baroclinic_tendencies_fc
-from legoesm.ocean.dynamics.ocean_pe_fc_cgrid import ocean_baroclinic_tendencies_fc_cgrid
 from legoesm.core.operators_fc import build_fc_config
 
 
@@ -76,7 +75,7 @@ def test_ocean_fc_cgrid_div_damping(ocean_grid, ocean_z_coord, ocean_state):
     """FC + div-damping ocean tendencies have correct shapes."""
     fc_config = build_fc_config(d=2, C=4, degree=5, div_damp_2=1e5)
     config = OceanConfig(A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0, hyperdiff_coeff=0.0)
-    tend = ocean_baroclinic_tendencies_fc_cgrid(
+    tend = ocean_baroclinic_tendencies_fc(
         ocean_state, ocean_grid, ocean_z_coord, fc_config, config,
     )
     assert tend.du_dt.data.shape == (6, 8, 8, 5)

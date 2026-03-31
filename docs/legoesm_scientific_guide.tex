@@ -60,7 +60,7 @@
   \includegraphics[width=0.35\textwidth]{../legoESM.png}\\[12pt]
   \textbf{legoESM Scientific Guide}\\[6pt]
   {\Large A Fully Differentiable Earth System Model in JAX}\\[6pt]
-  {\large Version 3.9 --- March 2026}
+  {\large Version 4.0 --- March 2026}
 }
 \author{legoESM Development Team}
 \date{}
@@ -96,11 +96,11 @@ estimation, hybrid AI--physics modelling, and sensitivity analysis.
 
 The model features:
 \begin{itemize}[nosep]
-  \item \textbf{24+ dynamical cores} spanning five discretisation families
+  \item \textbf{25+ dynamical cores} spanning five discretisation families
     (C-D grid FV3, spectral, finite-volume lat-lon, C-grid lat-lon, and
     MPAS/Voronoi), with shallow water, hydrostatic primitive equation,
     and non-hydrostatic compressible Euler equation sets;
-  \item \textbf{25+ physics parameterisations} for radiation, convection,
+  \item \textbf{35+ physics parameterisations} for radiation, convection,
     microphysics, boundary-layer turbulence, clouds, gravity wave drag,
     and surface exchange;
   \item A \textbf{3D Boussinesq ocean} with split-explicit barotropic
@@ -217,6 +217,22 @@ Scalar fields are exchanged directly across the six-face connectivity table.
 Vector fields are first rotated to geographic components, padded as scalars,
 then rotated back.  Two halo widths are supported: halo\,=\,1 for second-order
 and MUSCL stencils, and halo\,=\,2 for PPM/WENO5 and biharmonic operators.
+
+\paragraph{Native 4D halo exchange.}
+All 3D operators use a 4D halo path (\texttt{pad\_halo\_4d},
+\texttt{pad\_halo\_vector\_4d}) that exchanges all vertical levels in a
+single MPI message per neighbour, replacing the earlier
+\texttt{vmap(pad\_halo)} path which issued $n_{\mathrm{lev}}$ separate
+messages.
+
+\paragraph{MPI differentiability.}
+All \texttt{sendrecv} calls go through a \texttt{@jax.custom\_vjp}
+wrapper (\texttt{\_sendrecv\_vjp} in \texttt{halo\_exchange.py}) that
+swaps source and destination ranks in the backward pass, enabling
+\texttt{jax.grad} through distributed halo exchange.  Only
+\texttt{allreduce(SUM)} is AD-safe among MPI reductions;
+\texttt{MAX}/\texttt{MIN}/\texttt{allgather}/\texttt{bcast} are used
+only in diagnostics and are not differentiable.
 
 
 % ---------------------------------------------------------------------------
@@ -507,6 +523,50 @@ to implement FV3-faithful Piecewise Parabolic Method (PPM) transport
     ($\nu_4 = \Delta x^4/\tau_{\mathrm{efold}}$).
 \end{itemize}
 The module spans approximately 740~lines of JAX code.
+
+\paragraph{FV3 forward--backward shallow-water core (v4.0).}
+An FV3-exact implementation of the complete c\_sw/d\_sw forward--backward
+stepping algorithm is provided in \texttt{fv3\_sw\_core.py}.  The forward
+step (c\_sw) computes C-grid mass fluxes and height tendencies; the backward
+step (d\_sw) updates D-grid winds using the vorticity flux and Bernoulli
+gradient.
+
+\subparagraph{d2a2c\_vect.}
+The D-grid $\to$ A-grid $\to$ C-grid vector conversion faithfully ports
+the GFDL FV3 algorithm, including:
+\begin{itemize}[nosep]
+  \item Edge-boundary stencils with one-sided 4-point interpolation at
+    cube-face edges;
+  \item Non-orthogonality corrections via $\cos\alpha$ and
+    $(\sin^2\!\alpha)^{-1}$ corner metrics;
+  \item Halo-aware padding with face-boundary detection.
+\end{itemize}
+
+\subparagraph{PPM wind and vorticity transport.}
+C-grid wind tendencies (\texttt{xtp\_u}, \texttt{ytp\_v}) and absolute
+vorticity flux use Piecewise Parabolic Method reconstruction with
+FV3-specific interpolation coefficients ($A_1$, $A_2$, $C_1$--$C_3$)
+and Colella--Woodward monotonicity limiters.
+
+\subparagraph{Cell-centred kinetic energy.}
+Kinetic energy is computed from A-grid velocities at cell centres, with
+an optional 4th-order averaging stencil (\texttt{a2b\_ord4}).
+
+\paragraph{Duo-grid sub-grid metrics (Mouallem et al.\ 2023).}
+The cubed-sphere C-D grid computes 9-point sub-grid angle metrics per cell:
+\begin{equation}
+  \sin\alpha_{\mathrm{sg}},\;\cos\alpha_{\mathrm{sg}} \in \mathbb{R}^{6 \times n \times n \times 9},
+\end{equation}
+encoding the local deviation from orthogonality at cell centres, edge
+midpoints, and corners.  These enable FV3-faithful flux scaling at
+cube-face boundaries where the gnomonic projection introduces
+non-orthogonality.  Additional C-D grid metrics:
+\begin{itemize}[nosep]
+  \item Centre-to-centre distances $\Delta x_c$ (shape $6 \times (n\!+\!1) \times n$)
+    and $\Delta y_c$ (shape $6 \times n \times (n\!+\!1)$);
+  \item Non-orthogonality factors $\cos\alpha_{\mathrm{corner}}$ and
+    $(\sin^2\!\alpha_{\mathrm{corner}})^{-1}$ at D-grid corners.
+\end{itemize}
 
 \subsection{Lat-Lon Finite Volume Discretisation}
 
@@ -2029,6 +2089,49 @@ Heat and salt: uniform additive correction per unit volume.
 
 
 % #############################################################################
+\chapter{Differentiable Training}
+\label{ch:training}
+% #############################################################################
+
+The \texttt{training/} module provides end-to-end differentiable training
+pipelines for three modes:
+
+\section{Physics Parameter Tuning}
+
+\texttt{TrainablePhysicsParams} wraps 8 physics parameters (convective
+relaxation time, mixing length, drag coefficients, etc.) as an Equinox
+module with sigmoid-based constraints mapping from unconstrained space to
+valid physical ranges.  Gradients flow through
+\texttt{eqx.filter\_value\_and\_grad} applied to the model's
+\texttt{build\_segment\_fn(...).raw} (non-JIT, non-donating variant for AD
+compatibility).
+
+\section{Neural GCM Training}
+
+Spectral neural GCM training couples a learned column model with the
+spectral dynamical core.  The loss function combines area-weighted MSE,
+spectral loss (penalising errors at each total wavenumber), and
+per-variable MSE, imported from \texttt{ml/loss.py}.  Optimisation uses
+\texttt{ml/training.create\_optimizer()} (warmup + cosine decay + gradient
+clipping).
+
+\section{SFNO--Dycore Coupling}
+
+The Spherical Fourier Neural Operator can be coupled to any dynamical
+core for hybrid learned--physical simulations.  Training uses the same
+segment-based architecture, with \texttt{SegmentForcing} as an explicit
+argument (not closure-captured) to prevent JIT recompilation when forcing
+data changes.
+
+\section{ERA5 Data Ingestion}
+
+\texttt{era5\_to\_state.py} converts ERA5 reanalysis (lat-lon) to any
+model grid with a local Zarr cache for efficient repeated access.
+Vertical interpolation handles pressure-to-sigma/hybrid coordinate
+mapping.
+
+
+% #############################################################################
 \chapter{Parallel Runtime}
 \label{ch:parallel}
 % #############################################################################
@@ -2055,11 +2158,32 @@ validates device counts, and routes to the correct halo/reduction backend.
 
 \paragraph{Cubed sphere.}
 Valid device counts: 1, 2, 3, 6, and $6k^2$ for $k\ge 2$.
-Each face can be further tiled.
+Each face can be further tiled into sub-face patches.
+\texttt{initialize\_distributed(global\_n=N)} $\to$
+\texttt{scatter\_to\_local()} distributes the global state to rank-local
+patches; \texttt{gather\_to\_global()} is used only for I/O.
 
 \paragraph{Voronoi/MPAS.}
 RCB geometric partitioner (no external dependencies) or METIS graph
 partitioner.  Two-layer halo for biharmonic operators.
+
+\section{MPI Differentiability}
+
+All halo exchange \texttt{sendrecv} calls go through a
+\texttt{@jax.custom\_vjp} wrapper (\texttt{\_sendrecv\_vjp}) that swaps
+source and destination ranks in the backward pass, enabling
+\texttt{jax.grad} through distributed halo exchange.  Global reductions
+use AD-safe \texttt{allreduce(SUM)} with a custom VJP; \texttt{MAX},
+\texttt{MIN}, \texttt{allgather}, and \texttt{bcast} are not
+differentiable and are used only in diagnostics.  Conservation fixers
+(\texttt{fix\_mass}, \texttt{zero\_mean\_tendency}) correctly flow
+gradients through global reductions.
+
+The native 4D halo exchange path (\texttt{pad\_halo\_4d},
+\texttt{pad\_halo\_vector\_4d}) exchanges all vertical levels in one
+MPI message per neighbour, replacing the earlier per-level
+\texttt{vmap(pad\_halo)} which issued $n_{\mathrm{lev}}$ separate
+messages.
 
 \section{Ensemble Parallelism}
 
@@ -2077,8 +2201,11 @@ mean/std/percentile diagnostics, and gradient checkpointing.
 
 CF-1.8 NetCDF4 files with CMIP6 Data Reference Syntax (DRS) filenames:
 \texttt{<var>\_<table>\_<model>\_<expt>\_<variant>\_<grid>.nc}.
-Two CMOR tables: Amon (21 atmospheric variables) and Lmon (6 land variables)
-on a standard 19-level pressure grid.
+Four CMOR tables: Amon (33 atmospheric variables including clear-sky
+radiative fluxes, cloud condensate, and relative humidity), Lmon
+(6 land variables), Omon (2 ocean variables: SST and sea-ice fraction),
+and Aday (5 daily atmospheric variables) on a standard 19-level pressure
+grid.
 
 \section{Experiment Templates}
 
@@ -2109,9 +2236,9 @@ and git hash.
 \label{ch:verification}
 % #############################################################################
 
-The legoESM codebase comprises approximately 363~source modules
-($\sim$90{,}000~lines of code), validated by 2{,}949~tests across
-208~test files.
+The legoESM codebase comprises approximately 385~source modules
+($\sim$102{,}000~lines of code), validated by 3{,}489~tests across
+216~test files.
 
 \section{Williamson Standard Test Cases}
 \label{sec:williamson}
@@ -2154,6 +2281,20 @@ All five shallow water discretisations are compared on the same test
 problems, verifying consistent convergence rates and inter-scheme
 agreement in error norms.  This ensures that the shared physics interface
 produces consistent results regardless of the dynamical core choice.
+
+\section{MPI Distributed Tests}
+
+Dedicated distributed test suites (\texttt{tests/distributed/}) verify:
+\begin{itemize}[nosep]
+  \item \textbf{Halo exchange correctness}: Scalar and vector 4D halo
+    exchange on 2--6 ranks matches serial reference within round-off;
+  \item \textbf{MPI differentiability}: \texttt{jax.grad} through
+    halo-exchange and allreduce operations produces gradients matching
+    single-rank reference (\texttt{test\_mpi\_differentiability.py});
+  \item \textbf{MPI driver integration}: Full model stepping under MPI
+    produces results consistent with serial execution
+    (\texttt{test\_mpi\_driver.py}).
+\end{itemize}
 
 
 % #############################################################################
@@ -2353,6 +2494,11 @@ Pincus, R., E.J.~Mlawer, and J.S.~Delamere, 2019:
 Balancing accuracy, efficiency, and flexibility in radiation calculations
 for dynamical models.
 \textit{J.\ Adv.\ Model.\ Earth Syst.}, \textbf{11}, 3074--3089.
+
+\bibitem[Mouallem et al.(2023)]{Mouallem2023}
+Mouallem, J., L.M.~Harris, and R.~Benson, 2023:
+A duo-grid methodology for cubed-sphere shallow water models.
+\textit{J.\ Comput.\ Phys.}, \textbf{485}, 112097.
 
 \bibitem[Putman and Lin(2007)]{PutmanLin2007}
 Putman, W.M.\ and S.-J.~Lin, 2007:

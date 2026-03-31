@@ -22,11 +22,9 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.grids.halo import pad_halo, pad_halo_vector
+from legoesm.grids.halo import pad_halo_vector
 from legoesm.core.operators_cdgrid import (
     _pad_halo_auto,
-    _pad_halo_auto_h2,
-    _broadcast_metric,
     cgrid_mass_flux_divergence,
     dgrid_vorticity,
     _interp_center_to_corner,

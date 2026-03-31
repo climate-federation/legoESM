@@ -31,3 +31,8 @@ from legoesm.atmosphere.physics.combined import (
     PhysicsConfig,
     make_physics,
 )
+from legoesm.atmosphere.physics.neural_physics import (
+    NeuralPhysics,
+    make_neural_step_unified,
+    make_hybrid_step_unified,
+)

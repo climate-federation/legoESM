@@ -36,8 +36,9 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.ocean.init import rest_state_ocean, idealized_bathymetry
-from legoesm.ocean.dynamics.ocean_pe import (
-    ocean_baroclinic_tendencies,
+from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
+    ocean_baroclinic_tendencies_cdgrid,
     _vertical_advection_ocean,
 )
 from legoesm.ocean.physics.mixing import vertical_diffusion
@@ -59,6 +60,12 @@ from legoesm.ocean.conservation import (
 def ocean_grid():
     """Small C8 cubed-sphere grid for fast tests."""
     return create_cubed_sphere(8)
+
+
+@pytest.fixture
+def ocean_cdgrid(ocean_grid):
+    """CDGrid for tendency computation."""
+    return create_cubed_sphere_cdgrid(ocean_grid)
 
 
 @pytest.fixture
@@ -289,10 +296,10 @@ class TestOceanState:
 class TestOceanTendencies:
     """Tests for ocean baroclinic tendency computation."""
 
-    def test_rest_state_small_tendencies(self, ocean_state, ocean_grid, ocean_z_coord, ocean_config):
+    def test_rest_state_small_tendencies(self, ocean_state, ocean_grid, ocean_cdgrid, ocean_z_coord, ocean_config):
         """Rest state should produce near-zero tendencies."""
-        tend = ocean_baroclinic_tendencies(
-            ocean_state, ocean_grid, ocean_z_coord, ocean_config,
+        tend = ocean_baroclinic_tendencies_cdgrid(
+            ocean_state, ocean_grid, ocean_z_coord, ocean_cdgrid, ocean_config,
         )
         # Velocity tendencies should be small (Coriolis on zero velocity = 0)
         assert float(jnp.max(jnp.abs(tend.du_dt.data))) < 1e-3
@@ -300,10 +307,10 @@ class TestOceanTendencies:
         # Eta tendency should be small
         assert float(jnp.max(jnp.abs(tend.deta_dt.data))) < 1e-3
 
-    def test_tendencies_finite(self, ocean_state, ocean_grid, ocean_z_coord, ocean_config):
+    def test_tendencies_finite(self, ocean_state, ocean_grid, ocean_cdgrid, ocean_z_coord, ocean_config):
         """All tendencies should be finite."""
-        tend = ocean_baroclinic_tendencies(
-            ocean_state, ocean_grid, ocean_z_coord, ocean_config,
+        tend = ocean_baroclinic_tendencies_cdgrid(
+            ocean_state, ocean_grid, ocean_z_coord, ocean_cdgrid, ocean_config,
         )
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
         assert jnp.all(jnp.isfinite(tend.dv_dt.data))
@@ -311,7 +318,7 @@ class TestOceanTendencies:
         assert jnp.all(jnp.isfinite(tend.dS_dt.data))
         assert jnp.all(jnp.isfinite(tend.deta_dt.data))
 
-    def test_tendencies_finite_for_thin_columns(self, ocean_state, ocean_grid, ocean_z_coord):
+    def test_tendencies_finite_for_thin_columns(self, ocean_state, ocean_grid, ocean_cdgrid, ocean_z_coord):
         """Tendency path should remain finite when eta approaches dry columns."""
         state_thin = ocean_state._replace(
             eta=ocean_state.eta.replace(
@@ -327,8 +334,8 @@ class TestOceanTendencies:
             hyperdiff_coeff=0.0,
             min_water_column_m=0.5,
         )
-        tend = ocean_baroclinic_tendencies(
-            state_thin, ocean_grid, ocean_z_coord, config,
+        tend = ocean_baroclinic_tendencies_cdgrid(
+            state_thin, ocean_grid, ocean_z_coord, ocean_cdgrid, config,
         )
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
         assert jnp.all(jnp.isfinite(tend.dv_dt.data))
@@ -336,21 +343,21 @@ class TestOceanTendencies:
         assert jnp.all(jnp.isfinite(tend.dS_dt.data))
         assert jnp.all(jnp.isfinite(tend.deta_dt.data))
 
-    def test_static_fields_zero_tendency(self, ocean_state, ocean_grid, ocean_z_coord, ocean_config):
+    def test_static_fields_zero_tendency(self, ocean_state, ocean_grid, ocean_cdgrid, ocean_z_coord, ocean_config):
         """H_bathy and land_mask tendencies should be exactly zero."""
-        tend = ocean_baroclinic_tendencies(
-            ocean_state, ocean_grid, ocean_z_coord, ocean_config,
+        tend = ocean_baroclinic_tendencies_cdgrid(
+            ocean_state, ocean_grid, ocean_z_coord, ocean_cdgrid, ocean_config,
         )
         assert float(jnp.max(jnp.abs(tend.dH_bathy_dt.data))) == 0.0
         assert float(jnp.max(jnp.abs(tend.dland_mask_dt.data))) == 0.0
 
-    def test_land_masking(self, ocean_grid, ocean_z_coord, ocean_config):
+    def test_land_masking(self, ocean_grid, ocean_cdgrid, ocean_z_coord, ocean_config):
         """Tendencies should be exactly zero on land cells."""
         state = rest_state_ocean(
             ocean_grid, ocean_z_coord, H_max=4000.0, land_lat_threshold=60.0,
         )
-        tend = ocean_baroclinic_tendencies(
-            state, ocean_grid, ocean_z_coord, ocean_config,
+        tend = ocean_baroclinic_tendencies_cdgrid(
+            state, ocean_grid, ocean_z_coord, ocean_cdgrid, ocean_config,
         )
         land = state.land_mask.data < 0.5
         # On land cells, all tendencies should be zero
@@ -358,7 +365,7 @@ class TestOceanTendencies:
         assert float(jnp.max(jnp.abs(tend.dv_dt.data[land]))) == 0.0
         assert float(jnp.max(jnp.abs(tend.deta_dt.data[land]))) == 0.0
 
-    def test_coriolis_applies_to_baroclinic_shear(self, ocean_grid, ocean_z_coord):
+    def test_coriolis_applies_to_baroclinic_shear(self, ocean_grid, ocean_cdgrid, ocean_z_coord):
         """FV tendencies should include planetary Coriolis on shear flow."""
         state = rest_state_ocean(
             ocean_grid, ocean_z_coord, H_max=4000.0, land_lat_threshold=90.0,
@@ -378,7 +385,7 @@ class TestOceanTendencies:
             A_h=0.0, K_h=0.0, A_v=0.0, K_v=0.0,
             hyperdiff_coeff=0.0,
         )
-        tend = ocean_baroclinic_tendencies(state, ocean_grid, ocean_z_coord, config)
+        tend = ocean_baroclinic_tendencies_cdgrid(state, ocean_grid, ocean_z_coord, ocean_cdgrid, config)
         # Exclude equatorial points where f=0 and bottom level where upwind BC can zero tendency.
         off_equator = jnp.abs(ocean_grid.f) > 1.0e-8
         shear_not_zero = jnp.max(jnp.abs(v_shear), axis=-1) > 1.0e-6
@@ -694,14 +701,14 @@ class TestOceanConservation:
 class TestOceanDifferentiability:
     """Tests for JAX differentiability through ocean model."""
 
-    def test_grad_through_tendencies(self, ocean_state, ocean_grid, ocean_z_coord, ocean_config):
+    def test_grad_through_tendencies(self, ocean_state, ocean_grid, ocean_cdgrid, ocean_z_coord, ocean_config):
         """jax.grad should work through tendency computation."""
         def loss_fn(eta_data):
             state = ocean_state._replace(
                 eta=ocean_state.eta.replace(data=eta_data),
             )
-            tend = ocean_baroclinic_tendencies(
-                state, ocean_grid, ocean_z_coord, ocean_config,
+            tend = ocean_baroclinic_tendencies_cdgrid(
+                state, ocean_grid, ocean_z_coord, ocean_cdgrid, ocean_config,
             )
             return jnp.sum(tend.du_dt.data**2)
 

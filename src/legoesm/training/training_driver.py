@@ -244,7 +244,7 @@ def train_neural_gcm(
     neural_physics : updated NeuralPhysics
     list[float] — loss history
     """
-    from legoesm.training.neural_physics import make_neural_step_unified
+    from legoesm.atmosphere.physics.neural_physics import make_neural_step_unified
     from legoesm.driver.grid_adapters import make_adapter
 
     sigma_full = jnp.asarray(sigma.sigma_full)
