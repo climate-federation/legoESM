@@ -197,9 +197,7 @@ class TestMPIHaloExchange:
     def test_halo_exchange_produces_finite_result(self, topology):
         """A scalar halo exchange should produce finite results on local faces."""
         from legoesm.grids.halo import pad_halo
-        from legoesm.parallel.distributed import partition_state, gather_state
-
-        import warnings
+        from legoesm.parallel.distributed import scatter_to_local
 
         n = 4
         # Create a known field: face i has value i+1.
@@ -207,10 +205,8 @@ class TestMPIHaloExchange:
         for f in range(6):
             data = data.at[f].set(float(f + 1))
 
-        # Partition (zero non-local faces) and exchange halos.
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            partitioned = partition_state(data, topology)
+        # Scatter to rank-local faces and exchange halos.
+        partitioned = scatter_to_local(data)
 
         result = pad_halo(partitioned)
         assert result.shape == (6, n + 2, n + 2)
@@ -222,17 +218,13 @@ class TestMPIHaloExchange:
     def test_halo_exchange_roundtrip(self, topology):
         """partition -> halo -> gather should recover local interior data."""
         from legoesm.grids.halo import pad_halo
-        from legoesm.parallel.distributed import partition_state, gather_state
-
-        import warnings
+        from legoesm.parallel.distributed import scatter_to_local
 
         n = 8
         key = jax.random.PRNGKey(42)
         data = jax.random.normal(key, (6, n, n), dtype=jnp.float32)
 
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            partitioned = partition_state(data, topology)
+        partitioned = scatter_to_local(data)
 
         result = pad_halo(partitioned)
         # Interior of each local face should match original data.

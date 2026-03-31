@@ -161,42 +161,40 @@ class TestParallelRuntimeSerial:
 
 
 # -----------------------------------------------------------------------
-# Deprecation warnings
+# scatter_to_local / gather_to_global API
 # -----------------------------------------------------------------------
 
-class TestDeprecation:
-    def test_partition_state_warns(self):
-        """Legacy partition_state should emit DeprecationWarning."""
-        from legoesm.parallel.comm import build_comm_topology
-        topo = build_comm_topology(0, 1)
-        import jax.numpy as jnp
-        state = jnp.zeros((6, 4, 4))
+class TestScatterGatherAPI:
+    def test_scatter_to_local_importable(self):
+        """scatter_to_local should be importable from distributed."""
+        from legoesm.parallel.distributed import scatter_to_local
+        assert callable(scatter_to_local)
 
-        from legoesm.parallel.distributed import partition_state
-        with pytest.warns(DeprecationWarning, match="deprecated"):
-            partition_state(state, topo)
+    def test_gather_to_global_importable(self):
+        """gather_to_global should be importable from distributed."""
+        from legoesm.parallel.distributed import gather_to_global
+        assert callable(gather_to_global)
 
-    def test_gather_state_emits_deprecation_warning(self):
-        """gather_state should emit DeprecationWarning."""
-        from legoesm.parallel.distributed import gather_state
-        from legoesm.parallel.comm import build_comm_topology
-        from unittest.mock import patch, MagicMock
+    def test_scatter_to_local_single_rank(self):
+        """scatter_to_local with SingleRankLayout is identity."""
+        from legoesm.parallel.distributed import scatter_to_local
+        from legoesm.parallel.layout import SingleRankLayout
         import jax.numpy as jnp
 
-        topo = build_comm_topology(0, 1)
+        layout = SingleRankLayout(rank=0, n_ranks=1, global_n=4,
+                                  local_shape_2d=(6, 4, 4), is_tiled=False)
         state = jnp.ones((6, 4, 4))
+        result = scatter_to_local(state, layout)
+        assert result is state
 
-        # gather_state calls _require_mpi_stack and allreduce, so mock those
-        mock_mpi4jax = MagicMock()
-        mock_MPI = MagicMock()
+    def test_gather_to_global_single_rank(self):
+        """gather_to_global with SingleRankLayout is identity."""
+        from legoesm.parallel.distributed import gather_to_global
+        from legoesm.parallel.layout import SingleRankLayout
+        import jax.numpy as jnp
 
-        def mock_allreduce(leaf, op, comm):
-            return (leaf, MagicMock())
-
-        mock_mpi4jax.allreduce = mock_allreduce
-
-        with patch(
-            "legoesm.parallel.distributed._require_mpi_stack",
-            return_value=(mock_mpi4jax, mock_MPI),
-        ), pytest.warns(DeprecationWarning, match="deprecated"):
-            gather_state(state, topo)
+        layout = SingleRankLayout(rank=0, n_ranks=1, global_n=4,
+                                  local_shape_2d=(6, 4, 4), is_tiled=False)
+        state = jnp.ones((6, 4, 4))
+        result = gather_to_global(state, layout)
+        assert result is state

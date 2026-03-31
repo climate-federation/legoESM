@@ -32,8 +32,6 @@ from legoesm.core.precision import (
     clear_module_overrides,
     get_module_overrides,
     set_recommended_overrides,
-    sync_from_hardware,
-    sync_to_hardware,
 )
 
 
@@ -527,42 +525,6 @@ class TestTracerNegativity:
 # ===========================================================================
 # Part 10: Legacy sync
 # ===========================================================================
-
-class TestLegacySync:
-    """Test sync with hardware.py's legacy precision policy."""
-
-    def teardown_method(self):
-        set_policy(PrecisionPolicy.fp32())
-        clear_module_overrides()
-
-    def test_sync_from_hardware_fp32(self):
-        from legoesm.core.hardware import set_runtime_precision_policy
-        set_runtime_precision_policy(dynamics="fp32", conservation="fp32")
-        policy = sync_from_hardware()
-        assert policy.compute == jnp.float32
-        assert policy.accumulate == jnp.float32
-
-    def test_sync_from_hardware_mixed(self):
-        from legoesm.core.hardware import set_runtime_precision_policy
-        set_runtime_precision_policy(dynamics="fp32", conservation="fp64")
-        policy = sync_from_hardware()
-        assert policy.compute == jnp.float32
-        assert policy.accumulate == jnp.float64
-
-    def test_sync_from_hardware_fp64(self):
-        from legoesm.core.hardware import set_runtime_precision_policy
-        set_runtime_precision_policy(dynamics="fp64", conservation="fp64")
-        policy = sync_from_hardware()
-        assert policy.compute == jnp.float64
-
-    def test_sync_to_hardware(self):
-        set_policy(PrecisionPolicy.mixed())
-        sync_to_hardware()
-        from legoesm.core.hardware import get_runtime_precision_policy
-        legacy = get_runtime_precision_policy()
-        assert legacy["dynamics"] == jnp.float32
-        assert legacy["conservation"] == jnp.float64
-
 
 # ===========================================================================
 # Part 11: JIT compatibility

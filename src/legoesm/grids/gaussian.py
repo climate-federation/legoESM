@@ -189,12 +189,12 @@ def create_gaussian_grid(
             legoesm_config.get("atmosphere.spectral.allow_unsupported", False)
         )
 
-    from legoesm.core.hardware import check_spectral_backend, get_backend
+    from legoesm.runtime.backend import check_spectral_backend, get_backend
     backend = get_backend()
 
     # On Metal we can still run spectral dynamics by hosting grid/transforms on
     # CPU and routing the spectral model there. Keep strict x64 requirement.
-    if backend == "METAL":
+    if backend == "metal":
         if not jax.config.jax_enable_x64:
             raise ValueError(
                 "Gaussian spectral grid on Metal requires JAX_ENABLE_X64=True "

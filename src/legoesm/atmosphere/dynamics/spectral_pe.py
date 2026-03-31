@@ -688,16 +688,15 @@ class SpectralPrimitiveEquationModel:
                 )
             )
 
-        from legoesm.core.hardware import get_backend
+        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
-        if backend == "METAL":
+        if backend == "metal":
             self._use_cpu_for_spectral = True
             self._cpu_device = jax.devices("cpu")[0]
             self._default_device = jax.devices()[0]
             self.grid = jax.device_put(grid, self._cpu_device)
         else:
             self.grid = grid
-            from legoesm.core.hardware import check_spectral_backend
             check_spectral_backend(
                 allow_unsupported=allow_unsupported_backend,
             )

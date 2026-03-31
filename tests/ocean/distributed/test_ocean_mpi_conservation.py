@@ -52,7 +52,7 @@ from legoesm.ocean.init import rest_state_ocean
 from legoesm.ocean.state import OceanConfig
 from legoesm.ocean.vertical import create_ocean_z_star, compute_layer_thickness
 from legoesm.parallel.comm import build_comm_topology
-from legoesm.parallel.distributed import gather_state, partition_state
+from legoesm.parallel.distributed import scatter_to_local, gather_to_global
 from legoesm.parallel.reductions import global_sum_mpi
 
 
@@ -137,7 +137,7 @@ class TestMPIOceanConservationLongrun:
         )
 
         set_halo_backend("mpi", topology)
-        state = partition_state(state0, topology)
+        state = scatter_to_local(state0)
 
         ocean_area0, eta_int0, heat0, salt0 = _global_ocean_invariants(
             state,
@@ -186,7 +186,7 @@ class TestMPIOceanConservationLongrun:
         salt_rel_drift = abs(salt1 - salt0) / max(abs(salt0), 1.0)
 
         # Collective gather validates full-state reconstruction after long run.
-        state_global = gather_state(state, topology)
+        state_global = gather_to_global(state)
 
         if topology.rank == 0:
             assert area_rel < 1.0e-12

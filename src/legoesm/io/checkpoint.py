@@ -20,6 +20,39 @@ from legoesm.forcing.amip_config import (
     AMIPExperimentConfig,
 )
 
+# Lazy imports to avoid circular dependency:
+#   io.checkpoint → driver.config → driver.__init__ → model_driver → io.checkpoint
+_experiment_config_from_dict = None
+
+
+def _get_experiment_config_from_dict():
+    global _experiment_config_from_dict
+    if _experiment_config_from_dict is None:
+        from legoesm.driver.config import experiment_config_from_dict
+        _experiment_config_from_dict = experiment_config_from_dict
+    return _experiment_config_from_dict
+
+
+def _config_from_dict_auto(d: dict):
+    """Detect config format and deserialize.
+
+    ExperimentConfig JSON has a ``"grid"`` key with nested sub-configs;
+    legacy AMIPExperimentConfig JSON has flat fields (``"resolution"``
+    at the top level).
+
+    Returns an ``ExperimentConfig`` in both cases (upconverting legacy
+    AMIP format via ``ExperimentConfig.from_amip_config``).
+    """
+    if "grid" in d and isinstance(d["grid"], dict):
+        # New ExperimentConfig format
+        ecfd = _get_experiment_config_from_dict()
+        return ecfd(d)
+    else:
+        # Legacy AMIPExperimentConfig format — load then upconvert
+        amip_cfg = config_from_dict(d)
+        from legoesm.driver.config import ExperimentConfig
+        return ExperimentConfig.from_amip_config(amip_cfg)
+
 
 def _auto_chunks(shape: tuple[int, ...]) -> tuple[int, ...]:
     """Choose chunk shape: per-face for 4D (6,n,n,nlev), whole-array otherwise."""
@@ -66,7 +99,7 @@ def save_checkpoint_zarr(
     q_v : array-like
     step : int
     day : float
-    config : AMIPExperimentConfig
+    config : ExperimentConfig or AMIPExperimentConfig
     q_c, q_r : array-like, optional
     diag_accumulators : dict, optional
     compressor : optional
@@ -181,7 +214,7 @@ def load_checkpoint_zarr(
         step = int(root.attrs["step"])
         day = float(root.attrs["day"])
         config_str = root.attrs.get("config_json", "{}")
-        config = config_from_dict(json.loads(config_str))
+        config = _config_from_dict_auto(json.loads(config_str))
         diag = {k[5:]: root[k] for k in array_names if k.startswith("diag_")}
         q_c = root["q_c"] if "q_c" in root else None
         q_r = root["q_r"] if "q_r" in root else None
@@ -215,7 +248,7 @@ def load_checkpoint_zarr(
     )
 
     config_str = root.attrs.get("config_json", "{}")
-    config = config_from_dict(json.loads(config_str))
+    config = _config_from_dict_auto(json.loads(config_str))
 
     diag_accumulators = {}
     for k in array_names:
@@ -229,8 +262,25 @@ def load_checkpoint_zarr(
     return state, q_v, step, day, config, diag_accumulators, q_c, q_r
 
 
+def _upconvert_config(config):
+    """Ensure *config* is an ExperimentConfig.
+
+    If it is already an ExperimentConfig, return as-is.
+    If it is an AMIPExperimentConfig, upconvert via
+    ``ExperimentConfig.from_amip_config``.
+    """
+    from legoesm.driver.config import ExperimentConfig
+    if isinstance(config, ExperimentConfig):
+        return config
+    return ExperimentConfig.from_amip_config(config)
+
+
 def load_checkpoint_auto(path, grid, sigma):
     """Auto-detect checkpoint format (.npz or .zarr) and load.
+
+    Returns an ``ExperimentConfig`` regardless of whether the
+    checkpoint was saved with the legacy AMIP format or the new
+    ExperimentConfig format.
 
     Parameters
     ----------
@@ -242,7 +292,8 @@ def load_checkpoint_auto(path, grid, sigma):
     -------
     tuple
         9-tuple: (state, q_v, step, day, config, diag_accumulators,
-        q_c, q_r, carry_aux).
+        q_c, q_r, carry_aux).  *config* is always an
+        ``ExperimentConfig``.
     """
     from legoesm.forcing.amip_config import load_checkpoint as load_npz
 
@@ -252,7 +303,11 @@ def load_checkpoint_auto(path, grid, sigma):
         result = load_checkpoint_zarr(path, grid, sigma)
         # Zarr path returns 8-tuple; pad with empty carry_aux
         if len(result) == 8:
-            return (*result, {})
-        return result
+            result = (*result, {})
     else:
-        return load_npz(path, grid, sigma)
+        result = load_npz(path, grid, sigma)
+
+    # Upconvert config (element [4]) to ExperimentConfig if needed
+    result_list = list(result)
+    result_list[4] = _upconvert_config(result_list[4])
+    return tuple(result_list)

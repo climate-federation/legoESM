@@ -190,19 +190,6 @@ def _meta_path(checkpoint_path: Path) -> Path:
 # Save / Load
 # ---------------------------------------------------------------------------
 
-def _ensure_amip_config(config):
-    """Convert ExperimentConfig to AMIPExperimentConfig if needed.
-
-    The npz/zarr checkpoint formats still use the AMIP wire format
-    for backward compatibility.  This helper keeps the conversion
-    at the serialization boundary.
-    """
-    EC, _ = _get_experiment_config_type()
-    if isinstance(config, EC):
-        return config.to_amip_config()
-    return config
-
-
 def save_restart(
     path,
     state,
@@ -221,8 +208,9 @@ def save_restart(
     """Save a restart checkpoint together with reproducibility metadata.
 
     Accepts either ``ExperimentConfig`` (canonical) or
-    ``AMIPExperimentConfig`` (legacy).  Conversion to the AMIP wire
-    format happens at this serialization boundary.
+    ``AMIPExperimentConfig`` (legacy).  ExperimentConfig is serialized
+    directly using its native JSON format.  Legacy AMIPExperimentConfig
+    is still accepted for backward compatibility.
 
     Delegates array persistence to :func:`save_checkpoint` (npz) or
     :func:`save_checkpoint_zarr` (zarr) and writes a companion
@@ -235,9 +223,6 @@ def save_restart(
     """
     path = Path(path)
 
-    # Convert ExperimentConfig → AMIP wire format at the boundary
-    wire_config = _ensure_amip_config(config)
-
     # 1. Delegate to appropriate backend
     if backend == "zarr":
         from legoesm.io.checkpoint import save_checkpoint_zarr
@@ -248,7 +233,7 @@ def save_restart(
             q_v,
             step,
             day,
-            wire_config,
+            config,
             q_c=q_c,
             q_r=q_r,
             diag_accumulators=diag_accumulators,
@@ -260,7 +245,7 @@ def save_restart(
             q_v,
             step,
             day,
-            wire_config,
+            config,
             diag_accumulators=diag_accumulators,
             q_c=q_c,
             q_r=q_r,
@@ -335,16 +320,14 @@ def load_restart(
     """
     path = Path(path)
 
-    # 1. Delegate to auto-detecting loader (handles both .npz and .zarr)
+    # 1. Delegate to auto-detecting loader (handles both .npz and .zarr).
+    #    load_checkpoint_auto returns ExperimentConfig regardless of
+    #    whether the checkpoint used the legacy AMIP or new format.
     from legoesm.io.checkpoint import load_checkpoint_auto
 
-    state, q_v, step, day, loaded_amip_config, diag_accumulators, q_c, q_r, carry_aux = (
+    state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r, carry_aux = (
         load_checkpoint_auto(path, grid, sigma)
     )
-
-    # Upconvert AMIP wire format → canonical ExperimentConfig
-    EC, _ = _get_experiment_config_type()
-    loaded_config = EC.from_amip_config(loaded_amip_config)
 
     # 2. Try to read companion metadata
     meta_file = _meta_path(path)

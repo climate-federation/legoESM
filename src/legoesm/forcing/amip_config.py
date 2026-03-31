@@ -122,9 +122,18 @@ class AMIPExperimentConfig(NamedTuple):
     output_dir: str = ""
 
 
-def config_to_dict(config: AMIPExperimentConfig) -> dict:
-    """Convert config to a plain dict for JSON serialization."""
-    return config._asdict()
+def config_to_dict(config) -> dict:
+    """Convert config to a plain dict for JSON serialization.
+
+    Accepts ``AMIPExperimentConfig`` or ``ExperimentConfig``.
+    Sub-config NamedTuples (GridConfig, DycoreConfig, OutputConfig) are
+    recursively converted to dicts.
+    """
+    d = config._asdict()
+    for key, val in d.items():
+        if hasattr(val, '_asdict'):
+            d[key] = val._asdict()
+    return d
 
 
 def config_from_dict(d: dict) -> AMIPExperimentConfig:
@@ -157,7 +166,7 @@ def save_checkpoint(
     q_v: jnp.ndarray,
     step: int,
     day: float,
-    config: AMIPExperimentConfig,
+    config,
     diag_accumulators: dict | None = None,
     q_c: jnp.ndarray | None = None,
     q_r: jnp.ndarray | None = None,
@@ -177,7 +186,7 @@ def save_checkpoint(
         Current time step number.
     day : float
         Current simulation day.
-    config : AMIPExperimentConfig
+    config : ExperimentConfig or AMIPExperimentConfig
         Experiment configuration (saved alongside for reproducibility).
     diag_accumulators : dict, optional
         Any accumulated diagnostic arrays to preserve across restart.

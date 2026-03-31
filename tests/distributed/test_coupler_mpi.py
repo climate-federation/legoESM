@@ -22,7 +22,7 @@ from legoesm.grids.halo import set_halo_backend
 from legoesm.ice.config import SeaIceConfig
 from legoesm.land.config import LandConfig
 from legoesm.parallel.comm import build_comm_topology
-from legoesm.parallel.distributed import gather_state
+from legoesm.parallel.distributed import gather_to_global
 
 
 @pytest.fixture(autouse=True)
@@ -201,8 +201,8 @@ class TestCouplerMPIRegression:
             part_blended, topology.local_face_ids,
         )
 
-        got_state = gather_state(part_state_new, topology)
-        got_blended = gather_state(part_blended, topology)
+        got_state = gather_to_global(part_state_new)
+        got_blended = gather_to_global(part_blended)
 
         if topology.rank == 0:
             _assert_surface_to_atm_close(got_blended, ref_blended)
@@ -272,8 +272,8 @@ class TestCouplerMPIRegression:
             part_blended = _mask_face_leading_pytree(
                 part_blended, topology.local_face_ids,
             )
-            got_state = gather_state(part_state, topology)
-            got_blended = gather_state(part_blended, topology)
+            got_state = gather_to_global(part_state)
+            got_blended = gather_to_global(part_blended)
 
             if topology.rank == 0:
                 _assert_surface_to_atm_close(got_blended, ref_blended)

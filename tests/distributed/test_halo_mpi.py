@@ -17,7 +17,7 @@ mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
 from legoesm.parallel.comm import build_comm_topology
-from legoesm.parallel.distributed import partition_state, gather_state
+from legoesm.parallel.distributed import scatter_to_local, gather_to_global
 from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.halo import (
@@ -63,10 +63,10 @@ class TestMPIHaloExchange:
         reference = _pad_halo_local(data)
 
         # Partition then apply MPI halo exchange on local faces only.
-        partitioned = partition_state(data, topology)
+        partitioned = scatter_to_local(data)
         set_halo_backend("mpi", topology)
         result_local = pad_halo(partitioned)
-        result = gather_state(result_local, topology)
+        result = gather_to_global(result_local)
 
         # Gather results to rank 0 for comparison.
         if topology.rank == 0:
@@ -83,10 +83,10 @@ class TestMPIHaloExchange:
 
         reference = _pad_halo_local(data)
 
-        partitioned = partition_state(data, topology)
+        partitioned = scatter_to_local(data)
         set_halo_backend("mpi", topology)
         result_local = pad_halo(partitioned)
-        result = gather_state(result_local, topology)
+        result = gather_to_global(result_local)
 
         if topology.rank == 0:
             assert jnp.allclose(result, reference, atol=1e-6)
@@ -110,8 +110,8 @@ class TestMPIHaloExchange:
             grid.sin_angle_padded,
         )
 
-        u_part = partition_state(u_data, topology)
-        v_part = partition_state(v_data, topology)
+        u_part = scatter_to_local(u_data)
+        v_part = scatter_to_local(v_data)
         set_halo_backend("mpi", topology)
         out_u_local, out_v_local = pad_halo_vector(
             u_part,
@@ -121,7 +121,7 @@ class TestMPIHaloExchange:
             grid.cos_angle_padded,
             grid.sin_angle_padded,
         )
-        out_u, out_v = gather_state((out_u_local, out_v_local), topology)
+        out_u, out_v = gather_to_global((out_u_local, out_v_local))
 
         if topology.rank == 0:
             assert jnp.allclose(out_u, ref_u, atol=1e-6)
@@ -136,10 +136,10 @@ class TestMPIHaloExchange:
 
         reference = _pad_halo_local_h2(data)
 
-        partitioned = partition_state(data, topology)
+        partitioned = scatter_to_local(data)
         set_halo_backend("mpi", topology)
         result_local = pad_halo(partitioned, halo=2)
-        result = gather_state(result_local, topology)
+        result = gather_to_global(result_local)
 
         if topology.rank == 0:
             assert result.shape == (6, n + 4, n + 4)
@@ -167,9 +167,9 @@ class TestPartitionGather:
     """State partitioning and gathering."""
 
     def test_partition_zeros_non_local(self, topology):
-        """partition_state zeros out non-local faces."""
+        """scatter_to_local extracts only local faces."""
         data = jnp.ones((6, 4, 4), dtype=jnp.float32)
-        result = partition_state(data, topology)
+        result = scatter_to_local(data)
 
         for f in range(6):
             if f in topology.local_face_ids:
@@ -178,13 +178,13 @@ class TestPartitionGather:
                 assert jnp.allclose(result[f], 0.0)
 
     def test_gather_recovers_full(self, topology):
-        """gather_state(partition_state(x)) == x."""
+        """gather_to_global(scatter_to_local(x)) == x."""
         data = jnp.ones((6, 4, 4), dtype=jnp.float32)
         for f in range(6):
             data = data.at[f].set(float(f + 1))
 
-        partitioned = partition_state(data, topology)
-        gathered = gather_state(partitioned, topology)
+        partitioned = scatter_to_local(data)
+        gathered = gather_to_global(partitioned)
 
         assert jnp.allclose(gathered, data)
 
@@ -233,8 +233,8 @@ class TestMPIOceanConservation:
         )
 
         set_halo_backend("mpi", topology)
-        old_part = partition_state(state_old, topology)
-        new_part = partition_state(state_new, topology)
+        old_part = scatter_to_local(state_old)
+        new_part = scatter_to_local(state_new)
         fixed_part = ocean_conservation_fixer(
             new_part,
             old_part,
@@ -242,7 +242,7 @@ class TestMPIOceanConservation:
             z_coord,
             config,
         )
-        fixed_state = gather_state(fixed_part, topology)
+        fixed_state = gather_to_global(fixed_part)
 
         if topology.rank == 0:
             assert jnp.allclose(fixed_state.eta.data, ref_state.eta.data, atol=1e-6)

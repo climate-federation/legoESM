@@ -225,9 +225,9 @@ class SpectralShallowWaterModel:
             )
 
         # Detect Metal backend: auto-route spectral to CPU.
-        from legoesm.core.hardware import get_backend
+        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
-        if backend == "METAL":
+        if backend == "metal":
             self._use_cpu_for_spectral = True
             self._cpu_device = jax.devices("cpu")[0]
             self._default_device = jax.devices()[0]
@@ -236,7 +236,6 @@ class SpectralShallowWaterModel:
         else:
             self.grid = grid
             # Guard: verify backend supports float64/complex128
-            from legoesm.core.hardware import check_spectral_backend
             check_spectral_backend(
                 allow_unsupported=allow_unsupported_backend
             )

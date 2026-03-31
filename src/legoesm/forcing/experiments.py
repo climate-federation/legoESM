@@ -333,9 +333,10 @@ def create_experiment_config(
     name : str
         Experiment name (must be a key in ``EXPERIMENT_TEMPLATES``).
     **overrides
-        Any ``ExperimentConfig`` or ``AMIPExperimentConfig`` field name
-        with the desired value.  AMIPExperimentConfig field names are
-        accepted for backward compatibility and mapped transparently.
+        Any ``ExperimentConfig`` field name (or sub-config field name
+        like ``resolution``, ``nlev``, ``dt``) with the desired value.
+        Legacy AMIPExperimentConfig flat field names are accepted for
+        backward compatibility and mapped to the correct sub-config.
 
     Returns
     -------
@@ -356,13 +357,93 @@ def create_experiment_config(
     >>> cfg.co2_ppmv
     284.3
     """
-    # Build via the legacy AMIP path and upconvert — this keeps
-    # the field mapping logic in one place and avoids duplication.
     # Lazy import to avoid circular dependency chain.
-    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.config import (
+        ExperimentConfig,
+        GridConfig,
+        DycoreConfig,
+        OutputConfig,
+    )
 
-    amip_cfg = create_amip_experiment_config(name, **overrides)
-    return ExperimentConfig.from_amip_config(amip_cfg)
+    if name not in EXPERIMENT_TEMPLATES:
+        raise ValueError(
+            f"Unknown experiment {name!r}. "
+            f"Available: {sorted(EXPERIMENT_TEMPLATES)}"
+        )
+
+    tmpl = EXPERIMENT_TEMPLATES[name]
+
+    # Total integration length in model days.
+    total_days = (tmpl.end_year - tmpl.start_year) * _DAYS_PER_YEAR
+
+    # GHG concentrations at the start of the experiment.
+    co2, ch4, n2o = ghg_at_year(name, tmpl.start_year)
+
+    # Partition overrides into sub-config fields vs top-level fields.
+    # Legacy flat field names (resolution, nlev, dt, etc.) are mapped
+    # to the appropriate sub-config.
+    _GRID_FIELDS = set(GridConfig._fields)
+    _DYCORE_FIELDS = set(DycoreConfig._fields)
+    _OUTPUT_FIELDS = set(OutputConfig._fields)
+    _TOP_FIELDS = set(ExperimentConfig._fields)
+
+    grid_ov: dict = {}
+    dycore_ov: dict = {}
+    output_ov: dict = {}
+    top_ov: dict = {}
+
+    for k, v in overrides.items():
+        if k in _TOP_FIELDS:
+            top_ov[k] = v
+        elif k in _GRID_FIELDS:
+            grid_ov[k] = v
+        elif k in _DYCORE_FIELDS:
+            dycore_ov[k] = v
+        elif k in _OUTPUT_FIELDS:
+            output_ov[k] = v
+        # Legacy flat field names from AMIPExperimentConfig
+        elif k == "resolution":
+            grid_ov["resolution"] = v
+        elif k == "nlev":
+            grid_ov["nlev"] = v
+        elif k == "dt":
+            dycore_ov["dt"] = v
+        elif k == "diag_days":
+            output_ov["diag_days"] = v
+        elif k == "checkpoint_days":
+            output_ov["checkpoint_days"] = v
+        elif k == "hyperdiff_scale":
+            dycore_ov["hyperdiff_scale"] = v
+        else:
+            raise TypeError(
+                f"Invalid ExperimentConfig field: {k!r}"
+            )
+
+    grid = GridConfig(**{**GridConfig()._asdict(), **grid_ov})
+    dycore = DycoreConfig(**{**DycoreConfig()._asdict(), **dycore_ov})
+    output = OutputConfig(**{**OutputConfig()._asdict(), **output_ov})
+
+    # Build the top-level config.
+    cfg_dict: dict = {
+        "grid": grid,
+        "dycore": dycore,
+        "output": output,
+        "days": total_days,
+        "start_day": 0.0,
+        "co2_ppmv": co2,
+        "ch4_ppbv": ch4,
+        "n2o_ppbv": n2o,
+        "experiment": name,
+        "start_year": tmpl.start_year,
+    }
+
+    # Apply top-level overrides.
+    cfg_dict.update(top_ov)
+
+    return ExperimentConfig(**{
+        **ExperimentConfig()._asdict(),
+        **cfg_dict,
+    })
 
 
 def create_amip_experiment_config(
@@ -371,9 +452,18 @@ def create_amip_experiment_config(
 ) -> AMIPExperimentConfig:
     """Create an :class:`AMIPExperimentConfig` from a template.
 
-    Legacy factory — prefer ``create_experiment_config`` which returns
-    the canonical ``ExperimentConfig``.
+    .. deprecated::
+        Use ``create_experiment_config`` which returns the canonical
+        ``ExperimentConfig``.  This legacy factory is retained only
+        for backward compatibility with old code paths.
     """
+    import warnings
+    warnings.warn(
+        "create_amip_experiment_config is deprecated; "
+        "use create_experiment_config instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if name not in EXPERIMENT_TEMPLATES:
         raise ValueError(
             f"Unknown experiment {name!r}. "

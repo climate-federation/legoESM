@@ -109,21 +109,15 @@ class ModelDriver:
         # Strict validation — abort early on invalid parameters
         self.config.validate_strict()
 
-        # Activate precision policy before any JAX array creation.
-        from legoesm.runtime.precision import apply_precision
-        apply_precision(self.config.precision)
-        logger.info(f"  Precision: {self.config.precision}")
+        # Bootstrap runtime: precision, backend, devices, and (optionally) MPI.
+        # This is the canonical single entry point — handles everything before
+        # any JAX array creation.
+        self._bootstrap_runtime()
 
         # Config cross-validation
         config_warnings = self.config.validate()
         for w in config_warnings:
             logger.warning(f"  Config: {w}")
-
-        # Bootstrap MPI distributed runtime before any JAX array creation.
-        # This must happen before _create_grid() so that _setup_parallel()
-        # later finds an active topology/config.
-        if self.config.distributed:
-            self._bootstrap_distributed()
 
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._create_grid()
@@ -601,85 +595,45 @@ class ModelDriver:
     def _save_config(self) -> None:
         """Save experiment config to output directory.
 
-        Writes the canonical ExperimentConfig JSON.  Also writes a
-        legacy ``amip_config.json`` for backward-compatible tooling.
+        Writes the canonical ExperimentConfig JSON only.
         """
         from legoesm.driver.config import save_experiment_config
         save_experiment_config(self.config, self._output_dir / "experiment_config.json")
 
-        # Legacy AMIP-format sidecar (serialization boundary adapter)
-        from legoesm.forcing.amip_config import save_config as _save_amip
-        _save_amip(self.config.to_amip_config(), self._output_dir / "amip_config.json")
+    def _bootstrap_runtime(self) -> None:
+        """Bootstrap the full runtime: precision, backend, devices, MPI.
 
-    def _bootstrap_distributed(self) -> None:
-        """Initialize MPI distributed runtime when --distributed is set.
-
-        Must be called before any grid/state creation so that
-        ``_setup_parallel()`` can find the active topology and config.
-        The grid resolution is not yet known, so the layout is deferred
-        to ``_setup_parallel()`` where it can read the grid shape.
+        Uses the canonical ``legoesm.runtime.bootstrap()`` entry point
+        so that all initialisation (XLA flags, x64, precision policy,
+        device mesh, MPI topology) goes through one place.
         """
-        from legoesm.parallel.distributed import initialize_distributed
-        grid_type = self.config.grid.grid_type
-        config = initialize_distributed(
-            return_topology=False,
-            return_layout=False,
-            global_n=None,          # deferred — grid not created yet
-            grid_type=grid_type,
+        from legoesm.runtime import bootstrap
+
+        rc = bootstrap(
+            precision=self.config.precision,
+            distributed=self.config.distributed,
+            grid_type=self.config.grid.grid_type,
         )
-        self._device_config = config
+        self._device_config = rc.device_config
         logger.info(
-            f"  Distributed: initialized MPI runtime, "
-            f"{config.n_devices} local devices, "
-            f"grid_type={grid_type}"
+            f"  Runtime: backend={rc.backend}, precision={self.config.precision}, "
+            f"x64={rc.x64}, distributed={rc.distributed}"
         )
 
     def _setup_parallel(self) -> None:
-        """Set up multi-device parallelism if available.
+        """Shard or scatter state after grid/state creation.
 
-        Tries to use the canonical ``ParallelRuntime`` for device mesh
-        creation and state sharding.  Falls back to local device
-        detection for backward compatibility when ``ParallelRuntime``
-        is not configured (e.g., non-MPI single-node runs).
+        The device mesh and MPI topology were already set up by
+        ``_bootstrap_runtime()``.  This method handles the data-level
+        work that requires knowing the grid shape: scatter for MPI,
+        or shard for multi-device SPMD.
         """
-        self._device_config = None
-
-        # Try canonical ParallelRuntime path first (handles distributed/MPI).
-        try:
-            from legoesm.parallel.mesh import get_active_config
-            active = get_active_config()
-            if active is not None and (active.n_devices > 1 or active.is_distributed):
-                self._device_config = active
-                logger.info(
-                    f"  Parallel: using active config — "
-                    f"{active.n_devices} devices, "
-                    f"distributed={active.is_distributed}"
-                )
-        except Exception:
-            pass
-
-        # Fall back to local device detection.
+        # Device config was set by _bootstrap_runtime().  If None or
+        # single-device without distribution, nothing to do.
         if self._device_config is None:
-            from legoesm.parallel.device_config import detect_devices, configure_jax_for_device
-            hw = detect_devices()
-            configure_jax_for_device(hw)
-
-            if hw.device_count <= 1:
-                return
-            if self.config.grid.grid_type != "cubed_sphere":
-                return
-
-            from legoesm.parallel.mesh import create_device_mesh
-            try:
-                self._device_config = create_device_mesh(n_devices=hw.device_count)
-            except ValueError:
-                logger.warning(
-                    f"Cannot create cubed-sphere mesh for {hw.device_count} "
-                    f"devices; using single-device mode"
-                )
-                return
-
-        if self._device_config is None:
+            return
+        if (not self._device_config.is_distributed
+                and self._device_config.n_devices <= 1):
             return
 
         if self._device_config.is_distributed:
@@ -1124,6 +1078,107 @@ class ModelDriver:
         return run_status
 
     # ==================================================================
+    # Shared run helpers (used by both compiled and per-step paths)
+    # ==================================================================
+
+    def _prepare_run_context(self, start_step, start_day, restore_carry=False):
+        """Prepare shared state for a run loop.
+
+        Returns a dict with all derived quantities both run paths need:
+        intervals, shapes, solar forcing, physics step, external forcing,
+        held radiation arrays, and conservation targets.
+        """
+        from legoesm.forcing.external import get_solar_forcing_at_time
+
+        cfg = self.config
+        DT = cfg.dycore.dt
+        N_DAYS = cfg.days
+        START_DAY = start_day if start_day is not None else cfg.start_day
+        RAD_UPDATE_STEPS = cfg.rad_update_steps
+
+        n_steps_total = int(N_DAYS * 86400 / DT)
+        diag_interval = int(cfg.output.diag_days * 86400 / DT)
+        checkpoint_interval = (
+            int(cfg.output.checkpoint_days * 86400 / DT)
+            if cfg.output.checkpoint_days > 0 else 0
+        )
+
+        sigma_full = self.sigma.sigma_full
+        dsigma = self.sigma.dsigma
+
+        # Use actual state shape (rank-local after MPI scatter, global otherwise)
+        shape_2d = self.state.p_s.data.shape
+        if self._ensemble_size > 1:
+            shape_2d = shape_2d[1:]
+        shape_3d = (*shape_2d, cfg.grid.nlev)
+
+        # Solar forcing
+        solar_init = get_solar_forcing_at_time(self._solar_config, START_DAY)
+        current_s_0 = float(solar_init["tsi"])
+        solar_weights = (
+            jnp.asarray(solar_init["solar_fraction_by_gpt"])
+            if self._use_solar_spectral
+            else self._solar_weights_template
+        )
+
+        step_unified = self.physics.build_step_unified()
+
+        # Held radiation arrays — restore from carry or zero-init
+        _ens = self._ensemble_size
+        _ens_3d = (_ens, *shape_3d) if _ens > 1 else shape_3d
+        _ens_2d = (_ens, *shape_2d) if _ens > 1 else shape_2d
+        _aux = self._carry_aux if restore_carry else {}
+        held_dT_rad = _aux.get("held_dT_rad", jnp.zeros(_ens_3d))
+        held_sw_net_sfc = _aux.get("held_sw_net_sfc", jnp.zeros(_ens_2d))
+        held_lw_net_sfc = _aux.get("held_lw_net_sfc", jnp.zeros(_ens_2d))
+        held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d))
+        held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d))
+        held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d))
+
+        # External forcing
+        o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
+            START_DAY, self.state.p_s.data, self._grid_lat,
+        )
+
+        lat_deg_grid = np.degrees(np.asarray(self._grid_lat))
+
+        return {
+            "cfg": cfg, "DT": DT, "N_DAYS": N_DAYS, "START_DAY": START_DAY,
+            "RAD_UPDATE_STEPS": RAD_UPDATE_STEPS,
+            "n_steps_total": n_steps_total,
+            "diag_interval": diag_interval,
+            "checkpoint_interval": checkpoint_interval,
+            "sigma_full": sigma_full, "dsigma": dsigma,
+            "shape_2d": shape_2d, "shape_3d": shape_3d,
+            "current_s_0": current_s_0, "solar_weights": solar_weights,
+            "step_unified": step_unified,
+            "held_dT_rad": held_dT_rad,
+            "held_sw_net_sfc": held_sw_net_sfc,
+            "held_lw_net_sfc": held_lw_net_sfc,
+            "held_sw_up_toa": held_sw_up_toa,
+            "held_lw_up_toa": held_lw_up_toa,
+            "held_sw_down_toa": held_sw_down_toa,
+            "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
+            "lat_deg_grid": lat_deg_grid,
+        }
+
+    def _finalize_run(self, run_status, t_jit, t_start, n_steps_total,
+                      START_DAY, N_DAYS, checkpoint_interval):
+        """Shared finalization: save diagnostics, results, final checkpoint."""
+        jax.block_until_ready(self.state.u.data)
+        total_wall = time.time() - t_start
+        logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
+
+        self.diagnostics.save(self._output_dir)
+        self.save_results(run_status, t_jit, total_wall)
+        logger.info(self.diagnostics.print_summary())
+
+        if checkpoint_interval > 0:
+            self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
+
+        return run_status
+
+    # ==================================================================
     # Compiled segment execution path
     # ==================================================================
 
@@ -1140,68 +1195,48 @@ class ModelDriver:
             compute_segment_length, build_segment_fn, pack_forcing,
         )
 
-        cfg = self.config
-        DT = cfg.dycore.dt
-        N_DAYS = cfg.days
-        START_DAY = start_day if start_day is not None else cfg.start_day
-        RAD_UPDATE_STEPS = cfg.rad_update_steps
+        ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
+        cfg = ctx["cfg"]
+        DT = ctx["DT"]
+        N_DAYS = ctx["N_DAYS"]
+        START_DAY = ctx["START_DAY"]
+        RAD_UPDATE_STEPS = ctx["RAD_UPDATE_STEPS"]
+        n_steps_total = ctx["n_steps_total"]
+        diag_interval = ctx["diag_interval"]
+        checkpoint_interval = ctx["checkpoint_interval"]
+        sigma_full = ctx["sigma_full"]
+        dsigma = ctx["dsigma"]
+        shape_2d = ctx["shape_2d"]
+        shape_3d = ctx["shape_3d"]
+        current_s_0 = ctx["current_s_0"]
+        solar_weights = ctx["solar_weights"]
+        step_unified = ctx["step_unified"]
+        held_dT_rad = ctx["held_dT_rad"]
+        held_sw_net_sfc = ctx["held_sw_net_sfc"]
+        held_lw_net_sfc = ctx["held_lw_net_sfc"]
+        held_sw_up_toa = ctx["held_sw_up_toa"]
+        held_lw_up_toa = ctx["held_lw_up_toa"]
+        held_sw_down_toa = ctx["held_sw_down_toa"]
+        o3_vmr = ctx["o3_vmr"]
+        aerosol_od = ctx["aerosol_od"]
+        ghg_vmr = ctx["ghg_vmr"]
+        lat_deg_grid = ctx["lat_deg_grid"]
 
-        n_steps_total = int(N_DAYS * 86400 / DT)
-        diag_interval = int(cfg.output.diag_days * 86400 / DT)
-        checkpoint_interval = (
-            int(cfg.output.checkpoint_days * 86400 / DT)
-            if cfg.output.checkpoint_days > 0 else 0
-        )
-
-        # Compute segment length = GCD of all cadence intervals
+        # Segment computation
         segment_length = compute_segment_length(
             diag_interval, checkpoint_interval, RAD_UPDATE_STEPS,
         )
         n_steps_remaining = n_steps_total - start_step
         n_segments = (n_steps_remaining + segment_length - 1) // segment_length
 
-        sigma_full = self.sigma.sigma_full
-        dsigma = self.sigma.dsigma
-
-        # Use actual state shape (rank-local after MPI scatter, global otherwise)
-        shape_2d = self.state.p_s.data.shape
-        if self._ensemble_size > 1:
-            shape_2d = shape_2d[1:]  # strip leading ensemble dim
-        shape_3d = (*shape_2d, cfg.grid.nlev)
-
-        # Solar forcing (initial)
-        solar_init = get_solar_forcing_at_time(self._solar_config, START_DAY)
-        current_s_0 = float(solar_init["tsi"])
-        solar_weights = (
-            jnp.asarray(solar_init["solar_fraction_by_gpt"])
-            if self._use_solar_spectral
-            else self._solar_weights_template
-        )
-
-        # Build JIT-compiled unified physics step
-        step_unified = self.physics.build_step_unified()
-
-        # Initial held radiation tendencies — restore from checkpoint if available
         _ens = self._ensemble_size
-        _ens_3d = (_ens, *shape_3d) if _ens > 1 else shape_3d
         _ens_2d = (_ens, *shape_2d) if _ens > 1 else shape_2d
-        _aux = self._carry_aux
-        held_dT_rad = _aux.get("held_dT_rad", jnp.zeros(_ens_3d))
-        held_sw_net_sfc = _aux.get("held_sw_net_sfc", jnp.zeros(_ens_2d))
-        held_lw_net_sfc = _aux.get("held_lw_net_sfc", jnp.zeros(_ens_2d))
-        held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d))
-        held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d))
-        held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d))
-
-        # External forcing
-        o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
-            START_DAY, self.state.p_s.data, self._grid_lat,
-        )
 
         # Compute fixed moisture target for conservation fixer —
         # restore from checkpoint if available, else compute from IC.
         from legoesm.core.conservation import compute_global_moisture
-        _target_moisture = _aux.get("target_moisture", jnp.asarray(0.0))
+        _carry_aux = self._carry_aux
+        _target_moisture = _carry_aux.get("target_moisture", jnp.asarray(0.0))
         if cfg.fix_moisture and float(_target_moisture) == 0.0:
             _target_moisture = compute_global_moisture(
                 self.q_v, self.state.p_s.data, dsigma, self.grid,
@@ -1212,13 +1247,12 @@ class ModelDriver:
         from legoesm.core.operators import global_integral
         from legoesm.core.field import Field
         _p_s_field = Field(self.state.p_s.data, name="p_s", dims=("face", "x", "y"), units="Pa")
-        _target_mass = _aux.get("target_mass", jnp.asarray(0.0))
+        _target_mass = _carry_aux.get("target_mass", jnp.asarray(0.0))
         if cfg.dycore.fix_mass and float(_target_mass) == 0.0:
             _target_mass = global_integral(_p_s_field, self.grid)
             logger.info(f"  Mass target: {float(_target_mass):.6e} Pa·m²")
 
         run_status = "COMPLETED"
-        lat_deg_grid = np.degrees(np.asarray(self._grid_lat))
 
         # Build the compiled segment function ONCE (outside the loop).
         # Per-segment forcing (SST, SIC, solar, ozone, aerosol) is now
@@ -1447,19 +1481,10 @@ class ModelDriver:
             if elapsed_day > 0 and int(elapsed_day) % 365 == 0 and diag_interval > 0 and current_step % diag_interval == 0:
                 self.diagnostics.flush_to_disk(self._output_dir)
 
-        # Finalize
-        jax.block_until_ready(self.state.u.data)
-        total_wall = time.time() - t_start
-        logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
-
-        self.diagnostics.save(self._output_dir)
-        self.save_results(run_status, t_jit, total_wall)
-        logger.info(self.diagnostics.print_summary())
-
-        if checkpoint_interval > 0:
-            self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
-
-        return run_status
+        return self._finalize_run(
+            run_status, t_jit, t_start,
+            n_steps_total, START_DAY, N_DAYS, checkpoint_interval,
+        )
 
     # ==================================================================
     # Legacy per-step execution path
@@ -1478,56 +1503,33 @@ class ModelDriver:
         hyperdiffusion_3d = self._hyperdiffusion_3d_fn
         from legoesm.forcing.external import get_solar_forcing_at_time
 
-        cfg = self.config
-        DT = cfg.dycore.dt
-        N_DAYS = cfg.days
-        START_DAY = start_day if start_day is not None else cfg.start_day
+        ctx = self._prepare_run_context(start_step, start_day, restore_carry=False)
+        cfg = ctx["cfg"]
+        DT = ctx["DT"]
+        N_DAYS = ctx["N_DAYS"]
+        START_DAY = ctx["START_DAY"]
         MICROPHYSICS = cfg.microphysics
-        RAD_UPDATE_STEPS = cfg.rad_update_steps
-
-        n_steps_total = int(N_DAYS * 86400 / DT)
-        diag_interval = int(cfg.output.diag_days * 86400 / DT)
-        checkpoint_interval = (
-            int(cfg.output.checkpoint_days * 86400 / DT)
-            if cfg.output.checkpoint_days > 0 else 0
-        )
-
-        sigma_full = self.sigma.sigma_full
-        dsigma = self.sigma.dsigma
-
-        # Use actual state shape (rank-local after MPI scatter, global otherwise)
-        shape_2d = self.state.p_s.data.shape
-        if self._ensemble_size > 1:
-            shape_2d = shape_2d[1:]  # strip leading ensemble dim
-        shape_3d = (*shape_2d, cfg.grid.nlev)
-
-        ncol = int(np.prod(np.array(shape_2d)))
-        nlev = cfg.grid.nlev
-
-        # Solar forcing (initial)
-        solar_init = get_solar_forcing_at_time(self._solar_config, START_DAY)
-        current_s_0 = float(solar_init["tsi"])
-        solar_weights = (
-            jnp.asarray(solar_init["solar_fraction_by_gpt"])
-            if self._use_solar_spectral
-            else self._solar_weights_template
-        )
-
-        # Build JIT-compiled unified physics step
-        step_unified = self.physics.build_step_unified()
-
-        # Held radiation tendencies
-        held_dT_rad = jnp.zeros(shape_3d)
-        held_sw_net_sfc = jnp.zeros(shape_2d)
-        held_lw_net_sfc = jnp.zeros(shape_2d)
-        held_sw_up_toa = jnp.zeros(shape_2d)
-        held_lw_up_toa = jnp.zeros(shape_2d)
-        held_sw_down_toa = jnp.zeros(shape_2d)
-
-        # External forcing (pre-compute outside JIT)
-        o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
-            START_DAY, self.state.p_s.data, self._grid_lat,
-        )
+        RAD_UPDATE_STEPS = ctx["RAD_UPDATE_STEPS"]
+        n_steps_total = ctx["n_steps_total"]
+        diag_interval = ctx["diag_interval"]
+        checkpoint_interval = ctx["checkpoint_interval"]
+        sigma_full = ctx["sigma_full"]
+        dsigma = ctx["dsigma"]
+        shape_2d = ctx["shape_2d"]
+        shape_3d = ctx["shape_3d"]
+        current_s_0 = ctx["current_s_0"]
+        solar_weights = ctx["solar_weights"]
+        step_unified = ctx["step_unified"]
+        held_dT_rad = ctx["held_dT_rad"]
+        held_sw_net_sfc = ctx["held_sw_net_sfc"]
+        held_lw_net_sfc = ctx["held_lw_net_sfc"]
+        held_sw_up_toa = ctx["held_sw_up_toa"]
+        held_lw_up_toa = ctx["held_lw_up_toa"]
+        held_sw_down_toa = ctx["held_sw_down_toa"]
+        o3_vmr = ctx["o3_vmr"]
+        aerosol_od = ctx["aerosol_od"]
+        ghg_vmr = ctx["ghg_vmr"]
+        lat_deg_grid = ctx["lat_deg_grid"]
 
         # Moisture conservation fixer
         FIX_MOISTURE = cfg.fix_moisture
@@ -1537,7 +1539,6 @@ class ModelDriver:
             )
 
         run_status = "COMPLETED"
-        lat_deg_grid = np.degrees(np.asarray(self._grid_lat))
 
         logger.info(f"Starting: {n_steps_total - start_step} steps, {N_DAYS} days")
 
@@ -1723,20 +1724,10 @@ class ModelDriver:
             if checkpoint_interval > 0 and (step + 1) % checkpoint_interval == 0:
                 self.save_checkpoint(step + 1, day)
 
-        # Finalize
-        jax.block_until_ready(self.state.u.data)
-        total_wall = time.time() - t_start
-        logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
-
-        self.diagnostics.save(self._output_dir)
-        self.save_results(run_status, t_jit, total_wall)
-        logger.info(self.diagnostics.print_summary())
-
-        # Final checkpoint
-        if checkpoint_interval > 0:
-            self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
-
-        return run_status
+        return self._finalize_run(
+            run_status, t_jit, t_start,
+            n_steps_total, START_DAY, N_DAYS, checkpoint_interval,
+        )
 
     def save_results(self, run_status: str, jit_time: float, wall_time: float) -> None:
         """Write results.txt summary file."""

@@ -22,7 +22,7 @@ from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
     fv_shallow_water_tendencies_latlon,
 )
 from legoesm.core.conservation import (
-    compute_conservation_diagnostics_latlon,
+    compute_conservation_diagnostics,
 )
 
 
@@ -210,13 +210,13 @@ class TestConservation:
         model = FVShallowWaterLatLonModel(grid, config, dt=dt)
 
         state = williamson_test2_latlon(grid)
-        diag_init = compute_conservation_diagnostics_latlon(state, grid)
+        diag_init = compute_conservation_diagnostics(state, grid)
         mass_init = float(diag_init['total_mass'])
 
         for _ in range(50):
             state = model.step(state, dt)
 
-        diag_final = compute_conservation_diagnostics_latlon(state, grid)
+        diag_final = compute_conservation_diagnostics(state, grid)
         mass_final = float(diag_final['total_mass'])
 
         rel_err = abs(mass_final - mass_init) / abs(mass_init)

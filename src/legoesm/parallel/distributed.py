@@ -21,8 +21,8 @@ Ranks store **only their local data**.  ``layout.scatter()`` extracts
 the local portion from a global array; ``layout.gather()`` reconstructs
 the global array via MPI allgather (for I/O, plotting, restart only).
 
-The legacy ``partition_state`` / ``gather_state`` API is retained as
-thin backward-compatible shims that delegate to the layout system.
+The legacy ``partition_state`` / ``gather_state`` API has been removed.
+Use ``scatter_to_local`` / ``gather_to_global`` for all new code.
 """
 
 from __future__ import annotations
@@ -310,87 +310,3 @@ def gather_to_global(local_state, layout=None):
             "Call initialize_distributed(global_n=...) first."
         )
     return layout_gather_pytree(local_state, layout)
-
-
-# =========================================================================
-# Legacy API — backward-compatible shims
-# =========================================================================
-
-def partition_state(state, topology: CommTopology | None = None):
-    """Zero out non-local faces in a state pytree.
-
-    .. deprecated::
-        Use :func:`scatter_to_local` or :class:`ParallelRuntime.scatter`
-        instead, which return truly rank-local arrays.
-
-    This legacy function keeps the full ``(6, n, n)`` shape but sets
-    non-local face data to zero.  It wastes memory and will be removed.
-    """
-    import warnings
-    warnings.warn(
-        "partition_state is deprecated. Use ParallelRuntime.scatter() or "
-        "layout.scatter() for rank-local arrays.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    topology = topology or _active_topology
-    if topology is None:
-        raise ValueError(
-            "No CommTopology provided and no active topology is set. "
-            "Call initialize_distributed() first or pass topology explicitly."
-        )
-
-    local_faces = set(topology.local_face_ids)
-
-    def _mask_leaf(leaf):
-        if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-            return leaf
-        if leaf.ndim < 1 or leaf.shape[0] != 6:
-            return leaf
-        mask_1d = jnp.array(
-            [1.0 if f in local_faces else 0.0 for f in range(6)],
-            dtype=leaf.dtype,
-        )
-        shape = (6,) + (1,) * (leaf.ndim - 1)
-        mask = mask_1d.reshape(shape)
-        return leaf * mask
-
-    return jax.tree.map(_mask_leaf, state)
-
-
-def gather_state(local_state, topology: CommTopology | None = None):
-    """Gather a zero-masked partitioned state from all MPI ranks.
-
-    .. deprecated::
-        Use :func:`gather_to_global` instead with rank-local data
-        from :func:`scatter_to_local`.
-
-    This legacy function uses ``allreduce(SUM)`` on the zero-masked
-    global arrays (each rank contributes its local faces, zeros elsewhere).
-    """
-    warnings.warn(
-        "gather_state is deprecated. Use gather_to_global() with "
-        "rank-local data from scatter_to_local().",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    topology = topology or _active_topology
-    if topology is None:
-        raise ValueError(
-            "No CommTopology provided and no active topology is set. "
-            "Call initialize_distributed() first or pass topology explicitly."
-        )
-
-    mpi4jax, MPI = _require_mpi_stack()
-
-    def _allreduce_leaf(leaf):
-        if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-            return leaf
-        if leaf.ndim < 1 or leaf.shape[0] != 6:
-            return leaf
-        result = _mpi4jax_array_result(
-            mpi4jax.allreduce(leaf, op=MPI.SUM, comm=MPI.COMM_WORLD),
-        )
-        return result
-
-    return jax.tree.map(_allreduce_leaf, local_state)

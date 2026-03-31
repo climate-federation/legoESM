@@ -19,7 +19,7 @@ from typing import NamedTuple
 
 import jax
 
-from legoesm.core.hardware import get_backend
+from legoesm.runtime.backend import get_backend
 
 
 class MetalConfig(NamedTuple):
@@ -49,7 +49,7 @@ def get_metal_config() -> MetalConfig:
     backend = get_backend()
     cpu_device = jax.devices("cpu")[0]
 
-    if backend == "METAL":
+    if backend == "metal":
         metal_devices = jax.devices()
         metal_device = metal_devices[0] if metal_devices else None
         return MetalConfig(

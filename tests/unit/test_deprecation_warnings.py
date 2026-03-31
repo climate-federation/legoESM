@@ -193,24 +193,6 @@ class TestOceanDiscretizationAliases:
 # Conservation latlon aliases
 # ===================================================================
 
-class TestConservationAliases:
-    """Conservation _latlon aliases emit DeprecationWarning."""
-
-    def test_zero_mean_tendency_latlon_warns(self):
-        from legoesm.core.conservation import zero_mean_tendency_latlon
-        import jax.numpy as jnp
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-
-        grid = create_cubed_sphere(4)
-        field = jnp.zeros((6, 4, 4))
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            zero_mean_tendency_latlon(field, grid)
-            dep_warns = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warns) >= 1
-            assert "zero_mean_tendency" in str(dep_warns[0].message)
-
 
 # ===================================================================
 # Implementation matrix consistency

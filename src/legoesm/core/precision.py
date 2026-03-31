@@ -35,6 +35,36 @@ import jax.numpy as jnp
 
 
 # ---------------------------------------------------------------------------
+# Dtype parsing helper
+# ---------------------------------------------------------------------------
+
+_PRECISION_NAME_TO_DTYPE = {
+    "float16": jnp.float16, "fp16": jnp.float16, "half": jnp.float16,
+    "bfloat16": jnp.bfloat16, "bf16": jnp.bfloat16,
+    "float32": jnp.float32, "fp32": jnp.float32, "single": jnp.float32,
+    "float64": jnp.float64, "fp64": jnp.float64, "double": jnp.float64,
+}
+
+
+def _parse_dtype(value, *, field_name: str, allow_none: bool = False):
+    """Parse a precision config value into a JAX dtype."""
+    if value is None:
+        if allow_none:
+            return None
+        raise ValueError(f"{field_name} precision cannot be None")
+    if value in (jnp.float16, jnp.bfloat16, jnp.float32, jnp.float64):
+        return value
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in _PRECISION_NAME_TO_DTYPE:
+            return _PRECISION_NAME_TO_DTYPE[key]
+    raise ValueError(
+        f"Unknown {field_name} precision {value!r}. "
+        f"Use one of {sorted(_PRECISION_NAME_TO_DTYPE.keys())}."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Precision roles
 # ---------------------------------------------------------------------------
 
@@ -172,12 +202,11 @@ def set_module_override(module: str, **role_overrides: str) -> None:
     if module not in _MODULE_OVERRIDES:
         _MODULE_OVERRIDES[module] = {}
 
-    from legoesm.core.hardware import _parse_precision_dtype  # legacy helper
     for role, value in role_overrides.items():
         if value is None:
             _MODULE_OVERRIDES[module].pop(role, None)
         else:
-            _MODULE_OVERRIDES[module][role] = _parse_precision_dtype(
+            _MODULE_OVERRIDES[module][role] = _parse_dtype(
                 value, field_name=f"{module}.{role}",
             )
 
@@ -529,40 +558,3 @@ def set_recommended_overrides(mode: str = "mixed") -> None:
                 _MODULE_OVERRIDES[module_name] = dict(roles)
 
 
-# ---------------------------------------------------------------------------
-# Sync with legacy hardware.py policy
-# ---------------------------------------------------------------------------
-
-def sync_from_hardware() -> PrecisionPolicy:
-    """Create a PrecisionPolicy from the existing hardware.py config.
-
-    This bridges the legacy 3-component policy (dynamics, ml, conservation)
-    to the new 4-role policy.
-    """
-    from legoesm.core.hardware import get_runtime_precision_policy
-
-    legacy = get_runtime_precision_policy()
-    dynamics_dtype = legacy.get("dynamics", jnp.float32)
-    conservation_dtype = legacy.get("conservation")
-
-    if dynamics_dtype == jnp.float64:
-        policy = PrecisionPolicy.fp64()
-    elif conservation_dtype == jnp.float64:
-        policy = PrecisionPolicy.mixed()
-    else:
-        policy = PrecisionPolicy.fp32()
-
-    set_policy(policy)
-    return policy
-
-
-def sync_to_hardware() -> None:
-    """Push the active PrecisionPolicy back to hardware.py's legacy config."""
-    from legoesm.core.hardware import set_runtime_precision_policy
-
-    policy = get_policy()
-    # Map: compute → dynamics, accumulate → conservation
-    set_runtime_precision_policy(
-        dynamics=policy.compute,
-        conservation=policy.accumulate,
-    )

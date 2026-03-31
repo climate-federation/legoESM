@@ -43,7 +43,7 @@ from legoesm.core.operators_fv_latlon_3d import (
     fv_scalar_advection_latlon_3d,
 )
 from legoesm.core.conservation import (
-    zero_mean_tendency_latlon,
+    zero_mean_tendency,
     fix_mass_hydrostatic_latlon,
 )
 from legoesm.grids.latlon import LatLonGrid
@@ -166,7 +166,7 @@ def fv_latlon_hydrostatic_tendencies(
     # dp_s/dt from FV flux divergence (same operator as σ̇)
     D_total = jnp.sum(div_v * dsigma[None, None, :], axis=-1)
     dp_s_dt_data = -p_s * D_total / sigma_range
-    dp_s_dt_data = zero_mean_tendency_latlon(dp_s_dt_data, grid)
+    dp_s_dt_data = zero_mean_tendency(dp_s_dt_data, grid)
 
     sigma_dot = compute_sigma_dot(div_v, sigma_coord)
 

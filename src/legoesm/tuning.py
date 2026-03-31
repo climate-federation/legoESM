@@ -2,7 +2,7 @@
 
 Provides a registry of key tunable parameters with valid ranges,
 sensitivities, and descriptions, plus helpers that validate an
-:class:`AMIPExperimentConfig` and suggest resolution-appropriate defaults.
+experiment configuration and suggest resolution-appropriate defaults.
 """
 
 from __future__ import annotations
@@ -246,19 +246,60 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
 # Validation
 # ---------------------------------------------------------------------------
 
-def validate_tuning(config: AMIPExperimentConfig) -> list[str]:
+def _extract_tuning_fields(config):
+    """Extract tuning-relevant fields from either config type.
+
+    Returns a namespace-like object with attributes: resolution, dt,
+    hyperdiff_scale, co2_ppmv, sbm_tau_c, sbm_RH_ref, rad_update_steps,
+    radiation, cloud_scheme, microphysics, C_H, C_E, albedo_ice,
+    albedo_ocean, nlev.
+
+    Accepts ``ExperimentConfig`` (nested sub-configs) or
+    ``AMIPExperimentConfig`` (flat fields).
+    """
+    from legoesm.driver.config import ExperimentConfig
+
+    if isinstance(config, ExperimentConfig):
+        class _Ns:
+            pass
+        ns = _Ns()
+        ns.resolution = config.grid.resolution
+        ns.dt = config.dycore.dt
+        ns.hyperdiff_scale = config.dycore.hyperdiff_scale
+        ns.co2_ppmv = config.co2_ppmv
+        ns.sbm_tau_c = config.sbm_tau_c
+        ns.sbm_RH_ref = config.sbm_RH_ref
+        ns.rad_update_steps = config.rad_update_steps
+        ns.radiation = config.radiation
+        ns.cloud_scheme = config.cloud_scheme
+        ns.microphysics = config.microphysics
+        ns.C_H = config.C_H
+        ns.C_E = config.C_E
+        ns.albedo_ice = config.albedo_ice
+        ns.albedo_ocean = config.albedo_ocean
+        ns.nlev = config.grid.nlev
+        return ns
+    # Legacy AMIPExperimentConfig — fields are flat
+    return config
+
+
+def validate_tuning(config) -> list[str]:
     """Return a list of warning messages for potentially problematic settings.
+
+    Accepts either ``ExperimentConfig`` (canonical) or
+    ``AMIPExperimentConfig`` (legacy).
 
     Checks parameter ranges, CFL heuristics, and conflicting options.
     """
+    cfg = _extract_tuning_fields(config)
     warnings_list: list[str] = []
 
     # -- dt vs. resolution heuristic ------------------------------------
     _dt_limits = {16: 900.0, 32: 600.0, 48: 600.0, 64: 300.0, 96: 150.0}
-    dt_max = _dt_limits.get(config.resolution)
-    if dt_max is not None and config.dt > dt_max:
+    dt_max = _dt_limits.get(cfg.resolution)
+    if dt_max is not None and cfg.dt > dt_max:
         warnings_list.append(
-            f"dt={config.dt:.0f}s may violate CFL at C{config.resolution} "
+            f"dt={cfg.dt:.0f}s may violate CFL at C{cfg.resolution} "
             f"resolution (recommend dt<={dt_max:.0f}s)"
         )
 
@@ -268,63 +309,63 @@ def validate_tuning(config: AMIPExperimentConfig) -> list[str]:
         48: (1e15, 5e16),
         96: (1e14, 1e16),
     }
-    hd_range = _hd_ranges.get(config.resolution)
+    hd_range = _hd_ranges.get(cfg.resolution)
     if hd_range is not None:
         lo, hi = hd_range
-        if config.hyperdiff_scale < lo:
+        if cfg.hyperdiff_scale < lo:
             warnings_list.append(
-                f"hyperdiff_scale={config.hyperdiff_scale:.1e} may be too "
-                f"weak for C{config.resolution} (recommended >= {lo:.0e})"
+                f"hyperdiff_scale={cfg.hyperdiff_scale:.1e} may be too "
+                f"weak for C{cfg.resolution} (recommended >= {lo:.0e})"
             )
-        if config.hyperdiff_scale > hi:
+        if cfg.hyperdiff_scale > hi:
             warnings_list.append(
-                f"hyperdiff_scale={config.hyperdiff_scale:.1e} may be too "
-                f"strong for C{config.resolution} (recommended <= {hi:.0e})"
+                f"hyperdiff_scale={cfg.hyperdiff_scale:.1e} may be too "
+                f"strong for C{cfg.resolution} (recommended <= {hi:.0e})"
             )
 
     # -- Gas concentrations ---------------------------------------------
-    if config.co2_ppmv <= 0.0:
+    if cfg.co2_ppmv <= 0.0:
         warnings_list.append(
-            f"co2_ppmv={config.co2_ppmv} — zero or negative CO2 will "
+            f"co2_ppmv={cfg.co2_ppmv} — zero or negative CO2 will "
             "cause radiation issues"
         )
-    if config.co2_ppmv > 2000.0:
+    if cfg.co2_ppmv > 2000.0:
         warnings_list.append(
-            f"co2_ppmv={config.co2_ppmv} — unusually high CO2 "
+            f"co2_ppmv={cfg.co2_ppmv} — unusually high CO2 "
             "(pre-industrial ~280, current ~420)"
         )
 
     # -- SBM parameters -------------------------------------------------
-    if config.sbm_tau_c < 1800.0:
+    if cfg.sbm_tau_c < 1800.0:
         warnings_list.append(
-            f"sbm_tau_c={config.sbm_tau_c:.0f}s is very short — may "
+            f"sbm_tau_c={cfg.sbm_tau_c:.0f}s is very short — may "
             "cause excessive convective adjustment"
         )
-    if config.sbm_RH_ref > 0.95:
+    if cfg.sbm_RH_ref > 0.95:
         warnings_list.append(
-            f"sbm_RH_ref={config.sbm_RH_ref:.2f} is very high — may "
+            f"sbm_RH_ref={cfg.sbm_RH_ref:.2f} is very high — may "
             "cause near-saturated atmosphere everywhere"
         )
-    if config.sbm_RH_ref < 0.4:
+    if cfg.sbm_RH_ref < 0.4:
         warnings_list.append(
-            f"sbm_RH_ref={config.sbm_RH_ref:.2f} is very low — may "
+            f"sbm_RH_ref={cfg.sbm_RH_ref:.2f} is very low — may "
             "produce an unrealistically dry atmosphere"
         )
 
     # -- Radiation cadence ----------------------------------------------
-    if config.rad_update_steps > 12:
+    if cfg.rad_update_steps > 12:
         warnings_list.append(
-            f"rad_update_steps={config.rad_update_steps} is very large — "
+            f"rad_update_steps={cfg.rad_update_steps} is very large — "
             "radiation will be very stale between calls"
         )
 
     # -- Conflicting options -------------------------------------------
-    if config.radiation == "gray" and config.cloud_scheme != "none":
+    if cfg.radiation == "gray" and cfg.cloud_scheme != "none":
         warnings_list.append(
             "Cloud scheme is active but radiation='gray' — clouds will "
             "have no effect on radiation"
         )
-    if config.microphysics != "none" and config.cloud_scheme == "none":
+    if cfg.microphysics != "none" and cfg.cloud_scheme == "none":
         warnings_list.append(
             "Microphysics is active but cloud_scheme='none' — cloud "
             "water will not affect radiation"
@@ -332,7 +373,7 @@ def validate_tuning(config: AMIPExperimentConfig) -> list[str]:
 
     # -- Surface bulk coefficients --------------------------------------
     for name in ("C_H", "C_E"):
-        val = getattr(config, name)
+        val = getattr(cfg, name)
         if val > 0.01:
             warnings_list.append(
                 f"{name}={val:.4f} is unrealistically large "
@@ -345,19 +386,19 @@ def validate_tuning(config: AMIPExperimentConfig) -> list[str]:
             )
 
     # -- Albedo range checks -------------------------------------------
-    if not (0.0 <= config.albedo_ice <= 1.0):
+    if not (0.0 <= cfg.albedo_ice <= 1.0):
         warnings_list.append(
-            f"albedo_ice={config.albedo_ice} is outside [0, 1]"
+            f"albedo_ice={cfg.albedo_ice} is outside [0, 1]"
         )
-    if not (0.0 <= config.albedo_ocean <= 1.0):
+    if not (0.0 <= cfg.albedo_ocean <= 1.0):
         warnings_list.append(
-            f"albedo_ocean={config.albedo_ocean} is outside [0, 1]"
+            f"albedo_ocean={cfg.albedo_ocean} is outside [0, 1]"
         )
 
     # -- Vertical levels ------------------------------------------------
-    if config.nlev < 10:
+    if cfg.nlev < 10:
         warnings_list.append(
-            f"nlev={config.nlev} — very few vertical levels, may not "
+            f"nlev={cfg.nlev} — very few vertical levels, may not "
             "resolve the boundary layer or tropopause"
         )
 

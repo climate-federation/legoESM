@@ -280,8 +280,11 @@ class TestExperimentFactory:
         assert isinstance(cfg, ExperimentConfig)
 
     def test_amip_factory_returns_amip_config(self):
+        import warnings
         from legoesm.forcing.experiments import create_amip_experiment_config
-        cfg = create_amip_experiment_config("piControl", resolution=16)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            cfg = create_amip_experiment_config("piControl", resolution=16)
         assert isinstance(cfg, AMIPExperimentConfig)
 
     def test_factory_ghg_values(self):
