@@ -129,7 +129,43 @@ class ScalingReport:
 # ===========================================================================
 
 GRID_CHOICES = ("cubed-sphere", "latlon", "icosahedral", "spectral")
-PHYSICS_CHOICES = ("held_suarez", "gray_sbm", "rrtmg_full")
+PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full")
+
+# Grid/physics support matrix.  Moist tiers require tracer storage
+# that MPAS and spectral states do not have today.
+_SUPPORTED_PHYSICS = {
+    "cubed-sphere": {"none", "held_suarez", "gray_sbm", "rrtmg_full"},
+    "latlon": {"none", "held_suarez", "gray_sbm", "rrtmg_full"},
+    "icosahedral": {"none", "held_suarez"},
+    "spectral": {"none", "held_suarez"},
+}
+
+
+def _validate_physics(grid_type: str, physics_level: str) -> None:
+    supported = _SUPPORTED_PHYSICS.get(grid_type, set())
+    if physics_level not in supported:
+        raise ValueError(
+            f"Physics level {physics_level!r} not supported for "
+            f"grid {grid_type!r}. Supported: {sorted(supported)}."
+        )
+
+
+def _build_physics_fn(physics_level: str, grid_type: str):
+    """Build a Held-Suarez physics function for the given grid type."""
+    if physics_level != "held_suarez":
+        return None
+    if grid_type == "spectral":
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing_spectral
+        return held_suarez_forcing_spectral
+    elif grid_type == "latlon":
+        from legoesm.atmosphere.physics.held_suarez_latlon import held_suarez_forcing_latlon
+        return held_suarez_forcing_latlon
+    elif grid_type == "icosahedral":
+        from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_forcing_mpas
+        return held_suarez_forcing_mpas
+    else:
+        from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing
+        return held_suarez_forcing
 
 # Weak scaling base values (constant cells/rank)
 WEAK_BASE_CS = 24
@@ -316,7 +352,12 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         if layout is not None:
             state = scatter_to_local(state, layout)
 
-    step_fn = model.step
+    physics_fn = _build_physics_fn(physics_level, "cubed-sphere")
+    if physics_fn is not None:
+        _phys = physics_fn
+        step_fn = lambda state, dt: model.step(state, dt, physics_fn=_phys)
+    else:
+        step_fn = model.step
     cells_per_rank = total_cells // max(1, n_ranks)
     return step_fn, state, dt, total_cells, cells_per_rank
 
@@ -354,6 +395,8 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
 
     total_cells = n_lat * n_lon * nlev
 
+    physics_fn = _build_physics_fn(physics_level, "latlon")
+
     if n_ranks > 1:
         from legoesm.parallel.latlon_mpi import (
             make_latlon_band_layout,
@@ -362,9 +405,20 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         )
         layout = make_latlon_band_layout(rank, n_ranks, n_lat, n_lon)
         state = scatter_state_latlon(state, layout)
+        # MPI step already integrates physics inside tendency_fn when
+        # model.step is called with physics_fn.  For held_suarez, wrap
+        # the model so the MPI stepper sees physics in each RK stage.
+        if physics_fn is not None:
+            _phys = physics_fn
+            _orig_step = model.step
+            model.step = lambda s, dt, physics_fn=None: _orig_step(s, dt, physics_fn=_phys)
         step_fn = make_latlon_mpi_step(model, grid, layout, sigma, config)
     else:
-        step_fn = model.step
+        if physics_fn is not None:
+            _phys = physics_fn
+            step_fn = lambda state, dt: model.step(state, dt, physics_fn=_phys)
+        else:
+            step_fn = model.step
 
     cells_per_rank = total_cells // max(1, n_ranks)
     return step_fn, state, dt, total_cells, cells_per_rank
@@ -395,6 +449,8 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
 
     total_cells = mesh.nCells * nlev
 
+    physics_fn = _build_physics_fn(physics_level, "icosahedral")
+
     if n_ranks > 1:
         from legoesm.parallel.voronoi_mpi import (
             make_voronoi_partition_layout,
@@ -405,7 +461,11 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         state = scatter_state_voronoi(state, layout.partition)
         step_fn = make_voronoi_mpi_step(model, layout, sigma, config)
     else:
-        step_fn = model.step
+        if physics_fn is not None:
+            _phys = physics_fn
+            step_fn = lambda state, dt: model.step(state, dt, physics_fn=_phys)
+        else:
+            step_fn = model.step
 
     cells_per_rank = total_cells // max(1, n_ranks)
     return step_fn, state, dt, total_cells, cells_per_rank
@@ -435,7 +495,15 @@ def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
     state = jax.tree.map(cast_fn, state)
 
     total_cells = grid.n_lat * grid.n_lon * nlev
-    return model.step, state, dt, total_cells, total_cells
+
+    physics_fn = _build_physics_fn(physics_level, "spectral")
+    if physics_fn is not None:
+        _phys = physics_fn
+        step_fn = lambda state, dt: model.step(state, dt, physics_fn=_phys)
+    else:
+        step_fn = model.step
+
+    return step_fn, state, dt, total_cells, total_cells
 
 
 # ===========================================================================
@@ -457,6 +525,7 @@ def run_single_benchmark(
     dt: float | None = None,
 ) -> TimingResult:
     """Run a single benchmark case and return timing."""
+    _validate_physics(grid_type, physics_level)
 
     import jax
     import jax.numpy as jnp

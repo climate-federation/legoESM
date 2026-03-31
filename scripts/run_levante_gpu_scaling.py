@@ -114,6 +114,18 @@ def _maybe_init_distributed(
 # Dataclasses for results
 # ===========================================================================
 
+PHYSICS_CHOICES = ("none", "held_suarez", "gray_sbm", "rrtmg_full")
+
+# Grid/physics support matrix.  Moist tiers (gray_sbm, rrtmg_full) require
+# tracer storage that MPAS and spectral states do not have today.
+_SUPPORTED_PHYSICS = {
+    "cubed-sphere": {"none", "held_suarez", "gray_sbm", "rrtmg_full"},
+    "latlon": {"none", "held_suarez", "gray_sbm", "rrtmg_full"},
+    "icosahedral": {"none", "held_suarez"},
+    "spectral": {"none", "held_suarez"},
+}
+
+
 @dataclass
 class TimingResult:
     n_gpus: int
@@ -121,6 +133,7 @@ class TimingResult:
     n_levels: int
     precision: str
     mode: str
+    physics_level: str
     dt_seconds: float
     n_warmup: int
     n_timing: int
@@ -316,6 +329,52 @@ def _hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
 
 
 # ===========================================================================
+# Physics helpers
+# ===========================================================================
+
+def _validate_physics(grid_type: str, physics_level: str) -> None:
+    """Raise if the grid/physics combination is not supported."""
+    supported = _SUPPORTED_PHYSICS.get(grid_type, set())
+    if physics_level not in supported:
+        raise ValueError(
+            f"Physics level {physics_level!r} is not supported for "
+            f"grid {grid_type!r}. Supported: {sorted(supported)}. "
+            f"Moist tiers (gray_sbm, rrtmg_full) require tracer storage "
+            f"that {grid_type} does not have."
+        )
+
+
+def _build_physics_fn(physics_level: str, grid_type: str):
+    """Build a Held-Suarez physics function for the given grid type.
+
+    Returns None for 'none' and moist tiers (those use segment path).
+    """
+    if physics_level != "held_suarez":
+        return None
+
+    if grid_type == "spectral":
+        from legoesm.atmosphere.physics.held_suarez import (
+            held_suarez_forcing_spectral,
+        )
+        return held_suarez_forcing_spectral
+    elif grid_type == "latlon":
+        from legoesm.atmosphere.physics.held_suarez_latlon import (
+            held_suarez_forcing_latlon,
+        )
+        return held_suarez_forcing_latlon
+    elif grid_type == "icosahedral":
+        from legoesm.atmosphere.physics.held_suarez_mpas import (
+            held_suarez_forcing_mpas,
+        )
+        return held_suarez_forcing_mpas
+    else:  # cubed-sphere
+        from legoesm.atmosphere.physics.held_suarez import (
+            held_suarez_forcing,
+        )
+        return held_suarez_forcing
+
+
+# ===========================================================================
 # Core benchmark runner
 # ===========================================================================
 
@@ -331,8 +390,15 @@ def run_benchmark(
     dt: float | None = None,
     grid_type: str = "spectral",
     no_conservation: bool = False,
+    physics_level: str = "none",
 ) -> TimingResult:
-    """Run the baroclinic wave dycore benchmark and return timing results."""
+    """Run the baroclinic wave benchmark and return timing results.
+
+    When ``physics_level`` is ``"held_suarez"``, the appropriate
+    Held-Suarez forcing function is passed to the model step so that
+    physics tendencies are included in each RK stage.
+    """
+    _validate_physics(grid_type, physics_level)
 
     import jax
     import jax.numpy as jnp
@@ -517,6 +583,9 @@ def run_benchmark(
                 print("    WARNING: State appears fully replicated — "
                       "sharding may not be effective", flush=True)
 
+    # Build physics function (None for dycore-only and moist tiers).
+    physics_fn = _build_physics_fn(physics_level, grid_type)
+
     # For Voronoi multi-GPU: wrap step to avoid per-operator collectives.
     # TRiSK's indirect indexing generates O(n_ops) cross-device gathers
     # when state is naively sharded.  The wrapper replicates state first
@@ -529,9 +598,28 @@ def run_benchmark(
         step_fn = make_sharded_step(model, dev_config)
     elif grid_type == "latlon" and dev_config.n_devices > 1:
         from legoesm.parallel.latlon_sharded import make_latlon_sharded_step
-        step_fn = make_latlon_sharded_step(model, dev_config)
+        step_fn = make_latlon_sharded_step(model, dev_config, physics_fn=physics_fn)
     else:
         step_fn = model.step
+
+    # Wrap step_fn to include physics for non-latlon grids.
+    # Lat-lon sharded step already has physics baked in via closure.
+    # For cubed-sphere and icosahedral SPMD, physics_fn is passed to __call__.
+    # For single-GPU all grids, physics_fn is passed to model.step.
+    if physics_fn is not None:
+        if grid_type == "latlon" and dev_config.n_devices > 1:
+            # Physics already baked into the sharded step
+            pass
+        elif dev_config.n_devices > 1 and grid_type in ("cubed-sphere", "icosahedral"):
+            # CompiledShardedStep / VoronoiShardedStep accept physics_fn
+            _sharded_step = step_fn
+            _phys = physics_fn
+            step_fn = lambda state, dt: _sharded_step(state, dt, physics_fn=_phys)
+        else:
+            # Single-GPU: pass physics_fn to model.step
+            _model_step = step_fn
+            _phys = physics_fn
+            step_fn = lambda state, dt: _model_step(state, dt, physics_fn=_phys)
 
     cells_per_gpu = total_cells // max(1, n_gpus)
 
@@ -543,9 +631,11 @@ def run_benchmark(
         res_label = f"LL{n_grid}"
     else:
         res_label = f"C{n_grid}"
+    phys_tag = f" | physics={physics_level}" if physics_level != "none" else ""
     print(
         f"  [{precision}] {res_label}/L{n_levels} on {n_gpus} GPU(s) | "
-        f"dt={dt:.0f}s | cells={total_cells:,} | cells/GPU={cells_per_gpu:,}",
+        f"dt={dt:.0f}s | cells={total_cells:,} | cells/GPU={cells_per_gpu:,}"
+        f"{phys_tag}",
         flush=True,
     )
 
@@ -646,6 +736,7 @@ def run_benchmark(
         n_levels=n_levels,
         precision=precision,
         mode=mode,
+        physics_level=physics_level,
         dt_seconds=dt,
         n_warmup=n_warmup,
         n_timing=n_timing,
@@ -675,6 +766,7 @@ def run_weak_scaling(
     base_level_ico: int = WEAK_SCALING_BASE_LEVEL_ICO,
     grid_type: str = "spectral",
     no_conservation: bool = False,
+    physics_level: str = "none",
 ) -> list[TimingResult]:
     """Run weak scaling: fix cells/GPU, sweep GPU counts up to n_gpus."""
 
@@ -721,6 +813,7 @@ def run_weak_scaling(
                     n_timing=n_timing,
                     grid_type=grid_type,
                     no_conservation=no_conservation,
+                    physics_level=physics_level,
                 )
                 results.append(result)
             except Exception as exc:
@@ -752,6 +845,7 @@ def run_strong_scaling(
     resolutions: list[int] | None = None,
     grid_type: str = "spectral",
     no_conservation: bool = False,
+    physics_level: str = "none",
 ) -> list[TimingResult]:
     """Run strong scaling: fix resolution, sweep GPU counts up to n_gpus."""
 
@@ -833,6 +927,7 @@ def run_strong_scaling(
                         n_timing=n_timing,
                         grid_type=grid_type,
                         no_conservation=no_conservation,
+                        physics_level=physics_level,
                     )
                     results.append(result)
                 except Exception as exc:
@@ -1125,6 +1220,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Grid / dycore type.",
     )
     p.add_argument(
+        "--physics", choices=list(PHYSICS_CHOICES), default="none",
+        help="Physics complexity level.  'none' = dycore only. "
+             "'held_suarez' works on all grids.  'gray_sbm' and "
+             "'rrtmg_full' require cubed-sphere or latlon.",
+    )
+    p.add_argument(
         "--mode", choices=["weak", "strong", "both"], default="both",
         help="Scaling mode: weak, strong, or both.",
     )
@@ -1247,11 +1348,17 @@ def main() -> int:
     hostname = os.environ.get("HOSTNAME", os.environ.get("SLURM_NODELIST", "unknown"))
     backend = jax.default_backend().upper()
 
+    physics_level = args.physics
+
+    # Validate grid/physics combination early.
+    _validate_physics(grid_type, physics_level)
+
     if is_rank0:
         print("=" * 72)
         print("  legoESM GPU Scaling Benchmark")
         print("=" * 72)
         print(f"  Grid:        {grid_type}")
+        print(f"  Physics:     {physics_level}")
         print(f"  Backend:     {backend}")
         print(f"  Hostname:    {hostname}")
         print(f"  Max GPUs:    {max_gpus}")
@@ -1279,6 +1386,7 @@ def main() -> int:
             base_n=args.weak_base_n,
             grid_type=grid_type,
             no_conservation=args.no_conservation,
+            physics_level=physics_level,
         )
         all_results.extend(weak_results)
         if is_rank0:
@@ -1310,6 +1418,7 @@ def main() -> int:
             resolutions=strong_res,
             grid_type=grid_type,
             no_conservation=args.no_conservation,
+            physics_level=physics_level,
         )
         all_results.extend(strong_results)
         if is_rank0:

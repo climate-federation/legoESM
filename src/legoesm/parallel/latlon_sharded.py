@@ -108,13 +108,18 @@ def _build_local_grid(
 # Main entry point
 # ============================================================================
 
-def make_latlon_sharded_step(model, config):
+def make_latlon_sharded_step(model, config, physics_fn=None):
     """Build a multi-GPU step for FV lat-lon with explicit halo exchange.
 
     Parameters
     ----------
     model : FVLatLonPrimitiveEquationModel
     config : DeviceConfig
+    physics_fn : callable, optional
+        Physics forcing function with signature
+        ``(state, grid, sigma_coord) -> tendencies``.
+        May also return ``(tendencies, updated_state)`` tuple.
+        When provided, physics tendencies are included in each RK stage.
 
     Returns
     -------
@@ -202,6 +207,9 @@ def make_latlon_sharded_step(model, config):
     _nlev = nlev
     _n_channels = n_channels
 
+    # Physics function captured as closure constant (not a shard_map input)
+    _physics_fn = physics_fn
+
     # --- Shard-map kernel ---
     def _local_tendency(u_s, v_s, T_s, ps_s, phis_s, dt_val):
         """Halo exchange + local tendency for one lat band."""
@@ -280,9 +288,20 @@ def make_latlon_sharded_step(model, config):
                        units="m^2/s^2"),
         )
 
+        # Compute physics tendencies if a physics function is provided.
+        # The physics_fn is a closure constant captured outside shard_map.
+        phys_tend = None
+        if _physics_fn is not None:
+            _phys_result = _physics_fn(local_state, my_grid, sigma_coord_rep)
+            phys_tend = (
+                _phys_result[0]
+                if type(_phys_result) is tuple
+                else _phys_result
+            )
+
         tend = fv_latlon_hydrostatic_tendencies(
             local_state, my_grid, sigma_coord_rep, cfg,
-            physics_tendency=None, polar_mask=my_polar_mask,
+            physics_tendency=phys_tend, polar_mask=my_polar_mask,
         )
 
         # Return only owned portion
@@ -368,7 +387,8 @@ def make_latlon_sharded_step(model, config):
 
     logger.info(
         "Lat-lon sharded step ready: %d devices, %d lats/device, "
-        "halo=%d, 2 ppermute calls/stage",
+        "halo=%d, 2 ppermute calls/stage, physics=%s",
         n_dev, lats_per, halo,
+        "yes" if _physics_fn is not None else "no",
     )
     return _step
