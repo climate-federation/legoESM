@@ -208,17 +208,29 @@ def fv3_hydrostatic_tendencies(
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)  # (6, n, n, nlev)
     zeta_abs = zeta + grid.f[..., None]
 
+    # === Stage-level packed halo exchange #1 ===
+    # Pack {zeta_abs, B, 1/T} into one collective instead of 3 separate.
+    ln_ps = jnp.log(p_s)
+    inv_T = 1.0 / T
+    from legoesm.grids.halo import _halo_backend
+    if _halo_backend == "spmd":
+        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
+        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
+            zeta_abs, B, inv_T, mesh=_spmd_mesh,
+        )
+    else:
+        _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
+
     # Vorticity interpolated to D-grid corners
-    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)  # (6, n+1, n+1, nlev)
+    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid, padded=_zeta_pad)
 
     # --- 7. Bernoulli gradient at D-grid corners (Arakawa-Lamb) ---
-    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)  # (6, n+1, n+1, nlev)
+    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
 
     # --- 8. Pressure gradient correction at D-grid corners ---
-    ln_ps = jnp.log(p_s)
-    dln_dx, dln_dy_perp = _arakawa_lamb_gradient(ln_ps, cdgrid)  # (6, n+1, n+1)
+    dln_dx, dln_dy_perp = _arakawa_lamb_gradient(ln_ps, cdgrid)  # 2D, separate exchange
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
-    T_corner = 1.0 / _interp_center_to_corner(1.0 / T, cdgrid)  # (6, n+1, n+1, nlev)
+    T_corner = 1.0 / _interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
     pg_corr_x = R_d * T_corner * dln_dx[..., None]
     pg_corr_y_perp = R_d * T_corner * dln_dy_perp[..., None]
 
@@ -286,8 +298,12 @@ def fv3_hydrostatic_tendencies(
 
     # --- 11. Thermodynamic equation ---
     # Horizontal advection: centred advection using cell-centre velocities
-    dT_dx = _gradient_x_3d(T, grid)
-    dT_dy = _gradient_y_3d(T, grid)
+    # === Stage-level packed halo exchange #2 ===
+    # Pad T once, reuse for both x- and y-gradient (saves 1 exchange).
+    from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+    _T_pad = _pad_halo_4d(T, interp_offsets=grid.halo_interp_offsets)
+    dT_dx = _gradient_x_3d(T, grid, padded=_T_pad)
+    dT_dy = _gradient_y_3d(T, grid, padded=_T_pad)
     horiz_adv_T = -(u_cell * dT_dx + v_cell * dT_dy)
 
     # Adiabatic heating: kappa * T * omega / p

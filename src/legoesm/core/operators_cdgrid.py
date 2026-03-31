@@ -27,7 +27,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.grids.halo import pad_halo
+from legoesm.grids.halo import pad_halo, pad_halo_4d
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
@@ -49,14 +49,8 @@ def _pad_halo_auto(field, cdgrid):
     """
     if field.ndim == 3:
         return pad_halo(field, interp_offsets=cdgrid.base.halo_interp_offsets)
-    # 3D: vmap over levels
-    f_t = jnp.moveaxis(field, -1, 0)
-
-    def pad_one(fk):
-        return pad_halo(fk, interp_offsets=cdgrid.base.halo_interp_offsets)
-
-    f_pad_t = jax.vmap(pad_one)(f_t)
-    return jnp.moveaxis(f_pad_t, 0, -1)
+    # 4D: use pad_halo_4d directly (single exchange for all levels)
+    return pad_halo_4d(field, interp_offsets=cdgrid.base.halo_interp_offsets)
 
 
 def _pad_halo_auto_h2(field, cdgrid):
@@ -73,14 +67,9 @@ def _pad_halo_auto_h2(field, cdgrid):
     if field.ndim == 3:
         return pad_halo(field, halo=2,
                         interp_offsets=cdgrid.base.halo_interp_offsets_h2)
-    f_t = jnp.moveaxis(field, -1, 0)
-
-    def pad_one(fk):
-        return pad_halo(fk, halo=2,
-                        interp_offsets=cdgrid.base.halo_interp_offsets_h2)
-
-    f_pad_t = jax.vmap(pad_one)(f_t)
-    return jnp.moveaxis(f_pad_t, 0, -1)
+    # 4D: use pad_halo_4d directly
+    return pad_halo_4d(field, halo=2,
+                       interp_offsets=cdgrid.base.halo_interp_offsets_h2)
 
 
 def _broadcast_metric(metric, field):
@@ -831,7 +820,7 @@ def _replace_halo_with_extrapolation(B_pad):
     return B_pad
 
 
-def _arakawa_lamb_gradient(B, cdgrid):
+def _arakawa_lamb_gradient(B, cdgrid, padded=None):
     """4-point Arakawa-Lamb gradient at D-grid corners.
 
     Returns the gradient in physical (e_x, e_perp) coordinates using a
@@ -849,13 +838,17 @@ def _arakawa_lamb_gradient(B, cdgrid):
     Parameters
     ----------
     B : jax.Array, shape (6, n, n[, nlev])
+    cdgrid : CubedSphereCDGrid
+    padded : jax.Array, optional
+        Pre-padded field (6, n+2, n+2[, nlev]).  Skips internal halo
+        exchange when provided (stage-level packing).
 
     Returns
     -------
     dB_dx, dB_dy_perp : jax.Array, shape (6, n+1, n+1[, nlev])
         Gradient along face-local e_x and perpendicular to e_x.
     """
-    B_pad = _pad_halo_auto(B, cdgrid)
+    B_pad = padded if padded is not None else _pad_halo_auto(B, cdgrid)
 
     # Replace cross-face halo values with face-local extrapolation
     # to eliminate the coordinate-kink error at face boundaries.
@@ -898,7 +891,7 @@ def _arakawa_lamb_gradient(B, cdgrid):
 # Interpolation helpers
 # ==============================================================================
 
-def _interp_center_to_corner(field, cdgrid):
+def _interp_center_to_corner(field, cdgrid, padded=None):
     """Interpolate cell-centre field to D-grid corners (4-point average).
 
     Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
@@ -906,12 +899,17 @@ def _interp_center_to_corner(field, cdgrid):
     Parameters
     ----------
     field : jax.Array, shape (6, n, n[, nlev])
+    cdgrid : CubedSphereCDGrid
+    padded : jax.Array, optional
+        Pre-padded field (6, n+2, n+2[, nlev]).  When provided, the
+        internal halo exchange is skipped — used by stage-level
+        packing to avoid redundant collectives.
 
     Returns
     -------
     jax.Array, shape (6, n+1, n+1[, nlev])
     """
-    f_pad = _pad_halo_auto(field, cdgrid)
+    f_pad = padded if padded is not None else _pad_halo_auto(field, cdgrid)
 
     if field.ndim == 3:
         return 0.25 * (f_pad[:, :-1, :-1] + f_pad[:, 1:, :-1]

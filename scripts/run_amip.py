@@ -138,11 +138,20 @@ def main():
     parser.add_argument("--profile", type=int, default=0, metavar="N_STEPS",
                         help="Profile first N steps with jax.profiler and exit")
 
-    # Distributed (placeholder)
-    parser.add_argument("--distributed", action="store_true", default=False)
+    # Distributed / MPI
+    parser.add_argument("--distributed", action="store_true", default=False,
+                        help="Enable MPI distributed execution (auto-detected from environment)")
     parser.add_argument("--ensemble-size", type=int, default=1)
 
     args = parser.parse_args()
+
+    # Auto-detect MPI environment: enable distributed if MPI launcher detected
+    import os
+    if not args.distributed and any(
+        k in os.environ for k in ("OMPI_COMM_WORLD_SIZE", "PMI_SIZE",
+                                   "SLURM_NTASKS", "MPI_LOCALNRANKS")
+    ):
+        args.distributed = True
 
     # Backward-compatible alias
     if args.radiation == "rrtmgp":
@@ -239,6 +248,9 @@ def main():
     print("Setup...")
     driver.setup()
 
+    # After setup(), MPI rank is known
+    _is_root = (driver._mpi_rank is None or driver._mpi_rank == 0)
+
     # Load checkpoint if restarting
     start_step = 0
     start_day = None
@@ -247,27 +259,33 @@ def main():
         if not restart_path.exists():
             print(f"ERROR: restart file not found: {restart_path}", file=sys.stderr)
             sys.exit(1)
-        print(f"Loading checkpoint: {restart_path}")
+        if _is_root:
+            print(f"Loading checkpoint: {restart_path}")
         start_step, start_day = driver.load_checkpoint(restart_path)
-        print(f"  Resumed at step={start_step}, day={start_day:.2f}")
+        if _is_root:
+            print(f"  Resumed at step={start_step}, day={start_day:.2f}")
 
     # Profiling mode: trace first N steps, save profile, and exit
     if args.profile > 0:
         import jax
         profile_dir = str(Path(driver.output_dir) / "jax_profile")
-        print(f"Profiling {args.profile} steps → {profile_dir}")
+        if _is_root:
+            print(f"Profiling {args.profile} steps → {profile_dir}")
         # Override days so run() only executes args.profile steps
         n_profile_days = args.profile * args.dt / 86400.0
         driver.config = driver.config._replace(days=int(n_profile_days + 1))
         with jax.profiler.trace(profile_dir):
             driver.run(start_step=start_step, start_day=start_day)
-        print(f"Profile saved to {profile_dir}")
-        print("View with: tensorboard --logdir " + profile_dir)
+        if _is_root:
+            print(f"Profile saved to {profile_dir}")
+            print("View with: tensorboard --logdir " + profile_dir)
         return
 
-    print("Running...")
+    if _is_root:
+        print("Running...")
     driver.run(start_step=start_step, start_day=start_day)
-    print(f"Complete. Output: {driver.output_dir}")
+    if _is_root:
+        print(f"Complete. Output: {driver.output_dir}")
 
 
 if __name__ == "__main__":

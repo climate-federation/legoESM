@@ -483,3 +483,323 @@ def apvm_correction(q_vertex, u_edge, mesh, dt):
     u_dot_grad_q = advection / count
 
     return q_vertex - 0.5 * dt * u_dot_grad_q
+
+
+# ============================================================================
+# Batched 3D operators — one gather for all levels
+# ============================================================================
+# These replace jax.lax.scan over levels: adjacency is gathered once
+# across the full (nEdges/nCells/nVertices, nlev) arrays, eliminating
+# nlev repeated indirect indexing calls.
+
+
+def divergence_cell_3d(u_edge_3d, mesh):
+    """Divergence at cell centers for all levels.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev)
+    """
+    eoc = mesh.edgesOnCell  # (maxEdges, nCells)
+    sign = mesh.edgeSignOnCell  # (maxEdges, nCells)
+    mask = (eoc >= 0).astype(u_edge_3d.dtype)
+    eoc_safe = jnp.maximum(eoc, 0)
+
+    u_gathered = u_edge_3d[eoc_safe]          # (maxEdges, nCells, nlev)
+    dv_gathered = mesh.dvEdge[eoc_safe]        # (maxEdges, nCells)
+
+    flux = (sign[:, :, None] * u_gathered
+            * dv_gathered[:, :, None] * mask[:, :, None])
+    return jnp.sum(flux, axis=0) / mesh.areaCell[:, None]
+
+
+def gradient_edge_3d(phi_cell_3d, mesh):
+    """Gradient at edges for all levels.
+
+    Parameters
+    ----------
+    phi_cell_3d : jax.Array, shape (nCells, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+    """
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    return (phi_cell_3d[c2] - phi_cell_3d[c1]) / mesh.dcEdge[:, None]
+
+
+def curl_vertex_3d(u_edge_3d, mesh):
+    """Curl (relative vorticity) at vertices for all levels.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nVertices, nlev)
+    """
+    eov = mesh.edgesOnVertex          # (vertexDegree, nVertices)
+    sign = mesh.edgeSignOnVertex
+    mask = (eov >= 0).astype(u_edge_3d.dtype)
+    eov_safe = jnp.maximum(eov, 0)
+
+    u_gathered = u_edge_3d[eov_safe]   # (vertexDegree, nVertices, nlev)
+    dc_gathered = mesh.dcEdge[eov_safe]
+
+    circ = (sign[:, :, None] * u_gathered
+            * dc_gathered[:, :, None] * mask[:, :, None])
+    return jnp.sum(circ, axis=0) / mesh.areaTriangle[:, None]
+
+
+def tangential_velocity_3d(u_edge_3d, mesh):
+    """Tangential velocity reconstruction for all levels.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+    """
+    eoe = mesh.edgesOnEdge        # (maxEdges2, nEdges)
+    woe = mesh.weightsOnEdge
+    mask = (eoe >= 0).astype(u_edge_3d.dtype)
+    eoe_safe = jnp.maximum(eoe, 0)
+
+    u_gathered = u_edge_3d[eoe_safe]  # (maxEdges2, nEdges, nlev)
+    return jnp.sum(woe[:, :, None] * u_gathered * mask[:, :, None], axis=0)
+
+
+def cell_to_edge_avg_3d(phi_cell_3d, mesh):
+    """Interpolate cell-centered 3D field to edges by averaging.
+
+    Parameters
+    ----------
+    phi_cell_3d : jax.Array, shape (nCells, nlev) or (nCells, ...)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev) or (nEdges, ...)
+    """
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    return 0.5 * (phi_cell_3d[c1] + phi_cell_3d[c2])
+
+
+def edge_thickness_3d(h_cell_3d, mesh):
+    """Thickness at edges for all levels."""
+    return cell_to_edge_avg_3d(h_cell_3d, mesh)
+
+
+def vertex_thickness_3d(h_cell_3d, mesh):
+    """Kite-area-weighted thickness at vertices for all levels.
+
+    Parameters
+    ----------
+    h_cell_3d : jax.Array, shape (nCells, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nVertices, nlev)
+    """
+    cov = mesh.cellsOnVertex       # (vertexDegree, nVertices)
+    ka = mesh.kiteAreasOnVertex
+    mask = (cov >= 0).astype(h_cell_3d.dtype)
+    cov_safe = jnp.maximum(cov, 0)
+
+    h_gathered = h_cell_3d[cov_safe]  # (vertexDegree, nVertices, nlev)
+    return (jnp.sum(ka[:, :, None] * h_gathered * mask[:, :, None], axis=0)
+            / mesh.areaTriangle[:, None])
+
+
+def kinetic_energy_cell_3d(u_edge_3d, mesh):
+    """Kinetic energy at cell centers for all levels.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev)
+    """
+    eoc = mesh.edgesOnCell
+    mask = (eoc >= 0).astype(u_edge_3d.dtype)
+    eoc_safe = jnp.maximum(eoc, 0)
+
+    u_sq = u_edge_3d[eoc_safe] ** 2   # (maxEdges, nCells, nlev)
+    dc = mesh.dcEdge[eoc_safe]
+    dv = mesh.dvEdge[eoc_safe]
+    area_e = dc * dv
+
+    return (jnp.sum(0.25 * area_e[:, :, None] * u_sq * mask[:, :, None], axis=0)
+            / mesh.areaCell[:, None])
+
+
+def potential_vorticity_vertex_3d(u_edge_3d, h_cell_3d, f_vertex, mesh):
+    """Potential vorticity at vertices for all levels.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    h_cell_3d : jax.Array, shape (nCells, nlev)
+    f_vertex : jax.Array, shape (nVertices,)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nVertices, nlev)
+    """
+    zeta = curl_vertex_3d(u_edge_3d, mesh)
+    h_v = vertex_thickness_3d(h_cell_3d, mesh)
+    h_v_safe = jnp.maximum(h_v, 1e-10)
+    return (zeta + f_vertex[:, None]) / h_v_safe
+
+
+def pv_edge_3d(q_vertex_3d, mesh):
+    """PV at edges for all levels."""
+    v0 = mesh.verticesOnEdge[0]
+    v1 = mesh.verticesOnEdge[1]
+    return 0.5 * (q_vertex_3d[v0] + q_vertex_3d[v1])
+
+
+def pv_flux_energy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
+    """Energy-conserving PV flux for all levels.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    h_cell_3d : jax.Array, shape (nCells, nlev)
+    q_vertex_3d : jax.Array, shape (nVertices, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+    """
+    h_e = edge_thickness_3d(h_cell_3d, mesh)
+    q_e = pv_edge_3d(q_vertex_3d, mesh)
+
+    eoe = mesh.edgesOnEdge
+    woe = mesh.weightsOnEdge
+    mask = (eoe >= 0).astype(u_edge_3d.dtype)
+    eoe_safe = jnp.maximum(eoe, 0)
+
+    u_g = u_edge_3d[eoe_safe]   # (maxEdges2, nEdges, nlev)
+    h_g = h_e[eoe_safe]
+    q_g = q_e[eoe_safe]
+
+    return jnp.sum(woe[:, :, None] * q_g * h_g * u_g * mask[:, :, None], axis=0)
+
+
+def pv_flux_enstrophy_conserving_3d(u_edge_3d, h_cell_3d, q_vertex_3d, mesh):
+    """Enstrophy-conserving PV flux for all levels.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    h_cell_3d : jax.Array, shape (nCells, nlev)
+    q_vertex_3d : jax.Array, shape (nVertices, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+    """
+    h_e = edge_thickness_3d(h_cell_3d, mesh)
+    q_e = pv_edge_3d(q_vertex_3d, mesh)
+
+    F_normal = h_e * u_edge_3d
+    F_tangential = tangential_velocity_3d(F_normal, mesh)
+    return q_e * F_tangential
+
+
+def vector_laplacian_del2_3d(u_edge_3d, mesh):
+    """Vector Laplacian del2 for all levels.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+    """
+    div_c = divergence_cell_3d(u_edge_3d, mesh)
+    curl_v = curl_vertex_3d(u_edge_3d, mesh)
+
+    grad_div = gradient_edge_3d(div_c, mesh)
+
+    v0 = mesh.verticesOnEdge[0]
+    v1 = mesh.verticesOnEdge[1]
+    grad_curl_tangent = (curl_v[v1] - curl_v[v0]) / mesh.dvEdge[:, None]
+
+    return grad_div - grad_curl_tangent
+
+
+def vector_laplacian_del4_3d(u_edge_3d, mesh):
+    """Biharmonic vector Laplacian for all levels.
+
+    Parameters
+    ----------
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+
+    Returns
+    -------
+    jax.Array, shape (nEdges, nlev)
+    """
+    del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)
+    return -vector_laplacian_del2_3d(del2_u, mesh)
+
+
+def apvm_correction_3d(q_vertex_3d, u_edge_3d, mesh, dt):
+    """Anticipated PV Method correction for all levels.
+
+    Parameters
+    ----------
+    q_vertex_3d : jax.Array, shape (nVertices, nlev)
+    u_edge_3d : jax.Array, shape (nEdges, nlev)
+    mesh : VoronoiMesh
+    dt : float
+
+    Returns
+    -------
+    jax.Array, shape (nVertices, nlev)
+    """
+    eov = mesh.edgesOnVertex
+    voe = mesh.verticesOnEdge
+
+    mask = (eov >= 0).astype(q_vertex_3d.dtype)
+    eov_safe = jnp.maximum(eov, 0)
+
+    v0_of_edge = voe[0][eov_safe]
+    v1_of_edge = voe[1][eov_safe]
+    dq = q_vertex_3d[v1_of_edge] - q_vertex_3d[v0_of_edge]
+    dv = mesh.dvEdge[eov_safe]
+    dv_safe = jnp.maximum(dv, 1e-10)
+    dq_ds = dq / dv_safe[:, :, None]
+
+    vt = tangential_velocity_3d(u_edge_3d, mesh)
+    vt_at_edges = vt[eov_safe]
+
+    advection = jnp.sum((vt_at_edges * dq_ds) * mask[:, :, None], axis=0)
+    count = jnp.maximum(jnp.sum(mask, axis=0), 1.0)
+    u_dot_grad_q = advection / count[:, None]
+
+    return q_vertex_3d - 0.5 * dt * u_dot_grad_q

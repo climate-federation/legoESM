@@ -38,11 +38,29 @@ def _accumulation_dtype():
     return target
 
 
-def _global_area_sum(array: jax.Array, grid) -> jax.Array:
+def _global_area_sum(
+    array: jax.Array,
+    grid,
+    owned_mask: jax.Array | None = None,
+) -> jax.Array:
     """Area-weighted global sum of a raw array, distributed-aware.
 
     Works on any grid with a ``.area`` attribute (CubedSphereGrid,
     LatLonGrid, etc.).
+
+    Parameters
+    ----------
+    array : jax.Array
+        The field to integrate (e.g. surface pressure).
+    grid : grid object
+        Must have ``.area`` attribute.
+    owned_mask : jax.Array, optional
+        Shape ``(n_faces,)`` boolean/float mask indicating which faces
+        this rank owns.  Required for **replicated-dynamics MPI** where
+        each rank holds full ``(6, n, n)`` data but only owned faces
+        are authoritative.  Non-owned faces are zeroed before local
+        summation; ``global_sum_mpi`` then combines owned portions.
+        If ``None``, all faces are summed (single-rank or SPMD).
 
     Execution modes:
 
@@ -51,14 +69,17 @@ def _global_area_sum(array: jax.Array, grid) -> jax.Array:
       face-sharded array already produces the correct global sum --
       JAX/XLA automatically inserts an all-reduce when the reduction
       spans a sharded axis.  No explicit ``psum`` is needed.
-    - **MPI distributed**: local sums are combined via
-      ``allreduce(SUM)`` to produce the true global total.
-
-    The accumulation is performed in float64 (if available) to avoid
-    precision loss in large-scale global integrals.
+    - **MPI distributed** (replicated dynamics): mask to owned faces,
+      local sum, then ``allreduce(SUM)``.
     """
     acc = _accumulation_dtype()
     prod = array.astype(acc) * grid.area.astype(acc)
+    if owned_mask is not None:
+        # Broadcast (n_faces,) → match prod shape: (6,) → (6,1,1,...)
+        mask = owned_mask.astype(acc)
+        while mask.ndim < prod.ndim:
+            mask = mask[..., None]
+        prod = prod * mask
     local_sum = jnp.sum(prod)
     if _is_distributed():
         from legoesm.parallel.reductions import global_sum_mpi
@@ -322,6 +343,7 @@ def compute_global_moisture(
     p_s: jax.Array,
     dsigma: jax.Array,
     grid,
+    owned_mask: jax.Array | None = None,
 ) -> jax.Array:
     """Compute global column-integrated water vapor.
 
@@ -337,6 +359,8 @@ def compute_global_moisture(
         Sigma layer thicknesses.
     grid : CubedSphereGrid or similar
         Grid with ``.area`` attribute.
+    owned_mask : jax.Array, optional
+        Shape ``(n_faces,)`` for MPI replicated dynamics.
 
     Returns
     -------
@@ -345,7 +369,7 @@ def compute_global_moisture(
     from legoesm import constants
     # Column water vapor: ∫ q_v dp/g = q_v * p_s * dsigma / g
     cwv = jnp.sum(q_v * p_s[..., None] * dsigma, axis=-1) / constants.g
-    return _global_area_sum(cwv, grid)
+    return _global_area_sum(cwv, grid, owned_mask=owned_mask)
 
 
 def fix_moisture_hydrostatic(
@@ -354,6 +378,7 @@ def fix_moisture_hydrostatic(
     p_s: jax.Array,
     dsigma: jax.Array,
     grid,
+    owned_mask: jax.Array | None = None,
 ) -> jax.Array:
     """Fix global moisture conservation via multiplicative scaling.
 
@@ -372,12 +397,14 @@ def fix_moisture_hydrostatic(
     dsigma : jax.Array, shape (nlev,)
         Sigma layer thicknesses.
     grid : CubedSphereGrid or similar
+    owned_mask : jax.Array, optional
+        Shape ``(n_faces,)`` for MPI replicated dynamics.
 
     Returns
     -------
     jax.Array : Moisture-conserving q_v with same shape as input.
     """
-    current = compute_global_moisture(q_v, p_s, dsigma, grid)
+    current = compute_global_moisture(q_v, p_s, dsigma, grid, owned_mask=owned_mask)
     scale = jnp.where(current > _TINY, target_moisture / current, 1.0)
     return q_v * scale
 
@@ -457,6 +484,7 @@ def fix_ps_mass_target(
     p_s: jax.Array,
     target_mass: jax.Array,
     grid: CubedSphereGrid,
+    owned_mask: jax.Array | None = None,
 ) -> jax.Array:
     """Fix dry mass conservation on raw p_s array, anchored to a fixed target.
 
@@ -471,13 +499,15 @@ def fix_ps_mass_target(
     target_mass : jax.Array (scalar)
         Target global mass integral (∫ p_s * dA at t=0).
     grid : CubedSphereGrid
+    owned_mask : jax.Array, optional
+        Shape ``(6,)`` float mask for MPI replicated dynamics.
+        See :func:`_global_area_sum` for details.
 
     Returns
     -------
     jax.Array : Corrected p_s with same shape.
     """
-    acc = _accumulation_dtype()
-    mass_new = jnp.sum(p_s.astype(acc) * grid.area.astype(acc))
+    mass_new = _global_area_sum(p_s, grid, owned_mask=owned_mask)
     correction = (target_mass - mass_new) / grid.total_area
     return p_s + correction
 

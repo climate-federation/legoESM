@@ -68,6 +68,7 @@ def vorticity_3d(
 
 def gradient_x_3d(
     field_3d: jax.Array, grid: CubedSphereGrid,
+    padded: jax.Array | None = None,
 ) -> jax.Array:
     """Compute x-gradient at all levels using native 4D halo exchange.
 
@@ -75,18 +76,22 @@ def gradient_x_3d(
     ----------
     field_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
+    padded : jax.Array, optional
+        Pre-padded field (6, n+2, n+2, nlev).  Skips internal halo
+        exchange when provided (stage-level packing).
 
     Returns
     -------
     jax.Array : d(field)/dx, shape (6, n, n, nlev).
     """
-    # One 4D halo exchange = 1 MPI message set (instead of nlev)
-    padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+    if padded is None:
+        padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
     return (padded[:, 2:, 1:-1, :] - padded[:, :-2, 1:-1, :]) / grid.dx[..., None]
 
 
 def gradient_y_3d(
     field_3d: jax.Array, grid: CubedSphereGrid,
+    padded: jax.Array | None = None,
 ) -> jax.Array:
     """Compute y-gradient at all levels using native 4D halo exchange.
 
@@ -94,12 +99,16 @@ def gradient_y_3d(
     ----------
     field_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
+    padded : jax.Array, optional
+        Pre-padded field (6, n+2, n+2, nlev).  Skips internal halo
+        exchange when provided (stage-level packing).
 
     Returns
     -------
     jax.Array : d(field)/dy, shape (6, n, n, nlev).
     """
-    padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+    if padded is None:
+        padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
     return (padded[:, 1:-1, 2:, :] - padded[:, 1:-1, :-2, :]) / grid.dy[..., None]
 
 

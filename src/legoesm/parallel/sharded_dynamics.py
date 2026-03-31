@@ -668,6 +668,22 @@ def make_sharded_step(
         logger.info("make_sharded_step: single-device mode, using plain JIT")
         return _SingleDeviceStep(model)
 
+    # Activate explicit SPMD halo exchange for face-sharded cubed-sphere.
+    # This replaces implicit cross-shard reads with explicit all_gather
+    # collectives, producing much better XLA communication patterns.
+    if (config.n_devices <= 6
+            and getattr(config, 'tiling', (1, 1)) == (1, 1)
+            and "face" in getattr(config.mesh, 'axis_names', ())):
+        from legoesm.parallel.cubesphere_exchange import (
+            activate_spmd_halo_backend,
+        )
+        activate_spmd_halo_backend(config.mesh)
+        logger.info(
+            "make_sharded_step: activated SPMD halo backend "
+            "(%d devices, face-sharded)",
+            config.n_devices,
+        )
+
     logger.info(
         "make_sharded_step: %d-device mode, tiling=%s",
         config.n_devices, config.tiling,

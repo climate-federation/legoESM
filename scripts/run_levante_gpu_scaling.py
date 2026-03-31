@@ -482,6 +482,9 @@ def run_benchmark(
     elif grid_type == "cubed-sphere" and dev_config.n_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_sharded_step
         step_fn = make_sharded_step(model, dev_config)
+    elif grid_type == "latlon" and dev_config.n_devices > 1:
+        from legoesm.parallel.latlon_sharded import make_latlon_sharded_step
+        step_fn = make_latlon_sharded_step(model, dev_config)
     else:
         step_fn = model.step
 

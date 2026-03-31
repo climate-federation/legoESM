@@ -1,6 +1,9 @@
-"""3D operator wrappers for lat-lon grids.
+"""Native 3D operators for lat-lon grids.
 
-vmap of 2D lat-lon operators over vertical levels via vmap_over_levels.
+All operators pad halos once for all levels simultaneously, avoiding
+the per-level vmap approach that produced O(nlev) separate halo
+exchanges under multi-GPU sharding.
+
 All functions operate on raw jax.Array data with shape
 (n_lat, n_lon, nlev), where the level axis is last.
 """
@@ -8,77 +11,22 @@ All functions operate on raw jax.Array data with shape
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 
-from legoesm.core.vmap_levels import vmap_over_levels
-from legoesm.core.field import Field
-from legoesm.core.operators_latlon import (
-    gradient_x,
-    gradient_y,
-    divergence,
-    curl_z,
-    laplacian,
-    hyperdiffusion,
-)
 from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.halo_latlon import (
+    pad_halo_latlon_3d,
+    pad_halo_latlon_vector_3d,
+    pad_halo_vector_latlon_3d,
+)
 
 
-def _curl_z_raw(u_k, v_k, *, grid):
-    """curl_z wrapper: raw arrays -> raw array."""
-    u_f = Field(data=u_k, name="u", dims=("lat", "lon"), units="m/s")
-    v_f = Field(data=v_k, name="v", dims=("lat", "lon"), units="m/s")
-    return curl_z(u_f, v_f, grid).data
-
-
-def _gradient_x_raw(f_k, *, grid):
-    """gradient_x wrapper: raw array -> raw array."""
-    f_field = Field(data=f_k, name="f", dims=("lat", "lon"),
-                    units="", staggering="cell")
-    return gradient_x(f_field, grid).data
-
-
-def _gradient_y_raw(f_k, *, grid):
-    """gradient_y wrapper: raw array -> raw array."""
-    f_field = Field(data=f_k, name="f", dims=("lat", "lon"),
-                    units="", staggering="cell")
-    return gradient_y(f_field, grid).data
-
-
-def _divergence_raw(u_k, v_k, *, grid):
-    """divergence wrapper: raw arrays -> raw array."""
-    u_f = Field(data=u_k, name="u", dims=("lat", "lon"), units="m/s")
-    v_f = Field(data=v_k, name="v", dims=("lat", "lon"), units="m/s")
-    return divergence(u_f, v_f, grid).data
-
-
-def _laplacian_raw(f_k, *, grid):
-    """laplacian wrapper: raw array -> raw array."""
-    f_field = Field(data=f_k, name="f", dims=("lat", "lon"), units="")
-    return laplacian(f_field, grid).data
-
-
-def _hyperdiffusion_raw(f_k, *, grid, coeff):
-    """hyperdiffusion wrapper: raw array -> raw array."""
-    f_field = Field(data=f_k, name="f", dims=("lat", "lon"), units="")
-    return hyperdiffusion(f_field, grid, coeff).data
-
-
-def vorticity_3d(u_3d: jax.Array, v_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
-    """Compute vorticity at all levels via vmap of 2D curl_z.
-
-    Parameters
-    ----------
-    u_3d, v_3d : jax.Array, shape (n_lat, n_lon, nlev)
-    grid : LatLonGrid
-
-    Returns
-    -------
-    jax.Array : Vorticity, shape (n_lat, n_lon, nlev).
-    """
-    return vmap_over_levels(_curl_z_raw)(u_3d, v_3d, grid=grid)
-
+# ==============================================================================
+# Gradient operators
+# ==============================================================================
 
 def gradient_x_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
-    """Compute x-gradient at all levels via vmap.
+    """Compute x-gradient at all levels (single 3D halo pad).
 
     Parameters
     ----------
@@ -89,11 +37,14 @@ def gradient_x_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
     -------
     jax.Array : d(field)/dx, shape (n_lat, n_lon, nlev).
     """
-    return vmap_over_levels(_gradient_x_raw)(field_3d, grid=grid)
+    padded = pad_halo_latlon_3d(field_3d)
+    # Centered difference: (f[j, i+1, :] - f[j, i-1, :]) / dx
+    df_dx = (padded[1:-1, 2:] - padded[1:-1, :-2]) / grid.dx[:, :, None]
+    return df_dx
 
 
 def gradient_y_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
-    """Compute y-gradient at all levels via vmap.
+    """Compute y-gradient at all levels (single 3D halo pad).
 
     Parameters
     ----------
@@ -104,11 +55,17 @@ def gradient_y_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
     -------
     jax.Array : d(field)/dy, shape (n_lat, n_lon, nlev).
     """
-    return vmap_over_levels(_gradient_y_raw)(field_3d, grid=grid)
+    padded = pad_halo_latlon_3d(field_3d)
+    df_dy = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / grid.dy
+    return df_dy
 
+
+# ==============================================================================
+# Divergence and curl
+# ==============================================================================
 
 def divergence_3d(u_3d: jax.Array, v_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
-    """Compute divergence at all levels via vmap.
+    """Compute divergence at all levels (single 3D halo pad).
 
     Parameters
     ----------
@@ -119,11 +76,73 @@ def divergence_3d(u_3d: jax.Array, v_3d: jax.Array, grid: LatLonGrid) -> jax.Arr
     -------
     jax.Array : Divergence, shape (n_lat, n_lon, nlev).
     """
-    return vmap_over_levels(_divergence_raw)(u_3d, v_3d, grid=grid)
+    # Form fluxes with metric factors
+    flux_x = u_3d * (grid.dy * 0.5)
+    flux_y = v_3d * (grid.dx * 0.5)[:, :, None]
+
+    flux_x_pad, flux_y_pad = pad_halo_vector_latlon_3d(flux_x, flux_y)
+
+    d_flux_x = flux_x_pad[1:-1, 2:] - flux_x_pad[1:-1, :-2]
+    d_flux_y = flux_y_pad[2:, 1:-1] - flux_y_pad[:-2, 1:-1]
+
+    return (d_flux_x + d_flux_y) / (2.0 * grid.area[:, :, None])
+
+
+def vorticity_3d(u_3d: jax.Array, v_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
+    """Compute vorticity at all levels (single 3D halo pad).
+
+    Parameters
+    ----------
+    u_3d, v_3d : jax.Array, shape (n_lat, n_lon, nlev)
+    grid : LatLonGrid
+
+    Returns
+    -------
+    jax.Array : Vorticity, shape (n_lat, n_lon, nlev).
+    """
+    v_metric = v_3d * (grid.dy * 0.5)
+    u_metric = u_3d * (grid.dx * 0.5)[:, :, None]
+
+    v_pad = pad_halo_latlon_vector_3d(v_metric)
+    u_pad = pad_halo_latlon_vector_3d(u_metric)
+
+    dv_dx = v_pad[1:-1, 2:] - v_pad[1:-1, :-2]
+    du_dy = u_pad[2:, 1:-1] - u_pad[:-2, 1:-1]
+
+    return (dv_dx - du_dy) / (2.0 * grid.area[:, :, None])
+
+
+# ==============================================================================
+# Laplacian and hyperdiffusion
+# ==============================================================================
+
+def laplacian_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
+    """Compute Laplacian at all levels (single 3D halo pad).
+
+    Parameters
+    ----------
+    field_3d : jax.Array, shape (n_lat, n_lon, nlev)
+    grid : LatLonGrid
+
+    Returns
+    -------
+    jax.Array : Laplacian, shape (n_lat, n_lon, nlev).
+    """
+    padded = pad_halo_latlon_3d(field_3d)
+
+    d2f_dx2 = (
+        padded[1:-1, 2:] - 2.0 * field_3d + padded[1:-1, :-2]
+    ) / (grid.dx**2 / 4.0)[:, :, None]
+
+    d2f_dy2 = (
+        padded[2:, 1:-1] - 2.0 * field_3d + padded[:-2, 1:-1]
+    ) / (grid.dy**2 / 4.0)
+
+    return d2f_dx2 + d2f_dy2
 
 
 def hyperdiffusion_3d(field_3d: jax.Array, grid: LatLonGrid, coeff: float) -> jax.Array:
-    """Compute hyperdiffusion at all levels via vmap.
+    """Compute hyperdiffusion at all levels: -coeff * nabla^4(field).
 
     Parameters
     ----------
@@ -135,19 +154,6 @@ def hyperdiffusion_3d(field_3d: jax.Array, grid: LatLonGrid, coeff: float) -> ja
     -------
     jax.Array : Hyperdiffusion tendency, shape (n_lat, n_lon, nlev).
     """
-    return vmap_over_levels(_hyperdiffusion_raw)(field_3d, grid=grid, coeff=coeff)
-
-
-def laplacian_3d(field_3d: jax.Array, grid: LatLonGrid) -> jax.Array:
-    """Compute Laplacian at all levels via vmap.
-
-    Parameters
-    ----------
-    field_3d : jax.Array, shape (n_lat, n_lon, nlev)
-    grid : LatLonGrid
-
-    Returns
-    -------
-    jax.Array : Laplacian, shape (n_lat, n_lon, nlev).
-    """
-    return vmap_over_levels(_laplacian_raw)(field_3d, grid=grid)
+    lap1 = laplacian_3d(field_3d, grid)
+    lap2 = laplacian_3d(lap1, grid)
+    return -coeff * lap2

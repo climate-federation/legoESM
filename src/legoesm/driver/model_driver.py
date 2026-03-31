@@ -64,6 +64,14 @@ class ModelDriver:
         self._device_config = None
         self._carry_aux: dict = {}  # held radiation + carry metadata for checkpoint
 
+        # MPI distributed state (populated by _setup_parallel)
+        self._mpi_rank: int | None = None
+        self._mpi_world_size: int | None = None
+        self._owned_face_ids: jax.Array | None = None  # shape (n_local_faces,)
+        self._layout = None  # DistributedLayout for scatter/gather
+        self._physics_lat = None  # rank-local lat for physics
+        self._physics_lon = None  # rank-local lon for physics
+
         if output_dir is not None:
             self._output_dir = Path(output_dir)
         elif config.output.output_dir:
@@ -119,7 +127,9 @@ class ModelDriver:
         for w in config_warnings:
             logger.warning(f"  Config: {w}")
 
-        self._output_dir.mkdir(parents=True, exist_ok=True)
+        # Only rank 0 creates output directory (or single-rank)
+        if self._mpi_rank is None or self._mpi_rank == 0:
+            self._output_dir.mkdir(parents=True, exist_ok=True)
         self._create_grid()
         self._create_topography()
         self._create_dycore()
@@ -469,6 +479,16 @@ class ModelDriver:
                 source="constant",
             )
 
+    def _owned_p_s_and_lat(self):
+        """Return (p_s, lat) for physics — rank-local if MPI, global otherwise."""
+        if self._owned_face_ids is not None:
+            p_s = self.state.p_s.data[self._owned_face_ids]
+            lat = self._physics_lat
+        else:
+            p_s = self.state.p_s.data
+            lat = self._grid_lat
+        return p_s, lat
+
     def _precompute_external_forcing(self, day, p_s, lat):
         """Pre-compute ozone/aerosol/GHG fields outside JIT boundary."""
         from legoesm.forcing.external import (
@@ -561,10 +581,46 @@ class ModelDriver:
 
         if self._device_config is not None:
             if self._device_config.is_distributed:
-                # MPI: reconstruct global state from rank-local data
-                from legoesm.parallel.distributed import gather_to_global
-                gathered = gather_to_global(kwargs.get('state', self.state))
-                kwargs['state'] = gathered
+                # MPI replicated dynamics: state is full (6, n, n) on each
+                # rank but non-owned faces are stale.  Gather owned-face
+                # data from all ranks into a correct global state on rank 0.
+                state = kwargs.get('state', self.state)
+                jax.block_until_ready(state.u.data)
+                if self._owned_face_ids is not None and self._layout is not None:
+                    from legoesm.parallel.layout import scatter, gather
+                    from legoesm.core.field import Field
+                    from legoesm.core.state import HydrostaticState
+                    # Extract owned faces, then gather to global on all ranks
+                    _ofi = list(self._owned_face_ids)
+                    fields_local = {
+                        'u': state.u.data[_ofi], 'v': state.v.data[_ofi],
+                        'T': state.T.data[_ofi], 'p_s': state.p_s.data[_ofi],
+                        'phis': state.phis.data[_ofi],
+                    }
+                    fields_global = {}
+                    for name, arr in fields_local.items():
+                        fields_global[name] = gather(arr, self._layout)
+
+                    gathered = HydrostaticState(
+                        u=Field(fields_global['u'], name="u", dims=state.u.dims, units=state.u.units),
+                        v=Field(fields_global['v'], name="v", dims=state.v.dims, units=state.v.units),
+                        T=Field(fields_global['T'], name="T", dims=state.T.dims, units=state.T.units),
+                        p_s=Field(fields_global['p_s'], name="p_s", dims=state.p_s.dims, units=state.p_s.units),
+                        phis=Field(fields_global['phis'], name="phis", dims=state.phis.dims, units=state.phis.units),
+                    )
+                    kwargs['state'] = gathered
+
+                    # Also gather tracers
+                    for tname in ('q_v', 'q_c', 'q_r'):
+                        arr = kwargs.get(tname)
+                        if arr is not None:
+                            kwargs[tname] = gather(arr[_ofi], self._layout)
+
+                    # Only rank 0 collects diagnostics
+                    if self._mpi_rank != 0:
+                        return {'mean_T': 0.0, 'max_v': 0.0}
+
+                return self.diagnostics.collect(**kwargs)
             elif self._device_config.mesh is not None:
                 # Multi-GPU single-node: replicate sharded → full
                 from legoesm.parallel.sharded_dynamics import gather_state
@@ -595,10 +651,9 @@ class ModelDriver:
         self._hyperdiffusion_3d_fn = hyperdiffusion_3d
 
     def _save_config(self) -> None:
-        """Save experiment config to output directory.
-
-        Writes the canonical ExperimentConfig JSON only.
-        """
+        """Save experiment config to output directory (rank 0 only)."""
+        if self._mpi_rank is not None and self._mpi_rank != 0:
+            return
         from legoesm.driver.config import save_experiment_config
         save_experiment_config(self.config, self._output_dir / "experiment_config.json")
 
@@ -617,6 +672,15 @@ class ModelDriver:
             grid_type=self.config.grid.grid_type,
         )
         self._device_config = rc.device_config
+
+        # Detect MPI rank early for output guards and logging
+        if rc.distributed:
+            from legoesm.parallel.distributed import get_active_topology
+            topo = get_active_topology()
+            if topo is not None:
+                self._mpi_rank = topo.rank
+                self._mpi_world_size = topo.n_processes
+
         logger.info(
             f"  Runtime: backend={rc.backend}, precision={self.config.precision}, "
             f"x64={rc.x64}, distributed={rc.distributed}"
@@ -629,6 +693,15 @@ class ModelDriver:
         ``_bootstrap_runtime()``.  This method handles the data-level
         work that requires knowing the grid shape: scatter for MPI,
         or shard for multi-device SPMD.
+
+        **MPI strategy (replicated dynamics):**
+        State and tracers are kept at full ``(6, n, n, ...)`` shape on
+        every rank so that ``pad_halo_mpi`` (which expects the 6-face
+        layout) works unchanged.  Only physics-related arrays (lat, lon,
+        SST/SIC, ozone, aerosol) are scattered to rank-local for the
+        column-parallel physics.  Conservation fixers use an
+        ``owned_mask`` to sum only owned faces, then ``global_sum_mpi``
+        to combine across ranks.
         """
         # Device config was set by _bootstrap_runtime().  If None or
         # single-device without distribution, nothing to do.
@@ -639,36 +712,42 @@ class ModelDriver:
             return
 
         if self._device_config.is_distributed:
-            # MPI: scatter global state to rank-local data via layout
             from legoesm.parallel.distributed import (
-                scatter_to_local, get_active_layout, set_active_layout,
+                get_active_layout, set_active_layout,
                 get_active_topology,
             )
+            from legoesm.parallel.layout import scatter
+
+            topo = get_active_topology()
             layout = get_active_layout()
-            if layout is None:
+            if layout is None and topo is not None:
                 # Deferred layout: grid_n wasn't known at init time
-                topo = get_active_topology()
-                if topo is not None:
-                    from legoesm.parallel.layout import make_layout
-                    n = self.state.T.data.shape[1]  # per-face resolution
-                    layout = make_layout(topo.rank, topo.n_processes, n)
-                    set_active_layout(layout)
+                from legoesm.parallel.layout import make_layout
+                n = self.state.T.data.shape[1]  # per-face resolution
+                layout = make_layout(topo.rank, topo.n_processes, n)
+                set_active_layout(layout)
+
             if layout is not None:
-                self.state = scatter_to_local(self.state, layout)
-                from legoesm.parallel.layout import scatter_pytree, scatter
-                self.tracers = scatter_pytree(self.tracers, layout)
+                # Store MPI metadata for later phases
+                self._layout = layout
+                self._mpi_rank = topo.rank
+                self._mpi_world_size = topo.n_processes
+                self._owned_face_ids = jnp.asarray(
+                    list(layout.ownership.face_ids)
+                )
 
-                # Scatter auxiliary 2-D fields to rank-local shapes
-                self._grid_lat = scatter(self._grid_lat, layout)
-                self._grid_lon = scatter(self._grid_lon, layout)
-                if self._phis_data is not None and self._phis_data.ndim >= 3:
-                    self._phis_data = scatter(self._phis_data, layout)
-                if self._f_land is not None and self._f_land.ndim >= 3:
-                    self._f_land = scatter(self._f_land, layout)
+                # NOTE: State and tracers are NOT scattered — dynamics
+                # needs full (6, n, n) for pad_halo_mpi.  Non-owned faces
+                # will diverge from truth but owned faces stay correct via
+                # MPI halo exchange.
 
-                # Rebuild physics adapter to match rank-local shapes
+                # Scatter lat/lon for rank-local physics
+                self._physics_lat = scatter(self._grid_lat, layout)
+                self._physics_lon = scatter(self._grid_lon, layout)
+
+                # Rebuild physics adapter for rank-local column count
                 from legoesm.driver.grid_adapters import ColumnAdapter
-                local_shape_2d = tuple(int(s) for s in self._grid_lat.shape)
+                local_shape_2d = tuple(int(s) for s in self._physics_lat.shape)
                 local_ncol = 1
                 for s in local_shape_2d:
                     local_ncol *= s
@@ -689,8 +768,9 @@ class ModelDriver:
                 self.get_sst_sic = _local_get_sst_sic
 
                 logger.info(
-                    f"  Parallel: MPI distributed — "
-                    f"rank-local shape {layout.local_shape_2d}"
+                    f"  Parallel: MPI distributed — rank {topo.rank}/{topo.n_processes}, "
+                    f"owned faces {list(layout.ownership.face_ids)}, "
+                    f"physics shape {local_shape_2d}"
                 )
         else:
             # Multi-GPU single-node: SPMD sharding
@@ -713,36 +793,28 @@ class ModelDriver:
         """
         elapsed_day = day - self.config.start_day
 
-        # Distributed path: per-rank checkpoint (no gather needed)
+        # Distributed path: rank 0 saves the full state (replicated dynamics)
+        # plus carry_aux for held radiation and conservation targets.
         if (self._device_config is not None
                 and self._device_config.is_distributed):
-            from legoesm.io.distributed_checkpoint import (
-                save_checkpoint_distributed,
-            )
-            from legoesm.parallel.distributed import get_active_topology
-            topology = get_active_topology()
-            if topology is not None:
-                ckpt_dir = (
-                    self._output_dir
-                    / f"checkpoint_day_{int(elapsed_day):04d}"
-                )
-                save_checkpoint_distributed(
-                    path=ckpt_dir,
+            if self._mpi_rank == 0:
+                ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
+                save_restart(
+                    path=ckpt_path,
                     state=self.state,
-                    rank=topology.rank,
-                    n_ranks=topology.n_processes,
+                    q_v=self.q_v,
                     step=step,
                     day=day,
                     config=self.config,
-                    q_v=self.q_v,
                     q_c=self.q_c,
                     q_r=self.q_r,
+                    carry_aux=self._carry_aux,
                 )
-                logger.info(
-                    f"  Distributed checkpoint: {ckpt_dir.name} "
-                    f"(rank {topology.rank}/{topology.n_processes})"
-                )
-                return
+                logger.info(f"  Checkpoint: {ckpt_path.name} (rank 0)")
+            # Barrier so all ranks wait for rank 0 to finish writing
+            from mpi4py import MPI
+            MPI.COMM_WORLD.Barrier()
+            return
 
         # Single-process path
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
@@ -1138,9 +1210,10 @@ class ModelDriver:
         held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d, dtype=_sd))
 
-        # External forcing
+        # External forcing (rank-local p_s and lat for MPI)
+        _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
         o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
-            START_DAY, self.state.p_s.data, self._grid_lat,
+            START_DAY, _phys_p_s, _phys_lat,
         )
 
         lat_deg_grid = np.degrees(np.asarray(self._grid_lat))
@@ -1163,6 +1236,7 @@ class ModelDriver:
             "held_sw_down_toa": held_sw_down_toa,
             "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
             "lat_deg_grid": lat_deg_grid,
+            "_sd": _sd,
         }
 
     def _finalize_run(self, run_status, t_jit, t_start, n_steps_total,
@@ -1172,9 +1246,11 @@ class ModelDriver:
         total_wall = time.time() - t_start
         logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
 
-        self.diagnostics.save(self._output_dir)
-        self.save_results(run_status, t_jit, total_wall)
-        logger.info(self.diagnostics.print_summary())
+        _is_root = (self._mpi_rank is None or self._mpi_rank == 0)
+        if _is_root:
+            self.diagnostics.save(self._output_dir)
+            self.save_results(run_status, t_jit, total_wall)
+            logger.info(self.diagnostics.print_summary())
 
         if checkpoint_interval > 0:
             self.save_checkpoint(n_steps_total, START_DAY + N_DAYS)
@@ -1224,6 +1300,7 @@ class ModelDriver:
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
         lat_deg_grid = ctx["lat_deg_grid"]
+        _sd = ctx["_sd"]
 
         # Segment computation
         segment_length = compute_segment_length(
@@ -1237,22 +1314,29 @@ class ModelDriver:
 
         # Compute fixed moisture target for conservation fixer —
         # restore from checkpoint if available, else compute from IC.
-        from legoesm.core.conservation import compute_global_moisture
+        # At initialization (step 0) all ranks have identical state, so
+        # owned_mask is not strictly needed, but we include it for consistency.
+        from legoesm.core.conservation import compute_global_moisture, _global_area_sum
         _carry_aux = self._carry_aux
+        _owned_mask = None
+        if self._owned_face_ids is not None:
+            _owned_mask = jnp.zeros(6, dtype=jnp.float32)
+            _owned_mask = _owned_mask.at[self._owned_face_ids].set(1.0)
+
         _target_moisture = _carry_aux.get("target_moisture", jnp.asarray(0.0))
         if cfg.fix_moisture and float(_target_moisture) == 0.0:
             _target_moisture = compute_global_moisture(
                 self.q_v, self.state.p_s.data, dsigma, self.grid,
+                owned_mask=_owned_mask,
             )
             logger.info(f"  Moisture target: {float(_target_moisture):.6e} kg")
 
         # Compute fixed dry mass target for target-anchored conservation
-        from legoesm.core.operators import global_integral
-        from legoesm.core.field import Field
-        _p_s_field = Field(self.state.p_s.data, name="p_s", dims=("face", "x", "y"), units="Pa")
         _target_mass = _carry_aux.get("target_mass", jnp.asarray(0.0))
         if cfg.dycore.fix_mass and float(_target_mass) == 0.0:
-            _target_mass = global_integral(_p_s_field, self.grid)
+            _target_mass = _global_area_sum(
+                self.state.p_s.data, self.grid, owned_mask=_owned_mask,
+            )
             logger.info(f"  Mass target: {float(_target_mass):.6e} Pa·m²")
 
         run_status = "COMPLETED"
@@ -1261,6 +1345,10 @@ class ModelDriver:
         # Per-segment forcing (SST, SIC, solar, ozone, aerosol) is now
         # passed as an explicit SegmentForcing argument to run_segment,
         # so changing forcing values does NOT trigger JIT recompilation.
+        # lat/lon for physics: rank-local when MPI, global otherwise
+        _seg_lat = self._physics_lat if self._physics_lat is not None else self._grid_lat
+        _seg_lon = self._physics_lon if self._physics_lon is not None else self._grid_lon
+
         run_segment = build_segment_fn(
             model=self.model,
             step_unified=step_unified,
@@ -1274,8 +1362,8 @@ class ModelDriver:
             fix_mass=cfg.dycore.fix_mass,
             fric_decay=self._fric_decay,
             qv_smooth_coeff=self._qv_smooth_coeff,
-            lat=self._grid_lat,
-            lon=self._grid_lon,
+            lat=_seg_lat,
+            lon=_seg_lon,
             start_day=START_DAY,
             gradient_checkpoint=(
                 cfg.gradient_checkpoint
@@ -1292,6 +1380,7 @@ class ModelDriver:
             albedo_ice=cfg.albedo_ice,
             albedo_ocean=cfg.albedo_ocean,
             ghg_vmr_override=ghg_vmr,
+            owned_face_ids=self._owned_face_ids,
         )
 
         logger.info(
@@ -1316,8 +1405,9 @@ class ModelDriver:
                 current_s_0 = float(solar_now["tsi"])
                 if self._use_solar_spectral:
                     solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
+                _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
                 o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
-                    day, self.state.p_s.data, self._grid_lat,
+                    day, _phys_p_s, _phys_lat,
                 )
 
             # Pack per-segment forcing into a SegmentForcing pytree.
@@ -1416,31 +1506,50 @@ class ModelDriver:
                 # CFL computed host-side from final segment state (not in hot loop)
                 from legoesm.core.cfl import cfl_number_from_state, estimate_min_dx_cubed_sphere
                 _dx_min = estimate_min_dx_cubed_sphere(cfg.grid.resolution) if hasattr(self.grid, 'n') else 1e6
-                _seg_max_cfl = float(cfl_number_from_state(
-                    self.state.u.data, self.state.v.data, _dx_min, DT,
-                ))
 
-                elapsed_wall = time.time() - t_start
-                days_done = elapsed_day
-                eta_str = ""
-                if days_done > 0:
-                    rate = elapsed_wall / days_done
-                    remaining = (N_DAYS - days_done) * rate
-                    eta_str = f", ETA {remaining/3600:.1f}h"
-                logger.info(
-                    f"  Day {elapsed_day:6.0f}: T={diag_info['mean_T']:.1f}K, "
-                    f"max_v={diag_info['max_v']:.1f}m/s"
-                    f"{eta_str}"
-                )
+                # Under MPI, CFL on owned faces only, then global max
+                if self._owned_face_ids is not None:
+                    _ofi = self._owned_face_ids
+                    _seg_max_cfl = float(cfl_number_from_state(
+                        self.state.u.data[_ofi], self.state.v.data[_ofi], _dx_min, DT,
+                    ))
+                    from mpi4py import MPI
+                    _seg_max_cfl = MPI.COMM_WORLD.allreduce(_seg_max_cfl, op=MPI.MAX)
+                else:
+                    _seg_max_cfl = float(cfl_number_from_state(
+                        self.state.u.data, self.state.v.data, _dx_min, DT,
+                    ))
 
-                # CFL monitoring
-                if _seg_max_cfl > 0:
-                    logger.info(f"    CFL max: {_seg_max_cfl:.2f}")
+                # Logging: rank 0 only under MPI
+                _is_root = (self._mpi_rank is None or self._mpi_rank == 0)
+                if _is_root:
+                    elapsed_wall = time.time() - t_start
+                    days_done = elapsed_day
+                    eta_str = ""
+                    if days_done > 0:
+                        rate = elapsed_wall / days_done
+                        remaining = (N_DAYS - days_done) * rate
+                        eta_str = f", ETA {remaining/3600:.1f}h"
+                    logger.info(
+                        f"  Day {elapsed_day:6.0f}: T={diag_info.get('mean_T', 0):.1f}K, "
+                        f"max_v={diag_info.get('max_v', 0):.1f}m/s"
+                        f"{eta_str}"
+                    )
+                    if _seg_max_cfl > 0:
+                        logger.info(f"    CFL max: {_seg_max_cfl:.2f}")
 
-                # Stability check
-                error = self.diagnostics.check_stability(self.state, elapsed_day)
+                # Stability check (all ranks must agree to avoid deadlock)
+                if _is_root:
+                    error = self.diagnostics.check_stability(self.state, elapsed_day)
+                else:
+                    error = None
+                # Broadcast stability error to all ranks
+                if self._mpi_rank is not None:
+                    from mpi4py import MPI
+                    error = MPI.COMM_WORLD.bcast(error, root=0)
                 if error:
-                    logger.warning(f"  {error}")
+                    if _is_root:
+                        logger.warning(f"  {error}")
                     run_status = error
                     break
 
@@ -1465,8 +1574,9 @@ class ModelDriver:
                         grid=self.grid, sigma_full=sigma_full, dsigma=dsigma,
                         dt=DT, rad_update_steps=RAD_UPDATE_STEPS,
                         microphysics=cfg.microphysics, fix_moisture=cfg.fix_moisture,
+                        fix_mass=cfg.dycore.fix_mass,
                         fric_decay=self._fric_decay, qv_smooth_coeff=self._qv_smooth_coeff,
-                        lat=self._grid_lat, lon=self._grid_lon, start_day=START_DAY,
+                        lat=_seg_lat, lon=_seg_lon, start_day=START_DAY,
                         gradient_checkpoint=cfg.gradient_checkpoint or segment_length > 50,
                         hyperdiffusion_3d_fn=self._hyperdiffusion_3d_fn,
                         tau_equator=cfg.tau_equator, tau_pole=cfg.tau_pole,
@@ -1474,14 +1584,17 @@ class ModelDriver:
                         C_H=cfg.C_H, C_E=cfg.C_E,
                         albedo_ice=cfg.albedo_ice, albedo_ocean=cfg.albedo_ocean,
                         ghg_vmr_override=ghg_vmr,
+                        owned_face_ids=self._owned_face_ids,
                     )
 
             # Checkpoint
             if checkpoint_interval > 0 and current_step % checkpoint_interval == 0:
                 self.save_checkpoint(current_step, day)
 
-            # Periodic diagnostic flush (every ~365 days) to cap memory
-            if elapsed_day > 0 and int(elapsed_day) % 365 == 0 and diag_interval > 0 and current_step % diag_interval == 0:
+            # Periodic diagnostic flush (every ~365 days) to cap memory — rank 0 only
+            if (elapsed_day > 0 and int(elapsed_day) % 365 == 0
+                    and diag_interval > 0 and current_step % diag_interval == 0
+                    and (self._mpi_rank is None or self._mpi_rank == 0)):
                 self.diagnostics.flush_to_disk(self._output_dir)
 
         return self._finalize_run(
@@ -1619,9 +1732,10 @@ class ModelDriver:
                 if self._use_solar_spectral:
                     solar_weights = jnp.asarray(solar_now["solar_fraction_by_gpt"])
 
-                # Ozone + aerosol + GHG
+                # Ozone + aerosol + GHG (rank-local for MPI)
+                _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
                 o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
-                    day, self.state.p_s.data, self._grid_lat,
+                    day, _phys_p_s, _phys_lat,
                 )
 
                 # CMIP GHG trajectory

@@ -282,6 +282,7 @@ def build_segment_fn(
     albedo_ice=None,
     albedo_ocean=None,
     ghg_vmr_override=None,
+    owned_face_ids=None,
 ):
     """Build a compiled segment function.
 
@@ -323,6 +324,11 @@ def build_segment_fn(
         recomputation for O(sqrt(N)) memory during reverse-mode AD.
         If None (default), automatically enable for segments longer
         than 50 steps to prevent OOM on large grids.
+    owned_face_ids : jax.Array or None, optional
+        Indices of faces owned by this MPI rank (e.g. ``[0, 1]``).
+        Used for replicated-dynamics MPI: conservation fixers sum
+        only owned faces, physics operates on owned columns only.
+        ``None`` means single-rank (all faces owned).
 
     Returns
     -------
@@ -364,6 +370,14 @@ def build_segment_fn(
             k: jnp.float64(v) for k, v in ghg_vmr_override.items()
         }
 
+    # Build owned-face mask for MPI replicated dynamics.
+    # Shape (6,) with 1.0 for owned faces, 0.0 for non-owned.
+    # None when single-rank (no masking needed).
+    _owned_mask = None
+    if owned_face_ids is not None:
+        _owned_mask = jnp.zeros(6, dtype=jnp.float32)
+        _owned_mask = _owned_mask.at[owned_face_ids].set(1.0)
+
     def _make_single_step(forcing: SegmentForcing):
         """Create the scan body closed over a specific forcing pytree.
 
@@ -388,7 +402,9 @@ def build_segment_fn(
 
             # --- Dry mass fixer (target-anchored) ---
             if fix_mass:
-                p_s_new = fix_ps_mass_target(p_s_new, carry.target_mass, grid)
+                p_s_new = fix_ps_mass_target(
+                    p_s_new, carry.target_mass, grid, owned_mask=_owned_mask,
+                )
 
             # --- Physics with radiation sub-cycling ---
             need_rad = jnp.where(
@@ -397,29 +413,86 @@ def build_segment_fn(
                 ((step_idx + 1) % rad_update_steps) == 0,
             )
 
-            phys_out, held_new = step_unified(
-                need_rad,
-                T_new, p_s_new,
-                carry.q_v, carry.q_c, carry.q_r,
-                u_new, v_new,
-                forcing.sst, forcing.sic, lat, lon,
-                forcing.day_of_year, forcing.seconds_of_day, _dt,
-                forcing.solar_weights, forcing.s_0,
-                forcing.o3_vmr, forcing.aerosol_od,
-                carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
-                carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
-                tau_equator=_tau_equator, tau_pole=_tau_pole,
-                sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
-                C_H=_C_H, C_E=_C_E,
-                albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
-                ghg_vmr_override=_ghg_vmr_override,
-            )
+            if owned_face_ids is not None:
+                # MPI replicated dynamics: physics on owned faces only.
+                # Dynamics state is full (6, n, n, ...) but physics inputs
+                # (forcing, lat/lon) are rank-local.  Extract owned faces
+                # from dynamics fields, run physics, write back.
+                _ofi = owned_face_ids
+                phys_out, held_new_local = step_unified(
+                    need_rad,
+                    T_new[_ofi], p_s_new[_ofi],
+                    carry.q_v[_ofi], carry.q_c[_ofi], carry.q_r[_ofi],
+                    u_new[_ofi], v_new[_ofi],
+                    forcing.sst, forcing.sic, lat, lon,
+                    forcing.day_of_year, forcing.seconds_of_day, _dt,
+                    forcing.solar_weights, forcing.s_0,
+                    forcing.o3_vmr, forcing.aerosol_od,
+                    carry.held_dT_rad[_ofi], carry.held_sw_net_sfc[_ofi],
+                    carry.held_lw_net_sfc[_ofi],
+                    carry.held_sw_up_toa[_ofi], carry.held_lw_up_toa[_ofi],
+                    carry.held_sw_down_toa[_ofi],
+                    tau_equator=_tau_equator, tau_pole=_tau_pole,
+                    sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
+                    C_H=_C_H, C_E=_C_E,
+                    albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                    ghg_vmr_override=_ghg_vmr_override,
+                )
 
-            # --- State update ---
-            T_upd = T_new + _dt * phys_out.dT_dt
-            q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
-            q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
-            q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
+                # Write physics tendencies back at owned indices.
+                # Non-owned faces keep dynamics-only values (no physics).
+                T_upd = T_new.at[_ofi].set(T_new[_ofi] + _dt * phys_out.dT_dt)
+                q_v_upd = carry.q_v.at[_ofi].set(
+                    jnp.maximum(carry.q_v[_ofi] + _dt * phys_out.dq_v_dt, 0.0)
+                )
+                q_c_upd = carry.q_c.at[_ofi].set(
+                    jnp.maximum(carry.q_c[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
+                )
+                q_r_upd = carry.q_r.at[_ofi].set(
+                    jnp.maximum(carry.q_r[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
+                )
+
+                # Held radiation: update at owned indices
+                held_new = (
+                    carry.held_dT_rad.at[_ofi].set(held_new_local[0]),
+                    carry.held_sw_net_sfc.at[_ofi].set(held_new_local[1]),
+                    carry.held_lw_net_sfc.at[_ofi].set(held_new_local[2]),
+                    carry.held_sw_up_toa.at[_ofi].set(held_new_local[3]),
+                    carry.held_lw_up_toa.at[_ofi].set(held_new_local[4]),
+                    carry.held_sw_down_toa.at[_ofi].set(held_new_local[5]),
+                )
+
+                # Precip: update at owned indices
+                precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new[_ofi])
+                precip_accum = carry.precip_accum.at[_ofi].add(precip_step * _dt)
+            else:
+                phys_out, held_new = step_unified(
+                    need_rad,
+                    T_new, p_s_new,
+                    carry.q_v, carry.q_c, carry.q_r,
+                    u_new, v_new,
+                    forcing.sst, forcing.sic, lat, lon,
+                    forcing.day_of_year, forcing.seconds_of_day, _dt,
+                    forcing.solar_weights, forcing.s_0,
+                    forcing.o3_vmr, forcing.aerosol_od,
+                    carry.held_dT_rad, carry.held_sw_net_sfc, carry.held_lw_net_sfc,
+                    carry.held_sw_up_toa, carry.held_lw_up_toa, carry.held_sw_down_toa,
+                    tau_equator=_tau_equator, tau_pole=_tau_pole,
+                    sbm_tau_c=_sbm_tau_c, sbm_RH_ref=_sbm_RH_ref,
+                    C_H=_C_H, C_E=_C_E,
+                    albedo_ice=_albedo_ice, albedo_ocean=_albedo_ocean,
+                    ghg_vmr_override=_ghg_vmr_override,
+                )
+
+                # --- State update ---
+                T_upd = T_new + _dt * phys_out.dT_dt
+                q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
+                q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
+                q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)
+
+                # --- Accumulate precipitation ---
+                precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
+                precip_accum = carry.precip_accum + precip_step * _dt
 
             # --- Saturation adjustment ---
             if do_sat_adjust:
@@ -434,6 +507,7 @@ def build_segment_fn(
                 q_v_upd = fix_moisture_hydrostatic(
                     q_v_upd, carry.target_moisture,
                     p_s_new, dsigma, grid,
+                    owned_mask=_owned_mask,
                 )
 
             # --- Moisture smoothing ---
@@ -449,10 +523,6 @@ def build_segment_fn(
             # CFL is computed at segment boundary (host-side) from the
             # final carry's wind fields, not inside the hot loop.
             max_cfl = carry.max_cfl
-
-            # --- Accumulate precipitation ---
-            precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
-            precip_accum = carry.precip_accum + precip_step * _dt
 
             # Cast all arrays back to carry input dtypes to prevent
             # float32→float64 promotion from Python float constants

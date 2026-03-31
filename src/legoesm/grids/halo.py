@@ -324,6 +324,7 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
 # Module-level state: "local" for single-node (default), "mpi" for distributed.
 _halo_backend: str = "local"
 _mpi_topology = None  # CommTopology or None
+_spmd_mesh = None     # jax.sharding.Mesh or None
 
 
 def set_halo_backend(backend: str, topology=None) -> None:
@@ -331,15 +332,18 @@ def set_halo_backend(backend: str, topology=None) -> None:
 
     Parameters
     ----------
-    backend : ``"local"`` | ``"mpi"``
+    backend : ``"local"`` | ``"mpi"`` | ``"spmd"``
         ``"local"`` uses the default JAX-native implementation
         (works for single-device and single-node multi-device).
         ``"mpi"`` uses ``mpi4jax`` for distributed communication.
+        ``"spmd"`` uses ``shard_map`` + ``all_gather`` for explicit
+        multi-GPU collectives (set via
+        :func:`parallel.cubesphere_exchange.activate_spmd_halo_backend`).
     topology : CommTopology, optional
         Required when ``backend="mpi"``.
     """
     global _halo_backend, _mpi_topology
-    if backend not in ("local", "mpi"):
+    if backend not in ("local", "mpi", "spmd"):
         raise ValueError(f"Unknown halo backend: {backend!r}")
     if backend == "mpi" and topology is None:
         raise ValueError("CommTopology is required for MPI halo backend")
@@ -429,6 +433,11 @@ def pad_halo(
         from legoesm.parallel.halo_exchange import pad_halo_mpi
         return pad_halo_mpi(data, _mpi_topology, halo=halo)
 
+    # SPMD dispatch (explicit all_gather for multi-GPU).
+    if _halo_backend == "spmd" and _spmd_mesh is not None:
+        from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
+        return explicit_pad_halo(data, _spmd_mesh, halo=halo)
+
     if halo == 1:
         return _pad_halo_local(data, interp_offsets)
     else:
@@ -468,6 +477,11 @@ def pad_halo_4d(
     if _halo_backend == "mpi":
         from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
         return pad_halo_mpi_4d(data, _mpi_topology, halo=halo)
+
+    # SPMD dispatch (explicit all_gather for multi-GPU).
+    if _halo_backend == "spmd" and _spmd_mesh is not None:
+        from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
+        return explicit_pad_halo_4d(data, _spmd_mesh, halo=halo)
 
     if halo == 1:
         return _pad_halo_local_4d(data, interp_offsets)
@@ -591,6 +605,18 @@ def pad_halo_vector_4d(
     -------
     u_padded, v_padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
     """
+    # SPMD dispatch: pack both components into a single collective.
+    if _halo_backend == "spmd" and _spmd_mesh is not None and halo == 1:
+        from legoesm.parallel.cubesphere_exchange import (
+            explicit_pad_halo_vector_4d,
+        )
+        return explicit_pad_halo_vector_4d(
+            u_data, v_data,
+            cos_angle, sin_angle,
+            cos_angle_padded, sin_angle_padded,
+            _spmd_mesh, halo=halo,
+        )
+
     # Broadcast 2D angles to match 4D data
     ca = cos_angle[..., None]
     sa = sin_angle[..., None]

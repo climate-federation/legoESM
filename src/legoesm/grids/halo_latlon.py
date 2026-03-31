@@ -120,3 +120,90 @@ def pad_halo_vector_latlon(
     (u_padded, v_padded) : each shape (n_lat+2*halo, n_lon+2*halo).
     """
     return pad_halo_latlon_vector(u, halo), pad_halo_latlon_vector(v, halo)
+
+
+# ==============================================================================
+# Native 3D halo padding (batch across levels, no vmap)
+# ==============================================================================
+
+
+def _fold_pole_rows_3d(
+    data: jnp.ndarray,
+    halo: int,
+    negate: bool,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Pole-fold for 3D arrays, shape (n_lat, n_lon_padded, nlev).
+
+    Same logic as _fold_pole_rows but keeps the level axis intact.
+    """
+    half = data.shape[1] // 2
+    sign = -1.0 if negate else 1.0
+
+    south = sign * jnp.roll(data[:halo][::-1], half, axis=1)
+    north = sign * jnp.roll(data[-halo:][::-1], half, axis=1)
+    return south, north
+
+
+def pad_halo_latlon_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
+    """Pad a scalar 3D field with halo cells using pole-folding.
+
+    Parameters
+    ----------
+    data : jax.Array
+        Scalar field, shape (n_lat, n_lon, nlev).
+    halo : int
+        Number of halo cells on each side (default 1).
+
+    Returns
+    -------
+    jax.Array : Padded field, shape (n_lat+2*halo, n_lon+2*halo, nlev).
+    """
+    # Longitude: periodic wrap (axis 1)
+    data_lon = jnp.concatenate(
+        [data[:, -halo:], data, data[:, :halo]], axis=1,
+    )
+    # Latitude: pole-folding (scalar — no sign change)
+    south, north = _fold_pole_rows_3d(data_lon, halo, negate=False)
+    return jnp.concatenate([south, data_lon, north], axis=0)
+
+
+def pad_halo_latlon_vector_3d(data: jnp.ndarray, halo: int = 1) -> jnp.ndarray:
+    """Pad a single 3D vector component with pole-folding and sign reversal.
+
+    Parameters
+    ----------
+    data : jax.Array
+        Vector component field, shape (n_lat, n_lon, nlev).
+    halo : int
+        Number of halo cells on each side (default 1).
+
+    Returns
+    -------
+    jax.Array : Padded field, shape (n_lat+2*halo, n_lon+2*halo, nlev).
+    """
+    data_lon = jnp.concatenate(
+        [data[:, -halo:], data, data[:, :halo]], axis=1,
+    )
+    south, north = _fold_pole_rows_3d(data_lon, halo, negate=True)
+    return jnp.concatenate([south, data_lon, north], axis=0)
+
+
+def pad_halo_vector_latlon_3d(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    halo: int = 1,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Pad 3D vector components with pole-folding and sign reversal.
+
+    Parameters
+    ----------
+    u, v : jax.Array
+        Vector components, shape (n_lat, n_lon, nlev).
+    halo : int
+        Number of halo cells on each side (default 1).
+
+    Returns
+    -------
+    (u_padded, v_padded) : each shape (n_lat+2*halo, n_lon+2*halo, nlev).
+    """
+    return pad_halo_latlon_vector_3d(u, halo), pad_halo_latlon_vector_3d(v, halo)

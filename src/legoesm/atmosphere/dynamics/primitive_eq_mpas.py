@@ -42,6 +42,18 @@ from legoesm.core.operators_voronoi import (
     edge_thickness,
     cell_to_edge_avg,
     apvm_correction,
+    # Batched 3D operators — single gather for all levels
+    divergence_cell_3d,
+    gradient_edge_3d,
+    kinetic_energy_cell_3d,
+    potential_vorticity_vertex_3d,
+    pv_flux_energy_conserving_3d,
+    pv_flux_enstrophy_conserving_3d,
+    vector_laplacian_del2_3d,
+    vector_laplacian_del4_3d,
+    cell_to_edge_avg_3d,
+    edge_thickness_3d,
+    apvm_correction_3d,
 )
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.grids.vertical import (
@@ -118,9 +130,6 @@ def mpas_hydrostatic_tendencies(
     nlev = T_3d.shape[-1]
     p_s = jnp.clip(p_s, 100.0, 2.0e6)
 
-    c1 = mesh.cellsOnEdge[0]  # (nEdges,)
-    c2 = mesh.cellsOnEdge[1]
-
     # --- 1. Pressure at full levels ---
     if _hybrid:
         p_full = pressure_from_hybrid(sigma_coord, p_s)   # (nCells, nlev)
@@ -138,93 +147,69 @@ def mpas_hydrostatic_tendencies(
     ln_ps = jnp.log(p_s)
     grad_ln_ps = gradient_edge(ln_ps, mesh)  # (nEdges,)
 
-    # --- Per-level tendencies via scan ---
-    def _level_tendencies(carry, k):
-        u_k = u_3d[:, k]        # (nEdges,)
-        T_k = T_3d[:, k]        # (nCells,)
-        Phi_k = Phi[:, k]       # (nCells,)
-        p_k = p_full[:, k]      # (nCells,)
+    # --- Batched 3D tendencies (single gather for all levels) ---
+    # Kinetic energy at all levels
+    ke_3d = kinetic_energy_cell_3d(u_3d, mesh)  # (nCells, nlev)
 
-        # Kinetic energy
-        ke = kinetic_energy_cell(u_k, mesh)  # (nCells,)
+    # Bernoulli function: KE + Phi
+    bernoulli_3d = ke_3d + Phi  # (nCells, nlev)
 
-        # Bernoulli function: KE + Phi
-        bernoulli = ke + Phi_k
+    # Bernoulli gradient at edges
+    grad_B_3d = gradient_edge_3d(bernoulli_3d, mesh)  # (nEdges, nlev)
 
-        # Bernoulli gradient at edges
-        grad_B = gradient_edge(bernoulli, mesh)  # (nEdges,)
+    # Pressure gradient correction: R_d * T_edge * grad(ln p_s)
+    T_edge_3d = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
+    pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
 
-        # Pressure gradient correction: R_d * T_edge * grad(ln p_s)
-        T_edge = cell_to_edge_avg(T_k, mesh)  # (nEdges,)
-        pg_corr = R_d * T_edge * grad_ln_ps
+    # PV flux: h_proxy = dp/g (pressure thickness)
+    if _hybrid:
+        h_proxy_3d = dp / config.g  # (nCells, nlev)
+    else:
+        h_proxy_3d = p_s[:, None] * sigma_coord.dsigma[None, :] / config.g
 
-        # PV flux
-        # For the hydrostatic PE, h is proportional to dp/g.
-        # Use a proxy thickness = dp/g (pressure thickness).
-        if _hybrid:
-            h_proxy = dp[:, k] / config.g  # (nCells,)
-        else:
-            h_proxy = p_s * sigma_coord.dsigma[k] / config.g
+    q_v_3d = potential_vorticity_vertex_3d(u_3d, h_proxy_3d, mesh.fVertex, mesh)
 
-        q_v = potential_vorticity_vertex(u_k, h_proxy, mesh.fVertex, mesh)
+    if config.apvm_scale > 0:
+        q_v_3d = apvm_correction_3d(q_v_3d, u_3d, mesh, config.apvm_scale * dt)
 
-        if config.apvm_scale > 0:
-            q_v = apvm_correction(q_v, u_k, mesh, config.apvm_scale * dt)
+    if config.pv_scheme == "enstrophy":
+        pv_flux_3d = pv_flux_enstrophy_conserving_3d(u_3d, h_proxy_3d, q_v_3d, mesh)
+    else:
+        pv_flux_3d = pv_flux_energy_conserving_3d(u_3d, h_proxy_3d, q_v_3d, mesh)
 
-        if config.pv_scheme == "enstrophy":
-            pv_flux = pv_flux_enstrophy_conserving(u_k, h_proxy, q_v, mesh)
-        else:
-            pv_flux = pv_flux_energy_conserving(u_k, h_proxy, q_v, mesh)
+    # Momentum tendency
+    du_dt_3d = -grad_B_3d - pg_corr_3d + pv_flux_3d  # (nEdges, nlev)
 
-        # Momentum tendency
-        du_dt_k = -grad_B - pg_corr + pv_flux
+    # Viscosity
+    if config.nu_del2 > 0:
+        du_dt_3d = du_dt_3d + config.nu_del2 * vector_laplacian_del2_3d(u_3d, mesh)
+    if config.nu_del4 > 0:
+        du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
 
-        # Viscosity
-        if config.nu_del2 > 0:
-            du_dt_k = du_dt_k + config.nu_del2 * vector_laplacian_del2(u_k, mesh)
-        if config.nu_del4 > 0:
-            du_dt_k = du_dt_k + config.nu_del4 * vector_laplacian_del4(u_k, mesh)
+    # Divergence for continuity / sigma-dot
+    div_3d = divergence_cell_3d(u_3d, mesh)  # (nCells, nlev)
 
-        # Divergence for continuity / sigma-dot
-        div_k = divergence_cell(u_k, mesh)  # (nCells,)
+    # Temperature advection: -v·∇T ≈ centered tracer flux form
+    T_edge_centered_3d = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
+    flux_T_3d = u_3d * T_edge_centered_3d  # (nEdges, nlev)
+    div_uT_3d = divergence_cell_3d(flux_T_3d, mesh)  # (nCells, nlev)
+    horiz_adv_T_3d = -div_uT_3d + T_3d * div_3d  # (nCells, nlev)
 
-        # Temperature advection: -v·∇T ≈ centered tracer flux form
-        T_edge_centered = cell_to_edge_avg(T_k, mesh)
-        flux_T = u_k * T_edge_centered  # (nEdges,)
-        div_uT = divergence_cell(flux_T, mesh)  # (nCells,)
-        horiz_adv_T = -div_uT + T_k * div_k  # advective form
-
-        # Scalar diffusion
-        if config.K_h > 0:
-            grad_T = gradient_edge(T_k, mesh)
-            horiz_adv_T = horiz_adv_T + config.K_h * divergence_cell(grad_T, mesh)
-
-        return carry, (du_dt_k, div_k, horiz_adv_T, p_k)
-
-    _, (du_dt_all, div_all, horiz_adv_T_all, p_all) = jax.lax.scan(
-        _level_tendencies, None, jnp.arange(nlev),
-    )
-    # scan outputs: (nlev, nEdges/nCells)
-    du_dt_3d = jnp.moveaxis(du_dt_all, 0, -1)       # (nEdges, nlev)
-    div_3d = jnp.moveaxis(div_all, 0, -1)            # (nCells, nlev)
-    horiz_adv_T_3d = jnp.moveaxis(horiz_adv_T_all, 0, -1)  # (nCells, nlev)
+    # Scalar diffusion
+    if config.K_h > 0:
+        grad_T_3d = gradient_edge_3d(T_3d, mesh)  # (nEdges, nlev)
+        horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * divergence_cell_3d(grad_T_3d, mesh)
 
     # --- 4. Surface pressure tendency and vertical velocity ---
     if _hybrid:
         # Hybrid closure on MPAS:
         #   B_range * dp_s/dt = -sum_k div(dp_k * v_k)
         # Compute layer-pressure flux on edges, then cell divergence.
-        dp_t = jnp.moveaxis(dp, -1, 0)      # (nlev, nCells)
-        u_t = jnp.moveaxis(u_3d, -1, 0)     # (nlev, nEdges)
-
-        def _div_dp_flux(dp_k, u_k):
-            dp_edge = edge_thickness(dp_k, mesh)
-            return divergence_cell(u_k * dp_edge, mesh)
-
-        div_dp_all = jax.vmap(_div_dp_flux, in_axes=(0, 0), out_axes=0)(
-            dp_t, u_t,
-        )  # (nlev, nCells)
-        dp_s_dt = -jnp.sum(div_dp_all, axis=0) / sigma_coord.B_range
+        dp_edge_3d = edge_thickness_3d(dp, mesh)  # (nEdges, nlev)
+        div_dp_3d = divergence_cell_3d(
+            u_3d * dp_edge_3d, mesh,
+        )  # (nCells, nlev)
+        dp_s_dt = -jnp.sum(div_dp_3d, axis=-1) / sigma_coord.B_range
 
         mass_flux = compute_mass_flux_hybrid(div_3d, p_s, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T_3d, mass_flux, p_s, sigma_coord)
@@ -261,15 +246,9 @@ def mpas_hydrostatic_tendencies(
 
     # v·∇(ln p_s) at cells: div(u * ln_ps_edge) - ln_ps * div(u)
     ln_ps_edge = cell_to_edge_avg(ln_ps, mesh)  # (nEdges,)
-
-    def _cell_avg_scalar_product(carry, k):
-        flux = u_3d[:, k] * ln_ps_edge
-        return carry, divergence_cell(flux, mesh) - ln_ps * div_3d[:, k]
-
-    _, v_grad_lnps_all = jax.lax.scan(
-        _cell_avg_scalar_product, None, jnp.arange(nlev),
-    )
-    v_grad_lnps = jnp.moveaxis(v_grad_lnps_all, 0, -1)  # (nCells, nlev)
+    flux_lnps_3d = u_3d * ln_ps_edge[:, None]   # (nEdges, nlev)
+    div_flux_lnps = divergence_cell_3d(flux_lnps_3d, mesh)  # (nCells, nlev)
+    v_grad_lnps = div_flux_lnps - ln_ps[:, None] * div_3d  # (nCells, nlev)
 
     adiabatic = adiabatic + kappa * T_3d * v_grad_lnps
 
