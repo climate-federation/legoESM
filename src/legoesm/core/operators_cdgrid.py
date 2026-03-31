@@ -798,6 +798,39 @@ def cgrid_tracer_advection_fct(q, u_c, v_c, cdgrid):
 # Arakawa-Lamb gradient at D-grid corners
 # ==============================================================================
 
+def _replace_halo_with_extrapolation(B_pad):
+    """Replace cross-face halo values with face-local linear extrapolation.
+
+    At face boundaries the scalar halo exchange introduces O(dx²) error
+    due to the coordinate kink between adjacent cubed-sphere panels.
+    This function replaces the haloed edge strips with face-local linear
+    extrapolations from the two nearest interior rows, eliminating the
+    kink-induced error.  Corner halo cells (4 per face) are left
+    unchanged since _fill_corners_h1 already handles them.
+
+    Parameters
+    ----------
+    B_pad : jax.Array, shape (6, n+2, n+2[, nlev])
+
+    Returns
+    -------
+    B_pad : jax.Array with replaced boundary halo values.
+    """
+    # West halo (i=0): extrapolate from i=1, i=2
+    B_pad = B_pad.at[:, 0, 1:-1].set(
+        2.0 * B_pad[:, 1, 1:-1] - B_pad[:, 2, 1:-1])
+    # East halo (i=-1): extrapolate from i=-2, i=-3
+    B_pad = B_pad.at[:, -1, 1:-1].set(
+        2.0 * B_pad[:, -2, 1:-1] - B_pad[:, -3, 1:-1])
+    # South halo (j=0): extrapolate from j=1, j=2
+    B_pad = B_pad.at[:, 1:-1, 0].set(
+        2.0 * B_pad[:, 1:-1, 1] - B_pad[:, 1:-1, 2])
+    # North halo (j=-1): extrapolate from j=-2, j=-3
+    B_pad = B_pad.at[:, 1:-1, -1].set(
+        2.0 * B_pad[:, 1:-1, -2] - B_pad[:, 1:-1, -3])
+    return B_pad
+
+
 def _arakawa_lamb_gradient(B, cdgrid):
     """4-point Arakawa-Lamb gradient at D-grid corners.
 
@@ -806,6 +839,10 @@ def _arakawa_lamb_gradient(B, cdgrid):
     This eliminates the separate non-orthogonality correction and gives
     correct gradients at face boundaries and cube vertices where face-local
     metrics are inconsistent across faces.
+
+    Halo values are replaced with face-local linear extrapolations
+    (Duo-Grid approach) to eliminate the coordinate-kink artifact at
+    cubed-sphere face boundaries.
 
     Works for both 2D (6, n, n) and 3D (6, n, n, nlev) inputs.
 
@@ -819,6 +856,16 @@ def _arakawa_lamb_gradient(B, cdgrid):
         Gradient along face-local e_x and perpendicular to e_x.
     """
     B_pad = _pad_halo_auto(B, cdgrid)
+
+    # Replace cross-face halo values with face-local extrapolation
+    # to eliminate the coordinate-kink error at face boundaries.
+    if B.ndim == 3:
+        B_pad = _replace_halo_with_extrapolation(B_pad)
+    else:
+        # 3D: apply per level
+        B_t = jnp.moveaxis(B_pad, -1, 0)
+        B_t = jax.vmap(_replace_halo_with_extrapolation)(B_t)
+        B_pad = jnp.moveaxis(B_t, 0, -1)
 
     if B.ndim == 3:
         B_sw = B_pad[:, :-1, :-1]

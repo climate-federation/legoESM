@@ -95,25 +95,12 @@ def detect_devices() -> dict:
 # ---------------------------------------------------------------------------
 
 def _parse_precision_dtype(value, *, field_name: str, allow_none: bool = False):
-    """Parse a precision config value into a JAX dtype."""
-    if value is None:
-        if allow_none:
-            return None
-        raise ValueError(f"{field_name} precision cannot be None")
+    """Parse a precision config value into a JAX dtype.
 
-    if value in (jnp.float16, jnp.bfloat16, jnp.float32, jnp.float64):
-        return value
-
-    if isinstance(value, str):
-        key = value.strip().lower()
-        if key in _PRECISION_NAME_TO_DTYPE:
-            return _PRECISION_NAME_TO_DTYPE[key]
-
-    allowed = sorted(_PRECISION_NAME_TO_DTYPE.keys())
-    raise ValueError(
-        f"Unknown {field_name} precision {value!r}. "
-        f"Use one of {allowed}."
-    )
+    .. deprecated:: Delegates to ``legoesm.core.precision._parse_dtype``.
+    """
+    from legoesm.core.precision import _parse_dtype
+    return _parse_dtype(value, field_name=field_name, allow_none=allow_none)
 
 
 def set_runtime_precision_policy(

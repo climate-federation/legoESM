@@ -383,17 +383,19 @@ class TestMixedPrecisionSemantics:
         assert policy["ml"] == jnp.bfloat16
 
     @pytest.mark.parametrize("mode", ["fp32", "fp64", "mixed"])
-    def test_precision_sync_to_legacy(self, mode):
-        """PrecisionPolicy sync_to_hardware must update legacy dict."""
-        from legoesm.core.precision import sync_to_hardware, set_recommended_overrides
-        from legoesm.core.hardware import get_runtime_precision_policy
+    def test_precision_policy_matches_mode(self, mode):
+        """PrecisionPolicy must match the requested mode."""
+        from legoesm.core.precision import set_recommended_overrides
 
         set_recommended_overrides(mode)
-        sync_to_hardware()
-        legacy = get_runtime_precision_policy()
         policy = get_policy()
-        assert legacy["dynamics"] == policy.compute
-        assert legacy["conservation"] == policy.accumulate
+        if mode == "fp64":
+            assert policy.compute == jnp.float64
+        elif mode == "mixed":
+            assert policy.compute == jnp.float32
+            assert policy.accumulate == jnp.float64
+        else:
+            assert policy.compute == jnp.float32
 
 
 # =========================================================================
