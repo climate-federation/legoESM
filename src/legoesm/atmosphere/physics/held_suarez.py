@@ -340,6 +340,9 @@ def held_suarez_init(
     -------
     HydrostaticState : Initial state.
     """
+    from legoesm.core.precision import get_policy
+    _dtype = get_policy().storage
+
     n = grid.n
     nlev = sigma_coord.n_levels
     shape_3d = (6, n, n, nlev)
@@ -349,15 +352,15 @@ def held_suarez_init(
 
     # Surface geopotential
     if phis is None:
-        phis_data = jnp.zeros(shape_2d)
+        phis_data = jnp.zeros(shape_2d, dtype=_dtype)
     else:
-        phis_data = phis
+        phis_data = jnp.asarray(phis, dtype=_dtype)
 
     # Surface pressure (hydrostatic adjustment for topography)
-    p_s_data = p_s_init * jnp.exp(-phis_data / (constants.R_d * T_init))
+    p_s_data = (p_s_init * jnp.exp(-phis_data / (constants.R_d * T_init))).astype(_dtype)
 
     # Uniform temperature
-    T_data = jnp.ones(shape_3d) * T_init
+    T_data = jnp.ones(shape_3d, dtype=_dtype) * T_init
 
     # Add small perturbation at lowest level to break symmetry
     key = jax.random.PRNGKey(seed)
@@ -365,8 +368,8 @@ def held_suarez_init(
     T_data = T_data.at[..., -1].add(perturbation)
 
     return HydrostaticState(
-        u=Field(data=jnp.zeros(shape_3d), name="u", dims=dims_3d, units="m/s"),
-        v=Field(data=jnp.zeros(shape_3d), name="v", dims=dims_3d, units="m/s"),
+        u=Field(data=jnp.zeros(shape_3d, dtype=_dtype), name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=jnp.zeros(shape_3d, dtype=_dtype), name="v", dims=dims_3d, units="m/s"),
         T=Field(data=T_data, name="T", dims=dims_3d, units="K"),
         p_s=Field(data=p_s_data, name="p_s", dims=dims_2d, units="Pa"),
         phis=Field(data=phis_data, name="phis", dims=dims_2d, units="m^2/s^2"),

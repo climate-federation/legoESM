@@ -278,10 +278,12 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
     # Clamp SIC again after interpolation
     sic_regridded = np.clip(sic_regridded, 0.0, 1.0)
 
+    from legoesm.core.precision import get_policy
+    _dtype = get_policy().storage
     return AMIPForcing(
         times=jnp.array(times_days),
-        sst=jnp.array(sst_regridded),
-        sic=jnp.array(sic_regridded),
+        sst=jnp.array(sst_regridded, dtype=_dtype),
+        sic=jnp.array(sic_regridded, dtype=_dtype),
         config=config,
     )
 

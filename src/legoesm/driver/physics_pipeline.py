@@ -356,8 +356,9 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E,
                 )
 
-                # Cast to common dtype so both lax.cond branches match
-                _dt = jnp.result_type(T, p_s)
+                # Cast to storage dtype so both lax.cond branches match
+                from legoesm.core.precision import get_policy
+                _dt = get_policy().storage
                 _cast = lambda x: x.astype(_dt) if hasattr(x, 'astype') else x
                 new_held = tuple(_cast(h) for h in (
                     dT_dt_rad, sw_net_sfc, lw_net_sfc,
@@ -384,11 +385,9 @@ class PhysicsPipeline:
                     C_H=C_H, C_E=C_E,
                 )
 
-                # Cast held arrays and physics output to match the dtype
-                # that _rad_branch produces (radiation kernels may return
-                # float64 while held inputs are float32).  Both lax.cond
-                # branches must return identical dtypes.
-                _dt = jnp.result_type(T, p_s)
+                # Cast to storage dtype — must match _rad_branch
+                from legoesm.core.precision import get_policy
+                _dt = get_policy().storage
                 _cast = lambda x: x.astype(_dt) if hasattr(x, 'astype') else x
                 new_held = tuple(_cast(h) for h in (
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,

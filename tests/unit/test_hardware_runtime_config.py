@@ -174,17 +174,19 @@ class TestConservationPrecisionHook:
 
     def test_accumulation_dtype_uses_configured_float32(self):
         set_policy(PrecisionPolicy.fp32())
-        # When JAX x64 is enabled (e.g. JAX_ENABLE_X64=1), conservation
-        # accumulators intentionally promote to float64 regardless of the
-        # precision policy to prevent catastrophic cancellation.
-        if jax.config.jax_enable_x64:
-            assert _accumulation_dtype() == jnp.float64
-        else:
-            assert _accumulation_dtype() == jnp.float32
+        # fp32 policy: accumulate=float32 → always float32, even when
+        # JAX x64 is enabled.  Conservation now honors the policy.
+        assert _accumulation_dtype() == jnp.float32
 
     def test_accumulation_dtype_uses_configured_float64(self):
         set_policy(PrecisionPolicy.mixed())
-        assert _accumulation_dtype() == jnp.float64
+        # mixed policy: accumulate=float64 → float64 when backend
+        # supports it; float32 otherwise (e.g. Metal).
+        from legoesm.runtime.backend import supports_float64, is_x64_enabled
+        if supports_float64() and is_x64_enabled():
+            assert _accumulation_dtype() == jnp.float64
+        else:
+            assert _accumulation_dtype() == jnp.float32
 
     def test_accumulation_dtype_falls_back_when_float64_unavailable(self):
         set_policy(PrecisionPolicy.mixed())

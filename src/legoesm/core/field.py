@@ -175,9 +175,16 @@ def zeros_field(
     units: str = "",
     long_name: str = "",
     staggering: str = "cell",
-    dtype=jnp.float32,
+    dtype=None,
 ) -> Field:
-    """Create a Field filled with zeros."""
+    """Create a Field filled with zeros.
+
+    If *dtype* is ``None``, defaults to the active precision policy's
+    storage dtype (``get_policy().storage``).
+    """
+    if dtype is None:
+        from legoesm.core.precision import get_policy
+        dtype = get_policy().storage
     return Field(
         data=jnp.zeros(shape, dtype=dtype),
         name=name, dims=dims, units=units,
@@ -192,9 +199,16 @@ def ones_field(
     units: str = "",
     long_name: str = "",
     staggering: str = "cell",
-    dtype=jnp.float32,
+    dtype=None,
 ) -> Field:
-    """Create a Field filled with ones."""
+    """Create a Field filled with ones.
+
+    If *dtype* is ``None``, defaults to the active precision policy's
+    storage dtype (``get_policy().storage``).
+    """
+    if dtype is None:
+        from legoesm.core.precision import get_policy
+        dtype = get_policy().storage
     return Field(
         data=jnp.ones(shape, dtype=dtype),
         name=name, dims=dims, units=units,

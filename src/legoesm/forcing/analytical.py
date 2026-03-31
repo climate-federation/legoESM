@@ -50,4 +50,6 @@ def analytical_sst_sic(
     # SIC: ramp from 0 to 1 as SST drops below T_ice
     sic = np.clip(((T_ice + 0.5) - sst) / 3.0, 0.0, 1.0)
 
-    return jnp.array(sst), jnp.array(sic)
+    from legoesm.core.precision import get_policy
+    _dtype = get_policy().storage
+    return jnp.array(sst, dtype=_dtype), jnp.array(sic, dtype=_dtype)
