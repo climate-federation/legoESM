@@ -187,9 +187,15 @@ def step_ocean_biogeochemistry(
         ocean_mask, cfg, U10, PAR_surf,
     )
 
-    # Forward-Euler update with non-negativity clipping
-    DIC_new = jnp.clip(state.DIC + dt * tend.dDIC_dt, 0.0, None)
-    ALK_new = jnp.clip(state.ALK + dt * tend.dALK_dt, 0.0, None)
+    # Forward-Euler update with smooth non-negativity (softplus).
+    # softplus(x, alpha) ≈ max(x, 0) but preserves AD gradients and
+    # does not silently zero-out overshoots the way hard clip does.
+    _alpha = 1.0e-6  # smoothing scale [mol/m^3]; tight but differentiable
+    def _soft_pos(x):
+        return _alpha * jnp.logaddexp(x / _alpha, 0.0)
+
+    DIC_new = _soft_pos(state.DIC + dt * tend.dDIC_dt)
+    ALK_new = _soft_pos(state.ALK + dt * tend.dALK_dt)
 
     NO3_new = None
     Phyto_new = None
@@ -197,10 +203,10 @@ def step_ocean_biogeochemistry(
     Det_new = None
 
     if cfg.scheme == "npzd" and state.NO3 is not None:
-        NO3_new = jnp.clip(state.NO3 + dt * tend.dNO3_dt, 0.0, None)
-        Phyto_new = jnp.clip(state.Phyto + dt * tend.dPhyto_dt, 0.0, None)
-        Zoo_new = jnp.clip(state.Zoo + dt * tend.dZoo_dt, 0.0, None)
-        Det_new = jnp.clip(state.Det + dt * tend.dDet_dt, 0.0, None)
+        NO3_new = _soft_pos(state.NO3 + dt * tend.dNO3_dt)
+        Phyto_new = _soft_pos(state.Phyto + dt * tend.dPhyto_dt)
+        Zoo_new = _soft_pos(state.Zoo + dt * tend.dZoo_dt)
+        Det_new = _soft_pos(state.Det + dt * tend.dDet_dt)
 
     return OceanBiogeoState(
         DIC=DIC_new,

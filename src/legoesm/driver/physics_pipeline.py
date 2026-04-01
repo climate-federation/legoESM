@@ -470,14 +470,11 @@ def _build_gray_radiation_fn(config):
 def _build_rrtmgp_radiation_fn(config):
     """Build a JIT-compiled RRTMGP radiation wrapper from config."""
     from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.solar import (
         cos_zenith_angle, daily_mean_insolation,
     )
-    from legoesm.driver.kernel_registry import (
-        RADIATION_REGISTRY, resolve_kernel,
-    )
 
-    rrtmgp_radiation = resolve_kernel(RADIATION_REGISTRY, "rrtmgp")
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
 
@@ -491,6 +488,8 @@ def _build_rrtmgp_radiation_fn(config):
         use_scan=False,
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
+
+    solver = RRTMGP.from_legoesm_config(rrtmg_config)
 
     @jax.jit
     def radiation_fn(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
@@ -509,12 +508,12 @@ def _build_rrtmgp_radiation_fn(config):
         else:
             insol = daily_mean_insolation(lat_col, day_of_year, s_0)
             cos_zenith = jnp.clip(insol / jnp.clip(s_0, 1e-6, None), 0.0, 1.0)
-        return rrtmgp_radiation(
+        return solver.solve_columns(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_col,
-            cos_zenith=cos_zenith, config=rrtmg_config,
-            sfc_albedo_override=albedo_col,
-            sfc_emissivity_override=emis_col,
+            cos_zenith=cos_zenith,
+            sfc_albedo=albedo_col,
+            sfc_emissivity=emis_col,
             o3_vmr=o3_vmr_col,
             aerosol_optical_depth=aerosol_od_col,
             solar_spectral_fraction=solar_weights if solar_weights.size > 0 else None,

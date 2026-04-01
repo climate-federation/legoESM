@@ -181,6 +181,7 @@ def _call_radiation_backend(
     q_ice: jnp.ndarray | None = None,
     ghg_vmr_override: dict | None = None,
     f_day: jnp.ndarray | None = None,
+    rrtmgp_solver=None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -201,9 +202,8 @@ def _call_radiation_backend(
         the day+night average, and SW fluxes/heating are rescaled by f_day
         to recover daily-mean energy balance.
     """
-    radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
-
     if radiation_config.scheme == "gray":
+        radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
         return radiation_fn(
             T=T,
             p_full=p_full,
@@ -261,16 +261,22 @@ def _call_radiation_backend(
             "cloud_r_eff_ice": cloud_props.r_eff_ice,
         }
 
-    result = radiation_fn(
+    # RRTMGP path: use solver directly (config is baked in).
+    if rrtmgp_solver is None:
+        # Fallback: construct a solver on the fly (e.g. called without
+        # the pre-built solver from make_radiation_physics).
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+        rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
+
+    result = rrtmgp_solver.solve_columns(
         T=T,
         p_full=p_full,
         p_half=p_half,
         sfc_temperature=sfc_temperature,
         q_v=q_v_safe,
         cos_zenith=cos_sza,
-        config=scheme_config,
-        sfc_albedo_override=sfc_albedo_override,
-        sfc_emissivity_override=sfc_emissivity_override,
+        sfc_albedo=sfc_albedo_override,
+        sfc_emissivity=sfc_emissivity_override,
         o3_vmr=o3_vmr,
         ghg_vmr_override=ghg_vmr_override,
         **cloud_kwargs,
@@ -312,18 +318,18 @@ def make_radiation_physics(
         Physics function with the correct signature for the model.
     """
     # Load heavy/static RRTMGP optics once outside model JIT traces.
+    rrtmgp_solver = None
     if radiation_config.scheme == "rrtmgp":
-        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
-            preload_rrtmgp_optics,
-        )
-        preload_rrtmgp_optics(radiation_config.rrtmgp)
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+        RRTMGP.preload(radiation_config.rrtmgp)
+        rrtmgp_solver = RRTMGP.from_legoesm_config(radiation_config.rrtmgp)
 
     if model_type == "hydrostatic":
-        return _make_hydrostatic_radiation(radiation_config)
+        return _make_hydrostatic_radiation(radiation_config, rrtmgp_solver)
     elif model_type == "nonhydrostatic":
-        return _make_nonhydrostatic_radiation(radiation_config)
+        return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver)
     elif model_type == "spectral_pe":
-        return _make_spectral_pe_radiation(radiation_config)
+        return _make_spectral_pe_radiation(radiation_config, rrtmgp_solver)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -337,6 +343,7 @@ def make_radiation_physics(
 
 def _make_hydrostatic_radiation(
     radiation_config: RadiationConfig,
+    rrtmgp_solver=None,
 ) -> Callable:
     """Create radiation physics_fn for PrimitiveEquationModel.
 
@@ -432,6 +439,7 @@ def _make_hydrostatic_radiation(
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
             f_day=f_day_col,
+            rrtmgp_solver=rrtmgp_solver,
         )
 
         # Reshape heating rate back to (6, n, n, nlev)
@@ -473,6 +481,7 @@ def _make_hydrostatic_radiation(
 
 def _make_nonhydrostatic_radiation(
     radiation_config: RadiationConfig,
+    rrtmgp_solver=None,
 ) -> Callable:
     """Create radiation physics_fn for CompressibleEulerModel.
 
@@ -573,6 +582,7 @@ def _make_nonhydrostatic_radiation(
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
             f_day=f_day_col,
+            rrtmgp_solver=rrtmgp_solver,
         )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -626,6 +636,7 @@ def _make_nonhydrostatic_radiation(
 
 def _make_spectral_pe_radiation(
     radiation_config: RadiationConfig,
+    rrtmgp_solver=None,
 ) -> Callable:
     """Create radiation physics_fn for SpectralPEModel.
 
@@ -727,6 +738,7 @@ def _make_spectral_pe_radiation(
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
             f_day=f_day_col,
+            rrtmgp_solver=rrtmgp_solver,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)

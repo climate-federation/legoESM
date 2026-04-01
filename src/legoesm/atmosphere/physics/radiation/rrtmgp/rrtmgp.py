@@ -15,6 +15,7 @@
 """Implementation of a radiative transfer solver."""
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TypeAlias
 
 import jax
@@ -24,12 +25,54 @@ from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp import stretched_grid_util
 from legoesm.atmosphere.physics.radiation.rrtmgp import rrtmgp_common
 from legoesm.atmosphere.physics.radiation.rrtmgp.config import radiative_transfer
+from legoesm.atmosphere.physics.radiation.rrtmgp.config.radiative_transfer import (
+    OpticsParameters,
+    RRTMOptics as RRTMOpticsConfig,
+)
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
+from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants as optics_constants
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_volume_mixing_ratio
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import optics
+from legoesm.atmosphere.physics.radiation.rrtmgp.optics.lookup_volume_mixing_ratio import (
+    LookupVolumeMixingRatio,
+)
+from legoesm.atmosphere.physics.radiation.rrtmgp.optics.optics import optics_factory
 from legoesm.atmosphere.physics.radiation.rrtmgp.rte import two_stream
 
 Array: TypeAlias = jax.Array
+
+# ---------------------------------------------------------------------------
+# Default RRTMGP NetCDF data file paths
+# ---------------------------------------------------------------------------
+_DATA_DIR = Path(__file__).parent / "optics" / "rrtmgp_data"
+_DEFAULT_LW_GAS = str(_DATA_DIR / "rrtmgp-gas-lw-g128.nc")
+_DEFAULT_SW_GAS = str(_DATA_DIR / "rrtmgp-gas-sw-g112.nc")
+_DEFAULT_LW_CLOUD = str(_DATA_DIR / "cloudysky_lw.nc")
+_DEFAULT_SW_CLOUD = str(_DATA_DIR / "cloudysky_sw.nc")
+
+# Module-level optics cache (shared across RRTMGP instances)
+_legoesm_optics_cache: dict = {}
+
+
+# ---------------------------------------------------------------------------
+# Helper functions for the legoESM column solver
+# ---------------------------------------------------------------------------
+
+def _add_halos(f_3d):
+    """Add 1-cell vertical halos via linear extrapolation.
+
+    Input shape (ncol, 1, nlev), output shape (ncol, 1, nlev+2).
+    """
+    bottom_halo = 2 * f_3d[:, :, 0:1] - f_3d[:, :, 1:2]
+    top_halo = 2 * f_3d[:, :, -1:] - f_3d[:, :, -2:-1]
+    return jnp.concatenate([bottom_halo, f_3d, top_halo], axis=2)
+
+
+def _standard_o3_profile(p_full):
+    """Simple climatological ozone profile (VMR). US Std Atm 1976 fit."""
+    p_hPa = p_full / 100.0
+    o3 = 8.0e-6 * jnp.exp(-0.5 * ((jnp.log(p_hPa) - jnp.log(10.0)) / 1.5) ** 2)
+    return jnp.clip(o3, 1.0e-10, None)
 
 
 def _humidity_to_volume_mixing_ratio(
@@ -332,3 +375,354 @@ class RRTMGP:
         output[v] = _horiz_mean(sw_heating_rate_clearsky)
 
     return output
+
+  # =========================================================================
+  # legoESM integration API
+  # =========================================================================
+
+  @staticmethod
+  def _cache_key(config):
+      """Compute a hashable cache key from an RRTMGPConfig."""
+      return (config.lw_gas_file, config.sw_gas_file,
+              config.lw_cloud_file, config.sw_cloud_file,
+              config.include_clouds,
+              config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv)
+
+  @staticmethod
+  def _build_optics_and_vmr(config):
+      """Build (or retrieve from cache) optics scheme and VMR library.
+
+      Parameters
+      ----------
+      config : RRTMGPConfig
+          legoESM radiation configuration.
+
+      Returns
+      -------
+      (optics_lib, vmr_lib)
+      """
+      key = RRTMGP._cache_key(config)
+      if key not in _legoesm_optics_cache:
+          lw_file = config.lw_gas_file or _DEFAULT_LW_GAS
+          sw_file = config.sw_gas_file or _DEFAULT_SW_GAS
+          lw_cloud = config.lw_cloud_file or _DEFAULT_LW_CLOUD
+          sw_cloud = config.sw_cloud_file or _DEFAULT_SW_CLOUD
+
+          rrtm_optics = RRTMOpticsConfig(
+              longwave_nc_filepath=lw_file,
+              shortwave_nc_filepath=sw_file,
+              cloud_longwave_nc_filepath=lw_cloud,
+              cloud_shortwave_nc_filepath=sw_cloud,
+          )
+          optics_params = OpticsParameters(optics=rrtm_optics)
+
+          # Build VMR library with global means from legoESM config.
+          global_means = {
+              optics_constants.DRY_AIR_KEY: optics_constants.DRY_AIR_VMR,
+              "co2": config.co2_ppmv * 1.0e-6,
+              "ch4": config.ch4_ppbv * 1.0e-9,
+              "n2o": config.n2o_ppbv * 1.0e-9,
+              "o2": 0.20948,
+              "n2": 0.78084,
+              "co": 1.5e-7,
+              "ccl4": 7.5e-11,
+              "cfc11": 2.2e-10,
+              "cfc12": 5.0e-10,
+              "cfc22": 2.4e-10,
+              "cf4": 8.5e-11,
+              "no2": 3.0e-10,
+          }
+          vmr_lib = LookupVolumeMixingRatio(
+              global_means=global_means, profiles=None,
+          )
+
+          optics_lib = optics_factory(optics_params, vmr_lib)
+          _legoesm_optics_cache[key] = (optics_lib, vmr_lib)
+      return _legoesm_optics_cache[key]
+
+  @classmethod
+  def from_legoesm_config(cls, config) -> 'RRTMGP':
+      """Construct an RRTMGP solver from legoESM's RRTMGPConfig.
+
+      Parameters
+      ----------
+      config : RRTMGPConfig
+          legoESM radiation configuration.
+
+      Returns
+      -------
+      RRTMGP
+          Ready-to-use solver instance.
+      """
+      instance = object.__new__(cls)
+      optics_lib, vmr_lib = cls._build_optics_and_vmr(config)
+      # Minimal atmospheric state with VMR library; zenith/albedo/emissivity
+      # are overridden per-call in solve_columns().
+      instance.atmospheric_state = atmospheric_state.AtmosphericState(
+          sfc_emis=config.sfc_emissivity,
+          sfc_alb=config.sfc_albedo,
+          zenith=0.0,
+          irrad=config.S_0,
+          vmr=vmr_lib,
+          toa_flux_lw=0.0,
+      )
+      instance.optics_lib = optics_lib
+      instance._config = config
+      # Unused by solve_columns() but set for compatibility with
+      # compute_heating_rate().
+      instance._dz = 0.0
+      instance._diagnostic_fields = ()
+      instance._save_lw_sw_heating_rates = False
+      instance._do_clear_sky = False
+      return instance
+
+  @classmethod
+  def preload(cls, config) -> None:
+      """Preload optics tables outside JIT."""
+      cls._build_optics_and_vmr(config)
+
+  @classmethod
+  def preload_mpi(cls, config) -> None:
+      """MPI-aware preload: rank 0 reads, broadcasts to others."""
+      try:
+          from mpi4py import MPI
+      except ImportError:
+          cls.preload(config)
+          return
+      comm = MPI.COMM_WORLD
+      rank = comm.Get_rank()
+      if rank == 0:
+          cls.preload(config)
+      key = cls._cache_key(config)
+      data = _legoesm_optics_cache.get(key) if rank == 0 else None
+      data = comm.bcast(data, root=0)
+      if rank != 0:
+          _legoesm_optics_cache[key] = data
+
+  def solve_columns(
+      self,
+      T: jnp.ndarray,
+      p_full: jnp.ndarray,
+      p_half: jnp.ndarray,
+      sfc_temperature: jnp.ndarray,
+      q_v: jnp.ndarray,
+      cos_zenith: jnp.ndarray,
+      sfc_albedo: jnp.ndarray | float | None = None,
+      sfc_emissivity: jnp.ndarray | float | None = None,
+      o3_vmr: jnp.ndarray | None = None,
+      cloud_path_liq: jnp.ndarray | None = None,
+      cloud_path_ice: jnp.ndarray | None = None,
+      cloud_r_eff_liq: jnp.ndarray | None = None,
+      cloud_r_eff_ice: jnp.ndarray | None = None,
+      aerosol_optical_depth: jnp.ndarray | None = None,
+      solar_spectral_fraction: jnp.ndarray | None = None,
+      ghg_vmr_override: dict | None = None,
+  ):
+      """Compute radiation for legoESM column arrays.
+
+      This is the canonical entry point for the RRTMGP solver when used
+      from legoESM's physics integration layer.  It handles:
+
+      1. Reshaping (ncol, nlev) arrays to jax-rrtmgp's (ncol, 1, nlev+2)
+      2. Adding 1-cell vertical halos
+      3. Building VMR dict from config concentrations
+      4. Computing atmospheric state and solving two-stream
+      5. Stripping halos and reshaping back
+
+      Parameters
+      ----------
+      T : jnp.ndarray
+          Temperature at full levels (ncol, nlev) [K].
+      p_full : jnp.ndarray
+          Pressure at full levels (ncol, nlev) [Pa].
+      p_half : jnp.ndarray
+          Pressure at interface levels (ncol, nlev+1) [Pa].
+      sfc_temperature : jnp.ndarray
+          Surface temperature (ncol,) [K].
+      q_v : jnp.ndarray
+          Water vapor mixing ratio (ncol, nlev) [kg/kg].
+      cos_zenith : jnp.ndarray
+          Cosine of solar zenith angle (ncol,).
+      sfc_albedo : jnp.ndarray | float | None
+          Per-column surface albedo override.
+      sfc_emissivity : jnp.ndarray | float | None
+          Per-column surface emissivity override.
+      o3_vmr : jnp.ndarray | None
+          External ozone VMR (ncol, nlev), index 0 = TOA.
+      cloud_path_liq : jnp.ndarray | None
+          Liquid water path per layer (ncol, nlev) [kg/m^2].
+      cloud_path_ice : jnp.ndarray | None
+          Ice water path per layer (ncol, nlev) [kg/m^2].
+      cloud_r_eff_liq : jnp.ndarray | None
+          Liquid cloud effective radius (ncol, nlev) [m].
+      cloud_r_eff_ice : jnp.ndarray | None
+          Ice cloud effective radius (ncol, nlev) [m].
+      aerosol_optical_depth : jnp.ndarray | None
+          Prescribed aerosol optical depth per layer (ncol, nlev).
+      solar_spectral_fraction : jnp.ndarray | None
+          Per-g-point solar source weights (ngpt_sw,).
+      ghg_vmr_override : dict | None
+          Runtime GHG VMR overrides (e.g. ``{"co2": 4.15e-4}``).
+
+      Returns
+      -------
+      RadiationOutput
+          Fluxes and heating rates.
+      """
+      from legoesm.atmosphere.physics.radiation.output import RadiationOutput
+
+      config = self._config
+      ncol, nlev = T.shape
+
+      # --- 1. Reshape (ncol, nlev) -> (ncol, 1, nlev+2) with halos ---
+      T_3d = _add_halos(T[:, None, ::-1])
+      p_3d = _add_halos(p_full[:, None, ::-1])
+      p_3d = jnp.clip(p_3d, 1.0, None)
+      q_v_3d = _add_halos(jnp.clip(q_v, 0.0, None)[:, None, ::-1])
+
+      # --- 2. Build VMR fields ---
+      mol_ratio = constants.R_V / constants.R_D
+      h2o_vmr = mol_ratio * q_v_3d / (1.0 - q_v_3d)
+
+      if o3_vmr is not None:
+          o3_3d = _add_halos(jnp.clip(o3_vmr, 1.0e-10, None)[:, None, ::-1])
+      else:
+          o3_3d = _standard_o3_profile(p_3d)
+
+      vmr_fields = {
+          "h2o": h2o_vmr,
+          "o3": o3_3d,
+      }
+
+      if ghg_vmr_override is not None:
+          for gas_name, vmr_value in ghg_vmr_override.items():
+              vmr_fields[gas_name] = jnp.full_like(p_3d, vmr_value)
+
+      dp = kernel_ops.centered_difference(p_3d, dim=2)
+      mol_m_air = (constants.DRY_AIR_MOL_MASS
+                   + constants.WATER_MOL_MASS * h2o_vmr)
+      molecules = -(dp / constants.G) * constants.AVOGADRO / mol_m_air
+
+      # --- 3. Build atmospheric state ---
+      optics_lib = self.optics_lib
+      vmr_lib = self.atmospheric_state.vmr
+
+      cos_z_col = jnp.clip(cos_zenith, 0.0, 1.0)
+      zenith_col = jnp.arccos(cos_z_col)[:, None, None]
+
+      if sfc_albedo is not None:
+          eff_albedo = jnp.asarray(sfc_albedo, dtype=p_3d.dtype)
+          if eff_albedo.ndim == 0:
+              eff_albedo = jnp.broadcast_to(eff_albedo, (ncol,))
+          eff_albedo = eff_albedo.reshape(ncol, 1)
+      else:
+          eff_albedo = jnp.full((ncol, 1), config.sfc_albedo, dtype=p_3d.dtype)
+
+      if sfc_emissivity is not None:
+          eff_emis = jnp.asarray(sfc_emissivity, dtype=p_3d.dtype)
+          if eff_emis.ndim == 0:
+              eff_emis = jnp.broadcast_to(eff_emis, (ncol,))
+          eff_emis = eff_emis.reshape(ncol, 1)
+      else:
+          eff_emis = jnp.full((ncol, 1), config.sfc_emissivity, dtype=p_3d.dtype)
+
+      atmos_state = atmospheric_state.AtmosphericState(
+          sfc_emis=eff_emis,
+          sfc_alb=eff_albedo,
+          zenith=zenith_col,
+          irrad=config.S_0,
+          vmr=vmr_lib,
+          toa_flux_lw=0.0,
+      )
+
+      sfc_T_2d = sfc_temperature[:, None]
+
+      # --- Cloud properties ---
+      has_clouds = config.include_clouds and cloud_path_liq is not None
+      if has_clouds:
+          cpl_3d = _add_halos(jnp.clip(cloud_path_liq, 0.0, None)[:, None, ::-1])
+          cpi_3d = _add_halos(jnp.clip(cloud_path_ice, 0.0, None)[:, None, ::-1])
+          crl_3d = _add_halos(jnp.clip(cloud_r_eff_liq, 1.0e-6, None)[:, None, ::-1])
+          cri_3d = _add_halos(jnp.clip(cloud_r_eff_ice, 1.0e-6, None)[:, None, ::-1])
+      else:
+          cpl_3d = cpi_3d = crl_3d = cri_3d = None
+
+      # Optional aerosol optical depth
+      if aerosol_optical_depth is not None:
+          aerosol_od_3d = _add_halos(
+              jnp.clip(aerosol_optical_depth, 0.0, None)[:, None, ::-1],
+          )
+      else:
+          aerosol_od_3d = None
+
+      # Optional spectral solar forcing
+      if solar_spectral_fraction is not None:
+          solar_weights = jnp.clip(jnp.asarray(solar_spectral_fraction), 0.0, None)
+          denom = jnp.maximum(jnp.sum(solar_weights), 1.0e-30)
+          solar_weights = solar_weights / denom
+          if solar_weights.shape[0] != optics_lib.n_gpt_sw:
+              raise ValueError(
+                  "solar_spectral_fraction has wrong length: "
+                  f"{solar_weights.shape[0]} (expected {optics_lib.n_gpt_sw})",
+              )
+      else:
+          solar_weights = None
+
+      # --- 4. Solve LW ---
+      lw_fluxes = two_stream.solve_lw(
+          p_3d,
+          T_3d,
+          molecules,
+          optics_lib,
+          atmos_state,
+          vmr_fields,
+          sfc_T_2d,
+          cloud_r_eff_liq=crl_3d,
+          cloud_path_liq=cpl_3d,
+          cloud_r_eff_ice=cri_3d,
+          cloud_path_ice=cpi_3d,
+          use_scan=config.use_scan,
+      )
+
+      # --- 5. Solve SW ---
+      sw_fluxes = two_stream.solve_sw(
+          p_3d,
+          T_3d,
+          molecules,
+          optics_lib,
+          atmos_state,
+          vmr_fields,
+          cloud_r_eff_liq=crl_3d,
+          cloud_path_liq=cpl_3d,
+          cloud_r_eff_ice=cri_3d,
+          cloud_path_ice=cpi_3d,
+          aerosol_optical_depth=aerosol_od_3d,
+          aerosol_single_scattering_albedo=config.aerosol_ssa,
+          aerosol_asymmetry_factor=config.aerosol_g,
+          solar_fraction_by_gpt=solar_weights,
+          use_scan=config.use_scan,
+      )
+
+      # --- 6. Compute heating rates ---
+      lw_hr_3d = two_stream.compute_heating_rate(lw_fluxes['flux_net'], p_3d)
+      sw_hr_3d = two_stream.compute_heating_rate(sw_fluxes['flux_net'], p_3d)
+
+      # --- 7. Strip halos, flip back to legoESM convention, reshape ---
+      hw = 1
+      lw_up = lw_fluxes['flux_up'][:, 0, hw:][:, ::-1]
+      lw_down = lw_fluxes['flux_down'][:, 0, hw:][:, ::-1]
+      sw_up = sw_fluxes['flux_up'][:, 0, hw:][:, ::-1]
+      sw_down = sw_fluxes['flux_down'][:, 0, hw:][:, ::-1]
+
+      lw_hr = lw_hr_3d[:, 0, hw:-hw][:, ::-1]
+      sw_hr = sw_hr_3d[:, 0, hw:-hw][:, ::-1]
+
+      return RadiationOutput(
+          lw_flux_up=lw_up,
+          lw_flux_down=lw_down,
+          sw_flux_up=sw_up,
+          sw_flux_down=sw_down,
+          heating_rate=lw_hr + sw_hr,
+          lw_heating_rate=lw_hr,
+          sw_heating_rate=sw_hr,
+      )

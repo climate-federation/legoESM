@@ -123,8 +123,10 @@ def npzd_source_sink(
     # Nutrient limitation (Michaelis-Menten)
     f_N = N / (N + cfg.k_N)
 
-    # Light limitation (Smith 1936 hyperbolic tangent)
-    f_L = 1.0 - jnp.exp(-cfg.alpha_P * PAR / jnp.clip(cfg.mu_max * day_to_s, eps, None))
+    # Light limitation (Webb et al. 1974 exponential form)
+    # alpha_P [1/(W/m^2)/day] and mu_max [1/day] are both per-day,
+    # so their ratio alpha_P/mu_max [1/(W/m^2)] is already consistent.
+    f_L = 1.0 - jnp.exp(-cfg.alpha_P * PAR / jnp.clip(cfg.mu_max, eps, None))
 
     # Growth rate
     mu = cfg.mu_max * day_to_s * T_factor * jnp.minimum(f_N, f_L)
@@ -140,15 +142,16 @@ def npzd_source_sink(
     # ---- 4. Detritus remineralization ----
     remin = cfg.remin_rate * day_to_s * D
 
-    # ---- 5. Detritus sinking (as a loss from each layer, gain to layer below) ----
+    # ---- 5. Detritus sinking (conservative interface-flux formulation) ----
     # w_sink in m/day -> m/s
     w_sink_s = cfg.w_sink * day_to_s  # m/s
-    # Sinking flux out of layer k: w_sink * D[k] / dz[k]
-    # This is a simple first-order upwind treatment
-    sink_loss = w_sink_s * D / jnp.clip(dz_ref, 1.0, None)
-    # Gain from layer above (k-1): shift and zero at surface
+    # Interface flux (upwind): F[k] = w_sink * D[k-1] [mol N/m^2/s]
+    # F[0] = 0 (no flux into top), F[nlev] = w_sink * D[nlev-1] (export)
+    # Tendency: dD/dt[k] = (F[k] - F[k+1]) / dz[k]
+    flux_out = w_sink_s * D  # flux leaving each layer downward
     zeros = jnp.zeros((*D.shape[:-1], 1), dtype=D.dtype)
-    sink_from_above = jnp.concatenate([zeros, (w_sink_s * D / jnp.clip(dz_ref, 1.0, None))[..., :-1]], axis=-1)
+    flux_in = jnp.concatenate([zeros, flux_out[..., :-1]], axis=-1)
+    sinking_tend = (flux_in - flux_out) / jnp.clip(dz_ref, 1.0, None)
 
     # ---- Assemble tendencies ----
     # Nutrients
@@ -161,8 +164,7 @@ def npzd_source_sink(
     dZoo_dt = cfg.gamma_Z * grazing - zoo_mort
 
     # Detritus
-    dDet_dt = phyto_mort + zoo_mort + (1.0 - cfg.gamma_Z) * grazing - grazing * 0  # sloppy feed already in NO3
-    dDet_dt = phyto_mort + zoo_mort - remin - sink_loss + sink_from_above
+    dDet_dt = phyto_mort + zoo_mort - remin + sinking_tend
 
     # ---- Carbon coupling (Redfield) ----
     # Organic carbon cycle: C:N = R_CN
