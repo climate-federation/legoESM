@@ -154,15 +154,31 @@ def step_land(
     evap_rate = lhflx / constants.L_v  # kg/m2/s (positive = upward)
     precip_rain = forcing.precip_total - forcing.precip_snow
     melt_rate = snow_melt / dt  # kg/m2/s entering liquid budget
-    dW_dt = precip_rain + melt_rate - evap_rate
-    W_new = W + dt * dW_dt
-    W_new = jnp.clip(W_new, 0.0, config.W_max)
+
+    # Water-limit evaporation: cannot remove more water than is available.
+    # When the bucket is empty, evaporation must shut off regardless of beta.
+    max_evap = jnp.maximum(W / dt + precip_rain + melt_rate, 0.0)
+    evap_rate_actual = jnp.minimum(evap_rate, max_evap)
+    # Excess latent heat energy (demand that couldn't be met) warms the soil
+    evap_excess_energy = (evap_rate - evap_rate_actual) * constants.L_v  # W/m2
+
+    dW_dt = precip_rain + melt_rate - evap_rate_actual
+    W_unclamped = W + dt * dW_dt
+    # Overflow becomes surface runoff rather than being silently discarded
+    runoff = jnp.maximum(W_unclamped - config.W_max, 0.0) / dt  # kg/m2/s
+    W_new = jnp.clip(W_unclamped, 0.0, config.W_max)
+    # Actual lhflx consistent with water-limited evaporation
+    lhflx_actual = evap_rate_actual * constants.L_v
+
+    # Correct soil temperature: energy that couldn't drive evaporation heats soil
+    T_soil_new = T_soil_new + dt * evap_excess_energy / heat_cap
 
     new_state = LandState(
         T_soil=state.T_soil.replace(data=T_soil_new),
         W_bucket=state.W_bucket.replace(data=W_new),
         snow_depth=state.snow_depth.replace(data=snow_new),
         snow_age=state.snow_age.replace(data=snow_age_new),
+        runoff=runoff,
     )
 
     # Recompute upward LW with updated temperature for consistency
@@ -203,7 +219,7 @@ def step_land(
         z0=jnp.broadcast_to(jnp.array(config.z0_land), T_soil.shape),
         q_surface=q_sfc_new,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx_actual,
         tau_x=tau_x,
         tau_y=tau_y,
         lw_up=lw_up_new,

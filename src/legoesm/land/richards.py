@@ -100,11 +100,11 @@ def solve_richards(
     psi_top_abs = jnp.abs(psi[:, 0])
     infil_capacity = K_top * (1.0 + psi_top_abs / dz[0])  # Darcy infiltration limit
 
-    # Surface runoff: excess over infiltration capacity
+    # Surface runoff: excess over Darcy infiltration capacity.
+    # Do NOT additionally cap by top-layer saturation — the implicit Picard
+    # solve redistributes water downward, so capping here creates spurious
+    # runoff before deeper layers can absorb the infiltrating water.
     flux_infiltrated = jnp.minimum(flux_top, infil_capacity)
-    # Also cap at what would saturate top layer in one dt
-    max_flux = (hydro_config.theta_sat - theta[:, 0]) * dz[0] / dt
-    flux_infiltrated = jnp.minimum(flux_infiltrated, jnp.maximum(max_flux, 0.0))
     runoff_surface = jnp.maximum(flux_top - flux_infiltrated, 0.0)
 
     # --- Picard iteration ---

@@ -18,6 +18,7 @@ class LandState(NamedTuple):
     W_bucket: Field        # Bucket soil moisture [kg/m2]
     snow_depth: Field      # Snow water equivalent [kg/m2]
     snow_age: Field        # Time since last snowfall [s]
+    runoff: jax.Array | None = None  # Surface runoff [kg/m2/s]
 
 
 class MultiLayerLandState(NamedTuple):

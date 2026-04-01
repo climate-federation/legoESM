@@ -195,12 +195,18 @@ def step_multilayer_land(
     melt_rate = snow_melt / dt  # kg/m2/s meltwater entering liquid budget
     flux_top = (precip_rain + melt_rate - evap_bare) / rho_w  # m/s, positive down
 
-    # Root sink: only transpiration portion.
-    # solve_richards expects sink in [m3/m3/s] (volumetric extraction rate).
-    # Convert from water depth rate [m/s] by dividing by layer thickness.
+    # Root sink: distribute transpiration across layers weighted by moisture-
+    # available root density. The total vertically-integrated sink must equal
+    # E_pot_transp (the actual transpiration from the energy balance) to close
+    # the water budget. beta_root weights the distribution but must NOT reduce
+    # the total — the surface flux already embedded moisture stress via f_veg.
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w  # m/s
     dz = grid.dz  # (n_layers,) layer thicknesses [m]
-    sink = root_frac[None, :] * E_pot_transp[:, None] * beta_root / dz[None, :]
+    weight = root_frac[None, :] * beta_root  # (ncol, n_layers)
+    weight_sum = jnp.sum(weight, axis=-1, keepdims=True)  # (ncol, 1)
+    # Safe normalization: when all layers are dry, E_pot_transp ≈ 0 anyway
+    weight_norm = weight / jnp.maximum(weight_sum, 1e-20)
+    sink = weight_norm * E_pot_transp[:, None] / dz[None, :]
 
     # --- Richards equation: update soil moisture ---
     richards_out = solve_richards(
