@@ -58,12 +58,15 @@ def saturation_mixing_ratio(
         Saturation mixing ratio [kg/kg].
     """
     e_sat = saturation_vapor_pressure(T)
-    # Clip denominator to avoid division by zero when e_sat >= p
-    denom = jnp.maximum(p - e_sat, 1.0)
+    # Smooth floor on denominator: preserves gradients near e_sat ≈ p
+    # instead of a hard clip that creates a zero-gradient plateau.
+    # softplus(x - 1) + 1 ≈ x for x >> 1, ≈ 1 for x << 1, smooth at x = 1.
+    denom = jax.nn.softplus(p - e_sat - 1.0) + 1.0
     q_sat = constants.epsilon * e_sat / denom
-    # Cap at 1.0 kg/kg: prevents singularity at low-pressure levels
-    # where e_sat > p (e.g. isothermal 300K init above ~3500 Pa)
-    return jnp.minimum(q_sat, 1.0)
+    # Smooth cap at 1.0 kg/kg: prevents singularity at low-pressure levels
+    # while allowing gradients to flow (unlike hard jnp.minimum).
+    # Uses LogSumExp smooth-min: 1 - softplus(β(1 - x))/β with β = 20.
+    return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat)) / 20.0
 
 
 def saturation_mixing_ratio_ice(
@@ -90,6 +93,6 @@ def saturation_mixing_ratio_ice(
     e_sat_i = 611.2 * jnp.exp(
         constants.L_s / constants.R_v * (1.0 / constants.T_freeze - 1.0 / T)
     )
-    denom = jnp.maximum(p - e_sat_i, 1.0)
+    denom = jax.nn.softplus(p - e_sat_i - 1.0) + 1.0
     q_sat_i = constants.epsilon * e_sat_i / denom
-    return jnp.minimum(q_sat_i, 1.0)
+    return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat_i)) / 20.0

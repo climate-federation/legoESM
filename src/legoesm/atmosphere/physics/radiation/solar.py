@@ -136,6 +136,44 @@ def daily_mean_insolation(
     return jnp.maximum(Q, 0.0)
 
 
+def daylight_fraction(
+    lat: jnp.ndarray,
+    day_of_year: float,
+    obliquity: float = 23.45,
+) -> jnp.ndarray:
+    """Fraction of the day with sunlight (h_s / pi).
+
+    Returns a value in [0, 1] where 0 = polar night and 1 = polar day.
+    At equinox, returns 0.5 everywhere.
+
+    Parameters
+    ----------
+    lat : jnp.ndarray
+        Latitude [radians].
+    day_of_year : float
+        Day of year (1-365).
+    obliquity : float
+        Obliquity [degrees].
+
+    Returns
+    -------
+    jnp.ndarray
+        Daylight fraction, same shape as lat.
+    """
+    delta = solar_declination(day_of_year, obliquity)
+    sin_lat = jnp.sin(lat)
+    cos_lat = jnp.cos(lat)
+    sin_delta = jnp.sin(delta)
+    cos_delta = jnp.cos(delta)
+
+    cos_hs = jnp.clip(
+        -sin_lat * sin_delta / jnp.clip(cos_lat * cos_delta, _TINY, None),
+        -1.0, 1.0,
+    )
+    h_s = jnp.arccos(cos_hs)
+    return h_s / jnp.pi
+
+
 def perpetual_equinox_insolation(
     lat: jnp.ndarray,
     S_0: float = 1360.0,

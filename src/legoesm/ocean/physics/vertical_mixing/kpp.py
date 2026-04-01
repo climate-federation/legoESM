@@ -101,8 +101,21 @@ def _boundary_layer_depth(
     w_sum = jnp.sum(w_cross, axis=-1, keepdims=True)
     w_norm = w_cross / jnp.maximum(w_sum, eps)
 
-    # Weighted average depth gives the BL depth estimate
-    h = jnp.sum(w_norm * z_depth, axis=-1)  # (...)
+    # Crossing-based depth estimate
+    h_crossing = jnp.sum(w_norm * z_depth, axis=-1)  # (...)
+
+    # Fallback for columns where Ri_b never crosses Ri_crit:
+    # - If column is mostly unstable (sig ≈ 0): BL extends to full depth
+    # - If column is mostly stable (sig ≈ 1): BL is one layer
+    column_stability = jnp.mean(sig, axis=-1)  # 0 = all unstable, 1 = all stable
+    max_depth = z_depth[..., -1]
+    min_depth = dz_actual[..., 0]
+    h_fallback = (1.0 - column_stability) * max_depth + column_stability * min_depth
+
+    # Blend: use crossing depth when crossing signal is strong, fallback otherwise
+    crossing_strength = w_sum[..., 0]
+    blend = jax.nn.sigmoid(20.0 * (crossing_strength - 0.1))
+    h = blend * h_crossing + (1.0 - blend) * h_fallback
 
     # At least one layer thick
     h = jnp.maximum(h, dz_actual[..., 0])

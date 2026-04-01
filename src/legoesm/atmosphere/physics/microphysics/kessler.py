@@ -81,11 +81,11 @@ def kessler_microphysics(
     dq_v_sat = -condensation
     dq_c_sat = condensation
 
-    # 2. Autoconversion: cloud -> rain (smooth softplus)
+    # 2. Autoconversion: cloud -> rain (threshold excess)
     # dq_c_sat is a tendency [kg/kg/s]; multiply by dt to get increment [kg/kg]
     q_c_updated = q_c + dq_c_sat * dt
-    autoconv = config.autoconversion_rate * jax.nn.softplus(
-        q_c_updated - config.autoconversion_threshold
+    autoconv = config.autoconversion_rate * jnp.maximum(
+        q_c_updated - config.autoconversion_threshold, 0.0
     )
 
     # 3. Accretion: cloud collected by rain

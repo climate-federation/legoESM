@@ -81,12 +81,26 @@ def _get_optics(config: RRTMGPConfig):
         )
         optics_params = OpticsParameters(optics=rrtm_optics)
 
-        # Build VMR library with global means from legoESM config
+        # Build VMR library with global means from legoESM config.
+        # Include all gases that appear in the RRTMGP absorption tables;
+        # omitting them causes their VMR to default to zero, dropping
+        # real absorbers/scatterers (e.g. O2 A-band, CFC window absorption).
         global_means = {
             rrtmgp_optics_constants.DRY_AIR_KEY: rrtmgp_optics_constants.DRY_AIR_VMR,
             "co2": config.co2_ppmv * 1.0e-6,
             "ch4": config.ch4_ppbv * 1.0e-9,
             "n2o": config.n2o_ppbv * 1.0e-9,
+            # Major atmospheric constituents
+            "o2": 0.20948,
+            "n2": 0.78084,
+            # Minor trace gases (present-day approximate global means)
+            "co": 1.5e-7,       # ~150 ppbv
+            "ccl4": 7.5e-11,    # ~75 pptv (declining)
+            "cfc11": 2.2e-10,   # ~220 pptv
+            "cfc12": 5.0e-10,   # ~500 pptv
+            "cfc22": 2.4e-10,   # ~240 pptv
+            "cf4": 8.5e-11,     # ~85 pptv
+            "no2": 3.0e-10,     # ~0.3 ppbv (stratospheric column mean)
         }
         vmr_lib = LookupVolumeMixingRatio(global_means=global_means, profiles=None)
 
@@ -276,9 +290,11 @@ def rrtmgp_radiation(
         for gas_name, vmr_value in ghg_vmr_override.items():
             vmr_fields[gas_name] = jnp.full_like(p_3d, vmr_value)
 
-    # Compute molecules per area (centered difference preserves shape via roll)
+    # Compute molecules per area (centered difference preserves shape via roll).
+    # VMR is n_h2o/n_dry, so molar mass per mole of dry air is M_dry + M_h2o * vmr
+    # (matching the bundled rrtmgp.py convention, NOT the mole-fraction formula).
     dp = kernel_ops.centered_difference(p_3d, dim=2)
-    mol_m_air = (rrtmgp_constants.DRY_AIR_MOL_MASS * (1.0 - h2o_vmr)
+    mol_m_air = (rrtmgp_constants.DRY_AIR_MOL_MASS
                  + rrtmgp_constants.WATER_MOL_MASS * h2o_vmr)
     molecules = -(dp / rrtmgp_constants.G) * rrtmgp_constants.AVOGADRO / mol_m_air
 
@@ -325,7 +341,9 @@ def rrtmgp_radiation(
     sfc_T_2d = sfc_temperature[:, None]  # (ncol, 1)
 
     # --- Cloud properties: reshape to jax-rrtmgp convention ---
-    has_clouds = cloud_path_liq is not None
+    # Respect config.include_clouds: even if cloud arrays are passed,
+    # disable cloud optics when the config says so.
+    has_clouds = config.include_clouds and cloud_path_liq is not None
     if has_clouds:
         cpl_3d = _add_halos(jnp.clip(cloud_path_liq, 0.0, None)[:, None, ::-1])
         cpi_3d = _add_halos(jnp.clip(cloud_path_ice, 0.0, None)[:, None, ::-1])

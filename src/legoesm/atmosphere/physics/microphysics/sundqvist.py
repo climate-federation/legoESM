@@ -58,7 +58,7 @@ def sundqvist_microphysics(
 
     # 1. Smooth condensation activation — convert increment [kg/kg] to tendency [kg/kg/s]
     f = jax.nn.sigmoid(sharpness * (RH - config.RH_crit))
-    condensation = f * jax.nn.softplus(q_v - config.RH_crit * q_sat) / dt  # [kg/kg/s]
+    condensation = f * jnp.maximum(q_v - config.RH_crit * q_sat, 0.0) / dt  # [kg/kg/s]
 
     # 2. Autoconversion
     # condensation is a tendency [kg/kg/s]; multiply by dt to get increment [kg/kg]

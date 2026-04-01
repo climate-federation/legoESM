@@ -25,31 +25,32 @@ class ParamConstraint(NamedTuple):
 
 
 # Default trainable parameters (the ones already traced through build_segment_fn)
+# Bounds must match tuning.py validated ranges.
 DEFAULT_TRAINABLE = [
     ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
     ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
     ParamConstraint("sbm_tau_c", 3600.0, 14400.0, "sigmoid"),
-    ParamConstraint("sbm_RH_ref", 0.5, 0.9, "sigmoid"),
-    ParamConstraint("C_H", 0.001, 0.01, "sigmoid"),
-    ParamConstraint("C_E", 0.001, 0.01, "sigmoid"),
+    ParamConstraint("sbm_RH_ref", 0.6, 0.9, "sigmoid"),
+    ParamConstraint("C_H", 0.001, 0.005, "sigmoid"),
+    ParamConstraint("C_E", 0.001, 0.005, "sigmoid"),
     ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
-    ParamConstraint("albedo_ocean", 0.02, 0.12, "sigmoid"),
+    ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
 ]
 
 # Non-convection trainable parameters (shared by all schemes)
 _COMMON_TRAINABLE = [
     ParamConstraint("tau_equator", 5.0, 10.0, "sigmoid"),
     ParamConstraint("tau_pole", 1.0, 3.0, "sigmoid"),
-    ParamConstraint("C_H", 0.001, 0.01, "sigmoid"),
-    ParamConstraint("C_E", 0.001, 0.01, "sigmoid"),
+    ParamConstraint("C_H", 0.001, 0.005, "sigmoid"),
+    ParamConstraint("C_E", 0.001, 0.005, "sigmoid"),
     ParamConstraint("albedo_ice", 0.4, 0.8, "sigmoid"),
-    ParamConstraint("albedo_ocean", 0.02, 0.12, "sigmoid"),
+    ParamConstraint("albedo_ocean", 0.03, 0.10, "sigmoid"),
 ]
 
 # SBM-specific convection parameters
 _SBM_TRAINABLE = [
     ParamConstraint("sbm_tau_c", 3600.0, 14400.0, "sigmoid"),
-    ParamConstraint("sbm_RH_ref", 0.5, 0.9, "sigmoid"),
+    ParamConstraint("sbm_RH_ref", 0.6, 0.9, "sigmoid"),
 ]
 
 

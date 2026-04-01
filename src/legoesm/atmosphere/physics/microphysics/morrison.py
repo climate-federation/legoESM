@@ -97,7 +97,7 @@ def morrison_microphysics(
 
     # 1. Ice nucleation (Cooper 1986, smoothed)
     N_i_target = config.N_i0 * jnp.exp(
-        config.cooper_a * jax.nn.softplus(T_freeze - T)
+        config.cooper_a * jnp.maximum(T_freeze - T, 0.0)
     ) / jnp.clip(rho, 0.1)
     dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0)
 
@@ -106,7 +106,7 @@ def morrison_microphysics(
     S_i = q_v / jnp.clip(q_sat_i, 1e-10) - 1.0
     dq_i_dep = (
         config.dep_coeff
-        * jax.nn.softplus(S_i)
+        * jnp.maximum(S_i, 0.0)
         * jnp.clip(q_i, 0.0)
         * jnp.clip(N_i, 0.0) ** (1.0 / 3.0)
         * f_ice

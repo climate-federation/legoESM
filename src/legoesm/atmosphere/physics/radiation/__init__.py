@@ -30,6 +30,7 @@ from legoesm.atmosphere.physics.radiation.gray import gray_radiation
 from legoesm.atmosphere.physics.radiation.solar import (
     cos_zenith_angle,
     daily_mean_insolation,
+    daylight_fraction,
     perpetual_equinox_insolation,
     solar_declination,
 )

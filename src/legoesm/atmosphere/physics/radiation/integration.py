@@ -41,9 +41,11 @@ from legoesm.atmosphere.physics.radiation.config import (
     RadiationConfig,
 )
 from legoesm.atmosphere.physics.radiation.gray import gray_radiation
+from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 from legoesm.atmosphere.physics.radiation.solar import (
     cos_zenith_angle,
     daily_mean_insolation,
+    daylight_fraction,
     perpetual_equinox_insolation,
 )
 from legoesm.atmosphere.physics.thermodynamics import (
@@ -87,7 +89,7 @@ def _compute_insolation(
     lon: jnp.ndarray | None = None,
     day_of_year: float = 80.0,
     seconds_of_day: float = 43200.0,
-) -> tuple[jnp.ndarray, jnp.ndarray | None]:
+) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
     """Compute TOA insolation and (optionally) cosine zenith angle.
 
     Returns
@@ -97,6 +99,10 @@ def _compute_insolation(
     cos_sza : jnp.ndarray or None
         Cosine of solar zenith angle (clipped >=0) per column.
         Only returned when ``config.diurnal_cycle`` is True.
+    f_day : jnp.ndarray or None
+        Daylight fraction per column.  Returned for non-diurnal daily-mean
+        insolation so that RRTMGP can use a daytime-effective cos(SZA)
+        rather than a day+night average.
     """
     S_0 = config.rrtmgp.S_0 if config.scheme == "rrtmgp" else config.gray.S_0
     obliquity = config.gray.obliquity
@@ -105,13 +111,16 @@ def _compute_insolation(
         hour = seconds_of_day / 3600.0
         cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, obliquity)
         cos_sza_pos = jnp.maximum(cos_sza, 0.0)
-        return S_0 * cos_sza_pos, cos_sza_pos
+        return S_0 * cos_sza_pos, cos_sza_pos, None
 
     # No diurnal cycle — daily-mean or perpetual-equinox insolation.
     gray_config = config.gray
     if gray_config.perpetual_equinox:
-        return perpetual_equinox_insolation(lat, S_0), None
-    return daily_mean_insolation(lat, day_of_year, S_0, obliquity), None
+        # Equinox: f_day = 0.5 everywhere
+        f_day = jnp.full_like(lat, 0.5)
+        return perpetual_equinox_insolation(lat, S_0), None, f_day
+    f_day = daylight_fraction(lat, day_of_year, obliquity)
+    return daily_mean_insolation(lat, day_of_year, S_0, obliquity), None, f_day
 
 
 def _compute_ozone_vmr(
@@ -171,6 +180,7 @@ def _call_radiation_backend(
     q_cloud: jnp.ndarray | None = None,
     q_ice: jnp.ndarray | None = None,
     ghg_vmr_override: dict | None = None,
+    f_day: jnp.ndarray | None = None,
 ):
     """Call configured radiation backend with a unified integration interface.
 
@@ -185,6 +195,11 @@ def _call_radiation_backend(
         Cloud ice mixing ratio (ncol, nlev) [kg/kg].
     ghg_vmr_override : dict or None
         Runtime GHG VMR overrides passed to RRTMGP (e.g. transient CO2).
+    f_day : jnp.ndarray or None
+        Daylight fraction per column for non-diurnal RRTMGP.  When provided,
+        the two-stream solver uses the daytime-effective cos(SZA) instead of
+        the day+night average, and SW fluxes/heating are rescaled by f_day
+        to recover daily-mean energy balance.
     """
     radiation_fn, scheme_config = _get_radiation_fn(radiation_config)
 
@@ -201,14 +216,25 @@ def _call_radiation_backend(
         )
 
     # RRTMGP: use actual cos_sza if available (diurnal cycle), else derive
-    # from daily-mean insolation.
+    # from daily-mean insolation using the daytime-effective zenith angle.
+    _sw_scale = None
     if cos_sza is None:
         S_0 = radiation_config.rrtmgp.S_0
-        cos_sza = jnp.clip(
-            insolation / jnp.clip(S_0, 1.0e-6, None),
-            0.0,
-            1.0,
-        )
+        if f_day is not None:
+            # Use daytime-effective cos(SZA): insol = S_0 * f_day * <cos_sza>_day
+            # so <cos_sza>_day = insol / (S_0 * f_day).  The solver sees the
+            # correct daytime optical path; we rescale SW output by f_day afterward.
+            f_day_safe = jnp.maximum(f_day, 1.0e-6)
+            cos_sza = jnp.clip(
+                insolation / (S_0 * f_day_safe), 0.0, 1.0,
+            )
+            _sw_scale = f_day
+        else:
+            cos_sza = jnp.clip(
+                insolation / jnp.clip(S_0, 1.0e-6, None),
+                0.0,
+                1.0,
+            )
     q_v_safe = q_v if q_v is not None else jnp.zeros_like(T)
 
     # Compute ozone VMR based on config.
@@ -235,7 +261,7 @@ def _call_radiation_backend(
             "cloud_r_eff_ice": cloud_props.r_eff_ice,
         }
 
-    return radiation_fn(
+    result = radiation_fn(
         T=T,
         p_full=p_full,
         p_half=p_half,
@@ -249,6 +275,22 @@ def _call_radiation_backend(
         ghg_vmr_override=ghg_vmr_override,
         **cloud_kwargs,
     )
+
+    # When using daytime-effective cos(SZA), the solver computes SW fluxes at
+    # the daytime level (1/f_day times too large).  Rescale to daily-mean.
+    if _sw_scale is not None:
+        s = _sw_scale[:, None]  # (ncol, 1) for broadcasting against (ncol, nlev)
+        result = RadiationOutput(
+            lw_flux_up=result.lw_flux_up,
+            lw_flux_down=result.lw_flux_down,
+            sw_flux_up=result.sw_flux_up * s,
+            sw_flux_down=result.sw_flux_down * s,
+            heating_rate=result.lw_heating_rate + result.sw_heating_rate * s,
+            lw_heating_rate=result.lw_heating_rate,
+            sw_heating_rate=result.sw_heating_rate * s,
+        )
+
+    return result
 
 
 def make_radiation_physics(
@@ -340,7 +382,7 @@ def _make_hydrostatic_radiation(
         T_sfc = T[..., -1]  # (6, n, n)
 
         # Insolation (and optionally cos_sza for diurnal cycle).
-        insol, cos_sza = _compute_insolation(
+        insol, cos_sza, f_day = _compute_insolation(
             lat, radiation_config,
             lon=lon,
             day_of_year=_time["day_of_year"],
@@ -376,6 +418,7 @@ def _make_hydrostatic_radiation(
             _qi_data = _qi_raw.data if hasattr(_qi_raw, "data") else _qi_raw
             q_ice_col = jnp.maximum(_qi_data.reshape(ncol, nlev), 0.0)
 
+        f_day_col = f_day.reshape(ncol) if f_day is not None else None
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col,
@@ -388,6 +431,7 @@ def _make_hydrostatic_radiation(
             cos_sza=cos_sza_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
+            f_day=f_day_col,
         )
 
         # Reshape heating rate back to (6, n, n, nlev)
@@ -478,7 +522,7 @@ def _make_nonhydrostatic_radiation(
         T_sfc = T[..., -1]
 
         # Insolation (and optionally cos_sza for diurnal cycle).
-        insol, cos_sza = _compute_insolation(
+        insol, cos_sza, f_day = _compute_insolation(
             lat, radiation_config,
             lon=lon,
             day_of_year=_time["day_of_year"],
@@ -515,6 +559,7 @@ def _make_nonhydrostatic_radiation(
                 state.tracers.data[..., 3], 0.0, None
             ).reshape(ncol, nlev)
 
+        f_day_col = f_day.reshape(ncol) if f_day is not None else None
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col,
@@ -527,6 +572,7 @@ def _make_nonhydrostatic_radiation(
             cos_sza=cos_sza_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
+            f_day=f_day_col,
         )
 
         # Convert dT/dt -> dtheta'/dt using local Exner (T = theta * exner).
@@ -621,20 +667,21 @@ def _make_spectral_pe_radiation(
         if radiation_config.diurnal_cycle:
             lat_2d = jnp.broadcast_to(lat[:, None], (n_lat, n_lon))
             lon_2d = jnp.broadcast_to(grid.lon[None, :], (n_lat, n_lon))
-            insol, cos_sza = _compute_insolation(
+            insol, cos_sza, f_day = _compute_insolation(
                 lat_2d, radiation_config,
                 lon=lon_2d,
                 day_of_year=_time["day_of_year"],
                 seconds_of_day=_time["seconds_of_day"],
             )
         else:
-            insol_1d, _ = _compute_insolation(
+            insol_1d, _, f_day_1d = _compute_insolation(
                 lat, radiation_config,
                 day_of_year=_time["day_of_year"],
                 seconds_of_day=_time["seconds_of_day"],
             )
             insol = jnp.broadcast_to(insol_1d[:, None], (n_lat, n_lon))
             cos_sza = None
+            f_day = jnp.broadcast_to(f_day_1d[:, None], (n_lat, n_lon)) if f_day_1d is not None else None
 
         # Reshape to columns: (n_lat, n_lon, ...) -> (ncol, ...)
         ncol = n_lat * n_lon
@@ -666,6 +713,7 @@ def _make_spectral_pe_radiation(
             _qi_data = _qi_raw.data if hasattr(_qi_raw, "data") else _qi_raw
             q_ice_col = jnp.maximum(_qi_data.reshape(ncol, nlev), 0.0)
 
+        f_day_col = f_day.reshape(ncol) if f_day is not None else None
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
             T=T_col,
@@ -678,6 +726,7 @@ def _make_spectral_pe_radiation(
             cos_sza=cos_sza_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
+            f_day=f_day_col,
         )
 
         # Reshape heating rate back to (n_lat, n_lon, nlev)

@@ -75,8 +75,8 @@ def kuo_convection(
     # 1. Saturation mixing ratio
     q_sat = saturation_mixing_ratio(T, p_full)  # (ncol, nlev)
 
-    # 2. Column moisture excess: softplus for smooth positive part
-    excess = jax.nn.softplus(q_v - q_sat)  # (ncol, nlev)
+    # 2. Column moisture excess: positive part only (zero when subsaturated)
+    excess = jnp.maximum(q_v - q_sat, 0.0)  # (ncol, nlev)
     MC = jnp.sum(excess * dp, axis=1) / constants.g  # (ncol,) [kg/m^2]
 
     # 3. Smooth trigger based on column moisture excess

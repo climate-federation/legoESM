@@ -99,9 +99,9 @@ def mass_flux_convection(
         * config.M_scale
     )  # (ncol,)
 
-    # 4. Prognostic update: relax M_c toward M_eq, softplus floor
+    # 4. Prognostic update: relax M_c toward M_eq, non-negative projection
     M_c_new = M_c + dt * (M_eq - M_c) / config.tau_adj
-    M_c_new = jax.nn.softplus(M_c_new)  # ensure non-negative
+    M_c_new = jnp.maximum(M_c_new, 0.0)
 
     # 5. Mass flux profile: sinusoidal in pressure
     p_base = p_full[:, -1:]  # (ncol, 1)
