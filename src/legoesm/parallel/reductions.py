@@ -220,11 +220,13 @@ def global_sum_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global sum across all processes.
     """
+    from legoesm.parallel.profiling import mpi_timer
     mpi4jax, MPI = _require_mpi_stack()
 
-    global_val = _mpi4jax_array_result(
-        mpi4jax.allreduce(local_value, op=MPI.SUM, comm=MPI.COMM_WORLD),
-    )
+    with mpi_timer("global_sum_mpi"):
+        global_val = _mpi4jax_array_result(
+            mpi4jax.allreduce(local_value, op=MPI.SUM, comm=MPI.COMM_WORLD),
+        )
     return global_val
 
 
@@ -245,11 +247,13 @@ def global_max_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global maximum across all processes.
     """
+    from legoesm.parallel.profiling import mpi_timer
     mpi4jax, MPI = _require_mpi_stack()
 
-    global_val = _mpi4jax_array_result(
-        mpi4jax.allreduce(local_value, op=MPI.MAX, comm=MPI.COMM_WORLD),
-    )
+    with mpi_timer("global_max_mpi"):
+        global_val = _mpi4jax_array_result(
+            mpi4jax.allreduce(local_value, op=MPI.MAX, comm=MPI.COMM_WORLD),
+        )
     return global_val
 
 
@@ -270,11 +274,13 @@ def global_min_mpi(local_value: jax.Array) -> jax.Array:
     jax.Array
         The global minimum across all processes.
     """
+    from legoesm.parallel.profiling import mpi_timer
     mpi4jax, MPI = _require_mpi_stack()
 
-    global_val = _mpi4jax_array_result(
-        mpi4jax.allreduce(local_value, op=MPI.MIN, comm=MPI.COMM_WORLD),
-    )
+    with mpi_timer("global_min_mpi"):
+        global_val = _mpi4jax_array_result(
+            mpi4jax.allreduce(local_value, op=MPI.MIN, comm=MPI.COMM_WORLD),
+        )
     return global_val
 
 
@@ -296,15 +302,17 @@ def allgather_mpi(local_value: jax.Array) -> jax.Array:
         Concatenated array from all processes along a new leading axis.
         Shape: ``(n_processes,) + local_value.shape``.
     """
+    from legoesm.parallel.profiling import mpi_timer
     mpi4jax, MPI = _require_mpi_stack()
 
     n_procs = MPI.COMM_WORLD.Get_size()
     recv_shape = (n_procs,) + local_value.shape
     recv_buf = jax.numpy.zeros(recv_shape, dtype=local_value.dtype)
 
-    recv_buf = _mpi4jax_array_result(
-        mpi4jax.allgather(local_value, comm=MPI.COMM_WORLD),
-    )
+    with mpi_timer("allgather_mpi"):
+        recv_buf = _mpi4jax_array_result(
+            mpi4jax.allgather(local_value, comm=MPI.COMM_WORLD),
+        )
     return recv_buf
 
 
@@ -365,9 +373,11 @@ def batch_allreduce_mpi(
     packed = jnp.concatenate(flat_parts, axis=0)
 
     # Single MPI allreduce.
-    global_packed = _mpi4jax_array_result(
-        mpi4jax.allreduce(packed, op=mpi_op, comm=MPI.COMM_WORLD),
-    )
+    from legoesm.parallel.profiling import mpi_timer
+    with mpi_timer("batch_allreduce_mpi"):
+        global_packed = _mpi4jax_array_result(
+            mpi4jax.allreduce(packed, op=mpi_op, comm=MPI.COMM_WORLD),
+        )
 
     # Unpack and restore original shapes and dtypes.
     results = []

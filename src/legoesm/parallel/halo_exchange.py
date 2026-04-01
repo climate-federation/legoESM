@@ -477,9 +477,11 @@ def pad_halo_mpi(
             "Install with: pip install mpi4jax mpi4py"
         ) from exc
 
-    if topology.tiling != (1, 1):
-        return _pad_halo_mpi_tiled(data, topology, halo, mpi4jax, MPI)
-    return _pad_halo_mpi_face_only(data, topology, halo, mpi4jax, MPI)
+    from legoesm.parallel.profiling import mpi_timer
+    with mpi_timer("pad_halo_mpi"):
+        if topology.tiling != (1, 1):
+            return _pad_halo_mpi_tiled(data, topology, halo, mpi4jax, MPI)
+        return _pad_halo_mpi_face_only(data, topology, halo, mpi4jax, MPI)
 
 
 def pad_halo_vector_mpi(
@@ -838,6 +840,45 @@ def pad_halo_mpi_4d(
             "Install with: pip install mpi4jax mpi4py"
         ) from exc
 
-    if topology.tiling != (1, 1):
-        return _pad_halo_mpi_tiled_4d(data, topology, halo, mpi4jax, MPI)
-    return _pad_halo_mpi_face_only_4d(data, topology, halo, mpi4jax, MPI)
+    from legoesm.parallel.profiling import mpi_timer
+    with mpi_timer("pad_halo_mpi_4d"):
+        if topology.tiling != (1, 1):
+            return _pad_halo_mpi_tiled_4d(data, topology, halo, mpi4jax, MPI)
+        return _pad_halo_mpi_face_only_4d(data, topology, halo, mpi4jax, MPI)
+
+
+def packed_pad_halo_mpi_4d(
+    *fields: jax.Array,
+    topology: CommTopology,
+    halo: int = 1,
+) -> list[jax.Array]:
+    """Exchange halos for multiple 4D fields in a single MPI round.
+
+    Stacks fields along the trailing axis, performs ONE halo exchange
+    (with proportionally larger MPI messages), then splits.  Reduces
+    MPI message count from ``len(fields)`` exchanges to 1.
+
+    All fields must share the same ``(6, n, n)`` spatial prefix.
+    The trailing axis (levels/channels) can differ.
+
+    Parameters
+    ----------
+    *fields : jax.Array
+        4D arrays of shape ``(6, n, n, C_i)``.
+    topology : CommTopology
+    halo : int
+
+    Returns
+    -------
+    list[jax.Array]
+        Padded arrays, each ``(6, n+2h, n+2h, C_i)``.
+    """
+    if not fields:
+        return []
+    if len(fields) == 1:
+        return [pad_halo_mpi_4d(fields[0], topology, halo)]
+
+    splits = [f.shape[-1] for f in fields]
+    stacked = jnp.concatenate(fields, axis=-1)
+    padded = pad_halo_mpi_4d(stacked, topology, halo)
+    return list(jnp.split(padded, jnp.cumsum(jnp.array(splits[:-1])), axis=-1))

@@ -560,7 +560,25 @@ class ModelDriver:
         are still correct.  Snapshots, profiles, and monthly means are
         skipped.
         """
-        perf_mode = kwargs.pop("perf_mode", False)
+        perf_mode = kwargs.pop("perf_mode", None)
+        if perf_mode is None:
+            # Auto-detect: use perf_mode when distributed to avoid
+            # expensive allgather on every diagnostic interval.
+            pm_setting = getattr(
+                getattr(self, '_experiment_config', None),
+                'output', None,
+            )
+            pm_flag = getattr(pm_setting, 'diagnostics_perf_mode', 'auto')
+            if pm_flag == "always":
+                perf_mode = True
+            elif pm_flag == "never":
+                perf_mode = False
+            else:
+                # auto: use perf_mode when running distributed MPI
+                perf_mode = (
+                    self._device_config is not None
+                    and self._device_config.is_distributed
+                )
 
         if perf_mode:
             # Lightweight path: scalar reductions only, no gather.

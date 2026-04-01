@@ -1477,3 +1477,92 @@ def cdgrid_momentum_tendencies_3d(
 def _smooth_boundary_cells(field, cdgrid):
     """No-op: FV3-faithful operators handle boundaries via d2a2c."""
     return field
+
+
+# ==============================================================================
+# Overlapped (async) halo variants for MPI compute-communication overlap
+# ==============================================================================
+
+def _overlapped_interp_center_to_corner(field, cdgrid, masks=None):
+    """Like _interp_center_to_corner but with interior/boundary overlap.
+
+    Computes interior stencil before halo exchange, boundary after.
+    Only beneficial under MPI where halo exchange has latency.
+
+    Only supports 4D fields (6, n, n, nlev) — the 3D case is handled
+    by the standard function since 2D halos are very cheap.
+
+    Parameters
+    ----------
+    field : jax.Array, shape (6, n, n, nlev)
+    cdgrid : CubedSphereCDGrid
+    masks : InteriorBoundaryMasks, optional
+        Pre-computed masks.  Created on-the-fly if None.
+
+    Returns
+    -------
+    jax.Array, shape (6, n+1, n+1, nlev)
+    """
+    if field.ndim == 3:
+        return _interp_center_to_corner(field, cdgrid)
+
+    from legoesm.parallel.async_halo import overlapped_halo_compute
+
+    def _stencil_body(f_pad):
+        """4-point average on padded (6, n+2, n+2) field -> (6, n+1, n+1)."""
+        return 0.25 * (f_pad[:, :-1, :-1] + f_pad[:, 1:, :-1]
+                        + f_pad[:, :-1, 1:] + f_pad[:, 1:, 1:])
+
+    # Apply per-level via vmap over trailing axis
+    # overlapped_halo_compute works on 2D (6, n, n) fields
+    field_t = jnp.moveaxis(field, -1, 0)  # (nlev, 6, n, n)
+    result_t = jax.vmap(
+        lambda f: overlapped_halo_compute(f, _stencil_body, halo_width=1, masks=masks)
+    )(field_t)
+    return jnp.moveaxis(result_t, 0, -1)  # (6, n+1, n+1, nlev)
+
+
+def _overlapped_arakawa_lamb_gradient(B, cdgrid, masks=None):
+    """Like _arakawa_lamb_gradient but with interior/boundary overlap.
+
+    Only supports 4D fields (6, n, n, nlev).
+
+    Parameters
+    ----------
+    B : jax.Array, shape (6, n, n, nlev)
+    cdgrid : CubedSphereCDGrid
+    masks : InteriorBoundaryMasks, optional
+
+    Returns
+    -------
+    dB_dx, dB_dy_perp : each (6, n+1, n+1, nlev)
+    """
+    if B.ndim == 3:
+        return _arakawa_lamb_gradient(B, cdgrid)
+
+    from legoesm.parallel.async_halo import overlapped_halo_compute
+
+    c00 = cdgrid.grad_c00
+    c01 = cdgrid.grad_c01
+    c10 = cdgrid.grad_c10
+    c11 = cdgrid.grad_c11
+
+    def _stencil_body(f_pad):
+        """Arakawa-Lamb gradient stencil -> (6, n+1, n+1, 2) packed dx/dy."""
+        B_sw = f_pad[:, :-1, :-1]
+        B_se = f_pad[:, 1:, :-1]
+        B_nw = f_pad[:, :-1, 1:]
+        B_ne = f_pad[:, 1:, 1:]
+        dB_raw_x = (B_se + B_ne) - (B_sw + B_nw)
+        dB_raw_y = (B_nw + B_ne) - (B_sw + B_se)
+        dB_dx = c00 * dB_raw_x + c01 * dB_raw_y
+        dB_dy = c10 * dB_raw_x + c11 * dB_raw_y
+        return jnp.stack([dB_dx, dB_dy], axis=-1)  # (6, n+1, n+1, 2)
+
+    # Apply per-level
+    B_t = jnp.moveaxis(B, -1, 0)  # (nlev, 6, n, n)
+    result_t = jax.vmap(
+        lambda f: overlapped_halo_compute(f, _stencil_body, halo_width=1, masks=masks)
+    )(B_t)  # (nlev, 6, n+1, n+1, 2)
+    result = jnp.moveaxis(result_t, 0, -2)  # (6, n+1, n+1, nlev, 2)
+    return result[..., 0], result[..., 1]

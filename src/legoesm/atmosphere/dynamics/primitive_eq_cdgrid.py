@@ -129,6 +129,13 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Ensures exact mass conservation to machine precision but
         # requires a global reduction (MPI allreduce when distributed).
         # Disable for pure performance benchmarks to eliminate sync.
+    use_async_halo: bool = False
+        # Enable interior/boundary split for compute-communication
+        # overlap in MPI mode.  Computes stencils on interior points
+        # before halo exchange completes, then recomputes boundary
+        # points after.  Overhead: boundary fraction (~8% at C96,
+        # ~17% at C48) of redundant compute.  Benefit: hides MPI
+        # latency behind interior compute.  Off by default.
 
 
 # ==============================================================================
@@ -218,6 +225,12 @@ def fv3_hydrostatic_tendencies(
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
             zeta_abs, B, inv_T, mesh=_spmd_mesh,
         )
+    elif _halo_backend == "mpi":
+        from legoesm.grids.halo import _mpi_topology
+        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+        _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
+            zeta_abs, B, inv_T, topology=_mpi_topology,
+        )
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
 
@@ -228,6 +241,7 @@ def fv3_hydrostatic_tendencies(
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
 
     # --- 8. Pressure gradient correction at D-grid corners ---
+    # ln_ps is 2D — async overlap not beneficial for 2D fields
     dln_dx, dln_dy_perp = _arakawa_lamb_gradient(ln_ps, cdgrid)  # 2D, separate exchange
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
     T_corner = 1.0 / _interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
@@ -241,7 +255,13 @@ def fv3_hydrostatic_tendencies(
     # Divergence damping at D-grid
     if config.div_damp_coeff > 0:
         div_v_damp = cgrid_divergence(u_c, v_c, cdgrid)  # (6, n, n, nlev)
-        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v_damp, cdgrid)
+        if config.use_async_halo and _halo_backend == "mpi":
+            from legoesm.core.operators_cdgrid import _overlapped_arakawa_lamb_gradient
+            ddiv_dx, ddiv_dy_perp = _overlapped_arakawa_lamb_gradient(
+                div_v_damp, cdgrid,
+            )
+        else:
+            ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_v_damp, cdgrid)
         du_d_dt = du_d_dt + config.div_damp_coeff * ddiv_dx
         dv_d_dt = dv_d_dt + config.div_damp_coeff * ddiv_dy_perp
 

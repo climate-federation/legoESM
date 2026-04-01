@@ -43,6 +43,7 @@ from legoesm.parallel.halo_exchange_voronoi import VoronoiHaloExchange
 from legoesm.parallel.reductions import (
     _require_mpi_stack,
     global_sum_mpi,
+    batch_allreduce_mpi,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 
@@ -237,9 +238,12 @@ def _fix_mass_mpi(
     area = mesh.areaCell
     owned_area = jnp.where(owned_mask, area, 0.0)
 
-    mass_old = global_sum_mpi(jnp.sum(state_old.p_s.data * owned_area))
-    mass_new = global_sum_mpi(jnp.sum(state_new.p_s.data * owned_area))
-    total_area = global_sum_mpi(jnp.sum(owned_area))
+    local_mass_old = jnp.sum(state_old.p_s.data * owned_area)
+    local_mass_new = jnp.sum(state_new.p_s.data * owned_area)
+    local_total_area = jnp.sum(owned_area)
+    mass_old, mass_new, total_area = batch_allreduce_mpi(
+        [local_mass_old, local_mass_new, local_total_area], op="sum",
+    )
 
     correction = (mass_old - mass_new) / total_area
     p_s_fixed = state_new.p_s._replace(

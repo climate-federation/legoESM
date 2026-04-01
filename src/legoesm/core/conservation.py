@@ -87,6 +87,40 @@ def _global_area_sum(
     return local_sum
 
 
+def _batch_global_area_sums(
+    arrays: list[jax.Array],
+    grid,
+    owned_mask: jax.Array | None = None,
+) -> list[jax.Array]:
+    """Compute multiple area-weighted global sums in a single MPI call.
+
+    Same semantics as calling :func:`_global_area_sum` on each array
+    individually, but batches all reductions into one ``allreduce``
+    when running under MPI, reducing latency from O(N) to O(1).
+
+    Falls back to individual ``jnp.sum`` when not distributed.
+    """
+    acc = _accumulation_dtype()
+    area_acc = grid.area.astype(acc)
+    mask = None
+    if owned_mask is not None:
+        mask = owned_mask.astype(acc)
+        while mask.ndim < area_acc.ndim:
+            mask = mask[..., None]
+
+    local_sums = []
+    for arr in arrays:
+        prod = arr.astype(acc) * area_acc
+        if mask is not None:
+            prod = prod * mask
+        local_sums.append(jnp.sum(prod))
+
+    if _is_distributed():
+        from legoesm.parallel.reductions import batch_allreduce_mpi
+        return batch_allreduce_mpi(local_sums, op="sum")
+    return local_sums
+
+
 def _total_area(grid) -> jax.Array:
     """Total area for any grid."""
     return grid.grid_total_area
@@ -118,9 +152,9 @@ def fix_mass_shallow_water(
     -------
     ShallowWaterState : Mass-conserving state.
     """
-    mass_old = _global_area_sum(state_old.h.data, grid)
-    mass_new = _global_area_sum(state_new.h.data, grid)
-
+    mass_old, mass_new = _batch_global_area_sums(
+        [state_old.h.data, state_new.h.data], grid,
+    )
     correction = (mass_old - mass_new) / _total_area(grid)
     h_fixed = state_new.h.replace(data=state_new.h.data + correction)
 
@@ -155,23 +189,23 @@ def fix_energy_shallow_water(
     -------
     ShallowWaterState : Energy-conserving state.
     """
-    def total_energy(state):
-        h = state.h.data
-        u = state.u.data
-        v = state.v.data
-        h_s = state.h_s.data
-        ke = 0.5 * h * (u**2 + v**2)
-        pe = 0.5 * g * (h + h_s)**2
-        return _global_area_sum(ke + pe, grid)
-
-    E_old = total_energy(state_old)
+    # Compute all three energy integrals as local sums, then batch
+    # into a single MPI allreduce (3 separate allreduces -> 1).
+    h_old = state_old.h.data
+    u_old = state_old.u.data
+    v_old = state_old.v.data
+    h_s_old = state_old.h_s.data
+    E_old_field = 0.5 * h_old * (u_old**2 + v_old**2) + 0.5 * g * (h_old + h_s_old)**2
 
     h_new = state_new.h.data
     u_new = state_new.u.data
     v_new = state_new.v.data
-    KE_new = _global_area_sum(0.5 * h_new * (u_new**2 + v_new**2), grid)
+    KE_new_field = 0.5 * h_new * (u_new**2 + v_new**2)
+    PE_new_field = 0.5 * g * (h_new + state_new.h_s.data)**2
 
-    PE_new = _global_area_sum(0.5 * g * (h_new + state_new.h_s.data)**2, grid)
+    E_old, KE_new, PE_new = _batch_global_area_sums(
+        [E_old_field, KE_new_field, PE_new_field], grid,
+    )
 
     KE_target = E_old - PE_new
     KE_target = jnp.maximum(KE_target, 0.0)
@@ -233,10 +267,9 @@ def fix_mass_hydrostatic(
     -------
     HydrostaticState : Mass-conserving state.
     """
-    mass_old = global_integral(state_old.p_s, grid)
-    mass_new = global_integral(state_new.p_s, grid)
-
-    # Uniform correction to p_s
+    mass_old, mass_new = _batch_global_area_sums(
+        [state_old.p_s.data, state_new.p_s.data], grid,
+    )
     correction = (mass_old - mass_new) / grid.total_area
     p_s_fixed = state_new.p_s.replace(data=state_new.p_s.data + correction)
 
@@ -569,15 +602,17 @@ def fix_mass_nonhydrostatic(
     -------
     NonHydrostaticState : Mass-conserving state.
     """
-    current_mass = compute_nh_dry_mass(
-        state.rho_prime.data, height_coord, terrain_metric, grid,
-    )
+    rho_total = height_coord.rho_ref + state.rho_prime.data
     J = terrain_metric.jacobian
     dz = height_coord.dz
-    # Total weighted volume: ∫ J * sum(dz) * dA
-    col_vol = J * jnp.sum(dz)  # (6, n, n)
-    total_vol = _global_area_sum(col_vol, grid)
-    # Uniform correction to rho_prime
+    col_mass = jnp.sum(
+        J[..., None] * rho_total * dz[None, None, None, :],
+        axis=-1,
+    )
+    col_vol = J * jnp.sum(dz)
+    current_mass, total_vol = _batch_global_area_sums(
+        [col_mass, col_vol], grid,
+    )
     correction = (target_mass - current_mass) / total_vol
     rho_fixed = state.rho_prime.replace(
         data=state.rho_prime.data + correction,
@@ -619,16 +654,18 @@ def compute_hydrostatic_energy(
 
     # Kinetic energy
     ke_3d = 0.5 * (u**2 + v**2) * mass_weight
-    ke = _global_area_sum(jnp.sum(ke_3d, axis=-1), grid)
+    ke_col = jnp.sum(ke_3d, axis=-1)
 
     # Internal energy
     ie_3d = c_v * T * mass_weight
-    ie = _global_area_sum(jnp.sum(ie_3d, axis=-1), grid)
+    ie_col = jnp.sum(ie_3d, axis=-1)
 
     # Potential energy
     Phi = compute_geopotential(T, p_s, sigma_coord, phis)
     pe_3d = Phi * mass_weight
-    pe = _global_area_sum(jnp.sum(pe_3d, axis=-1), grid)
+    pe_col = jnp.sum(pe_3d, axis=-1)
+
+    ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
     total = ke + ie + pe
     return {
@@ -683,15 +720,17 @@ def compute_nh_energy(
 
     # Kinetic
     ke_3d = 0.5 * (u**2 + v**2 + w_full**2) * weight
-    ke = _global_area_sum(jnp.sum(ke_3d, axis=-1), grid)
+    ke_col = jnp.sum(ke_3d, axis=-1)
 
     # Internal
     ie_3d = c_v * T * weight
-    ie = _global_area_sum(jnp.sum(ie_3d, axis=-1), grid)
+    ie_col = jnp.sum(ie_3d, axis=-1)
 
     # Potential
     pe_3d = g * z_full[None, None, None, :] * weight
-    pe = _global_area_sum(jnp.sum(pe_3d, axis=-1), grid)
+    pe_col = jnp.sum(pe_3d, axis=-1)
+
+    ke, ie, pe = _batch_global_area_sums([ke_col, ie_col, pe_col], grid)
 
     total = ke + ie + pe
     return {
@@ -720,10 +759,11 @@ def compute_conservation_diagnostics(
     v = state.v.data
     h_s = state.h_s.data
 
-    total_mass = _global_area_sum(h, grid)
     ke = 0.5 * h * (u**2 + v**2)
     pe = 0.5 * g * (h + h_s)**2
-    total_energy = _global_area_sum(ke + pe, grid)
+    total_mass, total_energy = _batch_global_area_sums(
+        [h, ke + pe], grid,
+    )
 
     return {
         'total_mass': total_mass,

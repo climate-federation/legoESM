@@ -28,6 +28,7 @@ Also supports:
 from __future__ import annotations
 
 import logging
+import os
 from functools import partial
 
 import jax
@@ -298,6 +299,47 @@ def _get_exchange(mesh, ndim, use_ppermute):
 # Module-level flag: use ppermute by default?
 _use_ppermute: bool = False
 
+# Auto-selection threshold (bytes).  When the all_gather data volume
+# per device exceeds this, ppermute is preferred.  Default 4 MB.
+_AUTO_THRESHOLD_BYTES = int(
+    float(os.environ.get("LEGOESM_SPMD_HALO_THRESHOLD_MB", "4")) * 1_048_576
+)
+
+
+def select_exchange_backend(
+    n: int,
+    nlev: int = 1,
+    n_devices: int = 6,
+    dtype_bytes: int = 4,
+) -> bool:
+    """Decide whether to use ppermute (True) or all_gather (False).
+
+    Heuristic: all_gather moves O(6 * n^2 * nlev * dtype_bytes) per
+    device.  ppermute moves O(4 * n * nlev * dtype_bytes).  When the
+    all_gather volume exceeds the threshold, ppermute is better.
+
+    The threshold is configurable via ``LEGOESM_SPMD_HALO_THRESHOLD_MB``
+    (default 4 MB).
+
+    Parameters
+    ----------
+    n : int
+        Per-face spatial resolution (e.g. 48 for C48).
+    nlev : int
+        Number of vertical levels (1 for shallow water).
+    n_devices : int
+        Number of devices in the mesh.
+    dtype_bytes : int
+        Bytes per element (4 for float32, 8 for float64).
+
+    Returns
+    -------
+    bool
+        True if ppermute is recommended, False for all_gather.
+    """
+    allgather_bytes = 6 * n * n * nlev * dtype_bytes
+    return allgather_bytes > _AUTO_THRESHOLD_BYTES
+
 
 def set_ppermute_default(enabled: bool) -> None:
     """Switch the default collective backend.
@@ -412,17 +454,42 @@ def packed_pad_halo_4d(*fields, mesh):
 _spmd_mesh = None
 
 
-def activate_spmd_halo_backend(mesh) -> None:
-    """Switch the global halo backend to explicit SPMD exchange."""
-    global _spmd_mesh
+def activate_spmd_halo_backend(mesh, n: int = 0, nlev: int = 1) -> None:
+    """Switch the global halo backend to explicit SPMD exchange.
+
+    When *n* (per-face resolution) is provided, auto-selects between
+    all_gather and ppermute based on estimated data volume.
+
+    Parameters
+    ----------
+    mesh : jax.sharding.Mesh
+    n : int
+        Per-face resolution for auto-selection (0 = skip auto-select).
+    nlev : int
+        Number of vertical levels.
+    """
+    global _spmd_mesh, _use_ppermute
     _spmd_mesh = mesh
     from legoesm.grids import halo
     halo._halo_backend = "spmd"
     halo._spmd_mesh = mesh
-    logger.info(
-        "SPMD halo backend activated (mesh=%s, %d devices)",
-        mesh.axis_names, len(mesh.devices.flat),
-    )
+
+    # Auto-select ppermute vs all_gather if resolution is known.
+    n_devices = len(mesh.devices.flat)
+    if n > 0:
+        use_pp = select_exchange_backend(n, nlev, n_devices)
+        _use_ppermute = use_pp
+        backend_name = "ppermute" if use_pp else "all_gather"
+        logger.info(
+            "SPMD halo backend activated (mesh=%s, %d devices, "
+            "n=%d, nlev=%d, exchange=%s)",
+            mesh.axis_names, n_devices, n, nlev, backend_name,
+        )
+    else:
+        logger.info(
+            "SPMD halo backend activated (mesh=%s, %d devices)",
+            mesh.axis_names, n_devices,
+        )
 
 
 def deactivate_spmd_halo_backend() -> None:

@@ -47,6 +47,7 @@ class OutputConfig(NamedTuple):
     cmip_output: bool = False
     clear_sky_diag: bool = False
     checkpoint_format: str = "npz"  # npz, zarr
+    diagnostics_perf_mode: str = "auto"  # auto, always, never
 
 
 class ExperimentConfig(NamedTuple):

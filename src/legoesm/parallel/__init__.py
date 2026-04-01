@@ -139,6 +139,14 @@ from legoesm.parallel.reductions import (
     batch_allreduce_mpi,
 )
 
+from legoesm.parallel.profiling import (
+    is_profiling_enabled,
+    mpi_timer,
+    get_stats as get_mpi_profile_stats,
+    reset_stats as reset_mpi_profile_stats,
+    print_mpi_profile,
+)
+
 from legoesm.parallel.layout import (
     DistributedLayout,
     SingleRankLayout,
@@ -247,6 +255,12 @@ __all__ = [
     "check_sharding",
     # Batch MPI reductions
     "batch_allreduce_mpi",
+    # MPI profiling
+    "is_profiling_enabled",
+    "mpi_timer",
+    "get_mpi_profile_stats",
+    "reset_mpi_profile_stats",
+    "print_mpi_profile",
     # Device configuration and hardware-aware optimization
     "HardwareConfig",
     "detect_hardware",

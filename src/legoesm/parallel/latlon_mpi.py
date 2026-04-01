@@ -378,7 +378,12 @@ def make_latlon_mpi_step(
         )
 
     # Global area for mass conservation (computed via MPI reduction)
-    from legoesm.parallel.reductions import global_sum_mpi
+    from legoesm.parallel.reductions import global_sum_mpi, batch_allreduce_mpi
+
+    # Cache total area — this is a geometric constant, no need to
+    # recompute via MPI allreduce every timestep.
+    _owned_area_cached = global_grid.area[layout.lat_start:layout.lat_end]
+    _total_area_cached = global_sum_mpi(jnp.sum(_owned_area_cached))
 
     def _local_tendency(u, v, T, ps, phis, dt_val):
         """Halo exchange + tendency for the local band.
@@ -452,15 +457,14 @@ def make_latlon_mpi_step(
         if config.p_floor > 0:
             ps_new = jnp.maximum(ps_new, config.p_floor)
 
-        # Mass conservation via global MPI reduction
+        # Mass conservation via global MPI reduction (batched)
         if config.use_conservation_fixer and config.fix_mass:
-            # Use owned area only for this rank's contribution
-            owned_area = global_grid.area[
-                layout.lat_start:layout.lat_end]
-            mass_old = global_sum_mpi(jnp.sum(ps * owned_area))
-            mass_new = global_sum_mpi(jnp.sum(ps_new * owned_area))
-            total_area = global_sum_mpi(jnp.sum(owned_area))
-            ps_new = ps_new + (mass_old - mass_new) / total_area
+            local_mass_old = jnp.sum(ps * _owned_area_cached)
+            local_mass_new = jnp.sum(ps_new * _owned_area_cached)
+            mass_old, mass_new = batch_allreduce_mpi(
+                [local_mass_old, local_mass_new], op="sum",
+            )
+            ps_new = ps_new + (mass_old - mass_new) / _total_area_cached
 
         dims_3d = ("lat", "lon", "level")
         dims_2d = ("lat", "lon")
