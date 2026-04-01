@@ -136,11 +136,14 @@ def compute_phenology(
 
     # Hemisphere-aware effective doy (shift by half year for SH)
     doy_arr = jnp.broadcast_to(jnp.asarray(doy, dtype=lat.dtype), lat.shape)
-    doy_eff = jnp.where(
-        lat < 0,
-        jnp.mod(doy_arr + 182.5, 365.25),
-        doy_arr,
-    )
+    if config.hemisphere_aware:
+        doy_eff = jnp.where(
+            lat < 0,
+            jnp.mod(doy_arr + 182.5, 365.25),
+            doy_arr,
+        )
+    else:
+        doy_eff = doy_arr
 
     # Labile release factor — Gaussian pulse around Bday
     arg_l = jnp.sin((doy_eff - config.Bday + osl) / sf) * sf / wl
@@ -234,14 +237,28 @@ def step_carbon_differland(
     gpp_day = gpp * _SPD  # gC/m2/day rate
 
     # --- Autotrophic respiration & NPP -------------------------------------
-    R_auto_day = config.f_auto * gpp_day
-    NPP_day = jnp.maximum(gpp_day - R_auto_day, 0.0)
+    # Maintenance respiration: biomass-proportional, temperature-dependent,
+    # always active (including nighttime and dormant seasons).
+    temp_factor_ra = jnp.exp(config.Q10_exp * (T - config.T_ref))
+    R_maint_day = (
+        config.r_maint_fol * state.C_fol
+        + config.r_maint_root * state.C_root
+        + config.r_maint_wood * state.C_wood
+    ) * temp_factor_ra  # gC/m2/day
+
+    # Growth respiration: fraction of net assimilation (GPP minus maintenance)
+    R_growth_day = config.f_auto * jnp.maximum(gpp_day - R_maint_day, 0.0)
+    R_auto_day = R_maint_day + R_growth_day
+    NPP_day = gpp_day - R_auto_day
 
     # --- NPP allocation (sequential partition) -----------------------------
-    A_fol = NPP_day * config.f_fol
-    A_lab = (NPP_day - A_fol) * config.f_lab
-    A_root = (NPP_day - A_fol - A_lab) * config.f_root
-    A_wood = jnp.maximum(NPP_day - A_fol - A_lab - A_root, 0.0)
+    # Allocation only occurs when NPP > 0 (growth); maintenance losses are
+    # already accounted for in R_auto_day and flow directly to atmosphere.
+    NPP_pos = jnp.maximum(NPP_day, 0.0)
+    A_fol = NPP_pos * config.f_fol
+    A_lab = (NPP_pos - A_fol) * config.f_lab
+    A_root = (NPP_pos - A_fol - A_lab) * config.f_root
+    A_wood = jnp.maximum(NPP_pos - A_fol - A_lab - A_root, 0.0)
 
     # --- Phenology ---------------------------------------------------------
     lrf, lff = compute_phenology(jnp.asarray(doy), lat, config)
@@ -271,21 +288,27 @@ def step_carbon_differland(
     )
 
     # --- Pool updates (Euler, gC/m2/day rates * dt_days) -------------------
+    # Smooth non-negativity (softplus): preserves AD gradients and allows
+    # pools to approach zero without the artificial 1 gC/m2 hard floor.
+    _alpha = 0.01  # smoothing scale [gC/m2]
+    def _soft_pos(x):
+        return _alpha * jnp.logaddexp(x / _alpha, 0.0)
+
     new_state = CarbonState(
-        C_lab=jnp.maximum(
-            state.C_lab + (A_lab - lab_release) * dt_days, 1.0),
-        C_fol=jnp.maximum(
-            state.C_fol + (A_fol + lab_release - leaf_litter) * dt_days, 1.0),
-        C_root=jnp.maximum(
-            state.C_root + (A_root - root_litter) * dt_days, 1.0),
-        C_wood=jnp.maximum(
-            state.C_wood + (A_wood - wood_litter) * dt_days, 1.0),
-        C_lit=jnp.maximum(
+        C_lab=_soft_pos(
+            state.C_lab + (A_lab - lab_release) * dt_days),
+        C_fol=_soft_pos(
+            state.C_fol + (A_fol + lab_release - leaf_litter) * dt_days),
+        C_root=_soft_pos(
+            state.C_root + (A_root - root_litter) * dt_days),
+        C_wood=_soft_pos(
+            state.C_wood + (A_wood - wood_litter) * dt_days),
+        C_lit=_soft_pos(
             state.C_lit + (leaf_litter + root_litter
-                           - R_het_lit - lit_to_som) * dt_days, 1.0),
-        C_som=jnp.maximum(
+                           - R_het_lit - lit_to_som) * dt_days),
+        C_som=_soft_pos(
             state.C_som + (lit_to_som + wood_litter
-                           - R_het_som) * dt_days, 1.0),
+                           - R_het_som) * dt_days),
     )
 
     # --- NEE: positive = source to atmosphere ------------------------------

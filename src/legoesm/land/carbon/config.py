@@ -24,7 +24,10 @@ class CarbonConfig(NamedTuple):
     K_CO2: float = 400.0          # CO2 half-saturation constant [ppmv]
 
     # --- Autotrophic respiration ---
-    f_auto: float = 0.45          # Fraction of GPP lost to Ra
+    f_auto: float = 0.28          # Growth respiration fraction of net assimilation
+    r_maint_fol: float = 0.005    # Foliage maintenance respiration rate [day^-1]
+    r_maint_root: float = 0.002   # Root maintenance respiration rate [day^-1]
+    r_maint_wood: float = 5e-5    # Wood maintenance respiration rate [day^-1]
 
     # --- NPP allocation (sequential partition) ---
     f_fol: float = 0.15           # Fraction NPP -> foliage

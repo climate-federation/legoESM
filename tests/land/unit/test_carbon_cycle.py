@@ -63,7 +63,7 @@ class TestCarbonConfig(unittest.TestCase):
     def test_default_construction(self):
         cfg = CarbonConfig()
         self.assertEqual(cfg.scheme, "none")
-        self.assertAlmostEqual(cfg.f_auto, 0.45)
+        self.assertAlmostEqual(cfg.f_auto, 0.28)
         self.assertAlmostEqual(cfg.LCMA, 50.0)
 
     def test_differland_construction(self):

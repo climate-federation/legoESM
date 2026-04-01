@@ -1012,20 +1012,21 @@ class TestCloudFraction:
         T, p_full, p_half, T_sfc, lat, insol = _make_column_data(ncol, nlev)
         q_v = jnp.full((ncol, nlev), 0.001)
         cos_zen = jnp.full(ncol, 0.5)
-        config = RRTMGPConfig()
+        config_clear = RRTMGPConfig(include_clouds=False)
+        config_cloudy = RRTMGPConfig(include_clouds=True)
 
         # Clear sky
         out_clear = rrtmgp_radiation(
-            T, p_full, p_half, T_sfc, q_v, cos_zen, config,
+            T, p_full, p_half, T_sfc, q_v, cos_zen, config_clear,
         )
 
-        # Cloudy sky
+        # Cloudy sky (include_clouds must be True for cloud optics to apply)
         lwp = jnp.full((ncol, nlev), 0.05)
         iwp = jnp.zeros((ncol, nlev))
         r_eff_liq = jnp.full((ncol, nlev), 10.0e-6)
         r_eff_ice = jnp.full((ncol, nlev), 30.0e-6)
         out_cloudy = rrtmgp_radiation(
-            T, p_full, p_half, T_sfc, q_v, cos_zen, config,
+            T, p_full, p_half, T_sfc, q_v, cos_zen, config_cloudy,
             cloud_path_liq=lwp, cloud_path_ice=iwp,
             cloud_r_eff_liq=r_eff_liq, cloud_r_eff_ice=r_eff_ice,
         )
