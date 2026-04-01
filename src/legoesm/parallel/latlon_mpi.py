@@ -25,7 +25,6 @@ from __future__ import annotations
 import logging
 from typing import NamedTuple
 
-import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -116,7 +115,7 @@ def make_latlon_band_layout(
 
 
 # ============================================================================
-# Local grid builder (reuses logic from latlon_sharded.py)
+# Local grid builder (delegates to latlon_sharded._build_local_grid)
 # ============================================================================
 
 def build_local_grid(
@@ -125,57 +124,11 @@ def build_local_grid(
 ) -> LatLonGrid:
     """Build a local LatLonGrid for this rank with halo rows.
 
-    Returns a grid with ``local_n_lat + 2*halo`` latitude rows whose
-    metric terms (dx, area, f) correspond to the correct latitudes.
-    For pole-adjacent halos the latitude is mirrored.
+    Delegates to the shared ``_build_local_grid`` in ``latlon_sharded``.
     """
-    n_lat = layout.global_n_lat
-    n_lon = layout.global_n_lon
-    halo = layout.halo
-    R = global_grid.radius
-    dlon = global_grid.dlon
-    dlat = global_grid.dlat
-
-    lat_global = np.asarray(global_grid.lat)  # (n_lat,)
-    i_start = layout.lat_start
-    i_end = layout.lat_end
-
-    # Extend with halo, mirroring at poles
-    lat_list = []
-    for i in range(i_start - halo, i_end + halo):
-        if 0 <= i < n_lat:
-            lat_list.append(lat_global[i])
-        elif i < 0:
-            mi = min(max(-1 - i, 0), n_lat - 1)
-            lat_list.append(-np.pi - lat_global[mi])
-        else:
-            mi = min(max(2 * n_lat - 1 - i, 0), n_lat - 1)
-            lat_list.append(np.pi - lat_global[mi])
-
-    lat_local = jnp.array(lat_list)
-    n_lat_local = len(lat_list)
-    lon = global_grid.lon
-
-    lat2d = jnp.broadcast_to(lat_local[:, None], (n_lat_local, n_lon))
-    lon2d = jnp.broadcast_to(lon[None, :], (n_lat_local, n_lon))
-    cos_lat = jnp.maximum(jnp.abs(jnp.cos(lat_local)), 1e-10)
-    sin_lat = jnp.sin(lat_local)
-
-    omega_val = float(
-        jnp.asarray(global_grid.f[0, 0])
-        / (2.0 * jnp.sin(global_grid.lat[0]))
-    )
-    f = 2.0 * omega_val * sin_lat[:, None] * jnp.ones((1, n_lon))
-    dx = R * 2.0 * dlon * cos_lat[:, None] * jnp.ones((1, n_lon))
-    dy = float(R * 2.0 * dlat)
-    area = R**2 * dlat * dlon * cos_lat[:, None] * jnp.ones((1, n_lon))
-
-    return LatLonGrid(
-        n_lat=n_lat_local, n_lon=n_lon, radius=R,
-        lat=lat_local, lon=lon, lat2d=lat2d, lon2d=lon2d,
-        cos_lat=cos_lat, sin_lat=sin_lat, f=f,
-        dx=dx, dy=dy, area=area, total_area=jnp.sum(area),
-        dlon=float(dlon), dlat=float(dlat),
+    from legoesm.parallel.latlon_sharded import _build_local_grid
+    return _build_local_grid(
+        global_grid, layout.rank, layout.n_ranks, layout.halo,
     )
 
 

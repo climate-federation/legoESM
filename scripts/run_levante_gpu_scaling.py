@@ -557,14 +557,8 @@ def _run_segment_benchmark(
     if precision == "float64":
         jax.config.update("jax_enable_x64", True)
 
-    # Preload RRTMG optics before JIT to avoid filesystem races
-    if physics_level == "rrtmg_full":
-        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
-            preload_rrtmgp_optics,
-        )
-        from legoesm.driver.config import ExperimentConfig
-        # Preload with defaults (the ModelDriver setup will also preload,
-        # but doing it here ensures it happens before any JIT)
+    # RRTMG optics are preloaded inside _build_segment_benchmark() via
+    # ModelDriver.setup() → _create_physics() → preload_rrtmgp_optics().
 
     step_fn, carry, dt_used, total_cells, cells_per_gpu = _build_segment_benchmark(
         physics_level=physics_level,
