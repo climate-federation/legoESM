@@ -81,6 +81,29 @@ def estimate_min_dx_gaussian(n_max: int, radius: float = 6.371229e6) -> float:
     return float(dx_equator)
 
 
+def estimate_min_dx_icosahedral(level: int, radius: float = 6.371229e6) -> float:
+    """Estimate minimum grid spacing on an icosahedral (Voronoi/MPAS) grid.
+
+    Parameters
+    ----------
+    level : int
+        Icosahedral subdivision level (e.g., 5 → ~10242 cells).
+    radius : float
+        Sphere radius [m].
+
+    Returns
+    -------
+    dx_min : float
+        Approximate minimum edge-to-edge spacing [m].
+    """
+    # Number of cells: 10 * 4^level + 2 (icosahedral subdivision)
+    n_cells = 10 * 4**level + 2
+    # Average cell spacing from sphere area / n_cells
+    dx_avg = np.sqrt(4 * np.pi * radius**2 / n_cells)
+    # Minimum spacing is ~0.85 of the average for quasi-uniform meshes
+    return float(0.85 * dx_avg)
+
+
 def cfl_max_dt(
     dx_min: float,
     wave_speed: float,
@@ -225,7 +248,7 @@ def cfl_check_and_adjust(
     verbose : bool
         Print CFL diagnostics.
     grid_type : str
-        Grid type: 'cubed_sphere', 'gaussian', or 'latlon'.
+        Grid type: 'cubed_sphere', 'gaussian', 'latlon', or 'voronoi'.
 
     Returns
     -------
@@ -236,6 +259,8 @@ def cfl_check_and_adjust(
         dx_min = estimate_min_dx_latlon(n, radius)
     elif grid_type == "gaussian":
         dx_min = estimate_min_dx_gaussian(n, radius)
+    elif grid_type == "voronoi":
+        dx_min = estimate_min_dx_icosahedral(n, radius)
     else:
         dx_min = estimate_min_dx_cubed_sphere(n, radius)
 

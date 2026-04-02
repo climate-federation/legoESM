@@ -113,7 +113,13 @@ def compute_diffusion(grid, dc: DycoreConfig) -> DiffusionCoeffs:
     -------
     DiffusionCoeffs
     """
-    dx_min = float(jnp.min(jnp.asarray(grid.dx))) / 2.0 if hasattr(grid, 'dx') else 1e5
+    if hasattr(grid, 'dcEdge'):
+        # Voronoi/MPAS: dcEdge is the cell-to-cell distance along each edge
+        dx_min = float(jnp.min(jnp.asarray(grid.dcEdge)))
+    elif hasattr(grid, 'dx'):
+        dx_min = float(jnp.min(jnp.asarray(grid.dx))) / 2.0
+    else:
+        dx_min = 1e5
     DT = dc.dt
 
     # Laplacian viscosity: CFL-safe Smagorinsky-like default

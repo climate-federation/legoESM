@@ -98,8 +98,12 @@ _TPU_XLA_FLAGS = {
     "xla_tpu_enable_latency_hiding_scheduler": "LHS_DEFAULT",
 }
 
-_GPU_XLA_FLAGS = {
+_NVIDIA_GPU_XLA_FLAGS = {
     "xla_gpu_cudnn_gemm_fusion_level": "3",
+}
+
+_AMD_GPU_XLA_FLAGS: dict[str, str] = {
+    # ROCm does not use cuDNN; no vendor-specific flags needed yet.
 }
 
 
@@ -114,6 +118,38 @@ def _set_xla_flags(flags: dict[str, str]) -> None:
     if new_parts:
         combined = (existing + " " + " ".join(new_parts)).strip()
         os.environ["XLA_FLAGS"] = combined
+
+
+def _is_nvidia_gpu() -> bool:
+    """Return ``True`` if the default GPU device is an NVIDIA (CUDA) GPU."""
+    import jax
+    devices = jax.devices()
+    if not devices:
+        return False
+    kind = str(getattr(devices[0], "device_kind", "")).lower()
+    return "nvidia" in kind
+
+
+def _is_amd_gpu() -> bool:
+    """Return ``True`` if the default GPU device is an AMD (ROCm) GPU."""
+    import jax
+    devices = jax.devices()
+    if not devices:
+        return False
+    kind = str(getattr(devices[0], "device_kind", "")).lower()
+    return "amd" in kind or "instinct" in kind
+
+
+def gpu_vendor() -> str:
+    """Return the GPU vendor: ``"nvidia"``, ``"amd"``, or ``"unknown"``.
+
+    Only meaningful when ``get_backend() == "gpu"``.
+    """
+    if _is_nvidia_gpu():
+        return "nvidia"
+    if _is_amd_gpu():
+        return "amd"
+    return "unknown"
 
 
 def configure_backend(backend: str | None = None) -> str:
@@ -139,11 +175,19 @@ def configure_backend(backend: str | None = None) -> str:
 
     elif backend == "gpu":
         devices = jax.devices()
+        vendor = gpu_vendor()
         if len(devices) > 1:
-            _set_xla_flags(_GPU_XLA_FLAGS)
+            if vendor == "nvidia":
+                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+            elif vendor == "amd":
+                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
         if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
             os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
-        jax.config.update("jax_default_matmul_precision", "tensorfloat32")
+        # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa).
+        # AMD GPUs do not have TF32 hardware; use default float32.
+        if vendor == "nvidia":
+            jax.config.update("jax_default_matmul_precision", "tensorfloat32")
+        logger.info("GPU vendor: %s (%d device(s))", vendor, len(devices))
 
     elif backend == "metal":
         pass  # No special flags needed.

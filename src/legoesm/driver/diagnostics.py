@@ -451,6 +451,13 @@ class DiagnosticCollector:
                 sigma=sigma,
             )
 
+        if self.snapshots:
+            snap_data = {"snapshot_days": np.array(sorted(self.snapshots.keys()))}
+            for day_key, fields in self.snapshots.items():
+                for field_name, arr in fields.items():
+                    snap_data[f"day{day_key:03d}_{field_name}"] = arr
+            np.savez(output_dir / "snapshots.npz", **snap_data)
+
         if self.cf_writer is not None:
             self.cf_writer.close()
 

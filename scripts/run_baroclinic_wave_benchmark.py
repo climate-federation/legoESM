@@ -349,6 +349,7 @@ def main():
         DT = cfl_check_and_adjust(
             DT, N_GRID, model_type="primitive_eq",
             max_wind=60.0, gravity_wave_speed=300.0,
+            grid_type="gaussian" if USE_SPECTRAL else "cubed_sphere",
         )
 
     # Hyperdiffusion
@@ -521,7 +522,7 @@ def main():
     # Initial diagnostics
     ps0, u0, v0, T0 = _get_grid_fields(state)
     if USE_SPECTRAL:
-        area = grid.area  # (n_lat, n_lon)
+        area = grid.grid_area  # (n_lat, n_lon)
         dsigma = sigma.dsigma
         mass_init = float(jnp.sum(ps0 * area) / constants.g)
         dp0 = ps0[..., None] * dsigma
@@ -761,7 +762,7 @@ def main():
         n_cols = len(plot_days)
         fig, axes = plt.subplots(
             3, n_cols,
-            figsize=(5.5 * n_cols, 15),
+            figsize=(5.5 * n_cols, 10),
             subplot_kw={"projection": ccrs.PlateCarree(central_longitude=180)} if has_cartopy else {},
         )
         # Ensure axes is 2D even when n_cols == 1
@@ -918,9 +919,9 @@ def main():
         plt.suptitle(
             f"Dry Baroclinic Wave Benchmark  |  {res_label} L{N_LEV}  |  "
             f"dt={DT:.0f}s  |  legoESM {dycore_label}",
-            fontsize=13, y=1.01,
+            fontsize=13, y=0.98,
         )
-        plt.tight_layout()
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
         fig_path = _out("baroclinic_wave_benchmark", "png")
         plt.savefig(fig_path, dpi=200, bbox_inches="tight")
         plt.close()

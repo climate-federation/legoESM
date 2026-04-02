@@ -20,7 +20,7 @@ import jax.numpy as jnp
 # Legacy constants — kept so that ``from legoesm.core.hardware import
 # _UNSUPPORTED_F64_BACKENDS`` in conservation.py et al. keeps working.
 # ---------------------------------------------------------------------------
-_UNSUPPORTED_F64_BACKENDS = frozenset({"METAL"})
+_UNSUPPORTED_F64_BACKENDS = frozenset({"metal"})
 
 _PRECISION_NAME_TO_DTYPE = {
     "float16": jnp.float16,

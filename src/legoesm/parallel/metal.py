@@ -96,7 +96,7 @@ def to_metal(array: jax.Array) -> jax.Array:
     jax.Array on the Metal device (or unchanged).
     """
     backend = get_backend()
-    if backend != "METAL":
+    if backend != "metal":
         return array
     metal = jax.devices()[0]
     return jax.device_put(array, metal)
@@ -136,7 +136,7 @@ def route_to_default(pytree):
 
 def is_metal_backend() -> bool:
     """Check if the default JAX backend is Metal."""
-    return get_backend() == "METAL"
+    return get_backend() == "metal"
 
 
 def ensure_spectral_on_cpu(fn):

@@ -531,6 +531,7 @@ def _build_rrtmgp_radiation_fn(config):
 _RADIATION_BUILDERS: dict[str, callable] = {
     "gray": _build_gray_radiation_fn,
     "rrtmgp": _build_rrtmgp_radiation_fn,
+    "rrtmg": _build_rrtmgp_radiation_fn,  # common alias
 }
 
 

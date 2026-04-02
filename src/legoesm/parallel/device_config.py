@@ -71,6 +71,7 @@ class HardwareConfig(NamedTuple):
 _NO_F64_BACKENDS = frozenset({"metal"})
 
 # Known GPU memory sizes (GB) by platform string.
+# NVIDIA GPUs.
 _GPU_MEMORY_TABLE = {
     "a100": 40.0,
     "a100-80": 80.0,
@@ -81,6 +82,17 @@ _GPU_MEMORY_TABLE = {
     "l4": 24.0,
     "rtx3090": 24.0,
     "rtx4090": 24.0,
+    # AMD Instinct GPUs.
+    "mi250x": 128.0,  # 2×64 GB HBM2e
+    "mi250": 128.0,
+    "mi210": 64.0,
+    "mi300x": 192.0,  # 8×24 GB HBM3
+    "mi300a": 128.0,  # APU: 8×16 GB HBM3
+    "mi100": 32.0,
+    # AMD Radeon Pro / consumer.
+    "w7900": 48.0,
+    "w7800": 32.0,
+    "rx7900xtx": 24.0,
 }
 
 # TPU memory per chip (GB) by generation.
@@ -193,9 +205,13 @@ _TPU_XLA_FLAGS = {
     "xla_tpu_enable_latency_hiding_scheduler": "LHS_DEFAULT",
 }
 
-_GPU_XLA_FLAGS = {
-    # Use cuDNN for convolutions when available.
+_NVIDIA_GPU_XLA_FLAGS = {
+    # Use cuDNN for GEMM fusion on NVIDIA GPUs.
     "xla_gpu_cudnn_gemm_fusion_level": "3",
+}
+
+_AMD_GPU_XLA_FLAGS: dict[str, str] = {
+    # ROCm does not use cuDNN; no vendor-specific flags needed yet.
 }
 
 
@@ -240,19 +256,34 @@ def _configure_tpu(config: HardwareConfig) -> None:
 
 
 def _configure_gpu(config: HardwareConfig) -> None:
-    """Apply GPU-specific JAX and XLA configuration."""
+    """Apply GPU-specific JAX and XLA configuration.
+
+    Detects NVIDIA vs AMD GPUs and applies vendor-appropriate flags.
+    NVIDIA: cuDNN GEMM fusion + TensorFloat32 matmul precision.
+    AMD (ROCm): no cuDNN flags, default float32 matmul precision.
+    """
+    from legoesm.runtime.backend import gpu_vendor
+
+    vendor = gpu_vendor()
+
     if config.device_count > 1:
-        _set_xla_flags(_GPU_XLA_FLAGS)
+        if vendor == "nvidia":
+            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+        elif vendor == "amd":
+            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
 
     # Pre-allocate 90% of GPU memory to avoid fragmentation.
     # Only set if not already configured by the user.
     if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
         os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
 
-    # Enable TF32 precision for Ampere+ GPUs (A100, H100).
-    # TF32 uses 19-bit mantissa — faster than FP32 with negligible
-    # accuracy loss for weather/climate dynamics.
-    jax.config.update("jax_default_matmul_precision", "tensorfloat32")
+    # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa) —
+    # faster than FP32 with negligible accuracy loss for weather/climate.
+    # AMD GPUs do not have TF32 hardware; leave matmul at default float32.
+    if vendor == "nvidia":
+        jax.config.update("jax_default_matmul_precision", "tensorfloat32")
+
+    logger.info("GPU vendor: %s (%d device(s))", vendor, config.device_count)
 
 
 def _configure_metal(config: HardwareConfig) -> None:

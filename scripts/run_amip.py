@@ -19,11 +19,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 # Enable line-buffered output for real-time logging
 sys.stdout.reconfigure(line_buffering=True)
+logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
 
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.config import (
@@ -142,6 +144,10 @@ def main():
     parser.add_argument("--distributed", action="store_true", default=False,
                         help="Enable MPI distributed execution (auto-detected from environment)")
     parser.add_argument("--ensemble-size", type=int, default=1)
+
+    # Visualization
+    parser.add_argument("--plot", action="store_true", default=False,
+                        help="Generate diagnostic plots after simulation completes")
 
     args = parser.parse_args()
 
@@ -286,6 +292,14 @@ def main():
     driver.run(start_step=start_step, start_day=start_day)
     if _is_root:
         print(f"Complete. Output: {driver.output_dir}")
+
+    if args.plot and _is_root:
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            "plot_amip", Path(__file__).parent / "plot_amip.py")
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _mod.plot_amip(driver.output_dir, show=False)
 
 
 if __name__ == "__main__":

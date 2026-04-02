@@ -274,7 +274,7 @@ def create_gaussian_grid(
     lon2d_np, lat2d_np = np.meshgrid(lon_np, lat_np)
     f_np = 2.0 * constants.Omega * sin_lat_np[:, None] * np.ones((1, n_lon))
 
-    target_device = jax.devices("cpu")[0] if backend == "METAL" else None
+    target_device = jax.devices("cpu")[0] if backend == "metal" else None
 
     def _to_jax(array, dtype):
         np_arr = np.asarray(array, dtype=dtype)

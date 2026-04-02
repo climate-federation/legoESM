@@ -84,6 +84,7 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     nu_del4_ps: float = 0.0       # del4 diffusion for surface pressure [m⁴/s]
     K_h: float = 0.0              # scalar diffusion [m²/s]
     T_min: float = 50.0           # temperature floor [K]
+    p_floor: float = 100.0        # pressure floor [Pa] for adiabatic heating (limits 1/p)
     pv_scheme: str = "energy"     # "energy" or "enstrophy"
     apvm_scale: float = 0.0       # APVM upwinding (0 = off)
     fix_mass: bool = True
@@ -242,7 +243,8 @@ def mpas_hydrostatic_tendencies(
 
     # --- 5. Thermodynamic equation ---
     # Adiabatic heating: κ·T·ω/p
-    adiabatic = kappa * T_3d * omega / p_full
+    p_adiab = jnp.maximum(p_full, config.p_floor)
+    adiabatic = kappa * T_3d * omega / p_adiab
 
     # v·∇(ln p_s) at cells: div(u * ln_ps_edge) - ln_ps * div(u)
     ln_ps_edge = cell_to_edge_avg(ln_ps, mesh)  # (nEdges,)
