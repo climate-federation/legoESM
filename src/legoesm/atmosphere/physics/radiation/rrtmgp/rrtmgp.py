@@ -382,11 +382,18 @@ class RRTMGP:
 
   @staticmethod
   def _cache_key(config):
-      """Compute a hashable cache key from an RRTMGPConfig."""
+      """Compute a hashable cache key from an RRTMGPConfig.
+
+      Includes the x64 state so that switching precision between calls
+      invalidates the cache (table dtypes depend on JAX precision mode).
+      """
+      import jax
+      x64 = bool(jax.config.jax_enable_x64)
       return (config.lw_gas_file, config.sw_gas_file,
               config.lw_cloud_file, config.sw_cloud_file,
               config.include_clouds,
-              config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv)
+              config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv,
+              x64)
 
   @staticmethod
   def _build_optics_and_vmr(config):
@@ -573,6 +580,19 @@ class RRTMGP:
 
       config = self._config
       ncol, nlev = T.shape
+
+      # --- 0. Determine working dtype ---
+      # The optics tables are loaded at whatever precision JAX was configured
+      # with at load time (float32 if x64 off, float64 if x64 on).  Promote
+      # all inputs to match so that table lookups, lax.cond branches, and
+      # lax.scan carries have consistent dtypes throughout the solver.
+      _table_dtype = self.optics_lib.gas_optics_lw.kmajor.dtype
+      T = T.astype(_table_dtype)
+      p_full = p_full.astype(_table_dtype)
+      p_half = p_half.astype(_table_dtype)
+      q_v = q_v.astype(_table_dtype)
+      sfc_temperature = jnp.asarray(sfc_temperature).astype(_table_dtype)
+      cos_zenith = jnp.asarray(cos_zenith).astype(_table_dtype)
 
       # --- 1. Reshape (ncol, nlev) -> (ncol, 1, nlev+2) with halos ---
       T_3d = _add_halos(T[:, None, ::-1])

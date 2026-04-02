@@ -20,7 +20,10 @@ from typing import Callable, TypeAlias
 import jax
 import jax.numpy as jnp
 
-_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+def _tiny(x=None):
+  """Smallest normal value for the working dtype (float32 or float64)."""
+  dtype = x.dtype if x is not None else jnp.float_
+  return float(jnp.finfo(dtype).tiny)
 
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_cloud_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import optics_utils
@@ -150,8 +153,9 @@ def compute_optical_properties(
   combined_props = jax.tree.map(jnp.add, *optical_props)
   # Use safe denominators: jnp.where evaluates both branches so the division
   # must never produce inf/NaN even on the "inactive" branch.
-  safe_tau = jnp.maximum(combined_props['tau'], _TINY)
-  safe_tau_ssa = jnp.maximum(combined_props['tau_ssa'], _TINY)
+  _floor = _tiny(combined_props['tau'])
+  safe_tau = jnp.maximum(combined_props['tau'], _floor)
+  safe_tau_ssa = jnp.maximum(combined_props['tau_ssa'], _floor)
   return {
       'optical_depth': combined_props['tau'],
       'ssa': jnp.where(

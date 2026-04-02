@@ -1087,10 +1087,11 @@ class ModelDriver:
             p_half_col = p_half.reshape(-1, cfg.grid.nlev + 1)
             q_v_col = jnp.zeros_like(T_col)  # dry physics
             T_sfc_col = T_sfc.reshape(-1)
-            # Broadcast lat from (n_lat,) to (n_lat, n_lon) then flatten
-            lat_2d = jnp.broadcast_to(
-                self._grid_lat[:, None], shape_2d
-            )
+            # Ensure lat is 2D (n_lat, n_lon) — may already be for Gaussian grids
+            if self._grid_lat.ndim == 1:
+                lat_2d = jnp.broadcast_to(self._grid_lat[:, None], shape_2d)
+            else:
+                lat_2d = self._grid_lat
             lat_col = lat_2d.reshape(-1)
 
             insol = daily_mean_insolation(lat_col, self._current_day, S_0)

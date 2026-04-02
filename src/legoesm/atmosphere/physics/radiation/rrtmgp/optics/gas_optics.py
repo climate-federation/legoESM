@@ -334,8 +334,14 @@ def _compute_minor_optical_depth(
       temperature, lookup.t_ref
   )
 
+  # Working dtype — all table lookups are cast to this to ensure consistent
+  # dtypes through jax.lax.cond and jax.lax.fori_loop (which require matching
+  # carry dtypes).  Without this, x64-mode tables (float64) mixed with float32
+  # inputs crash in minor-gas loops.
+  _wdtype = temperature.dtype
+
   if vmr_fields is not None and lookup.idx_h2o in vmr_fields:
-    dry_factor = 1.0 / (1.0 + vmr_fields[lookup.idx_h2o])
+    dry_factor = 1.0 / (1.0 + vmr_fields[lookup.idx_h2o].astype(_wdtype))
   else:
     dry_factor = 1.0
 
@@ -348,9 +354,7 @@ def _compute_minor_optical_depth(
   def scale_with_gas_fn(i):
     sgas = jnp.maximum(idx_scaling_gas[i], 0)
     sgas_idx = sgas * jnp.ones_like(tropo_idx)
-    scaling_vmr = get_vmr(lookup, vmr_lib, sgas_idx, vmr_fields)
-    # Cast to pressure dtype so lax.cond branches match downstream.
-    scaling_vmr = scaling_vmr.astype(p.dtype)
+    scaling_vmr = get_vmr(lookup, vmr_lib, sgas_idx, vmr_fields).astype(_wdtype)
     scaling = jax.lax.cond(
         scale_by_complement[i] == 1,
         lambda: (1.0 - scaling_vmr * dry_factor),
@@ -384,7 +388,7 @@ def _compute_minor_optical_depth(
     active = jnp.logical_and(i >= i0, i <= bnd_end)
     # Map the minor contributor to the RRTMGP gas index.
     gas_idx = idx_gases_minor[i] * jnp.ones_like(tropo_idx)
-    vmr_minor = get_vmr(lookup, vmr_lib, gas_idx, vmr_fields)
+    vmr_minor = get_vmr(lookup, vmr_lib, gas_idx, vmr_fields).astype(_wdtype)
     scaling = vmr_minor * molecules / _M2_TO_CM2_FACTOR
     scaling *= jax.lax.cond(
         minor_scales_with_density[i] == 1,
@@ -401,7 +405,7 @@ def _compute_minor_optical_depth(
                 ('t', lambda: temperature_interpolant),
                 ('m', mix_interpolant_fn),
             )),
-        )
+        ).astype(_wdtype)
         * scaling
     )
     return tau_minor + jnp.where(active, delta_tau, 0.0)
