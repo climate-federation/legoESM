@@ -370,8 +370,7 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
 # ==============================================================================
 
 def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
-                       div_damp=0.0, hyperdiff_coeff=0.0,
-                       use_a2b_gradient=False):
+                       div_damp=0.0, hyperdiff_coeff=0.0):
     """FV3 c_sw-style shallow water tendencies for RK3 integration.
 
     Computes the FULL Bernoulli gradient + vorticity flux at C-grid
@@ -389,11 +388,6 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     h_s : (6, n, n) surface topography
     cdgrid : CubedSphereCDGrid
     g, div_damp, hyperdiff_coeff : float
-    use_a2b_gradient : bool
-        If True, use FV3-faithful a2b_ord4 gradient (cell centres → corners
-        via 4th-order interpolation → 2-point edge differences).  This
-        avoids the halo-error amplification of the cell-centre 2-point
-        gradient.  Default False for backward compatibility.
 
     Returns
     -------
@@ -427,24 +421,10 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     ke = 0.5 * (ua * ke_u + va * ke_v)
     B = ke + g * (h + h_s)
 
-    # 4. Bernoulli gradient at C-grid face positions
-    if use_a2b_gradient:
-        # FV3-faithful: a2b_ord4 interpolation to corners → 2-point edge differences.
-        # The a2b_ord4 uses 4th-order interior stencil (no halo data needed)
-        # and boundary-consistent stencils, avoiding the halo-error
-        # amplification that causes edge artifacts.
-        from legoesm.core.operators_cdgrid import _a2b_ord4_gradient
-        dB_du, dB_dv = _a2b_ord4_gradient(B, cdgrid)
-        # Map to C-grid stagger with sign convention (negative gradient = force):
-        # dB_x at uc position (n+1, n) = -(dB_dv) since dB_dv is positive gradient
-        # dB_y at vc position (n, n+1) = -(dB_du) since dB_du is positive gradient
-        dB_x = -dB_dv    # (6, n+1, n)
-        dB_y = -dB_du     # (6, n, n+1)
-    else:
-        # Original: 2-point cell-centre gradient (larger truncation error at boundaries)
-        B_pad = _pad_halo_auto(B, cdgrid)
-        dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])
-        dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])
+    # 4. Bernoulli gradient at C-grid face positions (2-point difference)
+    B_pad = _pad_halo_auto(B, cdgrid)
+    dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])  # (6, n+1, n)
+    dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])  # (6, n, n+1)
 
     # 5. Vorticity at D-grid corners from C-grid velocities
     fx_circ = uc * cdgrid.dy_edge_x
@@ -620,150 +600,6 @@ def _d_sw(h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
 
 
 # ==============================================================================
-# d_sw with a2b_ord4 gradient (FV3-faithful, no Cartesian matrix)
-# ==============================================================================
-
-def _d_sw_a2b(h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
-              div_damp=0.0, hyperdiff_coeff=0.0):
-    """FV3-faithful d_sw with a2b_ord4 gradient and proper FB coupling.
-
-    Critical differences from the original _d_sw:
-
-    1. **Gradient**: a2b_ord4 (cell centres → corners → 2-point edge
-       differences). NO Cartesian matrix — avoids halo-error amplification.
-
-    2. **Forward-backward coupling**: Cross-velocity uses ``uc_new``/
-       ``vc_new`` from c_sw (not old D-grid winds). This implicit coupling
-       is what makes the forward-backward scheme stable: the c_sw half
-       updates the C-grid velocities, and d_sw uses those UPDATED
-       velocities for the vorticity flux cross-velocity.
-
-    3. **Direct edge-midpoint computation**: Momentum is computed directly
-       at D-grid edge positions using upwind-selected corner vorticity
-       (not averaged). u_d and v_d are at the SAME positions as uc and vc
-       respectively, so cross-velocities use the updated C-grid values
-       directly (no interpolation).
-
-    4. **Vorticity**: Same circulation integral as c_sw (uc*dy + vc*dx at
-       corners), ensuring operator consistency between the two half-steps.
-    """
-    from legoesm.core.operators_cdgrid import (
-        cgrid_mass_flux_divergence, cgrid_divergence,
-        _a2b_ord4_gradient, _laplacian_dgrid,
-        _extrapolate_boundary_corners, _pad_halo_auto,
-    )
-
-    n = cdgrid.n
-
-    # 1. Mass transport (PPM) with UPDATED C-grid velocities from c_sw
-    dh = cgrid_mass_flux_divergence(h_star, uc_new, vc_new, cdgrid)
-    total_area = jnp.sum(cdgrid.base.area)
-    dh = dh - jnp.sum(dh * cdgrid.base.area) / total_area
-    h_new = h_star + 0.5 * dt * dh
-
-    # 2. Bernoulli function from ORIGINAL D-grid velocities
-    u_cc = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
-    v_cc = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
-    KE = 0.5 * (u_cc ** 2 + v_cc ** 2)
-    B = KE + g * (h + h_s)
-
-    # 3. Bernoulli gradient via a2b_ord4 at D-grid edge midpoints
-    dB_du, dB_dv = _a2b_ord4_gradient(B, cdgrid)
-    # dB_du: (6, n, n+1) positive gradient at u_d positions
-    # dB_dv: (6, n+1, n) positive gradient at v_d positions
-
-    # 4. Vorticity at corners — use SAME formula as c_sw for consistency.
-    #    The c_sw vorticity uses uc*dy + vc*dx.  For d_sw, recompute
-    #    vorticity from the ORIGINAL uc/vc (not uc_new) so that the
-    #    vorticity is at the same time level as u_d/v_d.
-    #    We need a fresh d2a2c for the ORIGINAL velocities.
-    ua_old, va_old, uc_old, vc_old, ut_old, vt_old = _d2a2c_vect(
-        u_d, v_d, cdgrid)
-
-    fx_circ = uc_old * cdgrid.dy_edge_x    # (6, n+1, n)
-    fy_circ = vc_old * cdgrid.dx_edge_y    # (6, n, n+1)
-
-    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
-
-    circ = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
-            + fy_pad[:, 1:, :] - fy_pad[:, :-1, :])
-    circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
-    circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-    circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
-    circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
-
-    vort_abs = circ * cdgrid.rarea_c + cdgrid.f_corner  # (6, n+1, n+1)
-
-    # 5. Cross-velocity and upwind vorticity at D-grid edge positions
-    #    KEY: uses uc_NEW/vc_NEW from c_sw — the forward-backward coupling!
-    #
-    #    v_d at (I, j) and uc at (I, j) are at the SAME ξ-face position.
-    #    Cross-velocity: fy1 = (v_d_old - uc_new * cosa_u) / sina_u
-    cosa_u = cdgrid.cosa_u
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
-    fy1 = (v_d - uc_new * cosa_u) / jnp.maximum(sina_u, _EPS)
-    # At face boundaries: use v_d directly (sin_sg cancellation)
-    fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
-    fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
-    fy1 = fy1.at[:, n - 1, :].set(v_d[:, n - 1, :])
-    fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
-
-    # Upwind vorticity at v_d position from adjacent corners in j
-    vort_v = jnp.where(fy1 > 0,
-                       vort_abs[:, :, :-1],    # lower corner
-                       vort_abs[:, :, 1:])     # upper corner
-
-    #    u_d at (i, J) and vc at (i, J) are at the SAME η-face position.
-    #    Cross-velocity: fx1 = (u_d_old - vc_new * cosa_v) / sina_v
-    cosa_v = cdgrid.cosa_v
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
-    fx1 = (u_d - vc_new * cosa_v) / jnp.maximum(sina_v, _EPS)
-    fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
-    fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])
-    fx1 = fx1.at[:, :, n - 1].set(u_d[:, :, n - 1])
-    fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
-
-    # Upwind vorticity at u_d position from adjacent corners in i
-    vort_u = jnp.where(fx1 > 0,
-                       vort_abs[:, :-1, :],    # lower corner
-                       vort_abs[:, 1:, :])     # upper corner
-
-    # 6. D-grid momentum update (edge midpoints, dt/2 half-step)
-    #    FV3's d_sw uses dt2 = dt/2 for the momentum update, matching
-    #    c_sw's dt/2 scaling.  The two half-steps together give a full dt.
-    dt2 = 0.5 * dt
-    #    v_d update (FV3 u): dv = fy1*vort - dB/dj
-    v_d_new = v_d + dt2 * (fy1 * vort_v - dB_dv)
-    #    u_d update (FV3 v): du = -fx1*vort + dB/di
-    u_d_new = u_d + dt2 * (-fx1 * vort_u + dB_du)
-
-    # 7. Divergence damping
-    if div_damp > 0:
-        div_field = cgrid_divergence(uc_new, vc_new, cdgrid)
-        ddiv_du, ddiv_dv = _a2b_ord4_gradient(div_field, cdgrid)
-        u_d_new = u_d_new + dt2 * div_damp * ddiv_du
-        v_d_new = v_d_new + dt2 * div_damp * ddiv_dv
-
-    # 8. Biharmonic hyperdiffusion
-    if hyperdiff_coeff > 0:
-        u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
-        u_corner = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])
-        v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
-        v_corner = 0.5 * (v_d_pad[:, :, :-1] + v_d_pad[:, :, 1:])
-
-        du_hyp = -hyperdiff_coeff * _laplacian_dgrid(
-            _laplacian_dgrid(u_corner, cdgrid), cdgrid)
-        dv_hyp = -hyperdiff_coeff * _laplacian_dgrid(
-            _laplacian_dgrid(v_corner, cdgrid), cdgrid)
-        du_hyp, dv_hyp = _extrapolate_boundary_corners(du_hyp, dv_hyp, n)
-        u_d_new = u_d_new + dt2 * 0.5 * (du_hyp[:, :-1, :] + du_hyp[:, 1:, :])
-        v_d_new = v_d_new + dt2 * 0.5 * (dv_hyp[:, :, :-1] + dv_hyp[:, :, 1:])
-
-    return h_new, u_d_new, v_d_new
-
-
-# ==============================================================================
 # Complete forward-backward step
 # ==============================================================================
 
@@ -801,31 +637,6 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
 
     # D-grid half: PPM mass transport + D-grid velocity update
     h_new, u_d_new, v_d_new = _d_sw(
-        h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
-        div_damp=div_damp, hyperdiff_coeff=hyperdiff_coeff)
-
-    return h_new, u_d_new, v_d_new
-
-
-def fv3_forward_backward_step_a2b(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
-                                   div_damp=0.0, hyperdiff_coeff=0.0):
-    """FV3-faithful forward-backward step with a2b_ord4 gradient in d_sw.
-
-    Same as ``fv3_forward_backward_step`` but the D-grid half uses the
-    a2b_ord4 gradient path (no Cartesian matrix) to eliminate face-boundary
-    edge artifacts.
-
-    The c_sw half (C-grid) uses the standard FV3 2-point KE gradient +
-    corner vorticity.  The d_sw half (D-grid) uses a2b_ord4 B interpolation
-    to corners + 2-point edge gradient.  The forward-backward alternation
-    provides cross-step error cancellation between the two staggers.
-    """
-    # C-grid half: mass transport + C-grid velocity update
-    h_star, uc_new, vc_new, ua, va = _c_sw(
-        h, u_d, v_d, h_s, cdgrid, dt, g)
-
-    # D-grid half: a2b_ord4 gradient + PPM mass transport
-    h_new, u_d_new, v_d_new = _d_sw_a2b(
         h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
         div_damp=div_damp, hyperdiff_coeff=hyperdiff_coeff)
 
