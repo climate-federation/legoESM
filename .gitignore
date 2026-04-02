@@ -30,3 +30,5 @@ data/
 wandb/
 .claude/worktrees/serene-perlman/
 .claude/worktrees/agent-a5afdce4/
+ralph-claude-code/
+ralph/

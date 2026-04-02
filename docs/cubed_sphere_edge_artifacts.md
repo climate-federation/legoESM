@@ -497,7 +497,15 @@ Implementation: added `boundary_fix=True` parameter to `fv3_sw_tendencies` (10-l
 | TC5 5d | h range | [3841, 5926] | [3824, 5928] | nearly identical |
 | TC5 15d | stable | Yes | **Yes** | both stable |
 | TC5 15d | max wspd | — | 16.74 | physically correct |
-| All tests | 76/76 | pass | **pass** | no regressions |
+| All tests | 76/76 | pass | **pass** | no regressions (80 with new tests) |
+
+**Note on test coverage:** The automated tests in ``test_boundary_fix.py``
+are short-horizon smoke tests (100 steps at C16) that verify the code path
+does not crash and preserves basic invariants.  They do NOT reproduce the
+multi-day, C36 results in the table above.  The quantitative edge-ratio
+improvement and visual artifact elimination were validated manually at C36
+with 5-day/15-day integrations.  A future CI job should run the C36 5-day
+TC2 and TC5 validation to catch regressions.
 
 ### Visual Verification
 

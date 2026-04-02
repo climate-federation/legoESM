@@ -1,11 +1,22 @@
-"""Test that boundary_fix eliminates cubed-sphere edge artifacts.
+"""Smoke tests for the boundary_fix option in FV3EdgeShallowWaterModel.
 
-The boundary_fix option in FV3EdgeShallowWaterModel replaces the outermost
-corner ring tendencies (which suffer from A-L gradient halo-error amplification)
-with the nearest interior ring values.  This removes panel-boundary edge
-artifacts while preserving stability and mass conservation.
+These are **short-horizon, low-resolution** sanity checks (100 steps at C16)
+that verify the boundary_fix code path does not crash and preserves basic
+invariants.  They do NOT reproduce the multi-day, C36 experiments documented
+in ``docs/cubed_sphere_edge_artifacts.md`` (iteration 15), which showed:
 
-See docs/cubed_sphere_edge_artifacts.md, iteration 15, for the full analysis.
+* TC2 at C36 5-day: edge ratio 1.02 (vs baseline 0.95), L2 21% worse
+* TC5 at C36 5-day/15-day: stable with physically correct wind speeds
+* Visual elimination of panel-boundary v-wind streaks
+
+To reproduce the documented experiments, run the C36 validation manually::
+
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterModel, CDGridShallowWaterConfig)
+    config = CDGridShallowWaterConfig(
+        div_damp=..., hyperdiff_coeff=..., boundary_fix=True)
+
+See docs/cubed_sphere_edge_artifacts.md, iteration 15, for the full protocol.
 """
 
 import jax
@@ -24,7 +35,6 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
 )
 from tests.atmosphere.shallow_water.test_cases.williamson import (
     williamson_test2,
-    williamson_test2_exact,
     williamson_test5,
 )
 
@@ -44,7 +54,11 @@ def _make_edge_ic(grid, cdgrid, test_num):
 
 
 def _edge_artifact_ratio(v_north, n):
-    """Ratio of max error at face boundaries vs interior."""
+    """Ratio of max |v_north| at face boundaries vs interior.
+
+    Returns ~1.0 when errors are uniformly distributed, >1.0 when
+    boundary errors dominate (edge artifacts).
+    """
     bw = max(2, n // 8)
     bdy = np.zeros((6, n, n), dtype=bool)
     bdy[:, :bw, :] = True
@@ -59,17 +73,24 @@ def _edge_artifact_ratio(v_north, n):
 
 @pytest.fixture(scope="module")
 def grid_and_cdgrid():
-    n = 16  # Small for fast tests
+    # C16: small enough for fast CI, large enough for non-trivial halo exchange
+    n = 16
     grid = create_cubed_sphere(n)
     cdgrid = create_cubed_sphere_cdgrid(grid)
     return grid, cdgrid, n
 
 
 class TestBoundaryFix:
-    """Tests for the boundary_fix edge-artifact elimination."""
+    """Smoke tests for the boundary_fix code path.
+
+    These check that boundary_fix=True does not introduce NaN, preserves
+    mass, and does not make the edge-artifact ratio dramatically worse.
+    They are intentionally short (100 steps ≈ 8 hours of model time at
+    dt=300s) and low-resolution (C16) for CI speed.
+    """
 
     def test_tc2_stable_100_steps(self, grid_and_cdgrid):
-        """boundary_fix model is stable for 100 steps on TC2."""
+        """boundary_fix produces finite output after 100 steps on TC2."""
         grid, cdgrid, n = grid_and_cdgrid
         dx = float(grid.radius) * np.pi / (2 * n)
         dt = 300.0
@@ -87,7 +108,7 @@ class TestBoundaryFix:
         assert jnp.all(jnp.isfinite(state.u_d))
 
     def test_tc5_stable_100_steps(self, grid_and_cdgrid):
-        """boundary_fix model is stable for 100 steps on TC5."""
+        """boundary_fix produces finite output after 100 steps on TC5."""
         grid, cdgrid, n = grid_and_cdgrid
         dx = float(grid.radius) * np.pi / (2 * n)
         dt = 300.0
@@ -104,7 +125,7 @@ class TestBoundaryFix:
         assert jnp.all(jnp.isfinite(state.h))
 
     def test_mass_conservation(self, grid_and_cdgrid):
-        """boundary_fix preserves mass to machine precision."""
+        """boundary_fix preserves mass (50 steps, C16, rel err < 1e-6)."""
         grid, cdgrid, n = grid_and_cdgrid
         dx = float(grid.radius) * np.pi / (2 * n)
         dt = 300.0
@@ -122,8 +143,13 @@ class TestBoundaryFix:
         rel_err = abs(mass1 - mass0) / abs(mass0)
         assert rel_err < 1e-6
 
-    def test_edge_ratio_reduced(self, grid_and_cdgrid):
-        """boundary_fix has edge ratio closer to 1.0 than baseline."""
+    def test_edge_ratio_not_worse(self, grid_and_cdgrid):
+        """boundary_fix does not make the edge-artifact ratio worse.
+
+        This is a weak guard-rail (short horizon, low resolution). The
+        documented C36 5-day result shows edge ratio improving from 0.95
+        to 1.02; at C16 / 100 steps the effect is smaller.
+        """
         grid, cdgrid, n = grid_and_cdgrid
         dx = float(grid.radius) * np.pi / (2 * n)
         dt = 300.0
@@ -148,5 +174,8 @@ class TestBoundaryFix:
                        + np.asarray(grid.cos_angle) * v_cc)
             results[label] = _edge_artifact_ratio(v_north, n)
 
-        # boundary_fix edge ratio should be closer to 1.0
-        assert abs(results["bdy_fix"] - 1.0) < abs(results["baseline"] - 1.0) + 0.5
+        # Guard-rail: boundary_fix should not make edge ratio dramatically
+        # worse than baseline. A margin of 0.3 accounts for the fact that
+        # at C16 / 100 steps the ratio is noisy and the improvement is
+        # smaller than the documented C36 / 5-day result.
+        assert results["bdy_fix"] < results["baseline"] + 0.3
