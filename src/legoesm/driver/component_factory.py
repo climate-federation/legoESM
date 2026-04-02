@@ -308,8 +308,10 @@ def create_atmosphere_dycore(
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig,
         )
         cfg = MPASPrimitiveEquationConfig(
+            nu_del2=diff.A_h,
             nu_del4=diff.hyperdiff,
             nu_del4_ps=diff.hyperdiff,
+            K_h=diff.A_h,
             fix_mass=dc.fix_mass,
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)

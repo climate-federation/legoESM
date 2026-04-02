@@ -36,7 +36,7 @@ class SBMConfig(NamedTuple):
     RH_ref : float
         Reference relative humidity for moisture profile (default 0.7).
     CAPE_threshold : float
-        Minimum CAPE [J/kg] to trigger convection (default 0.0).
+        Minimum CAPE [J/kg] to trigger convection (default 70.0).
     T_min_convect : float
         Minimum temperature [K] for convection (default 200.0).
     smooth_trigger_sharpness : float
@@ -44,7 +44,7 @@ class SBMConfig(NamedTuple):
     """
     tau_c: float = 7200.0
     RH_ref: float = 0.7
-    CAPE_threshold: float = 0.0
+    CAPE_threshold: float = 70.0
     T_min_convect: float = 200.0
     smooth_trigger_sharpness: float = 0.01
 
