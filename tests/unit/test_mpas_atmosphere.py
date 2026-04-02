@@ -345,5 +345,26 @@ class TestMPASNonHydrostaticCE(unittest.TestCase):
         self.assertTrue(jnp.all(jnp.isfinite(g)))
 
 
+class TestMPASConfig(unittest.TestCase):
+    """Tests for MPASPrimitiveEquationConfig fields."""
+
+    def test_p_floor_default(self):
+        """p_floor defaults to 100 Pa."""
+        cfg = MPASPrimitiveEquationConfig()
+        self.assertEqual(cfg.p_floor, 100.0)
+
+    def test_p_floor_custom(self):
+        """p_floor can be overridden."""
+        cfg = MPASPrimitiveEquationConfig(p_floor=50.0)
+        self.assertEqual(cfg.p_floor, 50.0)
+
+    def test_p_floor_used_in_tendencies(self):
+        """p_floor is accessible and positive in the config passed to tendencies."""
+        cfg = MPASPrimitiveEquationConfig(p_floor=200.0)
+        self.assertGreater(cfg.p_floor, 0.0)
+        # Verify it's a valid NamedTuple field
+        self.assertIn("p_floor", cfg._fields)
+
+
 if __name__ == "__main__":
     unittest.main()

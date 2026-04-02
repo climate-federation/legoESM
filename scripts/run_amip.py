@@ -294,12 +294,10 @@ def main():
         print(f"Complete. Output: {driver.output_dir}")
 
     if args.plot and _is_root:
-        import importlib.util
-        _spec = importlib.util.spec_from_file_location(
-            "plot_amip", Path(__file__).parent / "plot_amip.py")
-        _mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        _mod.plot_amip(driver.output_dir, show=False)
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent))
+        from plot_amip import plot_amip as _plot_amip
+        _plot_amip(driver.output_dir, show=False)
 
 
 if __name__ == "__main__":

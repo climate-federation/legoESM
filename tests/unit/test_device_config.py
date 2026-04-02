@@ -24,7 +24,8 @@ from legoesm.parallel.device_config import (
     _recommended_batch_size,
     _set_xla_flags,
     _TPU_XLA_FLAGS,
-    _GPU_XLA_FLAGS,
+    _NVIDIA_GPU_XLA_FLAGS,
+    _AMD_GPU_XLA_FLAGS,
 )
 
 
@@ -162,6 +163,24 @@ class TestMemoryEstimation:
         """CPU reports 64 GB."""
         mem = _estimate_device_memory("cpu", [])
         assert mem == 64.0
+
+    def test_gpu_mi250x_memory(self):
+        """AMD MI250X should report 128 GB."""
+        devices = [MagicMock(device_kind="AMD Instinct MI250X OAM")]
+        mem = _estimate_device_memory("gpu", devices)
+        assert mem == 128.0
+
+    def test_gpu_mi300x_memory(self):
+        """AMD MI300X should report 192 GB."""
+        devices = [MagicMock(device_kind="AMD Instinct MI300X")]
+        mem = _estimate_device_memory("gpu", devices)
+        assert mem == 192.0
+
+    def test_gpu_mi300a_memory(self):
+        """AMD MI300A should report 128 GB."""
+        devices = [MagicMock(device_kind="AMD Instinct MI300A")]
+        mem = _estimate_device_memory("gpu", devices)
+        assert mem == 128.0
 
     def test_metal_memory(self):
         """Metal reports 8 GB."""
@@ -489,3 +508,41 @@ class TestReExports:
     def test_get_optimal_mesh_importable(self):
         from legoesm.parallel import get_optimal_mesh
         assert callable(get_optimal_mesh)
+
+
+# ============================================================================
+# GPU vendor detection
+# ============================================================================
+
+class TestGPUVendorDetection:
+    """Tests for GPU vendor detection in backend.py."""
+
+    def test_nvidia_detected_from_device_kind(self):
+        """NVIDIA GPU detected from device_kind string."""
+        from legoesm.runtime.backend import _is_nvidia_gpu, _is_amd_gpu, gpu_vendor
+        with patch("jax.devices",
+                   return_value=[MagicMock(device_kind="NVIDIA A100-SXM4-40GB")]):
+            assert _is_nvidia_gpu()
+            assert not _is_amd_gpu()
+            assert gpu_vendor() == "nvidia"
+
+    def test_amd_detected_from_device_kind(self):
+        """AMD GPU detected from device_kind string."""
+        from legoesm.runtime.backend import _is_nvidia_gpu, _is_amd_gpu, gpu_vendor
+        with patch("jax.devices",
+                   return_value=[MagicMock(device_kind="AMD Instinct MI250X OAM")]):
+            assert not _is_nvidia_gpu()
+            assert _is_amd_gpu()
+            assert gpu_vendor() == "amd"
+
+    def test_unknown_vendor_on_cpu(self):
+        """CPU backend returns 'unknown' vendor."""
+        from legoesm.runtime.backend import gpu_vendor
+        with patch("jax.devices",
+                   return_value=[MagicMock(device_kind="cpu")]):
+            assert gpu_vendor() == "unknown"
+
+    def test_xla_flags_nvidia_only(self):
+        """NVIDIA XLA flags contain cuDNN; AMD flags do not."""
+        assert "xla_gpu_cudnn_gemm_fusion_level" in _NVIDIA_GPU_XLA_FLAGS
+        assert "xla_gpu_cudnn_gemm_fusion_level" not in _AMD_GPU_XLA_FLAGS

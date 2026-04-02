@@ -193,26 +193,16 @@ def detect_devices() -> HardwareConfig:
 
 
 # ============================================================================
-# TPU-specific XLA flags
+# XLA flags — canonical definitions live in runtime.backend;
+# re-exported here for configure_jax_for_device().
 # ============================================================================
 
-_TPU_XLA_FLAGS = {
-    # Overlap communication with computation for pipelined execution.
-    "xla_tpu_enable_async_collective_fusion": "true",
-    # Optimize all-reduce operations for data-parallel workloads.
-    "xla_tpu_enable_data_parallel_all_reduce_opt": "true",
-    # Hide cross-chip communication latency behind compute.
-    "xla_tpu_enable_latency_hiding_scheduler": "LHS_DEFAULT",
-}
-
-_NVIDIA_GPU_XLA_FLAGS = {
-    # Use cuDNN for GEMM fusion on NVIDIA GPUs.
-    "xla_gpu_cudnn_gemm_fusion_level": "3",
-}
-
-_AMD_GPU_XLA_FLAGS: dict[str, str] = {
-    # ROCm does not use cuDNN; no vendor-specific flags needed yet.
-}
+from legoesm.runtime.backend import (          # noqa: E402
+    _TPU_XLA_FLAGS,
+    _NVIDIA_GPU_XLA_FLAGS,
+    _AMD_GPU_XLA_FLAGS,
+    _set_xla_flags,
+)
 
 
 def configure_jax_for_device(config: HardwareConfig) -> None:
@@ -317,25 +307,6 @@ def _configure_cpu(config: HardwareConfig) -> None:
             })
         except Exception:
             pass  # Non-critical; XLA will use defaults.
-
-
-def _set_xla_flags(flags: dict[str, str]) -> None:
-    """Append XLA flags to the XLA_FLAGS environment variable.
-
-    Merges with any existing flags set by the user rather than
-    overwriting them.
-    """
-    existing = os.environ.get("XLA_FLAGS", "")
-    new_parts = []
-    for key, value in flags.items():
-        flag = f"--{key}={value}"
-        # Do not duplicate flags already set by the user.
-        if key not in existing:
-            new_parts.append(flag)
-
-    if new_parts:
-        combined = existing + " " + " ".join(new_parts) if existing else " ".join(new_parts)
-        os.environ["XLA_FLAGS"] = combined.strip()
 
 
 # ============================================================================

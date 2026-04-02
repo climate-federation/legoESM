@@ -55,7 +55,7 @@ class DeviceConfig(NamedTuple):
     n_devices : int
         Number of devices in use.
     backend : str
-        Backend name (``"CPU"``, ``"GPU"``, ``"TPU"``, ``"METAL"``).
+        Backend name (``"cpu"``, ``"gpu"``, ``"tpu"``, ``"metal"``).
     is_distributed : bool
         ``True`` if using multi-node MPI.
     tiling : tuple[int, int]
