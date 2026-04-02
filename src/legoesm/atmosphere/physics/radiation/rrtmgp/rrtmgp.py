@@ -620,10 +620,9 @@ class RRTMGP:
               vmr_fields[gas_name] = jnp.full_like(p_3d, vmr_value)
 
       # Exact layer thickness from interface pressures.
-      # p_half is (ncol, nlev+1) in legoESM convention (index 0 = surface).
-      # Flip to TOA-first and compute dp = p_half[k+1] - p_half[k] (positive).
-      p_half_flip = p_half[:, ::-1]  # (ncol, nlev+1), index 0 = TOA
-      dp_exact = p_half_flip[:, 1:] - p_half_flip[:, :-1]  # (ncol, nlev)
+      # p_half is (ncol, nlev+1) with index 0 = TOA (sigma=0 → p≈0).
+      # dp = p_half[k+1] - p_half[k] is positive (p increases toward surface).
+      dp_exact = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
       dp_3d = dp_exact[:, None, :]  # (ncol, 1, nlev)
       # Pad with halo values (replicate boundary layers)
       dp_3d = jnp.concatenate([

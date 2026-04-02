@@ -248,11 +248,15 @@ def compute_ocean_rho(state, z_coord, jacobian):
     -------
     array : In-situ density [kg/m^3].
     """
-    p_hydro = compute_hydrostatic_pressure(
-        jnp.full_like(state.T.data, rho_0),
-        state.eta.data, z_coord.dz_ref, jacobian, rho_0,
-    )
-    return wright_eos(state.T.data, state.S.data, p_hydro)
+    # Two EOS iterations for density-pressure consistency, matching the
+    # dynamical core (ocean_pe_cdgrid.py).
+    rho = wright_eos(state.T.data, state.S.data, jnp.zeros_like(state.T.data))
+    for _ in range(2):
+        p_hydro = compute_hydrostatic_pressure(
+            rho, state.eta.data, z_coord.dz_ref, jacobian, rho_0,
+        )
+        rho = wright_eos(state.T.data, state.S.data, p_hydro)
+    return rho
 
 
 def compute_ocean_rho_and_pressure(state, z_coord, jacobian):

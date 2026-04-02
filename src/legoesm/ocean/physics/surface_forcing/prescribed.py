@@ -45,9 +45,10 @@ def prescribed_surface_forcing(
     inv_rho_dz = 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1e-10))
 
     # Wind stress
-    if cfg.wind_profile == "cosine_latitude":
+    if cfg.wind_profile in ("cosine_latitude", "double_gyre"):
         lat = grid.lat  # (6, n, n)
-        # Cosine latitude profile: tau_x = -tau_max * cos(pi * lat / max_lat)
+        # Double-gyre wind: tau_x = -tau_max * cos(2*lat)
+        # Gives westerlies at mid-latitudes, easterlies near equator and poles.
         lat_range = jnp.pi / 2.0  # 90 degrees
         tau_x = -cfg.tau_max * jnp.cos(jnp.pi * lat / lat_range)
         tau_y = jnp.zeros_like(tau_x)

@@ -44,6 +44,10 @@ class KPPConfig(NamedTuple):
     gamma_S: float = 6.33    # Non-local transport coefficient for S
     K_conv: float = 1.0      # Convective mixing diffusivity [m^2/s]
     Ri_conv: float = 0.0     # Ri threshold for convective instability
+    K_0_shear: float = 5e-3  # LMD94 interior shear instability peak K [m^2/s]
+    Ri_0: float = 0.7        # LMD94 critical Ri for interior shear mixing
+    c_s: float = 98.96       # LMD94 parameter for V_t^2 (Appendix B)
+    c_b: float = 0.599       # LMD94 convective velocity scale parameter
 
 
 class VerticalMixingConfig(NamedTuple):

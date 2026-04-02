@@ -61,9 +61,9 @@ def plume_convection(
         rho_plume = wright_eos(T_plume, S_plume, p_hydro[..., k])
         delta_rho = rho_plume - rho[..., k]
 
-        # Plume is active where it's denser than environment (sinking)
-        # Using soft mask for differentiability
-        active = active * jax.nn.sigmoid(-delta_rho * 1e4)
+        # Plume is active where it's denser than environment (sinking):
+        # delta_rho > 0 means rho_plume > rho_env → plume sinks → stay active
+        active = active * jax.nn.sigmoid(delta_rho * 1e4)
 
         # Detrainment tendency at this level
         dT_k = cfg.alpha_plume * cfg.epsilon * (T_plume - T[..., k]) * active

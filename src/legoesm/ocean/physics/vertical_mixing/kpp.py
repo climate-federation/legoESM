@@ -52,6 +52,7 @@ def _boundary_layer_depth(
     B_f: jnp.ndarray,
     cfg: KPPConfig,
     g: float = constants.g,
+    h_bl_prev: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Estimate boundary layer depth h via bulk Richardson number.
 
@@ -73,10 +74,18 @@ def _boundary_layer_depth(
     delta_v = v - v[..., :1]
     delta_V2 = delta_u**2 + delta_v**2
 
-    # Unresolved shear: V_t^2 = Cv * sqrt(|N2|) * h (approx with z_depth)
+    # LMD94 Eq. 23: V_t^2 = Cv * sqrt(|N2|) / sqrt(c_s * epsilon) *
+    #   max(Ri_crit * h - d, 0) * d / h
+    # Uses h_bl from the previous time step to break the coupling.
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
     N2_full = jnp.concatenate([N2[..., :1], N2], axis=-1)
-    V_t2 = cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 0.0)) * z_depth
+    max_depth = z_depth[..., -1]
+    h_est = max_depth if h_bl_prev is None else h_bl_prev
+    h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
+    V_t2 = (cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 0.0))
+            / jnp.sqrt(jnp.maximum(cfg.c_s * 0.1, eps))
+            * jnp.maximum(cfg.Ri_crit * h_safe - z_depth, 0.0)
+            * z_depth / h_safe)
 
     # Bulk Richardson number
     Ri_b = (g * delta_rho * z_depth) / (
@@ -202,11 +211,32 @@ def kpp_vertical_mixing(
     )
     zeta_kpp = d / L_MO
 
-    # Unstable (B_f > 0 or zeta < 0): w_s = kappa * u_star * (1 - c_s * zeta)^p
+    # LMD94 Appendix B turbulent velocity scales:
     # Stable (B_f <= 0): w_s = kappa * u_star / (1 + 5*zeta)
+    # Unstable, weakly (epsilon*d < |L|): w_s = kappa * u_star * phi_m^{-1}
+    #   where phi_m^{-1} = (1 - 16*zeta)^{1/4}
+    # Unstable, strongly convective (epsilon*d > |L|):
+    #   w_s = (kappa * (u_star^3 + c_b * kappa * (-B_f) * d))^{1/3}
     is_unstable = B_f[..., jnp.newaxis] > 0.0
-    w_s_unstable = (cfg.kappa_vk * u_star[..., jnp.newaxis]
-                    * jnp.power(jnp.maximum(1.0 + 16.0 * jnp.abs(zeta_kpp), 1.0), 0.25))
+    epsilon_lmd = 0.1  # LMD94 surface layer fraction
+
+    # Weakly unstable: phi_m^{-1} formulation
+    w_s_weak = (cfg.kappa_vk * u_star[..., jnp.newaxis]
+                * jnp.power(jnp.maximum(1.0 + 16.0 * jnp.abs(zeta_kpp), 1.0), 0.25))
+
+    # Strongly convective: includes convective velocity scale
+    Bf_pos = jnp.maximum(B_f[..., jnp.newaxis], 0.0)
+    w_s_conv = jnp.power(
+        cfg.kappa_vk * (u_star[..., jnp.newaxis]**3
+                        + cfg.c_b * cfg.kappa_vk * Bf_pos * d),
+        1.0 / 3.0,
+    )
+
+    # Transition: use convective scale when epsilon*d > |L_MO|
+    is_strongly_convective = epsilon_lmd * d > jnp.abs(L_MO)
+    w_s_unstable = jnp.where(is_strongly_convective, w_s_conv, w_s_weak)
+
+    # Stable: standard suppression
     w_s_stable = (cfg.kappa_vk * u_star[..., jnp.newaxis]
                   / jnp.maximum(1.0 + 5.0 * jnp.maximum(zeta_kpp, 0.0), 1.0))
     w_s = jnp.where(is_unstable, w_s_unstable, w_s_stable)
@@ -223,7 +253,10 @@ def kpp_vertical_mixing(
     dv = v[..., :-1] - v[..., 1:]
     S2 = (du**2 + dv**2) / jnp.maximum(dz_half**2, eps)
     Ri_int = N2 / jnp.maximum(S2, eps)
-    K_interior = cfg.K_bg / (1.0 + 5.0 * jnp.maximum(Ri_int, 0.0)) ** 2 + cfg.K_bg
+    # LMD94 interior shear instability: K = K_0 * (1 - (Ri/Ri_0)^2)^3
+    # for Ri < Ri_0, zero above.
+    Ri_ratio = jnp.clip(Ri_int / cfg.Ri_0, 0.0, 1.0)
+    K_interior = cfg.K_0_shear * (1.0 - Ri_ratio**2) ** 3 + cfg.K_bg
 
     # Interior static instability: enhanced mixing where N2 < 0
     K_conv = jnp.where(N2 < cfg.Ri_conv, cfg.K_conv, 0.0)

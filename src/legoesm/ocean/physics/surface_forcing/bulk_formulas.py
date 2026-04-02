@@ -72,12 +72,14 @@ def bulk_formula_surface_forcing(
         # Fluxes are positive upward; stress opposes wind
         tau_x = -tau_x  # flip to positive eastward
     else:
-        # Constant coefficients (original behavior)
+        # Constant coefficients: wind is zonal-only (u_a = U_a, v_a = 0)
+        # to match the directional convention used in the MOST path.
         Q_sh = cfg.rho_a * cfg.c_pa * cfg.C_H * cfg.U_a * (T_s - cfg.T_a)
         Q_lh = cfg.rho_a * cfg.L_v * cfg.C_E * cfg.U_a * (q_sat - cfg.q_a)
 
-        tau = cfg.rho_a * cfg.C_D * cfg.U_a ** 2
-        tau_x = jnp.full_like(T_s, tau, dtype=dtype)
+        # tau = rho_a * C_D * |U_a| * (u_a, v_a)  — directional stress
+        U_a_speed = jnp.abs(cfg.U_a)
+        tau_x = jnp.full_like(T_s, cfg.rho_a * cfg.C_D * U_a_speed * cfg.U_a, dtype=dtype)
         tau_y = jnp.zeros_like(T_s)
 
     # Net heat flux (positive into ocean)
