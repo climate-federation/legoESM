@@ -259,6 +259,7 @@ def _call_radiation_backend(
             "cloud_path_ice": cloud_props.iwp,
             "cloud_r_eff_liq": cloud_props.r_eff_liq,
             "cloud_r_eff_ice": cloud_props.r_eff_ice,
+            "cloud_fraction": cloud_props.cloud_fraction,
         }
 
     # RRTMGP path: use solver directly (config is baked in).

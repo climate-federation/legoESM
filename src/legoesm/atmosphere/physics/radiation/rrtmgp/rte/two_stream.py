@@ -45,6 +45,7 @@ def _compute_local_properties_lw(
     cloud_path_liq: Array | None = None,
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
+    cloud_fraction: Array | None = None,
 ) -> dict[str, Array]:
   """Compute local optical properties for longwave radiative transfer."""
   if isinstance(sfc_temperature, float):
@@ -65,6 +66,7 @@ def _compute_local_properties_lw(
       cloud_path_liq,
       cloud_r_eff_ice,
       cloud_path_ice,
+      cloud_fraction=cloud_fraction,
   )
 
   # Compute Planck sources: `planck_src`, `planck_src_bottom`, `planck_src_top`,
@@ -131,6 +133,7 @@ def solve_lw(
     cloud_path_liq: Array | None = None,
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
+    cloud_fraction: Array | None = None,
     use_scan: bool = False,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
@@ -190,6 +193,7 @@ def solve_lw(
         cloud_path_liq,
         cloud_r_eff_ice,
         cloud_path_ice,
+        cloud_fraction=cloud_fraction,
     )
 
     # Boundary conditions.
@@ -234,6 +238,7 @@ def solve_sw(
     cloud_path_liq: Array | None = None,
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
+    cloud_fraction: Array | None = None,
     aerosol_optical_depth: Array | None = None,
     aerosol_single_scattering_albedo: float = 0.93,
     aerosol_asymmetry_factor: float = 0.70,
@@ -314,6 +319,7 @@ def solve_sw(
         cloud_path_liq,
         cloud_r_eff_ice,
         cloud_path_ice,
+        cloud_fraction=cloud_fraction,
     )
     if aerosol_optical_depth is not None:
       tau_bg = jnp.maximum(sw_optical_props['optical_depth'], 1.0e-12)

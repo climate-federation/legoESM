@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio, saturation_specific_humidity
 from legoesm.forcing.surface_utils import blend_surface_temperature
 from legoesm.driver.grid_adapters import ColumnAdapter, make_adapter
 
@@ -33,6 +33,14 @@ class PhysicsOutput(NamedTuple):
     sw_up_toa: jax.Array
     lw_up_toa: jax.Array
     sw_down_toa: jax.Array
+    du_dt: jax.Array
+    dv_dt: jax.Array
+    dq_i_dt: jax.Array
+    dq_s_dt: jax.Array
+    dq_g_dt: jax.Array
+    dN_c_dt: jax.Array
+    dN_r_dt: jax.Array
+    dN_i_dt: jax.Array
 
 
 class HeldRadiation(NamedTuple):
@@ -113,6 +121,10 @@ class PhysicsPipeline:
         micro_fn=None,
         micro_config=None,
         dynamic_albedo=False,
+        turbulence_fn=None,
+        turbulence_config=None,
+        gwd_fn=None,
+        gwd_config=None,
     ):
         self.adapter = adapter
         self.sigma_full = sigma_full
@@ -131,13 +143,19 @@ class PhysicsPipeline:
         self.micro_fn = micro_fn
         self.micro_config = micro_config
         self.dynamic_albedo = dynamic_albedo
+        self.turbulence_fn = turbulence_fn
+        self.turbulence_config = turbulence_config
+        self.gwd_fn = gwd_fn
+        self.gwd_config = gwd_config
         self._cloud_scheme = "none"  # set by build_physics_pipeline
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
                             sw_up_toa, lw_up_toa, sw_down_toa,
                             sbm_tau_c=None, sbm_RH_ref=None,
-                            C_H=None, C_E=None):
+                            C_H=None, C_E=None,
+                            q_i=None, q_s=None, q_g=None,
+                            N_c=None, N_r=None, N_i=None):
         """Convection + microphysics + BL exchange with held radiation."""
         _C_H = self.C_H if C_H is None else C_H
         _C_E = self.C_E if C_E is None else C_E
@@ -182,6 +200,12 @@ class PhysicsPipeline:
         dq_v_dt_micro = jnp.zeros(shape_3d, dtype=_sd)
         dq_c_dt = jnp.zeros(shape_3d, dtype=_sd)
         dq_r_dt = jnp.zeros(shape_3d, dtype=_sd)
+        dq_i_dt = jnp.zeros(shape_3d, dtype=_sd)
+        dq_s_dt = jnp.zeros(shape_3d, dtype=_sd)
+        dq_g_dt = jnp.zeros(shape_3d, dtype=_sd)
+        dN_c_dt = jnp.zeros(shape_3d, dtype=_sd)
+        dN_r_dt = jnp.zeros(shape_3d, dtype=_sd)
+        dN_i_dt = jnp.zeros(shape_3d, dtype=_sd)
         precip_micro = jnp.zeros(shape_2d, dtype=_sd)
 
         if self.micro_fn is not None:
@@ -191,11 +215,15 @@ class PhysicsPipeline:
             rho_col = p_full_col / (constants.R_d * T_col)
             dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
             dz_col = dp_col / (rho_col * constants.g)
+            _z = jnp.zeros_like(q_c_col)
             hydrometeors = HydrometeorState(
                 q_c=q_c_col, q_r=q_r_col,
-                q_i=jnp.zeros_like(q_c_col), q_s=jnp.zeros_like(q_c_col),
-                q_g=jnp.zeros_like(q_c_col), N_c=jnp.zeros_like(q_c_col),
-                N_r=jnp.zeros_like(q_c_col), N_i=jnp.zeros_like(q_c_col),
+                q_i=ad.flatten_3d(q_i) if q_i is not None else _z,
+                q_s=ad.flatten_3d(q_s) if q_s is not None else _z,
+                q_g=ad.flatten_3d(q_g) if q_g is not None else _z,
+                N_c=ad.flatten_3d(N_c) if N_c is not None else _z,
+                N_r=ad.flatten_3d(N_r) if N_r is not None else _z,
+                N_i=ad.flatten_3d(N_i) if N_i is not None else _z,
             )
             micro_out = self.micro_fn(
                 T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
@@ -208,6 +236,12 @@ class PhysicsPipeline:
             dq_c_dt = ad.unflatten_3d(micro_out.dq_c_dt)
             dq_r_dt = ad.unflatten_3d(micro_out.dq_r_dt)
             precip_micro = ad.unflatten_2d(micro_out.precipitation)
+            dq_i_dt = ad.unflatten_3d(micro_out.dq_i_dt)
+            dq_s_dt = ad.unflatten_3d(micro_out.dq_s_dt)
+            dq_g_dt = ad.unflatten_3d(micro_out.dq_g_dt)
+            dN_c_dt = ad.unflatten_3d(micro_out.dN_c_dt)
+            dN_r_dt = ad.unflatten_3d(micro_out.dN_r_dt)
+            dN_i_dt = ad.unflatten_3d(micro_out.dN_i_dt)
 
         # Boundary layer exchange (grid-agnostic: uses [..., -1] indexing)
         rho_low = (p_s * self.sigma_full[-1]) / (constants.R_d * T[..., -1])
@@ -215,7 +249,7 @@ class PhysicsPipeline:
         dp_low = p_s * (self.sigma_half[-1] - self.sigma_half[-2])
 
         shflx = rho_low * constants.c_pd * _C_H * wind_speed * (T_sfc - T[..., -1])
-        q_sat_sfc = saturation_mixing_ratio(T_sfc, p_s)
+        q_sat_sfc = saturation_specific_humidity(T_sfc, p_s)
         lhflx = rho_low * constants.L_v * _C_E * wind_speed * (q_sat_sfc - q_v[..., -1])
         evap_rate = lhflx / constants.L_v
 
@@ -228,6 +262,47 @@ class PhysicsPipeline:
         dq_v_dt = dq_v_dt_conv + dq_v_dt_micro
         dq_v_dt = dq_v_dt.at[..., -1].add(dq_BL)
 
+        # Momentum tendencies from turbulence and GWD
+        du_dt = jnp.zeros(shape_3d, dtype=_sd)
+        dv_dt = jnp.zeros(shape_3d, dtype=_sd)
+
+        if self.turbulence_fn is not None or self.gwd_fn is not None:
+            from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+            u_col = ad.flatten_3d(u)
+            v_col = ad.flatten_3d(v)
+            rho_col_phys = p_full_col / (constants.R_d * T_col)
+            z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col)
+
+        if self.turbulence_fn is not None:
+            T_sfc_col = ad.flatten_2d(T_sfc)
+            q_sat_sfc_col = ad.flatten_2d(
+                saturation_specific_humidity(T_sfc, p_s)
+            )
+            turb_out = self.turbulence_fn(
+                u=u_col, v=v_col, T=T_col, q_v=q_v_col,
+                p_full=p_full_col, p_half=p_half_col,
+                z_full=z_full_col, z_half=z_half_col,
+                T_sfc=T_sfc_col, q_sfc=q_sat_sfc_col,
+                rho=rho_col_phys, dt=dt, config=self.turbulence_config,
+            )
+            du_dt = du_dt + ad.unflatten_3d(turb_out.du_dt)
+            dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
+            dT_dt = dT_dt + ad.unflatten_3d(turb_out.dT_dt)
+            dq_v_dt = dq_v_dt + ad.unflatten_3d(turb_out.dq_v_dt)
+
+        if self.gwd_fn is not None:
+            lat_col = ad.flatten_2d(lat)
+            gwd_out = self.gwd_fn(
+                u=u_col, v=v_col, T=T_col,
+                p_full=p_full_col, p_half=p_half_col,
+                z_full=z_full_col, z_half=z_half_col,
+                rho=rho_col_phys, lat=lat_col,
+                dt=dt, config=self.gwd_config,
+            )
+            du_dt = du_dt + ad.unflatten_3d(gwd_out.du_dt)
+            dv_dt = dv_dt + ad.unflatten_3d(gwd_out.dv_dt)
+            dT_dt = dT_dt + ad.unflatten_3d(gwd_out.dT_dt)
+
         return PhysicsOutput(
             dT_dt=dT_dt,
             dq_v_dt=dq_v_dt,
@@ -239,6 +314,14 @@ class PhysicsPipeline:
             sw_up_toa=sw_up_toa,
             lw_up_toa=lw_up_toa,
             sw_down_toa=sw_down_toa,
+            du_dt=du_dt,
+            dv_dt=dv_dt,
+            dq_i_dt=dq_i_dt,
+            dq_s_dt=dq_s_dt,
+            dq_g_dt=dq_g_dt,
+            dN_c_dt=dN_c_dt,
+            dN_r_dt=dN_r_dt,
+            dN_i_dt=dN_i_dt,
         )
 
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,
@@ -301,6 +384,7 @@ class PhysicsPipeline:
                 "cloud_path_ice": cloud_props.iwp,
                 "cloud_r_eff_liq": cloud_props.r_eff_liq,
                 "cloud_r_eff_ice": cloud_props.r_eff_ice,
+                "cloud_fraction": cloud_props.cloud_fraction,
             }
 
         rad_out = self.radiation_fn(
@@ -528,7 +612,8 @@ def _build_rrtmgp_radiation_fn(config):
                      tau_equator=None, tau_pole=None,
                      ghg_vmr_override=None,
                      cloud_path_liq=None, cloud_path_ice=None,
-                     cloud_r_eff_liq=None, cloud_r_eff_ice=None):
+                     cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_fraction=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
         _sw_scale = None
         if diurnal:
@@ -561,6 +646,7 @@ def _build_rrtmgp_radiation_fn(config):
             cloud_path_ice=cloud_path_ice,
             cloud_r_eff_liq=cloud_r_eff_liq,
             cloud_r_eff_ice=cloud_r_eff_ice,
+            cloud_fraction=cloud_fraction,
         )
 
         # Rescale SW fluxes/heating to daily-mean when using daytime-effective SZA
@@ -596,21 +682,17 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 def _resolve_convection(config):
     """Resolve convection kernel and config from ExperimentConfig.
 
-    Returns (kernel_fn, kernel_config).  Currently defaults to SBM
-    matching the original pipeline behaviour; the registry makes it
-    trivial to add new convection backends.
+    Returns (kernel_fn, kernel_config).  Stateful schemes (mass_flux,
+    edmf) are wrapped in a closure that manages the prognostic state
+    internally, presenting the same stateless signature as SBM/Kuo/DCA.
     """
     from legoesm.atmosphere.physics.convection.config import SBMConfig
     from legoesm.driver.kernel_registry import (
         CONVECTION_REGISTRY, resolve_kernel,
     )
 
-    # The original pipeline always used SBM.  With a registry we can
-    # support any convection scheme; for now we default to SBM to
-    # preserve exact numerical behaviour.
     scheme = config.convection
     if scheme == "none":
-        # Provide a no-op convection that returns zeros
         return _noop_convection, None
 
     conv_fn = resolve_kernel(CONVECTION_REGISTRY, scheme)
@@ -619,10 +701,45 @@ def _resolve_convection(config):
     if scheme == "sbm":
         conv_config = SBMConfig(tau_c=config.sbm_tau_c, RH_ref=config.sbm_RH_ref)
     else:
-        # For other schemes, use ConvectionConfig's sub-config attribute
         from legoesm.atmosphere.physics.convection.config import ConvectionConfig
         cc = ConvectionConfig(scheme=scheme)
         conv_config = getattr(cc, scheme)
+
+    # Wrap stateful convection schemes (mass_flux, edmf) in a closure
+    # that manages the prognostic variable internally.
+    if scheme == "mass_flux":
+        from legoesm.atmosphere.physics.convection.config import MassFluxConfig
+        _state = {"M_c": None}
+
+        def _wrapped(T, q_v, p_full, p_half, dt, config):
+            ncol = T.shape[0]
+            if _state["M_c"] is None:
+                _state["M_c"] = jnp.full((ncol,), config.M_c_init, dtype=T.dtype)
+            conv_out, M_c_new = conv_fn(
+                T=T, q_v=q_v, p_full=p_full, p_half=p_half,
+                M_c=_state["M_c"], dt=dt, config=config,
+            )
+            _state["M_c"] = M_c_new
+            return conv_out
+
+        return _wrapped, conv_config
+
+    if scheme == "edmf":
+        from legoesm.atmosphere.physics.convection.config import EDMFConfig
+        _state = {"a_u": None}
+
+        def _wrapped(T, q_v, p_full, p_half, dt, config):
+            ncol = T.shape[0]
+            if _state["a_u"] is None:
+                _state["a_u"] = jnp.full((ncol,), config.a_u_init, dtype=T.dtype)
+            conv_out, a_u_new = conv_fn(
+                T=T, q_v=q_v, p_full=p_full, p_half=p_half,
+                a_u=_state["a_u"], dt=dt, config=config,
+            )
+            _state["a_u"] = a_u_new
+            return conv_out
+
+        return _wrapped, conv_config
 
     return conv_fn, conv_config
 
@@ -664,6 +781,52 @@ def _resolve_microphysics(config):
 
 
 # ---------------------------------------------------------------------------
+# Turbulence resolver
+# ---------------------------------------------------------------------------
+
+def _resolve_turbulence(config):
+    """Resolve turbulence kernel and config from ExperimentConfig.
+
+    Returns (kernel_fn, kernel_config) or (None, None) if disabled.
+    """
+    scheme = getattr(config, 'turbulence', 'none')
+    if scheme == "none":
+        return None, None
+
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.atmosphere.physics.turbulence.integration import _get_turbulence_fn
+
+    tc = TurbulenceConfig(scheme=scheme)
+    _name, turb_fn, turb_config = _get_turbulence_fn(tc)
+    return turb_fn, turb_config
+
+
+# ---------------------------------------------------------------------------
+# Gravity wave drag resolver
+# ---------------------------------------------------------------------------
+
+def _resolve_gwd(config):
+    """Resolve gravity wave drag kernel and config from ExperimentConfig.
+
+    Returns (kernel_fn, kernel_config) or (None, None) if disabled.
+    """
+    scheme = getattr(config, 'gravity_wave_drag', 'none')
+    if scheme == "none":
+        return None, None
+
+    from legoesm.atmosphere.physics.gravity_wave_drag.config import (
+        GravityWaveDragConfig,
+    )
+    from legoesm.atmosphere.physics.gravity_wave_drag.integration import (
+        _get_gwd_fn,
+    )
+
+    gc = GravityWaveDragConfig(scheme=scheme)
+    _name, gwd_fn, gwd_config = _get_gwd_fn(gc)
+    return gwd_fn, gwd_config
+
+
+# ---------------------------------------------------------------------------
 # Top-level builder
 # ---------------------------------------------------------------------------
 
@@ -701,6 +864,12 @@ def build_physics_pipeline(grid, sigma, config):
     # Resolve microphysics via registry
     micro_fn, micro_config = _resolve_microphysics(config)
 
+    # Resolve turbulence
+    turb_fn, turb_config = _resolve_turbulence(config)
+
+    # Resolve gravity wave drag
+    gwd_fn, gwd_config = _resolve_gwd(config)
+
     pipeline = PhysicsPipeline(
         adapter=adapter,
         sigma_full=sigma.sigma_full,
@@ -719,6 +888,10 @@ def build_physics_pipeline(grid, sigma, config):
         micro_fn=micro_fn,
         micro_config=micro_config,
         dynamic_albedo=config.dynamic_albedo,
+        turbulence_fn=turb_fn,
+        turbulence_config=turb_config,
+        gwd_fn=gwd_fn,
+        gwd_config=gwd_config,
     )
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
     return pipeline

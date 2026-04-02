@@ -20,7 +20,9 @@ from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import day_to_calendar
 
 from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic
-from legoesm.core.tracers import TracerRegistry, make_moisture_registry, init_tracers
+from legoesm.core.tracers import (
+    TracerRegistry, make_moisture_registry, make_full_moisture_registry, init_tracers,
+)
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import build_physics_pipeline
 from legoesm.driver.diagnostics import DiagnosticCollector
@@ -52,7 +54,12 @@ class ModelDriver:
         self.physics = None
         self.state = None
         self.tracers: dict[str, jax.Array] = {}
-        self.tracer_registry: TracerRegistry = make_moisture_registry()
+        # Use full moisture registry for mixed-phase/two-moment microphysics
+        _ice_schemes = {"morrison", "thompson", "seifert_beheng"}
+        if config.microphysics in _ice_schemes:
+            self.tracer_registry: TracerRegistry = make_full_moisture_registry()
+        else:
+            self.tracer_registry: TracerRegistry = make_moisture_registry()
         self.get_sst_sic = None
         self.diagnostics = None
         self._phis_data = None
@@ -111,6 +118,30 @@ class ModelDriver:
     @q_r.setter
     def q_r(self, value):
         self.tracers["q_r"] = value
+
+    @property
+    def q_i(self) -> jax.Array | None:
+        return self.tracers.get("q_i")
+
+    @q_i.setter
+    def q_i(self, value):
+        self.tracers["q_i"] = value
+
+    @property
+    def q_s(self) -> jax.Array | None:
+        return self.tracers.get("q_s")
+
+    @q_s.setter
+    def q_s(self, value):
+        self.tracers["q_s"] = value
+
+    @property
+    def q_g(self) -> jax.Array | None:
+        return self.tracers.get("q_g")
+
+    @q_g.setter
+    def q_g(self, value):
+        self.tracers["q_g"] = value
 
     def setup(self) -> None:
         """Initialize grid, dycore, physics, forcing, and state."""
@@ -1715,6 +1746,11 @@ class ModelDriver:
             new_T = new_T + constants.L_v * excess / constants.c_pd
 
         self.state = self.state._replace(T=self.state.T.replace(data=new_T))
+        if hasattr(phys_out, 'du_dt') and phys_out.du_dt is not None:
+            self.state = self.state._replace(
+                u=self.state.u.replace(data=self.state.u.data + DT * phys_out.du_dt),
+                v=self.state.v.replace(data=self.state.v.data + DT * phys_out.dv_dt),
+            )
         self.q_v = jnp.maximum(
             self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff), 0.0
         )
@@ -1787,6 +1823,21 @@ class ModelDriver:
             self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
             self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
 
+            # Apply ice/number tracer tendencies when full registry is active
+            if self.tracer_registry.has("q_i"):
+                self.q_i = jnp.maximum(self.q_i + DT * phys_out.dq_i_dt, 0.0)
+                self.q_s = jnp.maximum(self.q_s + DT * phys_out.dq_s_dt, 0.0)
+                self.q_g = jnp.maximum(self.q_g + DT * phys_out.dq_g_dt, 0.0)
+                self.tracers["N_c"] = jnp.maximum(
+                    self.tracers["N_c"] + DT * phys_out.dN_c_dt, 0.0
+                )
+                self.tracers["N_r"] = jnp.maximum(
+                    self.tracers["N_r"] + DT * phys_out.dN_r_dt, 0.0
+                )
+                self.tracers["N_i"] = jnp.maximum(
+                    self.tracers["N_i"] + DT * phys_out.dN_i_dt, 0.0
+                )
+
             # Saturation adjustment
             if MICROPHYSICS == "none":
                 p_full = self.state.p_s.data[..., None] * sigma_full
@@ -1803,6 +1854,15 @@ class ModelDriver:
             self.state = self.state._replace(
                 T=self.state.T.replace(data=new_T)
             )
+
+            # Apply momentum tendencies from turbulence/GWD
+            if hasattr(phys_out, 'du_dt') and phys_out.du_dt is not None:
+                new_u = self.state.u.data + DT * phys_out.du_dt
+                new_v = self.state.v.data + DT * phys_out.dv_dt
+                self.state = self.state._replace(
+                    u=self.state.u.replace(data=new_u),
+                    v=self.state.v.replace(data=new_v),
+                )
 
             # Moisture conservation fixer
             if FIX_MOISTURE:

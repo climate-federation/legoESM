@@ -49,7 +49,7 @@ def _adjust_one_iteration(
     T : jax.Array
         Temperature [K], shape (ncol, nlev).
     q_v : jax.Array
-        Water vapor mixing ratio [kg/kg], shape (ncol, nlev).
+        Water vapor specific humidity [kg/kg], shape (ncol, nlev).
     p_full : jax.Array
         Pressure at full levels [Pa], shape (ncol, nlev).
     dp : jax.Array
@@ -186,7 +186,7 @@ def dca_convection(
     T : jax.Array
         Temperature at full levels [K], shape (ncol, nlev).
     q_v : jax.Array
-        Water vapor mixing ratio [kg/kg], shape (ncol, nlev).
+        Water vapor specific humidity [kg/kg], shape (ncol, nlev).
     p_full : jax.Array
         Pressure at full levels [Pa], shape (ncol, nlev).
     p_half : jax.Array

@@ -328,8 +328,14 @@ class RRTMOptics(optics_base.OpticsScheme):
       cloud_path_liq: Array | None = None,
       radius_eff_ice: Array | None = None,
       cloud_path_ice: Array | None = None,
+      cloud_fraction: Array | None = None,
   ) -> dict[str, Array]:
-    """Combine the gas optical properties with the cloud optical properties."""
+    """Combine the gas optical properties with the cloud optical properties.
+
+    When ``cloud_fraction`` is provided, cloud optical depths are scaled
+    by the fractional cloud cover so that partially-cloudy grid cells
+    have proportionally reduced cloud radiative effect.
+    """
     gas_lookup = self.gas_optics_lw if is_lw else self.gas_optics_sw
     assert gas_lookup is not None  # Type narrowing.
 
@@ -350,6 +356,14 @@ class RRTMOptics(optics_base.OpticsScheme):
         radius_eff_liq, cloud_path_liq, radius_eff_ice, cloud_path_ice
     )
 
+    # Scale cloud optical depth by cloud fraction for partial coverage
+    if cloud_fraction is not None:
+      cloud_optical_props = {
+          'optical_depth': cloud_optical_props['optical_depth'] * cloud_fraction,
+          'ssa': cloud_optical_props['ssa'],
+          'asymmetry_factor': cloud_optical_props['asymmetry_factor'],
+      }
+
     if not is_lw:
       cloud_optical_props = self._apply_delta_scaling_for_cloud(
           cloud_optical_props
@@ -368,6 +382,7 @@ class RRTMOptics(optics_base.OpticsScheme):
       cloud_path_liq: Array | None = None,
       cloud_r_eff_ice: Array | None = None,
       cloud_path_ice: Array | None = None,
+      cloud_fraction: Array | None = None,
   ) -> dict[str, Array]:
     """Compute the monochromatic longwave optical properties.
 
@@ -390,6 +405,8 @@ class RRTMOptics(optics_base.OpticsScheme):
       cloud_r_eff_ice: The effective radius of cloud ice particles [m].
       cloud_path_ice: The cloud ice water path in each atmospheric grid cell
         [kg/m²].
+      cloud_fraction: Cloud fraction per layer [0, 1] for partial-coverage
+        scaling of cloud optical depth.
 
     Returns:
       A dictionary containing (for a single g-point):
@@ -416,6 +433,7 @@ class RRTMOptics(optics_base.OpticsScheme):
           cloud_path_liq=cloud_path_liq,
           radius_eff_ice=cloud_r_eff_ice,
           cloud_path_ice=cloud_path_ice,
+          cloud_fraction=cloud_fraction,
       )
     return optical_props
 
@@ -431,6 +449,7 @@ class RRTMOptics(optics_base.OpticsScheme):
       cloud_path_liq: Array | None = None,
       cloud_r_eff_ice: Array | None = None,
       cloud_path_ice: Array | None = None,
+      cloud_fraction: Array | None = None,
   ) -> dict[str, Array]:
     """Compute the monochromatic shortwave optical properties.
 
@@ -453,6 +472,8 @@ class RRTMOptics(optics_base.OpticsScheme):
       cloud_r_eff_ice: The effective radius of cloud ice particles [m].
       cloud_path_ice: The cloud ice water path in each atmospheric grid cell
         [kg/m²].
+      cloud_fraction: Cloud fraction per layer [0, 1] for partial-coverage
+        scaling of cloud optical depth.
 
     Returns:
       A dictionary containing (for a single g-point):
@@ -490,6 +511,7 @@ class RRTMOptics(optics_base.OpticsScheme):
           cloud_path_liq=cloud_path_liq,
           radius_eff_ice=cloud_r_eff_ice,
           cloud_path_ice=cloud_path_ice,
+          cloud_fraction=cloud_fraction,
       )
     return gas_optical_props
 

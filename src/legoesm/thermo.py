@@ -96,3 +96,31 @@ def saturation_mixing_ratio_ice(
     denom = jax.nn.softplus(p - e_sat_i - 1.0) + 1.0
     q_sat_i = constants.epsilon * e_sat_i / denom
     return 1.0 - jax.nn.softplus(20.0 * (1.0 - q_sat_i)) / 20.0
+
+
+def saturation_specific_humidity(
+    T: jax.Array,
+    p: jax.Array,
+) -> jax.Array:
+    """Compute saturation specific humidity from saturation mixing ratio.
+
+    q = w_sat / (1 + w_sat)
+
+    where w_sat = epsilon * e_sat / (p - e_sat) is the saturation mixing
+    ratio.  Use this function when working with specific humidity fields
+    (q = m_v / (m_v + m_d)) rather than mixing ratio (w = m_v / m_d).
+
+    Parameters
+    ----------
+    T : jax.Array
+        Temperature [K].
+    p : jax.Array
+        Pressure [Pa].
+
+    Returns
+    -------
+    jax.Array
+        Saturation specific humidity [kg/kg].
+    """
+    w_sat = saturation_mixing_ratio(T, p)
+    return w_sat / (1.0 + w_sat)

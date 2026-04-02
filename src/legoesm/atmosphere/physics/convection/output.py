@@ -23,7 +23,7 @@ class ConvectionOutput(NamedTuple):
     dT_dt : jax.Array
         Temperature tendency [K/s], shape (ncol, nlev).
     dq_v_dt : jax.Array
-        Water vapor mixing ratio tendency [kg/kg/s], shape (ncol, nlev).
+        Water vapor specific humidity tendency [kg/kg/s], shape (ncol, nlev).
     precipitation : jax.Array
         Surface precipitation rate [kg/m^2/s], shape (ncol,).
     cape : jax.Array

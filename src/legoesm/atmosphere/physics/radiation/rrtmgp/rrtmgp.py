@@ -521,6 +521,7 @@ class RRTMGP:
       cloud_path_ice: jnp.ndarray | None = None,
       cloud_r_eff_liq: jnp.ndarray | None = None,
       cloud_r_eff_ice: jnp.ndarray | None = None,
+      cloud_fraction: jnp.ndarray | None = None,
       aerosol_optical_depth: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
@@ -683,8 +684,12 @@ class RRTMGP:
           cpi_3d = _add_halos(jnp.clip(_cpi, 0.0, None)[:, None, ::-1])
           crl_3d = _add_halos(jnp.clip(_crl, 1.0e-6, None)[:, None, ::-1])
           cri_3d = _add_halos(jnp.clip(_cri, 1.0e-6, None)[:, None, ::-1])
+          if cloud_fraction is not None:
+              cf_3d = _add_halos(jnp.clip(cloud_fraction, 0.0, 1.0)[:, None, ::-1])
+          else:
+              cf_3d = None
       else:
-          cpl_3d = cpi_3d = crl_3d = cri_3d = None
+          cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
 
       # Optional aerosol optical depth
       if aerosol_optical_depth is not None:
@@ -720,6 +725,7 @@ class RRTMGP:
           cloud_path_liq=cpl_3d,
           cloud_r_eff_ice=cri_3d,
           cloud_path_ice=cpi_3d,
+          cloud_fraction=cf_3d,
           use_scan=config.use_scan,
       )
 
@@ -735,6 +741,7 @@ class RRTMGP:
           cloud_path_liq=cpl_3d,
           cloud_r_eff_ice=cri_3d,
           cloud_path_ice=cpi_3d,
+          cloud_fraction=cf_3d,
           aerosol_optical_depth=aerosol_od_3d,
           aerosol_single_scattering_albedo=config.aerosol_ssa,
           aerosol_asymmetry_factor=config.aerosol_g,

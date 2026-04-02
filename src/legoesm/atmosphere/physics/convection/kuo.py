@@ -54,7 +54,7 @@ def kuo_convection(
     T : jax.Array
         Temperature at full levels [K], shape (ncol, nlev).
     q_v : jax.Array
-        Water vapor mixing ratio [kg/kg], shape (ncol, nlev).
+        Water vapor specific humidity [kg/kg], shape (ncol, nlev).
     p_full : jax.Array
         Pressure at full levels [Pa], shape (ncol, nlev).
     p_half : jax.Array
@@ -96,20 +96,46 @@ def kuo_convection(
         / config.tau_relax
     )  # (ncol, nlev)
 
-    # 6. Moistening tendency: relax toward saturation
-    q_sat_moist = saturation_mixing_ratio(T_moist, p_full)
-    dq_v_dt = (
-        trigger[:, None]
-        * (1.0 - config.alpha_heat)
-        * (q_sat_moist - q_v)
-        / config.tau_relax
-    )  # (ncol, nlev)
+    # 6. Moistening tendency (budget-consistent with heating)
+    #
+    # Water conservation requires:
+    #   column_integral(dq_v_dt * dp/g) + precipitation = 0
+    #
+    # The column moisture excess MC is the only moisture source.
+    # Fraction alpha_heat goes to condensational heating (→ precipitation).
+    # Fraction (1 - alpha_heat) goes to moistening the column.
+    #
+    # We distribute the moistening budget proportional to the local
+    # subsaturation deficit, then normalize so the column integral
+    # exactly equals (1 - alpha_heat) * MC / tau_relax.
 
-    # 7. Precipitation from implied condensation (latent heat budget closure)
-    # P = ∫ (dT/dt * c_pd / L_v) dp/g — ensures energy-moisture consistency
+    # Implied condensation rate from heating (moisture sink)
     implied_condensation = dT_dt * constants.c_pd / constants.L_v  # (ncol, nlev)
+
+    # Subsaturation deficit profile for distributing moistening
+    deficit = jnp.maximum(q_sat - q_v, 0.0)  # (ncol, nlev)
+    deficit_integral = jnp.sum(deficit * dp, axis=1, keepdims=True) / constants.g  # (ncol, 1)
+    deficit_integral_safe = jnp.maximum(deficit_integral, 1e-20)
+
+    # Moistening budget: (1 - alpha_heat) * MC / tau_relax [kg/m^2/s]
+    moistening_budget = (
+        trigger * (1.0 - config.alpha_heat) * MC / config.tau_relax
+    )  # (ncol,)
+
+    # Distribute moistening proportional to deficit, normalized to budget
+    dq_v_dt = (
+        moistening_budget[:, None]
+        * (deficit / deficit_integral_safe)
+        * constants.g / dp
+    )  # (ncol, nlev) [kg/kg/s]
+
+    # Subtract condensation implied by heating
+    dq_v_dt = dq_v_dt - implied_condensation
+
+    # 7. Precipitation = net column moisture removal (water-conservative)
+    # P = -∫ dq_v_dt dp/g = condensation_integral - moistening_budget
     precipitation = jnp.clip(
-        jnp.sum(implied_condensation * dp, axis=1) / constants.g,
+        -jnp.sum(dq_v_dt * dp, axis=1) / constants.g,
         0.0,
         None,
     )  # (ncol,)
