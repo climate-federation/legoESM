@@ -512,7 +512,7 @@ def _pad_halo_local_4d(
         values = data[src_f, src_i, src_j]  # (24*n, nlev)
         padded = padded.at[dst_f, dst_i, dst_j].set(values)
     else:
-        # Interpolated exchange: two gathers + lerp + scatter
+        # 3-point quadratic Lagrange (same upgrade as 2D path)
         flat_offsets = interp_offsets.reshape(-1)
         n_int = int(n)
         strip_base = jnp.repeat(jnp.arange(24) * n_int, n_int)
@@ -520,19 +520,24 @@ def _pad_halo_local_4d(
 
         frac = j_local + flat_offsets
         frac = jnp.clip(frac, 0.0, n_int - 1.0)
-        lo = jnp.floor(frac).astype(jnp.int32)
-        lo = jnp.clip(lo, 0, n_int - 2)
-        hi = lo + 1
-        w = jnp.clip(frac - lo.astype(frac.dtype), 0.0, 1.0)
+
+        jc = jnp.clip(jnp.round(frac).astype(jnp.int32), 1, n_int - 2)
+        f = frac - jc.astype(frac.dtype)
+        c_m1 = 0.5 * f * (f - 1.0)
+        c_0 = 1.0 - f * f
+        c_p1 = 0.5 * f * (f + 1.0)
 
         _sf = jnp.asarray(src_f)
         _si = jnp.asarray(src_i)
         _sj = jnp.asarray(src_j)
-        lo_global = strip_base + lo
-        hi_global = strip_base + hi
-        vals_lo = data[_sf[lo_global], _si[lo_global], _sj[lo_global]]  # (24*n, nlev)
-        vals_hi = data[_sf[hi_global], _si[hi_global], _sj[hi_global]]
-        values = ((1.0 - w[:, None]) * vals_lo + w[:, None] * vals_hi).astype(data.dtype)
+        idx_m1 = strip_base + jnp.clip(jc - 1, 0, n_int - 1)
+        idx_0 = strip_base + jc
+        idx_p1 = strip_base + jnp.clip(jc + 1, 0, n_int - 1)
+        vals_m1 = data[_sf[idx_m1], _si[idx_m1], _sj[idx_m1]]  # (24*n, nlev)
+        vals_0 = data[_sf[idx_0], _si[idx_0], _sj[idx_0]]
+        vals_p1 = data[_sf[idx_p1], _si[idx_p1], _sj[idx_p1]]
+        values = (c_m1[:, None] * vals_m1 + c_0[:, None] * vals_0
+                  + c_p1[:, None] * vals_p1).astype(data.dtype)
         padded = padded.at[dst_f, dst_i, dst_j].set(values)
 
     padded = _fill_corners_h1(padded)
@@ -656,8 +661,11 @@ def _pad_halo_local(
         values = data[src_f, src_i, src_j]
         padded = padded.at[dst_f, dst_i, dst_j].set(values)
     else:
-        # Interpolated exchange: two gathers + lerp + scatter
-        # Offsets (6, 4, n) → (24*n,) matching strip order
+        # Interpolated exchange: 3-point quadratic Lagrange interpolation.
+        # Reduces halo interpolation error from O(dx^2) to O(dx^3),
+        # which lowers the gradient error at face boundaries from O(dx)
+        # to O(dx^2) — matching interior accuracy and eliminating edge
+        # artifacts in the Arakawa-Lamb gradient.
         flat_offsets = interp_offsets.reshape(-1)
         n_int = int(n)
         strip_base = jnp.repeat(jnp.arange(24) * n_int, n_int)  # (24*n,)
@@ -665,22 +673,27 @@ def _pad_halo_local(
 
         frac = j_local + flat_offsets
         frac = jnp.clip(frac, 0.0, n_int - 1.0)
-        lo = jnp.floor(frac).astype(jnp.int32)
-        lo = jnp.clip(lo, 0, n_int - 2)
-        hi = lo + 1
-        w = jnp.clip(frac - lo.astype(frac.dtype), 0.0, 1.0)
 
-        # Map strip-local lo/hi to data indices.  lo/hi are traced
-        # (depend on interp_offsets), so convert source tables to JAX
-        # arrays to allow traced-index gather.
+        # 3-point Lagrange stencil centered at jc = round(frac)
+        jc = jnp.clip(jnp.round(frac).astype(jnp.int32), 1, n_int - 2)
+        f = frac - jc.astype(frac.dtype)  # fractional distance from center
+        # Lagrange basis polynomials for nodes {jc-1, jc, jc+1}:
+        c_m1 = 0.5 * f * (f - 1.0)
+        c_0 = 1.0 - f * f
+        c_p1 = 0.5 * f * (f + 1.0)
+
+        # Map strip-local indices to global data indices.
         _sf = jnp.asarray(src_f)
         _si = jnp.asarray(src_i)
         _sj = jnp.asarray(src_j)
-        lo_global = strip_base + lo
-        hi_global = strip_base + hi
-        vals_lo = data[_sf[lo_global], _si[lo_global], _sj[lo_global]]
-        vals_hi = data[_sf[hi_global], _si[hi_global], _sj[hi_global]]
-        values = ((1.0 - w) * vals_lo + w * vals_hi).astype(data.dtype)
+        idx_m1 = strip_base + jnp.clip(jc - 1, 0, n_int - 1)
+        idx_0 = strip_base + jc
+        idx_p1 = strip_base + jnp.clip(jc + 1, 0, n_int - 1)
+        vals_m1 = data[_sf[idx_m1], _si[idx_m1], _sj[idx_m1]]
+        vals_0 = data[_sf[idx_0], _si[idx_0], _sj[idx_0]]
+        vals_p1 = data[_sf[idx_p1], _si[idx_p1], _sj[idx_p1]]
+        values = (c_m1 * vals_m1 + c_0 * vals_0 + c_p1 * vals_p1).astype(
+            data.dtype)
         padded = padded.at[dst_f, dst_i, dst_j].set(values)
 
     # Fill corner cells (vectorized)

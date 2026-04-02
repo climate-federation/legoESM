@@ -13,6 +13,7 @@
     ]
   },
   "enabledPlugins": {
-    "codex@openai-codex": true
+    "codex@openai-codex": true,
+    "ralph-loop@claude-plugins-official": true
   }
 }

@@ -194,8 +194,6 @@ _TPU_XLA_FLAGS = {
 }
 
 _GPU_XLA_FLAGS = {
-    # Enable NCCL-based async collectives on multi-GPU.
-    "xla_gpu_enable_async_collectives": "true",
     # Use cuDNN for convolutions when available.
     "xla_gpu_cudnn_gemm_fusion_level": "3",
 }

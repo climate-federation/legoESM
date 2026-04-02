@@ -99,7 +99,6 @@ _TPU_XLA_FLAGS = {
 }
 
 _GPU_XLA_FLAGS = {
-    "xla_gpu_enable_async_collectives": "true",
     "xla_gpu_cudnn_gemm_fusion_level": "3",
 }
 

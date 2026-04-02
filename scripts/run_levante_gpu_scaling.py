@@ -63,7 +63,6 @@ def _configure_jax(precision: str) -> None:
         xla_flags = os.environ.get("XLA_FLAGS", "")
         for flag in [
             "--xla_gpu_enable_latency_hiding_scheduler=true",
-            "--xla_gpu_enable_async_collectives=true",
         ]:
             if flag not in xla_flags:
                 xla_flags = f"{xla_flags} {flag}" if xla_flags else flag

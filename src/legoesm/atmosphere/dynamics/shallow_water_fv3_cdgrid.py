@@ -73,6 +73,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
     use_fv3_fb: bool = False  # FV3 forward-backward step (bypasses RK3)
+    boundary_fix: bool = False  # Replace boundary corner tendencies with interior
 
 
 # ==============================================================================
@@ -350,6 +351,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                     g=self.config.g,
                     div_damp=self.config.div_damp,
                     hyperdiff_coeff=self.config.hyperdiff_coeff,
+                    boundary_fix=self.config.boundary_fix,
                 )
                 return FV3EdgeShallowWaterState(
                     h=dh, u_d=du, v_d=dv,
