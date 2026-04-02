@@ -25,6 +25,7 @@ class SeaIceConfig(NamedTuple):
     L_f: float = 3.337e5            # Latent heat of fusion [J/kg] (= constants.L_f)
     h_ice_min: float = 0.01         # Min ice thickness for smooth ops [m]
     albedo_ice: float = 0.65        # Fallback constant albedo
+    albedo_ocean: float = 0.06      # Ocean albedo for open-water freezing calc
     emissivity_ice: float = 0.97
     z0_ice: float = 5e-4            # Ice roughness length [m]
     Cd_ice: float = 1.5e-3          # Ice-atmosphere drag coefficient (constant)

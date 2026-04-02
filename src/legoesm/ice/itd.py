@@ -174,7 +174,8 @@ def linear_remap(
     h_new: jnp.ndarray,
     a_new: jnp.ndarray,
     n_cat: int,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    T_new: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Redistribute ice across categories after thermodynamic changes.
 
     Simplified linear remapping following Lipscomb (2001): ice that has
@@ -193,6 +194,9 @@ def linear_remap(
     a_new : array (..., n_cat)
         Post-thermodynamics concentration.
     n_cat : int
+    T_new : array (..., n_cat) or None
+        Post-thermodynamics temperature. If provided, enthalpy is remapped
+        alongside volume and the remapped temperature is returned.
 
     Returns
     -------
@@ -200,6 +204,8 @@ def linear_remap(
         Remapped thickness.
     a_remap : array (..., n_cat)
         Remapped concentration.
+    T_remap : array (..., n_cat)
+        Remapped temperature (only if T_new is provided).
     """
     lo = category_bounds(n_cat)
     hi = upper_bounds(n_cat)
@@ -231,10 +237,16 @@ def linear_remap(
     vol_remap = vol_new - vol_excess - vol_deficit
     a_remap = a_new - a_excess - a_deficit
 
-    # Add excess to next category (shift left, pad last with zero)
+    # Add excess to next category (shift left); last category retains
+    # its own excess to avoid non-conservative volume loss.
     z_pad = jnp.zeros_like(vol_excess[..., :1])
-    vol_remap = vol_remap + jnp.concatenate([z_pad, vol_excess[..., :-1]], axis=-1)
-    a_remap = a_remap + jnp.concatenate([z_pad, a_excess[..., :-1]], axis=-1)
+    vol_receive = jnp.concatenate([z_pad, vol_excess[..., :-1]], axis=-1)
+    a_receive = jnp.concatenate([z_pad, a_excess[..., :-1]], axis=-1)
+    # Last category: re-add its own excess (nowhere to promote)
+    vol_receive = vol_receive.at[..., -1].add(vol_excess[..., -1])
+    a_receive = a_receive.at[..., -1].add(a_excess[..., -1])
+    vol_remap = vol_remap + vol_receive
+    a_remap = a_remap + a_receive
 
     # Add deficit to previous category (shift right, pad first with zero)
     vol_remap = vol_remap + jnp.concatenate([vol_deficit[..., 1:], z_pad], axis=-1)
@@ -246,4 +258,26 @@ def linear_remap(
     h_remap = jnp.where(a_remap > 0.0, vol_remap / a_safe, 0.0)
     h_remap = jnp.maximum(h_remap, 0.0)
 
-    return h_remap, a_remap
+    if T_new is None:
+        return h_remap, a_remap
+
+    # Remap enthalpy (E = T * vol) alongside volume to conserve energy.
+    E_new = T_new * vol_new
+    E_excess = E_new * excess_frac
+    E_deficit = E_new * deficit_frac
+    E_remap = E_new - E_excess - E_deficit
+
+    # Add excess enthalpy to next category (same pattern as volume)
+    z_E = jnp.zeros_like(E_excess[..., :1])
+    E_recv = jnp.concatenate([z_E, E_excess[..., :-1]], axis=-1)
+    E_recv = E_recv.at[..., -1].add(E_excess[..., -1])
+    E_remap = E_remap + E_recv
+
+    # Add deficit enthalpy to previous category
+    E_remap = E_remap + jnp.concatenate([E_deficit[..., 1:], z_E], axis=-1)
+
+    # Recover temperature from enthalpy
+    vol_safe = jnp.maximum(vol_remap, 1e-30)
+    T_remap = jnp.where(vol_remap > 0.0, E_remap / vol_safe, T_new)
+
+    return h_remap, a_remap, T_remap

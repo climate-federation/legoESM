@@ -104,6 +104,7 @@ def compute_most_fluxes(
     scheme="coare3",
     n_iter=5,
     charnock=0.011,
+    L_latent=None,
 ):
     """Compute stability-dependent bulk fluxes via iterative MOST.
 
@@ -278,10 +279,11 @@ def compute_most_fluxes(
     u_star, z0, z0_t, z0_q, theta_star, q_star_val = carry
 
     # Fluxes from scaling parameters
+    _L = constants.L_v if L_latent is None else L_latent
     tau_x = -rho * u_star ** 2 * u_rel / wind_speed
     tau_y = -rho * u_star ** 2 * v_rel / wind_speed
     shflx = rho * constants.c_pd * u_star * theta_star
-    lhflx = rho * constants.L_v * u_star * q_star_val
+    lhflx = rho * _L * u_star * q_star_val
 
     return tau_x, tau_y, shflx, lhflx, u_star
 
@@ -297,6 +299,7 @@ def simple_bulk_fluxes(
     wind_speed: jnp.ndarray,
     Cd: float,
     Ch: float,
+    L_latent: float | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Simple bulk-aerodynamic surface fluxes with constant coefficients.
 
@@ -330,8 +333,9 @@ def simple_bulk_fluxes(
     lhflx : array
         Latent heat flux [W/m2] (positive upward = surface moister).
     """
+    _L = constants.L_v if L_latent is None else L_latent
     tau_x = -rho * Cd * wind_speed * u_lowest
     tau_y = -rho * Cd * wind_speed * v_lowest
     shflx = rho * constants.c_pd * Ch * wind_speed * (T_sfc - T_lowest)
-    lhflx = rho * constants.L_v * Ch * wind_speed * (q_sfc - q_lowest)
+    lhflx = rho * _L * Ch * wind_speed * (q_sfc - q_lowest)
     return tau_x, tau_y, shflx, lhflx

@@ -127,6 +127,7 @@ def _step_slab(
             z0_init=config.z0_ice,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
+            L_latent=constants.L_s,  # sublimation over ice, not evaporation
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
@@ -134,6 +135,7 @@ def _step_slab(
             forcing.T_lowest, forcing.q_lowest,
             T_ice, q_sfc, rho, wind_speed,
             config.Cd_ice, config.Ch_ice,
+            L_latent=constants.L_s,  # sublimation over ice
         )
 
     # ---------- Thermodynamics (delegate to shared routine) ----------
@@ -298,8 +300,17 @@ def _step_dynamic(
         T_ice = jnp.moveaxis(T_t, 0, -1)
         conc = jnp.moveaxis(conc_t, 0, -1)
 
-        # ---- 4. ITD remap ----
-        h, conc = linear_remap(h_old, conc_old, h, conc, n_cat)
+        # Open-water ice growth should only be deposited into category 0
+        # (thinnest). Zero out new-ice growth in empty higher categories
+        # to prevent spurious ice creation in all empty categories.
+        was_empty = h_old <= 0.0  # (..., n_cat) True where category had no ice
+        cat_mask = jnp.arange(n_cat) > 0  # False for cat 0, True for cats 1+
+        suppress = was_empty & cat_mask  # suppress growth in empty non-zero cats
+        h = jnp.where(suppress, h_old, h)
+        conc = jnp.where(suppress, conc_old, conc)
+
+        # ---- 4. ITD remap (including temperature for enthalpy conservation) ----
+        h, conc, T_ice = linear_remap(h_old, conc_old, h, conc, n_cat, T_new=T_ice)
     else:
         h, T_ice, conc = _thermo_single(
             h, T_ice, conc, forcing, ocean_sst, config, U_min, dt,
@@ -372,17 +383,19 @@ def _thermo_single(
             forcing.T_lowest, forcing.q_lowest,
             T_ice, q_sfc, rho, wind_speed,
             config.Cd_ice, config.Ch_ice,
+            L_latent=constants.L_s,  # sublimation over ice
         )
 
-    # Albedo
+    # Albedo: use ice albedo over ice, ocean albedo over open water
     if config.temp_dependent_albedo:
         alpha_ice = compute_ice_albedo(T_ice, config.ice_albedo)
     else:
         alpha_ice = jnp.broadcast_to(jnp.array(config.albedo_ice), h.shape)
+    alpha = jnp.where(ice_mask, alpha_ice, config.albedo_ocean)
 
     # Radiation
     sw_net, lw_net, lw_up = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_ice, alpha_ice,
+        forcing.sw_down, forcing.lw_down, T_ice, alpha,
         config.emissivity_ice,
     )
     Q_sfc = sw_net + lw_net - shflx - lhflx
@@ -394,9 +407,10 @@ def _thermo_single(
         0.0,
     )
 
-    # Temperature
+    # Temperature: F_cond = k*(T_base - T_sfc)/h is heat arriving at
+    # the surface from the warm ice base, so it ADDS to the surface budget.
     skin_cap = config.rho_ice * config.c_ice * h_eff * 0.5
-    dT_dt = (Q_sfc - F_cond) / skin_cap
+    dT_dt = (Q_sfc + F_cond) / skin_cap
     T_trial = T_ice + dt * dT_dt
     T_new = jnp.where(
         ice_mask,
