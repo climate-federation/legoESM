@@ -409,6 +409,7 @@ def solve_sw(
 def compute_heating_rate(
     flux_net: Array,
     pressure: Array,
+    dp: Array | None = None,
 ) -> Array:
   """Computes cell-center heating rate from pressure and net radiative flux.
 
@@ -420,15 +421,15 @@ def compute_heating_rate(
   Args:
     flux_net: The net flux at the bottom face [W/m²].
     pressure: The pressure field [Pa].
+    dp: Exact layer pressure thickness [Pa].  When provided, used directly
+        instead of the centered-difference approximation from ``pressure``.
 
   Returns:
     The heating rate of the grid cell [K/s].
   """
-  # Compute the centered pressure difference in z:
-  #   dp_{i,j,k} = (p_{i,j,k+1} - p_{i,j,k-1}) / 2.
-  # This is an approximation to the pressure difference across the cell, which
-  # would use the pressure at the upper and lower faces, but it should be ok.
-  dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
+  if dp is None:
+      # Fallback: centered-difference approximation.
+      dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
 
   # Compute the forward pressure difference of fluxes on faces (like a
   # derivative of face_to_node).

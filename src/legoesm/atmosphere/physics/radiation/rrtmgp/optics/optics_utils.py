@@ -63,6 +63,9 @@ def _einsum_expression_from_lookup_table(table: Array):
 def lookup_values(vals: Array, idx_list: Sequence[Array]) -> Array:
   """Gather values from `vals` as specified by a list of index arrays.
 
+  On TPU the one-hot einsum path leverages the MXU; on CPU/GPU direct
+  indexing is faster and uses less memory.
+
   Args:
     vals: An array of coefficients to be gathered.
     idx_list: A list of length equal to the rank of `vals` containing arrays of
@@ -72,17 +75,18 @@ def lookup_values(vals: Array, idx_list: Sequence[Array]) -> Array:
     An array having the same shape as an element of `idx_list` where the indices
     have been replaced by the corresponding value from `vals`.
   """
-  # To avoid the `gather` op, which is very slow on TPU's, we convert the
-  # integer indices to a one-hot representation that can leverage the high
-  # throughput of the matrix-multiply unit, and express the lookup reduction
-  # operation with `einsum`.
-  eq = _einsum_expression_from_lookup_table(vals)
-  inputs = [
-      jax.nn.one_hot(idx, vals.shape[i], dtype=vals.dtype)
-      for i, idx in enumerate(idx_list)
-  ]
-  inputs.append(vals)
-  return jnp.einsum(eq, *inputs)
+  backend = jax.default_backend().lower()
+  if backend == "tpu":
+      # One-hot einsum: avoids slow `gather` on TPU by using the MXU.
+      eq = _einsum_expression_from_lookup_table(vals)
+      inputs = [
+          jax.nn.one_hot(idx, vals.shape[i], dtype=vals.dtype)
+          for i, idx in enumerate(idx_list)
+      ]
+      inputs.append(vals)
+      return jnp.einsum(eq, *inputs)
+  # CPU/GPU: direct indexing is faster and more memory-efficient.
+  return lookup_values_direct_indexing(vals, idx_list)
 
 
 def lookup_values_direct_indexing(vals, idx_list: Sequence[Array]) -> Array:
@@ -101,7 +105,8 @@ def lookup_values_direct_indexing(vals, idx_list: Sequence[Array]) -> Array:
     An array having the same shape as an element of `idx_list` where the indices
     have been replaced by the corresponding value from `vals`.
   """
-  return vals[idx_list]
+  # Convert idx_list to a tuple for advanced indexing (list is deprecated).
+  return vals[tuple(idx_list)]
 
 
 def evaluate_weighted_lookup(

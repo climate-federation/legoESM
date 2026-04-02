@@ -540,7 +540,7 @@ class RRTMGP:
       sfc_temperature : jnp.ndarray
           Surface temperature (ncol,) [K].
       q_v : jnp.ndarray
-          Water vapor mixing ratio (ncol, nlev) [kg/kg].
+          Water vapor specific humidity (ncol, nlev) [kg/kg].
       cos_zenith : jnp.ndarray
           Cosine of solar zenith angle (ncol,).
       sfc_albedo : jnp.ndarray | float | None
@@ -598,10 +598,21 @@ class RRTMGP:
           for gas_name, vmr_value in ghg_vmr_override.items():
               vmr_fields[gas_name] = jnp.full_like(p_3d, vmr_value)
 
-      dp = kernel_ops.centered_difference(p_3d, dim=2)
+      # Exact layer thickness from interface pressures.
+      # p_half is (ncol, nlev+1) in legoESM convention (index 0 = surface).
+      # Flip to TOA-first and compute dp = p_half[k+1] - p_half[k] (positive).
+      p_half_flip = p_half[:, ::-1]  # (ncol, nlev+1), index 0 = TOA
+      dp_exact = p_half_flip[:, 1:] - p_half_flip[:, :-1]  # (ncol, nlev)
+      dp_3d = dp_exact[:, None, :]  # (ncol, 1, nlev)
+      # Pad with halo values (replicate boundary layers)
+      dp_3d = jnp.concatenate([
+          dp_3d[:, :, :1], dp_3d, dp_3d[:, :, -1:],
+      ], axis=2)
+      dp_3d = jnp.clip(dp_3d, 1.0, None)
+
       mol_m_air = (constants.DRY_AIR_MOL_MASS
                    + constants.WATER_MOL_MASS * h2o_vmr)
-      molecules = -(dp / constants.G) * constants.AVOGADRO / mol_m_air
+      molecules = (dp_3d / constants.G) * constants.AVOGADRO / mol_m_air
 
       # --- 3. Build atmospheric state ---
       optics_lib = self.optics_lib
@@ -638,12 +649,20 @@ class RRTMGP:
       sfc_T_2d = sfc_temperature[:, None]
 
       # --- Cloud properties ---
-      has_clouds = config.include_clouds and cloud_path_liq is not None
+      has_clouds = config.include_clouds and (
+          cloud_path_liq is not None or cloud_path_ice is not None
+      )
       if has_clouds:
-          cpl_3d = _add_halos(jnp.clip(cloud_path_liq, 0.0, None)[:, None, ::-1])
-          cpi_3d = _add_halos(jnp.clip(cloud_path_ice, 0.0, None)[:, None, ::-1])
-          crl_3d = _add_halos(jnp.clip(cloud_r_eff_liq, 1.0e-6, None)[:, None, ::-1])
-          cri_3d = _add_halos(jnp.clip(cloud_r_eff_ice, 1.0e-6, None)[:, None, ::-1])
+          _zero = jnp.zeros((ncol, nlev), dtype=T.dtype)
+          _r_min = jnp.full((ncol, nlev), 1.0e-6, dtype=T.dtype)
+          _cpl = cloud_path_liq if cloud_path_liq is not None else _zero
+          _cpi = cloud_path_ice if cloud_path_ice is not None else _zero
+          _crl = cloud_r_eff_liq if cloud_r_eff_liq is not None else _r_min
+          _cri = cloud_r_eff_ice if cloud_r_eff_ice is not None else _r_min
+          cpl_3d = _add_halos(jnp.clip(_cpl, 0.0, None)[:, None, ::-1])
+          cpi_3d = _add_halos(jnp.clip(_cpi, 0.0, None)[:, None, ::-1])
+          crl_3d = _add_halos(jnp.clip(_crl, 1.0e-6, None)[:, None, ::-1])
+          cri_3d = _add_halos(jnp.clip(_cri, 1.0e-6, None)[:, None, ::-1])
       else:
           cpl_3d = cpi_3d = crl_3d = cri_3d = None
 
@@ -703,9 +722,13 @@ class RRTMGP:
           use_scan=config.use_scan,
       )
 
-      # --- 6. Compute heating rates ---
-      lw_hr_3d = two_stream.compute_heating_rate(lw_fluxes['flux_net'], p_3d)
-      sw_hr_3d = two_stream.compute_heating_rate(sw_fluxes['flux_net'], p_3d)
+      # --- 6. Compute heating rates using exact layer thickness ---
+      lw_hr_3d = two_stream.compute_heating_rate(
+          lw_fluxes['flux_net'], p_3d, dp=dp_3d,
+      )
+      sw_hr_3d = two_stream.compute_heating_rate(
+          sw_fluxes['flux_net'], p_3d, dp=dp_3d,
+      )
 
       # --- 7. Strip halos, flip back to legoESM convention, reshape ---
       hw = 1

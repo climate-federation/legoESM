@@ -131,6 +131,7 @@ class PhysicsPipeline:
         self.micro_fn = micro_fn
         self.micro_config = micro_config
         self.dynamic_albedo = dynamic_albedo
+        self._cloud_scheme = "none"  # set by build_physics_pipeline
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
@@ -246,7 +247,9 @@ class PhysicsPipeline:
                                o3_vmr_precomputed, aerosol_od_precomputed,
                                tau_equator=None, tau_pole=None,
                                albedo_ice=None, albedo_ocean=None,
-                               ghg_vmr_override=None):
+                               ghg_vmr_override=None,
+                               q_c=None, q_r=None,
+                               cloud_scheme="none"):
         """Compute radiation tendencies and fluxes (pure JAX, no I/O).
 
         Returns (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
@@ -278,6 +281,28 @@ class PhysicsPipeline:
         albedo_col = ad.flatten_2d(albedo)
         emis_col = ad.flatten_2d(emissivity)
 
+        # Compute cloud properties for cloud-radiation coupling
+        cloud_kwargs = {}
+        if cloud_scheme != "none" and q_c is not None:
+            from legoesm.atmosphere.physics.clouds.config import CloudConfig
+            from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+                compute_cloud_properties,
+            )
+            dp_col = p_half_col[:, 1:] - p_half_col[:, :-1]
+            q_c_col = ad.flatten_3d(q_c)
+            q_i_col = None
+            cloud_config = CloudConfig(scheme=cloud_scheme)
+            cloud_props = compute_cloud_properties(
+                T=T_col, p_full=p_full_col, q_v=q_v_col, dp=dp_col,
+                config=cloud_config, q_cloud=q_c_col, q_ice=q_i_col,
+            )
+            cloud_kwargs = {
+                "cloud_path_liq": cloud_props.lwp,
+                "cloud_path_ice": cloud_props.iwp,
+                "cloud_r_eff_liq": cloud_props.r_eff_liq,
+                "cloud_r_eff_ice": cloud_props.r_eff_ice,
+            }
+
         rad_out = self.radiation_fn(
             T_col, p_full_col, p_half_col, q_v_col,
             T_sfc_col, lat_col, lon_col,
@@ -287,6 +312,7 @@ class PhysicsPipeline:
             solar_weights, s_0,
             tau_equator=tau_equator, tau_pole=tau_pole,
             ghg_vmr_override=ghg_vmr_override,
+            **cloud_kwargs,
         )
 
         # Unflatten back to native grid shape via adapter
@@ -347,6 +373,8 @@ class PhysicsPipeline:
                         tau_equator=tau_equator, tau_pole=tau_pole,
                         albedo_ice=albedo_ice, albedo_ocean=albedo_ocean,
                         ghg_vmr_override=ghg_vmr_override,
+                        q_c=q_c,
+                        cloud_scheme=pipeline._cloud_scheme,
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
@@ -472,8 +500,9 @@ def _build_rrtmgp_radiation_fn(config):
     from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
     from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.solar import (
-        cos_zenith_angle, daily_mean_insolation,
+        cos_zenith_angle, daily_mean_insolation, daylight_fraction,
     )
+    from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
@@ -485,7 +514,7 @@ def _build_rrtmgp_radiation_fn(config):
         sfc_emissivity=config.sfc_emissivity,
         sfc_albedo=config.albedo_ocean,
         S_0=S_0,
-        use_scan=False,
+        use_scan=True,
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 
@@ -501,14 +530,24 @@ def _build_rrtmgp_radiation_fn(config):
                      cloud_path_liq=None, cloud_path_ice=None,
                      cloud_r_eff_liq=None, cloud_r_eff_ice=None):
         del tau_equator, tau_pole  # RRTMGP does not use gray optical depth
+        _sw_scale = None
         if diurnal:
             hour = seconds_of_day / 3600.0
             cos_sza = cos_zenith_angle(lat_col, lon_col, day_of_year, hour)
             cos_zenith = jnp.maximum(cos_sza, 0.0)
         else:
+            # Daytime-effective cos(SZA): use daylight fraction so the solver
+            # sees the correct optical path during sunlit hours.  SW fluxes
+            # are then rescaled by f_day to recover daily-mean energy.
             insol = daily_mean_insolation(lat_col, day_of_year, s_0)
-            cos_zenith = jnp.clip(insol / jnp.clip(s_0, 1e-6, None), 0.0, 1.0)
-        return solver.solve_columns(
+            f_day = daylight_fraction(lat_col, day_of_year)
+            f_day_safe = jnp.maximum(f_day, 1.0e-6)
+            cos_zenith = jnp.clip(
+                insol / (s_0 * f_day_safe), 0.0, 1.0,
+            )
+            _sw_scale = f_day
+
+        result = solver.solve_columns(
             T=T_col, p_full=p_full_col, p_half=p_half_col,
             sfc_temperature=T_sfc_col, q_v=q_v_col,
             cos_zenith=cos_zenith,
@@ -523,6 +562,21 @@ def _build_rrtmgp_radiation_fn(config):
             cloud_r_eff_liq=cloud_r_eff_liq,
             cloud_r_eff_ice=cloud_r_eff_ice,
         )
+
+        # Rescale SW fluxes/heating to daily-mean when using daytime-effective SZA
+        if _sw_scale is not None:
+            s = _sw_scale[:, None]
+            result = RadiationOutput(
+                lw_flux_up=result.lw_flux_up,
+                lw_flux_down=result.lw_flux_down,
+                sw_flux_up=result.sw_flux_up * s,
+                sw_flux_down=result.sw_flux_down * s,
+                heating_rate=result.lw_heating_rate + result.sw_heating_rate * s,
+                lw_heating_rate=result.lw_heating_rate,
+                sw_heating_rate=result.sw_heating_rate * s,
+            )
+
+        return result
 
     return radiation_fn
 
@@ -647,7 +701,7 @@ def build_physics_pipeline(grid, sigma, config):
     # Resolve microphysics via registry
     micro_fn, micro_config = _resolve_microphysics(config)
 
-    return PhysicsPipeline(
+    pipeline = PhysicsPipeline(
         adapter=adapter,
         sigma_full=sigma.sigma_full,
         sigma_half=sigma.sigma_half,
@@ -666,3 +720,5 @@ def build_physics_pipeline(grid, sigma, config):
         micro_config=micro_config,
         dynamic_albedo=config.dynamic_albedo,
     )
+    pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
+    return pipeline

@@ -349,6 +349,8 @@ def _compute_minor_optical_depth(
     sgas = jnp.maximum(idx_scaling_gas[i], 0)
     sgas_idx = sgas * jnp.ones_like(tropo_idx)
     scaling_vmr = get_vmr(lookup, vmr_lib, sgas_idx, vmr_fields)
+    # Cast to pressure dtype so lax.cond branches match downstream.
+    scaling_vmr = scaling_vmr.astype(p.dtype)
     scaling = jax.lax.cond(
         scale_by_complement[i] == 1,
         lambda: (1.0 - scaling_vmr * dry_factor),
@@ -361,7 +363,7 @@ def _compute_minor_optical_depth(
     scaling *= jax.lax.cond(
         idx_scaling_gas[i] > 0,
         scale_with_gas_fn(i),
-        lambda: jnp.ones_like(temperature),
+        lambda: jnp.ones_like(scaling),
     )
     return lambda: scaling
 
