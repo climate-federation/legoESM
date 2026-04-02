@@ -215,8 +215,6 @@ export JAX_PLATFORMS="gpu,cpu"
 export JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.90
-export XLA_FLAGS="\${XLA_FLAGS:+\${XLA_FLAGS} }--xla_gpu_enable_async_collectives=true"
-
 # Prevent CPU thread oversubscription
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1

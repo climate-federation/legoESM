@@ -403,8 +403,6 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
 
     # 2. Mass transport uses the PROVEN fv3_cc2c (physical face-normal).
-    # The d2a2c covariant velocities have too much divergence for the PPM
-    # transport, so we compute a separate set for mass transport only.
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
     uc_mass, vc_mass = fv3_cc2c(u_cc, v_cc, cdgrid)
     dh_dt = cgrid_mass_flux_divergence(h, uc_mass, vc_mass, cdgrid)

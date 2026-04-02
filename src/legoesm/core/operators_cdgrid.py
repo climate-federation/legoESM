@@ -1338,6 +1338,7 @@ def fv3_d2cc2c(u_d, v_d, cdgrid):
 def fv3_sw_tendencies(
     h, u_d, v_d, h_s, cdgrid,
     g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
+    boundary_fix=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1422,6 +1423,21 @@ def fv3_sw_tendencies(
 
     # (i) Vertex fix
     du_corner, dv_corner = _extrapolate_boundary_corners(du_corner, dv_corner, n)
+
+    # (i2) Boundary ring fix: replace outermost corner ring (dist=0)
+    #      with the nearest interior ring (dist=1).  The A-L gradient's
+    #      halo-error amplification is concentrated entirely in dist=0;
+    #      dist=1+ uses only face-interior data and is accurate.
+    #      Mass transport retains full cross-face halo coupling.
+    if boundary_fix:
+        du_corner = du_corner.at[:, 0, :].set(du_corner[:, 1, :])
+        du_corner = du_corner.at[:, n, :].set(du_corner[:, n - 1, :])
+        du_corner = du_corner.at[:, :, 0].set(du_corner[:, :, 1])
+        du_corner = du_corner.at[:, :, n].set(du_corner[:, :, n - 1])
+        dv_corner = dv_corner.at[:, 0, :].set(dv_corner[:, 1, :])
+        dv_corner = dv_corner.at[:, n, :].set(dv_corner[:, n - 1, :])
+        dv_corner = dv_corner.at[:, :, 0].set(dv_corner[:, :, 1])
+        dv_corner = dv_corner.at[:, :, n].set(dv_corner[:, :, n - 1])
 
     # (j) Average corner tendencies to edge-midpoint positions
     du_d_dt = 0.5 * (du_corner[:, :-1, :] + du_corner[:, 1:, :])   # (6, n, n+1)
