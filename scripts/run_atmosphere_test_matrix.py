@@ -280,7 +280,11 @@ def _create_vertical(nlev: int, vertical_coord: str):
 # ---------------------------------------------------------------------------
 
 def _make_rrtmgp_physics(model_type: str, dt: float):
-    """Create RRTMGP-based physics function."""
+    """Create RRTMGP-based physics function.
+
+    model_type : str
+        One of "hydrostatic", "nonhydrostatic", "spectral_pe", "mpas".
+    """
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -1470,8 +1474,11 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         state = held_suarez_init_mpas(mesh, sigma)
         grid = mesh
 
+        physics_fn_mpas = (_make_rrtmgp_physics("mpas", dt)
+                           if radiation == "rrtmgp" else held_suarez_forcing_mpas)
+
         def step_fn(s, dt_):
-            return model.step(s, dt_, held_suarez_forcing_mpas)
+            return model.step(s, dt_, physics_fn_mpas)
 
         mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
 
@@ -1522,7 +1529,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
 
-        physics_fn = held_suarez_forcing_spectral
+        physics_fn = (_make_rrtmgp_physics("spectral_pe", dt)
+                      if radiation == "rrtmgp" else held_suarez_forcing_spectral)
 
         def step_fn(s, dt_):
             return model.step(s, dt_, physics_fn=physics_fn)
