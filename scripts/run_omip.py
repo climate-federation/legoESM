@@ -181,8 +181,11 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
     if grid_type == "spectral":
         A_h = 1.0e4   # spectral Laplacian is exact: less needed
         K_h = 1.0e3
+    elif grid_type == "mpas":
+        A_h = 1.0e4   # MPAS ico3 is very coarse (~900 km); lower K_h stable
+        K_h = 1.0e3
     else:
-        A_h = 1.0e5   # FV grids need more dissipation
+        A_h = 1.0e5   # cubed-sphere/latlon need more dissipation at ~5°
         K_h = 1.0e5
 
     if grid_type == "cubed_sphere":
@@ -434,22 +437,35 @@ def _extract_scalars(state, grid_type, grid, z_coord):
 def _check_finite(state, grid_type):
     """Check if state contains finite and physically sensible values."""
     if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_synthesis_3d
-        # Check spectral coefficients are finite
         ok_finite = bool(jnp.all(jnp.isfinite(state.T_hat.data)))
         if not ok_finite:
             return False
-        # Also check magnitude: spectral coeff l=0 ~ global mean T
-        # which should be O(10) not O(1e6)
         T0_mag = float(jnp.abs(state.T_hat.data[0, 0]))
         return T0_mag < 1000.0
+
     T = state.T.data
-    ok = bool(
-        jnp.all(jnp.isfinite(T))
-        & jnp.all(jnp.isfinite(state.eta.data))
-        & (jnp.max(jnp.abs(T)) < 100.0)  # |T| < 100°C
+    eta = state.eta.data
+    mask = state.land_mask.data
+
+    # Mask to ocean cells only (land cells may have uncontrolled values)
+    if grid_type == "mpas":
+        mask_3d = mask[:, jnp.newaxis]
+        mask_2d = mask
+    else:
+        mask_3d = mask[..., jnp.newaxis]
+        mask_2d = mask
+
+    T_ocean = jnp.where(mask_3d > 0.5, T, 0.0)
+    eta_ocean = jnp.where(mask_2d > 0.5, eta, 0.0)
+
+    ok_finite = bool(
+        jnp.all(jnp.isfinite(T_ocean))
+        & jnp.all(jnp.isfinite(eta_ocean))
     )
-    return ok
+    if not ok_finite:
+        return False
+
+    return bool(jnp.max(jnp.abs(T_ocean)) < 100.0)
 
 
 # ===========================================================================
@@ -502,7 +518,16 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
         if step % 100 == 0:
             if not _check_finite(state, grid_type):
-                print(f"  BLOWUP at step {step}")
+                # Debug: identify what failed
+                if grid_type != "spectral":
+                    mask = state.land_mask.data
+                    m3 = mask[:, jnp.newaxis] if grid_type == "mpas" else mask[..., jnp.newaxis]
+                    T_oc = jnp.where(m3 > 0.5, state.T.data, 0.0)
+                    print(f"  BLOWUP step {step}: max|T|={float(jnp.max(jnp.abs(T_oc))):.1f}"
+                          f" T_finite={bool(jnp.all(jnp.isfinite(T_oc)))}"
+                          f" eta_max={float(jnp.max(jnp.abs(state.eta.data))):.2f}")
+                else:
+                    print(f"  BLOWUP at step {step}")
                 blown_up = True
                 break
 

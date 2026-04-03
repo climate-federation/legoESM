@@ -2529,28 +2529,46 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             getattr(hcoord, "z_full", np.arange(nlev)), dtype=np.float64)
 
     elif tc.grid_type == "icosahedral":
-        if test_case != "tc1":
-            record(tc, "SKIP", 0.0, f"MPAS NH only supports tc1, got {test_case}")
-            return "SKIP", 0.0, ""
-
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
             MPASCompressibleEulerModel, MPASCompressibleEulerConfig)
-        from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
-            dcmip25_tc1_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
-        state, hcoord, tmetric = dcmip25_tc1_init_mpas(
-            mesh, n_levels=nlev)
+
+        if test_case == "tc1":
+            from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
+                dcmip25_tc1_init_mpas)
+            state, hcoord, tmetric = dcmip25_tc1_init_mpas(
+                mesh, n_levels=nlev)
+        elif test_case == "tc2a":
+            from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2_mpas import (
+                dcmip25_tc2_init_mpas)
+            state, hcoord, tmetric, mesh = dcmip25_tc2_init_mpas(
+                mesh, n_levels=nlev, subcase="a")
+        elif test_case == "tc3":
+            from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3_mpas import (
+                dcmip25_tc3_init_mpas)
+            state, hcoord, tmetric, mesh = dcmip25_tc3_init_mpas(
+                mesh, n_levels=nlev)
+        else:
+            record(tc, "SKIP", 0.0, f"MPAS NH: unsupported test case {test_case}")
+            return "SKIP", 0.0, ""
         grid = mesh
 
         dx_mean = float(jnp.sqrt(
             4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
         dt = min(max(0.2, 6.0 * (200.0 / (dx_mean / 1000.0))), 6.0)
+        # Sponge config per test case
+        if test_case == "tc2a":
+            _sponge_w, _sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
+        elif test_case == "tc3":
+            _sponge_w, _sponge_c = 5000.0, 0.05
+        else:
+            _sponge_w, _sponge_c = 10000.0, 0.05
         nh_config = MPASCompressibleEulerConfig(
-            n_acoustic_substeps=10, sponge_width=10000.0,
-            sponge_coeff=0.05,
+            n_acoustic_substeps=10, sponge_width=_sponge_w,
+            sponge_coeff=_sponge_c,
             nu_del4=dx_mean ** 4 / (48.0 * 3600.0))
         model = MPASCompressibleEulerModel(
             mesh, hcoord, tmetric, nh_config)
@@ -2620,25 +2638,51 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.spectral_nh import (
             SpectralCompressibleEulerModel, SpectralNHConfig,
             dcmip25_tc1_init_spectral,
+            dcmip25_tc2_init_spectral,
+            dcmip25_tc3_init_spectral,
         )
-
-        if test_case != "tc1":
-            raise NotImplementedError(
-                f"Spectral NH only supports tc1, got {test_case}")
 
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
-        state, hcoord, tmetric = dcmip25_tc1_init_spectral(
-            grid, n_levels=nlev)
+
+        if test_case == "tc1":
+            state, hcoord, tmetric = dcmip25_tc1_init_spectral(
+                grid, n_levels=nlev)
+        elif test_case == "tc2a":
+            state, hcoord, tmetric = dcmip25_tc2_init_spectral(
+                grid, n_levels=nlev, subcase="a")
+        elif test_case == "tc3":
+            state, hcoord, tmetric = dcmip25_tc3_init_spectral(
+                grid, n_levels=nlev)
+        else:
+            raise NotImplementedError(
+                f"Spectral NH: unsupported test case {test_case}")
+
+        # Small-Earth factor and sponge config per test case
+        if test_case == "tc2a":
+            sef = 20.0
+            sponge_w, sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
+        elif test_case == "tc3":
+            sef = 60.0
+            sponge_w, sponge_c = 5000.0, 0.05
+        else:
+            sef = 1.0
+            sponge_w, sponge_c = 10000.0, 0.05
 
         dt = max(0.5, 6.0 * (21.0 / n_max))
         nh_config = SpectralNHConfig(
             n_acoustic_substeps=10,
             semi_implicit_acoustic=True,
-            sponge_width=10000.0,
-            sponge_coeff=0.05,
+            sponge_width=sponge_w,
+            sponge_coeff=sponge_c,
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            small_earth_factor=sef,
         )
+        # Use the small-Earth grid for tc2/tc3
+        if sef != 1.0:
+            from legoesm import constants as _c
+            grid = create_gaussian_grid(
+                n_max, radius=_c.R_earth / sef)
         model = SpectralCompressibleEulerModel(
             grid, hcoord, tmetric, nh_config)
 
