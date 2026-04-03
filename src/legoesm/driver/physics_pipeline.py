@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio, saturation_specific_humidity
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.forcing.surface_utils import blend_surface_temperature
 from legoesm.driver.grid_adapters import ColumnAdapter, make_adapter
 
@@ -708,7 +708,6 @@ def _resolve_convection(config):
     # Wrap stateful convection schemes (mass_flux, edmf) in a closure
     # that manages the prognostic variable internally.
     if scheme == "mass_flux":
-        from legoesm.atmosphere.physics.convection.config import MassFluxConfig
         _state = {"M_c": None}
 
         def _wrapped(T, q_v, p_full, p_half, dt, config):
@@ -725,7 +724,6 @@ def _resolve_convection(config):
         return _wrapped, conv_config
 
     if scheme == "edmf":
-        from legoesm.atmosphere.physics.convection.config import EDMFConfig
         _state = {"a_u": None}
 
         def _wrapped(T, q_v, p_full, p_half, dt, config):

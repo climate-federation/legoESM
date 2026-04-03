@@ -336,8 +336,8 @@ def build_segment_fn(
         ``run_segment(carry: SegmentCarry, n_steps: int,
         forcing: SegmentForcing) -> SegmentCarry``
     """
-    from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic, fix_ps_mass_target
-    from legoesm.core.cfl import cfl_number_from_state, estimate_min_dx_cubed_sphere
+    from legoesm.core.conservation import fix_moisture_hydrostatic, fix_ps_mass_target
+    from legoesm.core.cfl import estimate_min_dx_cubed_sphere
 
     # Precompute minimum grid spacing for CFL monitoring
     if hasattr(grid, 'n'):
