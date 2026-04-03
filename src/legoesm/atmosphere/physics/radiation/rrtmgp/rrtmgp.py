@@ -622,8 +622,9 @@ class RRTMGP:
       # Exact layer thickness from interface pressures.
       # p_half is (ncol, nlev+1) with index 0 = TOA (sigma=0 → p≈0).
       # dp = p_half[k+1] - p_half[k] is positive (p increases toward surface).
-      dp_exact = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
-      dp_3d = dp_exact[:, None, :]  # (ncol, 1, nlev)
+      # Reverse to surface-first order to match T_3d, p_3d, q_v_3d.
+      dp_exact = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev) TOA-first
+      dp_3d = dp_exact[:, None, ::-1]  # (ncol, 1, nlev) surface-first
       # Pad with halo values (replicate boundary layers)
       dp_3d = jnp.concatenate([
           dp_3d[:, :, :1], dp_3d, dp_3d[:, :, -1:],

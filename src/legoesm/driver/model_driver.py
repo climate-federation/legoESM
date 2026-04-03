@@ -422,7 +422,9 @@ class ModelDriver:
     def _create_physics(self) -> None:
         """Build the physics pipeline."""
         self.physics = build_physics_pipeline(self.grid, self.sigma, self.config)
-        logger.info(f"  Physics: {self.config.radiation} + SBM convection")
+        rad_str = self.config.radiation or "none"
+        conv_str = self.config.convection or "none"
+        logger.info(f"  Physics: radiation={rad_str}, convection={conv_str}")
 
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
@@ -985,17 +987,18 @@ class ModelDriver:
         return self._run_per_step(start_step, start_day)
 
     # ==================================================================
-    # MPAS execution path (Held-Suarez forcing, no separate physics pipeline)
+    # MPAS execution path (uses unified physics pipeline)
     # ==================================================================
 
     def _run_mpas(self, start_step: int = 0, start_day: float | None = None) -> str:
-        """Run MPAS model with Held-Suarez forcing.
+        """Run MPAS model with the unified physics pipeline.
 
-        Uses the MPAS PE model's built-in physics_fn interface instead
-        of the general physics pipeline (which assumes A-grid u/v).
+        Uses the same physics pipeline as cubed-sphere/lat-lon, built
+        via ``_create_physics()`` (includes RRTMGP, convection, etc.).
+        Falls back to bare Held-Suarez forcing only when the config
+        has radiation='none'.
         """
         import time
-        from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_forcing_mpas
 
         cfg = self.config
         DT = cfg.dycore.dt
@@ -1004,7 +1007,24 @@ class ModelDriver:
         DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
         START_DAY = start_day if start_day is not None else cfg.start_day
 
-        physics_fn = held_suarez_forcing_mpas
+        # Build MPAS-compatible physics via make_physics (same code path as
+        # cubed-sphere/lat-lon).  Includes RRTMGP + Held-Suarez forcing
+        # when radiation is configured.
+        from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+        from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+        from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+        from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+        from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
+        from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+
+        phys_cfg = PhysicsConfig(
+            radiation=RadiationConfig(scheme=cfg.radiation if cfg.radiation != "none" else "none"),
+            convection=ConvectionConfig(scheme=cfg.convection),
+            turbulence=TurbulenceConfig(scheme=cfg.turbulence),
+            microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
+            gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
+        )
+        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT)
 
         run_status = "COMPLETED"
         logger.info(f"Starting MPAS: {n_steps_total - start_step} steps, {N_DAYS} days")

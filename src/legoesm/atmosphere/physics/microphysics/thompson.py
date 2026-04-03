@@ -83,7 +83,7 @@ def thompson_microphysics(
     # Autoconversion (gamma-corrected)
     x_c = jnp.clip(q_c, 0.0) * rho / jnp.clip(N_c_eff, 1.0)
     onset = jax.nn.sigmoid(sharpness * (x_c - config.x_star))
-    dq_c_au = config.k_au * jnp.clip(q_c, 0.0) ** 2 * onset * gamma_norm / rho
+    dq_c_au = config.k_au * jnp.clip(q_c, 0.0) ** 2 * onset * gamma_norm * rho
     dN_r_au = dq_c_au * rho / (config.x_star * 20.0)
 
     # Accretion (gamma-corrected)

@@ -122,10 +122,12 @@ def make_physics(
         return _make_nonhydrostatic_combined(config, dt)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_combined(config, dt)
+    elif model_type == "mpas":
+        return _make_mpas_combined(config, dt)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
-            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe'."
+            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
 
 
@@ -159,35 +161,49 @@ def _build_updated_phys_state(phys_state, updates):
 # Hydrostatic
 # ======================================================================
 
-def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
-    # Tagged list: (fn, accepts_phys_state, updated_field_name)
-    # Turbulence, convection, GWD accept phys_state and return updates;
-    # radiation, microphysics don't.
+def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
+                               model_type: str = "hydrostatic") -> Callable:
+    """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
+
+    Uses the unified ``HydrostaticTendencies`` with optional ``dv_dt``.
+    When *model_type* is ``"mpas"``, the radiation factory is called
+    with ``"mpas"`` so that lat/lon extraction uses mesh.latCell/lonCell.
+    """
     tagged_fns = []
     if config.radiation.scheme != "none":
-        tagged_fns.append((make_radiation_physics(config.radiation, "hydrostatic"), False, None))
+        tagged_fns.append((make_radiation_physics(config.radiation, model_type), False, None))
     if config.convection.scheme != "none":
-        tagged_fns.append((make_convection_physics(config.convection, "hydrostatic", dt), True, "conv_prog"))
+        tagged_fns.append((make_convection_physics(config.convection, model_type, dt), True, "conv_prog"))
     if config.turbulence.scheme != "none":
-        tagged_fns.append((make_turbulence_physics(config.turbulence, "hydrostatic", dt), True, "tke"))
+        tagged_fns.append((make_turbulence_physics(config.turbulence, model_type, dt), True, "tke"))
     if config.microphysics.scheme != "none":
-        tagged_fns.append((make_microphysics_physics(config.microphysics, "hydrostatic", dt), False, None))
+        tagged_fns.append((make_microphysics_physics(config.microphysics, model_type, dt), False, None))
     if config.gravity_wave_drag.scheme != "none":
-        tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, "hydrostatic", dt), True, "gwd_spectrum"))
+        tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, model_type, dt), True, "gwd_spectrum"))
 
     def physics_fn(state, grid, sigma_coord, phys_state=None):
+        has_v = state.v is not None
+
         if not tagged_fns:
-            shape_3d = state.T.data.shape
-            shape_2d = state.p_s.data.shape
-            dims_3d = ("face", "x", "y", "level")
-            dims_2d = ("face", "x", "y")
             _sd = state.T.data.dtype
+            dims_T = state.T.dims
+            dims_ps = state.p_s.dims
+            dv_dt_zero = None
+            if has_v:
+                dv_dt_zero = Field(
+                    data=jnp.zeros_like(state.v.data), name="dv_dt_phys",
+                    dims=state.v.dims, units="m/s^2",
+                )
             zero_tend = HydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="du_dt_phys", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="dv_dt_phys", dims=dims_3d, units="m/s^2"),
-                dT_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd), name="dT_dt_phys", dims=dims_3d, units="K/s"),
-                dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=_sd), name="dp_s_dt_phys", dims=dims_2d, units="Pa/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_sd), name="dphis_dt_phys", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros_like(state.u.data), name="du_dt_phys",
+                            dims=state.u.dims, units="m/s^2"),
+                dT_dt=Field(data=jnp.zeros_like(state.T.data), name="dT_dt_phys",
+                            dims=dims_T, units="K/s"),
+                dp_s_dt=Field(data=jnp.zeros_like(state.p_s.data), name="dp_s_dt_phys",
+                              dims=dims_ps, units="Pa/s"),
+                dphis_dt=Field(data=jnp.zeros_like(state.p_s.data), name="dphis_dt_phys",
+                               dims=dims_ps, units="m^2/s^3"),
+                dv_dt=dv_dt_zero,
             )
             return zero_tend, None
 
@@ -201,7 +217,7 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
         else:
             first = fn0(state, grid, sigma_coord)
         du_dt = first.du_dt.data
-        dv_dt = first.dv_dt.data
+        dv_dt = first.dv_dt.data if first.dv_dt is not None else None
         dT_dt = first.dT_dt.data
         dp_s_dt = first.dp_s_dt.data
         dphis_dt = first.dphis_dt.data
@@ -220,7 +236,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             else:
                 t = fn(state, grid, sigma_coord)
             du_dt = du_dt + t.du_dt.data
-            dv_dt = dv_dt + t.dv_dt.data
+            if dv_dt is not None and t.dv_dt is not None:
+                dv_dt = dv_dt + t.dv_dt.data
             dT_dt = dT_dt + t.dT_dt.data
             dp_s_dt = dp_s_dt + t.dp_s_dt.data
             dphis_dt = dphis_dt + t.dphis_dt.data
@@ -233,20 +250,24 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
                         combined_tracer_tends[k] = v.data
 
         # Build tracer_tendencies dict with Field wrappers
-        dims_3d = ("face", "x", "y", "level")
         tracer_tends_out = None
         if combined_tracer_tends:
             tracer_tends_out = {
-                k: Field(data=v, name=f"d{k}_dt_phys", dims=dims_3d, units="kg/kg/s")
+                k: Field(data=v, name=f"d{k}_dt_phys",
+                         dims=first.dT_dt.dims, units="kg/kg/s")
                 for k, v in combined_tracer_tends.items()
             }
 
+        combined_dv_dt = None
+        if first.dv_dt is not None:
+            combined_dv_dt = first.dv_dt.replace(data=dv_dt)
+
         combined = HydrostaticTendencies(
             du_dt=first.du_dt.replace(data=du_dt),
-            dv_dt=first.dv_dt.replace(data=dv_dt),
             dT_dt=first.dT_dt.replace(data=dT_dt),
             dp_s_dt=first.dp_s_dt.replace(data=dp_s_dt),
             dphis_dt=first.dphis_dt.replace(data=dphis_dt),
+            dv_dt=combined_dv_dt,
             tracer_tendencies=tracer_tends_out,
         )
         phys_state_out = _build_updated_phys_state(phys_state, phys_updates)
@@ -459,3 +480,11 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     physics_fn.reset_state = reset_state
     physics_fn.set_time = set_time
     return physics_fn
+
+
+# ======================================================================
+# MPAS (Voronoi mesh) — uses unified hydrostatic combined path
+# ======================================================================
+
+def _make_mpas_combined(config: PhysicsConfig, dt: float) -> Callable:
+    return _make_hydrostatic_combined(config, dt, model_type="mpas")
