@@ -148,6 +148,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     cdgrid: CubedSphereCDGrid,
     config: OceanConfig = OceanConfig(),
     physics_fn=None,
+    surface_forcing=None,
 ) -> OceanTendencies:
     """Compute 3D baroclinic tendencies using C-D grid operators.
 
@@ -321,7 +322,7 @@ def ocean_baroclinic_tendencies_cdgrid(
             du_dt = du_dt + hyperdiffusion_3d(u_a * mask_3d, grid, config.hyperdiff_coeff)
             dv_dt = dv_dt + hyperdiffusion_3d(v_a * mask_3d, grid, config.hyperdiff_coeff)
     else:
-        phys = physics_fn(state, grid, z_coord)
+        phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
         dv_dt = dv_dt + phys.dv_dt.data
         dT_dt = dT_dt + phys.dT_dt.data

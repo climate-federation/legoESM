@@ -42,7 +42,8 @@ def make_surface_forcing_physics(
 
 def _make_none() -> Callable:
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         return _zero_tendencies(state)
     return physics_fn
 
@@ -52,7 +53,8 @@ def _make_prescribed(config: SurfaceForcingConfig) -> Callable:
     cfg = config.prescribed
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         out = prescribed_surface_forcing(
             state.u.data, state.v.data, state.T.data, state.S.data,
@@ -67,7 +69,8 @@ def _make_restoring(config: SurfaceForcingConfig) -> Callable:
     cfg = config.restoring
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         out = restoring_surface_forcing(state.T.data, state.S.data, grid, cfg)
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
@@ -78,7 +81,8 @@ def _make_bulk_formulas(config: SurfaceForcingConfig) -> Callable:
     cfg = config.bulk_formulas
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         out = bulk_formula_surface_forcing(
             state.T.data, state.S.data, z_coord, J, cfg,

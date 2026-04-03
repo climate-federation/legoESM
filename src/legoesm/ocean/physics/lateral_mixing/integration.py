@@ -43,7 +43,8 @@ def make_lateral_mixing_physics(
 
 def _make_none() -> Callable:
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         return _zero_tendencies(state)
     return physics_fn
 
@@ -53,7 +54,8 @@ def _make_harmonic(config: LateralMixingConfig) -> Callable:
     cfg = config.harmonic
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         out = harmonic_lateral_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             state.land_mask.data, grid, cfg,
@@ -67,7 +69,8 @@ def _make_biharmonic(config: LateralMixingConfig) -> Callable:
     cfg = config.biharmonic
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         out = biharmonic_lateral_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             state.land_mask.data, grid, cfg,
@@ -81,7 +84,8 @@ def _make_gm_redi(config: LateralMixingConfig) -> Callable:
     cfg = config.gm_redi
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         rho = _compute_rho(state, z_coord, J)
         out = gm_redi_lateral_mixing(

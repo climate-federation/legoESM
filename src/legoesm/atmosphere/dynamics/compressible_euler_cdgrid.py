@@ -50,6 +50,7 @@ from legoesm.grids.cubed_sphere_cdgrid import (
     create_cubed_sphere_cdgrid,
 )
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
@@ -280,7 +281,7 @@ def cdgrid_compressible_euler_slow_tendencies(
     )
 
 
-class CDGridCompressibleEulerModel:
+class CDGridCompressibleEulerModel(IntegrationMixin):
     """FV3-style C-D grid non-hydrostatic compressible Euler model.
 
     Parameters
@@ -426,20 +427,4 @@ class CDGridCompressibleEulerModel:
     def step_with_physics(self, state, dt, physics_fn=None):
         return self.step(state, dt, physics_fn=physics_fn)
 
-    def integrate(self, state, duration, dt, save_every=1, physics_fn=None):
-        n_steps = int(duration / dt)
-        trajectory = [state]
-        for i in range(n_steps):
-            state = self.step(state, dt, physics_fn=physics_fn)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-        return state, trajectory
-
-    def integrate_scan(self, state, n_steps, dt):
-        def scan_fn(state, _):
-            new_state = self.step(state, dt)
-            return new_state, new_state
-        final_state, trajectory = jax.lax.scan(
-            scan_fn, state, jnp.arange(n_steps)
-        )
-        return final_state, trajectory
+    # integrate() and integrate_scan() inherited from IntegrationMixin

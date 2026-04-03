@@ -42,6 +42,7 @@ from legoesm.grids.polar_filter import (
     compute_polar_filter_mask,
     fourier_filter_3d,
 )
+from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.timestepping.split_explicit import (
     split_explicit_step,
     SplitExplicitConfig,
@@ -256,7 +257,7 @@ def fv_compressible_euler_latlon_slow_tendencies(
     )
 
 
-class FVCompressibleEulerLatLonModel:
+class FVCompressibleEulerLatLonModel(IntegrationMixin):
     """FV3-style non-hydrostatic compressible Euler model on the lat-lon grid.
 
     Parameters
@@ -304,84 +305,8 @@ class FVCompressibleEulerLatLonModel:
         )
 
     def step(self, state: NonHydrostaticState, dt: float) -> NonHydrostaticState:
-        """Advance one time step using split-explicit RK3 with FV transport.
-
-        This non-jitted wrapper precomputes target mass outside the JIT
-        boundary, then delegates to the jitted ``_step_jitted``.
-        """
-        # Precompute target mass outside JIT boundary (host-side only).
-        if (self.config.fix_mass
-                and self.config.anchor_mass_to_initial
-                and self._target_mass is None):
-            from legoesm.core.conservation import compute_nh_dry_mass
-            self._target_mass = compute_nh_dry_mass(
-                state.rho_prime.data, self.height_coord,
-                self.terrain_metric, self.grid,
-            )
-        return self._step_jitted(state, dt)
-
-    @partial(jax.jit, static_argnums=(0,))
-    def _step_jitted(self, state: NonHydrostaticState, dt: float) -> NonHydrostaticState:
-        """JIT-compiled step core (no physics)."""
-        from legoesm.atmosphere.dynamics.compressible_euler import CompressibleEulerConfig
-        acoustic_cfg = CompressibleEulerConfig(
-            g=self.config.g,
-            n_acoustic_substeps=self.config.n_acoustic_substeps,
-            semi_implicit_acoustic=self.config.semi_implicit_acoustic,
-        )
-
-        se_config = SplitExplicitConfig(
-            n_substeps=self.config.n_acoustic_substeps,
-            outer_integrator=self.config.outer_integrator,
-        )
-
-        def slow_tendency_fn(s):
-            tend = fv_compressible_euler_latlon_slow_tendencies(
-                s, self.grid, self.height_coord, self.terrain_metric,
-                self.config, polar_mask=self.polar_mask,
-            )
-            return NonHydrostaticState(
-                u=s.u.replace(data=tend.du_dt.data),
-                v=s.v.replace(data=tend.dv_dt.data),
-                w=s.w.replace(data=tend.dw_dt.data),
-                theta_prime=s.theta_prime.replace(data=tend.dtheta_prime_dt.data),
-                rho_prime=s.rho_prime.replace(data=tend.drho_prime_dt.data),
-                phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
-                tracers=s.tracers.replace(data=tend.dtracers_dt.data),
-            )
-
-        def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
-            if self.config.semi_implicit_acoustic:
-                return acoustic_substeps_semi_implicit(
-                    s, slow_tend, dt_s, n_sub, cfg,
-                    self.height_coord, self.terrain_metric, acoustic_cfg,
-                )
-            return acoustic_substeps(
-                s, slow_tend, dt_s, n_sub, cfg,
-                self.height_coord, self.terrain_metric, acoustic_cfg,
-            )
-
-        state_new = split_explicit_step(
-            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-        )
-
-        if self.config.fix_mass:
-            from legoesm.core.conservation import (
-                fix_mass_nonhydrostatic, compute_nh_dry_mass,
-            )
-            # _target_mass is precomputed in step() outside the JIT boundary.
-            target = self._target_mass if self.config.anchor_mass_to_initial else (
-                compute_nh_dry_mass(
-                    state.rho_prime.data, self.height_coord,
-                    self.terrain_metric, self.grid,
-                )
-            )
-            state_new = fix_mass_nonhydrostatic(
-                state_new, target, self.height_coord,
-                self.terrain_metric, self.grid,
-            )
-
-        return state_new
+        """Advance one time step (delegates to step_with_physics)."""
+        return self.step_with_physics(state, dt, physics_fn=None)
 
     def step_with_physics(
         self,
@@ -479,24 +404,4 @@ class FVCompressibleEulerLatLonModel:
 
         return state_new
 
-    def integrate(
-        self,
-        state: NonHydrostaticState,
-        duration: float,
-        dt: float,
-        save_every: int = 1,
-        physics_fn=None,
-    ) -> tuple[NonHydrostaticState, list[NonHydrostaticState]]:
-        """Integrate forward for a given duration."""
-        n_steps = int(duration / dt)
-        trajectory = [state]
-
-        for i in range(n_steps):
-            if physics_fn is not None:
-                state = self.step_with_physics(state, dt, physics_fn)
-            else:
-                state = self.step(state, dt)
-            if (i + 1) % save_every == 0:
-                trajectory.append(state)
-
-        return state, trajectory
+    # integrate() and integrate_scan() inherited from IntegrationMixin

@@ -43,7 +43,8 @@ def make_vertical_mixing_physics(
 
 def _make_none() -> Callable:
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         return _zero_tendencies(state)
     return physics_fn
 
@@ -53,7 +54,8 @@ def _make_constant(config: VerticalMixingConfig) -> Callable:
     cfg = config.constant
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         out = constant_vertical_mixing(
             state.u.data, state.v.data, state.T.data, state.S.data,
@@ -68,7 +70,8 @@ def _make_richardson(config: VerticalMixingConfig) -> Callable:
     cfg = config.richardson
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         rho = _compute_rho(state, z_coord, J)
         out = richardson_vertical_mixing(
@@ -84,7 +87,8 @@ def _make_kpp(config: VerticalMixingConfig) -> Callable:
     cfg = config.kpp
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         rho = _compute_rho(state, z_coord, J)
         out = kpp_vertical_mixing(

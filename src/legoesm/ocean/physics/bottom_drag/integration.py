@@ -40,7 +40,8 @@ def make_bottom_drag_physics(
 
 def _make_none() -> Callable:
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         return _zero_tendencies(state)
     return physics_fn
 
@@ -50,7 +51,8 @@ def _make_linear(config: BottomDragConfig) -> Callable:
     cfg = config.linear
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         out = linear_bottom_drag(state.u.data, state.v.data, cfg)
         return _wrap_tendencies(out.du_dt, out.dv_dt, state)
     return physics_fn
@@ -61,7 +63,8 @@ def _make_quadratic(config: BottomDragConfig) -> Callable:
     cfg = config.quadratic
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         out = quadratic_bottom_drag(state.u.data, state.v.data, z_coord, J, cfg)
         return _wrap_tendencies(out.du_dt, out.dv_dt, state)

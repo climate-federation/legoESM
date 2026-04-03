@@ -135,6 +135,7 @@ def latlon_ocean_baroclinic_tendencies(
     z_coord: OceanZStarCoordinate,
     config: LatLonOceanConfig = LatLonOceanConfig(),
     physics_fn=None,
+    surface_forcing=None,
 ) -> LatLonOceanTendencies:
     """Compute 3D baroclinic tendencies on a lat-lon grid.
 
@@ -294,7 +295,7 @@ def latlon_ocean_baroclinic_tendencies(
                 lap_v, grid, mask=mask,
             )
     else:
-        phys = physics_fn(state, grid, z_coord)
+        phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
         dv_dt = dv_dt + phys.dv_dt.data
         dT_dt = dT_dt + phys.dT_dt.data

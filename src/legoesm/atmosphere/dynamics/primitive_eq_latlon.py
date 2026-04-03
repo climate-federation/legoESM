@@ -333,46 +333,13 @@ class LatLonPrimitiveEquationModel(IntegrationMixin):
             self.polar_mask,
         )
 
-    @partial(jax.jit, static_argnums=(0,))
     def step(
         self,
         state: HydrostaticState,
         dt: float,
     ) -> HydrostaticState:
-        """Advance one time step using SSP-RK3."""
-        # Filter state BEFORE RK3 so the original state used in the
-        # RK3 linear combinations is clean.
-        if self.polar_mask is not None:
-            state = _filter_state(state, self.grid, self.polar_mask)
-
-        def tendency_fn(s):
-            tend = latlon_hydrostatic_tendencies(
-                s, self.grid, self.sigma_coord, self.config,
-                polar_mask=self.polar_mask,
-            )
-            return HydrostaticState(
-                u=s.u.replace(data=tend.du_dt.data),
-                v=s.v.replace(data=tend.dv_dt.data),
-                T=s.T.replace(data=tend.dT_dt.data),
-                p_s=s.p_s.replace(data=tend.dp_s_dt.data),
-                phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
-            )
-
-        state_new = dispatch_integrator(state, tendency_fn, dt, self.config.time_integrator)
-
-        # Temperature and pressure floors
-        T_new = jnp.clip(state_new.T.data, self.config.T_min, None)
-        p_s_new = jnp.clip(state_new.p_s.data, self.config.p_floor, None)
-        state_new = state_new._replace(
-            T=state_new.T.replace(data=T_new),
-            p_s=state_new.p_s.replace(data=p_s_new),
-        )
-
-        if self.config.use_conservation_fixer and self.config.fix_mass:
-            from legoesm.core.conservation import fix_mass_hydrostatic_latlon
-            state_new = fix_mass_hydrostatic_latlon(state_new, state, self.grid)
-
-        return state_new
+        """Advance one time step (delegates to step_with_physics)."""
+        return self.step_with_physics(state, dt, physics_fn=None)
 
     @partial(jax.jit, static_argnums=(0, 3))
     def step_with_physics(
@@ -381,7 +348,7 @@ class LatLonPrimitiveEquationModel(IntegrationMixin):
         dt: float,
         physics_fn=None,
     ) -> HydrostaticState:
-        """Advance one time step with physics forcing.
+        """Advance one time step with optional physics forcing.
 
         Parameters
         ----------
@@ -392,7 +359,8 @@ class LatLonPrimitiveEquationModel(IntegrationMixin):
         physics_fn : callable, optional
             Function (state, grid, sigma_coord) -> HydrostaticTendencies.
         """
-        # Filter state BEFORE RK3
+        # Filter state BEFORE RK3 so the original state used in the
+        # RK3 linear combinations is clean.
         if self.polar_mask is not None:
             state = _filter_state(state, self.grid, self.polar_mask)
 
