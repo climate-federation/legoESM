@@ -15,6 +15,9 @@ import jax
 import jax.numpy as jnp
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+# Epsilon for energy fixers: prevents sqrt(0) which has infinite gradient,
+# causing 0*Inf=NaN in the backward pass when jnp.maximum clamps KE_target to 0.
+_EPS_ENERGY = 1e-20
 
 from legoesm.core.operators import global_integral, _is_distributed
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -208,7 +211,7 @@ def fix_energy_shallow_water(
     )
 
     KE_target = E_old - PE_new
-    KE_target = jnp.maximum(KE_target, 0.0)
+    KE_target = jnp.maximum(KE_target, _EPS_ENERGY)
     scale = jnp.where(KE_new > _TINY, jnp.sqrt(KE_target / KE_new), 1.0)
 
     u_fixed = state_new.u.replace(data=u_new * scale)
@@ -839,7 +842,7 @@ def fix_energy_mpas(state, target_energy, mesh, g=9.80616):
     KE = jnp.sum(KE_cells * h * area)
     PE = jnp.sum(0.5 * g * (h + h_s) ** 2 * area)
 
-    KE_target = jnp.maximum(target_energy - PE, 0.0)
+    KE_target = jnp.maximum(target_energy - PE, _EPS_ENERGY)
     scale = jnp.where(KE > _TINY, jnp.sqrt(KE_target / KE), 1.0)
     u_fixed = state.u.replace(data=u * scale)
     return state._replace(u=u_fixed)

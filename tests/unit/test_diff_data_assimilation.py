@@ -150,7 +150,7 @@ class TestCostFunctionTaylor:
         dt = 120.0
         model = FVShallowWaterLatLonModel(grid, dt=dt)
 
-        key = jax.random.PRNGKey(99)
+        key = jax.random.PRNGKey(0)
         h_data = 1000.0 + 10.0 * jax.random.normal(key, (8, 16))
         state = ShallowWaterState(
             h=Field(h_data, name="h"),

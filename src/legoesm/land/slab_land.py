@@ -19,7 +19,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
@@ -97,8 +97,11 @@ def step_land(
     # so it can be applied to updated soil moisture later.
     stomatal_ratio = beta / jnp.maximum(beta_soil, 1e-10)
 
-    # Surface saturation humidity
-    q_sat_sfc = saturation_mixing_ratio(T_soil, forcing.p_surface)
+    # Surface saturation humidity: use ice saturation over snow-covered ground
+    q_sat_liq = saturation_mixing_ratio(T_soil, forcing.p_surface)
+    q_sat_ice = saturation_mixing_ratio_ice(T_soil, forcing.p_surface)
+    has_snow = snow > 1e-6  # kg/m2 threshold
+    q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     q_sfc = beta * q_sat_sfc
 
     # Bulk fluxes
@@ -181,9 +184,17 @@ def step_land(
         runoff=runoff,
     )
 
-    # Recompute upward LW with updated temperature for consistency
+    # Post-step albedo: reflects updated snow state for the next atmosphere step
+    if config.snow_albedo_feedback and lat is not None:
+        alpha_new = compute_land_albedo(
+            lat, snow_new, snow_age_new, config.land_albedo,
+        )
+    else:
+        alpha_new = alpha
+
+    # Recompute upward LW with updated temperature and post-step albedo
     _, _, lw_up_new = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_soil_new, alpha,
+        forcing.sw_down, forcing.lw_down, T_soil_new, alpha_new,
         config.emissivity_land,
     )
 
@@ -193,7 +204,11 @@ def step_land(
     w_frac_new = jnp.clip(W_new / config.W_max, 0.0, 1.0)
     beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
     beta_new = stomatal_ratio * beta_soil_new
-    q_sfc_new = beta_new * saturation_mixing_ratio(T_soil_new, forcing.p_surface)
+    q_sat_liq_new = saturation_mixing_ratio(T_soil_new, forcing.p_surface)
+    q_sat_ice_new = saturation_mixing_ratio_ice(T_soil_new, forcing.p_surface)
+    has_snow_new = snow_new > 1e-6
+    q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
+    q_sfc_new = beta_new * q_sat_sfc_new
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
@@ -214,7 +229,7 @@ def step_land(
 
     response = TileResponse(
         T_surface=T_soil_new,
-        albedo=alpha,
+        albedo=alpha_new,
         emissivity=jnp.broadcast_to(jnp.array(config.emissivity_land), T_soil.shape),
         z0=jnp.broadcast_to(jnp.array(config.z0_land), T_soil.shape),
         q_surface=q_sfc_new,

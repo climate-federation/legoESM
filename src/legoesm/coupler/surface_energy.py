@@ -45,6 +45,10 @@ def surface_radiation_fluxes(
     """
     sw_net = (1.0 - alpha) * sw_down
     lw_down_abs = emissivity * lw_down
-    lw_up = emissivity * constants.sigma_sb * T_surface ** 4
-    lw_net = lw_down_abs - lw_up
+    lw_emit = emissivity * constants.sigma_sb * T_surface ** 4
+    # Total upward LW = thermal emission + reflected downward LW
+    # (consistent with gray-radiation surface BC)
+    lw_up = lw_emit + (1.0 - emissivity) * lw_down
+    # Net LW at the surface = absorbed - emitted (surface energy budget)
+    lw_net = lw_down_abs - lw_emit
     return sw_net, lw_net, lw_up

@@ -107,7 +107,7 @@ class TestLatLonShallowWater:
         self.dt = 120.0
         self.model = FVShallowWaterLatLonModel(grid, config, dt=self.dt)
 
-        key = jax.random.PRNGKey(1)
+        key = jax.random.PRNGKey(0)
         h_data = 1000.0 * jnp.ones((8, 16)) + 10.0 * jax.random.normal(key, (8, 16))
         self.state = ShallowWaterState(
             h=Field(h_data, name="h"),
@@ -139,6 +139,38 @@ class TestLatLonShallowWater:
 
         grad = jax.grad(loss)(state.h.data)
         assert_gradient_ok(grad, "LatLon SW 5 steps")
+
+    def test_grad_5_steps_seed1(self):
+        # Regression test: seed=1 previously produced NaN gradients due to
+        # sqrt(0) infinite gradient in the energy conservation fixer.
+        # Fixed by clamping KE_target to _EPS_ENERGY instead of 0.
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig,
+        )
+        from legoesm.core.state import ShallowWaterState
+
+        grid = create_latlon_grid(8, 16)
+        dt = 120.0
+        model = FVShallowWaterLatLonModel(grid, dt=dt)
+        key = jax.random.PRNGKey(1)
+        h_data = 1000.0 + 10.0 * jax.random.normal(key, (8, 16))
+        state = ShallowWaterState(
+            h=Field(h_data, name="h"),
+            u=Field(jnp.zeros((8, 16)), name="u"),
+            v=Field(jnp.zeros((8, 16)), name="v"),
+            h_s=Field(jnp.zeros((8, 16)), name="h_s"),
+        )
+
+        def loss(h_data):
+            s = state._replace(h=state.h.replace(data=h_data))
+            def body(carry, _):
+                return model.step(carry, dt), None
+            s_final, _ = jax.lax.scan(body, s, None, length=5)
+            return jnp.sum(s_final.h.data ** 2)
+
+        grad = jax.grad(loss)(state.h.data)
+        assert_gradient_ok(grad, "LatLon SW 5 steps seed=1")
 
 
 # ============================================================================

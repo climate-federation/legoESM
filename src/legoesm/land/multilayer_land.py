@@ -19,7 +19,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
@@ -105,8 +105,11 @@ def step_multilayer_land(
     # so it can be applied to updated soil moisture later (same as slab land).
     stomatal_ratio = beta / jnp.maximum(beta_soil, 1e-10)
 
-    # --- Surface saturation humidity ---
-    q_sat_sfc = saturation_mixing_ratio(T_surface, forcing.p_surface)
+    # --- Surface saturation humidity: use ice saturation over snow ---
+    q_sat_liq = saturation_mixing_ratio(T_surface, forcing.p_surface)
+    q_sat_ice = saturation_mixing_ratio_ice(T_surface, forcing.p_surface)
+    has_snow = snow > 1e-6  # kg/m2 threshold
+    q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     q_sfc = beta * q_sat_sfc
 
     # --- Bulk fluxes ---
@@ -166,7 +169,22 @@ def step_multilayer_land(
     # --- Infiltration flux for Richards equation ---
     # Convert precip (kg/m2/s) and evap (kg/m2/s) to water depth rate (m/s)
     rho_w = constants.rho_water
-    evap_rate = lhflx / constants.L_v  # kg/m2/s, positive up
+    evap_rate_demand = lhflx / constants.L_v  # kg/m2/s, positive up
+
+    # --- Water-limit evaporation ---
+    # Total extractable water: integrate (theta - theta_r) * dz * rho_w
+    dz = grid.dz  # (n_layers,) layer thicknesses [m]
+    extractable_water = jnp.sum(
+        jnp.maximum(theta - theta_r, 0.0) * dz[None, :], axis=-1
+    ) * rho_w  # (ncol,) kg/m2
+    precip_rain = forcing.precip_total - forcing.precip_snow
+    melt_rate = snow_melt / dt  # kg/m2/s meltwater entering liquid budget
+    max_evap = jnp.maximum(extractable_water / dt + precip_rain + melt_rate, 0.0)
+    evap_rate = jnp.minimum(evap_rate_demand, max_evap)
+
+    # Excess latent heat (demand that couldn't be met) redirected to soil warming
+    evap_excess_energy = (evap_rate_demand - evap_rate) * constants.L_v  # W/m2
+    lhflx_actual = evap_rate * constants.L_v
 
     # --- Root water uptake sink term ---
     # Exponential root distribution: root_frac(z) ~ exp(-z / root_depth)
@@ -191,8 +209,6 @@ def step_multilayer_land(
 
     # Infiltration: rain + snow meltwater enter the soil; snow goes to snowpack.
     # Only bare-soil evap subtracted (transpiration handled by sink).
-    precip_rain = forcing.precip_total - forcing.precip_snow
-    melt_rate = snow_melt / dt  # kg/m2/s meltwater entering liquid budget
     flux_top = (precip_rain + melt_rate - evap_bare) / rho_w  # m/s, positive down
 
     # Root sink: distribute transpiration across layers weighted by moisture-
@@ -201,7 +217,6 @@ def step_multilayer_land(
     # the water budget. beta_root weights the distribution but must NOT reduce
     # the total — the surface flux already embedded moisture stress via f_veg.
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w  # m/s
-    dz = grid.dz  # (n_layers,) layer thicknesses [m]
     weight = root_frac[None, :] * beta_root  # (ncol, n_layers)
     weight_sum = jnp.sum(weight, axis=-1, keepdims=True)  # (ncol, 1)
     # Safe normalization: when all layers are dry, E_pot_transp ≈ 0 anyway
@@ -226,6 +241,8 @@ def step_multilayer_land(
     richards_out = richards_out._replace(theta_new=theta_corrected)
 
     # --- Soil thermal diffusion: update soil temperature ---
+    # Excess energy from water-limited evaporation warms the soil
+    G_surface = G_surface + evap_excess_energy
     T_soil_new = solve_soil_thermal(
         T_soil, richards_out.theta_new, grid,
         config.hydraulics, config.thermal,
@@ -245,8 +262,17 @@ def step_multilayer_land(
 
     # --- Build TileResponse ---
     T_surface_new = T_soil_new[:, 0]
+
+    # Post-step albedo: reflects updated snow for the next atmosphere step
+    if config.snow_albedo_feedback and lat is not None:
+        alpha_new = compute_land_albedo(
+            lat, snow_new, snow_age_new, config.land_albedo,
+        )
+    else:
+        alpha_new = alpha
+
     _, _, lw_up_new = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_surface_new, alpha,
+        forcing.sw_down, forcing.lw_down, T_surface_new, alpha_new,
         config.emissivity_land,
     )
 
@@ -259,7 +285,11 @@ def step_multilayer_land(
     )
     beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
     beta_new = stomatal_ratio * beta_soil_new
-    q_sfc_new = beta_new * saturation_mixing_ratio(T_surface_new, forcing.p_surface)
+    q_sat_liq_new = saturation_mixing_ratio(T_surface_new, forcing.p_surface)
+    q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
+    has_snow_new = snow_new > 1e-6
+    q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
+    q_sfc_new = beta_new * q_sat_sfc_new
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":
@@ -280,14 +310,14 @@ def step_multilayer_land(
 
     response = TileResponse(
         T_surface=T_surface_new,
-        albedo=alpha,
+        albedo=alpha_new,
         emissivity=jnp.broadcast_to(
             jnp.array(config.emissivity_land), T_surface.shape
         ),
         z0=jnp.broadcast_to(jnp.array(config.z0_land), T_surface.shape),
         q_surface=q_sfc_new,
         shflx=shflx,
-        lhflx=lhflx,
+        lhflx=lhflx_actual,
         tau_x=tau_x,
         tau_y=tau_y,
         lw_up=lw_up_new,

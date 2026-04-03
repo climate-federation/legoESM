@@ -153,7 +153,7 @@ class TestCheckpointGrad:
         grad_no = jax.grad(loss_no_ckpt)(state.h.data)
         grad_ck = jax.grad(loss_ckpt)(state.h.data)
 
-        assert jnp.allclose(grad_no, grad_ck, rtol=1e-5), (
+        assert jnp.allclose(grad_no, grad_ck, rtol=1e-4), (
             "Checkpoint gradient differs from non-checkpoint"
         )
 

@@ -169,6 +169,13 @@ def brooks_corey_theta(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.nd
     return config.theta_r + (config.theta_sat - config.theta_r) * Se
 
 
+def brooks_corey_psi(theta: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
+    """Matric potential from volumetric water content (inverse)."""
+    Se = jnp.clip((theta - config.theta_r) / (config.theta_sat - config.theta_r),
+                  1e-6, 1.0 - 1e-6)
+    return config.psi_b * Se ** (-1.0 / config.lambda_bc)
+
+
 def brooks_corey_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
     """Hydraulic conductivity."""
     Se = brooks_corey_Se(psi, config)
@@ -456,6 +463,8 @@ def psi_from_theta(theta: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndar
         return van_genuchten_psi(theta, config)
     elif curve == "clapp_hornberger" or curve == "campbell":
         return clapp_hornberger_psi(theta, config)
+    elif curve == "brooks_corey":
+        return brooks_corey_psi(theta, config)
     elif curve == "pdi":
         return pdi_psi(theta, config)
     elif curve == "lu":

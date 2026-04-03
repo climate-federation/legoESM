@@ -44,7 +44,12 @@ def _create_vertical(nlev: int, vertical_coord: str):
     return create_sigma_coordinate(nlev)
 
 
-def _make_rrtmgp_physics(model_type: str, dt: float):
+def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None):
+    """Create RRTMGP physics, optionally combined with Held-Suarez forcing.
+
+    When *hs_fn* is provided the returned function sums the HS Newtonian
+    relaxation / Rayleigh drag tendencies with RRTMGP radiative tendencies.
+    """
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -59,7 +64,66 @@ def _make_rrtmgp_physics(model_type: str, dt: float):
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    return make_physics(phys_cfg, model_type=model_type, dt=dt)
+    rrtmgp_fn = make_physics(phys_cfg, model_type=model_type, dt=dt)
+
+    if hs_fn is None:
+        return rrtmgp_fn
+
+    if model_type == "spectral_pe":
+        def combined_fn(state, grid, sigma_coord, phys_state=None):
+            rrtmgp_result = rrtmgp_fn(state, grid, sigma_coord, phys_state=phys_state)
+            rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
+            phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
+            hs_tend = hs_fn(state, grid, sigma_coord)
+            from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+            summed = SpectralHydrostaticState(
+                vor_hat=rrtmgp_tend.vor_hat.replace(
+                    data=rrtmgp_tend.vor_hat.data + hs_tend.vor_hat.data),
+                div_hat=rrtmgp_tend.div_hat.replace(
+                    data=rrtmgp_tend.div_hat.data + hs_tend.div_hat.data),
+                T_hat=rrtmgp_tend.T_hat.replace(
+                    data=rrtmgp_tend.T_hat.data + hs_tend.T_hat.data),
+                lnps_hat=rrtmgp_tend.lnps_hat.replace(
+                    data=rrtmgp_tend.lnps_hat.data + hs_tend.lnps_hat.data),
+                phis_hat=rrtmgp_tend.phis_hat.replace(
+                    data=rrtmgp_tend.phis_hat.data + hs_tend.phis_hat.data),
+            )
+            return summed, phys_state_out
+    else:
+        def combined_fn(state, grid, sigma_coord, phys_state=None):
+            rrtmgp_result = rrtmgp_fn(state, grid, sigma_coord, phys_state=phys_state)
+            rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
+            phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
+            hs_tend = hs_fn(state, grid, sigma_coord)
+            from legoesm.core.state import HydrostaticTendencies
+            dv_dt = None
+            if rrtmgp_tend.dv_dt is not None and hs_tend.dv_dt is not None:
+                dv_dt = rrtmgp_tend.dv_dt.replace(
+                    data=rrtmgp_tend.dv_dt.data + hs_tend.dv_dt.data)
+            elif rrtmgp_tend.dv_dt is not None:
+                dv_dt = rrtmgp_tend.dv_dt
+            elif hs_tend.dv_dt is not None:
+                dv_dt = hs_tend.dv_dt
+            summed = HydrostaticTendencies(
+                du_dt=rrtmgp_tend.du_dt.replace(
+                    data=rrtmgp_tend.du_dt.data + hs_tend.du_dt.data),
+                dT_dt=rrtmgp_tend.dT_dt.replace(
+                    data=rrtmgp_tend.dT_dt.data + hs_tend.dT_dt.data),
+                dp_s_dt=rrtmgp_tend.dp_s_dt.replace(
+                    data=rrtmgp_tend.dp_s_dt.data + hs_tend.dp_s_dt.data),
+                dphis_dt=rrtmgp_tend.dphis_dt.replace(
+                    data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
+                dv_dt=dv_dt,
+                tracer_tendencies=rrtmgp_tend.tracer_tendencies,
+            )
+            return summed, phys_state_out
+
+    if hasattr(rrtmgp_fn, 'set_time'):
+        combined_fn.set_time = rrtmgp_fn.set_time
+    if hasattr(rrtmgp_fn, 'reset_state'):
+        combined_fn.reset_state = rrtmgp_fn.reset_state
+
+    return combined_fn
 
 
 # Diffusion coefficient helpers (match test matrix)
@@ -160,7 +224,8 @@ def run_cubed_sphere(days, nlev, vertical_coord):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig)
-    from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+    from legoesm.atmosphere.physics.held_suarez import (
+        held_suarez_init, held_suarez_forcing)
     from legoesm.core.operators import global_integral
 
     n = 36
@@ -177,7 +242,7 @@ def run_cubed_sphere(days, nlev, vertical_coord):
     model = CDGridPrimitiveEquationModel(grid, sigma, config)
     state = held_suarez_init(grid, sigma)
 
-    physics_fn = _make_rrtmgp_physics("hydrostatic", dt)
+    physics_fn = _make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing)
 
     def step_fn(s, dt_):
         return model.step_with_physics(s, dt_, physics_fn)
@@ -205,7 +270,8 @@ def run_latlon(days, nlev, vertical_coord):
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
         LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-    from legoesm.atmosphere.physics.held_suarez_latlon import held_suarez_init_latlon
+    from legoesm.atmosphere.physics.held_suarez_latlon import (
+        held_suarez_init_latlon, held_suarez_forcing_latlon)
     from legoesm.core.operators_latlon import global_integral as global_integral_ll
 
     n_lat, n_lon = 72, 144
@@ -222,7 +288,7 @@ def run_latlon(days, nlev, vertical_coord):
     model = LatLonPrimitiveEquationModel(grid, sigma, config)
     state = held_suarez_init_latlon(grid, sigma)
 
-    physics_fn = _make_rrtmgp_physics("hydrostatic", dt)
+    physics_fn = _make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing_latlon)
 
     def step_fn(s, dt_):
         return model.step_with_physics(s, dt_, physics_fn)
@@ -251,7 +317,8 @@ def run_icosahedral(days, nlev):
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-    from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_init_mpas
+    from legoesm.atmosphere.physics.held_suarez_mpas import (
+        held_suarez_init_mpas, held_suarez_forcing_mpas)
 
     level = 5
     mesh = create_voronoi_mesh(level)
@@ -265,7 +332,7 @@ def run_icosahedral(days, nlev):
     model = MPASPrimitiveEquationModel(mesh, sigma, config)
     state = held_suarez_init_mpas(mesh, sigma)
 
-    physics_fn = _make_rrtmgp_physics("mpas", dt)
+    physics_fn = _make_rrtmgp_physics("mpas", dt, hs_fn=held_suarez_forcing_mpas)
 
     def step_fn(s, dt_):
         return model.step(s, dt_, physics_fn)
@@ -294,6 +361,7 @@ def run_spectral(days, nlev, vertical_coord):
     from legoesm.atmosphere.dynamics.spectral_pe import (
         SpectralPrimitiveEquationModel, SpectralPEConfig,
         isothermal_rest_state_spectral, spectral_pe_to_grid)
+    from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing_spectral
 
     n_max = 21
     grid = create_gaussian_grid(n_max)
@@ -308,7 +376,7 @@ def run_spectral(days, nlev, vertical_coord):
     model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
     state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
 
-    physics_fn = _make_rrtmgp_physics("spectral_pe", dt)
+    physics_fn = _make_rrtmgp_physics("spectral_pe", dt, hs_fn=held_suarez_forcing_spectral)
 
     def step_fn(s, dt_):
         return model.step(s, dt_, physics_fn=physics_fn)

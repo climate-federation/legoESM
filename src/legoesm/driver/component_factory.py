@@ -467,7 +467,7 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
         land_config = LandConfig()
 
     if isinstance(land_config, MultiLayerLandConfig):
-        logger.info("Land: multilayer model (n_soil=%d)", land_config.n_soil)
+        logger.info("Land: multilayer model (n_layers=%d)", land_config.soil_grid.n_layers)
         return step_multilayer_land
 
     if isinstance(land_config, LandConfig):

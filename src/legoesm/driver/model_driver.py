@@ -67,6 +67,7 @@ class ModelDriver:
         self._fric_decay = None
         self._qv_smooth_coeff = None
         self._hyperdiffusion_3d_fn = None
+        self._hs_newtonian_relax = None  # precomputed HS relaxation fn
         self._ensemble_size = 1
         self._device_config = None
         self._carry_aux: dict = {}  # held radiation + carry metadata for checkpoint
@@ -701,6 +702,37 @@ class ModelDriver:
             from legoesm.core.operators_latlon_3d import hyperdiffusion_3d
         self._hyperdiffusion_3d_fn = hyperdiffusion_3d
 
+        # Held-Suarez Newtonian temperature relaxation (precomputed coefficients)
+        if cfg.held_suarez_forcing:
+            from legoesm.atmosphere.physics.held_suarez import (
+                held_suarez_equilibrium_temperature,
+                K_A, K_S, SIGMA_B,
+            )
+            _hs_sigma_b = SIGMA_B
+            _hs_k_a = K_A
+            _hs_k_s = K_S
+
+            def _newtonian_relax(T, p_s, lat):
+                """Compute dT/dt from HS Newtonian relaxation [K/s].
+
+                Handles arbitrary lat shapes: (6,n,n) for cubed-sphere,
+                (n_lat, n_lon) for lat-lon, (n_lat,) for Gaussian.
+                """
+                p_full = p_s[..., None] * sigma_full
+                # Expand lat to broadcast with (... , nlev)
+                n_expand = p_full.ndim - lat.ndim
+                lat_exp = lat
+                for _ in range(n_expand):
+                    lat_exp = lat_exp[..., None]
+                T_eq = held_suarez_equilibrium_temperature(lat_exp, p_full)
+                sigma_factor = jnp.maximum(
+                    0.0, (sigma_full - _hs_sigma_b) / (1.0 - _hs_sigma_b))
+                cos_lat_4 = jnp.cos(lat_exp) ** 4
+                k_T = _hs_k_a + (_hs_k_s - _hs_k_a) * sigma_factor * cos_lat_4
+                return -k_T * (T - T_eq)
+
+            self._hs_newtonian_relax = _newtonian_relax
+
     def _save_config(self) -> None:
         """Save experiment config to output directory (rank 0 only)."""
         if self._mpi_rank is not None and self._mpi_rank != 0:
@@ -956,7 +988,7 @@ class ModelDriver:
         return step, day
 
     def run(self, start_step: int = 0, start_day: float | None = None,
-            compiled: bool = True) -> str:
+            compiled: bool = True, segment_callback=None) -> str:
         """Run the time integration.
 
         Parameters
@@ -970,12 +1002,16 @@ class ModelDriver:
             ``jax.lax.scan``.  If ``False``, use the legacy per-step
             Python loop (useful for debugging or when the compiled path
             is not applicable).
+        segment_callback : callable, optional
+            Called at each diagnostic interval boundary with
+            ``(driver, day, dt_segment)`` for coupled-model integration.
 
         Returns
         -------
         str
             Run status ("COMPLETED" or "BLOWUP at day ...").
         """
+        self._segment_callback = segment_callback
         # MPAS and spectral states use different pytree layouts;
         # use dedicated simple run loops.
         if self.config.grid.grid_type == "voronoi":
@@ -1025,6 +1061,35 @@ class ModelDriver:
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT)
+
+        # Wrap with Held-Suarez forcing when enabled
+        if cfg.held_suarez_forcing:
+            from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_forcing_mpas
+            _rrtmgp_fn = physics_fn
+
+            def physics_fn(state, mesh, sigma_coord, phys_state=None):
+                rrtmgp_result = _rrtmgp_fn(state, mesh, sigma_coord, phys_state=phys_state)
+                rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
+                phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
+                hs_tend = held_suarez_forcing_mpas(state, mesh, sigma_coord)
+                from legoesm.core.state import HydrostaticTendencies
+                summed = HydrostaticTendencies(
+                    du_dt=rrtmgp_tend.du_dt.replace(
+                        data=rrtmgp_tend.du_dt.data + hs_tend.du_dt.data),
+                    dT_dt=rrtmgp_tend.dT_dt.replace(
+                        data=rrtmgp_tend.dT_dt.data + hs_tend.dT_dt.data),
+                    dp_s_dt=rrtmgp_tend.dp_s_dt.replace(
+                        data=rrtmgp_tend.dp_s_dt.data + hs_tend.dp_s_dt.data),
+                    dphis_dt=rrtmgp_tend.dphis_dt.replace(
+                        data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
+                    tracer_tendencies=rrtmgp_tend.tracer_tendencies,
+                )
+                return summed, phys_state_out
+
+            if hasattr(_rrtmgp_fn, 'set_time'):
+                physics_fn.set_time = _rrtmgp_fn.set_time
+            if hasattr(_rrtmgp_fn, 'reset_state'):
+                physics_fn.reset_state = _rrtmgp_fn.reset_state
 
         run_status = "COMPLETED"
         logger.info(f"Starting MPAS: {n_steps_total - start_step} steps, {N_DAYS} days")
@@ -1152,6 +1217,11 @@ class ModelDriver:
                 q_v=q_v_col, insolation=insol, config=gray_config,
             )
             dT_dt_rad = rad_out.heating_rate.reshape(shape_3d)
+
+            # Held-Suarez Newtonian temperature relaxation
+            if self._hs_newtonian_relax is not None:
+                dT_dt_rad = dT_dt_rad + self._hs_newtonian_relax(
+                    T_g, p_s_g, self._grid_lat)
 
             # Rayleigh friction
             du_dt = -k_f * u_g
@@ -1451,6 +1521,7 @@ class ModelDriver:
             albedo_ocean=cfg.albedo_ocean,
             ghg_vmr_override=ghg_vmr,
             owned_face_ids=self._owned_face_ids,
+            hs_newtonian_relax=self._hs_newtonian_relax,
         )
 
         logger.info(
@@ -1535,7 +1606,7 @@ class ModelDriver:
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
 
-            # Keep carry auxiliary fields for checkpoint persistence
+            # Keep carry auxiliary fields for checkpoint persistence and coupling
             self._carry_aux = {
                 "held_dT_rad": held_dT_rad,
                 "held_sw_net_sfc": held_sw_net_sfc,
@@ -1545,6 +1616,7 @@ class ModelDriver:
                 "held_sw_down_toa": held_sw_down_toa,
                 "target_moisture": _target_moisture,
                 "target_mass": _target_mass,
+                "seg_precip": seg_precip,
             }
 
             current_step = seg_end_step
@@ -1623,6 +1695,11 @@ class ModelDriver:
                     run_status = error
                     break
 
+                # Segment callback for coupled integration (e.g., coupler step)
+                if self._segment_callback is not None:
+                    dt_seg = float(seg_steps * DT)
+                    self._segment_callback(self, day, dt_seg)
+
                 # Adaptive dt: if CFL exceeds threshold, halve dt and rebuild
                 if _seg_max_cfl > 1.0:
                     DT = DT / 2.0
@@ -1655,6 +1732,7 @@ class ModelDriver:
                         albedo_ice=cfg.albedo_ice, albedo_ocean=cfg.albedo_ocean,
                         ghg_vmr_override=ghg_vmr,
                         owned_face_ids=self._owned_face_ids,
+                        hs_newtonian_relax=self._hs_newtonian_relax,
                     )
 
             # Checkpoint
@@ -1754,6 +1832,9 @@ class ModelDriver:
 
         # Apply warmup tendencies
         new_T = self.state.T.data + DT * phys_out.dT_dt
+        if self._hs_newtonian_relax is not None:
+            new_T = new_T + DT * self._hs_newtonian_relax(
+                self.state.T.data, self.state.p_s.data, self._grid_lat)
         self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
         self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
         self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
@@ -1839,6 +1920,12 @@ class ModelDriver:
 
             # (c) Update state
             new_T = self.state.T.data + DT * phys_out.dT_dt
+
+            # Held-Suarez Newtonian temperature relaxation
+            if self._hs_newtonian_relax is not None:
+                new_T = new_T + DT * self._hs_newtonian_relax(
+                    self.state.T.data, self.state.p_s.data, self._grid_lat)
+
             self.q_v = jnp.maximum(self.q_v + DT * phys_out.dq_v_dt, 0.0)
             self.q_c = jnp.maximum(self.q_c + DT * phys_out.dq_c_dt, 0.0)
             self.q_r = jnp.maximum(self.q_r + DT * phys_out.dq_r_dt, 0.0)
@@ -1935,6 +2022,17 @@ class ModelDriver:
                     logger.warning(f"  {error}")
                     run_status = error
                     break
+
+                # Store carry_aux for coupling access
+                self._carry_aux = {
+                    "held_sw_net_sfc": phys_out.sw_net_sfc,
+                    "held_lw_net_sfc": phys_out.lw_net_sfc,
+                    "seg_precip": phys_out.precip,
+                }
+
+                # Segment callback for coupled integration
+                if self._segment_callback is not None:
+                    self._segment_callback(self, day, DT)
 
             # Checkpoint
             if checkpoint_interval > 0 and (step + 1) % checkpoint_interval == 0:
