@@ -60,7 +60,7 @@
   \includegraphics[width=0.35\textwidth]{../legoESM.png}\\[12pt]
   \textbf{legoESM Scientific Guide}\\[6pt]
   {\Large A Fully Differentiable Earth System Model in JAX}\\[6pt]
-  {\large Version 4.0 --- March 2026}
+  {\large Version 5.0 --- April 2026}
 }
 \author{legoESM Development Team}
 \date{}
@@ -1481,6 +1481,59 @@ with $k_a=1/(40\;\text{day})$, $k_s=1/(4\;\text{day})$, $\sigma_b=0.7$.
 \end{equation}
 
 
+\section{Additional Turbulence Schemes}
+
+\subsection{Smagorinsky}
+Constant eddy diffusivity: $K_m = K_h = \mathrm{const}$.
+
+\subsection{YSU (Yonsei University)}
+Nonlocal K-profile boundary-layer scheme with explicit entrainment at the PBL top, following \citet{HoltslagBoville1993} with enhanced counter-gradient terms.
+
+\subsection{CLUBB-lite}
+Higher-order prognostic moment closure with five variables:
+$\overline{w'^2}$, $\overline{\theta_l'^2}$, $\overline{r_t'^2}$,
+$\overline{w'\theta_l'}$, $\overline{w'r_t'}$.
+Cloud fraction is diagnosed via an assumed bivariate Gaussian PDF of
+$\theta_l$ and $r_t$.
+
+\subsection{EDMF Turbulence}
+Eddy-diffusivity mass-flux unified boundary-layer framework combining
+diffusive transport (for weakly convective conditions) with explicit
+updraft mass flux (for strongly convective conditions) in a single scheme.
+
+\section{Additional Convection Schemes}
+
+\subsection{Kuo (1974)}
+Column moisture-excess scheme activating when column-integrated moisture
+convergence exceeds a threshold.  Excess moisture is partitioned between
+heating (fraction $\alpha_{\mathrm{heat}}$) and moistening
+($1-\alpha_{\mathrm{heat}}$).
+
+\subsection{Deep Convective Adjustment (DCA)}
+Bottom-to-top column adjustment toward a moist-adiabatic reference profile,
+with smooth sigmoid activation for JAX differentiability.
+
+\section{Gravity Wave Drag Schemes}
+
+Six GWD parameterisations are available:
+\begin{enumerate}[nosep]
+  \item \textbf{Rayleigh friction}: Linear damping above a threshold height.
+  \item \textbf{Lindzen (1981)}: Orographic GWD with saturation and critical-level absorption.
+  \item \textbf{McFarlane (1987)}: Enhanced orographic scheme with improved wave saturation.
+  \item \textbf{Hines (1997)}: Doppler-spread parameterisation for non-orographic GWD, propagating a spectrum of gravity waves upward with nonlinear interactions.
+  \item \textbf{Prognostic Spectral}: Multi-azimuthal ($N_{\mathrm{az}}$), multi-wavenumber ($N_k$) spectrum with prognostic wave momentum flux and vertical propagation via \texttt{jax.lax.scan}.
+  \item \textbf{ML Emulator}: Equinox MLP surrogate mapping column state to GWD tendencies.
+\end{enumerate}
+
+\section{Neural and Learned Physics}
+
+\subsection{NeuralPhysics}
+An Equinox MLP column model that maps the column state (temperature, moisture, wind, surface fluxes) to physics tendencies.  Hybrid mode blends learned corrections with conventional parameterisation output via a configurable blending coefficient.
+
+\subsection{LearnedColumn}
+Per-column physics replacement following Rasp et al.\ (2018), mapping the full column state vector to temperature and moisture tendencies via a neural network, trainable end-to-end with the dynamical core.
+
+
 % #############################################################################
 \chapter{Ocean Model}
 \label{ch:ocean}
@@ -1712,6 +1765,52 @@ $Z$ (zooplankton), $D$ (detritus), following \citet{Fasham1990}:
 Redfield stoichiometry ($R_{C:N}=6.625$) couples biology to DIC/ALK.
 
 
+\section{Ocean Bottom Drag}
+
+Two formulations:
+
+\paragraph{Linear drag.}
+$\vect{\tau}_b = -r\,\vect{u}_b$, with configurable coefficient $r$.
+
+\paragraph{Quadratic drag.}
+$\vect{\tau}_b = -C_d\,|\vect{u}_b|\,\vect{u}_b$, with $C_d = 2.5\times10^{-3}$ (default).
+
+\section{Ocean Surface Forcing}
+
+Three modes are available:
+\begin{itemize}[nosep]
+  \item \textbf{Prescribed}: Fixed wind stress ($\tau_x$, $\tau_y$) and heat flux with latitudinal profiles.
+  \item \textbf{Restoring}: SST/SSS restoring toward climatology (Haney-style) with cosine latitude temperature profile ($25^\circ$C at equator, $0^\circ$C at poles).
+  \item \textbf{Bulk formulas}: COARE-like air--sea fluxes with drag ($C_D$), Stanton ($C_H$), and Dalton ($C_E$) coefficients, reference height, and stability corrections.
+\end{itemize}
+
+\section{Shortwave Penetration}
+
+Subsurface shortwave absorption follows the Jerlov (1968) water type classification with five types (I, IA, IB, II, III).  Each type defines a two-band exponential decay profile:
+\begin{equation}
+  I(z) = I_0\bigl[R\,e^{-z/\zeta_1} + (1-R)\,e^{-z/\zeta_2}\bigr],
+\end{equation}
+where $R$, $\zeta_1$, $\zeta_2$ depend on the water type.
+
+\section{Ocean Convection}
+
+\subsection{Enhanced Diffusion}
+Convective adjustment via enhanced diffusivity where $N^2 < 0$:
+$K_{\mathrm{conv}} = K_{\mathrm{max}}$ in statically unstable regions, with smooth transitions.
+
+\subsection{Plume Model}
+Entraining mass-flux ocean convection with entrainment rate $\alpha_{\mathrm{plume}}=0.1$ and background detrainment $\varepsilon=10^{-3}$~m$^{-1}$.
+
+\section{Richardson-Number Vertical Mixing}
+
+Interior shear-driven diffusivity:
+\begin{equation}
+  K_v = K_{v,0}\,(1 + 5\,\mathrm{Ri})^{-1},
+  \qquad \mathrm{Ri} = \frac{N^2}{S^2},
+\end{equation}
+complementing KPP boundary-layer mixing with interior shear instability parameterisation.
+
+
 % #############################################################################
 \chapter{Land Surface Model}
 \label{ch:land}
@@ -1850,6 +1949,67 @@ The coupled $A$--$g_s$--$C_i$ system is solved by 5 fixed-point
 iterations, unrolled for JAX JIT compatibility.
 
 
+\section{Plant Functional Types}
+\label{sec:pft}
+
+Land surface parameters are spatially heterogeneous and depend on vegetation type.  legoESM implements a CLM5-style Plant Functional Type (PFT) system with 17 types spanning needleleaf/broadleaf trees (evergreen and deciduous, temperate and tropical), shrubs, grasses (C3/C4), and crops.
+
+\subsection{Parameter Lookup}
+
+For each grid cell, the effective parameter $\bar{p}$ is a PFT-fraction-weighted average:
+\begin{equation}
+  \bar{p} = \sum_{k=1}^{17} f_k\,p_k,
+\end{equation}
+where $f_k$ is the fractional coverage of PFT~$k$ and $p_k$ is the parameter value for that type.
+
+\subsection{Trainable Parameters}
+
+Twelve land surface parameters are trainable per PFT: vegetation albedo ($\alpha_{\mathrm{veg}}$), emissivity ($\varepsilon$), roughness length ($z_0$), maximum soil water ($W_{\max}$), soil heat capacity ($C_{\mathrm{soil}}$), soil depth ($d_{\mathrm{soil}}$), root depth ($z_{\mathrm{root}}$), wilting point ($\theta_{\mathrm{wp}}$), field capacity ($\theta_{\mathrm{fc}}$), maximum carboxylation rate ($V_{c,\max,25}$), leaf carbon mass per area (LCMA), and stomatal slope ($g_1$).
+
+Each parameter is bounded via sigmoid transforms:
+\begin{equation}
+  p = p_{\min} + (p_{\max}-p_{\min})\,\sigma(x_{\mathrm{raw}}),
+\end{equation}
+where $x_{\mathrm{raw}}$ is the unconstrained trainable value.
+
+\subsection{Neural Parameter Provider}
+
+An alternative to PFT lookup, a 3-hidden-layer fully connected network (GELU activation, 48 hidden units) maps static land features---cyclic latitude/longitude, one-hot soil type, normalised elevation, precipitation, temperature, and forest age---to the 12 land parameters.  Sigmoid output bounds match the PFT physical ranges.
+
+
+\section{DifferLand: Differentiable Land Model Training}
+\label{sec:differland}
+
+The DifferLand framework enables end-to-end gradient-based optimisation of land surface and carbon cycle parameters.  Three carbon cycle modes are available:
+\begin{itemize}[nosep]
+  \item \textbf{none}: Carbon cycle disabled; LAI prescribed.
+  \item \textbf{differland}: Prognostic DALEC-990 with trainable allocation fractions, decomposition rates, and phenology parameters.
+  \item \textbf{seasonal}: Prescribed seasonal LAI cycle; carbon pools diagnostic only.
+\end{itemize}
+
+\subsection{Phenology}
+
+Leaf emergence and fall follow hemisphere-aware Gaussian windows:
+\begin{equation}
+  f_{\mathrm{on}}(d) = \exp\!\Bigl[-\frac{(d-d_{\mathrm{Bday}})^2}{2\,\tau_{\mathrm{on}}^2}\Bigr],
+  \qquad
+  f_{\mathrm{off}}(d) = \exp\!\Bigl[-\frac{(d-d_{\mathrm{Fday}})^2}{2\,\tau_{\mathrm{off}}^2}\Bigr],
+\end{equation}
+where $d$ is the day of year, $d_{\mathrm{Bday}}$ and $d_{\mathrm{Fday}}$ are budburst and leaf-fall dates, and $\tau$ controls the transition width.
+
+\subsection{Decomposition}
+
+Litter and SOM decomposition rates follow $Q_{10}$ temperature sensitivity with moisture limitation:
+\begin{equation}
+  k(T,\theta) = k_0\,Q_{10}^{(T-T_{\mathrm{ref}})/10}\,f_w(\theta),
+\end{equation}
+where $f_w$ is a piecewise-linear function of soil moisture.
+
+\subsection{NPP Allocation}
+
+Net primary production ($\mathrm{NPP}=\mathrm{GPP}-R_a$) is allocated sequentially: foliar $\to$ labile $\to$ root $\to$ wood, with allocation fractions as trainable parameters.
+
+
 % #############################################################################
 \chapter{Sea Ice}
 \label{ch:ice}
@@ -1905,6 +2065,20 @@ remapping redistributes ice across thickness categories, maintaining a
 well-resolved thickness distribution.
 
 
+\section{Free-Drift Dynamics}
+
+When \texttt{dynamics="free\_drift"}, ice velocity is diagnosed from ocean and atmospheric drag:
+\begin{equation}
+  \vect{u}_i = C_{\mathrm{ocean}}\,\vect{u}_{\mathrm{ocean}}
+  + \frac{C_{\mathrm{atm}}\,\rho_{\mathrm{air}}}{\rho_{\mathrm{ice}}}\,\vect{u}_{\mathrm{wind}},
+\end{equation}
+with $C_{\mathrm{ocean}}=5.5\times10^{-3}$, $C_{\mathrm{atm}}=1.3\times10^{-3}$.
+
+\section{Ice Tracer Transport}
+
+When \texttt{transport="advect"}, ice thickness, concentration, and temperature are advected by the ice velocity field.  For multi-category ice, advection is applied independently to each category via \texttt{jax.vmap}.
+
+
 % #############################################################################
 \chapter{Tile-Based Coupler}
 \label{ch:coupler}
@@ -1932,8 +2106,25 @@ where $\mu_0=\cos\theta_z$.
 
 \section{Lake Model}
 
-A two-layer model with epilimnion (warm, mixed) and hypolimnion (cold, deep)
-connected by entrainment mixing.
+A two-layer model with epilimnion (warm, mixed, default depth $h_{\mathrm{epi}}=5$~m)
+and hypolimnion (cold, deep, $h_{\mathrm{hypo}}=20$~m).
+
+\subsection{Energy Balance}
+The epilimnion temperature evolves under the surface energy budget:
+\begin{equation}
+  \rho_w\,c_w\,h_{\mathrm{epi}}\,\frac{\dd T_{\mathrm{epi}}}{\dd t}
+  = \mathrm{SW}_{\mathrm{net}} + \mathrm{LW}_{\mathrm{net}} - \mathrm{SH} - \mathrm{LH} - F_{\mathrm{mix}},
+\end{equation}
+where the mixing flux between the two layers is
+\begin{equation}
+  F_{\mathrm{mix}} = \rho_w\,c_w\,k_{\mathrm{eff}}\,\frac{T_{\mathrm{epi}}-T_{\mathrm{hypo}}}{d_{\mathrm{mid}}},
+\end{equation}
+with wind-enhanced effective diffusivity
+$k_{\mathrm{eff}} = k_{\mathrm{mix}}\,(1+\alpha_{\mathrm{wind}}\,|\vect{V}|)$.
+
+\subsection{Freezing}
+Lake temperature is clamped at $T_f = 273.15$~K.  Bulk flux options:
+constant coefficients or iterative Monin--Obukhov similarity theory.
 
 
 % #############################################################################
