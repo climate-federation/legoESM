@@ -35,6 +35,11 @@ from legoesm.land.soil_thermal import solve_soil_thermal
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
+def _get(lp, name: str, fallback):
+    """Read from spatial LandSurfaceParams if available, else config scalar."""
+    return getattr(lp, name) if lp is not None else fallback
+
+
 def step_multilayer_land(
     state: MultiLayerLandState,
     forcing: AtmToSurface,
@@ -44,6 +49,7 @@ def step_multilayer_land(
     lat: jnp.ndarray | None = None,
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
+    land_params=None,
 ) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
     """Step the multi-layer land model forward by dt seconds.
 
@@ -68,6 +74,7 @@ def step_multilayer_land(
     (MultiLayerLandState, TileResponse, CarbonState | None)
         Updated state, surface response, and updated carbon state.
     """
+    lp = land_params
     T_soil = state.T_soil       # (ncol, n_layers)
     psi = state.psi_soil        # (ncol, n_layers)
     theta = state.theta_soil    # (ncol, n_layers)
@@ -76,6 +83,16 @@ def step_multilayer_land(
 
     # Build soil grid from config
     grid = make_soil_grid(config.soil_grid)
+
+    # Spatially-varying surface parameters (or config scalar fallbacks)
+    albedo_land = _get(lp, "albedo_veg", config.albedo_land)
+    emissivity = _get(lp, "emissivity", config.emissivity_land)
+    z0 = _get(lp, "z0", config.z0_land)
+
+    # Spatially-varying root zone params
+    root_depth = _get(lp, "root_depth", config.root_depth)
+    theta_wp = _get(lp, "theta_wp", config.theta_wp)
+    theta_fc = _get(lp, "theta_fc", config.theta_fc)
 
     # Surface temperature = top soil layer
     T_surface = T_soil[:, 0]
@@ -98,6 +115,7 @@ def step_multilayer_land(
     # --- Stomatal conductance (if enabled) ---
     beta, gpp_farq = compute_effective_beta(
         T_surface, forcing, beta_soil, config, carbon_state, dt,
+        land_params=lp,
     )
 
     # Stomatal reduction factor: ratio of effective beta to soil-only beta.
@@ -122,7 +140,7 @@ def step_multilayer_land(
             forcing.T_lowest, forcing.q_lowest,
             T_surface, q_sfc, rho,
             z_ref=config.z_ref,
-            z0_init=config.z0_land,
+            z0_init=z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
         )
@@ -140,12 +158,12 @@ def step_multilayer_land(
             lat, snow, snow_age, config.land_albedo,
         )
     else:
-        alpha = jnp.broadcast_to(jnp.array(config.albedo_land), T_surface.shape)
+        alpha = jnp.broadcast_to(jnp.asarray(albedo_land), T_surface.shape)
 
     # --- Radiation ---
     sw_net, lw_net, lw_up = surface_radiation_fluxes(
         forcing.sw_down, forcing.lw_down, T_surface, alpha,
-        config.emissivity_land,
+        emissivity,
     )
 
     # --- Ground heat flux (residual of surface energy balance) ---
@@ -189,14 +207,25 @@ def step_multilayer_land(
     # --- Root water uptake sink term ---
     # Exponential root distribution: root_frac(z) ~ exp(-z / root_depth)
     z_centers = grid.z_node  # (n_layers,) depth below surface [m]
-    root_frac = jnp.exp(-z_centers / config.root_depth)
-    root_frac = root_frac / jnp.sum(root_frac)  # normalize to 1
+    if lp is not None:
+        # Spatial root_depth: (ncol,) → (ncol, 1) for broadcast with (n_layers,)
+        root_frac = jnp.exp(-z_centers[None, :] / root_depth[:, None])
+        root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
+    else:
+        root_frac = jnp.exp(-z_centers / root_depth)
+        root_frac = root_frac / jnp.sum(root_frac)  # normalize to 1
 
     # Soil moisture stress: beta(theta) = clip((theta - theta_wp)/(theta_fc - theta_wp), 0, 1)
-    beta_root = jnp.clip(
-        (theta - config.theta_wp) / (config.theta_fc - config.theta_wp + 1e-10),
-        0.0, 1.0,
-    )
+    if lp is not None:
+        beta_root = jnp.clip(
+            (theta - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
+            0.0, 1.0,
+        )
+    else:
+        beta_root = jnp.clip(
+            (theta - theta_wp) / (theta_fc - theta_wp + 1e-10),
+            0.0, 1.0,
+        )
 
     # Partition evaporation into bare-soil and root-mediated transpiration
     # to avoid double-counting (surface flux_top subtracts bare-soil evap,
@@ -273,7 +302,7 @@ def step_multilayer_land(
 
     _, _, lw_up_new = surface_radiation_fluxes(
         forcing.sw_down, forcing.lw_down, T_surface_new, alpha_new,
-        config.emissivity_land,
+        emissivity,
     )
 
     # Recompute q_surface with updated temperature.
@@ -298,6 +327,7 @@ def step_multilayer_land(
         # photosynthesis and respiration use consistent end-of-step state.
         _, gpp_farq_new = compute_effective_beta(
             T_surface_new, forcing, beta_soil_new, config, carbon_state, dt,
+            land_params=lp,
         )
         carbon_state_new, co2_flux = step_carbon(
             carbon_state, forcing.sw_down, T_surface_new, forcing.co2_ppmv,
@@ -311,10 +341,8 @@ def step_multilayer_land(
     response = TileResponse(
         T_surface=T_surface_new,
         albedo=alpha_new,
-        emissivity=jnp.broadcast_to(
-            jnp.array(config.emissivity_land), T_surface.shape
-        ),
-        z0=jnp.broadcast_to(jnp.array(config.z0_land), T_surface.shape),
+        emissivity=jnp.broadcast_to(jnp.asarray(emissivity), T_surface.shape),
+        z0=jnp.broadcast_to(jnp.asarray(z0), T_surface.shape),
         q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx_actual,

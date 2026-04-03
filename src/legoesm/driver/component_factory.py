@@ -523,6 +523,8 @@ def create_coupler(
     lake_config=None,
     lat=None,
     grid=None,
+    land_param_provider=None,
+    land_features=None,
 ):
     """Create the surface coupler.
 
@@ -585,4 +587,6 @@ def create_coupler(
         lake_config=lake_config,
         lat=lat,
         grid=grid,
+        land_param_provider=land_param_provider,
+        land_features=land_features,
     )

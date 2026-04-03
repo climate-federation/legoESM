@@ -32,6 +32,11 @@ from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
+def _get(lp, name: str, fallback):
+    """Read from spatial LandSurfaceParams if available, else config scalar."""
+    return getattr(lp, name) if lp is not None else fallback
+
+
 def step_land(
     state: LandState,
     forcing: AtmToSurface,
@@ -41,6 +46,7 @@ def step_land(
     lat: jnp.ndarray | None = None,
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
+    land_params=None,
 ) -> tuple[LandState, TileResponse, CarbonState | None]:
     """Step the slab land model forward by dt seconds.
 
@@ -65,10 +71,19 @@ def step_land(
     (LandState, TileResponse, CarbonState | None)
         Updated state, surface response, and updated carbon state.
     """
+    lp = land_params
     T_soil = state.T_soil.data
     W = state.W_bucket.data
     snow = state.snow_depth.data
     snow_age = state.snow_age.data
+
+    # Spatially-varying surface parameters (or config scalar fallbacks)
+    albedo_land = _get(lp, "albedo_veg", config.albedo_land)
+    emissivity = _get(lp, "emissivity", config.emissivity_land)
+    z0 = _get(lp, "z0", config.z0_land)
+    W_max = _get(lp, "W_max", config.W_max)
+    C_soil = _get(lp, "C_soil", config.C_soil)
+    d_soil = _get(lp, "d_soil", config.d_soil)
 
     # --- Surface albedo (from current snow state) ---
     if config.snow_albedo_feedback and lat is not None:
@@ -76,7 +91,7 @@ def step_land(
             lat, snow, snow_age, config.land_albedo,
         )
     else:
-        alpha = jnp.broadcast_to(jnp.array(config.albedo_land), T_soil.shape)
+        alpha = jnp.broadcast_to(jnp.asarray(albedo_land), T_soil.shape)
 
     # Smooth wind speed floor
     wind_speed = jnp.sqrt(
@@ -84,12 +99,13 @@ def step_land(
     )
 
     # Moisture availability: smooth ramp from beta_min to 1
-    w_frac = jnp.clip(W / config.W_max, 0.0, 1.0)
+    w_frac = jnp.clip(W / W_max, 0.0, 1.0)
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac
 
     # --- Stomatal conductance (if enabled) ---
     beta, gpp_farq = compute_effective_beta(
         T_soil, forcing, beta_soil, config, carbon_state, dt,
+        land_params=lp,
     )
 
     # Stomatal reduction factor: ratio of effective beta to soil-only beta.
@@ -114,7 +130,7 @@ def step_land(
             forcing.T_lowest, forcing.q_lowest,
             T_soil, q_sfc, rho,
             z_ref=config.z_ref,
-            z0_init=config.z0_land,
+            z0_init=z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
         )
@@ -129,7 +145,7 @@ def step_land(
     # Radiation
     sw_net, lw_net, lw_up = surface_radiation_fluxes(
         forcing.sw_down, forcing.lw_down, T_soil, alpha,
-        config.emissivity_land,
+        emissivity,
     )
 
     # --- Net surface energy flux (positive = energy into soil) ---
@@ -147,7 +163,7 @@ def step_land(
     # --- Energy balance: dT/dt ---
     # The melt consumes latent heat of fusion, reducing the energy
     # available for warming the soil slab.
-    heat_cap = config.C_soil * config.d_soil
+    heat_cap = C_soil * d_soil
     melt_energy = snow_melt * constants.L_f / dt  # W/m2 consumed by melt
     dT_dt = (Q_net - melt_energy) / heat_cap
     T_soil_new = T_soil + dt * dT_dt
@@ -168,8 +184,8 @@ def step_land(
     dW_dt = precip_rain + melt_rate - evap_rate_actual
     W_unclamped = W + dt * dW_dt
     # Overflow becomes surface runoff rather than being silently discarded
-    runoff = jnp.maximum(W_unclamped - config.W_max, 0.0) / dt  # kg/m2/s
-    W_new = jnp.clip(W_unclamped, 0.0, config.W_max)
+    runoff = jnp.maximum(W_unclamped - W_max, 0.0) / dt  # kg/m2/s
+    W_new = jnp.clip(W_unclamped, 0.0, W_max)
     # Actual lhflx consistent with water-limited evaporation
     lhflx_actual = evap_rate_actual * constants.L_v
 
@@ -195,13 +211,13 @@ def step_land(
     # Recompute upward LW with updated temperature and post-step albedo
     _, _, lw_up_new = surface_radiation_fluxes(
         forcing.sw_down, forcing.lw_down, T_soil_new, alpha_new,
-        config.emissivity_land,
+        emissivity,
     )
 
     # Recompute q_surface from updated T and moisture for consistency.
     # Apply the stomatal reduction factor so that q_surface reflects both
     # soil moisture availability AND stomatal conductance limitation.
-    w_frac_new = jnp.clip(W_new / config.W_max, 0.0, 1.0)
+    w_frac_new = jnp.clip(W_new / W_max, 0.0, 1.0)
     beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
     beta_new = stomatal_ratio * beta_soil_new
     q_sat_liq_new = saturation_mixing_ratio(T_soil_new, forcing.p_surface)
@@ -217,6 +233,7 @@ def step_land(
         # photosynthesis and respiration use consistent end-of-step state.
         _, gpp_farq_new = compute_effective_beta(
             T_soil_new, forcing, beta_soil_new, config, carbon_state, dt,
+            land_params=lp,
         )
         carbon_state_new, co2_flux = step_carbon(
             carbon_state, forcing.sw_down, T_soil_new, forcing.co2_ppmv,
@@ -230,8 +247,8 @@ def step_land(
     response = TileResponse(
         T_surface=T_soil_new,
         albedo=alpha_new,
-        emissivity=jnp.broadcast_to(jnp.array(config.emissivity_land), T_soil.shape),
-        z0=jnp.broadcast_to(jnp.array(config.z0_land), T_soil.shape),
+        emissivity=jnp.broadcast_to(jnp.asarray(emissivity), T_soil.shape),
+        z0=jnp.broadcast_to(jnp.asarray(z0), T_soil.shape),
         q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx_actual,

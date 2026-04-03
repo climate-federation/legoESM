@@ -244,6 +244,8 @@ def make_coupler(
     lake_config: LakeConfig,
     lat: jnp.ndarray | None = None,
     grid=None,
+    land_param_provider=None,
+    land_features: jnp.ndarray | None = None,
 ):
     """Factory that returns step_surface function.
 
@@ -255,6 +257,12 @@ def make_coupler(
     grid : CubedSphereGrid, optional
         Required when ``ice_config.dynamics != "none"`` or
         ``ice_config.transport != "none"``.
+    land_param_provider : eqx.Module, optional
+        Provider that produces spatially-varying ``LandSurfaceParams``.
+        If None, step functions use scalar config values (backward compat).
+    land_features : jnp.ndarray, optional
+        Static feature matrix ``(ncol, n_input)`` for neural provider.
+        Required when ``land_param_provider`` is a ``NeuralParamProvider``.
 
     Returns
     -------
@@ -268,6 +276,8 @@ def make_coupler(
     _lat = lat
     _grid = grid
     _use_multilayer = isinstance(land_config, MultiLayerLandConfig)
+    _land_param_provider = land_param_provider
+    _land_features = land_features
 
     def step_surface(
         sfc_state: SurfaceState,
@@ -293,16 +303,31 @@ def make_coupler(
                 f"{tile_config.f_lake.shape!r} vs {atm_forcing.sw_down.shape!r}",
             )
 
-        # 1. Step land (dispatch slab vs multi-layer)
+        # 1. Materialize spatial land params (once per coupler step)
+        if _land_param_provider is not None:
+            if _land_features is not None:
+                _lp = _land_param_provider(_land_features)
+            else:
+                _lp = _land_param_provider()
+            # For slab land: reshape (ncol,) -> spatial shape (e.g. (6,n,n))
+            if not _use_multilayer:
+                from legoesm.land.surface_params import reshape_params
+                _lp = reshape_params(_lp, atm_forcing.sw_down.shape)
+        else:
+            _lp = None
+
+        # 2. Step land (dispatch slab vs multi-layer)
         if _use_multilayer:
             land_new, land_resp, carbon_new = step_multilayer_land(
                 sfc_state.land, atm_forcing, land_config, U_min, dt,
                 lat=_lat, carbon_state=sfc_state.carbon, doy=doy,
+                land_params=_lp,
             )
         else:
             land_new, land_resp, carbon_new = step_land(
                 sfc_state.land, atm_forcing, land_config, U_min, dt,
                 lat=_lat, carbon_state=sfc_state.carbon, doy=doy,
+                land_params=_lp,
             )
 
         # 2. Step sea ice
