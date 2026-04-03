@@ -283,6 +283,7 @@ def build_segment_fn(
     albedo_ocean=None,
     ghg_vmr_override=None,
     owned_face_ids=None,
+    hs_newtonian_relax=None,
 ):
     """Build a compiled segment function.
 
@@ -336,8 +337,8 @@ def build_segment_fn(
         ``run_segment(carry: SegmentCarry, n_steps: int,
         forcing: SegmentForcing) -> SegmentCarry``
     """
-    from legoesm.core.conservation import compute_global_moisture, fix_moisture_hydrostatic, fix_ps_mass_target
-    from legoesm.core.cfl import cfl_number_from_state, estimate_min_dx_cubed_sphere
+    from legoesm.core.conservation import fix_moisture_hydrostatic, fix_ps_mass_target
+    from legoesm.core.cfl import estimate_min_dx_cubed_sphere
 
     # Precompute minimum grid spacing for CFL monitoring
     if hasattr(grid, 'n'):
@@ -441,7 +442,11 @@ def build_segment_fn(
 
                 # Write physics tendencies back at owned indices.
                 # Non-owned faces keep dynamics-only values (no physics).
-                T_upd = T_new.at[_ofi].set(T_new[_ofi] + _dt * phys_out.dT_dt)
+                _phys_dT = phys_out.dT_dt
+                if hs_newtonian_relax is not None:
+                    _phys_dT = _phys_dT + hs_newtonian_relax(
+                        T_new[_ofi], p_s_new[_ofi], lat[_ofi])
+                T_upd = T_new.at[_ofi].set(T_new[_ofi] + _dt * _phys_dT)
                 q_v_upd = carry.q_v.at[_ofi].set(
                     jnp.maximum(carry.q_v[_ofi] + _dt * phys_out.dq_v_dt, 0.0)
                 )
@@ -485,7 +490,10 @@ def build_segment_fn(
                 )
 
                 # --- State update ---
-                T_upd = T_new + _dt * phys_out.dT_dt
+                _phys_dT_dt = phys_out.dT_dt
+                if hs_newtonian_relax is not None:
+                    _phys_dT_dt = _phys_dT_dt + hs_newtonian_relax(T_new, p_s_new, lat)
+                T_upd = T_new + _dt * _phys_dT_dt
                 q_v_upd = jnp.maximum(carry.q_v + _dt * phys_out.dq_v_dt, 0.0)
                 q_c_upd = jnp.maximum(carry.q_c + _dt * phys_out.dq_c_dt, 0.0)
                 q_r_upd = jnp.maximum(carry.q_r + _dt * phys_out.dq_r_dt, 0.0)

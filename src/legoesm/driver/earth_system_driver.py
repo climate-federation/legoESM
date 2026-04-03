@@ -4,8 +4,8 @@ Orchestrates atmosphere + coupler (land, sea ice, lake) + optional
 ocean model into a single time integration. Builds on the existing
 ``ModelDriver`` for atmosphere and ``make_coupler`` for surface exchange.
 
-The coupler step runs at segment boundaries (host-side), after the
-atmosphere segment completes.  This is a split-step approach where
+The coupler step runs at segment boundaries (host-side), via a callback
+from ``ModelDriver.run()``.  This is a split-step approach where
 atmosphere and surface exchange alternate each diagnostic interval.
 """
 
@@ -16,6 +16,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.config import ExperimentConfig
 
@@ -103,9 +104,9 @@ class EarthSystemDriver:
         logger.info("  EarthSystem: atmosphere + coupler initialized")
 
     def _build_atm_forcing(self, day: float):
-        """Build AtmToSurface coupling fields from current atmosphere state."""
+        """Build AtmToSurface coupling fields from atmosphere state and physics."""
         from legoesm.coupler.coupling_fields import AtmToSurface
-        from legoesm import constants
+        from legoesm.forcing.surface_utils import blend_surface_temperature
 
         state = self._atm.state
         q_v = self._atm.q_v
@@ -118,11 +119,54 @@ class EarthSystemDriver:
         p_low = p_s * sigma_full[-1]
         rho_low = p_low / (constants.R_d * T_low)
 
+        # Extract real radiation and precipitation from last atmosphere physics
+        aux = getattr(self._atm, '_carry_aux', {})
+        sw_net_sfc = aux.get("held_sw_net_sfc", jnp.zeros_like(p_s))
+        lw_net_sfc = aux.get("held_lw_net_sfc", jnp.zeros_like(p_s))
+        seg_precip = aux.get("seg_precip", jnp.zeros_like(p_s))
+
+        # Reconstruct gross downward fluxes from net fluxes.
+        # sw_net = sw_down * (1 - albedo) → sw_down = sw_net / (1 - albedo)
+        # Use the atmosphere's effective surface albedo for reconstruction.
+        cfg = self.config
+        sst, sic = self._atm.get_sst_sic(day)
+        from legoesm.forcing.surface_utils import blend_surface_property
+        albedo_eff = blend_surface_property(
+            sic,
+            getattr(cfg, 'albedo_ice', 0.6),
+            getattr(cfg, 'albedo_ocean', 0.06),
+        )
+        sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
+
+        # lw_net = eps * lw_down - eps * sigma * T_sfc^4
+        # lw_down = (lw_net + eps * sigma * T_sfc^4) / eps
+        T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
+        eps_sfc = 0.96  # typical surface emissivity
+        lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
+        lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
+
+        # Snow fraction: approximate from T_lowest < freezing
+        precip_total = jnp.maximum(seg_precip, 0.0)
+        snow_frac = jnp.where(T_low < constants.T_freeze, 1.0, 0.0)
+        precip_snow = precip_total * snow_frac
+
+        # Cosine zenith: daily-mean approximation cos_zen = Q / S_0
+        from legoesm.forcing.time_utils import day_to_calendar
+        doy, _ = day_to_calendar(day)
+        lat = self._atm._grid_lat
+        if lat is not None:
+            from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
+            S_0 = getattr(cfg, 'S_0', 1360.0)
+            Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
+            cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
+        else:
+            cos_zen = jnp.full_like(p_s, 0.5)
+
         return AtmToSurface(
-            sw_down=jnp.zeros_like(p_s),
-            lw_down=jnp.zeros_like(p_s),
-            precip_total=jnp.zeros_like(p_s),
-            precip_snow=jnp.zeros_like(p_s),
+            sw_down=sw_down,
+            lw_down=lw_down,
+            precip_total=precip_total,
+            precip_snow=precip_snow,
             T_lowest=T_low,
             q_lowest=q_low,
             u_lowest=u_low,
@@ -130,21 +174,21 @@ class EarthSystemDriver:
             p_lowest=p_low,
             p_surface=p_s,
             rho_lowest=rho_low,
-            cos_zenith=jnp.full_like(p_s, 0.5),
+            cos_zenith=cos_zen,
             co2_ppmv=jnp.full_like(p_s, self.config.co2_ppmv),
             has_radiation=jnp.ones_like(p_s),
-            has_precipitation=jnp.zeros_like(p_s),
+            has_precipitation=jnp.where(precip_total > 0, 1.0, 0.0),
         )
 
     def _step_coupler(self, day: float, dt: float):
         """Execute one coupler step: land + ice + lake surface exchange."""
-        from legoesm.forcing.time_utils import day_to_calendar
-
-        doy, _ = day_to_calendar(day)
         atm_forcing = self._build_atm_forcing(day)
 
         # Get ocean SST for ice coupling
         sst, _ = self._atm.get_sst_sic(day)
+
+        from legoesm.forcing.time_utils import day_to_calendar
+        doy, _ = day_to_calendar(day)
 
         self._sfc_state, sfc_response = self._step_surface(
             self._sfc_state,
@@ -159,27 +203,40 @@ class EarthSystemDriver:
 
         return sfc_response
 
+    def _segment_hook(self, driver, day, dt_segment):
+        """Callback invoked at each segment boundary by ModelDriver.
+
+        Runs the coupler and feeds surface temperature back to the
+        atmosphere for the next segment.
+        """
+        if self._step_surface is None:
+            return
+
+        sfc_response = self._step_coupler(day, dt_segment)
+
+        # Feed surface response back: update atmosphere's land surface
+        # temperature override if available.  This is the primary feedback
+        # mechanism — the coupler's blended T_surface influences the next
+        # atmosphere segment's boundary layer computation.
+        if hasattr(driver, '_sfc_T_override'):
+            driver._sfc_T_override = sfc_response.T_surface
+        # Store last surface response for diagnostics
+        self._last_sfc_response = sfc_response
+
     def run(self, start_step: int = 0, start_day: float | None = None) -> str:
         """Run the coupled integration.
 
-        Runs the atmosphere via ModelDriver, then applies the coupler
-        step at each diagnostic interval boundary.
+        Runs the atmosphere via ModelDriver with a segment callback
+        that invokes the coupler at each diagnostic interval boundary.
         """
         logger.info("Starting coupled Earth System run")
 
-        # Run atmosphere segments
-        status = self._atm.run(start_step=start_step, start_day=start_day)
-
-        # Apply coupler step at the end of the run
-        # (for full coupling, this would happen at each segment boundary
-        # inside the atmosphere loop — requires ModelDriver callback support)
-        if status == "COMPLETED" and self._step_surface is not None:
-            cfg = self.config
-            DT = cfg.dycore.dt
-            day = (start_day or cfg.start_day) + cfg.days
-            coupling_dt = float(cfg.output.diag_days * 86400)
-            self._step_coupler(day, coupling_dt)
-            logger.info("  Coupler step applied at end of run")
+        # Run atmosphere with coupler callback at each segment boundary
+        status = self._atm.run(
+            start_step=start_step,
+            start_day=start_day,
+            segment_callback=self._segment_hook,
+        )
 
         logger.info(f"Earth System run: {status}")
         return status

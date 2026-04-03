@@ -19,12 +19,19 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.microphysics.config import SeifertBehengConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
     sedimentation_tendency,
+)
+from legoesm.atmosphere.physics.microphysics._warm_rain import (
+    saturation_adjustment,
+    effective_Nc,
+    autoconversion_sb,
+    accretion,
+    self_collection_breakup,
+    rain_evaporation,
 )
 
 
@@ -57,40 +64,25 @@ def seifert_beheng_microphysics(
     N_r = hydrometeors.N_r
     sharpness = config.saturation_sharpness
 
-    # Effective N_c: use config default if zero
-    N_c_eff = jnp.where(N_c > 1.0, N_c, config.Nc_0 * jnp.ones_like(N_c))
+    N_c_eff = effective_Nc(N_c, config.Nc_0)
 
-    # Saturation adjustment — convert increment [kg/kg] to tendency [kg/kg/s]
-    q_sat = saturation_mixing_ratio(T, p_full)
-    excess = q_v - q_sat
-    cond_frac = jax.nn.sigmoid(sharpness * excess)
-    condensation = cond_frac * excess / dt  # [kg/kg/s]
+    condensation, q_sat = saturation_adjustment(T, q_v, p_full, dt, sharpness)
 
     # 1. Autoconversion (mass-dependent)
-    x_c = jnp.clip(q_c, 0.0) * rho / jnp.clip(N_c_eff, 1.0)
-    onset = jax.nn.sigmoid(sharpness * (x_c - config.x_star))
-    dq_c_au = config.k_au * jnp.clip(q_c, 0.0) ** 2 * onset / rho
-    dN_r_au = dq_c_au * rho / (config.x_star * 20.0)
+    dq_c_au, dN_r_au, x_c = autoconversion_sb(
+        q_c, N_c_eff, rho, config.k_au, config.x_star, sharpness,
+    )
 
     # 2. Accretion
-    dq_c_ac = config.k_ac * jnp.clip(q_c, 0.0) * jnp.clip(q_r, 0.0) * rho
+    dq_c_ac = accretion(q_c, q_r, rho, config.k_ac)
 
-    # 3. Self-collection
-    dN_r_sc = -config.k_sc * jnp.clip(N_r, 0.0) * jnp.clip(q_r, 0.0) * rho
-
-    # 4. Breakup (opposes self-collection for large drops)
-    # Mean rain drop diameter estimate: D_r ~ (q_r * rho / (N_r * pi/6 * rho_w))^(1/3)
-    rho_w = constants.rho_water
-    D_r = jnp.clip(
-        (jnp.clip(q_r, 0.0) * rho / jnp.clip(N_r, 1.0) / (jnp.pi / 6.0 * rho_w)),
-        0.0,
-    ) ** (1.0 / 3.0)
-    breakup_frac = jax.nn.sigmoid(config.breakup_sharpness * (D_r - config.D_eq))
-    dN_r_br = -dN_r_sc * breakup_frac
+    # 3-4. Self-collection and breakup
+    dN_r_sc, dN_r_br = self_collection_breakup(
+        N_r, q_r, rho, config.k_sc, config.breakup_sharpness, config.D_eq,
+    )
 
     # 5. Rain evaporation
-    subsaturation = jnp.clip(q_sat - q_v, 0.0) / jnp.clip(q_sat, 1e-10)
-    evaporation = config.evap_coeff * subsaturation * jnp.clip(q_r, 0.0) ** 0.525
+    evaporation = rain_evaporation(q_v, q_r, q_sat, config.evap_coeff)
 
     # 6. Sedimentation
     rho_sfc = rho[:, -1:]

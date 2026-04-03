@@ -42,8 +42,9 @@ from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.ice.state import SeaIceState
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import init_carbon_state
-from legoesm.land.config import LandConfig
+from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.slab_land import step_land
+from legoesm.land.multilayer_land import step_multilayer_land
 from legoesm.land.state import LandState
 
 
@@ -109,16 +110,25 @@ def init_surface_state(
     from legoesm.core.precision import get_policy
     _sd = get_policy().storage
 
-    land = LandState(
-        T_soil=Field(data=jnp.full(shape, T_soil_init, dtype=_sd),
-                     name="T_soil", dims=dims_2d, units="K"),
-        W_bucket=Field(data=jnp.full(shape, W_bucket_init, dtype=_sd),
-                       name="W_bucket", dims=dims_2d, units="kg/m2"),
-        snow_depth=Field(data=jnp.zeros(shape, dtype=_sd),
-                         name="snow_depth", dims=dims_2d, units="kg/m2"),
-        snow_age=Field(data=jnp.zeros(shape, dtype=_sd),
-                       name="snow_age", dims=dims_2d, units="s"),
-    )
+    if isinstance(land_config, MultiLayerLandConfig):
+        from legoesm.land.multilayer_land import init_multilayer_land_state
+        # For multi-layer land, ncol = product of spatial dims
+        import math
+        ncol = math.prod(shape)
+        land = init_multilayer_land_state(
+            ncol, land_config, T_init=T_soil_init,
+        )
+    else:
+        land = LandState(
+            T_soil=Field(data=jnp.full(shape, T_soil_init, dtype=_sd),
+                         name="T_soil", dims=dims_2d, units="K"),
+            W_bucket=Field(data=jnp.full(shape, W_bucket_init, dtype=_sd),
+                           name="W_bucket", dims=dims_2d, units="kg/m2"),
+            snow_depth=Field(data=jnp.zeros(shape, dtype=_sd),
+                             name="snow_depth", dims=dims_2d, units="kg/m2"),
+            snow_age=Field(data=jnp.zeros(shape, dtype=_sd),
+                           name="snow_age", dims=dims_2d, units="s"),
+        )
 
     ice = SeaIceState(
         h_ice=Field(data=jnp.zeros(shape, dtype=_sd),
@@ -234,6 +244,8 @@ def make_coupler(
     lake_config: LakeConfig,
     lat: jnp.ndarray | None = None,
     grid=None,
+    land_param_provider=None,
+    land_features: jnp.ndarray | None = None,
 ):
     """Factory that returns step_surface function.
 
@@ -245,6 +257,12 @@ def make_coupler(
     grid : CubedSphereGrid, optional
         Required when ``ice_config.dynamics != "none"`` or
         ``ice_config.transport != "none"``.
+    land_param_provider : eqx.Module, optional
+        Provider that produces spatially-varying ``LandSurfaceParams``.
+        If None, step functions use scalar config values (backward compat).
+    land_features : jnp.ndarray, optional
+        Static feature matrix ``(ncol, n_input)`` for neural provider.
+        Required when ``land_param_provider`` is a ``NeuralParamProvider``.
 
     Returns
     -------
@@ -257,6 +275,9 @@ def make_coupler(
     coupling_dt = float(coupler_config.coupling_dt)
     _lat = lat
     _grid = grid
+    _use_multilayer = isinstance(land_config, MultiLayerLandConfig)
+    _land_param_provider = land_param_provider
+    _land_features = land_features
 
     def step_surface(
         sfc_state: SurfaceState,
@@ -282,11 +303,32 @@ def make_coupler(
                 f"{tile_config.f_lake.shape!r} vs {atm_forcing.sw_down.shape!r}",
             )
 
-        # 1. Step land (with optional carbon cycle)
-        land_new, land_resp, carbon_new = step_land(
-            sfc_state.land, atm_forcing, land_config, U_min, dt,
-            lat=_lat, carbon_state=sfc_state.carbon, doy=doy,
-        )
+        # 1. Materialize spatial land params (once per coupler step)
+        if _land_param_provider is not None:
+            if _land_features is not None:
+                _lp = _land_param_provider(_land_features)
+            else:
+                _lp = _land_param_provider()
+            # For slab land: reshape (ncol,) -> spatial shape (e.g. (6,n,n))
+            if not _use_multilayer:
+                from legoesm.land.surface_params import reshape_params
+                _lp = reshape_params(_lp, atm_forcing.sw_down.shape)
+        else:
+            _lp = None
+
+        # 2. Step land (dispatch slab vs multi-layer)
+        if _use_multilayer:
+            land_new, land_resp, carbon_new = step_multilayer_land(
+                sfc_state.land, atm_forcing, land_config, U_min, dt,
+                lat=_lat, carbon_state=sfc_state.carbon, doy=doy,
+                land_params=_lp,
+            )
+        else:
+            land_new, land_resp, carbon_new = step_land(
+                sfc_state.land, atm_forcing, land_config, U_min, dt,
+                lat=_lat, carbon_state=sfc_state.carbon, doy=doy,
+                land_params=_lp,
+            )
 
         # 2. Step sea ice
         ice_new, ice_resp = step_sea_ice(

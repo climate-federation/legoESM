@@ -90,51 +90,10 @@ def _dgrid_to_center_3d(u_d, v_d, cdgrid):
 # Vertical velocity diagnosis
 # ==============================================================================
 
-def _diagnose_w_from_flux_div(flux_div_k, z_coord=None):
-    """Diagnose z-star transport velocity from flux divergence.
-
-    Parameters
-    ----------
-    flux_div_k : array, shape (..., nlev)
-    z_coord : OceanZStarCoordinate or None
-
-    Returns
-    -------
-    w : array, shape (..., nlev+1)
-    """
-    fd_rev = flux_div_k[..., ::-1]
-    cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
-    w_inner = -cumsum_rev[..., ::-1]
-    zeros_bottom = jnp.zeros((*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype)
-    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
-
-    if z_coord is None:
-        return w_euler
-
-    sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
-    deta_dt = w_euler[..., 0:1]
-    return w_euler - sigma * deta_dt
-
-
-def _vertical_advection_ocean(field, w_half, z_coord, jacobian):
-    """Vertical advection -w * d(field)/dz with upwind scheme.
-
-    Parameters
-    ----------
-    field : array, shape (..., nlev)
-    w_half : array, shape (..., nlev+1)
-    z_coord : OceanZStarCoordinate
-    jacobian : array, shape (...)
-
-    Returns
-    -------
-    tendency : array, shape (..., nlev)
-    """
-    w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
-    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
-    dz_half = z_coord.dz_half_ref * jac_safe
-    grad = upwind_vertical_gradient(field, dz_half, w_full)
-    return -w_full * grad
+from legoesm.ocean.vertical import (
+    diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
+    vertical_advection_ocean as _vertical_advection_ocean,
+)
 
 
 # ==============================================================================
@@ -148,6 +107,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     cdgrid: CubedSphereCDGrid,
     config: OceanConfig = OceanConfig(),
     physics_fn=None,
+    surface_forcing=None,
 ) -> OceanTendencies:
     """Compute 3D baroclinic tendencies using C-D grid operators.
 
@@ -321,7 +281,7 @@ def ocean_baroclinic_tendencies_cdgrid(
             du_dt = du_dt + hyperdiffusion_3d(u_a * mask_3d, grid, config.hyperdiff_coeff)
             dv_dt = dv_dt + hyperdiffusion_3d(v_a * mask_3d, grid, config.hyperdiff_coeff)
     else:
-        phys = physics_fn(state, grid, z_coord)
+        phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
         dv_dt = dv_dt + phys.dv_dt.data
         dT_dt = dT_dt + phys.dT_dt.data

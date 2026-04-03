@@ -25,6 +25,7 @@ def compute_effective_beta(
     config,
     carbon_state: CarbonState | None,
     dt: float,
+    land_params=None,
 ) -> tuple[jnp.ndarray, jnp.ndarray | None]:
     """Compute effective moisture availability beta, with optional stomatal/carbon coupling.
 
@@ -47,29 +48,44 @@ def compute_effective_beta(
         Current carbon pools (needed for differland LAI).
     dt : float
         Time step [s] (reserved for future use).
+    land_params : LandSurfaceParams or None
+        Spatially-varying parameters.  When provided, overrides
+        ``config.stomata.Vc_max25``, ``config.stomata.g1_bb``,
+        and ``config.carbon.LCMA`` with per-cell arrays.
 
     Returns
     -------
     (beta, gpp_farq)
         Effective moisture factor [0-1] and Farquhar GPP [gC/m2/s] or None.
     """
+    # Override stomatal / carbon config fields with spatial arrays if provided
+    if land_params is not None:
+        _stomata = config.stomata._replace(
+            Vc_max25=land_params.Vc_max25,
+            g1_bb=land_params.g1,
+        )
+        _carbon = config.carbon._replace(LCMA=land_params.LCMA)
+    else:
+        _stomata = config.stomata
+        _carbon = config.carbon
+
     gpp_farq = None
 
     if config.stomata.enabled:
         if config.carbon.scheme == "differland" and carbon_state is not None:
-            LAI = carbon_state.C_fol / config.carbon.LCMA
+            LAI = carbon_state.C_fol / _carbon.LCMA
             gs, gpp_farq = coupled_farquhar_stomata(
                 T_surface, forcing.sw_down, forcing.co2_ppmv,
                 forcing.q_lowest, forcing.p_surface, LAI, beta_soil,
-                config.stomata)
+                _stomata)
             beta = compute_stomatal_beta(
-                gs, LAI, beta_soil, config.stomata)
+                gs, LAI, beta_soil, _stomata)
         else:
             gs = jarvis_gs(
                 T_surface, forcing.sw_down, forcing.q_lowest,
-                forcing.p_surface, beta_soil, config.stomata)
+                forcing.p_surface, beta_soil, _stomata)
             beta = compute_stomatal_beta(
-                gs, None, beta_soil, config.stomata)
+                gs, None, beta_soil, _stomata)
     else:
         beta = beta_soil
 

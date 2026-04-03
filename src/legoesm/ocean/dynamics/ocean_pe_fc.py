@@ -35,9 +35,9 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 from legoesm.ocean.physics.mixing import vertical_diffusion
-from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
-    _diagnose_w_from_flux_div,
-    _vertical_advection_ocean,
+from legoesm.ocean.vertical import (
+    diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
+    vertical_advection_ocean as _vertical_advection_ocean,
 )
 
 
@@ -48,6 +48,7 @@ def ocean_baroclinic_tendencies_fc(
     fc_config: FCOperatorConfig,
     config: OceanConfig = OceanConfig(),
     physics_fn=None,
+    surface_forcing=None,
 ) -> OceanTendencies:
     """Compute 3D baroclinic tendencies with FC spectral operators.
 
@@ -187,7 +188,7 @@ def ocean_baroclinic_tendencies_fc(
             du_dt = du_dt + fc_hyperdiffusion_3d(u * mask_3d, grid, fc_config, config.hyperdiff_coeff)
             dv_dt = dv_dt + fc_hyperdiffusion_3d(v * mask_3d, grid, fc_config, config.hyperdiff_coeff)
     else:
-        phys = physics_fn(state, grid, z_coord)
+        phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
         dv_dt = dv_dt + phys.dv_dt.data
         dT_dt = dT_dt + phys.dT_dt.data

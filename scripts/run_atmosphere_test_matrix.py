@@ -279,8 +279,23 @@ def _create_vertical(nlev: int, vertical_coord: str):
 # RRTMGP physics factory
 # ---------------------------------------------------------------------------
 
-def _make_rrtmgp_physics(model_type: str, dt: float):
-    """Create RRTMGP-based physics function."""
+def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None):
+    """Create RRTMGP-based physics function, optionally combined with Held-Suarez.
+
+    When *hs_fn* is provided the returned function sums the Held-Suarez
+    Newtonian relaxation / Rayleigh drag tendencies with the RRTMGP
+    radiative tendencies so the experiment remains a valid HS benchmark.
+
+    Parameters
+    ----------
+    model_type : str
+        One of "hydrostatic", "nonhydrostatic", "spectral_pe", "mpas".
+    dt : float
+        Physics time step [s].
+    hs_fn : callable, optional
+        Held-Suarez forcing function ``(state, grid, sigma_coord) -> tendencies``.
+        When ``None``, only RRTMGP radiation is applied (no HS forcing).
+    """
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -295,7 +310,69 @@ def _make_rrtmgp_physics(model_type: str, dt: float):
         microphysics=MicrophysicsConfig(scheme="none"),
         gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
     )
-    return make_physics(phys_cfg, model_type=model_type, dt=dt)
+    rrtmgp_fn = make_physics(phys_cfg, model_type=model_type, dt=dt)
+
+    if hs_fn is None:
+        return rrtmgp_fn
+
+    # --- Build wrapper that sums HS + RRTMGP tendencies ---
+    if model_type == "spectral_pe":
+        def combined_fn(state, grid, sigma_coord, phys_state=None):
+            rrtmgp_result = rrtmgp_fn(state, grid, sigma_coord, phys_state=phys_state)
+            rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
+            phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
+            hs_tend = hs_fn(state, grid, sigma_coord)
+            from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+            summed = SpectralHydrostaticState(
+                vor_hat=rrtmgp_tend.vor_hat.replace(
+                    data=rrtmgp_tend.vor_hat.data + hs_tend.vor_hat.data),
+                div_hat=rrtmgp_tend.div_hat.replace(
+                    data=rrtmgp_tend.div_hat.data + hs_tend.div_hat.data),
+                T_hat=rrtmgp_tend.T_hat.replace(
+                    data=rrtmgp_tend.T_hat.data + hs_tend.T_hat.data),
+                lnps_hat=rrtmgp_tend.lnps_hat.replace(
+                    data=rrtmgp_tend.lnps_hat.data + hs_tend.lnps_hat.data),
+                phis_hat=rrtmgp_tend.phis_hat.replace(
+                    data=rrtmgp_tend.phis_hat.data + hs_tend.phis_hat.data),
+            )
+            return summed, phys_state_out
+    else:
+        # hydrostatic, nonhydrostatic, mpas — all use HydrostaticTendencies
+        def combined_fn(state, grid, sigma_coord, phys_state=None):
+            rrtmgp_result = rrtmgp_fn(state, grid, sigma_coord, phys_state=phys_state)
+            rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
+            phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
+            hs_tend = hs_fn(state, grid, sigma_coord)
+            from legoesm.core.state import HydrostaticTendencies
+            dv_dt = None
+            if rrtmgp_tend.dv_dt is not None and hs_tend.dv_dt is not None:
+                dv_dt = rrtmgp_tend.dv_dt.replace(
+                    data=rrtmgp_tend.dv_dt.data + hs_tend.dv_dt.data)
+            elif rrtmgp_tend.dv_dt is not None:
+                dv_dt = rrtmgp_tend.dv_dt
+            elif hs_tend.dv_dt is not None:
+                dv_dt = hs_tend.dv_dt
+            summed = HydrostaticTendencies(
+                du_dt=rrtmgp_tend.du_dt.replace(
+                    data=rrtmgp_tend.du_dt.data + hs_tend.du_dt.data),
+                dT_dt=rrtmgp_tend.dT_dt.replace(
+                    data=rrtmgp_tend.dT_dt.data + hs_tend.dT_dt.data),
+                dp_s_dt=rrtmgp_tend.dp_s_dt.replace(
+                    data=rrtmgp_tend.dp_s_dt.data + hs_tend.dp_s_dt.data),
+                dphis_dt=rrtmgp_tend.dphis_dt.replace(
+                    data=rrtmgp_tend.dphis_dt.data + hs_tend.dphis_dt.data),
+                dv_dt=dv_dt,
+                tracer_tendencies=rrtmgp_tend.tracer_tendencies,
+            )
+            return summed, phys_state_out
+
+    # Forward set_time / reset_state from the RRTMGP combined function
+    if hasattr(rrtmgp_fn, 'set_time'):
+        combined_fn.set_time = rrtmgp_fn.set_time
+    if hasattr(rrtmgp_fn, 'reset_state'):
+        combined_fn.reset_state = rrtmgp_fn.reset_state
+
+    return combined_fn
 
 
 # ===========================================================================
@@ -1373,7 +1450,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         model = PrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init(grid, sigma)
 
-        physics_fn = (_make_rrtmgp_physics("hydrostatic", dt)
+        physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing)
                       if radiation == "rrtmgp" else held_suarez_forcing)
 
         def step_fn(s, dt_):
@@ -1424,7 +1501,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         model = LatLonPrimitiveEquationModel(grid, sigma, config)
         state = held_suarez_init_latlon(grid, sigma)
 
-        physics_fn = (_make_rrtmgp_physics("hydrostatic", dt)
+        physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing_latlon)
                       if radiation == "rrtmgp" else held_suarez_forcing_latlon)
 
         def step_fn(s, dt_):
@@ -1470,8 +1547,11 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         state = held_suarez_init_mpas(mesh, sigma)
         grid = mesh
 
+        physics_fn_mpas = (_make_rrtmgp_physics("mpas", dt, hs_fn=held_suarez_forcing_mpas)
+                           if radiation == "rrtmgp" else held_suarez_forcing_mpas)
+
         def step_fn(s, dt_):
-            return model.step(s, dt_, held_suarez_forcing_mpas)
+            return model.step(s, dt_, physics_fn_mpas)
 
         mass_fn = lambda s: float(jnp.sum(s.p_s.data * mesh.areaCell))
 
@@ -1522,7 +1602,8 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         model = SpectralPrimitiveEquationModel(grid, sigma, pe_config)
         state = isothermal_rest_state_spectral(grid, sigma, T_init=300.0)
 
-        physics_fn = held_suarez_forcing_spectral
+        physics_fn = (_make_rrtmgp_physics("spectral_pe", dt, hs_fn=held_suarez_forcing_spectral)
+                      if radiation == "rrtmgp" else held_suarez_forcing_spectral)
 
         def step_fn(s, dt_):
             return model.step(s, dt_, physics_fn=physics_fn)

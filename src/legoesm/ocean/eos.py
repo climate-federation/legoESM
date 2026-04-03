@@ -111,6 +111,85 @@ def wright_eos(
     return rho.astype(orig_dtype)
 
 
+def _wright_eos_scalar(T: float, S: float, p: float) -> float:
+    """Scalar Wright EOS for JAX grad (no clipping or dtype promotion).
+
+    Used internally by ``thermal_expansion_coeff`` and
+    ``haline_contraction_coeff`` via ``jax.grad``.
+    """
+    al0 = _a0 + _a1 * T + _a2 * S
+    p0 = (_b0 + _b4 * S) + T * (_b1 + T * (_b2 + _b3 * T) + _b5 * S)
+    lam = (_c0 + _c4 * S) + T * (_c1 + T * (_c2 + _c3 * T) + _c5 * S)
+    p_plus_p0 = p + p0
+    return p_plus_p0 / (lam + al0 * p_plus_p0)
+
+
+# Partial derivatives via JAX autodiff (scalar → vmap for arrays).
+import jax
+_drho_dT_scalar = jax.grad(_wright_eos_scalar, argnums=0)
+_drho_dS_scalar = jax.grad(_wright_eos_scalar, argnums=1)
+
+
+def thermal_expansion_coeff(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""Thermal expansion coefficient α = -(1/ρ) ∂ρ/∂T.
+
+    Parameters
+    ----------
+    T : array — Potential temperature [degC].
+    S : array — Salinity [PSU].
+    p : array — Pressure [Pa].
+
+    Returns
+    -------
+    array : α [1/K], same shape as inputs.
+    """
+    T64 = T.astype(jnp.float64)
+    S64 = S.astype(jnp.float64)
+    p64 = p.astype(jnp.float64)
+    T_c = jnp.clip(T64, -2.0, 40.0)
+    S_c = jnp.clip(S64, 0.0, 42.0)
+    flat_T = T_c.ravel()
+    flat_S = S_c.ravel()
+    flat_p = p64.ravel()
+    drho_dT = jax.vmap(_drho_dT_scalar)(flat_T, flat_S, flat_p).reshape(T.shape)
+    rho = wright_eos(T, S, p)
+    return (-drho_dT / rho).astype(T.dtype)
+
+
+def haline_contraction_coeff(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+) -> jnp.ndarray:
+    r"""Haline contraction coefficient β = (1/ρ) ∂ρ/∂S.
+
+    Parameters
+    ----------
+    T : array — Potential temperature [degC].
+    S : array — Salinity [PSU].
+    p : array — Pressure [Pa].
+
+    Returns
+    -------
+    array : β [1/PSU], same shape as inputs.
+    """
+    T64 = T.astype(jnp.float64)
+    S64 = S.astype(jnp.float64)
+    p64 = p.astype(jnp.float64)
+    T_c = jnp.clip(T64, -2.0, 40.0)
+    S_c = jnp.clip(S64, 0.0, 42.0)
+    flat_T = T_c.ravel()
+    flat_S = S_c.ravel()
+    flat_p = p64.ravel()
+    drho_dS = jax.vmap(_drho_dS_scalar)(flat_T, flat_S, flat_p).reshape(T.shape)
+    rho = wright_eos(T, S, p)
+    return (drho_dS / rho).astype(T.dtype)
+
+
 def density_perturbation(
     T: jnp.ndarray,
     S: jnp.ndarray,

@@ -57,53 +57,68 @@ class ShallowWaterTendencies(NamedTuple):
 class HydrostaticState(NamedTuple):
     """State for the hydrostatic primitive equations in sigma coordinates.
 
-    Prognostic variables for the hydrostatic atmosphere on the cubed-sphere.
-    3D fields have shape (6, n, n, n_levels) with the level axis last.
-    2D fields (surface) have shape (6, n, n).
+    Unified state type for all hydrostatic grids: cubed-sphere, lat-lon,
+    and MPAS Voronoi mesh.  Field shapes depend on the grid type:
+
+    - Cubed-sphere: 3D = (6, n, n, nlev), 2D = (6, n, n)
+    - Lat-lon: 3D = (n_lat, n_lon, nlev), 2D = (n_lat, n_lon)
+    - MPAS: u = (nEdges, nlev), T/p_s/phis = (nCells, nlev)/(nCells,)
 
     Fields
     ------
     u : Field
-        Zonal wind [m/s]. Prognostic. Shape (6, n, n, nlev).
-    v : Field
-        Meridional wind [m/s]. Prognostic. Shape (6, n, n, nlev).
+        Wind component [m/s]. Prognostic.
+        Cubed-sphere/lat-lon: zonal wind on cell centres.
+        MPAS: normal velocity on edges.
     T : Field
-        Temperature [K]. Prognostic. Shape (6, n, n, nlev).
+        Temperature [K]. Prognostic.
     p_s : Field
-        Surface pressure [Pa]. Prognostic. Shape (6, n, n).
+        Surface pressure [Pa]. Prognostic.
     phis : Field
         Surface geopotential [m^2/s^2]. Static (not time-stepped).
-        Shape (6, n, n).
+    v : Field | None
+        Meridional wind [m/s]. Prognostic.
+        None for MPAS (edge-based normal velocity has no separate v).
     tracers : dict[str, Field] | None
         Tracer mixing ratios as a dictionary. Keys are tracer names
-        (e.g., "q_v", "q_c", "q_r"). Values are Fields with shape
-        (6, n, n, nlev). None when tracers are not in use.
+        (e.g., "q_v", "q_c", "q_r"). None when tracers are not in use.
     """
     u: Field
-    v: Field
     T: Field
     p_s: Field
     phis: Field
+    v: Field | None = None
     tracers: dict[str, Field] | None = None
 
 
 class HydrostaticTendencies(NamedTuple):
     """Tendencies (time derivatives) for the hydrostatic primitive equations.
 
-    Same structure as HydrostaticState. The phis tendency is always zero
-    since surface geopotential is static.
+    Unified tendency type for all hydrostatic grids. The phis tendency is
+    always zero since surface geopotential is static.
 
+    Fields
+    ------
+    du_dt : Field
+        Wind tendency [m/s^2]. Cubed-sphere/lat-lon: zonal wind. MPAS: normal velocity on edges.
+    dT_dt : Field
+        Temperature tendency [K/s].
+    dp_s_dt : Field
+        Surface pressure tendency [Pa/s].
+    dphis_dt : Field
+        Geopotential tendency [m^2/s^3] — always zero.
+    dv_dt : Field | None
+        Meridional wind tendency [m/s^2]. None for MPAS.
     tracer_tendencies : dict[str, Field] | None
         Optional tracer tendencies from physics (convection, microphysics).
         Keys match HydrostaticState.tracers (e.g. "q_v", "q_c", "q_r").
-        Values are Fields with shape (6, n, n, nlev) and units "kg/kg/s".
         None when no physics scheme produces tracer tendencies.
     """
     du_dt: Field
-    dv_dt: Field
     dT_dt: Field
     dp_s_dt: Field
     dphis_dt: Field
+    dv_dt: Field | None = None
     tracer_tendencies: dict[str, Field] | None = None
 
 
@@ -300,34 +315,9 @@ class MPASShallowWaterTendencies(NamedTuple):
 # MPAS Voronoi Mesh Atmosphere States
 # ==============================================================================
 
-class MPASHydrostaticState(NamedTuple):
-    """State for the hydrostatic primitive equations on an MPAS Voronoi mesh.
-
-    Uses TRiSK C-grid staggering: normal velocity on edges, scalars on cells.
-
-    Fields
-    ------
-    u : Field
-        Normal velocity [m/s]. Shape (nEdges, nlev). Prognostic.
-    T : Field
-        Temperature [K]. Shape (nCells, nlev). Prognostic.
-    p_s : Field
-        Surface pressure [Pa]. Shape (nCells,). Prognostic.
-    phis : Field
-        Surface geopotential [m^2/s^2]. Shape (nCells,). Static.
-    """
-    u: Field
-    T: Field
-    p_s: Field
-    phis: Field
-
-
-class MPASHydrostaticTendencies(NamedTuple):
-    """Tendencies for the MPAS hydrostatic primitive equations."""
-    du_dt: Field
-    dT_dt: Field
-    dp_s_dt: Field
-    dphis_dt: Field
+# Backward-compatibility aliases — MPAS uses the unified types with v=None.
+MPASHydrostaticState = HydrostaticState
+MPASHydrostaticTendencies = HydrostaticTendencies
 
 
 class MPASNonHydrostaticState(NamedTuple):

@@ -244,11 +244,11 @@ class OceanModel:
                     f"{max(max_land_u, max_land_v, max_land_eta):.3e}",
                 )
 
-    def tendencies(self, state: OceanState):
+    def tendencies(self, state: OceanState, surface_forcing=None):
         """Compute baroclinic tendencies (pure function wrapper)."""
-        return self._compute_tendencies(state)
+        return self._compute_tendencies(state, surface_forcing)
 
-    def _compute_tendencies(self, state: OceanState):
+    def _compute_tendencies(self, state: OceanState, surface_forcing=None):
         """Compute baroclinic tendencies using C-D grid operators."""
         from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
             ocean_baroclinic_tendencies_cdgrid,
@@ -257,10 +257,12 @@ class OceanModel:
             state, self.grid, self.z_coord,
             self._cdgrid, self.config,
             physics_fn=self._physics_fn,
+            surface_forcing=surface_forcing,
         )
 
     @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: OceanState, dt: float) -> OceanState:
+    def step(self, state: OceanState, dt: float,
+             surface_forcing=None) -> OceanState:
         """Advance one time step using split-explicit stepping.
 
         1. Compute baroclinic (slow) tendencies at current state.
@@ -275,13 +277,15 @@ class OceanModel:
             Current state.
         dt : float
             Time step [seconds].
+        surface_forcing : OceanSurfaceForcing or None
+            External atmospheric forcing (SW, heat, wind, freshwater).
 
         Returns
         -------
         OceanState : State after one time step.
         """
         # --- 1. Baroclinic tendencies ---
-        tend = self._compute_tendencies(state)
+        tend = self._compute_tendencies(state, surface_forcing)
 
         # --- 2. Update tracers (forward Euler) ---
         T_new = state.T.data + dt * tend.dT_dt.data
@@ -317,9 +321,10 @@ class OceanModel:
 
         return state_new
 
-    def step_checked(self, state: OceanState, dt: float) -> OceanState:
+    def step_checked(self, state: OceanState, dt: float,
+                     surface_forcing=None) -> OceanState:
         """Advance one timestep and optionally apply host-side runtime checks."""
-        state_new = self.step(state, dt)
+        state_new = self.step(state, dt, surface_forcing)
         if self.config.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new

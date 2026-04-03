@@ -467,7 +467,7 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
         land_config = LandConfig()
 
     if isinstance(land_config, MultiLayerLandConfig):
-        logger.info("Land: multilayer model (n_soil=%d)", land_config.n_soil)
+        logger.info("Land: multilayer model (n_layers=%d)", land_config.soil_grid.n_layers)
         return step_multilayer_land
 
     if isinstance(land_config, LandConfig):
@@ -523,6 +523,8 @@ def create_coupler(
     lake_config=None,
     lat=None,
     grid=None,
+    land_param_provider=None,
+    land_features=None,
 ):
     """Create the surface coupler.
 
@@ -585,4 +587,6 @@ def create_coupler(
         lake_config=lake_config,
         lat=lat,
         grid=grid,
+        land_param_provider=land_param_provider,
+        land_features=land_features,
     )

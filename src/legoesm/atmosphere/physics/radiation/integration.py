@@ -7,6 +7,7 @@ Supported model types:
 - "hydrostatic"  : PrimitiveEquationModel (sigma coordinates)
 - "nonhydrostatic": CompressibleEulerModel (z* coordinates)
 - "spectral_pe"  : SpectralPEModel (Gaussian grid + sigma coordinates)
+- "mpas"         : MPASPrimitiveEquationModel (Voronoi mesh, sigma coords)
 """
 
 from __future__ import annotations
@@ -163,6 +164,114 @@ def _compute_ozone_vmr(
         o3 = o3 * lat_factor[:, None]  # broadcast to (ncol, nlev)
 
     return jnp.clip(o3, 1.0e-10, None)
+
+
+# ===========================================================================
+# Shared column extraction for all hydrostatic grids
+# ===========================================================================
+
+def _extract_tracer_columns(state, ncol, nlev, dtype=None):
+    """Extract water vapor and cloud condensate columns from state tracers.
+
+    Works for any state type (HydrostaticState, SpectralHydrostaticState, etc.)
+    Returns (q_v_col, q_cloud_col, q_ice_col) all shaped (ncol, nlev).
+    """
+    if dtype is None:
+        # Try to infer dtype from state.T or state.T_hat
+        if hasattr(state, "T"):
+            dtype = state.T.data.dtype
+        elif hasattr(state, "T_hat"):
+            dtype = jnp.float64  # spectral states typically use fp64
+        else:
+            dtype = jnp.float64
+    T_col_shape = (ncol, nlev)
+    q_v_col = jnp.zeros(T_col_shape, dtype=dtype)
+    q_cloud_col = None
+    q_ice_col = None
+
+    tracers = getattr(state, "tracers", None)
+    if tracers is not None:
+        if "q_v" in tracers:
+            _qv_raw = tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = _qv_data.reshape(ncol, nlev)
+        if "q_c" in tracers:
+            _qc_raw = tracers["q_c"]
+            _qc_data = _qc_raw.data if hasattr(_qc_raw, "data") else _qc_raw
+            q_cloud_col = jnp.maximum(_qc_data.reshape(ncol, nlev), 0.0)
+        if "q_i" in tracers:
+            _qi_raw = tracers["q_i"]
+            _qi_data = _qi_raw.data if hasattr(_qi_raw, "data") else _qi_raw
+            q_ice_col = jnp.maximum(_qi_data.reshape(ncol, nlev), 0.0)
+
+    return q_v_col, q_cloud_col, q_ice_col
+
+
+def _get_grid_lat_lon(grid_or_mesh, shape_2d):
+    """Get latitude/longitude arrays from any grid type.
+
+    Handles cubed-sphere, lat-lon, and MPAS Voronoi grids uniformly.
+    Returns (lat, lon) broadcast to shape_2d.
+    """
+    if hasattr(grid_or_mesh, 'latCell'):
+        # MPAS Voronoi mesh: lat/lon already (nCells,) = shape_2d
+        return jnp.asarray(grid_or_mesh.latCell), jnp.asarray(grid_or_mesh.lonCell)
+
+    lat = jnp.asarray(grid_or_mesh.grid_lat)
+    lon = jnp.asarray(grid_or_mesh.grid_lon)
+    if lat.ndim < len(shape_2d):
+        lat = jnp.broadcast_to(
+            lat.reshape((*lat.shape, *([1] * (len(shape_2d) - lat.ndim)))),
+            shape_2d,
+        )
+    if lon.ndim < len(shape_2d):
+        if lon.ndim == 1 and len(shape_2d) == 2:
+            lon = jnp.broadcast_to(lon[None, :], shape_2d)
+        else:
+            lon = jnp.broadcast_to(
+                lon.reshape((*([1] * (len(shape_2d) - lon.ndim)), *lon.shape)),
+                shape_2d,
+            )
+    return lat, lon
+
+
+def _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d):
+    """Pack column heating rate into a HydrostaticTendencies.
+
+    Returns a HydrostaticTendencies with only dT_dt non-zero.
+    Works for cubed-sphere, lat-lon, and MPAS (v fields are zero or None
+    depending on whether state.v is present).
+    """
+    dims_3d = state.T.dims
+    dims_2d = state.p_s.dims
+
+    has_v = state.v is not None
+    du_shape = state.u.data.shape  # (6,n,n,nlev) or (nEdges,nlev)
+    du_dims = state.u.dims
+
+    dv_dt = None
+    if has_v:
+        dv_dt = Field(
+            data=jnp.zeros(state.v.data.shape), name="dv_dt_rad",
+            dims=state.v.dims, units="m/s^2",
+        )
+
+    return HydrostaticTendencies(
+        du_dt=Field(
+            data=jnp.zeros(du_shape), name="du_dt_rad",
+            dims=du_dims, units="m/s^2",
+        ),
+        dT_dt=Field(data=dT_dt, name="dT_dt_rad", dims=dims_3d, units="K/s"),
+        dp_s_dt=Field(
+            data=jnp.zeros(shape_2d), name="dp_s_dt_rad",
+            dims=dims_2d, units="Pa/s",
+        ),
+        dphis_dt=Field(
+            data=jnp.zeros(shape_2d), name="dphis_dt_rad",
+            dims=dims_2d, units="m^2/s^3",
+        ),
+        dv_dt=dv_dt,
+    )
 
 
 def _call_radiation_backend(
@@ -331,38 +440,34 @@ def make_radiation_physics(
         return _make_nonhydrostatic_radiation(radiation_config, rrtmgp_solver)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_radiation(radiation_config, rrtmgp_solver)
+    elif model_type == "mpas":
+        return _make_mpas_radiation(radiation_config, rrtmgp_solver)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
-            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe'."
+            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
 
 
 # ===========================================================================
-# Hydrostatic PE
+# Hydrostatic PE (cubed-sphere, lat-lon, and MPAS Voronoi)
 # ===========================================================================
 
 def _make_hydrostatic_radiation(
     radiation_config: RadiationConfig,
     rrtmgp_solver=None,
 ) -> Callable:
-    """Create radiation physics_fn for PrimitiveEquationModel.
+    """Create radiation physics_fn for any hydrostatic model.
 
-    Signature: (state, grid, sigma_coord) -> HydrostaticTendencies
+    Handles cubed-sphere, lat-lon FV, and MPAS Voronoi grids via the
+    shared ``_get_grid_lat_lon`` / ``_extract_tracer_columns`` /
+    ``_pack_hydrostatic_tendencies`` helpers.
 
-    The returned function has a ``set_time(day_of_year, seconds_of_day)``
-    method that must be called before each radiation step when
-    ``radiation_config.diurnal_cycle`` is True (or when the seasonal
-    cycle should vary with day of year).
+    Signature: (state, grid_or_mesh, sigma_coord) -> HydrostaticTendencies
     """
-    # Mutable time state — updated via physics_fn.set_time().
     _time, set_time = _make_time_state()
 
-    def physics_fn(
-        state: HydrostaticState,
-        grid: CubedSphereGrid,
-        sigma_coord: SigmaCoordinate,
-    ) -> HydrostaticTendencies:
+    def physics_fn(state, grid_or_mesh, sigma_coord) -> HydrostaticTendencies:
         T = state.T.data
         p_s = state.p_s.data
 
@@ -371,25 +476,15 @@ def _make_hydrostatic_radiation(
         shape_2d = p_s.shape
         ncol = int(math.prod(int(s) for s in shape_2d))
 
-        # Hydrostatic grids can be cubed-sphere (face,x,y) or lat-lon (lat,lon).
-        lat = jnp.asarray(grid.grid_lat)
-        lon = jnp.asarray(grid.grid_lon)
-        if lat.ndim < len(shape_2d):
-            lat = jnp.broadcast_to(lat.reshape((*lat.shape, *([1] * (len(shape_2d) - lat.ndim))),), shape_2d)
-        if lon.ndim < len(shape_2d):
-            if lon.ndim == 1 and len(shape_2d) == 2:
-                lon = jnp.broadcast_to(lon[None, :], shape_2d)
-            else:
-                lon = jnp.broadcast_to(lon.reshape((*([1] * (len(shape_2d) - lon.ndim)), *lon.shape)), shape_2d)
+        lat, lon = _get_grid_lat_lon(grid_or_mesh, shape_2d)
 
         # Pressure at full and half levels
         p_full = sigma_coord.pressure_at_full(p_s)
         p_half = sigma_coord.pressure_at_half(p_s)
 
         # Surface temperature = lowest-level temperature
-        T_sfc = T[..., -1]  # (6, n, n)
+        T_sfc = T[..., -1]
 
-        # Insolation (and optionally cos_sza for diurnal cycle).
         insol, cos_sza, f_day = _compute_insolation(
             lat, radiation_config,
             lon=lon,
@@ -397,7 +492,7 @@ def _make_hydrostatic_radiation(
             seconds_of_day=_time["seconds_of_day"],
         )
 
-        # Flatten horizontal dimensions to column-major shape (ncol, nlev).
+        # Flatten to column-major (ncol, nlev)
         T_col = T.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
@@ -406,25 +501,9 @@ def _make_hydrostatic_radiation(
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
-        # Extract water vapor from tracers if available; else assume dry.
-        if state.tracers is not None and "q_v" in state.tracers:
-            _qv_raw = state.tracers["q_v"]
-            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
-            q_v_col = _qv_data.reshape(ncol, nlev)
-        else:
-            q_v_col = jnp.zeros_like(T_col)
-
-        # Extract cloud condensate from tracers for cloud-radiation coupling.
-        q_cloud_col = None
-        q_ice_col = None
-        if state.tracers is not None and "q_c" in state.tracers:
-            _qc_raw = state.tracers["q_c"]
-            _qc_data = _qc_raw.data if hasattr(_qc_raw, "data") else _qc_raw
-            q_cloud_col = jnp.maximum(_qc_data.reshape(ncol, nlev), 0.0)
-        if state.tracers is not None and "q_i" in state.tracers:
-            _qi_raw = state.tracers["q_i"]
-            _qi_data = _qi_raw.data if hasattr(_qi_raw, "data") else _qi_raw
-            q_ice_col = jnp.maximum(_qi_data.reshape(ncol, nlev), 0.0)
+        q_v_col, q_cloud_col, q_ice_col = _extract_tracer_columns(
+            state, ncol, nlev,
+        )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
         rad_out = _call_radiation_backend(
@@ -443,37 +522,14 @@ def _make_hydrostatic_radiation(
             rrtmgp_solver=rrtmgp_solver,
         )
 
-        # Reshape heating rate back to (6, n, n, nlev)
         dT_dt = rad_out.heating_rate.reshape(shape_3d)
-
-        dims_3d = state.T.dims
-        dims_2d = state.p_s.dims
-
-        return HydrostaticTendencies(
-            du_dt=Field(
-                data=jnp.zeros(shape_3d), name="du_dt_rad",
-                dims=dims_3d, units="m/s^2",
-            ),
-            dv_dt=Field(
-                data=jnp.zeros(shape_3d), name="dv_dt_rad",
-                dims=dims_3d, units="m/s^2",
-            ),
-            dT_dt=Field(
-                data=dT_dt, name="dT_dt_rad",
-                dims=dims_3d, units="K/s",
-            ),
-            dp_s_dt=Field(
-                data=jnp.zeros(shape_2d), name="dp_s_dt_rad",
-                dims=dims_2d, units="Pa/s",
-            ),
-            dphis_dt=Field(
-                data=jnp.zeros(shape_2d), name="dphis_dt_rad",
-                dims=dims_2d, units="m^2/s^3",
-            ),
-        )
+        return _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d)
 
     physics_fn.set_time = set_time
     return physics_fn
+
+# MPAS uses the same unified hydrostatic radiation function.
+_make_mpas_radiation = _make_hydrostatic_radiation
 
 
 # ===========================================================================
@@ -705,25 +761,9 @@ def _make_spectral_pe_radiation(
         insol_col = insol.reshape(ncol)
         cos_sza_col = cos_sza.reshape(ncol) if cos_sza is not None else None
 
-        # Extract water vapor if spectral state carries tracer coefficients.
-        if hasattr(state, "tracers") and state.tracers is not None and "q_v" in state.tracers:
-            _qv_raw = state.tracers["q_v"]
-            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
-            q_v_col = _qv_data.reshape(ncol, nlev)
-        else:
-            q_v_col = jnp.zeros_like(T_col)
-
-        # Extract cloud condensate from tracers for cloud-radiation coupling.
-        q_cloud_col = None
-        q_ice_col = None
-        if hasattr(state, "tracers") and state.tracers is not None and "q_c" in state.tracers:
-            _qc_raw = state.tracers["q_c"]
-            _qc_data = _qc_raw.data if hasattr(_qc_raw, "data") else _qc_raw
-            q_cloud_col = jnp.maximum(_qc_data.reshape(ncol, nlev), 0.0)
-        if hasattr(state, "tracers") and state.tracers is not None and "q_i" in state.tracers:
-            _qi_raw = state.tracers["q_i"]
-            _qi_data = _qi_raw.data if hasattr(_qi_raw, "data") else _qi_raw
-            q_ice_col = jnp.maximum(_qi_data.reshape(ncol, nlev), 0.0)
+        q_v_col, q_cloud_col, q_ice_col = _extract_tracer_columns(
+            state, ncol, nlev,
+        )
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
         rad_out = _call_radiation_backend(
@@ -762,3 +802,6 @@ def _make_spectral_pe_radiation(
 
     physics_fn.set_time = set_time
     return physics_fn
+
+
+# _make_mpas_radiation is defined as an alias above (= _make_hydrostatic_radiation)

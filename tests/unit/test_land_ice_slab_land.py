@@ -301,13 +301,16 @@ class Test1e_WaterConservation:
 
 class Test1f_StefanBoltzmann:
     def test_lw_up_matches_stefan_boltzmann(self):
-        """lw_up should equal emissivity * sigma * T_surface^4."""
+        """lw_up should equal emissivity * sigma * T^4 + (1-eps) * lw_down."""
         state = make_state(T_soil=290.0)
         forcing = make_forcing()
         new_state, resp, _ = step_land(state, forcing, CONFIG, U_min=1.0, dt=DT)
 
         T_sfc = new_state.T_soil.data
-        expected_lw_up = CONFIG.emissivity_land * constants.sigma_sb * T_sfc ** 4
+        eps = CONFIG.emissivity_land
+        lw_emit = eps * constants.sigma_sb * T_sfc ** 4
+        lw_reflect = (1.0 - eps) * forcing.lw_down
+        expected_lw_up = lw_emit + lw_reflect
 
         rel_err = jnp.abs(resp.lw_up - expected_lw_up) / expected_lw_up
         assert jnp.all(rel_err < 0.001), (

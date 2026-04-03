@@ -63,6 +63,32 @@ class OceanTendencies(NamedTuple):
     dland_mask_dt: Field
 
 
+class OceanSurfaceForcing(NamedTuple):
+    """External atmospheric/surface forcing data for ocean physics.
+
+    Carries coupler-provided fields into the ocean physics pipeline.
+    All fields are optional (None means not available).  Shape of 2D
+    fields matches the horizontal grid; 3D fields add a level axis.
+
+    Fields
+    ------
+    sw_down : array or None
+        Downwelling shortwave at sea surface [W/m²].  Needed for
+        subsurface SW penetration heating.
+    q_net : array or None
+        Net surface heat flux (positive into ocean) [W/m²].
+    tau_x, tau_y : array or None
+        Surface wind stress components [Pa].
+    freshwater : array or None
+        Net freshwater flux into ocean (P - E + R + M) [kg/m²/s].
+    """
+    sw_down: object = None       # jnp.ndarray | None
+    q_net: object = None         # jnp.ndarray | None
+    tau_x: object = None         # jnp.ndarray | None
+    tau_y: object = None         # jnp.ndarray | None
+    freshwater: object = None    # jnp.ndarray | None
+
+
 class OceanConfig(NamedTuple):
     """Configuration for the ocean model."""
     g: float = 9.80616

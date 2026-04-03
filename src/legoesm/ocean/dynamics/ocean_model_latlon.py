@@ -140,15 +140,17 @@ class LatLonOceanModel:
                     f"Salinity out of bounds: [{S_min:.3f}, {S_max:.3f}] PSU",
                 )
 
-    def tendencies(self, state: LatLonOceanState):
+    def tendencies(self, state: LatLonOceanState, surface_forcing=None):
         """Compute baroclinic tendencies."""
         return latlon_ocean_baroclinic_tendencies(
             state, self.grid, self.z_coord, self.config,
             physics_fn=self._physics_fn,
+            surface_forcing=surface_forcing,
         )
 
     @partial(jax.jit, static_argnums=(0,))
-    def step(self, state: LatLonOceanState, dt: float) -> LatLonOceanState:
+    def step(self, state: LatLonOceanState, dt: float,
+             surface_forcing=None) -> LatLonOceanState:
         """Advance one time step using split-explicit stepping.
 
         Parameters
@@ -156,13 +158,15 @@ class LatLonOceanModel:
         state : LatLonOceanState
         dt : float
             Time step [seconds].
+        surface_forcing : OceanSurfaceForcing or None
+            External atmospheric forcing.
 
         Returns
         -------
         LatLonOceanState
         """
         # 1. Baroclinic tendencies
-        tend = self.tendencies(state)
+        tend = self.tendencies(state, surface_forcing)
 
         # 2. Update tracers
         T_new = state.T.data + dt * tend.dT_dt.data
@@ -199,9 +203,10 @@ class LatLonOceanModel:
 
     def step_checked(
         self, state: LatLonOceanState, dt: float,
+        surface_forcing=None,
     ) -> LatLonOceanState:
         """Advance one timestep with optional runtime checks."""
-        state_new = self.step(state, dt)
+        state_new = self.step(state, dt, surface_forcing)
         if self.config.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new

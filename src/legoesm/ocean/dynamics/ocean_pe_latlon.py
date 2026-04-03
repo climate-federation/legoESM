@@ -45,62 +45,10 @@ from legoesm.ocean.dynamics.latlon_operators import (
 )
 
 
-def _diagnose_w_from_flux_div(
-    flux_div_k: jnp.ndarray,
-    z_coord: OceanZStarCoordinate | None = None,
-) -> jnp.ndarray:
-    """Diagnose z-star transport velocity from flux divergence (bottom-up cumsum).
-
-    Parameters
-    ----------
-    flux_div_k : array, shape (..., nlev)
-    z_coord : OceanZStarCoordinate or None
-        When provided, applies the z-star correction so that ẇ[0] = 0
-        at the surface and ẇ[nlev] = 0 at the bottom.
-
-    Returns
-    -------
-    w : array, shape (..., nlev+1)
-        w[..., 0] at surface, w[..., -1] = 0 at bottom.
-    """
-    fd_rev = flux_div_k[..., ::-1]
-    cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
-    w_inner = -cumsum_rev[..., ::-1]
-    zeros_bottom = jnp.zeros((*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype)
-    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
-
-    if z_coord is None:
-        return w_euler
-
-    sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
-    deta_dt = w_euler[..., 0:1]
-    return w_euler - sigma * deta_dt
-
-
-def _vertical_advection_ocean(
-    field: jnp.ndarray,
-    w_half: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
-    jacobian: jnp.ndarray,
-) -> jnp.ndarray:
-    """Vertical advection -w * d(field)/dz with upwind scheme (momentum).
-
-    Parameters
-    ----------
-    field : array, shape (..., nlev)
-    w_half : array, shape (..., nlev+1)
-    z_coord : OceanZStarCoordinate
-    jacobian : array, shape (...)
-
-    Returns
-    -------
-    tendency : array, shape (..., nlev)
-    """
-    w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
-    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
-    dz_half = z_coord.dz_half_ref * jac_safe
-    grad = upwind_vertical_gradient(field, dz_half, w_full)
-    return -w_full * grad
+from legoesm.ocean.vertical import (
+    diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
+    vertical_advection_ocean as _vertical_advection_ocean,
+)
 
 
 def _flux_form_vertical_advection_tracer(
@@ -135,6 +83,7 @@ def latlon_ocean_baroclinic_tendencies(
     z_coord: OceanZStarCoordinate,
     config: LatLonOceanConfig = LatLonOceanConfig(),
     physics_fn=None,
+    surface_forcing=None,
 ) -> LatLonOceanTendencies:
     """Compute 3D baroclinic tendencies on a lat-lon grid.
 
@@ -294,7 +243,7 @@ def latlon_ocean_baroclinic_tendencies(
                 lap_v, grid, mask=mask,
             )
     else:
-        phys = physics_fn(state, grid, z_coord)
+        phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
         dv_dt = dv_dt + phys.dv_dt.data
         dT_dt = dT_dt + phys.dT_dt.data

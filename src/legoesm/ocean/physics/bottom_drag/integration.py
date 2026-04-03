@@ -40,7 +40,8 @@ def make_bottom_drag_physics(
 
 def _make_none() -> Callable:
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         return _zero_tendencies(state)
     return physics_fn
 
@@ -50,7 +51,8 @@ def _make_linear(config: BottomDragConfig) -> Callable:
     cfg = config.linear
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         out = linear_bottom_drag(state.u.data, state.v.data, cfg)
         return _wrap_tendencies(out.du_dt, out.dv_dt, state)
     return physics_fn
@@ -61,7 +63,8 @@ def _make_quadratic(config: BottomDragConfig) -> Callable:
     cfg = config.quadratic
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate) -> OceanTendencies:
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
         J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
         out = quadratic_bottom_drag(state.u.data, state.v.data, z_coord, J, cfg)
         return _wrap_tendencies(out.du_dt, out.dv_dt, state)
@@ -70,33 +73,11 @@ def _make_quadratic(config: BottomDragConfig) -> Callable:
 
 # --- Helpers ---
 
-def _zero_tendencies(state: OceanState) -> OceanTendencies:
-    z3 = jnp.zeros_like(state.u.data)
-    z2 = jnp.zeros_like(state.eta.data)
-    dims_3d = ("face", "x", "y", "level")
-    dims_2d = ("face", "x", "y")
-    return OceanTendencies(
-        du_dt=Field(data=z3, name="du_dt", dims=dims_3d, units="m/s^2"),
-        dv_dt=Field(data=z3, name="dv_dt", dims=dims_3d, units="m/s^2"),
-        dT_dt=Field(data=z3, name="dT_dt", dims=dims_3d, units="degC/s"),
-        dS_dt=Field(data=z3, name="dS_dt", dims=dims_3d, units="PSU/s"),
-        deta_dt=Field(data=z2, name="deta_dt", dims=dims_2d, units="m/s"),
-        dH_bathy_dt=Field(data=z2, name="dH_bathy_dt", dims=dims_2d, units="m/s"),
-        dland_mask_dt=Field(data=z2, name="dland_mask_dt", dims=dims_2d, units="1/s"),
-    )
+def _zero_tendencies(state):
+    from legoesm.ocean.physics.combined import zero_ocean_tendencies
+    return zero_ocean_tendencies(state)
 
 
 def _wrap_tendencies(du_dt, dv_dt, state):
-    z3 = jnp.zeros_like(state.u.data)
-    z2 = jnp.zeros_like(state.eta.data)
-    dims_3d = ("face", "x", "y", "level")
-    dims_2d = ("face", "x", "y")
-    return OceanTendencies(
-        du_dt=Field(data=du_dt, name="du_dt", dims=dims_3d, units="m/s^2"),
-        dv_dt=Field(data=dv_dt, name="dv_dt", dims=dims_3d, units="m/s^2"),
-        dT_dt=Field(data=z3, name="dT_dt", dims=dims_3d, units="degC/s"),
-        dS_dt=Field(data=z3, name="dS_dt", dims=dims_3d, units="PSU/s"),
-        deta_dt=Field(data=z2, name="deta_dt", dims=dims_2d, units="m/s"),
-        dH_bathy_dt=Field(data=z2, name="dH_bathy_dt", dims=dims_2d, units="m/s"),
-        dland_mask_dt=Field(data=z2, name="dland_mask_dt", dims=dims_2d, units="1/s"),
-    )
+    from legoesm.ocean.physics.combined import wrap_ocean_tendencies
+    return wrap_ocean_tendencies(du_dt, dv_dt, None, None, state)
