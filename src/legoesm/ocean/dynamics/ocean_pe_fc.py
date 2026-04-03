@@ -35,9 +35,9 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 from legoesm.ocean.physics.mixing import vertical_diffusion
-from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
-    _diagnose_w_from_flux_div,
-    _vertical_advection_ocean,
+from legoesm.ocean.vertical import (
+    diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
+    vertical_advection_ocean as _vertical_advection_ocean,
 )
 
 

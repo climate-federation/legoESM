@@ -223,22 +223,22 @@ def init_ocean_from_woa(
     T : jax.Array, shape (..., nlev) — potential temperature [degC]
     S : jax.Array, shape (..., nlev) — salinity [PSU]
     """
-    # Extract latitude in degrees from the grid
-    if hasattr(grid, 'lat') and hasattr(grid, 'lon'):
-        # CubedSphereGrid: lat/lon in radians, shape (6, n, n)
-        lat_deg = np.asarray(grid.lat) * (180.0 / np.pi)
-        lon_deg = np.asarray(grid.lon) * (180.0 / np.pi)
+    # Extract latitude in degrees from the grid.
+    # Dispatch order matters: GaussianGrid has both 'lat' and 'lat2d',
+    # while CubedSphereGrid has 'lat' (3D) but no 'lat2d'.
+    if hasattr(grid, 'lat2d'):
+        # GaussianGrid: lat2d in radians, shape (n_lat, n_lon)
+        lat_deg = np.asarray(grid.lat2d) * (180.0 / np.pi)
+        lon_2d = np.asarray(grid.lon) * (180.0 / np.pi)
+        lon_deg = np.broadcast_to(lon_2d[np.newaxis, :], lat_deg.shape)
     elif hasattr(grid, 'latCell'):
         # VoronoiMesh: latCell in radians, shape (nCells,)
         lat_deg = np.asarray(grid.latCell) * (180.0 / np.pi)
         lon_deg = np.asarray(grid.lonCell) * (180.0 / np.pi)
-    elif hasattr(grid, 'lats'):
-        # GaussianGrid: lats in degrees, shape (n_lat,)
-        lat_deg = np.asarray(grid.lats)
-        lon_deg = np.asarray(grid.lons) if hasattr(grid, 'lons') else np.linspace(0, 360, getattr(grid, 'n_lon', 128), endpoint=False)
-        lat_2d, lon_2d = np.meshgrid(lat_deg, lon_deg, indexing='ij')
-        lat_deg = lat_2d
-        lon_deg = lon_2d
+    elif hasattr(grid, 'lat') and hasattr(grid, 'lon'):
+        # CubedSphereGrid or LatLonGrid: lat/lon in radians
+        lat_deg = np.asarray(grid.lat) * (180.0 / np.pi)
+        lon_deg = np.asarray(grid.lon) * (180.0 / np.pi)
     else:
         raise TypeError(f"Unsupported grid type: {type(grid)}")
 

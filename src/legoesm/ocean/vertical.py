@@ -235,3 +235,65 @@ def upwind_vertical_gradient(
     grad_down = jnp.concatenate([zeros, df], axis=-1)
 
     return jnp.where(w > 0.0, grad_up, grad_down)
+
+
+# ---------------------------------------------------------------------------
+# Vertical velocity diagnosis and advection (shared across ocean dycores)
+# ---------------------------------------------------------------------------
+
+def diagnose_w_from_flux_div(flux_div_k, z_coord=None):
+    """Diagnose z-star transport velocity from flux divergence.
+
+    Performs a bottom-up cumulative sum of the horizontal flux divergence
+    and optionally applies the z-star sigma correction so that
+    ẇ = 0 at both surface and bottom.
+
+    Parameters
+    ----------
+    flux_div_k : array, shape (..., nlev)
+        Horizontal flux divergence at each layer.
+    z_coord : OceanZStarCoordinate or None
+        When provided, applies the z-star correction.
+
+    Returns
+    -------
+    w : array, shape (..., nlev+1)
+        Vertical velocity on half levels (surface first, bottom last = 0).
+    """
+    fd_rev = flux_div_k[..., ::-1]
+    cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
+    w_inner = -cumsum_rev[..., ::-1]
+    zeros_bottom = jnp.zeros((*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype)
+    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
+
+    if z_coord is None:
+        return w_euler
+
+    sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
+    deta_dt = w_euler[..., 0:1]
+    return w_euler - sigma * deta_dt
+
+
+def vertical_advection_ocean(field, w_half, z_coord, jacobian):
+    """Vertical advection ``-w * d(field)/dz`` with upwind scheme.
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+        Quantity being advected.
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half levels.
+    z_coord : OceanZStarCoordinate
+        Vertical coordinate (provides ``dz_half_ref``).
+    jacobian : array, shape (...)
+        Dynamic z-star Jacobian.
+
+    Returns
+    -------
+    tendency : array, shape (..., nlev)
+    """
+    w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
+    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
+    dz_half = z_coord.dz_half_ref * jac_safe
+    grad = upwind_vertical_gradient(field, dz_half, w_full)
+    return -w_full * grad
