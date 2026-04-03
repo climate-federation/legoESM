@@ -88,8 +88,8 @@ def parse_args():
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
     p.add_argument("--no-conservation-fixer", action="store_true")
-    p.add_argument("--restoring-timescale", type=float, default=365.0,
-                   help="SST/SSS restoring timescale [days] (default: 365)")
+    p.add_argument("--restoring-timescale", type=float, default=1095.0,
+                   help="SST/SSS restoring timescale [days] (default: 1095)")
     p.add_argument("--no-restoring", action="store_true",
                    help="Disable SST/SSS restoring")
     p.add_argument("--diag-every", type=int, default=None,

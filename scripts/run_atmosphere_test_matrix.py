@@ -112,6 +112,7 @@ def _build_test_matrix() -> list[TestCase]:
         for case, dur, quick, kw in [
             ("williamson2", 5, 1, {"test_num": 2}),
             ("williamson5", 15, 1, {"test_num": 5}),
+            ("cosine_bell", 12, 1, {}),
         ]:
             matrix.append(TestCase(
                 "shallow_water", case, g, res[g], "none", dur, quick, dict(kw)))
@@ -1415,6 +1416,328 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         ],
         mass_key="mean_height", energy_key="max_wind",
         scalar_units={"mean_height": "m", "max_wind": "m/s"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
+# Runner: Cosine bell advection (Putman & Lin 2007, Section 4.1)
+# ===========================================================================
+
+def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
+                    radiation: str = "gray") -> tuple[str, float, str]:
+    """Solid body rotation of a cosine bell — pure transport test.
+
+    Implements Section 4.1 of Putman & Lin (2007).  Winds are prescribed
+    (frozen) via transport-only tendency wrappers; only the height/mass
+    field evolves.  After 12 days the bell returns to its initial position
+    and error norms are computed against the initial condition.
+
+    Flow angle beta = pi/4 sends the bell over the cubed-sphere corners.
+    """
+    from tests.test_cases.cosine_bell import (
+        cosine_bell_cubesphere, cosine_bell_latlon,
+        cosine_bell_mpas, cosine_bell_spectral,
+        cosine_bell_error_norms, cosine_bell_exact,
+    )
+
+    beta = jnp.pi / 4.0  # Southeastward flow over corners
+
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
+            CDGridShallowWaterConfig)
+
+        n = int(tc.resolution[1:])
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        dt = 1800.0
+        config = CDGridShallowWaterConfig(
+            hyperdiff_coeff=_hyperdiff_cube(n),
+            div_damp=_div_damp_cube(n))
+        model = FV3EdgeShallowWaterModel(grid, config)
+        cdgrid = model.cdgrid
+        state = cosine_bell_cubesphere(grid, cdgrid, beta)
+        h_init = state.h.copy()
+        model.set_initial_mass(state)
+
+        # Transport-only step: zero momentum tendencies so winds stay frozen.
+        if config.use_fv3_fb:
+            from legoesm.core.fv3_sw_core import fv3_csw_tendencies
+            _tend_fn_inner = lambda s: fv3_csw_tendencies(
+                s.h, s.u_d, s.v_d, s.h_s, cdgrid,
+                g=config.g, div_damp=config.div_damp,
+                hyperdiff_coeff=config.hyperdiff_coeff)
+        else:
+            from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+            _tend_fn_inner = lambda s: fv3_sw_tendencies(
+                s.h, s.u_d, s.v_d, s.h_s, cdgrid,
+                g=config.g, div_damp=config.div_damp,
+                hyperdiff_coeff=config.hyperdiff_coeff,
+                boundary_fix=config.boundary_fix)
+
+        from legoesm.timestepping.dispatch import dispatch_integrator
+        from legoesm.core.conservation import _accumulation_dtype
+
+        @jax.jit
+        def step_fn(s, dt_):
+            def tendency_fn_transport(st):
+                dh, _du, _dv = _tend_fn_inner(st)
+                return FV3EdgeShallowWaterState(
+                    h=dh,
+                    u_d=jnp.zeros_like(st.u_d),
+                    v_d=jnp.zeros_like(st.v_d),
+                    h_s=jnp.zeros_like(st.h_s))
+
+            s_new = dispatch_integrator(
+                s, tendency_fn_transport, dt_, config.time_integrator)
+            # Mass conservation fixer
+            if config.use_conservation_fixer and config.fix_mass:
+                acc = _accumulation_dtype()
+                area = grid.area.astype(acc)
+                total_area = jnp.sum(area)
+                mass_target = model._target_mass
+                mass_new = jnp.sum(s_new.h.astype(acc) * area)
+                correction = (mass_target - mass_new) / total_area
+                s_new = s_new._replace(
+                    h=s_new.h + correction.astype(s_new.h.dtype))
+            return s_new
+
+        def check_fn(s):
+            return (check_finite({"h": s.h}),
+                    float(jnp.max(jnp.abs(s.h))))
+
+        def scalar_fn(s):
+            return {"mean_height": float(jnp.mean(s.h)),
+                    "max_height": float(jnp.max(s.h))}
+
+        _cs_w = _get_cs_weights(n)
+
+        def extract_fn(s):
+            h_np = np.asarray(s.h, dtype=np.float64)
+            return {"height": h_np}
+
+        key_array_fn = lambda s: s.h
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+        def error_fn(s, t):
+            h_exact = cosine_bell_exact(grid.lon, grid.lat, grid.radius,
+                                        t, beta)
+            return cosine_bell_error_norms(s.h, h_exact, grid.area)
+
+    elif tc.grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig,
+            fv_shallow_water_tendencies_latlon)
+        from legoesm.core.state import ShallowWaterState
+
+        n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
+        grid = create_latlon_grid(n_lat, n_lon)
+        dt = 1800.0
+        config = FVShallowWaterLatLonConfig(
+            hyperdiff_coeff=_hyperdiff_latlon(n_lat))
+        model = FVShallowWaterLatLonModel(grid, config, dt=dt)
+        state = cosine_bell_latlon(grid, beta)
+        h_init = state.h.data.copy()
+
+        from legoesm.timestepping.dispatch import dispatch_integrator
+
+        @jax.jit
+        def step_fn(s, dt_):
+            def tendency_fn_transport(st):
+                tend = fv_shallow_water_tendencies_latlon(
+                    st, grid, config, model.polar_filter_mask)
+                return ShallowWaterState(
+                    h=st.h.replace(data=tend.dh_dt.data),
+                    u=st.u.replace(data=jnp.zeros_like(st.u.data)),
+                    v=st.v.replace(data=jnp.zeros_like(st.v.data)),
+                    h_s=st.h_s.replace(data=jnp.zeros_like(st.h_s.data)))
+            return dispatch_integrator(
+                s, tendency_fn_transport, dt_, config.time_integrator)
+
+        def check_fn(s):
+            return (check_finite({"h": s.h.data}),
+                    float(jnp.max(jnp.abs(s.h.data))))
+
+        def scalar_fn(s):
+            return {"mean_height": float(jnp.mean(s.h.data)),
+                    "max_height": float(jnp.max(s.h.data))}
+
+        def extract_fn(s):
+            return {"height": np.asarray(s.h.data, dtype=np.float64)}
+
+        key_array_fn = lambda s: s.h.data
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+        def error_fn(s, t):
+            h_exact = cosine_bell_exact(grid.lon2d, grid.lat2d,
+                                        grid.radius, t, beta)
+            return cosine_bell_error_norms(s.h.data, h_exact, grid.area)
+
+    elif tc.grid_type == "icosahedral":
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+            MPASShallowWaterModel, MPASShallowWaterConfig,
+            mpas_shallow_water_tendencies)
+        from legoesm.core.state import MPASShallowWaterState
+
+        level = int(tc.resolution.replace("ico", ""))
+        mesh = create_voronoi_mesh(level)
+        dt = 1800.0
+        config = MPASShallowWaterConfig(nu_del4=_hyperdiff_ico(mesh))
+        model = MPASShallowWaterModel(mesh, config)
+        state = cosine_bell_mpas(mesh, beta)
+        h_init = state.h.data.copy()
+        grid = mesh
+
+        from legoesm.timestepping.dispatch import dispatch_integrator
+
+        @jax.jit
+        def step_fn(s, dt_):
+            def tendency_fn_transport(st):
+                tend = mpas_shallow_water_tendencies(
+                    st, mesh, config, dt=dt_)
+                return MPASShallowWaterState(
+                    h=st.h.replace(data=tend.dh_dt.data),
+                    u=st.u.replace(data=jnp.zeros_like(st.u.data)),
+                    h_s=st.h_s.replace(data=jnp.zeros_like(st.h_s.data)))
+            s_new = dispatch_integrator(
+                s, tendency_fn_transport, dt_, config.time_integrator)
+            # Mass conservation fixer
+            if config.fix_mass:
+                area = mesh.areaCell
+                mass_old = jnp.sum(s.h.data * area)
+                mass_new = jnp.sum(s_new.h.data * area)
+                total_area = jnp.sum(area)
+                correction = (mass_old - mass_new) / total_area
+                s_new = s_new._replace(
+                    h=s_new.h.replace(data=s_new.h.data + correction))
+            return s_new
+
+        lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+
+        def check_fn(s):
+            return (check_finite({"h": s.h.data}),
+                    float(jnp.max(jnp.abs(s.h.data))))
+
+        def scalar_fn(s):
+            return {"mean_height": float(jnp.mean(s.h.data)),
+                    "max_height": float(jnp.max(s.h.data))}
+
+        def extract_fn(s):
+            return {"height": _bin_to_latlon(
+                np.asarray(s.h.data, dtype=np.float64),
+                lon_cell, lat_cell)}
+
+        key_array_fn = lambda s: s.h.data
+        coord_kind = "latlon"  # already regridded
+        lon_deg = np.linspace(-180, 180, 360, endpoint=False)
+        lat_deg = np.linspace(-90, 90, 181)
+
+        def error_fn(s, t):
+            h_exact = cosine_bell_exact(mesh.lonCell, mesh.latCell,
+                                        mesh.radius, t, beta)
+            return cosine_bell_error_norms(s.h.data, h_exact, mesh.areaCell)
+
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid, sh_synthesis, sh_analysis)
+        from legoesm.atmosphere.dynamics.spectral_sw import (
+            SpectralShallowWaterModel, SpectralSWConfig,
+            SpectralSWState, spectral_sw_tendencies)
+        from legoesm import constants as C
+
+        n_max = int(tc.resolution.replace("T", ""))
+        grid = create_gaussian_grid(n_max)
+        dt = min(1800.0, 0.5 * grid.radius / (n_max * 40.0))
+        config = SpectralSWConfig(spectral_filter_order=8)
+        model = SpectralShallowWaterModel(grid, config)
+        state = cosine_bell_spectral(grid, beta)
+        phi_init = sh_synthesis(grid, state.phi_hat.data).copy()
+
+        from legoesm.timestepping.dispatch import dispatch_integrator
+
+        @jax.jit
+        def step_fn(s, dt_):
+            def tendency_fn_transport(st):
+                full = spectral_sw_tendencies(st, grid, config)
+                # Keep only phi tendency; freeze vor and div (winds)
+                return SpectralSWState(
+                    vor_hat=st.vor_hat.replace(
+                        data=jnp.zeros_like(st.vor_hat.data)),
+                    div_hat=st.div_hat.replace(
+                        data=jnp.zeros_like(st.div_hat.data)),
+                    phi_hat=full.phi_hat,
+                    phis_hat=st.phis_hat.replace(
+                        data=jnp.zeros_like(st.phis_hat.data)))
+            result = dispatch_integrator(
+                s, tendency_fn_transport, dt_, 'ssp_rk3')
+            return model._apply_filter(result)
+
+        def check_fn(s):
+            phi = sh_synthesis(grid, s.phi_hat.data)
+            return (check_finite({"phi": phi}),
+                    float(jnp.max(jnp.abs(phi))))
+
+        def scalar_fn(s):
+            phi = sh_synthesis(grid, s.phi_hat.data)
+            return {"mean_height": float(jnp.mean(phi / C.g)),
+                    "max_height": float(jnp.max(phi / C.g))}
+
+        def extract_fn(s):
+            phi = np.asarray(sh_synthesis(grid, s.phi_hat.data),
+                             dtype=np.float64)
+            return {"height": phi / float(C.g)}
+
+        key_array_fn = lambda s: s.phi_hat.data
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+        def error_fn(s, t):
+            phi = sh_synthesis(grid, s.phi_hat.data)
+            h_exact = cosine_bell_exact(grid.lon2d, grid.lat2d,
+                                        grid.radius, t, beta)
+            return cosine_bell_error_norms(phi / C.g, h_exact, grid.grid_area)
+
+    else:
+        raise NotImplementedError(
+            f"Cosine bell not implemented for grid '{tc.grid_type}'")
+
+    # --- Time loop ---
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, key_array_fn,
+        label=f"Cosine Bell ({tc.grid_type})", total_days=days)
+
+    # --- Error norms (compare to initial condition after full revolution) ---
+    notes = ""
+    norms = error_fn(state, days * 86400.0)
+    notes = f"L1={norms['l1']:.2e}, L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "status": "PASS" if ok else "FAIL",
+        "notes": notes})
+    _save_case_diagnostics(
+        output_dir, f"Cosine Bell PL07 {tc.resolution}", dt,
+        diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("height", "Height h (m)", "viridis"),
+        ],
+        mass_key="mean_height", energy_key="max_height",
+        scalar_units={"mean_height": "m", "max_height": "m"})
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -2796,6 +3119,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 RUNNERS: dict[str, Callable] = {
     "williamson2": run_shallow_water,
     "williamson5": run_shallow_water,
+    "cosine_bell": run_cosine_bell,
     "held_suarez": run_held_suarez,
     "baroclinic": run_baroclinic,
     "dcmip_transport_11": run_dcmip_transport,
