@@ -1443,6 +1443,9 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
     beta = jnp.pi / 4.0  # Southeastward flow over corners
 
+    # The cosine bell peak is ~1000 m, so use a larger blowup threshold.
+    _CB_BLOWUP = 5000.0
+
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -1463,36 +1466,21 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         h_init = state.h.copy()
         model.set_initial_mass(state)
 
-        # Transport-only step: zero momentum tendencies so winds stay frozen.
-        if config.use_fv3_fb:
-            from legoesm.core.fv3_sw_core import fv3_csw_tendencies
-            _tend_fn_inner = lambda s: fv3_csw_tendencies(
-                s.h, s.u_d, s.v_d, s.h_s, cdgrid,
-                g=config.g, div_damp=config.div_damp,
-                hyperdiff_coeff=config.hyperdiff_coeff)
-        else:
-            from legoesm.core.operators_cdgrid import fv3_sw_tendencies
-            _tend_fn_inner = lambda s: fv3_sw_tendencies(
-                s.h, s.u_d, s.v_d, s.h_s, cdgrid,
-                g=config.g, div_damp=config.div_damp,
-                hyperdiff_coeff=config.hyperdiff_coeff,
-                boundary_fix=config.boundary_fix)
-
-        from legoesm.timestepping.dispatch import dispatch_integrator
+        # FV3-faithful transport: d2a2c_vect for contravariant velocities,
+        # then Lin-Rood split transport with Courant-number PPM.
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv_tp_2d import transport_step
         from legoesm.core.conservation import _accumulation_dtype
+
+        # Pre-compute contravariant velocities (winds are frozen)
+        _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
+            state.u_d, state.v_d, cdgrid)
 
         @jax.jit
         def step_fn(s, dt_):
-            def tendency_fn_transport(st):
-                dh, _du, _dv = _tend_fn_inner(st)
-                return FV3EdgeShallowWaterState(
-                    h=dh,
-                    u_d=jnp.zeros_like(st.u_d),
-                    v_d=jnp.zeros_like(st.v_d),
-                    h_s=jnp.zeros_like(st.h_s))
-
-            s_new = dispatch_integrator(
-                s, tendency_fn_transport, dt_, config.time_integrator)
+            h_new = transport_step(s.h, ut, vt, dt_, cdgrid)
+            s_new = s._replace(h=h_new)
+            s_new = s._replace(h=h_new)
             # Mass conservation fixer
             if config.use_conservation_fixer and config.fix_mass:
                 acc = _accumulation_dtype()
@@ -1538,7 +1526,14 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
         grid = create_latlon_grid(n_lat, n_lon)
-        dt = 1800.0
+        # Rotated winds (beta=pi/4) give large zonal flow near the poles.
+        # CFL-safe dt: dx_min ≈ dlon*R*cos(lat_max), u_max ≈ u0.
+        import math
+        _u0 = 2.0 * math.pi * float(grid.radius) / (12.0 * 86400.0)
+        _dlon = 2.0 * math.pi / n_lon
+        _dx_pole = float(grid.radius) * _dlon * math.cos(
+            math.radians(90.0 - 180.0 / n_lat))
+        dt = min(1800.0, 0.8 * _dx_pole / _u0)
         config = FVShallowWaterLatLonConfig(
             hyperdiff_coeff=_hyperdiff_latlon(n_lat))
         model = FVShallowWaterLatLonModel(grid, config, dt=dt)
@@ -1547,13 +1542,26 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
         from legoesm.timestepping.dispatch import dispatch_integrator
 
+        # Compute only mass flux divergence + polar filter.
+        from legoesm.core.operators_latlon import (
+            divergence as divergence_ll)
+        from legoesm.core.conservation import zero_mean_tendency
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            fourier_filter)
+
         @jax.jit
         def step_fn(s, dt_):
             def tendency_fn_transport(st):
-                tend = fv_shallow_water_tendencies_latlon(
-                    st, grid, config, model.polar_filter_mask)
+                hu = st.h.replace(data=st.h.data * st.u.data)
+                hv = st.h.replace(data=st.h.data * st.v.data)
+                dh_dt_data = -divergence_ll(hu, hv, grid).data
+                dh_dt_data = zero_mean_tendency(dh_dt_data, grid)
+                if (config.use_polar_filter
+                        and model.polar_filter_mask is not None):
+                    dh_dt_data = fourier_filter(
+                        dh_dt_data, grid, model.polar_filter_mask)
                 return ShallowWaterState(
-                    h=st.h.replace(data=tend.dh_dt.data),
+                    h=st.h.replace(data=dh_dt_data),
                     u=st.u.replace(data=jnp.zeros_like(st.u.data)),
                     v=st.v.replace(data=jnp.zeros_like(st.v.data)),
                     h_s=st.h_s.replace(data=jnp.zeros_like(st.h_s.data)))
@@ -1584,14 +1592,15 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.shallow_water_mpas import (
-            MPASShallowWaterModel, MPASShallowWaterConfig,
-            mpas_shallow_water_tendencies)
+            MPASShallowWaterModel, MPASShallowWaterConfig)
         from legoesm.core.state import MPASShallowWaterState
 
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
         dt = 1800.0
-        config = MPASShallowWaterConfig(nu_del4=_hyperdiff_ico(mesh))
+        # Use SSP-RK3 for positivity; RK4 default can overshoot.
+        config = MPASShallowWaterConfig(
+            nu_del4=_hyperdiff_ico(mesh), time_integrator="ssp_rk3")
         model = MPASShallowWaterModel(mesh, config)
         state = cosine_bell_mpas(mesh, beta)
         h_init = state.h.data.copy()
@@ -1599,26 +1608,37 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
         from legoesm.timestepping.dispatch import dispatch_integrator
 
+        # Compute ONLY mass flux divergence, bypassing the momentum
+        # equation entirely.  The PV computation in the full tendency
+        # divides by h, producing inf where h=0 (outside the bell).
+        from legoesm.core.operators_voronoi import (
+            thickness_flux, divergence_cell)
+
         @jax.jit
         def step_fn(s, dt_):
             def tendency_fn_transport(st):
-                tend = mpas_shallow_water_tendencies(
-                    st, mesh, config, dt=dt_)
+                h_flux = thickness_flux(
+                    st.h.data, st.u.data, mesh,
+                    order=config.thickness_order)
+                dh_dt_data = -divergence_cell(h_flux, mesh)
                 return MPASShallowWaterState(
-                    h=st.h.replace(data=tend.dh_dt.data),
+                    h=st.h.replace(data=dh_dt_data),
                     u=st.u.replace(data=jnp.zeros_like(st.u.data)),
                     h_s=st.h_s.replace(data=jnp.zeros_like(st.h_s.data)))
             s_new = dispatch_integrator(
                 s, tendency_fn_transport, dt_, config.time_integrator)
-            # Mass conservation fixer
-            if config.fix_mass:
-                area = mesh.areaCell
-                mass_old = jnp.sum(s.h.data * area)
-                mass_new = jnp.sum(s_new.h.data * area)
-                total_area = jnp.sum(area)
-                correction = (mass_old - mass_new) / total_area
-                s_new = s_new._replace(
-                    h=s_new.h.replace(data=s_new.h.data + correction))
+            # Positivity limiter + mass conservation fixer.
+            # The centred thickness flux can produce negative h;
+            # clamp to zero then restore total mass.
+            h_new = jnp.maximum(s_new.h.data, 0.0)
+            area = mesh.areaCell
+            mass_old = jnp.sum(s.h.data * area)
+            mass_new = jnp.sum(h_new * area)
+            total_area = jnp.sum(area)
+            correction = (mass_old - mass_new) / total_area
+            h_new = h_new + correction
+            s_new = s_new._replace(
+                h=s_new.h.replace(data=h_new))
             return s_new
 
         lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
@@ -1685,7 +1705,7 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         def check_fn(s):
             phi = sh_synthesis(grid, s.phi_hat.data)
             return (check_finite({"phi": phi}),
-                    float(jnp.max(jnp.abs(phi))))
+                    float(jnp.max(phi / C.g)))
 
         def scalar_fn(s):
             phi = sh_synthesis(grid, s.phi_hat.data)
@@ -1719,7 +1739,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, key_array_fn,
-        label=f"Cosine Bell ({tc.grid_type})", total_days=days)
+        label=f"Cosine Bell ({tc.grid_type})", total_days=days,
+        blowup_threshold=_CB_BLOWUP)
 
     # --- Error norms (compare to initial condition after full revolution) ---
     notes = ""

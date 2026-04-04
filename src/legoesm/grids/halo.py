@@ -314,6 +314,11 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     c_0 = 1.0 - f * f
     c_p1 = 0.5 * f * (f + 1.0)
     interp = c_m1 * strip[jc - 1] + c_0 * strip[jc] + c_p1 * strip[jc + 1]
+    # Monotone clamping: prevent quadratic Lagrange from overshooting
+    # beyond the local range of the three source cells.
+    lo3 = jnp.minimum(jnp.minimum(strip[jc - 1], strip[jc]), strip[jc + 1])
+    hi3 = jnp.maximum(jnp.maximum(strip[jc - 1], strip[jc]), strip[jc + 1])
+    interp = jnp.clip(interp, lo3, hi3)
     return interp.astype(strip.dtype)
 
 
