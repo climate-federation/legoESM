@@ -22,8 +22,60 @@ from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y, divergence, laplacian
 from legoesm.core.precision import cast
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import pad_halo
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
+
+
+# ==============================================================================
+# Land-fill helper (Neumann BC at coastlines)
+# ==============================================================================
+
+def _fill_land_cells(
+    field: jnp.ndarray,
+    mask: jnp.ndarray,
+    grid: CubedSphereGrid,
+) -> jnp.ndarray:
+    """Replace land values with ocean-neighbor average (zero-gradient BC).
+
+    For each land cell (mask < 0.5) that has at least one ocean neighbor,
+    set its value to the area-unweighted mean of ocean neighbors.  This
+    removes the sharp jump between physical ocean values and masked zeros
+    that would otherwise produce spurious pressure gradients and diffusive
+    fluxes at the coastline.
+
+    Uses ``pad_halo`` for correct cross-face halo exchange.
+
+    Parameters
+    ----------
+    field : array, shape (6, n, n)
+    mask  : array, shape (6, n, n), 1 = ocean, 0 = land
+    grid  : CubedSphereGrid
+
+    Returns
+    -------
+    field_filled : array, same shape, ocean cells unchanged, coastal
+        land cells filled.
+    """
+    f_pad = pad_halo(field, interp_offsets=grid.halo_interp_offsets)
+    m_pad = pad_halo(mask, interp_offsets=grid.halo_interp_offsets)
+
+    # 4-connected neighbour sum, weighted by ocean mask
+    nbr_sum = (
+        f_pad[:, 2:, 1:-1] * m_pad[:, 2:, 1:-1]
+        + f_pad[:, :-2, 1:-1] * m_pad[:, :-2, 1:-1]
+        + f_pad[:, 1:-1, 2:] * m_pad[:, 1:-1, 2:]
+        + f_pad[:, 1:-1, :-2] * m_pad[:, 1:-1, :-2]
+    )
+    nbr_count = (
+        m_pad[:, 2:, 1:-1]
+        + m_pad[:, :-2, 1:-1]
+        + m_pad[:, 1:-1, 2:]
+        + m_pad[:, 1:-1, :-2]
+    )
+    nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
+
+    return jnp.where(mask > 0.5, field, nbr_avg)
 
 
 # ==============================================================================
@@ -172,8 +224,14 @@ def barotropic_substeps(
         eta_new = jnp.maximum(eta_new, eta_floor) * mask
 
         # Backward: update U_bar, V_bar with UPDATED eta
-        deta_dx = _gradient_x_raw(eta_new, grid).astype(eta.dtype)
-        deta_dy = _gradient_y_raw(eta_new, grid).astype(eta.dtype)
+        # Fill land cells with ocean-neighbour average so that the
+        # centred-difference gradient sees a smooth field at coastlines
+        # instead of the sharp ocean-to-zero transition from masking.
+        # Without this, coastal ocean cells experience a spurious pressure
+        # gradient force that drives flow toward/away from land.
+        eta_filled = _fill_land_cells(eta_new, mask, grid)
+        deta_dx = _gradient_x_raw(eta_filled, grid).astype(eta.dtype)
+        deta_dy = _gradient_y_raw(eta_filled, grid).astype(eta.dtype)
 
         # Semi-implicit Coriolis + backward PGF
         rhs_u = U_bar_c + alpha * V_bar_c - dt_s * g * deta_dx
@@ -184,15 +242,23 @@ def barotropic_substeps(
         if config.barotropic_diffusion_alpha > 0.0:
             # Compact Laplacian diffusion (damps modes amplified by
             # Coriolis-PGF interaction on non-adjoint cubed-sphere operators).
+            # Fill land cells before Laplacian to avoid diffusing against
+            # the masked discontinuity at coastlines.
             eta_new = (
-                eta_new + nu_dt * _laplacian_raw(eta_new, grid).astype(eta.dtype)
+                eta_new + nu_dt * _laplacian_raw(
+                    _fill_land_cells(eta_new, mask, grid), grid,
+                ).astype(eta.dtype)
             ) * mask
             eta_new = jnp.maximum(eta_new, eta_floor) * mask
             U_bar_new = (
-                U_bar_new + nu_dt * _laplacian_raw(U_bar_new, grid).astype(eta.dtype)
+                U_bar_new + nu_dt * _laplacian_raw(
+                    _fill_land_cells(U_bar_new, mask, grid), grid,
+                ).astype(eta.dtype)
             ) * mask
             V_bar_new = (
-                V_bar_new + nu_dt * _laplacian_raw(V_bar_new, grid).astype(eta.dtype)
+                V_bar_new + nu_dt * _laplacian_raw(
+                    _fill_land_cells(V_bar_new, mask, grid), grid,
+                ).astype(eta.dtype)
             ) * mask
 
         return (eta_new, U_bar_new, V_bar_new)

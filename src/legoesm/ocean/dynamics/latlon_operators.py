@@ -152,6 +152,8 @@ def fv_divergence_latlon(
     Fu: jnp.ndarray,
     Fv: jnp.ndarray,
     grid: LatLonGrid,
+    *,
+    mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Conservative FV flux divergence on a lat-lon grid.
 
@@ -169,6 +171,11 @@ def fv_divergence_latlon(
         Meridional flux component (e.g., h*v for mass flux).
     grid : LatLonGrid
         Horizontal grid.
+    mask : array, shape (n_lat, n_lon), optional
+        Ocean mask (1 = ocean, 0 = land).  When provided, interface
+        fluxes between an ocean cell and a land cell are forced to zero
+        (wall boundary condition), preventing spurious mass flux through
+        coastlines.
 
     Returns
     -------
@@ -184,6 +191,10 @@ def fv_divergence_latlon(
     # Flux at east face of cell (i, j): between cell j and j+1
     # Interface velocity: average of adjacent cells
     Fu_east = 0.5 * (Fu + jnp.roll(Fu, -1, axis=1))
+    if mask is not None:
+        # Zero interface flux between ocean and land cells
+        ocean_both_zonal = mask * jnp.roll(mask, -1, axis=1)
+        Fu_east = Fu_east * ocean_both_zonal
     # Face length in meridional direction: R * dlat
     zonal_flux = Fu_east * R * dlat  # (n_lat, n_lon)
     # Net zonal flux: east - west = F_east(j) - F_east(j-1)
@@ -197,6 +208,10 @@ def fv_divergence_latlon(
 
     # Interface flux: average adjacent cells
     Fv_north_inner = 0.5 * (Fv[:-1] + Fv[1:])  # (n_lat-1, n_lon)
+    if mask is not None:
+        # Zero interface flux at land-ocean boundaries
+        ocean_both_merid = mask[:-1] * mask[1:]  # (n_lat-1, n_lon)
+        Fv_north_inner = Fv_north_inner * ocean_both_merid
     # Face length in zonal direction: R * cos(lat_face) * dlon
     merid_flux_inner = Fv_north_inner * R * cos_lat_half[:, None] * dlon
 
