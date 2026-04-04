@@ -258,13 +258,14 @@ None. Free wave propagation.
 | mpas ico3 | 0.232 m | PASS |
 | spectral T21 | 7.321 m | PASS (but anomalous) |
 
-### Known Issues
+### Grid Support
 
-Spectral max|eta| is ~50x larger than FV grids. This is connected to the spectral
-land-masking issue: the barotropic_wave runner calls `_create_rest_state` which now
-uses `land_lat_threshold=80` for spectral, triggering the Gibbs boundary problem. The
-experiment's own config has `spectral_land_lat_threshold = 90` (no land) but this is
-not used by the test matrix runner.
+- cubed_sphere (C24), latlon (48x72), mpas (ico4): full support with land at
+  |lat| > 80 deg. Resolutions are matched by effective dx (~384-446 km) rather than
+  using the global defaults, to ensure comparable numerical dispersion across grids.
+- **spectral: skipped** — land boundaries cause Gibbs ringing issues that produce
+  anomalous amplitudes (~7 m vs ~0.2 m on FV grids). Disabled until spectral land
+  masking is fixed.
 
 ### Duration
 
@@ -645,7 +646,7 @@ z-star, 10 levels, H_max = 5500 m. Same as rest_state.
 |---|---|---|---|---|
 | rest_state_no_land | yes | yes | yes | yes |
 | rest_state | yes | yes | yes | yes (land issues) |
-| barotropic_wave | yes | yes | yes | yes (amplitude issues) |
+| barotropic_wave | yes | yes | yes | no (land issues) |
 | inertia_gravity_wave | yes | yes | yes | yes (no land) |
 | baroclinic | yes | yes | yes | yes (no land) |
 | phillips_two_layer | yes | yes | yes | yes (no land) |

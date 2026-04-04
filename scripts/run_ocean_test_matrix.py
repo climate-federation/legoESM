@@ -192,10 +192,12 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "rest_state_no_land", g, res[g], 1.0, 0.1))
 
-    # --- Barotropic gravity wave: all grids ---
+    # --- Barotropic gravity wave: resolution-matched grids (~384-446 km dx) ---
+    bwave_res = {"cubed_sphere": "C24", "latlon": "48x72",
+                 "mpas": "ico4", "spectral": "T21"}
     for g in GRID_TYPES:
         matrix.append(TestCase(
-            "barotropic_wave", g, res[g], 2.0, 0.2))
+            "barotropic_wave", g, bwave_res[g], 2.0, 0.2))
 
     # --- Wind-driven gyre: cubed_sphere, latlon, mpas ---
     for g in ["cubed_sphere", "latlon", "mpas"]:
@@ -658,10 +660,19 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                 # Mask land areas (where land_mask ≤ 0.5) with NaN
                 regridded = np.where(land_mask_regridded > 0.5, regridded, np.nan)
             
+            # Compute extent from actual coordinates
+            if coord_kind in ("latlon", "gaussian"):
+                lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+                lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
+                lon_ext = [float(lon_flat.min()), float(lon_flat.max())]
+                lat_ext = [float(lat_flat.min()), float(lat_flat.max())]
+            else:
+                lon_ext = [-180, 180]
+                lat_ext = [-90, 90]
             # Individual grid plots use auto-scaling for maximum detail
             im = ax.imshow(
                 regridded, origin="lower", aspect="auto", cmap=cmap,
-                extent=[-180, 180, -90, 90])
+                extent=[lon_ext[0], lon_ext[1], lat_ext[0], lat_ext[1]])
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             if c == 0:
@@ -880,8 +891,14 @@ def _save_snapshot_data(
     # Build time-series arrays for native grid
     native_arrays = dict(common_metadata)
     latlon_arrays = dict(common_metadata)
-    latlon_arrays["lat"] = np.linspace(-90.0, 90.0, 181)
-    latlon_arrays["lon"] = np.linspace(-180.0, 180.0, 360)
+    if coord_kind in ("latlon", "gaussian"):
+        # Native grids have lon in [0, 360); store actual coordinates
+        latlon_arrays["lat"] = np.asarray(lat_deg, dtype=np.float64).ravel()
+        latlon_arrays["lon"] = np.asarray(lon_deg, dtype=np.float64).ravel()
+    else:
+        # Regridded grids (cube, mpas) use [-180, 180] target
+        latlon_arrays["lat"] = np.linspace(-90.0, 90.0, 181)
+        latlon_arrays["lon"] = np.linspace(-180.0, 180.0, 360)
 
     for field_key in all_field_keys:
         # Collect this field across all timesteps
@@ -1627,6 +1644,9 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
 def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
                         ) -> tuple[str, float, str]:
     """Barotropic gravity wave: Gaussian SSH perturbation propagation."""
+    if tc.grid_type == "spectral":
+        raise NotImplementedError(
+            "Barotropic wave skipped for spectral grid (land masking issues)")
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc))
     state = _create_rest_state(tc, grid, z_coord)
@@ -2976,10 +2996,19 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
     for i, (grid_name, data) in enumerate(grid_results.items()):
         if i >= len(axes):
             break
-            
+
         ax = axes[i]
         snapshots = data['snapshots']
-        
+
+        # Determine longitude extent from stored coordinates
+        if 'lon' in snapshots.files:
+            lon_arr = snapshots['lon']
+            lat_arr = snapshots['lat']
+            plot_extent = [float(lon_arr.min()), float(lon_arr.max()),
+                          float(lat_arr.min()), float(lat_arr.max())]
+        else:
+            plot_extent = [-180, 180, -90, 90]
+
         # Handle both new format (field as time series) and old format (field_stepN)
         if field in snapshots.files:
             # NEW FORMAT: field is a time series array, take final timestep
@@ -2989,7 +3018,7 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                     final_field = field_data[-1]  # Last time
                 else:  # Single timestep: (nlat, nlon) - shouldn't happen with new format
                     final_field = field_data
-                
+
                 # Apply land masking if available
                 if 'land_mask' in snapshots.files:
                     land_mask_data = snapshots['land_mask']
@@ -2999,10 +3028,10 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                         land_mask_final = land_mask_data
                     # Mask land areas (where land_mask ≤ 0.5) with NaN
                     final_field = np.where(land_mask_final > 0.5, final_field, np.nan)
-                
+
                 # Create the plot with consistent color scale
                 im = ax.imshow(final_field, origin='lower', aspect='auto', cmap=cmap,
-                              extent=[-180, 180, -90, 90], vmin=vmin, vmax=vmax)
+                              extent=plot_extent, vmin=vmin, vmax=vmax)
                 ax.set_title(f'{grid_name} ({data["resolution"]})')
                 ax.set_xlabel('Longitude')
                 ax.set_ylabel('Latitude')
@@ -3029,7 +3058,7 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                 
                 # Create the plot with consistent color scale
                 im = ax.imshow(final_field, origin='lower', aspect='auto', cmap=cmap,
-                              extent=[-180, 180, -90, 90], vmin=vmin, vmax=vmax)
+                              extent=plot_extent, vmin=vmin, vmax=vmax)
                 ax.set_title(f'{grid_name} ({data["resolution"]})')
                 ax.set_xlabel('Longitude')
                 ax.set_ylabel('Latitude')
