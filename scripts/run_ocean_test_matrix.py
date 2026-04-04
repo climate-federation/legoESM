@@ -1038,7 +1038,8 @@ def _parse_resolution(tc: TestCase):
 
 def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
                         H_max: float = DEFAULT_H_MAX, physics=None,
-                        A_h: float | None = None):
+                        A_h: float | None = None,
+                        A_v: float | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -1052,7 +1053,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
     A_h : float or None
         Override horizontal viscosity [m^2/s]. If None, uses config default.
 
-    Returns (grid, z_coord, state, model, coord_kind, lon_deg, lat_deg).
+    Returns (grid, z_coord, config, model, coord_kind, lon_deg, lat_deg).
     """
     from legoesm.ocean.vertical import create_ocean_z_star
 
@@ -1069,6 +1070,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
         config = OceanConfig(**kw)
         model = OceanModel(grid, z_coord, config)
         coord_kind = "cube"
@@ -1085,6 +1088,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
         config = LatLonOceanConfig(**kw)
         model = LatLonOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
@@ -1802,9 +1807,9 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
             f"(no surface forcing support)")
 
     physics = _make_gyre_physics(wind_profile)
-    # A_h = 5e5 m^2/s: Munk layer delta_M ~ 500 km, marginally
-    # resolved at ~5-degree grid spacing. Needed to stabilise
-    # long integrations at coarse resolution.
+    # A_h = 5e5 m^2/s: Munk layer delta_M ~ 300 km, needed to
+    # stabilise long integrations at ~5-degree resolution.
+    # Default A_v = 1e-3 (higher values destabilise latlon).
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc, physics=physics, A_h=5e5))
     state = _add_wind_gyre_forcing(
