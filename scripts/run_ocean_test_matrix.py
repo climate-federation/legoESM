@@ -1037,7 +1037,8 @@ def _parse_resolution(tc: TestCase):
 
 
 def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
-                        H_max: float = DEFAULT_H_MAX, physics=None):
+                        H_max: float = DEFAULT_H_MAX, physics=None,
+                        A_h: float | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -1048,6 +1049,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
     physics : OceanPhysicsConfig or None
         If provided, passed to the model config to enable physics
         (e.g. prescribed surface forcing for wind-driven experiments).
+    A_h : float or None
+        Override horizontal viscosity [m^2/s]. If None, uses config default.
 
     Returns (grid, z_coord, state, model, coord_kind, lon_deg, lat_deg).
     """
@@ -1063,7 +1066,10 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
 
         n = params["n"]
         grid = create_cubed_sphere(n)
-        config = OceanConfig(n_barotropic_substeps=30, physics=physics)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        config = OceanConfig(**kw)
         model = OceanModel(grid, z_coord, config)
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -1076,7 +1082,10 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
         from legoesm.ocean.state import LatLonOceanConfig
 
         grid = create_latlon_grid(params["n_lat"], params["n_lon"])
-        config = LatLonOceanConfig(n_barotropic_substeps=30, physics=physics)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        config = LatLonOceanConfig(**kw)
         model = LatLonOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -1737,6 +1746,17 @@ def _make_gyre_physics(wind_profile: str = "single_gyre"):
     ----------
     wind_profile : str
         "single_gyre" or "double_gyre".
+
+    Notes
+    -----
+    Lateral viscosity is NOT in the physics config because the physics
+    pipeline's harmonic mixing is cubed-sphere-only. Instead, A_h is
+    set on the ocean config via _create_ocean_setup (the dynamics
+    applies it natively on both cubed-sphere and latlon when
+    physics_fn is None for that module). When physics_fn IS set,
+    the dynamics skips config.A_h — so we keep lateral_mixing="none"
+    in the physics config and set A_h on the base config.
+    See _create_ocean_setup where A_h is passed.
     """
     from legoesm.ocean.physics.combined import OceanPhysicsConfig
     from legoesm.ocean.physics.surface_forcing.config import (
@@ -1744,9 +1764,13 @@ def _make_gyre_physics(wind_profile: str = "single_gyre"):
     )
     from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+    from legoesm.ocean.physics.bottom_drag.config import (
+        BottomDragConfig, LinearDragConfig,
+    )
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 
+    # Linear bottom drag r = 1e-4 s^-1 (Stommel, design doc §4.2).
+    # Lateral viscosity A_h handled by the base ocean config (see above).
     return OceanPhysicsConfig(
         surface_forcing=SurfaceForcingConfig(
             scheme="prescribed",
@@ -1759,7 +1783,10 @@ def _make_gyre_physics(wind_profile: str = "single_gyre"):
         ),
         vertical_mixing=VerticalMixingConfig(scheme="none"),
         lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(
+            scheme="linear",
+            linear=LinearDragConfig(r=1e-4),
+        ),
         convection=OceanConvectionConfig(scheme="none"),
         shortwave_penetration=None,
     )
@@ -1775,8 +1802,11 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
             f"(no surface forcing support)")
 
     physics = _make_gyre_physics(wind_profile)
+    # A_h = 5e5 m^2/s: Munk layer delta_M ~ 500 km, marginally
+    # resolved at ~5-degree grid spacing. Needed to stabilise
+    # long integrations at coarse resolution.
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics))
+        _create_ocean_setup(tc, physics=physics, A_h=5e5))
     state = _add_wind_gyre_forcing(
         None, tc.grid_type, grid, z_coord,
         lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,

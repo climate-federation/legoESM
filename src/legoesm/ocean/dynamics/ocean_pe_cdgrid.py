@@ -243,44 +243,44 @@ def ocean_baroclinic_tendencies_cdgrid(
         # Vertical advection
         dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
 
-        if physics_fn is None:
-            if config.K_h > 0:
-                from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
-                dtr_dt = dtr_dt + laplacian_viscosity_3d(tr, grid, config.K_h)
-            if config.K_v > 0:
-                from legoesm.ocean.physics.mixing import vertical_diffusion
-                dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
+        if config.K_h > 0:
+            from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
+            dtr_dt = dtr_dt + laplacian_viscosity_3d(tr, grid, config.K_h)
+        if config.K_v > 0:
+            from legoesm.ocean.physics.mixing import vertical_diffusion
+            dtr_dt = dtr_dt + vertical_diffusion(tr, z_coord, J, config.K_v)
         return dtr_dt
 
     tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
     dT_dt = tracer_tend[0]
     dS_dt = tracer_tend[1]
 
-    # --- 17. Mixing ---
-    if physics_fn is None:
-        if config.A_h > 0:
-            from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
-            vel_masked = jnp.stack([u_a * mask_3d, v_a * mask_3d], axis=0)
-            vel_lap = jax.vmap(
-                lambda q: laplacian_viscosity_3d(q, grid, config.A_h),
-                in_axes=0, out_axes=0,
-            )(vel_masked)
-            du_dt = du_dt + vel_lap[0]
-            dv_dt = dv_dt + vel_lap[1]
-        if config.A_v > 0:
-            from legoesm.ocean.physics.mixing import vertical_diffusion
-            vel = jnp.stack([u_a, v_a], axis=0)
-            vel_vdiff = jax.vmap(
-                lambda q: vertical_diffusion(q, z_coord, J, config.A_v),
-                in_axes=0, out_axes=0,
-            )(vel)
-            du_dt = du_dt + vel_vdiff[0]
-            dv_dt = dv_dt + vel_vdiff[1]
-        if config.hyperdiff_coeff > 0:
-            from legoesm.core.operators_3d import hyperdiffusion_3d
-            du_dt = du_dt + hyperdiffusion_3d(u_a * mask_3d, grid, config.hyperdiff_coeff)
-            dv_dt = dv_dt + hyperdiffusion_3d(v_a * mask_3d, grid, config.hyperdiff_coeff)
-    else:
+    # --- 17. Mixing (always applied from config, grid-native operators) ---
+    if config.A_h > 0:
+        from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
+        vel_masked = jnp.stack([u_a * mask_3d, v_a * mask_3d], axis=0)
+        vel_lap = jax.vmap(
+            lambda q: laplacian_viscosity_3d(q, grid, config.A_h),
+            in_axes=0, out_axes=0,
+        )(vel_masked)
+        du_dt = du_dt + vel_lap[0]
+        dv_dt = dv_dt + vel_lap[1]
+    if config.A_v > 0:
+        from legoesm.ocean.physics.mixing import vertical_diffusion
+        vel = jnp.stack([u_a, v_a], axis=0)
+        vel_vdiff = jax.vmap(
+            lambda q: vertical_diffusion(q, z_coord, J, config.A_v),
+            in_axes=0, out_axes=0,
+        )(vel)
+        du_dt = du_dt + vel_vdiff[0]
+        dv_dt = dv_dt + vel_vdiff[1]
+    if config.hyperdiff_coeff > 0:
+        from legoesm.core.operators_3d import hyperdiffusion_3d
+        du_dt = du_dt + hyperdiffusion_3d(u_a * mask_3d, grid, config.hyperdiff_coeff)
+        dv_dt = dv_dt + hyperdiffusion_3d(v_a * mask_3d, grid, config.hyperdiff_coeff)
+
+    # --- 17b. Physics tendencies (surface forcing, bottom drag, etc.) ---
+    if physics_fn is not None:
         phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
         dv_dt = dv_dt + phys.dv_dt.data
