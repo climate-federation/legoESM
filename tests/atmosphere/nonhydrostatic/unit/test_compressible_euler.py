@@ -28,13 +28,14 @@ from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
 from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
-    compressible_euler_slow_tendencies,
     compute_exner_perturbation,
 )
 from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
     CDGridCompressibleEulerModel as CompressibleEulerModel,
     CDGridCompressibleEulerConfig,
+    cdgrid_compressible_euler_slow_tendencies,
 )
+from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm import constants
 
 
@@ -59,6 +60,12 @@ def terrain_metric(grid, height_coord):
     """Flat terrain metric."""
     z_s = jnp.zeros((6, grid.n, grid.n))
     return compute_terrain_metric(z_s, height_coord)
+
+
+@pytest.fixture
+def cdgrid(grid):
+    """C-D grid metrics for testing."""
+    return create_cubed_sphere_cdgrid(grid)
 
 
 def _make_nh_state(grid, height_coord, n_tracers=0):
@@ -227,29 +234,29 @@ class TestNonHydrostaticState:
 # ==============================================================================
 
 class TestCompressibleEulerTendencies:
-    """Tests for tendency computation."""
+    """Tests for C-D grid tendency computation."""
 
-    def test_rest_state_tendencies_small(self, grid, height_coord, terrain_metric):
+    def test_rest_state_tendencies_small(self, grid, height_coord, terrain_metric, cdgrid):
         """Rest state should produce near-zero tendencies."""
         state = _make_nh_state(grid, height_coord)
-        config = CompressibleEulerConfig(hyperdiff_coeff=0.0, sponge_coeff=0.0)
-        tend = compressible_euler_slow_tendencies(
-            state, grid, height_coord, terrain_metric, config,
+        config = CDGridCompressibleEulerConfig(hyperdiff_coeff=0.0, sponge_coeff=0.0)
+        tend = cdgrid_compressible_euler_slow_tendencies(
+            state, grid, height_coord, terrain_metric, cdgrid, config,
         )
         # u, v tendencies should be zero for rest state
         assert float(jnp.max(jnp.abs(tend.du_dt.data))) < 1e-6
         assert float(jnp.max(jnp.abs(tend.dv_dt.data))) < 1e-6
 
-    def test_tendencies_finite(self, grid, height_coord, terrain_metric):
+    def test_tendencies_finite(self, grid, height_coord, terrain_metric, cdgrid):
         """All tendencies should be finite."""
         state = _make_nh_state(grid, height_coord)
         # Add some non-zero wind
         state = state._replace(
             u=state.u.replace(data=jnp.ones_like(state.u.data) * 10.0),
         )
-        config = CompressibleEulerConfig()
-        tend = compressible_euler_slow_tendencies(
-            state, grid, height_coord, terrain_metric, config,
+        config = CDGridCompressibleEulerConfig()
+        tend = cdgrid_compressible_euler_slow_tendencies(
+            state, grid, height_coord, terrain_metric, cdgrid, config,
         )
         assert jnp.all(jnp.isfinite(tend.du_dt.data))
         assert jnp.all(jnp.isfinite(tend.dv_dt.data))
@@ -257,12 +264,12 @@ class TestCompressibleEulerTendencies:
         assert jnp.all(jnp.isfinite(tend.dtheta_prime_dt.data))
         assert jnp.all(jnp.isfinite(tend.drho_prime_dt.data))
 
-    def test_tendency_shapes(self, grid, height_coord, terrain_metric):
+    def test_tendency_shapes(self, grid, height_coord, terrain_metric, cdgrid):
         """Tendency shapes match state shapes."""
         state = _make_nh_state(grid, height_coord)
-        config = CompressibleEulerConfig()
-        tend = compressible_euler_slow_tendencies(
-            state, grid, height_coord, terrain_metric, config,
+        config = CDGridCompressibleEulerConfig()
+        tend = cdgrid_compressible_euler_slow_tendencies(
+            state, grid, height_coord, terrain_metric, cdgrid, config,
         )
         assert tend.du_dt.data.shape == state.u.data.shape
         assert tend.dv_dt.data.shape == state.v.data.shape
@@ -432,17 +439,17 @@ class TestKesslerMicrophysics:
 class TestDifferentiability:
     """Tests that the NH model is differentiable through JAX."""
 
-    def test_grad_through_tendencies(self, grid, height_coord, terrain_metric):
-        """jax.grad works through tendency computation."""
-        config = CompressibleEulerConfig(hyperdiff_coeff=0.0, sponge_coeff=0.0)
+    def test_grad_through_tendencies(self, grid, height_coord, terrain_metric, cdgrid):
+        """jax.grad works through C-D grid tendency computation."""
+        config = CDGridCompressibleEulerConfig(hyperdiff_coeff=0.0, sponge_coeff=0.0)
         state = _make_nh_state(grid, height_coord)
 
         def loss_fn(theta_p_data):
             s = state._replace(
                 theta_prime=state.theta_prime.replace(data=theta_p_data),
             )
-            tend = compressible_euler_slow_tendencies(
-                s, grid, height_coord, terrain_metric, config,
+            tend = cdgrid_compressible_euler_slow_tendencies(
+                s, grid, height_coord, terrain_metric, cdgrid, config,
             )
             return jnp.sum(tend.drho_prime_dt.data ** 2)
 

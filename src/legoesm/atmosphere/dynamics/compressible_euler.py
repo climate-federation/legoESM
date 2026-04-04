@@ -1,22 +1,18 @@
-"""Fully compressible non-hydrostatic Euler equations on the cubed-sphere.
+"""Shared utilities for the non-hydrostatic compressible Euler equations.
 
-Solves the compressible Euler equations in height-based terrain-following
-(z*) coordinates using reference-state subtraction:
+This module provides shared infrastructure used by all non-hydrostatic
+compressible Euler solvers (C-D grid cubed-sphere, lat-lon FV, MPAS,
+spectral):
 
-    du/dt   =  (zeta+f)·v - dB/dx - c_p·theta·d(pi')/dx + D_u + sponge
-    dv/dt   = -(zeta+f)·u - dB/dy - c_p·theta·d(pi')/dy + D_v + sponge
-    dw/dt   = -c_p·theta·(1/J)·d(pi')/dz* - g·(theta'/theta_0) + sponge
-    d(theta')/dt = -v·grad(theta) - (w/J)·d(theta)/dz* + D_theta + Q/(rho·c_p)
-    d(rho')/dt   = -(1/J)·[div_h(J·rho·v_h) + d(rho·w)/dz*]
+- ``CompressibleEulerConfig`` — base configuration NamedTuple
+- ``compute_exner_perturbation`` — Exner function perturbation from EOS
+- ``_sponge_profile`` — Rayleigh damping profile
+- ``acoustic_substeps`` — forward-backward acoustic substeps
+- ``acoustic_substeps_semi_implicit`` — tridiagonal implicit acoustic substeps
 
-where:
-    pi = (p/p_0)^kappa          Exner function (dimensionless)
-    B = 0.5·(u^2 + v^2)        Bernoulli function (kinetic energy only)
-    J = (H - z_s) / H          Jacobian of z* transform
-    primes = perturbation from 1D reference state
-
-Time integration uses split-explicit: SSP-RK3 for slow modes with
-forward-backward acoustic substeps for fast (sound/gravity) waves.
+The A-grid cubed-sphere slow-tendency solver that previously lived here
+has been removed.  Use ``cdgrid_compressible_euler_slow_tendencies`` from
+``compressible_euler_cdgrid.py`` instead.
 
 References
 ----------
@@ -26,32 +22,14 @@ References
 
 from __future__ import annotations
 
-from functools import partial
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
-from legoesm.core.operators_3d import (
-    vorticity_3d,
-    gradient_x_3d,
-    gradient_y_3d,
-    divergence_3d,
-    hyperdiffusion_3d,
-    vertical_advection_height,
-)
-from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
-from legoesm.timestepping.split_explicit import (
-    split_explicit_step,
-    SplitExplicitConfig,
-)
-from legoesm.grids.edge_blending import (
-    blend_scalar_cube_edges,
-    blend_vector_cube_edges,
-)
+from legoesm.timestepping.split_explicit import SplitExplicitConfig
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm import constants
 
@@ -69,63 +47,12 @@ class CompressibleEulerConfig(NamedTuple):
     use_coriolis: bool = True       # Set False for f=0 tests (e.g. DCMIP TC3)
     semi_implicit_acoustic: bool = False  # Use tridiagonal solve for acoustic substeps
     outer_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
-    edge_blend_uv: float = 0.0
-    edge_blend_w: float = 0.0
-    edge_blend_theta: float = 0.0
-    edge_blend_rho: float = 0.0
-    edge_blend_tracers: float = 0.0
-    edge_blend_width: int = 1
     fix_mass: bool = False            # Apply NH mass conservation fixer
     anchor_mass_to_initial: bool = False  # Anchor to initial mass (prevents drift)
     acoustic_off_centering: float = 0.0   # Off-centering parameter beta for acoustic steps
                                           # 0.0 = centered (neutral), 0.1 = slightly damped
                                           # Damps vertically-propagating acoustic modes
                                           # without horizontal CFL constraint (Skamarock 2008)
-
-
-def _apply_nh_edge_blend(
-    state: NonHydrostaticState,
-    grid: CubedSphereGrid,
-    config: CompressibleEulerConfig,
-) -> NonHydrostaticState:
-    """Apply variable-specific cubed-sphere edge blending."""
-    u_data = state.u.data
-    v_data = state.v.data
-    w_data = state.w.data
-    theta_data = state.theta_prime.data
-    rho_data = state.rho_prime.data
-    tracers_data = state.tracers.data
-
-    if config.edge_blend_uv > 0.0:
-        u_data, v_data = blend_vector_cube_edges(
-            u_data, v_data, grid.cos_angle, grid.sin_angle,
-            config.edge_blend_uv, width=config.edge_blend_width,
-        )
-    if config.edge_blend_w > 0.0:
-        w_data = blend_scalar_cube_edges(
-            w_data, config.edge_blend_w, width=config.edge_blend_width
-        )
-    if config.edge_blend_theta > 0.0:
-        theta_data = blend_scalar_cube_edges(
-            theta_data, config.edge_blend_theta, width=config.edge_blend_width
-        )
-    if config.edge_blend_rho > 0.0:
-        rho_data = blend_scalar_cube_edges(
-            rho_data, config.edge_blend_rho, width=config.edge_blend_width
-        )
-    if config.edge_blend_tracers > 0.0 and tracers_data.ndim == 5 and tracers_data.shape[-1] > 0:
-        tracers_data = blend_scalar_cube_edges(
-            tracers_data, config.edge_blend_tracers, width=config.edge_blend_width
-        )
-
-    return state._replace(
-        u=state.u.replace(data=u_data),
-        v=state.v.replace(data=v_data),
-        w=state.w.replace(data=w_data),
-        theta_prime=state.theta_prime.replace(data=theta_data),
-        rho_prime=state.rho_prime.replace(data=rho_data),
-        tracers=state.tracers.replace(data=tracers_data),
-    )
 
 
 # ==============================================================================
@@ -199,186 +126,6 @@ def _sponge_profile(
     # Fraction into sponge layer: 0 below, 1 at top
     frac = jnp.clip((z_full - z_sponge_bottom) / sponge_width, 0.0, 1.0)
     return sponge_coeff * jnp.sin(0.5 * jnp.pi * frac) ** 2
-
-
-# ==============================================================================
-# Slow tendency computation
-# ==============================================================================
-
-def compressible_euler_slow_tendencies(
-    state: NonHydrostaticState,
-    grid: CubedSphereGrid,
-    height_coord: HeightCoordinate,
-    terrain_metric: TerrainMetric,
-    config: CompressibleEulerConfig,
-    physics_tendency: NonHydrostaticTendencies | None = None,
-) -> NonHydrostaticTendencies:
-    """Compute slow (advective) tendencies for the compressible Euler equations.
-
-    These are evaluated once per RK3 stage and held constant during
-    acoustic substeps. They include:
-    1. Coriolis force
-    2. Horizontal pressure gradient (Exner function)
-    3. Horizontal and vertical advection of u, v, theta
-    4. Kinetic energy gradient
-    5. Hyperdiffusion
-    6. Sponge layer damping
-
-    The fast tendencies (acoustic: vertical PGF for w, continuity for rho)
-    are handled in the acoustic substeps.
-    """
-    u = state.u.data          # (6, n, n, nlev)
-    v = state.v.data
-    w = state.w.data          # (6, n, n, nlev+1)
-    theta_p = state.theta_prime.data
-    rho_p = state.rho_prime.data
-    tracers = state.tracers.data  # (6, n, n, nlev, n_tracers)
-
-    c_p = constants.c_pd
-    rho_0 = height_coord.rho_ref        # (nlev,)
-    theta_0 = height_coord.theta_ref    # (nlev,)
-    dz = height_coord.dz                # (nlev,)
-    dz_half = height_coord.dz_half      # (nlev-1,)
-    J = terrain_metric.jacobian         # (6, n, n)
-
-    theta_total, rho_total = sanitize_theta_rho(
-        theta_0 + theta_p,
-        rho_0 + rho_p,
-    )
-
-    # --- 1. Exner perturbation and horizontal pressure gradient ---
-    pi_prime = compute_exner_perturbation(rho_p, theta_p, height_coord)
-
-    dpi_dx = gradient_x_3d(pi_prime, grid)
-    dpi_dy = gradient_y_3d(pi_prime, grid)
-
-    # --- 2. Vorticity and Coriolis ---
-    zeta = vorticity_3d(u, v, grid)
-    abs_vor = (zeta + grid.f[..., None]) if config.use_coriolis else zeta
-
-    # --- 3. Kinetic energy gradient ---
-    K = 0.5 * (u**2 + v**2)
-    dK_dx = gradient_x_3d(K, grid)
-    dK_dy = gradient_y_3d(K, grid)
-
-    # --- 4. Horizontal momentum (vector-invariant form) ---
-    du_dt = abs_vor * v - dK_dx - c_p * theta_total * dpi_dx
-    dv_dt = -abs_vor * u - dK_dy - c_p * theta_total * dpi_dy
-
-    # --- 5. Vertical advection of u, v ---
-    du_dt = du_dt + vertical_advection_height(u, w, dz, dz_half, J)
-    dv_dt = dv_dt + vertical_advection_height(v, w, dz, dz_half, J)
-
-    # --- 6. Theta equation: HORIZONTAL advection only ---
-    # Vertical theta advection is handled by the acoustic substeps.
-    # Advective form: -v·∇_h(θ) using centered gradients.
-    dtheta_dx = gradient_x_3d(theta_total, grid)
-    dtheta_dy = gradient_y_3d(theta_total, grid)
-    dtheta_p_dt = -(u * dtheta_dx + v * dtheta_dy)
-
-    # --- 7. Continuity: HORIZONTAL divergence only ---
-    # Vertical mass flux divergence is handled by the acoustic substeps.
-    rho_u = rho_total * u
-    rho_v = rho_total * v
-    div_rho_v = divergence_3d(rho_u, rho_v, grid)
-    drho_p_dt = -div_rho_v
-
-    # --- 8. Tracer advection ---
-    n_tracers = tracers.shape[-1] if tracers.ndim > 3 else 0
-    if n_tracers > 0:
-        tracers_t = jnp.moveaxis(tracers, -1, 0)  # (n_tracers, 6, n, n, nlev)
-
-        def _single_tracer_tendency(q):
-            dq_dx = gradient_x_3d(q, grid)
-            dq_dy = gradient_y_3d(q, grid)
-            horiz_adv_q = -(u * dq_dx + v * dq_dy)
-            vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
-            return horiz_adv_q + vert_adv_q
-
-        dtracers_dt_t = jax.vmap(_single_tracer_tendency)(tracers_t)
-        dtracers_dt = jnp.moveaxis(dtracers_dt_t, 0, -1)
-    else:
-        dtracers_dt = jnp.zeros_like(tracers)
-
-    # --- 9. Hyperdiffusion ---
-    if config.hyperdiff_coeff > 0:
-        du_dt = du_dt + hyperdiffusion_3d(u, grid, config.hyperdiff_coeff)
-        dv_dt = dv_dt + hyperdiffusion_3d(v, grid, config.hyperdiff_coeff)
-        dtheta_p_dt = dtheta_p_dt + hyperdiffusion_3d(
-            theta_p, grid, config.hyperdiff_coeff
-        )
-    if config.hyperdiff_rho_coeff > 0:
-        drho_p_dt = drho_p_dt + hyperdiffusion_3d(
-            rho_p, grid, config.hyperdiff_rho_coeff
-        )
-
-    # --- 10. Sponge layer (Rayleigh damping toward reference state) ---
-    sponge = _sponge_profile(
-        height_coord.z_full, height_coord.H,
-        config.sponge_width, config.sponge_coeff,
-    )
-    du_dt = du_dt - sponge * u
-    dv_dt = dv_dt - sponge * v
-    dtheta_p_dt = dtheta_p_dt - sponge * theta_p
-
-    # Sponge for w at half levels
-    sponge_half = _sponge_profile(
-        height_coord.z_half, height_coord.H,
-        config.sponge_width, config.sponge_coeff,
-    )
-
-    # --- 11. w tendency (slow part only: buoyancy is in acoustic step) ---
-    # The w equation has slow contributions from horizontal advection
-    w_full = 0.5 * (w[..., :-1] + w[..., 1:])  # interpolate to full levels
-    dw_dx = gradient_x_3d(w_full, grid)
-    dw_dy = gradient_y_3d(w_full, grid)
-    horiz_adv_w = -(u * dw_dx + v * dw_dy)
-
-    # Map back to half levels by averaging
-    horiz_adv_w_half = jnp.zeros_like(w)
-    horiz_adv_w_half = horiz_adv_w_half.at[..., 1:-1].set(
-        0.5 * (horiz_adv_w[..., :-1] + horiz_adv_w[..., 1:])
-    )
-
-    dw_dt = horiz_adv_w_half - sponge_half * w
-    if config.hyperdiff_w_coeff > 0:
-        dw_dt = dw_dt + hyperdiffusion_3d(
-            w, grid, config.hyperdiff_w_coeff
-        )
-
-    # --- 12. Add physics tendencies if provided ---
-    if physics_tendency is not None:
-        du_dt = du_dt + physics_tendency.du_dt.data
-        dv_dt = dv_dt + physics_tendency.dv_dt.data
-        dw_dt = dw_dt + physics_tendency.dw_dt.data
-        dtheta_p_dt = dtheta_p_dt + physics_tendency.dtheta_prime_dt.data
-        drho_p_dt = drho_p_dt + physics_tendency.drho_prime_dt.data
-        dtracers_dt = dtracers_dt + physics_tendency.dtracers_dt.data
-
-    # --- Build tendency pytree ---
-    dims_3d = ("face", "x", "y", "level")
-    dims_w = ("face", "x", "y", "level_half")
-    dims_2d = ("face", "x", "y")
-    dims_tr = ("face", "x", "y", "level", "tracer")
-
-    return NonHydrostaticTendencies(
-        du_dt=Field(data=du_dt, name="du_dt", dims=dims_3d, units="m/s^2"),
-        dv_dt=Field(data=dv_dt, name="dv_dt", dims=dims_3d, units="m/s^2"),
-        dw_dt=Field(data=dw_dt, name="dw_dt", dims=dims_w, units="m/s^2"),
-        dtheta_prime_dt=Field(
-            data=dtheta_p_dt, name="dtheta_prime_dt", dims=dims_3d, units="K/s",
-        ),
-        drho_prime_dt=Field(
-            data=drho_p_dt, name="drho_prime_dt", dims=dims_3d, units="kg/m^3/s",
-        ),
-        dphis_dt=Field(
-            data=jnp.zeros_like(state.phis.data),
-            name="dphis_dt", dims=dims_2d, units="m^2/s^3",
-        ),
-        dtracers_dt=Field(
-            data=dtracers_dt, name="dtracers_dt", dims=dims_tr, units="1/s",
-        ),
-    )
 
 
 # ==============================================================================
