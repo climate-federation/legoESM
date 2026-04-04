@@ -13,7 +13,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.da.control_vector import ControlVectorSpec, state_to_control, control_to_state
+from legoesm.da.control_vector import ControlVectorSpec
 from legoesm.da.incremental import IncrementalConfig, incremental_4dvar
 
 logger = logging.getLogger(__name__)

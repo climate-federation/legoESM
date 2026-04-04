@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-import jax.numpy as jnp
-
-from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian

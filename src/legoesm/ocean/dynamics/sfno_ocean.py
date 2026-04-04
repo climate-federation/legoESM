@@ -22,12 +22,11 @@ References
 
 from __future__ import annotations
 
-from typing import NamedTuple, Callable
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
@@ -35,7 +34,7 @@ from legoesm.grids.gaussian import (
     sh_synthesis,
     sh_synthesis_3d,
 )
-from legoesm.ocean.state import SpectralOceanState, SpectralOceanConfig
+from legoesm.ocean.state import SpectralOceanState
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,

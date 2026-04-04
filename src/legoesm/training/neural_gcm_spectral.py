@@ -522,11 +522,6 @@ def load_training_data(
         _open_era5_zarr, _resolve_var, ERA5Slice,
         _regrid_latlon_to_gaussian, _regrid_2d_to_gaussian,
     )
-    from legoesm.training.vertical_interp import interp_pressure_to_sigma
-    from legoesm.driver.compiled_segments import pack_carry
-    from legoesm.core.field import Field
-    from legoesm.core.state import HydrostaticState
-
     era5_config = TrainingERA5Config(dt_hours=6)
     n_days = config.n_train_days
     # Time indices: need days 0..n_days (n_days+1 snapshots for n_days pairs)
