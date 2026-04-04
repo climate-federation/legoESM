@@ -8,7 +8,8 @@ Test cases:
   Existing:
     - rest_state          Rest-state adjustment (stability check)
     - barotropic_wave     Gaussian SSH perturbation propagation
-    - wind_gyre           Wind-driven double-gyre circulation
+    - barotropic_gyre     Wind-driven single barotropic gyre (Stommel/Munk)
+    - barotropic_double_gyre  Wind-driven barotropic double gyre (Holland & Lin)
     - baroclinic          Meridional temperature front relaxation
     - phillips_two_layer  Phillips 2-layer baroclinic instability
 
@@ -121,10 +122,15 @@ FIELD_RANGES = {
         "eta": (-1.5, 1.5),        # meters - wave amplitude ~1m  
         "SST": (1.5, 21.0),        # °C - background temperature range
     },
-    "wind_gyre": {
-        "eta": (-0.5, 0.5),        # meters - gyre SSH variations
-        "speed_sfc": (0, 0.3),      # m/s - realistic surface speeds
-        "SST": (1.5, 21.0),        # °C
+    "barotropic_gyre": {
+        "eta": (-0.02, 0.02),      # meters - gyre SSH (small after quick spin-up)
+        "speed_sfc": (0, 0.15),     # m/s - surface speeds
+        "SST": (9.5, 10.5),        # °C - uniform 10°C (barotropic)
+    },
+    "barotropic_double_gyre": {
+        "eta": (-0.02, 0.02),      # meters - gyre SSH (small after quick spin-up)
+        "speed_sfc": (0, 0.15),     # m/s - surface speeds
+        "SST": (9.5, 10.5),        # °C - uniform 10°C (barotropic)
     },
     "baroclinic": {
         "eta": (-0.1, 0.1),        # meters - adjustment process
@@ -147,7 +153,7 @@ FIELD_RANGES = {
         "SST": (-1, 21),            # °C - cold dense water
     },
     "stommel_gyre_tracer": {
-        "eta": (-0.5, 0.5),        # meters - gyre circulation
+        "eta": (-0.02, 0.02),      # meters - gyre circulation (small during spin-up)
         "SST": (1.5, 21.0),        # °C
         "SSS": (33, 37),            # PSU - tracer salinity range
     },
@@ -161,7 +167,7 @@ FIELD_RANGES = {
 @dataclass
 class TestCase:
     """A single test case in the ocean matrix."""
-    case: str               # rest_state, barotropic_wave, wind_gyre, baroclinic
+    case: str               # rest_state, barotropic_gyre, barotropic_double_gyre, etc.
     grid_type: str          # cubed_sphere, latlon, mpas, spectral
     resolution: str         # C24, 36x72, ico3, T21
     duration_days: float
@@ -199,10 +205,15 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "barotropic_wave", g, bwave_res[g], 2.0, 0.2))
 
-    # --- Wind-driven gyre: cubed_sphere, latlon, mpas ---
-    for g in ["cubed_sphere", "latlon", "mpas"]:
+    # --- Barotropic gyre: cubed_sphere, latlon (MPAS lacks surface forcing) ---
+    for g in ["cubed_sphere", "latlon"]:
         matrix.append(TestCase(
-            "wind_gyre", g, res[g], 30.0, 2.0))
+            "barotropic_gyre", g, res[g], 30.0, 2.0))
+
+    # --- Barotropic double gyre: cubed_sphere, latlon ---
+    for g in ["cubed_sphere", "latlon"]:
+        matrix.append(TestCase(
+            "barotropic_double_gyre", g, res[g], 30.0, 2.0))
 
     # --- Baroclinic adjustment: all grids ---
     for g in GRID_TYPES:
@@ -229,8 +240,8 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "overflow", g, res[g], 0.5, 0.1))
 
-    # --- Stommel Gyre Tracer (Hecht et al. 2000): cubed_sphere, latlon, mpas ---
-    for g in ["cubed_sphere", "latlon", "mpas"]:
+    # --- Stommel Gyre Tracer (Hecht et al. 2000): cubed_sphere, latlon ---
+    for g in ["cubed_sphere", "latlon"]:
         matrix.append(TestCase(
             "stommel_gyre_tracer", g, res[g], 60.0, 5.0))
 
@@ -1026,8 +1037,17 @@ def _parse_resolution(tc: TestCase):
 
 
 def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
-                        H_max: float = DEFAULT_H_MAX):
+                        H_max: float = DEFAULT_H_MAX, physics=None):
     """Create grid, z_coord, and rest-state for any grid type.
+
+    Parameters
+    ----------
+    tc : TestCase
+    nlev : int
+    H_max : float
+    physics : OceanPhysicsConfig or None
+        If provided, passed to the model config to enable physics
+        (e.g. prescribed surface forcing for wind-driven experiments).
 
     Returns (grid, z_coord, state, model, coord_kind, lon_deg, lat_deg).
     """
@@ -1043,7 +1063,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
 
         n = params["n"]
         grid = create_cubed_sphere(n)
-        config = OceanConfig(n_barotropic_substeps=30)
+        config = OceanConfig(n_barotropic_substeps=30, physics=physics)
         model = OceanModel(grid, z_coord, config)
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -1056,7 +1076,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
         from legoesm.ocean.state import LatLonOceanConfig
 
         grid = create_latlon_grid(params["n_lat"], params["n_lon"])
-        config = LatLonOceanConfig(n_barotropic_substeps=30)
+        config = LatLonOceanConfig(n_barotropic_substeps=30, physics=physics)
         model = LatLonOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -1446,17 +1466,24 @@ def _add_barotropic_wave_perturbation(state, grid_type: str, grid, z_coord):
 # Wind-driven gyre forcing
 # ===========================================================================
 
-def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord):
-    """Create wind-gyre initial state (starts at rest with bathymetry)."""
+def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord,
+                           lon_west=0.0, lon_east=120.0,
+                           lat_south=15.0, lat_north=75.0):
+    """Create wind-gyre initial state with rectangular basin boundaries."""
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import wind_driven_gyre_init
-        return wind_driven_gyre_init(grid, z_coord)
+        return wind_driven_gyre_init(
+            grid, z_coord,
+            lon_west=lon_west, lon_east=lon_east,
+            lat_south=lat_south, lat_north=lat_north,
+        )
     elif grid_type == "latlon":
         from legoesm.ocean.init_latlon import wind_driven_gyre_latlon
-        return wind_driven_gyre_latlon(grid, z_coord)
-    elif grid_type == "mpas":
-        # MPAS doesn't have a dedicated gyre init; use rest state
-        return state
+        return wind_driven_gyre_latlon(
+            grid, z_coord,
+            lon_west=lon_west, lon_east=lon_east,
+            lat_south=lat_south, lat_north=lat_north,
+        )
     raise ValueError(f"Wind gyre not available for grid: {grid_type}")
 
 
@@ -1703,18 +1730,57 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
 # Runner: Wind-Driven Gyre
 # ===========================================================================
 
-def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
-                  ) -> tuple[str, float, str]:
-    """Wind-driven double-gyre circulation."""
-    if tc.grid_type == "spectral":
-        raise NotImplementedError(
-            "Wind-driven gyre not implemented for spectral grid")
+def _make_gyre_physics(wind_profile: str = "single_gyre"):
+    """Create OceanPhysicsConfig with prescribed gyre wind forcing.
 
+    Parameters
+    ----------
+    wind_profile : str
+        "single_gyre" or "double_gyre".
+    """
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.surface_forcing.config import (
+        PrescribedForcingConfig, SurfaceForcingConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+
+    return OceanPhysicsConfig(
+        surface_forcing=SurfaceForcingConfig(
+            scheme="prescribed",
+            prescribed=PrescribedForcingConfig(
+                wind_profile=wind_profile,
+                tau_max=0.1,
+                lat_south_deg=15.0,
+                lat_north_deg=75.0,
+            ),
+        ),
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(scheme="none"),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=None,
+    )
+
+
+def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
+                         wind_profile: str, label: str,
+                         ) -> tuple[str, float, str]:
+    """Shared runner for barotropic gyre experiments."""
+    if tc.grid_type not in ("cubed_sphere", "latlon"):
+        raise NotImplementedError(
+            f"{label} not implemented for {tc.grid_type} grid "
+            f"(no surface forcing support)")
+
+    physics = _make_gyre_physics(wind_profile)
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc))
-    # Create rest state first (needed for grids without dedicated gyre init)
-    rest = _create_rest_state(tc, grid, z_coord)
-    state = _add_wind_gyre_forcing(rest, tc.grid_type, grid, z_coord)
+        _create_ocean_setup(tc, physics=physics))
+    state = _add_wind_gyre_forcing(
+        None, tc.grid_type, grid, z_coord,
+        lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
+    )
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -1730,15 +1796,9 @@ def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
-        label=f"Wind Gyre ({tc.grid_type})", total_days=days)
+        label=f"{label} ({tc.grid_type})", total_days=days)
 
-    if tc.grid_type == "mpas":
-        speed_key = "max_abs_u"
-    else:
-        speed_key = "max_speed"
-    max_speed = diag[speed_key][-1] if diag.get(speed_key) else 0
-    # Use absolute eta drift in meters rather than relative drift since 
-    # initial mean_eta is ~0 in gyre runs, making relative drift meaningless (division by ~0).
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
     eta_list = diag.get("mean_eta", [])
     eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
@@ -1756,12 +1816,11 @@ def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
     field_specs = [
         ("eta", "SSH (m)", "RdBu_r"),
         ("SST", "SST (degC)", "RdYlBu_r"),
+        ("speed_sfc", "Surface speed (m/s)", "magma"),
     ]
-    if tc.grid_type != "mpas":
-        field_specs.append(("speed_sfc", "Surface speed (m/s)", "magma"))
 
     _save_case_diagnostics(
-        output_dir, f"Wind Gyre {tc.grid_type} {tc.resolution}",
+        output_dir, f"{label} {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=field_specs,
         field_3d_key="T_3d", level_values=depth,
@@ -1771,6 +1830,22 @@ def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
                       "mean_T": "degC", "mean_S": "PSU"})
 
     return "PASS" if ok else "FAIL", wall, notes
+
+
+def run_barotropic_gyre(tc: TestCase, output_dir: Path, days: float
+                        ) -> tuple[str, float, str]:
+    """Wind-driven single barotropic gyre (Stommel 1948, Munk 1950)."""
+    return _run_gyre_experiment(tc, output_dir, days,
+                                wind_profile="single_gyre",
+                                label="Barotropic Gyre")
+
+
+def run_barotropic_double_gyre(tc: TestCase, output_dir: Path, days: float
+                               ) -> tuple[str, float, str]:
+    """Wind-driven barotropic double gyre (Holland & Lin 1975)."""
+    return _run_gyre_experiment(tc, output_dir, days,
+                                wind_profile="double_gyre",
+                                label="Barotropic Double Gyre")
 
 
 # ===========================================================================
@@ -2632,13 +2707,16 @@ def _init_stommel_gyre_tracer(state, grid_type, grid, z_coord):
     """
     from legoesm.core.field import Field
 
-    # First set up the wind-gyre dynamics
-    state = _add_wind_gyre_forcing(state, grid_type, grid, z_coord)
+    # First set up the wind-gyre dynamics (basin: 0-60E, 15-75N)
+    state = _add_wind_gyre_forcing(
+        state, grid_type, grid, z_coord,
+        lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
+    )
 
-    # Add salinity tracer blob (Gaussian, centered at 30N, 30W)
+    # Add salinity tracer blob (Gaussian, centered at 35N, 30E — inside basin)
     lat, lon = _get_cell_latlon_rad(grid_type, grid)
-    lat_c = np.radians(30.0)   # blob center latitude
-    lon_c = np.radians(-30.0)  # blob center longitude
+    lat_c = np.radians(35.0)   # blob center latitude
+    lon_c = np.radians(60.0)   # blob center longitude (basin midpoint)
     sigma = np.radians(10.0)   # blob width (~10 deg)
     S_bg = 35.0                # background salinity (PSU)
     S_amp = 2.0                # tracer perturbation amplitude
@@ -2673,20 +2751,19 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     boundary current. Monitors tracer conservation (integral, min, max)
     and transport through the sheared flow.
     """
-    if tc.grid_type == "spectral":
+    if tc.grid_type not in ("cubed_sphere", "latlon"):
         raise NotImplementedError(
-            "Stommel gyre tracer not implemented for spectral grid")
+            f"Stommel gyre tracer not implemented for {tc.grid_type} grid "
+            f"(no surface forcing support)")
 
+    physics = _make_gyre_physics("single_gyre")
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc))
+        _create_ocean_setup(tc, physics=physics))
     rest = _create_rest_state(tc, grid, z_coord)
     state = _init_stommel_gyre_tracer(rest, tc.grid_type, grid, z_coord)
 
     # Store initial tracer integral for conservation check
-    if tc.grid_type == "mpas":
-        area = np.asarray(grid.areaCell, dtype=np.float64)
-    else:
-        area = np.asarray(grid.area, dtype=np.float64)
+    area = np.asarray(grid.area, dtype=np.float64)
     S_init_sfc = np.asarray(state.S.data[..., 0], dtype=np.float64)
     mask = np.asarray(state.land_mask.data, dtype=np.float64)
     S_integral_init = float(np.sum(S_init_sfc * area * mask))
@@ -2771,7 +2848,8 @@ RUNNERS: dict[str, Callable] = {
     "rest_state": run_rest_state,
     "rest_state_no_land": run_rest_state_no_land,
     "barotropic_wave": run_barotropic_wave,
-    "wind_gyre": run_wind_gyre,
+    "barotropic_gyre": run_barotropic_gyre,
+    "barotropic_double_gyre": run_barotropic_double_gyre,
     "baroclinic": run_baroclinic,
     "phillips_two_layer": run_phillips_two_layer,
     "inertia_gravity_wave": run_inertia_gravity_wave,
@@ -2792,7 +2870,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--only", type=str, default="all",
         help="Run only cases matching this name "
-             "(e.g. rest_state, barotropic_wave, wind_gyre, baroclinic)")
+             "(e.g. rest_state, barotropic_gyre, barotropic_double_gyre)")
     p.add_argument(
         "--grid", type=str, default="all",
         choices=["cubed_sphere", "latlon", "mpas", "spectral", "all"],

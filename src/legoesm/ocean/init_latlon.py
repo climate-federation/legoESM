@@ -120,6 +120,50 @@ def wind_driven_gyre_latlon(
     grid: LatLonGrid,
     z_coord: OceanZStarCoordinate,
     H_max: float = 5500.0,
+    lon_west: float = 0.0,
+    lon_east: float = 120.0,
+    lat_south: float = 15.0,
+    lat_north: float = 75.0,
+    T_uniform: float = 10.0,
+    S_uniform: float = 35.0,
 ) -> LatLonOceanState:
-    """Create initial condition for a wind-driven double-gyre on lat-lon."""
-    return rest_state_latlon_ocean(grid, z_coord, H_max=H_max)
+    """Create initial condition for a wind-driven barotropic gyre on lat-lon.
+
+    Uniform T and S inside a rectangular basin. Purely barotropic setup.
+    Wind forcing is applied during integration via the prescribed
+    surface forcing pipeline.
+    """
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+    nlev = z_coord.n_levels
+    dtype = get_policy().storage
+
+    # Basin land mask: ocean inside rectangle, land outside
+    lon_deg = grid.lon2d * (180.0 / jnp.pi)
+    lat_deg = grid.lat2d * (180.0 / jnp.pi)
+    in_basin = (
+        (lon_deg >= lon_west) & (lon_deg <= lon_east) &
+        (lat_deg >= lat_south) & (lat_deg <= lat_north)
+    )
+    land_mask = jnp.where(in_basin, 1.0, 0.0).astype(dtype)
+
+    H_bathy = jnp.full_like(land_mask, H_max)
+
+    # Uniform T and S — purely barotropic setup
+    T_3d = jnp.full((n_lat, n_lon, nlev), T_uniform, dtype=dtype)
+    S_3d = jnp.full((n_lat, n_lon, nlev), S_uniform, dtype=dtype)
+    zeros_3d = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
+    zeros_2d = jnp.zeros((n_lat, n_lon), dtype=dtype)
+
+    dims_3d = ("lat", "lon", "level")
+    dims_2d = ("lat", "lon")
+
+    return LatLonOceanState(
+        u=Field(data=zeros_3d, name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=zeros_3d, name="v", dims=dims_3d, units="m/s"),
+        T=Field(data=T_3d, name="T", dims=dims_3d, units="degC"),
+        S=Field(data=S_3d, name="S", dims=dims_3d, units="PSU"),
+        eta=Field(data=zeros_2d, name="eta", dims=dims_2d, units="m"),
+        H_bathy=Field(data=H_bathy, name="H_bathy", dims=dims_2d, units="m"),
+        land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
+    )

@@ -14,10 +14,11 @@ Scientific Purpose:
 - Validate conservation properties during gyre circulation
 
 Domain Configuration:
-- Global ocean with land at high latitudes (|lat| > 80°)
+- Rectangular ocean basin (default: 0-60°E, 15-75°N)
+- Land on all four sides (meridional + zonal boundaries)
 - Uniform depth: 5500m in ocean regions
 - Rest state stratification as background
-- Symmetric wind stress forcing creates double-gyre pattern
+- Basin-relative double-gyre wind stress forcing
 
 Physical Setup:
 - Double-gyre wind stress pattern: alternating cyclonic/anticyclonic
@@ -60,84 +61,69 @@ from legoesm.constants import g
 @dataclass
 class WindGyreConfig:
     """Configuration parameters for wind-driven gyre experiment.
-    
+
     All parameters have physically meaningful defaults that work across
     different grid types and resolutions.
     """
-    # Background state (inherits from rest_state)
-    T_surface: float = 20.0        # Surface temperature [°C]
-    T_deep: float = 2.0            # Deep ocean temperature [°C] 
+    # Background state
+    T_surface: float = 20.0        # Surface temperature [degC]
+    T_deep: float = 2.0            # Deep ocean temperature [degC]
     scale_depth: float = 1000.0    # Temperature e-folding depth [m]
     S_uniform: float = 35.0        # Salinity [PSU]
-    
-    # Domain configuration  
+
+    # Domain configuration — rectangular basin
     H_max: float = 5500.0          # Maximum ocean depth [m]
-    land_lat_threshold: float = 80.0  # Latitude threshold for land [degrees]
-    
-    # Wind forcing parameters (if needed for custom forcing)
+    lon_west: float = 0.0          # Basin western boundary [degrees]
+    lon_east: float = 120.0        # Basin eastern boundary [degrees]
+    lat_south: float = 15.0        # Basin southern boundary [degrees]
+    lat_north: float = 75.0        # Basin northern boundary [degrees]
+
+    # Wind forcing parameters
     wind_stress_max: float = 0.1   # Maximum wind stress [Pa]
-    wind_forcing_enabled: bool = True  # Enable wind forcing
 
 
 def create_initial_conditions(grid_type: str, grid, z_coord, 
                             config: WindGyreConfig = None):
-    """Create wind-driven gyre initial conditions for any grid type.
-    
-    This creates either a rest state background (for MPAS) or uses dedicated
-    wind-gyre initialization functions that set up appropriate bathymetry and
-    initial circulation patterns.
-    
+    """Create wind-driven gyre initial conditions for any supported grid type.
+
+    Creates a rectangular ocean basin with rest-state stratification.
+    Wind forcing is applied during model integration via the prescribed
+    surface forcing physics pipeline.
+
     Parameters
     ----------
     grid_type : str
-        Grid type: "cubed_sphere", "latlon", "mpas", or "spectral"
+        Grid type: "cubed_sphere" or "latlon".
     grid : Grid
-        Grid object (type depends on grid_type)
+        Grid object.
     z_coord : OceanZCoordinate
-        Vertical coordinate system
+        Vertical coordinate system.
     config : WindGyreConfig, optional
         Configuration parameters. Uses defaults if None.
-        
+
     Returns
     -------
     OceanState
-        Initial state for wind-driven gyre experiment
-        
-    Notes
-    -----
-    - Cubed sphere and lat-lon grids: Use dedicated gyre initialization
-    - MPAS grid: Uses rest state (no dedicated gyre init available)
-    - Spectral grid: Not implemented (raises NotImplementedError)
-    - Wind forcing is applied during model integration, not at initialization
+        Initial state with basin land mask for double-gyre experiment.
     """
     if config is None:
         config = WindGyreConfig()
     
     if grid_type == "cubed_sphere":
-        # Use dedicated wind-driven gyre initialization
         from legoesm.ocean.init import wind_driven_gyre_init
-        return wind_driven_gyre_init(grid, z_coord)
-        
-    elif grid_type == "latlon":
-        # Use dedicated lat-lon wind-gyre initialization  
-        from legoesm.ocean.init_latlon import wind_driven_gyre_latlon
-        return wind_driven_gyre_latlon(grid, z_coord)
-        
-    elif grid_type == "mpas":
-        # MPAS doesn't have dedicated gyre init; use rest state
-        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        return rest_state_mpas_ocean(
-            grid, z_coord,
-            T_surface=config.T_surface,
-            T_deep=config.T_deep,
-            S_uniform=config.S_uniform,
-            H_max=config.H_max,
-            land_lat_threshold=config.land_lat_threshold
+        return wind_driven_gyre_init(
+            grid, z_coord, H_max=config.H_max,
+            lon_west=config.lon_west, lon_east=config.lon_east,
+            lat_south=config.lat_south, lat_north=config.lat_north,
         )
-        
-    elif grid_type == "spectral":
-        raise NotImplementedError(
-            "Wind-driven gyre not implemented for spectral grid")
+
+    elif grid_type == "latlon":
+        from legoesm.ocean.init_latlon import wind_driven_gyre_latlon
+        return wind_driven_gyre_latlon(
+            grid, z_coord, H_max=config.H_max,
+            lon_west=config.lon_west, lon_east=config.lon_east,
+            lat_south=config.lat_south, lat_north=config.lat_north,
+        )
         
     else:
         raise ValueError(f"Unknown grid type: {grid_type}")
@@ -190,8 +176,11 @@ def create_domain_config(config: WindGyreConfig = None) -> Dict[str, Any]:
         
     return {
         "H_max": config.H_max,
-        "land_lat_threshold": config.land_lat_threshold,
-        "description": "Global ocean with wind-driven double-gyre circulation",
+        "lon_west": config.lon_west,
+        "lon_east": config.lon_east,
+        "lat_south": config.lat_south,
+        "lat_north": config.lat_north,
+        "description": "Rectangular basin with wind-driven double-gyre circulation",
         "forcing_type": "wind_stress_gyre",
     }
 
@@ -215,11 +204,7 @@ def compute_circulation_metrics(diagnostics: Dict[str, list],
     metrics = {}
     
     # Maximum surface speed - should reach realistic gyre speeds
-    max_speed_key = "max_speed"  # Default for most grids
-    max_speed_list = diagnostics.get(max_speed_key, [])
-    if not max_speed_list:
-        # Try MPAS alternative
-        max_speed_list = diagnostics.get("max_abs_u", [])
+    max_speed_list = diagnostics.get("max_speed", [])
     
     if len(max_speed_list) >= 2:
         max_speed_final = max_speed_list[-1]
@@ -375,8 +360,8 @@ EXPERIMENT_CONFIG = {
     },
     "grid_support": {
         "cubed_sphere": True,
-        "latlon": True, 
-        "mpas": True,
-        "spectral": False  # Not implemented
+        "latlon": True,
+        "mpas": False,      # No surface forcing support yet
+        "spectral": False,  # Not implemented
     },
 }

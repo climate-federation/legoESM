@@ -273,50 +273,106 @@ None. Free wave propagation.
 
 ---
 
-## 4. Wind-Driven Gyre (`wind_gyre`)
+## 4. Barotropic Gyre (`barotropic_gyre`)
 
 **Purpose.** Validate wind stress momentum transfer, Sverdrup balance, and western
-boundary current formation. Based on Munk (1950) / Stommel (1948).
+boundary current formation in a single-gyre configuration. Based on Stommel (1948) and
+Munk (1950).
 
 ### Vertical Grid
 
 z-star, 10 levels, H_max = 5500 m.
 
+### Domain
+
+Rectangular ocean basin: 0-120 deg E, 15-75 deg N. Land on all four sides (meridional
++ zonal boundaries). This provides the western boundary needed for western boundary
+current formation and closes the basin for proper Sverdrup balance.
+
 ### Initialization
 
 | Variable | Value | Notes |
 |---|---|---|
-| eta (SSH) | 0 | From rest state |
-| u, v (velocity) | 0 or pre-initialized | cubed_sphere/latlon: dedicated gyre init may set initial flow. mpas: rest state (zero). |
-| T (temperature) | `2 + 18 * exp(z/1000)` | From rest state |
-| S (salinity) | 35.0 PSU | From rest state |
-| H_bathy | 5500 m | Uniform |
-| land_mask | \|lat\| < 80 deg = ocean | Standard land mask |
+| eta (SSH) | 0 | Zero everywhere |
+| u, v (velocity) | 0 | Zero; wind drives circulation |
+| T (temperature) | 10 C | Uniform everywhere (purely barotropic) |
+| S (salinity) | 35.0 PSU | Uniform everywhere |
+| H_bathy | 5500 m | Uniform (including land, for smooth Jacobian) |
+| land_mask | 1 inside basin, 0 outside | Rectangular basin mask |
 
 ### Forcing
 
-- Zonal wind stress: `tau_x = tau_max * cos(2 pi lat / L)`, tau_max = 0.1 Pa.
-- Creates a symmetric double-gyre pattern (subtropical + subpolar).
-- Wind forcing is applied at each time step as a surface momentum flux.
+Prescribed single-gyre wind stress via `OceanPhysicsConfig`:
+- `tau_x = -tau_max * cos(pi * (lat - lat_s) / (lat_n - lat_s))`, tau_max = 0.1 Pa.
+- Easterlies at southern boundary (15 N), westerlies at northern boundary (75 N).
+- One sign of wind stress curl → one anticyclonic (subtropical) gyre.
+- Applied to surface layer as `du/dt = tau_x / (rho_0 * dz_0)`.
 
 ### Expected Behavior
 
-- Subtropical and subpolar gyres develop with western boundary intensification.
+- Single anticyclonic gyre develops with western boundary intensification.
 - Maximum surface speed 0.05-0.5 m/s after spin-up.
-- Speed should increase over time (spin-up ratio > 1.5).
-- SSH dipole: positive in subtropical gyre, negative in subpolar.
+- SSH depression in gyre center (Ekman pumping).
 
 ### Validation Thresholds
 
 - max_speed_final: 0.05 -- 0.5 m/s
-- eta_drift_normalized < 1e-5
-- speed_development > 1.5
+- eta_drift small (< 1e-3 m absolute)
 
 ### Grid Support
 
-- cubed_sphere, latlon: dedicated gyre initialization.
-- mpas: falls back to rest state; circulation develops purely from wind forcing.
-- **spectral: not supported** (raises NotImplementedError).
+- cubed_sphere, latlon: full support with basin land mask.
+- **mpas: not supported** — MPAS lacks surface forcing infrastructure (see issue #55).
+- **spectral: not supported**.
+
+### Known Issues
+
+- Goes unstable at 30 days without dissipation (all mixing/drag disabled). Needs
+  lateral viscosity or bottom drag for long integrations.
+
+### Duration
+
+30.0 days (quick: 2.0 days).
+
+---
+
+## 4b. Barotropic Double Gyre (`barotropic_double_gyre`)
+
+**Purpose.** Validate wind-driven double-gyre circulation with two counter-rotating
+gyres. Based on Holland & Lin (1975).
+
+### Domain
+
+Same rectangular basin as barotropic_gyre: 0-120 deg E, 15-75 deg N.
+
+### Initialization
+
+Identical to barotropic_gyre: zero velocity, uniform T = 10 C, uniform S = 35 PSU.
+
+### Forcing
+
+Prescribed double-gyre wind stress:
+- `tau_x = -tau_max * cos(2*pi * (lat - lat_s) / (lat_n - lat_s))`, tau_max = 0.1 Pa.
+- Easterlies at both boundaries (15 N and 75 N), westerly jet at mid-basin (45 N).
+- Curl changes sign at mid-basin → subtropical gyre (south) + subpolar gyre (north).
+
+### Expected Behavior
+
+- Two counter-rotating gyres: anticyclonic subtropical, cyclonic subpolar.
+- Westerly jet separation at mid-basin boundary.
+- SSH dipole: positive (subtropical) and negative (subpolar).
+
+### Validation Thresholds
+
+Same as barotropic_gyre.
+
+### Grid Support
+
+Same as barotropic_gyre (cubed_sphere, latlon only).
+
+### Known Issues
+
+Same stability issue as barotropic_gyre at 30 days without dissipation.
 
 ### Duration
 
@@ -585,28 +641,32 @@ None. Density contrast + topographic slope drive the dynamics.
 ## 10. Stommel Gyre Tracer (`stommel_gyre_tracer`)
 
 **Purpose.** Validate passive tracer transport, integral conservation, and monotonicity
-preservation in a wind-driven gyre circulation. Based on Hecht et al. (2000). Tests
+preservation in a wind-driven Stommel gyre. Based on Hecht et al. (2000). Tests
 advection scheme quality under realistic flow conditions.
+
+### Domain
+
+Same rectangular basin as barotropic_gyre: 0-120 deg E, 15-75 deg N.
 
 ### Vertical Grid
 
-z-star, 10 levels, H_max = 5500 m. Same as rest_state.
+z-star, 10 levels, H_max = 5500 m.
 
 ### Initialization
 
 | Variable | Value | Notes |
 |---|---|---|
-| eta (SSH) | 0 or from gyre init | cubed_sphere/latlon: dedicated gyre init. mpas: rest state. |
-| u, v (velocity) | 0 or from gyre init | Same as above |
-| T (temperature) | `2 + 18 * exp(z/1000)` | Standard profile |
-| S (salinity) | Background + Gaussian blob | 35 PSU background + 2 PSU Gaussian blob centered at (30 N, 30 W), width 10 deg. Surface level only (`surface_tracer_only = True`). |
+| eta (SSH) | 0 | Zero everywhere |
+| u, v (velocity) | 0 | Zero; wind drives circulation |
+| T (temperature) | 10 C | Uniform (barotropic setup, same as gyre experiments) |
+| S (salinity) | Background + Gaussian blob | 35 PSU background + 2 PSU Gaussian blob centered at (35 N, 60 E), width 10 deg. Surface level only. |
 | H_bathy | 5500 m | Uniform |
-| land_mask | \|lat\| < 80 deg = ocean | Standard land mask |
+| land_mask | 1 inside basin, 0 outside | Rectangular basin mask |
 
 ### Forcing
 
-- Same double-gyre wind stress as wind_gyre (tau_max = 0.1 Pa).
-- Wind drives the circulation that advects the tracer.
+- Single-gyre wind stress (Stommel pattern): `tau_x = -tau_max * cos(pi * (lat - lat_s) / (lat_n - lat_s))`, tau_max = 0.1 Pa.
+- Easterlies at south, westerlies at north → single anticyclonic gyre that advects the tracer.
 
 ### Expected Behavior
 
@@ -623,9 +683,9 @@ z-star, 10 levels, H_max = 5500 m. Same as rest_state.
 
 ### Grid Support
 
-- cubed_sphere, latlon: dedicated gyre initialization.
-- mpas: rest state fallback (circulation develops from forcing).
-- **spectral: not supported** (complex tracer handling).
+- cubed_sphere, latlon: full support with basin land mask.
+- **mpas: not supported** — MPAS lacks surface forcing infrastructure (see issue #55).
+- **spectral: not supported**.
 
 ### Notes
 
@@ -650,10 +710,11 @@ z-star, 10 levels, H_max = 5500 m. Same as rest_state.
 | inertia_gravity_wave | yes | yes | yes | yes (no land) |
 | baroclinic | yes | yes | yes | yes (no land) |
 | phillips_two_layer | yes | yes | yes | yes (no land) |
-| wind_gyre | yes | yes | yes | no |
+| barotropic_gyre | yes | yes | no (issue #55) | no |
+| barotropic_double_gyre | yes | yes | no (issue #55) | no |
 | lock_exchange | yes | yes | no | no |
 | overflow | yes | yes | no | no |
-| stommel_gyre_tracer | yes | yes | yes | no |
+| stommel_gyre_tracer | yes | yes | no (issue #55) | no |
 
 ### Experiment Hierarchy
 
@@ -667,17 +728,19 @@ unlikely to succeed.
 4. **barotropic_wave** -- Nonlinear barotropic wave propagation.
 5. **baroclinic** -- Geostrophic adjustment and baroclinic dynamics.
 6. **phillips_two_layer** -- Baroclinic instability with forcing.
-7. **wind_gyre** -- Forced-dissipative equilibrium.
-8. **lock_exchange** -- Density-driven gravity currents.
-9. **overflow** -- Gravity currents over topography.
-10. **stommel_gyre_tracer** -- Tracer transport in complex flow.
+7. **barotropic_gyre** -- Wind-driven single gyre (Stommel/Munk).
+8. **barotropic_double_gyre** -- Wind-driven double gyre (Holland & Lin).
+9. **lock_exchange** -- Density-driven gravity currents.
+10. **overflow** -- Gravity currents over topography.
+11. **stommel_gyre_tracer** -- Tracer transport in wind-driven gyre.
 
 ### Land Masking Strategy
 
 | Category | Experiments | Land Handling |
 |---|---|---|
 | No land (all grids) | rest_state_no_land, inertia_gravity_wave | land_lat_threshold = 90 deg |
-| With land (all grids) | rest_state, wind_gyre, lock_exchange, overflow, stommel_gyre_tracer | \|lat\| > 80 deg |
+| Polar land strips | rest_state, lock_exchange, overflow | \|lat\| > 80 deg |
+| Rectangular basin | barotropic_gyre, barotropic_double_gyre, stommel_gyre_tracer | 0-120 E, 15-75 N; land everywhere else |
 | Spectral uses no land | barotropic_wave, baroclinic, phillips_two_layer | FV grids: land at 80 deg; spectral: 90 deg |
 
 The spectral grid avoids land in most experiments because the spectral land-ocean
@@ -691,13 +754,13 @@ was changed to include land for spectral (2026-04-04) to expose and track this i
 |---|---|---|---|
 | rest_state, rest_state_no_land | 5500 | 10 | Standard global ocean |
 | barotropic_wave | 5500 | 10 | Standard global ocean |
-| wind_gyre | 5500 | 10 | Standard global ocean |
+| barotropic_gyre, barotropic_double_gyre | 5500 | 10 | Rectangular basin, uniform T/S |
 | baroclinic | 5500 | 10 | Standard global ocean |
 | phillips_two_layer | 3500 | 2 | Classic two-layer theory (Phillips 1954) |
 | inertia_gravity_wave | 1000 | 2 | Barotropic-equivalent shallow basin |
 | lock_exchange | 500 | 20 | Shallow + high vertical resolution for gravity currents |
 | overflow | 2000 | 20 | Shelf-to-basin topography |
-| stommel_gyre_tracer | 5500 | 10 | Standard global ocean |
+| stommel_gyre_tracer | 5500 | 10 | Rectangular basin, uniform T/S + tracer blob |
 
 ### Expected Field Ranges (for plotting and sanity checks)
 
@@ -709,10 +772,11 @@ was changed to include land for spectral (2026-04-04) to expose and track this i
 | inertia_gravity_wave | (-1.2, 1.2) | (1.5, 21) | |
 | baroclinic | (-0.1, 0.1) | (1.5, 21) | |
 | phillips_two_layer | (-0.2, 0.2) | (8, 16) | |
-| wind_gyre | (-0.5, 0.5) | (1.5, 21) | speed_sfc: (0, 0.3) |
+| barotropic_gyre | (-0.02, 0.02) | (9.5, 10.5) | speed_sfc: (0, 0.15) |
+| barotropic_double_gyre | (-0.02, 0.02) | (9.5, 10.5) | speed_sfc: (0, 0.15) |
 | lock_exchange | (-0.05, 0.05) | (-1, 21) | |
 | overflow | (-0.1, 0.1) | (-1, 21) | |
-| stommel_gyre_tracer | (-0.5, 0.5) | (1.5, 21) | SSS: (33, 37) |
+| stommel_gyre_tracer | (-0.02, 0.02) | (9.5, 10.5) | SSS: (33, 37) |
 
 ### Known Issues (as of 2026-04-04)
 
@@ -724,9 +788,15 @@ was changed to include land for spectral (2026-04-04) to expose and track this i
 2. **Spectral barotropic_wave amplitude**: max|eta| ~7.3 m on spectral vs ~0.1-0.2 m
    on FV grids. Connected to issue 1 via land masking in `_create_rest_state`.
 
-3. **MPAS wind_gyre initialization**: No dedicated gyre init for MPAS; falls back to
-   rest state with wind forcing. Circulation takes longer to develop compared to
-   cubed_sphere/latlon which have pre-initialized gyre states.
+3. **MPAS surface forcing**: MPAS ocean model lacks the surface forcing pipeline
+   (physics_fn, surface_forcing parameter) that cubed_sphere and latlon have.
+   Wind-driven experiments (barotropic_gyre, barotropic_double_gyre,
+   stommel_gyre_tracer) are disabled for MPAS until this is implemented (issue #55).
 
-4. **Phillips two-layer local constants**: Module defines local `_A_EARTH` and
+4. **Gyre long-integration stability**: barotropic_gyre and barotropic_double_gyre
+   go unstable at 30 days without dissipation (all mixing and bottom drag disabled).
+   Needs lateral viscosity or bottom drag for long integrations. Quick mode (2 days)
+   is stable and shows correct circulation patterns.
+
+5. **Phillips two-layer local constants**: Module defines local `_A_EARTH` and
    `_G_EARTH` instead of importing from `constants.py`. Potential consistency risk.
