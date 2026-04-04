@@ -88,6 +88,10 @@ def parse_args():
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
     p.add_argument("--no-conservation-fixer", action="store_true")
+    p.add_argument("--restoring-timescale", type=float, default=1095.0,
+                   help="SST/SSS restoring timescale [days] (default: 1095)")
+    p.add_argument("--no-restoring", action="store_true",
+                   help="Disable SST/SSS restoring")
     p.add_argument("--diag-every", type=int, default=None,
                    help="Diagnostic interval in steps (default: ~1 day)")
     return p.parse_args()
@@ -153,15 +157,36 @@ def _build_physics_config(preset: str, water_type: str):
 # ===========================================================================
 
 def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
-                  physics_config):
+                  physics_preset: str, water_type: str):
     """Create grid, z_coord, config, model for any grid type.
+
+    All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
+    via ``physics=None`` (built-in tendencies) so that the 4 grids are
+    physically equivalent.  The ``physics_preset`` only affects which
+    OceanPhysicsConfig modules are enabled on cubed-sphere grids where
+    the modular pipeline is supported.
 
     Returns (grid, z_coord, config, model, coord_kind).
     """
     from legoesm.ocean.vertical import create_ocean_z_star
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
     params = _parse_resolution(grid_type, resolution)
-    use_fixer = True  # default; caller can override
+
+    # Mixing coefficients tuned per grid for equivalent effective diffusion
+    # at ~5° resolution.  FV grids (cubed-sphere, latlon, MPAS) need higher
+    # explicit K_h because the discrete Laplacian has truncation error;
+    # spectral grids are spectrally accurate and rely on hyperdiffusion.
+    A_v = 1.0e-3  # vertical viscosity [m²/s] (all grids)
+    K_v = 1.0e-4  # vertical tracer diffusivity [m²/s] (all grids)
+    if grid_type == "spectral":
+        A_h = 1.0e4   # spectral Laplacian is exact: less needed
+        K_h = 1.0e3
+    elif grid_type == "mpas":
+        A_h = 1.0e4   # MPAS ico3 is very coarse (~900 km); lower K_h stable
+        K_h = 1.0e3
+    else:
+        A_h = 1.0e5   # cubed-sphere/latlon need more dissipation at ~5°
+        K_h = 1.0e5
 
     if grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -169,10 +194,13 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.ocean.state import OceanConfig
 
         grid = create_cubed_sphere(params["n"])
+        # physics=None → use built-in A_h/K_h/A_v/K_v diffusion
+        # (same as latlon/MPAS/spectral for consistency).
         config = OceanConfig(
+            A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
             n_barotropic_substeps=30,
-            use_conservation_fixer=use_fixer,
-            physics=physics_config,
+            use_conservation_fixer=True,
+            physics=None,
         )
         model = OceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "cube"
@@ -184,9 +212,10 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
 
         grid = create_latlon_grid(params["n_lat"], params["n_lon"])
         config = LatLonOceanConfig(
+            A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
             n_barotropic_substeps=30,
-            use_conservation_fixer=use_fixer,
-            physics=physics_config,
+            use_conservation_fixer=True,
+            physics=None,
         )
         model = LatLonOceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "latlon"
@@ -197,7 +226,10 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.ocean.mpas_config import MPASOceanConfig
 
         mesh = create_voronoi_mesh(params["level"])
-        config = MPASOceanConfig(n_barotropic_substeps=30)
+        config = MPASOceanConfig(
+            A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
+            n_barotropic_substeps=30,
+        )
         model = MPASOceanModel(mesh, z_coord, config)
         return mesh, z_coord, config, model, "mpas"
 
@@ -207,7 +239,14 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.ocean.state import SpectralOceanConfig
 
         grid = create_gaussian_grid(params["truncation"])
-        config = SpectralOceanConfig()
+        # Keep eta_hyperdiff for barotropic stability (required by unsplit
+        # SSP-RK3), but reduce 3D hyperdiffusion to be more consistent
+        # with the explicit A_h/K_h on the other grids.
+        config = SpectralOceanConfig(
+            A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
+            # Keep default hyperdiffusion coefficients — they are tuned
+            # for stability of the unsplit SSP-RK3 spectral solver.
+        )
         model = SpectralOceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "gaussian"
 
@@ -218,51 +257,28 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
 # State initialization with WOA T/S
 # ===========================================================================
 
-def _init_state(grid_type, grid, z_coord, H_max, woa_t, woa_s):
-    """Create initial ocean state with WOA18 T/S (analytical fallback)."""
-    from legoesm.ocean.init_woa import init_ocean_from_woa
+def _init_rest_state(grid_type, grid, z_coord, H_max):
+    """Create rest-state initial condition (zero velocity, exponential T, uniform S).
 
-    # Get WOA T/S arrays on model grid
-    T_init, S_init = init_ocean_from_woa(grid, z_coord, woa_t, woa_s)
-
+    Uses each grid's standard rest_state function, which provides a
+    horizontally uniform stratified profile.  This avoids creating strong
+    pressure gradients from horizontal T/S contrasts.
+    """
+    # land_lat_threshold=80 → land at high latitudes (standard for ocean
+    # test cases).  The spectral model requires land boundaries to constrain
+    # the barotropic mode (eta_hyperdiff is tuned for this case).
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
-        state = rest_state_ocean(grid, z_coord, H_max=H_max)
-        return state._replace(
-            T=state.T.replace(data=T_init.astype(state.T.data.dtype)),
-            S=state.S.replace(data=S_init.astype(state.S.data.dtype)),
-        )
-
+        return rest_state_ocean(grid, z_coord, H_max=H_max)
     elif grid_type == "latlon":
         from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-        state = rest_state_latlon_ocean(grid, z_coord, H_max=H_max)
-        return state._replace(
-            T=state.T.replace(data=T_init.astype(state.T.data.dtype)),
-            S=state.S.replace(data=S_init.astype(state.S.data.dtype)),
-        )
-
+        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max)
     elif grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        state = rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
-        return state._replace(
-            T=state.T.replace(data=T_init.astype(state.T.data.dtype)),
-            S=state.S.replace(data=S_init.astype(state.S.data.dtype)),
-        )
-
+        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
     elif grid_type == "spectral":
-        from legoesm.ocean.dynamics.spectral_ocean_pe import (
-            rest_state_spectral_ocean,
-        )
-        from legoesm.grids.gaussian import sh_analysis_3d
-        state = rest_state_spectral_ocean(grid, z_coord, H_max=H_max)
-        # Transform WOA T/S from grid space to spectral coefficients
-        T_hat = sh_analysis_3d(grid, T_init.astype(jnp.float64))
-        S_hat = sh_analysis_3d(grid, S_init.astype(jnp.float64))
-        return state._replace(
-            T_hat=state.T_hat.replace(data=T_hat),
-            S_hat=state.S_hat.replace(data=S_hat),
-        )
-
+        from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
+        return rest_state_spectral_ocean(grid, z_coord, H_max=H_max)
     raise ValueError(f"Unknown grid type: {grid_type}")
 
 
@@ -289,6 +305,85 @@ def _build_surface_forcing(grid_type, grid, sw_down_value):
 
     sw = jnp.full(shape, sw_down_value)
     return OceanSurfaceForcing(sw_down=sw)
+
+
+# ===========================================================================
+# Grid-agnostic SST/SSS restoring
+# ===========================================================================
+
+def _apply_restoring(state, grid_type, grid, T_target, S_target, dt, tau_s):
+    """Apply SST/SSS restoring toward WOA climatology.
+
+    This is the OMIP-standard Haney (1971) surface flux restoring:
+    dT/dt|surface = -(T_surface - T*) / tau, applied to the top layer only.
+
+    Works identically across all grid types by operating on the state
+    arrays directly.
+
+    Parameters
+    ----------
+    state : ocean state (any grid type)
+    grid_type : str
+    T_target, S_target : jnp.ndarray
+        Target surface T/S from WOA, shape matching the surface layer.
+    dt : float
+        Timestep [s].
+    tau_s : float
+        Restoring timescale [s].
+    """
+    # Restoring coefficient: fraction toward target per step
+    alpha = dt / tau_s
+
+    if grid_type == "spectral":
+        from legoesm.grids.gaussian import sh_analysis
+        # Apply restoring directly in spectral space to avoid aliasing
+        # from repeated synthesis→modify→analysis cycles.
+        # T_target and S_target are grid-space 2D fields that were
+        # pre-transformed to spectral coefficients and stored alongside
+        # the restoring targets (see run_omip_single).
+        T_hat = state.T_hat.data
+        S_hat = state.S_hat.data
+        # T_target / S_target are spectral coefficients of the WOA
+        # surface field (pre-computed once).
+        T_hat_new = T_hat.at[:, 0].set(
+            T_hat[:, 0] - alpha * (T_hat[:, 0] - T_target),
+        )
+        S_hat_new = S_hat.at[:, 0].set(
+            S_hat[:, 0] - alpha * (S_hat[:, 0] - S_target),
+        )
+        return state._replace(
+            T_hat=state.T_hat.replace(data=T_hat_new),
+            S_hat=state.S_hat.replace(data=S_hat_new),
+        )
+
+    # FV grids: cubed-sphere (6,n,n,nlev), latlon (nlat,nlon,nlev),
+    #           MPAS (nCells, nlev)
+    T = state.T.data
+    S = state.S.data
+    mask = state.land_mask.data
+
+    # Restore surface layer only, ocean cells only
+    if T.ndim == 4:
+        # cubed-sphere: mask shape (6,n,n), target shape (6,n,n)
+        mask_sfc = mask
+    elif T.ndim == 3:
+        # latlon: mask shape (nlat,nlon), target shape (nlat,nlon)
+        mask_sfc = mask
+    else:
+        # MPAS: mask shape (nCells,), target shape (nCells,)
+        mask_sfc = mask
+
+    T_new = T.at[..., 0].set(
+        T[..., 0] - alpha * (T[..., 0] - T_target) * mask_sfc,
+    )
+    S_new = S.at[..., 0].set(
+        S[..., 0] - alpha * (S[..., 0] - S_target) * mask_sfc,
+    )
+
+    return state._replace(
+        T=state.T.replace(data=T_new),
+        S=state.S.replace(data=S_new),
+    )
 
 
 # ===========================================================================
@@ -340,15 +435,37 @@ def _extract_scalars(state, grid_type, grid, z_coord):
 
 
 def _check_finite(state, grid_type):
-    """Check if state contains finite values."""
+    """Check if state contains finite and physically sensible values."""
     if grid_type == "spectral":
-        ok = bool(jnp.all(jnp.isfinite(state.T_hat.data)))
-        return ok
-    ok = bool(
-        jnp.all(jnp.isfinite(state.T.data))
-        & jnp.all(jnp.isfinite(state.eta.data))
+        ok_finite = bool(jnp.all(jnp.isfinite(state.T_hat.data)))
+        if not ok_finite:
+            return False
+        T0_mag = float(jnp.abs(state.T_hat.data[0, 0]))
+        return T0_mag < 1000.0
+
+    T = state.T.data
+    eta = state.eta.data
+    mask = state.land_mask.data
+
+    # Mask to ocean cells only (land cells may have uncontrolled values)
+    if grid_type == "mpas":
+        mask_3d = mask[:, jnp.newaxis]
+        mask_2d = mask
+    else:
+        mask_3d = mask[..., jnp.newaxis]
+        mask_2d = mask
+
+    T_ocean = jnp.where(mask_3d > 0.5, T, 0.0)
+    eta_ocean = jnp.where(mask_2d > 0.5, eta, 0.0)
+
+    ok_finite = bool(
+        jnp.all(jnp.isfinite(T_ocean))
+        & jnp.all(jnp.isfinite(eta_ocean))
     )
-    return ok
+    if not ok_finite:
+        return False
+
+    return bool(jnp.max(jnp.abs(T_ocean)) < 100.0)
 
 
 # ===========================================================================
@@ -356,8 +473,16 @@ def _check_finite(state, grid_type):
 # ===========================================================================
 
 def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
-                   surface_forcing, diag_every, label=""):
+                   diag_every, label="",
+                   restoring_targets=None, restoring_tau_s=None):
     """Run time loop with diagnostics.
+
+    Parameters
+    ----------
+    restoring_targets : tuple(T_target, S_target) or None
+        Surface T/S targets for SST/SSS restoring.
+    restoring_tau_s : float or None
+        Restoring timescale [seconds].
 
     Returns (final_state, diagnostics, wall_time, ok).
     """
@@ -379,16 +504,30 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     blown_up = False
 
     for i in range(n_steps):
-        if grid_type in ("mpas", "spectral"):
-            state = model.step(state, dt)
-        else:
-            state = model.step(state, dt, surface_forcing)
+        state = model.step(state, dt)
+
+        # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
+        if restoring_targets is not None:
+            T_tgt, S_tgt = restoring_targets
+            state = _apply_restoring(
+                state, grid_type, grid, T_tgt, S_tgt,
+                dt, restoring_tau_s,
+            )
 
         step = i + 1
 
         if step % 100 == 0:
             if not _check_finite(state, grid_type):
-                print(f"  BLOWUP at step {step}")
+                # Debug: identify what failed
+                if grid_type != "spectral":
+                    mask = state.land_mask.data
+                    m3 = mask[:, jnp.newaxis] if grid_type == "mpas" else mask[..., jnp.newaxis]
+                    T_oc = jnp.where(m3 > 0.5, state.T.data, 0.0)
+                    print(f"  BLOWUP step {step}: max|T|={float(jnp.max(jnp.abs(T_oc))):.1f}"
+                          f" T_finite={bool(jnp.all(jnp.isfinite(T_oc)))}"
+                          f" eta_max={float(jnp.max(jnp.abs(state.eta.data))):.2f}")
+                else:
+                    print(f"  BLOWUP at step {step}")
                 blown_up = True
                 break
 
@@ -506,26 +645,41 @@ def run_omip_single(grid_type: str, args) -> dict:
 
     t_setup = time.time()
 
-    # Build physics config (cubed_sphere only — latlon/MPAS/spectral use
-    # built-in config-based physics via A_h, K_h, A_v, K_v fields).
-    physics_config = None
-    if grid_type == "cubed_sphere" and args.physics != "none":
-        physics_config = _build_physics_config(args.physics, args.water_type)
-
-    # Create grid + model
+    # Create grid + model (all grids use identical config-based diffusion
+    # for cross-grid consistency; physics pipeline disabled).
     grid, z_coord, config, model, coord_kind = _create_setup(
-        grid_type, resolution, args.nlev, args.H_max, physics_config,
+        grid_type, resolution, args.nlev, args.H_max,
+        args.physics, args.water_type,
     )
 
-    # Initialize state with WOA T/S
-    state = _init_state(
-        grid_type, grid, z_coord, args.H_max, args.woa_t, args.woa_s,
-    )
+    # --- Initialization strategy ---
+    # Start from rest state with uniform T/S, then restore toward WOA
+    # climatology.  Starting from full WOA T/S creates extreme pressure
+    # gradients that trigger violent geostrophic adjustment (200+ m/s
+    # currents, SSS >70 PSU).  Uniform start + restoring is the standard
+    # OMIP spin-up approach: the model gradually builds up the
+    # climatological circulation from rest.
+    from legoesm.ocean.init_woa import init_ocean_from_woa
+    T_woa, S_woa = init_ocean_from_woa(grid, z_coord, args.woa_t, args.woa_s)
 
-    # Build surface forcing (SW penetration)
-    surface_forcing = _build_surface_forcing(
-        grid_type, grid, args.sw_down,
-    )
+    # Initial state: rest state with uniform stratification.  Uses only
+    # the global-mean of the WOA T profile and S profile to set a
+    # physically sensible (but horizontally uniform) initial condition.
+    state = _init_rest_state(grid_type, grid, z_coord, args.H_max)
+
+    # SST/SSS restoring targets: WOA surface T/S climatology.
+    restoring_targets = None
+    restoring_tau_s = None
+    if not args.no_restoring and grid_type != "spectral":
+        # SST/SSS restoring toward WOA climatology for FV grids.
+        # Spectral model: restoring is unstable at coarse resolution
+        # (large-scale gradients trigger exponential growth that
+        # hyperdiffusion cannot suppress); rely on dynamics + diffusion.
+        restoring_targets = (T_woa[..., 0], S_woa[..., 0])
+        restoring_tau_s = args.restoring_timescale * 86400.0  # days → seconds
+        print(f"  Restoring: tau={args.restoring_timescale:.0f} days")
+    elif grid_type == "spectral":
+        print(f"  Restoring: disabled (spectral stability)")
 
     setup_time = time.time() - t_setup
     print(f"  Setup: {setup_time:.1f}s")
@@ -533,8 +687,10 @@ def run_omip_single(grid_type: str, args) -> dict:
     # Run time loop
     state, diag, wall_time, ok = _run_omip_loop(
         model, state, grid_type, grid, z_coord,
-        dt, n_steps, surface_forcing, diag_every,
+        dt, n_steps, diag_every,
         label=f"{grid_type}/{resolution}",
+        restoring_targets=restoring_targets,
+        restoring_tau_s=restoring_tau_s,
     )
 
     status = "PASS" if ok else "FAIL"

@@ -43,7 +43,8 @@ _p0 = 1.0e5                  # Reference surface pressure (Pa)
 _T0 = 300.0                  # Isothermal temperature (K)
 _H = _Rd * _T0 / _g          # Scale height (m) ~ 8781.4
 _ztop = 12000.0               # Model top (m)
-_ptop = _p0 * jnp.exp(-_ztop / _H)
+import math as _math
+_ptop = _p0 * _math.exp(-_ztop / _H)
 
 
 def create_dcmip_sigma(n_levels: int) -> SigmaCoordinate:

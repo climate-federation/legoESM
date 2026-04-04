@@ -31,7 +31,7 @@
 \title{\textbf{legoESM: A Differentiable Earth System Model in JAX}\\[6pt]
 \large Technical Documentation of Equations and Implementations}
 \author{legoESM Development Team}
-\date{March 2026}
+\date{April 2026}
 
 \begin{document}
 
@@ -744,6 +744,65 @@ Empirical neutral drag coefficient as a function of neutral 10-m wind speed $U_{
 \end{equation}
 with roughness recovered as $z_0=10/\exp(\kappa_{\mathrm{vK}}/\sqrt{C_{DN}})$.  Stanton and Dalton numbers follow the stability-corrected LY04 parameterisation.
 
+%-----------------------------------------------------------------------------
+\subsection{Additional Turbulence Schemes}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Smagorinsky}
+Constant eddy diffusivity baseline: $K_m=K_h=\text{const}$.
+
+\subsubsection{YSU (Yonsei University)}
+Nonlocal K-profile boundary-layer scheme with explicit entrainment treatment at the PBL top.
+
+\subsubsection{CLUBB-lite}
+Higher-order prognostic moment closure with five prognostic variables ($\overline{w'^2}$, $\overline{\theta_l'^2}$, $\overline{r_t'^2}$, $\overline{w'\theta_l'}$, $\overline{w'r_t'}$) and cloud fraction diagnosis via assumed bivariate Gaussian PDF.
+
+\subsubsection{EDMF Turbulence}
+Eddy-diffusivity mass-flux unified PBL framework combining diffusive and convective transport in a single scheme.
+
+%-----------------------------------------------------------------------------
+\subsection{Additional Convection Schemes}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Kuo (1974)}
+Column moisture-excess scheme partitioning excess moisture between heating (fraction $\alpha_{\mathrm{heat}}$) and moistening ($1-\alpha_{\mathrm{heat}}$).
+
+\subsubsection{Mass-Flux Convection (Arakawa--Wu Type)}
+Entraining-detraining plume model with bulk mass flux, CAPE closure, and configurable entrainment/detrainment rates.
+
+\subsubsection{EDMF Convection}
+Combined eddy-diffusivity and mass-flux framework for shallow and deep convection.
+
+\subsubsection{Deep Convective Adjustment (DCA)}
+Bottom-to-top adjustment with smooth sigmoid triggers for JAX differentiability.
+
+%-----------------------------------------------------------------------------
+\subsection{Gravity Wave Drag}
+%-----------------------------------------------------------------------------
+
+Six GWD schemes are available:
+\begin{itemize}[nosep]
+  \item \textbf{Rayleigh friction}: Simple linear damping above a threshold height.
+  \item \textbf{Lindzen (1981)}: Orographic GWD with critical-level absorption.
+  \item \textbf{McFarlane (1987)}: Enhanced orographic scheme with improved saturation.
+  \item \textbf{Hines (1997)}: Doppler-spread parameterisation for non-orographic GWD.
+  \item \textbf{Prognostic Spectral}: Multi-azimuthal, multi-wavenumber spectrum with prognostic wave flux and vertical propagation via \texttt{jax.lax.scan}.
+  \item \textbf{ML Emulator}: Equinox MLP surrogate for learned GWD.
+\end{itemize}
+
+%-----------------------------------------------------------------------------
+\subsection{Cloud Microphysics}
+%-----------------------------------------------------------------------------
+
+Five microphysics schemes:
+\begin{itemize}[nosep]
+  \item \textbf{Kessler (1969)}: Warm-rain autoconversion with threshold cloud water.
+  \item \textbf{Seifert--Beheng (2001)}: Two-moment warm rain with prognostic number concentration.
+  \item \textbf{Morrison (2005)}: Double-moment ice + liquid scheme.
+  \item \textbf{Thompson}: Hybrid-moment scheme with ice crystal habits.
+  \item \textbf{Sundqvist (1988)} and \textbf{Xu--Randall (1996)} cloud fraction diagnostics.
+\end{itemize}
+
 %=============================================================================
 \section{Ocean Dynamics}
 %=============================================================================
@@ -819,6 +878,88 @@ Vertical velocity diagnosed bottom-up from $w(\text{floor})=0$:
 \begin{equation}
   w_{k-1/2} = -\sum_{k'=k}^{N-1}\nabla\!\cdot\!(h_{k'}\,\bm v_{k'}).
 \end{equation}
+
+%-----------------------------------------------------------------------------
+\subsection{Ocean Vertical Mixing}
+%-----------------------------------------------------------------------------
+
+Three vertical mixing schemes are available:
+
+\subsubsection{K-Profile Parameterisation (KPP, Large et al.\ 1994)}
+Boundary-layer depth $h_{\mathrm{bl}}$ diagnosed from the bulk Richardson number criterion $\mathrm{Ri}_b(h)=\mathrm{Ri}_c=0.3$.  Within the boundary layer, diffusivity follows a cubic shape function:
+\begin{equation}
+  K(z) = h_{\mathrm{bl}}\,w_*\,G(\sigma), \qquad G(\sigma)=\sigma(1-\sigma)^2, \qquad \sigma=-z/h_{\mathrm{bl}},
+\end{equation}
+where $w_*$ is a turbulent velocity scale incorporating wind and buoyancy forcing.  Non-local transport of temperature and salinity: $\gamma_T=-C_s\,(\overline{w'\theta'})_0/(w_*\,h_{\mathrm{bl}})$.
+
+\subsubsection{Richardson-Number Mixing}
+Interior shear-driven diffusivity:
+\begin{equation}
+  K_v = K_{v,0}\,(1+5\,\mathrm{Ri})^{-1}, \qquad \mathrm{Ri}=\frac{N^2}{S^2}.
+\end{equation}
+
+\subsubsection{Constant Mixing}
+Uniform $K_v$ (default $10^{-4}$~m$^2$\,s$^{-1}$) for idealised experiments.
+
+%-----------------------------------------------------------------------------
+\subsection{Ocean Lateral Mixing}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Harmonic (Laplacian) Diffusion}
+$F_h = A_h\,\nabla^2\phi$ with constant or Smagorinsky-type coefficient.
+
+\subsubsection{Biharmonic ($\nabla^4$) Diffusion}
+$F_h = -A_4\,\nabla^4\phi$, providing scale-selective damping of grid-scale noise.
+
+\subsubsection{Gent--McWilliams / Redi (GM/Redi)}
+Mesoscale eddy parameterisation with bolus velocity $\bm v^*=-\kappa_{\mathrm{GM}}\,\nabla_h s$ where $s$ is the isopycnal slope.  Isopycnal diffusion (Redi) rotates the diffusion tensor to align with isopycnal surfaces.  Default $\kappa_{\mathrm{GM}}=1000$~m$^2$\,s$^{-1}$.
+
+%-----------------------------------------------------------------------------
+\subsection{Ocean Bottom Drag}
+%-----------------------------------------------------------------------------
+
+Two formulations:
+\begin{itemize}[nosep]
+  \item \textbf{Linear}: $\bm\tau_b=-r\,\bm u_b$ with configurable $r$.
+  \item \textbf{Quadratic}: $\bm\tau_b=-C_d\,|\bm u_b|\,\bm u_b$ with $C_d=2.5\times10^{-3}$.
+\end{itemize}
+
+%-----------------------------------------------------------------------------
+\subsection{Ocean Surface Forcing}
+%-----------------------------------------------------------------------------
+
+Three modes:
+\begin{itemize}[nosep]
+  \item \textbf{Prescribed}: Fixed wind stress and heat flux profiles.
+  \item \textbf{Restoring}: SST/SSS restoring toward climatology (Haney-style) with configurable timescale.
+  \item \textbf{Bulk formulas}: COARE-like air--sea fluxes with drag, Stanton, and Dalton coefficients.
+\end{itemize}
+
+%-----------------------------------------------------------------------------
+\subsection{Shortwave Penetration}
+%-----------------------------------------------------------------------------
+
+Subsurface absorption following Jerlov (1968) water type classification (types I, IA, IB, II, III) with two-band exponential decay:
+\begin{equation}
+  I(z) = I_0\bigl[R\,e^{-z/\zeta_1} + (1-R)\,e^{-z/\zeta_2}\bigr],
+\end{equation}
+where $R$, $\zeta_1$, $\zeta_2$ depend on the water type.
+
+%-----------------------------------------------------------------------------
+\subsection{Ocean Convection}
+%-----------------------------------------------------------------------------
+
+\subsubsection{Enhanced Diffusion}
+Convective adjustment via enhanced diffusivity $K_{\mathrm{conv}}$ where $N^2<0$, with smooth transitions.
+
+\subsubsection{Plume Model}
+Entraining mass-flux ocean convection with entrainment rate $\alpha_{\mathrm{plume}}=0.1$ and background detrainment $\varepsilon=10^{-3}$~m$^{-1}$.
+
+%-----------------------------------------------------------------------------
+\subsection{Ocean Conservation Fixers}
+%-----------------------------------------------------------------------------
+
+Grid-specific volume, heat, and salt conservation fixers for cubed-sphere, lat-lon, and MPAS grids.  Uniform additive correction per unit volume after each timestep.
 
 %=============================================================================
 \section{Time Integration}
@@ -957,6 +1098,31 @@ $g_s = g_{s,\max}\,f(\mathrm{PAR})\,f(T)\,f(\mathrm{VPD})\,f(\theta)$ \quad (CO$
 The coupled $A$--$g_s$--$C_i$ system is solved by 5 fixed-point iterations (unrolled for JAX JIT).
 
 %-----------------------------------------------------------------------------
+\subsection{Plant Functional Types (PFTs)}
+%-----------------------------------------------------------------------------
+
+CLM5-style weighted-average lookup over 17 Plant Functional Types (needleleaf/broadleaf trees, shrubs, grasses, crops), with 12 trainable land parameters per PFT: vegetation albedo, emissivity, roughness length, maximum soil water, soil heat capacity, soil depth, root depth, wilting point, field capacity, $V_{c,\max,25}$, LCMA, and stomatal slope $g_1$.  Each parameter is bounded via sigmoid transforms:
+\begin{equation}
+  p = p_{\min} + (p_{\max}-p_{\min})\,\sigma(x_{\mathrm{raw}}).
+\end{equation}
+Three parameter provider modes:
+\begin{itemize}[nosep]
+  \item \textbf{Constant}: Spatially uniform default values.
+  \item \textbf{PFT}: Weighted average $\bar p=\sum_{k=1}^{17}f_k\,p_k$ from the PFT lookup table.
+  \item \textbf{Neural}: 3-hidden-layer FCNN (GELU, 48 hidden units) mapping static features (lat/lon, soil type, elevation, precipitation, temperature, forest age) to land parameters.
+\end{itemize}
+
+%-----------------------------------------------------------------------------
+\subsection{DifferLand Training}
+%-----------------------------------------------------------------------------
+
+End-to-end differentiable land model training with three carbon cycle modes: ``none'' (disabled), ``differland'' (prognostic DALEC-990 with trainable allocation and decomposition parameters), and ``seasonal'' (prescribed LAI).  Phenology uses hemisphere-aware Gaussian windows for leaf emergence/fall.  Decomposition follows $Q_{10}$ temperature sensitivity:
+\begin{equation}
+  k(T,\theta)=k_0\,Q_{10}^{(T-T_{\mathrm{ref}})/10}\,f_w(\theta).
+\end{equation}
+NPP allocation is sequential: foliar $\to$ labile $\to$ root $\to$ wood.
+
+%-----------------------------------------------------------------------------
 \subsection{Tile Coupler}
 %-----------------------------------------------------------------------------
 
@@ -975,6 +1141,13 @@ where $\mu_0=\cos\theta_z$ is the cosine of the solar zenith angle.
 
 \paragraph{External forcing.}
 Time-varying greenhouse gases (CO$_2$, CH$_4$, N$_2$O), total solar irradiance, and monthly zonal-mean ozone and aerosol climatologies can be read from NetCDF files and linearly interpolated in time via the \texttt{ExternalForcingConfig} interface.  Ozone and aerosol data are loaded but not yet connected to the radiation solver.
+
+\paragraph{Two-layer lake model.}
+Epilimnion (mixed layer, default $h_{\mathrm{epi}}=5$~m) and hypolimnion (deep layer, $h_{\mathrm{hypo}}=20$~m) connected by wind-enhanced vertical mixing:
+\begin{equation}
+  k_{\mathrm{eff}} = k_{\mathrm{mix}}\,(1+\alpha_{\mathrm{wind}}\,|\bm V|),
+\end{equation}
+with surface energy balance driving the epilimnion temperature and mixing flux $F_{\mathrm{mix}}=\rho\,c\,k_{\mathrm{eff}}\,\Delta T/d_{\mathrm{mid}}$ coupling the two layers.  Lake freezing is clamped at $T_f=273.15$~K.  Bulk flux options: constant coefficients or iterative MOST.
 
 %=============================================================================
 \section{Machine Learning: Spherical Fourier Neural Operator}
@@ -1003,6 +1176,16 @@ In the SH coefficient space:
   \hat f_{nm}^{\mathrm{out}} = W_{nm}\,\hat f_{nm}^{\mathrm{in}},
 \end{equation}
 where $W_{nm}\in\mathbb R^{n_{\mathrm{emb}}\times n_{\mathrm{emb}}}$ is a learnable weight matrix per wavenumber pair.
+
+%-----------------------------------------------------------------------------
+\subsection{Neural and Learned Physics}
+%-----------------------------------------------------------------------------
+
+\subsubsection{NeuralPhysics}
+Equinox MLP column model with hybrid mode blending learned corrections with conventional physics via a configurable blending coefficient.
+
+\subsubsection{LearnedColumn}
+Per-column physics replacement following Rasp et al.\ (2018), mapping the full column state to temperature and moisture tendencies via a neural network, trainable end-to-end with the dynamical core.
 
 %=============================================================================
 \section{Conservation Corrections}
@@ -1117,6 +1300,10 @@ The function \texttt{verify\_reproducibility()} compares two restart files and r
 \subsection{Tuning Guide}
 
 A registry of 16 tunable parameters across five categories (dynamics, radiation, convection, diffusion, surface) with valid ranges, default values, sensitivity ratings, and physical notes.  \texttt{validate\_tuning(config)} checks CFL consistency, range violations, and conflicting options.  \texttt{recommended\_params(resolution, nlev)} provides resolution-appropriate defaults.
+
+\subsection{OMIP Simulation Pipeline}
+
+The \texttt{run\_omip.py} script provides a complete Ocean Model Intercomparison Project (OMIP) simulation pipeline supporting cubed-sphere, lat-lon, MPAS, and spectral grids.  Features include WOA18-based initialisation with fallback, Haney-style SST/SSS restoring toward climatology, configurable physics presets (``none'', ``minimal'', ``full'' with KPP, GM/Redi, bottom drag, shortwave penetration), per-grid resolution and timestep defaults, and diagnostic extraction with wall-time tracking.
 
 %=============================================================================
 \section{4D-Var Data Assimilation (v3.9)}

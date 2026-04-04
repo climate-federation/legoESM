@@ -112,6 +112,7 @@ def _build_test_matrix() -> list[TestCase]:
         for case, dur, quick, kw in [
             ("williamson2", 5, 1, {"test_num": 2}),
             ("williamson5", 15, 1, {"test_num": 5}),
+            ("cosine_bell", 12, 1, {}),
         ]:
             matrix.append(TestCase(
                 "shallow_water", case, g, res[g], "none", dur, quick, dict(kw)))
@@ -1442,6 +1443,349 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
 
 # ===========================================================================
+# Runner: Cosine bell advection (Putman & Lin 2007, Section 4.1)
+# ===========================================================================
+
+def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
+                    radiation: str = "gray") -> tuple[str, float, str]:
+    """Solid body rotation of a cosine bell — pure transport test.
+
+    Implements Section 4.1 of Putman & Lin (2007).  Winds are prescribed
+    (frozen) via transport-only tendency wrappers; only the height/mass
+    field evolves.  After 12 days the bell returns to its initial position
+    and error norms are computed against the initial condition.
+
+    Flow angle beta = pi/4 sends the bell over the cubed-sphere corners.
+    """
+    from tests.test_cases.cosine_bell import (
+        cosine_bell_cubesphere, cosine_bell_latlon,
+        cosine_bell_mpas, cosine_bell_spectral,
+        cosine_bell_error_norms, cosine_bell_exact,
+    )
+
+    beta = jnp.pi / 4.0  # Southeastward flow over corners
+
+    # The cosine bell peak is ~1000 m, so use a larger blowup threshold.
+    _CB_BLOWUP = 5000.0
+
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            FV3EdgeShallowWaterModel, FV3EdgeShallowWaterState,
+            CDGridShallowWaterConfig)
+
+        n = int(tc.resolution[1:])
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        dt = 1800.0
+        config = CDGridShallowWaterConfig(
+            hyperdiff_coeff=_hyperdiff_cube(n),
+            div_damp=_div_damp_cube(n))
+        model = FV3EdgeShallowWaterModel(grid, config)
+        cdgrid = model.cdgrid
+        state = cosine_bell_cubesphere(grid, cdgrid, beta)
+        h_init = state.h.copy()
+        model.set_initial_mass(state)
+
+        # FV3-faithful transport: d2a2c_vect for contravariant velocities,
+        # then Lin-Rood split transport with Courant-number PPM.
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        from legoesm.core.fv_tp_2d import transport_step
+        from legoesm.core.conservation import _accumulation_dtype
+
+        # Pre-compute contravariant velocities (winds are frozen)
+        _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
+            state.u_d, state.v_d, cdgrid)
+
+        @jax.jit
+        def step_fn(s, dt_):
+            h_new = transport_step(s.h, ut, vt, dt_, cdgrid)
+            s_new = s._replace(h=h_new)
+            s_new = s._replace(h=h_new)
+            # Mass conservation fixer
+            if config.use_conservation_fixer and config.fix_mass:
+                acc = _accumulation_dtype()
+                area = grid.area.astype(acc)
+                total_area = jnp.sum(area)
+                mass_target = model._target_mass
+                mass_new = jnp.sum(s_new.h.astype(acc) * area)
+                correction = (mass_target - mass_new) / total_area
+                s_new = s_new._replace(
+                    h=s_new.h + correction.astype(s_new.h.dtype))
+            return s_new
+
+        def check_fn(s):
+            return (check_finite({"h": s.h}),
+                    float(jnp.max(jnp.abs(s.h))))
+
+        def scalar_fn(s):
+            return {"mean_height": float(jnp.mean(s.h)),
+                    "max_height": float(jnp.max(s.h))}
+
+        _cs_w = _get_cs_weights(n)
+
+        def extract_fn(s):
+            h_np = np.asarray(s.h, dtype=np.float64)
+            return {"height": h_np}
+
+        key_array_fn = lambda s: s.h
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+        def error_fn(s, t):
+            h_exact = cosine_bell_exact(grid.lon, grid.lat, grid.radius,
+                                        t, beta)
+            return cosine_bell_error_norms(s.h, h_exact, grid.area)
+
+    elif tc.grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig,
+            fv_shallow_water_tendencies_latlon)
+        from legoesm.core.state import ShallowWaterState
+
+        n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
+        grid = create_latlon_grid(n_lat, n_lon)
+        # Rotated winds (beta=pi/4) give large zonal flow near the poles.
+        # CFL-safe dt: dx_min ≈ dlon*R*cos(lat_max), u_max ≈ u0.
+        import math
+        _u0 = 2.0 * math.pi * float(grid.radius) / (12.0 * 86400.0)
+        _dlon = 2.0 * math.pi / n_lon
+        _dx_pole = float(grid.radius) * _dlon * math.cos(
+            math.radians(90.0 - 180.0 / n_lat))
+        dt = min(1800.0, 0.8 * _dx_pole / _u0)
+        config = FVShallowWaterLatLonConfig(
+            hyperdiff_coeff=_hyperdiff_latlon(n_lat))
+        model = FVShallowWaterLatLonModel(grid, config, dt=dt)
+        state = cosine_bell_latlon(grid, beta)
+        h_init = state.h.data.copy()
+
+        from legoesm.timestepping.dispatch import dispatch_integrator
+
+        # Compute only mass flux divergence + polar filter.
+        from legoesm.core.operators_latlon import (
+            divergence as divergence_ll)
+        from legoesm.core.conservation import zero_mean_tendency
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            fourier_filter)
+
+        @jax.jit
+        def step_fn(s, dt_):
+            def tendency_fn_transport(st):
+                hu = st.h.replace(data=st.h.data * st.u.data)
+                hv = st.h.replace(data=st.h.data * st.v.data)
+                dh_dt_data = -divergence_ll(hu, hv, grid).data
+                dh_dt_data = zero_mean_tendency(dh_dt_data, grid)
+                if (config.use_polar_filter
+                        and model.polar_filter_mask is not None):
+                    dh_dt_data = fourier_filter(
+                        dh_dt_data, grid, model.polar_filter_mask)
+                return ShallowWaterState(
+                    h=st.h.replace(data=dh_dt_data),
+                    u=st.u.replace(data=jnp.zeros_like(st.u.data)),
+                    v=st.v.replace(data=jnp.zeros_like(st.v.data)),
+                    h_s=st.h_s.replace(data=jnp.zeros_like(st.h_s.data)))
+            return dispatch_integrator(
+                s, tendency_fn_transport, dt_, config.time_integrator)
+
+        def check_fn(s):
+            return (check_finite({"h": s.h.data}),
+                    float(jnp.max(jnp.abs(s.h.data))))
+
+        def scalar_fn(s):
+            return {"mean_height": float(jnp.mean(s.h.data)),
+                    "max_height": float(jnp.max(s.h.data))}
+
+        def extract_fn(s):
+            return {"height": np.asarray(s.h.data, dtype=np.float64)}
+
+        key_array_fn = lambda s: s.h.data
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+        def error_fn(s, t):
+            h_exact = cosine_bell_exact(grid.lon2d, grid.lat2d,
+                                        grid.radius, t, beta)
+            return cosine_bell_error_norms(s.h.data, h_exact, grid.area)
+
+    elif tc.grid_type == "icosahedral":
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.atmosphere.dynamics.shallow_water_mpas import (
+            MPASShallowWaterModel, MPASShallowWaterConfig)
+        from legoesm.core.state import MPASShallowWaterState
+
+        level = int(tc.resolution.replace("ico", ""))
+        mesh = create_voronoi_mesh(level)
+        dt = 1800.0
+        # Use SSP-RK3 for positivity; RK4 default can overshoot.
+        config = MPASShallowWaterConfig(
+            nu_del4=_hyperdiff_ico(mesh), time_integrator="ssp_rk3")
+        model = MPASShallowWaterModel(mesh, config)
+        state = cosine_bell_mpas(mesh, beta)
+        h_init = state.h.data.copy()
+        grid = mesh
+
+        from legoesm.timestepping.dispatch import dispatch_integrator
+
+        # Compute ONLY mass flux divergence, bypassing the momentum
+        # equation entirely.  The PV computation in the full tendency
+        # divides by h, producing inf where h=0 (outside the bell).
+        from legoesm.core.operators_voronoi import (
+            thickness_flux, divergence_cell)
+
+        @jax.jit
+        def step_fn(s, dt_):
+            def tendency_fn_transport(st):
+                h_flux = thickness_flux(
+                    st.h.data, st.u.data, mesh,
+                    order=config.thickness_order)
+                dh_dt_data = -divergence_cell(h_flux, mesh)
+                return MPASShallowWaterState(
+                    h=st.h.replace(data=dh_dt_data),
+                    u=st.u.replace(data=jnp.zeros_like(st.u.data)),
+                    h_s=st.h_s.replace(data=jnp.zeros_like(st.h_s.data)))
+            s_new = dispatch_integrator(
+                s, tendency_fn_transport, dt_, config.time_integrator)
+            # Positivity limiter + mass conservation fixer.
+            # The centred thickness flux can produce negative h;
+            # clamp to zero then restore total mass.
+            h_new = jnp.maximum(s_new.h.data, 0.0)
+            area = mesh.areaCell
+            mass_old = jnp.sum(s.h.data * area)
+            mass_new = jnp.sum(h_new * area)
+            total_area = jnp.sum(area)
+            correction = (mass_old - mass_new) / total_area
+            h_new = h_new + correction
+            s_new = s_new._replace(
+                h=s_new.h.replace(data=h_new))
+            return s_new
+
+        lon_cell = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_cell = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+
+        def check_fn(s):
+            return (check_finite({"h": s.h.data}),
+                    float(jnp.max(jnp.abs(s.h.data))))
+
+        def scalar_fn(s):
+            return {"mean_height": float(jnp.mean(s.h.data)),
+                    "max_height": float(jnp.max(s.h.data))}
+
+        def extract_fn(s):
+            return {"height": _bin_to_latlon(
+                np.asarray(s.h.data, dtype=np.float64),
+                lon_cell, lat_cell)}
+
+        key_array_fn = lambda s: s.h.data
+        coord_kind = "latlon"  # already regridded
+        lon_deg = np.linspace(-180, 180, 360, endpoint=False)
+        lat_deg = np.linspace(-90, 90, 181)
+
+        def error_fn(s, t):
+            h_exact = cosine_bell_exact(mesh.lonCell, mesh.latCell,
+                                        mesh.radius, t, beta)
+            return cosine_bell_error_norms(s.h.data, h_exact, mesh.areaCell)
+
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import (
+            create_gaussian_grid, sh_synthesis, sh_analysis)
+        from legoesm.atmosphere.dynamics.spectral_sw import (
+            SpectralShallowWaterModel, SpectralSWConfig,
+            SpectralSWState, spectral_sw_tendencies)
+        from legoesm import constants as C
+
+        n_max = int(tc.resolution.replace("T", ""))
+        grid = create_gaussian_grid(n_max)
+        dt = min(1800.0, 0.5 * grid.radius / (n_max * 40.0))
+        config = SpectralSWConfig(spectral_filter_order=8)
+        model = SpectralShallowWaterModel(grid, config)
+        state = cosine_bell_spectral(grid, beta)
+        phi_init = sh_synthesis(grid, state.phi_hat.data).copy()
+
+        from legoesm.timestepping.dispatch import dispatch_integrator
+
+        @jax.jit
+        def step_fn(s, dt_):
+            def tendency_fn_transport(st):
+                full = spectral_sw_tendencies(st, grid, config)
+                # Keep only phi tendency; freeze vor and div (winds)
+                return SpectralSWState(
+                    vor_hat=st.vor_hat.replace(
+                        data=jnp.zeros_like(st.vor_hat.data)),
+                    div_hat=st.div_hat.replace(
+                        data=jnp.zeros_like(st.div_hat.data)),
+                    phi_hat=full.phi_hat,
+                    phis_hat=st.phis_hat.replace(
+                        data=jnp.zeros_like(st.phis_hat.data)))
+            result = dispatch_integrator(
+                s, tendency_fn_transport, dt_, 'ssp_rk3')
+            return model._apply_filter(result)
+
+        def check_fn(s):
+            phi = sh_synthesis(grid, s.phi_hat.data)
+            return (check_finite({"phi": phi}),
+                    float(jnp.max(phi / C.g)))
+
+        def scalar_fn(s):
+            phi = sh_synthesis(grid, s.phi_hat.data)
+            return {"mean_height": float(jnp.mean(phi / C.g)),
+                    "max_height": float(jnp.max(phi / C.g))}
+
+        def extract_fn(s):
+            phi = np.asarray(sh_synthesis(grid, s.phi_hat.data),
+                             dtype=np.float64)
+            return {"height": phi / float(C.g)}
+
+        key_array_fn = lambda s: s.phi_hat.data
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+
+        def error_fn(s, t):
+            phi = sh_synthesis(grid, s.phi_hat.data)
+            h_exact = cosine_bell_exact(grid.lon2d, grid.lat2d,
+                                        grid.radius, t, beta)
+            return cosine_bell_error_norms(phi / C.g, h_exact, grid.grid_area)
+
+    else:
+        raise NotImplementedError(
+            f"Cosine bell not implemented for grid '{tc.grid_type}'")
+
+    # --- Time loop ---
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, key_array_fn,
+        label=f"Cosine Bell ({tc.grid_type})", total_days=days,
+        blowup_threshold=_CB_BLOWUP)
+
+    # --- Error norms (compare to initial condition after full revolution) ---
+    notes = ""
+    norms = error_fn(state, days * 86400.0)
+    notes = f"L1={norms['l1']:.2e}, L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "status": "PASS" if ok else "FAIL",
+        "notes": notes})
+    _save_case_diagnostics(
+        output_dir, f"Cosine Bell PL07 {tc.resolution}", dt,
+        diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("height", "Height h (m)", "viridis"),
+        ],
+        mass_key="mean_height", energy_key="max_height",
+        scalar_units={"mean_height": "m", "max_height": "m"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
 # Runner: Held-Suarez
 # ===========================================================================
 
@@ -2551,28 +2895,46 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             getattr(hcoord, "z_full", np.arange(nlev)), dtype=np.float64)
 
     elif tc.grid_type == "icosahedral":
-        if test_case != "tc1":
-            record(tc, "SKIP", 0.0, f"MPAS NH only supports tc1, got {test_case}")
-            return "SKIP", 0.0, ""
-
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
             MPASCompressibleEulerModel, MPASCompressibleEulerConfig)
-        from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
-            dcmip25_tc1_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
-        state, hcoord, tmetric = dcmip25_tc1_init_mpas(
-            mesh, n_levels=nlev)
+
+        if test_case == "tc1":
+            from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas import (
+                dcmip25_tc1_init_mpas)
+            state, hcoord, tmetric = dcmip25_tc1_init_mpas(
+                mesh, n_levels=nlev)
+        elif test_case == "tc2a":
+            from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2_mpas import (
+                dcmip25_tc2_init_mpas)
+            state, hcoord, tmetric, mesh = dcmip25_tc2_init_mpas(
+                mesh, n_levels=nlev, subcase="a")
+        elif test_case == "tc3":
+            from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3_mpas import (
+                dcmip25_tc3_init_mpas)
+            state, hcoord, tmetric, mesh = dcmip25_tc3_init_mpas(
+                mesh, n_levels=nlev)
+        else:
+            record(tc, "SKIP", 0.0, f"MPAS NH: unsupported test case {test_case}")
+            return "SKIP", 0.0, ""
         grid = mesh
 
         dx_mean = float(jnp.sqrt(
             4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
         dt = min(max(0.2, 6.0 * (200.0 / (dx_mean / 1000.0))), 6.0)
+        # Sponge config per test case
+        if test_case == "tc2a":
+            _sponge_w, _sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
+        elif test_case == "tc3":
+            _sponge_w, _sponge_c = 5000.0, 0.05
+        else:
+            _sponge_w, _sponge_c = 10000.0, 0.05
         nh_config = MPASCompressibleEulerConfig(
-            n_acoustic_substeps=10, sponge_width=10000.0,
-            sponge_coeff=0.05,
+            n_acoustic_substeps=10, sponge_width=_sponge_w,
+            sponge_coeff=_sponge_c,
             nu_del4=dx_mean ** 4 / (48.0 * 3600.0))
         model = MPASCompressibleEulerModel(
             mesh, hcoord, tmetric, nh_config)
@@ -2642,25 +3004,51 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.spectral_nh import (
             SpectralCompressibleEulerModel, SpectralNHConfig,
             dcmip25_tc1_init_spectral,
+            dcmip25_tc2_init_spectral,
+            dcmip25_tc3_init_spectral,
         )
-
-        if test_case != "tc1":
-            raise NotImplementedError(
-                f"Spectral NH only supports tc1, got {test_case}")
 
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
-        state, hcoord, tmetric = dcmip25_tc1_init_spectral(
-            grid, n_levels=nlev)
+
+        if test_case == "tc1":
+            state, hcoord, tmetric = dcmip25_tc1_init_spectral(
+                grid, n_levels=nlev)
+        elif test_case == "tc2a":
+            state, hcoord, tmetric = dcmip25_tc2_init_spectral(
+                grid, n_levels=nlev, subcase="a")
+        elif test_case == "tc3":
+            state, hcoord, tmetric = dcmip25_tc3_init_spectral(
+                grid, n_levels=nlev)
+        else:
+            raise NotImplementedError(
+                f"Spectral NH: unsupported test case {test_case}")
+
+        # Small-Earth factor and sponge config per test case
+        if test_case == "tc2a":
+            sef = 20.0
+            sponge_w, sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
+        elif test_case == "tc3":
+            sef = 60.0
+            sponge_w, sponge_c = 5000.0, 0.05
+        else:
+            sef = 1.0
+            sponge_w, sponge_c = 10000.0, 0.05
 
         dt = max(0.5, 6.0 * (21.0 / n_max))
         nh_config = SpectralNHConfig(
             n_acoustic_substeps=10,
             semi_implicit_acoustic=True,
-            sponge_width=10000.0,
-            sponge_coeff=0.05,
+            sponge_width=sponge_w,
+            sponge_coeff=sponge_c,
             hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            small_earth_factor=sef,
         )
+        # Use the small-Earth grid for tc2/tc3
+        if sef != 1.0:
+            from legoesm import constants as _c
+            grid = create_gaussian_grid(
+                n_max, radius=_c.R_earth / sef)
         model = SpectralCompressibleEulerModel(
             grid, hcoord, tmetric, nh_config)
 
@@ -2774,6 +3162,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 RUNNERS: dict[str, Callable] = {
     "williamson2": run_shallow_water,
     "williamson5": run_shallow_water,
+    "cosine_bell": run_cosine_bell,
     "held_suarez": run_held_suarez,
     "baroclinic": run_baroclinic,
     "dcmip_transport_11": run_dcmip_transport,

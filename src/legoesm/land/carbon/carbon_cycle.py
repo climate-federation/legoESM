@@ -1,6 +1,6 @@
 """Land carbon cycle: DifferLand prognostic model and seasonal cycle.
 
-DifferLand (Fang & Gentile, Columbia) — DALEC990-based:
+DifferLand (Fang & Gentine, Columbia) — DALEC990-based:
     6 carbon pools (labile, foliage, root, wood, litter, SOM) driven by a
     light-use-efficiency GPP with temperature/moisture responses.  Phenology
     follows DALEC990 Gaussian seasonal forcing.

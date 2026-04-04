@@ -5,7 +5,7 @@ Provides a switchable carbon model with two schemes:
 - **differland**: DALEC990-based prognostic 6-pool model (labile, foliage,
   root, wood, litter, SOM) driven by a light-use-efficiency GPP with
   phenology and temperature/moisture-dependent decomposition.  Based on
-  DifferLand v1.0 (Fang & Gentile, Columbia).
+  DifferLand v1.0 (Fang & Gentine, Columbia).
 
 - **seasonal**: prescribed repeating sinusoidal NEE cycle with
   latitude-dependent amplitude and phase.  No prognostic pools.

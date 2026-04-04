@@ -914,3 +914,225 @@ def nh_rest_state_spectral(
             data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/kg",
         ),
     )
+
+
+def dcmip25_tc2_init_spectral(
+    grid: GaussianGrid,
+    n_levels: int = 48,
+    subcase: str = "a",
+    params: dict | None = None,
+) -> tuple['SpectralNHState', HeightCoordinate, 'TerrainMetric']:
+    """Initialize DCMIP-2025 TC2 (mountain flow) on Gaussian grid.
+
+    Isothermal atmosphere with solid-body rotation and mountain topography
+    on a small Earth (radius/20). Transforms to spectral space.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+        Gaussian grid (used for n_max only; a small-Earth grid is created).
+    n_levels : int
+        Number of vertical levels.
+    subcase : str
+        "a" for gap flow, "b" for vortex shedding.
+    params : dict, optional
+        Override default parameters.
+    """
+    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.common import (
+        isothermal_theta_ref,
+    )
+    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2 import (
+        TC2_PARAMS,
+    )
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import (
+        create_height_coordinate,
+        compute_terrain_metric,
+    )
+
+    p = {**TC2_PARAMS, **(params or {})}
+    factor = p["small_earth_factor"]
+    small_grid = create_gaussian_grid(
+        grid.n_max, radius=constants.R_earth / factor)
+
+    theta_fn = isothermal_theta_ref(T0=p["T0"])
+    height_coord = create_height_coordinate(n_levels, p["H"], theta_fn)
+
+    n_lat, n_lon = small_grid.n_lat, small_grid.n_lon
+    lat_2d = small_grid.lat[:, None] * jnp.ones(n_lon)[None, :]
+    lon_2d = small_grid.lon2d
+
+    if subcase == "a":
+        dlon = jnp.mod(lon_2d - p["chain_lon"] + jnp.pi, 2 * jnp.pi) - jnp.pi
+        x_dist = dlon * small_grid.radius * jnp.cos(lat_2d)
+        y_dist = (lat_2d - p["gap_lat"]) * small_grid.radius
+        z_s = (p["chain_h0"]
+               * jnp.exp(-(x_dist / p["chain_halfwidth_lon"]) ** 2)
+               * jnp.exp(-(y_dist / p["chain_halfwidth_lat"]) ** 4)
+               * (1.0 - jnp.exp(-(y_dist / p["gap_halfwidth"]) ** 2)))
+    elif subcase == "b":
+        dlat = lat_2d - p["mountain_lat"]
+        dlon = lon_2d - p["mountain_lon"]
+        a_hav = (jnp.sin(dlat / 2) ** 2
+                 + jnp.cos(lat_2d) * jnp.cos(p["mountain_lat"])
+                 * jnp.sin(dlon / 2) ** 2)
+        dist = 2.0 * jnp.arcsin(jnp.sqrt(jnp.clip(a_hav, 0.0, 1.0))) * small_grid.radius
+        z_s = p["mountain_h0"] * jnp.exp(-(dist / p["mountain_d"]) ** 2)
+    else:
+        raise ValueError(f"Unknown subcase: {subcase!r}")
+
+    terrain_metric = compute_terrain_metric(z_s, height_coord)
+
+    nlev = n_levels
+    u0 = p["u0"]
+    u_grid = (jnp.ones((n_lat, n_lon, nlev), dtype=jnp.float64)
+              * (u0 * jnp.cos(small_grid.lat))[:, None, None])
+    v_grid = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
+
+    a_rad = small_grid.radius
+    im_over_a = 1j * small_grid.ms.astype(jnp.float64) / a_rad
+    one_over_a = 1.0 / a_rad
+    cos_lat_3d = small_grid.cos_lat[:, None, None]
+    u_cos = u_grid * cos_lat_3d
+    v_cos = v_grid * cos_lat_3d
+
+    vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(small_grid, v_cos)
+               + one_over_a * sh_analysis_dmu_3d(small_grid, u_cos))
+    div_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(small_grid, u_cos)
+               - one_over_a * sh_analysis_dmu_3d(small_grid, v_cos))
+
+    n_sh = small_grid.n_sh
+    w_hat = jnp.zeros((n_sh, nlev + 1), dtype=jnp.complex128)
+    theta_p_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
+    rho_p_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
+    phis_hat = sh_analysis(small_grid, (constants.g * z_s).astype(jnp.float64))
+    tracers_hat = jnp.zeros((n_sh, nlev, 1), dtype=jnp.complex128)
+
+    dims_3d = ("spectral", "level")
+    dims_w = ("spectral", "level_half")
+    dims_2d = ("spectral",)
+    dims_tr = ("spectral", "level", "tracer")
+
+    return SpectralNHState(
+        vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
+        div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
+        w_hat=Field(data=w_hat, name="w_hat", dims=dims_w, units="m/s"),
+        theta_prime_hat=Field(data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K"),
+        rho_prime_hat=Field(data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3"),
+        phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
+        tracers_hat=Field(data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/kg"),
+    ), height_coord, terrain_metric
+
+
+def dcmip25_tc3_init_spectral(
+    grid: GaussianGrid,
+    n_levels: int = 40,
+    params: dict | None = None,
+) -> tuple['SpectralNHState', HeightCoordinate, 'TerrainMetric']:
+    """Initialize DCMIP-2025 TC3 (squall line) on Gaussian grid.
+
+    Wind shear, moisture, and warm bubbles on a small Earth (radius/60).
+    Transforms to spectral space.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+        Gaussian grid (used for n_max only; a small-Earth grid is created).
+    n_levels : int
+        Number of vertical levels.
+    params : dict, optional
+        Override default parameters.
+    """
+    from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3 import (
+        TC3_PARAMS, _squall_line_sounding, _squall_line_theta_fn,
+    )
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import (
+        create_height_coordinate, compute_terrain_metric,
+    )
+    from legoesm.thermo import saturation_mixing_ratio
+
+    p = {**TC3_PARAMS, **(params or {})}
+    factor = p["small_earth_factor"]
+    small_grid = create_gaussian_grid(
+        grid.n_max, radius=constants.R_earth / factor)
+
+    theta_fn = _squall_line_theta_fn(p)
+    height_coord = create_height_coordinate(n_levels, p["H"], theta_fn)
+
+    n_lat, n_lon = small_grid.n_lat, small_grid.n_lon
+    z_s = jnp.zeros((n_lat, n_lon))
+    terrain_metric = compute_terrain_metric(z_s, height_coord)
+
+    nlev = n_levels
+    z_full = height_coord.z_full
+    T_sounding, _, p_sounding = _squall_line_sounding(z_full, p)
+
+    u_profile = p["U_c"] + p["U_s"] * jnp.minimum(z_full / p["z_s"], 1.0)
+    u_grid = jnp.ones((n_lat, n_lon, nlev), dtype=jnp.float64) * u_profile[None, None, :]
+    v_grid = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
+
+    a_rad = small_grid.radius
+    im_over_a = 1j * small_grid.ms.astype(jnp.float64) / a_rad
+    one_over_a = 1.0 / a_rad
+    cos_lat_3d = small_grid.cos_lat[:, None, None]
+    u_cos = u_grid * cos_lat_3d
+    v_cos = v_grid * cos_lat_3d
+
+    vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(small_grid, v_cos)
+               + one_over_a * sh_analysis_dmu_3d(small_grid, u_cos))
+    div_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(small_grid, u_cos)
+               - one_over_a * sh_analysis_dmu_3d(small_grid, v_cos))
+
+    n_sh = small_grid.n_sh
+    w_hat = jnp.zeros((n_sh, nlev + 1), dtype=jnp.complex128)
+    rho_p_hat = jnp.zeros((n_sh, nlev), dtype=jnp.complex128)
+
+    RH_profile = jnp.clip(
+        p["RH_low"] * jnp.exp(-z_full / p["RH_transition_z"]),
+        p["RH_high"], p["RH_low"])
+    q_v_profile = RH_profile * saturation_mixing_ratio(T_sounding, p_sounding)
+
+    q_v_grid = jnp.ones((n_lat, n_lon, nlev), dtype=jnp.float64) * q_v_profile[None, None, :]
+    q_c_grid = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
+    q_r_grid = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
+
+    # Warm bubbles
+    lat_2d = small_grid.lat[:, None] * jnp.ones(n_lon)[None, :]
+    lon_2d = small_grid.lon2d
+    theta_pert = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
+    for i in range(p["n_bubbles"]):
+        lat_c = (i - p["n_bubbles"] // 2) * p["bubble_spacing"] / small_grid.radius
+        dlat = lat_2d - lat_c
+        dlon = jnp.mod(lon_2d - p["bubble_lon"] + jnp.pi, 2 * jnp.pi) - jnp.pi
+        x_dist = dlon * small_grid.radius * jnp.cos(lat_2d)
+        y_dist = dlat * small_grid.radius
+        r_horiz = jnp.sqrt(x_dist**2 + y_dist**2)
+        z_dist = z_full[None, None, :] - p["bubble_zc"]
+        r_norm = jnp.sqrt((r_horiz[..., None] / p["bubble_rh"]) ** 2
+                          + (z_dist / p["bubble_rz"]) ** 2)
+        theta_pert = theta_pert + p["bubble_dtheta"] * jnp.where(
+            r_norm <= 1.0, jnp.cos(0.5 * jnp.pi * r_norm) ** 2, 0.0)
+
+    theta_p_hat = sh_analysis_3d(small_grid, theta_pert)
+    tracers_hat = jnp.stack([
+        sh_analysis_3d(small_grid, q_v_grid),
+        sh_analysis_3d(small_grid, q_c_grid),
+        sh_analysis_3d(small_grid, q_r_grid),
+    ], axis=-1)
+    phis_hat = jnp.zeros(n_sh, dtype=jnp.complex128)
+
+    dims_3d = ("spectral", "level")
+    dims_w = ("spectral", "level_half")
+    dims_2d = ("spectral",)
+    dims_tr = ("spectral", "level", "tracer")
+
+    return SpectralNHState(
+        vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
+        div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
+        w_hat=Field(data=w_hat, name="w_hat", dims=dims_w, units="m/s"),
+        theta_prime_hat=Field(data=theta_p_hat, name="theta_prime_hat", dims=dims_3d, units="K"),
+        rho_prime_hat=Field(data=rho_p_hat, name="rho_prime_hat", dims=dims_3d, units="kg/m^3"),
+        phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
+        tracers_hat=Field(data=tracers_hat, name="tracers_hat", dims=dims_tr, units="kg/kg"),
+    ), height_coord, terrain_metric
