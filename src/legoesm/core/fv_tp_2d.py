@@ -273,31 +273,51 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid):
     fyy = yfx * fy2
     q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
 
-    # Reuse q's x-halo for q_i instead of a separate halo exchange.
-    # This avoids the interpolation errors from an additional exchange.
-    # The x-halo of q_i differs from q's by O(dt) — acceptable.
-    q_i_x = q_full[:, :, 2:-2].at[:, 2:-2, :].set(q_i)
-    fx1 = _xppm(q_i_x, crx, n, ox_L0, ox_R0, ox_L1, ox_R1)
+    # Proper halo exchange for q_i (required for mass conservation)
+    q_i_pad = pad_halo(q_i, halo=2, interp_offsets=offsets_h2)
+    fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1)
 
     # Pass 2: X-sweep on q, Y-sweep on cross-corrected q_j
     fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1)
     fxx = xfx * fx2
     q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
 
-    # Reuse q's y-halo for q_j
-    q_j_y = q_full[:, 2:-2, :].at[:, :, 2:-2].set(q_j)
-    fy1 = _yppm(q_j_y, cry, n, oy_L0, oy_R0, oy_L1, oy_R1)
+    # Proper halo exchange for q_j (required for mass conservation)
+    q_j_pad = pad_halo(q_j, halo=2, interp_offsets=offsets_h2)
+    fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1)
 
     fx = 0.5 * (fx1 + fx2) * xfx
     fy = 0.5 * (fy1 + fy2) * yfx
     return fx, fy
 
 
-def transport_step(h, ut, vt, dt, cdgrid, **_kwargs):
-    """Single FV3-style transport step."""
+def transport_step(h, ut, vt, dt, cdgrid, mass_target=None, **_kwargs):
+    """Single FV3-style transport step with mass conservation.
+
+    Parameters
+    ----------
+    h : (6, n, n) height field
+    ut, vt : contravariant velocities
+    dt : timestep
+    cdgrid : CubedSphereCDGrid
+    mass_target : float or None — if provided, enforce exact mass conservation
+    """
     area = cdgrid.base.area
     crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
         ut, vt, dt, cdgrid)
     fx, fy = fv_tp_2d(h, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid)
-    return h + (fx[:, :-1, :] - fx[:, 1:, :]
-                + fy[:, :, :-1] - fy[:, :, 1:]) / area
+    h_new = h + (fx[:, :-1, :] - fx[:, 1:, :]
+                 + fy[:, :, :-1] - fy[:, :, 1:]) / area
+
+    # Mass conservation fixer: clip negative values and rescale
+    # positive values to conserve total mass.  This compensates for
+    # flux mismatches at face boundaries while maintaining non-negativity.
+    if mass_target is not None:
+        # Step 1: clip negatives to zero
+        h_pos = jnp.maximum(h_new, 0.0)
+        mass_pos = jnp.sum(h_pos * area)
+        # Step 2: scale positive values to match target mass
+        scale = mass_target / jnp.maximum(mass_pos, 1.0)
+        h_new = h_pos * scale
+
+    return h_new

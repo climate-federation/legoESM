@@ -1498,22 +1498,14 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         _ua, _va, _uc, _vc, ut, vt = _d2a2c_vect(
             state.u_d, state.v_d, cdgrid)
 
+        # Pre-compute initial mass for conservation fixer
+        _mass_target = float(jnp.sum(state.h * grid.area))
+
         @jax.jit
         def step_fn(s, dt_):
-            h_new = transport_step(s.h, ut, vt, dt_, cdgrid)
-            s_new = s._replace(h=h_new)
-            s_new = s._replace(h=h_new)
-            # Mass conservation fixer
-            if config.use_conservation_fixer and config.fix_mass:
-                acc = _accumulation_dtype()
-                area = grid.area.astype(acc)
-                total_area = jnp.sum(area)
-                mass_target = model._target_mass
-                mass_new = jnp.sum(s_new.h.astype(acc) * area)
-                correction = (mass_target - mass_new) / total_area
-                s_new = s_new._replace(
-                    h=s_new.h + correction.astype(s_new.h.dtype))
-            return s_new
+            h_new = transport_step(s.h, ut, vt, dt_, cdgrid,
+                                   mass_target=_mass_target)
+            return s._replace(h=h_new)
 
         def check_fn(s):
             return (check_finite({"h": s.h}),

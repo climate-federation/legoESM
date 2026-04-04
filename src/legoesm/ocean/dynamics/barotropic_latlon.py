@@ -22,6 +22,7 @@ from legoesm.ocean.dynamics.latlon_operators import (
     gradient_x_latlon,
     gradient_y_latlon,
     laplacian_latlon,
+    _neumann_fill_latlon,
 )
 
 
@@ -89,12 +90,17 @@ def barotropic_substeps_latlon(
         # Forward: update eta from continuity
         div_flux = fv_divergence_latlon(
             H_total_c * U_bar_c, H_total_c * V_bar_c, grid,
+            mask=mask,
         ).astype(eta.dtype)
         eta_new = jnp.maximum(eta_c - dt_s * div_flux, eta_floor) * mask
 
         # Backward: update velocity with UPDATED eta
-        deta_dx = gradient_x_latlon(eta_new, grid).astype(eta.dtype)
-        deta_dy = gradient_y_latlon(eta_new, grid).astype(eta.dtype)
+        # Fill land cells with ocean-neighbour values so that centred-
+        # difference gradients see a smooth field at coastlines instead
+        # of the masked ocean-to-zero step function.
+        eta_filled = _neumann_fill_latlon(eta_new, mask)
+        deta_dx = gradient_x_latlon(eta_filled, grid).astype(eta.dtype)
+        deta_dy = gradient_y_latlon(eta_filled, grid).astype(eta.dtype)
 
         # Semi-implicit Coriolis + backward PGF
         rhs_u = U_bar_c + alpha * V_bar_c - dt_s * g * deta_dx

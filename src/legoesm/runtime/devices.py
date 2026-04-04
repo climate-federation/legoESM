@@ -9,7 +9,6 @@ which sub-module to import.
 from __future__ import annotations
 
 import logging
-from typing import NamedTuple, Sequence
 
 logger = logging.getLogger(__name__)
 

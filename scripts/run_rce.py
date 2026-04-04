@@ -36,6 +36,10 @@ def main():
     parser = argparse.ArgumentParser(description="Moist RCE experiment")
     parser.add_argument("--mode", choices=["ocean", "land"], default="ocean",
                         help="Surface type: slab ocean or slab land")
+    parser.add_argument("--ocean-mode", choices=["prescribed", "slab", "two_layer"],
+                        default="slab",
+                        help="Ocean coupling: prescribed (fixed SST), slab (50m), "
+                             "two_layer (50m mixed + 200m deep)")
     parser.add_argument("--days", type=int, default=200)
     parser.add_argument("--resolution", type=int, default=16,
                         help="Grid resolution (N for cubed-sphere, n_max for spectral, etc.)")
@@ -130,11 +134,16 @@ def main():
     # Surface configuration
     # ---------------------------------------------------------------
     IS_LAND = args.mode == "land"
+    OCEAN_MODE = args.ocean_mode if not IS_LAND else "slab"  # land uses slab soil
+    IS_TWO_LAYER = OCEAN_MODE == "two_layer"
+    IS_PRESCRIBED = OCEAN_MODE == "prescribed"
     if not IS_LAND:
         from legoesm.ocean.simple_ocean import SimpleOceanConfig
-        sfc_config = SimpleOceanConfig(mode="slab", h_mix=50.0, albedo_ocean=0.06)
+        sfc_config = SimpleOceanConfig(mode=OCEAN_MODE, h_mix=50.0, albedo_ocean=0.06,
+                                       h_deep=200.0, k_mix=1.0e-4)
         C_sfc = sfc_config.rho_ocean * sfc_config.c_ocean * sfc_config.h_mix
         T_sfc = jnp.full(shape_2d, args.sst_init)
+        T_deep = jnp.full(shape_2d, 278.0) if IS_TWO_LAYER else None
         sfc_albedo = 0.06
         T_freeze = sfc_config.T_freeze
         W_bucket = jnp.zeros(shape_2d)  # dummy, unused
@@ -146,6 +155,7 @@ def main():
         h_soil = 1.0       # soil depth [m]
         C_sfc = C_soil * h_soil
         T_sfc = jnp.full(shape_2d, args.sst_init)
+        T_deep = None
         sfc_albedo = 0.25
         T_freeze = constants.T_freeze  # 273.15 K (freshwater)
         # Bucket hydrology
@@ -153,7 +163,7 @@ def main():
         beta_min = 0.1     # minimum evaporation efficiency
         W_bucket = jnp.full(shape_2d, 0.75 * W_max)  # 75% saturated
 
-    C_H = 1.5e-3  # bulk transfer coefficient (heat and moisture)
+    C_H = 4.4e-3  # bulk transfer coefficient (heat and moisture; Frierson 2006)
 
     # ---------------------------------------------------------------
     # Physics configuration
@@ -180,10 +190,9 @@ def main():
     )
     sbm_config = SBMConfig(tau_c=7200.0, RH_ref=0.7)
 
-    # Rayleigh friction profile
+    # Rayleigh friction profile (Frierson 2006: BL only, no free-atmosphere drag)
     sigma_b = 0.7
-    k_f = (0.1 / 86400.0                                                       # free-atmosphere drag
-           + (1.0 / 86400.0) * jnp.maximum(0.0,
+    k_f = ((1.0 / 86400.0) * jnp.maximum(0.0,
                (sigma.sigma_full - sigma_b) / (1.0 - sigma_b)))
     fric_decay = jnp.exp(-k_f * DT)
 
@@ -194,7 +203,7 @@ def main():
     # JIT-compiled physics step
     # ---------------------------------------------------------------
     @jax.jit
-    def physics_step(T, p_s, q_v, u, v, T_sfc, W_bkt, lat, dt):
+    def physics_step(T, p_s, q_v, u, v, T_sfc, T_deep, W_bkt, lat, dt):
         """Operator-split physics: radiation + convection + BL + surface."""
         nlev = T.shape[-1]
         ncol = T[..., 0].size
@@ -253,8 +262,23 @@ def main():
         # (d) Surface energy balance
         sw_net = (rad.sw_flux_down[:, -1] - rad.sw_flux_up[:, -1]).reshape(p_s.shape)
         lw_net = (rad.lw_flux_down[:, -1] - rad.lw_flux_up[:, -1]).reshape(p_s.shape)
-        dT_sfc_dt = (sw_net + lw_net - shflx - lhflx) / C_sfc
-        T_sfc_new = jnp.maximum(T_sfc + dt * dT_sfc_dt, T_freeze)
+
+        if IS_PRESCRIBED:
+            T_sfc_new = T_sfc  # fixed SST
+        elif IS_TWO_LAYER:
+            # Mixed layer + deep layer with vertical diffusion
+            rho_o, c_o = sfc_config.rho_ocean, sfc_config.c_ocean
+            d_mid = 0.5 * (sfc_config.h_mix + sfc_config.h_deep)
+            F_mix = rho_o * c_o * sfc_config.k_mix * (T_sfc - T_deep) / d_mid
+            C_mix = rho_o * c_o * sfc_config.h_mix
+            C_deep_v = rho_o * c_o * sfc_config.h_deep
+            dT_sfc_dt = (sw_net + lw_net - shflx - lhflx - F_mix) / C_mix
+            dT_deep_dt = F_mix / C_deep_v
+            T_sfc_new = jnp.maximum(T_sfc + dt * dT_sfc_dt, T_freeze)
+            T_deep = T_deep + dt * dT_deep_dt
+        else:
+            dT_sfc_dt = (sw_net + lw_net - shflx - lhflx) / C_sfc
+            T_sfc_new = jnp.maximum(T_sfc + dt * dT_sfc_dt, T_freeze)
 
         # (e) Bucket hydrology update (land only — traced at JIT time)
         if IS_LAND:
@@ -272,7 +296,7 @@ def main():
         if _apply_hyperdiff is not None:
             dq_dt = dq_dt + _apply_hyperdiff(q_v, HYPERDIFF)
 
-        return dT_dt, dq_dt, T_sfc_new, W_new, precip
+        return dT_dt, dq_dt, T_sfc_new, T_deep, W_new, precip
 
     # ---------------------------------------------------------------
     # Time integration
@@ -280,8 +304,9 @@ def main():
     n_steps = int(args.days * 86400 / DT)
     diag_interval = int(args.diag_days * 86400 / DT)
 
+    _ocean_label = OCEAN_MODE if not IS_LAND else "slab_soil"
     print("=" * 70)
-    print(f"  Moist RCE: slab {args.mode} + gray radiation + SBM convection")
+    print(f"  Moist RCE: {_ocean_label} {args.mode} + gray radiation + SBM convection")
     print("=" * 70)
     _grid_labels = {
         "cubed_sphere": f"C{N}", "gaussian": f"T{N}",
@@ -302,11 +327,14 @@ def main():
         state = model.step(state, DT)
 
         # (2) Operator-split physics
-        dT_dt, dq_dt, T_sfc, W_bucket, precip = physics_step(
+        _T_deep_in = T_deep if IS_TWO_LAYER else jnp.zeros(shape_2d)
+        dT_dt, dq_dt, T_sfc, _T_deep_out, W_bucket, precip = physics_step(
             state.T.data, state.p_s.data, q_v,
             state.u.data, state.v.data,
-            T_sfc, W_bucket, grid.grid_lat, DT,
+            T_sfc, _T_deep_in, W_bucket, grid.grid_lat, DT,
         )
+        if IS_TWO_LAYER:
+            T_deep = _T_deep_out
         new_T = state.T.data + DT * dT_dt
         q_v = jnp.maximum(q_v + DT * dq_dt, 0.0)
 
@@ -318,6 +346,13 @@ def main():
         q_v = q_v - excess
         new_T = new_T + constants.L_v * excess / constants.c_pd
         state = state._replace(T=state.T.replace(data=new_T))
+
+        # Large-scale precipitation: column-integrated condensation [kg/m2/s]
+        ls_precip = jnp.sum(excess * state.p_s.data[..., None] * dsigma,
+                            axis=-1) / constants.g / DT
+        precip = precip + ls_precip  # total = convective + large-scale
+        if IS_LAND:
+            W_bucket = jnp.clip(W_bucket + DT * ls_precip, 0.0, W_max)
 
         # (4) Rayleigh friction
         state = state._replace(

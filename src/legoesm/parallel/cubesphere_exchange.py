@@ -33,7 +33,6 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-import numpy as np_cpu
 
 from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
