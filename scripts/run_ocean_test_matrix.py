@@ -113,6 +113,10 @@ FIELD_RANGES = {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
     },
+    "rest_state_no_land": {
+        "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH (pure ocean)
+        "SST": (1.5, 21.0),        # °C - range from deep to surface T
+    },
     "barotropic_wave": {
         "eta": (-1.5, 1.5),        # meters - wave amplitude ~1m  
         "SST": (1.5, 21.0),        # °C - background temperature range
@@ -182,6 +186,11 @@ def _build_test_matrix() -> list[TestCase]:
     for g in GRID_TYPES:
         matrix.append(TestCase(
             "rest_state", g, res[g], 1.0, 0.1))
+
+    # --- Rest state adjustment without land: all grids ---
+    for g in GRID_TYPES:
+        matrix.append(TestCase(
+            "rest_state_no_land", g, res[g], 1.0, 0.1))
 
     # --- Barotropic gravity wave: all grids ---
     for g in GRID_TYPES:
@@ -642,6 +651,13 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
             raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
             regridded = _regrid_2d(raw, lon_deg, lat_deg, coord_kind)
             
+            # Apply land masking if land_mask is available
+            if "land_mask" in snapshots[step]:
+                land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+                land_mask_regridded = _regrid_2d(land_mask_raw, lon_deg, lat_deg, coord_kind)
+                # Mask land areas (where land_mask ≤ 0.5) with NaN
+                regridded = np.where(land_mask_regridded > 0.5, regridded, np.nan)
+            
             # Individual grid plots use auto-scaling for maximum detail
             im = ax.imshow(
                 regridded, origin="lower", aspect="auto", cmap=cmap,
@@ -660,9 +676,9 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
         if im is not None:
             fig.colorbar(
                 im, ax=axes.ravel().tolist(), orientation="vertical",
-                fraction=0.02, pad=0.02, label=field_label)
+                fraction=0.046, pad=0.04, label=field_label)
         fig.suptitle(f"{case_name} — {field_key}", fontsize=11)
-        fig.tight_layout(rect=[0, 0, 0.96, 0.95])
+        fig.tight_layout(rect=[0, 0, 0.88, 0.95])  # More space for colorbar
         fname = f"snapshots_{field_key}.png"
         fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -752,6 +768,13 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
 
         for ax, step in zip(axes_arr, valid_steps):
             f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
+            
+            # Apply land masking to 3D field before cross-section if available
+            if "land_mask" in snapshots[step]:
+                land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+                land_mask_3d = land_mask_raw[..., np.newaxis]  # Expand to 3D
+                f3d = np.where(land_mask_3d > 0.5, f3d, np.nan)
+            
             section, bin_centers = _bin_cross_section(
                 f3d, lon_deg, lat_deg, coord_kind, mean_axis)
             section = _fill_nan_section(section)
@@ -768,11 +791,11 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         axes_arr[0].set_ylabel(level_label)
         if im is not None:
             fig.colorbar(
-                im, ax=axes_arr, orientation="vertical", fraction=0.028,
-                pad=0.02, label=field_3d_key)
+                im, ax=axes_arr, orientation="vertical", fraction=0.046,
+                pad=0.04, label=field_3d_key)
         fig.suptitle(
             f"{case_name} — {field_3d_key} cross-sections", fontsize=11)
-        fig.tight_layout(rect=[0, 0, 0.96, 0.95])
+        fig.tight_layout(rect=[0, 0, 0.88, 0.95])  # More space for colorbar
         fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
@@ -791,6 +814,13 @@ def _save_profiles(output_dir: Path, case_name: str, snapshots: dict,
     colors = plt.cm.viridis(np.linspace(0, 1, len(valid_steps)))
     for step, color in zip(valid_steps, colors):
         f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
+        
+        # Apply land masking to 3D field before computing profile if available
+        if "land_mask" in snapshots[step]:
+            land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+            land_mask_3d = land_mask_raw[..., np.newaxis]  # Expand to 3D
+            f3d = np.where(land_mask_3d > 0.5, f3d, np.nan)
+        
         profile = np.nanmean(f3d, axis=tuple(range(f3d.ndim - 1)))
         day = step * dt / 86400.0
         ax.plot(profile, levels, color=color, lw=1.5, label=f"day {day:.1f}")
@@ -1065,6 +1095,25 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
+def _create_rest_state_no_land(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
+    """Create rest-state initial condition with no land for any grid type."""
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.ocean.init import rest_state_ocean
+        return rest_state_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
+    elif tc.grid_type == "latlon":
+        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
+        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
+    elif tc.grid_type == "mpas":
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
+    elif tc.grid_type == "spectral":
+        from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
+        # No land mask for idealized spectral tests (avoids Gibbs ringing)
+        return rest_state_spectral_ocean(grid, z_coord, H_max=H_max,
+                                         land_lat_threshold=90.0)
+    raise ValueError(f"Unknown grid type: {tc.grid_type}")
+
+
 # ===========================================================================
 # Field extraction helpers
 # ===========================================================================
@@ -1082,6 +1131,7 @@ def _extract_fv_ocean(state, grid_type: str):
         "u_sfc": u_sfc,
         "T_3d": T_3d,
         "S_3d": S_3d,
+        "land_mask": np.asarray(state.land_mask.data, dtype=np.float64),
     }
     if hasattr(state, "v"):
         v_sfc = np.asarray(state.v.data[..., 0], dtype=np.float64)
@@ -1106,6 +1156,7 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg):
         "SST": SST,
         "T_3d": T_3d,
         "S_3d": S_3d,
+        "land_mask": np.asarray(state.land_mask.data, dtype=np.float64),
     }
     return result
 
@@ -1122,12 +1173,22 @@ def _extract_spectral_ocean(state, grid):
         sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
     SST = T_grid[..., 0] if T_grid.ndim >= 3 else T_grid
     SSS = S_grid[..., 0] if S_grid.ndim >= 3 else S_grid
+    
+    # For spectral grids, synthesize land mask if available (typically all ocean for spectral)
+    if hasattr(state, 'land_mask') and hasattr(state.land_mask, 'data'):
+        land_mask_grid = np.asarray(
+            sh_synthesis(grid, state.land_mask.data), dtype=np.float64)
+    else:
+        # Default to all ocean for spectral grids (consistent with rest_state config)
+        land_mask_grid = np.ones_like(eta_grid, dtype=np.float64)
+    
     return {
         "eta": eta_grid,
         "SST": SST,
         "SSS": SSS,
         "T_3d": T_grid,
         "S_3d": S_grid,
+        "land_mask": land_mask_grid,
     }
 
 
@@ -1174,33 +1235,109 @@ def _make_scalar_fn(grid_type: str, grid=None):
             T_phys = sh_synthesis_3d(grid, s.T_hat.data)         # °C  
             S_phys = sh_synthesis_3d(grid, s.S_hat.data)         # PSU
             
-            return {
-                "mean_eta": float(jnp.mean(eta_phys)),           # meters
-                "max_abs_eta": float(jnp.max(jnp.abs(eta_phys))), # meters
-                "mean_T": float(jnp.mean(T_phys)),               # °C
-                "mean_S": float(jnp.mean(S_phys)),               # PSU
-            }
+            # Apply ocean masking if available
+            if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
+                land_mask_phys = sh_synthesis(grid, s.land_mask.data)
+                ocean_mask = land_mask_phys > 0.5
+                
+                # Compute ocean-only statistics
+                eta_ocean = jnp.where(ocean_mask, eta_phys, jnp.nan)
+                T_ocean = jnp.where(ocean_mask, T_phys, jnp.nan)
+                S_ocean = jnp.where(ocean_mask, S_phys, jnp.nan)
+                
+                return {
+                    "mean_eta": float(jnp.nanmean(eta_ocean)),           # meters
+                    "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))), # meters
+                    "mean_T": float(jnp.nanmean(T_ocean)),               # °C
+                    "mean_S": float(jnp.nanmean(S_ocean)),               # PSU
+                }
+            else:
+                # Fallback for spectral (typically all ocean anyway)
+                return {
+                    "mean_eta": float(jnp.mean(eta_phys)),           # meters
+                    "max_abs_eta": float(jnp.max(jnp.abs(eta_phys))), # meters
+                    "mean_T": float(jnp.mean(T_phys)),               # °C
+                    "mean_S": float(jnp.mean(S_phys)),               # PSU
+                }
         return scalar_fn
     elif grid_type == "mpas":
         def scalar_fn(s):
-            return {
-                "mean_eta": float(jnp.mean(s.eta.data)),
-                "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
-                "mean_T": float(jnp.mean(s.T.data)),
-                "mean_S": float(jnp.mean(s.S.data)),
-                "max_abs_u": float(jnp.max(jnp.abs(s.u.data))),
-            }
+            # MPAS land masking using post-regridding approach
+            # Note: This is less accurate than pre-regridding masking with mesh topology,
+            # but simpler to implement. Future versions could use MPAS mesh connectivity
+            # to map cell-centered land masks to edge-centered velocity fields.
+            
+            if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
+                # For MPAS, apply masking by excluding land cell values
+                land_mask = s.land_mask.data > 0.5
+                
+                # Cell-centered fields: direct masking
+                eta_ocean = jnp.where(land_mask, s.eta.data, jnp.nan)
+                T_ocean = jnp.where(land_mask[..., jnp.newaxis], s.T.data, jnp.nan)
+                S_ocean = jnp.where(land_mask[..., jnp.newaxis], s.S.data, jnp.nan)
+                
+                # Edge-centered fields: use global statistics for now
+                # TODO: Map cell mask to edge mask using MPAS mesh topology
+                max_abs_u = float(jnp.max(jnp.abs(s.u.data)))
+                
+                return {
+                    "mean_eta": float(jnp.nanmean(eta_ocean)),
+                    "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))),
+                    "mean_T": float(jnp.nanmean(T_ocean)),
+                    "mean_S": float(jnp.nanmean(S_ocean)),
+                    "max_abs_u": max_abs_u,  # Unmasked for now
+                }
+            else:
+                # Fallback without masking
+                return {
+                    "mean_eta": float(jnp.mean(s.eta.data)),
+                    "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
+                    "mean_T": float(jnp.mean(s.T.data)),
+                    "mean_S": float(jnp.mean(s.S.data)),
+                    "max_abs_u": float(jnp.max(jnp.abs(s.u.data))),
+                }
         return scalar_fn
     else:
         def scalar_fn(s):
-            return {
-                "mean_eta": float(jnp.mean(s.eta.data)),
-                "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
-                "mean_T": float(jnp.mean(s.T.data)),
-                "mean_S": float(jnp.mean(s.S.data)),
-                "max_speed": float(jnp.max(jnp.sqrt(
-                    s.u.data ** 2 + s.v.data ** 2))),
-            }
+            # Apply ocean masking for cubed-sphere and lat-lon
+            if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
+                ocean_mask = s.land_mask.data > 0.5  # Shape: (6, 24, 24)
+                
+                # For 2D fields (eta): use mask directly
+                eta_ocean = jnp.where(ocean_mask, s.eta.data, jnp.nan)
+                
+                # For 3D fields (T, S): expand mask to 3D
+                ocean_mask_3d = ocean_mask[..., jnp.newaxis]  # Shape: (6, 24, 24, 1)
+                T_ocean = jnp.where(ocean_mask_3d, s.T.data, jnp.nan) 
+                S_ocean = jnp.where(ocean_mask_3d, s.S.data, jnp.nan)
+                
+                # For velocity, apply mask to 2D surface fields
+                if hasattr(s, 'u') and hasattr(s, 'v'):
+                    u_sfc = s.u.data[..., 0]  # Surface level
+                    v_sfc = s.v.data[..., 0]
+                    speed_sfc = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
+                    speed_ocean = jnp.where(ocean_mask, speed_sfc, jnp.nan)
+                    max_speed = float(jnp.nanmax(speed_ocean))
+                else:
+                    max_speed = 0.0
+                
+                return {
+                    "mean_eta": float(jnp.nanmean(eta_ocean)),
+                    "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))),
+                    "mean_T": float(jnp.nanmean(T_ocean)),
+                    "mean_S": float(jnp.nanmean(S_ocean)),
+                    "max_speed": max_speed,
+                }
+            else:
+                # Fallback without masking
+                return {
+                    "mean_eta": float(jnp.mean(s.eta.data)),
+                    "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
+                    "mean_T": float(jnp.mean(s.T.data)),
+                    "mean_S": float(jnp.mean(s.S.data)),
+                    "max_speed": float(jnp.max(jnp.sqrt(
+                        s.u.data ** 2 + s.v.data ** 2))),
+                }
         return scalar_fn
 
 
@@ -1385,11 +1522,10 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         label=f"Rest State ({tc.grid_type})", total_days=days)
 
     # Check drift is small - all grids now use same physical units
-    # Use absolute drift normalized by ocean depth (DEFAULT_H_MAX) rather than
-    # relative drift: _compute_drift divides by |initial|, which is ~0 for mean_eta
-    # in a rest state (initial eta=0), yielding meaningless large relative values.
+    # Use absolute eta drift in meters rather than relative drift since 
+    # initial mean_eta is ~0 in rest state, making relative drift meaningless (division by ~0).
     eta_list = diag.get("mean_eta", [])
-    eta_drift = (abs(eta_list[-1] - eta_list[0]) / DEFAULT_H_MAX
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
@@ -1404,6 +1540,63 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         "wall_time": f"{wall:.1f}s"})
     _save_case_diagnostics(
         output_dir, f"Rest State {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
+                   ) -> tuple[str, float, str]:
+    """Rest state adjustment with no land: pure ocean should remain near initial condition."""
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc))
+    state = _create_rest_state_no_land(tc, grid, z_coord)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Rest State No Land ({tc.grid_type})", total_days=days)
+
+    # Check drift is small - all grids now use same physical units
+    # Use absolute eta drift in meters rather than relative drift since 
+    # initial mean_eta is ~0 in rest state, making relative drift meaningless (division by ~0).
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_drift = _compute_drift(diag.get("mean_T", []))
+    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full  # positive downward for plotting
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"Rest State No Land {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=[
             ("eta", "SSH (m)", "RdBu_r"),
@@ -1516,11 +1709,10 @@ def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
     else:
         speed_key = "max_speed"
     max_speed = diag[speed_key][-1] if diag.get(speed_key) else 0
-    # Use absolute drift normalized by ocean depth (DEFAULT_H_MAX) rather than relative
-    # drift: initial mean_eta is ~0 in the wind gyre quick run, making relative drift
-    # meaningless (division by ~0).
+    # Use absolute eta drift in meters rather than relative drift since 
+    # initial mean_eta is ~0 in gyre runs, making relative drift meaningless (division by ~0).
     eta_list = diag.get("mean_eta", [])
-    eta_drift = (abs(eta_list[-1] - eta_list[0]) / DEFAULT_H_MAX
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     notes = f"max speed={max_speed:.4f} m/s, eta drift={eta_drift:.2e}"
 
@@ -2549,6 +2741,7 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
 
 RUNNERS: dict[str, Callable] = {
     "rest_state": run_rest_state,
+    "rest_state_no_land": run_rest_state_no_land,
     "barotropic_wave": run_barotropic_wave,
     "wind_gyre": run_wind_gyre,
     "baroclinic": run_baroclinic,
@@ -2603,7 +2796,13 @@ def build_parser() -> argparse.ArgumentParser:
 def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
     filtered = tests
     if args.only != "all":
-        filtered = [t for t in filtered if args.only in t.case]
+        # Support exact matching with "=" prefix (e.g., "=rest_state")
+        if args.only.startswith("="):
+            exact_name = args.only[1:]
+            filtered = [t for t in filtered if t.case == exact_name]
+        else:
+            # Default substring matching
+            filtered = [t for t in filtered if args.only in t.case]
     if args.grid != "all":
         filtered = [t for t in filtered if t.grid_type == args.grid]
     return filtered
@@ -2735,20 +2934,23 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
     field_ranges = FIELD_RANGES.get(test_case, {})
     vmin, vmax = field_ranges.get(field, (None, None))
     
-    # Set up grid layout (2x2 for up to 4 grids)
+    # Set up grid layout (2x2 for up to 4 grids + space for colorbar)
     n_grids = len(grid_results)
     if n_grids <= 2:
-        nrows, ncols = 1, 2
+        nrows, ncols = 1, 3  # Extra column for colorbar
     else:
-        nrows, ncols = 2, 2
+        nrows, ncols = 2, 3  # Extra column for colorbar
         
-    fig, axes = plt.subplots(nrows, ncols, figsize=(12, 10))
-    if n_grids == 1:
-        axes = [axes]
-    elif nrows == 1:
-        axes = axes.flatten()
-    else:
-        axes = axes.flatten()
+    fig = plt.figure(figsize=(14, 10))  # Wider to accommodate colorbar
+    
+    # Create subplots with specific width ratios: plots get most space, colorbar gets less
+    gs = fig.add_gridspec(nrows, ncols, width_ratios=[1, 1, 0.05] if ncols == 3 else [1, 1, 1, 0.05])
+    
+    axes = []
+    for i in range(nrows):
+        for j in range(ncols - 1):  # Don't include colorbar column
+            ax = fig.add_subplot(gs[i, j])
+            axes.append(ax)
     
     fig.suptitle(f'Final {field.upper()} Snapshots - {test_case_dir.name}', fontsize=14, fontweight='bold')
     
@@ -2780,6 +2982,16 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                 else:  # Single timestep: (nlat, nlon) - shouldn't happen with new format
                     final_field = field_data
                 
+                # Apply land masking if available
+                if 'land_mask' in snapshots.files:
+                    land_mask_data = snapshots['land_mask']
+                    if land_mask_data.ndim == 3:  # Time series
+                        land_mask_final = land_mask_data[-1]  # Last time
+                    else:  # Single timestep
+                        land_mask_final = land_mask_data
+                    # Mask land areas (where land_mask ≤ 0.5) with NaN
+                    final_field = np.where(land_mask_final > 0.5, final_field, np.nan)
+                
                 # Create the plot with consistent color scale
                 im = ax.imshow(final_field, origin='lower', aspect='auto', cmap=cmap,
                               extent=[-180, 180, -90, 90], vmin=vmin, vmax=vmax)
@@ -2800,6 +3012,13 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                 final_field_name = f'{field}_step{final_step}'
                 final_field = snapshots[final_field_name]
                 
+                # Apply land masking if available (old format)
+                land_mask_name = f'land_mask_step{final_step}'
+                if land_mask_name in snapshots.files:
+                    land_mask_final = snapshots[land_mask_name]
+                    # Mask land areas (where land_mask ≤ 0.5) with NaN
+                    final_field = np.where(land_mask_final > 0.5, final_field, np.nan)
+                
                 # Create the plot with consistent color scale
                 im = ax.imshow(final_field, origin='lower', aspect='auto', cmap=cmap,
                               extent=[-180, 180, -90, 90], vmin=vmin, vmax=vmax)
@@ -2815,9 +3034,11 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
     for i in range(n_grids, len(axes)):
         axes[i].set_visible(False)
     
-    # Add colorbar
+    # Add colorbar in dedicated space
     if im is not None:
-        cbar = fig.colorbar(im, ax=axes[:n_grids], shrink=0.8, aspect=20)
+        # Create colorbar axes in the rightmost column, spanning all rows
+        cbar_ax = fig.add_subplot(gs[:, -1])
+        cbar = fig.colorbar(im, cax=cbar_ax)
         if field == 'eta':
             cbar.set_label('Sea Surface Height (m)')
         elif field in ['SST', 'T']:
