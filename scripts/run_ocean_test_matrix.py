@@ -1089,9 +1089,9 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
     elif tc.grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
-        # No land mask for idealized spectral tests (avoids Gibbs ringing)
+        # Use land with tanh taper (same as other grids); hyperdiffusion mitigates Gibbs
         return rest_state_spectral_ocean(grid, z_coord, H_max=H_max,
-                                         land_lat_threshold=90.0)
+                                         land_lat_threshold=80.0)
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
@@ -1108,7 +1108,6 @@ def _create_rest_state_no_land(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX)
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
     elif tc.grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
-        # No land mask for idealized spectral tests (avoids Gibbs ringing)
         return rest_state_spectral_ocean(grid, z_coord, H_max=H_max,
                                          land_lat_threshold=90.0)
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
@@ -1529,6 +1528,15 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
                  if len(eta_list) >= 2 else 0.0)
     T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+
+    # Spectral land-leakage diagnostic: check that eta stays near zero in land cells
+    if tc.grid_type == "spectral" and hasattr(state, 'land_mask_grid'):
+        from legoesm.grids.gaussian import sh_synthesis
+        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
+        eta_grid = np.asarray(sh_synthesis(grid, state.eta_hat.data).real,
+                              dtype=np.float64)
+        land_leakage = np.max(np.abs(eta_grid * (1.0 - mask)))
+        notes += f", land_leakage={land_leakage:.2e}"
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full  # positive downward for plotting

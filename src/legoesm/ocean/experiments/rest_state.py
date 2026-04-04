@@ -57,8 +57,8 @@ class RestStateConfig:
     H_max: float = 5500.0          # Maximum ocean depth [m]
     land_lat_threshold: float = 80.0  # Latitude threshold for land [degrees]
     
-    # Special handling for spectral grid (avoids Gibbs ringing)
-    spectral_land_lat_threshold: float = 90.0  # No land for spectral grid
+    # Spectral grid: same land threshold as other grids; tanh taper mitigates Gibbs
+    spectral_land_lat_threshold: float = 80.0
 
 
 def create_initial_conditions(grid_type: str, grid, z_coord, 
