@@ -2,7 +2,13 @@
 
 Computes in-situ density rho(T, S, p) using the Wright (1997)
 parameterization as implemented in MOM6 (MOM_EOS_Wright.F90).
-Pure JAX functions, fully compatible with jit/grad/vmap.
+Pure JAX functions, compatible with jit/grad/vmap.  Inputs are clipped
+to the Wright EOS valid range (T in [-2, 40] degC, S in [0, 42] PSU),
+so gradients are exactly zero outside that range.  This is physically
+correct (the polynomial is not valid there) but means the EOS is only
+*piecewise* differentiable; callers using jax.grad through long
+integrations should be aware that out-of-range states produce zero
+gradients rather than NaN or extrapolated values.
 
 Reference
 ---------

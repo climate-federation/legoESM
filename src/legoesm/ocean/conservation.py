@@ -235,10 +235,15 @@ def ocean_conservation_fixer(
             eta_floor = jnp.asarray(min_wc, dtype=eta_corrected.dtype) - state_new.H_bathy.data
             eta_corrected = jnp.maximum(eta_corrected, eta_floor) * mask
 
-    # Use OLD h_k for heat/salt corrections (not recomputed from corrected eta)
-    h_k_new_for_fixers = h_k_old  # avoids order dependency
+    # Recompute h_k from the CORRECTED eta so heat/salt integrals use
+    # layer thicknesses consistent with the actual post-fix state.
+    # Using h_k_old here would conserve against a stale geometry.
+    h_k_corrected = compute_layer_thickness(
+        eta_corrected, state_new.H_bathy.data, z_coord,
+        min_water_column_m=min_wc,
+    )
     h_k_old_acc = cast(h_k_old, _M, "accumulate")
-    h_k_fix_acc = cast(h_k_new_for_fixers, _M, "accumulate")
+    h_k_fix_acc = cast(h_k_corrected, _M, "accumulate")
 
     # --- Heat (T) correction ---
     T_corrected = state_new.T.data

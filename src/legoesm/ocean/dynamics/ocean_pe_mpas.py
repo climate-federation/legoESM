@@ -99,9 +99,20 @@ def mpas_ocean_baroclinic_tendencies(
             rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
         )
         rho = wright_eos(T_3d, S_3d, p_hydro)
+    # Final p_hydro for EOS only (not used in Bernoulli)
     p_hydro = compute_hydrostatic_pressure(
         rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
     )  # (nCells, nlev)
+
+    # Baroclinic pressure anomaly: built from rho' = rho - rho_0 only.
+    # This excludes the rho_0*g*eta surface term, which is handled by
+    # the barotropic solver's -g*grad(eta).  Using full p_hydro would
+    # double-count the barotropic pressure gradient.
+    rho_prime = rho - rho_0
+    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
+    dp_layer = rho_prime * g * dz_actual
+    p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
+    p_prime = p_prime + 0.5 * dp_layer  # (nCells, nlev)
 
     # ---- Edge mask for land boundaries ----
     c1 = mesh.cellsOnEdge[0]  # (nEdges,)
@@ -116,7 +127,7 @@ def mpas_ocean_baroclinic_tendencies(
         T_k = T_3d[:, k]       # (nCells,)
         S_k = S_3d[:, k]       # (nCells,)
         h_k_level = h_k[:, k]  # (nCells,)
-        p_k = p_hydro[:, k]    # (nCells,)
+        p_k = p_prime[:, k]    # (nCells,) — baroclinic anomaly only
 
         # Edge layer thickness
         h_e = edge_thickness(h_k_level, mesh)  # (nEdges,)

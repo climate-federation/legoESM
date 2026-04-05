@@ -91,8 +91,8 @@ class OceanSurfaceForcing(NamedTuple):
 
 class OceanConfig(NamedTuple):
     """Configuration for the ocean model."""
-    g: float = 9.80616
-    rho_0: float = 1025.0
+    g: float = 9.80616           # = constants.g
+    rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4           # Horizontal viscosity [m^2/s]
     K_h: float = 1.0e3           # Horizontal tracer diffusivity [m^2/s]
     A_v: float = 1.0e-3          # Vertical viscosity [m^2/s]

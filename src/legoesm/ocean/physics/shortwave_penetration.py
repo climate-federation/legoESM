@@ -61,8 +61,8 @@ def shortwave_penetration_tendency(
     z_coord_z_half_ref: jnp.ndarray,
     jacobian: jnp.ndarray,
     config: ShortwavePenetrationConfig = ShortwavePenetrationConfig(),
-    rho_0: float = 1025.0,
-    c_sw: float = 3994.0,
+    rho_0: float = 1025.0,  # = eos.rho_0
+    c_sw: float = 3994.0,   # = eos.c_sw
 ) -> jnp.ndarray:
     """Compute 3D temperature tendency from subsurface SW absorption.
 
