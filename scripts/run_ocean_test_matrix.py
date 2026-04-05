@@ -100,10 +100,11 @@ DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
 DEFAULT_DT = 300.0  # seconds (scaled for ~2.5 deg resolution CFL)
 
-# Physical constants for idealized ocean test cases
-_A_EARTH = 6.37122e6   # Earth radius (m)
-_OMEGA_E = 7.292e-5     # Earth rotation rate (rad/s)
-_G_EARTH = 9.80616      # gravitational acceleration (m/s^2)
+# Physical constants for idealized ocean test cases — use canonical values.
+from legoesm import constants as _C
+_A_EARTH = _C.R_earth   # Earth radius (m)
+_OMEGA_E = _C.Omega      # Earth rotation rate (rad/s)
+_G_EARTH = _C.g           # gravitational acceleration (m/s^2)
 
 
 # ===========================================================================
@@ -256,7 +257,12 @@ def _run_timeloop(
     """
     snap_targets = _snapshot_steps(n_steps, n_snaps)
     snapshots: dict[int, dict[str, np.ndarray]] = {0: extract_fn(state)}
-    diag: dict[str, list] = {"times": [], "steps": []}
+    # Record step-0 diagnostics so conservation plots have the true
+    # initial value (important for perturbation variables starting at 0).
+    scalars_0 = scalar_fn(state)
+    diag: dict[str, list] = {"times": [0.0], "steps": [0]}
+    for k, v in scalars_0.items():
+        diag.setdefault(k, []).append(v)
 
     t0 = time.time()
     last_print = t0
@@ -1833,15 +1839,15 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
     phase = kx * lon + ky * lat
     eta_pert = eta_amp * np.cos(phase)
 
-    # Velocity from linearized SWE: u, v from eta at t=0
-    # u = g/(omega^2 - f^2) * (omega*kx*cos(phase) - f*ky*sin(phase)) / a
-    # v = g/(omega^2 - f^2) * (omega*ky*cos(phase) + f*kx*sin(phase)) / a
+    # Velocity from linearized SWE (barotropic mode = depth-uniform):
+    # u = g*eta0/(omega^2 - f^2) * (omega*k*cos(phase) - f*l*sin(phase))
+    # v = g*eta0/(omega^2 - f^2) * (omega*l*cos(phase) + f*k*sin(phase))
     denom = omega**2 - f0**2
     if abs(denom) < 1e-30:
         denom = 1e-30
-    u_pert = (_G_EARTH / denom) * (
+    u_pert = (eta_amp * _G_EARTH / denom) * (
         omega * k_phys * np.cos(phase) - f0 * l_phys * np.sin(phase))
-    v_pert = (_G_EARTH / denom) * (
+    v_pert = (eta_amp * _G_EARTH / denom) * (
         omega * l_phys * np.cos(phase) + f0 * k_phys * np.sin(phase))
 
     if grid_type == "spectral":
@@ -1851,13 +1857,13 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         cos_lat = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
         a = grid.radius
         nlev = state.T_hat.data.shape[-1]
-        # Only perturb level 0 (consistent with cubed-sphere / lat-lon init)
+        # Barotropic mode: depth-uniform velocity at all levels
         u_cos_2d = jnp.array(u_pert * cos_lat)    # (n_lat, n_lon)
         v_cos_2d = jnp.array(v_pert * cos_lat)
-        u_cos = jnp.concatenate([u_cos_2d[..., None],
-                                 jnp.zeros((*u_cos_2d.shape, nlev - 1))], axis=-1)
-        v_cos = jnp.concatenate([v_cos_2d[..., None],
-                                 jnp.zeros((*v_cos_2d.shape, nlev - 1))], axis=-1)
+        u_cos = jnp.broadcast_to(
+            u_cos_2d[..., None], (*u_cos_2d.shape, nlev)).copy()
+        v_cos = jnp.broadcast_to(
+            v_cos_2d[..., None], (*v_cos_2d.shape, nlev)).copy()
         im_over_a = 1j * grid.ms.astype(jnp.float64) / a
         one_over_a = 1.0 / a
         vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
@@ -1874,13 +1880,14 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         lon_e = np.asarray(grid.lonEdge, dtype=np.float64)
         u_data = np.array(state.u.data, dtype=np.float64, copy=True)
         phase_e = kx * lon_e + ky * lat_e
-        u_e = (_G_EARTH / denom) * (
+        u_e = (eta_amp * _G_EARTH / denom) * (
             omega * k_phys * np.cos(phase_e) - f0 * l_phys * np.sin(phase_e))
-        v_e = (_G_EARTH / denom) * (
+        v_e = (eta_amp * _G_EARTH / denom) * (
             omega * l_phys * np.cos(phase_e) + f0 * k_phys * np.sin(phase_e))
-        # Project onto edge normals
+        # Project onto edge normals — depth-uniform (all levels)
         angle = np.asarray(grid.angleEdge, dtype=np.float64)
-        u_data[..., 0] = u_e * np.cos(angle) + v_e * np.sin(angle)
+        u_normal = u_e * np.cos(angle) + v_e * np.sin(angle)
+        u_data[:, :] = u_normal[:, None]
         eta_cell = eta_amp * np.cos(kx * lon + ky * lat)
         return state._replace(
             eta=Field(jnp.array(eta_cell)),
@@ -1889,8 +1896,9 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
     else:  # cubed_sphere, latlon
         u_data = np.array(state.u.data, dtype=np.float64, copy=True)
         v_data = np.array(state.v.data, dtype=np.float64, copy=True)
-        u_data[..., 0] = u_pert
-        v_data[..., 0] = v_pert
+        # Barotropic mode: depth-uniform velocity at all levels
+        u_data[...] = u_pert[..., None]
+        v_data[...] = v_pert[..., None]
         return state._replace(
             eta=Field(jnp.array(eta_pert)),
             u=Field(jnp.array(u_data)),
@@ -2035,8 +2043,6 @@ def _compute_rpe(state, grid_type, grid, z_coord):
     Approximation: sort density profile at each column and compute
     domain-integrated rho * z.
     """
-    from legoesm.ocean.eos import wright_eos
-
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_synthesis_3d
         T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data), dtype=np.float64)
