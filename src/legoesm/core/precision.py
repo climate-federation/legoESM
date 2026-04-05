@@ -542,25 +542,23 @@ _ICE_OVERRIDES = {
 def set_recommended_overrides(mode: str = "mixed") -> None:
     """Apply recommended per-module overrides for a precision mode.
 
+    This function only manages module overrides — it does NOT reset the
+    global policy.  The caller (``apply_precision``) is responsible for
+    setting the policy before calling this.
+
     Parameters
     ----------
     mode : str
-        "fp32" — no overrides (everything fp32).
-        "fp64" — no overrides needed (global policy handles it).
+        "fp32" — clear overrides (global policy handles it).
+        "fp64" — clear overrides (global policy handles it).
         "mixed" — apply domain-knowledge overrides for sensitive kernels.
     """
     clear_module_overrides()
 
-    if mode == "fp32":
-        set_policy(PrecisionPolicy.fp32())
-        return
-    elif mode == "fp64":
-        set_policy(PrecisionPolicy.fp64())
+    if mode in ("fp32", "fp64"):
         return
     elif mode != "mixed":
         raise ValueError(f"Unknown mode {mode!r}. Use 'fp32', 'fp64', or 'mixed'.")
-
-    set_policy(PrecisionPolicy.mixed())
 
     # Apply all domain-specific overrides.
     for overrides_dict in [

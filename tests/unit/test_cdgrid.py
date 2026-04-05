@@ -68,26 +68,28 @@ class TestCDGridConstruction(unittest.TestCase):
         self.assertEqual(self.cdgrid.n, self.n)
         self.assertEqual(self.cdgrid.radius, self.grid.radius)
 
-    def test_metric_dtype_respects_x64(self):
-        """Corner-critical metrics should be float64 when x64 + CPU backend."""
+    def test_metric_dtype_configurable(self):
+        """metric_dtype parameter controls corner-critical metric precision."""
         import jax
         if not getattr(jax.config, 'x64_enabled', False):
             self.skipTest("x64 not enabled")
-        # Check if backend actually supports f64
         try:
             jax.device_put(jnp.array(1.0, dtype=jnp.float64))
         except Exception:
             self.skipTest("backend does not support float64")
-        # Rebuild grid to pick up x64 metrics
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        cdgrid = create_cubed_sphere_cdgrid(self.grid)
-        # Gradient matrix and inverse metrics must be float64
+        cdgrid = create_cubed_sphere_cdgrid(self.grid, metric_dtype=jnp.float64)
         self.assertEqual(cdgrid.grad_c00.dtype, jnp.float64)
         self.assertEqual(cdgrid.rarea_c.dtype, jnp.float64)
         self.assertEqual(cdgrid.rdxc.dtype, jnp.float64)
         self.assertEqual(cdgrid.rsin2_corner.dtype, jnp.float64)
         # Position fields stay float32
         self.assertEqual(cdgrid.lon_corner.dtype, jnp.float32)
+
+    def test_metric_dtype_defaults_float32(self):
+        """Default metric_dtype is float32 for backward compatibility."""
+        self.assertEqual(self.cdgrid.grad_c00.dtype, jnp.float32)
+        self.assertEqual(self.cdgrid.rarea_c.dtype, jnp.float32)
 
 
 class TestCDGridOperators(unittest.TestCase):
@@ -478,37 +480,37 @@ class TestCDGrid3DOperators(unittest.TestCase):
         self.cdgrid = create_cubed_sphere_cdgrid(self.grid)
 
     def test_vorticity_3d_shape(self):
-        from legoesm.core.operators_cdgrid import dgrid_vorticity_3d
+        from legoesm.core.operators_cdgrid import dgrid_vorticity
         n, nlev = self.n, self.nlev
         u_d = jnp.zeros((6, n + 1, n + 1, nlev))
         v_d = jnp.zeros((6, n + 1, n + 1, nlev))
-        zeta = dgrid_vorticity_3d(u_d, v_d, self.cdgrid)
+        zeta = dgrid_vorticity(u_d, v_d, self.cdgrid)
         self.assertEqual(zeta.shape, (6, n, n, nlev))
 
     def test_divergence_3d_shape(self):
-        from legoesm.core.operators_cdgrid import cgrid_divergence_3d
+        from legoesm.core.operators_cdgrid import cgrid_divergence
         n, nlev = self.n, self.nlev
         u_c = jnp.zeros((6, n + 1, n, nlev))
         v_c = jnp.zeros((6, n, n + 1, nlev))
-        div = cgrid_divergence_3d(u_c, v_c, self.cdgrid)
+        div = cgrid_divergence(u_c, v_c, self.cdgrid)
         self.assertEqual(div.shape, (6, n, n, nlev))
 
     def test_gradient_3d_constant(self):
-        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient_3d
+        from legoesm.core.operators_cdgrid import _arakawa_lamb_gradient
         n, nlev = self.n, self.nlev
         B = jnp.ones((6, n, n, nlev)) * 100.0
-        dB_dx, dB_dy = _arakawa_lamb_gradient_3d(B, self.cdgrid)
+        dB_dx, dB_dy = _arakawa_lamb_gradient(B, self.cdgrid)
         self.assertEqual(dB_dx.shape, (6, n + 1, n + 1, nlev))
         self.assertLess(float(jnp.max(jnp.abs(dB_dx))), 1e-5)
         self.assertLess(float(jnp.max(jnp.abs(dB_dy))), 1e-5)
 
     def test_mass_flux_3d_shape(self):
-        from legoesm.core.operators_cdgrid import cgrid_mass_flux_divergence_3d
+        from legoesm.core.operators_cdgrid import cgrid_mass_flux_divergence
         n, nlev = self.n, self.nlev
         h = jnp.ones((6, n, n, nlev)) * 100.0
         u_c = jnp.ones((6, n + 1, n, nlev)) * 0.1
         v_c = jnp.zeros((6, n, n + 1, nlev))
-        dh = cgrid_mass_flux_divergence_3d(h, u_c, v_c, self.cdgrid)
+        dh = cgrid_mass_flux_divergence(h, u_c, v_c, self.cdgrid)
         self.assertEqual(dh.shape, (6, n, n, nlev))
         self.assertTrue(jnp.all(jnp.isfinite(dh)))
 

@@ -4,9 +4,9 @@ Provides realistic temperature and salinity initial conditions by
 interpolating WOA18 annual climatology to the model grid and vertical
 coordinate.  Supports cubed-sphere, lat-lon, MPAS, and spectral grids.
 
-WOA18 data are expected as NetCDF files on a 1-degree lat-lon grid with
-standard depth levels.  If files are not available, a latitude-dependent
-analytical fallback is provided.
+WOA18 data are expected as Zarr stores or NetCDF files on a 1-degree
+lat-lon grid with standard depth levels.  If files are not available, a
+latitude-dependent analytical fallback is provided.
 
 References
 ----------
@@ -120,18 +120,28 @@ def _analytical_woa_profiles(
     return T, S
 
 
+def _open_woa_dataset(path: str | Path):
+    """Open a WOA18 file as xarray Dataset (Zarr or NetCDF)."""
+    import os
+    import xarray as xr
+    path_str = str(path)
+    if os.path.isdir(path_str) or path_str.endswith(".zarr"):
+        return xr.open_zarr(path_str)
+    return xr.open_dataset(path_str)
+
+
 def load_woa18(
     T_path: str | Path | None = None,
     S_path: str | Path | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Load WOA18 annual climatology from NetCDF files.
+    """Load WOA18 annual climatology from Zarr stores or NetCDF files.
 
     Parameters
     ----------
     T_path : path or None
-        Path to WOA18 temperature file (e.g., ``woa18_decav_t00_01.nc``).
+        Path to WOA18 temperature file/store.
     S_path : path or None
-        Path to WOA18 salinity file (e.g., ``woa18_decav_s00_01.nc``).
+        Path to WOA18 salinity file/store.
 
     Returns
     -------
@@ -140,21 +150,15 @@ def load_woa18(
     lat_woa : array, shape (n_lat,)  — degrees
     lon_woa : array, shape (n_lon,)  — degrees [0, 360)
     """
-    try:
-        import netCDF4
-    except ImportError:
-        raise ImportError(
-            "netCDF4 is required for WOA18 loading. "
-            "Install with: pip install netCDF4"
-        )
+    ds_T = _open_woa_dataset(T_path)
+    T_woa = np.array(ds_T["t_an"].values[0, :, :, :])  # (depth, lat, lon)
+    lat_woa = np.array(ds_T["lat"].values)
+    lon_woa = np.array(ds_T["lon"].values)
+    ds_T.close()
 
-    with netCDF4.Dataset(T_path, "r") as ds:
-        T_woa = np.array(ds["t_an"][0, :, :, :])  # (depth, lat, lon)
-        lat_woa = np.array(ds["lat"][:])
-        lon_woa = np.array(ds["lon"][:])
-
-    with netCDF4.Dataset(S_path, "r") as ds:
-        S_woa = np.array(ds["s_an"][0, :, :, :])
+    ds_S = _open_woa_dataset(S_path)
+    S_woa = np.array(ds_S["s_an"].values[0, :, :, :])
+    ds_S.close()
 
     # Transpose to (lat, lon, depth) for easier interpolation
     T_woa = np.transpose(T_woa, (1, 2, 0))

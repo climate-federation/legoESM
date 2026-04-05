@@ -1,4 +1,4 @@
-"""Baroclinic wave test case for dynamical core validation (DCMIP 2016).
+"""Baroclinic wave test case for all grid types (DCMIP 2016).
 
 Implements the Jablonowski-Williamson baroclinic instability test, the
 gold-standard benchmark for hydrostatic dynamical cores.
@@ -16,6 +16,8 @@ The test has two components:
 
 Initial conditions are defined analytically in height (z) coordinates,
 then mapped to sigma levels by inverting p(z) via bisection.
+
+Supported grids: cubed-sphere, lat-lon, MPAS Voronoi, spectral (Gaussian).
 
 Expected results (C48, 26 levels, 10 days with perturbation):
 - Subtropical jet ~35 m/s at ~250 hPa
@@ -39,7 +41,6 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
-from legoesm.grids.cubed_sphere import CubedSphereGrid, rotate_winds_geo_to_grid
 from legoesm.grids.vertical import SigmaCoordinate
 from legoesm import constants
 
@@ -151,7 +152,7 @@ def find_z_for_pressure(
 
     Since pressure decreases monotonically with height, bisection
     converges reliably. With 60 iterations, precision is ~Z_MAX/2^60
-    ≈ 4e-14 m.
+    ~ 4e-14 m.
 
     Parameters
     ----------
@@ -287,15 +288,15 @@ def exponential_perturbation(
 
 
 # ==============================================================================
-# Initialization
+# Cubed-sphere initialization
 # ==============================================================================
 
 def baroclinic_wave_init(
-    grid: CubedSphereGrid,
+    grid,
     sigma_coord: SigmaCoordinate,
     perturbed: bool = True,
 ) -> HydrostaticState:
-    """Create initial conditions for the baroclinic wave test.
+    """Create initial conditions for the baroclinic wave test on a cubed-sphere grid.
 
     Computes the analytic balanced state on the model's sigma levels
     by inverting the height-based formulation via bisection at each
@@ -316,6 +317,8 @@ def baroclinic_wave_init(
     HydrostaticState
         Initial state for the baroclinic wave test.
     """
+    from legoesm.grids.cubed_sphere import rotate_winds_geo_to_grid
+
     n = grid.n
     nlev = sigma_coord.n_levels
 
@@ -355,12 +358,9 @@ def baroclinic_wave_init(
     # u_3d is the geographic EASTWARD wind; v_geo = 0 (no northward wind).
     # The model stores GRID-ALIGNED velocity components, so we must rotate
     # from geographic (east, north) to local cubed-sphere (x, y) coordinates.
-    # This is essential: on faces where the grid x-axis is not aligned with
-    # east, the geographic u_east projects onto both u_grid and v_grid.
     v_north = jnp.zeros((6, n, n, nlev))
 
-    # Rotate at each level using the grid angle (angle between x-axis and east)
-    # rotate_winds_geo_to_grid expects (6,n,n) arrays, so we loop over levels
+    # Rotate at each level using the grid angle
     u_grid = jnp.zeros_like(u_3d)
     v_grid = jnp.zeros_like(u_3d)
     for k in range(nlev):
@@ -384,6 +384,10 @@ def baroclinic_wave_init(
     )
 
 
+# ==============================================================================
+# Lat-lon initialization
+# ==============================================================================
+
 def baroclinic_wave_init_latlon(
     grid,
     sigma_coord: SigmaCoordinate,
@@ -399,7 +403,7 @@ def baroclinic_wave_init_latlon(
     # Build 2D coordinate arrays from 1D lat/lon
     lat_1d = jnp.asarray(grid.lat)   # (n_lat,)
     lon_1d = jnp.asarray(grid.lon)   # (n_lon,)
-    lat = lat_1d[:, None]            # (n_lat, 1) — broadcasts with (n_lat, n_lon)
+    lat = lat_1d[:, None]            # (n_lat, 1) -- broadcasts with (n_lat, n_lon)
     lon = lon_1d[None, :]            # (1, n_lon)
     n_lat = lat_1d.size
     n_lon = lon_1d.size
@@ -430,4 +434,211 @@ def baroclinic_wave_init_latlon(
         p_s=Field(data=p_s, name="p_s", dims=dims_2d, units="Pa"),
         phis=Field(data=jnp.zeros((n_lat, n_lon)),
                    name="phis", dims=dims_2d, units="m^2/s^2"),
+    )
+
+
+# ==============================================================================
+# MPAS Voronoi mesh initialization
+# ==============================================================================
+
+def baroclinic_wave_init_mpas(
+    mesh,
+    sigma_coord,
+    perturbed: bool = True,
+):
+    """Initialize Jablonowski-Williamson baroclinic wave on MPAS mesh.
+
+    Uses the same DCMIP 2016 analytic solution as the cubed-sphere and
+    spectral initializations, ensuring identical balanced states across
+    all grid types.  The height-based formulation is inverted to sigma
+    levels via bisection.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+    perturbed : bool
+        If True, add the exponential perturbation to trigger instability.
+
+    Returns
+    -------
+    MPASHydrostaticState
+    """
+    from legoesm.core.state import MPASHydrostaticState
+
+    nCells = mesh.nCells
+    nEdges = mesh.nEdges
+    nlev = sigma_coord.n_levels
+    sigma_full = sigma_coord.sigma_full  # (nlev,)
+
+    lat_c = mesh.latCell   # (nCells,)
+    lat_e = mesh.latEdge   # (nEdges,)
+    lon_e = mesh.lonEdge   # (nEdges,)
+    cos_angle = jnp.cos(mesh.angleEdge)  # (nEdges,)
+
+    # Surface pressure: constant (no topography)
+    p_s_data = jnp.full((nCells,), P0)
+
+    # Compute T at cell centers and u at edges, level by level
+    T_data = jnp.zeros((nCells, nlev))
+    u_data = jnp.zeros((nEdges, nlev))
+
+    for k in range(nlev):
+        sig_k = float(sigma_full[k])
+
+        # --- Temperature at cell centers ---
+        p_target_c = jnp.full((nCells,), sig_k * P0)
+        z_c = find_z_for_pressure(p_target_c, lat_c)
+        _, T_k = evaluate_pressure_temperature(z_c, lat_c)
+        T_data = T_data.at[:, k].set(T_k)
+
+        # --- Zonal wind at edge midpoints ---
+        p_target_e = jnp.full((nEdges,), sig_k * P0)
+        z_e = find_z_for_pressure(p_target_e, lat_e)
+        _, T_e = evaluate_pressure_temperature(z_e, lat_e)
+        u_zonal = compute_zonal_wind(z_e, lat_e, T_e)
+
+        # Add perturbation (eastward direction, projected to edge normal)
+        if perturbed:
+            u_zonal = u_zonal + exponential_perturbation(lat_e, lon_e, z_e)
+
+        # Project zonal wind to edge normal: u_n = u_east * cos(angle)
+        # (v_north = 0 for this test case)
+        u_data = u_data.at[:, k].set(u_zonal * cos_angle)
+
+    # Surface geopotential: flat
+    phis_data = jnp.zeros((nCells,))
+
+    return MPASHydrostaticState(
+        u=Field(data=u_data, name="u", dims=("nEdges", "level"), units="m/s"),
+        T=Field(data=T_data, name="T", dims=("nCells", "level"), units="K"),
+        p_s=Field(data=p_s_data, name="p_s", dims=("nCells",), units="Pa"),
+        phis=Field(data=phis_data, name="phis", dims=("nCells",), units="m^2/s^2"),
+    )
+
+
+# ==============================================================================
+# Spectral (Gaussian grid) initialization
+# ==============================================================================
+
+def baroclinic_wave_init_spectral(
+    grid,
+    sigma_coord: SigmaCoordinate,
+    perturbed: bool = True,
+):
+    """Initialize Jablonowski-Williamson baroclinic wave in spectral space.
+
+    Evaluates the analytic JW06 balanced state on Gaussian grid points,
+    then transforms u,v -> vorticity/divergence via spectral analysis.
+
+    Parameters
+    ----------
+    grid : GaussianGrid
+        Gaussian grid with SH transform matrices.
+    sigma_coord : SigmaCoordinate
+        Vertical sigma coordinate.
+    perturbed : bool
+        If True, add the exponential perturbation to trigger instability.
+
+    Returns
+    -------
+    SpectralHydrostaticState
+        Initial state for the baroclinic wave test.
+    """
+    import numpy as np
+    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.grids.gaussian import (
+        sh_analysis,
+        sh_analysis_3d,
+        sh_analysis_oc2_3d,
+        sh_analysis_dmu_3d,
+    )
+
+    nlev = sigma_coord.n_levels
+    n_sh = grid.n_sh
+
+    # Grid coordinates as numpy for the analytic solution
+    lat_np = np.array(grid.lat)        # (n_lat,)
+    lon_np = np.array(grid.lon2d[0])   # (n_lon,) -- all rows same longitude
+    sigma_full = np.array(sigma_coord.sigma_full)  # (nlev,)
+
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+
+    # Create 2D lat/lon for each level
+    lat_2d = np.broadcast_to(lat_np[:, None], (n_lat, n_lon))
+    lon_2d = np.array(grid.lon2d)
+
+    # Allocate 3D fields (n_lat, n_lon, nlev)
+    u_3d = np.zeros((n_lat, n_lon, nlev))
+    v_3d = np.zeros((n_lat, n_lon, nlev))
+    T_3d = np.zeros((n_lat, n_lon, nlev))
+
+    # Compute initial conditions level by level
+    for k in range(nlev):
+        # Target pressure at this sigma level
+        p_target = np.full((n_lat, n_lon), sigma_full[k] * P0)
+
+        # Find height where p(z, lat) = p_target
+        z_k = find_z_for_pressure(p_target, lat_2d)
+
+        # Compute temperature at this height
+        _, T_k = evaluate_pressure_temperature(z_k, lat_2d)
+
+        # Compute zonal wind from gradient-wind balance
+        u_k = compute_zonal_wind(z_k, lat_2d, T_k)
+
+        # Add perturbation if requested
+        if perturbed:
+            u_k = u_k + exponential_perturbation(lat_2d, lon_2d, z_k)
+
+        u_3d[:, :, k] = u_k
+        T_3d[:, :, k] = T_k
+
+    # Convert to JAX float64
+    u_jax = jnp.array(u_3d, dtype=jnp.float64)
+    v_jax = jnp.array(v_3d, dtype=jnp.float64)
+    T_jax = jnp.array(T_3d, dtype=jnp.float64)
+
+    # --- Transform u,v to spectral vorticity/divergence ---
+    a = grid.radius
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    cos_lat_3d = grid.cos_lat[:, None, None]
+    u_cos = u_jax * cos_lat_3d
+    v_cos = v_jax * cos_lat_3d
+
+    # vor_hat = (im/a) * SH{v*cos/cos^2} + (1/a) * SH_dmu{u*cos}
+    vor_hat = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
+        + one_over_a * sh_analysis_dmu_3d(grid, u_cos)
+    )
+    # div_hat = (im/a) * SH{u*cos/cos^2} - (1/a) * SH_dmu{v*cos}
+    div_hat = (
+        im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
+        - one_over_a * sh_analysis_dmu_3d(grid, v_cos)
+    )
+
+    # Temperature to spectral
+    T_hat = sh_analysis_3d(grid, T_jax)
+
+    # Uniform surface pressure (no topography for JW06)
+    lnps_grid = jnp.full(
+        (n_lat, n_lon), jnp.log(P0), dtype=jnp.float64,
+    )
+    lnps_hat = sh_analysis(grid, lnps_grid)
+
+    # No topography
+    phis_hat = jnp.zeros(n_sh, dtype=jnp.complex128)
+
+    dims_3d = ("spectral", "level")
+    dims_2d = ("spectral",)
+
+    return SpectralHydrostaticState(
+        vor_hat=Field(data=vor_hat, name="vor_hat", dims=dims_3d, units="1/s"),
+        div_hat=Field(data=div_hat, name="div_hat", dims=dims_3d, units="1/s"),
+        T_hat=Field(data=T_hat, name="T_hat", dims=dims_3d, units="K"),
+        lnps_hat=Field(data=lnps_hat, name="lnps_hat", dims=dims_2d, units=""),
+        phis_hat=Field(data=phis_hat, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
     )

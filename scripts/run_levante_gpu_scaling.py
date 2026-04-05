@@ -352,22 +352,22 @@ def _build_physics_fn(physics_level: str, grid_type: str):
         return None
 
     if grid_type == "spectral":
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_spectral,
         )
         return held_suarez_forcing_spectral
     elif grid_type == "latlon":
-        from legoesm.atmosphere.physics.held_suarez_latlon import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_latlon,
         )
         return held_suarez_forcing_latlon
     elif grid_type == "icosahedral":
-        from legoesm.atmosphere.physics.held_suarez_mpas import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_mpas,
         )
         return held_suarez_forcing_mpas
     else:  # cubed-sphere
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing,
         )
         return held_suarez_forcing
@@ -736,8 +736,8 @@ def run_benchmark(
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralPrimitiveEquationModel,
             SpectralPEConfig,
-            baroclinic_wave_init_spectral,
         )
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
         grid = create_gaussian_grid(n_grid)
         hd = _hyperdiff_coeff(n_grid, grid_type)
@@ -761,7 +761,7 @@ def run_benchmark(
             MPASPrimitiveEquationModel,
             MPASPrimitiveEquationConfig,
         )
-        from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
         grid = create_voronoi_mesh(subdivision_level=n_grid)
 
@@ -802,7 +802,7 @@ def run_benchmark(
             FVLatLonPrimitiveEquationModel,
             FVLatLonPrimitiveEquationConfig,
         )
-        from legoesm.atmosphere.physics.baroclinic_wave import (
+        from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init_latlon,
         )
 
@@ -830,7 +830,7 @@ def run_benchmark(
             CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3,
         )
-        from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
         grid = create_cubed_sphere(n_grid)
         cdgrid = create_cubed_sphere_cdgrid(grid)

@@ -30,7 +30,7 @@ from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
     MPASPrimitiveEquationModel,
     MPASPrimitiveEquationConfig,
 )
-from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
+from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 from legoesm.parallel.voronoi_mpi import (
     make_voronoi_partition_layout,
     scatter_state_voronoi,

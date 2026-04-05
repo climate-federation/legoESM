@@ -249,6 +249,7 @@ def _compute_sin_cos_sg(n, face_gnomonic_to_lonlat):
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
     omega: float = 7.292e-5,
+    metric_dtype=None,
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
 
@@ -258,11 +259,20 @@ def create_cubed_sphere_cdgrid(
         cell-centre cubed-sphere with cell-center metrics.
     omega : float
         Planetary rotation rate [rad/s].
+    metric_dtype : dtype or None
+        Dtype for corner-critical metrics (gradient matrix, rsin, rarea,
+        cosa, sin_sg, dxc/dyc).  Defaults to float32.
 
     Returns
     -------
     CubedSphereCDGrid
     """
+    if metric_dtype is None:
+        try:
+            from legoesm.core.precision import get_policy
+            metric_dtype = get_policy().storage
+        except Exception:
+            metric_dtype = jnp.float32
     n = base.n
     radius = base.radius
 
@@ -821,20 +831,10 @@ def create_cubed_sphere_cdgrid(
     grad_c10 = -_a21 * _inv_Rd
     grad_c11 = _a11 * _inv_Rd
 
-    # Use float64 for metrics when x64 is enabled and the backend supports
-    # it (Metal/GPU may not).  Gradient matrix and inverse-length fields are
-    # sensitive to cancellation at cube corners.
-    import jax
-    _base = jnp.float32
-    _x64_ok = getattr(jax.config, 'x64_enabled', False)
-    if _x64_ok:
-        try:
-            jax.device_put(jnp.array(1.0, dtype=jnp.float64))
-            _prec = jnp.float64
-        except Exception:
-            _prec = jnp.float32
-    else:
-        _prec = jnp.float32
+    # Base dtype follows the parent grid. Metric dtype may be higher
+    # precision for corner-critical operators (gradient matrix, rsin, etc).
+    _base = base.lon.dtype if hasattr(base.lon, 'dtype') else jnp.float32
+    _prec = metric_dtype
     return CubedSphereCDGrid(
         base=base,
         lon_corner=lon_corner.astype(_base),

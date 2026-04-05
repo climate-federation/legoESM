@@ -285,6 +285,7 @@ class TestRecommendedOverrides:
         clear_module_overrides()
 
     def test_mixed_mode_sets_overrides(self):
+        set_policy(PrecisionPolicy.mixed())
         set_recommended_overrides("mixed")
         p = get_policy()
         assert p.storage == jnp.float32
@@ -294,11 +295,13 @@ class TestRecommendedOverrides:
         assert overrides["barotropic_solver"]["compute"] == jnp.float64
 
     def test_fp32_mode_no_overrides(self):
+        set_policy(PrecisionPolicy.fp32())
         set_recommended_overrides("fp32")
         assert get_module_overrides() == {}
         assert get_policy().accumulate == jnp.float32
 
     def test_fp64_mode_no_overrides(self):
+        set_policy(PrecisionPolicy.fp64())
         set_recommended_overrides("fp64")
         assert get_module_overrides() == {}
         assert get_policy().compute == jnp.float64

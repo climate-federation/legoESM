@@ -510,7 +510,7 @@ class TestIntegration:
         """Hydrostatic turbulence tendencies should have correct shapes."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -531,7 +531,7 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero wind tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -558,7 +558,7 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero T tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -616,7 +616,7 @@ class TestIntegration:
         """jax.grad should work through hydrostatic turbulence physics."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -637,7 +637,7 @@ class TestIntegration:
         """Different schemes should produce different tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -682,7 +682,7 @@ class TestIntegration:
         """scheme='none' should produce zero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)

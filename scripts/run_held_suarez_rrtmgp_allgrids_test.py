@@ -26,7 +26,7 @@ def run_cubed_sphere(days, nlev):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig)
-    from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+    from tests.test_cases.held_suarez import held_suarez_init
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -154,7 +154,7 @@ def run_icosahedral(days, nlev):
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-    from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_init_mpas
+    from tests.test_cases.held_suarez import held_suarez_init_mpas
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -220,7 +220,7 @@ def run_latlon_spectral_elements(days, nlev):
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
         LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-    from legoesm.atmosphere.physics.held_suarez_latlon import held_suarez_init_latlon
+    from tests.test_cases.held_suarez import held_suarez_init_latlon
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig

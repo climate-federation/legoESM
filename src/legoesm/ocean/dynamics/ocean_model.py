@@ -32,6 +32,7 @@ import jax.numpy as jnp
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState, OceanConfig
+from legoesm.core.precision import cast_pytree
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 
 OCEAN_DISCRETIZATIONS = ["cdgrid"]
@@ -284,6 +285,8 @@ class OceanModel:
         -------
         OceanState : State after one time step.
         """
+        state = cast_pytree(state, None, "compute")
+
         # --- 1. Baroclinic tendencies ---
         tend = self._compute_tendencies(state, surface_forcing)
 
@@ -319,7 +322,7 @@ class OceanModel:
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     def step_checked(self, state: OceanState, dt: float,
                      surface_forcing=None) -> OceanState:

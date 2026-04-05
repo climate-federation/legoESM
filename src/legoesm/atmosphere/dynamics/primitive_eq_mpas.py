@@ -28,6 +28,8 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.precision import cast_pytree
+
 from legoesm.core.field import Field
 from legoesm.core.state import MPASHydrostaticState, MPASHydrostaticTendencies
 from legoesm.core.operators_voronoi import (
@@ -351,6 +353,8 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         -------
         MPASHydrostaticState
         """
+        state = cast_pytree(state, None, "compute")
+
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -381,7 +385,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         if self.config.fix_mass:
             state_new = _fix_mass_mpas_hydro(state_new, state, self.mesh)
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 

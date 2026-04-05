@@ -1768,7 +1768,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing, held_suarez_init)
         from legoesm.core.operators import global_integral
 
@@ -1818,7 +1818,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
             LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_latlon import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_latlon, held_suarez_init_latlon)
         from legoesm.core.operators_latlon import (
             global_integral as global_integral_ll)
@@ -1867,7 +1867,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_mpas import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))
@@ -1920,7 +1920,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_spectral,
         )
 
@@ -2031,7 +2031,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.baroclinic_wave import (
+        from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init)
         from legoesm.core.operators import global_integral
 
@@ -2083,7 +2083,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
             LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.baroclinic_wave import (
+        from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init_latlon)
         from legoesm.core.operators_latlon import (
             global_integral as global_integral_ll)
@@ -2134,7 +2134,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_mpas import (
+        from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))
@@ -2182,8 +2182,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
-            baroclinic_wave_init_spectral, spectral_pe_to_grid,
+            spectral_pe_to_grid,
         )
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
@@ -2511,10 +2512,10 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
         from legoesm.core.operators import global_integral
 
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing
+        from tests.test_cases.held_suarez import held_suarez_forcing
 
         n = int(tc.resolution[1:])
         grid = create_cubed_sphere(n)
@@ -2563,7 +2564,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
             LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_latlon import (
+        from tests.test_cases.held_suarez import (
             held_suarez_init_latlon, held_suarez_forcing_latlon)
         from legoesm.core.operators_latlon import (
             global_integral as global_integral_ll)
@@ -2613,7 +2614,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_mpas import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 
@@ -2665,7 +2666,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_spectral,
         )
 

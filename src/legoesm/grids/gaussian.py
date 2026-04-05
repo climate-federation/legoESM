@@ -182,6 +182,20 @@ def create_gaussian_grid(
             "Set the environment variable JAX_ENABLE_X64=1 or call "
             "jax.config.update('jax_enable_x64', True) before importing."
         )
+    # Precision policy guard: spectral paths are float64-only.
+    try:
+        from legoesm.core.precision import get_policy
+        policy = get_policy()
+        if policy.compute == jnp.float32 and policy.storage == jnp.float32:
+            import warnings
+            warnings.warn(
+                "Spectral/Gaussian grid created under fp32 precision policy. "
+                "Spectral transforms require float64; grid arrays will be "
+                "float64 regardless of the global policy.",
+                stacklevel=2,
+            )
+    except Exception:
+        pass
 
     # Extract allow_unsupported from global config if provided
     if legoesm_config is not None:

@@ -49,9 +49,9 @@ from legoesm.atmosphere.dynamics.spectral_pe import (
     SpectralPEConfig,
     SpectralPrimitiveEquationModel,
     isothermal_rest_state_spectral,
-    baroclinic_wave_init_spectral,
     spectral_pe_to_grid,
 )
+from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 from legoesm import constants
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

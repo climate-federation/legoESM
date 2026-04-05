@@ -1448,53 +1448,6 @@ def fv3_sw_tendencies(
     return dh_dt, du_d_dt, dv_d_dt
 
 
-# ==============================================================================
-# Legacy aliases for backward compatibility
-# ==============================================================================
-
-def dgrid_vorticity_3d(u_d, v_d, cdgrid):
-    """Alias: dgrid_vorticity handles both 2D and 3D."""
-    return dgrid_vorticity(u_d, v_d, cdgrid)
-
-
-def cgrid_divergence_3d(u_c, v_c, cdgrid):
-    """Alias: cgrid_divergence handles both 2D and 3D."""
-    return cgrid_divergence(u_c, v_c, cdgrid)
-
-
-def cgrid_mass_flux_divergence_3d(h, u_c, v_c, cdgrid):
-    """Alias: cgrid_mass_flux_divergence handles both 2D and 3D."""
-    return cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
-
-
-def _arakawa_lamb_gradient_3d(B, cdgrid):
-    """Alias: _arakawa_lamb_gradient handles both 2D and 3D."""
-    return _arakawa_lamb_gradient(B, cdgrid)
-
-
-def _interp_center_to_corner_3d(field, cdgrid):
-    """Alias: _interp_center_to_corner handles both 2D and 3D."""
-    return _interp_center_to_corner(field, cdgrid)
-
-
-def cdgrid_momentum_tendencies_3d(
-    u_d, v_d, p_prime, cdgrid, rho_0,
-    A_h=0.0, div_v=None, f_3d=None,
-    u_prime=None, v_prime=None,
-):
-    """Alias: cdgrid_momentum_tendencies handles both 2D and 3D."""
-    return cdgrid_momentum_tendencies(
-        p_prime, u_d, v_d, jnp.zeros(cdgrid.base.area.shape), cdgrid,
-        rho_0=rho_0, A_h=A_h, div_v=div_v, f_3d=f_3d,
-        u_prime=u_prime, v_prime=v_prime,
-    )
-
-
-# Keep _smooth_boundary_cells for any code that imports it, but make it a no-op
-# since FV3-faithful operators should not need boundary smoothing.
-def _smooth_boundary_cells(field, cdgrid):
-    """No-op: FV3-faithful operators handle boundaries via d2a2c."""
-    return field
 
 
 # ==============================================================================

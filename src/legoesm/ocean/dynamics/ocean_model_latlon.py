@@ -16,6 +16,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.precision import cast_pytree
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import LatLonOceanState, LatLonOceanConfig
@@ -165,6 +166,8 @@ class LatLonOceanModel:
         -------
         LatLonOceanState
         """
+        state = cast_pytree(state, None, "compute")
+
         # 1. Baroclinic tendencies
         tend = self.tendencies(state, surface_forcing)
 
@@ -199,7 +202,7 @@ class LatLonOceanModel:
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     def step_checked(
         self, state: LatLonOceanState, dt: float,

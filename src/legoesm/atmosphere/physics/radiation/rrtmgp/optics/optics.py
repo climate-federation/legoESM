@@ -64,16 +64,16 @@ class RRTMOptics(optics_base.OpticsScheme):
     assert isinstance(params.optics, radiative_transfer.RRTMOptics)
     rrtm_params = params.optics
     self.vmr_lib = vmr_lib
-    self.cloud_optics_lw = lookup_cloud_optics.from_nc_file(
+    self.cloud_optics_lw = lookup_cloud_optics.from_data_file(
         rrtm_params.cloud_longwave_nc_filepath
     )
-    self.cloud_optics_sw = lookup_cloud_optics.from_nc_file(
+    self.cloud_optics_sw = lookup_cloud_optics.from_data_file(
         rrtm_params.cloud_shortwave_nc_filepath
     )
-    self.gas_optics_lw = lookup_gas_optics_longwave.from_nc_file(
+    self.gas_optics_lw = lookup_gas_optics_longwave.from_data_file(
         rrtm_params.longwave_nc_filepath
     )
-    self.gas_optics_sw = lookup_gas_optics_shortwave.from_nc_file(
+    self.gas_optics_sw = lookup_gas_optics_shortwave.from_data_file(
         rrtm_params.shortwave_nc_filepath
     )
     # Type narrowing

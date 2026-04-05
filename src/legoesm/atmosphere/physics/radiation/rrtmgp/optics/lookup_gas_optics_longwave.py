@@ -20,7 +20,6 @@ from typing import Any, TypeAlias
 
 import jax
 import jax.numpy as jnp
-import netCDF4 as nc
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import data_loader_base
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_gas_optics_base
 
@@ -42,20 +41,22 @@ class LookupGasOpticsLongwave(lookup_gas_optics_base.AbstractLookupGasOptics):
 
 
 def _load_data(
-    ds: nc.Dataset, tables: Mapping[str, Array], dims: Mapping[str, int]
+    tables: Mapping[str, Array],
+    dims: Mapping[str, int],
+    strings: Mapping[str, list[str]],
 ) -> dict[str, Any]:
   """Preprocess the RRTMGP longwave gas optics data.
 
   Args:
-    ds: The original netCDF Dataset containing the RRTMGP shortwave optics data.
-    tables: The extracted data as a dictionary of `Array`s.
+    tables: The extracted data as a dictionary of ``Array``s.
     dims: A dictionary containing dimension information for the tables.
+    strings: A dictionary of decoded string variables.
 
   Returns:
     A dictionary containing dimension information and the preprocessed RRTMGP
-    data as `Array`s.
+    data as ``Array``s.
   """
-  data = lookup_gas_optics_base.load_data(ds, tables, dims)
+  data = lookup_gas_optics_base.load_data(tables, dims, strings)
   data['n_t_plnk'] = dims['temperature_Planck']
   data['planck_fraction'] = tables['plank_fraction']
   # Similarly to the original RRTM Fortran code, here we assume that
@@ -72,20 +73,16 @@ def _load_data(
   return data
 
 
-def from_nc_file(path: str) -> LookupGasOpticsLongwave:
-  """Instantiate a `LookupGasOpticsLongwave` object from zipped netCDF file.
-
-  The compressed file should be netCDF parsable and contain the RRTMGP
-  absorprtion coefficient lookup table for the longwave bands as well as all
-  the auxiliary reference tables required to index into the lookup table.
+def from_data_file(path: str) -> LookupGasOpticsLongwave:
+  """Instantiate a ``LookupGasOpticsLongwave`` from a Zarr store or NetCDF file.
 
   Args:
-    path: The full path of the zipped netCDF file containing the longwave
+    path: The full path to a Zarr store or NetCDF file containing the longwave
       absorption coefficient lookup table.
 
   Returns:
-    A `LookupGasOpticsLongwave` object.
+    A ``LookupGasOpticsLongwave`` object.
   """
-  ds, tables, dims = data_loader_base.parse_nc_file(path)
-  kwargs = _load_data(ds, tables, dims)
+  tables, dims, strings = data_loader_base.parse_data_file(path)
+  kwargs = _load_data(tables, dims, strings)
   return LookupGasOpticsLongwave(**kwargs)

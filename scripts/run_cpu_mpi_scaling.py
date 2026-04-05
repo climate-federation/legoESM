@@ -155,16 +155,16 @@ def _build_physics_fn(physics_level: str, grid_type: str):
     if physics_level != "held_suarez":
         return None
     if grid_type == "spectral":
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing_spectral
+        from tests.test_cases.held_suarez import held_suarez_forcing_spectral
         return held_suarez_forcing_spectral
     elif grid_type == "latlon":
-        from legoesm.atmosphere.physics.held_suarez_latlon import held_suarez_forcing_latlon
+        from tests.test_cases.held_suarez import held_suarez_forcing_latlon
         return held_suarez_forcing_latlon
     elif grid_type == "icosahedral":
-        from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_forcing_mpas
+        from tests.test_cases.held_suarez import held_suarez_forcing_mpas
         return held_suarez_forcing_mpas
     else:
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing
+        from tests.test_cases.held_suarez import held_suarez_forcing
         return held_suarez_forcing
 
 # Weak scaling base values (constant cells/rank)
@@ -324,7 +324,7 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
     )
-    from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
     grid = create_cubed_sphere(resolution)
     cdgrid = create_cubed_sphere_cdgrid(grid)
@@ -387,7 +387,7 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     model = FVLatLonPrimitiveEquationModel(grid, sigma, config)
 
     # Baroclinic wave init for lat-lon
-    from legoesm.atmosphere.physics.baroclinic_wave import (
+    from tests.test_cases.baroclinic_wave import (
         baroclinic_wave_init_latlon,
     )
     state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
@@ -434,7 +434,7 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
     mesh = create_voronoi_mesh(subdivision_level=resolution)
     config = MPASPrimitiveEquationConfig(
@@ -479,8 +479,8 @@ def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
     from legoesm.atmosphere.dynamics.spectral_pe import (
         SpectralPrimitiveEquationModel,
         SpectralPEConfig,
-        baroclinic_wave_init_spectral,
     )
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
     grid = create_gaussian_grid(resolution)
     config = SpectralPEConfig(

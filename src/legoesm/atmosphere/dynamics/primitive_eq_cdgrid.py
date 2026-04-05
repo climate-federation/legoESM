@@ -541,6 +541,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
     ) -> FV3HydrostaticState:
         """Advance one time step with D-grid prognostic winds."""
+        from legoesm.core.precision import cast_pytree
+        state = cast_pytree(state, None, "compute")
         cdgrid = self.cdgrid
 
         def tendency_fn(s):
@@ -612,7 +614,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 )
                 state_new = state_new._replace(p_s=state_h_fixed.p_s)
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_cell_centre(

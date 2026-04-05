@@ -338,7 +338,7 @@ class ModelDriver:
         NLEV = cfg.grid.nlev
 
         if cfg.grid.grid_type == "voronoi":
-            from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_init_mpas
+            from tests.test_cases.held_suarez import held_suarez_init_mpas
             shape_3d = (self.grid.nCells, NLEV)
             self.state = held_suarez_init_mpas(
                 self.grid, self.sigma, T_init=cfg.T_init,
@@ -356,14 +356,14 @@ class ModelDriver:
             )
         else:
             if cfg.grid.grid_type == "cubed_sphere":
-                from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+                from tests.test_cases.held_suarez import held_suarez_init
                 shape_3d = (6, N, N, NLEV)
                 self.state = held_suarez_init(
                     self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
                 )
             else:
                 # Lat-lon and Gaussian grids use (n_lat, n_lon, nlev) layout
-                from legoesm.atmosphere.physics.held_suarez_latlon import held_suarez_init_latlon
+                from tests.test_cases.held_suarez import held_suarez_init_latlon
                 shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
                 self.state = held_suarez_init_latlon(
                     self.grid, self.sigma, T_init=cfg.T_init,
@@ -704,7 +704,7 @@ class ModelDriver:
 
         # Held-Suarez Newtonian temperature relaxation (precomputed coefficients)
         if cfg.held_suarez_forcing:
-            from legoesm.atmosphere.physics.held_suarez import (
+            from tests.test_cases.held_suarez import (
                 held_suarez_equilibrium_temperature,
                 K_A, K_S, SIGMA_B,
             )
@@ -1064,7 +1064,7 @@ class ModelDriver:
 
         # Wrap with Held-Suarez forcing when enabled
         if cfg.held_suarez_forcing:
-            from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_forcing_mpas
+            from tests.test_cases.held_suarez import held_suarez_forcing_mpas
             _rrtmgp_fn = physics_fn
 
             def physics_fn(state, mesh, sigma_coord, phys_state=None):

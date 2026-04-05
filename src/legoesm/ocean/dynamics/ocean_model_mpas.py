@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.mpas_config import MPASOceanConfig
@@ -78,6 +79,8 @@ class MPASOceanModel:
         -------
         MPASOceanState
         """
+        state = cast_pytree(state, None, "compute")
+
         config = self.config
         mesh = self.mesh
         z_coord = self.z_coord
@@ -165,7 +168,7 @@ class MPASOceanModel:
                 S=state_new.S.replace(data=S_data * mask[:, jnp.newaxis]),
             )
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     def integrate(
         self,

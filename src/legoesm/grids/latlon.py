@@ -105,6 +105,7 @@ def create_latlon_grid(
     n_lon: int | None = None,
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
+    dtype=None,
 ) -> LatLonGrid:
     """Create a latitude-longitude grid.
 
@@ -125,6 +126,13 @@ def create_latlon_grid(
     """
     if n_lon is None:
         n_lon = 2 * n_lat
+
+    if dtype is None:
+        try:
+            from legoesm.core.precision import get_policy
+            dtype = get_policy().storage
+        except Exception:
+            dtype = jnp.float32
 
     dlat = jnp.pi / n_lat
     dlon = 2.0 * jnp.pi / n_lon
@@ -155,20 +163,21 @@ def create_latlon_grid(
     area = radius**2 * dlat * dlon * cos_lat[:, None] * jnp.ones((1, n_lon))
     total_area = jnp.sum(area)
 
+    _c = lambda a: a.astype(dtype) if hasattr(a, 'astype') else a
     return LatLonGrid(
         n_lat=n_lat,
         n_lon=n_lon,
         radius=float(radius),
-        lat=lat,
-        lon=lon,
-        lat2d=lat2d,
-        lon2d=lon2d,
-        cos_lat=cos_lat,
-        sin_lat=sin_lat,
-        f=f,
-        dx=dx,
+        lat=_c(lat),
+        lon=_c(lon),
+        lat2d=_c(lat2d),
+        lon2d=_c(lon2d),
+        cos_lat=_c(cos_lat),
+        sin_lat=_c(sin_lat),
+        f=_c(f),
+        dx=_c(dx),
         dy=dy,
-        area=area,
+        area=_c(area),
         total_area=total_area,
         dlon=float(dlon),
         dlat=float(dlat),

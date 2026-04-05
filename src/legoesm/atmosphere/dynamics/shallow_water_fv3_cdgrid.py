@@ -241,6 +241,10 @@ class CDGridShallowWaterModel(IntegrationMixin):
         self, state: CDGridShallowWaterState, dt: float,
     ) -> CDGridShallowWaterState:
         """Advance one time step using SSP-RK3."""
+        from legoesm.core.precision import cast_pytree
+        # Cast state to compute precision at the boundary.
+        state_c = cast_pytree(state, None, "compute")
+
         def tendency_fn(s):
             dh, du, dv = cdgrid_shallow_water_tendencies(
                 s, self.cdgrid, self.config,
@@ -251,7 +255,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
             )
 
         state_new = dispatch_integrator(
-            state, tendency_fn, dt, self.config.time_integrator,
+            state_c, tendency_fn, dt, self.config.time_integrator,
         )
 
         # Owner-based sync: once per time step, after integrator
@@ -272,7 +276,8 @@ class CDGridShallowWaterModel(IntegrationMixin):
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
 
-        return state_new
+        # Cast back to storage precision.
+        return cast_pytree(state_new, None, "storage")
 
 
 # ==============================================================================
@@ -318,6 +323,8 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
     def step(self, state, dt):
         """Advance one time step."""
         from legoesm.core.operators_cdgrid import fv3_d2cc, _pad_halo_auto
+        from legoesm.core.precision import cast_pytree
+        state = cast_pytree(state, None, "compute")
 
         if self.config.use_fv3_fb:
             # EXPERIMENTAL — known unstable (NaN by step ~50).
@@ -404,4 +411,4 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")

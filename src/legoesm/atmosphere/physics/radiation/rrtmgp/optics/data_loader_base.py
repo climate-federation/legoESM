@@ -12,28 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""A base loader for the RRTMGP lookup tables in netCDF format."""
+"""A base loader for the RRTMGP lookup tables (Zarr-first, NetCDF fallback)."""
 
 from collections.abc import Sequence
 import os
 from typing import TypeAlias
 
-from pathlib import Path
 import jax
 import jax.numpy as jnp
-import netCDF4 as nc
 import numpy as np
+import xarray as xr
 
 Array: TypeAlias = jax.Array
-
-_NETCDF_DATA_DIR = os.environ.get(
-    "LEGOESM_DATA_DIR",
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "data", "netcdf"),
-)
-
-
-def _bytes_to_str(split_str):
-  return str(split_str, 'utf-8').strip()
 
 
 def create_index(name_arr: Sequence[str]) -> dict[str, int]:
@@ -41,59 +31,62 @@ def create_index(name_arr: Sequence[str]) -> dict[str, int]:
   return {name: idx for idx, name in enumerate(name_arr)}
 
 
-def _create_local_file(filepath: str) -> str:
-  """Copies remote files locally so they can be ingested by netCDF reader."""
-  # Create local directory.
-  if os.path.exists(_NETCDF_DATA_DIR):
-    if not os.path.isdir(_NETCDF_DATA_DIR):
-      raise FileNotFoundError(
-          f"RRTMGP data directory path exists but is not a directory: {_NETCDF_DATA_DIR}"
-      )
-  else:
-    os.makedirs(_NETCDF_DATA_DIR)
-  local_filename = os.path.join(_NETCDF_DATA_DIR, os.path.basename(filepath))
-  # Copy the file from remote location if not already present.
-  if os.path.exists(local_filename):
-    if not os.path.isfile(local_filename):
-      raise FileNotFoundError(
-          f"RRTMGP data path exists but is not a file: {local_filename}"
-      )
-  else:
-    path = Path(local_filename)
-    path.write_bytes(Path(filepath).read_bytes())
-  return local_filename
+def _decode_string_var(arr: np.ndarray) -> list[str]:
+  """Decode a byte-string or object array to a list of stripped Python strings."""
+  result = []
+  for item in arr.flat:
+    if isinstance(item, bytes):
+      result.append(item.decode("utf-8").strip())
+    elif isinstance(item, str):
+      result.append(item.strip())
+    else:
+      result.append(str(item).strip())
+  return result
 
 
-def parse_nc_file(
+def _open_dataset(path: str) -> xr.Dataset:
+  """Open a Zarr store or NetCDF file, auto-detecting format."""
+  if os.path.isdir(path):
+    return xr.open_zarr(path)
+  if path.endswith(".zarr"):
+    return xr.open_zarr(path)
+  # NetCDF fallback
+  return xr.open_dataset(path)
+
+
+def parse_data_file(
     path: str,
-) -> tuple[nc.Dataset, dict[str, Array], dict[str, int]]:
-  """Utility functions for unpacking RRTMGP files and loading arrays.
+) -> tuple[dict[str, Array], dict[str, int], dict[str, list[str]]]:
+  """Load RRTMGP lookup tables from a Zarr store or NetCDF file.
 
   Args:
-    path: Full path of the netCDF dataset file.
+    path: Full path to a Zarr store directory or NetCDF file.
 
   Returns:
-    A 3-tuple of 1) the original netCDF Dataset, 2) a dictionary containing the
-    data as Arrays, and 3) a dictionary of dimensions.
+    A 3-tuple of:
+      1) a dictionary of numeric variables as JAX Arrays,
+      2) a dictionary of dimension name -> size,
+      3) a dictionary of string variables as lists of decoded strings.
   """
-  local_path = _create_local_file(path)
-  ds = nc.Dataset(local_path, 'r')
+  ds = _open_dataset(path)
 
-  array_dict = {}
-  dim_map = {k: v.size for k, v in ds.dimensions.items()}
+  array_dict: dict[str, Array] = {}
+  string_dict: dict[str, list[str]] = {}
+  dim_map = dict(ds.sizes)
 
-  for key in ds.variables:
-    val = ds[key][:].data
-    if val.dtype == np.dtype('S1'):
-      # The S1 dtype string arrays are not needed here, because later on they
-      # are pulled directly from the Dataset object.  JAX cannot convert this
-      # datatype to arrays anyway, so skip these data types.
+  for key in ds.data_vars:
+    val = ds[key].values
+    if val.dtype.kind in ("S", "U", "O"):
+      # String / byte-string variable
+      string_dict[key] = _decode_string_var(val)
       continue
     if np.issubdtype(val.dtype, np.floating):
       dtype = jnp.float_
     elif np.issubdtype(val.dtype, np.integer):
       dtype = jnp.int_
     else:
-      raise ValueError(f'Unexpected dtype: {val.dtype}')
+      raise ValueError(f"Unexpected dtype: {val.dtype}")
     array_dict[key] = jnp.array(val, dtype=dtype)
-  return ds, array_dict, dim_map
+
+  ds.close()
+  return array_dict, dim_map, string_dict

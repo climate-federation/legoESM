@@ -239,10 +239,10 @@ class TestMPIAwareness:
         from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 
         source = inspect.getsource(ocean_baroclinic_tendencies_cdgrid)
-        # C-D grid ocean uses C-D grid operators (not A-grid gradient_x_3d)
-        assert "cgrid_mass_flux_divergence_3d" in source
-        assert "cgrid_divergence_3d" in source
-        assert "dgrid_vorticity_3d" in source
+        # C-D grid ocean uses unified C-D grid operators (not A-grid gradient_x_3d)
+        assert "cgrid_mass_flux_divergence(" in source
+        assert "cgrid_divergence(" in source
+        assert "dgrid_vorticity(" in source
 
     def test_barotropic_uses_halo_operators(self):
         """Barotropic substeps should call operators with halo exchange."""
