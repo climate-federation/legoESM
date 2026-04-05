@@ -123,7 +123,7 @@ def fv_latlon_hydrostatic_tendencies(
     kappa = constants.kappa
     dsigma = sigma_coord.dsigma
 
-    p_s = jnp.clip(p_s, 100.0, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
 
     # --- 1. Pressure at full levels ---
     p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)

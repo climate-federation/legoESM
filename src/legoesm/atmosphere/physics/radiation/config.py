@@ -68,7 +68,7 @@ class GrayRadiationConfig(NamedTuple):
     sfc_emissivity: float = 1.0
     sw_tau_0: float = 0.22
     sw_exponent: float = 2.0
-    S_0: float = 1360.0
+    S_0: float = 1361.0  # = constants.S_0
     sfc_albedo: float = 0.31
     perpetual_equinox: bool = True
     obliquity: float = 23.45
@@ -122,7 +122,7 @@ class RRTMGPConfig(NamedTuple):
     n2o_ppbv: float = 332.0
     sfc_emissivity: float = 0.98
     sfc_albedo: float = 0.06
-    S_0: float = 1360.86
+    S_0: float = 1361.0  # = constants.S_0
     aerosol_ssa: float = 0.93
     aerosol_g: float = 0.70
     use_scan: bool = False

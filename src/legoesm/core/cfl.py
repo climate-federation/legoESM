@@ -8,10 +8,12 @@ from __future__ import annotations
 import logging
 import numpy as np
 
+from legoesm import constants
+
 logger = logging.getLogger("legoesm.cfl")
 
 
-def estimate_min_dx_cubed_sphere(n: int, radius: float = 6.371229e6) -> float:
+def estimate_min_dx_cubed_sphere(n: int, radius: float = constants.R_earth) -> float:
     """Estimate minimum grid spacing on a cubed-sphere grid.
 
     Parameters
@@ -34,7 +36,7 @@ def estimate_min_dx_cubed_sphere(n: int, radius: float = 6.371229e6) -> float:
     return float(dx_min)
 
 
-def estimate_min_dx_latlon(n_lat: int, radius: float = 6.371229e6) -> float:
+def estimate_min_dx_latlon(n_lat: int, radius: float = constants.R_earth) -> float:
     """Estimate minimum grid spacing on a latitude-longitude grid.
 
     Parameters
@@ -61,7 +63,7 @@ def estimate_min_dx_latlon(n_lat: int, radius: float = 6.371229e6) -> float:
     return float(min(dx_pole, dy))
 
 
-def estimate_min_dx_gaussian(n_max: int, radius: float = 6.371229e6) -> float:
+def estimate_min_dx_gaussian(n_max: int, radius: float = constants.R_earth) -> float:
     """Estimate minimum grid spacing on a Gaussian grid.
 
     Parameters
@@ -81,7 +83,7 @@ def estimate_min_dx_gaussian(n_max: int, radius: float = 6.371229e6) -> float:
     return float(dx_equator)
 
 
-def estimate_min_dx_icosahedral(level: int, radius: float = 6.371229e6) -> float:
+def estimate_min_dx_icosahedral(level: int, radius: float = constants.R_earth) -> float:
     """Estimate minimum grid spacing on an icosahedral (Voronoi/MPAS) grid.
 
     Parameters
@@ -222,7 +224,7 @@ def cfl_check_and_adjust(
     max_wind: float = 0.0,
     gravity_wave_speed: float = 0.0,
     cfl_number: float = 0.8,
-    radius: float = 6.371229e6,
+    radius: float = constants.R_earth,
     verbose: bool = True,
     grid_type: str = "cubed_sphere",
 ) -> float:

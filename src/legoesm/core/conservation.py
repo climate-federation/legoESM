@@ -19,6 +19,7 @@ _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38
 # causing 0*Inf=NaN in the backward pass when jnp.maximum clamps KE_target to 0.
 _EPS_ENERGY = 1e-20
 
+from legoesm import constants
 from legoesm.core.operators import global_integral, _is_distributed
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.core.state import ShallowWaterState, HydrostaticState
@@ -168,7 +169,7 @@ def fix_energy_shallow_water(
     state_new: ShallowWaterState,
     state_old: ShallowWaterState,
     grid,
-    g: float = 9.80616,
+    g: float = constants.g,
 ) -> ShallowWaterState:
     """Fix total energy conservation for shallow water equations (any grid).
 
@@ -226,7 +227,7 @@ def apply_conservation_fixer(
     grid,
     fix_mass: bool = True,
     fix_energy: bool = True,
-    g: float = 9.80616,
+    g: float = constants.g,
 ) -> ShallowWaterState:
     """Apply all conservation fixers in sequence (any grid).
 
@@ -747,7 +748,7 @@ def compute_nh_energy(
 def compute_conservation_diagnostics(
     state: ShallowWaterState,
     grid,
-    g: float = 9.80616,
+    g: float = constants.g,
 ) -> dict[str, jax.Array]:
     """Compute conservation diagnostic quantities (any grid).
 
@@ -816,7 +817,7 @@ def fix_mass_mpas(state, target_mass, mesh):
     return state._replace(h=h_fixed)
 
 
-def fix_energy_mpas(state, target_energy, mesh, g=9.80616):
+def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     """Fix energy conservation on Voronoi mesh via velocity scaling.
 
     Parameters

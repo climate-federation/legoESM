@@ -183,7 +183,7 @@ def fv3_hydrostatic_tendencies(
 
     # Positivity protections
     T = jnp.maximum(T, config.T_min)
-    p_s = jnp.clip(p_s, 100.0, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
 
     # --- 1. D-grid to C-grid ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
@@ -590,7 +590,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             alpha = self.config.implicit_grav_wave_damping
             lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
             p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
-            p_s_damped = jnp.maximum(p_s_damped, 100.0)
+            p_s_damped = jnp.maximum(p_s_damped, self.config.p_floor)
             state_new = state_new._replace(
                 p_s=state_new.p_s.replace(data=p_s_damped),
             )

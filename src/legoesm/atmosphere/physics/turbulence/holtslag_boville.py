@@ -107,19 +107,21 @@ def holtslag_boville_turbulence(
     # Bulk Ri from surface at each level
     theta_v_sfc = theta_v[:, -1]  # (ncol,)
     z_sfc = z_full[:, -1:]  # (ncol, 1)
+    u_sfc = u[:, -1:]  # (ncol, 1)
+    v_sfc = v[:, -1:]  # (ncol, 1)
     dz_from_sfc = jnp.abs(z_full - z_sfc) + 1.0  # (ncol, nlev)
     dtheta_v_bulk = theta_v - theta_v_sfc[:, None]
-    wind_speed2 = u ** 2 + v ** 2 + 1e-4
+    # Wind shear from surface (not absolute wind)
+    dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4
     Ri_bulk = (constants.g / jnp.clip(theta_v_sfc[:, None], 1.0, None)) * (
-        dtheta_v_bulk * dz_from_sfc / wind_speed2
+        dtheta_v_bulk * dz_from_sfc / dV2
     )  # (ncol, nlev)
 
-    # Sigmoid-weighted average for smooth PBL height
+    # Transition-zone weighting: peaks at Ri_crit crossing, not centroid
     sharpness = 20.0
-    w_pbl = jax.nn.sigmoid(sharpness * (config.Ri_crit - Ri_bulk))  # (ncol, nlev)
-    h_pbl = jnp.sum(z_full * w_pbl, axis=1) / jnp.clip(
-        jnp.sum(w_pbl, axis=1), 1e-10, None
-    )  # (ncol,)
+    sigma_pbl = jax.nn.sigmoid(sharpness * (config.Ri_crit - Ri_bulk))  # (ncol, nlev)
+    w_pbl = sigma_pbl * (1.0 - sigma_pbl) + 1e-20
+    h_pbl = jnp.sum(z_full * w_pbl, axis=1) / jnp.sum(w_pbl, axis=1)  # (ncol,)
     h_pbl = jnp.clip(h_pbl, 100.0, None)
 
     # ----- K-profile inside PBL -----

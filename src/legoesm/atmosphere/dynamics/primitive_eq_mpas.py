@@ -131,7 +131,7 @@ def mpas_hydrostatic_tendencies(
     R_d = constants.R_d
     kappa = constants.kappa
     nlev = T_3d.shape[-1]
-    p_s = jnp.clip(p_s, 100.0, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
 
     # --- 1. Pressure at full levels ---
     if _hybrid:
