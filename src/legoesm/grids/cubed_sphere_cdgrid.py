@@ -821,48 +821,61 @@ def create_cubed_sphere_cdgrid(
     grad_c10 = -_a21 * _inv_Rd
     grad_c11 = _a11 * _inv_Rd
 
-    _f32 = jnp.float32
+    # Use float64 for metrics when x64 is enabled and the backend supports
+    # it (Metal/GPU may not).  Gradient matrix and inverse-length fields are
+    # sensitive to cancellation at cube corners.
+    import jax
+    _base = jnp.float32
+    _x64_ok = getattr(jax.config, 'x64_enabled', False)
+    if _x64_ok:
+        try:
+            jax.device_put(jnp.array(1.0, dtype=jnp.float64))
+            _prec = jnp.float64
+        except Exception:
+            _prec = jnp.float32
+    else:
+        _prec = jnp.float32
     return CubedSphereCDGrid(
         base=base,
-        lon_corner=lon_corner.astype(_f32),
-        lat_corner=lat_corner.astype(_f32),
-        f_corner=f_corner.astype(_f32),
-        angle_corner=angle_corner.astype(_f32),
-        cos_angle_corner=cos_angle_corner.astype(_f32),
-        sin_angle_corner=sin_angle_corner.astype(_f32),
-        dx_edge_y=dx_edge_y.astype(_f32),
-        dy_edge_x=dy_edge_x.astype(_f32),
-        area_corner=area_corner.astype(_f32),
-        cosa_corner=cosa_corner.astype(_f32),
-        rsin2_corner=rsin2_corner.astype(_f32),
-        cosa_u=cosa_u.astype(_f32),
-        cosa_v=cosa_v.astype(_f32),
-        rsin_u=rsin_u.astype(_f32),
-        rsin_v=rsin_v.astype(_f32),
-        lon_edge_x=lon_edge_x.astype(_f32),
-        lat_edge_x=lat_edge_x.astype(_f32),
-        lon_edge_y=lon_edge_y.astype(_f32),
-        lat_edge_y=lat_edge_y.astype(_f32),
-        angle_edge_x=angle_edge_x.astype(_f32),
-        cos_angle_edge_x=cos_angle_edge_x.astype(_f32),
-        sin_angle_edge_x=sin_angle_edge_x.astype(_f32),
-        angle_edge_y=angle_edge_y.astype(_f32),
-        cos_angle_edge_y=cos_angle_edge_y.astype(_f32),
-        sin_angle_edge_y=sin_angle_edge_y.astype(_f32),
-        f_edge_x=f_edge_x.astype(_f32),
-        f_edge_y=f_edge_y.astype(_f32),
-        cosa_cell=cosa_cell.astype(_f32),
-        sina_cell=sina_cell.astype(_f32),
-        rsin2_cell=rsin2_cell.astype(_f32),
-        grad_c00=grad_c00.astype(_f32),
-        grad_c01=grad_c01.astype(_f32),
-        grad_c10=grad_c10.astype(_f32),
-        grad_c11=grad_c11.astype(_f32),
-        sin_sg=sin_sg.astype(_f32),
-        cos_sg=cos_sg.astype(_f32),
-        dxc=dxc.astype(_f32),
-        dyc=dyc.astype(_f32),
-        rdxc=rdxc.astype(_f32),
-        rdyc=rdyc.astype(_f32),
-        rarea_c=rarea_c.astype(_f32),
+        lon_corner=lon_corner.astype(_base),
+        lat_corner=lat_corner.astype(_base),
+        f_corner=f_corner.astype(_base),
+        angle_corner=angle_corner.astype(_base),
+        cos_angle_corner=cos_angle_corner.astype(_base),
+        sin_angle_corner=sin_angle_corner.astype(_base),
+        dx_edge_y=dx_edge_y.astype(_base),
+        dy_edge_x=dy_edge_x.astype(_base),
+        area_corner=area_corner.astype(_prec),
+        cosa_corner=cosa_corner.astype(_prec),
+        rsin2_corner=rsin2_corner.astype(_prec),
+        cosa_u=cosa_u.astype(_prec),
+        cosa_v=cosa_v.astype(_prec),
+        rsin_u=rsin_u.astype(_prec),
+        rsin_v=rsin_v.astype(_prec),
+        lon_edge_x=lon_edge_x.astype(_base),
+        lat_edge_x=lat_edge_x.astype(_base),
+        lon_edge_y=lon_edge_y.astype(_base),
+        lat_edge_y=lat_edge_y.astype(_base),
+        angle_edge_x=angle_edge_x.astype(_base),
+        cos_angle_edge_x=cos_angle_edge_x.astype(_base),
+        sin_angle_edge_x=sin_angle_edge_x.astype(_base),
+        angle_edge_y=angle_edge_y.astype(_base),
+        cos_angle_edge_y=cos_angle_edge_y.astype(_base),
+        sin_angle_edge_y=sin_angle_edge_y.astype(_base),
+        f_edge_x=f_edge_x.astype(_base),
+        f_edge_y=f_edge_y.astype(_base),
+        cosa_cell=cosa_cell.astype(_prec),
+        sina_cell=sina_cell.astype(_prec),
+        rsin2_cell=rsin2_cell.astype(_prec),
+        grad_c00=grad_c00.astype(_prec),
+        grad_c01=grad_c01.astype(_prec),
+        grad_c10=grad_c10.astype(_prec),
+        grad_c11=grad_c11.astype(_prec),
+        sin_sg=sin_sg.astype(_prec),
+        cos_sg=cos_sg.astype(_prec),
+        dxc=dxc.astype(_prec),
+        dyc=dyc.astype(_prec),
+        rdxc=rdxc.astype(_prec),
+        rdyc=rdyc.astype(_prec),
+        rarea_c=rarea_c.astype(_prec),
     )

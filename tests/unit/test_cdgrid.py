@@ -68,6 +68,27 @@ class TestCDGridConstruction(unittest.TestCase):
         self.assertEqual(self.cdgrid.n, self.n)
         self.assertEqual(self.cdgrid.radius, self.grid.radius)
 
+    def test_metric_dtype_respects_x64(self):
+        """Corner-critical metrics should be float64 when x64 + CPU backend."""
+        import jax
+        if not getattr(jax.config, 'x64_enabled', False):
+            self.skipTest("x64 not enabled")
+        # Check if backend actually supports f64
+        try:
+            jax.device_put(jnp.array(1.0, dtype=jnp.float64))
+        except Exception:
+            self.skipTest("backend does not support float64")
+        # Rebuild grid to pick up x64 metrics
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        cdgrid = create_cubed_sphere_cdgrid(self.grid)
+        # Gradient matrix and inverse metrics must be float64
+        self.assertEqual(cdgrid.grad_c00.dtype, jnp.float64)
+        self.assertEqual(cdgrid.rarea_c.dtype, jnp.float64)
+        self.assertEqual(cdgrid.rdxc.dtype, jnp.float64)
+        self.assertEqual(cdgrid.rsin2_corner.dtype, jnp.float64)
+        # Position fields stay float32
+        self.assertEqual(cdgrid.lon_corner.dtype, jnp.float32)
+
 
 class TestCDGridOperators(unittest.TestCase):
     """Test C-D grid operators."""
@@ -269,7 +290,10 @@ class TestCDGridShallowWater(unittest.TestCase):
         mass_1 = float(jnp.sum(state_new.h * area))
 
         rel_err = abs(mass_1 - mass_0) / abs(mass_0)
-        self.assertLess(rel_err, 1e-10)
+        # Post-step fixer corrects mass drift, but float32 state
+        # limits correction precision to ~1e-7. The in-tendency
+        # global-mean subtraction was removed to expose raw flux errors.
+        self.assertLess(rel_err, 1e-6)
 
     def test_multi_step_stability(self):
         """10 steps should remain stable."""

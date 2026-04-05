@@ -142,3 +142,46 @@ class TestMassConservation:
         assert rel_drift < 1e-5, (
             f"Mass drift {rel_drift:.2e} exceeds threshold (1e-5)"
         )
+
+    def test_raw_flux_residual(self):
+        """Raw (uncorrected) mass flux divergence should integrate near zero.
+
+        If the PPM fluxes telescope correctly, the area-weighted integral
+        of dh_dt should be close to machine precision.  A large residual
+        signals non-conservative face fluxes.
+        """
+        import numpy as np
+        from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            FV3EdgeShallowWaterState,
+        )
+        from tests.test_cases.williamson import williamson_test2
+
+        grid = create_cubed_sphere(16)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        sw_state = williamson_test2(grid)
+        # Build edge-midpoint D-grid IC (fv3_sw_tendencies expects this stagger)
+        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        u_d = cdgrid.cos_angle_edge_x * u0 * jnp.cos(cdgrid.lat_edge_x)
+        v_d = -cdgrid.sin_angle_edge_y * u0 * jnp.cos(cdgrid.lat_edge_y)
+        h = sw_state.h.data
+        h_s = sw_state.h_s.data
+
+        # Compute tendencies WITHOUT global-mean correction
+        dh_dt, _, _ = fv3_sw_tendencies(
+            h, u_d, v_d, h_s, cdgrid,
+            zero_mean_correction=False,
+        )
+        area = grid.area.astype(jnp.float64)
+        residual = float(jnp.abs(jnp.sum(dh_dt.astype(jnp.float64) * area)))
+        total_mass = float(jnp.sum(h.astype(jnp.float64) * area))
+        rel_residual = residual / total_mass
+
+        # Threshold: O(1e-6) per the known PPM face-boundary asymmetry.
+        # If this regresses significantly, face flux telescoping is broken.
+        assert rel_residual < 1e-4, (
+            f"Raw flux residual {rel_residual:.2e} too large — "
+            f"face fluxes are not telescoping"
+        )

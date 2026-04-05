@@ -1339,6 +1339,7 @@ def fv3_sw_tendencies(
     h, u_d, v_d, h_s, cdgrid,
     g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
+    zero_mean_correction=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
@@ -1372,8 +1373,9 @@ def fv3_sw_tendencies(
 
     # (b) Height tendency (PPM mass flux divergence)
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
-    total_area = jnp.sum(cdgrid.base.area)
-    dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
+    if zero_mean_correction:
+        total_area = jnp.sum(cdgrid.base.area)
+        dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
     # (c) Bernoulli function from ORIGINAL cell-centre winds.
     # Computing KE here (not inside cdgrid_momentum_tendencies) avoids

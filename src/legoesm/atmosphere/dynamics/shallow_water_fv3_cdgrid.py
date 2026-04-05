@@ -72,7 +72,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
-    use_fv3_fb: bool = False  # FV3 forward-backward step (bypasses RK3)
+    use_fv3_fb: bool = False  # EXPERIMENTAL — unstable, see docs/cubed_sphere_edge_artifacts.md
     boundary_fix: bool = False  # Replace boundary corner tendencies with interior
 
 
@@ -105,10 +105,6 @@ def cdgrid_shallow_water_tendencies(
     # 1. Mass transport via C-grid velocities (with non-orth correction)
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
-
-    # Zero-mean correction for mass conservation
-    total_area = jnp.sum(cdgrid.base.area)
-    dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
     # 2. Momentum tendencies (vector-invariant form with div damping)
     du_d_dt, dv_d_dt = cdgrid_momentum_tendencies(
@@ -324,9 +320,18 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         from legoesm.core.operators_cdgrid import fv3_d2cc, _pad_halo_auto
 
         if self.config.use_fv3_fb:
-            # FV3 c_sw operators with RK3 integration.
-            # All operators (gradient + vorticity) at C-grid positions,
-            # TOTAL tendency projected to D-grid edge midpoints.
+            # EXPERIMENTAL — known unstable (NaN by step ~50).
+            # This wraps fv3_csw_tendencies in RK3, NOT the actual
+            # forward-backward step (fv3_forward_backward_step).
+            # See docs/cubed_sphere_edge_artifacts.md iterations 7-14.
+            import warnings
+            warnings.warn(
+                "use_fv3_fb=True is experimental and known unstable. "
+                "It runs C-grid tendencies through RK3, not the actual "
+                "FV3 forward-backward scheme. See "
+                "docs/cubed_sphere_edge_artifacts.md.",
+                stacklevel=2,
+            )
             from legoesm.core.fv3_sw_core import fv3_csw_tendencies
 
             def tendency_fn_csw(s):
