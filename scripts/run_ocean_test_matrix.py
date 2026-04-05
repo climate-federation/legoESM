@@ -188,8 +188,10 @@ def _build_test_matrix() -> list[TestCase]:
     matrix: list[TestCase] = []
     res = GRID_RESOLUTIONS
 
-    # --- Rest state adjustment: all grids ---
+    # --- Rest state adjustment (with land): all grids except spectral ---
     for g in GRID_TYPES:
+        if g == "spectral":
+            continue
         matrix.append(TestCase(
             "rest_state", g, res[g], 1.0, 0.1))
 
@@ -3056,9 +3058,13 @@ def _create_comparison_timeseries(test_case_dir: Path, grid_results: dict) -> No
     # Set common x-label
     for ax in axes[1,:]:
         ax.set_xlabel('Time (days)')
-    
+
+    from datetime import datetime
+    fig.text(0.99, 0.01, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+             ha='right', va='bottom', fontsize=7, color='gray')
+
     plt.tight_layout()
-    
+
     # Save plot
     output_file = test_case_dir / "comparison_timeseries.png"
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
@@ -3093,7 +3099,17 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
             ax = fig.add_subplot(gs[i, j])
             axes.append(ax)
     
-    fig.suptitle(f'Final {field.upper()} Snapshots - {test_case_dir.name}', fontsize=14, fontweight='bold')
+    # Determine simulation time of the final snapshot from any grid's data
+    sim_time_str = ""
+    for data in grid_results.values():
+        snapshots_any = data['snapshots']
+        if 'times_days' in snapshots_any.files:
+            t_final = float(snapshots_any['times_days'][-1])
+            sim_time_str = f" (t = {t_final:.2f} days)"
+            break
+
+    fig.suptitle(f'Final {field.upper()} Snapshots - {test_case_dir.name}{sim_time_str}',
+                 fontsize=14, fontweight='bold')
     
     # Choose colormap based on field
     if field == 'eta':
@@ -3195,9 +3211,13 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
             cbar.set_label('Temperature (°C)')
         elif field in ['SSS', 'S']:
             cbar.set_label('Salinity (PSU)')
-    
+
+    from datetime import datetime
+    fig.text(0.99, 0.01, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+             ha='right', va='bottom', fontsize=7, color='gray')
+
     plt.tight_layout()
-    
+
     # Save plot
     output_file = test_case_dir / f"comparison_snapshots_{field}.png"
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
