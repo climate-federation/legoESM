@@ -83,7 +83,7 @@ def detect_devices() -> dict:
         "backend": backend,
         "n_devices": len(devices),
         "devices": devices,
-        "supports_f64": backend not in _UNSUPPORTED_F64_BACKENDS,
+        "supports_f64": backend.lower() not in _UNSUPPORTED_F64_BACKENDS,
         "distributed": jax.process_count() > 1,
     }
 

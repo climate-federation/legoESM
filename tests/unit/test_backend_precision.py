@@ -395,24 +395,24 @@ class TestMetalBackend:
         config = get_metal_config()
         assert hasattr(config, 'is_metal')
         assert hasattr(config, 'cpu_device')
-        # On non-Metal machine, is_metal should be False
-        if get_backend() != "METAL":
+        # When Metal is non-functional (fell back to CPU), is_metal is False
+        from legoesm.runtime.backend import metal_fell_back_to_cpu
+        if get_backend() != "METAL" or metal_fell_back_to_cpu():
             assert config.is_metal is False
 
     def test_fv_would_work_on_metal(self):
         """FV operators use float32 by default, compatible with Metal."""
         grid = create_cubed_sphere(8)
         q, u, v = _make_fields(grid, jnp.float32)
-        # Verify no float64 in the computation graph
-        dq = jax.make_jaxpr(fv_flux_divergence)(q, u, v, grid)
-        # Check that no f64 types appear in the jaxpr
-        jaxpr_str = str(dq)
-        # float64 literals may appear from grid constants (dx/dy), but
-        # the core computation should work in float32
+        # Verify inputs are float32
         assert q.dtype == jnp.float32
+        # Run the operation to confirm it works
+        dq = fv_flux_divergence(q, u, v, grid)
+        assert dq.dtype == jnp.float32
+        assert jnp.all(jnp.isfinite(dq))
 
     def test_spectral_metal_cpu_routing(self):
-        """Spectral model should detect Metal and route to CPU."""
+        """Spectral model should detect functional Metal and route to CPU."""
         _requires_metal()
         from legoesm.atmosphere.dynamics.spectral_sw import SpectralShallowWaterModel
         from legoesm.grids.gaussian import create_gaussian_grid
@@ -441,7 +441,7 @@ class TestMultiDeviceSharding:
         assert dev_config.n_devices == 1
 
         n = grid.n
-        q = jnp.ones((6, n, n)) * 1000.0
+        q = jnp.ones((6, n, n), dtype=jnp.float32) * 1000.0
         # Shard should be a no-op for single device
         q_sharded = shard_pytree(q, dev_config)
         assert jnp.allclose(q, q_sharded)

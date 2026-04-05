@@ -121,7 +121,8 @@ class TestMetalCompatibility:
         assert "_cpu_device" in init_source
         assert "_default_device" in init_source
         assert "get_backend" in init_source
-        assert 'METAL' in init_source
+        # get_backend() returns lowercase; source uses "metal"
+        assert 'metal' in init_source.lower()
 
         step_source = inspect.getsource(SpectralOceanModel.step)
         assert "_use_cpu_for_spectral" in step_source
