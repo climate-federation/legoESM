@@ -98,8 +98,12 @@ class TestCastHelpers:
 
     def test_cast_to_compute(self):
         x = jnp.ones(5, dtype=jnp.float64)
+        # Default: downcast skipped (fp64 -> fp32 blocked)
         y = cast(x, "tracer_advection", "compute")
-        assert y.dtype == jnp.float32
+        assert y.dtype == jnp.float64
+        # Explicit downcast allowed
+        y2 = cast(x, "tracer_advection", "compute", allow_downcast=True)
+        assert y2.dtype == jnp.float32
 
     def test_cast_to_accumulate(self):
         x = jnp.ones(5, dtype=jnp.float32)
@@ -156,8 +160,13 @@ class TestModuleOverrides:
 
     def test_no_override_uses_global(self):
         x = jnp.ones(5, dtype=jnp.float64)
+        # Without override, global fp32 policy applies but downcast is
+        # skipped by default to prevent silent precision loss.
         y = cast(x, "tracer_advection", "compute")
-        assert y.dtype == jnp.float32
+        assert y.dtype == jnp.float64
+        # With explicit allow_downcast, it does downcast.
+        y2 = cast(x, "tracer_advection", "compute", allow_downcast=True)
+        assert y2.dtype == jnp.float32
 
     def test_clear_overrides(self):
         set_module_override("foo", compute="fp64")

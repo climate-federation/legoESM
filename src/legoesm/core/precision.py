@@ -257,11 +257,17 @@ def _resolve_dtype(module: str | None, role: str) -> jnp.dtype:
 # Casting helpers — the main API for kernels
 # ---------------------------------------------------------------------------
 
-def cast(x: jax.Array, module: str | None, role: str) -> jax.Array:
+def cast(x: jax.Array, module: str | None, role: str, *,
+         allow_downcast: bool = False) -> jax.Array:
     """Cast array to the effective dtype for (module, role).
 
     This is the primary entry point for precision-aware kernels.
     No-op if the array is already in the target dtype.
+
+    By default, only upcasts and no-ops are performed.  Downcasts are
+    skipped unless *allow_downcast* is True.  This prevents silent
+    precision loss when the default fp32 policy is active but arrays
+    were created in float64 (e.g. under JAX_ENABLE_X64).
 
     Parameters
     ----------
@@ -272,6 +278,8 @@ def cast(x: jax.Array, module: str | None, role: str) -> jax.Array:
         None uses the global policy only.
     role : str
         Precision role: "storage", "compute", "accumulate", or "control".
+    allow_downcast : bool
+        If False (default), skip casts that would reduce precision.
 
     Returns
     -------
@@ -281,7 +289,9 @@ def cast(x: jax.Array, module: str | None, role: str) -> jax.Array:
     target = _resolve_dtype(module, role)
     if x.dtype == target:
         return x
-    return x.astype(target)
+    if allow_downcast or jnp.dtype(x.dtype).itemsize <= jnp.dtype(target).itemsize:
+        return x.astype(target)
+    return x  # skip downcast
 
 
 def const(value: float, module: str | None, role: str) -> jax.Array:
@@ -305,16 +315,27 @@ def const(value: float, module: str | None, role: str) -> jax.Array:
     return jnp.array(value, dtype=target)
 
 
-def cast_pytree(pytree, module: str | None, role: str):
+def cast_pytree(pytree, module: str | None, role: str, *,
+                allow_downcast: bool = False):
     """Cast all float arrays in a pytree to the effective dtype.
 
     Non-float leaves (int, bool) and non-array leaves are left unchanged.
+
+    By default, only upcasts (e.g. float32 -> float64) and no-ops are
+    performed.  Downcasts are skipped unless *allow_downcast* is True.
+    This prevents silent precision loss when the default fp32 policy is
+    active but arrays were created in float64 (e.g. under JAX_ENABLE_X64).
     """
     target = _resolve_dtype(module, role)
+    target_size = jnp.dtype(target).itemsize
 
     def _maybe_cast(leaf):
         if isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating):
-            return leaf.astype(target) if leaf.dtype != target else leaf
+            if leaf.dtype == target:
+                return leaf
+            if allow_downcast or jnp.dtype(leaf.dtype).itemsize <= target_size:
+                return leaf.astype(target)
+            return leaf  # skip downcast
         return leaf
 
     return jax.tree.map(_maybe_cast, pytree)
