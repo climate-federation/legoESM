@@ -343,14 +343,13 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
 
     total_cells = 6 * resolution * resolution * nlev
 
-    # MPI: use existing cubed-sphere path
+    # MPI: initialise distributed but keep full (6, n, n, ...) state
+    # on every rank, matching the production driver.  pad_halo_mpi
+    # requires the full shape; each rank steps all faces and MPI halo
+    # exchange keeps owned faces correct.
     if n_ranks > 1:
-        from legoesm.parallel.distributed import initialize_distributed, scatter_to_local
+        from legoesm.parallel.distributed import initialize_distributed
         initialize_distributed(global_n=resolution, grid_type="cubed_sphere")
-        from legoesm.parallel.distributed import get_active_layout
-        layout = get_active_layout()
-        if layout is not None:
-            state = scatter_to_local(state, layout)
 
     physics_fn = _build_physics_fn(physics_level, "cubed-sphere")
     if physics_fn is not None:

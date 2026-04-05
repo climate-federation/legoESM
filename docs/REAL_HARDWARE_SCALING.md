@@ -5,8 +5,8 @@ atmosphere and ocean components on CPUs/GPUs and MPI clusters.
 
 It is focused on commands that already exist in this repository:
 - `scripts/run_levante_gpu_scaling.py` (atmosphere scaling + MPI validation)
-- `scripts/run_ocean_regression_matrix.py` (ocean runtime/regression matrix)
-- `tests/distributed/test_halo_mpi.py` and `tests/distributed/test_ocean_mpi_conservation.py` (MPI ocean/distributed checks)
+- `scripts/run_ocean_test_matrix.py` (ocean runtime/regression matrix)
+- `tests/distributed/test_halo_mpi.py` and `tests/ocean/distributed/test_ocean_mpi_conservation.py` (MPI ocean/distributed checks)
 
 ## 1. Prerequisites
 
@@ -77,9 +77,9 @@ JAX_PLATFORMS=cpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
 ### 3.2 MPI rank scaling (real cluster)
 
 The benchmark uses `initialize_distributed(global_n=...)` to build the MPI
-topology and distributed layout, then scatters the global initial state to
-rank-local data via `scatter_to_local()`.  Each rank steps on its local
-subset; results are gathered only for I/O.
+topology and set up MPI halo exchange.  Each rank keeps the full
+`(6, n, n, ...)` state (matching the production driver), and `pad_halo_mpi`
+handles inter-rank communication during each step.
 
 ```bash
 mpirun -np 6 .venv/bin/python scripts/run_levante_gpu_scaling.py \
@@ -130,7 +130,7 @@ Use the workflow below to cover real ocean hardware behavior.
 ### 4.1 Ocean scaling matrix (single-process runtime/perf trend)
 
 ```bash
-.venv/bin/python scripts/run_ocean_regression_matrix.py \
+.venv/bin/python scripts/run_ocean_test_matrix.py \
   --output "$OUTDIR/ocean_matrix_cpu" \
   --std-resolutions 8,16 \
   --std-levels 10,20 \
@@ -147,7 +147,7 @@ Use the workflow below to cover real ocean hardware behavior.
 GPU backend variant:
 
 ```bash
-JAX_PLATFORMS=gpu .venv/bin/python scripts/run_ocean_regression_matrix.py \
+JAX_PLATFORMS=gpu .venv/bin/python scripts/run_ocean_test_matrix.py \
   --output "$OUTDIR/ocean_matrix_gpu" \
   --std-resolutions 8,16 \
   --std-levels 10,20 \
@@ -190,7 +190,7 @@ done
 Long-run MPI conservation regression:
 
 ```bash
-mpirun -np 3 .venv/bin/python -m pytest -q tests/distributed/test_ocean_mpi_conservation.py
+mpirun -np 3 .venv/bin/python -m pytest -q tests/ocean/distributed/test_ocean_mpi_conservation.py
 ```
 
 ### 4.3 Ocean MPI timing sweep (manual scaling proxy)
@@ -201,7 +201,7 @@ For a quick wall-time scaling proxy on real MPI hardware:
 for np in 1 2 3 6; do
   echo "=== ocean mpi np=${np} ==="
   /usr/bin/time -p mpirun -np "$np" .venv/bin/python -m pytest -q \
-    tests/distributed/test_ocean_mpi_conservation.py
+    tests/ocean/distributed/test_ocean_mpi_conservation.py
 done
 ```
 
@@ -257,7 +257,7 @@ Atmosphere (`run_levante_gpu_scaling.py` defaults):
 - weak step growth threshold: `--weak-max-step-growth` (default 2.5)
 - weak throughput threshold: `--weak-min-per-device-throughput-ratio` (default 0.35)
 
-Ocean (`run_ocean_regression_matrix.py` defaults):
+Ocean (`run_ocean_test_matrix.py` defaults):
 - heat drift: `<= 1e-3`
 - salt drift: `<= 1e-3`
 - mean eta drift: `<= 1e-3 m`

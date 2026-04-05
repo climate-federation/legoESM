@@ -753,6 +753,7 @@ class ModelDriver:
             precision=self.config.precision,
             distributed=self.config.distributed,
             grid_type=self.config.grid.grid_type,
+            n_devices=self.config.n_devices,
         )
         self._device_config = rc.device_config
 

@@ -154,6 +154,7 @@ class ExperimentConfig(NamedTuple):
     # Distributed
     distributed: bool = False
     ensemble_size: int = 1
+    n_devices: int | str = "auto"  # number of GPUs, or "auto" for all visible
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.

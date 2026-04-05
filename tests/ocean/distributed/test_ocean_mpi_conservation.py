@@ -52,15 +52,19 @@ from legoesm.ocean.init import rest_state_ocean
 from legoesm.ocean.state import OceanConfig
 from legoesm.ocean.vertical import create_ocean_z_star, compute_layer_thickness
 from legoesm.parallel.comm import build_comm_topology
-from legoesm.parallel.distributed import scatter_to_local, gather_to_global
+from legoesm.parallel.distributed import (
+    scatter_to_local, gather_to_global, set_active_layout,
+)
+from legoesm.parallel.layout import make_layout
 from legoesm.parallel.reductions import global_sum_mpi
 
 
 @pytest.fixture(autouse=True)
 def reset_halo_backend():
-    """Reset halo backend to local after each test."""
+    """Reset halo backend and layout to local after each test."""
     yield
     set_halo_backend("local")
+    set_active_layout(None)
 
 
 @pytest.fixture
@@ -137,7 +141,15 @@ class TestMPIOceanConservationLongrun:
         )
 
         set_halo_backend("mpi", topology)
-        state = scatter_to_local(state0)
+
+        # Create and activate distributed layout so scatter_to_local works.
+        resolution = 8
+        layout = make_layout(topology.rank, topology.n_processes, resolution)
+        set_active_layout(layout)
+
+        state = scatter_to_local(state0, layout)
+        # Scatter grid so area/lon/lat match rank-local face count.
+        grid = scatter_to_local(grid, layout)
 
         ocean_area0, eta_int0, heat0, salt0 = _global_ocean_invariants(
             state,

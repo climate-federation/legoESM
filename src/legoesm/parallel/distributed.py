@@ -183,6 +183,25 @@ def initialize_distributed(
     if local_device_count < 1:
         raise RuntimeError("No local JAX devices found for this MPI rank.")
 
+    # Per-rank GPU affinity for single-node MPI.
+    # When multiple MPI ranks share the same host (no JAX distributed),
+    # all ranks see the same local_devices().  Assign a non-overlapping
+    # slice to each rank to prevent oversubscription.
+    if not _is_multi_node and n_processes > 1 and local_device_count > 1:
+        # Number of co-located ranks on this host.
+        n_ranks_on_host = n_processes  # single-node: all ranks are local
+        gpus_per_rank = max(1, local_device_count // n_ranks_on_host)
+        local_rank = rank  # single-node: rank == local rank
+        start = local_rank * gpus_per_rank
+        end = min(start + gpus_per_rank, local_device_count)
+        local_devices = local_devices[start:end]
+        local_device_count = len(local_devices)
+        if local_device_count < 1:
+            raise RuntimeError(
+                f"Rank {rank}: no GPUs assigned after affinity slicing "
+                f"({n_ranks_on_host} ranks, {gpus_per_rank} GPUs/rank)."
+            )
+
     # Each MPI rank uses its local devices.
     # For face-only: pick largest divisor of 6 ≤ local_device_count.
     # For sub-face: each rank owns one tile, so use 1 device per rank

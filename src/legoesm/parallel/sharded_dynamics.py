@@ -348,14 +348,18 @@ class StepCacheKey(NamedTuple):
         and decomposition strategy.
     has_physics : bool
         Whether a ``physics_fn`` is supplied (alters the traced graph).
+    phys_id : int or None
+        ``id(physics_fn)`` — distinct callables produce different XLA
+        programs and must not share a cache entry.
     """
     state_structure: object
     leaf_meta: tuple
     sharding_key: tuple
     has_physics: bool
+    phys_id: object = None
 
 
-def _make_cache_key(state, config: DeviceConfig, has_physics: bool) -> StepCacheKey:
+def _make_cache_key(state, config: DeviceConfig, physics_fn=None) -> StepCacheKey:
     """Build a cache key from current call arguments."""
     structure = jax.tree.structure(state)
     leaves = jax.tree.leaves(state)
@@ -364,11 +368,14 @@ def _make_cache_key(state, config: DeviceConfig, has_physics: bool) -> StepCache
         for leaf in leaves
     )
     sharding_key = (config.n_devices, config.tiling, config.grid_type)
+    has_physics = physics_fn is not None
+    phys_id = id(physics_fn) if has_physics else None
     return StepCacheKey(
         state_structure=structure,
         leaf_meta=leaf_meta,
         sharding_key=sharding_key,
         has_physics=has_physics,
+        phys_id=phys_id,
     )
 
 
@@ -434,7 +441,7 @@ class CompiledShardedStep:
 
         return new_state
 
-    def _compile(self, state, has_physics: bool):
+    def _compile(self, state, physics_fn=None):
         """Trace and compile a new executable, returning the jitted fn."""
         t0 = time.monotonic()
 
@@ -445,13 +452,15 @@ class CompiledShardedStep:
 
         # Build the jitted step.  ``dt`` is a regular traced argument
         # (not static), so a single compiled program handles all dt values.
-        # ``physics_fn`` is captured via closure as a static boolean —
-        # the has_physics flag in the cache key ensures we compile
-        # separate programs for with-physics vs without-physics calls.
-        if has_physics and hasattr(model, "step_with_physics"):
+        # ``physics_fn`` is captured in the closure so JAX doesn't try
+        # to trace it as an array argument.  The phys_id in the cache
+        # key ensures we compile separate programs for distinct callables.
+        if physics_fn is not None and hasattr(model, "step_with_physics"):
+            _phys = physics_fn
+
             @partial(jax.jit, out_shardings=out_shardings)
-            def _jitted(s, dt, phys):
-                new = model.step_with_physics(s, dt, phys)
+            def _jitted(s, dt):
+                new = model.step_with_physics(s, dt, _phys)
                 if halo_fn is not None:
                     new = halo_fn(new)
                 return new
@@ -474,11 +483,11 @@ class CompiledShardedStep:
         )
         return _jitted
 
-    def _get_executable(self, state, has_physics: bool):
+    def _get_executable(self, state, physics_fn=None):
         """Return the cached executable, compiling if needed."""
-        key = _make_cache_key(state, self._config, has_physics)
+        key = _make_cache_key(state, self._config, physics_fn)
         if key not in self._cache:
-            self._cache[key] = self._compile(state, has_physics)
+            self._cache[key] = self._compile(state, physics_fn)
         return self._cache[key]
 
     # -----------------------------------------------------------------
@@ -500,21 +509,19 @@ class CompiledShardedStep:
             Time step [seconds].  This is a traced value, so changing
             ``dt`` between calls does **not** trigger recompilation.
         physics_fn : callable, optional
-            Physics forcing function.
+            Physics forcing function.  Captured in the compiled
+            closure — not passed as a traced argument.
 
         Returns
         -------
         Updated state (same sharding).
         """
-        has_physics = physics_fn is not None
-        fn = self._get_executable(state, has_physics)
-        if has_physics:
-            return fn(state, dt, physics_fn)
+        fn = self._get_executable(state, physics_fn)
         return fn(state, dt)
 
     def is_compiled_for(self, state, physics_fn=None) -> bool:
         """Check whether a compiled executable already exists for this state."""
-        key = _make_cache_key(state, self._config, physics_fn is not None)
+        key = _make_cache_key(state, self._config, physics_fn)
         return key in self._cache
 
     def clear_cache(self):
@@ -612,6 +619,9 @@ def make_sharded_step(
     model,
     config: DeviceConfig,
     halo_exchange_fn=None,
+    *,
+    n: int = 0,
+    nlev: int = 1,
 ):
     """Wrap a dynamics model's step function for multi-device execution.
 
@@ -642,6 +652,11 @@ def make_sharded_step(
         Custom halo exchange function ``f(state) -> state`` applied
         after each dynamics step.  If ``None``, the model's built-in
         halo exchange (via ``pad_halo``) is used.
+    n : int, optional
+        Per-face resolution for SPMD halo backend auto-selection
+        (ppermute vs all_gather). 0 skips auto-selection.
+    nlev : int, optional
+        Number of vertical levels for SPMD halo backend auto-selection.
 
     Returns
     -------
@@ -677,11 +692,11 @@ def make_sharded_step(
         from legoesm.parallel.cubesphere_exchange import (
             activate_spmd_halo_backend,
         )
-        activate_spmd_halo_backend(config.mesh)
+        activate_spmd_halo_backend(config.mesh, n=n, nlev=nlev)
         logger.info(
             "make_sharded_step: activated SPMD halo backend "
-            "(%d devices, face-sharded)",
-            config.n_devices,
+            "(%d devices, face-sharded, n=%d, nlev=%d)",
+            config.n_devices, n, nlev,
         )
 
     logger.info(

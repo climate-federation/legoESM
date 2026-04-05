@@ -124,6 +124,12 @@ _SUPPORTED_PHYSICS = {
     "spectral": {"none", "held_suarez"},
 }
 
+# MPI distributed benchmark support.  Only cubed-sphere has a validated
+# MPI path in this script.  Lat-lon and Voronoi MPI implementations exist
+# (latlon_mpi.py, voronoi_mpi.py) and are exercised by
+# run_cpu_mpi_scaling.py, but are not yet wired into this GPU harness.
+_MPI_SUPPORTED_GRIDS = {"cubed-sphere"}
+
 
 @dataclass
 class TimingResult:
@@ -440,6 +446,7 @@ def _build_segment_benchmark(
         days=1,
         precision="fp64" if precision == "float64" else "fp32",
         fix_moisture=False,
+        n_devices=n_gpus,
     )
 
     driver = ModelDriver(config)
@@ -722,7 +729,8 @@ def run_benchmark(
 
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.parallel.mesh import (
-        create_device_mesh, create_level_mesh, create_voronoi_device_mesh, shard_pytree,
+        create_device_mesh, create_latlon_mesh, create_level_mesh,
+        create_voronoi_device_mesh, shard_pytree,
     )
 
     # Choose timestep
@@ -821,7 +829,7 @@ def run_benchmark(
         state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
 
         total_cells = n_lat * n_lon * n_levels
-        dev_config = create_device_mesh(n_devices=n_gpus)
+        dev_config = create_latlon_mesh(n_devices=n_gpus)
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -859,6 +867,16 @@ def run_benchmark(
 
     backend = dev_config.backend
 
+    # Guard: warn if MPI is active for a grid without validated MPI paths.
+    if dev_config.is_distributed and grid_type not in _MPI_SUPPORTED_GRIDS:
+        print(
+            f"  WARNING: MPI distributed benchmarks for grid_type={grid_type!r} "
+            f"are not validated in this script. Only {sorted(_MPI_SUPPORTED_GRIDS)} "
+            f"have validated MPI paths. Use run_cpu_mpi_scaling.py for lat-lon "
+            f"and Voronoi MPI benchmarks.",
+            flush=True,
+        )
+
     # Cast to desired precision
     def _cast(x):
         if isinstance(x, jnp.ndarray) and jnp.issubdtype(x.dtype, jnp.floating):
@@ -866,7 +884,11 @@ def run_benchmark(
         return x
     state = jax.tree.map(_cast, state)
 
-    # MPI distributed: build layout (deferred) and scatter to rank-local
+    # MPI distributed: keep full (6, n, n, ...) state on every rank
+    # to match the production driver, which requires the full shape for
+    # pad_halo_mpi.  Each rank steps all faces; MPI halo exchange
+    # ensures owned faces stay correct.  Layout is still needed for
+    # gather_to_global at I/O time.
     from legoesm.parallel.distributed import get_active_layout
     if dev_config.is_distributed and get_active_layout() is None:
         from legoesm.parallel.distributed import get_active_topology, set_active_layout
@@ -874,11 +896,6 @@ def run_benchmark(
         topo = get_active_topology()
         if topo is not None:
             set_active_layout(make_layout(topo.rank, topo.n_processes, n_grid))
-
-    layout = get_active_layout()
-    if layout is not None and hasattr(layout, 'is_tiled'):
-        from legoesm.parallel.distributed import scatter_to_local
-        state = scatter_to_local(state, layout)
 
     # Shard across devices (SPMD for multi-GPU single-node)
     if dev_config.n_devices > 1 and not dev_config.is_distributed:
@@ -907,7 +924,7 @@ def run_benchmark(
         step_fn = make_voronoi_sharded_step(model, dev_config)
     elif grid_type == "cubed-sphere" and dev_config.n_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_sharded_step
-        step_fn = make_sharded_step(model, dev_config)
+        step_fn = make_sharded_step(model, dev_config, n=n_grid, nlev=n_levels)
     elif grid_type == "latlon" and dev_config.n_devices > 1:
         from legoesm.parallel.latlon_sharded import make_latlon_sharded_step
         step_fn = make_latlon_sharded_step(model, dev_config, physics_fn=physics_fn)
