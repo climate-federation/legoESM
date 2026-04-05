@@ -1839,15 +1839,15 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
     phase = kx * lon + ky * lat
     eta_pert = eta_amp * np.cos(phase)
 
-    # Velocity from linearized SWE (barotropic mode = depth-uniform):
-    # u = g*eta0/(omega^2 - f^2) * (omega*k*cos(phase) - f*l*sin(phase))
-    # v = g*eta0/(omega^2 - f^2) * (omega*l*cos(phase) + f*k*sin(phase))
+    # Velocity from linearized SWE: u, v from eta at t=0
+    # u = g/(omega^2 - f^2) * (omega*kx*cos(phase) - f*ky*sin(phase))
+    # v = g/(omega^2 - f^2) * (omega*ky*cos(phase) + f*kx*sin(phase))
     denom = omega**2 - f0**2
     if abs(denom) < 1e-30:
         denom = 1e-30
-    u_pert = (eta_amp * _G_EARTH / denom) * (
+    u_pert = (_G_EARTH / denom) * (
         omega * k_phys * np.cos(phase) - f0 * l_phys * np.sin(phase))
-    v_pert = (eta_amp * _G_EARTH / denom) * (
+    v_pert = (_G_EARTH / denom) * (
         omega * l_phys * np.cos(phase) + f0 * k_phys * np.sin(phase))
 
     if grid_type == "spectral":
@@ -1857,13 +1857,13 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         cos_lat = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
         a = grid.radius
         nlev = state.T_hat.data.shape[-1]
-        # Barotropic mode: depth-uniform velocity at all levels
+        # Only perturb level 0 (consistent with cubed-sphere / lat-lon init)
         u_cos_2d = jnp.array(u_pert * cos_lat)    # (n_lat, n_lon)
         v_cos_2d = jnp.array(v_pert * cos_lat)
-        u_cos = jnp.broadcast_to(
-            u_cos_2d[..., None], (*u_cos_2d.shape, nlev)).copy()
-        v_cos = jnp.broadcast_to(
-            v_cos_2d[..., None], (*v_cos_2d.shape, nlev)).copy()
+        u_cos = jnp.concatenate([u_cos_2d[..., None],
+                                 jnp.zeros((*u_cos_2d.shape, nlev - 1))], axis=-1)
+        v_cos = jnp.concatenate([v_cos_2d[..., None],
+                                 jnp.zeros((*v_cos_2d.shape, nlev - 1))], axis=-1)
         im_over_a = 1j * grid.ms.astype(jnp.float64) / a
         one_over_a = 1.0 / a
         vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
@@ -1880,14 +1880,13 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
         lon_e = np.asarray(grid.lonEdge, dtype=np.float64)
         u_data = np.array(state.u.data, dtype=np.float64, copy=True)
         phase_e = kx * lon_e + ky * lat_e
-        u_e = (eta_amp * _G_EARTH / denom) * (
+        u_e = (_G_EARTH / denom) * (
             omega * k_phys * np.cos(phase_e) - f0 * l_phys * np.sin(phase_e))
-        v_e = (eta_amp * _G_EARTH / denom) * (
+        v_e = (_G_EARTH / denom) * (
             omega * l_phys * np.cos(phase_e) + f0 * k_phys * np.sin(phase_e))
-        # Project onto edge normals — depth-uniform (all levels)
+        # Project onto edge normals
         angle = np.asarray(grid.angleEdge, dtype=np.float64)
-        u_normal = u_e * np.cos(angle) + v_e * np.sin(angle)
-        u_data[:, :] = u_normal[:, None]
+        u_data[..., 0] = u_e * np.cos(angle) + v_e * np.sin(angle)
         eta_cell = eta_amp * np.cos(kx * lon + ky * lat)
         return state._replace(
             eta=Field(jnp.array(eta_cell)),
@@ -1896,9 +1895,8 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
     else:  # cubed_sphere, latlon
         u_data = np.array(state.u.data, dtype=np.float64, copy=True)
         v_data = np.array(state.v.data, dtype=np.float64, copy=True)
-        # Barotropic mode: depth-uniform velocity at all levels
-        u_data[...] = u_pert[..., None]
-        v_data[...] = v_pert[..., None]
+        u_data[..., 0] = u_pert
+        v_data[..., 0] = v_pert
         return state._replace(
             eta=Field(jnp.array(eta_pert)),
             u=Field(jnp.array(u_data)),

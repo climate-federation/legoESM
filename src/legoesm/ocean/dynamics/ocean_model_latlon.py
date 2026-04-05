@@ -179,18 +179,16 @@ class LatLonOceanModel:
         u_new = state.u.data + dt * tend.du_dt.data
         v_new = state.v.data + dt * tend.dv_dt.data
 
-        # 3b. Apply physics-driven eta tendency (e.g. freshwater flux)
-        eta_mid = state.eta.data + dt * tend.deta_dt.data
-
         state_mid = state._replace(
             u=state.u.replace(data=u_new),
             v=state.v.replace(data=v_new),
             T=state.T.replace(data=T_new),
             S=state.S.replace(data=S_new),
-            eta=state.eta.replace(data=eta_mid),
         )
 
-        # 4. Barotropic substeps (further updates eta via continuity)
+        # 4. Barotropic substeps (sole handler of eta update via continuity)
+        # Do NOT pre-apply tend.deta_dt — the barotropic solver computes the
+        # same depth-integrated flux divergence, so pre-applying double-counts.
         dt_s = dt / self.config.n_barotropic_substeps
         state_new = barotropic_substeps_latlon(
             state_mid, dt_s, self.config.n_barotropic_substeps,
