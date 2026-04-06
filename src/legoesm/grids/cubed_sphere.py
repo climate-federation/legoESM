@@ -613,3 +613,113 @@ def rotate_winds_grid_to_geo(
     u_east = cos_a * u_grid - sin_a * v_grid
     v_north = sin_a * u_grid + cos_a * v_grid
     return u_east, v_north
+
+
+def create_cubed_sphere_panel(
+    n: int,
+    face_id: int = 0,
+    radius: float = 6.371229e6,
+    omega: float = 7.292e-5,
+    dtype=None,
+    return_cdgrid: bool = False,
+) -> "CubedSphereGrid | tuple[CubedSphereGrid, ...]":
+    """Create a single-face cubed-sphere panel for regional experiments.
+
+    Extracts one face from a full cubed-sphere grid and returns a
+    ``CubedSphereGrid`` with leading dimension 1 instead of 6.
+
+    All existing operators (gradient, divergence, Laplacian) work
+    automatically because :func:`~legoesm.grids.halo.pad_halo` detects
+    ``data.shape[0] == 1`` and applies Neumann (zero-gradient) wall
+    boundary conditions instead of inter-face halo exchange.
+
+    Parameters
+    ----------
+    n : int
+        Grid resolution (cells per face edge).
+    face_id : int
+        Which cube face to extract (0-5, default 0 = equatorial).
+    radius : float
+        Sphere radius [m].
+    omega : float
+        Rotation rate [rad/s].
+
+    Returns
+    -------
+    CubedSphereGrid or (CubedSphereGrid, CubedSphereCDGrid)
+        Grid with all arrays shaped ``(1, n, n)`` or ``(1, n+2, n+2)``
+        for the selected face.  Use with a wall land mask (0 on
+        boundary, 1 in interior) for closed-basin experiments.
+
+        When ``return_cdgrid=True``, also returns the single-face
+        C-D grid needed by the ocean baroclinic solver.
+    """
+    full = create_cubed_sphere(n, radius=radius, omega=omega, dtype=dtype)
+
+    # Extract single face, keeping leading dimension
+    f = face_id
+    _s = lambda arr: arr[f:f+1]  # (6,...) → (1,...)
+    _p = lambda arr: arr[f:f+1]  # same for padded arrays
+
+    # Padded angle/metric arrays: extract face then re-pad with edge BC
+    # (the full grid's padded arrays have inter-face halo data that doesn't
+    # apply to a single-face panel).
+    def _repad(arr_full_face, halo=1):
+        """Re-pad a single face with Neumann BC."""
+        interior = arr_full_face  # (1, n, n) or (1, n+2h, n+2h)
+        if interior.shape[1] > n:
+            interior = interior[:, halo:-halo, halo:-halo]
+        return jnp.pad(interior, ((0, 0), (halo, halo), (halo, halo)),
+                        mode="edge")
+
+    angle_p = _repad(_s(full.angle_padded), halo=1)
+
+    panel = CubedSphereGrid(
+        n=n,
+        radius=float(radius),
+        lon=_s(full.lon),
+        lat=_s(full.lat),
+        area=_s(full.area),
+        dx=_s(full.dx),
+        dy=_s(full.dy),
+        f=_s(full.f),
+        cos_lat=_s(full.cos_lat),
+        sin_lat=_s(full.sin_lat),
+        angle=_s(full.angle),
+        x_cart=_s(full.x_cart),
+        y_cart=_s(full.y_cart),
+        z_cart=_s(full.z_cart),
+        angle_padded=angle_p,
+        cos_angle=_s(full.cos_angle),
+        sin_angle=_s(full.sin_angle),
+        cos_angle_padded=jnp.cos(angle_p),
+        sin_angle_padded=jnp.sin(angle_p),
+        hx_ext=_repad(_s(full.hx_ext), halo=1),
+        hy_ext=_repad(_s(full.hy_ext), halo=1),
+        halo_interp_offsets=None,  # not needed — wall BC
+        cos_angle_padded_h2=jnp.cos(_repad(_s(full.angle), halo=2)),
+        sin_angle_padded_h2=jnp.sin(_repad(_s(full.angle), halo=2)),
+        hx_ext_h2=_repad(_s(full.hx_ext_h2), halo=2),
+        hy_ext_h2=_repad(_s(full.hy_ext_h2), halo=2),
+        halo_interp_offsets_h2=None,  # not needed — wall BC
+    )
+
+    if not return_cdgrid:
+        return panel
+
+    # Also build single-face C-D grid from the full cdgrid.
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+    full_cdgrid = create_cubed_sphere_cdgrid(full, omega=omega)
+
+    # Extract face f from every array leaf in the cdgrid, replacing the
+    # base grid reference with the panel.
+    def _extract_face(leaf):
+        if hasattr(leaf, 'shape') and hasattr(leaf, 'ndim'):
+            if leaf.ndim >= 3 and leaf.shape[0] == 6:
+                return leaf[f:f+1]
+        return leaf
+
+    cdgrid_panel = jax.tree.map(_extract_face, full_cdgrid)
+    # Replace the base grid with the panel (base is index 0 of the NamedTuple)
+    cdgrid_panel = cdgrid_panel._replace(base=panel)
+    return panel, cdgrid_panel
