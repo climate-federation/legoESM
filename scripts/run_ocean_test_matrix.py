@@ -865,7 +865,12 @@ def _placeholder_plot(path: Path, title: str, text: str):
 
 
 def _ensure_required_artifacts(output_dir: Path):
-    """Guarantee standardized files exist in each case folder."""
+    """Guarantee standardized files exist in each case folder.
+
+    Creates placeholder CSVs, snapshot_times.txt, and placeholder PNGs
+    so that every test case directory has the full set of expected outputs,
+    even when the test crashed (ERROR) or was skipped.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     for csv_name in ["mean_timeseries.csv", "conservation_timeseries.csv"]:
         p = output_dir / csv_name
@@ -875,8 +880,17 @@ def _ensure_required_artifacts(output_dir: Path):
     if not (output_dir / "snapshot_times.txt").exists():
         with open(output_dir / "snapshot_times.txt", "w") as f:
             f.write("step,time_seconds,time_days\n")
-    # Note: PNGs are only created by the diagnostic routines when applicable.
-    # No placeholder images are generated to avoid masking real issues.
+    # Generate placeholder PNGs for any missing visualization files.
+    case_label = "/".join(output_dir.parts[-4:])
+    for png_name in [
+        "mean_timeseries.png",
+        "conservation_timeseries.png",
+        "field_snapshots.png",
+    ]:
+        p = output_dir / png_name
+        if not p.exists():
+            _placeholder_plot(p, png_name.replace(".png", ""),
+                              f"No data — {case_label}")
 
 
 # ===========================================================================
