@@ -118,6 +118,14 @@ FIELD_RANGES = {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH (pure ocean)
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
     },
+    "rest_state_uniform_ts": {
+        "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH
+        "SST": (9.5, 10.5),        # °C - uniform 10°C everywhere
+    },
+    "rest_state_uniform_ts_no_land": {
+        "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH
+        "SST": (9.5, 10.5),        # °C - uniform 10°C everywhere
+    },
     "barotropic_wave": {
         "eta": (-1.5, 1.5),        # meters - wave amplitude ~1m  
         "SST": (1.5, 21.0),        # °C - background temperature range
@@ -194,6 +202,20 @@ def _build_test_matrix() -> list[TestCase]:
             continue
         matrix.append(TestCase(
             "rest_state", g, res[g], 1.0, 0.1))
+
+    # --- Rest state with land, uniform T/S (no stratification): diagnostic ---
+    for g in GRID_TYPES:
+        if g == "spectral":
+            continue
+        matrix.append(TestCase(
+            "rest_state_uniform_ts", g, res[g], 1.0, 0.1))
+
+    # --- Rest state uniform T/S without land (control for uniform_ts): all grids ---
+    for g in GRID_TYPES:
+        if g == "spectral":
+            continue
+        matrix.append(TestCase(
+            "rest_state_uniform_ts_no_land", g, res[g], 1.0, 0.1))
 
     # --- Rest state adjustment without land: all grids ---
     for g in GRID_TYPES:
@@ -1166,6 +1188,56 @@ def _create_rest_state_no_land(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX)
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
+def _create_rest_state_uniform_ts(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
+    """Create rest-state IC with uniform T/S (no stratification) and land.
+
+    Same land mask as rest_state (|lat| > 80°), but temperature and salinity
+    are spatially uniform (T=10°C, S=35 PSU at all depths).  This isolates
+    whether the baroclinic pressure gradient is the trigger for land-boundary
+    instabilities: with constant T/S, rho_prime is horizontally uniform,
+    so the baroclinic PGF is exactly zero regardless of land masking.
+    """
+    T_UNIFORM = 10.0
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.ocean.init import rest_state_ocean
+        return rest_state_ocean(grid, z_coord, H_max=H_max,
+                                T_surface=T_UNIFORM, T_deep=T_UNIFORM)
+    elif tc.grid_type == "latlon":
+        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
+        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max,
+                                       T_surface=T_UNIFORM, T_deep=T_UNIFORM)
+    elif tc.grid_type == "mpas":
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max,
+                                     T_surface=T_UNIFORM, T_deep=T_UNIFORM)
+    raise ValueError(f"Unknown grid type: {tc.grid_type}")
+
+
+def _create_rest_state_uniform_ts_no_land(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
+    """Create rest-state IC with uniform T/S and no land.
+
+    Control experiment for rest_state_uniform_ts: same uniform T=10°C, S=35 PSU,
+    but no land mask.  Should remain at exact rest indefinitely.
+    """
+    T_UNIFORM = 10.0
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.ocean.init import rest_state_ocean
+        return rest_state_ocean(grid, z_coord, H_max=H_max,
+                                T_surface=T_UNIFORM, T_deep=T_UNIFORM,
+                                land_lat_threshold=90.0)
+    elif tc.grid_type == "latlon":
+        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
+        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max,
+                                       T_surface=T_UNIFORM, T_deep=T_UNIFORM,
+                                       land_lat_threshold=90.0)
+    elif tc.grid_type == "mpas":
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max,
+                                     T_surface=T_UNIFORM, T_deep=T_UNIFORM,
+                                     land_lat_threshold=90.0)
+    raise ValueError(f"Unknown grid type: {tc.grid_type}")
+
+
 # ===========================================================================
 # Field extraction helpers
 # ===========================================================================
@@ -1665,6 +1737,119 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
         "wall_time": f"{wall:.1f}s"})
     _save_case_diagnostics(
         output_dir, f"Rest State No Land {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
+                              ) -> tuple[str, float, str]:
+    """Rest state with land but uniform T/S — diagnostic for baroclinic PGF hypothesis.
+
+    If the stratified rest_state (with land) blows up but this test stays
+    stable, it confirms the baroclinic pressure gradient is the primary
+    trigger for land-boundary instabilities.
+    """
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc))
+    state = _create_rest_state_uniform_ts(tc, grid, z_coord)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Rest State Uniform T/S ({tc.grid_type})", total_days=days)
+
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_drift = _compute_drift(diag.get("mean_T", []))
+    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"Rest State Uniform T/S {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: float
+                                      ) -> tuple[str, float, str]:
+    """Rest state with uniform T/S and no land — control for uniform_ts diagnostic."""
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc))
+    state = _create_rest_state_uniform_ts_no_land(tc, grid, z_coord)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Rest State Uniform T/S No Land ({tc.grid_type})", total_days=days)
+
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_drift = _compute_drift(diag.get("mean_T", []))
+    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"Rest State Uniform T/S No Land {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=[
             ("eta", "SSH (m)", "RdBu_r"),
@@ -2883,6 +3068,8 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
 
 RUNNERS: dict[str, Callable] = {
     "rest_state": run_rest_state,
+    "rest_state_uniform_ts": run_rest_state_uniform_ts,
+    "rest_state_uniform_ts_no_land": run_rest_state_uniform_ts_no_land,
     "rest_state_no_land": run_rest_state_no_land,
     "barotropic_wave": run_barotropic_wave,
     "barotropic_gyre": run_barotropic_gyre,
