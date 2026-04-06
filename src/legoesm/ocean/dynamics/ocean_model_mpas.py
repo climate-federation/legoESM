@@ -47,15 +47,24 @@ class MPASOceanModel:
         self.z_coord = z_coord
         self.config = config or MPASOceanConfig()
 
+        if self.config.physics is not None:
+            from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
+            self._physics_fn = make_mpas_ocean_physics(self.config.physics)
+        else:
+            self._physics_fn = None
+
     def tendencies(
         self,
         state: MPASOceanState,
         freshwater: FreshwaterForcing | None = None,
+        surface_forcing=None,
     ) -> MPASOceanTendencies:
         """Compute baroclinic tendencies."""
         return mpas_ocean_baroclinic_tendencies(
             state, self.mesh, self.z_coord, self.config,
             freshwater=freshwater,
+            physics_fn=self._physics_fn,
+            surface_forcing=surface_forcing,
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -64,6 +73,7 @@ class MPASOceanModel:
         state: MPASOceanState,
         dt: float,
         freshwater: FreshwaterForcing | None = None,
+        surface_forcing=None,
     ) -> MPASOceanState:
         """Advance one full timestep (baroclinic + barotropic).
 
@@ -74,6 +84,8 @@ class MPASOceanModel:
             Baroclinic timestep [s].
         freshwater : FreshwaterForcing or None
             Freshwater forcing (P, E, runoff, ice). If None, no freshwater.
+        surface_forcing : optional
+            External surface forcing passed to the physics pipeline.
 
         Returns
         -------
@@ -87,7 +99,8 @@ class MPASOceanModel:
         mask = state.land_mask.data
 
         # 1. Compute baroclinic tendencies
-        tend = self.tendencies(state, freshwater=freshwater)
+        tend = self.tendencies(state, freshwater=freshwater,
+                               surface_forcing=surface_forcing)
 
         # 2. Update tracers (forward Euler)
         T_new = state.T.data + dt * tend.dT_dt.data

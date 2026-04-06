@@ -69,6 +69,7 @@ class MPASOceanConfig(NamedTuple):
     semi_implicit_coriolis: bool = True
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0
+    physics: object = None  # OceanPhysicsConfig or None
     # Runtime bounds checks (matching cubed-sphere ocean)
     enable_runtime_checks: bool = False
     temperature_min_c: float = -5.0
