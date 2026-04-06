@@ -165,13 +165,71 @@ exchanges for q_i and q_j in the Lin-Rood splitting.
 | Non-negativity | min=-67 | **min=0** | ≥ 0 |
 | Peak 12d | 300 | **808** | ~850 |
 | Visual 1-day | Bell splits | Preserved | Perfect |
-| Williamson 2 | L2=3.53e-3 | **L2=3.53e-3** | — |
-| Williamson 5 | mass drift 2.78e-5 | **mass drift 2.78e-5** | — |
+| Williamson 2 | L2=3.53e-3 | **L2=3.12e-3** | — |
+| Williamson 5 | mass drift 2.78e-5 | **mass drift 2.11e-5** | — |
 | DCMIP 3D transport | PASS | **PASS** | — |
 
 **Total improvement**: 1-day error 3.2x better. Mass conservation fixed
 from 27% leak to machine precision. Non-negativity enforced. Peak retention
 improved by 33%. Bell no longer splits or distorts at short timescales.
+
+## Iteration 11: D-A-D Filter Removal + Operator Cleanup (2026-04-06)
+
+**Problem**: The D-A-D filter (alpha=0.2 blending of edge-midpoint winds
+with cell-centre averages after each time step) was degrading wind fields
+in Williamson TC2 and TC5. The filter was adding artificial diffusion
+that smeared the balanced geostrophic flow.
+
+**Root cause**: The D-A-D filter was introduced to suppress a grid-scale
+computational mode inherent to the edge-midpoint stagger. However, the
+mode was already controlled by the divergence damping + hyperdiffusion
+in the tendency computation. The filter was redundant and harmful.
+
+**Changes**:
+1. **Removed D-A-D filter** from `FV3EdgeShallowWaterModel.step()` —
+   eliminated 15 lines of artificial diffusion (vector halo exchange
+   + blending) that degraded wind accuracy.
+2. **Cleaned up `fv3_sw_tendencies`** — simplified the function to use
+   `fv3_d2cc` + `fv3_cc2c` for mass transport, physical-frame KE,
+   and corner-based vorticity + Arakawa-Lamb gradient.
+3. **Removed `boundary_fix` logic** — the extrapolation of boundary
+   corners was no longer needed without the D-A-D filter.
+
+**What was preserved**:
+- PPM mass flux divergence (4th-order, monotone)
+- Corner-based vorticity (exact circulation form)
+- Arakawa-Lamb gradient at D-grid corners
+- Adaptive divergence damping
+- Vertex corner fix (`_extrapolate_boundary_corners`)
+- Mass conservation fixer
+
+**Results** (C36, 1 day):
+
+| Metric | Before (D-A-D) | After (no D-A-D) |
+|--------|-----------------|-------------------|
+| TC2 L2(h) | 3.53e-3 | **3.12e-3** (11% better) |
+| TC5 mass drift | 2.78e-5 | **2.11e-5** (24% better) |
+| Cosine bell L1 | 0.132 | 0.132 (unchanged) |
+
+**Wind diagnostics** (TC2 zonal, C36, 1 day):
+- max|v_err| = 2.65 m/s (v should be 0)
+- RMS v_err: boundary 0.57, interior 0.29, ratio 2.0x
+- No additional edge artifacts from the operators
+
+**Ocean impact**: The ocean model (`OceanModel`) uses the corner-based
+operators (`cdgrid_momentum_tendencies`, `cgrid_mass_flux_divergence`)
+which were NOT modified. Ocean IGW L2=1.26 (cubed sphere) vs 1.24 (lat-lon)
+— comparable, not a cubed-sphere regression.
+
+**Files modified**:
+- `src/legoesm/core/operators_cdgrid.py` — simplified `fv3_sw_tendencies`
+- `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py` — removed
+  D-A-D filter from `FV3EdgeShallowWaterModel.step()`
+
+**Test results**: All 33 CDGrid tests, 5 Williamson TC2 tests, 37 tracer
+transport tests, 42 ocean tests pass. The only failure is a pre-existing
+`test_compiled_segments.py` mock issue (PhysicsOutput field count mismatch)
+unrelated to this change.
 
 The remaining 3.7x gap at beta=45 (12 days) is from the gnomonic projection's
 transverse cell misalignment near cube corners (offsets up to 0.49 cells).

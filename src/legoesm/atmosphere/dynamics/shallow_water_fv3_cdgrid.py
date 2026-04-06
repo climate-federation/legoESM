@@ -322,7 +322,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step."""
-        from legoesm.core.operators_cdgrid import fv3_d2cc, _pad_halo_auto
         from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
 
@@ -373,28 +372,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             state_new = dispatch_integrator(
                 state, tendency_fn, dt, self.config.time_integrator,
             )
-
-        # D-A-D filter: suppress grid-scale computational mode by
-        # blending edge-midpoint winds with cell-centre-averaged values.
-        # alpha=0.2 reliably prevents the computational mode while
-        # keeping dissipation acceptable for multi-day integrations.
-        alpha = 0.2
-        n = self.cdgrid.n
-        u_cc, v_cc = fv3_d2cc(state_new.u_d, state_new.v_d, self.cdgrid)
-        # Vector halo exchange: rotates wind components at face boundaries
-        from legoesm.grids.halo import pad_halo_vector
-        grid = self.cdgrid.base
-        u_cc_pad, v_cc_pad = pad_halo_vector(
-            u_cc, v_cc,
-            grid.cos_angle, grid.sin_angle,
-            grid.cos_angle_padded, grid.sin_angle_padded,
-            interp_offsets=grid.halo_interp_offsets,
-        )
-        u_dad = 0.5 * (u_cc_pad[:, 1:-1, :-1] + u_cc_pad[:, 1:-1, 1:])
-        v_dad = 0.5 * (v_cc_pad[:, :-1, 1:-1] + v_cc_pad[:, 1:, 1:-1])
-        u_f = (1.0 - alpha) * state_new.u_d + alpha * u_dad[:, :n, :n+1]
-        v_f = (1.0 - alpha) * state_new.v_d + alpha * v_dad[:, :n+1, :n]
-        state_new = state_new._replace(u_d=u_f, v_d=v_f)
 
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
