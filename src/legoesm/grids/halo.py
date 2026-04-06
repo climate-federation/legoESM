@@ -388,6 +388,38 @@ def _extract_edge_strip(data: jax.Array, face: int, edge: int) -> jax.Array:
         raise ValueError(f"Invalid edge: {edge}")
 
 
+def _pad_halo_wall(data: jax.Array, halo: int = 1) -> jax.Array:
+    """Pad a field with Neumann (zero-gradient) wall boundary conditions.
+
+    For single-face regional panels where inter-face halo exchange is
+    not available.  Each boundary is filled by replicating the nearest
+    interior row/column (zero-gradient BC), which prevents spurious
+    gradients at domain edges.
+
+    Handles both 3D ``(1, n, n)`` and 4D ``(1, n, n, nlev)`` inputs.
+
+    Parameters
+    ----------
+    data : jax.Array, shape (1, n, n) or (1, n, n, nlev)
+    halo : int
+        Halo width (1 or 2).
+
+    Returns
+    -------
+    padded : jax.Array, shape (1, n+2*h, n+2*h) or (1, n+2*h, n+2*h, nlev)
+    """
+    h = halo
+    if data.ndim == 3:
+        # (1, n, n)
+        padded = jnp.pad(data, ((0, 0), (h, h), (h, h)), mode="edge")
+    elif data.ndim == 4:
+        # (1, n, n, nlev) — pad only spatial dims
+        padded = jnp.pad(data, ((0, 0), (h, h), (h, h), (0, 0)), mode="edge")
+    else:
+        raise ValueError(f"_pad_halo_wall expects 3D or 4D, got {data.ndim}D")
+    return padded
+
+
 def pad_halo(
     data: jax.Array,
     halo: int = 1,
@@ -427,6 +459,10 @@ def pad_halo(
     """
     if halo not in (1, 2):
         raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
+
+    # Single-face (regional panel) dispatch: wall boundary conditions.
+    if data.shape[0] == 1:
+        return _pad_halo_wall(data, halo)
 
     # MPI dispatch.
     if _halo_backend == "mpi":
@@ -472,6 +508,10 @@ def pad_halo_4d(
         raise ValueError(f"pad_halo_4d expects 4D input, got {data.ndim}D")
     if halo not in (1, 2):
         raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
+
+    # Single-face (regional panel) dispatch: wall boundary conditions.
+    if data.shape[0] == 1:
+        return _pad_halo_wall(data, halo)
 
     # MPI dispatch.
     if _halo_backend == "mpi":
