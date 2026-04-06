@@ -44,7 +44,7 @@ from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
     create_cubed_sphere_cdgrid,
 )
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
+from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -130,12 +130,13 @@ def ocean_baroclinic_tendencies_cdgrid(
     S_filled = jax.vmap(
         lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
     )(S)
-    rho = wright_eos(T_filled, S_filled, jnp.zeros_like(T))
+    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
         )
-        rho = wright_eos(T_filled, S_filled, p_hydro)
+        rho = eos_fn(T_filled, S_filled, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
         rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
     )

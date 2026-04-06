@@ -36,7 +36,7 @@ from legoesm.core.operators_voronoi import (
     vector_laplacian_del2,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
+from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -123,12 +123,13 @@ def mpas_ocean_baroclinic_tendencies(
     # density on land ≈ ρ₀, preventing spurious ρ' at coastlines.
     T_filled = _fill_land_cells_mpas(T_3d, mask)
     S_filled = _fill_land_cells_mpas(S_3d, mask)
-    rho = wright_eos(T_filled, S_filled, jnp.zeros_like(T_3d))
+    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T_3d))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
         )
-        rho = wright_eos(T_filled, S_filled, p_hydro)
+        rho = eos_fn(T_filled, S_filled, p_hydro)
     # Final p_hydro for EOS only (not used in Bernoulli)
     p_hydro = compute_hydrostatic_pressure(
         rho, eta, z_coord.dz_ref, jacobian, rho_0, g,

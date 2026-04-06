@@ -24,6 +24,9 @@ import jax.numpy as jnp
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean.eos import (
     wright_eos,
+    linear_eos,
+    make_eos_fn,
+    LinearEOSConfig,
     density_perturbation,
     compute_hydrostatic_pressure,
     compute_buoyancy_frequency,
@@ -176,6 +179,95 @@ class TestWrightEOS:
         # Well below the valid range
         g_cold = jax.grad(rho_of_T)(jnp.array(-5.0))
         assert float(g_cold) == 0.0, f"Expected zero grad at T=-5C, got {float(g_cold)}"
+
+
+class TestLinearEOS:
+    """Tests for the linear equation of state."""
+
+    def test_reference_density(self):
+        """At T=T_ref, S=S_ref, density should be rho_ref."""
+        rho = linear_eos(
+            jnp.array(10.0), jnp.array(35.0), jnp.array(0.0),
+            rho_ref=1025.0, T_ref=10.0, S_ref=35.0,
+        )
+        assert float(rho) == pytest.approx(1025.0)
+
+    def test_warm_water_lighter(self):
+        """Warmer water should be less dense (positive alpha_T)."""
+        rho_warm = linear_eos(jnp.array(25.0), jnp.array(35.0), jnp.array(0.0))
+        rho_cold = linear_eos(jnp.array(5.0), jnp.array(35.0), jnp.array(0.0))
+        assert float(rho_warm) < float(rho_cold)
+
+    def test_salty_water_heavier(self):
+        """Saltier water should be more dense (positive beta_S)."""
+        rho_salty = linear_eos(jnp.array(10.0), jnp.array(38.0), jnp.array(0.0))
+        rho_fresh = linear_eos(jnp.array(10.0), jnp.array(32.0), jnp.array(0.0))
+        assert float(rho_salty) > float(rho_fresh)
+
+    def test_pressure_independent(self):
+        """Linear EOS should not depend on pressure."""
+        rho_sfc = linear_eos(jnp.array(10.0), jnp.array(35.0), jnp.array(0.0))
+        rho_deep = linear_eos(jnp.array(10.0), jnp.array(35.0), jnp.array(5e7))
+        assert float(rho_sfc) == pytest.approx(float(rho_deep))
+
+    def test_analytical_value(self):
+        """Check against hand-computed value."""
+        # rho = 1025 * (1 - 2e-4*(20-10) + 7.4e-4*(36-35))
+        #     = 1025 * (1 - 0.002 + 0.00074) = 1025 * 0.99874 = 1023.7085
+        rho = linear_eos(
+            jnp.array(20.0), jnp.array(36.0), jnp.array(0.0),
+            rho_ref=1025.0, alpha_T=2e-4, beta_S=7.4e-4,
+            T_ref=10.0, S_ref=35.0,
+        )
+        assert float(rho) == pytest.approx(1025.0 * 0.99874, rel=1e-6)
+
+    def test_vectorized(self):
+        """Linear EOS should work with array inputs."""
+        T = jnp.array([5.0, 10.0, 20.0, 25.0])
+        S = jnp.full(4, 35.0)
+        p = jnp.zeros(4)
+        rho = linear_eos(T, S, p)
+        assert rho.shape == (4,)
+        assert jnp.all(jnp.diff(rho) < 0)
+
+    def test_jit_and_grad(self):
+        """Linear EOS should be JIT-able and differentiable."""
+        f = jax.jit(lambda T: linear_eos(T, jnp.array(35.0), jnp.array(0.0)))
+        rho = f(jnp.array(10.0))
+        assert jnp.isfinite(rho)
+
+        g = jax.grad(lambda T: linear_eos(T, jnp.array(35.0), jnp.array(0.0)))
+        drho_dT = g(jnp.array(10.0))
+        # drho/dT = -rho_ref * alpha_T = -1025 * 2e-4 = -0.205
+        assert float(drho_dT) == pytest.approx(-1025.0 * 2e-4, rel=1e-6)
+
+
+class TestMakeEosFn:
+    """Tests for the EOS dispatcher."""
+
+    def test_wright_returns_wright(self):
+        """make_eos_fn('wright') should return wright_eos."""
+        fn = make_eos_fn("wright")
+        assert fn is wright_eos
+
+    def test_linear_returns_callable(self):
+        """make_eos_fn('linear') should return a callable."""
+        fn = make_eos_fn("linear")
+        rho = fn(jnp.array(10.0), jnp.array(35.0), jnp.array(0.0))
+        assert jnp.isfinite(rho)
+
+    def test_linear_with_config(self):
+        """make_eos_fn('linear', cfg) should use config values."""
+        cfg = LinearEOSConfig(rho_ref=1000.0, alpha_T=1e-4, T_ref=0.0)
+        fn = make_eos_fn("linear", cfg)
+        # rho = 1000 * (1 - 1e-4 * (10 - 0)) = 1000 * 0.999 = 999
+        rho = fn(jnp.array(10.0), jnp.array(35.0), jnp.array(0.0))
+        assert float(rho) == pytest.approx(999.0 + 1000.0 * 7.4e-4 * (35.0 - 35.0), rel=1e-6)
+
+    def test_unknown_raises(self):
+        """Unknown EOS should raise ValueError."""
+        with pytest.raises(ValueError, match="Unknown EOS"):
+            make_eos_fn("cubic")
 
 
 # ==============================================================================
