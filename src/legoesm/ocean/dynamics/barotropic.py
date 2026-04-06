@@ -9,6 +9,17 @@ Solves the 2D free-surface equations via forward-backward substeps:
 where U_bar, V_bar are depth-averaged velocities and F_slow is the
 baroclinic forcing held constant during substeps.
 
+Grid staggering
+---------------
+This solver uses **A-grid** (cell-center) staggering for velocity, even
+though the baroclinic dynamics (``ocean_pe_cdgrid.py``) use C-D grid
+internally.  This is a deliberate trade-off: the barotropic mode
+primarily resolves fast gravity waves, where mass conservation and
+stability matter more than high-order vorticity numerics. The
+``barotropic_diffusion_alpha`` parameter damps the A-grid computational
+mode (checkerboard noise in eta).  See ``docs/ocean_grid_staggering.md``
+for the full rationale.
+
 This parallels acoustic_substeps() in compressible_euler.py but for
 barotropic ocean gravity waves instead of atmospheric sound waves.
 """
