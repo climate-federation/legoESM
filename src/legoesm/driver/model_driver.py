@@ -1657,6 +1657,10 @@ class ModelDriver:
 
             # Diagnostics
             if diag_interval > 0 and current_step % diag_interval == 0:
+                # Convert accumulated precipitation (kg/m²) to rate (kg/m²/s)
+                # so diagnostics can multiply by 86400 to get mm/day.
+                seg_precip_rate = seg_precip / (seg_steps * DT)
+
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,
@@ -1666,7 +1670,7 @@ class ModelDriver:
                     q_r=self.q_r,
                     sst=sst,
                     sic=sic,
-                    precip_total=seg_precip,
+                    precip_total=seg_precip_rate,
                     sw_up_toa=held_sw_up_toa,
                     lw_up_toa=held_lw_up_toa,
                     sw_net_sfc=held_sw_net_sfc,
