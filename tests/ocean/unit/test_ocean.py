@@ -357,13 +357,44 @@ class TestOceanZStar:
     def test_input_validation(self):
         """Coordinate constructor should reject invalid values."""
         with pytest.raises(ValueError):
-            create_ocean_z_star(n_levels=1)
+            create_ocean_z_star(n_levels=0)
         with pytest.raises(ValueError):
             create_ocean_z_star(H_max=0.0)
         with pytest.raises(ValueError):
             create_ocean_z_star(dz_surface=0.0)
         with pytest.raises(ValueError):
             create_ocean_z_star(dz_deep=0.0)
+
+    def test_nlev1_creation(self):
+        """nlev=1 should produce valid coordinate for barotropic experiments."""
+        z = create_ocean_z_star(n_levels=1, H_max=5000.0)
+        assert z.n_levels == 1
+        assert z.dz_ref.shape == (1,)
+        assert float(z.dz_ref[0]) == pytest.approx(5000.0)
+        assert z.dz_half_ref.shape == (0,)
+        assert z.z_full_ref.shape == (1,)
+        assert z.z_half_ref.shape == (2,)
+        assert float(z.z_half_ref[0]) == pytest.approx(0.0)
+        assert float(z.z_half_ref[1]) == pytest.approx(-5000.0)
+
+    def test_nlev1_model_step(self):
+        """Ocean model should be able to step with nlev=1 (barotropic)."""
+        from legoesm.ocean.dynamics.ocean_model import OceanModel
+        from legoesm.ocean.state import OceanConfig
+        from legoesm.ocean.init import rest_state_ocean
+
+        grid = create_cubed_sphere(4)
+        z = create_ocean_z_star(n_levels=1, H_max=5000.0)
+        config = OceanConfig(
+            A_v=0.0, K_v=0.0, n_barotropic_substeps=5,
+        )
+        model = OceanModel(grid, z, config)
+        state = rest_state_ocean(grid, z, H_max=5000.0)
+        state_new = model.step(state, 60.0)
+        assert jnp.all(jnp.isfinite(state_new.u.data))
+        assert jnp.all(jnp.isfinite(state_new.T.data))
+        assert jnp.all(jnp.isfinite(state_new.eta.data))
+        assert state_new.u.data.shape[-1] == 1
 
 
 # ==============================================================================

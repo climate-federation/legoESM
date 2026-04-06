@@ -196,7 +196,7 @@ def latlon_ocean_baroclinic_tendencies(
         if config.K_h > 0:
             dtr_dt = dtr_dt + config.K_h * laplacian_latlon(tr, grid, mask=mask)
         if physics_fn is None:
-            if config.K_v > 0:
+            if config.K_v > 0 and tr.shape[-1] >= 2:
                 # J is horizontal-only (n_lat, n_lon) — broadcasts with
                 # vertical arrays via the trailing newaxis.
                 jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
@@ -224,7 +224,7 @@ def latlon_ocean_baroclinic_tendencies(
     if config.A_h > 0:
         du_dt = du_dt + config.A_h * laplacian_latlon(u * mask_3d, grid, mask=mask)
         dv_dt = dv_dt + config.A_h * laplacian_latlon(v * mask_3d, grid, mask=mask)
-    if config.A_v > 0:
+    if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
         for vel, dvel_dt_ref in [(u, "u"), (v, "v")]:
             dv_dz_half = jnp.diff(vel, axis=-1) / (
