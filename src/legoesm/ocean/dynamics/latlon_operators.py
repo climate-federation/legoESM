@@ -468,14 +468,16 @@ def _neumann_fill_latlon(
     f: jnp.ndarray,
     mask: jnp.ndarray,
 ) -> jnp.ndarray:
-    """Fill land cells with nearest meridional ocean-neighbor value.
+    """Fill land cells with nearest ocean-neighbor value (4-connected).
 
     Enforces zero-gradient (Neumann) boundary conditions at land-ocean
-    interfaces so that the Laplacian does not see a sharp jump between
-    ocean values and masked zeros.  Without this fill the Laplacian
-    produces spurious diffusive flux at the boundary which, amplified
-    by the 1/cos²(lat) metric near the poles, generates the characteristic
-    horizontal stripes in height and velocity fields.
+    interfaces so that gradient and Laplacian operators do not see a
+    sharp jump between ocean values and masked zeros.
+
+    Checks all 4 neighbors (N, S, E, W with periodic E/W wrapping) so
+    that both meridional and zonal coastlines are handled correctly.
+    Without zonal neighbors, E/W coastlines still see the ocean-to-zero
+    discontinuity in the zonal gradient.
 
     Parameters
     ----------
@@ -498,26 +500,42 @@ def _neumann_fill_latlon(
         # North neighbor (one cell toward north pole)
         f_n = jnp.concatenate([filled[1:], filled[-1:]], axis=0)
         m_n = jnp.concatenate([m[1:], m[-1:]], axis=0)
+        # West neighbor (periodic)
+        f_w = jnp.roll(filled, 1, axis=1)
+        m_w = jnp.roll(m, 1, axis=1)
+        # East neighbor (periodic)
+        f_e = jnp.roll(filled, -1, axis=1)
+        m_e = jnp.roll(m, -1, axis=1)
 
         is_land = m < 0.5
-        has_south = m_s > 0.5
-        has_north = m_n > 0.5
 
+        # Weighted average of all ocean neighbors
         if f.ndim > 2:
+            m_s_e = m_s[..., jnp.newaxis]
+            m_n_e = m_n[..., jnp.newaxis]
+            m_w_e = m_w[..., jnp.newaxis]
+            m_e_e = m_e[..., jnp.newaxis]
             is_land_e = is_land[..., jnp.newaxis]
-            has_south_e = has_south[..., jnp.newaxis]
-            has_north_e = has_north[..., jnp.newaxis]
         else:
+            m_s_e = m_s
+            m_n_e = m_n
+            m_w_e = m_w
+            m_e_e = m_e
             is_land_e = is_land
-            has_south_e = has_south
-            has_north_e = has_north
 
-        filled = jnp.where(
-            is_land_e & has_south_e, f_s,
-            jnp.where(is_land_e & has_north_e, f_n, filled),
-        )
+        nbr_sum = f_s * m_s_e + f_n * m_n_e + f_w * m_w_e + f_e * m_e_e
+        nbr_count = m_s_e + m_n_e + m_w_e + m_e_e
+        nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
+
+        has_any_nbr = (m_s + m_n + m_w + m_e) > 0.0
+        if f.ndim > 2:
+            has_any_nbr_e = has_any_nbr[..., jnp.newaxis]
+        else:
+            has_any_nbr_e = has_any_nbr
+
+        filled = jnp.where(is_land_e & has_any_nbr_e, nbr_avg, filled)
         # Expand the effective mask so the next pass can propagate further.
-        m = jnp.where(is_land & (has_south | has_north), 1.0, m)
+        m = jnp.where(is_land & has_any_nbr, 1.0, m)
 
     return filled
 
