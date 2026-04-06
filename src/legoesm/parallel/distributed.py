@@ -216,7 +216,6 @@ def initialize_distributed(
         mesh_devices = local_device_count
 
     if mesh_devices != local_device_count and n_processes <= 6:
-        import warnings
         warnings.warn(
             "Local device count does not evenly divide 6 cubed-sphere faces. "
             f"Using {mesh_devices} of {local_device_count} local devices.",

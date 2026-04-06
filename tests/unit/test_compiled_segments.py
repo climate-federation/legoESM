@@ -112,6 +112,14 @@ def _mock_step_unified(
         sw_up_toa=jnp.zeros(shape_2d),
         lw_up_toa=jnp.zeros(shape_2d),
         sw_down_toa=jnp.zeros(shape_2d),
+        du_dt=jnp.zeros(shape_3d),
+        dv_dt=jnp.zeros(shape_3d),
+        dq_i_dt=jnp.zeros(shape_3d),
+        dq_s_dt=jnp.zeros(shape_3d),
+        dq_g_dt=jnp.zeros(shape_3d),
+        dN_c_dt=jnp.zeros(shape_3d),
+        dN_r_dt=jnp.zeros(shape_3d),
+        dN_i_dt=jnp.zeros(shape_3d),
     )
     # Return held unchanged (no radiation update in mock)
     held_new = (

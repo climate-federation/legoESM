@@ -54,10 +54,13 @@ Or use the lower-level utilities directly::
 
 from __future__ import annotations
 
-from typing import Callable, NamedTuple
+from typing import Callable, NamedTuple, TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+
+if TYPE_CHECKING:
+    from legoesm.parallel.comm import CommTopology
 
 
 # ======================================================================

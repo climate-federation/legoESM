@@ -13,9 +13,14 @@ Three packing schemes:
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import NamedTuple, TYPE_CHECKING
 
 import jax.numpy as jnp
+
+if TYPE_CHECKING:
+    from legoesm.atmosphere.dynamics.spectral_sw import SpectralSWState
+    from legoesm.atmosphere.dynamics.spectral_pe import SpectralHydrostaticState
+    from legoesm.ocean.state import SpectralOceanState
 
 from legoesm.core.field import Field
 from legoesm.grids.gaussian import (
