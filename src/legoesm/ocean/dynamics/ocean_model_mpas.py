@@ -13,6 +13,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.mpas_config import MPASOceanConfig
@@ -78,6 +79,8 @@ class MPASOceanModel:
         -------
         MPASOceanState
         """
+        state = cast_pytree(state, None, "compute")
+
         config = self.config
         mesh = self.mesh
         z_coord = self.z_coord
@@ -154,18 +157,62 @@ class MPASOceanModel:
                 state_new, state, mesh, z_coord, config,
             )
 
-        # 7. Runtime bounds checks (matching cubed-sphere ocean model)
-        if config.enable_runtime_checks:
-            T_data = state_new.T.data
-            S_data = state_new.S.data
-            T_data = jnp.clip(T_data, config.temperature_min_c, config.temperature_max_c)
-            S_data = jnp.clip(S_data, config.salinity_min_psu, config.salinity_max_psu)
-            state_new = state_new._replace(
-                T=state_new.T.replace(data=T_data * mask[:, jnp.newaxis]),
-                S=state_new.S.replace(data=S_data * mask[:, jnp.newaxis]),
+        return cast_pytree(state_new, None, "storage")
+
+    def step_checked(
+        self,
+        state: MPASOceanState,
+        dt: float,
+        surface_forcing=None,
+    ) -> MPASOceanState:
+        """Advance one timestep with host-side runtime validation.
+
+        Unlike the previous implementation which silently clipped tracers,
+        this raises on out-of-bounds values so the caller sees the failure.
+        """
+        state_new = self.step(state, dt, surface_forcing)
+        if self.config.enable_runtime_checks:
+            self._assert_runtime_invariants(state_new)
+        return state_new
+
+    def _assert_runtime_invariants(self, state: MPASOceanState) -> None:
+        """Host-side runtime checks (matching cubed-sphere ocean model)."""
+        mask = state.land_mask.data
+        wet = mask > 0.5
+
+        finite_ok = bool(
+            jnp.all(jnp.isfinite(state.u.data))
+            & jnp.all(jnp.isfinite(state.T.data))
+            & jnp.all(jnp.isfinite(state.S.data))
+            & jnp.all(jnp.isfinite(state.eta.data))
+        )
+        if not finite_ok:
+            raise FloatingPointError(
+                "MPAS ocean runtime check failed: non-finite state detected"
             )
 
-        return state_new
+        config = self.config
+        T_wet = state.T.data[wet[:, jnp.newaxis].broadcast_to(state.T.data.shape)]
+        S_wet = state.S.data[wet[:, jnp.newaxis].broadcast_to(state.S.data.shape)]
+
+        if T_wet.size > 0:
+            T_min_val = float(jnp.min(T_wet))
+            T_max_val = float(jnp.max(T_wet))
+            if T_min_val < config.temperature_min_c or T_max_val > config.temperature_max_c:
+                raise ValueError(
+                    f"MPAS ocean runtime check failed: T out of bounds "
+                    f"[{T_min_val:.2f}, {T_max_val:.2f}] vs "
+                    f"[{config.temperature_min_c}, {config.temperature_max_c}]"
+                )
+        if S_wet.size > 0:
+            S_min_val = float(jnp.min(S_wet))
+            S_max_val = float(jnp.max(S_wet))
+            if S_min_val < config.salinity_min_psu or S_max_val > config.salinity_max_psu:
+                raise ValueError(
+                    f"MPAS ocean runtime check failed: S out of bounds "
+                    f"[{S_min_val:.2f}, {S_max_val:.2f}] vs "
+                    f"[{config.salinity_min_psu}, {config.salinity_max_psu}]"
+                )
 
     def integrate(
         self,

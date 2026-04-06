@@ -124,6 +124,12 @@ _SUPPORTED_PHYSICS = {
     "spectral": {"none", "held_suarez"},
 }
 
+# MPI distributed benchmark support.  Only cubed-sphere has a validated
+# MPI path in this script.  Lat-lon and Voronoi MPI implementations exist
+# (latlon_mpi.py, voronoi_mpi.py) and are exercised by
+# run_cpu_mpi_scaling.py, but are not yet wired into this GPU harness.
+_MPI_SUPPORTED_GRIDS = {"cubed-sphere"}
+
 
 @dataclass
 class TimingResult:
@@ -231,6 +237,37 @@ STRONG_RESOLUTIONS_CS = [48, 96, 192]   # cubed-sphere: ~200, ~100, ~50 km
 STRONG_RESOLUTIONS_SP = [42, 85, 170]   # spectral: T42, T85, T170
 STRONG_RESOLUTIONS_ICO = [4, 5, 6]      # icosahedral: levels 4, 5, 6
 STRONG_RESOLUTIONS_LL = [64, 128, 256]  # lat-lon: n_lat
+
+# Minimum total timing duration target (seconds).  When step times are
+# sub-millisecond (e.g., I4 at ~0.5 ms/step), 100 steps yield only
+# ~50 ms of timed work — within OS scheduling / NCCL jitter.
+# Targeting ≥2 s greatly reduces relative noise.
+_MIN_TIMING_SECONDS = 2.0
+
+
+def _auto_n_timing(n_timing_base: int, total_cells: int, n_gpus: int,
+                    max_timing: int = 2000) -> int:
+    """Scale timing steps up for small grids to ensure stable measurements.
+
+    For sub-millisecond step times (small cells/GPU), the default 100
+    timing steps yield only ~50 ms of timed work which is within OS and
+    NCCL jitter.  This helper estimates step time from cells/GPU and
+    bumps n_timing so the timed window is ≥ _MIN_TIMING_SECONDS.
+
+    Capped at *max_timing* to keep total benchmark runtime practical.
+    """
+    cells_per_gpu = total_cells // max(n_gpus, 1)
+    # Rough model: step time ~ 0.01 ms per 1000 cells/GPU (from I4–I6 data)
+    est_ms = max(cells_per_gpu / 100_000, 0.1)
+    est_total_s = est_ms * n_timing_base / 1000.0
+    if est_total_s >= _MIN_TIMING_SECONDS:
+        return n_timing_base
+    needed = int(math.ceil(_MIN_TIMING_SECONDS / (est_ms / 1000.0)))
+    # Round up to nearest 100 for clean reporting, capped
+    needed = max(needed, n_timing_base)
+    needed = min(needed, max_timing)
+    needed = ((needed + 99) // 100) * 100
+    return needed
 
 # GPU counts to sweep (must satisfy cubed-sphere tiling constraints).
 GPU_COUNTS = [1, 2, 3, 6, 24, 54, 96]  # 1-6 divide faces; >6 must be 6*k^2
@@ -352,22 +389,22 @@ def _build_physics_fn(physics_level: str, grid_type: str):
         return None
 
     if grid_type == "spectral":
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_spectral,
         )
         return held_suarez_forcing_spectral
     elif grid_type == "latlon":
-        from legoesm.atmosphere.physics.held_suarez_latlon import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_latlon,
         )
         return held_suarez_forcing_latlon
     elif grid_type == "icosahedral":
-        from legoesm.atmosphere.physics.held_suarez_mpas import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_mpas,
         )
         return held_suarez_forcing_mpas
     else:  # cubed-sphere
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing,
         )
         return held_suarez_forcing
@@ -440,6 +477,7 @@ def _build_segment_benchmark(
         days=1,
         precision="fp64" if precision == "float64" else "fp32",
         fix_moisture=False,
+        n_devices=n_gpus,
     )
 
     driver = ModelDriver(config)
@@ -722,7 +760,8 @@ def run_benchmark(
 
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.parallel.mesh import (
-        create_device_mesh, create_level_mesh, create_voronoi_device_mesh, shard_pytree,
+        create_device_mesh, create_latlon_mesh, create_level_mesh,
+        create_voronoi_device_mesh, shard_pytree,
     )
 
     # Choose timestep
@@ -736,8 +775,8 @@ def run_benchmark(
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralPrimitiveEquationModel,
             SpectralPEConfig,
-            baroclinic_wave_init_spectral,
         )
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
         grid = create_gaussian_grid(n_grid)
         hd = _hyperdiff_coeff(n_grid, grid_type)
@@ -761,7 +800,7 @@ def run_benchmark(
             MPASPrimitiveEquationModel,
             MPASPrimitiveEquationConfig,
         )
-        from legoesm.atmosphere.physics.held_suarez_mpas import baroclinic_wave_init_mpas
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
         grid = create_voronoi_mesh(subdivision_level=n_grid)
 
@@ -802,7 +841,7 @@ def run_benchmark(
             FVLatLonPrimitiveEquationModel,
             FVLatLonPrimitiveEquationConfig,
         )
-        from legoesm.atmosphere.physics.baroclinic_wave import (
+        from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init_latlon,
         )
 
@@ -821,7 +860,7 @@ def run_benchmark(
         state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
 
         total_cells = n_lat * n_lon * n_levels
-        dev_config = create_device_mesh(n_devices=n_gpus)
+        dev_config = create_latlon_mesh(n_devices=n_gpus)
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -830,7 +869,7 @@ def run_benchmark(
             CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3,
         )
-        from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
         grid = create_cubed_sphere(n_grid)
         cdgrid = create_cubed_sphere_cdgrid(grid)
@@ -859,6 +898,16 @@ def run_benchmark(
 
     backend = dev_config.backend
 
+    # Guard: warn if MPI is active for a grid without validated MPI paths.
+    if dev_config.is_distributed and grid_type not in _MPI_SUPPORTED_GRIDS:
+        print(
+            f"  WARNING: MPI distributed benchmarks for grid_type={grid_type!r} "
+            f"are not validated in this script. Only {sorted(_MPI_SUPPORTED_GRIDS)} "
+            f"have validated MPI paths. Use run_cpu_mpi_scaling.py for lat-lon "
+            f"and Voronoi MPI benchmarks.",
+            flush=True,
+        )
+
     # Cast to desired precision
     def _cast(x):
         if isinstance(x, jnp.ndarray) and jnp.issubdtype(x.dtype, jnp.floating):
@@ -866,7 +915,11 @@ def run_benchmark(
         return x
     state = jax.tree.map(_cast, state)
 
-    # MPI distributed: build layout (deferred) and scatter to rank-local
+    # MPI distributed: keep full (6, n, n, ...) state on every rank
+    # to match the production driver, which requires the full shape for
+    # pad_halo_mpi.  Each rank steps all faces; MPI halo exchange
+    # ensures owned faces stay correct.  Layout is still needed for
+    # gather_to_global at I/O time.
     from legoesm.parallel.distributed import get_active_layout
     if dev_config.is_distributed and get_active_layout() is None:
         from legoesm.parallel.distributed import get_active_topology, set_active_layout
@@ -874,11 +927,6 @@ def run_benchmark(
         topo = get_active_topology()
         if topo is not None:
             set_active_layout(make_layout(topo.rank, topo.n_processes, n_grid))
-
-    layout = get_active_layout()
-    if layout is not None and hasattr(layout, 'is_tiled'):
-        from legoesm.parallel.distributed import scatter_to_local
-        state = scatter_to_local(state, layout)
 
     # Shard across devices (SPMD for multi-GPU single-node)
     if dev_config.n_devices > 1 and not dev_config.is_distributed:
@@ -907,7 +955,7 @@ def run_benchmark(
         step_fn = make_voronoi_sharded_step(model, dev_config)
     elif grid_type == "cubed-sphere" and dev_config.n_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_sharded_step
-        step_fn = make_sharded_step(model, dev_config)
+        step_fn = make_sharded_step(model, dev_config, n=n_grid, nlev=n_levels)
     elif grid_type == "latlon" and dev_config.n_devices > 1:
         from legoesm.parallel.latlon_sharded import make_latlon_sharded_step
         step_fn = make_latlon_sharded_step(model, dev_config, physics_fn=physics_fn)
@@ -1227,7 +1275,20 @@ def run_strong_scaling(
                         )
                         continue
 
+                # Estimate total cells for auto-scaling timing steps
+                if grid_type == "icosahedral":
+                    _est_cells = (10 * 4 ** n_grid + 2) * n_levels
+                elif grid_type == "latlon":
+                    _est_cells = n_grid * 2 * n_grid * n_levels
+                elif grid_type == "spectral":
+                    _est_cells = n_grid * (n_grid + 1) * n_levels
+                else:
+                    _est_cells = 6 * n_grid * n_grid * n_levels
+                _nt = _auto_n_timing(n_timing, _est_cells, ng)
+
                 print(f"\n--- {ng} GPU(s), {res_prefix}{n_grid} [{prec}] ---")
+                if _nt != n_timing:
+                    print(f"    (auto-scaled n_timing: {n_timing} → {_nt})")
                 try:
                     result = run_benchmark(
                         n_grid=n_grid,
@@ -1236,7 +1297,7 @@ def run_strong_scaling(
                         precision=prec,
                         mode="strong",
                         n_warmup=n_warmup,
-                        n_timing=n_timing,
+                        n_timing=_nt,
                         grid_type=grid_type,
                         no_conservation=no_conservation,
                         physics_level=physics_level,

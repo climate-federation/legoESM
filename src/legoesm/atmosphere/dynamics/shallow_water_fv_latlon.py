@@ -168,18 +168,10 @@ class FVShallowWaterLatLonModel(IntegrationMixin):
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: ShallowWaterState, dt: float) -> ShallowWaterState:
-        """Advance one time step using SSP-RK3 with PPM transport.
+        """Advance one time step using SSP-RK3 with PPM transport."""
+        from legoesm.core.precision import cast_pytree
+        state = cast_pytree(state, None, "compute")
 
-        Parameters
-        ----------
-        state : ShallowWaterState
-        dt : float
-            Time step [seconds].
-
-        Returns
-        -------
-        ShallowWaterState
-        """
         def tendency_fn(s):
             tend = fv_shallow_water_tendencies_latlon(
                 s, self.grid, self.config, self.polar_filter_mask,
@@ -204,5 +196,5 @@ class FVShallowWaterLatLonModel(IntegrationMixin):
                 g=self.config.g,
             )
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 

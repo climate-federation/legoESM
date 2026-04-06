@@ -72,7 +72,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
-    use_fv3_fb: bool = False  # FV3 forward-backward step (bypasses RK3)
+    use_fv3_fb: bool = False  # EXPERIMENTAL — unstable, see docs/cubed_sphere_edge_artifacts.md
     boundary_fix: bool = False  # Replace boundary corner tendencies with interior
 
 
@@ -105,10 +105,6 @@ def cdgrid_shallow_water_tendencies(
     # 1. Mass transport via C-grid velocities (with non-orth correction)
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
-
-    # Zero-mean correction for mass conservation
-    total_area = jnp.sum(cdgrid.base.area)
-    dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
     # 2. Momentum tendencies (vector-invariant form with div damping)
     du_d_dt, dv_d_dt = cdgrid_momentum_tendencies(
@@ -245,6 +241,10 @@ class CDGridShallowWaterModel(IntegrationMixin):
         self, state: CDGridShallowWaterState, dt: float,
     ) -> CDGridShallowWaterState:
         """Advance one time step using SSP-RK3."""
+        from legoesm.core.precision import cast_pytree
+        # Cast state to compute precision at the boundary.
+        state_c = cast_pytree(state, None, "compute")
+
         def tendency_fn(s):
             dh, du, dv = cdgrid_shallow_water_tendencies(
                 s, self.cdgrid, self.config,
@@ -255,7 +255,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
             )
 
         state_new = dispatch_integrator(
-            state, tendency_fn, dt, self.config.time_integrator,
+            state_c, tendency_fn, dt, self.config.time_integrator,
         )
 
         # Owner-based sync: once per time step, after integrator
@@ -276,7 +276,8 @@ class CDGridShallowWaterModel(IntegrationMixin):
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
 
-        return state_new
+        # Cast back to storage precision.
+        return cast_pytree(state_new, None, "storage")
 
 
 # ==============================================================================
@@ -321,12 +322,22 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state, dt):
         """Advance one time step."""
-        from legoesm.core.operators_cdgrid import fv3_d2cc, _pad_halo_auto
+        from legoesm.core.precision import cast_pytree
+        state = cast_pytree(state, None, "compute")
 
         if self.config.use_fv3_fb:
-            # FV3 c_sw operators with RK3 integration.
-            # All operators (gradient + vorticity) at C-grid positions,
-            # TOTAL tendency projected to D-grid edge midpoints.
+            # EXPERIMENTAL — known unstable (NaN by step ~50).
+            # This wraps fv3_csw_tendencies in RK3, NOT the actual
+            # forward-backward step (fv3_forward_backward_step).
+            # See docs/cubed_sphere_edge_artifacts.md iterations 7-14.
+            import warnings
+            warnings.warn(
+                "use_fv3_fb=True is experimental and known unstable. "
+                "It runs C-grid tendencies through RK3, not the actual "
+                "FV3 forward-backward scheme. See "
+                "docs/cubed_sphere_edge_artifacts.md.",
+                stacklevel=2,
+            )
             from legoesm.core.fv3_sw_core import fv3_csw_tendencies
 
             def tendency_fn_csw(s):
@@ -362,28 +373,6 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
                 state, tendency_fn, dt, self.config.time_integrator,
             )
 
-        # D-A-D filter: suppress grid-scale computational mode by
-        # blending edge-midpoint winds with cell-centre-averaged values.
-        # alpha=0.2 reliably prevents the computational mode while
-        # keeping dissipation acceptable for multi-day integrations.
-        alpha = 0.2
-        n = self.cdgrid.n
-        u_cc, v_cc = fv3_d2cc(state_new.u_d, state_new.v_d, self.cdgrid)
-        # Vector halo exchange: rotates wind components at face boundaries
-        from legoesm.grids.halo import pad_halo_vector
-        grid = self.cdgrid.base
-        u_cc_pad, v_cc_pad = pad_halo_vector(
-            u_cc, v_cc,
-            grid.cos_angle, grid.sin_angle,
-            grid.cos_angle_padded, grid.sin_angle_padded,
-            interp_offsets=grid.halo_interp_offsets,
-        )
-        u_dad = 0.5 * (u_cc_pad[:, 1:-1, :-1] + u_cc_pad[:, 1:-1, 1:])
-        v_dad = 0.5 * (v_cc_pad[:, :-1, 1:-1] + v_cc_pad[:, 1:, 1:-1])
-        u_f = (1.0 - alpha) * state_new.u_d + alpha * u_dad[:, :n, :n+1]
-        v_f = (1.0 - alpha) * state_new.v_d + alpha * v_dad[:, :n+1, :n]
-        state_new = state_new._replace(u_d=u_f, v_d=v_f)
-
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
             from legoesm.core.conservation import _accumulation_dtype
@@ -399,4 +388,4 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             h_fixed = state_new.h + correction.astype(state_new.h.dtype)
             state_new = state_new._replace(h=h_fixed)
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")

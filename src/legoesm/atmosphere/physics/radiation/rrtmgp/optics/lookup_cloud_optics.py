@@ -101,20 +101,16 @@ def _load_data(
   return data
 
 
-def from_nc_file(path: str) -> LookupCloudOptics:
-  """Instantiate a `LookupCloudOptics` object from a netCDF file.
-
-  The netCDF file should contain the lookup tables for the extinction
-  coefficients, the single-scattering albedo, and the asymmetry factor for
-  liquid and ice particles.
+def from_data_file(path: str) -> LookupCloudOptics:
+  """Instantiate a ``LookupCloudOptics`` from a Zarr store or NetCDF file.
 
   Args:
-    path: The full path of the netCDF file containing the cloud optics lookup
-      tables.
+    path: The full path to a Zarr store or NetCDF file containing the cloud
+      optics lookup tables.
 
   Returns:
-    A `LookupCloudOptics` instance.
+    A ``LookupCloudOptics`` instance.
   """
-  _, tables, dims = data_loader_base.parse_nc_file(path)
+  tables, dims, _ = data_loader_base.parse_data_file(path)
   kwargs = _load_data(tables, dims)
   return LookupCloudOptics(**kwargs)

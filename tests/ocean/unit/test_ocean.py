@@ -153,6 +153,30 @@ class TestWrightEOS:
         rho = f(jnp.array(10.0), jnp.array(35.0), jnp.array(0.0))
         assert jnp.isfinite(rho)
 
+    def test_grad_interior_nonzero(self):
+        """Gradient of EOS w.r.t. T should be nonzero inside valid range."""
+        def rho_of_T(T):
+            return wright_eos(T, jnp.array(35.0), jnp.array(0.0))
+        g = jax.grad(rho_of_T)(jnp.array(10.0))
+        assert jnp.isfinite(g)
+        assert float(g) != 0.0
+
+    def test_grad_zero_outside_valid_range(self):
+        """Gradient should be zero outside the clipped range [-2, 40] degC.
+
+        This documents the piecewise-differentiable behavior: the Wright
+        polynomial is not valid outside its range, so inputs are clipped
+        and the gradient is exactly zero at the boundaries.
+        """
+        def rho_of_T(T):
+            return wright_eos(T, jnp.array(35.0), jnp.array(0.0))
+        # Well above the valid range
+        g_hot = jax.grad(rho_of_T)(jnp.array(45.0))
+        assert float(g_hot) == 0.0, f"Expected zero grad at T=45C, got {float(g_hot)}"
+        # Well below the valid range
+        g_cold = jax.grad(rho_of_T)(jnp.array(-5.0))
+        assert float(g_cold) == 0.0, f"Expected zero grad at T=-5C, got {float(g_cold)}"
+
 
 # ==============================================================================
 # Vertical Coordinate Tests

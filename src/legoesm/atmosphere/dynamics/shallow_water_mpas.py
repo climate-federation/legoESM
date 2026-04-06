@@ -161,17 +161,10 @@ class MPASShallowWaterModel(IntegrationMixin):
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: MPASShallowWaterState, dt: float) -> MPASShallowWaterState:
-        """Advance one time step.
+        """Advance one time step."""
+        from legoesm.core.precision import cast_pytree
+        state = cast_pytree(state, None, "compute")
 
-        Parameters
-        ----------
-        state : MPASShallowWaterState
-        dt : float
-
-        Returns
-        -------
-        MPASShallowWaterState
-        """
         def tendency_fn(s):
             tend = mpas_shallow_water_tendencies(
                 s, self.mesh, self.config, dt=dt)
@@ -193,7 +186,7 @@ class MPASShallowWaterModel(IntegrationMixin):
             state_new = _fix_energy_mpas(
                 state_new, state, self.mesh, self.config.g)
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 

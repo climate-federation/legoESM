@@ -121,7 +121,8 @@ class TestMetalCompatibility:
         assert "_cpu_device" in init_source
         assert "_default_device" in init_source
         assert "get_backend" in init_source
-        assert 'METAL' in init_source
+        # get_backend() returns lowercase; source uses "metal"
+        assert 'metal' in init_source.lower()
 
         step_source = inspect.getsource(SpectralOceanModel.step)
         assert "_use_cpu_for_spectral" in step_source
@@ -239,10 +240,10 @@ class TestMPIAwareness:
         from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 
         source = inspect.getsource(ocean_baroclinic_tendencies_cdgrid)
-        # C-D grid ocean uses C-D grid operators (not A-grid gradient_x_3d)
-        assert "cgrid_mass_flux_divergence_3d" in source
-        assert "cgrid_divergence_3d" in source
-        assert "dgrid_vorticity_3d" in source
+        # C-D grid ocean uses unified C-D grid operators (not A-grid gradient_x_3d)
+        assert "cgrid_mass_flux_divergence(" in source
+        assert "cgrid_divergence(" in source
+        assert "dgrid_vorticity(" in source
 
     def test_barotropic_uses_halo_operators(self):
         """Barotropic substeps should call operators with halo exchange."""

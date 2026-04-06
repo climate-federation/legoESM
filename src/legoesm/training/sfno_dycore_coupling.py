@@ -11,11 +11,14 @@ SFNO parameters (eqx.Module leaves) flow through ``jax.grad``.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
 import equinox as eqx
+
+if TYPE_CHECKING:
+    from legoesm.grids.gaussian import GaussianGrid
 
 from legoesm.ml.sfno import SFNO, SFNOConfig
 from legoesm.ml.channel_packing import PE3DChannelSpec

@@ -134,6 +134,7 @@ DEFAULT_CONFIG = {
     },
     "hardware": {
         "precision": {
+            "mode": "fp32",  # fp32, fp64, mixed, mixed_fp64_storage
             "dynamics": "float32",
             "ml": "bfloat16",
             "conservation": "float64",

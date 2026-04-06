@@ -112,13 +112,13 @@ def main():
     # Initial atmospheric state (isothermal 280 K, at rest)
     # ---------------------------------------------------------------
     if grid_type == "cubed_sphere":
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
         state = held_suarez_init(grid, sigma, T_init=280.0)
     elif grid_type == "voronoi":
-        from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_init_mpas
+        from tests.test_cases.held_suarez import held_suarez_init_mpas
         state = held_suarez_init_mpas(grid, sigma, T_init=280.0)
     else:
-        from legoesm.atmosphere.physics.held_suarez_latlon import held_suarez_init_latlon
+        from tests.test_cases.held_suarez import held_suarez_init_latlon
         state = held_suarez_init_latlon(grid, sigma, T_init=280.0)
 
     # Moisture: 60% RH with sigma^2 vertical decay

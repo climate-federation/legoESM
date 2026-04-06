@@ -510,7 +510,7 @@ class TestIntegration:
         """Hydrostatic turbulence tendencies should have correct shapes."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -531,7 +531,7 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero wind tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -558,7 +558,7 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero T tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -616,7 +616,7 @@ class TestIntegration:
         """jax.grad should work through hydrostatic turbulence physics."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -637,7 +637,7 @@ class TestIntegration:
         """Different schemes should produce different tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -682,7 +682,7 @@ class TestIntegration:
         """scheme='none' should produce zero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -1243,6 +1243,26 @@ class TestPBLHeight:
         # Stronger shear means larger V^2, so Ri is smaller -> more levels
         # where Ri < Ri_crit -> deeper PBL
         assert float(jnp.mean(h_strong)) > float(jnp.mean(h_weak))
+
+    def test_barotropic_wind_does_not_deepen_pbl(self):
+        """Adding a uniform wind offset (no extra shear) should not change PBL height.
+
+        The bulk Ri denominator must use wind shear from surface, not absolute
+        wind speed.  A barotropic wind adds the same vector to every level,
+        so the shear is unchanged and the PBL height should be identical.
+        """
+        ncol, nlev = 4, 20
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+
+        h_base = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+        # Add a large uniform barotropic wind (no shear added)
+        h_baro = diagnose_pbl_height(T, q_v, u + 50.0, v + 30.0, p_full, z_full)
+
+        # PBL height should be essentially unchanged
+        assert jnp.allclose(h_base, h_baro, rtol=1e-4), (
+            f"Barotropic wind changed PBL: {float(jnp.mean(h_base)):.1f} -> "
+            f"{float(jnp.mean(h_baro)):.1f}"
+        )
 
     def test_differentiable(self):
         """jax.grad should work through PBL height diagnosis."""

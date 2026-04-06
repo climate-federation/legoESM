@@ -24,6 +24,75 @@ logger = logging.getLogger(__name__)
 # Backends that lack float64/complex128 hardware support.
 _NO_F64_BACKENDS = frozenset({"metal"})
 
+# Cached result of the Metal health check (None = not yet tested).
+_metal_healthy: bool | None = None
+# Whether we have already applied the CPU fallback.
+_cpu_fallback_applied: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Metal health check and CPU fallback
+# ---------------------------------------------------------------------------
+
+def _metal_is_functional() -> bool:
+    """Test whether the Metal backend can execute a trivial operation.
+
+    Returns ``False`` when an incompatible ``jax-metal`` plugin is installed
+    (e.g. jax-metal 0.1.x with JAX 0.9.x).  The result is cached so the
+    probe runs at most once per process.
+    """
+    global _metal_healthy
+    if _metal_healthy is not None:
+        return _metal_healthy
+
+    try:
+        import jax
+        import jax.numpy as jnp
+        x = jax.device_put(1.0, jax.devices()[0])
+        _ = float(x + x)
+        _metal_healthy = True
+    except Exception:
+        _metal_healthy = False
+    return _metal_healthy
+
+
+def ensure_metal_or_fallback() -> None:
+    """If Metal is the default backend but non-functional, fall back to CPU.
+
+    This sets ``jax.default_device`` to the CPU device so all subsequent
+    array creation and computation runs on CPU transparently.  Call this
+    once at startup (e.g. from ``configure_backend``).
+    """
+    global _cpu_fallback_applied
+    if _cpu_fallback_applied:
+        return
+
+    import jax
+    if jax.default_backend().lower() != "metal":
+        return
+
+    if _metal_is_functional():
+        return
+
+    cpu = jax.devices("cpu")[0]
+    jax.config.update("jax_default_device", cpu)
+    _cpu_fallback_applied = True
+    warnings.warn(
+        "Metal backend detected but non-functional (likely jax-metal / JAX "
+        "version mismatch). All computation will run on CPU.  To silence "
+        "this warning, either upgrade jax-metal or set JAX_PLATFORMS=cpu.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    logger.warning(
+        "Metal backend broken — forced CPU fallback via jax.default_device"
+    )
+
+
+def metal_fell_back_to_cpu() -> bool:
+    """Return ``True`` if Metal was detected but we fell back to CPU."""
+    return _cpu_fallback_applied
+
 
 # ---------------------------------------------------------------------------
 # Backend query
@@ -33,9 +102,18 @@ def get_backend() -> str:
     """Return the current JAX default backend name (lowercase).
 
     Common values: ``"cpu"``, ``"gpu"``, ``"tpu"``, ``"metal"``.
+
+    If the Metal backend was detected but is non-functional and we fell
+    back to CPU, this returns ``"cpu"``.
     """
     import jax
-    return jax.default_backend().lower()
+    backend = jax.default_backend().lower()
+    if backend == "metal":
+        # Lazy health check — triggers at most once.
+        ensure_metal_or_fallback()
+        if _cpu_fallback_applied:
+            return "cpu"
+    return backend
 
 
 def supports_float64(backend: str | None = None) -> bool:
@@ -100,6 +178,15 @@ _TPU_XLA_FLAGS = {
 
 _NVIDIA_GPU_XLA_FLAGS = {
     "xla_gpu_cudnn_gemm_fusion_level": "3",
+    # Overlap compute with collective communication (halo exchange, allreduce).
+    "xla_gpu_enable_latency_hiding_scheduler": "true",
+    "xla_gpu_enable_async_all_reduce": "true",
+    # Enable async for ALL collectives (ppermute, all-gather, etc.),
+    # not just allreduce.  Critical for icosahedral grids that use
+    # ppermute-based halo exchange — without this flag, ppermute blocks
+    # until completion, leaving the GPU idle during communication.
+    "xla_gpu_enable_async_collectives": "true",
+    "xla_gpu_enable_highest_priority_async_stream": "true",
 }
 
 _AMD_GPU_XLA_FLAGS: dict[str, str] = {
@@ -176,11 +263,12 @@ def configure_backend(backend: str | None = None) -> str:
     elif backend == "gpu":
         devices = jax.devices()
         vendor = gpu_vendor()
-        if len(devices) > 1:
-            if vendor == "nvidia":
-                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
-            elif vendor == "amd":
-                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+        # Apply XLA flags unconditionally — latency hiding and GEMM fusion
+        # benefit single-GPU and MPI-per-rank setups too.
+        if vendor == "nvidia":
+            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+        elif vendor == "amd":
+            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
         if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
             os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
         # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa).
@@ -190,7 +278,9 @@ def configure_backend(backend: str | None = None) -> str:
         logger.info("GPU vendor: %s (%d device(s))", vendor, len(devices))
 
     elif backend == "metal":
-        pass  # No special flags needed.
+        ensure_metal_or_fallback()
+        if _cpu_fallback_applied:
+            backend = "cpu"
 
     else:  # cpu
         if "XLA_FLAGS" not in os.environ:

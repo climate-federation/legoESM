@@ -36,3 +36,5 @@ from legoesm.driver.kernel_registry import (
 from legoesm.driver.diagnostics import DiagnosticCollector
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.driver.earth_system_driver import EarthSystemDriver
+from legoesm.driver.coupled_esm_driver import CoupledESMDriver
+from legoesm.driver.coupled_config import CoupledConfig, PRESETS as COUPLED_PRESETS

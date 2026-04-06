@@ -2,7 +2,13 @@
 
 Computes in-situ density rho(T, S, p) using the Wright (1997)
 parameterization as implemented in MOM6 (MOM_EOS_Wright.F90).
-Pure JAX functions, fully compatible with jit/grad/vmap.
+Pure JAX functions, compatible with jit/grad/vmap.  Inputs are clipped
+to the Wright EOS valid range (T in [-2, 40] degC, S in [0, 42] PSU),
+so gradients are exactly zero outside that range.  This is physically
+correct (the polynomial is not valid there) but means the EOS is only
+*piecewise* differentiable; callers using jax.grad through long
+integrations should be aware that out-of-range states produce zero
+gradients rather than NaN or extrapolated values.
 
 Reference
 ---------
@@ -15,6 +21,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.precision import _resolve_dtype
 
 # ==============================================================================
 # Ocean constants
@@ -86,10 +93,13 @@ def wright_eos(
     """
     orig_dtype = T.dtype
 
-    # Promote to float64 for intermediate polynomial evaluation
-    T = T.astype(jnp.float64)
-    S = S.astype(jnp.float64)
-    p = p.astype(jnp.float64)
+    # Promote to the EOS compute dtype (float64 in mixed mode) for
+    # intermediate polynomial evaluation.  On backends that lack float64
+    # (e.g. Metal), _resolve_dtype silently returns float32.
+    hi = _resolve_dtype("equation_of_state", "compute")
+    T = T.astype(hi)
+    S = S.astype(hi)
+    p = p.astype(hi)
 
     # Clip inputs to Wright EOS valid range [-2, 40] degC, [0, 42] PSU
     T = jnp.clip(T, -2.0, 40.0)
@@ -147,9 +157,10 @@ def thermal_expansion_coeff(
     -------
     array : α [1/K], same shape as inputs.
     """
-    T64 = T.astype(jnp.float64)
-    S64 = S.astype(jnp.float64)
-    p64 = p.astype(jnp.float64)
+    hi = _resolve_dtype("equation_of_state", "compute")
+    T64 = T.astype(hi)
+    S64 = S.astype(hi)
+    p64 = p.astype(hi)
     T_c = jnp.clip(T64, -2.0, 40.0)
     S_c = jnp.clip(S64, 0.0, 42.0)
     flat_T = T_c.ravel()
@@ -177,9 +188,10 @@ def haline_contraction_coeff(
     -------
     array : β [1/PSU], same shape as inputs.
     """
-    T64 = T.astype(jnp.float64)
-    S64 = S.astype(jnp.float64)
-    p64 = p.astype(jnp.float64)
+    hi = _resolve_dtype("equation_of_state", "compute")
+    T64 = T.astype(hi)
+    S64 = S.astype(hi)
+    p64 = p.astype(hi)
     T_c = jnp.clip(T64, -2.0, 40.0)
     S_c = jnp.clip(S64, 0.0, 42.0)
     flat_T = T_c.ravel()

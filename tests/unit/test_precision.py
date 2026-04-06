@@ -98,8 +98,12 @@ class TestCastHelpers:
 
     def test_cast_to_compute(self):
         x = jnp.ones(5, dtype=jnp.float64)
+        # Default: downcast skipped (fp64 -> fp32 blocked)
         y = cast(x, "tracer_advection", "compute")
-        assert y.dtype == jnp.float32
+        assert y.dtype == jnp.float64
+        # Explicit downcast allowed
+        y2 = cast(x, "tracer_advection", "compute", allow_downcast=True)
+        assert y2.dtype == jnp.float32
 
     def test_cast_to_accumulate(self):
         x = jnp.ones(5, dtype=jnp.float32)
@@ -156,8 +160,13 @@ class TestModuleOverrides:
 
     def test_no_override_uses_global(self):
         x = jnp.ones(5, dtype=jnp.float64)
+        # Without override, global fp32 policy applies but downcast is
+        # skipped by default to prevent silent precision loss.
         y = cast(x, "tracer_advection", "compute")
-        assert y.dtype == jnp.float32
+        assert y.dtype == jnp.float64
+        # With explicit allow_downcast, it does downcast.
+        y2 = cast(x, "tracer_advection", "compute", allow_downcast=True)
+        assert y2.dtype == jnp.float32
 
     def test_clear_overrides(self):
         set_module_override("foo", compute="fp64")
@@ -285,6 +294,7 @@ class TestRecommendedOverrides:
         clear_module_overrides()
 
     def test_mixed_mode_sets_overrides(self):
+        set_policy(PrecisionPolicy.mixed())
         set_recommended_overrides("mixed")
         p = get_policy()
         assert p.storage == jnp.float32
@@ -294,11 +304,13 @@ class TestRecommendedOverrides:
         assert overrides["barotropic_solver"]["compute"] == jnp.float64
 
     def test_fp32_mode_no_overrides(self):
+        set_policy(PrecisionPolicy.fp32())
         set_recommended_overrides("fp32")
         assert get_module_overrides() == {}
         assert get_policy().accumulate == jnp.float32
 
     def test_fp64_mode_no_overrides(self):
+        set_policy(PrecisionPolicy.fp64())
         set_recommended_overrides("fp64")
         assert get_module_overrides() == {}
         assert get_policy().compute == jnp.float64

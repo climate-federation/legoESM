@@ -406,8 +406,6 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
     uc_mass, vc_mass = fv3_cc2c(u_cc, v_cc, cdgrid)
     dh_dt = cgrid_mass_flux_divergence(h, uc_mass, vc_mass, cdgrid)
-    total_area = jnp.sum(cdgrid.base.area)
-    dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
     # 3. KE at cell centres (FV3 upwind formula)
     uc_left = uc[:, :-1, :]
@@ -521,20 +519,32 @@ def _d_sw(h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
     """
     n = cdgrid.n
 
-    # 1. Convert updated covariant uc/vc to physical face-normal for PPM transport.
-    # The covariant uc is the projection of velocity onto the i-coordinate
-    # line.  The physical face-normal velocity is:
-    #   uc_phys = (uc_cov - v_at_u * cosa_u) * rsin_u
-    # At face boundaries the sin_sg cancellation means uc_cov ≈ uc_phys * sin_sg,
-    # but for the PPM mass transport which expects uc_phys, we need to undo
-    # this.  The simplest approach: pass uc_new directly (covariant ≈ physical
-    # on nearly orthogonal grids, sin_alpha ≈ 1 at interior).  The c_sw half
-    # already did the primary transport; the d_sw PPM is a correction step.
+    # 1. Convert updated covariant uc/vc to physical face-normal velocities.
+    # cgrid_mass_flux_divergence builds fluxes as h_face * u_c * dy, so u_c
+    # must be the physical face-normal velocity, not the covariant projection.
+    # Physical face-normal: uc_phys = (uc_cov - v_at_u * cosa_u) * rsin_u
+    # We approximate v_at_u from the D-grid v_d (same time level as uc_new
+    # was derived from) via simple averaging to the u-face position.
+    cosa_u = cdgrid.cosa_u     # (6, n+1, n)
+    rsin_u = cdgrid.rsin_u     # (6, n+1, n)
+    cosa_v = cdgrid.cosa_v     # (6, n, n+1)
+    rsin_v = cdgrid.rsin_v     # (6, n, n+1)
 
-    # 2. Mass transport (PPM) with updated C-grid velocities (dt/2 half-step).
-    dh = cgrid_mass_flux_divergence(h_star, uc_new, vc_new, cdgrid)
-    total_area = jnp.sum(cdgrid.base.area)
-    dh = dh - jnp.sum(dh * cdgrid.base.area) / total_area
+    # v at u-face positions: average v_d along j to the u-face j-index
+    v_at_u = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n-1, n) → need (6, n+1, n)
+    # Pad to cover the n+1 u-face rows
+    v_at_u_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    v_at_u = 0.5 * (v_at_u_pad[:, :, :-1] + v_at_u_pad[:, :, 1:])  # (6, n+1, n)
+
+    # u at v-face positions: average u_d along i to the v-face i-index
+    u_at_v_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    u_at_v = 0.5 * (u_at_v_pad[:, :-1, :] + u_at_v_pad[:, 1:, :])  # (6, n, n+1)
+
+    uc_phys = (uc_new - v_at_u * cosa_u) * rsin_u
+    vc_phys = (vc_new - u_at_v * cosa_v) * rsin_v
+
+    # 2. Mass transport (PPM) with physical face-normal velocities (dt/2 half-step).
+    dh = cgrid_mass_flux_divergence(h_star, uc_phys, vc_phys, cdgrid)
     h_new = h_star + 0.5 * dt * dh
 
     # 3. D-grid momentum update using existing corner operators.

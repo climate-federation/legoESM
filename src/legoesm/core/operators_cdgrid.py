@@ -1339,18 +1339,25 @@ def fv3_sw_tendencies(
     h, u_d, v_d, h_s, cdgrid,
     g=9.80616, div_damp=0.0, hyperdiff_coeff=0.0,
     boundary_fix=False,
+    zero_mean_correction=False,
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
-    Uses a corner-based momentum computation for stability (compact
-    stencil avoids the wide-stencil computational mode), with
-    edge-midpoint mass transport via PPM:
+    Hybrid FV3-faithful approach compatible with RK3 integration:
 
-    1. Edge-midpoint D-grid -> cell-centre -> C-grid (mass transport)
-    2. Corner winds from D-grid edge averages (pad + average to corners)
-    3. Corner momentum tendencies (Arakawa-Lamb gradient + vorticity)
-    4. Corner tendencies averaged back to edge-midpoint positions
-    5. Biharmonic hyperdiffusion at cell centres projected to edges
+    1. ``_d2a2c_vect``: D-grid → A-grid (contravariant) → C-grid
+       with 4th-order Lagrange interpolation, covariant→contravariant
+       solve, and sin_sg upwinding at face edges.
+    2. PPM mass flux divergence using C-grid face-normal velocities.
+    3. FV3-style upwind KE from contravariant A-grid and covariant
+       C-grid velocities.
+    4. Arakawa-Lamb gradient of Bernoulli function at D-grid corners.
+    5. D-grid circulation vorticity from corner winds.
+    6. Corner tendencies averaged to edge-midpoint positions.
+
+    The improved ``_d2a2c_vect`` gives 4th-order interior interpolation
+    with covariant→contravariant resolution, eliminating the wind errors
+    from the simpler 2-point averaging approach.
 
     Parameters
     ----------
@@ -1368,40 +1375,38 @@ def fv3_sw_tendencies(
     n = cdgrid.n
 
     # (a) Cell-centre and C-grid velocities for mass transport
-    u_cc, v_cc, u_c, v_c = fv3_d2cc2c(u_d, v_d, cdgrid)
+    u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
+    u_c, v_c = fv3_cc2c(u_cc, v_cc, cdgrid)
 
     # (b) Height tendency (PPM mass flux divergence)
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
-    total_area = jnp.sum(cdgrid.base.area)
-    dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
+    if zero_mean_correction:
+        total_area = jnp.sum(cdgrid.base.area)
+        dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
-    # (c) Bernoulli function from ORIGINAL cell-centre winds.
-    # Computing KE here (not inside cdgrid_momentum_tendencies) avoids
-    # the double-averaging that occurs when corner winds are averaged
-    # back to cell centres for KE.
+    # (c) Bernoulli function using physical cell-centre winds
     KE = 0.5 * (u_cc ** 2 + v_cc ** 2)
     B = KE + g * (h + h_s)
+
+    # (d) Arakawa-Lamb gradient at D-grid corners (stable with RK3)
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
-    # (d) Corner winds from edge midpoints for vorticity computation.
-    # mode='edge' padding is acceptable here because the vorticity
-    # circulation uses edge lengths (exact) and the boundary error
-    # is limited to the outermost cell row.
+    # (e) Corner winds from edge midpoints for vorticity
     u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
     u_corner = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])
     v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
     v_corner = 0.5 * (v_d_pad[:, :, :-1] + v_d_pad[:, :, 1:])
 
-    # (e) Vorticity at cell centres → interpolated to corners
+    # (f) Vorticity at cell centres → interpolated to corners
     zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
     zeta_abs = zeta + cdgrid.base.f
     zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
 
-    # (f) Momentum tendencies at D-grid corners
+    # (g) Momentum tendencies at D-grid corners
     du_corner = zeta_corner * v_corner - dB_dx
     dv_corner = -zeta_corner * u_corner - dB_dy_perp
 
-    # (g) Divergence damping
+    # (h) Divergence damping at D-grid corners
     if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
         area_min = jnp.min(cdgrid.base.area)
@@ -1414,85 +1419,23 @@ def fv3_sw_tendencies(
         du_corner = du_corner + adaptive_coeff * ddiv_dx
         dv_corner = dv_corner + adaptive_coeff * ddiv_dy_perp
 
-    # (h) Biharmonic hyperdiffusion
+    # (i) Biharmonic hyperdiffusion
     if hyperdiff_coeff > 0:
         du_corner = du_corner - hyperdiff_coeff * _laplacian_dgrid(
             _laplacian_dgrid(u_corner, cdgrid), cdgrid)
         dv_corner = dv_corner - hyperdiff_coeff * _laplacian_dgrid(
             _laplacian_dgrid(v_corner, cdgrid), cdgrid)
 
-    # (i) Vertex fix
+    # (j) Vertex fix
     du_corner, dv_corner = _extrapolate_boundary_corners(du_corner, dv_corner, n)
 
-    # (i2) Boundary ring fix: replace outermost corner ring (dist=0)
-    #      with the nearest interior ring (dist=1).  The A-L gradient's
-    #      halo-error amplification is concentrated entirely in dist=0;
-    #      dist=1+ uses only face-interior data and is accurate.
-    #      Mass transport retains full cross-face halo coupling.
-    if boundary_fix:
-        du_corner = du_corner.at[:, 0, :].set(du_corner[:, 1, :])
-        du_corner = du_corner.at[:, n, :].set(du_corner[:, n - 1, :])
-        du_corner = du_corner.at[:, :, 0].set(du_corner[:, :, 1])
-        du_corner = du_corner.at[:, :, n].set(du_corner[:, :, n - 1])
-        dv_corner = dv_corner.at[:, 0, :].set(dv_corner[:, 1, :])
-        dv_corner = dv_corner.at[:, n, :].set(dv_corner[:, n - 1, :])
-        dv_corner = dv_corner.at[:, :, 0].set(dv_corner[:, :, 1])
-        dv_corner = dv_corner.at[:, :, n].set(dv_corner[:, :, n - 1])
-
-    # (j) Average corner tendencies to edge-midpoint positions
+    # (k) Average corner tendencies to edge-midpoint positions
     du_d_dt = 0.5 * (du_corner[:, :-1, :] + du_corner[:, 1:, :])   # (6, n, n+1)
     dv_d_dt = 0.5 * (dv_corner[:, :, :-1] + dv_corner[:, :, 1:])   # (6, n+1, n)
 
     return dh_dt, du_d_dt, dv_d_dt
 
 
-# ==============================================================================
-# Legacy aliases for backward compatibility
-# ==============================================================================
-
-def dgrid_vorticity_3d(u_d, v_d, cdgrid):
-    """Alias: dgrid_vorticity handles both 2D and 3D."""
-    return dgrid_vorticity(u_d, v_d, cdgrid)
-
-
-def cgrid_divergence_3d(u_c, v_c, cdgrid):
-    """Alias: cgrid_divergence handles both 2D and 3D."""
-    return cgrid_divergence(u_c, v_c, cdgrid)
-
-
-def cgrid_mass_flux_divergence_3d(h, u_c, v_c, cdgrid):
-    """Alias: cgrid_mass_flux_divergence handles both 2D and 3D."""
-    return cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
-
-
-def _arakawa_lamb_gradient_3d(B, cdgrid):
-    """Alias: _arakawa_lamb_gradient handles both 2D and 3D."""
-    return _arakawa_lamb_gradient(B, cdgrid)
-
-
-def _interp_center_to_corner_3d(field, cdgrid):
-    """Alias: _interp_center_to_corner handles both 2D and 3D."""
-    return _interp_center_to_corner(field, cdgrid)
-
-
-def cdgrid_momentum_tendencies_3d(
-    u_d, v_d, p_prime, cdgrid, rho_0,
-    A_h=0.0, div_v=None, f_3d=None,
-    u_prime=None, v_prime=None,
-):
-    """Alias: cdgrid_momentum_tendencies handles both 2D and 3D."""
-    return cdgrid_momentum_tendencies(
-        p_prime, u_d, v_d, jnp.zeros(cdgrid.base.area.shape), cdgrid,
-        rho_0=rho_0, A_h=A_h, div_v=div_v, f_3d=f_3d,
-        u_prime=u_prime, v_prime=v_prime,
-    )
-
-
-# Keep _smooth_boundary_cells for any code that imports it, but make it a no-op
-# since FV3-faithful operators should not need boundary smoothing.
-def _smooth_boundary_cells(field, cdgrid):
-    """No-op: FV3-faithful operators handle boundaries via d2a2c."""
-    return field
 
 
 # ==============================================================================

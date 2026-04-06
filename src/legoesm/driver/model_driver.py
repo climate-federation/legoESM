@@ -338,7 +338,7 @@ class ModelDriver:
         NLEV = cfg.grid.nlev
 
         if cfg.grid.grid_type == "voronoi":
-            from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_init_mpas
+            from tests.test_cases.held_suarez import held_suarez_init_mpas
             shape_3d = (self.grid.nCells, NLEV)
             self.state = held_suarez_init_mpas(
                 self.grid, self.sigma, T_init=cfg.T_init,
@@ -356,14 +356,14 @@ class ModelDriver:
             )
         else:
             if cfg.grid.grid_type == "cubed_sphere":
-                from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+                from tests.test_cases.held_suarez import held_suarez_init
                 shape_3d = (6, N, N, NLEV)
                 self.state = held_suarez_init(
                     self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
                 )
             else:
                 # Lat-lon and Gaussian grids use (n_lat, n_lon, nlev) layout
-                from legoesm.atmosphere.physics.held_suarez_latlon import held_suarez_init_latlon
+                from tests.test_cases.held_suarez import held_suarez_init_latlon
                 shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
                 self.state = held_suarez_init_latlon(
                     self.grid, self.sigma, T_init=cfg.T_init,
@@ -642,16 +642,29 @@ class ModelDriver:
                     from legoesm.parallel.layout import scatter, gather
                     from legoesm.core.field import Field
                     from legoesm.core.state import HydrostaticState
-                    # Extract owned faces, then gather to global on all ranks
+                    # Only rank 0 needs the full state for diagnostics,
+                    # so use root_only=True to save 50% MPI bandwidth
+                    # (MPI.Gather instead of MPI.Allgather).
                     _ofi = list(self._owned_face_ids)
                     fields_local = {
                         'u': state.u.data[_ofi], 'v': state.v.data[_ofi],
                         'T': state.T.data[_ofi], 'p_s': state.p_s.data[_ofi],
                         'phis': state.phis.data[_ofi],
                     }
+                    # All ranks must participate in MPI.Gather
                     fields_global = {}
                     for name, arr in fields_local.items():
-                        fields_global[name] = gather(arr, self._layout)
+                        fields_global[name] = gather(arr, self._layout, root_only=True)
+
+                    # Gather tracers (all ranks participate)
+                    for tname in ('q_v', 'q_c', 'q_r'):
+                        arr = kwargs.get(tname)
+                        if arr is not None:
+                            kwargs[tname] = gather(arr[_ofi], self._layout, root_only=True)
+
+                    # Only rank 0 collects full diagnostics
+                    if self._mpi_rank != 0:
+                        return {'mean_T': 0.0, 'max_v': 0.0}
 
                     gathered = HydrostaticState(
                         u=Field(fields_global['u'], name="u", dims=state.u.dims, units=state.u.units),
@@ -661,16 +674,6 @@ class ModelDriver:
                         phis=Field(fields_global['phis'], name="phis", dims=state.phis.dims, units=state.phis.units),
                     )
                     kwargs['state'] = gathered
-
-                    # Also gather tracers
-                    for tname in ('q_v', 'q_c', 'q_r'):
-                        arr = kwargs.get(tname)
-                        if arr is not None:
-                            kwargs[tname] = gather(arr[_ofi], self._layout)
-
-                    # Only rank 0 collects diagnostics
-                    if self._mpi_rank != 0:
-                        return {'mean_T': 0.0, 'max_v': 0.0}
 
                 return self.diagnostics.collect(**kwargs)
             elif self._device_config.mesh is not None:
@@ -704,7 +707,7 @@ class ModelDriver:
 
         # Held-Suarez Newtonian temperature relaxation (precomputed coefficients)
         if cfg.held_suarez_forcing:
-            from legoesm.atmosphere.physics.held_suarez import (
+            from tests.test_cases.held_suarez import (
                 held_suarez_equilibrium_temperature,
                 K_A, K_S, SIGMA_B,
             )
@@ -753,6 +756,7 @@ class ModelDriver:
             precision=self.config.precision,
             distributed=self.config.distributed,
             grid_type=self.config.grid.grid_type,
+            n_devices=self.config.n_devices,
         )
         self._device_config = rc.device_config
 
@@ -871,15 +875,43 @@ class ModelDriver:
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save checkpoint to output directory using unified restart API.
 
-        When running under MPI (``is_distributed``), uses per-rank
-        distributed checkpoint to avoid gathering the full state.
+        When running under MPI with partitioned state, uses per-rank
+        distributed checkpoint so every rank writes its own partition
+        concurrently (no barrier).  For replicated state, only rank 0
+        writes and signals completion via a lightweight barrier.
         """
         elapsed_day = day - self.config.start_day
 
-        # Distributed path: rank 0 saves the full state (replicated dynamics)
-        # plus carry_aux for held radiation and conservation targets.
+        # Distributed path
         if (self._device_config is not None
                 and self._device_config.is_distributed):
+
+            # Partitioned state: each rank writes its own partition
+            if self._layout is not None and self._owned_face_ids is not None:
+                ckpt_dir = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}"
+                from legoesm.io.distributed_checkpoint import save_checkpoint_distributed
+                save_checkpoint_distributed(
+                    path=ckpt_dir,
+                    state=self.state,
+                    rank=self._mpi_rank,
+                    n_ranks=self._mpi_world_size,
+                    step=step,
+                    day=day,
+                    config=self.config,
+                    q_v=self.q_v,
+                    q_c=self.q_c,
+                    q_r=self.q_r,
+                    diag_accumulators=self._carry_aux,
+                )
+                # Lightweight barrier: only needed so rank 0's metadata.json
+                # is flushed before any rank tries to load the checkpoint.
+                from mpi4py import MPI
+                MPI.COMM_WORLD.Barrier()
+                if self._mpi_rank == 0:
+                    logger.info(f"  Checkpoint: {ckpt_dir.name} (distributed, {self._mpi_world_size} ranks)")
+                return
+
+            # Replicated state: only rank 0 writes
             if self._mpi_rank == 0:
                 ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
                 save_restart(
@@ -894,7 +926,6 @@ class ModelDriver:
                     carry_aux=self._carry_aux,
                 )
                 logger.info(f"  Checkpoint: {ckpt_path.name} (rank 0)")
-            # Barrier so all ranks wait for rank 0 to finish writing
             from mpi4py import MPI
             MPI.COMM_WORLD.Barrier()
             return
@@ -1064,7 +1095,7 @@ class ModelDriver:
 
         # Wrap with Held-Suarez forcing when enabled
         if cfg.held_suarez_forcing:
-            from legoesm.atmosphere.physics.held_suarez_mpas import held_suarez_forcing_mpas
+            from tests.test_cases.held_suarez import held_suarez_forcing_mpas
             _rrtmgp_fn = physics_fn
 
             def physics_fn(state, mesh, sigma_coord, phys_state=None):
@@ -1626,6 +1657,10 @@ class ModelDriver:
 
             # Diagnostics
             if diag_interval > 0 and current_step % diag_interval == 0:
+                # Convert accumulated precipitation (kg/m²) to rate (kg/m²/s)
+                # so diagnostics can multiply by 86400 to get mm/day.
+                seg_precip_rate = seg_precip / (seg_steps * DT)
+
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,
@@ -1635,7 +1670,7 @@ class ModelDriver:
                     q_r=self.q_r,
                     sst=sst,
                     sic=sic,
-                    precip_total=seg_precip,
+                    precip_total=seg_precip_rate,
                     sw_up_toa=held_sw_up_toa,
                     lw_up_toa=held_lw_up_toa,
                     sw_net_sfc=held_sw_net_sfc,

@@ -16,6 +16,7 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.precision import cast_pytree
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import LatLonOceanState, LatLonOceanConfig
@@ -165,6 +166,8 @@ class LatLonOceanModel:
         -------
         LatLonOceanState
         """
+        state = cast_pytree(state, None, "compute")
+
         # 1. Baroclinic tendencies
         tend = self.tendencies(state, surface_forcing)
 
@@ -183,7 +186,9 @@ class LatLonOceanModel:
             S=state.S.replace(data=S_new),
         )
 
-        # 4. Barotropic substeps
+        # 4. Barotropic substeps (sole handler of eta update via continuity)
+        # Do NOT pre-apply tend.deta_dt — the barotropic solver computes the
+        # same depth-integrated flux divergence, so pre-applying double-counts.
         dt_s = dt / self.config.n_barotropic_substeps
         state_new = barotropic_substeps_latlon(
             state_mid, dt_s, self.config.n_barotropic_substeps,
@@ -199,7 +204,7 @@ class LatLonOceanModel:
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     def step_checked(
         self, state: LatLonOceanState, dt: float,

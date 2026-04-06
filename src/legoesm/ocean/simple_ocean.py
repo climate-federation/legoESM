@@ -33,8 +33,8 @@ class SimpleOceanConfig(NamedTuple):
     sst_constant: float = 300.0      # Global constant SST [K]
     # Slab ocean
     h_mix: float = 50.0              # Mixed-layer depth [m]
-    rho_ocean: float = 1025.0        # Ocean density [kg/m3]
-    c_ocean: float = 3994.0          # Seawater specific heat [J/kg/K]
+    rho_ocean: float = 1025.0        # Ocean density [kg/m3] (= eos.rho_0)
+    c_ocean: float = 3994.0          # Seawater specific heat [J/kg/K] (= eos.c_sw)
     Q_flux: float = 0.0              # Prescribed OHT convergence [W/m2]
     albedo_ocean: float = 0.06
     emissivity_ocean: float = 0.97

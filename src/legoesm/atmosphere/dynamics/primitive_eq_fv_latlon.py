@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.precision import cast_pytree
 from legoesm.core.state import HydrostaticState, HydrostaticTendencies
 from legoesm.core.operators_latlon import (
     gradient_x as _gradient_x_2d,
@@ -122,7 +123,7 @@ def fv_latlon_hydrostatic_tendencies(
     kappa = constants.kappa
     dsigma = sigma_coord.dsigma
 
-    p_s = jnp.clip(p_s, 100.0, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
 
     # --- 1. Pressure at full levels ---
     p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
@@ -313,6 +314,7 @@ class FVLatLonPrimitiveEquationModel(IntegrationMixin):
     @partial(jax.jit, static_argnums=(0, 3))
     def step(self, state: HydrostaticState, dt: float, physics_fn=None) -> HydrostaticState:
         """Advance one time step, optionally with physics forcing."""
+        state = cast_pytree(state, None, "compute")
         if self.polar_mask is not None:
             state = _filter_state(state, self.grid, self.polar_mask)
 
@@ -348,7 +350,7 @@ class FVLatLonPrimitiveEquationModel(IntegrationMixin):
         if self.config.use_conservation_fixer and self.config.fix_mass:
             state_new = fix_mass_hydrostatic_latlon(state_new, state, self.grid)
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     def step_with_physics(self, state, dt, physics_fn=None):
         """Backward-compatible wrapper for step() with physics."""

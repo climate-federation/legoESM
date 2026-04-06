@@ -31,12 +31,12 @@ from legoesm.core.operators_cdgrid import (
     dgrid_to_center_vector,
     dgrid_to_cgrid,
     cgrid_to_dgrid,
-    dgrid_vorticity_3d,
-    cgrid_divergence_3d,
-    cgrid_mass_flux_divergence_3d,
+    dgrid_vorticity,
+    cgrid_divergence,
+    cgrid_mass_flux_divergence,
     cgrid_tracer_advection_fct,
-    _arakawa_lamb_gradient_3d,
-    _interp_center_to_corner_3d,
+    _arakawa_lamb_gradient,
+    _interp_center_to_corner,
     _laplacian_dgrid,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
@@ -52,38 +52,6 @@ from legoesm.ocean.vertical import (
     upwind_vertical_gradient,
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
-
-
-# ==============================================================================
-# Cell-centre ↔ D-grid conversion
-# ==============================================================================
-
-def _center_to_dgrid_3d(u_cc, v_cc, cdgrid):
-    """Cell-centre velocities → D-grid corners (with cross-face rotation).
-
-    Parameters
-    ----------
-    u_cc, v_cc : jax.Array, shape (6, n, n, nlev)
-
-    Returns
-    -------
-    u_d, v_d : jax.Array, shape (6, n+1, n+1, nlev)
-    """
-    return center_to_dgrid_vector(u_cc, v_cc, cdgrid)
-
-
-def _dgrid_to_center_3d(u_d, v_d, cdgrid):
-    """D-grid corner velocities → cell-centre velocities (4-point average).
-
-    Parameters
-    ----------
-    u_d, v_d : jax.Array, shape (6, n+1, n+1, nlev)
-
-    Returns
-    -------
-    u_cc, v_cc : jax.Array, shape (6, n, n, nlev)
-    """
-    return dgrid_to_center_vector(u_d, v_d)
 
 
 # ==============================================================================
@@ -165,40 +133,47 @@ def ocean_baroclinic_tendencies_cdgrid(
     rho_prime = rho - rho_0
 
     # --- 3. Baroclinic pressure gradient ---
+    # Promote to higher precision: cumulative pressure sums lose precision
+    # in float32 for deep ocean layers (large p, small dp differences).
+    # Use result_type to only upcast (never downcast from current dtype).
+    from legoesm.core.precision import _resolve_dtype
+    _pg_dt = jnp.result_type(rho_prime.dtype, _resolve_dtype("pressure_gradient", "compute"))
     dz_actual = z_coord.dz_ref * J[..., jnp.newaxis]
-    dp_layer = rho_prime * g * dz_actual
+    rho_prime_hi = rho_prime.astype(_pg_dt)
+    dz_hi = dz_actual.astype(_pg_dt)
+    dp_layer = rho_prime_hi * g * dz_hi
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
-    p_prime = p_prime + 0.5 * dp_layer
+    p_prime = (p_prime + 0.5 * dp_layer).astype(T.dtype)
 
     # --- 4. Convert to D-grid ---
-    u_d, v_d = _center_to_dgrid_3d(u_a * mask_3d, v_a * mask_3d, cdgrid)
+    u_d, v_d = center_to_dgrid_vector(u_a * mask_3d, v_a * mask_3d, cdgrid)
 
     # --- 5. C-grid velocities for mass transport ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
 
     # --- 6. Flux divergence for vertical velocity ---
     # Use cell-centre for flux divergence (cell-centre h_k and velocities)
-    flux_div_k = cgrid_mass_flux_divergence_3d(
+    flux_div_k = cgrid_mass_flux_divergence(
         h_k, u_c, v_c, cdgrid,
     )
     w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
 
     # --- 7. Velocity divergence for skew-symmetric correction ---
-    div_v = cgrid_divergence_3d(u_c, v_c, cdgrid)
+    div_v = cgrid_divergence(u_c, v_c, cdgrid)
 
     # --- 8. Vorticity ---
-    zeta = dgrid_vorticity_3d(u_d, v_d, cdgrid)
+    zeta = dgrid_vorticity(u_d, v_d, cdgrid)
 
     # --- 9. KE at cell centres from D-grid (orthogonal basis) ---
     u_cc_ke, v_cc_ke = dgrid_to_center_vector(u_d, v_d)
     KE = 0.5 * (u_cc_ke ** 2 + v_cc_ke ** 2)
 
     # --- 10. Bernoulli and pressure gradients at D-grid corners ---
-    dKE_dx, dKE_dy_perp = _arakawa_lamb_gradient_3d(KE, cdgrid)
-    dp_dx, dp_dy_perp = _arakawa_lamb_gradient_3d(p_prime, cdgrid)
+    dKE_dx, dKE_dy_perp = _arakawa_lamb_gradient(KE, cdgrid)
+    dp_dx, dp_dy_perp = _arakawa_lamb_gradient(p_prime, cdgrid)
 
     # --- 11. Vorticity at corners (relative only) ---
-    zeta_corner = _interp_center_to_corner_3d(zeta, cdgrid)
+    zeta_corner = _interp_center_to_corner(zeta, cdgrid)
     f_corner_3d = cdgrid.f_corner[:, :, :, None]   # (6, n+1, n+1, 1)
 
     # --- 12. Baroclinic Coriolis split ---
@@ -209,7 +184,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     V_bar_a = jnp.sum(v_a * h_k, axis=-1) / H_total * mask
     u_prime_a = (u_a - U_bar_a[..., jnp.newaxis]) * mask_3d
     v_prime_a = (v_a - V_bar_a[..., jnp.newaxis]) * mask_3d
-    u_prime_d, v_prime_d = _center_to_dgrid_3d(u_prime_a, v_prime_a, cdgrid)
+    u_prime_d, v_prime_d = center_to_dgrid_vector(u_prime_a, v_prime_a, cdgrid)
 
     # --- 13. D-grid momentum tendencies ---
     # ζ*v + f*v' (relative vorticity × full velocity, Coriolis × deviation)
@@ -219,12 +194,12 @@ def ocean_baroclinic_tendencies_cdgrid(
                - dKE_dy_perp - dp_dy_perp / rho_0)
 
     # Skew-symmetric correction
-    div_corner = _interp_center_to_corner_3d(div_v, cdgrid)
+    div_corner = _interp_center_to_corner(div_v, cdgrid)
     du_d_dt = du_d_dt - 0.5 * u_d * div_corner
     dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
 
     # --- 14. Convert D-grid tendencies back to cell-centre ---
-    du_dt, dv_dt = _dgrid_to_center_3d(du_d_dt, dv_d_dt, cdgrid)
+    du_dt, dv_dt = dgrid_to_center_vector(du_d_dt, dv_d_dt)
 
     # --- 15. Vertical advection of u, v (cell-centre) ---
     du_dt = du_dt + _vertical_advection_ocean(u_a, w, z_coord, J)

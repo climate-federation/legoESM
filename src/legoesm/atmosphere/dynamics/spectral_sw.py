@@ -203,19 +203,6 @@ class SpectralShallowWaterModel:
         self._cpu_device = None
         self._default_device = None
 
-        # Precompute exponential spectral filter if enabled.
-        # The filter damps high-wavenumber spectral coefficients to
-        # suppress Gibbs ringing from non-smooth fields (e.g. conical
-        # topography in Williamson TC5).  Applied after each time step.
-        if self.config.spectral_filter_order > 0:
-            alpha = -jnp.log(jnp.float64(self.config.spectral_filter_cutoff))
-            ratio = grid.ls.astype(jnp.float64) / grid.n_max
-            self._spectral_filter = jnp.exp(
-                -alpha * ratio ** self.config.spectral_filter_order
-            )
-        else:
-            self._spectral_filter = None
-
         # Extract allow_unsupported from global config if provided
         if legoesm_config is not None:
             allow_unsupported_backend = bool(
@@ -224,7 +211,7 @@ class SpectralShallowWaterModel:
                 )
             )
 
-        # Detect Metal backend: auto-route spectral to CPU.
+        # --- Metal detection MUST happen before any float64 computation ---
         from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
@@ -239,6 +226,20 @@ class SpectralShallowWaterModel:
             check_spectral_backend(
                 allow_unsupported=allow_unsupported_backend
             )
+
+        # Precompute exponential spectral filter if enabled.
+        # The filter damps high-wavenumber spectral coefficients to
+        # suppress Gibbs ringing from non-smooth fields (e.g. conical
+        # topography in Williamson TC5).  Applied after each time step.
+        # Uses self.grid which is now on CPU when Metal is active.
+        if self.config.spectral_filter_order > 0:
+            alpha = -jnp.log(jnp.float64(self.config.spectral_filter_cutoff))
+            ratio = self.grid.ls.astype(jnp.float64) / self.grid.n_max
+            self._spectral_filter = jnp.exp(
+                -alpha * ratio ** self.config.spectral_filter_order
+            )
+        else:
+            self._spectral_filter = None
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: SpectralSWState, dt: float) -> SpectralSWState:

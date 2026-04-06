@@ -10,7 +10,8 @@ This module provides automatic device routing:
 - :func:`to_cpu` / :func:`to_metal` — transfer arrays between devices.
 - Model classes use these to route computation transparently.
 
-When not running on Metal, all functions are no-ops.
+When not running on Metal (or when Metal is non-functional and has
+fallen back to CPU), all functions are no-ops.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import NamedTuple
 
 import jax
 
-from legoesm.runtime.backend import get_backend
+from legoesm.runtime.backend import get_backend, metal_fell_back_to_cpu
 
 
 class MetalConfig(NamedTuple):
@@ -32,7 +33,8 @@ class MetalConfig(NamedTuple):
     cpu_device : jax.Device
         The CPU device (always available).
     is_metal : bool
-        ``True`` if the default backend is Metal.
+        ``True`` if the default backend is Metal **and** it is functional.
+        ``False`` when Metal was detected but fell back to CPU.
     """
     metal_device: jax.Device | None
     cpu_device: jax.Device
@@ -42,11 +44,15 @@ class MetalConfig(NamedTuple):
 def get_metal_config() -> MetalConfig:
     """Detect the Metal backend and resolve CPU/GPU devices.
 
+    If Metal is detected but non-functional (e.g. jax-metal / JAX version
+    mismatch), ``is_metal`` will be ``False`` because the runtime has
+    already fallen back to CPU.
+
     Returns
     -------
     MetalConfig
     """
-    backend = get_backend()
+    backend = get_backend()  # triggers health check & fallback
     cpu_device = jax.devices("cpu")[0]
 
     if backend == "metal":
@@ -84,7 +90,7 @@ def to_cpu(array: jax.Array) -> jax.Array:
 def to_metal(array: jax.Array) -> jax.Array:
     """Transfer an array to the default Metal device.
 
-    If not on Metal, returns the array unchanged.
+    If not on Metal (or Metal fell back to CPU), returns the array unchanged.
 
     Parameters
     ----------
@@ -119,7 +125,10 @@ def route_to_cpu(pytree):
 
 
 def route_to_default(pytree):
-    """Transfer an entire pytree to the default device.
+    """Transfer an entire pytree to the effective default device.
+
+    When Metal has fallen back to CPU, this routes to CPU (not to the
+    non-functional Metal device).
 
     Parameters
     ----------
@@ -130,13 +139,40 @@ def route_to_default(pytree):
     -------
     Pytree with all array leaves on the default device.
     """
-    default = jax.devices()[0]
+    # jax.config.jax_default_device is set when Metal fell back to CPU.
+    # jax.devices()[0] would still return the Metal device in that case.
+    default = getattr(jax.config, "jax_default_device", None)
+    if default is None:
+        default = jax.devices()[0]
     return jax.device_put(pytree, default)
 
 
 def is_metal_backend() -> bool:
-    """Check if the default JAX backend is Metal."""
+    """Check if the default JAX backend is Metal **and** functional.
+
+    Returns ``False`` when Metal was detected but fell back to CPU.
+    """
     return get_backend() == "metal"
+
+
+def _is_on_device(x, device):
+    """Check if a JAX array is already on the given device."""
+    if not hasattr(x, "devices"):
+        return True  # non-array (e.g., python scalar)
+    try:
+        devs = x.devices()
+        return device in devs
+    except Exception:
+        return False
+
+
+def _put_if_needed(x, device):
+    """Transfer *x* to *device* only if it's not already there."""
+    if not hasattr(x, "dtype"):
+        return x
+    if _is_on_device(x, device):
+        return x
+    return jax.device_put(x, device)
 
 
 def ensure_spectral_on_cpu(fn):
@@ -146,22 +182,19 @@ def ensure_spectral_on_cpu(fn):
     transfers inputs to CPU, runs the function, and transfers results
     back to the default device.
 
+    Skips redundant transfers when inputs are already on the target
+    device (e.g., within a ``lax.scan`` body that already runs on CPU).
+
     On non-Metal backends this is a no-op wrapper.
     """
     if not is_metal_backend():
         return fn
 
+    _cpu = jax.devices("cpu")[0]
+
     def wrapper(*args, **kwargs):
-        args_cpu = jax.tree.map(
-            lambda x: jax.device_put(x, jax.devices("cpu")[0])
-            if hasattr(x, "dtype") else x,
-            args,
-        )
-        kwargs_cpu = jax.tree.map(
-            lambda x: jax.device_put(x, jax.devices("cpu")[0])
-            if hasattr(x, "dtype") else x,
-            kwargs,
-        )
+        args_cpu = jax.tree.map(lambda x: _put_if_needed(x, _cpu), args)
+        kwargs_cpu = jax.tree.map(lambda x: _put_if_needed(x, _cpu), kwargs)
         result = fn(*args_cpu, **kwargs_cpu)
         return route_to_default(result)
 

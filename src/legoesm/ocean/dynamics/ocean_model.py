@@ -32,6 +32,7 @@ import jax.numpy as jnp
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState, OceanConfig
+from legoesm.core.precision import cast_pytree
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 
 OCEAN_DISCRETIZATIONS = ["cdgrid"]
@@ -284,6 +285,8 @@ class OceanModel:
         -------
         OceanState : State after one time step.
         """
+        state = cast_pytree(state, None, "compute")
+
         # --- 1. Baroclinic tendencies ---
         tend = self._compute_tendencies(state, surface_forcing)
 
@@ -303,7 +306,10 @@ class OceanModel:
         )
 
         # --- 4. Barotropic substeps ---
-        # eta is updated ONLY here (not by the slow tendency).
+        # eta is updated ONLY by the barotropic solver's continuity equation.
+        # Do NOT pre-apply tend.deta_dt here — the barotropic solver computes
+        # the same depth-integrated flux divergence, so pre-applying would
+        # double-count the eta tendency.
         # Slow u/v tendency is already included in state_mid.
         dt_s = dt / self.config.n_barotropic_substeps
         state_new = barotropic_substeps(
@@ -319,7 +325,7 @@ class OceanModel:
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     def step_checked(self, state: OceanState, dt: float,
                      surface_forcing=None) -> OceanState:

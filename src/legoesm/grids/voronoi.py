@@ -625,7 +625,11 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega):
     # --- Convert all arrays to JAX ---
     # Use float64 when x64 is enabled for geometry precision, float32 otherwise.
     import jax
-    _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    try:
+        from legoesm.core.precision import get_policy
+        _fdtype = get_policy().storage
+    except Exception:
+        _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
 
     def to_jax_f(arr):
         return jnp.array(arr, dtype=_fdtype)
@@ -921,7 +925,11 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
     radius = float(ds.sphere_radius) if hasattr(ds, 'sphere_radius') else 6371229.0
 
     import jax
-    _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    try:
+        from legoesm.core.precision import get_policy
+        _fdtype = get_policy().storage
+    except Exception:
+        _fdtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
 
     mesh_data = {
         'nCells': nCells, 'nEdges': nEdges, 'nVertices': nVertices,

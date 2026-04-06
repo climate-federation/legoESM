@@ -174,7 +174,7 @@ def run_hydro_validation(output_dir):
     from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing, held_suarez_init
+    from tests.test_cases.held_suarez import held_suarez_forcing, held_suarez_init
     from legoesm.core.operators import global_integral
     from legoesm.core.operators_fv_cubed import default_div_damp_coeffs
 

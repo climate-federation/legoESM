@@ -156,7 +156,11 @@ _ACTIVE_POLICY: list[PrecisionPolicy] = [PrecisionPolicy.fp32()]
 def set_policy(policy: PrecisionPolicy) -> None:
     """Set the active global precision policy.
 
-    Also enables JAX x64 if any dtype is float64.
+    Also enables JAX x64 if any dtype is float64.  On backends that
+    lack float64 hardware (e.g. Apple Metal), x64 is still enabled
+    because spectral solvers route computation to CPU and need float64
+    there.  ``_resolve_dtype`` handles clamping float64 → float32 for
+    non-spectral code that runs on the default (Metal) device.
     """
     _ACTIVE_POLICY[0] = policy
     if jnp.float64 in (policy.storage, policy.compute,
@@ -173,17 +177,28 @@ def get_policy() -> PrecisionPolicy:
 def validate_policy(policy: PrecisionPolicy | None = None) -> None:
     """Verify the active precision policy is actually achievable.
 
+    On backends that lack float64 (e.g. Metal), float64 requests in the
+    policy are silently clamped to float32 by ``_resolve_dtype``, so the
+    policy is always achievable — this function is a no-op in that case.
+
     Raises
     ------
     RuntimeError
-        If the policy requires float64 but JAX x64 mode is not enabled.
+        If the policy requires float64, the backend supports it, but
+        JAX x64 mode is not enabled.
     """
     if policy is None:
         policy = get_policy()
     needs_x64 = jnp.float64 in (
         policy.storage, policy.compute, policy.accumulate, policy.control,
     )
-    if needs_x64 and not jax.config.jax_enable_x64:
+    if not needs_x64:
+        return
+    from legoesm.runtime.backend import supports_float64
+    if not supports_float64():
+        # Backend cannot do float64; _resolve_dtype will clamp to float32.
+        return
+    if not jax.config.jax_enable_x64:
         raise RuntimeError(
             "Precision policy requires float64 but JAX x64 mode is not enabled. "
             "Set JAX_ENABLE_X64=1 or call jax.config.update('jax_enable_x64', True) "
@@ -237,31 +252,53 @@ def get_module_overrides() -> dict[str, dict[str, str | None]]:
     return {k: dict(v) for k, v in _MODULE_OVERRIDES.items()}
 
 
+def _clamp_to_backend(dtype: jnp.dtype) -> jnp.dtype:
+    """Clamp *dtype* to what the current backend actually supports.
+
+    On backends that lack float64 (e.g. Apple Metal) or when JAX x64
+    mode is disabled, float64 is silently downgraded to float32 so that
+    the precision policy never requests an impossible dtype.
+    """
+    if dtype == jnp.float64:
+        from legoesm.runtime.backend import supports_float64, is_x64_enabled
+        if not (supports_float64() and is_x64_enabled()):
+            return jnp.float32
+    return dtype
+
+
 def _resolve_dtype(module: str | None, role: str) -> jnp.dtype:
     """Resolve the effective dtype for a (module, role) pair.
 
     Priority: module override > global policy > fallback to float32.
+    The result is clamped to what the backend supports (float64 is
+    downgraded to float32 on Metal or when x64 is disabled).
     """
     # Check module-level override first.
     if module is not None and module in _MODULE_OVERRIDES:
         overrides = _MODULE_OVERRIDES[module]
         if role in overrides:
-            return overrides[role]
+            return _clamp_to_backend(overrides[role])
 
     # Fall back to global policy.
     policy = get_policy()
-    return getattr(policy, role, jnp.float32)
+    return _clamp_to_backend(getattr(policy, role, jnp.float32))
 
 
 # ---------------------------------------------------------------------------
 # Casting helpers — the main API for kernels
 # ---------------------------------------------------------------------------
 
-def cast(x: jax.Array, module: str | None, role: str) -> jax.Array:
+def cast(x: jax.Array, module: str | None, role: str, *,
+         allow_downcast: bool = False) -> jax.Array:
     """Cast array to the effective dtype for (module, role).
 
     This is the primary entry point for precision-aware kernels.
     No-op if the array is already in the target dtype.
+
+    By default, only upcasts and no-ops are performed.  Downcasts are
+    skipped unless *allow_downcast* is True.  This prevents silent
+    precision loss when the default fp32 policy is active but arrays
+    were created in float64 (e.g. under JAX_ENABLE_X64).
 
     Parameters
     ----------
@@ -272,6 +309,8 @@ def cast(x: jax.Array, module: str | None, role: str) -> jax.Array:
         None uses the global policy only.
     role : str
         Precision role: "storage", "compute", "accumulate", or "control".
+    allow_downcast : bool
+        If False (default), skip casts that would reduce precision.
 
     Returns
     -------
@@ -281,7 +320,9 @@ def cast(x: jax.Array, module: str | None, role: str) -> jax.Array:
     target = _resolve_dtype(module, role)
     if x.dtype == target:
         return x
-    return x.astype(target)
+    if allow_downcast or jnp.dtype(x.dtype).itemsize <= jnp.dtype(target).itemsize:
+        return x.astype(target)
+    return x  # skip downcast
 
 
 def const(value: float, module: str | None, role: str) -> jax.Array:
@@ -305,16 +346,27 @@ def const(value: float, module: str | None, role: str) -> jax.Array:
     return jnp.array(value, dtype=target)
 
 
-def cast_pytree(pytree, module: str | None, role: str):
+def cast_pytree(pytree, module: str | None, role: str, *,
+                allow_downcast: bool = False):
     """Cast all float arrays in a pytree to the effective dtype.
 
     Non-float leaves (int, bool) and non-array leaves are left unchanged.
+
+    By default, only upcasts (e.g. float32 -> float64) and no-ops are
+    performed.  Downcasts are skipped unless *allow_downcast* is True.
+    This prevents silent precision loss when the default fp32 policy is
+    active but arrays were created in float64 (e.g. under JAX_ENABLE_X64).
     """
     target = _resolve_dtype(module, role)
+    target_size = jnp.dtype(target).itemsize
 
     def _maybe_cast(leaf):
         if isinstance(leaf, jax.Array) and jnp.issubdtype(leaf.dtype, jnp.floating):
-            return leaf.astype(target) if leaf.dtype != target else leaf
+            if leaf.dtype == target:
+                return leaf
+            if allow_downcast or jnp.dtype(leaf.dtype).itemsize <= target_size:
+                return leaf.astype(target)
+            return leaf  # skip downcast
         return leaf
 
     return jax.tree.map(_maybe_cast, pytree)
@@ -542,25 +594,23 @@ _ICE_OVERRIDES = {
 def set_recommended_overrides(mode: str = "mixed") -> None:
     """Apply recommended per-module overrides for a precision mode.
 
+    This function only manages module overrides — it does NOT reset the
+    global policy.  The caller (``apply_precision``) is responsible for
+    setting the policy before calling this.
+
     Parameters
     ----------
     mode : str
-        "fp32" — no overrides (everything fp32).
-        "fp64" — no overrides needed (global policy handles it).
+        "fp32" — clear overrides (global policy handles it).
+        "fp64" — clear overrides (global policy handles it).
         "mixed" — apply domain-knowledge overrides for sensitive kernels.
     """
     clear_module_overrides()
 
-    if mode == "fp32":
-        set_policy(PrecisionPolicy.fp32())
-        return
-    elif mode == "fp64":
-        set_policy(PrecisionPolicy.fp64())
+    if mode in ("fp32", "fp64"):
         return
     elif mode != "mixed":
         raise ValueError(f"Unknown mode {mode!r}. Use 'fp32', 'fp64', or 'mixed'.")
-
-    set_policy(PrecisionPolicy.mixed())
 
     # Apply all domain-specific overrides.
     for overrides_dict in [
@@ -574,3 +624,56 @@ def set_recommended_overrides(mode: str = "mixed") -> None:
                 _MODULE_OVERRIDES[module_name] = dict(roles)
 
 
+# ======================================================================
+# Runtime dtype verification
+# ======================================================================
+
+import logging as _logging
+
+_precision_logger = _logging.getLogger(__name__)
+
+
+def verify_dtypes(
+    pytree,
+    module: str | None = None,
+    role: str = "storage",
+    *,
+    label: str = "",
+) -> list[str]:
+    """Walk *pytree* and log warnings for dtype mismatches vs. the active policy.
+
+    Parameters
+    ----------
+    pytree
+        Any JAX-compatible pytree (state, carry, dict, NamedTuple, ...).
+    module : str or None
+        Module name for ``_resolve_dtype`` lookup.
+    role : str
+        Precision role (``"storage"``, ``"compute"``, ``"accumulate"``, ``"control"``).
+    label : str
+        Human-readable label for log messages (e.g., ``"after segment 3"``).
+
+    Returns
+    -------
+    list[str]
+        Mismatch descriptions (empty if everything matches).
+    """
+    expected = _resolve_dtype(module, role)
+    mismatches: list[str] = []
+
+    leaves = jax.tree.leaves(pytree)
+    for i, leaf in enumerate(leaves):
+        if not hasattr(leaf, "dtype"):
+            continue
+        # Only check floating-point arrays.
+        if not jnp.issubdtype(leaf.dtype, jnp.floating):
+            continue
+        if leaf.dtype != expected:
+            msg = (
+                f"[{label}] leaf {i}: dtype={leaf.dtype}, "
+                f"expected={expected} (module={module!r}, role={role!r})"
+            )
+            mismatches.append(msg)
+            _precision_logger.warning(msg)
+
+    return mismatches

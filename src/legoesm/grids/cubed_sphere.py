@@ -197,6 +197,7 @@ def create_cubed_sphere(
     n: int,
     radius: float = 6.371229e6,
     omega: float = 7.292e-5,
+    dtype=None,
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -263,38 +264,44 @@ def create_cubed_sphere(
     sin_angle_padded_h2_val = jnp.sin(angle_padded_h2)
     halo_offsets_h2 = compute_halo_interp_offsets_h2(n)
 
-    # Cast all arrays to float32. The cubed-sphere PE and tracer transport
-    # models run in float32, so grid arrays must match to avoid scatter
-    # cast warnings when jax_enable_x64 is True (e.g., spectral tests).
-    _f32 = jnp.float32
+    # Grid arrays use the storage dtype from the precision policy.
+    # Defaults to float32 for backward compatibility.
+    if dtype is None:
+        try:
+            from legoesm.core.precision import get_policy
+            _dt = get_policy().storage
+        except Exception:
+            _dt = jnp.float32
+    else:
+        _dt = dtype
     grid = CubedSphereGrid(
         n=n,
         radius=radius,
-        lon=lon.astype(_f32),
-        lat=lat.astype(_f32),
-        area=area.astype(_f32),
-        dx=dx.astype(_f32),
-        dy=dy.astype(_f32),
-        f=f.astype(_f32),
-        cos_lat=cos_lat.astype(_f32),
-        sin_lat=sin_lat.astype(_f32),
-        angle=angle.astype(_f32),
-        x_cart=x_cart.astype(_f32),
-        y_cart=y_cart.astype(_f32),
-        z_cart=z_cart.astype(_f32),
-        angle_padded=angle_padded.astype(_f32),
-        cos_angle=cos_angle_val.astype(_f32),
-        sin_angle=sin_angle_val.astype(_f32),
-        cos_angle_padded=cos_angle_padded_val.astype(_f32),
-        sin_angle_padded=sin_angle_padded_val.astype(_f32),
-        hx_ext=hx_ext.astype(_f32),
-        hy_ext=hy_ext.astype(_f32),
-        halo_interp_offsets=halo_offsets.astype(_f32),
-        cos_angle_padded_h2=cos_angle_padded_h2_val.astype(_f32),
-        sin_angle_padded_h2=sin_angle_padded_h2_val.astype(_f32),
-        hx_ext_h2=hx_ext_h2.astype(_f32),
-        hy_ext_h2=hy_ext_h2.astype(_f32),
-        halo_interp_offsets_h2=halo_offsets_h2.astype(_f32),
+        lon=lon.astype(_dt),
+        lat=lat.astype(_dt),
+        area=area.astype(_dt),
+        dx=dx.astype(_dt),
+        dy=dy.astype(_dt),
+        f=f.astype(_dt),
+        cos_lat=cos_lat.astype(_dt),
+        sin_lat=sin_lat.astype(_dt),
+        angle=angle.astype(_dt),
+        x_cart=x_cart.astype(_dt),
+        y_cart=y_cart.astype(_dt),
+        z_cart=z_cart.astype(_dt),
+        angle_padded=angle_padded.astype(_dt),
+        cos_angle=cos_angle_val.astype(_dt),
+        sin_angle=sin_angle_val.astype(_dt),
+        cos_angle_padded=cos_angle_padded_val.astype(_dt),
+        sin_angle_padded=sin_angle_padded_val.astype(_dt),
+        hx_ext=hx_ext.astype(_dt),
+        hy_ext=hy_ext.astype(_dt),
+        halo_interp_offsets=halo_offsets.astype(_dt),
+        cos_angle_padded_h2=cos_angle_padded_h2_val.astype(_dt),
+        sin_angle_padded_h2=sin_angle_padded_h2_val.astype(_dt),
+        hx_ext_h2=hx_ext_h2.astype(_dt),
+        hy_ext_h2=hy_ext_h2.astype(_dt),
+        halo_interp_offsets_h2=halo_offsets_h2.astype(_dt),
     )
 
     # Eagerly populate the vectorized halo index cache so that the

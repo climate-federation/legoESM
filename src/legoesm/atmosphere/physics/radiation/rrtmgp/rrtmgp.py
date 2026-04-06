@@ -42,13 +42,24 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.rte import two_stream
 Array: TypeAlias = jax.Array
 
 # ---------------------------------------------------------------------------
-# Default RRTMGP NetCDF data file paths
+# Default RRTMGP data file paths (Zarr preferred, NetCDF fallback)
 # ---------------------------------------------------------------------------
-_DATA_DIR = Path(__file__).parent / "optics" / "rrtmgp_data"
-_DEFAULT_LW_GAS = str(_DATA_DIR / "rrtmgp-gas-lw-g128.nc")
-_DEFAULT_SW_GAS = str(_DATA_DIR / "rrtmgp-gas-sw-g112.nc")
-_DEFAULT_LW_CLOUD = str(_DATA_DIR / "cloudysky_lw.nc")
-_DEFAULT_SW_CLOUD = str(_DATA_DIR / "cloudysky_sw.nc")
+_ZARR_DIR = Path(__file__).parent.parent.parent.parent / "data" / "zarr"
+_NC_DIR = Path(__file__).parent / "optics" / "rrtmgp_data"
+
+
+def _default_data_path(basename_nc: str) -> str:
+    """Return path to Zarr store if available, else fall back to NetCDF."""
+    zarr_path = _ZARR_DIR / basename_nc.replace(".nc", ".zarr")
+    if zarr_path.exists():
+        return str(zarr_path)
+    return str(_NC_DIR / basename_nc)
+
+
+_DEFAULT_LW_GAS = _default_data_path("rrtmgp-gas-lw-g128.nc")
+_DEFAULT_SW_GAS = _default_data_path("rrtmgp-gas-sw-g112.nc")
+_DEFAULT_LW_CLOUD = _default_data_path("cloudysky_lw.nc")
+_DEFAULT_SW_CLOUD = _default_data_path("cloudysky_sw.nc")
 
 # Module-level optics cache (shared across RRTMGP instances)
 _legoesm_optics_cache: dict = {}

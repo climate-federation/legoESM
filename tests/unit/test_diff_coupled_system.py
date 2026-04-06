@@ -39,7 +39,7 @@ class TestAtmDynPlusPhysics:
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel,
         )
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing
+        from tests.test_cases.held_suarez import held_suarez_forcing
         from legoesm.core.state import FV3HydrostaticState
 
         n, nlev = 4, 5

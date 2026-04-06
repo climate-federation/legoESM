@@ -1074,7 +1074,12 @@ def _placeholder_plot(path: Path, title: str, text: str):
 
 
 def _ensure_required_artifacts(output_dir: Path):
-    """Guarantee standardized files exist in each case folder."""
+    """Guarantee standardized files exist in each case folder.
+
+    Creates placeholder CSVs, snapshot_times.txt, and placeholder PNGs
+    so that every test case directory has the full set of expected outputs,
+    even when the test crashed (ERROR) or was skipped.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     for csv_name in ["mean_timeseries.csv", "conservation_timeseries.csv"]:
         p = output_dir / csv_name
@@ -1084,8 +1089,17 @@ def _ensure_required_artifacts(output_dir: Path):
     if not (output_dir / "snapshot_times.txt").exists():
         with open(output_dir / "snapshot_times.txt", "w") as f:
             f.write("step,time_seconds,time_days\n")
-    # Note: PNGs are only created by the diagnostic routines when applicable.
-    # No placeholder images are generated to avoid masking real issues.
+    # Generate placeholder PNGs for any missing visualization files.
+    case_label = "/".join(output_dir.parts[-4:])
+    for png_name in [
+        "mean_timeseries.png",
+        "conservation_timeseries.png",
+        "field_snapshots.png",
+    ]:
+        p = output_dir / png_name
+        if not p.exists():
+            _placeholder_plot(p, png_name.replace(".png", ""),
+                              f"No data — {case_label}")
 
 
 # ===========================================================================
@@ -1790,7 +1804,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing, held_suarez_init)
         from legoesm.core.operators import global_integral
 
@@ -1840,7 +1854,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
             LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_latlon import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_latlon, held_suarez_init_latlon)
         from legoesm.core.operators_latlon import (
             global_integral as global_integral_ll)
@@ -1887,16 +1901,14 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_mpas import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
-        # MPAS PE currently uses sigma only
-        sigma = create_sigma_coordinate(nlev)
+        sigma = _create_vertical(nlev, tc.vertical_coord)
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
@@ -1944,7 +1956,7 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_spectral,
         )
 
@@ -2055,7 +2067,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.baroclinic_wave import (
+        from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init)
         from legoesm.core.operators import global_integral
 
@@ -2107,7 +2119,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
             LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.baroclinic_wave import (
+        from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init_latlon)
         from legoesm.core.operators_latlon import (
             global_integral as global_integral_ll)
@@ -2158,7 +2170,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_mpas import (
+        from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init_mpas)
 
         level = int(tc.resolution.replace("ico", ""))
@@ -2206,8 +2218,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import create_sigma_coordinate
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralPrimitiveEquationModel, SpectralPEConfig,
-            baroclinic_wave_init_spectral, spectral_pe_to_grid,
+            spectral_pe_to_grid,
         )
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
         n_max = int(tc.resolution.replace("T", ""))
         grid = create_gaussian_grid(n_max)
@@ -2535,10 +2548,10 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
             CDGridPrimitiveEquationModel as PrimitiveEquationModel,
             CDGridPrimitiveEquationConfig as PrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_init
+        from tests.test_cases.held_suarez import held_suarez_init
         from legoesm.core.operators import global_integral
 
-        from legoesm.atmosphere.physics.held_suarez import held_suarez_forcing
+        from tests.test_cases.held_suarez import held_suarez_forcing
 
         n = int(tc.resolution[1:])
         grid = create_cubed_sphere(n)
@@ -2587,7 +2600,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
         from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
             LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_latlon import (
+        from tests.test_cases.held_suarez import (
             held_suarez_init_latlon, held_suarez_forcing_latlon)
         from legoesm.core.operators_latlon import (
             global_integral as global_integral_ll)
@@ -2604,7 +2617,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             div_damp_coeff=dd, A_h=ah,
             use_conservation_fixer=True, fix_mass=True)
         model = LatLonPrimitiveEquationModel(grid, sigma, config)
-        state = held_suarez_init_latlon(grid, sigma)
+        state = held_suarez_init_latlon(grid, sigma, T_init=280.0)
 
         physics_fn = held_suarez_forcing_latlon
 
@@ -2634,16 +2647,16 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
-        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.grids.vertical import standard_hybrid_levels
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
             MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-        from legoesm.atmosphere.physics.held_suarez_mpas import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_mpas, held_suarez_init_mpas)
         from legoesm.ocean.init_mpas import reconstruct_cell_velocity
 
         level = int(tc.resolution.replace("ico", ""))
         mesh = create_voronoi_mesh(level)
-        sigma = create_sigma_coordinate(nlev)
+        sigma = standard_hybrid_levels(nlev)
         dt = 200.0
         ah = _laplacian_visc_ico(mesh)
         config = MPASPrimitiveEquationConfig(
@@ -2689,7 +2702,7 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
             SpectralPrimitiveEquationModel, SpectralPEConfig,
             isothermal_rest_state_spectral, spectral_pe_to_grid,
         )
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_spectral,
         )
 
@@ -2823,7 +2836,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             dt = max(0.2, 4.0 * (16.0 / n))
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
-                sponge_width=5000.0, sponge_coeff=0.1,
+                sponge_width=15000.0,
+                sponge_coeff=1.0 / (0.1 * 86400.0),
                 hyperdiff_coeff=hd,
                 acoustic_off_centering=0.1)
         elif test_case == "tc3":
@@ -2834,7 +2848,7 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             dt = max(0.1, 2.0 * (16.0 / n))
             nh_config = CompressibleEulerConfig(
                 n_acoustic_substeps=10, semi_implicit_acoustic=True,
-                sponge_width=5000.0, sponge_coeff=0.1,
+                sponge_width=5000.0, sponge_coeff=0.05,
                 hyperdiff_coeff=hd,
                 acoustic_off_centering=0.1)
         else:

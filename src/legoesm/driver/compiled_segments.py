@@ -109,35 +109,51 @@ def pack_carry(state, q_v, q_c, q_r,
                step_index,
                target_moisture=None, target_mass=None,
                max_cfl=None, precip_accum=None):
-    """Pack driver state into a SegmentCarry for the compiled kernel."""
+    """Pack driver state into a SegmentCarry for the compiled kernel.
+
+    Prognostic fields are cast to at least the precision policy's storage
+    dtype (upcasting only — never downcasts existing float64 arrays).
+    Accumulation scalars use at least the accumulate dtype.
+    """
+    from legoesm.core.precision import _resolve_dtype
+    storage = _resolve_dtype(None, "storage")
+    accum = _resolve_dtype(None, "accumulate")
+
+    def _promote(x, target_dt):
+        """Cast *x* to the wider of its current dtype and *target_dt*."""
+        if hasattr(x, 'dtype'):
+            dt = jnp.result_type(x.dtype, target_dt)
+            return x.astype(dt) if x.dtype != dt else x
+        return jnp.asarray(x, dtype=target_dt)
+
     if target_moisture is None:
-        target_moisture = jnp.asarray(0.0)
+        target_moisture = jnp.asarray(0.0, dtype=accum)
     if target_mass is None:
-        target_mass = jnp.asarray(0.0)
+        target_mass = jnp.asarray(0.0, dtype=accum)
     if max_cfl is None:
         max_cfl = jnp.asarray(0.0)
     if precip_accum is None:
         precip_accum = jnp.zeros_like(state.p_s.data)
     return SegmentCarry(
-        u=state.u.data,
-        v=state.v.data,
-        T=state.T.data,
-        p_s=state.p_s.data,
-        phis=state.phis.data,
-        q_v=q_v,
-        q_c=q_c,
-        q_r=q_r,
-        held_dT_rad=held_dT_rad,
-        held_sw_net_sfc=held_sw_net_sfc,
-        held_lw_net_sfc=held_lw_net_sfc,
-        held_sw_up_toa=held_sw_up_toa,
-        held_lw_up_toa=held_lw_up_toa,
-        held_sw_down_toa=held_sw_down_toa,
+        u=_promote(state.u.data, storage),
+        v=_promote(state.v.data, storage),
+        T=_promote(state.T.data, storage),
+        p_s=_promote(state.p_s.data, storage),
+        phis=_promote(state.phis.data, storage),
+        q_v=_promote(q_v, storage),
+        q_c=_promote(q_c, storage),
+        q_r=_promote(q_r, storage),
+        held_dT_rad=_promote(held_dT_rad, storage),
+        held_sw_net_sfc=_promote(held_sw_net_sfc, storage),
+        held_lw_net_sfc=_promote(held_lw_net_sfc, storage),
+        held_sw_up_toa=_promote(held_sw_up_toa, storage),
+        held_lw_up_toa=_promote(held_lw_up_toa, storage),
+        held_sw_down_toa=_promote(held_sw_down_toa, storage),
         step_index=jnp.int32(step_index),
-        target_moisture=jnp.asarray(target_moisture),
-        target_mass=jnp.asarray(target_mass),
+        target_moisture=_promote(target_moisture, accum),
+        target_mass=_promote(target_mass, accum),
         max_cfl=jnp.asarray(max_cfl),
-        precip_accum=precip_accum,
+        precip_accum=_promote(precip_accum, storage),
     )
 
 
@@ -364,11 +380,14 @@ def build_segment_fn(
     _C_E = jnp.asarray(C_E) if C_E is not None else None
     _albedo_ice = jnp.asarray(albedo_ice) if albedo_ice is not None else None
     _albedo_ocean = jnp.asarray(albedo_ocean) if albedo_ocean is not None else None
-    # GHG VMR needs float64 for spectral accuracy in radiation.
+    # GHG VMR: use control dtype (float64 in mixed mode) for spectral
+    # accuracy in radiation; auto-clamps to float32 on Metal.
+    from legoesm.core.precision import _resolve_dtype
+    _ghg_dtype = _resolve_dtype(None, "control")
     _ghg_vmr_override = None
     if ghg_vmr_override is not None:
         _ghg_vmr_override = {
-            k: jnp.float64(v) for k, v in ghg_vmr_override.items()
+            k: jnp.array(v, dtype=_ghg_dtype) for k, v in ghg_vmr_override.items()
         }
 
     # Build owned-face mask for MPI replicated dynamics.

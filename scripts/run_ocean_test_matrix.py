@@ -103,10 +103,11 @@ DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
 DEFAULT_DT = 300.0  # seconds (scaled for ~2.5 deg resolution CFL)
 
-# Physical constants for idealized ocean test cases
-_A_EARTH = 6.37122e6   # Earth radius (m)
-_OMEGA_E = 7.292e-5     # Earth rotation rate (rad/s)
-_G_EARTH = 9.80616      # gravitational acceleration (m/s^2)
+# Physical constants for idealized ocean test cases — use canonical values.
+from legoesm import constants as _C
+_A_EARTH = _C.R_earth   # Earth radius (m)
+_OMEGA_E = _C.Omega      # Earth rotation rate (rad/s)
+_G_EARTH = _C.g           # gravitational acceleration (m/s^2)
 
 # Field ranges for consistent plotting across grid types
 FIELD_RANGES = {
@@ -346,7 +347,12 @@ def _run_timeloop(
     """
     snap_targets = _snapshot_steps(n_steps, n_snaps)
     snapshots: dict[int, dict[str, np.ndarray]] = {0: extract_fn(state)}
-    diag: dict[str, list] = {"times": [], "steps": []}
+    # Record step-0 diagnostics so conservation plots have the true
+    # initial value (important for perturbation variables starting at 0).
+    scalars_0 = scalar_fn(state)
+    diag: dict[str, list] = {"times": [0.0], "steps": [0]}
+    for k, v in scalars_0.items():
+        diag.setdefault(k, []).append(v)
 
     t0 = time.time()
     last_print = t0
@@ -1028,7 +1034,12 @@ def _placeholder_plot(path: Path, title: str, text: str):
 
 
 def _ensure_required_artifacts(output_dir: Path):
-    """Guarantee standardized files exist in each case folder."""
+    """Guarantee standardized files exist in each case folder.
+
+    Creates placeholder CSVs, snapshot_times.txt, and placeholder PNGs
+    so that every test case directory has the full set of expected outputs,
+    even when the test crashed (ERROR) or was skipped.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     for csv_name in ["mean_timeseries.csv", "conservation_timeseries.csv"]:
         p = output_dir / csv_name
@@ -1038,8 +1049,17 @@ def _ensure_required_artifacts(output_dir: Path):
     if not (output_dir / "snapshot_times.txt").exists():
         with open(output_dir / "snapshot_times.txt", "w") as f:
             f.write("step,time_seconds,time_days\n")
-    # Note: PNGs are only created by the diagnostic routines when applicable.
-    # No placeholder images are generated to avoid masking real issues.
+    # Generate placeholder PNGs for any missing visualization files.
+    case_label = "/".join(output_dir.parts[-4:])
+    for png_name in [
+        "mean_timeseries.png",
+        "conservation_timeseries.png",
+        "field_snapshots.png",
+    ]:
+        p = output_dir / png_name
+        if not p.exists():
+            _placeholder_plot(p, png_name.replace(".png", ""),
+                              f"No data — {case_label}")
 
 
 # ===========================================================================
@@ -2437,8 +2457,8 @@ def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
     eta_pert = eta_amp * np.cos(phase)
 
     # Velocity from linearized SWE: u, v from eta at t=0
-    # u = g/(omega^2 - f^2) * (omega*kx*cos(phase) - f*ky*sin(phase)) / a
-    # v = g/(omega^2 - f^2) * (omega*ky*cos(phase) + f*kx*sin(phase)) / a
+    # u = g/(omega^2 - f^2) * (omega*kx*cos(phase) - f*ky*sin(phase))
+    # v = g/(omega^2 - f^2) * (omega*ky*cos(phase) + f*kx*sin(phase))
     denom = omega**2 - f0**2
     if abs(denom) < 1e-30:
         denom = 1e-30
@@ -2638,8 +2658,6 @@ def _compute_rpe(state, grid_type, grid, z_coord):
     Approximation: sort density profile at each column and compute
     domain-integrated rho * z.
     """
-    from legoesm.ocean.eos import wright_eos
-
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_synthesis_3d
         T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data), dtype=np.float64)

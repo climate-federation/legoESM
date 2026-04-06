@@ -703,7 +703,7 @@ class TestTemperatureStability:
 
     def test_held_suarez_temperature_bounds(self, grid, sigma_20):
         """Held-Suarez forcing should keep T within bounds over 100 steps."""
-        from legoesm.atmosphere.physics.held_suarez import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing,
             held_suarez_init,
         )
@@ -736,7 +736,7 @@ class TestTemperatureStability:
 
     def test_baroclinic_wave_temperature_bounds(self, grid):
         """Baroclinic wave IC should keep T within bounds over 50 steps."""
-        from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
         sigma_26 = create_sigma_coordinate(26)
         model = PrimitiveEquationModel(

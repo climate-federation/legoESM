@@ -54,10 +54,13 @@ Or use the lower-level utilities directly::
 
 from __future__ import annotations
 
-from typing import Callable, NamedTuple
+from typing import Callable, NamedTuple, TYPE_CHECKING
 
 import jax
 import jax.numpy as jnp
+
+if TYPE_CHECKING:
+    from legoesm.parallel.comm import CommTopology
 
 
 # ======================================================================
@@ -65,14 +68,14 @@ import jax.numpy as jnp
 # ======================================================================
 
 def jax_native_halo_exchange(data, grid, mesh=None):
-    """JAX-native halo exchange using collective operations (experimental).
+    """JAX-native halo exchange using collective operations.
 
-    .. warning::
+    .. note::
 
-       The ``ppermute``-based path is **experimental** and has not been
-       validated at scale.  When ``mesh`` is provided, the function will
-       attempt the ppermute code path and emit a warning.  Set ``mesh=None``
-       (the default) to use the well-tested local/MPI-based exchange.
+       This is a **legacy** entry point.  For production multi-device
+       halo exchange, use the SPMD backend activated via
+       ``activate_spmd_halo_backend()`` in ``cubesphere_exchange.py``,
+       which auto-selects between all_gather and ppermute.
 
     When running on multi-GPU/TPU with JAX sharding, this uses
     ``jax.lax.ppermute`` for device-to-device communication instead of MPI.

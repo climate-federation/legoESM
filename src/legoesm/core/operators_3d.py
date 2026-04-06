@@ -255,6 +255,193 @@ def fv_scalar_advection_3d(
 
 
 # ==============================================================================
+# Overlapped async halo variants (interior/boundary split)
+# ==============================================================================
+
+def overlapped_gradient_3d(
+    field_3d: jax.Array,
+    grid: CubedSphereGrid,
+    masks=None,
+) -> tuple[jax.Array, jax.Array]:
+    """Gradient (dx, dy) with interior/boundary overlap for 4D fields.
+
+    Computes interior stencil with local-only halo padding, then
+    boundary stencil after full halo exchange, and merges.
+
+    Parameters
+    ----------
+    field_3d : jax.Array, shape (6, n, n, nlev)
+    grid : CubedSphereGrid
+    masks : InteriorBoundaryMasks, optional
+        Pre-computed masks from ``create_interior_boundary_masks``.
+
+    Returns
+    -------
+    (dx, dy) : tuple of jax.Array, each shape (6, n, n, nlev).
+    """
+    from legoesm.parallel.async_halo import overlapped_halo_compute
+
+    dx_grid = grid.dx
+    dy_grid = grid.dy
+
+    def _grad_stencil(f_pad):
+        """(6, n+2, n+2) -> (6, n, n, 2) packed dx/dy."""
+        gx = (f_pad[:, 2:, 1:-1] - f_pad[:, :-2, 1:-1]) / dx_grid
+        gy = (f_pad[:, 1:-1, 2:] - f_pad[:, 1:-1, :-2]) / dy_grid
+        return jnp.stack([gx, gy], axis=-1)
+
+    f_t = jnp.moveaxis(field_3d, -1, 0)  # (nlev, 6, n, n)
+    result_t = jax.vmap(
+        lambda f: overlapped_halo_compute(
+            f, _grad_stencil, halo_width=1, masks=masks,
+            interp_offsets=grid.halo_interp_offsets,
+        )
+    )(f_t)  # (nlev, 6, n, n, 2)
+    result = jnp.moveaxis(result_t, 0, -2)  # (6, n, n, nlev, 2)
+    return result[..., 0], result[..., 1]
+
+
+def overlapped_laplacian_compact_3d(
+    field_3d: jax.Array,
+    grid: CubedSphereGrid,
+    masks=None,
+) -> jax.Array:
+    """Compact Laplacian with interior/boundary overlap for 4D fields.
+
+    Parameters
+    ----------
+    field_3d : jax.Array, shape (6, n, n, nlev)
+    grid : CubedSphereGrid
+    masks : InteriorBoundaryMasks, optional
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n, nlev).
+    """
+    from legoesm.parallel.async_halo import overlapped_halo_compute
+
+    hx_sq = (grid.dx / 2.0) ** 2
+    hy_sq = (grid.dy / 2.0) ** 2
+
+    def _lap_stencil(f_pad):
+        """(6, n+2, n+2) -> (6, n, n)."""
+        interior = f_pad[:, 1:-1, 1:-1]
+        d2x = (f_pad[:, 2:, 1:-1] - 2.0 * interior + f_pad[:, :-2, 1:-1]) / hx_sq
+        d2y = (f_pad[:, 1:-1, 2:] - 2.0 * interior + f_pad[:, 1:-1, :-2]) / hy_sq
+        return d2x + d2y
+
+    f_t = jnp.moveaxis(field_3d, -1, 0)
+    result_t = jax.vmap(
+        lambda f: overlapped_halo_compute(
+            f, _lap_stencil, halo_width=1, masks=masks,
+            interp_offsets=grid.halo_interp_offsets,
+        )
+    )(f_t)
+    return jnp.moveaxis(result_t, 0, -1)
+
+
+def overlapped_divergence_3d(
+    u_3d: jax.Array,
+    v_3d: jax.Array,
+    grid: CubedSphereGrid,
+    masks=None,
+) -> jax.Array:
+    """Divergence with interior/boundary overlap for 4D vector fields.
+
+    Parameters
+    ----------
+    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
+    grid : CubedSphereGrid
+    masks : InteriorBoundaryMasks, optional
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n, nlev).
+    """
+    from legoesm.parallel.async_halo import overlapped_halo_compute_vector
+
+    hy_ext = grid.hy_ext
+    hx_ext = grid.hx_ext
+    area = grid.area
+
+    def _div_stencil(u_pad, v_pad):
+        """(6, n+2, n+2) each -> (6, n, n)."""
+        fx = u_pad * hy_ext
+        fy = v_pad * hx_ext
+        dfx = fx[:, 2:, 1:-1] - fx[:, :-2, 1:-1]
+        dfy = fy[:, 1:-1, 2:] - fy[:, 1:-1, :-2]
+        return (dfx + dfy) / (2.0 * area)
+
+    u_t = jnp.moveaxis(u_3d, -1, 0)
+    v_t = jnp.moveaxis(v_3d, -1, 0)
+    # Use scalar overlap for each component packed together
+    uv_packed = jnp.stack([u_3d, v_3d], axis=-1)  # (6, n, n, nlev, 2)
+    uv_t = jnp.moveaxis(uv_packed, -2, 0)  # (nlev, 6, n, n, 2)
+
+    def _per_level(uv_k):
+        u_k, v_k = uv_k[..., 0], uv_k[..., 1]
+        return overlapped_halo_compute_vector(
+            u_k, v_k, _div_stencil,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            halo_width=1, masks=masks,
+            interp_offsets=grid.halo_interp_offsets,
+        )
+
+    result_t = jax.vmap(_per_level)(uv_t)
+    return jnp.moveaxis(result_t, 0, -1)
+
+
+def overlapped_vorticity_3d(
+    u_3d: jax.Array,
+    v_3d: jax.Array,
+    grid: CubedSphereGrid,
+    masks=None,
+) -> jax.Array:
+    """Vorticity with interior/boundary overlap for 4D vector fields.
+
+    Parameters
+    ----------
+    u_3d, v_3d : jax.Array, shape (6, n, n, nlev)
+    grid : CubedSphereGrid
+    masks : InteriorBoundaryMasks, optional
+
+    Returns
+    -------
+    jax.Array, shape (6, n, n, nlev).
+    """
+    from legoesm.parallel.async_halo import overlapped_halo_compute_vector
+
+    hy_ext = grid.hy_ext
+    hx_ext = grid.hx_ext
+    area = grid.area
+
+    def _vort_stencil(u_pad, v_pad):
+        """(6, n+2, n+2) each -> (6, n, n)."""
+        vort_x = v_pad * hy_ext
+        vort_y = u_pad * hx_ext
+        d_vort_x = vort_x[:, 2:, 1:-1] - vort_x[:, :-2, 1:-1]
+        d_vort_y = vort_y[:, 1:-1, 2:] - vort_y[:, 1:-1, :-2]
+        return (d_vort_x - d_vort_y) / (2.0 * area)
+
+    uv_packed = jnp.stack([u_3d, v_3d], axis=-1)
+    uv_t = jnp.moveaxis(uv_packed, -2, 0)
+
+    def _per_level(uv_k):
+        u_k, v_k = uv_k[..., 0], uv_k[..., 1]
+        return overlapped_halo_compute_vector(
+            u_k, v_k, _vort_stencil,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            halo_width=1, masks=masks,
+            interp_offsets=grid.halo_interp_offsets,
+        )
+
+    result_t = jax.vmap(_per_level)(uv_t)
+    return jnp.moveaxis(result_t, 0, -1)
+
+
+# ==============================================================================
 # Vertical operators for height-based coordinates (non-hydrostatic)
 # ==============================================================================
 

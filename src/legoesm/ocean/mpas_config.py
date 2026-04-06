@@ -50,8 +50,8 @@ class MPASOceanConfig(NamedTuple):
     S_ref : float
         Reference salinity [PSU] for virtual salt flux.
     """
-    g: float = 9.80616
-    rho_0: float = 1025.0
+    g: float = 9.80616           # = constants.g
+    rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4
     K_h: float = 1.0e3
     A_v: float = 1.0e-3
@@ -64,6 +64,9 @@ class MPASOceanConfig(NamedTuple):
     fix_salt: bool = True
     min_water_column_m: float = 0.5
     barotropic_damping: float = 0.0
+    barotropic_diffusion_alpha: float = 0.01
+    barotropic_diffusion_dt_ref: float = 60.0
+    semi_implicit_coriolis: bool = True
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0
     # Runtime bounds checks (matching cubed-sphere ocean)

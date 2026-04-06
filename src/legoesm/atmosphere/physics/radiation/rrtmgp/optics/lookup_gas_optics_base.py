@@ -20,16 +20,11 @@ from typing import Any, TypeAlias
 
 import jax
 import jax.numpy as jnp
-import netCDF4 as nc
 import numpy as np
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import data_loader_base
 
 Array: TypeAlias = jax.Array
-
-
-def _bytes_to_str(split_str):
-  return str(split_str, 'utf-8').strip()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,15 +147,15 @@ class AbstractLookupGasOptics:
 
 def _create_rrtm_consistent_minor_gas_index(
     idx_gases: dict[str, int],
-    gases_minor_arr: Sequence[Any],
-    scaling_gases_arr: Sequence[Any],
+    gases_minor: Sequence[str],
+    scaling_gases: Sequence[str],
 ) -> tuple[Array, Array]:
   """Create a mapping from the minor and scaling absorber to the RRTM index.
 
   Args:
     idx_gases: A dictionary mapping gas name to its RRTM index.
-    gases_minor_arr: An array of minor gas names.
-    scaling_gases_arr: An array of scaling gas names. Some entries will be
+    gases_minor: A sequence of minor gas names (already decoded strings).
+    scaling_gases: A sequence of scaling gas names. Some entries will be
       empty, which implies that the corresponding minor absorber does not have a
       scaling gas.
 
@@ -169,13 +164,11 @@ def _create_rrtm_consistent_minor_gas_index(
     index and 2) a mapping from minor absorber index to the corresponding
     scaling gas RRTM index.
   """
-  n_minor_absrb = len(gases_minor_arr)
-  assert len(scaling_gases_arr) == n_minor_absrb, (
+  n_minor_absrb = len(gases_minor)
+  assert len(scaling_gases) == n_minor_absrb, (
       'The scaling gases array should have length equal to the number of'
       ' minor absorbers.'
   )
-  gases_minor_arr = [_bytes_to_str(b) for b in gases_minor_arr]
-  scaling_gases_arr = [_bytes_to_str(b) for b in scaling_gases_arr]
 
   def idx_tensor(arr):
     idx = [-1] * len(arr)
@@ -184,8 +177,8 @@ def _create_rrtm_consistent_minor_gas_index(
         idx[i] = idx_gases[g]
     return jnp.array(idx, dtype=jnp.int_)
 
-  idx_minor = idx_tensor(gases_minor_arr)
-  idx_scale = idx_tensor(scaling_gases_arr)
+  idx_minor = idx_tensor(gases_minor)
+  idx_scale = idx_tensor(scaling_gases)
   return idx_minor, idx_scale
 
 
@@ -247,20 +240,20 @@ def _minor_gas_mappings(
 
 
 def load_data(
-    ds: nc.Dataset,
     tables: Mapping[str, Array],
     dims: Mapping[str, int],
+    strings: Mapping[str, list[str]],
 ) -> dict[str, Any]:
   """Preprocesses the RRTMGP gas optics data.
 
   Args:
-    ds: The original netCDF Dataset containing the RRTMGP optics data.
-    tables: The extracted data as a dictionary of `Array`s.
+    tables: The extracted numeric data as a dictionary of ``Array``s.
     dims: A dictionary containing dimension information for the tables.
+    strings: A dictionary of decoded string variables (gas names, etc.).
 
   Returns:
     A dictionary containing dimension information and the preprocessed RRTMGP
-    data as `Array`s.
+    data as ``Array``s.
   """
   p_ref = tables['press_ref']
   t_ref = tables['temp_ref']
@@ -269,10 +262,7 @@ def load_data(
   temperature_ref_max = jnp.max(t_ref)
   dtemp = t_ref[1] - t_ref[0]
   dln_p = jnp.log(p_ref[0]) - jnp.log(p_ref[1])
-  gas_names_ds = ds['gas_names'][:].data
-  gas_names = []
-  for gas_name in gas_names_ds:
-    gas_names.append(''.join([g_i.decode('utf-8') for g_i in gas_name]).strip())
+  gas_names = list(strings['gas_names'])
   # Prepend a dry air key to the list of names so that the 0 index is reserved
   # for dry air and all the other names follow a 1-based index system,
   # consistent with the RRTMGP species indices.
@@ -288,32 +278,32 @@ def load_data(
   idx_minor_gases_lower, idx_scaling_gases_lower = (
       _create_rrtm_consistent_minor_gas_index(
           idx_gases,
-          ds['minor_gases_lower'][:].data,
-          ds['scaling_gas_lower'][:].data,
+          strings['minor_gases_lower'],
+          strings['scaling_gas_lower'],
       )
   )
   idx_minor_gases_upper, idx_scaling_gases_upper = (
       _create_rrtm_consistent_minor_gas_index(
           idx_gases,
-          ds['minor_gases_upper'][:].data,
-          ds['scaling_gas_upper'][:].data,
+          strings['minor_gases_upper'],
+          strings['scaling_gas_upper'],
       )
   )
   # Decrement indices since RRTMGP was originally developed in a 1-based index
   # system.
-  bnd_limits_gpt = ds['bnd_limits_gpt'][:].data - 1
+  bnd_limits_gpt = np.asarray(tables['bnd_limits_gpt']) - 1
   g_point_to_bnd = np.asarray([None] * dims['gpt'])
   for i in range(dims['bnd']):
     g_point_to_bnd[bnd_limits_gpt[i, 0] : bnd_limits_gpt[i, 1] + 1] = i
   g_point_to_bnd = np.array(g_point_to_bnd, dtype=jnp.int_)
-  minor_lower_gpt_lims = ds['minor_limits_gpt_lower'][:].data - 1
+  minor_lower_gpt_lims = np.asarray(tables['minor_limits_gpt_lower']) - 1
   (
       minor_lower_bnd,
       minor_lower_bnd_start,
       minor_lower_bnd_end,
       minor_lower_gpt_shift,
   ) = _minor_gas_mappings(g_point_to_bnd, minor_lower_gpt_lims, dims['bnd'])
-  minor_upper_gpt_lims = ds['minor_limits_gpt_upper'][:].data - 1
+  minor_upper_gpt_lims = np.asarray(tables['minor_limits_gpt_upper']) - 1
   (
       minor_upper_bnd,
       minor_upper_bnd_start,

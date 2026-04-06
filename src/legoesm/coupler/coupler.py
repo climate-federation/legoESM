@@ -7,6 +7,7 @@ full atmospheric state — only AtmToSurface.
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 import warnings
 
@@ -151,7 +152,12 @@ def init_surface_state(
     # Carbon pools (only for differland scheme)
     carbon = None
     if land_config is not None and land_config.carbon.scheme == "differland":
-        carbon = init_carbon_state(shape, land_config.carbon)
+        # Multi-layer land uses columnar (ncol,) shape; slab uses spatial shape
+        if isinstance(land_config, MultiLayerLandConfig):
+            carbon_shape = (math.prod(shape),)
+        else:
+            carbon_shape = shape
+        carbon = init_carbon_state(carbon_shape, land_config.carbon)
 
     return SurfaceState(land=land, ice=ice, lake=lake, accumulator=acc,
                         carbon=carbon)
@@ -318,10 +324,28 @@ def make_coupler(
 
         # 2. Step land (dispatch slab vs multi-layer)
         if _use_multilayer:
-            land_new, land_resp, carbon_new = step_multilayer_land(
-                sfc_state.land, atm_forcing, land_config, U_min, dt,
-                lat=_lat, carbon_state=sfc_state.carbon, doy=doy,
+            # Multi-layer land operates on columnar (ncol,) arrays.
+            # Flatten (6,n,n) forcing to (ncol,) and unflatten response.
+            _spatial_shape = atm_forcing.sw_down.shape
+            _flat_forcing = jax.tree.map(
+                lambda x: x.reshape(-1) if hasattr(x, 'reshape') else x,
+                atm_forcing,
+            )
+            _flat_lat = (_lat.reshape(-1)
+                         if _lat is not None and hasattr(_lat, 'reshape')
+                         else _lat)
+            land_new, land_resp_flat, carbon_new = step_multilayer_land(
+                sfc_state.land, _flat_forcing, land_config, U_min, dt,
+                lat=_flat_lat, carbon_state=sfc_state.carbon, doy=doy,
                 land_params=_lp,
+            )
+            # Unflatten TileResponse fields back to spatial shape
+            land_resp = jax.tree.map(
+                lambda x: (x.reshape(_spatial_shape)
+                           if hasattr(x, 'reshape') and x.ndim == 1
+                              and x.shape[0] == math.prod(_spatial_shape)
+                           else x),
+                land_resp_flat,
             )
         else:
             land_new, land_resp, carbon_new = step_land(

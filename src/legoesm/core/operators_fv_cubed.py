@@ -6,6 +6,7 @@ cubed-sphere, including default divergence damping coefficient calculation.
 
 from __future__ import annotations
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 
 
@@ -50,8 +51,8 @@ def default_div_damp_coeffs(
     # Approximate cell size in meters on the cubed-sphere
     # For a cubed-sphere with n points per edge and Earth radius ~6.371e6 m
     # each cell has characteristic size ~ (2*pi*R) / (6*n) meters
-    earth_radius = 6.371e6  # meters
-    face_perimeter = 2 * 3.141592653589793 * earth_radius / 3.0
+    earth_radius = constants.R_earth
+    face_perimeter = 2 * float(constants.PI) * earth_radius / 3.0
     dx = face_perimeter / grid.n
 
     # Default damping coefficients scaled by grid spacing and timestep

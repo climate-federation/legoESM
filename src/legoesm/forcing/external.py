@@ -13,7 +13,7 @@ Status
 - GHG: config + constant-value active; time-varying from file supported
 - Ozone: zonal-mean climatology with lat/vertical interpolation + reference fallback
 - Aerosol: zonal-mean AOD climatology with optional volcanic contribution
-- Solar: constant/file TSI and full spectral (per g-point) forcing from NetCDF
+- Solar: constant/file TSI and full spectral (per g-point) forcing
 """
 
 from __future__ import annotations
@@ -26,17 +26,27 @@ import numpy as np
 
 
 # ==============================================================================
-# NetCDF time-interpolation helper
+# Data loading helpers (Zarr-first, NetCDF fallback via xarray)
 # ==============================================================================
 
+def _open_forcing_dataset(path: str):
+    """Open a forcing file as xarray Dataset (Zarr or NetCDF)."""
+    import os
+    import xarray as xr
+    if os.path.isdir(path) or path.endswith(".zarr"):
+        return xr.open_zarr(path)
+    return xr.open_dataset(path)
+
+
 @lru_cache(maxsize=16)
-def _load_nc_timeseries(path: str, varnames: tuple[str, ...]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Load 1-D time series variables from a NetCDF file.
+def _load_timeseries(path: str, varnames: tuple[str, ...]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Load 1-D time series variables from a Zarr store or NetCDF file.
 
     Parameters
     ----------
     path : str
-        Path to a NetCDF file with a ``time`` dimension (in fractional days).
+        Path to a Zarr store or NetCDF file with a ``time`` dimension
+        (in fractional days).
     varnames : tuple of str
         Variable names to load (must be 1-D along time).
 
@@ -45,23 +55,25 @@ def _load_nc_timeseries(path: str, varnames: tuple[str, ...]) -> tuple[np.ndarra
     (times, data) where times is shape (N,) in days and data maps
     each varname to a 1-D numpy array of length N.
     """
-    import netCDF4  # deferred to avoid hard dep at import time
-
-    with netCDF4.Dataset(path, "r") as ds:
-        if "time" not in ds.dimensions:
-            raise ValueError(f"NetCDF file {path!r} has no 'time' dimension")
-        times = np.asarray(ds.variables["time"][:], dtype=np.float64)
-        data = {}
-        for v in varnames:
-            if v not in ds.variables:
-                raise ValueError(f"Variable {v!r} not found in {path!r}")
-            arr = np.asarray(ds.variables[v][:], dtype=np.float64)
-            if arr.ndim != 1 or arr.shape[0] != times.shape[0]:
-                raise ValueError(
-                    f"Variable {v!r} must be 1-D with length matching 'time' "
-                    f"(got shape {arr.shape}, expected ({times.shape[0]},))"
-                )
-            data[v] = arr
+    ds = _open_forcing_dataset(path)
+    if "time" not in ds.dims:
+        ds.close()
+        raise ValueError(f"Forcing file {path!r} has no 'time' dimension")
+    times = np.asarray(ds["time"].values, dtype=np.float64)
+    data = {}
+    for v in varnames:
+        if v not in ds.data_vars:
+            ds.close()
+            raise ValueError(f"Variable {v!r} not found in {path!r}")
+        arr = np.asarray(ds[v].values, dtype=np.float64)
+        if arr.ndim != 1 or arr.shape[0] != times.shape[0]:
+            ds.close()
+            raise ValueError(
+                f"Variable {v!r} must be 1-D with length matching 'time' "
+                f"(got shape {arr.shape}, expected ({times.shape[0]},))"
+            )
+        data[v] = arr
+    ds.close()
     return times, data
 
 
@@ -84,8 +96,8 @@ def _interp_2d_time(times: np.ndarray, values: np.ndarray, day: float) -> np.nda
 
 
 @lru_cache(maxsize=16)
-def _load_nc_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Load a monthly zonal-mean field from NetCDF.
+def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Load a monthly zonal-mean field from a Zarr store or NetCDF file.
 
     Expected dimensions: ``(time=12, lat, [level])``.
     An optional ``level`` or ``plev`` variable provides pressure levels [Pa].
@@ -96,98 +108,100 @@ def _load_nc_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndar
     mid-month days, lat is shape (nlat,), and data is shape
     (12, nlat) or (12, nlat, nlev).
     """
-    import netCDF4
-
-    with netCDF4.Dataset(path, "r") as ds:
-        if varname not in ds.variables:
-            raise ValueError(f"Variable {varname!r} not found in {path!r}")
-        data = np.asarray(ds.variables[varname][:], dtype=np.float64)
-        if "lat" in ds.variables:
-            lat = np.asarray(ds.variables["lat"][:], dtype=np.float64)
-        elif "latitude" in ds.variables:
-            lat = np.asarray(ds.variables["latitude"][:], dtype=np.float64)
-        else:
-            raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
-        if "time" in ds.variables:
-            mid_days = np.asarray(ds.variables["time"][:], dtype=np.float64)
-        else:
-            # Assume 12 months, mid-month day of year
-            mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+    ds = _open_forcing_dataset(path)
+    if varname not in ds.data_vars:
+        ds.close()
+        raise ValueError(f"Variable {varname!r} not found in {path!r}")
+    data = np.asarray(ds[varname].values, dtype=np.float64)
+    if "lat" in ds:
+        lat = np.asarray(ds["lat"].values, dtype=np.float64)
+    elif "latitude" in ds:
+        lat = np.asarray(ds["latitude"].values, dtype=np.float64)
+    else:
+        ds.close()
+        raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
+    if "time" in ds:
+        mid_days = np.asarray(ds["time"].values, dtype=np.float64)
+    else:
+        # Assume 12 months, mid-month day of year
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+    ds.close()
     return mid_days, lat, data
 
 
 @lru_cache(maxsize=16)
-def _load_nc_monthly_zonal_with_levels(path: str, varname: str):
-    """Like _load_nc_monthly_zonal but also returns pressure levels if present.
+def _load_monthly_zonal_with_levels(path: str, varname: str):
+    """Like ``_load_monthly_zonal`` but also returns pressure levels if present.
 
     Returns
     -------
     (mid_days, lat, plev, data) where plev is shape (nlev,) in [Pa]
     or None if no vertical dimension.
     """
-    import netCDF4
+    ds = _open_forcing_dataset(path)
+    if varname not in ds.data_vars:
+        ds.close()
+        raise ValueError(f"Variable {varname!r} not found in {path!r}")
+    var = ds[varname]
+    data = np.asarray(var.values, dtype=np.float64)
+    dims = list(var.dims)
+    if "lat" in ds:
+        lat = np.asarray(ds["lat"].values, dtype=np.float64)
+    elif "latitude" in ds:
+        lat = np.asarray(ds["latitude"].values, dtype=np.float64)
+    else:
+        ds.close()
+        raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
+    if "time" in ds:
+        mid_days = np.asarray(ds["time"].values, dtype=np.float64)
+    else:
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
 
-    with netCDF4.Dataset(path, "r") as ds:
-        if varname not in ds.variables:
-            raise ValueError(f"Variable {varname!r} not found in {path!r}")
-        var = ds.variables[varname]
-        data = np.asarray(var[:], dtype=np.float64)
-        dims = list(var.dimensions) if hasattr(var, "dimensions") else []
-        if "lat" in ds.variables:
-            lat = np.asarray(ds.variables["lat"][:], dtype=np.float64)
-        elif "latitude" in ds.variables:
-            lat = np.asarray(ds.variables["latitude"][:], dtype=np.float64)
-        else:
-            raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
-        if "time" in ds.variables:
-            mid_days = np.asarray(ds.variables["time"][:], dtype=np.float64)
-        else:
-            mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+    plev = None
+    for vname in ("plev", "level", "lev"):
+        if vname in ds:
+            plev = np.asarray(ds[vname].values, dtype=np.float64)
+            # Convert hPa → Pa if needed (detect via units attr or magnitude)
+            units = ds[vname].attrs.get("units", "")
+            if units in ("hPa", "millibar", "mbar", "mb"):
+                plev = plev * 100.0
+            elif not units and plev.size > 0 and np.max(plev) < 1500.0:
+                # Heuristic: surface pressure ~1013 hPa; if max < 1500 assume hPa
+                plev = plev * 100.0
+            break
 
-        plev = None
-        for vname in ("plev", "level", "lev"):
-            if vname in ds.variables:
-                plev = np.asarray(ds.variables[vname][:], dtype=np.float64)
-                # Convert hPa → Pa if needed (detect via units attr or magnitude)
-                units = getattr(ds.variables[vname], "units", "")
-                if units in ("hPa", "millibar", "mbar", "mb"):
-                    plev = plev * 100.0
-                elif not units and plev.size > 0 and np.max(plev) < 1500.0:
-                    # Heuristic: surface pressure ~1013 hPa; if max < 1500 assume hPa
-                    plev = plev * 100.0
-                break
+    # Average over longitude if present → zonal mean
+    lon_names = ("lon", "longitude")
+    for lname in lon_names:
+        if lname in dims:
+            lon_ax = dims.index(lname)
+            data = np.nanmean(data, axis=lon_ax)
+            dims.pop(lon_ax)
+            break
 
-        # Average over longitude if present → zonal mean
-        lon_names = ("lon", "longitude")
-        for lname in lon_names:
-            if lname in dims:
-                lon_ax = dims.index(lname)
-                data = np.nanmean(data, axis=lon_ax)
-                dims.pop(lon_ax)
-                break
+    # Ensure dimension order is (time, lat, plev) for downstream code.
+    # CMIP6 files often have (time, plev, lat); swap if needed.
+    if plev is not None and data.ndim == 3:
+        lat_name = "lat" if "lat" in dims else "latitude"
+        plev_name = next((v for v in ("plev", "level", "lev") if v in dims), None)
+        if plev_name and lat_name in dims and plev_name in dims:
+            lat_ax = dims.index(lat_name)
+            plev_ax = dims.index(plev_name)
+            if plev_ax < lat_ax:
+                # (time, plev, lat) → (time, lat, plev)
+                data = np.swapaxes(data, plev_ax, lat_ax)
 
-        # Ensure dimension order is (time, lat, plev) for downstream code.
-        # CMIP6 files often have (time, plev, lat); swap if needed.
-        if plev is not None and data.ndim == 3:
-            lat_name = "lat" if "lat" in dims else "latitude"
-            plev_name = next((v for v in ("plev", "level", "lev") if v in dims), None)
-            if plev_name and lat_name in dims and plev_name in dims:
-                lat_ax = dims.index(lat_name)
-                plev_ax = dims.index(plev_name)
-                if plev_ax < lat_ax:
-                    # (time, plev, lat) → (time, lat, plev)
-                    data = np.swapaxes(data, plev_ax, lat_ax)
-
+    ds.close()
     return mid_days, lat, plev, data
 
 
 @lru_cache(maxsize=16)
-def _load_nc_time_gpt(
+def _load_time_gpt(
     path: str,
     tsi_var: str,
     spectral_var: str,
 ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
-    """Load time-varying solar spectral forcing.
+    """Load time-varying solar spectral forcing (Zarr or NetCDF).
 
     Expected variables
     ------------------
@@ -195,29 +209,32 @@ def _load_nc_time_gpt(
     - optional ``tsi`` [W/m^2]
     - spectral weights ``spectral_var`` with shape (time, ngpt)
     """
-    import netCDF4
-
-    with netCDF4.Dataset(path, "r") as ds:
-        if "time" not in ds.variables:
-            raise ValueError(f"No 'time' variable in spectral solar file {path!r}")
-        times = np.asarray(ds.variables["time"][:], dtype=np.float64)
-        if spectral_var not in ds.variables:
+    ds = _open_forcing_dataset(path)
+    if "time" not in ds:
+        ds.close()
+        raise ValueError(f"No 'time' variable in spectral solar file {path!r}")
+    times = np.asarray(ds["time"].values, dtype=np.float64)
+    if spectral_var not in ds.data_vars:
+        ds.close()
+        raise ValueError(
+            f"Spectral variable {spectral_var!r} not found in {path!r}",
+        )
+    spec = np.asarray(ds[spectral_var].values, dtype=np.float64)
+    if spec.ndim != 2 or spec.shape[0] != times.shape[0]:
+        ds.close()
+        raise ValueError(
+            f"Spectral variable {spectral_var!r} must have shape (time, ngpt); "
+            f"got {spec.shape}",
+        )
+    tsi = None
+    if tsi_var in ds.data_vars:
+        tsi = np.asarray(ds[tsi_var].values, dtype=np.float64)
+        if tsi.ndim != 1 or tsi.shape[0] != times.shape[0]:
+            ds.close()
             raise ValueError(
-                f"Spectral variable {spectral_var!r} not found in {path!r}",
+                f"TSI variable {tsi_var!r} must have shape (time,); got {tsi.shape}",
             )
-        spec = np.asarray(ds.variables[spectral_var][:], dtype=np.float64)
-        if spec.ndim != 2 or spec.shape[0] != times.shape[0]:
-            raise ValueError(
-                f"Spectral variable {spectral_var!r} must have shape (time, ngpt); "
-                f"got {spec.shape}",
-            )
-        tsi = None
-        if tsi_var in ds.variables:
-            tsi = np.asarray(ds.variables[tsi_var][:], dtype=np.float64)
-            if tsi.ndim != 1 or tsi.shape[0] != times.shape[0]:
-                raise ValueError(
-                    f"TSI variable {tsi_var!r} must have shape (time,); got {tsi.shape}",
-                )
+    ds.close()
     return times, tsi, spec
 
 
@@ -358,7 +375,7 @@ class GHGConfig(NamedTuple):
 
 @lru_cache(maxsize=4)
 def _load_ghg_annual_file(path: str) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Load CMIP6-style annual global-mean GHG file.
+    """Load CMIP6-style annual global-mean GHG file (Zarr or NetCDF).
 
     Expected format: variables CO2, CH4, N2O, CFC_11, CFC_12 with
     dimensions (time, lat, lon) where lat=1, lon=1.  The time axis
@@ -371,28 +388,30 @@ def _load_ghg_annual_file(path: str) -> tuple[np.ndarray, dict[str, np.ndarray]]
     names to 1-D numpy arrays of length N.  Values are in the file's
     native units (CO2 in 1e-6, CH4/N2O in 1e-9, CFCs in 1e-12).
     """
-    import netCDF4
+    ds = _open_forcing_dataset(path)
+    if "time" not in ds.dims:
+        ds.close()
+        raise ValueError(f"GHG file {path!r} has no 'time' dimension")
+    years = np.asarray(ds["time"].values, dtype=np.float64)
 
-    with netCDF4.Dataset(path, "r") as ds:
-        if "time" not in ds.dimensions:
-            raise ValueError(f"GHG file {path!r} has no 'time' dimension")
-        years = np.asarray(ds.variables["time"][:], dtype=np.float64)
+    data = {}
+    for varname in ("CO2", "CH4", "N2O", "CFC_11", "CFC_12"):
+        if varname not in ds.data_vars:
+            ds.close()
+            raise ValueError(f"Variable {varname!r} not found in {path!r}")
+        arr = np.asarray(ds[varname].values, dtype=np.float64)
+        # Squeeze spatial dimensions (lat=1, lon=1) → 1-D time series
+        arr = arr.squeeze()
+        if arr.ndim != 1 or arr.shape[0] != years.shape[0]:
+            ds.close()
+            raise ValueError(
+                f"Variable {varname!r} must reduce to 1-D after "
+                f"squeezing (got shape {arr.shape}, expected "
+                f"({years.shape[0]},))"
+            )
+        data[varname] = arr
 
-        data = {}
-        for varname in ("CO2", "CH4", "N2O", "CFC_11", "CFC_12"):
-            if varname not in ds.variables:
-                raise ValueError(f"Variable {varname!r} not found in {path!r}")
-            arr = np.asarray(ds.variables[varname][:], dtype=np.float64)
-            # Squeeze spatial dimensions (lat=1, lon=1) → 1-D time series
-            arr = arr.squeeze()
-            if arr.ndim != 1 or arr.shape[0] != years.shape[0]:
-                raise ValueError(
-                    f"Variable {varname!r} must reduce to 1-D after "
-                    f"squeezing (got shape {arr.shape}, expected "
-                    f"({years.shape[0]},))"
-                )
-            data[varname] = arr
-
+    ds.close()
     return years, data
 
 
@@ -422,7 +441,7 @@ def get_ghg_at_time(config: GHGConfig, day: float) -> dict:
         if not config.path:
             raise ValueError("GHGConfig.path must be set when source='file'")
         varnames = ("co2_ppmv", "ch4_ppbv", "n2o_ppbv")
-        times, data = _load_nc_timeseries(config.path, varnames)
+        times, data = _load_timeseries(config.path, varnames)
         result = {v: _interp_1d(times, data[v], day) for v in varnames}
         result["cfc11_pptv"] = config.cfc11_pptv
         result["cfc12_pptv"] = config.cfc12_pptv
@@ -547,16 +566,16 @@ _OZONE_VARNAMES = ("ozone", "vmro3", "o3", "O3", "tro3")
 
 @lru_cache(maxsize=16)
 def _detect_ozone_varname(path: str) -> str:
-    """Auto-detect the ozone variable name in a NetCDF file.
+    """Auto-detect the ozone variable name in a Zarr store or NetCDF file.
 
     Tries common names: 'ozone', 'vmro3' (CMIP6), 'o3', 'O3', 'tro3'.
     """
-    import netCDF4
-
-    with netCDF4.Dataset(path, "r") as ds:
-        for name in _OZONE_VARNAMES:
-            if name in ds.variables:
-                return name
+    ds = _open_forcing_dataset(path)
+    for name in _OZONE_VARNAMES:
+        if name in ds.data_vars:
+            ds.close()
+            return name
+    ds.close()
     raise ValueError(
         f"No ozone variable found in {path!r}. "
         f"Expected one of {_OZONE_VARNAMES}"
@@ -602,7 +621,7 @@ def get_ozone_at_time(config: OzoneConfig, day: float,
         )
 
     varname = _detect_ozone_varname(config.path)
-    mid_days, lat, plev, data = _load_nc_monthly_zonal_with_levels(
+    mid_days, lat, plev, data = _load_monthly_zonal_with_levels(
         config.path, varname
     )
     ozone_interp = _interp_monthly_cyclic(mid_days, data, day)
@@ -693,7 +712,7 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     if not config.enabled:
         return None
     if config.path:
-        mid_days, lat, data = _load_nc_monthly_zonal(config.path, "aod")
+        mid_days, lat, data = _load_monthly_zonal(config.path, "aod")
         aod_interp = _interp_monthly_cyclic(mid_days, data, day)
         if lat_grid is not None:
             base_aod = _interp_zonal_to_grid(lat, aod_interp, lat_grid)
@@ -715,7 +734,7 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
     # Optional volcanic contribution.
     if config.volcanic_enabled:
         if config.volcanic_path:
-            mid_days_v, lat_v, data_v = _load_nc_monthly_zonal(config.volcanic_path, "aod")
+            mid_days_v, lat_v, data_v = _load_monthly_zonal(config.volcanic_path, "aod")
             aod_v = _interp_monthly_cyclic(mid_days_v, data_v, day) * config.volcanic_scale
             if lat_grid is not None:
                 volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
@@ -796,13 +815,13 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
     if config.source == "file":
         if not config.path:
             raise ValueError("SolarConfig.path must be set when source='file'")
-        times, data = _load_nc_timeseries(config.path, (config.tsi_var,))
+        times, data = _load_timeseries(config.path, (config.tsi_var,))
         return {"tsi": _interp_1d(times, data[config.tsi_var], day), "solar_fraction_by_gpt": None}
 
     if config.source == "spectral_file":
         if not config.path:
             raise ValueError("SolarConfig.path must be set when source='spectral_file'")
-        times, tsi_series, spec_series = _load_nc_time_gpt(
+        times, tsi_series, spec_series = _load_time_gpt(
             config.path,
             config.tsi_var,
             config.spectral_var,

@@ -63,7 +63,10 @@ def compute_bulk_richardson(
 ) -> jax.Array:
     """Compute bulk Richardson number profile from surface.
 
-    Ri_b(z) = g * z * (theta_v(z) - theta_v_sfc) / (theta_v_sfc * V(z)^2)
+    Ri_b(z) = g * dz * (theta_v(z) - theta_v_sfc) / (theta_v_sfc * dV(z)^2)
+
+    where dV(z)^2 = (u(z)-u_sfc)^2 + (v(z)-v_sfc)^2 is the wind *shear*
+    from the surface, not the absolute wind speed.
 
     Parameters
     ----------
@@ -93,6 +96,8 @@ def compute_bulk_richardson(
     # Surface values (bottom level)
     theta_v_sfc = theta_v[:, -1]  # (ncol,)
     z_sfc = z_full[:, -1:]        # (ncol, 1)
+    u_sfc = u[:, -1:]             # (ncol, 1)
+    v_sfc = v[:, -1:]             # (ncol, 1)
 
     # Height above surface
     dz_from_sfc = jnp.abs(z_full - z_sfc) + 1.0  # (ncol, nlev), +1 avoids /0
@@ -100,12 +105,13 @@ def compute_bulk_richardson(
     # Buoyancy difference from surface
     dtheta_v = theta_v - theta_v_sfc[:, None]
 
-    # Wind speed squared (with floor to avoid division by zero)
-    V2 = u ** 2 + v ** 2 + 1e-4
+    # Wind shear squared from surface (NOT absolute wind speed)
+    # A barotropic wind with no shear should not deepen the PBL.
+    dV2 = (u - u_sfc) ** 2 + (v - v_sfc) ** 2 + 1e-4
 
     # Bulk Richardson number
     Ri_bulk = (constants.g / jnp.clip(theta_v_sfc[:, None], 1.0, None)) * (
-        dtheta_v * dz_from_sfc / V2
+        dtheta_v * dz_from_sfc / dV2
     )
 
     return Ri_bulk, theta_v
@@ -148,12 +154,15 @@ def diagnose_pbl_height(
     Ri_bulk, _ = compute_bulk_richardson(T, q_v, u, v, p_full, z_full)
 
     # Sigmoid weights: high where Ri_bulk < Ri_crit (inside PBL)
-    weights = jax.nn.sigmoid(config.sharpness * (config.Ri_crit - Ri_bulk))
+    sigma = jax.nn.sigmoid(config.sharpness * (config.Ri_crit - Ri_bulk))
 
-    # Weighted average height
-    h_pbl = jnp.sum(z_full * weights, axis=1) / jnp.clip(
-        jnp.sum(weights, axis=1), 1e-10, None
-    )
+    # Transition-zone weights: sigma * (1 - sigma) peaks at the Ri_crit
+    # crossing, not at the centroid of the subcritical layer.  This gives
+    # a weighted average that converges to the PBL top in the sharp limit.
+    weights = sigma * (1.0 - sigma) + 1e-20
+
+    # Weighted average height (focused on the crossing region)
+    h_pbl = jnp.sum(z_full * weights, axis=1) / jnp.sum(weights, axis=1)
 
     return jnp.clip(h_pbl, config.h_min, config.h_max)
 
@@ -170,8 +179,8 @@ def diagnose_pbl_height_interp(
     """Diagnose PBL height with linear interpolation to Ri_crit crossing.
 
     Scans from the surface upward and linearly interpolates between the
-    last sub-critical and first super-critical levels. Uses a smooth
-    maximum to select the crossing in a JAX-traceable way.
+    last sub-critical and first super-critical levels. Uses a softmin
+    (log-sum-exp) to select the lowest crossing in a differentiable way.
 
     Parameters
     ----------
@@ -198,23 +207,31 @@ def diagnose_pbl_height_interp(
     z_below = z_rev[:, :-1]
     z_above = z_rev[:, 1:]
 
-    # Crossing occurs where Ri_below < Ri_crit and Ri_above >= Ri_crit
-    crosses = (Ri_below < config.Ri_crit) & (Ri_above >= config.Ri_crit)
+    # Soft crossing indicator using sigmoid (differentiable)
+    cross_weight = (
+        jax.nn.sigmoid(config.sharpness * (config.Ri_crit - Ri_below))
+        * jax.nn.sigmoid(config.sharpness * (Ri_above - config.Ri_crit))
+    )
 
     # Linear interpolation fraction at each crossing
     dRi = Ri_above - Ri_below + 1e-20
     frac = jnp.clip((config.Ri_crit - Ri_below) / dRi, 0.0, 1.0)
     z_cross = z_below + frac * (z_above - z_below)
 
-    # Select the first (lowest) crossing using soft-min
-    # Weight crossings, pick the one closest to surface
+    # Softmin: select the lowest crossing via log-sum-exp
+    # Negative temperature parameter picks the minimum.
+    beta = config.sharpness / config.h_max  # scale-aware sharpness
     large_val = config.h_max * 2.0
-    z_candidate = jnp.where(crosses, z_cross, large_val)
-    h_pbl = jnp.min(z_candidate, axis=1)
+    # Non-crossings get pushed to large_val (won't dominate softmin)
+    z_candidate = z_cross + (1.0 - cross_weight) * large_val
+    # Weighted softmin: -1/beta * log(sum(w * exp(-beta * z)))
+    log_weights = jnp.log(cross_weight + 1e-30) - beta * z_candidate
+    h_pbl = -jax.nn.logsumexp(log_weights, axis=1) / beta
 
-    # If no crossing found, fall back to sigmoid method
-    no_crossing = jnp.all(~crosses, axis=1)
+    # Blend with smooth-method fallback when no clear crossing exists
+    total_cross_weight = jnp.sum(cross_weight, axis=1)
+    blend = jax.nn.sigmoid(config.sharpness * (total_cross_weight - 0.1))
     h_fallback = diagnose_pbl_height(T, q_v, u, v, p_full, z_full, config)
-    h_pbl = jnp.where(no_crossing, h_fallback, h_pbl)
+    h_pbl = blend * h_pbl + (1.0 - blend) * h_fallback
 
     return jnp.clip(h_pbl, config.h_min, config.h_max)

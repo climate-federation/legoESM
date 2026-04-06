@@ -86,7 +86,7 @@ class TestMPIDriverPath:
             CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3,
         )
-        from legoesm.atmosphere.physics.baroclinic_wave import baroclinic_wave_init
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)

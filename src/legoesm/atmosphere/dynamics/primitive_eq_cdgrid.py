@@ -183,7 +183,7 @@ def fv3_hydrostatic_tendencies(
 
     # Positivity protections
     T = jnp.maximum(T, config.T_min)
-    p_s = jnp.clip(p_s, 100.0, 2.0e6)
+    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
 
     # --- 1. D-grid to C-grid ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
@@ -241,12 +241,19 @@ def fv3_hydrostatic_tendencies(
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
 
     # --- 8. Pressure gradient correction at D-grid corners ---
+    # Promote to higher precision for the PGF computation to avoid
+    # catastrophic cancellation (large p terms, small gradient).
+    # Use result_type to only upcast (never downcast from current dtype).
+    from legoesm.core.precision import _resolve_dtype
+    _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
     # ln_ps is 2D — async overlap not beneficial for 2D fields
-    dln_dx, dln_dy_perp = _arakawa_lamb_gradient(ln_ps, cdgrid)  # 2D, separate exchange
+    ln_ps_hi = ln_ps.astype(_pg_dt)
+    dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
     T_corner = 1.0 / _interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
-    pg_corr_x = R_d * T_corner * dln_dx[..., None]
-    pg_corr_y_perp = R_d * T_corner * dln_dy_perp[..., None]
+    T_corner_hi = T_corner.astype(_pg_dt)
+    pg_corr_x = (R_d * T_corner_hi * dln_dx_hi[..., None]).astype(u_d.dtype)
+    pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi[..., None]).astype(v_d.dtype)
 
     # --- 9. D-grid momentum tendencies ---
     du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x
@@ -541,6 +548,8 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
     ) -> FV3HydrostaticState:
         """Advance one time step with D-grid prognostic winds."""
+        from legoesm.core.precision import cast_pytree
+        state = cast_pytree(state, None, "compute")
         cdgrid = self.cdgrid
 
         def tendency_fn(s):
@@ -588,7 +597,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             alpha = self.config.implicit_grav_wave_damping
             lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
             p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
-            p_s_damped = jnp.maximum(p_s_damped, 100.0)
+            p_s_damped = jnp.maximum(p_s_damped, self.config.p_floor)
             state_new = state_new._replace(
                 p_s=state_new.p_s.replace(data=p_s_damped),
             )
@@ -612,7 +621,7 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 )
                 state_new = state_new._replace(p_s=state_h_fixed.p_s)
 
-        return state_new
+        return cast_pytree(state_new, None, "storage")
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_cell_centre(

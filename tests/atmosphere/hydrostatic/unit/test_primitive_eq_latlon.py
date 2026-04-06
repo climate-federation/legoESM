@@ -209,7 +209,7 @@ class TestLatLonPrimitiveEquationModel:
 
     def test_step_with_physics(self, grid, sigma):
         """step_with_physics should work with Held-Suarez forcing."""
-        from legoesm.atmosphere.physics.held_suarez_latlon import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_latlon,
             held_suarez_init_latlon,
         )
@@ -338,7 +338,7 @@ class TestTemperatureStabilityLatLon:
 
     def test_held_suarez_temperature_bounds(self, grid, sigma_20):
         """Held-Suarez forcing should keep T within bounds over 50 steps."""
-        from legoesm.atmosphere.physics.held_suarez_latlon import (
+        from tests.test_cases.held_suarez import (
             held_suarez_forcing_latlon,
             held_suarez_init_latlon,
         )

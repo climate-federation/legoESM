@@ -262,18 +262,19 @@ def spectral_ocean_tendencies(
         + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
     )
 
-    # --- 10. Energy variable: E = K + p'/rho_0 ---
+    # --- 10. Energy variable: E = K + p'/rho_0 + g*eta ---
     # Subtract the area-weighted mean pressure at each level to remove
     # spurious horizontal gradients from bathymetry variations.  The
     # global-mean pressure gradient is identically zero on a sphere,
     # so this does not affect the physics — it only suppresses spectral
     # ringing from the land-ocean boundary discontinuity.
     #
-    # NOTE: The barotropic PGF g*grad(eta) is NOT included here because
-    # the spectral model uses unsplit SSP-RK3 which cannot resolve the
-    # fast barotropic gravity wave mode (CFL > 1.73 at T21).  The
-    # barotropic mode is controlled by eta_hyperdiff instead.  A proper
-    # semi-implicit Helmholtz solve would be needed to include g*eta.
+    # The barotropic PGF g*eta is included here as a depth-uniform term.
+    # At T21 with dt=300s and H<=5500m, the maximum barotropic gravity
+    # wave eigenfrequency gives omega*dt ~ 0.2 << 1.73 (RK3 stability
+    # limit), so explicit treatment is stable.  The eta_hyperdiff
+    # provides additional damping of high-wavenumber barotropic modes
+    # as a safety margin.
     weights = grid.weights[:, jnp.newaxis, jnp.newaxis]  # (n_lat, 1, 1)
     ocean_area = jnp.sum(mask[..., jnp.newaxis] * weights, axis=(0, 1), keepdims=True)
     ocean_area = jnp.maximum(ocean_area, _TINY)
@@ -281,8 +282,10 @@ def spectral_ocean_tendencies(
         p_prime * mask_3d * weights, axis=(0, 1), keepdims=True,
     ) / ocean_area
     p_prime_anom = (p_prime - p_prime_mean) * mask_3d
+    # Barotropic PGF: g*eta broadcast to all levels (Boussinesq)
+    g_eta_3d = (g * eta_safe)[..., jnp.newaxis]  # (n_lat, n_lon, 1)
     E_hat = (sh_analysis_oc2_3d(grid, KE_cos2 * mask_3d)
-             + sh_analysis_3d(grid, (p_prime_anom / rho_0) * mask_3d))
+             + sh_analysis_3d(grid, (p_prime_anom / rho_0 + g_eta_3d) * mask_3d))
 
     # --- 11. Horizontal tendencies ---
     dvor_hat = -flux_vor_div
@@ -681,6 +684,42 @@ class SpectralOceanModel:
             jax.device_put(s, self._default_device) for s in trajectory_cpu
         ]
         return state_out, trajectory_out
+
+    def integrate_scan(
+        self,
+        state: SpectralOceanState,
+        n_steps: int,
+        dt: float,
+    ) -> tuple[SpectralOceanState, SpectralOceanState]:
+        """Integrate using jax.lax.scan (differentiable, JIT-friendly).
+
+        Parameters
+        ----------
+        state : SpectralOceanState
+            Initial state.
+        n_steps : int
+            Number of time steps.
+        dt : float
+            Time step [seconds].
+
+        Returns
+        -------
+        final_state : SpectralOceanState
+        trajectory : SpectralOceanState (stacked, each leaf shape (n_steps, ...))
+
+        Notes
+        -----
+        Does not support the Metal CPU-transfer batching path used by
+        ``integrate()``.  Use ``integrate()`` on Metal for optimal performance.
+        """
+        def scan_fn(state, _):
+            new_state = self.step(state, dt)
+            return new_state, new_state
+
+        final_state, trajectory = jax.lax.scan(
+            scan_fn, state, xs=None, length=n_steps,
+        )
+        return final_state, trajectory
 
 
 # ==============================================================================

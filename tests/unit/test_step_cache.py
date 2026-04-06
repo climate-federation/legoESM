@@ -101,23 +101,24 @@ class TestStepCacheKey:
     def test_same_state_same_key(self):
         config = _single_device_config()
         state = _make_hydrostatic_state()
-        k1 = _make_cache_key(state, config, has_physics=False)
-        k2 = _make_cache_key(state, config, has_physics=False)
+        k1 = _make_cache_key(state, config)
+        k2 = _make_cache_key(state, config)
         assert k1 == k2
 
     def test_different_physics_flag_different_key(self):
         config = _single_device_config()
         state = _make_hydrostatic_state()
-        k1 = _make_cache_key(state, config, has_physics=False)
-        k2 = _make_cache_key(state, config, has_physics=True)
+        _dummy_phys = lambda s, dt: s  # a callable to mark has_physics=True
+        k1 = _make_cache_key(state, config)
+        k2 = _make_cache_key(state, config, physics_fn=_dummy_phys)
         assert k1 != k2
 
     def test_different_state_type_different_key(self):
         config = _single_device_config()
         hydro = _make_hydrostatic_state()
         sw = _make_shallow_water_state()
-        k1 = _make_cache_key(hydro, config, has_physics=False)
-        k2 = _make_cache_key(sw, config, has_physics=False)
+        k1 = _make_cache_key(hydro, config)
+        k2 = _make_cache_key(sw, config)
         assert k1 != k2
 
     def test_different_shape_different_key(self):
@@ -135,14 +136,14 @@ class TestStepCacheKey:
             phis=Field(jnp.zeros((6, 4, 4), dtype=jnp.float32), "phis",
                        ("face", "x", "y"), "m2/s2"),
         )
-        k1 = _make_cache_key(state8, config, has_physics=False)
-        k2 = _make_cache_key(state4, config, has_physics=False)
+        k1 = _make_cache_key(state8, config)
+        k2 = _make_cache_key(state4, config)
         assert k1 != k2
 
     def test_key_is_hashable(self):
         config = _single_device_config()
         state = _make_hydrostatic_state()
-        key = _make_cache_key(state, config, has_physics=False)
+        key = _make_cache_key(state, config)
         # Must be usable as a dict key
         d = {key: "ok"}
         assert d[key] == "ok"
@@ -159,8 +160,8 @@ class TestStepCacheKey:
             tiling=(1, 1), grid_type="cubed_sphere",
         )
         state = _make_hydrostatic_state()
-        k1 = _make_cache_key(state, config1, has_physics=False)
-        k2 = _make_cache_key(state, config2, has_physics=False)
+        k1 = _make_cache_key(state, config1)
+        k2 = _make_cache_key(state, config2)
         assert k1 != k2
 
 

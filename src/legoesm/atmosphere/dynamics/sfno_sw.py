@@ -22,6 +22,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.gaussian import GaussianGrid
 from legoesm.atmosphere.dynamics.spectral_sw import (
     SpectralSWState,
@@ -59,7 +60,7 @@ class SFNOShallowWaterConfig(NamedTuple):
     )
     mode: str = "state_update"
     dt_sfno: float = 3600.0
-    g: float = 9.81
+    g: float = constants.g  # = 9.80616
     use_normalization: bool = False
     time_integrator: str = "ssp_rk3"
 
