@@ -188,11 +188,15 @@ class DiagnosticCollector:
         self.lw_net_sfc.append(mean_lw_sfc)
         self.dry_mass.append(mean_ps)
 
+        # Mean over all spatial axes except the last (vertical).
+        # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
+        # Lat-lon:      (nlat,nlon,nlev) → mean over (0,1) → (nlev,)
+        spatial_axes = tuple(range(state.T.data.ndim - 1))
         self.profiles_T.append(
-            np.asarray(jnp.mean(state.T.data, axis=(0, 1, 2)))
+            np.asarray(jnp.mean(state.T.data, axis=spatial_axes))
         )
         self.profiles_qv.append(
-            np.asarray(jnp.mean(q_v, axis=(0, 1, 2))) * 1000.0
+            np.asarray(jnp.mean(q_v, axis=spatial_axes)) * 1000.0
         )
 
         # Snapshots
