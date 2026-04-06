@@ -46,7 +46,7 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
+from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -199,7 +199,8 @@ def spectral_ocean_tendencies(
     S_real = S.real
     # Two-pass EOS-pressure coupling: improves consistency versus a
     # single rho(p=0) seed evaluation in long integrations.
-    rho = wright_eos(T_real, S_real, jnp.zeros_like(T_real))
+    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    rho = eos_fn(T_real, S_real, jnp.zeros_like(T_real))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
             rho,
@@ -209,7 +210,7 @@ def spectral_ocean_tendencies(
             rho_0,
             g,
         )
-        rho = wright_eos(T_real, S_real, p_hydro)
+        rho = eos_fn(T_real, S_real, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
         rho,
         eta_safe,

@@ -23,7 +23,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
+from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -128,12 +128,13 @@ def latlon_ocean_baroclinic_tendencies(
     from legoesm.ocean.dynamics.latlon_operators import _neumann_fill_latlon
     T_filled = _neumann_fill_latlon(T, mask)
     S_filled = _neumann_fill_latlon(S, mask)
-    rho = wright_eos(T_filled, S_filled, jnp.zeros_like(T))
+    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
         )
-        rho = wright_eos(T_filled, S_filled, p_hydro)
+        rho = eos_fn(T_filled, S_filled, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
         rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
     )

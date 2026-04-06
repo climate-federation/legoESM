@@ -2502,12 +2502,12 @@ def _compute_rpe(state, grid_type, grid, z_coord):
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
 
-    # Compute density at each point using linearized EOS approximation
-    # rho ≈ rho0 * (1 - alpha_T * (T - T_ref))
-    rho0 = 1025.0
-    alpha_T = 2.0e-4  # thermal expansion coefficient
-    T_ref = 15.0
-    rho = rho0 * (1.0 - alpha_T * (T - T_ref))
+    # Compute density at each point using linearized EOS
+    from legoesm.ocean.eos import linear_eos
+    rho = np.asarray(linear_eos(
+        jnp.array(T), jnp.array(S), jnp.zeros_like(jnp.array(T)),
+        rho_ref=1025.0, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
+    ), dtype=np.float64)
 
     # Potential energy: PE = g * sum(rho * z * dz * area)
     # For RPE, we'd sort density globally, but as approximation compute PE

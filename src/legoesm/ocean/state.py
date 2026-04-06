@@ -123,6 +123,8 @@ class OceanConfig(NamedTuple):
     edge_blend_strength: float = 0.0  # FV cube-edge continuity relaxation (0=off)
     edge_blend_depth: int = 2         # Rows near each face edge to relax
     physics: object = None  # OceanPhysicsConfig or None (legacy mode)
+    eos: str = "wright"    # "wright" or "linear"
+    eos_linear: object = None  # LinearEOSConfig when eos="linear"
 
 
 # ==============================================================================
@@ -184,6 +186,8 @@ class SpectralOceanConfig(NamedTuple):
     use_conservation_fixer: bool = True
     min_water_column_m: float = 0.5
     time_integrator: str = "ssp_rk3"
+    eos: str = "wright"
+    eos_linear: object = None
 
 
 # ==============================================================================
@@ -258,3 +262,5 @@ class LatLonOceanConfig(NamedTuple):
     salinity_max_psu: float = 50.0
     differentiable_barotropic: bool = False
     physics: object = None
+    eos: str = "wright"
+    eos_linear: object = None
