@@ -238,6 +238,37 @@ STRONG_RESOLUTIONS_SP = [42, 85, 170]   # spectral: T42, T85, T170
 STRONG_RESOLUTIONS_ICO = [4, 5, 6]      # icosahedral: levels 4, 5, 6
 STRONG_RESOLUTIONS_LL = [64, 128, 256]  # lat-lon: n_lat
 
+# Minimum total timing duration target (seconds).  When step times are
+# sub-millisecond (e.g., I4 at ~0.5 ms/step), 100 steps yield only
+# ~50 ms of timed work — within OS scheduling / NCCL jitter.
+# Targeting ≥2 s greatly reduces relative noise.
+_MIN_TIMING_SECONDS = 2.0
+
+
+def _auto_n_timing(n_timing_base: int, total_cells: int, n_gpus: int,
+                    max_timing: int = 2000) -> int:
+    """Scale timing steps up for small grids to ensure stable measurements.
+
+    For sub-millisecond step times (small cells/GPU), the default 100
+    timing steps yield only ~50 ms of timed work which is within OS and
+    NCCL jitter.  This helper estimates step time from cells/GPU and
+    bumps n_timing so the timed window is ≥ _MIN_TIMING_SECONDS.
+
+    Capped at *max_timing* to keep total benchmark runtime practical.
+    """
+    cells_per_gpu = total_cells // max(n_gpus, 1)
+    # Rough model: step time ~ 0.01 ms per 1000 cells/GPU (from I4–I6 data)
+    est_ms = max(cells_per_gpu / 100_000, 0.1)
+    est_total_s = est_ms * n_timing_base / 1000.0
+    if est_total_s >= _MIN_TIMING_SECONDS:
+        return n_timing_base
+    needed = int(math.ceil(_MIN_TIMING_SECONDS / (est_ms / 1000.0)))
+    # Round up to nearest 100 for clean reporting, capped
+    needed = max(needed, n_timing_base)
+    needed = min(needed, max_timing)
+    needed = ((needed + 99) // 100) * 100
+    return needed
+
 # GPU counts to sweep (must satisfy cubed-sphere tiling constraints).
 GPU_COUNTS = [1, 2, 3, 6, 24, 54, 96]  # 1-6 divide faces; >6 must be 6*k^2
 
@@ -1244,7 +1275,20 @@ def run_strong_scaling(
                         )
                         continue
 
+                # Estimate total cells for auto-scaling timing steps
+                if grid_type == "icosahedral":
+                    _est_cells = (10 * 4 ** n_grid + 2) * n_levels
+                elif grid_type == "latlon":
+                    _est_cells = n_grid * 2 * n_grid * n_levels
+                elif grid_type == "spectral":
+                    _est_cells = n_grid * (n_grid + 1) * n_levels
+                else:
+                    _est_cells = 6 * n_grid * n_grid * n_levels
+                _nt = _auto_n_timing(n_timing, _est_cells, ng)
+
                 print(f"\n--- {ng} GPU(s), {res_prefix}{n_grid} [{prec}] ---")
+                if _nt != n_timing:
+                    print(f"    (auto-scaled n_timing: {n_timing} → {_nt})")
                 try:
                     result = run_benchmark(
                         n_grid=n_grid,
@@ -1253,7 +1297,7 @@ def run_strong_scaling(
                         precision=prec,
                         mode="strong",
                         n_warmup=n_warmup,
-                        n_timing=n_timing,
+                        n_timing=_nt,
                         grid_type=grid_type,
                         no_conservation=no_conservation,
                         physics_level=physics_level,
