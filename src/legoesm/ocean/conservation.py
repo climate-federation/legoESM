@@ -1,8 +1,21 @@
-"""Conservation fixers for the ocean model.
+"""Conservation fixers for the ocean model (cubed-sphere).
 
 Volume (free surface), heat (T), and salt (S) conservation via
-uniform additive corrections, matching the atmosphere pattern in
-core/conservation.py.
+uniform additive corrections.
+
+Limitations
+-----------
+These are *uniform additive* fixers — a single scalar correction is
+applied to every ocean cell.  This acts as spurious globally-uniform
+diapycnal mixing and violates local conservation.  The proper fix is
+flux-form tracer advection with barotropic-baroclinic flux
+reconciliation (Hallberg 1997, Higdon 2005).  See issue #59.
+
+The combined fixer (``ocean_conservation_fixer``) computes all
+corrections simultaneously from the original pre-fix state, avoiding
+order-dependent bias between volume, heat, and salt fixers.  Precision
+is upcasted to accumulation dtype before global reductions to prevent
+catastrophic cancellation.
 """
 
 from __future__ import annotations
