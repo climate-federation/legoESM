@@ -96,8 +96,8 @@ def carry_mse(
     """
     lev_w = level_weights(sigma_full, config=config)
 
-    from legoesm.core.precision import _clamp_to_backend
-    loss = jnp.array(0.0, dtype=_clamp_to_backend(jnp.float64))
+    from legoesm.core.precision import _resolve_dtype
+    loss = jnp.array(0.0, dtype=_resolve_dtype(None, "accumulate"))
 
     # Temperature: (..., nlev)
     dT = pred_carry.T - target_carry.T

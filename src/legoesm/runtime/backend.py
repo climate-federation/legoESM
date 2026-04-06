@@ -178,6 +178,10 @@ _TPU_XLA_FLAGS = {
 
 _NVIDIA_GPU_XLA_FLAGS = {
     "xla_gpu_cudnn_gemm_fusion_level": "3",
+    # Overlap compute with collective communication (halo exchange, allreduce).
+    "xla_gpu_enable_latency_hiding_scheduler": "true",
+    "xla_gpu_enable_async_all_reduce": "true",
+    "xla_gpu_enable_highest_priority_async_stream": "true",
 }
 
 _AMD_GPU_XLA_FLAGS: dict[str, str] = {
@@ -254,11 +258,12 @@ def configure_backend(backend: str | None = None) -> str:
     elif backend == "gpu":
         devices = jax.devices()
         vendor = gpu_vendor()
-        if len(devices) > 1:
-            if vendor == "nvidia":
-                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
-            elif vendor == "amd":
-                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+        # Apply XLA flags unconditionally — latency hiding and GEMM fusion
+        # benefit single-GPU and MPI-per-rank setups too.
+        if vendor == "nvidia":
+            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+        elif vendor == "amd":
+            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
         if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
             os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
         # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa).

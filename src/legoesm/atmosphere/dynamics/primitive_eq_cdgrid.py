@@ -241,12 +241,19 @@ def fv3_hydrostatic_tendencies(
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)
 
     # --- 8. Pressure gradient correction at D-grid corners ---
+    # Promote to higher precision for the PGF computation to avoid
+    # catastrophic cancellation (large p terms, small gradient).
+    # Use result_type to only upcast (never downcast from current dtype).
+    from legoesm.core.precision import _resolve_dtype
+    _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
     # ln_ps is 2D — async overlap not beneficial for 2D fields
-    dln_dx, dln_dy_perp = _arakawa_lamb_gradient(ln_ps, cdgrid)  # 2D, separate exchange
+    ln_ps_hi = ln_ps.astype(_pg_dt)
+    dln_dx_hi, dln_dy_perp_hi = _arakawa_lamb_gradient(ln_ps_hi, cdgrid)  # 2D, separate exchange
     # Harmonic mean for T at corners suppresses spurious PGF from high-n T.
     T_corner = 1.0 / _interp_center_to_corner(inv_T, cdgrid, padded=_invT_pad)
-    pg_corr_x = R_d * T_corner * dln_dx[..., None]
-    pg_corr_y_perp = R_d * T_corner * dln_dy_perp[..., None]
+    T_corner_hi = T_corner.astype(_pg_dt)
+    pg_corr_x = (R_d * T_corner_hi * dln_dx_hi[..., None]).astype(u_d.dtype)
+    pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi[..., None]).astype(v_d.dtype)
 
     # --- 9. D-grid momentum tendencies ---
     du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x

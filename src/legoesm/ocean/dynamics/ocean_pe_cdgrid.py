@@ -133,10 +133,17 @@ def ocean_baroclinic_tendencies_cdgrid(
     rho_prime = rho - rho_0
 
     # --- 3. Baroclinic pressure gradient ---
+    # Promote to higher precision: cumulative pressure sums lose precision
+    # in float32 for deep ocean layers (large p, small dp differences).
+    # Use result_type to only upcast (never downcast from current dtype).
+    from legoesm.core.precision import _resolve_dtype
+    _pg_dt = jnp.result_type(rho_prime.dtype, _resolve_dtype("pressure_gradient", "compute"))
     dz_actual = z_coord.dz_ref * J[..., jnp.newaxis]
-    dp_layer = rho_prime * g * dz_actual
+    rho_prime_hi = rho_prime.astype(_pg_dt)
+    dz_hi = dz_actual.astype(_pg_dt)
+    dp_layer = rho_prime_hi * g * dz_hi
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
-    p_prime = p_prime + 0.5 * dp_layer
+    p_prime = (p_prime + 0.5 * dp_layer).astype(T.dtype)
 
     # --- 4. Convert to D-grid ---
     u_d, v_d = center_to_dgrid_vector(u_a * mask_3d, v_a * mask_3d, cdgrid)

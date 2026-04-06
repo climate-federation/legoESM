@@ -148,8 +148,9 @@ class ExperimentConfig(NamedTuple):
     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
 
     # Performance
-    precision: str = "fp32"           # fp32, fp64, or mixed
+    precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
+    debug_precision: bool = False     # log warnings when array dtypes mismatch policy
 
     # Distributed
     distributed: bool = False
@@ -177,9 +178,10 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
-        if self.precision not in ("fp32", "fp64", "mixed"):
+        _valid_precisions = ("fp32", "fp64", "mixed", "mixed_fp64_storage")
+        if self.precision not in _valid_precisions:
             errors.append(
-                f"precision must be 'fp32', 'fp64', or 'mixed', got {self.precision!r}"
+                f"precision must be one of {_valid_precisions}, got {self.precision!r}"
             )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")

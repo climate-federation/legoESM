@@ -624,3 +624,56 @@ def set_recommended_overrides(mode: str = "mixed") -> None:
                 _MODULE_OVERRIDES[module_name] = dict(roles)
 
 
+# ======================================================================
+# Runtime dtype verification
+# ======================================================================
+
+import logging as _logging
+
+_precision_logger = _logging.getLogger(__name__)
+
+
+def verify_dtypes(
+    pytree,
+    module: str | None = None,
+    role: str = "storage",
+    *,
+    label: str = "",
+) -> list[str]:
+    """Walk *pytree* and log warnings for dtype mismatches vs. the active policy.
+
+    Parameters
+    ----------
+    pytree
+        Any JAX-compatible pytree (state, carry, dict, NamedTuple, ...).
+    module : str or None
+        Module name for ``_resolve_dtype`` lookup.
+    role : str
+        Precision role (``"storage"``, ``"compute"``, ``"accumulate"``, ``"control"``).
+    label : str
+        Human-readable label for log messages (e.g., ``"after segment 3"``).
+
+    Returns
+    -------
+    list[str]
+        Mismatch descriptions (empty if everything matches).
+    """
+    expected = _resolve_dtype(module, role)
+    mismatches: list[str] = []
+
+    leaves = jax.tree.leaves(pytree)
+    for i, leaf in enumerate(leaves):
+        if not hasattr(leaf, "dtype"):
+            continue
+        # Only check floating-point arrays.
+        if not jnp.issubdtype(leaf.dtype, jnp.floating):
+            continue
+        if leaf.dtype != expected:
+            msg = (
+                f"[{label}] leaf {i}: dtype={leaf.dtype}, "
+                f"expected={expected} (module={module!r}, role={role!r})"
+            )
+            mismatches.append(msg)
+            _precision_logger.warning(msg)
+
+    return mismatches

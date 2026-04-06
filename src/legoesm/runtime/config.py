@@ -115,8 +115,10 @@ def bootstrap(
     # 2. X64 policy ----------------------------------------------------------
     need_x64 = x64
     if need_x64 is None:
-        # Infer: fp64 and mixed both need x64 for accumulate/control.
-        need_x64 = precision.strip().lower() in ("fp64", "float64", "mixed")
+        # Infer: fp64, mixed, and mixed_fp64_storage all need x64.
+        need_x64 = precision.strip().lower() in (
+            "fp64", "float64", "mixed", "mixed_fp64_storage",
+        )
 
     if need_x64:
         enable_x64(quiet=True)
@@ -171,21 +173,25 @@ def bootstrap_from_yaml_config(config) -> RuntimeConfig:
 
     This replaces the old ``core.hardware.apply_hardware_config``.
     """
-    # Precision mode: map legacy 3-component keys to a mode string.
-    dynamics_prec = config.get("hardware.precision.dynamics", None)
-    if dynamics_prec is not None:
-        prec_str = str(dynamics_prec).strip().lower()
-        if prec_str in ("float64", "fp64", "double"):
-            precision = "fp64"
-        else:
-            # Check conservation for mixed hint.
-            cons = config.get("hardware.precision.conservation", None)
-            if cons is not None and str(cons).strip().lower() in ("float64", "fp64"):
-                precision = "mixed"
-            else:
-                precision = "fp32"
+    # Precision mode: prefer explicit mode key, fall back to legacy 3-component.
+    explicit_mode = config.get("hardware.precision.mode", None)
+    if explicit_mode is not None:
+        precision = str(explicit_mode).strip().lower()
     else:
-        precision = "fp32"
+        dynamics_prec = config.get("hardware.precision.dynamics", None)
+        if dynamics_prec is not None:
+            prec_str = str(dynamics_prec).strip().lower()
+            if prec_str in ("float64", "fp64", "double"):
+                precision = "fp64"
+            else:
+                # Check conservation for mixed hint.
+                cons = config.get("hardware.precision.conservation", None)
+                if cons is not None and str(cons).strip().lower() in ("float64", "fp64"):
+                    precision = "mixed"
+                else:
+                    precision = "fp32"
+        else:
+            precision = "fp32"
 
     n_devices = config.get("hardware.parallelism.n_devices", "auto")
     backend = config.get("hardware.parallelism.backend", None)
