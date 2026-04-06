@@ -147,6 +147,11 @@ def barotropic_substeps_mpas(
     # explicit f*dt instability at high latitudes.
     use_semi_implicit = config.semi_implicit_coriolis
 
+    # Eta floor: prevent water column from going below minimum depth.
+    # Matches cubed-sphere and lat-lon barotropic solvers.
+    min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
+    eta_floor = (min_water_col - H_bathy) * mask
+
     # Forward-backward substeps via scan
     _eta_dtype = eta.dtype
     _ubar_dtype = u_bar.dtype
@@ -161,6 +166,7 @@ def barotropic_substeps_mpas(
         # Forward: update eta (continuity + freshwater mass source)
         transport = H_e_c * u_bar_c * edge_mask
         eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask + dt_baro * F_slow_eta * mask
+        eta_next = jnp.maximum(eta_next, eta_floor) * mask
 
         # Backward: update u_bar using new eta
         # Fill land cells before gradient to prevent spurious PGF
@@ -198,6 +204,7 @@ def barotropic_substeps_mpas(
             eta_next = (
                 eta_next + nu_dt_cell * _del2_cell(eta_next, mask)
             ) * mask
+            eta_next = jnp.maximum(eta_next, eta_floor) * mask
             # Velocity: vector Laplacian on edges
             del2_u = vector_laplacian_del2(u_bar_next, mesh)
             u_bar_next = (u_bar_next + nu_dt_edge * del2_u) * edge_mask
