@@ -125,7 +125,7 @@ class CoupledESMDriver:
         """Initialize coupler, land, ice, lake surface states."""
         from legoesm.coupler.coupler import make_coupler, init_surface_state
         from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.land.config import LandConfig
+        from legoesm.land.config import LandConfig, MultiLayerLandConfig
         from legoesm.ice.config import SeaIceConfig
         from legoesm.coupler.lake.config import LakeConfig
         from legoesm.core.precision import get_policy
@@ -142,15 +142,32 @@ class CoupledESMDriver:
         if cfg.land_mode == "none":
             land_cfg = LandConfig()  # won't be used (f_land=0)
         elif cfg.land_mode == "multilayer":
-            land_cfg = cfg.land_config
+            if isinstance(cfg.land_config, MultiLayerLandConfig):
+                land_cfg = cfg.land_config
+            else:
+                land_cfg = MultiLayerLandConfig()
         else:
             land_cfg = cfg.land_config if isinstance(cfg.land_config, LandConfig) else LandConfig()
+
+        # Enable carbon in land config if carbon_active + differland
+        if cfg.carbon_active and cfg.carbon_land == "differland":
+            from legoesm.land.carbon.config import CarbonConfig
+            carbon_cfg = CarbonConfig(scheme="differland")
+            land_cfg = land_cfg._replace(carbon=carbon_cfg)
+
+        self._land_cfg = land_cfg  # store for diagnostics
+
+        # PFT parameter provider (if requested and land is active)
+        land_param_provider = None
+        if cfg.use_pft and cfg.land_mode != "none":
+            land_param_provider = self._build_pft_provider(shape_2d)
 
         # Build coupler step function
         self._step_surface = make_coupler(
             coupler_cfg, land_cfg, ice_cfg, lake_cfg,
             lat=self._atm._grid_lat,
             grid=self._atm.grid,
+            land_param_provider=land_param_provider,
         )
 
         # Initialize surface state
@@ -161,8 +178,31 @@ class CoupledESMDriver:
         # Tile fractions
         if cfg.f_land_mode == "zero":
             f_land = jnp.zeros(shape_2d, dtype=_sd)
-        elif self._atm._f_land is not None:
-            f_land = self._atm._f_land
+        elif cfg.f_land_mode == "analytical":
+            # Use driver's land mask if non-trivial; otherwise generate one
+            # based on latitude (simple continents approximation).
+            if (self._atm._f_land is not None
+                    and float(jnp.max(self._atm._f_land)) > 0):
+                f_land = self._atm._f_land
+            elif cfg.land_mode != "none":
+                # Generate analytical land mask: ~30% land by area
+                # Land at |lat| > 20 in two longitude sectors
+                lat = self._atm._grid_lat
+                if lat is not None:
+                    if lat.ndim < len(shape_2d):
+                        lat_2d = jnp.broadcast_to(
+                            lat.reshape(lat.shape + (1,) * (len(shape_2d) - lat.ndim)),
+                            shape_2d,
+                        )
+                    else:
+                        lat_2d = lat
+                    abs_lat = jnp.abs(lat_2d) * 180.0 / jnp.pi
+                    # Land where |lat| > 25 degrees (crude polar/midlat continents)
+                    f_land = jnp.where(abs_lat > 25.0, 0.5, 0.0).astype(_sd)
+                else:
+                    f_land = jnp.zeros(shape_2d, dtype=_sd)
+            else:
+                f_land = jnp.zeros(shape_2d, dtype=_sd)
         else:
             f_land = jnp.zeros(shape_2d, dtype=_sd)
 
@@ -172,7 +212,64 @@ class CoupledESMDriver:
         )
 
         land_frac = float(jnp.mean(f_land))
-        logger.info(f"  Land: mode={cfg.land_mode}, f_land_mean={land_frac:.2f}")
+        pft_str = " (PFT)" if land_param_provider is not None else ""
+        logger.info(f"  Land: mode={cfg.land_mode}{pft_str}, "
+                    f"f_land_mean={land_frac:.2f}")
+
+    def _build_pft_provider(self, shape_2d):
+        """Create a PFTParamProvider with analytical PFT fractions."""
+        import math
+        from legoesm.land.param_providers import PFTParamProvider
+
+        lat = self._atm._grid_lat
+        if lat is None:
+            logger.warning("  PFT requested but no latitude available; "
+                           "falling back to scalar params")
+            return None
+
+        # Flatten to (ncol,)
+        lat_flat = jnp.ravel(lat) if lat.ndim > 1 else lat
+        ncol = lat_flat.shape[0]
+        if lat.ndim > 1:
+            ncol = math.prod(shape_2d)
+            lat_flat = jnp.broadcast_to(lat, shape_2d).ravel()
+
+        abs_lat_deg = jnp.abs(lat_flat) * 180.0 / jnp.pi
+
+        # 17 CLM5 PFTs — assign analytical fractions by latitude band
+        # 0=bare_soil, 1=NET_temperate, 2=NET_boreal, 3=NDT_boreal,
+        # 4=BET_tropical, 5=BET_temperate, 6=BDT_tropical, 7=BDT_temperate,
+        # 8=BDT_boreal, 9=BES, 10=BDS_temperate, 11=BDS_boreal,
+        # 12=C3_arctic, 13=C3_non_arctic, 14=C4, 15=crop, 16=bare_soil_2
+        n_pft = 17
+        fracs = jnp.zeros((ncol, n_pft))
+
+        # Tropical broadleaf (|lat| < 15)
+        tropical = (abs_lat_deg < 15.0).astype(jnp.float32)
+        fracs = fracs.at[:, 4].set(0.7 * tropical)   # BET_tropical
+        fracs = fracs.at[:, 14].set(0.3 * tropical)   # C4 grass
+
+        # Temperate (15-45)
+        temperate = ((abs_lat_deg >= 15.0) & (abs_lat_deg < 45.0)).astype(jnp.float32)
+        fracs = fracs.at[:, 7].set(0.3 * temperate)   # BDT_temperate
+        fracs = fracs.at[:, 13].set(0.4 * temperate)  # C3_non_arctic
+        fracs = fracs.at[:, 15].set(0.3 * temperate)  # crop
+
+        # Boreal (45-65)
+        boreal = ((abs_lat_deg >= 45.0) & (abs_lat_deg < 65.0)).astype(jnp.float32)
+        fracs = fracs.at[:, 2].set(0.5 * boreal)    # NET_boreal
+        fracs = fracs.at[:, 12].set(0.3 * boreal)   # C3_arctic
+        fracs = fracs.at[:, 0].set(0.2 * boreal)    # bare_soil
+
+        # Polar (>65)
+        polar = (abs_lat_deg >= 65.0).astype(jnp.float32)
+        fracs = fracs.at[:, 0].set(0.7 * polar)     # bare_soil
+        fracs = fracs.at[:, 12].set(0.3 * polar)    # C3_arctic
+
+        provider = PFTParamProvider.from_defaults(fracs)
+        logger.info(f"  PFT: {n_pft} types, {ncol} columns, "
+                    f"analytical latitude-band fractions")
+        return provider
 
     def _init_carbon(self):
         """Set up CO2 tracer in the atmosphere if carbon is active."""
