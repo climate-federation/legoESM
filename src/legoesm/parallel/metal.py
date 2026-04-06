@@ -155,6 +155,26 @@ def is_metal_backend() -> bool:
     return get_backend() == "metal"
 
 
+def _is_on_device(x, device):
+    """Check if a JAX array is already on the given device."""
+    if not hasattr(x, "devices"):
+        return True  # non-array (e.g., python scalar)
+    try:
+        devs = x.devices()
+        return device in devs
+    except Exception:
+        return False
+
+
+def _put_if_needed(x, device):
+    """Transfer *x* to *device* only if it's not already there."""
+    if not hasattr(x, "dtype"):
+        return x
+    if _is_on_device(x, device):
+        return x
+    return jax.device_put(x, device)
+
+
 def ensure_spectral_on_cpu(fn):
     """Wrap a function so that on Metal, inputs are routed to CPU.
 
@@ -162,22 +182,19 @@ def ensure_spectral_on_cpu(fn):
     transfers inputs to CPU, runs the function, and transfers results
     back to the default device.
 
+    Skips redundant transfers when inputs are already on the target
+    device (e.g., within a ``lax.scan`` body that already runs on CPU).
+
     On non-Metal backends this is a no-op wrapper.
     """
     if not is_metal_backend():
         return fn
 
+    _cpu = jax.devices("cpu")[0]
+
     def wrapper(*args, **kwargs):
-        args_cpu = jax.tree.map(
-            lambda x: jax.device_put(x, jax.devices("cpu")[0])
-            if hasattr(x, "dtype") else x,
-            args,
-        )
-        kwargs_cpu = jax.tree.map(
-            lambda x: jax.device_put(x, jax.devices("cpu")[0])
-            if hasattr(x, "dtype") else x,
-            kwargs,
-        )
+        args_cpu = jax.tree.map(lambda x: _put_if_needed(x, _cpu), args)
+        kwargs_cpu = jax.tree.map(lambda x: _put_if_needed(x, _cpu), kwargs)
         result = fn(*args_cpu, **kwargs_cpu)
         return route_to_default(result)
 

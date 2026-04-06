@@ -26,6 +26,7 @@ from legoesm.core.operators_voronoi import (
     gradient_edge,
     tangential_velocity,
     edge_thickness as _edge_avg,
+    vector_laplacian_del2,
 )
 from legoesm.ocean.vertical import compute_layer_thickness
 
@@ -101,9 +102,52 @@ def barotropic_substeps_mpas(
     if F_slow_eta is None:
         F_slow_eta = jnp.zeros_like(eta)
 
+    # --- Fix 1: Neumann fill for eta before gradient ---
+    # Fill land-cell eta with nearest-ocean-neighbor average so that
+    # gradient_edge sees smooth fields at coastlines instead of the
+    # sharp ocean-to-zero jump from masking.
+    def _fill_land_cells_mpas(field_cell, mask_cell):
+        """Replace land values with ocean-neighbor average (Neumann BC)."""
+        # Accumulate from all edges: for edge e connecting c1, c2,
+        # add c2's contribution to c1 and vice versa.
+        nbr_sum = jnp.zeros_like(field_cell)
+        nbr_cnt = jnp.zeros_like(field_cell)
+        nbr_sum = nbr_sum.at[c1].add(field_cell[c2] * mask_cell[c2])
+        nbr_cnt = nbr_cnt.at[c1].add(mask_cell[c2])
+        nbr_sum = nbr_sum.at[c2].add(field_cell[c1] * mask_cell[c1])
+        nbr_cnt = nbr_cnt.at[c2].add(mask_cell[c1])
+        nbr_avg = nbr_sum / jnp.maximum(nbr_cnt, 1.0)
+        return jnp.where(mask_cell > 0.5, field_cell, nbr_avg)
+
+    # --- Fix 2: Barotropic Laplacian diffusion ---
+    # Scalar cell Laplacian: del2(phi) = div(grad(phi)) on Voronoi.
+    # Edge-based velocity diffusion: vector_laplacian_del2(u, mesh).
+    baro_alpha_val = config.barotropic_diffusion_alpha
+    dt_ref = config.barotropic_diffusion_dt_ref
+    use_baro_diffusion = baro_alpha_val > 0.0
+
+    if use_baro_diffusion:
+        nu_dt_cell = baro_alpha_val * (dt_baro / dt_ref) * mesh.areaCell
+        # For edge diffusion, use average of adjacent cell areas
+        nu_dt_edge = baro_alpha_val * (dt_baro / dt_ref) * (
+            0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2])
+        )
+
+    def _del2_cell(phi_cell, mask_cell):
+        """Scalar Laplacian on Voronoi cells: div(grad(phi))."""
+        phi_filled = _fill_land_cells_mpas(phi_cell, mask_cell)
+        grad_e = gradient_edge(phi_filled, mesh)
+        return divergence_cell(grad_e, mesh)
+
+    # --- Fix 3: Semi-implicit Coriolis (trapezoidal predictor-corrector) ---
+    # On Voronoi meshes, the (u, v_tangential) decomposition doesn't
+    # allow a direct Crank-Nicolson solve. Instead, use a trapezoidal
+    # predictor-corrector: predict u_star with old v_t, recompute v_t
+    # from u_star, and average. This is second-order and avoids the
+    # explicit f*dt instability at high latitudes.
+    use_semi_implicit = config.semi_implicit_coriolis
+
     # Forward-backward substeps via scan
-    # Capture the carry dtype so that mesh-coordinate promotions (float64)
-    # are cast back before returning, keeping jax.lax.scan type-stable.
     _eta_dtype = eta.dtype
     _ubar_dtype = u_bar.dtype
 
@@ -119,19 +163,44 @@ def barotropic_substeps_mpas(
         eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask + dt_baro * F_slow_eta * mask
 
         # Backward: update u_bar using new eta
-        grad_eta = gradient_edge(eta_next, mesh)
+        # Fill land cells before gradient to prevent spurious PGF
+        eta_filled = _fill_land_cells_mpas(eta_next, mask)
+        grad_eta = gradient_edge(eta_filled, mesh)
 
-        # Coriolis: f * v_tangential
-        v_t = tangential_velocity(u_bar_c, mesh)
-        coriolis = mesh.fEdge * v_t
+        # Coriolis + PGF
+        v_t_old = tangential_velocity(u_bar_c, mesh)
 
-        u_bar_next = u_bar_c + dt_baro * (
-            -g * grad_eta + coriolis
-        ) * edge_mask
+        if use_semi_implicit:
+            # Trapezoidal predictor-corrector:
+            # 1. Predict with old Coriolis
+            u_star = u_bar_c + dt_baro * (
+                -g * grad_eta + mesh.fEdge * v_t_old
+            ) * edge_mask
+            # 2. Recompute tangential velocity from predicted u
+            v_t_star = tangential_velocity(u_star, mesh)
+            # 3. Correct with averaged Coriolis
+            u_bar_next = u_bar_c + dt_baro * (
+                -g * grad_eta + mesh.fEdge * 0.5 * (v_t_old + v_t_star)
+            ) * edge_mask
+        else:
+            # Explicit Coriolis (original)
+            u_bar_next = u_bar_c + dt_baro * (
+                -g * grad_eta + mesh.fEdge * v_t_old
+            ) * edge_mask
 
-        # Optional barotropic damping
+        # Optional barotropic damping (Rayleigh drag)
         if config.barotropic_damping > 0:
             u_bar_next = u_bar_next * (1.0 - dt_baro * config.barotropic_damping)
+
+        # Barotropic Laplacian diffusion (matches CS and LL solvers)
+        if use_baro_diffusion:
+            # Eta: scalar Laplacian on cells
+            eta_next = (
+                eta_next + nu_dt_cell * _del2_cell(eta_next, mask)
+            ) * mask
+            # Velocity: vector Laplacian on edges
+            del2_u = vector_laplacian_del2(u_bar_next, mesh)
+            u_bar_next = (u_bar_next + nu_dt_edge * del2_u) * edge_mask
 
         # Cast back to input dtype (mesh ops may promote to float64)
         return (eta_next.astype(_eta_dtype), u_bar_next.astype(_ubar_dtype)), None

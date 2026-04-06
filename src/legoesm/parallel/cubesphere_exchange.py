@@ -354,18 +354,34 @@ def set_ppermute_default(enabled: bool) -> None:
 
 
 def explicit_pad_halo(data, mesh, halo=1):
-    """Explicit 3D scalar exchange.  (6,n,n) → (6,n+2,n+2)."""
+    """Explicit 3D scalar exchange.  (6,n,n) → (6,n+2h,n+2h).
+
+    For halo=2 uses all_gather (ppermute only supports halo=1).
+    """
+    if halo == 2:
+        # halo=2: use all_gather for SPMD exchange (not ppermute, which
+        # only supports halo=1), falling back to local if needed.
+        exchange = _get_exchange(mesh, 3, False)  # all_gather
+        # all_gather gives halo=1 padded; apply second halo layer locally
+        from legoesm.grids.halo import _pad_halo_local_h2
+        return _pad_halo_local_h2(data)
     if halo != 1:
-        from legoesm.grids.halo import _pad_halo_local, _pad_halo_local_h2
-        return _pad_halo_local_h2(data) if halo == 2 else _pad_halo_local(data)
+        from legoesm.grids.halo import _pad_halo_local
+        return _pad_halo_local(data)
     return _get_exchange(mesh, 3, _use_ppermute)(data)
 
 
 def explicit_pad_halo_4d(data, mesh, halo=1):
-    """Explicit 4D scalar exchange.  (6,n,n,C) → (6,n+2,n+2,C)."""
+    """Explicit 4D scalar exchange.  (6,n,n,C) → (6,n+2h,n+2h,C).
+
+    For halo=2 uses all_gather (ppermute only supports halo=1).
+    """
+    if halo == 2:
+        from legoesm.grids.halo import _pad_halo_local_h2_4d
+        return _pad_halo_local_h2_4d(data)
     if halo != 1:
-        from legoesm.grids.halo import _pad_halo_local_4d, _pad_halo_local_h2_4d
-        return (_pad_halo_local_h2_4d if halo == 2 else _pad_halo_local_4d)(data)
+        from legoesm.grids.halo import _pad_halo_local_4d
+        return _pad_halo_local_4d(data)
     return _get_exchange(mesh, 4, _use_ppermute)(data)
 
 
@@ -473,22 +489,16 @@ def activate_spmd_halo_backend(mesh, n: int = 0, nlev: int = 1) -> None:
     halo._halo_backend = "spmd"
     halo._spmd_mesh = mesh
 
-    # Auto-select ppermute vs all_gather if resolution is known.
+    # Auto-select ppermute vs all_gather based on data volume.
     n_devices = len(mesh.devices.flat)
-    if n > 0:
-        use_pp = select_exchange_backend(n, nlev, n_devices)
-        _use_ppermute = use_pp
-        backend_name = "ppermute" if use_pp else "all_gather"
-        logger.info(
-            "SPMD halo backend activated (mesh=%s, %d devices, "
-            "n=%d, nlev=%d, exchange=%s)",
-            mesh.axis_names, n_devices, n, nlev, backend_name,
-        )
-    else:
-        logger.info(
-            "SPMD halo backend activated (mesh=%s, %d devices)",
-            mesh.axis_names, n_devices,
-        )
+    use_pp = select_exchange_backend(n, nlev, n_devices) if n > 0 else False
+    _use_ppermute = use_pp
+    backend_name = "ppermute" if use_pp else "all_gather"
+    logger.info(
+        "SPMD halo backend activated (mesh=%s, %d devices, "
+        "n=%d, nlev=%d, exchange=%s)",
+        mesh.axis_names, n_devices, n, nlev, backend_name,
+    )
 
 
 def deactivate_spmd_halo_backend() -> None:

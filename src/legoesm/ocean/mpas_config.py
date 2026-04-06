@@ -64,6 +64,9 @@ class MPASOceanConfig(NamedTuple):
     fix_salt: bool = True
     min_water_column_m: float = 0.5
     barotropic_damping: float = 0.0
+    barotropic_diffusion_alpha: float = 0.01
+    barotropic_diffusion_dt_ref: float = 60.0
+    semi_implicit_coriolis: bool = True
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0
     # Runtime bounds checks (matching cubed-sphere ocean)

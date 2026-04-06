@@ -115,6 +115,7 @@ def pack_carry(state, q_v, q_c, q_r,
     dtype (upcasting only — never downcasts existing float64 arrays).
     Accumulation scalars use at least the accumulate dtype.
     """
+    from legoesm.core.precision import _resolve_dtype
     storage = _resolve_dtype(None, "storage")
     accum = _resolve_dtype(None, "accumulate")
 
