@@ -1519,7 +1519,8 @@ def make_voronoi_sharded_step(
     model,
     dev_config: DeviceConfig,
     *,
-    halo_strategy: str = "ppermute",
+    halo_strategy: str = "auto",
+    ppermute_cells_per_device_threshold: int = 25_000,
 ):
     """Create a halo-partitioned multi-GPU step for Voronoi (MPAS/TRiSK) grids.
 
@@ -1542,10 +1543,18 @@ def make_voronoi_sharded_step(
     dev_config : DeviceConfig
         From :func:`~legoesm.parallel.mesh.create_voronoi_device_mesh`.
     halo_strategy : str
-        ``"ppermute"`` (default) uses neighbor-only exchange via
+        ``"auto"`` (default) selects ``"ppermute"`` for large grids and
+        ``"allgather"`` for small ones based on
+        *ppermute_cells_per_device_threshold*.
+        ``"ppermute"`` forces neighbor-only exchange via
         ``jax.lax.ppermute`` — O(halo) communication.
-        ``"allgather"`` uses the legacy full-state all-gather —
-        O(N) communication.  Useful for debugging or as a fallback.
+        ``"allgather"`` forces the full-state all-gather —
+        O(N) communication.
+    ppermute_cells_per_device_threshold : int
+        When ``halo_strategy="auto"``, use ppermute only if each device
+        owns at least this many cells.  Below this threshold the
+        per-round packing/scatter overhead of ppermute exceeds the
+        communication savings over allgather.  Default: 25 000.
 
     Returns
     -------
@@ -1579,6 +1588,25 @@ def make_voronoi_sharded_step(
     global_mesh = model.mesh
     sigma = model.sigma_coord
     cfg = model.config
+
+    # ------------------------------------------------------------------
+    # Auto-select halo strategy based on grid size per device
+    # ------------------------------------------------------------------
+    if halo_strategy == "auto":
+        if cells_per < ppermute_cells_per_device_threshold:
+            halo_strategy = "allgather"
+            logger.info(
+                "Auto-selected allgather strategy: cells_per_device=%d < "
+                "threshold=%d — ppermute packing overhead would dominate.",
+                cells_per, ppermute_cells_per_device_threshold,
+            )
+        else:
+            halo_strategy = "ppermute"
+            logger.info(
+                "Auto-selected ppermute strategy: cells_per_device=%d >= "
+                "threshold=%d.",
+                cells_per, ppermute_cells_per_device_threshold,
+            )
 
     # ------------------------------------------------------------------
     # Setup: build per-device local meshes and gather indices

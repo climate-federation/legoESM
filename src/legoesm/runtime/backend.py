@@ -181,6 +181,11 @@ _NVIDIA_GPU_XLA_FLAGS = {
     # Overlap compute with collective communication (halo exchange, allreduce).
     "xla_gpu_enable_latency_hiding_scheduler": "true",
     "xla_gpu_enable_async_all_reduce": "true",
+    # Enable async for ALL collectives (ppermute, all-gather, etc.),
+    # not just allreduce.  Critical for icosahedral grids that use
+    # ppermute-based halo exchange — without this flag, ppermute blocks
+    # until completion, leaving the GPU idle during communication.
+    "xla_gpu_enable_async_collectives": "true",
     "xla_gpu_enable_highest_priority_async_stream": "true",
 }
 
