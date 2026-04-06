@@ -137,13 +137,20 @@ def rest_state_ocean(
 def wind_driven_gyre_init(
     grid: CubedSphereGrid,
     z_coord: OceanZStarCoordinate,
-    tau_max: float = 0.1,
     H_max: float = 5500.0,
+    lon_west: float = 0.0,
+    lon_east: float = 120.0,
+    lat_south: float = 15.0,
+    lat_north: float = 75.0,
+    T_uniform: float = 10.0,
+    S_uniform: float = 35.0,
 ) -> OceanState:
-    """Create initial condition for a wind-driven double-gyre test.
+    """Create initial condition for a wind-driven barotropic gyre test.
 
-    Starts from rest with stratification. Wind forcing is applied
-    externally as a tendency (not part of the initial condition).
+    Starts from rest with uniform T and S inside a rectangular ocean basin.
+    Uniform tracers ensure purely barotropic dynamics (no baroclinic
+    pressure gradients or spurious mixing).  Wind forcing is applied
+    externally via the prescribed surface forcing physics pipeline.
 
     Parameters
     ----------
@@ -151,13 +158,52 @@ def wind_driven_gyre_init(
         Horizontal grid.
     z_coord : OceanZStarCoordinate
         Vertical coordinate.
-    tau_max : float
-        Maximum wind stress [N/m^2] (not stored in state, for reference).
     H_max : float
         Maximum ocean depth [m].
+    lon_west, lon_east : float
+        Basin longitude bounds [degrees].
+    lat_south, lat_north : float
+        Basin latitude bounds [degrees].
+    T_uniform : float
+        Uniform temperature [degC].
+    S_uniform : float
+        Uniform salinity [PSU].
 
     Returns
     -------
-    OceanState : Initial condition for double-gyre experiment.
+    OceanState : Initial condition for barotropic gyre experiment.
     """
-    return rest_state_ocean(grid, z_coord, H_max=H_max)
+    n = grid.n
+    nlev = z_coord.n_levels
+    dtype = get_policy().storage
+
+    # Basin land mask: ocean inside rectangle, land outside
+    lon_deg = grid.lon * (180.0 / jnp.pi)  # [0, 360)
+    lat_deg = grid.lat * (180.0 / jnp.pi)  # [-90, 90]
+    in_basin = (
+        (lon_deg >= lon_west) & (lon_deg <= lon_east) &
+        (lat_deg >= lat_south) & (lat_deg <= lat_north)
+    )
+    land_mask = jnp.where(in_basin, 1.0, 0.0).astype(dtype)
+
+    # Uniform depth everywhere (smooth Jacobian at coastlines)
+    H_bathy = jnp.full_like(land_mask, H_max)
+
+    # Uniform T and S — purely barotropic setup
+    T_3d = jnp.full((6, n, n, nlev), T_uniform, dtype=dtype)
+    S_3d = jnp.full((6, n, n, nlev), S_uniform, dtype=dtype)
+    zeros_3d = jnp.zeros((6, n, n, nlev), dtype=dtype)
+    zeros_2d = jnp.zeros((6, n, n), dtype=dtype)
+
+    dims_3d = ("face", "x", "y", "level")
+    dims_2d = ("face", "x", "y")
+
+    return OceanState(
+        u=Field(data=zeros_3d, name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=zeros_3d, name="v", dims=dims_3d, units="m/s"),
+        T=Field(data=T_3d, name="T", dims=dims_3d, units="degC"),
+        S=Field(data=S_3d, name="S", dims=dims_3d, units="PSU"),
+        eta=Field(data=zeros_2d, name="eta", dims=dims_2d, units="m"),
+        H_bathy=Field(data=H_bathy, name="H_bathy", dims=dims_2d, units="m"),
+        land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
+    )

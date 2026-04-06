@@ -371,8 +371,9 @@ class TestOceanMatrixAlignment:
         assert runners_keys is not None, "RUNNERS dict not found in canonical runner"
 
         expected = {
-            "rest_state", "barotropic_wave", "wind_gyre", "baroclinic",
-            "phillips_two_layer", "inertia_gravity_wave",
+            "rest_state", "rest_state_no_land",
+            "barotropic_wave", "barotropic_gyre", "barotropic_double_gyre",
+            "baroclinic", "phillips_two_layer", "inertia_gravity_wave",
             "lock_exchange", "overflow", "stommel_gyre_tracer",
         }
         assert runners_keys == expected, (
@@ -403,8 +404,9 @@ class TestOceanMatrixAlignment:
         assert requested is not None, "REQUESTED_CASES not found"
 
         canonical = {
-            "rest_state", "barotropic_wave", "wind_gyre", "baroclinic",
-            "phillips_two_layer", "inertia_gravity_wave",
+            "rest_state", "rest_state_no_land",
+            "barotropic_wave", "barotropic_gyre", "barotropic_double_gyre",
+            "baroclinic", "phillips_two_layer", "inertia_gravity_wave",
             "lock_exchange", "overflow", "stommel_gyre_tracer",
         }
         missing = set(requested) - canonical

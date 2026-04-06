@@ -37,6 +37,7 @@ dependencies = [
     "netCDF4>=1.6",
     "dataclasses-json>=0.6",
     "scipy>=1.10",
+    "pandas>=2.0",
 ]
 
 [project.optional-dependencies]

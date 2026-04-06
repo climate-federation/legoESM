@@ -45,12 +45,35 @@ def prescribed_surface_forcing(
     inv_rho_dz = 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1e-10))
 
     # Wind stress
-    if cfg.wind_profile in ("cosine_latitude", "double_gyre"):
-        lat = grid.lat  # (6, n, n)
-        # Double-gyre wind: tau_x = -tau_max * cos(2*lat)
-        # Gives westerlies at mid-latitudes, easterlies near equator and poles.
+    # Use grid_lat (GridProtocol property) for correct shape on all grid types:
+    # cubed_sphere (6, n, n), latlon (n_lat, n_lon).
+    if cfg.wind_profile == "cosine_latitude":
+        lat = grid.grid_lat
         lat_range = jnp.pi / 2.0  # 90 degrees
         tau_x = -cfg.tau_max * jnp.cos(jnp.pi * lat / lat_range)
+        tau_y = jnp.zeros_like(tau_x)
+    elif cfg.wind_profile == "single_gyre":
+        lat = grid.grid_lat
+        # Basin-relative single-gyre wind stress (Stommel 1948, Munk 1950).
+        # tau_x = -tau_max * cos(pi * (lat - lat_s) / (lat_n - lat_s))
+        # Easterlies at southern boundary, westerlies at northern boundary.
+        # One sign of curl → one anticyclonic (subtropical) gyre.
+        lat_s = cfg.lat_south_deg * jnp.pi / 180.0
+        lat_n = cfg.lat_north_deg * jnp.pi / 180.0
+        basin_width = lat_n - lat_s
+        tau_x = -cfg.tau_max * jnp.cos(jnp.pi * (lat - lat_s) / basin_width)
+        tau_y = jnp.zeros_like(tau_x)
+    elif cfg.wind_profile == "double_gyre":
+        lat = grid.grid_lat
+        # Basin-relative double-gyre wind stress (Holland & Lin 1975).
+        # tau_x = -tau_max * cos(2*pi * (lat - lat_s) / (lat_n - lat_s))
+        # Easterlies at both boundaries, westerly jet at mid-basin.
+        # Curl changes sign at mid-basin → subtropical gyre (south)
+        # + subpolar gyre (north).
+        lat_s = cfg.lat_south_deg * jnp.pi / 180.0
+        lat_n = cfg.lat_north_deg * jnp.pi / 180.0
+        basin_width = lat_n - lat_s
+        tau_x = -cfg.tau_max * jnp.cos(2.0 * jnp.pi * (lat - lat_s) / basin_width)
         tau_y = jnp.zeros_like(tau_x)
     else:
         tau_x = jnp.full_like(dz_0, cfg.tau_x, dtype=dtype)

@@ -946,13 +946,16 @@ def _save_snapshot_data(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
 ):
-    """Save snapshot field arrays as NPZ files in both native grid and lat-lon.
-
+    """Save snapshot field arrays as NPZ files with proper time series format.
+    
+    NEW FORMAT: Each field is saved as a time series array with shape (n_times, ...).
+    This replaces the old format where each timestep was a separate variable.
+    
     Produces:
-        snapshots_native.npz   – raw arrays keyed as ``{field}_step{step}``
+        snapshots_native.npz   – raw arrays keyed as ``{field}`` with time series
         snapshots_latlon.npz   – regridded to (181, 360) regular lat-lon,
                                  same key convention.  For 3-D fields the
-                                 shape is (181, 360, nlev).
+                                 shape is (n_times, 181, 360, nlev).
     Both files also contain ``times_days`` and ``steps`` metadata arrays.
     """
     if not snapshots:
@@ -963,29 +966,48 @@ def _save_snapshot_data(
     times_days = np.array([s * dt / 86400.0 for s in sorted_steps],
                           dtype=np.float64)
 
-    native_arrays: dict[str, np.ndarray] = {
+    # Common metadata for both files
+    common_metadata = {
         "steps": np.array(sorted_steps, dtype=np.int64),
         "times_days": times_days,
-    }
-    latlon_arrays: dict[str, np.ndarray] = {
-        "steps": np.array(sorted_steps, dtype=np.int64),
-        "times_days": times_days,
-        "lat": np.linspace(-90.0, 90.0, 181),
-        "lon": np.linspace(-180.0, 180.0, 360),
     }
 
-    for step in sorted_steps:
-        for field_key, field_val in snapshots[step].items():
-            arr = np.asarray(field_val, dtype=np.float64)
-            key = f"{field_key}_step{step}"
-            native_arrays[key] = arr
-            # Fields with "_3d" suffix are (*, nlev) – regrid per level
-            if field_key.endswith("_3d"):
-                latlon_arrays[key] = _regrid_3d_level(
-                    arr, lon_deg, lat_deg, coord_kind)
+    # Collect all unique field keys across all timesteps
+    all_field_keys = set()
+    for step_data in snapshots.values():
+        all_field_keys.update(step_data.keys())
+
+    # Build time-series arrays for native grid
+    native_arrays = dict(common_metadata)
+    latlon_arrays = dict(common_metadata)
+    latlon_arrays["lat"] = np.linspace(-90.0, 90.0, 181)
+    latlon_arrays["lon"] = np.linspace(-180.0, 180.0, 360)
+
+    for field_key in all_field_keys:
+        # Collect this field across all timesteps
+        field_timesteps = []
+        latlon_timesteps = []
+        
+        for step in sorted_steps:
+            if field_key in snapshots[step]:
+                arr = np.asarray(snapshots[step][field_key], dtype=np.float64)
+                field_timesteps.append(arr)
+                
+                # Regrid to lat-lon
+                if field_key.endswith("_3d"):
+                    regridded = _regrid_3d_level(arr, lon_deg, lat_deg, coord_kind)
+                else:
+                    regridded = _regrid_2d(arr, lon_deg, lat_deg, coord_kind)
+                latlon_timesteps.append(regridded)
             else:
-                latlon_arrays[key] = _regrid_2d(
-                    arr, lon_deg, lat_deg, coord_kind)
+                # Field not available at this timestep - skip incomplete time series
+                break
+        
+        # Only save fields that are available at all timesteps
+        if len(field_timesteps) == len(sorted_steps):
+            # Stack into time series: shape (n_times, ...)
+            native_arrays[field_key] = np.stack(field_timesteps, axis=0)
+            latlon_arrays[field_key] = np.stack(latlon_timesteps, axis=0)
 
     np.savez_compressed(output_dir / "snapshots_native.npz", **native_arrays)
     np.savez_compressed(output_dir / "snapshots_latlon.npz", **latlon_arrays)

@@ -11,8 +11,10 @@ class PrescribedForcingConfig(NamedTuple):
     tau_y: float = 0.0           # Meridional wind stress [N/m^2]
     Q_net: float = 0.0           # Net surface heat flux [W/m^2] (+ into ocean)
     E_minus_P: float = 0.0       # Evaporation minus precipitation [m/s]
-    wind_profile: str = "constant"   # "constant" or "cosine_latitude"
-    tau_max: float = 0.1         # Max wind stress for cosine profile [N/m^2]
+    wind_profile: str = "constant"   # "constant", "cosine_latitude", "single_gyre", or "double_gyre"
+    tau_max: float = 0.1         # Max wind stress for wind profiles [N/m^2]
+    lat_south_deg: float = 15.0  # Southern basin boundary [degrees]
+    lat_north_deg: float = 75.0  # Northern basin boundary [degrees]
 
 
 class RestoringConfig(NamedTuple):

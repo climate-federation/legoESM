@@ -27,8 +27,10 @@ from typing import Callable
 # These must match the RUNNERS dict in the canonical runner.
 REQUESTED_CASES = (
     "rest_state",
+    "rest_state_no_land",
     "barotropic_wave",
-    "wind_gyre",
+    "barotropic_gyre",
+    "barotropic_double_gyre",
     "baroclinic",
     "phillips_two_layer",
     "inertia_gravity_wave",

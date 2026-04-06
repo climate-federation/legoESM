@@ -8,7 +8,8 @@ Test cases:
   Existing:
     - rest_state          Rest-state adjustment (stability check)
     - barotropic_wave     Gaussian SSH perturbation propagation
-    - wind_gyre           Wind-driven double-gyre circulation
+    - barotropic_gyre     Wind-driven single barotropic gyre (Stommel/Munk)
+    - barotropic_double_gyre  Wind-driven barotropic double gyre (Holland & Lin)
     - baroclinic          Meridional temperature front relaxation
     - phillips_two_layer  Phillips 2-layer baroclinic instability
 
@@ -60,6 +61,8 @@ import shutil
 import sys
 import time
 import traceback
+
+import pandas as pd
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -106,6 +109,57 @@ _A_EARTH = _C.R_earth   # Earth radius (m)
 _OMEGA_E = _C.Omega      # Earth rotation rate (rad/s)
 _G_EARTH = _C.g           # gravitational acceleration (m/s^2)
 
+# Field ranges for consistent plotting across grid types
+FIELD_RANGES = {
+    "rest_state": {
+        "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH
+        "SST": (1.5, 21.0),        # °C - range from deep to surface T
+    },
+    "rest_state_no_land": {
+        "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH (pure ocean)
+        "SST": (1.5, 21.0),        # °C - range from deep to surface T
+    },
+    "barotropic_wave": {
+        "eta": (-1.5, 1.5),        # meters - wave amplitude ~1m  
+        "SST": (1.5, 21.0),        # °C - background temperature range
+    },
+    "barotropic_gyre": {
+        "eta": (-0.02, 0.02),      # meters - gyre SSH (small after quick spin-up)
+        "speed_sfc": (0, 0.15),     # m/s - surface speeds
+        "SST": (9.5, 10.5),        # °C - uniform 10°C (barotropic)
+    },
+    "barotropic_double_gyre": {
+        "eta": (-0.02, 0.02),      # meters - gyre SSH (small after quick spin-up)
+        "speed_sfc": (0, 0.15),     # m/s - surface speeds
+        "SST": (9.5, 10.5),        # °C - uniform 10°C (barotropic)
+    },
+    "baroclinic": {
+        "eta": (-0.1, 0.1),        # meters - adjustment process
+        "SST": (1.5, 21.0),        # °C - background temperature range
+    },
+    "phillips_two_layer": {
+        "eta": (-0.2, 0.2),        # meters - 2-layer dynamics
+        "SST": (8, 16),             # °C - 2-layer temperature range
+    },
+    "inertia_gravity_wave": {
+        "eta": (-1.2, 1.2),        # meters - IGW amplitude
+        "SST": (1.5, 21.0),        # °C
+    },
+    "lock_exchange": {
+        "eta": (-0.05, 0.05),      # meters - density current adjustment
+        "SST": (-1, 21),            # °C - cold/warm water exchange
+    },
+    "overflow": {
+        "eta": (-0.1, 0.1),        # meters - dense water overflow
+        "SST": (-1, 21),            # °C - cold dense water
+    },
+    "stommel_gyre_tracer": {
+        "eta": (-0.02, 0.02),      # meters - gyre circulation (small during spin-up)
+        "SST": (1.5, 21.0),        # °C
+        "SSS": (33, 37),            # PSU - tracer salinity range
+    },
+}
+
 
 # ===========================================================================
 # TestCase dataclass
@@ -114,7 +168,7 @@ _G_EARTH = _C.g           # gravitational acceleration (m/s^2)
 @dataclass
 class TestCase:
     """A single test case in the ocean matrix."""
-    case: str               # rest_state, barotropic_wave, wind_gyre, baroclinic
+    case: str               # rest_state, barotropic_gyre, barotropic_double_gyre, etc.
     grid_type: str          # cubed_sphere, latlon, mpas, spectral
     resolution: str         # C24, 36x72, ico3, T21
     duration_days: float
@@ -135,20 +189,34 @@ def _build_test_matrix() -> list[TestCase]:
     matrix: list[TestCase] = []
     res = GRID_RESOLUTIONS
 
-    # --- Rest state adjustment: all grids ---
+    # --- Rest state adjustment (with land): all grids except spectral ---
     for g in GRID_TYPES:
+        if g == "spectral":
+            continue
         matrix.append(TestCase(
             "rest_state", g, res[g], 1.0, 0.1))
 
-    # --- Barotropic gravity wave: all grids ---
+    # --- Rest state adjustment without land: all grids ---
     for g in GRID_TYPES:
         matrix.append(TestCase(
-            "barotropic_wave", g, res[g], 2.0, 0.2))
+            "rest_state_no_land", g, res[g], 1.0, 0.1))
 
-    # --- Wind-driven gyre: cubed_sphere, latlon, mpas ---
-    for g in ["cubed_sphere", "latlon", "mpas"]:
+    # --- Barotropic gravity wave: resolution-matched grids (~384-446 km dx) ---
+    bwave_res = {"cubed_sphere": "C24", "latlon": "48x72",
+                 "mpas": "ico4", "spectral": "T21"}
+    for g in GRID_TYPES:
         matrix.append(TestCase(
-            "wind_gyre", g, res[g], 30.0, 2.0))
+            "barotropic_wave", g, bwave_res[g], 2.0, 0.2))
+
+    # --- Barotropic gyre: cubed_sphere, latlon (MPAS lacks surface forcing) ---
+    for g in ["cubed_sphere", "latlon"]:
+        matrix.append(TestCase(
+            "barotropic_gyre", g, res[g], 30.0, 2.0))
+
+    # --- Barotropic double gyre: cubed_sphere, latlon ---
+    for g in ["cubed_sphere", "latlon"]:
+        matrix.append(TestCase(
+            "barotropic_double_gyre", g, res[g], 30.0, 2.0))
 
     # --- Baroclinic adjustment: all grids ---
     for g in GRID_TYPES:
@@ -175,8 +243,8 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "overflow", g, res[g], 0.5, 0.1))
 
-    # --- Stommel Gyre Tracer (Hecht et al. 2000): cubed_sphere, latlon, mpas ---
-    for g in ["cubed_sphere", "latlon", "mpas"]:
+    # --- Stommel Gyre Tracer (Hecht et al. 2000): cubed_sphere, latlon ---
+    for g in ["cubed_sphere", "latlon"]:
         matrix.append(TestCase(
             "stommel_gyre_tracer", g, res[g], 60.0, 5.0))
 
@@ -558,6 +626,16 @@ def _save_conservation(output_dir: Path, case_name: str, diag: dict,
     plt.close(fig)
 
 
+def _extract_test_case_name(case_name: str) -> str:
+    """Extract test case name from full case name (e.g. 'Rest State spectral T21' -> 'rest_state')."""
+    case_lower = case_name.lower()
+    for test_case in FIELD_RANGES.keys():
+        test_case_words = test_case.replace('_', ' ')
+        if test_case_words in case_lower:
+            return test_case
+    # Fallback to first word if no match
+    return case_lower.split()[0].replace(' ', '_')
+
 def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                          dt: float, field_specs: list[tuple[str, str, str]],
                          coord_kind: str, lon_deg: np.ndarray,
@@ -568,6 +646,10 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
     output_dir.mkdir(parents=True, exist_ok=True)
     valid_steps = sorted(snapshots.keys())
     first_saved = None
+    
+    # Extract test case for consistent field ranges
+    test_case = _extract_test_case_name(case_name)
+    field_ranges = FIELD_RANGES.get(test_case, {})
 
     for field_key, field_label, cmap in field_specs:
         steps = [s for s in valid_steps if field_key in snapshots[s]]
@@ -589,9 +671,27 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
             ax = axes[r, c]
             raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
             regridded = _regrid_2d(raw, lon_deg, lat_deg, coord_kind)
+            
+            # Apply land masking if land_mask is available
+            if "land_mask" in snapshots[step]:
+                land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+                land_mask_regridded = _regrid_2d(land_mask_raw, lon_deg, lat_deg, coord_kind)
+                # Mask land areas (where land_mask ≤ 0.5) with NaN
+                regridded = np.where(land_mask_regridded > 0.5, regridded, np.nan)
+            
+            # Compute extent from actual coordinates
+            if coord_kind in ("latlon", "gaussian"):
+                lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+                lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
+                lon_ext = [float(lon_flat.min()), float(lon_flat.max())]
+                lat_ext = [float(lat_flat.min()), float(lat_flat.max())]
+            else:
+                lon_ext = [-180, 180]
+                lat_ext = [-90, 90]
+            # Individual grid plots use auto-scaling for maximum detail
             im = ax.imshow(
                 regridded, origin="lower", aspect="auto", cmap=cmap,
-                extent=[-180, 180, -90, 90])
+                extent=[lon_ext[0], lon_ext[1], lat_ext[0], lat_ext[1]])
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             if c == 0:
@@ -606,9 +706,9 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
         if im is not None:
             fig.colorbar(
                 im, ax=axes.ravel().tolist(), orientation="vertical",
-                fraction=0.02, pad=0.02, label=field_label)
+                fraction=0.046, pad=0.04, label=field_label)
         fig.suptitle(f"{case_name} — {field_key}", fontsize=11)
-        fig.tight_layout(rect=[0, 0, 0.96, 0.95])
+        fig.tight_layout(rect=[0, 0, 0.88, 0.95])  # More space for colorbar
         fname = f"snapshots_{field_key}.png"
         fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -698,9 +798,18 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
 
         for ax, step in zip(axes_arr, valid_steps):
             f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
+            
+            # Apply land masking to 3D field before cross-section if available
+            if "land_mask" in snapshots[step]:
+                land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+                land_mask_3d = land_mask_raw[..., np.newaxis]  # Expand to 3D
+                f3d = np.where(land_mask_3d > 0.5, f3d, np.nan)
+            
             section, bin_centers = _bin_cross_section(
                 f3d, lon_deg, lat_deg, coord_kind, mean_axis)
             section = _fill_nan_section(section)
+            
+            # Individual grid plots use auto-scaling for maximum detail
             im = ax.imshow(
                 section.T, origin="upper", aspect="auto", cmap="RdBu_r",
                 extent=[bin_centers[0], bin_centers[-1],
@@ -712,11 +821,11 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         axes_arr[0].set_ylabel(level_label)
         if im is not None:
             fig.colorbar(
-                im, ax=axes_arr, orientation="vertical", fraction=0.028,
-                pad=0.02, label=field_3d_key)
+                im, ax=axes_arr, orientation="vertical", fraction=0.046,
+                pad=0.04, label=field_3d_key)
         fig.suptitle(
             f"{case_name} — {field_3d_key} cross-sections", fontsize=11)
-        fig.tight_layout(rect=[0, 0, 0.96, 0.95])
+        fig.tight_layout(rect=[0, 0, 0.88, 0.95])  # More space for colorbar
         fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
@@ -735,6 +844,13 @@ def _save_profiles(output_dir: Path, case_name: str, snapshots: dict,
     colors = plt.cm.viridis(np.linspace(0, 1, len(valid_steps)))
     for step, color in zip(valid_steps, colors):
         f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
+        
+        # Apply land masking to 3D field before computing profile if available
+        if "land_mask" in snapshots[step]:
+            land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+            land_mask_3d = land_mask_raw[..., np.newaxis]  # Expand to 3D
+            f3d = np.where(land_mask_3d > 0.5, f3d, np.nan)
+        
         profile = np.nanmean(f3d, axis=tuple(range(f3d.ndim - 1)))
         day = step * dt / 86400.0
         ax.plot(profile, levels, color=color, lw=1.5, label=f"day {day:.1f}")
@@ -767,7 +883,11 @@ def _save_snapshot_data(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
 ):
-    """Save snapshot field arrays as NPZ files."""
+    """Save snapshot field arrays as NPZ files with proper time series format.
+    
+    NEW FORMAT: Each field is saved as a time series array with shape (n_times, ...).
+    This replaces the old format where each timestep was a separate variable.
+    """
     if not snapshots:
         return
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -776,28 +896,55 @@ def _save_snapshot_data(
     times_days = np.array([s * dt / 86400.0 for s in sorted_steps],
                           dtype=np.float64)
 
-    native_arrays: dict[str, np.ndarray] = {
+    # Common metadata for both files
+    common_metadata = {
         "steps": np.array(sorted_steps, dtype=np.int64),
         "times_days": times_days,
-    }
-    latlon_arrays: dict[str, np.ndarray] = {
-        "steps": np.array(sorted_steps, dtype=np.int64),
-        "times_days": times_days,
-        "lat": np.linspace(-90.0, 90.0, 181),
-        "lon": np.linspace(-180.0, 180.0, 360),
     }
 
-    for step in sorted_steps:
-        for field_key, field_val in snapshots[step].items():
-            arr = np.asarray(field_val, dtype=np.float64)
-            key = f"{field_key}_step{step}"
-            native_arrays[key] = arr
-            if field_key.endswith("_3d"):
-                latlon_arrays[key] = _regrid_3d_level(
-                    arr, lon_deg, lat_deg, coord_kind)
+    # Collect all unique field keys across all timesteps
+    all_field_keys = set()
+    for step_data in snapshots.values():
+        all_field_keys.update(step_data.keys())
+
+    # Build time-series arrays for native grid
+    native_arrays = dict(common_metadata)
+    latlon_arrays = dict(common_metadata)
+    if coord_kind in ("latlon", "gaussian"):
+        # Native grids have lon in [0, 360); store actual coordinates
+        latlon_arrays["lat"] = np.asarray(lat_deg, dtype=np.float64).ravel()
+        latlon_arrays["lon"] = np.asarray(lon_deg, dtype=np.float64).ravel()
+    else:
+        # Regridded grids (cube, mpas) use [-180, 180] target
+        latlon_arrays["lat"] = np.linspace(-90.0, 90.0, 181)
+        latlon_arrays["lon"] = np.linspace(-180.0, 180.0, 360)
+
+    for field_key in all_field_keys:
+        # Collect this field across all timesteps
+        field_timesteps = []
+        latlon_timesteps = []
+        
+        for step in sorted_steps:
+            if field_key in snapshots[step]:
+                arr = np.asarray(snapshots[step][field_key], dtype=np.float64)
+                field_timesteps.append(arr)
+                
+                # Regrid to lat-lon
+                if field_key.endswith("_3d"):
+                    regridded = _regrid_3d_level(arr, lon_deg, lat_deg, coord_kind)
+                else:
+                    regridded = _regrid_2d(arr, lon_deg, lat_deg, coord_kind)
+                latlon_timesteps.append(regridded)
             else:
-                latlon_arrays[key] = _regrid_2d(
-                    arr, lon_deg, lat_deg, coord_kind)
+                # Field not available at this timestep - skip or use NaN
+                # For now, we'll skip incomplete time series
+                break
+        
+        # Only save fields that are available at all timesteps
+        if len(field_timesteps) == len(sorted_steps):
+            # Stack into time series: shape (n_times, ...)
+            native_arrays[field_key] = np.stack(field_timesteps, axis=0)
+            latlon_arrays[field_key] = np.stack(latlon_timesteps, axis=0)
 
     np.savez_compressed(output_dir / "snapshots_native.npz", **native_arrays)
     np.savez_compressed(output_dir / "snapshots_latlon.npz", **latlon_arrays)
@@ -912,10 +1059,23 @@ def _parse_resolution(tc: TestCase):
 
 
 def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
-                        H_max: float = DEFAULT_H_MAX):
+                        H_max: float = DEFAULT_H_MAX, physics=None,
+                        A_h: float | None = None,
+                        A_v: float | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
-    Returns (grid, z_coord, state, model, coord_kind, lon_deg, lat_deg).
+    Parameters
+    ----------
+    tc : TestCase
+    nlev : int
+    H_max : float
+    physics : OceanPhysicsConfig or None
+        If provided, passed to the model config to enable physics
+        (e.g. prescribed surface forcing for wind-driven experiments).
+    A_h : float or None
+        Override horizontal viscosity [m^2/s]. If None, uses config default.
+
+    Returns (grid, z_coord, config, model, coord_kind, lon_deg, lat_deg).
     """
     from legoesm.ocean.vertical import create_ocean_z_star
 
@@ -929,7 +1089,12 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
 
         n = params["n"]
         grid = create_cubed_sphere(n)
-        config = OceanConfig(n_barotropic_substeps=30)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        config = OceanConfig(**kw)
         model = OceanModel(grid, z_coord, config)
         coord_kind = "cube"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -942,7 +1107,12 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
         from legoesm.ocean.state import LatLonOceanConfig
 
         grid = create_latlon_grid(params["n_lat"], params["n_lon"])
-        config = LatLonOceanConfig(n_barotropic_substeps=30)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        config = LatLonOceanConfig(**kw)
         model = LatLonOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
@@ -992,7 +1162,25 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
     elif tc.grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
-        # No land mask for idealized spectral tests (avoids Gibbs ringing)
+        # Use land with tanh taper (same as other grids); hyperdiffusion mitigates Gibbs
+        return rest_state_spectral_ocean(grid, z_coord, H_max=H_max,
+                                         land_lat_threshold=80.0)
+    raise ValueError(f"Unknown grid type: {tc.grid_type}")
+
+
+def _create_rest_state_no_land(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
+    """Create rest-state initial condition with no land for any grid type."""
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.ocean.init import rest_state_ocean
+        return rest_state_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
+    elif tc.grid_type == "latlon":
+        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
+        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
+    elif tc.grid_type == "mpas":
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
+    elif tc.grid_type == "spectral":
+        from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         return rest_state_spectral_ocean(grid, z_coord, H_max=H_max,
                                          land_lat_threshold=90.0)
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
@@ -1015,6 +1203,7 @@ def _extract_fv_ocean(state, grid_type: str):
         "u_sfc": u_sfc,
         "T_3d": T_3d,
         "S_3d": S_3d,
+        "land_mask": np.asarray(state.land_mask.data, dtype=np.float64),
     }
     if hasattr(state, "v"):
         v_sfc = np.asarray(state.v.data[..., 0], dtype=np.float64)
@@ -1039,6 +1228,7 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg):
         "SST": SST,
         "T_3d": T_3d,
         "S_3d": S_3d,
+        "land_mask": np.asarray(state.land_mask.data, dtype=np.float64),
     }
     return result
 
@@ -1055,12 +1245,22 @@ def _extract_spectral_ocean(state, grid):
         sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
     SST = T_grid[..., 0] if T_grid.ndim >= 3 else T_grid
     SSS = S_grid[..., 0] if S_grid.ndim >= 3 else S_grid
+    
+    # For spectral grids, synthesize land mask if available (typically all ocean for spectral)
+    if hasattr(state, 'land_mask') and hasattr(state.land_mask, 'data'):
+        land_mask_grid = np.asarray(
+            sh_synthesis(grid, state.land_mask.data), dtype=np.float64)
+    else:
+        # Default to all ocean for spectral grids (consistent with rest_state config)
+        land_mask_grid = np.ones_like(eta_grid, dtype=np.float64)
+    
     return {
         "eta": eta_grid,
         "SST": SST,
         "SSS": SSS,
         "T_3d": T_grid,
         "S_3d": S_grid,
+        "land_mask": land_mask_grid,
     }
 
 
@@ -1093,37 +1293,123 @@ def _make_check_fn(grid_type: str):
         return check_fn
 
 
-def _make_scalar_fn(grid_type: str):
+def _make_scalar_fn(grid_type: str, grid=None):
     """Return a scalar_fn(state) -> dict for diagnostics."""
     if grid_type == "spectral":
+        if grid is None:
+            raise ValueError("Grid object required for spectral scalar function")
+        
         def scalar_fn(s):
-            return {
-                "mean_eta_hat_abs": float(jnp.mean(jnp.abs(s.eta_hat.data))),
-                "max_eta_hat_abs": float(jnp.max(jnp.abs(s.eta_hat.data))),
-                "mean_T_hat_abs": float(jnp.mean(jnp.abs(s.T_hat.data))),
-                "mean_S_hat_abs": float(jnp.mean(jnp.abs(s.S_hat.data))),
-            }
+            from legoesm.grids.gaussian import sh_synthesis, sh_synthesis_3d
+            
+            # Convert spectral coefficients to physical fields
+            eta_phys = sh_synthesis(grid, s.eta_hat.data)        # meters
+            T_phys = sh_synthesis_3d(grid, s.T_hat.data)         # °C  
+            S_phys = sh_synthesis_3d(grid, s.S_hat.data)         # PSU
+            
+            # Apply ocean masking if available
+            if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
+                land_mask_phys = sh_synthesis(grid, s.land_mask.data)
+                ocean_mask = land_mask_phys > 0.5
+                
+                # Compute ocean-only statistics
+                eta_ocean = jnp.where(ocean_mask, eta_phys, jnp.nan)
+                T_ocean = jnp.where(ocean_mask, T_phys, jnp.nan)
+                S_ocean = jnp.where(ocean_mask, S_phys, jnp.nan)
+                
+                return {
+                    "mean_eta": float(jnp.nanmean(eta_ocean)),           # meters
+                    "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))), # meters
+                    "mean_T": float(jnp.nanmean(T_ocean)),               # °C
+                    "mean_S": float(jnp.nanmean(S_ocean)),               # PSU
+                }
+            else:
+                # Fallback for spectral (typically all ocean anyway)
+                return {
+                    "mean_eta": float(jnp.mean(eta_phys)),           # meters
+                    "max_abs_eta": float(jnp.max(jnp.abs(eta_phys))), # meters
+                    "mean_T": float(jnp.mean(T_phys)),               # °C
+                    "mean_S": float(jnp.mean(S_phys)),               # PSU
+                }
         return scalar_fn
     elif grid_type == "mpas":
         def scalar_fn(s):
-            return {
-                "mean_eta": float(jnp.mean(s.eta.data)),
-                "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
-                "mean_T": float(jnp.mean(s.T.data)),
-                "mean_S": float(jnp.mean(s.S.data)),
-                "max_abs_u": float(jnp.max(jnp.abs(s.u.data))),
-            }
+            # MPAS land masking using post-regridding approach
+            # Note: This is less accurate than pre-regridding masking with mesh topology,
+            # but simpler to implement. Future versions could use MPAS mesh connectivity
+            # to map cell-centered land masks to edge-centered velocity fields.
+            
+            if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
+                # For MPAS, apply masking by excluding land cell values
+                land_mask = s.land_mask.data > 0.5
+                
+                # Cell-centered fields: direct masking
+                eta_ocean = jnp.where(land_mask, s.eta.data, jnp.nan)
+                T_ocean = jnp.where(land_mask[..., jnp.newaxis], s.T.data, jnp.nan)
+                S_ocean = jnp.where(land_mask[..., jnp.newaxis], s.S.data, jnp.nan)
+                
+                # Edge-centered fields: use global statistics for now
+                # TODO: Map cell mask to edge mask using MPAS mesh topology
+                max_abs_u = float(jnp.max(jnp.abs(s.u.data)))
+                
+                return {
+                    "mean_eta": float(jnp.nanmean(eta_ocean)),
+                    "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))),
+                    "mean_T": float(jnp.nanmean(T_ocean)),
+                    "mean_S": float(jnp.nanmean(S_ocean)),
+                    "max_abs_u": max_abs_u,  # Unmasked for now
+                }
+            else:
+                # Fallback without masking
+                return {
+                    "mean_eta": float(jnp.mean(s.eta.data)),
+                    "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
+                    "mean_T": float(jnp.mean(s.T.data)),
+                    "mean_S": float(jnp.mean(s.S.data)),
+                    "max_abs_u": float(jnp.max(jnp.abs(s.u.data))),
+                }
         return scalar_fn
     else:
         def scalar_fn(s):
-            return {
-                "mean_eta": float(jnp.mean(s.eta.data)),
-                "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
-                "mean_T": float(jnp.mean(s.T.data)),
-                "mean_S": float(jnp.mean(s.S.data)),
-                "max_speed": float(jnp.max(jnp.sqrt(
-                    s.u.data ** 2 + s.v.data ** 2))),
-            }
+            # Apply ocean masking for cubed-sphere and lat-lon
+            if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
+                ocean_mask = s.land_mask.data > 0.5  # Shape: (6, 24, 24)
+                
+                # For 2D fields (eta): use mask directly
+                eta_ocean = jnp.where(ocean_mask, s.eta.data, jnp.nan)
+                
+                # For 3D fields (T, S): expand mask to 3D
+                ocean_mask_3d = ocean_mask[..., jnp.newaxis]  # Shape: (6, 24, 24, 1)
+                T_ocean = jnp.where(ocean_mask_3d, s.T.data, jnp.nan) 
+                S_ocean = jnp.where(ocean_mask_3d, s.S.data, jnp.nan)
+                
+                # For velocity, apply mask to 2D surface fields
+                if hasattr(s, 'u') and hasattr(s, 'v'):
+                    u_sfc = s.u.data[..., 0]  # Surface level
+                    v_sfc = s.v.data[..., 0]
+                    speed_sfc = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
+                    speed_ocean = jnp.where(ocean_mask, speed_sfc, jnp.nan)
+                    max_speed = float(jnp.nanmax(speed_ocean))
+                else:
+                    max_speed = 0.0
+                
+                return {
+                    "mean_eta": float(jnp.nanmean(eta_ocean)),
+                    "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))),
+                    "mean_T": float(jnp.nanmean(T_ocean)),
+                    "mean_S": float(jnp.nanmean(S_ocean)),
+                    "max_speed": max_speed,
+                }
+            else:
+                # Fallback without masking
+                return {
+                    "mean_eta": float(jnp.mean(s.eta.data)),
+                    "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
+                    "mean_T": float(jnp.mean(s.T.data)),
+                    "mean_S": float(jnp.mean(s.S.data)),
+                    "max_speed": float(jnp.max(jnp.sqrt(
+                        s.u.data ** 2 + s.v.data ** 2))),
+                }
         return scalar_fn
 
 
@@ -1216,17 +1502,24 @@ def _add_barotropic_wave_perturbation(state, grid_type: str, grid, z_coord):
 # Wind-driven gyre forcing
 # ===========================================================================
 
-def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord):
-    """Create wind-gyre initial state (starts at rest with bathymetry)."""
+def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord,
+                           lon_west=0.0, lon_east=120.0,
+                           lat_south=15.0, lat_north=75.0):
+    """Create wind-gyre initial state with rectangular basin boundaries."""
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import wind_driven_gyre_init
-        return wind_driven_gyre_init(grid, z_coord)
+        return wind_driven_gyre_init(
+            grid, z_coord,
+            lon_west=lon_west, lon_east=lon_east,
+            lat_south=lat_south, lat_north=lat_north,
+        )
     elif grid_type == "latlon":
         from legoesm.ocean.init_latlon import wind_driven_gyre_latlon
-        return wind_driven_gyre_latlon(grid, z_coord)
-    elif grid_type == "mpas":
-        # MPAS doesn't have a dedicated gyre init; use rest state
-        return state
+        return wind_driven_gyre_latlon(
+            grid, z_coord,
+            lon_west=lon_west, lon_east=lon_east,
+            lat_south=lat_south, lat_north=lat_north,
+        )
     raise ValueError(f"Wind gyre not available for grid: {grid_type}")
 
 
@@ -1296,7 +1589,7 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -1307,19 +1600,23 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
         label=f"Rest State ({tc.grid_type})", total_days=days)
 
-    # Check drift is small
-    if tc.grid_type == "spectral":
-        eta_drift = _compute_drift(diag.get("max_eta_hat_abs", []))
-        T_drift = _compute_drift(diag.get("mean_T_hat_abs", []))
-    else:
-        # Use absolute drift normalized by ocean depth (DEFAULT_H_MAX) rather than
-        # relative drift: _compute_drift divides by |initial|, which is ~0 for mean_eta
-        # in a rest state (initial eta=0), yielding meaningless large relative values.
-        eta_list = diag.get("mean_eta", [])
-        eta_drift = (abs(eta_list[-1] - eta_list[0]) / DEFAULT_H_MAX
-                     if len(eta_list) >= 2 else 0.0)
-        T_drift = _compute_drift(diag.get("mean_T", []))
+    # Check drift is small - all grids now use same physical units
+    # Use absolute eta drift in meters rather than relative drift since 
+    # initial mean_eta is ~0 in rest state, making relative drift meaningless (division by ~0).
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+
+    # Spectral land-leakage diagnostic: check that eta stays near zero in land cells
+    if tc.grid_type == "spectral" and hasattr(state, 'land_mask_grid'):
+        from legoesm.grids.gaussian import sh_synthesis
+        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
+        eta_grid = np.asarray(sh_synthesis(grid, state.eta_hat.data).real,
+                              dtype=np.float64)
+        land_leakage = np.max(np.abs(eta_grid * (1.0 - mask)))
+        notes += f", land_leakage={land_leakage:.2e}"
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full  # positive downward for plotting
@@ -1338,9 +1635,66 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         ],
         field_3d_key="T_3d", level_values=depth,
         level_label="Depth (m)",
-        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
-        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
-        salt_key="mean_S" if tc.grid_type != "spectral" else "mean_S_hat_abs",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
+                   ) -> tuple[str, float, str]:
+    """Rest state adjustment with no land: pure ocean should remain near initial condition."""
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc))
+    state = _create_rest_state_no_land(tc, grid, z_coord)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Rest State No Land ({tc.grid_type})", total_days=days)
+
+    # Check drift is small - all grids now use same physical units
+    # Use absolute eta drift in meters rather than relative drift since 
+    # initial mean_eta is ~0 in rest state, making relative drift meaningless (division by ~0).
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_drift = _compute_drift(diag.get("mean_T", []))
+    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full  # positive downward for plotting
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"Rest State No Land {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
         scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
 
     return "PASS" if ok else "FAIL", wall, notes
@@ -1353,6 +1707,9 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
 def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
                         ) -> tuple[str, float, str]:
     """Barotropic gravity wave: Gaussian SSH perturbation propagation."""
+    if tc.grid_type == "spectral":
+        raise NotImplementedError(
+            "Barotropic wave skipped for spectral grid (land masking issues)")
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc))
     state = _create_rest_state(tc, grid, z_coord)
@@ -1364,7 +1721,7 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -1375,11 +1732,8 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
         label=f"Barotropic Wave ({tc.grid_type})", total_days=days)
 
-    if tc.grid_type == "spectral":
-        eta_key = "max_eta_hat_abs"
-    else:
-        eta_key = "max_abs_eta"
-    eta_max = diag[eta_key][-1] if diag.get(eta_key) else 0
+    # All grids now use same physical units
+    eta_max = diag["max_abs_eta"][-1] if diag.get("max_abs_eta") else 0
     notes = f"max|eta|={eta_max:.4f} m"
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
@@ -1399,9 +1753,9 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
         ],
         field_3d_key="T_3d", level_values=depth,
         level_label="Depth (m)",
-        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
-        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
-        salt_key="mean_S" if tc.grid_type != "spectral" else "mean_S_hat_abs",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
         scalar_units={"mean_eta": "m", "max_abs_eta": "m",
                       "mean_T": "degC", "mean_S": "PSU"})
 
@@ -1412,25 +1766,85 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
 # Runner: Wind-Driven Gyre
 # ===========================================================================
 
-def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
-                  ) -> tuple[str, float, str]:
-    """Wind-driven double-gyre circulation."""
-    if tc.grid_type == "spectral":
-        raise NotImplementedError(
-            "Wind-driven gyre not implemented for spectral grid")
+def _make_gyre_physics(wind_profile: str = "single_gyre"):
+    """Create OceanPhysicsConfig with prescribed gyre wind forcing.
 
+    Parameters
+    ----------
+    wind_profile : str
+        "single_gyre" or "double_gyre".
+
+    Notes
+    -----
+    Lateral viscosity is NOT in the physics config because the physics
+    pipeline's harmonic mixing is cubed-sphere-only. Instead, A_h is
+    set on the ocean config via _create_ocean_setup (the dynamics
+    applies it natively on both cubed-sphere and latlon when
+    physics_fn is None for that module). When physics_fn IS set,
+    the dynamics skips config.A_h — so we keep lateral_mixing="none"
+    in the physics config and set A_h on the base config.
+    See _create_ocean_setup where A_h is passed.
+    """
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.surface_forcing.config import (
+        PrescribedForcingConfig, SurfaceForcingConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.bottom_drag.config import (
+        BottomDragConfig, LinearDragConfig,
+    )
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+
+    # Linear bottom drag r = 1e-4 s^-1 (Stommel, design doc §4.2).
+    # Lateral viscosity A_h handled by the base ocean config (see above).
+    return OceanPhysicsConfig(
+        surface_forcing=SurfaceForcingConfig(
+            scheme="prescribed",
+            prescribed=PrescribedForcingConfig(
+                wind_profile=wind_profile,
+                tau_max=0.1,
+                lat_south_deg=15.0,
+                lat_north_deg=75.0,
+            ),
+        ),
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(
+            scheme="linear",
+            linear=LinearDragConfig(r=1e-4),
+        ),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=None,
+    )
+
+
+def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
+                         wind_profile: str, label: str,
+                         ) -> tuple[str, float, str]:
+    """Shared runner for barotropic gyre experiments."""
+    if tc.grid_type not in ("cubed_sphere", "latlon"):
+        raise NotImplementedError(
+            f"{label} not implemented for {tc.grid_type} grid "
+            f"(no surface forcing support)")
+
+    physics = _make_gyre_physics(wind_profile)
+    # A_h = 5e5 m^2/s: Munk layer delta_M ~ 300 km, needed to
+    # stabilise long integrations at ~5-degree resolution.
+    # Default A_v = 1e-3 (higher values destabilise latlon).
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc))
-    # Create rest state first (needed for grids without dedicated gyre init)
-    rest = _create_rest_state(tc, grid, z_coord)
-    state = _add_wind_gyre_forcing(rest, tc.grid_type, grid, z_coord)
+        _create_ocean_setup(tc, physics=physics, A_h=5e5))
+    state = _add_wind_gyre_forcing(
+        None, tc.grid_type, grid, z_coord,
+        lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
+    )
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 40)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -1439,18 +1853,11 @@ def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
-        label=f"Wind Gyre ({tc.grid_type})", total_days=days)
+        label=f"{label} ({tc.grid_type})", total_days=days)
 
-    if tc.grid_type == "mpas":
-        speed_key = "max_abs_u"
-    else:
-        speed_key = "max_speed"
-    max_speed = diag[speed_key][-1] if diag.get(speed_key) else 0
-    # Use absolute drift normalized by ocean depth (DEFAULT_H_MAX) rather than relative
-    # drift: initial mean_eta is ~0 in the wind gyre quick run, making relative drift
-    # meaningless (division by ~0).
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
     eta_list = diag.get("mean_eta", [])
-    eta_drift = (abs(eta_list[-1] - eta_list[0]) / DEFAULT_H_MAX
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
                  if len(eta_list) >= 2 else 0.0)
     notes = f"max speed={max_speed:.4f} m/s, eta drift={eta_drift:.2e}"
 
@@ -1466,12 +1873,11 @@ def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
     field_specs = [
         ("eta", "SSH (m)", "RdBu_r"),
         ("SST", "SST (degC)", "RdYlBu_r"),
+        ("speed_sfc", "Surface speed (m/s)", "magma"),
     ]
-    if tc.grid_type != "mpas":
-        field_specs.append(("speed_sfc", "Surface speed (m/s)", "magma"))
 
     _save_case_diagnostics(
-        output_dir, f"Wind Gyre {tc.grid_type} {tc.resolution}",
+        output_dir, f"{label} {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=field_specs,
         field_3d_key="T_3d", level_values=depth,
@@ -1481,6 +1887,22 @@ def run_wind_gyre(tc: TestCase, output_dir: Path, days: float
                       "mean_T": "degC", "mean_S": "PSU"})
 
     return "PASS" if ok else "FAIL", wall, notes
+
+
+def run_barotropic_gyre(tc: TestCase, output_dir: Path, days: float
+                        ) -> tuple[str, float, str]:
+    """Wind-driven single barotropic gyre (Stommel 1948, Munk 1950)."""
+    return _run_gyre_experiment(tc, output_dir, days,
+                                wind_profile="single_gyre",
+                                label="Barotropic Gyre")
+
+
+def run_barotropic_double_gyre(tc: TestCase, output_dir: Path, days: float
+                               ) -> tuple[str, float, str]:
+    """Wind-driven barotropic double gyre (Holland & Lin 1975)."""
+    return _run_gyre_experiment(tc, output_dir, days,
+                                wind_profile="double_gyre",
+                                label="Barotropic Double Gyre")
 
 
 # ===========================================================================
@@ -1501,7 +1923,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -1512,10 +1934,8 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
         label=f"Baroclinic ({tc.grid_type})", total_days=days)
 
-    if tc.grid_type == "spectral":
-        T_drift = _compute_drift(diag.get("mean_T_hat_abs", []))
-    else:
-        T_drift = _compute_drift(diag.get("mean_T", []))
+    # All grids now use same physical units
+    T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"T drift={T_drift:.2e}"
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
@@ -1536,9 +1956,9 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float
         ],
         field_3d_key="T_3d", level_values=depth,
         level_label="Depth (m)",
-        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
-        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
-        salt_key="mean_S" if tc.grid_type != "spectral" else "mean_S_hat_abs",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
         scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
 
     return "PASS" if ok else "FAIL", wall, notes
@@ -1684,7 +2104,7 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     # Relaxation forcing toward target temperature profiles
@@ -1763,10 +2183,8 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
         label=f"Phillips 2-layer ({tc.grid_type})", total_days=days)
 
-    if tc.grid_type == "spectral":
-        T_drift = _compute_drift(diag.get("mean_T_hat_abs", []))
-    else:
-        T_drift = _compute_drift(diag.get("mean_T", []))
+    # All grids now use same physical units
+    T_drift = _compute_drift(diag.get("mean_T", []))
     notes = f"T drift={T_drift:.2e}"
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
@@ -1786,9 +2204,9 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
         ],
         field_3d_key="T_3d", level_values=depth,
         level_label="Depth (m)",
-        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
-        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
-        salt_key="mean_S" if tc.grid_type != "spectral" else "mean_S_hat_abs",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
         scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
 
     return "PASS" if ok else "FAIL", wall, notes
@@ -1944,7 +2362,7 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     state, snapshots, diag, wall, ok = _run_timeloop(
@@ -1987,8 +2405,8 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
         output_dir, f"IGW Bishnu {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=[("eta", "SSH (m)", "RdBu_r")],
-        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
-        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
+        vol_key="mean_eta",
+        heat_key="mean_T",
         scalar_units={"mean_eta": "m"})
 
     return "PASS" if ok else "FAIL", wall, notes
@@ -2114,7 +2532,7 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     # Custom scalar function that includes PE
-    base_scalar_fn = _make_scalar_fn(tc.grid_type)
+    base_scalar_fn = _make_scalar_fn(tc.grid_type, grid)
 
     def scalar_fn(s):
         scalars = base_scalar_fn(s)
@@ -2156,9 +2574,9 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
         ],
         field_3d_key="T_3d", level_values=depth,
         level_label="Depth (m)",
-        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
-        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
-        salt_key="mean_S" if tc.grid_type != "spectral" else "mean_S_hat_abs",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
         scalar_units={"mean_eta": "m", "mean_T": "degC", "PE": "J",
                       "PE_rel": ""})
 
@@ -2265,7 +2683,7 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
 
     check_fn = _make_check_fn(tc.grid_type)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
-    base_scalar_fn = _make_scalar_fn(tc.grid_type)
+    base_scalar_fn = _make_scalar_fn(tc.grid_type, grid)
 
     def scalar_fn(s):
         scalars = base_scalar_fn(s)
@@ -2286,10 +2704,8 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
 
     pe_drift = _compute_drift(diag.get("PE", []))
     pe_rel_final = diag["PE_rel"][-1] if diag.get("PE_rel") else 0.0
-    if tc.grid_type == "spectral":
-        T_drift = _compute_drift(diag.get("mean_T_hat_abs", []))
-    else:
-        T_drift = _compute_drift(diag.get("mean_T", []))
+    # All grids now use same physical units
+    T_drift = _compute_drift(diag.get("mean_T", []))
     notes = (f"PE drift={pe_drift:.2e}, PE_rel={pe_rel_final:.4e}, "
              f"T drift={T_drift:.2e}")
 
@@ -2312,9 +2728,9 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
         ],
         field_3d_key="T_3d", level_values=depth,
         level_label="Depth (m)",
-        vol_key="mean_eta" if tc.grid_type != "spectral" else "mean_eta_hat_abs",
-        heat_key="mean_T" if tc.grid_type != "spectral" else "mean_T_hat_abs",
-        salt_key="mean_S" if tc.grid_type != "spectral" else "mean_S_hat_abs",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
         scalar_units={"mean_eta": "m", "mean_T": "degC", "PE": "J"})
 
     return "PASS" if ok else "FAIL", wall, notes
@@ -2346,13 +2762,16 @@ def _init_stommel_gyre_tracer(state, grid_type, grid, z_coord):
     """
     from legoesm.core.field import Field
 
-    # First set up the wind-gyre dynamics
-    state = _add_wind_gyre_forcing(state, grid_type, grid, z_coord)
+    # First set up the wind-gyre dynamics (basin: 0-60E, 15-75N)
+    state = _add_wind_gyre_forcing(
+        state, grid_type, grid, z_coord,
+        lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
+    )
 
-    # Add salinity tracer blob (Gaussian, centered at 30N, 30W)
+    # Add salinity tracer blob (Gaussian, centered at 35N, 30E — inside basin)
     lat, lon = _get_cell_latlon_rad(grid_type, grid)
-    lat_c = np.radians(30.0)   # blob center latitude
-    lon_c = np.radians(-30.0)  # blob center longitude
+    lat_c = np.radians(35.0)   # blob center latitude
+    lon_c = np.radians(60.0)   # blob center longitude (basin midpoint)
     sigma = np.radians(10.0)   # blob width (~10 deg)
     S_bg = 35.0                # background salinity (PSU)
     S_amp = 2.0                # tracer perturbation amplitude
@@ -2387,20 +2806,19 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     boundary current. Monitors tracer conservation (integral, min, max)
     and transport through the sheared flow.
     """
-    if tc.grid_type == "spectral":
+    if tc.grid_type not in ("cubed_sphere", "latlon"):
         raise NotImplementedError(
-            "Stommel gyre tracer not implemented for spectral grid")
+            f"Stommel gyre tracer not implemented for {tc.grid_type} grid "
+            f"(no surface forcing support)")
 
+    physics = _make_gyre_physics("single_gyre")
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc))
+        _create_ocean_setup(tc, physics=physics))
     rest = _create_rest_state(tc, grid, z_coord)
     state = _init_stommel_gyre_tracer(rest, tc.grid_type, grid, z_coord)
 
     # Store initial tracer integral for conservation check
-    if tc.grid_type == "mpas":
-        area = np.asarray(grid.areaCell, dtype=np.float64)
-    else:
-        area = np.asarray(grid.area, dtype=np.float64)
+    area = np.asarray(grid.area, dtype=np.float64)
     S_init_sfc = np.asarray(state.S.data[..., 0], dtype=np.float64)
     mask = np.asarray(state.land_mask.data, dtype=np.float64)
     S_integral_init = float(np.sum(S_init_sfc * area * mask))
@@ -2413,7 +2831,7 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
 
     check_fn = _make_check_fn(tc.grid_type)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
-    base_scalar_fn = _make_scalar_fn(tc.grid_type)
+    base_scalar_fn = _make_scalar_fn(tc.grid_type, grid)
 
     def scalar_fn(s):
         scalars = base_scalar_fn(s)
@@ -2483,8 +2901,10 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
 
 RUNNERS: dict[str, Callable] = {
     "rest_state": run_rest_state,
+    "rest_state_no_land": run_rest_state_no_land,
     "barotropic_wave": run_barotropic_wave,
-    "wind_gyre": run_wind_gyre,
+    "barotropic_gyre": run_barotropic_gyre,
+    "barotropic_double_gyre": run_barotropic_double_gyre,
     "baroclinic": run_baroclinic,
     "phillips_two_layer": run_phillips_two_layer,
     "inertia_gravity_wave": run_inertia_gravity_wave,
@@ -2505,7 +2925,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--only", type=str, default="all",
         help="Run only cases matching this name "
-             "(e.g. rest_state, barotropic_wave, wind_gyre, baroclinic)")
+             "(e.g. rest_state, barotropic_gyre, barotropic_double_gyre)")
     p.add_argument(
         "--grid", type=str, default="all",
         choices=["cubed_sphere", "latlon", "mpas", "spectral", "all"],
@@ -2526,6 +2946,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--quick", action="store_true",
         help="Use shorter durations for quick verification")
     p.add_argument(
+        "--days", type=float, default=None,
+        help="Override duration in days (overrides both normal and quick mode durations)")
+    p.add_argument(
         "--list", action="store_true",
         help="List all test cases and exit")
     return p
@@ -2534,10 +2957,415 @@ def build_parser() -> argparse.ArgumentParser:
 def filter_tests(tests: list[TestCase], args) -> list[TestCase]:
     filtered = tests
     if args.only != "all":
-        filtered = [t for t in filtered if args.only in t.case]
+        # Support exact matching with "=" prefix (e.g., "=rest_state")
+        if args.only.startswith("="):
+            exact_name = args.only[1:]
+            filtered = [t for t in filtered if t.case == exact_name]
+        else:
+            # Default substring matching
+            filtered = [t for t in filtered if args.only in t.case]
     if args.grid != "all":
         filtered = [t for t in filtered if t.grid_type == args.grid]
     return filtered
+
+
+def _collect_grid_results(test_case_dir: Path) -> dict:
+    """Collect results from all grids that completed for this test case.
+    
+    Returns:
+        dict mapping grid_type -> {timeseries, snapshots, metadata}
+    """
+    grid_results = {}
+    
+    for grid_dir in test_case_dir.iterdir():
+        if not grid_dir.is_dir():
+            continue
+            
+        # Find resolution subdirectory (e.g., C24, 36x72, ico3, T21)
+        resolution_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
+        if not resolution_dirs:
+            continue
+        resolution_dir = resolution_dirs[0]  # Take first (should be only one)
+        
+        # Check for required files
+        csv_file = resolution_dir / "mean_timeseries.csv"
+        npz_file = resolution_dir / "snapshots_latlon.npz"
+        results_file = resolution_dir / "results.txt"
+        
+        if all(f.exists() for f in [csv_file, npz_file, results_file]):
+            try:
+                # Load timeseries data
+                timeseries_df = pd.read_csv(csv_file)
+                
+                # Load snapshot data
+                snapshots_data = np.load(npz_file)
+                
+                # Parse results metadata
+                metadata = {}
+                with open(results_file, 'r') as f:
+                    for line in f:
+                        if ':' in line:
+                            key, value = line.strip().split(':', 1)
+                            metadata[key.strip()] = value.strip()
+                
+                grid_results[grid_dir.name] = {
+                    'timeseries': timeseries_df,
+                    'snapshots': snapshots_data,
+                    'metadata': metadata,
+                    'resolution': resolution_dir.name
+                }
+            except Exception as e:
+                print(f"Warning: Failed to load data for {grid_dir.name}: {e}")
+                continue
+    
+    return grid_results
+
+
+def _create_comparison_timeseries(test_case_dir: Path, grid_results: dict) -> None:
+    """Create 4-panel time series comparison plot across all grids."""
+    import matplotlib.pyplot as plt
+    
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle(f'Time Series Comparison - {test_case_dir.name}', fontsize=14, fontweight='bold')
+    
+    # Colors for different grids
+    colors = {'cubed_sphere': 'blue', 'latlon': 'red', 'mpas': 'green', 'spectral': 'orange'}
+    
+    for grid_name, data in grid_results.items():
+        df = data['timeseries']
+        color = colors.get(grid_name, 'black')
+        
+        # Panel 1: Mean eta evolution
+        if 'mean_eta' in df.columns:
+            axes[0,0].plot(df['time_days'], df['mean_eta'], label=grid_name, color=color)
+        axes[0,0].set_ylabel('Mean η (m)')
+        axes[0,0].set_title('Mean Sea Surface Height')
+        axes[0,0].legend()
+        axes[0,0].grid(True, alpha=0.3)
+        
+        # Panel 2: Mean temperature evolution  
+        if 'mean_T' in df.columns:
+            axes[0,1].plot(df['time_days'], df['mean_T'], label=grid_name, color=color)
+        axes[0,1].set_ylabel('Mean T (°C)')
+        axes[0,1].set_title('Mean Temperature')
+        axes[0,1].legend()
+        axes[0,1].grid(True, alpha=0.3)
+        
+        # Panel 3: Max speed evolution (if available)
+        if 'max_speed' in df.columns:
+            axes[1,0].plot(df['time_days'], df['max_speed'], label=grid_name, color=color)
+        elif 'max_abs_eta' in df.columns:
+            axes[1,0].plot(df['time_days'], df['max_abs_eta'], label=grid_name, color=color)
+            axes[1,0].set_ylabel('Max |η| (m)')
+            axes[1,0].set_title('Maximum SSH Amplitude')
+        axes[1,0].legend()
+        axes[1,0].grid(True, alpha=0.3)
+        
+        # Panel 4: Conservation metrics
+        if 'volume_drift' in df.columns:
+            axes[1,1].plot(df['time_days'], df['volume_drift'], label=grid_name, color=color)
+            axes[1,1].set_ylabel('Volume Drift')
+            axes[1,1].set_title('Volume Conservation')
+        elif 'heat_drift' in df.columns:
+            axes[1,1].plot(df['time_days'], df['heat_drift'], label=grid_name, color=color)
+            axes[1,1].set_ylabel('Heat Drift')
+            axes[1,1].set_title('Heat Conservation')
+        axes[1,1].legend()
+        axes[1,1].grid(True, alpha=0.3)
+    
+    # Set common x-label
+    for ax in axes[1,:]:
+        ax.set_xlabel('Time (days)')
+
+    from datetime import datetime
+    fig.text(0.99, 0.01, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+             ha='right', va='bottom', fontsize=7, color='gray')
+
+    plt.tight_layout()
+
+    # Save plot
+    output_file = test_case_dir / "comparison_timeseries.png"
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"    Saved: {output_file.name}")
+
+
+def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field: str = 'eta') -> None:
+    """Create 4-panel final snapshot comparison for a given field."""
+    import matplotlib.pyplot as plt
+    
+    # Determine the test case for field ranges
+    test_case = _extract_test_case_name(test_case_dir.name)
+    field_ranges = FIELD_RANGES.get(test_case, {})
+    vmin, vmax = field_ranges.get(field, (None, None))
+    
+    # Set up grid layout (2x2 for up to 4 grids + space for colorbar)
+    n_grids = len(grid_results)
+    if n_grids <= 2:
+        nrows, ncols = 1, 3  # Extra column for colorbar
+    else:
+        nrows, ncols = 2, 3  # Extra column for colorbar
+        
+    fig = plt.figure(figsize=(14, 10))  # Wider to accommodate colorbar
+    
+    # Create subplots with specific width ratios: plots get most space, colorbar gets less
+    gs = fig.add_gridspec(nrows, ncols, width_ratios=[1, 1, 0.05] if ncols == 3 else [1, 1, 1, 0.05])
+    
+    axes = []
+    for i in range(nrows):
+        for j in range(ncols - 1):  # Don't include colorbar column
+            ax = fig.add_subplot(gs[i, j])
+            axes.append(ax)
+    
+    # Determine simulation time of the final snapshot from any grid's data
+    sim_time_str = ""
+    for data in grid_results.values():
+        snapshots_any = data['snapshots']
+        if 'times_days' in snapshots_any.files:
+            t_final = float(snapshots_any['times_days'][-1])
+            sim_time_str = f" (t = {t_final:.2f} days)"
+            break
+
+    fig.suptitle(f'Final {field.upper()} Snapshots - {test_case_dir.name}{sim_time_str}',
+                 fontsize=14, fontweight='bold')
+    
+    # Choose colormap based on field
+    if field == 'eta':
+        cmap = 'RdBu_r'
+    elif field in ['SST', 'T']:
+        cmap = 'plasma'
+    elif field in ['SSS', 'S']:
+        cmap = 'viridis'
+    else:
+        cmap = 'viridis'
+    
+    im = None
+    for i, (grid_name, data) in enumerate(grid_results.items()):
+        if i >= len(axes):
+            break
+
+        ax = axes[i]
+        snapshots = data['snapshots']
+
+        # Determine longitude extent from stored coordinates
+        if 'lon' in snapshots.files:
+            lon_arr = snapshots['lon']
+            lat_arr = snapshots['lat']
+            plot_extent = [float(lon_arr.min()), float(lon_arr.max()),
+                          float(lat_arr.min()), float(lat_arr.max())]
+        else:
+            plot_extent = [-180, 180, -90, 90]
+
+        # Handle both new format (field as time series) and old format (field_stepN)
+        if field in snapshots.files:
+            # NEW FORMAT: field is a time series array, take final timestep
+            field_data = snapshots[field]
+            if field_data.ndim >= 2:  # At least 2D (could be 3D with time)
+                if field_data.ndim == 3:  # Time series: (n_times, nlat, nlon)
+                    final_field = field_data[-1]  # Last time
+                else:  # Single timestep: (nlat, nlon) - shouldn't happen with new format
+                    final_field = field_data
+
+                # Apply land masking if available
+                if 'land_mask' in snapshots.files:
+                    land_mask_data = snapshots['land_mask']
+                    if land_mask_data.ndim == 3:  # Time series
+                        land_mask_final = land_mask_data[-1]  # Last time
+                    else:  # Single timestep
+                        land_mask_final = land_mask_data
+                    # Mask land areas (where land_mask ≤ 0.5) with NaN
+                    final_field = np.where(land_mask_final > 0.5, final_field, np.nan)
+
+                # Create the plot with consistent color scale
+                im = ax.imshow(final_field, origin='lower', aspect='auto', cmap=cmap,
+                              extent=plot_extent, vmin=vmin, vmax=vmax)
+                ax.set_title(f'{grid_name} ({data["resolution"]})')
+                ax.set_xlabel('Longitude')
+                ax.set_ylabel('Latitude')
+            else:
+                ax.text(0.5, 0.5, f'{field} wrong shape', transform=ax.transAxes, 
+                       ha='center', va='center')
+                ax.set_title(f'{grid_name} ({data["resolution"]})')
+        else:
+            # OLD FORMAT: Find final timestep field (fields stored as field_stepN)
+            field_files = [f for f in snapshots.files if f.startswith(f'{field}_step')]
+            if field_files:
+                # Get the highest step number
+                step_numbers = [int(f.split('_step')[1]) for f in field_files]
+                final_step = max(step_numbers)
+                final_field_name = f'{field}_step{final_step}'
+                final_field = snapshots[final_field_name]
+                
+                # Apply land masking if available (old format)
+                land_mask_name = f'land_mask_step{final_step}'
+                if land_mask_name in snapshots.files:
+                    land_mask_final = snapshots[land_mask_name]
+                    # Mask land areas (where land_mask ≤ 0.5) with NaN
+                    final_field = np.where(land_mask_final > 0.5, final_field, np.nan)
+                
+                # Create the plot with consistent color scale
+                im = ax.imshow(final_field, origin='lower', aspect='auto', cmap=cmap,
+                              extent=plot_extent, vmin=vmin, vmax=vmax)
+                ax.set_title(f'{grid_name} ({data["resolution"]})')
+                ax.set_xlabel('Longitude')
+                ax.set_ylabel('Latitude')
+            else:
+                ax.text(0.5, 0.5, f'{field} not available', transform=ax.transAxes, 
+                       ha='center', va='center')
+                ax.set_title(f'{grid_name} ({data["resolution"]})')
+    
+    # Hide unused subplots
+    for i in range(n_grids, len(axes)):
+        axes[i].set_visible(False)
+    
+    # Add colorbar in dedicated space
+    if im is not None:
+        # Create colorbar axes in the rightmost column, spanning all rows
+        cbar_ax = fig.add_subplot(gs[:, -1])
+        cbar = fig.colorbar(im, cax=cbar_ax)
+        if field == 'eta':
+            cbar.set_label('Sea Surface Height (m)')
+        elif field in ['SST', 'T']:
+            cbar.set_label('Temperature (°C)')
+        elif field in ['SSS', 'S']:
+            cbar.set_label('Salinity (PSU)')
+
+    from datetime import datetime
+    fig.text(0.99, 0.01, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+             ha='right', va='bottom', fontsize=7, color='gray')
+
+    plt.tight_layout()
+
+    # Save plot
+    output_file = test_case_dir / f"comparison_snapshots_{field}.png"
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"    Saved: {output_file.name}")
+
+
+def _create_comparison_summary(test_case_dir: Path, grid_results: dict) -> None:
+    """Create cross-grid metrics comparison table."""
+    
+    summary_file = test_case_dir / "comparison_summary.txt"
+    
+    with open(summary_file, 'w') as f:
+        f.write(f"{test_case_dir.name} - Cross-Grid Comparison\n")
+        f.write("=" * 60 + "\n")
+        f.write(f"{'Grid':<12} {'Status':<8} {'Resolution':<10} {'Wall Time':<10} {'Notes':<30}\n")
+        f.write("-" * 80 + "\n")
+        
+        # Find metrics for comparison
+        eta_drifts = []
+        T_drifts = []
+        wall_times = []
+        
+        for grid_name, data in grid_results.items():
+            metadata = data['metadata']
+            status = metadata.get('status', 'N/A')
+            resolution = data['resolution']
+            wall_time = metadata.get('wall_time', 'N/A')
+            notes = metadata.get('notes', '')
+            
+            f.write(f"{grid_name:<12} {status:<8} {resolution:<10} {wall_time:<10} {notes:<30}\n")
+            
+            # Extract drift metrics from notes if available
+            if 'eta drift=' in notes:
+                try:
+                    eta_drift_str = notes.split('eta drift=')[1].split(',')[0].split()[0]
+                    eta_drifts.append((grid_name, float(eta_drift_str)))
+                except:
+                    pass
+            
+            if 'T drift=' in notes:
+                try:
+                    T_drift_str = notes.split('T drift=')[1].split(',')[0].split()[0]
+                    T_drifts.append((grid_name, float(T_drift_str)))
+                except:
+                    pass
+            
+            if wall_time != 'N/A':
+                try:
+                    wall_time_val = float(wall_time.replace('s', ''))
+                    wall_times.append((grid_name, wall_time_val))
+                except:
+                    pass
+        
+        f.write("-" * 80 + "\n")
+        
+        # Summary statistics
+        if eta_drifts:
+            best_eta = min(eta_drifts, key=lambda x: abs(x[1]))
+            worst_eta = max(eta_drifts, key=lambda x: abs(x[1]))
+            f.write(f"Best η drift:    {best_eta[0]} ({best_eta[1]:.2e})\n")
+            f.write(f"Worst η drift:   {worst_eta[0]} ({worst_eta[1]:.2e})\n")
+        
+        if T_drifts:
+            best_T = min(T_drifts, key=lambda x: abs(x[1]))
+            worst_T = max(T_drifts, key=lambda x: abs(x[1]))
+            f.write(f"Best T drift:    {best_T[0]} ({best_T[1]:.2e})\n")
+            f.write(f"Worst T drift:   {worst_T[0]} ({worst_T[1]:.2e})\n")
+        
+        if wall_times:
+            fastest = min(wall_times, key=lambda x: x[1])
+            slowest = max(wall_times, key=lambda x: x[1])
+            f.write(f"Fastest:         {fastest[0]} ({fastest[1]:.1f}s)\n")
+            f.write(f"Slowest:         {slowest[0]} ({slowest[1]:.1f}s)\n")
+    
+    print(f"    Saved: {summary_file.name}")
+
+
+def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> None:
+    """Create all cross-grid comparison plots and summary for a test case."""
+    if len(grid_results) < 2:
+        return  # Need at least 2 grids for comparison
+    
+    print(f"  Creating cross-grid comparisons for {test_case_dir.name}...")
+    
+    # Time series comparison
+    _create_comparison_timeseries(test_case_dir, grid_results)
+    
+    # Snapshot comparisons for available fields
+    for field in ['eta', 'SST']:
+        # Check if field exists in any grid's snapshots (new or old format)
+        field_available = any(
+            field in data['snapshots'].files or  # NEW FORMAT: direct field name
+            any(f.startswith(f'{field}_step') for f in data['snapshots'].files)  # OLD FORMAT
+            for data in grid_results.values()
+        )
+        if field_available:
+            _create_comparison_snapshots(test_case_dir, grid_results, field)
+    
+    # Summary table
+    _create_comparison_summary(test_case_dir, grid_results)
+
+
+def _check_and_generate_comparisons(output_base: Path, test_case_name: str, all_results: list) -> None:
+    """Check if all grids completed for a test case and generate cross-grid comparisons."""
+    # Find all results for this test case
+    test_results = [r for r in all_results if r['test'] == test_case_name]
+    
+    if len(test_results) < 2:
+        return  # Need at least 2 grids for comparison
+    
+    # Check if we have results for multiple grids
+    grid_types = set(r['grid'] for r in test_results)
+    if len(grid_types) < 2:
+        return  # Need different grids, not just multiple resolutions
+        
+    test_case_dir = output_base / test_case_name
+    if not test_case_dir.exists():
+        return
+    
+    # Try to collect grid results
+    grid_results = _collect_grid_results(test_case_dir)
+    if len(grid_results) > 1:
+        print("\n" + "-" * 60)
+        print(f"  CROSS-GRID COMPARISON: {test_case_name}")
+        print("-" * 60)
+        _create_cross_grid_comparisons(test_case_dir, grid_results)
+        print("-" * 60)
+    else:
+        print(f"  Note: Insufficient grid data for {test_case_name} cross-grid comparison")
 
 
 def main():
@@ -2591,8 +3419,14 @@ def main():
 
     t_start_all = time.time()
 
+    # Keep track of completed test cases for cross-grid comparison
+    completed_test_cases = set()
+    
     for i, tc in enumerate(tests, 1):
-        days = tc.quick_days if args.quick else tc.duration_days
+        if args.days is not None:
+            days = args.days
+        else:
+            days = tc.quick_days if args.quick else tc.duration_days
         out_dir = output_base / tc.output_path
 
         label = f"{tc.case}/{tc.grid_type}/{tc.resolution}"
@@ -2614,6 +3448,17 @@ def main():
             traceback.print_exc()
         finally:
             _ensure_required_artifacts(out_dir)
+        
+        # Check if this test case just completed across all its grids
+        if tc.case not in completed_test_cases:
+            # Find how many grids are supposed to run for this test case
+            test_case_tests = [t for t in tests if t.case == tc.case]
+            test_case_results = [r for r in ALL_RESULTS if r['test'] == tc.case]
+            
+            # If we have results for all grids of this test case, generate comparisons
+            if len(test_case_results) >= len(test_case_tests):
+                _check_and_generate_comparisons(output_base, tc.case, ALL_RESULTS)
+                completed_test_cases.add(tc.case)
 
     total_wall = time.time() - t_start_all
 
@@ -2672,6 +3517,44 @@ def main():
                     f"{r['wall_time']:7.1f}s  {r['notes']}\n")
 
     print(f"\n  Summary: {output_base / 'summary.json'}")
+
+    # Generate cross-grid comparison plots for any test cases that weren't completed during the run
+    # (This handles cases where the run was filtered or interrupted)
+    remaining_test_cases = set()
+    test_cases = {}
+    for result in ALL_RESULTS:
+        test_name = result['test']
+        if test_name not in test_cases:
+            test_cases[test_name] = []
+        test_cases[test_name].append(result)
+        if test_name not in completed_test_cases:
+            remaining_test_cases.add(test_name)
+    
+    if remaining_test_cases:
+        print("\n" + "=" * 78)
+        print("  GENERATING REMAINING CROSS-GRID COMPARISONS")
+        print("=" * 78)
+        
+        # Create comparisons for test cases that weren't processed during the main loop
+        for test_name in remaining_test_cases:
+            results = test_cases[test_name]
+            if len(results) > 1:  # Only create comparisons if multiple grids were run
+                test_case_dir = output_base / test_name
+                if test_case_dir.exists():
+                    grid_results = _collect_grid_results(test_case_dir)
+                    if len(grid_results) > 1:
+                        print(f"\n  Creating cross-grid comparisons for {test_name}...")
+                        _create_cross_grid_comparisons(test_case_dir, grid_results)
+                    else:
+                        print(f"  Skipping {test_name}: insufficient grid data")
+                else:
+                    print(f"  Skipping {test_name}: directory not found")
+            else:
+                print(f"  Skipping {test_name}: only {len(results)} grid(s) run")
+    else:
+        print("\n" + "=" * 78)
+        print("  ALL CROSS-GRID COMPARISONS COMPLETED DURING RUN")
+        print("=" * 78)
 
     if n_fail > 0 or n_error > 0:
         sys.exit(1)

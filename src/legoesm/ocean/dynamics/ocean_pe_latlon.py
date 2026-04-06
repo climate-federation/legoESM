@@ -184,9 +184,9 @@ def latlon_ocean_baroclinic_tendencies(
         dtr_dt = fv_scalar_advection_latlon_3d(tr, u * mask_3d, v * mask_3d, grid)
         dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
 
+        if config.K_h > 0:
+            dtr_dt = dtr_dt + config.K_h * laplacian_latlon(tr, grid, mask=mask)
         if physics_fn is None:
-            if config.K_h > 0:
-                dtr_dt = dtr_dt + config.K_h * laplacian_latlon(tr, grid, mask=mask)
             if config.K_v > 0:
                 # J is horizontal-only (n_lat, n_lon) — broadcasts with
                 # vertical arrays via the trailing newaxis.
@@ -211,38 +211,39 @@ def latlon_ocean_baroclinic_tendencies(
     dT_dt = tracer_tend[0]
     dS_dt = tracer_tend[1]
 
-    # --- 10. Mixing ---
-    if physics_fn is None:
-        if config.A_h > 0:
-            du_dt = du_dt + config.A_h * laplacian_latlon(u * mask_3d, grid, mask=mask)
-            dv_dt = dv_dt + config.A_h * laplacian_latlon(v * mask_3d, grid, mask=mask)
-        if config.A_v > 0:
-            jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
-            for vel, dvel_dt_ref in [(u, "u"), (v, "v")]:
-                dv_dz_half = jnp.diff(vel, axis=-1) / (
-                    z_coord.dz_half_ref * jac_v
-                )
-                flux = config.A_v * dv_dz_half
-                zeros_face = jnp.zeros((*vel.shape[:-1], 1), dtype=vel.dtype)
-                flux_full = jnp.concatenate([zeros_face, flux, zeros_face], axis=-1)
-                vdiff = (flux_full[..., :-1] - flux_full[..., 1:]) / (
-                    z_coord.dz_ref * jac_v
-                )
-                if dvel_dt_ref == "u":
-                    du_dt = du_dt + vdiff
-                else:
-                    dv_dt = dv_dt + vdiff
+    # --- 10. Mixing (always applied from config, grid-native operators) ---
+    if config.A_h > 0:
+        du_dt = du_dt + config.A_h * laplacian_latlon(u * mask_3d, grid, mask=mask)
+        dv_dt = dv_dt + config.A_h * laplacian_latlon(v * mask_3d, grid, mask=mask)
+    if config.A_v > 0:
+        jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
+        for vel, dvel_dt_ref in [(u, "u"), (v, "v")]:
+            dv_dz_half = jnp.diff(vel, axis=-1) / (
+                z_coord.dz_half_ref * jac_v
+            )
+            flux = config.A_v * dv_dz_half
+            zeros_face = jnp.zeros((*vel.shape[:-1], 1), dtype=vel.dtype)
+            flux_full = jnp.concatenate([zeros_face, flux, zeros_face], axis=-1)
+            vdiff = (flux_full[..., :-1] - flux_full[..., 1:]) / (
+                z_coord.dz_ref * jac_v
+            )
+            if dvel_dt_ref == "u":
+                du_dt = du_dt + vdiff
+            else:
+                dv_dt = dv_dt + vdiff
 
-        if config.hyperdiff_coeff > 0:
-            lap_u = laplacian_latlon(u * mask_3d, grid, mask=mask) * mask_3d
-            lap_v = laplacian_latlon(v * mask_3d, grid, mask=mask) * mask_3d
-            du_dt = du_dt - config.hyperdiff_coeff * laplacian_latlon(
-                lap_u, grid, mask=mask,
-            )
-            dv_dt = dv_dt - config.hyperdiff_coeff * laplacian_latlon(
-                lap_v, grid, mask=mask,
-            )
-    else:
+    if config.hyperdiff_coeff > 0:
+        lap_u = laplacian_latlon(u * mask_3d, grid, mask=mask) * mask_3d
+        lap_v = laplacian_latlon(v * mask_3d, grid, mask=mask) * mask_3d
+        du_dt = du_dt - config.hyperdiff_coeff * laplacian_latlon(
+            lap_u, grid, mask=mask,
+        )
+        dv_dt = dv_dt - config.hyperdiff_coeff * laplacian_latlon(
+            lap_v, grid, mask=mask,
+        )
+
+    # --- 10b. Physics tendencies (surface forcing, bottom drag, etc.) ---
+    if physics_fn is not None:
         phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
         dv_dt = dv_dt + phys.dv_dt.data
