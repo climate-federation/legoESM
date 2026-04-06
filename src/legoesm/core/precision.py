@@ -156,7 +156,11 @@ _ACTIVE_POLICY: list[PrecisionPolicy] = [PrecisionPolicy.fp32()]
 def set_policy(policy: PrecisionPolicy) -> None:
     """Set the active global precision policy.
 
-    Also enables JAX x64 if any dtype is float64.
+    Also enables JAX x64 if any dtype is float64.  On backends that
+    lack float64 hardware (e.g. Apple Metal), x64 is still enabled
+    because spectral solvers route computation to CPU and need float64
+    there.  ``_resolve_dtype`` handles clamping float64 → float32 for
+    non-spectral code that runs on the default (Metal) device.
     """
     _ACTIVE_POLICY[0] = policy
     if jnp.float64 in (policy.storage, policy.compute,
@@ -173,17 +177,28 @@ def get_policy() -> PrecisionPolicy:
 def validate_policy(policy: PrecisionPolicy | None = None) -> None:
     """Verify the active precision policy is actually achievable.
 
+    On backends that lack float64 (e.g. Metal), float64 requests in the
+    policy are silently clamped to float32 by ``_resolve_dtype``, so the
+    policy is always achievable — this function is a no-op in that case.
+
     Raises
     ------
     RuntimeError
-        If the policy requires float64 but JAX x64 mode is not enabled.
+        If the policy requires float64, the backend supports it, but
+        JAX x64 mode is not enabled.
     """
     if policy is None:
         policy = get_policy()
     needs_x64 = jnp.float64 in (
         policy.storage, policy.compute, policy.accumulate, policy.control,
     )
-    if needs_x64 and not jax.config.jax_enable_x64:
+    if not needs_x64:
+        return
+    from legoesm.runtime.backend import supports_float64
+    if not supports_float64():
+        # Backend cannot do float64; _resolve_dtype will clamp to float32.
+        return
+    if not jax.config.jax_enable_x64:
         raise RuntimeError(
             "Precision policy requires float64 but JAX x64 mode is not enabled. "
             "Set JAX_ENABLE_X64=1 or call jax.config.update('jax_enable_x64', True) "
@@ -237,20 +252,36 @@ def get_module_overrides() -> dict[str, dict[str, str | None]]:
     return {k: dict(v) for k, v in _MODULE_OVERRIDES.items()}
 
 
+def _clamp_to_backend(dtype: jnp.dtype) -> jnp.dtype:
+    """Clamp *dtype* to what the current backend actually supports.
+
+    On backends that lack float64 (e.g. Apple Metal) or when JAX x64
+    mode is disabled, float64 is silently downgraded to float32 so that
+    the precision policy never requests an impossible dtype.
+    """
+    if dtype == jnp.float64:
+        from legoesm.runtime.backend import supports_float64, is_x64_enabled
+        if not (supports_float64() and is_x64_enabled()):
+            return jnp.float32
+    return dtype
+
+
 def _resolve_dtype(module: str | None, role: str) -> jnp.dtype:
     """Resolve the effective dtype for a (module, role) pair.
 
     Priority: module override > global policy > fallback to float32.
+    The result is clamped to what the backend supports (float64 is
+    downgraded to float32 on Metal or when x64 is disabled).
     """
     # Check module-level override first.
     if module is not None and module in _MODULE_OVERRIDES:
         overrides = _MODULE_OVERRIDES[module]
         if role in overrides:
-            return overrides[role]
+            return _clamp_to_backend(overrides[role])
 
     # Fall back to global policy.
     policy = get_policy()
-    return getattr(policy, role, jnp.float32)
+    return _clamp_to_backend(getattr(policy, role, jnp.float32))
 
 
 # ---------------------------------------------------------------------------

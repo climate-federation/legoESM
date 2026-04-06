@@ -364,11 +364,14 @@ def build_segment_fn(
     _C_E = jnp.asarray(C_E) if C_E is not None else None
     _albedo_ice = jnp.asarray(albedo_ice) if albedo_ice is not None else None
     _albedo_ocean = jnp.asarray(albedo_ocean) if albedo_ocean is not None else None
-    # GHG VMR needs float64 for spectral accuracy in radiation.
+    # GHG VMR: prefer float64 for spectral accuracy in radiation,
+    # but fall back to float32 on backends that lack float64 (Metal).
+    from legoesm.core.precision import _clamp_to_backend
+    _ghg_dtype = _clamp_to_backend(jnp.float64)
     _ghg_vmr_override = None
     if ghg_vmr_override is not None:
         _ghg_vmr_override = {
-            k: jnp.float64(v) for k, v in ghg_vmr_override.items()
+            k: jnp.array(v, dtype=_ghg_dtype) for k, v in ghg_vmr_override.items()
         }
 
     # Build owned-face mask for MPI replicated dynamics.

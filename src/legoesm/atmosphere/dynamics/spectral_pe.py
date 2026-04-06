@@ -662,21 +662,6 @@ class SpectralPrimitiveEquationModel:
         self._sponge_dt = None
         # Leapfrog state management
         self._state_prev = None  # Previous time level for leapfrog
-        # Precompute spectral filter (time-independent)
-        self._spectral_filter = None
-        if self.config.spectral_filter_strength > 0:
-            self._spectral_filter = _compute_spectral_filter(
-                grid.ls if not self._use_cpu_for_spectral else self.grid.ls,
-                grid.n_max if not self._use_cpu_for_spectral else self.grid.n_max,
-                order=self.config.spectral_filter_order,
-                cutoff_fraction=self.config.spectral_filter_strength,
-            )
-
-        if self.config.si_substeps < 1:
-            raise ValueError(
-                f"si_substeps must be >= 1, got {self.config.si_substeps!r}",
-            )
-
         # Precompute implicit hyperdiffusion filter (unconditionally stable)
         self._hyperdiff_filter = None
         self._hyperdiff_filter_dt = None
@@ -688,6 +673,7 @@ class SpectralPrimitiveEquationModel:
                 )
             )
 
+        # --- Metal detection MUST happen before any float64 computation ---
         from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
@@ -699,6 +685,22 @@ class SpectralPrimitiveEquationModel:
             self.grid = grid
             check_spectral_backend(
                 allow_unsupported=allow_unsupported_backend,
+            )
+
+        # Precompute spectral filter (time-independent) — uses self.grid
+        # which is now on CPU when Metal is active.
+        self._spectral_filter = None
+        if self.config.spectral_filter_strength > 0:
+            self._spectral_filter = _compute_spectral_filter(
+                self.grid.ls,
+                self.grid.n_max,
+                order=self.config.spectral_filter_order,
+                cutoff_fraction=self.config.spectral_filter_strength,
+            )
+
+        if self.config.si_substeps < 1:
+            raise ValueError(
+                f"si_substeps must be >= 1, got {self.config.si_substeps!r}",
             )
 
     def _ensure_si_data(self, dt: float):
