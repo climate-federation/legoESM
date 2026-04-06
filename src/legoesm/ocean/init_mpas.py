@@ -114,6 +114,77 @@ def rest_state_mpas_ocean(
     )
 
 
+def wind_driven_gyre_mpas(
+    mesh: VoronoiMesh,
+    z_coord: OceanZStarCoordinate,
+    H_max: float = 5500.0,
+    lon_west: float = 0.0,
+    lon_east: float = 120.0,
+    lat_south: float = 15.0,
+    lat_north: float = 75.0,
+    T_uniform: float = 10.0,
+    S_uniform: float = 35.0,
+) -> MPASOceanState:
+    """Create initial condition for a wind-driven barotropic gyre on MPAS.
+
+    Uniform T and S inside a rectangular basin. Purely barotropic setup.
+    Wind forcing is applied during integration via the MPAS physics pipeline.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+    z_coord : OceanZStarCoordinate
+    H_max : float
+        Maximum ocean depth [m].
+    lon_west, lon_east : float
+        Basin longitude bounds [degrees].
+    lat_south, lat_north : float
+        Basin latitude bounds [degrees].
+    T_uniform : float
+        Uniform temperature [degC].
+    S_uniform : float
+        Uniform salinity [PSU].
+
+    Returns
+    -------
+    MPASOceanState
+    """
+    nCells = mesh.nCells
+    nEdges = mesh.nEdges
+    nlev = z_coord.n_levels
+    dtype = get_policy().storage
+
+    # Basin land mask: ocean inside rectangle, land outside
+    lon_deg = jnp.degrees(mesh.lonCell)  # (nCells,)
+    lat_deg = jnp.degrees(mesh.latCell)  # (nCells,)
+    in_basin = (
+        (lon_deg >= lon_west) & (lon_deg <= lon_east) &
+        (lat_deg >= lat_south) & (lat_deg <= lat_north)
+    )
+    land_mask = jnp.where(in_basin, 1.0, 0.0).astype(dtype)
+
+    # Uniform depth everywhere (smooth Jacobian at coastlines)
+    H_bathy = jnp.full(nCells, H_max, dtype=dtype)
+
+    # Uniform T and S
+    T_data = jnp.full((nCells, nlev), T_uniform, dtype=dtype)
+    S_data = jnp.full((nCells, nlev), S_uniform, dtype=dtype)
+
+    # Zero velocity and SSH
+    u_data = jnp.zeros((nEdges, nlev), dtype=dtype)
+    eta_data = jnp.zeros(nCells, dtype=dtype)
+
+    return MPASOceanState(
+        u=Field(data=u_data, name="u", dims=("nEdges", "nlev"), units="m/s",
+                staggering="edge"),
+        T=Field(data=T_data, name="T", dims=("nCells", "nlev"), units="degC"),
+        S=Field(data=S_data, name="S", dims=("nCells", "nlev"), units="PSU"),
+        eta=Field(data=eta_data, name="eta", dims=("nCells",), units="m"),
+        H_bathy=Field(data=H_bathy, name="H_bathy", dims=("nCells",), units="m"),
+        land_mask=Field(data=land_mask, name="land_mask", dims=("nCells",), units="1"),
+    )
+
+
 def reconstruct_cell_velocity(u_edge, mesh):
     """Reconstruct (u_east, v_north) at cell centers from edge normals.
 

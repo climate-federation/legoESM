@@ -55,6 +55,8 @@ def mpas_ocean_baroclinic_tendencies(
     z_coord: OceanZStarCoordinate,
     config: MPASOceanConfig = MPASOceanConfig(),
     freshwater: FreshwaterForcing | None = None,
+    physics_fn=None,
+    surface_forcing=None,
 ) -> MPASOceanTendencies:
     """Compute baroclinic (slow) tendencies for MPAS ocean.
 
@@ -256,6 +258,13 @@ def mpas_ocean_baroclinic_tendencies(
         S_3d, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
         mesh=mesh,
     ) * mask[:, jnp.newaxis]
+
+    # ---- Physics (surface forcing, bottom drag, etc.) ----
+    if physics_fn is not None:
+        phys = physics_fn(state, mesh, z_coord, surface_forcing)
+        du_dt_3d = du_dt_3d + phys.du_dt.data
+        dT_dt_3d = dT_dt_3d + phys.dT_dt.data
+        dS_dt_3d = dS_dt_3d + phys.dS_dt.data
 
     # ---- Free surface tendency ----
     # deta/dt = -sum_k div(u_k * h_e_k)
