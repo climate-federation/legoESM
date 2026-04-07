@@ -545,6 +545,9 @@ def held_suarez_init_mpas(
     MPASHydrostaticState
     """
     from legoesm.core.state import MPASHydrostaticState
+    from legoesm.core.precision import get_policy
+
+    _dtype = get_policy().storage
 
     nCells = mesh.nCells
     nEdges = mesh.nEdges
