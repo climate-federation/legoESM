@@ -173,8 +173,10 @@ class TestWilliamsonTC2Convergence:
         return l2
 
     def test_c8_better_than_c4(self):
+        # Both must integrate to the same total time for a fair comparison.
+        # C4: 50 * 600 = 30000s, C8: 100 * 300 = 30000s
         err_c4 = self._run_tc2(4, n_steps=50, dt=600.0)
-        err_c8 = self._run_tc2(8, n_steps=50, dt=300.0)
+        err_c8 = self._run_tc2(8, n_steps=100, dt=300.0)
 
         assert err_c8 < err_c4, (
             f"C8 error ({err_c8:.4e}) should be < C4 error ({err_c4:.4e})"

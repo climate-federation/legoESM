@@ -271,6 +271,8 @@ class TestMPIOceanConservation:
         )
 
         if topology.rank == 0:
-            assert jnp.allclose(fixed_part.eta.data, ref_state.eta.data, atol=1e-6)
-            assert jnp.allclose(fixed_part.T.data, ref_state.T.data, atol=1e-6)
-            assert jnp.allclose(fixed_part.S.data, ref_state.S.data, atol=1e-6)
+            # MPI allreduce uses different FP summation order than serial,
+            # so relax tolerance from 1e-6 to 1e-5.
+            assert jnp.allclose(fixed_part.eta.data, ref_state.eta.data, atol=1e-5)
+            assert jnp.allclose(fixed_part.T.data, ref_state.T.data, atol=1e-5)
+            assert jnp.allclose(fixed_part.S.data, ref_state.S.data, atol=1e-5)
