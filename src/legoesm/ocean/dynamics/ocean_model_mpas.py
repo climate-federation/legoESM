@@ -106,9 +106,25 @@ class MPASOceanModel:
         T_new = state.T.data + dt * tend.dT_dt.data
         S_new = state.S.data + dt * tend.dS_dt.data
 
-        # Mask land
-        T_new = T_new * mask[:, jnp.newaxis]
-        S_new = S_new * mask[:, jnp.newaxis]
+        # Fill land cells with ocean-neighbor average (Neumann BC) so that
+        # subsequent operators see smooth values at coastlines instead of
+        # the sharp ocean-to-zero discontinuity that `* mask` would create.
+        c1_m = mesh.cellsOnEdge[0]
+        c2_m = mesh.cellsOnEdge[1]
+        m1 = mask[c1_m, jnp.newaxis]
+        m2 = mask[c2_m, jnp.newaxis]
+        nbr_sum = jnp.zeros_like(T_new).at[c1_m].add(T_new[c2_m] * m2)
+        nbr_sum = nbr_sum.at[c2_m].add(T_new[c1_m] * m1)
+        nbr_cnt = jnp.zeros_like(T_new).at[c1_m].add(m2)
+        nbr_cnt = nbr_cnt.at[c2_m].add(m1)
+        nbr_avg_T = nbr_sum / jnp.maximum(nbr_cnt, 1.0)
+        mask_e = mask[:, jnp.newaxis]
+        T_new = jnp.where(mask_e > 0.5, T_new, nbr_avg_T)
+
+        nbr_sum_S = jnp.zeros_like(S_new).at[c1_m].add(S_new[c2_m] * m2)
+        nbr_sum_S = nbr_sum_S.at[c2_m].add(S_new[c1_m] * m1)
+        nbr_avg_S = nbr_sum_S / jnp.maximum(nbr_cnt, 1.0)
+        S_new = jnp.where(mask_e > 0.5, S_new, nbr_avg_S)
 
         # 3. Update 3D velocity with baroclinic tendency
         u_baro = state.u.data + dt * tend.du_dt.data
