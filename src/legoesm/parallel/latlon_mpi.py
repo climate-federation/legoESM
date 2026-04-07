@@ -259,10 +259,19 @@ def scatter_state_latlon(
     layout: LatLonBandLayout,
 ) -> HydrostaticState:
     """Extract rank-local state from a global HydrostaticState."""
-    return jax.tree.map(
-        lambda f: f._replace(data=scatter_latlon(f.data, layout))
-        if hasattr(f, 'data') else f,
-        global_state,
+    dims_3d = ("lat", "lon", "level")
+    dims_2d = ("lat", "lon")
+    return HydrostaticState(
+        u=Field(data=scatter_latlon(global_state.u.data, layout),
+                name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=scatter_latlon(global_state.v.data, layout),
+                name="v", dims=dims_3d, units="m/s"),
+        T=Field(data=scatter_latlon(global_state.T.data, layout),
+                name="T", dims=dims_3d, units="K"),
+        p_s=Field(data=scatter_latlon(global_state.p_s.data, layout),
+                  name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(data=scatter_latlon(global_state.phis.data, layout),
+                   name="phis", dims=dims_2d, units="m^2/s^2"),
     )
 
 
@@ -292,10 +301,19 @@ def gather_state_latlon(
     layout: LatLonBandLayout,
 ) -> HydrostaticState:
     """Reconstruct global HydrostaticState from rank-local data."""
-    return jax.tree.map(
-        lambda f: f._replace(data=gather_latlon(f.data, layout))
-        if hasattr(f, 'data') else f,
-        local_state,
+    dims_3d = ("lat", "lon", "level")
+    dims_2d = ("lat", "lon")
+    return HydrostaticState(
+        u=Field(data=gather_latlon(local_state.u.data, layout),
+                name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=gather_latlon(local_state.v.data, layout),
+                name="v", dims=dims_3d, units="m/s"),
+        T=Field(data=gather_latlon(local_state.T.data, layout),
+                name="T", dims=dims_3d, units="K"),
+        p_s=Field(data=gather_latlon(local_state.p_s.data, layout),
+                  name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(data=gather_latlon(local_state.phis.data, layout),
+                   name="phis", dims=dims_2d, units="m^2/s^2"),
     )
 
 

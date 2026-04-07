@@ -143,13 +143,13 @@ def scatter_state_voronoi(
     u is edge-centered; T, p_s, phis are cell-centered.
     """
     return MPASHydrostaticState(
-        u=global_state.u._replace(
+        u=global_state.u.replace(
             data=scatter_to_local(global_state.u.data, partition, "edge")),
-        T=global_state.T._replace(
+        T=global_state.T.replace(
             data=scatter_to_local(global_state.T.data, partition, "cell")),
-        p_s=global_state.p_s._replace(
+        p_s=global_state.p_s.replace(
             data=scatter_to_local(global_state.p_s.data, partition, "cell")),
-        phis=global_state.phis._replace(
+        phis=global_state.phis.replace(
             data=scatter_to_local(global_state.phis.data, partition, "cell")),
     )
 
@@ -205,13 +205,13 @@ def gather_state_voronoi(
 ) -> MPASHydrostaticState:
     """Reconstruct global MPASHydrostaticState from rank-local data."""
     return MPASHydrostaticState(
-        u=local_state.u._replace(
+        u=local_state.u.replace(
             data=gather_voronoi_field(local_state.u.data, partition, "edge")),
-        T=local_state.T._replace(
+        T=local_state.T.replace(
             data=gather_voronoi_field(local_state.T.data, partition, "cell")),
-        p_s=local_state.p_s._replace(
+        p_s=local_state.p_s.replace(
             data=gather_voronoi_field(local_state.p_s.data, partition, "cell")),
-        phis=local_state.phis._replace(
+        phis=local_state.phis.replace(
             data=gather_voronoi_field(local_state.phis.data, partition, "cell")),
     )
 
@@ -246,7 +246,7 @@ def _fix_mass_mpi(
     )
 
     correction = (mass_old - mass_new) / total_area
-    p_s_fixed = state_new.p_s._replace(
+    p_s_fixed = state_new.p_s.replace(
         data=state_new.p_s.data + correction)
     return state_new._replace(p_s=p_s_fixed)
 
@@ -345,10 +345,10 @@ def make_voronoi_mpi_step(
         phis_ex = halo_ex.exchange_cell_field(state.phis.data)
 
         return MPASHydrostaticState(
-            u=state.u._replace(data=u_ex),
-            T=state.T._replace(data=T_ex),
-            p_s=state.p_s._replace(data=ps_ex),
-            phis=state.phis._replace(data=phis_ex),
+            u=state.u.replace(data=u_ex),
+            T=state.T.replace(data=T_ex),
+            p_s=state.p_s.replace(data=ps_ex),
+            phis=state.phis.replace(data=phis_ex),
         )
 
     def _mpi_tendency_fn(state: MPASHydrostaticState) -> MPASHydrostaticState:
@@ -358,10 +358,10 @@ def make_voronoi_mpi_step(
             state_ex, local_mesh, sigma_coord, config,
         )
         return MPASHydrostaticState(
-            u=state.u._replace(data=tend.du_dt.data),
-            T=state.T._replace(data=tend.dT_dt.data),
-            p_s=state.p_s._replace(data=tend.dp_s_dt.data),
-            phis=state.phis._replace(data=jnp.zeros_like(state.phis.data)),
+            u=state.u.replace(data=tend.du_dt.data),
+            T=state.T.replace(data=tend.dT_dt.data),
+            p_s=state.p_s.replace(data=tend.dp_s_dt.data),
+            phis=state.phis.replace(data=jnp.zeros_like(state.phis.data)),
         )
 
     @jax.jit
@@ -374,7 +374,7 @@ def make_voronoi_mpi_step(
         if config.T_min > 0:
             T_clipped = jnp.maximum(state_new.T.data, config.T_min)
             state_new = state_new._replace(
-                T=state_new.T._replace(data=T_clipped))
+                T=state_new.T.replace(data=T_clipped))
 
         # Global mass fixer
         if config.fix_mass:
