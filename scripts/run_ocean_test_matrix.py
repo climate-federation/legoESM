@@ -171,6 +171,38 @@ FIELD_RANGES = {
     },
 }
 
+# Rest-state variant configuration for cross-case comparisons
+REST_STATE_VARIANTS = [
+    "rest_state",
+    "rest_state_no_land",
+    "rest_state_uniform_ts",
+    "rest_state_uniform_ts_no_land",
+]
+
+REST_STATE_LABELS = {
+    "rest_state":                    "Stratified + Land",
+    "rest_state_no_land":            "Stratified, No Land",
+    "rest_state_uniform_ts":         "Uniform T/S + Land",
+    "rest_state_uniform_ts_no_land": "Uniform T/S, No Land",
+}
+
+REST_STATE_COLORS = {
+    "rest_state":                    "red",
+    "rest_state_no_land":            "blue",
+    "rest_state_uniform_ts":         "orange",
+    "rest_state_uniform_ts_no_land": "green",
+}
+
+
+def _case_output_base(output_base: Path, case_name: str) -> Path:
+    """Return the base output directory for a test case.
+
+    Rest-state variants are grouped under ``rest_state_comparison/``.
+    """
+    if case_name in REST_STATE_VARIANTS:
+        return output_base / "rest_state_comparison" / case_name
+    return output_base / case_name
+
 
 # ===========================================================================
 # TestCase dataclass
@@ -691,19 +723,32 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
         axes = np.atleast_2d(axes)
         im = None
 
+        # Pre-compute shared color scale across all snapshot panels
+        all_regridded = []
+        for step in steps:
+            raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
+            reg = _regrid_2d(raw, lon_deg, lat_deg, coord_kind)
+            if "land_mask" in snapshots[step]:
+                lm_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+                lm_reg = _regrid_2d(lm_raw, lon_deg, lat_deg, coord_kind)
+                reg = np.where(lm_reg > 0.5, reg, np.nan)
+            all_regridded.append(reg)
+
+        # Use FIELD_RANGES if available, otherwise compute from data
+        if field_key in field_ranges:
+            vmin, vmax = field_ranges[field_key]
+        else:
+            vmin = np.nanmin([np.nanmin(r) for r in all_regridded])
+            vmax = np.nanmax([np.nanmax(r) for r in all_regridded])
+            if vmin == vmax:
+                vmin -= 0.1
+                vmax += 0.1
+
         for idx, step in enumerate(steps):
             r, c = divmod(idx, n_cols)
             ax = axes[r, c]
-            raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
-            regridded = _regrid_2d(raw, lon_deg, lat_deg, coord_kind)
-            
-            # Apply land masking if land_mask is available
-            if "land_mask" in snapshots[step]:
-                land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
-                land_mask_regridded = _regrid_2d(land_mask_raw, lon_deg, lat_deg, coord_kind)
-                # Mask land areas (where land_mask ≤ 0.5) with NaN
-                regridded = np.where(land_mask_regridded > 0.5, regridded, np.nan)
-            
+            regridded = all_regridded[idx]
+
             # Compute extent from actual coordinates
             if coord_kind in ("latlon", "gaussian"):
                 lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
@@ -713,10 +758,10 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
             else:
                 lon_ext = [-180, 180]
                 lat_ext = [-90, 90]
-            # Individual grid plots use auto-scaling for maximum detail
             im = ax.imshow(
                 regridded, origin="lower", aspect="auto", cmap=cmap,
-                extent=[lon_ext[0], lon_ext[1], lat_ext[0], lat_ext[1]])
+                extent=[lon_ext[0], lon_ext[1], lat_ext[0], lat_ext[1]],
+                vmin=vmin, vmax=vmax)
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             if c == 0:
@@ -821,24 +866,34 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             axes_arr = [axes_arr]
         im = None
 
-        for ax, step in zip(axes_arr, valid_steps):
+        # Pre-compute all cross-sections to determine shared color scale
+        all_sections = []
+        all_bin_centers = []
+        for step in valid_steps:
             f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
-            
-            # Apply land masking to 3D field before cross-section if available
             if "land_mask" in snapshots[step]:
                 land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
-                land_mask_3d = land_mask_raw[..., np.newaxis]  # Expand to 3D
+                land_mask_3d = land_mask_raw[..., np.newaxis]
                 f3d = np.where(land_mask_3d > 0.5, f3d, np.nan)
-            
             section, bin_centers = _bin_cross_section(
                 f3d, lon_deg, lat_deg, coord_kind, mean_axis)
             section = _fill_nan_section(section)
-            
-            # Individual grid plots use auto-scaling for maximum detail
+            all_sections.append(section)
+            all_bin_centers.append(bin_centers)
+
+        cs_vmin = np.nanmin([np.nanmin(s) for s in all_sections])
+        cs_vmax = np.nanmax([np.nanmax(s) for s in all_sections])
+        if cs_vmin == cs_vmax:
+            cs_vmin -= 0.1
+            cs_vmax += 0.1
+
+        for ax, step, section, bin_centers in zip(
+                axes_arr, valid_steps, all_sections, all_bin_centers):
             im = ax.imshow(
                 section.T, origin="upper", aspect="auto", cmap="RdBu_r",
                 extent=[bin_centers[0], bin_centers[-1],
-                        float(levels[-1]), float(levels[0])])
+                        float(levels[-1]), float(levels[0])],
+                vmin=cs_vmin, vmax=cs_vmax)
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             ax.set_xlabel(xlabel)
@@ -3300,7 +3355,29 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
     test_case = _extract_test_case_name(test_case_dir.name)
     field_ranges = FIELD_RANGES.get(test_case, {})
     vmin, vmax = field_ranges.get(field, (None, None))
-    
+
+    # If FIELD_RANGES not available, compute from the data
+    if vmin is None or vmax is None:
+        all_vals = []
+        for data in grid_results.values():
+            snap = data['snapshots']
+            if field in snap.files:
+                fd = snap[field]
+                if fd.ndim == 3:
+                    fd = fd[-1]
+                if 'land_mask' in snap.files:
+                    lm = snap['land_mask']
+                    if lm.ndim == 3:
+                        lm = lm[-1]
+                    fd = np.where(lm > 0.5, fd, np.nan)
+                all_vals.append(fd)
+        if all_vals:
+            vmin = np.nanmin([np.nanmin(v) for v in all_vals])
+            vmax = np.nanmax([np.nanmax(v) for v in all_vals])
+    if vmin is not None and vmax is not None and vmin == vmax:
+        vmin -= 0.1
+        vmax += 0.1
+
     # Set up grid layout (2x2 for up to 4 grids + space for colorbar)
     n_grids = len(grid_results)
     if n_grids <= 2:
@@ -3554,10 +3631,10 @@ def _check_and_generate_comparisons(output_base: Path, test_case_name: str, all_
     if len(grid_types) < 2:
         return  # Need different grids, not just multiple resolutions
         
-    test_case_dir = output_base / test_case_name
+    test_case_dir = _case_output_base(output_base, test_case_name)
     if not test_case_dir.exists():
         return
-    
+
     # Try to collect grid results
     grid_results = _collect_grid_results(test_case_dir)
     if len(grid_results) > 1:
@@ -3568,6 +3645,407 @@ def _check_and_generate_comparisons(output_base: Path, test_case_name: str, all_
         print("-" * 60)
     else:
         print(f"  Note: Insufficient grid data for {test_case_name} cross-grid comparison")
+
+
+# ===========================================================================
+# Cross-case comparison (rest-state variants)
+# ===========================================================================
+
+
+def _collect_case_results(comparison_dir: Path, grid_type: str) -> dict:
+    """Collect results from all rest-state variants for one grid type.
+
+    Scans ``comparison_dir/{case}/{grid_type}/{resolution}/`` for each
+    rest-state variant and loads the CSV, NPZ, and metadata.
+
+    Returns:
+        dict mapping case_name -> {timeseries, snapshots, metadata, resolution}
+    """
+    case_results: dict = {}
+
+    for case_name in REST_STATE_VARIANTS:
+        case_dir = comparison_dir / case_name
+        if not case_dir.is_dir():
+            continue
+
+        grid_dir = case_dir / grid_type
+        if not grid_dir.is_dir():
+            continue
+
+        resolution_dirs = [d for d in grid_dir.iterdir() if d.is_dir()]
+        if not resolution_dirs:
+            continue
+        resolution_dir = resolution_dirs[0]
+
+        csv_file = resolution_dir / "mean_timeseries.csv"
+        npz_file = resolution_dir / "snapshots_latlon.npz"
+        results_file = resolution_dir / "results.txt"
+
+        if all(f.exists() for f in [csv_file, npz_file, results_file]):
+            try:
+                timeseries_df = pd.read_csv(csv_file)
+                snapshots_data = np.load(npz_file)
+                metadata: dict = {}
+                with open(results_file, "r") as fh:
+                    for line in fh:
+                        if ":" in line:
+                            key, value = line.strip().split(":", 1)
+                            metadata[key.strip()] = value.strip()
+                case_results[case_name] = {
+                    "timeseries": timeseries_df,
+                    "snapshots": snapshots_data,
+                    "metadata": metadata,
+                    "resolution": resolution_dir.name,
+                }
+            except Exception as e:
+                print(f"Warning: Failed to load data for {case_name}/{grid_type}: {e}")
+                continue
+
+    return case_results
+
+
+def _create_cross_case_timeseries(
+    comparison_dir: Path, case_results: dict, grid_type: str
+) -> None:
+    """Create 4-panel time series comparing rest-state variants for one grid."""
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle(
+        f"Rest-State Variant Comparison \u2014 {grid_type}",
+        fontsize=14, fontweight="bold",
+    )
+
+    for case_name, data in case_results.items():
+        df = data["timeseries"]
+        color = REST_STATE_COLORS.get(case_name, "black")
+        label = REST_STATE_LABELS.get(case_name, case_name)
+
+        # Panel 1: Mean eta
+        if "mean_eta" in df.columns:
+            axes[0, 0].plot(df["time_days"], df["mean_eta"], label=label, color=color)
+        axes[0, 0].set_ylabel("Mean \u03b7 (m)")
+        axes[0, 0].set_title("Mean Sea Surface Height")
+
+        # Panel 2: Max |eta|
+        if "max_abs_eta" in df.columns:
+            axes[0, 1].plot(df["time_days"], df["max_abs_eta"], label=label, color=color)
+        axes[0, 1].set_ylabel("Max |\u03b7| (m)")
+        axes[0, 1].set_title("Maximum SSH Amplitude")
+
+        # Panel 3: Mean T
+        if "mean_T" in df.columns:
+            axes[1, 0].plot(df["time_days"], df["mean_T"], label=label, color=color)
+        axes[1, 0].set_ylabel("Mean T (\u00b0C)")
+        axes[1, 0].set_title("Mean Temperature")
+
+        # Panel 4: Mean S
+        if "mean_S" in df.columns:
+            axes[1, 1].plot(df["time_days"], df["mean_S"], label=label, color=color)
+        axes[1, 1].set_ylabel("Mean S (PSU)")
+        axes[1, 1].set_title("Mean Salinity")
+
+    for ax in axes.flat:
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+    for ax in axes[1, :]:
+        ax.set_xlabel("Time (days)")
+
+    from datetime import datetime
+
+    fig.text(
+        0.99, 0.01,
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ha="right", va="bottom", fontsize=7, color="gray",
+    )
+    plt.tight_layout()
+
+    output_file = comparison_dir / f"cross_case_timeseries_{grid_type}.png"
+    plt.savefig(output_file, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"    Saved: {output_file.name}")
+
+
+def _create_cross_case_snapshots(
+    comparison_dir: Path, case_results: dict, grid_type: str,
+    field: str = "eta",
+) -> None:
+    """Create 2x2 final snapshot comparison across rest-state variants.
+
+    Uses a shared color scale derived from the data so amplitudes are
+    directly comparable.
+    """
+    n_cases = len(case_results)
+    nrows = 2 if n_cases > 2 else 1
+    ncols_plot = 2 if n_cases > 2 else n_cases
+
+    fig = plt.figure(figsize=(14, 10 if nrows == 2 else 6))
+    gs = fig.add_gridspec(
+        nrows, ncols_plot + 1,
+        width_ratios=[1] * ncols_plot + [0.05],
+    )
+
+    axes = []
+    for i in range(nrows):
+        for j in range(ncols_plot):
+            axes.append(fig.add_subplot(gs[i, j]))
+
+    # Determine simulation time from any variant
+    sim_time_str = ""
+    for data in case_results.values():
+        snap = data["snapshots"]
+        if "times_days" in snap.files:
+            t_final = float(snap["times_days"][-1])
+            sim_time_str = f" (t = {t_final:.2f} days)"
+            break
+
+    fig.suptitle(
+        f"Final {field.upper()} \u2014 Rest-State Variants on {grid_type}{sim_time_str}",
+        fontsize=14, fontweight="bold",
+    )
+
+    cmap = "RdBu_r" if field == "eta" else "viridis"
+
+    # First pass: collect data to determine shared color scale
+    all_fields = []
+    for case_name, data in case_results.items():
+        snap = data["snapshots"]
+        if field in snap.files:
+            fd = snap[field]
+            if fd.ndim == 3:
+                fd = fd[-1]
+            if "land_mask" in snap.files:
+                lm = snap["land_mask"]
+                if lm.ndim == 3:
+                    lm = lm[-1]
+                fd = np.where(lm > 0.5, fd, np.nan)
+            all_fields.append(fd)
+
+    if all_fields:
+        global_min = np.nanmin([np.nanmin(f) for f in all_fields])
+        global_max = np.nanmax([np.nanmax(f) for f in all_fields])
+        if field == "eta":
+            abs_max = max(abs(global_min), abs(global_max))
+            if abs_max == 0:
+                abs_max = 0.1
+            vmin, vmax = -abs_max, abs_max
+        else:
+            vmin, vmax = global_min, global_max
+            if vmin == vmax:
+                vmin -= 0.1
+                vmax += 0.1
+    else:
+        vmin, vmax = None, None
+
+    # Second pass: plot
+    im = None
+    for idx, (case_name, data) in enumerate(case_results.items()):
+        if idx >= len(axes):
+            break
+        ax = axes[idx]
+        snap = data["snapshots"]
+
+        if "lon" in snap.files:
+            lon_arr, lat_arr = snap["lon"], snap["lat"]
+            extent = [float(lon_arr.min()), float(lon_arr.max()),
+                      float(lat_arr.min()), float(lat_arr.max())]
+        else:
+            extent = [-180, 180, -90, 90]
+
+        if field in snap.files:
+            fd = snap[field]
+            if fd.ndim == 3:
+                fd = fd[-1]
+            if "land_mask" in snap.files:
+                lm = snap["land_mask"]
+                if lm.ndim == 3:
+                    lm = lm[-1]
+                fd = np.where(lm > 0.5, fd, np.nan)
+
+            im = ax.imshow(
+                fd, origin="lower", aspect="auto", cmap=cmap,
+                extent=extent, vmin=vmin, vmax=vmax,
+            )
+        else:
+            ax.text(0.5, 0.5, f"{field} not available",
+                    transform=ax.transAxes, ha="center", va="center")
+
+        label = REST_STATE_LABELS.get(case_name, case_name)
+        ax.set_title(f"{label} ({data['resolution']})")
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+
+    for idx in range(n_cases, len(axes)):
+        axes[idx].set_visible(False)
+
+    if im is not None:
+        cbar_ax = fig.add_subplot(gs[:, -1])
+        cbar = fig.colorbar(im, cax=cbar_ax)
+        if field == "eta":
+            cbar.set_label("Sea Surface Height (m)")
+        elif field in ("SST", "T"):
+            cbar.set_label("Temperature (\u00b0C)")
+
+    from datetime import datetime
+
+    fig.text(
+        0.99, 0.01,
+        f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        ha="right", va="bottom", fontsize=7, color="gray",
+    )
+    plt.tight_layout()
+
+    output_file = comparison_dir / f"cross_case_snapshots_{field}_{grid_type}.png"
+    plt.savefig(output_file, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"    Saved: {output_file.name}")
+
+
+def _create_cross_case_summary(
+    comparison_dir: Path, all_case_results: dict[str, dict],
+) -> None:
+    """Create summary table of rest-state variant metrics across all grids.
+
+    ``all_case_results`` maps ``grid_type -> {case_name -> data_dict}``.
+    """
+    summary_file = comparison_dir / "cross_case_summary.txt"
+
+    with open(summary_file, "w") as f:
+        f.write("Rest-State Cross-Case Comparison\n")
+        f.write("=" * 80 + "\n\n")
+
+        # Per-grid tables
+        for grid_type, case_results in all_case_results.items():
+            f.write(f"Grid: {grid_type}\n")
+            f.write("-" * 80 + "\n")
+            f.write(
+                f"{'Variant':<30} {'Status':<8} {'Res':<8} "
+                f"{'Wall':>8}  {'eta drift':>12}  {'T drift':>12}\n"
+            )
+            f.write("-" * 80 + "\n")
+
+            eta_drifts: dict[str, float] = {}
+            T_drifts: dict[str, float] = {}
+
+            for case_name, data in case_results.items():
+                meta = data["metadata"]
+                status = meta.get("status", "N/A")
+                res = data["resolution"]
+                wall = meta.get("wall_time", "N/A")
+                notes = meta.get("notes", "")
+                label = REST_STATE_LABELS.get(case_name, case_name)
+
+                eta_str = "N/A"
+                T_str = "N/A"
+                if "eta drift=" in notes:
+                    try:
+                        val = notes.split("eta drift=")[1].split(",")[0].split()[0]
+                        eta_drifts[case_name] = float(val)
+                        eta_str = val
+                    except Exception:
+                        pass
+                if "T drift=" in notes:
+                    try:
+                        val = notes.split("T drift=")[1].split(",")[0].split()[0]
+                        T_drifts[case_name] = float(val)
+                        T_str = val
+                    except Exception:
+                        pass
+
+                f.write(
+                    f"{label:<30} {status:<8} {res:<8} "
+                    f"{wall:>8}  {eta_str:>12}  {T_str:>12}\n"
+                )
+
+            f.write("-" * 80 + "\n")
+
+            # Diagnostic decomposition (requires all 4 variants)
+            four = {
+                "rest_state", "rest_state_no_land",
+                "rest_state_uniform_ts", "rest_state_uniform_ts_no_land",
+            }
+            if four.issubset(eta_drifts.keys()):
+                land_effect = abs(eta_drifts["rest_state"]) - abs(eta_drifts["rest_state_no_land"])
+                strat_effect = abs(eta_drifts["rest_state"]) - abs(eta_drifts["rest_state_uniform_ts"])
+                interaction = (
+                    abs(eta_drifts["rest_state"])
+                    - abs(eta_drifts["rest_state_no_land"])
+                    - abs(eta_drifts["rest_state_uniform_ts"])
+                    + abs(eta_drifts["rest_state_uniform_ts_no_land"])
+                )
+                f.write(f"\n  Diagnostic decomposition (eta drift, |values|):\n")
+                f.write(f"    Land mask effect:     {land_effect:+.2e}\n")
+                f.write(f"    Stratification effect: {strat_effect:+.2e}\n")
+                f.write(f"    Interaction:          {interaction:+.2e}\n")
+
+            if four.issubset(T_drifts.keys()):
+                land_effect = abs(T_drifts["rest_state"]) - abs(T_drifts["rest_state_no_land"])
+                strat_effect = abs(T_drifts["rest_state"]) - abs(T_drifts["rest_state_uniform_ts"])
+                interaction = (
+                    abs(T_drifts["rest_state"])
+                    - abs(T_drifts["rest_state_no_land"])
+                    - abs(T_drifts["rest_state_uniform_ts"])
+                    + abs(T_drifts["rest_state_uniform_ts_no_land"])
+                )
+                f.write(f"\n  Diagnostic decomposition (T drift, |values|):\n")
+                f.write(f"    Land mask effect:     {land_effect:+.2e}\n")
+                f.write(f"    Stratification effect: {strat_effect:+.2e}\n")
+                f.write(f"    Interaction:          {interaction:+.2e}\n")
+
+            f.write("\n\n")
+
+    print(f"    Saved: {summary_file.name}")
+
+
+def _create_cross_case_comparisons(comparison_dir: Path, grid_type: str) -> None:
+    """Create all cross-case comparison outputs for rest-state variants on one grid."""
+    case_results = _collect_case_results(comparison_dir, grid_type)
+    if len(case_results) < 2:
+        print(f"  Skipping {grid_type}: fewer than 2 rest-state variants available")
+        return
+
+    _create_cross_case_timeseries(comparison_dir, case_results, grid_type)
+
+    # Snapshot comparison for eta (SST ranges incompatible across stratified vs uniform)
+    field_available = any(
+        "eta" in data["snapshots"].files
+        or any(fn.startswith("eta_step") for fn in data["snapshots"].files)
+        for data in case_results.values()
+    )
+    if field_available:
+        _create_cross_case_snapshots(comparison_dir, case_results, grid_type)
+
+    return case_results  # used by caller to build summary
+
+
+def _generate_all_cross_case_comparisons(
+    output_base: Path, all_results: list, completed_grids: set | None = None,
+) -> None:
+    """Generate cross-case comparisons for each grid that has multiple rest-state variants."""
+    comparison_dir = output_base / "rest_state_comparison"
+    if not comparison_dir.exists():
+        return
+
+    rest_results = [r for r in all_results if r["test"] in REST_STATE_VARIANTS]
+    all_case_results: dict[str, dict] = {}
+
+    for grid_type in GRID_TYPES:
+        grid_rest = [r for r in rest_results if r["grid"] == grid_type]
+        case_names = set(r["test"] for r in grid_rest)
+        if len(case_names) < 2:
+            continue
+
+        if completed_grids and grid_type in completed_grids:
+            # Already generated plots; just collect data for the summary
+            cr = _collect_case_results(comparison_dir, grid_type)
+            if cr and len(cr) >= 2:
+                all_case_results[grid_type] = cr
+        else:
+            print(f"\n  Cross-case comparison: rest-state variants on {grid_type}")
+            cr = _create_cross_case_comparisons(comparison_dir, grid_type)
+            if cr:
+                all_case_results[grid_type] = cr
+
+    if all_case_results:
+        _create_cross_case_summary(comparison_dir, all_case_results)
 
 
 def main():
@@ -3623,13 +4101,15 @@ def main():
 
     # Keep track of completed test cases for cross-grid comparison
     completed_test_cases = set()
-    
+    # Track grids for which cross-case rest-state comparisons are done
+    completed_cross_case_grids: set = set()
+
     for i, tc in enumerate(tests, 1):
         if args.days is not None:
             days = args.days
         else:
             days = tc.quick_days if args.quick else tc.duration_days
-        out_dir = output_base / tc.output_path
+        out_dir = _case_output_base(output_base, tc.case) / tc.grid_type / tc.resolution
 
         label = f"{tc.case}/{tc.grid_type}/{tc.resolution}"
         print(f"\n[{i}/{len(tests)}] {label} ({days:.4g} days)")
@@ -3650,17 +4130,32 @@ def main():
             traceback.print_exc()
         finally:
             _ensure_required_artifacts(out_dir)
-        
+
         # Check if this test case just completed across all its grids
         if tc.case not in completed_test_cases:
-            # Find how many grids are supposed to run for this test case
             test_case_tests = [t for t in tests if t.case == tc.case]
             test_case_results = [r for r in ALL_RESULTS if r['test'] == tc.case]
-            
-            # If we have results for all grids of this test case, generate comparisons
+
             if len(test_case_results) >= len(test_case_tests):
                 _check_and_generate_comparisons(output_base, tc.case, ALL_RESULTS)
                 completed_test_cases.add(tc.case)
+
+        # Incremental cross-case comparison for rest-state variants
+        if (tc.case in REST_STATE_VARIANTS
+                and tc.grid_type not in completed_cross_case_grids):
+            expected = [t for t in tests
+                        if t.case in REST_STATE_VARIANTS and t.grid_type == tc.grid_type]
+            done = [r for r in ALL_RESULTS
+                    if r["test"] in REST_STATE_VARIANTS and r["grid"] == tc.grid_type]
+            if len(done) >= len(expected):
+                comparison_dir = output_base / "rest_state_comparison"
+                comparison_dir.mkdir(parents=True, exist_ok=True)
+                print(f"\n  Cross-case comparison: rest-state variants on {tc.grid_type}")
+                cr = _create_cross_case_comparisons(comparison_dir, tc.grid_type)
+                if cr:
+                    # Collect for summary at the end
+                    pass
+                completed_cross_case_grids.add(tc.grid_type)
 
     total_wall = time.time() - t_start_all
 
@@ -3741,7 +4236,7 @@ def main():
         for test_name in remaining_test_cases:
             results = test_cases[test_name]
             if len(results) > 1:  # Only create comparisons if multiple grids were run
-                test_case_dir = output_base / test_name
+                test_case_dir = _case_output_base(output_base, test_name)
                 if test_case_dir.exists():
                     grid_results = _collect_grid_results(test_case_dir)
                     if len(grid_results) > 1:
@@ -3757,6 +4252,14 @@ def main():
         print("\n" + "=" * 78)
         print("  ALL CROSS-GRID COMPARISONS COMPLETED DURING RUN")
         print("=" * 78)
+
+    # --- Cross-case rest-state comparisons (end-of-run sweep) ---
+    print("\n" + "=" * 78)
+    print("  CROSS-CASE REST-STATE COMPARISONS")
+    print("=" * 78)
+    _generate_all_cross_case_comparisons(
+        output_base, ALL_RESULTS, completed_grids=completed_cross_case_grids,
+    )
 
     if n_fail > 0 or n_error > 0:
         sys.exit(1)

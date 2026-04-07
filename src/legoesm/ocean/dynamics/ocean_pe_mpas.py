@@ -191,7 +191,7 @@ def mpas_ocean_baroclinic_tendencies(
         du_dt_k = du_dt_k * edge_mask  # zero on land edges
 
         # ---- Thickness flux for continuity ----
-        thickness_flux_k = u_k * h_e  # (nEdges,)
+        thickness_flux_k = u_k * h_e * edge_mask  # (nEdges,) no-flux BC at coast
 
         # Continuity: dh_k/dt = -div(u * h_e)
         div_flux = divergence_cell(thickness_flux_k, mesh)  # (nCells,)
@@ -216,9 +216,9 @@ def mpas_ocean_baroclinic_tendencies(
 
         # Horizontal tracer diffusion: K_h * lap(T)
         # Approximate Laplacian as div(grad(T))
-        grad_T = gradient_edge(T_k, mesh)
+        grad_T = gradient_edge(T_k, mesh) * edge_mask
         dT_dt_k = dT_dt_k + config.K_h * divergence_cell(grad_T, mesh) / h_safe * h_k_level
-        grad_S = gradient_edge(S_k, mesh)
+        grad_S = gradient_edge(S_k, mesh) * edge_mask
         dS_dt_k = dS_dt_k + config.K_h * divergence_cell(grad_S, mesh) / h_safe * h_k_level
 
         # Mask land cells
