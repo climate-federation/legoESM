@@ -1186,7 +1186,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         dt = 300.0
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=_hyperdiff_cube(n),
-            div_damp=_div_damp_cube(n))
+            div_damp=_div_damp_cube(n),
+            boundary_fix=True)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
 
@@ -1501,7 +1502,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         dt = 1800.0
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=_hyperdiff_cube(n),
-            div_damp=_div_damp_cube(n))
+            div_damp=_div_damp_cube(n),
+            boundary_fix=True)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
         state = cosine_bell_cubesphere(grid, cdgrid, beta)
