@@ -391,6 +391,13 @@ def make_coupler(
             acc_closed = accumulate(sfc_state.accumulator, blended, dt_to_close)
             blended_out = mean_accumulator(acc_closed)
 
+            # Cast blended_out to match blended's leaf dtypes so both
+            # jax.lax.cond branches return the same types.
+            blended_out = jax.tree.map(
+                lambda a, b: a.astype(b.dtype) if hasattr(b, "dtype") else a,
+                blended_out, blended,
+            )
+
             dt_excess = jnp.maximum(dt_arr - dt_to_close, 0.0)
             acc_next = accumulator_from_flux(
                 blended,
