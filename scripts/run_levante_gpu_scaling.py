@@ -1321,14 +1321,21 @@ def run_weak_scaling(
             except Exception as exc:
                 print(f"    FAILED: {exc}", flush=True)
 
-    # Compute scaling efficiency relative to 1-GPU baseline
+    # Compute scaling efficiency relative to 1-GPU baseline.
+    # For icosahedral grids the subdivision level jumps by 4× in cell
+    # count, so cells/GPU is not constant across GPU counts.  Normalize
+    # by the cells/GPU ratio to avoid misleading efficiency numbers.
     for prec in precisions:
         prec_results = [r for r in results if r.precision == prec]
         baseline = next((r for r in prec_results if r.n_gpus == 1), None)
         if baseline is not None:
             for r in prec_results:
-                # Ideal weak scaling: time/step stays constant
-                r.scaling_efficiency = baseline.time_per_step_ms / r.time_per_step_ms
+                # Ideal weak scaling: constant throughput per cell per GPU.
+                # efficiency = (t1 / tN) * (cells_per_gpu_N / cells_per_gpu_1)
+                cell_ratio = r.cells_per_gpu / baseline.cells_per_gpu
+                r.scaling_efficiency = (
+                    baseline.time_per_step_ms / r.time_per_step_ms * cell_ratio
+                )
 
     return results
 
