@@ -193,14 +193,20 @@ def unpack_carry(carry, state_template):
 def compute_segment_length(
     diag_interval: int,
     checkpoint_interval: int,
-    rad_update_steps: int,
+    rad_update_steps: int = 0,
 ) -> int:
     """Compute the optimal segment length.
 
     The segment length is the GCD of all cadence intervals that require
-    host-side actions (diagnostics, checkpoints, radiation forcing
-    updates).  This ensures every cadence boundary falls on a segment
-    boundary.
+    host-side actions (diagnostics, checkpoints).  This ensures every
+    cadence boundary falls on a segment boundary.
+
+    ``rad_update_steps`` is intentionally **excluded** from the GCD
+    because radiation sub-cycling is handled inside the compiled scan
+    body via ``jnp.where`` / modulo — it does not require a host-side
+    segment boundary.  Including it collapses the segment length to 1
+    whenever ``rad_update_steps=1`` (the default), eliminating all
+    ``jax.lax.scan`` batching.
 
     Parameters
     ----------
@@ -209,14 +215,14 @@ def compute_segment_length(
     checkpoint_interval : int
         Steps between checkpoints (0 = disabled).
     rad_update_steps : int
-        Steps between radiation forcing refreshes.
+        Kept for API compatibility but not used in the GCD.
 
     Returns
     -------
     int
         Segment length in time steps.  Always >= 1.
     """
-    intervals = [i for i in [diag_interval, checkpoint_interval, rad_update_steps]
+    intervals = [i for i in [diag_interval, checkpoint_interval]
                  if i > 0]
     if not intervals:
         return 1

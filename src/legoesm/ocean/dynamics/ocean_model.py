@@ -83,6 +83,7 @@ class OceanModel:
         config: OceanConfig | None = None,
         discretization: str = "cdgrid",
         fc_config=None,
+        cdgrid=None,
     ):
         # Map legacy discretization names with deprecation warning
         if discretization in _LEGACY_DISCRETIZATION_MAP:
@@ -109,9 +110,13 @@ class OceanModel:
         self.discretization = "cdgrid"  # Only C-D grid supported
         self._validate_config(self.config)
 
-        # Build C-D grid
-        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        self._cdgrid = create_cubed_sphere_cdgrid(grid)
+        # Build C-D grid.  For single-face panels, pass a pre-built cdgrid
+        # via create_cubed_sphere_panel(return_cdgrid=True).
+        if cdgrid is not None:
+            self._cdgrid = cdgrid
+        else:
+            from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+            self._cdgrid = create_cubed_sphere_cdgrid(grid)
 
         # Build physics function if configured
         if self.config.physics is not None:

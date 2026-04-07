@@ -491,3 +491,112 @@ class TestCouplerIntegration:
         assert u_east.shape == (mesh.nCells,)
         assert v_north.shape == (mesh.nCells,)
         assert jnp.all(jnp.isfinite(u_east))
+
+
+# ============================================================================
+# Test: Surface Forcing Physics
+# ============================================================================
+
+class TestSurfaceForcing:
+    """Test MPAS ocean physics pipeline (surface forcing, bottom drag)."""
+
+    def test_physics_fn_creation(self):
+        """make_mpas_ocean_physics returns a callable."""
+        from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.surface_forcing.config import (
+            PrescribedForcingConfig, SurfaceForcingConfig,
+        )
+
+        config = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(
+                scheme="prescribed",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="single_gyre", tau_max=0.1),
+            ),
+        )
+        fn = make_mpas_ocean_physics(config)
+        assert callable(fn)
+
+    def test_prescribed_wind_produces_tendency(self, mesh, z_coord, state):
+        """Prescribed wind forcing produces nonzero edge-normal momentum tendency."""
+        from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.surface_forcing.config import (
+            PrescribedForcingConfig, SurfaceForcingConfig,
+        )
+
+        config = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(
+                scheme="prescribed",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="single_gyre", tau_max=0.1),
+            ),
+        )
+        fn = make_mpas_ocean_physics(config)
+        tend = fn(state, mesh, z_coord)
+
+        assert tend.du_dt.data.shape == state.u.data.shape
+        assert tend.dT_dt.data.shape == state.T.data.shape
+        assert tend.dS_dt.data.shape == state.T.data.shape
+        # Wind stress should produce nonzero top-layer momentum tendency
+        assert float(jnp.max(jnp.abs(tend.du_dt.data[:, 0]))) > 0
+        # Below top layer should be zero (no bottom drag)
+        assert float(jnp.max(jnp.abs(tend.du_dt.data[:, 1:]))) == 0.0
+
+    def test_bottom_drag_produces_tendency(self, mesh, z_coord):
+        """Linear bottom drag produces nonzero bottom-layer tendency."""
+        from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.bottom_drag.config import (
+            BottomDragConfig, LinearDragConfig,
+        )
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+
+        config = OceanPhysicsConfig(
+            bottom_drag=BottomDragConfig(
+                scheme="linear", linear=LinearDragConfig(r=1e-4)),
+        )
+        fn = make_mpas_ocean_physics(config)
+
+        # Create state with nonzero bottom velocity
+        s = rest_state_mpas_ocean(mesh, z_coord, H_max=500.0)
+        u_data = s.u.data.at[:, -1].set(1.0)
+        s = s._replace(u=s.u.replace(data=u_data))
+
+        tend = fn(s, mesh, z_coord)
+        # Bottom layer should have drag: du/dt = -r * u = -1e-4
+        assert float(jnp.max(jnp.abs(tend.du_dt.data[:, -1]))) > 0
+
+    def test_model_step_with_physics(self, mesh, z_coord):
+        """Full model step with physics produces circulation."""
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.surface_forcing.config import (
+            PrescribedForcingConfig, SurfaceForcingConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import (
+            BottomDragConfig, LinearDragConfig,
+        )
+        from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
+
+        physics = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(
+                scheme="prescribed",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="single_gyre", tau_max=0.1),
+            ),
+            bottom_drag=BottomDragConfig(
+                scheme="linear", linear=LinearDragConfig(r=1e-4)),
+        )
+        config = MPASOceanConfig(
+            n_barotropic_substeps=5, physics=physics, A_h=1e3)
+        model = MPASOceanModel(mesh, z_coord, config)
+
+        state = wind_driven_gyre_mpas(mesh, z_coord, H_max=500.0)
+        state_new = model.step(state, 60.0)
+
+        assert jnp.all(jnp.isfinite(state_new.u.data))
+        assert jnp.all(jnp.isfinite(state_new.T.data))
+        assert jnp.all(jnp.isfinite(state_new.eta.data))
+        # Wind stress should produce motion
+        assert float(jnp.max(jnp.abs(state_new.u.data))) > 0

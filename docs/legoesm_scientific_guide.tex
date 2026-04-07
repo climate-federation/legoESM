@@ -2277,6 +2277,9 @@ Volume: $\eta^{\mathrm{corr}}=\eta^{\mathrm{new}}
 +(\sum\eta_{\mathrm{old}}\,A-\sum\eta_{\mathrm{new}}\,A)/\sum A$.
 
 Heat and salt: uniform additive correction per unit volume.
+All three grids (cubed-sphere, lat-lon, MPAS) compute corrections simultaneously from the original pre-fix state and upcast to accumulation precision before global reductions.
+
+\textbf{Note:} These are uniform additive fixers that violate local conservation.  The proper solution is flux-form tracer advection with barotropic--baroclinic flux reconciliation.
 
 
 % #############################################################################

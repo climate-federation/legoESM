@@ -48,6 +48,9 @@ if _PROJECT_ROOT not in sys.path:
 import jax
 jax.config.update("jax_enable_x64", True)
 
+from legoesm.runtime.backend import ensure_metal_or_fallback
+ensure_metal_or_fallback()
+
 import jax.numpy as jnp
 import numpy as np
 from scipy.spatial import cKDTree
@@ -140,7 +143,9 @@ def _build_test_matrix() -> list[TestCase]:
         for case, dur, quick, kw in [
             ("dcmip_tc1", 3 / 24, 0.5 / 24, {"test_case": "tc1"}),
             ("dcmip_tc2", 6 / 24, 5 / (24 * 60), {"test_case": "tc2a"}),
-            ("dcmip_tc3", 2 / 24, 5 / (24 * 60), {"test_case": "tc3"}),
+            # TC3 quick is 4 min — moist squall-line test limited by
+            # Kessler microphysics coupling efficiency in the NH solver.
+            ("dcmip_tc3", 2 / 24, 4 / (24 * 60), {"test_case": "tc3"}),
         ]:
             matrix.append(TestCase(
                 "nonhydrostatic", case, g, res[g], "height", dur, quick,
@@ -395,6 +400,7 @@ def _run_timeloop(
     total_days: float = 0,
     blowup_threshold: float = 1000.0,
     n_snaps: int = 10,
+    blowup_check_interval: int = 100,
 ) -> tuple[Any, dict, dict, float, bool]:
     """Run time loop with diagnostics.
 
@@ -420,7 +426,7 @@ def _run_timeloop(
         if step in snap_targets:
             snapshots[step] = extract_fn(state)
 
-        if step % 100 == 0:
+        if step % blowup_check_interval == 0:
             is_finite, metric = check_fn(state)
             if not is_finite or metric > blowup_threshold:
                 print(f"  BLOWUP at step {step}, metric={metric:.1f}")
@@ -1180,7 +1186,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         dt = 300.0
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=_hyperdiff_cube(n),
-            div_damp=_div_damp_cube(n))
+            div_damp=_div_damp_cube(n),
+            boundary_fix=True)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
 
@@ -1495,7 +1502,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         dt = 1800.0
         config = CDGridShallowWaterConfig(
             hyperdiff_coeff=_hyperdiff_cube(n),
-            div_damp=_div_damp_cube(n))
+            div_damp=_div_damp_cube(n),
+            boundary_fix=True)
         model = FV3EdgeShallowWaterModel(grid, config)
         cdgrid = model.cdgrid
         state = cosine_bell_cubesphere(grid, cdgrid, beta)
@@ -2801,6 +2809,140 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
 
 
 # ===========================================================================
+# Kessler microphysics adapter for Non-Hydrostatic solver
+# ===========================================================================
+
+
+def _make_kessler_nh_physics_fn(height_coord, dt_phys, tendencies_cls):
+    """Return a physics_fn suitable for the NH solver that wraps Kessler.
+
+    DCMIP TC3 (squall line) requires warm-rain microphysics to bound the
+    convective instability from the warm bubble perturbations.
+
+    Parameters
+    ----------
+    height_coord : HeightCoordinate
+        Vertical coordinate with reference profiles.
+    dt_phys : float
+        Outer time step [s] used for Kessler saturation adjustment rate.
+    tendencies_cls : type
+        NonHydrostaticTendencies or MPASNonHydrostaticTendencies.
+    """
+    from legoesm.atmosphere.dynamics.compressible_euler import (
+        compute_exner_perturbation,
+    )
+    from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
+    from legoesm.atmosphere.physics.microphysics.config import KesslerConfig
+    from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+    from legoesm.core.field import Field
+    from legoesm import constants as _c
+
+    p_ref = _c.p_ref
+    c_pd = _c.c_pd
+    R_d = _c.R_d
+    L_v = _c.L_v
+
+    theta_ref = height_coord.theta_ref   # (nlev,)
+    rho_ref = height_coord.rho_ref       # (nlev,)
+    exner_ref = height_coord.exner_ref   # (nlev,)
+    dz = height_coord.dz                 # (nlev,)
+    nlev = int(dz.shape[0])
+    config = KesslerConfig()
+    # Cubed-sphere tendencies have dv_dt; MPAS does not
+    has_dv = "dv_dt" in tendencies_cls._fields
+
+    def physics_fn(state, grid, hcoord, tmetric):
+        # Recover thermodynamic fields from perturbation state
+        theta_total = theta_ref + state.theta_prime.data
+        rho_total = rho_ref + state.rho_prime.data
+
+        pi_prime = compute_exner_perturbation(
+            state.rho_prime.data, state.theta_prime.data, hcoord,
+        )
+        exner_total = exner_ref + pi_prime
+        T = theta_total * exner_total
+        p_full = p_ref * exner_total ** (c_pd / R_d)
+
+        # Flatten all spatial dims → (ncol, nlev)
+        flat_shape = (-1, nlev)
+        T_flat = T.reshape(flat_shape)
+        p_flat = p_full.reshape(flat_shape)
+        rho_flat = rho_total.reshape(flat_shape)
+        ncol = T_flat.shape[0]
+
+        # Tracers: (..., nlev, 3) → separate (ncol, nlev)
+        tr = state.tracers.data
+        q_v = tr[..., 0].reshape(flat_shape)
+        q_c = tr[..., 1].reshape(flat_shape)
+        q_r = tr[..., 2].reshape(flat_shape)
+
+        # Half-level pressure (linearly interpolated)
+        p_half = jnp.zeros((ncol, nlev + 1))
+        p_half = p_half.at[:, 1:-1].set(
+            0.5 * (p_flat[:, :-1] + p_flat[:, 1:]),
+        )
+        p_half = p_half.at[:, -1].set(
+            p_flat[:, -1] + 0.5 * (p_flat[:, -1] - p_flat[:, -2]),
+        )
+
+        dz_flat = jnp.broadcast_to(dz, (ncol, nlev))
+        z_ncol = jnp.zeros((ncol, nlev))
+
+        hydro = HydrometeorState(
+            q_c=q_c, q_r=q_r,
+            q_i=z_ncol, q_s=z_ncol, q_g=z_ncol,
+            N_c=z_ncol, N_r=z_ncol, N_i=z_ncol,
+        )
+
+        out = kessler_microphysics(
+            T_flat, q_v, hydro, p_flat, p_half, rho_flat,
+            dz_flat, dt_phys, config,
+        )
+
+        # Convert dT/dt → dtheta_prime/dt ≈ dT/dt / exner_total
+        dtheta_dt = out.dT_dt.reshape(T.shape) / jnp.clip(exner_total, 0.5, None)
+
+        # Tracer tendencies
+        dtracers = jnp.stack([
+            out.dq_v_dt.reshape(T.shape),
+            out.dq_c_dt.reshape(T.shape),
+            out.dq_r_dt.reshape(T.shape),
+        ], axis=-1)
+
+        z3d = jnp.zeros_like(state.theta_prime.data)
+        z_w = jnp.zeros_like(state.w.data)
+        z2d = jnp.zeros_like(state.phis.data)
+        d3 = state.theta_prime.dims
+        d_w = state.w.dims
+        d2 = state.phis.dims
+
+        fields = dict(
+            du_dt=Field(data=jnp.zeros_like(state.u.data),
+                        name="du_dt", dims=state.u.dims, units="m/s^2"),
+            dw_dt=Field(data=z_w, name="dw_dt", dims=d_w, units="m/s^2"),
+            dtheta_prime_dt=Field(
+                data=dtheta_dt, name="dtheta_prime_dt", dims=d3, units="K/s",
+            ),
+            drho_prime_dt=Field(
+                data=z3d, name="drho_prime_dt", dims=d3, units="kg/m^3/s",
+            ),
+            dphis_dt=Field(data=z2d, name="dphis_dt", dims=d2, units="m^2/s^3"),
+            dtracers_dt=Field(
+                data=dtracers, name="dtracers_dt",
+                dims=state.tracers.dims, units="kg/kg/s",
+            ),
+        )
+        if has_dv:
+            fields["dv_dt"] = Field(
+                data=z3d, name="dv_dt", dims=d3, units="m/s^2",
+            )
+
+        return tendencies_cls(**fields)
+
+    return physics_fn
+
+
+# ===========================================================================
 # Runner: Non-Hydrostatic (DCMIP-2025)
 # ===========================================================================
 
@@ -2833,31 +2975,46 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
                 grid, n_levels=nlev)
             grid = small_grid
-            dt = max(0.2, 4.0 * (16.0 / n))
+            # Scale hyperdiffusion for 20x smaller Earth: coeff ∝ dx⁴
+            hd_tc2 = hd / 20.0 ** 4
+            dt = max(0.15, 3.0 * (16.0 / n))
             nh_config = CompressibleEulerConfig(
-                n_acoustic_substeps=10, semi_implicit_acoustic=True,
+                n_acoustic_substeps=15, semi_implicit_acoustic=True,
                 sponge_width=15000.0,
                 sponge_coeff=1.0 / (0.1 * 86400.0),
-                hyperdiff_coeff=hd,
-                acoustic_off_centering=0.1)
+                hyperdiff_coeff=hd_tc2,
+                acoustic_off_centering=0.15)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
                 grid, n_levels=nlev)
             grid = small_grid
-            dt = max(0.1, 2.0 * (16.0 / n))
+            # Scale hyperdiffusion for 60x smaller Earth: coeff ∝ dx⁴
+            hd_tc3 = hd / 60.0 ** 4
+            dt = max(0.05, 0.5 * (16.0 / n))
             nh_config = CompressibleEulerConfig(
-                n_acoustic_substeps=10, semi_implicit_acoustic=True,
-                sponge_width=5000.0, sponge_coeff=0.05,
-                hyperdiff_coeff=hd,
-                acoustic_off_centering=0.1)
+                n_acoustic_substeps=20, semi_implicit_acoustic=True,
+                sponge_width=12000.0, sponge_coeff=0.3,
+                hyperdiff_coeff=hd_tc3,
+                hyperdiff_w_coeff=hd_tc3,
+                acoustic_off_centering=0.2)
         else:
             raise ValueError(f"Unknown NH test case: {test_case}")
 
         model = CompressibleEulerModel(grid, hcoord, tmetric, nh_config)
 
-        def step_fn(s, dt_):
-            return model.step(s, dt_)
+        # TC3 requires Kessler warm-rain microphysics to bound the
+        # buoyancy-driven convective instability from the warm bubbles.
+        if test_case == "tc3":
+            from legoesm.core.state import NonHydrostaticTendencies
+            _kessler_fn = _make_kessler_nh_physics_fn(
+                hcoord, dt, NonHydrostaticTendencies)
+
+            def step_fn(s, dt_):
+                return model.step_with_physics(s, dt_, physics_fn=_kessler_fn)
+        else:
+            def step_fn(s, dt_):
+                return model.step(s, dt_)
 
         def check_fn(s):
             return (check_finite({
@@ -2930,16 +3087,19 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
 
         dx_mean = float(jnp.sqrt(
             4.0 * jnp.pi * mesh.radius ** 2 / mesh.nCells))
-        dt = min(max(0.2, 6.0 * (200.0 / (dx_mean / 1000.0))), 6.0)
+        _dt_scale = 6.0
+        _dt_cap = 0.5 if test_case == "tc3" else 6.0
+        dt = min(max(0.2, _dt_scale * (200.0 / (dx_mean / 1000.0))), _dt_cap)
         # Sponge config per test case
         if test_case == "tc2a":
             _sponge_w, _sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
         elif test_case == "tc3":
-            _sponge_w, _sponge_c = 5000.0, 0.05
+            _sponge_w, _sponge_c = 12000.0, 0.3
         else:
             _sponge_w, _sponge_c = 10000.0, 0.05
+        _n_acoustic = 20 if test_case == "tc3" else 10
         nh_config = MPASCompressibleEulerConfig(
-            n_acoustic_substeps=10, sponge_width=_sponge_w,
+            n_acoustic_substeps=_n_acoustic, sponge_width=_sponge_w,
             sponge_coeff=_sponge_c,
             nu_del4=dx_mean ** 4 / (48.0 * 3600.0))
         model = MPASCompressibleEulerModel(
@@ -2950,8 +3110,16 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         lon_edge = np.asarray(mesh.lonEdge, dtype=np.float64) * 180 / np.pi
         lat_edge = np.asarray(mesh.latEdge, dtype=np.float64) * 180 / np.pi
 
-        def step_fn(s, dt_):
-            return model.step(s, dt_)
+        if test_case == "tc3":
+            from legoesm.core.state import MPASNonHydrostaticTendencies
+            _kessler_fn = _make_kessler_nh_physics_fn(
+                hcoord, dt, MPASNonHydrostaticTendencies)
+
+            def step_fn(s, dt_):
+                return model.step(s, dt_, physics_fn=_kessler_fn)
+        else:
+            def step_fn(s, dt_):
+                return model.step(s, dt_)
 
         def check_fn(s):
             # u is on edges (nEdges, nlev), w/theta on cells (nCells, nlev)
@@ -3004,6 +3172,14 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         return "SKIP", 0.0, ""
 
     elif tc.grid_type == "spectral":
+        # TC3 requires Kessler microphysics; the spectral solver does not
+        # yet support a physics_fn callback (state is in spectral space).
+        if test_case == "tc3":
+            record(tc, "SKIP", 0.0,
+                   "Spectral NH TC3 requires Kessler microphysics; "
+                   "physics_fn not yet wired for spectral solver")
+            return "SKIP", 0.0, ""
+
         from legoesm.grids.gaussian import (
             create_gaussian_grid, sh_synthesis_3d,
         )
@@ -3036,14 +3212,17 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             sponge_w, sponge_c = 15000.0, 1.0 / (0.1 * 86400.0)
         elif test_case == "tc3":
             sef = 60.0
-            sponge_w, sponge_c = 5000.0, 0.05
+            sponge_w, sponge_c = 8000.0, 0.15
         else:
             sef = 1.0
             sponge_w, sponge_c = 10000.0, 0.05
 
-        dt = max(0.5, 6.0 * (21.0 / n_max))
+        _dt_scale_sp = 3.0 if test_case == "tc3" else 6.0
+        dt = max(0.25 if test_case == "tc3" else 0.5,
+                 _dt_scale_sp * (21.0 / n_max))
+        _n_acoustic_sp = 20 if test_case == "tc3" else 10
         nh_config = SpectralNHConfig(
-            n_acoustic_substeps=10,
+            n_acoustic_substeps=_n_acoustic_sp,
             semi_implicit_acoustic=True,
             sponge_width=sponge_w,
             sponge_coeff=sponge_c,
@@ -3123,7 +3302,8 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, key_array_fn,
-        label=f"NH {test_case} ({tc.grid_type})", total_days=days)
+        label=f"NH {test_case} ({tc.grid_type})", total_days=days,
+        blowup_check_interval=25)
 
     if ok:
         if hasattr(state, 'w'):

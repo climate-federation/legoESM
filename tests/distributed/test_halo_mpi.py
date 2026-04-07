@@ -48,6 +48,21 @@ def topology():
     return build_comm_topology(rank, n_processes)
 
 
+def _zero_non_owned(data, topology):
+    """Zero non-owned faces in a (6, ...) array for MPI halo exchange.
+
+    pad_halo_mpi expects a full (6, n, n) array where non-local faces
+    are zeroed.  scatter_to_local returns (n_local, n, n) which is
+    incompatible with the MPI halo exchange functions.
+    """
+    owned = set(topology.local_face_ids)
+    mask = jnp.array([1.0 if f in owned else 0.0 for f in range(6)])
+    # Broadcast mask to match data shape: (6,) → (6, 1, 1, ...)
+    for _ in range(data.ndim - 1):
+        mask = mask[..., jnp.newaxis]
+    return data * mask
+
+
 class TestMPIHaloExchange:
     """MPI halo exchange correctness."""
 
@@ -62,13 +77,12 @@ class TestMPIHaloExchange:
         # Reference: local halo exchange (no MPI).
         reference = _pad_halo_local(data)
 
-        # Partition then apply MPI halo exchange on local faces only.
-        partitioned = scatter_to_local(data)
+        # Zero non-owned faces then apply MPI halo exchange.
+        partitioned = _zero_non_owned(data, topology)
         set_halo_backend("mpi", topology)
-        result_local = pad_halo(partitioned)
-        result = gather_to_global(result_local)
+        result = pad_halo(partitioned)
 
-        # Gather results to rank 0 for comparison.
+        # All ranks participate in MPI exchange; rank 0 checks result.
         if topology.rank == 0:
             assert jnp.allclose(result, reference), (
                 f"MPI halo mismatch (max diff: "
@@ -83,10 +97,9 @@ class TestMPIHaloExchange:
 
         reference = _pad_halo_local(data)
 
-        partitioned = scatter_to_local(data)
+        partitioned = _zero_non_owned(data, topology)
         set_halo_backend("mpi", topology)
-        result_local = pad_halo(partitioned)
-        result = gather_to_global(result_local)
+        result = pad_halo(partitioned)
 
         if topology.rank == 0:
             assert jnp.allclose(result, reference, atol=1e-6)
@@ -110,10 +123,10 @@ class TestMPIHaloExchange:
             grid.sin_angle_padded,
         )
 
-        u_part = scatter_to_local(u_data)
-        v_part = scatter_to_local(v_data)
+        u_part = _zero_non_owned(u_data, topology)
+        v_part = _zero_non_owned(v_data, topology)
         set_halo_backend("mpi", topology)
-        out_u_local, out_v_local = pad_halo_vector(
+        out_u, out_v = pad_halo_vector(
             u_part,
             v_part,
             grid.cos_angle,
@@ -121,7 +134,6 @@ class TestMPIHaloExchange:
             grid.cos_angle_padded,
             grid.sin_angle_padded,
         )
-        out_u, out_v = gather_to_global((out_u_local, out_v_local))
 
         if topology.rank == 0:
             assert jnp.allclose(out_u, ref_u, atol=1e-6)
@@ -136,10 +148,9 @@ class TestMPIHaloExchange:
 
         reference = _pad_halo_local_h2(data)
 
-        partitioned = scatter_to_local(data)
+        partitioned = _zero_non_owned(data, topology)
         set_halo_backend("mpi", topology)
-        result_local = pad_halo(partitioned, halo=2)
-        result = gather_to_global(result_local)
+        result = pad_halo(partitioned, halo=2)
 
         if topology.rank == 0:
             assert result.shape == (6, n + 4, n + 4)
@@ -171,14 +182,15 @@ class TestPartitionGather:
         data = jnp.ones((6, 4, 4), dtype=jnp.float32)
         result = scatter_to_local(data)
 
-        for f in range(6):
-            if f in topology.local_face_ids:
-                assert jnp.allclose(result[f], 1.0)
-            else:
-                assert jnp.allclose(result[f], 0.0)
+        n_local = len(topology.local_face_ids)
+        assert result.shape == (n_local, 4, 4), (
+            f"Expected ({n_local}, 4, 4), got {result.shape}"
+        )
+        # All local faces should have value 1.0
+        assert jnp.allclose(result, 1.0)
 
     def test_gather_recovers_full(self, topology):
-        """gather_to_global(scatter_to_local(x)) == x."""
+        """gather_to_global(scatter_to_local(x)) == x on rank 0."""
         data = jnp.ones((6, 4, 4), dtype=jnp.float32)
         for f in range(6):
             data = data.at[f].set(float(f + 1))
@@ -186,7 +198,9 @@ class TestPartitionGather:
         partitioned = scatter_to_local(data)
         gathered = gather_to_global(partitioned)
 
-        assert jnp.allclose(gathered, data)
+        if topology.rank == 0:
+            assert gathered.shape == (6, 4, 4), f"Expected (6,4,4), got {gathered.shape}"
+            assert jnp.allclose(gathered, data)
 
 
 class TestMPIOceanConservation:
@@ -232,9 +246,22 @@ class TestMPIOceanConservation:
             config,
         )
 
+        # For MPI conservation: use _zero_non_owned on state arrays
+        # but keep grid global (conservation fixer needs global areas
+        # for the area-weighted correction).
         set_halo_backend("mpi", topology)
-        old_part = scatter_to_local(state_old)
-        new_part = scatter_to_local(state_new)
+        old_part = jax.tree.map(
+            lambda x: _zero_non_owned(x, topology)
+            if isinstance(x, jnp.ndarray) and x.ndim >= 3 and x.shape[0] == 6
+            else x,
+            state_old,
+        )
+        new_part = jax.tree.map(
+            lambda x: _zero_non_owned(x, topology)
+            if isinstance(x, jnp.ndarray) and x.ndim >= 3 and x.shape[0] == 6
+            else x,
+            state_new,
+        )
         fixed_part = ocean_conservation_fixer(
             new_part,
             old_part,
@@ -242,9 +269,10 @@ class TestMPIOceanConservation:
             z_coord,
             config,
         )
-        fixed_state = gather_to_global(fixed_part)
 
         if topology.rank == 0:
-            assert jnp.allclose(fixed_state.eta.data, ref_state.eta.data, atol=1e-6)
-            assert jnp.allclose(fixed_state.T.data, ref_state.T.data, atol=1e-6)
-            assert jnp.allclose(fixed_state.S.data, ref_state.S.data, atol=1e-6)
+            # MPI allreduce uses different FP summation order than serial,
+            # so relax tolerance from 1e-6 to 1e-5.
+            assert jnp.allclose(fixed_part.eta.data, ref_state.eta.data, atol=1e-5)
+            assert jnp.allclose(fixed_part.T.data, ref_state.T.data, atol=1e-5)
+            assert jnp.allclose(fixed_part.S.data, ref_state.S.data, atol=1e-5)

@@ -36,7 +36,7 @@ from legoesm.core.operators_voronoi import (
     vector_laplacian_del2,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
+from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -55,6 +55,8 @@ def mpas_ocean_baroclinic_tendencies(
     z_coord: OceanZStarCoordinate,
     config: MPASOceanConfig = MPASOceanConfig(),
     freshwater: FreshwaterForcing | None = None,
+    physics_fn=None,
+    surface_forcing=None,
 ) -> MPASOceanTendencies:
     """Compute baroclinic (slow) tendencies for MPAS ocean.
 
@@ -82,6 +84,30 @@ def mpas_ocean_baroclinic_tendencies(
     H_bathy = state.H_bathy.data  # (nCells,)
     mask = state.land_mask.data  # (nCells,)
 
+    c1 = mesh.cellsOnEdge[0]  # (nEdges,)
+    c2 = mesh.cellsOnEdge[1]  # (nEdges,)
+
+    # Helper: fill land cells with ocean-neighbor average (Neumann BC).
+    # Works for both 1D (nCells,) and 2D (nCells, nlev) arrays.
+    def _fill_land_cells_mpas(field_cell, mask_cell):
+        nbr_sum = jnp.zeros_like(field_cell)
+        nbr_cnt = jnp.zeros_like(field_cell)
+        if field_cell.ndim == 1:
+            nbr_sum = nbr_sum.at[c1].add(field_cell[c2] * mask_cell[c2])
+            nbr_cnt = nbr_cnt.at[c1].add(mask_cell[c2])
+            nbr_sum = nbr_sum.at[c2].add(field_cell[c1] * mask_cell[c1])
+            nbr_cnt = nbr_cnt.at[c2].add(mask_cell[c1])
+        else:
+            m2 = mask_cell[c2, jnp.newaxis]
+            m1 = mask_cell[c1, jnp.newaxis]
+            nbr_sum = nbr_sum.at[c1].add(field_cell[c2] * m2)
+            nbr_cnt = nbr_cnt.at[c1].add(m2)
+            nbr_sum = nbr_sum.at[c2].add(field_cell[c1] * m1)
+            nbr_cnt = nbr_cnt.at[c2].add(m1)
+        nbr_avg = nbr_sum / jnp.maximum(nbr_cnt, 1.0)
+        mask_e = mask_cell if field_cell.ndim == 1 else mask_cell[:, jnp.newaxis]
+        return jnp.where(mask_e > 0.5, field_cell, nbr_avg)
+
     # ---- Layer thickness and Jacobian ----
     jacobian = compute_ocean_jacobian(
         eta, H_bathy, z_coord,
@@ -93,12 +119,17 @@ def mpas_ocean_baroclinic_tendencies(
     )  # (nCells, nlev)
 
     # ---- Density and hydrostatic pressure ----
-    rho = wright_eos(T_3d, S_3d, jnp.zeros_like(T_3d))
+    # Fill land-cell T/S with ocean-neighbor values before EOS so that
+    # density on land ≈ ρ₀, preventing spurious ρ' at coastlines.
+    T_filled = _fill_land_cells_mpas(T_3d, mask)
+    S_filled = _fill_land_cells_mpas(S_3d, mask)
+    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T_3d))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
         )
-        rho = wright_eos(T_3d, S_3d, p_hydro)
+        rho = eos_fn(T_filled, S_filled, p_hydro)
     # Final p_hydro for EOS only (not used in Bernoulli)
     p_hydro = compute_hydrostatic_pressure(
         rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
@@ -114,9 +145,11 @@ def mpas_ocean_baroclinic_tendencies(
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer  # (nCells, nlev)
 
+    # Fill land cells in p_prime before gradient_edge so the 2-cell
+    # stencil sees smooth values at coastlines.
+    p_prime = _fill_land_cells_mpas(p_prime, mask)
+
     # ---- Edge mask for land boundaries ----
-    c1 = mesh.cellsOnEdge[0]  # (nEdges,)
-    c2 = mesh.cellsOnEdge[1]  # (nEdges,)
     edge_mask = mask[c1] * mask[c2]  # 1 only if both cells are ocean
 
     # ---- Per-level momentum and tracer tendencies ----
@@ -226,6 +259,13 @@ def mpas_ocean_baroclinic_tendencies(
         S_3d, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
         mesh=mesh,
     ) * mask[:, jnp.newaxis]
+
+    # ---- Physics (surface forcing, bottom drag, etc.) ----
+    if physics_fn is not None:
+        phys = physics_fn(state, mesh, z_coord, surface_forcing)
+        du_dt_3d = du_dt_3d + phys.du_dt.data
+        dT_dt_3d = dT_dt_3d + phys.dT_dt.data
+        dS_dt_3d = dS_dt_3d + phys.dS_dt.data
 
     # ---- Free surface tendency ----
     # deta/dt = -sum_k div(u_k * h_e_k)

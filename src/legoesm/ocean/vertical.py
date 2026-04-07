@@ -77,9 +77,9 @@ def create_ocean_z_star(
     -------
     OceanZStarCoordinate : The vertical coordinate.
     """
-    if n_levels < 2:
+    if n_levels < 1:
         raise ValueError(
-            f"n_levels must be >= 2 for finite-difference operators, got {n_levels!r}",
+            f"n_levels must be >= 1, got {n_levels!r}",
         )
     if H_max <= 0.0:
         raise ValueError(f"H_max must be > 0, got {H_max!r}")

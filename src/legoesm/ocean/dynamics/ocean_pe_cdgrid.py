@@ -44,7 +44,7 @@ from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
     create_cubed_sphere_cdgrid,
 )
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
+from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -121,12 +121,22 @@ def ocean_baroclinic_tendencies_cdgrid(
     )
 
     # --- 2. Density from EOS (2 iterations for consistency with latlon) ---
-    rho = wright_eos(T, S, jnp.zeros_like(T))
+    # Fill land-cell T/S with ocean-neighbor values before EOS so that
+    # density on land ≈ ρ₀, preventing spurious ρ' at coastlines.
+    from legoesm.ocean.dynamics.barotropic import _fill_land_cells
+    T_filled = jax.vmap(
+        lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
+    )(T)
+    S_filled = jax.vmap(
+        lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
+    )(S)
+    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
         )
-        rho = wright_eos(T, S, p_hydro)
+        rho = eos_fn(T_filled, S_filled, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
         rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
     )
@@ -170,7 +180,12 @@ def ocean_baroclinic_tendencies_cdgrid(
 
     # --- 10. Bernoulli and pressure gradients at D-grid corners ---
     dKE_dx, dKE_dy_perp = _arakawa_lamb_gradient(KE, cdgrid)
-    dp_dx, dp_dy_perp = _arakawa_lamb_gradient(p_prime, cdgrid)
+    # Fill land cells in p_prime before gradient so the 4-point stencil
+    # sees smooth values at coastlines instead of the ocean-to-zero jump.
+    p_prime_filled = jax.vmap(
+        lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
+    )(p_prime)
+    dp_dx, dp_dy_perp = _arakawa_lamb_gradient(p_prime_filled, cdgrid)
 
     # --- 11. Vorticity at corners (relative only) ---
     zeta_corner = _interp_center_to_corner(zeta, cdgrid)

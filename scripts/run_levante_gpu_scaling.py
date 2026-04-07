@@ -8,6 +8,7 @@ Supported grids:
   spectral      -- Gaussian grid + spectral PE dycore (default)
   cubed-sphere  -- Cubed-sphere C-D grid + FV3 PE dycore
   icosahedral   -- MPAS Voronoi mesh + TRiSK PE dycore
+  latlon        -- Lat-lon finite-volume grid + FV PE dycore
 
 Two modes:
   weak   -- fix problem size per GPU, increase resolution with GPU count
@@ -25,7 +26,11 @@ Single-node (4 A100s)::
 Multi-node via MPI (set up by the companion SLURM script)::
 
     mpirun -np 8 python scripts/run_levante_gpu_scaling.py \\
-        --mode strong --precision float64 --n-gpus 8
+        --grid cubed-sphere --mode strong --precision float64 --n-gpus 8
+    mpirun -np 4 python scripts/run_levante_gpu_scaling.py \\
+        --grid latlon --mode strong --n-gpus 4
+    mpirun -np 4 python scripts/run_levante_gpu_scaling.py \\
+        --grid icosahedral --mode strong --n-gpus 4
 
 The script auto-detects available GPUs when --n-gpus is not set.
 """
@@ -47,6 +52,23 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # JAX configuration -- must happen before jax import
 # ---------------------------------------------------------------------------
+
+def _configure_mpi_gpu_affinity() -> None:
+    """Pin one GPU per MPI rank via ``CUDA_VISIBLE_DEVICES``.
+
+    Must be called **before** any JAX import so that JAX only sees the
+    assigned GPU.  Uses MPI-launcher env vars (``OMPI_COMM_WORLD_LOCAL_RANK``
+    for OpenMPI, ``MV2_COMM_WORLD_LOCAL_RANK`` for MVAPICH2, or
+    ``SLURM_LOCALID`` for SLURM) to determine which GPU this rank should use.
+    """
+    local_rank = (
+        os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+        or os.environ.get("MV2_COMM_WORLD_LOCAL_RANK")
+        or os.environ.get("SLURM_LOCALID")
+    )
+    if local_rank is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = local_rank
+
 
 def _configure_jax(precision: str) -> None:
     """Set JAX env vars before import."""
@@ -71,31 +93,56 @@ def _configure_jax(precision: str) -> None:
 
 def _maybe_init_distributed(
     global_n: int | None = None,
+    grid_type: str = "cubed-sphere",
 ) -> tuple[int, int]:
     """Detect and initialize distributed JAX if under MPI or SLURM.
 
     Returns (rank, world_size). For single-process, returns (0, 1).
 
-    When MPI is detected, uses ``initialize_distributed()`` from
+    For cubed-sphere grids, uses ``initialize_distributed()`` from
     ``legoesm.parallel.distributed`` which sets the MPI halo backend,
     builds the CommTopology, creates the DeviceConfig, and (when
-    ``global_n`` is provided) builds the :class:`DistributedLayout`
-    so that :func:`scatter_to_local` / :func:`gather_to_global` work.
+    ``global_n`` is provided) builds the :class:`DistributedLayout`.
+
+    For lat-lon and icosahedral grids, performs lightweight MPI init
+    (rank/size detection and multi-node JAX coordination) without
+    cubed-sphere-specific topology.  Grid-specific MPI layout, scatter,
+    and step functions are set up later in :func:`run_benchmark`.
 
     Parameters
     ----------
     global_n : int, optional
-        Per-face grid resolution.  When provided, the distributed
-        layout is constructed so state can be scattered to rank-local.
+        Per-face grid resolution (cubed-sphere only).
+    grid_type : str
+        Grid type: ``"cubed-sphere"``, ``"latlon"``, or ``"icosahedral"``.
     """
     # Check for MPI environment
     if "OMPI_COMM_WORLD_SIZE" in os.environ or "PMI_SIZE" in os.environ:
         try:
-            from legoesm.parallel.distributed import initialize_distributed
-            initialize_distributed(global_n=global_n)
             from mpi4py import MPI
             comm = MPI.COMM_WORLD
-            return comm.Get_rank(), comm.Get_size()
+            rank = comm.Get_rank()
+            n_procs = comm.Get_size()
+
+            if grid_type == "cubed-sphere":
+                # Full cubed-sphere distributed init (topology, halo backend,
+                # DeviceConfig).
+                from legoesm.parallel.distributed import initialize_distributed
+                initialize_distributed(global_n=global_n)
+            elif n_procs > 1:
+                # Lat-lon / icosahedral: lightweight MPI init.
+                # Handle multi-node JAX coordination if needed.
+                import socket
+                hostnames = comm.allgather(socket.gethostname())
+                if len(set(hostnames)) > 1:
+                    import jax
+                    jax.distributed.initialize(
+                        coordinator_address=f"{hostnames[0]}:1234",
+                        num_processes=n_procs,
+                        process_id=rank,
+                    )
+
+            return rank, n_procs
         except ImportError:
             pass
 
@@ -124,11 +171,10 @@ _SUPPORTED_PHYSICS = {
     "spectral": {"none", "held_suarez"},
 }
 
-# MPI distributed benchmark support.  Only cubed-sphere has a validated
-# MPI path in this script.  Lat-lon and Voronoi MPI implementations exist
-# (latlon_mpi.py, voronoi_mpi.py) and are exercised by
-# run_cpu_mpi_scaling.py, but are not yet wired into this GPU harness.
-_MPI_SUPPORTED_GRIDS = {"cubed-sphere"}
+# MPI distributed benchmark support.  All three finite-volume grids have
+# validated MPI paths: cubed-sphere (via distributed.py), lat-lon (via
+# latlon_mpi.py), and icosahedral/Voronoi (via voronoi_mpi.py).
+_MPI_SUPPORTED_GRIDS = {"cubed-sphere", "latlon", "icosahedral"}
 
 
 @dataclass
@@ -226,10 +272,21 @@ def _weak_resolution_ico(n_gpus: int, base_level: int = WEAK_SCALING_BASE_LEVEL_
 # Lat-lon weak scaling: same approach as cubed-sphere.
 WEAK_SCALING_BASE_N_LL = 64  # ~64x128 on 1 GPU
 
-def _weak_resolution_ll(n_gpus: int, base_n: int = WEAK_SCALING_BASE_N_LL) -> int:
-    """Compute lat-lon resolution for weak scaling at a given GPU count."""
+def _weak_resolution_ll(
+    n_gpus: int,
+    base_n: int = WEAK_SCALING_BASE_N_LL,
+    n_ranks: int = 1,
+) -> int:
+    """Compute lat-lon resolution for weak scaling at a given GPU count.
+
+    When ``n_ranks > 1`` (MPI), the result is rounded up to be divisible
+    by ``n_ranks`` so that latitude bands divide evenly.
+    """
     n_raw = base_n * math.sqrt(n_gpus)
     n_rounded = max(8, 2 * round(n_raw / 2))  # even number, min 8
+    if n_ranks > 1:
+        while n_rounded % n_ranks != 0:
+            n_rounded += 2
     return n_rounded
 
 # Strong scaling: fixed resolutions, sweep GPU counts.
@@ -389,22 +446,22 @@ def _build_physics_fn(physics_level: str, grid_type: str):
         return None
 
     if grid_type == "spectral":
-        from tests.test_cases.held_suarez import (
+        from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing_spectral,
         )
         return held_suarez_forcing_spectral
     elif grid_type == "latlon":
-        from tests.test_cases.held_suarez import (
+        from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing_latlon,
         )
         return held_suarez_forcing_latlon
     elif grid_type == "icosahedral":
-        from tests.test_cases.held_suarez import (
+        from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing_mpas,
         )
         return held_suarez_forcing_mpas
     else:  # cubed-sphere
-        from tests.test_cases.held_suarez import (
+        from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing,
         )
         return held_suarez_forcing
@@ -770,13 +827,27 @@ def run_benchmark(
 
     sigma = create_sigma_coordinate(n_levels)
 
+    # Detect MPI for lat-lon and icosahedral grids (cubed-sphere uses
+    # dev_config.is_distributed instead, set by initialize_distributed).
+    _rank, _n_ranks = 0, 1
+    try:
+        from mpi4py import MPI as _MPI
+        _rank, _n_ranks = _MPI.COMM_WORLD.Get_rank(), _MPI.COMM_WORLD.Get_size()
+    except ImportError:
+        pass
+    _is_mpi = _n_ranks > 1
+
+    # Grid-specific MPI layouts (populated in grid branches below).
+    _latlon_layout = None
+    _voronoi_layout = None
+
     if grid_type == "spectral":
         from legoesm.grids.gaussian import create_gaussian_grid
         from legoesm.atmosphere.dynamics.spectral_pe import (
             SpectralPrimitiveEquationModel,
             SpectralPEConfig,
         )
-        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
+        from legoesm.atmosphere.baroclinic_wave import baroclinic_wave_init_spectral
 
         grid = create_gaussian_grid(n_grid)
         hd = _hyperdiff_coeff(n_grid, grid_type)
@@ -800,31 +871,11 @@ def run_benchmark(
             MPASPrimitiveEquationModel,
             MPASPrimitiveEquationConfig,
         )
-        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
+        from legoesm.atmosphere.baroclinic_wave import baroclinic_wave_init_mpas
 
         grid = create_voronoi_mesh(subdivision_level=n_grid)
 
-        # Reorder mesh for spatial locality when sharding across GPUs.
-        if n_gpus > 1:
-            from legoesm.parallel.voronoi_partition import (
-                reorder_voronoi_for_sharding,
-            )
-            grid = reorder_voronoi_for_sharding(grid, n_gpus)
-
         total_cells = grid.nCells * n_levels
-        dev_config = create_voronoi_device_mesh(
-            nCells=grid.nCells,
-            nEdges=grid.nEdges,
-            nVertices=grid.nVertices,
-            n_devices=n_gpus,
-        )
-
-        # Replicate mesh on all devices so JIT-compiled operators
-        # find connectivity arrays locally without cross-device gathers.
-        if dev_config.n_devices > 1:
-            from legoesm.parallel.mesh import replicate_pytree
-            grid = replicate_pytree(grid, dev_config)
-
         hd = _hyperdiff_coeff(n_grid, grid_type)
         config = MPASPrimitiveEquationConfig(
             nu_del4=hd,
@@ -833,15 +884,57 @@ def run_benchmark(
             pv_scheme="energy",
             time_integrator="ssp_rk3",
         )
-        model = MPASPrimitiveEquationModel(grid, sigma, config)
-        state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
+
+        if _is_mpi:
+            # MPI distributed: partition mesh across ranks.  State is
+            # initialized from the global mesh and scattered to rank-local.
+            # make_voronoi_mpi_step uses layout.local_mesh internally.
+            from legoesm.parallel.voronoi_mpi import (
+                make_voronoi_partition_layout,
+            )
+            _voronoi_layout = make_voronoi_partition_layout(
+                grid, _rank, _n_ranks,
+            )
+            model = MPASPrimitiveEquationModel(grid, sigma, config)
+            state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
+            # Each MPI rank uses 1 GPU (affinity set by
+            # _configure_mpi_gpu_affinity).
+            dev_config = create_voronoi_device_mesh(
+                nCells=_voronoi_layout.local_mesh.nCells,
+                nEdges=_voronoi_layout.local_mesh.nEdges,
+                nVertices=_voronoi_layout.local_mesh.nVertices,
+                n_devices=1,
+            )
+        else:
+            # Single-node: reorder for spatial locality and shard.
+            if n_gpus > 1:
+                from legoesm.parallel.voronoi_partition import (
+                    reorder_voronoi_for_sharding,
+                )
+                grid = reorder_voronoi_for_sharding(grid, n_gpus)
+
+            dev_config = create_voronoi_device_mesh(
+                nCells=grid.nCells,
+                nEdges=grid.nEdges,
+                nVertices=grid.nVertices,
+                n_devices=n_gpus,
+            )
+
+            # Replicate mesh on all devices so JIT-compiled operators
+            # find connectivity arrays locally without cross-device gathers.
+            if dev_config.n_devices > 1:
+                from legoesm.parallel.mesh import replicate_pytree
+                grid = replicate_pytree(grid, dev_config)
+
+            model = MPASPrimitiveEquationModel(grid, sigma, config)
+            state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
     elif grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
             FVLatLonPrimitiveEquationModel,
             FVLatLonPrimitiveEquationConfig,
         )
-        from tests.test_cases.baroclinic_wave import (
+        from legoesm.atmosphere.baroclinic_wave import (
             baroclinic_wave_init_latlon,
         )
 
@@ -860,7 +953,20 @@ def run_benchmark(
         state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
 
         total_cells = n_lat * n_lon * n_levels
-        dev_config = create_latlon_mesh(n_devices=n_gpus)
+
+        if _is_mpi:
+            # MPI distributed: 1D latitude-band decomposition.
+            # State is scattered to rank-local bands after cast.
+            from legoesm.parallel.latlon_mpi import (
+                make_latlon_band_layout,
+            )
+            _latlon_layout = make_latlon_band_layout(
+                _rank, _n_ranks, n_lat, n_lon,
+            )
+            # Each MPI rank uses 1 GPU.
+            dev_config = create_latlon_mesh(n_devices=1)
+        else:
+            dev_config = create_latlon_mesh(n_devices=n_gpus)
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -869,7 +975,7 @@ def run_benchmark(
             CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3,
         )
-        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+        from legoesm.atmosphere.baroclinic_wave import baroclinic_wave_init
 
         grid = create_cubed_sphere(n_grid)
         cdgrid = create_cubed_sphere_cdgrid(grid)
@@ -899,12 +1005,12 @@ def run_benchmark(
     backend = dev_config.backend
 
     # Guard: warn if MPI is active for a grid without validated MPI paths.
-    if dev_config.is_distributed and grid_type not in _MPI_SUPPORTED_GRIDS:
+    _is_cs_distributed = dev_config.is_distributed
+    if (_is_cs_distributed or _is_mpi) and grid_type not in _MPI_SUPPORTED_GRIDS:
         print(
             f"  WARNING: MPI distributed benchmarks for grid_type={grid_type!r} "
             f"are not validated in this script. Only {sorted(_MPI_SUPPORTED_GRIDS)} "
-            f"have validated MPI paths. Use run_cpu_mpi_scaling.py for lat-lon "
-            f"and Voronoi MPI benchmarks.",
+            f"have validated MPI paths.",
             flush=True,
         )
 
@@ -915,25 +1021,33 @@ def run_benchmark(
         return x
     state = jax.tree.map(_cast, state)
 
-    # MPI distributed: keep full (6, n, n, ...) state on every rank
-    # to match the production driver, which requires the full shape for
-    # pad_halo_mpi.  Each rank steps all faces; MPI halo exchange
-    # ensures owned faces stay correct.  Layout is still needed for
-    # gather_to_global at I/O time.
+    # --- MPI scatter for lat-lon and icosahedral ---
+    # (cubed-sphere MPI keeps full state on all ranks; lat-lon and
+    # icosahedral scatter to rank-local)
+    if _latlon_layout is not None:
+        from legoesm.parallel.latlon_mpi import scatter_state_latlon
+        state = scatter_state_latlon(state, _latlon_layout)
+    elif _voronoi_layout is not None:
+        from legoesm.parallel.voronoi_mpi import scatter_state_voronoi
+        state = scatter_state_voronoi(state, _voronoi_layout.partition)
+
+    # Cubed-sphere MPI: keep full (6, n, n, ...) state on every rank
+    # to match the production driver.  pad_halo_mpi requires the full
+    # shape; MPI halo exchange keeps owned faces correct.
     from legoesm.parallel.distributed import get_active_layout
-    if dev_config.is_distributed and get_active_layout() is None:
+    if _is_cs_distributed and get_active_layout() is None:
         from legoesm.parallel.distributed import get_active_topology, set_active_layout
         from legoesm.parallel.layout import make_layout
         topo = get_active_topology()
         if topo is not None:
             set_active_layout(make_layout(topo.rank, topo.n_processes, n_grid))
 
-    # Shard across devices (SPMD for multi-GPU single-node)
-    if dev_config.n_devices > 1 and not dev_config.is_distributed:
+    # Shard across devices (SPMD for multi-GPU single-node, non-MPI)
+    if dev_config.n_devices > 1 and not _is_cs_distributed and not _is_mpi:
         state = shard_pytree(state, dev_config)
 
     # Verify sharding is effective (not accidentally replicated)
-    if dev_config.n_devices > 1:
+    if dev_config.n_devices > 1 and not _is_mpi:
         sample_leaf = jax.tree.leaves(state)[0]
         if hasattr(sample_leaf, 'sharding'):
             is_replicated = all(
@@ -946,11 +1060,24 @@ def run_benchmark(
     # Build physics function (None for dycore-only and moist tiers).
     physics_fn = _build_physics_fn(physics_level, grid_type)
 
-    # For Voronoi multi-GPU: wrap step to avoid per-operator collectives.
-    # TRiSK's indirect indexing generates O(n_ops) cross-device gathers
-    # when state is naively sharded.  The wrapper replicates state first
-    # (one all-gather), computes locally, and re-shards (local slice).
-    if grid_type == "icosahedral" and dev_config.n_devices > 1:
+    # --- Step function selection ---
+    # MPI distributed step functions (lat-lon and icosahedral) take
+    # priority over SPMD sharded steps.
+    if _latlon_layout is not None:
+        from legoesm.parallel.latlon_mpi import make_latlon_mpi_step
+        # Physics wrapping: MPI step calls model.step per RK stage.
+        if physics_fn is not None:
+            _phys = physics_fn
+            _orig_step = model.step
+            model.step = lambda s, dt, physics_fn=None: _orig_step(
+                s, dt, physics_fn=_phys,
+            )
+        step_fn = make_latlon_mpi_step(model, grid, _latlon_layout, sigma, config)
+    elif _voronoi_layout is not None:
+        from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
+        step_fn = make_voronoi_mpi_step(model, _voronoi_layout, sigma, config)
+    # SPMD sharded step functions (single-node multi-GPU).
+    elif grid_type == "icosahedral" and dev_config.n_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_voronoi_sharded_step
         step_fn = make_voronoi_sharded_step(model, dev_config)
     elif grid_type == "cubed-sphere" and dev_config.n_devices > 1:
@@ -962,11 +1089,14 @@ def run_benchmark(
     else:
         step_fn = model.step
 
-    # Wrap step_fn to include physics for non-latlon grids.
+    # Wrap step_fn to include physics for non-MPI, non-latlon grids.
+    # MPI lat-lon already has physics baked in above.
+    # MPI icosahedral: make_voronoi_mpi_step handles dycore only
+    #   (physics integration requires extending make_voronoi_mpi_step).
     # Lat-lon sharded step already has physics baked in via closure.
     # For cubed-sphere and icosahedral SPMD, physics_fn is passed to __call__.
     # For single-GPU all grids, physics_fn is passed to model.step.
-    if physics_fn is not None:
+    if physics_fn is not None and _latlon_layout is None and _voronoi_layout is None:
         if grid_type == "latlon" and dev_config.n_devices > 1:
             # Physics already baked into the sharded step
             pass
@@ -1127,10 +1257,21 @@ def run_weak_scaling(
     grid_type: str = "spectral",
     no_conservation: bool = False,
     physics_level: str = "none",
+    fixed_gpu_count: int | None = None,
 ) -> list[TimingResult]:
-    """Run weak scaling: fix cells/GPU, sweep GPU counts up to n_gpus."""
+    """Run weak scaling: fix cells/GPU, sweep GPU counts up to n_gpus.
 
-    gpu_counts = _valid_gpu_counts(n_gpus, grid_type)
+    Parameters
+    ----------
+    fixed_gpu_count : int, optional
+        When set (e.g. under MPI), run only at this GPU count instead
+        of sweeping all valid counts up to *n_gpus*.
+    """
+
+    if fixed_gpu_count is not None:
+        gpu_counts = [fixed_gpu_count]
+    else:
+        gpu_counts = _valid_gpu_counts(n_gpus, grid_type)
     results: list[TimingResult] = []
 
     if grid_type == "spectral":
@@ -1158,7 +1299,8 @@ def run_weak_scaling(
             if grid_type == "icosahedral":
                 n_grid = _weak_resolution_ico(ng, base_level_ico)
             elif grid_type == "latlon":
-                n_grid = _weak_resolution_ll(ng)
+                _n_mpi_ranks = fixed_gpu_count if fixed_gpu_count else 1
+                n_grid = _weak_resolution_ll(ng, n_ranks=_n_mpi_ranks)
             else:
                 n_grid = _weak_resolution(ng, base_n)
             print(f"\n--- {ng} GPU(s), {res_prefix}{n_grid} ---")
@@ -1179,14 +1321,21 @@ def run_weak_scaling(
             except Exception as exc:
                 print(f"    FAILED: {exc}", flush=True)
 
-    # Compute scaling efficiency relative to 1-GPU baseline
+    # Compute scaling efficiency relative to 1-GPU baseline.
+    # For icosahedral grids the subdivision level jumps by 4× in cell
+    # count, so cells/GPU is not constant across GPU counts.  Normalize
+    # by the cells/GPU ratio to avoid misleading efficiency numbers.
     for prec in precisions:
         prec_results = [r for r in results if r.precision == prec]
         baseline = next((r for r in prec_results if r.n_gpus == 1), None)
         if baseline is not None:
             for r in prec_results:
-                # Ideal weak scaling: time/step stays constant
-                r.scaling_efficiency = baseline.time_per_step_ms / r.time_per_step_ms
+                # Ideal weak scaling: constant throughput per cell per GPU.
+                # efficiency = (t1 / tN) * (cells_per_gpu_N / cells_per_gpu_1)
+                cell_ratio = r.cells_per_gpu / baseline.cells_per_gpu
+                r.scaling_efficiency = (
+                    baseline.time_per_step_ms / r.time_per_step_ms * cell_ratio
+                )
 
     return results
 
@@ -1206,10 +1355,21 @@ def run_strong_scaling(
     grid_type: str = "spectral",
     no_conservation: bool = False,
     physics_level: str = "none",
+    fixed_gpu_count: int | None = None,
 ) -> list[TimingResult]:
-    """Run strong scaling: fix resolution, sweep GPU counts up to n_gpus."""
+    """Run strong scaling: fix resolution, sweep GPU counts up to n_gpus.
 
-    gpu_counts = _valid_gpu_counts(n_gpus, grid_type)
+    Parameters
+    ----------
+    fixed_gpu_count : int, optional
+        When set (e.g. under MPI), run only at this GPU count instead
+        of sweeping all valid counts up to *n_gpus*.
+    """
+
+    if fixed_gpu_count is not None:
+        gpu_counts = [fixed_gpu_count]
+    else:
+        gpu_counts = _valid_gpu_counts(n_gpus, grid_type)
     if resolutions is None:
         if grid_type == "spectral":
             defaults = STRONG_RESOLUTIONS_SP
@@ -1368,8 +1528,8 @@ def print_summary_table(results: list[TimingResult], mode: str) -> None:
 
     header = (
         f"{'Prec':>7s} | {'GPUs':>5s} | {'Res':>5s} | {'L':>3s} | "
-        f"{'dt(s)':>6s} | {'ms/step':>9s} | {'SYPD':>8s} | "
-        f"{'Mcell/s':>9s} | {'Eff':>6s}"
+        f"{'dt(s)':>6s} | {'cells/GPU':>9s} | {'ms/step':>9s} | "
+        f"{'SYPD':>8s} | {'Mcell/s':>9s} | {'Eff':>6s}"
     )
     print(header)
     print("-" * len(header))
@@ -1378,6 +1538,7 @@ def print_summary_table(results: list[TimingResult], mode: str) -> None:
         print(
             f"{r.precision:>7s} | {r.n_gpus:>5d} | {r.resolution:<5d} | "
             f"{r.n_levels:>3d} | {r.dt_seconds:>6.0f} | "
+            f"{r.cells_per_gpu:>9,d} | "
             f"{r.time_per_step_ms:>9.2f} | {r.sypd:>8.3f} | "
             f"{r.mcells_per_s:>9.1f} | {r.scaling_efficiency:>5.1%}"
         )
@@ -1664,13 +1825,16 @@ def main() -> int:
     else:
         precisions = [args.precision]
 
+    # GPU affinity must be set before JAX sees devices.
+    _configure_mpi_gpu_affinity()
+
     # Configure JAX for first precision (will be reconfigured per run)
     _configure_jax(precisions[0])
 
     import jax
 
     # Initialize distributed runtime if under MPI/SLURM
-    rank, world_size = _maybe_init_distributed()
+    rank, world_size = _maybe_init_distributed(grid_type=grid_type)
     is_rank0 = (rank == 0)
 
     # Resolve GPU count
@@ -1744,6 +1908,10 @@ def main() -> int:
         print(f"  Output:      {output_dir}")
         print("=" * 72)
 
+    # Under MPI, the GPU count is fixed (= world_size * GPUs/rank).
+    # Disable sweep by pinning to the actual count.
+    fixed = max_gpus if world_size > 1 else None
+
     all_results: list[TimingResult] = []
 
     # ---------------------------------------------------------------
@@ -1760,6 +1928,7 @@ def main() -> int:
             grid_type=grid_type,
             no_conservation=args.no_conservation,
             physics_level=physics_level,
+            fixed_gpu_count=fixed,
         )
         all_results.extend(weak_results)
         if is_rank0:
@@ -1792,6 +1961,7 @@ def main() -> int:
             grid_type=grid_type,
             no_conservation=args.no_conservation,
             physics_level=physics_level,
+            fixed_gpu_count=fixed,
         )
         all_results.extend(strong_results)
         if is_rank0:

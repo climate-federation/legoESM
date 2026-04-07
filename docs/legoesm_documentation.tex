@@ -865,6 +865,15 @@ where
 \end{align}
 Coefficients follow the MOM6 implementation.  The density perturbation is $\rho'=\rho(\theta,S,p)-\rho_0$.
 
+\subsubsection{Linear Equation of State}
+
+A configurable linear EOS is also available for idealised experiments:
+\begin{equation}
+  \rho = \rho_0\bigl[1 - \alpha_T(T-T_{\mathrm{ref}}) + \beta_S(S-S_{\mathrm{ref}})\bigr],
+\end{equation}
+with typical values $\alpha_T=2\times10^{-4}$~K$^{-1}$, $\beta_S=7.4\times10^{-4}$~PSU$^{-1}$.
+The linear EOS is pressure-independent (no hydrostatic pressure coupling iterations required), enabling faster compilation and execution.  It is selected via \texttt{eos="linear"} in the ocean configuration, with parameters set via a \texttt{LinearEOSConfig} NamedTuple.  A dispatcher \texttt{make\_eos\_fn()} returns the appropriate EOS callable.
+
 %-----------------------------------------------------------------------------
 \subsection{Hydrostatic Pressure and Vertical Velocity}
 %-----------------------------------------------------------------------------
@@ -878,6 +887,9 @@ Vertical velocity diagnosed bottom-up from $w(\text{floor})=0$:
 \begin{equation}
   w_{k-1/2} = -\sum_{k'=k}^{N-1}\nabla\!\cdot\!(h_{k'}\,\bm v_{k'}).
 \end{equation}
+
+\paragraph{Single-level barotropic mode ($N_{\mathrm{lev}}=1$).}
+The z-star coordinate supports $N_{\mathrm{lev}}=1$, reducing exactly to the nonlinear shallow-water equations: $h = H + \eta$, with no baroclinic modes.  Vertical mixing operators return zero for $N_{\mathrm{lev}}<2$.  This enables MITgcm-style barotropic gyre experiments with a single depth-integrated layer.
 
 %-----------------------------------------------------------------------------
 \subsection{Ocean Vertical Mixing}
@@ -928,12 +940,13 @@ Two formulations:
 \subsection{Ocean Surface Forcing}
 %-----------------------------------------------------------------------------
 
-Three modes:
+Three modes, available on cubed-sphere, lat-lon, and MPAS grids:
 \begin{itemize}[nosep]
-  \item \textbf{Prescribed}: Fixed wind stress and heat flux profiles.
+  \item \textbf{Prescribed}: Fixed wind stress and heat flux profiles (cosine-latitude, single-gyre, double-gyre, constant).
   \item \textbf{Restoring}: SST/SSS restoring toward climatology (Haney-style) with configurable timescale.
   \item \textbf{Bulk formulas}: COARE-like air--sea fluxes with drag, Stanton, and Dalton coefficients.
 \end{itemize}
+On MPAS Voronoi meshes, cell-centred wind stress $(\tau_x,\tau_y)$ is projected onto TRiSK edge normals via $\tau_n = \tau_x\cos\alpha_e + \tau_y\sin\alpha_e$ where $\alpha_e$ is the edge normal angle.  An MPAS-specific physics factory (\texttt{make\_mpas\_ocean\_physics}) handles this projection.
 
 %-----------------------------------------------------------------------------
 \subsection{Shortwave Penetration}
@@ -959,7 +972,9 @@ Entraining mass-flux ocean convection with entrainment rate $\alpha_{\mathrm{plu
 \subsection{Ocean Conservation Fixers}
 %-----------------------------------------------------------------------------
 
-Grid-specific volume, heat, and salt conservation fixers for cubed-sphere, lat-lon, and MPAS grids.  Uniform additive correction per unit volume after each timestep.
+Grid-specific volume, heat, and salt conservation fixers for cubed-sphere, lat-lon, and MPAS grids.  Uniform additive correction per unit volume after each timestep.  All three grids compute corrections simultaneously from the original pre-fix state (avoiding order-dependent bias) and upcast to accumulation precision before global reductions to prevent catastrophic cancellation in float32.
+
+\textbf{Limitation:} These are uniform additive fixers that violate local conservation and act as spurious globally-uniform diapycnal mixing.  The proper solution is flux-form tracer advection with barotropic--baroclinic flux reconciliation (Hallberg 1997, Higdon 2005).
 
 %=============================================================================
 \section{Time Integration}

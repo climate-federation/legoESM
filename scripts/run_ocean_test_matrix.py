@@ -76,6 +76,9 @@ if _PROJECT_ROOT not in sys.path:
 import jax
 jax.config.update("jax_enable_x64", True)
 
+from legoesm.runtime.backend import ensure_metal_or_fallback
+ensure_metal_or_fallback()
+
 import jax.numpy as jnp
 import numpy as np
 from scipy.spatial import cKDTree
@@ -230,13 +233,13 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "barotropic_wave", g, bwave_res[g], 2.0, 0.2))
 
-    # --- Barotropic gyre: cubed_sphere, latlon (MPAS lacks surface forcing) ---
-    for g in ["cubed_sphere", "latlon"]:
+    # --- Barotropic gyre: cubed_sphere, latlon, mpas ---
+    for g in ["cubed_sphere", "latlon", "mpas"]:
         matrix.append(TestCase(
             "barotropic_gyre", g, res[g], 30.0, 2.0))
 
-    # --- Barotropic double gyre: cubed_sphere, latlon ---
-    for g in ["cubed_sphere", "latlon"]:
+    # --- Barotropic double gyre: cubed_sphere, latlon, mpas ---
+    for g in ["cubed_sphere", "latlon", "mpas"]:
         matrix.append(TestCase(
             "barotropic_double_gyre", g, res[g], 30.0, 2.0))
 
@@ -265,8 +268,8 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "overflow", g, res[g], 0.5, 0.1))
 
-    # --- Stommel Gyre Tracer (Hecht et al. 2000): cubed_sphere, latlon ---
-    for g in ["cubed_sphere", "latlon"]:
+    # --- Stommel Gyre Tracer (Hecht et al. 2000): cubed_sphere, latlon, mpas ---
+    for g in ["cubed_sphere", "latlon", "mpas"]:
         matrix.append(TestCase(
             "stommel_gyre_tracer", g, res[g], 60.0, 5.0))
 
@@ -1147,7 +1150,12 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
         from legoesm.ocean.mpas_config import MPASOceanConfig
 
         mesh = create_voronoi_mesh(params["level"])
-        config = MPASOceanConfig(n_barotropic_substeps=30)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        config = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, config)
         coord_kind = "mpas"
         lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
@@ -1592,6 +1600,13 @@ def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord,
             lon_west=lon_west, lon_east=lon_east,
             lat_south=lat_south, lat_north=lat_north,
         )
+    elif grid_type == "mpas":
+        from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
+        return wind_driven_gyre_mpas(
+            grid, z_coord,
+            lon_west=lon_west, lon_east=lon_east,
+            lat_south=lat_south, lat_north=lat_north,
+        )
     raise ValueError(f"Wind gyre not available for grid: {grid_type}")
 
 
@@ -2008,7 +2023,7 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
                          wind_profile: str, label: str,
                          ) -> tuple[str, float, str]:
     """Shared runner for barotropic gyre experiments."""
-    if tc.grid_type not in ("cubed_sphere", "latlon"):
+    if tc.grid_type not in ("cubed_sphere", "latlon", "mpas"):
         raise NotImplementedError(
             f"{label} not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
@@ -2675,12 +2690,12 @@ def _compute_rpe(state, grid_type, grid, z_coord):
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
 
-    # Compute density at each point using linearized EOS approximation
-    # rho ≈ rho0 * (1 - alpha_T * (T - T_ref))
-    rho0 = 1025.0
-    alpha_T = 2.0e-4  # thermal expansion coefficient
-    T_ref = 15.0
-    rho = rho0 * (1.0 - alpha_T * (T - T_ref))
+    # Compute density at each point using linearized EOS
+    from legoesm.ocean.eos import linear_eos
+    rho = np.asarray(linear_eos(
+        jnp.array(T), jnp.array(S), jnp.zeros_like(jnp.array(T)),
+        rho_ref=1025.0, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
+    ), dtype=np.float64)
 
     # Potential energy: PE = g * sum(rho * z * dz * area)
     # For RPE, we'd sort density globally, but as approximation compute PE
@@ -2991,7 +3006,7 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     boundary current. Monitors tracer conservation (integral, min, max)
     and transport through the sheared flow.
     """
-    if tc.grid_type not in ("cubed_sphere", "latlon"):
+    if tc.grid_type not in ("cubed_sphere", "latlon", "mpas"):
         raise NotImplementedError(
             f"Stommel gyre tracer not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
@@ -3003,7 +3018,7 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
     state = _init_stommel_gyre_tracer(rest, tc.grid_type, grid, z_coord)
 
     # Store initial tracer integral for conservation check
-    area = np.asarray(grid.area, dtype=np.float64)
+    area = np.asarray(grid.grid_area, dtype=np.float64)
     S_init_sfc = np.asarray(state.S.data[..., 0], dtype=np.float64)
     mask = np.asarray(state.land_mask.data, dtype=np.float64)
     S_integral_init = float(np.sum(S_init_sfc * area * mask))

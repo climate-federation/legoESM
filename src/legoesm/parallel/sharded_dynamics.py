@@ -1520,7 +1520,7 @@ def make_voronoi_sharded_step(
     dev_config: DeviceConfig,
     *,
     halo_strategy: str = "auto",
-    ppermute_cells_per_device_threshold: int = 25_000,
+    ppermute_cells_per_device_threshold: int = 2_000,
 ):
     """Create a halo-partitioned multi-GPU step for Voronoi (MPAS/TRiSK) grids.
 
@@ -1554,7 +1554,9 @@ def make_voronoi_sharded_step(
         When ``halo_strategy="auto"``, use ppermute only if each device
         owns at least this many cells.  Below this threshold the
         per-round packing/scatter overhead of ppermute exceeds the
-        communication savings over allgather.  Default: 25 000.
+        communication savings over allgather.  Default: 2 000.
+        (Lowered from 25 000 to avoid the O(N) allgather bottleneck
+        on moderate icosahedral grids like I5 with 2–4 GPUs.)
 
     Returns
     -------

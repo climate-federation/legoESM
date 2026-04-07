@@ -23,7 +23,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
+from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -123,12 +123,18 @@ def latlon_ocean_baroclinic_tendencies(
     )
 
     # --- 2. Density from EOS ---
-    rho = wright_eos(T, S, jnp.zeros_like(T))
+    # Fill land-cell T/S with ocean-neighbor values before EOS so that
+    # density on land ≈ ρ₀, preventing spurious ρ' at coastlines.
+    from legoesm.ocean.dynamics.latlon_operators import _neumann_fill_latlon
+    T_filled = _neumann_fill_latlon(T, mask)
+    S_filled = _neumann_fill_latlon(S, mask)
+    eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
             rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
         )
-        rho = wright_eos(T, S, p_hydro)
+        rho = eos_fn(T_filled, S_filled, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
         rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
     )
@@ -140,8 +146,11 @@ def latlon_ocean_baroclinic_tendencies(
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
 
-    dp_dx = gradient_x_latlon(p_prime, grid)
-    dp_dy = gradient_y_latlon(p_prime, grid)
+    # Fill land cells in p_prime before gradient so the centered-
+    # difference stencil sees smooth values at coastlines.
+    p_prime_filled = _neumann_fill_latlon(p_prime, mask)
+    dp_dx = gradient_x_latlon(p_prime_filled, grid)
+    dp_dy = gradient_y_latlon(p_prime_filled, grid)
 
     # --- 4. Vertical velocity from FV flux divergence ---
     flux_div_k = fv_divergence_latlon_3d(
@@ -187,7 +196,7 @@ def latlon_ocean_baroclinic_tendencies(
         if config.K_h > 0:
             dtr_dt = dtr_dt + config.K_h * laplacian_latlon(tr, grid, mask=mask)
         if physics_fn is None:
-            if config.K_v > 0:
+            if config.K_v > 0 and tr.shape[-1] >= 2:
                 # J is horizontal-only (n_lat, n_lon) — broadcasts with
                 # vertical arrays via the trailing newaxis.
                 jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
@@ -215,7 +224,7 @@ def latlon_ocean_baroclinic_tendencies(
     if config.A_h > 0:
         du_dt = du_dt + config.A_h * laplacian_latlon(u * mask_3d, grid, mask=mask)
         dv_dt = dv_dt + config.A_h * laplacian_latlon(v * mask_3d, grid, mask=mask)
-    if config.A_v > 0:
+    if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
         for vel, dvel_dt_ref in [(u, "u"), (v, "v")]:
             dv_dz_half = jnp.diff(vel, axis=-1) / (

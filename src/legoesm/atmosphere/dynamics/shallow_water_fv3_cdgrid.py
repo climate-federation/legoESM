@@ -73,7 +73,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
     use_fv3_fb: bool = False  # EXPERIMENTAL — unstable, see docs/cubed_sphere_edge_artifacts.md
-    boundary_fix: bool = False  # Replace boundary corner tendencies with interior
+    boundary_fix: bool = True  # Replace boundary corner tendencies with interior
 
 
 # ==============================================================================

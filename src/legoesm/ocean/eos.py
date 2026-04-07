@@ -1,14 +1,11 @@
-"""Wright (1997) equation of state for seawater.
+"""Equation of state for seawater: Wright (1997) and linear.
 
-Computes in-situ density rho(T, S, p) using the Wright (1997)
-parameterization as implemented in MOM6 (MOM_EOS_Wright.F90).
-Pure JAX functions, compatible with jit/grad/vmap.  Inputs are clipped
-to the Wright EOS valid range (T in [-2, 40] degC, S in [0, 42] PSU),
-so gradients are exactly zero outside that range.  This is physically
-correct (the polynomial is not valid there) but means the EOS is only
-*piecewise* differentiable; callers using jax.grad through long
-integrations should be aware that out-of-range states produce zero
-gradients rather than NaN or extrapolated values.
+Provides:
+- ``wright_eos`` — nonlinear Wright (1997) EOS (MOM6 implementation)
+- ``linear_eos`` — configurable linear EOS: ρ = ρ₀[1 - αT(T-Tref) + βS(S-Sref)]
+- ``make_eos_fn`` — dispatcher returning an EOS callable based on config
+
+Pure JAX functions, compatible with jit/grad/vmap.
 
 Reference
 ---------
@@ -17,6 +14,8 @@ Ockham's Razor Revisited. J. Atmos. Oceanic Tech., 14(3), 735-740.
 """
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 import jax.numpy as jnp
 
@@ -202,6 +201,84 @@ def haline_contraction_coeff(
     return (drho_dS / rho).astype(T.dtype)
 
 
+# ==============================================================================
+# Linear equation of state
+# ==============================================================================
+
+class LinearEOSConfig(NamedTuple):
+    """Configuration for the linear equation of state.
+
+    ρ = rho_ref * [1 - alpha_T * (T - T_ref) + beta_S * (S - S_ref)]
+    """
+    rho_ref: float = 1025.0    # Reference density [kg/m³]
+    alpha_T: float = 2.0e-4    # Thermal expansion coefficient [1/K]
+    beta_S: float = 7.4e-4     # Haline contraction coefficient [1/PSU]
+    T_ref: float = 10.0        # Reference temperature [°C]
+    S_ref: float = 35.0        # Reference salinity [PSU]
+
+
+def linear_eos(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    rho_ref: float = 1025.0,
+    alpha_T: float = 2.0e-4,
+    beta_S: float = 7.4e-4,
+    T_ref: float = 10.0,
+    S_ref: float = 35.0,
+) -> jnp.ndarray:
+    """Compute density from a linear equation of state.
+
+    ρ = rho_ref * [1 - alpha_T * (T - T_ref) + beta_S * (S - S_ref)]
+
+    Parameters
+    ----------
+    T : array — Potential temperature [°C].
+    S : array — Salinity [PSU].
+    p : array — Pressure [Pa] (unused, accepted for API compatibility).
+    rho_ref : float — Reference density [kg/m³].
+    alpha_T : float — Thermal expansion coefficient [1/K].
+    beta_S : float — Haline contraction coefficient [1/PSU].
+    T_ref : float — Reference temperature [°C].
+    S_ref : float — Reference salinity [PSU].
+
+    Returns
+    -------
+    array : In-situ density [kg/m³].
+    """
+    return rho_ref * (1.0 - alpha_T * (T - T_ref) + beta_S * (S - S_ref))
+
+
+def make_eos_fn(eos="wright", eos_linear=None):
+    """Return an EOS callable ``fn(T, S, p) -> rho``.
+
+    Parameters
+    ----------
+    eos : str
+        ``"wright"`` (default) or ``"linear"``.
+    eos_linear : LinearEOSConfig or None
+        Parameters for linear EOS.  Ignored when *eos* is ``"wright"``.
+        If ``None`` and *eos* is ``"linear"``, default parameters are used.
+
+    Returns
+    -------
+    Callable[[array, array, array], array]
+    """
+    if eos == "wright":
+        return wright_eos
+    elif eos == "linear":
+        cfg = eos_linear if eos_linear is not None else LinearEOSConfig()
+        def _linear(T, S, p):
+            return linear_eos(
+                T, S, p,
+                rho_ref=cfg.rho_ref, alpha_T=cfg.alpha_T,
+                beta_S=cfg.beta_S, T_ref=cfg.T_ref, S_ref=cfg.S_ref,
+            )
+        return _linear
+    else:
+        raise ValueError(f"Unknown EOS scheme: {eos!r}")
+
+
 def density_perturbation(
     T: jnp.ndarray,
     S: jnp.ndarray,
@@ -320,8 +397,8 @@ def compute_buoyancy_frequency(
 # Shared helpers for ocean physics integration modules
 # ==============================================================================
 
-def compute_ocean_rho(state, z_coord, jacobian):
-    """Compute in-situ density from ocean state via Wright EOS.
+def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
+    """Compute in-situ density from ocean state.
 
     Used by vertical mixing, lateral mixing, and convection integration
     bridges. Avoids triplicating the same hydrostatic pressure + EOS call.
@@ -334,37 +411,45 @@ def compute_ocean_rho(state, z_coord, jacobian):
         Vertical coordinate with .dz_ref.
     jacobian : array
         Dynamic Jacobian (eta + H) / H.
+    eos_fn : callable or None
+        EOS function ``fn(T, S, p) -> rho``.  If None, uses ``wright_eos``.
 
     Returns
     -------
     array : In-situ density [kg/m^3].
     """
+    if eos_fn is None:
+        eos_fn = wright_eos
     # Two EOS iterations for density-pressure consistency, matching the
     # dynamical core (ocean_pe_cdgrid.py).
-    rho = wright_eos(state.T.data, state.S.data, jnp.zeros_like(state.T.data))
+    rho = eos_fn(state.T.data, state.S.data, jnp.zeros_like(state.T.data))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
             rho, state.eta.data, z_coord.dz_ref, jacobian, rho_0,
         )
-        rho = wright_eos(state.T.data, state.S.data, p_hydro)
+        rho = eos_fn(state.T.data, state.S.data, p_hydro)
     return rho
 
 
-def compute_ocean_rho_and_pressure(state, z_coord, jacobian):
+def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
     """Compute in-situ density and hydrostatic pressure from ocean state.
 
     Parameters
     ----------
     state, z_coord, jacobian : same as ``compute_ocean_rho``.
+    eos_fn : callable or None
+        EOS function. If None, uses ``wright_eos``.
 
     Returns
     -------
     rho : array — in-situ density [kg/m^3].
     p_hydro : array — hydrostatic pressure [Pa].
     """
+    if eos_fn is None:
+        eos_fn = wright_eos
     p_hydro = compute_hydrostatic_pressure(
         jnp.full_like(state.T.data, rho_0),
         state.eta.data, z_coord.dz_ref, jacobian, rho_0,
     )
-    rho = wright_eos(state.T.data, state.S.data, p_hydro)
+    rho = eos_fn(state.T.data, state.S.data, p_hydro)
     return rho, p_hydro

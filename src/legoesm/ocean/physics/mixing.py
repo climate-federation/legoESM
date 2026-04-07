@@ -73,6 +73,9 @@ def vertical_diffusion(
     -------
     array : Vertical diffusion tendency, shape (..., nlev).
     """
+    if field.shape[-1] < 2:
+        return jnp.zeros_like(field)
+
     dtype = field.dtype
     jacobian = jacobian.astype(dtype)
     coeff = jnp.asarray(coeff, dtype=dtype)
@@ -120,6 +123,9 @@ def vertical_diffusion_variable_K(
     -------
     array : Vertical diffusion tendency, shape (..., nlev).
     """
+    if field.shape[-1] < 2:
+        return jnp.zeros_like(field)
+
     dtype = field.dtype
     jacobian = jacobian.astype(dtype)
     K_half = K_half.astype(dtype)

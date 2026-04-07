@@ -9,6 +9,17 @@ Solves the 2D free-surface equations via forward-backward substeps:
 where U_bar, V_bar are depth-averaged velocities and F_slow is the
 baroclinic forcing held constant during substeps.
 
+Grid staggering
+---------------
+This solver uses **A-grid** (cell-center) staggering for velocity, even
+though the baroclinic dynamics (``ocean_pe_cdgrid.py``) use C-D grid
+internally.  This is a deliberate trade-off: the barotropic mode
+primarily resolves fast gravity waves, where mass conservation and
+stability matter more than high-order vorticity numerics. The
+``barotropic_diffusion_alpha`` parameter damps the A-grid computational
+mode (checkerboard noise in eta).  See ``docs/ocean_grid_staggering.md``
+for the full rationale.
+
 This parallels acoustic_substeps() in compressible_euler.py but for
 barotropic ocean gravity waves instead of atmospheric sound waves.
 """
@@ -35,6 +46,7 @@ def _fill_land_cells(
     field: jnp.ndarray,
     mask: jnp.ndarray,
     grid: CubedSphereGrid,
+    n_passes: int = 3,
 ) -> jnp.ndarray:
     """Replace land values with ocean-neighbor average (zero-gradient BC).
 
@@ -44,6 +56,10 @@ def _fill_land_cells(
     that would otherwise produce spurious pressure gradients and diffusive
     fluxes at the coastline.
 
+    Multiple passes propagate through consecutive land cells (e.g. narrow
+    land strips 2-3 cells wide between ocean basins), matching the
+    lat-lon solver's 3-pass approach.
+
     Uses ``pad_halo`` for correct cross-face halo exchange.
 
     Parameters
@@ -51,31 +67,42 @@ def _fill_land_cells(
     field : array, shape (6, n, n)
     mask  : array, shape (6, n, n), 1 = ocean, 0 = land
     grid  : CubedSphereGrid
+    n_passes : int
+        Number of fill passes (default 3).
 
     Returns
     -------
     field_filled : array, same shape, ocean cells unchanged, coastal
         land cells filled.
     """
-    f_pad = pad_halo(field, interp_offsets=grid.halo_interp_offsets)
-    m_pad = pad_halo(mask, interp_offsets=grid.halo_interp_offsets)
+    filled = field
+    effective_mask = mask
+    for _ in range(n_passes):
+        f_pad = pad_halo(filled, interp_offsets=grid.halo_interp_offsets)
+        m_pad = pad_halo(effective_mask, interp_offsets=grid.halo_interp_offsets)
 
-    # 4-connected neighbour sum, weighted by ocean mask
-    nbr_sum = (
-        f_pad[:, 2:, 1:-1] * m_pad[:, 2:, 1:-1]
-        + f_pad[:, :-2, 1:-1] * m_pad[:, :-2, 1:-1]
-        + f_pad[:, 1:-1, 2:] * m_pad[:, 1:-1, 2:]
-        + f_pad[:, 1:-1, :-2] * m_pad[:, 1:-1, :-2]
-    )
-    nbr_count = (
-        m_pad[:, 2:, 1:-1]
-        + m_pad[:, :-2, 1:-1]
-        + m_pad[:, 1:-1, 2:]
-        + m_pad[:, 1:-1, :-2]
-    )
-    nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
+        # 4-connected neighbour sum, weighted by ocean mask
+        nbr_sum = (
+            f_pad[:, 2:, 1:-1] * m_pad[:, 2:, 1:-1]
+            + f_pad[:, :-2, 1:-1] * m_pad[:, :-2, 1:-1]
+            + f_pad[:, 1:-1, 2:] * m_pad[:, 1:-1, 2:]
+            + f_pad[:, 1:-1, :-2] * m_pad[:, 1:-1, :-2]
+        )
+        nbr_count = (
+            m_pad[:, 2:, 1:-1]
+            + m_pad[:, :-2, 1:-1]
+            + m_pad[:, 1:-1, 2:]
+            + m_pad[:, 1:-1, :-2]
+        )
+        nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
 
-    return jnp.where(mask > 0.5, field, nbr_avg)
+        is_land = mask < 0.5
+        has_ocean_nbr = nbr_count > 0.0
+        filled = jnp.where(is_land & has_ocean_nbr, nbr_avg, filled)
+        # Expand effective mask so next pass can propagate further
+        effective_mask = jnp.where(is_land & has_ocean_nbr, 1.0, effective_mask)
+
+    return jnp.where(mask > 0.5, field, filled)
 
 
 # ==============================================================================
@@ -211,8 +238,13 @@ def barotropic_substeps(
 
         # Forward: update eta from continuity
         # deta/dt = -div(H_total * U_bar, H_total * V_bar)
-        flux_u = H_total_c * U_bar_c
-        flux_v = H_total_c * V_bar_c
+        # Mask fluxes before divergence so that no transport crosses
+        # land-ocean boundaries.  Without this, the centered-difference
+        # stencil in divergence() sees a nonzero-to-zero transition at
+        # coastal cells, generating spurious divergence.  (The latlon
+        # solver achieves this via mask= kwarg in fv_divergence_latlon.)
+        flux_u = H_total_c * U_bar_c * mask
+        flux_v = H_total_c * V_bar_c * mask
         div_flux = _divergence_raw(flux_u, flux_v, grid).astype(eta.dtype)
         eta_unfloored = (eta_c - dt_s * div_flux) * mask
         eta_new = jnp.maximum(eta_unfloored, eta_floor) * mask
