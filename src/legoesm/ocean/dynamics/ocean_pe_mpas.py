@@ -215,7 +215,7 @@ def mpas_ocean_baroclinic_tendencies(
         dS_dt_k = (-div_S_flux + S_k * div_flux) / h_safe
 
         # Horizontal tracer diffusion: K_h * lap(T)
-        # Approximate Laplacian as div(grad(T))
+        # Approximate Laplacian as div(grad(T)); mask enforces no-flux BC at coast
         grad_T = gradient_edge(T_k, mesh) * edge_mask
         dT_dt_k = dT_dt_k + config.K_h * divergence_cell(grad_T, mesh) / h_safe * h_k_level
         grad_S = gradient_edge(S_k, mesh) * edge_mask
