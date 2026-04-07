@@ -590,10 +590,10 @@ def laplacian_latlon(
     # cos(lat) at half-levels
     lat = grid.lat
     cos_half_north = jnp.cos(
-        jnp.concatenate([0.5 * (lat[:-1] + lat[1:]), jnp.array([jnp.pi / 2])])
+        jnp.concatenate([0.5 * (lat[:-1] + lat[1:]), jnp.array([jnp.pi / 2], dtype=lat.dtype)])
     )
     cos_half_south = jnp.cos(
-        jnp.concatenate([jnp.array([-jnp.pi / 2]), 0.5 * (lat[:-1] + lat[1:])])
+        jnp.concatenate([jnp.array([-jnp.pi / 2], dtype=lat.dtype), 0.5 * (lat[:-1] + lat[1:])])
     )
 
     if f.ndim == 2:
