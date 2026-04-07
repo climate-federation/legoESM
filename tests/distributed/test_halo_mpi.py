@@ -305,16 +305,16 @@ class TestMPIOceanConservation:
 
         # Compare only owned faces: the MPI version zeroes non-owned faces,
         # so non-owned face data will not match the reference.
-        owned = list(topology.local_face_ids)
+        owned = jnp.array(list(topology.local_face_ids))
         # MPI allreduce uses different FP summation order than serial,
         # producing O(1e-5) differences in float32.  Use atol=1e-4
         # to accommodate the worst-case rounding discrepancy.
         assert jnp.allclose(
             fixed_part.eta.data[owned], ref_state.eta.data[owned], atol=1e-4,
-        ), f"eta mismatch on owned faces"
+        ), "eta mismatch on owned faces"
         assert jnp.allclose(
             fixed_part.T.data[owned], ref_state.T.data[owned], atol=1e-4,
-        ), f"T mismatch on owned faces"
+        ), "T mismatch on owned faces"
         assert jnp.allclose(
             fixed_part.S.data[owned], ref_state.S.data[owned], atol=1e-4,
-        ), f"S mismatch on owned faces"
+        ), "S mismatch on owned faces"
