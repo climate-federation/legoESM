@@ -146,7 +146,8 @@ class TestComputeSegmentLength:
         assert compute_segment_length(12, 8, 0) == 4
 
     def test_three_intervals(self):
-        assert compute_segment_length(12, 18, 6) == 6
+        # rad_update_steps is excluded from GCD (handled inside scan body)
+        assert compute_segment_length(12, 18, 6) == 6  # gcd(12, 18)
 
     def test_all_same(self):
         assert compute_segment_length(5, 5, 5) == 5
@@ -154,8 +155,14 @@ class TestComputeSegmentLength:
     def test_all_zero_returns_one(self):
         assert compute_segment_length(0, 0, 0) == 1
 
-    def test_one_zero_ignored(self):
-        assert compute_segment_length(10, 0, 4) == 2
+    def test_rad_update_excluded_from_gcd(self):
+        # rad_update_steps=4 should NOT constrain segment length;
+        # only diag_interval=10 matters here (checkpoint=0 disabled).
+        assert compute_segment_length(10, 0, 4) == 10
+
+    def test_rad_update_one_does_not_collapse(self):
+        # The original bug: rad_update_steps=1 collapsed segment to 1.
+        assert compute_segment_length(100, 0, 1) == 100
 
     def test_always_at_least_one(self):
         assert compute_segment_length(1, 1, 1) == 1
@@ -164,9 +171,9 @@ class TestComputeSegmentLength:
         assert compute_segment_length(97, 53, 0) == 1
 
     def test_python_gcd_consistency(self):
-        """Result matches stdlib math.gcd."""
+        """Result matches stdlib math.gcd for diag & checkpoint."""
         a, b, c = 120, 84, 36
-        expected = math.gcd(math.gcd(a, b), c)
+        expected = math.gcd(a, b)  # rad_update_steps excluded
         assert compute_segment_length(a, b, c) == expected
 
 
