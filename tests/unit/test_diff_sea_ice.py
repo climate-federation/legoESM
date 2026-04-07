@@ -192,3 +192,114 @@ class TestRheologyGrad:
 
         grad = jax.grad(loss)(eps_11)
         assert_gradient_ok(grad, "EVP stress update w.r.t. eps_11")
+
+
+# ============================================================================
+# 5d  Multi-category ITD — linear_remap differentiability
+# ============================================================================
+
+class TestITDRemapGrad:
+
+    def test_linear_remap_grad_h(self):
+        """Gradient through ITD linear remapping w.r.t. post-thermo thickness."""
+        from legoesm.ice.itd import linear_remap
+
+        n_cat = 5
+        shape = (6, 4, 4, n_cat)
+
+        key = jax.random.PRNGKey(50)
+        k1, k2, k3, k4 = jax.random.split(key, 4)
+
+        # Pre-thermo state: uniform across categories
+        h_old = jnp.broadcast_to(jnp.array([0.3, 1.0, 1.8, 3.0, 5.0]), shape)
+        a_old = 0.15 * jnp.ones(shape)
+
+        # Post-thermo: perturbed thickness
+        h_new = h_old + 0.1 * jax.random.normal(k1, shape)
+        h_new = jnp.maximum(h_new, 0.0)
+        a_new = a_old + 0.01 * jax.random.normal(k2, shape)
+        a_new = jnp.clip(a_new, 0.0, 1.0)
+
+        T_new = 265.0 * jnp.ones(shape)
+
+        def loss(h_new_data):
+            h_r, a_r, T_r = linear_remap(h_old, a_old, h_new_data, a_new, n_cat, T_new)
+            return jnp.sum(h_r ** 2 + a_r ** 2)
+
+        grad = jax.grad(loss)(h_new)
+        assert_gradient_ok(grad, "ITD linear_remap w.r.t. h_new", min_nonzero_frac=0.05)
+
+    def test_aggregate_state_grad(self):
+        """Gradient through ITD aggregation."""
+        from legoesm.ice.itd import aggregate_state
+
+        n_cat = 5
+        shape = (6, 4, 4, n_cat)
+        h_ice = jnp.broadcast_to(jnp.array([0.3, 1.0, 1.8, 3.0, 5.0]), shape)
+        T_ice = 265.0 * jnp.ones(shape)
+        conc = 0.15 * jnp.ones(shape)
+
+        def loss(h_data):
+            h_agg, T_agg, conc_agg = aggregate_state(h_data, T_ice, conc)
+            return jnp.sum(h_agg ** 2)
+
+        grad = jax.grad(loss)(h_ice)
+        assert_gradient_ok(grad, "ITD aggregate w.r.t. h_ice", min_nonzero_frac=0.05)
+
+
+# ============================================================================
+# 5e  Ice albedo feedback loop
+# ============================================================================
+
+class TestIceAlbedoFeedback:
+
+    def test_albedo_feedback_sign(self):
+        """Warmer ice -> lower albedo -> more SW absorption (positive feedback).
+
+        d(absorbed_SW)/d(T_ice) > 0 when temp_dependent_albedo=True.
+        """
+        from legoesm.surface_albedo import ice_albedo, IceAlbedoConfig
+
+        config = IceAlbedoConfig()
+        ncol = 32
+        sw_down = 200.0 * jnp.ones(ncol)
+
+        def absorbed_sw(T_ice):
+            alpha = ice_albedo(T_ice, config)
+            return jnp.sum((1.0 - alpha) * sw_down)
+
+        T_ice = 270.0 * jnp.ones(ncol)
+        grad = jax.grad(absorbed_sw)(T_ice)
+        assert jnp.all(jnp.isfinite(grad)), "Albedo feedback gradient not finite"
+        # Positive feedback: warmer ice -> lower albedo -> more absorption
+        assert jnp.mean(grad) > 0, (
+            f"Expected positive d(absorbed_SW)/d(T_ice), got mean={jnp.mean(grad):.6e}"
+        )
+
+    def test_slab_ice_with_temp_albedo_grad(self):
+        """Full slab ice step with temperature-dependent albedo."""
+        from legoesm.ice.sea_ice import step_sea_ice
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.ice.state import SeaIceState
+
+        config = SeaIceConfig(dynamics="none", temp_dependent_albedo=True)
+        shape = (6, 4, 4)
+        ones = jnp.ones(shape)
+        state = SeaIceState(
+            h_ice=Field(1.0 * ones, name="h_ice"),
+            T_ice=Field(268.0 * ones, name="T_ice"),
+            concentration=Field(0.8 * ones, name="concentration"),
+        )
+        forcing = make_ice_forcing(shape)
+        ocean_sst = 271.35 * ones
+
+        def loss(T_data):
+            s = state._replace(T_ice=state.T_ice.replace(data=T_data))
+            out, response = step_sea_ice(
+                s, forcing, ocean_sst, jnp.zeros(shape), jnp.zeros(shape),
+                config, U_min=1.0, dt=3600.0,
+            )
+            return jnp.sum(out.T_ice.data ** 2)
+
+        grad = jax.grad(loss)(state.T_ice.data)
+        assert_gradient_ok(grad, "Slab ice (temp-dependent albedo) w.r.t. T_ice")

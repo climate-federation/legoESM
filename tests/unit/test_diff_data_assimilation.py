@@ -272,3 +272,90 @@ class TestPreconditioningGrad:
         v0 = jnp.ones(n)
         grad = jax.grad(precond_cost)(v0)
         assert_gradient_ok(grad, "Preconditioned cost gradient")
+
+
+# ============================================================================
+# 7g  Incremental 4D-Var end-to-end
+# ============================================================================
+
+class TestIncremental4DVar:
+
+    def test_twin_experiment(self):
+        """Twin experiment: analysis should reduce RMSE vs background."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
+            FVShallowWaterLatLonModel,
+        )
+        from legoesm.core.state import ShallowWaterState
+        from legoesm.da.control_vector import build_control_spec, state_to_control
+        from legoesm.da.observation import DirectObsOperator, Observation
+        from legoesm.da.background_error import DiagonalB
+        from legoesm.da.incremental import incremental_4dvar, IncrementalConfig
+
+        grid = create_latlon_grid(8, 16)
+        dt = 120.0
+        model = FVShallowWaterLatLonModel(grid, dt=dt)
+
+        # Truth
+        key = jax.random.PRNGKey(42)
+        h_truth = 1000.0 + 10.0 * jax.random.normal(key, (8, 16))
+        truth_state = ShallowWaterState(
+            h=Field(h_truth, name="h"),
+            u=Field(jnp.zeros((8, 16)), name="u"),
+            v=Field(jnp.zeros((8, 16)), name="v"),
+            h_s=Field(jnp.zeros((8, 16)), name="h_s"),
+        )
+
+        # Background: truth + error
+        k2 = jax.random.PRNGKey(43)
+        h_bg = h_truth + 15.0 * jax.random.normal(k2, (8, 16))
+        bg_state = ShallowWaterState(
+            h=Field(h_bg, name="h"),
+            u=Field(jnp.zeros((8, 16)), name="u"),
+            v=Field(jnp.zeros((8, 16)), name="v"),
+            h_s=Field(jnp.zeros((8, 16)), name="h_s"),
+        )
+
+        spec = build_control_spec(bg_state, fields=("h",))
+
+        # Synthetic observations from truth at time_index=1
+        indices = (jnp.array([2, 4, 6]), jnp.array([3, 8, 12]))
+        H = DirectObsOperator("h", indices)
+
+        # Forward truth to get obs at step 1
+        truth_step1 = model.step(truth_state, dt)
+        obs_vals = H(truth_step1)
+        obs = (Observation(
+            values=obs_vals,
+            errors=5.0 * jnp.ones(3),
+            time_index=1,
+            operator=H,
+        ),)
+
+        sigma = 20.0 * jnp.ones(spec.total_size)
+        B = DiagonalB(sigma=sigma)
+
+        config = IncrementalConfig(
+            n_outer=2,
+            n_inner=10,
+            inner_gtol=1e-4,
+            inner_method="lbfgs",
+            use_preconditioning=True,
+        )
+
+        analysis_state, diag = incremental_4dvar(
+            model, bg_state, obs, B, spec, dt, n_steps=2, config=config,
+        )
+
+        # Assert cost decreased
+        if len(diag.cost_history) >= 2:
+            assert diag.cost_history[-1] <= diag.cost_history[0] + 1e-6, (
+                f"Cost did not decrease: {diag.cost_history}"
+            )
+
+        # Assert analysis is closer to truth than background
+        rmse_bg = jnp.sqrt(jnp.mean((h_bg - h_truth) ** 2))
+        rmse_an = jnp.sqrt(jnp.mean((analysis_state.h.data - h_truth) ** 2))
+        assert rmse_an < rmse_bg, (
+            f"Analysis RMSE ({rmse_an:.4f}) not less than background RMSE ({rmse_bg:.4f})"
+        )
