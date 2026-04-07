@@ -239,6 +239,27 @@ class TestCFWriter(unittest.TestCase):
                 self.assertIsNotNone(writer)
 
 
+class TestDiagnosticCollector(unittest.TestCase):
+    """DiagnosticCollector CMIP wiring."""
+
+    def test_cmor_writer_uses_requested_experiment_id(self):
+        """CFWriter metadata follows the configured experiment id."""
+        from legoesm.driver.diagnostics import DiagnosticCollector
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector = DiagnosticCollector(
+                nlev=5,
+                sigma_full=np.linspace(0.9, 0.1, 5),
+                dsigma=np.full(5, 0.2),
+                experiment_id="piControl",
+                cmip_output=True,
+                output_dir=tmpdir,
+            )
+            self.assertIsNotNone(collector.cf_writer)
+            self.assertEqual(collector.cf_writer.experiment_id, "piControl")
+            collector.cf_writer.close()
+
+
 # ======================================================================
 # Experiment templates
 # ======================================================================

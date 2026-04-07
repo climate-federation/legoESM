@@ -247,7 +247,9 @@ def held_suarez_init(
 
     # Add small perturbation at lowest level to break symmetry
     key = jax.random.PRNGKey(seed)
-    perturbation = jax.random.normal(key, shape_2d) * perturbation_amplitude
+    perturbation = jax.random.normal(key, shape_2d, dtype=_dtype) * jnp.asarray(
+        perturbation_amplitude, dtype=_dtype
+    )
     T_data = T_data.at[..., -1].add(perturbation)
 
     return HydrostaticState(
@@ -404,7 +406,9 @@ def held_suarez_init_latlon(
 
     # Small perturbation at lowest level
     key = jax.random.PRNGKey(seed)
-    perturbation = jax.random.normal(key, shape_2d) * perturbation_amplitude
+    perturbation = jax.random.normal(key, shape_2d, dtype=_dtype) * jnp.asarray(
+        perturbation_amplitude, dtype=_dtype
+    )
     T_data = T_data.at[:, :, -1].add(perturbation)
 
     return HydrostaticState(
@@ -558,7 +562,9 @@ def held_suarez_init_mpas(
     # Temperature: uniform with small perturbation at lowest level
     T_data = jnp.full((nCells, nlev), T_init)
     key = jax.random.PRNGKey(seed)
-    perturbation = jax.random.normal(key, (nCells,)) * perturbation_amplitude
+    perturbation = jax.random.normal(key, (nCells,), dtype=_dtype) * jnp.asarray(
+        perturbation_amplitude, dtype=_dtype
+    )
     T_data = T_data.at[:, -1].add(perturbation)
 
     # Velocity: at rest

@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -545,21 +546,36 @@ class CoupledESMDriver:
         if hasattr(self, '_co2_field') and self._co2_field is not None:
             arrays["co2_field"] = np.asarray(self._co2_field)
 
+        # Surface state (land, ice, lake, accumulator, carbon) — flatten
+        # the pytree into a dict of named arrays for serialization.
+        if self._sfc_state is not None:
+            leaves_with_path = jax.tree_util.tree_leaves_with_path(
+                self._sfc_state,
+            )
+            for path_parts, leaf in leaves_with_path:
+                key = "sfc_" + ".".join(str(p) for p in path_parts)
+                arrays[key] = np.asarray(leaf)
+
         if arrays:
             np.savez(coupled_path, **arrays)
             logger.info(f"  Coupled checkpoint: {coupled_path.name}")
 
-    def load_coupled_checkpoint(self, step_day: float) -> None:
+    def load_coupled_checkpoint(self, step_day: float,
+                               checkpoint_dir: str | Path | None = None) -> None:
         """Load coupled state saved alongside an atmosphere checkpoint.
 
         Parameters
         ----------
         step_day : float
             Elapsed day used in the filename (same as atmosphere checkpoint).
+        checkpoint_dir : str or Path, optional
+            Directory containing the coupled checkpoint.  Defaults to
+            ``self.output_dir``.
         """
         from legoesm.core.field import Field
 
-        coupled_path = self.output_dir / f"coupled_day_{int(step_day):04d}.npz"
+        base = Path(checkpoint_dir) if checkpoint_dir is not None else self.output_dir
+        coupled_path = base / f"coupled_day_{int(step_day):04d}.npz"
         if not coupled_path.exists():
             logger.warning(f"No coupled checkpoint at {coupled_path}")
             return
@@ -584,5 +600,30 @@ class CoupledESMDriver:
 
         if "co2_field" in data:
             self._co2_field = jnp.asarray(data["co2_field"])
+
+        # Restore surface state from flattened pytree leaves.
+        sfc_keys = [k for k in data.files if k.startswith("sfc_")]
+        if sfc_keys and self._sfc_state is not None:
+            leaves_with_path = jax.tree_util.tree_leaves_with_path(
+                self._sfc_state,
+            )
+            # Build a lookup from stringified path -> saved array
+            saved = {}
+            for k in sfc_keys:
+                saved[k] = data[k]
+
+            # Replace leaves in-order (same traversal as save)
+            new_leaves = []
+            for path_parts, leaf in leaves_with_path:
+                key = "sfc_" + ".".join(str(p) for p in path_parts)
+                if key in saved:
+                    new_leaves.append(jnp.asarray(saved[key]))
+                else:
+                    new_leaves.append(leaf)
+
+            self._sfc_state = jax.tree_util.tree_unflatten(
+                jax.tree_util.tree_structure(self._sfc_state),
+                new_leaves,
+            )
 
         logger.info(f"  Loaded coupled checkpoint: {coupled_path.name}")

@@ -47,6 +47,7 @@ class DiagnosticCollector:
         nlev: int,
         sigma_full,
         dsigma,
+        experiment_id: str = "amip",
         monthly_means: bool = False,
         cmip_output: bool = False,
         clear_sky_diag: bool = False,
@@ -96,7 +97,7 @@ class DiagnosticCollector:
             cmor_dir = str(Path(output_dir) / "cmor") if output_dir else "cmor"
             self.cf_writer = CFWriter(
                 output_dir=cmor_dir,
-                experiment_id="amip",
+                experiment_id=experiment_id,
                 model_id="legoESM-1-0",
                 freq="mon",
                 calendar="noleap",

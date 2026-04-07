@@ -571,6 +571,7 @@ class ModelDriver:
             nlev=self.config.grid.nlev,
             sigma_full=self.sigma.sigma_full,
             dsigma=self.sigma.dsigma,
+            experiment_id=self.config.experiment or "amip",
             monthly_means=self.config.output.monthly_means,
             cmip_output=self.config.output.cmip_output,
             clear_sky_diag=self.config.output.clear_sky_diag,
@@ -599,7 +600,7 @@ class ModelDriver:
             # Auto-detect: use perf_mode when distributed to avoid
             # expensive allgather on every diagnostic interval.
             pm_setting = getattr(
-                getattr(self, '_experiment_config', None),
+                self.config,
                 'output', None,
             )
             pm_flag = getattr(pm_setting, 'diagnostics_perf_mode', 'auto')
