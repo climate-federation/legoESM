@@ -252,8 +252,8 @@ class TestSupportedMatrix:
         from legoesm.supported_matrix import (
             ATMOSPHERE_MATRIX, OCEAN_MATRIX,
         )
-        # 14 atmosphere + 5 ocean = 19 genuinely distinct implementations
-        assert len(ATMOSPHERE_MATRIX) == 14
+        # 16 atmosphere + 5 ocean = 21 genuinely distinct implementations
+        assert len(ATMOSPHERE_MATRIX) == 16
         assert len(OCEAN_MATRIX) == 5
 
     def test_canonical_solver_names_helper(self):
