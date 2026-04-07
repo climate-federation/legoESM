@@ -1528,8 +1528,8 @@ def print_summary_table(results: list[TimingResult], mode: str) -> None:
 
     header = (
         f"{'Prec':>7s} | {'GPUs':>5s} | {'Res':>5s} | {'L':>3s} | "
-        f"{'dt(s)':>6s} | {'ms/step':>9s} | {'SYPD':>8s} | "
-        f"{'Mcell/s':>9s} | {'Eff':>6s}"
+        f"{'dt(s)':>6s} | {'cells/GPU':>9s} | {'ms/step':>9s} | "
+        f"{'SYPD':>8s} | {'Mcell/s':>9s} | {'Eff':>6s}"
     )
     print(header)
     print("-" * len(header))
@@ -1538,6 +1538,7 @@ def print_summary_table(results: list[TimingResult], mode: str) -> None:
         print(
             f"{r.precision:>7s} | {r.n_gpus:>5d} | {r.resolution:<5d} | "
             f"{r.n_levels:>3d} | {r.dt_seconds:>6.0f} | "
+            f"{r.cells_per_gpu:>9,d} | "
             f"{r.time_per_step_ms:>9.2f} | {r.sypd:>8.3f} | "
             f"{r.mcells_per_s:>9.1f} | {r.scaling_efficiency:>5.1%}"
         )
