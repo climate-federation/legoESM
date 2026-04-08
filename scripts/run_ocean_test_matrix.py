@@ -1643,8 +1643,11 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
     else:
         # Cubed-sphere and lat-lon grids.
         # Capture grid area and z_coord for volume-weighted diagnostics.
+        # Use actual h_k (which depends on eta) rather than reference dz_ref,
+        # so that the diagnostic tracks the true conserved quantity h*T.
         _area = grid.area if (grid is not None and hasattr(grid, 'area')) else None
-        _dz = z_coord.dz_ref if z_coord is not None else None
+        _z_coord = z_coord
+        _min_wc = 0.5  # default min_water_column_m
 
         def scalar_fn(s):
             if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
@@ -1652,9 +1655,13 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
 
                 eta_ocean = jnp.where(ocean_mask, s.eta.data, jnp.nan)
 
-                # Volume-weighted T and S means
-                if _area is not None and _dz is not None:
-                    vol = _area[..., None] * _dz * ocean_mask[..., None]
+                # Volume-weighted T and S using actual layer thickness h_k
+                if _area is not None and _z_coord is not None:
+                    from legoesm.ocean.vertical import compute_layer_thickness
+                    h_k = compute_layer_thickness(
+                        s.eta.data, s.H_bathy.data, _z_coord,
+                        min_water_column_m=_min_wc)
+                    vol = _area[..., None] * h_k * ocean_mask[..., None]
                     vol_sum = jnp.sum(vol)
                     mean_T = float(jnp.sum(s.T.data * vol) / vol_sum)
                     mean_S = float(jnp.sum(s.S.data * vol) / vol_sum)
@@ -4125,7 +4132,11 @@ def _check_and_generate_comparisons(output_base: Path, test_case_name: str, all_
     if len(grid_types) < 2:
         return  # Need different grids, not just multiple resolutions
         
-    test_case_dir = output_base / test_case_name
+    # Rest-state variants are grouped under rest_state/
+    if test_case_name in TestCase._REST_STATE_GROUP:
+        test_case_dir = output_base / "rest_state" / test_case_name
+    else:
+        test_case_dir = output_base / test_case_name
     if not test_case_dir.exists():
         return
     
@@ -4332,7 +4343,10 @@ def main():
         for test_name in remaining_test_cases:
             results = test_cases[test_name]
             if len(results) > 1:  # Only create comparisons if multiple grids were run
-                test_case_dir = output_base / test_name
+                if test_name in TestCase._REST_STATE_GROUP:
+                    test_case_dir = output_base / "rest_state" / test_name
+                else:
+                    test_case_dir = output_base / test_name
                 if test_case_dir.exists():
                     grid_results = _collect_grid_results(test_case_dir)
                     if len(grid_results) > 1:
