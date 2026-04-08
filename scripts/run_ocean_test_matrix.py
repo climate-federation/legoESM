@@ -735,7 +735,8 @@ def _extract_test_case_name(case_name: str) -> str:
 def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                          dt: float, field_specs: list[tuple[str, str, str]],
                          coord_kind: str, lon_deg: np.ndarray,
-                         lat_deg: np.ndarray):
+                         lat_deg: np.ndarray,
+                         domain_extent: tuple[float,float,float,float] | None = None):
     """Save snapshot evolution plots for each 2D field."""
     if not snapshots:
         return
@@ -793,10 +794,30 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
             regridded = all_regridded[idx]
 
             # Compute extent from actual coordinates.
-            # For unstructured grids (cube, mpas) the regridded array
-            # covers [0,360] × [-90,90].  For regional meshes, crop
-            # to the data extent so the plot zooms into the domain.
-            if coord_kind in ("latlon", "gaussian"):
+            # When domain_extent is given (regional experiments), use it
+            # directly.  Otherwise infer from coordinate arrays or the
+            # non-NaN bounding box of the regridded field.
+            if domain_extent is not None:
+                # domain_extent = (lon_west, lon_east, lat_south, lat_north)
+                lon_ext = [domain_extent[0], domain_extent[1]]
+                lat_ext = [domain_extent[2], domain_extent[3]]
+                if coord_kind not in ("latlon", "gaussian"):
+                    lat_1d = np.linspace(-90, 90, regridded.shape[0])
+                    lon_1d = np.linspace(0, 360, regridded.shape[1])
+                    r0 = max(int(np.searchsorted(lat_1d, lat_ext[0])) - 1, 0)
+                    r1 = min(int(np.searchsorted(lat_1d, lat_ext[1])) + 2,
+                             len(lat_1d))
+                    c0 = max(int(np.searchsorted(lon_1d, lon_ext[0])) - 1, 0)
+                    c1 = min(int(np.searchsorted(lon_1d, lon_ext[1])) + 2,
+                             len(lon_1d))
+                    plot_data = regridded[r0:r1, c0:c1]
+                    lon_ext = [float(lon_1d[c0]),
+                               float(lon_1d[min(c1, len(lon_1d)-1)])]
+                    lat_ext = [float(lat_1d[r0]),
+                               float(lat_1d[min(r1, len(lat_1d)-1)])]
+                else:
+                    plot_data = regridded
+            elif coord_kind in ("latlon", "gaussian"):
                 lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
                 lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
                 lon_ext = [float(lon_flat.min()), float(lon_flat.max())]
@@ -1010,6 +1031,131 @@ def _save_profiles(output_dir: Path, case_name: str, snapshots: dict,
     plt.close(fig)
 
 
+def _save_velocity_profiles(output_dir: Path, case_name: str,
+                            snapshots: dict, dt: float,
+                            levels: np.ndarray, level_label: str = "Depth (m)"):
+    """Save vertical velocity profile diagnostics (mean, max, structure).
+
+    Requires snapshots to contain 'u_3d', 'v_3d', 'speed_3d' keys
+    (set include_velocity_3d=True in _make_extract_fn).
+    """
+    valid_steps = sorted(
+        s for s in snapshots
+        if "u_3d" in snapshots[s] and "v_3d" in snapshots[s])
+    if not valid_steps:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n_snaps = len(valid_steps)
+    cmap = plt.cm.viridis(np.linspace(0.1, 0.95, n_snaps))
+
+    def _mask_3d(snap):
+        mask = snap["land_mask"]
+        if mask.ndim == 1:  # MPAS: (nCells,)
+            return mask[:, np.newaxis]
+        return mask[..., np.newaxis]  # latlon: (n_lat, n_lon)
+
+    def _horiz_axes(m3d):
+        return tuple(range(m3d.ndim - 1))
+
+    # ── 1. Domain-mean |u|, |v|, speed vs depth ──
+    fig, axes = plt.subplots(1, 3, figsize=(15, 8), sharey=True)
+    for idx, step in enumerate(valid_steps):
+        snap = snapshots[step]
+        m3d = _mask_3d(snap)
+        hax = _horiz_axes(m3d)
+        ocean_count = np.maximum(np.sum(m3d > 0.5, axis=hax), 1)
+        day = step * dt / 86400.0
+        lbl = f"day {day:.1f}"
+
+        mean_abs_u = np.sum(np.abs(snap["u_3d"]) * m3d, axis=hax) / ocean_count
+        mean_abs_v = np.sum(np.abs(snap["v_3d"]) * m3d, axis=hax) / ocean_count
+        mean_spd = np.sum(snap["speed_3d"] * m3d, axis=hax) / ocean_count
+
+        axes[0].plot(mean_abs_u, levels, color=cmap[idx], label=lbl)
+        axes[1].plot(mean_abs_v, levels, color=cmap[idx], label=lbl)
+        axes[2].plot(mean_spd, levels, color=cmap[idx], label=lbl)
+
+    axes[0].set_xlabel(r"Mean $|u|$ (m/s)"); axes[0].set_title("Zonal velocity")
+    axes[1].set_xlabel(r"Mean $|v|$ (m/s)"); axes[1].set_title("Meridional velocity")
+    axes[2].set_xlabel("Mean speed (m/s)"); axes[2].set_title("Speed")
+    axes[0].set_ylabel(level_label)
+    axes[2].legend(fontsize=7, loc="lower right")
+    for ax in axes:
+        ax.invert_yaxis(); ax.grid(True, alpha=0.3)
+    fig.suptitle(f"{case_name} — domain-mean velocity profiles", fontsize=13,
+                 fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(output_dir / "velocity_profiles_mean.png", dpi=150,
+                bbox_inches="tight")
+    plt.close(fig)
+
+    # ── 2. Max |u|, |v|, speed vs depth ──
+    fig, axes = plt.subplots(1, 3, figsize=(15, 8), sharey=True)
+    for idx, step in enumerate(valid_steps):
+        snap = snapshots[step]
+        m3d = _mask_3d(snap)
+        hax = _horiz_axes(m3d)
+        day = step * dt / 86400.0
+        lbl = f"day {day:.1f}"
+
+        max_u = np.max(np.where(m3d > 0.5, np.abs(snap["u_3d"]), 0.0), axis=hax)
+        max_v = np.max(np.where(m3d > 0.5, np.abs(snap["v_3d"]), 0.0), axis=hax)
+        max_spd = np.max(np.where(m3d > 0.5, snap["speed_3d"], 0.0), axis=hax)
+
+        axes[0].plot(max_u, levels, color=cmap[idx], label=lbl)
+        axes[1].plot(max_v, levels, color=cmap[idx], label=lbl)
+        axes[2].plot(max_spd, levels, color=cmap[idx], label=lbl)
+
+    axes[0].set_xlabel(r"Max $|u|$ (m/s)"); axes[0].set_title("Zonal velocity")
+    axes[1].set_xlabel(r"Max $|v|$ (m/s)"); axes[1].set_title("Meridional velocity")
+    axes[2].set_xlabel("Max speed (m/s)"); axes[2].set_title("Speed")
+    axes[0].set_ylabel(level_label)
+    axes[2].legend(fontsize=7, loc="lower right")
+    for ax in axes:
+        ax.invert_yaxis(); ax.grid(True, alpha=0.3)
+    fig.suptitle(f"{case_name} — max velocity profiles", fontsize=13,
+                 fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(output_dir / "velocity_profiles_max.png", dpi=150,
+                bbox_inches="tight")
+    plt.close(fig)
+
+    # ── 3. Final-snapshot velocity structure: mean + RMS per level ──
+    last_step = valid_steps[-1]
+    snap = snapshots[last_step]
+    m3d = _mask_3d(snap)
+    hax = _horiz_axes(m3d)
+    day = last_step * dt / 86400.0
+    ocean_count = np.maximum(np.sum(m3d > 0.5, axis=hax), 1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 8), sharey=True)
+    mean_u = np.sum(snap["u_3d"] * m3d, axis=hax) / ocean_count
+    mean_v = np.sum(snap["v_3d"] * m3d, axis=hax) / ocean_count
+    rms_u = np.sqrt(np.sum(snap["u_3d"]**2 * m3d, axis=hax) / ocean_count)
+    rms_v = np.sqrt(np.sum(snap["v_3d"]**2 * m3d, axis=hax) / ocean_count)
+
+    axes[0].plot(mean_u, levels, 'b-o', ms=4, label="mean u")
+    axes[0].plot(rms_u, levels, 'b--s', ms=4, label="RMS u")
+    axes[0].set_xlabel("Velocity (m/s)"); axes[0].set_ylabel(level_label)
+    axes[0].set_title(f"Zonal velocity (day {day:.1f})")
+    axes[0].legend(); axes[0].axvline(0, color='k', lw=0.5, ls=':')
+
+    axes[1].plot(mean_v, levels, 'r-o', ms=4, label="mean v")
+    axes[1].plot(rms_v, levels, 'r--s', ms=4, label="RMS v")
+    axes[1].set_xlabel("Velocity (m/s)")
+    axes[1].set_title(f"Meridional velocity (day {day:.1f})")
+    axes[1].legend(); axes[1].axvline(0, color='k', lw=0.5, ls=':')
+
+    for ax in axes:
+        ax.invert_yaxis(); ax.grid(True, alpha=0.3)
+    fig.suptitle(f"{case_name} — velocity structure (final)", fontsize=13,
+                 fontweight="bold")
+    fig.tight_layout()
+    fig.savefig(output_dir / "velocity_structure_final.png", dpi=150,
+                bbox_inches="tight")
+    plt.close(fig)
+
+
 def _save_snapshot_times(output_dir: Path, snapshots: dict, dt: float):
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "snapshot_times.txt", "w") as f:
@@ -1026,6 +1172,7 @@ def _save_snapshot_data(
     coord_kind: str,
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
+    domain_extent: tuple[float, float, float, float] | None = None,
 ):
     """Save snapshot field arrays as NPZ files with proper time series format.
     
@@ -1054,14 +1201,32 @@ def _save_snapshot_data(
     # Build time-series arrays for native grid
     native_arrays = dict(common_metadata)
     latlon_arrays = dict(common_metadata)
+    # Store source coordinate range so downstream plotters know the
+    # actual domain extent (important for regional unstructured meshes
+    # where nearest-neighbour regridding bleeds beyond the domain).
+    # When domain_extent is provided (regional experiments), use it
+    # instead of the mesh cell coordinate range (which can extend
+    # beyond the nominal domain for Voronoi meshes).
+    src_lon = np.asarray(lon_deg, dtype=np.float64).ravel()
+    src_lat = np.asarray(lat_deg, dtype=np.float64).ravel()
     if coord_kind in ("latlon", "gaussian"):
         # Native grids have lon in [0, 360); store actual coordinates
-        latlon_arrays["lat"] = np.asarray(lat_deg, dtype=np.float64).ravel()
-        latlon_arrays["lon"] = np.asarray(lon_deg, dtype=np.float64).ravel()
+        latlon_arrays["lat"] = src_lat
+        latlon_arrays["lon"] = src_lon
     else:
         # Regridded grids (cube, mpas) use [0, 360] target
         latlon_arrays["lat"] = np.linspace(-90.0, 90.0, 181)
         latlon_arrays["lon"] = np.linspace(0.0, 360.0, 360)
+    if domain_extent is not None:
+        latlon_arrays["source_lon_range"] = np.array(
+            [domain_extent[0], domain_extent[1]])
+        latlon_arrays["source_lat_range"] = np.array(
+            [domain_extent[2], domain_extent[3]])
+    else:
+        latlon_arrays["source_lon_range"] = np.array(
+            [float(src_lon.min()), float(src_lon.max())])
+        latlon_arrays["source_lat_range"] = np.array(
+            [float(src_lat.min()), float(src_lat.max())])
 
     for field_key in all_field_keys:
         # Collect this field across all timesteps
@@ -1116,8 +1281,17 @@ def _save_case_diagnostics(
     heat_key: str | None = None,
     salt_key: str | None = None,
     scalar_units: dict[str, str] | None = None,
+    domain_extent: tuple[float, float, float, float] | None = None,
 ):
-    """Save all standard diagnostic outputs for a test case."""
+    """Save all standard diagnostic outputs for a test case.
+
+    Parameters
+    ----------
+    domain_extent : (lon_west, lon_east, lat_south, lat_north) or None
+        When set, snapshot plots are cropped to this geographic extent.
+        Useful for regional experiments on unstructured grids where the
+        auto-crop heuristic fails due to nearest-neighbour extrapolation.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     su = scalar_units or {}
 
@@ -1130,10 +1304,11 @@ def _save_case_diagnostics(
 
     _save_snapshot_plots(
         output_dir, case_name, snapshots, dt, field_specs_2d,
-        coord_kind, lon_deg, lat_deg)
+        coord_kind, lon_deg, lat_deg, domain_extent=domain_extent)
     _save_snapshot_times(output_dir, snapshots, dt)
     _save_snapshot_data(
-        output_dir, snapshots, dt, coord_kind, lon_deg, lat_deg)
+        output_dir, snapshots, dt, coord_kind, lon_deg, lat_deg,
+        domain_extent=domain_extent)
 
     if field_3d_key and level_values is not None:
         _save_cross_sections(
@@ -1449,7 +1624,7 @@ def _create_rest_state_no_land(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX)
 # Field extraction helpers
 # ===========================================================================
 
-def _extract_fv_ocean(state, grid_type: str):
+def _extract_fv_ocean(state, grid_type: str, include_velocity_3d: bool = False):
     """Extract snapshot fields for cubed-sphere or lat-lon ocean state."""
     eta = np.asarray(state.eta.data, dtype=np.float64)
     T_3d = np.asarray(state.T.data, dtype=np.float64)
@@ -1470,14 +1645,34 @@ def _extract_fv_ocean(state, grid_type: str):
         # C-grid: u and v have different shapes; skip speed_sfc
         if u_sfc.shape == v_sfc.shape:
             result["speed_sfc"] = np.sqrt(u_sfc ** 2 + v_sfc ** 2)
+    if include_velocity_3d:
+        u_raw = np.asarray(state.u.data, dtype=np.float64)
+        if hasattr(state, "v"):
+            v_raw = np.asarray(state.v.data, dtype=np.float64)
+            # C-grid: interpolate staggered u/v to cell centers
+            if u_raw.shape[:-1] != v_raw.shape[:-1]:
+                u_cc = 0.5 * (u_raw[:, :-1, :] + u_raw[:, 1:, :])
+                v_cc = 0.5 * (v_raw[:-1, :, :] + v_raw[1:, :, :])
+            else:
+                u_cc = u_raw
+                v_cc = v_raw
+            result["u_3d"] = u_cc
+            result["v_3d"] = v_cc
+            result["speed_3d"] = np.sqrt(u_cc**2 + v_cc**2)
+        else:
+            result["u_3d"] = u_raw
     return result
 
 
-def _extract_mpas_ocean(state, lon_deg, lat_deg):
+def _extract_mpas_ocean(state, lon_deg, lat_deg, mesh=None,
+                        include_velocity_3d: bool = False):
     """Extract snapshot fields for MPAS ocean state.
 
     Returns raw cell-center arrays; regridding to lat-lon is done by the
     plotting functions via _regrid_2d / _regrid_3d_level.
+
+    When *include_velocity_3d* is True and *mesh* is provided, reconstructs
+    cell-center (u_east, v_north) at all levels via Perot reconstruction.
     """
     eta = np.asarray(state.eta.data, dtype=np.float64)
     T_3d = np.asarray(state.T.data, dtype=np.float64)
@@ -1491,6 +1686,20 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg):
         "S_3d": S_3d,
         "land_mask": np.asarray(state.land_mask.data, dtype=np.float64),
     }
+    if include_velocity_3d and mesh is not None:
+        from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+        u_edge = np.asarray(state.u.data, dtype=np.float64)  # (nEdges, nlev)
+        nlev = u_edge.shape[-1]
+        nCells = eta.shape[0]
+        u_cc = np.zeros((nCells, nlev), dtype=np.float64)
+        v_cc = np.zeros((nCells, nlev), dtype=np.float64)
+        for k in range(nlev):
+            ue, vn = reconstruct_cell_velocity(state.u.data[:, k], mesh)
+            u_cc[:, k] = np.asarray(ue, dtype=np.float64)
+            v_cc[:, k] = np.asarray(vn, dtype=np.float64)
+        result["u_3d"] = u_cc
+        result["v_3d"] = v_cc
+        result["speed_3d"] = np.sqrt(u_cc**2 + v_cc**2)
     return result
 
 
@@ -1782,19 +1991,23 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
         return scalar_fn
 
 
-def _make_extract_fn(grid_type: str, grid, lon_deg, lat_deg):
+def _make_extract_fn(grid_type: str, grid, lon_deg, lat_deg,
+                     include_velocity_3d: bool = False):
     """Return an extract_fn(state) -> dict for snapshots."""
     if grid_type == "spectral":
         def extract_fn(s):
             return _extract_spectral_ocean(s, grid)
         return extract_fn
     elif grid_type in ("mpas", "mpas_regional"):
+        _mesh = grid if include_velocity_3d else None
         def extract_fn(s):
-            return _extract_mpas_ocean(s, lon_deg, lat_deg)
+            return _extract_mpas_ocean(s, lon_deg, lat_deg, mesh=_mesh,
+                                       include_velocity_3d=include_velocity_3d)
         return extract_fn
     else:
         def extract_fn(s):
-            return _extract_fv_ocean(s, grid_type)
+            return _extract_fv_ocean(s, grid_type,
+                                     include_velocity_3d=include_velocity_3d)
         return extract_fn
 
 
@@ -2423,7 +2636,8 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
 
     check_fn = _make_check_fn(tc.grid_type)
     scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
-    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
+                                  include_velocity_3d=True)
 
     def step_fn(s, dt_):
         return model.step(s, dt_)
@@ -2454,15 +2668,26 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
         ("speed_sfc", "Surface speed (m/s)", "magma"),
     ]
 
+    case_label = f"{label} {tc.grid_type} {tc.resolution}"
+    # For regional grids, pass domain extent so plots are cropped correctly
+    # (the auto-crop heuristic fails on unstructured meshes because
+    # nearest-neighbour regridding bleeds beyond the domain).
+    is_regional = tc.grid_type in ("mpas_regional", "latlon_regional",
+                                    "cs_regional")
+    extent = (0.0, 120.0, 15.0, 75.0) if is_regional else None
     _save_case_diagnostics(
-        output_dir, f"{label} {tc.grid_type} {tc.resolution}",
+        output_dir, case_label,
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=field_specs,
         field_3d_key="T_3d", level_values=depth,
         level_label="Depth (m)",
         vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
         scalar_units={"mean_eta": "m", "max_speed": "m/s",
-                      "mean_T": "degC", "mean_S": "PSU"})
+                      "mean_T": "degC", "mean_S": "PSU"},
+        domain_extent=extent)
+
+    _save_velocity_profiles(output_dir, case_label, snapshots, dt,
+                            depth, level_label="Depth (m)")
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -3880,8 +4105,14 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
         ax = axes[i]
         snapshots = data['snapshots']
 
-        # Determine longitude extent from stored coordinates
-        if 'lon' in snapshots.files:
+        # Determine plot extent: prefer source coordinate range (accurate
+        # for regional unstructured meshes) over the regridded grid range.
+        if 'source_lon_range' in snapshots.files:
+            src_lon = snapshots['source_lon_range']
+            src_lat = snapshots['source_lat_range']
+            plot_extent = [float(src_lon[0]), float(src_lon[1]),
+                          float(src_lat[0]), float(src_lat[1])]
+        elif 'lon' in snapshots.files:
             lon_arr = snapshots['lon']
             lat_arr = snapshots['lat']
             plot_extent = [float(lon_arr.min()), float(lon_arr.max()),
@@ -3909,21 +4140,22 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                     # Mask land areas (where land_mask ≤ 0.5) with NaN
                     final_field = np.where(land_mask_final > 0.5, final_field, np.nan)
 
-                # Crop to bounding box of non-NaN data for regional grids
-                # (e.g. MPAS regional regridded onto a global lat-lon grid)
-                valid = np.isfinite(final_field)
-                if valid.any():
-                    rows = np.where(valid.any(axis=1))[0]
-                    cols = np.where(valid.any(axis=0))[0]
-                    r0, r1 = max(rows[0] - 1, 0), min(rows[-1] + 2, final_field.shape[0])
-                    c0, c1 = max(cols[0] - 1, 0), min(cols[-1] + 2, final_field.shape[1])
-                    # Only crop if data occupies less than 80% of the grid
-                    if (r1 - r0) * (c1 - c0) < 0.8 * final_field.size:
-                        lat_1d = np.linspace(plot_extent[2], plot_extent[3], final_field.shape[0])
-                        lon_1d = np.linspace(plot_extent[0], plot_extent[1], final_field.shape[1])
+                # Crop regridded array to source domain extent
+                if 'lon' in snapshots.files:
+                    lat_1d = np.asarray(snapshots['lat'])
+                    lon_1d = np.asarray(snapshots['lon'])
+                    r0 = max(int(np.searchsorted(lat_1d, plot_extent[2])) - 1, 0)
+                    r1 = min(int(np.searchsorted(lat_1d, plot_extent[3])) + 2,
+                             len(lat_1d))
+                    c0 = max(int(np.searchsorted(lon_1d, plot_extent[0])) - 1, 0)
+                    c1 = min(int(np.searchsorted(lon_1d, plot_extent[1])) + 2,
+                             len(lon_1d))
+                    if (r1 - r0) < final_field.shape[0] or (c1 - c0) < final_field.shape[1]:
                         final_field = final_field[r0:r1, c0:c1]
-                        plot_extent = [float(lon_1d[c0]), float(lon_1d[min(c1, len(lon_1d)-1)]),
-                                       float(lat_1d[r0]), float(lat_1d[min(r1, len(lat_1d)-1)])]
+                        plot_extent = [float(lon_1d[c0]),
+                                       float(lon_1d[min(c1, len(lon_1d)-1)]),
+                                       float(lat_1d[r0]),
+                                       float(lat_1d[min(r1, len(lat_1d)-1)])]
 
                 # Create the plot with consistent color scale
                 im = ax.imshow(final_field, origin='lower', aspect='auto', cmap=cmap,
@@ -4181,33 +4413,40 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
 
     for i_row, gname in enumerate(actual_grids):
         entries = grid_field_data[gname]
-        # Get plot extent
+        # Get plot extent — prefer source coordinate range for accurate
+        # regional domain cropping on unstructured meshes.
         snaps = grid_results[gname]['snapshots']
-        if 'lon' in snaps.files:
+        if 'source_lon_range' in snaps.files:
+            src_lon = snaps['source_lon_range']
+            src_lat = snaps['source_lat_range']
+            extent = [float(src_lon[0]), float(src_lon[1]),
+                      float(src_lat[0]), float(src_lat[1])]
+        elif 'lon' in snaps.files:
             lon_arr, lat_arr = snaps['lon'], snaps['lat']
             extent = [float(lon_arr.min()), float(lon_arr.max()),
                       float(lat_arr.min()), float(lat_arr.max())]
         else:
             extent = [0, 360, -90, 90]
 
-        # Precompute crop bounds for regional grids (from first valid snapshot)
+        # Crop regridded array to source domain extent
         crop_slices = None
-        for _, f2d_check in entries:
-            valid = np.isfinite(f2d_check)
-            if valid.any():
-                rows = np.where(valid.any(axis=1))[0]
-                cols = np.where(valid.any(axis=0))[0]
-                r0 = max(rows[0] - 1, 0)
-                r1 = min(rows[-1] + 2, f2d_check.shape[0])
-                c0 = max(cols[0] - 1, 0)
-                c1 = min(cols[-1] + 2, f2d_check.shape[1])
-                if (r1 - r0) * (c1 - c0) < 0.8 * f2d_check.size:
-                    lat_1d = np.linspace(extent[2], extent[3], f2d_check.shape[0])
-                    lon_1d = np.linspace(extent[0], extent[1], f2d_check.shape[1])
-                    crop_slices = (r0, r1, c0, c1)
-                    extent = [float(lon_1d[c0]), float(lon_1d[min(c1, len(lon_1d)-1)]),
-                              float(lat_1d[r0]), float(lat_1d[min(r1, len(lat_1d)-1)])]
-                break
+        if 'lon' in snaps.files:
+            lat_1d = np.asarray(snaps['lat'])
+            lon_1d = np.asarray(snaps['lon'])
+            r0 = max(int(np.searchsorted(lat_1d, extent[2])) - 1, 0)
+            r1 = min(int(np.searchsorted(lat_1d, extent[3])) + 2,
+                     len(lat_1d))
+            c0 = max(int(np.searchsorted(lon_1d, extent[0])) - 1, 0)
+            c1 = min(int(np.searchsorted(lon_1d, extent[1])) + 2,
+                     len(lon_1d))
+            sample_shape = entries[0][1].shape if entries else None
+            if sample_shape and ((r1 - r0) < sample_shape[0]
+                                 or (c1 - c0) < sample_shape[1]):
+                crop_slices = (r0, r1, c0, c1)
+                extent = [float(lon_1d[c0]),
+                          float(lon_1d[min(c1, len(lon_1d)-1)]),
+                          float(lat_1d[r0]),
+                          float(lat_1d[min(r1, len(lat_1d)-1)])]
 
         for i_col in range(actual_cols):
             ax = axes[i_row, i_col]
