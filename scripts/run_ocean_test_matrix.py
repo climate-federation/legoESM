@@ -1235,8 +1235,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
-        from legoesm.ocean.state import LatLonOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+        from legoesm.ocean.state import LatLonCGridOceanConfig
 
         grid = create_latlon_grid(params["n_lat"], params["n_lon"])
         kw = dict(n_barotropic_substeps=30, physics=physics)
@@ -1244,8 +1244,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
-        config = LatLonOceanConfig(**kw)
-        model = LatLonOceanModel(grid, z_coord, config)
+        config = LatLonCGridOceanConfig(**kw)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -1296,8 +1296,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
 
     elif tc.grid_type == "latlon_regional":
         from legoesm.grids.latlon import create_regional_latlon_grid
-        from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
-        from legoesm.ocean.state import LatLonOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+        from legoesm.ocean.state import LatLonCGridOceanConfig
 
         n_lat, n_lon = params["n_lat"], params["n_lon"]
         lon_w = tc.run_kwargs.get("lon_west", 0.0)
@@ -1311,8 +1311,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
-        config = LatLonOceanConfig(**kw)
-        model = LatLonOceanModel(grid, z_coord, config)
+        config = LatLonCGridOceanConfig(**kw)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -1360,8 +1360,8 @@ def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
         from legoesm.ocean.init import rest_state_ocean
         return rest_state_ocean(grid, z_coord, H_max=H_max)
     elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max)
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max)
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
@@ -1379,8 +1379,8 @@ def _create_rest_state_uniform_ts(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_M
         from legoesm.ocean.init import rest_state_ocean
         return rest_state_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
     elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
@@ -1394,8 +1394,8 @@ def _create_rest_state_uniform_ts_no_land(tc: TestCase, grid, z_coord, H_max=DEF
         return rest_state_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0,
                                  land_lat_threshold=90.0)
     elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0,
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0,
                                         land_lat_threshold=90.0)
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
@@ -1410,8 +1410,8 @@ def _create_rest_state_no_land(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX)
         from legoesm.ocean.init import rest_state_ocean
         return rest_state_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
     elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
@@ -1444,7 +1444,9 @@ def _extract_fv_ocean(state, grid_type: str):
     if hasattr(state, "v"):
         v_sfc = np.asarray(state.v.data[..., 0], dtype=np.float64)
         result["v_sfc"] = v_sfc
-        result["speed_sfc"] = np.sqrt(u_sfc ** 2 + v_sfc ** 2)
+        # C-grid: u and v have different shapes; skip speed_sfc
+        if u_sfc.shape == v_sfc.shape:
+            result["speed_sfc"] = np.sqrt(u_sfc ** 2 + v_sfc ** 2)
     return result
 
 
@@ -1656,9 +1658,16 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                 if hasattr(s, 'u') and hasattr(s, 'v'):
                     u_sfc = s.u.data[..., 0]
                     v_sfc = s.v.data[..., 0]
-                    speed_sfc = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
-                    speed_ocean = jnp.where(ocean_mask, speed_sfc, jnp.nan)
-                    max_speed = float(jnp.nanmax(speed_ocean))
+                    # C-grid: u (n_lat, n_lon+1) and v (n_lat+1, n_lon)
+                    # can't compute sqrt(u²+v²) directly. Use max(|u|, |v|).
+                    if u_sfc.shape != v_sfc.shape:
+                        max_speed = float(jnp.maximum(
+                            jnp.max(jnp.abs(u_sfc)),
+                            jnp.max(jnp.abs(v_sfc))))
+                    else:
+                        speed_sfc = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
+                        speed_ocean = jnp.where(ocean_mask, speed_sfc, jnp.nan)
+                        max_speed = float(jnp.nanmax(speed_ocean))
                 else:
                     max_speed = 0.0
 
@@ -1676,8 +1685,9 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                     "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
                     "mean_T": float(jnp.mean(s.T.data)),
                     "mean_S": float(jnp.mean(s.S.data)),
-                    "max_speed": float(jnp.max(jnp.sqrt(
-                        s.u.data ** 2 + s.v.data ** 2))),
+                    "max_speed": float(jnp.maximum(
+                        jnp.max(jnp.abs(s.u.data)),
+                        jnp.max(jnp.abs(s.v.data)))),
                 }
         return scalar_fn
 
@@ -1783,8 +1793,8 @@ def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord,
             lat_south=lat_south, lat_north=lat_north,
         )
     elif grid_type in ("latlon", "latlon_regional"):
-        from legoesm.ocean.init_latlon import wind_driven_gyre_latlon
-        return wind_driven_gyre_latlon(
+        from legoesm.ocean.init_latlon_cgrid import wind_driven_gyre_latlon_cgrid
+        return wind_driven_gyre_latlon_cgrid(
             grid, z_coord,
             lon_west=lon_west, lon_east=lon_east,
             lat_south=lat_south, lat_north=lat_north,
@@ -2414,8 +2424,8 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
         from legoesm.core.field import Field
         state = state._replace(land_mask=Field(data=mask.astype(state.eta.data.dtype)))
     elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-        state = rest_state_latlon_ocean(grid, z_coord)
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        state = rest_state_latlon_cgrid_ocean(grid, z_coord)
         lon_2d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_1d = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
         lon_grid, lat_grid = np.meshgrid(lon_2d, lat_1d) if lon_2d.ndim == 1 else (lon_2d, lat_1d)
