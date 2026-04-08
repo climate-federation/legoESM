@@ -351,3 +351,71 @@ PPM reconstruction at face boundaries, which compound over multiple crossings.
 - `src/legoesm/core/fv_tp_2d.py` — NEW: FV3 transport module
 - `scripts/run_atmosphere_test_matrix.py` — Updated cosine bell step to use FV3 transport
 - `tests/test_cases/cosine_bell.py` — Unchanged
+
+---
+
+## Iteration 12: Williamson TC2/TC5 Momentum Investigation (2026-04-08)
+
+### Problem Statement
+Transport (cosine bell) is reasonable, but the MOMENTUM operators are broken:
+- **TC2 (steady-state geostrophic flow)**: v-wind should be ~0 everywhere, u-wind should be u_0*cos(lat)
+- After 1 day at C24: max|v|=2.9 m/s (no diffusion), max|v|=41.6 m/s (with hyperdiffusion)
+- Errors GROW with resolution (C16→C24), indicating non-convergent scheme
+
+### Diagnostic Results
+
+**t=0 Balance Residuals** (corner D-grid, C16):
+- max|du_dt| = 6.9e-5 m/s² — small, good initial balance
+- max|dv_dt| = 1.2e-4 m/s²
+- v_north at cell centers = 0.85 m/s — from corner→center averaging artifact
+
+**Error Growth** (corner D-grid, C16, no diffusion, dt=600s):
+
+| Step | Time | max\|v\| | max\|u_err\| | max\|h_err\| |
+|------|------|---------|-------------|-------------|
+| 1 | 0.2h | 0.855 | 0.082 | 0.46 m |
+| 10 | 1.7h | 0.864 | 0.187 | 3.49 m |
+| 50 | 8.3h | 0.869 | 0.601 | 9.78 m |
+
+The v-wind is essentially constant (diagnostic artifact from corner→center); u and h errors grow linearly (not exponentially).
+
+**Resolution Comparison** (corner D-grid, no diffusion, 1 day):
+
+| Resolution | max\|v\| | max\|h_err\| | Notes |
+|-----------|---------|-------------|-------|
+| C16 (dt=600) | ~0.87 | ~18 m | Stable |
+| C24 (dt=400) | 2.9 | 42 m | Errors LARGER (non-convergent!) |
+| C24 + hyperdiff | 41.6 | 804 m | `_laplacian_dgrid` blow-up |
+
+**Hyperdiffusion catastrophe**: The `_laplacian_dgrid` function (D→A→Laplacian→A→D) goes through halo exchange TWICE, amplifying boundary errors quadratically. At C24 this is enough to destabilize the solution.
+
+### Alternative Approaches Tested (C16, 50 steps)
+
+| Approach | max\|du\| at t=0 | max\|v\| at 8.3h | Verdict |
+|----------|-----------------|-----------------|---------|
+| Corner D-grid (current) | 1.0e-4 | 0.87 | Stable but v≠0 |
+| `fv3_csw_tendencies` (C-grid→D-grid) | 9.1e-4 | 18.8 | WORSE: 10x larger residuals |
+
+### Root Cause: Wrong D-grid Stagger
+
+The corner D-grid `(6, n+1, n+1)` with BOTH u and v at each corner is NOT the FV3 D-grid. It's a node/vertex-based discretization:
+- Susceptible to the Hollingsworth-Kallberg instability
+- `dgrid_to_center_vector` (4-point average) mixes different grid angles → v_north ≠ 0 even at t=0
+- `_laplacian_dgrid` (D→A→Lap→A→D) amplifies boundary errors through double halo exchange
+
+The TRUE FV3 D-grid uses edge-midpoint winds:
+- u_d at x-edge midpoints `(6, n, n+1)` — same position as C-grid u
+- v_d at y-edge midpoints `(6, n+1, n)` — same position as C-grid v
+- This avoids colocation and gives correct D→A averaging
+
+### Plan: Rewrite `fv3_sw_tendencies` with C-Grid Momentum Equation
+
+The correct FV3 approach evaluates du_d/dt at x-edge midpoints directly:
+1. **Bernoulli gradient**: Simple 2-point rdxc/rdyc difference between adjacent cell-center B values
+2. **Vorticity**: Circulation form at corners from `fv3_vorticity` (proper halo exchange)
+3. **Vorticity flux**: Upwind selection at C-grid faces using cross-velocity
+4. **KE**: Cell-center KE from `fv3_d2cc` (simple, no upwind formula)
+5. **No corners needed**: tendencies are DIRECTLY at edge-midpoint positions
+6. **No `_laplacian_dgrid`**: stable diffusion via cell-center Laplacian + rdxc gradient
+
+This approach is what FV3's c_sw computes. The key property is that gradient and vorticity are at the SAME stagger (C-grid faces/D-grid edge midpoints), giving exact discrete geostrophic balance.

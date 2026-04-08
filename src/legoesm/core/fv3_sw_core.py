@@ -651,3 +651,255 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
         div_damp=div_damp, hyperdiff_coeff=hyperdiff_coeff)
 
     return h_new, u_d_new, v_d_new
+
+
+# ==============================================================================
+# NEW: FV3-faithful forward-backward WITHOUT Arakawa-Lamb gradient
+# ==============================================================================
+
+def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
+    """Backward pressure gradient at C-grid positions.
+
+    Applies g*grad(h_star + h_s) at C-grid face positions using a 2-point
+    divided difference.  This is the "backward-in-time" step that couples
+    mass and momentum implicitly, providing stability for gravity waves.
+
+    Parameters
+    ----------
+    h_star : (6, n, n) — half-step height from c_sw
+    h_s : (6, n, n) — surface topography
+    cdgrid : CubedSphereCDGrid
+    dt2 : float — dt/2
+    g : float
+
+    Returns
+    -------
+    dp_x : (6, n+1, n) — pressure gradient contribution to uc
+    dp_y : (6, n, n+1) — pressure gradient contribution to vc
+    """
+    p = g * (h_star + h_s)
+    p_pad = _pad_halo_auto(p, cdgrid)
+    # 2-point gradient at C-grid faces (same sign convention as c_sw KE gradient)
+    dp_x = dt2 * cdgrid.rdxc * (p_pad[:, :-1, 1:-1] - p_pad[:, 1:, 1:-1])
+    dp_y = dt2 * cdgrid.rdyc * (p_pad[:, 1:-1, :-1] - p_pad[:, 1:-1, 1:])
+    return dp_x, dp_y
+
+
+def _uc_to_ut(uc, vc, u_d, v_d, cdgrid):
+    """Convert updated C-grid covariant (uc, vc) to contravariant (ut, vt).
+
+    Uses metric correction at interior and sin_sg upwinding at face boundaries.
+
+    Parameters
+    ----------
+    uc : (6, n+1, n) — updated covariant C-grid u
+    vc : (6, n, n+1) — updated covariant C-grid v
+    u_d : (6, n, n+1) — D-grid x-wind (for metric correction)
+    v_d : (6, n+1, n) — D-grid y-wind (for metric correction)
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    ut : (6, n+1, n) — contravariant transport u at C-grid x-faces
+    vt : (6, n, n+1) — contravariant transport v at C-grid y-faces
+    """
+    n = cdgrid.n
+    cosa_u = cdgrid.cosa_u     # (6, n+1, n)
+    rsin_u = cdgrid.rsin_u     # (6, n+1, n)
+    cosa_v = cdgrid.cosa_v     # (6, n, n+1)
+    rsin_v = cdgrid.rsin_v     # (6, n, n+1)
+
+    # v_d (6, n+1, n) has the same shape as cosa_u — use directly as
+    # the cross-velocity at u-face positions (co-located approximation,
+    # same as _d2a2c_vect line 167).  Similarly u_d (6, n, n+1) matches cosa_v.
+    ut = (uc - v_d * cosa_u) * rsin_u
+    vt = (vc - u_d * cosa_v) * rsin_v
+
+    # At face boundaries: ut = uc / sin_sg_upwind
+    sg = cdgrid.sin_sg
+    for i_bdy in [0, 1, n - 1, n]:
+        i_left = max(i_bdy - 1, 0)
+        i_right = min(i_bdy, n - 1)
+        sin_left = sg[:, i_left, :, 2]    # E-edge of left cell
+        sin_right = sg[:, i_right, :, 0]  # W-edge of right cell
+        sin_upwind = jnp.where(uc[:, i_bdy, :] > 0, sin_left, sin_right)
+        ut = ut.at[:, i_bdy, :].set(
+            uc[:, i_bdy, :] / jnp.maximum(sin_upwind, _EPS))
+
+    for j_bdy in [0, 1, n - 1, n]:
+        j_below = max(j_bdy - 1, 0)
+        j_above = min(j_bdy, n - 1)
+        sin_below = sg[:, :, j_below, 3]  # N-edge of cell below
+        sin_above = sg[:, :, j_above, 1]  # S-edge of cell above
+        sin_upwind = jnp.where(vc[:, :, j_bdy] > 0, sin_below, sin_above)
+        vt = vt.at[:, :, j_bdy].set(
+            vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
+
+    return ut, vt
+
+
+def _d_sw_native(h, u_d, v_d, uc, vc, ua, va, cdgrid, dt, g,
+                 div_damp=0.0):
+    """D-grid full-step without Arakawa-Lamb gradient.
+
+    Mass transport uses PPM via the updated C-grid velocities (which already
+    include the backward pressure gradient from p_grad_c).  D-grid winds are
+    updated using:
+    - KE at corners (interpolated from cell centres, NO A-L stencil)
+    - Vorticity transport to D-grid edges via fv_tp_2d
+    - Divergence damping at corners
+
+    The pressure gradient is NOT in this function — it was already incorporated
+    into uc/vc by p_grad_c.  The D-grid wind update involves only the (small)
+    KE gradient and vorticity flux.  For balanced geostrophic flow (Williamson 2),
+    both are near zero, so halo errors have minimal impact.
+
+    Parameters
+    ----------
+    h : (6, n, n) — ORIGINAL height (for PPM mass transport)
+    u_d : (6, n, n+1) — OLD D-grid x-velocity
+    v_d : (6, n+1, n) — OLD D-grid y-velocity
+    uc : (6, n+1, n) — UPDATED covariant C-grid u (from c_sw + p_grad_c)
+    vc : (6, n, n+1) — UPDATED covariant C-grid v (from c_sw + p_grad_c)
+    ua, va : (6, n, n) — A-grid contravariant (from c_sw's d2a2c_vect)
+    cdgrid : CubedSphereCDGrid
+    dt : float — full time step
+    g : float
+    div_damp : float
+
+    Returns
+    -------
+    h_new, u_d_new, v_d_new
+    """
+    from legoesm.core.fv_tp_2d import (
+        compute_transport_quantities, fv_tp_2d, transport_step,
+    )
+    n = cdgrid.n
+
+    # === 1. Contravariant transport velocity from updated C-grid ===
+    ut, vt = _uc_to_ut(uc, vc, u_d, v_d, cdgrid)
+
+    # === 2. PPM mass transport using ORIGINAL h ===
+    h_new = transport_step(h, ut, vt, dt, cdgrid)
+
+    # === 3. Cell-centre vorticity from D-grid circulation ===
+    dx_u = cdgrid.dx_edge_y  # (6, n, n+1) — edge length for u_d
+    dy_v = cdgrid.dy_edge_x  # (6, n+1, n) — edge length for v_d
+
+    vt_circ = u_d * dx_u  # (6, n, n+1) — u circulation
+    ut_circ = v_d * dy_v  # (6, n+1, n) — v circulation
+
+    rarea = 1.0 / cdgrid.base.area  # (6, n, n)
+    # CCW circulation: bottom - top + right - left
+    zeta = rarea * (vt_circ[:, :, :-1] - vt_circ[:, :, 1:]
+                    + ut_circ[:, 1:, :] - ut_circ[:, :-1, :])
+    zeta_abs = zeta + cdgrid.base.f  # (6, n, n)
+
+    # === 4. KE at cell centres (contravariant × covariant) ===
+    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])  # (6, n, n)
+    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])  # (6, n, n)
+    ke_cell = 0.5 * (ua * utmp + va * vtmp)  # (6, n, n)
+
+    # === 5. KE at corners via 4-point average with halo ===
+    ke_corner = _interp_center_to_corner(ke_cell, cdgrid)  # (6, n+1, n+1)
+
+    # === 6. Divergence damping at corners (optional) ===
+    if div_damp > 0:
+        div_field = cgrid_divergence(uc, vc, cdgrid)
+        area_min = float(jnp.min(cdgrid.base.area))
+        d2_bg = div_damp / area_min
+        dddmp = 0.2
+        div_abs = jnp.abs(div_field)
+        div_abs_corner = _interp_center_to_corner(div_abs, cdgrid)
+        damp_coeff = area_min * jnp.maximum(
+            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
+        div_corner = _interp_center_to_corner(div_field, cdgrid)
+        ke_corner = ke_corner + damp_coeff * div_corner
+
+    # === 7. KE gradient at D-grid edges (2-point corner difference) ===
+    # u_d[i, j] sits between corners (i, j) and (i+1, j) in the i-direction
+    ke_diff_u = ke_corner[:, :-1, :] - ke_corner[:, 1:, :]  # (6, n, n+1)
+    # But ke_diff has wrong shape for u_d: (6, n+1+1-1=n+1, n+1) → need to
+    # trim j to match u_d's n+1 j-values... Actually ke_corner is (n+1, n+1)
+    # and :-1 / 1: in dim1 gives (n, n+1) ← matches u_d!
+
+    # v_d[i, j] sits between corners (i, j) and (i, j+1) in the j-direction
+    ke_diff_v = ke_corner[:, :, :-1] - ke_corner[:, :, 1:]  # (6, n+1, n)
+
+    # Scale to circulation: dt * ke_diff has units s × m²/s² = m²/s
+    ke_diff_u_scaled = dt * ke_diff_u
+    ke_diff_v_scaled = dt * ke_diff_v
+
+    # === 8. Vorticity transport to D-grid edges via fv_tp_2d ===
+    crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
+        ut, vt, dt, cdgrid)
+    fx_vort, fy_vort = fv_tp_2d(
+        zeta_abs, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid)
+    # fx_vort: (6, n+1, n) — vorticity flux at x-interfaces (v_d positions)
+    # fy_vort: (6, n, n+1) — vorticity flux at y-interfaces (u_d positions)
+
+    # === 9. D-grid wind update ===
+    # Circulation form: u_new * dx = u_old * dx + ke_diff + fy_vort
+    #                   v_new * dy = v_old * dy + ke_diff - fx_vort
+    rdx_u = 1.0 / jnp.maximum(dx_u, _EPS)  # (6, n, n+1)
+    rdy_v = 1.0 / jnp.maximum(dy_v, _EPS)  # (6, n+1, n)
+
+    u_d_new = u_d + (ke_diff_u_scaled + fy_vort) * rdx_u
+    v_d_new = v_d + (ke_diff_v_scaled - fx_vort) * rdy_v
+
+    return h_new, u_d_new, v_d_new
+
+
+def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
+                   div_damp=0.0):
+    """Complete FV3 forward-backward shallow water time step.
+
+    Three phases:
+    1. c_sw (forward, dt/2): d2a2c_vect + mass transport + KE/vorticity
+       update at C-grid.
+    2. p_grad_c (backward, dt/2): pressure gradient at C-grid using
+       transported mass (h_star).  This implicit coupling provides stability
+       for gravity waves and keeps the large pressure gradient at C-grid
+       where the 2-point stencil is well-conditioned.
+    3. d_sw (full dt): PPM mass transport + D-grid wind update using ONLY
+       KE gradient (corner differences) and vorticity transport.  No
+       Arakawa-Lamb gradient — the pressure gradient is already in uc/vc.
+
+    For balanced geostrophic flow (Williamson 2), the D-grid winds change
+    by only the small KE and vorticity terms.  This makes the scheme
+    insensitive to halo interpolation errors at face boundaries, unlike
+    the RK3 approach where the full Bernoulli gradient (dominated by g*h)
+    must be computed at D-grid corners with haloed cell-centre data.
+
+    Parameters
+    ----------
+    h : (6, n, n) height
+    u_d : (6, n, n+1) D-grid x-velocity (edge midpoints)
+    v_d : (6, n+1, n) D-grid y-velocity (edge midpoints)
+    h_s : (6, n, n) surface topography
+    cdgrid : CubedSphereCDGrid
+    dt : float
+    g : float
+    div_damp : float
+
+    Returns
+    -------
+    h_new, u_d_new, v_d_new
+    """
+    dt2 = 0.5 * dt
+
+    # Phase 1: c_sw — forward half-step at C-grid (KE + vorticity only)
+    h_star, uc_new, vc_new, ua, va = _c_sw(
+        h, u_d, v_d, h_s, cdgrid, dt, g)
+
+    # Phase 2: p_grad_c — backward pressure gradient at C-grid
+    dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid, dt2, g)
+    uc_new = uc_new + dp_x
+    vc_new = vc_new + dp_y
+
+    # Phase 3: d_sw — full-step D-grid update (no A-L gradient)
+    h_new, u_d_new, v_d_new = _d_sw_native(
+        h, u_d, v_d, uc_new, vc_new, ua, va, cdgrid, dt, g,
+        div_damp=div_damp)
+
+    return h_new, u_d_new, v_d_new

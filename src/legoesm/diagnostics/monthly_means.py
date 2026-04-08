@@ -411,3 +411,76 @@ class SpatialMonthlyAccumulator:
             result[f"field_3d_{fname}"] = arr
 
         return result
+
+    def pop_completed_months(self, current_year: int, current_month: int) -> dict:
+        """Finalize and remove months that are strictly before the current month.
+
+        This allows incremental flushing: completed months are returned
+        and freed from memory, keeping only the in-progress month.
+
+        Parameters
+        ----------
+        current_year, current_month : int
+            The month currently being accumulated (will NOT be popped).
+
+        Returns
+        -------
+        dict
+            Same structure as :meth:`finalize` but only for completed months.
+            Empty ``{'months': []}`` if no months are ready.
+        """
+        current_key = (current_year, current_month)
+        completed_2d = {k for k in self._data_2d if k < current_key}
+        completed_3d = {k for k in self._data_3d if k < current_key}
+        completed = sorted(completed_2d | completed_3d)
+        if not completed:
+            return {'months': []}
+
+        result: dict = {'months': completed}
+        n = len(completed)
+
+        # 2-D
+        all_2d_names: set[str] = set()
+        for key in completed:
+            bucket = self._data_2d.get(key, {})
+            all_2d_names.update(bucket.keys())
+        for fname in sorted(all_2d_names):
+            arr = np.full((n, self.nlat, self.nlon), np.nan)
+            for i, key in enumerate(completed):
+                bucket = self._data_2d.get(key, {})
+                if fname in bucket:
+                    s, c = bucket[fname]
+                    if c > 0:
+                        arr[i] = s / c
+            result[f"field_2d_{fname}"] = arr
+
+        # 3-D
+        all_3d_names: set[str] = set()
+        for key in completed:
+            bucket = self._data_3d.get(key, {})
+            all_3d_names.update(bucket.keys())
+        for fname in sorted(all_3d_names):
+            sample = None
+            for key in completed:
+                bucket = self._data_3d.get(key, {})
+                if fname in bucket:
+                    sample = bucket[fname][0]
+                    break
+            if sample is None:
+                continue
+            nlev = sample.shape[2]
+            arr = np.full((n, self.nlat, self.nlon, nlev), np.nan)
+            for i, key in enumerate(completed):
+                bucket = self._data_3d.get(key, {})
+                if fname in bucket:
+                    s, c = bucket[fname]
+                    if c > 0:
+                        arr[i] = s / c
+            result[f"field_3d_{fname}"] = arr
+
+        # Free memory for completed months
+        for key in completed:
+            self._data_2d.pop(key, None)
+            self._data_3d.pop(key, None)
+
+        return result

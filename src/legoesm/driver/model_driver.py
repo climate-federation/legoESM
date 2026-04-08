@@ -643,6 +643,14 @@ class ModelDriver:
                     and self._device_config.is_distributed
                 )
 
+        # CMIP output requires full collect() for spatial/monthly
+        # accumulation — perf mode skips those, producing zero files.
+        cmip_on = getattr(
+            getattr(self.config, 'output', None), 'cmip_output', False,
+        )
+        if cmip_on and perf_mode:
+            perf_mode = False
+
         if perf_mode:
             # Lightweight path: scalar reductions only, no gather.
             state = kwargs.get('state', self.state)
@@ -1817,6 +1825,12 @@ class ModelDriver:
                     and diag_interval > 0 and current_step % diag_interval == 0
                     and (self._mpi_rank is None or self._mpi_rank == 0)):
                 self.diagnostics.flush_to_disk(self._output_dir)
+
+            # Incremental CMIP monthly flush — write completed months and
+            # free their memory so long runs don't accumulate all months.
+            if (diag_interval > 0 and current_step % diag_interval == 0
+                    and (self._mpi_rank is None or self._mpi_rank == 0)):
+                self.diagnostics.flush_cmip_monthly(day)
 
         return self._finalize_run(
             run_status, t_jit, t_start,

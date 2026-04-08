@@ -281,6 +281,73 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
 
 # ==============================================================================
+# FV3 Forward-Backward Shallow Water Model (no A-L gradient)
+# ==============================================================================
+
+class FV3FBShallowWaterModel:
+    """FV3 forward-backward shallow water model on the cubed-sphere.
+
+    Uses the three-phase FV3 forward-backward scheme:
+    1. c_sw: C-grid half-step (KE + vorticity, forward)
+    2. p_grad_c: pressure gradient at C-grid (backward, using h_star)
+    3. d_sw: D-grid full-step (mass transport + wind update, no A-L gradient)
+
+    The key advantage: the large pressure gradient (g*h) is handled at C-grid
+    (well-conditioned 2-point stencil), while D-grid winds are updated by only
+    the small KE and vorticity terms.  This eliminates the edge artifacts from
+    the Arakawa-Lamb gradient.
+
+    Parameters
+    ----------
+    grid : CubedSphereGrid
+    config : CDGridShallowWaterConfig, optional
+    """
+
+    def __init__(self, grid, config=None):
+        self.grid = grid
+        self.cdgrid = create_cubed_sphere_cdgrid(grid)
+        self.config = config or CDGridShallowWaterConfig()
+        self._target_mass = None
+
+    def set_initial_mass(self, state):
+        self._target_mass = jnp.sum(state.h * self.cdgrid.base.area)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def step(self, state, dt):
+        """Advance one time step using FV3 forward-backward."""
+        from legoesm.core.precision import cast_pytree
+        from legoesm.core.fv3_sw_core import fv3_fb_sw_step
+
+        state_c = cast_pytree(state, None, "compute")
+
+        h_new, u_new, v_new = fv3_fb_sw_step(
+            state_c.h, state_c.u_d, state_c.v_d, state_c.h_s,
+            self.cdgrid, dt, g=self.config.g,
+            div_damp=self.config.div_damp,
+        )
+
+        state_new = FV3EdgeShallowWaterState(
+            h=h_new, u_d=u_new, v_d=v_new, h_s=state_c.h_s)
+
+        # Conservation fixer
+        if self.config.use_conservation_fixer and self.config.fix_mass:
+            from legoesm.core.conservation import _accumulation_dtype
+            acc = _accumulation_dtype()
+            area = self.cdgrid.base.area.astype(acc)
+            total_area = jnp.sum(area)
+            if self._target_mass is not None:
+                mass_target = self._target_mass
+            else:
+                mass_target = jnp.sum(state.h.astype(acc) * area)
+            mass_new = jnp.sum(state_new.h.astype(acc) * area)
+            correction = (mass_target - mass_new) / total_area
+            h_fixed = state_new.h + correction.astype(state_new.h.dtype)
+            state_new = state_new._replace(h=h_fixed)
+
+        return cast_pytree(state_new, None, "storage")
+
+
+# ==============================================================================
 # FV3 edge-midpoint D-grid shallow water model
 # ==============================================================================
 

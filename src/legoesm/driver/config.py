@@ -225,6 +225,13 @@ class ExperimentConfig(NamedTuple):
                 "fix_moisture with active microphysics may conflict "
                 "with microphysical moisture sources/sinks"
             )
+        if (self.output.cmip_output
+                and self.output.diagnostics_perf_mode == "always"):
+            warns.append(
+                "diagnostics_perf_mode='always' is incompatible with "
+                "cmip_output=True; perf mode will be disabled at runtime "
+                "to ensure CMIP accumulation is not skipped"
+            )
         return warns
 
     # ------------------------------------------------------------------

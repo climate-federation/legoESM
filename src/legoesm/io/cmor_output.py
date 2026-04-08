@@ -939,18 +939,33 @@ class CFWriter:
         encoding = {
             var_name: self._encoding_for(var_name),
         }
-        # Append if file already exists, otherwise create
         if out_path.exists():
-            existing = xr.open_dataset(out_path)
-            ds = xr.concat([existing, ds], dim="time")
-            existing.close()
-
-        ds.to_netcdf(
-            out_path,
-            format="NETCDF4",
-            encoding=encoding,
-            unlimited_dims=["time"],
-        )
+            # Append by extending the time dimension in place.
+            # This avoids reading + concatenating + rewriting the
+            # entire file, which is O(n²) over a multi-year run.
+            nc4 = _import_netcdf4()
+            if nc4 is not None:
+                with nc4.Dataset(str(out_path), "a") as ncf:
+                    t_idx = len(ncf.dimensions["time"])
+                    ncf.variables["time"][t_idx] = float(time)
+                    ncf.variables["time_bnds"][t_idx, :] = [
+                        time_bounds[0], time_bounds[1],
+                    ]
+                    ncf.variables[var_name][t_idx] = data_np[0]
+            else:
+                # Fallback: xarray concat (original O(n²) path)
+                existing = xr.open_dataset(out_path)
+                ds = xr.concat([existing, ds], dim="time")
+                existing.close()
+                ds.to_netcdf(
+                    out_path, format="NETCDF4",
+                    encoding=encoding, unlimited_dims=["time"],
+                )
+        else:
+            ds.to_netcdf(
+                out_path, format="NETCDF4",
+                encoding=encoding, unlimited_dims=["time"],
+            )
 
         return out_path
 

@@ -17,6 +17,96 @@ from legoesm.forcing.time_utils import day_to_calendar
 from legoesm.io.cmor_output import CMIP6_PLEV19
 
 
+class _StructuredRegridWeights:
+    """Precomputed bilinear interpolation weights for structured grids."""
+    __slots__ = ('i_lo', 'j_lo', 'wi', 'wj', 'src_nlat', 'src_nlon')
+
+    def __init__(self, i_lo, j_lo, wi, wj, src_nlat, src_nlon):
+        self.i_lo = i_lo
+        self.j_lo = j_lo
+        self.wi = wi
+        self.wj = wj
+        self.src_nlat = src_nlat
+        self.src_nlon = src_nlon
+
+
+def _build_structured_regrid_weights(
+    src_lat_rad: np.ndarray,
+    src_lon_rad: np.ndarray,
+    tgt_nlat: int,
+    tgt_nlon: int,
+) -> _StructuredRegridWeights:
+    """Build bilinear interpolation weights from a native structured grid
+    to a regular CMIP lat-lon grid.
+
+    Parameters
+    ----------
+    src_lat_rad : (n_lat_src,) — source latitudes in radians, S→N
+    src_lon_rad : (n_lon_src,) — source longitudes in radians, [0, 2π)
+    tgt_nlat, tgt_nlon : target CMIP grid dimensions
+    """
+    src_lat = np.degrees(src_lat_rad)  # S→N
+    src_lon = np.degrees(src_lon_rad)  # [0, 360)
+
+    tgt_lat = np.linspace(-90.0, 90.0, tgt_nlat)
+    tgt_lon = np.linspace(0.0, 360.0, tgt_nlon, endpoint=False)
+
+    # For each target lat, find bracketing source lat indices + weight
+    i_lo = np.searchsorted(src_lat, tgt_lat) - 1
+    i_lo = np.clip(i_lo, 0, len(src_lat) - 2)
+    denom_i = src_lat[i_lo + 1] - src_lat[i_lo]
+    denom_i = np.where(denom_i == 0, 1.0, denom_i)
+    wi = np.clip((tgt_lat - src_lat[i_lo]) / denom_i, 0.0, 1.0)
+
+    # For each target lon, find bracketing source lon indices + weight
+    j_lo = np.searchsorted(src_lon, tgt_lon) - 1
+    j_lo = np.clip(j_lo, 0, len(src_lon) - 2)
+    denom_j = src_lon[j_lo + 1] - src_lon[j_lo]
+    denom_j = np.where(denom_j == 0, 1.0, denom_j)
+    wj = np.clip((tgt_lon - src_lon[j_lo]) / denom_j, 0.0, 1.0)
+
+    return _StructuredRegridWeights(
+        i_lo=i_lo, j_lo=j_lo, wi=wi, wj=wj,
+        src_nlat=len(src_lat), src_nlon=len(src_lon),
+    )
+
+
+def _apply_structured_regrid_2d(
+    field: np.ndarray,
+    w: _StructuredRegridWeights,
+) -> np.ndarray:
+    """Apply bilinear interpolation to a 2-D field (nlat_src, nlon_src)
+    → (nlat_tgt, nlon_tgt)."""
+    i0 = w.i_lo
+    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
+    j0 = w.j_lo
+    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
+    wi = w.wi
+    wj = w.wj
+    # Bilinear: f = (1-wi)(1-wj)*f00 + wi*(1-wj)*f10 + (1-wi)*wj*f01 + wi*wj*f11
+    f00 = field[np.ix_(i0, j0)]
+    f10 = field[np.ix_(i1, j0)]
+    f01 = field[np.ix_(i0, j1)]
+    f11 = field[np.ix_(i1, j1)]
+    return ((1 - wi[:, None]) * (1 - wj[None, :]) * f00
+            + wi[:, None] * (1 - wj[None, :]) * f10
+            + (1 - wi[:, None]) * wj[None, :] * f01
+            + wi[:, None] * wj[None, :] * f11)
+
+
+def _apply_structured_regrid_3d(
+    field: np.ndarray,
+    w: _StructuredRegridWeights,
+) -> np.ndarray:
+    """Apply bilinear interpolation to a 3-D field (nlat_src, nlon_src, nlev)
+    → (nlat_tgt, nlon_tgt, nlev)."""
+    nlev = field.shape[2]
+    result = np.empty((len(w.i_lo), len(w.j_lo), nlev), dtype=field.dtype)
+    for k in range(nlev):
+        result[:, :, k] = _apply_structured_regrid_2d(field[:, :, k], w)
+    return result
+
+
 class DiagnosticCollector:
     """Accumulates diagnostics during a simulation.
 
@@ -142,18 +232,47 @@ class DiagnosticCollector:
         grid_type : str
             "cubed_sphere", "gaussian", "latlon", or "voronoi".
         grid : object, optional
-            Grid object (needed for cubed-sphere regridding weights).
+            Grid object (needed for regridding weights).
         start_year : int
             Calendar start year for time axis in NetCDF files.
         """
         self._cmip_start_year = start_year
-        if grid_type == "cubed_sphere" and grid is not None and self._spatial_monthly is not None:
+        self._cmip_grid_type = grid_type
+
+        if self._spatial_monthly is None:
+            return
+
+        if grid_type == "cubed_sphere" and grid is not None:
             from legoesm.grids.regridding import (
                 get_cubedsphere_to_latlon_weights,
             )
             n = grid.n
             self._cs_regrid_weights = get_cubedsphere_to_latlon_weights(
                 n, n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+            )
+        elif grid_type in ("latlon", "gaussian") and grid is not None:
+            # For structured grids, store native 1-D coordinates (degrees)
+            # for bilinear regridding when native shape != CMIP target.
+            native_lat = np.asarray(grid.lat)  # radians, 1-D
+            native_lon = np.asarray(grid.lon)  # radians, 1-D
+            n_lat_native = native_lat.shape[0]
+            n_lon_native = native_lon.shape[0]
+            if (n_lat_native, n_lon_native) == (self._cmip_nlat, self._cmip_nlon):
+                # Native grid matches CMIP target — no regridding needed.
+                self._structured_regrid = None
+            else:
+                # Precompute regridding from native → CMIP lat-lon.
+                self._structured_regrid = _build_structured_regrid_weights(
+                    src_lat_rad=native_lat,
+                    src_lon_rad=native_lon,
+                    tgt_nlat=self._cmip_nlat,
+                    tgt_nlon=self._cmip_nlon,
+                )
+        elif grid_type in ("voronoi", "mpas"):
+            raise ValueError(
+                f"CMIP output is not supported for grid_type={grid_type!r}. "
+                f"Voronoi/MPAS grids require unstructured-to-latlon regridding "
+                f"which is not yet implemented."
             )
 
     def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
@@ -166,9 +285,12 @@ class DiagnosticCollector:
             return apply_cubedsphere_to_latlon(
                 np.asarray(field), self._cs_regrid_weights,
             )
-        # Lat-lon / Gaussian: field is already (nlat, nlon)
+        # Structured grids (lat-lon / Gaussian)
         arr = np.asarray(field)
         if arr.ndim == 2:
+            regrid = getattr(self, '_structured_regrid', None)
+            if regrid is not None:
+                return _apply_structured_regrid_2d(arr, regrid)
             return arr
         return None
 
@@ -184,6 +306,9 @@ class DiagnosticCollector:
             )
         arr = np.asarray(field)
         if arr.ndim == 3:
+            regrid = getattr(self, '_structured_regrid', None)
+            if regrid is not None:
+                return _apply_structured_regrid_3d(arr, regrid)
             return arr
         return None
 
@@ -397,7 +522,9 @@ class DiagnosticCollector:
             fields_2d = {}
             r = self._regrid_to_latlon_2d(state.T.data[..., -1])
             if r is not None:
-                fields_2d['tas'] = r  # near-surface T (lowest level)
+                # tas: lowest model level T as proxy for 2 m air temperature.
+                # True 2 m diagnostic requires a surface-layer scheme.
+                fields_2d['tas'] = r
             r = self._regrid_to_latlon_2d(precip_total)
             if r is not None:
                 fields_2d['pr'] = r
@@ -410,15 +537,29 @@ class DiagnosticCollector:
             r = self._regrid_to_latlon_2d(state.p_s.data)
             if r is not None:
                 fields_2d['ps'] = r
-            r = self._regrid_to_latlon_2d(sw_net_sfc)
+
+            # rsdt: TOA incoming shortwave [W/m2] — correctly available
+            r = self._regrid_to_latlon_2d(sw_down_toa)
             if r is not None:
-                fields_2d['rsds'] = r  # approximate: net ≈ downwelling
-            r = self._regrid_to_latlon_2d(lw_net_sfc)
-            if r is not None:
-                fields_2d['rlds'] = r
+                fields_2d['rsdt'] = r
+
+            # NOTE: rsds/rlds (surface downwelling) are NOT computed here.
+            # The runtime only provides sw_net_sfc/lw_net_sfc (net fluxes),
+            # which are not equal to the downwelling component.  Publishing
+            # net fluxes under CMIP downwelling names would be scientifically
+            # incorrect.  These variables will be added when the physics
+            # pipeline exposes separate downwelling surface fluxes.
+
+            # NOTE: clt (total cloud cover) is NOT computed here.  The
+            # available binary column cloud mask (q_c > threshold → 100%)
+            # does not represent cloud area fraction as defined by CMIP.
+            # A proper cloud overlap / random-maximum scheme is needed.
 
             # psl: sea-level pressure via hypsometric equation
             # p_sl = p_s * exp(phis / (R_d * T_lowest))
+            # This is a standard GCM approximation; a more accurate
+            # extrapolation (e.g., WMO method) would improve results
+            # over steep topography.
             T_lowest = np.asarray(state.T.data[..., -1])
             phis = np.asarray(state.phis.data)
             p_s_np = np.asarray(state.p_s.data)
@@ -435,15 +576,6 @@ class DiagnosticCollector:
             r = self._regrid_to_latlon_2d(cwv_field)
             if r is not None:
                 fields_2d['prw'] = r
-
-            # clt: total cloud cover [%] — column max approach
-            # Any column with q_c > 1e-6 kg/kg is considered cloudy
-            q_c_np = np.asarray(q_c)
-            cloud_mask = (q_c_np > 1.0e-6).any(axis=-1)  # (...) bool
-            clt_field = cloud_mask.astype(np.float64) * 100.0
-            r = self._regrid_to_latlon_2d(clt_field)
-            if r is not None:
-                fields_2d['clt'] = r
 
             # hfss: surface upward sensible heat flux [W/m2]
             if shflx is not None:
@@ -646,6 +778,31 @@ class DiagnosticCollector:
                 **{k: np.array(v) for k, v in moisture_data.items()},
             )
 
+    def flush_cmip_monthly(self, current_day: float) -> None:
+        """Write completed CMIP months incrementally and free their memory.
+
+        Call this periodically (e.g. at each diagnostic interval) during
+        long runs.  Only months strictly before the current month are
+        flushed; the in-progress month is kept for further accumulation.
+        """
+        if self._spatial_monthly is None or self.cf_writer is None:
+            return
+
+        from legoesm.forcing.time_utils import day_to_calendar
+        doy, _ = day_to_calendar(current_day)
+        current_year = int(current_day // 365.0)
+        from legoesm.diagnostics.monthly_means import MonthlyAccumulator
+        current_month = MonthlyAccumulator.day_to_month(doy)
+
+        data = self._spatial_monthly.pop_completed_months(
+            current_year, current_month,
+        )
+        months = data.get('months', [])
+        if not months:
+            return
+
+        self._write_cmip_data(data)
+
     def save(self, output_dir: str | Path) -> None:
         """Save all accumulated diagnostics to disk."""
         output_dir = Path(output_dir)
@@ -698,20 +855,31 @@ class DiagnosticCollector:
             self.cf_writer.close()
 
     def _write_cmip_monthly_files(self) -> None:
-        """Write CMIP-compliant NetCDF files from the spatial accumulator."""
+        """Write CMIP-compliant NetCDF files from the spatial accumulator.
+
+        Called at end-of-run to flush any remaining data.
+        """
         if self._spatial_monthly is None or self.cf_writer is None:
             return
-
         data = self._spatial_monthly.finalize()
+        self._write_cmip_data(data)
+
+    def _write_cmip_data(self, data: dict) -> None:
+        """Write a batch of CMIP monthly data to NetCDF files.
+
+        Shared implementation used by both end-of-run finalization
+        and incremental monthly flushing.
+        """
+        if self.cf_writer is None:
+            return
+
         months = data.get('months', [])
         if not months:
             return
 
-        # Build lat/lon for the CMIP grid
         lat = np.linspace(-90.0, 90.0, self._cmip_nlat)
         lon = np.linspace(0.0, 360.0, self._cmip_nlon, endpoint=False)
 
-        # Days in each month (noleap calendar)
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
         start_year = self._cmip_start_year
 
@@ -724,12 +892,11 @@ class DiagnosticCollector:
             time_mid = 0.5 * (day_start + day_end)
             time_bounds = (day_start, day_end)
 
-            # Write each 2-D field
             for key, arr in data.items():
                 if not key.startswith("field_2d_"):
                     continue
                 var_name = key[len("field_2d_"):]
-                field_slice = arr[i]  # (nlat, nlon)
+                field_slice = arr[i]
                 if np.all(np.isnan(field_slice)):
                     continue
                 try:
@@ -742,20 +909,17 @@ class DiagnosticCollector:
                         lon=lon,
                     )
                 except (KeyError, ValueError):
-                    pass  # skip unrecognized CMOR variables
+                    pass
 
-            # Write each 3-D field (already on plev19 from interpolation)
             for key, arr in data.items():
                 if not key.startswith("field_3d_"):
                     continue
                 var_name = key[len("field_3d_"):]
-                field_slice = arr[i]  # (nlat, nlon, n_plev)
+                field_slice = arr[i]
                 if np.all(np.isnan(field_slice)):
                     continue
                 nlev = field_slice.shape[2]
-                # Use ascending plev19 (matching interpolation order)
                 plev = np.sort(CMIP6_PLEV19)[:nlev] if nlev <= len(CMIP6_PLEV19) else None
-                # Reshape from (nlat, nlon, nlev) to (nlev, nlat, nlon)
                 field_plev = np.transpose(field_slice, (2, 0, 1))
                 try:
                     self.cf_writer.write_field(
