@@ -597,6 +597,7 @@ class ModelDriver:
             clear_sky_diag=self.config.output.clear_sky_diag,
             n_days=self.config.days,
             output_dir=self._output_dir,
+            cmip_resolution_deg=self.config.output.cmip_resolution_deg,
         )
         # Configure CMIP spatial regridding weights
         if self.config.output.cmip_output:
@@ -1616,6 +1617,7 @@ class ModelDriver:
                 day_of_year=day_of_year, seconds_of_day=seconds_of_day,
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
+                ghg_vmr=ghg_vmr,
             )
 
             # Pack state into carry

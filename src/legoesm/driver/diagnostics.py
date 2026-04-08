@@ -14,6 +14,7 @@ import jax.numpy as jnp
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import EnergyBudgetTracker
 from legoesm.forcing.time_utils import day_to_calendar
+from legoesm.io.cmor_output import CMIP6_PLEV19
 
 
 class DiagnosticCollector:
@@ -53,6 +54,7 @@ class DiagnosticCollector:
         clear_sky_diag: bool = False,
         n_days: int = 200,
         output_dir: str | Path = "",
+        cmip_resolution_deg: float = 5.0,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
@@ -112,8 +114,8 @@ class DiagnosticCollector:
                 self.monthly_accum = MonthlyAccumulator(nlev=nlev, n_lat_bins=90)
             # Full spatial accumulator for CMIP NetCDF output
             from legoesm.diagnostics.monthly_means import SpatialMonthlyAccumulator
-            _cmip_nlon = 72   # 5° resolution default
-            _cmip_nlat = 36
+            _cmip_nlon = int(round(360.0 / cmip_resolution_deg))
+            _cmip_nlat = int(round(180.0 / cmip_resolution_deg))
             self._spatial_monthly = SpatialMonthlyAccumulator(
                 nlat=_cmip_nlat, nlon=_cmip_nlon, nlev=nlev,
             )
@@ -184,6 +186,63 @@ class DiagnosticCollector:
         if arr.ndim == 3:
             return arr
         return None
+
+    def _interp_to_plev19(self, field_3d, p_s) -> np.ndarray | None:
+        """Interpolate a 3-D field from model levels to CMIP6 plev19.
+
+        Parameters
+        ----------
+        field_3d : array, shape (..., nlev)
+            Field on model levels.
+        p_s : array, shape (...)
+            Surface pressure [Pa].
+
+        Returns (..., 19) numpy array on CMIP6 standard pressure levels,
+        or None if sigma_full is not available.
+        """
+        sigma = np.asarray(self.sigma_full)
+        p_s_np = np.asarray(p_s)
+        field_np = np.asarray(field_3d)
+
+        # Model pressure at each level: p_k = sigma_k * p_s
+        # Shape: (..., nlev)
+        p_model = p_s_np[..., None] * sigma
+
+        # Target pressure levels (ascending for interpolation)
+        plev_target = np.sort(CMIP6_PLEV19)  # ascending (100 Pa → 100000 Pa)
+
+        # Log-pressure linear interpolation (numpy version)
+        log_p_model = np.log(np.maximum(p_model, 1e-10))
+        log_plev = np.log(plev_target)
+
+        # For each target level, find bracketing model levels and interpolate
+        n_target = len(plev_target)
+        out_shape = field_np.shape[:-1] + (n_target,)
+        result = np.empty(out_shape, dtype=np.float64)
+
+        for k in range(n_target):
+            log_pt = log_plev[k]
+            # searchsorted on the last axis of log_p_model
+            # p_model is ascending (sigma is ascending: top→bottom)
+            idx_hi = np.searchsorted(
+                sigma, plev_target[k] / np.maximum(p_s_np, 1e-10),
+            )
+            idx_hi = np.clip(idx_hi, 1, len(sigma) - 1)
+            idx_lo = idx_hi - 1
+
+            # Gather bracket values using advanced indexing
+            flat_shape = field_np.shape[:-1]
+            f_lo = np.take_along_axis(field_np, idx_lo[..., None], axis=-1)[..., 0]
+            f_hi = np.take_along_axis(field_np, idx_hi[..., None], axis=-1)[..., 0]
+            lp_lo = np.take_along_axis(log_p_model, idx_lo[..., None], axis=-1)[..., 0]
+            lp_hi = np.take_along_axis(log_p_model, idx_hi[..., None], axis=-1)[..., 0]
+
+            denom = lp_hi - lp_lo
+            denom = np.where(denom == 0.0, 1.0, denom)
+            alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
+            result[..., k] = f_lo + alpha * (f_hi - f_lo)
+
+        return result
 
     def collect(
         self,
@@ -329,6 +388,8 @@ class DiagnosticCollector:
 
         # Spatial monthly accumulation for CMIP output
         if self._spatial_monthly is not None:
+            from legoesm import constants as _c
+
             doy, _ = day_to_calendar(day)
             year = int(day // 365.0)
             fields_2d = {}
@@ -353,20 +414,64 @@ class DiagnosticCollector:
             r = self._regrid_to_latlon_2d(lw_net_sfc)
             if r is not None:
                 fields_2d['rlds'] = r
+
+            # psl: sea-level pressure via hypsometric equation
+            # p_sl = p_s * exp(phis / (R_d * T_lowest))
+            T_lowest = np.asarray(state.T.data[..., -1])
+            phis = np.asarray(state.phis.data)
+            p_s_np = np.asarray(state.p_s.data)
+            T_lowest_safe = np.maximum(T_lowest, 200.0)  # avoid div-by-zero
+            psl = p_s_np * np.exp(phis / (_c.R_d * T_lowest_safe))
+            r = self._regrid_to_latlon_2d(psl)
+            if r is not None:
+                fields_2d['psl'] = r
+
+            # prw: column water vapor [kg/m2]
+            cwv_field = np.asarray(
+                column_water_vapor(q_v, state.p_s.data, self.dsigma)
+            )
+            r = self._regrid_to_latlon_2d(cwv_field)
+            if r is not None:
+                fields_2d['prw'] = r
+
+            # clt: total cloud cover [%] — column max approach
+            # Any column with q_c > 1e-6 kg/kg is considered cloudy
+            q_c_np = np.asarray(q_c)
+            cloud_mask = (q_c_np > 1.0e-6).any(axis=-1)  # (...) bool
+            clt_field = cloud_mask.astype(np.float64) * 100.0
+            r = self._regrid_to_latlon_2d(clt_field)
+            if r is not None:
+                fields_2d['clt'] = r
+
             if fields_2d:
                 self._spatial_monthly.add_2d(doy, year, fields_2d)
 
-            # 3-D fields
+            # 3-D fields: interpolate from model levels to plev19, then regrid
             fields_3d = {}
-            r = self._regrid_to_latlon_3d(state.T.data)
-            if r is not None:
-                fields_3d['ta'] = r
-            r = self._regrid_to_latlon_3d(state.u.data)
-            if r is not None:
-                fields_3d['ua'] = r
-            r = self._regrid_to_latlon_3d(q_v)
-            if r is not None:
-                fields_3d['hus'] = r
+            ta_plev = self._interp_to_plev19(state.T.data, state.p_s.data)
+            ua_plev = self._interp_to_plev19(state.u.data, state.p_s.data)
+            hus_plev = self._interp_to_plev19(q_v, state.p_s.data)
+            if ta_plev is not None:
+                r = self._regrid_to_latlon_3d(ta_plev)
+                if r is not None:
+                    fields_3d['ta'] = r
+            if ua_plev is not None:
+                r = self._regrid_to_latlon_3d(ua_plev)
+                if r is not None:
+                    fields_3d['ua'] = r
+            if hus_plev is not None:
+                r = self._regrid_to_latlon_3d(hus_plev)
+                if r is not None:
+                    fields_3d['hus'] = r
+
+            # va: northward wind on pressure levels
+            if hasattr(state, 'v'):
+                va_plev = self._interp_to_plev19(state.v.data, state.p_s.data)
+                if va_plev is not None:
+                    r = self._regrid_to_latlon_3d(va_plev)
+                    if r is not None:
+                        fields_3d['va'] = r
+
             if fields_3d:
                 self._spatial_monthly.add_3d(doy, year, fields_3d)
 
@@ -625,16 +730,17 @@ class DiagnosticCollector:
                 except (KeyError, ValueError):
                     pass  # skip unrecognized CMOR variables
 
-            # Write each 3-D field
+            # Write each 3-D field (already on plev19 from interpolation)
             for key, arr in data.items():
                 if not key.startswith("field_3d_"):
                     continue
                 var_name = key[len("field_3d_"):]
-                field_slice = arr[i]  # (nlat, nlon, nlev)
+                field_slice = arr[i]  # (nlat, nlon, n_plev)
                 if np.all(np.isnan(field_slice)):
                     continue
                 nlev = field_slice.shape[2]
-                plev = CMIP6_PLEV19[:nlev] if nlev <= len(CMIP6_PLEV19) else None
+                # Use ascending plev19 (matching interpolation order)
+                plev = np.sort(CMIP6_PLEV19)[:nlev] if nlev <= len(CMIP6_PLEV19) else None
                 # Reshape from (nlat, nlon, nlev) to (nlev, nlat, nlon)
                 field_plev = np.transpose(field_slice, (2, 0, 1))
                 try:

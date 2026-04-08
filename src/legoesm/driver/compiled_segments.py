@@ -258,13 +258,61 @@ class SegmentForcing(NamedTuple):
     s_0: jax.Array
     o3_vmr: jax.Array
     aerosol_od: jax.Array
+    ghg_vmr: jax.Array  # shape (n_species,); empty (0,) when inactive
+
+
+# Canonical GHG species ordering for the ghg_vmr array.
+GHG_SPECIES_ORDER = ("co2", "ch4", "n2o", "cfc11", "cfc12")
+
+
+def ghg_dict_to_array(ghg_dict: dict | None) -> jax.Array:
+    """Convert a GHG VMR dict to a flat array in canonical order.
+
+    Returns shape ``(n,)`` where *n* is the number of species present
+    in ``ghg_dict`` (in :data:`GHG_SPECIES_ORDER`), or ``(0,)`` if
+    *ghg_dict* is None.
+    """
+    if ghg_dict is None:
+        return jnp.zeros(0)
+    vals = [ghg_dict[k] for k in GHG_SPECIES_ORDER if k in ghg_dict]
+    return jnp.asarray(vals)
+
+
+def ghg_array_to_dict(ghg_arr: jax.Array, ghg_keys: tuple[str, ...]) -> dict | None:
+    """Reconstruct a GHG VMR dict from a flat array + key list.
+
+    Parameters
+    ----------
+    ghg_arr : jax.Array, shape (n,)
+    ghg_keys : tuple of str
+        Species names in the same order used to build *ghg_arr*.
+
+    Returns None when *ghg_keys* is empty (no GHG override).
+    """
+    if not ghg_keys:
+        return None
+    return {k: ghg_arr[i] for i, k in enumerate(ghg_keys)}
 
 
 def pack_forcing(
     sst, sic, day_of_year, seconds_of_day,
     solar_weights, s_0, o3_vmr, aerosol_od,
+    ghg_vmr=None,
 ) -> SegmentForcing:
-    """Pack per-segment forcing into a SegmentForcing pytree."""
+    """Pack per-segment forcing into a SegmentForcing pytree.
+
+    Parameters
+    ----------
+    ghg_vmr : dict, jax.Array, or None
+        GHG volume mixing ratios.  Accepts a dict (auto-converted via
+        :func:`ghg_dict_to_array`), a pre-packed array, or None.
+    """
+    if ghg_vmr is None:
+        _ghg = jnp.zeros(0)
+    elif isinstance(ghg_vmr, dict):
+        _ghg = ghg_dict_to_array(ghg_vmr)
+    else:
+        _ghg = jnp.asarray(ghg_vmr)
     return SegmentForcing(
         sst=jnp.asarray(sst),
         sic=jnp.asarray(sic),
@@ -274,6 +322,7 @@ def pack_forcing(
         s_0=jnp.asarray(s_0),
         o3_vmr=jnp.asarray(o3_vmr),
         aerosol_od=jnp.asarray(aerosol_od),
+        ghg_vmr=_ghg,
     )
 
 
@@ -386,15 +435,11 @@ def build_segment_fn(
     _C_E = jnp.asarray(C_E) if C_E is not None else None
     _albedo_ice = jnp.asarray(albedo_ice) if albedo_ice is not None else None
     _albedo_ocean = jnp.asarray(albedo_ocean) if albedo_ocean is not None else None
-    # GHG VMR: use control dtype (float64 in mixed mode) for spectral
-    # accuracy in radiation; auto-clamps to float32 on Metal.
-    from legoesm.core.precision import _resolve_dtype
-    _ghg_dtype = _resolve_dtype(None, "control")
-    _ghg_vmr_override = None
+    # GHG VMR: species key order is static (captured in closure);
+    # values are dynamic (passed via SegmentForcing.ghg_vmr).
+    _ghg_keys: tuple[str, ...] = ()
     if ghg_vmr_override is not None:
-        _ghg_vmr_override = {
-            k: jnp.array(v, dtype=_ghg_dtype) for k, v in ghg_vmr_override.items()
-        }
+        _ghg_keys = tuple(k for k in GHG_SPECIES_ORDER if k in ghg_vmr_override)
 
     # Build owned-face mask for MPI replicated dynamics.
     # Shape (6,) with 1.0 for owned faces, 0.0 for non-owned.
@@ -411,6 +456,11 @@ def build_segment_fn(
         varying per step), so closing here is equivalent to passing it
         in scan's xs — but simpler.
         """
+        # Reconstruct GHG VMR dict from forcing array + static keys.
+        # _ghg_keys is a Python tuple captured in the closure; its
+        # length determines whether step_unified receives None or dict.
+        _ghg_vmr_override = ghg_array_to_dict(forcing.ghg_vmr, _ghg_keys)
+
         def _single_step(carry: SegmentCarry, _unused) -> tuple:
             """One atmosphere step: dynamics → physics → fixers."""
             step_idx = carry.step_index
