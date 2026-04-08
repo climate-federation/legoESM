@@ -35,5 +35,6 @@ from legoesm.grids.topography import (
 from legoesm.grids.voronoi import (
     VoronoiMesh,
     create_voronoi_mesh,
+    create_regional_voronoi_mesh,
     load_mpas_mesh,
 )
