@@ -144,17 +144,20 @@ def ocean_baroclinic_tendencies_cdgrid(
     rho_prime = rho - rho_0
 
     # --- 3. Baroclinic pressure gradient ---
-    # Promote to higher precision: cumulative pressure sums lose precision
-    # in float32 for deep ocean layers (large p, small dp differences).
-    # Use result_type to only upcast (never downcast from current dtype).
-    from legoesm.core.precision import _resolve_dtype
-    _pg_dt = jnp.result_type(rho_prime.dtype, _resolve_dtype("pressure_gradient", "compute"))
+    # Must use float64 for cumulative sums AND the subsequent gradient
+    # computation.  With float32, the absolute pressure (~6e5 Pa at depth)
+    # has ULP = 0.0625 Pa.  The halo-exchange interpolation of float32
+    # values at face boundaries introduces O(ULP) errors, which the
+    # gradient operator amplifies to O(ULP/dx) ≈ O(2e-7) Pa/m — a
+    # spurious pressure gradient that drives rest-state instability
+    # on the cubed sphere.  Keeping p_prime in float64 (ULP ≈ 1e-10 Pa)
+    # reduces the halo interpolation error by 9 orders of magnitude.
     dz_actual = z_coord.dz_ref * J[..., jnp.newaxis]
-    rho_prime_hi = rho_prime.astype(_pg_dt)
-    dz_hi = dz_actual.astype(_pg_dt)
+    rho_prime_hi = rho_prime.astype(jnp.float64)
+    dz_hi = dz_actual.astype(jnp.float64)
     dp_layer = rho_prime_hi * g * dz_hi
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
-    p_prime = (p_prime + 0.5 * dp_layer).astype(T.dtype)
+    p_prime = p_prime + 0.5 * dp_layer  # stay in float64 through gradient
 
     # --- 4. Convert to D-grid ---
     u_d, v_d = center_to_dgrid_vector(u_a * mask_3d, v_a * mask_3d, cdgrid)
@@ -187,6 +190,9 @@ def ocean_baroclinic_tendencies_cdgrid(
         lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
     )(p_prime)
     dp_dx, dp_dy_perp = _arakawa_lamb_gradient(p_prime_filled, cdgrid)
+    # Downcast PGF results back to working precision
+    dp_dx = dp_dx.astype(T.dtype)
+    dp_dy_perp = dp_dy_perp.astype(T.dtype)
 
     # --- 11. Vorticity at corners (relative only) ---
     zeta_corner = _interp_center_to_corner(zeta, cdgrid)
