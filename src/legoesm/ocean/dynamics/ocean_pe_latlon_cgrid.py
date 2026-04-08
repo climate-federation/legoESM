@@ -295,19 +295,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dv_dt = dv_dt + _vertical_advection_ocean(
         v_prime, w_v, z_coord, _interp_to_v_points(J))
 
-    # --- 9. Tracer tendencies (no horizontal advection) ---
-    # Horizontal tracer advection is handled in the step() function
-    # using barotropic-averaged transport (Hallberg 1997, issue #102).
-    # This ensures the tracer transport is exactly consistent with the
-    # continuity equation that determines h_new.
+    # --- 9. Tracer tendencies (diffusion + physics only) ---
+    # Horizontal AND vertical tracer advection are handled in the step()
+    # function using barotropic-averaged transport (Hallberg 1997, #102).
+    # Vertical velocity w is diagnosed from the barotropic-averaged
+    # per-layer divergence, ensuring 3D transport consistency.
     #
-    # The tendency here includes only: vertical advection, horizontal
-    # and vertical diffusion, and physics.
+    # The tendency here includes only: diffusion and physics.
     h_safe = jnp.maximum(h_k, 1e-10)
     tracers = jnp.stack([T, S], axis=0)
 
     def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
-        dtr_dt = _vertical_advection_ocean(tr, w, z_coord, J)
+        dtr_dt = jnp.zeros_like(tr)
 
         if config.K_h > 0:
             dtr_dt = dtr_dt + config.K_h * laplacian_cgrid(tr, grid, mask=mask)
