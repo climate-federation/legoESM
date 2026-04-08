@@ -910,24 +910,35 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             axes_arr = [axes_arr]
         im = None
 
-        for ax, step in zip(axes_arr, valid_steps):
+        # Pre-compute all cross-sections and find shared color range
+        all_sections = []
+        all_bin_centers = []
+        for step in valid_steps:
             f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
-            
-            # Apply land masking to 3D field before cross-section if available
             if "land_mask" in snapshots[step]:
                 land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
-                land_mask_3d = land_mask_raw[..., np.newaxis]  # Expand to 3D
+                land_mask_3d = land_mask_raw[..., np.newaxis]
                 f3d = np.where(land_mask_3d > 0.5, f3d, np.nan)
-            
             section, bin_centers = _bin_cross_section(
                 f3d, lon_deg, lat_deg, coord_kind, mean_axis)
             section = _fill_nan_section(section)
-            
-            # Individual grid plots use auto-scaling for maximum detail
+            all_sections.append(section)
+            all_bin_centers.append(bin_centers)
+
+        all_vals = np.concatenate([s.ravel() for s in all_sections])
+        all_finite = all_vals[np.isfinite(all_vals)]
+        if len(all_finite) > 0:
+            cs_vmin, cs_vmax = float(np.nanmin(all_finite)), float(np.nanmax(all_finite))
+        else:
+            cs_vmin, cs_vmax = None, None
+
+        for ax, step, section, bin_centers in zip(
+                axes_arr, valid_steps, all_sections, all_bin_centers):
             im = ax.imshow(
                 section.T, origin="upper", aspect="auto", cmap="RdBu_r",
                 extent=[bin_centers[0], bin_centers[-1],
-                        float(levels[-1]), float(levels[0])])
+                        float(levels[-1]), float(levels[0])],
+                vmin=cs_vmin, vmax=cs_vmax)
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             ax.set_xlabel(xlabel)
@@ -3669,6 +3680,33 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
     test_case = _extract_test_case_name(test_case_dir.name)
     field_ranges = FIELD_RANGES.get(test_case, {})
     vmin, vmax = field_ranges.get(field, (None, None))
+
+    # If no explicit range, compute shared range across all grids
+    if vmin is None or vmax is None:
+        all_vals = []
+        for data in grid_results.values():
+            snapshots = data['snapshots']
+            if field in snapshots.files:
+                fd = snapshots[field]
+                if fd.ndim == 3:
+                    fd = fd[-1]
+                if 'land_mask' in snapshots.files:
+                    lm = snapshots['land_mask']
+                    if lm.ndim == 3:
+                        lm = lm[-1]
+                    fd = np.where(lm > 0.5, fd, np.nan)
+                all_vals.append(fd.ravel())
+            else:
+                ffiles = [f for f in snapshots.files if f.startswith(f'{field}_step')]
+                if ffiles:
+                    steps = [int(f.split('_step')[1]) for f in ffiles]
+                    fd = snapshots[f'{field}_step{max(steps)}']
+                    all_vals.append(fd.ravel())
+        if all_vals:
+            combined = np.concatenate(all_vals)
+            finite = combined[np.isfinite(combined)]
+            if len(finite) > 0:
+                vmin, vmax = float(np.nanmin(finite)), float(np.nanmax(finite))
     
     # Set up grid layout (2x2 for up to 4 grids + space for colorbar)
     n_grids = len(grid_results)
