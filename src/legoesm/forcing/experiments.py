@@ -420,6 +420,37 @@ def create_experiment_config(
             )
 
     grid = GridConfig(**{**GridConfig()._asdict(), **grid_ov})
+
+    # Auto-select a valid discretization for the chosen grid_type
+    # when the user hasn't explicitly overridden it.
+    _GRID_DEFAULT_DISCRETIZATION = {
+        "cubed_sphere": "cdgrid",
+        "latlon": "latlon_fv",
+        "gaussian": "spectral",
+        "voronoi": "mpas",
+        "mpas": "mpas",
+    }
+    _GRID_DEFAULT_MODEL = {
+        "cubed_sphere": "hydrostatic",
+        "latlon": "hydrostatic",
+        "gaussian": "spectral_pe",
+        "voronoi": "hydrostatic",
+        "mpas": "hydrostatic",
+    }
+    if "discretization" not in dycore_ov and "grid_type" in grid_ov:
+        gt = grid.grid_type
+        if gt in _GRID_DEFAULT_DISCRETIZATION:
+            dycore_ov["discretization"] = _GRID_DEFAULT_DISCRETIZATION[gt]
+        else:
+            raise ValueError(
+                f"Unsupported grid_type={gt!r} for auto-discretization. "
+                f"Supported: {sorted(_GRID_DEFAULT_DISCRETIZATION)}"
+            )
+    if "model_type" not in dycore_ov and "grid_type" in grid_ov:
+        gt = grid.grid_type
+        if gt in _GRID_DEFAULT_MODEL:
+            dycore_ov["model_type"] = _GRID_DEFAULT_MODEL[gt]
+
     dycore = DycoreConfig(**{**DycoreConfig()._asdict(), **dycore_ov})
     output = OutputConfig(**{**OutputConfig()._asdict(), **output_ov})
 

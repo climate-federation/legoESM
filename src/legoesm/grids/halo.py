@@ -281,11 +281,15 @@ def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
 
 
 def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
-    """Quadratically interpolate *strip* at positions ``j + offsets_1d[j]``.
+    """Interpolate *strip* at positions ``j + offsets_1d[j]``.
 
-    Uses 3-point Lagrange interpolation, which reduces the gradient error
-    at face boundaries from O(dx) (linear) to O(dx^2) (quadratic).
-    Falls back to linear for very short strips (n < 3).
+    Uses 3-point quadratic Lagrange interpolation, giving O(dx^3) value
+    accuracy and O(dx^2) gradient accuracy.  Falls back to linear for
+    very short strips (n < 3).
+
+    The quadratic stencil uses points {jc-1, jc, jc+1} where jc is the
+    nearest integer.  The stencil centre is clamped to [1, n-2] to keep
+    all three indices in bounds.
 
     Parameters
     ----------
@@ -309,7 +313,10 @@ def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     # 3-point Lagrange: stencil centre clamped to [1, n-2] so all
     # three indices {jc-1, jc, jc+1} are in bounds.
     jc = jnp.clip(jnp.round(idx).astype(jnp.int32), 1, n - 2)
-    f = idx - jc.astype(offsets_1d.dtype)
+    # Promote f to strip dtype so Lagrange weights have full precision.
+    # With float32 offsets + float64 data, the float32 weights have
+    # sum(w) = 1 ± O(1e-7), causing ~0.06 Pa error for 6e5 Pa fields.
+    f = (idx - jc.astype(offsets_1d.dtype)).astype(strip.dtype)
     c_m1 = 0.5 * f * (f - 1.0)
     c_0 = 1.0 - f * f
     c_p1 = 0.5 * f * (f + 1.0)
@@ -562,7 +569,8 @@ def _pad_halo_local_4d(
         frac = jnp.clip(frac, 0.0, n_int - 1.0)
 
         jc = jnp.clip(jnp.round(frac).astype(jnp.int32), 1, n_int - 2)
-        f = frac - jc.astype(frac.dtype)
+        # Promote f to data dtype so Lagrange weights have full precision.
+        f = (frac - jc.astype(frac.dtype)).astype(data.dtype)
         c_m1 = 0.5 * f * (f - 1.0)
         c_0 = 1.0 - f * f
         c_p1 = 0.5 * f * (f + 1.0)
@@ -719,7 +727,8 @@ def _pad_halo_local(
 
         # 3-point Lagrange stencil centered at jc = round(frac)
         jc = jnp.clip(jnp.round(frac).astype(jnp.int32), 1, n_int - 2)
-        f = frac - jc.astype(frac.dtype)  # fractional distance from center
+        # Promote f to data dtype so Lagrange weights have full precision.
+        f = (frac - jc.astype(frac.dtype)).astype(data.dtype)
         # Lagrange basis polynomials for nodes {jc-1, jc, jc+1}:
         c_m1 = 0.5 * f * (f - 1.0)
         c_0 = 1.0 - f * f
