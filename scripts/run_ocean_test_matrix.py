@@ -3923,27 +3923,171 @@ def _create_comparison_summary(test_case_dir: Path, grid_results: dict) -> None:
     print(f"    Saved: {summary_file.name}")
 
 
+def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
+                                  field: str = 'eta', max_times: int = 6) -> None:
+    """Create a grid-vs-time evolution comparison: rows=grids, cols=time steps.
+
+    Each row is a different grid, each column a snapshot in time.
+    All panels share a common colorbar so fields are directly comparable.
+    Skipped for rest-state cases where fields don't evolve.
+    """
+    import matplotlib.pyplot as plt
+
+    # Skip for rest states — nothing evolves
+    if "rest_state" in test_case_dir.name:
+        return
+
+    test_case = _extract_test_case_name(test_case_dir.name)
+    field_ranges = FIELD_RANGES.get(test_case, {})
+
+    # Choose colormap
+    if field == 'eta':
+        cmap = 'RdBu_r'
+    elif field in ('SST', 'T'):
+        cmap = 'plasma'
+    elif field in ('speed_sfc',):
+        cmap = 'magma'
+    else:
+        cmap = 'viridis'
+
+    grid_names = list(grid_results.keys())
+    n_grids = len(grid_names)
+
+    # Determine number of time steps available (use the grid with most)
+    n_times_per_grid = {}
+    for gname, data in grid_results.items():
+        snaps = data['snapshots']
+        if field in snaps.files and snaps[field].ndim == 3:
+            n_times_per_grid[gname] = snaps[field].shape[0]
+        else:
+            # Old format: count step files
+            ffiles = [f for f in snaps.files if f.startswith(f'{field}_step')]
+            n_times_per_grid[gname] = len(ffiles)
+
+    if not n_times_per_grid or max(n_times_per_grid.values()) < 2:
+        return  # Need at least 2 time steps for evolution
+
+    n_times_max = max(n_times_per_grid.values())
+    n_cols = min(max_times, n_times_max)
+
+    # Collect all fields for shared color range
+    all_fields = []  # list of 2D arrays
+    grid_field_data = {}  # gname -> list of (time_label, 2D_array)
+    for gname, data in grid_results.items():
+        snaps = data['snapshots']
+        times_days = snaps['times_days'] if 'times_days' in snaps.files else None
+
+        if field in snaps.files and snaps[field].ndim == 3:
+            field_3d = snaps[field]  # (n_times, nlat, nlon)
+            nt = field_3d.shape[0]
+            # Select evenly spaced time indices
+            if nt > n_cols:
+                indices = np.linspace(0, nt - 1, n_cols).astype(int)
+            else:
+                indices = np.arange(nt)
+
+            entries = []
+            for idx in indices:
+                f2d = field_3d[idx].copy()
+                if 'land_mask' in snaps.files:
+                    lm = snaps['land_mask']
+                    lm2d = lm[idx] if lm.ndim == 3 else lm
+                    f2d = np.where(lm2d > 0.5, f2d, np.nan)
+                t_label = f"{times_days[idx]:.1f}d" if times_days is not None else f"t{idx}"
+                entries.append((t_label, f2d))
+                all_fields.append(f2d)
+            grid_field_data[gname] = entries
+        else:
+            # Old format — skip for simplicity
+            continue
+
+    if not grid_field_data or not all_fields:
+        return
+
+    # Shared color range
+    if field in field_ranges:
+        vmin, vmax = field_ranges[field]
+    else:
+        combined = np.concatenate([f.ravel() for f in all_fields])
+        finite = combined[np.isfinite(combined)]
+        if len(finite) > 0:
+            vmin, vmax = float(np.nanmin(finite)), float(np.nanmax(finite))
+        else:
+            vmin, vmax = None, None
+
+    # Actual number of columns (may differ per grid; use max)
+    actual_cols = max(len(v) for v in grid_field_data.values())
+    actual_grids = [g for g in grid_names if g in grid_field_data]
+    n_rows = len(actual_grids)
+
+    fig, axes = plt.subplots(n_rows, actual_cols,
+                              figsize=(3.5 * actual_cols, 3.0 * n_rows),
+                              squeeze=False)
+    im = None
+
+    for i_row, gname in enumerate(actual_grids):
+        entries = grid_field_data[gname]
+        # Get plot extent
+        snaps = grid_results[gname]['snapshots']
+        if 'lon' in snaps.files:
+            lon_arr, lat_arr = snaps['lon'], snaps['lat']
+            extent = [float(lon_arr.min()), float(lon_arr.max()),
+                      float(lat_arr.min()), float(lat_arr.max())]
+        else:
+            extent = [-180, 180, -90, 90]
+
+        for i_col in range(actual_cols):
+            ax = axes[i_row, i_col]
+            if i_col < len(entries):
+                t_label, f2d = entries[i_col]
+                im = ax.imshow(f2d, origin='lower', aspect='auto', cmap=cmap,
+                               extent=extent, vmin=vmin, vmax=vmax)
+                if i_row == 0:
+                    ax.set_title(t_label, fontsize=9)
+                if i_col == 0:
+                    res = grid_results[gname]['resolution']
+                    ax.set_ylabel(f"{gname}\n({res})", fontsize=9)
+                else:
+                    ax.set_ylabel("")
+                ax.set_xlabel("")
+                ax.tick_params(labelsize=7)
+            else:
+                ax.set_visible(False)
+
+    fig.suptitle(f"{field.upper()} Evolution — {test_case_dir.name}",
+                 fontsize=13, fontweight='bold')
+
+    if im is not None:
+        fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
+
+    fig.tight_layout(rect=[0, 0, 0.95, 0.95])
+    out = test_case_dir / f"comparison_evolution_{field}.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"    Saved: {out.name}")
+
+
 def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> None:
     """Create all cross-grid comparison plots and summary for a test case."""
     if len(grid_results) < 2:
         return  # Need at least 2 grids for comparison
-    
+
     print(f"  Creating cross-grid comparisons for {test_case_dir.name}...")
-    
+
     # Time series comparison
     _create_comparison_timeseries(test_case_dir, grid_results)
-    
-    # Snapshot comparisons for available fields
+
+    # Final snapshot comparisons
     for field in ['eta', 'SST']:
-        # Check if field exists in any grid's snapshots (new or old format)
         field_available = any(
-            field in data['snapshots'].files or  # NEW FORMAT: direct field name
-            any(f.startswith(f'{field}_step') for f in data['snapshots'].files)  # OLD FORMAT
+            field in data['snapshots'].files or
+            any(f.startswith(f'{field}_step') for f in data['snapshots'].files)
             for data in grid_results.values()
         )
         if field_available:
             _create_comparison_snapshots(test_case_dir, grid_results, field)
-    
+            _create_comparison_evolution(test_case_dir, grid_results, field)
+
     # Summary table
     _create_comparison_summary(test_case_dir, grid_results)
 
