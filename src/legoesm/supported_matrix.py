@@ -149,6 +149,11 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.ocean.dynamics.ocean_model_latlon",
     ),
     SolverEntry(
+        "ocean", "hydrostatic", "latlon_cgrid",
+        "latlon_cgrid", "LatLonCGridOceanModel",
+        "legoesm.ocean.dynamics.ocean_model_latlon_cgrid",
+    ),
+    SolverEntry(
         "ocean", "hydrostatic", "mpas_voronoi",
         "mpas", "MPASOceanModel",
         "legoesm.ocean.dynamics.ocean_model_mpas",
