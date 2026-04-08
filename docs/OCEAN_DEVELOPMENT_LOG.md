@@ -485,7 +485,29 @@ Issue #101 is resolved for latlon C-grid and MPAS. Summary of what was achieved:
 | latlon C-grid | 1.83e-17 | 8.7e-4 (transport limited) | ~same |
 | cubed-sphere | deferred (#100) | deferred (#100) | deferred (#100) |
 
-Volume conservation is at machine precision on both production grids. The remaining latlon T/S gap (8.7e-4) is from the transport operator stencil mismatch, not the split-explicit h mismatch. Fixing this requires flux-form tracer transport with barotropic-averaged transport — filed as issue #102 with a detailed plan (Phase 2a: horizontal accumulation, Phase 2b: vertical w reconstruction). Experts agree: MPAS first (low risk, validates infrastructure), latlon second (high value).
+Volume conservation is at machine precision on both production grids. The remaining latlon T/S gap (8.7e-4) requires flux-form tracer transport with barotropic-averaged transport — filed as issue #102.
+
+---
+
+## 2026-04-08: Consistent tracer transport operator (latlon C-grid, issue #102)
+
+**Problem investigated**: The latlon tracer transport used `scalar_advection_cgrid` (upwind, velocity-only flux `-div(Tu)`) with a correction `+T*div(hu)/h`. Two bugs:
+1. Wrong equation: `-div(Tu)` != `-div(huT)/h` when h varies
+2. Different stencils: upwind (tracer) vs centered (mass flux) don't cancel exactly
+
+**Fix applied**: Replaced with the MPAS/TRiSK pattern — use `divergence_cgrid` for BOTH `div(h*u*T)` and `div(h*u)`, with centered face reconstruction for tracers (same interpolation as h). This ensures exact cancellation for uniform T.
+
+**Result**: Per-step conservation is now at machine precision (1.4e-16 after 1 step). But the 10-day T drift is **unchanged** at 8.6e-4. The fix is correct but addresses the secondary error source, not the dominant one.
+
+**Dominant error identified**: The barotropic-baroclinic time-splitting inconsistency. The baroclinic step uses instantaneous velocity for tracer transport, but the barotropic solver determines h_new via 30 substeps with evolving velocities. The effective transport that changes h is NOT the same as the instantaneous transport used for dT/dt.
+
+This is why MPAS achieves 6e-15 without barotropic averaging — on MPAS, the TRiSK operators + consistent edge connectivity mean the per-level transport sums match the barotropic solver's transport. On latlon, the barotropic solver uses different face interpolations (`H_total` at faces) than the baroclinic code (per-layer `h_k` at faces), creating a structural mismatch even at the first substep.
+
+**Conclusion**: The full Phase 2a plan from issue #102 (barotropic transport accumulation) IS needed. The consistent operator fix is a correct prerequisite but not sufficient alone. The fix is kept because it:
+- Corrects a real mathematical error
+- Ensures machine-precision per-step conservation
+- Improves differentiability (removes upwind `jnp.where` kink)
+- Is required for Phase 2a to work correctly
 
 ---
 
