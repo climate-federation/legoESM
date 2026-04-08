@@ -954,7 +954,7 @@ class CFWriter:
                     ncf.variables[var_name][t_idx] = data_np[0]
             else:
                 # Fallback: xarray concat (original O(n²) path)
-                existing = xr.open_dataset(out_path)
+                existing = xr.open_dataset(out_path, decode_times=False)
                 ds = xr.concat([existing, ds], dim="time")
                 existing.close()
                 ds.to_netcdf(

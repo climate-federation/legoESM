@@ -48,8 +48,10 @@ def _build_structured_regrid_weights(
     src_lat = np.degrees(src_lat_rad)  # S→N
     src_lon = np.degrees(src_lon_rad)  # [0, 360)
 
-    tgt_lat = np.linspace(-90.0, 90.0, tgt_nlat)
-    tgt_lon = np.linspace(0.0, 360.0, tgt_nlon, endpoint=False)
+    dlat = 180.0 / tgt_nlat
+    dlon = 360.0 / tgt_nlon
+    tgt_lat = np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, tgt_nlat)
+    tgt_lon = np.linspace(dlon / 2, 360.0 - dlon / 2, tgt_nlon)
 
     # For each target lat, find bracketing source lat indices + weight
     i_lo = np.searchsorted(src_lat, tgt_lat) - 1
@@ -291,6 +293,12 @@ class DiagnosticCollector:
             regrid = getattr(self, '_structured_regrid', None)
             if regrid is not None:
                 return _apply_structured_regrid_2d(arr, regrid)
+            # Resample when source shape differs from CMIP target
+            if arr.shape != (self._cmip_nlat, self._cmip_nlon):
+                from scipy.ndimage import zoom
+                factors = (self._cmip_nlat / arr.shape[0],
+                           self._cmip_nlon / arr.shape[1])
+                return zoom(arr, factors, order=1)
             return arr
         return None
 
@@ -309,6 +317,13 @@ class DiagnosticCollector:
             regrid = getattr(self, '_structured_regrid', None)
             if regrid is not None:
                 return _apply_structured_regrid_3d(arr, regrid)
+            # Resample when source shape differs from CMIP target
+            if arr.shape[:2] != (self._cmip_nlat, self._cmip_nlon):
+                from scipy.ndimage import zoom
+                factors = (self._cmip_nlat / arr.shape[0],
+                           self._cmip_nlon / arr.shape[1],
+                           1.0)
+                return zoom(arr, factors, order=1)
             return arr
         return None
 
@@ -877,8 +892,10 @@ class DiagnosticCollector:
         if not months:
             return
 
-        lat = np.linspace(-90.0, 90.0, self._cmip_nlat)
-        lon = np.linspace(0.0, 360.0, self._cmip_nlon, endpoint=False)
+        dlat = 180.0 / self._cmip_nlat
+        dlon = 360.0 / self._cmip_nlon
+        lat = np.linspace(-90.0 + dlat / 2, 90.0 - dlat / 2, self._cmip_nlat)
+        lon = np.linspace(dlon / 2, 360.0 - dlon / 2, self._cmip_nlon)
 
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
         start_year = self._cmip_start_year
@@ -886,7 +903,7 @@ class DiagnosticCollector:
         from legoesm.io.cmor_output import CMIP6_PLEV19
 
         for i, (yr, mo) in enumerate(months):
-            year_offset = (yr - start_year) * 365.0
+            year_offset = (start_year - 1 + yr) * 365.0
             day_start = year_offset + sum(month_days[:mo - 1])
             day_end = day_start + month_days[mo - 1]
             time_mid = 0.5 * (day_start + day_end)
