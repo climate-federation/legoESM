@@ -160,9 +160,17 @@ def mpas_hydrostatic_tendencies(
     # Bernoulli gradient at edges
     grad_B_3d = gradient_edge_3d(bernoulli_3d, mesh)  # (nEdges, nlev)
 
-    # Pressure gradient correction: R_d * T_edge * grad(ln p_s)
+    # Pressure gradient correction: R_d * T_edge * grad_eta(ln p)
+    # In sigma coords: grad_eta(ln p) = grad(ln p_s).
+    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
     T_edge_3d = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
     pg_corr_3d = R_d * T_edge_3d * grad_ln_ps[:, None]  # (nEdges, nlev)
+    if _hybrid:
+        p_full_edge = cell_to_edge_avg_3d(p_full, mesh)  # (nEdges, nlev)
+        p_s_edge_scalar = cell_to_edge_avg(p_s, mesh)    # (nEdges,)
+        B_full = sigma_coord.B_full  # (nlev,)
+        hybrid_factor_edge = B_full * p_s_edge_scalar[:, None] / jnp.maximum(p_full_edge, 1e-10)
+        pg_corr_3d = pg_corr_3d * hybrid_factor_edge
 
     # PV flux: h_proxy = dp/g (pressure thickness)
     if _hybrid:
@@ -254,6 +262,10 @@ def mpas_hydrostatic_tendencies(
     div_flux_lnps = divergence_cell_3d(flux_lnps_3d, mesh)  # (nCells, nlev)
     v_grad_lnps = div_flux_lnps - ln_ps[:, None] * div_3d  # (nCells, nlev)
 
+    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s),
+    # so the adiabatic correction needs the same factor.
+    if _hybrid:
+        v_grad_lnps = v_grad_lnps * (sigma_coord.B_full * p_s[:, None] / p_adiab)
     adiabatic = adiabatic + kappa * T_3d * v_grad_lnps
 
     dT_dt_3d = horiz_adv_T_3d + vert_adv_T + adiabatic

@@ -255,6 +255,19 @@ def fv3_hydrostatic_tendencies(
     pg_corr_x = (R_d * T_corner_hi * dln_dx_hi[..., None]).astype(u_d.dtype)
     pg_corr_y_perp = (R_d * T_corner_hi * dln_dy_perp_hi[..., None]).astype(v_d.dtype)
 
+    # Hybrid coordinate correction: in sigma coords grad_eta(ln p) = grad(ln p_s),
+    # but in hybrid coords grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
+    # Near the model top B -> 0 (pure pressure levels), so the PGF correction
+    # from surface pressure should vanish.  Without this factor the model
+    # develops spurious upper-level heating and eventually blows up.
+    if _hybrid:
+        B_full = sigma_coord.B_full  # (nlev,)
+        _hybrid_factor = B_full * p_s[..., None] / p_full  # (6, n, n, nlev)
+        # Interpolate to D-grid corners for the PGF correction
+        _hf_corner = _interp_center_to_corner(_hybrid_factor, cdgrid)
+        pg_corr_x = pg_corr_x * _hf_corner
+        pg_corr_y_perp = pg_corr_y_perp * _hf_corner
+
     # --- 9. D-grid momentum tendencies ---
     du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x
     dv_d_dt = -zeta_corner * u_d - dB_dy_perp - pg_corr_y_perp
@@ -341,6 +354,11 @@ def fv3_hydrostatic_tendencies(
     dln_ps_dy = gradient_y(ln_ps_field, grid).data
     adiabatic = kappa * T * omega / p_adiab
     v_dot_grad_lnps = u_cell * dln_ps_dx[..., None] + v_cell * dln_ps_dy[..., None]
+    # In sigma coords: grad_eta(ln p) = grad(ln p_s).
+    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
+    # Apply the same factor to the adiabatic v.grad(ln p_s) correction.
+    if _hybrid:
+        v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_dt_data = horiz_adv_T + vert_adv_T + adiabatic
