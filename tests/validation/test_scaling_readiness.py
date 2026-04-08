@@ -47,6 +47,8 @@ class TestScalingReadiness:
             target_mass=jnp.float32(0.0),
             max_cfl=jnp.float32(0.0),
             precip_accum=jnp.zeros(s2),
+            shflx_accum=jnp.zeros(s2),
+            lhflx_accum=jnp.zeros(s2),
         )
         leaves, treedef = jax.tree.flatten(carry)
         reconstructed = treedef.unflatten(leaves)
@@ -111,6 +113,8 @@ class TestScalingReadiness:
             target_mass=jnp.float32(0.0),
             max_cfl=jnp.float32(0.0),
             precip_accum=jnp.zeros(s2),
+            shflx_accum=jnp.zeros(s2),
+            lhflx_accum=jnp.zeros(s2),
         )
         for field_name in SegmentCarry._fields:
             val = getattr(carry, field_name)

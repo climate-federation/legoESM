@@ -191,6 +191,8 @@ class TestSegmentCarryJIT:
             target_mass=jnp.float32(0.0),
             max_cfl=jnp.float32(0.0),
             precip_accum=jnp.zeros(shape2d, dtype=jnp.float32),
+            shflx_accum=jnp.zeros(shape2d, dtype=jnp.float32),
+            lhflx_accum=jnp.zeros(shape2d, dtype=jnp.float32),
         )
 
     def test_carry_through_scan(self):

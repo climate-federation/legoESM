@@ -49,6 +49,8 @@ class TestSegmentCarryPytree:
             target_mass=jnp.float32(0.0),
             max_cfl=jnp.float32(0.0),
             precip_accum=jnp.zeros(shape2d),
+            shflx_accum=jnp.zeros(shape2d),
+            lhflx_accum=jnp.zeros(shape2d),
         )
 
     def test_is_namedtuple(self):

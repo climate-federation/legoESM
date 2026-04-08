@@ -136,6 +136,8 @@ class TestEnsembleDiagnosticCollector:
             target_mass=jnp.zeros(3),
             max_cfl=jnp.zeros(3),
             precip_accum=jnp.zeros(s2),
+            shflx_accum=jnp.zeros(s2),
+            lhflx_accum=jnp.zeros(s2),
         )
 
         mean_carry = ensemble_mean(carry)

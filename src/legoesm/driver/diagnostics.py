@@ -262,6 +262,8 @@ class DiagnosticCollector:
         sw_down_toa,
         T_ice: float,
         lat_deg_grid=None,
+        shflx=None,
+        lhflx=None,
     ) -> None:
         """Collect diagnostics at a diagnostic interval.
 
@@ -442,6 +444,18 @@ class DiagnosticCollector:
             r = self._regrid_to_latlon_2d(clt_field)
             if r is not None:
                 fields_2d['clt'] = r
+
+            # hfss: surface upward sensible heat flux [W/m2]
+            if shflx is not None:
+                r = self._regrid_to_latlon_2d(shflx)
+                if r is not None:
+                    fields_2d['hfss'] = r
+
+            # hfls: surface upward latent heat flux [W/m2]
+            if lhflx is not None:
+                r = self._regrid_to_latlon_2d(lhflx)
+                if r is not None:
+                    fields_2d['hfls'] = r
 
             if fields_2d:
                 self._spatial_monthly.add_2d(doy, year, fields_2d)

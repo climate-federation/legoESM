@@ -41,6 +41,8 @@ class PhysicsOutput(NamedTuple):
     dN_c_dt: jax.Array
     dN_r_dt: jax.Array
     dN_i_dt: jax.Array
+    shflx: jax.Array | None = None   # surface sensible heat flux [W/m2]
+    lhflx: jax.Array | None = None   # surface latent heat flux [W/m2]
 
 
 class HeldRadiation(NamedTuple):
@@ -322,6 +324,8 @@ class PhysicsPipeline:
             dN_c_dt=dN_c_dt,
             dN_r_dt=dN_r_dt,
             dN_i_dt=dN_i_dt,
+            shflx=shflx,
+            lhflx=lhflx,
         )
 
     def compute_radiation_core(self, T, p_s, q_v, sst, sic, lat, lon,

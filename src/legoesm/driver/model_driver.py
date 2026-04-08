@@ -1660,10 +1660,12 @@ class ModelDriver:
                 from legoesm.parallel.ensemble import ensemble_mean
                 mean_carry = ensemble_mean(carry)
                 (self.state, self.q_v, self.q_c, self.q_r,
-                 held_tuple, _, seg_precip) = unpack_carry(mean_carry, self._state_template)
+                 held_tuple, _, seg_precip,
+                 seg_shflx, seg_lhflx) = unpack_carry(mean_carry, self._state_template)
             else:
                 (self.state, self.q_v, self.q_c, self.q_r,
-                 held_tuple, _, seg_precip) = unpack_carry(carry, self.state)
+                 held_tuple, _, seg_precip,
+                 seg_shflx, seg_lhflx) = unpack_carry(carry, self.state)
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
              held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = held_tuple
 
@@ -1678,6 +1680,8 @@ class ModelDriver:
                 "target_moisture": _target_moisture,
                 "target_mass": _target_mass,
                 "seg_precip": seg_precip,
+                "seg_shflx": seg_shflx,
+                "seg_lhflx": seg_lhflx,
             }
 
             current_step = seg_end_step
@@ -1687,9 +1691,11 @@ class ModelDriver:
 
             # Diagnostics
             if diag_interval > 0 and current_step % diag_interval == 0:
-                # Convert accumulated precipitation (kg/m²) to rate (kg/m²/s)
-                # so diagnostics can multiply by 86400 to get mm/day.
-                seg_precip_rate = seg_precip / (seg_steps * DT)
+                # Convert accumulated quantities to rates over segment duration.
+                _seg_dur = seg_steps * DT
+                seg_precip_rate = seg_precip / _seg_dur
+                seg_shflx_rate = seg_shflx / _seg_dur  # W/m²
+                seg_lhflx_rate = seg_lhflx / _seg_dur  # W/m²
 
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
@@ -1708,6 +1714,8 @@ class ModelDriver:
                     sw_down_toa=held_sw_down_toa,
                     T_ice=cfg.T_ice,
                     lat_deg_grid=lat_deg_grid,
+                    shflx=seg_shflx_rate,
+                    lhflx=seg_lhflx_rate,
                 )
 
                 # CFL computed host-side from final segment state (not in hot loop)

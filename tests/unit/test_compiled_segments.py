@@ -225,8 +225,8 @@ class TestSegmentCarryRoundtrip:
             step_index=42,
         )
 
-        new_state, qv_out, qc_out, qr_out, held_tuple, step_idx, precip = \
-            unpack_carry(carry, state)
+        (new_state, qv_out, qc_out, qr_out, held_tuple, step_idx, precip,
+         shflx_out, lhflx_out) = unpack_carry(carry, state)
 
         np.testing.assert_array_equal(np.asarray(new_state.T.data),
                                        np.asarray(state.T.data))
@@ -579,6 +579,8 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             target_mass=carry.target_mass,
             max_cfl=max_cfl,
             precip_accum=precip_accum,
+            shflx_accum=carry.shflx_accum,
+            lhflx_accum=carry.lhflx_accum,
         )
     return carry
 

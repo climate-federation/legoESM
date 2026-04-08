@@ -81,6 +81,10 @@ class SegmentCarry(NamedTuple):
         Monitored at segment boundaries for adaptive dt.
     precip_accum : jax.Array
         Accumulated precipitation over the segment [kg/m2].
+    shflx_accum : jax.Array
+        Accumulated sensible heat flux [W/m2 * s] over the segment.
+    lhflx_accum : jax.Array
+        Accumulated latent heat flux [W/m2 * s] over the segment.
     """
     u: jax.Array
     v: jax.Array
@@ -101,6 +105,8 @@ class SegmentCarry(NamedTuple):
     target_mass: jax.Array
     max_cfl: jax.Array
     precip_accum: jax.Array
+    shflx_accum: jax.Array
+    lhflx_accum: jax.Array
 
 
 def pack_carry(state, q_v, q_c, q_r,
@@ -108,7 +114,8 @@ def pack_carry(state, q_v, q_c, q_r,
                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                step_index,
                target_moisture=None, target_mass=None,
-               max_cfl=None, precip_accum=None):
+               max_cfl=None, precip_accum=None,
+               shflx_accum=None, lhflx_accum=None):
     """Pack driver state into a SegmentCarry for the compiled kernel.
 
     Prognostic fields are cast to at least the precision policy's storage
@@ -134,6 +141,10 @@ def pack_carry(state, q_v, q_c, q_r,
         max_cfl = jnp.asarray(0.0)
     if precip_accum is None:
         precip_accum = jnp.zeros_like(state.p_s.data)
+    if shflx_accum is None:
+        shflx_accum = jnp.zeros_like(state.p_s.data)
+    if lhflx_accum is None:
+        lhflx_accum = jnp.zeros_like(state.p_s.data)
     return SegmentCarry(
         u=_promote(state.u.data, storage),
         v=_promote(state.v.data, storage),
@@ -154,6 +165,8 @@ def pack_carry(state, q_v, q_c, q_r,
         target_mass=_promote(target_mass, accum),
         max_cfl=jnp.asarray(max_cfl),
         precip_accum=_promote(precip_accum, storage),
+        shflx_accum=_promote(shflx_accum, storage),
+        lhflx_accum=_promote(lhflx_accum, storage),
     )
 
 
@@ -168,7 +181,8 @@ def unpack_carry(carry, state_template):
 
     Returns
     -------
-    state, q_v, q_c, q_r, held_tuple, step_index, precip_accum
+    state, q_v, q_c, q_r, held_tuple, step_index, precip_accum,
+    shflx_accum, lhflx_accum
     """
     new_state = state_template._replace(
         u=state_template.u.replace(data=carry.u),
@@ -183,7 +197,8 @@ def unpack_carry(carry, state_template):
     )
     return (new_state, carry.q_v, carry.q_c, carry.q_r,
             held_tuple, int(carry.step_index),
-            carry.precip_accum)
+            carry.precip_accum,
+            carry.shflx_accum, carry.lhflx_accum)
 
 
 # ======================================================================
@@ -545,6 +560,12 @@ def build_segment_fn(
                 # Precip: update at owned indices
                 precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new[_ofi])
                 precip_accum = carry.precip_accum.at[_ofi].add(precip_step * _dt)
+
+                # Surface heat fluxes: accumulate at owned indices
+                _sh = phys_out.shflx if phys_out.shflx is not None else jnp.zeros_like(p_s_new[_ofi])
+                _lh = phys_out.lhflx if phys_out.lhflx is not None else jnp.zeros_like(p_s_new[_ofi])
+                shflx_accum = carry.shflx_accum.at[_ofi].add(_sh * _dt)
+                lhflx_accum = carry.lhflx_accum.at[_ofi].add(_lh * _dt)
             else:
                 phys_out, held_new = step_unified(
                     need_rad,
@@ -576,6 +597,12 @@ def build_segment_fn(
                 # --- Accumulate precipitation ---
                 precip_step = phys_out.precip if hasattr(phys_out, 'precip') else jnp.zeros_like(p_s_new)
                 precip_accum = carry.precip_accum + precip_step * _dt
+
+                # --- Accumulate surface heat fluxes ---
+                _sh = phys_out.shflx if phys_out.shflx is not None else jnp.zeros_like(p_s_new)
+                _lh = phys_out.lhflx if phys_out.lhflx is not None else jnp.zeros_like(p_s_new)
+                shflx_accum = carry.shflx_accum + _sh * _dt
+                lhflx_accum = carry.lhflx_accum + _lh * _dt
 
             # --- Saturation adjustment ---
             if do_sat_adjust:
@@ -630,6 +657,8 @@ def build_segment_fn(
                 target_mass=carry.target_mass,
                 max_cfl=max_cfl,
                 precip_accum=_match_dtype(precip_accum, carry.precip_accum),
+                shflx_accum=_match_dtype(shflx_accum, carry.shflx_accum),
+                lhflx_accum=_match_dtype(lhflx_accum, carry.lhflx_accum),
             )
             return new_carry, None
         return _single_step
