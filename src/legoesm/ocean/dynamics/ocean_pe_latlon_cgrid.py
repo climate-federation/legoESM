@@ -366,6 +366,26 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             else:
                 dv_dt = dv_dt + vdiff
 
+    # --- 10b. Physics tendencies (surface forcing, bottom drag, etc.) ---
+    # The physics module returns tendencies at cell centers (A-grid shape).
+    # Interpolate du_dt/dv_dt to C-grid face locations.
+    if physics_fn is not None:
+        # Project C-grid velocity to cell centers for the physics call
+        from legoesm.core.field import Field
+        u_cell_phys = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+        v_cell_phys = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+        state_for_physics = state._replace(
+            u=Field(data=u_cell_phys, name="u", dims=("lat", "lon", "level"), units="m/s"),
+            v=Field(data=v_cell_phys, name="v", dims=("lat", "lon", "level"), units="m/s"),
+        )
+        phys = physics_fn(state_for_physics, grid, z_coord, surface_forcing)
+        # Interpolate momentum tendencies to C-grid faces
+        du_dt = du_dt + _interp_to_u_points(phys.du_dt.data)
+        dv_dt = dv_dt + _interp_to_v_points(phys.dv_dt.data)
+        # Tracer tendencies stay at cell centers
+        dT_dt = dT_dt + phys.dT_dt.data
+        dS_dt = dS_dt + phys.dS_dt.data
+
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d
     dv_dt = dv_dt * v_mask_3d
