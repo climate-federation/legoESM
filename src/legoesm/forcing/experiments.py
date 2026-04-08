@@ -423,6 +423,25 @@ def create_experiment_config(
     dycore = DycoreConfig(**{**DycoreConfig()._asdict(), **dycore_ov})
     output = OutputConfig(**{**OutputConfig()._asdict(), **output_ov})
 
+    # Production-appropriate defaults for CMIP experiments.
+    # These can be overridden via **overrides.
+    radiation = "gray"   # safe default for idealized tests
+    dataset = "analytical"
+
+    if name in ("amip",):
+        # AMIP should use prescribed SST; analytical is a fallback.
+        # Set radiation to rrtmgp when available for production.
+        radiation = "rrtmgp"
+    elif name in ("historical", "ssp245", "ssp585", "1pctCO2"):
+        radiation = "rrtmgp"
+    # piControl keeps gray as default — it's an idealized control run.
+
+    # Allow explicit overrides to win.
+    if "radiation" in top_ov:
+        radiation = top_ov.pop("radiation")
+    if "dataset" in top_ov:
+        dataset = top_ov.pop("dataset")
+
     # Build the top-level config.
     cfg_dict: dict = {
         "grid": grid,
@@ -435,15 +454,39 @@ def create_experiment_config(
         "n2o_ppbv": n2o,
         "experiment": name,
         "start_year": tmpl.start_year,
+        "radiation": radiation,
+        "dataset": dataset,
     }
 
-    # Apply top-level overrides.
+    # Apply remaining top-level overrides.
     cfg_dict.update(top_ov)
 
-    return ExperimentConfig(**{
+    cfg = ExperimentConfig(**{
         **ExperimentConfig()._asdict(),
         **cfg_dict,
     })
+
+    # Validation warnings for CMIP-inappropriate configs.
+    import warnings
+    if name == "amip" and cfg.dataset == "analytical":
+        warnings.warn(
+            f"CMIP experiment '{name}' is using analytical SST/SIC. "
+            f"Set dataset='hadisst' or a real SST file for production runs.",
+            UserWarning,
+            stacklevel=2,
+        )
+    if (tmpl.forcing_type == "transient"
+            and cfg.radiation == "gray"
+            and "radiation" not in overrides):
+        warnings.warn(
+            f"CMIP transient experiment '{name}' is using gray radiation. "
+            f"Transient GHG trajectories require rrtmgp/rrtmg radiation "
+            f"to affect the simulation.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    return cfg
 
 
 def create_amip_experiment_config(

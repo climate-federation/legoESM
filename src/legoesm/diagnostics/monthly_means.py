@@ -272,3 +272,142 @@ class MonthlyAccumulator:
 
         save_dict.update(extra_arrays)
         np.savez(str(path), **save_dict)
+
+
+class SpatialMonthlyAccumulator:
+    """Accumulate full 2-D and 3-D spatial fields into monthly bins.
+
+    Unlike :class:`MonthlyAccumulator` (which stores only zonal means),
+    this class stores complete ``(nlat, nlon)`` and ``(nlat, nlon, nlev)``
+    fields, producing scientifically valid monthly means for CMIP output.
+
+    For cubed-sphere source grids the caller should regrid to lat-lon
+    *before* calling :meth:`add_2d` / :meth:`add_3d`.
+
+    Parameters
+    ----------
+    nlat, nlon : int
+        Target lat-lon grid dimensions.
+    nlev : int
+        Number of vertical levels (for 3-D fields).
+    """
+
+    MONTH_DAYS = MonthlyAccumulator.MONTH_DAYS
+
+    def __init__(self, nlat: int, nlon: int, nlev: int = 0):
+        self.nlat = nlat
+        self.nlon = nlon
+        self.nlev = nlev
+        # Storage: {(year, month): {field_name: (sum_array, count)}}
+        self._data_2d: dict[tuple[int, int], dict] = {}
+        self._data_3d: dict[tuple[int, int], dict] = {}
+
+    @staticmethod
+    def day_to_month(day_of_year: float) -> int:
+        return MonthlyAccumulator.day_to_month(day_of_year)
+
+    def _key(self, day_of_year: float, year: int) -> tuple[int, int]:
+        return (year, self.day_to_month(day_of_year))
+
+    def add_2d(
+        self,
+        day_of_year: float,
+        year: int,
+        fields: dict[str, np.ndarray],
+    ) -> None:
+        """Add regridded 2-D fields, shape ``(nlat, nlon)``."""
+        key = self._key(day_of_year, year)
+        bucket = self._data_2d.setdefault(key, {})
+        for name, field in fields.items():
+            arr = np.asarray(field)
+            if arr.shape != (self.nlat, self.nlon):
+                raise ValueError(
+                    f"SpatialMonthlyAccumulator.add_2d: expected "
+                    f"({self.nlat}, {self.nlon}), got {arr.shape} "
+                    f"for field {name!r}"
+                )
+            if name not in bucket:
+                bucket[name] = (np.zeros_like(arr, dtype=np.float64), 0)
+            s, c = bucket[name]
+            s += arr.astype(np.float64)
+            bucket[name] = (s, c + 1)
+
+    def add_3d(
+        self,
+        day_of_year: float,
+        year: int,
+        fields: dict[str, np.ndarray],
+    ) -> None:
+        """Add regridded 3-D fields, shape ``(nlat, nlon, nlev)``."""
+        key = self._key(day_of_year, year)
+        bucket = self._data_3d.setdefault(key, {})
+        for name, field in fields.items():
+            arr = np.asarray(field)
+            if arr.ndim != 3 or arr.shape[0] != self.nlat or arr.shape[1] != self.nlon:
+                raise ValueError(
+                    f"SpatialMonthlyAccumulator.add_3d: expected "
+                    f"({self.nlat}, {self.nlon}, nlev), got {arr.shape} "
+                    f"for field {name!r}"
+                )
+            if name not in bucket:
+                bucket[name] = (np.zeros_like(arr, dtype=np.float64), 0)
+            s, c = bucket[name]
+            s += arr.astype(np.float64)
+            bucket[name] = (s, c + 1)
+
+    def finalize(self) -> dict:
+        """Compute monthly means and return structured output.
+
+        Returns
+        -------
+        dict with keys:
+            'months' : sorted list of (year, month)
+            'field_2d_{name}' : (n_months, nlat, nlon) — 2-D means
+            'field_3d_{name}' : (n_months, nlat, nlon, nlev) — 3-D means
+        """
+        months_2d = set(self._data_2d.keys())
+        months_3d = set(self._data_3d.keys())
+        months = sorted(months_2d | months_3d)
+        result: dict = {'months': months}
+        if not months:
+            return result
+
+        n_months = len(months)
+
+        # 2-D fields
+        all_2d_names: set[str] = set()
+        for bucket in self._data_2d.values():
+            all_2d_names.update(bucket.keys())
+        for fname in sorted(all_2d_names):
+            arr = np.full((n_months, self.nlat, self.nlon), np.nan)
+            for i, key in enumerate(months):
+                bucket = self._data_2d.get(key, {})
+                if fname in bucket:
+                    s, c = bucket[fname]
+                    if c > 0:
+                        arr[i] = s / c
+            result[f"field_2d_{fname}"] = arr
+
+        # 3-D fields
+        all_3d_names: set[str] = set()
+        for bucket in self._data_3d.values():
+            all_3d_names.update(bucket.keys())
+        for fname in sorted(all_3d_names):
+            sample = None
+            for bucket in self._data_3d.values():
+                if fname in bucket:
+                    sample = bucket[fname][0]
+                    break
+            if sample is None:
+                continue
+            nlev = sample.shape[2]
+            arr = np.full((n_months, self.nlat, self.nlon, nlev), np.nan)
+            for i, key in enumerate(months):
+                bucket = self._data_3d.get(key, {})
+                if fname in bucket:
+                    s, c = bucket[fname]
+                    if c > 0:
+                        arr[i] = s / c
+            result[f"field_3d_{fname}"] = arr
+
+        return result

@@ -162,3 +162,205 @@ class TestSSTToFlux:
         assert_gradient_ok(grad, "SST → shflx")
         # Warmer SST → more sensible heat upward when SST > T_atm
         # Sign depends on convention, but gradient should be non-zero
+
+
+# ============================================================================
+# 8d  Atmosphere → coupler → sea ice → albedo feedback
+# ============================================================================
+
+class TestIceAlbedoChain:
+
+    def test_sw_down_ice_albedo_feedback(self):
+        """Gradient of absorbed SW through the full ice step.
+
+        sw_down -> ice_step -> T_ice change -> albedo change -> absorbed_SW.
+        """
+        from legoesm.ice.sea_ice import step_sea_ice
+        from legoesm.ice.config import SeaIceConfig
+        from legoesm.ice.state import SeaIceState
+        from legoesm.coupler.coupling_fields import AtmToSurface
+
+        config = SeaIceConfig(dynamics="none", temp_dependent_albedo=True)
+        shape = (6, 4, 4)
+        ones = jnp.ones(shape)
+
+        state = SeaIceState(
+            h_ice=Field(1.0 * ones, name="h_ice"),
+            T_ice=Field(268.0 * ones, name="T_ice"),
+            concentration=Field(0.8 * ones, name="concentration"),
+        )
+
+        def loss(sw_down):
+            forcing = AtmToSurface(
+                sw_down=sw_down,
+                lw_down=250.0 * ones,
+                precip_total=0.0 * ones,
+                precip_snow=0.0 * ones,
+                T_lowest=260.0 * ones,
+                q_lowest=1e-3 * ones,
+                u_lowest=5.0 * ones,
+                v_lowest=2.0 * ones,
+                p_lowest=1e5 * ones,
+                p_surface=1.013e5 * ones,
+                rho_lowest=1.4 * ones,
+                cos_zenith=0.5 * ones,
+                co2_ppmv=400.0 * ones,
+                has_radiation=1.0 * ones,
+                has_precipitation=1.0 * ones,
+            )
+            _, response = step_sea_ice(
+                state, forcing, 271.35 * ones,
+                jnp.zeros(shape), jnp.zeros(shape),
+                config, U_min=1.0, dt=3600.0,
+            )
+            # Absorbed SW = (1 - albedo) * sw_down
+            return jnp.sum((1.0 - response.albedo) * sw_down)
+
+        sw = 100.0 * ones
+        grad = jax.grad(loss)(sw)
+        assert jnp.all(jnp.isfinite(grad)), "Ice albedo chain gradient not finite"
+        assert jnp.any(grad != 0), "Ice albedo chain gradient all zero"
+
+
+# ============================================================================
+# 8e  Full AMIP-like chain (small): dynamics + physics + coupler
+# ============================================================================
+
+class TestFullAMIPChain:
+
+    def test_dynamics_plus_physics_plus_land(self):
+        """Full chain: dynamics.step -> Held-Suarez -> land step -> scalar loss.
+
+        Tests gradient through the entire atmosphere + surface chain.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel,
+        )
+        from tests.test_cases.held_suarez import held_suarez_forcing
+        from legoesm.core.state import FV3HydrostaticState, HydrostaticState
+        from legoesm.land.slab_land import step_land
+        from legoesm.land.config import LandConfig
+        from legoesm.land.state import LandState
+        from legoesm.coupler.coupling_fields import AtmToSurface
+
+        n, nlev = 4, 5
+        grid = create_cubed_sphere(n)
+        sigma = create_sigma_coordinate(nlev)
+        dt = 60.0
+        model = CDGridPrimitiveEquationModel(grid, sigma)
+
+        key = jax.random.PRNGKey(200)
+        T_data = 250.0 * jnp.ones((6, n, n, nlev)) + 1.0 * jax.random.normal(key, (6, n, n, nlev))
+        state = FV3HydrostaticState(
+            u_d=Field(jnp.zeros((6, n + 1, n + 1, nlev)), name="u_d"),
+            v_d=Field(jnp.zeros((6, n + 1, n + 1, nlev)), name="v_d"),
+            T=Field(T_data, name="T"),
+            p_s=Field(1e5 * jnp.ones((6, n, n)), name="p_s"),
+            phis=Field(jnp.zeros((6, n, n)), name="phis"),
+        )
+
+        land_config = LandConfig()
+        shape2d = (6, n, n)
+        ones = jnp.ones(shape2d)
+        land_state = LandState(
+            T_soil=Field(280.0 * ones, name="T_soil"),
+            W_bucket=Field(50.0 * ones, name="W_bucket"),
+            snow_depth=Field(jnp.zeros(shape2d), name="snow_depth"),
+            snow_age=Field(jnp.zeros(shape2d), name="snow_age"),
+        )
+
+        def loss(T_init):
+            s = state._replace(T=state.T.replace(data=T_init))
+            # 1. dynamics step
+            s = model.step(s, dt)
+            # 2. physics (Held-Suarez tendency)
+            hs_state = HydrostaticState(
+                u=Field(jnp.zeros((6, n, n, nlev)), name="u"),
+                v=Field(jnp.zeros((6, n, n, nlev)), name="v"),
+                T=s.T,
+                p_s=s.p_s,
+                phis=s.phis,
+            )
+            tend = held_suarez_forcing(hs_state, grid, sigma)
+            T_after_phys = s.T.data + dt * tend.dT_dt.data
+            # 3. Extract lowest level temp as forcing for land
+            T_lowest = T_after_phys[:, :, :, -1]
+            forcing = AtmToSurface(
+                sw_down=200.0 * ones, lw_down=300.0 * ones,
+                precip_total=1e-5 * ones, precip_snow=0.0 * ones,
+                T_lowest=T_lowest, q_lowest=5e-3 * ones,
+                u_lowest=5.0 * ones, v_lowest=2.0 * ones,
+                p_lowest=1e5 * ones, p_surface=1.013e5 * ones,
+                rho_lowest=1.2 * ones, cos_zenith=0.7 * ones,
+                co2_ppmv=400.0 * ones,
+                has_radiation=1.0 * ones, has_precipitation=1.0 * ones,
+            )
+            land_out, _, _ = step_land(land_state, forcing, land_config, U_min=1.0, dt=dt)
+            # Loss combines atmosphere and land
+            return jnp.sum(T_after_phys ** 2) + jnp.sum(land_out.T_soil.data ** 2)
+
+        grad = jax.grad(loss)(state.T.data)
+        assert_gradient_ok(grad, "Full AMIP chain: dynamics + physics + land")
+        # Should have spatial structure
+        assert not jnp.all(grad == grad.ravel()[0]), "Gradient has no spatial structure"
+
+
+# ============================================================================
+# 8f  DA cost function with coupled atmosphere model
+# ============================================================================
+
+class TestDACoupledCost:
+
+    def test_da_cost_with_pe_model(self):
+        """Build 4D-Var cost function with hydrostatic PE model and verify gradient."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
+            LatLonPrimitiveEquationModel,
+        )
+        from legoesm.core.state import HydrostaticState
+        from legoesm.da.control_vector import build_control_spec, state_to_control
+        from legoesm.da.observation import DirectObsOperator, Observation
+        from legoesm.da.background_error import DiagonalB
+        from legoesm.da.cost_function import build_cost_fn
+
+        nlev = 5
+        grid = create_latlon_grid(8, 16)
+        sigma = create_sigma_coordinate(nlev)
+        dt = 120.0
+        model = LatLonPrimitiveEquationModel(grid, sigma, dt=dt)
+
+        key = jax.random.PRNGKey(300)
+        T_data = 250.0 + 2.0 * jax.random.normal(key, (8, 16, nlev))
+        state = HydrostaticState(
+            u=Field(jnp.zeros((8, 16, nlev)), name="u"),
+            v=Field(jnp.zeros((8, 16, nlev)), name="v"),
+            T=Field(T_data, name="T"),
+            p_s=Field(1e5 * jnp.ones((8, 16)), name="p_s"),
+            phis=Field(jnp.zeros((8, 16)), name="phis"),
+        )
+
+        spec = build_control_spec(state, fields=("T",))
+        x_b = state_to_control(state, spec)
+
+        # Observe T at a few grid points after 1 step
+        indices = (jnp.array([2, 4]), jnp.array([3, 8]), jnp.array([0, 2]))
+        H = DirectObsOperator("T", indices)
+        obs_vals = H(state) + 2.0
+        obs = (Observation(
+            values=obs_vals,
+            errors=5.0 * jnp.ones(len(obs_vals)),
+            time_index=1,
+            operator=H,
+        ),)
+
+        sigma_b = 10.0 * jnp.ones(spec.total_size)
+        B = DiagonalB(sigma=sigma_b)
+
+        cost_fn = build_cost_fn(model, x_b, obs, B, spec, state, dt, n_steps=2)
+
+        grad = jax.grad(cost_fn)(x_b)
+        assert jnp.all(jnp.isfinite(grad)), "DA cost gradient not finite"
+        assert jnp.any(grad != 0), "DA cost gradient all zero"

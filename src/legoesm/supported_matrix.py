@@ -115,6 +115,16 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "tracer_transport", "TracerTransportModel",
         "legoesm.atmosphere.dynamics.tracer_transport",
     ),
+    SolverEntry(
+        "atmosphere", "tracer_transport", "latlon",
+        "tracer_transport_latlon", "TracerTransportLatLonModel",
+        "legoesm.atmosphere.dynamics.tracer_transport_latlon",
+    ),
+    SolverEntry(
+        "atmosphere", "tracer_transport", "voronoi",
+        "tracer_transport_mpas", "TracerTransportMPASModel",
+        "legoesm.atmosphere.dynamics.tracer_transport_mpas",
+    ),
 )
 
 
@@ -137,6 +147,11 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
         "ocean", "hydrostatic", "latlon_fv",
         "latlon", "LatLonOceanModel",
         "legoesm.ocean.dynamics.ocean_model_latlon",
+    ),
+    SolverEntry(
+        "ocean", "hydrostatic", "latlon_cgrid",
+        "latlon_cgrid", "LatLonCGridOceanModel",
+        "legoesm.ocean.dynamics.ocean_model_latlon_cgrid",
     ),
     SolverEntry(
         "ocean", "hydrostatic", "mpas_voronoi",

@@ -339,10 +339,19 @@ def spectral_pe_tendencies(
     dfdtheta_cos = _sh_synthesis_H(grid, state.lnps_hat.data)
     dlnps_dy = -dfdtheta_cos / (a * cos_lat_2d)
 
-    # PGF correction: -∇·(R_d·T'·∇lnps) computed as spectral div of grid product
+    # PGF correction: -∇·(R_d·T'·∇_eta(lnp)) computed as spectral div of grid product
+    # In sigma coords: ∇_eta(ln p) = ∇(ln p_s).
+    # In hybrid coords: ∇_eta(ln p) = (B*p_s/p) * ∇(ln p_s).
     T_prime_pgf = T - T_ref
-    pgf_Fx_cos = R_d * T_prime_pgf * dlnps_dx[..., None] * cos_lat_3d
-    pgf_Fy_cos = R_d * T_prime_pgf * dlnps_dy[..., None] * cos_lat_3d
+    _pgf_dlnps_dx = dlnps_dx[..., None]
+    _pgf_dlnps_dy = dlnps_dy[..., None]
+    if _hybrid:
+        B_full = sigma_coord.B_full  # (nlev,)
+        _hf = B_full * p_s[..., None] / p_full  # (n_lat, n_lon, nlev)
+        _pgf_dlnps_dx = _pgf_dlnps_dx * _hf
+        _pgf_dlnps_dy = _pgf_dlnps_dy * _hf
+    pgf_Fx_cos = R_d * T_prime_pgf * _pgf_dlnps_dx * cos_lat_3d
+    pgf_Fy_cos = R_d * T_prime_pgf * _pgf_dlnps_dy * cos_lat_3d
     pgf_correction_hat = (
         im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_Fx_cos)
         - one_over_a * sh_analysis_dmu_3d(grid, pgf_Fy_cos)
@@ -394,8 +403,11 @@ def spectral_pe_tendencies(
     p_adiab = jnp.maximum(p_full, config.p_floor) if config.p_floor > 0 else p_full
     adiabatic = kappa * T * omega / p_adiab
 
-    # Material derivative correction: kappa * T * v . grad(lnps)
+    # Material derivative correction: kappa * T * v . grad_eta(ln p)
+    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
     v_dot_grad_lnps = u * dlnps_dx[..., None] + v * dlnps_dy[..., None]
+    if _hybrid:
+        v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
     dT_hat = dT_hat + sh_analysis_3d(grid, adiabatic)

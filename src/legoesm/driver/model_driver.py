@@ -563,6 +563,26 @@ class ModelDriver:
             ghg_conc = get_ghg_at_time(self._ghg_config, day)
             ghg_vmr = ghg_concentrations_to_vmr(ghg_conc)
 
+        # CMIP experiment transient GHG override — applies even when
+        # ghg_forcing is "constant" so that built-in experiment
+        # trajectories (historical, SSP, 1pctCO2) drive radiation.
+        cfg = self.config
+        if (self._experiment
+                and cfg.radiation in ("rrtmg", "rrtmgp")
+                and ghg_vmr is None):
+            from legoesm.forcing.experiments import (
+                ghg_at_year, EXPERIMENT_TEMPLATES,
+            )
+            tmpl = EXPERIMENT_TEMPLATES.get(self._experiment)
+            if tmpl is not None and tmpl.forcing_type == "transient":
+                current_year = self._start_year + day / 365.0
+                co2, ch4, n2o = ghg_at_year(self._experiment, current_year)
+                ghg_vmr = ghg_concentrations_to_vmr({
+                    "co2_ppmv": co2,
+                    "ch4_ppbv": ch4,
+                    "n2o_ppbv": n2o,
+                })
+
         return o3_vmr, aerosol_od, ghg_vmr
 
     def _create_diagnostics(self) -> None:
@@ -571,12 +591,21 @@ class ModelDriver:
             nlev=self.config.grid.nlev,
             sigma_full=self.sigma.sigma_full,
             dsigma=self.sigma.dsigma,
+            experiment_id=self.config.experiment or "amip",
             monthly_means=self.config.output.monthly_means,
             cmip_output=self.config.output.cmip_output,
             clear_sky_diag=self.config.output.clear_sky_diag,
             n_days=self.config.days,
             output_dir=self._output_dir,
+            cmip_resolution_deg=self.config.output.cmip_resolution_deg,
         )
+        # Configure CMIP spatial regridding weights
+        if self.config.output.cmip_output:
+            self.diagnostics.set_cmip_grid_info(
+                grid_type=self.config.grid.grid_type,
+                grid=self.grid,
+                start_year=self.config.start_year,
+            )
 
     def _sync_and_collect_diagnostics(self, **kwargs) -> dict:
         """Synchronize device computation and collect diagnostics.
@@ -599,7 +628,7 @@ class ModelDriver:
             # Auto-detect: use perf_mode when distributed to avoid
             # expensive allgather on every diagnostic interval.
             pm_setting = getattr(
-                getattr(self, '_experiment_config', None),
+                self.config,
                 'output', None,
             )
             pm_flag = getattr(pm_setting, 'diagnostics_perf_mode', 'auto')
@@ -1588,6 +1617,7 @@ class ModelDriver:
                 day_of_year=day_of_year, seconds_of_day=seconds_of_day,
                 solar_weights=solar_weights, s_0=current_s_0,
                 o3_vmr=o3_vmr, aerosol_od=aerosol_od,
+                ghg_vmr=ghg_vmr,
             )
 
             # Pack state into carry
@@ -1929,13 +1959,8 @@ class ModelDriver:
                     day, _phys_p_s, _phys_lat,
                 )
 
-                # CMIP GHG trajectory
-                if self._experiment and cfg.radiation in ("rrtmg", "rrtmgp"):
-                    from legoesm.forcing.experiments import ghg_at_year
-                    current_year = self._start_year + day / 365.0
-                    ghg = ghg_at_year(self._experiment, current_year)
-                    # GHG override passed via config to radiation_fn at build time;
-                    # for transient experiments the pipeline already uses config defaults.
+                # CMIP GHG trajectory — already handled inside
+                # _precompute_external_forcing for transient experiments.
 
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \

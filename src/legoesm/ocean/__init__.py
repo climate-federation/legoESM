@@ -6,15 +6,16 @@ barotropic/baroclinic time stepping.
 
 Supported implementations:
 
-=========================  ============================
-Grid                       Class
-=========================  ============================
-Cubed-sphere (C-D grid)    ``OceanModel``
-Spectral (Gaussian)        ``SpectralOceanModel``
-Lat-lon (FV)               ``LatLonOceanModel``
-MPAS Voronoi               ``MPASOceanModel``
-SFNO (data-driven)         ``SFNOOceanModel``
-=========================  ============================
+============================  ============================
+Grid                           Class
+============================  ============================
+Cubed-sphere (C-D grid)        ``OceanModel``
+Spectral (Gaussian)            ``SpectralOceanModel``
+Lat-lon A-grid (FV)            ``LatLonOceanModel``
+Lat-lon C-grid (FV)            ``LatLonCGridOceanModel``
+MPAS Voronoi                   ``MPASOceanModel``
+SFNO (data-driven)             ``SFNOOceanModel``
+============================  ============================
 
 Deprecated aliases for ``OceanModel(discretization=...)``:
 ``"centered"``, ``"finite_volume"``, ``"fv"`` all map to ``"cdgrid"``
@@ -99,6 +100,12 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "idealized_bathymetry_latlon": ("legoesm.ocean.init_latlon", "idealized_bathymetry_latlon"),
     "wind_driven_gyre_latlon": ("legoesm.ocean.init_latlon", "wind_driven_gyre_latlon"),
     "latlon_ocean_conservation_fixer": ("legoesm.ocean.conservation_latlon", "latlon_ocean_conservation_fixer"),
+    # Lat-lon C-grid FV ocean
+    "LatLonCGridOceanModel": ("legoesm.ocean.dynamics.ocean_model_latlon_cgrid", "LatLonCGridOceanModel"),
+    "LatLonCGridOceanState": ("legoesm.ocean.state", "LatLonCGridOceanState"),
+    "LatLonCGridOceanTendencies": ("legoesm.ocean.state", "LatLonCGridOceanTendencies"),
+    "LatLonCGridOceanConfig": ("legoesm.ocean.state", "LatLonCGridOceanConfig"),
+    "rest_state_latlon_cgrid_ocean": ("legoesm.ocean.init_latlon_cgrid", "rest_state_latlon_cgrid_ocean"),
     # Bathymetry
     "BathymetryConfig": ("legoesm.ocean.bathymetry", "BathymetryConfig"),
     "CRITICAL_STRAITS": ("legoesm.ocean.bathymetry", "CRITICAL_STRAITS"),
@@ -176,6 +183,12 @@ __all__ = [
     "idealized_bathymetry_latlon",
     "wind_driven_gyre_latlon",
     "latlon_ocean_conservation_fixer",
+    # Lat-lon C-grid FV ocean
+    "LatLonCGridOceanModel",
+    "LatLonCGridOceanState",
+    "LatLonCGridOceanTendencies",
+    "LatLonCGridOceanConfig",
+    "rest_state_latlon_cgrid_ocean",
     # Freshwater
     "FreshwaterForcing",
     "zero_freshwater",

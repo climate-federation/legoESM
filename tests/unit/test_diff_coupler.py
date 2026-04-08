@@ -195,3 +195,151 @@ class TestFullCouplerGrad:
 
         grad = jax.grad(loss)(self.ocean_sst)
         assert_gradient_ok(grad, "Full coupler w.r.t. SST")
+
+
+# ============================================================================
+# 6d  Flux accumulator differentiability
+# ============================================================================
+
+class TestFluxAccumulatorGrad:
+
+    def test_accumulate_and_mean_grad(self):
+        """Gradient flows through accumulate -> mean_accumulator."""
+        from legoesm.coupler.accumulator import (
+            reset_accumulator, accumulate, mean_accumulator,
+        )
+        from legoesm.coupler.coupling_fields import SurfaceToAtm
+
+        shape = (6, 4, 4)
+        ones = jnp.ones(shape)
+
+        def make_sfc_to_atm(T_surface):
+            return SurfaceToAtm(
+                T_surface=T_surface,
+                albedo=0.1 * ones,
+                emissivity=0.97 * ones,
+                z0=1e-4 * ones,
+                q_surface=5e-3 * ones,
+                shflx=20.0 * ones,
+                lhflx=10.0 * ones,
+                tau_x=0.1 * ones,
+                tau_y=0.05 * ones,
+                lw_up=350.0 * ones,
+                u_ocean_sfc=jnp.zeros(shape),
+                v_ocean_sfc=jnp.zeros(shape),
+                co2_flux=jnp.zeros(shape),
+            )
+
+        def loss(T_surface):
+            acc = reset_accumulator(shape)
+            sfc1 = make_sfc_to_atm(T_surface)
+            acc = accumulate(acc, sfc1, dt=100.0)
+            sfc2 = make_sfc_to_atm(T_surface + 1.0)
+            acc = accumulate(acc, sfc2, dt=200.0)
+            mean = mean_accumulator(acc)
+            return jnp.sum(mean.T_surface ** 2)
+
+        T_sfc = 290.0 * ones
+        grad = jax.grad(loss)(T_sfc)
+        assert_gradient_ok(grad, "Flux accumulator w.r.t. T_surface")
+
+
+# ============================================================================
+# 6e  Cross-component: atmosphere -> coupler -> ocean
+# ============================================================================
+
+class TestCrossComponentAtmOcean:
+
+    def test_grad_T_atm_to_shflx(self):
+        """Gradient of sensible heat flux w.r.t. atmospheric temperature."""
+        from legoesm.coupler.bulk_flux import compute_most_fluxes
+
+        ncol = 32
+        sst = 295.0 * jnp.ones(ncol)
+        u_rel = 5.0 * jnp.ones(ncol)
+        v_rel = 2.0 * jnp.ones(ncol)
+        q_atm = 5e-3 * jnp.ones(ncol)
+        q_sfc = 8e-3 * jnp.ones(ncol)
+        rho = 1.2 * jnp.ones(ncol)
+
+        def loss(T_atm):
+            _, _, shflx, _, _ = compute_most_fluxes(
+                u_rel, v_rel, T_atm, q_atm, sst, q_sfc, rho,
+                scheme="coare3", n_iter=5,
+            )
+            return jnp.sum(shflx ** 2)
+
+        T_atm = 290.0 * jnp.ones(ncol)
+        grad = jax.grad(loss)(T_atm)
+        assert_gradient_ok(grad, "Cross-component T_atm -> shflx")
+
+
+# ============================================================================
+# 6f  Lake model differentiability
+# ============================================================================
+
+class TestLakeModelGrad:
+
+    def test_grad_wrt_T_epi(self):
+        """Gradient through two-layer lake step w.r.t. epilimnion temperature."""
+        from legoesm.coupler.lake import step_lake, LakeConfig, LakeState
+
+        ncol = 32
+        config = LakeConfig()
+        ones = jnp.ones(ncol)
+        state = LakeState(
+            T_epi=Field(285.0 * ones, name="T_epi"),
+            T_hypo=Field(280.0 * ones, name="T_hypo"),
+        )
+        forcing = self._make_lake_forcing(ncol)
+
+        def loss(T_epi_data):
+            s = state._replace(T_epi=state.T_epi.replace(data=T_epi_data))
+            out, _ = step_lake(s, forcing, config, U_min=1.0, dt=3600.0)
+            return jnp.sum(out.T_epi.data ** 2)
+
+        grad = jax.grad(loss)(state.T_epi.data)
+        assert_gradient_ok(grad, "Lake model w.r.t. T_epi")
+
+    def test_grad_wrt_sw_down(self):
+        """Gradient through lake step w.r.t. shortwave forcing."""
+        from legoesm.coupler.lake import step_lake, LakeConfig, LakeState
+
+        ncol = 32
+        config = LakeConfig()
+        ones = jnp.ones(ncol)
+        state = LakeState(
+            T_epi=Field(285.0 * ones, name="T_epi"),
+            T_hypo=Field(280.0 * ones, name="T_hypo"),
+        )
+        forcing = self._make_lake_forcing(ncol)
+
+        def loss(sw_down):
+            f = forcing._replace(sw_down=sw_down)
+            out, _ = step_lake(state, f, config, U_min=1.0, dt=3600.0)
+            return jnp.sum(out.T_epi.data ** 2)
+
+        grad = jax.grad(loss)(forcing.sw_down)
+        assert_gradient_ok(grad, "Lake model w.r.t. sw_down")
+
+    @staticmethod
+    def _make_lake_forcing(ncol):
+        from legoesm.coupler.coupling_fields import AtmToSurface
+        ones = jnp.ones(ncol)
+        return AtmToSurface(
+            sw_down=200.0 * ones,
+            lw_down=300.0 * ones,
+            precip_total=1e-5 * ones,
+            precip_snow=0.0 * ones,
+            T_lowest=280.0 * ones,
+            q_lowest=5e-3 * ones,
+            u_lowest=5.0 * ones,
+            v_lowest=2.0 * ones,
+            p_lowest=1e5 * ones,
+            p_surface=1.013e5 * ones,
+            rho_lowest=1.2 * ones,
+            cos_zenith=0.7 * ones,
+            co2_ppmv=400.0 * ones,
+            has_radiation=1.0 * ones,
+            has_precipitation=1.0 * ones,
+        )

@@ -25,7 +25,7 @@ from typing import NamedTuple
 
 import numpy as np
 import jax.numpy as jnp
-from scipy.spatial import ConvexHull, SphericalVoronoi
+from scipy.spatial import ConvexHull, Delaunay, SphericalVoronoi
 
 from legoesm import constants
 
@@ -330,7 +330,7 @@ def _order_indices_ccw(center_xyz, neighbor_xyz):
 # ============================================================================
 
 def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
-                                 triangles=None):
+                                triangles=None):
     """Build complete MPAS mesh from generator points on the unit sphere.
 
     Parameters
@@ -341,10 +341,10 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
         Sphere radius [m].
     omega : float
         Rotation rate [rad/s].
-    triangles : ndarray, shape (nTriangles, 3), optional
-        Pre-computed Delaunay triangulation.  When provided the ConvexHull
-        step is skipped.  Useful for regional meshes where the convex hull
-        of a partial sphere produces spurious back-face triangles.
+    triangles : ndarray or None
+        Pre-computed Delaunay triangles (nTriangles, 3). If ``None``,
+        uses ``ConvexHull`` (only valid for global meshes covering the
+        full sphere).
 
     Returns
     -------
@@ -352,12 +352,10 @@ def _build_mesh_from_generators(cell_xyz, radius, omega=constants.Omega,
     """
     nCells = len(cell_xyz)
 
-    # --- Delaunay triangulation ---
     if triangles is None:
+        # --- Delaunay triangulation via ConvexHull ---
         hull = ConvexHull(cell_xyz)
         triangles = hull.simplices.copy()
-    else:
-        triangles = np.asarray(triangles).copy()
 
     # Orient triangles outward
     for i, tri in enumerate(triangles):
@@ -844,150 +842,6 @@ def _compute_weights_on_edge(nEdges, nCells, maxEdges, maxEdges2,
 
 
 # ============================================================================
-# Regional mesh helpers
-# ============================================================================
-
-def _seed_regional_hex_generators(
-    lon_west_deg: float,
-    lon_east_deg: float,
-    lat_south_deg: float,
-    lat_north_deg: float,
-    resolution: float,
-    radius: float,
-    buffer_rings: int = 2,
-) -> np.ndarray:
-    """Seed quasi-uniform hex generators inside a spherical lat/lon region.
-
-    Produces a regular hexagonal close-packed grid in lat/lon, with
-    longitude spacing adjusted by cos(lat) so that cell distances are
-    approximately uniform in meters.
-
-    Parameters
-    ----------
-    lon_west_deg, lon_east_deg : float
-        Longitude bounds [degrees].
-    lat_south_deg, lat_north_deg : float
-        Latitude bounds [degrees].
-    resolution : float
-        Approximate cell spacing [m].
-    radius : float
-        Sphere radius [m].
-    buffer_rings : int
-        Number of extra cell rings outside the domain boundary.
-
-    Returns
-    -------
-    cell_xyz : ndarray, shape (nCells, 3)
-        Generator points on the unit sphere.
-    """
-    dlat = resolution / radius  # radians
-
-    lat_s = np.radians(lat_south_deg) - buffer_rings * dlat
-    lat_n = np.radians(lat_north_deg) + buffer_rings * dlat
-    # Clamp to avoid pole singularity
-    lat_s = max(lat_s, -np.pi / 2 + dlat * 0.5)
-    lat_n = min(lat_n, np.pi / 2 - dlat * 0.5)
-
-    # Use a FIXED dlon based on the centre latitude so that every row
-    # has the same number of cells.  Variable dlon (cos-adjusted per row)
-    # creates rows with different cell counts, leading to degenerate
-    # Voronoi edges at the joins that blow up the TRiSK barotropic solver.
-    lat_center = 0.5 * (np.radians(lat_south_deg) + np.radians(lat_north_deg))
-    dlon = resolution / (radius * np.cos(lat_center))  # radians
-
-    lon_w = np.radians(lon_west_deg) - buffer_rings * dlon
-    lon_e = np.radians(lon_east_deg) + buffer_rings * dlon
-
-    points = []
-    row = 0
-    lat = lat_s
-    while lat <= lat_n:
-        offset = (dlon / 2) * (row % 2)
-        lon = lon_w + offset
-        while lon <= lon_e:
-            points.append([lat, lon])
-            lon += dlon
-        lat += dlat
-        row += 1
-
-    latlons = np.array(points, dtype=np.float64)
-    x = np.cos(latlons[:, 0]) * np.cos(latlons[:, 1])
-    y = np.cos(latlons[:, 0]) * np.sin(latlons[:, 1])
-    z = np.sin(latlons[:, 0])
-    return np.column_stack([x, y, z])
-
-
-def _stereographic_delaunay(cell_xyz: np.ndarray,
-                             center_lat: float,
-                             center_lon: float,
-                             max_edge_chord: float | None = None,
-                             ) -> np.ndarray:
-    """Delaunay triangulation of regional points via stereographic projection.
-
-    Projects the 3-D unit-sphere points to a tangent plane centred on
-    (center_lat, center_lon) using stereographic projection, runs
-    scipy.spatial.Delaunay in 2-D, and returns the triangle indices.
-
-    Parameters
-    ----------
-    cell_xyz : ndarray, shape (nCells, 3)
-        Points on the unit sphere.
-    center_lat, center_lon : float
-        Projection centre [radians].
-    max_edge_chord : float, optional
-        Maximum allowed chord distance (on the unit sphere) for any
-        triangle edge.  Triangles with a longer edge are discarded.
-
-    Returns
-    -------
-    triangles : ndarray, shape (nTriangles, 3)
-        Triangle vertex indices (0-based).
-    """
-    from scipy.spatial import Delaunay
-
-    # Rotate so that the projection centre maps to the north pole (0, 0, 1).
-    # Step 1: rotate about z by -center_lon
-    cos_l = np.cos(center_lon)
-    sin_l = np.sin(center_lon)
-    x1 = cell_xyz[:, 0] * cos_l + cell_xyz[:, 1] * sin_l
-    y1 = -cell_xyz[:, 0] * sin_l + cell_xyz[:, 1] * cos_l
-    z1 = cell_xyz[:, 2]
-
-    # Step 2: rotate about y by -(pi/2 - center_lat) to map center to pole
-    angle = np.pi / 2 - center_lat
-    cos_a = np.cos(angle)
-    sin_a = np.sin(angle)
-    x2 = x1 * cos_a + z1 * sin_a
-    y2 = y1
-    z2 = -x1 * sin_a + z1 * cos_a
-
-    # Stereographic projection from south pole (0, 0, -1)
-    denom = np.maximum(1.0 + z2, 1e-12)
-    X = x2 / denom
-    Y = y2 / denom
-
-    pts = np.column_stack([X, Y])
-    tri = Delaunay(pts)
-    simplices = tri.simplices.copy()
-
-    # Filter degenerate triangles whose chord-distance edges are much
-    # longer than the typical cell spacing.  These appear at the convex
-    # hull boundary and would create huge Voronoi cells.
-    if max_edge_chord is not None:
-        good = np.ones(len(simplices), dtype=bool)
-        for t in range(len(simplices)):
-            a, b, c = simplices[t]
-            for i, j in [(a, b), (b, c), (c, a)]:
-                d = np.linalg.norm(cell_xyz[i] - cell_xyz[j])
-                if d > max_edge_chord:
-                    good[t] = False
-                    break
-        simplices = simplices[good]
-
-    return simplices
-
-
-# ============================================================================
 # Public API
 # ============================================================================
 
@@ -1045,98 +899,238 @@ def create_voronoi_mesh(
     return mesh
 
 
-def create_regional_voronoi_mesh(
-    lon_west: float,
-    lon_east: float,
-    lat_south: float,
-    lat_north: float,
-    resolution: float,
-    radius: float = constants.R_earth,
-    omega: float = constants.Omega,
-    buffer_rings: int = 2,
-    lloyd_iterations: int = 0,
-) -> VoronoiMesh:
-    """Create a regional Voronoi mesh on a spherical lat/lon domain.
+# ============================================================================
+# Regional mesh generation
+# ============================================================================
 
-    Generates quasi-uniform hexagonal generators inside the specified
-    region (plus a buffer ring), triangulates via stereographic
-    projection, and builds the full MPAS-compatible mesh.
-
-    The buffer cells outside ``[lon_west, lon_east] × [lat_south,
-    lat_north]`` should be land-masked in the ocean initialisation to
-    provide wall boundary conditions.  All TRiSK operators and the
-    MPAS ocean model work unchanged with the returned mesh.
+def _stereo_project(xyz, pole):
+    """Stereographic projection from *pole* onto the tangent plane.
 
     Parameters
     ----------
-    lon_west, lon_east : float
-        Longitude bounds [degrees].
-    lat_south, lat_north : float
-        Latitude bounds [degrees].
-    resolution : float
-        Approximate cell spacing [m].
+    xyz : ndarray, shape (N, 3)
+        Points on the unit sphere.
+    pole : ndarray, shape (3,)
+        Projection pole (unit vector). The tangent plane is at the
+        antipodal point.
+
+    Returns
+    -------
+    xy : ndarray, shape (N, 2)
+        2-D projected coordinates.
+    """
+    p = pole / np.linalg.norm(pole)
+
+    # Build ONB for the plane perpendicular to p
+    if abs(p[2]) < 0.9:
+        up = np.array([0.0, 0.0, 1.0])
+    else:
+        up = np.array([1.0, 0.0, 0.0])
+    e1 = np.cross(up, p)
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(p, e1)
+
+    dot = xyz @ p  # (N,)
+    denom = 1.0 + dot  # (N,)
+    denom = np.maximum(denom, 1e-15)
+    scale = 2.0 / denom
+
+    diff = xyz - dot[:, None] * p[None, :]
+    x_proj = np.sum(diff * e1[None, :], axis=1) * scale
+    y_proj = np.sum(diff * e2[None, :], axis=1) * scale
+    return np.stack([x_proj, y_proj], axis=1)
+
+
+def _seed_regional_generators(lon_range, lat_range, resolution_km, radius):
+    """Seed quasi-uniform hex generators on the sphere in a regional domain.
+
+    Uses uniform angular dlon spacing (same cell count per row) to avoid
+    degenerate Voronoi edges at row boundaries. A buffer ring of ~1.5x
+    resolution is added around the domain.
+
+    Parameters
+    ----------
+    lon_range : tuple[float, float]
+        Longitude range in degrees [lon_min, lon_max].
+    lat_range : tuple[float, float]
+        Latitude range in degrees [lat_min, lat_max].
+    resolution_km : float
+        Target cell spacing in km.
     radius : float
-        Sphere radius [m].
+        Sphere radius in m.
+
+    Returns
+    -------
+    cell_xyz : ndarray, shape (nCells, 3)
+        Generator points on the unit sphere.
+    """
+    lon_min = np.radians(lon_range[0])
+    lon_max = np.radians(lon_range[1])
+    lat_min = np.radians(lat_range[0])
+    lat_max = np.radians(lat_range[1])
+
+    d_rad = resolution_km * 1000.0 / radius
+
+    # Buffer of 1.5x resolution around domain
+    buffer = 1.5 * d_rad
+    lat_min_buf = max(lat_min - buffer, -np.pi / 2 + 0.01)
+    lat_max_buf = min(lat_max + buffer, np.pi / 2 - 0.01)
+    lon_min_buf = lon_min - buffer
+    lon_max_buf = lon_max + buffer
+
+    # Uniform dlon at center latitude: all rows have same cell count
+    lat_center = 0.5 * (lat_min_buf + lat_max_buf)
+    dlon = d_rad / max(np.cos(lat_center), 0.1)
+    dlat = d_rad * np.sqrt(3.0) / 2.0  # hex packing row spacing
+
+    lats = np.arange(lat_min_buf, lat_max_buf + 0.5 * dlat, dlat)
+    n_lon = max(1, int(np.ceil((lon_max_buf - lon_min_buf) / dlon)))
+
+    generators = []
+    for i_row, lat in enumerate(lats):
+        offset = 0.5 * dlon if (i_row % 2 == 1) else 0.0
+        lons = lon_min_buf + offset + np.arange(n_lon) * dlon
+        for lon in lons:
+            x = np.cos(lat) * np.cos(lon)
+            y = np.cos(lat) * np.sin(lon)
+            z = np.sin(lat)
+            generators.append([x, y, z])
+
+    cell_xyz = np.array(generators, dtype=np.float64)
+    norms = np.linalg.norm(cell_xyz, axis=1, keepdims=True)
+    cell_xyz /= norms
+    return cell_xyz
+
+
+def _regional_delaunay(cell_xyz, resolution_km, radius):
+    """Compute Delaunay triangulation for regional points via stereographic projection.
+
+    Uses stereographic projection from the centroid of the point cloud,
+    then filters degenerate boundary triangles (edge length > 3x resolution).
+
+    Parameters
+    ----------
+    cell_xyz : ndarray, shape (N, 3)
+        Points on the unit sphere.
+    resolution_km : float
+        Target resolution in km (used for degenerate-triangle filter).
+    radius : float
+        Sphere radius in m.
+
+    Returns
+    -------
+    triangles : ndarray, shape (M, 3)
+        Filtered triangle vertex indices.
+    """
+    centroid = cell_xyz.mean(axis=0)
+    centroid /= np.linalg.norm(centroid)
+    pole = -centroid  # project from antipodal point
+
+    xy = _stereo_project(cell_xyz, pole)
+
+    tri = Delaunay(xy)
+    triangles = tri.simplices.copy()
+
+    # Filter degenerate triangles: any edge > 3x angular resolution
+    d_rad = resolution_km * 1000.0 / radius
+    max_edge = 3.0 * d_rad
+
+    keep = []
+    for t in triangles:
+        i0, i1, i2 = int(t[0]), int(t[1]), int(t[2])
+        d01 = np.arccos(np.clip(np.dot(cell_xyz[i0], cell_xyz[i1]), -1, 1))
+        d12 = np.arccos(np.clip(np.dot(cell_xyz[i1], cell_xyz[i2]), -1, 1))
+        d20 = np.arccos(np.clip(np.dot(cell_xyz[i2], cell_xyz[i0]), -1, 1))
+        if d01 <= max_edge and d12 <= max_edge and d20 <= max_edge:
+            keep.append(t)
+
+    if len(keep) == 0:
+        raise ValueError(
+            "All Delaunay triangles were filtered as degenerate. "
+            "Try increasing resolution_km or expanding the domain."
+        )
+
+    return np.array(keep, dtype=np.int64)
+
+
+def create_regional_voronoi_mesh(
+    lon_range: tuple[float, float],
+    lat_range: tuple[float, float],
+    resolution_km: float = 300.0,
+    radius: float = constants.R_earth,
+    omega: float = constants.Omega,
+) -> VoronoiMesh:
+    """Create a regional spherical Voronoi mesh for ocean dynamics testing.
+
+    Generates a quasi-uniform hex mesh covering a lat/lon region + buffer,
+    builds the Delaunay triangulation via stereographic projection, and
+    constructs the full MPAS-compatible ``VoronoiMesh``. Boundary cells
+    (outside the target domain) serve as buffer/land cells via the
+    existing lat/lon land-mask mechanism.
+
+    Unlike the global ``create_voronoi_mesh``, this function:
+
+    - Seeds generators only in the target region (+ buffer ring)
+    - Uses uniform angular dlon spacing (same cell count per row) to
+      avoid degenerate Voronoi edges at row boundaries
+    - Uses Delaunay triangulation via stereographic projection instead
+      of ConvexHull (which requires a full sphere)
+    - Filters degenerate hull triangles (edge > 3x resolution)
+    - Skips Lloyd relaxation (distorts boundary cells)
+    - Sets safety floors on dvEdge and areaTriangle for boundary cells
+
+    Parameters
+    ----------
+    lon_range : tuple[float, float]
+        Longitude range in degrees [lon_min, lon_max].
+    lat_range : tuple[float, float]
+        Latitude range in degrees [lat_min, lat_max].
+    resolution_km : float
+        Target cell spacing in km. Default: 300 km.
+    radius : float
+        Sphere radius [m]. Default: Earth radius.
     omega : float
-        Rotation rate [rad/s].
-    buffer_rings : int
-        Extra cell rings outside the domain boundary (default 2).
-        These become land cells and ensure interior edges have full
-        two-sided connectivity for the TRiSK stencil.
-    lloyd_iterations : int
-        Number of Lloyd relaxation iterations (default 0 = disabled).
-        The current ``SphericalVoronoi``-based Lloyd iteration
-        distorts boundary cells of regional meshes, so it is off by
-        default.  The uniform-angular-spacing seeding already produces
-        a mesh that is stable for the TRiSK barotropic solver.
+        Rotation rate [rad/s]. Default: Earth rotation.
 
     Returns
     -------
     VoronoiMesh
-        Regional mesh.  Use ``mesh.latCell`` and ``mesh.lonCell`` to
-        determine which cells lie inside the target domain.
+        Regional mesh ready for use with all TRiSK operators.
+
+    Notes
+    -----
+    The motivation is that global MPAS meshes waste computation on land
+    for regional tests, while lat-lon A-grid barotropic solvers suffer
+    from checkerboard instability. This function provides a regional
+    C-grid (TRiSK) mesh for stable ocean dynamics testing.
+
+    References
+    ----------
+    - Issue #88: regional mesh for ocean dynamics testing
+    - Ringler, T. D., et al. (2010). J. Comput. Phys., 229(9), 3065-3090.
     """
-    # 1. Seed hex generators in the region + buffer
-    cell_xyz = _seed_regional_hex_generators(
-        lon_west, lon_east, lat_south, lat_north,
-        resolution, radius, buffer_rings,
-    )
-    n_cells = len(cell_xyz)
-    print(f"Regional mesh: {n_cells} cells "
-          f"(resolution ≈ {resolution/1e3:.0f} km, "
-          f"buffer_rings={buffer_rings})")
+    # Step 1: Seed generators in the target region + buffer
+    cell_xyz = _seed_regional_generators(lon_range, lat_range,
+                                         resolution_km, radius)
 
-    # 1b. Lloyd relaxation to smooth out degenerate Voronoi edges
-    if lloyd_iterations > 0:
-        cell_xyz = _lloyd_relaxation(cell_xyz, n_iter=lloyd_iterations)
-        print(f"  Lloyd relaxation: {lloyd_iterations} iterations")
+    # Step 2: Delaunay triangulation via stereographic projection
+    triangles = _regional_delaunay(cell_xyz, resolution_km, radius)
 
-    # 2. Delaunay triangulation via stereographic projection
-    #    Filter out triangles with edges > 3× the nominal spacing to
-    #    remove degenerate boundary triangles.
-    center_lat = np.radians(0.5 * (lat_south + lat_north))
-    center_lon = np.radians(0.5 * (lon_west + lon_east))
-    max_chord = 3.0 * resolution / radius  # on unit sphere
-    triangles = _stereographic_delaunay(cell_xyz, center_lat, center_lon,
-                                         max_edge_chord=max_chord)
-    print(f"  Delaunay: {len(triangles)} triangles, {n_cells} cells")
-
-    # 3. Build full mesh (reuses all spherical geometry + connectivity)
+    # Step 3: Build complete mesh using pre-computed triangles
     mesh = _build_mesh_from_generators(cell_xyz, radius, omega,
-                                        triangles=triangles)
+                                       triangles=triangles)
 
-    # 4. Safety: ensure dvEdge > 0 and areaTriangle > 0 everywhere.
-    #    Boundary edges (convex-hull of the regional point cloud) may
-    #    have only one adjacent triangle, leaving dvEdge = 0.  Setting
-    #    a floor prevents NaN from division in TRiSK operators at land
-    #    cells where the result is masked anyway.
-    min_dc = float(jnp.min(mesh.dcEdge[mesh.dcEdge > 0]))
-    dv_safe = jnp.where(mesh.dvEdge > 0, mesh.dvEdge,
-                         jnp.asarray(min_dc, dtype=mesh.dvEdge.dtype))
-    at_safe = jnp.where(mesh.areaTriangle > 0, mesh.areaTriangle,
-                         jnp.asarray(min_dc ** 2 * 0.1,
-                                     dtype=mesh.areaTriangle.dtype))
-    mesh = mesh._replace(dvEdge=dv_safe, areaTriangle=at_safe)
+    # Step 4: Apply safety floors on dvEdge and areaTriangle
+    # Boundary edges may have only one adjacent triangle, giving
+    # dvEdge = 0. Set a floor to prevent NaN in TRiSK operators.
+    d_rad = resolution_km * 1000.0 / radius
+    dvEdge_floor = 0.01 * d_rad * radius  # 1% of resolution
+    areaTriangle_floor = 0.001 * (d_rad * radius) ** 2  # 0.1% of cell area
+
+    dvEdge_safe = jnp.maximum(mesh.dvEdge, dvEdge_floor)
+    areaTriangle_safe = jnp.maximum(mesh.areaTriangle, areaTriangle_floor)
+
+    mesh = mesh._replace(dvEdge=dvEdge_safe, areaTriangle=areaTriangle_safe)
 
     return mesh
 

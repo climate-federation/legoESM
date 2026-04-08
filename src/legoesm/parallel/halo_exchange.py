@@ -112,10 +112,14 @@ def _make_sendrecv_vjp(mpi4jax_mod):
     This wrapper bypasses that by using ``@jax.custom_vjp``: the forward
     calls sendrecv normally, and the backward calls sendrecv with
     swapped endpoints as a fresh forward call (no transpose flag).
+
+    Non-JAX arguments (source, dest, sendtag, recvtag, comm) are
+    declared via ``nondiff_argnums`` so JAX does not attempt to trace
+    them.  They are passed through to fwd/bwd as leading static args.
     """
 
-    @jax.custom_vjp
-    def _sendrecv(send_buf, recv_template, source, dest, sendtag, recvtag, comm):
+    def _sendrecv_impl(send_buf, recv_template, source, dest,
+                       sendtag, recvtag, comm):
         return _mpi4jax_array_result(
             mpi4jax_mod.sendrecv(
                 send_buf, recv_template,
@@ -124,7 +128,12 @@ def _make_sendrecv_vjp(mpi4jax_mod):
             )
         )
 
+    _sendrecv = jax.custom_vjp(
+        _sendrecv_impl, nondiff_argnums=(2, 3, 4, 5, 6),
+    )
+
     def _fwd(send_buf, recv_template, source, dest, sendtag, recvtag, comm):
+        # fwd has the same signature as the primal function.
         result = _mpi4jax_array_result(
             mpi4jax_mod.sendrecv(
                 send_buf, recv_template,
@@ -132,11 +141,11 @@ def _make_sendrecv_vjp(mpi4jax_mod):
                 sendtag=sendtag, recvtag=recvtag, comm=comm,
             )
         )
-        return result, (source, dest, sendtag, recvtag, comm)
+        return result, ()
 
-    def _bwd(res, g):
-        source, dest, sendtag, recvtag, comm = res
-        # Reverse: swap source↔dest so cotangent flows back to sender.
+    def _bwd(source, dest, sendtag, recvtag, comm, _res, g):
+        # bwd receives nondiff args first, then residuals, then cotangent.
+        # Reverse: swap source<->dest so cotangent flows back to sender.
         d_send = _mpi4jax_array_result(
             mpi4jax_mod.sendrecv(
                 g, jnp.zeros_like(g),
@@ -144,7 +153,7 @@ def _make_sendrecv_vjp(mpi4jax_mod):
                 sendtag=sendtag, recvtag=recvtag, comm=comm,
             )
         )
-        return d_send, jnp.zeros_like(g), None, None, None, None, None
+        return d_send, jnp.zeros_like(g)
 
     _sendrecv.defvjp(_fwd, _bwd)
     return _sendrecv

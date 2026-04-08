@@ -264,3 +264,99 @@ class LatLonOceanConfig(NamedTuple):
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None
+
+
+# ==============================================================================
+# Lat-Lon C-Grid FV Ocean State
+# ==============================================================================
+
+class LatLonCGridOceanState(NamedTuple):
+    """State for the lat-lon C-grid finite-volume ocean primitive equations.
+
+    Velocities live on cell faces (Arakawa C-grid staggering):
+    - u at east/west faces (lon interfaces): shape (n_lat, n_lon+1, nlev)
+    - v at north/south faces (lat interfaces): shape (n_lat+1, n_lon, nlev)
+
+    Scalars live at cell centers:
+    - eta, T, S, H_bathy, land_mask: shape (n_lat, n_lon [, nlev])
+
+    Face masks (u_mask, v_mask) are derived from the cell-center land_mask:
+    a face is wet (mask=1) only if both adjacent cells are wet.
+
+    Fields
+    ------
+    u : Field
+        Zonal velocity at lon interfaces [m/s]. Shape (n_lat, n_lon+1, nlev).
+    v : Field
+        Meridional velocity at lat interfaces [m/s]. Shape (n_lat+1, n_lon, nlev).
+    T : Field
+        Potential temperature [degC]. Shape (n_lat, n_lon, nlev).
+    S : Field
+        Salinity [PSU]. Shape (n_lat, n_lon, nlev).
+    eta : Field
+        Sea surface height [m]. Shape (n_lat, n_lon).
+    H_bathy : Field
+        Bathymetry depth [m]. Static (positive downward). Shape (n_lat, n_lon).
+    land_mask : Field
+        Ocean mask at cell centers. Static. 1=ocean, 0=land. Shape (n_lat, n_lon).
+    u_mask : Field
+        Ocean mask at u-points (lon interfaces). Shape (n_lat, n_lon+1).
+    v_mask : Field
+        Ocean mask at v-points (lat interfaces). Shape (n_lat+1, n_lon).
+    """
+
+    u: Field
+    v: Field
+    T: Field
+    S: Field
+    eta: Field
+    H_bathy: Field
+    land_mask: Field
+    u_mask: Field
+    v_mask: Field
+
+
+class LatLonCGridOceanTendencies(NamedTuple):
+    """Tendencies for the lat-lon C-grid ocean primitive equations."""
+
+    du_dt: Field
+    dv_dt: Field
+    dT_dt: Field
+    dS_dt: Field
+    deta_dt: Field
+    dH_bathy_dt: Field
+    dland_mask_dt: Field
+
+
+class LatLonCGridOceanConfig(NamedTuple):
+    """Configuration for the lat-lon C-grid FV ocean model.
+
+    Same parameter set as LatLonOceanConfig; kept separate for clarity
+    since operator semantics differ (compact stencils vs centered).
+    """
+
+    g: float = 9.80616
+    rho_0: float = 1025.0
+    A_h: float = 1.0e4
+    K_h: float = 1.0e3
+    A_v: float = 1.0e-3
+    K_v: float = 1.0e-4
+    n_barotropic_substeps: int = 30
+    hyperdiff_coeff: float = 0.0
+    use_conservation_fixer: bool = True
+    fix_volume: bool = True
+    fix_heat: bool = True
+    fix_salt: bool = True
+    barotropic_diffusion_alpha: float = 0.01
+    barotropic_diffusion_dt_ref: float = 60.0
+    enable_runtime_checks: bool = False
+    min_water_column_m: float = 0.5
+    max_abs_eta_m: float = 1.0e4
+    temperature_min_c: float = -5.0
+    temperature_max_c: float = 45.0
+    salinity_min_psu: float = 0.0
+    salinity_max_psu: float = 50.0
+    differentiable_barotropic: bool = False
+    physics: object = None
+    eos: str = "wright"
+    eos_linear: object = None

@@ -239,6 +239,27 @@ class TestCFWriter(unittest.TestCase):
                 self.assertIsNotNone(writer)
 
 
+class TestDiagnosticCollector(unittest.TestCase):
+    """DiagnosticCollector CMIP wiring."""
+
+    def test_cmor_writer_uses_requested_experiment_id(self):
+        """CFWriter metadata follows the configured experiment id."""
+        from legoesm.driver.diagnostics import DiagnosticCollector
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            collector = DiagnosticCollector(
+                nlev=5,
+                sigma_full=np.linspace(0.9, 0.1, 5),
+                dsigma=np.full(5, 0.2),
+                experiment_id="piControl",
+                cmip_output=True,
+                output_dir=tmpdir,
+            )
+            self.assertIsNotNone(collector.cf_writer)
+            self.assertEqual(collector.cf_writer.experiment_id, "piControl")
+            collector.cf_writer.close()
+
+
 # ======================================================================
 # Experiment templates
 # ======================================================================
@@ -458,6 +479,24 @@ class TestCreateExperimentConfig(unittest.TestCase):
         cfg = create_experiment_config("historical")
         # 164 years * 365 days
         self.assertEqual(cfg.days, (2014 - 1850) * 365)
+
+    def test_transient_experiments_default_rrtmgp(self):
+        """Transient experiments default to rrtmgp radiation."""
+        from legoesm.forcing.experiments import create_experiment_config
+
+        for name in ("historical", "ssp245", "ssp585", "1pctCO2"):
+            cfg = create_experiment_config(name)
+            self.assertEqual(
+                cfg.radiation, "rrtmgp",
+                f"{name} should default to rrtmgp radiation"
+            )
+
+    def test_radiation_override_respected(self):
+        """Explicit radiation override is respected."""
+        from legoesm.forcing.experiments import create_experiment_config
+
+        cfg = create_experiment_config("historical", radiation="gray")
+        self.assertEqual(cfg.radiation, "gray")
 
     def test_overrides(self):
         """Overrides are applied to the config."""

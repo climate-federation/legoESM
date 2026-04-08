@@ -2370,6 +2370,16 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
     cfg = TC_CFGS[test_num]
     nlev = 30
     dt = cfg["dt"]
+
+    # TC13 grid-specific dt: the tilted solid-body rotation (u0~38 m/s)
+    # violates the horizontal CFL on lat-lon grids near the poles where
+    # dx -> 0.  On icosahedral meshes the centered advective scheme
+    # requires a moderately smaller dt to avoid dispersive instability.
+    if test_num == 13:
+        if tc.grid_type == "latlon":
+            dt = 120.0   # CFL < 0.8 at pole-nearest grid point
+        elif tc.grid_type == "icosahedral":
+            dt = 600.0   # reduce dispersion errors in centered scheme
     sigma_coord = create_dcmip_sigma(nlev)
 
     # --- Grid-specific setup ---
@@ -2975,25 +2985,32 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             state, hcoord, tmetric, small_grid = dcmip25_tc2_init(
                 grid, n_levels=nlev)
             grid = small_grid
-            # Scale hyperdiffusion for 20x smaller Earth: coeff ∝ dx⁴
-            hd_tc2 = hd / 20.0 ** 4
+            # Scale hyperdiffusion for 20x smaller Earth: coeff ∝ dx⁴.
+            # Use a shorter e-folding time (4x stronger diffusion) than
+            # the full-Earth default because mountain-generated flow
+            # disturbances produce grid-scale noise that the standard
+            # 52-hour e-fold cannot damp in a 6-hour simulation.
+            hd_tc2 = hd / 20.0 ** 4 * 4.0
             dt = max(0.15, 3.0 * (16.0 / n))
             nh_config = CompressibleEulerConfig(
-                n_acoustic_substeps=15, semi_implicit_acoustic=True,
+                n_acoustic_substeps=20, semi_implicit_acoustic=True,
                 sponge_width=15000.0,
                 sponge_coeff=1.0 / (0.1 * 86400.0),
                 hyperdiff_coeff=hd_tc2,
+                hyperdiff_w_coeff=hd_tc2,
                 acoustic_off_centering=0.15)
         elif test_case == "tc3":
             from tests.test_cases.dcmip2025 import dcmip25_tc3_init
             state, hcoord, tmetric, small_grid = dcmip25_tc3_init(
                 grid, n_levels=nlev)
             grid = small_grid
-            # Scale hyperdiffusion for 60x smaller Earth: coeff ∝ dx⁴
-            hd_tc3 = hd / 60.0 ** 4
+            # Scale hyperdiffusion for 60x smaller Earth: coeff ∝ dx⁴.
+            # 8x stronger than default scaling to stabilize the
+            # convective dynamics in the squall line.
+            hd_tc3 = hd / 60.0 ** 4 * 8.0
             dt = max(0.05, 0.5 * (16.0 / n))
             nh_config = CompressibleEulerConfig(
-                n_acoustic_substeps=20, semi_implicit_acoustic=True,
+                n_acoustic_substeps=25, semi_implicit_acoustic=True,
                 sponge_width=12000.0, sponge_coeff=0.3,
                 hyperdiff_coeff=hd_tc3,
                 hyperdiff_w_coeff=hd_tc3,
@@ -3097,11 +3114,21 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
             _sponge_w, _sponge_c = 12000.0, 0.3
         else:
             _sponge_w, _sponge_c = 10000.0, 0.05
-        _n_acoustic = 20 if test_case == "tc3" else 10
+        # TC2/TC3 need more acoustic substeps and stronger diffusion
+        # than TC1 due to mountain-generated and convective instabilities.
+        if test_case == "tc2a":
+            _n_acoustic = 20
+            _nu_del4 = dx_mean ** 4 / (12.0 * 3600.0)  # 4x stronger
+        elif test_case == "tc3":
+            _n_acoustic = 25
+            _nu_del4 = dx_mean ** 4 / (6.0 * 3600.0)   # 8x stronger
+        else:
+            _n_acoustic = 10
+            _nu_del4 = dx_mean ** 4 / (48.0 * 3600.0)
         nh_config = MPASCompressibleEulerConfig(
             n_acoustic_substeps=_n_acoustic, sponge_width=_sponge_w,
             sponge_coeff=_sponge_c,
-            nu_del4=dx_mean ** 4 / (48.0 * 3600.0))
+            nu_del4=_nu_del4)
         model = MPASCompressibleEulerModel(
             mesh, hcoord, tmetric, nh_config)
 
@@ -3220,13 +3247,23 @@ def run_nonhydrostatic(tc: TestCase, output_dir: Path, days: float, *,
         _dt_scale_sp = 3.0 if test_case == "tc3" else 6.0
         dt = max(0.25 if test_case == "tc3" else 0.5,
                  _dt_scale_sp * (21.0 / n_max))
-        _n_acoustic_sp = 20 if test_case == "tc3" else 10
+        # TC2/TC3 need more acoustic substeps and stronger diffusion.
+        _base_hd = 2.338e15 * (21.0 / n_max) ** 4
+        if test_case == "tc2a":
+            _n_acoustic_sp = 20
+            _hd_sp = _base_hd * 4.0
+        elif test_case == "tc3":
+            _n_acoustic_sp = 25
+            _hd_sp = _base_hd * 8.0
+        else:
+            _n_acoustic_sp = 10
+            _hd_sp = _base_hd
         nh_config = SpectralNHConfig(
             n_acoustic_substeps=_n_acoustic_sp,
             semi_implicit_acoustic=True,
             sponge_width=sponge_w,
             sponge_coeff=sponge_c,
-            hyperdiff_coeff=2.338e15 * (21.0 / n_max) ** 4,
+            hyperdiff_coeff=_hd_sp,
             small_earth_factor=sef,
         )
         # Use the small-Earth grid for tc2/tc3

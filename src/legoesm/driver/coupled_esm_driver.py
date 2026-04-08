@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -415,48 +416,57 @@ class CoupledESMDriver:
 
         co2_flux = self._last_sfc_response.co2_flux  # kgCO2/m2/s, +up
         p_s = self._atm.state.p_s.data
-        sigma_full = jnp.asarray(self._atm.sigma.sigma_full)
-        # Layer mass: dp / g [kg/m2]
-        if len(sigma_full) > 1:
-            d_sigma = sigma_full[-1] - sigma_full[-2]
-        else:
-            d_sigma = sigma_full[-1]
-        dp = p_s * d_sigma
+        dsigma = jnp.asarray(self._atm.sigma.dsigma)
+        # Layer mass of lowest level: dp / g [kg/m2]
+        dp = p_s * dsigma[-1]
         mass_air = dp / constants.g
         dco2 = co2_flux / jnp.maximum(mass_air, 1.0) * dt
         self._co2_field = self._co2_field.at[..., -1].add(dco2)
 
     def _segment_hook(self, driver, day, dt_segment):
-        """Callback at each segment boundary: step ocean + coupler."""
+        """Callback at each segment boundary: step ocean + coupler.
+
+        The segment may span many atmosphere time steps (e.g. an entire
+        diagnostic interval).  Surface coupling — ocean, land, ice, and
+        carbon — must be sub-cycled at ``coupling_dt`` (default 3600 s)
+        so that the carbon cycle's forward-Euler integration remains
+        stable and fluxes are physically consistent.
+        """
+        from legoesm.forcing.time_utils import day_to_calendar
+
+        coupling_dt = self.coupled_cfg.coupling_dt  # default 3600 s
+        n_sub = max(1, int(round(dt_segment / coupling_dt)))
+        sub_dt = dt_segment / n_sub
+
         atm_forcing = self._build_atm_forcing(day)
 
-        # Step slab ocean
-        self._step_ocean(atm_forcing, dt_segment)
+        for _ in range(n_sub):
+            # Step slab ocean
+            self._step_ocean(atm_forcing, sub_dt)
 
-        # Step coupler (land, ice, lake, ocean tile blending)
-        sst = self._ocean_state.T_sfc.data
-        u_sfc = getattr(self, '_ocean_u_sfc', jnp.zeros_like(sst))
-        v_sfc = getattr(self, '_ocean_v_sfc', jnp.zeros_like(sst))
+            # Step coupler (land, ice, lake, ocean tile blending)
+            sst = self._ocean_state.T_sfc.data
+            u_sfc = getattr(self, '_ocean_u_sfc', jnp.zeros_like(sst))
+            v_sfc = getattr(self, '_ocean_v_sfc', jnp.zeros_like(sst))
 
-        from legoesm.forcing.time_utils import day_to_calendar
-        doy, _ = day_to_calendar(day)
+            doy, _ = day_to_calendar(day)
 
-        self._sfc_state, sfc_response = self._step_surface(
-            self._sfc_state,
-            atm_forcing,
-            self._tile_config,
-            ocean_sst=sst,
-            ocean_u_sfc=u_sfc,
-            ocean_v_sfc=v_sfc,
-            dt=dt_segment,
-            doy=float(doy),
-        )
-        self._last_sfc_response = sfc_response
+            self._sfc_state, sfc_response = self._step_surface(
+                self._sfc_state,
+                atm_forcing,
+                self._tile_config,
+                ocean_sst=sst,
+                ocean_u_sfc=u_sfc,
+                ocean_v_sfc=v_sfc,
+                dt=sub_dt,
+                doy=float(doy),
+            )
+            self._last_sfc_response = sfc_response
 
-        # CO2 tracer update
-        self._step_co2_tracer(dt_segment)
+            # CO2 tracer update
+            self._step_co2_tracer(sub_dt)
 
-        # Diagnostics
+        # Diagnostics (once per segment, not per sub-step)
         self._log_coupled_diag(day)
 
     def _log_coupled_diag(self, day):
@@ -519,6 +529,101 @@ class CoupledESMDriver:
         return self._coupled_diag
 
     def save_checkpoint(self, step: int, day: float) -> None:
-        """Save atmosphere + ocean + surface state."""
+        """Save atmosphere + ocean + surface + CO2 state."""
         self._atm.save_checkpoint(step, day)
-        # TODO: save ocean_state and co2_field alongside atmosphere
+
+        # Save coupled state alongside the atmosphere checkpoint.
+        elapsed_day = day - self.atm_config.start_day
+        coupled_path = self.output_dir / f"coupled_day_{int(elapsed_day):04d}.npz"
+        arrays = {}
+
+        # Ocean state (SlabOceanState is a NamedTuple of Fields)
+        if self._ocean_state is not None:
+            arrays["ocean_T_sfc"] = np.asarray(self._ocean_state.T_sfc.data)
+            arrays["ocean_T_deep"] = np.asarray(self._ocean_state.T_deep.data)
+
+        # CO2 tracer field
+        if hasattr(self, '_co2_field') and self._co2_field is not None:
+            arrays["co2_field"] = np.asarray(self._co2_field)
+
+        # Surface state (land, ice, lake, accumulator, carbon) — flatten
+        # the pytree into a dict of named arrays for serialization.
+        if self._sfc_state is not None:
+            leaves_with_path = jax.tree_util.tree_leaves_with_path(
+                self._sfc_state,
+            )
+            for path_parts, leaf in leaves_with_path:
+                key = "sfc_" + ".".join(str(p) for p in path_parts)
+                arrays[key] = np.asarray(leaf)
+
+        if arrays:
+            np.savez(coupled_path, **arrays)
+            logger.info(f"  Coupled checkpoint: {coupled_path.name}")
+
+    def load_coupled_checkpoint(self, step_day: float,
+                               checkpoint_dir: str | Path | None = None) -> None:
+        """Load coupled state saved alongside an atmosphere checkpoint.
+
+        Parameters
+        ----------
+        step_day : float
+            Elapsed day used in the filename (same as atmosphere checkpoint).
+        checkpoint_dir : str or Path, optional
+            Directory containing the coupled checkpoint.  Defaults to
+            ``self.output_dir``.
+        """
+        from legoesm.core.field import Field
+
+        base = Path(checkpoint_dir) if checkpoint_dir is not None else self.output_dir
+        coupled_path = base / f"coupled_day_{int(step_day):04d}.npz"
+        if not coupled_path.exists():
+            logger.warning(f"No coupled checkpoint at {coupled_path}")
+            return
+
+        data = np.load(coupled_path)
+
+        if "ocean_T_sfc" in data and self._ocean_state is not None:
+            self._ocean_state = self._ocean_state._replace(
+                T_sfc=Field(
+                    data=jnp.asarray(data["ocean_T_sfc"]),
+                    name="T_sfc",
+                    dims=self._ocean_state.T_sfc.dims,
+                    units="K",
+                ),
+                T_deep=Field(
+                    data=jnp.asarray(data["ocean_T_deep"]),
+                    name="T_deep",
+                    dims=self._ocean_state.T_deep.dims,
+                    units="K",
+                ),
+            )
+
+        if "co2_field" in data:
+            self._co2_field = jnp.asarray(data["co2_field"])
+
+        # Restore surface state from flattened pytree leaves.
+        sfc_keys = [k for k in data.files if k.startswith("sfc_")]
+        if sfc_keys and self._sfc_state is not None:
+            leaves_with_path = jax.tree_util.tree_leaves_with_path(
+                self._sfc_state,
+            )
+            # Build a lookup from stringified path -> saved array
+            saved = {}
+            for k in sfc_keys:
+                saved[k] = data[k]
+
+            # Replace leaves in-order (same traversal as save)
+            new_leaves = []
+            for path_parts, leaf in leaves_with_path:
+                key = "sfc_" + ".".join(str(p) for p in path_parts)
+                if key in saved:
+                    new_leaves.append(jnp.asarray(saved[key]))
+                else:
+                    new_leaves.append(leaf)
+
+            self._sfc_state = jax.tree_util.tree_unflatten(
+                jax.tree_util.tree_structure(self._sfc_state),
+                new_leaves,
+            )
+
+        logger.info(f"  Loaded coupled checkpoint: {coupled_path.name}")

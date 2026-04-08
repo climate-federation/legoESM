@@ -48,6 +48,7 @@ class OutputConfig(NamedTuple):
     clear_sky_diag: bool = False
     checkpoint_format: str = "npz"  # npz, zarr
     diagnostics_perf_mode: str = "auto"  # auto, always, never
+    cmip_resolution_deg: float = 5.0  # lat-lon grid spacing for CMIP output [degrees]
 
 
 class ExperimentConfig(NamedTuple):

@@ -38,6 +38,7 @@ from legoesm.core.operators_cdgrid import (
     _arakawa_lamb_gradient,
     _interp_center_to_corner,
     _laplacian_dgrid,
+    _extrapolate_boundary_corners,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
@@ -212,6 +213,11 @@ def ocean_baroclinic_tendencies_cdgrid(
     div_corner = _interp_center_to_corner(div_v, cdgrid)
     du_d_dt = du_d_dt - 0.5 * u_d * div_corner
     dv_d_dt = dv_d_dt - 0.5 * v_d * div_corner
+
+    # Boundary-corner fix: replace face-boundary corner tendencies with
+    # nearest-interior values to eliminate O(dx) halo interpolation error
+    # (mirrors atmosphere fix from commit f3f9a86).
+    du_d_dt, dv_d_dt = _extrapolate_boundary_corners(du_d_dt, dv_d_dt, cdgrid.n)
 
     # --- 14. Convert D-grid tendencies back to cell-centre ---
     du_dt, dv_dt = dgrid_to_center_vector(du_d_dt, dv_d_dt)

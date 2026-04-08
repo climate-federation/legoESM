@@ -14,6 +14,7 @@ import jax.numpy as jnp
 from legoesm.diagnostics.column_integrals import column_water_vapor
 from legoesm.diagnostics.energy_budget import EnergyBudgetTracker
 from legoesm.forcing.time_utils import day_to_calendar
+from legoesm.io.cmor_output import CMIP6_PLEV19
 
 
 class DiagnosticCollector:
@@ -47,11 +48,13 @@ class DiagnosticCollector:
         nlev: int,
         sigma_full,
         dsigma,
+        experiment_id: str = "amip",
         monthly_means: bool = False,
         cmip_output: bool = False,
         clear_sky_diag: bool = False,
         n_days: int = 200,
         output_dir: str | Path = "",
+        cmip_resolution_deg: float = 5.0,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
@@ -89,14 +92,17 @@ class DiagnosticCollector:
             from legoesm.diagnostics.monthly_means import MonthlyAccumulator
             self.monthly_accum = MonthlyAccumulator(nlev=nlev, n_lat_bins=90)
 
-        # CFWriter
+        # CFWriter + spatial monthly accumulator for CMIP output
         self.cf_writer = None
+        self._spatial_monthly = None
+        self._cs_regrid_weights = None  # cached cubed-sphere → lat-lon weights
+        self._cmip_start_year = 1  # updated by set_cmip_start_year()
         if cmip_output:
             from legoesm.io.cmor_output import CFWriter
             cmor_dir = str(Path(output_dir) / "cmor") if output_dir else "cmor"
             self.cf_writer = CFWriter(
                 output_dir=cmor_dir,
-                experiment_id="amip",
+                experiment_id=experiment_id,
                 model_id="legoESM-1-0",
                 freq="mon",
                 calendar="noleap",
@@ -106,6 +112,15 @@ class DiagnosticCollector:
                 from legoesm.diagnostics.monthly_means import MonthlyAccumulator
                 self.monthly_means = True
                 self.monthly_accum = MonthlyAccumulator(nlev=nlev, n_lat_bins=90)
+            # Full spatial accumulator for CMIP NetCDF output
+            from legoesm.diagnostics.monthly_means import SpatialMonthlyAccumulator
+            _cmip_nlon = int(round(360.0 / cmip_resolution_deg))
+            _cmip_nlat = int(round(180.0 / cmip_resolution_deg))
+            self._spatial_monthly = SpatialMonthlyAccumulator(
+                nlat=_cmip_nlat, nlon=_cmip_nlon, nlev=nlev,
+            )
+            self._cmip_nlat = _cmip_nlat
+            self._cmip_nlon = _cmip_nlon
 
         # Snapshots
         self.snapshot_days: set[int] = set()
@@ -115,6 +130,119 @@ class DiagnosticCollector:
         if n_days not in self.snapshot_days:
             self.snapshot_days.add(n_days)
         self.snapshots: dict[int, dict[str, np.ndarray]] = {}
+
+    def set_cmip_grid_info(self, grid_type: str, grid=None, start_year: int = 1):
+        """Configure CMIP output grid and regridding weights.
+
+        Must be called after setup() and before the first collect() when
+        ``cmip_output=True``.
+
+        Parameters
+        ----------
+        grid_type : str
+            "cubed_sphere", "gaussian", "latlon", or "voronoi".
+        grid : object, optional
+            Grid object (needed for cubed-sphere regridding weights).
+        start_year : int
+            Calendar start year for time axis in NetCDF files.
+        """
+        self._cmip_start_year = start_year
+        if grid_type == "cubed_sphere" and grid is not None and self._spatial_monthly is not None:
+            from legoesm.grids.regridding import (
+                get_cubedsphere_to_latlon_weights,
+            )
+            n = grid.n
+            self._cs_regrid_weights = get_cubedsphere_to_latlon_weights(
+                n, n_lon=self._cmip_nlon, n_lat=self._cmip_nlat,
+            )
+
+    def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
+        """Regrid a 2-D field to the CMIP lat-lon grid.
+
+        Returns (nlat, nlon) numpy array, or None if no weights.
+        """
+        if self._cs_regrid_weights is not None:
+            from legoesm.grids.regridding import apply_cubedsphere_to_latlon
+            return apply_cubedsphere_to_latlon(
+                np.asarray(field), self._cs_regrid_weights,
+            )
+        # Lat-lon / Gaussian: field is already (nlat, nlon)
+        arr = np.asarray(field)
+        if arr.ndim == 2:
+            return arr
+        return None
+
+    def _regrid_to_latlon_3d(self, field) -> np.ndarray | None:
+        """Regrid a 3-D field to the CMIP lat-lon grid.
+
+        Returns (nlat, nlon, nlev) numpy array, or None if no weights.
+        """
+        if self._cs_regrid_weights is not None:
+            from legoesm.grids.regridding import apply_cubedsphere_to_latlon_3d
+            return apply_cubedsphere_to_latlon_3d(
+                np.asarray(field), self._cs_regrid_weights,
+            )
+        arr = np.asarray(field)
+        if arr.ndim == 3:
+            return arr
+        return None
+
+    def _interp_to_plev19(self, field_3d, p_s) -> np.ndarray | None:
+        """Interpolate a 3-D field from model levels to CMIP6 plev19.
+
+        Parameters
+        ----------
+        field_3d : array, shape (..., nlev)
+            Field on model levels.
+        p_s : array, shape (...)
+            Surface pressure [Pa].
+
+        Returns (..., 19) numpy array on CMIP6 standard pressure levels,
+        or None if sigma_full is not available.
+        """
+        sigma = np.asarray(self.sigma_full)
+        p_s_np = np.asarray(p_s)
+        field_np = np.asarray(field_3d)
+
+        # Model pressure at each level: p_k = sigma_k * p_s
+        # Shape: (..., nlev)
+        p_model = p_s_np[..., None] * sigma
+
+        # Target pressure levels (ascending for interpolation)
+        plev_target = np.sort(CMIP6_PLEV19)  # ascending (100 Pa → 100000 Pa)
+
+        # Log-pressure linear interpolation (numpy version)
+        log_p_model = np.log(np.maximum(p_model, 1e-10))
+        log_plev = np.log(plev_target)
+
+        # For each target level, find bracketing model levels and interpolate
+        n_target = len(plev_target)
+        out_shape = field_np.shape[:-1] + (n_target,)
+        result = np.empty(out_shape, dtype=np.float64)
+
+        for k in range(n_target):
+            log_pt = log_plev[k]
+            # searchsorted on the last axis of log_p_model
+            # p_model is ascending (sigma is ascending: top→bottom)
+            idx_hi = np.searchsorted(
+                sigma, plev_target[k] / np.maximum(p_s_np, 1e-10),
+            )
+            idx_hi = np.clip(idx_hi, 1, len(sigma) - 1)
+            idx_lo = idx_hi - 1
+
+            # Gather bracket values using advanced indexing
+            flat_shape = field_np.shape[:-1]
+            f_lo = np.take_along_axis(field_np, idx_lo[..., None], axis=-1)[..., 0]
+            f_hi = np.take_along_axis(field_np, idx_hi[..., None], axis=-1)[..., 0]
+            lp_lo = np.take_along_axis(log_p_model, idx_lo[..., None], axis=-1)[..., 0]
+            lp_hi = np.take_along_axis(log_p_model, idx_hi[..., None], axis=-1)[..., 0]
+
+            denom = lp_hi - lp_lo
+            denom = np.where(denom == 0.0, 1.0, denom)
+            alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
+            result[..., k] = f_lo + alpha * (f_hi - f_lo)
+
+        return result
 
     def collect(
         self,
@@ -257,6 +385,95 @@ class DiagnosticCollector:
                 'sw_up_toa': mean_sw_toa,
                 'lw_up_toa': mean_lw_toa,
             })
+
+        # Spatial monthly accumulation for CMIP output
+        if self._spatial_monthly is not None:
+            from legoesm import constants as _c
+
+            doy, _ = day_to_calendar(day)
+            year = int(day // 365.0)
+            fields_2d = {}
+            r = self._regrid_to_latlon_2d(state.T.data[..., -1])
+            if r is not None:
+                fields_2d['tas'] = r  # near-surface T (lowest level)
+            r = self._regrid_to_latlon_2d(precip_total)
+            if r is not None:
+                fields_2d['pr'] = r
+            r = self._regrid_to_latlon_2d(sw_up_toa)
+            if r is not None:
+                fields_2d['rsut'] = r
+            r = self._regrid_to_latlon_2d(lw_up_toa)
+            if r is not None:
+                fields_2d['rlut'] = r
+            r = self._regrid_to_latlon_2d(state.p_s.data)
+            if r is not None:
+                fields_2d['ps'] = r
+            r = self._regrid_to_latlon_2d(sw_net_sfc)
+            if r is not None:
+                fields_2d['rsds'] = r  # approximate: net ≈ downwelling
+            r = self._regrid_to_latlon_2d(lw_net_sfc)
+            if r is not None:
+                fields_2d['rlds'] = r
+
+            # psl: sea-level pressure via hypsometric equation
+            # p_sl = p_s * exp(phis / (R_d * T_lowest))
+            T_lowest = np.asarray(state.T.data[..., -1])
+            phis = np.asarray(state.phis.data)
+            p_s_np = np.asarray(state.p_s.data)
+            T_lowest_safe = np.maximum(T_lowest, 200.0)  # avoid div-by-zero
+            psl = p_s_np * np.exp(phis / (_c.R_d * T_lowest_safe))
+            r = self._regrid_to_latlon_2d(psl)
+            if r is not None:
+                fields_2d['psl'] = r
+
+            # prw: column water vapor [kg/m2]
+            cwv_field = np.asarray(
+                column_water_vapor(q_v, state.p_s.data, self.dsigma)
+            )
+            r = self._regrid_to_latlon_2d(cwv_field)
+            if r is not None:
+                fields_2d['prw'] = r
+
+            # clt: total cloud cover [%] — column max approach
+            # Any column with q_c > 1e-6 kg/kg is considered cloudy
+            q_c_np = np.asarray(q_c)
+            cloud_mask = (q_c_np > 1.0e-6).any(axis=-1)  # (...) bool
+            clt_field = cloud_mask.astype(np.float64) * 100.0
+            r = self._regrid_to_latlon_2d(clt_field)
+            if r is not None:
+                fields_2d['clt'] = r
+
+            if fields_2d:
+                self._spatial_monthly.add_2d(doy, year, fields_2d)
+
+            # 3-D fields: interpolate from model levels to plev19, then regrid
+            fields_3d = {}
+            ta_plev = self._interp_to_plev19(state.T.data, state.p_s.data)
+            ua_plev = self._interp_to_plev19(state.u.data, state.p_s.data)
+            hus_plev = self._interp_to_plev19(q_v, state.p_s.data)
+            if ta_plev is not None:
+                r = self._regrid_to_latlon_3d(ta_plev)
+                if r is not None:
+                    fields_3d['ta'] = r
+            if ua_plev is not None:
+                r = self._regrid_to_latlon_3d(ua_plev)
+                if r is not None:
+                    fields_3d['ua'] = r
+            if hus_plev is not None:
+                r = self._regrid_to_latlon_3d(hus_plev)
+                if r is not None:
+                    fields_3d['hus'] = r
+
+            # va: northward wind on pressure levels
+            if hasattr(state, 'v'):
+                va_plev = self._interp_to_plev19(state.v.data, state.p_s.data)
+                if va_plev is not None:
+                    r = self._regrid_to_latlon_3d(va_plev)
+                    if r is not None:
+                        fields_3d['va'] = r
+
+            if fields_3d:
+                self._spatial_monthly.add_3d(doy, year, fields_3d)
 
         return {
             'mean_sst': mean_sst,
@@ -463,7 +680,81 @@ class DiagnosticCollector:
             np.savez(output_dir / "snapshots.npz", **snap_data)
 
         if self.cf_writer is not None:
+            self._write_cmip_monthly_files()
             self.cf_writer.close()
+
+    def _write_cmip_monthly_files(self) -> None:
+        """Write CMIP-compliant NetCDF files from the spatial accumulator."""
+        if self._spatial_monthly is None or self.cf_writer is None:
+            return
+
+        data = self._spatial_monthly.finalize()
+        months = data.get('months', [])
+        if not months:
+            return
+
+        # Build lat/lon for the CMIP grid
+        lat = np.linspace(-90.0, 90.0, self._cmip_nlat)
+        lon = np.linspace(0.0, 360.0, self._cmip_nlon, endpoint=False)
+
+        # Days in each month (noleap calendar)
+        month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        start_year = self._cmip_start_year
+
+        from legoesm.io.cmor_output import CMIP6_PLEV19
+
+        for i, (yr, mo) in enumerate(months):
+            year_offset = (yr - start_year) * 365.0
+            day_start = year_offset + sum(month_days[:mo - 1])
+            day_end = day_start + month_days[mo - 1]
+            time_mid = 0.5 * (day_start + day_end)
+            time_bounds = (day_start, day_end)
+
+            # Write each 2-D field
+            for key, arr in data.items():
+                if not key.startswith("field_2d_"):
+                    continue
+                var_name = key[len("field_2d_"):]
+                field_slice = arr[i]  # (nlat, nlon)
+                if np.all(np.isnan(field_slice)):
+                    continue
+                try:
+                    self.cf_writer.write_field(
+                        var_name=var_name,
+                        data=field_slice,
+                        time=time_mid,
+                        time_bounds=time_bounds,
+                        lat=lat,
+                        lon=lon,
+                    )
+                except (KeyError, ValueError):
+                    pass  # skip unrecognized CMOR variables
+
+            # Write each 3-D field (already on plev19 from interpolation)
+            for key, arr in data.items():
+                if not key.startswith("field_3d_"):
+                    continue
+                var_name = key[len("field_3d_"):]
+                field_slice = arr[i]  # (nlat, nlon, n_plev)
+                if np.all(np.isnan(field_slice)):
+                    continue
+                nlev = field_slice.shape[2]
+                # Use ascending plev19 (matching interpolation order)
+                plev = np.sort(CMIP6_PLEV19)[:nlev] if nlev <= len(CMIP6_PLEV19) else None
+                # Reshape from (nlat, nlon, nlev) to (nlev, nlat, nlon)
+                field_plev = np.transpose(field_slice, (2, 0, 1))
+                try:
+                    self.cf_writer.write_field(
+                        var_name=var_name,
+                        data=field_plev,
+                        time=time_mid,
+                        time_bounds=time_bounds,
+                        lat=lat,
+                        lon=lon,
+                        plev=plev,
+                    )
+                except (KeyError, ValueError):
+                    pass
 
     def print_summary(self) -> str:
         """Return end-of-run summary string."""
