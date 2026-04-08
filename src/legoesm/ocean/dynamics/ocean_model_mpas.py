@@ -154,14 +154,47 @@ class MPASOceanModel:
             F_slow_eta=F_slow_eta,
         )
 
-        # 5. Reconcile 3D velocity
-        # Compute u_bar_old from the UPDATED state (state_for_baro),
-        # not the original. This ensures depth_avg(u_3d_new) = u_bar_new.
-        h_k = compute_layer_thickness(
+        # 5. Thickness-weighted tracer correction (split-explicit coupling)
+        #
+        # The tracer Euler step used the OLD layer thickness h_old:
+        #     T_new = T_old + dt * dT_dt   where dT_dt = (1/h_old) * flux_terms
+        # so:  h_old * T_new = h_old * T_old + dt * flux_terms
+        #
+        # But the barotropic solver changed eta → h_new != h_old.
+        # Conservation requires:  h_new * T_corrected = h_old * T_new
+        # Therefore:              T_corrected = T_new * (h_old / h_new)
+        #
+        # This is the standard split-explicit corrector used in MPAS-Ocean,
+        # MOM6, and POP (Higdon 2005, Hallberg 1997).  It ensures that the
+        # thickness-weighted tracer content h*T is exactly conserved through
+        # the barotropic-baroclinic splitting.  The correction is O(dt * deta/dt)
+        # and vanishes when eta is stationary (e.g., rest state).
+        #
+        # Freshwater forcing: F_slow_eta changes eta in the barotropic solver,
+        # so h_new reflects mass added by precipitation/evaporation.  The
+        # rescaling h_old/h_new correctly dilutes/concentrates tracers in
+        # proportion to the added/removed volume.  The virtual salt flux
+        # (already included in dS_dt) is a source term that gets diluted by
+        # the same factor, which is physically correct.
+        h_k_old = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, z_coord,
             min_water_column_m=config.min_water_column_m,
         )
-        h_e_k = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+        h_k_new = compute_layer_thickness(
+            eta_new, state.H_bathy.data, z_coord,
+            min_water_column_m=config.min_water_column_m,
+        )
+        # Ratio h_old / h_new, with safe denominator for dry cells.
+        # On ocean cells where h_k > min_water_column_m, this is well-defined.
+        h_ratio = h_k_old / jnp.maximum(h_k_new, 1e-10)
+        mask_e = mask[:, jnp.newaxis]
+        T_new = jnp.where(mask_e > 0.5, T_new * h_ratio, T_new)
+        S_new = jnp.where(mask_e > 0.5, S_new * h_ratio, S_new)
+
+        # 6. Reconcile 3D velocity
+        # Compute u_bar_old from the UPDATED state (state_for_baro),
+        # not the original. This ensures depth_avg(u_3d_new) = u_bar_new.
+        h_e_k = 0.5 * (h_k_old[c1] + h_k_old[c2])  # (nEdges, nlev)
         H_total = jnp.maximum(state.eta.data + state.H_bathy.data,
                               config.min_water_column_m)
         H_e = 0.5 * (H_total[c1] + H_total[c2])
@@ -180,7 +213,7 @@ class MPASOceanModel:
             land_mask=state.land_mask,
         )
 
-        # 6. Conservation fixers
+        # 7. Conservation fixers
         if config.use_conservation_fixer:
             state_new = mpas_ocean_conservation_fixer(
                 state_new, state, mesh, z_coord, config,

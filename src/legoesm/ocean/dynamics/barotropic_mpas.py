@@ -26,7 +26,6 @@ from legoesm.core.operators_voronoi import (
     gradient_edge,
     tangential_velocity,
     edge_thickness as _edge_avg,
-    vector_laplacian_del2,
 )
 from legoesm.ocean.vertical import compute_layer_thickness
 
@@ -120,24 +119,18 @@ def barotropic_substeps_mpas(
         return jnp.where(mask_cell > 0.5, field_cell, nbr_avg)
 
     # --- Fix 2: Barotropic Laplacian diffusion ---
-    # Scalar cell Laplacian: del2(phi) = div(grad(phi)) on Voronoi.
-    # Edge-based velocity diffusion: vector_laplacian_del2(u, mesh).
     baro_alpha_val = config.barotropic_diffusion_alpha
     dt_ref = config.barotropic_diffusion_dt_ref
     use_baro_diffusion = baro_alpha_val > 0.0
 
     if use_baro_diffusion:
-        nu_dt_cell = baro_alpha_val * (dt_baro / dt_ref) * mesh.areaCell
-        # For edge diffusion, use average of adjacent cell areas
+        # Edge-centered diffusion coefficient for flux-form diffusion:
+        # div(nu_edge * grad(eta)) is exactly conservative (divergence
+        # theorem), unlike nu_cell * div(grad(eta)) which leaks volume
+        # when cell areas are non-uniform.
         nu_dt_edge = baro_alpha_val * (dt_baro / dt_ref) * (
             0.5 * (mesh.areaCell[c1] + mesh.areaCell[c2])
         )
-
-    def _del2_cell(phi_cell, mask_cell):
-        """Scalar Laplacian on Voronoi cells: div(grad(phi))."""
-        phi_filled = _fill_land_cells_mpas(phi_cell, mask_cell)
-        grad_e = gradient_edge(phi_filled, mesh)
-        return divergence_cell(grad_e, mesh)
 
     # --- Fix 3: Semi-implicit Coriolis (trapezoidal predictor-corrector) ---
     # On Voronoi meshes, the (u, v_tangential) decomposition doesn't
@@ -198,16 +191,17 @@ def barotropic_substeps_mpas(
         if config.barotropic_damping > 0:
             u_bar_next = u_bar_next * (1.0 - dt_baro * config.barotropic_damping)
 
-        # Barotropic Laplacian diffusion (matches CS and LL solvers)
+        # Barotropic Laplacian diffusion on eta (flux-form: conservative).
+        # Uses div(nu_edge * grad(eta)) instead of nu_cell * div(grad(eta))
+        # so that volume is exactly conserved by the divergence theorem.
         if use_baro_diffusion:
-            # Eta: scalar Laplacian on cells
+            eta_filled = _fill_land_cells_mpas(eta_next, mask)
+            grad_e = gradient_edge(eta_filled, mesh)
+            diff_flux = nu_dt_edge * grad_e * edge_mask
             eta_next = (
-                eta_next + nu_dt_cell * _del2_cell(eta_next, mask)
+                eta_next + divergence_cell(diff_flux, mesh)
             ) * mask
             eta_next = jnp.maximum(eta_next, eta_floor) * mask
-            # Velocity: vector Laplacian on edges
-            del2_u = vector_laplacian_del2(u_bar_next, mesh)
-            u_bar_next = (u_bar_next + nu_dt_edge * del2_u) * edge_mask
 
         # Cast back to input dtype (mesh ops may promote to float64)
         return (eta_next.astype(_eta_dtype), u_bar_next.astype(_ubar_dtype)), None

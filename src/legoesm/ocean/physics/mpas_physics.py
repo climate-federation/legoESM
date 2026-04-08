@@ -93,6 +93,11 @@ def make_mpas_ocean_physics(config) -> Callable:
                 tau_x = -cfg.tau_max * jnp.cos(
                     2.0 * jnp.pi * (lat - lat_s) / basin_width)
                 tau_y = jnp.zeros_like(tau_x)
+            elif cfg.wind_profile == "global_wind":
+                # Global 3-belt wind: trades, westerlies, polar easterlies
+                taper = jnp.cos(lat) ** 2  # smooth to zero at poles
+                tau_x = -cfg.tau_max * jnp.cos(2.0 * lat) * taper
+                tau_y = jnp.zeros_like(tau_x)
             else:  # "constant"
                 tau_x = jnp.full(mesh.nCells, cfg.tau_x, dtype=dtype)
                 tau_y = jnp.full(mesh.nCells, cfg.tau_y, dtype=dtype)

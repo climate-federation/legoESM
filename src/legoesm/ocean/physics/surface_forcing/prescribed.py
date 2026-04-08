@@ -75,6 +75,19 @@ def prescribed_surface_forcing(
         basin_width = lat_n - lat_s
         tau_x = -cfg.tau_max * jnp.cos(2.0 * jnp.pi * (lat - lat_s) / basin_width)
         tau_y = jnp.zeros_like(tau_x)
+    elif cfg.wind_profile == "global_wind":
+        lat = grid.grid_lat
+        # Global 3-belt zonal wind stress:
+        #   Easterly trades (0-30°), westerlies (30-60°), polar easterlies (60-90°)
+        # τ_x = -τ_0 * [cos(2φ) * taper], where taper smoothly reduces
+        # to zero near the poles to avoid singularities.
+        # The cos(2φ) pattern gives:
+        #   φ=0:  τ_x = -τ_0  (easterly trades)
+        #   φ=45: τ_x = +τ_0  (westerlies)
+        #   φ=90: τ_x = -τ_0  (polar easterlies, tapered)
+        taper = jnp.cos(lat) ** 2  # goes to 0 at poles
+        tau_x = -cfg.tau_max * jnp.cos(2.0 * lat) * taper
+        tau_y = jnp.zeros_like(tau_x)
     else:
         tau_x = jnp.full_like(dz_0, cfg.tau_x, dtype=dtype)
         tau_y = jnp.full_like(dz_0, cfg.tau_y, dtype=dtype)

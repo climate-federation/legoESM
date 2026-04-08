@@ -58,7 +58,7 @@ class MPASOceanConfig(NamedTuple):
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30
     pv_scheme: str = "energy"
-    use_conservation_fixer: bool = True
+    use_conservation_fixer: bool = False
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True

@@ -99,7 +99,7 @@ class OceanConfig(NamedTuple):
     K_v: float = 1.0e-4          # Vertical tracer diffusivity [m^2/s]
     n_barotropic_substeps: int = 30
     hyperdiff_coeff: float = 0.0
-    use_conservation_fixer: bool = True
+    use_conservation_fixer: bool = False
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
@@ -183,7 +183,7 @@ class SpectralOceanConfig(NamedTuple):
     # larger than split-explicit solvers.  Uses the same ``hyperdiff_order``
     # as the 3D fields.  Set to 0 to disable.
     eta_hyperdiff_coeff: float = 2.5e18
-    use_conservation_fixer: bool = True
+    use_conservation_fixer: bool = False
     min_water_column_m: float = 0.5
     time_integrator: str = "ssp_rk3"
     eos: str = "wright"
@@ -247,7 +247,7 @@ class LatLonOceanConfig(NamedTuple):
     K_v: float = 1.0e-4          # Vertical tracer diffusivity [m^2/s]
     n_barotropic_substeps: int = 30
     hyperdiff_coeff: float = 0.0
-    use_conservation_fixer: bool = True
+    use_conservation_fixer: bool = False
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
@@ -343,7 +343,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30
     hyperdiff_coeff: float = 0.0
-    use_conservation_fixer: bool = True
+    use_conservation_fixer: bool = False
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
