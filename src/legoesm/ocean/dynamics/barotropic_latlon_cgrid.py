@@ -56,10 +56,11 @@ def _depth_average_to_faces(
     U_bar : (n_lat, n_lon+1)
     V_bar : (n_lat+1, n_lon)
     """
-    # h at u-faces: average of adjacent cell h
-    h_left = h_k
-    h_right = jnp.roll(h_k, -1, axis=1)
-    h_u = 0.5 * (h_left + h_right)  # (n_lat, n_lon, nlev)
+    # h at u-faces: average of adjacent cells flanking face j
+    # Face j is between cell (j-1) mod n_lon and cell j
+    h_east = h_k
+    h_west = jnp.roll(h_k, 1, axis=1)
+    h_u = 0.5 * (h_west + h_east)  # (n_lat, n_lon, nlev)
     h_u = jnp.concatenate([h_u, h_u[:, 0:1, :]], axis=1)  # (n_lat, n_lon+1, nlev)
 
     H_u = jnp.maximum(jnp.sum(h_u, axis=-1), min_water_col)
@@ -129,8 +130,8 @@ def barotropic_substeps_latlon_cgrid(
 
     # Semi-implicit Coriolis parameter at face points
     f_cell = grid.f.astype(eta.dtype)
-    # f at u-points
-    f_u = 0.5 * (f_cell + jnp.roll(f_cell, -1, axis=1))
+    # f at u-points: face j is between cell (j-1) mod n_lon and cell j
+    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)
     f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
     # f at v-points
     f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
@@ -152,7 +153,7 @@ def barotropic_substeps_latlon_cgrid(
         # Forward: update eta from continuity (C-grid divergence)
         # Need U_bar * H_total at u-points. H_total is cell-centered,
         # interpolate to faces.
-        H_u = 0.5 * (H_total_c + jnp.roll(H_total_c, -1, axis=1))
+        H_u = 0.5 * (jnp.roll(H_total_c, 1, axis=1) + H_total_c)
         H_u = jnp.concatenate([H_u, H_u[:, 0:1]], axis=1)
         H_v_interior = 0.5 * (H_total_c[:-1] + H_total_c[1:])
         n_lon_loc = H_total_c.shape[1]
@@ -172,8 +173,9 @@ def barotropic_substeps_latlon_cgrid(
         deta_dy = gradient_y_cgrid(eta_new, grid).astype(eta.dtype)
 
         # Average V to u-points for Coriolis
-        V_east = jnp.roll(V_bar_c, -1, axis=1)
-        V_at_u = 0.25 * (V_bar_c[:-1] + V_bar_c[1:] + V_east[:-1] + V_east[1:])
+        # Face j is between cell (j-1) and cell j; use v-points at j-1 and j
+        V_west = jnp.roll(V_bar_c, 1, axis=1)
+        V_at_u = 0.25 * (V_bar_c[:-1] + V_bar_c[1:] + V_west[:-1] + V_west[1:])
         V_at_u = jnp.concatenate([V_at_u, V_at_u[:, 0:1]], axis=1)
 
         # Average U to v-points for Coriolis

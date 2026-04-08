@@ -57,14 +57,11 @@ def gradient_x_cgrid(
     dlon = grid.dlon
     cos_lat = grid.cos_lat  # (n_lat,)
 
-    # f_east wraps periodically: f_east[:, j] = f[:, (j+1) % n_lon]
-    f_east = jnp.roll(f, -1, axis=1)
-
-    # Interior faces: j=0..n_lon-1 have f[:, j+1] - f[:, j]
-    # but we need n_lon+1 faces; face j=n_lon is the same as face j=0
-    # (periodic). We compute all n_lon interior differences then append
-    # the wrap-around face.
-    df = f_east - f  # shape (n_lat, n_lon, ...)
+    # Face j sits between cell (j-1) mod n_lon (west) and cell j (east),
+    # matching the divergence convention (cell j: west=face j, east=face j+1).
+    # Gradient at face j: (f[j] - f[(j-1) mod n_lon]) / dx
+    f_west = jnp.roll(f, 1, axis=1)   # f[:, (j-1) % n_lon]
+    df = f - f_west  # shape (n_lat, n_lon, ...)
 
     # Wrap: face at j=n_lon equals face at j=0
     df_wrap = df[..., 0:1] if f.ndim == 2 else df[:, 0:1, :]
@@ -269,9 +266,9 @@ def coriolis_cgrid(
     n_lon = grid.n_lon
 
     # --- f at u-points ---
-    # u-point (i, j+1/2) is between cell (i, j) and cell (i, j+1 mod n_lon).
-    # f_u = 0.5 * (f[i,j] + f[i, j+1 mod n_lon])
-    f_u = 0.5 * (f_cell + jnp.roll(f_cell, -1, axis=1))  # (n_lat, n_lon)
+    # u-point at face j is between cell (j-1) mod n_lon and cell j.
+    # f_u = 0.5 * (f[j-1 mod n_lon] + f[j])
+    f_u = 0.5 * (jnp.roll(f_cell, 1, axis=1) + f_cell)  # (n_lat, n_lon)
     # Append periodic wrap
     f_u = jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)  # (n_lat, n_lon+1)
 
@@ -284,13 +281,11 @@ def coriolis_cgrid(
     # (n_lat+1, n_lon)
 
     # --- Average v to u-points ---
-    # u-point (i, j+1/2) has 4 neighboring v-points:
-    # v[i, j], v[i+1, j], v[i, j+1], v[i+1, j+1]
-    # (i.e., the 4 corners of the cell face)
-    # Average: v_at_u = 0.25 * (v[i,j] + v[i+1,j] + v[i,j+1] + v[i+1,j+1])
-    # with j+1 periodic in longitude
-    v_east = jnp.roll(v, -1, axis=1)  # v[:, j+1 mod n_lon]
-    v_avg = 0.25 * (v[:-1] + v[1:] + v_east[:-1] + v_east[1:])
+    # u-point at face j is between cell (j-1) and cell j.
+    # The 4 neighboring v-points are:
+    # v[i, j-1], v[i+1, j-1], v[i, j], v[i+1, j]
+    v_west = jnp.roll(v, 1, axis=1)  # v[:, (j-1) mod n_lon]
+    v_avg = 0.25 * (v[:-1] + v[1:] + v_west[:-1] + v_west[1:])
     # v_avg shape: (n_lat, n_lon, ...). Need (n_lat, n_lon+1, ...)
     if is_3d:
         v_avg_wrap = v_avg[:, 0:1, :]
@@ -501,7 +496,7 @@ def laplacian_cgrid(
 
     if mask is not None:
         # Zero gradient at land-ocean boundaries
-        u_mask = mask * jnp.roll(mask, -1, axis=1)
+        u_mask = mask * jnp.roll(mask, 1, axis=1)
         u_mask = jnp.concatenate([u_mask, u_mask[:, 0:1]], axis=1)
         v_mask_interior = mask[:-1] * mask[1:]
         zero_row = jnp.zeros((1, mask.shape[1]), dtype=mask.dtype)
@@ -540,8 +535,8 @@ def compute_face_masks(
     v_mask : array, shape (n_lat+1, n_lon)
         Mask at meridional (lat) interfaces.
     """
-    # u-face j is between cell j and cell j+1 (periodic in lon)
-    u_mask_interior = land_mask * jnp.roll(land_mask, -1, axis=1)
+    # u-face j is between cell (j-1) mod n_lon and cell j (periodic in lon)
+    u_mask_interior = land_mask * jnp.roll(land_mask, 1, axis=1)
     # Append periodic wrap
     u_mask = jnp.concatenate(
         [u_mask_interior, u_mask_interior[:, 0:1]], axis=1,

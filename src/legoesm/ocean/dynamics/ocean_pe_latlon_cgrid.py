@@ -45,7 +45,6 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
-    coriolis_cgrid,
     scalar_advection_cgrid,
     laplacian_cgrid,
 )
@@ -66,8 +65,9 @@ def _interp_to_u_points(f: jnp.ndarray) -> jnp.ndarray:
     -------
     f_u : array, shape (n_lat, n_lon+1, ...) at u-points.
     """
-    f_right = jnp.roll(f, -1, axis=1)
-    f_avg = 0.5 * (f + f_right)
+    # Face j is between cell (j-1) mod n_lon and cell j
+    f_left = jnp.roll(f, 1, axis=1)
+    f_avg = 0.5 * (f_left + f)
     if f.ndim >= 3:
         return jnp.concatenate([f_avg, f_avg[:, 0:1, :]], axis=1)
     else:
@@ -204,20 +204,30 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     T_filled = _neumann_fill_cgrid(T, mask)
     S_filled = _neumann_fill_cgrid(S, mask)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    # Use REFERENCE Jacobian (J=1, eta=0) for the hydrostatic pressure
+    # in the EOS iteration.  The barotropic solver handles the
+    # free-surface pressure gradient g*grad(eta); using the actual J
+    # here would create a spatially-varying pressure even for uniform
+    # T/S, double-counting the barotropic forcing.
+    J_ref = jnp.ones_like(J)
+    eta_ref = jnp.zeros_like(eta_safe)
     rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
-            rho, eta_safe, z_coord.dz_ref, J, rho_0, g_val,
+            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g_val,
         )
         rho = eos_fn(T_filled, S_filled, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
-        rho, eta_safe, z_coord.dz_ref, J, rho_0, g_val,
+        rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g_val,
     )
     rho_prime = rho - rho_0
 
     # --- 3. Baroclinic pressure gradient (compact C-grid stencil) ---
-    dz_actual = z_coord.dz_ref * J[..., jnp.newaxis]
-    dp_layer = rho_prime * g_val * dz_actual
+    # Use REFERENCE layer thickness (dz_ref, corresponding to eta=0)
+    # rather than the actual thickness (dz_ref * J) which includes the
+    # free-surface contribution.  The barotropic solver handles
+    # g*grad(eta); using J here would double-count that forcing.
+    dp_layer = rho_prime * g_val * z_coord.dz_ref
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
 
@@ -234,7 +244,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dp_dy = jnp.moveaxis(dp_dy_t, 0, -1)  # (n_lat+1, n_lon, nlev)
 
     # --- 4. Vertical velocity from FV flux divergence ---
-    # Divergence needs face fluxes: h*u at u-points, h*v at v-points
+    # Divergence needs face fluxes: h*u at u-points, h*v at v-points.
+    # Uses FULL velocity (barotropic + baroclinic) for mass transport.
     h_u = _interp_to_u_points(h_k)
     h_v = _interp_to_v_points(h_k)
     flux_div_k = divergence_cgrid(
@@ -242,38 +253,58 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     )
     w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
 
-    # --- 5. Coriolis ---
-    cor_u, cor_v = coriolis_cgrid(
-        u * u_mask_3d, v * v_mask_3d, grid,
-        u_mask=u_mask, v_mask=v_mask,
-    )
+    # --- 4b. Baroclinic perturbation velocity ---
+    # The barotropic solver handles the depth-averaged momentum.
+    # The baroclinic step must operate on the PERTURBATION velocity
+    # u' = u - U_bar to avoid double-counting the barotropic tendency.
+    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), 1e-10)
+    U_bar = jnp.sum(u * h_u, axis=-1) / jnp.maximum(
+        jnp.sum(h_u, axis=-1), 1e-10) * u_mask  # (n_lat, n_lon+1)
+    V_bar = jnp.sum(v * h_v, axis=-1) / jnp.maximum(
+        jnp.sum(h_v, axis=-1), 1e-10) * v_mask  # (n_lat+1, n_lon)
+    u_prime = u - U_bar[..., jnp.newaxis]
+    v_prime = v - V_bar[..., jnp.newaxis]
 
-    # --- 6. Kinetic energy gradient (at faces) ---
-    # KE at cell centers: need u and v at cell centers
-    # u at cell center: average adjacent u-faces
-    u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])  # (n_lat, n_lon, nlev)
-    # v at cell center: average adjacent v-faces
-    v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])  # (n_lat, n_lon, nlev)
-    KE = 0.5 * (u_cell**2 + v_cell**2)  # (n_lat, n_lon, nlev)
+    # --- 5. Coriolis ---
+    # Coriolis is NOT included in the returned momentum tendencies.
+    # It is applied as a forward-backward (Matsuno) step in the step
+    # function (ocean_model_latlon_cgrid.py), which is unconditionally
+    # stable for inertial oscillations.  Forward Euler Coriolis amplifies
+    # by sqrt(1 + (f*dt)^2) per step and blows up within ~1 day at
+    # high latitudes.
+
+    # --- 6. Kinetic energy gradient (from perturbation velocity) ---
+    up_cell = 0.5 * (u_prime[:, :-1, :] + u_prime[:, 1:, :])
+    vp_cell = 0.5 * (v_prime[:-1, :, :] + v_prime[1:, :, :])
+    KE = 0.5 * (up_cell**2 + vp_cell**2)
 
     KE_t = jnp.moveaxis(KE, -1, 0)
     dKE_dx_t = jax.vmap(lambda ke2d: gradient_x_cgrid(ke2d, grid))(KE_t)
     dKE_dy_t = jax.vmap(lambda ke2d: gradient_y_cgrid(ke2d, grid))(KE_t)
-    dKE_dx = jnp.moveaxis(dKE_dx_t, 0, -1)  # (n_lat, n_lon+1, nlev)
-    dKE_dy = jnp.moveaxis(dKE_dy_t, 0, -1)  # (n_lat+1, n_lon, nlev)
+    dKE_dx = jnp.moveaxis(dKE_dx_t, 0, -1)
+    dKE_dy = jnp.moveaxis(dKE_dy_t, 0, -1)
 
-    # --- 7. Momentum tendencies ---
-    du_dt = cor_u - dKE_dx - dp_dx / rho_0
-    dv_dt = cor_v - dKE_dy - dp_dy / rho_0
+    # --- 7. Momentum tendencies (non-Coriolis only) ---
+    du_dt = -dKE_dx - dp_dx / rho_0
+    dv_dt = -dKE_dy - dp_dy / rho_0
 
-    # --- 8. Vertical advection of u, v ---
-    # Need w at u-points and v-points
+    # --- 8. Vertical advection of u, v (perturbation velocity) ---
     w_u = _interp_to_u_points(w)
     w_v = _interp_to_v_points(w)
-    du_dt = du_dt + _vertical_advection_ocean(u, w_u, z_coord, _interp_to_u_points(J))
-    dv_dt = dv_dt + _vertical_advection_ocean(v, w_v, z_coord, _interp_to_v_points(J))
+    du_dt = du_dt + _vertical_advection_ocean(
+        u_prime, w_u, z_coord, _interp_to_u_points(J))
+    dv_dt = dv_dt + _vertical_advection_ocean(
+        v_prime, w_v, z_coord, _interp_to_v_points(J))
 
-    # --- 9. Tracer tendencies ---
+    # --- 9. Tracer tendencies (flux-form) ---
+    # The scalar_advection_cgrid computes -div(T*u)/area (advective form).
+    # For a free-surface model, the correct flux-form equation is:
+    #   h * dT/dt = -div(h*T*u) + T * div(h*u)
+    #   dT/dt = -div(T*u)/area + T * div(h*u) / (h * area)
+    # The second term cancels the spurious T tendency that arises when
+    # velocity is divergent (as in a barotropic wave with uniform T).
+    # flux_div_k = div(h*u) is already computed in section 4.
+    h_safe = jnp.maximum(h_k, 1e-10)
     tracers = jnp.stack([T, S], axis=0)
 
     def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
@@ -281,6 +312,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             tr, u * u_mask_3d, v * v_mask_3d, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask,
         )
+        # Flux-form correction: + T * div(h*u) / h
+        dtr_dt = dtr_dt + tr * flux_div_k / h_safe
         dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
 
         if config.K_h > 0:
@@ -308,18 +341,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dT_dt = tracer_tend[0]
     dS_dt = tracer_tend[1]
 
-    # --- 10. Mixing (viscosity) ---
+    # --- 10. Mixing (viscosity on perturbation velocity) ---
     if config.A_h > 0:
-        # Laplacian of u at u-points: interpolate u to cell centers,
-        # apply Laplacian, interpolate back. Simpler: use the cell-center
-        # velocity for viscous diffusion.
-        du_dt = du_dt + config.A_h * _laplacian_at_u(u * u_mask_3d, grid, mask)
-        dv_dt = dv_dt + config.A_h * _laplacian_at_v(v * v_mask_3d, grid, mask)
+        du_dt = du_dt + config.A_h * _laplacian_at_u(
+            u_prime * u_mask_3d, grid, mask)
+        dv_dt = dv_dt + config.A_h * _laplacian_at_v(
+            v_prime * v_mask_3d, grid, mask)
 
     if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v_u = jnp.maximum(_interp_to_u_points(J)[..., jnp.newaxis], 1e-10)
         jac_v_v = jnp.maximum(_interp_to_v_points(J)[..., jnp.newaxis], 1e-10)
-        for vel, jac, is_u in [(u, jac_v_u, True), (v, jac_v_v, False)]:
+        for vel, jac, is_u in [(u_prime, jac_v_u, True), (v_prime, jac_v_v, False)]:
             dv_dz_half = jnp.diff(vel, axis=-1) / (
                 z_coord.dz_half_ref * jac
             )
