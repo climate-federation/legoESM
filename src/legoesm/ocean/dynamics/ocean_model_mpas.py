@@ -102,29 +102,11 @@ class MPASOceanModel:
         tend = self.tendencies(state, freshwater=freshwater,
                                surface_forcing=surface_forcing)
 
-        # 2. Update tracers (forward Euler)
-        T_new = state.T.data + dt * tend.dT_dt.data
-        S_new = state.S.data + dt * tend.dS_dt.data
-
-        # Fill land cells with ocean-neighbor average (Neumann BC) so that
-        # subsequent operators see smooth values at coastlines instead of
-        # the sharp ocean-to-zero discontinuity that `* mask` would create.
-        c1_m = mesh.cellsOnEdge[0]
-        c2_m = mesh.cellsOnEdge[1]
-        m1 = mask[c1_m, jnp.newaxis]
-        m2 = mask[c2_m, jnp.newaxis]
-        nbr_sum = jnp.zeros_like(T_new).at[c1_m].add(T_new[c2_m] * m2)
-        nbr_sum = nbr_sum.at[c2_m].add(T_new[c1_m] * m1)
-        nbr_cnt = jnp.zeros_like(T_new).at[c1_m].add(m2)
-        nbr_cnt = nbr_cnt.at[c2_m].add(m1)
-        nbr_avg_T = nbr_sum / jnp.maximum(nbr_cnt, 1.0)
-        mask_e = mask[:, jnp.newaxis]
-        T_new = jnp.where(mask_e > 0.5, T_new, nbr_avg_T)
-
-        nbr_sum_S = jnp.zeros_like(S_new).at[c1_m].add(S_new[c2_m] * m2)
-        nbr_sum_S = nbr_sum_S.at[c2_m].add(S_new[c1_m] * m1)
-        nbr_avg_S = nbr_sum_S / jnp.maximum(nbr_cnt, 1.0)
-        S_new = jnp.where(mask_e > 0.5, S_new, nbr_avg_S)
+        # 2. Layer thickness before barotropic update (needed for flux-form)
+        h_k_old = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, z_coord,
+            min_water_column_m=config.min_water_column_m,
+        )
 
         # 3. Update 3D velocity with baroclinic tendency
         u_baro = state.u.data + dt * tend.du_dt.data
@@ -154,42 +136,61 @@ class MPASOceanModel:
             F_slow_eta=F_slow_eta,
         )
 
-        # 5. Thickness-weighted tracer correction (split-explicit coupling)
+        # 5. Flux-form tracer update (exact conservation)
         #
-        # The tracer Euler step used the OLD layer thickness h_old:
-        #     T_new = T_old + dt * dT_dt   where dT_dt = (1/h_old) * flux_terms
-        # so:  h_old * T_new = h_old * T_old + dt * flux_terms
+        # The advective flux divergence div(h·u·T) telescopes exactly on
+        # the Voronoi mesh: sum(div(h·u·T) * area) = 0.  By updating
+        # the thickness-weighted tracer h*T directly:
         #
-        # But the barotropic solver changed eta → h_new != h_old.
-        # Conservation requires:  h_new * T_corrected = h_old * T_new
-        # Therefore:              T_corrected = T_new * (h_old / h_new)
+        #   h_new * T_new = h_old * T_old
+        #                   - dt * div(h·u·T)        [advection, conservative]
+        #                   + dt * h_old * source     [diffusion, physics]
         #
-        # This is the standard split-explicit corrector used in MPAS-Ocean,
-        # MOM6, and POP (Higdon 2005, Hallberg 1997).  It ensures that the
-        # thickness-weighted tracer content h*T is exactly conserved through
-        # the barotropic-baroclinic splitting.  The correction is O(dt * deta/dt)
-        # and vanishes when eta is stationary (e.g., rest state).
-        #
-        # Freshwater forcing: F_slow_eta changes eta in the barotropic solver,
-        # so h_new reflects mass added by precipitation/evaporation.  The
-        # rescaling h_old/h_new correctly dilutes/concentrates tracers in
-        # proportion to the added/removed volume.  The virtual salt flux
-        # (already included in dS_dt) is a source term that gets diluted by
-        # the same factor, which is physically correct.
-        h_k_old = compute_layer_thickness(
-            state.eta.data, state.H_bathy.data, z_coord,
-            min_water_column_m=config.min_water_column_m,
-        )
+        # we avoid the non-conservative T·div(h·u) term that arises in
+        # the advective form and doesn't cancel exactly across the
+        # split-explicit time split.
         h_k_new = compute_layer_thickness(
             eta_new, state.H_bathy.data, z_coord,
             min_water_column_m=config.min_water_column_m,
         )
-        # Ratio h_old / h_new, with safe denominator for dry cells.
-        # On ocean cells where h_k > min_water_column_m, this is well-defined.
-        h_ratio = h_k_old / jnp.maximum(h_k_new, 1e-10)
+        h_new_safe = jnp.maximum(h_k_new, 1e-10)
         mask_e = mask[:, jnp.newaxis]
-        T_new = jnp.where(mask_e > 0.5, T_new * h_ratio, T_new)
-        S_new = jnp.where(mask_e > 0.5, S_new * h_ratio, S_new)
+
+        if config.flux_form_tracers and tend.div_hut is not None:
+            # Flux-form: exact conservation of h*T
+            hT_new = (h_k_old * state.T.data
+                      - dt * tend.div_hut.data
+                      + dt * h_k_old * tend.dT_dt_source.data)
+            T_new = hT_new / h_new_safe
+
+            hS_new = (h_k_old * state.S.data
+                      - dt * tend.div_hus.data
+                      + dt * h_k_old * tend.dS_dt_source.data)
+            S_new = hS_new / h_new_safe
+        else:
+            # Fallback: advective-form + h_old/h_new correction
+            T_new = (state.T.data + dt * tend.dT_dt.data) * (
+                h_k_old / h_new_safe)
+            S_new = (state.S.data + dt * tend.dS_dt.data) * (
+                h_k_old / h_new_safe)
+
+        # Mask ocean cells; fill land with Neumann BC for operator stencils
+        T_new = jnp.where(mask_e > 0.5, T_new, 0.0)
+        S_new = jnp.where(mask_e > 0.5, S_new, 0.0)
+        c1_m = mesh.cellsOnEdge[0]
+        c2_m = mesh.cellsOnEdge[1]
+        m1 = mask[c1_m, jnp.newaxis]
+        m2 = mask[c2_m, jnp.newaxis]
+        nbr_sum = jnp.zeros_like(T_new).at[c1_m].add(T_new[c2_m] * m2)
+        nbr_sum = nbr_sum.at[c2_m].add(T_new[c1_m] * m1)
+        nbr_cnt = jnp.zeros_like(T_new).at[c1_m].add(m2)
+        nbr_cnt = nbr_cnt.at[c2_m].add(m1)
+        nbr_avg_T = nbr_sum / jnp.maximum(nbr_cnt, 1.0)
+        T_new = jnp.where(mask_e > 0.5, T_new, nbr_avg_T)
+        nbr_sum_S = jnp.zeros_like(S_new).at[c1_m].add(S_new[c2_m] * m2)
+        nbr_sum_S = nbr_sum_S.at[c2_m].add(S_new[c1_m] * m1)
+        nbr_avg_S = nbr_sum_S / jnp.maximum(nbr_cnt, 1.0)
+        S_new = jnp.where(mask_e > 0.5, S_new, nbr_avg_S)
 
         # 6. Reconcile 3D velocity
         # Compute u_bar_old from the UPDATED state (state_for_baro),

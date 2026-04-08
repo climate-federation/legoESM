@@ -398,8 +398,19 @@ class MPASOceanTendencies(NamedTuple):
     """Tendencies for MPAS ocean primitive equations.
 
     Only prognostic fields have tendencies.
+
+    The optional ``div_hut`` / ``div_hus`` and ``dT_dt_source`` /
+    ``dS_dt_source`` fields enable a **flux-form** tracer update that
+    conserves ``h * T`` exactly (the divergence telescopes on the
+    Voronoi mesh).  When these fields are ``None`` the model falls
+    back to the advective-form update.
     """
     du_dt: Field
-    dT_dt: Field
+    dT_dt: Field                        # total tendency (advective + source)
     dS_dt: Field
     deta_dt: Field
+    # Flux-form decomposition (populated by ocean_pe_mpas)
+    div_hut: Field | None = None        # div(h·u·T), (nCells, nlev) [degC·m/s]
+    div_hus: Field | None = None        # div(h·u·S), (nCells, nlev) [PSU·m/s]
+    dT_dt_source: Field | None = None   # non-advective T tendency [degC/s]
+    dS_dt_source: Field | None = None   # non-advective S tendency [PSU/s]

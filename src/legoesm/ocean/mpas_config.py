@@ -72,6 +72,12 @@ class MPASOceanConfig(NamedTuple):
     physics: object = None  # OceanPhysicsConfig or None
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
+    # Flux-form tracer update: uses div(h·u·T) directly (telescopes
+    # exactly) instead of the advective form.  Gives exact h*T
+    # conservation but requires barotropic-averaged transport for
+    # stability (not yet implemented).  Default False uses the stable
+    # advective form + h_old/h_new correction.  See issue #94.
+    flux_form_tracers: bool = False
     # Runtime bounds checks (matching cubed-sphere ocean)
     enable_runtime_checks: bool = False
     temperature_min_c: float = -5.0

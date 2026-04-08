@@ -1628,10 +1628,12 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                 }
         return scalar_fn
     elif grid_type in ("mpas", "mpas_regional"):
-        # Capture z_coord layer thicknesses and cell areas for
-        # volume-weighted diagnostics.
+        # Capture z_coord and cell areas for volume-weighted diagnostics.
+        # Use actual h_k (which depends on eta) rather than reference dz_ref,
+        # so that the diagnostic tracks the true conserved quantity h*T.
         _area = grid.areaCell if grid is not None else None
-        _dz = z_coord.dz_ref if z_coord is not None else None
+        _z_coord = z_coord
+        _min_wc = 0.5  # default min_water_column_m
 
         def scalar_fn(s):
             if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
@@ -1640,9 +1642,13 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                 # Area-weighted eta mean
                 eta_ocean = jnp.where(mask, s.eta.data, jnp.nan)
 
-                # Volume-weighted T and S means
-                if _area is not None and _dz is not None:
-                    vol = _area[:, None] * _dz[None, :] * mask[:, None]
+                # Volume-weighted T and S using actual layer thickness h_k
+                if _area is not None and _z_coord is not None:
+                    from legoesm.ocean.vertical import compute_layer_thickness
+                    h_k = compute_layer_thickness(
+                        s.eta.data, s.H_bathy.data, _z_coord,
+                        min_water_column_m=_min_wc)
+                    vol = _area[:, None] * h_k * mask[:, None]
                     vol_sum = jnp.sum(vol)
                     mean_T = float(jnp.sum(s.T.data * vol) / vol_sum)
                     mean_S = float(jnp.sum(s.S.data * vol) / vol_sum)

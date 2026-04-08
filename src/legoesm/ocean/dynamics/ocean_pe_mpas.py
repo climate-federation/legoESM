@@ -205,40 +205,60 @@ def mpas_ocean_baroclinic_tendencies(
         T_flux = thickness_flux_k * T_e
         S_flux = thickness_flux_k * S_e
 
-        # Divergence of tracer flux
+        # Divergence of tracer flux — this is the term that telescopes
+        # exactly on the Voronoi mesh: sum(div_T_flux * area) = 0.
         div_T_flux = divergence_cell(T_flux, mesh)  # (nCells,)
         div_S_flux = divergence_cell(S_flux, mesh)
 
-        # Flux-form tracer tendency: h * dT/dt = -div(h*u*T) + T*div(h*u)
+        # Advective-form tracer tendency (kept for backward compatibility
+        # and diagnostics): h * dT/dt = -div(h*u*T) + T*div(h*u)
         h_safe = jnp.maximum(h_k_level, 1e-10)
         dT_dt_k = (-div_T_flux + T_k * div_flux) / h_safe
         dS_dt_k = (-div_S_flux + S_k * div_flux) / h_safe
 
-        # Horizontal tracer diffusion: K_h * lap(T)
-        # Approximate Laplacian as div(grad(T)); mask enforces no-flux BC at coast
+        # Non-advective source terms (horizontal diffusion).
+        # These are separated from the advective flux for the flux-form
+        # tracer update in ocean_model_mpas.py.
         grad_T = gradient_edge(T_k, mesh) * edge_mask
-        dT_dt_k = dT_dt_k + config.K_h * divergence_cell(grad_T, mesh) / h_safe * h_k_level
+        dT_dt_src_k = config.K_h * divergence_cell(grad_T, mesh) / h_safe * h_k_level
         grad_S = gradient_edge(S_k, mesh) * edge_mask
-        dS_dt_k = dS_dt_k + config.K_h * divergence_cell(grad_S, mesh) / h_safe * h_k_level
+        dS_dt_src_k = config.K_h * divergence_cell(grad_S, mesh) / h_safe * h_k_level
+
+        # Add source to total tendency (backward compat)
+        dT_dt_k = dT_dt_k + dT_dt_src_k
+        dS_dt_k = dS_dt_k + dS_dt_src_k
 
         # Mask land cells
         dT_dt_k = dT_dt_k * mask
         dS_dt_k = dS_dt_k * mask
+        div_T_flux = div_T_flux * mask
+        div_S_flux = div_S_flux * mask
+        dT_dt_src_k = dT_dt_src_k * mask
+        dS_dt_src_k = dS_dt_src_k * mask
 
-        return du_dt_k, dT_dt_k, dS_dt_k, div_flux
+        return (du_dt_k, dT_dt_k, dS_dt_k, div_flux,
+                div_T_flux, div_S_flux, dT_dt_src_k, dS_dt_src_k)
 
     # Vectorize over levels using scan for efficiency
     def _scan_fn(carry, k):
-        du, dT, dS, div_f = _level_tendencies(k)
-        return carry, (du, dT, dS, div_f)
+        (du, dT, dS, div_f,
+         div_hut, div_hus, dT_src, dS_src) = _level_tendencies(k)
+        return carry, (du, dT, dS, div_f,
+                       div_hut, div_hus, dT_src, dS_src)
 
-    _, (du_dt_all, dT_dt_all, dS_dt_all, div_flux_all) = jax.lax.scan(
+    _, (du_dt_all, dT_dt_all, dS_dt_all, div_flux_all,
+        div_hut_all, div_hus_all,
+        dT_src_all, dS_src_all) = jax.lax.scan(
         _scan_fn, None, jnp.arange(nlev),
     )
     # scan outputs: (nlev, nEdges), (nlev, nCells), etc.
-    du_dt_3d = du_dt_all.T  # (nEdges, nlev)
-    dT_dt_3d = dT_dt_all.T  # (nCells, nlev)
-    dS_dt_3d = dS_dt_all.T  # (nCells, nlev)
+    du_dt_3d = du_dt_all.T       # (nEdges, nlev)
+    dT_dt_3d = dT_dt_all.T       # (nCells, nlev)
+    dS_dt_3d = dS_dt_all.T       # (nCells, nlev)
+    div_hut_3d = div_hut_all.T   # (nCells, nlev)
+    div_hus_3d = div_hus_all.T   # (nCells, nlev)
+    dT_dt_src_3d = dT_src_all.T  # (nCells, nlev)
+    dS_dt_src_3d = dS_src_all.T  # (nCells, nlev)
 
     # ---- Vertical mixing ----
     dz_half = z_coord.dz_half_ref  # (nlev-1,)
@@ -250,15 +270,19 @@ def mpas_ocean_baroclinic_tendencies(
         mesh=mesh,
     )
 
-    # Vertical tracer diffusion
-    dT_dt_3d = dT_dt_3d + _vertical_diffusion(
+    # Vertical tracer diffusion (conservative per-column; source term)
+    vdiff_T = _vertical_diffusion(
         T_3d, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
         mesh=mesh,
     ) * mask[:, jnp.newaxis]
-    dS_dt_3d = dS_dt_3d + _vertical_diffusion(
+    vdiff_S = _vertical_diffusion(
         S_3d, dz_half, dz, jacobian=jacobian, coeff=config.K_v, is_edge=False,
         mesh=mesh,
     ) * mask[:, jnp.newaxis]
+    dT_dt_3d = dT_dt_3d + vdiff_T
+    dS_dt_3d = dS_dt_3d + vdiff_S
+    dT_dt_src_3d = dT_dt_src_3d + vdiff_T
+    dS_dt_src_3d = dS_dt_src_3d + vdiff_S
 
     # ---- Physics (surface forcing, bottom drag, etc.) ----
     if physics_fn is not None:
@@ -266,6 +290,8 @@ def mpas_ocean_baroclinic_tendencies(
         du_dt_3d = du_dt_3d + phys.du_dt.data
         dT_dt_3d = dT_dt_3d + phys.dT_dt.data
         dS_dt_3d = dS_dt_3d + phys.dS_dt.data
+        dT_dt_src_3d = dT_dt_src_3d + phys.dT_dt.data
+        dS_dt_src_3d = dS_dt_src_3d + phys.dS_dt.data
 
     # ---- Free surface tendency ----
     # deta/dt = -sum_k div(u_k * h_e_k)
@@ -280,6 +306,7 @@ def mpas_ocean_baroclinic_tendencies(
         dz_0 = h_k[:, 0]  # top layer thickness (nCells,)
         dS_fw = virtual_salt_flux(freshwater, config.S_ref, dz_0, config.rho_0)
         dS_dt_3d = dS_dt_3d.at[:, 0].add(dS_fw * mask)
+        dS_dt_src_3d = dS_dt_src_3d.at[:, 0].add(dS_fw * mask)
 
     return MPASOceanTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",
@@ -290,6 +317,14 @@ def mpas_ocean_baroclinic_tendencies(
                     dims=("nCells", "nlev"), units="PSU/s"),
         deta_dt=Field(data=deta_dt, name="deta_dt",
                       dims=("nCells",), units="m/s"),
+        div_hut=Field(data=div_hut_3d, name="div_hut",
+                      dims=("nCells", "nlev"), units="degC*m/s"),
+        div_hus=Field(data=div_hus_3d, name="div_hus",
+                      dims=("nCells", "nlev"), units="PSU*m/s"),
+        dT_dt_source=Field(data=dT_dt_src_3d, name="dT_dt_source",
+                           dims=("nCells", "nlev"), units="degC/s"),
+        dS_dt_source=Field(data=dS_dt_src_3d, name="dS_dt_source",
+                           dims=("nCells", "nlev"), units="PSU/s"),
     )
 
 
