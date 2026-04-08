@@ -98,12 +98,15 @@ GRID_RESOLUTIONS: dict[str, str] = {
     "latlon": "36x72",
     "mpas": "ico3",
     "mpas_regional": "300km",
+    "latlon_regional": "24x48",
+    "cs_regional": "C24",
     "spectral": "T21",
 }
 
 # Standard grid types for the full test matrix.
-# mpas_regional is only added to specific test cases (gyre experiments).
+# Regional grids are only added to specific test cases (gyre experiments).
 GRID_TYPES = ["cubed_sphere", "latlon", "mpas", "spectral"]
+REGIONAL_GRID_TYPES = ["mpas_regional", "latlon_regional", "cs_regional"]
 
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
@@ -202,10 +205,24 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "rest_state", g, res[g], 1.0, 0.1))
 
+    # --- Rest state with uniform T/S (with land): isolates barotropic PGF ---
+    for g in GRID_TYPES:
+        if g == "spectral":
+            continue
+        matrix.append(TestCase(
+            "rest_state_uniform_ts", g, res[g], 1.0, 0.1))
+
     # --- Rest state adjustment without land: all grids ---
     for g in GRID_TYPES:
         matrix.append(TestCase(
             "rest_state_no_land", g, res[g], 1.0, 0.1))
+
+    # --- Rest state uniform T/S without land: control ---
+    for g in GRID_TYPES:
+        if g == "spectral":
+            continue
+        matrix.append(TestCase(
+            "rest_state_uniform_ts_no_land", g, res[g], 1.0, 0.1))
 
     # --- Barotropic gravity wave: resolution-matched grids (~384-446 km dx) ---
     bwave_res = {"cubed_sphere": "C24", "latlon": "48x72",
@@ -214,14 +231,10 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "barotropic_wave", g, bwave_res[g], 2.0, 0.2))
 
-    # --- Barotropic gyre: cubed_sphere, latlon, mpas ---
-    # --- Barotropic double gyre: cubed_sphere, latlon, mpas, mpas_regional ---
-    for g in ["cubed_sphere", "latlon", "mpas"]:
+    # --- Wind-driven regional barotropic double gyre: all regional grids ---
+    for g in REGIONAL_GRID_TYPES:
         matrix.append(TestCase(
             "barotropic_double_gyre", g, res[g], 30.0, 2.0))
-    matrix.append(TestCase(
-        "barotropic_double_gyre", "mpas_regional", res["mpas_regional"],
-        30.0, 2.0))
 
     # --- Geostrophic adjustment: all grids ---
     for g in GRID_TYPES:
@@ -1125,6 +1138,11 @@ def _parse_resolution(tc: TestCase):
         return {"level": int(tc.resolution.replace("ico", ""))}
     elif tc.grid_type == "mpas_regional":
         return {"resolution_km": int(tc.resolution.replace("km", ""))}
+    elif tc.grid_type == "latlon_regional":
+        parts = tc.resolution.split("x")
+        return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
+    elif tc.grid_type == "cs_regional":
+        return {"n": int(tc.resolution[1:])}
     elif tc.grid_type == "spectral":
         return {"truncation": int(tc.resolution[1:])}
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
@@ -1234,6 +1252,50 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
         lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
         return mesh, z_coord, config, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "latlon_regional":
+        from legoesm.grids.latlon import create_regional_latlon_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
+        from legoesm.ocean.state import LatLonOceanConfig
+
+        n_lat, n_lon = params["n_lat"], params["n_lon"]
+        lon_w = tc.run_kwargs.get("lon_west", 0.0)
+        lon_e = tc.run_kwargs.get("lon_east", 120.0)
+        lat_s = tc.run_kwargs.get("lat_south", 15.0)
+        lat_n = tc.run_kwargs.get("lat_north", 75.0)
+        grid, wall_mask = create_regional_latlon_grid(
+            n_lat, n_lon, lat_s, lat_n, lon_w, lon_e)
+        kw = dict(n_barotropic_substeps=30, physics=physics,
+                  barotropic_staggering="C")
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        config = LatLonOceanConfig(**kw)
+        model = LatLonOceanModel(grid, z_coord, config)
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, config, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "cs_regional":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere_panel
+        from legoesm.ocean.dynamics.ocean_model import OceanModel
+        from legoesm.ocean.state import OceanConfig
+
+        n = params["n"]
+        grid = create_cubed_sphere_panel(n, face_id=0, return_cdgrid=False)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        config = OceanConfig(**kw)
+        model = OceanModel(grid, z_coord, config)
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, config, model, coord_kind, lon_deg, lat_deg
 
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import create_gaussian_grid
@@ -1639,14 +1701,14 @@ def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord,
                            lon_west=0.0, lon_east=120.0,
                            lat_south=15.0, lat_north=75.0):
     """Create wind-gyre initial state with rectangular basin boundaries."""
-    if grid_type == "cubed_sphere":
+    if grid_type in ("cubed_sphere", "cs_regional"):
         from legoesm.ocean.init import wind_driven_gyre_init
         return wind_driven_gyre_init(
             grid, z_coord,
             lon_west=lon_west, lon_east=lon_east,
             lat_south=lat_south, lat_north=lat_north,
         )
-    elif grid_type == "latlon":
+    elif grid_type in ("latlon", "latlon_regional"):
         from legoesm.ocean.init_latlon import wind_driven_gyre_latlon
         return wind_driven_gyre_latlon(
             grid, z_coord,
@@ -2076,7 +2138,9 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
                          wind_profile: str, label: str,
                          ) -> tuple[str, float, str]:
     """Shared runner for barotropic gyre experiments."""
-    if tc.grid_type not in ("cubed_sphere", "latlon", "mpas", "mpas_regional"):
+    _supported = ("cubed_sphere", "latlon", "mpas", "mpas_regional",
+                   "latlon_regional", "cs_regional")
+    if tc.grid_type not in _supported:
         raise NotImplementedError(
             f"{label} not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
@@ -3154,7 +3218,9 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
 
 RUNNERS: dict[str, Callable] = {
     "rest_state": run_rest_state,
+    "rest_state_uniform_ts": run_rest_state_uniform_ts,
     "rest_state_no_land": run_rest_state_no_land,
+    "rest_state_uniform_ts_no_land": run_rest_state_uniform_ts_no_land,
     "barotropic_wave": run_barotropic_wave,
     "barotropic_gyre": run_barotropic_gyre,
     "barotropic_double_gyre": run_barotropic_double_gyre,
@@ -3181,7 +3247,8 @@ def build_parser() -> argparse.ArgumentParser:
              "(e.g. rest_state, barotropic_gyre, barotropic_double_gyre)")
     p.add_argument(
         "--grid", type=str, default="all",
-        choices=["cubed_sphere", "latlon", "mpas", "mpas_regional",
+        choices=["cubed_sphere", "latlon", "mpas",
+                 "mpas_regional", "latlon_regional", "cs_regional",
                  "spectral", "all"],
         help="Run only a specific grid type (default: all)")
     p.add_argument(
