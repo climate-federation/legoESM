@@ -475,16 +475,33 @@ The apparent 2× speed difference was partly a diagnostic artifact: the test mat
 
 ---
 
+## 2026-04-08: Conservation strategy wrap-up (issue #101 closed)
+
+Issue #101 is resolved for latlon C-grid and MPAS. Summary of what was achieved:
+
+| Grid | Volume (eta) | Heat (T) | Salt (S) |
+|------|-------------|----------|----------|
+| MPAS | 1.86e-17 | 6e-15 | 0 |
+| latlon C-grid | 1.83e-17 | 8.7e-4 (transport limited) | ~same |
+| cubed-sphere | deferred (#100) | deferred (#100) | deferred (#100) |
+
+Volume conservation is at machine precision on both production grids. The remaining latlon T/S gap (8.7e-4) is from the transport operator stencil mismatch, not the split-explicit h mismatch. Fixing this requires flux-form tracer transport with barotropic-averaged transport — filed as issue #102 with a detailed plan (Phase 2a: horizontal accumulation, Phase 2b: vertical w reconstruction). Experts agree: MPAS first (low risk, validates infrastructure), latlon second (high value).
+
+---
+
 ## Issues and PRs
 
 ### Open issues
 - #100 — Cubed-sphere ocean face-boundary instability (exponential blowup at face boundaries in dynamic simulations)
-- #101 — Conservation strategy: replace additive fixers with h_old/h_new thickness correction
-- #94 — Split-explicit tracer conservation: flux-form path needs barotropic-averaged transport (long-term, Phase 2 of #101)
+- #102 — Flux-form tracer transport with barotropic-averaged transport (latlon T/S conservation, Phase 2a/2b)
 - #99 — Remove spectral grid from ocean (land boundary issues, not worth investing)
 - #87 — Latlon A-grid instability (C-grid fixes in #98; A-grid removed from test matrix)
 - #88 — Regional MPAS mesh (pole fix + test matrix in #98)
 - #81 — Rest-state stability (diagnostic artifact fix in #98)
+
+### Closed issues
+- #101 — Conservation strategy (resolved: conservative diffusion, h_old/h_new, fixer disabled, budget diagnostic)
+- #94 — Split-explicit tracer conservation (superseded by #102)
 
 ### PRs
 - #98 — Consolidated ocean model fixes (open, replaces #89, #92, #95)
