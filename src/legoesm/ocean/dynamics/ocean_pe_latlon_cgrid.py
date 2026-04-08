@@ -366,6 +366,24 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             else:
                 dv_dt = dv_dt + vdiff
 
+    # --- 10b. Physics tendencies (surface forcing, bottom drag, etc.) ---
+    # The physics pipeline expects cell-center u/v shapes (shared with
+    # A-grid and cubed-sphere).  Create a cell-center proxy state so
+    # the physics functions produce (n_lat, n_lon, nlev) output, then
+    # interpolate momentum tendencies to C-grid face points.
+    if physics_fn is not None:
+        u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])  # (n_lat, n_lon, nlev)
+        v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])   # (n_lat, n_lon, nlev)
+        cc_state = state._replace(
+            u=state.u.replace(data=u_cell),
+            v=state.v.replace(data=v_cell),
+        )
+        phys = physics_fn(cc_state, grid, z_coord, surface_forcing)
+        du_dt = du_dt + _interp_to_u_points(phys.du_dt.data)
+        dv_dt = dv_dt + _interp_to_v_points(phys.dv_dt.data)
+        dT_dt = dT_dt + phys.dT_dt.data
+        dS_dt = dS_dt + phys.dS_dt.data
+
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d
     dv_dt = dv_dt * v_mask_3d

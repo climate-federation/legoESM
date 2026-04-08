@@ -241,14 +241,136 @@ Spectral methods work well for the atmosphere but not for ocean dynamics with cl
 
 ---
 
+## 2026-04-08: Cubed-sphere face-boundary instability (issue #100)
+
+**Problem**: The cubed-sphere ocean has a hard exponential instability at face boundaries. The geostrophic adjustment test blows up by day 5-7 (e-folding time ~0.8 days), while MPAS and latlon are perfectly stable. Rest-state tests show a face-imprint pattern at ~1e-15 level in all cubed-sphere cases, with the stratified+land case 5 orders of magnitude worse (1.27e-12 eta drift).
+
+**Root causes identified**:
+
+1. **Bug: Binary land mask interpolated at face boundaries.** `_fill_land_cells` (barotropic.py:82) passes the {0,1} mask through Lagrange interpolation in `pad_halo`, producing fractional values (~0.3-0.7) at face boundaries. This corrupts the neighbor-count logic for coastal filling.
+
+2. **Design weakness: Inconsistent barotropic/baroclinic gradient operators.** The barotropic solver uses A-grid centered differences while the baroclinic dynamics use C-D grid Arakawa-Lamb gradients. The different error patterns at face boundaries don't cancel, creating a spurious tendency every timestep.
+
+3. **Ocean-specific amplifier: density-pressure feedback loop.** Halo interpolation error → spurious PG → velocity error → advects T/S → density perturbation (amplified by Wright EOS) → larger PG → feedback. The atmosphere uses the same C-D grid operators but is stable because its temperature doesn't feed back through density into the pressure gradient in the same tight loop.
+
+**Not yet fixed.** Proposed fix priority: (P0) don't interpolate mask — 1 line; (P1) float64 halo offsets — 1 line; (P2) normalize Lagrange weights — 3 lines; (P3) targeted face-boundary diffusion; (P4) reference pressure subtraction; (P5 long-term) C-grid barotropic solver.
+
+---
+
+## 2026-04-08: Conservation strategy overhaul (issue #101)
+
+**Problem**: The additive conservation fixers (uniform correction to eta, T, S after each timestep) are harmful for forced/coupled simulations. They can't distinguish numerical error from real external forcing — a net surface heat flux gets "corrected" away, smeared uniformly through the full water column.
+
+**Key finding**: The MPAS model's `h_old/h_new` thickness correction (ocean_model_mpas.py:157-192) already achieves machine-precision conservation (4.3e-16 relative heat drift over 1 day) *without* the additive fixer. The fixer actually makes conservation slightly worse (2.1e-15) by adding global-sum rounding noise.
+
+**The h_old/h_new correction**: After the barotropic solver changes eta (and thus layer thickness from h_old to h_new), rescale tracers: `T_corrected = T_new * h_old / h_new`. This preserves thickness-weighted content `h*T` through the split-explicit step. It's local (no global reductions), differentiable (pointwise multiply), and doesn't interfere with external forcing.
+
+**Missing from cubed-sphere and latlon C-grid**: Only MPAS has this correction. The cubed-sphere geostrophic adjustment T drift (9e-5) and the latlon double-gyre SSH drift (-0.012 m over 30 days) are both caused by this missing correction.
+
+**Changes made**:
+- `use_conservation_fixer` default changed to `False` in all 5 ocean config classes
+- Fixer remains available via explicit opt-in for debugging
+
+**Phased plan**:
+- Phase 0: Port h_old/h_new correction to cubed-sphere and latlon C-grid (~20 lines each)
+- Phase 1: Add conservation budget diagnostic (reports actual vs expected heat/salt change)
+- Phase 2: Flux-form tracer transport with barotropic-averaged transport (issue #94, long-term)
+
+### Phase 0 implementation: latlon C-grid h_old/h_new correction
+
+Added the h_old/h_new thickness correction to `LatLonCGridOceanModel.step()` (ocean_model_latlon_cgrid.py), porting the pattern from MPAS (ocean_model_mpas.py:157-192).
+
+**Results after the correction:**
+
+| Test | Before | After | Notes |
+|------|--------|-------|-------|
+| rest_state_stratified_with_land | T=9.85e-15 | T=9.85e-15 | No change (no velocity → no h mismatch) |
+| geostrophic_adjustment | T=8.39e-4 | T=8.70e-4 | No improvement |
+| barotropic_double_gyre | eta=-1.16e-2 | eta=-1.18e-2 | No improvement (eta drift is volume, not tracer) |
+
+**Why the latlon correction doesn't help like MPAS:**
+
+The h_old/h_new correction fixes the split-explicit h mismatch — the error from tracers being updated with old h while the barotropic solver changes h. On MPAS, this was the **dominant** conservation error (6e-15 with correction vs 2.8e-5 without). On latlon C-grid, the dominant error is elsewhere.
+
+The latlon C-grid tracer transport (ocean_pe_latlon_cgrid.py:299-316) uses an approximate flux-form approach:
+```
+dT/dt = -div(T*u)/area + T * div(h*u) / h
+```
+
+This combines `scalar_advection_cgrid` (advective form: `-div(Tu)`) with a correction term (`T * div(hu)/h`). Analytically these cancel to give `-u*grad(T)`, but the two **discrete** operators use different stencils that don't cancel exactly. The residual is O(8e-4) over 10 days — far larger than the h mismatch error the correction fixes.
+
+On MPAS, TRiSK uses the **same** edge operator for both scalar transport and mass flux divergence, so the discrete cancellation is exact. That's why MPAS achieves 6e-15 and latlon achieves 8e-4.
+
+**The eta drift (-0.012 m over 30 days)** is a separate volume conservation issue from the non-conservative barotropic Laplacian diffusion (`nu_dt = alpha * area`, area-dependent coefficient). The h_old/h_new correction only fixes tracer conservation, not volume.
+
+### Why not switch to proper flux form?
+
+A naive flux-form implementation (`h_new * T_new = h_old * T_old - dt * div(h*u*T)`) was previously tried on MPAS and went unstable after ~3 days (documented in the "Flux-form attempt" section above). The instability occurs because the tracer flux uses the instantaneous baroclinic velocity, which is inconsistent with the barotropic solver's time-averaged continuity equation. The barotropic solver's `div(h*u)` is accumulated over 30 substeps, but the tracer sees only the single baroclinic-step velocity.
+
+The fix (Hallberg 1997, Higdon 2005, as used in MOM6 and MPAS-Ocean) requires the barotropic solver to accumulate and return the time-averaged thickness flux `<h*u>_baro`, and the tracer equation to use that averaged transport. This is issue #94 (Phase 2). Switching the latlon transport to proper flux form without this barotropic averaging would likely hit the same instability.
+
+**Current conservation status across grids:**
+
+| Grid | Transport form | T conservation (geoadj 10d) | Limiting factor |
+|------|---------------|----------------------------|-----------------|
+| MPAS | TRiSK (exact flux form) | 6e-15 | Machine precision |
+| latlon C-grid | Approximate flux-form correction | 8.7e-4 | Discrete stencil mismatch in transport |
+| cubed_sphere | FCT (flux-corrected transport) | 9e-5 | Missing h_old/h_new + face-boundary instability |
+
+**The h_old/h_new correction is still worth keeping on latlon** — it's architecturally correct, costs nothing, and will matter when the transport operator is improved in Phase 2.
+
+---
+
+## 2026-04-08: Conservative barotropic diffusion (latlon C-grid)
+
+**Problem**: The barotropic Laplacian diffusion on the latlon C-grid used `nu_cell * div(grad(eta))` where `nu_cell = alpha * grid.area` varies as `cos(lat)`. This places the spatially varying coefficient *outside* the divergence, breaking volume conservation. Over 30 days in a barotropic double gyre, the leak accumulated to -0.012 m mean SSH drift (~0.14 m/year).
+
+**Root cause**: `sum(nu_cell * laplacian(eta) * area) != 0` when `nu_cell` varies spatially. The divergence theorem only guarantees `sum(div(F) * area) = 0` — the coefficient must be *inside* the divergence.
+
+**Fix**: Reformulated as `div(nu_face * grad(eta))` (flux-form diffusion):
+1. Compute gradient: `grad_x, grad_y = gradient(eta)`
+2. Multiply by face-centered coefficient: `flux_x = nu_face_u * grad_x`
+3. Take divergence: `delta_eta = div(flux_x, flux_y)`
+
+Where `nu_face_u = baro_alpha * 0.5 * (area_west + area_east)` — average of adjacent cell areas at each face. Face masks zero the flux at land boundaries. The face coefficients are precomputed once outside the substep loop (grid geometry only).
+
+This is the standard approach in MOM6 and NEMO. Conservative by construction: `sum(div(F) * area) = 0` for any flux F with no-flux BCs.
+
+**Results** (barotropic double gyre, latlon_regional 24x48, 30 days):
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| eta drift | -1.16e-2 | -2.87e-3 | 4x |
+| max speed | 0.093 m/s | 0.093 m/s | unchanged |
+| rest state (eta) | 0.00e+00 | 0.00e+00 | unchanged |
+| rest state (T) | 9.85e-15 | 9.85e-15 | unchanged |
+
+The diffusion fix eliminated ~75% of the volume leak. The remaining drift (~2.9e-3 over 30 days, ~0.035 m/year) comes from a secondary source — not the eta floor clamping (floor is at -5499.5 m, eta stays within ±0.02 m), likely the continuity divergence operator or mask interactions. This is a 4x improvement and adequate for multi-decade runs; the secondary source can be investigated as a follow-up.
+
+**Same issue exists on cubed-sphere and MPAS**: Both use `nu_cell * laplacian(eta)` with area-dependent coefficients. The MPAS case leaks less because Voronoi cell areas are more uniform (~1.2x vs ~3.7x variation). The same flux-form fix should be applied to both solvers for consistency.
+
+---
+
+## 2026-04-08: Test matrix comparison plot fixes
+
+**Problem**: Cross-grid comparison plots for regional grids (MPAS regional, latlon regional) showed incorrect extents and indistinguishable lines.
+
+1. **MPAS regional on global axes**: The MPAS regional regridding outputs to a global 181x360 lat-lon grid with NaN outside the domain. The comparison snapshot and evolution plots used the full coordinate extent instead of cropping to non-NaN data. Fixed by adding bounding-box crop (same logic already used in per-grid snapshots).
+
+2. **Black-on-black timeseries**: The color dict only had entries for global grids (cubed_sphere, latlon, mpas, spectral). Regional grids fell through to default black. Fixed by adding color entries for regional grids (tab:red/tab:green with dashed linestyle).
+
+---
+
 ## Issues and PRs
 
 ### Open issues
-- #94 — Split-explicit tracer conservation: flux-form path needs barotropic-averaged transport (deprioritized — default path is machine-precision)
+- #100 — Cubed-sphere ocean face-boundary instability (exponential blowup at face boundaries in dynamic simulations)
+- #101 — Conservation strategy: replace additive fixers with h_old/h_new thickness correction
+- #94 — Split-explicit tracer conservation: flux-form path needs barotropic-averaged transport (long-term, Phase 2 of #101)
+- #99 — Remove spectral grid from ocean (land boundary issues, not worth investing)
 - #87 — Latlon A-grid instability (C-grid fixes in #98; A-grid removed from test matrix)
 - #88 — Regional MPAS mesh (pole fix + test matrix in #98)
 - #81 — Rest-state stability (diagnostic artifact fix in #98)
-- #99 — Remove spectral grid from ocean (land boundary issues, not worth investing)
 
 ### PRs
 - #98 — Consolidated ocean model fixes (open, replaces #89, #92, #95)

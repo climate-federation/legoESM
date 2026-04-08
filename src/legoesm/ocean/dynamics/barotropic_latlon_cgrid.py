@@ -26,7 +26,6 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_x_cgrid,
     gradient_y_cgrid,
     coriolis_cgrid,
-    laplacian_cgrid,
 )
 
 
@@ -140,10 +139,39 @@ def barotropic_substeps_latlon_cgrid(
     alpha_u = (0.5 * f_u * dt_s).astype(eta.dtype)
     alpha_v = (0.5 * f_v * dt_s).astype(eta.dtype)
 
-    # Barotropic diffusion
+    # Barotropic diffusion — flux-form with face-centered coefficient.
+    # Using div(nu_face * grad(eta)) instead of nu_cell * div(grad(eta))
+    # ensures exact volume conservation (divergence theorem: sum of
+    # div(F)*area = 0 for any flux F with no-flux BCs).
+    # The cell-center form nu_cell * laplacian(eta) is non-conservative
+    # when nu_cell varies spatially (area varies as cos(lat) on latlon).
     baro_alpha = jnp.asarray(
         config.barotropic_diffusion_alpha, dtype=eta.dtype,
     ) * (dt_s / jnp.asarray(config.barotropic_diffusion_dt_ref, dtype=eta.dtype))
+
+    # Precompute face-centered diffusion coefficients (grid geometry only,
+    # constant across substeps).
+    if config.barotropic_diffusion_alpha > 0.0:
+        area = grid.area  # (n_lat, n_lon)
+        # u-face coefficient: average of adjacent cell areas
+        nu_face_u = baro_alpha * 0.5 * (jnp.roll(area, 1, axis=1) + area)
+        nu_face_u = jnp.concatenate([nu_face_u, nu_face_u[:, 0:1]], axis=1)
+        # v-face coefficient: average of adjacent cell areas
+        nu_face_v_interior = baro_alpha * 0.5 * (area[:-1] + area[1:])
+        zero_row_nu = jnp.zeros((1, area.shape[1]), dtype=eta.dtype)
+        nu_face_v = jnp.concatenate(
+            [zero_row_nu, nu_face_v_interior, zero_row_nu], axis=0,
+        )
+        # Face masks for land boundaries (zero flux at coastlines)
+        diff_u_mask = mask * jnp.roll(mask, 1, axis=1)
+        diff_u_mask = jnp.concatenate(
+            [diff_u_mask, diff_u_mask[:, 0:1]], axis=1,
+        )
+        diff_v_mask_interior = mask[:-1] * mask[1:]
+        zero_row_m = jnp.zeros((1, mask.shape[1]), dtype=mask.dtype)
+        diff_v_mask = jnp.concatenate(
+            [zero_row_m, diff_v_mask_interior, zero_row_m], axis=0,
+        )
 
     def substep_body(i, carry):
         eta_c, U_bar_c, V_bar_c = carry
@@ -228,11 +256,14 @@ def barotropic_substeps_latlon_cgrid(
         )
         V_bar_new = (V_bar_c + dt_s * (-f_v * U_new_at_v - g * deta_dy)) * v_mask
 
-        # Optional Laplacian damping on eta
+        # Optional Laplacian damping on eta (flux-form: conservative)
         if config.barotropic_diffusion_alpha > 0.0:
-            nu_dt = baro_alpha * grid.area
+            grad_x = gradient_x_cgrid(eta_new * mask, grid)
+            grad_y = gradient_y_cgrid(eta_new * mask, grid)
+            flux_x = nu_face_u * grad_x * diff_u_mask
+            flux_y = nu_face_v * grad_y * diff_v_mask
             eta_new = (
-                eta_new + nu_dt * laplacian_cgrid(eta_new, grid, mask=mask).astype(eta.dtype)
+                eta_new + divergence_cgrid(flux_x, flux_y, grid).astype(eta.dtype)
             ) * mask
             eta_new = jnp.maximum(eta_new, eta_floor) * mask
 

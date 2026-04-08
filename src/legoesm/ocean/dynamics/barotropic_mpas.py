@@ -198,16 +198,15 @@ def barotropic_substeps_mpas(
         if config.barotropic_damping > 0:
             u_bar_next = u_bar_next * (1.0 - dt_baro * config.barotropic_damping)
 
-        # Barotropic Laplacian diffusion (matches CS and LL solvers)
+        # Barotropic Laplacian diffusion on eta only (matches latlon C-grid solver).
+        # Velocity diffusion was previously included here but caused
+        # systematic over-damping of the barotropic flow, giving ~50%
+        # lower equilibrium speeds compared to latlon in wind-driven tests.
         if use_baro_diffusion:
-            # Eta: scalar Laplacian on cells
             eta_next = (
                 eta_next + nu_dt_cell * _del2_cell(eta_next, mask)
             ) * mask
             eta_next = jnp.maximum(eta_next, eta_floor) * mask
-            # Velocity: vector Laplacian on edges
-            del2_u = vector_laplacian_del2(u_bar_next, mesh)
-            u_bar_next = (u_bar_next + nu_dt_edge * del2_u) * edge_mask
 
         # Cast back to input dtype (mesh ops may promote to float64)
         return (eta_next.astype(_eta_dtype), u_bar_next.astype(_ubar_dtype)), None

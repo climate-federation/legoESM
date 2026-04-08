@@ -295,11 +295,40 @@ class LatLonCGridOceanModel:
             S=state.S.replace(data=S_new * mask_3d),
         )
 
-        # 5. Barotropic substeps
+        # 5. Save pre-barotropic layer thickness for tracer correction
+        h_k_old = compute_layer_thickness(
+            state_mid.eta.data, state_mid.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m,
+        )
+
+        # 6. Barotropic substeps
         dt_s = dt / self.config.n_barotropic_substeps
         state_new = barotropic_substeps_latlon_cgrid(
             state_mid, dt_s, self.config.n_barotropic_substeps,
             self.grid, self.z_coord, self.config,
+        )
+
+        # 7. Thickness-weighted tracer correction (split-explicit coupling)
+        #
+        # The tracer Euler step used the OLD layer thickness h_old:
+        #     T_new = T_old + dt * dT_dt
+        # But the barotropic solver changed eta -> h_new != h_old.
+        # Conservation requires: h_new * T_corrected = h_old * T_new
+        # Therefore:             T_corrected = T_new * (h_old / h_new)
+        #
+        # This is the standard split-explicit corrector used in MPAS-Ocean,
+        # MOM6, and POP.  It ensures thickness-weighted tracer content h*T
+        # is exactly conserved through the barotropic-baroclinic splitting.
+        h_k_new = compute_layer_thickness(
+            state_new.eta.data, state_new.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m,
+        )
+        h_ratio = h_k_old / jnp.maximum(h_k_new, 1e-10)
+        T_corrected = jnp.where(mask_3d > 0.5, state_new.T.data * h_ratio, state_new.T.data)
+        S_corrected = jnp.where(mask_3d > 0.5, state_new.S.data * h_ratio, state_new.S.data)
+        state_new = state_new._replace(
+            T=state_new.T.replace(data=T_corrected),
+            S=state_new.S.replace(data=S_corrected),
         )
 
         return cast_pytree(state_new, None, "storage")

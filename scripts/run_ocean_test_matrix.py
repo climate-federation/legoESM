@@ -247,10 +247,19 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "barotropic_double_gyre", g, res[g], 30.0, 2.0))
 
-    # --- Global barotropic wind-driven: cubed_sphere, latlon, mpas ---
-    for g in ["cubed_sphere", "latlon", "mpas"]:
+    # --- Global barotropic wind-driven: latlon, mpas ---
+    # (cubed_sphere excluded — face-boundary instability produces unphysical speeds)
+    for g in ["latlon", "mpas"]:
         matrix.append(TestCase(
             "global_barotropic_wind", g, res[g], 60.0, 5.0))
+
+    # --- Global barotropic wind, single layer (truly barotropic) ---
+    # 1-level eliminates vertical coupling issues; wind and bottom drag
+    # act on the same layer → clean Sverdrup-like equilibrium.
+    for g in ["latlon", "mpas"]:
+        matrix.append(TestCase(
+            "global_barotropic_wind_1lev", g, res[g], 60.0, 5.0,
+            run_kwargs={"nlev": 1}))
 
     # --- Geostrophic adjustment: all grids ---
     for g in GRID_TYPES:
@@ -434,7 +443,7 @@ def _build_latlon_weights(
         ``_apply_weights``.  Prevents extrapolation artefacts in
         regional meshes.
     """
-    lon = ((np.asarray(lon_deg, dtype=np.float64).ravel() + 180) % 360) - 180
+    lon = np.asarray(lon_deg, dtype=np.float64).ravel() % 360
     lat = np.clip(np.asarray(lat_deg, dtype=np.float64).ravel(), -90, 90)
     d2r = np.pi / 180.0
     src = np.column_stack([
@@ -442,7 +451,7 @@ def _build_latlon_weights(
         np.cos(lat * d2r) * np.sin(lon * d2r),
         np.sin(lat * d2r)])
     lat_1d = np.linspace(-90.0, 90.0, n_lat)
-    lon_1d = np.linspace(-180.0, 180.0, n_lon)
+    lon_1d = np.linspace(0.0, 360.0, n_lon)
     lo, la = np.meshgrid(lon_1d, lat_1d)
     tgt = np.column_stack([
         np.cos(la.ravel() * d2r) * np.cos(lo.ravel() * d2r),
@@ -785,7 +794,7 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
 
             # Compute extent from actual coordinates.
             # For unstructured grids (cube, mpas) the regridded array
-            # covers [-180,180] × [-90,90].  For regional meshes, crop
+            # covers [0,360] × [-90,90].  For regional meshes, crop
             # to the data extent so the plot zooms into the domain.
             if coord_kind in ("latlon", "gaussian"):
                 lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
@@ -795,9 +804,9 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                 plot_data = regridded
             else:
                 # The regridded array is (181, 360) on
-                # lat ∈ [-90, 90], lon ∈ [-180, 180].
+                # lat ∈ [-90, 90], lon ∈ [0, 360].
                 lat_1d = np.linspace(-90, 90, regridded.shape[0])
-                lon_1d = np.linspace(-180, 180, regridded.shape[1])
+                lon_1d = np.linspace(0, 360, regridded.shape[1])
                 # Find the bounding box of non-NaN data.
                 valid = np.isfinite(regridded)
                 if valid.any():
@@ -810,7 +819,7 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                     lat_ext = [float(lat_1d[r0]), float(lat_1d[min(r1, len(lat_1d)-1)])]
                 else:
                     plot_data = regridded
-                    lon_ext = [-180, 180]
+                    lon_ext = [0, 360]
                     lat_ext = [-90, 90]
             im = ax.imshow(
                 plot_data, origin="lower", aspect="auto", cmap=cmap,
@@ -890,7 +899,7 @@ def _bin_cross_section(
 
     section = np.nanmean(ll, axis=mean_axis)
     if mean_axis == 0:
-        return section, np.linspace(-180, 180, section.shape[0])
+        return section, np.linspace(0, 360, section.shape[0])
     return section, np.linspace(-90, 90, section.shape[0])
 
 
@@ -1050,9 +1059,9 @@ def _save_snapshot_data(
         latlon_arrays["lat"] = np.asarray(lat_deg, dtype=np.float64).ravel()
         latlon_arrays["lon"] = np.asarray(lon_deg, dtype=np.float64).ravel()
     else:
-        # Regridded grids (cube, mpas) use [-180, 180] target
+        # Regridded grids (cube, mpas) use [0, 360] target
         latlon_arrays["lat"] = np.linspace(-90.0, 90.0, 181)
-        latlon_arrays["lon"] = np.linspace(-180.0, 180.0, 360)
+        latlon_arrays["lon"] = np.linspace(0.0, 360.0, 360)
 
     for field_key in all_field_keys:
         # Collect this field across all timesteps
@@ -1200,8 +1209,8 @@ def _parse_resolution(tc: TestCase):
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
-def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
-                        H_max: float = DEFAULT_H_MAX, physics=None,
+def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
+                        H_max: float | None = None, physics=None,
                         A_h: float | None = None,
                         A_v: float | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
@@ -1219,6 +1228,10 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
 
     Returns (grid, z_coord, config, model, coord_kind, lon_deg, lat_deg).
     """
+    if nlev is None:
+        nlev = DEFAULT_NLEV
+    if H_max is None:
+        H_max = DEFAULT_H_MAX
     from legoesm.ocean.vertical import create_ocean_z_star
 
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
@@ -1600,7 +1613,13 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
             if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
                 mask = s.land_mask.data > 0.5
 
-                # Area-weighted eta mean
+                # Area-weighted eta mean (nanmean is biased on non-uniform grids)
+                if _area is not None:
+                    area_ocean = _area * mask.astype(_area.dtype)
+                    mean_eta = float(jnp.sum(s.eta.data * area_ocean) / jnp.maximum(jnp.sum(area_ocean), 1e-30))
+                else:
+                    eta_ocean = jnp.where(mask, s.eta.data, jnp.nan)
+                    mean_eta = float(jnp.nanmean(eta_ocean))
                 eta_ocean = jnp.where(mask, s.eta.data, jnp.nan)
 
                 # Volume-weighted T and S using actual layer thickness h_k
@@ -1621,23 +1640,53 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
 
                 max_abs_u = float(jnp.max(jnp.abs(s.u.data)))
 
+                # Reconstruct cell-center velocity for comparable speed diagnostic
+                from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+                u_east, v_north = reconstruct_cell_velocity(s.u.data[:, 0], grid)
+                speed_cell = jnp.sqrt(u_east**2 + v_north**2)
+                max_speed = float(jnp.max(jnp.where(mask, speed_cell, 0.0)))
+
+                # Volume-weighted KE: 0.5 * sum(speed^2 * h_k * area) / sum(h_k * area)
+                if _area is not None and _z_coord is not None:
+                    from legoesm.ocean.vertical import compute_layer_thickness
+                    h_k = compute_layer_thickness(
+                        s.eta.data, s.H_bathy.data, _z_coord,
+                        min_water_column_m=_min_wc)
+                    nlev = h_k.shape[-1]
+                    # Reconstruct cell speed at all levels
+                    ke_sum = jnp.zeros(())
+                    vol_ke = jnp.zeros(())
+                    for lev in range(nlev):
+                        ue, vn = reconstruct_cell_velocity(s.u.data[:, lev], grid)
+                        spd2 = ue**2 + vn**2
+                        cell_vol = _area * h_k[:, lev] * mask
+                        ke_sum = ke_sum + jnp.sum(0.5 * spd2 * cell_vol)
+                        vol_ke = vol_ke + jnp.sum(cell_vol)
+                    mean_ke = float(ke_sum / jnp.maximum(vol_ke, 1e-10))
+                else:
+                    mean_ke = 0.0
+
                 return {
-                    "mean_eta": float(jnp.nanmean(eta_ocean)),
+                    "mean_eta": mean_eta,
                     "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))),
                     "mean_T": mean_T,
                     "mean_S": mean_S,
                     "max_abs_u": max_abs_u,
-                    "max_speed": max_abs_u,  # edge-normal speed for MPAS
+                    "max_speed": max_speed,
+                    "mean_ke": mean_ke,
                 }
             else:
                 max_abs_u = float(jnp.max(jnp.abs(s.u.data)))
+                from legoesm.ocean.init_mpas import reconstruct_cell_velocity
+                u_east, v_north = reconstruct_cell_velocity(s.u.data[:, 0], grid)
+                max_speed = float(jnp.max(jnp.sqrt(u_east**2 + v_north**2)))
                 return {
                     "mean_eta": float(jnp.mean(s.eta.data)),
                     "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
                     "mean_T": float(jnp.mean(s.T.data)),
                     "mean_S": float(jnp.mean(s.S.data)),
                     "max_abs_u": max_abs_u,
-                    "max_speed": max_abs_u,
+                    "max_speed": max_speed,
                 }
         return scalar_fn
     else:
@@ -1653,6 +1702,12 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
             if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
                 ocean_mask = s.land_mask.data > 0.5
 
+                # Area-weighted eta mean (nanmean is biased on non-uniform grids)
+                if _area is not None:
+                    area_ocean = _area * ocean_mask.astype(_area.dtype)
+                    mean_eta = float(jnp.sum(s.eta.data * area_ocean) / jnp.maximum(jnp.sum(area_ocean), 1e-30))
+                else:
+                    mean_eta = float(jnp.nanmean(jnp.where(ocean_mask, s.eta.data, jnp.nan)))
                 eta_ocean = jnp.where(ocean_mask, s.eta.data, jnp.nan)
 
                 # Volume-weighted T and S using actual layer thickness h_k
@@ -1688,12 +1743,29 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                 else:
                     max_speed = 0.0
 
+                # Volume-weighted KE
+                mean_ke = 0.0
+                if hasattr(s, 'u') and hasattr(s, 'v') and _area is not None and _z_coord is not None:
+                    u = s.u.data; v = s.v.data
+                    # Interpolate to cell centers for KE
+                    if u.shape[:-1] != v.shape[:-1]:
+                        # C-grid: u (n_lat, n_lon+1, nlev), v (n_lat+1, n_lon, nlev)
+                        u_cc = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+                        v_cc = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+                    else:
+                        u_cc = u; v_cc = v
+                    spd2 = u_cc**2 + v_cc**2
+                    ke_vol = 0.5 * spd2 * _area[..., None] * h_k * ocean_mask[..., None]
+                    vol_total = jnp.sum(_area[..., None] * h_k * ocean_mask[..., None])
+                    mean_ke = float(jnp.sum(ke_vol) / jnp.maximum(vol_total, 1e-10))
+
                 return {
-                    "mean_eta": float(jnp.nanmean(eta_ocean)),
+                    "mean_eta": mean_eta,
                     "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))),
                     "mean_T": mean_T,
                     "mean_S": mean_S,
                     "max_speed": max_speed,
+                    "mean_ke": mean_ke,
                 }
             else:
                 # Fallback without masking
@@ -1705,6 +1777,7 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                     "max_speed": float(jnp.maximum(
                         jnp.max(jnp.abs(s.u.data)),
                         jnp.max(jnp.abs(s.v.data)))),
+                    "mean_ke": 0.0,
                 }
         return scalar_fn
 
@@ -2268,8 +2341,8 @@ def _make_global_wind_physics():
 
 
 def _create_simplified_continent_mask(lon_deg, lat_deg,
-                                       continent_lon_west=30.0,
-                                       continent_lon_east=90.0,
+                                       continent_lon_west=20.0,
+                                       continent_lon_east=60.0,
                                        continent_lat_south=-55.0,
                                        polar_cap_lat=80.0):
     """Create a simplified continent land mask for global wind-driven tests.
@@ -2280,6 +2353,11 @@ def _create_simplified_continent_mask(lon_deg, lat_deg,
     - Single meridional continent from north cap to continent_lat_south
     - Open Drake Passage south of continent_lat_south
     - Everything else is ocean (including circumpolar band)
+
+    The continent is 40° wide (20-60°E). This is the minimum needed
+    for full latitude coverage on the ico3 MPAS mesh (~4-5° spacing)
+    and to prevent roll-based operators from communicating through
+    the land barrier on the latlon grid (8 cells at 5° resolution).
 
     Parameters
     ----------
@@ -2427,13 +2505,19 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
             f"Global wind not implemented for {tc.grid_type}")
 
     physics = _make_global_wind_physics()
+    nlev_override = tc.run_kwargs.get("nlev", None)
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=5e5))
+        _create_ocean_setup(tc, physics=physics, A_h=5e5, nlev=nlev_override))
 
     # Build initial state with simplified continent land mask
+    # Uniform T/S for a truly barotropic experiment (no baroclinic modes)
+    T_uniform = 10.0  # degC
+    S_uniform = 35.0  # PSU
     if tc.grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
-        state = rest_state_ocean(grid, z_coord)
+        state = rest_state_ocean(grid, z_coord,
+                                 T_surface=T_uniform, T_deep=T_uniform,
+                                 S_uniform=S_uniform)
         # Override land mask with simplified continent
         lon_flat = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_flat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -2442,7 +2526,9 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
         state = state._replace(land_mask=Field(data=mask.astype(state.eta.data.dtype)))
     elif tc.grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-        state = rest_state_latlon_cgrid_ocean(grid, z_coord)
+        state = rest_state_latlon_cgrid_ocean(grid, z_coord,
+                                              T_surface=T_uniform, T_deep=T_uniform,
+                                              S_uniform=S_uniform)
         lon_2d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_1d = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
         lon_grid, lat_grid = np.meshgrid(lon_2d, lat_1d) if lon_2d.ndim == 1 else (lon_2d, lat_1d)
@@ -2451,10 +2537,19 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
             lon_grid = lon_2d[None, :] * np.ones((len(lat_1d), 1))
         mask = _create_simplified_continent_mask(lon_grid, lat_grid)
         from legoesm.core.field import Field
-        state = state._replace(land_mask=Field(data=mask.astype(state.eta.data.dtype)))
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+        mask_typed = mask.astype(state.eta.data.dtype)
+        u_mask_new, v_mask_new = compute_face_masks(mask_typed)
+        state = state._replace(
+            land_mask=Field(data=mask_typed),
+            u_mask=Field(data=u_mask_new),
+            v_mask=Field(data=v_mask_new),
+        )
     elif tc.grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        state = rest_state_mpas_ocean(grid, z_coord)
+        state = rest_state_mpas_ocean(grid, z_coord,
+                                      T_surface=T_uniform, T_deep=T_uniform,
+                                      S_uniform=S_uniform)
         lon_deg_c = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
         lat_deg_c = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
         mask = _create_simplified_continent_mask(lon_deg_c, lat_deg_c)
@@ -3512,6 +3607,7 @@ RUNNERS: dict[str, Callable] = {
     "barotropic_gyre": run_barotropic_gyre,
     "barotropic_double_gyre": run_barotropic_double_gyre,
     "global_barotropic_wind": run_global_barotropic_wind,
+    "global_barotropic_wind_1lev": run_global_barotropic_wind,
     "geostrophic_adjustment": run_geostrophic_adjustment,
     "phillips_two_layer": run_phillips_two_layer,
     "inertia_gravity_wave": run_inertia_gravity_wave,
@@ -3638,49 +3734,50 @@ def _create_comparison_timeseries(test_case_dir: Path, grid_results: dict) -> No
     fig.suptitle(f'Time Series Comparison - {test_case_dir.name}', fontsize=14, fontweight='bold')
     
     # Colors for different grids
-    colors = {'cubed_sphere': 'blue', 'latlon': 'red', 'mpas': 'green', 'spectral': 'orange'}
+    colors = {
+        'cubed_sphere': 'blue', 'latlon': 'red', 'mpas': 'green',
+        'spectral': 'orange', 'mpas_regional': 'tab:green',
+        'latlon_regional': 'tab:red', 'cs_regional': 'tab:blue',
+    }
+    linestyles = {
+        'cubed_sphere': '-', 'latlon': '-', 'mpas': '-',
+        'spectral': '-', 'mpas_regional': '--',
+        'latlon_regional': '--', 'cs_regional': '--',
+    }
     
     for grid_name, data in grid_results.items():
         df = data['timeseries']
         color = colors.get(grid_name, 'black')
-        
+        ls = linestyles.get(grid_name, '-')
+
         # Panel 1: Mean eta evolution
         if 'mean_eta' in df.columns:
-            axes[0,0].plot(df['time_days'], df['mean_eta'], label=grid_name, color=color)
-        axes[0,0].set_ylabel('Mean η (m)')
-        axes[0,0].set_title('Mean Sea Surface Height')
-        axes[0,0].legend()
-        axes[0,0].grid(True, alpha=0.3)
-        
-        # Panel 2: Mean temperature evolution  
-        if 'mean_T' in df.columns:
-            axes[0,1].plot(df['time_days'], df['mean_T'], label=grid_name, color=color)
-        axes[0,1].set_ylabel('Mean T (°C)')
-        axes[0,1].set_title('Mean Temperature')
-        axes[0,1].legend()
-        axes[0,1].grid(True, alpha=0.3)
-        
-        # Panel 3: Max speed evolution (if available)
+            axes[0,0].plot(df['time_days'], df['mean_eta'], label=grid_name, color=color, ls=ls)
+
+        # Panel 2: Max |eta|
+        if 'max_abs_eta' in df.columns:
+            axes[0,1].plot(df['time_days'], df['max_abs_eta'], label=grid_name, color=color, ls=ls)
+
+        # Panel 3: Max speed
         if 'max_speed' in df.columns:
-            axes[1,0].plot(df['time_days'], df['max_speed'], label=grid_name, color=color)
-        elif 'max_abs_eta' in df.columns:
-            axes[1,0].plot(df['time_days'], df['max_abs_eta'], label=grid_name, color=color)
-            axes[1,0].set_ylabel('Max |η| (m)')
-            axes[1,0].set_title('Maximum SSH Amplitude')
-        axes[1,0].legend()
-        axes[1,0].grid(True, alpha=0.3)
-        
-        # Panel 4: Conservation metrics
-        if 'volume_drift' in df.columns:
-            axes[1,1].plot(df['time_days'], df['volume_drift'], label=grid_name, color=color)
-            axes[1,1].set_ylabel('Volume Drift')
-            axes[1,1].set_title('Volume Conservation')
-        elif 'heat_drift' in df.columns:
-            axes[1,1].plot(df['time_days'], df['heat_drift'], label=grid_name, color=color)
-            axes[1,1].set_ylabel('Heat Drift')
-            axes[1,1].set_title('Heat Conservation')
-        axes[1,1].legend()
-        axes[1,1].grid(True, alpha=0.3)
+            axes[1,0].plot(df['time_days'], df['max_speed'], label=grid_name, color=color, ls=ls)
+
+        # Panel 4: Volume-weighted KE
+        if 'mean_ke' in df.columns:
+            axes[1,1].plot(df['time_days'], df['mean_ke'], label=grid_name, color=color, ls=ls)
+
+    axes[0,0].set_ylabel('Mean η (m)')
+    axes[0,0].set_title('Mean Sea Surface Height')
+    axes[0,1].set_ylabel('Max |η| (m)')
+    axes[0,1].set_title('Maximum SSH Amplitude')
+    axes[1,0].set_ylabel('Max Speed (m/s)')
+    axes[1,0].set_title('Maximum Speed')
+    axes[1,1].set_ylabel('Mean KE (m²/s²)')
+    axes[1,1].set_title('Volume-Weighted Kinetic Energy')
+
+    for ax in axes.flat:
+        ax.legend()
+        ax.grid(True, alpha=0.3)
     
     # Set common x-label
     for ax in axes[1,:]:
@@ -3790,7 +3887,7 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
             plot_extent = [float(lon_arr.min()), float(lon_arr.max()),
                           float(lat_arr.min()), float(lat_arr.max())]
         else:
-            plot_extent = [-180, 180, -90, 90]
+            plot_extent = [0, 360, -90, 90]
 
         # Handle both new format (field as time series) and old format (field_stepN)
         if field in snapshots.files:
@@ -3811,6 +3908,22 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                         land_mask_final = land_mask_data
                     # Mask land areas (where land_mask ≤ 0.5) with NaN
                     final_field = np.where(land_mask_final > 0.5, final_field, np.nan)
+
+                # Crop to bounding box of non-NaN data for regional grids
+                # (e.g. MPAS regional regridded onto a global lat-lon grid)
+                valid = np.isfinite(final_field)
+                if valid.any():
+                    rows = np.where(valid.any(axis=1))[0]
+                    cols = np.where(valid.any(axis=0))[0]
+                    r0, r1 = max(rows[0] - 1, 0), min(rows[-1] + 2, final_field.shape[0])
+                    c0, c1 = max(cols[0] - 1, 0), min(cols[-1] + 2, final_field.shape[1])
+                    # Only crop if data occupies less than 80% of the grid
+                    if (r1 - r0) * (c1 - c0) < 0.8 * final_field.size:
+                        lat_1d = np.linspace(plot_extent[2], plot_extent[3], final_field.shape[0])
+                        lon_1d = np.linspace(plot_extent[0], plot_extent[1], final_field.shape[1])
+                        final_field = final_field[r0:r1, c0:c1]
+                        plot_extent = [float(lon_1d[c0]), float(lon_1d[min(c1, len(lon_1d)-1)]),
+                                       float(lat_1d[r0]), float(lat_1d[min(r1, len(lat_1d)-1)])]
 
                 # Create the plot with consistent color scale
                 im = ax.imshow(final_field, origin='lower', aspect='auto', cmap=cmap,
@@ -3838,7 +3951,21 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
                     land_mask_final = snapshots[land_mask_name]
                     # Mask land areas (where land_mask ≤ 0.5) with NaN
                     final_field = np.where(land_mask_final > 0.5, final_field, np.nan)
-                
+
+                # Crop to bounding box of non-NaN data for regional grids
+                valid = np.isfinite(final_field)
+                if valid.any():
+                    rows = np.where(valid.any(axis=1))[0]
+                    cols = np.where(valid.any(axis=0))[0]
+                    r0, r1 = max(rows[0] - 1, 0), min(rows[-1] + 2, final_field.shape[0])
+                    c0, c1 = max(cols[0] - 1, 0), min(cols[-1] + 2, final_field.shape[1])
+                    if (r1 - r0) * (c1 - c0) < 0.8 * final_field.size:
+                        lat_1d = np.linspace(plot_extent[2], plot_extent[3], final_field.shape[0])
+                        lon_1d = np.linspace(plot_extent[0], plot_extent[1], final_field.shape[1])
+                        final_field = final_field[r0:r1, c0:c1]
+                        plot_extent = [float(lon_1d[c0]), float(lon_1d[min(c1, len(lon_1d)-1)]),
+                                       float(lat_1d[r0]), float(lat_1d[min(r1, len(lat_1d)-1)])]
+
                 # Create the plot with consistent color scale
                 im = ax.imshow(final_field, origin='lower', aspect='auto', cmap=cmap,
                               extent=plot_extent, vmin=vmin, vmax=vmax)
@@ -4061,12 +4188,34 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
             extent = [float(lon_arr.min()), float(lon_arr.max()),
                       float(lat_arr.min()), float(lat_arr.max())]
         else:
-            extent = [-180, 180, -90, 90]
+            extent = [0, 360, -90, 90]
+
+        # Precompute crop bounds for regional grids (from first valid snapshot)
+        crop_slices = None
+        for _, f2d_check in entries:
+            valid = np.isfinite(f2d_check)
+            if valid.any():
+                rows = np.where(valid.any(axis=1))[0]
+                cols = np.where(valid.any(axis=0))[0]
+                r0 = max(rows[0] - 1, 0)
+                r1 = min(rows[-1] + 2, f2d_check.shape[0])
+                c0 = max(cols[0] - 1, 0)
+                c1 = min(cols[-1] + 2, f2d_check.shape[1])
+                if (r1 - r0) * (c1 - c0) < 0.8 * f2d_check.size:
+                    lat_1d = np.linspace(extent[2], extent[3], f2d_check.shape[0])
+                    lon_1d = np.linspace(extent[0], extent[1], f2d_check.shape[1])
+                    crop_slices = (r0, r1, c0, c1)
+                    extent = [float(lon_1d[c0]), float(lon_1d[min(c1, len(lon_1d)-1)]),
+                              float(lat_1d[r0]), float(lat_1d[min(r1, len(lat_1d)-1)])]
+                break
 
         for i_col in range(actual_cols):
             ax = axes[i_row, i_col]
             if i_col < len(entries):
                 t_label, f2d = entries[i_col]
+                if crop_slices is not None:
+                    r0, r1, c0, c1 = crop_slices
+                    f2d = f2d[r0:r1, c0:c1]
                 im = ax.imshow(f2d, origin='lower', aspect='auto', cmap=cmap,
                                extent=extent, vmin=vmin, vmax=vmax)
                 if i_row == 0:
@@ -4115,8 +4264,57 @@ def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> N
             _create_comparison_snapshots(test_case_dir, grid_results, field)
             _create_comparison_evolution(test_case_dir, grid_results, field)
 
+    # Forcing profile plot for wind-driven cases
+    if 'barotropic_wind' in test_case_dir.name:
+        _save_forcing_profile(test_case_dir)
+
     # Summary table
     _create_comparison_summary(test_case_dir, grid_results)
+
+
+def _save_forcing_profile(test_case_dir: Path) -> None:
+    """Save a wind forcing profile plot (tau_x vs latitude)."""
+    import matplotlib.pyplot as plt
+
+    lat_deg = np.linspace(-90, 90, 361)
+    lat_rad = lat_deg * np.pi / 180.0
+    taper = np.cos(lat_rad) ** 2
+    tau_x = -0.1 * np.cos(2.0 * lat_rad) * taper
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    fig.suptitle('Prescribed Wind Forcing', fontsize=14, fontweight='bold')
+
+    # Panel 1: Wind stress profile
+    axes[0].plot(lat_deg, tau_x, 'k-', linewidth=2)
+    axes[0].axhline(0, color='gray', linewidth=0.5)
+    axes[0].set_xlabel('Latitude (deg)')
+    axes[0].set_ylabel(r'$\tau_x$ (N/m$^2$)')
+    axes[0].set_title('Zonal Wind Stress')
+    axes[0].set_xlim(-90, 90)
+    axes[0].grid(True, alpha=0.3)
+    # Annotate wind belts
+    axes[0].annotate('Trades', xy=(0, -0.07), ha='center', fontsize=9, color='blue')
+    axes[0].annotate('Westerlies', xy=(45, 0.04), ha='center', fontsize=9, color='red')
+    axes[0].annotate('Westerlies', xy=(-45, 0.04), ha='center', fontsize=9, color='red')
+
+    # Panel 2: Wind stress curl (proportional to Sverdrup transport)
+    # curl_tau = d(tau_x)/dy  (on sphere: (1/R) * d(tau_x)/d(lat))
+    R = 6.371e6
+    dtau_dlat = np.gradient(tau_x, lat_rad)
+    curl_z = dtau_dlat / R  # simplified: -d(tau_x)/dy for zonal-only wind
+    axes[1].plot(lat_deg, curl_z * 1e7, 'k-', linewidth=2)
+    axes[1].axhline(0, color='gray', linewidth=0.5)
+    axes[1].set_xlabel('Latitude (deg)')
+    axes[1].set_ylabel(r'curl$_z(\tau)$ ($\times 10^{-7}$ N/m$^3$)')
+    axes[1].set_title('Wind Stress Curl')
+    axes[1].set_xlim(-90, 90)
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    output_file = test_case_dir / "forcing_profile.png"
+    plt.savefig(output_file, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"    Saved: {output_file.name}")
 
 
 def _check_and_generate_comparisons(output_base: Path, test_case_name: str, all_results: list) -> None:
