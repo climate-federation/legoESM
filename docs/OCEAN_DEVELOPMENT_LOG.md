@@ -479,13 +479,13 @@ The apparent 2× speed difference was partly a diagnostic artifact: the test mat
 
 Issue #101 is resolved for latlon C-grid and MPAS. Summary of what was achieved:
 
-| Grid | Volume (eta) | Heat (T) | Salt (S) |
-|------|-------------|----------|----------|
-| MPAS | 1.86e-17 | 6e-15 | 0 |
-| latlon C-grid | 1.83e-17 | 8.7e-4 (transport limited) | ~same |
-| cubed-sphere | deferred (#100) | deferred (#100) | deferred (#100) |
+| Grid | Volume (eta) | Heat (T, 1-level) | Heat (T, multi-level) | Salt (S) |
+|------|-------------|-------------------|----------------------|----------|
+| MPAS | 1.86e-17 | 6e-15 | 6e-15 | 0 |
+| latlon C-grid | 1.83e-17 | 1.78e-15 | 2.59e-7 (vertical w) | ~same |
+| cubed-sphere | deferred (#100) | deferred (#100) | deferred (#100) | deferred (#100) |
 
-Volume conservation is at machine precision on both production grids. The remaining latlon T/S gap (8.7e-4) requires flux-form tracer transport with barotropic-averaged transport — filed as issue #102.
+Volume conservation and horizontal tracer conservation are at machine precision on both production grids. The multi-level latlon T gap (2.59e-7) is from the vertical-horizontal transport inconsistency (Phase 2b of #102).
 
 ---
 
@@ -508,6 +508,54 @@ This is why MPAS achieves 6e-15 without barotropic averaging — on MPAS, the TR
 - Ensures machine-precision per-step conservation
 - Improves differentiability (removes upwind `jnp.where` kink)
 - Is required for Phase 2a to work correctly
+
+---
+
+## 2026-04-08: Flux-form tracer transport with barotropic-averaged transport (issue #102, Phase 2a)
+
+**Goal**: Make horizontal tracer advection exactly consistent with the barotropic continuity equation by using time-averaged barotropic transport instead of instantaneous baroclinic velocity.
+
+### Implementation
+
+Three files changed:
+
+1. **barotropic_latlon_cgrid.py**: Carry state enlarged from `(eta, U_bar, V_bar)` to `(eta, U_bar, V_bar, Hu_sum, Hv_sum)`. Mass fluxes `H_u * U_bar * u_mask` accumulated each substep. After the loop, time-averaged transports `Hu_avg = Hu_sum / n_substeps` returned as a separate tuple alongside the state.
+
+2. **ocean_pe_latlon_cgrid.py**: Horizontal tracer advection removed from the baroclinic tendency function. The tendency now contains only vertical advection + diffusion + physics. Horizontal transport is handled in the step function using the barotropic-averaged transport.
+
+3. **ocean_model_latlon_cgrid.py**: Flux-form horizontal tracer update using barotropic-averaged transport distributed to layers:
+   ```
+   h_new * T_new = h_old * T_mid - dt * div(Hu_avg_k * T_face)
+   ```
+   where `Hu_avg_k = Hu_avg * h_old_k / H_old` distributes the 2D barotropic transport proportional to layer thickness.
+
+### Key insight: pure flux form, not skew-symmetric
+
+The initial attempt used the skew-symmetric form `hT = h*T - dt*(div(huT) - T*div(hu))`. This is NOT globally conservative for non-uniform T because `sum(T * div(hu) * area) != 0` when T varies spatially. The pure flux form `hT_new = h_old*T_mid - dt*div(mf*T_face)` IS exactly conservative by the divergence theorem: `sum(div(F)*area) = 0` for any flux F with no-flux boundaries.
+
+### Results
+
+| Test | Heat conservation | Notes |
+|------|------------------|-------|
+| **1-level barotropic** | **1.78e-15** | Machine precision! Proves horizontal transport is exactly conservative. |
+| 10-level stratified | 2.59e-7 | Limited by vertical w inconsistency (Phase 2b) |
+| Rest state | 7.98e-15 | Unchanged, still perfect |
+
+The 1-level result proves the horizontal flux-form + barotropic-averaged transport machinery works correctly. The 10-level residual comes from the vertical velocity `w` being diagnosed from the instantaneous baroclinic divergence, not from the barotropic-averaged transport. This vertical-horizontal inconsistency is Phase 2b.
+
+### What improved vs where we started
+
+| Metric | Before all fixes | After Phase 2a |
+|--------|-----------------|----------------|
+| Volume (eta) conservation | -1.16e-2 (30d) | 1.83e-17 (machine precision) |
+| Horizontal T conservation (1-level) | ~8.7e-4 | 1.78e-15 (machine precision) |
+| Multi-level T conservation | ~8.7e-4 | 2.59e-7 (vertical limited) |
+| Additive fixer | On (harmful for forcing) | Off (unnecessary) |
+| Diagnostic accuracy | Unweighted mean (biased) | Area-weighted (correct) |
+
+### Phase 2b (remaining)
+
+The diagnosed vertical velocity `w = -integral(div(h_k * u_k))` uses the instantaneous baroclinic velocity, creating a vertical-horizontal transport inconsistency when the barotropic-averaged transport differs from instantaneous. The fix: reconstruct `w` from the barotropic-averaged per-layer divergence `div(Hu_avg_k)`. This would close the full 3D budget to machine precision.
 
 ---
 
