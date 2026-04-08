@@ -72,7 +72,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
-    use_fv3_fb: bool = False  # EXPERIMENTAL — unstable, see docs/cubed_sphere_edge_artifacts.md
+    use_fv3_fb: bool = False  # EXPERIMENTAL — known unstable (NaN by step ~50), not production-ready
     boundary_fix: bool = True  # Replace boundary corner tendencies with interior
 
 
@@ -285,17 +285,15 @@ class CDGridShallowWaterModel(IntegrationMixin):
 # ==============================================================================
 
 class FV3FBShallowWaterModel:
-    """FV3 forward-backward shallow water model on the cubed-sphere.
+    """EXPERIMENTAL: FV3 forward-backward shallow water model.
+
+    Known unstable (85 m/s v-wind after 1 day, 3% mass error).
+    Use ``FV3EdgeShallowWaterModel`` for production work.
 
     Uses the three-phase FV3 forward-backward scheme:
     1. c_sw: C-grid half-step (KE + vorticity, forward)
     2. p_grad_c: pressure gradient at C-grid (backward, using h_star)
     3. d_sw: D-grid full-step (mass transport + wind update, no A-L gradient)
-
-    The key advantage: the large pressure gradient (g*h) is handled at C-grid
-    (well-conditioned 2-point stencil), while D-grid winds are updated by only
-    the small KE and vorticity terms.  This eliminates the edge artifacts from
-    the Arakawa-Lamb gradient.
 
     Parameters
     ----------

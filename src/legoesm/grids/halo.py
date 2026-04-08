@@ -283,13 +283,13 @@ def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
 def _interp_strip(strip: jax.Array, offsets_1d: jax.Array) -> jax.Array:
     """Interpolate *strip* at positions ``j + offsets_1d[j]``.
 
-    Uses 4-point cubic Lagrange interpolation, giving O(dx^4) value
-    accuracy and O(dx^3) gradient accuracy.  Falls back to 3-point
-    quadratic for short strips (n < 5) and linear for n < 3.
+    Uses 3-point quadratic Lagrange interpolation, giving O(dx^3) value
+    accuracy and O(dx^2) gradient accuracy.  Falls back to linear for
+    very short strips (n < 3).
 
-    The cubic stencil uses points {jc-1, jc, jc+1, jc+2} where jc is
-    the nearest integer to the left.  At strip ends where jc+2 would
-    be out of bounds, the stencil is shifted inward.
+    The quadratic stencil uses points {jc-1, jc, jc+1} where jc is the
+    nearest integer.  The stencil centre is clamped to [1, n-2] to keep
+    all three indices in bounds.
 
     Parameters
     ----------

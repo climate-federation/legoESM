@@ -1,8 +1,12 @@
-"""FV3 shallow water forward-backward core (paper-exact port).
+"""FV3-inspired shallow water forward-backward core (EXPERIMENTAL).
 
-Implements the complete c_sw + d_sw forward-backward step from GFDL's
-FV3 dynamical core (sw_core.F90).  All operators are self-contained
-and use FV3's covariant velocity convention with sin_sg flux scaling.
+Implements a c_sw + d_sw forward-backward step adapted from GFDL's
+FV3 dynamical core (sw_core.F90).  The operators use FV3's covariant
+velocity convention with sin_sg flux scaling.
+
+**Status**: experimental.  The full forward-backward step
+(``fv3_fb_sw_step``) is known to be unstable — use ``fv3_sw_tendencies``
+(operators_cdgrid.py) or ``fv3_csw_tendencies`` for production work.
 
 The c_sw half-step operates at C-grid face positions (gradient and
 vorticity at the same stagger — essential for geostrophic balance).
@@ -64,7 +68,7 @@ _C3 = 5.0 / 14.0
 def _d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid vector conversion.
 
-    Paper-exact port of GFDL sw_core.F90 d2a2c_vect.  Returns C-grid
+    Adapted from GFDL sw_core.F90 d2a2c_vect.  Returns C-grid
     velocities in FV3's COVARIANT convention (uc = interpolated covariant
     utmp, NOT the physical face-normal velocity).
 
@@ -533,15 +537,12 @@ def _d_sw(h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
     cosa_v = cdgrid.cosa_v     # (6, n, n+1)
     rsin_v = cdgrid.rsin_v     # (6, n, n+1)
 
-    # v at u-face positions: average v_d along j to the u-face j-index
-    v_at_u = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n-1, n) → need (6, n+1, n)
-    # Pad to cover the n+1 u-face rows
-    v_at_u_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    v_at_u = 0.5 * (v_at_u_pad[:, :, :-1] + v_at_u_pad[:, :, 1:])  # (6, n+1, n)
+    # v_d (6, n+1, n) is co-located with cosa_u — use directly as the
+    # cross-velocity at u-face positions (same approximation as _uc_to_ut).
+    v_at_u = v_d  # (6, n+1, n)
 
-    # u at v-face positions: average u_d along i to the v-face i-index
-    u_at_v_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    u_at_v = 0.5 * (u_at_v_pad[:, :-1, :] + u_at_v_pad[:, 1:, :])  # (6, n, n+1)
+    # u_d (6, n, n+1) is co-located with cosa_v — use directly.
+    u_at_v = u_d  # (6, n, n+1)
 
     uc_phys = (uc_new - v_at_u * cosa_u) * rsin_u
     vc_phys = (vc_new - u_at_v * cosa_v) * rsin_v
@@ -618,7 +619,11 @@ def _d_sw(h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
 
 def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
                                div_damp=0.0, hyperdiff_coeff=0.0):
-    """One complete FV3 forward-backward time step for shallow water.
+    """EXPERIMENTAL: One complete FV3 forward-backward time step for shallow water.
+
+    Known unstable — produces large errors by step ~50.  Use
+    ``fv3_sw_tendencies`` (operators_cdgrid.py) with RK3 integration
+    for production work.
 
     Combines c_sw (C-grid half) + d_sw (D-grid half).  The c_sw half
     uses FV3's covariant velocity convention with sin_sg flux scaling;
@@ -855,7 +860,10 @@ def _d_sw_native(h, u_d, v_d, uc, vc, ua, va, cdgrid, dt, g,
 
 def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
                    div_damp=0.0):
-    """Complete FV3 forward-backward shallow water time step.
+    """EXPERIMENTAL: Complete FV3 forward-backward shallow water time step.
+
+    Known unstable (85 m/s v-wind after 1 day, 3% mass error).
+    Use ``fv3_sw_tendencies`` with RK3 for production work.
 
     Three phases:
     1. c_sw (forward, dt/2): d2a2c_vect + mass transport + KE/vorticity

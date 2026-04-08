@@ -260,6 +260,13 @@ def _supergrid_quad_area(px, py, pz, i0, j0, i1, j1, i2, j2, i3, j3, radius):
 def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
     """Compute area_c and dxc/dyc from the FV3 supergrid.
 
+    **Currently unused.** The actual grid construction
+    (``create_cubed_sphere_cdgrid``) computes dxc/dyc from halo-exchanged
+    cell-centre positions and area_corner from halo-exchanged cell areas,
+    which ensures consistency with the haloed field values used by the
+    gradient and vorticity operators.  This helper is retained as
+    reference infrastructure for future supergrid-based validation.
+
     Uses the SAME 2x-refined supergrid as sin_sg/cos_sg to ensure all
     metrics are mutually consistent (discrete Stokes theorem).
 
@@ -658,10 +665,13 @@ def create_cubed_sphere_cdgrid(
     # metrics must be derived from the SAME corners for consistency.
     cosa_u = 0.5 * (cosa_corner[:, :, :-1] + cosa_corner[:, :, 1:])  # (6, n+1, n)
     cosa_v = 0.5 * (cosa_corner[:, :-1, :] + cosa_corner[:, 1:, :])  # (6, n, n+1)
-    sina_u = 0.5 * (sina_corner[:, :, :-1] + sina_corner[:, :, 1:])  # (6, n+1, n)
-    sina_v = 0.5 * (sina_corner[:, :-1, :] + sina_corner[:, 1:, :])  # (6, n, n+1)
-    rsin_u = 1.0 / jnp.maximum(sina_u, _EPS)
-    rsin_v = 1.0 / jnp.maximum(sina_v, _EPS)
+    # Derive sina from cosa (not averaged sina_corner) so that
+    # rsin_u = 1/sqrt(1 - cosa_u**2) is consistent with what operators
+    # compute on the fly.  avg(sin) != sqrt(1 - avg(cos)^2) in general.
+    sina_u_from_cosa = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
+    sina_v_from_cosa = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
+    rsin_u = 1.0 / jnp.maximum(sina_u_from_cosa, _EPS)
+    rsin_v = 1.0 / jnp.maximum(sina_v_from_cosa, _EPS)
 
     # ------------------------------------------------------------------
     # FV3 edge-midpoint D-grid metrics

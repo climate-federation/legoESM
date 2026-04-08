@@ -1534,18 +1534,6 @@ def fv3_sw_tendencies(
     dv_d_dt = 0.5 * (dv_corner[:, :, :-1] + dv_corner[:, :, 1:])   # (6, n+1, n)
 
     return dh_dt, du_d_dt, dv_d_dt
-    # duc (6, n+1, n) at uc-position → du_d_dt (6, n, n+1) at u_d-position
-    # dvc (6, n, n+1) at vc-position → dv_d_dt (6, n+1, n) at v_d-position
-    # These are at SWAPPED stagger positions, so use 4-point average.
-    duc_pad = jnp.pad(duc, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    du_d_dt = 0.25 * (duc_pad[:, :-1, :-1] + duc_pad[:, 1:, :-1]
-                       + duc_pad[:, :-1, 1:] + duc_pad[:, 1:, 1:])  # (6, n, n+1)
-
-    dvc_pad = jnp.pad(dvc, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    dv_d_dt = 0.25 * (dvc_pad[:, :-1, :-1] + dvc_pad[:, 1:, :-1]
-                       + dvc_pad[:, :-1, 1:] + dvc_pad[:, 1:, 1:])  # (6, n+1, n)
-
-    return dh_dt, du_d_dt, dv_d_dt
 
 
 
