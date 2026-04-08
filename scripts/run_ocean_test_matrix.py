@@ -236,6 +236,11 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "barotropic_double_gyre", g, res[g], 30.0, 2.0))
 
+    # --- Global barotropic wind-driven: cubed_sphere, latlon, mpas ---
+    for g in ["cubed_sphere", "latlon", "mpas"]:
+        matrix.append(TestCase(
+            "global_barotropic_wind", g, res[g], 60.0, 5.0))
+
     # --- Geostrophic adjustment: all grids ---
     for g in GRID_TYPES:
         matrix.append(TestCase(
@@ -2134,6 +2139,88 @@ def _make_gyre_physics(wind_profile: str = "single_gyre"):
     )
 
 
+def _make_global_wind_physics():
+    """Create OceanPhysicsConfig with global 3-belt wind forcing."""
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.surface_forcing.config import (
+        PrescribedForcingConfig, SurfaceForcingConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.bottom_drag.config import (
+        BottomDragConfig, LinearDragConfig,
+    )
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+
+    return OceanPhysicsConfig(
+        surface_forcing=SurfaceForcingConfig(
+            scheme="prescribed",
+            prescribed=PrescribedForcingConfig(
+                wind_profile="global_wind",
+                tau_max=0.1,
+            ),
+        ),
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(
+            scheme="linear",
+            linear=LinearDragConfig(r=1e-4),
+        ),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=None,
+    )
+
+
+def _create_simplified_continent_mask(lon_deg, lat_deg,
+                                       continent_lon_west=30.0,
+                                       continent_lon_east=90.0,
+                                       continent_lat_south=-55.0,
+                                       polar_cap_lat=80.0):
+    """Create a simplified continent land mask for global wind-driven tests.
+
+    Geometry:
+    - North polar cap: land poleward of +polar_cap_lat
+    - South polar cap: land poleward of -polar_cap_lat
+    - Single meridional continent from north cap to continent_lat_south
+    - Open Drake Passage south of continent_lat_south
+    - Everything else is ocean (including circumpolar band)
+
+    Parameters
+    ----------
+    lon_deg, lat_deg : array
+        Cell-center coordinates in degrees.
+    continent_lon_west, continent_lon_east : float
+        Longitude bounds of the continent [degrees].
+    continent_lat_south : float
+        Southern tip of the continent [degrees]. Drake Passage opens
+        south of this latitude.
+    polar_cap_lat : float
+        Latitude of polar caps [degrees]. Land poleward of ±this value.
+
+    Returns
+    -------
+    land_mask : array
+        1 = ocean, 0 = land.
+    """
+    lon = jnp.asarray(lon_deg)
+    lat = jnp.asarray(lat_deg)
+
+    # Start with all ocean
+    ocean = jnp.ones_like(lat)
+
+    # Polar caps: land
+    ocean = jnp.where(jnp.abs(lat) > polar_cap_lat, 0.0, ocean)
+
+    # Single continent: land where inside lon bounds AND north of Drake Passage
+    in_continent = (
+        (lon >= continent_lon_west) & (lon <= continent_lon_east) &
+        (lat >= continent_lat_south)
+    )
+    ocean = jnp.where(in_continent, 0.0, ocean)
+
+    return ocean
+
+
 def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
                          wind_profile: str, label: str,
                          ) -> tuple[str, float, str]:
@@ -2220,6 +2307,110 @@ def run_barotropic_double_gyre(tc: TestCase, output_dir: Path, days: float
     return _run_gyre_experiment(tc, output_dir, days,
                                 wind_profile="double_gyre",
                                 label="Barotropic Double Gyre")
+
+
+# ===========================================================================
+# Runner: Global Wind-Driven Circulation
+# ===========================================================================
+
+def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
+                                ) -> tuple[str, float, str]:
+    """Global barotropic wind-driven circulation with simplified continent.
+
+    Tests the barotropic response to a global 3-belt wind stress
+    (trades, westerlies, polar easterlies) in a basin with:
+    - One meridional continent (30-90°E) from the north polar cap to 55°S
+    - Open Drake Passage south of 55°S → circumpolar current
+    - Polar caps (land poleward of ±80°)
+
+    Expected features: subtropical/subpolar gyres in Atlantic-like and
+    Pacific-like basins, western boundary currents, and ACC-like flow.
+    """
+    if tc.grid_type not in ("cubed_sphere", "latlon", "mpas"):
+        raise NotImplementedError(
+            f"Global wind not implemented for {tc.grid_type}")
+
+    physics = _make_global_wind_physics()
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc, physics=physics, A_h=5e5))
+
+    # Build initial state with simplified continent land mask
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.ocean.init import rest_state_init
+        state = rest_state_init(grid, z_coord)
+        # Override land mask with simplified continent
+        lon_flat = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_flat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        mask = _create_simplified_continent_mask(lon_flat, lat_flat)
+        from legoesm.core.field import Field
+        state = state._replace(land_mask=Field(data=mask.astype(state.eta.data.dtype)))
+    elif tc.grid_type == "latlon":
+        from legoesm.ocean.init_latlon import rest_state_latlon
+        state = rest_state_latlon(grid, z_coord)
+        lon_2d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_1d = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        lon_grid, lat_grid = np.meshgrid(lon_2d, lat_1d) if lon_2d.ndim == 1 else (lon_2d, lat_1d)
+        if lat_grid.ndim == 1:
+            lat_grid = lat_1d[:, None] * np.ones((1, len(lon_2d)))
+            lon_grid = lon_2d[None, :] * np.ones((len(lat_1d), 1))
+        mask = _create_simplified_continent_mask(lon_grid, lat_grid)
+        from legoesm.core.field import Field
+        state = state._replace(land_mask=Field(data=mask.astype(state.eta.data.dtype)))
+    elif tc.grid_type == "mpas":
+        from legoesm.ocean.init_mpas import rest_state_mpas
+        state = rest_state_mpas(grid, z_coord)
+        lon_deg_c = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_deg_c = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
+        mask = _create_simplified_continent_mask(lon_deg_c, lat_deg_c)
+        from legoesm.core.field import Field
+        state = state._replace(land_mask=Field(data=mask.astype(state.eta.data.dtype)))
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Global Wind ({tc.grid_type})", total_days=days)
+
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    notes = f"max speed={max_speed:.4f} m/s, eta drift={eta_drift:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+
+    _save_case_diagnostics(
+        output_dir, f"Global Wind {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+            ("speed_sfc", "Surface speed (m/s)", "magma"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "max_speed": "m/s",
+                      "mean_T": "degC", "mean_S": "PSU"})
+
+    return "PASS" if ok else "FAIL", wall, notes
 
 
 # ===========================================================================
@@ -3224,6 +3415,7 @@ RUNNERS: dict[str, Callable] = {
     "barotropic_wave": run_barotropic_wave,
     "barotropic_gyre": run_barotropic_gyre,
     "barotropic_double_gyre": run_barotropic_double_gyre,
+    "global_barotropic_wind": run_global_barotropic_wind,
     "geostrophic_adjustment": run_geostrophic_adjustment,
     "phillips_two_layer": run_phillips_two_layer,
     "inertia_gravity_wave": run_inertia_gravity_wave,
