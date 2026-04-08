@@ -25,6 +25,76 @@ from legoesm.ocean.dynamics.barotropic_mpas import (
 )
 from legoesm.ocean.conservation_mpas import mpas_ocean_conservation_fixer
 from legoesm.ocean.freshwater import FreshwaterForcing, freshwater_eta_tendency
+from legoesm.core.operators_voronoi import tangential_velocity_3d
+
+
+def _forward_backward_coriolis_mpas_3d(
+    u_3d: jnp.ndarray,
+    dt: float,
+    mesh,
+    z_coord: OceanZStarCoordinate,
+    config: MPASOceanConfig,
+    mask: jnp.ndarray,
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+) -> jnp.ndarray:
+    """Apply semi-implicit Coriolis to baroclinic perturbation velocity.
+
+    Uses the same trapezoidal predictor-corrector scheme as the barotropic
+    solver (barotropic_mpas.py), but operates on the perturbation velocity
+    u' = u - u_bar only.  This avoids double-counting with the barotropic
+    solver's Coriolis treatment of the depth-mean flow.
+
+    Matches the latlon C-grid pattern in _forward_backward_coriolis_3d
+    (ocean_model_latlon_cgrid.py).
+
+    Parameters
+    ----------
+    u_3d : (nEdges, nlev) full 3D velocity
+    dt : time step [s]
+    mesh : VoronoiMesh
+    z_coord : OceanZStarCoordinate
+    config : MPASOceanConfig
+    mask : (nCells,) land mask
+    eta, H_bathy : (nCells,) for layer thickness computation
+
+    Returns
+    -------
+    u_3d_new : (nEdges, nlev) full velocity with Coriolis applied to perturbation
+    """
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+    edge_mask = (mask[c1] * mask[c2])[:, jnp.newaxis]  # (nEdges, 1)
+
+    # Layer thickness at edges for depth averaging
+    h_k = compute_layer_thickness(
+        eta, H_bathy, z_coord,
+        min_water_column_m=config.min_water_column_m,
+    )
+    h_e = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+    H_e = jnp.maximum(jnp.sum(h_e, axis=1, keepdims=True), config.min_water_column_m)
+
+    # Depth-averaged velocity
+    u_bar = jnp.sum(u_3d * h_e, axis=1, keepdims=True) / H_e  # (nEdges, 1)
+    u_bar = u_bar * edge_mask
+
+    # Perturbation velocity
+    u_prime = (u_3d - u_bar) * edge_mask  # (nEdges, nlev)
+
+    # Coriolis parameter at edges
+    f_e = mesh.fEdge[:, jnp.newaxis]  # (nEdges, 1)
+
+    # Semi-implicit (trapezoidal predictor-corrector):
+    # 1. Predict with old tangential velocity
+    v_t_old = tangential_velocity_3d(u_prime, mesh)
+    u_prime_star = (u_prime + dt * f_e * v_t_old) * edge_mask
+
+    # 2. Correct with averaged tangential velocity
+    v_t_star = tangential_velocity_3d(u_prime_star, mesh)
+    u_prime_new = (u_prime + dt * f_e * 0.5 * (v_t_old + v_t_star)) * edge_mask
+
+    # Reconstruct full velocity
+    return u_prime_new + u_bar
 
 
 class MPASOceanModel:
@@ -126,8 +196,17 @@ class MPASOceanModel:
         nbr_avg_S = nbr_sum_S / jnp.maximum(nbr_cnt, 1.0)
         S_new = jnp.where(mask_e > 0.5, S_new, nbr_avg_S)
 
-        # 3. Update 3D velocity with baroclinic tendency
+        # 3. Update 3D velocity with baroclinic tendency (non-Coriolis)
         u_baro = state.u.data + dt * tend.du_dt.data
+
+        # 3b. Forward-backward Coriolis on perturbation velocity
+        # Coriolis is excluded from the baroclinic tendencies (issue #103)
+        # and applied here to the perturbation velocity u' = u - u_bar only.
+        # The barotropic solver handles depth-mean Coriolis separately.
+        u_baro = _forward_backward_coriolis_mpas_3d(
+            u_baro, dt, mesh, z_coord, config, mask,
+            state.eta.data, state.H_bathy.data,
+        )
 
         # 4. Barotropic substeps
         # The baroclinic tendency is already applied to u_baro, so the

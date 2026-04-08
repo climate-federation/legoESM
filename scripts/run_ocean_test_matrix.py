@@ -4278,36 +4278,38 @@ def _save_forcing_profile(test_case_dir: Path) -> None:
 
     lat_deg = np.linspace(-90, 90, 361)
     lat_rad = lat_deg * np.pi / 180.0
-    taper = np.cos(lat_rad) ** 2
-    tau_x = -0.1 * np.cos(2.0 * lat_rad) * taper
+    s2 = np.sin(lat_rad) ** 2
+    tau_x = (-0.08 - 0.0397 * s2 + 1.9487 * s2**2 - 2.0397 * s2**3) * np.cos(lat_rad)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    fig.suptitle('Prescribed Wind Forcing', fontsize=14, fontweight='bold')
+    fig.suptitle('Prescribed Wind Forcing (Nikurashin & Vallis style)',
+                 fontsize=14, fontweight='bold')
 
     # Panel 1: Wind stress profile
-    axes[0].plot(lat_deg, tau_x, 'k-', linewidth=2)
-    axes[0].axhline(0, color='gray', linewidth=0.5)
+    axes[0].plot(lat_deg, tau_x, 'b-', linewidth=2)
+    axes[0].axhline(0, color='k', linewidth=0.5, linestyle=':')
+    axes[0].axvspan(-90, -55, alpha=0.1, color='gray', label='Drake Passage open')
     axes[0].set_xlabel('Latitude (deg)')
-    axes[0].set_ylabel(r'$\tau_x$ (N/m$^2$)')
+    axes[0].set_ylabel(r'$\tau_x$ [Pa]')
     axes[0].set_title('Zonal Wind Stress')
-    axes[0].set_xlim(-90, 90)
+    axes[0].set_xlim(-80, 80)
+    axes[0].set_ylim(-0.12, 0.12)
     axes[0].grid(True, alpha=0.3)
-    # Annotate wind belts
-    axes[0].annotate('Trades', xy=(0, -0.07), ha='center', fontsize=9, color='blue')
-    axes[0].annotate('Westerlies', xy=(45, 0.04), ha='center', fontsize=9, color='red')
-    axes[0].annotate('Westerlies', xy=(-45, 0.04), ha='center', fontsize=9, color='red')
+    axes[0].annotate('Trades', xy=(0, -0.065), ha='center', fontsize=9, color='blue')
+    axes[0].annotate('Westerlies', xy=(50, 0.085), ha='center', fontsize=9, color='red')
+    axes[0].annotate('Westerlies', xy=(-50, 0.085), ha='center', fontsize=9, color='red')
 
     # Panel 2: Wind stress curl (proportional to Sverdrup transport)
-    # curl_tau = d(tau_x)/dy  (on sphere: (1/R) * d(tau_x)/d(lat))
     R = 6.371e6
     dtau_dlat = np.gradient(tau_x, lat_rad)
-    curl_z = dtau_dlat / R  # simplified: -d(tau_x)/dy for zonal-only wind
-    axes[1].plot(lat_deg, curl_z * 1e7, 'k-', linewidth=2)
-    axes[1].axhline(0, color='gray', linewidth=0.5)
+    curl_z = dtau_dlat / R
+    axes[1].plot(lat_deg, curl_z * 1e7, 'b-', linewidth=2)
+    axes[1].axhline(0, color='k', linewidth=0.5, linestyle=':')
+    axes[1].axvspan(-90, -55, alpha=0.1, color='gray')
     axes[1].set_xlabel('Latitude (deg)')
     axes[1].set_ylabel(r'curl$_z(\tau)$ ($\times 10^{-7}$ N/m$^3$)')
     axes[1].set_title('Wind Stress Curl')
-    axes[1].set_xlim(-90, 90)
+    axes[1].set_xlim(-80, 80)
     axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
