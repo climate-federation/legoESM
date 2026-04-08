@@ -939,9 +939,27 @@ class CFWriter:
         encoding = {
             var_name: self._encoding_for(var_name),
         }
-        # Append if file already exists, otherwise create
+        # Append if file already exists, otherwise create.
+        # decode_times=False is requested so that time/time_bnds stay as raw
+        # float64, but some xarray versions still decode time_bnds to cftime
+        # objects.  Explicitly re-encode any object-dtype time_bnds back to
+        # float64 so xr.concat does not produce mixed cftime/float arrays.
         if out_path.exists():
-            existing = xr.open_dataset(out_path)
+            existing = xr.open_dataset(out_path, decode_times=False)
+            if "time_bnds" in existing:
+                tb = existing["time_bnds"].values
+                if tb.dtype == object:
+                    import cftime as _cftime
+                    units = f"days since {self.ref_date}"
+                    float_tb = np.array(
+                        _cftime.date2num(tb, units=units, calendar=self.calendar),
+                        dtype=np.float64,
+                    )
+                    existing["time_bnds"] = xr.DataArray(
+                        float_tb,
+                        dims=existing["time_bnds"].dims,
+                        attrs=existing["time_bnds"].attrs,
+                    )
             ds = xr.concat([existing, ds], dim="time")
             existing.close()
 
