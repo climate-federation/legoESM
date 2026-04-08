@@ -120,11 +120,11 @@ _G_EARTH = _C.g           # gravitational acceleration (m/s^2)
 
 # Field ranges for consistent plotting across grid types
 FIELD_RANGES = {
-    "rest_state": {
+    "rest_state_stratified_with_land": {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
     },
-    "rest_state_no_land": {
+    "rest_state_stratified_no_land": {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH (pure ocean)
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
     },
@@ -184,8 +184,18 @@ class TestCase:
     quick_days: float
     run_kwargs: dict = field(default_factory=dict)
 
+    # Rest-state variants are grouped under a single rest_state/ folder
+    _REST_STATE_GROUP = {
+        "rest_state_stratified_with_land",
+        "rest_state_uniform_with_land",
+        "rest_state_stratified_no_land",
+        "rest_state_uniform_no_land",
+    }
+
     @property
     def output_path(self) -> str:
+        if self.case in self._REST_STATE_GROUP:
+            return f"rest_state/{self.case}/{self.grid_type}/{self.resolution}"
         return f"{self.case}/{self.grid_type}/{self.resolution}"
 
 
@@ -203,26 +213,26 @@ def _build_test_matrix() -> list[TestCase]:
         if g == "spectral":
             continue
         matrix.append(TestCase(
-            "rest_state", g, res[g], 1.0, 0.1))
+            "rest_state_stratified_with_land", g, res[g], 1.0, 0.1))
 
     # --- Rest state with uniform T/S (with land): isolates barotropic PGF ---
     for g in GRID_TYPES:
         if g == "spectral":
             continue
         matrix.append(TestCase(
-            "rest_state_uniform_ts", g, res[g], 1.0, 0.1))
+            "rest_state_uniform_with_land", g, res[g], 1.0, 0.1))
 
     # --- Rest state adjustment without land: all grids ---
     for g in GRID_TYPES:
         matrix.append(TestCase(
-            "rest_state_no_land", g, res[g], 1.0, 0.1))
+            "rest_state_stratified_no_land", g, res[g], 1.0, 0.1))
 
     # --- Rest state uniform T/S without land: control ---
     for g in GRID_TYPES:
         if g == "spectral":
             continue
         matrix.append(TestCase(
-            "rest_state_uniform_ts_no_land", g, res[g], 1.0, 0.1))
+            "rest_state_uniform_no_land", g, res[g], 1.0, 0.1))
 
     # --- Barotropic gravity wave: resolution-matched grids (~384-446 km dx) ---
     bwave_res = {"cubed_sphere": "C24", "latlon": "48x72",
@@ -3487,10 +3497,10 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
 # ===========================================================================
 
 RUNNERS: dict[str, Callable] = {
-    "rest_state": run_rest_state,
-    "rest_state_uniform_ts": run_rest_state_uniform_ts,
-    "rest_state_no_land": run_rest_state_no_land,
-    "rest_state_uniform_ts_no_land": run_rest_state_uniform_ts_no_land,
+    "rest_state_stratified_with_land": run_rest_state,
+    "rest_state_uniform_with_land": run_rest_state_uniform_ts,
+    "rest_state_stratified_no_land": run_rest_state_no_land,
+    "rest_state_uniform_no_land": run_rest_state_uniform_ts_no_land,
     "barotropic_wave": run_barotropic_wave,
     "barotropic_gyre": run_barotropic_gyre,
     "barotropic_double_gyre": run_barotropic_double_gyre,
@@ -3944,7 +3954,7 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
     import matplotlib.pyplot as plt
 
     # Skip for rest states — nothing evolves
-    if "rest_state" in test_case_dir.name:
+    if test_case_dir.name.startswith("rest_state"):
         return
 
     test_case = _extract_test_case_name(test_case_dir.name)
@@ -4351,24 +4361,24 @@ def main():
 # ===========================================================================
 
 REST_STATE_VARIANTS_LIST = [
-    "rest_state",
-    "rest_state_uniform_ts",
-    "rest_state_no_land",
-    "rest_state_uniform_ts_no_land",
+    "rest_state_stratified_with_land",
+    "rest_state_uniform_with_land",
+    "rest_state_stratified_no_land",
+    "rest_state_uniform_no_land",
 ]
 
 REST_STATE_VARIANT_LABELS = {
-    "rest_state":                    "Stratified + Land",
-    "rest_state_uniform_ts":         "Uniform T/S + Land",
-    "rest_state_no_land":            "Stratified, No Land",
-    "rest_state_uniform_ts_no_land": "Uniform T/S, No Land",
+    "rest_state_stratified_with_land": "Stratified + Land",
+    "rest_state_uniform_with_land":    "Uniform T/S + Land",
+    "rest_state_stratified_no_land":   "Stratified, No Land",
+    "rest_state_uniform_no_land":      "Uniform T/S, No Land",
 }
 
 REST_STATE_VARIANT_COLORS = {
-    "rest_state":                    "red",
-    "rest_state_uniform_ts":         "orange",
-    "rest_state_no_land":            "blue",
-    "rest_state_uniform_ts_no_land": "green",
+    "rest_state_stratified_with_land": "red",
+    "rest_state_uniform_with_land":    "orange",
+    "rest_state_stratified_no_land":   "blue",
+    "rest_state_uniform_no_land":      "green",
 }
 
 
@@ -4388,10 +4398,11 @@ def _create_rest_state_cross_variant_comparison(output_base: Path):
 
     # Collect conservation timeseries for all variants × grids
     data = {}  # (variant, grid) -> DataFrame
+    rest_base = output_base / "rest_state"
     for variant in REST_STATE_VARIANTS_LIST:
         for grid in grids:
-            # Find the resolution dir
-            variant_dir = output_base / variant / grid
+            # Find the resolution dir (rest states grouped under rest_state/)
+            variant_dir = rest_base / variant / grid
             if not variant_dir.exists():
                 continue
             res_dirs = [d for d in variant_dir.iterdir() if d.is_dir()]
@@ -4458,13 +4469,14 @@ def _create_rest_state_cross_variant_comparison(output_base: Path):
                  fontsize=13, fontweight='bold')
     fig.tight_layout(rect=[0.03, 0, 1, 0.95])
 
-    out_path = output_base / "rest_state_cross_variant_comparison.png"
+    rest_base.mkdir(parents=True, exist_ok=True)
+    out_path = rest_base / "cross_variant_comparison.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {out_path}")
 
     # Also create a summary table
-    summary_path = output_base / "rest_state_cross_variant_summary.txt"
+    summary_path = rest_base / "cross_variant_summary.txt"
     with open(summary_path, 'w') as f:
         f.write("Rest-State Cross-Variant Summary\n")
         f.write("=" * 80 + "\n\n")
