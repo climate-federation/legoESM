@@ -144,13 +144,111 @@ The exploration branch (`dhruv/exploration`, PR #89) had accumulated a lot of ex
 
 ---
 
+## 2026-04-08: Latlon A-grid → C-grid migration in test matrix
+
+**Problem**: The latlon ocean model in the test matrix was using the A-grid (`LatLonOceanModel`), which has a fundamental checkerboard instability at land boundaries. The geostrophic adjustment test blew up around day 4-5 with exponential growth of grid-scale noise (max|eta| going from 0.12 m to 3.3 m over days 5-10).
+
+**Root cause**: A-grid (collocated) discretization creates a 2dx null space invisible to both divergence and gradient operators. Land boundary reflections excite this computational mode faster than diffusion can damp it.
+
+**Fix**: Switched all latlon paths in the test matrix to the C-grid model (`LatLonCGridOceanModel` + `LatLonCGridOceanConfig`), which uses compact stencils that resolve the checkerboard mode. Also created `wind_driven_gyre_latlon_cgrid` init function for the gyre experiments.
+
+**C-grid shape handling**: The C-grid has staggered velocity arrays — u at (n_lat, n_lon+1) and v at (n_lat+1, n_lon). Can't compute `sqrt(u² + v²)` directly. Diagnostic functions now use `max(|u|, |v|)` as the speed proxy.
+
+**Result**: Geostrophic adjustment now runs the full 10 days stable on latlon C-grid (T drift = 8.4e-4, vs blowup on A-grid).
+
+---
+
+## 2026-04-08: MPAS wind forcing diagnostic bug
+
+**Problem**: MPAS ocean showed `max_speed = 0.0` in all wind-driven experiments (double gyre, global wind), even though the wind forcing was correctly applied and velocities were developing.
+
+**Root cause**: Diagnostic key mismatch. The MPAS scalar function reported velocity as `max_abs_u`, but the gyre/wind runners looked for `max_speed`. The key was simply missing from the MPAS diagnostic dict.
+
+**Fix**: Added `max_speed` key to MPAS scalar function output. Also added the `global_wind` profile to `mpas_physics.py` (was only in the generic `prescribed.py` used by cubed_sphere/latlon).
+
+**Verification**: MPAS global wind now shows 0.276 m/s after 5 days (physically reasonable for early spin-up).
+
+---
+
+## 2026-04-08: Spectral ocean removed from test matrix
+
+Opened issue #99. The spectral grid has fundamental limitations for ocean dynamics:
+- Land boundaries create Gibbs ringing (spectral transform + sharp transitions)
+- Rest state T drift: 2.6e-5 (vs machine precision on all FV grids)
+- Geostrophic adjustment T drift: 1.2e-2 (orders of magnitude worse)
+- Barotropic wave: had to be skipped entirely
+
+Spectral methods work well for the atmosphere but not for ocean dynamics with closed basins and no-flux walls.
+
+---
+
+## 2026-04-08: Volume-weighted diagnostic fix for cubed_sphere/latlon
+
+**Problem**: The conservation diagnostic for cubed_sphere and latlon used reference layer thickness `dz_ref` instead of actual `h_k = compute_layer_thickness(eta, H_bathy)`. This was the same artifact we fixed for MPAS earlier — when eta ≠ 0, `dz_ref` diverges from the true conserved quantity `sum(T * h_k * area)`.
+
+**Fix**: Switched the cubed_sphere/latlon scalar function to compute actual h_k, matching the MPAS fix. For rest states (eta ≈ 0) this makes no practical difference, but for dynamic cases like geostrophic adjustment it correctly tracks the conserved quantity.
+
+**Note on diagnostic precision floor**: Stratified rest states show T drift of 1e-15 to 1e-14 while uniform T/S cases show exactly zero. This is floating-point rounding noise in the global summation, not real conservation error. Vertical diffusion changes per-level T values, and the O(n_cells × n_levels) sum picks up different rounding patterns at each diagnostic step. Float64 precision limits conservation measurement to ~1e-14 relative without compensated summation.
+
+---
+
+## 2026-04-08: Test matrix restructuring
+
+**Changes**:
+- Removed `barotropic_gyre` (redundant with `barotropic_double_gyre`)
+- Renamed rest-state cases for clarity:
+  - `rest_state` → `rest_state_stratified_with_land`
+  - `rest_state_uniform_ts` → `rest_state_uniform_with_land`
+  - `rest_state_no_land` → `rest_state_stratified_no_land`
+  - `rest_state_uniform_ts_no_land` → `rest_state_uniform_no_land`
+- All rest states grouped under single `rest_state/` output folder
+- Added `global_barotropic_wind` test case (simplified continent, 3-belt wind, 60 days)
+- Regional grids (mpas_regional, latlon_regional) for double gyre
+- Cross-grid time evolution comparison plots (rows=grids, cols=time)
+- Cross-variant rest-state comparison (4 variants × 3 grids)
+- Shared colorbar ranges across all multi-panel plots
+- Spectral removed from all ocean tests
+
+### Current test matrix (36 cases)
+
+| Experiment | cubed_sphere | latlon (C-grid) | mpas | mpas_regional | latlon_regional |
+|---|---|---|---|---|---|
+| rest_state_stratified_with_land | 1d | 1d | 1d | — | — |
+| rest_state_uniform_with_land | 1d | 1d | 1d | — | — |
+| rest_state_stratified_no_land | 1d | 1d | 1d | — | — |
+| rest_state_uniform_no_land | 1d | 1d | 1d | — | — |
+| barotropic_wave | 2d | 2d | 2d | — | — |
+| barotropic_double_gyre | — | — | — | 30d | 30d |
+| global_barotropic_wind | 60d | 60d | 60d | — | — |
+| geostrophic_adjustment | 10d | 10d | 10d | — | — |
+| phillips_two_layer | 10d | 10d | 10d | — | — |
+| inertia_gravity_wave | 2d | 2d | 2d | — | — |
+| lock_exchange | 1d | 1d | — | — | — |
+| overflow | 0.5d | 0.5d | — | — | — |
+| stommel_gyre_tracer | 60d | 60d | 60d | — | — |
+
+### Latest results (cases 1-27)
+
+| Test | cubed_sphere | latlon (C-grid) | mpas |
+|------|-------------|-----------------|------|
+| rest_state (all 4 variants) | 12/12 PASS | machine precision | |
+| barotropic_wave | PASS | PASS | PASS |
+| geostrophic_adjustment | FAIL (T:9e-5) | PASS (T:8.4e-4) | PASS (T:6e-15) |
+
+**Known issues**:
+- Cubed_sphere geostrophic adjustment T drift (9e-5) — needs h_old/h_new thickness correction (same fix as MPAS)
+- Wind-driven cases at low resolution develop unrealistic speeds over 60 days (viscosity tuning, not a code bug)
+
+---
+
 ## Issues and PRs
 
 ### Open issues
 - #94 — Split-explicit tracer conservation: flux-form path needs barotropic-averaged transport (deprioritized — default path is machine-precision)
-- #87 — Latlon A-grid instability (C-grid fixes in #98)
+- #87 — Latlon A-grid instability (C-grid fixes in #98; A-grid removed from test matrix)
 - #88 — Regional MPAS mesh (pole fix + test matrix in #98)
 - #81 — Rest-state stability (diagnostic artifact fix in #98)
+- #99 — Remove spectral grid from ocean (land boundary issues, not worth investing)
 
 ### PRs
 - #98 — Consolidated ocean model fixes (open, replaces #89, #92, #95)
