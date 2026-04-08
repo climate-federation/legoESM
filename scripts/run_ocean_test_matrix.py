@@ -147,7 +147,7 @@ FIELD_RANGES = {
         "speed_sfc": (0, 0.15),     # m/s - surface speeds
         "SST": (9.5, 10.5),        # °C - uniform 10°C (barotropic)
     },
-    "baroclinic": {
+    "geostrophic_adjustment": {
         "eta": (-0.1, 0.1),        # meters - adjustment process
         "SST": (1.5, 21.0),        # °C - background temperature range
     },
@@ -281,10 +281,10 @@ def _build_test_matrix() -> list[TestCase]:
         "barotropic_double_gyre", "mpas_regional", res["mpas_regional"],
         30.0, 2.0))
 
-    # --- Baroclinic adjustment: all grids ---
+    # --- Geostrophic adjustment: all grids ---
     for g in GRID_TYPES:
         matrix.append(TestCase(
-            "baroclinic", g, res[g], 10.0, 1.0))
+            "geostrophic_adjustment", g, res[g], 10.0, 1.0))
 
     # --- Phillips two-layer baroclinic: all grids ---
     for g in GRID_TYPES:
@@ -1819,7 +1819,7 @@ def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord,
 
 
 # ===========================================================================
-# Baroclinic adjustment perturbation
+# Geostrophic adjustment perturbation
 # ===========================================================================
 
 def _add_baroclinic_perturbation(state, grid_type: str, grid, z_coord):
@@ -2329,12 +2329,12 @@ def run_barotropic_double_gyre(tc: TestCase, output_dir: Path, days: float
 
 
 # ===========================================================================
-# Runner: Baroclinic Adjustment
+# Runner: Geostrophic Adjustment
 # ===========================================================================
 
-def run_baroclinic(tc: TestCase, output_dir: Path, days: float
+def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
                    ) -> tuple[str, float, str]:
-    """Baroclinic adjustment: meridional temperature front relaxation."""
+    """Geostrophic adjustment: meridional temperature front relaxation."""
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc))
     state = _create_rest_state(tc, grid, z_coord)
@@ -2355,7 +2355,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
-        label=f"Baroclinic ({tc.grid_type})", total_days=days)
+        label=f"Geostrophic Adj ({tc.grid_type})", total_days=days)
 
     # All grids now use same physical units
     T_drift = _compute_drift(diag.get("mean_T", []))
@@ -2370,7 +2370,7 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float
         "status": "PASS" if ok else "FAIL", "notes": notes,
         "wall_time": f"{wall:.1f}s"})
     _save_case_diagnostics(
-        output_dir, f"Baroclinic Adj {tc.grid_type} {tc.resolution}",
+        output_dir, f"Geostrophic Adj {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=[
             ("eta", "SSH (m)", "RdBu_r"),
@@ -3351,7 +3351,7 @@ RUNNERS: dict[str, Callable] = {
     "barotropic_wave": run_barotropic_wave,
     "barotropic_gyre": run_barotropic_gyre,
     "barotropic_double_gyre": run_barotropic_double_gyre,
-    "baroclinic": run_baroclinic,
+    "geostrophic_adjustment": run_geostrophic_adjustment,
     "phillips_two_layer": run_phillips_two_layer,
     "inertia_gravity_wave": run_inertia_gravity_wave,
     "lock_exchange": run_lock_exchange,
