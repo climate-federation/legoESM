@@ -147,6 +147,22 @@ def _best_tile_factorization(n_devices: int) -> tuple[int, int, int]:
 # Mesh creation — cubed-sphere
 # ==============================================================================
 
+def _largest_valid_cubed_sphere_count(n: int) -> int:
+    """Return the largest valid cubed-sphere device count that is <= n.
+
+    Valid counts: 1, 2, 3, 6 (face-level), then 6*k^2 for k=2,3,…
+    """
+    candidates = [c for c in (1, 2, 3) if c <= n]
+    k = 1
+    while True:
+        c = 6 * k * k
+        if c > n:
+            break
+        candidates.append(c)
+        k += 1
+    return max(candidates) if candidates else 1
+
+
 def create_device_mesh(
     n_devices: int | str = "auto",
     backend: str | None = None,
@@ -216,7 +232,15 @@ def create_device_mesh(
 
     # Resolve n_devices.
     if n_devices == "auto":
-        n_dev = all_count
+        n_dev = _largest_valid_cubed_sphere_count(all_count)
+        if n_dev != all_count:
+            logger.warning(
+                "create_device_mesh: %d device(s) available but %d is not a "
+                "valid cubed-sphere count (must divide 6 for ≤6 devices, or be "
+                "6·k² for >6 devices).  Using %d device(s).  Pass n_devices "
+                "explicitly to suppress this warning.",
+                all_count, all_count, n_dev,
+            )
     else:
         n_dev = int(n_devices)
 
