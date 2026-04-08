@@ -97,10 +97,13 @@ GRID_RESOLUTIONS: dict[str, str] = {
     "cubed_sphere": "C24",
     "latlon": "36x72",
     "mpas": "ico3",
+    "mpas_regional": "300km",
     "spectral": "T21",
 }
 
-GRID_TYPES = list(GRID_RESOLUTIONS.keys())
+# Standard grid types for the full test matrix.
+# mpas_regional is only added to specific test cases (gyre experiments).
+GRID_TYPES = ["cubed_sphere", "latlon", "mpas", "spectral"]
 
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
@@ -270,10 +273,13 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "barotropic_gyre", g, res[g], 30.0, 2.0))
 
-    # --- Barotropic double gyre: cubed_sphere, latlon, mpas ---
+    # --- Barotropic double gyre: cubed_sphere, latlon, mpas, mpas_regional ---
     for g in ["cubed_sphere", "latlon", "mpas"]:
         matrix.append(TestCase(
             "barotropic_double_gyre", g, res[g], 30.0, 2.0))
+    matrix.append(TestCase(
+        "barotropic_double_gyre", "mpas_regional", res["mpas_regional"],
+        30.0, 2.0))
 
     # --- Baroclinic adjustment: all grids ---
     for g in GRID_TYPES:
@@ -1133,6 +1139,8 @@ def _parse_resolution(tc: TestCase):
         return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
     elif tc.grid_type == "mpas":
         return {"level": int(tc.resolution.replace("ico", ""))}
+    elif tc.grid_type == "mpas_regional":
+        return {"resolution_km": int(tc.resolution.replace("km", ""))}
     elif tc.grid_type == "spectral":
         return {"truncation": int(tc.resolution[1:])}
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
@@ -1187,7 +1195,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
         from legoesm.ocean.state import LatLonOceanConfig
 
         grid = create_latlon_grid(params["n_lat"], params["n_lon"])
-        kw = dict(n_barotropic_substeps=30, physics=physics)
+        kw = dict(n_barotropic_substeps=30, physics=physics,
+                  barotropic_staggering="C")
         if A_h is not None:
             kw["A_h"] = A_h
         if A_v is not None:
@@ -1205,6 +1214,31 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
         from legoesm.ocean.mpas_config import MPASOceanConfig
 
         mesh = create_voronoi_mesh(params["level"])
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        config = MPASOceanConfig(**kw)
+        model = MPASOceanModel(mesh, z_coord, config)
+        coord_kind = "mpas"
+        lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+        return mesh, z_coord, config, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "mpas_regional":
+        from legoesm.grids.voronoi import create_regional_voronoi_mesh
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+
+        res_m = params["resolution_km"] * 1e3
+        # Default gyre basin bounds
+        lon_w = tc.run_kwargs.get("lon_west", 0.0)
+        lon_e = tc.run_kwargs.get("lon_east", 120.0)
+        lat_s = tc.run_kwargs.get("lat_south", 15.0)
+        lat_n = tc.run_kwargs.get("lat_north", 75.0)
+        mesh = create_regional_voronoi_mesh(
+            lon_w, lon_e, lat_s, lat_n, res_m)
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
@@ -1458,7 +1492,7 @@ def _make_check_fn(grid_type: str):
                    bool(jnp.all(jnp.isfinite(s.T_hat.data))))
             return fin, eta_max
         return check_fn
-    elif grid_type == "mpas":
+    elif grid_type in ("mpas", "mpas_regional"):
         def check_fn(s):
             fin = check_finite({"eta": s.eta.data, "T": s.T.data,
                                 "u": s.u.data})
@@ -1513,7 +1547,7 @@ def _make_scalar_fn(grid_type: str, grid=None):
                     "mean_S": float(jnp.mean(S_phys)),               # PSU
                 }
         return scalar_fn
-    elif grid_type == "mpas":
+    elif grid_type in ("mpas", "mpas_regional"):
         def scalar_fn(s):
             # MPAS land masking using post-regridding approach
             # Note: This is less accurate than pre-regridding masking with mesh topology,
@@ -1600,7 +1634,7 @@ def _make_extract_fn(grid_type: str, grid, lon_deg, lat_deg):
         def extract_fn(s):
             return _extract_spectral_ocean(s, grid)
         return extract_fn
-    elif grid_type == "mpas":
+    elif grid_type in ("mpas", "mpas_regional"):
         def extract_fn(s):
             return _extract_mpas_ocean(s, lon_deg, lat_deg)
         return extract_fn
@@ -1701,7 +1735,7 @@ def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord,
             lon_west=lon_west, lon_east=lon_east,
             lat_south=lat_south, lat_north=lat_north,
         )
-    elif grid_type == "mpas":
+    elif grid_type in ("mpas", "mpas_regional"):
         from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
         return wind_driven_gyre_mpas(
             grid, z_coord,
@@ -2124,7 +2158,7 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
                          wind_profile: str, label: str,
                          ) -> tuple[str, float, str]:
     """Shared runner for barotropic gyre experiments."""
-    if tc.grid_type not in ("cubed_sphere", "latlon", "mpas"):
+    if tc.grid_type not in ("cubed_sphere", "latlon", "mpas", "mpas_regional"):
         raise NotImplementedError(
             f"{label} not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
@@ -3267,7 +3301,8 @@ def build_parser() -> argparse.ArgumentParser:
              "(e.g. rest_state, barotropic_gyre, barotropic_double_gyre)")
     p.add_argument(
         "--grid", type=str, default="all",
-        choices=["cubed_sphere", "latlon", "mpas", "spectral", "all"],
+        choices=["cubed_sphere", "latlon", "mpas", "mpas_regional",
+                 "spectral", "all"],
         help="Run only a specific grid type (default: all)")
     p.add_argument(
         "--resolution", type=str, default=None,
