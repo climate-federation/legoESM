@@ -553,9 +553,9 @@ The 1-level result proves the horizontal flux-form + barotropic-averaged transpo
 | Additive fixer | On (harmful for forcing) | Off (unnecessary) |
 | Diagnostic accuracy | Unweighted mean (biased) | Area-weighted (correct) |
 
-### Phase 2b (remaining)
+### Phase 2b (done)
 
-The diagnosed vertical velocity `w = -integral(div(h_k * u_k))` uses the instantaneous baroclinic velocity, creating a vertical-horizontal transport inconsistency when the barotropic-averaged transport differs from instantaneous. The fix: reconstruct `w` from the barotropic-averaged per-layer divergence `div(Hu_avg_k)`. This would close the full 3D budget to machine precision.
+Diagnosed w from barotropic-averaged per-layer divergence. Vertical tracer advection moved to step function. 10-level heat: 2.59e-7 to 8.69e-14. Geostrophic adj T drift: 8.7e-4 to 2.01e-11. Latlon matches MPAS quality.
 
 ---
 
@@ -563,7 +563,7 @@ The diagnosed vertical velocity `w = -integral(div(h_k * u_k))` uses the instant
 
 ### Open issues
 - #100 — Cubed-sphere ocean face-boundary instability (exponential blowup at face boundaries in dynamic simulations)
-- #102 — Flux-form tracer transport with barotropic-averaged transport (latlon T/S conservation, Phase 2a/2b)
+
 - #99 — Remove spectral grid from ocean (land boundary issues, not worth investing)
 - #87 — Latlon A-grid instability (C-grid fixes in #98; A-grid removed from test matrix)
 - #88 — Regional MPAS mesh (pole fix + test matrix in #98)
@@ -571,6 +571,8 @@ The diagnosed vertical velocity `w = -integral(div(h_k * u_k))` uses the instant
 
 ### Closed issues
 - #101 — Conservation strategy (resolved: conservative diffusion, h_old/h_new, fixer disabled, budget diagnostic)
+- #102 — Flux-form tracer transport (resolved: Phase 2a horizontal + Phase 2b vertical)
+- #101 — Conservation strategy (resolved)
 - #94 — Split-explicit tracer conservation (superseded by #102)
 
 ### PRs
