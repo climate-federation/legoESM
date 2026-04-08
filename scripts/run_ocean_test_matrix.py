@@ -1234,6 +1234,52 @@ def _create_ocean_setup(tc: TestCase, nlev: int = DEFAULT_NLEV,
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
+def _create_regional_latlon_setup(
+    tc: TestCase,
+    lat_south: float, lat_north: float,
+    lon_west: float, lon_east: float,
+    nlev: int = DEFAULT_NLEV,
+    H_max: float = DEFAULT_H_MAX,
+    physics=None,
+    A_h: float | None = None,
+    A_v: float | None = None,
+):
+    """Create a regional lat-lon grid covering only the specified basin.
+
+    Uses the same total cell count as the global resolution (e.g. 36x72)
+    but concentrates them in the basin domain, giving much finer resolution.
+
+    Returns (grid, wall_mask, z_coord, config, model, coord_kind, lon_deg, lat_deg).
+    """
+    from legoesm.grids.latlon import create_regional_latlon_grid
+    from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
+    from legoesm.ocean.state import LatLonOceanConfig
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
+    params = _parse_resolution(tc)
+    n_lat = params["n_lat"]
+    n_lon = params["n_lon"]
+
+    grid, wall_mask = create_regional_latlon_grid(
+        n_lat=n_lat, n_lon=n_lon,
+        lat_south=lat_south, lat_north=lat_north,
+        lon_west=lon_west, lon_east=lon_east,
+    )
+
+    kw = dict(n_barotropic_substeps=30, physics=physics)
+    if A_h is not None:
+        kw["A_h"] = A_h
+    if A_v is not None:
+        kw["A_v"] = A_v
+    config = LatLonOceanConfig(**kw)
+    model = LatLonOceanModel(grid, z_coord, config)
+    coord_kind = "latlon"
+    lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+    lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+    return grid, wall_mask, z_coord, config, model, coord_kind, lon_deg, lat_deg
+
+
 def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
     """Create rest-state initial condition for any grid type."""
     if tc.grid_type == "cubed_sphere":
@@ -2083,16 +2129,31 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
             f"{label} not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
 
+    lon_west, lon_east = 0.0, 120.0
+    lat_south, lat_north = 15.0, 75.0
+
     physics = _make_gyre_physics(wind_profile)
-    # A_h = 5e5 m^2/s: Munk layer delta_M ~ 300 km, needed to
-    # stabilise long integrations at ~5-degree resolution.
-    # Default A_v = 1e-3 (higher values destabilise latlon).
-    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=5e5))
-    state = _add_wind_gyre_forcing(
-        None, tc.grid_type, grid, z_coord,
-        lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
-    )
+    if tc.grid_type == "latlon":
+        # Regional grid: all cells cover the basin, no wasted land.
+        # A_h scaled for ~1-degree resolution (Munk layer ~800 km).
+        from legoesm.ocean.init_latlon import regional_rest_state_latlon
+        grid, wall_mask, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+            _create_regional_latlon_setup(
+                tc, lat_south, lat_north, lon_west, lon_east,
+                physics=physics, A_h=5e5))
+        state = regional_rest_state_latlon(
+            grid, wall_mask, z_coord, T_surface=10.0, T_deep=10.0,
+            S_uniform=35.0)
+    else:
+        # Global grid path (cubed_sphere, mpas).
+        # A_h = 5e5 m^2/s for ~5-degree resolution.
+        grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+            _create_ocean_setup(tc, physics=physics, A_h=5e5))
+        state = _add_wind_gyre_forcing(
+            None, tc.grid_type, grid, z_coord,
+            lon_west=lon_west, lon_east=lon_east,
+            lat_south=lat_south, lat_north=lat_north,
+        )
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -3008,20 +3069,26 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
 #   - Linear bottom drag
 # ===========================================================================
 
-def _init_stommel_gyre_tracer(state, grid_type, grid, z_coord):
+def _init_stommel_gyre_tracer(state, grid_type, grid, z_coord,
+                              regional=False):
     """Initialize Stommel gyre with passive salinity tracer blob.
 
     Uses the existing wind-driven gyre initialization for dynamics,
     then sets salinity as a passive tracer with a Gaussian blob
     in the subtropical gyre interior.
+
+    When ``regional=True``, the state already has the correct basin
+    mask from ``regional_rest_state_latlon`` and the wind-gyre
+    forcing call is skipped.
     """
     from legoesm.core.field import Field
 
-    # First set up the wind-gyre dynamics (basin: 0-60E, 15-75N)
-    state = _add_wind_gyre_forcing(
-        state, grid_type, grid, z_coord,
-        lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
-    )
+    if not regional:
+        # Set up the wind-gyre dynamics (basin: 0-120E, 15-75N)
+        state = _add_wind_gyre_forcing(
+            state, grid_type, grid, z_coord,
+            lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
+        )
 
     # Add salinity tracer blob (Gaussian, centered at 35N, 30E — inside basin)
     lat, lon = _get_cell_latlon_rad(grid_type, grid)
@@ -3066,11 +3133,26 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
             f"Stommel gyre tracer not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
 
+    lon_west, lon_east = 0.0, 120.0
+    lat_south, lat_north = 15.0, 75.0
+
     physics = _make_gyre_physics("single_gyre")
-    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics))
-    rest = _create_rest_state(tc, grid, z_coord)
-    state = _init_stommel_gyre_tracer(rest, tc.grid_type, grid, z_coord)
+    if tc.grid_type == "latlon":
+        from legoesm.ocean.init_latlon import regional_rest_state_latlon
+        grid, wall_mask, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+            _create_regional_latlon_setup(
+                tc, lat_south, lat_north, lon_west, lon_east,
+                physics=physics, A_h=5e5))
+        rest = regional_rest_state_latlon(
+            grid, wall_mask, z_coord, T_surface=10.0, T_deep=10.0,
+            S_uniform=35.0)
+        state = _init_stommel_gyre_tracer(
+            rest, tc.grid_type, grid, z_coord, regional=True)
+    else:
+        grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+            _create_ocean_setup(tc, physics=physics))
+        rest = _create_rest_state(tc, grid, z_coord)
+        state = _init_stommel_gyre_tracer(rest, tc.grid_type, grid, z_coord)
 
     # Store initial tracer integral for conservation check
     area = np.asarray(grid.grid_area, dtype=np.float64)

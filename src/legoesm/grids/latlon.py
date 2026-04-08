@@ -194,11 +194,13 @@ def create_regional_latlon_grid(
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
     dtype=None,
+    n_wall: int = 1,
 ) -> tuple[LatLonGrid, jax.Array]:
     """Create a regional lat-lon grid covering a limited domain.
 
     The grid spans the specified lat/lon bounding box with *n_lat* x
-    *n_lon* interior cells.  A 1-cell wall (land mask = 0) is placed on
+    *n_lon* interior cells.  A wall (land mask = 0) of *n_wall* cells
+    is placed on
     all four boundaries for closed-basin experiments.
 
     Operators remain periodic in longitude via ``jnp.roll``, but the
@@ -240,8 +242,9 @@ def create_regional_latlon_grid(
             dtype = jnp.float32
 
     # Total cells including wall rows/columns
-    ny = n_lat + 2
-    nx = n_lon + 2
+    nw = n_wall
+    ny = n_lat + 2 * nw
+    nx = n_lon + 2 * nw
 
     lat_s_rad = jnp.deg2rad(lat_south)
     lat_n_rad = jnp.deg2rad(lat_north)
@@ -253,13 +256,13 @@ def create_regional_latlon_grid(
 
     # Cell-center coordinates including wall cells
     lat = jnp.linspace(
-        float(lat_s_rad) - dlat / 2.0,
-        float(lat_n_rad) + dlat / 2.0,
+        float(lat_s_rad) - (nw - 0.5) * dlat,
+        float(lat_n_rad) + (nw - 0.5) * dlat,
         ny,
     )
     lon = jnp.linspace(
-        float(lon_w_rad) - dlon / 2.0,
-        float(lon_e_rad) + dlon / 2.0,
+        float(lon_w_rad) - (nw - 0.5) * dlon,
+        float(lon_e_rad) + (nw - 0.5) * dlon,
         nx,
     )
 
@@ -276,12 +279,13 @@ def create_regional_latlon_grid(
     area = radius**2 * dlat * dlon * cos_lat[:, None] * jnp.ones((1, nx))
     total_area = jnp.sum(area)
 
-    # Wall mask: 1-cell boundary on all sides
+    # Wall mask: n_wall-cell boundary on all sides
     wall_mask = jnp.ones((ny, nx), dtype=dtype)
-    wall_mask = wall_mask.at[0, :].set(0.0)   # south wall
-    wall_mask = wall_mask.at[-1, :].set(0.0)  # north wall
-    wall_mask = wall_mask.at[:, 0].set(0.0)   # west wall
-    wall_mask = wall_mask.at[:, -1].set(0.0)  # east wall
+    for w in range(nw):
+        wall_mask = wall_mask.at[w, :].set(0.0)       # south wall
+        wall_mask = wall_mask.at[-(w+1), :].set(0.0)   # north wall
+        wall_mask = wall_mask.at[:, w].set(0.0)         # west wall
+        wall_mask = wall_mask.at[:, -(w+1)].set(0.0)   # east wall
 
     _c = lambda a: a.astype(dtype) if hasattr(a, 'astype') else a
     grid = LatLonGrid(
