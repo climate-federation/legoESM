@@ -971,17 +971,23 @@ def _seed_regional_generators(lon_range, lat_range, resolution_km, radius):
 
     d_rad = resolution_km * 1000.0 / radius
 
-    # Buffer of 1.5x resolution around domain
-    buffer = 1.5 * d_rad
+    # Buffer of 3x resolution around domain (≈2 cell rows)
+    # to ensure interior edges have full two-sided connectivity.
+    buffer = 3.0 * d_rad
     lat_min_buf = max(lat_min - buffer, -np.pi / 2 + 0.01)
     lat_max_buf = min(lat_max + buffer, np.pi / 2 - 0.01)
     lon_min_buf = lon_min - buffer
     lon_max_buf = lon_max + buffer
 
-    # Uniform dlon at center latitude: all rows have same cell count
+    # Uniform dlon at center latitude (same cell count per row).
+    # dlat = d_rad (resolution / radius) gives tighter row spacing than
+    # dlon, producing a hex grid with good Voronoi edge quality
+    # (dvEdge/dcEdge ≈ 0.08+). Using dlat = dlon or dlat = d_rad*sqrt(3)/2
+    # makes rows too sparse and creates degenerate Voronoi edges at the
+    # domain center that blow up the TRiSK barotropic solver.
     lat_center = 0.5 * (lat_min_buf + lat_max_buf)
     dlon = d_rad / max(np.cos(lat_center), 0.1)
-    dlat = d_rad * np.sqrt(3.0) / 2.0  # hex packing row spacing
+    dlat = d_rad  # tighter row spacing → better Voronoi quality
 
     lats = np.arange(lat_min_buf, lat_max_buf + 0.5 * dlat, dlat)
     n_lon = max(1, int(np.ceil((lon_max_buf - lon_min_buf) / dlon)))
@@ -1024,7 +1030,11 @@ def _regional_delaunay(cell_xyz, resolution_km, radius):
     """
     centroid = cell_xyz.mean(axis=0)
     centroid /= np.linalg.norm(centroid)
-    pole = -centroid  # project from antipodal point
+    # _stereo_project uses denom = 1 + dot(xyz, pole), which projects
+    # from -pole.  Setting pole = +centroid means we project from
+    # -centroid (the antipodal point), so data near +centroid gets
+    # small, well-behaved projected coordinates.
+    pole = centroid
 
     xy = _stereo_project(cell_xyz, pole)
 
@@ -1124,8 +1134,8 @@ def create_regional_voronoi_mesh(
     # Boundary edges may have only one adjacent triangle, giving
     # dvEdge = 0. Set a floor to prevent NaN in TRiSK operators.
     d_rad = resolution_km * 1000.0 / radius
-    dvEdge_floor = 0.01 * d_rad * radius  # 1% of resolution
-    areaTriangle_floor = 0.001 * (d_rad * radius) ** 2  # 0.1% of cell area
+    dvEdge_floor = 0.1 * d_rad * radius  # 10% of resolution
+    areaTriangle_floor = 0.01 * (d_rad * radius) ** 2  # 1% of cell area
 
     dvEdge_safe = jnp.maximum(mesh.dvEdge, dvEdge_floor)
     areaTriangle_safe = jnp.maximum(mesh.areaTriangle, areaTriangle_floor)
