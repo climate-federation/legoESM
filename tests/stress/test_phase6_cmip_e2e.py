@@ -77,17 +77,51 @@ class TestPiControl:
         status = driver.run()
         assert jnp.all(jnp.isfinite(driver.state.T.data))
 
-        # CMOR file writing requires cubed-sphere → lat-lon regridding,
-        # which is not automatically configured at C8 test resolution.
-        # Verify that if files were written, they have correct metadata.
+        # CMOR output must produce actual NetCDF files
         cmor_dir = tmp_path / "cmor"
-        if cmor_dir.exists():
-            nc_files = list(cmor_dir.rglob("*.nc"))
-            if nc_files:
-                import xarray as xr
-                ds = xr.open_dataset(nc_files[0])
-                assert "Conventions" in ds.attrs
-                ds.close()
+        assert cmor_dir.exists(), "cmor/ directory not created"
+        nc_files = list(cmor_dir.rglob("*.nc"))
+        assert len(nc_files) > 0, (
+            "cmip_output=True produced zero NetCDF files"
+        )
+
+        # Files must have correct CMIP metadata
+        import xarray as xr
+        ds = xr.open_dataset(nc_files[0])
+        assert ds.attrs.get("Conventions") == "CF-1.8"
+        assert ds.attrs.get("experiment_id") == "piControl", (
+            f"Wrong experiment_id: {ds.attrs.get('experiment_id')}"
+        )
+        ds.close()
+
+    def test_picontrol_cmor_spatial_fields_not_zonal(self, tmp_path):
+        """CMIP output fields must vary in longitude (not zonal broadcast)."""
+        driver = _make_driver_from_experiment(
+            "piControl", days=30, cmip_output=True, output_dir=str(tmp_path),
+        )
+        driver.run()
+
+        cmor_dir = tmp_path / "cmor"
+        nc_files = list(cmor_dir.rglob("*.nc"))
+        assert len(nc_files) > 0, "No NC files written"
+
+        import xarray as xr
+        for nc_path in nc_files[:3]:
+            ds = xr.open_dataset(nc_path)
+            for var in ds.data_vars:
+                if var in ("time_bnds",):
+                    continue
+                arr = ds[var].values
+                if arr.ndim >= 3 and "lon" in ds[var].dims:
+                    # Check that at least one time slice has longitude variation
+                    lon_idx = list(ds[var].dims).index("lon")
+                    std_along_lon = np.std(arr, axis=lon_idx)
+                    has_variation = np.any(std_along_lon > 1e-10)
+                    assert has_variation, (
+                        f"Variable {var} in {nc_path.name} is zonally "
+                        f"uniform — likely a zonal-broadcast artifact"
+                    )
+            ds.close()
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +182,24 @@ class TestAMIP:
         cfg = create_experiment_config("amip")
         assert cfg.co2_ppmv == pytest.approx(348.0, abs=1.0)
 
+    def test_amip_warns_analytical_sst(self):
+        """AMIP with analytical SST emits a warning."""
+        import warnings
+        from legoesm.forcing.experiments import create_experiment_config
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            cfg = create_experiment_config("amip")
+            sst_warns = [x for x in w if "analytical" in str(x.message).lower()]
+            assert len(sst_warns) > 0, (
+                "AMIP with analytical SST should emit a warning"
+            )
+
+    def test_amip_default_radiation_rrtmgp(self):
+        """AMIP experiment defaults to rrtmgp radiation."""
+        from legoesm.forcing.experiments import create_experiment_config
+        cfg = create_experiment_config("amip")
+        assert cfg.radiation == "rrtmgp"
+
 
 # ---------------------------------------------------------------------------
 # 6.4  historical config verification
@@ -167,6 +219,58 @@ class TestHistorical:
         tmpl = EXPERIMENT_TEMPLATES["historical"]
         expected_years = tmpl.end_year - tmpl.start_year
         assert expected_years >= 100  # 1850-2014 = 164 years
+
+
+# ---------------------------------------------------------------------------
+# 6.4b  Transient GHG applied at runtime
+# ---------------------------------------------------------------------------
+
+class TestTransientGHG:
+    """Verify that transient experiments produce time-varying GHG VMR."""
+
+    def test_precompute_returns_transient_ghg(self):
+        """_precompute_external_forcing returns non-None ghg_vmr for transient experiments."""
+        driver = _make_driver_from_experiment(
+            "historical", days=30, resolution=8, nlev=5, dt=600.0,
+        )
+        # At day 0 (year 1850), GHG should be at pre-industrial
+        p_s, lat = driver._owned_p_s_and_lat()
+        _, _, ghg_vmr_0 = driver._precompute_external_forcing(0.0, p_s, lat)
+
+        # historical is transient + rrtmgp → should get VMR override
+        assert ghg_vmr_0 is not None, (
+            "Transient CMIP experiment did not produce GHG VMR override"
+        )
+        assert "co2" in ghg_vmr_0
+
+    def test_transient_ghg_evolves_over_time(self):
+        """GHG VMR changes between different simulation days for transient experiments."""
+        driver = _make_driver_from_experiment(
+            "1pctCO2", days=30, resolution=8, nlev=5, dt=600.0,
+        )
+        p_s, lat = driver._owned_p_s_and_lat()
+        _, _, ghg_vmr_0 = driver._precompute_external_forcing(0.0, p_s, lat)
+        # 50 years later (day = 50*365)
+        _, _, ghg_vmr_50y = driver._precompute_external_forcing(50 * 365.0, p_s, lat)
+
+        assert ghg_vmr_0 is not None
+        assert ghg_vmr_50y is not None
+        assert ghg_vmr_50y["co2"] > ghg_vmr_0["co2"], (
+            f"1pctCO2 GHG did not increase: day 0 CO2={ghg_vmr_0['co2']:.6e}, "
+            f"day 18250 CO2={ghg_vmr_50y['co2']:.6e}"
+        )
+
+    def test_picontrol_ghg_is_none_or_constant(self):
+        """piControl (fixed forcing) should NOT get transient GHG override."""
+        driver = _make_driver_from_experiment(
+            "piControl", days=30, resolution=8, nlev=5, dt=600.0,
+        )
+        p_s, lat = driver._owned_p_s_and_lat()
+        _, _, ghg_vmr = driver._precompute_external_forcing(0.0, p_s, lat)
+        # piControl is fixed forcing — ghg_vmr should be None (uses config defaults)
+        assert ghg_vmr is None, (
+            "piControl should not produce transient GHG override"
+        )
 
 
 # ---------------------------------------------------------------------------

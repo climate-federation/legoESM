@@ -480,6 +480,24 @@ class TestCreateExperimentConfig(unittest.TestCase):
         # 164 years * 365 days
         self.assertEqual(cfg.days, (2014 - 1850) * 365)
 
+    def test_transient_experiments_default_rrtmgp(self):
+        """Transient experiments default to rrtmgp radiation."""
+        from legoesm.forcing.experiments import create_experiment_config
+
+        for name in ("historical", "ssp245", "ssp585", "1pctCO2"):
+            cfg = create_experiment_config(name)
+            self.assertEqual(
+                cfg.radiation, "rrtmgp",
+                f"{name} should default to rrtmgp radiation"
+            )
+
+    def test_radiation_override_respected(self):
+        """Explicit radiation override is respected."""
+        from legoesm.forcing.experiments import create_experiment_config
+
+        cfg = create_experiment_config("historical", radiation="gray")
+        self.assertEqual(cfg.radiation, "gray")
+
     def test_overrides(self):
         """Overrides are applied to the config."""
         from legoesm.forcing.experiments import create_experiment_config
