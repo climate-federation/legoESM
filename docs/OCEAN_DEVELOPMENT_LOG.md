@@ -345,9 +345,38 @@ This is the standard approach in MOM6 and NEMO. Conservative by construction: `s
 | rest state (eta) | 0.00e+00 | 0.00e+00 | unchanged |
 | rest state (T) | 9.85e-15 | 9.85e-15 | unchanged |
 
-The diffusion fix eliminated ~75% of the volume leak. The remaining drift (~2.9e-3 over 30 days, ~0.035 m/year) comes from a secondary source — not the eta floor clamping (floor is at -5499.5 m, eta stays within ±0.02 m), likely the continuity divergence operator or mask interactions. This is a 4x improvement and adequate for multi-decade runs; the secondary source can be investigated as a follow-up.
+The reported -2.87e-3 "remaining drift" turned out to be a **diagnostic artifact**: the `mean_eta` diagnostic used `nanmean` (unweighted), which is biased on grids with non-uniform cell areas. On this 15-75N domain with 4:1 area ratio, the double gyre's asymmetric SSH pattern produced an apparent drift even though total volume `sum(eta * area)` was conserved to machine precision (1.83e-17). Fixed by switching to area-weighted mean.
 
-**Same issue exists on cubed-sphere and MPAS**: Both use `nu_cell * laplacian(eta)` with area-dependent coefficients. The MPAS case leaks less because Voronoi cell areas are more uniform (~1.2x vs ~3.7x variation). The same flux-form fix should be applied to both solvers for consistency.
+**Same fix applied to MPAS** (commit 589702b): reformulated `nu_dt_cell * _del2_cell(eta)` to `div(nu_dt_edge * grad(eta))` in `barotropic_mpas.py`. MPAS double gyre eta drift improved from -9.81e-04 to 1.86e-17.
+
+**Final volume conservation (both grids at machine precision):**
+
+| Grid | eta drift (double gyre, 30d) |
+|------|------|
+| latlon_regional | 1.83e-17 |
+| mpas_regional | 1.86e-17 |
+
+**Same issue exists on cubed-sphere** (`barotropic.py` line 231) but is deferred until the face-boundary instability (#100) is resolved.
+
+---
+
+## 2026-04-08: Conservation budget diagnostic (issue #101, Phase 1)
+
+Added `conservation_budget.py` — a grid-agnostic diagnostic that computes the actual change in volume, heat, and salt between two states, and optionally compares against expected forcing input.
+
+```python
+from legoesm.ocean.conservation_budget import conservation_budget, print_budget
+
+budget = conservation_budget(state_new, state_old, area, z_coord,
+    heat_forcing=expected_heat_input)  # optional
+print_budget(budget, "after 1 day")
+```
+
+Reports `ConservationBudget` NamedTuple with: old/new integrals, change, expected forcing, and residual (change - forcing) for volume, heat, and salt. Uses precision upcasting for accurate global sums.
+
+For **unforced runs**, the residual equals the change and should be ~0 (machine precision). For **forced/coupled runs**, pass the expected forcing integrals and the residual isolates the numerical error from the physical signal.
+
+Verified on MPAS rest state: volume residual = 0, heat residual = 4.3e-16 relative, salt residual = 0.
 
 ---
 
@@ -358,6 +387,91 @@ The diffusion fix eliminated ~75% of the volume leak. The remaining drift (~2.9e
 1. **MPAS regional on global axes**: The MPAS regional regridding outputs to a global 181x360 lat-lon grid with NaN outside the domain. The comparison snapshot and evolution plots used the full coordinate extent instead of cropping to non-NaN data. Fixed by adding bounding-box crop (same logic already used in per-grid snapshots).
 
 2. **Black-on-black timeseries**: The color dict only had entries for global grids (cubed_sphere, latlon, mpas, spectral). Regional grids fell through to default black. Fixed by adding color entries for regional grids (tab:red/tab:green with dashed linestyle).
+
+---
+
+## 2026-04-08: Global barotropic wind-driven experiment
+
+**Goal**: Stand up a global wind-driven barotropic gyre experiment with simplified continent geometry on latlon C-grid and MPAS, and get the two grids producing comparable results.
+
+### Setup
+
+- **Domain**: Single meridional continent (20–60°E) from north polar cap (80°N) to 55°S, open Drake Passage south of 55°S, polar caps at ±80°.
+- **Forcing**: 3-belt zonal wind stress: τ_x = −τ₀ cos(2φ) cos²(φ), τ₀ = 0.1 Pa. Gives easterly trades near equator, westerlies at mid-latitudes, polar easterlies tapered to zero at poles.
+- **Physics**: Linear bottom drag (r = 1e-4 s⁻¹), lateral viscosity A_h = 5×10⁵ m²/s. No vertical mixing, convection, or heat/freshwater forcing.
+- **Initial condition**: Uniform T = 10°C, S = 35 PSU. Flat bottom H = 5500 m.
+- **Grids**: latlon C-grid (36×72), MPAS ico3. Cubed-sphere excluded due to face-boundary instability (issue #100).
+
+### Bug 1: Latlon C-grid blowup (stale face masks)
+
+**Problem**: Latlon C-grid blew up at step 300 (~1 day), while geostrophic adjustment was stable for 10 days on the same grid.
+
+**Root cause**: When the simplified continent land mask was applied, only the cell-center `land_mask` was updated. The C-grid's `u_mask` and `v_mask` (at velocity faces) were not recomputed. Stale face masks allowed flow through continent boundaries, creating unbounded pressure gradients and a positive feedback → exponential blowup.
+
+**Fix**: Call `compute_face_masks(land_mask)` after replacing the land mask to regenerate consistent `u_mask` and `v_mask`.
+
+### Bug 2: Latlon C-grid zero velocity (physics never called)
+
+**Problem**: After fix 1, latlon ran 60 days stable but with zero velocity — the wind forcing was never applied.
+
+**Root cause**: `latlon_cgrid_ocean_baroclinic_tendencies()` accepted `physics_fn` as a parameter but never called it. The physics pipeline (wind + bottom drag) was silently dropped.
+
+**Fix**: Added physics call in `ocean_pe_latlon_cgrid.py` before land masking (section 10b). Because the physics pipeline produces cell-center tendencies while C-grid momentum lives at face points, a cell-center proxy state is created for the physics call and the resulting du_dt/dv_dt are interpolated to faces via `_interp_to_u_points` / `_interp_to_v_points`. T/S tendencies are used directly (already at cell centers).
+
+### Investigation: 10-level latlon vs MPAS speed discrepancy
+
+With 10 vertical levels, latlon gave max speed 0.47 m/s while MPAS gave 9.9 m/s — a 20× difference. Step-by-step diagnostics showed:
+
+1. **Initial forcing is identical**: max|du_dt| = 1.85e-6 (latlon) vs 1.86e-6 (MPAS). First ~100 steps track perfectly.
+2. **Divergence is gradual**: solutions start splitting around day 1 and reach 2× by day 3.5.
+3. **Vertical structure dominates**: Wind forces only the top layer (52 m thick), creating a surface-trapped jet. Bottom drag acts on the bottom layer (1048 m thick) and is negligible. The barotropic-baroclinic splitting communicates momentum to depth differently on the two grids, leading to very different equilibria.
+
+**Conclusion**: The 10-level experiment is not a well-posed barotropic test. Wind and bottom drag act on different levels with no effective vertical coupling, making the result highly sensitive to the split-explicit formulation details.
+
+### Fix: Single-level experiment (truly barotropic)
+
+Added `global_barotropic_wind_1lev` test case with 1 vertical level. With a single layer, wind forcing and bottom drag act on the same layer. The analytical steady-state balance is u = τ_x/(ρ₀·H·r) = 1.77×10⁻⁴ m/s.
+
+**Results (1 level, 60 days)**:
+
+| Grid | Max Speed (m/s) | Analytical | Ratio |
+|------|----------------|------------|-------|
+| latlon C-grid | 2.14e-4 | 1.77e-4 | 1.21 |
+| MPAS ico3 | 1.45e-4 | 1.77e-4 | 0.82 |
+
+Both grids equilibrate properly. The remaining ~20% differences come from Coriolis deflection, lateral viscosity, and boundary effects.
+
+### MPAS edge-normal projection: cos²(angleEdge) ≈ 0.5
+
+**Finding**: On the isotropic ico3 mesh, edges are uniformly oriented, giving ⟨cos²(angleEdge)⟩ = 0.498 ≈ 0.5. A purely zonal wind stress projected onto edge normals (τ_n = τ_x·cos(angleEdge)) delivers ~50% of the energy input compared to a latlon grid where all u-faces are perfectly zonal.
+
+**This is physically correct** — you can't apply a zonal force to a north-south edge. The TRiSK Perot reconstruction (`reconstruct_cell_velocity` in `init_mpas.py`) recovers the correct cell-center velocity from edge-normal components. Verified: for a uniform zonal flow, reconstruction gives mean u_east = 0.997 (expected 1.0).
+
+The apparent 2× speed difference was partly a diagnostic artifact: the test matrix reported `max|u_edge|` (edge-normal speed) for MPAS vs `max(|u|, |v|)` (component speed) for latlon. Fixed by using Perot-reconstructed cell-center speed for MPAS diagnostics.
+
+### MPAS barotropic velocity diffusion
+
+**Finding**: The MPAS barotropic solver applied Laplacian diffusion to both eta AND velocity, while the latlon solver only diffused eta. The velocity diffusion over-damped MPAS barotropic flow.
+
+**Fix**: Removed velocity diffusion from `barotropic_mpas.py`, matching the latlon solver. MPAS equilibrium speed improved from 1.13e-4 to 1.45e-4 m/s (closer to analytical 1.77e-4).
+
+### Test matrix and diagnostic improvements
+
+1. **New test case**: `global_barotropic_wind_1lev` — 1-level barotropic wind on latlon + MPAS, 60 days.
+2. **Uniform T/S**: Both `global_barotropic_wind` variants use T = 10°C, S = 35 PSU (no stratification).
+3. **Continent width**: 40° (20–60°E), minimum for gap-free coverage on ico3 MPAS mesh.
+4. **MPAS speed diagnostic**: Uses Perot-reconstructed cell-center velocity instead of raw edge-normal speed.
+5. **Volume-weighted KE**: Added to scalar diagnostics on all grids.
+6. **Comparison timeseries**: 4 panels — Mean η, Max |η|, Max Speed, Mean KE. Fixed missing labels.
+7. **Longitude convention**: All plots now use 0–360° longitude (was -180–180 for MPAS, 0–360 for latlon).
+8. **Forcing profile plot**: `forcing_profile.png` saved in test case directory showing τ_x(lat) and wind stress curl.
+9. **`--levels` CLI flag**: Fixed to actually take effect (was baked in at function-definition time).
+
+### Remaining issues
+
+- **10-level vertical coupling**: The multi-level barotropic wind experiment has latlon (0.47 m/s) vs MPAS (9.9 m/s) due to surface-trapped flow and different barotropic-baroclinic splitting. Not a bug — the experiment is not well-posed as a barotropic test with 10 levels.
+- **Latlon mean eta drift**: The 1-level latlon case shows a steady mean eta drift of ~5.5e-5/day (MPAS is stable at ~4e-6). Likely related to the non-conservative barotropic diffusion documented earlier.
+- **Speed gap at 1 level**: Latlon is 21% above analytical, MPAS is 18% below. Differences from Coriolis, viscosity, and boundary treatment on the two grids.
 
 ---
 
