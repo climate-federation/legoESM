@@ -78,6 +78,12 @@ def main():
     parser.add_argument("--co2-init", type=float, default=415.0,
                         help="Initial CO2 concentration [ppmv]")
 
+    # Devices
+    parser.add_argument(
+        "--n-devices", type=int, default=None, metavar="N",
+        help="Number of GPUs to use (default: auto-select largest valid count)",
+    )
+
     # Output
     parser.add_argument("--output", "-o", default="results/coupled",
                         help="Output directory")
@@ -91,6 +97,7 @@ def main():
     logger.info(f"  Resolution: C{args.resolution}/L{args.nlev}")
     logger.info(f"  Days:       {args.days}")
     logger.info(f"  Radiation:  {args.radiation}")
+    logger.info(f"  Devices:    {args.n_devices if args.n_devices is not None else 'auto'}")
     logger.info(f"  Backend:    {jax.default_backend()}")
     logger.info(f"  X64:        {jax.config.jax_enable_x64}")
     logger.info("=" * 60)
@@ -112,6 +119,7 @@ def main():
         output=OutputConfig(diag_days=args.diag_days),
         radiation=args.radiation,
         days=args.days,
+        n_devices=args.n_devices if args.n_devices is not None else "auto",
     )
 
     # Build coupled config from preset with overrides

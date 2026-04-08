@@ -132,6 +132,66 @@ def rest_state_latlon_cgrid_ocean(
     )
 
 
+def wind_driven_gyre_latlon_cgrid(
+    grid: LatLonGrid,
+    z_coord: OceanZStarCoordinate,
+    H_max: float = 5500.0,
+    lon_west: float = 0.0,
+    lon_east: float = 120.0,
+    lat_south: float = 15.0,
+    lat_north: float = 75.0,
+    T_uniform: float = 10.0,
+    S_uniform: float = 35.0,
+) -> LatLonCGridOceanState:
+    """Create initial condition for a wind-driven barotropic gyre on C-grid lat-lon.
+
+    Uniform T and S inside a rectangular basin. Purely barotropic setup.
+    """
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+    nlev = z_coord.n_levels
+    dtype = get_policy().storage
+
+    lon_deg = grid.lon2d * (180.0 / jnp.pi)
+    lat_deg = grid.lat2d * (180.0 / jnp.pi)
+    in_basin = (
+        (lon_deg >= lon_west) & (lon_deg <= lon_east) &
+        (lat_deg >= lat_south) & (lat_deg <= lat_north)
+    )
+    land_mask = jnp.where(in_basin, 1.0, 0.0).astype(dtype)
+    H_bathy = jnp.full_like(land_mask, H_max)
+
+    T_3d = jnp.full((n_lat, n_lon, nlev), T_uniform, dtype=dtype)
+    S_3d = jnp.full((n_lat, n_lon, nlev), S_uniform, dtype=dtype)
+
+    u_zeros = jnp.zeros((n_lat, n_lon + 1, nlev), dtype=dtype)
+    v_zeros = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=dtype)
+    zeros_2d = jnp.zeros((n_lat, n_lon), dtype=dtype)
+
+    u_mask, v_mask = compute_face_masks(land_mask)
+
+    dims_u = ("lat", "lon_u", "level")
+    dims_v = ("lat_v", "lon", "level")
+    dims_3d = ("lat", "lon", "level")
+    dims_2d = ("lat", "lon")
+    dims_u2d = ("lat", "lon_u")
+    dims_v2d = ("lat_v", "lon")
+
+    return LatLonCGridOceanState(
+        u=Field(data=u_zeros, name="u", dims=dims_u, units="m/s",
+                staggering="edge"),
+        v=Field(data=v_zeros, name="v", dims=dims_v, units="m/s",
+                staggering="edge"),
+        T=Field(data=T_3d, name="T", dims=dims_3d, units="degC"),
+        S=Field(data=S_3d, name="S", dims=dims_3d, units="PSU"),
+        eta=Field(data=zeros_2d, name="eta", dims=dims_2d, units="m"),
+        H_bathy=Field(data=H_bathy, name="H_bathy", dims=dims_2d, units="m"),
+        land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
+        u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
+        v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
+    )
+
+
 def regional_rest_state_latlon_cgrid(
     grid: LatLonGrid,
     wall_mask: jnp.ndarray,
