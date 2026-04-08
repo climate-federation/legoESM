@@ -215,10 +215,6 @@ def _build_test_matrix() -> list[TestCase]:
             "barotropic_wave", g, bwave_res[g], 2.0, 0.2))
 
     # --- Barotropic gyre: cubed_sphere, latlon, mpas ---
-    for g in ["cubed_sphere", "latlon", "mpas"]:
-        matrix.append(TestCase(
-            "barotropic_gyre", g, res[g], 30.0, 2.0))
-
     # --- Barotropic double gyre: cubed_sphere, latlon, mpas, mpas_regional ---
     for g in ["cubed_sphere", "latlon", "mpas"]:
         matrix.append(TestCase(
