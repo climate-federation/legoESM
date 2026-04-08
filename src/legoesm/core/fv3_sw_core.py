@@ -311,8 +311,10 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     ke_total = dt2 * 0.5 * (ua * ke_u + va * ke_v)
 
     # 5. Vorticity at D-grid corners from C-grid covariant velocities
-    fx_circ = uc * cdgrid.dy_edge_x    # (6, n+1, n)
-    fy_circ = vc * cdgrid.dx_edge_y    # (6, n, n+1)
+    # FV3 c_sw uses dxc/dyc (center-to-center distances), NOT edge lengths.
+    # uc is covariant along x → uc*dxc = line integral along that path.
+    fx_circ = uc * cdgrid.dxc    # (6, n+1, n) — FV3: fx = uc * dxc
+    fy_circ = vc * cdgrid.dyc    # (6, n, n+1) — FV3: fy = vc * dyc
 
     fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
     fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
@@ -424,9 +426,10 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])  # (6, n+1, n)
     dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])  # (6, n, n+1)
 
-    # 5. Vorticity at D-grid corners from C-grid velocities
-    fx_circ = uc * cdgrid.dy_edge_x
-    fy_circ = vc * cdgrid.dx_edge_y
+    # 5. Vorticity at D-grid corners from C-grid covariant velocities
+    # FV3: fx = uc * dxc, fy = vc * dyc (center-to-center distances)
+    fx_circ = uc * cdgrid.dxc
+    fy_circ = vc * cdgrid.dyc
     fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
     fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
 

@@ -279,6 +279,42 @@ def dgrid_to_center_vector(u_d, v_d):
     return u_cc, v_cc
 
 
+def dgrid_to_center_geographic(u_d, v_d, cdgrid):
+    """D-grid corner velocities -> cell-centre east/north (geographic) winds.
+
+    Rotates each corner velocity to geographic (east, north) coordinates
+    BEFORE averaging to cell centres.  This is essential for accurate
+    diagnostics: averaging in face-local coordinates then rotating
+    produces spurious v_north for solid-body rotation (0.85 m/s at C16),
+    while rotating first then averaging gives v_north = 0 to machine
+    precision.
+
+    Works for 2D (6, n+1, n+1) only.
+
+    Parameters
+    ----------
+    u_d, v_d : jax.Array, shape (6, n+1, n+1)
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    u_east, v_north : jax.Array, shape (6, n, n) — geographic winds at centres
+    """
+    ca = cdgrid.cos_angle_corner  # (6, n+1, n+1)
+    sa = cdgrid.sin_angle_corner  # (6, n+1, n+1)
+
+    # Rotate to geographic at each corner
+    ue = ca * u_d - sa * v_d  # u_east at corners
+    vn = sa * u_d + ca * v_d  # v_north at corners
+
+    # Average geographic winds to cell centres
+    u_east = 0.25 * (ue[:, :-1, :-1] + ue[:, 1:, :-1]
+                      + ue[:, :-1, 1:] + ue[:, 1:, 1:])
+    v_north = 0.25 * (vn[:, :-1, :-1] + vn[:, 1:, :-1]
+                       + vn[:, :-1, 1:] + vn[:, 1:, 1:])
+    return u_east, v_north
+
+
 # ==============================================================================
 # D-grid -> C-grid interpolation (d2a2c)
 # ==============================================================================
@@ -1004,18 +1040,20 @@ def _laplacian_dgrid(u_d, cdgrid):
 # ==============================================================================
 
 def _extrapolate_boundary_corners(du, dv, n):
-    """Fix momentum tendencies at all face-boundary corners.
+    """Fix momentum tendencies at cube-vertex corners.
 
-    The Arakawa-Lamb gradient and vorticity interpolation at boundary
-    corners (i=0, i=n, j=0, j=n) use haloed cell-centre data with
-    O(dx^2) interpolation error, giving O(dx) gradient error -- 12-60x
-    larger than interior O(dx^2) error.  Replace boundary tendency values
-    with their nearest-interior neighbours, which use only on-face
-    cell-centre data and have O(dx^2) accuracy.
+    The Arakawa-Lamb gradient at the 8 cube vertices (where 3 faces
+    meet) has O(dx) error because all 4 stencil cells are from
+    different faces with halo interpolation errors.  Edge-interior
+    boundary corners use 2 on-face + 2 halo cells and have O(dx^2)
+    accuracy (only ~2x worse than deep interior).
 
-    Edge-interior corners are set from one cell inward (i=1 or j=1).
-    Vertex corners (shared by 3 faces) use the average of two edge
-    neighbours (already corrected by the edge fix).
+    Vertex corners are replaced using bilinear extrapolation from the
+    3 nearest edge/interior corners:
+        tend(0,0) = tend(1,0) + tend(0,1) - tend(1,1)
+
+    This gives O(dx^2) accuracy because the 3 source points are
+    O(dx^2) accurate, and bilinear extrapolation preserves the order.
 
     Works for both 2D (6, n+1, n+1) and 3D (6, n+1, n+1, nlev) inputs.
 
@@ -1028,16 +1066,21 @@ def _extrapolate_boundary_corners(du, dv, n):
     -------
     du, dv : jax.Array with fixed boundary values
     """
-    # Vertex corners: average of two nearest edge-interior neighbours
+    # Bilinear extrapolation at vertex corners from 3 nearby points.
+    # For corner (0,0): use (1,0), (0,1), (1,1):
+    #   tend(0,0) = tend(1,0) + tend(0,1) - tend(1,1)
     corners = [
-        ((0, 0), (1, 0), (0, 1)),
-        ((n, 0), (n - 1, 0), (n, 1)),
-        ((0, n), (1, n), (0, n - 1)),
-        ((n, n), (n - 1, n), (n, n - 1)),
+        # (vertex, edge_nb1, edge_nb2, interior_diag)
+        ((0, 0), (1, 0), (0, 1), (1, 1)),
+        ((n, 0), (n - 1, 0), (n, 1), (n - 1, 1)),
+        ((0, n), (1, n), (0, n - 1), (1, n - 1)),
+        ((n, n), (n - 1, n), (n, n - 1), (n - 1, n - 1)),
     ]
-    for (ci, cj), (n1i, n1j), (n2i, n2j) in corners:
-        du = du.at[:, ci, cj].set(0.5 * (du[:, n1i, n1j] + du[:, n2i, n2j]))
-        dv = dv.at[:, ci, cj].set(0.5 * (dv[:, n1i, n1j] + dv[:, n2i, n2j]))
+    for (ci, cj), (e1i, e1j), (e2i, e2j), (di, dj) in corners:
+        du = du.at[:, ci, cj].set(
+            du[:, e1i, e1j] + du[:, e2i, e2j] - du[:, di, dj])
+        dv = dv.at[:, ci, cj].set(
+            dv[:, e1i, e1j] + dv[:, e2i, e2j] - dv[:, di, dj])
 
     return du, dv
 
@@ -1131,16 +1174,66 @@ def cdgrid_momentum_tendencies(
         dv_d_dt = -zeta_corner * u_d - dB_dy_perp
 
     # 6. Laplacian viscosity
-    if A_h > 0:
-        du_d_dt = du_d_dt + A_h * _laplacian_dgrid(u_d, cdgrid)
-        dv_d_dt = dv_d_dt + A_h * _laplacian_dgrid(v_d, cdgrid)
-
     # 7. Biharmonic hyperdiffusion
-    if hyperdiff_coeff > 0:
-        du_d_dt = du_d_dt - hyperdiff_coeff * _laplacian_dgrid(
-            _laplacian_dgrid(u_d, cdgrid), cdgrid)
-        dv_d_dt = dv_d_dt - hyperdiff_coeff * _laplacian_dgrid(
-            _laplacian_dgrid(v_d, cdgrid), cdgrid)
+    #
+    # For 2D shallow water, apply diffusion DIRECTLY at D-grid corners
+    # in GEOGRAPHIC (east/north) coordinates.  The 5-point Laplacian
+    # operates on the (n+1, n+1) corner grid, which sees the 2Δx
+    # computational mode that the old cell-center path misses (D→A
+    # averaging kills the 2Δx mode before the Laplacian can damp it).
+    # Boundary corners (i=0, n; j=0, n) are left untouched (handled
+    # by _extrapolate_boundary_corners); interior corners use on-face data.
+    if (A_h > 0 or hyperdiff_coeff > 0) and not is_3d:
+        from legoesm.core.operators import laplacian_compact
+        # Geographic-frame diffusion at CELL CENTRES.  Geographic winds
+        # are smooth across face boundaries AND at the poles (unlike
+        # face-local or geographic at corners).  The D→A averaging kills
+        # the 2Δx computational mode, so this diffusion only smooths
+        # resolved scales.  The 2Δx mode is handled separately by a
+        # light filter in the model step function.
+        ca_c = cdgrid.cos_angle_corner
+        sa_c = cdgrid.sin_angle_corner
+        ue = ca_c * u_d - sa_c * v_d
+        vn = sa_c * u_d + ca_c * v_d
+        ue_cc = 0.25 * (ue[:, :-1, :-1] + ue[:, 1:, :-1]
+                        + ue[:, :-1, 1:] + ue[:, 1:, 1:])
+        vn_cc = 0.25 * (vn[:, :-1, :-1] + vn[:, 1:, :-1]
+                        + vn[:, :-1, 1:] + vn[:, 1:, 1:])
+        lap_ue = laplacian_compact(ue_cc, cdgrid.base)
+        lap_vn = laplacian_compact(vn_cc, cdgrid.base)
+
+        if A_h > 0:
+            cos_a = jnp.cos(cdgrid.base.angle)
+            sin_a = jnp.sin(cdgrid.base.angle)
+            lap_u_local = cos_a * lap_ue + sin_a * lap_vn
+            lap_v_local = -sin_a * lap_ue + cos_a * lap_vn
+            lap_u_corner = _interp_center_to_corner(lap_u_local, cdgrid)
+            lap_v_corner = _interp_center_to_corner(lap_v_local, cdgrid)
+            du_d_dt = du_d_dt + A_h * lap_u_corner
+            dv_d_dt = dv_d_dt + A_h * lap_v_corner
+
+        if hyperdiff_coeff > 0:
+            bilap_ue = laplacian_compact(lap_ue, cdgrid.base)
+            bilap_vn = laplacian_compact(lap_vn, cdgrid.base)
+            cos_a = jnp.cos(cdgrid.base.angle)
+            sin_a = jnp.sin(cdgrid.base.angle)
+            bilap_u_local = cos_a * bilap_ue + sin_a * bilap_vn
+            bilap_v_local = -sin_a * bilap_ue + cos_a * bilap_vn
+            bilap_u_corner = _interp_center_to_corner(bilap_u_local, cdgrid)
+            bilap_v_corner = _interp_center_to_corner(bilap_v_local, cdgrid)
+            du_d_dt = du_d_dt - hyperdiff_coeff * bilap_u_corner
+            dv_d_dt = dv_d_dt - hyperdiff_coeff * bilap_v_corner
+
+    elif A_h > 0 or hyperdiff_coeff > 0:
+        # 3D fallback: use original _laplacian_dgrid (for ocean/PE models)
+        if A_h > 0:
+            du_d_dt = du_d_dt + A_h * _laplacian_dgrid(u_d, cdgrid)
+            dv_d_dt = dv_d_dt + A_h * _laplacian_dgrid(v_d, cdgrid)
+        if hyperdiff_coeff > 0:
+            du_d_dt = du_d_dt - hyperdiff_coeff * _laplacian_dgrid(
+                _laplacian_dgrid(u_d, cdgrid), cdgrid)
+            dv_d_dt = dv_d_dt - hyperdiff_coeff * _laplacian_dgrid(
+                _laplacian_dgrid(v_d, cdgrid), cdgrid)
 
     # 8. Divergence damping (FV3-style adaptive Smagorinsky)
     if div_damp > 0:
@@ -1343,29 +1436,10 @@ def fv3_sw_tendencies(
 ):
     """Shallow water tendencies on the FV3 edge-midpoint D-grid.
 
-    Evaluates the vector-invariant momentum equation DIRECTLY at
-    C-grid face positions (= D-grid edge-midpoint positions), following
-    FV3's c_sw approach.  Gradient and vorticity are computed at the
-    SAME stagger, which preserves discrete geostrophic balance.
-
-    Algorithm (FV3 c_sw-style, adapted for RK3):
-    1. D→A: cell-centre velocities from edge-midpoint averaging.
-    2. A→C: halo-exchanged cell-centre winds interpolated to C-grid
-       positions for mass transport.
-    3. PPM mass flux divergence using C-grid face-normal velocities.
-    4. Bernoulli function at cell centres: B = KE + g*(h + h_s).
-    5. Bernoulli gradient at C-grid faces via 2-point rdxc/rdyc
-       difference (same stagger as momentum).
-    6. Vorticity at D-grid corners from edge-midpoint circulation
-       (exact, with proper halo exchange via fv3_vorticity).
-    7. Upwind vorticity flux at C-grid faces.
-    8. Tendencies are directly at edge-midpoint positions — no
-       projection from corners needed.
-
-    References
-    ----------
-    - Lin (2004): A "Vertically Lagrangian" FV Dynamical Core, c_sw
-    - GFDL sw_core.F90, lines 79-488
+    Computes momentum at D-grid corners via the Arakawa-Lamb gradient
+    and circulation-based vorticity, then averages to edge-midpoint
+    positions.  Mass transport uses PPM via fv3_cc2c physical C-grid
+    velocities.
 
     Parameters
     ----------
@@ -1382,298 +1456,87 @@ def fv3_sw_tendencies(
     """
     n = cdgrid.n
 
-    # (a) Cell-centre velocities from edge-midpoint averaging
+    # (a) Cell-centre and C-grid velocities for mass transport
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
-
-    # (b) C-grid velocities for mass transport (with halo exchange)
     u_c, v_c = fv3_cc2c(u_cc, v_cc, cdgrid)
 
-    # (c) Height tendency (PPM mass flux divergence)
+    # (b) Height tendency (PPM mass flux divergence)
     dh_dt = cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid)
     if zero_mean_correction:
         total_area = jnp.sum(cdgrid.base.area)
         dh_dt = dh_dt - jnp.sum(dh_dt * cdgrid.base.area) / total_area
 
-    # (d) Bernoulli function at cell centres
+    # (c) Bernoulli function using physical cell-centre winds
     KE = 0.5 * (u_cc ** 2 + v_cc ** 2)
     B = KE + g * (h + h_s)
 
-    # (e) Bernoulli gradient at C-grid faces via 2-point difference
-    #     This is at the SAME stagger as the momentum equation.
-    B_pad = _pad_halo_auto(B, cdgrid)
-    # x-face gradient: dB/dx at (i, j) where i=0..n, j=0..n-1
-    #   B[i-1, j] is B_pad[:, i, j+1], B[i, j] is B_pad[:, i+1, j+1]
-    dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])  # (6, n+1, n)
-    # y-face gradient: dB/dy at (i, j) where i=0..n-1, j=0..n
-    dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])  # (6, n, n+1)
+    # (d) Arakawa-Lamb gradient at D-grid corners
+    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
-    # (f) Vorticity at D-grid corners from edge-midpoint circulation
-    #     Uses fv3_vorticity which has proper halo exchange.
-    vort = fv3_vorticity(u_d, v_d, cdgrid)     # (6, n+1, n+1)
-    vort_abs = vort + cdgrid.f_corner           # (6, n+1, n+1)
+    # (e) Corner winds from edge midpoints for vorticity
+    u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    u_corner = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])
+    v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    v_corner = 0.5 * (v_d_pad[:, :, :-1] + v_d_pad[:, :, 1:])
 
-    # (g) Upwind vorticity flux at C-grid x-faces
-    #     Cross-velocity at x-face: v interpolated to x-edge position.
-    #     Use v_d values from the two y-edges flanking the x-face.
-    #     v_d is (6, n+1, n): v_d[:, i, j] is at y-edge midpoint (i, j+1/2).
-    #     For x-face at (i, j), the cross-velocity uses v_d[:, i, j-1] and
-    #     v_d[:, i, j].
-    v_d_pad_j = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    v_cross_x = 0.5 * (v_d_pad_j[:, :, :-1] + v_d_pad_j[:, :, 1:])  # (6, n+1, n+1)
-    # Select at x-face positions: v_cross at (i, j) uses corners (i, j) and (i, j+1)
-    v_at_xface = 0.5 * (v_cross_x[:, :, :-1] + v_cross_x[:, :, 1:])  # (6, n+1, n)
+    # (f) Vorticity at cell centres → interpolated to corners
+    zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
+    zeta_abs = zeta + cdgrid.base.f
+    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
 
-    # Upwind vorticity: if cross-v > 0, use vort from south corner
-    vort_x = jnp.where(
-        v_at_xface > 0,
-        vort_abs[:, :, :-1],   # south corner (j)
-        vort_abs[:, :, 1:],    # north corner (j+1)
-    )  # (6, n+1, n)
+    # (g) Momentum tendencies at D-grid corners
+    du_corner = zeta_corner * v_corner - dB_dx
+    dv_corner = -zeta_corner * u_corner - dB_dy_perp
 
-    # (h) Upwind vorticity flux at C-grid y-faces
-    u_d_pad_i = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    u_cross_y = 0.5 * (u_d_pad_i[:, :-1, :] + u_d_pad_i[:, 1:, :])  # (6, n+1, n+1)
-    u_at_yface = 0.5 * (u_cross_y[:, :-1, :] + u_cross_y[:, 1:, :])  # (6, n, n+1)
-
-    vort_y = jnp.where(
-        u_at_yface > 0,
-        vort_abs[:, :-1, :],   # west corner (i)
-        vort_abs[:, 1:, :],    # east corner (i+1)
-    )  # (6, n, n+1)
-
-    # (i) Momentum tendencies at edge-midpoint positions (DIRECTLY)
-    #     du_d/dt at x-edge midpoint: vort_flux_x + Bernoulli_gradient_x
-    du_d_dt = v_at_xface * vort_x + dB_x    # (6, n+1, n)
-    #     dv_d/dt at y-edge midpoint: -vort_flux_y + Bernoulli_gradient_y
-    dv_d_dt = -u_at_yface * vort_y + dB_y   # (6, n, n+1)
-
-    # (j) Divergence damping at C-grid face positions
+    # (h) Divergence damping at D-grid corners
     if div_damp > 0:
         div_field = cgrid_divergence(u_c, v_c, cdgrid)
-        div_pad = _pad_halo_auto(div_field, cdgrid)
-        ddiv_x = cdgrid.rdxc * (div_pad[:, :-1, 1:-1] - div_pad[:, 1:, 1:-1])
-        ddiv_y = cdgrid.rdyc * (div_pad[:, 1:-1, :-1] - div_pad[:, 1:-1, 1:])
-        du_d_dt = du_d_dt + div_damp * ddiv_x
-        dv_d_dt = dv_d_dt + div_damp * ddiv_y
+        area_min = jnp.min(cdgrid.base.area)
+        d2_bg = div_damp / area_min
+        dddmp = 0.2
+        div_abs_corner = _interp_center_to_corner(jnp.abs(div_field), cdgrid)
+        adaptive_coeff = area_min * jnp.maximum(
+            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
+        ddiv_dx, ddiv_dy_perp = _arakawa_lamb_gradient(div_field, cdgrid)
+        du_corner = du_corner + adaptive_coeff * ddiv_dx
+        dv_corner = dv_corner + adaptive_coeff * ddiv_dy_perp
 
-    # (k) Biharmonic hyperdiffusion at cell centres → gradient to faces
+    # (i) Biharmonic hyperdiffusion (cell-centre geographic path)
     if hyperdiff_coeff > 0:
         from legoesm.core.operators import laplacian_compact
-        # Laplacian of cell-centre u and v (with halo exchange)
-        lap_u = laplacian_compact(u_cc, cdgrid.base)
-        lap_v = laplacian_compact(v_cc, cdgrid.base)
-        # Second Laplacian (biharmonic)
-        bilap_u = laplacian_compact(lap_u, cdgrid.base)
-        bilap_v = laplacian_compact(lap_v, cdgrid.base)
-        # Gradient to edge-midpoint positions
-        bilap_u_pad = _pad_halo_auto(bilap_u, cdgrid)
-        bilap_v_pad = _pad_halo_auto(bilap_v, cdgrid)
-        # Average to x-edge midpoints for du_d_dt
-        bilap_u_xedge = 0.5 * (bilap_u_pad[:, :-1, 1:-1] + bilap_u_pad[:, 1:, 1:-1])
-        du_d_dt = du_d_dt - hyperdiff_coeff * bilap_u_xedge
-        # Average to y-edge midpoints for dv_d_dt
-        bilap_v_yedge = 0.5 * (bilap_v_pad[:, 1:-1, :-1] + bilap_v_pad[:, 1:-1, 1:])
-        dv_d_dt = dv_d_dt - hyperdiff_coeff * bilap_v_yedge
+        ca_c = cdgrid.cos_angle_corner
+        sa_c = cdgrid.sin_angle_corner
+        ue = ca_c * u_corner - sa_c * v_corner
+        vn = sa_c * u_corner + ca_c * v_corner
+        ue_cc = 0.25 * (ue[:, :-1, :-1] + ue[:, 1:, :-1]
+                        + ue[:, :-1, 1:] + ue[:, 1:, 1:])
+        vn_cc = 0.25 * (vn[:, :-1, :-1] + vn[:, 1:, :-1]
+                        + vn[:, :-1, 1:] + vn[:, 1:, 1:])
+        lap_ue = laplacian_compact(ue_cc, cdgrid.base)
+        bilap_ue = laplacian_compact(lap_ue, cdgrid.base)
+        lap_vn = laplacian_compact(vn_cc, cdgrid.base)
+        bilap_vn = laplacian_compact(lap_vn, cdgrid.base)
+        cos_a = jnp.cos(cdgrid.base.angle)
+        sin_a = jnp.sin(cdgrid.base.angle)
+        bilap_u_local = cos_a * bilap_ue + sin_a * bilap_vn
+        bilap_v_local = -sin_a * bilap_ue + cos_a * bilap_vn
+        bilap_u_corner = _interp_center_to_corner(bilap_u_local, cdgrid)
+        bilap_v_corner = _interp_center_to_corner(bilap_v_local, cdgrid)
+        du_corner = du_corner - hyperdiff_coeff * bilap_u_corner
+        dv_corner = dv_corner - hyperdiff_coeff * bilap_v_corner
 
-    # NOTE: The shapes are (6, n+1, n) and (6, n, n+1) respectively.
-    # The edge-midpoint model expects du_d_dt at u_d positions (6, n, n+1)
-    # and dv_d_dt at v_d positions (6, n+1, n). The shapes above are
-    # at C-grid positions which match: u_c is (6, n+1, n) but u_d is
-    # (6, n, n+1). These are SWAPPED relative to the D-grid convention.
-    # FV3 convention: u_d at x-edge = tangent to x-edge = j-direction,
-    # so u_d shape is (6, n, n+1) = velocity at (i, j+1/2).
-    # C-grid u_c shape is (6, n+1, n) = normal to x-face at (i+1/2, j).
-    #
-    # The x-face at (i+1/2, j) has the gradient dB/dx and the
-    # vorticity flux for the u_c update. But u_d at (i, j+1/2) needs
-    # a DIFFERENT gradient: dB/dy perpendicular.
-    #
-    # This means we need to swap: du_d_dt uses the y-direction gradient
-    # and dv_d_dt uses the x-direction gradient. Let me fix this.
+    # (j) Vertex fix
+    if boundary_fix:
+        du_corner, dv_corner = _extrapolate_boundary_corners(du_corner, dv_corner, n)
 
-    # CORRECTION: In FV3's D-grid convention:
-    # u_d at x-edge midpoint (i, j+1/2) shape (6, n, n+1):
-    #   du_d/dt = (f+ζ)*v - dB/dy  (gradient in Y at this position)
-    # v_d at y-edge midpoint (i+1/2, j) shape (6, n+1, n):
-    #   dv_d/dt = -(f+ζ)*u - dB/dx  (gradient in X at this position)
-    #
-    # So the x-gradient dB_x (6, n+1, n) goes with dv_d_dt
-    # And the y-gradient dB_y (6, n, n+1) goes with du_d_dt
+    # (k) Average corner tendencies to edge-midpoint positions
+    du_d_dt = 0.5 * (du_corner[:, :-1, :] + du_corner[:, 1:, :])   # (6, n, n+1)
+    dv_d_dt = 0.5 * (dv_corner[:, :, :-1] + dv_corner[:, :, 1:])   # (6, n+1, n)
 
-    # Recompute vorticity fluxes at the correct positions:
-    # For du_d at x-edge (i, j+1/2): need vort flux in y-direction
-    # For dv_d at y-edge (i+1/2, j): need vort flux in x-direction
-
-    # Actually, the sign convention and stagger are getting confused.
-    # Let me restart the momentum part with the correct FV3 stagger.
-
-    # ---- MOMENTUM PART (corrected stagger) ----
-    # u_d at x-edge midpoints (i, j+1/2), shape (6, n, n+1)
-    #   du_d/dt = vort_abs * v_cross - dB/dy
-    #   where dB/dy is between cells (i, j) and (i, j+1)
-    #   and v_cross is v at the x-edge position
-
-    # v_d at y-edge midpoints (i+1/2, j), shape (6, n+1, n)
-    #   dv_d/dt = -vort_abs * u_cross - dB/dx
-    #   where dB/dx is between cells (i, j) and (i+1, j)
-    #   and u_cross is u at the y-edge position
-
-    # dB/dy at x-edge (i, j+1/2): (B[i,j+1] - B[i,j]) / dyc[i,j+1/2]
-    # = rdyc * (B_pad[:, i+1, j] - B_pad[:, i+1, j+1])
-    # Wait: rdyc has shape (6, n, n+1) — correct for x-edge positions
-    dB_at_xedge = dB_y  # (6, n, n+1) — y-gradient at x-edge positions ✓
-
-    # dB/dx at y-edge (i+1/2, j): (B[i+1,j] - B[i,j]) / dxc[i+1/2,j]
-    # = rdxc * (B_pad[:, i, j+1] - B_pad[:, i+1, j+1])
-    # rdxc has shape (6, n+1, n) — correct for y-edge positions
-    dB_at_yedge = dB_x  # (6, n+1, n) — x-gradient at y-edge positions ✓
-
-    # Vorticity flux at x-edge (i, j+1/2):
-    # The two flanking corners are (i, j) and (i, j+1) in local coords.
-    # But corners are (n+1, n+1), with j indexing from 0 to n.
-    # x-edge (i, j+1/2) is between corners at column j and j+1.
-    # Actually, x-edge (i, j) in u_d indexing (6, n, n+1) is at
-    # position between corner-columns j-1 and j... this depends on
-    # the exact convention.
-
-    # Let me use a simpler approach: average vort_abs to x-edge and y-edge
-    # positions, then multiply by cross-velocity.
-
-    # For x-edge midpoint at u_d position (i, j) [j=0..n]:
-    # This is at the midpoint of the x-edge, between corner-rows i and i+1
-    # (but there are only n rows in u_d). Actually u_d is (6, n, n+1),
-    # so i=0..n-1, j=0..n.
-    # The x-edge at (i, j) sits between cells (i, j-1) and (i, j).
-    # The flanking corners in the y-direction are:
-    # corner (i, j) and corner (i+1, j) — these are in the i-direction
-
-    # Vorticity for upwind selection: vort_abs at corners surrounding the x-edge
-    # x-edge (i, j): flanked by corners (i, j) and (i+1, j) in i-direction
-    # The cross-velocity is v at this position.
-    # If v > 0 (flow from i to i+1), upwind vort is at corner (i, j)
-    # If v < 0, upwind vort is at corner (i+1, j)
-
-    # Cross-velocity v at x-edge (i, j): average v_d from surrounding y-edges
-    # v_d is (6, n+1, n) at y-edge midpoints.
-    # Nearby v_d values: v_d[i, j-1], v_d[i, j], v_d[i+1, j-1], v_d[i+1, j]
-    # Simple average: 0.25 * (v_d[i,j-1] + v_d[i,j] + v_d[i+1,j-1] + v_d[i+1,j])
-    # But j goes from 0 to n for u_d, and 0 to n-1 for v_d, so need padding.
-
-    # This is getting quite involved. Let me use a cleaner implementation.
-
-    # Vort at x-edge (i, j) for du_d/dt:
-    # Average of 4 surrounding corner vorticities:
-    # vort_abs[i, j], vort_abs[i+1, j], vort_abs[i, j+1]... wait.
-    # Actually for upwind, we need 2 corners and select based on cross-v.
-
-    # Let me pad vort_abs for indexing convenience
-    # vort_abs is (6, n+1, n+1)
-    # For u_d (6, n, n+1): du_dt[f, i, j] with i in [0,n), j in [0,n]
-    # Flanking corners in i: (i, j) and (i+1, j) — but which j?
-    # Actually the x-edge at u_d position (i, j) connects corner (i, j)
-    # to corner (i+1, j). So the cross-direction is j (y-direction).
-    # The vorticity for upwind: if v_cross > 0 (flow from low-j to high-j),
-    # upwind = corner (i or i+1, j) [the j side]; if v_cross < 0,
-    # upwind = corner (i or i+1, j+1)... no this isn't right either.
-
-    # I think the issue is that FV3 uses a specific convention that I need
-    # to follow exactly. Let me look at c_sw again.
-
-    # In FV3 c_sw (from fv3_sw_core.py lines 332-354):
-    # vort_x: upwind based on fy1 (cross-velocity at x-face)
-    #   fy1 = (v_d - uc * cosa_u) / sina_u at x-faces
-    #   vort_x = where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
-    # This means: at x-face (i, j) [u_c position, shape (6, n+1, n)]:
-    #   if fy1 > 0: use vort_abs[:, :, j] (lower j corner)
-    #   if fy1 < 0: use vort_abs[:, :, j+1] (upper j corner)
-    #
-    # Similarly for vort_y at y-face (v_c position, shape (6, n, n+1)):
-    #   fx1 = (u_d - vc * cosa_v) / sina_v
-    #   vort_y = where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
-    #   if fx1 > 0: use vort_abs[:, i, :] (lower i corner)
-    #   if fx1 < 0: use vort_abs[:, i+1, :] (upper i corner)
-
-    # The C-grid tendency is then:
-    #   duc = fy1 * vort_x + dke_x  [at x-face, shape (6, n+1, n)]
-    #   dvc = -fx1 * vort_y + dke_y  [at y-face, shape (6, n, n+1)]
-
-    # But wait — u_c is (6, n+1, n) and u_d is (6, n, n+1). These are
-    # at DIFFERENT positions!
-    # - u_c at x-face: (i+1/2, j), i.e. between cells in the x-direction
-    # - u_d at x-edge: (i, j+1/2), i.e. between cells in the y-direction
-
-    # So I CANNOT just set du_d_dt = duc. I need to average duc to u_d
-    # positions, or compute the tendency directly at u_d positions.
-
-    # The fv3_csw_tendencies function handles this by averaging:
-    #   duc_pad → du_dt via 4-point average (lines 476-478)
-
-    # Let me use that approach but with the corrected operators.
-
-    # Hmm, this means the stagger mismatch is unavoidable.
-    # Let me implement the FV3 c_sw tendency and project to D-grid.
-
-    # ---- Use the c_sw style: compute at C-grid, project to D-grid ----
-
-    # Vorticity at corners
-    vort = fv3_vorticity(u_d, v_d, cdgrid)
-    vort_abs2 = vort + cdgrid.f_corner
-
-    # Cross-velocities at C-grid faces
-    cosa_u = cdgrid.cosa_u  # (6, n+1, n)
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
-    fy1 = (v_d - u_c * cosa_u) / jnp.maximum(sina_u, _EPS)  # (6, n+1, n)
-    # At face boundaries use v_d directly (sin_sg cancellation)
-    fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
-    fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
-    fy1 = fy1.at[:, n - 1, :].set(v_d[:, n - 1, :])
-    fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
-
-    vort_x2 = jnp.where(fy1 > 0, vort_abs2[:, :, :-1], vort_abs2[:, :, 1:])
-
-    cosa_v = cdgrid.cosa_v  # (6, n, n+1)
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
-    fx1 = (u_d - v_c * cosa_v) / jnp.maximum(sina_v, _EPS)  # (6, n, n+1)
-    fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
-    fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])
-    fx1 = fx1.at[:, :, n - 1].set(u_d[:, :, n - 1])
-    fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
-
-    vort_y2 = jnp.where(fx1 > 0, vort_abs2[:, :-1, :], vort_abs2[:, 1:, :])
-
-    # C-grid tendencies
-    duc = fy1 * vort_x2 + dB_x      # (6, n+1, n) at x-face
-    dvc = -fx1 * vort_y2 + dB_y     # (6, n, n+1) at y-face
-
-    # Divergence damping at C-grid faces
-    if div_damp > 0:
-        div_field = cgrid_divergence(u_c, v_c, cdgrid)
-        div_pad = _pad_halo_auto(div_field, cdgrid)
-        ddiv_x = cdgrid.rdxc * (div_pad[:, :-1, 1:-1] - div_pad[:, 1:, 1:-1])
-        ddiv_y = cdgrid.rdyc * (div_pad[:, 1:-1, :-1] - div_pad[:, 1:-1, 1:])
-        duc = duc + div_damp * ddiv_x
-        dvc = dvc + div_damp * ddiv_y
-
-    # Biharmonic hyperdiffusion via cell-centre Laplacian (stable path)
-    if hyperdiff_coeff > 0:
-        from legoesm.core.operators import laplacian_compact
-        lap_u = laplacian_compact(u_cc, cdgrid.base)
-        bilap_u = laplacian_compact(lap_u, cdgrid.base)
-        lap_v = laplacian_compact(v_cc, cdgrid.base)
-        bilap_v = laplacian_compact(lap_v, cdgrid.base)
-        bilap_u_pad = _pad_halo_auto(bilap_u, cdgrid)
-        bilap_v_pad = _pad_halo_auto(bilap_v, cdgrid)
-        # Average to C-grid x-face for duc
-        bilap_at_xface = 0.5 * (bilap_u_pad[:, :-1, 1:-1] + bilap_u_pad[:, 1:, 1:-1])
-        duc = duc - hyperdiff_coeff * bilap_at_xface
-        # Average to C-grid y-face for dvc
-        bilap_at_yface = 0.5 * (bilap_v_pad[:, 1:-1, :-1] + bilap_v_pad[:, 1:-1, 1:])
-        dvc = dvc - hyperdiff_coeff * bilap_at_yface
-
-    # Project C-grid tendencies to D-grid edge-midpoint positions
-    # duc is (6, n+1, n) at x-face → du_d_dt at (6, n, n+1) x-edge midpoint
-    # dvc is (6, n, n+1) at y-face → dv_d_dt at (6, n+1, n) y-edge midpoint
-    # Use 4-point average with edge padding for the projection.
+    return dh_dt, du_d_dt, dv_d_dt
+    # duc (6, n+1, n) at uc-position → du_d_dt (6, n, n+1) at u_d-position
+    # dvc (6, n, n+1) at vc-position → dv_d_dt (6, n+1, n) at v_d-position
+    # These are at SWAPPED stagger positions, so use 4-point average.
     duc_pad = jnp.pad(duc, [(0, 0), (0, 0), (1, 1)], mode='edge')
     du_d_dt = 0.25 * (duc_pad[:, :-1, :-1] + duc_pad[:, 1:, :-1]
                        + duc_pad[:, :-1, 1:] + duc_pad[:, 1:, 1:])  # (6, n, n+1)

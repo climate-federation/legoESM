@@ -246,6 +246,139 @@ def _compute_sin_cos_sg(n, face_gnomonic_to_lonlat):
     return sin_sg, cos_sg
 
 
+def _supergrid_quad_area(px, py, pz, i0, j0, i1, j1, i2, j2, i3, j3, radius):
+    """Spherical area of a quadrilateral from 4 supergrid points via cross-product."""
+    # Diagonal vectors
+    d1x = px[i2, j2] - px[i0, j0]; d1y = py[i2, j2] - py[i0, j0]; d1z = pz[i2, j2] - pz[i0, j0]
+    d2x = px[i3, j3] - px[i1, j1]; d2y = py[i3, j3] - py[i1, j1]; d2z = pz[i3, j3] - pz[i1, j1]
+    cx = d1y * d2z - d1z * d2y
+    cy = d1z * d2x - d1x * d2z
+    cz = d1x * d2y - d1y * d2x
+    return 0.5 * jnp.sqrt(cx**2 + cy**2 + cz**2) * radius**2
+
+
+def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
+    """Compute area_c and dxc/dyc from the FV3 supergrid.
+
+    Uses the SAME 2x-refined supergrid as sin_sg/cos_sg to ensure all
+    metrics are mutually consistent (discrete Stokes theorem).
+
+    FV3 convention (fv_grid_tools.F90 line 1459):
+        area_c(i,j) = sum of 4 supergrid cell areas around dual-cell corner
+
+    FV3 convention (fv_grid_tools.F90 line 883):
+        dxc(i,j) = 2 * great_circle_dist(edge_midpoint, cell_center)
+
+    Returns
+    -------
+    area_c_all : (6, n+1, n+1) dual cell areas
+    dxc_all : (6, n+1, n) center-to-center distances in x
+    dyc_all : (6, n, n+1) center-to-center distances in y
+    """
+    import numpy as np
+
+    dalpha = np.pi / (2 * n)
+    n_sg = 2 * n + 1  # supergrid without extra padding
+    alpha_sg = np.linspace(-np.pi / 4, np.pi / 4, n_sg)
+    ax_sg, ay_sg = np.meshgrid(alpha_sg, alpha_sg, indexing='ij')
+
+    all_area_c = []
+    all_dxc = []
+    all_dyc = []
+
+    for face in range(6):
+        lon_sg, lat_sg = face_gnomonic_to_lonlat(face,
+            jnp.array(ax_sg), jnp.array(ay_sg))
+        lon_sg = np.asarray(lon_sg); lat_sg = np.asarray(lat_sg)
+        cos_lat = np.cos(lat_sg)
+        px = cos_lat * np.cos(lon_sg)
+        py = cos_lat * np.sin(lon_sg)
+        pz = np.sin(lat_sg)
+
+        # Supergrid indices:
+        #   Corner (i,j) at (2i, 2j)          i,j = 0..n
+        #   Cell center (i,j) at (2i+1, 2j+1) i,j = 0..n-1
+        #   x-edge midpoint at (2i, 2j+1)     between corners (2i,2j) and (2i,2j+2)
+        #   y-edge midpoint at (2i+1, 2j)
+
+        # --- area_c at dual-cell corners = cell centers ---
+        # Dual cell corner at cell center (i,j) = supergrid (2i+1, 2j+1)
+        # Sum of 4 surrounding supergrid quadrilateral areas.
+        # The 4 supergrid cells around (2i+1, 2j+1):
+        #   SW: (2i, 2j)-(2i+1, 2j)-(2i+1, 2j+1)-(2i, 2j+1)
+        #   SE: (2i+1, 2j)-(2i+2, 2j)-(2i+2, 2j+1)-(2i+1, 2j+1)
+        #   NE: (2i+1, 2j+1)-(2i+2, 2j+1)-(2i+2, 2j+2)-(2i+1, 2j+2)
+        #   NW: (2i, 2j+1)-(2i+1, 2j+1)-(2i+1, 2j+2)-(2i, 2j+2)
+
+        # Compute ALL supergrid quadrilateral areas: (2n, 2n)
+        # Each quad (si, sj) has corners at (si,sj),(si+1,sj),(si+1,sj+1),(si,sj+1)
+        d1x = px[1:, 1:] - px[:-1, :-1]; d1y = py[1:, 1:] - py[:-1, :-1]; d1z = pz[1:, 1:] - pz[:-1, :-1]
+        d2x = px[1:, :-1] - px[:-1, 1:]; d2y = py[1:, :-1] - py[:-1, 1:]; d2z = pz[1:, :-1] - pz[:-1, 1:]
+        cx = d1y*d2z - d1z*d2y; cy = d1z*d2x - d1x*d2z; cz = d1x*d2y - d1y*d2x
+        sg_area = 0.5 * np.sqrt(cx**2 + cy**2 + cz**2) * radius**2  # (2n, 2n)
+
+        # Sum 4 supergrid cells at each dual-cell corner (cell center position)
+        # Cell center (i,j) → supergrid (2i+1, 2j+1), i,j = 0..n-1
+        # But dual cell CORNER at grid corner (i,j), i,j = 0..n
+        # Grid corner (i,j) = supergrid (2i, 2j)
+        # The 4 supergrid cells around grid corner (2i, 2j):
+        #   SW: sg_area[2i-1, 2j-1], SE: sg_area[2i, 2j-1]
+        #   NW: sg_area[2i-1, 2j],   NE: sg_area[2i, 2j]
+        # For i,j = 0..n: need 2i-1 >= 0 and 2i <= 2n-1 → i = 1..n-1 for interior
+        # Boundaries use available cells only
+
+        area_c = np.zeros((n + 1, n + 1))
+        for i in range(n + 1):
+            for j in range(n + 1):
+                si, sj = 2 * i, 2 * j
+                total = 0.0
+                if si > 0 and sj > 0:
+                    total += sg_area[si - 1, sj - 1]
+                if si < 2 * n and sj > 0:
+                    total += sg_area[si, sj - 1]
+                if si > 0 and sj < 2 * n:
+                    total += sg_area[si - 1, sj]
+                if si < 2 * n and sj < 2 * n:
+                    total += sg_area[si, sj]
+                area_c[i, j] = total
+        all_area_c.append(area_c)
+
+        # --- dxc: distance between cell centers (i-1,j) and (i,j) ---
+        # Cell center (i,j) at supergrid (2i+1, 2j+1)
+        # dxc at x-face (i,j): dist from (2(i-1)+1, 2j+1) to (2i+1, 2j+1)
+        # = dist from (2i-1, 2j+1) to (2i+1, 2j+1) for i=1..n, j=0..n-1
+        # For i=0 and i=n (boundary), extrapolate
+        dxc = np.zeros((n + 1, n))
+        for i in range(n + 1):
+            for j in range(n):
+                si0 = max(2 * i - 1, 0)
+                si1 = min(2 * i + 1, 2 * n)
+                sj = 2 * j + 1
+                chord = np.sqrt((px[si0, sj] - px[si1, sj])**2
+                                + (py[si0, sj] - py[si1, sj])**2
+                                + (pz[si0, sj] - pz[si1, sj])**2)
+                dxc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+        all_dxc.append(dxc)
+
+        # --- dyc: distance between cell centers (i,j-1) and (i,j) ---
+        dyc = np.zeros((n, n + 1))
+        for i in range(n):
+            for j in range(n + 1):
+                si = 2 * i + 1
+                sj0 = max(2 * j - 1, 0)
+                sj1 = min(2 * j + 1, 2 * n)
+                chord = np.sqrt((px[si, sj0] - px[si, sj1])**2
+                                + (py[si, sj0] - py[si, sj1])**2
+                                + (pz[si, sj0] - pz[si, sj1])**2)
+                dyc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+        all_dyc.append(dyc)
+
+    area_c_all = jnp.array(np.stack(all_area_c, axis=0))
+    dxc_all = jnp.array(np.stack(all_dxc, axis=0))
+    dyc_all = jnp.array(np.stack(all_dyc, axis=0))
+    return area_c_all, dxc_all, dyc_all
+
+
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
     omega: float = 7.292e-5,
@@ -519,13 +652,16 @@ def create_cubed_sphere_cdgrid(
     sina_corner = jnp.sqrt(jnp.maximum(1.0 - cosa_corner**2, _EPS))
     rsin2_corner = 1.0 / jnp.maximum(sina_corner**2, _EPS)
 
-    # Average to C-grid positions
+    # Average to C-grid positions from corner values.
+    # FV3 uses sin_sg at cell face midpoints (fv_grid_utils.F90 L504-515)
+    # but our corner D-grid operators use cosa_corner, so C-grid face
+    # metrics must be derived from the SAME corners for consistency.
     cosa_u = 0.5 * (cosa_corner[:, :, :-1] + cosa_corner[:, :, 1:])  # (6, n+1, n)
     cosa_v = 0.5 * (cosa_corner[:, :-1, :] + cosa_corner[:, 1:, :])  # (6, n, n+1)
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
-    rsin_u = 1.0 / sina_u
-    rsin_v = 1.0 / sina_v
+    sina_u = 0.5 * (sina_corner[:, :, :-1] + sina_corner[:, :, 1:])  # (6, n+1, n)
+    sina_v = 0.5 * (sina_corner[:, :-1, :] + sina_corner[:, 1:, :])  # (6, n, n+1)
+    rsin_u = 1.0 / jnp.maximum(sina_u, _EPS)
+    rsin_v = 1.0 / jnp.maximum(sina_v, _EPS)
 
     # ------------------------------------------------------------------
     # FV3 edge-midpoint D-grid metrics
@@ -744,7 +880,10 @@ def create_cubed_sphere_cdgrid(
     y_cc = cos_lat_cc * jnp.sin(base.lon)
     z_cc = jnp.sin(base.lat)
 
-    # Pad with the same halo exchange used for field values at runtime
+    # Pad with the same halo exchange used for field values at runtime.
+    # Interpolation of positions is required: without it, the nearest-
+    # neighbor positional mismatch (up to 0.5 cells near cube vertices)
+    # creates O(1) errors in the gradient transformation matrix.
     x_pad = pad_halo(x_cc, interp_offsets=base.halo_interp_offsets)
     y_pad = pad_halo(y_cc, interp_offsets=base.halo_interp_offsets)
     z_pad = pad_halo(z_cc, interp_offsets=base.halo_interp_offsets)
@@ -754,21 +893,16 @@ def create_cubed_sphere_cdgrid(
 
     # ------------------------------------------------------------------
     # FV3 c_sw metrics: center-to-center distances across C-grid faces.
-    # dxc(i,j) = great-circle distance between cell (i-1,j) and cell (i,j)
-    #            at x-interface i, shape (6, n+1, n).
-    # dyc(i,j) = distance between cell (i,j-1) and cell (i,j)
-    #            at y-interface j, shape (6, n, n+1).
-    # In padded coords: cell (i,j) → padded (i+1, j+1).
+    # Computed from the SAME halo-exchanged cell-centre positions as the
+    # Arakawa-Lamb gradient, ensuring consistency between dxc/rdxc and
+    # the haloed field values used in gradient/vorticity operators.
     # ------------------------------------------------------------------
-    # x-direction: adjacent cells in i-direction
     chord_xc = jnp.sqrt(
         (x_pad[:, :-1, 1:-1] - x_pad[:, 1:, 1:-1]) ** 2
         + (y_pad[:, :-1, 1:-1] - y_pad[:, 1:, 1:-1]) ** 2
         + (z_pad[:, :-1, 1:-1] - z_pad[:, 1:, 1:-1]) ** 2
     )  # (6, n+1, n)
     dxc = radius * 2.0 * jnp.arcsin(jnp.clip(chord_xc / 2.0, 0.0, 1.0))
-
-    # y-direction: adjacent cells in j-direction
     chord_yc = jnp.sqrt(
         (x_pad[:, 1:-1, :-1] - x_pad[:, 1:-1, 1:]) ** 2
         + (y_pad[:, 1:-1, :-1] - y_pad[:, 1:-1, 1:]) ** 2
