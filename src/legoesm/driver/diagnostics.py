@@ -166,11 +166,17 @@ class DiagnosticCollector:
             return apply_cubedsphere_to_latlon(
                 np.asarray(field), self._cs_regrid_weights,
             )
-        # Lat-lon / Gaussian: field is already (nlat, nlon)
+        # Lat-lon / Gaussian: field is (src_nlat, src_nlon).
+        # Resample to CMIP target grid when sizes differ.
         arr = np.asarray(field)
-        if arr.ndim == 2:
+        if arr.ndim != 2:
+            return None
+        target = (self._cmip_nlat, self._cmip_nlon)
+        if arr.shape == target:
             return arr
-        return None
+        from scipy.ndimage import zoom
+        return zoom(arr, (target[0] / arr.shape[0], target[1] / arr.shape[1]),
+                    order=1, mode='nearest')
 
     def _regrid_to_latlon_3d(self, field) -> np.ndarray | None:
         """Regrid a 3-D field to the CMIP lat-lon grid.
@@ -183,9 +189,14 @@ class DiagnosticCollector:
                 np.asarray(field), self._cs_regrid_weights,
             )
         arr = np.asarray(field)
-        if arr.ndim == 3:
+        if arr.ndim != 3:
+            return None
+        target = (self._cmip_nlat, self._cmip_nlon)
+        if arr.shape[:2] == target:
             return arr
-        return None
+        from scipy.ndimage import zoom
+        return zoom(arr, (target[0] / arr.shape[0], target[1] / arr.shape[1], 1.0),
+                    order=1, mode='nearest')
 
     def _interp_to_plev19(self, field_3d, p_s) -> np.ndarray | None:
         """Interpolate a 3-D field from model levels to CMIP6 plev19.
