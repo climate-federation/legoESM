@@ -1301,8 +1301,15 @@ def _make_check_fn(grid_type: str):
         return check_fn
 
 
-def _make_scalar_fn(grid_type: str, grid=None):
-    """Return a scalar_fn(state) -> dict for diagnostics."""
+def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
+    """Return a scalar_fn(state) -> dict for diagnostics.
+
+    When *z_coord* is provided, mean_T and mean_S are volume-weighted
+    (sum(T * dz * area * mask) / sum(dz * area * mask)).  Without it
+    the diagnostic falls back to an unweighted nanmean, which drifts
+    spuriously when vertical diffusion redistributes heat across layers
+    of different thickness.
+    """
     if grid_type == "spectral":
         if grid is None:
             raise ValueError("Grid object required for spectral scalar function")
@@ -1340,35 +1347,41 @@ def _make_scalar_fn(grid_type: str, grid=None):
                     "mean_S": float(jnp.mean(S_phys)),               # PSU
                 }
         return scalar_fn
-    elif grid_type == "mpas":
+    elif grid_type in ("mpas", "mpas_regional"):
+        # Capture z_coord layer thicknesses and cell areas for
+        # volume-weighted diagnostics.
+        _area = grid.areaCell if grid is not None else None
+        _dz = z_coord.dz_ref if z_coord is not None else None
+
         def scalar_fn(s):
-            # MPAS land masking using post-regridding approach
-            # Note: This is less accurate than pre-regridding masking with mesh topology,
-            # but simpler to implement. Future versions could use MPAS mesh connectivity
-            # to map cell-centered land masks to edge-centered velocity fields.
-            
             if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
-                # For MPAS, apply masking by excluding land cell values
-                land_mask = s.land_mask.data > 0.5
-                
-                # Cell-centered fields: direct masking
-                eta_ocean = jnp.where(land_mask, s.eta.data, jnp.nan)
-                T_ocean = jnp.where(land_mask[..., jnp.newaxis], s.T.data, jnp.nan)
-                S_ocean = jnp.where(land_mask[..., jnp.newaxis], s.S.data, jnp.nan)
-                
-                # Edge-centered fields: use global statistics for now
-                # TODO: Map cell mask to edge mask using MPAS mesh topology
+                mask = s.land_mask.data > 0.5
+
+                # Area-weighted eta mean
+                eta_ocean = jnp.where(mask, s.eta.data, jnp.nan)
+
+                # Volume-weighted T and S means
+                if _area is not None and _dz is not None:
+                    vol = _area[:, None] * _dz[None, :] * mask[:, None]
+                    vol_sum = jnp.sum(vol)
+                    mean_T = float(jnp.sum(s.T.data * vol) / vol_sum)
+                    mean_S = float(jnp.sum(s.S.data * vol) / vol_sum)
+                else:
+                    T_ocean = jnp.where(mask[:, None], s.T.data, jnp.nan)
+                    S_ocean = jnp.where(mask[:, None], s.S.data, jnp.nan)
+                    mean_T = float(jnp.nanmean(T_ocean))
+                    mean_S = float(jnp.nanmean(S_ocean))
+
                 max_abs_u = float(jnp.max(jnp.abs(s.u.data)))
-                
+
                 return {
                     "mean_eta": float(jnp.nanmean(eta_ocean)),
                     "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))),
-                    "mean_T": float(jnp.nanmean(T_ocean)),
-                    "mean_S": float(jnp.nanmean(S_ocean)),
-                    "max_abs_u": max_abs_u,  # Unmasked for now
+                    "mean_T": mean_T,
+                    "mean_S": mean_S,
+                    "max_abs_u": max_abs_u,
                 }
             else:
-                # Fallback without masking
                 return {
                     "mean_eta": float(jnp.mean(s.eta.data)),
                     "max_abs_eta": float(jnp.max(jnp.abs(s.eta.data))),
@@ -1378,34 +1391,44 @@ def _make_scalar_fn(grid_type: str, grid=None):
                 }
         return scalar_fn
     else:
+        # Cubed-sphere and lat-lon grids.
+        # Capture grid area and z_coord for volume-weighted diagnostics.
+        _area = grid.area if (grid is not None and hasattr(grid, 'area')) else None
+        _dz = z_coord.dz_ref if z_coord is not None else None
+
         def scalar_fn(s):
-            # Apply ocean masking for cubed-sphere and lat-lon
             if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
-                ocean_mask = s.land_mask.data > 0.5  # Shape: (6, 24, 24)
-                
-                # For 2D fields (eta): use mask directly
+                ocean_mask = s.land_mask.data > 0.5
+
                 eta_ocean = jnp.where(ocean_mask, s.eta.data, jnp.nan)
-                
-                # For 3D fields (T, S): expand mask to 3D
-                ocean_mask_3d = ocean_mask[..., jnp.newaxis]  # Shape: (6, 24, 24, 1)
-                T_ocean = jnp.where(ocean_mask_3d, s.T.data, jnp.nan) 
-                S_ocean = jnp.where(ocean_mask_3d, s.S.data, jnp.nan)
-                
-                # For velocity, apply mask to 2D surface fields
+
+                # Volume-weighted T and S means
+                if _area is not None and _dz is not None:
+                    vol = _area[..., None] * _dz * ocean_mask[..., None]
+                    vol_sum = jnp.sum(vol)
+                    mean_T = float(jnp.sum(s.T.data * vol) / vol_sum)
+                    mean_S = float(jnp.sum(s.S.data * vol) / vol_sum)
+                else:
+                    ocean_mask_3d = ocean_mask[..., jnp.newaxis]
+                    T_ocean = jnp.where(ocean_mask_3d, s.T.data, jnp.nan)
+                    S_ocean = jnp.where(ocean_mask_3d, s.S.data, jnp.nan)
+                    mean_T = float(jnp.nanmean(T_ocean))
+                    mean_S = float(jnp.nanmean(S_ocean))
+
                 if hasattr(s, 'u') and hasattr(s, 'v'):
-                    u_sfc = s.u.data[..., 0]  # Surface level
+                    u_sfc = s.u.data[..., 0]
                     v_sfc = s.v.data[..., 0]
                     speed_sfc = jnp.sqrt(u_sfc ** 2 + v_sfc ** 2)
                     speed_ocean = jnp.where(ocean_mask, speed_sfc, jnp.nan)
                     max_speed = float(jnp.nanmax(speed_ocean))
                 else:
                     max_speed = 0.0
-                
+
                 return {
                     "mean_eta": float(jnp.nanmean(eta_ocean)),
                     "max_abs_eta": float(jnp.nanmax(jnp.abs(eta_ocean))),
-                    "mean_T": float(jnp.nanmean(T_ocean)),
-                    "mean_S": float(jnp.nanmean(S_ocean)),
+                    "mean_T": mean_T,
+                    "mean_S": mean_S,
                     "max_speed": max_speed,
                 }
             else:
@@ -1604,7 +1627,7 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -1670,7 +1693,7 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -1715,6 +1738,119 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
     return "PASS" if ok else "FAIL", wall, notes
 
 
+def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
+                              ) -> tuple[str, float, str]:
+    """Rest state with land but uniform T/S — diagnostic for baroclinic PGF hypothesis.
+
+    If the stratified rest_state (with land) blows up but this test stays
+    stable, it confirms the baroclinic pressure gradient is the primary
+    trigger for land-boundary instabilities.
+    """
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc))
+    state = _create_rest_state_uniform_ts(tc, grid, z_coord)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Rest State Uniform T/S ({tc.grid_type})", total_days=days)
+
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_drift = _compute_drift(diag.get("mean_T", []))
+    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"Rest State Uniform T/S {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: float
+                                      ) -> tuple[str, float, str]:
+    """Rest state with uniform T/S and no land — control for uniform_ts diagnostic."""
+    grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc))
+    state = _create_rest_state_uniform_ts_no_land(tc, grid, z_coord)
+
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 20)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Rest State Uniform T/S No Land ({tc.grid_type})", total_days=days)
+
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_drift = _compute_drift(diag.get("mean_T", []))
+    notes = f"eta drift={eta_drift:.2e}, T drift={T_drift:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+    _save_case_diagnostics(
+        output_dir, f"Rest State Uniform T/S No Land {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta",
+        heat_key="mean_T",
+        salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
 # ===========================================================================
 # Runner: Barotropic Wave
 # ===========================================================================
@@ -1736,7 +1872,7 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -1859,7 +1995,7 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
     diag_every = max(1, n_steps // 40)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -1938,7 +2074,7 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     def step_fn(s, dt_):
@@ -2119,7 +2255,7 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     # Relaxation forcing toward target temperature profiles
@@ -2377,7 +2513,7 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 20)
 
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     state, snapshots, diag, wall, ok = _run_timeloop(
@@ -2547,7 +2683,7 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
 
     # Custom scalar function that includes PE
-    base_scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    base_scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
 
     def scalar_fn(s):
         scalars = base_scalar_fn(s)
@@ -2698,7 +2834,7 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
 
     check_fn = _make_check_fn(tc.grid_type)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
-    base_scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    base_scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
 
     def scalar_fn(s):
         scalars = base_scalar_fn(s)
@@ -2846,7 +2982,7 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
 
     check_fn = _make_check_fn(tc.grid_type)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
-    base_scalar_fn = _make_scalar_fn(tc.grid_type, grid)
+    base_scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
 
     def scalar_fn(s):
         scalars = base_scalar_fn(s)
@@ -3387,6 +3523,24 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
+    # ---------------------------------------------------------------
+    # Use float64 precision for the validation test matrix.
+    #
+    # The default PrecisionPolicy is float32, which is faster on GPUs
+    # and suitable for production runs.  However, float32 introduces
+    # rounding noise (~1e-7 relative per step) that accumulates in
+    # conservation diagnostics and masks real discretisation errors.
+    # For example, the stratified rest-state test shows a spurious
+    # temperature drift of ~3e-5 degC/day in float32 that vanishes
+    # entirely in float64 — the vertical diffusion operator is in
+    # fact perfectly conservative.
+    #
+    # Running the test matrix in float64 ensures that any drift we
+    # detect is a genuine bug in the numerics, not arithmetic noise.
+    # ---------------------------------------------------------------
+    from legoesm.core.precision import set_policy, PrecisionPolicy
+    set_policy(PrecisionPolicy.fp64())
+
     # Override global defaults if specified
     global DEFAULT_NLEV, DEFAULT_DT
     DEFAULT_NLEV = args.levels
@@ -3421,7 +3575,9 @@ def main():
     print("=" * 78)
     print("  legoESM Ocean Test Matrix")
     print("=" * 78)
+    from legoesm.core.precision import get_policy
     print(f"  Backend:    {jax.default_backend()}")
+    print(f"  Precision:  {get_policy().storage.__name__}")
     print(f"  X64:        {jax.config.jax_enable_x64}")
     print(f"  Devices:    {jax.devices()}")
     print(f"  Output:     {output_base}")
