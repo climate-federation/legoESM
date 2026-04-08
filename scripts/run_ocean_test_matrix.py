@@ -393,11 +393,21 @@ def _build_latlon_weights(
     n_lat: int = 181,
     n_lon: int = 360,
     k: int = 6,
+    max_dist: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build KDTree interpolation weights from unstructured to lat-lon grid.
 
     Returns (idxs, weights) arrays of shape (n_lat*n_lon, K) for K-nearest-
     neighbor inverse-distance weighting in 3-D Cartesian coordinates.
+
+    Parameters
+    ----------
+    max_dist : float, optional
+        Maximum 3-D Cartesian distance (on the unit sphere) for a valid
+        neighbour.  Target points whose nearest source cell is farther
+        than this get zero weight and will produce NaN after
+        ``_apply_weights``.  Prevents extrapolation artefacts in
+        regional meshes.
     """
     lon = ((np.asarray(lon_deg, dtype=np.float64).ravel() + 180) % 360) - 180
     lat = np.clip(np.asarray(lat_deg, dtype=np.float64).ravel(), -90, 90)
@@ -420,7 +430,12 @@ def _build_latlon_weights(
         dists = dists[:, None]
         idxs = idxs[:, None]
     w = 1.0 / np.maximum(dists, 1e-12)
-    w /= w.sum(axis=1, keepdims=True)
+    # Zero out weights for target points too far from any source cell.
+    if max_dist is not None:
+        too_far = dists[:, 0] > max_dist
+        w[too_far] = 0.0
+    w_sum = w.sum(axis=1, keepdims=True)
+    w = np.where(w_sum > 0, w / np.maximum(w_sum, 1e-30), 0.0)
     return idxs, w
 
 
@@ -443,12 +458,38 @@ def _bin_to_latlon(
     lat_deg: np.ndarray,
     n_lat: int = 181,
     n_lon: int = 360,
+    max_dist: float | None = None,
 ) -> np.ndarray:
-    """Interpolate unstructured points onto a regular lat-lon grid."""
+    """Interpolate unstructured points onto a regular lat-lon grid.
+
+    Parameters
+    ----------
+    max_dist : float, optional
+        If given, target grid points whose nearest source cell is farther
+        than this (3-D Cartesian distance on unit sphere) are set to NaN.
+        Automatically estimated for regional meshes when not provided.
+    """
     vals = np.asarray(values, dtype=np.float64).ravel()
     if not np.any(np.isfinite(vals)):
         return np.full((n_lat, n_lon), np.nan, dtype=np.float64)
-    idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon)
+    # Auto-detect regional mesh: if the source points span < 80% of
+    # the globe in latitude, apply a distance cutoff to prevent
+    # extrapolation artefacts outside the mesh.
+    if max_dist is None:
+        lat = np.asarray(lat_deg, dtype=np.float64).ravel()
+        lat_span = lat.max() - lat.min()
+        if lat_span < 0.8 * 180:
+            # Regional: max_dist ≈ 3× median cell spacing (on unit sphere)
+            lon = np.asarray(lon_deg, dtype=np.float64).ravel()
+            d2r = np.pi / 180.0
+            # Rough estimate: sqrt(4π / N) gives mean angular cell spacing
+            n_pts = len(lat)
+            mean_spacing = np.sqrt(
+                d2r**2 * lat_span * min(360, lon.max() - lon.min()) / n_pts)
+            # Convert angular spacing to 3-D chord distance
+            max_dist = 2.0 * np.sin(0.5 * mean_spacing * 3.0)
+    idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon,
+                                     max_dist=max_dist)
     return _apply_weights(vals, idxs, w, n_lat, n_lon)
 
 
@@ -497,7 +538,19 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     nlev = arr.shape[-1]
     n_lat, n_lon = 181, 360
     flat = arr.reshape(-1, nlev)
-    idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon)
+    # Auto-detect regional mesh and apply distance cutoff
+    lat = np.asarray(lat_deg, dtype=np.float64).ravel()
+    max_dist = None
+    if lat.max() - lat.min() < 0.8 * 180:
+        lon = np.asarray(lon_deg, dtype=np.float64).ravel()
+        d2r = np.pi / 180.0
+        n_pts = len(lat)
+        mean_spacing = np.sqrt(
+            d2r**2 * (lat.max() - lat.min())
+            * min(360, lon.max() - lon.min()) / n_pts)
+        max_dist = 2.0 * np.sin(0.5 * mean_spacing * 3.0)
+    idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon,
+                                     max_dist=max_dist)
     out = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
     for k in range(nlev):
         out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon)
@@ -678,29 +731,41 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
         for idx, step in enumerate(steps):
             r, c = divmod(idx, n_cols)
             ax = axes[r, c]
-            raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
-            regridded = _regrid_2d(raw, lon_deg, lat_deg, coord_kind)
-            
-            # Apply land masking if land_mask is available
-            if "land_mask" in snapshots[step]:
-                land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
-                land_mask_regridded = _regrid_2d(land_mask_raw, lon_deg, lat_deg, coord_kind)
-                # Mask land areas (where land_mask ≤ 0.5) with NaN
-                regridded = np.where(land_mask_regridded > 0.5, regridded, np.nan)
-            
-            # Compute extent from actual coordinates
+            regridded = all_regridded[idx]
+
+            # Compute extent from actual coordinates.
+            # For unstructured grids (cube, mpas) the regridded array
+            # covers [-180,180] × [-90,90].  For regional meshes, crop
+            # to the data extent so the plot zooms into the domain.
             if coord_kind in ("latlon", "gaussian"):
                 lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
                 lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
                 lon_ext = [float(lon_flat.min()), float(lon_flat.max())]
                 lat_ext = [float(lat_flat.min()), float(lat_flat.max())]
+                plot_data = regridded
             else:
-                lon_ext = [-180, 180]
-                lat_ext = [-90, 90]
-            # Individual grid plots use auto-scaling for maximum detail
+                # The regridded array is (181, 360) on
+                # lat ∈ [-90, 90], lon ∈ [-180, 180].
+                lat_1d = np.linspace(-90, 90, regridded.shape[0])
+                lon_1d = np.linspace(-180, 180, regridded.shape[1])
+                # Find the bounding box of non-NaN data.
+                valid = np.isfinite(regridded)
+                if valid.any():
+                    rows = np.where(valid.any(axis=1))[0]
+                    cols = np.where(valid.any(axis=0))[0]
+                    r0, r1 = max(rows[0] - 1, 0), min(rows[-1] + 2, len(lat_1d))
+                    c0, c1 = max(cols[0] - 1, 0), min(cols[-1] + 2, len(lon_1d))
+                    plot_data = regridded[r0:r1, c0:c1]
+                    lon_ext = [float(lon_1d[c0]), float(lon_1d[min(c1, len(lon_1d)-1)])]
+                    lat_ext = [float(lat_1d[r0]), float(lat_1d[min(r1, len(lat_1d)-1)])]
+                else:
+                    plot_data = regridded
+                    lon_ext = [-180, 180]
+                    lat_ext = [-90, 90]
             im = ax.imshow(
-                regridded, origin="lower", aspect="auto", cmap=cmap,
-                extent=[lon_ext[0], lon_ext[1], lat_ext[0], lat_ext[1]])
+                plot_data, origin="lower", aspect="auto", cmap=cmap,
+                extent=[lon_ext[0], lon_ext[1], lat_ext[0], lat_ext[1]],
+                vmin=vmin, vmax=vmax)
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             if c == 0:
