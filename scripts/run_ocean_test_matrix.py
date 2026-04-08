@@ -4147,8 +4147,151 @@ def main():
         print("  ALL CROSS-GRID COMPARISONS COMPLETED DURING RUN")
         print("=" * 78)
 
+    # Generate rest-state cross-variant comparison
+    _create_rest_state_cross_variant_comparison(output_base)
+
     if n_fail > 0 or n_error > 0:
         sys.exit(1)
+
+
+# ===========================================================================
+# Rest-state cross-variant comparison
+# ===========================================================================
+
+REST_STATE_VARIANTS_LIST = [
+    "rest_state",
+    "rest_state_uniform_ts",
+    "rest_state_no_land",
+    "rest_state_uniform_ts_no_land",
+]
+
+REST_STATE_VARIANT_LABELS = {
+    "rest_state":                    "Stratified + Land",
+    "rest_state_uniform_ts":         "Uniform T/S + Land",
+    "rest_state_no_land":            "Stratified, No Land",
+    "rest_state_uniform_ts_no_land": "Uniform T/S, No Land",
+}
+
+REST_STATE_VARIANT_COLORS = {
+    "rest_state":                    "red",
+    "rest_state_uniform_ts":         "orange",
+    "rest_state_no_land":            "blue",
+    "rest_state_uniform_ts_no_land": "green",
+}
+
+
+def _create_rest_state_cross_variant_comparison(output_base: Path):
+    """Create a combined comparison plot across all rest-state variants and grids.
+
+    Produces a (3 rows × 3 cols) figure:
+    - Rows: grids (cubed_sphere, latlon, mpas)
+    - Cols: eta drift, T drift, S drift
+    Each panel overlays the 4 rest-state variants as different colored lines.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    grids = ["cubed_sphere", "latlon", "mpas"]
+
+    # Collect conservation timeseries for all variants × grids
+    data = {}  # (variant, grid) -> DataFrame
+    for variant in REST_STATE_VARIANTS_LIST:
+        for grid in grids:
+            # Find the resolution dir
+            variant_dir = output_base / variant / grid
+            if not variant_dir.exists():
+                continue
+            res_dirs = [d for d in variant_dir.iterdir() if d.is_dir()]
+            if not res_dirs:
+                continue
+            csv_file = res_dirs[0] / "conservation_timeseries.csv"
+            if csv_file.exists():
+                try:
+                    df = pd.read_csv(csv_file)
+                    data[(variant, grid)] = df
+                except Exception:
+                    continue
+
+    if not data:
+        print("  No rest-state conservation data found for cross-variant comparison.")
+        return
+
+    print("\n" + "=" * 78)
+    print("  REST-STATE CROSS-VARIANT COMPARISON")
+    print("=" * 78)
+
+    fig, axes = plt.subplots(len(grids), 3, figsize=(15, 3.5 * len(grids)),
+                              sharex=True)
+    if len(grids) == 1:
+        axes = axes[np.newaxis, :]
+
+    col_labels = ["Volume (eta) relative drift", "Heat (T) relative drift",
+                  "Salt (S) relative drift"]
+    col_keys = ["vol_rel", "heat_rel", "salt_rel"]
+
+    for i_grid, grid in enumerate(grids):
+        for i_col, (col_key, col_label) in enumerate(zip(col_keys, col_labels)):
+            ax = axes[i_grid, i_col]
+            any_plotted = False
+            for variant in REST_STATE_VARIANTS_LIST:
+                key = (variant, grid)
+                if key not in data:
+                    continue
+                df = data[key]
+                if col_key not in df.columns:
+                    continue
+                label = REST_STATE_VARIANT_LABELS.get(variant, variant)
+                color = REST_STATE_VARIANT_COLORS.get(variant, "gray")
+                ax.plot(df["time_days"], df[col_key], label=label, color=color,
+                        linewidth=1.5)
+                any_plotted = True
+
+            ax.set_ylabel(col_label if i_grid == 0 else "")
+            ax.ticklabel_format(axis='y', style='scientific', scilimits=(-3, 3))
+            ax.grid(True, alpha=0.3)
+            if i_grid == 0:
+                ax.set_title(col_label, fontsize=10)
+            if i_grid == len(grids) - 1:
+                ax.set_xlabel("Time (days)")
+            if i_col == 0:
+                ax.text(-0.25, 0.5, grid, transform=ax.transAxes,
+                        fontsize=12, fontweight='bold', va='center',
+                        rotation=90)
+            if any_plotted and i_grid == 0 and i_col == 2:
+                ax.legend(fontsize=7, loc='upper left')
+
+    fig.suptitle("Rest-State Cross-Variant Comparison\n"
+                 "(4 variants × 3 grids, conservation drift)",
+                 fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0.03, 0, 1, 0.95])
+
+    out_path = output_base / "rest_state_cross_variant_comparison.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {out_path}")
+
+    # Also create a summary table
+    summary_path = output_base / "rest_state_cross_variant_summary.txt"
+    with open(summary_path, 'w') as f:
+        f.write("Rest-State Cross-Variant Summary\n")
+        f.write("=" * 80 + "\n\n")
+        f.write(f"{'Variant':<35} {'Grid':<15} {'eta drift':>12} {'T drift':>12} {'S drift':>12}\n")
+        f.write("-" * 86 + "\n")
+        for variant in REST_STATE_VARIANTS_LIST:
+            for grid in grids:
+                key = (variant, grid)
+                if key not in data:
+                    continue
+                df = data[key]
+                last = df.iloc[-1]
+                eta_d = last.get("vol_rel", 0)
+                t_d = last.get("heat_rel", 0)
+                s_d = last.get("salt_rel", 0)
+                label = REST_STATE_VARIANT_LABELS.get(variant, variant)
+                f.write(f"{label:<35} {grid:<15} {eta_d:>12.2e} {t_d:>12.2e} {s_d:>12.2e}\n")
+            f.write("\n")
+    print(f"  Saved: {summary_path}")
 
 
 if __name__ == "__main__":
