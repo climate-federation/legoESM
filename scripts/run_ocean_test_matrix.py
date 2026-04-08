@@ -1875,7 +1875,7 @@ def _add_baroclinic_perturbation(state, grid_type: str, grid, z_coord):
         else:
             lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
 
-        T_data = np.asarray(state.T.data, dtype=np.float64)
+        T_data = np.array(state.T.data, dtype=np.float64)  # writeable copy
         nlev = T_data.shape[-1]
         T_pert = 5.0 * np.cos(np.radians(lat))
         # Reshape T_pert to broadcast with T_data[..., k]
