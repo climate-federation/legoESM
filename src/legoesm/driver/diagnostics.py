@@ -718,9 +718,12 @@ class DiagnosticCollector:
         if not months:
             return
 
-        # Build lat/lon for the CMIP grid
-        lat = np.linspace(-90.0, 90.0, self._cmip_nlat)
-        lon = np.linspace(0.0, 360.0, self._cmip_nlon, endpoint=False)
+        # Build lat/lon for the CMIP grid using cell centres.
+        # For a 5° grid with 36 bands: centres at -87.5, -82.5, ..., 87.5.
+        res_lat = 180.0 / self._cmip_nlat
+        res_lon = 360.0 / self._cmip_nlon
+        lat = np.linspace(-90.0 + 0.5 * res_lat, 90.0 - 0.5 * res_lat, self._cmip_nlat)
+        lon = np.linspace(0.5 * res_lon, 360.0 - 0.5 * res_lon, self._cmip_nlon)
 
         # Days in each month (noleap calendar)
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
@@ -729,7 +732,11 @@ class DiagnosticCollector:
         from legoesm.io.cmor_output import CMIP6_PLEV19
 
         for i, (yr, mo) in enumerate(months):
-            year_offset = (yr - start_year) * 365.0
+            # yr is the simulation year (0 = first year of run).
+            # Convert to days since 0001-01-01 using the calendar start year.
+            # year_offset = (start_year - 1 + yr) * 365 gives the number of
+            # complete noleap years elapsed from 0001-01-01 to this sim year.
+            year_offset = (start_year - 1 + yr) * 365.0
             day_start = year_offset + sum(month_days[:mo - 1])
             day_end = day_start + month_days[mo - 1]
             time_mid = 0.5 * (day_start + day_end)
