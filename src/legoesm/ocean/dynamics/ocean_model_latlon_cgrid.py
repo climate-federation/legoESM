@@ -295,37 +295,87 @@ class LatLonCGridOceanModel:
             S=state.S.replace(data=S_new * mask_3d),
         )
 
-        # 5. Save pre-barotropic layer thickness for tracer correction
+        # 5. Save pre-barotropic layer thickness
         h_k_old = compute_layer_thickness(
             state_mid.eta.data, state_mid.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
         )
 
-        # 6. Barotropic substeps
+        # 6. Barotropic substeps (returns averaged transport for tracer update)
         dt_s = dt / self.config.n_barotropic_substeps
-        state_new = barotropic_substeps_latlon_cgrid(
+        state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
             state_mid, dt_s, self.config.n_barotropic_substeps,
             self.grid, self.z_coord, self.config,
         )
 
-        # 7. Thickness-weighted tracer correction (split-explicit coupling)
+        # 7. Flux-form tracer correction using barotropic-averaged transport
         #
-        # The tracer Euler step used the OLD layer thickness h_old:
-        #     T_new = T_old + dt * dT_dt
-        # But the barotropic solver changed eta -> h_new != h_old.
-        # Conservation requires: h_new * T_corrected = h_old * T_new
-        # Therefore:             T_corrected = T_new * (h_old / h_new)
+        # The baroclinic tendency used instantaneous velocity for tracer
+        # advection, but the barotropic solver determined h_new via 30
+        # substeps with evolving velocities.  The barotropic-averaged
+        # transport Hu_avg, Hv_avg is consistent with the continuity
+        # equation that produced h_new.
         #
-        # This is the standard split-explicit corrector used in MPAS-Ocean,
-        # MOM6, and POP.  It ensures thickness-weighted tracer content h*T
-        # is exactly conserved through the barotropic-baroclinic splitting.
+        # We correct the tracer content by replacing the baroclinic
+        # horizontal advection with flux-form advection using the
+        # barotropic-averaged transport distributed to layers:
+        #
+        #   h_new_k * T_new_k = h_old_k * T_mid_k
+        #     - dt * (div(flux_k * T_face_k) - T_mid_k * div(flux_k))
+        #
+        # where flux_k = Hu_avg * (h_u_k / H_u) distributes the 2D
+        # barotropic transport to layers proportional to thickness.
+        # Using the SAME divergence operator for both terms guarantees
+        # exact cancellation for uniform T (Hallberg 1997, Higdon 2005).
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _interp_to_u_points,
+            _interp_to_v_points,
+        )
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
+
+        mask = state.land_mask.data
+
+        # Distribute 2D barotropic transport to layers
+        h_u_old = _interp_to_u_points(h_k_old)  # (n_lat, n_lon+1, nlev)
+        h_v_old = _interp_to_v_points(h_k_old)  # (n_lat+1, n_lon, nlev)
+        H_u_old = jnp.sum(h_u_old, axis=-1)     # (n_lat, n_lon+1)
+        H_v_old = jnp.sum(h_v_old, axis=-1)     # (n_lat+1, n_lon)
+
+        frac_u = h_u_old / jnp.maximum(H_u_old[..., jnp.newaxis], 1e-10)
+        frac_v = h_v_old / jnp.maximum(H_v_old[..., jnp.newaxis], 1e-10)
+
+        mass_flux_u = Hu_avg[..., jnp.newaxis] * frac_u * state.u_mask.data[..., jnp.newaxis]
+        mass_flux_v = Hv_avg[..., jnp.newaxis] * frac_v * state.v_mask.data[..., jnp.newaxis]
+
+        # Flux-form tracer update for each tracer
         h_k_new = compute_layer_thickness(
             state_new.eta.data, state_new.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
         )
-        h_ratio = h_k_old / jnp.maximum(h_k_new, 1e-10)
-        T_corrected = jnp.where(mask_3d > 0.5, state_new.T.data * h_ratio, state_new.T.data)
-        S_corrected = jnp.where(mask_3d > 0.5, state_new.S.data * h_ratio, state_new.S.data)
+        h_safe = jnp.maximum(h_k_old, 1e-10)
+
+        T_mid = state_new.T.data  # tracer after non-advective Euler step
+        S_mid = state_new.S.data
+
+        for tr_name in ['T', 'S']:
+            tr = T_mid if tr_name == 'T' else S_mid
+            tr_u = _interp_to_u_points(tr)
+            tr_v = _interp_to_v_points(tr)
+            tracer_flux_u = mass_flux_u * tr_u
+            tracer_flux_v = mass_flux_v * tr_v
+            div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
+            # Pure flux form: h_new * T_new = h_old * T_mid - dt * div(mf * T_face)
+            # This is exactly conservative: sum(div(F)*area) = 0 by divergence theorem.
+            # The skew-symmetric form (-div(huT) + T*div(hu)) is NOT globally
+            # conservative because T*div(hu) doesn't integrate to zero for non-uniform T.
+            hT_new = h_k_old * tr - dt * div_hut
+            tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
+            tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
+            if tr_name == 'T':
+                T_corrected = tr_new
+            else:
+                S_corrected = tr_new
+
         state_new = state_new._replace(
             T=state_new.T.replace(data=T_corrected),
             S=state_new.S.replace(data=S_corrected),

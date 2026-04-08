@@ -173,8 +173,16 @@ def barotropic_substeps_latlon_cgrid(
             [zero_row_m, diff_v_mask_interior, zero_row_m], axis=0,
         )
 
+    # Accumulators for time-averaged barotropic transport (Phase 2a, issue #102).
+    # These accumulate the mass fluxes H*U_bar at each substep so the tracer
+    # equation can use transport consistent with the barotropic continuity.
+    n_lat = eta.shape[0]
+    n_lon = eta.shape[1]
+    Hu_sum = jnp.zeros((n_lat, n_lon + 1), dtype=eta.dtype)
+    Hv_sum = jnp.zeros((n_lat + 1, n_lon), dtype=eta.dtype)
+
     def substep_body(i, carry):
-        eta_c, U_bar_c, V_bar_c = carry
+        eta_c, U_bar_c, V_bar_c, Hu_sum_c, Hv_sum_c = carry
 
         H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
 
@@ -190,6 +198,10 @@ def barotropic_substeps_latlon_cgrid(
 
         flux_u = H_u * U_bar_c * u_mask
         flux_v = H_v * V_bar_c * v_mask
+
+        # Accumulate transport for barotropic-averaged tracer advection
+        Hu_sum_new = Hu_sum_c + flux_u
+        Hv_sum_new = Hv_sum_c + flux_v
 
         div_flux = divergence_cgrid(
             flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
@@ -267,20 +279,26 @@ def barotropic_substeps_latlon_cgrid(
             ) * mask
             eta_new = jnp.maximum(eta_new, eta_floor) * mask
 
-        return (eta_new, U_bar_new, V_bar_new)
+        return (eta_new, U_bar_new, V_bar_new, Hu_sum_new, Hv_sum_new)
+
+    init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum)
 
     if config.differentiable_barotropic:
         def scan_body(carry, _):
             new_carry = substep_body(0, carry)
             return new_carry, None
 
-        (eta_f, U_bar_f, V_bar_f), _ = jax.lax.scan(
-            scan_body, (eta, U_bar, V_bar), xs=None, length=n_substeps,
+        (eta_f, U_bar_f, V_bar_f, Hu_sum_f, Hv_sum_f), _ = jax.lax.scan(
+            scan_body, init_carry, xs=None, length=n_substeps,
         )
     else:
-        eta_f, U_bar_f, V_bar_f = jax.lax.fori_loop(
-            0, n_substeps, substep_body, (eta, U_bar, V_bar),
+        eta_f, U_bar_f, V_bar_f, Hu_sum_f, Hv_sum_f = jax.lax.fori_loop(
+            0, n_substeps, substep_body, init_carry,
         )
+
+    # Time-averaged barotropic transport
+    Hu_avg = Hu_sum_f / n_substeps
+    Hv_avg = Hv_sum_f / n_substeps
 
     # Correct 3D velocities: preserve baroclinic structure
     u_baro_old = U_bar[..., jnp.newaxis]
@@ -290,8 +308,9 @@ def barotropic_substeps_latlon_cgrid(
     u_new = (u_prime + U_bar_f[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
     v_new = (v_prime + V_bar_f[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
 
-    return state._replace(
+    state_new = state._replace(
         eta=state.eta.replace(data=eta_f),
         u=state.u.replace(data=u_new),
         v=state.v.replace(data=v_new),
     )
+    return state_new, (Hu_avg, Hv_avg)

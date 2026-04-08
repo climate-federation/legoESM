@@ -295,45 +295,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dv_dt = dv_dt + _vertical_advection_ocean(
         v_prime, w_v, z_coord, _interp_to_v_points(J))
 
-    # --- 9. Tracer tendencies (consistent flux-form) ---
-    # Uses the SAME divergence operator (divergence_cgrid) for both
-    # the tracer flux div(h*u*T) and the mass flux div(h*u), so that
-    # for spatially uniform T the discrete cancellation is exact:
-    #   -div(h*u*T) + T*div(h*u) = -T*div(h*u) + T*div(h*u) = 0
+    # --- 9. Tracer tendencies (no horizontal advection) ---
+    # Horizontal tracer advection is handled in the step() function
+    # using barotropic-averaged transport (Hallberg 1997, issue #102).
+    # This ensures the tracer transport is exactly consistent with the
+    # continuity equation that determines h_new.
     #
-    # This mirrors the MPAS/TRiSK pattern (ocean_pe_mpas.py:194-214)
-    # and is why MPAS achieves 6e-15 T conservation.
-    #
-    # The previous code used scalar_advection_cgrid (upwind, velocity-
-    # only flux -div(Tu)) with a correction +T*div(hu)/h.  This had
-    # two problems: (1) wrong equation (-div(Tu) != -div(huT)/h when
-    # h varies), (2) different stencils (upwind vs centered) prevented
-    # exact cancellation.
-    #
-    # Note: centered face reconstruction provides no implicit diffusion.
-    # Rely on explicit K_h for stabilization.  For sharp fronts, a
-    # Lax-Friedrichs or FCT limiter should be added (future work).
+    # The tendency here includes only: vertical advection, horizontal
+    # and vertical diffusion, and physics.
     h_safe = jnp.maximum(h_k, 1e-10)
     tracers = jnp.stack([T, S], axis=0)
 
-    # Mass fluxes at faces (already computed for flux_div_k in section 4)
-    mass_flux_u = h_u * u * u_mask_3d  # (n_lat, n_lon+1, nlev)
-    mass_flux_v = h_v * v * v_mask_3d  # (n_lat+1, n_lon, nlev)
-
     def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
-        # Centered tracer at faces (same interpolation used for h)
-        tr_u = _interp_to_u_points(tr)  # (n_lat, n_lon+1, nlev)
-        tr_v = _interp_to_v_points(tr)  # (n_lat+1, n_lon, nlev)
-
-        # Tracer flux = mass_flux * T_face
-        tracer_flux_u = mass_flux_u * tr_u
-        tracer_flux_v = mass_flux_v * tr_v
-
-        # Same operator for both — guarantees exact cancellation
-        div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
-        dtr_dt = (-div_hut + tr * flux_div_k) / h_safe
-
-        dtr_dt = dtr_dt + _vertical_advection_ocean(tr, w, z_coord, J)
+        dtr_dt = _vertical_advection_ocean(tr, w, z_coord, J)
 
         if config.K_h > 0:
             dtr_dt = dtr_dt + config.K_h * laplacian_cgrid(tr, grid, mask=mask)
