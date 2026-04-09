@@ -122,27 +122,30 @@ def latlon_ocean_baroclinic_tendencies(
         eta_safe, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     )
 
-    # --- 2. Density from EOS ---
-    # Fill land-cell T/S with ocean-neighbor values before EOS so that
-    # density on land ≈ ρ₀, preventing spurious ρ' at coastlines.
+    # --- 2. Density from EOS (reference J) ---
+    # Use reference Jacobian (J=1, eta=0) for the EOS pressure iteration
+    # and baroclinic pressure gradient.  The barotropic solver already
+    # handles -g*grad(eta); using the actual J here would double-count
+    # the free-surface contribution (see #109).
     from legoesm.ocean.dynamics.latlon_operators import _neumann_fill_latlon
     T_filled = _neumann_fill_latlon(T, mask)
     S_filled = _neumann_fill_latlon(S, mask)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    J_ref = jnp.ones_like(J)
+    eta_ref = jnp.zeros_like(eta_safe)
     rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
-            rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
+            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
         )
         rho = eos_fn(T_filled, S_filled, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
-        rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
+        rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
     )
     rho_prime = rho - rho_0
 
-    # --- 3. Baroclinic pressure gradient ---
-    dz_actual = z_coord.dz_ref * J[..., jnp.newaxis]
-    dp_layer = rho_prime * g * dz_actual
+    # --- 3. Baroclinic pressure gradient (reference thickness) ---
+    dp_layer = rho_prime * g * z_coord.dz_ref
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer
 
