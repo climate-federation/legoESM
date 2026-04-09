@@ -46,6 +46,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_x_cgrid,
     gradient_y_cgrid,
     laplacian_cgrid,
+    vector_laplacian_cgrid,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
@@ -334,11 +335,15 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dS_dt = tracer_tend[1]
 
     # --- 10. Mixing (viscosity on perturbation velocity) ---
+    # Uses the proper vector Laplacian grad(div) - k×grad(curl) directly
+    # on face velocities, avoiding the lossy cell-center detour.
+    # See issue #105 for details.
     if config.A_h > 0:
-        du_dt = du_dt + config.A_h * _laplacian_at_u(
-            u_prime * u_mask_3d, grid, mask)
-        dv_dt = dv_dt + config.A_h * _laplacian_at_v(
-            v_prime * v_mask_3d, grid, mask)
+        vlap_u, vlap_v = vector_laplacian_cgrid(
+            u_prime, v_prime, grid,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        du_dt = du_dt + config.A_h * vlap_u
+        dv_dt = dv_dt + config.A_h * vlap_v
 
     if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v_u = jnp.maximum(_interp_to_u_points(J)[..., jnp.newaxis], 1e-10)
