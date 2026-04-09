@@ -200,8 +200,8 @@ def barotropic_substeps_latlon_cgrid(
         flux_v = H_v * V_bar_c * v_mask
 
         # Accumulate transport for barotropic-averaged tracer advection
-        Hu_sum_new = Hu_sum_c + flux_u
-        Hv_sum_new = Hv_sum_c + flux_v
+        Hu_sum_new = Hu_sum_c + flux_u.astype(eta.dtype)
+        Hv_sum_new = Hv_sum_c + flux_v.astype(eta.dtype)
 
         div_flux = divergence_cgrid(
             flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
