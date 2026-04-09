@@ -72,7 +72,7 @@ class CDGridShallowWaterConfig(NamedTuple):
     use_conservation_fixer: bool = True
     fix_mass: bool = True
     time_integrator: str = "ssp_rk3"
-    use_fv3_fb: bool = False  # EXPERIMENTAL — known unstable (NaN by step ~50), not production-ready
+    use_experimental_csw: bool = False  # EXPERIMENTAL: C-grid tendencies via RK3 (NOT the FV3 forward-backward scheme). Known unstable.
     boundary_fix: bool = True  # Replace boundary corner tendencies with interior
 
 
@@ -281,19 +281,25 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
 
 # ==============================================================================
-# FV3 Forward-Backward Shallow Water Model (no A-L gradient)
+# FV3 Forward-Backward Shallow Water Model (EXPERIMENTAL — DO NOT USE)
 # ==============================================================================
 
 class FV3FBShallowWaterModel:
     """EXPERIMENTAL: FV3 forward-backward shallow water model.
 
-    Known unstable (85 m/s v-wind after 1 day, 3% mass error).
-    Use ``FV3EdgeShallowWaterModel`` for production work.
+    **NOT PRODUCTION-READY.** Known unstable (85 m/s v-wind after 1 day,
+    3% mass error). Use ``FV3EdgeShallowWaterModel`` with the default
+    ``use_experimental_csw=False`` for production work.
 
-    Uses the three-phase FV3 forward-backward scheme:
+    This model uses the three-phase FV3 forward-backward scheme from
+    ``fv3_sw_core.fv3_fb_sw_step``:
     1. c_sw: C-grid half-step (KE + vorticity, forward)
     2. p_grad_c: pressure gradient at C-grid (backward, using h_star)
     3. d_sw: D-grid full-step (mass transport + wind update, no A-L gradient)
+
+    Blocker: The forward-backward coupling is unstable for finite dt without
+    additional dissipation at the c_sw/d_sw interface. A faithful port would
+    require FV3's exact dissipation control (del2/del4 at specific phases).
 
     Parameters
     ----------
@@ -364,15 +370,19 @@ class FV3EdgeShallowWaterState(NamedTuple):
 
 
 class FV3EdgeShallowWaterModel(IntegrationMixin):
-    """FV3-style shallow water model with edge-midpoint D-grid stagger.
+    """PRODUCTION shallow water model with FV3-inspired edge-midpoint D-grid stagger.
+
+    This is a **stabilized research path**, not a faithful FV3 port.
+    Key differences from FV3:
+    - Uses Arakawa-Lamb 4-point gradient (FV3 uses 2-point c_sw gradient)
+    - Uses RK3 time integration (FV3 uses forward-backward splitting)
+    - Edge-midpoint stagger avoids boundary sync (FV3 uses tile-edge coupling)
 
     Edge-midpoint D-grid winds sit half a cell from any face boundary,
     eliminating boundary sync entirely and removing edge artifacts.
 
     Momentum tendencies are computed at cell corners (compact stencil)
-    and averaged to edge-midpoint positions.  A light D-A-D filter
-    after each time step suppresses the grid-scale computational mode
-    inherent to the edge-midpoint stagger.
+    and averaged to edge-midpoint positions.
     """
 
     def __init__(self, grid, config=None):
@@ -390,16 +400,17 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
 
-        if self.config.use_fv3_fb:
+        if self.config.use_experimental_csw:
             # EXPERIMENTAL — known unstable (NaN by step ~50).
             # This wraps fv3_csw_tendencies in RK3, NOT the actual
             # forward-backward step (fv3_forward_backward_step).
             # See docs/cubed_sphere_edge_artifacts.md iterations 7-14.
             import warnings
             warnings.warn(
-                "use_fv3_fb=True is experimental and known unstable. "
-                "It runs C-grid tendencies through RK3, not the actual "
-                "FV3 forward-backward scheme. See "
+                "use_experimental_csw=True is experimental and known unstable. "
+                "It runs fv3_csw_tendencies (C-grid half only) through "
+                "RK3, NOT the actual FV3 forward-backward scheme "
+                "(fv3_forward_backward_step). See "
                 "docs/cubed_sphere_edge_artifacts.md.",
                 stacklevel=2,
             )

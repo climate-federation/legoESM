@@ -260,12 +260,16 @@ def _supergrid_quad_area(px, py, pz, i0, j0, i1, j1, i2, j2, i3, j3, radius):
 def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
     """Compute area_c and dxc/dyc from the FV3 supergrid.
 
-    **Currently unused.** The actual grid construction
-    (``create_cubed_sphere_cdgrid``) computes dxc/dyc from halo-exchanged
-    cell-centre positions and area_corner from halo-exchanged cell areas,
-    which ensures consistency with the haloed field values used by the
-    gradient and vorticity operators.  This helper is retained as
-    reference infrastructure for future supergrid-based validation.
+    **DEAD CODE — not called by any live path.**
+
+    Superseded by the halo-exchange-aware metric computation in
+    ``create_cubed_sphere_cdgrid`` (lines ~592-925), which computes
+    dxc/dyc and area_corner from halo-exchanged cell-centre positions
+    and areas. The halo-aware path ensures consistency with the haloed
+    field values used by operators at runtime.
+
+    Retained as reference infrastructure for potential future
+    supergrid-based cross-validation of the halo-aware metrics.
 
     Uses the SAME 2x-refined supergrid as sin_sg/cos_sg to ensure all
     metrics are mutually consistent (discrete Stokes theorem).

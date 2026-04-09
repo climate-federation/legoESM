@@ -1,10 +1,18 @@
-"""FV3 Hydrostatic Primitive Equations on the cubed-sphere (D-grid dynamics).
+"""FV3-inspired Hydrostatic Primitive Equations on the cubed-sphere (D-grid dynamics).
 
-Prognostic winds are stored on the D-grid (cell corners). The C-grid
-velocities are diagnosed for mass flux and kinetic energy computation.
+**Fidelity status: stabilized research path, not a faithful FV3 port.**
 
-Physics coupling converts D-grid to cell-centre at the interface boundary
-only (diagnostic).
+Key similarities to FV3:
+- D-grid prognostic winds (cell corners, (6, n+1, n+1, nlev))
+- Arakawa-Lamb gradient at D-grid corners
+- Exact circulation-based vorticity
+- C-grid mass flux for transport
+
+Key differences from faithful FV3:
+- Uses RK3 time integration (FV3 uses forward-backward splitting)
+- Uses edge-midpoint stagger with corner averaging (FV3 uses true D-grid)
+- Halo exchange uses interpolation (FV3 uses exact tile-edge coupling)
+- No Lagrangian vertical coordinate (FV3 uses vertically Lagrangian remapping)
 
 Operator staggering
 -------------------

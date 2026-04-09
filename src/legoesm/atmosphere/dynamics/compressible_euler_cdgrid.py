@@ -1,16 +1,21 @@
-"""FV3-style C-D grid Non-Hydrostatic Compressible Euler on the cubed-sphere.
+"""FV3-inspired C-D grid Non-Hydrostatic Compressible Euler on the cubed-sphere.
+
+**Fidelity status: stabilized research path, not a faithful FV3 port.**
 
 Uses the same C-D grid discretisation as the shallow water and PE solvers:
 
-* D-grid winds (cell corners) are prognostic.
+* D-grid winds (cell corners) are prognostic (internal conversion from cell-centre).
 * C-grid velocities (cell edges) are diagnosed for mass/scalar transport.
 * Vorticity from circulation (exact on D-grid).
 * Bernoulli/pressure gradient via Arakawa-Lamb at D-grid corners.
 * Scalar transport (theta, rho, tracers) via C-grid upwind mass flux.
 * Acoustic substeps for vertically propagating sound waves.
 
-State is stored on the cell-centre for compatibility with existing physics
-infrastructure. Velocities are converted to D-grid for momentum computation.
+**State is stored at cell centres** for compatibility with the existing physics
+infrastructure. Velocities are converted to D-grid for momentum computation
+and back to cell-centre for output. A faithful FV3 NH path would store winds
+on D-grid edges throughout and require a physics coupler that consumes D-grid
+winds.
 
 References
 ----------
