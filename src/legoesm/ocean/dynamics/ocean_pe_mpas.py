@@ -36,7 +36,7 @@ from legoesm.core.operators_voronoi import (
     vector_laplacian_del2,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,

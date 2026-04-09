@@ -25,7 +25,6 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
-    coriolis_cgrid,
 )
 
 
