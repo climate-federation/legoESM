@@ -127,9 +127,9 @@ def latlon_ocean_baroclinic_tendencies(
     # and baroclinic pressure gradient.  The barotropic solver already
     # handles -g*grad(eta); using the actual J here would double-count
     # the free-surface contribution (see #109).
-    from legoesm.ocean.dynamics.latlon_operators import _neumann_fill_latlon
-    T_filled = _neumann_fill_latlon(T, mask)
-    S_filled = _neumann_fill_latlon(S, mask)
+    from legoesm.ocean.dynamics.latlon_operators import neumann_fill_latlon
+    T_filled = neumann_fill_latlon(T, mask)
+    S_filled = neumann_fill_latlon(S, mask)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
     J_ref = jnp.ones_like(J)
     eta_ref = jnp.zeros_like(eta_safe)
@@ -151,7 +151,7 @@ def latlon_ocean_baroclinic_tendencies(
 
     # Fill land cells in p_prime before gradient so the centered-
     # difference stencil sees smooth values at coastlines.
-    p_prime_filled = _neumann_fill_latlon(p_prime, mask)
+    p_prime_filled = neumann_fill_latlon(p_prime, mask)
     dp_dx = gradient_x_latlon(p_prime_filled, grid)
     dp_dy = gradient_y_latlon(p_prime_filled, grid)
 

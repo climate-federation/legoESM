@@ -126,12 +126,12 @@ def ocean_baroclinic_tendencies_cdgrid(
     # and baroclinic pressure gradient.  The barotropic solver already
     # handles -g*grad(eta); using the actual J here would double-count
     # the free-surface contribution (see #109).
-    from legoesm.ocean.dynamics.barotropic import _fill_land_cells
+    from legoesm.ocean.dynamics.barotropic import fill_land_cells
     T_filled = jax.vmap(
-        lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
+        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
     )(T)
     S_filled = jax.vmap(
-        lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
+        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
     )(S)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
     J_ref = jnp.ones_like(J)
@@ -192,7 +192,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     # Fill land cells in p_prime before gradient so the 4-point stencil
     # sees smooth values at coastlines instead of the ocean-to-zero jump.
     p_prime_filled = jax.vmap(
-        lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
+        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
     )(p_prime)
     dp_dx, dp_dy_perp = _arakawa_lamb_gradient(p_prime_filled, cdgrid)
     # Downcast PGF results back to working precision

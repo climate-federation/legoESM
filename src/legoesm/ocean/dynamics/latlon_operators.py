@@ -464,7 +464,7 @@ def vorticity_latlon(
         return dv_dx - du_cos_dy / grid.cos_lat[:, None, None]
 
 
-def _neumann_fill_latlon(
+def neumann_fill_latlon(
     f: jnp.ndarray,
     mask: jnp.ndarray,
 ) -> jnp.ndarray:
@@ -578,7 +578,7 @@ def laplacian_latlon(
     # d/dφ(cos φ df/dφ): finite difference with cos(lat) metric
     # When a mask is provided, fill land cells so meridional gradients
     # do not see the ocean-to-zero discontinuity.
-    f_merid = _neumann_fill_latlon(f, mask) if mask is not None else f
+    f_merid = neumann_fill_latlon(f, mask) if mask is not None else f
 
     # Pad in lat with boundary values
     f_pad = jnp.concatenate([f_merid[0:1], f_merid, f_merid[-1:]], axis=0)

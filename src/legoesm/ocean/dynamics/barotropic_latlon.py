@@ -22,7 +22,7 @@ from legoesm.ocean.dynamics.latlon_operators import (
     gradient_x_latlon,
     gradient_y_latlon,
     laplacian_latlon,
-    _neumann_fill_latlon,
+    neumann_fill_latlon,
 )
 
 
@@ -98,7 +98,7 @@ def barotropic_substeps_latlon(
         # Fill land cells with ocean-neighbour values so that centred-
         # difference gradients see a smooth field at coastlines instead
         # of the masked ocean-to-zero step function.
-        eta_filled = _neumann_fill_latlon(eta_new, mask)
+        eta_filled = neumann_fill_latlon(eta_new, mask)
         deta_dx = gradient_x_latlon(eta_filled, grid).astype(eta.dtype)
         deta_dy = gradient_y_latlon(eta_filled, grid).astype(eta.dtype)
 
