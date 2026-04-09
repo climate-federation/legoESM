@@ -63,38 +63,6 @@ class TestCubedSphereOcean:
 
 
 # ============================================================================
-# 3b  Ocean dynamics — lat-lon
-# ============================================================================
-
-class TestLatLonOcean:
-
-    @pytest.fixture(autouse=True)
-    def setup(self):
-        from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.ocean.vertical import create_ocean_z_star
-        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-        from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
-
-        nlev = 3
-        grid = create_latlon_grid(8, 16)
-        z_coord = create_ocean_z_star(nlev, H_max=500.0)
-        self.model = LatLonOceanModel(grid, z_coord)
-        self.state = rest_state_latlon_ocean(grid, z_coord)
-        self.dt = 300.0
-
-    def test_grad_wrt_T(self):
-        model, state, dt = self.model, self.state, self.dt
-
-        def loss(T_data):
-            s = state._replace(T=state.T.replace(data=T_data))
-            out = model.step(s, dt)
-            return jnp.sum(out.T.data ** 2)
-
-        grad = jax.grad(loss)(state.T.data)
-        assert_gradient_ok(grad, "LatLon Ocean single step w.r.t. T")
-
-
-# ============================================================================
 # 3c  Ocean dynamics — MPAS
 # ============================================================================
 

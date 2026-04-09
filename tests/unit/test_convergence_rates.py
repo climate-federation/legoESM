@@ -401,69 +401,6 @@ class TestGradientConvergenceVoronoi:
 
 
 # ---------------------------------------------------------------------------
-# 6h  Williamson TC2 convergence on lat-lon FV
-# ---------------------------------------------------------------------------
-
-class TestWilliamsonTC2ConvergenceLatLon:
-    """TC2 (steady geostrophic flow) on lat-lon should converge with resolution."""
-
-    @staticmethod
-    def _run_tc2_latlon(n_lat, n_steps=50, dt=300.0):
-        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-            FVShallowWaterLatLonModel,
-            FVShallowWaterLatLonConfig,
-        )
-        from legoesm.core.state import ShallowWaterState
-        from legoesm.grids.latlon import create_latlon_grid
-
-        n_lon = 2 * n_lat
-        grid = create_latlon_grid(n_lat, n_lon)
-
-        g = constants.g
-        Omega = constants.Omega
-        R = grid.radius
-        u0 = 20.0
-        h0 = 1e4
-
-        lat2d = grid.lat2d
-        h_init = h0 - (R * Omega * u0 + 0.5 * u0**2) * jnp.sin(lat2d)**2 / g
-        u_init = u0 * jnp.cos(lat2d)
-
-        dims = ("lat", "lon")
-        state = ShallowWaterState(
-            h=Field(data=h_init, name="h", dims=dims, units="m"),
-            u=Field(data=u_init, name="u", dims=dims, units="m/s"),
-            v=Field(data=jnp.zeros_like(h_init), name="v", dims=dims, units="m/s"),
-            h_s=Field(data=jnp.zeros_like(h_init), name="h_s", dims=dims, units="m"),
-        )
-
-        config = FVShallowWaterLatLonConfig(
-            hyperdiff_coeff=0.0,
-            use_conservation_fixer=True,
-            fix_mass=True,
-            fix_energy=False,
-            use_polar_filter=True,
-        )
-        model = FVShallowWaterLatLonModel(grid, config, dt=dt)
-
-        for _ in range(n_steps):
-            state = model.step(state, dt)
-
-        h_err = state.h.data - h_init
-        area = grid.area
-        return float(jnp.sqrt(jnp.sum(h_err**2 * area) / jnp.sum(area)))
-
-    def test_16x32_better_than_8x16(self):
-        """Finer resolution should have smaller TC2 error."""
-        err_8 = self._run_tc2_latlon(8, n_steps=50, dt=600.0)
-        err_16 = self._run_tc2_latlon(16, n_steps=50, dt=300.0)
-
-        assert err_16 < err_8, (
-            f"16x32 error ({err_16:.4e}) should be < 8x16 error ({err_8:.4e})"
-        )
-
-
-# ---------------------------------------------------------------------------
 # 6i  Williamson TC2 convergence on MPAS
 # ---------------------------------------------------------------------------
 

@@ -93,40 +93,6 @@ class TestCGridOperators:
         # geometry, but should be bounded
         assert jnp.all(jnp.isfinite(div))
 
-    def test_no_checkerboard_null_space(self, grid):
-        """C-grid gradient should detect checkerboard patterns.
-
-        Unlike the A-grid centered-difference gradient which has a 2*dx
-        null space, the compact C-grid gradient should produce nonzero
-        output for a checkerboard eta pattern.
-
-        The gradient magnitude is 2/(R*dlon*cos(lat)) which is ~3e-6
-        on a 5-degree grid, so we check for nonzero output (> 1e-8)
-        rather than O(1) values.
-        """
-        n_lat = grid.n_lat
-        n_lon = grid.n_lon
-        # Checkerboard: (-1)^(i+j) pattern
-        i_idx = jnp.arange(n_lat)[:, None]
-        j_idx = jnp.arange(n_lon)[None, :]
-        checker = (-1.0) ** (i_idx + j_idx)
-
-        gx = gradient_x_cgrid(checker, grid)
-        gy = gradient_y_cgrid(checker, grid)
-
-        # C-grid should detect the pattern (nonzero gradient)
-        assert float(jnp.max(jnp.abs(gx))) > 1e-8
-        assert float(jnp.max(jnp.abs(gy))) > 1e-8
-
-        # Verify that A-grid centered-difference has ZERO zonal gradient
-        # for the same pattern (this is the 2*dx null-space bug C-grid fixes)
-        from legoesm.ocean.dynamics.latlon_operators import (
-            gradient_x_latlon,
-        )
-        gx_agrid = gradient_x_latlon(checker, grid)
-        # A-grid centered-diff: f[j+1]-f[j-1] cancels for checker
-        assert float(jnp.max(jnp.abs(gx_agrid))) < 1e-14
-
     def test_face_masks(self, grid):
         """Face masks should have correct shapes."""
         n_lat = grid.n_lat

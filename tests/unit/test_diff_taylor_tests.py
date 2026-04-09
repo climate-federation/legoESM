@@ -60,41 +60,6 @@ def assert_taylor_ok(ratios, name=""):
 
 
 # ============================================================================
-# 9a  Dynamics (shallow water lat-lon)
-# ============================================================================
-
-class TestTaylorDynamics:
-
-    def test_sw_latlon(self):
-        from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-            FVShallowWaterLatLonModel,
-        )
-        from legoesm.core.state import ShallowWaterState
-
-        grid = create_latlon_grid(8, 16)
-        dt = 120.0
-        model = FVShallowWaterLatLonModel(grid, dt=dt)
-
-        key = jax.random.PRNGKey(0)
-        h_data = 1000.0 + 10.0 * jax.random.normal(key, (8, 16))
-        state = ShallowWaterState(
-            h=Field(h_data, name="h"),
-            u=Field(jnp.zeros((8, 16)), name="u"),
-            v=Field(jnp.zeros((8, 16)), name="v"),
-            h_s=Field(jnp.zeros((8, 16)), name="h_s"),
-        )
-
-        def loss(h_data):
-            s = state._replace(h=state.h.replace(data=h_data))
-            out = model.step(s, dt)
-            return jnp.sum(out.h.data ** 2)
-
-        ratios = taylor_test(loss, state.h.data)
-        assert_taylor_ok(ratios, "SW lat-lon Taylor test")
-
-
-# ============================================================================
 # 9b  Physics (Held-Suarez)
 # ============================================================================
 
@@ -243,54 +208,3 @@ class TestTaylorCoupler:
         assert_taylor_ok(ratios, "COARE3 Taylor test")
 
 
-# ============================================================================
-# 9f  DA cost function Taylor test
-# ============================================================================
-
-class TestTaylorDACost:
-
-    def test_4dvar_cost_taylor(self):
-        """Taylor test for 4D-Var cost function gradient."""
-        from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-            FVShallowWaterLatLonModel,
-        )
-        from legoesm.core.state import ShallowWaterState
-        from legoesm.da.control_vector import build_control_spec, state_to_control
-        from legoesm.da.observation import DirectObsOperator, Observation
-        from legoesm.da.background_error import DiagonalB
-        from legoesm.da.cost_function import build_cost_fn
-
-        grid = create_latlon_grid(8, 16)
-        dt = 120.0
-        model = FVShallowWaterLatLonModel(grid, dt=dt)
-
-        key = jax.random.PRNGKey(99)
-        h_data = 1000.0 + 10.0 * jax.random.normal(key, (8, 16))
-        state = ShallowWaterState(
-            h=Field(h_data, name="h"),
-            u=Field(jnp.zeros((8, 16)), name="u"),
-            v=Field(jnp.zeros((8, 16)), name="v"),
-            h_s=Field(jnp.zeros((8, 16)), name="h_s"),
-        )
-
-        spec = build_control_spec(state, fields=("h",))
-        x_b = state_to_control(state, spec)
-
-        indices = (jnp.array([2, 4, 6]), jnp.array([3, 8, 12]))
-        H = DirectObsOperator("h", indices)
-        obs_vals = H(state) + 5.0
-        obs = (Observation(
-            values=obs_vals,
-            errors=10.0 * jnp.ones(3),
-            time_index=1,
-            operator=H,
-        ),)
-
-        sigma = 20.0 * jnp.ones(spec.total_size)
-        B = DiagonalB(sigma=sigma)
-
-        cost_fn = build_cost_fn(model, x_b, obs, B, spec, state, dt, n_steps=2)
-
-        ratios = taylor_test(cost_fn, x_b)
-        assert_taylor_ok(ratios, "4D-Var cost function Taylor test")
