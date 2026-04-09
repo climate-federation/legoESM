@@ -23,7 +23,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.latlon import LatLonGrid
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,

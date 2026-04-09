@@ -45,7 +45,7 @@ from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
     create_cubed_sphere_cdgrid,
 )
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,

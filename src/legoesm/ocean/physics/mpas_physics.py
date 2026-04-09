@@ -107,8 +107,6 @@ def make_mpas_ocean_physics(config) -> Callable:
             # with the edge-normal direction (angleEdge).
             c1 = mesh.cellsOnEdge[0]  # (nEdges,)
             c2 = mesh.cellsOnEdge[1]  # (nEdges,)
-            tau_x_e = 0.5 * (tau_x[c1] + tau_y[c1] * 0.0
-                             + tau_x[c2] + tau_y[c2] * 0.0)  # mean tau_x
             tau_x_e = 0.5 * (tau_x[c1] + tau_x[c2])
             tau_y_e = 0.5 * (tau_y[c1] + tau_y[c2])
             tau_n = (tau_x_e * jnp.cos(mesh.angleEdge)
