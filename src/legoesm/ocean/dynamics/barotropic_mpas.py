@@ -105,18 +105,10 @@ def barotropic_substeps_mpas(
     # Fill land-cell eta with nearest-ocean-neighbor average so that
     # gradient_edge sees smooth fields at coastlines instead of the
     # sharp ocean-to-zero jump from masking.
+    from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
     def _fill_land_cells_mpas(field_cell, mask_cell):
-        """Replace land values with ocean-neighbor average (Neumann BC)."""
-        # Accumulate from all edges: for edge e connecting c1, c2,
-        # add c2's contribution to c1 and vice versa.
-        nbr_sum = jnp.zeros_like(field_cell)
-        nbr_cnt = jnp.zeros_like(field_cell)
-        nbr_sum = nbr_sum.at[c1].add(field_cell[c2] * mask_cell[c2])
-        nbr_cnt = nbr_cnt.at[c1].add(mask_cell[c2])
-        nbr_sum = nbr_sum.at[c2].add(field_cell[c1] * mask_cell[c1])
-        nbr_cnt = nbr_cnt.at[c2].add(mask_cell[c1])
-        nbr_avg = nbr_sum / jnp.maximum(nbr_cnt, 1.0)
-        return jnp.where(mask_cell > 0.5, field_cell, nbr_avg)
+        return fill_land_cells_mpas(field_cell, mask_cell, c1, c2)
 
     # --- Fix 2: Barotropic Laplacian diffusion ---
     baro_alpha_val = config.barotropic_diffusion_alpha
