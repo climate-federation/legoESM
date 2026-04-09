@@ -151,6 +151,13 @@ class TracerTransportLatLonModel(IntegrationMixin):
         wind_fn: WindFnLatLon,
         config: TracerTransportLatLonConfig | None = None,
     ):
+        import warnings
+        warnings.warn(
+            "TracerTransportLatLonModel (A-grid) is deprecated. Use the "
+            "cubed-sphere or icosahedral transport models instead. "
+            "See #115.",
+            FutureWarning, stacklevel=2,
+        )
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.wind_fn = wind_fn
