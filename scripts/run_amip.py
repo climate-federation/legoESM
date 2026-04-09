@@ -43,6 +43,8 @@ def main():
     parser.add_argument("--dataset", type=str, default="analytical",
                         choices=["cobe", "hadisst", "custom", "analytical"])
     parser.add_argument("--forcing-path", type=str, default=None)
+    parser.add_argument("--sic-path", type=str, default=None,
+                        help="Separate SIC file (for ICON split SST/SIC files)")
     parser.add_argument("--sst-var", type=str, default=None)
     parser.add_argument("--sic-var", type=str, default=None)
     parser.add_argument("--sst-offset", type=float, default=None)
@@ -211,6 +213,7 @@ def main():
         start_day=args.start_day,
         dataset=args.dataset,
         forcing_path=args.forcing_path or "",
+        sic_path=args.sic_path or "",
         sst_var=args.sst_var or "",
         sic_var=args.sic_var or "",
         sst_offset=args.sst_offset or 0.0,
