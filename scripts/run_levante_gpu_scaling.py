@@ -929,31 +929,10 @@ def run_benchmark(
             model = MPASPrimitiveEquationModel(grid, sigma, config)
             state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
     elif grid_type == "latlon":
-        from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
-            FVLatLonPrimitiveEquationModel,
-            FVLatLonPrimitiveEquationConfig,
+        raise ValueError(
+            "A-grid latlon atmosphere has been removed. "
+            "Use --grid cubed-sphere or --grid icosahedral instead. See #115."
         )
-        from legoesm.atmosphere.baroclinic_wave import (
-            baroclinic_wave_init_latlon,
-        )
-
-        n_lat = n_grid
-        n_lon = 2 * n_grid
-        grid = create_latlon_grid(n_lat, n_lon)
-        hd = _hyperdiff_coeff(n_grid, grid_type)
-        config = FVLatLonPrimitiveEquationConfig(
-            hyperdiff_coeff=hd,
-            hyperdiff_ps_coeff=hd,
-            use_conservation_fixer=not no_conservation,
-            fix_mass=not no_conservation,
-            use_polar_filter=False,
-        )
-        model = FVLatLonPrimitiveEquationModel(grid, sigma, config)
-        state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
-
-        total_cells = n_lat * n_lon * n_levels
-
         if _is_mpi:
             # MPI distributed: 1D latitude-band decomposition.
             # State is scattered to rank-local bands after cast.

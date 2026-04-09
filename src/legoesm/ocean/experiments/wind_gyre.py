@@ -118,8 +118,8 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         )
 
     elif grid_type == "latlon":
-        from legoesm.ocean.init_latlon import wind_driven_gyre_latlon
-        return wind_driven_gyre_latlon(
+        from legoesm.ocean.init_latlon_cgrid import wind_driven_gyre_latlon_cgrid
+        return wind_driven_gyre_latlon_cgrid(
             grid, z_coord, H_max=config.H_max,
             lon_west=config.lon_west, lon_east=config.lon_east,
             lat_south=config.lat_south, lat_north=config.lat_north,

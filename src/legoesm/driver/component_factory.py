@@ -268,40 +268,6 @@ def create_atmosphere_dycore(
         from legoesm.atmosphere.dynamics.spectral_nh import SpectralCompressibleEulerModel
         return SpectralCompressibleEulerModel(grid=grid, sigma_coord=sigma)
 
-    # ----- Lat-lon FV solvers -----
-    if solver_name == "fv_shallow_water_latlon":
-        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig,
-        )
-        cfg = FVShallowWaterLatLonConfig(
-            hyperdiff_coeff=diff.hyperdiff,
-            use_conservation_fixer=dc.conservation_fixer,
-            fix_mass=dc.fix_mass,
-        )
-        return FVShallowWaterLatLonModel(grid=grid, config=cfg, dt=dc.dt)
-
-    if solver_name == "fv_primitive_equations_latlon":
-        from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
-            FVLatLonPrimitiveEquationModel, FVLatLonPrimitiveEquationConfig,
-        )
-        cfg = FVLatLonPrimitiveEquationConfig(
-            A_h=diff.A_h,
-            hyperdiff_coeff=diff.hyperdiff,
-            hyperdiff_ps_coeff=diff.hyperdiff,
-            use_conservation_fixer=dc.conservation_fixer,
-            fix_mass=dc.fix_mass,
-        )
-        return FVLatLonPrimitiveEquationModel(grid=grid, sigma_coord=sigma, config=cfg, dt=dc.dt)
-
-    if solver_name == "fv_compressible_euler_latlon":
-        from legoesm.atmosphere.dynamics.compressible_euler_fv_latlon import (
-            FVCompressibleEulerLatLonModel, FVCompressibleEulerLatLonConfig,
-        )
-        cfg = FVCompressibleEulerLatLonConfig(
-            hyperdiff_coeff=diff.hyperdiff,
-        )
-        return FVCompressibleEulerLatLonModel(grid=grid, sigma_coord=sigma, config=cfg, dt=dc.dt)
-
     # ----- MPAS icosahedral -----
     if solver_name == "mpas_primitive_equations":
         from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
