@@ -79,7 +79,10 @@ def _fill_land_cells(
     effective_mask = mask
     for _ in range(n_passes):
         f_pad = pad_halo(filled, interp_offsets=grid.halo_interp_offsets)
-        m_pad = pad_halo(effective_mask, interp_offsets=grid.halo_interp_offsets)
+        # Binary {0,1} mask must NOT be interpolated — Lagrange
+        # interpolation produces fractional values (0.3-0.7) at face
+        # boundaries, corrupting the neighbor-count logic.
+        m_pad = pad_halo(effective_mask, interp_offsets=None)
 
         # 4-connected neighbour sum, weighted by ocean mask
         nbr_sum = (
