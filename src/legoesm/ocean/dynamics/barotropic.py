@@ -42,7 +42,7 @@ from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 # Land-fill helper (Neumann BC at coastlines)
 # ==============================================================================
 
-def _fill_land_cells(
+def fill_land_cells(
     field: jnp.ndarray,
     mask: jnp.ndarray,
     grid: CubedSphereGrid,
@@ -264,7 +264,7 @@ def barotropic_substeps(
         # instead of the sharp ocean-to-zero transition from masking.
         # Without this, coastal ocean cells experience a spurious pressure
         # gradient force that drives flow toward/away from land.
-        eta_filled = _fill_land_cells(eta_new, mask, grid)
+        eta_filled = fill_land_cells(eta_new, mask, grid)
         deta_dx = _gradient_x_raw(eta_filled, grid).astype(eta.dtype)
         deta_dy = _gradient_y_raw(eta_filled, grid).astype(eta.dtype)
 
@@ -281,18 +281,18 @@ def barotropic_substeps(
             # the masked discontinuity at coastlines.
             eta_new = (
                 eta_new + nu_dt * _laplacian_raw(
-                    _fill_land_cells(eta_new, mask, grid), grid,
+                    fill_land_cells(eta_new, mask, grid), grid,
                 ).astype(eta.dtype)
             ) * mask
             eta_new = jnp.maximum(eta_new, eta_floor) * mask
             U_bar_new = (
                 U_bar_new + nu_dt * _laplacian_raw(
-                    _fill_land_cells(U_bar_new, mask, grid), grid,
+                    fill_land_cells(U_bar_new, mask, grid), grid,
                 ).astype(eta.dtype)
             ) * mask
             V_bar_new = (
                 V_bar_new + nu_dt * _laplacian_raw(
-                    _fill_land_cells(V_bar_new, mask, grid), grid,
+                    fill_land_cells(V_bar_new, mask, grid), grid,
                 ).astype(eta.dtype)
             ) * mask
 

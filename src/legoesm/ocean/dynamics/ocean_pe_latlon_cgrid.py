@@ -98,7 +98,7 @@ def _neumann_fill_cgrid(
 ) -> jnp.ndarray:
     """Fill land cells with nearest ocean-neighbor (Neumann BC).
 
-    Same algorithm as latlon_operators._neumann_fill_latlon.
+    Same algorithm as latlon_operators.neumann_fill_latlon.
     """
     m = mask
     filled = f
