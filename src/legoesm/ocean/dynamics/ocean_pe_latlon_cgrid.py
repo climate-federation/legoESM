@@ -46,6 +46,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_x_cgrid,
     gradient_y_cgrid,
     laplacian_cgrid,
+    vector_laplacian_cgrid,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
@@ -294,19 +295,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dv_dt = dv_dt + _vertical_advection_ocean(
         v_prime, w_v, z_coord, _interp_to_v_points(J))
 
-    # --- 9. Tracer tendencies (no horizontal advection) ---
-    # Horizontal tracer advection is handled in the step() function
-    # using barotropic-averaged transport (Hallberg 1997, issue #102).
-    # This ensures the tracer transport is exactly consistent with the
-    # continuity equation that determines h_new.
+    # --- 9. Tracer tendencies (diffusion + physics only) ---
+    # Horizontal AND vertical tracer advection are handled in the step()
+    # function using barotropic-averaged transport (Hallberg 1997, #102).
+    # Vertical velocity w is diagnosed from the barotropic-averaged
+    # per-layer divergence, ensuring 3D transport consistency.
     #
-    # The tendency here includes only: vertical advection, horizontal
-    # and vertical diffusion, and physics.
+    # The tendency here includes only: diffusion and physics.
     h_safe = jnp.maximum(h_k, 1e-10)
     tracers = jnp.stack([T, S], axis=0)
 
     def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:
-        dtr_dt = _vertical_advection_ocean(tr, w, z_coord, J)
+        dtr_dt = jnp.zeros_like(tr)
 
         if config.K_h > 0:
             dtr_dt = dtr_dt + config.K_h * laplacian_cgrid(tr, grid, mask=mask)
@@ -333,15 +333,16 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dT_dt = tracer_tend[0]
     dS_dt = tracer_tend[1]
 
-    # --- 10. Mixing (proper vector Laplacian on perturbation velocity) ---
+    # --- 10. Mixing (viscosity on perturbation velocity) ---
+    # Uses the proper vector Laplacian grad(div) - k×grad(curl) directly
+    # on face velocities, avoiding the lossy cell-center detour.
+    # See issue #105 for details.
     if config.A_h > 0:
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import vector_laplacian_cgrid
-        lap_u, lap_v = vector_laplacian_cgrid(
-            u_prime * u_mask_3d, v_prime * v_mask_3d, grid,
-            mask=mask, u_mask=u_mask, v_mask=v_mask,
-        )
-        du_dt = du_dt + config.A_h * lap_u
-        dv_dt = dv_dt + config.A_h * lap_v
+        vlap_u, vlap_v = vector_laplacian_cgrid(
+            u_prime, v_prime, grid,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        du_dt = du_dt + config.A_h * vlap_u
+        dv_dt = dv_dt + config.A_h * vlap_v
 
     if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v_u = jnp.maximum(_interp_to_u_points(J)[..., jnp.newaxis], 1e-10)

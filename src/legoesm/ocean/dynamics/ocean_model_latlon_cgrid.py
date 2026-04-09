@@ -347,28 +347,55 @@ class LatLonCGridOceanModel:
         mass_flux_u = Hu_avg[..., jnp.newaxis] * frac_u * state.u_mask.data[..., jnp.newaxis]
         mass_flux_v = Hv_avg[..., jnp.newaxis] * frac_v * state.v_mask.data[..., jnp.newaxis]
 
-        # Flux-form tracer update for each tracer
+        # Flux-form tracer update (horizontal + vertical)
+        #
+        # Both horizontal and vertical transport use the barotropic-averaged
+        # per-layer divergence for consistency:
+        #   h_new * T_new = h_old * T_mid
+        #     - dt * div_h(mf_k * T_face_h)        [horizontal flux]
+        #     - dt * (w_{k-1/2}*T_{k-1/2} - w_{k+1/2}*T_{k+1/2})  [vertical flux]
+        #
+        # The horizontal flux integrates to zero by the 2D divergence theorem.
+        # The vertical flux telescopes to surface/bottom (both zero).
+        # Total conservation is exact.
+        from legoesm.ocean.vertical import (
+            diagnose_w_from_flux_div,
+            vertical_advection_ocean,
+        )
+
         h_k_new = compute_layer_thickness(
             state_new.eta.data, state_new.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m,
         )
-        h_safe = jnp.maximum(h_k_old, 1e-10)
 
-        T_mid = state_new.T.data  # tracer after non-advective Euler step
+        # Diagnose w from barotropic-averaged per-layer divergence
+        # (consistent with the horizontal transport used for tracers)
+        flux_div_k = divergence_cgrid(mass_flux_u, mass_flux_v, self.grid)
+        J_old = h_k_old / jnp.maximum(
+            self.z_coord.dz_ref, 1e-10,
+        )  # Jacobian from pre-barotropic state
+        w_baro = diagnose_w_from_flux_div(flux_div_k, self.z_coord)
+
+        T_mid = state_new.T.data  # tracer after diffusion+physics Euler step
         S_mid = state_new.S.data
 
         for tr_name in ['T', 'S']:
             tr = T_mid if tr_name == 'T' else S_mid
+
+            # Horizontal flux: div(mf_k * T_face)
             tr_u = _interp_to_u_points(tr)
             tr_v = _interp_to_v_points(tr)
             tracer_flux_u = mass_flux_u * tr_u
             tracer_flux_v = mass_flux_v * tr_v
             div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
-            # Pure flux form: h_new * T_new = h_old * T_mid - dt * div(mf * T_face)
-            # This is exactly conservative: sum(div(F)*area) = 0 by divergence theorem.
-            # The skew-symmetric form (-div(huT) + T*div(hu)) is NOT globally
-            # conservative because T*div(hu) doesn't integrate to zero for non-uniform T.
-            hT_new = h_k_old * tr - dt * div_hut
+
+            # Vertical advection using barotropic-consistent w
+            # Returns -w * dT/dz (tendency per unit thickness)
+            vert_adv = vertical_advection_ocean(tr, w_baro, self.z_coord, J_old[..., 0])
+
+            # Pure flux form for horizontal + Euler for vertical:
+            # h_new * T_new = h_old * (T_mid + dt*vert_adv) - dt * div_h(mf*T_face)
+            hT_new = h_k_old * (tr + dt * vert_adv) - dt * div_hut
             tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
             tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
             if tr_name == 'T':

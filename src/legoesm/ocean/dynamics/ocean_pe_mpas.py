@@ -34,6 +34,7 @@ from legoesm.core.operators_voronoi import (
     edge_thickness,
     cell_to_edge_avg,
     vector_laplacian_del2,
+    vertex_thickness,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
@@ -108,24 +109,30 @@ def mpas_ocean_baroclinic_tendencies(
     T_filled = _fill_land_cells_mpas(T_3d, mask)
     S_filled = _fill_land_cells_mpas(S_3d, mask)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    # Use REFERENCE Jacobian (J=1, eta=0) for the hydrostatic pressure
+    # in the EOS iteration.  The barotropic solver handles the
+    # free-surface pressure gradient g*grad(eta); using the actual J
+    # here would create a spatially-varying pressure even for uniform
+    # T/S, double-counting the barotropic forcing.
+    # (Matches latlon C-grid: ocean_pe_latlon_cgrid.py:207-213)
+    J_ref = jnp.ones_like(jacobian)
+    eta_ref = jnp.zeros_like(eta)
     rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T_3d))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
-            rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
+            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
         )
         rho = eos_fn(T_filled, S_filled, p_hydro)
-    # Final p_hydro for EOS only (not used in Bernoulli)
     p_hydro = compute_hydrostatic_pressure(
-        rho, eta, z_coord.dz_ref, jacobian, rho_0, g,
+        rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
     )  # (nCells, nlev)
 
-    # Baroclinic pressure anomaly: built from rho' = rho - rho_0 only.
-    # This excludes the rho_0*g*eta surface term, which is handled by
-    # the barotropic solver's -g*grad(eta).  Using full p_hydro would
-    # double-count the barotropic pressure gradient.
+    # Baroclinic pressure anomaly: built from rho' = rho - rho_0 only,
+    # using REFERENCE layer thickness dz_ref (not actual dz = dz_ref*J).
+    # This ensures the baroclinic PGF is independent of eta, avoiding
+    # overlap with the barotropic solver's -g*grad(eta).
     rho_prime = rho - rho_0
-    dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
-    dp_layer = rho_prime * g * dz_actual
+    dp_layer = rho_prime * g * z_coord.dz_ref
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer  # (nCells, nlev)
 
@@ -136,11 +143,29 @@ def mpas_ocean_baroclinic_tendencies(
     # ---- Edge mask for land boundaries ----
     edge_mask = mask[c1] * mask[c2]  # 1 only if both cells are ocean
 
+    # ---- Depth-averaged velocity and perturbation ----
+    # The baroclinic step must operate on PERTURBATION velocity
+    # u' = u - u_bar to avoid double-counting with the barotropic
+    # solver.  The barotropic solver handles the depth-mean Coriolis,
+    # pressure gradient, and KE; the baroclinic step handles only the
+    # vertical shear (perturbation) component.
+    # (Matches latlon C-grid: ocean_pe_latlon_cgrid.py:256-266)
+    h_e_3d = 0.5 * (h_k[c1] + h_k[c2])  # (nEdges, nlev)
+    H_e = jnp.maximum(jnp.sum(h_e_3d, axis=1), config.min_water_column_m)
+    u_bar = jnp.sum(u_3d * h_e_3d, axis=1) / jnp.maximum(H_e, 1e-10)
+    u_bar = u_bar * edge_mask  # (nEdges,)
+    u_prime_3d = u_3d - u_bar[:, jnp.newaxis]  # (nEdges, nlev)
+
     # ---- Per-level momentum and tracer tendencies ----
-    # Use vmap over vertical levels
+    # Use scan over vertical levels.
+    # Coriolis is EXCLUDED from the returned tendencies — it is applied
+    # separately as a forward-backward (Matsuno) step in the model step
+    # function, operating on perturbation velocity only.
+    # (Matches latlon C-grid: ocean_pe_latlon_cgrid.py:268-274)
     def _level_tendencies(k):
         """Compute tendencies for a single level."""
-        u_k = u_3d[:, k]       # (nEdges,)
+        u_k = u_3d[:, k]       # (nEdges,) full velocity (for mass flux)
+        u_prime_k = u_prime_3d[:, k]  # (nEdges,) perturbation velocity
         T_k = T_3d[:, k]       # (nCells,)
         S_k = S_3d[:, k]       # (nCells,)
         h_k_level = h_k[:, k]  # (nCells,)
@@ -149,27 +174,33 @@ def mpas_ocean_baroclinic_tendencies(
         # Edge layer thickness
         h_e = edge_thickness(h_k_level, mesh)  # (nEdges,)
 
-        # ---- Momentum tendency ----
-        # Kinetic energy
-        ke = kinetic_energy_cell(u_k, mesh)  # (nCells,)
+        # ---- Momentum tendency (perturbation velocity only) ----
+        # Kinetic energy from perturbation velocity
+        ke = kinetic_energy_cell(u_prime_k, mesh)  # (nCells,)
 
-        # Bernoulli function: KE + p'/rho_0  (baroclinic only;
-        # the barotropic pressure gradient -g*grad(eta) is handled
-        # by the barotropic substeps to avoid double-counting)
+        # Bernoulli function: KE(u') + p'/rho_0  (baroclinic only)
         bernoulli = ke + p_k / rho_0  # (nCells,)
 
         # Pressure gradient + Bernoulli
         grad_B = gradient_edge(bernoulli, mesh)  # (nEdges,)
 
-        # PV flux (Coriolis + vorticity)
-        q_v = potential_vorticity_vertex(u_k, h_k_level, mesh.fVertex, mesh)
+        # PV flux: RELATIVE VORTICITY from perturbation velocity ONLY.
+        # Coriolis (f) is excluded and applied separately in the step
+        # function to avoid double-counting with the barotropic solver.
+        # Using u_prime for curl ensures the depth-mean vorticity is
+        # not double-counted with the barotropic solver's implicit
+        # handling of depth-mean vorticity dynamics.
+        zeta_v = curl_vertex(u_prime_k, mesh)  # relative vorticity at vertices
+        h_v = vertex_thickness(h_k_level, mesh)
+        h_v_safe = jnp.maximum(h_v, 1e-10)
+        q_vort = zeta_v / h_v_safe  # PV without f
         if config.pv_scheme == "energy":
-            pv_flux = pv_flux_energy_conserving(u_k, h_k_level, q_v, mesh)
+            pv_flux = pv_flux_energy_conserving(u_prime_k, h_k_level, q_vort, mesh)
         else:
-            pv_flux = pv_flux_enstrophy_conserving(u_k, h_k_level, q_v, mesh)
+            pv_flux = pv_flux_enstrophy_conserving(u_prime_k, h_k_level, q_vort, mesh)
 
-        # Horizontal viscosity
-        visc = config.A_h * vector_laplacian_del2(u_k, mesh)  # (nEdges,)
+        # Horizontal viscosity on perturbation velocity
+        visc = config.A_h * vector_laplacian_del2(u_prime_k, mesh)  # (nEdges,)
 
         du_dt_k = -grad_B + pv_flux + visc
         du_dt_k = du_dt_k * edge_mask  # zero on land edges
@@ -228,9 +259,9 @@ def mpas_ocean_baroclinic_tendencies(
     dz_half = z_coord.dz_half_ref  # (nlev-1,)
     dz = z_coord.dz_ref  # (nlev,)
 
-    # Vertical viscosity: d/dz(A_v * du/dz) at each edge
+    # Vertical viscosity on perturbation velocity: d/dz(A_v * du'/dz)
     du_dt_3d = du_dt_3d + _vertical_diffusion(
-        u_3d, dz_half, dz, jacobian=jacobian, coeff=config.A_v, is_edge=True,
+        u_prime_3d, dz_half, dz, jacobian=jacobian, coeff=config.A_v, is_edge=True,
         mesh=mesh,
     )
 

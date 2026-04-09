@@ -348,7 +348,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
-    barotropic_diffusion_alpha: float = 0.01
+    # Default alpha=0 for C-grid: the compact-stencil C-grid divergence/
+    # gradient operators eliminate the 2dx checkerboard mode that the A-grid
+    # solver needs diffusion to suppress.  The flux-form diffusion code
+    # remains available for production runs with realistic topography
+    # where grid-scale SSH noise may arise from wetting/drying or steep
+    # bathymetric steps.  Set to 0.001-0.01 if needed.
+    barotropic_diffusion_alpha: float = 0.0
     barotropic_diffusion_dt_ref: float = 60.0
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5

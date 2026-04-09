@@ -77,16 +77,22 @@ def prescribed_surface_forcing(
         tau_y = jnp.zeros_like(tau_x)
     elif cfg.wind_profile == "global_wind":
         lat = grid.grid_lat
-        # Global 3-belt zonal wind stress:
-        #   Easterly trades (0-30°), westerlies (30-60°), polar easterlies (60-90°)
-        # τ_x = -τ_0 * [cos(2φ) * taper], where taper smoothly reduces
-        # to zero near the poles to avoid singularities.
-        # The cos(2φ) pattern gives:
-        #   φ=0:  τ_x = -τ_0  (easterly trades)
-        #   φ=45: τ_x = +τ_0  (westerlies)
-        #   φ=90: τ_x = -τ_0  (polar easterlies, tapered)
-        taper = jnp.cos(lat) ** 2  # goes to 0 at poles
-        tau_x = -cfg.tau_max * jnp.cos(2.0 * lat) * taper
+        # Realistic 3-belt zonal wind stress following
+        # Nikurashin & Vallis (2012, JPO) style profile.
+        # Polynomial in sin^2(phi) with cos(phi) envelope:
+        #   tau_x = tau_max * (a + b*s^2 + c*s^4 + d*s^6) * cos(phi)
+        # where s = sin(phi). Coefficients tuned so that:
+        #   phi=0:  tau_x = -0.08 Pa  (easterly trades)
+        #   phi=30: tau_x = 0         (zero crossing)
+        #   phi=50: tau_x = +0.10 Pa  (westerly peak)
+        #   phi=70: tau_x = 0         (returns to zero)
+        # Scaled by tau_max/0.1 so the default tau_max=0.1 gives
+        # the reference amplitudes above.
+        s2 = jnp.sin(lat) ** 2
+        scale = cfg.tau_max / 0.1
+        tau_x = scale * (
+            -0.08 - 0.0397 * s2 + 1.9487 * s2**2 - 2.0397 * s2**3
+        ) * jnp.cos(lat)
         tau_y = jnp.zeros_like(tau_x)
     else:
         tau_x = jnp.full_like(dz_0, cfg.tau_x, dtype=dtype)

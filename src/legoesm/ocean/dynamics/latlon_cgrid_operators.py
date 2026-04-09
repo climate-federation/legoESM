@@ -388,152 +388,315 @@ def laplacian_cgrid(
 
 
 # =============================================================================
-# Vector Laplacian on C-grid faces
+# Vector Laplacian: grad(div) - k x grad(curl)
 # =============================================================================
 
-def vorticity_cgrid(
+def curl_vertex_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
     grid: LatLonGrid,
 ) -> jnp.ndarray:
-    """Relative vorticity at cell corners (vertex points).
+    """Relative vorticity at vertex (corner) points via circulation integral.
 
-    Computes ζ = ∂v/∂x - ∂u/∂y on the C-grid using circulation
-    around each vertex.  Returns shape (n_lat+1, n_lon+1).
-
-    Corner (i, j) is the SW corner of cell (i, j), surrounded by:
-    - u-face (i-1, j) to the south
-    - u-face (i, j) to the north
-    - v-face (i, j-1) to the west
-    - v-face (i, j) to the east
-    """
-    R = grid.radius
-    dlat = grid.dlat
-    dlon = grid.dlon
-    n_lat, n_lon = grid.n_lat, grid.n_lon
-
-    # v-face contribution: ∂v/∂x at corners
-    # v has shape (n_lat+1, n_lon). Corner (i,j) uses v(i, j) and v(i, j-1).
-    v_east = v                                    # (n_lat+1, n_lon) at j
-    v_west = jnp.roll(v, 1, axis=1)              # (n_lat+1, n_lon) at j-1
-    # Pad to (n_lat+1, n_lon+1) — periodic in longitude
-    dv_dx = jnp.concatenate([v_east - v_west, (v_east - v_west)[:, 0:1]], axis=1)
-
-    # u-face contribution: -∂(u*cos_lat)/∂y at corners
-    # u has shape (n_lat, n_lon+1). Corner (i,j) uses u(i, j) and u(i-1, j).
-    # Latitude of u-face row i = lat[i] (cell-center latitude)
-    cos_lat_u = jnp.cos(grid.lat)[:, None]  # (n_lat, 1)
-    u_cos = u * cos_lat_u                   # (n_lat, n_lon+1)
-    u_north = u_cos                          # at i
-    u_south = jnp.zeros((1, n_lon + 1), dtype=u.dtype)
-    # Pad: row 0 of corners uses u(0, j) (north) and nothing to south (wall)
-    u_north_full = jnp.concatenate([u_cos, jnp.zeros((1, n_lon + 1), dtype=u.dtype)], axis=0)
-    u_south_full = jnp.concatenate([jnp.zeros((1, n_lon + 1), dtype=u.dtype), u_cos], axis=0)
-    du_cos_dy = u_north_full - u_south_full   # (n_lat+1, n_lon+1)
-
-    # Corner latitude (needed for 1/cos_lat_corner metric)
-    lat_corner = jnp.concatenate([
-        jnp.array([-jnp.pi / 2]),
-        0.5 * (grid.lat[:-1] + grid.lat[1:]),
-        jnp.array([jnp.pi / 2]),
-    ])  # (n_lat+1,)
-    cos_lat_corner = jnp.maximum(jnp.cos(lat_corner), 1e-10)[:, None]
-
-    # ζ = (1 / R cos_lat_corner) * (dv_dx / dlon - du_cos_dy / dlat)
-    zeta = (dv_dx / dlon - du_cos_dy / dlat) / (R * cos_lat_corner)
-    return zeta
-
-
-def vector_laplacian_cgrid(
-    u: jnp.ndarray,
-    v: jnp.ndarray,
-    grid: LatLonGrid,
-    mask: jnp.ndarray | None = None,
-    u_mask: jnp.ndarray | None = None,
-    v_mask: jnp.ndarray | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Vector Laplacian: grad(div) - curl(curl) at C-grid face points.
-
-    Computes the proper vector Laplacian directly on face velocities
-    without the cell-center interpolation detour.  This avoids the
-    extra smoothing from double-interpolation that over-dissipates KE.
+    Vertices sit at the intersection of u-face latitudes and v-face
+    longitudes: shape (n_lat+1, n_lon+1), with periodic wrap in
+    longitude (column n_lon == column 0).
 
     Parameters
     ----------
     u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
     v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
     grid : LatLonGrid
-    mask, u_mask, v_mask : optional land masks
 
     Returns
     -------
-    lap_u : same shape as u
-    lap_v : same shape as v
+    zeta : (n_lat+1, n_lon+1) or (n_lat+1, n_lon+1, nlev)
     """
-    import jax
+    is_3d = u.ndim == 3
+    if is_3d:
+        import jax
+        u_t = jnp.moveaxis(u, -1, 0)
+        v_t = jnp.moveaxis(v, -1, 0)
 
+        def curl_2d(uv):
+            return curl_vertex_cgrid(uv[0], uv[1], grid)
+
+        zeta_t = jax.vmap(curl_2d)(jnp.stack([u_t, v_t]))
+        return jnp.moveaxis(zeta_t, 0, -1)
+
+    R = grid.radius
+    dlon = grid.dlon
+    dlat = grid.dlat
+    lat = grid.lat  # cell-center latitudes (n_lat,)
+    cos_lat = grid.cos_lat  # (n_lat,)
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+
+    # Vertex area: A_v(i) = R^2 * dlon * |sin(lat_cell[i]) - sin(lat_cell[i-1])|
+    # with lat_cell[-1] = -pi/2 (south pole), lat_cell[n_lat] = +pi/2 (north pole)
+    sin_lat = jnp.sin(lat)
+    sin_ext = jnp.concatenate([
+        jnp.array([-1.0], dtype=lat.dtype),   # sin(-pi/2)
+        sin_lat,
+        jnp.array([1.0], dtype=lat.dtype),     # sin(+pi/2)
+    ])
+    A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])  # (n_lat+1,)
+    A_vertex = jnp.maximum(A_vertex, 1e-30)  # avoid division by zero at poles
+
+    # Circulation around vertex (i, j), CCW:
+    #   south edge (eastward): +u[i-1, j] * R*cos(lat[i-1])*dlon
+    #   east edge (northward): +v[i, j] * R*dlat
+    #   north edge (westward): -u[i, j] * R*cos(lat[i])*dlon
+    #   west edge (southward): -v[i, j-1] * R*dlat
+    #
+    # For vertex row i: south cell row = i-1, north cell row = i
+    # For vertex col j: east v-col = j, west v-col = (j-1) mod n_lon
+
+    # Edge lengths
+    dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at each cell latitude
+    dy_edge = R * dlat             # scalar, meridional edge length
+
+    # v contribution: v[i, j]*dy - v[i, (j-1)%n_lon]*dy
+    # v shape: (n_lat+1, n_lon). Wrap in longitude.
+    v_east = v                                    # (n_lat+1, n_lon)
+    v_west = jnp.roll(v, 1, axis=1)              # (n_lat+1, n_lon)
+    dv_circ = (v_east - v_west) * dy_edge         # (n_lat+1, n_lon)
+
+    # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i]
+    # u shape: (n_lat, n_lon+1). Vertex row i uses u rows i-1 and i.
+    # Pad with zeros at poles (u at pole vertex has no cell row beyond)
+    zero_u = jnp.zeros((1, n_lon + 1), dtype=u.dtype)
+    u_ext = jnp.concatenate([zero_u, u, zero_u], axis=0)  # (n_lat+2, n_lon+1)
+    dx_ext = jnp.concatenate([
+        jnp.zeros(1, dtype=lat.dtype),
+        dx_cell,
+        jnp.zeros(1, dtype=lat.dtype),
+    ])  # (n_lat+2,)
+
+    # u_south = u_ext[i] = u[i-1] for vertex row i (0-indexed)
+    # u_north = u_ext[i+1] = u[i] for vertex row i
+    u_south = u_ext[:-1, :]  # (n_lat+1, n_lon+1)
+    u_north = u_ext[1:, :]   # (n_lat+1, n_lon+1)
+    dx_south = dx_ext[:-1]    # (n_lat+1,)
+    dx_north = dx_ext[1:]     # (n_lat+1,)
+
+    du_circ = (u_south * dx_south[:, jnp.newaxis]
+               - u_north * dx_north[:, jnp.newaxis])  # (n_lat+1, n_lon+1)
+
+    # Combine: need dv_circ at (n_lat+1, n_lon+1) — append periodic wrap column
+    dv_circ_full = jnp.concatenate(
+        [dv_circ, dv_circ[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
+
+    circ = du_circ + dv_circ_full
+    zeta = circ / A_vertex[:, jnp.newaxis]
+
+    # Zero at poles (degenerate vertex area, undefined vorticity)
+    zeta = zeta.at[0, :].set(0.0)
+    zeta = zeta.at[-1, :].set(0.0)
+
+    return zeta
+
+
+def _gradient_curl_to_u(
+    zeta: jnp.ndarray,
+    grid: LatLonGrid,
+) -> jnp.ndarray:
+    """Meridional gradient of vertex scalar to u-face points.
+
+    The tangential direction at a u-face is south-to-north.
+    result(i, j) = (zeta[i+1, j] - zeta[i, j]) / (R * dlat)
+
+    Parameters
+    ----------
+    zeta : (n_lat+1, n_lon+1) or (n_lat+1, n_lon+1, nlev)
+
+    Returns
+    -------
+    grad : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
+    """
+    R = grid.radius
+    dlat = grid.dlat
+    dy = R * dlat
+    return (zeta[1:] - zeta[:-1]) / dy
+
+
+def _gradient_curl_to_v(
+    zeta: jnp.ndarray,
+    grid: LatLonGrid,
+) -> jnp.ndarray:
+    """Zonal gradient of vertex scalar to v-face points.
+
+    The tangential direction at a v-face is west-to-east.
+    result(i, j) = (zeta[i, j+1] - zeta[i, j]) / (R * cos(lat_v[i]) * dlon)
+
+    Parameters
+    ----------
+    zeta : (n_lat+1, n_lon+1) or (n_lat+1, n_lon+1, nlev)
+
+    Returns
+    -------
+    grad : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
+    """
+    R = grid.radius
+    dlon = grid.dlon
+    lat = grid.lat
+
+    # v-face latitudes (same as in divergence_cgrid)
+    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
+    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    lat_interior = 0.5 * (lat[:-1] + lat[1:])
+    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
+    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)
+
+    dx_v = R * cos_lat_v * dlon  # (n_lat+1,)
+
+    # zeta[:, j+1] - zeta[:, j] for j=0..n_lon-1
+    # Column n_lon of zeta is the periodic wrap of column 0
+    dzeta = zeta[:, 1:] - zeta[:, :-1]  # (n_lat+1, n_lon)
+
+    if zeta.ndim == 2:
+        return dzeta / dx_v[:, jnp.newaxis]
+    else:
+        return dzeta / dx_v[:, jnp.newaxis, jnp.newaxis]
+
+
+def vector_laplacian_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Vector Laplacian on the C-grid: grad(div) - k x grad(curl).
+
+    Operates directly on face velocities without cell-center detour.
+    This is the rectangular-grid analog of TRiSK's vector_laplacian_del2.
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
+    v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
+    grid : LatLonGrid
+    mask : (n_lat, n_lon) cell-center land mask, optional
+    u_mask : (n_lat, n_lon+1) u-face mask, optional
+    v_mask : (n_lat+1, n_lon) v-face mask, optional
+
+    Returns
+    -------
+    vlap_u : same shape as u
+    vlap_v : same shape as v
+    """
     is_3d = u.ndim == 3
 
-    def _vlap_2d(u2d, v2d):
-        # --- Term 1: grad(div) ---
-        div_uv = divergence_cgrid(u2d, v2d, grid, u_mask=u_mask, v_mask=v_mask)
-        if mask is not None:
-            div_uv = div_uv * mask
-        graddiv_u = gradient_x_cgrid(div_uv, grid)  # (n_lat, n_lon+1)
-        graddiv_v = gradient_y_cgrid(div_uv, grid)  # (n_lat+1, n_lon)
+    if is_3d:
+        import jax
+        u_t = jnp.moveaxis(u, -1, 0)
+        v_t = jnp.moveaxis(v, -1, 0)
 
-        # --- Term 2: curl(curl) = -k × grad(ζ) ---
-        # ζ at corners (n_lat+1, n_lon+1)
-        zeta = vorticity_cgrid(u2d, v2d, grid)
-        if mask is not None:
-            # Mask vorticity at corners: corner (i,j) is wet only if
-            # all adjacent cells are wet.  Interior corners (1..n_lat-1,
-            # 0..n_lon) use 4 cells; pole corners are always masked.
-            n_lat, n_lon = mask.shape
-            # Interior corner mask (n_lat-1, n_lon)
-            m_s = mask[:-1, :]      # cell to south
-            m_n = mask[1:, :]       # cell to north
-            m_sw = m_s              # same row, same col
-            m_nw = m_n
-            m_se = jnp.roll(m_s, -1, axis=1)
-            m_ne = jnp.roll(m_n, -1, axis=1)
-            cm_interior = m_sw * m_nw * m_se * m_ne  # (n_lat-1, n_lon)
-            # Pad: poles masked, periodic in lon
-            zero_row = jnp.zeros((1, n_lon), dtype=mask.dtype)
-            cm = jnp.concatenate([zero_row, cm_interior, zero_row], axis=0)
-            cm = jnp.concatenate([cm, cm[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
-            zeta = zeta * cm
+        def vlap_2d(uv):
+            return vector_laplacian_cgrid(
+                uv[0], uv[1], grid,
+                mask=mask, u_mask=u_mask, v_mask=v_mask)
 
-        # grad(ζ): ζ at corners → gradient at faces
-        # ∂ζ/∂y at u-points (n_lat, n_lon+1): u-face (i,j) between
-        # corners (i,j) [south] and (i+1,j) [north]
-        R = grid.radius
-        dzetady_at_u = (zeta[1:, :] - zeta[:-1, :]) / (R * grid.dlat)
+        # Stack u and v along a new leading axis for vmap
+        # u_t: (nlev, n_lat, n_lon+1), v_t: (nlev, n_lat+1, n_lon)
+        # Pad v to match u's shape for stacking, then unpad
+        n_lat = grid.n_lat
+        n_lon = grid.n_lon
+        nlev = u_t.shape[0]
 
-        # ∂ζ/∂x at v-points (n_lat+1, n_lon): v-face (i,j) between
-        # corners (i,j) [west] and (i,j+1) [east]
-        cos_lat_v = jnp.concatenate([
-            jnp.array([1e-10]),
-            jnp.maximum(jnp.cos(0.5 * (grid.lat[:-1] + grid.lat[1:])), 1e-10),
-            jnp.array([1e-10]),
-        ])[:, None]
-        dzetadx_at_v = (zeta[:, 1:] - zeta[:, :-1]) / (R * cos_lat_v * grid.dlon)
+        vlap_u_list = []
+        vlap_v_list = []
+        for k in range(nlev):
+            lu, lv = vector_laplacian_cgrid(
+                u_t[k], v_t[k], grid,
+                mask=mask, u_mask=u_mask, v_mask=v_mask)
+            vlap_u_list.append(lu)
+            vlap_v_list.append(lv)
+        vlap_u = jnp.stack(vlap_u_list, axis=-1)
+        vlap_v = jnp.stack(vlap_v_list, axis=-1)
+        return vlap_u, vlap_v
 
-        # curl(curl) = (∂ζ/∂y, -∂ζ/∂x)  (k × grad ζ)
-        # vector Laplacian = grad(div) - curl(curl)
-        lap_u = graddiv_u - dzetady_at_u
-        lap_v = graddiv_v + dzetadx_at_v
-        return lap_u, lap_v
+    # --- 2D case ---
 
-    if not is_3d:
-        return _vlap_2d(u, v)
+    # Apply face masks before computing div and curl
+    u_eff = u
+    v_eff = v
+    if u_mask is not None:
+        u_eff = u * u_mask
+    if v_mask is not None:
+        v_eff = v * v_mask
 
-    # 3D: vmap over levels (u and v have different spatial shapes,
-    # so we vmap them as separate arguments, moving level to axis 0).
-    u_t = jnp.moveaxis(u, -1, 0)   # (nlev, n_lat, n_lon+1)
-    v_t = jnp.moveaxis(v, -1, 0)   # (nlev, n_lat+1, n_lon)
-    lu_t, lv_t = jax.vmap(_vlap_2d)(u_t, v_t)
-    return jnp.moveaxis(lu_t, 0, -1), jnp.moveaxis(lv_t, 0, -1)
+    # 1. Divergence at cell centers
+    div = divergence_cgrid(u_eff, v_eff, grid)
+    if mask is not None:
+        div = div * mask
+
+    # 2. grad(div) at faces
+    grad_div_u = gradient_x_cgrid(div, grid)  # (n_lat, n_lon+1)
+    grad_div_v = gradient_y_cgrid(div, grid)  # (n_lat+1, n_lon)
+
+    # 3. Curl at vertices
+    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)  # (n_lat+1, n_lon+1)
+
+    # Mask curl at land-adjacent vertices
+    if mask is not None:
+        vmask = _compute_vertex_mask(mask)
+        zeta = zeta * vmask
+
+    # 4. Tangential gradient of curl at faces
+    grad_curl_u = _gradient_curl_to_u(zeta, grid)  # (n_lat, n_lon+1)
+    grad_curl_v = _gradient_curl_to_v(zeta, grid)  # (n_lat+1, n_lon)
+
+    # 5. Vector Laplacian = grad(div) - curl(curl)
+    # curl(curl F) = k × ∇ζ = (-∂ζ/∂y, +∂ζ/∂x).
+    # Signs verified via bump tests (both components must be diffusive):
+    #   u-bump: vlap_u = grad_div_u - grad_curl_u → negative ✓
+    #   v-bump: vlap_v = grad_div_v + grad_curl_v → negative ✓
+    # The sign asymmetry arises because _gradient_curl_to_u computes
+    # ∂ζ/∂y (northward) while _gradient_curl_to_v computes ∂ζ/∂x
+    # (eastward), and (k × ∇ζ)_x = -∂ζ/∂y but (k × ∇ζ)_y = +∂ζ/∂x.
+    vlap_u = grad_div_u - grad_curl_u
+    vlap_v = grad_div_v + grad_curl_v
+
+    # Apply face masks to output
+    if u_mask is not None:
+        vlap_u = vlap_u * u_mask
+    if v_mask is not None:
+        vlap_v = vlap_v * v_mask
+
+    return vlap_u, vlap_v
+
+
+def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
+    """Compute vertex mask: wet only if all four surrounding cells are wet.
+
+    Parameters
+    ----------
+    land_mask : (n_lat, n_lon)
+
+    Returns
+    -------
+    vertex_mask : (n_lat+1, n_lon+1)
+    """
+    m = land_mask
+    n_lat, n_lon = m.shape
+
+    # Interior vertices (i, j) for i=1..n_lat-1, j=0..n_lon-1
+    # surrounded by cells (i-1, j-1), (i-1, j), (i, j-1), (i, j)
+    m_sw = jnp.roll(m, 1, axis=1)  # m[:, j-1]
+    interior = m[:-1] * m[1:] * m_sw[:-1] * m_sw[1:]  # (n_lat-1, n_lon)
+
+    # Append periodic wrap column
+    interior_full = jnp.concatenate(
+        [interior, interior[:, 0:1]], axis=1)  # (n_lat-1, n_lon+1)
+
+    # Pole rows: zero (degenerate vertices)
+    zero_row = jnp.zeros((1, n_lon + 1), dtype=m.dtype)
+
+    return jnp.concatenate([zero_row, interior_full, zero_row], axis=0)
 
 
 # =============================================================================

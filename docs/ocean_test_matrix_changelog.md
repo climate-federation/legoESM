@@ -618,14 +618,223 @@ JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only inertia_gravity_
 
 ---
 
+### 8. **CRITICAL FIX: MPAS Coriolis Double-Counting in Split-Explicit Stepping (Issue #103)**
+**Date**: 2026-04-08
+**Severity**: Critical
+**Status**: ✅ Fixed (committed, validation pending)
+
+**Problem**: The MPAS ocean model double-counted the depth-mean Coriolis tendency in its split-explicit time stepping, causing catastrophic velocity amplification with multiple vertical levels (52 m/s at 10 levels vs 0.0001 m/s at 1 level in the global wind test).
+
+**Root Cause**: The baroclinic PV-flux Coriolis in `ocean_pe_mpas.py` operated on full velocity `u`, not perturbation velocity `u' = u - u_bar`. This generated a nonzero depth-mean Coriolis tendency that got baked into `u_baro`, and the barotropic solver applied Coriolis again.
+
+**Fix**: Ported the latlon C-grid's perturbation-velocity approach to MPAS:
+- Baroclinic tendencies (KE, PV flux, viscosity, vertical diffusion) now use `u' = u - u_bar`
+- Coriolis excluded from baroclinic PV — only relative vorticity `zeta = curl(u')` used
+- New `_forward_backward_coriolis_mpas_3d()` applies semi-implicit Coriolis to perturbation velocity only
+- Hydrostatic pressure uses reference Jacobian (`J=1, eta=0`) to avoid barotropic overlap
+- Baroclinic pressure anomaly uses `dz_ref` instead of `dz_ref * J`
+
+**Files Modified**:
+- `src/legoesm/ocean/dynamics/ocean_model_mpas.py`
+- `src/legoesm/ocean/dynamics/ocean_pe_mpas.py`
+
+---
+
+### 9. **ENHANCEMENT: Wind Profile Upgrade to Nikurashin & Vallis (2012) Style**
+**Date**: 2026-04-08
+**Severity**: Enhancement
+**Status**: ✅ Implemented
+
+**Problem**: The simple `cos(2φ)` 3-belt wind profile had unrealistic zero crossings and amplitude distribution.
+
+**Fix**: Replaced with polynomial-in-sin²(φ) profile with cos(φ) envelope:
+```
+τ_x = scale * (-0.08 - 0.0397·s² + 1.9487·s⁴ - 2.0397·s⁶) · cos(φ)
+```
+Gives realistic trade/westerly/polar easterly structure with zero crossings at ~30° and ~70°.
+
+**Files Modified**:
+- `src/legoesm/ocean/physics/surface_forcing/prescribed.py`
+- `src/legoesm/ocean/physics/mpas_physics.py`
+- `scripts/run_ocean_test_matrix.py` (forcing profile plot)
+
+---
+
+### 10. **ENHANCEMENT: Vertical Velocity Profile Diagnostics**
+**Date**: 2026-04-08
+**Severity**: Enhancement
+**Status**: ✅ Implemented
+
+**Problem**: The ocean test matrix only saved surface-level velocity and 3D temperature/salinity. No way to inspect how momentum is distributed vertically.
+
+**Fix**: Added `include_velocity_3d` flag to snapshot extraction functions and a general `_save_velocity_profiles()` diagnostic function. When enabled (currently for gyre experiments), snapshots include cell-center `u_3d`, `v_3d`, `speed_3d` at all levels, and three new plots are generated:
+- `velocity_profiles_mean.png` — domain-mean |u|, |v|, speed vs depth over time
+- `velocity_profiles_max.png` — max velocity vs depth over time
+- `velocity_structure_final.png` — mean + RMS velocity structure at final timestep
+
+For MPAS, cell-center velocity is reconstructed from edge normals via Perot reconstruction at all levels. For latlon C-grid, face velocities are interpolated to cell centers.
+
+**Files Modified**:
+- `scripts/run_ocean_test_matrix.py`
+
+---
+
+### 11. **BUG FIX: Regional MPAS Plot Extent in Cross-Grid Comparisons**
+**Date**: 2026-04-08
+**Severity**: Moderate
+**Status**: ✅ Fixed
+
+**Problem**: MPAS regional plots showed the full 0-360° longitude range instead of the actual domain (e.g., 0-120°). The nearest-neighbour regridding bleeds beyond the domain because on a sphere the regional mesh cells are "closest" to target grid points far outside the domain.
+
+**Root Cause**: The auto-crop heuristic (find non-NaN bounding box) failed because the regridded land_mask values were >0.5 at points far from the domain.
+
+**Fix**:
+- Added explicit `domain_extent` parameter through the plotting pipeline (`_save_snapshot_plots`, `_save_case_diagnostics`)
+- Saved `source_lon_range` / `source_lat_range` in `snapshots_latlon.npz` for cross-grid comparison functions
+- Regional gyre experiments pass `(0, 120, 15, 75)` as domain extent
+
+**Files Modified**:
+- `scripts/run_ocean_test_matrix.py`
+
+---
+
+### 12. **CRITICAL FIX: Latlon C-Grid Vector Laplacian (Issue #105)**
+**Date**: 2026-04-08
+**Severity**: Critical
+**Status**: ✅ Fixed
+
+**Problem**: The latlon C-grid ocean model dissipated ~30% more kinetic energy than MPAS for identical physics parameters. In the 30-day regional double gyre, latlon max SSH declined from 0.017 to 0.014 m while MPAS held steady at 0.021 m. KE dropped ~20%.
+
+**Root Cause**: The viscosity operator `_laplacian_at_u` / `_laplacian_at_v` used a lossy cell-center detour: interpolate face velocity to cell centers, apply scalar Laplacian, interpolate back to faces. The double interpolation smeared the operator, producing effective dissipation wider and stronger than the nominal A_h.
+
+**Fix**: Implemented the proper vector Laplacian `grad(div) - k×grad(curl)` operating directly on face velocities:
+- `curl_vertex_cgrid()` — vorticity at corner points via circulation integral
+- `_gradient_curl_to_u()` / `_gradient_curl_to_v()` — tangential gradient of curl at face points
+- `vector_laplacian_cgrid()` — composes the above with existing `divergence_cgrid` and `gradient_x/y_cgrid`
+- `_compute_vertex_mask()` — vertex mask from cell land mask
+
+This is the rectangular-grid analog of TRiSK's `vector_laplacian_del2`. Sign convention verified via bump tests: both u and v components produce diffusive (negative at peak) results.
+
+**Validation**:
+```
+30-day regional double gyre (A_h=5e5, dt=300s, 10 levels):
+
+BEFORE (scalar Laplacian via cell-center detour):
+  latlon: max SSH 0.014 m (declining), KE ~2.5e-6 (declining)
+  MPAS:   max SSH 0.021 m (steady),    KE ~3.0e-6 (steady)
+
+AFTER (proper vector Laplacian):
+  latlon: max SSH 0.019 m (steady),    KE ~4.0e-6 (steady)
+  MPAS:   max SSH 0.021 m (steady),    KE ~3.0e-6 (steady)
+```
+
+Latlon KE no longer shows anomalous decline. The remaining difference (latlon slightly higher KE) is consistent with its finer effective resolution.
+
+**Files Modified**:
+- `src/legoesm/ocean/dynamics/latlon_cgrid_operators.py` (new operators)
+- `src/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py` (use new operator)
+
+**Remaining items from #105 analysis**:
+- Physics pipeline (wind stress, bottom drag) still routes through cell-center interpolation — secondary contributor to dissipation mismatch
+- Wall boundary treatment in physics interpolation can bleed across land mask
+
+---
+
+### 13. **FIX: Disable Excessive Barotropic SSH Diffusion on C-Grid (Issue #105 follow-up)**
+**Date**: 2026-04-08
+**Severity**: Moderate
+**Status**: ✅ Fixed
+
+**Problem**: Even after the vector Laplacian fix (#12), latlon SSH amplitude still declined ~0.5%/day (0.019 → 0.016 m over 30 days) while MPAS held rock-steady at 0.021 m. With `barotropic_diffusion_alpha=0`, latlon reached 0.025 m and was completely stable.
+
+**Root Cause**: The barotropic solver applies `div(nu_face * grad(eta))` every substep (30 per baroclinic step) with `alpha=0.01`. The effective diffusivity is ~1e7 m²/s — **20x larger than A_h=5e5**. While the flux-form diffusion is exactly conservative (no net mass loss), it smooths SSH gradients aggressively, reducing the gyre amplitude toward a flatter profile.
+
+This diffusion was originally needed for the **A-grid** solver to suppress the 2Δx checkerboard mode. The **C-grid** solver eliminates the checkerboard by construction (compact 1-cell stencils), so the diffusion is unnecessary.
+
+**Investigation**: The ocean expert agent confirmed:
+- The active solver (`barotropic_latlon_cgrid.py`) already uses flux-form diffusion — no conservation error
+- The old hybrid solver (`barotropic_cgrid_latlon.py`) was dead code using A-grid `laplacian_latlon`
+- Three fix options: flux-form (already done), C-grid operators (already done), default alpha=0 (needed)
+- Keep alpha=0 as default; retain the knob for production runs with realistic topography (wetting/drying, steep bathymetric steps)
+
+**Fix**:
+- Changed `LatLonCGridOceanConfig.barotropic_diffusion_alpha` default from `0.01` to `0.0`
+- Removed dead code `barotropic_cgrid_latlon.py` (hybrid A/C-grid solver not imported by any active model)
+- A-grid config `LatLonOceanConfig` and MPAS config retain `alpha=0.01` (still needed)
+
+**Validation**:
+```
+30-day regional double gyre (A_h=5e5, dt=300s, 10 levels):
+
+alpha=0.01 (old default): latlon max SSH 0.019 → 0.016 m (declining)
+alpha=0.0  (new default): latlon max SSH → 0.025 m (rock-steady)
+MPAS (alpha=0.01, flux-form): max SSH → 0.021 m (rock-steady)
+```
+
+**Files Modified**:
+- `src/legoesm/ocean/state.py` (default alpha=0.0 for C-grid config)
+- `src/legoesm/ocean/dynamics/barotropic_cgrid_latlon.py` (removed — dead code)
+
+---
+
+### 14. **NOTE: Cross-Grid SSH Amplitude Difference is Expected at Coarse Resolution**
+**Date**: 2026-04-08
+**Status**: Documented (no action needed)
+
+After all fixes (#105, barotropic diffusion), the 30-day regional double gyre shows:
+- Latlon C-grid (24x48): max SSH = 0.025 m (steady)
+- MPAS regional (300km): max SSH = 0.021 m (steady)
+
+The ~20% difference is **physically expected**, not a bug. At A_h = 5e5 m²/s, the Munk boundary layer width is `delta_M = (A_h/beta)^(1/3) ≈ 290 km` — about 2-3 cells on latlon and ~1 cell on MPAS. Both grids barely resolve the western boundary layer, so numerical diffusion from each discretization acts as additional effective viscosity on top of the explicit A_h. The MPAS Voronoi stencil contributes more numerical diffusion than the structured latlon C-grid, damping the circulation more and producing lower SSH amplitude.
+
+The SSH amplitude is controlled by how the western boundary return flow is handled, not by the interior Sverdrup balance (which is resolution-independent). At higher resolution with A_h held fixed (so delta_M is well-resolved), the amplitudes would converge.
+
+---
+
+### 15. **CODE AUDIT: Systematic Ocean Model Review (Issues #107–#115)**
+**Date**: 2026-04-08
+**Severity**: Mixed (2 Critical, 4 High, 12 Medium, 6 Low)
+**Status**: Issues filed, fixes pending
+
+After extensive ocean model development (vector Laplacian, perturbation velocity Coriolis, MPAS fixes, barotropic solver changes), ran a systematic code audit using both dycore-expert and ocean-model-expert agents, then cross-verified all findings with the ocean expert. Results: 19 confirmed issues, 5 partially correct, 0 false positives.
+
+**Critical findings**:
+- **#107**: MPAS `step_checked()` passes `surface_forcing` as positional arg `freshwater` — silently drops forcing
+- **#110**: Dead semi-implicit Coriolis code in C-grid barotropic solver — computed but overwritten every substep
+
+**High-severity findings**:
+- **#109**: A-grid and cubed-sphere dycores use actual Jacobian J for baroclinic pressure `dp_layer`, double-counting the free-surface contribution that the barotropic solver handles via `-g*grad(eta)`. The C-grid and MPAS backends correctly use reference J.
+- **#112**: `vector_laplacian_cgrid` 3D path uses Python for-loop over levels (unrolls at JIT time, bloats compile). Related: broken 3D path in `curl_vertex_cgrid` (dead but trappable).
+
+**Medium-severity findings**:
+- **#108**: Dead code sweep needed — unused functions (`_laplacian_at_u/v`, `scalar_advection_cgrid`), unused variables (`H_total`), stale imports (`wright_eos` x3, `coriolis_cgrid`), untracked file (`barotropic_cgrid_latlon.py`)
+- **#111**: C-grid model missing `step_checked`, conservation fixer, and freshwater support (present in A-grid and MPAS)
+- **#113**: MPAS physics pipeline duplicates `_fill_land_cells_mpas` in 3 files; silently ignores Richardson/KPP/GM-Redi physics config
+- **#114**: Cross-grid consistency issues — physics Field dims hardcoded to cubed-sphere, EOS iteration mismatch (1 vs 2), stale OceanConfig fields, `restoring.py` uses `grid.lat` instead of `grid.grid_lat`, shortwave uses reference z for absorption but dynamic dz for tendency, private function cross-module imports
+
+**Architecture discussion**:
+- **#115**: Consider retiring the A-grid (latlon) ocean model — the C-grid is strictly better (no checkerboard mode, proper vector Laplacian, correct PGF), paralleling #99 (spectral retirement)
+
+**GitHub Issues Created**: #107, #108, #109, #110, #111, #112, #113, #114, #115
+
+---
+
 ## Next Steps
 
 1. ~~Continue audit of remaining 8 test cases~~ ✅ **COMPLETED**
-2. ~~Document configuration issues found in each test~~ ✅ **COMPLETED**  
+2. ~~Document configuration issues found in each test~~ ✅ **COMPLETED**
 3. ~~Implement additional fixes as needed~~ ✅ **COMPLETED**
 4. ~~Create final validation report~~ ✅ **COMPLETED**
-5. **NEW**: Leverage modular architecture for enhanced ocean model research workflows
-6. **NEW**: Consider similar refactoring for atmosphere test matrix following ocean pattern
+5. ~~Implement proper vector Laplacian for latlon C-grid~~ ✅ **COMPLETED** (Issue #105)
+6. ~~Disable excessive barotropic SSH diffusion on C-grid~~ ✅ **COMPLETED** (Issue #105 follow-up)
+7. ~~Fix MPAS Coriolis double-counting~~ ✅ **COMMITTED** (Issue #103, validation pending)
+8. ~~Systematic ocean code audit~~ ✅ **COMPLETED** (Issues #107–#115 filed)
+9. **TODO**: Fix MPAS `step_checked` positional arg bug (#107) — quick, critical
+10. **TODO**: Dead code cleanup sweep (#108)
+11. **TODO**: Fix A-grid/cubed-sphere pressure double-counting (#109)
+12. **TODO**: Fix physics pipeline cell-center detour for wind stress/bottom drag on C-grid
+13. **TODO**: Run full ocean test matrix to validate all changes end-to-end
+14. **TODO**: Consider A-grid retirement (#115) and spectral removal (#99)
 
 ---
 
