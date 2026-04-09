@@ -47,8 +47,13 @@ class BulkFormulaConfig(NamedTuple):
 
 
 class SurfaceForcingConfig(NamedTuple):
-    """Top-level surface forcing configuration."""
-    scheme: str = "none"  # "prescribed", "restoring", "bulk_formulas", "none"
+    """Top-level surface forcing configuration.
+
+    Use ``scheme="combined"`` to apply prescribed wind stress together
+    with temperature/salinity restoring — needed for realistic
+    baroclinic gyre experiments.
+    """
+    scheme: str = "none"  # "prescribed", "restoring", "combined", "bulk_formulas", "none"
     prescribed: PrescribedForcingConfig = PrescribedForcingConfig()
     restoring: RestoringConfig = RestoringConfig()
     bulk_formulas: BulkFormulaConfig = BulkFormulaConfig()

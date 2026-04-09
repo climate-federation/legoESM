@@ -31,6 +31,8 @@ def make_surface_forcing_physics(
         return _make_prescribed(config)
     elif scheme == "restoring":
         return _make_restoring(config)
+    elif scheme == "combined":
+        return _make_combined(config)
     elif scheme == "bulk_formulas":
         return _make_bulk_formulas(config)
     else:
@@ -70,6 +72,32 @@ def _make_restoring(config: SurfaceForcingConfig) -> Callable:
                    surface_forcing=None) -> OceanTendencies:
         out = restoring_surface_forcing(state.T.data, state.S.data, grid, cfg)
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+    return physics_fn
+
+
+def _make_combined(config: SurfaceForcingConfig) -> Callable:
+    """Prescribed wind stress + temperature/salinity restoring."""
+    from legoesm.ocean.physics.surface_forcing.prescribed import prescribed_surface_forcing
+    from legoesm.ocean.physics.surface_forcing.restoring import restoring_surface_forcing
+    cfg_p = config.prescribed
+    cfg_r = config.restoring
+
+    def physics_fn(state: OceanState, grid: CubedSphereGrid,
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
+        J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
+        p = prescribed_surface_forcing(
+            state.u.data, state.v.data, state.T.data, state.S.data,
+            z_coord, J, grid, cfg_p,
+        )
+        r = restoring_surface_forcing(state.T.data, state.S.data, grid, cfg_r)
+        return _wrap_tendencies(
+            p.du_dt + r.du_dt,
+            p.dv_dt + r.dv_dt,
+            p.dT_dt + r.dT_dt,
+            p.dS_dt + r.dS_dt,
+            state,
+        )
     return physics_fn
 
 
