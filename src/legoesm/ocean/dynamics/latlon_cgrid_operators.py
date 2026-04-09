@@ -24,6 +24,7 @@ References
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.grids.latlon import LatLonGrid
@@ -326,131 +327,6 @@ def coriolis_cgrid(
 
 
 # =============================================================================
-# Scalar advection (face-normal velocities)
-# =============================================================================
-
-def scalar_advection_cgrid(
-    q: jnp.ndarray,
-    u: jnp.ndarray,
-    v: jnp.ndarray,
-    grid: LatLonGrid,
-    *,
-    mask: jnp.ndarray | None = None,
-    u_mask: jnp.ndarray | None = None,
-    v_mask: jnp.ndarray | None = None,
-) -> jnp.ndarray:
-    """Upwind scalar advection on the C-grid: -div(q * v).
-
-    Uses first-order upwind reconstruction at cell faces.
-
-    Parameters
-    ----------
-    q : array, shape (n_lat, n_lon) or (n_lat, n_lon, nlev)
-        Scalar at cell centers.
-    u : array, shape (n_lat, n_lon+1, ...) at u-points.
-    v : array, shape (n_lat+1, n_lon, ...) at v-points.
-    grid : LatLonGrid
-    mask, u_mask, v_mask : arrays, optional
-
-    Returns
-    -------
-    dq_dt : array, shape (n_lat, n_lon, ...)
-    """
-    R = grid.radius
-    dlon = grid.dlon
-    dlat = grid.dlat
-
-    is_3d = q.ndim == 3
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
-
-    # Apply face masks to velocities
-    u_eff = u
-    v_eff = v
-    if u_mask is not None:
-        um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask
-        u_eff = u * um
-    if v_mask is not None:
-        vm = v_mask[..., jnp.newaxis] if is_3d and v_mask.ndim == 2 else v_mask
-        v_eff = v * vm
-
-    # --- Zonal advection ---
-    # Face j: between cell j-1 and cell j
-    # q_face = upwind(u_face, q_left=q[j-1], q_right=q[j])
-    # q_left at face j: q[:, j-1]  (periodic)
-    # q_right at face j: q[:, j]
-    q_left = jnp.roll(q, 1, axis=1)  # q[:, j-1]
-
-    # For faces 0..n_lon-1 and the periodic face at n_lon:
-    # face j has left=q[:,j-1], right=q[:,j]
-    # face n_lon is same as face 0 (periodic wrap)
-    if is_3d:
-        q_left_full = jnp.concatenate([q_left, q_left[:, 0:1, :]], axis=1)
-        q_right_full = jnp.concatenate([q, q[:, 0:1, :]], axis=1)
-    else:
-        q_left_full = jnp.concatenate([q_left, q_left[:, 0:1]], axis=1)
-        q_right_full = jnp.concatenate([q, q[:, 0:1]], axis=1)
-
-    # Upwind: use q_left if u > 0 (flow from left to right)
-    q_u_face = jnp.where(u_eff > 0, q_left_full, q_right_full)
-
-    # Face flux: u * q * face_length
-    face_dy = R * dlat
-    zonal_flux = u_eff * q_u_face * face_dy  # (n_lat, n_lon+1, ...)
-
-    # Net zonal flux per cell: flux_east - flux_west
-    if is_3d:
-        net_zonal = zonal_flux[:, 1:, :] - zonal_flux[:, :-1, :]
-    else:
-        net_zonal = zonal_flux[:, 1:] - zonal_flux[:, :-1]
-
-    # --- Meridional advection ---
-    lat = grid.lat
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)
-    face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
-
-    # q at v-faces: upwind
-    # face i: between cell i-1 (south) and cell i (north)
-    # Interior faces i=1..n_lat-1
-    q_south = q[:-1]  # cell i-1
-    q_north_cells = q[1:]   # cell i
-    v_interior = v_eff[1:-1]  # interior v-faces (exclude poles)
-
-    q_v_interior = jnp.where(v_interior > 0, q_south, q_north_cells)
-
-    # Pole faces: zero flux (v=0 at poles)
-    if is_3d:
-        zero_row = jnp.zeros((1, n_lon, q.shape[2]), dtype=q.dtype)
-    else:
-        zero_row = jnp.zeros((1, n_lon), dtype=q.dtype)
-
-    q_v_face = jnp.concatenate([zero_row, q_v_interior, zero_row], axis=0)
-
-    if is_3d:
-        merid_flux = v_eff * q_v_face * face_dx[:, jnp.newaxis, jnp.newaxis]
-        net_merid = merid_flux[1:, :, :] - merid_flux[:-1, :, :]
-    else:
-        merid_flux = v_eff * q_v_face * face_dx[:, jnp.newaxis]
-        net_merid = merid_flux[1:] - merid_flux[:-1]
-
-    # Divergence
-    area = grid.area
-    if is_3d:
-        area = area[..., jnp.newaxis]
-
-    dq_dt = -(net_zonal + net_merid) / area
-
-    if mask is not None:
-        m = mask[..., jnp.newaxis] if is_3d and mask.ndim == 2 else mask
-        dq_dt = dq_dt * m
-
-    return dq_dt
-
-
 # =============================================================================
 # Laplacian for C-grid scalar fields (at cell centers)
 # =============================================================================
@@ -481,7 +357,6 @@ def laplacian_cgrid(
 
     if is_3d:
         # vmap over levels
-        import jax
         f_t = jnp.moveaxis(f, -1, 0)
 
         def lap_2d(fi):

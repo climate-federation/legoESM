@@ -17,7 +17,7 @@ Solver selection
 Use two-axis selection (recommended)::
 
     dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
-    discretization: "cdgrid" | "spectral" | "sfno" | "latlon_fv" | "mpas"
+    discretization: "cdgrid" | "spectral" | "sfno" | "mpas"
 
 Supported implementation matrix
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -27,15 +27,12 @@ dynamics                     discretization  solver
 ``shallow_water``            cdgrid          CDGridShallowWaterModel
 ``shallow_water``            spectral        SpectralShallowWaterModel
 ``shallow_water``            sfno            SFNOShallowWaterModel
-``shallow_water``            latlon_fv       FVShallowWaterLatLonModel
 ``hydrostatic``              cdgrid          CDGridPrimitiveEquationModel
 ``hydrostatic``              spectral        SpectralPrimitiveEquationModel
 ``hydrostatic``              sfno            SFNOPrimitiveEquationModel
-``hydrostatic``              latlon_fv       FVLatLonPrimitiveEquationModel
 ``hydrostatic``              mpas            MPASPrimitiveEquationModel
 ``nonhydrostatic``           cdgrid          CDGridCompressibleEulerModel
 ``nonhydrostatic``           spectral        SpectralCompressibleEulerModel
-``nonhydrostatic``           latlon_fv       FVCompressibleEulerLatLonModel
 ``nonhydrostatic``           mpas            MPASCompressibleEulerModel
 ===========================  ==============  =================================
 
@@ -95,12 +92,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "SFNOPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.sfno_pe", "SFNOPrimitiveEquationModel"),
     "SFNOPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.sfno_pe", "SFNOPrimitiveEquationConfig"),
     # --- Lat-lon cores ---
-    "FVShallowWaterLatLonModel": ("legoesm.atmosphere.dynamics.shallow_water_fv_latlon", "FVShallowWaterLatLonModel"),
-    "fv_shallow_water_tendencies_latlon": ("legoesm.atmosphere.dynamics.shallow_water_fv_latlon", "fv_shallow_water_tendencies_latlon"),
-    "FVLatLonPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.primitive_eq_fv_latlon", "FVLatLonPrimitiveEquationModel"),
-    "fv_latlon_hydrostatic_tendencies": ("legoesm.atmosphere.dynamics.primitive_eq_fv_latlon", "fv_latlon_hydrostatic_tendencies"),
-    "FVCompressibleEulerLatLonModel": ("legoesm.atmosphere.dynamics.compressible_euler_fv_latlon", "FVCompressibleEulerLatLonModel"),
-    "fv_compressible_euler_latlon_slow_tendencies": ("legoesm.atmosphere.dynamics.compressible_euler_fv_latlon", "fv_compressible_euler_latlon_slow_tendencies"),
     # --- MPAS icosahedral ---
     "MPASPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.primitive_eq_mpas", "MPASPrimitiveEquationModel"),
     "MPASPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.primitive_eq_mpas", "MPASPrimitiveEquationConfig"),
@@ -111,8 +102,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     # --- Tracer transport ---
     "TracerTransportModel": ("legoesm.atmosphere.dynamics.tracer_transport", "TracerTransportModel"),
     "tracer_tendencies": ("legoesm.atmosphere.dynamics.tracer_transport", "tracer_tendencies"),
-    "TracerTransportLatLonModel": ("legoesm.atmosphere.dynamics.tracer_transport_latlon", "TracerTransportLatLonModel"),
-    "tracer_tendencies_latlon": ("legoesm.atmosphere.dynamics.tracer_transport_latlon", "tracer_tendencies_latlon"),
     "TracerTransportMPASModel": ("legoesm.atmosphere.dynamics.tracer_transport_mpas", "TracerTransportMPASModel"),
     "tracer_tendencies_mpas": ("legoesm.atmosphere.dynamics.tracer_transport_mpas", "tracer_tendencies_mpas"),
     # --- Shared utilities (acoustic substeps, sponge, Exner) ---
@@ -196,13 +185,9 @@ AVAILABLE_SOLVERS = [
     "spectral_compressible_euler",
     "sfno_shallow_water",
     "sfno_primitive_equations",
-    "fv_shallow_water_latlon",
-    "fv_primitive_equations_latlon",
-    "fv_compressible_euler_latlon",
     "mpas_primitive_equations",
     "mpas_compressible_euler",
     "tracer_transport",
-    "tracer_transport_latlon",
     "tracer_transport_mpas",
 ]
 
@@ -224,7 +209,7 @@ _ALL_SOLVER_NAMES = AVAILABLE_SOLVERS + list(_DEPRECATED_SOLVER_NAMES)
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["cdgrid", "spectral", "sfno", "latlon_fv", "mpas"]
+DISCRETIZATION_OPTIONS = ["cdgrid", "spectral", "sfno", "mpas"]
 
 # Deprecated discretization names
 _DEPRECATED_DISCRETIZATIONS = {
@@ -239,15 +224,12 @@ _AXIS_TO_SOLVER = {
     ("shallow_water", "cdgrid"): "cdgrid_shallow_water",
     ("shallow_water", "spectral"): "spectral_shallow_water",
     ("shallow_water", "sfno"): "sfno_shallow_water",
-    ("shallow_water", "latlon_fv"): "fv_shallow_water_latlon",
     ("hydrostatic", "cdgrid"): "cdgrid_primitive_equations",
     ("hydrostatic", "spectral"): "spectral_primitive_equations",
     ("hydrostatic", "sfno"): "sfno_primitive_equations",
-    ("hydrostatic", "latlon_fv"): "fv_primitive_equations_latlon",
     ("hydrostatic", "mpas"): "mpas_primitive_equations",
     ("nonhydrostatic", "cdgrid"): "cdgrid_compressible_euler",
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
-    ("nonhydrostatic", "latlon_fv"): "fv_compressible_euler_latlon",
     ("nonhydrostatic", "mpas"): "mpas_compressible_euler",
 }
 
@@ -374,11 +356,7 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         "spectral_compressible_euler": "SpectralCompressibleEulerModel",
         "sfno_shallow_water": "SFNOShallowWaterModel",
         "sfno_primitive_equations": "SFNOPrimitiveEquationModel",
-        "fv_shallow_water_latlon": "FVShallowWaterLatLonModel",
-        "fv_primitive_equations_latlon": "FVLatLonPrimitiveEquationModel",
-        "fv_compressible_euler_latlon": "FVCompressibleEulerLatLonModel",
         "tracer_transport": "TracerTransportModel",
-        "tracer_transport_latlon": "TracerTransportLatLonModel",
         "tracer_transport_mpas": "TracerTransportMPASModel",
         "mpas_primitive_equations": "MPASPrimitiveEquationModel",
         "mpas_compressible_euler": "MPASCompressibleEulerModel",

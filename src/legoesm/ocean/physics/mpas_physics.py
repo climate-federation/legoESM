@@ -38,6 +38,22 @@ def make_mpas_ocean_physics(config) -> Callable:
     sf_config = config.surface_forcing
     bd_config = config.bottom_drag
 
+    # Warn about unsupported physics schemes that would be silently ignored.
+    import warnings
+    _unsupported = []
+    for attr in ("vertical_mixing", "lateral_mixing", "convection",
+                 "shortwave_penetration"):
+        sub = getattr(config, attr, None)
+        if sub is not None and getattr(sub, "scheme", "none") != "none":
+            _unsupported.append(f"{attr}={getattr(sub, 'scheme', '?')!r}")
+    if _unsupported:
+        warnings.warn(
+            f"MPAS ocean physics: ignoring unsupported schemes: "
+            + ", ".join(_unsupported),
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     has_surface_forcing = (
         isinstance(sf_config, SurfaceForcingConfig)
         and sf_config.scheme != "none"
@@ -111,8 +127,6 @@ def make_mpas_ocean_physics(config) -> Callable:
             # with the edge-normal direction (angleEdge).
             c1 = mesh.cellsOnEdge[0]  # (nEdges,)
             c2 = mesh.cellsOnEdge[1]  # (nEdges,)
-            tau_x_e = 0.5 * (tau_x[c1] + tau_y[c1] * 0.0
-                             + tau_x[c2] + tau_y[c2] * 0.0)  # mean tau_x
             tau_x_e = 0.5 * (tau_x[c1] + tau_x[c2])
             tau_y_e = 0.5 * (tau_y[c1] + tau_y[c2])
             tau_n = (tau_x_e * jnp.cos(mesh.angleEdge)

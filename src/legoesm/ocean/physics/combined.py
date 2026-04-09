@@ -158,8 +158,8 @@ def zero_ocean_tendencies(state: OceanState) -> OceanTendencies:
     """Return zero tendencies matching *state* shapes."""
     z3 = jnp.zeros_like(state.u.data)
     z2 = jnp.zeros_like(state.eta.data)
-    dims_3d = ("face", "x", "y", "level")
-    dims_2d = ("face", "x", "y")
+    dims_3d = state.u.dims if hasattr(state.u, 'dims') else ("face", "x", "y", "level")
+    dims_2d = state.eta.dims if hasattr(state.eta, 'dims') else ("face", "x", "y")
     return OceanTendencies(
         du_dt=Field(data=z3, name="du_dt", dims=dims_3d, units="m/s^2"),
         dv_dt=Field(data=z3, name="dv_dt", dims=dims_3d, units="m/s^2"),
@@ -182,8 +182,8 @@ def wrap_ocean_tendencies(
     """
     z3 = jnp.zeros_like(state.u.data)
     z2 = jnp.zeros_like(state.eta.data)
-    dims_3d = ("face", "x", "y", "level")
-    dims_2d = ("face", "x", "y")
+    dims_3d = state.u.dims if hasattr(state.u, 'dims') else ("face", "x", "y", "level")
+    dims_2d = state.eta.dims if hasattr(state.eta, 'dims') else ("face", "x", "y")
     return OceanTendencies(
         du_dt=Field(data=du_dt if du_dt is not None else z3, name="du_dt", dims=dims_3d, units="m/s^2"),
         dv_dt=Field(data=dv_dt if dv_dt is not None else z3, name="dv_dt", dims=dims_3d, units="m/s^2"),

@@ -29,7 +29,7 @@ def restoring_surface_forcing(
     """
     shape_3d = T.shape
     dtype = T.dtype
-    lat = grid.lat  # (6, n, n)
+    lat = grid.grid_lat  # protocol: (6, n, n) or (n_lat, n_lon) etc.
 
     # Target SST profile
     if cfg.T_profile == "cosine":

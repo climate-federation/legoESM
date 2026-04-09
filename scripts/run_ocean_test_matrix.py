@@ -2,7 +2,7 @@
 """Ocean test matrix: organized test runner for legoESM ocean dynamical cores.
 
 Runs a comprehensive suite of ocean test cases across cubed-sphere, lat-lon,
-MPAS, and spectral (Gaussian) grids at ~5 degree resolution.
+and MPAS grids at ~5 degree resolution.
 
 Test cases:
   Existing:
@@ -50,7 +50,6 @@ Usage:
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --quick
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --only lock_exchange
     JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --grid cubed_sphere
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --grid spectral --only baroclinic
 """
 
 from __future__ import annotations
@@ -3945,7 +3944,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--grid", type=str, default="all",
         choices=["cubed_sphere", "latlon", "mpas",
                  "mpas_regional", "latlon_regional", "cs_regional",
-                 "spectral", "all"],
+                 "all"],
         help="Run only a specific grid type (default: all)")
     p.add_argument(
         "--resolution", type=str, default=None,

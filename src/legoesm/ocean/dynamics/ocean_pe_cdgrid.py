@@ -45,7 +45,7 @@ from legoesm.grids.cubed_sphere_cdgrid import (
     CubedSphereCDGrid,
     create_cubed_sphere_cdgrid,
 )
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -121,29 +121,35 @@ def ocean_baroclinic_tendencies_cdgrid(
         min_water_column_m=config.min_water_column_m,
     )
 
-    # --- 2. Density from EOS (2 iterations for consistency with latlon) ---
-    # Fill land-cell T/S with ocean-neighbor values before EOS so that
-    # density on land ≈ ρ₀, preventing spurious ρ' at coastlines.
-    from legoesm.ocean.dynamics.barotropic import _fill_land_cells
+    # --- 2. Density from EOS (2 iterations, reference J) ---
+    # Use reference Jacobian (J=1, eta=0) for the EOS pressure iteration
+    # and baroclinic pressure gradient.  The barotropic solver already
+    # handles -g*grad(eta); using the actual J here would double-count
+    # the free-surface contribution (see #109).
+    from legoesm.ocean.dynamics.barotropic import fill_land_cells
     T_filled = jax.vmap(
-        lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
+        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
     )(T)
     S_filled = jax.vmap(
-        lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
+        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
     )(S)
     eos_fn = make_eos_fn(config.eos, getattr(config, 'eos_linear', None))
+    J_ref = jnp.ones_like(J)
+    eta_ref = jnp.zeros_like(eta_safe)
     rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
     for _ in range(2):
         p_hydro = compute_hydrostatic_pressure(
-            rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
+            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
         )
         rho = eos_fn(T_filled, S_filled, p_hydro)
     p_hydro = compute_hydrostatic_pressure(
-        rho, eta_safe, z_coord.dz_ref, J, rho_0, g,
+        rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
     )
     rho_prime = rho - rho_0
 
     # --- 3. Baroclinic pressure gradient ---
+    # Use REFERENCE layer thickness (dz_ref, not dz_ref*J) to avoid
+    # double-counting the free-surface contribution.
     # Must use float64 for cumulative sums AND the subsequent gradient
     # computation.  With float32, the absolute pressure (~6e5 Pa at depth)
     # has ULP = 0.0625 Pa.  The halo-exchange interpolation of float32
@@ -152,9 +158,8 @@ def ocean_baroclinic_tendencies_cdgrid(
     # spurious pressure gradient that drives rest-state instability
     # on the cubed sphere.  Keeping p_prime in float64 (ULP ≈ 1e-10 Pa)
     # reduces the halo interpolation error by 9 orders of magnitude.
-    dz_actual = z_coord.dz_ref * J[..., jnp.newaxis]
     rho_prime_hi = rho_prime.astype(jnp.float64)
-    dz_hi = dz_actual.astype(jnp.float64)
+    dz_hi = z_coord.dz_ref.astype(jnp.float64)
     dp_layer = rho_prime_hi * g * dz_hi
     p_prime = jnp.cumsum(dp_layer, axis=-1) - dp_layer
     p_prime = p_prime + 0.5 * dp_layer  # stay in float64 through gradient
@@ -187,7 +192,7 @@ def ocean_baroclinic_tendencies_cdgrid(
     # Fill land cells in p_prime before gradient so the 4-point stencil
     # sees smooth values at coastlines instead of the ocean-to-zero jump.
     p_prime_filled = jax.vmap(
-        lambda f: _fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
+        lambda f: fill_land_cells(f, mask, grid), in_axes=-1, out_axes=-1,
     )(p_prime)
     dp_dx, dp_dy_perp = _arakawa_lamb_gradient(p_prime_filled, cdgrid)
     # Downcast PGF results back to working precision

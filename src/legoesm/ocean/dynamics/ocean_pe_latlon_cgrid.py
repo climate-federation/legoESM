@@ -99,7 +99,7 @@ def _neumann_fill_cgrid(
 ) -> jnp.ndarray:
     """Fill land cells with nearest ocean-neighbor (Neumann BC).
 
-    Same algorithm as latlon_operators._neumann_fill_latlon.
+    Same algorithm as latlon_operators.neumann_fill_latlon.
     """
     m = mask
     filled = f
@@ -257,7 +257,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # The barotropic solver handles the depth-averaged momentum.
     # The baroclinic step must operate on the PERTURBATION velocity
     # u' = u - U_bar to avoid double-counting the barotropic tendency.
-    H_total = jnp.maximum(jnp.sum(h_k, axis=-1), 1e-10)
     U_bar = jnp.sum(u * h_u, axis=-1) / jnp.maximum(
         jnp.sum(h_u, axis=-1), 1e-10) * u_mask  # (n_lat, n_lon+1)
     V_bar = jnp.sum(v * h_v, axis=-1) / jnp.maximum(
@@ -412,49 +411,3 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     )
 
 
-def _laplacian_at_u(
-    u: jnp.ndarray,
-    grid: LatLonGrid,
-    mask: jnp.ndarray,
-) -> jnp.ndarray:
-    """Laplacian of a u-point field, computed via cell-center detour.
-
-    Interpolates u to cell centers, applies C-grid Laplacian, then
-    interpolates back to u-points.
-
-    Parameters
-    ----------
-    u : (n_lat, n_lon+1, nlev)
-    grid : LatLonGrid
-    mask : (n_lat, n_lon)
-
-    Returns
-    -------
-    lap_u : (n_lat, n_lon+1, nlev)
-    """
-    # u at cell centers: average adjacent faces
-    u_cell = 0.5 * (u[:, :-1, :] + u[:, 1:, :])  # (n_lat, n_lon, nlev)
-    lap_cell = laplacian_cgrid(u_cell, grid, mask=mask)
-    return _interp_to_u_points(lap_cell)
-
-
-def _laplacian_at_v(
-    v: jnp.ndarray,
-    grid: LatLonGrid,
-    mask: jnp.ndarray,
-) -> jnp.ndarray:
-    """Laplacian of a v-point field via cell-center detour.
-
-    Parameters
-    ----------
-    v : (n_lat+1, n_lon, nlev)
-    grid : LatLonGrid
-    mask : (n_lat, n_lon)
-
-    Returns
-    -------
-    lap_v : (n_lat+1, n_lon, nlev)
-    """
-    v_cell = 0.5 * (v[:-1, :, :] + v[1:, :, :])
-    lap_cell = laplacian_cgrid(v_cell, grid, mask=mask)
-    return _interp_to_v_points(lap_cell)

@@ -106,7 +106,9 @@ class OceanConfig(NamedTuple):
     # 2-D Laplacian damping used in barotropic subcycling.
     # Per-substep coefficient is alpha * (dt_s / dt_ref) * area * laplacian(...),
     # so the damping is explicitly dt-scaled and tunable.
-    barotropic_diffusion_alpha: float = 0.01
+    # Cubed-sphere default is higher (0.05) than other grids (0.01)
+    # to suppress the face-boundary feedback instability.  See #100.
+    barotropic_diffusion_alpha: float = 0.05
     barotropic_diffusion_dt_ref: float = 60.0
     # Optional runtime state checks for debugging/regression hardening.
     enable_runtime_checks: bool = False
@@ -117,7 +119,6 @@ class OceanConfig(NamedTuple):
     salinity_min_psu: float = 0.0
     salinity_max_psu: float = 50.0
     differentiable_barotropic: bool = False  # Use lax.scan (grad-compatible) vs fori_loop (faster)
-    use_fv_tracer_transport: bool = False  # Use PPM for T/S horizontal advection (reduces spurious mixing)
     div_damp_2: float = 0.0   # 2nd-order divergence damping [m²/s] (FV discretization)
     div_damp_4: float = 0.0   # 4th-order divergence damping [m⁴/s] (FV discretization)
     edge_blend_strength: float = 0.0  # FV cube-edge continuity relaxation (0=off)

@@ -11,7 +11,6 @@ Grid                           Class
 ============================  ============================
 Cubed-sphere (C-D grid)        ``OceanModel``
 Spectral (Gaussian)            ``SpectralOceanModel``
-Lat-lon A-grid (FV)            ``LatLonOceanModel``
 Lat-lon C-grid (FV)            ``LatLonCGridOceanModel``
 MPAS Voronoi                   ``MPASOceanModel``
 SFNO (data-driven)             ``SFNOOceanModel``
@@ -92,14 +91,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "air_sea_co2_flux": ("legoesm.ocean.biogeochemistry", "air_sea_co2_flux"),
     "solve_carbonate_system": ("legoesm.ocean.biogeochemistry", "solve_carbonate_system"),
     # Lat-lon FV ocean
-    "LatLonOceanModel": ("legoesm.ocean.dynamics.ocean_model_latlon", "LatLonOceanModel"),
-    "LatLonOceanState": ("legoesm.ocean.state", "LatLonOceanState"),
-    "LatLonOceanTendencies": ("legoesm.ocean.state", "LatLonOceanTendencies"),
-    "LatLonOceanConfig": ("legoesm.ocean.state", "LatLonOceanConfig"),
-    "rest_state_latlon_ocean": ("legoesm.ocean.init_latlon", "rest_state_latlon_ocean"),
-    "idealized_bathymetry_latlon": ("legoesm.ocean.init_latlon", "idealized_bathymetry_latlon"),
-    "wind_driven_gyre_latlon": ("legoesm.ocean.init_latlon", "wind_driven_gyre_latlon"),
-    "latlon_ocean_conservation_fixer": ("legoesm.ocean.conservation_latlon", "latlon_ocean_conservation_fixer"),
     # Lat-lon C-grid FV ocean
     "LatLonCGridOceanModel": ("legoesm.ocean.dynamics.ocean_model_latlon_cgrid", "LatLonCGridOceanModel"),
     "LatLonCGridOceanState": ("legoesm.ocean.state", "LatLonCGridOceanState"),
@@ -175,14 +166,6 @@ __all__ = [
     "rest_state_ocean_realistic",
     "enforce_straits",
     # Lat-lon FV ocean
-    "LatLonOceanModel",
-    "LatLonOceanState",
-    "LatLonOceanTendencies",
-    "LatLonOceanConfig",
-    "rest_state_latlon_ocean",
-    "idealized_bathymetry_latlon",
-    "wind_driven_gyre_latlon",
-    "latlon_ocean_conservation_fixer",
     # Lat-lon C-grid FV ocean
     "LatLonCGridOceanModel",
     "LatLonCGridOceanState",

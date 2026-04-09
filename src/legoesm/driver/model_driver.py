@@ -315,6 +315,7 @@ class ModelDriver:
                     sst_var=cfg.sst_var or "sst",
                     sic_var=cfg.sic_var or "sic",
                     sst_offset=cfg.sst_offset, sic_scale=cfg.sic_scale,
+                    sic_path=getattr(cfg, 'sic_path', ''),
                 )
             else:
                 forcing_config = get_amip_preset(cfg.dataset)._replace(

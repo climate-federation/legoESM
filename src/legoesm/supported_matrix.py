@@ -80,23 +80,6 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.sfno_pe",
     ),
 
-    # -- Lat-lon FV --
-    SolverEntry(
-        "atmosphere", "shallow_water", "latlon_fv",
-        "fv_shallow_water_latlon", "FVShallowWaterLatLonModel",
-        "legoesm.atmosphere.dynamics.shallow_water_fv_latlon",
-    ),
-    SolverEntry(
-        "atmosphere", "hydrostatic", "latlon_fv",
-        "fv_primitive_equations_latlon", "FVLatLonPrimitiveEquationModel",
-        "legoesm.atmosphere.dynamics.primitive_eq_fv_latlon",
-    ),
-    SolverEntry(
-        "atmosphere", "nonhydrostatic", "latlon_fv",
-        "fv_compressible_euler_latlon", "FVCompressibleEulerLatLonModel",
-        "legoesm.atmosphere.dynamics.compressible_euler_fv_latlon",
-    ),
-
     # -- MPAS icosahedral --
     SolverEntry(
         "atmosphere", "hydrostatic", "mpas_voronoi",
@@ -116,11 +99,6 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.tracer_transport",
     ),
     SolverEntry(
-        "atmosphere", "tracer_transport", "latlon",
-        "tracer_transport_latlon", "TracerTransportLatLonModel",
-        "legoesm.atmosphere.dynamics.tracer_transport_latlon",
-    ),
-    SolverEntry(
         "atmosphere", "tracer_transport", "voronoi",
         "tracer_transport_mpas", "TracerTransportMPASModel",
         "legoesm.atmosphere.dynamics.tracer_transport_mpas",
@@ -138,15 +116,14 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
         "cdgrid", "OceanModel",
         "legoesm.ocean.dynamics.ocean_model",
     ),
+    # NOTE: spectral ocean is unsupported — land boundary handling in
+    # spectral space causes Gibbs ringing and unreliable masking.
+    # Kept for reference; not included in the ocean test matrix.
+    # See https://github.com/leap-stc/legoESM/issues/99
     SolverEntry(
         "ocean", "hydrostatic", "spectral_gaussian",
         "spectral", "SpectralOceanModel",
         "legoesm.ocean.dynamics.spectral_ocean_pe",
-    ),
-    SolverEntry(
-        "ocean", "hydrostatic", "latlon_fv",
-        "latlon", "LatLonOceanModel",
-        "legoesm.ocean.dynamics.ocean_model_latlon",
     ),
     SolverEntry(
         "ocean", "hydrostatic", "latlon_cgrid",

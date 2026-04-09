@@ -30,7 +30,7 @@ class GridConfig(NamedTuple):
 class DycoreConfig(NamedTuple):
     """Dynamical core configuration."""
     model_type: str = "hydrostatic"       # hydrostatic, nonhydrostatic, spectral_pe
-    discretization: str = "cdgrid"        # cdgrid, spectral, sfno, latlon_fv, mpas
+    discretization: str = "cdgrid"        # cdgrid, spectral, sfno, mpas
     dt: float = 600.0
     hyperdiff_scale: float = 1.0
     div_damp_scale: float = 1.0
@@ -71,6 +71,7 @@ class ExperimentConfig(NamedTuple):
     # Forcing
     dataset: str = "analytical"
     forcing_path: str = ""
+    sic_path: str = ""             # separate SIC file (ICON format)
     sst_var: str = ""
     sic_var: str = ""
     sst_offset: float = 0.0

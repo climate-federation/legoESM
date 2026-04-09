@@ -410,6 +410,46 @@ class LatLonCGridOceanModel:
 
         return cast_pytree(state_new, None, "storage")
 
+    def step_checked(
+        self,
+        state: LatLonCGridOceanState,
+        dt: float,
+        surface_forcing=None,
+    ) -> LatLonCGridOceanState:
+        """Advance one timestep with host-side runtime validation."""
+        state_new = self.step(state, dt, surface_forcing)
+        if self.config.enable_runtime_checks:
+            self._assert_runtime_invariants(state_new)
+        return state_new
+
+    def _assert_runtime_invariants(self, state: LatLonCGridOceanState) -> None:
+        """Host-side runtime checks for debugging."""
+        mask = state.land_mask.data
+        wet = mask > 0.5
+
+        if not bool(jnp.all(jnp.isfinite(state.eta.data))):
+            raise FloatingPointError("C-grid ocean: non-finite eta")
+        if not bool(jnp.all(jnp.isfinite(state.T.data))):
+            raise FloatingPointError("C-grid ocean: non-finite T")
+
+        eta_abs = float(jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0))))
+        if eta_abs > self.config.max_abs_eta_m:
+            raise ValueError(
+                f"C-grid ocean: |eta|={eta_abs:.3g} exceeds "
+                f"threshold {self.config.max_abs_eta_m:.3g}",
+            )
+
+        if bool(jnp.any(wet)):
+            T_ocean = jnp.where(wet[..., jnp.newaxis], state.T.data, jnp.nan)
+            T_min = float(jnp.nanmin(T_ocean))
+            T_max = float(jnp.nanmax(T_ocean))
+            if T_min < self.config.temperature_min_c or T_max > self.config.temperature_max_c:
+                raise ValueError(
+                    f"C-grid ocean: T range [{T_min:.2f}, {T_max:.2f}] "
+                    f"outside bounds [{self.config.temperature_min_c}, "
+                    f"{self.config.temperature_max_c}]",
+                )
+
     def integrate(
         self,
         state: LatLonCGridOceanState,
@@ -448,8 +488,9 @@ class LatLonCGridOceanModel:
             )
 
         trajectory = [state]
+        step_fn = self.step_checked if self.config.enable_runtime_checks else self.step
         for i in range(n_steps):
-            state = self.step(state, dt)
+            state = step_fn(state, dt)
             if (i + 1) % save_every == 0:
                 trajectory.append(state)
 

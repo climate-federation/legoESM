@@ -37,7 +37,7 @@ from legoesm.core.operators_voronoi import (
     vertex_thickness,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -88,26 +88,10 @@ def mpas_ocean_baroclinic_tendencies(
     c1 = mesh.cellsOnEdge[0]  # (nEdges,)
     c2 = mesh.cellsOnEdge[1]  # (nEdges,)
 
-    # Helper: fill land cells with ocean-neighbor average (Neumann BC).
-    # Works for both 1D (nCells,) and 2D (nCells, nlev) arrays.
+    from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
     def _fill_land_cells_mpas(field_cell, mask_cell):
-        nbr_sum = jnp.zeros_like(field_cell)
-        nbr_cnt = jnp.zeros_like(field_cell)
-        if field_cell.ndim == 1:
-            nbr_sum = nbr_sum.at[c1].add(field_cell[c2] * mask_cell[c2])
-            nbr_cnt = nbr_cnt.at[c1].add(mask_cell[c2])
-            nbr_sum = nbr_sum.at[c2].add(field_cell[c1] * mask_cell[c1])
-            nbr_cnt = nbr_cnt.at[c2].add(mask_cell[c1])
-        else:
-            m2 = mask_cell[c2, jnp.newaxis]
-            m1 = mask_cell[c1, jnp.newaxis]
-            nbr_sum = nbr_sum.at[c1].add(field_cell[c2] * m2)
-            nbr_cnt = nbr_cnt.at[c1].add(m2)
-            nbr_sum = nbr_sum.at[c2].add(field_cell[c1] * m1)
-            nbr_cnt = nbr_cnt.at[c2].add(m1)
-        nbr_avg = nbr_sum / jnp.maximum(nbr_cnt, 1.0)
-        mask_e = mask_cell if field_cell.ndim == 1 else mask_cell[:, jnp.newaxis]
-        return jnp.where(mask_e > 0.5, field_cell, nbr_avg)
+        return fill_land_cells_mpas(field_cell, mask_cell, c1, c2)
 
     # ---- Layer thickness and Jacobian ----
     jacobian = compute_ocean_jacobian(

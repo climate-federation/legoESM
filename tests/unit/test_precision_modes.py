@@ -185,42 +185,6 @@ class TestSWCubedSpherePrecision:
         assert jnp.all(jnp.isfinite(s.h))
 
 
-class TestSWLatLonPrecision:
-    """Lat-lon FV shallow water one-step in each precision mode."""
-
-    @staticmethod
-    def _run_one_step(mode):
-        apply_precision(mode)
-        from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig,
-        )
-        from tests.atmosphere.shallow_water.test_cases.williamson_latlon import (
-            williamson_test2_latlon,
-        )
-        grid = create_latlon_grid(16)
-        config = FVShallowWaterLatLonConfig(use_conservation_fixer=False)
-        model = FVShallowWaterLatLonModel(grid, config)
-        sw = williamson_test2_latlon(grid)
-        state_new = model.step(sw, 60.0)
-        return state_new, get_policy()
-
-    def test_fp32(self):
-        s, p = self._run_one_step("fp32")
-        assert s.h.data.dtype == jnp.float32
-        assert jnp.all(jnp.isfinite(s.h.data))
-
-    def test_fp64(self):
-        s, p = self._run_one_step("fp64")
-        assert s.h.data.dtype == jnp.float64
-        assert jnp.all(jnp.isfinite(s.h.data))
-
-    def test_mixed_fp64_storage(self):
-        s, p = self._run_one_step("mixed_fp64_storage")
-        assert s.h.data.dtype == jnp.float64
-        assert jnp.all(jnp.isfinite(s.h.data))
-
-
 class TestSWMPASPrecision:
     """MPAS shallow water one-step in each precision mode."""
 

@@ -46,7 +46,7 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure, make_eos_fn
+from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -525,6 +525,14 @@ class SpectralOceanModel:
         *,
         allow_unsupported_backend: bool = False,
     ):
+        warnings.warn(
+            "SpectralOceanModel is unsupported: land boundary handling "
+            "in spectral space causes Gibbs ringing and unreliable masking. "
+            "Use OceanModel (cubed-sphere), LatLonCGridOceanModel, or "
+            "MPASOceanModel instead. See issue #99.",
+            FutureWarning,
+            stacklevel=2,
+        )
         self.z_coord = z_coord
         self.config = config or SpectralOceanConfig()
         self._validate_config(self.config)

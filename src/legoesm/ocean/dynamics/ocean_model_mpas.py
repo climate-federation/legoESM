@@ -304,6 +304,7 @@ class MPASOceanModel:
         self,
         state: MPASOceanState,
         dt: float,
+        freshwater=None,
         surface_forcing=None,
     ) -> MPASOceanState:
         """Advance one timestep with host-side runtime validation.
@@ -311,7 +312,8 @@ class MPASOceanModel:
         Unlike the previous implementation which silently clipped tracers,
         this raises on out-of-bounds values so the caller sees the failure.
         """
-        state_new = self.step(state, dt, surface_forcing)
+        state_new = self.step(state, dt, freshwater=freshwater,
+                              surface_forcing=surface_forcing)
         if self.config.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new

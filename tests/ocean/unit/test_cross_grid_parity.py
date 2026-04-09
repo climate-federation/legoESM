@@ -57,34 +57,6 @@ def cube_model(cube_grid, z_coord):
     return OceanModel(cube_grid, z_coord, config)
 
 
-# --- Lat-lon fixtures --------------------------------------------------------
-
-@pytest.fixture
-def latlon_grid():
-    from legoesm.grids.latlon import create_latlon_grid
-    return create_latlon_grid(n_lat=36, n_lon=72)
-
-
-@pytest.fixture
-def latlon_z_coord():
-    from legoesm.ocean.vertical import create_ocean_z_star
-    return create_ocean_z_star(n_levels=5, H_max=4000.0)
-
-
-@pytest.fixture
-def latlon_state(latlon_grid, latlon_z_coord):
-    from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-    return rest_state_latlon_ocean(latlon_grid, latlon_z_coord)
-
-
-@pytest.fixture
-def latlon_model(latlon_grid, latlon_z_coord):
-    from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
-    from legoesm.ocean.state import LatLonOceanConfig
-    config = LatLonOceanConfig()
-    return LatLonOceanModel(latlon_grid, latlon_z_coord, config)
-
-
 # --- MPAS fixtures ------------------------------------------------------------
 
 @pytest.fixture
@@ -178,41 +150,6 @@ class TestRestStateParity:
             mask[..., jnp.newaxis] > 0.5,
             s.T.data,
             jnp.nan,
-        )
-        T_max = float(jnp.nanmax(T_ocean))
-        T_min = float(jnp.nanmin(T_ocean))
-
-        assert T_min > -5.0, f"T_min={T_min} below physical range"
-        assert T_max < 40.0, f"T_max={T_max} above physical range"
-
-
-class TestLatLonRestStateParity:
-    """Rest state should remain near rest on lat-lon grid."""
-
-    def test_latlon_rest_state_stable(self, latlon_model, latlon_state):
-        """Lat-lon rest state: 5 steps should stay near rest."""
-        s = latlon_state
-        for _ in range(5):
-            s = latlon_model.step(s, 3600.0)
-
-        u_max = float(jnp.max(jnp.abs(s.u.data)))
-        v_max = float(jnp.max(jnp.abs(s.v.data)))
-        eta_max = float(jnp.max(jnp.abs(s.eta.data)))
-
-        assert u_max < 1.0, f"Rest state u_max={u_max} too large"
-        assert v_max < 1.0, f"Rest state v_max={v_max} too large"
-        assert eta_max < 1.0, f"Rest state eta_max={eta_max} too large"
-        assert jnp.all(jnp.isfinite(s.T.data))
-
-    def test_latlon_rest_temperature_bounded(self, latlon_model, latlon_state):
-        """Temperature should stay in reasonable range on lat-lon."""
-        s = latlon_state
-        for _ in range(5):
-            s = latlon_model.step(s, 3600.0)
-
-        mask = latlon_state.land_mask.data
-        T_ocean = jnp.where(
-            mask[..., jnp.newaxis] > 0.5, s.T.data, jnp.nan,
         )
         T_max = float(jnp.nanmax(T_ocean))
         T_min = float(jnp.nanmin(T_ocean))
