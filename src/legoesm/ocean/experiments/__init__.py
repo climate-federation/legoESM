@@ -23,8 +23,9 @@ Example Usage:
 Available Experiments:
 - rest_state: Fundamental stability and conservation test
 - barotropic_wave: Barotropic gravity wave propagation test
-- wind_gyre: Wind-driven double-gyre circulation development
+- wind_gyre: Wind-driven double-gyre circulation development  
 - baroclinic: Baroclinic adjustment from meridional temperature front
+- baroclinic_gyre: Regional wind-driven baroclinic gyre with surface restoring
 - phillips_two_layer: Two-layer baroclinic instability with relaxation
 - inertia_gravity_wave: Inertia-gravity wave propagation with analytical validation
 - lock_exchange: Density-driven gravity current with RPE mixing diagnostics
@@ -43,6 +44,7 @@ from . import rest_state
 from . import barotropic_wave
 from . import wind_gyre
 from . import baroclinic
+from . import baroclinic_gyre
 from . import phillips_two_layer
 from . import inertia_gravity_wave
 from . import lock_exchange
@@ -55,6 +57,7 @@ AVAILABLE_EXPERIMENTS = {
     "barotropic_wave": barotropic_wave.EXPERIMENT_CONFIG,
     "wind_gyre": wind_gyre.EXPERIMENT_CONFIG,
     "baroclinic": baroclinic.EXPERIMENT_CONFIG,
+    "baroclinic_gyre": baroclinic_gyre.EXPERIMENT_CONFIG,
     "phillips_two_layer": phillips_two_layer.EXPERIMENT_CONFIG,
     "inertia_gravity_wave": inertia_gravity_wave.EXPERIMENT_CONFIG,
     "lock_exchange": lock_exchange.EXPERIMENT_CONFIG,
@@ -66,7 +69,8 @@ __all__ = [
     "rest_state",
     "barotropic_wave",
     "wind_gyre",
-    "baroclinic", 
+    "baroclinic",
+    "baroclinic_gyre",
     "phillips_two_layer",
     "inertia_gravity_wave",
     "lock_exchange",

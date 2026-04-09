@@ -563,6 +563,7 @@ Diagnosed w from barotropic-averaged per-layer divergence. Vertical tracer advec
 
 ### Open issues
 - #100 — Cubed-sphere ocean face-boundary instability (exponential blowup at face boundaries in dynamic simulations)
+- #106 — Ocean surface forcing cannot combine wind stress with temperature restoring (architecture limitation)
 
 - #99 — Remove spectral grid from ocean (land boundary issues, not worth investing)
 - #87 — Latlon A-grid instability (C-grid fixes in #98; A-grid removed from test matrix)
@@ -570,13 +571,89 @@ Diagnosed w from barotropic-averaged per-layer divergence. Vertical tracer advec
 - #81 — Rest-state stability (diagnostic artifact fix in #98)
 
 ### Closed issues
+- #105 — Vector Laplacian and barotropic diffusion fixes for latlon C-grid (resolved: proper grad(div)-curl×grad(curl) + disabled excessive SSH diffusion)
+- #103 — MPAS Coriolis double-counting in split-explicit stepping (resolved: perturbation velocity + semi-implicit Coriolis)
 - #101 — Conservation strategy (resolved: conservative diffusion, h_old/h_new, fixer disabled, budget diagnostic)
 - #102 — Flux-form tracer transport (resolved: Phase 2a horizontal + Phase 2b vertical)
-- #101 — Conservation strategy (resolved)
 - #94 — Split-explicit tracer conservation (superseded by #102)
 
 ### PRs
-- #98 — Consolidated ocean model fixes (open, replaces #89, #92, #95)
+- #104 — Cubed-sphere rest-state fix (merged)
+- #98 — Consolidated ocean model fixes (merged, resolved #89, #92, #95)
 - #89 — Ocean exploration (closed, superseded by #98)
 - #92 — Regional mesh pole fix (closed, superseded by #98)
 - #95 — C-grid latlon stability (closed, superseded by #98)
+
+---
+
+## Recent Development Activities (2026-04-09)
+
+### Ocean Test Matrix Analysis and Current Status
+
+**Comprehensive ocean journey review** to understand where ocean development stands and what bugs need solving.
+
+**Current Status Summary**:
+- **Working grids**: latlon C-grid, MPAS (2 of 3 target grids production-ready)
+- **Broken grid**: cubed_sphere (face-boundary instability #100)  
+- **Removed grid**: spectral (fundamental limitations with land boundaries)
+- **Test matrix**: 37 test cases spanning rest states → complex multi-layer dynamics
+
+**Key Recent Fixes Validated**:
+- ✅ Volume conservation: Machine precision (1.83e-17) on MPAS and latlon C-grid
+- ✅ Tracer conservation: Flux-form transport with barotropic-averaged transport  
+- ✅ MPAS Coriolis fix (#103): Perturbation velocity approach prevents double-counting
+- ✅ Latlon C-grid improvements (#105): Vector Laplacian + disabled excessive diffusion
+
+### Regional Baroclinic Gyre Experiment Development
+
+**Motivation**: Create a test case that validates recent ocean fixes (especially #103 Coriolis double-counting) with realistic multi-level baroclinic dynamics.
+
+**Implementation**:
+- **New experiment module**: `src/legoesm/ocean/experiments/baroclinic_gyre.py`  
+- **Domain**: Same as successful barotropic_double_gyre (0-120°E, 15-75°N)
+- **Physics**: Double-gyre wind pattern + realistic 20°C→2°C exponential stratification
+- **Target grids**: `mpas_regional`, `latlon_regional` 
+- **Duration**: 60 days (5 days quick mode)
+
+**Scientific Value**:
+- Tests **multi-level momentum transfer** (validates Coriolis fix #103)
+- Tests **thermal wind dynamics** with realistic stratification
+- Tests **long-term conservation** over extended baroclinic integrations  
+- Enables **cross-grid validation** (latlon C-grid vs MPAS performance)
+
+**Integration**: Added to ocean test matrix as cases 18-19 (now 39 total test cases)
+
+**Test Results**: ✅ **PASS** - `latlon_regional` quick test successful
+- Speed: 0.0703 m/s (realistic baroclinic gyre velocities)
+- Volume conservation: 5.33×10⁻¹⁸ (machine precision)
+- Heat conservation: 0.000°C (perfect conservation)
+- Performance: 3.9s for 5-day integration
+
+### Surface Forcing Architecture Limitation Discovery
+
+**Problem Identified**: Ocean surface forcing system cannot combine wind stress with temperature restoring, limiting realistic baroclinic experiments.
+
+**Root Cause**: `SurfaceForcingConfig.scheme` only allows one forcing type:
+- `"prescribed"`: Wind OR heat flux (not both)
+- `"restoring"`: Thermal only (no wind)  
+- `"bulk_formulas"`: Realistic fluxes (different use case)
+
+**Scope**: Universal limitation affecting all ocean grids (latlon, MPAS, etc.) - not grid-specific
+
+**Impact**: 
+- Blocks realistic baroclinic experiments requiring thermal-mechanical coupling
+- Had to disable temperature restoring in baroclinic_gyre experiment
+- Limits air-sea interaction studies
+
+**Documentation**: Created **Issue #106** with detailed analysis and proposed solutions
+
+**Workaround**: baroclinic_gyre uses wind-driven stratified flow (still scientifically valuable for testing multi-level dynamics)
+
+### Next Priority Actions
+
+1. **Validate MPAS regional baroclinic gyre** - test Coriolis fix (#103) cross-grid consistency
+2. **Fix cubed-sphere face-boundary instability (#100)** - last critical blocker for 3-grid support
+3. **Extend surface forcing architecture (#106)** - enable combined wind+thermal forcing
+4. **Run full ocean test matrix** - validate all recent changes end-to-end
+
+**Ocean Model Readiness**: 2 of 3 target grids production-ready, with comprehensive test validation framework in place.

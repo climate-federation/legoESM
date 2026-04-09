@@ -791,6 +791,34 @@ The SSH amplitude is controlled by how the western boundary return flow is handl
 
 ---
 
+### 15. **CODE AUDIT: Systematic Ocean Model Review (Issues #107–#115)**
+**Date**: 2026-04-08
+**Severity**: Mixed (2 Critical, 4 High, 12 Medium, 6 Low)
+**Status**: Issues filed, fixes pending
+
+After extensive ocean model development (vector Laplacian, perturbation velocity Coriolis, MPAS fixes, barotropic solver changes), ran a systematic code audit using both dycore-expert and ocean-model-expert agents, then cross-verified all findings with the ocean expert. Results: 19 confirmed issues, 5 partially correct, 0 false positives.
+
+**Critical findings**:
+- **#107**: MPAS `step_checked()` passes `surface_forcing` as positional arg `freshwater` — silently drops forcing
+- **#110**: Dead semi-implicit Coriolis code in C-grid barotropic solver — computed but overwritten every substep
+
+**High-severity findings**:
+- **#109**: A-grid and cubed-sphere dycores use actual Jacobian J for baroclinic pressure `dp_layer`, double-counting the free-surface contribution that the barotropic solver handles via `-g*grad(eta)`. The C-grid and MPAS backends correctly use reference J.
+- **#112**: `vector_laplacian_cgrid` 3D path uses Python for-loop over levels (unrolls at JIT time, bloats compile). Related: broken 3D path in `curl_vertex_cgrid` (dead but trappable).
+
+**Medium-severity findings**:
+- **#108**: Dead code sweep needed — unused functions (`_laplacian_at_u/v`, `scalar_advection_cgrid`), unused variables (`H_total`), stale imports (`wright_eos` x3, `coriolis_cgrid`), untracked file (`barotropic_cgrid_latlon.py`)
+- **#111**: C-grid model missing `step_checked`, conservation fixer, and freshwater support (present in A-grid and MPAS)
+- **#113**: MPAS physics pipeline duplicates `_fill_land_cells_mpas` in 3 files; silently ignores Richardson/KPP/GM-Redi physics config
+- **#114**: Cross-grid consistency issues — physics Field dims hardcoded to cubed-sphere, EOS iteration mismatch (1 vs 2), stale OceanConfig fields, `restoring.py` uses `grid.lat` instead of `grid.grid_lat`, shortwave uses reference z for absorption but dynamic dz for tendency, private function cross-module imports
+
+**Architecture discussion**:
+- **#115**: Consider retiring the A-grid (latlon) ocean model — the C-grid is strictly better (no checkerboard mode, proper vector Laplacian, correct PGF), paralleling #99 (spectral retirement)
+
+**GitHub Issues Created**: #107, #108, #109, #110, #111, #112, #113, #114, #115
+
+---
+
 ## Next Steps
 
 1. ~~Continue audit of remaining 8 test cases~~ ✅ **COMPLETED**
@@ -800,9 +828,13 @@ The SSH amplitude is controlled by how the western boundary return flow is handl
 5. ~~Implement proper vector Laplacian for latlon C-grid~~ ✅ **COMPLETED** (Issue #105)
 6. ~~Disable excessive barotropic SSH diffusion on C-grid~~ ✅ **COMPLETED** (Issue #105 follow-up)
 7. ~~Fix MPAS Coriolis double-counting~~ ✅ **COMMITTED** (Issue #103, validation pending)
-8. **TODO**: Fix physics pipeline cell-center detour for wind stress/bottom drag on C-grid
-9. **TODO**: Run full ocean test matrix to validate all changes end-to-end
-10. **TODO**: Consider similar refactoring for atmosphere test matrix following ocean pattern
+8. ~~Systematic ocean code audit~~ ✅ **COMPLETED** (Issues #107–#115 filed)
+9. **TODO**: Fix MPAS `step_checked` positional arg bug (#107) — quick, critical
+10. **TODO**: Dead code cleanup sweep (#108)
+11. **TODO**: Fix A-grid/cubed-sphere pressure double-counting (#109)
+12. **TODO**: Fix physics pipeline cell-center detour for wind stress/bottom drag on C-grid
+13. **TODO**: Run full ocean test matrix to validate all changes end-to-end
+14. **TODO**: Consider A-grid retirement (#115) and spectral removal (#99)
 
 ---
 

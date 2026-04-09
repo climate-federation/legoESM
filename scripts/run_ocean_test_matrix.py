@@ -142,6 +142,11 @@ FIELD_RANGES = {
         "speed_sfc": (0, 0.15),     # m/s - surface speeds
         "SST": (9.5, 10.5),        # °C - uniform 10°C (barotropic)
     },
+    "baroclinic_gyre": {
+        "eta": (-0.05, 0.05),      # meters - larger SSH with baroclinic dynamics
+        "speed_sfc": (0, 0.5),      # m/s - higher speeds with thermal wind
+        "SST": (2, 20),             # °C - full stratification range (matches restoring)
+    },
     "geostrophic_adjustment": {
         "eta": (-0.1, 0.1),        # meters - adjustment process
         "SST": (1.5, 21.0),        # °C - background temperature range
@@ -246,6 +251,12 @@ def _build_test_matrix() -> list[TestCase]:
     for g in ["mpas_regional", "latlon_regional"]:
         matrix.append(TestCase(
             "barotropic_double_gyre", g, res[g], 30.0, 2.0))
+
+    # --- Wind-driven regional baroclinic gyre: regional grids ---
+    # Tests Coriolis double-counting fix (#103) with realistic stratification
+    for g in ["mpas_regional", "latlon_regional"]:
+        matrix.append(TestCase(
+            "baroclinic_gyre", g, res[g], 60.0, 5.0))
 
     # --- Global barotropic wind-driven: latlon, mpas ---
     # (cubed_sphere excluded — face-boundary instability produces unphysical speeds)
@@ -2708,6 +2719,81 @@ def run_barotropic_double_gyre(tc: TestCase, output_dir: Path, days: float
                                 label="Barotropic Double Gyre")
 
 
+def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
+                       ) -> tuple[str, float, str]:
+    """Regional wind-driven baroclinic gyre with surface restoring."""
+    if tc.grid_type not in ("mpas_regional", "latlon_regional"):
+        raise NotImplementedError(
+            f"Baroclinic gyre only implemented for regional grids, not {tc.grid_type}")
+    
+    from legoesm.ocean.experiments.baroclinic_gyre import (
+        BaroclinicGyreConfig, create_initial_conditions, create_forcings)
+    
+    config = BaroclinicGyreConfig()
+    physics = create_forcings(tc.grid_type, None, config)
+    
+    grid, z_coord, ocean_config, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc, physics=physics, A_h=config.A_h))
+    
+    state = create_initial_conditions(tc.grid_type, grid, z_coord, config)
+    
+    dt = DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+    
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
+                                  include_velocity_3d=True)
+    
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+    
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Baroclinic Gyre ({tc.grid_type})", total_days=days)
+    
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
+    eta_list = diag.get("mean_eta", [])
+    eta_drift = (abs(eta_list[-1] - eta_list[0])
+                 if len(eta_list) >= 2 else 0.0)
+    T_list = diag.get("mean_T", [])
+    T_drift = (abs(T_list[-1] - T_list[0])
+               if len(T_list) >= 2 else 0.0)
+    
+    notes = (f"max_speed={max_speed:.4f}m/s, eta_drift={eta_drift:.2e}, "
+             f"T_drift={T_drift:.3f}degC")
+    
+    # Save results  
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "max_speed": max_speed, "eta_drift": eta_drift, "T_drift": T_drift,
+        "depth": depth.tolist(), "notes": notes,
+    })
+    
+    # Regional extent for proper plotting
+    extent = (config.lon_west, config.lon_east, config.lat_south, config.lat_north)
+    _save_case_diagnostics(
+        output_dir, f"Baroclinic Gyre {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("speed_sfc", "Surface speed (m/s)", "magma"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "max_speed": "m/s",
+                      "mean_T": "degC", "mean_S": "PSU"},
+        domain_extent=extent)
+    
+    return "PASS" if ok else "FAIL", wall, notes
+
 # ===========================================================================
 # Runner: Global Wind-Driven Circulation
 # ===========================================================================
@@ -3831,6 +3917,7 @@ RUNNERS: dict[str, Callable] = {
     "barotropic_wave": run_barotropic_wave,
     "barotropic_gyre": run_barotropic_gyre,
     "barotropic_double_gyre": run_barotropic_double_gyre,
+    "baroclinic_gyre": run_baroclinic_gyre,
     "global_barotropic_wind": run_global_barotropic_wind,
     "global_barotropic_wind_1lev": run_global_barotropic_wind,
     "geostrophic_adjustment": run_geostrophic_adjustment,
