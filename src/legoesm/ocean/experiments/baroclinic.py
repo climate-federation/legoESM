@@ -127,10 +127,10 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         )
         
     elif grid_type == "latlon":
-        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-        state = rest_state_latlon_ocean(
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        state = rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=config.T_surface, 
+            T_surface=config.T_surface,
             T_deep=config.T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
