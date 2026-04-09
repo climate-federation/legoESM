@@ -143,6 +143,13 @@ class FVShallowWaterLatLonModel(IntegrationMixin):
         config: FVShallowWaterLatLonConfig | None = None,
         dt: float = 600.0,
     ):
+        import warnings
+        warnings.warn(
+            "FVShallowWaterLatLonModel (A-grid) is deprecated. Use the "
+            "cubed-sphere or icosahedral shallow-water models instead. "
+            "See #115.",
+            FutureWarning, stacklevel=2,
+        )
         self.grid = grid
         self.config = config or FVShallowWaterLatLonConfig()
 

@@ -308,6 +308,13 @@ class LatLonPrimitiveEquationModel(IntegrationMixin):
         config: LatLonPrimitiveEquationConfig | None = None,
         dt: float = 600.0,
     ):
+        import warnings
+        warnings.warn(
+            "LatLonPrimitiveEquationModel (A-grid) is deprecated. Use the "
+            "cubed-sphere, spectral, or icosahedral PE models instead. "
+            "See #115.",
+            FutureWarning, stacklevel=2,
+        )
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or LatLonPrimitiveEquationConfig()

@@ -53,6 +53,15 @@ class LatLonOceanModel:
         z_coord: OceanZStarCoordinate,
         config: LatLonOceanConfig | None = None,
     ):
+        import warnings
+        warnings.warn(
+            "LatLonOceanModel (A-grid) is deprecated and will be removed in a "
+            "future release. Use LatLonCGridOceanModel (C-grid) or "
+            "MPASOceanModel instead. The A-grid has a 2dx checkerboard null "
+            "space and double-counts the free-surface pressure. See #115.",
+            FutureWarning,
+            stacklevel=2,
+        )
         self.grid = grid
         self.z_coord = z_coord
         self.config = config or LatLonOceanConfig()

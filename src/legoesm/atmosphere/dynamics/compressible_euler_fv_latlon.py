@@ -278,6 +278,12 @@ class FVCompressibleEulerLatLonModel(IntegrationMixin):
         config: FVCompressibleEulerLatLonConfig | None = None,
         dt: float = 10.0,
     ):
+        import warnings
+        warnings.warn(
+            "FVCompressibleEulerLatLonModel (A-grid) is deprecated. Use the "
+            "cubed-sphere or icosahedral NH models instead. See #115.",
+            FutureWarning, stacklevel=2,
+        )
         self.grid = grid
         self.height_coord = height_coord
         self.terrain_metric = terrain_metric

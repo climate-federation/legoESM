@@ -80,7 +80,8 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.sfno_pe",
     ),
 
-    # -- Lat-lon FV --
+    # -- Lat-lon FV (DEPRECATED: A-grid, see #115) --
+    # Use cubed-sphere C-D grid, spectral, or icosahedral instead.
     SolverEntry(
         "atmosphere", "shallow_water", "latlon_fv",
         "fv_shallow_water_latlon", "FVShallowWaterLatLonModel",
@@ -147,6 +148,9 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
         "spectral", "SpectralOceanModel",
         "legoesm.ocean.dynamics.spectral_ocean_pe",
     ),
+    # NOTE: A-grid latlon ocean is deprecated — use latlon_cgrid instead.
+    # Has 2dx checkerboard null space and free-surface double-counting.
+    # See https://github.com/leap-stc/legoESM/issues/115
     SolverEntry(
         "ocean", "hydrostatic", "latlon_fv",
         "latlon", "LatLonOceanModel",

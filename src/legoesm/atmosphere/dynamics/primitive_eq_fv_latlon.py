@@ -287,6 +287,13 @@ class FVLatLonPrimitiveEquationModel(IntegrationMixin):
         config: FVLatLonPrimitiveEquationConfig | None = None,
         dt: float = 600.0,
     ):
+        import warnings
+        warnings.warn(
+            "FVLatLonPrimitiveEquationModel (A-grid) is deprecated. Use the "
+            "cubed-sphere, spectral, or icosahedral PE models instead. "
+            "See #115.",
+            FutureWarning, stacklevel=2,
+        )
         self.grid = grid
         self.sigma_coord = sigma_coord
         self.config = config or FVLatLonPrimitiveEquationConfig()
