@@ -777,6 +777,20 @@ MPAS (alpha=0.01, flux-form): max SSH → 0.021 m (rock-steady)
 
 ---
 
+### 14. **NOTE: Cross-Grid SSH Amplitude Difference is Expected at Coarse Resolution**
+**Date**: 2026-04-08
+**Status**: Documented (no action needed)
+
+After all fixes (#105, barotropic diffusion), the 30-day regional double gyre shows:
+- Latlon C-grid (24x48): max SSH = 0.025 m (steady)
+- MPAS regional (300km): max SSH = 0.021 m (steady)
+
+The ~20% difference is **physically expected**, not a bug. At A_h = 5e5 m²/s, the Munk boundary layer width is `delta_M = (A_h/beta)^(1/3) ≈ 290 km` — about 2-3 cells on latlon and ~1 cell on MPAS. Both grids barely resolve the western boundary layer, so numerical diffusion from each discretization acts as additional effective viscosity on top of the explicit A_h. The MPAS Voronoi stencil contributes more numerical diffusion than the structured latlon C-grid, damping the circulation more and producing lower SSH amplitude.
+
+The SSH amplitude is controlled by how the western boundary return flow is handled, not by the interior Sverdrup balance (which is resolution-independent). At higher resolution with A_h held fixed (so delta_M is well-resolved), the amplitudes would converge.
+
+---
+
 ## Next Steps
 
 1. ~~Continue audit of remaining 8 test cases~~ ✅ **COMPLETED**
@@ -785,10 +799,10 @@ MPAS (alpha=0.01, flux-form): max SSH → 0.021 m (rock-steady)
 4. ~~Create final validation report~~ ✅ **COMPLETED**
 5. ~~Implement proper vector Laplacian for latlon C-grid~~ ✅ **COMPLETED** (Issue #105)
 6. ~~Disable excessive barotropic SSH diffusion on C-grid~~ ✅ **COMPLETED** (Issue #105 follow-up)
-6. ~~Fix MPAS Coriolis double-counting~~ ✅ **COMMITTED** (Issue #103, validation pending)
-7. **TODO**: Fix physics pipeline cell-center detour for wind stress/bottom drag on C-grid
-8. **TODO**: Run full ocean test matrix to validate all changes end-to-end
-9. **TODO**: Consider similar refactoring for atmosphere test matrix following ocean pattern
+7. ~~Fix MPAS Coriolis double-counting~~ ✅ **COMMITTED** (Issue #103, validation pending)
+8. **TODO**: Fix physics pipeline cell-center detour for wind stress/bottom drag on C-grid
+9. **TODO**: Run full ocean test matrix to validate all changes end-to-end
+10. **TODO**: Consider similar refactoring for atmosphere test matrix following ocean pattern
 
 ---
 
