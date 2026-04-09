@@ -48,6 +48,10 @@ class AMIPForcingConfig(NamedTuple):
         Additive offset for SST (e.g., +273.15 if data in Celsius) [K].
     sic_scale : float
         Multiplicative scale for SIC (e.g., 0.01 if data in percent).
+    sic_path : str
+        Separate SIC file path.  When non-empty, SIC is loaded from
+        this file instead of the main ``path``.  Required for ICON
+        boundary conditions which store SST and SIC in separate files.
     T_ice : float
         Sea-ice surface temperature [K].
     albedo_ice : float
@@ -64,6 +68,7 @@ class AMIPForcingConfig(NamedTuple):
     lon_var: str = "lon"
     sst_offset: float = 0.0
     sic_scale: float = 1.0
+    sic_path: str = ""
     T_ice: float = 271.35
     albedo_ice: float = 0.65
     albedo_ocean: float = 0.06
@@ -126,8 +131,101 @@ def get_amip_preset(dataset_name: str) -> AMIPForcingConfig:
         )
 
 
+def _is_icon_unstructured(ds) -> bool:
+    """Detect whether a dataset uses the ICON unstructured grid format.
+
+    ICON boundary condition files have a ``cell`` dimension with
+    ``clon``/``clat`` coordinates in radians.
+    """
+    return "cell" in ds.dims and "clon" in ds.coords and "clat" in ds.coords
+
+
+def _load_icon_unstructured(config: AMIPForcingConfig, grid) -> AMIPForcing:
+    """Load AMIP forcing from ICON unstructured NetCDF files.
+
+    Handles separate SST/SIC files (``config.sic_path``), unit
+    conversions, and KD-tree nearest-neighbour regridding from the
+    ICON cell centroids to the target grid.
+    """
+    import xarray as xr
+    from scipy.spatial import cKDTree
+
+    # --- Open SST file ---
+    ds_sst = xr.open_dataset(config.path)
+    try:
+        clon = ds_sst["clon"].values.astype(np.float64)   # radians
+        clat = ds_sst["clat"].values.astype(np.float64)   # radians
+        sst_data = ds_sst[config.sst_var].values.astype(np.float64)
+        time_coord = ds_sst[config.time_var].values
+    finally:
+        ds_sst.close()
+
+    # --- Open SIC file (separate or same) ---
+    sic_path = config.sic_path or config.path
+    ds_sic = xr.open_dataset(sic_path)
+    try:
+        sic_data = ds_sic[config.sic_var].values.astype(np.float64)
+    finally:
+        ds_sic.close()
+
+    # Ensure 2D: (ntime, ncells)
+    if sst_data.ndim == 1:
+        sst_data = sst_data[None, :]
+        sic_data = sic_data[None, :]
+
+    # --- Unit conversions ---
+    sst_data = sst_data + config.sst_offset
+    sic_data = sic_data * config.sic_scale
+    sic_data = np.clip(sic_data, 0.0, 1.0)
+    sst_data = np.maximum(sst_data, 200.0)
+
+    # --- Build KD-tree from ICON cell centroids (3D Cartesian) ---
+    x_src = np.cos(clat) * np.cos(clon)
+    y_src = np.cos(clat) * np.sin(clon)
+    z_src = np.sin(clat)
+    tree = cKDTree(np.stack([x_src, y_src, z_src], axis=-1))
+
+    # --- Target grid points (3D Cartesian) ---
+    grid_lat = np.asarray(grid.grid_lat)  # radians
+    grid_lon = np.asarray(grid.grid_lon)  # radians
+    target_shape = grid_lat.shape
+    x_tgt = np.cos(grid_lat.ravel()) * np.cos(grid_lon.ravel())
+    y_tgt = np.cos(grid_lat.ravel()) * np.sin(grid_lon.ravel())
+    z_tgt = np.sin(grid_lat.ravel())
+    _, idx = tree.query(np.stack([x_tgt, y_tgt, z_tgt], axis=-1))
+
+    # --- Vectorised regridding (all timesteps at once) ---
+    ntime = sst_data.shape[0]
+    sst_regridded = sst_data[:, idx].reshape(ntime, *target_shape)
+    sic_regridded = sic_data[:, idx].reshape(ntime, *target_shape)
+
+    # --- Time axis ---
+    if np.issubdtype(time_coord.dtype, np.datetime64):
+        t0 = time_coord[0]
+        times_days = (time_coord - t0) / np.timedelta64(1, "D")
+        times_days = times_days.astype(np.float64)
+    else:
+        times_days = time_coord.astype(np.float64)
+        times_days = times_days - times_days[0]
+
+    sic_regridded = np.clip(sic_regridded, 0.0, 1.0)
+
+    from legoesm.core.precision import get_policy
+    _dtype = get_policy().storage
+    return AMIPForcing(
+        times=jnp.array(times_days),
+        sst=jnp.array(sst_regridded, dtype=_dtype),
+        sic=jnp.array(sic_regridded, dtype=_dtype),
+        config=config,
+    )
+
+
 def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
     """Load AMIP forcing from NetCDF and regrid to the target grid.
+
+    Supports regular lat-lon grids (COBE-SST2, HadISST, custom) and
+    ICON unstructured grids (detected via ``cell`` dimension with
+    ``clon``/``clat`` coordinates).
 
     Parameters
     ----------
@@ -160,6 +258,11 @@ def load_amip_forcing(config: AMIPForcingConfig, grid) -> AMIPForcing:
         raise OSError(
             f"Failed to open AMIP forcing file: {path}\n  {exc}"
         ) from exc
+
+    # --- Detect ICON unstructured grid ---
+    if _is_icon_unstructured(ds):
+        ds.close()
+        return _load_icon_unstructured(config, grid)
 
     try:
         # --- Validate required variables ---

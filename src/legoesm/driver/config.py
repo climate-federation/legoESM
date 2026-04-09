@@ -71,6 +71,7 @@ class ExperimentConfig(NamedTuple):
     # Forcing
     dataset: str = "analytical"
     forcing_path: str = ""
+    sic_path: str = ""             # separate SIC file (ICON format)
     sst_var: str = ""
     sic_var: str = ""
     sst_offset: float = 0.0
