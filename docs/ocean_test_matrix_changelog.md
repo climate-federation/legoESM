@@ -740,6 +740,43 @@ Latlon KE no longer shows anomalous decline. The remaining difference (latlon sl
 
 ---
 
+### 13. **FIX: Disable Excessive Barotropic SSH Diffusion on C-Grid (Issue #105 follow-up)**
+**Date**: 2026-04-08
+**Severity**: Moderate
+**Status**: ✅ Fixed
+
+**Problem**: Even after the vector Laplacian fix (#12), latlon SSH amplitude still declined ~0.5%/day (0.019 → 0.016 m over 30 days) while MPAS held rock-steady at 0.021 m. With `barotropic_diffusion_alpha=0`, latlon reached 0.025 m and was completely stable.
+
+**Root Cause**: The barotropic solver applies `div(nu_face * grad(eta))` every substep (30 per baroclinic step) with `alpha=0.01`. The effective diffusivity is ~1e7 m²/s — **20x larger than A_h=5e5**. While the flux-form diffusion is exactly conservative (no net mass loss), it smooths SSH gradients aggressively, reducing the gyre amplitude toward a flatter profile.
+
+This diffusion was originally needed for the **A-grid** solver to suppress the 2Δx checkerboard mode. The **C-grid** solver eliminates the checkerboard by construction (compact 1-cell stencils), so the diffusion is unnecessary.
+
+**Investigation**: The ocean expert agent confirmed:
+- The active solver (`barotropic_latlon_cgrid.py`) already uses flux-form diffusion — no conservation error
+- The old hybrid solver (`barotropic_cgrid_latlon.py`) was dead code using A-grid `laplacian_latlon`
+- Three fix options: flux-form (already done), C-grid operators (already done), default alpha=0 (needed)
+- Keep alpha=0 as default; retain the knob for production runs with realistic topography (wetting/drying, steep bathymetric steps)
+
+**Fix**:
+- Changed `LatLonCGridOceanConfig.barotropic_diffusion_alpha` default from `0.01` to `0.0`
+- Removed dead code `barotropic_cgrid_latlon.py` (hybrid A/C-grid solver not imported by any active model)
+- A-grid config `LatLonOceanConfig` and MPAS config retain `alpha=0.01` (still needed)
+
+**Validation**:
+```
+30-day regional double gyre (A_h=5e5, dt=300s, 10 levels):
+
+alpha=0.01 (old default): latlon max SSH 0.019 → 0.016 m (declining)
+alpha=0.0  (new default): latlon max SSH → 0.025 m (rock-steady)
+MPAS (alpha=0.01, flux-form): max SSH → 0.021 m (rock-steady)
+```
+
+**Files Modified**:
+- `src/legoesm/ocean/state.py` (default alpha=0.0 for C-grid config)
+- `src/legoesm/ocean/dynamics/barotropic_cgrid_latlon.py` (removed — dead code)
+
+---
+
 ## Next Steps
 
 1. ~~Continue audit of remaining 8 test cases~~ ✅ **COMPLETED**
@@ -747,6 +784,7 @@ Latlon KE no longer shows anomalous decline. The remaining difference (latlon sl
 3. ~~Implement additional fixes as needed~~ ✅ **COMPLETED**
 4. ~~Create final validation report~~ ✅ **COMPLETED**
 5. ~~Implement proper vector Laplacian for latlon C-grid~~ ✅ **COMPLETED** (Issue #105)
+6. ~~Disable excessive barotropic SSH diffusion on C-grid~~ ✅ **COMPLETED** (Issue #105 follow-up)
 6. ~~Fix MPAS Coriolis double-counting~~ ✅ **COMMITTED** (Issue #103, validation pending)
 7. **TODO**: Fix physics pipeline cell-center detour for wind stress/bottom drag on C-grid
 8. **TODO**: Run full ocean test matrix to validate all changes end-to-end
