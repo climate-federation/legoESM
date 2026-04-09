@@ -135,9 +135,6 @@ def barotropic_substeps_latlon_cgrid(
     f_v_interior = 0.5 * (f_cell[:-1] + f_cell[1:])
     f_v = jnp.concatenate([f_cell[0:1], f_v_interior, f_cell[-1:]], axis=0)
 
-    alpha_u = (0.5 * f_u * dt_s).astype(eta.dtype)
-    alpha_v = (0.5 * f_v * dt_s).astype(eta.dtype)
-
     # Barotropic diffusion — flux-form with face-centered coefficient.
     # Using div(nu_face * grad(eta)) instead of nu_cell * div(grad(eta))
     # ensures exact volume conservation (divergence theorem: sum of
@@ -225,34 +222,7 @@ def barotropic_substeps_latlon_cgrid(
         zero_row_u = jnp.zeros((1, n_lon_loc), dtype=eta.dtype)
         U_at_v = jnp.concatenate([zero_row_u, U_at_v_interior, zero_row_u], axis=0)
 
-        # Semi-implicit Coriolis at u-points
-        denom_u = 1.0 + alpha_u ** 2
-        rhs_u = U_bar_c + alpha_u * V_at_u - dt_s * g * deta_dx
-        rhs_v_corr = V_at_u - alpha_u * U_bar_c
-        U_bar_new = (rhs_u + alpha_u * rhs_v_corr) / denom_u * u_mask
-
-        # Semi-implicit Coriolis at v-points
-        denom_v = 1.0 + alpha_v ** 2
-        rhs_v = V_bar_c - alpha_v * U_at_v - dt_s * g * deta_dy
-        rhs_u_corr = U_at_v + alpha_v * V_bar_c
-        V_bar_new = (rhs_v - alpha_v * (-rhs_u_corr)) / denom_v * v_mask
-        # Simplified: V_bar_new = (rhs_v + alpha_v * rhs_u_corr) / denom_v
-        # but with correct sign convention for southern hemisphere
-        V_bar_new = (V_bar_c - alpha_v * U_at_v - dt_s * g * deta_dy
-                     + alpha_v * (U_at_v + alpha_v * V_bar_c)) / denom_v * v_mask
-        # Expand:  (V_bar_c*(1+alpha_v^2) - alpha_v*U_at_v + alpha_v*U_at_v
-        #            - dt_s*g*deta_dy) / denom_v
-        # Hmm, that cancels. Let me redo the semi-implicit properly.
-
-        # Proper semi-implicit Coriolis (at each face independently):
-        # At u-point:
-        #   U* = U + dt*(f*V_at_u - g*deta/dx)
-        #   U_new = (U* + alpha_u * V_at_u_*) / (1 + alpha_u^2)
-        # But V_at_u_* is not known yet. Standard approach: predict-correct.
-        # Simpler: use the forward-backward pattern where U updates first,
-        # then V uses the new U.
-
-        # Forward-backward with Coriolis:
+        # Forward-backward Coriolis (Matsuno stepping):
         # Step 1: U_new = U + dt * (f_u * V_at_u - g * deta/dx)
         U_bar_new = (U_bar_c + dt_s * (f_u * V_at_u - g * deta_dx)) * u_mask
 
