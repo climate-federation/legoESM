@@ -60,13 +60,9 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     ("hydrostatic",   "spectral",       "gaussian"):     "spectral_primitive_equations",
     ("nonhydrostatic","spectral",       "gaussian"):     "spectral_compressible_euler",
 
-    # --- Lat-lon finite-volume ---
-    ("shallow_water", "finite_volume",  "latlon"):       "fv_shallow_water_latlon",
+    # --- Lat-lon finite-volume (hydrostatic only) ---
     ("hydrostatic",   "finite_volume",  "latlon"):       "fv_primitive_equations_latlon",
-    ("nonhydrostatic","finite_volume",  "latlon"):       "fv_compressible_euler_latlon",
-    ("shallow_water", "centered",       "latlon"):       "fv_shallow_water_latlon",
     ("hydrostatic",   "centered",       "latlon"):       "fv_primitive_equations_latlon",
-    ("nonhydrostatic","centered",       "latlon"):       "fv_compressible_euler_latlon",
 
     # --- MPAS icosahedral ---
     ("hydrostatic",   "mpas",           "voronoi"):      "mpas_primitive_equations",
@@ -267,6 +263,20 @@ def create_atmosphere_dycore(
     if solver_name == "spectral_compressible_euler":
         from legoesm.atmosphere.dynamics.spectral_nh import SpectralCompressibleEulerModel
         return SpectralCompressibleEulerModel(grid=grid, sigma_coord=sigma)
+
+    # ----- Lat-lon FV (hydrostatic) -----
+    if solver_name == "fv_primitive_equations_latlon":
+        from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
+            FVLatLonPrimitiveEquationModel, FVLatLonPrimitiveEquationConfig,
+        )
+        cfg = FVLatLonPrimitiveEquationConfig(
+            A_h=diff.A_h,
+            hyperdiff_coeff=diff.hyperdiff,
+            hyperdiff_ps_coeff=diff.hyperdiff,
+            use_conservation_fixer=dc.conservation_fixer,
+            fix_mass=dc.fix_mass,
+        )
+        return FVLatLonPrimitiveEquationModel(grid=grid, sigma_coord=sigma, config=cfg, dt=dc.dt)
 
     # ----- MPAS icosahedral -----
     if solver_name == "mpas_primitive_equations":
