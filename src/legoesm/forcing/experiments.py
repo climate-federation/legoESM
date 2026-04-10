@@ -425,7 +425,7 @@ def create_experiment_config(
     # when the user hasn't explicitly overridden it.
     _GRID_DEFAULT_DISCRETIZATION = {
         "cubed_sphere": "cdgrid",
-        "latlon": "cdgrid",
+        "latlon": "finite_volume",
         "gaussian": "spectral",
         "voronoi": "mpas",
         "mpas": "mpas",
