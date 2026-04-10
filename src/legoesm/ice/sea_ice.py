@@ -3,14 +3,15 @@
 Modes (controlled by ``SeaIceConfig``):
 - **Slab** (``dynamics="none"``, ``n_categories=1``): Original thermodynamic
   slab with diagnostic free-drift velocity. Fully backward compatible.
-- **Free drift** (``dynamics="free_drift"``): Free-drift velocity with
-  optional tracer advection.
+- **Free drift** (``dynamics="free_drift"``): Heuristic linear-combination
+  velocity (not a force-balance solver) with optional tracer advection.
 - **EVP** (``dynamics="evp"``): Elastic-Viscous-Plastic rheology with
   subcycled momentum solver (Hunke & Dukowicz 1997).
 
-Multi-category ice (``n_categories > 1``) follows the CICE framework
-with linear remapping (Lipscomb 2001) to maintain the ice thickness
-distribution.
+Multi-category ice (``n_categories > 1``) uses a simplified category
+transfer scheme to redistribute ice across thickness bins.  This is
+*not* a full Lipscomb (2001) linear remapping.  Snow depth is not
+tracked.
 
 Thermodynamics:
     Surface energy balance determines T_ice.
@@ -80,6 +81,18 @@ def step_sea_ice(
     new_state : SeaIceState or DynamicSeaIceState
     response : TileResponse
     """
+    # Validate: dynamics/transport requiring grid must have grid != None
+    if config.dynamics == "evp" and grid is None:
+        raise ValueError(
+            "dynamics='evp' requires a grid argument. "
+            "Pass grid=<CubedSphereGrid> to step_sea_ice()."
+        )
+    if config.transport == "advect" and grid is None:
+        raise ValueError(
+            "transport='advect' requires a grid argument. "
+            "Pass grid=<CubedSphereGrid> to step_sea_ice()."
+        )
+
     if config.dynamics == "none" and config.n_categories == 1:
         # Original slab path — fully backward compatible
         if isinstance(state, DynamicSeaIceState):
@@ -474,17 +487,32 @@ def _build_response(
         config.emissivity_ice,
     )
 
-    # Recompute surface fluxes from aggregated state
+    # Recompute surface fluxes from aggregated state, honoring bulk_scheme
     wind_speed = jnp.sqrt(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
     )
     rho = forcing.rho_lowest
-    tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
-        forcing.u_lowest, forcing.v_lowest,
-        forcing.T_lowest, forcing.q_lowest,
-        T_ice, q_sfc, rho, wind_speed,
-        config.Cd_ice, config.Ch_ice,
-    )
+
+    if config.bulk_scheme in ("most", "coare3", "large_yeager"):
+        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_ice, q_sfc, rho,
+            z_ref=config.z_ref,
+            z0_init=config.z0_ice,
+            scheme=config.bulk_scheme,
+            n_iter=config.bulk_n_iter,
+            L_latent=constants.L_s,  # sublimation over ice
+        )
+    else:
+        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            T_ice, q_sfc, rho, wind_speed,
+            config.Cd_ice, config.Ch_ice,
+            L_latent=constants.L_s,  # sublimation over ice
+        )
 
     return TileResponse(
         T_surface=T_ice,

@@ -1,12 +1,17 @@
 """Sea ice tracer advection.
 
-Advects ice tracers (thickness, concentration, snow depth, temperature)
-by the ice velocity field using flux-form upstream transport on the
-cubed sphere.
+Advects ice tracers (thickness, concentration, temperature) by the ice
+velocity field using **centered** flux-form transport on the cubed sphere.
 
-For conserved quantities (volume = h*a, area = a), uses the
-flux-form divergence operator. Temperature is advected as enthalpy
-(T*h*a) to preserve conservation.
+For conserved quantities (volume = h*a, area = a), uses the flux-form
+divergence operator.  Temperature is advected as enthalpy (T*h*a) to
+preserve conservation.
+
+**Limitations**: The centered divergence operator is not monotone — it
+can generate new extrema (negative thickness, concentration > 1, or
+out-of-range temperatures).  Post-transport clamps enforce physical
+bounds but do not guarantee strict conservation.  A proper upwind or
+FCT scheme would be needed for both monotonicity and conservation.
 
 All functions are JAX-compatible (differentiable, JIT-friendly).
 """
@@ -18,68 +23,6 @@ import jax.numpy as jnp
 from legoesm.core.field import Field
 from legoesm.core.operators import divergence
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import pad_halo, pad_halo_vector
-
-
-# ==============================================================================
-# Upwind flux computation
-# ==============================================================================
-
-def _upwind_flux_x(
-    phi: jnp.ndarray,
-    u: jnp.ndarray,
-    grid: CubedSphereGrid,
-) -> jnp.ndarray:
-    """Compute upwind flux in x-direction.
-
-    flux = u * phi_upwind
-
-    Uses scalar halo exchange for phi, vector halo for u already done.
-
-    Parameters
-    ----------
-    phi : array (6, n, n)
-        Scalar field to advect.
-    u : array (6, n+2, n+2)
-        Padded velocity (x-component in grid coords).
-
-    Returns
-    -------
-    flux : array (6, n, n)
-        d(phi*u)/dx contribution to divergence [phi/s].
-    """
-    phi_pad = pad_halo(phi, interp_offsets=grid.halo_interp_offsets)
-
-    # Upwind selection: use phi at i-1 if u > 0, phi at i+1 if u < 0
-    # Evaluate at cell interfaces (i+1/2 and i-1/2)
-    # u at cell center: u_pad[:, 1:-1, 1:-1]
-    # We need the interface velocity = average of neighbors
-
-    # Interface at i+1/2: between cells i and i+1
-    u_right = 0.5 * (u[:, 1:-1, 1:-1] + u[:, 2:, 1:-1])  # (6, n, n) but last is n-1
-    # Actually, for a simple first-order upwind on cell centers:
-    # flux_x = u * phi_upwind where phi_upwind depends on sign of u
-
-    # Centered u at cell center
-    u_c = u[:, 1:-1, 1:-1]  # (6, n, n)
-
-    # Upwind phi: if u > 0, use phi[i-1]; if u < 0, use phi[i+1]
-    phi_left = phi_pad[:, :-2, 1:-1]   # phi[i-1]
-    phi_right = phi_pad[:, 2:, 1:-1]   # phi[i+1]
-    phi_center = phi_pad[:, 1:-1, 1:-1]
-
-    phi_upwind = jnp.where(u_c >= 0, phi_center, phi_right) * jnp.maximum(u_c, 0.0) \
-               + jnp.where(u_c < 0, phi_center, phi_left) * jnp.minimum(u_c, 0.0)
-
-    # Actually, cleaner formulation: split into positive/negative parts
-    # flux = u+ * phi_left + u- * phi_right  (at interfaces)
-    # For cell-centered finite volume:
-    # d(flux)/dx ≈ (flux_right - flux_left) / dx
-    # But simplest approach: use the existing divergence operator with upwind
-
-    # Simplest: donor cell
-    # net flux = (u * phi)_upwind approximated as:
-    return phi_upwind
 
 
 def advect_ice_tracers(
@@ -90,12 +33,14 @@ def advect_ice_tracers(
     v_ice: jnp.ndarray,
     grid: CubedSphereGrid,
     dt: float,
+    T_ice_min: float = 180.0,
+    T_freeze_ocean: float = 271.35,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advect ice tracers by the ice velocity field.
 
-    Uses the cubed-sphere divergence operator with first-order donor-cell
-    (upwind) transport. Conserved quantities (volume, area) use flux form.
-    Temperature is advected as enthalpy for conservation.
+    Uses the cubed-sphere divergence operator with centered flux-form
+    transport.  This is **not** an upwind/monotone scheme — physical
+    bounds are enforced by post-transport clamping.
 
     Parameters
     ----------
@@ -110,15 +55,19 @@ def advect_ice_tracers(
     grid : CubedSphereGrid
     dt : float
         Timestep [s].
+    T_ice_min : float
+        Lower temperature bound [K] (default 180).
+    T_freeze_ocean : float
+        Upper temperature bound [K] (default 271.35).
 
     Returns
     -------
     h_new : array (6, n, n)
-        Updated thickness.
+        Updated thickness (clamped >= 0).
     conc_new : array (6, n, n)
-        Updated concentration.
+        Updated concentration (clamped to [0, 1]).
     T_new : array (6, n, n)
-        Updated temperature.
+        Updated temperature (clamped to [T_ice_min, T_freeze_ocean]).
     """
     eps = 1e-20
 
@@ -150,6 +99,13 @@ def advect_ice_tracers(
     conc_safe = jnp.maximum(conc_new, eps)
     h_new = jnp.where(conc_new > 0.0, vol_new / conc_safe, 0.0)
     vol_safe = jnp.maximum(vol_new, eps)
-    T_new = jnp.where(vol_new > 0.0, enth_new / vol_safe, 271.35)
+    T_new = jnp.where(
+        vol_new > 0.0,
+        enth_new / vol_safe,
+        T_freeze_ocean,
+    )
+
+    # Clamp temperature to physical bounds (centered scheme is not monotone)
+    T_new = jnp.clip(T_new, T_ice_min, T_freeze_ocean)
 
     return h_new, conc_new, T_new

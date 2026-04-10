@@ -31,17 +31,26 @@ class AtmToSurface(NamedTuple):
 
 
 class TileResponse(NamedTuple):
-    """Per-tile surface response. Identical slots to SurfaceToAtm."""
-    T_surface: jax.Array         # Surface skin temperature [K]
-    albedo: jax.Array            # Surface albedo [0-1]
+    """Per-tile surface response returned to the coupler.
+
+    **Temporal semantics**: state fields (``T_surface``, ``q_surface``,
+    ``albedo``, ``lw_up``) reflect the **end-of-step** surface state.
+    Turbulent fluxes (``shflx``, ``lhflx``, ``tau_x``, ``tau_y``) are
+    computed from the **beginning-of-step** state and represent the
+    time-step-averaged exchange.  This is standard practice in land
+    surface models (the fluxes drove the state update, so they are
+    self-consistent with the energy/water budget over the step).
+    """
+    T_surface: jax.Array         # [end-of-step] Surface skin temperature [K]
+    albedo: jax.Array            # [end-of-step] Surface albedo [0-1]
     emissivity: jax.Array        # Surface emissivity [0-1]
     z0: jax.Array                # Roughness length [m]
-    q_surface: jax.Array         # Surface specific humidity [kg/kg]
-    shflx: jax.Array             # Sensible heat flux [W/m2] (positive up)
-    lhflx: jax.Array             # Latent heat flux [W/m2] (positive up)
-    tau_x: jax.Array             # Zonal surface stress [Pa]
-    tau_y: jax.Array             # Meridional surface stress [Pa]
-    lw_up: jax.Array             # Upward longwave [W/m2]
+    q_surface: jax.Array         # [end-of-step] Surface specific humidity [kg/kg]
+    shflx: jax.Array             # [step-averaged] Sensible heat flux [W/m2] (positive up)
+    lhflx: jax.Array             # [step-averaged] Latent heat flux [W/m2] (positive up)
+    tau_x: jax.Array             # [step-averaged] Zonal surface stress [Pa]
+    tau_y: jax.Array             # [step-averaged] Meridional surface stress [Pa]
+    lw_up: jax.Array             # [end-of-step] Upward longwave [W/m2]
     u_ocean_sfc: jax.Array       # Ocean surface zonal current [m/s]
     v_ocean_sfc: jax.Array       # Ocean surface meridional current [m/s]
     co2_flux: jax.Array          # CO2 flux [kg/m2/s] (positive up)

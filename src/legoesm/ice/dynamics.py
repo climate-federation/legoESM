@@ -111,9 +111,14 @@ def free_drift_velocity(
     rho_air: float = 1.225,
     rho_ice: float = 917.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Compute diagnostic free-drift ice velocity.
+    """Compute diagnostic ice velocity via linear drag combination.
 
-    u_ice = drag_ocean * u_ocean + drag_atm * (rho_air/rho_ice) * u_wind
+    **This is a heuristic placeholder**, not a physically faithful
+    free-drift solver.  A proper free-drift model would solve the
+    steady-state momentum balance including Coriolis and turning
+    angles.  The current formulation is a simple linear combination:
+
+        u_ice = drag_ocean * u_ocean + drag_atm * (rho_air/rho_ice) * u_wind
 
     Parameters
     ----------
@@ -129,7 +134,7 @@ def free_drift_velocity(
     Returns
     -------
     u_ice, v_ice : arrays
-        Free-drift ice velocity [m/s].
+        Diagnostic ice velocity [m/s].
     """
     ratio = drag_atm * rho_air / rho_ice
     u_ice = drag_ocean * ocean_u + ratio * wind_u

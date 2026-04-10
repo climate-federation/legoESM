@@ -2,11 +2,12 @@
 
 Sea ice model with switchable dynamics and multi-category support:
 - ``dynamics="none"``: Slab thermodynamics (default, backward compatible).
-- ``dynamics="free_drift"``: Free-drift velocity with tracer advection.
+- ``dynamics="free_drift"``: Heuristic linear-combination velocity.
 - ``dynamics="evp"``: EVP rheology (Hunke & Dukowicz 1997).
 
-Multi-category ice (``n_categories > 1``) uses linear remapping
-(Lipscomb 2001) for ice thickness distribution.
+Multi-category ice (``n_categories > 1``) uses a simplified category
+transfer scheme for ice thickness redistribution.  Snow depth is not
+tracked.
 """
 
 from legoesm.ice.config import SeaIceConfig

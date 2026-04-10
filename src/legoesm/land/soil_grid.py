@@ -61,7 +61,7 @@ def make_soil_grid(config: SoilGridConfig = SoilGridConfig()) -> SoilGrid:
 
     r = config.growth_factor
     # Layer thicknesses: dz_top * r^k for k = 0, ..., n-1
-    dz = dz_top * r ** jnp.arange(n, dtype=jnp.float32)
+    dz = dz_top * r ** jnp.arange(n, dtype=float)
 
     # Interface depths (cumulative sum with 0 at top)
     z_interface = jnp.concatenate([jnp.zeros(1), jnp.cumsum(dz)])
@@ -93,7 +93,7 @@ def make_soil_grid_custom(dz_array: tuple | list) -> SoilGrid:
     -------
     SoilGrid
     """
-    dz = jnp.array(dz_array, dtype=jnp.float32)
+    dz = jnp.array(dz_array, dtype=float)
     n = len(dz_array)
     z_interface = jnp.concatenate([jnp.zeros(1), jnp.cumsum(dz)])
     z_node = 0.5 * (z_interface[:-1] + z_interface[1:])

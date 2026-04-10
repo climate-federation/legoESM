@@ -36,10 +36,23 @@ Flags:
 - `--grid cubed_sphere` / `--grid latlon` / `--grid mpas` / `--grid spectral`
 - `--levels N` / `--dt T` for resolution overrides
 
+## 1b2) Sea Ice Test Matrix
+
+Run the sea ice test matrix:
+
+```bash
+JAX_ENABLE_X64=1 python scripts/run_sea_ice_test_matrix.py --quick --output results/sea_ice
+```
+
+Flags:
+- `--only <category_or_case>` for specific categories (thermo, dynamics, transport, itd, integration) or case names
+- `--grid cubed_sphere` / `--grid column`
+- `--test <case_name>` for a single test case
+
 ## 1c) Capture Output
 
 After each matrix run:
-1. Read `results/atmosphere/summary.json` and `results/ocean/summary.json`
+1. Read `results/atmosphere/summary.json`, `results/ocean/summary.json`, and `results/sea_ice/summary.json`
 2. Count PASS / FAIL / ERROR / SKIP
 3. Report the summary to the user immediately
 
@@ -68,6 +81,14 @@ For each case output directory (`results/<domain>/<case>/<grid>/<resolution>/`):
 - SSH (eta): |eta| < 100 m
 - Velocity: max|u| < 10 m/s (ocean currents)
 - No NaN or Inf
+
+**Sea ice checks:**
+- Ice thickness: h >= 0 everywhere
+- Surface temperature: 180 K <= T_ice <= 271.35 K (ocean freezing point)
+- Ice concentration: 0 <= a <= 1
+- Ice velocity (if dynamic): max|u_ice| < 5 m/s
+- Stress tensor (if EVP): all components finite, |sigma| < 1e8 N/m
+- No NaN or Inf in any field
 
 ## 2b) Conservation Time Series
 
@@ -107,6 +128,7 @@ Read the PNG files to check for obvious problems:
 Check for a previous summary at:
 - `results/atmosphere/summary_previous.json`
 - `results/ocean/summary_previous.json`
+- `results/sea_ice/summary_previous.json`
 
 If these don't exist, check if the current `summary.json` already exists before running (save a copy as `summary_previous.json` before the new run).
 
@@ -129,6 +151,7 @@ After validation, copy current summaries to `*_previous.json` for next run:
 ```bash
 cp results/atmosphere/summary.json results/atmosphere/summary_previous.json
 cp results/ocean/summary.json results/ocean/summary_previous.json
+cp results/sea_ice/summary.json results/sea_ice/summary_previous.json
 ```
 
 ---
@@ -228,4 +251,5 @@ Format the report as a markdown summary printed to stdout. Also save it to `resu
 - Run atmosphere and ocean matrices sequentially (they share JAX device memory)
 - If only atmosphere or only ocean is requested via arguments, skip the other
 - When generating fix prompts, be specific about file paths and line numbers
-- Conservation thresholds: mass < 0.1%, energy < 5% (atmosphere), volume/heat/salt < 1% (ocean)
+- Conservation thresholds: mass < 0.1%, energy < 5% (atmosphere), volume/heat/salt < 1% (ocean), volume < 5% (sea ice ITD remap)
+- Sea ice matrix: `JAX_ENABLE_X64=1 python scripts/run_sea_ice_test_matrix.py --quick --output results/sea_ice`

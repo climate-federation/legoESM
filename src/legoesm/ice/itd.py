@@ -1,12 +1,16 @@
 """Ice Thickness Distribution (ITD) — multi-category sea ice.
 
 Implements an N-category ice model following the CICE framework
-(Hunke & Dukowicz 1997; Lipscomb 2001). Each category carries its own
-thickness, snow depth, temperature, and areal fraction.
+(Hunke & Dukowicz 1997).  Each category carries its own thickness,
+temperature, and areal fraction.  (Snow depth is **not** tracked.)
 
-The linear remapping scheme (Lipscomb 2001) redistributes ice across
-categories after thermodynamic growth/melt so that each category's mean
-thickness stays within its prescribed bounds.
+The ``linear_remap`` function is a **simplified category transfer
+scheme** that moves ice volume and area between adjacent categories
+when thickness exceeds category bounds.  It is *not* a faithful
+implementation of the Lipscomb (2001) linear remapping (which fits
+a piecewise-linear g(h) within each category).  Post-remap clamping
+ensures category means stay within bounds, but conservation is only
+approximate when clamping activates.
 
 All functions are JAX-compatible (differentiable, JIT-friendly).
 
@@ -15,7 +19,8 @@ References
 - Hunke, E. C. & Dukowicz, J. K. (1997): An elastic-viscous-plastic model
   for sea ice dynamics. J. Phys. Oceanogr., 27, 1849-1867.
 - Lipscomb, W. H. (2001): Remapping the thickness distribution in sea ice
-  models. J. Geophys. Res., 106(C7), 13989-14000.
+  models. J. Geophys. Res., 106(C7), 13989-14000.  *(Cited for context;
+  the full algorithm is not implemented here.)*
 """
 
 from __future__ import annotations
@@ -175,13 +180,17 @@ def linear_remap(
     a_new: jnp.ndarray,
     n_cat: int,
     T_new: jnp.ndarray | None = None,
+    T_ice_min: float = 180.0,
+    T_freeze_ocean: float = 271.35,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Redistribute ice across categories after thermodynamic changes.
 
-    Simplified linear remapping following Lipscomb (2001): ice that has
-    grown beyond its category upper bound is moved to the next category;
-    ice that has melted below its lower bound is moved to the previous
-    category.
+    **Simplified category transfer** (not full Lipscomb 2001): ice that
+    has grown beyond its category upper bound is moved to the next
+    category; ice that has melted below its lower bound is moved to the
+    previous category.  Post-remap thickness is clamped to category
+    bounds to prevent drift.  Conservation is exact when no clamping
+    activates, and only approximate otherwise.
 
     Parameters
     ----------
@@ -197,15 +206,20 @@ def linear_remap(
     T_new : array (..., n_cat) or None
         Post-thermodynamics temperature. If provided, enthalpy is remapped
         alongside volume and the remapped temperature is returned.
+    T_ice_min : float
+        Lower temperature bound [K] (default 180).
+    T_freeze_ocean : float
+        Upper temperature bound [K] (default 271.35).
 
     Returns
     -------
     h_remap : array (..., n_cat)
-        Remapped thickness.
+        Remapped thickness (clamped to category bounds).
     a_remap : array (..., n_cat)
-        Remapped concentration.
+        Remapped concentration (clamped to [0, 1]).
     T_remap : array (..., n_cat)
-        Remapped temperature (only if T_new is provided).
+        Remapped temperature (only if T_new is provided;
+        clamped to [T_ice_min, T_freeze_ocean]).
     """
     lo = category_bounds(n_cat)
     hi = upper_bounds(n_cat)
@@ -258,6 +272,19 @@ def linear_remap(
     h_remap = jnp.where(a_remap > 0.0, vol_remap / a_safe, 0.0)
     h_remap = jnp.maximum(h_remap, 0.0)
 
+    # Post-remap: clamp category mean thickness to bounds.
+    # Last category has no finite upper bound (100 m sentinel).
+    h_remap = jnp.where(
+        (a_remap > 0.0) & (h_remap < lo),
+        lo,
+        h_remap,
+    )
+    h_remap = jnp.where(
+        (a_remap > 0.0) & (h_remap > hi),
+        hi,
+        h_remap,
+    )
+
     if T_new is None:
         return h_remap, a_remap
 
@@ -279,5 +306,8 @@ def linear_remap(
     # Recover temperature from enthalpy
     vol_safe = jnp.maximum(vol_remap, 1e-30)
     T_remap = jnp.where(vol_remap > 0.0, E_remap / vol_safe, T_new)
+
+    # Clamp temperature to physical bounds
+    T_remap = jnp.clip(T_remap, T_ice_min, T_freeze_ocean)
 
     return h_remap, a_remap, T_remap

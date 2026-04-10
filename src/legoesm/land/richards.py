@@ -1,4 +1,4 @@
-"""Richards equation solver — mixed-form modified Picard iteration (Task 8C).
+"""Richards equation solver — mixed-form Picard iteration.
 
 Solves the 1D vertical unsaturated flow equation:
     ∂θ/∂t = ∂/∂z [K(ψ) · (∂ψ/∂z + 1)] - S(z)
@@ -7,14 +7,15 @@ Uses the Celia et al. (1990) mass-conservative mixed-form discretization
 with Picard iteration for nonlinearity.
 
 All operations are JAX-differentiable. The Picard loop uses
-jax.lax.fori_loop with masked updates after convergence.
+``jax.lax.fori_loop`` with a **fixed iteration count** (default 10).
+No early-termination convergence check is performed: converged columns
+simply get near-zero updates on subsequent iterations. The ``n_iter``
+diagnostic always equals ``max_iter``.
 
 References
 ----------
 - Celia et al. (1990): A general mass-conservative numerical solution for the
   unsaturated flow equation. Water Resources Research, 26(7), 1483-1496.
-- Miller et al. (1998): A spatially distributed model for forestation and
-  land-use change. Ecological Modelling, 108, 47-63.
 """
 
 from __future__ import annotations
@@ -23,8 +24,6 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-
-_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 from legoesm import constants
 from legoesm.land.soil_grid import SoilGrid
@@ -35,12 +34,18 @@ from legoesm.land.soil_hydraulics import (
     moisture_capacity,
     interblock_K,
 )
+from legoesm.land.tridiag import thomas_solve_batch
 
 
 class RichardsConfig(NamedTuple):
-    """Configuration for the Richards equation solver."""
+    """Configuration for the Richards equation solver.
+
+    The solver runs a fixed number of Picard iterations (``max_iter``)
+    per time step.  ``theta_tol`` is retained for future use but is
+    **not** checked during the loop.
+    """
     max_iter: int = 10
-    theta_tol: float = 1e-6       # convergence tolerance [m3/m3]
+    theta_tol: float = 1e-6       # reserved for future convergence check [m3/m3]
     bottom_bc: str = "free_drainage"  # "free_drainage" or "zero_flux"
 
 
@@ -50,7 +55,7 @@ class RichardsOutput(NamedTuple):
     theta_new: jnp.ndarray     # (ncol, n_layers) updated water content [m3/m3]
     runoff_surface: jnp.ndarray   # (ncol,) surface runoff [kg/m2/s]
     runoff_subsurface: jnp.ndarray  # (ncol,) subsurface runoff [kg/m2/s]
-    n_iter: jnp.ndarray        # (ncol,) iterations used
+    n_iter: jnp.ndarray        # (ncol,) always equals max_iter (fixed-iteration solver)
 
 
 def solve_richards(
@@ -167,10 +172,10 @@ def solve_richards(
         c_full = jnp.zeros((ncol, nlayers))
         c_full = c_full.at[:, :-1].set(sup)
 
-        dpsi = _thomas_solve_batch(a_full, diag, c_full, rhs)
+        dpsi = thomas_solve_batch(a_full, diag, c_full, rhs)
 
-        # Update psi and theta (all columns unconditionally — converged
-        # columns get near-zero dpsi so extra iterations are no-ops).
+        # Update psi and theta unconditionally.  Converged columns get
+        # near-zero dpsi, so extra iterations are effectively no-ops.
         psi_new = psi_m + dpsi
         theta_new = theta_from_psi(psi_new, hydro_config)
         theta_new = jnp.clip(theta_new, hydro_config.theta_r, hydro_config.theta_sat)
@@ -185,7 +190,7 @@ def solve_richards(
         picard_body,
         (psi_m, theta_m_init),
     )
-    # Iteration count for diagnostics (computed outside AD tape)
+    # Fixed iteration count (no convergence check; always equals max_iter)
     n_iter_final = jnp.full(ncol, float(richards_config.max_iter))
 
     # Subsurface runoff: gravitational drainage at bottom
@@ -208,48 +213,3 @@ def solve_richards(
     )
 
 
-def _thomas_solve_batch(a, b, c, d):
-    """Solve tridiagonal system for each column.
-
-    Parameters
-    ----------
-    a, b, c, d : (ncol, nlayers) sub/main/super diagonal and RHS.
-
-    Returns
-    -------
-    x : (ncol, nlayers) solution.
-    """
-    ncol, n = b.shape
-
-    def solve_single(a_col, b_col, c_col, d_col):
-        """Solve single column tridiagonal system."""
-        # Forward elimination
-        def fwd(carry, k):
-            c_p, d_p = carry
-            denom = b_col[k] - a_col[k] * c_p
-            denom = jnp.where(jnp.abs(denom) < _TINY,
-                             jnp.sign(denom) * _TINY + _TINY, denom)
-            c_new = c_col[k] / denom
-            d_new = (d_col[k] - a_col[k] * d_p) / denom
-            return (c_new, d_new), (c_new, d_new)
-
-        denom0 = jnp.where(jnp.abs(b_col[0]) < _TINY, _TINY, b_col[0])
-        init = (c_col[0] / denom0, d_col[0] / denom0)
-        _, (c_primes, d_primes) = jax.lax.scan(fwd, init, jnp.arange(1, n))
-
-        # Prepend first values
-        c_all = jnp.concatenate([jnp.array([init[0]]), c_primes])
-        d_all = jnp.concatenate([jnp.array([init[1]]), d_primes])
-
-        # Back substitution
-        def bwd(x_next, k):
-            x_k = d_all[k] - c_all[k] * x_next
-            return x_k, x_k
-
-        x_last = d_all[-1]
-        _, x_rev = jax.lax.scan(bwd, x_last, jnp.arange(n - 2, -1, -1))
-        x = jnp.concatenate([jnp.flip(x_rev), jnp.array([x_last])])
-        return x
-
-    # Vectorize over columns
-    return jax.vmap(solve_single)(a, b, c, d)

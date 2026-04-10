@@ -16,13 +16,11 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-import jax
 import jax.numpy as jnp
-
-_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
 from legoesm.land.soil_grid import SoilGrid
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
+from legoesm.land.tridiag import thomas_solve_batch
 
 
 class SoilThermalConfig(NamedTuple):
@@ -167,36 +165,5 @@ def solve_soil_thermal(
     c = jnp.zeros((ncol, nlayers))
     c = c.at[:, :-1].set(sup)
 
-    T_new = _thomas_solve_batch(a, diag, c, rhs)
+    T_new = thomas_solve_batch(a, diag, c, rhs)
     return T_new
-
-
-def _thomas_solve_batch(a, b, c, d):
-    """Solve tridiagonal system for each column (same as richards.py)."""
-    def solve_single(a_col, b_col, c_col, d_col):
-        n = b_col.shape[0]
-
-        def fwd(carry, k):
-            c_p, d_p = carry
-            denom = b_col[k] - a_col[k] * c_p
-            denom = jnp.where(jnp.abs(denom) < _TINY,
-                             jnp.sign(denom) * _TINY + _TINY, denom)
-            c_new = c_col[k] / denom
-            d_new = (d_col[k] - a_col[k] * d_p) / denom
-            return (c_new, d_new), (c_new, d_new)
-
-        denom0 = jnp.where(jnp.abs(b_col[0]) < _TINY, _TINY, b_col[0])
-        init = (c_col[0] / denom0, d_col[0] / denom0)
-        _, (c_primes, d_primes) = jax.lax.scan(fwd, init, jnp.arange(1, n))
-        c_all = jnp.concatenate([jnp.array([init[0]]), c_primes])
-        d_all = jnp.concatenate([jnp.array([init[1]]), d_primes])
-
-        def bwd(x_next, k):
-            x_k = d_all[k] - c_all[k] * x_next
-            return x_k, x_k
-
-        x_last = d_all[-1]
-        _, x_rev = jax.lax.scan(bwd, x_last, jnp.arange(n - 2, -1, -1))
-        return jnp.concatenate([jnp.flip(x_rev), jnp.array([x_last])])
-
-    return jax.vmap(solve_single)(a, b, c, d)

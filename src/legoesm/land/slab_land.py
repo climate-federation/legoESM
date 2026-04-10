@@ -4,14 +4,15 @@ Energy balance:
     C_soil * d_soil * dT/dt = SW_net + LW_net - SH - LH - L_f * melt_rate
 
 Bucket hydrology:
-    dW/dt = precip_rain + melt - E,   W in [0, W_max]
+    dW/dt = precip_rain + melt - E_bare,   W in [0, W_max]
 
 Snow:
-    d(snow)/dt = precip_snow - melt
+    d(snow)/dt = precip_snow - melt - sublimation + deposition
     Energy-limited melt: melt = min(snow, max(0, Q_net * dt / L_f))
-    Melt energy is subtracted from the surface energy budget.
+    Melt energy subtracted from the surface energy budget.
     Meltwater enters the soil water bucket.
-    Snow cover fraction and albedo feedback (Task 10).
+    Sublimation/deposition uses L_s (not L_v) and draws from/adds to
+    the snowpack — not the liquid soil bucket.
 """
 
 from __future__ import annotations
@@ -118,7 +119,14 @@ def step_land(
     q_sat_ice = saturation_mixing_ratio_ice(T_soil, forcing.p_surface)
     has_snow = snow > 1e-6  # kg/m2 threshold
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
-    q_sfc = beta * q_sat_sfc
+    # Over snow, moisture is freely available from the snowpack (beta=1);
+    # water-limiting is applied later via snow mass.  Over bare soil,
+    # beta reflects bucket moisture and stomatal limitation.
+    beta_effective = jnp.where(has_snow, 1.0, beta)
+    q_sfc = beta_effective * q_sat_sfc
+
+    # Phase-appropriate latent heat: sublimation (L_s) over snow, vaporisation (L_v) over bare soil
+    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
 
     # Bulk fluxes
     rho = forcing.rho_lowest
@@ -133,6 +141,7 @@ def step_land(
             z0_init=z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
+            L_latent=L_eff,
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
@@ -140,6 +149,7 @@ def step_land(
             forcing.T_lowest, forcing.q_lowest,
             T_soil, q_sfc, rho, wind_speed,
             config.Cd_land, config.Ch_land,
+            L_latent=L_eff,
         )
 
     # Radiation
@@ -168,26 +178,45 @@ def step_land(
     dT_dt = (Q_net - melt_energy) / heat_cap
     T_soil_new = T_soil + dt * dT_dt
 
-    # --- Bucket hydrology ---
-    # Rain and snow meltwater enter the bucket; snow goes to snowpack.
-    evap_rate = lhflx / constants.L_v  # kg/m2/s (positive = upward)
+    # --- Latent mass exchange ---
+    # Convert lhflx to mass flux using the phase-appropriate latent heat.
+    # lhflx already embeds L_eff (passed to bulk flux), so dividing by
+    # L_eff recovers the correct mass flux for either phase.
+    evap_rate = lhflx / L_eff  # kg/m2/s (positive = upward)
     precip_rain = forcing.precip_total - forcing.precip_snow
     melt_rate = snow_melt / dt  # kg/m2/s entering liquid budget
 
-    # Water-limit evaporation: cannot remove more water than is available.
-    # When the bucket is empty, evaporation must shut off regardless of beta.
-    max_evap = jnp.maximum(W / dt + precip_rain + melt_rate, 0.0)
-    evap_rate_actual = jnp.minimum(evap_rate, max_evap)
-    # Excess latent heat energy (demand that couldn't be met) warms the soil
-    evap_excess_energy = (evap_rate - evap_rate_actual) * constants.L_v  # W/m2
+    # --- Snow sublimation / deposition ---
+    # Over snow: latent exchange removes/adds mass from/to the snowpack.
+    # Sublimation (evap_rate>0) limited by available snow after melt.
+    # Deposition (evap_rate<0) always accepted (adds to snow).
+    snow_after_melt = snow_new  # snow already updated by update_snow
+    max_sublim = jnp.maximum(snow_after_melt / dt, 0.0)  # kg/m2/s
+    sublim_demand = jnp.where(has_snow, evap_rate, 0.0)
+    sublim_actual = jnp.minimum(sublim_demand, max_sublim)
+    # Deposition: negative sublim_demand adds to snow (no limit)
+    sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
+    snow_new = snow_new - sublim_actual * dt  # sublimation removes, deposition adds
+    snow_new = jnp.maximum(snow_new, 0.0)
 
-    dW_dt = precip_rain + melt_rate - evap_rate_actual
+    # --- Bucket hydrology ---
+    # Over bare soil: evaporation removes from bucket.
+    # Over snow: bucket is not involved in latent exchange.
+    soil_evap = jnp.where(has_snow, 0.0, evap_rate)
+    max_soil_evap = jnp.maximum(W / dt + precip_rain + melt_rate, 0.0)
+    soil_evap_actual = jnp.minimum(soil_evap, max_soil_evap)
+
+    # Total actual mass flux and excess energy
+    evap_rate_actual = jnp.where(has_snow, sublim_actual, soil_evap_actual)
+    evap_excess_energy = (evap_rate - evap_rate_actual) * L_eff  # W/m2
+
+    dW_dt = precip_rain + melt_rate - soil_evap_actual
     W_unclamped = W + dt * dW_dt
     # Overflow becomes surface runoff rather than being silently discarded
     runoff = jnp.maximum(W_unclamped - W_max, 0.0) / dt  # kg/m2/s
     W_new = jnp.clip(W_unclamped, 0.0, W_max)
-    # Actual lhflx consistent with water-limited evaporation
-    lhflx_actual = evap_rate_actual * constants.L_v
+    # Actual lhflx consistent with water-limited evaporation/sublimation
+    lhflx_actual = evap_rate_actual * L_eff
 
     # Correct soil temperature: energy that couldn't drive evaporation heats soil
     T_soil_new = T_soil_new + dt * evap_excess_energy / heat_cap
@@ -224,7 +253,9 @@ def step_land(
     q_sat_ice_new = saturation_mixing_ratio_ice(T_soil_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
-    q_sfc_new = beta_new * q_sat_sfc_new
+    # Over snow, moisture is freely available (beta=1)
+    beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
+    q_sfc_new = beta_effective_new * q_sat_sfc_new
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":

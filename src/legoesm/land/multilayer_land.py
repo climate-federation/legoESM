@@ -1,17 +1,30 @@
-"""Multi-layer soil land model (Task 8).
+"""Multi-layer soil land model.
 
 Energy balance at the surface drives ground heat flux into a multi-layer
-soil thermal model. Precipitation minus evaporation drives Richards
-equation for unsaturated flow. Thermal and hydraulic properties depend
-on soil moisture (Johansen 1975, Van Genuchten 1980).
+soil thermal model. Precipitation minus evaporation drives a Richards
+equation solver for unsaturated flow. Thermal and hydraulic properties
+depend on soil moisture (Johansen 1975, Van Genuchten 1980).
+
+**Approximations and limitations:**
+
+* The Richards solver uses a fixed number of Picard iterations (default
+  10) with no early-termination convergence check.
+* Snow-covered latent exchange uses sublimation energetics (L_s) and
+  draws from the snowpack, not the soil moisture reservoir.
+* Transpiration moisture stress integrates over the root zone (not just
+  the top layer), but root distribution is a simple exponential profile.
+* Turbulent fluxes in TileResponse are step-averaged (computed from
+  beginning-of-step state); state fields reflect end-of-step.
 
 Physics sequence each time step:
+
 1. Compute bulk surface fluxes (same as slab land)
 2. Surface energy balance → ground heat flux G
-3. Infiltration flux = (precip - evap) converted to m/s
-4. Richards equation → updated psi, theta, runoff
-5. Soil thermal diffusion → updated T_soil
-6. Return TileResponse for coupler blending
+3. Snow sublimation/deposition from snowpack
+4. Infiltration flux = (precip + melt - bare-soil evap) to m/s
+5. Richards equation → updated psi, theta, runoff
+6. Soil thermal diffusion → updated T_soil
+7. Return TileResponse for coupler blending
 """
 
 from __future__ import annotations
@@ -103,14 +116,44 @@ def step_multilayer_land(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
     )
 
-    # --- Moisture availability from top-layer water content ---
-    theta_top = theta[:, 0]
+    # --- Root distribution and per-layer moisture stress ---
+    # Compute these early so beta_soil reflects the full root zone,
+    # not just the top layer.
     theta_sat = config.hydraulics.theta_sat
     theta_r = config.hydraulics.theta_r
-    w_frac = jnp.clip(
-        (theta_top - theta_r) / (theta_sat - theta_r + 1e-10), 0.0, 1.0
-    )
-    beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac
+    z_centers = grid.z_node  # (n_layers,) depth below surface [m]
+    if lp is not None:
+        root_frac = jnp.exp(-z_centers[None, :] / root_depth[:, None])
+        root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
+    else:
+        root_frac = jnp.exp(-z_centers / root_depth)
+        root_frac = root_frac / jnp.sum(root_frac)
+
+    if lp is not None:
+        beta_root = jnp.clip(
+            (theta - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
+            0.0, 1.0,
+        )
+    else:
+        beta_root = jnp.clip(
+            (theta - theta_wp) / (theta_fc - theta_wp + 1e-10),
+            0.0, 1.0,
+        )
+
+    # --- Moisture availability from root-zone water content ---
+    # Root-zone weighted beta: integrates moisture stress across layers
+    # weighted by root density, so a dry top with wet deeper layers
+    # still permits transpiration.
+    w_frac_rz = jnp.clip(
+        jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0,
+    )  # (ncol,)  — note: root_frac may be (nlayers,) or (ncol, nlayers)
+    # Handle broadcast: if root_frac is 1D, the sum over axis=-1 on
+    # root_frac[None,:]*beta_root gives the same result.
+    if lp is None:
+        w_frac_rz = jnp.clip(
+            jnp.sum(root_frac[None, :] * beta_root, axis=-1), 0.0, 1.0,
+        )
+    beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac_rz
 
     # --- Stomatal conductance (if enabled) ---
     beta, gpp_farq = compute_effective_beta(
@@ -128,7 +171,12 @@ def step_multilayer_land(
     q_sat_ice = saturation_mixing_ratio_ice(T_surface, forcing.p_surface)
     has_snow = snow > 1e-6  # kg/m2 threshold
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
-    q_sfc = beta * q_sat_sfc
+    # Over snow, moisture is freely available from the snowpack (beta=1)
+    beta_effective = jnp.where(has_snow, 1.0, beta)
+    q_sfc = beta_effective * q_sat_sfc
+
+    # Phase-appropriate latent heat: sublimation over snow, vaporisation over bare soil
+    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
 
     # --- Bulk fluxes ---
     rho = forcing.rho_lowest
@@ -143,6 +191,7 @@ def step_multilayer_land(
             z0_init=z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
+            L_latent=L_eff,
         )
     else:
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
@@ -150,6 +199,7 @@ def step_multilayer_land(
             forcing.T_lowest, forcing.q_lowest,
             T_surface, q_sfc, rho, wind_speed,
             config.Cd_land, config.Ch_land,
+            L_latent=L_eff,
         )
 
     # --- Surface albedo (from current snow state) ---
@@ -184,49 +234,38 @@ def step_multilayer_land(
     melt_energy = snow_melt * constants.L_f / dt  # W/m2 consumed by melt
     G_surface = G_surface - melt_energy
 
-    # --- Infiltration flux for Richards equation ---
-    # Convert precip (kg/m2/s) and evap (kg/m2/s) to water depth rate (m/s)
+    # --- Latent mass exchange ---
+    # Convert lhflx to mass flux using phase-appropriate latent heat.
     rho_w = constants.rho_water
-    evap_rate_demand = lhflx / constants.L_v  # kg/m2/s, positive up
+    evap_rate_demand = lhflx / L_eff  # kg/m2/s, positive up
 
-    # --- Water-limit evaporation ---
-    # Total extractable water: integrate (theta - theta_r) * dz * rho_w
+    # --- Snow sublimation / deposition ---
+    # Over snow: latent exchange removes/adds mass from/to the snowpack.
+    snow_after_melt = snow_new
+    max_sublim = jnp.maximum(snow_after_melt / dt, 0.0)
+    sublim_demand = jnp.where(has_snow, evap_rate_demand, 0.0)
+    sublim_actual = jnp.minimum(sublim_demand, max_sublim)
+    sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
+    snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
+
+    # --- Water-limit soil evaporation (bare soil only) ---
     dz = grid.dz  # (n_layers,) layer thicknesses [m]
     extractable_water = jnp.sum(
         jnp.maximum(theta - theta_r, 0.0) * dz[None, :], axis=-1
     ) * rho_w  # (ncol,) kg/m2
     precip_rain = forcing.precip_total - forcing.precip_snow
     melt_rate = snow_melt / dt  # kg/m2/s meltwater entering liquid budget
-    max_evap = jnp.maximum(extractable_water / dt + precip_rain + melt_rate, 0.0)
-    evap_rate = jnp.minimum(evap_rate_demand, max_evap)
+    soil_evap_demand = jnp.where(has_snow, 0.0, evap_rate_demand)
+    max_soil_evap = jnp.maximum(extractable_water / dt + precip_rain + melt_rate, 0.0)
+    soil_evap = jnp.minimum(soil_evap_demand, max_soil_evap)
 
-    # Excess latent heat (demand that couldn't be met) redirected to soil warming
-    evap_excess_energy = (evap_rate_demand - evap_rate) * constants.L_v  # W/m2
-    lhflx_actual = evap_rate * constants.L_v
+    # Total actual mass flux and excess energy
+    evap_rate = jnp.where(has_snow, sublim_actual, soil_evap)
+    evap_excess_energy = (evap_rate_demand - evap_rate) * L_eff  # W/m2
+    lhflx_actual = evap_rate * L_eff
 
     # --- Root water uptake sink term ---
-    # Exponential root distribution: root_frac(z) ~ exp(-z / root_depth)
-    z_centers = grid.z_node  # (n_layers,) depth below surface [m]
-    if lp is not None:
-        # Spatial root_depth: (ncol,) → (ncol, 1) for broadcast with (n_layers,)
-        root_frac = jnp.exp(-z_centers[None, :] / root_depth[:, None])
-        root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
-    else:
-        root_frac = jnp.exp(-z_centers / root_depth)
-        root_frac = root_frac / jnp.sum(root_frac)  # normalize to 1
-
-    # Soil moisture stress: beta(theta) = clip((theta - theta_wp)/(theta_fc - theta_wp), 0, 1)
-    if lp is not None:
-        beta_root = jnp.clip(
-            (theta - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
-            0.0, 1.0,
-        )
-    else:
-        beta_root = jnp.clip(
-            (theta - theta_wp) / (theta_fc - theta_wp + 1e-10),
-            0.0, 1.0,
-        )
-
+    # root_frac and beta_root were computed earlier (before beta_soil).
     # Partition evaporation into bare-soil and root-mediated transpiration
     # to avoid double-counting (surface flux_top subtracts bare-soil evap,
     # Richards sink removes root-mediated transpiration).
@@ -305,20 +344,35 @@ def step_multilayer_land(
         emissivity,
     )
 
-    # Recompute q_surface with updated temperature.
+    # Recompute q_surface with updated temperature and root-zone moisture.
     # Apply stomatal_ratio so q_surface reflects both soil moisture
     # availability AND stomatal limitation (same as slab land).
-    theta_top_new = richards_out.theta_new[:, 0]
-    w_frac_new = jnp.clip(
-        (theta_top_new - theta_r) / (theta_sat - theta_r + 1e-10), 0.0, 1.0
-    )
-    beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_new
+    theta_new = richards_out.theta_new
+    if lp is not None:
+        beta_root_new = jnp.clip(
+            (theta_new - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
+            0.0, 1.0,
+        )
+        w_frac_rz_new = jnp.clip(
+            jnp.sum(root_frac * beta_root_new, axis=-1), 0.0, 1.0,
+        )
+    else:
+        beta_root_new = jnp.clip(
+            (theta_new - theta_wp) / (theta_fc - theta_wp + 1e-10),
+            0.0, 1.0,
+        )
+        w_frac_rz_new = jnp.clip(
+            jnp.sum(root_frac[None, :] * beta_root_new, axis=-1), 0.0, 1.0,
+        )
+    beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_rz_new
     beta_new = stomatal_ratio * beta_soil_new
     q_sat_liq_new = saturation_mixing_ratio(T_surface_new, forcing.p_surface)
     q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
-    q_sfc_new = beta_new * q_sat_sfc_new
+    # Over snow, moisture is freely available (beta=1)
+    beta_effective_new = jnp.where(has_snow_new, 1.0, beta_new)
+    q_sfc_new = beta_effective_new * q_sat_sfc_new
 
     # --- Carbon cycle ---
     if config.carbon.scheme != "none":

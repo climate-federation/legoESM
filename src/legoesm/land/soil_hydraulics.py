@@ -36,7 +36,11 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
-_TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
+_TINY = float(jnp.finfo(jnp.float32).tiny)  # Floor for denominators (~1.18e-38).
+# This is used as a static guard against division by zero.  It is safe
+# for both float32 and float64 because it is only ever compared to
+# absolute values — float64 tiny is *smaller*, so the float32 constant
+# is a conservative (larger) floor that works in both precisions.
 
 
 class SoilHydraulicsConfig(NamedTuple):
