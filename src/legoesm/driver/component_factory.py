@@ -60,14 +60,6 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     ("hydrostatic",   "spectral",       "gaussian"):     "spectral_primitive_equations",
     ("nonhydrostatic","spectral",       "gaussian"):     "spectral_compressible_euler",
 
-    # --- Lat-lon finite-volume ---
-    ("shallow_water", "finite_volume",  "latlon"):       "fv_shallow_water_latlon",
-    ("hydrostatic",   "finite_volume",  "latlon"):       "fv_primitive_equations_latlon",
-    ("nonhydrostatic","finite_volume",  "latlon"):       "fv_compressible_euler_latlon",
-    ("shallow_water", "centered",       "latlon"):       "fv_shallow_water_latlon",
-    ("hydrostatic",   "centered",       "latlon"):       "fv_primitive_equations_latlon",
-    ("nonhydrostatic","centered",       "latlon"):       "fv_compressible_euler_latlon",
-
     # --- MPAS icosahedral ---
     ("hydrostatic",   "mpas",           "voronoi"):      "mpas_primitive_equations",
     ("nonhydrostatic","mpas",           "voronoi"):      "mpas_compressible_euler",
