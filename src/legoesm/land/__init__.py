@@ -5,6 +5,13 @@ from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.state import LandState, MultiLayerLandState
 from legoesm.land.slab_land import step_land
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
+from legoesm.land.canopy import (
+    CanopyConfig,
+    CanopyLandConfig,
+    CanopyLandParams,
+    init_canopy_land_state,
+    step_canopy_land,
+)
 from legoesm.land.surface_params import LandSurfaceParams, PARAM_BOUNDS, PARAM_NAMES
 from legoesm.land.param_providers import (
     ConstantParamProvider,
