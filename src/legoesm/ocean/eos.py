@@ -434,6 +434,10 @@ def compute_ocean_rho(state, z_coord, jacobian, eos_fn=None):
 def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
     """Compute in-situ density and hydrostatic pressure from ocean state.
 
+    Delegates to ``compute_ocean_rho`` for the 2-iteration EOS-pressure
+    coupling, then computes a final hydrostatic pressure consistent with
+    the converged density.
+
     Parameters
     ----------
     state, z_coord, jacobian : same as ``compute_ocean_rho``.
@@ -445,11 +449,8 @@ def compute_ocean_rho_and_pressure(state, z_coord, jacobian, eos_fn=None):
     rho : array — in-situ density [kg/m^3].
     p_hydro : array — hydrostatic pressure [Pa].
     """
-    if eos_fn is None:
-        eos_fn = wright_eos
+    rho = compute_ocean_rho(state, z_coord, jacobian, eos_fn=eos_fn)
     p_hydro = compute_hydrostatic_pressure(
-        jnp.full_like(state.T.data, rho_0),
-        state.eta.data, z_coord.dz_ref, jacobian, rho_0,
+        rho, state.eta.data, z_coord.dz_ref, jacobian, rho_0,
     )
-    rho = eos_fn(state.T.data, state.S.data, p_hydro)
     return rho, p_hydro

@@ -330,6 +330,8 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             _interp_to_u_points,
             _interp_to_v_points,
+            _upwind_to_u_points,
+            _upwind_to_v_points,
         )
         from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
 
@@ -360,7 +362,7 @@ class LatLonCGridOceanModel:
         # Total conservation is exact.
         from legoesm.ocean.vertical import (
             diagnose_w_from_flux_div,
-            vertical_advection_ocean,
+            flux_form_vertical_tracer_advection,
         )
 
         h_k_new = compute_layer_thickness(
@@ -369,12 +371,13 @@ class LatLonCGridOceanModel:
         )
 
         # Diagnose w from barotropic-averaged per-layer divergence
-        # (consistent with the horizontal transport used for tracers)
+        # (consistent with the horizontal transport used for tracers).
+        # mass_flux_u/v are thickness-weighted (h*u), so flux_div_k
+        # is div(h*u) [m/s] and already includes layer thickness.
         flux_div_k = divergence_cgrid(mass_flux_u, mass_flux_v, self.grid)
-        J_old = h_k_old / jnp.maximum(
-            self.z_coord.dz_ref, 1e-10,
-        )  # Jacobian from pre-barotropic state
-        w_baro = diagnose_w_from_flux_div(flux_div_k, self.z_coord)
+        w_baro = diagnose_w_from_flux_div(
+            flux_div_k, self.z_coord, thickness_weighted=True,
+        )
 
         T_mid = state_new.T.data  # tracer after diffusion+physics Euler step
         S_mid = state_new.S.data
@@ -383,19 +386,23 @@ class LatLonCGridOceanModel:
             tr = T_mid if tr_name == 'T' else S_mid
 
             # Horizontal flux: div(mf_k * T_face)
-            tr_u = _interp_to_u_points(tr)
-            tr_v = _interp_to_v_points(tr)
+            # First-order upwind interpolation prevents new extrema near
+            # sharp gradients (monotonicity-preserving).  The upwind cell
+            # is selected based on the sign of the mass flux.
+            tr_u = _upwind_to_u_points(tr, mass_flux_u)
+            tr_v = _upwind_to_v_points(tr, mass_flux_v)
             tracer_flux_u = mass_flux_u * tr_u
             tracer_flux_v = mass_flux_v * tr_v
             div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
 
-            # Vertical advection using barotropic-consistent w
-            # Returns -w * dT/dz (tendency per unit thickness)
-            vert_adv = vertical_advection_ocean(tr, w_baro, self.z_coord, J_old[..., 0])
+            # Flux-form vertical advection:
+            # Returns (F_top - F_bot) for each level, where F = w * T_upwind.
+            # Units: [tracer]*[m/s].  NOT divided by layer thickness.
+            vert_flux_div = flux_form_vertical_tracer_advection(tr, w_baro)
 
-            # Pure flux form for horizontal + Euler for vertical:
-            # h_new * T_new = h_old * (T_mid + dt*vert_adv) - dt * div_h(mf*T_face)
-            hT_new = h_k_old * (tr + dt * vert_adv) - dt * div_hut
+            # Full flux-form tracer update:
+            # h_new * T_new = h_old * T_old - dt * vert_flux_div - dt * div_h(mf*T_face)
+            hT_new = h_k_old * tr - dt * vert_flux_div - dt * div_hut
             tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
             tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
             if tr_name == 'T':

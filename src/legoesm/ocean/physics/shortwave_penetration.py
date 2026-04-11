@@ -92,7 +92,10 @@ def shortwave_penetration_tendency(
     zeta1 = params.zeta1
     zeta2 = params.zeta2
 
-    # Interface depths (negative), shape (nlev+1,)
+    # Interface depths (negative), shape (nlev+1,).
+    # Uses reference z (not dynamic z*J) for the absorption profile.
+    # Error is O(eta/H) ~ O(1e-4), negligible vs Jerlov parameter
+    # uncertainty.  Standard practice in MOM6, NEMO, and POP.
     z_half = z_coord_z_half_ref
 
     # SW flux at each interface: I(z) = Q_sw * [R*exp(z/zeta1) + (1-R)*exp(z/zeta2)]

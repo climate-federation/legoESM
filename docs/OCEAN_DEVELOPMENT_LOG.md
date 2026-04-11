@@ -657,3 +657,265 @@ Diagnosed w from barotropic-averaged per-layer divergence. Vertical tracer advec
 4. **Run full ocean test matrix** - validate all recent changes end-to-end
 
 **Ocean Model Readiness**: 2 of 3 target grids production-ready, with comprehensive test validation framework in place.
+
+---
+
+## 2026-04-11: MPAS visualization artifacts fixed (issue #135)
+
+### Problem
+
+MPAS regional baroclinic gyre SST plots showed severe artifacts: cold temperature bands (9.8–15°C) at land-ocean boundaries, 396 spurious cold spots in the regridded data. The native MPAS data was correct (ocean cells 19.521±0.0001°C, land cells 0.000°C) — the problem was entirely in the visualization pipeline.
+
+### Root cause
+
+`_bin_to_latlon()` built a KDTree from **all** MPAS cell centers (ocean + land), then used 6-nearest-neighbor IDW interpolation. Near coastlines, target grid points blended ocean cells (~19.5°C) with land cells (0°C), producing unphysical intermediate values. The post-hoc land mask only removed points classified as land — ocean points near the coast that were contaminated by IDW averaging remained corrupted.
+
+### Research: standard MPAS visualization approaches
+
+Investigated the MPAS community practices (MPAS-Tools, UXarray, Project Pythia cookbook):
+
+1. **Native PolyCollection plotting** — Draw each Voronoi cell as its actual polygon. No interpolation, zero artifacts. Standard for small-to-moderate meshes in `mpas_tools.viz`.
+2. **Delaunay triangulation with `tripcolor`** — Decompose cells into triangles via `mesh_to_triangles`. Good for smooth contouring.
+3. **Mask-aware IDW** — Exclude land cells from the KDTree before interpolation. Recommended by xESMF for mask-aware regridding.
+4. **UXarray/Datashader** — Overkill for ~1000 cells, designed for million-cell meshes.
+
+### Fix: two complementary approaches
+
+**1. Mask-aware IDW interpolation** (for regridded data, cross-sections, NPZ output)
+
+Added `ocean_mask` parameter to `_build_latlon_weights()`. When provided, land cells are filtered out before building the KDTree, so they can never contribute to interpolation weights. The returned indices are mapped back to the full array so `_apply_weights()` works unchanged. Propagated through `_bin_to_latlon`, `_regrid_2d`, `_regrid_3d_level`, `_bin_cross_section`, and all callers.
+
+**Result**: Cold artifacts in regridded NPZ data: **396 → 0**. SST range now 19.52–19.53°C (all physically realistic).
+
+**2. Native Voronoi polygon plotting** (for MPAS snapshot plots)
+
+Added `_build_voronoi_polygons()` and `_plot_voronoi_field()` using matplotlib `PolyCollection`. Each Voronoi cell is drawn as its actual polygon with `edgecolor='face'` to eliminate gaps. Land cells rendered in gray. Ocean cells colored by field value. No interpolation at all.
+
+Threaded `mesh` parameter through `_save_case_diagnostics` → `_save_snapshot_plots`. When `mesh` is provided and `coord_kind` is MPAS, the native polygon path is used instead of regrid+imshow. Updated all 14 runner call sites with `mesh=grid if coord_kind == "mpas" else None`.
+
+**Also removed**: The SST `> 1.0°C` color range hack that was working around the artifacts.
+
+---
+
+## 2026-04-11: Per-panel colorbars for snapshot evolution plots
+
+### Problem
+
+Snapshot evolution plots (`snapshots_SST.png`) used a single shared colorbar across all 8 time panels. The temporal cooling trend (19.53→19.46°C over 30 days, range ~0.07°C) dominated the color range, making the ~0.004°C spatial patterns within each panel invisible. The plots looked spatially uniform even though spatial structure was developing.
+
+### Fix
+
+Changed both the Voronoi and regrid+imshow plotting paths to compute per-panel vmin/vmax and add a colorbar per panel. Each panel's colorbar is fitted to that snapshot's data range. Spatial patterns (meridional SST gradients from Ekman convergence, boundary cooling) are now clearly visible at every timestep.
+
+Same fix applied to `_create_comparison_evolution()` — the cross-grid evolution comparison now uses per-panel colorbars so each panel reveals its spatial structure, and the different magnitudes between grids are honestly shown on separate colorbars rather than hidden by a shared one.
+
+For the vertical section evolution plot, the colorbar is shared per row (per grid) and pinned to the initial condition range (t=0), so any departure from the initial stratification would show as a visible color change.
+
+---
+
+## 2026-04-11: Vertical section evolution comparison plot
+
+Added `_create_comparison_vertical_evolution()` — a new cross-grid comparison showing meridional temperature cross-sections (latitude × depth at 60°E) evolving over time. Layout: rows = grids, columns = time steps. One shared colorbar per row pinned to the initial condition range. Wired into `_create_cross_grid_comparisons` for `baroclinic_gyre` cases.
+
+At 30 days the stratification remains very close to the IC (~2–19.5°C) — the wind-driven isopycnal tilting is too small relative to the background to be visible. Longer integrations or surface buoyancy forcing (issue #106) would produce visible thermocline tilting.
+
+---
+
+## 2026-04-11: --replot mode for ocean test matrix
+
+### Problem
+
+Every visualization change required rerunning the full simulation, even though the data was already saved in NPZ files. For a 30-day run this meant ~3 minutes of unnecessary computation; for longer runs (multi-year), it would be prohibitive.
+
+### Implementation
+
+Added `--replot` flag to `run_ocean_test_matrix.py`. When set:
+
+1. Discovers existing result directories by searching for `snapshots_latlon.npz` files
+2. Applies `--only` and `--grid` filters to select which cases to replot
+3. Loads the saved NPZ data and reconstructs the `snapshots` dict expected by plotting functions
+4. Regenerates per-case snapshot plots, cross-sections, and vertical profiles
+5. Regenerates all cross-grid comparison plots
+
+**Performance**: Replotting the baroclinic gyre (2 grids) takes **9.5 seconds** vs **172 seconds** for simulation+plot (18× faster).
+
+**Limitation**: MPAS snapshot plots in replot mode use regridded latlon data (since the VoronoiMesh isn't available without running the model). Native polygon rendering requires the simulation path.
+
+Usage:
+```bash
+python scripts/run_ocean_test_matrix.py --only baroclinic_gyre --replot
+```
+
+---
+
+## 2026-04-11: MPAS performance benchmarking (issue #137)
+
+### Finding
+
+Benchmarked per-step cost for MPAS vs latlon at comparable cell counts:
+
+| Grid | Cells | ms/step | JIT compile |
+|------|-------|---------|-------------|
+| latlon 24×48 | 1,200 | **1.86** | 1.18s |
+| MPAS 300km | 1,044 | **16.16** | 0.60s |
+
+**8.7× slower per step** despite having 13% fewer cells.
+
+### Root cause
+
+Not grid size — it's the computational pattern. Structured grids use regular array stencils (simple slicing) that JAX/XLA fuses into efficient vectorized kernels. MPAS operators use indirect addressing through connectivity arrays (`cellsOnEdge`, `edgesOnCell`, etc.) — gather/scatter patterns that XLA cannot optimize as well.
+
+This is a known tradeoff for unstructured grids: geometric flexibility at the cost of computational efficiency per DOF. Filed as issue #137 with optimization approaches (fused scan, sparse matrix operators, GPU acceleration).
+
+**Practical impact**: A 5-year baroclinic gyre takes ~16 min on latlon vs ~2.4 hours on MPAS.
+
+The same `VoronoiMesh` and TRiSK operators are used by the atmosphere MPAS dycores (shallow water, primitive equation, compressible Euler), so any optimization would benefit both components.
+
+---
+
+## 2026-04-11: Cross-grid physics consistency fixes (issue #114)
+
+Resolved all 6 subproblems from the automated code audit, using ocean-expert, dycore-expert, differentiability-expert, and slopbuster agents for consensus-driven fixes.
+
+### Items fixed
+
+**1. Physics Field dims hardcoded to cubed-sphere**: `combined.py` was creating `OceanTendencies` with `("face", "x", "y", "level")` dims regardless of grid type. Since `Field.dims` is part of pytree `aux_data` (static metadata), this could cause pytree structure mismatches under `jax.grad`. Fixed by inferring from `state.T.dims` / `state.eta.dims`, matching the pattern already used by `zero_ocean_tendencies` in the same file.
+
+**2. EOS iteration mismatch**: `compute_ocean_rho_and_pressure` (used by plume convection) did only 1 EOS-pressure iteration while `compute_ocean_rho` (used by all other physics) did 2. At 4000m depth, this caused ~0.018 kg/m³ density error — significant for convective dynamics where buoyancy differences are O(0.001–0.01 kg/m³). Refactored `compute_ocean_rho_and_pressure` to delegate to `compute_ocean_rho`, eliminating duplication and ensuring consistency.
+
+**3. Stale OceanConfig fields**: Removed `edge_blend_strength` and `edge_blend_depth` from `OceanConfig` — defined and validated but never used in any computation (separate from actively-used `BathymetryConfig` fields). Removed dead test `test_ocean_model_fv_tracer_transport` that referenced non-existent `use_fv_tracer_transport` field. Fixed broken coupler test with same stale field.
+
+**4. Restoring forcing grid compatibility**: Already fixed in current code — uses `grid.grid_lat`. Cleaned stale `CubedSphereGrid` type hint.
+
+**5. Shortwave penetration z inconsistency**: Expert analysis showed error is O(eta/H) ~ O(1e-4), negligible vs Jerlov parameter uncertainty. Standard practice in MOM6/NEMO/POP. Added documentation comment; no code change needed.
+
+**6. Cross-module private imports**: Already resolved in current code. No changes needed.
+
+### Slopbuster review
+
+Ran slopbuster on all changes. All core changes **CLEAN**. Fixed redundant `cKDTree` import and EOS code duplication during review.
+
+---
+
+## 2026-04-11: 5-year baroclinic gyre — latlon blowup diagnosis (issue #138)
+
+### The 5-year run
+
+Launched a 5-year (1825-day) baroclinic gyre simulation on both grids:
+
+| Grid | Duration | max_speed | T drift | Outcome |
+|------|----------|-----------|---------|---------|
+| MPAS 300km | 1825 days (2.3 hrs) | 0.052 m/s | 0.000°C | **PASS** |
+| latlon 24×48 | 456 days (4.8 min) | 0.094 m/s | 0.008°C | **BLOWUP** |
+
+MPAS ran the full 5 years perfectly stable. Latlon blew up at day 456 (~1.25 years).
+
+### Root cause analysis
+
+The ocean expert diagnosed a **positive feedback loop** driven by two numerical deficiencies:
+
+**Primary: Non-conservative vertical advection** — The tracer update used tendency-form vertical advection (`-w * dT/dz`) inside a flux-form horizontal framework. The tendency form does not telescope when summed over levels, creating a **systematic heat source** that grew with the circulation. Evidence: latlon drifted +0.008°C in 456 days with zero surface forcing, while MPAS drifted 3.2×10⁻⁷°C.
+
+**Secondary: Unlimited centered horizontal tracer interpolation** — Centered (arithmetic mean) face interpolation permits new extrema near sharp gradients, producing a checkerboard pattern in w concentrated at the northern boundary.
+
+**Not a CFL violation**: Advective CFL was only 0.0004 at blowup.
+
+**Why MPAS survived**: So coarse (300km) that baroclinic structure barely develops — T spatial variation 50-600× smaller than latlon. The positive feedback never triggered.
+
+### Fix 1: Flux-form vertical tracer advection
+
+Added `flux_form_vertical_tracer_advection()` in `vertical.py`:
+- Computes `F_top[k] - F_bot[k]` where `F = w * T_upwind` at interfaces
+- Uses first-order upwind: at interface k, `w > 0` (upward) → `T_face = T[k]` (from below)
+- Returns flux divergence NOT divided by h (units: `[tracer]*[m/s]`)
+- Telescopes exactly: `sum(flux_div) = F[surface] - F[bottom] = 0`
+
+Tracer update changed from:
+```
+hT_new = h_old * (T + dt * vert_tendency) - dt * div_h(flux)
+```
+to:
+```
+hT_new = h_old * T - dt * vert_flux_div - dt * div_h(flux)
+```
+
+**Hidden bug found**: `diagnose_w_from_flux_div` was multiplying flux divergence by `dz_ref` when the C-grid input was already thickness-weighted (`div(h*u)`, units m/s). This made w ~100× too large. The old tendency-form code had a compensating `1/dz` in the gradient calculation, so the errors canceled. The new flux form exposed it. Added `thickness_weighted=True` parameter for the C-grid caller.
+
+**Result**: T drift went from 0.001°C in 5 days to **0.000°C in 30 days**. The spurious heat source is eliminated.
+
+### Fix 2: First-order upwind horizontal tracer advection
+
+Added `_upwind_to_u_points()` and `_upwind_to_v_points()` in `ocean_pe_latlon_cgrid.py`:
+- u-face j: if `mass_flux_u > 0` (eastward), upwind is cell (j-1); else cell j
+- v-face i: if `mass_flux_v > 0` (northward), upwind is cell (i-1); else cell i
+- Uses `jnp.where` for data-dependent selection (JAX-compatible)
+- Periodic longitude handled via `jnp.roll` + concatenation
+- Solid wall boundaries at latitude edges (zero tracer, zero flux)
+
+The dycore expert independently verified the staggering conventions and confirmed the sign conventions match. Both agents agreed on the formulas.
+
+Replaced centered interpolation in the tracer flux computation:
+```python
+# Before (permits new extrema):
+tr_u = _interp_to_u_points(tr)
+tr_v = _interp_to_v_points(tr)
+
+# After (monotonicity-preserving):
+tr_u = _upwind_to_u_points(tr, mass_flux_u)
+tr_v = _upwind_to_v_points(tr, mass_flux_v)
+```
+
+The centered interpolation functions are preserved for non-tracer quantities (thickness, velocity) where monotonicity is not a concern.
+
+### Verification
+
+All 90 ocean unit tests pass. Baroclinic gyre quick test: PASS with max_speed=0.0657 m/s, T_drift=0.000°C.
+
+### 5-year validation results
+
+Launched with both fixes to test long-term stability. Output in `results/ocean_5yr_v2/`.
+
+---
+
+## 2026-04-11: Issue #113 analysis — MPAS physics pipeline
+
+Sent ocean-expert, dycore-expert, and differentiability-expert agents to analyze. Key consensus:
+
+### Sub-problem 1: Duplicate _fill_land_cells_mpas
+
+Already mostly resolved. A shared mpas_fill.py exists and is used by 2 of 3 call sites. Only ocean_model_mpas.py still inlines the logic (~18 lines). Fix: replace with 4 lines calling the shared function.
+
+### Sub-problem 2: MPAS silently ignores advanced physics
+
+All three agents agree: do NOT unify the physics pipelines. The state types, tendency types, and operator requirements are fundamentally incompatible. Forcing unification creates AD risks (pytree structure mismatch).
+
+Recommended layered approach:
+- Share raw physics kernels (already grid-agnostic)
+- Keep separate integration bridges per grid type
+- Extend make_mpas_ocean_physics with MPAS-specific wrappers for 6 trivial modules (constant mixing, enhanced_diffusion, plume, shortwave, restoring, quadratic drag)
+- Defer lateral mixing (harmonic, biharmonic, GM-Redi) — needs MPAS-specific operators, significant effort
+
+---
+
+## Issues and PRs (updated 2026-04-11)
+
+### Open issues
+- #138 — Latlon C-grid long-term instability: tracer fixes done (conservation perfect), dynamical SSH instability remains at ~2 years
+- #137 — MPAS/Voronoi unstructured grid 9× slower than latlon (performance)
+- #113 — MPAS physics pipeline duplicates
+- #112 — Vector Laplacian Python for-loop hurts JIT performance
+- #111 — C-grid ocean missing step_checked, conservation fixer, freshwater
+- #109 — A-grid/cubed-sphere baroclinic pressure double-counts free-surface
+- #108 — Dead/stale code cleanup in ocean dynamics
+- #106 — Surface forcing cannot combine wind + thermal restoring
+- #100 — Cubed-sphere ocean face-boundary instability
+
+### Recently closed
+- #135 — MPAS regional regridding visualization artifacts (resolved: mask-aware IDW + native PolyCollection)
+- #134 — MPAS land cell temperature masking (resolved)
+- #130 — Vertical advection not producing spatial T patterns (resolved)
+- #114 — Cross-grid physics consistency (resolved: 6/6 items fixed)
+- #105 — Vector Laplacian and barotropic diffusion fixes
+- #103 — MPAS Coriolis double-counting
+- #102 — Flux-form tracer transport
+- #101 — Conservation strategy

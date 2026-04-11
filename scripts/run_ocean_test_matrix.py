@@ -444,6 +444,7 @@ def _build_latlon_weights(
     max_dist: float | None = None,
     target_lat: np.ndarray | None = None,
     target_lon: np.ndarray | None = None,
+    ocean_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build KDTree interpolation weights from unstructured to lat-lon grid.
 
@@ -458,14 +459,36 @@ def _build_latlon_weights(
         than this get zero weight and will produce NaN after
         ``_apply_weights``.  Prevents extrapolation artefacts in
         regional meshes.
+    ocean_mask : array, optional
+        Boolean-like mask where >0.5 means ocean.  When provided, only
+        ocean cells are included in the KDTree so land values never
+        contaminate interpolated ocean fields.  Returned ``idxs`` refer
+        to the *original* (unmasked) array so ``_apply_weights`` works
+        unchanged.
     """
     lon = np.asarray(lon_deg, dtype=np.float64).ravel() % 360
     lat = np.clip(np.asarray(lat_deg, dtype=np.float64).ravel(), -90, 90)
     d2r = np.pi / 180.0
-    src = np.column_stack([
+    src_all = np.column_stack([
         np.cos(lat * d2r) * np.cos(lon * d2r),
         np.cos(lat * d2r) * np.sin(lon * d2r),
         np.sin(lat * d2r)])
+
+    # When an ocean mask is provided, build the tree from ocean cells only
+    # but map indices back to the full array for _apply_weights.
+    if ocean_mask is not None:
+        omask = np.asarray(ocean_mask, dtype=np.float64).ravel() > 0.5
+        ocean_idx = np.where(omask)[0]
+        if ocean_idx.size == 0:
+            # All land — return zero weights
+            n_tgt = n_lat * n_lon
+            return (np.zeros((n_tgt, 1), dtype=int),
+                    np.zeros((n_tgt, 1), dtype=np.float64))
+        src = src_all[ocean_idx]
+    else:
+        ocean_idx = None
+        src = src_all
+
     # Use target grid if provided
     if target_lat is not None and target_lon is not None:
         lat_1d = target_lat
@@ -485,6 +508,11 @@ def _build_latlon_weights(
     if K == 1:
         dists = dists[:, None]
         idxs = idxs[:, None]
+
+    # Map indices back to the full (unmasked) array
+    if ocean_idx is not None:
+        idxs = ocean_idx[idxs]
+
     w = 1.0 / np.maximum(dists, 1e-12)
     # Zero out weights for target points too far from any source cell.
     if max_dist is not None:
@@ -508,6 +536,101 @@ def _apply_weights(vals: np.ndarray, idxs: np.ndarray, w: np.ndarray,
     return np.where(ws.ravel() > 0, result, np.nan).reshape(n_lat, n_lon)
 
 
+def _build_voronoi_polygons(mesh) -> tuple[list, np.ndarray]:
+    """Pre-compute Voronoi cell polygons from an MPAS VoronoiMesh.
+
+    Returns
+    -------
+    polygons : list of (nv, 2) arrays
+        Each polygon is an array of (lon_deg, lat_deg) vertices.
+    cell_indices : int array, shape (n_polygons,)
+        The cell index for each polygon (some cells may be skipped
+        if vertex connectivity is invalid).
+    """
+    lat_v = np.degrees(np.asarray(mesh.latVertex, dtype=np.float64))
+    lon_v = np.degrees(np.asarray(mesh.lonVertex, dtype=np.float64))
+    verts_on_cell = np.asarray(mesh.verticesOnCell, dtype=int)  # (maxEdges, nCells)
+    n_edges = np.asarray(mesh.nEdgesOnCell, dtype=int)          # (nCells,)
+
+    polygons = []
+    cell_indices = []
+    for i in range(mesh.nCells):
+        nv = int(n_edges[i])
+        if nv < 3:
+            continue
+        vidx = verts_on_cell[:nv, i]
+        if np.any(vidx < 0):
+            continue
+        poly = np.column_stack([lon_v[vidx], lat_v[vidx]])
+        polygons.append(poly)
+        cell_indices.append(i)
+    return polygons, np.array(cell_indices, dtype=int)
+
+
+def _plot_voronoi_field(ax, mesh, field: np.ndarray,
+                        land_mask: np.ndarray | None = None,
+                        cmap: str = "RdYlBu_r",
+                        vmin: float | None = None,
+                        vmax: float | None = None):
+    """Plot a cell-centered field on the native Voronoi mesh.
+
+    Uses matplotlib PolyCollection — no interpolation, so there are
+    zero land-bleed artifacts.
+
+    Parameters
+    ----------
+    ax : matplotlib Axes
+    mesh : VoronoiMesh
+    field : array, shape (nCells,)
+    land_mask : array, shape (nCells,), optional
+        >0.5 means ocean.  Land cells drawn in light gray.
+    cmap, vmin, vmax : colormap parameters for ocean cells.
+
+    Returns
+    -------
+    pc : PolyCollection for the ocean cells (for colorbar).
+    """
+    from matplotlib.collections import PolyCollection
+
+    polygons, cell_idx = _build_voronoi_polygons(mesh)
+    values = np.asarray(field, dtype=np.float64).ravel()
+
+    if land_mask is not None:
+        mask = np.asarray(land_mask, dtype=np.float64).ravel()
+        ocean_polys, ocean_vals = [], []
+        land_polys = []
+        for poly, ci in zip(polygons, cell_idx):
+            if mask[ci] > 0.5:
+                ocean_polys.append(poly)
+                ocean_vals.append(values[ci])
+            else:
+                land_polys.append(poly)
+        # Draw land cells
+        if land_polys:
+            land_pc = PolyCollection(land_polys, facecolor="#d9d9d9",
+                                     edgecolor="#bfbfbf", linewidth=0.3)
+            ax.add_collection(land_pc)
+        # Draw ocean cells
+        pc = None
+        if ocean_polys:
+            pc = PolyCollection(ocean_polys, array=np.array(ocean_vals),
+                                cmap=cmap, edgecolor="face", linewidth=0.1)
+            if vmin is not None and vmax is not None:
+                pc.set_clim(vmin, vmax)
+            ax.add_collection(pc)
+    else:
+        vals_arr = values[cell_idx]
+        pc = PolyCollection(polygons, array=vals_arr, cmap=cmap,
+                            edgecolor="face", linewidth=0.1)
+        if vmin is not None and vmax is not None:
+            pc.set_clim(vmin, vmax)
+        ax.add_collection(pc)
+
+    ax.autoscale_view()
+    ax.set_aspect("equal")
+    return pc
+
+
 def _bin_to_latlon(
     values: np.ndarray,
     lon_deg: np.ndarray,
@@ -517,6 +640,7 @@ def _bin_to_latlon(
     max_dist: float | None = None,
     target_lat: np.ndarray | None = None,
     target_lon: np.ndarray | None = None,
+    ocean_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Interpolate unstructured points onto a regular lat-lon grid.
 
@@ -526,6 +650,10 @@ def _bin_to_latlon(
         If given, target grid points whose nearest source cell is farther
         than this (3-D Cartesian distance on unit sphere) are set to NaN.
         Automatically estimated for regional meshes when not provided.
+    ocean_mask : array, optional
+        Boolean-like mask (>0.5 = ocean).  When provided, land cells are
+        excluded from the KDTree so they cannot contaminate interpolated
+        ocean values.
     """
     vals = np.asarray(values, dtype=np.float64).ravel()
     # Use target grid if provided, otherwise use default dimensions
@@ -547,10 +675,11 @@ def _bin_to_latlon(
             n_pts = len(lat)
             mean_spacing = np.sqrt(
                 d2r**2 * lat_span * min(360, lon.max() - lon.min()) / n_pts)
-            # Convert angular spacing to 3-D chord distance  
+            # Convert angular spacing to 3-D chord distance
             max_dist = 2.0 * np.sin(0.5 * mean_spacing * 3.0)
     idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon,
-                                     max_dist=max_dist)
+                                     max_dist=max_dist,
+                                     ocean_mask=ocean_mask)
     return _apply_weights(vals, idxs, w, n_lat, n_lon)
 
 
@@ -563,8 +692,8 @@ def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
         return np.asarray(mask_arr, dtype=np.float64)
     
     # For unstructured grids, use nearest neighbor interpolation
-    from scipy.spatial import cKDTree
-    
+    # (cKDTree already imported at module level)
+
     # Source points (unstructured)
     lon_src = np.asarray(lon_deg, dtype=np.float64).ravel() % 360
     lat_src = np.clip(np.asarray(lat_deg, dtype=np.float64).ravel(), -90, 90)
@@ -613,8 +742,16 @@ def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
 def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
                lat_deg: np.ndarray, coord_kind: str,
                target_lat: np.ndarray | None = None,
-               target_lon: np.ndarray | None = None) -> np.ndarray:
-    """Regrid a 2D field to target lat-lon grid (default 181x360)."""
+               target_lon: np.ndarray | None = None,
+               ocean_mask: np.ndarray | None = None) -> np.ndarray:
+    """Regrid a 2D field to target lat-lon grid (default 181x360).
+
+    Parameters
+    ----------
+    ocean_mask : array, optional
+        Boolean-like mask (>0.5 = ocean).  For unstructured grids, land
+        cells are excluded from the interpolation KDTree.
+    """
     if coord_kind in ("latlon", "gaussian"):
         return np.asarray(field_arr, dtype=np.float64)
     # Cubed-sphere: use face-aware bilinear interpolation (no edge artifacts).
@@ -630,13 +767,15 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
         w = get_cubedsphere_to_latlon_weights(n)
         return apply_cubedsphere_to_latlon(arr, w)
     return _bin_to_latlon(field_arr.ravel(), lon_deg.ravel(), lat_deg.ravel(),
-                          target_lat=target_lat, target_lon=target_lon)
+                          target_lat=target_lat, target_lon=target_lon,
+                          ocean_mask=ocean_mask)
 
 
 def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
                      lat_deg: np.ndarray, coord_kind: str,
                      target_lat: np.ndarray | None = None,
-                     target_lon: np.ndarray | None = None) -> np.ndarray:
+                     target_lon: np.ndarray | None = None,
+                     ocean_mask: np.ndarray | None = None) -> np.ndarray:
     """Regrid a 3D field (*, nlev) to target lat-lon grid (default 181x360x nlev)."""
     arr = np.asarray(field_3d, dtype=np.float64)
     if coord_kind in ("latlon", "gaussian"):
@@ -676,7 +815,8 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
         max_dist = 2.0 * np.sin(0.5 * mean_spacing * 3.0)
     idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon,
                                      max_dist=max_dist, target_lat=target_lat,
-                                     target_lon=target_lon)
+                                     target_lon=target_lon,
+                                     ocean_mask=ocean_mask)
     out = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
     for k in range(nlev):
         out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon)
@@ -828,8 +968,17 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                          dt: float, field_specs: list[tuple[str, str, str]],
                          coord_kind: str, lon_deg: np.ndarray,
                          lat_deg: np.ndarray,
-                         domain_extent: tuple[float,float,float,float] | None = None):
-    """Save snapshot evolution plots for each 2D field."""
+                         domain_extent: tuple[float,float,float,float] | None = None,
+                         mesh=None):
+    """Save snapshot evolution plots for each 2D field.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh, optional
+        When provided and coord_kind is ``"mpas"``, snapshot plots use
+        native Voronoi polygon rendering (PolyCollection) instead of
+        regrid-then-imshow, eliminating land-bleed interpolation artifacts.
+    """
     if not snapshots:
         return
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -839,6 +988,12 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
     # Extract test case for consistent field ranges
     test_case = _extract_test_case_name(case_name)
     field_ranges = FIELD_RANGES.get(test_case, {})
+
+    # Use native Voronoi polygon rendering for MPAS grids when mesh is
+    # available.  This eliminates all interpolation artifacts at land
+    # boundaries.  (Falls back to regrid+imshow when mesh is not provided.)
+    use_native_voronoi = (mesh is not None
+                          and coord_kind in ("mpas", "mpas_regional"))
 
     for field_key, field_label, cmap in field_specs:
         steps = [s for s in valid_steps if field_key in snapshots[s]]
@@ -855,160 +1010,185 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
         axes = np.atleast_2d(axes)
         im = None
 
-        # Pre-compute regridded fields for all steps
-        all_regridded = []
-        for step in steps:
-            raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
-            regridded = _regrid_2d(raw, lon_deg, lat_deg, coord_kind)
-            if "land_mask" in snapshots[step]:
-                land_mask_raw = np.asarray(snapshots[step]["land_mask"],
-                                            dtype=np.float64)
-                land_mask_reg = _regrid_2d(land_mask_raw, lon_deg, lat_deg,
-                                            coord_kind)
-                regridded = np.where(land_mask_reg > 0.5, regridded, np.nan)
-            all_regridded.append(regridded)
-
-        # Determine shared color range across all panels
-        if field_key in field_ranges and field_ranges[field_key] != (None, None):
-            vmin, vmax = field_ranges[field_key]
+        if use_native_voronoi:
+            # --- Native Voronoi polygon path (MPAS) -----------------------
+            for idx, step in enumerate(steps):
+                r, c = divmod(idx, n_cols)
+                ax = axes[r, c]
+                raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
+                lm = (np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+                      if "land_mask" in snapshots[step] else None)
+                # Per-panel color range: use explicit range if configured,
+                # otherwise fit to this panel's ocean data.
+                if field_key in field_ranges and field_ranges[field_key] != (None, None):
+                    vmin, vmax = field_ranges[field_key]
+                else:
+                    ocean_vals = raw.ravel()
+                    if lm is not None:
+                        ocean_vals = ocean_vals[lm.ravel() > 0.5]
+                    finite = ocean_vals[np.isfinite(ocean_vals)]
+                    vmin = float(finite.min()) if finite.size else None
+                    vmax = float(finite.max()) if finite.size else None
+                im = _plot_voronoi_field(
+                    ax, mesh, raw, land_mask=lm, cmap=cmap,
+                    vmin=vmin, vmax=vmax)
+                if domain_extent is not None:
+                    ax.set_xlim(domain_extent[0], domain_extent[1])
+                    ax.set_ylim(domain_extent[2], domain_extent[3])
+                if im is not None:
+                    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                day = step * dt / 86400.0
+                ax.set_title(f"t={day:.2f} d", fontsize=9)
+                if c == 0:
+                    ax.set_ylabel("Latitude")
+                if r == n_rows - 1:
+                    ax.set_xlabel("Longitude")
         else:
-            # Compute consistent range from all regridded data
-            all_vals = np.concatenate([r.ravel() for r in all_regridded])
-            all_finite = all_vals[np.isfinite(all_vals)]
-            
-            # For SST, exclude likely land values (0°C) that escaped land masking
-            if field_key == 'SST' and len(all_finite) > 0:
-                # Remove values very close to 0°C which are likely unmasked land
-                ocean_vals = all_finite[all_finite > 1.0]  # Ocean SST should be > 1°C
-                if len(ocean_vals) > 0:
-                    all_finite = ocean_vals
-                    
-            if len(all_finite) > 0:
-                vmin, vmax = float(np.nanmin(all_finite)), float(np.nanmax(all_finite))
-            else:
-                vmin, vmax = None, None
+            # --- Regrid + imshow path (latlon, cubed-sphere, fallback) ----
+            # Pre-compute regridded fields for all steps
+            all_regridded = []
+            for step in steps:
+                raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
+                # Use mask-aware IDW: pass ocean_mask so land cells are
+                # excluded from the KDTree and cannot contaminate ocean values.
+                land_mask_raw = None
+                if "land_mask" in snapshots[step]:
+                    land_mask_raw = np.asarray(snapshots[step]["land_mask"],
+                                                dtype=np.float64)
+                regridded = _regrid_2d(raw, lon_deg, lat_deg, coord_kind,
+                                       ocean_mask=land_mask_raw)
+                # Still apply land mask on the regridded grid for display
+                if land_mask_raw is not None:
+                    land_mask_reg = _regrid_land_mask(
+                        land_mask_raw, lon_deg, lat_deg, coord_kind)
+                    regridded = np.where(land_mask_reg > 0.5, regridded, np.nan)
+                all_regridded.append(regridded)
 
-        for idx, step in enumerate(steps):
-            r, c = divmod(idx, n_cols)
-            ax = axes[r, c]
-            regridded = all_regridded[idx]
+            for idx, step in enumerate(steps):
+                r, c = divmod(idx, n_cols)
+                ax = axes[r, c]
+                regridded = all_regridded[idx]
 
-            # Compute extent from actual coordinates.
-            # When domain_extent is given (regional experiments), use it
-            # directly.  Otherwise infer from coordinate arrays or the
-            # non-NaN bounding box of the regridded field.
-            if domain_extent is not None:
-                # domain_extent = (lon_west, lon_east, lat_south, lat_north)
-                lon_ext = [domain_extent[0], domain_extent[1]]
-                lat_ext = [domain_extent[2], domain_extent[3]]
-                if coord_kind not in ("latlon", "gaussian"):
+                # Per-panel color range
+                if field_key in field_ranges and field_ranges[field_key] != (None, None):
+                    vmin, vmax = field_ranges[field_key]
+                else:
+                    panel_finite = regridded.ravel()
+                    panel_finite = panel_finite[np.isfinite(panel_finite)]
+                    if len(panel_finite) > 0:
+                        vmin, vmax = float(panel_finite.min()), float(panel_finite.max())
+                    else:
+                        vmin, vmax = None, None
+
+                # Compute extent from actual coordinates.
+                # When domain_extent is given (regional experiments), use it
+                # directly.  Otherwise infer from coordinate arrays or the
+                # non-NaN bounding box of the regridded field.
+                if domain_extent is not None:
+                    # domain_extent = (lon_west, lon_east, lat_south, lat_north)
+                    lon_ext = [domain_extent[0], domain_extent[1]]
+                    lat_ext = [domain_extent[2], domain_extent[3]]
+                    if coord_kind not in ("latlon", "gaussian"):
+                        lat_1d = np.linspace(-90, 90, regridded.shape[0])
+                        lon_1d = np.linspace(0, 360, regridded.shape[1])
+                        r0 = max(int(np.searchsorted(lat_1d, lat_ext[0])) - 1, 0)
+                        r1 = min(int(np.searchsorted(lat_1d, lat_ext[1])) + 2,
+                                 len(lat_1d))
+                        c0 = max(int(np.searchsorted(lon_1d, lon_ext[0])) - 1, 0)
+                        c1 = min(int(np.searchsorted(lon_1d, lon_ext[1])) + 2,
+                                 len(lon_1d))
+                        plot_data = regridded[r0:r1, c0:c1]
+                        lon_ext = [float(lon_1d[c0]),
+                                   float(lon_1d[min(c1, len(lon_1d)-1)])]
+                        lat_ext = [float(lat_1d[r0]),
+                                   float(lat_1d[min(r1, len(lat_1d)-1)])]
+                    else:
+                        plot_data = regridded
+                elif coord_kind in ("latlon", "gaussian"):
+                    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+                    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
+                    lon_ext = [float(lon_flat.min()), float(lon_flat.max())]
+                    lat_ext = [float(lat_flat.min()), float(lat_flat.max())]
+                    plot_data = regridded
+                else:
                     lat_1d = np.linspace(-90, 90, regridded.shape[0])
                     lon_1d = np.linspace(0, 360, regridded.shape[1])
-                    r0 = max(int(np.searchsorted(lat_1d, lat_ext[0])) - 1, 0)
-                    r1 = min(int(np.searchsorted(lat_1d, lat_ext[1])) + 2,
-                             len(lat_1d))
-                    c0 = max(int(np.searchsorted(lon_1d, lon_ext[0])) - 1, 0)
-                    c1 = min(int(np.searchsorted(lon_1d, lon_ext[1])) + 2,
-                             len(lon_1d))
-                    plot_data = regridded[r0:r1, c0:c1]
-                    lon_ext = [float(lon_1d[c0]),
-                               float(lon_1d[min(c1, len(lon_1d)-1)])]
-                    lat_ext = [float(lat_1d[r0]),
-                               float(lat_1d[min(r1, len(lat_1d)-1)])]
-                else:
-                    plot_data = regridded
-            elif coord_kind in ("latlon", "gaussian"):
-                lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
-                lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
-                lon_ext = [float(lon_flat.min()), float(lon_flat.max())]
-                lat_ext = [float(lat_flat.min()), float(lat_flat.max())]
-                plot_data = regridded
-            else:
-                # The regridded array is (181, 360) on
-                # lat ∈ [-90, 90], lon ∈ [0, 360].
-                lat_1d = np.linspace(-90, 90, regridded.shape[0])
-                lon_1d = np.linspace(0, 360, regridded.shape[1])
-                # Find the bounding box of non-NaN data.
-                valid = np.isfinite(regridded)
-                if valid.any():
-                    rows = np.where(valid.any(axis=1))[0]
-                    cols = np.where(valid.any(axis=0))[0]
-                    r0, r1 = max(rows[0] - 1, 0), min(rows[-1] + 2, len(lat_1d))
-                    c0, c1 = max(cols[0] - 1, 0), min(cols[-1] + 2, len(lon_1d))
-                    plot_data = regridded[r0:r1, c0:c1]
-                    lon_ext = [float(lon_1d[c0]), float(lon_1d[min(c1, len(lon_1d)-1)])]
-                    lat_ext = [float(lat_1d[r0]), float(lat_1d[min(r1, len(lat_1d)-1)])]
-                else:
-                    plot_data = regridded
-                    lon_ext = [0, 360]
-                    lat_ext = [-90, 90]
-            im = ax.imshow(
-                plot_data, origin="lower", aspect="auto", cmap=cmap,
-                extent=[lon_ext[0], lon_ext[1], lat_ext[0], lat_ext[1]],
-                vmin=vmin, vmax=vmax)
-                
-            # Add velocity vectors for circulation visualization
-            if field_key in ("SST", "speed_sfc") and "u_sfc" in snapshots[step] and "v_sfc" in snapshots[step]:
-                u_raw = np.asarray(snapshots[step]["u_sfc"], dtype=np.float64)
-                v_raw = np.asarray(snapshots[step]["v_sfc"], dtype=np.float64)
-                u_reg = _regrid_2d(u_raw, lon_deg, lat_deg, coord_kind)
-                v_reg = _regrid_2d(v_raw, lon_deg, lat_deg, coord_kind)
-                
-                # Create coordinate meshgrid for vectors
-                if domain_extent is not None and coord_kind not in ("latlon", "gaussian"):
-                    # Use same cropping as for the main field
-                    lat_1d = np.linspace(-90, 90, u_reg.shape[0])
-                    lon_1d = np.linspace(0, 360, u_reg.shape[1])
-                    r0 = max(int(np.searchsorted(lat_1d, lat_ext[0])) - 1, 0)
-                    r1 = min(int(np.searchsorted(lat_1d, lat_ext[1])) + 2, len(lat_1d))
-                    c0 = max(int(np.searchsorted(lon_1d, lon_ext[0])) - 1, 0)
-                    c1 = min(int(np.searchsorted(lon_1d, lon_ext[1])) + 2, len(lon_1d))
-                    u_plot = u_reg[r0:r1, c0:c1]
-                    v_plot = v_reg[r0:r1, c0:c1]
-                    lat_plot = lat_1d[r0:r1]
-                    lon_plot = lon_1d[c0:c1]
-                else:
-                    u_plot = u_reg
-                    v_plot = v_reg
-                    lat_plot = np.linspace(lat_ext[0], lat_ext[1], u_reg.shape[0])
-                    lon_plot = np.linspace(lon_ext[0], lon_ext[1], u_reg.shape[1])
-                
-                # Subsample vectors for readability (every 4th point)
-                skip = 4
-                X, Y = np.meshgrid(lon_plot[::skip], lat_plot[::skip])
-                U = u_plot[::skip, ::skip]
-                V = v_plot[::skip, ::skip]
-                
-                # Only plot where data is finite and non-zero
-                mask = np.isfinite(U) & np.isfinite(V) & ((np.abs(U) + np.abs(V)) > 1e-6)
-                if np.any(mask):
-                    # Use adaptive scaling based on velocity magnitude
-                    speed = np.sqrt(U[mask]**2 + V[mask]**2)
-                    max_speed = np.nanmax(speed) if len(speed) > 0 else 0.01
-                    scale = max_speed * 100  # Scale for visibility
-                    
-                    ax.quiver(X[mask], Y[mask], U[mask], V[mask], 
-                             color='white', alpha=0.8, scale=scale, scale_units='xy',
-                             width=0.003, headwidth=4, headlength=6, 
-                             edgecolors='black', linewidth=0.5)
-            
-            day = step * dt / 86400.0
-            ax.set_title(f"t={day:.2f} d", fontsize=9)
-            if c == 0:
-                ax.set_ylabel("Latitude")
-            if r == n_rows - 1:
-                ax.set_xlabel("Longitude")
+                    valid = np.isfinite(regridded)
+                    if valid.any():
+                        rows = np.where(valid.any(axis=1))[0]
+                        cols = np.where(valid.any(axis=0))[0]
+                        r0, r1 = max(rows[0] - 1, 0), min(rows[-1] + 2, len(lat_1d))
+                        c0, c1 = max(cols[0] - 1, 0), min(cols[-1] + 2, len(lon_1d))
+                        plot_data = regridded[r0:r1, c0:c1]
+                        lon_ext = [float(lon_1d[c0]), float(lon_1d[min(c1, len(lon_1d)-1)])]
+                        lat_ext = [float(lat_1d[r0]), float(lat_1d[min(r1, len(lat_1d)-1)])]
+                    else:
+                        plot_data = regridded
+                        lon_ext = [0, 360]
+                        lat_ext = [-90, 90]
+                im = ax.imshow(
+                    plot_data, origin="lower", aspect="auto", cmap=cmap,
+                    extent=[lon_ext[0], lon_ext[1], lat_ext[0], lat_ext[1]],
+                    vmin=vmin, vmax=vmax)
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+                # Add velocity vectors for circulation visualization
+                if field_key in ("SST", "speed_sfc") and "u_sfc" in snapshots[step] and "v_sfc" in snapshots[step]:
+                    u_raw = np.asarray(snapshots[step]["u_sfc"], dtype=np.float64)
+                    v_raw = np.asarray(snapshots[step]["v_sfc"], dtype=np.float64)
+                    _lm = (np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+                            if "land_mask" in snapshots[step] else None)
+                    u_reg = _regrid_2d(u_raw, lon_deg, lat_deg, coord_kind,
+                                       ocean_mask=_lm)
+                    v_reg = _regrid_2d(v_raw, lon_deg, lat_deg, coord_kind,
+                                       ocean_mask=_lm)
+
+                    if domain_extent is not None and coord_kind not in ("latlon", "gaussian"):
+                        lat_1d = np.linspace(-90, 90, u_reg.shape[0])
+                        lon_1d = np.linspace(0, 360, u_reg.shape[1])
+                        r0 = max(int(np.searchsorted(lat_1d, lat_ext[0])) - 1, 0)
+                        r1 = min(int(np.searchsorted(lat_1d, lat_ext[1])) + 2, len(lat_1d))
+                        c0 = max(int(np.searchsorted(lon_1d, lon_ext[0])) - 1, 0)
+                        c1 = min(int(np.searchsorted(lon_1d, lon_ext[1])) + 2, len(lon_1d))
+                        u_plot = u_reg[r0:r1, c0:c1]
+                        v_plot = v_reg[r0:r1, c0:c1]
+                        lat_plot = lat_1d[r0:r1]
+                        lon_plot = lon_1d[c0:c1]
+                    else:
+                        u_plot = u_reg
+                        v_plot = v_reg
+                        lat_plot = np.linspace(lat_ext[0], lat_ext[1], u_reg.shape[0])
+                        lon_plot = np.linspace(lon_ext[0], lon_ext[1], u_reg.shape[1])
+
+                    skip = 4
+                    X, Y = np.meshgrid(lon_plot[::skip], lat_plot[::skip])
+                    U = u_plot[::skip, ::skip]
+                    V = v_plot[::skip, ::skip]
+
+                    mask = np.isfinite(U) & np.isfinite(V) & ((np.abs(U) + np.abs(V)) > 1e-6)
+                    if np.any(mask):
+                        speed = np.sqrt(U[mask]**2 + V[mask]**2)
+                        max_speed = np.nanmax(speed) if len(speed) > 0 else 0.01
+                        scale = max_speed * 100
+
+                        ax.quiver(X[mask], Y[mask], U[mask], V[mask],
+                                 color='white', alpha=0.8, scale=scale, scale_units='xy',
+                                 width=0.003, headwidth=4, headlength=6,
+                                 edgecolors='black', linewidth=0.5)
+
+                day = step * dt / 86400.0
+                ax.set_title(f"t={day:.2f} d", fontsize=9)
+                if c == 0:
+                    ax.set_ylabel("Latitude")
+                if r == n_rows - 1:
+                    ax.set_xlabel("Longitude")
 
         for idx in range(len(steps), n_rows * n_cols):
             r, c = divmod(idx, n_cols)
             axes[r, c].set_visible(False)
 
-        if im is not None:
-            fig.colorbar(
-                im, ax=axes.ravel().tolist(), orientation="vertical",
-                fraction=0.046, pad=0.04, label=field_label)
-        fig.suptitle(f"{case_name} — {field_key}", fontsize=11)
-        fig.tight_layout(rect=[0, 0, 0.88, 0.95])  # More space for colorbar
+        fig.suptitle(f"{case_name} — {field_key} ({field_label})", fontsize=11)
+        fig.tight_layout()
         fname = f"snapshots_{field_key}.png"
         fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -1029,6 +1209,7 @@ def _bin_cross_section(
     mean_axis: int,
     n_lat: int = 181,
     n_lon: int = 360,
+    ocean_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute a cross-section by direct binning (no interpolation).
 
@@ -1042,6 +1223,8 @@ def _bin_cross_section(
     mean_axis : int
         0 = average over latitude → longitude-vertical section
         1 = average over longitude → latitude-vertical section
+    ocean_mask : array, optional
+        Boolean-like mask (>0.5 = ocean).  Excludes land cells from KDTree.
 
     Returns
     -------
@@ -1057,7 +1240,8 @@ def _bin_cross_section(
             arr = arr[:, None]
         flat = arr.reshape(-1, arr.shape[-1])
         nlev = flat.shape[1]
-        idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon, k=20)
+        idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon, k=20,
+                                         ocean_mask=ocean_mask)
         ll = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
         for lev in range(nlev):
             ll[..., lev] = _apply_weights(flat[:, lev], idxs, w, n_lat, n_lon)
@@ -1101,12 +1285,14 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         all_bin_centers = []
         for step in valid_steps:
             f3d = np.asarray(snapshots[step][field_3d_key], dtype=np.float64)
+            _lm = None
             if "land_mask" in snapshots[step]:
-                land_mask_raw = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
-                land_mask_3d = land_mask_raw[..., np.newaxis]
+                _lm = np.asarray(snapshots[step]["land_mask"], dtype=np.float64)
+                land_mask_3d = _lm[..., np.newaxis]
                 f3d = np.where(land_mask_3d > 0.5, f3d, np.nan)
             section, bin_centers = _bin_cross_section(
-                f3d, lon_deg, lat_deg, coord_kind, mean_axis)
+                f3d, lon_deg, lat_deg, coord_kind, mean_axis,
+                ocean_mask=_lm)
             section = _fill_nan_section(section)
             all_sections.append(section)
             all_bin_centers.append(bin_centers)
@@ -1399,21 +1585,31 @@ def _save_snapshot_data(
         # Collect this field across all timesteps
         field_timesteps = []
         latlon_timesteps = []
-        
+
         for step in sorted_steps:
             if field_key in snapshots[step]:
                 arr = np.asarray(snapshots[step][field_key], dtype=np.float64)
                 field_timesteps.append(arr)
-                
+
+                # Get ocean mask for mask-aware IDW (skip for land_mask itself)
+                _lm = None
+                if field_key != "land_mask" and "land_mask" in snapshots[step]:
+                    _lm = np.asarray(snapshots[step]["land_mask"],
+                                     dtype=np.float64)
+
                 # Regrid to lat-lon
                 target_lat = latlon_arrays["lat"]
                 target_lon = latlon_arrays["lon"]
                 if field_key.endswith("_3d"):
                     regridded = _regrid_3d_level(arr, lon_deg, lat_deg, coord_kind,
-                                               target_lat=target_lat, target_lon=target_lon)
+                                               target_lat=target_lat,
+                                               target_lon=target_lon,
+                                               ocean_mask=_lm)
                 else:
                     regridded = _regrid_2d(arr, lon_deg, lat_deg, coord_kind,
-                                         target_lat=target_lat, target_lon=target_lon)
+                                         target_lat=target_lat,
+                                         target_lon=target_lon,
+                                         ocean_mask=_lm)
                 latlon_timesteps.append(regridded)
             else:
                 # Field not available at this timestep - skip or use NaN
@@ -1453,6 +1649,7 @@ def _save_case_diagnostics(
     salt_key: str | None = None,
     scalar_units: dict[str, str] | None = None,
     domain_extent: tuple[float, float, float, float] | None = None,
+    mesh=None,
 ):
     """Save all standard diagnostic outputs for a test case.
 
@@ -1462,6 +1659,9 @@ def _save_case_diagnostics(
         When set, snapshot plots are cropped to this geographic extent.
         Useful for regional experiments on unstructured grids where the
         auto-crop heuristic fails due to nearest-neighbour extrapolation.
+    mesh : VoronoiMesh, optional
+        When provided for MPAS grids, snapshot plots use native Voronoi
+        polygon rendering instead of regrid+imshow.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     su = scalar_units or {}
@@ -1475,7 +1675,8 @@ def _save_case_diagnostics(
 
     _save_snapshot_plots(
         output_dir, case_name, snapshots, dt, field_specs_2d,
-        coord_kind, lon_deg, lat_deg, domain_extent=domain_extent)
+        coord_kind, lon_deg, lat_deg, domain_extent=domain_extent,
+        mesh=mesh)
     _save_snapshot_times(output_dir, snapshots, dt)
     _save_snapshot_data(
         output_dir, snapshots, dt, coord_kind, lon_deg, lat_deg,
@@ -2432,7 +2633,8 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         vol_key="mean_eta",
         heat_key="mean_T",
         salt_key="mean_S",
-        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -2489,7 +2691,8 @@ def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
         vol_key="mean_eta",
         heat_key="mean_T",
         salt_key="mean_S",
-        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -2548,7 +2751,8 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
         vol_key="mean_eta",
         heat_key="mean_T",
         salt_key="mean_S",
-        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -2602,7 +2806,8 @@ def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: floa
         vol_key="mean_eta",
         heat_key="mean_T",
         salt_key="mean_S",
-        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -2664,7 +2869,8 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
         heat_key="mean_T",
         salt_key="mean_S",
         scalar_units={"mean_eta": "m", "max_abs_eta": "m",
-                      "mean_T": "degC", "mean_S": "PSU"})
+                      "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -2889,7 +3095,8 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
         vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
         scalar_units={"mean_eta": "m", "max_speed": "m/s",
                       "mean_T": "degC", "mean_S": "PSU"},
-        domain_extent=extent)
+        domain_extent=extent,
+        mesh=grid if coord_kind == "mpas" else None)
 
     _save_velocity_profiles(output_dir, case_label, snapshots, dt,
                             depth, level_label="Depth (m)")
@@ -3105,7 +3312,8 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
                       "T_north_surface": "degC", "T_south_surface": "degC",
                       "T_north_thermocline": "degC", "T_south_thermocline": "degC",
                       "T_spatial_std_surface": "degC", "T_spatial_std_thermocline": "degC"},
-        domain_extent=extent)
+        domain_extent=extent,
+        mesh=grid if coord_kind == "mpas" else None)
     
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -3225,7 +3433,8 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
         level_label="Depth (m)",
         vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
         scalar_units={"mean_eta": "m", "max_speed": "m/s",
-                      "mean_T": "degC", "mean_S": "PSU"})
+                      "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -3284,7 +3493,8 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
         vol_key="mean_eta",
         heat_key="mean_T",
         salt_key="mean_S",
-        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -3532,7 +3742,8 @@ def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
         vol_key="mean_eta",
         heat_key="mean_T",
         salt_key="mean_S",
-        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"})
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -3732,7 +3943,8 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
         field_specs_2d=[("eta", "SSH (m)", "RdBu_r")],
         vol_key="mean_eta",
         heat_key="mean_T",
-        scalar_units={"mean_eta": "m"})
+        scalar_units={"mean_eta": "m"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -3903,7 +4115,8 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
         heat_key="mean_T",
         salt_key="mean_S",
         scalar_units={"mean_eta": "m", "mean_T": "degC", "PE": "J",
-                      "PE_rel": ""})
+                      "PE_rel": ""},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -4056,7 +4269,8 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
         vol_key="mean_eta",
         heat_key="mean_T",
         salt_key="mean_S",
-        scalar_units={"mean_eta": "m", "mean_T": "degC", "PE": "J"})
+        scalar_units={"mean_eta": "m", "mean_T": "degC", "PE": "J"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -4215,7 +4429,8 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
         level_label="Depth (m)",
         vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
         scalar_units={"mean_eta": "m", "mean_T": "degC", "mean_S": "PSU",
-                      "S_min": "PSU", "S_max": "PSU", "S_integral": "PSU*m^2"})
+                      "S_min": "PSU", "S_max": "PSU", "S_integral": "PSU*m^2"},
+        mesh=grid if coord_kind == "mpas" else None)
 
     return "PASS" if ok else "FAIL", wall, notes
 
@@ -4283,6 +4498,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--list", action="store_true",
         help="List all test cases and exit")
+    p.add_argument(
+        "--replot", action="store_true",
+        help="Skip simulations; regenerate all plots from existing NPZ data")
     return p
 
 
@@ -4812,17 +5030,6 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
     if not grid_field_data or not all_fields:
         return
 
-    # Shared color range
-    if field in field_ranges:
-        vmin, vmax = field_ranges[field]
-    else:
-        combined = np.concatenate([f.ravel() for f in all_fields])
-        finite = combined[np.isfinite(combined)]
-        if len(finite) > 0:
-            vmin, vmax = float(np.nanmin(finite)), float(np.nanmax(finite))
-        else:
-            vmin, vmax = None, None
-
     # Actual number of columns (may differ per grid; use max)
     actual_cols = max(len(v) for v in grid_field_data.values())
     actual_grids = grid_names  # Include all grids, even those with missing fields
@@ -4831,10 +5038,14 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
     fig, axes = plt.subplots(n_rows, actual_cols,
                               figsize=(3.5 * actual_cols, 3.0 * n_rows),
                               squeeze=False)
-    im = None
 
     for i_row, gname in enumerate(actual_grids):
         entries = grid_field_data[gname]
+
+        # Color range is computed per-panel below so that spatial patterns
+        # within each snapshot are visible (temporal trends otherwise
+        # dominate the shared range and wash out spatial structure).
+
         # Get plot extent — prefer source coordinate range for accurate
         # regional domain cropping on unstructured meshes.
         snaps = grid_results[gname]['snapshots']
@@ -4885,15 +5096,27 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
                     if crop_slices is not None:
                         r0, r1, c0, c1 = crop_slices
                         f2d = f2d[r0:r1, c0:c1]
-                    im = ax.imshow(f2d, origin='lower', aspect='auto', cmap=cmap,
-                                   extent=extent, vmin=vmin, vmax=vmax)
+                    # Per-panel color range
+                    if field in field_ranges and field_ranges[field] != (None, None):
+                        p_vmin, p_vmax = field_ranges[field]
+                    else:
+                        pf = f2d.ravel()
+                        pf = pf[np.isfinite(pf)]
+                        if pf.size:
+                            p_vmin, p_vmax = float(pf.min()), float(pf.max())
+                        else:
+                            p_vmin, p_vmax = None, None
+                    panel_im = ax.imshow(f2d, origin='lower', aspect='auto',
+                                         cmap=cmap, extent=extent,
+                                         vmin=p_vmin, vmax=p_vmax)
+                    fig.colorbar(panel_im, ax=ax, fraction=0.046, pad=0.04)
                 else:
-                    # Field not available - show "not available" message
-                    ax.text(0.5, 0.5, f'{field} not available', transform=ax.transAxes,
+                    ax.text(0.5, 0.5, f'{field} not available',
+                            transform=ax.transAxes,
                             ha='center', va='center', fontsize=9)
                     ax.set_xlim(0, 1)
                     ax.set_ylim(0, 1)
-                
+
                 if i_row == 0:
                     ax.set_title(t_label, fontsize=9)
                 if i_col == 0:
@@ -4909,10 +5132,7 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
     fig.suptitle(f"{field.upper()} Evolution — {test_case_dir.name}",
                  fontsize=13, fontweight='bold')
 
-    if im is not None:
-        fig.colorbar(im, ax=axes.ravel().tolist(), fraction=0.02, pad=0.02)
-
-    fig.tight_layout(rect=[0, 0, 0.95, 0.95])
+    fig.tight_layout()
     out = test_case_dir / f"comparison_evolution_{field}.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -5076,6 +5296,167 @@ def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict)
     print(f"    Saved: {out_file.name}")
 
 
+def _create_comparison_vertical_evolution(
+    test_case_dir: Path, grid_results: dict, max_times: int = 6,
+) -> None:
+    """Meridional T cross-section evolution: rows = grids, cols = time steps.
+
+    Each panel shows the latitude–depth temperature section at 60°E,
+    with a per-panel colorbar so that spatial patterns within each
+    snapshot are visible even when the full-depth stratification
+    dominates the overall range.
+    """
+    import matplotlib.pyplot as plt
+
+    # Skip rest-state cases
+    if test_case_dir.name.startswith("rest_state"):
+        return
+
+    # Gather grids that have T_3d
+    grids_with_T3d = {}
+    for gname, data in grid_results.items():
+        snaps = data["snapshots"]
+        if "T_3d" in snaps.files:
+            grids_with_T3d[gname] = data
+    if len(grids_with_T3d) < 1:
+        return
+
+    # Read depth levels from results.txt of first grid
+    first_grid = next(iter(grids_with_T3d))
+    results_file = (test_case_dir / first_grid / "results.txt")
+    if results_file.exists():
+        with open(results_file) as f:
+            for line in f:
+                if line.startswith("depth:"):
+                    import ast as _ast
+                    depth_data = np.array(
+                        _ast.literal_eval(line.split(":", 1)[1].strip()))
+                    break
+            else:
+                depth_data = np.array([26.19, 133.86, 352.12, 680.95,
+                                       1120.37, 1670.37, 2330.95, 3102.12,
+                                       3983.86, 4976.19])
+    else:
+        depth_data = np.array([26.19, 133.86, 352.12, 680.95, 1120.37,
+                               1670.37, 2330.95, 3102.12, 3983.86, 4976.19])
+
+    # Level interfaces for pcolormesh
+    def _level_interfaces(centers):
+        if len(centers) == 1:
+            return np.array([0.0, 2 * centers[0]])
+        ifc = np.zeros(len(centers) + 1)
+        ifc[0] = 0.0
+        ifc[1:-1] = 0.5 * (centers[:-1] + centers[1:])
+        ifc[-1] = centers[-1] + (centers[-1] - ifc[-2])
+        return ifc
+
+    level_ifc = _level_interfaces(depth_data)
+    lon_middle = 60.0
+
+    grid_names = list(grids_with_T3d.keys())
+    n_grids = len(grid_names)
+
+    # Determine number of time columns
+    n_times_max = max(
+        grids_with_T3d[g]["snapshots"]["T_3d"].shape[0]
+        for g in grid_names
+        if grids_with_T3d[g]["snapshots"]["T_3d"].ndim == 4)
+    n_cols = min(max_times, n_times_max)
+
+    fig, axes = plt.subplots(n_grids, n_cols,
+                              figsize=(3.5 * n_cols, 3.5 * n_grids),
+                              squeeze=False)
+
+    for i_row, gname in enumerate(grid_names):
+        snaps = grids_with_T3d[gname]["snapshots"]
+        T_3d_all = np.asarray(snaps["T_3d"], dtype=np.float64)
+        lon_deg = np.asarray(snaps["lon"], dtype=np.float64)
+        lat_deg = np.asarray(snaps["lat"], dtype=np.float64)
+        times_days = (np.asarray(snaps["times_days"], dtype=np.float64)
+                      if "times_days" in snaps.files else None)
+
+        if T_3d_all.ndim != 4:
+            continue  # need (time, lat, lon, lev)
+        nt = T_3d_all.shape[0]
+        indices = (np.linspace(0, nt - 1, n_cols).astype(int)
+                   if nt > n_cols else np.arange(nt))
+
+        # Longitude slice
+        lon_idx = int(np.argmin(np.abs(lon_deg - lon_middle)))
+        lon_sl = slice(max(0, lon_idx - 2), min(len(lon_deg), lon_idx + 3))
+
+        # Latitude interfaces
+        if len(lat_deg) > 1:
+            dlat = (lat_deg[-1] - lat_deg[0]) / (len(lat_deg) - 1)
+            lat_ifc = np.linspace(lat_deg[0] - 0.5 * dlat,
+                                  lat_deg[-1] + 0.5 * dlat,
+                                  len(lat_deg) + 1)
+        else:
+            lat_ifc = np.array([lat_deg[0] - 1.0, lat_deg[0] + 1.0])
+
+        X, Y = np.meshgrid(lat_ifc, level_ifc)
+
+        # Use the initial condition (t=0) range for all panels so that
+        # any departure from the initial stratification is visible.
+        T_ic = T_3d_all[0]  # (lat, lon, lev)
+        T_sec_ic = np.nanmean(T_ic[:, lon_sl, :], axis=1)
+        ic_finite = T_sec_ic[np.isfinite(T_sec_ic)]
+        if ic_finite.size:
+            row_vmin, row_vmax = float(ic_finite.min()), float(ic_finite.max())
+        else:
+            row_vmin, row_vmax = 2, 20
+
+        for i_col, ti in enumerate(indices):
+            ax = axes[i_row, i_col]
+            T_3d = T_3d_all[ti]  # (lat, lon, lev)
+            T_sec = np.nanmean(T_3d[:, lon_sl, :], axis=1)  # (lat, lev)
+
+            if T_sec.shape != (len(lat_ifc) - 1, len(level_ifc) - 1):
+                ax.set_visible(False)
+                continue
+
+            im = ax.pcolormesh(X, Y, T_sec.T, cmap="RdYlBu_r",
+                               vmin=row_vmin, vmax=row_vmax, shading="flat")
+            ax.invert_yaxis()
+            ax.set_xlim(15, 75)
+            ax.set_ylim(level_ifc[-1], 0)
+            ax.tick_params(labelsize=7)
+
+            if i_row == 0:
+                t_label = (f"{times_days[ti]:.1f}d"
+                           if times_days is not None else f"t{ti}")
+                ax.set_title(t_label, fontsize=9)
+            if i_col == 0:
+                res = grid_results[gname]["resolution"]
+                ax.set_ylabel(f"{gname}\n({res})\nDepth (m)", fontsize=9)
+            else:
+                ax.set_ylabel("")
+            if i_row == n_grids - 1:
+                ax.set_xlabel("Latitude (°)", fontsize=8)
+            else:
+                ax.set_xlabel("")
+
+        # Hide unused columns
+        for i_col in range(len(indices), n_cols):
+            axes[i_row, i_col].set_visible(False)
+
+        # One shared colorbar per row (all panels use the IC range)
+        if im is not None:
+            row_axes = [axes[i_row, c] for c in range(n_cols)
+                        if axes[i_row, c].get_visible()]
+            fig.colorbar(im, ax=row_axes, fraction=0.02, pad=0.02,
+                         label="T (°C)")
+
+    fig.suptitle(
+        f"T Section Evolution at 60°E — {test_case_dir.name}",
+        fontsize=13, fontweight="bold")
+    fig.tight_layout()
+    out = test_case_dir / "comparison_evolution_vertical_section.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"    Saved: {out.name}")
+
+
 def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> None:
     """Create all cross-grid comparison plots and summary for a test case."""
     if len(grid_results) < 2:
@@ -5104,6 +5485,7 @@ def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> N
     # Vertical cross-section comparison for baroclinic gyre
     if 'baroclinic_gyre' in test_case_dir.name:
         _create_comparison_vertical_section(test_case_dir, grid_results)
+        _create_comparison_vertical_evolution(test_case_dir, grid_results)
 
     # Summary table
     _create_comparison_summary(test_case_dir, grid_results)
@@ -5189,6 +5571,192 @@ def _check_and_generate_comparisons(output_base: Path, test_case_name: str, all_
         print(f"  Note: Insufficient grid data for {test_case_name} cross-grid comparison")
 
 
+def _replot_case_snapshots(case_dir: Path) -> None:
+    """Regenerate per-case snapshot plots from saved NPZ data.
+
+    Reads ``snapshots_latlon.npz`` (regridded) and ``results.txt``
+    to reconstruct the snapshot evolution plots, cross-sections, and
+    vertical profiles without rerunning the simulation.
+    """
+    npz_path = case_dir / "snapshots_latlon.npz"
+    results_path = case_dir / "results.txt"
+    if not npz_path.exists():
+        return
+
+    data = np.load(npz_path)
+    if "times_days" not in data.files:
+        return
+
+    times = data["times_days"]
+    lat = data["lat"]
+    lon = data["lon"]
+    n_times = len(times)
+
+    # Parse metadata from results.txt
+    meta = {}
+    if results_path.exists():
+        with open(results_path) as f:
+            for line in f:
+                if ":" in line:
+                    k, v = line.strip().split(":", 1)
+                    meta[k.strip()] = v.strip()
+    dt_val = float(meta.get("dt", DEFAULT_DT))
+    grid_type = meta.get("grid", "")
+    resolution = meta.get("resolution", "")
+
+    # Determine coord_kind for the regridded data — it's always on a
+    # regular lat-lon grid after regridding, so we use "latlon".
+    coord_kind = "latlon"
+
+    # Build field specs from what's available
+    field_specs_2d = []
+    if "eta" in data.files:
+        field_specs_2d.append(("eta", "SSH (m)", "RdBu_r"))
+    if "SST" in data.files:
+        field_specs_2d.append(("SST", "SST (degC)", "RdYlBu_r"))
+    if "speed_sfc" in data.files:
+        field_specs_2d.append(("speed_sfc", "Surface speed (m/s)", "magma"))
+    if "w_133m" in data.files:
+        field_specs_2d.append(("w_133m", "w at 134m (m/s)", "RdBu_r"))
+
+    if not field_specs_2d:
+        return
+
+    # Reconstruct the snapshots dict expected by _save_snapshot_plots.
+    # The NPZ stores (n_times, lat, lon) arrays.  The plotting code
+    # expects  snapshots = {step: {field: 2D_array, ...}, ...}
+    # with step numbers as keys.  We fake step numbers from dt.
+    snapshots = {}
+    steps_arr = data["steps"] if "steps" in data.files else np.arange(n_times)
+    for i, step in enumerate(steps_arr):
+        step = int(step)
+        snap = {}
+        for fk, _, _ in field_specs_2d:
+            if fk in data.files:
+                arr = data[fk]
+                if arr.ndim == 3:  # (time, lat, lon)
+                    snap[fk] = arr[i]
+                elif arr.ndim == 2:
+                    snap[fk] = arr
+        if "land_mask" in data.files:
+            lm = data["land_mask"]
+            snap["land_mask"] = lm[i] if lm.ndim == 3 else lm
+        # Velocity vectors for quiver overlay
+        for vk in ("u_sfc", "v_sfc"):
+            if vk in data.files:
+                va = data[vk]
+                snap[vk] = va[i] if va.ndim == 3 else va
+        snapshots[step] = snap
+
+    # Domain extent
+    domain_extent = None
+    if "source_lon_range" in data.files and "source_lat_range" in data.files:
+        slon = data["source_lon_range"]
+        slat = data["source_lat_range"]
+        domain_extent = (float(slon[0]), float(slon[1]),
+                         float(slat[0]), float(slat[1]))
+
+    case_label = f"{case_dir.parent.name} {grid_type} {resolution}".strip()
+
+    # Regenerate snapshot plots (regridded data is already on lat-lon)
+    _save_snapshot_plots(
+        case_dir, case_label, snapshots, dt_val, field_specs_2d,
+        coord_kind, lon, lat, domain_extent=domain_extent)
+
+    # Regenerate cross-sections and profiles if 3D data exists
+    if "T_3d" in data.files:
+        import ast as _ast
+        T_3d_all = data["T_3d"]  # (time, lat, lon, lev)
+        depth_data = None
+        if results_path.exists():
+            with open(results_path) as f:
+                for line in f:
+                    if line.startswith("depth:"):
+                        depth_data = np.array(
+                            _ast.literal_eval(line.split(":", 1)[1].strip()))
+                        break
+        if depth_data is not None:
+            # Add T_3d to snapshots
+            for i, step in enumerate(steps_arr):
+                step = int(step)
+                if step in snapshots and T_3d_all.ndim == 4:
+                    snapshots[step]["T_3d"] = T_3d_all[i]
+
+            _save_cross_sections(
+                case_dir, case_label, snapshots, dt_val, "T_3d",
+                coord_kind, lon, lat, depth_data, "Depth (m)")
+            _save_profiles(
+                case_dir, case_label, snapshots, dt_val, "T_3d",
+                depth_data, "Depth (m)")
+
+
+def _run_replot(args) -> None:
+    """Replot mode: regenerate all plots from existing NPZ data."""
+    output_base = Path(args.output)
+    if not output_base.exists():
+        print(f"Output directory {output_base} does not exist.")
+        return
+
+    print("=" * 78)
+    print("  legoESM Ocean Test Matrix — REPLOT MODE")
+    print("=" * 78)
+    print(f"  Output:     {output_base}")
+    print(f"  Filter:     --only {args.only}  --grid {args.grid}")
+    print("=" * 78)
+
+    t_start = time.time()
+
+    # Discover all test case directories with results
+    test_case_dirs = set()
+    replotted = 0
+
+    for case_dir in sorted(output_base.rglob("snapshots_latlon.npz")):
+        res_dir = case_dir.parent        # e.g., results/ocean/baroclinic_gyre/latlon_regional/24x48
+        grid_dir = res_dir.parent         # e.g., results/ocean/baroclinic_gyre/latlon_regional
+        test_dir = grid_dir.parent        # e.g., results/ocean/baroclinic_gyre
+
+        grid_name = grid_dir.name
+        test_name = test_dir.name
+
+        # Apply filters
+        if args.only != "all" and args.only not in test_name:
+            continue
+        if args.grid != "all" and args.grid != grid_name:
+            continue
+
+        print(f"  Replotting {test_name}/{grid_name}/{res_dir.name} ...")
+        try:
+            _replot_case_snapshots(res_dir)
+            replotted += 1
+        except Exception as e:
+            print(f"    ERROR: {e}")
+            traceback.print_exc()
+
+        test_case_dirs.add(test_dir)
+
+    # Regenerate cross-grid comparisons
+    if test_case_dirs:
+        print()
+        print("=" * 78)
+        print("  REGENERATING CROSS-GRID COMPARISONS")
+        print("=" * 78)
+        for test_dir in sorted(test_case_dirs):
+            grid_results = _collect_grid_results(test_dir)
+            if len(grid_results) >= 2:
+                _create_cross_grid_comparisons(test_dir, grid_results)
+            elif len(grid_results) == 1:
+                print(f"  Skipping {test_dir.name}: only 1 grid available")
+
+    # Rest-state cross-variant comparison
+    _create_rest_state_cross_variant_comparison(output_base)
+
+    elapsed = time.time() - t_start
+    print()
+    print("=" * 78)
+    print(f"  Replotted {replotted} case(s) in {elapsed:.1f}s")
+    print("=" * 78)
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -5228,6 +5796,10 @@ def main():
                   f"{tc.quick_days:8.2f}")
         print(f"\nTotal: {len(tests)} test cases "
               f"(of {len(TEST_MATRIX)} in full matrix)")
+        return
+
+    if args.replot:
+        _run_replot(args)
         return
 
     if not tests:

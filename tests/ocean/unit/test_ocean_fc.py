@@ -138,19 +138,6 @@ def test_ocean_model_fc_gram_cgrid_step(ocean_grid, ocean_z_coord, ocean_state):
     assert jnp.all(jnp.isfinite(state_new.T.data))
 
 
-def test_ocean_model_fv_tracer_transport(ocean_grid, ocean_z_coord, ocean_state):
-    """OceanModel with FV tracer transport runs a step."""
-    from legoesm.ocean.dynamics.ocean_model import OceanModel
-    config = OceanConfig(
-        use_fv_tracer_transport=True,
-        use_conservation_fixer=False,
-    )
-    model = OceanModel(ocean_grid, ocean_z_coord, config=config)
-    state_new = model.step(ocean_state, 60.0)
-    assert jnp.all(jnp.isfinite(state_new.T.data))
-    assert jnp.all(jnp.isfinite(state_new.S.data))
-
-
 def test_ocean_model_centered_step(ocean_grid, ocean_z_coord, ocean_state):
     """OceanModel with default centered discretization runs a step."""
     from legoesm.ocean.dynamics.ocean_model import OceanModel

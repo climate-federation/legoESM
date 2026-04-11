@@ -121,8 +121,6 @@ class OceanConfig(NamedTuple):
     differentiable_barotropic: bool = False  # Use lax.scan (grad-compatible) vs fori_loop (faster)
     div_damp_2: float = 0.0   # 2nd-order divergence damping [m²/s] (FV discretization)
     div_damp_4: float = 0.0   # 4th-order divergence damping [m⁴/s] (FV discretization)
-    edge_blend_strength: float = 0.0  # FV cube-edge continuity relaxation (0=off)
-    edge_blend_depth: int = 2         # Rows near each face edge to relax
     physics: object = None  # OceanPhysicsConfig or None (legacy mode)
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
@@ -395,13 +393,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
-    # Default alpha=0 for C-grid: the compact-stencil C-grid divergence/
-    # gradient operators eliminate the 2dx checkerboard mode that the A-grid
-    # solver needs diffusion to suppress.  The flux-form diffusion code
-    # remains available for production runs with realistic topography
-    # where grid-scale SSH noise may arise from wetting/drying or steep
-    # bathymetric steps.  Set to 0.001-0.01 if needed.
-    barotropic_diffusion_alpha: float = 0.0
+    # Barotropic SSH diffusion damps grid-scale modes that accumulate
+    # from split-explicit mode-splitting error.  The C-grid spatial
+    # operators eliminate the A-grid checkerboard, but the temporal
+    # barotropic-baroclinic coupling error still requires damping for
+    # long integrations (>1 year).  Matches MPAS default of 0.01.
+    barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
