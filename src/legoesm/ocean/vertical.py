@@ -260,7 +260,17 @@ def diagnose_w_from_flux_div(flux_div_k, z_coord=None):
     w : array, shape (..., nlev+1)
         Vertical velocity on half levels (surface first, bottom last = 0).
     """
-    fd_rev = flux_div_k[..., ::-1]
+    # FIXED: Include layer thickness for correct vertical integration
+    # From continuity: w(z) = -∫[bottom to z] ∇·(hu) dz'
+    # Need to multiply flux divergence by layer thickness before integrating
+    if z_coord is not None:
+        dz_ref = z_coord.dz_ref  # Layer thicknesses
+        fd_with_dz = flux_div_k * dz_ref[jnp.newaxis, jnp.newaxis, :]
+    else:
+        # Fallback for testing (assume unit thickness)
+        fd_with_dz = flux_div_k
+    
+    fd_rev = fd_with_dz[..., ::-1]
     cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]
     zeros_bottom = jnp.zeros((*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype)
@@ -296,4 +306,7 @@ def vertical_advection_ocean(field, w_half, z_coord, jacobian):
     jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
     dz_half = z_coord.dz_half_ref * jac_safe
     grad = upwind_vertical_gradient(field, dz_half, w_full)
+    
+    # Vertical advection calculation
+    
     return -w_full * grad

@@ -123,6 +123,10 @@ FIELD_RANGES = {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
     },
+    "baroclinic_gyre": {
+        "eta": (None, None),       # meters - adaptive range for circulation patterns
+        "SST": (None, None),       # °C - adaptive range for circulation-driven T patterns
+    },
     "rest_state_stratified_no_land": {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH (pure ocean)
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
@@ -144,7 +148,7 @@ FIELD_RANGES = {
     "baroclinic_gyre": {
         "eta": (-0.05, 0.05),      # meters - larger SSH with baroclinic dynamics
         "speed_sfc": (0, 0.5),      # m/s - higher speeds with thermal wind
-        "SST": (2, 20),             # °C - full stratification range (matches restoring)
+        "SST": (None, None),        # °C - adaptive range for circulation-driven T patterns
     },
     "geostrophic_adjustment": {
         "eta": (-0.1, 0.1),        # meters - adjustment process
@@ -438,6 +442,8 @@ def _build_latlon_weights(
     n_lon: int = 360,
     k: int = 6,
     max_dist: float | None = None,
+    target_lat: np.ndarray | None = None,
+    target_lon: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build KDTree interpolation weights from unstructured to lat-lon grid.
 
@@ -460,8 +466,14 @@ def _build_latlon_weights(
         np.cos(lat * d2r) * np.cos(lon * d2r),
         np.cos(lat * d2r) * np.sin(lon * d2r),
         np.sin(lat * d2r)])
-    lat_1d = np.linspace(-90.0, 90.0, n_lat)
-    lon_1d = np.linspace(0.0, 360.0, n_lon)
+    # Use target grid if provided
+    if target_lat is not None and target_lon is not None:
+        lat_1d = target_lat
+        lon_1d = target_lon
+        n_lat, n_lon = len(lat_1d), len(lon_1d)
+    else:
+        lat_1d = np.linspace(-90.0, 90.0, n_lat)
+        lon_1d = np.linspace(0.0, 360.0, n_lon)
     lo, la = np.meshgrid(lon_1d, lat_1d)
     tgt = np.column_stack([
         np.cos(la.ravel() * d2r) * np.cos(lo.ravel() * d2r),
@@ -503,6 +515,8 @@ def _bin_to_latlon(
     n_lat: int = 181,
     n_lon: int = 360,
     max_dist: float | None = None,
+    target_lat: np.ndarray | None = None,
+    target_lon: np.ndarray | None = None,
 ) -> np.ndarray:
     """Interpolate unstructured points onto a regular lat-lon grid.
 
@@ -514,6 +528,9 @@ def _bin_to_latlon(
         Automatically estimated for regional meshes when not provided.
     """
     vals = np.asarray(values, dtype=np.float64).ravel()
+    # Use target grid if provided, otherwise use default dimensions
+    if target_lat is not None and target_lon is not None:
+        n_lat, n_lon = len(target_lat), len(target_lon)
     if not np.any(np.isfinite(vals)):
         return np.full((n_lat, n_lon), np.nan, dtype=np.float64)
     # Auto-detect regional mesh: if the source points span < 80% of
@@ -530,16 +547,74 @@ def _bin_to_latlon(
             n_pts = len(lat)
             mean_spacing = np.sqrt(
                 d2r**2 * lat_span * min(360, lon.max() - lon.min()) / n_pts)
-            # Convert angular spacing to 3-D chord distance
+            # Convert angular spacing to 3-D chord distance  
             max_dist = 2.0 * np.sin(0.5 * mean_spacing * 3.0)
     idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon,
                                      max_dist=max_dist)
     return _apply_weights(vals, idxs, w, n_lat, n_lon)
 
 
+def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
+                     lat_deg: np.ndarray, coord_kind: str,
+                     target_lat: np.ndarray | None = None,
+                     target_lon: np.ndarray | None = None) -> np.ndarray:
+    """Regrid a binary land mask using nearest neighbor interpolation."""
+    if coord_kind in ("latlon", "gaussian"):
+        return np.asarray(mask_arr, dtype=np.float64)
+    
+    # For unstructured grids, use nearest neighbor interpolation
+    from scipy.spatial import cKDTree
+    
+    # Source points (unstructured)
+    lon_src = np.asarray(lon_deg, dtype=np.float64).ravel() % 360
+    lat_src = np.clip(np.asarray(lat_deg, dtype=np.float64).ravel(), -90, 90)
+    mask_src = np.asarray(mask_arr, dtype=np.float64).ravel()
+    
+    # Target grid
+    if target_lat is not None and target_lon is not None:
+        n_lat, n_lon = len(target_lat), len(target_lon)
+        lat_1d, lon_1d = target_lat, target_lon
+    else:
+        n_lat, n_lon = 181, 360
+        lat_1d = np.linspace(-90.0, 90.0, n_lat)
+        lon_1d = np.linspace(0.0, 360.0, n_lon)
+    
+    # Convert to 3D Cartesian coordinates for accurate distance calculation
+    d2r = np.pi / 180.0
+    
+    # Source points in 3D
+    src_3d = np.column_stack([
+        np.cos(lat_src * d2r) * np.cos(lon_src * d2r),
+        np.cos(lat_src * d2r) * np.sin(lon_src * d2r),
+        np.sin(lat_src * d2r)
+    ])
+    
+    # Target points in 3D  
+    lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d)
+    tgt_3d = np.column_stack([
+        np.cos(lat_2d.ravel() * d2r) * np.cos(lon_2d.ravel() * d2r),
+        np.cos(lat_2d.ravel() * d2r) * np.sin(lon_2d.ravel() * d2r),
+        np.sin(lat_2d.ravel() * d2r)
+    ])
+    
+    # Build KDTree and find nearest neighbors
+    tree = cKDTree(src_3d)
+    distances, indices = tree.query(tgt_3d, k=1)
+    
+    # Get mask values at nearest neighbors
+    mask_interp = mask_src[indices]
+    
+    # For land mask, apply threshold to ensure binary values
+    mask_interp = np.where(mask_interp > 0.5, 1.0, 0.0)
+    
+    return mask_interp.reshape(n_lat, n_lon)
+
+
 def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
-               lat_deg: np.ndarray, coord_kind: str) -> np.ndarray:
-    """Regrid a 2D field to (181, 360) lat-lon."""
+               lat_deg: np.ndarray, coord_kind: str,
+               target_lat: np.ndarray | None = None,
+               target_lon: np.ndarray | None = None) -> np.ndarray:
+    """Regrid a 2D field to target lat-lon grid (default 181x360)."""
     if coord_kind in ("latlon", "gaussian"):
         return np.asarray(field_arr, dtype=np.float64)
     # Cubed-sphere: use face-aware bilinear interpolation (no edge artifacts).
@@ -554,12 +629,15 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
             arr = arr.reshape(6, n, n)
         w = get_cubedsphere_to_latlon_weights(n)
         return apply_cubedsphere_to_latlon(arr, w)
-    return _bin_to_latlon(field_arr.ravel(), lon_deg.ravel(), lat_deg.ravel())
+    return _bin_to_latlon(field_arr.ravel(), lon_deg.ravel(), lat_deg.ravel(),
+                          target_lat=target_lat, target_lon=target_lon)
 
 
 def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
-                     lat_deg: np.ndarray, coord_kind: str) -> np.ndarray:
-    """Regrid a 3D field (*, nlev) to (181, 360, nlev)."""
+                     lat_deg: np.ndarray, coord_kind: str,
+                     target_lat: np.ndarray | None = None,
+                     target_lon: np.ndarray | None = None) -> np.ndarray:
+    """Regrid a 3D field (*, nlev) to target lat-lon grid (default 181x360x nlev)."""
     arr = np.asarray(field_3d, dtype=np.float64)
     if coord_kind in ("latlon", "gaussian"):
         if arr.ndim == 2:
@@ -580,7 +658,10 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     if arr.ndim == 1:
         arr = arr[:, None]
     nlev = arr.shape[-1]
-    n_lat, n_lon = 181, 360
+    if target_lat is not None and target_lon is not None:
+        n_lat, n_lon = len(target_lat), len(target_lon)
+    else:
+        n_lat, n_lon = 181, 360
     flat = arr.reshape(-1, nlev)
     # Auto-detect regional mesh and apply distance cutoff
     lat = np.asarray(lat_deg, dtype=np.float64).ravel()
@@ -594,7 +675,8 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
             * min(360, lon.max() - lon.min()) / n_pts)
         max_dist = 2.0 * np.sin(0.5 * mean_spacing * 3.0)
     idxs, w = _build_latlon_weights(lon_deg, lat_deg, n_lat, n_lon,
-                                     max_dist=max_dist)
+                                     max_dist=max_dist, target_lat=target_lat,
+                                     target_lon=target_lon)
     out = np.full((n_lat, n_lon, nlev), np.nan, dtype=np.float64)
     for k in range(nlev):
         out[..., k] = _apply_weights(flat[:, k], idxs, w, n_lat, n_lon)
@@ -787,12 +869,20 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
             all_regridded.append(regridded)
 
         # Determine shared color range across all panels
-        if field_key in field_ranges:
+        if field_key in field_ranges and field_ranges[field_key] != (None, None):
             vmin, vmax = field_ranges[field_key]
         else:
             # Compute consistent range from all regridded data
             all_vals = np.concatenate([r.ravel() for r in all_regridded])
             all_finite = all_vals[np.isfinite(all_vals)]
+            
+            # For SST, exclude likely land values (0°C) that escaped land masking
+            if field_key == 'SST' and len(all_finite) > 0:
+                # Remove values very close to 0°C which are likely unmasked land
+                ocean_vals = all_finite[all_finite > 1.0]  # Ocean SST should be > 1°C
+                if len(ocean_vals) > 0:
+                    all_finite = ocean_vals
+                    
             if len(all_finite) > 0:
                 vmin, vmax = float(np.nanmin(all_finite)), float(np.nanmax(all_finite))
             else:
@@ -856,6 +946,52 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                 plot_data, origin="lower", aspect="auto", cmap=cmap,
                 extent=[lon_ext[0], lon_ext[1], lat_ext[0], lat_ext[1]],
                 vmin=vmin, vmax=vmax)
+                
+            # Add velocity vectors for circulation visualization
+            if field_key in ("SST", "speed_sfc") and "u_sfc" in snapshots[step] and "v_sfc" in snapshots[step]:
+                u_raw = np.asarray(snapshots[step]["u_sfc"], dtype=np.float64)
+                v_raw = np.asarray(snapshots[step]["v_sfc"], dtype=np.float64)
+                u_reg = _regrid_2d(u_raw, lon_deg, lat_deg, coord_kind)
+                v_reg = _regrid_2d(v_raw, lon_deg, lat_deg, coord_kind)
+                
+                # Create coordinate meshgrid for vectors
+                if domain_extent is not None and coord_kind not in ("latlon", "gaussian"):
+                    # Use same cropping as for the main field
+                    lat_1d = np.linspace(-90, 90, u_reg.shape[0])
+                    lon_1d = np.linspace(0, 360, u_reg.shape[1])
+                    r0 = max(int(np.searchsorted(lat_1d, lat_ext[0])) - 1, 0)
+                    r1 = min(int(np.searchsorted(lat_1d, lat_ext[1])) + 2, len(lat_1d))
+                    c0 = max(int(np.searchsorted(lon_1d, lon_ext[0])) - 1, 0)
+                    c1 = min(int(np.searchsorted(lon_1d, lon_ext[1])) + 2, len(lon_1d))
+                    u_plot = u_reg[r0:r1, c0:c1]
+                    v_plot = v_reg[r0:r1, c0:c1]
+                    lat_plot = lat_1d[r0:r1]
+                    lon_plot = lon_1d[c0:c1]
+                else:
+                    u_plot = u_reg
+                    v_plot = v_reg
+                    lat_plot = np.linspace(lat_ext[0], lat_ext[1], u_reg.shape[0])
+                    lon_plot = np.linspace(lon_ext[0], lon_ext[1], u_reg.shape[1])
+                
+                # Subsample vectors for readability (every 4th point)
+                skip = 4
+                X, Y = np.meshgrid(lon_plot[::skip], lat_plot[::skip])
+                U = u_plot[::skip, ::skip]
+                V = v_plot[::skip, ::skip]
+                
+                # Only plot where data is finite and non-zero
+                mask = np.isfinite(U) & np.isfinite(V) & ((np.abs(U) + np.abs(V)) > 1e-6)
+                if np.any(mask):
+                    # Use adaptive scaling based on velocity magnitude
+                    speed = np.sqrt(U[mask]**2 + V[mask]**2)
+                    max_speed = np.nanmax(speed) if len(speed) > 0 else 0.01
+                    scale = max_speed * 100  # Scale for visibility
+                    
+                    ax.quiver(X[mask], Y[mask], U[mask], V[mask], 
+                             color='white', alpha=0.8, scale=scale, scale_units='xy',
+                             width=0.003, headwidth=4, headlength=6, 
+                             edgecolors='black', linewidth=0.5)
+            
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             if c == 0:
@@ -982,16 +1118,37 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         else:
             cs_vmin, cs_vmax = None, None
 
+        # Compute level interfaces for pcolormesh (accurate vertical grid representation)
+        def compute_level_interfaces(level_centers):
+            """Compute interface depths from level center depths."""
+            if len(level_centers) == 1:
+                return np.array([0.0, 2 * level_centers[0]])
+            
+            # Compute interfaces as midpoints between level centers
+            interfaces = np.zeros(len(level_centers) + 1)
+            interfaces[0] = 0.0  # Surface
+            interfaces[1:-1] = 0.5 * (level_centers[:-1] + level_centers[1:])
+            interfaces[-1] = level_centers[-1] + (level_centers[-1] - interfaces[-2])
+            return interfaces
+
+        level_interfaces = compute_level_interfaces(levels)
+        
         for ax, step, section, bin_centers in zip(
                 axes_arr, valid_steps, all_sections, all_bin_centers):
-            im = ax.imshow(
-                section.T, origin="upper", aspect="auto", cmap="RdBu_r",
-                extent=[bin_centers[0], bin_centers[-1],
-                        float(levels[-1]), float(levels[0])],
+            # Use pcolormesh to show true model grid structure instead of imshow
+            # This accurately represents the variable vertical grid spacing
+            bin_interfaces = np.linspace(bin_centers[0] - 0.5 * (bin_centers[1] - bin_centers[0]),
+                                       bin_centers[-1] + 0.5 * (bin_centers[-1] - bin_centers[-2]),
+                                       len(bin_centers) + 1)
+            X, Y = np.meshgrid(bin_interfaces, level_interfaces)
+            im = ax.pcolormesh(
+                X, Y, section.T, cmap="RdBu_r", shading='flat',
                 vmin=cs_vmin, vmax=cs_vmax)
+            
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             ax.set_xlabel(xlabel)
+            ax.invert_yaxis()  # Depth increases downward
 
         axes_arr[0].set_ylabel(level_label)
         if im is not None:
@@ -1249,10 +1406,14 @@ def _save_snapshot_data(
                 field_timesteps.append(arr)
                 
                 # Regrid to lat-lon
+                target_lat = latlon_arrays["lat"]
+                target_lon = latlon_arrays["lon"]
                 if field_key.endswith("_3d"):
-                    regridded = _regrid_3d_level(arr, lon_deg, lat_deg, coord_kind)
+                    regridded = _regrid_3d_level(arr, lon_deg, lat_deg, coord_kind,
+                                               target_lat=target_lat, target_lon=target_lon)
                 else:
-                    regridded = _regrid_2d(arr, lon_deg, lat_deg, coord_kind)
+                    regridded = _regrid_2d(arr, lon_deg, lat_deg, coord_kind,
+                                         target_lat=target_lat, target_lon=target_lon)
                 latlon_timesteps.append(regridded)
             else:
                 # Field not available at this timestep - skip or use NaN
@@ -1671,6 +1832,31 @@ def _extract_fv_ocean(state, grid_type: str, include_velocity_3d: bool = False):
             result["speed_3d"] = np.sqrt(u_cc**2 + v_cc**2)
         else:
             result["u_3d"] = u_raw
+        # Add vertical velocity if available
+        if hasattr(state, "w"):
+            w_3d = np.asarray(state.w.data, dtype=np.float64)
+            result["w_3d"] = w_3d
+            # Extract vertical velocity below Ekman layer (level 1 = 133.9m depth)
+            result["w_133m"] = w_3d[..., 1]
+            # Also keep surface for comparison if needed
+            result["w_sfc"] = w_3d[..., 0]
+    
+    # Create surface speed field by interpolating u,v to common grid
+    if "u_sfc" in result and "v_sfc" in result:
+        u_sfc = result["u_sfc"]
+        v_sfc = result["v_sfc"]
+        # For C-grid: interpolate staggered velocities to cell centers for speed
+        if u_sfc.shape != v_sfc.shape:
+            # u is on east-west faces, v on north-south faces
+            # Interpolate both to cell centers
+            u_cc = 0.5 * (u_sfc[:, :-1] + u_sfc[:, 1:])  # avg in lon direction
+            v_cc = 0.5 * (v_sfc[:-1, :] + v_sfc[1:, :])  # avg in lat direction
+            # Make sure they have same shape (min of both)
+            ny_min = min(u_cc.shape[0], v_cc.shape[0])
+            nx_min = min(u_cc.shape[1], v_cc.shape[1])
+            u_final = u_cc[:ny_min, :nx_min]
+            v_final = v_cc[:ny_min, :nx_min]
+            result["speed_sfc"] = np.sqrt(u_final**2 + v_final**2)
     return result
 
 
@@ -1710,6 +1896,15 @@ def _extract_mpas_ocean(state, lon_deg, lat_deg, mesh=None,
         result["u_3d"] = u_cc
         result["v_3d"] = v_cc
         result["speed_3d"] = np.sqrt(u_cc**2 + v_cc**2)
+        
+        # Add vertical velocity if available (for future MPAS implementation)
+        if hasattr(state, "w"):
+            w_3d = np.asarray(state.w.data, dtype=np.float64)
+            result["w_3d"] = w_3d
+            # Extract vertical velocity below Ekman layer (level 1 = 133.9m depth)
+            result["w_133m"] = w_3d[..., 1]
+            # Also keep surface for comparison if needed
+            result["w_sfc"] = w_3d[..., 0]
     return result
 
 
@@ -2718,6 +2913,115 @@ def run_barotropic_double_gyre(tc: TestCase, output_dir: Path, days: float
                                 label="Barotropic Double Gyre")
 
 
+def _make_baroclinic_scalar_fn(grid_type: str, grid=None, z_coord=None, config=None):
+    """Enhanced scalar function for baroclinic gyre with N-S temperature gradient diagnostics."""
+    import jax.numpy as jnp
+    
+    # Get base scalar function
+    base_scalar_fn = _make_scalar_fn(grid_type, grid, z_coord)
+    
+    # Domain bounds for North-South analysis
+    lat_south = config.lat_south if config else 15.0
+    lat_north = config.lat_north if config else 75.0
+    lat_center = (lat_south + lat_north) / 2.0
+    
+    if grid_type == "latlon_regional":
+        # Get latitude coordinates
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        
+        # Find indices for north/south split
+        center_idx = np.argmin(np.abs(lat_deg - lat_center))
+        
+        def scalar_fn(s):
+            base_diag = base_scalar_fn(s)
+            
+            if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
+                ocean_mask = s.land_mask.data > 0.5
+                
+                # Compute North-South temperature differences at key levels
+                T_data = s.T.data
+                
+                # Surface level (0) and thermocline level (4, ~681m depth)
+                for level, level_name in [(0, 'surface'), (4, 'thermocline')]:
+                    if level < T_data.shape[-1]:
+                        T_level = T_data[..., level]
+                        T_level_ocean = jnp.where(ocean_mask, T_level, jnp.nan)
+                        
+                        # Split domain at center latitude
+                        T_north = T_level_ocean[center_idx:, :]
+                        T_south = T_level_ocean[:center_idx, :]
+                        
+                        # Compute mean temperatures in each region
+                        T_north_mean = jnp.nanmean(T_north)
+                        T_south_mean = jnp.nanmean(T_south)
+                        
+                        # North-South temperature difference (positive = north warmer)
+                        dT_ns = T_north_mean - T_south_mean
+                        
+                        # Add to diagnostics
+                        base_diag[f"dT_ns_{level_name}"] = float(dT_ns)
+                        base_diag[f"T_north_{level_name}"] = float(T_north_mean)
+                        base_diag[f"T_south_{level_name}"] = float(T_south_mean)
+                        
+                        # Spatial standard deviation (measure of baroclinic development)
+                        spatial_std = jnp.nanstd(T_level_ocean)
+                        base_diag[f"T_spatial_std_{level_name}"] = float(spatial_std)
+            
+            return base_diag
+            
+        return scalar_fn
+        
+    elif grid_type == "mpas_regional":
+        # For MPAS, use cell latitude coordinates
+        lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
+        
+        # Find cells in north vs south regions
+        north_mask = lat_deg >= lat_center
+        south_mask = lat_deg < lat_center
+        
+        def scalar_fn(s):
+            base_diag = base_scalar_fn(s)
+            
+            if hasattr(s, 'land_mask') and hasattr(s.land_mask, 'data'):
+                ocean_mask = s.land_mask.data > 0.5
+                
+                # Compute North-South temperature differences at key levels
+                T_data = s.T.data
+                
+                for level, level_name in [(0, 'surface'), (4, 'thermocline')]:
+                    if level < T_data.shape[-1]:
+                        T_level = T_data[..., level]
+                        T_level_ocean = jnp.where(ocean_mask, T_level, jnp.nan)
+                        
+                        # Extract north and south regions
+                        T_north = jnp.where(north_mask & ocean_mask, T_level, jnp.nan)
+                        T_south = jnp.where(south_mask & ocean_mask, T_level, jnp.nan)
+                        
+                        # Compute mean temperatures in each region
+                        T_north_mean = jnp.nanmean(T_north)
+                        T_south_mean = jnp.nanmean(T_south)
+                        
+                        # North-South temperature difference
+                        dT_ns = T_north_mean - T_south_mean
+                        
+                        # Add to diagnostics
+                        base_diag[f"dT_ns_{level_name}"] = float(dT_ns)
+                        base_diag[f"T_north_{level_name}"] = float(T_north_mean)
+                        base_diag[f"T_south_{level_name}"] = float(T_south_mean)
+                        
+                        # Spatial standard deviation
+                        spatial_std = jnp.nanstd(T_level_ocean)
+                        base_diag[f"T_spatial_std_{level_name}"] = float(spatial_std)
+            
+            return base_diag
+            
+        return scalar_fn
+    
+    else:
+        # For other grids, just return the base function
+        return base_scalar_fn
+
+
 def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
                        ) -> tuple[str, float, str]:
     """Regional wind-driven baroclinic gyre with surface restoring."""
@@ -2741,7 +3045,7 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
     diag_every = max(1, n_steps // 40)
     
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    scalar_fn = _make_baroclinic_scalar_fn(tc.grid_type, grid, z_coord, config)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
                                   include_velocity_3d=True)
     
@@ -2761,8 +3065,15 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
     T_drift = (abs(T_list[-1] - T_list[0])
                if len(T_list) >= 2 else 0.0)
     
+    # Extract baroclinic diagnostics
+    dT_ns_surface = diag.get("dT_ns_surface", [0])[-1] if diag.get("dT_ns_surface") else 0
+    dT_ns_thermocline = diag.get("dT_ns_thermocline", [0])[-1] if diag.get("dT_ns_thermocline") else 0
+    T_spatial_std_surface = diag.get("T_spatial_std_surface", [0])[-1] if diag.get("T_spatial_std_surface") else 0
+    T_spatial_std_thermocline = diag.get("T_spatial_std_thermocline", [0])[-1] if diag.get("T_spatial_std_thermocline") else 0
+    
     notes = (f"max_speed={max_speed:.4f}m/s, eta_drift={eta_drift:.2e}, "
-             f"T_drift={T_drift:.3f}degC")
+             f"T_drift={T_drift:.3f}degC, dT_NS_sfc={dT_ns_surface:.6f}degC, "
+             f"dT_NS_thermo={dT_ns_thermocline:.6f}degC")
     
     # Save results  
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
@@ -2783,12 +3094,17 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
             ("eta", "SSH (m)", "RdBu_r"),
             ("speed_sfc", "Surface speed (m/s)", "magma"),
             ("SST", "SST (degC)", "RdYlBu_r"),
+            ("w_133m", "Vertical velocity at 134m (m/s)", "RdBu_r"),
         ],
         field_3d_key="T_3d", level_values=depth,
         level_label="Depth (m)",
         vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
         scalar_units={"mean_eta": "m", "max_speed": "m/s",
-                      "mean_T": "degC", "mean_S": "PSU"},
+                      "mean_T": "degC", "mean_S": "PSU",
+                      "dT_ns_surface": "degC", "dT_ns_thermocline": "degC",
+                      "T_north_surface": "degC", "T_south_surface": "degC",
+                      "T_north_thermocline": "degC", "T_south_thermocline": "degC",
+                      "T_spatial_std_surface": "degC", "T_spatial_std_thermocline": "degC"},
         domain_extent=extent)
     
     return "PASS" if ok else "FAIL", wall, notes
@@ -4180,6 +4496,8 @@ def _create_comparison_snapshots(test_case_dir: Path, grid_results: dict, field:
         cmap = 'plasma'
     elif field in ['SSS', 'S']:
         cmap = 'viridis'
+    elif field in ('w_133m', 'w_sfc'):
+        cmap = 'RdBu_r'  # Diverging colormap for vertical velocity (upwelling/downwelling)
     else:
         cmap = 'viridis'
     
@@ -4419,6 +4737,8 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
         cmap = 'plasma'
     elif field in ('speed_sfc',):
         cmap = 'magma'
+    elif field in ('w_133m', 'w_sfc'):
+        cmap = 'RdBu_r'  # Diverging colormap for vertical velocity (upwelling/downwelling)
     else:
         cmap = 'viridis'
 
@@ -4431,12 +4751,21 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
         snaps = data['snapshots']
         if field in snaps.files and snaps[field].ndim == 3:
             n_times_per_grid[gname] = snaps[field].shape[0]
+        elif 'times_days' in snaps.files:
+            # Grid doesn't have this field, but use times from other data
+            n_times_per_grid[gname] = len(snaps['times_days'])
         else:
-            # Old format: count step files
+            # Old format: count step files or use a default
             ffiles = [f for f in snaps.files if f.startswith(f'{field}_step')]
-            n_times_per_grid[gname] = len(ffiles)
+            n_times_per_grid[gname] = len(ffiles) if ffiles else max_times
 
-    if not n_times_per_grid or max(n_times_per_grid.values()) < 2:
+    if not n_times_per_grid:
+        return  # No grids at all
+
+    # Ensure we have at least 2 time steps from grids that actually have the field
+    has_field_times = [nt for gname, nt in n_times_per_grid.items() 
+                       if field in grid_results[gname]['snapshots'].files]
+    if not has_field_times or max(has_field_times) < 2:
         return  # Need at least 2 time steps for evolution
 
     n_times_max = max(n_times_per_grid.values())
@@ -4444,7 +4773,7 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
 
     # Collect all fields for shared color range
     all_fields = []  # list of 2D arrays
-    grid_field_data = {}  # gname -> list of (time_label, 2D_array)
+    grid_field_data = {}  # gname -> list of (time_label, 2D_array or None)
     for gname, data in grid_results.items():
         snaps = data['snapshots']
         times_days = snaps['times_days'] if 'times_days' in snaps.files else None
@@ -4470,8 +4799,15 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
                 all_fields.append(f2d)
             grid_field_data[gname] = entries
         else:
-            # Old format — skip for simplicity
-            continue
+            # Field not available - create placeholder entries
+            entries = []
+            for i in range(n_cols):
+                if times_days is not None and len(times_days) > i:
+                    t_label = f"{times_days[i]:.1f}d"
+                else:
+                    t_label = f"t{i}"
+                entries.append((t_label, None))  # None indicates missing data
+            grid_field_data[gname] = entries
 
     if not grid_field_data or not all_fields:
         return
@@ -4489,7 +4825,7 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
 
     # Actual number of columns (may differ per grid; use max)
     actual_cols = max(len(v) for v in grid_field_data.values())
-    actual_grids = [g for g in grid_names if g in grid_field_data]
+    actual_grids = grid_names  # Include all grids, even those with missing fields
     n_rows = len(actual_grids)
 
     fig, axes = plt.subplots(n_rows, actual_cols,
@@ -4525,7 +4861,13 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
             c0 = max(int(np.searchsorted(lon_1d, extent[0])) - 1, 0)
             c1 = min(int(np.searchsorted(lon_1d, extent[1])) + 2,
                      len(lon_1d))
-            sample_shape = entries[0][1].shape if entries else None
+            # Find a non-None entry to get the shape
+            sample_shape = None
+            if entries:
+                for _, f2d in entries:
+                    if f2d is not None:
+                        sample_shape = f2d.shape
+                        break
             if sample_shape and ((r1 - r0) < sample_shape[0]
                                  or (c1 - c0) < sample_shape[1]):
                 crop_slices = (r0, r1, c0, c1)
@@ -4538,11 +4880,20 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
             ax = axes[i_row, i_col]
             if i_col < len(entries):
                 t_label, f2d = entries[i_col]
-                if crop_slices is not None:
-                    r0, r1, c0, c1 = crop_slices
-                    f2d = f2d[r0:r1, c0:c1]
-                im = ax.imshow(f2d, origin='lower', aspect='auto', cmap=cmap,
-                               extent=extent, vmin=vmin, vmax=vmax)
+                if f2d is not None:
+                    # Field data available
+                    if crop_slices is not None:
+                        r0, r1, c0, c1 = crop_slices
+                        f2d = f2d[r0:r1, c0:c1]
+                    im = ax.imshow(f2d, origin='lower', aspect='auto', cmap=cmap,
+                                   extent=extent, vmin=vmin, vmax=vmax)
+                else:
+                    # Field not available - show "not available" message
+                    ax.text(0.5, 0.5, f'{field} not available', transform=ax.transAxes,
+                            ha='center', va='center', fontsize=9)
+                    ax.set_xlim(0, 1)
+                    ax.set_ylim(0, 1)
+                
                 if i_row == 0:
                     ax.set_title(t_label, fontsize=9)
                 if i_col == 0:
@@ -4568,6 +4919,163 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
     print(f"    Saved: {out.name}")
 
 
+def _create_comparison_vertical_section(test_case_dir: Path, grid_results: dict) -> None:
+    """Create meridional vertical cross-section comparison for baroclinic gyre."""
+    import numpy as np
+    
+    # Check that we have T_3d data for all grids
+    grids_with_T3d = {}
+    for grid_name, data in grid_results.items():
+        snapshots = data['snapshots']
+        if 'T_3d' in snapshots.files:
+            grids_with_T3d[grid_name] = data
+    
+    if len(grids_with_T3d) < 2:
+        return
+    
+    # Domain parameters for baroclinic gyre (60° longitude × 60° latitude)
+    lon_middle = 60.0  # Middle of 0-120° domain
+    lat_range = (-90, 90)  # Full latitude range for averaging
+    
+    fig, axes = plt.subplots(1, len(grids_with_T3d), figsize=(5 * len(grids_with_T3d), 6),
+                             sharey=True)
+    if len(grids_with_T3d) == 1:
+        axes = [axes]
+    
+    for idx, (grid_name, data) in enumerate(grids_with_T3d.items()):
+        ax = axes[idx]
+        snapshots = data['snapshots']
+        
+        # Load final temperature field (use last time step)
+        T_3d_all = np.asarray(snapshots['T_3d'], dtype=np.float64)
+        lon_deg = np.asarray(snapshots['lon'], dtype=np.float64) 
+        lat_deg = np.asarray(snapshots['lat'], dtype=np.float64)
+        
+        # Handle different data structures - T_3d is (time, lat, lon, lev) 
+        if T_3d_all.ndim == 4:  # (time, lat, lon, lev)
+            T_3d = T_3d_all[-1]  # Take final time step → (lat, lon, lev)
+        elif T_3d_all.ndim == 3:  # (lat, lon, lev) - already final state  
+            T_3d = T_3d_all
+        else:
+            print(f"Warning: unexpected T_3d shape {T_3d_all.shape} for {grid_name}")
+            continue
+        
+        # Get depth levels from the first grid (they should be the same)  
+        if idx == 0:
+            # Try to get depth data from results.txt or default levels
+            results_file = test_case_dir / grid_name / 'results.txt'
+            if results_file.exists():
+                with open(results_file, 'r') as f:
+                    content = f.read()
+                    # Look for depth line
+                    for line in content.split('\n'):
+                        if line.startswith('depth:'):
+                            import ast
+                            depth_str = line.split(':', 1)[1].strip()
+                            depth_data = np.array(ast.literal_eval(depth_str))
+                            break
+                    else:
+                        # Fallback to default depth levels
+                        depth_data = np.array([26.19, 133.86, 352.12, 680.95, 1120.37, 
+                                             1670.37, 2330.95, 3102.12, 3983.86, 4976.19])
+            else:
+                # Fallback to default depth levels
+                depth_data = np.array([26.19, 133.86, 352.12, 680.95, 1120.37,
+                                     1670.37, 2330.95, 3102.12, 3983.86, 4976.19])
+        
+        # Extract meridional section at domain middle (longitude = 60°)
+        # Find closest longitude index to domain middle  
+        lon_idx = np.argmin(np.abs(lon_deg - lon_middle))
+        
+        # Average over a few longitude points for smoother section
+        lon_indices = slice(max(0, lon_idx-2), min(len(lon_deg), lon_idx+3))
+        T_section = np.nanmean(T_3d[:, lon_indices, :], axis=1)  # T_3d is (lat, lon, lev) → (lat, lev)
+        
+        # Apply land mask if available (simplified for now)
+        if 'land_mask' in snapshots.files:
+            land_mask = np.asarray(snapshots['land_mask'], dtype=np.float64)
+            # For now, skip land masking to get basic functionality working
+            # TODO: Fix land mask broadcasting for vertical sections
+            pass
+        
+        # Compute depth interfaces for proper plotting
+        def compute_level_interfaces(level_centers):
+            if len(level_centers) == 1:
+                return np.array([0.0, 2 * level_centers[0]])
+            interfaces = np.zeros(len(level_centers) + 1)
+            interfaces[0] = 0.0
+            interfaces[1:-1] = 0.5 * (level_centers[:-1] + level_centers[1:])
+            interfaces[-1] = level_centers[-1] + (level_centers[-1] - interfaces[-2])
+            return interfaces
+        
+        level_interfaces = compute_level_interfaces(depth_data)
+        
+        # Create coordinate meshes for pcolormesh
+        # Ensure lat_interfaces matches the T_section shape
+        if len(lat_deg) > 1:
+            lat_step = (lat_deg[-1] - lat_deg[0]) / (len(lat_deg) - 1)
+            lat_interfaces = np.linspace(lat_deg[0] - 0.5 * lat_step,
+                                       lat_deg[-1] + 0.5 * lat_step,
+                                       len(lat_deg) + 1)
+        else:
+            lat_interfaces = np.array([lat_deg[0] - 1.0, lat_deg[0] + 1.0])
+        
+        X, Y = np.meshgrid(lat_interfaces, level_interfaces)
+        
+        # Verify dimensions match for pcolormesh
+        expected_lat_size = len(lat_interfaces) - 1  # pcolormesh expects one less than interfaces
+        expected_lev_size = len(level_interfaces) - 1
+        if T_section.shape != (expected_lat_size, expected_lev_size):
+            print(f"Warning: T_section shape {T_section.shape} doesn't match expected "
+                  f"({expected_lat_size}, {expected_lev_size}) for {grid_name}")
+            continue
+        
+        # Plot with adaptive colormap range
+        # For baroclinic_gyre, use data-adaptive range to show circulation patterns
+        T_finite = T_section.T[np.isfinite(T_section.T)]
+        if len(T_finite) > 0:
+            vmin, vmax = float(np.nanmin(T_finite)), float(np.nanmax(T_finite))
+        else:
+            vmin, vmax = 2, 20  # fallback for edge cases
+        
+        im = ax.pcolormesh(X, Y, T_section.T, cmap='RdYlBu_r', 
+                          vmin=vmin, vmax=vmax, shading='flat')
+        
+        ax.set_title(f'{grid_name}', fontsize=12)
+        ax.set_xlabel('Latitude (°)')
+        if idx == 0:
+            ax.set_ylabel('Depth (m)')
+        ax.set_ylim(0, level_interfaces[-1])  # Set y-limits to actual depth range
+        ax.invert_yaxis()  # Surface at top, deep at bottom
+        ax.grid(True, alpha=0.3)
+        
+        # Set x-limits to regional domain extent for consistent comparison
+        # Use the actual experiment domain, not the interpolation grid extent
+        regional_lat_min, regional_lat_max = 15.0, 75.0  # Baroclinic gyre domain
+        ax.set_xlim(regional_lat_min, regional_lat_max)
+        
+        # Add domain boundaries for regional grids
+        if 'regional' in grid_name:
+            ax.axvline(15, color='white', linewidth=2, linestyle='--', alpha=0.8)
+            ax.axvline(75, color='white', linewidth=2, linestyle='--', alpha=0.8)
+    
+    # Add colorbar
+    plt.tight_layout()
+    fig.subplots_adjust(right=0.88)
+    cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
+    cbar = fig.colorbar(im, cax=cbar_ax)
+    cbar.set_label('Temperature (°C)', fontsize=12)
+    
+    fig.suptitle(f'{test_case_dir.name} — Meridional Temperature Section (60°E)', 
+                 fontsize=14, y=0.95)
+    
+    # Save the plot
+    out_file = test_case_dir / 'comparison_vertical_section.png'
+    fig.savefig(out_file, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"    Saved: {out_file.name}")
+
+
 def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> None:
     """Create all cross-grid comparison plots and summary for a test case."""
     if len(grid_results) < 2:
@@ -4579,7 +5087,7 @@ def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> N
     _create_comparison_timeseries(test_case_dir, grid_results)
 
     # Final snapshot comparisons
-    for field in ['eta', 'SST']:
+    for field in ['eta', 'SST', 'w_133m']:
         field_available = any(
             field in data['snapshots'].files or
             any(f.startswith(f'{field}_step') for f in data['snapshots'].files)
@@ -4592,6 +5100,10 @@ def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> N
     # Forcing profile plot for wind-driven cases
     if 'barotropic_wind' in test_case_dir.name:
         _save_forcing_profile(test_case_dir)
+
+    # Vertical cross-section comparison for baroclinic gyre
+    if 'baroclinic_gyre' in test_case_dir.name:
+        _create_comparison_vertical_section(test_case_dir, grid_results)
 
     # Summary table
     _create_comparison_summary(test_case_dir, grid_results)

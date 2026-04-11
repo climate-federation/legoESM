@@ -304,6 +304,8 @@ class LatLonCGridOceanState(NamedTuple):
         Ocean mask at u-points (lon interfaces). Shape (n_lat, n_lon+1).
     v_mask : Field
         Ocean mask at v-points (lat interfaces). Shape (n_lat+1, n_lon).
+    w : Field
+        Vertical velocity [m/s]. Shape (n_lat, n_lon, nlev). Diagnostic field computed from flux divergence.
     """
 
     u: Field
@@ -315,6 +317,51 @@ class LatLonCGridOceanState(NamedTuple):
     land_mask: Field
     u_mask: Field
     v_mask: Field
+    w: Field
+
+
+class LatLonCGridOceanDiagnostics(NamedTuple):
+    """Diagnostic fields for debugging ocean dynamics on lat-lon C-grid.
+    
+    These fields are computed during tendency calculation for analysis purposes
+    but are not part of the prognostic state.
+    
+    Fields
+    ------
+    w : Field
+        Vertical velocity at half levels [m/s]. Shape (n_lat, n_lon, nlev+1).
+    w_half_ref : Field
+        Reference vertical velocity in z* coordinates [m/s]. Shape (n_lat, n_lon, nlev+1).
+    flux_div_k : Field
+        Horizontal flux divergence per layer [m/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_total : Field
+        Total temperature tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_hadv : Field
+        Horizontal advection tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_vadv : Field
+        Vertical advection tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_hdiff : Field
+        Horizontal diffusion tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_vdiff : Field
+        Vertical diffusion tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_physics : Field
+        Physics tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    wind_stress_x : Field
+        Zonal wind stress applied [Pa]. Shape (n_lat, n_lon).
+    wind_stress_y : Field  
+        Meridional wind stress applied [Pa]. Shape (n_lat, n_lon).
+    """
+    w: Field
+    w_half_ref: Field
+    flux_div_k: Field
+    dT_dt_total: Field
+    dT_dt_hadv: Field
+    dT_dt_vadv: Field
+    dT_dt_hdiff: Field
+    dT_dt_vdiff: Field
+    dT_dt_physics: Field
+    wind_stress_x: Field
+    wind_stress_y: Field
 
 
 class LatLonCGridOceanTendencies(NamedTuple):
