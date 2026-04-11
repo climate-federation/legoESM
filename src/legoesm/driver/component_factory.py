@@ -425,12 +425,20 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
         The land surface step function.
     """
     from legoesm.land import (
-        LandConfig, MultiLayerLandConfig,
-        step_land, step_multilayer_land,
+        CanopyLandConfig, LandConfig, MultiLayerLandConfig,
+        step_canopy_land, step_land, step_multilayer_land,
     )
 
     if land_config is None:
         land_config = LandConfig()
+
+    if isinstance(land_config, CanopyLandConfig):
+        logger.info(
+            "Land: canopy model (n_layers=%d, LE_module=%s)",
+            land_config.multilayer.soil_grid.n_layers,
+            land_config.canopy.LE_module,
+        )
+        return step_canopy_land
 
     if isinstance(land_config, MultiLayerLandConfig):
         logger.info("Land: multilayer model (n_layers=%d)", land_config.soil_grid.n_layers)
@@ -441,7 +449,7 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
         return step_land
 
     raise TypeError(
-        f"land_config must be LandConfig or MultiLayerLandConfig, "
+        f"land_config must be LandConfig, MultiLayerLandConfig, or CanopyLandConfig, "
         f"got {type(land_config).__name__!r}"
     )
 
