@@ -12,7 +12,6 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh

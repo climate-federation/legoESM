@@ -485,7 +485,6 @@ def curl_vertex_cgrid(
     """
     is_3d = u.ndim == 3
     if is_3d:
-        import jax
         u_t = jnp.moveaxis(u, -1, 0)   # (nlev, n_lat, n_lon+1)
         v_t = jnp.moveaxis(v, -1, 0)   # (nlev, n_lat+1, n_lon)
 
@@ -662,7 +661,6 @@ def vector_laplacian_cgrid(
     is_3d = u.ndim == 3
 
     if is_3d:
-        import jax
         u_t = jnp.moveaxis(u, -1, 0)   # (nlev, n_lat, n_lon+1)
         v_t = jnp.moveaxis(v, -1, 0)   # (nlev, n_lat+1, n_lon)
 

@@ -30,27 +30,21 @@ from legoesm.core.operators_cdgrid import (
     center_to_dgrid_vector,
     dgrid_to_center_vector,
     dgrid_to_cgrid,
-    cgrid_to_dgrid,
     dgrid_vorticity,
     cgrid_divergence,
     cgrid_mass_flux_divergence,
     cgrid_tracer_advection_fct,
     _arakawa_lamb_gradient,
     _interp_center_to_corner,
-    _laplacian_dgrid,
     _extrapolate_boundary_corners,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.cubed_sphere_cdgrid import (
-    CubedSphereCDGrid,
-    create_cubed_sphere_cdgrid,
-)
+from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
 from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
-    upwind_vertical_gradient,
 )
 from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
 
