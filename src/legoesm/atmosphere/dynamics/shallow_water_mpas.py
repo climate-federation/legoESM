@@ -196,13 +196,19 @@ class MPASShallowWaterModel(IntegrationMixin):
 # ============================================================================
 
 def _fix_mass_mpas(state_new, state_old, mesh):
-    """Fix mass conservation: uniform additive correction to h."""
-    area = mesh.areaCell
-    mass_old = jnp.sum(state_old.h.data * area)
-    mass_new = jnp.sum(state_new.h.data * area)
+    """Fix mass conservation: uniform additive correction to h.
+
+    Upcasts to float64 for the global reduction to avoid catastrophic
+    cancellation in the mass difference (float32 sums lose ~7 digits).
+    """
+    area = mesh.areaCell.astype(jnp.float64)
+    mass_old = jnp.sum(state_old.h.data.astype(jnp.float64) * area)
+    mass_new = jnp.sum(state_new.h.data.astype(jnp.float64) * area)
     total_area = jnp.sum(area)
     correction = (mass_old - mass_new) / total_area
-    h_fixed = state_new.h.replace(data=state_new.h.data + correction)
+    h_fixed = state_new.h.replace(
+        data=state_new.h.data + correction.astype(state_new.h.data.dtype),
+    )
     return state_new._replace(h=h_fixed)
 
 

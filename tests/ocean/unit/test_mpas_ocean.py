@@ -369,13 +369,18 @@ class TestConservation:
             eta=state.eta.replace(data=eta_perturbed),
         )
 
-        vol_before = jnp.sum(state.eta.data * mask * area)
+        # Verify in float64 — the fixer accumulates in float64 but the
+        # corrected state may be float32 under the default precision policy.
+        _f64 = jnp.float64
+        vol_before = jnp.sum(state.eta.data.astype(_f64) * mask.astype(_f64) * area.astype(_f64))
         state_fixed = fix_volume_mpas(state_new, state, mesh, z_coord)
-        vol_after = jnp.sum(state_fixed.eta.data * mask * area)
+        vol_after = jnp.sum(state_fixed.eta.data.astype(_f64) * mask.astype(_f64) * area.astype(_f64))
 
-        # Use absolute tolerance when reference volume is near zero
-        total_area = jnp.sum(mask * area)
-        assert jnp.abs(vol_after - vol_before) < 1e-10 * total_area
+        # Use absolute tolerance when reference volume is near zero.
+        # With float32 state, the correction's float32 representation
+        # introduces O(nCells * eps_f32 * |correction|) residual.
+        total_area = jnp.sum(mask.astype(_f64) * area.astype(_f64))
+        assert jnp.abs(vol_after - vol_before) < 1e-5 * total_area
 
     def test_heat_conservation(self, state, mesh, z_coord):
         """Heat fixer restores total heat content."""
@@ -390,21 +395,24 @@ class TestConservation:
             T=state.T.replace(data=T_perturbed),
         )
 
+        _f64 = jnp.float64
         h_k = compute_layer_thickness(state.eta.data, H_bathy, z_coord)
         heat_before = jnp.sum(
-            state.T.data * h_k * mask[:, jnp.newaxis] * mesh.areaCell[:, jnp.newaxis]
+            state.T.data.astype(_f64) * h_k.astype(_f64)
+            * mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
         )
 
         state_fixed = fix_heat_mpas(state_new, state, mesh, z_coord)
         h_k_new = compute_layer_thickness(state_fixed.eta.data, H_bathy, z_coord)
         heat_after = jnp.sum(
-            state_fixed.T.data * h_k_new * mask[:, jnp.newaxis] * mesh.areaCell[:, jnp.newaxis]
+            state_fixed.T.data.astype(_f64) * h_k_new.astype(_f64)
+            * mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
         )
 
         rel_err = jnp.abs(heat_after - heat_before) / jnp.maximum(
             jnp.abs(heat_before), 1e-30,
         )
-        assert rel_err < 1e-10
+        assert rel_err < 1e-5
 
     def test_full_fixer(self, state, mesh, z_coord, config):
         """Full conservation fixer chain works."""

@@ -54,7 +54,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     cell_to_cgrid_winds,
 )
 from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
-    _absolute_vorticity_coriolis,
+    absolute_vorticity_coriolis,
 )
 from legoesm.core.operators_fv_latlon_3d import (
     cgrid_fv_scalar_advection_latlon_3d,
@@ -74,7 +74,6 @@ from legoesm.grids.vertical import (
     dp_from_hybrid,
     compute_geopotential,
     compute_geopotential_hybrid,
-    compute_mass_flux_hybrid,
     vertical_advection,
     vertical_advection_hybrid,
     compute_pressure_velocity,
@@ -298,7 +297,7 @@ def cgrid_latlon_hydrostatic_tendencies(
     dv_dt = -(dB_dy + pg_corr_y)
 
     # --- 8. Coriolis using absolute vorticity (ζ+f) ---
-    cor_u, cor_v = _absolute_vorticity_coriolis(u, v, grid)
+    cor_u, cor_v = absolute_vorticity_coriolis(u, v, grid)
     du_dt = du_dt + cor_u
     dv_dt = dv_dt + cor_v
 

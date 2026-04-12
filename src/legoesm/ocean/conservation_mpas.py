@@ -21,26 +21,28 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.core.precision import cast
 from legoesm.ocean.vertical import compute_layer_thickness
-
-_M = "ocean_diagnostics"  # precision module for accumulations
 
 
 def _ocean_area_sum_mpas(field_2d, mask, mesh):
-    """Area-weighted sum over ocean cells with precision upcasting."""
-    field_acc = cast(field_2d, _M, "accumulate")
-    mask_acc = cast(mask, _M, "accumulate")
-    area_acc = cast(mesh.areaCell, _M, "accumulate")
+    """Area-weighted sum over ocean cells with float64 accumulation.
+
+    Explicit float64 upcast prevents catastrophic cancellation in global
+    reductions (the default precision policy may resolve "accumulate" to
+    float32, which is insufficient for conservation fixers).
+    """
+    field_acc = field_2d.astype(jnp.float64)
+    mask_acc = mask.astype(jnp.float64)
+    area_acc = mesh.areaCell.astype(jnp.float64)
     return jnp.sum(field_acc * mask_acc * area_acc)
 
 
 def _ocean_volume_sum_mpas(field_3d, h_k, mask, mesh):
-    """Volume-weighted sum over ocean cells and levels with precision upcasting."""
-    field_acc = cast(field_3d, _M, "accumulate")
-    h_k_acc = cast(h_k, _M, "accumulate")
-    mask_acc = cast(mask, _M, "accumulate")
-    area_acc = cast(mesh.areaCell, _M, "accumulate")
+    """Volume-weighted sum over ocean cells and levels with float64 accumulation."""
+    field_acc = field_3d.astype(jnp.float64)
+    h_k_acc = h_k.astype(jnp.float64)
+    mask_acc = mask.astype(jnp.float64)
+    area_acc = mesh.areaCell.astype(jnp.float64)
     return jnp.sum(
         field_acc * h_k_acc * mask_acc[:, jnp.newaxis] * area_acc[:, jnp.newaxis]
     )
@@ -140,15 +142,19 @@ def mpas_ocean_conservation_fixer(state_new, state_old, mesh, z_coord, config):
         min_water_column_m=min_col,
     )
 
-    mask_acc = cast(mask, _M, "accumulate")
-    area_acc = cast(mesh.areaCell, _M, "accumulate")
+    # Explicit float64 upcast for all accumulations — the default precision
+    # policy may resolve "accumulate" to float32, which loses ~7 digits and
+    # makes conservation fixers ineffective.
+    _f64 = jnp.float64
+    mask_acc = mask.astype(_f64)
+    area_acc = mesh.areaCell.astype(_f64)
     weighted_area_acc = mask_acc * area_acc
 
     # --- Volume (eta) correction ---
     eta_corrected = state_new.eta.data
     if config.fix_volume:
-        vol_old = jnp.sum(cast(state_old.eta.data, _M, "accumulate") * weighted_area_acc)
-        vol_new = jnp.sum(cast(state_new.eta.data, _M, "accumulate") * weighted_area_acc)
+        vol_old = jnp.sum(state_old.eta.data.astype(_f64) * weighted_area_acc)
+        vol_new = jnp.sum(state_new.eta.data.astype(_f64) * weighted_area_acc)
         ocean_area = jnp.sum(weighted_area_acc)
         eta_correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
         eta_corrected = state_new.eta.data + eta_correction.astype(eta_corrected.dtype) * mask
@@ -163,14 +169,14 @@ def mpas_ocean_conservation_fixer(state_new, state_old, mesh, z_coord, config):
         eta_corrected, state_new.H_bathy.data, z_coord,
         min_water_column_m=min_col,
     )
-    h_k_old_acc = cast(h_k_old, _M, "accumulate")
-    h_k_fix_acc = cast(h_k_corrected, _M, "accumulate")
+    h_k_old_acc = h_k_old.astype(_f64)
+    h_k_fix_acc = h_k_corrected.astype(_f64)
 
     # --- Heat (T) correction ---
     T_corrected = state_new.T.data
     if config.fix_heat:
-        heat_old = jnp.sum(jnp.sum(cast(state_old.T.data, _M, "accumulate") * h_k_old_acc, axis=-1) * weighted_area_acc)
-        heat_new = jnp.sum(jnp.sum(cast(state_new.T.data, _M, "accumulate") * h_k_fix_acc, axis=-1) * weighted_area_acc)
+        heat_old = jnp.sum(jnp.sum(state_old.T.data.astype(_f64) * h_k_old_acc, axis=-1) * weighted_area_acc)
+        heat_new = jnp.sum(jnp.sum(state_new.T.data.astype(_f64) * h_k_fix_acc, axis=-1) * weighted_area_acc)
         ocean_vol = jnp.sum(jnp.sum(h_k_fix_acc, axis=-1) * weighted_area_acc)
         T_correction = (heat_old - heat_new) / jnp.maximum(ocean_vol, 1.0)
         T_corrected = state_new.T.data + T_correction.astype(T_corrected.dtype) * mask[:, jnp.newaxis]
@@ -178,8 +184,8 @@ def mpas_ocean_conservation_fixer(state_new, state_old, mesh, z_coord, config):
     # --- Salt (S) correction ---
     S_corrected = state_new.S.data
     if config.fix_salt:
-        salt_old = jnp.sum(jnp.sum(cast(state_old.S.data, _M, "accumulate") * h_k_old_acc, axis=-1) * weighted_area_acc)
-        salt_new = jnp.sum(jnp.sum(cast(state_new.S.data, _M, "accumulate") * h_k_fix_acc, axis=-1) * weighted_area_acc)
+        salt_old = jnp.sum(jnp.sum(state_old.S.data.astype(_f64) * h_k_old_acc, axis=-1) * weighted_area_acc)
+        salt_new = jnp.sum(jnp.sum(state_new.S.data.astype(_f64) * h_k_fix_acc, axis=-1) * weighted_area_acc)
         ocean_vol = jnp.sum(jnp.sum(h_k_fix_acc, axis=-1) * weighted_area_acc)
         S_correction = (salt_old - salt_new) / jnp.maximum(ocean_vol, 1.0)
         S_corrected = state_new.S.data + S_correction.astype(S_corrected.dtype) * mask[:, jnp.newaxis]

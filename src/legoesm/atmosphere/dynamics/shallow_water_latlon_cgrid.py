@@ -40,7 +40,6 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_x_cgrid,
     gradient_y_cgrid,
     divergence_cgrid,
-    coriolis_cgrid,
     curl_vertex_cgrid,
     vector_laplacian_cgrid,
     interp_cell_to_uface,
@@ -95,7 +94,7 @@ class CGridLatLonShallowWaterConfig(NamedTuple):
 # C-grid interpolation helpers
 # ==============================================================================
 
-def _absolute_vorticity_coriolis(
+def absolute_vorticity_coriolis(
     u: jnp.ndarray,
     v: jnp.ndarray,
     grid: LatLonGrid,
@@ -246,7 +245,7 @@ def cgrid_latlon_sw_tendencies(
     dv_dt = -gradient_y_cgrid(B, grid)   # (n_lat+1, n_lon)
 
     # --- 4. Coriolis using absolute vorticity (ζ+f) ---
-    cor_u, cor_v = _absolute_vorticity_coriolis(u, v, grid)
+    cor_u, cor_v = absolute_vorticity_coriolis(u, v, grid)
     du_dt = du_dt + cor_u
     dv_dt = dv_dt + cor_v
 
@@ -383,10 +382,9 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
 # Initial condition helpers
 # ==============================================================================
 
-# cell_to_cgrid_winds and cell_to_cgrid_winds_3d are imported from
+# cell_to_cgrid_winds is imported from
 # legoesm.ocean.dynamics.latlon_cgrid_operators (shared with ocean).
 # The shared version handles both 2D and 3D via ndim dispatch.
-cell_to_cgrid_winds_3d = cell_to_cgrid_winds  # alias for 3D callers
 
 
 def williamson_test2_cgrid(

@@ -10,6 +10,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.atmosphere.dynamics.shallow_water_mpas import (
     MPASShallowWaterModel,
@@ -23,8 +24,22 @@ from tests.atmosphere.shallow_water.test_cases.williamson_mpas import (
 )
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _fp64_policy():
+    """Set fp64 precision policy for this module (conservation tests need it).
+
+    Restores the original policy on teardown to avoid leaking into other
+    test modules.
+    """
+    from legoesm.core.precision import get_policy
+    saved = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    yield
+    set_policy(saved)
+
+
 @pytest.fixture(scope="module")
-def mesh():
+def mesh(_fp64_policy):
     """Level-3 icosahedral mesh (642 cells)."""
     return create_voronoi_mesh(3, lloyd_iterations=50)
 
