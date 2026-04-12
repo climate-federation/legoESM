@@ -210,7 +210,9 @@ def laplacian_compact(data: jax.Array, grid: CubedSphereGrid) -> jax.Array:
     -------
     jax.Array : ∇²f, shape (6, n, n)
     """
-    padded = pad_halo(data, interp_offsets=grid.halo_interp_offsets)
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    padded = pad_halo(data, interp_offsets=offsets, duogrid=dg)
 
     # Compact second differences using ADJACENT cells:
     # d²f/dx² ≈ (f[i+1] - 2*f[i] + f[i-1]) / (dx/2)²

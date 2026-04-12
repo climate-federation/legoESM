@@ -233,12 +233,14 @@ def center_to_dgrid_vector(u_cc, v_cc, cdgrid):
     from legoesm.grids.halo import pad_halo_vector
 
     grid = cdgrid.base
+    dg = grid.duogrid
+    offsets = None if dg is not None else grid.halo_interp_offsets
     if u_cc.ndim == 3:
         u_pad, v_pad = pad_halo_vector(
             u_cc, v_cc,
             grid.cos_angle, grid.sin_angle,
             grid.cos_angle_padded, grid.sin_angle_padded,
-            interp_offsets=grid.halo_interp_offsets,
+            interp_offsets=offsets, duogrid=dg,
         )
         u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
                        + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
@@ -1300,11 +1302,13 @@ def fv3_vorticity(u_d, v_d, cdgrid):
     v_cc = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
 
     grid = cdgrid.base
+    dg = grid.duogrid
+    offsets = None if dg is not None else grid.halo_interp_offsets
     u_pad, v_pad = pad_halo_vector(
         u_cc, v_cc,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
+        interp_offsets=offsets, duogrid=dg,
     )   # each (6, n+2, n+2)
 
     # Reconstruct halo u_dx from padded cell-centre u ----------------------
@@ -1385,11 +1389,13 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
     from legoesm.grids.halo import pad_halo_vector
 
     grid = cdgrid.base
+    dg = grid.duogrid
+    offsets = None if dg is not None else grid.halo_interp_offsets
     u_pad, v_pad = pad_halo_vector(
         u_cc, v_cc,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
+        interp_offsets=offsets, duogrid=dg,
     )
 
     # Average cell-centre velocities to C-grid face positions with
