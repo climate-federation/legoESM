@@ -49,11 +49,13 @@ def vorticity_3d(
     jax.Array : Vorticity, shape (6, n, n, nlev).
     """
     # One 4D vector halo exchange = 2 MPI messages (instead of 2*nlev)
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
     u_pad, v_pad = pad_halo_vector_4d(
         u_3d, v_3d,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
+        interp_offsets=offsets, duogrid=dg,
     )
 
     # Stencil identical to 2D curl_z but with trailing level axis
@@ -85,7 +87,9 @@ def gradient_x_3d(
     jax.Array : d(field)/dx, shape (6, n, n, nlev).
     """
     if padded is None:
-        padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+        dg = getattr(grid, 'duogrid', None)
+        offsets = None if dg is not None else grid.halo_interp_offsets
+        padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
     return (padded[:, 2:, 1:-1, :] - padded[:, :-2, 1:-1, :]) / grid.dx[..., None]
 
 
@@ -108,7 +112,9 @@ def gradient_y_3d(
     jax.Array : d(field)/dy, shape (6, n, n, nlev).
     """
     if padded is None:
-        padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+        dg = getattr(grid, 'duogrid', None)
+        offsets = None if dg is not None else grid.halo_interp_offsets
+        padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
     return (padded[:, 1:-1, 2:, :] - padded[:, 1:-1, :-2, :]) / grid.dy[..., None]
 
 
@@ -127,11 +133,13 @@ def divergence_3d(
     jax.Array : Divergence, shape (6, n, n, nlev).
     """
     # One 4D vector halo exchange = 2 MPI messages (instead of 2*nlev)
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
     u_pad, v_pad = pad_halo_vector_4d(
         u_3d, v_3d,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
+        interp_offsets=offsets, duogrid=dg,
     )
 
     flux_x_pad = u_pad * grid.hy_ext[..., None]
@@ -189,7 +197,9 @@ def laplacian_compact_3d(
     -------
     jax.Array : ∇²f, shape (6, n, n, nlev)
     """
-    padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
     interior = padded[:, 1:-1, 1:-1, :]
     hx_sq = (grid.dx / 2.0) ** 2
     hy_sq = (grid.dy / 2.0) ** 2
