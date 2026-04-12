@@ -353,7 +353,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # per-layer divergence, ensuring 3D transport consistency.
     #
     # The tendency here includes only: diffusion and physics.
-    h_safe = jnp.maximum(h_k, 1e-10)
     tracers = jnp.stack([T, S], axis=0)
 
     def tracer_tendency(tr: jnp.ndarray) -> jnp.ndarray:

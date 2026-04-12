@@ -35,7 +35,7 @@ from legoesm.core.precision import cast
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
-from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
+from legoesm.ocean.state import OceanState, OceanConfig
 
 
 # ==============================================================================

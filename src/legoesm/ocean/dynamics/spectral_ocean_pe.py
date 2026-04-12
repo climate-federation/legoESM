@@ -466,29 +466,6 @@ def _vertical_advection_spectral(
     return -w_full * grad
 
 
-def _flux_form_vertical_advection_spectral(
-    field: jnp.ndarray,
-    w_half: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
-    jacobian: jnp.ndarray,
-) -> jnp.ndarray:
-    """Conservative flux-form vertical advection for tracers (spectral)."""
-    T_above = field[..., :-1]
-    T_below = field[..., 1:]
-    w_interior = w_half[..., 1:-1]
-
-    T_at_interface = jnp.where(w_interior > 0, T_below, T_above)
-    F_interior = w_interior * T_at_interface
-
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-    flux = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
-
-    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
-    h_k = z_coord.dz_ref * jac_safe
-
-    return (flux[..., 1:] - flux[..., :-1]) / h_k
-
-
 # ==============================================================================
 # Model class
 # ==============================================================================
