@@ -173,13 +173,20 @@ def leaf_energy_balance_bt(
     Rn = ASW + ALW
     LE = lam * rhoa * (q_f - q_c) / jnp.maximum(Rb + rs, 1e-6)
 
-    # Constrain: LE in [0, Rn] for daytime, 0 if below freezing
-    LE = jnp.clip(LE, 0.0, jnp.where(Rn > 0.0, Rn, 0.0))
-    LE = jnp.where(Tc < _T0, 0.0, LE)
+    # LE sign is not constrained here: negative LE = dew formation on the
+    # leaf, positive LE = transpiration + evaporation.  The DifferBESS
+    # daytime-only clamp ``LE ∈ [0, max(Rn, 0)]`` has been removed so the
+    # model can represent nocturnal dew and non-stationary transitions.
 
     H  = Rn - LE
-    dT = jnp.clip(Rb / (rhoa * Cp) * H, -30.0, 30.0)
-    Tf_new = Tc + dT
+    # ``Tf_new`` is the leaf temperature satisfying sensible-flux closure
+    # ``H = ρ Cp (Tf − Tc)/Rb``.  The earlier hard ``clip(dT, ±30)`` was
+    # non-differentiable at the clamp boundary and silently degraded the
+    # Newton Jacobian.  Leave ``Tf_new`` unclipped here — the Newton
+    # driver ``solve_canopy_closure`` already damps ``Δx`` globally
+    # (``clamp = 10 → 0.1`` across iterations), so step sizes remain
+    # bounded without a local non-smooth clip.
+    Tf_new = Tc + Rb * H / (rhoa * Cp)
 
     return Rn, LE, H, Tf_new, gs, Ci
 
@@ -234,12 +241,11 @@ def leaf_energy_balance_pm(
     disc = jnp.maximum(b**2 - 4.0 * a * c, 0.0)
     LE   = (-b + jnp.sign(b) * jnp.sqrt(disc)) / (2.0 * a)
 
-    LE = jnp.clip(LE, 0.0, jnp.where(Rn > 0.0, Rn, 0.0))
-    LE = jnp.where(Tc < _T0, 0.0, LE)
+    # No LE clamp — see notes in leaf_energy_balance_bt for rationale.
 
     H  = Rn - LE
-    dT = jnp.clip(Rb / (rhoa * Cp) * H, -30.0, 30.0)
-    Tf_new = Tc + dT
+    # Unclipped Tf update; see leaf_energy_balance_bt for rationale.
+    Tf_new = Tc + Rb * H / (rhoa * Cp)
 
     return Rn, LE, H, Tf_new, gs, Ci
 
@@ -262,31 +268,32 @@ def soil_energy_balance_bt(
     Rsoil: jax.Array,
     ASW_soil: jax.Array,
     ALW_soil: jax.Array,
-    G_alpha: float | jax.Array,
 ) -> tuple[jax.Array, ...]:
-    """Soil energy balance via bulk transfer.
+    """Soil energy balance with prescribed skin temperature (BT).
 
-    Rsoil = raw_below * (1/fStress_soil - 1) adds resistance proportional
-    to soil dryness, reducing soil evaporation.
+    The soil skin ``Ts`` is supplied by the caller from the top layer of the
+    multilayer soil thermal state (``T_soil[:, 0]``).  Turbulent fluxes are
+    computed from explicit bulk-transfer formulas and ``G`` closes the
+    surface energy budget as a residual — it is *not* parameterised as
+    ``G_alpha · Rn``.  The resulting ``G`` is then fed as the upper
+    boundary condition to ``solve_soil_thermal`` in the caller (the same
+    pattern as ``multilayer_land.py``).
+
+    ``Rsoil`` is the soil-dryness surface resistance
+    ``raw_below · (1/fStress_soil - 1)`` added in series with ``raw_soil``.
 
     Returns
     -------
-    Rn_soil, LE_soil, H_soil, Ts_new, G
+    Rn_soil, LE_soil, H_soil, G
     """
-    Rn  = ASW_soil + ALW_soil
-    G   = G_alpha * Rn
-    AE  = Rn - G
-
-    LE  = lam * rhoa * (q_s - q_c) / jnp.maximum(raw_soil + Rsoil, 1e-6)
-
-    LE  = jnp.clip(LE, 0.0, jnp.where(AE > 0.0, AE, 0.0))
-    LE  = jnp.where(Tc < _T0, 0.0, LE)
-
-    H   = AE - LE
-    dT  = jnp.clip(rah_soil / (rhoa * Cp) * H, -30.0, 30.0)
-    Ts_new = Tc + dT
-
-    return Rn, LE, H, Ts_new, G
+    Rn = ASW_soil + ALW_soil
+    # Direct bulk-transfer turbulent fluxes — Ts is prescribed so no
+    # root-finding for soil T is needed.
+    LE = lam * rhoa * (q_s - q_c) / jnp.maximum(raw_soil + Rsoil, 1e-6)
+    H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
+    # G closes the surface energy budget as a residual — positive into soil.
+    G  = Rn - LE - H
+    return Rn, LE, H, G
 
 
 # ---------------------------------------------------------------------------
@@ -297,10 +304,9 @@ def soil_energy_balance_bt(
 def soil_energy_balance_pm(
     Ts: jax.Array,
     Tc: jax.Array,
-    VPD_c: jax.Array,
-    desTc: jax.Array,
-    ddesTc: jax.Array,
-    gamma_c: jax.Array,
+    q_s: jax.Array,
+    q_c: jax.Array,
+    lam: jax.Array,
     rhoa: jax.Array,
     Cp: jax.Array,
     rah_soil: jax.Array,
@@ -308,41 +314,25 @@ def soil_energy_balance_pm(
     Rsoil: jax.Array,
     ASW_soil: jax.Array,
     ALW_soil: jax.Array,
-    G_alpha: float | jax.Array,
 ) -> tuple[jax.Array, ...]:
-    """Soil energy balance via second-order Penman-Monteith.
+    """Soil energy balance with prescribed skin temperature (PM).
+
+    With ``Ts`` prescribed by the caller, the second-order Penman-Monteith
+    quadratic that originally solved for ``Ts`` is no longer needed — LE
+    and H follow from explicit bulk-transfer formulas.  The PM variant is
+    therefore numerically identical to the BT variant at the soil level;
+    the dispatch is kept for API symmetry with the leaf pathway where PM
+    and BT still differ.
 
     Returns
     -------
-    Rn_soil, LE_soil, H_soil, Ts_new, G
+    Rn_soil, LE_soil, H_soil, G
     """
-    Rn  = ASW_soil + ALW_soil
-    G   = G_alpha * Rn
-    AE  = Rn - G
-
-    ddesTc_Raw2          = ddesTc * raw_soil**2
-    gamma_Raw_Rsoil       = gamma_c * (raw_soil + Rsoil)
-    rhoa_Cp_gamma         = rhoa * Cp * gamma_Raw_Rsoil
-
-    a = 0.5 * ddesTc_Raw2 / rhoa_Cp_gamma
-    b = (-1.0
-         - rah_soil * desTc / gamma_Raw_Rsoil
-         - ddesTc_Raw2 * AE / rhoa_Cp_gamma)
-    c = (rhoa * Cp / gamma_Raw_Rsoil * VPD_c
-         + desTc * rah_soil / gamma_Raw_Rsoil * AE
-         + 0.5 * ddesTc_Raw2 / rhoa_Cp_gamma * AE**2)
-
-    disc = jnp.maximum(b**2 - 4.0 * a * c, 0.0)
-    LE   = (-b + jnp.sign(b) * jnp.sqrt(disc)) / (2.0 * a)
-
-    LE  = jnp.clip(LE, 0.0, jnp.where(AE > 0.0, AE, 0.0))
-    LE  = jnp.where(Tc < _T0, 0.0, LE)
-
-    H   = AE - LE
-    dT  = jnp.clip(rah_soil / (rhoa * Cp) * H, -30.0, 30.0)
-    Ts_new = Tc + dT
-
-    return Rn, LE, H, Ts_new, G
+    Rn = ASW_soil + ALW_soil
+    LE = lam * rhoa * (q_s - q_c) / jnp.maximum(raw_soil + Rsoil, 1e-6)
+    H  = rhoa * Cp * (Ts - Tc) / jnp.maximum(rah_soil, 1e-6)
+    G  = Rn - LE - H
+    return Rn, LE, H, G
 
 
 # ---------------------------------------------------------------------------

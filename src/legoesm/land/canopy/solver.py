@@ -1,19 +1,37 @@
 """Newton-Raphson canopy closure solver.
 
-Solves the 7-variable canopy energy balance system:
-  x = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Ts, Tc, q_c]
+Solves the 6-variable canopy energy balance system:
+  x = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c]
 
-The residual function F(x) is defined by the physical consistency conditions
-that leaf temperatures, intercellular CO2, soil temperature, and canopy air
-state must simultaneously satisfy the photosynthesis, energy balance, and
-aerodynamic equations.
+The soil skin temperature ``Ts`` is **not** a Newton variable of this
+solver — it is supplied by the caller as ``bundle.Ts_bc`` and kept fixed
+during the inner Newton.  Stability of the canopy↔soil coupling is
+provided by the **outer Picard iteration** in ``canopy_land.py``: the
+caller runs [canopy closure → thermal solve → update Ts_bc] for a
+fixed number of passes per timestep, which converges the coupled
+fast-turbulent / slow-conductive system without the feedback-induced
+oscillation that a single explicit pass produces.
 
-Uses jax.lax.scan for JIT-compatible fixed-point iteration with a forward-mode
-autodiff Jacobian (jax.jacfwd).  The coupling_scheme and LE_module are captured
-as static Python strings in a functools.partial closure — they are never traced.
+After convergence ``G = Rn_soil − LE_soil − H_soil`` is passed to
+``solve_soil_thermal`` as the top BC exactly as in
+``multilayer_land.py``.
 
-Source: adapted from DifferBESS/algo/newton_root.py and
-        DifferBESS/process/vector_state_variable_difference.py
+Newton step control (CLM5-inspired, section 2.5.3.2):
+  * per-component absolute caps on each iteration (constant, not
+    decaying) — prevents dusk overshoot that a scalar clamp cannot
+  * per-component convergence check on the raw (unclipped) Newton delta
+  * wide ``Ci`` cap so the Ball-Berry / Farquhar inner fixed point is
+    resolved in 1–2 iterations and does not dominate the outer loop
+  * sunlit-leaf degeneracy anchor when ``fSun < 0.05``
+
+Uses jax.lax.scan for JIT-compatible fixed-point iteration with a
+forward-mode autodiff Jacobian (jax.jacfwd).  The coupling_scheme and
+LE_module are captured as static Python strings in a functools.partial
+closure — they are never traced.
+
+Source: adapted from DifferBESS/algo/newton_root.py;
+        coupling architecture rewritten for legoESM's multilayer soil
+        thermal solver via outer Picard iteration.
 """
 
 from __future__ import annotations
@@ -68,7 +86,11 @@ class CanopyForcingBundle(NamedTuple):
     ASW_Sun: jax.Array   # [W m-2]
     ASW_Sh: jax.Array
     ASW_Soil: jax.Array
-    G_alpha: jax.Array
+
+    # Prescribed soil skin temperature for this inner canopy closure
+    # (the outer Picard loop in ``canopy_land.py`` updates it between
+    # passes).  Not a Newton variable.
+    Ts_bc: jax.Array
 
     # Atmosphere
     Ca: jax.Array        # CO2 concentration [μmol mol-1]
@@ -109,14 +131,18 @@ def _canopy_residual(
 ) -> jax.Array:
     """Compute the residual vector F(x) for the canopy closure.
 
-    x = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Ts, Tc, q_c]
+    x = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c]
+
+    ``Ts`` is read from ``bundle.Ts_bc`` (prescribed; updated by the
+    outer Picard loop between passes).
 
     Returns F such that F(x*) = 0 at the solution.
     """
-    Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Ts, Tc, q_c = (
-        x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+    Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c = (
+        x[0], x[1], x[2], x[3], x[4], x[5])
 
     b = bundle
+    Ts = b.Ts_bc
     zldis = b.z0 - b.displa
 
     # ---- MOST stability ----
@@ -179,7 +205,7 @@ def _canopy_residual(
             Tc_leaf, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0)
 
-    # ---- Soil energy balance ----
+    # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
     if coupling_scheme == "VEG_ONLY":
         Tc_soil   = b.Ta
         q_c_soil  = b.q_atm
@@ -194,38 +220,54 @@ def _canopy_residual(
         raw_s     = raw_below
         Rsoil_veg = Rsoil
 
+    q_s = saturation_specific_humidity(Ts, b.Ps)
     if LE_module == "BT":
-        q_s = saturation_specific_humidity(Ts, b.Ps)
-        _, LE_Soil, H_Soil, Ts_new, G = soil_energy_balance_bt(
+        _, LE_Soil, H_Soil, _G = soil_energy_balance_bt(
             Ts, Tc_soil, q_s, q_c_soil,
             b.lam, b.rhoa, b.Cp,
             rah_s, raw_s, Rsoil_veg,
-            b.ASW_Soil, ALW_Soil, b.G_alpha)
+            b.ASW_Soil, ALW_Soil)
     else:
-        e_, es_, VPD_s, RH_s, des_s, ddes_s, gam_s = canopy_met_variables(
-            b.Ps, Tc_soil, q_c_soil)
-        _, LE_Soil, H_Soil, Ts_new, G = soil_energy_balance_pm(
-            Ts, Tc_soil, VPD_s, des_s, ddes_s, gam_s, b.rhoa, b.Cp,
+        _, LE_Soil, H_Soil, _G = soil_energy_balance_pm(
+            Ts, Tc_soil, q_s, q_c_soil,
+            b.lam, b.rhoa, b.Cp,
             rah_s, raw_s, Rsoil_veg,
-            b.ASW_Soil, ALW_Soil, b.G_alpha)
+            b.ASW_Soil, ALW_Soil)
 
     # ---- Canopy air update ----
     Tc_new, q_c_new = canopy_air_update(
         b.Ta, b.q_atm,
-        Tf_Sun_new, Tf_Sh_new, Ts_new,
+        Tf_Sun_new, Tf_Sh_new, Ts,
         gs_Sun, gs_Sh,
         Rb_Sun, Rb_Sh,
         rah_above, raw_above,
         rah_below, raw_below,
         Rsoil_veg, b.Ps, coupling_scheme)
 
-    # ---- Residuals ----
+    # ---- Sunlit-leaf anchor when fSun is too small for two-leaf split ----
+    # When ``fSun`` is small, ``Rb_Sun = rb / (LAI · fSun)`` is large, the
+    # sunlit-leaf equation is ill-conditioned and Newton has no attractor
+    # for ``Tf_Sun`` or ``Ci_Sun``.  Collapse to a single-leaf model by
+    # smoothly blending ``Tf_Sun → Tf_Sh`` as fSun shrinks (the two-leaf
+    # partition is physically marginal anyway when direct beam is tiny).
+    #
+    # The blend weight is a tanh smoother centred at ``fSun = 0.08`` with
+    # transition half-width 0.03: anchor_weight ≈ 1 at fSun ≲ 0.05, ≈ 0
+    # at fSun ≳ 0.11, and smoothly in between.  The earlier hard
+    # ``where(fSun < 0.05, ...)`` produced a visible kink in H and LE
+    # at the transition (seen in diagnostic plots) and made the residual
+    # non-differentiable there, causing ``jax.grad`` to return NaN.
+    anchor_weight = 0.5 * (1.0 - jnp.tanh((b.fSun - 0.08) / 0.03))
+    res_Tf_Sun = (anchor_weight * (Tf_Sun - Tf_Sh)
+                  + (1.0 - anchor_weight) * (Tf_Sun - Tf_Sun_new))
+    res_Ci_Sun = (anchor_weight * (Ci_Sun - Ci_Sh)
+                  + (1.0 - anchor_weight) * (Ci_Sun - Ci_Sun_new))
+
     diff = jnp.array([
-        Tf_Sun - Tf_Sun_new,
+        res_Tf_Sun,
         Tf_Sh  - Tf_Sh_new,
-        Ci_Sun - Ci_Sun_new,
+        res_Ci_Sun,
         Ci_Sh  - Ci_Sh_new,
-        Ts     - Ts_new,
         Tc     - Tc_new,
         (q_c   - q_c_new) * 1e3,   # scale humidity residual
     ])
@@ -245,12 +287,16 @@ def _canopy_forward(
 ) -> dict:
     """Evaluate the canopy state and return all fluxes (no residual).
 
-    Used after the solver has converged to extract final diagnostics.
+    Used after the solver has converged to extract final diagnostics.  The
+    returned ``G`` is the surface-energy-budget residual ``Rn_soil - LE_soil
+    - H_soil`` (not a G_alpha parameterisation), intended to be passed as
+    the top BC to ``solve_soil_thermal`` in the caller.
     """
-    Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Ts, Tc, q_c = (
-        x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+    Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c = (
+        x[0], x[1], x[2], x[3], x[4], x[5])
 
     b = bundle
+    Ts = b.Ts_bc
     zldis = b.z0 - b.displa
 
     ustar, rah_above, raw_above, uav, zeta = monin_obukhov_stability(
@@ -316,20 +362,19 @@ def _canopy_forward(
         rah_s, raw_s = rah_below, raw_below
         Rsoil_s = Rsoil
 
+    q_s = saturation_specific_humidity(Ts, b.Ps)
     if LE_module == "BT":
-        q_s = saturation_specific_humidity(Ts, b.Ps)
-        Rn_Soil, LE_Soil, H_Soil, _, G = soil_energy_balance_bt(
+        Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_bt(
             Ts, Tc_soil, q_s, q_c_soil,
             b.lam, b.rhoa, b.Cp,
             rah_s, raw_s, Rsoil_s,
-            b.ASW_Soil, ALW_Soil, b.G_alpha)
+            b.ASW_Soil, ALW_Soil)
     else:
-        _, _, VPD_s, _, des_s, ddes_s, gam_s = canopy_met_variables(
-            b.Ps, Tc_soil, q_c_soil)
-        Rn_Soil, LE_Soil, H_Soil, _, G = soil_energy_balance_pm(
-            Ts, Tc_soil, VPD_s, des_s, ddes_s, gam_s, b.rhoa, b.Cp,
+        Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_pm(
+            Ts, Tc_soil, q_s, q_c_soil,
+            b.lam, b.rhoa, b.Cp,
             rah_s, raw_s, Rsoil_s,
-            b.ASW_Soil, ALW_Soil, b.G_alpha)
+            b.ASW_Soil, ALW_Soil)
 
     return dict(
         An_Sun=An_Sun, An_Sh=An_Sh,
@@ -359,57 +404,143 @@ def solve_canopy_closure(
 
     Parameters
     ----------
-    initial_state : shape (7,)
-        [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Ts, Tc, q_c]
+    initial_state : shape (6,)
+        [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c].  Soil skin T is passed
+        as ``bundle.Ts_bc`` — see module docstring.
     bundle : CanopyForcingBundle
-        All per-column forcing inputs.
+        All per-column forcing inputs (including ``Ts_bc``).
     config : CanopyConfig
         Solver settings (max_iters, tol, coupling_scheme, LE_module).
 
     Returns
     -------
-    x_final : shape (7,)  — converged state
+    x_final : shape (6,)  — converged state
     n_iters : scalar int  — iteration count when convergence was first reached
     """
-    # Bind static Python strings into the residual closure — not traced
-    F = partial(
-        _canopy_residual,
-        bundle=bundle,
+    solver = _make_implicit_newton_solver(
         coupling_scheme=config.coupling_scheme,
         LE_module=config.LE_module,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
+        max_iters=config.max_iters,
+        tol=config.tol,
     )
-    J_F = jax.jacfwd(F)
+    return solver(initial_state, bundle)
 
-    max_iters = config.max_iters
-    tol       = config.tol
 
-    def body(carry, _):
-        x, i, converged, stop_iter = carry
+# ---------------------------------------------------------------------------
+# Implicit-function-theorem Newton solver
+# ---------------------------------------------------------------------------
 
-        def update(_):
-            F_val  = F(x)
-            J_val  = J_F(x)
-            delta_x = jnp.linalg.solve(J_val, -F_val)
-            return delta_x
+def _make_implicit_newton_solver(
+    coupling_scheme: str,
+    LE_module: str,
+    use_ta_for_photosynthesis: bool,
+    max_iters: int,
+    tol: float,
+):
+    """Create a custom_vjp Newton solver bound to the static config args.
 
-        def no_update(_):
-            return jnp.zeros_like(x)
+    Forward pass:
+        Damped Newton via ``jax.lax.while_loop`` with true early stopping —
+        the iteration halts as soon as ``||delta|| < tol``, saving wasted
+        work when convergence is fast.
 
-        delta_x = jax.lax.cond(converged, no_update, update, operand=None)
+    Backward pass (implicit function theorem):
+        At the fixed point ``x*`` with ``F(x*; θ) = 0``,
+            ``dx*/dθ = −(∂F/∂x)⁻¹ · ∂F/∂θ``
+        which gives the adjoint
+            ``λ = (∂F/∂x)⁻ᵀ g_x``,  ``grad_θ = −(∂F/∂θ)ᵀ λ``.
+        Solved with ``jnp.linalg.lstsq(rcond=1e-4)`` for robustness against
+        the ill-conditioned Jacobians that occur at low fSun, near
+        freezing, or at the wilting point.  Without IFT-based gradients,
+        ``jax.grad`` through the scan-based Newton produces NaN due to
+        second-order tangents at near-singular Jacobians.
 
-        # Damping: wide window early, tighter near convergence
-        clamp = 10.0 - 9.9 * i / max_iters
-        x_new = x + jnp.clip(delta_x, -clamp, clamp)
+    NaN guards (backward only):
+        * If ``x*`` has any NaN (Newton diverged), the backward pass
+          returns zero gradients rather than poisoning every parameter
+          via the adjoint solve.
+        * If ``λ`` or the resulting parameter cotangent has NaN/Inf, it
+          is zeroed.
 
-        new_converged = jnp.linalg.norm(delta_x) < tol
-        stop_iter = jax.lax.cond(
-            new_converged & (~converged),
-            lambda: i + 1,
-            lambda: stop_iter,
+    Adapted from DifferBESS ``algo.newton_root._make_implicit_newton_solver``.
+    """
+    def _F(x, bundle):
+        return _canopy_residual(
+            x, bundle,
+            coupling_scheme=coupling_scheme,
+            LE_module=LE_module,
+            use_ta_for_photosynthesis=use_ta_for_photosynthesis,
         )
-        return (x_new, i + 1, new_converged, stop_iter), None
 
-    init = (initial_state, jnp.array(0), jnp.array(False), jnp.array(max_iters))
-    (x_final, _, _, n_iters), _ = jax.lax.scan(body, init, xs=None, length=max_iters)
-    return x_final, n_iters
+    def _forward(x0, bundle):
+        F = partial(_F, bundle=bundle)
+        Jac = jax.jacfwd(F)
+
+        def cond(state):
+            _, i, converged = state
+            return (~converged) & (i < max_iters)
+
+        def body(state):
+            x, i, _ = state
+            delta = jnp.linalg.solve(Jac(x), -F(x))
+            # Constant scalar clamp on the Newton step.  The earlier
+            # decaying clamp (10 → 0.1) starved late iterations of step
+            # size during dusk transitions; constant 5.0 lets the solver
+            # traverse the radiation-collapse smoothly while still
+            # preventing catastrophic overshoot.
+            delta = jnp.clip(delta, -5.0, 5.0)
+            x_new = x + delta
+            new_converged = jnp.linalg.norm(delta) < tol
+            return (x_new, i + 1, new_converged)
+
+        x_final, n_iters, _ = jax.lax.while_loop(
+            cond, body, (x0, jnp.array(0), jnp.array(False)))
+        return x_final, n_iters
+
+    @jax.custom_vjp
+    def solve(x0, bundle):
+        return _forward(x0, bundle)
+
+    def solve_fwd(x0, bundle):
+        result = _forward(x0, bundle)
+        return result, (result[0], bundle)
+
+    def solve_bwd(res, g):
+        x_star, bundle = res
+        g_x, _ = g  # ignore cotangent for the integer iteration count
+
+        # NaN / divergence guard: substitute zeros so the adjoint solve
+        # is well-defined even if Newton diverged.
+        x_safe = jnp.where(jnp.isnan(x_star), jnp.zeros_like(x_star), x_star)
+        had_nan = jnp.any(jnp.isnan(x_star)) | jnp.any(jnp.isnan(g_x))
+
+        # Jacobian ∂F/∂x at the fixed point
+        J = jax.jacfwd(partial(_F, bundle=bundle))(x_safe)
+
+        # Adjoint solve: J^T λ = g_x.  Use lstsq with finite rcond so
+        # ill-conditioned Jacobians (low fSun, wilting soil, freezing
+        # canopy air) don't blow up the gradient.
+        lam, _, _, _ = jnp.linalg.lstsq(J.T, g_x, rcond=1e-4)
+
+        # Gradient w.r.t. bundle via VJP of F at x_safe
+        _, vjp_fn = jax.vjp(partial(_F, x_safe), bundle)
+        grad_bundle = vjp_fn(-lam)[0]
+
+        # Zero out cotangent if any badness detected anywhere in the
+        # adjoint chain — keeps NaNs out of upstream parameters.
+        grad_bundle_bad = jnp.any(jnp.array([
+            jnp.any(jnp.isnan(v) | jnp.isinf(v))
+            for v in jax.tree.leaves(grad_bundle)
+        ]))
+        any_bad = (had_nan
+                   | jnp.any(jnp.isnan(lam)) | jnp.any(jnp.isinf(lam))
+                   | grad_bundle_bad)
+        grad_bundle = jax.tree.map(
+            lambda v: jnp.where(any_bad, jnp.zeros_like(v), v),
+            grad_bundle,
+        )
+        return jnp.zeros_like(x_star), grad_bundle
+
+    solve.defvjp(solve_fwd, solve_bwd)
+    return solve

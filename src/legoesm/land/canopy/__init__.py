@@ -15,12 +15,15 @@ from legoesm.land.canopy.config import (
     PFT_VCMAX25_C4,
 )
 from legoesm.land.canopy.canopy_land import (
+    CanopyDiagnostics,
     init_canopy_land_state,
     step_canopy_land,
+    step_canopy_land_with_diagnostics,
 )
 
 __all__ = [
     "CanopyConfig",
+    "CanopyDiagnostics",
     "CanopyLandConfig",
     "CanopyLandParams",
     "PFT_AERO_PARAMS",
@@ -29,4 +32,5 @@ __all__ = [
     "PFT_VCMAX25_C4",
     "init_canopy_land_state",
     "step_canopy_land",
+    "step_canopy_land_with_diagnostics",
 ]
