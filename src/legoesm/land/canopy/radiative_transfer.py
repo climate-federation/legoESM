@@ -296,15 +296,21 @@ def canopy_shortwave_rt(
     Vcmax25_C4Sun = jnp.where(LAI > 0, Vcmax25_C4Sun,  zero)
     Vcmax25_C4Sh  = jnp.where(LAI > 0, Vcmax25_C4Sh,   zero)
 
-    # Night guard: when there is no direct-beam radiation, the two-stream
-    # quadrature still returns a small nonzero fSun (~1/ngauss), which makes
-    # Rb_Sun = rb / (LAI * fSun) artificially finite and causes the
-    # energy-balance closure to assign spurious temperatures to a negligible
-    # "sunlit" leaf fraction at night.  Force fSun exactly to 0 when there
-    # is no direct PAR beam.
+    # Night guard: when direct-beam radiation is small, the two-stream
+    # quadrature still returns a non-zero fSun (~1/ngauss for the first
+    # Gauss point) that would make ``Rb_Sun = rb / (LAI · fSun)``
+    # artificially finite and let the canopy closure assign spurious
+    # temperatures to a negligible sunlit leaf fraction at night.  Ramp
+    # fSun smoothly to 0 via a tanh weight centred at
+    # ``sw_dir = 30 W/m²`` with half-width 20 W/m².  The wide transition
+    # (sw_dir ∈ [0, 60]) is intentional: with a 30-min model timestep
+    # the dusk forcing ``sw_dir`` typically drops from O(50) to 0 in one
+    # step, so a narrow transition would still produce a kink at the
+    # first night step.  By the time sw_dir > 60 the day_weight is ~1
+    # and the sunlit fraction is fully active.
     sw_dir_total = PAR_dir + NIR_dir
-    is_day = sw_dir_total > 1e-3
-    fSun = jnp.where(is_day, fSun, 0.0)
+    day_weight = 0.5 * (1.0 + jnp.tanh((sw_dir_total - 30.0) / 20.0))
+    fSun = fSun * day_weight
 
     return CanopySWOutput(
         fSun=fSun,
@@ -371,9 +377,19 @@ def canopy_longwave_rt(
 
     kd_LAI = kd * LAI
 
+    # ``kd - kb`` is negative for SZA > ~50° (kb > 0.78) and positive below.
+    # The earlier ``max(kd - kb, 1e-6)`` was a safety against division by
+    # zero when ``kd == kb`` (SZA ≈ 50°), but it silently clipped any
+    # negative denominator to +1e-6 — which flips the sign and amplifies
+    # the sunlit LW term by ~1e6 at night (SZA → 90°, kb → 50).  This
+    # was the root cause of nocturnal Newton divergence for dense canopies.
+    # Use a sign-preserving guard that only intervenes at |kd - kb| < 1e-6.
+    kdb = kd - kb
+    kdb_safe = jnp.where(jnp.abs(kdb) < 1e-6, 1e-6, kdb)
+
     # Net absorbed LW by sunlit leaves
     ALW_Sun = (
-        (Ls - Lf_Sun) * kd * (jnp.exp(-kd_LAI) - jnp.exp(-kb * LAI)) / jnp.maximum(kd - kb, 1e-6)
+        (Ls - Lf_Sun) * kd * (jnp.exp(-kd_LAI) - jnp.exp(-kb * LAI)) / kdb_safe
         + kd * (La - Lf_Sun) * (1.0 - jnp.exp(-(kb + kd) * LAI)) / (kd + kb)
     )
 

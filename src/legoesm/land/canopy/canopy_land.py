@@ -23,6 +23,8 @@ independently per column via jax.lax.scan (not MPI-partitioned at this stage).
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 
@@ -54,13 +56,46 @@ from legoesm.land.canopy.energy_balance import saturation_specific_humidity
 _SIGMA = 5.670373e-8  # Stefan-Boltzmann [W m-2 K-4]
 
 
+class CanopyDiagnostics(NamedTuple):
+    """Per-column surface energy budget diagnostics (all [W m-2] unless noted).
+
+    The canopy+soil system should satisfy ``Rn_int ≈ LE_tot + H_tot + G``
+    exactly (internal closure); any drift is a model bug.  ``Rn_ext`` is
+    recomputed from forcing and is the quantity a downstream diagnostic
+    would see — the difference ``Rn_ext - Rn_int`` indicates RT / LW-accounting
+    drift.
+    """
+    Rn_ext: jnp.ndarray          # (1-α) SW_down + ε (LW_down - σ T_surface^4)
+    Rn_int: jnp.ndarray          # Rn_Sun + Rn_Sh + Rn_Soil (solver-internal)
+    SW_net: jnp.ndarray          # (1-α) SW_down
+    LW_net: jnp.ndarray          # ε (LW_down - σ T_surface^4)
+    LE_tot: jnp.ndarray
+    H_tot: jnp.ndarray
+    G: jnp.ndarray               # positive = into soil
+    LE_canopy: jnp.ndarray       # LE_Sun + LE_Sh
+    LE_soil: jnp.ndarray
+    H_canopy: jnp.ndarray
+    H_soil: jnp.ndarray
+    Rn_canopy: jnp.ndarray       # Rn_Sun + Rn_Sh (leaves, no G)
+    Rn_soil: jnp.ndarray         # ASW_Soil + ALW_Soil
+    residual_int: jnp.ndarray    # Rn_int - (LE_tot + H_tot + G)
+    residual_ext: jnp.ndarray    # Rn_ext - (LE_tot + H_tot + G)
+    GPP: jnp.ndarray             # [gC m-2 s-1]
+    fSun: jnp.ndarray            # sunlit canopy fraction [0-1]
+    n_iters: jnp.ndarray         # Newton-Raphson iterations used
+    Tf_Sun: jnp.ndarray          # converged sunlit leaf T [K]
+    Tf_Sh: jnp.ndarray           # converged shaded leaf T [K]
+    Ts_solve: jnp.ndarray        # converged soil skin T from closure [K]
+    T_surface: jnp.ndarray       # weighted emission T fed to coupler [K]
+
+
 def _get(lp, name: str, fallback):
     if lp is None:
         return fallback
     return getattr(lp, name, fallback)
 
 
-def step_canopy_land(
+def _step_canopy_land_full(
     state: MultiLayerLandState,
     forcing: AtmToSurface,
     config: CanopyLandConfig,
@@ -70,26 +105,11 @@ def step_canopy_land(
     carbon_state: CarbonState | None = None,
     doy: float = 0.0,
     land_params: CanopyLandParams | None = None,
-) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
-    """Single time step of the canopy energy balance land model.
+) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None, CanopyDiagnostics]:
+    """Internal full-return step: advances state AND returns surface-budget diagnostics.
 
-    Parameters
-    ----------
-    state       : MultiLayerLandState — prognostic soil T, theta, psi, snow
-    forcing     : AtmToSurface — coupler fields from atmosphere
-    config      : CanopyLandConfig — physics configuration
-    U_min       : minimum wind speed [m/s] for numerical stability
-    dt          : time step [s]
-    lat         : latitude [degrees], optional, for snow albedo
-    carbon_state: CarbonState | None — reserved for Stage 2 (carbon pools)
-    doy         : day of year [1–365]
-    land_params : CanopyLandParams | None — spatially varying parameters
-
-    Returns
-    -------
-    new_state   : MultiLayerLandState
-    response    : TileResponse
-    carbon_state: None (Stage 1 — no prognostic carbon pools)
+    Callers should use :func:`step_canopy_land` (3-tuple) or
+    :func:`step_canopy_land_with_diagnostics` (4-tuple) instead.
     """
     cc = config.canopy
     mc = config.multilayer
@@ -198,16 +218,16 @@ def step_canopy_land(
     Cp   = 1004.0          # specific heat [J kg-1 K-1]
     Ca   = forcing.co2_ppmv  # CO2 [μmol mol-1]
 
-    # ---- Build forcing bundles for solver (one element per column) ----
-    # Initial canopy state guess
-    Ts_init  = T_soil[:, 0]
-    q_s_init = sat_specific_humidity(Ts_init, Ps)
+    # ---- Initial canopy state guess for Newton ----
+    Ts_old   = T_soil[:, 0]                        # start-of-step skin T
+    q_s_init = sat_specific_humidity(Ts_old, Ps)
     q_c_init = 0.5 * (q_s_init + q_atm)
     chi = 0.7 - 0.3 * fC4  # initial Ci/Ca ratio (0.7 C3, 0.4 C4)
     Ci_init = Ca * chi
 
+    # 6-var Newton state: [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c]
     initial_state = jnp.stack([
-        Ta, Ta, Ci_init, Ci_init, Ts_init, Ta, q_c_init], axis=-1)  # (ncol, 7)
+        Ta, Ta, Ci_init, Ci_init, Ta, q_c_init], axis=-1)  # (ncol, 6)
 
     # Build CanopyForcingBundle — broadcast scalar config values to (ncol,)
     def _bcast(v):
@@ -215,39 +235,85 @@ def step_canopy_land(
             return v
         return jnp.broadcast_to(jnp.asarray(v), (ncol,))
 
-    bundles = CanopyForcingBundle(
-        LAI=LAI, SZA=SZA, La=forcing.lw_down,
-        epsf=_bcast(cc.epsf), epss=_bcast(cc.epss),
-        fSun=sw_rt.fSun,
-        APAR_Sun=sw_rt.APAR_Sun, APAR_Sh=sw_rt.APAR_Sh,
-        Vcmax25_Sun=sw_rt.Vcmax25_C3Sun, Vcmax25_Sh=sw_rt.Vcmax25_C3Sh,
-        Vcmax25_C4Sun=sw_rt.Vcmax25_C4Sun, Vcmax25_C4Sh=sw_rt.Vcmax25_C4Sh,
-        ASW_Sun=sw_rt.ASW_Sun, ASW_Sh=sw_rt.ASW_Sh, ASW_Soil=sw_rt.ASW_Soil,
-        G_alpha=_bcast(cc.G_alpha),
-        Ca=Ca, Ps=Ps, Ta=Ta,
-        lam=_bcast(lam), Cp=_bcast(Cp), rhoa=rhoa, Tv_atm=Tv_atm, q_atm=q_atm,
-        m=m_mix, b0=b0_mix, alf=alf, TgC=TgC,
-        fC4=fC4, fStress_soil=fStress_soil,
-        ur=wind_speed, CI=CI, z0m=z0m, displa=displa, z0=z_ref,
-    )
+    def _build_bundle(Ts_bc):
+        """Build a CanopyForcingBundle for a given prescribed skin T."""
+        return CanopyForcingBundle(
+            LAI=LAI, SZA=SZA, La=forcing.lw_down,
+            epsf=_bcast(cc.epsf), epss=_bcast(cc.epss),
+            fSun=sw_rt.fSun,
+            APAR_Sun=sw_rt.APAR_Sun, APAR_Sh=sw_rt.APAR_Sh,
+            Vcmax25_Sun=sw_rt.Vcmax25_C3Sun, Vcmax25_Sh=sw_rt.Vcmax25_C3Sh,
+            Vcmax25_C4Sun=sw_rt.Vcmax25_C4Sun, Vcmax25_C4Sh=sw_rt.Vcmax25_C4Sh,
+            ASW_Sun=sw_rt.ASW_Sun, ASW_Sh=sw_rt.ASW_Sh, ASW_Soil=sw_rt.ASW_Soil,
+            Ts_bc=Ts_bc,
+            Ca=Ca, Ps=Ps, Ta=Ta,
+            lam=_bcast(lam), Cp=_bcast(Cp), rhoa=rhoa, Tv_atm=Tv_atm, q_atm=q_atm,
+            m=m_mix, b0=b0_mix, alf=alf, TgC=TgC,
+            fC4=fC4, fStress_soil=fStress_soil,
+            ur=wind_speed, CI=CI, z0m=z0m, displa=displa, z0=z_ref,
+        )
 
-    # ---- Newton-Raphson closure — vectorised over columns via vmap ----
     def _solve_one_col(x0, bun):
         return solve_canopy_closure(x0, bun, cc)
 
-    x_final, n_iters = jax.vmap(_solve_one_col)(initial_state, bundles)
-
-    # ---- Diagnostic forward pass — extract all fluxes ----
     def _fwd_one_col(xf, bun):
         return _canopy_forward(xf, bun, cc.coupling_scheme, cc.LE_module,
                                cc.use_ta_for_photosynthesis)
 
-    fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles)
+    # ---- Outer Picard loop: canopy closure ↔ soil thermal solver ----
+    # The canopy turbulent fluxes (LE, H) respond to Ts on sub-minute
+    # timescales, while the soil top layer has a ~1-hour thermal time
+    # constant.  A single explicit pass (solve canopy with Ts_old, then
+    # update soil with resulting G) has feedback gain up to ~7 for wet
+    # moist soils with small aerodynamic resistance (LE sensitivity
+    # ``dLE/dTs ≈ 200 W/m²/K`` dominates), leading to step-to-step
+    # oscillation between "hot" and "cold" states — we observed this
+    # as alternating ``LE ≈ 1000 / G = −500`` and ``LE ≈ 200 / G = +500``
+    # for C4 savanna at peak sun.
+    #
+    # Picard iteration: re-solve the canopy at an updated ``Ts_bc``
+    # between passes, with under-relaxation on the update.  The
+    # stability condition for simple Picard under-relaxation is
+    # ``|ω · G_Picard| < 1`` where G_Picard ≈ |dG/dTs| · dt/C_top ≈ 7.
+    # Using ω = 0.15 gives effective gain 1.04 → barely stable;
+    # 6 iterations compound the damping so the final residual is
+    # ``(1 − ω · G)^6 · ε₀ ≈ 0.95^6 ε₀ ≈ 0.74 ε₀``.  For stiffer
+    # cases (very wet soil, small resistance) this is still enough
+    # to damp the oscillation to below the safety clamp.
+    n_picard = 6
+    omega = 0.15
+    Ts_bc_k = Ts_old  # start from beginning-of-step skin T
 
-    # Converged state
+    # ---- Pre-Picard preliminaries that don't depend on Ts ----
+    # Snow / Richards setup that uses LE_tot will run AFTER Picard
+    # converges.  Here we just need forcings that enter the bundle.
+
+    for _picard_iter in range(n_picard):
+        bundles_k = _build_bundle(Ts_bc_k)
+        x_final, n_iters = jax.vmap(_solve_one_col)(initial_state, bundles_k)
+        fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
+
+        # Diagnose G and tentatively advance soil thermal to update Ts_bc.
+        # Clamp to physical bounds so a non-convergent iter cannot
+        # corrupt the update.
+        G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)
+        T_soil_tent = solve_soil_thermal(
+            T_soil, theta, grid, mc.hydraulics, mc.thermal, G_k, dt)
+        Ts_thermal = T_soil_tent[:, 0]
+        # Under-relaxed update — the relaxation factor < 1 damps the
+        # inner feedback loop (see module-level note above for the
+        # stability analysis).
+        Ts_bc_k = (1.0 - omega) * Ts_bc_k + omega * Ts_thermal
+
+    # After Picard: x_final, fluxes_per_col, bundles_k reflect the
+    # converged fast-canopy state paired with a slow-soil Ts_bc_k that
+    # agrees (to O(ω^3) = O(0.125)) with what the thermal solver will
+    # produce below.
+
+    # Converged state — 6-var layout [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c]
     Tf_Sun = x_final[:, 0]
     Tf_Sh  = x_final[:, 1]
-    Ts_cvg = x_final[:, 4]  # converged soil surface temperature
+    Ts_cvg = Ts_bc_k   # skin T used by the final canopy closure
 
     # ---- Aggregate fluxes ----
     fSun    = sw_rt.fSun
@@ -275,10 +341,10 @@ def step_canopy_land(
     GPP     = (An_Sun + An_Sh) * 12.0e-6
 
     # ---- Canopy albedo (diagnosed from RT) ----
-    # Reflected SW ≈ (1 - absorbed fraction) * sw_down
-    # Conservative: use (ASW_Sun+ASW_Sh+ASW_Soil) / sw_down
-    sw_absorbed = (sw_rt.ASW_Sun * fSun + sw_rt.ASW_Sh * (1.0 - fSun)
-                   + sw_rt.ASW_Soil)
+    # ASW_Sun / ASW_Sh / ASW_Soil are already canopy-integrated ground-area
+    # fluxes — the sunlit/shaded split is within the RT scheme, not a weight
+    # the caller should re-apply.  Straight sum recovers (1-α)·SW_down.
+    sw_absorbed = sw_rt.ASW_Sun + sw_rt.ASW_Sh + sw_rt.ASW_Soil
     sw_down_safe = jnp.maximum(forcing.sw_down, 1.0)
     alpha_canopy = jnp.clip(1.0 - sw_absorbed / sw_down_safe, 0.0, 1.0)
     alpha_canopy = jnp.where(forcing.sw_down < 1.0, mc.albedo_land, alpha_canopy)
@@ -293,6 +359,15 @@ def step_canopy_land(
            + a_soil * cc.epss * _SIGMA * Ts_cvg**4)
     eps_eff = a_sun * cc.epsf + a_sh * cc.epsf + a_soil * cc.epss
     T_surface = (Lw_up / jnp.maximum(eps_eff * _SIGMA, 1e-12))**0.25
+
+    # Physical safety clamp on G passed downstream: a single non-converged
+    # Newton step at a stiff transition can return |G| ≫ 1000 W/m², which
+    # the soil thermal solver then applies faithfully and corrupts
+    # ``T_soil[0]`` for the next step.  Clamp to well beyond any
+    # physically reasonable range (desert midday G ≲ 300 W/m², nocturnal
+    # release ≳ -200 W/m²) — normal operation is unaffected, extreme
+    # excursions are capped.
+    G = jnp.clip(G, -500.0, 700.0)
 
     # ---- Snow budget ----
     has_snow = snow > 1e-6
@@ -386,7 +461,8 @@ def step_canopy_land(
     # Post-step soil moisture stress for q_surface
     if lp is not None and hasattr(lp, "theta_wp") and lp.theta_wp.ndim > 0:
         beta_root_new = jnp.clip(
-            (T_soil_new[:, :] - theta_wp[:, None]) / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
+            (richards_out.theta_new - theta_wp[:, None])
+            / (theta_fc[:, None] - theta_wp[:, None] + 1e-10),
             0.0, 1.0)
     else:
         beta_root_new = jnp.clip(
@@ -425,7 +501,99 @@ def step_canopy_land(
         co2_flux=co2_flux,
     )
 
-    return new_state, response, carbon_state
+    # ---- Surface-budget diagnostics ------------------------------------
+    # Internal (solver-closed): each leaf satisfies Rn_leaf = LE_leaf + H_leaf;
+    # soil satisfies Rn_soil = LE_soil + H_soil + G.  Sum → Rn_int = LE+H+G.
+    Rn_Sun_d   = fluxes_per_col["Rn_Sun"]
+    Rn_Sh_d    = fluxes_per_col["Rn_Sh"]
+    Rn_Soil_d  = fluxes_per_col["Rn_Soil"]
+    Rn_canopy_d = Rn_Sun_d + Rn_Sh_d
+    Rn_int_d    = Rn_canopy_d + Rn_Soil_d
+    LE_canopy_d = LE_Sun + LE_Sh
+    H_canopy_d  = H_Sun  + H_Sh
+
+    # External (boundary-condition): what a downstream observer sees from
+    # forcing + canopy-mean surface temperature used for LW emission.
+    eps_eff_ext = eps_eff
+    SW_net_d = (1.0 - alpha_canopy) * forcing.sw_down
+    LW_net_d = eps_eff_ext * forcing.lw_down - eps_eff_ext * _SIGMA * T_surface**4
+    Rn_ext_d = SW_net_d + LW_net_d
+
+    residual_int_d = Rn_int_d - (LE_tot + H_tot + G)
+    residual_ext_d = Rn_ext_d - (LE_tot + H_tot + G)
+
+    diagnostics = CanopyDiagnostics(
+        Rn_ext=Rn_ext_d,
+        Rn_int=Rn_int_d,
+        SW_net=SW_net_d,
+        LW_net=LW_net_d,
+        LE_tot=LE_tot,
+        H_tot=H_tot,
+        G=G,
+        LE_canopy=LE_canopy_d,
+        LE_soil=LE_Soil,
+        H_canopy=H_canopy_d,
+        H_soil=H_Soil,
+        Rn_canopy=Rn_canopy_d,
+        Rn_soil=Rn_Soil_d,
+        residual_int=residual_int_d,
+        residual_ext=residual_ext_d,
+        GPP=GPP,
+        fSun=fSun,
+        n_iters=n_iters,
+        Tf_Sun=Tf_Sun,
+        Tf_Sh=Tf_Sh,
+        Ts_solve=Ts_cvg,
+        T_surface=T_surface_new,
+    )
+
+    return new_state, response, carbon_state, diagnostics
+
+
+def step_canopy_land(
+    state: MultiLayerLandState,
+    forcing: AtmToSurface,
+    config: CanopyLandConfig,
+    U_min: float,
+    dt: float,
+    lat: jnp.ndarray | None = None,
+    carbon_state: CarbonState | None = None,
+    doy: float = 0.0,
+    land_params: CanopyLandParams | None = None,
+) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None]:
+    """Single time step of the canopy energy balance land model.
+
+    Returns the standard 3-tuple (new_state, response, carbon_state).  For
+    detailed surface-budget diagnostics use
+    :func:`step_canopy_land_with_diagnostics`.
+    """
+    new_state, response, cs, _diag = _step_canopy_land_full(
+        state, forcing, config, U_min, dt,
+        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
+    return new_state, response, cs
+
+
+def step_canopy_land_with_diagnostics(
+    state: MultiLayerLandState,
+    forcing: AtmToSurface,
+    config: CanopyLandConfig,
+    U_min: float,
+    dt: float,
+    lat: jnp.ndarray | None = None,
+    carbon_state: CarbonState | None = None,
+    doy: float = 0.0,
+    land_params: CanopyLandParams | None = None,
+) -> tuple[MultiLayerLandState, TileResponse, CarbonState | None, CanopyDiagnostics]:
+    """Like :func:`step_canopy_land` but also returns a ``CanopyDiagnostics``.
+
+    Intended for offline diagnostic runs — enables inspection of the full
+    surface energy budget (Rn, LE, H, G, residual) without recomputing the
+    Newton closure.  Adds ~dozen extra arrays to the return pytree; no
+    performance cost beyond their allocation.
+    """
+    return _step_canopy_land_full(
+        state, forcing, config, U_min, dt,
+        lat=lat, carbon_state=carbon_state, doy=doy, land_params=land_params)
 
 
 def init_canopy_land_state(

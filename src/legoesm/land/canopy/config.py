@@ -79,7 +79,9 @@ PFT_CANOPY_HEIGHT: dict[str, float] = {
 class CanopyConfig(NamedTuple):
     """Physics settings for the canopy energy balance solver."""
 
-    # Newton-Raphson solver
+    # Newton-Raphson solver.  With the scalar-clamp damping and the
+    # outer Picard canopy↔thermal loop in canopy_land.py, 50 iters is
+    # normally ample.
     max_iters: int = 50
     tol: float = 1e-2
     # coupling_scheme and LE_module are static Python strings captured in
@@ -88,8 +90,11 @@ class CanopyConfig(NamedTuple):
     LE_module: str = "BT"                   # "BT" (Bulk Transfer, default) | "PM" (Penman-Monteith)
     use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
 
-    # Ground heat flux fraction of net radiation at soil surface
-    G_alpha: float = 0.35
+    # NOTE: The former ``G_alpha`` tunable (G = G_alpha · Rn_soil) has been
+    # removed.  Ground heat flux is now diagnosed as the surface energy
+    # budget residual ``G = Rn_soil - LE_soil - H_soil`` using
+    # T_soil[:, 0] as the prescribed skin temperature, then fed as the
+    # top BC to ``solve_soil_thermal`` — same pattern as multilayer_land.
 
     # Emissivities
     epsf: float = 0.97   # leaf emissivity
