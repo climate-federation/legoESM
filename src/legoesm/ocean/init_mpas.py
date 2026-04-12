@@ -166,9 +166,14 @@ def wind_driven_gyre_mpas(
     # Uniform depth everywhere (smooth Jacobian at coastlines)
     H_bathy = jnp.full(nCells, H_max, dtype=dtype)
 
-    # Uniform T and S
+    # Uniform T and S - apply land masking to set land cells to 0.0°C
     T_data = jnp.full((nCells, nlev), T_uniform, dtype=dtype)
     S_data = jnp.full((nCells, nlev), S_uniform, dtype=dtype)
+    
+    # Apply land masking: land cells (mask <= 0.5) set to 0.0°C
+    mask_3d = land_mask[:, jnp.newaxis]  # Broadcast to 3D
+    T_data = jnp.where(mask_3d > 0.5, T_data, 0.0)
+    S_data = jnp.where(mask_3d > 0.5, S_data, 0.0)
 
     # Zero velocity and SSH
     u_data = jnp.zeros((nEdges, nlev), dtype=dtype)

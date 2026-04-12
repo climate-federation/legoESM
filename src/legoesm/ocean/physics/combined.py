@@ -125,8 +125,8 @@ def make_ocean_physics(config: OceanPhysicsConfig) -> Callable:
             )
             dT_dt = dT_dt + sw_tend
 
-        dims_3d = ("face", "x", "y", "level")
-        dims_2d = ("face", "x", "y")
+        dims_3d = state.T.dims if hasattr(state.T, 'dims') else ("face", "x", "y", "level")
+        dims_2d = state.eta.dims if hasattr(state.eta, 'dims') else ("face", "x", "y")
         return OceanTendencies(
             du_dt=Field(data=du_dt, name="du_dt", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt", dims=dims_3d, units="m/s^2"),

@@ -241,7 +241,8 @@ def upwind_vertical_gradient(
 # Vertical velocity diagnosis and advection (shared across ocean dycores)
 # ---------------------------------------------------------------------------
 
-def diagnose_w_from_flux_div(flux_div_k, z_coord=None):
+def diagnose_w_from_flux_div(flux_div_k, z_coord=None,
+                              thickness_weighted=False):
     """Diagnose z-star transport velocity from flux divergence.
 
     Performs a bottom-up cumulative sum of the horizontal flux divergence
@@ -252,15 +253,35 @@ def diagnose_w_from_flux_div(flux_div_k, z_coord=None):
     ----------
     flux_div_k : array, shape (..., nlev)
         Horizontal flux divergence at each layer.
+        If ``thickness_weighted=False`` (legacy), this is ``div(u)`` and
+        will be multiplied by ``dz_ref`` before integration.
+        If ``thickness_weighted=True``, this is ``div(h*u)`` [m/s] and
+        already has layer thickness folded in; no dz multiplication.
     z_coord : OceanZStarCoordinate or None
         When provided, applies the z-star correction.
+    thickness_weighted : bool
+        If True, ``flux_div_k`` already includes layer thickness
+        (i.e. it was computed from thickness-weighted velocity).
+        Default False for backward compatibility.
 
     Returns
     -------
     w : array, shape (..., nlev+1)
         Vertical velocity on half levels (surface first, bottom last = 0).
     """
-    fd_rev = flux_div_k[..., ::-1]
+    # From continuity: w(k) = w(k+1) + div_h(h_k * u_k)
+    # If flux_div_k already includes layer thickness (thickness_weighted=True),
+    # we cumsum directly. Otherwise, multiply by dz_ref first.
+    if thickness_weighted:
+        fd_integrated = flux_div_k
+    elif z_coord is not None:
+        dz_ref = z_coord.dz_ref  # Layer thicknesses
+        fd_integrated = flux_div_k * dz_ref[jnp.newaxis, jnp.newaxis, :]
+    else:
+        # Fallback for testing (assume unit thickness)
+        fd_integrated = flux_div_k
+
+    fd_rev = fd_integrated[..., ::-1]
     cumsum_rev = jnp.cumsum(fd_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]
     zeros_bottom = jnp.zeros((*flux_div_k.shape[:-1], 1), dtype=flux_div_k.dtype)
@@ -296,4 +317,75 @@ def vertical_advection_ocean(field, w_half, z_coord, jacobian):
     jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
     dz_half = z_coord.dz_half_ref * jac_safe
     grad = upwind_vertical_gradient(field, dz_half, w_full)
+    
+    # Vertical advection calculation
+    
     return -w_full * grad
+
+
+def flux_form_vertical_tracer_advection(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with first-order upwind.
+
+    Computes the vertical flux divergence  F_top[k] - F_bot[k]  for each
+    level k, where F = w * T_face is the upward tracer flux on interfaces.
+
+    Level convention
+    ----------------
+    k = 0 is surface, k = nlev-1 is bottom.
+    Interface k sits ABOVE level k:
+      - interface 0  = sea surface  (top of level 0)
+      - interface k  = between level k-1 (above) and level k (below), k=1..nlev-1
+      - interface nlev = ocean bottom (below level nlev-1)
+    w positive = upward.
+
+    Upwind at interior interface k (k = 1 .. nlev-1):
+      - w[k] > 0  (upward):  fluid from level k  (below) → T_face = field[k]
+      - w[k] <= 0 (downward): fluid from level k-1 (above) → T_face = field[k-1]
+
+    Surface and bottom fluxes are zero (w[0] = w[nlev] = 0 by construction).
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+        Tracer at full levels (e.g. temperature [degC]).
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half (interface) levels [m/s].
+
+    Returns
+    -------
+    vert_flux_div : array, shape (..., nlev)
+        Vertical flux divergence  F_top[k] - F_bot[k]  for each level.
+        Units are [tracer] * [m/s]  (NOT divided by layer thickness).
+        The caller uses:  h_new*T_new = h_old*T_old - dt*vert_flux_div - dt*horiz_flux_div
+    """
+    nlev = field.shape[-1]
+
+    # --- Compute upwind tracer flux at each interface ---
+    # F has shape (..., nlev+1).  F[..., 0] = 0, F[..., nlev] = 0.
+    # For interior interface k (1 <= k <= nlev-1):
+    #   F[k] = w[k] * T_face[k]
+    #   where T_face[k] = field[k]   if w[k] > 0   (upward, from below)
+    #                    = field[k-1] if w[k] <= 0  (downward, from above)
+
+    # Interior w values: w_half[..., 1:nlev] has shape (..., nlev-1)
+    w_interior = w_half[..., 1:nlev]  # (..., nlev-1)
+
+    # Upwind selection at interior interfaces
+    # Interface k (1-indexed) is between level k-1 (above) and level k (below)
+    T_below = field[..., 1:]    # field[k]   for k=1..nlev-1 → (..., nlev-1)
+    T_above = field[..., :-1]   # field[k-1] for k=1..nlev-1 → (..., nlev-1)
+
+    T_face_interior = jnp.where(w_interior > 0.0, T_below, T_above)
+    F_interior = w_interior * T_face_interior  # (..., nlev-1)
+
+    # Full flux array with zero boundaries
+    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
+    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)  # (..., nlev+1)
+
+    # Flux divergence: F_top[k] - F_bot[k] = F[k] - F[k+1]
+    vert_flux_div = F[..., :-1] - F[..., 1:]  # (..., nlev)
+
+    return vert_flux_div

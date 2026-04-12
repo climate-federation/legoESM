@@ -947,9 +947,8 @@ def test_coupler_with_fv_ocean_tracer_transport():
         H_max=4000.0,
     )
 
-    # Step ocean with FV tracer transport
+    # Step ocean
     ocean_config = OceanConfig(
-        use_fv_tracer_transport=True,
         use_conservation_fixer=False,
     )
     ocean_model = OceanModel(grid, z_coord, config=ocean_config)

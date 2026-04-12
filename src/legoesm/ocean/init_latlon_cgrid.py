@@ -110,6 +110,9 @@ def rest_state_latlon_cgrid_ocean(
     # Face masks
     u_mask, v_mask = compute_face_masks(land_mask)
 
+    # Initialize vertical velocity with zeros (will be computed during step)
+    w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
+
     dims_u = ("lat", "lon_u", "level")
     dims_v = ("lat_v", "lon", "level")
     dims_3d = ("lat", "lon", "level")
@@ -129,6 +132,7 @@ def rest_state_latlon_cgrid_ocean(
         land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
         u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
         v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
+        w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
     )
 
 
@@ -170,6 +174,9 @@ def wind_driven_gyre_latlon_cgrid(
 
     u_mask, v_mask = compute_face_masks(land_mask)
 
+    # Initialize vertical velocity with zeros (will be computed during step)
+    w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
+
     dims_u = ("lat", "lon_u", "level")
     dims_v = ("lat_v", "lon", "level")
     dims_3d = ("lat", "lon", "level")
@@ -189,6 +196,7 @@ def wind_driven_gyre_latlon_cgrid(
         land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
         u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
         v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
+        w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
     )
 
 
@@ -241,6 +249,9 @@ def regional_rest_state_latlon_cgrid(
     land_mask = wall_mask.astype(dtype)
     u_mask, v_mask = compute_face_masks(land_mask)
 
+    # Initialize vertical velocity with zeros (will be computed during step)
+    w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
+
     dims_u = ("lat", "lon_u", "level")
     dims_v = ("lat_v", "lon", "level")
     dims_3d = ("lat", "lon", "level")
@@ -260,4 +271,5 @@ def regional_rest_state_latlon_cgrid(
         land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
         u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
         v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
+        w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
     )

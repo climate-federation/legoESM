@@ -93,6 +93,73 @@ def _interp_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([zero, f_interior, zero], axis=0)
 
 
+def _upwind_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """First-order upwind interpolation of cell-center field to u-points.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, ...) at cell centers.
+    mass_flux_u : array, shape (n_lat, n_lon+1, ...) at u-points.
+        Sign convention: positive = flow in +j (eastward) direction.
+
+    Returns
+    -------
+    f_u : array, shape (n_lat, n_lon+1, ...) at u-points.
+        Upwind value: uses the upstream cell based on mass_flux_u sign.
+    """
+    # Face j is between cell (j-1) mod n_lon and cell j.
+    # Positive flux => flow from cell j-1 to cell j => upwind is cell j-1.
+    # Negative flux => flow from cell j to cell j-1 => upwind is cell j.
+    f_left = jnp.roll(f, 1, axis=1)   # f_left[:, j] = f[:, j-1]
+    f_right = f                        # f_right[:, j] = f[:, j]
+
+    # Build upwind at interior faces (n_lat, n_lon)
+    f_upwind = jnp.where(mass_flux_u[:, :-1] > 0, f_left, f_right)
+
+    # Wrap: face n_lon is the same as face 0 (periodic in longitude)
+    if f.ndim >= 3:
+        return jnp.concatenate([f_upwind, f_upwind[:, 0:1, :]], axis=1)
+    else:
+        return jnp.concatenate([f_upwind, f_upwind[:, 0:1]], axis=1)
+
+
+def _upwind_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+) -> jnp.ndarray:
+    """First-order upwind interpolation of cell-center field to v-points.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, ...) at cell centers.
+    mass_flux_v : array, shape (n_lat+1, n_lon, ...) at v-points.
+        Sign convention: positive = flow in +i (northward) direction.
+
+    Returns
+    -------
+    f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
+        Upwind value: uses the upstream cell based on mass_flux_v sign.
+        Boundary faces (i=0 and i=n_lat) are zero (solid wall).
+    """
+    # Interior face i (for i=1..n_lat-1) sits between cell i-1 and cell i.
+    # Positive flux => flow from cell i-1 to cell i => upwind is cell i-1.
+    # Negative flux => flow from cell i to cell i-1 => upwind is cell i.
+    f_south = f[:-1]   # cell i-1 for interior faces
+    f_north = f[1:]    # cell i   for interior faces
+    # Interior mass flux: faces 1..n_lat-1
+    mf_interior = mass_flux_v[1:-1]
+    f_upwind = jnp.where(mf_interior > 0, f_south, f_north)
+
+    if f.ndim >= 3:
+        zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
+    else:
+        zero = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
+    return jnp.concatenate([zero, f_upwind, zero], axis=0)
+
+
 def _neumann_fill_cgrid(
     f: jnp.ndarray,
     mask: jnp.ndarray,
@@ -251,7 +318,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     flux_div_k = divergence_cgrid(
         h_u * u * u_mask_3d, h_v * v * v_mask_3d, grid,
     )
-    w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
+    w = _diagnose_w_from_flux_div(flux_div_k, z_coord, thickness_weighted=True)
 
     # --- 4b. Baroclinic perturbation velocity ---
     # The barotropic solver handles the depth-averaged momentum.

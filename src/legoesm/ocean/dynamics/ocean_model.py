@@ -167,16 +167,6 @@ class OceanModel:
                 "salinity_min_psu must be <= salinity_max_psu, got "
                 f"{config.salinity_min_psu!r} > {config.salinity_max_psu!r}",
             )
-        if not (0.0 <= config.edge_blend_strength <= 1.0):
-            raise ValueError(
-                "edge_blend_strength must be in [0, 1], got "
-                f"{config.edge_blend_strength!r}",
-            )
-        if config.edge_blend_depth < 0:
-            raise ValueError(
-                "edge_blend_depth must be >= 0, got "
-                f"{config.edge_blend_depth!r}",
-            )
 
     def _assert_runtime_invariants(self, state: OceanState) -> None:
         """Host-side runtime checks for debugging/regression hardening."""

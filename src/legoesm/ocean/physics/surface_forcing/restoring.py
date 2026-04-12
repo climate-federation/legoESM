@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.physics.surface_forcing.config import RestoringConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 
@@ -12,15 +11,15 @@ from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 def restoring_surface_forcing(
     T: jnp.ndarray,
     S: jnp.ndarray,
-    grid: CubedSphereGrid,
+    grid,
     cfg: RestoringConfig,
 ) -> SurfaceForcingOutput:
     """Apply SST/SSS restoring to target profiles.
 
     Parameters
     ----------
-    T, S : array (6, n, n, nlev)
-    grid : CubedSphereGrid
+    T, S : array — 3D tracer fields (any grid layout)
+    grid : any grid with ``grid_lat`` attribute
     cfg : RestoringConfig
 
     Returns

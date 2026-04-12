@@ -121,8 +121,6 @@ class OceanConfig(NamedTuple):
     differentiable_barotropic: bool = False  # Use lax.scan (grad-compatible) vs fori_loop (faster)
     div_damp_2: float = 0.0   # 2nd-order divergence damping [m²/s] (FV discretization)
     div_damp_4: float = 0.0   # 4th-order divergence damping [m⁴/s] (FV discretization)
-    edge_blend_strength: float = 0.0  # FV cube-edge continuity relaxation (0=off)
-    edge_blend_depth: int = 2         # Rows near each face edge to relax
     physics: object = None  # OceanPhysicsConfig or None (legacy mode)
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
@@ -252,7 +250,7 @@ class LatLonOceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
-    barotropic_diffusion_alpha: float = 0.01
+    barotropic_diffusion_alpha: float = 0.0
     barotropic_diffusion_dt_ref: float = 60.0
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
@@ -304,6 +302,8 @@ class LatLonCGridOceanState(NamedTuple):
         Ocean mask at u-points (lon interfaces). Shape (n_lat, n_lon+1).
     v_mask : Field
         Ocean mask at v-points (lat interfaces). Shape (n_lat+1, n_lon).
+    w : Field
+        Vertical velocity [m/s]. Shape (n_lat, n_lon, nlev). Diagnostic field computed from flux divergence.
     """
 
     u: Field
@@ -315,6 +315,51 @@ class LatLonCGridOceanState(NamedTuple):
     land_mask: Field
     u_mask: Field
     v_mask: Field
+    w: Field
+
+
+class LatLonCGridOceanDiagnostics(NamedTuple):
+    """Diagnostic fields for debugging ocean dynamics on lat-lon C-grid.
+    
+    These fields are computed during tendency calculation for analysis purposes
+    but are not part of the prognostic state.
+    
+    Fields
+    ------
+    w : Field
+        Vertical velocity at half levels [m/s]. Shape (n_lat, n_lon, nlev+1).
+    w_half_ref : Field
+        Reference vertical velocity in z* coordinates [m/s]. Shape (n_lat, n_lon, nlev+1).
+    flux_div_k : Field
+        Horizontal flux divergence per layer [m/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_total : Field
+        Total temperature tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_hadv : Field
+        Horizontal advection tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_vadv : Field
+        Vertical advection tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_hdiff : Field
+        Horizontal diffusion tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_vdiff : Field
+        Vertical diffusion tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    dT_dt_physics : Field
+        Physics tendency [degC/s]. Shape (n_lat, n_lon, nlev).
+    wind_stress_x : Field
+        Zonal wind stress applied [Pa]. Shape (n_lat, n_lon).
+    wind_stress_y : Field  
+        Meridional wind stress applied [Pa]. Shape (n_lat, n_lon).
+    """
+    w: Field
+    w_half_ref: Field
+    flux_div_k: Field
+    dT_dt_total: Field
+    dT_dt_hadv: Field
+    dT_dt_vadv: Field
+    dT_dt_hdiff: Field
+    dT_dt_vdiff: Field
+    dT_dt_physics: Field
+    wind_stress_x: Field
+    wind_stress_y: Field
 
 
 class LatLonCGridOceanTendencies(NamedTuple):
@@ -348,13 +393,13 @@ class LatLonCGridOceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
-    # Default alpha=0 for C-grid: the compact-stencil C-grid divergence/
-    # gradient operators eliminate the 2dx checkerboard mode that the A-grid
-    # solver needs diffusion to suppress.  The flux-form diffusion code
-    # remains available for production runs with realistic topography
-    # where grid-scale SSH noise may arise from wetting/drying or steep
-    # bathymetric steps.  Set to 0.001-0.01 if needed.
-    barotropic_diffusion_alpha: float = 0.0
+    # Barotropic SSH diffusion damps grid-scale modes that accumulate
+    # from split-explicit mode-splitting error.  Barotropic time-
+    # averaging of eta/U/V for baroclinic coupling reduces the need
+    # for diffusion but does not fully eliminate it.  Default 0.01
+    # provides minimal damping; reduce toward 0.0 if time-averaging
+    # suffices for your experiment.
+    barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5

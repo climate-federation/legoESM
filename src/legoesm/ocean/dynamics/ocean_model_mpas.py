@@ -270,6 +270,11 @@ class MPASOceanModel:
         T_new = jnp.where(mask_e > 0.5, T_new * h_ratio, T_new)
         S_new = jnp.where(mask_e > 0.5, S_new * h_ratio, S_new)
 
+        # Explicit land cell masking: ensure land cells are set to 0.0°C
+        # This is the critical fix for MPAS regional grid land cell masking
+        T_new = jnp.where(mask_e > 0.5, T_new, 0.0)
+        S_new = jnp.where(mask_e > 0.5, S_new, 0.0)
+
         # 6. Reconcile 3D velocity
         # Compute u_bar_old from the UPDATED state (state_for_baro),
         # not the original. This ensures depth_avg(u_3d_new) = u_bar_new.
@@ -283,10 +288,16 @@ class MPASOceanModel:
             u_baro, u_bar_old, u_bar_new, mesh, mask,
         )
 
+        # Final state construction with explicit land masking
+        # Ensure all fields respect land mask in the final state
+        mask_e = mask[:, jnp.newaxis]
+        T_final = jnp.where(mask_e > 0.5, T_new, 0.0)
+        S_final = jnp.where(mask_e > 0.5, S_new, 0.0)
+        
         state_new = MPASOceanState(
             u=state.u.replace(data=u_3d_new),
-            T=state.T.replace(data=T_new),
-            S=state.S.replace(data=S_new),
+            T=state.T.replace(data=T_final),
+            S=state.S.replace(data=S_final),
             eta=state.eta.replace(data=eta_new * mask),
             H_bathy=state.H_bathy,
             land_mask=state.land_mask,
