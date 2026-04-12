@@ -318,7 +318,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     flux_div_k = divergence_cgrid(
         h_u * u * u_mask_3d, h_v * v * v_mask_3d, grid,
     )
-    w = _diagnose_w_from_flux_div(flux_div_k, z_coord)
+    w = _diagnose_w_from_flux_div(flux_div_k, z_coord, thickness_weighted=True)
 
     # --- 4b. Baroclinic perturbation velocity ---
     # The barotropic solver handles the depth-averaged momentum.

@@ -308,25 +308,21 @@ class LatLonCGridOceanModel:
             self.grid, self.z_coord, self.config,
         )
 
-        # 7. Flux-form tracer correction using barotropic-averaged transport
+        # 7. Flux-form tracer update using full 3D velocity
         #
-        # The baroclinic tendency used instantaneous velocity for tracer
-        # advection, but the barotropic solver determined h_new via 30
-        # substeps with evolving velocities.  The barotropic-averaged
-        # transport Hu_avg, Hv_avg is consistent with the continuity
-        # equation that produced h_new.
+        # The barotropic solver returns Hu_avg (time-averaged depth-
+        # integrated transport) consistent with the continuity equation
+        # that produced h_new.  For tracer advection we need per-layer
+        # mass fluxes that:
+        #   (a) preserve the baroclinic velocity shear (needed for
+        #       Ekman pumping and vertical tracer transport), and
+        #   (b) have depth-integrated transport matching Hu_avg (needed
+        #       for consistency with the barotropic continuity).
         #
-        # We correct the tracer content by replacing the baroclinic
-        # horizontal advection with flux-form advection using the
-        # barotropic-averaged transport distributed to layers:
-        #
-        #   h_new_k * T_new_k = h_old_k * T_mid_k
-        #     - dt * (div(flux_k * T_face_k) - T_mid_k * div(flux_k))
-        #
-        # where flux_k = Hu_avg * (h_u_k / H_u) distributes the 2D
-        # barotropic transport to layers proportional to thickness.
-        # Using the SAME divergence operator for both terms guarantees
-        # exact cancellation for uniform T (Hallberg 1997, Higdon 2005).
+        # We take the full 3D velocity from state_new (which preserves
+        # baroclinic structure) and apply a uniform barotropic correction
+        # so that sum_k(h_k * u_corrected_k) = Hu_avg exactly.
+        # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             _interp_to_u_points,
             _interp_to_v_points,
@@ -337,17 +333,37 @@ class LatLonCGridOceanModel:
 
         mask = state.land_mask.data
 
-        # Distribute 2D barotropic transport to layers
+        # Layer thickness at face points
         h_u_old = _interp_to_u_points(h_k_old)  # (n_lat, n_lon+1, nlev)
         h_v_old = _interp_to_v_points(h_k_old)  # (n_lat+1, n_lon, nlev)
         H_u_old = jnp.sum(h_u_old, axis=-1)     # (n_lat, n_lon+1)
         H_v_old = jnp.sum(h_v_old, axis=-1)     # (n_lat+1, n_lon)
 
-        frac_u = h_u_old / jnp.maximum(H_u_old[..., jnp.newaxis], 1e-10)
-        frac_v = h_v_old / jnp.maximum(H_v_old[..., jnp.newaxis], 1e-10)
+        # Full 3D velocity (barotropic + baroclinic) from state after
+        # barotropic correction.  The barotropic solver preserves the
+        # baroclinic perturbation u' = u - U_bar and replaces the
+        # barotropic component with the time-averaged U_bar_avg.
+        u_3d = state_new.u.data   # (n_lat, n_lon+1, nlev)
+        v_3d = state_new.v.data   # (n_lat+1, n_lon, nlev)
 
-        mass_flux_u = Hu_avg[..., jnp.newaxis] * frac_u * state.u_mask.data[..., jnp.newaxis]
-        mass_flux_v = Hv_avg[..., jnp.newaxis] * frac_v * state.v_mask.data[..., jnp.newaxis]
+        # Correct the barotropic component so that depth-integrated
+        # transport matches Hu_avg exactly.  The correction is the
+        # difference between <H*U> (time-averaged transport) and
+        # <U>*H (time-averaged velocity times pre-barotropic H).
+        Hu_3d = jnp.sum(u_3d * h_u_old, axis=-1)
+        Hv_3d = jnp.sum(v_3d * h_v_old, axis=-1)
+        delta_U = (Hu_avg - Hu_3d) / jnp.maximum(H_u_old, 1e-10)
+        delta_V = (Hv_avg - Hv_3d) / jnp.maximum(H_v_old, 1e-10)
+        u_corrected = u_3d + delta_U[..., jnp.newaxis]
+        v_corrected = v_3d + delta_V[..., jnp.newaxis]
+
+        # Per-layer mass fluxes with full 3D velocity structure.
+        # Unlike the previous barotropic-only distribution (which gave
+        # uniform velocity at all depths and identically zero w),
+        # this preserves baroclinic shear and produces non-zero vertical
+        # velocity from Ekman pumping/suction.
+        mass_flux_u = h_u_old * u_corrected * state.u_mask.data[..., jnp.newaxis]
+        mass_flux_v = h_v_old * v_corrected * state.v_mask.data[..., jnp.newaxis]
 
         # Flux-form tracer update (horizontal + vertical)
         #
