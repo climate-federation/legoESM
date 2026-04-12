@@ -60,13 +60,13 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     ("hydrostatic",   "spectral",       "gaussian"):     "spectral_primitive_equations",
     ("nonhydrostatic","spectral",       "gaussian"):     "spectral_compressible_euler",
 
-    # --- Lat-lon finite-volume ---
-    ("shallow_water", "finite_volume",  "latlon"):       "fv_shallow_water_latlon",
-    ("hydrostatic",   "finite_volume",  "latlon"):       "fv_primitive_equations_latlon",
-    ("nonhydrostatic","finite_volume",  "latlon"):       "fv_compressible_euler_latlon",
-    ("shallow_water", "centered",       "latlon"):       "fv_shallow_water_latlon",
-    ("hydrostatic",   "centered",       "latlon"):       "fv_primitive_equations_latlon",
-    ("nonhydrostatic","centered",       "latlon"):       "fv_compressible_euler_latlon",
+    # --- Lat-lon C-grid ---
+    ("shallow_water", "finite_volume",  "latlon"):       "latlon_cgrid_shallow_water",
+    ("hydrostatic",   "finite_volume",  "latlon"):       "latlon_cgrid_primitive_equations",
+    ("shallow_water", "centered",       "latlon"):       "latlon_cgrid_shallow_water",
+    ("hydrostatic",   "centered",       "latlon"):       "latlon_cgrid_primitive_equations",
+    ("shallow_water", "latlon_cgrid",   "latlon"):       "latlon_cgrid_shallow_water",
+    ("hydrostatic",   "latlon_cgrid",   "latlon"):       "latlon_cgrid_primitive_equations",
 
     # --- MPAS icosahedral ---
     ("hydrostatic",   "mpas",           "voronoi"):      "mpas_primitive_equations",
@@ -285,6 +285,92 @@ def create_atmosphere_dycore(
     if solver_name == "mpas_compressible_euler":
         from legoesm.atmosphere.dynamics.compressible_euler_mpas import MPASCompressibleEulerModel
         return MPASCompressibleEulerModel(mesh=grid, sigma_coord=sigma)
+
+    # ----- Lat-lon C-grid solvers -----
+    if solver_name in ("latlon_cgrid_shallow_water",
+                       "latlon_cgrid_primitive_equations"):
+        # The lat-lon C-grid configs support A_h and fix_mass but not
+        # The lat-lon C-grid solver uses Laplacian viscosity (A_h) only —
+        # it has no biharmonic hyperdiffusion operator.  However, the
+        # driver still uses compute_diffusion().hyperdiff for moisture
+        # smoothing, so hyperdiff_scale is NOT rejected here.
+        #
+        # Divergence damping is not used anywhere on lat-lon, so values
+        # > 1.0 (requesting amplified damping) are rejected.
+        if dc.div_damp_scale > 1.0:
+            raise ValueError(
+                f"Lat-lon C-grid solver does not support divergence "
+                f"damping. div_damp_scale={dc.div_damp_scale} was "
+                f"requested but this mechanism is not implemented. "
+                f"Set div_damp_scale=1.0 (default) or 0.0 (disabled)."
+            )
+
+        # Honor conservation_fixer: when explicitly False, disable fix_mass
+        # even if dc.fix_mass is True.
+        _fix_mass = dc.fix_mass
+        if dc.conservation_fixer is False:
+            _fix_mass = False
+            if dc.fix_mass:
+                logger.info(
+                    "Lat-lon C-grid solver: conservation_fixer=False "
+                    "overrides fix_mass=True → mass fixer disabled",
+                )
+
+        # ---- Pole-cell CFL safeguards ----
+        # The explicit C-grid solver on a lat-lon grid has its smallest
+        # cell at the poles: dx_pole = R * dlon * cos(π/2 - dlat/2).
+        # Both the advective CFL (dt < dx / c_grav) and the diffusive
+        # CFL (A_h < 0.4 * dx² / dt) must be satisfied there.
+        from legoesm.core.cfl import (
+            pole_cell_dx, cfl_max_dt, max_laplacian_viscosity,
+        )
+        dx_pole = pole_cell_dx(grid)
+        c_grav = 300.0  # gravity wave speed [m/s]
+        dt_max_advective = cfl_max_dt(dx_pole, c_grav, cfl_number=0.8, ndim=1)
+        _effective_dt = dc.dt
+        if _effective_dt > dt_max_advective:
+            logger.warning(
+                "Lat-lon C-grid: dt=%.1f s exceeds pole-cell advective "
+                "CFL limit (%.1f s); clamping to %.1f s. "
+                "Set dycore.dt <= %.1f for this grid.",
+                _effective_dt, dt_max_advective, dt_max_advective,
+                dt_max_advective,
+            )
+            _effective_dt = dt_max_advective
+
+        A_h_max = max_laplacian_viscosity(dx_pole, _effective_dt)
+        _A_h = min(diff.A_h, A_h_max)
+        if diff.A_h > A_h_max:
+            logger.warning(
+                "Lat-lon C-grid: A_h=%.2e exceeds pole-cell diffusive "
+                "CFL limit (%.2e); clamping.",
+                diff.A_h, A_h_max,
+            )
+
+    if solver_name == "latlon_cgrid_shallow_water":
+        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+            CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
+        )
+        cfg = CGridLatLonShallowWaterConfig(
+            A_h=_A_h,
+            fix_mass=_fix_mass,
+        )
+        model = CGridLatLonShallowWaterModel(grid, cfg, dt=_effective_dt)
+        model.effective_dt = _effective_dt
+        return model
+
+    if solver_name == "latlon_cgrid_primitive_equations":
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
+        )
+        cfg = CGridLatLonPrimitiveEquationConfig(
+            A_h=_A_h,
+            fix_mass=_fix_mass,
+        )
+        model = CGridLatLonPrimitiveEquationModel(
+            grid, sigma, cfg, dt=_effective_dt)
+        model.effective_dt = _effective_dt
+        return model
 
     # ----- SFNO data-driven -----
     if solver_name == "sfno_shallow_water":

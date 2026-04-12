@@ -21,20 +21,22 @@ Use two-axis selection (recommended)::
 
 Supported implementation matrix
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-===========================  ==============  =================================
+===========================  ==============  ========================================
 dynamics                     discretization  solver
-===========================  ==============  =================================
+===========================  ==============  ========================================
 ``shallow_water``            cdgrid          CDGridShallowWaterModel
 ``shallow_water``            spectral        SpectralShallowWaterModel
 ``shallow_water``            sfno            SFNOShallowWaterModel
+``shallow_water``            latlon_cgrid    CGridLatLonShallowWaterModel
 ``hydrostatic``              cdgrid          CDGridPrimitiveEquationModel
 ``hydrostatic``              spectral        SpectralPrimitiveEquationModel
 ``hydrostatic``              sfno            SFNOPrimitiveEquationModel
+``hydrostatic``              latlon_cgrid    CGridLatLonPrimitiveEquationModel
 ``hydrostatic``              mpas            MPASPrimitiveEquationModel
 ``nonhydrostatic``           cdgrid          CDGridCompressibleEulerModel
 ``nonhydrostatic``           spectral        SpectralCompressibleEulerModel
 ``nonhydrostatic``           mpas            MPASCompressibleEulerModel
-===========================  ==============  =================================
+===========================  ==============  ========================================
 
 Deprecated aliases
 ~~~~~~~~~~~~~~~~~~
@@ -47,8 +49,10 @@ emit ``DeprecationWarning``.  They will be removed in a future release:
   ``CGPrimitiveEquationModel`` → use ``CDGridPrimitiveEquationModel``
 - ``CompressibleEulerModel``, ``FVCompressibleEulerModel``,
   ``CGCompressibleEulerModel`` → use ``CDGridCompressibleEulerModel``
-- discretization names ``"centered"``, ``"finite_volume"``, ``"cgrid"``
-  → use ``"cdgrid"``
+- discretization names ``"cgrid"``, ``"fv"`` → use ``"cdgrid"``
+- ``"centered"`` and ``"finite_volume"`` default to ``"cdgrid"`` without
+  grid context; the driver resolves them grid-aware (e.g. ``latlon_cgrid``
+  on lat-lon grids)
 
 See :mod:`legoesm.supported_matrix` for the full implementation matrix.
 """
@@ -91,7 +95,15 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "SFNOShallowWaterConfig": ("legoesm.atmosphere.dynamics.sfno_sw", "SFNOShallowWaterConfig"),
     "SFNOPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.sfno_pe", "SFNOPrimitiveEquationModel"),
     "SFNOPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.sfno_pe", "SFNOPrimitiveEquationConfig"),
-    # --- Lat-lon cores ---
+    # --- Lat-lon C-grid cores ---
+    "CGridLatLonShallowWaterModel": ("legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid", "CGridLatLonShallowWaterModel"),
+    "CGridLatLonShallowWaterConfig": ("legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid", "CGridLatLonShallowWaterConfig"),
+    "CGridLatLonShallowWaterState": ("legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid", "CGridLatLonShallowWaterState"),
+    "cgrid_latlon_sw_tendencies": ("legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid", "cgrid_latlon_sw_tendencies"),
+    "CGridLatLonPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid", "CGridLatLonPrimitiveEquationModel"),
+    "CGridLatLonPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid", "CGridLatLonPrimitiveEquationConfig"),
+    "CGridLatLonHydrostaticState": ("legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid", "CGridLatLonHydrostaticState"),
+    "cgrid_latlon_hydrostatic_tendencies": ("legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid", "cgrid_latlon_hydrostatic_tendencies"),
     # --- MPAS icosahedral ---
     "MPASPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.primitive_eq_mpas", "MPASPrimitiveEquationModel"),
     "MPASPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.primitive_eq_mpas", "MPASPrimitiveEquationConfig"),
@@ -104,6 +116,8 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "tracer_tendencies": ("legoesm.atmosphere.dynamics.tracer_transport", "tracer_tendencies"),
     "TracerTransportMPASModel": ("legoesm.atmosphere.dynamics.tracer_transport_mpas", "TracerTransportMPASModel"),
     "tracer_tendencies_mpas": ("legoesm.atmosphere.dynamics.tracer_transport_mpas", "tracer_tendencies_mpas"),
+    "TracerTransportLatLonModel": ("legoesm.atmosphere.dynamics.tracer_transport_latlon", "TracerTransportLatLonModel"),
+    "tracer_tendencies_latlon": ("legoesm.atmosphere.dynamics.tracer_transport_latlon", "tracer_tendencies_latlon"),
     # --- Shared utilities (acoustic substeps, sponge, Exner) ---
     "CompressibleEulerConfig": ("legoesm.atmosphere.dynamics.compressible_euler", "CompressibleEulerConfig"),
     "compute_exner_perturbation": ("legoesm.atmosphere.dynamics.compressible_euler", "compute_exner_perturbation"),
@@ -185,10 +199,13 @@ AVAILABLE_SOLVERS = [
     "spectral_compressible_euler",
     "sfno_shallow_water",
     "sfno_primitive_equations",
+    "latlon_cgrid_shallow_water",
+    "latlon_cgrid_primitive_equations",
     "mpas_primitive_equations",
     "mpas_compressible_euler",
     "tracer_transport",
     "tracer_transport_mpas",
+    "tracer_transport_latlon",
 ]
 
 # Deprecated flat names that alias a canonical solver
@@ -209,12 +226,18 @@ _ALL_SOLVER_NAMES = AVAILABLE_SOLVERS + list(_DEPRECATED_SOLVER_NAMES)
 
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
-DISCRETIZATION_OPTIONS = ["cdgrid", "spectral", "sfno", "mpas"]
+DISCRETIZATION_OPTIONS = [
+    "cdgrid", "spectral", "sfno", "mpas", "latlon_cgrid",
+    # Legacy names kept as valid options (default to cdgrid when grid is
+    # unknown; the driver resolves more precisely using grid_type).
+    "finite_volume", "centered",
+]
 
-# Deprecated discretization names
+# Deprecated discretization names that ALWAYS alias to cdgrid.
+# "finite_volume" and "centered" are NOT here — they are ambiguous
+# (could be cdgrid on cubed-sphere or latlon_cgrid on lat-lon) and
+# are resolved as explicit entries in _AXIS_TO_SOLVER instead.
 _DEPRECATED_DISCRETIZATIONS = {
-    "centered": "cdgrid",
-    "finite_volume": "cdgrid",
     "cgrid": "cdgrid",
     "fv": "cdgrid",
 }
@@ -231,10 +254,26 @@ _AXIS_TO_SOLVER = {
     ("nonhydrostatic", "cdgrid"): "cdgrid_compressible_euler",
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
     ("nonhydrostatic", "mpas"): "mpas_compressible_euler",
+    ("shallow_water", "latlon_cgrid"): "latlon_cgrid_shallow_water",
+    ("hydrostatic", "latlon_cgrid"): "latlon_cgrid_primitive_equations",
+    # "finite_volume" and "centered" default to cdgrid when used without
+    # grid context (backward compat).  The driver overrides this using
+    # the grid_type-aware _DRIVER_SUPPORTED table.
+    ("shallow_water", "finite_volume"): "cdgrid_shallow_water",
+    ("hydrostatic", "finite_volume"): "cdgrid_primitive_equations",
+    ("nonhydrostatic", "finite_volume"): "cdgrid_compressible_euler",
+    ("shallow_water", "centered"): "cdgrid_shallow_water",
+    ("hydrostatic", "centered"): "cdgrid_primitive_equations",
+    ("nonhydrostatic", "centered"): "cdgrid_compressible_euler",
 }
 
 # flat solver name -> (dynamics, discretization)
-_SOLVER_TO_AXIS = {v: k for k, v in _AXIS_TO_SOLVER.items()}
+# Only use canonical discretization names (not the finite_volume/centered
+# aliases) so the reverse mapping is unique.
+_SOLVER_TO_AXIS = {
+    v: k for k, v in _AXIS_TO_SOLVER.items()
+    if k[1] not in ("finite_volume", "centered")
+}
 
 
 def resolve_solver_name(
@@ -318,6 +357,12 @@ def solver_axes(name: str) -> tuple[str, str]:
 
 def create_model(name: str = None, legoesm_config=None, **kwargs):
     """Create a dynamical core model by name or from config."""
+    # Track whether the resolved name came from an ambiguous discretization
+    # (finite_volume/centered) that should be rerouted grid-aware, vs an
+    # explicit request (name= directly, equations=, or discretization=
+    # "cdgrid"/"latlon_cgrid"/etc.) that must be honored as-is.
+    _reroute_latlon = False
+
     # --- Apply runtime hardware config when available ---
     if legoesm_config is not None:
         from legoesm.runtime.config import bootstrap_from_yaml_config
@@ -329,11 +374,21 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
             raise ValueError(
                 "Either 'name' or 'legoesm_config' must be provided."
             )
+        _disc = legoesm_config.get("atmosphere.discretization")
+        _eqs = legoesm_config.get("atmosphere.equations")
+        _dyn = legoesm_config.get("atmosphere.dynamics")
         name = resolve_solver_name(
-            dynamics=legoesm_config.get("atmosphere.dynamics"),
-            discretization=legoesm_config.get("atmosphere.discretization"),
-            equations=legoesm_config.get("atmosphere.equations"),
+            dynamics=_dyn, discretization=_disc, equations=_eqs,
         )
+        # Only reroute when the discretization was genuinely ambiguous:
+        # "finite_volume" or "centered" (which default to cdgrid but
+        # should map to latlon_cgrid on lat-lon grids).  Explicit
+        # discretization="cdgrid" is never rerouted.
+        # Note: a stale equations= key doesn't affect rerouting because
+        # resolve_solver_name ignores it when axis keys are present.
+        _AMBIGUOUS = {"finite_volume", "centered", None}
+        _used_axes = (_dyn is not None or _disc is not None)
+        _reroute_latlon = _used_axes and _disc in _AMBIGUOUS
 
     # Map deprecated solver names with warning
     if name in _DEPRECATED_SOLVER_NAMES:
@@ -345,6 +400,49 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
             stacklevel=2,
         )
         name = canonical
+
+    # --- Grid-aware rerouting (ambiguous resolution only) ---
+    # Only fires when the name was NOT explicitly requested by the caller
+    # but came from axis-based resolution of an ambiguous discretization
+    # (finite_volume/centered → cdgrid default).  Explicit cdgrid_*
+    # requests are never rerouted — the caller asked for that solver.
+    if _reroute_latlon:
+        _grid = kwargs.get("grid")
+        if _grid is not None:
+            from legoesm.grids.latlon import LatLonGrid
+            if isinstance(_grid, LatLonGrid) and name == "cdgrid_compressible_euler":
+                raise ValueError(
+                    "Non-hydrostatic dynamics are not supported on the "
+                    "lat-lon C-grid. Use discretization='cdgrid' with a "
+                    "cubed-sphere grid, or choose model_type='hydrostatic'."
+                )
+    if _reroute_latlon and name in (
+        "cdgrid_shallow_water", "cdgrid_primitive_equations",
+    ):
+        _grid = kwargs.get("grid")
+        if _grid is not None:
+            from legoesm.grids.latlon import LatLonGrid
+            if isinstance(_grid, LatLonGrid):
+                _CDGRID_TO_LATLON = {
+                    "cdgrid_shallow_water": "latlon_cgrid_shallow_water",
+                    "cdgrid_primitive_equations": "latlon_cgrid_primitive_equations",
+                }
+                name = _CDGRID_TO_LATLON[name]
+                # Apply basic pole-cell CFL safety.  The driver factory
+                # does a more thorough job (diffusion coefficients, etc.),
+                # but create_model() callers get at least the dt guard.
+                from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
+                dx_pole = pole_cell_dx(_grid)
+                _dt = kwargs.get("dt", 600.0)
+                _dt_clamped = min(_dt, cfl_max_dt(dx_pole, 300.0,
+                                                   cfl_number=0.8, ndim=1))
+                if _dt_clamped < _dt:
+                    _warnings.warn(
+                        f"create_model: dt={_dt:.0f}s exceeds pole-cell "
+                        f"CFL limit ({_dt_clamped:.0f}s); clamping.",
+                        stacklevel=2,
+                    )
+                    kwargs["dt"] = _dt_clamped
 
     # --- Instantiate (resolves lazy imports on demand) ---
     _SOLVER_TO_CLASS = {
@@ -358,8 +456,11 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         "sfno_primitive_equations": "SFNOPrimitiveEquationModel",
         "tracer_transport": "TracerTransportModel",
         "tracer_transport_mpas": "TracerTransportMPASModel",
+        "tracer_transport_latlon": "TracerTransportLatLonModel",
         "mpas_primitive_equations": "MPASPrimitiveEquationModel",
         "mpas_compressible_euler": "MPASCompressibleEulerModel",
+        "latlon_cgrid_shallow_water": "CGridLatLonShallowWaterModel",
+        "latlon_cgrid_primitive_equations": "CGridLatLonPrimitiveEquationModel",
     }
 
     # Spectral solvers accept legoesm_config as a kwarg.
@@ -380,4 +481,12 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
         kwargs.setdefault("legoesm_config", legoesm_config)
 
     cls = _resolve_lazy(class_name)
-    return cls(**kwargs)
+    model = cls(**kwargs)
+
+    # Expose clamped timestep so callers know what dt to use for step().
+    if not hasattr(model, 'effective_dt'):
+        _clamped = kwargs.get("dt")
+        if _clamped is not None:
+            model.effective_dt = _clamped
+
+    return model

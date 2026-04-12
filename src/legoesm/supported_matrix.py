@@ -92,6 +92,18 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.compressible_euler_mpas",
     ),
 
+    # -- Lat-lon C-grid (FV) --
+    SolverEntry(
+        "atmosphere", "shallow_water", "latlon_cgrid",
+        "latlon_cgrid_shallow_water", "CGridLatLonShallowWaterModel",
+        "legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid",
+    ),
+    SolverEntry(
+        "atmosphere", "hydrostatic", "latlon_cgrid",
+        "latlon_cgrid_primitive_equations", "CGridLatLonPrimitiveEquationModel",
+        "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
+    ),
+
     # -- Tracer transport --
     SolverEntry(
         "atmosphere", "tracer_transport", "cubed_sphere_cdgrid",
@@ -102,6 +114,11 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "atmosphere", "tracer_transport", "voronoi",
         "tracer_transport_mpas", "TracerTransportMPASModel",
         "legoesm.atmosphere.dynamics.tracer_transport_mpas",
+    ),
+    SolverEntry(
+        "atmosphere", "tracer_transport", "latlon_cgrid",
+        "tracer_transport_latlon", "TracerTransportLatLonModel",
+        "legoesm.atmosphere.dynamics.tracer_transport_latlon",
     ),
 )
 
@@ -231,9 +248,11 @@ ATMOSPHERE_DEPRECATED_ALIASES: dict[str, tuple[str, str]] = {
 
 
 #: Discretization names that map to the same implementation.
+#: "centered" and "finite_volume" are grid-dependent: they resolve
+#: to "cdgrid" on cubed-sphere grids and "latlon_cgrid" on lat-lon
+#: grids.  The default (without grid context) is "cdgrid".
+#: "cgrid" is a true deprecated alias that always means "cdgrid".
 ATMOSPHERE_DEPRECATED_DISCRETIZATIONS: dict[str, str] = {
-    "centered": "cdgrid",
-    "finite_volume": "cdgrid",
     "cgrid": "cdgrid",
 }
 

@@ -27,6 +27,29 @@ from legoesm.core.operators_fv import _ppm_edge_values, _ppm_limit
 from legoesm.grids.halo_latlon import pad_halo_latlon, pad_halo_vector_latlon
 
 
+def _lat_v_interfaces(grid):
+    """Compute v-face latitudes consistent with divergence_cgrid.
+
+    Uses midpoints of cell-center latitudes for interior faces,
+    and exact pole values (±π/2) for boundaries.  This matches the
+    convention in ``latlon_cgrid_operators.divergence_cgrid`` and
+    supports non-uniform latitude grids.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+
+    Returns
+    -------
+    lat_v : jax.Array, shape (n_lat+1,)
+    """
+    lat = grid.lat  # (n_lat,)
+    lat_south = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
+    lat_north = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
+    return jnp.concatenate([lat_south, lat_interior, lat_north])
+
+
 # ==============================================================================
 # PPM reconstruction for lat-lon grid
 # ==============================================================================
@@ -144,7 +167,7 @@ def fv_flux_divergence_latlon(q, u, v, grid, limiter=True):
     u_strip = u_pad[2:-2, :]  # (n_lat, n_lon+4)
     u_iface = 0.5 * (u_strip[:, 1:-2] + u_strip[:, 2:-1])  # (n_lat, n_lon+1)
 
-    q_face_lon = jnp.where(u_iface > 0, q_L_lon, q_R_lon)
+    q_face_lon = jnp.where(u_iface >= 0, q_L_lon, q_R_lon)
 
     # Edge length perpendicular to longitude (hy = R * dlat, constant)
     hy = R * dlat
@@ -157,16 +180,12 @@ def fv_flux_divergence_latlon(q, u, v, grid, limiter=True):
     v_strip = v_pad[:, 2:-2]  # (n_lat+4, n_lon)
     v_iface = 0.5 * (v_strip[1:-2, :] + v_strip[2:-1, :])  # (n_lat+1, n_lon)
 
-    q_face_lat = jnp.where(v_iface > 0, q_L_lat, q_R_lat)
+    q_face_lat = jnp.where(v_iface >= 0, q_L_lat, q_R_lat)
 
-    # Edge length perpendicular to latitude at interfaces: hx = R * dlon * cos(lat_iface)
-    n_lat = grid.n_lat
-    lat_iface = jnp.linspace(-jnp.pi / 2 + dlat / 2 - dlat / 2,
-                              jnp.pi / 2 - dlat / 2 + dlat / 2,
-                              n_lat + 1)
-    # Simpler: interfaces are at cell boundaries
-    lat_iface = jnp.linspace(-jnp.pi / 2, jnp.pi / 2, n_lat + 1)
-    hx_iface = R * dlon * jnp.cos(lat_iface)[:, None]  # (n_lat+1, 1) -> broadcast
+    # Edge length perpendicular to latitude at interfaces: hx = R * dlon * cos(lat_v)
+    # Use grid-derived midpoints (consistent with divergence_cgrid)
+    lat_v = _lat_v_interfaces(grid)
+    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
 
     Phi_lat = v_iface * hx_iface * q_face_lat  # (n_lat+1, n_lon)
 
@@ -269,3 +288,110 @@ def fv_gradient_lat(q, grid):
 
     # grid.dy spans 2 cells, single-cell = dy/2
     return dq / (grid.dy / 2.0)
+
+
+# ==============================================================================
+# C-grid PPM transport (face-centered velocities)
+# ==============================================================================
+
+def cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter=True):
+    """Conservative PPM flux divergence using C-grid face velocities.
+
+    Like ``fv_flux_divergence_latlon`` but takes velocities already at faces
+    (Arakawa C-grid staggering), eliminating the velocity interpolation step.
+    Shared by atmosphere and ocean lat-lon C-grid dycores.
+
+    Parameters
+    ----------
+    q : jax.Array, shape (n_lat, n_lon)
+        Scalar field at cell centers (e.g. fluid depth h, or tracer).
+    u_face : jax.Array, shape (n_lat, n_lon+1)
+        Zonal velocity at longitude interfaces (C-grid u-points).
+    v_face : jax.Array, shape (n_lat+1, n_lon)
+        Meridional velocity at latitude interfaces (C-grid v-points).
+    grid : LatLonGrid
+    limiter : bool
+        Apply Colella-Woodward monotonicity limiter.
+
+    Returns
+    -------
+    jax.Array, shape (n_lat, n_lon)
+        Flux divergence tendency: dq/dt = -div(q * v).
+    """
+    R = grid.radius
+    dlat = grid.dlat
+    dlon = grid.dlon
+    n_lat = grid.n_lat
+
+    # Pad scalar with halo=2 for PPM reconstruction
+    q_pad = pad_halo_latlon(q, halo=2)
+
+    # --- Longitude flux ---
+    q_L_lon, q_R_lon = _ppm_reconstruct_lon(q_pad, limiter)  # (n_lat, n_lon+1)
+    q_face_lon = jnp.where(u_face >= 0, q_L_lon, q_R_lon)
+
+    # Face length perpendicular to longitude: R * dlat (constant)
+    hy = R * dlat
+    Phi_lon = u_face * hy * q_face_lon  # (n_lat, n_lon+1)
+
+    # --- Latitude flux ---
+    q_L_lat, q_R_lat = _ppm_reconstruct_lat(q_pad, limiter)  # (n_lat+1, n_lon)
+    q_face_lat = jnp.where(v_face >= 0, q_L_lat, q_R_lat)
+
+    # Face length at latitude interfaces: R * dlon * cos(lat_v)
+    # Use grid-derived midpoints (consistent with divergence_cgrid)
+    lat_v = _lat_v_interfaces(grid)
+    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
+    Phi_lat = v_face * hx_iface * q_face_lat  # (n_lat+1, n_lon)
+
+    # --- Net flux divergence ---
+    net_lon = Phi_lon[:, 1:] - Phi_lon[:, :-1]   # (n_lat, n_lon)
+    net_lat = Phi_lat[1:, :] - Phi_lat[:-1, :]   # (n_lat, n_lon)
+
+    return -(net_lon + net_lat) / grid.area
+
+
+def _cgrid_velocity_divergence(u_face, v_face, grid):
+    """Velocity divergence from C-grid face velocities (no PPM needed).
+
+    For q=1 the upwind face value is always 1.0, so the flux divergence
+    reduces to a simple velocity divergence without halo/PPM overhead.
+
+    Returns
+    -------
+    jax.Array, shape (n_lat, n_lon)
+    """
+    R = grid.radius
+    dlat = grid.dlat
+    dlon = grid.dlon
+    hy = R * dlat
+    lat_v = _lat_v_interfaces(grid)
+    hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
+
+    net_lon = hy * (u_face[:, 1:] - u_face[:, :-1])
+    net_lat = hx_iface[1:, :] * v_face[1:, :] - hx_iface[:-1, :] * v_face[:-1, :]
+
+    return (net_lon + net_lat) / grid.area
+
+
+def cgrid_fv_scalar_advection_latlon(q, u_face, v_face, grid, limiter=True):
+    """PPM advection of scalar q by C-grid face velocities (advective form).
+
+    Computes -v·∇q = -div(q v) + q div(v).  The div(v) term uses direct
+    velocity divergence (no PPM needed for q=1), halving transport cost.
+
+    Parameters
+    ----------
+    q : jax.Array, shape (n_lat, n_lon)
+    u_face : jax.Array, shape (n_lat, n_lon+1)
+    v_face : jax.Array, shape (n_lat+1, n_lon)
+    grid : LatLonGrid
+    limiter : bool
+
+    Returns
+    -------
+    jax.Array, shape (n_lat, n_lon)
+    """
+    flux_form = cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter)
+    div_v = _cgrid_velocity_divergence(u_face, v_face, grid)
+    return flux_form + q * div_v

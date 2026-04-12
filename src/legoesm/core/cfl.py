@@ -175,6 +175,47 @@ def adaptive_hyperdiff_coeff(
     return safety * C_n * dx_min ** order / dt
 
 
+def pole_cell_dx(grid) -> float:
+    """Return the zonal grid spacing at the polar-most cell [m].
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+        Must have ``radius``, ``dlon``, ``dlat`` attributes.
+
+    Returns
+    -------
+    float
+        dx_pole = R * dlon * cos(π/2 − dlat/2).
+    """
+    R = float(grid.radius)
+    dlon = float(grid.dlon)
+    dlat = float(grid.dlat)
+    return R * dlon * np.cos(np.pi / 2.0 - dlat / 2.0)
+
+
+def max_laplacian_viscosity(dx_min: float, dt: float) -> float:
+    """Maximum stable Laplacian viscosity coefficient.
+
+    For forward-Euler Laplacian diffusion the stability constraint is
+    A_h * dt / dx² < 0.5.  With a safety margin the practical limit is
+    A_h_max = 0.4 * dx² / dt.
+
+    Parameters
+    ----------
+    dx_min : float
+        Minimum grid spacing [m].
+    dt : float
+        Time step [s].
+
+    Returns
+    -------
+    float
+        A_h_max [m²/s].
+    """
+    return 0.4 * dx_min ** 2 / dt
+
+
 def cfl_number_from_state(
     u, v, dx_min: float, dt: float, runtime=None,
 ):

@@ -155,3 +155,12 @@ These are recurring mistakes caught by slopbuster. Check for them before submitt
 - State assumptions explicitly.
 - When changing numerics or algorithms, explain the expected effect on stability, accuracy, conservation, or differentiability.
 - Do not present guesses as facts.
+
+# iterate-with-codex agent
+1. Implement the requested change
+2. Run /codex:adversarial-review --wait
+3. Parse the review output
+4. Fix all flagged issues
+5. Run /codex:review --wait again
+6. If issues remain, go to step 4
+7. Stop when review is clean or after 30 iterations

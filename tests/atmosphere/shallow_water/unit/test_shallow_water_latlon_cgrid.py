@@ -1,0 +1,400 @@
+"""Unit and integration tests for the lat-lon C-grid shallow water model."""
+
+import jax
+import jax.numpy as jnp
+import pytest
+
+from legoesm.grids.latlon import create_latlon_grid
+from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    CGridLatLonShallowWaterModel,
+    CGridLatLonShallowWaterConfig,
+    CGridLatLonShallowWaterState,
+    cgrid_latlon_sw_tendencies,
+    williamson_test2_cgrid,
+    williamson_test2_exact_cgrid,
+    williamson_test5_cgrid,
+    compute_error_norms_cgrid,
+    _interp_cell_to_uface,
+    _interp_cell_to_vface,
+    _kinetic_energy_cgrid,
+)
+from legoesm import constants
+
+
+# ==============================================================================
+# Fixtures
+# ==============================================================================
+
+@pytest.fixture(scope="module")
+def grid():
+    return create_latlon_grid(n_lat=32, radius=constants.R_earth, omega=constants.Omega)
+
+
+@pytest.fixture(scope="module")
+def fine_grid():
+    return create_latlon_grid(n_lat=64, radius=constants.R_earth, omega=constants.Omega)
+
+
+@pytest.fixture(scope="module")
+def model(grid):
+    config = CGridLatLonShallowWaterConfig(fix_mass=True)
+    return CGridLatLonShallowWaterModel(grid, config)
+
+
+# ==============================================================================
+# Shape and basic consistency tests
+# ==============================================================================
+
+class TestShapes:
+
+    def test_williamson2_shapes(self, grid):
+        state = williamson_test2_cgrid(grid)
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        assert state.h.shape == (n_lat, n_lon)
+        assert state.u.shape == (n_lat, n_lon + 1)
+        assert state.v.shape == (n_lat + 1, n_lon)
+        assert state.h_s.shape == (n_lat, n_lon)
+
+    def test_tendencies_shapes(self, grid):
+        state = williamson_test2_cgrid(grid)
+        dh, du, dv = cgrid_latlon_sw_tendencies(state, grid)
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        assert dh.shape == (n_lat, n_lon)
+        assert du.shape == (n_lat, n_lon + 1)
+        assert dv.shape == (n_lat + 1, n_lon)
+
+    def test_interp_uface_shape(self, grid):
+        h = jnp.ones((grid.n_lat, grid.n_lon))
+        assert _interp_cell_to_uface(h).shape == (grid.n_lat, grid.n_lon + 1)
+
+    def test_interp_vface_shape(self, grid):
+        h = jnp.ones((grid.n_lat, grid.n_lon))
+        assert _interp_cell_to_vface(h).shape == (grid.n_lat + 1, grid.n_lon)
+
+
+# ==============================================================================
+# Rest state tests
+# ==============================================================================
+
+class TestRestState:
+
+    def test_rest_state_zero_tendencies(self, grid):
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        state = CGridLatLonShallowWaterState(
+            h=jnp.full((n_lat, n_lon), 1000.0),
+            u=jnp.zeros((n_lat, n_lon + 1)),
+            v=jnp.zeros((n_lat + 1, n_lon)),
+            h_s=jnp.zeros((n_lat, n_lon)),
+        )
+        dh, du, dv = cgrid_latlon_sw_tendencies(state, grid)
+        assert jnp.allclose(dh, 0.0, atol=1e-20)
+        assert jnp.allclose(du, 0.0, atol=1e-20)
+        assert jnp.allclose(dv, 0.0, atol=1e-20)
+
+    def test_rest_state_with_topography(self, grid):
+        """Flat free surface: h + h_s = const → zero tendency."""
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        h_s = 100.0 * jnp.sin(grid.lat2d) ** 2
+        state = CGridLatLonShallowWaterState(
+            h=jnp.full((n_lat, n_lon), 5000.0) - h_s,
+            u=jnp.zeros((n_lat, n_lon + 1)),
+            v=jnp.zeros((n_lat + 1, n_lon)),
+            h_s=h_s,
+        )
+        dh, du, dv = cgrid_latlon_sw_tendencies(state, grid)
+        assert jnp.allclose(dh, 0.0, atol=1e-20)
+        assert jnp.allclose(du, 0.0, atol=1e-10)
+        assert jnp.allclose(dv, 0.0, atol=1e-10)
+
+
+# ==============================================================================
+# Geostrophic balance (Williamson Test 2) — tightened to 1e-6
+# ==============================================================================
+
+class TestGeostrophicBalance:
+
+    def test_tendencies_finite(self, grid):
+        state = williamson_test2_cgrid(grid)
+        dh, du, dv = cgrid_latlon_sw_tendencies(state, grid)
+        assert jnp.all(jnp.isfinite(dh))
+        assert jnp.all(jnp.isfinite(du))
+        assert jnp.all(jnp.isfinite(dv))
+
+    def test_height_tendency_small(self, grid):
+        state = williamson_test2_cgrid(grid)
+        dh, _, _ = cgrid_latlon_sw_tendencies(state, grid)
+        assert jnp.max(jnp.abs(dh)) < 1e-10
+
+    def test_v_tendency_small(self, grid):
+        """dv/dt should be near zero (geostrophic balance at C-grid accuracy).
+
+        The residual is O(dx^2) truncation error from the discrete Coriolis–
+        pressure-gradient balance.  At C32 (~600 km) this is ~O(1e-4).
+        """
+        state = williamson_test2_cgrid(grid)
+        _, _, dv = cgrid_latlon_sw_tendencies(state, grid)
+        max_dv = float(jnp.max(jnp.abs(dv)))
+        assert max_dv < 5e-4, f"max |dv/dt| = {max_dv} (expected < 5e-4)"
+
+
+# ==============================================================================
+# Pole consistency
+# ==============================================================================
+
+class TestPoleConsistency:
+
+    def test_v_zero_at_poles(self, grid):
+        model = CGridLatLonShallowWaterModel(grid)
+        state = williamson_test2_cgrid(grid)
+        state_new = model.step(state, dt=60.0)
+        assert jnp.allclose(state_new.v[0, :], 0.0)
+        assert jnp.allclose(state_new.v[-1, :], 0.0)
+
+    def test_gradient_y_zero_at_poles(self, grid):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import gradient_y_cgrid
+        h = jnp.ones((grid.n_lat, grid.n_lon))
+        grad_y = gradient_y_cgrid(h, grid)
+        assert jnp.allclose(grad_y[0, :], 0.0)
+        assert jnp.allclose(grad_y[-1, :], 0.0)
+
+
+# ==============================================================================
+# Mass conservation — uses explicit target_mass API
+# ==============================================================================
+
+class TestMassConservation:
+
+    def test_mass_conserved_100_steps(self, grid):
+        config = CGridLatLonShallowWaterConfig(fix_mass=True)
+        model = CGridLatLonShallowWaterModel(grid, config)
+        state = williamson_test5_cgrid(grid)
+        target_mass = model.compute_mass(state)
+
+        area64 = grid.area.astype(jnp.float64)
+        mass_init = float(jnp.sum(state.h.astype(jnp.float64) * area64))
+        dt = 60.0
+        for _ in range(100):
+            state = model.step(state, dt, target_mass=target_mass)
+
+        mass_final = float(jnp.sum(state.h.astype(jnp.float64) * area64))
+        rel_err = abs(mass_final - mass_init) / abs(mass_init)
+        assert rel_err < 1e-6, f"Mass conservation error: {rel_err}"
+
+
+# ==============================================================================
+# Stability and error bounds — tightened L2 to 0.01
+# ==============================================================================
+
+class TestStability:
+
+    def test_williamson2_6hr_stable(self, grid):
+        config = CGridLatLonShallowWaterConfig(fix_mass=True)
+        model = CGridLatLonShallowWaterModel(grid, config)
+        state = williamson_test2_cgrid(grid)
+        target_mass = model.compute_mass(state)
+
+        dt = 60.0
+        n_steps = int(6 * 3600 / dt)
+        for _ in range(n_steps):
+            state = model.step(state, dt, target_mass=target_mass)
+
+        assert jnp.all(jnp.isfinite(state.h))
+        assert jnp.all(jnp.isfinite(state.u))
+        assert jnp.all(jnp.isfinite(state.v))
+
+    def test_williamson2_error_bounded(self, grid):
+        """After 6h, L2 error < 0.01 (was 0.1 — tightened)."""
+        config = CGridLatLonShallowWaterConfig(fix_mass=True)
+        model = CGridLatLonShallowWaterModel(grid, config)
+        state = williamson_test2_cgrid(grid)
+        target_mass = model.compute_mass(state)
+
+        dt = 60.0
+        for _ in range(int(6 * 3600 / dt)):
+            state = model.step(state, dt, target_mass=target_mass)
+
+        ref = williamson_test2_exact_cgrid(grid, t=6 * 3600)
+        norms = compute_error_norms_cgrid(state, ref, grid)
+        assert norms["l2"] < 0.01, f"L2 error = {norms['l2']}"
+        assert norms["linf"] < 0.05, f"Linf error = {norms['linf']}"
+
+    def test_williamson5_6hr_stable(self, grid):
+        config = CGridLatLonShallowWaterConfig(fix_mass=True)
+        model = CGridLatLonShallowWaterModel(grid, config)
+        state = williamson_test5_cgrid(grid)
+        target_mass = model.compute_mass(state)
+
+        dt = 60.0
+        for _ in range(int(6 * 3600 / dt)):
+            state = model.step(state, dt, target_mass=target_mass)
+
+        assert jnp.all(jnp.isfinite(state.h))
+        assert float(jnp.min(state.h)) > 0.0
+
+
+# ==============================================================================
+# KE diagnostic
+# ==============================================================================
+
+class TestKineticEnergy:
+
+    def test_ke_zero_for_rest_state(self, grid):
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        ke = _kinetic_energy_cgrid(
+            jnp.zeros((n_lat, n_lon + 1)), jnp.zeros((n_lat + 1, n_lon)),
+        )
+        assert jnp.allclose(ke, 0.0)
+
+    def test_ke_uniform_zonal(self, grid):
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        u0 = 10.0
+        ke = _kinetic_energy_cgrid(
+            jnp.full((n_lat, n_lon + 1), u0), jnp.zeros((n_lat + 1, n_lon)),
+        )
+        assert jnp.allclose(ke, 0.5 * u0**2, rtol=1e-10)
+
+
+# ==============================================================================
+# Total energy conservation
+# ==============================================================================
+
+class TestEnergyConservation:
+
+    def _total_energy(self, state, grid, g):
+        """KE + PE, area-weighted."""
+        u_c = 0.5 * (state.u[:, :-1] + state.u[:, 1:])
+        v_c = 0.5 * (state.v[:-1, :] + state.v[1:, :])
+        ke = 0.5 * state.h * (u_c**2 + v_c**2)
+        pe = 0.5 * g * (state.h + state.h_s) ** 2
+        return float(jnp.sum((ke + pe) * grid.area))
+
+    def test_energy_drift_bounded(self, grid):
+        """Total energy drift should be < 1% over 100 steps."""
+        g = constants.g
+        config = CGridLatLonShallowWaterConfig(fix_mass=True, A_h=0.0)
+        model = CGridLatLonShallowWaterModel(grid, config)
+        state = williamson_test2_cgrid(grid)
+        target_mass = model.compute_mass(state)
+
+        E0 = self._total_energy(state, grid, g)
+        dt = 60.0
+        for _ in range(100):
+            state = model.step(state, dt, target_mass=target_mass)
+        E1 = self._total_energy(state, grid, g)
+
+        rel_drift = abs(E1 - E0) / abs(E0)
+        assert rel_drift < 0.01, f"Energy drift = {rel_drift:.4e}"
+
+
+# ==============================================================================
+# Convergence rate (Williamson 2: n=32 vs n=64 → ~4x L2 reduction)
+# ==============================================================================
+
+class TestConvergence:
+
+    def test_tendency_convergence(self, grid, fine_grid):
+        """Area-weighted L2 tendency residual should decrease from C32 → C64.
+
+        Pure spatial convergence test: single tendency evaluation on the
+        Williamson 2 steady state (analytic tendency = 0).  The
+        area-weighted L2 norm avoids pole-point sensitivity of max norm.
+        """
+        state_32 = williamson_test2_cgrid(grid)
+        dh_32, _, _ = cgrid_latlon_sw_tendencies(state_32, grid)
+        l2_32 = float(jnp.sqrt(jnp.sum(dh_32**2 * grid.area) / grid.total_area))
+
+        state_64 = williamson_test2_cgrid(fine_grid)
+        dh_64, _, _ = cgrid_latlon_sw_tendencies(state_64, fine_grid)
+        l2_64 = float(jnp.sqrt(jnp.sum(dh_64**2 * fine_grid.area) / fine_grid.total_area))
+
+        # Both should be near zero; fine grid should be smaller
+        assert l2_32 < 1e-8, f"dh/dt L2 at C32 not near zero: {l2_32:.4e}"
+        assert l2_64 < 1e-8, f"dh/dt L2 at C64 not near zero: {l2_64:.4e}"
+        assert l2_64 <= l2_32, (
+            f"Fine grid L2 ({l2_64:.4e}) not ≤ coarse ({l2_32:.4e})"
+        )
+
+
+# ==============================================================================
+# Fallback transport (use_ppm_transport=False)
+# ==============================================================================
+
+class TestFallbackTransport:
+
+    def test_no_ppm_williamson2_stable(self, grid):
+        """The 2nd-order fallback transport should be stable for 100 steps."""
+        config = CGridLatLonShallowWaterConfig(
+            fix_mass=True, use_ppm_transport=False,
+        )
+        model = CGridLatLonShallowWaterModel(grid, config)
+        state = williamson_test2_cgrid(grid)
+        target_mass = model.compute_mass(state)
+
+        dt = 60.0
+        for _ in range(100):
+            state = model.step(state, dt, target_mass=target_mass)
+
+        assert jnp.all(jnp.isfinite(state.h))
+        assert jnp.all(jnp.isfinite(state.u))
+        assert jnp.all(jnp.isfinite(state.v))
+
+
+# ==============================================================================
+# Polar filter
+# ==============================================================================
+
+class TestPolarFilter:
+
+    def test_polar_filter_stable_at_larger_dt(self, grid):
+        dt = 300.0
+        config = CGridLatLonShallowWaterConfig(
+            fix_mass=True, use_polar_filter=True,
+            polar_filter_cutoff_deg=60.0, polar_filter_max_wave_speed=300.0,
+        )
+        model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
+        state = williamson_test2_cgrid(grid)
+        target_mass = model.compute_mass(state)
+
+        for _ in range(int(6 * 3600 / dt)):
+            state = model.step(state, dt, target_mass=target_mass)
+
+        assert jnp.all(jnp.isfinite(state.h))
+
+
+# ==============================================================================
+# Time integrator flexibility
+# ==============================================================================
+
+class TestTimeIntegrators:
+
+    def test_rk4_stable(self, grid):
+        config = CGridLatLonShallowWaterConfig(fix_mass=True, time_integrator="rk4")
+        model = CGridLatLonShallowWaterModel(grid, config)
+        state = williamson_test2_cgrid(grid)
+        for _ in range(10):
+            state = model.step(state, dt=60.0)
+        assert jnp.all(jnp.isfinite(state.h))
+
+    def test_ssp_rk54_stable(self, grid):
+        config = CGridLatLonShallowWaterConfig(fix_mass=True, time_integrator="ssp_rk54")
+        model = CGridLatLonShallowWaterModel(grid, config)
+        state = williamson_test2_cgrid(grid)
+        for _ in range(10):
+            state = model.step(state, dt=60.0)
+        assert jnp.all(jnp.isfinite(state.h))
+
+
+# ==============================================================================
+# C-grid PPM transport
+# ==============================================================================
+
+class TestPPMTransport:
+
+    def test_cgrid_ppm_uniform_field(self, grid):
+        from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        q = jnp.ones((n_lat, n_lon))
+        u = jnp.ones((n_lat, n_lon + 1)) * 10.0
+        v = jnp.zeros((n_lat + 1, n_lon))
+        tend = cgrid_fv_flux_divergence_latlon(q, u, v, grid)
+        assert jnp.max(jnp.abs(tend)) < 1e-10

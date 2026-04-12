@@ -256,6 +256,34 @@ class ModelDriver:
 
         self.model = create_atmosphere_dycore(self.config, self.grid, self.sigma)
 
+        # The component factory may clamp dt for pole-cell CFL on lat-lon
+        # grids.  Propagate the clamped value back into the driver config
+        # so all downstream code (friction, radiation sub-cycling, etc.)
+        # uses the actual timestep.
+        _eff_dt = getattr(self.model, 'effective_dt', None)
+        if _eff_dt is not None and _eff_dt < self.config.dycore.dt:
+            logger.info(
+                f"  Factory clamped dt from {self.config.dycore.dt:.1f}s "
+                f"to {_eff_dt:.1f}s (pole-cell CFL)"
+            )
+            self.config = self.config._replace(
+                dycore=self.config.dycore._replace(dt=_eff_dt),
+            )
+
+        # When conservation_fixer=False, propagate to fix_mass=False in
+        # the driver config so the compiled-segment driver-level mass fixer
+        # (fix_ps_mass_target in build_segment_fn) is also disabled.
+        # The component factory already disables the dycore-internal fixer,
+        # but the driver reads cfg.dycore.fix_mass independently.
+        if not self.config.dycore.conservation_fixer and self.config.dycore.fix_mass:
+            logger.info(
+                "  conservation_fixer=False → disabling driver-level "
+                "fix_mass to match dycore config"
+            )
+            self.config = self.config._replace(
+                dycore=self.config.dycore._replace(fix_mass=False),
+            )
+
         # Keep hyperdiffusion coefficient for moisture smoothing later.
         diff = compute_diffusion(self.grid, self.config.dycore)
         self._hyperdiff = diff.hyperdiff

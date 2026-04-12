@@ -415,13 +415,13 @@ def curl_vertex_cgrid(
     is_3d = u.ndim == 3
     if is_3d:
         import jax
-        u_t = jnp.moveaxis(u, -1, 0)
-        v_t = jnp.moveaxis(v, -1, 0)
+        u_t = jnp.moveaxis(u, -1, 0)   # (nlev, n_lat, n_lon+1)
+        v_t = jnp.moveaxis(v, -1, 0)   # (nlev, n_lat+1, n_lon)
 
-        def curl_2d(uv):
-            return curl_vertex_cgrid(uv[0], uv[1], grid)
+        def _curl_2d(u_k, v_k):
+            return curl_vertex_cgrid(u_k, v_k, grid)
 
-        zeta_t = jax.vmap(curl_2d)(jnp.stack([u_t, v_t]))
+        zeta_t = jax.vmap(_curl_2d)(u_t, v_t)  # (nlev, n_lat+1, n_lon+1)
         return jnp.moveaxis(zeta_t, 0, -1)
 
     R = grid.radius
@@ -592,32 +592,16 @@ def vector_laplacian_cgrid(
 
     if is_3d:
         import jax
-        u_t = jnp.moveaxis(u, -1, 0)
-        v_t = jnp.moveaxis(v, -1, 0)
+        u_t = jnp.moveaxis(u, -1, 0)   # (nlev, n_lat, n_lon+1)
+        v_t = jnp.moveaxis(v, -1, 0)   # (nlev, n_lat+1, n_lon)
 
-        def vlap_2d(uv):
+        def _vlap_2d(u_k, v_k):
             return vector_laplacian_cgrid(
-                uv[0], uv[1], grid,
+                u_k, v_k, grid,
                 mask=mask, u_mask=u_mask, v_mask=v_mask)
 
-        # Stack u and v along a new leading axis for vmap
-        # u_t: (nlev, n_lat, n_lon+1), v_t: (nlev, n_lat+1, n_lon)
-        # Pad v to match u's shape for stacking, then unpad
-        n_lat = grid.n_lat
-        n_lon = grid.n_lon
-        nlev = u_t.shape[0]
-
-        vlap_u_list = []
-        vlap_v_list = []
-        for k in range(nlev):
-            lu, lv = vector_laplacian_cgrid(
-                u_t[k], v_t[k], grid,
-                mask=mask, u_mask=u_mask, v_mask=v_mask)
-            vlap_u_list.append(lu)
-            vlap_v_list.append(lv)
-        vlap_u = jnp.stack(vlap_u_list, axis=-1)
-        vlap_v = jnp.stack(vlap_v_list, axis=-1)
-        return vlap_u, vlap_v
+        lu_t, lv_t = jax.vmap(_vlap_2d)(u_t, v_t)
+        return jnp.moveaxis(lu_t, 0, -1), jnp.moveaxis(lv_t, 0, -1)
 
     # --- 2D case ---
 

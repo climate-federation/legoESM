@@ -1,0 +1,806 @@
+"""Arakawa C-grid Hydrostatic Primitive Equations on the latitude-longitude grid.
+
+True staggered C-grid discretisation following Sadourny / MITgcm / NEMO
+conventions:
+
+  u at longitude interfaces:  shape (n_lat, n_lon+1, nlev)
+  v at latitude interfaces:   shape (n_lat+1, n_lon, nlev)
+  T, p_s, phis at cell centers: shape (n_lat, n_lon, nlev) / (n_lat, n_lon)
+
+Key design choices:
+- Vector-invariant momentum with Bernoulli function at cell centers.
+- Sigma-coordinate pressure gradient: -grad(Φ + KE) - R_d T grad(ln p_s).
+- Sadourny (1975) energy-conserving Coriolis from the ocean C-grid operators.
+- Conservative C-grid divergence for continuity and sigma-dot diagnosis.
+- Vertical advection using upwind differencing in sigma.
+- Pole treatment: v = 0 at poles (wall BC), periodic longitude.
+
+Operator reuse:
+- Gradient, divergence, Coriolis, vector Laplacian from the ocean lat-lon
+  C-grid operator module.
+- Vertical coordinate utilities (sigma-dot, vertical advection, geopotential)
+  from grids.vertical.
+- PPM-compatible cell-centered gradients from operators_fv_latlon for
+  temperature advection.
+
+References
+----------
+- Simmons & Burridge (1981): An Energy and Angular-Momentum Conserving
+  Vertical Finite-Difference Scheme and Hybrid Vertical Coordinates.
+- Sadourny (1975): The dynamics of finite-difference models of the
+  shallow water equations.
+- Lin (2004): A "Vertically Lagrangian" FV Dynamical Core (sigma-coordinate
+  hydrostatic PE sections).
+"""
+
+from __future__ import annotations
+
+from functools import partial
+from typing import NamedTuple
+
+import jax
+import jax.numpy as jnp
+
+from legoesm.core.field import Field
+from legoesm.core.state import HydrostaticState
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    gradient_x_cgrid,
+    gradient_y_cgrid,
+    divergence_cgrid,
+    vector_laplacian_cgrid,
+    laplacian_cgrid,
+)
+from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+    _absolute_vorticity_coriolis,
+)
+from legoesm.core.operators_fv_latlon_3d import (
+    cgrid_fv_scalar_advection_latlon_3d,
+    cgrid_fv_flux_divergence_latlon_3d,
+)
+from legoesm.grids.latlon import LatLonGrid
+from legoesm.grids.polar_filter import (
+    compute_polar_filter_mask,
+    fourier_filter_3d,
+    fourier_filter,
+)
+from legoesm.grids.vertical import (
+    SigmaCoordinate,
+    HybridSigmaPressureCoordinate,
+    pressure_from_sigma,
+    pressure_from_hybrid,
+    dp_from_hybrid,
+    compute_geopotential,
+    compute_geopotential_hybrid,
+    compute_mass_flux_hybrid,
+    vertical_advection,
+    vertical_advection_hybrid,
+    compute_pressure_velocity,
+    compute_omega_hybrid,
+)
+from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.integration import IntegrationMixin
+from legoesm import constants
+
+
+# ==============================================================================
+# State and Config
+# ==============================================================================
+
+class CGridLatLonHydrostaticState(NamedTuple):
+    """Hydrostatic state on the lat-lon Arakawa C-grid.
+
+    u      : (n_lat, n_lon+1, nlev)  -- zonal velocity at lon interfaces [m/s]
+    v      : (n_lat+1, n_lon, nlev)  -- meridional velocity at lat interfaces [m/s]
+    T      : (n_lat, n_lon, nlev)    -- temperature at cell centres [K]
+    p_s    : (n_lat, n_lon)          -- surface pressure at cell centres [Pa]
+    phis   : (n_lat, n_lon)          -- surface geopotential [m^2/s^2]  (static)
+    tracers: dict mapping name → (n_lat, n_lon, nlev) arrays [various]
+    """
+    u: jax.Array
+    v: jax.Array
+    T: jax.Array
+    p_s: jax.Array
+    phis: jax.Array
+    tracers: dict = {}
+
+
+class CGridLatLonPrimitiveEquationConfig(NamedTuple):
+    """Configuration for the C-grid lat-lon hydrostatic PE model.
+
+    Time integrator options: "ssp_rk3", "ssp_rk34", "ssp_rk54", "rk4".
+    """
+    g: float = constants.g
+    A_h: float = 0.0              # Laplacian viscosity [m^2/s]
+    time_integrator: str = "ssp_rk3"
+    fix_mass: bool = True
+    T_min: float = 50.0           # Temperature floor [K]
+    p_floor: float = 100.0        # Pressure floor [Pa] for surface pressure positivity
+    zero_mean_ps_tendency: bool = True
+    use_ppm_transport: bool = True  # PPM scalar transport (vs cell-centered gradient)
+    use_polar_filter: bool = False
+    polar_filter_cutoff_deg: float = 60.0
+    polar_filter_max_wave_speed: float = 300.0
+
+
+# ==============================================================================
+# 3D interpolation helpers
+# ==============================================================================
+
+def _interp_cell_to_uface_3d(h: jnp.ndarray) -> jnp.ndarray:
+    """Interpolate a 3D cell-center field to u-face positions.
+
+    Parameters
+    ----------
+    h : (n_lat, n_lon, nlev) or (n_lat, n_lon, nlev+1)
+
+    Returns
+    -------
+    h_u : (n_lat, n_lon+1, ...)
+    """
+    h_u = 0.5 * (jnp.roll(h, 1, axis=1) + h)
+    return jnp.concatenate([h_u, h_u[:, 0:1]], axis=1)
+
+
+def _interp_cell_to_vface_3d(h: jnp.ndarray) -> jnp.ndarray:
+    """Interpolate a 3D cell-center field to v-face positions.
+
+    Parameters
+    ----------
+    h : (n_lat, n_lon, nlev) or (n_lat, n_lon, nlev+1)
+
+    Returns
+    -------
+    h_v : (n_lat+1, n_lon, ...)
+    """
+    h_v_interior = 0.5 * (h[:-1] + h[1:])
+    return jnp.concatenate([h[0:1], h_v_interior, h[-1:]], axis=0)
+
+
+def _face_to_cell_u(u: jnp.ndarray) -> jnp.ndarray:
+    """Average u from lon faces to cell centers.
+
+    u : (n_lat, n_lon+1, nlev) → (n_lat, n_lon, nlev)
+    """
+    return 0.5 * (u[:, :-1] + u[:, 1:])
+
+
+def _face_to_cell_v(v: jnp.ndarray) -> jnp.ndarray:
+    """Average v from lat faces to cell centers.
+
+    v : (n_lat+1, n_lon, nlev) → (n_lat, n_lon, nlev)
+    """
+    return 0.5 * (v[:-1] + v[1:])
+
+
+# ==============================================================================
+# Adapter: cell-centered HydrostaticState ↔ C-grid state
+# ==============================================================================
+
+def hydrostatic_to_cgrid(
+    state: HydrostaticState,
+    grid: LatLonGrid,
+) -> CGridLatLonHydrostaticState:
+    """Convert a cell-centered HydrostaticState to C-grid.
+
+    Winds are interpolated from cell centers to faces.
+    v is set to zero at pole boundaries.
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+        cell_to_cgrid_winds_3d,
+    )
+    u_cell = state.u.data
+    v_cell = state.v.data if state.v is not None else jnp.zeros_like(u_cell)
+
+    u_face, v_face = cell_to_cgrid_winds_3d(u_cell, v_cell)
+
+    tracers = {}
+    if hasattr(state, 'tracers') and state.tracers is not None:
+        tracers = {name: f.data for name, f in state.tracers.items()}
+
+    return CGridLatLonHydrostaticState(
+        u=u_face,
+        v=v_face,
+        T=state.T.data,
+        p_s=state.p_s.data,
+        phis=state.phis.data,
+        tracers=tracers,
+    )
+
+
+def cgrid_to_hydrostatic(
+    state: CGridLatLonHydrostaticState,
+    grid: LatLonGrid,
+) -> HydrostaticState:
+    """Convert a C-grid state to cell-centered HydrostaticState.
+
+    Winds are averaged from faces to cell centers.
+    """
+    u_cell = _face_to_cell_u(state.u)
+    v_cell = _face_to_cell_v(state.v)
+
+    dims_3d = ("lat", "lon", "level")
+    dims_2d = ("lat", "lon")
+
+    tracers = None
+    if state.tracers:
+        tracers = {
+            name: Field(data=arr, name=name, dims=dims_3d, units="kg/kg")
+            for name, arr in state.tracers.items()
+        }
+
+    return HydrostaticState(
+        u=Field(data=u_cell, name="u", dims=dims_3d, units="m/s"),
+        v=Field(data=v_cell, name="v", dims=dims_3d, units="m/s"),
+        T=Field(data=state.T, name="T", dims=dims_3d, units="K"),
+        p_s=Field(data=state.p_s, name="p_s", dims=dims_2d, units="Pa"),
+        phis=Field(data=state.phis, name="phis", dims=dims_2d, units="m^2/s^2"),
+        tracers=tracers,
+    )
+
+
+# ==============================================================================
+# Tendency computation
+# ==============================================================================
+
+def cgrid_latlon_hydrostatic_tendencies(
+    state: CGridLatLonHydrostaticState,
+    grid: LatLonGrid,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    config: CGridLatLonPrimitiveEquationConfig = CGridLatLonPrimitiveEquationConfig(),
+):
+    """Compute hydrostatic PE tendencies on the lat-lon C-grid.
+
+    Supports both pure sigma and hybrid sigma-pressure vertical coordinates.
+
+    Parameters
+    ----------
+    state : CGridLatLonHydrostaticState
+    grid : LatLonGrid
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+    config : CGridLatLonPrimitiveEquationConfig
+
+    Returns
+    -------
+    (du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends)
+        Tendencies at (lon faces, lat faces, cell centers, cell centers,
+        dict of cell-center tracer tendencies).
+    """
+    u, v, T, p_s, phis = state.u, state.v, state.T, state.p_s, state.phis
+    tracers = state.tracers
+
+    R_d = constants.R_d
+    kappa = constants.kappa
+
+    _hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+
+    # Positivity protections
+    T = jnp.maximum(T, config.T_min)
+    p_s = jnp.clip(p_s, config.p_floor, 2.0e6)
+
+    # --- 1. Pressure at full levels ---
+    if _hybrid:
+        p_full = pressure_from_hybrid(sigma_coord, p_s)
+        dp = dp_from_hybrid(sigma_coord, p_s)
+    else:
+        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
+
+    # --- 2. Geopotential via hydrostatic integration ---
+    if _hybrid:
+        Phi = compute_geopotential_hybrid(T, p_s, sigma_coord, phis)
+    else:
+        Phi = compute_geopotential(T, p_s, sigma_coord, phis)
+
+    # --- 3. KE at cell centres from C-grid face velocities ---
+    u_c = _face_to_cell_u(u)
+    v_c = _face_to_cell_v(v)
+    KE = 0.5 * (u_c**2 + v_c**2)
+
+    # --- 4. Bernoulli function B = Φ + KE ---
+    B = Phi + KE
+
+    # --- 5. Bernoulli gradient at faces ---
+    dB_dx = gradient_x_cgrid(B, grid)
+    dB_dy = gradient_y_cgrid(B, grid)
+
+    # --- 6. Pressure gradient correction ---
+    ln_ps = jnp.log(p_s)
+    dln_dx = gradient_x_cgrid(ln_ps, grid)  # 2D
+    dln_dy = gradient_y_cgrid(ln_ps, grid)  # 2D
+
+    T_u = _interp_cell_to_uface_3d(T)
+    T_v = _interp_cell_to_vface_3d(T)
+
+    pg_corr_x = R_d * T_u * dln_dx[:, :, jnp.newaxis]
+    pg_corr_y = R_d * T_v * dln_dy[:, :, jnp.newaxis]
+
+    # Hybrid coordinate correction: in sigma coords grad_eta(ln p) = grad(ln p_s),
+    # but in hybrid coords grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
+    if _hybrid:
+        B_coeff = sigma_coord.B_full  # (nlev,)
+        hybrid_factor = B_coeff * p_s[..., jnp.newaxis] / p_full
+        hf_u = _interp_cell_to_uface_3d(hybrid_factor)
+        hf_v = _interp_cell_to_vface_3d(hybrid_factor)
+        pg_corr_x = pg_corr_x * hf_u
+        pg_corr_y = pg_corr_y * hf_v
+
+    # --- 7. Momentum tendencies ---
+    du_dt = -(dB_dx + pg_corr_x)
+    dv_dt = -(dB_dy + pg_corr_y)
+
+    # --- 8. Coriolis using absolute vorticity (ζ+f) ---
+    cor_u, cor_v = _absolute_vorticity_coriolis(u, v, grid)
+    du_dt = du_dt + cor_u
+    dv_dt = dv_dt + cor_v
+
+    # --- 9. Surface pressure tendency and vertical motion ---
+    # Both branches use flux-form continuity: sum_k div(dp_k * v).
+    # This differs from the advective form p_s * div(v) when p_s has
+    # horizontal gradients (which is always the case in practice).
+
+    if _hybrid:
+        # Hybrid closure: dp = dA + dB * p_s varies horizontally.
+        dp_u = _interp_cell_to_uface_3d(dp)  # (n_lat, n_lon+1, nlev)
+        dp_v = _interp_cell_to_vface_3d(dp)  # (n_lat+1, n_lon, nlev)
+        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
+        D_total_p = jnp.sum(div_dp, axis=-1)
+        dp_s_dt = -D_total_p / sigma_coord.B_range
+    else:
+        dsigma = sigma_coord.dsigma
+        sigma_top = sigma_coord.sigma_half[0]
+        sigma_range = 1.0 - sigma_top
+        # Flux-form: div(dp_k * v) where dp_k = p_s * dsigma_k
+        dp = p_s[..., jnp.newaxis] * dsigma  # (n_lat, n_lon, nlev)
+        dp_u = _interp_cell_to_uface_3d(dp)  # (n_lat, n_lon+1, nlev)
+        dp_v = _interp_cell_to_vface_3d(dp)  # (n_lat+1, n_lon, nlev)
+        div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
+        D_total_p = jnp.sum(div_dp, axis=-1)
+        dp_s_dt = -D_total_p / sigma_range
+
+    # Apply zero-mean correction only when the post-step mass fixer is OFF.
+    # When fix_mass=True the mass fixer already corrects the global integral,
+    # and applying both creates a double-correction artifact.
+    if config.zero_mean_ps_tendency and not config.fix_mass:
+        from legoesm.core.conservation import zero_mean_tendency
+        dp_s_dt = zero_mean_tendency(dp_s_dt, grid)
+
+    # --- 10. Vertical advection ---
+    # Compute vertical advection directly at face positions to avoid the
+    # smoothing from a cell-center round-trip.  sigma_dot/mass_flux are
+    # interpolated to u-face and v-face locations first.
+    if _hybrid:
+        # Build mass flux from the corrected div(dp*v) closure (div_dp),
+        # not from div(v)*dp which is what compute_mass_flux_hybrid uses.
+        # F_{k+1/2} = (B_{k+1/2}-B_top)/B_range * D_total_p - cumsum(div_dp)
+        _B_top = sigma_coord.B_half[0]
+        _frac_B = (sigma_coord.B_half[1:] - _B_top) / sigma_coord.B_range
+        _cumsum = jnp.cumsum(div_dp, axis=-1)
+        _mf_inner = _frac_B * D_total_p[..., jnp.newaxis] - _cumsum
+        _zero_top = jnp.zeros((*p_s.shape, 1))
+        mass_flux = jnp.concatenate([_zero_top, _mf_inner], axis=-1)
+        mass_flux = mass_flux.at[..., -1].set(0.0)
+        mf_u = _interp_cell_to_uface_3d(mass_flux)
+        mf_v = _interp_cell_to_vface_3d(mass_flux)
+        ps_u = _interp_cell_to_uface_3d(p_s[..., jnp.newaxis])[..., 0]
+        ps_v = _interp_cell_to_vface_3d(p_s[..., jnp.newaxis])[..., 0]
+        du_dt = du_dt + vertical_advection_hybrid(u, mf_u, ps_u, sigma_coord)
+        dv_dt = dv_dt + vertical_advection_hybrid(v, mf_v, ps_v, sigma_coord)
+        vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
+    else:
+        # Flux-form sigma_dot consistent with mass-flux continuity:
+        # σ̇_{k+1/2} = [frac_k · D_total_p - cumsum_k(div(dp·v))] / p_s
+        _frac = sigma_coord.fractional_sigma  # (nlev,)
+        _cumsum_dp = jnp.cumsum(div_dp, axis=-1)  # (n_lat, n_lon, nlev)
+        sigma_dot_inner = (
+            _frac * D_total_p[..., jnp.newaxis] - _cumsum_dp
+        ) / (p_s[..., jnp.newaxis] + 1e-10)
+        _zero_top = jnp.zeros((*p_s.shape, 1))
+        sigma_dot = jnp.concatenate([_zero_top, sigma_dot_inner], axis=-1)
+        sd_u = _interp_cell_to_uface_3d(sigma_dot)
+        sd_v = _interp_cell_to_vface_3d(sigma_dot)
+        du_dt = du_dt + vertical_advection(u, sd_u, sigma_coord)
+        dv_dt = dv_dt + vertical_advection(v, sd_v, sigma_coord)
+        vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
+
+    # --- 11. Temperature equation ---
+    if config.use_ppm_transport:
+        # C-grid PPM advection of T (4th-order, shared operator)
+        horiz_adv_T = cgrid_fv_scalar_advection_latlon_3d(T, u, v, grid)
+    else:
+        # Cell-centered gradient advection (fallback)
+        from legoesm.core.operators_fv_latlon import fv_gradient_lon, fv_gradient_lat
+        dT_dx = jax.vmap(fv_gradient_lon, in_axes=(-1, None), out_axes=-1)(T, grid)
+        dT_dy = jax.vmap(fv_gradient_lat, in_axes=(-1, None), out_axes=-1)(T, grid)
+        horiz_adv_T = -(u_c * dT_dx + v_c * dT_dy)
+
+    # Adiabatic heating: κ T (ω/p + v·∇_η(ln p))
+    # The v·∇_η(ln p) term is the horizontal pressure-gradient correction
+    # to the thermodynamic equation (Simmons & Burridge 1981).
+    if _hybrid:
+        omega = compute_omega_hybrid(mass_flux, p_s, dp_s_dt, sigma_coord)
+    else:
+        omega = compute_pressure_velocity(sigma_dot, p_s, dp_s_dt, sigma_coord)
+    # Tiny epsilon prevents division by zero without suppressing physics
+    # at the model top (the old p_floor=100 Pa clamp distorted heating
+    # for all levels with p < 100 Pa).
+    adiabatic = kappa * T * omega / (p_full + 1e-10)
+
+    # v · grad(ln p_s) at cell centres (average face gradients to centres)
+    dln_dx_cc = _face_to_cell_u(
+        jnp.broadcast_to(dln_dx[:, :, jnp.newaxis], u.shape))
+    dln_dy_cc = _face_to_cell_v(
+        jnp.broadcast_to(dln_dy[:, :, jnp.newaxis], v.shape))
+    v_dot_grad_lnps = u_c * dln_dx_cc + v_c * dln_dy_cc
+    # In sigma coords: grad_eta(ln p) = grad(ln p_s).
+    # In hybrid coords: grad_eta(ln p) = (B*p_s/p) * grad(ln p_s).
+    if _hybrid:
+        v_dot_grad_lnps = v_dot_grad_lnps * (
+            sigma_coord.B_full * p_s[..., jnp.newaxis] / (p_full + 1e-10))
+    adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
+
+    dT_dt = horiz_adv_T + vert_adv_T + adiabatic
+
+    # --- 12. Tracer transport (mass-weighted flux form) ---
+    # Uses the same mass fluxes (dp_u*u, dp_v*v) as the continuity
+    # equation for discrete consistency.  The mixing-ratio tendency is:
+    #   dq/dt = [-div(dp·q·v) + q·div(dp·v)] / dp - vert_advection
+    # This conserves ∫ q·dp·dA (tracer mass) to machine precision.
+    tracer_tends = {}
+    for name, q in tracers.items():
+        if config.use_ppm_transport:
+            # Mass-weighted flux-form horizontal transport
+            flux_dpq = cgrid_fv_flux_divergence_latlon_3d(
+                q, dp_u * u, dp_v * v, grid)
+            horiz_q = (flux_dpq + q * div_dp) / (dp + 1e-10)
+        else:
+            from legoesm.core.operators_fv_latlon import fv_gradient_lon, fv_gradient_lat
+            dq_dx = jax.vmap(fv_gradient_lon, in_axes=(-1, None), out_axes=-1)(q, grid)
+            dq_dy = jax.vmap(fv_gradient_lat, in_axes=(-1, None), out_axes=-1)(q, grid)
+            horiz_q = -(u_c * dq_dx + v_c * dq_dy)
+        if _hybrid:
+            vert_q = vertical_advection_hybrid(q, mass_flux, p_s, sigma_coord)
+        else:
+            vert_q = vertical_advection(q, sigma_dot, sigma_coord)
+        tracer_tends[name] = horiz_q + vert_q
+
+    # --- 13. Diffusion (optional) ---
+    if config.A_h > 0.0:
+        lap_u, lap_v = vector_laplacian_cgrid(u, v, grid)
+        du_dt = du_dt + config.A_h * lap_u
+        dv_dt = dv_dt + config.A_h * lap_v
+        lap_T = laplacian_cgrid(T, grid)
+        dT_dt = dT_dt + config.A_h * lap_T
+
+    # Enforce zero tendency at poles (wall BC) so that intermediate RK
+    # stages never see nonzero v at poles feeding into divergence/Coriolis.
+    dv_dt = dv_dt.at[0, :, :].set(0.0).at[-1, :, :].set(0.0)
+
+    return du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends
+
+
+# ==============================================================================
+# Model class
+# ==============================================================================
+
+class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
+    """C-grid hydrostatic PE model on the latitude-longitude grid.
+
+    Features:
+    - Compact-stencil C-grid operators (no checkerboard mode).
+    - Sadourny (1975) energy-conserving Coriolis.
+    - Simmons-Burridge geopotential integration.
+    - Conservative C-grid divergence for continuity.
+    - Wall BC at poles (v = 0), periodic longitude.
+    - Adapter to/from cell-centered HydrostaticState for physics coupling.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+    sigma_coord : SigmaCoordinate
+    config : CGridLatLonPrimitiveEquationConfig, optional
+    """
+
+    def __init__(
+        self,
+        grid: LatLonGrid,
+        sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+        config: CGridLatLonPrimitiveEquationConfig | None = None,
+        dt: float = 600.0,
+    ):
+        self.grid = grid
+        self.sigma_coord = sigma_coord
+        self.config = config or CGridLatLonPrimitiveEquationConfig()
+
+        # Pole-cell CFL limit: dx_pole is the smallest cell on the grid.
+        from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
+        dx_pole = pole_cell_dx(grid)
+        self._max_dt = cfl_max_dt(dx_pole, 300.0, cfl_number=0.8, ndim=1)
+
+        # Precompute polar filter mask
+        if self.config.use_polar_filter:
+            self._polar_mask = compute_polar_filter_mask(
+                grid, dt=dt,
+                max_wave_speed=self.config.polar_filter_max_wave_speed,
+                cutoff_lat_deg=self.config.polar_filter_cutoff_deg,
+            )
+        else:
+            self._polar_mask = None
+
+        # Cache for the last C-grid output state.  Keyed on Python id()
+        # of (u, v, T, p_s, phis, tracers) arrays in the HydrostaticState.
+        # When the returned state is passed back unmodified, the cache
+        # avoids a lossy cell→face re-projection of winds.  However, the
+        # cache is invalidated whenever ANY field is replaced (e.g. by
+        # driver friction/smoothing, checkpoint restore, or _replace()).
+        # In practice this means the cache only helps consecutive
+        # step_with_physics() calls that do NOT modify the returned state
+        # between steps.
+        self._cgrid_cache_key: tuple | None = None
+        self._cgrid_cache: CGridLatLonHydrostaticState | None = None
+
+    def compute_mass(self, state: CGridLatLonHydrostaticState) -> jax.Array:
+        """Compute total mass (for conservation fixer target)."""
+        from legoesm.core.conservation import _accumulation_dtype
+        acc = _accumulation_dtype()
+        return jnp.sum(state.p_s.astype(acc) * self.grid.area.astype(acc))
+
+    def tendencies(self, state: CGridLatLonHydrostaticState):
+        return cgrid_latlon_hydrostatic_tendencies(
+            state, self.grid, self.sigma_coord, self.config,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal C-grid stepping (raw-array CGridLatLonHydrostaticState)
+    # ------------------------------------------------------------------
+
+    def _call_physics(self, physics_fn, hs):
+        """Call physics_fn with the correct contract and unwrap tuples.
+
+        Supports both calling conventions used in the repo:
+        - Legacy 3-arg: ``physics_fn(state, grid, sigma_coord)``
+        - 1-arg closure: ``physics_fn(state)``
+
+        Also unwraps ``(tendencies, aux)`` tuple returns from
+        PhysicsModuleProtocol-style callables.
+        """
+        import inspect
+        sig = inspect.signature(physics_fn)
+        n_params = len(sig.parameters)
+        if n_params >= 3:
+            result = physics_fn(hs, self.grid, self.sigma_coord)
+        else:
+            result = physics_fn(hs)
+        if type(result) is tuple:
+            return result[0]
+        return result
+
+    @partial(jax.jit, static_argnums=(0, 4))
+    def _step_cgrid(
+        self,
+        state: CGridLatLonHydrostaticState,
+        dt: float,
+        target_mass: jax.Array | None = None,
+        physics_fn=None,
+    ) -> CGridLatLonHydrostaticState:
+        """Internal: advance one step on C-grid state (raw arrays).
+
+        Physics is evaluated inside each RK stage (matching the CDGrid
+        PE contract), not as a post-step Euler update.
+        """
+        from legoesm.core.precision import cast_pytree
+
+        state_c = cast_pytree(state, None, "compute")
+
+        def tendency_fn(s):
+            du, dv, dT, dps, dq = cgrid_latlon_hydrostatic_tendencies(
+                s, self.grid, self.sigma_coord, self.config,
+            )
+
+            # --- Physics coupling (inside RK stage) ---
+            if physics_fn is not None:
+                hs = cgrid_to_hydrostatic(s, self.grid)
+                phys_tend = self._call_physics(physics_fn, hs)
+
+                dT = dT + phys_tend.dT_dt.data
+                dps = dps + phys_tend.dp_s_dt.data
+
+                du_phys = phys_tend.du_dt.data
+                dv_phys = (phys_tend.dv_dt.data
+                           if phys_tend.dv_dt is not None
+                           else jnp.zeros_like(du_phys))
+                du = du + _interp_cell_to_uface_3d(du_phys)
+                dv = dv + _interp_cell_to_vface_3d(dv_phys)
+
+                # Physics tracer tendencies (only for tracers already in state;
+                # introducing new tracer keys here would break the RK
+                # integrator's pytree structure).
+                if phys_tend.tracer_tendencies is not None:
+                    for name, dq_field in phys_tend.tracer_tendencies.items():
+                        if name in dq:
+                            dq[name] = dq[name] + dq_field.data
+
+            # Polar filter: damp high-frequency modes near poles
+            if self._polar_mask is not None:
+                dT = fourier_filter_3d(dT, self.grid, self._polar_mask)
+                dps = fourier_filter(dps, self.grid, self._polar_mask)
+                du_int = fourier_filter_3d(du[:, :-1, :], self.grid, self._polar_mask)
+                du = jnp.concatenate([du_int, du_int[:, 0:1, :]], axis=1)
+
+            return CGridLatLonHydrostaticState(
+                u=du, v=dv, T=dT, p_s=dps,
+                phis=jnp.zeros_like(s.phis),
+                tracers=dq,
+            )
+
+        state_new = dispatch_integrator(
+            state_c, tendency_fn, dt, self.config.time_integrator,
+        )
+
+        # Enforce v = 0 at poles
+        v_new = state_new.v.at[0, :, :].set(0.0).at[-1, :, :].set(0.0)
+        state_new = state_new._replace(v=v_new)
+
+        # Safety rails: T floor, p_s floor, mass fixer
+        state_new = self._apply_safety_rails(state_new, target_mass, state)
+
+        return cast_pytree(state_new, None, "storage")
+
+    # ------------------------------------------------------------------
+    # Public API — matches the driver contract
+    # ------------------------------------------------------------------
+
+    def _apply_safety_rails(
+        self,
+        state: CGridLatLonHydrostaticState,
+        target_mass: jax.Array | None = None,
+        pre_state: CGridLatLonHydrostaticState | None = None,
+    ) -> CGridLatLonHydrostaticState:
+        """Apply T_min floor, p_floor clamp, and mass fixer.
+
+        Called after dynamics and again after physics to ensure safety
+        invariants hold regardless of what physics tendencies produce.
+        """
+        # Temperature floor
+        T_new = jnp.maximum(state.T, self.config.T_min)
+        state = state._replace(T=T_new)
+
+        # Surface pressure positivity
+        p_s_new = jnp.maximum(state.p_s, self.config.p_floor)
+        state = state._replace(p_s=p_s_new)
+
+        # Conservation fixer for mass
+        if self.config.fix_mass:
+            from legoesm.core.conservation import _accumulation_dtype
+            acc = _accumulation_dtype()
+            area = self.grid.area.astype(acc)
+            total_area = jnp.sum(area)
+            if target_mass is not None:
+                mass_target = target_mass
+            elif pre_state is not None:
+                mass_target = jnp.sum(pre_state.p_s.astype(acc) * area)
+            else:
+                mass_target = jnp.sum(state.p_s.astype(acc) * area)
+            mass_new = jnp.sum(state.p_s.astype(acc) * area)
+            correction = (mass_target - mass_new) / total_area
+
+            # Preserve tracer mass: ∫ q·dp·dA must be invariant when the
+            # mass fixer adjusts p_s.  Scale q by dp_pre / dp_post per
+            # level.  For pure sigma dp = p_s·dσ so the ratio is just
+            # p_s_pre/p_s_post, but for hybrid coords dp = dA + dB·p_s
+            # and the ratio differs per level (upper levels with large dA
+            # barely change).
+            p_s_pre = state.p_s
+            p_s_post = jnp.maximum(
+                p_s_pre + correction.astype(p_s_pre.dtype),
+                self.config.p_floor,
+            )
+            if state.tracers:
+                _hybrid = isinstance(
+                    self.sigma_coord, HybridSigmaPressureCoordinate)
+                if _hybrid:
+                    dp_pre = dp_from_hybrid(self.sigma_coord, p_s_pre)
+                    dp_post = dp_from_hybrid(self.sigma_coord, p_s_post)
+                else:
+                    dsigma = self.sigma_coord.dsigma
+                    dp_pre = p_s_pre[..., jnp.newaxis] * dsigma
+                    dp_post = p_s_post[..., jnp.newaxis] * dsigma
+                ratio = dp_pre / (dp_post + 1e-10)  # (n_lat, n_lon, nlev)
+                new_tracers = {
+                    name: q * ratio
+                    for name, q in state.tracers.items()
+                }
+                state = state._replace(tracers=new_tracers)
+
+            state = state._replace(p_s=p_s_post)
+
+        return state
+
+    def step(
+        self,
+        state,
+        dt: float,
+        target_mass: jax.Array | None = None,
+        physics_fn=None,
+    ):
+        """Advance one time step.
+
+        Pure with respect to the explicit state argument — always
+        advances the supplied state, never a cached copy.
+
+        Accepts either ``CGridLatLonHydrostaticState`` (native C-grid,
+        raw arrays) or ``HydrostaticState`` (cell-centred, Field members).
+        Returns the same type as the input.
+
+        Physics is evaluated inside each RK stage (matching CDGrid PE),
+        not as a post-step Euler update.
+
+        Parameters
+        ----------
+        state : CGridLatLonHydrostaticState or HydrostaticState
+        dt : float
+        target_mass : jax.Array or None
+            If provided, the mass fixer corrects to this target.
+        physics_fn : callable or None
+            Evaluated at each RK stage alongside dynamics (3-arg legacy
+            or 1-arg closure, tuple returns unwrapped).
+
+        Raises
+        ------
+        ValueError
+            If dt exceeds the pole-cell advective CFL limit.
+        """
+        if dt > self._max_dt:
+            raise ValueError(
+                f"dt={dt:.1f} s exceeds the pole-cell CFL limit "
+                f"({self._max_dt:.1f} s) for this lat-lon grid. "
+                f"Use dt <= {self._max_dt:.1f} or a coarser grid."
+            )
+
+        if isinstance(state, CGridLatLonHydrostaticState):
+            return self._step_cgrid(state, dt, target_mass, physics_fn)
+
+        # HydrostaticState input: use cached face-staggered winds from
+        # the previous step to avoid lossy cell→face re-projection.
+        # Cache is keyed on identity (Python id()) of ALL state fields
+        # including tracers.  Any field replacement invalidates.
+        cache_key = self._hs_cache_key(state)
+        if (self._cgrid_cache is not None
+                and self._cgrid_cache_key == cache_key):
+            cgrid_in = self._cgrid_cache
+        else:
+            cgrid_in = hydrostatic_to_cgrid(state, self.grid)
+
+        cgrid_out = self._step_cgrid(cgrid_in, dt, target_mass, physics_fn)
+
+        # Cache the output and convert to HydrostaticState
+        hs_out = cgrid_to_hydrostatic(cgrid_out, self.grid)
+        self._cgrid_cache = cgrid_out
+        self._cgrid_cache_key = self._hs_cache_key(hs_out)
+        return hs_out
+
+    @staticmethod
+    def _hs_cache_key(hs) -> tuple:
+        """Build a cache key from all HydrostaticState array identities.
+
+        Includes tracer names in the key so schema changes (renaming/
+        adding/removing tracers) invalidate the cache.
+        """
+        key = [id(hs.u.data), id(hs.v.data),
+               id(hs.T.data), id(hs.p_s.data),
+               id(hs.phis.data)]
+        if hs.tracers is not None:
+            names = sorted(hs.tracers)
+            key.append(tuple(names))  # schema part
+            for name in names:
+                f = hs.tracers[name]
+                key.append(id(f.data if hasattr(f, 'data') else f))
+        return tuple(key)
+
+    def step_with_physics(self, state, dt, physics_fn=None):
+        """Advance one step, optionally applying physics.
+
+        This is the entry point used by ``ModelDriver``.  It accepts
+        both ``HydrostaticState`` and ``CGridLatLonHydrostaticState``
+        and returns the same type as the input.  ``physics_fn=None``
+        runs dynamics only (no physics).
+        """
+        return self.step(state, dt, physics_fn=physics_fn)

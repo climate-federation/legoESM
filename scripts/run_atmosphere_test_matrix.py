@@ -216,15 +216,6 @@ def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 1.5e7) -> float:
     return ref_coeff * (ref_n / n) ** 2
 
 
-def _hyperdiff_latlon(n_lat: int, ref_n: int = 64, ref_coeff: float = 2e16) -> float:
-    return ref_coeff * (ref_n / n_lat) ** 4
-
-
-def _div_damp_latlon(n_lat: int, ref_n: int = 64, ref_coeff: float = 5e6) -> float:
-    """Scale second-order divergence damping coefficient with grid spacing."""
-    return ref_coeff * (ref_n / n_lat) ** 2
-
-
 def _hyperdiff_ico(mesh) -> float:
     """Biharmonic hyperdiffusion for icosahedral mesh.
 
@@ -1242,43 +1233,50 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig)
-        from tests.test_cases.williamson_latlon import (
-            williamson_test2_latlon, williamson_test5_latlon,
-            williamson_test2_exact_latlon, compute_error_norms_latlon)
+        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+            CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
+            williamson_test2_cgrid, williamson_test5_cgrid,
+            williamson_test2_exact_cgrid, compute_error_norms_cgrid)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
         grid = create_latlon_grid(n_lat, n_lon)
-        dt = 300.0
-        config = FVShallowWaterLatLonConfig(
-            hyperdiff_coeff=_hyperdiff_latlon(n_lat))
-        model = FVShallowWaterLatLonModel(grid, config)
-        state = (williamson_test2_latlon(grid) if test_num == 2
-                 else williamson_test5_latlon(grid))
+        # CFL-safe dt for gravity waves near poles
+        import math as _m
+        _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
+            _m.pi / 2 - grid.dlat / 2)
+        _c_grav = _m.sqrt(9.81 * 3000.0)
+        dt = min(300.0, 0.5 * _dx_pole / _c_grav)
+        # A_h must respect diffusion CFL: A_h*dt/dx_pole^2 < 0.5
+        _A_h_max = 0.4 * _dx_pole**2 / dt
+        _A_h = min(_laplacian_visc_latlon(n_lat), _A_h_max)
+        config = CGridLatLonShallowWaterConfig(A_h=_A_h)
+        model = CGridLatLonShallowWaterModel(grid, config, dt=dt)
+        state = (williamson_test2_cgrid(grid) if test_num == 2
+                 else williamson_test5_cgrid(grid))
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
         def check_fn(s):
-            return (check_finite({"h": s.h.data, "u": s.u.data}),
-                    float(jnp.max(jnp.abs(s.u.data))))
+            return (check_finite({"h": s.h, "u": s.u}),
+                    float(jnp.max(jnp.abs(s.u))))
 
         def scalar_fn(s):
+            u_c = 0.5 * (s.u[:, :-1] + s.u[:, 1:])
+            v_c = 0.5 * (s.v[:-1] + s.v[1:])
             return {
-                "mean_height": float(jnp.mean(s.h.data)),
-                "max_wind": float(jnp.max(jnp.sqrt(
-                    s.u.data ** 2 + s.v.data ** 2))),
+                "mean_height": float(jnp.mean(s.h)),
+                "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
             }
 
         def extract_fn(s):
-            u = np.asarray(s.u.data, dtype=np.float64)
-            v = np.asarray(s.v.data, dtype=np.float64)
+            u = np.asarray(0.5 * (s.u[:, :-1] + s.u[:, 1:]), dtype=np.float64)
+            v = np.asarray(0.5 * (s.v[:-1] + s.v[1:]), dtype=np.float64)
             return {"u": u, "v": v,
                     "wind_speed": np.sqrt(u ** 2 + v ** 2),
-                    "height": np.asarray(s.h.data, dtype=np.float64)}
+                    "height": np.asarray(s.h, dtype=np.float64)}
 
-        key_array_fn = lambda s: s.h.data
+        key_array_fn = lambda s: s.h
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -1435,8 +1433,8 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
         norms = {"l2": l2, "linf": linf}
         notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
     elif test_num == 2 and tc.grid_type == "latlon":
-        exact = williamson_test2_exact_latlon(grid, days * 86400.0)
-        norms = compute_error_norms_latlon(state, exact, grid)
+        exact = williamson_test2_exact_cgrid(grid, days * 86400.0)
+        norms = compute_error_norms_cgrid(state, exact, grid)
         notes = f"L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
     elif test_num == 2 and tc.grid_type == "icosahedral":
         norms = compute_error_norms_mpas(state.h.data, init_fns[2](mesh).h.data, mesh)
@@ -1555,67 +1553,61 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-            FVShallowWaterLatLonModel, FVShallowWaterLatLonConfig,
-            fv_shallow_water_tendencies_latlon)
-        from legoesm.core.state import ShallowWaterState
+        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+            CGridLatLonShallowWaterState, cell_to_cgrid_winds)
+        from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
+        from legoesm.timestepping.dispatch import dispatch_integrator
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
         grid = create_latlon_grid(n_lat, n_lon)
-        # Rotated winds (beta=pi/4) give large zonal flow near the poles.
-        # CFL-safe dt: dx_min ≈ dlon*R*cos(lat_max), u_max ≈ u0.
-        import math
-        _u0 = 2.0 * math.pi * float(grid.radius) / (12.0 * 86400.0)
-        _dlon = 2.0 * math.pi / n_lon
-        _dx_pole = float(grid.radius) * _dlon * math.cos(
-            math.radians(90.0 - 180.0 / n_lat))
+        # CFL-safe dt for advection near poles (beta=pi/4 rotated flow)
+        import math as _m
+        _u0 = 2.0 * _m.pi * float(grid.radius) / (12.0 * 86400.0)
+        _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
+            _m.pi / 2 - grid.dlat / 2)
         dt = min(1800.0, 0.8 * _dx_pole / _u0)
-        config = FVShallowWaterLatLonConfig(
-            hyperdiff_coeff=_hyperdiff_latlon(n_lat))
-        model = FVShallowWaterLatLonModel(grid, config, dt=dt)
-        state = cosine_bell_latlon(grid, beta)
-        h_init = state.h.data.copy()
 
-        from legoesm.timestepping.dispatch import dispatch_integrator
+        # Build C-grid cosine bell IC from cell-centered version
+        _cb_ll = cosine_bell_latlon(grid, beta)
+        _u_face, _v_face = cell_to_cgrid_winds(_cb_ll.u.data, _cb_ll.v.data)
+        state = CGridLatLonShallowWaterState(
+            h=_cb_ll.h.data, u=_u_face, v=_v_face,
+            h_s=jnp.zeros_like(_cb_ll.h.data))
+        h_init = state.h.copy()
 
-        # Compute only mass flux divergence + polar filter.
-        from legoesm.core.operators_latlon import (
-            divergence as divergence_ll)
-        from legoesm.core.conservation import zero_mean_tendency
-        from legoesm.atmosphere.dynamics.shallow_water_fv_latlon import (
-            fourier_filter)
+        # Transport-only step: freeze winds, only advect h.
+        # Uses the same PPM operator the shipped model calls internally.
+        # NO mass correction — raw transport conservation error is visible
+        # in the benchmark norms.
+        _u_frozen = _u_face
+        _v_frozen = _v_face
+        _mass_init = float(jnp.sum(state.h * grid.area))
 
         @jax.jit
         def step_fn(s, dt_):
-            def tendency_fn_transport(st):
-                hu = st.h.replace(data=st.h.data * st.u.data)
-                hv = st.h.replace(data=st.h.data * st.v.data)
-                dh_dt_data = -divergence_ll(hu, hv, grid).data
-                dh_dt_data = zero_mean_tendency(dh_dt_data, grid)
-                if (config.use_polar_filter
-                        and model.polar_filter_mask is not None):
-                    dh_dt_data = fourier_filter(
-                        dh_dt_data, grid, model.polar_filter_mask)
-                return ShallowWaterState(
-                    h=st.h.replace(data=dh_dt_data),
-                    u=st.u.replace(data=jnp.zeros_like(st.u.data)),
-                    v=st.v.replace(data=jnp.zeros_like(st.v.data)),
-                    h_s=st.h_s.replace(data=jnp.zeros_like(st.h_s.data)))
+            def tendency_fn(st):
+                dh = cgrid_fv_flux_divergence_latlon(
+                    st.h, _u_frozen, _v_frozen, grid)
+                return st._replace(
+                    h=dh,
+                    u=jnp.zeros_like(st.u),
+                    v=jnp.zeros_like(st.v),
+                    h_s=jnp.zeros_like(st.h_s))
             return dispatch_integrator(
-                s, tendency_fn_transport, dt_, config.time_integrator)
+                s, tendency_fn, dt_, "ssp_rk3")
 
         def check_fn(s):
-            return (check_finite({"h": s.h.data}),
-                    float(jnp.max(jnp.abs(s.h.data))))
+            return (check_finite({"h": s.h}),
+                    float(jnp.max(jnp.abs(s.h))))
 
         def scalar_fn(s):
-            return {"mean_height": float(jnp.mean(s.h.data)),
-                    "max_height": float(jnp.max(s.h.data))}
+            return {"mean_height": float(jnp.mean(s.h)),
+                    "max_height": float(jnp.max(s.h))}
 
         def extract_fn(s):
-            return {"height": np.asarray(s.h.data, dtype=np.float64)}
+            return {"height": np.asarray(s.h, dtype=np.float64)}
 
-        key_array_fn = lambda s: s.h.data
+        key_array_fn = lambda s: s.h
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -1623,7 +1615,11 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         def error_fn(s, t):
             h_exact = cosine_bell_exact(grid.lon2d, grid.lat2d,
                                         grid.radius, t, beta)
-            return cosine_bell_error_norms(s.h.data, h_exact, grid.area)
+            norms = cosine_bell_error_norms(s.h, h_exact, grid.area)
+            # Report raw mass drift (no correction applied)
+            mass_final = float(jnp.sum(s.h * grid.area))
+            norms["mass_drift"] = abs(mass_final - _mass_init) / abs(_mass_init)
+            return norms
 
     elif tc.grid_type == "icosahedral":
         from legoesm.grids.voronoi import create_voronoi_mesh
@@ -1782,6 +1778,12 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
     notes = ""
     norms = error_fn(state, days * 86400.0)
     notes = f"L1={norms['l1']:.2e}, L2={norms['l2']:.2e}, Linf={norms['linf']:.2e}"
+    if "mass_drift" in norms:
+        notes += f", mass_drift={norms['mass_drift']:.2e}"
+        if norms["mass_drift"] > 0.01:
+            logger.warning(
+                "Cosine bell %s: mass drift %.2e exceeds 1%% threshold",
+                tc.grid_type, norms["mass_drift"])
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -1860,26 +1862,27 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
 
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
-            LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
+            hydrostatic_to_cgrid)
         from tests.test_cases.held_suarez import (
             held_suarez_forcing_latlon, held_suarez_init_latlon)
-        from legoesm.core.operators_latlon import (
-            global_integral as global_integral_ll)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
         grid = create_latlon_grid(n_lat, n_lon)
         sigma = _create_vertical(nlev, tc.vertical_coord)
-        hd = _hyperdiff_latlon(n_lat)
-        dd = _div_damp_latlon(n_lat)
         ah = _laplacian_visc_latlon(n_lat)
-        dt = 200.0
-        config = LatLonPrimitiveEquationConfig(
-            hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
-            div_damp_coeff=dd, A_h=ah,
-            use_conservation_fixer=True, fix_mass=True)
-        model = LatLonPrimitiveEquationModel(grid, sigma, config)
-        state = held_suarez_init_latlon(grid, sigma)
+        # CFL-safe dt for explicit RK on lat-lon polar cells
+        import math as _m
+        _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
+            _m.pi / 2 - grid.dlat / 2)
+        dt = min(200.0, 0.5 * _dx_pole / 300.0)
+        _A_h_max = 0.4 * _dx_pole**2 / dt
+        ah = min(ah, _A_h_max)
+        config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
+        model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
+        state_cc = held_suarez_init_latlon(grid, sigma)
+        state = hydrostatic_to_cgrid(state_cc, grid)
 
         physics_fn = (_make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing_latlon)
                       if radiation == "rrtmgp" else held_suarez_forcing_latlon)
@@ -1887,22 +1890,32 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
 
-        mass_fn = lambda s: float(global_integral_ll(s.p_s, grid))
+        mass_fn = lambda s: float(jnp.sum(s.p_s * grid.area))
 
         def check_fn(s):
-            return (check_finite({"T": s.T.data, "u": s.u.data}),
-                    float(jnp.max(jnp.abs(s.u.data))))
+            return (check_finite({"T": s.T, "u": s.u}),
+                    float(jnp.max(jnp.abs(s.u))))
 
         def scalar_fn(s):
+            u_c = 0.5 * (s.u[:, :-1, :] + s.u[:, 1:, :])
+            v_c = 0.5 * (s.v[:-1, :, :] + s.v[1:, :, :])
             return {
                 "mass": mass_fn(s),
-                "max_wind": float(jnp.max(jnp.sqrt(
-                    s.u.data ** 2 + s.v.data ** 2))),
-                "mean_T": float(jnp.mean(s.T.data)),
+                "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
+                "mean_T": float(jnp.mean(s.T)),
             }
 
-        extract_fn = _extract_hydro_cube_latlon
-        key_array_fn = lambda s: s.T.data
+        def extract_fn(s):
+            u_sfc = np.asarray(0.5 * (s.u[:, :-1, -1] + s.u[:, 1:, -1]), dtype=np.float64)
+            v_sfc = np.asarray(0.5 * (s.v[:-1, :, -1] + s.v[1:, :, -1]), dtype=np.float64)
+            return {
+                "u": u_sfc, "v": v_sfc,
+                "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
+                "p_s": np.asarray(s.p_s, dtype=np.float64),
+                "T_3d": np.asarray(s.T, dtype=np.float64),
+            }
+
+        key_array_fn = lambda s: s.T
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -2125,50 +2138,59 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
-            LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
+            hydrostatic_to_cgrid)
         from tests.test_cases.baroclinic_wave import (
             baroclinic_wave_init_latlon)
-        from legoesm.core.operators_latlon import (
-            global_integral as global_integral_ll)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
         grid = create_latlon_grid(n_lat, n_lon)
         sigma_for_init = create_sigma_coordinate(nlev)
         sigma = _create_vertical(nlev, tc.vertical_coord)
-        hd = _hyperdiff_latlon(n_lat)
-        dd = _div_damp_latlon(n_lat)
         ah = _laplacian_visc_latlon(n_lat)
-        dt = 200.0
-        config = LatLonPrimitiveEquationConfig(
-            hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
-            div_damp_coeff=dd, A_h=ah,
-            use_conservation_fixer=True, fix_mass=True)
-        model = LatLonPrimitiveEquationModel(grid, sigma, config)
-        state = baroclinic_wave_init_latlon(grid, sigma_for_init, perturbed=True)
+        import math as _m
+        _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
+            _m.pi / 2 - grid.dlat / 2)
+        dt = min(200.0, 0.5 * _dx_pole / 300.0)
+        _A_h_max = 0.4 * _dx_pole**2 / dt
+        ah = min(ah, _A_h_max)
+        config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
+        model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
+        state_cc = baroclinic_wave_init_latlon(grid, sigma_for_init, perturbed=True)
+        state = hydrostatic_to_cgrid(state_cc, grid)
 
         def step_fn(s, dt_):
             return model.step(s, dt_)
 
-        mass_fn = lambda s: float(global_integral_ll(s.p_s, grid))
+        mass_fn = lambda s: float(jnp.sum(s.p_s * grid.area))
 
         def check_fn(s):
-            return (check_finite({"T": s.T.data, "u": s.u.data}),
-                    float(jnp.max(jnp.abs(s.u.data))))
+            return (check_finite({"T": s.T, "u": s.u}),
+                    float(jnp.max(jnp.abs(s.u))))
 
-        ps_init = np.array(state.p_s.data)
+        ps_init = np.array(state.p_s)
 
         def scalar_fn(s):
+            u_c = 0.5 * (s.u[:, :-1, :] + s.u[:, 1:, :])
+            v_c = 0.5 * (s.v[:-1, :, :] + s.v[1:, :, :])
             return {
                 "mass": mass_fn(s),
-                "max_wind": float(jnp.max(jnp.sqrt(
-                    s.u.data ** 2 + s.v.data ** 2))),
-                "ps_perturbation": float(jnp.max(
-                    jnp.abs(s.p_s.data - ps_init))),
+                "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
+                "ps_perturbation": float(jnp.max(jnp.abs(s.p_s - ps_init))),
             }
 
-        extract_fn = _extract_hydro_cube_latlon
-        key_array_fn = lambda s: s.T.data
+        def extract_fn(s):
+            u_sfc = np.asarray(0.5 * (s.u[:, :-1, -1] + s.u[:, 1:, -1]), dtype=np.float64)
+            v_sfc = np.asarray(0.5 * (s.v[:-1, :, -1] + s.v[1:, :, -1]), dtype=np.float64)
+            return {
+                "u": u_sfc, "v": v_sfc,
+                "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
+                "p_s": np.asarray(s.p_s, dtype=np.float64),
+                "T_3d": np.asarray(s.T, dtype=np.float64),
+            }
+
+        key_array_fn = lambda s: s.T
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -2414,12 +2436,12 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
         grid = create_latlon_grid(n_lat, n_lon)
 
-        # Wind wrapper: shared _geo returns geographic (u, v, sigma_dot),
-        # no rotation needed for lat-lon.  Must meshgrid 1D lon/lat.
+        # Wind wrapper: convert geographic (u_east, v_north, sigma_dot) API
+        # to the (t, lon2d, lat2d, sigma_coord) signature.
         wind_geo_fn = cfg["wind_geo"]
 
-        def ll_wind(t, g, sc):
-            return wind_geo_fn(t, g.lon2d, g.lat2d, sc)
+        def latlon_wind(t, lon2d, lat2d, sc):
+            return wind_geo_fn(t, lon2d, lat2d, sc)
 
         init_fns = {
             11: dcmip11_init_latlon,
@@ -2428,8 +2450,8 @@ def run_dcmip_transport(tc: TestCase, output_dir: Path, days: float, *,
         }
         state_init = init_fns[test_num](grid, sigma_coord)
         model = TracerTransportLatLonModel(
-            grid, sigma_coord, ll_wind,
-            TracerTransportLatLonConfig(hyperdiff_coeff=0.0))
+            grid, sigma_coord, latlon_wind,
+            TracerTransportLatLonConfig())
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
@@ -2616,49 +2638,59 @@ def run_amip(tc: TestCase, output_dir: Path, days: float, *,
     elif tc.grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import standard_hybrid_levels
-        from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
-            LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
+            hydrostatic_to_cgrid)
         from tests.test_cases.held_suarez import (
             held_suarez_init_latlon, held_suarez_forcing_latlon)
-        from legoesm.core.operators_latlon import (
-            global_integral as global_integral_ll)
 
         n_lat, n_lon = (int(x) for x in tc.resolution.split("x"))
         grid = create_latlon_grid(n_lat, n_lon)
         sigma = standard_hybrid_levels(nlev)
-        hd = _hyperdiff_latlon(n_lat)
-        dd = _div_damp_latlon(n_lat)
         ah = _laplacian_visc_latlon(n_lat)
-        dt = 300.0
-        config = LatLonPrimitiveEquationConfig(
-            hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
-            div_damp_coeff=dd, A_h=ah,
-            use_conservation_fixer=True, fix_mass=True)
-        model = LatLonPrimitiveEquationModel(grid, sigma, config)
-        state = held_suarez_init_latlon(grid, sigma, T_init=280.0)
+        import math as _m
+        _dx_pole = float(grid.radius) * grid.dlon * _m.cos(
+            _m.pi / 2 - grid.dlat / 2)
+        dt = min(300.0, 0.5 * _dx_pole / 300.0)
+        _A_h_max = 0.4 * _dx_pole**2 / dt
+        ah = min(ah, _A_h_max)
+        config = CGridLatLonPrimitiveEquationConfig(A_h=ah, fix_mass=True)
+        model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
+        state_cc = held_suarez_init_latlon(grid, sigma, T_init=280.0)
+        state = hydrostatic_to_cgrid(state_cc, grid)
 
         physics_fn = held_suarez_forcing_latlon
 
         def step_fn(s, dt_):
             return model.step_with_physics(s, dt_, physics_fn)
 
-        mass_fn = lambda s: float(global_integral_ll(s.p_s, grid))
+        mass_fn = lambda s: float(jnp.sum(s.p_s * grid.area))
 
         def check_fn(s):
-            return (check_finite({"T": s.T.data, "u": s.u.data}),
-                    float(jnp.max(jnp.abs(s.u.data))))
+            return (check_finite({"T": s.T, "u": s.u}),
+                    float(jnp.max(jnp.abs(s.u))))
 
         def scalar_fn(s):
+            u_c = 0.5 * (s.u[:, :-1, :] + s.u[:, 1:, :])
+            v_c = 0.5 * (s.v[:-1, :, :] + s.v[1:, :, :])
             return {
                 "mass": mass_fn(s),
-                "max_wind": float(jnp.max(jnp.sqrt(
-                    s.u.data ** 2 + s.v.data ** 2))),
-                "mean_T": float(jnp.mean(s.T.data)),
-                "mean_p_s": float(jnp.mean(s.p_s.data)),
+                "max_wind": float(jnp.max(jnp.sqrt(u_c ** 2 + v_c ** 2))),
+                "mean_T": float(jnp.mean(s.T)),
+                "mean_p_s": float(jnp.mean(s.p_s)),
             }
 
-        extract_fn = _extract_hydro_cube_latlon
-        key_array_fn = lambda s: s.T.data
+        def extract_fn(s):
+            u_sfc = np.asarray(0.5 * (s.u[:, :-1, -1] + s.u[:, 1:, -1]), dtype=np.float64)
+            v_sfc = np.asarray(0.5 * (s.v[:-1, :, -1] + s.v[1:, :, -1]), dtype=np.float64)
+            return {
+                "u": u_sfc, "v": v_sfc,
+                "wind_speed": np.sqrt(u_sfc ** 2 + v_sfc ** 2),
+                "p_s": np.asarray(s.p_s, dtype=np.float64),
+                "T_3d": np.asarray(s.T, dtype=np.float64),
+            }
+
+        key_array_fn = lambda s: s.T
         coord_kind = "latlon"
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi

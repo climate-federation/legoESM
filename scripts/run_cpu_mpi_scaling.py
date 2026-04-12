@@ -250,13 +250,26 @@ def _auto_dt(n_grid: int, grid_type: str) -> float:
         dx_avg = R * math.sqrt(4.0 * math.pi / n_cells)
         dx_min = 0.9 * dx_avg
     elif grid_type == "latlon":
-        n_lon = 2 * n_grid
-        dx_min = math.pi * R / n_lon
+        # Pole-cell dx is the limiting spacing on lat-lon grids
+        n_lat = n_grid
+        dlat = math.pi / n_lat
+        dlon = 2.0 * math.pi / (2 * n_lat)
+        dx_min = R * dlon * math.cos(math.pi / 2.0 - dlat / 2.0)
     else:  # cubed-sphere
         dx_min = (math.pi / 2) * R / (n_grid * math.sqrt(3))
 
     dt = cfl * dx_min / (u_max + c_grav)
-    return max(30.0, 30.0 * int(dt / 30.0))
+    # Round down to a "nice" value; no floor — lat-lon pole cells can
+    # require sub-second timesteps at very high resolution.
+    if dt >= 30.0:
+        return 30.0 * int(dt / 30.0)
+    elif dt >= 5.0:
+        return 5.0 * int(dt / 5.0)
+    elif dt >= 1.0:
+        return float(int(dt))
+    else:
+        # Truncate down to 2 decimal places (never round up past CFL)
+        return math.floor(dt * 100) / 100
 
 
 # ===========================================================================
@@ -367,23 +380,27 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     import jax.numpy as jnp
 
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.primitive_eq_fv_latlon import (
-        FVLatLonPrimitiveEquationModel,
-        FVLatLonPrimitiveEquationConfig,
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel,
+        CGridLatLonPrimitiveEquationConfig,
     )
+
+    from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
 
     n_lat = resolution
     n_lon = 2 * resolution
     grid = create_latlon_grid(n_lat, n_lon)
 
-    config = FVLatLonPrimitiveEquationConfig(
-        hyperdiff_coeff=0.0,
-        hyperdiff_ps_coeff=0.0,
-        use_conservation_fixer=True,
+    # Clamp dt to pole-cell CFL limit
+    dx_pole = pole_cell_dx(grid)
+    dt = min(dt, cfl_max_dt(dx_pole, 300.0, cfl_number=0.8, ndim=1))
+
+    config = CGridLatLonPrimitiveEquationConfig(
+        A_h=0.0,
         fix_mass=True,
         use_polar_filter=False,
     )
-    model = FVLatLonPrimitiveEquationModel(grid, sigma, config)
+    model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
 
     # Baroclinic wave init for lat-lon
     from legoesm.atmosphere.baroclinic_wave import (
