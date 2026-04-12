@@ -431,6 +431,7 @@ def pad_halo(
     data: jax.Array,
     halo: int = 1,
     interp_offsets: jax.Array | None = None,
+    duogrid=None,
 ) -> jax.Array:
     """Pad a scalar field with inter-face halo data.
 
@@ -444,28 +445,35 @@ def pad_halo(
     the O(Δα) position mismatch near cube corners that otherwise
     degrades operator accuracy from second to first order.
 
-    Corner cells (4 per face) are left as zero, which is safe for
-    halo=1 with 2nd-order stencils (corners are never used).
-
-    When the MPI backend is active, this dispatches to
-    :func:`legoesm.parallel.halo_exchange.pad_halo_mpi`.
+    When *duogrid* is provided (a ``DuoGridData``), the standard copy is
+    followed by a kinked-to-extended Lagrange remap (cube_rmp) and corner
+    fill. This is mutually exclusive with *interp_offsets*.
 
     Parameters
     ----------
     data : jax.Array, shape (6, n, n)
         Scalar field on the cubed-sphere.
     halo : int
-        Halo width (default 1). Only halo=1 is currently supported.
+        Halo width (default 1).
     interp_offsets : jax.Array or None
         Precomputed fractional-index offsets, shape (6, 4, n).
         When ``None``, the standard nearest-index copy is used.
+    duogrid : DuoGridData or None
+        Duo-Grid remapping data. Mutually exclusive with interp_offsets.
 
     Returns
     -------
     padded : jax.Array, shape (6, n+2*halo, n+2*halo)
     """
+    if interp_offsets is not None and duogrid is not None:
+        raise ValueError(
+            "interp_offsets and duogrid are mutually exclusive"
+        )
     if halo not in (1, 2):
         raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
+
+    # When duogrid is active, suppress interp_offsets (use nearest copy + remap)
+    offsets = None if duogrid is not None else interp_offsets
 
     # Single-face (regional panel) dispatch: wall boundary conditions.
     if data.shape[0] == 1:
@@ -474,23 +482,30 @@ def pad_halo(
     # MPI dispatch.
     if _halo_backend == "mpi":
         from legoesm.parallel.halo_exchange import pad_halo_mpi
-        return pad_halo_mpi(data, _mpi_topology, halo=halo)
-
+        padded = pad_halo_mpi(data, _mpi_topology, halo=halo)
     # SPMD dispatch (explicit all_gather for multi-GPU).
-    if _halo_backend == "spmd" and _spmd_mesh is not None:
+    elif _halo_backend == "spmd" and _spmd_mesh is not None:
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo
-        return explicit_pad_halo(data, _spmd_mesh, halo=halo)
-
-    if halo == 1:
-        return _pad_halo_local(data, interp_offsets)
+        padded = explicit_pad_halo(data, _spmd_mesh, halo=halo)
+    elif halo == 1:
+        padded = _pad_halo_local(data, offsets)
     else:
-        return _pad_halo_local_h2(data, interp_offsets)
+        padded = _pad_halo_local_h2(data, offsets)
+
+    # Duo-Grid post-processing: kinked→extended remap + corner fill
+    if duogrid is not None:
+        from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
+        padded = cube_rmp_vectorized(padded, duogrid, halo)
+        padded = fill_corner_region(padded, duogrid, halo)
+
+    return padded
 
 
 def pad_halo_4d(
     data: jax.Array,
     halo: int = 1,
     interp_offsets: jax.Array | None = None,
+    duogrid=None,
 ) -> jax.Array:
     """Pad a 4D scalar field with inter-face halo data.
 
@@ -506,6 +521,8 @@ def pad_halo_4d(
         Halo width (1 or 2).
     interp_offsets : jax.Array or None
         Precomputed fractional-index offsets, shape (6, 4, n).
+    duogrid : DuoGridData or None
+        Duo-Grid remapping data. Mutually exclusive with interp_offsets.
 
     Returns
     -------
@@ -513,8 +530,14 @@ def pad_halo_4d(
     """
     if data.ndim != 4:
         raise ValueError(f"pad_halo_4d expects 4D input, got {data.ndim}D")
+    if interp_offsets is not None and duogrid is not None:
+        raise ValueError(
+            "interp_offsets and duogrid are mutually exclusive"
+        )
     if halo not in (1, 2):
         raise NotImplementedError(f"Only halo=1 and halo=2 are supported, got {halo}")
+
+    offsets = None if duogrid is not None else interp_offsets
 
     # Single-face (regional panel) dispatch: wall boundary conditions.
     if data.shape[0] == 1:
@@ -523,17 +546,33 @@ def pad_halo_4d(
     # MPI dispatch.
     if _halo_backend == "mpi":
         from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
-        return pad_halo_mpi_4d(data, _mpi_topology, halo=halo)
-
+        padded = pad_halo_mpi_4d(data, _mpi_topology, halo=halo)
     # SPMD dispatch (explicit all_gather for multi-GPU).
-    if _halo_backend == "spmd" and _spmd_mesh is not None:
+    elif _halo_backend == "spmd" and _spmd_mesh is not None:
         from legoesm.parallel.cubesphere_exchange import explicit_pad_halo_4d
-        return explicit_pad_halo_4d(data, _spmd_mesh, halo=halo)
-
-    if halo == 1:
-        return _pad_halo_local_4d(data, interp_offsets)
+        padded = explicit_pad_halo_4d(data, _spmd_mesh, halo=halo)
+    elif halo == 1:
+        padded = _pad_halo_local_4d(data, offsets)
     else:
-        return _pad_halo_local_h2_4d(data, interp_offsets)
+        padded = _pad_halo_local_h2_4d(data, offsets)
+
+    # Duo-Grid post-processing: apply per-level via vmap
+    if duogrid is not None:
+        from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
+
+        def _remap_level(level_slice):
+            """Apply cube_rmp + corner fill to one (6, n+2h, n+2h) level."""
+            level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
+            level_slice = fill_corner_region(level_slice, duogrid, halo)
+            return level_slice
+
+        # Transpose to (nlev, 6, n+2h, n+2h), vmap, transpose back
+        nlev = padded.shape[3]
+        padded_t = jnp.transpose(padded, (3, 0, 1, 2))  # (nlev, 6, ...)
+        padded_t = jax.vmap(_remap_level)(padded_t)
+        padded = jnp.transpose(padded_t, (1, 2, 3, 0))
+
+    return padded
 
 
 def _pad_halo_local_4d(
@@ -647,6 +686,7 @@ def pad_halo_vector_4d(
     sin_angle_padded: jax.Array,
     interp_offsets: jax.Array | None = None,
     halo: int = 1,
+    duogrid=None,
 ) -> tuple[jax.Array, jax.Array]:
     """4D vector halo exchange (rotation + pad for all levels at once).
 
@@ -677,8 +717,10 @@ def pad_halo_vector_4d(
     u_east = ca * u_data - sa * v_data
     v_north = sa * u_data + ca * v_data
     # Step 2: pad as scalars (one communication per component)
-    u_east_padded = pad_halo_4d(u_east, halo=halo, interp_offsets=interp_offsets)
-    v_north_padded = pad_halo_4d(v_north, halo=halo, interp_offsets=interp_offsets)
+    u_east_padded = pad_halo_4d(u_east, halo=halo, interp_offsets=interp_offsets,
+                                 duogrid=duogrid)
+    v_north_padded = pad_halo_4d(v_north, halo=halo, interp_offsets=interp_offsets,
+                                  duogrid=duogrid)
     # Step 3: convert back using padded angles
     cap = cos_angle_padded[..., None]
     sap = sin_angle_padded[..., None]
@@ -1053,6 +1095,7 @@ def pad_halo_vector(
     sin_angle_padded: jax.Array,
     interp_offsets: jax.Array | None = None,
     halo: int = 1,
+    duogrid=None,
 ) -> tuple[jax.Array, jax.Array]:
     """Pad vector field components with proper rotation at face boundaries.
 
@@ -1100,8 +1143,10 @@ def pad_halo_vector(
     v_north = sin_angle * u_data + cos_angle * v_data
 
     # Step 2: Pad geographic components as scalars (auto-dispatches to MPI)
-    u_east_padded = pad_halo(u_east, halo=halo, interp_offsets=interp_offsets)
-    v_north_padded = pad_halo(v_north, halo=halo, interp_offsets=interp_offsets)
+    u_east_padded = pad_halo(u_east, halo=halo, interp_offsets=interp_offsets,
+                              duogrid=duogrid)
+    v_north_padded = pad_halo(v_north, halo=halo, interp_offsets=interp_offsets,
+                               duogrid=duogrid)
 
     # Step 3: Convert back to grid-aligned using padded angle
     u_padded = cos_angle_padded * u_east_padded + sin_angle_padded * v_north_padded

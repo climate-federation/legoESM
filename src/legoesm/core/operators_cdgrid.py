@@ -47,10 +47,11 @@ def _pad_halo_auto(field, cdgrid):
     -------
     jax.Array, shape (6, n+2, n+2) or (6, n+2, n+2, nlev)
     """
+    dg = cdgrid.base.duogrid
+    offsets = None if dg is not None else cdgrid.base.halo_interp_offsets
     if field.ndim == 3:
-        return pad_halo(field, interp_offsets=cdgrid.base.halo_interp_offsets)
-    # 4D: use pad_halo_4d directly (single exchange for all levels)
-    return pad_halo_4d(field, interp_offsets=cdgrid.base.halo_interp_offsets)
+        return pad_halo(field, interp_offsets=offsets, duogrid=dg)
+    return pad_halo_4d(field, interp_offsets=offsets, duogrid=dg)
 
 
 def _pad_halo_auto_h2(field, cdgrid):
@@ -64,12 +65,11 @@ def _pad_halo_auto_h2(field, cdgrid):
     -------
     jax.Array, shape (6, n+4, n+4) or (6, n+4, n+4, nlev)
     """
+    dg = cdgrid.base.duogrid
+    offsets = None if dg is not None else cdgrid.base.halo_interp_offsets_h2
     if field.ndim == 3:
-        return pad_halo(field, halo=2,
-                        interp_offsets=cdgrid.base.halo_interp_offsets_h2)
-    # 4D: use pad_halo_4d directly
-    return pad_halo_4d(field, halo=2,
-                       interp_offsets=cdgrid.base.halo_interp_offsets_h2)
+        return pad_halo(field, halo=2, interp_offsets=offsets, duogrid=dg)
+    return pad_halo_4d(field, halo=2, interp_offsets=offsets, duogrid=dg)
 
 
 def _broadcast_metric(metric, field):

@@ -98,6 +98,9 @@ class CubedSphereGrid(NamedTuple):
         Half dy on halo=2 extended grid, shape (6, n+4, n+4).
     halo_interp_offsets_h2 : jax.Array
         Interpolation offsets for halo=2 exchange, shape (6, 4, 2, n).
+    duogrid : DuoGridData or None
+        Duo-Grid kinked-to-extended remapping data. When not None,
+        pad_halo applies the Duo-Grid remap instead of interp_offsets.
     """
     n: int
     radius: float
@@ -126,6 +129,7 @@ class CubedSphereGrid(NamedTuple):
     hx_ext_h2: jax.Array
     hy_ext_h2: jax.Array
     halo_interp_offsets_h2: jax.Array
+    duogrid: object  # DuoGridData | None — use object to avoid circular import
 
     @property
     def n_cells(self) -> int:
@@ -198,6 +202,9 @@ def create_cubed_sphere(
     radius: float = 6.371229e6,
     omega: float = 7.292e-5,
     dtype=None,
+    use_duogrid: bool = False,
+    k2e_nord: int = 2,
+    duogrid_ng: int = 3,
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -264,6 +271,13 @@ def create_cubed_sphere(
     sin_angle_padded_h2_val = jnp.sin(angle_padded_h2)
     halo_offsets_h2 = compute_halo_interp_offsets_h2(n)
 
+    # Optional: Duo-Grid kinked-to-extended remapping data
+    duogrid = None
+    if use_duogrid:
+        from legoesm.grids.duogrid import create_duogrid_data
+        duogrid = create_duogrid_data(n, radius=radius, ng=duogrid_ng,
+                                       k2e_nord=k2e_nord)
+
     # Grid arrays use the storage dtype from the precision policy.
     # Defaults to float32 for backward compatibility.
     if dtype is None:
@@ -302,6 +316,7 @@ def create_cubed_sphere(
         hx_ext_h2=hx_ext_h2.astype(_dt),
         hy_ext_h2=hy_ext_h2.astype(_dt),
         halo_interp_offsets_h2=halo_offsets_h2.astype(_dt),
+        duogrid=duogrid,
     )
 
     # Eagerly populate the vectorized halo index cache so that the
