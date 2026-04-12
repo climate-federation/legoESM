@@ -411,7 +411,8 @@ def cube_rmp_vectorized(
     n = duogrid.n
     h = halo
     k2e_lo = duogrid.k2e_lo     # (6, 4, ng, n)
-    k2e_coef = duogrid.k2e_coef  # (6, 4, ng, n, MAX_K2E_NORD)
+    # Cast coefficients to field dtype to avoid mixed-precision scatter warnings
+    k2e_coef = duogrid.k2e_coef.astype(padded.dtype)  # (6, 4, ng, n, MAX_K2E_NORD)
     dst_idx = h + jnp.arange(n)
 
     for d in range(min(halo, duogrid.ng)):
