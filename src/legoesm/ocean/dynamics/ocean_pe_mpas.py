@@ -18,23 +18,20 @@ References
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.core.operators_voronoi import (
-    divergence_cell,
-    gradient_edge,
-    curl_vertex,
-    kinetic_energy_cell,
-    potential_vorticity_vertex,
-    pv_flux_energy_conserving,
-    pv_flux_enstrophy_conserving,
-    edge_thickness,
-    cell_to_edge_avg,
-    vector_laplacian_del2,
-    vertex_thickness,
+    divergence_cell_3d,
+    gradient_edge_3d,
+    curl_vertex_3d,
+    kinetic_energy_cell_3d,
+    pv_flux_energy_conserving_3d,
+    pv_flux_enstrophy_conserving_3d,
+    cell_to_edge_avg_3d,
+    vector_laplacian_del2_3d,
+    vertex_thickness_3d,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
 from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
@@ -76,7 +73,6 @@ def mpas_ocean_baroclinic_tendencies(
     """
     g = config.g
     rho_0 = config.rho_0
-    nlev = z_coord.n_levels
 
     u_3d = state.u.data          # (nEdges, nlev)
     T_3d = state.T.data          # (nCells, nlev)
@@ -156,104 +152,66 @@ def mpas_ocean_baroclinic_tendencies(
     u_bar = u_bar * edge_mask  # (nEdges,)
     u_prime_3d = u_3d - u_bar[:, jnp.newaxis]  # (nEdges, nlev)
 
-    # ---- Per-level momentum and tracer tendencies ----
-    # Use scan over vertical levels.
-    # Coriolis is EXCLUDED from the returned tendencies — it is applied
-    # separately as a forward-backward (Matsuno) step in the model step
-    # function, operating on perturbation velocity only.
-    # (Matches latlon C-grid: ocean_pe_latlon_cgrid.py:268-274)
-    def _level_tendencies(k):
-        """Compute tendencies for a single level."""
-        u_k = u_3d[:, k]       # (nEdges,) full velocity (for mass flux)
-        u_prime_k = u_prime_3d[:, k]  # (nEdges,) perturbation velocity
-        T_k = T_3d[:, k]       # (nCells,)
-        S_k = S_3d[:, k]       # (nCells,)
-        h_k_level = h_k[:, k]  # (nCells,)
-        p_k = p_prime[:, k]    # (nCells,) — baroclinic anomaly only
+    # ---- Momentum and tracer tendencies (batched 3D) ----
+    # Uses 3D operators that gather connectivity arrays once for all
+    # levels, instead of per-level scan with repeated 1D gathers.
+    # Coriolis is EXCLUDED — applied separately as forward-backward
+    # (Matsuno) step in the model step function.
+    # h_e_3d already computed above for u_bar; reuse it here.
 
-        # Edge layer thickness
-        h_e = edge_thickness(h_k_level, mesh)  # (nEdges,)
+    # Kinetic energy from perturbation velocity
+    ke = kinetic_energy_cell_3d(u_prime_3d, mesh)  # (nCells, nlev)
 
-        # ---- Momentum tendency (perturbation velocity only) ----
-        # Kinetic energy from perturbation velocity
-        ke = kinetic_energy_cell(u_prime_k, mesh)  # (nCells,)
+    # Bernoulli function: KE(u') + p'/rho_0
+    bernoulli = ke + p_prime / rho_0  # (nCells, nlev)
 
-        # Bernoulli function: KE(u') + p'/rho_0  (baroclinic only)
-        bernoulli = ke + p_k / rho_0  # (nCells,)
+    # Pressure gradient + Bernoulli
+    grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
 
-        # Pressure gradient + Bernoulli
-        grad_B = gradient_edge(bernoulli, mesh)  # (nEdges,)
+    # PV flux: RELATIVE VORTICITY from perturbation velocity ONLY.
+    zeta_v = curl_vertex_3d(u_prime_3d, mesh)  # (nVertices, nlev)
+    h_v = vertex_thickness_3d(h_k, mesh)  # (nVertices, nlev)
+    h_v_safe = jnp.maximum(h_v, 1e-10)
+    q_vort = zeta_v / h_v_safe  # PV without f
+    if config.pv_scheme == "energy":
+        pv_flux = pv_flux_energy_conserving_3d(u_prime_3d, h_k, q_vort, mesh)
+    else:
+        pv_flux = pv_flux_enstrophy_conserving_3d(u_prime_3d, h_k, q_vort, mesh)
 
-        # PV flux: RELATIVE VORTICITY from perturbation velocity ONLY.
-        # Coriolis (f) is excluded and applied separately in the step
-        # function to avoid double-counting with the barotropic solver.
-        # Using u_prime for curl ensures the depth-mean vorticity is
-        # not double-counted with the barotropic solver's implicit
-        # handling of depth-mean vorticity dynamics.
-        zeta_v = curl_vertex(u_prime_k, mesh)  # relative vorticity at vertices
-        h_v = vertex_thickness(h_k_level, mesh)
-        h_v_safe = jnp.maximum(h_v, 1e-10)
-        q_vort = zeta_v / h_v_safe  # PV without f
-        if config.pv_scheme == "energy":
-            pv_flux = pv_flux_energy_conserving(u_prime_k, h_k_level, q_vort, mesh)
-        else:
-            pv_flux = pv_flux_enstrophy_conserving(u_prime_k, h_k_level, q_vort, mesh)
+    # Horizontal viscosity on perturbation velocity
+    visc = config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
 
-        # Horizontal viscosity on perturbation velocity
-        visc = config.A_h * vector_laplacian_del2(u_prime_k, mesh)  # (nEdges,)
+    du_dt_3d = (-grad_B + pv_flux + visc) * edge_mask[:, jnp.newaxis]
 
-        du_dt_k = -grad_B + pv_flux + visc
-        du_dt_k = du_dt_k * edge_mask  # zero on land edges
+    # ---- Thickness flux for continuity ----
+    thickness_flux = u_3d * h_e_3d * edge_mask[:, jnp.newaxis]  # (nEdges, nlev)
 
-        # ---- Thickness flux for continuity ----
-        thickness_flux_k = u_k * h_e * edge_mask  # (nEdges,) no-flux BC at coast
+    # Continuity: dh_k/dt = -div(u * h_e)
+    div_flux = divergence_cell_3d(thickness_flux, mesh)  # (nCells, nlev)
 
-        # Continuity: dh_k/dt = -div(u * h_e)
-        div_flux = divergence_cell(thickness_flux_k, mesh)  # (nCells,)
+    # ---- Tracer tendencies (flux form) ----
+    T_e = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
+    S_e = cell_to_edge_avg_3d(S_3d, mesh)
 
-        # ---- Tracer tendencies (flux form) ----
-        # Edge tracer values (centered)
-        T_e = cell_to_edge_avg(T_k, mesh)  # (nEdges,)
-        S_e = cell_to_edge_avg(S_k, mesh)
+    T_flux = thickness_flux * T_e
+    S_flux = thickness_flux * S_e
 
-        # Tracer flux: u * h_e * T_e
-        T_flux = thickness_flux_k * T_e
-        S_flux = thickness_flux_k * S_e
+    div_T_flux = divergence_cell_3d(T_flux, mesh)
+    div_S_flux = divergence_cell_3d(S_flux, mesh)
 
-        # Divergence of tracer flux
-        div_T_flux = divergence_cell(T_flux, mesh)  # (nCells,)
-        div_S_flux = divergence_cell(S_flux, mesh)
+    h_safe = jnp.maximum(h_k, 1e-10)  # (nCells, nlev)
+    dT_dt_3d = (-div_T_flux + T_3d * div_flux) / h_safe
+    dS_dt_3d = (-div_S_flux + S_3d * div_flux) / h_safe
 
-        # Flux-form tracer tendency: h * dT/dt = -div(h*u*T) + T*div(h*u)
-        h_safe = jnp.maximum(h_k_level, 1e-10)
-        dT_dt_k = (-div_T_flux + T_k * div_flux) / h_safe
-        dS_dt_k = (-div_S_flux + S_k * div_flux) / h_safe
+    # Horizontal tracer diffusion: K_h * lap(T)
+    grad_T = gradient_edge_3d(T_3d, mesh) * edge_mask[:, jnp.newaxis]
+    dT_dt_3d = dT_dt_3d + config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
+    grad_S = gradient_edge_3d(S_3d, mesh) * edge_mask[:, jnp.newaxis]
+    dS_dt_3d = dS_dt_3d + config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
 
-        # Horizontal tracer diffusion: K_h * lap(T)
-        # Approximate Laplacian as div(grad(T)); mask enforces no-flux BC at coast
-        grad_T = gradient_edge(T_k, mesh) * edge_mask
-        dT_dt_k = dT_dt_k + config.K_h * divergence_cell(grad_T, mesh) / h_safe * h_k_level
-        grad_S = gradient_edge(S_k, mesh) * edge_mask
-        dS_dt_k = dS_dt_k + config.K_h * divergence_cell(grad_S, mesh) / h_safe * h_k_level
-
-        # Mask land cells
-        dT_dt_k = dT_dt_k * mask
-        dS_dt_k = dS_dt_k * mask
-
-        return du_dt_k, dT_dt_k, dS_dt_k, div_flux
-
-    # Vectorize over levels using scan for efficiency
-    def _scan_fn(carry, k):
-        du, dT, dS, div_f = _level_tendencies(k)
-        return carry, (du, dT, dS, div_f)
-
-    _, (du_dt_all, dT_dt_all, dS_dt_all, div_flux_all) = jax.lax.scan(
-        _scan_fn, None, jnp.arange(nlev),
-    )
-    # scan outputs: (nlev, nEdges), (nlev, nCells), etc.
-    du_dt_3d = du_dt_all.T  # (nEdges, nlev)
-    dT_dt_3d = dT_dt_all.T  # (nCells, nlev)
-    dS_dt_3d = dS_dt_all.T  # (nCells, nlev)
+    # Mask land cells
+    dT_dt_3d = dT_dt_3d * mask[:, jnp.newaxis]
+    dS_dt_3d = dS_dt_3d * mask[:, jnp.newaxis]
 
     # ---- Vertical mixing ----
     dz_half = z_coord.dz_half_ref  # (nlev-1,)
@@ -284,7 +242,7 @@ def mpas_ocean_baroclinic_tendencies(
 
     # ---- Free surface tendency ----
     # deta/dt = -sum_k div(u_k * h_e_k)
-    deta_dt = -jnp.sum(div_flux_all.T, axis=1) * mask  # (nCells,)
+    deta_dt = -jnp.sum(div_flux, axis=1) * mask  # (nCells,)
 
     # ---- Freshwater forcing ----
     if freshwater is not None and config.freshwater_closure != "none":
