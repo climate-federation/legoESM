@@ -250,7 +250,7 @@ class LatLonOceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
-    barotropic_diffusion_alpha: float = 0.01
+    barotropic_diffusion_alpha: float = 0.0
     barotropic_diffusion_dt_ref: float = 60.0
     enable_runtime_checks: bool = False
     min_water_column_m: float = 0.5
@@ -394,10 +394,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     fix_heat: bool = True
     fix_salt: bool = True
     # Barotropic SSH diffusion damps grid-scale modes that accumulate
-    # from split-explicit mode-splitting error.  The C-grid spatial
-    # operators eliminate the A-grid checkerboard, but the temporal
-    # barotropic-baroclinic coupling error still requires damping for
-    # long integrations (>1 year).  Matches MPAS default of 0.01.
+    # from split-explicit mode-splitting error.  Barotropic time-
+    # averaging of eta/U/V for baroclinic coupling reduces the need
+    # for diffusion but does not fully eliminate it.  Default 0.01
+    # provides minimal damping; reduce toward 0.0 if time-averaging
+    # suffices for your experiment.
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
     enable_runtime_checks: bool = False

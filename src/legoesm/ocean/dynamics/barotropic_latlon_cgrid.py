@@ -176,9 +176,13 @@ def barotropic_substeps_latlon_cgrid(
     n_lon = eta.shape[1]
     Hu_sum = jnp.zeros((n_lat, n_lon + 1), dtype=eta.dtype)
     Hv_sum = jnp.zeros((n_lat + 1, n_lon), dtype=eta.dtype)
+    eta_sum = jnp.zeros((n_lat, n_lon), dtype=eta.dtype)
+    U_sum = jnp.zeros((n_lat, n_lon + 1), dtype=eta.dtype)
+    V_sum = jnp.zeros((n_lat + 1, n_lon), dtype=eta.dtype)
 
     def substep_body(i, carry):
-        eta_c, U_bar_c, V_bar_c, Hu_sum_c, Hv_sum_c = carry
+        (eta_c, U_bar_c, V_bar_c,
+         Hu_sum_c, Hv_sum_c, eta_sum_c, U_sum_c, V_sum_c) = carry
 
         H_total_c = jnp.maximum(eta_c + H_bathy, min_water_col) * mask
 
@@ -248,20 +252,28 @@ def barotropic_substeps_latlon_cgrid(
             ) * mask
             eta_new = jnp.maximum(eta_new, eta_floor) * mask
 
-        return (eta_new, U_bar_new, V_bar_new, Hu_sum_new, Hv_sum_new)
+        # Accumulate eta, U_bar, V_bar AFTER diffusion for time-averaging
+        eta_sum_new = eta_sum_c + eta_new
+        U_sum_new = U_sum_c + U_bar_new
+        V_sum_new = V_sum_c + V_bar_new
 
-    init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum)
+        return (eta_new, U_bar_new, V_bar_new,
+                Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new)
+
+    init_carry = (eta, U_bar, V_bar, Hu_sum, Hv_sum, eta_sum, U_sum, V_sum)
 
     if config.differentiable_barotropic:
         def scan_body(carry, _):
             new_carry = substep_body(0, carry)
             return new_carry, None
 
-        (eta_f, U_bar_f, V_bar_f, Hu_sum_f, Hv_sum_f), _ = jax.lax.scan(
+        (eta_f, U_bar_f, V_bar_f,
+         Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f), _ = jax.lax.scan(
             scan_body, init_carry, xs=None, length=n_substeps,
         )
     else:
-        eta_f, U_bar_f, V_bar_f, Hu_sum_f, Hv_sum_f = jax.lax.fori_loop(
+        (eta_f, U_bar_f, V_bar_f,
+         Hu_sum_f, Hv_sum_f, eta_sum_f, U_sum_f, V_sum_f) = jax.lax.fori_loop(
             0, n_substeps, substep_body, init_carry,
         )
 
@@ -269,16 +281,23 @@ def barotropic_substeps_latlon_cgrid(
     Hu_avg = Hu_sum_f / n_substeps
     Hv_avg = Hv_sum_f / n_substeps
 
-    # Correct 3D velocities: preserve baroclinic structure
+    # Time-averaged eta and barotropic velocity for baroclinic coupling
+    eta_avg = eta_sum_f / n_substeps
+    U_bar_avg = U_sum_f / n_substeps
+    V_bar_avg = V_sum_f / n_substeps
+
+    # Correct 3D velocities: preserve baroclinic structure.
+    # Use time-averaged barotropic velocity for the 3D correction to ensure
+    # consistency with eta_avg (the time-averaged eta used for layer thicknesses).
     u_baro_old = U_bar[..., jnp.newaxis]
     v_baro_old = V_bar[..., jnp.newaxis]
     u_prime = u - u_baro_old
     v_prime = v - v_baro_old
-    u_new = (u_prime + U_bar_f[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
-    v_new = (v_prime + V_bar_f[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
+    u_new = (u_prime + U_bar_avg[..., jnp.newaxis]) * u_mask[..., jnp.newaxis]
+    v_new = (v_prime + V_bar_avg[..., jnp.newaxis]) * v_mask[..., jnp.newaxis]
 
     state_new = state._replace(
-        eta=state.eta.replace(data=eta_f),
+        eta=state.eta.replace(data=eta_avg),
         u=state.u.replace(data=u_new),
         v=state.v.replace(data=v_new),
     )
