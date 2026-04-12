@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.operators_fv import _ppm_edge_values, _ppm_limit
-from legoesm.core.operators_fv_latlon import _lat_v_interfaces
+from legoesm.core.operators_fv_latlon import lat_v_interfaces
 from legoesm.grids.halo_latlon import (
     pad_halo_latlon_3d,
     pad_halo_vector_latlon_3d,
@@ -139,7 +139,7 @@ def fv_flux_divergence_latlon_3d(
 
     q_face_lat = jnp.where(v_iface >= 0, q_L_lat, q_R_lat)
 
-    lat_v = _lat_v_interfaces(grid)
+    lat_v = lat_v_interfaces(grid)
     hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None, None]
 
     Phi_lat = v_iface * hx_iface * q_face_lat  # (n_lat+1, n_lon, nlev)
@@ -226,7 +226,7 @@ def cgrid_fv_flux_divergence_latlon_3d(
     q_L_lat, q_R_lat = _ppm_reconstruct_lat_3d(q_pad, limiter)  # (n_lat+1, n_lon, nlev)
     q_face_lat = jnp.where(v_face_3d >= 0, q_L_lat, q_R_lat)
 
-    lat_v = _lat_v_interfaces(grid)
+    lat_v = lat_v_interfaces(grid)
     hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None, None]
     Phi_lat = v_face_3d * hx_iface * q_face_lat  # (n_lat+1, n_lon, nlev)
 
@@ -257,7 +257,7 @@ def _cgrid_velocity_divergence_3d(
     dlat = grid.dlat
     dlon = grid.dlon
     hy = R * dlat
-    lat_v = _lat_v_interfaces(grid)
+    lat_v = lat_v_interfaces(grid)
     hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None, None]
 
     net_lon = hy * (u_face_3d[:, 1:, :] - u_face_3d[:, :-1, :])

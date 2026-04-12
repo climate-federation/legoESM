@@ -43,6 +43,9 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     coriolis_cgrid,
     curl_vertex_cgrid,
     vector_laplacian_cgrid,
+    interp_cell_to_uface,
+    interp_cell_to_vface,
+    cell_to_cgrid_winds,
 )
 from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
 from legoesm.grids.latlon import LatLonGrid
@@ -91,42 +94,6 @@ class CGridLatLonShallowWaterConfig(NamedTuple):
 # ==============================================================================
 # C-grid interpolation helpers
 # ==============================================================================
-
-def _interp_cell_to_uface(h: jnp.ndarray) -> jnp.ndarray:
-    """Interpolate a cell-center scalar to u-face positions (lon interfaces).
-
-    Face j sits between cell (j-1) mod n_lon and cell j.
-
-    Parameters
-    ----------
-    h : (n_lat, n_lon)
-
-    Returns
-    -------
-    h_u : (n_lat, n_lon+1)  -- periodic wrap included at face n_lon.
-    """
-    h_u = 0.5 * (jnp.roll(h, 1, axis=1) + h)  # (n_lat, n_lon)
-    return jnp.concatenate([h_u, h_u[:, 0:1]], axis=1)  # (n_lat, n_lon+1)
-
-
-def _interp_cell_to_vface(h: jnp.ndarray) -> jnp.ndarray:
-    """Interpolate a cell-center scalar to v-face positions (lat interfaces).
-
-    Interior v-face i+1/2 is between cell i and cell i+1.
-    Pole faces (i=0 south, i=n_lat north) use the adjacent cell value
-    (value doesn't matter since v=0 at poles, but we need a valid number).
-
-    Parameters
-    ----------
-    h : (n_lat, n_lon)
-
-    Returns
-    -------
-    h_v : (n_lat+1, n_lon)
-    """
-    h_v_interior = 0.5 * (h[:-1] + h[1:])  # (n_lat-1, n_lon)
-    return jnp.concatenate([h[0:1], h_v_interior, h[-1:]], axis=0)
-
 
 def _absolute_vorticity_coriolis(
     u: jnp.ndarray,
@@ -264,8 +231,8 @@ def cgrid_latlon_sw_tendencies(
         dh_dt = cgrid_fv_flux_divergence_latlon(h, u, v, grid)
     else:
         # Simple 2nd-order averaging of h to faces
-        h_u = _interp_cell_to_uface(h)
-        h_v = _interp_cell_to_vface(h)
+        h_u = interp_cell_to_uface(h)
+        h_v = interp_cell_to_vface(h)
         F_u = h_u * u
         F_v = h_v * v
         dh_dt = -divergence_cgrid(F_u, F_v, grid)
@@ -416,70 +383,10 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
 # Initial condition helpers
 # ==============================================================================
 
-def cell_to_cgrid_winds(
-    u_cell: jnp.ndarray,
-    v_cell: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Convert cell-centered winds to C-grid face winds (2D).
-
-    Parameters
-    ----------
-    u_cell : (n_lat, n_lon) -- zonal wind at cell centers
-    v_cell : (n_lat, n_lon) -- meridional wind at cell centers
-
-    Returns
-    -------
-    u_face : (n_lat, n_lon+1) -- zonal wind at lon interfaces
-    v_face : (n_lat+1, n_lon) -- meridional wind at lat interfaces
-    """
-    # u at lon faces: average adjacent cells (periodic in lon)
-    u_face = 0.5 * (jnp.roll(u_cell, 1, axis=1) + u_cell)
-    u_face = jnp.concatenate([u_face, u_face[:, 0:1]], axis=1)
-
-    # v at lat faces: average adjacent cells, zero at poles
-    n_lon = v_cell.shape[1]
-    v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
-    v_face = jnp.concatenate([
-        jnp.zeros((1, n_lon), dtype=v_cell.dtype),
-        v_interior,
-        jnp.zeros((1, n_lon), dtype=v_cell.dtype),
-    ], axis=0)
-
-    return u_face, v_face
-
-
-def cell_to_cgrid_winds_3d(
-    u_cell: jnp.ndarray,
-    v_cell: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Convert 3D cell-centered winds to C-grid face winds (vectorized).
-
-    All operations broadcast over the trailing level axis — no Python
-    loops over nlev.
-
-    Parameters
-    ----------
-    u_cell : (n_lat, n_lon, nlev) -- zonal wind at cell centers
-    v_cell : (n_lat, n_lon, nlev) -- meridional wind at cell centers
-
-    Returns
-    -------
-    u_face : (n_lat, n_lon+1, nlev) -- zonal wind at lon interfaces
-    v_face : (n_lat+1, n_lon, nlev) -- meridional wind at lat interfaces
-    """
-    u_face = 0.5 * (jnp.roll(u_cell, 1, axis=1) + u_cell)
-    u_face = jnp.concatenate([u_face, u_face[:, 0:1]], axis=1)
-
-    n_lon = v_cell.shape[1]
-    nlev = v_cell.shape[2]
-    v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
-    v_face = jnp.concatenate([
-        jnp.zeros((1, n_lon, nlev), dtype=v_cell.dtype),
-        v_interior,
-        jnp.zeros((1, n_lon, nlev), dtype=v_cell.dtype),
-    ], axis=0)
-
-    return u_face, v_face
+# cell_to_cgrid_winds and cell_to_cgrid_winds_3d are imported from
+# legoesm.ocean.dynamics.latlon_cgrid_operators (shared with ocean).
+# The shared version handles both 2D and 3D via ndim dispatch.
+cell_to_cgrid_winds_3d = cell_to_cgrid_winds  # alias for 3D callers
 
 
 def williamson_test2_cgrid(

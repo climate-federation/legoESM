@@ -47,6 +47,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
     laplacian_cgrid,
     vector_laplacian_cgrid,
+    interp_cell_to_uface,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
@@ -54,24 +55,7 @@ from legoesm.ocean.vertical import (
 )
 
 
-def _interp_to_u_points(f: jnp.ndarray) -> jnp.ndarray:
-    """Interpolate cell-center field to u-points (lon interfaces).
-
-    Parameters
-    ----------
-    f : array, shape (n_lat, n_lon, ...) at cell centers.
-
-    Returns
-    -------
-    f_u : array, shape (n_lat, n_lon+1, ...) at u-points.
-    """
-    # Face j is between cell (j-1) mod n_lon and cell j
-    f_left = jnp.roll(f, 1, axis=1)
-    f_avg = 0.5 * (f_left + f)
-    if f.ndim >= 3:
-        return jnp.concatenate([f_avg, f_avg[:, 0:1, :]], axis=1)
-    else:
-        return jnp.concatenate([f_avg, f_avg[:, 0:1]], axis=1)
+# interp_cell_to_uface is imported from latlon_cgrid_operators (shared).
 
 
 def _interp_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
@@ -313,7 +297,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- 4. Vertical velocity from FV flux divergence ---
     # Divergence needs face fluxes: h*u at u-points, h*v at v-points.
     # Uses FULL velocity (barotropic + baroclinic) for mass transport.
-    h_u = _interp_to_u_points(h_k)
+    h_u = interp_cell_to_uface(h_k)
     h_v = _interp_to_v_points(h_k)
     flux_div_k = divergence_cgrid(
         h_u * u * u_mask_3d, h_v * v * v_mask_3d, grid,
@@ -355,10 +339,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dv_dt = -dKE_dy - dp_dy / rho_0
 
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
-    w_u = _interp_to_u_points(w)
+    w_u = interp_cell_to_uface(w)
     w_v = _interp_to_v_points(w)
     du_dt = du_dt + _vertical_advection_ocean(
-        u_prime, w_u, z_coord, _interp_to_u_points(J))
+        u_prime, w_u, z_coord, interp_cell_to_uface(J))
     dv_dt = dv_dt + _vertical_advection_ocean(
         v_prime, w_v, z_coord, _interp_to_v_points(J))
 
@@ -412,7 +396,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_dt = dv_dt + config.A_h * vlap_v
 
     if config.A_v > 0 and u.shape[-1] >= 2:
-        jac_v_u = jnp.maximum(_interp_to_u_points(J)[..., jnp.newaxis], 1e-10)
+        jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)
         jac_v_v = jnp.maximum(_interp_to_v_points(J)[..., jnp.newaxis], 1e-10)
         for vel, jac, is_u in [(u_prime, jac_v_u, True), (v_prime, jac_v_v, False)]:
             dv_dz_half = jnp.diff(vel, axis=-1) / (
@@ -442,7 +426,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             v=state.v.replace(data=v_cell),
         )
         phys = physics_fn(cc_state, grid, z_coord, surface_forcing)
-        du_dt = du_dt + _interp_to_u_points(phys.du_dt.data)
+        du_dt = du_dt + interp_cell_to_uface(phys.du_dt.data)
         dv_dt = dv_dt + _interp_to_v_points(phys.dv_dt.data)
         dT_dt = dT_dt + phys.dT_dt.data
         dS_dt = dS_dt + phys.dS_dt.data

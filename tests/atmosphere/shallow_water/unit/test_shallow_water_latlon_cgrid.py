@@ -14,9 +14,11 @@ from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
     williamson_test2_exact_cgrid,
     williamson_test5_cgrid,
     compute_error_norms_cgrid,
-    _interp_cell_to_uface,
-    _interp_cell_to_vface,
     _kinetic_energy_cgrid,
+)
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    interp_cell_to_uface,
+    interp_cell_to_vface,
 )
 from legoesm import constants
 
@@ -65,11 +67,11 @@ class TestShapes:
 
     def test_interp_uface_shape(self, grid):
         h = jnp.ones((grid.n_lat, grid.n_lon))
-        assert _interp_cell_to_uface(h).shape == (grid.n_lat, grid.n_lon + 1)
+        assert interp_cell_to_uface(h).shape == (grid.n_lat, grid.n_lon + 1)
 
     def test_interp_vface_shape(self, grid):
         h = jnp.ones((grid.n_lat, grid.n_lon))
-        assert _interp_cell_to_vface(h).shape == (grid.n_lat + 1, grid.n_lon)
+        assert interp_cell_to_vface(h).shape == (grid.n_lat + 1, grid.n_lon)
 
 
 # ==============================================================================

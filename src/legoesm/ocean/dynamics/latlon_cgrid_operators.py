@@ -31,6 +31,77 @@ from legoesm.grids.latlon import LatLonGrid
 
 
 # =============================================================================
+# Cell-center ↔ face interpolation (shared by atmosphere and ocean)
+# =============================================================================
+
+def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
+    """Interpolate a cell-center field to u-face (lon interface) positions.
+
+    Simple average of the two cells sharing each lon face.
+    Periodic in longitude: face n_lon wraps to face 0.
+
+    Parameters
+    ----------
+    f : (n_lat, n_lon, ...) at cell centers.
+
+    Returns
+    -------
+    f_u : (n_lat, n_lon+1, ...) at u-faces.
+    """
+    f_u = 0.5 * (jnp.roll(f, 1, axis=1) + f)
+    return jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
+
+
+def interp_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
+    """Interpolate a cell-center field to v-face (lat interface) positions.
+
+    Interior faces: average of adjacent cells.
+    Pole faces (south=0, north=n_lat): copy the adjacent cell value.
+    The pole value is numerically inert since v = 0 at the wall.
+
+    Parameters
+    ----------
+    f : (n_lat, n_lon, ...) at cell centers.
+
+    Returns
+    -------
+    f_v : (n_lat+1, n_lon, ...) at v-faces.
+    """
+    f_v_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, ...)
+    return jnp.concatenate([f[0:1], f_v_interior, f[-1:]], axis=0)
+
+
+def cell_to_cgrid_winds(
+    u_cell: jnp.ndarray,
+    v_cell: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Convert cell-centered winds to C-grid face-staggered winds.
+
+    Works for both 2D (n_lat, n_lon) and 3D (n_lat, n_lon, nlev).
+    v = 0 at pole walls (wall boundary condition).
+
+    Parameters
+    ----------
+    u_cell, v_cell : cell-centered wind components.
+
+    Returns
+    -------
+    u_face : (..., n_lon+1, ...) at lon interfaces.
+    v_face : (n_lat+1, ...) at lat interfaces, zero at poles.
+    """
+    u_face = interp_cell_to_uface(u_cell)
+    # v at poles is zero (wall BC), not the average of adjacent cells.
+    v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
+    if v_cell.ndim >= 3:
+        zero = jnp.zeros((1, v_cell.shape[1], v_cell.shape[2]),
+                         dtype=v_cell.dtype)
+    else:
+        zero = jnp.zeros((1, v_cell.shape[1]), dtype=v_cell.dtype)
+    v_face = jnp.concatenate([zero, v_interior, zero], axis=0)
+    return u_face, v_face
+
+
+# =============================================================================
 # Gradient operators (scalar at cell center -> vector at faces)
 # =============================================================================
 

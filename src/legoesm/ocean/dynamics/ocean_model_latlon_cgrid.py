@@ -324,17 +324,18 @@ class LatLonCGridOceanModel:
         # so that sum_k(h_k * u_corrected_k) = Hu_avg exactly.
         # (Hallberg & Adcroft 2009, Shchepetkin & McWilliams 2005).
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-            _interp_to_u_points,
             _interp_to_v_points,
             _upwind_to_u_points,
             _upwind_to_v_points,
         )
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            divergence_cgrid, interp_cell_to_uface,
+        )
 
         mask = state.land_mask.data
 
         # Layer thickness at face points
-        h_u_old = _interp_to_u_points(h_k_old)  # (n_lat, n_lon+1, nlev)
+        h_u_old = interp_cell_to_uface(h_k_old)  # (n_lat, n_lon+1, nlev)
         h_v_old = _interp_to_v_points(h_k_old)  # (n_lat+1, n_lon, nlev)
         H_u_old = jnp.sum(h_u_old, axis=-1)     # (n_lat, n_lon+1)
         H_v_old = jnp.sum(h_v_old, axis=-1)     # (n_lat+1, n_lon)

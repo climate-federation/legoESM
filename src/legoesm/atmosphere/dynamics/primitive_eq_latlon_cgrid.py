@@ -49,6 +49,9 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     divergence_cgrid,
     vector_laplacian_cgrid,
     laplacian_cgrid,
+    interp_cell_to_uface,
+    interp_cell_to_vface,
+    cell_to_cgrid_winds,
 )
 from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
     _absolute_vorticity_coriolis,
@@ -122,38 +125,8 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     polar_filter_max_wave_speed: float = 300.0
 
 
-# ==============================================================================
-# 3D interpolation helpers
-# ==============================================================================
-
-def _interp_cell_to_uface_3d(h: jnp.ndarray) -> jnp.ndarray:
-    """Interpolate a 3D cell-center field to u-face positions.
-
-    Parameters
-    ----------
-    h : (n_lat, n_lon, nlev) or (n_lat, n_lon, nlev+1)
-
-    Returns
-    -------
-    h_u : (n_lat, n_lon+1, ...)
-    """
-    h_u = 0.5 * (jnp.roll(h, 1, axis=1) + h)
-    return jnp.concatenate([h_u, h_u[:, 0:1]], axis=1)
-
-
-def _interp_cell_to_vface_3d(h: jnp.ndarray) -> jnp.ndarray:
-    """Interpolate a 3D cell-center field to v-face positions.
-
-    Parameters
-    ----------
-    h : (n_lat, n_lon, nlev) or (n_lat, n_lon, nlev+1)
-
-    Returns
-    -------
-    h_v : (n_lat+1, n_lon, ...)
-    """
-    h_v_interior = 0.5 * (h[:-1] + h[1:])
-    return jnp.concatenate([h[0:1], h_v_interior, h[-1:]], axis=0)
+# interp_cell_to_uface and interp_cell_to_vface are imported from
+# legoesm.ocean.dynamics.latlon_cgrid_operators (shared with ocean).
 
 
 def _face_to_cell_u(u: jnp.ndarray) -> jnp.ndarray:
@@ -185,13 +158,10 @@ def hydrostatic_to_cgrid(
     Winds are interpolated from cell centers to faces.
     v is set to zero at pole boundaries.
     """
-    from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
-        cell_to_cgrid_winds_3d,
-    )
     u_cell = state.u.data
     v_cell = state.v.data if state.v is not None else jnp.zeros_like(u_cell)
 
-    u_face, v_face = cell_to_cgrid_winds_3d(u_cell, v_cell)
+    u_face, v_face = cell_to_cgrid_winds(u_cell, v_cell)
 
     tracers = {}
     if hasattr(state, 'tracers') and state.tracers is not None:
@@ -307,8 +277,8 @@ def cgrid_latlon_hydrostatic_tendencies(
     dln_dx = gradient_x_cgrid(ln_ps, grid)  # 2D
     dln_dy = gradient_y_cgrid(ln_ps, grid)  # 2D
 
-    T_u = _interp_cell_to_uface_3d(T)
-    T_v = _interp_cell_to_vface_3d(T)
+    T_u = interp_cell_to_uface(T)
+    T_v = interp_cell_to_vface(T)
 
     pg_corr_x = R_d * T_u * dln_dx[:, :, jnp.newaxis]
     pg_corr_y = R_d * T_v * dln_dy[:, :, jnp.newaxis]
@@ -318,8 +288,8 @@ def cgrid_latlon_hydrostatic_tendencies(
     if _hybrid:
         B_coeff = sigma_coord.B_full  # (nlev,)
         hybrid_factor = B_coeff * p_s[..., jnp.newaxis] / p_full
-        hf_u = _interp_cell_to_uface_3d(hybrid_factor)
-        hf_v = _interp_cell_to_vface_3d(hybrid_factor)
+        hf_u = interp_cell_to_uface(hybrid_factor)
+        hf_v = interp_cell_to_vface(hybrid_factor)
         pg_corr_x = pg_corr_x * hf_u
         pg_corr_y = pg_corr_y * hf_v
 
@@ -339,8 +309,8 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     if _hybrid:
         # Hybrid closure: dp = dA + dB * p_s varies horizontally.
-        dp_u = _interp_cell_to_uface_3d(dp)  # (n_lat, n_lon+1, nlev)
-        dp_v = _interp_cell_to_vface_3d(dp)  # (n_lat+1, n_lon, nlev)
+        dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
+        dp_v = interp_cell_to_vface(dp)  # (n_lat+1, n_lon, nlev)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
         D_total_p = jnp.sum(div_dp, axis=-1)
         dp_s_dt = -D_total_p / sigma_coord.B_range
@@ -350,8 +320,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         sigma_range = 1.0 - sigma_top
         # Flux-form: div(dp_k * v) where dp_k = p_s * dsigma_k
         dp = p_s[..., jnp.newaxis] * dsigma  # (n_lat, n_lon, nlev)
-        dp_u = _interp_cell_to_uface_3d(dp)  # (n_lat, n_lon+1, nlev)
-        dp_v = _interp_cell_to_vface_3d(dp)  # (n_lat+1, n_lon, nlev)
+        dp_u = interp_cell_to_uface(dp)  # (n_lat, n_lon+1, nlev)
+        dp_v = interp_cell_to_vface(dp)  # (n_lat+1, n_lon, nlev)
         div_dp = divergence_cgrid(dp_u * u, dp_v * v, grid)  # (n_lat, n_lon, nlev)
         D_total_p = jnp.sum(div_dp, axis=-1)
         dp_s_dt = -D_total_p / sigma_range
@@ -378,10 +348,10 @@ def cgrid_latlon_hydrostatic_tendencies(
         _zero_top = jnp.zeros((*p_s.shape, 1))
         mass_flux = jnp.concatenate([_zero_top, _mf_inner], axis=-1)
         mass_flux = mass_flux.at[..., -1].set(0.0)
-        mf_u = _interp_cell_to_uface_3d(mass_flux)
-        mf_v = _interp_cell_to_vface_3d(mass_flux)
-        ps_u = _interp_cell_to_uface_3d(p_s[..., jnp.newaxis])[..., 0]
-        ps_v = _interp_cell_to_vface_3d(p_s[..., jnp.newaxis])[..., 0]
+        mf_u = interp_cell_to_uface(mass_flux)
+        mf_v = interp_cell_to_vface(mass_flux)
+        ps_u = interp_cell_to_uface(p_s[..., jnp.newaxis])[..., 0]
+        ps_v = interp_cell_to_vface(p_s[..., jnp.newaxis])[..., 0]
         du_dt = du_dt + vertical_advection_hybrid(u, mf_u, ps_u, sigma_coord)
         dv_dt = dv_dt + vertical_advection_hybrid(v, mf_v, ps_v, sigma_coord)
         vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
@@ -395,8 +365,8 @@ def cgrid_latlon_hydrostatic_tendencies(
         ) / (p_s[..., jnp.newaxis] + 1e-10)
         _zero_top = jnp.zeros((*p_s.shape, 1))
         sigma_dot = jnp.concatenate([_zero_top, sigma_dot_inner], axis=-1)
-        sd_u = _interp_cell_to_uface_3d(sigma_dot)
-        sd_v = _interp_cell_to_vface_3d(sigma_dot)
+        sd_u = interp_cell_to_uface(sigma_dot)
+        sd_v = interp_cell_to_vface(sigma_dot)
         du_dt = du_dt + vertical_advection(u, sd_u, sigma_coord)
         dv_dt = dv_dt + vertical_advection(v, sd_v, sigma_coord)
         vert_adv_T = vertical_advection(T, sigma_dot, sigma_coord)
@@ -607,8 +577,8 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 dv_phys = (phys_tend.dv_dt.data
                            if phys_tend.dv_dt is not None
                            else jnp.zeros_like(du_phys))
-                du = du + _interp_cell_to_uface_3d(du_phys)
-                dv = dv + _interp_cell_to_vface_3d(dv_phys)
+                du = du + interp_cell_to_uface(du_phys)
+                dv = dv + interp_cell_to_vface(dv_phys)
 
                 # Physics tracer tendencies (only for tracers already in state;
                 # introducing new tracer keys here would break the RK

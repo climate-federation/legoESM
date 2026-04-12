@@ -27,7 +27,7 @@ from legoesm.core.operators_fv import _ppm_edge_values, _ppm_limit
 from legoesm.grids.halo_latlon import pad_halo_latlon, pad_halo_vector_latlon
 
 
-def _lat_v_interfaces(grid):
+def lat_v_interfaces(grid):
     """Compute v-face latitudes consistent with divergence_cgrid.
 
     Uses midpoints of cell-center latitudes for interior faces,
@@ -184,7 +184,7 @@ def fv_flux_divergence_latlon(q, u, v, grid, limiter=True):
 
     # Edge length perpendicular to latitude at interfaces: hx = R * dlon * cos(lat_v)
     # Use grid-derived midpoints (consistent with divergence_cgrid)
-    lat_v = _lat_v_interfaces(grid)
+    lat_v = lat_v_interfaces(grid)
     hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
 
     Phi_lat = v_iface * hx_iface * q_face_lat  # (n_lat+1, n_lon)
@@ -340,7 +340,7 @@ def cgrid_fv_flux_divergence_latlon(q, u_face, v_face, grid, limiter=True):
 
     # Face length at latitude interfaces: R * dlon * cos(lat_v)
     # Use grid-derived midpoints (consistent with divergence_cgrid)
-    lat_v = _lat_v_interfaces(grid)
+    lat_v = lat_v_interfaces(grid)
     hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
     Phi_lat = v_face * hx_iface * q_face_lat  # (n_lat+1, n_lon)
 
@@ -365,7 +365,7 @@ def _cgrid_velocity_divergence(u_face, v_face, grid):
     dlat = grid.dlat
     dlon = grid.dlon
     hy = R * dlat
-    lat_v = _lat_v_interfaces(grid)
+    lat_v = lat_v_interfaces(grid)
     hx_iface = R * dlon * jnp.maximum(jnp.cos(lat_v), 1e-10)[:, None]
 
     net_lon = hy * (u_face[:, 1:] - u_face[:, :-1])
