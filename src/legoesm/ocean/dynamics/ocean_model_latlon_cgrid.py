@@ -232,6 +232,23 @@ class LatLonCGridOceanModel:
                 f"min_water_column_m must be > 0, got "
                 f"{config.min_water_column_m!r}",
             )
+        _valid_fw = {"none", "virtual_salt_flux"}
+        if config.freshwater_closure not in _valid_fw:
+            raise ValueError(
+                f"freshwater_closure must be one of {_valid_fw}, "
+                f"got {config.freshwater_closure!r}",
+            )
+        if config.max_abs_eta_m <= 0.0:
+            raise ValueError(
+                f"max_abs_eta_m must be > 0, got {config.max_abs_eta_m!r}")
+        if config.temperature_min_c >= config.temperature_max_c:
+            raise ValueError(
+                f"temperature_min_c ({config.temperature_min_c}) must be "
+                f"< temperature_max_c ({config.temperature_max_c})")
+        if config.salinity_min_psu >= config.salinity_max_psu:
+            raise ValueError(
+                f"salinity_min_psu ({config.salinity_min_psu}) must be "
+                f"< salinity_max_psu ({config.salinity_max_psu})")
 
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None):
         """Compute baroclinic tendencies."""
@@ -243,7 +260,7 @@ class LatLonCGridOceanModel:
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: LatLonCGridOceanState, dt: float,
-             surface_forcing=None) -> LatLonCGridOceanState:
+             freshwater=None, surface_forcing=None) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
 
         Parameters
@@ -251,6 +268,9 @@ class LatLonCGridOceanModel:
         state : LatLonCGridOceanState
         dt : float
             Time step [seconds].
+        freshwater : FreshwaterForcing or None
+            Freshwater forcing (P, E, runoff, ice).  If None, no
+            freshwater mass/salt flux is applied.
         surface_forcing : OceanSurfaceForcing or None
 
         Returns
@@ -438,46 +458,124 @@ class LatLonCGridOceanModel:
             w=w_field,
         )
 
+        # 8. Freshwater forcing (virtual salt flux closure)
+        #
+        # Applied AFTER the tracer remap so that eta and h_k are
+        # consistent with the barotropic solver.  The virtual salt
+        # flux approximation adjusts salinity without changing volume,
+        # and a small eta tendency accounts for net mass addition.
+        # The conservation fixer (step 9) then corrects any residual
+        # drift in eta, T, and S.
+        if freshwater is not None and self.config.freshwater_closure != "none":
+            from legoesm.ocean.freshwater import (
+                freshwater_eta_tendency, virtual_salt_flux,
+            )
+            F_fw_eta = freshwater_eta_tendency(freshwater, self.config.rho_0)
+            eta_fw = state_new.eta.data + dt * F_fw_eta * mask
+            # Enforce minimum water column after freshwater
+            eta_floor = (
+                jnp.asarray(self.config.min_water_column_m,
+                            dtype=eta_fw.dtype)
+                - state_new.H_bathy.data
+            )
+            eta_fw = jnp.maximum(eta_fw, eta_floor) * mask
+            # Virtual salt flux into the top layer
+            dz_0 = h_k_new[..., 0]
+            dS_fw = virtual_salt_flux(
+                freshwater, S_ref=35.0, dz_0=dz_0, rho_0=self.config.rho_0,
+            )
+            S_fw = state_new.S.data.at[..., 0].add(dt * dS_fw * mask)
+            state_new = state_new._replace(
+                eta=state_new.eta.replace(data=eta_fw),
+                S=state_new.S.replace(data=S_fw),
+            )
+
+        # 9. Conservation fixers
+        if self.config.use_conservation_fixer:
+            from legoesm.ocean.conservation import ocean_conservation_fixer
+            state_new = ocean_conservation_fixer(
+                state_new, state, self.grid, self.z_coord, self.config,
+            )
+
         return cast_pytree(state_new, None, "storage")
 
     def step_checked(
         self,
         state: LatLonCGridOceanState,
         dt: float,
+        freshwater=None,
         surface_forcing=None,
     ) -> LatLonCGridOceanState:
         """Advance one timestep with host-side runtime validation."""
-        state_new = self.step(state, dt, surface_forcing)
+        state_new = self.step(state, dt, freshwater=freshwater,
+                              surface_forcing=surface_forcing)
         if self.config.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new
 
     def _assert_runtime_invariants(self, state: LatLonCGridOceanState) -> None:
-        """Host-side runtime checks for debugging."""
+        """Host-side runtime checks for debugging/regression hardening."""
         mask = state.land_mask.data
         wet = mask > 0.5
+        land = ~wet
 
-        if not bool(jnp.all(jnp.isfinite(state.eta.data))):
-            raise FloatingPointError("C-grid ocean: non-finite eta")
-        if not bool(jnp.all(jnp.isfinite(state.T.data))):
-            raise FloatingPointError("C-grid ocean: non-finite T")
+        # Finiteness of all prognostic fields
+        finite_ok = bool(
+            jnp.all(jnp.isfinite(state.u.data))
+            & jnp.all(jnp.isfinite(state.v.data))
+            & jnp.all(jnp.isfinite(state.T.data))
+            & jnp.all(jnp.isfinite(state.S.data))
+            & jnp.all(jnp.isfinite(state.eta.data))
+        )
+        if not finite_ok:
+            raise FloatingPointError(
+                "C-grid ocean: non-finite state detected")
 
-        eta_abs = float(jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0))))
+        # Water column depth
+        water_col = state.eta.data + state.H_bathy.data
+        if bool(jnp.any(wet)):
+            min_wc = float(jnp.min(jnp.where(wet, water_col, jnp.inf)))
+            if min_wc < self.config.min_water_column_m:
+                raise ValueError(
+                    f"C-grid ocean: water column too small. "
+                    f"min(eta+H)={min_wc:.6g} m, "
+                    f"threshold={self.config.min_water_column_m:.6g} m",
+                )
+
+        # SSH bounds
+        eta_abs = float(
+            jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0))))
         if eta_abs > self.config.max_abs_eta_m:
             raise ValueError(
                 f"C-grid ocean: |eta|={eta_abs:.3g} exceeds "
                 f"threshold {self.config.max_abs_eta_m:.3g}",
             )
 
+        # Temperature bounds
         if bool(jnp.any(wet)):
-            T_ocean = jnp.where(wet[..., jnp.newaxis], state.T.data, jnp.nan)
+            T_ocean = jnp.where(
+                wet[..., jnp.newaxis], state.T.data, jnp.nan)
             T_min = float(jnp.nanmin(T_ocean))
             T_max = float(jnp.nanmax(T_ocean))
-            if T_min < self.config.temperature_min_c or T_max > self.config.temperature_max_c:
+            if (T_min < self.config.temperature_min_c
+                    or T_max > self.config.temperature_max_c):
                 raise ValueError(
-                    f"C-grid ocean: T range [{T_min:.2f}, {T_max:.2f}] "
-                    f"outside bounds [{self.config.temperature_min_c}, "
-                    f"{self.config.temperature_max_c}]",
+                    f"C-grid ocean: T range [{T_min:.3f}, {T_max:.3f}] "
+                    f"outside bounds [{self.config.temperature_min_c:.3f}, "
+                    f"{self.config.temperature_max_c:.3f}]",
+                )
+
+            # Salinity bounds
+            S_ocean = jnp.where(
+                wet[..., jnp.newaxis], state.S.data, jnp.nan)
+            S_min = float(jnp.nanmin(S_ocean))
+            S_max = float(jnp.nanmax(S_ocean))
+            if (S_min < self.config.salinity_min_psu
+                    or S_max > self.config.salinity_max_psu):
+                raise ValueError(
+                    f"C-grid ocean: S range [{S_min:.3f}, {S_max:.3f}] "
+                    f"outside bounds [{self.config.salinity_min_psu:.3f}, "
+                    f"{self.config.salinity_max_psu:.3f}]",
                 )
 
     def integrate(

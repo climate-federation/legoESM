@@ -1,7 +1,8 @@
-"""Conservation fixers for the ocean model (cubed-sphere).
+"""Conservation fixers for the ocean model.
 
 Volume (free surface), heat (T), and salt (S) conservation via
-uniform additive corrections.
+uniform additive corrections.  Works with cubed-sphere, lat-lon
+C-grid, and any other grid that exposes a 2D ``area`` attribute.
 
 Limitations
 -----------
@@ -22,11 +23,21 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from typing import Union
+
 from legoesm.core.operators import _is_distributed
 from legoesm.core.precision import cast
-from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
-from legoesm.ocean.state import OceanState, OceanConfig
+from legoesm.ocean.state import (
+    OceanState, OceanConfig, LatLonCGridOceanState, LatLonCGridOceanConfig,
+)
+from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.latlon import LatLonGrid
+
+# Types accepted by the conservation fixer (cubed-sphere + lat-lon C-grid)
+_OceanStateT = Union[OceanState, LatLonCGridOceanState]
+_OceanConfigT = Union[OceanConfig, LatLonCGridOceanConfig]
+_GridT = Union[CubedSphereGrid, LatLonGrid]
 
 
 def _ocean_global_sum(local_value):
@@ -64,11 +75,11 @@ def _ocean_volume_sum(field_3d, h_k, mask, grid):
 
 
 def fix_volume_ocean(
-    state_new: OceanState,
-    state_old: OceanState,
-    grid: CubedSphereGrid,
+    state_new: _OceanStateT,
+    state_old: _OceanStateT,
+    grid: _GridT,
     min_water_column_m: float | None = None,
-) -> OceanState:
+) -> _OceanStateT:
     """Fix volume conservation via uniform eta correction.
 
     Ensures global integral of eta * area is preserved.
@@ -104,12 +115,12 @@ def fix_volume_ocean(
 
 
 def fix_heat_ocean(
-    state_new: OceanState,
-    state_old: OceanState,
-    grid: CubedSphereGrid,
+    state_new: _OceanStateT,
+    state_old: _OceanStateT,
+    grid: _GridT,
     z_coord: OceanZStarCoordinate,
     min_water_column_m: float | None = None,
-) -> OceanState:
+) -> _OceanStateT:
     """Fix heat conservation via uniform T correction.
 
     Ensures global integral of T * h_k * area is preserved.
@@ -155,12 +166,12 @@ def fix_heat_ocean(
 
 
 def fix_salt_ocean(
-    state_new: OceanState,
-    state_old: OceanState,
-    grid: CubedSphereGrid,
+    state_new: _OceanStateT,
+    state_old: _OceanStateT,
+    grid: _GridT,
     z_coord: OceanZStarCoordinate,
     min_water_column_m: float | None = None,
-) -> OceanState:
+) -> _OceanStateT:
     """Fix salt conservation via uniform S correction.
 
     Ensures global integral of S * h_k * area is preserved.
@@ -206,12 +217,12 @@ def fix_salt_ocean(
 
 
 def ocean_conservation_fixer(
-    state_new: OceanState,
-    state_old: OceanState,
-    grid: CubedSphereGrid,
+    state_new: _OceanStateT,
+    state_old: _OceanStateT,
+    grid: _GridT,
     z_coord: OceanZStarCoordinate,
-    config: OceanConfig,
-) -> OceanState:
+    config: _OceanConfigT,
+) -> _OceanStateT:
     """Apply all ocean conservation fixers simultaneously.
 
     All corrections are computed from the ORIGINAL state_old's layer
