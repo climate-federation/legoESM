@@ -39,6 +39,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
 )
+from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 
 
 def _forward_backward_coriolis_3d(
@@ -362,9 +363,18 @@ class LatLonCGridOceanModel:
 
         # 6. Barotropic substeps (returns averaged transport for tracer update)
         dt_s = dt / self.config.n_barotropic_substeps
+
+        # Freshwater mass flux for barotropic continuity equation
+        F_slow_eta = None
+        if freshwater is not None and self.config.freshwater_closure != "none":
+            F_slow_eta = freshwater_eta_tendency(
+                freshwater, self.config.rho_0,
+            ) * state.land_mask.data
+
         state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
             state_mid, dt_s, self.config.n_barotropic_substeps,
             self.grid, self.z_coord, self.config,
+            F_slow_eta=F_slow_eta,
         )
 
         # 7. Flux-form tracer update using full 3D velocity
@@ -497,35 +507,19 @@ class LatLonCGridOceanModel:
             w=w_field,
         )
 
-        # 8. Freshwater forcing (virtual salt flux closure)
+        # 8. Freshwater forcing (virtual salt flux only)
         #
-        # Applied AFTER the tracer remap so that eta and h_k are
-        # consistent with the barotropic solver.  The virtual salt
-        # flux approximation adjusts salinity without changing volume,
-        # and a small eta tendency accounts for net mass addition.
-        # The conservation fixer (step 9) then corrects any residual
-        # drift in eta, T, and S.
+        # The freshwater eta tendency (F_fw_eta) is now applied inside
+        # the barotropic continuity equation (via F_slow_eta), so no
+        # post-hoc eta correction is needed.  Only the virtual salt
+        # flux remains here, applied to the top layer of S.
         if freshwater is not None and self.config.freshwater_closure != "none":
-            from legoesm.ocean.freshwater import (
-                freshwater_eta_tendency, virtual_salt_flux,
-            )
-            F_fw_eta = freshwater_eta_tendency(freshwater, self.config.rho_0)
-            eta_fw = state_new.eta.data + dt * F_fw_eta * mask
-            # Enforce minimum water column after freshwater
-            eta_floor = (
-                jnp.asarray(self.config.min_water_column_m,
-                            dtype=eta_fw.dtype)
-                - state_new.H_bathy.data
-            )
-            eta_fw = jnp.maximum(eta_fw, eta_floor) * mask
-            # Virtual salt flux into the top layer
             dz_0 = h_k_new[..., 0]
             dS_fw = virtual_salt_flux(
                 freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
             )
             S_fw = state_new.S.data.at[..., 0].add(dt * dS_fw * mask)
             state_new = state_new._replace(
-                eta=state_new.eta.replace(data=eta_fw),
                 S=state_new.S.replace(data=S_fw),
             )
 

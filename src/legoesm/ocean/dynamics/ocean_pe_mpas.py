@@ -43,7 +43,6 @@ from legoesm.ocean.vertical import (
 )
 from legoesm.ocean.freshwater import (
     FreshwaterForcing,
-    freshwater_eta_tendency,
     virtual_salt_flux,
 )
 
@@ -252,10 +251,12 @@ def mpas_ocean_baroclinic_tendencies(
     deta_dt = -jnp.sum(div_flux, axis=1) * mask  # (nCells,)
 
     # ---- Freshwater forcing ----
+    # Note: freshwater_eta_tendency is NOT applied to deta_dt here because
+    # deta_dt is not used for state update — the barotropic solver handles
+    # the free-surface equation (including freshwater via F_slow_eta passed
+    # from ocean_model_mpas.py:step()).  Only the virtual salt flux is
+    # applied here as a tracer tendency.
     if freshwater is not None and config.freshwater_closure != "none":
-        # Free-surface mass flux: deta/dt += F_fw / rho_0
-        deta_dt = deta_dt + freshwater_eta_tendency(freshwater, config.rho_0) * mask
-
         # Virtual salt flux: dS/dt = -S_ref * F_fw / (rho_0 * dz_0)
         dz_0 = h_k[:, 0]  # top layer thickness (nCells,)
         dS_fw = virtual_salt_flux(freshwater, config.S_ref, dz_0, config.rho_0)

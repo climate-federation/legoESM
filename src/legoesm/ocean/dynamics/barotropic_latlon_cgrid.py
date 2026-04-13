@@ -86,6 +86,7 @@ def barotropic_substeps_latlon_cgrid(
     grid: LatLonGrid,
     z_coord: OceanZStarCoordinate,
     config: LatLonCGridOceanConfig,
+    F_slow_eta=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -99,6 +100,8 @@ def barotropic_substeps_latlon_cgrid(
     grid : LatLonGrid
     z_coord : OceanZStarCoordinate
     config : LatLonCGridOceanConfig
+    F_slow_eta : jax.Array or None, shape (n_lat, n_lon)
+        Slow forcing for eta (e.g., freshwater mass flux) [m/s].
 
     Returns
     -------
@@ -117,6 +120,11 @@ def barotropic_substeps_latlon_cgrid(
     g = g.astype(eta_raw.dtype)
     eta_floor = min_water_col - H_bathy
     eta = jnp.maximum(eta_raw, eta_floor) * mask
+
+    if F_slow_eta is None:
+        F_slow_eta = jnp.zeros_like(eta)
+    else:
+        F_slow_eta = F_slow_eta.astype(eta.dtype)
 
     # Depth-averaged velocity
     h_k = compute_layer_thickness(
@@ -206,7 +214,10 @@ def barotropic_substeps_latlon_cgrid(
         div_flux = divergence_cgrid(
             flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
         ).astype(eta.dtype)
-        eta_new = jnp.maximum(eta_c - dt_s * div_flux, eta_floor) * mask
+        eta_new = jnp.maximum(
+            eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask,
+            eta_floor,
+        ) * mask
 
         # Backward: update velocity with UPDATED eta (compact gradient)
         deta_dx = gradient_x_cgrid(eta_new, grid).astype(eta.dtype)
