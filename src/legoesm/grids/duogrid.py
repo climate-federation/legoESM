@@ -960,6 +960,60 @@ def _fill_corner_region_averaging(
 # ext_vector: FV3-faithful vector halo exchange
 # ============================================================================
 
+def ext_vector_dgrid(
+    utmp: jax.Array,
+    vtmp: jax.Array,
+    duogrid: 'DuoGridData',
+    cos_angle: jax.Array,
+    sin_angle: jax.Array,
+    halo: int = 2,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3-faithful D-grid vector halo exchange via lat/lon intermediary.
+
+    Following FV3 ext_vector for DGRID case (fv_duogrid.F90:741-826).
+    The flow is:
+    1. Convert covariant A-grid (utmp, vtmp) to lat/lon using grid angle
+       (approximation of FV3's c2l_ord2 which uses a11/a12/a21/a22 matrices)
+    2. Halo-exchange the lat/lon winds as scalars (with cube_rmp + corner fill)
+    3. Convert A-grid lat/lon back to D-grid via cubed_a2d_halo
+    4. Return padded D-grid winds
+
+    Parameters
+    ----------
+    utmp, vtmp : (6, n, n) — covariant A-grid winds (from D→A averaging)
+    duogrid : DuoGridData
+    cos_angle, sin_angle : (6, n, n) — grid rotation angle at A-grid
+    halo : int — halo width (default 2)
+
+    Returns
+    -------
+    ud_pad : (6, n+2h, n+2h-1) — D-grid u in padded domain
+    vd_pad : (6, n+2h-1, n+2h) — D-grid v in padded domain
+    """
+    from legoesm.grids.halo import pad_halo
+
+    n = duogrid.n
+    h = halo
+
+    # Step 1: Convert to geographic (lat/lon) at A-grid centers.
+    # This matches FV3's c2l_ord2 which transforms grid-aligned winds to
+    # zonal/meridional components via the a11/a12/a21/a22 rotation.
+    # Using grid angle rotation: equivalent for equidistant gnomonic.
+    u_east = cos_angle * utmp - sin_angle * vtmp
+    v_north = sin_angle * utmp + cos_angle * vtmp
+
+    # Step 2: Halo-exchange lat/lon winds as SCALARS with Duo-Grid remap.
+    # This applies cube_rmp (kinked→extended) + fill_corner_region.
+    u_east_pad = pad_halo(u_east, halo=h, duogrid=duogrid)   # (6, n+2h, n+2h)
+    v_north_pad = pad_halo(v_north, halo=h, duogrid=duogrid)  # (6, n+2h, n+2h)
+
+    # Step 3: Convert A-grid lat/lon back to D-grid via 3D Cartesian.
+    # This is FV3's cubed_a2d_halo (fv_duogrid.F90:2676-2763).
+    ud_pad, vd_pad = cubed_a2d_halo(u_east_pad, v_north_pad, duogrid, h)
+
+    return ud_pad, vd_pad
+
+
 def cubed_a2d_halo(
     ull: jax.Array,
     vll: jax.Array,

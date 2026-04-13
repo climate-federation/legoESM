@@ -500,6 +500,58 @@ class TestD2A2CVectDuoGrid:
 
 
 # =========================================================================
+# T7b: ext_vector and cubed_a2d_halo
+# =========================================================================
+
+class TestExtVector:
+    """Tests for ext_vector_dgrid and cubed_a2d_halo building blocks."""
+
+    def test_cubed_a2d_halo_shapes(self):
+        """cubed_a2d_halo should produce correct D-grid shapes."""
+        from legoesm.grids.duogrid import cubed_a2d_halo
+        dg = create_duogrid_data(8, ng=3, k2e_nord=2)
+        h = 3
+        n_p = 8 + 2 * h
+        ull = jnp.ones((6, n_p, n_p))
+        vll = jnp.zeros((6, n_p, n_p))
+        ud, vd = cubed_a2d_halo(ull, vll, dg, h)
+        assert ud.shape == (6, n_p, n_p - 1)
+        assert vd.shape == (6, n_p - 1, n_p)
+        assert jnp.all(jnp.isfinite(ud))
+        assert jnp.all(jnp.isfinite(vd))
+
+    def test_cubed_a2d_halo_zero_wind(self):
+        """Zero lat/lon wind should give zero D-grid wind."""
+        from legoesm.grids.duogrid import cubed_a2d_halo
+        dg = create_duogrid_data(8, ng=3, k2e_nord=2)
+        h = 3
+        n_p = 8 + 2 * h
+        ull = jnp.zeros((6, n_p, n_p))
+        vll = jnp.zeros((6, n_p, n_p))
+        ud, vd = cubed_a2d_halo(ull, vll, dg, h)
+        np.testing.assert_allclose(ud, 0.0, atol=1e-14)
+        np.testing.assert_allclose(vd, 0.0, atol=1e-14)
+
+    def test_ext_vector_dgrid_shapes(self):
+        """ext_vector_dgrid should produce padded D-grid shapes."""
+        from legoesm.grids.duogrid import ext_vector_dgrid
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        dg = grid.duogrid
+        h = 2
+        utmp = jnp.ones((6, n, n))
+        vtmp = jnp.zeros((6, n, n))
+        ud, vd = ext_vector_dgrid(utmp, vtmp, dg, grid.cos_angle,
+                                   grid.sin_angle, halo=h)
+        n_p = n + 2 * h
+        assert ud.shape == (6, n_p, n_p - 1)
+        assert vd.shape == (6, n_p - 1, n_p)
+        assert jnp.all(jnp.isfinite(ud))
+        assert jnp.all(jnp.isfinite(vd))
+
+
+# =========================================================================
 # T7: Lagrange corner fill correctness
 # =========================================================================
 

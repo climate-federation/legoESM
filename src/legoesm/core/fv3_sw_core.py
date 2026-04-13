@@ -96,21 +96,19 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
               + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
         vtmp = vtmp.at[:, 1:n - 1, :].set(v4)
 
-    # ---- Step 2: Halo-exchange with halo=2 + Duo-Grid remap ----
-    # dg is always non-None here (caller checks); pass it directly.
+    # ---- Step 2: Halo-exchange covariant utmp/vtmp ----
+    # FV3 exchanges D-grid winds via ext_vector BEFORE d2a2c_vect, providing
+    # halo-extended D-grid data. In legoESM, D-grid has no halo, so we
+    # exchange the covariant A-grid averages (utmp, vtmp) instead.
+    # pad_halo_vector rotates to geographic, exchanges with cube_rmp +
+    # corner fill, then rotates back — matching FV3's ext_vector flow for
+    # A-grid variables (c2l → remap → l2c).
     utmp_pad, vtmp_pad = pad_halo_vector(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        halo=h,
-        duogrid=dg,
+        halo=h, duogrid=dg,
     )  # each (6, n+4, n+4)
-
-    # NOTE: FV3 computes D→A from halo-extended D-grid winds (via
-    # ext_vector before d2a2c_vect). In legoESM, D-grid winds have no
-    # halo, so boundary cells of utmp/vtmp (first/last interior row) are
-    # 2nd-order. Improving this requires the full ext_vector pipeline
-    # for D-grid winds — see cubed_a2d_halo in duogrid.py.
 
     # ---- Step 3: Contravariant at cell centres over FULL padded domain ----
     # FV3 ref: sw_core.F90:3449-3454 — compute ua/va for isd:ied, jsd:jed
