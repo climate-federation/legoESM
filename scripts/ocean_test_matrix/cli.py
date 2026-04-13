@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--grid", type=str, default="all",
         choices=["cubed_sphere", "latlon", "mpas",
                  "mpas_regional", "latlon_regional", "cs_regional",
+                 "latlon_channel", "mpas_channel",
                  "all"],
         help="Run only a specific grid type (default: all)")
     p.add_argument(

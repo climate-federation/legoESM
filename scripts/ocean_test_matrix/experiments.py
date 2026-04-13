@@ -1274,6 +1274,81 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
 
 
 # ===========================================================================
+# Runner: Eady Baroclinic Instability
+# ===========================================================================
+
+def run_eady_instability(tc: TestCase, output_dir: Path, days: float
+                         ) -> tuple[str, float, str]:
+    """Eady baroclinic instability with meridional temperature front.
+
+    Regional channel setup with thermal-wind-balanced initial velocity,
+    no wind forcing, and a small SSH perturbation to seed instability.
+    """
+    if tc.grid_type not in ("mpas_channel", "latlon_channel"):
+        raise NotImplementedError(
+            f"Eady instability only for channel grids, not {tc.grid_type}")
+
+    from legoesm.ocean.experiments.eady_instability import (
+        EadyInstabilityConfig, create_initial_conditions as eady_ic,
+        create_forcings as eady_forcings)
+
+    eady_config = EadyInstabilityConfig()
+    physics = eady_forcings(tc.grid_type, None, eady_config)
+
+    grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(tc, physics=physics, A_h=eady_config.A_h))
+
+    state = eady_ic(tc.grid_type, grid, z_coord, eady_config)
+
+    dt = config.DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Eady Instability ({tc.grid_type})", total_days=days)
+
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
+    T_vals = diag.get("mean_T", [])
+    T_drift = abs(T_vals[-1] - T_vals[0]) if len(T_vals) >= 2 else 0
+    notes = f"max_speed={max_speed:.4f}m/s, T_drift={T_drift:.2e}"
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+
+    _save_case_diagnostics(
+        output_dir, f"Eady Instability {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("speed_sfc", "Surface Speed (m/s)", "plasma"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "max_speed": "m/s",
+                      "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
 # Runner dispatch
 # ===========================================================================
 
@@ -1296,4 +1371,5 @@ RUNNERS: dict[str, Callable] = {
     "lock_exchange": run_lock_exchange,
     "overflow": run_overflow,
     "stommel_gyre_tracer": run_stommel_gyre_tracer,
+    "eady_instability": run_eady_instability,
 }

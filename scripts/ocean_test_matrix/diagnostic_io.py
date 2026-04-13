@@ -178,7 +178,7 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
     # available.  This eliminates all interpolation artifacts at land
     # boundaries.  (Falls back to regrid+imshow when mesh is not provided.)
     use_native_voronoi = (mesh is not None
-                          and coord_kind in ("mpas", "mpas_regional"))
+                          and coord_kind in ("mpas", "mpas_regional", "mpas_channel"))
 
     for field_key, field_label, cmap in field_specs:
         steps = [s for s in valid_steps if field_key in snapshots[s]]

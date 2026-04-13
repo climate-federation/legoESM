@@ -18,13 +18,17 @@ GRID_RESOLUTIONS: dict[str, str] = {
     "mpas_regional": "300km",
     "latlon_regional": "24x48",
     "cs_regional": "C24",
+    "latlon_channel": "24x72",
+    "mpas_channel": "300km",
     "spectral": "T21",
 }
 
 # Standard grid types for the full test matrix.
 # Regional grids are only added to specific test cases (gyre experiments).
+# Channel grids are zonally periodic latitude bands (e.g. Eady instability).
 GRID_TYPES = ["cubed_sphere", "latlon", "mpas"]
 REGIONAL_GRID_TYPES = ["mpas_regional", "latlon_regional", "cs_regional"]
+CHANNEL_GRID_TYPES = ["latlon_channel", "mpas_channel"]
 
 DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0

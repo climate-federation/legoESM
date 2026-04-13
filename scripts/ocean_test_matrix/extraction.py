@@ -173,7 +173,7 @@ def _make_check_fn(grid_type: str):
                    bool(jnp.all(jnp.isfinite(s.T_hat.data))))
             return fin, eta_max
         return check_fn
-    elif grid_type in ("mpas", "mpas_regional"):
+    elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         def check_fn(s):
             fin = check_finite({"eta": s.eta.data, "T": s.T.data,
                                 "u": s.u.data})
@@ -235,7 +235,7 @@ def _make_scalar_fn(grid_type: str, grid=None, z_coord=None):
                     "mean_S": float(jnp.mean(S_phys)),               # PSU
                 }
         return scalar_fn
-    elif grid_type in ("mpas", "mpas_regional"):
+    elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         # Capture z_coord layer thicknesses and cell areas for
         # volume-weighted diagnostics.
         # Use actual h_k (which depends on eta) rather than reference dz_ref,
@@ -424,7 +424,7 @@ def _make_extract_fn(grid_type: str, grid, lon_deg, lat_deg,
         def extract_fn(s):
             return _extract_spectral_ocean(s, grid)
         return extract_fn
-    elif grid_type in ("mpas", "mpas_regional"):
+    elif grid_type in ("mpas", "mpas_regional", "mpas_channel"):
         _mesh = grid if include_velocity_3d else None
         def extract_fn(s):
             return _extract_mpas_ocean(s, lon_deg, lat_deg, mesh=_mesh,
@@ -506,7 +506,7 @@ def _make_baroclinic_scalar_fn(grid_type: str, grid=None, z_coord=None, config=N
 
         return scalar_fn
 
-    elif grid_type == "mpas_regional":
+    elif grid_type in ("mpas_regional", "mpas_channel"):
         # For MPAS, use cell latitude coordinates
         lat_deg = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
 

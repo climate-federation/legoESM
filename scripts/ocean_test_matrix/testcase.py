@@ -158,6 +158,11 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "stommel_gyre_tracer", g, res[g], 60.0, 5.0))
 
+    # --- Eady baroclinic instability: zonally periodic channel grids ---
+    for g in ["mpas_channel", "latlon_channel"]:
+        matrix.append(TestCase(
+            "eady_instability", g, res[g], 60.0, 5.0))
+
     return matrix
 
 

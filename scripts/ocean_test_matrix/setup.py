@@ -23,6 +23,11 @@ def _parse_resolution(tc):
         return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
     elif tc.grid_type == "cs_regional":
         return {"n": int(tc.resolution[1:])}
+    elif tc.grid_type == "latlon_channel":
+        parts = tc.resolution.split("x")
+        return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
+    elif tc.grid_type == "mpas_channel":
+        return {"resolution_km": int(tc.resolution.replace("km", ""))}
     elif tc.grid_type == "spectral":
         return {"truncation": int(tc.resolution[1:])}
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
@@ -159,6 +164,51 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
         lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
         return grid, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "latlon_channel":
+        from legoesm.grids.latlon import create_regional_latlon_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        n_lat, n_lon = params["n_lat"], params["n_lon"]
+        lat_s = tc.run_kwargs.get("lat_south", 25.0)
+        lat_n = tc.run_kwargs.get("lat_north", 65.0)
+        grid, wall_mask = create_regional_latlon_grid(
+            n_lat, n_lon, lat_s, lat_n, periodic_x=True)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        cfg = LatLonCGridOceanConfig(**kw)
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "mpas_channel":
+        from legoesm.grids.voronoi import create_regional_voronoi_mesh
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+
+        res_km = params["resolution_km"]
+        lat_s = tc.run_kwargs.get("lat_south", 25.0)
+        lat_n = tc.run_kwargs.get("lat_north", 65.0)
+        mesh = create_regional_voronoi_mesh(
+            (0, 360), (lat_s, lat_n), resolution_km=res_km,
+            periodic_x=True)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        cfg = MPASOceanConfig(**kw)
+        model = MPASOceanModel(mesh, z_coord, cfg)
+        coord_kind = "mpas"
+        lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+        return mesh, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
 
     elif tc.grid_type == "cs_regional":
         from legoesm.grids.cubed_sphere import create_cubed_sphere_panel

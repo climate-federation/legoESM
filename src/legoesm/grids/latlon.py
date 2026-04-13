@@ -194,16 +194,22 @@ def create_regional_latlon_grid(
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
     dtype=None,
+    periodic_x: bool = False,
 ) -> tuple[LatLonGrid, jax.Array]:
     """Create a regional lat-lon grid covering a limited domain.
 
     The grid spans the specified lat/lon bounding box with *n_lat* x
-    *n_lon* interior cells.  A 1-cell wall (land mask = 0) is placed on
-    all four boundaries for closed-basin experiments.
+    *n_lon* interior cells.  By default, a 1-cell wall (land mask = 0)
+    is placed on all four boundaries for closed-basin experiments.
 
-    Operators remain periodic in longitude via ``jnp.roll``, but the
-    wall mask + Neumann fill (from the barotropic/baroclinic solvers)
-    ensures no-normal-flow at the basin edges.
+    When ``periodic_x=True``, no east/west wall cells are added and
+    longitude spans the full 360° for channel-like experiments (e.g.
+    Eady baroclinic instability).  The latitude dimension still has
+    1-cell walls at north and south.
+
+    Operators remain periodic in longitude via ``jnp.roll``.  In the
+    closed-basin case (``periodic_x=False``), the wall mask + Neumann
+    fill ensures no-normal-flow at the basin edges.
 
     Parameters
     ----------
@@ -213,23 +219,25 @@ def create_regional_latlon_grid(
         Southern and northern boundaries [degrees].
     lon_west, lon_east : float
         Western and eastern boundaries [degrees].
+        Ignored when ``periodic_x=True`` (longitude spans 0-360°).
     radius : float
         Sphere radius [m].
     omega : float
         Rotation rate [rad/s].
+    periodic_x : bool
+        If True, longitude spans 360° with no east/west walls (channel).
 
     Returns
     -------
     grid : LatLonGrid
-        Grid with *n_lat + 2* latitude rows and *n_lon + 2* longitude
-        columns (1-cell walls on each side).
-    wall_mask : jax.Array, shape (n_lat + 2, n_lon + 2)
-        1 = ocean interior, 0 = wall.  Use as ``land_mask`` in
-        ``LatLonOceanState``.
+        Grid with *n_lat + 2* latitude rows (wall cells at N/S).
+        Longitude columns: *n_lon + 2* if closed, *n_lon* if periodic.
+    wall_mask : jax.Array
+        1 = ocean interior, 0 = wall.
     """
     if lat_south >= lat_north:
         raise ValueError(f"lat_south={lat_south} must be < lat_north={lat_north}")
-    if lon_west >= lon_east:
+    if not periodic_x and lon_west >= lon_east:
         raise ValueError(f"lon_west={lon_west} must be < lon_east={lon_east}")
 
     if dtype is None:
@@ -239,29 +247,34 @@ def create_regional_latlon_grid(
         except Exception:
             dtype = jnp.float32
 
-    # Total cells including wall rows/columns
+    # Latitude: always has wall cells at N/S
     ny = n_lat + 2
-    nx = n_lon + 2
-
     lat_s_rad = jnp.deg2rad(lat_south)
     lat_n_rad = jnp.deg2rad(lat_north)
-    lon_w_rad = jnp.deg2rad(lon_west)
-    lon_e_rad = jnp.deg2rad(lon_east)
-
     dlat = (lat_n_rad - lat_s_rad) / n_lat
-    dlon = (lon_e_rad - lon_w_rad) / n_lon
 
-    # Cell-center coordinates including wall cells
     lat = jnp.linspace(
         float(lat_s_rad) - dlat / 2.0,
         float(lat_n_rad) + dlat / 2.0,
         ny,
     )
-    lon = jnp.linspace(
-        float(lon_w_rad) - dlon / 2.0,
-        float(lon_e_rad) + dlon / 2.0,
-        nx,
-    )
+
+    if periodic_x:
+        # Channel: full 360° longitude, no wall cells in x
+        nx = n_lon
+        dlon = 2.0 * jnp.pi / n_lon
+        lon = jnp.linspace(0.0, 2.0 * jnp.pi - float(dlon), n_lon)
+    else:
+        # Closed basin: wall cells on east/west
+        nx = n_lon + 2
+        lon_w_rad = jnp.deg2rad(lon_west)
+        lon_e_rad = jnp.deg2rad(lon_east)
+        dlon = (lon_e_rad - lon_w_rad) / n_lon
+        lon = jnp.linspace(
+            float(lon_w_rad) - dlon / 2.0,
+            float(lon_e_rad) + dlon / 2.0,
+            nx,
+        )
 
     lat2d, lon2d = jnp.meshgrid(lat, lon, indexing="ij")
 
@@ -276,12 +289,13 @@ def create_regional_latlon_grid(
     area = radius**2 * dlat * dlon * cos_lat[:, None] * jnp.ones((1, nx))
     total_area = jnp.sum(area)
 
-    # Wall mask: 1-cell boundary on all sides
+    # Wall mask: walls at N/S always; E/W walls only for closed basin
     wall_mask = jnp.ones((ny, nx), dtype=dtype)
     wall_mask = wall_mask.at[0, :].set(0.0)   # south wall
     wall_mask = wall_mask.at[-1, :].set(0.0)  # north wall
-    wall_mask = wall_mask.at[:, 0].set(0.0)   # west wall
-    wall_mask = wall_mask.at[:, -1].set(0.0)  # east wall
+    if not periodic_x:
+        wall_mask = wall_mask.at[:, 0].set(0.0)   # west wall
+        wall_mask = wall_mask.at[:, -1].set(0.0)  # east wall
 
     _c = lambda a: a.astype(dtype) if hasattr(a, 'astype') else a
     grid = LatLonGrid(

@@ -33,6 +33,7 @@ Available Experiments:
 - stommel_gyre_tracer: Passive tracer transport in wind-driven gyre
 - geostrophic_adjustment: Geostrophic adjustment from temperature front
 - global_barotropic_wind: Global barotropic wind-driven circulation
+- eady_instability: Eady baroclinic instability from meridional temperature front
 
 Design Principles:
 1. Each experiment is self-documenting with scientific context
@@ -54,6 +55,7 @@ from . import overflow
 from . import stommel_gyre_tracer
 from . import geostrophic_adjustment
 from . import global_barotropic_wind
+from . import eady_instability
 
 # Registry of all available experiments
 AVAILABLE_EXPERIMENTS = {
@@ -69,6 +71,7 @@ AVAILABLE_EXPERIMENTS = {
     "stommel_gyre_tracer": stommel_gyre_tracer.EXPERIMENT_CONFIG,
     "geostrophic_adjustment": geostrophic_adjustment.EXPERIMENT_CONFIG,
     "global_barotropic_wind": global_barotropic_wind.EXPERIMENT_CONFIG,
+    "eady_instability": eady_instability.EXPERIMENT_CONFIG,
 }
 
 __all__ = [
@@ -84,5 +87,6 @@ __all__ = [
     "stommel_gyre_tracer",
     "geostrophic_adjustment",
     "global_barotropic_wind",
+    "eady_instability",
     "AVAILABLE_EXPERIMENTS",
 ]

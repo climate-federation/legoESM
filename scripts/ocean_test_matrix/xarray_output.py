@@ -106,7 +106,7 @@ def _dims_and_coords_for_field(
         return _latlon_dims_coords(field_shape, lon_deg, lat_deg, depth, times_days)
     elif coord_kind == "cube":
         return _cube_dims_coords(field_shape, lon_deg, lat_deg, depth, times_days)
-    elif coord_kind in ("mpas", "mpas_regional"):
+    elif coord_kind in ("mpas", "mpas_regional", "mpas_channel"):
         return _mpas_dims_coords(field_shape, lon_deg, lat_deg, depth, times_days)
     else:
         dims = ["time"] + [f"dim_{i}" for i in range(len(field_shape))]
