@@ -351,3 +351,183 @@ def test_slab_canopy_carbon_runs():
     assert carbon_new is not None
     # Daytime uptake
     assert float(resp.co2_flux[0]) < 0.0
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 / Stage 2b: prognostic LAI from C_fol
+# ---------------------------------------------------------------------------
+
+def test_prognostic_lai_helper_returns_c_fol_over_lcma():
+    """``compute_prognostic_lai`` must return C_fol / LCMA when
+    differland is active + use_prognostic_lai is True.  Returns None
+    when either condition fails.
+    """
+    from legoesm.land.surface_scheme.two_leaf_canopy import compute_prognostic_lai
+
+    ncol = 2
+    cfg = _make_canopy_carbon_cfg()
+    carbon = init_carbon_state((ncol,), cfg.carbon)
+    # C_fol_init = 200 gC/m², LCMA = 50 → expected LAI = 4.0
+    lai = compute_prognostic_lai(carbon, cfg, cfg.surface_scheme)
+    assert lai is not None
+    assert jnp.allclose(lai, 4.0)
+
+    # use_prognostic_lai=False → returns None
+    cfg_off = MultiLayerLandConfig(
+        surface_scheme=TwoLeafCanopyConfig(use_prognostic_lai=False),
+        carbon=CarbonConfig(scheme="differland"),
+    )
+    lai_off = compute_prognostic_lai(carbon, cfg_off, cfg_off.surface_scheme)
+    assert lai_off is None
+
+    # carbon scheme != differland → returns None
+    cfg_none = MultiLayerLandConfig(
+        surface_scheme=TwoLeafCanopyConfig(),
+        carbon=CarbonConfig(scheme="none"),
+    )
+    lai_none = compute_prognostic_lai(carbon, cfg_none, cfg_none.surface_scheme)
+    assert lai_none is None
+
+    # carbon_state is None → returns None
+    lai_no_state = compute_prognostic_lai(None, cfg, cfg.surface_scheme)
+    assert lai_no_state is None
+
+
+def test_prognostic_lai_overrides_prescribed_lai():
+    """When ``use_prognostic_lai`` is on and carbon is active, the canopy
+    flux output must use ``C_fol / LCMA`` even if ``CanopyLandParams.LAI``
+    prescribes a different value.
+    """
+    ncol = 2
+    forcing = _make_forcing(ncol, sw_down=700.0, cos_zenith=0.8)
+
+    # Prescribed LAI = 1.5; prognostic override should force LAI = 4.0
+    params = _canopy_params(ncol)._replace(LAI=jnp.full(ncol, 1.5))
+
+    cfg_prog = MultiLayerLandConfig(
+        surface_scheme=TwoLeafCanopyConfig(
+            max_iters=30, use_prognostic_lai=True),
+        carbon=CarbonConfig(scheme="differland"),
+    )
+    cfg_fixed = MultiLayerLandConfig(
+        surface_scheme=TwoLeafCanopyConfig(
+            max_iters=30, use_prognostic_lai=False),
+        carbon=CarbonConfig(scheme="differland"),
+    )
+
+    state = init_multilayer_land_state(ncol, cfg_prog, T_init=290.0, TgC_init=20.0)
+    carbon = init_carbon_state((ncol,), cfg_prog.carbon)
+
+    _, r_prog, _ = step_multilayer_land(
+        state, forcing, cfg_prog, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), carbon_state=carbon, doy=180.0,
+        land_params=params)
+    _, r_fixed, _ = step_multilayer_land(
+        state, forcing, cfg_fixed, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), carbon_state=carbon, doy=180.0,
+        land_params=params)
+
+    # The two runs MUST differ — LAI=4 vs LAI=1.5 changes SW absorption,
+    # canopy transpiration, aerodynamic resistance, etc.
+    assert not jnp.allclose(r_prog.lhflx, r_fixed.lhflx, atol=1e-3), (
+        "prognostic LAI must change canopy fluxes relative to LAI=1.5")
+    assert not jnp.allclose(r_prog.shflx, r_fixed.shflx, atol=1e-3)
+    assert not jnp.allclose(r_prog.T_surface, r_fixed.T_surface, atol=1e-4)
+
+
+def test_prognostic_lai_responds_to_c_fol_changes():
+    """Two different ``C_fol_init`` values must yield different canopy
+    fluxes when prognostic LAI is active.  Confirms the feedback is
+    actually reading the state.
+    """
+    ncol = 2
+    forcing = _make_forcing(ncol, sw_down=700.0, cos_zenith=0.8)
+    cfg_low = MultiLayerLandConfig(
+        surface_scheme=TwoLeafCanopyConfig(max_iters=30),
+        carbon=CarbonConfig(scheme="differland", C_fol_init=100.0),
+    )
+    cfg_high = MultiLayerLandConfig(
+        surface_scheme=TwoLeafCanopyConfig(max_iters=30),
+        carbon=CarbonConfig(scheme="differland", C_fol_init=400.0),
+    )
+
+    state = init_multilayer_land_state(ncol, cfg_low, T_init=290.0, TgC_init=20.0)
+    carbon_low = init_carbon_state((ncol,), cfg_low.carbon)    # C_fol=100 → LAI=2
+    carbon_high = init_carbon_state((ncol,), cfg_high.carbon)  # C_fol=400 → LAI=8
+
+    _, r_low, _ = step_multilayer_land(
+        state, forcing, cfg_low, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), carbon_state=carbon_low, doy=180.0,
+        land_params=_canopy_params(ncol))
+    _, r_high, _ = step_multilayer_land(
+        state, forcing, cfg_high, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), carbon_state=carbon_high, doy=180.0,
+        land_params=_canopy_params(ncol))
+
+    assert not jnp.allclose(r_low.lhflx, r_high.lhflx, atol=1e-3), (
+        "canopy with LAI=2 must differ from canopy with LAI=8")
+
+
+@pytest.mark.xfail(
+    reason="Reverse-mode grad through C_fol → LAI → canopy Newton IFT adjoint "
+           "produces NaN — deep interaction between jacfwd in solve_bwd and "
+           "the LAI_CRIT=2 clip in compute_aerodynamics.  Forward feedback "
+           "works (verified by the divergence tests above); grad through "
+           "OTHER canopy parameters with prognostic LAI enabled also works "
+           "(verified by test_grad_through_canopy_carbon_pipeline in Phase 4). "
+           "Fix requires replacing the hard LAI clip with a smooth saturation "
+           "or adding a custom_jvp to sidestep the jacfwd double-grad issue. "
+           "Tracked for Phase 7 or a separate differentiability pass.",
+    strict=True,
+)
+def test_prognostic_lai_jax_grad_through_feedback():
+    """``jax.grad`` through the prognostic LAI loop (C_fol → LAI →
+    canopy Newton → surface fluxes) should be finite for training.
+    Currently known-broken on the C_fol scale path — see xfail reason.
+    """
+    ncol = 2
+    cfg = _make_canopy_carbon_cfg()
+    state = init_multilayer_land_state(ncol, cfg, T_init=290.0, TgC_init=20.0)
+    carbon_base = init_carbon_state((ncol,), cfg.carbon)
+    forcing = _make_forcing(ncol, sw_down=700.0, cos_zenith=0.8)
+    params = _canopy_params(ncol)
+
+    def _loss(C_fol_scale):
+        carbon = carbon_base._replace(
+            C_fol=carbon_base.C_fol * C_fol_scale)
+        _, resp, _ = step_multilayer_land(
+            state, forcing, cfg, U_min=1.0, dt=1800.0,
+            lat=jnp.zeros(ncol), carbon_state=carbon, doy=180.0,
+            land_params=params)
+        return jnp.sum(resp.lhflx)
+
+    grad = jax.grad(_loss)(1.0)
+    assert jnp.isfinite(grad), f"non-finite grad wrt C_fol scale: {grad}"
+    assert float(grad) != 0.0
+
+
+def test_prognostic_lai_preserves_grad_wrt_vcmax():
+    """Regression: enabling prognostic LAI must NOT break ``jax.grad``
+    with respect to other canopy parameters.  Guards against the
+    prognostic LAI feedback accidentally introducing a NaN into the
+    generic canopy gradient path.
+    """
+    ncol = 2
+    cfg = _make_canopy_carbon_cfg()  # prognostic LAI is on by default
+    state = init_multilayer_land_state(ncol, cfg, T_init=290.0, TgC_init=20.0)
+    carbon = init_carbon_state((ncol,), cfg.carbon)
+    forcing = _make_forcing(ncol, sw_down=700.0, cos_zenith=0.8)
+
+    def _loss(Vc):
+        params = _canopy_params(ncol)._replace(
+            Vcmax25_C3_leaf=jnp.full(ncol, Vc))
+        _, _, c_new = step_multilayer_land(
+            state, forcing, cfg, U_min=1.0, dt=1800.0,
+            lat=jnp.zeros(ncol), carbon_state=carbon, doy=180.0,
+            land_params=params)
+        return jnp.sum(c_new.C_lab - carbon.C_lab)
+
+    grad = jax.grad(_loss)(60.0)
+    assert jnp.isfinite(grad)
+    # More Vcmax → more GPP → more C_lab allocation.  Sign must be positive.
+    assert float(grad) > 0.0

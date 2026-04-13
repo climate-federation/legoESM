@@ -69,6 +69,45 @@ _DEFAULT_PICARD_OMEGA = 0.15
 TGC_EMA_TAU_S: float = 30.0 * 86400.0
 
 
+def compute_prognostic_lai(
+    carbon_state,
+    land_config,
+    canopy_config: "TwoLeafCanopyConfig",
+) -> jnp.ndarray | None:
+    """Phase 6 / Stage 2b: prognostic LAI from the foliar carbon pool.
+
+    Returns ``carbon_state.C_fol / LCMA`` when all three conditions hold:
+
+    1. ``canopy_config.use_prognostic_lai`` is True (default).
+    2. ``land_config.carbon.scheme == "differland"``.
+    3. ``carbon_state is not None``.
+
+    Returns ``None`` otherwise, in which case callers fall through to
+    the prescribed ``CanopyLandParams.LAI`` (or the scalar default).
+
+    ``LCMA`` is read from ``land_config.carbon.LCMA`` — the leaf carbon
+    mass per unit area [gC / m²] that maps the prognostic foliar pool
+    onto a LAI value.  The typical DifferLand default is 50 gC/m²,
+    giving ``LAI = 4`` at the ``C_fol_init = 200`` pool size.
+
+    Notes
+    -----
+    - Canopy height ``hc`` stays prescribed in Phase 6 — there is no
+      simple allometric mapping from the wood pool to canopy height,
+      and the canopy closure is much less sensitive to ``hc`` than
+      to ``LAI``.
+    - The feedback is fully differentiable: ``dLAI / dC_fol = 1 / LCMA``.
+    """
+    if not getattr(canopy_config, "use_prognostic_lai", True):
+        return None
+    if carbon_state is None:
+        return None
+    if getattr(land_config.carbon, "scheme", "none") != "differland":
+        return None
+    LCMA = land_config.carbon.LCMA
+    return carbon_state.C_fol / jnp.maximum(LCMA, 1e-6)
+
+
 def advance_TgC_ema(
     TgC_old: jnp.ndarray,
     T_air_K: jnp.ndarray,
@@ -110,6 +149,7 @@ def compute_two_leaf_canopy_fluxes(
     soil_thermal_fn: Callable[[jnp.ndarray, float], jnp.ndarray],
     dt: float,
     TgC_override: jnp.ndarray | None = None,
+    LAI_override: jnp.ndarray | None = None,
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -154,7 +194,13 @@ def compute_two_leaf_canopy_fluxes(
     ncol = T_soil_top.shape[0]
 
     # ---- Resolve per-column parameters (fall back to scalar defaults) ----
-    LAI        = _get(lp, "LAI",      jnp.full(ncol, 1.5))
+    # LAI priority: (1) caller-supplied ``LAI_override`` (prognostic from
+    # ``C_fol / LCMA`` when carbon+canopy both active, Phase 6); (2)
+    # ``CanopyLandParams.LAI`` (prescribed); (3) scalar default 1.5.
+    if LAI_override is not None:
+        LAI    = LAI_override
+    else:
+        LAI    = _get(lp, "LAI",      jnp.full(ncol, 1.5))
     hc         = _get(lp, "hc",       jnp.full(ncol, 5.0))
     fC4        = _get(lp, "fC4",      jnp.zeros(ncol))
     FNonVeg    = _get(lp, "FNonVeg",  jnp.zeros(ncol))

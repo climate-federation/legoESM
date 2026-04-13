@@ -48,7 +48,10 @@ from legoesm.land.surface_scheme import (
     compute_simple_seb_fluxes,
     compute_two_leaf_canopy_fluxes,
 )
-from legoesm.land.surface_scheme.two_leaf_canopy import advance_TgC_ema
+from legoesm.land.surface_scheme.two_leaf_canopy import (
+    advance_TgC_ema,
+    compute_prognostic_lai,
+)
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
@@ -208,6 +211,13 @@ def _step_multilayer_land_impl(
         # ``TgC_override`` is None).
         TgC_override = state.TgC
 
+        # Phase 6 / Stage 2b: prognostic LAI feedback.  When
+        # ``use_prognostic_lai`` (default) and differland carbon is
+        # active, LAI = C_fol / LCMA takes precedence over any
+        # prescribed ``CanopyLandParams.LAI``.
+        LAI_override = compute_prognostic_lai(
+            carbon_state, config, config.surface_scheme)
+
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -221,6 +231,7 @@ def _step_multilayer_land_impl(
             soil_thermal_fn=_soil_thermal_cb,
             dt=dt,
             TgC_override=TgC_override,
+            LAI_override=LAI_override,
         )
     else:
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].

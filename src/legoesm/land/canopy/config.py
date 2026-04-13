@@ -99,6 +99,13 @@ class CanopyConfig(NamedTuple):
     # Python string via functools.partial — never traced.
     stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn"
     use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
+    # Prognostic LAI feedback (Phase 6 / Stage 2b).  When True (default)
+    # and the carbon cycle is active with ``scheme="differland"``, the
+    # canopy's LAI is recomputed each step from ``C_fol / LCMA``,
+    # bypassing any prescribed ``CanopyLandParams.LAI``.  Set to False
+    # to freeze LAI at its prescribed value (useful for validation
+    # studies against external LAI observations).
+    use_prognostic_lai: bool = True
 
     # NOTE: The former ``G_alpha`` tunable (G = G_alpha · Rn_soil) has been
     # removed.  Ground heat flux is now diagnosed as the surface energy

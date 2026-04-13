@@ -40,7 +40,10 @@ from legoesm.land.surface_scheme import (
     TwoLeafCanopyConfig,
     compute_two_leaf_canopy_fluxes,
 )
-from legoesm.land.surface_scheme.two_leaf_canopy import advance_TgC_ema
+from legoesm.land.surface_scheme.two_leaf_canopy import (
+    advance_TgC_ema,
+    compute_prognostic_lai,
+)
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
@@ -395,6 +398,15 @@ def _step_land_canopy(
     # ``TgC_override`` is None).
     TgC_override = _flat(state.TgC) if state.TgC is not None else None
 
+    # Phase 6 / Stage 2b: prognostic LAI feedback.  ``compute_prognostic_lai``
+    # returns ``C_fol / LCMA`` if differland carbon + use_prognostic_lai
+    # are both active.  For slab on cubed-sphere shapes, the carbon_state
+    # is (6, n, n) matching the slab state; we flatten it for the canopy
+    # vmap and unflatten is not needed because LAI_override is only read
+    # inside the canopy compute function.
+    _lai_full = compute_prognostic_lai(carbon_state, config, config.surface_scheme)
+    LAI_override = _flat(_lai_full) if _lai_full is not None else None
+
     # --- Canopy surface flux closure ---
     surface_out = compute_two_leaf_canopy_fluxes(
         T_soil_top=T_soil_flat,
@@ -409,6 +421,7 @@ def _step_land_canopy(
         soil_thermal_fn=_slab_thermal_cb,
         dt=dt,
         TgC_override=TgC_override,
+        LAI_override=LAI_override,
     )
 
     # --- Slab post-flux: snow, bucket, T_soil dT/dt (flattened) ---
