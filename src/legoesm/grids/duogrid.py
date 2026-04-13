@@ -1136,11 +1136,11 @@ def cubed_a2d_halo(
     #   ud(i,j,k) = ue . es(i,j,1)  — es variant 0 (B-grid normals)
     #   vd(i,j,k) = ve . ew(i,j,2)  — ew variant 1 (B-grid normals)
     # NOTE: FV3's es(:,:,1) is stored in our index 0, ew(:,:,2) in index 1
-    es_slice = es[:, offset:offset + n_p, offset + 1:offset + n_p, :, 1]  # (6, n_p, n_p-1, 3)
+    es_slice = es[:, offset:offset + n_p, offset + 1:offset + n_p, :, 0]  # (6, n_p, n_p-1, 3) — B-grid variant
     ud = jnp.sum(ue * es_slice, axis=-1)  # (6, n_p, n_p-1)
 
-    # vd = ve . ew_ext (A-grid normal variant)
-    ew_slice = ew[:, offset + 1:offset + n_p, offset:offset + n_p, :, 0]  # (6, n_p-1, n_p, 3)
+    # vd = ve . ew_ext (B-grid normal variant)
+    ew_slice = ew[:, offset + 1:offset + n_p, offset:offset + n_p, :, 1]  # (6, n_p-1, n_p, 3)
     vd = jnp.sum(ve * ew_slice, axis=-1)  # (6, n_p-1, n_p)
 
     return ud, vd
