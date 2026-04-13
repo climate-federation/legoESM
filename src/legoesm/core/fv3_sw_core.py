@@ -107,6 +107,16 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
         duogrid=dg,
     )  # each (6, n+4, n+4)
 
+    # FV3-faithful outermost-halo overwrite (sw_core.F90:3426-3447).
+    # FV3 sets utmp(i, jsd) = u(i, jsd+1) and utmp(i, jed) = u(i, jed+1)
+    # (using u(i,j+1) twice, not u(i,j)+u(i,j+1)).
+    # In padded coords: jsd=0, jed=n+3, so overwrite rows 0 and n+3.
+    utmp_pad = utmp_pad.at[:, :, 0].set(utmp_pad[:, :, 1])
+    utmp_pad = utmp_pad.at[:, :, n + 2 * h - 1].set(utmp_pad[:, :, n + 2 * h - 2])
+    # Similarly for vtmp: vtmp(isd, j) = v(isd+1, j), vtmp(ied, j) = v(ied+1, j)
+    vtmp_pad = vtmp_pad.at[:, 0, :].set(vtmp_pad[:, 1, :])
+    vtmp_pad = vtmp_pad.at[:, n + 2 * h - 1, :].set(vtmp_pad[:, n + 2 * h - 2, :])
+
     # ---- Step 3: Contravariant at cell centres over FULL padded domain ----
     # FV3 ref: sw_core.F90:3449-3454 — compute ua/va for isd:ied, jsd:jed
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]

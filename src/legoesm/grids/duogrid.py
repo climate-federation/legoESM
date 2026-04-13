@@ -730,85 +730,60 @@ def fill_corner_region(
     ie = h + n - 1  # last interior i in padded
     je = h + n - 1  # last interior j in padded
 
-    # Following FV3 fill_corner_region_2d pattern for each corner.
-    # NE corner: cells at (ie+1..ie+h, je+1..je+h)
-    for d1 in range(1, h + 1):
-        for d2 in range(1, h + 1):
-            i_p = ie + d1  # padded i
-            j_p = je + d2  # padded j
-            i_e = i_p + offset  # extended grid i
-            j_e = j_p + offset
+    # Following FV3 fill_corner_region_2d (fv_duogrid.F90:1719-1903).
+    # FV3 fill order: (1) non-diagonal cells first, (2) then diagonal
+    # cells as average of X and Y interpolations on a COPY of padded.
 
-            if d1 == d2:
-                # Diagonal: average of X+ and Y+
-                val_x = _lagrange_interp_x_plus(padded, xp, i_e, j_e, j_p, n, h)
-                val_y = _lagrange_interp_y_plus(padded, yp, i_e, j_e, i_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
-            elif d2 > d1:
-                # Above diagonal: use X+ (interpolate from east edge)
-                val = _lagrange_interp_x_plus(padded, xp, i_e, j_e, j_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(val)
-            else:
-                # Below diagonal: use Y+ (interpolate from north edge)
-                val = _lagrange_interp_y_plus(padded, yp, i_e, j_e, i_p, n, h)
+    def _fill_one_corner(padded, x_interp, y_interp, x_coefs, y_coefs,
+                         get_ip, get_jp):
+        """Fill one h×h corner block with FV3 ordering."""
+        # Pass 1: non-diagonal cells (d1 != d2)
+        for d1 in range(1, h + 1):
+            for d2 in range(1, h + 1):
+                if d1 == d2:
+                    continue
+                i_p = get_ip(d1)
+                j_p = get_jp(d2)
+                i_e = i_p + offset
+                j_e = j_p + offset
+                if d2 > d1:
+                    val = x_interp(padded, x_coefs, i_e, j_e, j_p, n, h)
+                else:
+                    val = y_interp(padded, y_coefs, i_e, j_e, i_p, n, h)
                 padded = padded.at[:, i_p, j_p].set(val)
 
-    # NW corner: cells at (0..h-1, je+1..je+h)
-    for d1 in range(1, h + 1):
-        for d2 in range(1, h + 1):
-            i_p = h - d1  # padded i (from west edge)
-            j_p = je + d2
+        # Pass 2: diagonal cells (d1 == d2), averaged from X and Y
+        # on separate copies (FV3 uses veltemp/veltempp)
+        for d in range(1, h + 1):
+            i_p = get_ip(d)
+            j_p = get_jp(d)
             i_e = i_p + offset
             j_e = j_p + offset
+            val_x = x_interp(padded, x_coefs, i_e, j_e, j_p, n, h)
+            val_y = y_interp(padded, y_coefs, i_e, j_e, i_p, n, h)
+            padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
 
-            if d1 == d2:
-                val_x = _lagrange_interp_x_minus(padded, xm, i_e, j_e, j_p, n, h)
-                val_y = _lagrange_interp_y_plus(padded, yp, i_e, j_e, i_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
-            elif d2 > d1:
-                val = _lagrange_interp_x_minus(padded, xm, i_e, j_e, j_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(val)
-            else:
-                val = _lagrange_interp_y_plus(padded, yp, i_e, j_e, i_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(val)
+        return padded
 
-    # SE corner: cells at (ie+1..ie+h, 0..h-1)
-    for d1 in range(1, h + 1):
-        for d2 in range(1, h + 1):
-            i_p = ie + d1
-            j_p = h - d2  # from south edge
-            i_e = i_p + offset
-            j_e = j_p + offset
+    # NE corner
+    padded = _fill_one_corner(
+        padded, _lagrange_interp_x_plus, _lagrange_interp_y_plus, xp, yp,
+        lambda d: ie + d, lambda d: je + d)
 
-            if d1 == d2:
-                val_x = _lagrange_interp_x_plus(padded, xp, i_e, j_e, j_p, n, h)
-                val_y = _lagrange_interp_y_minus(padded, ym, i_e, j_e, i_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
-            elif d2 > d1:
-                val = _lagrange_interp_x_plus(padded, xp, i_e, j_e, j_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(val)
-            else:
-                val = _lagrange_interp_y_minus(padded, ym, i_e, j_e, i_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(val)
+    # NW corner
+    padded = _fill_one_corner(
+        padded, _lagrange_interp_x_minus, _lagrange_interp_y_plus, xm, yp,
+        lambda d: h - d, lambda d: je + d)
 
-    # SW corner: cells at (0..h-1, 0..h-1)
-    for d1 in range(1, h + 1):
-        for d2 in range(1, h + 1):
-            i_p = h - d1
-            j_p = h - d2
-            i_e = i_p + offset
-            j_e = j_p + offset
+    # SE corner
+    padded = _fill_one_corner(
+        padded, _lagrange_interp_x_plus, _lagrange_interp_y_minus, xp, ym,
+        lambda d: ie + d, lambda d: h - d)
 
-            if d1 == d2:
-                val_x = _lagrange_interp_x_minus(padded, xm, i_e, j_e, j_p, n, h)
-                val_y = _lagrange_interp_y_minus(padded, ym, i_e, j_e, i_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
-            elif d2 > d1:
-                val = _lagrange_interp_x_minus(padded, xm, i_e, j_e, j_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(val)
-            else:
-                val = _lagrange_interp_y_minus(padded, ym, i_e, j_e, i_p, n, h)
-                padded = padded.at[:, i_p, j_p].set(val)
+    # SW corner
+    padded = _fill_one_corner(
+        padded, _lagrange_interp_x_minus, _lagrange_interp_y_minus, xm, ym,
+        lambda d: h - d, lambda d: h - d)
 
     return padded
 
