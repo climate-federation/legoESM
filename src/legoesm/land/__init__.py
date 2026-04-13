@@ -7,10 +7,12 @@ from legoesm.land.slab_land import step_land
 from legoesm.land.multilayer_land import step_multilayer_land, init_multilayer_land_state
 from legoesm.land.canopy import (
     CanopyConfig,
-    CanopyLandConfig,
     CanopyLandParams,
-    init_canopy_land_state,
-    step_canopy_land,
+)
+from legoesm.land.surface_scheme import (
+    SimpleSEBConfig,
+    TwoLeafCanopyConfig,
+    SurfaceFluxOutput,
 )
 from legoesm.land.surface_params import LandSurfaceParams, PARAM_BOUNDS, PARAM_NAMES
 from legoesm.land.param_providers import (
@@ -26,6 +28,8 @@ __all__ = [
     "LandConfig", "LandState", "step_land",
     "MultiLayerLandConfig", "MultiLayerLandState",
     "step_multilayer_land", "init_multilayer_land_state",
+    "CanopyConfig", "CanopyLandParams",
+    "SimpleSEBConfig", "TwoLeafCanopyConfig", "SurfaceFluxOutput",
     "LandSurfaceParams", "PARAM_BOUNDS", "PARAM_NAMES",
     "ConstantParamProvider", "PFTParamProvider", "NeuralParamProvider",
     "build_land_features", "create_land_param_provider",

@@ -7,6 +7,55 @@ from typing import NamedTuple
 import jax
 
 
+class StomataConfig(NamedTuple):
+    """Stomatal conductance + A-gs coupling configuration.
+
+    Used by the **SimpleSEB** surface scheme (slab / multilayer land
+    without the two-leaf canopy).  The ``TwoLeafCanopy`` scheme has its
+    own per-column parameter set (``CanopyLandParams``); these scalars
+    are the single-valued defaults for the uniform SimpleSEB path.
+
+    Modes:
+
+    - ``enabled=False`` (default): bucket ``beta`` only, no stomatal control.
+    - ``enabled=True`` + carbon off: ``jarvis_gs`` (CO2-independent).
+    - ``enabled=True`` + carbon on : coupled Leuning Farquhar + Ball-Berry
+                                     (or Medlyn) via ``coupled_farquhar_stomata``.
+
+    All photosynthesis fields refer to the **Leuning** C3/C4 model in
+    ``canopy/photosynthesis.py``; the Bernacchi (CLM-style) formulation
+    was removed.
+    """
+    enabled: bool = False
+    stomata_model: str = "ball_berry"   # "ball_berry" | "medlyn"
+
+    # --- Leuning Farquhar scalar defaults (overridden by LandSurfaceParams) ---
+    Vcmax25_C3: float = 60.0        # C3 max carboxylation at 25 C [μmol/m2/s]
+    Vcmax25_C4: float = 40.0        # C4 max carboxylation at 25 C [μmol/m2/s]
+    alf_C3: float = 0.30            # C3 quantum yield [mol CO2 / mol photons]
+    fC4: float = 0.0                # C4 area fraction [0-1] (continuous)
+    TgC_default: float = 25.0       # Default 30-day mean growth T [°C]
+
+    # --- Ball-Berry / Medlyn stomatal params ---
+    g0: float = 0.01                # Residual conductance [mol/m2/s]
+    g1_bb: float = 9.0              # Ball-Berry slope [-]
+    g1_med: float = 4.0             # Medlyn slope [kPa^0.5]
+
+    # --- Jarvis params (carbon off path) ---
+    gs_max: float = 0.3             # Maximum conductance [mol/m2/s]
+    K_PAR: float = 200.0            # PAR half-saturation [W/m2]
+    T_opt_jarvis: float = 25.0      # Optimal T [°C]
+    T_range_jarvis: float = 20.0    # T response half-width [°C]
+    a_vpd: float = 0.05             # VPD sensitivity [1/hPa]
+
+    # --- A-gs coupling solver ---
+    n_iter_ags: int = 5             # Fixed-point iterations (Phase 2 → Newton)
+
+    # --- Beta coupling ---
+    k_ext: float = 0.5              # Beer-law canopy extinction [-]
+    gs_ref: float = 0.3             # Reference gs for beta scaling [mol/m2/s]
+
+
 class CarbonConfig(NamedTuple):
     """Carbon cycle configuration.
 

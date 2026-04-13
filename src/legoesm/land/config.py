@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
-from legoesm.land.carbon.config import CarbonConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.carbon.config import CarbonConfig, StomataConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig
 from legoesm.land.richards import RichardsConfig
+from legoesm.land.surface_scheme import SimpleSEBConfig
 from legoesm.surface_albedo import LandAlbedoConfig
 
 
@@ -36,6 +36,10 @@ class LandConfig(NamedTuple):
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
     stomata: StomataConfig = StomataConfig()
+    # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
+    # Type hint is ``Any`` because NamedTuple does not support Unions well;
+    # dispatch is done via ``isinstance`` inside ``step_land``.
+    surface_scheme: Any = SimpleSEBConfig()
 
 
 class MultiLayerLandConfig(NamedTuple):
@@ -69,3 +73,6 @@ class MultiLayerLandConfig(NamedTuple):
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
     stomata: StomataConfig = StomataConfig()
+    # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
+    # Runtime dispatch via ``isinstance`` inside ``step_multilayer_land``.
+    surface_scheme: Any = SimpleSEBConfig()

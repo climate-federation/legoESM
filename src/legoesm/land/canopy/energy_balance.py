@@ -21,11 +21,16 @@ import functools
 import jax
 import jax.numpy as jnp
 
-# Physical constants
-_T0    = 273.15      # [K]
-_Ps0   = 101325.0    # standard pressure [Pa]
-_Lv    = 2.501e6     # latent heat of vaporisation at 0°C [J kg-1]
-_sigma = 5.670373e-8  # Stefan-Boltzmann [W m-2 K-4]
+from legoesm import constants
+from legoesm.thermo import saturation_vapor_pressure
+from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
+
+# Module-local constants.
+# NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
+# are imported from ``legoesm.constants`` — do not redefine them here.
+_Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
+                     # unit conversion factor 0.446; distinct from
+                     # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
 
 
 # ---------------------------------------------------------------------------
@@ -34,9 +39,17 @@ _sigma = 5.670373e-8  # Stefan-Boltzmann [W m-2 K-4]
 
 @jax.jit
 def saturation_specific_humidity(T: jax.Array, p: jax.Array) -> jax.Array:
-    """Saturation specific humidity [kg kg-1] from T [K] and p [Pa]."""
-    e_s = 611.2 * jnp.exp(17.67 * (T - _T0) / ((T - _T0) + 243.5))
-    return 0.622 * e_s / (p - (1.0 - 0.622) * e_s)
+    """Saturation specific humidity [kg kg-1] from T [K] and p [Pa].
+
+    Uses ``legoesm.thermo.saturation_vapor_pressure`` for the Tetens
+    formula (CLAUDE.md: never inline Tetens).  The specific-humidity
+    denominator ``p - (1 - ε) e_s`` differs from the mixing-ratio
+    denominator in ``thermo.saturation_mixing_ratio`` — this function
+    returns **specific** humidity, which is what the canopy air and
+    leaf boundary layers carry throughout the two-leaf closure.
+    """
+    e_s = saturation_vapor_pressure(T)
+    return constants.epsilon * e_s / (p - (1.0 - constants.epsilon) * e_s)
 
 
 @jax.jit
@@ -59,15 +72,17 @@ def canopy_met_variables(
       All in Pa (or Pa K-1 for derivatives; Pa K-2 for second derivative).
     """
     # Vapour pressure from specific humidity
-    e_c  = q_c * Ps / (0.622 + (1.0 - 0.622) * q_c)
-    # Saturation vapour pressure (Clausius-Clapeyron)
-    TcC  = Tc - _T0
-    es_c = 611.2 * jnp.exp(17.67 * TcC / (TcC + 243.5))
+    e_c  = q_c * Ps / (constants.epsilon + (1.0 - constants.epsilon) * q_c)
+    # Saturation vapour pressure (Tetens — shared helper).
+    TcC  = Tc - constants.T_freeze
+    es_c = saturation_vapor_pressure(Tc)
 
     VPD_c = es_c - e_c
     RH_c  = jnp.clip(e_c / jnp.maximum(es_c, 1e-6), 0.0, 1.0)
 
-    # First derivative des/dT [Pa K-1]
+    # First derivative des/dT [Pa K-1] — analytical derivative of the
+    # Tetens formula ``e_s = 611.2 * exp(17.67 * T_c / (T_c + 243.5))``.
+    # Kept local because ``legoesm.thermo`` does not expose des/dT.
     desTc  = es_c * 4098.0 * (TcC + 237.3) ** (-2)
     # Second derivative d²es/dT² [Pa K-2]
     ddesTc = 4098.0 * (
@@ -75,43 +90,71 @@ def canopy_met_variables(
         + (-2.0) * e_c * (TcC + 237.3) ** (-3)
     )
 
-    # Latent heat and psychrometric constant
-    lam   = _Lv - 2.361e3 * TcC
-    gamma = 1004.0 / 0.622 * Ps / lam   # [Pa K-1]
+    # Latent heat (temperature-corrected) and psychrometric constant
+    lam   = constants.L_v - 2.361e3 * TcC
+    gamma = constants.c_pd / constants.epsilon * Ps / lam   # [Pa K-1]
 
     return e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma
 
 
 # ---------------------------------------------------------------------------
-# Stomatal conductance (Ball-Berry)
+# Stomatal conductance dispatch (Ball-Berry or Medlyn)
 # ---------------------------------------------------------------------------
 
 def _compute_gs_and_ci(
     An: jax.Array,
     RH_c: jax.Array,
+    VPD_c: jax.Array,
     Ca: jax.Array,
     Tf: jax.Array,
     Ps: jax.Array,
     m: jax.Array,
     b0: jax.Array,
-    is_c4: bool = False,
+    stomatal_model: str,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Ball-Berry stomatal conductance and intercellular CO2.
+    """Stomatal conductance and intercellular CO2 closure for a leaf.
 
-    Returns (rs [s m-1], gs [m s-1], Ci [μmol mol-1])
+    Dispatches between Ball-Berry (RH-based) and Medlyn (VPD-based) based
+    on the ``stomatal_model`` static argument.  Both models use the same
+    per-leaf ``(m, b0)`` pair — ``m`` is interpreted as the Ball-Berry
+    slope ``g1_bb`` for ``"ball_berry"`` and as the Medlyn slope ``g1_med``
+    [kPa^0.5] for ``"medlyn"``; ``b0`` is the residual conductance in both
+    cases.
+
+    Parameters
+    ----------
+    An     : net assimilation [μmol CO2 / m^2 / s]
+    RH_c   : canopy-air relative humidity [-]  (used by Ball-Berry)
+    VPD_c  : canopy-air vapour pressure deficit [Pa]  (converted to
+             kPa inside for Medlyn; unused by Ball-Berry)
+    Ca     : ambient CO2 [μmol / mol]
+    Tf     : leaf temperature [K]  (for mol → m/s unit conversion)
+    Ps     : surface pressure [Pa]
+    m, b0  : stomatal slope and intercept (see above)
+    stomatal_model : ``"ball_berry"`` | ``"medlyn"`` — static Python string
+                     captured in a ``functools.partial`` closure; never
+                     traced by JAX.
+
+    Returns
+    -------
+    (rs [s m-1], gs [m s-1], Ci [μmol mol-1])
     """
-    # Unit conversion: mol m-2 s-1 → m s-1
-    cf = 0.446 * (_T0 / Tf) * (Ps / _Ps0)
-
-    gs_mol = jnp.maximum(m * RH_c * An / jnp.maximum(Ca, 1e-3) + b0, b0)
-    Ci = Ca - 1.6 * An / jnp.maximum(gs_mol, 1e-9)
-
-    # Clip Ci to physically reasonable range
-    if is_c4:
-        Ci = jnp.clip(Ci, 0.2 * Ca, 0.6 * Ca)
+    if stomatal_model == "medlyn":
+        VPD_kPa = jnp.maximum(VPD_c, 50.0) / 1000.0  # Pa → kPa, floor 0.05 kPa
+        gs_mol = medlyn_gs(An, VPD_kPa, Ca, m, b0)
     else:
-        Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)
+        gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
 
+    Ci = Ca - 1.6 * An / jnp.maximum(gs_mol, 1e-9)
+    # Clip Ci to the physically reasonable C3 range; mixed-PFT C3/C4
+    # is handled upstream in ``photosynthesis()`` via the continuous fC4
+    # fraction, so the C4 bounds are not needed here.
+    Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)
+
+    # Unit conversion: mol m-2 s-1 → m s-1 at IUPAC STP reference
+    # (T_std = 273.15 K, P_std = 101325 Pa, V_molar = 22.4 L/mol → 0.0224 m^3).
+    # The factor 0.446 encodes the reference molar volume; leave as-is.
+    cf = 0.446 * (constants.T_freeze / Tf) * (Ps / _Ps0)
     rs = 1.0 / (gs_mol / cf * 1e-2)   # [s m-1]
     gs = 1.0 / rs                      # [m s-1]
     return rs, gs, Ci
@@ -121,7 +164,7 @@ def _compute_gs_and_ci(
 # Leaf energy balance — BT (Bulk Transfer)
 # ---------------------------------------------------------------------------
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("stomatal_model",))
 def leaf_energy_balance_bt(
     An: jax.Array,
     ASW: jax.Array,
@@ -133,12 +176,14 @@ def leaf_energy_balance_bt(
     q_f: jax.Array,
     q_c: jax.Array,
     RH_c: jax.Array,
+    VPD_c: jax.Array,
     lam: jax.Array,
     Cp: jax.Array,
     rhoa: jax.Array,
     Rb: jax.Array,
     m: jax.Array,
     b0: jax.Array,
+    stomatal_model: str = "ball_berry",
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via direct bulk transfer (BT).
 
@@ -148,27 +193,31 @@ def leaf_energy_balance_bt(
 
     Parameters
     ----------
-    An   : net photosynthesis [μmol m-2 s-1]
-    ASW  : absorbed shortwave [W m-2]
-    ALW  : net absorbed longwave [W m-2]
-    Tf   : leaf temperature [K]
-    Ps   : pressure [Pa]
-    Ca   : ambient CO2 [μmol mol-1]
-    Tc   : canopy air temperature [K]
-    q_f  : leaf saturation specific humidity [kg kg-1]
-    q_c  : canopy air specific humidity [kg kg-1]
-    RH_c : canopy relative humidity [-]
-    lam  : latent heat of vaporisation [J kg-1]
-    Cp   : specific heat of air [J kg-1 K-1]
-    rhoa : air density [kg m-3]
-    Rb   : boundary-layer resistance [s m-1]
-    m, b0: Ball-Berry slope and intercept [mol m-2 s-1 units]
+    An     : net photosynthesis [μmol m-2 s-1]
+    ASW    : absorbed shortwave [W m-2]
+    ALW    : net absorbed longwave [W m-2]
+    Tf     : leaf temperature [K]
+    Ps     : pressure [Pa]
+    Ca     : ambient CO2 [μmol mol-1]
+    Tc     : canopy air temperature [K]
+    q_f    : leaf saturation specific humidity [kg kg-1]
+    q_c    : canopy air specific humidity [kg kg-1]
+    RH_c   : canopy relative humidity [-]
+    VPD_c  : canopy-air vapour pressure deficit [Pa] (used by Medlyn)
+    lam    : latent heat of vaporisation [J kg-1]
+    Cp     : specific heat of air [J kg-1 K-1]
+    rhoa   : air density [kg m-3]
+    Rb     : boundary-layer resistance [s m-1]
+    m, b0  : stomatal slope and intercept (Ball-Berry or Medlyn; see
+             ``_compute_gs_and_ci``)
+    stomatal_model : ``"ball_berry"`` | ``"medlyn"`` — static argument.
 
     Returns
     -------
     Rn, LE, H, Tf_new, gs, Ci
     """
-    rs, gs, Ci = _compute_gs_and_ci(An, RH_c, Ca, Tf, Ps, m, b0)
+    rs, gs, Ci = _compute_gs_and_ci(
+        An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model)
 
     Rn = ASW + ALW
     LE = lam * rhoa * (q_f - q_c) / jnp.maximum(Rb + rs, 1e-6)
@@ -195,7 +244,7 @@ def leaf_energy_balance_bt(
 # Leaf energy balance — PM (Penman-Monteith, second-order Paw & Gao 1988)
 # ---------------------------------------------------------------------------
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("stomatal_model",))
 def leaf_energy_balance_pm(
     An: jax.Array,
     ASW: jax.Array,
@@ -214,14 +263,19 @@ def leaf_energy_balance_pm(
     Rb: jax.Array,
     m: jax.Array,
     b0: jax.Array,
+    stomatal_model: str = "ball_berry",
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via second-order Penman-Monteith (Paw & Gao 1988).
+
+    ``stomatal_model`` selects Ball-Berry or Medlyn; see
+    ``leaf_energy_balance_bt`` for details.
 
     Returns
     -------
     Rn, LE, H, Tf_new, gs, Ci
     """
-    rs, gs, Ci = _compute_gs_and_ci(An, RH_c, Ca, Tf, Ps, m, b0)
+    rs, gs, Ci = _compute_gs_and_ci(
+        An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model)
 
     Rn = ASW + ALW
     rc = rs
@@ -339,7 +393,7 @@ def soil_energy_balance_pm(
 # Canopy air temperature and humidity update
 # ---------------------------------------------------------------------------
 
-@functools.partial(jax.jit, static_argnames=("coupling_scheme",))
+@jax.jit
 def canopy_air_update(
     Ta: jax.Array,
     q_atm: jax.Array,
@@ -356,16 +410,12 @@ def canopy_air_update(
     raw_below: jax.Array,
     Rsoil: jax.Array,
     Ps: jax.Array,
-    coupling_scheme: str,
 ) -> tuple[jax.Array, jax.Array]:
     """Update canopy air temperature Tc and specific humidity q_c.
 
-    Uses conductance-weighted mixing (DifferBESS CarbonWaterFluxes.py).
-
-    Parameters
-    ----------
-    coupling_scheme : "FULLY_COUPLED" | "VEG_ONLY" | "LEAVES_ATMO"
-      (static Python string — not traced)
+    Conductance-weighted mixing of above-canopy air, sunlit and shaded
+    leaves, and soil — DifferBESS FULLY_COUPLED formulation.  Leaves and
+    soil both communicate with the canopy air space (Tc, q_c).
 
     Returns
     -------
@@ -374,30 +424,22 @@ def canopy_air_update(
     ch_a   = 1.0 / jnp.maximum(rah_above, 1e-9)
     ch_sun = 1.0 / jnp.maximum(Rb_Sun,    1e-9)
     ch_sh  = 1.0 / jnp.maximum(Rb_Sh,     1e-9)
+    ch_g   = 1.0 / jnp.maximum(rah_below, 1e-9)
 
     gs_Sun_safe = jnp.maximum(gs_Sun, 1e-9)
     gs_Sh_safe  = jnp.maximum(gs_Sh,  1e-9)
     cw_a   = 1.0 / jnp.maximum(raw_above, 1e-9)
     cw_sun = 1.0 / (Rb_Sun + 1.0 / gs_Sun_safe)
     cw_sh  = 1.0 / (Rb_Sh  + 1.0 / gs_Sh_safe)
+    cw_g   = 1.0 / jnp.maximum(raw_below + Rsoil, 1e-9)
 
     q_f_Sun = saturation_specific_humidity(Tf_Sun, Ps)
     q_f_Sh  = saturation_specific_humidity(Tf_Sh,  Ps)
     q_s     = saturation_specific_humidity(Ts,     Ps)
 
-    if coupling_scheme == "VEG_ONLY":
-        # Canopy air excludes soil contribution
-        Tc_new = (ch_a * Ta + ch_sun * Tf_Sun + ch_sh * Tf_Sh) / (
-            ch_a + ch_sun + ch_sh)
-        q_c_new = (cw_a * q_atm + cw_sun * q_f_Sun + cw_sh * q_f_Sh) / (
-            cw_a + cw_sun + cw_sh)
-    else:
-        # FULLY_COUPLED or LEAVES_ATMO: soil included
-        ch_g  = 1.0 / jnp.maximum(rah_below, 1e-9)
-        cw_g  = 1.0 / jnp.maximum(raw_below + Rsoil, 1e-9)
-        Tc_new = (ch_a * Ta + ch_sun * Tf_Sun + ch_sh * Tf_Sh + ch_g * Ts) / (
-            ch_a + ch_sun + ch_sh + ch_g)
-        q_c_new = (cw_a * q_atm + cw_sun * q_f_Sun + cw_sh * q_f_Sh + cw_g * q_s) / (
-            cw_a + cw_sun + cw_sh + cw_g)
+    Tc_new = (ch_a * Ta + ch_sun * Tf_Sun + ch_sh * Tf_Sh + ch_g * Ts) / (
+        ch_a + ch_sun + ch_sh + ch_g)
+    q_c_new = (cw_a * q_atm + cw_sun * q_f_Sun + cw_sh * q_f_Sh + cw_g * q_s) / (
+        cw_a + cw_sun + cw_sh + cw_g)
 
     return Tc_new, q_c_new

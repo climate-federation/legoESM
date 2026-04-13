@@ -11,9 +11,15 @@ Provides a switchable carbon model with two schemes:
   latitude-dependent amplitude and phase.  No prognostic pools.
 
 Set ``CarbonConfig(scheme="none")`` (the default) to disable.
+
+``StomataConfig`` lives in ``carbon/config.py`` because the stomatal /
+A-gs coupling is the interface by which the carbon cycle consumes GPP
+from the surface energy balance.  The numerical implementations live in
+``land/canopy/stomatal.py`` (Ball-Berry, Medlyn, Jarvis, coupled solver)
+and ``land/canopy/photosynthesis.py`` (Leuning C3/C4 Farquhar).
 """
 
-from legoesm.land.carbon.config import CarbonConfig, CarbonState
+from legoesm.land.carbon.config import CarbonConfig, CarbonState, StomataConfig
 from legoesm.land.carbon.carbon_cycle import (
     compute_gpp,
     compute_phenology,
@@ -22,35 +28,15 @@ from legoesm.land.carbon.carbon_cycle import (
     step_carbon,
     step_carbon_differland,
 )
-from legoesm.land.carbon.stomata import (
-    StomataConfig,
-    arrhenius,
-    peaked_arrhenius,
-    farquhar_photosynthesis,
-    ball_berry_gs,
-    medlyn_gs,
-    jarvis_gs,
-    coupled_farquhar_stomata,
-    compute_stomatal_beta,
-)
 
 __all__ = [
     "CarbonConfig",
     "CarbonState",
+    "StomataConfig",
     "compute_gpp",
     "compute_phenology",
     "init_carbon_state",
     "seasonal_co2_flux",
     "step_carbon",
     "step_carbon_differland",
-    # Stomata / plant physiology
-    "StomataConfig",
-    "arrhenius",
-    "peaked_arrhenius",
-    "farquhar_photosynthesis",
-    "ball_berry_gs",
-    "medlyn_gs",
-    "jarvis_gs",
-    "coupled_farquhar_stomata",
-    "compute_stomatal_beta",
 ]

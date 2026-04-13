@@ -1,6 +1,11 @@
-"""Configuration for the canopy energy balance + photosynthesis land model.
+"""Configuration for the canopy energy balance + photosynthesis biophysics.
 
-Implements the DifferBESS-style two-leaf canopy model as a legoESM land option.
+Implements the DifferBESS-style two-leaf canopy model as a legoESM land
+surface scheme.  ``CanopyConfig`` holds the solver-level scalars
+(max_iters, LE_module, stomatal_model, ...) and is re-exported from
+``legoesm.land.surface_scheme`` as ``TwoLeafCanopyConfig`` — both names
+refer to the same NamedTuple type.
+
 PFT Vcmax25 values from Jiang & Ryu (2016) Table A1.
 Aerodynamic parameters from Ryu et al. (2011) / DifferBESS defaults.
 """
@@ -11,9 +16,6 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-
-from legoesm.land.config import MultiLayerLandConfig
-from legoesm.surface_albedo import LandAlbedoConfig
 
 
 # ---------------------------------------------------------------------------
@@ -84,11 +86,30 @@ class CanopyConfig(NamedTuple):
     # normally ample.
     max_iters: int = 50
     tol: float = 1e-2
-    # coupling_scheme and LE_module are static Python strings captured in
-    # functools.partial closures — they are never traced by JAX.
-    coupling_scheme: str = "FULLY_COUPLED"  # "FULLY_COUPLED" | "VEG_ONLY" | "LEAVES_ATMO"
+    # Only the DifferBESS FULLY_COUPLED scheme is implemented (leaves and
+    # soil share the canopy air space Tc, q_c via clumping-weighted
+    # below-canopy resistance).  The VEG_ONLY / LEAVES_ATMO variants were
+    # removed to keep the Newton residual minimal — re-introduce them via
+    # a new static config string if a multi-scheme comparison is needed.
     LE_module: str = "BT"                   # "BT" (Bulk Transfer, default) | "PM" (Penman-Monteith)
+    # Stomatal conductance model used inside the leaf energy balance
+    # closure.  "ball_berry" interprets ``m``/``b0`` as Ball-Berry slope
+    # and intercept; "medlyn" interprets ``m`` as the Medlyn g1 slope
+    # [kPa^0.5] and ``b0`` as g0 [mol/m2/s].  Captured as a static
+    # Python string via functools.partial — never traced.
+    stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn"
     use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
+    # Prognostic LAI feedback (Phase 6 / Stage 2b).  When True and the
+    # carbon cycle is active with ``scheme="differland"``, the canopy's
+    # LAI is recomputed each step from ``C_fol / LCMA``, bypassing any
+    # prescribed ``CanopyLandParams.LAI``.  **Defaults to False** until
+    # the reverse-mode ``jax.grad`` NaN through the ``C_fol → LAI →
+    # canopy Newton`` feedback loop is resolved (see ``monin_obukhov_
+    # stability`` custom-VJP follow-up).  Forward pass and non-feedback
+    # gradient paths are unaffected by this default — enable explicitly
+    # for coupled carbon ↔ canopy runs that do not require ``jax.grad``
+    # through the feedback loop.
+    use_prognostic_lai: bool = False
 
     # NOTE: The former ``G_alpha`` tunable (G = G_alpha · Rn_soil) has been
     # removed.  Ground heat flux is now diagnosed as the surface energy
@@ -154,17 +175,10 @@ class CanopyLandParams(NamedTuple):
     rd: jax.Array               # Displacement height / hc ratio
 
 
-# ---------------------------------------------------------------------------
-# CanopyLandConfig — top-level config wrapping MultiLayerLandConfig + CanopyConfig
-# Type-distinct from MultiLayerLandConfig so component_factory.py can dispatch
-# with isinstance().
-# ---------------------------------------------------------------------------
-class CanopyLandConfig(NamedTuple):
-    """Configuration for the canopy energy balance land model.
-
-    Wraps MultiLayerLandConfig (for below-ground soil physics) and CanopyConfig
-    (for above-ground canopy physics).  The soil thermal and hydraulic solvers
-    from multilayer_land.py are reused without modification.
-    """
-    multilayer: MultiLayerLandConfig = MultiLayerLandConfig()
-    canopy: CanopyConfig = CanopyConfig()
+# NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
+# scheme of ``MultiLayerLandConfig`` (and, in Phase 3b, ``LandConfig``):
+#
+#     cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(...))
+#
+# Dispatch happens inside ``step_multilayer_land`` / ``step_land`` via
+# ``isinstance`` on the ``surface_scheme`` field.

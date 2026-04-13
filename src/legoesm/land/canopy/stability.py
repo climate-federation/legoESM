@@ -18,12 +18,14 @@ import jax
 import jax.numpy as jnp
 from functools import partial
 
-# Physical constants
-_g   = 9.80665    # standard gravity [m s-2]
-_kv  = 0.4        # von Kármán constant
-_z0mg = 0.01      # bare-soil roughness length [m]
+from legoesm import constants
+from legoesm.thermo import saturation_vapor_pressure
+
+# Module-local numerics / stability parameters (not physical constants —
+# those come from ``legoesm.constants``).
 _ZETA_MAX_STABLE = 0.5
 _CONV_BDY_HEIGHT = 1000.0  # convective boundary layer height [m]
+_Z0MG_BARE = 0.01          # bare-soil momentum roughness length [m]
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +36,11 @@ _CONV_BDY_HEIGHT = 1000.0  # convective boundary layer height [m]
 def sat_specific_humidity(T: jax.Array, p: jax.Array) -> jax.Array:
     """Saturation specific humidity from temperature and pressure.
 
+    Uses ``legoesm.thermo.saturation_vapor_pressure`` for the Tetens
+    formula (CLAUDE.md: never inline Tetens).  Returns specific humidity
+    (not mixing ratio), matching the canopy air / leaf boundary-layer
+    variable convention.
+
     Parameters
     ----------
     T : temperature [K]
@@ -43,8 +50,8 @@ def sat_specific_humidity(T: jax.Array, p: jax.Array) -> jax.Array:
     -------
     q_sat [kg kg-1]
     """
-    e_s = 611.2 * jnp.exp(17.67 * (T - 273.15) / ((T - 273.15) + 243.5))
-    return 0.622 * e_s / (p - (1.0 - 0.622) * e_s)
+    e_s = saturation_vapor_pressure(T)
+    return constants.epsilon * e_s / (p - (1.0 - constants.epsilon) * e_s)
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +88,8 @@ def compute_aerodynamics(
 
     displa = hc * rd * egvf
     z0m = jnp.exp(
-        egvf * jnp.log(jnp.maximum(hc * rz0m, _z0mg))
-        + (1.0 - egvf) * jnp.log(_z0mg)
+        egvf * jnp.log(jnp.maximum(hc * rz0m, _Z0MG_BARE))
+        + (1.0 - egvf) * jnp.log(_Z0MG_BARE)
     )
     return z0m, displa
 
@@ -114,22 +121,22 @@ def _friction_velocity(zldis: jax.Array, z0m: jax.Array,
     zeta = zldis / obu
 
     # Very unstable
-    ustar1 = _kv * um / (
+    ustar1 = constants.kappa_vk * um / (
         jnp.log(-zetam * obu / z0m)
         - _stability_func_momentum(-zetam)
         + _stability_func_momentum(z0m / obu)
         + 1.14 * (jnp.cbrt(-zeta) - jnp.cbrt(zetam))
     )
     # Unstable
-    ustar2 = _kv * um / (
+    ustar2 = constants.kappa_vk * um / (
         jnp.log(zldis / z0m)
         - _stability_func_momentum(zeta)
         + _stability_func_momentum(z0m / obu)
     )
     # Stable
-    ustar3 = _kv * um / (jnp.log(zldis / z0m) + 5.0 * zeta - 5.0 * z0m / obu)
+    ustar3 = constants.kappa_vk * um / (jnp.log(zldis / z0m) + 5.0 * zeta - 5.0 * z0m / obu)
     # Very stable
-    ustar4 = _kv * um / (
+    ustar4 = constants.kappa_vk * um / (
         jnp.log(obu / z0m) + 5.0 - 5.0 * z0m / obu
         + (5.0 * jnp.log(zeta) + zeta - 1.0)
     )
@@ -146,19 +153,19 @@ def _temperature_humidity_relation(zldis: jax.Array, obu: jax.Array,
     zetat = 0.465
     zeta  = zldis / obu
 
-    ch1 = _kv / (
+    ch1 = constants.kappa_vk / (
         jnp.log(-zetat * obu / z0h)
         - _stability_func_heat(-zetat)
         + _stability_func_heat(z0h / obu)
         + 0.8 * (1.0 / jnp.cbrt(zetat) - 1.0 / jnp.cbrt(-zeta))
     )
-    ch2 = _kv / (
+    ch2 = constants.kappa_vk / (
         jnp.log(zldis / z0h)
         - _stability_func_heat(zeta)
         + _stability_func_heat(z0h / obu)
     )
-    ch3 = _kv / (jnp.log(zldis / z0h) + 5.0 * zeta - 5.0 * z0h / obu)
-    ch4 = _kv / (
+    ch3 = constants.kappa_vk / (jnp.log(zldis / z0h) + 5.0 * zeta - 5.0 * z0h / obu)
+    ch4 = constants.kappa_vk / (
         jnp.log(obu / z0h) + 5.0 - 5.0 * z0h / obu
         + (5.0 * jnp.log(zeta) + zeta - 1.0)
     )
@@ -175,7 +182,7 @@ def _monin_obukhov_init(ur: jax.Array, Tv_atm: jax.Array,
     """Initialise MOST via bulk Richardson number (Zeng et al. 1998)."""
     wc  = 0.5
     um  = jnp.where(dthv >= 0.0, jnp.maximum(ur, 0.1), jnp.sqrt(ur**2 + wc**2))
-    rib = _g * zldis * dthv / (Tv_atm * um**2)
+    rib = constants.g * zldis * dthv / (Tv_atm * um**2)
 
     zeta = jnp.where(
         rib >= 0.0,
@@ -211,13 +218,13 @@ def _stability_step(carry: jax.Array, _xs: None,
     qstar = ch * dq
     thvstar = tstar * (1.0 + 0.61 * q_atm) + 0.61 * Ta * qstar
 
-    zeta  = zldis * _kv * _g * thvstar / (ustar**2 * Tv_atm)
+    zeta  = zldis * constants.kappa_vk * constants.g * thvstar / (ustar**2 * Tv_atm)
 
     zeta_stable = jnp.clip(zeta, 0.01, _ZETA_MAX_STABLE)
     um_stable   = jnp.maximum(ur, 0.1)
     zeta_unstable = jnp.clip(zeta, -100.0, -0.01)
     wc_unstable = jnp.cbrt(jnp.maximum(
-        -_g * ustar * thvstar * _CONV_BDY_HEIGHT / Tv_atm, 0.0))
+        -constants.g * ustar * thvstar * _CONV_BDY_HEIGHT / Tv_atm, 0.0))
     um_unstable = jnp.sqrt(ur**2 + wc_unstable**2)
 
     is_stable = zeta >= 0.0
@@ -339,7 +346,7 @@ def compute_below_canopy_resistance(
     uav: jax.Array,
     CI: jax.Array,
     LAI: jax.Array,
-    z0mg: float = _z0mg,
+    z0mg: float = _Z0MG_BARE,
 ) -> tuple[jax.Array, jax.Array]:
     """Below-canopy aerodynamic resistance using clumping-weighted Cs approach.
 
@@ -361,7 +368,7 @@ def compute_below_canopy_resistance(
     """
     nu       = 1.5e-5   # kinematic viscosity of air [m2/s]
     Csdense  = 0.004    # dense-canopy drag coefficient
-    Csbare   = _kv / 0.13 * (z0mg * jnp.maximum(uav, 1e-3) / nu) ** (-0.45)
+    Csbare   = constants.kappa_vk / 0.13 * (z0mg * jnp.maximum(uav, 1e-3) / nu) ** (-0.45)
 
     w   = jnp.exp(-0.5 * CI * LAI)
     Cs  = Csbare * w + Csdense * (1.0 - w)

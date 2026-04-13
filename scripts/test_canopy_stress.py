@@ -40,16 +40,79 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from legoesm.coupler.coupling_fields import AtmToSurface
-from legoesm.land.canopy import (
-    CanopyConfig,
-    CanopyLandConfig,
-    CanopyLandParams,
-    init_canopy_land_state,
-    step_canopy_land,
-    step_canopy_land_with_diagnostics,
-)
+from legoesm.land.canopy import CanopyConfig, CanopyLandParams
 from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.multilayer_land import (
+    init_multilayer_land_state,
+    step_multilayer_land,
+    step_multilayer_land_with_diagnostics,
+)
 from legoesm.land.soil_hydraulics import psi_from_theta
+from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+
+
+# Phase 3 script-local shims so the rest of the stress script reads
+# unchanged after ``canopy_land.py`` and ``CanopyLandConfig`` were removed.
+from typing import NamedTuple
+
+step_canopy_land = step_multilayer_land
+init_canopy_land_state = init_multilayer_land_state
+
+
+class _StressDiag(NamedTuple):
+    """JAX-pytree-compatible adapter mapping ``SurfaceFluxOutput`` fields
+    to the legacy ``CanopyDiagnostics`` names used by the stress harness.
+    """
+    Tf_Sun: jax.Array
+    Tf_Sh: jax.Array
+    Ts_solve: jax.Array
+    LE_tot: jax.Array
+    H_tot: jax.Array
+    G: jax.Array
+    Rn_int: jax.Array
+    residual_int: jax.Array
+    n_iters: jax.Array
+    GPP: jax.Array
+
+
+def step_canopy_land_with_diagnostics(state, forcing, cfg, U_min, dt, **kwargs):
+    """Phase 3 stress-test shim.
+
+    ``step_multilayer_land_with_diagnostics`` returns the raw
+    ``SurfaceFluxOutput`` as its 4th element.  This wrapper repackages
+    the canopy-relevant fields under the legacy field names
+    (``LE_tot``, ``H_tot``, ``G``, ``residual_int``, ...) that the
+    stress test harness below expects, using a NamedTuple so the
+    return value is a valid JAX pytree under JIT.
+    """
+    new_state, resp, carbon_new, so = step_multilayer_land_with_diagnostics(
+        state, forcing, cfg, U_min, dt, **kwargs)
+    diag = _StressDiag(
+        Tf_Sun=so.Tf_Sun,
+        Tf_Sh=so.Tf_Sh,
+        Ts_solve=so.Ts_solve,
+        LE_tot=so.lhflx,
+        H_tot=so.shflx,
+        G=so.G_soil,
+        Rn_int=so.Rn_int,
+        residual_int=so.residual_int,
+        n_iters=so.n_iters,
+        GPP=so.gpp if so.gpp is not None else jnp.zeros_like(so.lhflx),
+    )
+    return new_state, resp, carbon_new, diag
+
+
+def CanopyLandConfig(*,
+                     multilayer: MultiLayerLandConfig = None,
+                     canopy: CanopyConfig = None
+                     ) -> MultiLayerLandConfig:
+    """Phase 3 test-script shim: build a ``MultiLayerLandConfig`` with a
+    ``TwoLeafCanopyConfig`` surface scheme from the old
+    ``CanopyLandConfig(multilayer=..., canopy=...)`` factory signature.
+    """
+    base = multilayer if multilayer is not None else MultiLayerLandConfig()
+    cc = canopy if canopy is not None else CanopyConfig()
+    return base._replace(surface_scheme=cc)
 
 
 # Physical sanity bounds
@@ -112,7 +175,7 @@ def _default_params(ncol, LAI=3.0, hc=10.0, fC4=0.0, theta_init=0.30,
 def _init_state(ncol, cfg, T_init=290.0, theta_init=0.30):
     state = init_canopy_land_state(ncol, cfg, T_init=T_init)
     theta_profile = jnp.full_like(state.theta_soil, theta_init)
-    psi_profile = psi_from_theta(theta_profile, cfg.multilayer.hydraulics)
+    psi_profile = psi_from_theta(theta_profile, cfg.hydraulics)
     return state._replace(theta_soil=theta_profile, psi_soil=psi_profile)
 
 
@@ -220,7 +283,7 @@ def run_run(name, cfg, state, params, n_steps, forcing_fn, dt=1800.0,
         result.record_step(k, state, response, diag)
         if result.nan_count > 0 and result.nan_first == k:
             break
-    result.finalize(cfg.canopy.max_iters)
+    result.finalize(cfg.surface_scheme.max_iters)
     return result, state
 
 
