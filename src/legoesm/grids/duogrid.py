@@ -631,15 +631,17 @@ def _compute_ext_vectors(n: int, ng: int, ext_lon, ext_lat):
         vlat_ext[face, :, :, 2] = cos_lat
 
     # --- ew_ext, es_ext: edge vectors ---
-    # Following FV3 a2stag_metrics (fv_duogrid.F90:2871-2992).
-    # ew_ext at (i+1/2, j): from A-grid Cartesian midpoint interpolation
-    # es_ext at (i, j+1/2): from A-grid Cartesian midpoint interpolation
+    # Following FV3 a2stag_metrics (fv_duogrid.F90:2925-2951).
+    # These are edge-NORMAL vectors (perpendicular to the line connecting
+    # adjacent A-grid centers, lying on the sphere surface).
     #
-    # The edge vector is the tangent to the great circle connecting
-    # adjacent A-grid cell centers, projected to the sphere surface.
-    # FV3 uses cross products of A-grid Cartesian positions; for
-    # simplicity we use the normalized difference vector (equivalent
-    # for small cells, converges to the same result).
+    # FV3 algorithm (double cross product):
+    # For ew at (i, j) (i-edge between cells i-1 and i):
+    #   pp = midpoint of B-grid (i,j) and (i,j+1) [on sphere]
+    #   p1 = A-grid (i, j) in Cartesian
+    #   p3 = A-grid (i-1, j) in Cartesian
+    #   p2 = cross(p3, p1) — normal to great circle connecting A-grids
+    #   ew = normalize(cross(p2, pp)) — tangent at pp, perpendicular to p2
 
     # Convert A-grid positions to Cartesian
     cart = np.zeros((6, n_ext, n_ext, 3))
@@ -650,28 +652,45 @@ def _compute_ext_vectors(n: int, ng: int, ext_lon, ext_lat):
         cart[face, :, :, 1] = np.cos(lat) * np.sin(lon)
         cart[face, :, :, 2] = np.sin(lat)
 
-    # ew_ext[i, j]: edge vector between A-grid (i-1, j) and (i, j)
+    def _cross(a, b):
+        """Vectorized cross product of (..., 3) arrays."""
+        return np.stack([
+            a[..., 1] * b[..., 2] - a[..., 2] * b[..., 1],
+            a[..., 2] * b[..., 0] - a[..., 0] * b[..., 2],
+            a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0],
+        ], axis=-1)
+
+    def _normalize(v):
+        """Normalize (..., 3) vectors."""
+        norms = np.linalg.norm(v, axis=-1, keepdims=True)
+        return v / np.maximum(norms, 1e-30)
+
+    # ew_ext[i, j]: edge-normal at i-edge (between A-grid i-1 and i)
     # Shape: (6, n_ext+1, n_ext, 3)
-    # FV3: ew_ext(3, isd:ied+1, jsd:jed, 2) — we only need the first slot
     ew_ext = np.zeros((6, n_ext + 1, n_ext, 3))
     for face in range(6):
-        # Interior edges (i=1..n_ext-1): tangent from (i-1,j) to (i,j)
-        diff = cart[face, 1:, :, :] - cart[face, :-1, :, :]
-        norms = np.linalg.norm(diff, axis=-1, keepdims=True)
-        norms = np.maximum(norms, 1e-30)
-        ew_ext[face, 1:-1, :, :] = diff / norms
-        # Boundary edges: replicate nearest interior
+        # For interior i-edges (i=1..n_ext-1):
+        p1 = cart[face, 1:, :, :]    # A-grid (i, j)
+        p3 = cart[face, :-1, :, :]   # A-grid (i-1, j)
+        # pp = midpoint of adjacent A-grid cells (approximation; FV3
+        # uses B-grid midpoints but we don't have B-grid on extended)
+        pp = _normalize(0.5 * (p1 + p3))
+        p2 = _cross(p3, p1)          # normal to great circle
+        ew_raw = _cross(p2, pp)       # edge-normal at pp
+        ew_ext[face, 1:-1, :, :] = _normalize(ew_raw)
         ew_ext[face, 0, :, :] = ew_ext[face, 1, :, :]
         ew_ext[face, -1, :, :] = ew_ext[face, -2, :, :]
 
-    # es_ext[i, j]: edge vector between A-grid (i, j-1) and (i, j)
+    # es_ext[i, j]: edge-normal at j-edge (between A-grid j-1 and j)
     # Shape: (6, n_ext, n_ext+1, 3)
     es_ext = np.zeros((6, n_ext, n_ext + 1, 3))
     for face in range(6):
-        diff = cart[face, :, 1:, :] - cart[face, :, :-1, :]
-        norms = np.linalg.norm(diff, axis=-1, keepdims=True)
-        norms = np.maximum(norms, 1e-30)
-        es_ext[face, :, 1:-1, :] = diff / norms
+        p1 = cart[face, :, 1:, :]    # A-grid (i, j)
+        p3 = cart[face, :, :-1, :]   # A-grid (i, j-1)
+        pp = _normalize(0.5 * (p1 + p3))
+        p2 = _cross(p3, p1)
+        es_raw = _cross(p2, pp)
+        es_ext[face, :, 1:-1, :] = _normalize(es_raw)
         es_ext[face, :, 0, :] = es_ext[face, :, 1, :]
         es_ext[face, :, -1, :] = es_ext[face, :, -2, :]
 
