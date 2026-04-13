@@ -999,21 +999,29 @@ def _rest_state_mpas(mesh, z_coord, H_bathy, ocean_mask,
 
 def _rest_state_spectral(grid, z_coord, H_bathy, ocean_mask,
                          T_surface, T_deep, S_uniform):
-    """Create spectral ocean rest state with given bathymetry."""
+    """Create spectral ocean rest state with given bathymetry.
+
+    Spectral ocean is soft-retired (#99); custom bathymetry and land masks
+    cannot be threaded through `rest_state_spectral_ocean` reliably (Gibbs
+    ringing at coastlines). This wrapper accepts only flat-bottom, all-ocean
+    inputs and raises otherwise so the caller sees the failure instead of
+    silently getting an inconsistent state.
+    """
     from legoesm.ocean.dynamics.spectral_ocean_pe import (
         rest_state_spectral_ocean,
     )
-    # For spectral ocean, the standard rest_state function handles
-    # the spectral transform. We provide bathymetry via a custom path.
-    # For now, delegate to the existing function and override H_bathy/mask.
-    # The existing function uses lat threshold — we just need to ensure
-    # the state gets the correct bathymetry.
-    #
-    # TODO: extend rest_state_spectral_ocean to accept external H_bathy/mask
+    H_np = np.asarray(H_bathy)
+    mask_np = np.asarray(ocean_mask)
+    if not np.allclose(H_np, H_np.flat[0]) or not np.all(mask_np == 1):
+        raise NotImplementedError(
+            "spectral ocean does not support custom bathymetry or land mask "
+            "(see #99 for retirement context). Use the cubed-sphere, "
+            "lat-lon C-grid, or MPAS ocean model instead."
+        )
     return rest_state_spectral_ocean(
         grid, z_coord,
         T_surface=T_surface,
         T_deep=T_deep,
         S_uniform=S_uniform,
-        H_max=float(jnp.max(H_bathy)),
+        H_max=float(H_np.flat[0]),
     )

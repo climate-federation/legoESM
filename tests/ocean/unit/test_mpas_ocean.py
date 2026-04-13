@@ -354,6 +354,21 @@ class TestMPASOceanModel:
         assert jnp.all(jnp.isfinite(s.T.data))
         assert jnp.all(jnp.isfinite(s.eta.data))
 
+    def test_step_checked_finite_state(self, mesh, z_coord, config, state):
+        """step_checked must validate finite state without crashing.
+
+        Regression test for an AttributeError on jax bool-array `.broadcast_to`
+        in `_assert_runtime_invariants` (#174 item 6). Default T/S bounds are
+        wide enough for the rest state, so the validator should pass through
+        cleanly and return a finite stepped state.
+        """
+        config_rc = config._replace(enable_runtime_checks=True)
+        model = MPASOceanModel(mesh, z_coord, config_rc)
+        state_new = model.step_checked(state, dt=60.0)
+        assert jnp.all(jnp.isfinite(state_new.T.data))
+        assert jnp.all(jnp.isfinite(state_new.S.data))
+        assert jnp.all(jnp.isfinite(state_new.eta.data))
+
 
 # ============================================================================
 # Test: Conservation

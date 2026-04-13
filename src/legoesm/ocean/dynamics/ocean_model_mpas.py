@@ -420,8 +420,8 @@ class MPASOceanModel:
             )
 
         config = self.config
-        T_wet = state.T.data[wet[:, jnp.newaxis].broadcast_to(state.T.data.shape)]
-        S_wet = state.S.data[wet[:, jnp.newaxis].broadcast_to(state.S.data.shape)]
+        T_wet = state.T.data[wet]
+        S_wet = state.S.data[wet]
 
         if T_wet.size > 0:
             T_min_val = float(jnp.min(T_wet))
