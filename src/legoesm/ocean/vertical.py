@@ -90,7 +90,8 @@ def create_ocean_z_star(
 
     # Stretched grid: dz grows smoothly from dz_surface to dz_deep.
     # Use a normalized distribution then scale to match H_max.
-    k = jnp.arange(n_levels, dtype=jnp.float32)
+    from legoesm.core.precision import get_policy
+    k = jnp.arange(n_levels, dtype=get_policy().control)
 
     # Layer thickness profile: linear growth from dz_surface to dz_deep
     dz_raw = dz_surface + k * (dz_deep - dz_surface) / jnp.maximum(n_levels - 1.0, 1.0)
