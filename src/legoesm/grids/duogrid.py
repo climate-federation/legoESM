@@ -387,6 +387,10 @@ def _compute_corner_lagrange_coeff(n: int, ng: int, ext_lon, ext_lat):
     interp_order = 3  # FV3 default: interporder=3 → 4 stencil points
     n_stencil = interp_order + 1  # 4
 
+    # 4-point Lagrange stencil requires n >= 4; fall back to averaging
+    if n < n_stencil:
+        return None, None, None, None
+
     n_ext = n + 2 * ng
 
     # For each face, compute weights for each direction and target position.
@@ -547,6 +551,9 @@ def create_duogrid_data(
     # Step P5: Compute Lagrange corner coefficients
     xp, xm, yp, ym = _compute_corner_lagrange_coeff(n, ng, ext_lon, ext_lat)
 
+    def _maybe_jnp(arr):
+        return jnp.array(arr, dtype=jnp.float64) if arr is not None else None
+
     return DuoGridData(
         n=n,
         ng=ng,
@@ -555,10 +562,10 @@ def create_duogrid_data(
         k2e_lo=jnp.array(k2e_lo, dtype=jnp.int32),
         ext_lon=jnp.array(ext_lon, dtype=jnp.float64),
         ext_lat=jnp.array(ext_lat, dtype=jnp.float64),
-        corner_xp=jnp.array(xp, dtype=jnp.float64),
-        corner_xm=jnp.array(xm, dtype=jnp.float64),
-        corner_yp=jnp.array(yp, dtype=jnp.float64),
-        corner_ym=jnp.array(ym, dtype=jnp.float64),
+        corner_xp=_maybe_jnp(xp),
+        corner_xm=_maybe_jnp(xm),
+        corner_yp=_maybe_jnp(yp),
+        corner_ym=_maybe_jnp(ym),
     )
 
 
