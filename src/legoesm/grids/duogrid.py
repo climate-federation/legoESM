@@ -981,8 +981,10 @@ def cubed_a2d_halo(
 
     Returns
     -------
-    ud : (6, n_p, n_p-1) — D-grid u at interior j-edges (j=1..n_p-2)
-    vd : (6, n_p-1, n_p) — D-grid v at interior i-edges (i=1..n_p-2)
+    ud : (6, n_p, n_p-1) — D-grid u at j-edges between adjacent A-cells
+        (n_p-1 edges at j+1/2 for j=0..n_p-2)
+    vd : (6, n_p-1, n_p) — D-grid v at i-edges between adjacent A-cells
+        (n_p-1 edges at i+1/2 for i=0..n_p-2)
     """
     n = duogrid.n
     h = halo
