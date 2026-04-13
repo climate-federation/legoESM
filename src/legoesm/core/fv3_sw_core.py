@@ -192,8 +192,9 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
 
-    # 4th-order interior (at least npt cells from each edge)
-    if n > 2 * npt:
+    # 4th-order interior (at least npt cells from each edge).
+    # Guard: needs n > 2*npt AND npt > 0 (i.e., n >= 2).
+    if n > 2 * npt and npt > 0:
         u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
               + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
         utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
