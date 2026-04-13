@@ -97,12 +97,11 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
         vtmp = vtmp.at[:, 1:n - 1, :].set(v4)
 
     # ---- Step 2: Halo-exchange with halo=2 + Duo-Grid remap ----
-    offsets_h2 = None if dg is not None else grid.halo_interp_offsets_h2
+    # dg is always non-None here (caller checks); pass it directly.
     utmp_pad, vtmp_pad = pad_halo_vector(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        interp_offsets=offsets_h2,
         halo=h,
         duogrid=dg,
     )  # each (6, n+4, n+4)
