@@ -445,6 +445,88 @@ class TestSlabLandIntegration(unittest.TestCase):
             jnp.allclose(resp_bb.lhflx, resp_med.lhflx, atol=1e-6))
 
 
+class TestNewtonAgsConvergence(unittest.TestCase):
+    """Newton-based A-gs solver must converge at high VPD where the
+    earlier fixed-point iteration stalls / oscillates.
+    """
+
+    def _make_high_vpd_inputs(self, n=4):
+        # T_leaf = 310 K (very warm); q_air = 1e-4 (essentially dry);
+        # Ps = 101325 Pa → e_sat(310) ≈ 6.28 kPa, e_air ≈ 0.016 kPa,
+        # VPD ≈ 6.26 kPa → g1/sqrt(VPD) ≈ 1.6 → Medlyn gs near g0.
+        T = jnp.full(n, 310.0)
+        sw = jnp.full(n, 800.0)
+        co2 = 400.0
+        q = jnp.full(n, 1e-4)
+        p = jnp.full(n, 101325.0)
+        LAI = jnp.full(n, 3.0)
+        beta = jnp.full(n, 0.6)
+        return T, sw, co2, q, p, LAI, beta
+
+    def _s(self, x):
+        """First-element accessor — inputs are uniform so all columns agree."""
+        return float(jnp.asarray(x).reshape(-1)[0])
+
+    def test_high_vpd_medlyn_converges(self):
+        """Medlyn + high VPD: Newton must return finite, stable gs/gpp."""
+        cfg = StomataConfig(
+            enabled=True, stomata_model="medlyn", n_iter_ags=5)
+        T, sw, co2, q, p, LAI, beta = self._make_high_vpd_inputs()
+        gs, gpp = coupled_farquhar_stomata(T, sw, co2, q, p, LAI, beta, cfg)
+        self.assertTrue(jnp.all(jnp.isfinite(gs)))
+        self.assertTrue(jnp.all(jnp.isfinite(gpp)))
+        # At 6 kPa VPD, gs should collapse toward g0 but not below.
+        self.assertGreaterEqual(self._s(gs), cfg.g0 - 1e-12)
+        # GPP should still be positive (some assimilation at high light)
+        # but much smaller than the low-VPD reference below.
+        self.assertGreaterEqual(self._s(gpp), 0.0)
+
+    def test_high_vpd_ball_berry_converges(self):
+        """Ball-Berry at low RH behaves similarly: must converge cleanly."""
+        cfg = StomataConfig(
+            enabled=True, stomata_model="ball_berry", n_iter_ags=5)
+        T, sw, co2, q, p, LAI, beta = self._make_high_vpd_inputs()
+        gs, gpp = coupled_farquhar_stomata(T, sw, co2, q, p, LAI, beta, cfg)
+        self.assertTrue(jnp.all(jnp.isfinite(gs)))
+        self.assertTrue(jnp.all(jnp.isfinite(gpp)))
+        self.assertGreaterEqual(self._s(gs), cfg.g0 - 1e-12)
+
+    def test_newton_converges_fewer_iters_than_fixed_point(self):
+        """At high VPD, Newton with 3 iterations should be nearly identical
+        to Newton with 20 iterations.  A fixed-point scheme would show a
+        visible drift between iteration counts.
+        """
+        cfg_low = StomataConfig(
+            enabled=True, stomata_model="medlyn", n_iter_ags=3)
+        cfg_high = StomataConfig(
+            enabled=True, stomata_model="medlyn", n_iter_ags=20)
+        T, sw, co2, q, p, LAI, beta = self._make_high_vpd_inputs()
+        gs_low, gpp_low = coupled_farquhar_stomata(
+            T, sw, co2, q, p, LAI, beta, cfg_low)
+        gs_high, gpp_high = coupled_farquhar_stomata(
+            T, sw, co2, q, p, LAI, beta, cfg_high)
+        # Small tolerance — 3 iters of damped Newton is already near convergence.
+        self.assertTrue(jnp.allclose(gs_low, gs_high, rtol=1e-3, atol=1e-6))
+        self.assertTrue(jnp.allclose(gpp_low, gpp_high, rtol=1e-3, atol=1e-10))
+
+    def test_low_vpd_still_converges(self):
+        """Regression: at benign conditions the Newton result must match
+        the intuitive low-VPD behaviour (gs substantially above g0, GPP > 0).
+        """
+        cfg = StomataConfig(
+            enabled=True, stomata_model="ball_berry", n_iter_ags=5)
+        T = jnp.full(4, 298.15)
+        sw = jnp.full(4, 500.0)
+        q = jnp.full(4, 0.012)
+        p = jnp.full(4, 101325.0)
+        LAI = jnp.full(4, 3.0)
+        beta = jnp.full(4, 0.8)
+        gs, gpp = coupled_farquhar_stomata(
+            T, sw, 400.0, q, p, LAI, beta, cfg)
+        self.assertGreater(self._s(gs), 5.0 * cfg.g0)   # well open
+        self.assertGreater(self._s(gpp) * 86400.0, 1.0)  # > 1 gC/m2/day
+
+
 class TestDifferentiability(unittest.TestCase):
     """JAX differentiability of stomatal models."""
 

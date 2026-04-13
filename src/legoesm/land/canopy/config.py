@@ -90,6 +90,12 @@ class CanopyConfig(NamedTuple):
     # removed to keep the Newton residual minimal — re-introduce them via
     # a new static config string if a multi-scheme comparison is needed.
     LE_module: str = "BT"                   # "BT" (Bulk Transfer, default) | "PM" (Penman-Monteith)
+    # Stomatal conductance model used inside the leaf energy balance
+    # closure.  "ball_berry" interprets ``m``/``b0`` as Ball-Berry slope
+    # and intercept; "medlyn" interprets ``m`` as the Medlyn g1 slope
+    # [kPa^0.5] and ``b0`` as g0 [mol/m2/s].  Captured as a static
+    # Python string via functools.partial — never traced.
+    stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn"
     use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
 
     # NOTE: The former ``G_alpha`` tunable (G = G_alpha · Rn_soil) has been

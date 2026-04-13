@@ -255,7 +255,7 @@ def _step_canopy_land_full(
         return solve_canopy_closure(x0, bun, cc)
 
     def _fwd_one_col(xf, bun):
-        return _canopy_forward(xf, bun, cc.LE_module,
+        return _canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
                                cc.use_ta_for_photosynthesis)
 
     # ---- Outer Picard loop: canopy closure ↔ soil thermal solver ----

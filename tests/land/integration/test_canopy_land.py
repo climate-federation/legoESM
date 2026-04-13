@@ -124,3 +124,93 @@ def test_dispatch_via_component_factory():
         pass
     step_fn = create_land_component(_Stub(), grid=None, land_config=cfg)
     assert step_fn is step_canopy_land
+
+
+# ---------------------------------------------------------------------------
+# Pluggable stomatal model (Ball-Berry default, Medlyn alternative)
+# ---------------------------------------------------------------------------
+
+def test_medlyn_stomatal_model_runs():
+    """Canopy must produce finite, physically reasonable fluxes when the
+    Medlyn stomatal conductance model is selected in place of Ball-Berry."""
+    ncol = 2
+    # Medlyn slope g1_med ≈ 4 for C3, g0 = 0.01 — use per-column m/b0 accordingly.
+    cfg = CanopyLandConfig(
+        multilayer=MultiLayerLandConfig(),
+        canopy=CanopyConfig(stomatal_model="medlyn", max_iters=30),
+    )
+    state = init_canopy_land_state(ncol, cfg, T_init=290.0)
+    forcing = _make_forcing(ncol, sw_down=700.0, cos_zenith=0.8)
+
+    # Override per-column Ball-Berry params to be Medlyn-appropriate: the
+    # canopy_land fallback provides m_C3=9 which is right for Ball-Berry
+    # but too large for Medlyn — use land_params to set m=4.0.
+    from legoesm.land.canopy.config import CanopyLandParams
+    import jax.numpy as jnp
+    params = CanopyLandParams(
+        LAI=jnp.full(ncol, 3.0),
+        hc=jnp.full(ncol, 5.0),
+        fC4=jnp.zeros(ncol),
+        FNonVeg=jnp.zeros(ncol),
+        CI=jnp.full(ncol, 0.75),
+        kn=jnp.full(ncol, 0.3),
+        Vcmax25_C3_leaf=jnp.full(ncol, 60.0),
+        Vcmax25_C4_leaf=jnp.full(ncol, 40.0),
+        m_C3=jnp.full(ncol, 4.0),   # Medlyn g1 [kPa^0.5]
+        m_C4=jnp.full(ncol, 1.6),   # Medlyn g1 for C4
+        b0_C3=jnp.full(ncol, 0.01),
+        b0_C4=jnp.full(ncol, 0.04),
+        alf=jnp.full(ncol, 0.3),
+        TgC=jnp.full(ncol, 20.0),
+        ALB_VIS=jnp.full(ncol, 0.1),
+        ALB_NIR=jnp.full(ncol, 0.2),
+        emissivity=jnp.full(ncol, 0.97),
+        rz0m=jnp.full(ncol, 0.055),
+        rd=jnp.full(ncol, 0.67),
+    )
+
+    _, response, _ = step_canopy_land(
+        state, forcing, cfg, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), doy=180.0, land_params=params)
+
+    for name, f in (("T_surface", response.T_surface),
+                    ("lhflx", response.lhflx),
+                    ("shflx", response.shflx),
+                    ("co2_flux", response.co2_flux)):
+        assert jnp.all(jnp.isfinite(f)), f"non-finite {name} under Medlyn"
+
+    assert float(response.lhflx[0]) > 0.0, "Medlyn LE ≤ 0 at midday"
+    assert float(response.co2_flux[0]) < 0.0, "Medlyn GPP ≤ 0 at midday"
+    assert 265.0 < float(response.T_surface[0]) < 325.0
+
+
+def test_medlyn_differs_from_ball_berry():
+    """Medlyn and Ball-Berry with the same numerical slopes must produce
+    different fluxes (their functional forms differ) — guards against
+    silent fallback to a single hard-coded model.
+    """
+    ncol = 2
+    state_bb = init_canopy_land_state(
+        CanopyLandConfig(multilayer=MultiLayerLandConfig(),
+                         canopy=CanopyConfig()),
+        ncol=ncol, T_init=290.0) if False else None
+    # Build both configs.
+    cfg_bb = CanopyLandConfig(
+        multilayer=MultiLayerLandConfig(),
+        canopy=CanopyConfig(stomatal_model="ball_berry", max_iters=30))
+    cfg_med = CanopyLandConfig(
+        multilayer=MultiLayerLandConfig(),
+        canopy=CanopyConfig(stomatal_model="medlyn", max_iters=30))
+    state = init_canopy_land_state(ncol, cfg_bb, T_init=290.0)
+    forcing = _make_forcing(ncol, sw_down=700.0, cos_zenith=0.8)
+
+    _, resp_bb, _ = step_canopy_land(
+        state, forcing, cfg_bb, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), doy=180.0)
+    _, resp_med, _ = step_canopy_land(
+        state, forcing, cfg_med, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), doy=180.0)
+
+    # Fluxes must differ (functional form difference).
+    assert not jnp.allclose(resp_bb.lhflx, resp_med.lhflx, atol=1e-4)
+    assert not jnp.allclose(resp_bb.co2_flux, resp_med.co2_flux, atol=1e-10)

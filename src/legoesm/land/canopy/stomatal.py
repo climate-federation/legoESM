@@ -168,7 +168,7 @@ def compute_stomatal_beta(
 
 
 # =====================================================================
-# Coupled Farquhar (Leuning) + stomata solver — fixed-point
+# Coupled Farquhar (Leuning) + stomata solver — damped Newton
 # =====================================================================
 
 def coupled_farquhar_stomata(
@@ -186,9 +186,18 @@ def coupled_farquhar_stomata(
 
     Uses the **Leuning C3 + Q10 C4** Farquhar model from
     ``canopy/photosynthesis.py`` with a continuous ``fC4`` fraction for
-    mixed C3/C4 canopies.  Iterates ``Ci`` between Farquhar and the
-    stomatal model (Ball-Berry or Medlyn) until the diffusion constraint
-    ``Ci = Ca - 1.6 * An / gs`` is satisfied.
+    mixed C3/C4 canopies.  Solves the scalar-per-column diffusion
+    constraint
+
+        F(Ci) = Ci - (Ca - 1.6 · max(A_n(Ci), 0) / max(gs(A_n(Ci)), g0)) = 0
+
+    via damped Newton iteration with the element-wise derivative
+    ``dF/dCi`` extracted by a single ``jax.jvp`` call per step
+    (``F`` is element-wise, so a unit-tangent JVP gives the diagonal of
+    the Jacobian in O(n)).  Replaces the earlier fixed-point iteration
+    which stalls or oscillates at high VPD because the Medlyn
+    ``1/sqrt(VPD)`` term amplifies small Ci changes into large gs
+    changes.
 
     Soil moisture stress is applied as a multiplicative down-regulation
     of ``Vcmax25`` (CLM / Bonan et al. 2011).
@@ -202,7 +211,9 @@ def coupled_farquhar_stomata(
     p_surface : surface pressure [Pa]
     LAI       : leaf area index [m^2 / m^2]
     beta_soil : soil moisture availability factor [0-1]
-    config    : StomataConfig
+    config    : StomataConfig (provides ``stomata_model``, ``n_iter_ags``,
+                ``Vcmax25_C3/C4``, ``alf_C3``, ``fC4``, ``g0``, ``g1_bb``,
+                ``g1_med``, ``TgC_default``, ``k_ext``)
     TgC       : 30-day mean growth temperature [°C].  If ``None``,
                 ``config.TgC_default`` is broadcast to ``T_leaf.shape``.
 
@@ -232,10 +243,11 @@ def coupled_farquhar_stomata(
             jnp.asarray(config.TgC_default, dtype=T_leaf.dtype), T_leaf.shape)
 
     beta_safe = jnp.clip(beta_soil, 0.01, 1.0)
-    Vcmax25_C3_eff = config.Vcmax25_C3 * beta_safe
-    Vcmax25_C4_eff = config.Vcmax25_C4 * beta_safe
+    Vcmax25_C3_eff = jnp.broadcast_to(
+        config.Vcmax25_C3 * beta_safe, T_leaf.shape)
+    Vcmax25_C4_eff = jnp.broadcast_to(
+        config.Vcmax25_C4 * beta_safe, T_leaf.shape)
 
-    # fC4 broadcast to leaf shape so Leuning photosynthesis gets an array.
     fC4 = jnp.broadcast_to(
         jnp.asarray(config.fC4, dtype=T_leaf.dtype), T_leaf.shape)
     alf = jnp.broadcast_to(
@@ -244,30 +256,47 @@ def coupled_farquhar_stomata(
     def _An(Ci):
         return _leuning_mixed(
             T_leaf, Ci, APAR_umol,
-            jnp.broadcast_to(Vcmax25_C3_eff, T_leaf.shape),
-            jnp.broadcast_to(Vcmax25_C4_eff, T_leaf.shape),
+            Vcmax25_C3_eff, Vcmax25_C4_eff,
             fC4, p_surface, alf, TgC,
         )
 
-    def _gs(An):
+    def _gs_from_An(An):
         if config.stomata_model == "medlyn":
             return medlyn_gs(An, VPD_kPa, Ca, config.g1_med, config.g0)
         return ball_berry_gs(An, RH, Ca, config.g1_bb, config.g0)
 
-    # Fixed-point iteration (unrolled for JIT compatibility).
-    # Phase 2 replaces this with a Newton solver — at high VPD the
-    # fixed-point can stall or oscillate.
-    Ci = 0.7 * Ca
-    for _ in range(config.n_iter_ags):
-        A_net = _An(Ci)
-        gs = _gs(A_net)
-        gs_safe = jnp.maximum(gs, config.g0)
-        A_pos = jnp.maximum(A_net, 0.0)
-        Ci = Ca - 1.6 * A_pos / gs_safe
-        Ci = jnp.clip(Ci, 1.0, Ca)
+    def _F(Ci):
+        """Residual F(Ci) = Ci - (Ca - 1.6 · max(A_n,0) / max(gs, g0)).
 
+        Element-wise in ``Ci`` because ``_An`` and ``_gs_from_An`` are
+        element-wise, so a unit-tangent ``jax.jvp`` returns the diagonal
+        of the Jacobian in a single forward-mode pass.
+        """
+        A_net = _An(Ci)
+        gs_local = _gs_from_An(A_net)
+        gs_safe = jnp.maximum(gs_local, config.g0)
+        A_pos = jnp.maximum(A_net, 0.0)
+        return Ci - (Ca - 1.6 * A_pos / gs_safe)
+
+    # Initial guess: chi = Ci/Ca ≈ 0.7 for C3, 0.4 for pure C4.
+    chi0 = 0.7 - 0.3 * fC4
+    Ci = chi0 * Ca
+
+    # Damped Newton.  dF/dCi > 0 always for this residual (the diffusion
+    # constraint monotonically increases with Ci), so we can safely floor
+    # the derivative at a small positive value.  Damping factor 0.8 trades
+    # quadratic convergence for global robustness at radiation-collapse
+    # transitions and high-VPD regimes.
+    DAMP = 0.8
+    for _ in range(config.n_iter_ags):
+        F_val, dF_dCi = jax.jvp(_F, (Ci,), (jnp.ones_like(Ci),))
+        dF_safe = jnp.maximum(dF_dCi, 1e-3)
+        Ci = Ci - DAMP * F_val / dF_safe
+        Ci = jnp.clip(Ci, 1.0, 0.99 * jnp.maximum(Ca, 1.0))
+
+    # Final evaluation at converged Ci.
     A_net = _An(Ci)
-    gs = _gs(A_net)
+    gs = _gs_from_An(A_net)
 
     # Leuning ``photosynthesis`` returns An clipped at 0 (net assimilation),
     # so use it directly as a GPP proxy.  Strictly speaking GPP should be

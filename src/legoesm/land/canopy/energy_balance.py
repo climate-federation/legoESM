@@ -21,6 +21,8 @@ import functools
 import jax
 import jax.numpy as jnp
 
+from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
+
 # Module-local constants.
 # NOTE: Stefan-Boltzmann and other canonical physical constants are imported
 # from ``legoesm.constants`` — do not redefine them here.
@@ -86,35 +88,61 @@ def canopy_met_variables(
 
 
 # ---------------------------------------------------------------------------
-# Stomatal conductance (Ball-Berry)
+# Stomatal conductance dispatch (Ball-Berry or Medlyn)
 # ---------------------------------------------------------------------------
 
 def _compute_gs_and_ci(
     An: jax.Array,
     RH_c: jax.Array,
+    VPD_c: jax.Array,
     Ca: jax.Array,
     Tf: jax.Array,
     Ps: jax.Array,
     m: jax.Array,
     b0: jax.Array,
-    is_c4: bool = False,
+    stomatal_model: str,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Ball-Berry stomatal conductance and intercellular CO2.
+    """Stomatal conductance and intercellular CO2 closure for a leaf.
 
-    Returns (rs [s m-1], gs [m s-1], Ci [μmol mol-1])
+    Dispatches between Ball-Berry (RH-based) and Medlyn (VPD-based) based
+    on the ``stomatal_model`` static argument.  Both models use the same
+    per-leaf ``(m, b0)`` pair — ``m`` is interpreted as the Ball-Berry
+    slope ``g1_bb`` for ``"ball_berry"`` and as the Medlyn slope ``g1_med``
+    [kPa^0.5] for ``"medlyn"``; ``b0`` is the residual conductance in both
+    cases.
+
+    Parameters
+    ----------
+    An     : net assimilation [μmol CO2 / m^2 / s]
+    RH_c   : canopy-air relative humidity [-]  (used by Ball-Berry)
+    VPD_c  : canopy-air vapour pressure deficit [Pa]  (converted to
+             kPa inside for Medlyn; unused by Ball-Berry)
+    Ca     : ambient CO2 [μmol / mol]
+    Tf     : leaf temperature [K]  (for mol → m/s unit conversion)
+    Ps     : surface pressure [Pa]
+    m, b0  : stomatal slope and intercept (see above)
+    stomatal_model : ``"ball_berry"`` | ``"medlyn"`` — static Python string
+                     captured in a ``functools.partial`` closure; never
+                     traced by JAX.
+
+    Returns
+    -------
+    (rs [s m-1], gs [m s-1], Ci [μmol mol-1])
     """
+    if stomatal_model == "medlyn":
+        VPD_kPa = jnp.maximum(VPD_c, 50.0) / 1000.0  # Pa → kPa, floor 0.05 kPa
+        gs_mol = medlyn_gs(An, VPD_kPa, Ca, m, b0)
+    else:
+        gs_mol = ball_berry_gs(An, RH_c, Ca, m, b0)
+
+    Ci = Ca - 1.6 * An / jnp.maximum(gs_mol, 1e-9)
+    # Clip Ci to the physically reasonable C3 range; mixed-PFT C3/C4
+    # is handled upstream in ``photosynthesis()`` via the continuous fC4
+    # fraction, so the C4 bounds are not needed here.
+    Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)
+
     # Unit conversion: mol m-2 s-1 → m s-1
     cf = 0.446 * (_T0 / Tf) * (Ps / _Ps0)
-
-    gs_mol = jnp.maximum(m * RH_c * An / jnp.maximum(Ca, 1e-3) + b0, b0)
-    Ci = Ca - 1.6 * An / jnp.maximum(gs_mol, 1e-9)
-
-    # Clip Ci to physically reasonable range
-    if is_c4:
-        Ci = jnp.clip(Ci, 0.2 * Ca, 0.6 * Ca)
-    else:
-        Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)
-
     rs = 1.0 / (gs_mol / cf * 1e-2)   # [s m-1]
     gs = 1.0 / rs                      # [m s-1]
     return rs, gs, Ci
@@ -124,7 +152,7 @@ def _compute_gs_and_ci(
 # Leaf energy balance — BT (Bulk Transfer)
 # ---------------------------------------------------------------------------
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("stomatal_model",))
 def leaf_energy_balance_bt(
     An: jax.Array,
     ASW: jax.Array,
@@ -136,12 +164,14 @@ def leaf_energy_balance_bt(
     q_f: jax.Array,
     q_c: jax.Array,
     RH_c: jax.Array,
+    VPD_c: jax.Array,
     lam: jax.Array,
     Cp: jax.Array,
     rhoa: jax.Array,
     Rb: jax.Array,
     m: jax.Array,
     b0: jax.Array,
+    stomatal_model: str = "ball_berry",
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via direct bulk transfer (BT).
 
@@ -151,27 +181,31 @@ def leaf_energy_balance_bt(
 
     Parameters
     ----------
-    An   : net photosynthesis [μmol m-2 s-1]
-    ASW  : absorbed shortwave [W m-2]
-    ALW  : net absorbed longwave [W m-2]
-    Tf   : leaf temperature [K]
-    Ps   : pressure [Pa]
-    Ca   : ambient CO2 [μmol mol-1]
-    Tc   : canopy air temperature [K]
-    q_f  : leaf saturation specific humidity [kg kg-1]
-    q_c  : canopy air specific humidity [kg kg-1]
-    RH_c : canopy relative humidity [-]
-    lam  : latent heat of vaporisation [J kg-1]
-    Cp   : specific heat of air [J kg-1 K-1]
-    rhoa : air density [kg m-3]
-    Rb   : boundary-layer resistance [s m-1]
-    m, b0: Ball-Berry slope and intercept [mol m-2 s-1 units]
+    An     : net photosynthesis [μmol m-2 s-1]
+    ASW    : absorbed shortwave [W m-2]
+    ALW    : net absorbed longwave [W m-2]
+    Tf     : leaf temperature [K]
+    Ps     : pressure [Pa]
+    Ca     : ambient CO2 [μmol mol-1]
+    Tc     : canopy air temperature [K]
+    q_f    : leaf saturation specific humidity [kg kg-1]
+    q_c    : canopy air specific humidity [kg kg-1]
+    RH_c   : canopy relative humidity [-]
+    VPD_c  : canopy-air vapour pressure deficit [Pa] (used by Medlyn)
+    lam    : latent heat of vaporisation [J kg-1]
+    Cp     : specific heat of air [J kg-1 K-1]
+    rhoa   : air density [kg m-3]
+    Rb     : boundary-layer resistance [s m-1]
+    m, b0  : stomatal slope and intercept (Ball-Berry or Medlyn; see
+             ``_compute_gs_and_ci``)
+    stomatal_model : ``"ball_berry"`` | ``"medlyn"`` — static argument.
 
     Returns
     -------
     Rn, LE, H, Tf_new, gs, Ci
     """
-    rs, gs, Ci = _compute_gs_and_ci(An, RH_c, Ca, Tf, Ps, m, b0)
+    rs, gs, Ci = _compute_gs_and_ci(
+        An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model)
 
     Rn = ASW + ALW
     LE = lam * rhoa * (q_f - q_c) / jnp.maximum(Rb + rs, 1e-6)
@@ -198,7 +232,7 @@ def leaf_energy_balance_bt(
 # Leaf energy balance — PM (Penman-Monteith, second-order Paw & Gao 1988)
 # ---------------------------------------------------------------------------
 
-@jax.jit
+@functools.partial(jax.jit, static_argnames=("stomatal_model",))
 def leaf_energy_balance_pm(
     An: jax.Array,
     ASW: jax.Array,
@@ -217,14 +251,19 @@ def leaf_energy_balance_pm(
     Rb: jax.Array,
     m: jax.Array,
     b0: jax.Array,
+    stomatal_model: str = "ball_berry",
 ) -> tuple[jax.Array, ...]:
     """Leaf energy balance via second-order Penman-Monteith (Paw & Gao 1988).
+
+    ``stomatal_model`` selects Ball-Berry or Medlyn; see
+    ``leaf_energy_balance_bt`` for details.
 
     Returns
     -------
     Rn, LE, H, Tf_new, gs, Ci
     """
-    rs, gs, Ci = _compute_gs_and_ci(An, RH_c, Ca, Tf, Ps, m, b0)
+    rs, gs, Ci = _compute_gs_and_ci(
+        An, RH_c, VPD_c, Ca, Tf, Ps, m, b0, stomatal_model)
 
     Rn = ASW + ALW
     rc = rs

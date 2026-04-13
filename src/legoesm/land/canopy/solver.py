@@ -134,6 +134,7 @@ def _canopy_residual(
     x: jax.Array,
     bundle: CanopyForcingBundle,
     LE_module: str,
+    stomatal_model: str,
     use_ta_for_photosynthesis: bool,
 ) -> jax.Array:
     """Compute the residual vector F(x) for the FULLY_COUPLED canopy closure.
@@ -191,21 +192,25 @@ def _canopy_residual(
         q_f_Sh  = saturation_specific_humidity(Tf_Sh,  b.Ps)
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_bt(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
-            Tc, q_f_Sun, q_c, RH_c,
-            b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0)
+            Tc, q_f_Sun, q_c, RH_c, VPD_c,
+            b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
+            stomatal_model=stomatal_model)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
-            Tc, q_f_Sh, q_c, RH_c,
-            b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0)
+            Tc, q_f_Sh, q_c, RH_c, VPD_c,
+            b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
+            stomatal_model=stomatal_model)
     else:  # PM
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
-            b.Cp, b.rhoa, Rb_Sun, b.m, b.b0)
+            b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
+            stomatal_model=stomatal_model)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
-            b.Cp, b.rhoa, Rb_Sh, b.m, b.b0)
+            b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
+            stomatal_model=stomatal_model)
 
     # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
     q_s = saturation_specific_humidity(Ts, b.Ps)
@@ -270,6 +275,7 @@ def _canopy_forward(
     x: jax.Array,
     bundle: CanopyForcingBundle,
     LE_module: str,
+    stomatal_model: str,
     use_ta_for_photosynthesis: bool,
 ) -> dict:
     """Evaluate the FULLY_COUPLED canopy state and return all fluxes.
@@ -317,21 +323,25 @@ def _canopy_forward(
         q_f_Sh  = saturation_specific_humidity(Tf_Sh,  b.Ps)
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_bt(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
-            Tc, q_f_Sun, q_c, RH_c,
-            b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0)
+            Tc, q_f_Sun, q_c, RH_c, VPD_c,
+            b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
+            stomatal_model=stomatal_model)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
-            Tc, q_f_Sh, q_c, RH_c,
-            b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0)
+            Tc, q_f_Sh, q_c, RH_c, VPD_c,
+            b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
+            stomatal_model=stomatal_model)
     else:
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
-            b.Cp, b.rhoa, Rb_Sun, b.m, b.b0)
+            b.Cp, b.rhoa, Rb_Sun, b.m, b.b0,
+            stomatal_model=stomatal_model)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
             Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
-            b.Cp, b.rhoa, Rb_Sh, b.m, b.b0)
+            b.Cp, b.rhoa, Rb_Sh, b.m, b.b0,
+            stomatal_model=stomatal_model)
 
     q_s = saturation_specific_humidity(Ts, b.Ps)
     if LE_module == "BT":
@@ -381,7 +391,7 @@ def solve_canopy_closure(
     bundle : CanopyForcingBundle
         All per-column forcing inputs (including ``Ts_bc``).
     config : CanopyConfig
-        Solver settings (max_iters, tol, LE_module).
+        Solver settings (max_iters, tol, LE_module, stomatal_model).
 
     Returns
     -------
@@ -390,6 +400,7 @@ def solve_canopy_closure(
     """
     solver = _make_implicit_newton_solver(
         LE_module=config.LE_module,
+        stomatal_model=config.stomatal_model,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
         max_iters=config.max_iters,
         tol=config.tol,
@@ -403,6 +414,7 @@ def solve_canopy_closure(
 
 def _make_implicit_newton_solver(
     LE_module: str,
+    stomatal_model: str,
     use_ta_for_photosynthesis: bool,
     max_iters: int,
     tol: float,
@@ -438,6 +450,7 @@ def _make_implicit_newton_solver(
         return _canopy_residual(
             x, bundle,
             LE_module=LE_module,
+            stomatal_model=stomatal_model,
             use_ta_for_photosynthesis=use_ta_for_photosynthesis,
         )
 
