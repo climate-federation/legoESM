@@ -82,19 +82,29 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     grid = cdgrid.base
     dg = grid.duogrid
 
+    # ---- Step 0: D-grid staggered halo exchange (FV3 ext_vector) ----
+    # FV3 exchanges D-grid winds via ext_vector BEFORE d2a2c_vect,
+    # providing halo-extended D-grid data for 4th-order D→A everywhere.
+    from legoesm.grids.duogrid import pad_halo_dgrid
+    u_d_ext, v_d_ext = pad_halo_dgrid(
+        u_d, v_d, grid.cos_angle, grid.sin_angle, dg)
+    # u_d_ext: (6, n, n+3) — u_d with 1 halo on each j-side
+    # v_d_ext: (6, n+3, n) — v_d with 1 halo on each i-side
+
     # ---- Step 1: D-grid → covariant cell centres (utmp, vtmp) ----
-    # 2nd-order base
-    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
-    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
-    # 4th-order interior: covers all cells except the outermost 1 on each
-    # side (FV3 uses 4th-order for jsd+1:jed-1 with ng=4 halo).
+    # With halo-extended D-grid, 4th-order at ALL cells including boundary.
+    # u_d_ext: (6, n, n+3) — halo=1 on each j-side of n+1 original edges.
+    # Interior edges are at j=1..n+1 (0-based). Cell j uses edges j+1, j+2.
+    utmp = 0.5 * (u_d_ext[:, :, 1:-2] + u_d_ext[:, :, 2:-1])  # (6, n, n) 2nd-order
+    vtmp = 0.5 * (v_d_ext[:, 1:-2, :] + v_d_ext[:, 2:-1, :])  # (6, n, n)
+    # 4th-order: now covers ALL cells because halo provides j=-1 and j=n+1
     if n >= 4:
-        u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
-              + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
-        utmp = utmp.at[:, :, 1:n - 1].set(u4)
-        v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
-              + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
-        vtmp = vtmp.at[:, 1:n - 1, :].set(v4)
+        u4 = (_A2 * (u_d_ext[:, :, :-3] + u_d_ext[:, :, 3:])
+              + _A1 * (u_d_ext[:, :, 1:-2] + u_d_ext[:, :, 2:-1]))
+        utmp = utmp.at[:, :, :].set(u4)  # ALL n cells are 4th-order now
+        v4 = (_A2 * (v_d_ext[:, :-3, :] + v_d_ext[:, 3:, :])
+              + _A1 * (v_d_ext[:, 1:-2, :] + v_d_ext[:, 2:-1, :]))
+        vtmp = vtmp.at[:, :, :].set(v4)
 
     # ---- Step 2: Halo-exchange via ext_vector pipeline ----
     # FV3 exchanges D-grid winds via ext_vector BEFORE d2a2c_vect.

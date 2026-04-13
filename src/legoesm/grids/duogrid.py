@@ -1007,6 +1007,166 @@ def _fill_corner_region_averaging(
 
 
 # ============================================================================
+# D-grid staggered halo exchange
+# ============================================================================
+
+def pad_halo_dgrid(
+    u_d: jax.Array,
+    v_d: jax.Array,
+    cos_angle: jax.Array,
+    sin_angle: jax.Array,
+    duogrid: 'DuoGridData | None' = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Pad D-grid staggered fields with halo=1 from neighbor faces.
+
+    FV3 exchanges D-grid winds via mpp_update_domains with DGRID_NE
+    gridtype before d2a2c_vect. This provides the boundary D-grid
+    values needed for 4th-order D→A averaging at face edges.
+
+    The approach:
+    1. Convert D-grid winds to geographic (east/north) at their stagger
+       positions using the nearest A-grid angle
+    2. For each face edge, extract the neighbor's edge-adjacent D-grid
+       values (converted to geographic), and place in the halo
+    3. Convert back to grid-aligned at the target face positions
+
+    Parameters
+    ----------
+    u_d : (6, n, n+1) D-grid x-velocity at j-edges
+    v_d : (6, n+1, n) D-grid y-velocity at i-edges
+    cos_angle, sin_angle : (6, n, n) grid angle at A-grid centers
+
+    Returns
+    -------
+    u_d_pad : (6, n, n+3) D-grid u padded with 1 halo on each j-side
+    v_d_pad : (6, n+3, n) D-grid v padded with 1 halo on each i-side
+    """
+    from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+
+    n = u_d.shape[1]  # cells per face edge
+
+    # Convert D-grid to geographic at approximate stagger positions.
+    # u_d (n, n+1): j-stagger has n+1 edges. Average A-grid angle at
+    # adjacent cells to get angle at j-edge: (n,n) → pad → (n,n+2) → avg → (n,n+1)
+    ca_pad_j = jnp.pad(cos_angle, [(0,0),(0,0),(1,1)], mode='edge')  # (6, n, n+2)
+    sa_pad_j = jnp.pad(sin_angle, [(0,0),(0,0),(1,1)], mode='edge')
+    ca_j = 0.5 * (ca_pad_j[:, :, :-1] + ca_pad_j[:, :, 1:])  # (6, n, n+1)
+    sa_j = 0.5 * (sa_pad_j[:, :, :-1] + sa_pad_j[:, :, 1:])
+    u_east_ud = ca_j * u_d
+    v_north_ud = sa_j * u_d
+
+    # v_d (n+1, n): i-stagger has n+1 edges. Average similarly.
+    ca_pad_i = jnp.pad(cos_angle, [(0,0),(1,1),(0,0)], mode='edge')  # (6, n+2, n)
+    sa_pad_i = jnp.pad(sin_angle, [(0,0),(1,1),(0,0)], mode='edge')
+    ca_i = 0.5 * (ca_pad_i[:, :-1, :] + ca_pad_i[:, 1:, :])  # (6, n+1, n)
+    sa_i = 0.5 * (sa_pad_i[:, :-1, :] + sa_pad_i[:, 1:, :])
+    u_east_vd = -sa_i * v_d
+    v_north_vd = ca_i * v_d
+
+    # Pad u_d along j (axis 2): add 1 halo on each side → (6, n, n+3)
+    u_d_pad = jnp.zeros((6, n, n + 3), dtype=u_d.dtype)
+    u_d_pad = u_d_pad.at[:, :, 1:-1].set(u_d)
+
+    # Pad v_d along i (axis 1): add 1 halo on each side → (6, n+3, n)
+    v_d_pad = jnp.zeros((6, n + 3, n), dtype=v_d.dtype)
+    v_d_pad = v_d_pad.at[:, 1:-1, :].set(v_d)
+
+    # Fill halo from neighbor faces using CONNECTIVITY
+    for face in range(6):
+        # u_d j-halo: need u_d at j=-1 (south) and j=n+1 (north)
+        # South: j=0 is the first j-edge. j=-1 comes from SOUTH neighbor.
+        nbr_f, nbr_e, rev = CONNECTIVITY[face][SOUTH]
+        # The neighbor's edge-adjacent u_d strip
+        if nbr_e == NORTH:
+            src = u_east_ud[nbr_f, :, -1]  # (n,) geographic
+            src_v = v_north_ud[nbr_f, :, -1]
+        elif nbr_e == SOUTH:
+            src = u_east_ud[nbr_f, :, 0]
+            src_v = v_north_ud[nbr_f, :, 0]
+        elif nbr_e == EAST:
+            src = u_east_vd[nbr_f, -1, :]
+            src_v = v_north_vd[nbr_f, -1, :]
+        else:  # WEST
+            src = u_east_vd[nbr_f, 0, :]
+            src_v = v_north_vd[nbr_f, 0, :]
+        if rev:
+            src = src[::-1]
+            src_v = src_v[::-1]
+        # Convert back to this face's grid-aligned at boundary
+        ca_bdy = ca_j[face, :, 0]  # angle at first j-edge
+        sa_bdy = sa_j[face, :, 0]
+        u_local = ca_bdy * src + sa_bdy * src_v
+        u_d_pad = u_d_pad.at[face, :, 0].set(u_local)
+
+        # North: j=n+1 comes from NORTH neighbor
+        nbr_f, nbr_e, rev = CONNECTIVITY[face][NORTH]
+        if nbr_e == SOUTH:
+            src = u_east_ud[nbr_f, :, 0]
+            src_v = v_north_ud[nbr_f, :, 0]
+        elif nbr_e == NORTH:
+            src = u_east_ud[nbr_f, :, -1]
+            src_v = v_north_ud[nbr_f, :, -1]
+        elif nbr_e == WEST:
+            src = u_east_vd[nbr_f, 0, :]
+            src_v = v_north_vd[nbr_f, 0, :]
+        else:  # EAST
+            src = u_east_vd[nbr_f, -1, :]
+            src_v = v_north_vd[nbr_f, -1, :]
+        if rev:
+            src = src[::-1]
+            src_v = src_v[::-1]
+        ca_bdy = ca_j[face, :, -1]
+        sa_bdy = sa_j[face, :, -1]
+        u_local = ca_bdy * src + sa_bdy * src_v
+        u_d_pad = u_d_pad.at[face, :, -1].set(u_local)
+
+        # v_d i-halo: need v_d at i=-1 (west) and i=n+1 (east)
+        nbr_f, nbr_e, rev = CONNECTIVITY[face][WEST]
+        if nbr_e == EAST:
+            src = u_east_vd[nbr_f, -1, :]
+            src_v = v_north_vd[nbr_f, -1, :]
+        elif nbr_e == WEST:
+            src = u_east_vd[nbr_f, 0, :]
+            src_v = v_north_vd[nbr_f, 0, :]
+        elif nbr_e == NORTH:
+            src = u_east_ud[nbr_f, :, -1]
+            src_v = v_north_ud[nbr_f, :, -1]
+        else:  # SOUTH
+            src = u_east_ud[nbr_f, :, 0]
+            src_v = v_north_ud[nbr_f, :, 0]
+        if rev:
+            src = src[::-1]
+            src_v = src_v[::-1]
+        ca_bdy = ca_i[face, 0, :]
+        sa_bdy = sa_i[face, 0, :]
+        v_local = -sa_bdy * src + ca_bdy * src_v
+        v_d_pad = v_d_pad.at[face, 0, :].set(v_local)
+
+        nbr_f, nbr_e, rev = CONNECTIVITY[face][EAST]
+        if nbr_e == WEST:
+            src = u_east_vd[nbr_f, 0, :]
+            src_v = v_north_vd[nbr_f, 0, :]
+        elif nbr_e == EAST:
+            src = u_east_vd[nbr_f, -1, :]
+            src_v = v_north_vd[nbr_f, -1, :]
+        elif nbr_e == SOUTH:
+            src = u_east_ud[nbr_f, :, 0]
+            src_v = v_north_ud[nbr_f, :, 0]
+        else:  # NORTH
+            src = u_east_ud[nbr_f, :, -1]
+            src_v = v_north_ud[nbr_f, :, -1]
+        if rev:
+            src = src[::-1]
+            src_v = src_v[::-1]
+        ca_bdy = ca_i[face, -1, :]
+        sa_bdy = sa_i[face, -1, :]
+        v_local = -sa_bdy * src + ca_bdy * src_v
+        v_d_pad = v_d_pad.at[face, -1, :].set(v_local)
+
+    return u_d_pad, v_d_pad
+
+
+# ============================================================================
 # ext_vector: FV3-faithful vector halo exchange
 # ============================================================================
 
