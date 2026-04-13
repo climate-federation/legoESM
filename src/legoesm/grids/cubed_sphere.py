@@ -275,12 +275,7 @@ def create_cubed_sphere(
     duogrid = None
     if use_duogrid:
         from legoesm.grids.duogrid import create_duogrid_data
-        # Auto-clamp ng to the valid range for this resolution.
-        # FV3 uses ng=3 or 4 with n>=48; for tiny test grids, reduce.
-        effective_ng = min(duogrid_ng, max(n // 2, 1))
-        if effective_ng < 2:
-            effective_ng = 2 if n >= 4 else 1
-        duogrid = create_duogrid_data(n, radius=radius, ng=effective_ng,
+        duogrid = create_duogrid_data(n, radius=radius, ng=duogrid_ng,
                                        k2e_nord=k2e_nord)
 
     # Grid arrays use the storage dtype from the precision policy.

@@ -413,8 +413,9 @@ class TestD2A2CVectDuoGrid:
     def _make_grid(self, n, use_duogrid):
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        ng = min(3, n // 2) if use_duogrid else 3
         grid = create_cubed_sphere(n, use_duogrid=use_duogrid, k2e_nord=2,
-                                    duogrid_ng=3)
+                                    duogrid_ng=ng)
         return create_cubed_sphere_cdgrid(grid)
 
     def test_duogrid_branch_dispatches(self):
