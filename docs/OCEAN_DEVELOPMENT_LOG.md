@@ -980,25 +980,101 @@ All 154 ocean unit tests pass.
 
 ---
 
-## Issues and PRs (updated 2026-04-12)
+## 2026-04-13: MPAS vertical tracer advection fix (issue #145)
+
+### The problem
+
+The MPAS ocean model had **no vertical tracer advection** — the same root cause as the latlon fix in #140, but never ported to MPAS. Tracers only moved horizontally, vertical velocity was never diagnosed, and isotherms remained flat in baroclinic experiments.
+
+### Three-file fix mirroring the latlon approach
+
+1. **`barotropic_mpas.py`**: Added `Hu_sum` accumulator to the barotropic scan. At each substep, depth-integrated edge transport `H_e * u_bar * edge_mask` is accumulated. Returns `Hu_avg = Hu_sum / n_substeps` as a third value (matching the latlon solver pattern).
+
+2. **`ocean_pe_mpas.py`**: Removed flux-form horizontal tracer advection from the PE tendencies. Only horizontal diffusion (`K_h * lap(T)`) and physics remain. Advection is now handled entirely in `step()` for consistency with barotropic-averaged transport. After merge with main, uses batched 3D operators (`divergence_cell_3d`, `gradient_edge_3d`).
+
+3. **`ocean_model_mpas.py`**: Full flux-form tracer transport in `step()`:
+   - Barotropic correction: uniform velocity shift so `sum_k(h_e * u_k) = Hu_avg`
+   - Per-layer mass fluxes preserving baroclinic shear → non-zero w
+   - Vertical velocity diagnosed from `divergence_cell_3d(mass_flux)` via continuity
+   - Horizontal: first-order upwind interpolation to edges
+   - Vertical: `flux_form_vertical_tracer_advection(tr, w)` — upwind at interfaces
+   - Conservative update: `h_new * T_new = h_old * T_mid - dt * vert - dt * horiz`
+
+### Results
+
+5-year baroclinic gyre (sin² wind):
+
+| Metric | latlon (5 yr) | MPAS (60 d, pre-fix would be ~0) |
+|--------|---------------|----------------------------------|
+| dT_NS_sfc | -0.911°C | -0.143°C |
+| dT_NS_thermo | -1.281°C | -0.042°C |
+| max_speed | 0.073 m/s | 0.064 m/s |
+| T_drift | 0.000°C | 0.000°C |
+| eta_drift | ~1e-15 | ~1e-17 |
+
+All 252 ocean tests pass. Differentiability tests pass.
+
+### Merge with main
+
+Merged 7 commits from main including batched 3D TRiSK operators (#137 fix). Resolved conflict in `ocean_pe_mpas.py` — took main's batched operators, applied our advection removal. Also switched `step()` from vmapped `divergence_cell` to native `divergence_cell_3d`.
+
+---
+
+## 2026-04-13: Wind-driven gyre test matrix variants
+
+### New wind profile: `double_gyre_tapered`
+Cosine double-gyre wind with smooth sin² taper to zero at basin walls. Implemented in `prescribed.py` and `mpas_physics.py`. Properties:
+- Basin-integrated wind ≈ 0 (unlike sin² which has net eastward stress)
+- Avoids spurious coastal Ekman transport at walls
+- Curl pattern identical to standard cosine → same gyre structure
+
+### Test matrix additions
+Added both cosine and sin² wind variants for barotropic and baroclinic gyre experiments:
+
+| Case | Wind | Grid |
+|------|------|------|
+| `barotropic_double_gyre` | cosine (existing) | mpas_regional, latlon_regional |
+| `barotropic_double_gyre_sin2` | sin² (new) | mpas_regional, latlon_regional |
+| `baroclinic_gyre` | sin² (existing) | mpas_regional, latlon_regional |
+| `baroclinic_gyre_cos` | cosine (new) | mpas_regional, latlon_regional |
+
+Hierarchical output structure: `barotropic_double_gyre/{variant}/`, `baroclinic_gyre/{variant}/` (matching rest_state pattern). Generalized `_VARIANT_GROUPS` replaces hardcoded `_REST_STATE_GROUP`.
+
+Added `wind_profile` and `wind_buffer_deg` fields to `BaroclinicGyreConfig` for parameterization.
+
+---
+
+## 2026-04-13: Plotting fixes
+
+1. **Vertical cross-sections**: Fixed `invert_yaxis()` toggle bug — calling inside loop with `sharey=True` toggles inversion, leaving even-panel counts non-inverted. Now called once after loop. Surface is correctly at top.
+2. **w snapshots**: Force symmetric colorscale centered at 0 for `w_*` fields.
+3. **u_sfc/v_sfc velocity maps**: Added to baroclinic gyre diagnostics and replot mode.
+4. **Symmetric colorscale**: Also applied to `u_sfc`, `v_sfc` fields (diverging quantities).
+
+---
+
+## Issues and PRs (updated 2026-04-13)
 
 ### Open issues
-- #140 — Baroclinic gyre has no vertical transport (fix implemented, validating)
-- #137 — MPAS/Voronoi unstructured grid 9× slower than latlon (performance)
+- #148 — Refactor ocean test matrix: use experiment modules, split monolith, adopt xarray/xgcm
+- #146 — Generic state checkpoint/restart system for all model components
+- #137 — MPAS/Voronoi unstructured grid 9× slower than latlon (partially addressed by batched 3D TRiSK)
 - #113 — MPAS physics pipeline duplicates
 - #112 — Vector Laplacian Python for-loop hurts JIT performance
-- #111 — C-grid ocean missing step_checked, conservation fixer, freshwater
 - #109 — A-grid/cubed-sphere baroclinic pressure double-counts free-surface
-- #108 — Dead/stale code cleanup in ocean dynamics
 - #106 — Surface forcing cannot combine wind + thermal restoring
 - #100 — Cubed-sphere ocean face-boundary instability
 
 ### Recently closed
+- #145 — MPAS vertical tracer advection (resolved: full flux-form transport in step())
+- #140 — Baroclinic gyre has no vertical transport (resolved: full 3D velocity for tracer mass fluxes)
 - #138 — Latlon C-grid long-term instability (resolved: flux-form vertical advection + upwind horizontal tracer)
 - #135 — MPAS regional regridding visualization artifacts (resolved: mask-aware IDW + native PolyCollection)
 - #134 — MPAS land cell temperature masking (resolved)
 - #130 — Vertical advection not producing spatial T patterns (resolved)
 - #114 — Cross-grid physics consistency (resolved: 6/6 items fixed)
+- #111 — C-grid ocean missing step_checked, conservation fixer, freshwater (resolved)
+- #108 — Dead/stale code cleanup in ocean dynamics (resolved)
 - #105 — Vector Laplacian and barotropic diffusion fixes
 - #103 — MPAS Coriolis double-counting
 - #102 — Flux-form tracer transport
