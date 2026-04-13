@@ -56,10 +56,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Tuple
-
-from legoesm.constants import g
 
 
 @dataclass
@@ -146,7 +143,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             lat_south=config.lat_south, lat_north=config.lat_north,
         )
         # Add vertical stratification
-        return _add_stratification(state, config)
+        return _add_stratification(state, z_coord, config)
 
     elif grid_type in ("mpas", "mpas_regional"):
         from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
@@ -157,21 +154,16 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             lat_south=config.lat_south, lat_north=config.lat_north,
         )
         # Add vertical stratification
-        return _add_stratification(state, config)
+        return _add_stratification(state, z_coord, config)
         
     else:
         raise ValueError(f"Grid type {grid_type} not supported for baroclinic_gyre")
 
 
-def _add_stratification(state, config: BaroclinicGyreConfig):
+def _add_stratification(state, z_coord, config: BaroclinicGyreConfig):
     """Add exponential stratification to a uniform initial state."""
-    import numpy as np
-    import jax.numpy as jnp
     from legoesm.core.field import Field
-    
-    # Get current uniform temperature
-    T_uniform = float(np.mean(state.T.data))
-    
+
     # Use actual model level depths from the z-coordinate object
     actual_depths = -np.asarray(z_coord.z_full_ref)  # positive-down depth [m]
     n_levels = len(actual_depths)

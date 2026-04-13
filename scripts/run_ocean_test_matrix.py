@@ -123,10 +123,6 @@ FIELD_RANGES = {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
     },
-    "baroclinic_gyre": {
-        "eta": (None, None),       # meters - adaptive range for circulation patterns
-        "SST": (None, None),       # °C - adaptive range for circulation-driven T patterns
-    },
     "rest_state_stratified_no_land": {
         "eta": (-1e-6, 1e-6),      # meters - rest state should have tiny SSH (pure ocean)
         "SST": (1.5, 21.0),        # °C - range from deep to surface T
@@ -226,9 +222,6 @@ class TestCase:
     for _group, _cases in _VARIANT_GROUPS.items():
         for _c in _cases:
             _CASE_TO_GROUP[_c] = _group
-
-    # Backward compat alias
-    _REST_STATE_GROUP = _VARIANT_GROUPS["rest_state"]
 
     @property
     def output_path(self) -> str:

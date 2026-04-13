@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
 from legoesm.ocean.physics.surface_forcing.config import PrescribedForcingConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
@@ -19,7 +18,7 @@ def prescribed_surface_forcing(
     S: jnp.ndarray,
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
-    grid: CubedSphereGrid,
+    grid,  # Any grid with grid_lat property (GridProtocol)
     cfg: PrescribedForcingConfig,
 ) -> SurfaceForcingOutput:
     """Apply prescribed surface forcing to the top ocean layer.

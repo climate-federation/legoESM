@@ -335,7 +335,7 @@ class MPASOceanModel:
             land_mask=state.land_mask,
         )
 
-        # 7. Conservation fixers
+        # 10. Conservation fixers
         if config.use_conservation_fixer:
             state_new = mpas_ocean_conservation_fixer(
                 state_new, state, mesh, z_coord, config,
