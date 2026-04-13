@@ -107,15 +107,11 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
         duogrid=dg,
     )  # each (6, n+4, n+4)
 
-    # FV3-faithful outermost-halo overwrite (sw_core.F90:3426-3447).
-    # FV3 sets utmp(i, jsd) = u(i, jsd+1) and utmp(i, jed) = u(i, jed+1)
-    # (using u(i,j+1) twice, not u(i,j)+u(i,j+1)).
-    # In padded coords: jsd=0, jed=n+3, so overwrite rows 0 and n+3.
-    utmp_pad = utmp_pad.at[:, :, 0].set(utmp_pad[:, :, 1])
-    utmp_pad = utmp_pad.at[:, :, n + 2 * h - 1].set(utmp_pad[:, :, n + 2 * h - 2])
-    # Similarly for vtmp: vtmp(isd, j) = v(isd+1, j), vtmp(ied, j) = v(ied+1, j)
-    vtmp_pad = vtmp_pad.at[:, 0, :].set(vtmp_pad[:, 1, :])
-    vtmp_pad = vtmp_pad.at[:, n + 2 * h - 1, :].set(vtmp_pad[:, n + 2 * h - 2, :])
+    # NOTE: FV3 (sw_core.F90:3426-3447) overwrites the outermost halo row
+    # of utmp/vtmp with the adjacent interior value (u(i,j+1) repeated).
+    # With halo=2, this overwrite is inert: ua/va read h:-h (rows 2..n+1),
+    # and uc/vc read h:-h in the cross-direction, never touching rows 0 or
+    # n+3. The overwrite would become relevant with halo>=4 (FV3's ng=4).
 
     # ---- Step 3: Contravariant at cell centres over FULL padded domain ----
     # FV3 ref: sw_core.F90:3449-3454 — compute ua/va for isd:ied, jsd:jed
