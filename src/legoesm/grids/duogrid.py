@@ -71,6 +71,17 @@ class DuoGridData(NamedTuple):
     corner_yp: jax.Array | None
     corner_ym: jax.Array | None
 
+    # --- Extended-grid unit vectors for ext_vector (a2stag_metrics) ---
+    # vlon_ext: unit vector in longitude direction at A-grid positions
+    # vlat_ext: unit vector in latitude direction at A-grid positions
+    # Shape: (6, n+2*ng, n+2*ng, 3) — 3D Cartesian
+    vlon_ext: jax.Array | None
+    vlat_ext: jax.Array | None
+    # ew_ext: east-west edge vector, es_ext: north-south edge vector
+    # Shape: (6, n+2*ng+1, n+2*ng, 3) and (6, n+2*ng, n+2*ng+1, 3)
+    ew_ext: jax.Array | None
+    es_ext: jax.Array | None
+
 
 # ============================================================================
 # Precompute: supergrid, kinked grid, coordinates, coefficients
@@ -555,6 +566,10 @@ def create_duogrid_data(
     # Step P5: Compute Lagrange corner coefficients
     xp, xm, yp, ym = _compute_corner_lagrange_coeff(n, ng, ext_lon, ext_lat)
 
+    # Step P6: Compute extended-grid unit vectors (FV3 a2stag_metrics)
+    vlon_ext, vlat_ext, ew_ext, es_ext = _compute_ext_vectors(
+        n, ng, ext_lon, ext_lat)
+
     def _maybe_jnp(arr):
         return jnp.array(arr, dtype=jnp.float64) if arr is not None else None
 
@@ -570,7 +585,97 @@ def create_duogrid_data(
         corner_xm=_maybe_jnp(xm),
         corner_yp=_maybe_jnp(yp),
         corner_ym=_maybe_jnp(ym),
+        vlon_ext=jnp.array(vlon_ext, dtype=jnp.float64),
+        vlat_ext=jnp.array(vlat_ext, dtype=jnp.float64),
+        ew_ext=jnp.array(ew_ext, dtype=jnp.float64),
+        es_ext=jnp.array(es_ext, dtype=jnp.float64),
     )
+
+
+def _compute_ext_vectors(n: int, ng: int, ext_lon, ext_lat):
+    """Compute extended-grid unit vectors for ext_vector (a2stag_metrics).
+
+    Following FV3 fv_duogrid.F90 unit_vect_latlon_ext (lines 2846-2868)
+    and a2stag_metrics (lines 2871-2992).
+
+    Returns
+    -------
+    vlon_ext : (6, n_ext, n_ext, 3) — longitude unit vector at A-grid
+    vlat_ext : (6, n_ext, n_ext, 3) — latitude unit vector at A-grid
+    ew_ext : (6, n_ext+1, n_ext, 3) — east-west edge vector
+    es_ext : (6, n_ext, n_ext+1, 3) — north-south edge vector
+    """
+    n_ext = n + 2 * ng
+
+    # --- vlon_ext, vlat_ext: unit vectors in lon/lat directions ---
+    # FV3 unit_vect_latlon_ext:
+    # elon = [-sin(lon), cos(lon), 0]
+    # elat = [-sin(lat)*cos(lon), -sin(lat)*sin(lon), cos(lat)]
+    vlon_ext = np.zeros((6, n_ext, n_ext, 3))
+    vlat_ext = np.zeros((6, n_ext, n_ext, 3))
+
+    for face in range(6):
+        lon = ext_lon[face]
+        lat = ext_lat[face]
+        sin_lon = np.sin(lon)
+        cos_lon = np.cos(lon)
+        sin_lat = np.sin(lat)
+        cos_lat = np.cos(lat)
+
+        vlon_ext[face, :, :, 0] = -sin_lon
+        vlon_ext[face, :, :, 1] = cos_lon
+        vlon_ext[face, :, :, 2] = 0.0
+
+        vlat_ext[face, :, :, 0] = -sin_lat * cos_lon
+        vlat_ext[face, :, :, 1] = -sin_lat * sin_lon
+        vlat_ext[face, :, :, 2] = cos_lat
+
+    # --- ew_ext, es_ext: edge vectors ---
+    # Following FV3 a2stag_metrics (fv_duogrid.F90:2871-2992).
+    # ew_ext at (i+1/2, j): from A-grid Cartesian midpoint interpolation
+    # es_ext at (i, j+1/2): from A-grid Cartesian midpoint interpolation
+    #
+    # The edge vector is the tangent to the great circle connecting
+    # adjacent A-grid cell centers, projected to the sphere surface.
+    # FV3 uses cross products of A-grid Cartesian positions; for
+    # simplicity we use the normalized difference vector (equivalent
+    # for small cells, converges to the same result).
+
+    # Convert A-grid positions to Cartesian
+    cart = np.zeros((6, n_ext, n_ext, 3))
+    for face in range(6):
+        lon = ext_lon[face]
+        lat = ext_lat[face]
+        cart[face, :, :, 0] = np.cos(lat) * np.cos(lon)
+        cart[face, :, :, 1] = np.cos(lat) * np.sin(lon)
+        cart[face, :, :, 2] = np.sin(lat)
+
+    # ew_ext[i, j]: edge vector between A-grid (i-1, j) and (i, j)
+    # Shape: (6, n_ext+1, n_ext, 3)
+    # FV3: ew_ext(3, isd:ied+1, jsd:jed, 2) — we only need the first slot
+    ew_ext = np.zeros((6, n_ext + 1, n_ext, 3))
+    for face in range(6):
+        # Interior edges (i=1..n_ext-1): tangent from (i-1,j) to (i,j)
+        diff = cart[face, 1:, :, :] - cart[face, :-1, :, :]
+        norms = np.linalg.norm(diff, axis=-1, keepdims=True)
+        norms = np.maximum(norms, 1e-30)
+        ew_ext[face, 1:-1, :, :] = diff / norms
+        # Boundary edges: replicate nearest interior
+        ew_ext[face, 0, :, :] = ew_ext[face, 1, :, :]
+        ew_ext[face, -1, :, :] = ew_ext[face, -2, :, :]
+
+    # es_ext[i, j]: edge vector between A-grid (i, j-1) and (i, j)
+    # Shape: (6, n_ext, n_ext+1, 3)
+    es_ext = np.zeros((6, n_ext, n_ext + 1, 3))
+    for face in range(6):
+        diff = cart[face, :, 1:, :] - cart[face, :, :-1, :]
+        norms = np.linalg.norm(diff, axis=-1, keepdims=True)
+        norms = np.maximum(norms, 1e-30)
+        es_ext[face, :, 1:-1, :] = diff / norms
+        es_ext[face, :, 0, :] = es_ext[face, :, 1, :]
+        es_ext[face, :, -1, :] = es_ext[face, :, -2, :]
+
+    return vlon_ext, vlat_ext, ew_ext, es_ext
 
 
 # ============================================================================
@@ -830,3 +935,77 @@ def _fill_corner_region_averaging(
                 0.5 * (padded[:, ni_ne, j_ne] + padded[:, i_ne, nj_ne]))
 
     return padded
+
+
+# ============================================================================
+# ext_vector: FV3-faithful vector halo exchange
+# ============================================================================
+
+def cubed_a2d_halo(
+    ull: jax.Array,
+    vll: jax.Array,
+    duogrid: DuoGridData,
+    halo: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Convert A-grid lat/lon winds to D-grid using 3D Cartesian projection.
+
+    Following FV3 fv_duogrid.F90 cubed_a2d_halo (lines 2676-2763).
+
+    Parameters
+    ----------
+    ull, vll : (6, n+2h, n+2h) — lat/lon wind components on padded A-grid
+    duogrid : DuoGridData with vlon_ext, vlat_ext, ew_ext, es_ext
+    halo : int — halo width of the padded arrays
+
+    Returns
+    -------
+    ud : (6, n+2h, n+2h+1) — D-grid u (at j-edges)
+    vd : (6, n+2h+1, n+2h) — D-grid v (at i-edges)
+    """
+    n = duogrid.n
+    h = halo
+    n_p = n + 2 * h
+    offset = duogrid.ng - h  # extended-grid index = padded index + offset
+
+    # Get extended-grid vectors, sliced to the padded domain
+    vlon = duogrid.vlon_ext  # (6, n_ext, n_ext, 3)
+    vlat = duogrid.vlat_ext
+    ew = duogrid.ew_ext      # (6, n_ext+1, n_ext, 3)
+    es = duogrid.es_ext      # (6, n_ext, n_ext+1, 3)
+
+    # Cast to field dtype
+    dtype = ull.dtype
+    vlon = vlon.astype(dtype)
+    vlat = vlat.astype(dtype)
+    ew = ew.astype(dtype)
+    es = es.astype(dtype)
+
+    # Step 1: Convert lat/lon to 3D Cartesian on A-grid
+    # v3 = u_ll * vlon + v_ll * vlat  — shape (6, n_p, n_p, 3)
+    # Index into the extended-grid vectors at the padded positions
+    i_slice = slice(offset, offset + n_p)
+    j_slice = slice(offset, offset + n_p)
+    vlon_p = vlon[:, i_slice, j_slice, :]  # (6, n_p, n_p, 3)
+    vlat_p = vlat[:, i_slice, j_slice, :]
+
+    v3 = ull[..., None] * vlon_p + vll[..., None] * vlat_p  # (6, n_p, n_p, 3)
+
+    # Step 2: Interpolate to D-grid edges (simple 2-point average)
+    # ud at (i, j+1/2): average of v3(i, j-1) and v3(i, j)
+    ue = 0.5 * (v3[:, :, :-1, :] + v3[:, :, 1:, :])  # (6, n_p, n_p-1, 3)
+    # vd at (i+1/2, j): average of v3(i-1, j) and v3(i, j)
+    ve = 0.5 * (v3[:, :-1, :, :] + v3[:, 1:, :, :])  # (6, n_p-1, n_p, 3)
+
+    # Step 3: Project onto edge vectors
+    # ud = ue . es_ext (south-north edge tangent for u/D-grid)
+    es_p = es[:, offset:offset + n_p, offset:offset + n_p - 1 + 2, :]
+    # We need es at (i, j+1/2) for j = 0..n_p-2 in padded coords
+    # es has j from 0..n_ext (n_ext+1 values). Slice to match ue shape.
+    es_slice = es[:, offset:offset + n_p, offset + 1:offset + n_p, :]  # (6, n_p, n_p-1, 3)
+    ud = jnp.sum(ue * es_slice, axis=-1)  # (6, n_p, n_p-1)
+
+    # vd = ve . ew_ext (east-west edge tangent for v/D-grid)
+    ew_slice = ew[:, offset + 1:offset + n_p, offset:offset + n_p, :]  # (6, n_p-1, n_p, 3)
+    vd = jnp.sum(ve * ew_slice, axis=-1)  # (6, n_p-1, n_p)
+
+    return ud, vd

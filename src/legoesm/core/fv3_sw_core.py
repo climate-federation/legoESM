@@ -106,11 +106,11 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
         duogrid=dg,
     )  # each (6, n+4, n+4)
 
-    # NOTE: FV3 (sw_core.F90:3426-3447) overwrites the outermost halo row
-    # of utmp/vtmp with the adjacent interior value (u(i,j+1) repeated).
-    # With halo=2, this overwrite is inert: ua/va read h:-h (rows 2..n+1),
-    # and uc/vc read h:-h in the cross-direction, never touching rows 0 or
-    # n+3. The overwrite would become relevant with halo>=4 (FV3's ng=4).
+    # NOTE: FV3 computes D→A from halo-extended D-grid winds (via
+    # ext_vector before d2a2c_vect). In legoESM, D-grid winds have no
+    # halo, so boundary cells of utmp/vtmp (first/last interior row) are
+    # 2nd-order. Improving this requires the full ext_vector pipeline
+    # for D-grid winds — see cubed_a2d_halo in duogrid.py.
 
     # ---- Step 3: Contravariant at cell centres over FULL padded domain ----
     # FV3 ref: sw_core.F90:3449-3454 — compute ua/va for isd:ied, jsd:jed
