@@ -347,9 +347,11 @@ class TestCornerFill:
 class TestFactory:
     """Test that create_duogrid_data produces valid data structures."""
 
-    @pytest.mark.parametrize("n", [4, 8])
-    @pytest.mark.parametrize("ng", [1, 2, 3])
-    @pytest.mark.parametrize("k2e_nord", [2, 4])
+    @pytest.mark.parametrize("n,ng,k2e_nord", [
+        (4, 1, 2), (4, 1, 4), (4, 2, 2), (4, 2, 4),
+        (8, 1, 2), (8, 1, 4), (8, 2, 2), (8, 2, 4),
+        (8, 3, 2), (8, 3, 4), (8, 4, 2), (8, 4, 4),
+    ])
     def test_create_duogrid_data(self, n, ng, k2e_nord):
         """Factory should produce valid DuoGridData for supported configs."""
         dg = create_duogrid_data(n, ng=ng, k2e_nord=k2e_nord)
@@ -368,6 +370,10 @@ class TestFactory:
     def test_invalid_ng(self):
         with pytest.raises(ValueError, match="ng"):
             create_duogrid_data(4, ng=5)
+
+    def test_ng_too_large_for_n(self):
+        with pytest.raises(ValueError, match="too large"):
+            create_duogrid_data(4, ng=3)
 
     def test_duogrid_is_jax_pytree(self):
         """DuoGridData must be a valid JAX pytree."""

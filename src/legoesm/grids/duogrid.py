@@ -535,6 +535,10 @@ def create_duogrid_data(
         raise ValueError(f"k2e_nord={k2e_nord} exceeds MAX_K2E_NORD={MAX_K2E_NORD}")
     if ng not in (1, 2, 3, 4):
         raise ValueError(f"ng={ng} not supported, must be 1, 2, 3, or 4")
+    if ng > n // 2:
+        raise ValueError(
+            f"ng={ng} too large for n={n}: need ng <= n//2 for valid "
+            f"Lagrange stencils (got n//2={n//2})")
 
     # Step P1: Build extended grid
     ext_lon, ext_lat = _build_extended_grid(n, ng)
@@ -710,8 +714,9 @@ def fill_corner_region(
     if h == 0:
         return padded
 
-    # Fall back to averaging if no corner coefficients
-    if getattr(duogrid, 'corner_xp', None) is None:
+    # Fall back to averaging if no corner coefficients or if halo > ng
+    # (offset = ng - h would go negative, making Lagrange lookup invalid)
+    if getattr(duogrid, 'corner_xp', None) is None or h > ng:
         return _fill_corner_region_averaging(padded, duogrid, halo)
 
     xp = duogrid.corner_xp.astype(padded.dtype)
@@ -724,7 +729,7 @@ def fill_corner_region(
     # If halo == ng, padded indices map 1:1 to extended grid indices.
     # If halo < ng, we need to offset. The halo cells in padded correspond
     # to the inner ng-halo..ng-1 halo cells of the extended grid.
-    offset = ng - h  # extended_idx = padded_idx + offset
+    offset = ng - h  # extended_idx = padded_idx + offset (always >= 0)
 
     # Interior bounds in padded coords
     ie = h + n - 1  # last interior i in padded
