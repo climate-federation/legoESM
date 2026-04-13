@@ -1013,8 +1013,10 @@ def _fill_corner_region_averaging(
 def pad_halo_dgrid(
     u_d: jax.Array,
     v_d: jax.Array,
-    cos_angle: jax.Array,
-    sin_angle: jax.Array,
+    cos_angle_edge_x: jax.Array,
+    sin_angle_edge_x: jax.Array,
+    cos_angle_edge_y: jax.Array,
+    sin_angle_edge_y: jax.Array,
     duogrid: 'DuoGridData | None' = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Pad D-grid staggered fields with halo=1 from neighbor faces.
@@ -1023,18 +1025,15 @@ def pad_halo_dgrid(
     gridtype before d2a2c_vect. This provides the boundary D-grid
     values needed for 4th-order D→A averaging at face edges.
 
-    The approach:
-    1. Convert D-grid winds to geographic (east/north) at their stagger
-       positions using the nearest A-grid angle
-    2. For each face edge, extract the neighbor's edge-adjacent D-grid
-       values (converted to geographic), and place in the halo
-    3. Convert back to grid-aligned at the target face positions
+    Uses exact D-grid edge angles from CubedSphereCDGrid (not averaged
+    A-grid angles) for precise geographic rotation at stagger positions.
 
     Parameters
     ----------
     u_d : (6, n, n+1) D-grid x-velocity at j-edges
     v_d : (6, n+1, n) D-grid y-velocity at i-edges
-    cos_angle, sin_angle : (6, n, n) grid angle at A-grid centers
+    cos_angle_edge_x, sin_angle_edge_x : (6, n, n+1) exact edge angles
+    cos_angle_edge_y, sin_angle_edge_y : (6, n+1, n) exact edge angles
 
     Returns
     -------
@@ -1043,23 +1042,16 @@ def pad_halo_dgrid(
     """
     from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
-    n = u_d.shape[1]  # cells per face edge
+    n = u_d.shape[1]
 
-    # Convert D-grid to geographic at approximate stagger positions.
-    # u_d (n, n+1): j-stagger has n+1 edges. Average A-grid angle at
-    # adjacent cells to get angle at j-edge: (n,n) → pad → (n,n+2) → avg → (n,n+1)
-    ca_pad_j = jnp.pad(cos_angle, [(0,0),(0,0),(1,1)], mode='edge')  # (6, n, n+2)
-    sa_pad_j = jnp.pad(sin_angle, [(0,0),(0,0),(1,1)], mode='edge')
-    ca_j = 0.5 * (ca_pad_j[:, :, :-1] + ca_pad_j[:, :, 1:])  # (6, n, n+1)
-    sa_j = 0.5 * (sa_pad_j[:, :, :-1] + sa_pad_j[:, :, 1:])
+    # Convert D-grid to geographic using EXACT edge angles.
+    ca_j = cos_angle_edge_x   # (6, n, n+1)
+    sa_j = sin_angle_edge_x
     u_east_ud = ca_j * u_d
     v_north_ud = sa_j * u_d
 
-    # v_d (n+1, n): i-stagger has n+1 edges. Average similarly.
-    ca_pad_i = jnp.pad(cos_angle, [(0,0),(1,1),(0,0)], mode='edge')  # (6, n+2, n)
-    sa_pad_i = jnp.pad(sin_angle, [(0,0),(1,1),(0,0)], mode='edge')
-    ca_i = 0.5 * (ca_pad_i[:, :-1, :] + ca_pad_i[:, 1:, :])  # (6, n+1, n)
-    sa_i = 0.5 * (sa_pad_i[:, :-1, :] + sa_pad_i[:, 1:, :])
+    ca_i = cos_angle_edge_y   # (6, n+1, n)
+    sa_i = sin_angle_edge_y
     u_east_vd = -sa_i * v_d
     v_north_vd = ca_i * v_d
 

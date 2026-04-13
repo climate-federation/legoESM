@@ -87,7 +87,10 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     # providing halo-extended D-grid data for 4th-order D→A everywhere.
     from legoesm.grids.duogrid import pad_halo_dgrid
     u_d_ext, v_d_ext = pad_halo_dgrid(
-        u_d, v_d, grid.cos_angle, grid.sin_angle, dg)
+        u_d, v_d,
+        cdgrid.cos_angle_edge_x, cdgrid.sin_angle_edge_x,
+        cdgrid.cos_angle_edge_y, cdgrid.sin_angle_edge_y,
+        dg)
     # u_d_ext: (6, n, n+3) — u_d with 1 halo on each j-side
     # v_d_ext: (6, n+3, n) — v_d with 1 halo on each i-side
 
