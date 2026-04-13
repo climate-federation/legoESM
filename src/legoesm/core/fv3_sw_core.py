@@ -246,9 +246,10 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
             + _C3 * utmp_pad[:, n - 1, 1:-1])
 
     # AT face boundary (i=1, i=n-1): edge_interpolate4 on CONTRAVARIANT ua
-    # then uc = ut * sin_sg_upwind (covariant from contravariant)
+    # then uc = ut * sin_sg_upwind (covariant from contravariant).
+    # Requires n >= 2 for the 4-point edge stencil to have valid indices.
     dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    for i_bdy in [1, n - 1]:
+    for i_bdy in ([1, n - 1] if n >= 2 else []):
         i_p = i_bdy  # padded offset
         ua4 = jnp.stack([ua_pad[:, i_p - 1, 1:-1], ua_pad[:, i_p, 1:-1],
                          ua_pad[:, i_p + 1, 1:-1], ua_pad[:, i_p + 2, 1:-1]],
@@ -298,9 +299,10 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
             _C1 * vtmp_pad[:, 1:-1, n - 3] + _C2 * vtmp_pad[:, 1:-1, n - 2]
             + _C3 * vtmp_pad[:, 1:-1, n - 1])
 
-    # AT face boundary (j=1, j=n-1): edge_interpolate4 on va
+    # AT face boundary (j=1, j=n-1): edge_interpolate4 on va.
+    # Requires n >= 2 for the 4-point edge stencil.
     dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    for j_bdy in [1, n - 1]:
+    for j_bdy in ([1, n - 1] if n >= 2 else []):
         j_p = j_bdy
         va4 = jnp.stack([va_pad[:, 1:-1, j_p - 1], va_pad[:, 1:-1, j_p],
                          va_pad[:, 1:-1, j_p + 1], va_pad[:, 1:-1, j_p + 2]],
