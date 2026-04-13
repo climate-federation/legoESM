@@ -41,11 +41,18 @@ def _save_timeseries_csv(output_dir: Path, diag: dict, dt: float):
     if not keys or not diag["steps"]:
         return
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Always write CSV (human-readable, quick inspection)
     with open(output_dir / "mean_timeseries.csv", "w") as f:
         f.write("step,time_days," + ",".join(keys) + "\n")
         for i in range(len(diag["steps"])):
             vals = ",".join(f"{diag[k][i]:.12e}" for k in keys)
             f.write(f"{diag['steps'][i]},{diag['times'][i]:.8f},{vals}\n")
+    # Also save as xarray Dataset if format is netcdf or zarr
+    if config.OUTPUT_FORMAT in ("netcdf", "zarr"):
+        from ocean_test_matrix.xarray_output import timeseries_to_dataset, save_dataset
+        ds = timeseries_to_dataset(diag, dt)
+        if ds.data_vars:
+            save_dataset(ds, output_dir / "timeseries", fmt=config.OUTPUT_FORMAT)
 
 
 def _save_timeseries_plot(output_dir: Path, case_name: str, diag: dict,
@@ -718,6 +725,7 @@ def _save_snapshot_data(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
     domain_extent: tuple[float, float, float, float] | None = None,
+    depth_values: np.ndarray | None = None,
 ):
     """Save snapshot field arrays as NPZ files with proper time series format.
 
@@ -814,8 +822,34 @@ def _save_snapshot_data(
             native_arrays[field_key] = np.stack(field_timesteps, axis=0)
             latlon_arrays[field_key] = np.stack(latlon_timesteps, axis=0)
 
-    np.savez_compressed(output_dir / "snapshots_native.npz", **native_arrays)
-    np.savez_compressed(output_dir / "snapshots_latlon.npz", **latlon_arrays)
+    if config.OUTPUT_FORMAT == "npz":
+        # Legacy NPZ format
+        np.savez_compressed(output_dir / "snapshots_native.npz", **native_arrays)
+        np.savez_compressed(output_dir / "snapshots_latlon.npz", **latlon_arrays)
+    else:
+        # Always save NPZ for backward compat with plotting code
+        np.savez_compressed(output_dir / "snapshots_native.npz", **native_arrays)
+        np.savez_compressed(output_dir / "snapshots_latlon.npz", **latlon_arrays)
+        # Also save xarray Dataset as NetCDF or Zarr
+        from ocean_test_matrix.xarray_output import (
+            snapshots_to_dataset, _arrays_to_latlon_dataset, save_dataset,
+        )
+        # Native grid dataset — build from raw snapshots
+        # Create a simple z_coord-like object for depth if depth_values provided
+        _zc = None
+        if depth_values is not None:
+            class _ZProxy:
+                def __init__(self, d): self.z_full_ref = -d  # negative = depth
+            _zc = _ZProxy(depth_values)
+        ds_native = snapshots_to_dataset(
+            snapshots, dt, coord_kind, lon_deg, lat_deg, z_coord=_zc,
+            attrs={"description": "Native grid snapshots"})
+        save_dataset(ds_native, output_dir / "snapshots_native",
+                     fmt=config.OUTPUT_FORMAT)
+        # Regridded lat-lon dataset — build from already-regridded arrays
+        ds_latlon = _arrays_to_latlon_dataset(latlon_arrays)
+        save_dataset(ds_latlon, output_dir / "snapshots_latlon",
+                     fmt=config.OUTPUT_FORMAT)
 
 
 # ---------------------------------------------------------------------------
@@ -872,7 +906,7 @@ def _save_case_diagnostics(
     _save_snapshot_times(output_dir, snapshots, dt)
     _save_snapshot_data(
         output_dir, snapshots, dt, coord_kind, lon_deg, lat_deg,
-        domain_extent=domain_extent)
+        domain_extent=domain_extent, depth_values=level_values)
 
     if field_3d_key and level_values is not None:
         _save_cross_sections(

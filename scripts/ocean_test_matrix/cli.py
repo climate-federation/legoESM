@@ -64,6 +64,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--replot", action="store_true",
         help="Skip simulations; regenerate all plots from existing NPZ data")
+    p.add_argument(
+        "--output-format", type=str, default="netcdf",
+        choices=["netcdf", "zarr", "npz"],
+        help="Snapshot output format: netcdf (default), zarr, or npz (legacy)")
     return p
 
 
@@ -107,6 +111,7 @@ def main():
     # Override global defaults if specified
     config.DEFAULT_NLEV = args.levels
     config.DEFAULT_DT = args.dt
+    config.OUTPUT_FORMAT = args.output_format
 
     tests = filter_tests(TEST_MATRIX, args)
 

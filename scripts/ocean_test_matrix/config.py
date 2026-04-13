@@ -30,6 +30,9 @@ DEFAULT_NLEV = 10
 DEFAULT_H_MAX = 5500.0
 DEFAULT_DT = 300.0  # seconds (scaled for ~2.5 deg resolution CFL)
 
+# Output format: "netcdf" (default), "zarr", or "npz" (legacy)
+OUTPUT_FORMAT = "netcdf"
+
 # Physical constants for idealized ocean test cases — use canonical values.
 _A_EARTH = _C.R_earth   # Earth radius (m)
 _OMEGA_E = _C.Omega      # Earth rotation rate (rad/s)

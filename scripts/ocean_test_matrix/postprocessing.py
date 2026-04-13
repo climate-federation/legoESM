@@ -48,15 +48,21 @@ def _collect_grid_results(test_case_dir: Path) -> dict:
         # Check for required files
         csv_file = resolution_dir / "mean_timeseries.csv"
         npz_file = resolution_dir / "snapshots_latlon.npz"
+        nc_file = resolution_dir / "snapshots_latlon.nc"
         results_file = resolution_dir / "results.txt"
 
-        if all(f.exists() for f in [csv_file, npz_file, results_file]):
+        has_snapshots = npz_file.exists() or nc_file.exists()
+        if csv_file.exists() and has_snapshots and results_file.exists():
             try:
                 # Load timeseries data
                 timeseries_df = pd.read_csv(csv_file)
 
-                # Load snapshot data
-                snapshots_data = np.load(npz_file)
+                # Load snapshot data — prefer NetCDF, fall back to NPZ
+                if nc_file.exists():
+                    import xarray as xr
+                    snapshots_data = xr.open_dataset(nc_file)
+                else:
+                    snapshots_data = np.load(npz_file)
 
                 # Parse results metadata
                 metadata = {}
