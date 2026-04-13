@@ -174,10 +174,10 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     vt : (6, n, n+1) C-grid contravariant v (transport)
     """
     # Dispatch to Duo-Grid path when active (FV3 sw_core.F90:3419).
-    # Requires n >= 4 for the 4th-order stencils to be meaningful;
-    # smaller grids fall through to the legacy path which handles edge
-    # specials correctly regardless of grid size.
-    if cdgrid.base.duogrid is not None and cdgrid.n >= 4:
+    # Works for all n: the A→C 4th-order stencil is valid with halo=2
+    # for any n>=1. For n<4 the D→A step uses 2nd-order (guarded by
+    # `if n >= 4` inside), matching FV3's outermost-halo-row treatment.
+    if cdgrid.base.duogrid is not None:
         return _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
 
     n = cdgrid.n
