@@ -6,7 +6,7 @@ horizontal resolution relative to baseline defaults, and runs finite-volume and
 spectral-style options where available.
 
 Canonical test cases are covered by ``scripts/run_ocean_test_matrix.py``:
-  - rest_state, barotropic_wave, wind_gyre, baroclinic, phillips_two_layer,
+  - rest_state, barotropic_wave, regional_gyre, baroclinic, phillips_two_layer,
     inertia_gravity_wave, lock_exchange, overflow, stommel_gyre_tracer
 """
 

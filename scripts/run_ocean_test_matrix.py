@@ -1968,74 +1968,6 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
     raise ValueError(f"Unknown grid type: {tc.grid_type}")
 
 
-def _create_rest_state(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
-    """Create rest-state initial condition for any grid type."""
-    if tc.grid_type == "cubed_sphere":
-        from legoesm.ocean.init import rest_state_ocean
-        return rest_state_ocean(grid, z_coord, H_max=H_max)
-    elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max)
-    elif tc.grid_type == "mpas":
-        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
-    elif tc.grid_type == "spectral":
-        from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
-        # Use land with tanh taper (same as other grids); hyperdiffusion mitigates Gibbs
-        return rest_state_spectral_ocean(grid, z_coord, H_max=H_max,
-                                         land_lat_threshold=80.0)
-    raise ValueError(f"Unknown grid type: {tc.grid_type}")
-
-
-def _create_rest_state_uniform_ts(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
-    """Create rest-state with uniform T/S (no stratification) + land."""
-    if tc.grid_type == "cubed_sphere":
-        from legoesm.ocean.init import rest_state_ocean
-        return rest_state_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
-    elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
-    elif tc.grid_type == "mpas":
-        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0)
-    raise ValueError(f"Unknown grid type: {tc.grid_type}")
-
-
-def _create_rest_state_uniform_ts_no_land(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
-    """Create rest-state with uniform T/S and no land."""
-    if tc.grid_type == "cubed_sphere":
-        from legoesm.ocean.init import rest_state_ocean
-        return rest_state_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0,
-                                 land_lat_threshold=90.0)
-    elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0,
-                                        land_lat_threshold=90.0)
-    elif tc.grid_type == "mpas":
-        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, T_surface=10.0, T_deep=10.0,
-                                      land_lat_threshold=90.0)
-    raise ValueError(f"Unknown grid type: {tc.grid_type}")
-
-
-def _create_rest_state_no_land(tc: TestCase, grid, z_coord, H_max=DEFAULT_H_MAX):
-    """Create rest-state initial condition with no land for any grid type."""
-    if tc.grid_type == "cubed_sphere":
-        from legoesm.ocean.init import rest_state_ocean
-        return rest_state_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
-    elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
-    elif tc.grid_type == "mpas":
-        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max, land_lat_threshold=90.0)
-    elif tc.grid_type == "spectral":
-        from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
-        return rest_state_spectral_ocean(grid, z_coord, H_max=H_max,
-                                         land_lat_threshold=90.0)
-    raise ValueError(f"Unknown grid type: {tc.grid_type}")
-
-
 # ===========================================================================
 # Field extraction helpers
 # ===========================================================================
@@ -2472,159 +2404,16 @@ def _key_array_fn(state, grid_type: str):
 
 
 # ===========================================================================
-# Barotropic wave perturbation
-# ===========================================================================
-
-def _add_barotropic_wave_perturbation(state, grid_type: str, grid, z_coord):
-    """Add a Gaussian SSH perturbation to the rest state.
-
-    Uses great-circle distance centered at (180E, 0N) with sigma=10 deg,
-    consistent across all grid types.
-    """
-    from legoesm.core.field import Field
-
-    eta_amp = 1.0  # 1 m SSH perturbation
-    sigma_rad = 10.0 * np.pi / 180.0  # Gaussian width in radians
-    lon0 = np.pi   # 180 degrees east
-    lat0 = 0.0     # equator
-
-    def _great_circle_perturbation(lon_rad, lat_rad):
-        """Compute Gaussian SSH perturbation using great-circle distance."""
-        dlon = lon_rad - lon0
-        dist = np.arccos(np.clip(
-            np.sin(lat_rad) * np.sin(lat0)
-            + np.cos(lat_rad) * np.cos(lat0) * np.cos(dlon),
-            -1.0, 1.0,
-        ))
-        return eta_amp * np.exp(-0.5 * (dist / sigma_rad) ** 2)
-
-    if grid_type == "cubed_sphere":
-        lon = np.asarray(grid.lon, dtype=np.float64)
-        lat = np.asarray(grid.lat, dtype=np.float64)
-        perturb = _great_circle_perturbation(lon, lat)
-        new_eta = state.eta.data + jnp.array(perturb)
-        return state._replace(eta=Field(new_eta))
-
-    elif grid_type == "latlon":
-        lon_1d = np.asarray(grid.lon, dtype=np.float64)
-        lat_1d = np.asarray(grid.lat, dtype=np.float64)
-        lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d, indexing='xy')
-        perturb = _great_circle_perturbation(lon_2d, lat_2d)
-        new_eta = state.eta.data + jnp.array(perturb)
-        return state._replace(eta=Field(new_eta))
-
-    elif grid_type == "mpas":
-        lon = np.asarray(grid.lonCell, dtype=np.float64)
-        lat = np.asarray(grid.latCell, dtype=np.float64)
-        perturb = _great_circle_perturbation(lon, lat)
-        new_eta = state.eta.data + jnp.array(perturb)
-        return state._replace(eta=Field(new_eta))
-
-    elif grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_analysis
-        lon_1d = np.asarray(grid.lon, dtype=np.float64)
-        lat_1d = np.asarray(grid.lat, dtype=np.float64)
-        lon_2d, lat_2d = np.meshgrid(lon_1d, lat_1d, indexing='xy')
-        perturb = _great_circle_perturbation(lon_2d, lat_2d)
-        perturb_hat = sh_analysis(grid, jnp.array(perturb))
-        new_eta_hat = state.eta_hat.data + perturb_hat
-        return state._replace(eta_hat=Field(new_eta_hat))
-
-    raise ValueError(f"Unknown grid type: {grid_type}")
-
-
-# ===========================================================================
-# Wind-driven gyre forcing
-# ===========================================================================
-
-def _add_wind_gyre_forcing(state, grid_type: str, grid, z_coord,
-                           lon_west=0.0, lon_east=120.0,
-                           lat_south=15.0, lat_north=75.0):
-    """Create wind-gyre initial state with rectangular basin boundaries."""
-    if grid_type in ("cubed_sphere", "cs_regional"):
-        from legoesm.ocean.init import wind_driven_gyre_init
-        return wind_driven_gyre_init(
-            grid, z_coord,
-            lon_west=lon_west, lon_east=lon_east,
-            lat_south=lat_south, lat_north=lat_north,
-        )
-    elif grid_type in ("latlon", "latlon_regional"):
-        from legoesm.ocean.init_latlon_cgrid import wind_driven_gyre_latlon_cgrid
-        return wind_driven_gyre_latlon_cgrid(
-            grid, z_coord,
-            lon_west=lon_west, lon_east=lon_east,
-            lat_south=lat_south, lat_north=lat_north,
-        )
-    elif grid_type in ("mpas", "mpas_regional"):
-        from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
-        return wind_driven_gyre_mpas(
-            grid, z_coord,
-            lon_west=lon_west, lon_east=lon_east,
-            lat_south=lat_south, lat_north=lat_north,
-        )
-    raise ValueError(f"Wind gyre not available for grid: {grid_type}")
-
-
-# ===========================================================================
-# Geostrophic adjustment perturbation
-# ===========================================================================
-
-def _add_baroclinic_perturbation(state, grid_type: str, grid, z_coord):
-    """Add a meridional temperature front for baroclinic adjustment."""
-    from legoesm.core.field import Field
-
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_analysis_3d
-        lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
-        # Add meridional temperature gradient: +5C at equator, -5C at poles
-        T_pert = 5.0 * np.cos(np.radians(lat))
-        # Extend to 3D
-        T_grid_hat = state.T_hat.data
-        nlev = T_grid_hat.shape[-1]
-        from legoesm.grids.gaussian import sh_synthesis_3d
-        T_grid = np.array(sh_synthesis_3d(grid, T_grid_hat), dtype=np.float64)
-        # T_pert is (n_lat,) → broadcast to (n_lat, n_lon)
-        T_pert_2d = T_pert[:, np.newaxis] * np.ones((1, grid.n_lon))
-        for k in range(nlev):
-            decay = np.exp(-k / max(nlev / 3, 1))
-            T_grid[..., k] += T_pert_2d * decay
-        from legoesm.grids.gaussian import sh_analysis_3d
-        new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
-        return state._replace(T_hat=Field(new_T_hat))
-
-    else:
-        # FV grids (cube, latlon, mpas)
-        if grid_type == "mpas":
-            lat = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
-        else:
-            lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
-
-        T_data = np.array(state.T.data, dtype=np.float64)  # writeable copy
-        nlev = T_data.shape[-1]
-        T_pert = 5.0 * np.cos(np.radians(lat))
-        # Reshape T_pert to broadcast with T_data[..., k]
-        # For lat-lon: (n_lat,) → (n_lat, 1); for cube: (6, n, n) OK; for mpas: (nCells,) OK
-        pert_shape = T_data.shape[:-1]  # spatial dims
-        T_pert = np.broadcast_to(T_pert.reshape(
-            T_pert.shape + (1,) * (len(pert_shape) - T_pert.ndim)), pert_shape)
-
-        for k in range(nlev):
-            decay = np.exp(-k / max(nlev / 3, 1))
-            T_data[..., k] += T_pert * decay
-
-        return state._replace(T=Field(jnp.array(T_data)))
-
-
-# ===========================================================================
 # Runner: Rest State
 # ===========================================================================
 
 def run_rest_state(tc: TestCase, output_dir: Path, days: float
                    ) -> tuple[str, float, str]:
     """Rest state adjustment: model should remain near initial condition."""
+    from legoesm.ocean.experiments.rest_state import RestStateConfig, create_initial_conditions as rest_ic
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc))
-    state = _create_rest_state(tc, grid, z_coord)
+    state = rest_ic(tc.grid_type, grid, z_coord, RestStateConfig())
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -2643,7 +2432,7 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
         label=f"Rest State ({tc.grid_type})", total_days=days)
 
     # Check drift is small - all grids now use same physical units
-    # Use absolute eta drift in meters rather than relative drift since 
+    # Use absolute eta drift in meters rather than relative drift since
     # initial mean_eta is ~0 in rest state, making relative drift meaningless (division by ~0).
     eta_list = diag.get("mean_eta", [])
     eta_drift = (abs(eta_list[-1] - eta_list[0])
@@ -2689,9 +2478,10 @@ def run_rest_state(tc: TestCase, output_dir: Path, days: float
 def run_rest_state_no_land(tc: TestCase, output_dir: Path, days: float
                    ) -> tuple[str, float, str]:
     """Rest state adjustment with no land: pure ocean should remain near initial condition."""
+    from legoesm.ocean.experiments.rest_state import RestStateConfig, create_initial_conditions as rest_ic
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc))
-    state = _create_rest_state_no_land(tc, grid, z_coord)
+    state = rest_ic(tc.grid_type, grid, z_coord, RestStateConfig(include_land=False))
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -2752,9 +2542,10 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
     stable, it confirms the baroclinic pressure gradient is the primary
     trigger for land-boundary instabilities.
     """
+    from legoesm.ocean.experiments.rest_state import RestStateConfig, create_initial_conditions as rest_ic
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc))
-    state = _create_rest_state_uniform_ts(tc, grid, z_coord)
+    state = rest_ic(tc.grid_type, grid, z_coord, RestStateConfig(uniform_ts=True))
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -2807,9 +2598,10 @@ def run_rest_state_uniform_ts(tc: TestCase, output_dir: Path, days: float
 def run_rest_state_uniform_ts_no_land(tc: TestCase, output_dir: Path, days: float
                                       ) -> tuple[str, float, str]:
     """Rest state with uniform T/S and no land — control for uniform_ts diagnostic."""
+    from legoesm.ocean.experiments.rest_state import RestStateConfig, create_initial_conditions as rest_ic
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc))
-    state = _create_rest_state_uniform_ts_no_land(tc, grid, z_coord)
+    state = rest_ic(tc.grid_type, grid, z_coord, RestStateConfig(uniform_ts=True, include_land=False))
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -2869,11 +2661,10 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     if tc.grid_type == "spectral":
         raise NotImplementedError(
             "Barotropic wave skipped for spectral grid (land masking issues)")
+    from legoesm.ocean.experiments.barotropic_wave import create_initial_conditions as bw_ic
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc))
-    state = _create_rest_state(tc, grid, z_coord)
-    state = _add_barotropic_wave_perturbation(
-        state, tc.grid_type, grid, z_coord)
+    state = bw_ic(tc.grid_type, grid, z_coord)
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -2926,124 +2717,6 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
 # Runner: Wind-Driven Gyre
 # ===========================================================================
 
-def _make_gyre_physics(wind_profile: str = "single_gyre",
-                       wind_buffer_deg: float = 0.0):
-    """Create OceanPhysicsConfig with prescribed gyre wind forcing.
-
-    Parameters
-    ----------
-    wind_profile : str
-        "single_gyre", "double_gyre", "double_gyre_sin2", etc.
-    wind_buffer_deg : float
-        Buffer zone width [degrees] where wind tapers to zero at basin edges.
-        Needed for "double_gyre_sin2" (use 5.0).
-
-    Notes
-    -----
-    Lateral viscosity is NOT in the physics config because the physics
-    pipeline's harmonic mixing is cubed-sphere-only. Instead, A_h is
-    set on the ocean config via _create_ocean_setup (the dynamics
-    applies it natively on both cubed-sphere and latlon when
-    physics_fn is None for that module). When physics_fn IS set,
-    the dynamics skips config.A_h — so we keep lateral_mixing="none"
-    in the physics config and set A_h on the base config.
-    See _create_ocean_setup where A_h is passed.
-    """
-    from legoesm.ocean.physics.combined import OceanPhysicsConfig
-    from legoesm.ocean.physics.surface_forcing.config import (
-        PrescribedForcingConfig, SurfaceForcingConfig,
-    )
-    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
-    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.bottom_drag.config import (
-        BottomDragConfig, LinearDragConfig,
-    )
-    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
-
-    # Linear bottom drag r = 1e-4 s^-1 (Stommel, design doc §4.2).
-    # Lateral viscosity A_h handled by the base ocean config (see above).
-    return OceanPhysicsConfig(
-        surface_forcing=SurfaceForcingConfig(
-            scheme="prescribed",
-            prescribed=PrescribedForcingConfig(
-                wind_profile=wind_profile,
-                tau_max=0.1,
-                lat_south_deg=15.0,
-                lat_north_deg=75.0,
-                wind_buffer_deg=wind_buffer_deg,
-            ),
-        ),
-        vertical_mixing=VerticalMixingConfig(scheme="none"),
-        lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(
-            scheme="linear",
-            linear=LinearDragConfig(r=1e-4),
-        ),
-        convection=OceanConvectionConfig(scheme="none"),
-        shortwave_penetration=None,
-    )
-
-
-def _make_global_wind_physics():
-    """Create OceanPhysicsConfig with global 3-belt wind forcing."""
-    return _make_gyre_physics("global_wind")
-
-
-def _create_simplified_continent_mask(lon_deg, lat_deg,
-                                       continent_lon_west=20.0,
-                                       continent_lon_east=60.0,
-                                       continent_lat_south=-55.0,
-                                       polar_cap_lat=80.0):
-    """Create a simplified continent land mask for global wind-driven tests.
-
-    Geometry:
-    - North polar cap: land poleward of +polar_cap_lat
-    - South polar cap: land poleward of -polar_cap_lat
-    - Single meridional continent from north cap to continent_lat_south
-    - Open Drake Passage south of continent_lat_south
-    - Everything else is ocean (including circumpolar band)
-
-    The continent is 40° wide (20-60°E). This is the minimum needed
-    for full latitude coverage on the ico3 MPAS mesh (~4-5° spacing)
-    and to prevent roll-based operators from communicating through
-    the land barrier on the latlon grid (8 cells at 5° resolution).
-
-    Parameters
-    ----------
-    lon_deg, lat_deg : array
-        Cell-center coordinates in degrees.
-    continent_lon_west, continent_lon_east : float
-        Longitude bounds of the continent [degrees].
-    continent_lat_south : float
-        Southern tip of the continent [degrees]. Drake Passage opens
-        south of this latitude.
-    polar_cap_lat : float
-        Latitude of polar caps [degrees]. Land poleward of ±this value.
-
-    Returns
-    -------
-    land_mask : array
-        1 = ocean, 0 = land.
-    """
-    lon = jnp.asarray(lon_deg)
-    lat = jnp.asarray(lat_deg)
-
-    # Start with all ocean
-    ocean = jnp.ones_like(lat)
-
-    # Polar caps: land
-    ocean = jnp.where(jnp.abs(lat) > polar_cap_lat, 0.0, ocean)
-
-    # Single continent: land where inside lon bounds AND north of Drake Passage
-    in_continent = (
-        (lon >= continent_lon_west) & (lon <= continent_lon_east) &
-        (lat >= continent_lat_south)
-    )
-    ocean = jnp.where(in_continent, 0.0, ocean)
-
-    return ocean
-
-
 def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
                          wind_profile: str, label: str,
                          wind_buffer_deg: float = 0.0,
@@ -3056,16 +2729,14 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
             f"{label} not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
 
-    physics = _make_gyre_physics(wind_profile, wind_buffer_deg=wind_buffer_deg)
-    # A_h = 5e5 m^2/s: Munk layer delta_M ~ 300 km, needed to
-    # stabilise long integrations at ~5-degree resolution.
-    # Default A_v = 1e-3 (higher values destabilise latlon).
+    from legoesm.ocean.experiments.regional_gyre import (
+        RegionalGyreConfig, create_initial_conditions as gyre_ic, create_forcings as gyre_forcings)
+    gyre_config = RegionalGyreConfig(
+        wind_profile=wind_profile, wind_buffer_deg=wind_buffer_deg)
+    physics = gyre_forcings(tc.grid_type, None, gyre_config)
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=5e5))
-    state = _add_wind_gyre_forcing(
-        None, tc.grid_type, grid, z_coord,
-        lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
-    )
+        _create_ocean_setup(tc, physics=physics, A_h=gyre_config.A_h))
+    state = gyre_ic(tc.grid_type, grid, z_coord, gyre_config)
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -3395,57 +3066,15 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
         raise NotImplementedError(
             f"Global wind not implemented for {tc.grid_type}")
 
-    physics = _make_global_wind_physics()
+    from legoesm.ocean.experiments.global_barotropic_wind import (
+        GlobalBarotropicWindConfig, create_initial_conditions as gbw_ic,
+        create_forcings as gbw_forcings)
+    gbw_config = GlobalBarotropicWindConfig()
+    physics = gbw_forcings(tc.grid_type, None, gbw_config)
     nlev_override = tc.run_kwargs.get("nlev", None)
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=5e5, nlev=nlev_override))
-
-    # Build initial state with simplified continent land mask
-    # Uniform T/S for a truly barotropic experiment (no baroclinic modes)
-    T_uniform = 10.0  # degC
-    S_uniform = 35.0  # PSU
-    if tc.grid_type == "cubed_sphere":
-        from legoesm.ocean.init import rest_state_ocean
-        state = rest_state_ocean(grid, z_coord,
-                                 T_surface=T_uniform, T_deep=T_uniform,
-                                 S_uniform=S_uniform)
-        # Override land mask with simplified continent
-        lon_flat = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
-        lat_flat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
-        mask = _create_simplified_continent_mask(lon_flat, lat_flat)
-        from legoesm.core.field import Field
-        state = state._replace(land_mask=Field(data=mask.astype(state.eta.data.dtype)))
-    elif tc.grid_type == "latlon":
-        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-        state = rest_state_latlon_cgrid_ocean(grid, z_coord,
-                                              T_surface=T_uniform, T_deep=T_uniform,
-                                              S_uniform=S_uniform)
-        lon_2d = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
-        lat_1d = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
-        lon_grid, lat_grid = np.meshgrid(lon_2d, lat_1d) if lon_2d.ndim == 1 else (lon_2d, lat_1d)
-        if lat_grid.ndim == 1:
-            lat_grid = lat_1d[:, None] * np.ones((1, len(lon_2d)))
-            lon_grid = lon_2d[None, :] * np.ones((len(lat_1d), 1))
-        mask = _create_simplified_continent_mask(lon_grid, lat_grid)
-        from legoesm.core.field import Field
-        from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
-        mask_typed = mask.astype(state.eta.data.dtype)
-        u_mask_new, v_mask_new = compute_face_masks(mask_typed)
-        state = state._replace(
-            land_mask=Field(data=mask_typed),
-            u_mask=Field(data=u_mask_new),
-            v_mask=Field(data=v_mask_new),
-        )
-    elif tc.grid_type == "mpas":
-        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        state = rest_state_mpas_ocean(grid, z_coord,
-                                      T_surface=T_uniform, T_deep=T_uniform,
-                                      S_uniform=S_uniform)
-        lon_deg_c = np.asarray(grid.lonCell, dtype=np.float64) * 180 / np.pi
-        lat_deg_c = np.asarray(grid.latCell, dtype=np.float64) * 180 / np.pi
-        mask = _create_simplified_continent_mask(lon_deg_c, lat_deg_c)
-        from legoesm.core.field import Field
-        state = state._replace(land_mask=Field(data=mask.astype(state.eta.data.dtype)))
+        _create_ocean_setup(tc, physics=physics, A_h=gbw_config.A_h, nlev=nlev_override))
+    state = gbw_ic(tc.grid_type, grid, z_coord, gbw_config)
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -3503,11 +3132,10 @@ def run_global_barotropic_wind(tc: TestCase, output_dir: Path, days: float
 def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
                    ) -> tuple[str, float, str]:
     """Geostrophic adjustment: meridional temperature front relaxation."""
+    from legoesm.ocean.experiments.geostrophic_adjustment import create_initial_conditions as ga_ic
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc))
-    state = _create_rest_state(tc, grid, z_coord)
-    state = _add_baroclinic_perturbation(
-        state, tc.grid_type, grid, z_coord)
+    state = ga_ic(tc.grid_type, grid, z_coord)
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -3560,136 +3188,13 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
 # Runner: Phillips Two-Layer
 # ===========================================================================
 
-def _add_phillips_perturbation(state, grid_type: str, grid, z_coord):
-    """Set up Phillips two-layer initial conditions: jet + SSH perturbation."""
-    from legoesm.core.field import Field
-
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import (
-            sh_analysis, sh_analysis_3d, sh_synthesis_3d,
-            sh_analysis_oc2_3d, sh_analysis_dmu_3d)
-        lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
-        lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
-        lon_2d, lat_2d = np.meshgrid(lon, lat, indexing='xy')
-        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-
-        # Temperature with land mask (consistent with FV grids)
-        T_hat = state.T_hat.data
-        T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
-        nlev = T_grid.shape[-1]
-        T_grid[..., 0] = (16.0 - 10.0 * np.sin(np.radians(lat_2d)) ** 2) * mask
-        if nlev > 1:
-            T_grid[..., 1] = (8.0 - 4.0 * np.sin(np.radians(lat_2d)) ** 2) * mask
-        new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
-
-        # Zonal jet -> convert to vorticity/divergence
-        cos_lat = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
-        u_jet = 0.30 * np.exp(-((lat_2d - 45.0) / 14.0) ** 2) * mask
-        u_grid = np.zeros(T_grid.shape, dtype=np.float64)
-        u_grid[..., 0] = u_jet
-        if nlev > 1:
-            u_grid[..., 1] = -0.20 * u_jet
-        u_cos = jnp.array(u_grid * cos_lat[..., None])
-        v_cos = jnp.zeros_like(u_cos)
-        a = grid.radius
-        im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-        one_over_a = 1.0 / a
-        vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
-                   + one_over_a * sh_analysis_dmu_3d(grid, u_cos))
-        div_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
-                   - one_over_a * sh_analysis_dmu_3d(grid, v_cos))
-
-        # SSH perturbation with mask (area-weighted mean subtraction)
-        eta_pert = 0.05 * np.sin(3.0 * np.radians(lon_2d)) * np.cos(
-            2.0 * np.radians(lat_2d)) * mask
-        w = np.asarray(grid.weights, dtype=np.float64)[:, None] * mask
-        eta_pert -= np.sum(eta_pert * w) / np.maximum(np.sum(w), 1e-30)
-        eta_hat = state.eta_hat.data + sh_analysis(grid, jnp.array(eta_pert))
-
-        return state._replace(
-            vor_hat=Field(vor_hat),
-            div_hat=Field(div_hat),
-            T_hat=Field(new_T_hat),
-            eta_hat=Field(eta_hat))
-
-    else:
-        # FV grids (cube, latlon, mpas)
-        if grid_type == "mpas":
-            lat_rad = np.asarray(grid.latCell, dtype=np.float64)
-            lon_rad = np.asarray(grid.lonCell, dtype=np.float64)
-            area = np.asarray(grid.areaCell, dtype=np.float64)
-        else:
-            lat_rad = np.asarray(grid.lat, dtype=np.float64)
-            lon_rad = np.asarray(grid.lon, dtype=np.float64)
-            area = np.asarray(grid.area, dtype=np.float64)
-
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
-        nlev = T_data.shape[-1]
-
-        # Broadcast lat to match spatial dimensions of mask
-        lat_deg_arr = lat_rad * 180 / np.pi
-        if lat_deg_arr.ndim < mask.ndim:
-            # latlon grid: lat is (n_lat,), mask is (n_lat, n_lon)
-            lat_deg_arr = np.broadcast_to(
-                lat_deg_arr.reshape(lat_deg_arr.shape + (1,) * (mask.ndim - lat_deg_arr.ndim)),
-                mask.shape)
-            lat_rad_bc = np.broadcast_to(
-                lat_rad.reshape(lat_rad.shape + (1,) * (mask.ndim - lat_rad.ndim)),
-                mask.shape)
-            lon_rad_bc = np.broadcast_to(
-                lon_rad.reshape((1,) * (mask.ndim - lon_rad.ndim) + lon_rad.shape),
-                mask.shape)
-        else:
-            lat_rad_bc = lat_rad
-            lon_rad_bc = lon_rad
-
-        # Zonal jet
-        u_data = np.array(state.u.data, dtype=np.float64, copy=True)
-        if grid_type == "mpas":
-            # MPAS: u on edges, compute jet on edge latitudes
-            lat_edge_deg = np.asarray(grid.latEdge, dtype=np.float64) * 180 / np.pi
-            u_jet_edge = 0.30 * np.exp(-((lat_edge_deg - 45.0) / 14.0) ** 2)
-            u_data[..., 0] = u_jet_edge
-            if nlev > 1:
-                u_data[..., 1] = -0.20 * u_jet_edge
-        else:
-            u_jet = 0.30 * np.exp(-((lat_deg_arr - 45.0) / 14.0) ** 2) * mask
-            u_data[..., 0] = u_jet
-            if nlev > 1:
-                u_data[..., 1] = -0.20 * u_jet
-
-        # Target temperatures
-        T_data[..., 0] = (16.0 - 10.0 * np.sin(lat_rad_bc) ** 2) * mask
-        if nlev > 1:
-            T_data[..., 1] = (8.0 - 4.0 * np.sin(lat_rad_bc) ** 2) * mask
-
-        # SSH perturbation
-        eta_seed = 0.05 * np.sin(3.0 * lon_rad_bc) * np.cos(2.0 * lat_rad_bc) * mask
-        area_w = mask * area
-        eta_seed -= np.sum(eta_seed * area_w) / np.maximum(np.sum(area_w), 1.0)
-        new_eta = state.eta.data + jnp.array(eta_seed)
-
-        state = state._replace(
-            u=Field(jnp.array(u_data)),
-            T=Field(jnp.array(T_data)),
-            eta=Field(new_eta))
-        if hasattr(state, "v"):
-            v_data = np.array(state.v.data, dtype=np.float64, copy=True)
-            v_data[..., 0] *= 0  # start with no meridional flow
-            if nlev > 1:
-                v_data[..., 1] *= 0
-            state = state._replace(v=Field(jnp.array(v_data)))
-        return state
-
-
 def run_phillips_two_layer(tc: TestCase, output_dir: Path, days: float
                            ) -> tuple[str, float, str]:
     """Phillips two-layer baroclinic test with zonal-mean relaxation."""
+    from legoesm.ocean.experiments.phillips_two_layer import create_initial_conditions as p2l_ic
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc, nlev=2, H_max=3500.0))
-    state = _create_rest_state(tc, grid, z_coord, H_max=3500.0)
-    state = _add_phillips_perturbation(state, tc.grid_type, grid, z_coord)
+    state = p2l_ic(tc.grid_type, grid, z_coord)
 
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
@@ -3836,98 +3341,6 @@ def _get_cell_latlon_rad(grid_type, grid):
 # Tests the barotropic pressure-gradient and Coriolis terms.
 # ===========================================================================
 
-def _init_inertia_gravity_wave(state, grid_type, grid, z_coord):
-    """Initialize a sinusoidal inertia-gravity wave perturbation.
-
-    Uses wavenumber-2 pattern in both longitude and latitude.
-    Analytical solution for comparison after propagation.
-    """
-    from legoesm.core.field import Field
-
-    H = float(z_coord.H_max)
-    f0 = 1.0e-4  # Coriolis parameter (mid-latitude f-plane value)
-
-    # Wavenumber-2 pattern
-    lat, lon = _get_cell_latlon_rad(grid_type, grid)
-    kx = 2.0  # wavenumber in zonal direction (cycles)
-    ky = 2.0  # wavenumber in meridional direction (cycles)
-
-    # Physical wavenumbers on the sphere (approximate for low wavenumbers)
-    k_phys = kx / _A_EARTH
-    l_phys = ky / _A_EARTH
-
-    # Dispersion relation
-    omega = np.sqrt(f0**2 + _G_EARTH * H * (k_phys**2 + l_phys**2))
-
-    # Initial perturbation (t=0)
-    eta_amp = 1.0  # 1 m amplitude
-    phase = kx * lon + ky * lat
-    eta_pert = eta_amp * np.cos(phase)
-
-    # Velocity from linearized SWE: u, v from eta at t=0
-    # u = g/(omega^2 - f^2) * (omega*kx*cos(phase) - f*ky*sin(phase))
-    # v = g/(omega^2 - f^2) * (omega*ky*cos(phase) + f*kx*sin(phase))
-    denom = omega**2 - f0**2
-    if abs(denom) < 1e-30:
-        denom = 1e-30
-    u_pert = (_G_EARTH / denom) * (
-        omega * k_phys * np.cos(phase) - f0 * l_phys * np.sin(phase))
-    v_pert = (_G_EARTH / denom) * (
-        omega * l_phys * np.cos(phase) + f0 * k_phys * np.sin(phase))
-
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import (
-            sh_analysis, sh_analysis_oc2_3d, sh_analysis_dmu_3d)
-        eta_hat = sh_analysis(grid, jnp.array(eta_pert))
-        cos_lat = np.asarray(grid.cos_lat[:, None], dtype=np.float64)
-        a = grid.radius
-        nlev = state.T_hat.data.shape[-1]
-        # Only perturb level 0 (consistent with cubed-sphere / lat-lon init)
-        u_cos_2d = jnp.array(u_pert * cos_lat)    # (n_lat, n_lon)
-        v_cos_2d = jnp.array(v_pert * cos_lat)
-        u_cos = jnp.concatenate([u_cos_2d[..., None],
-                                 jnp.zeros((*u_cos_2d.shape, nlev - 1))], axis=-1)
-        v_cos = jnp.concatenate([v_cos_2d[..., None],
-                                 jnp.zeros((*v_cos_2d.shape, nlev - 1))], axis=-1)
-        im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-        one_over_a = 1.0 / a
-        vor_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, v_cos)
-                   + one_over_a * sh_analysis_dmu_3d(grid, u_cos))
-        div_hat = (im_over_a[:, None] * sh_analysis_oc2_3d(grid, u_cos)
-                   - one_over_a * sh_analysis_dmu_3d(grid, v_cos))
-        return state._replace(
-            eta_hat=Field(eta_hat),
-            vor_hat=Field(vor_hat),
-            div_hat=Field(div_hat))
-
-    elif grid_type == "mpas":
-        lat_e = np.asarray(grid.latEdge, dtype=np.float64)
-        lon_e = np.asarray(grid.lonEdge, dtype=np.float64)
-        u_data = np.array(state.u.data, dtype=np.float64, copy=True)
-        phase_e = kx * lon_e + ky * lat_e
-        u_e = (_G_EARTH / denom) * (
-            omega * k_phys * np.cos(phase_e) - f0 * l_phys * np.sin(phase_e))
-        v_e = (_G_EARTH / denom) * (
-            omega * l_phys * np.cos(phase_e) + f0 * k_phys * np.sin(phase_e))
-        # Project onto edge normals
-        angle = np.asarray(grid.angleEdge, dtype=np.float64)
-        u_data[..., 0] = u_e * np.cos(angle) + v_e * np.sin(angle)
-        eta_cell = eta_amp * np.cos(kx * lon + ky * lat)
-        return state._replace(
-            eta=Field(jnp.array(eta_cell)),
-            u=Field(jnp.array(u_data)))
-
-    else:  # cubed_sphere, latlon
-        u_data = np.array(state.u.data, dtype=np.float64, copy=True)
-        v_data = np.array(state.v.data, dtype=np.float64, copy=True)
-        u_data[..., 0] = u_pert
-        v_data[..., 0] = v_pert
-        return state._replace(
-            eta=Field(jnp.array(eta_pert)),
-            u=Field(jnp.array(u_data)),
-            v=Field(jnp.array(v_data)))
-
-
 def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
                               ) -> tuple[str, float, str]:
     """Bishnu et al. 2024: inertia-gravity (Poincare) wave propagation.
@@ -3936,11 +3349,11 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
     condition. Measures L2 error against analytical solution and checks
     dispersion properties.
     """
+    from legoesm.ocean.experiments.inertia_gravity_wave import create_initial_conditions as igw_ic
     H_max = 1000.0  # equivalent depth (m)
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc, nlev=2, H_max=H_max))
-    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
-    state = _init_inertia_gravity_wave(state, tc.grid_type, grid, z_coord)
+    state = igw_ic(tc.grid_type, grid, z_coord)
 
     # Store initial eta for error computation
     if tc.grid_type == "spectral":
@@ -4022,44 +3435,6 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
 # parcel height in a minimum-energy sorted state.
 # ===========================================================================
 
-def _init_lock_exchange(state, grid_type, grid, z_coord):
-    """Initialize lock-exchange: cold dense (western hemisphere) / warm light (eastern).
-
-    Adapted to global ocean grids following Petersen et al. (2015):
-      - Left (lon < 0): T = 5 degC  (dense, rho ~ 1027 kg/m^3)
-      - Right (lon > 0): T = 30 degC (light, rho ~ 1022 kg/m^3)
-      - Salinity: uniform 35 PSU
-      - Velocity: zero (lock released at t=0)
-    """
-    from legoesm.core.field import Field
-
-    T_cold = 5.0    # degC (dense side)
-    T_warm = 30.0   # degC (light side)
-
-    lat, lon = _get_cell_latlon_rad(grid_type, grid)
-
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_analysis_3d
-        T_hat = state.T_hat.data
-        from legoesm.grids.gaussian import sh_synthesis_3d
-        T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
-        nlev = T_grid.shape[-1]
-        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        # Front at prime meridian (lon=0)
-        T_field = np.where(lon[..., None] < 0, T_cold, T_warm) * mask[..., None]
-        new_T_hat = sh_analysis_3d(grid, jnp.array(T_field))
-        return state._replace(T_hat=Field(new_T_hat))
-
-    else:
-        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        nlev = T_data.shape[-1]
-        # Temperature front at prime meridian
-        for k in range(nlev):
-            T_data[..., k] = np.where(lon < 0, T_cold, T_warm) * mask
-        return state._replace(T=Field(jnp.array(T_data)))
-
-
 def _compute_rpe(state, grid_type, grid, z_coord):
     """Compute Reference Potential Energy (Ilicak et al. 2012).
 
@@ -4108,12 +3483,14 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
     Cold dense water in western hemisphere, warm light in eastern.
     Monitors potential energy evolution as a proxy for spurious mixing.
     """
-    H_max = 500.0  # shallow basin
-    nlev = 20
+    from legoesm.ocean.experiments.lock_exchange import (
+        LockExchangeConfig, create_initial_conditions as le_ic)
+    le_config = LockExchangeConfig()
+    H_max = le_config.H_max  # 500 m shallow basin
+    nlev = le_config.nlev     # 20 levels
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc, nlev=nlev, H_max=H_max))
-    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
-    state = _init_lock_exchange(state, tc.grid_type, grid, z_coord)
+    state = le_ic(tc.grid_type, grid, z_coord, le_config)
 
     # Compute initial PE
     pe_init = _compute_rpe(state, tc.grid_type, grid, z_coord)
@@ -4191,71 +3568,6 @@ def run_lock_exchange(tc: TestCase, output_dir: Path, days: float
 # equatorward over a mid-latitude bathymetric ridge.
 # ===========================================================================
 
-def _init_overflow(state, grid_type, grid, z_coord):
-    """Initialize overflow: dense water at high latitudes over bathymetric slope.
-
-    Adapted from Petersen et al. (2015):
-      - Poleward of 50 deg: cold (T=5 degC, dense)
-      - Equatorward of 50 deg: warm (T=20 degC, light)
-      - Smooth tanh transition at 50 deg latitude
-      - Bathymetric ridge at ~40 deg: shelf at 500m, deep basin at 2000m
-    """
-    from legoesm.core.field import Field
-
-    T_cold = 5.0
-    T_warm = 20.0
-    lat_front = np.radians(50.0)   # front position
-    sigma_front = np.radians(5.0)  # transition width
-
-    # Bathymetry: shelf (500m) poleward of 40 deg, deep (2000m) equatorward
-    lat_shelf = np.radians(40.0)
-    sigma_shelf = np.radians(7.0)
-    d_shallow = 500.0
-    d_deep = float(z_coord.H_max)
-
-    lat, lon = _get_cell_latlon_rad(grid_type, grid)
-    abs_lat = np.abs(lat)
-
-    # Temperature: tanh transition at lat_front
-    T_profile = T_warm + (T_cold - T_warm) * 0.5 * (
-        1.0 + np.tanh((abs_lat - lat_front) / sigma_front))
-
-    # Bathymetry: tanh transition at lat_shelf
-    H_bathy_new = d_shallow + (d_deep - d_shallow) * 0.5 * (
-        1.0 - np.tanh((abs_lat - lat_shelf) / sigma_shelf))
-
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
-        T_hat = state.T_hat.data
-        T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
-        nlev = T_grid.shape[-1]
-        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        for k in range(nlev):
-            # Decay temperature perturbation with depth
-            depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
-            T_grid[..., k] = (T_profile * (1.0 - 0.5 * depth_frac) + 2.0 * depth_frac) * mask
-        new_T_hat = sh_analysis_3d(grid, jnp.array(T_grid))
-        # Note: spectral model doesn't easily support variable bathymetry
-        return state._replace(T_hat=Field(new_T_hat))
-
-    else:
-        T_data = np.array(state.T.data, dtype=np.float64, copy=True)
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        nlev = T_data.shape[-1]
-        for k in range(nlev):
-            depth_frac = float(z_coord.z_full_ref[k] / z_coord.z_full_ref[-1])
-            T_data[..., k] = (T_profile * (1.0 - 0.5 * depth_frac) + 2.0 * depth_frac) * mask
-
-        # Update bathymetry
-        H_bathy_new_masked = H_bathy_new * mask
-        # Ensure minimum depth where ocean exists
-        H_bathy_new_masked = np.where(mask > 0.5, np.maximum(H_bathy_new_masked, 50.0), 0.0)
-
-        return state._replace(
-            T=Field(jnp.array(T_data)),
-            H_bathy=Field(jnp.array(H_bathy_new_masked)))
-
-
 def run_overflow(tc: TestCase, output_dir: Path, days: float
                  ) -> tuple[str, float, str]:
     """Overflow: dense water descending a bathymetric slope (Petersen et al. 2015).
@@ -4263,12 +3575,14 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
     Cold dense water at high latitudes flows equatorward over a mid-latitude
     ridge. Monitors PE evolution and plume descent.
     """
-    H_max = 2000.0
-    nlev = 20
+    from legoesm.ocean.experiments.overflow import (
+        OverflowConfig, create_initial_conditions as ov_ic)
+    ov_config = OverflowConfig()
+    H_max = ov_config.H_max  # 2000 m
+    nlev = ov_config.nlev     # 20 levels
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc, nlev=nlev, H_max=H_max))
-    state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
-    state = _init_overflow(state, tc.grid_type, grid, z_coord)
+    state = ov_ic(tc.grid_type, grid, z_coord, ov_config)
 
     pe_init = _compute_rpe(state, tc.grid_type, grid, z_coord)
 
@@ -4349,51 +3663,6 @@ def run_overflow(tc: TestCase, output_dir: Path, days: float
 #   - Linear bottom drag
 # ===========================================================================
 
-def _init_stommel_gyre_tracer(state, grid_type, grid, z_coord):
-    """Initialize Stommel gyre with passive salinity tracer blob.
-
-    Uses the existing wind-driven gyre initialization for dynamics,
-    then sets salinity as a passive tracer with a Gaussian blob
-    in the subtropical gyre interior.
-    """
-    from legoesm.core.field import Field
-
-    # First set up the wind-gyre dynamics (basin: 0-60E, 15-75N)
-    state = _add_wind_gyre_forcing(
-        state, grid_type, grid, z_coord,
-        lon_west=0.0, lon_east=120.0, lat_south=15.0, lat_north=75.0,
-    )
-
-    # Add salinity tracer blob (Gaussian, centered at 35N, 30E — inside basin)
-    lat, lon = _get_cell_latlon_rad(grid_type, grid)
-    lat_c = np.radians(35.0)   # blob center latitude
-    lon_c = np.radians(60.0)   # blob center longitude (basin midpoint)
-    sigma = np.radians(10.0)   # blob width (~10 deg)
-    S_bg = 35.0                # background salinity (PSU)
-    S_amp = 2.0                # tracer perturbation amplitude
-
-    r2 = (lat - lat_c)**2 + (np.cos(lat_c) * (lon - lon_c))**2
-    S_blob = S_bg + S_amp * np.exp(-r2 / (2.0 * sigma**2))
-
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
-        S_hat = state.S_hat.data
-        S_grid = np.array(sh_synthesis_3d(grid, S_hat), dtype=np.float64)
-        nlev = S_grid.shape[-1]
-        mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        # Set top-level salinity as tracer, keep deeper levels uniform
-        S_grid[..., 0] = S_blob * mask
-        new_S_hat = sh_analysis_3d(grid, jnp.array(S_grid))
-        return state._replace(S_hat=Field(new_S_hat))
-
-    else:
-        S_data = np.array(state.S.data, dtype=np.float64, copy=True)
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        # Surface salinity blob
-        S_data[..., 0] = S_blob * mask
-        return state._replace(S=Field(jnp.array(S_data)))
-
-
 def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
                              ) -> tuple[str, float, str]:
     """Stommel gyre with passive tracer (Hecht et al. 2000).
@@ -4407,11 +3676,14 @@ def run_stommel_gyre_tracer(tc: TestCase, output_dir: Path, days: float
             f"Stommel gyre tracer not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
 
-    physics = _make_gyre_physics("single_gyre")
+    from legoesm.ocean.experiments.regional_gyre import (
+        RegionalGyreConfig, create_forcings as gyre_forcings)
+    from legoesm.ocean.experiments.stommel_gyre_tracer import create_initial_conditions as sgt_ic
+    gyre_config = RegionalGyreConfig(wind_profile="single_gyre")
+    physics = gyre_forcings(tc.grid_type, None, gyre_config)
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(tc, physics=physics))
-    rest = _create_rest_state(tc, grid, z_coord)
-    state = _init_stommel_gyre_tracer(rest, tc.grid_type, grid, z_coord)
+    state = sgt_ic(tc.grid_type, grid, z_coord)
 
     # Store initial tracer integral for conservation check
     area = np.asarray(grid.grid_area, dtype=np.float64)
