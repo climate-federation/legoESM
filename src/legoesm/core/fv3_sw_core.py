@@ -95,19 +95,26 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     # v_d_ext: (6, n+3, n) — v_d with 1 halo on each i-side
 
     # ---- Step 1: D-grid → covariant cell centres (utmp, vtmp) ----
-    # With halo-extended D-grid, 4th-order at ALL cells including boundary.
-    # u_d_ext: (6, n, n+3) — halo=1 on each j-side of n+1 original edges.
-    # Interior edges are at j=1..n+1 (0-based). Cell j uses edges j+1, j+2.
-    utmp = 0.5 * (u_d_ext[:, :, 1:-2] + u_d_ext[:, :, 2:-1])  # (6, n, n) 2nd-order
+    # FV3 sw_core.F90:3421-3447 — duogrid path:
+    #   Interior (jsd+1..jed-1): 4th-order
+    #   Extreme boundary (jsd, jed): use u(i, jsd+1) (copy of inner edge)
+    # u_d_ext: (6, n, n+3) — edges at indices 0..n+2, cells at 0..n-1.
+    # Edge index j in u_d_ext corresponds to: 0=south halo, 1..n+1=original, n+2=north halo.
+    # Cell j uses edges (j+1, j+2) — offset by 1 for halo.
+    # FV3 sw_core.F90:3421-3447 duogrid path: 4th-order D→A everywhere
+    # except at the outermost halo rows (jsd, jed) of the HALOCATED domain.
+    # Our n cells correspond to FV3's INTERIOR cells (is:ie), NOT the halo
+    # boundary rows. The halo is provided by the secondary geographic exchange
+    # (Step 2 below). So all n cells get 4th-order here.
+    utmp = 0.5 * (u_d_ext[:, :, 1:-2] + u_d_ext[:, :, 2:-1])  # (6, n, n) 2nd-order fallback
     vtmp = 0.5 * (v_d_ext[:, 1:-2, :] + v_d_ext[:, 2:-1, :])  # (6, n, n)
-    # 4th-order: now covers ALL cells because halo provides j=-1 and j=n+1
     if n >= 4:
         u4 = (_A2 * (u_d_ext[:, :, :-3] + u_d_ext[:, :, 3:])
               + _A1 * (u_d_ext[:, :, 1:-2] + u_d_ext[:, :, 2:-1]))
-        utmp = utmp.at[:, :, :].set(u4)  # ALL n cells are 4th-order now
+        utmp = u4  # 4th-order for ALL n interior cells
         v4 = (_A2 * (v_d_ext[:, :-3, :] + v_d_ext[:, 3:, :])
               + _A1 * (v_d_ext[:, 1:-2, :] + v_d_ext[:, 2:-1, :]))
-        vtmp = vtmp.at[:, :, :].set(v4)
+        vtmp = v4
 
     # ---- Step 2: Halo-exchange covariant utmp/vtmp ----
     # FV3 ext_vector converts covariant → lat/lon → remap → grid-aligned.
@@ -198,10 +205,11 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     vt : (6, n, n+1) C-grid contravariant v (transport)
     """
     # Dispatch to Duo-Grid path when active (FV3 sw_core.F90:3419).
-    # Requires duogrid.ng >= 2 so both halo depths are remapped (the
-    # d2a2c_vect duogrid path uses halo=2). For n<4 where ng<2, the
-    # duogrid halo remap only covers 1 depth, leaving the outer row
-    # unremapped — fall through to the legacy path instead.
+    # FV3 gates on `dg%is_initialized` which is true when the duogrid
+    # structure is fully allocated with sufficient halo. Here the `ng >= 2`
+    # guard ensures the k2e-remapped halo covers both depths needed by the
+    # 4th-order A→C stencil (halo=2). For tiny grids (n<4) where
+    # ng = n//2 < 2, fall through to the legacy path.
     dg = cdgrid.base.duogrid
     if dg is not None and dg.ng >= 2:
         return _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
@@ -449,25 +457,32 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     circ = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
             + fy_pad[:, 1:, :] - fy_pad[:, :-1, :])
 
-    # Cube vertex corrections
-    circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
-    circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-    circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
-    circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
+    # Cube vertex corrections — FV3 sw_core.F90:395-401:
+    # SKIPPED when duogrid is active (.not. flagstruct%duogrid).
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+    if not use_duogrid:
+        circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
+        circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+        circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
+        circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
 
     vort = circ * cdgrid.rarea_c
     vort_abs = vort + cdgrid.f_corner
 
     # 6. Vorticity flux at C-grid face positions
-    # x-face: cross-velocity in j-direction transports vorticity
+    # FV3 sw_core.F90:622-726: when duogrid is active, use simple formula
+    # everywhere (no face-boundary overrides). When not active, override
+    # fy1 at face boundaries with dt2 * v_d.
     cosa_u = cdgrid.cosa_u
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
     fy1 = dt2 * (v_d - uc * cosa_u) / jnp.maximum(sina_u, _EPS)
-    # At face edges: sin_sg cancellation → fy1 = dt2 * v_d
-    fy1 = fy1.at[:, 0, :].set(dt2 * v_d[:, 0, :])
-    fy1 = fy1.at[:, 1, :].set(dt2 * v_d[:, 1, :])
-    fy1 = fy1.at[:, n - 1, :].set(dt2 * v_d[:, n - 1, :])
-    fy1 = fy1.at[:, n, :].set(dt2 * v_d[:, n, :])
+    if not use_duogrid:
+        # At face edges: sin_sg cancellation → fy1 = dt2 * v_d
+        fy1 = fy1.at[:, 0, :].set(dt2 * v_d[:, 0, :])
+        fy1 = fy1.at[:, 1, :].set(dt2 * v_d[:, 1, :])
+        fy1 = fy1.at[:, n - 1, :].set(dt2 * v_d[:, n - 1, :])
+        fy1 = fy1.at[:, n, :].set(dt2 * v_d[:, n, :])
 
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
@@ -475,10 +490,11 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     cosa_v = cdgrid.cosa_v
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
     fx1 = dt2 * (u_d - vc * cosa_v) / jnp.maximum(sina_v, _EPS)
-    fx1 = fx1.at[:, :, 0].set(dt2 * u_d[:, :, 0])
-    fx1 = fx1.at[:, :, 1].set(dt2 * u_d[:, :, 1])
-    fx1 = fx1.at[:, :, n - 1].set(dt2 * u_d[:, :, n - 1])
-    fx1 = fx1.at[:, :, n].set(dt2 * u_d[:, :, n])
+    if not use_duogrid:
+        fx1 = fx1.at[:, :, 0].set(dt2 * u_d[:, :, 0])
+        fx1 = fx1.at[:, :, 1].set(dt2 * u_d[:, :, 1])
+        fx1 = fx1.at[:, :, n - 1].set(dt2 * u_d[:, :, n - 1])
+        fx1 = fx1.at[:, :, n].set(dt2 * u_d[:, :, n])
 
     vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
 
@@ -562,30 +578,37 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
 
     circ = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
             + fy_pad[:, 1:, :] - fy_pad[:, :-1, :])
-    circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
-    circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-    circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
-    circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
+    # FV3 sw_core.F90:395-401: corner corrections skipped with duogrid
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+    if not use_duogrid:
+        circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
+        circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+        circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
+        circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
 
     vort_abs = circ * cdgrid.rarea_c + cdgrid.f_corner
 
     # 6. Vorticity flux at C-grid face positions
+    # FV3 sw_core.F90:622: when duogrid active, use uniform formula
     cosa_u = cdgrid.cosa_u
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
     fy1 = (v_d - uc * cosa_u) / jnp.maximum(sina_u, _EPS)
-    fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
-    fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
-    fy1 = fy1.at[:, n - 1, :].set(v_d[:, n - 1, :])
-    fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
+    if not use_duogrid:
+        fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
+        fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
+        fy1 = fy1.at[:, n - 1, :].set(v_d[:, n - 1, :])
+        fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
     cosa_v = cdgrid.cosa_v
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
     fx1 = (u_d - vc * cosa_v) / jnp.maximum(sina_v, _EPS)
-    fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
-    fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])
-    fx1 = fx1.at[:, :, n - 1].set(u_d[:, :, n - 1])
-    fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
+    if not use_duogrid:
+        fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
+        fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])
+        fx1 = fx1.at[:, :, n - 1].set(u_d[:, :, n - 1])
+        fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
     vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
 
     # 7. TOTAL C-grid tendency = vorticity flux + Bernoulli gradient
