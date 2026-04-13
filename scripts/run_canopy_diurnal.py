@@ -27,14 +27,24 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from legoesm.coupler.coupling_fields import AtmToSurface
-from legoesm.land.canopy import (
-    CanopyConfig,
-    CanopyLandConfig,
-    CanopyLandParams,
-    init_canopy_land_state,
-    step_canopy_land,
-)
+from legoesm.land.canopy import CanopyConfig, CanopyLandParams
 from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.multilayer_land import (
+    init_multilayer_land_state,
+    step_multilayer_land,
+)
+from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+
+# Phase 3 script-local shims: ``CanopyLandConfig`` / ``init_canopy_land_state``
+# / ``step_canopy_land`` were removed when canopy became a surface scheme.
+init_canopy_land_state = init_multilayer_land_state
+step_canopy_land = step_multilayer_land
+
+
+def CanopyLandConfig(*, multilayer=None, canopy=None) -> MultiLayerLandConfig:
+    base = multilayer if multilayer is not None else MultiLayerLandConfig()
+    cc = canopy if canopy is not None else CanopyConfig()
+    return base._replace(surface_scheme=cc)
 
 
 # ----- case definitions ------------------------------------------------------

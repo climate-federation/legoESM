@@ -38,15 +38,38 @@ import xarray as xr
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from legoesm.coupler.coupling_fields import AtmToSurface
-from legoesm.land.canopy import (
-    CanopyConfig,
-    CanopyLandConfig,
-    CanopyLandParams,
-    init_canopy_land_state,
-    step_canopy_land_with_diagnostics,
-)
+from legoesm.land.canopy import CanopyConfig, CanopyLandParams
 from legoesm.land.config import MultiLayerLandConfig
+from legoesm.land.multilayer_land import (
+    init_multilayer_land_state,
+    step_multilayer_land_with_diagnostics,
+)
 from legoesm.land.soil_hydraulics import psi_from_theta
+from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+
+# Phase 3 shims: ``CanopyLandConfig``, ``init_canopy_land_state``, and
+# ``step_canopy_land_with_diagnostics`` were removed when the canopy
+# became a surface scheme of ``MultiLayerLandConfig``.  These shims
+# preserve the rest of this script unchanged.
+init_canopy_land_state = init_multilayer_land_state
+
+
+def CanopyLandConfig(*, multilayer=None, canopy=None) -> MultiLayerLandConfig:
+    """Phase 3 script-local shim — ``CanopyLandConfig(multilayer, canopy)``
+    becomes ``MultiLayerLandConfig(surface_scheme=canopy)``.
+    """
+    base = multilayer if multilayer is not None else MultiLayerLandConfig()
+    cc = canopy if canopy is not None else CanopyConfig()
+    return base._replace(surface_scheme=cc)
+
+
+def step_canopy_land_with_diagnostics(state, forcing, cfg, U_min, dt, **kwargs):
+    """Return ``(new_state, response, carbon_state, surface_out)`` where
+    ``surface_out`` is the canopy-populated ``SurfaceFluxOutput`` whose
+    fields directly cover all 22 ``CanopyDiagnostics`` keys consumed below.
+    """
+    return step_multilayer_land_with_diagnostics(
+        state, forcing, cfg, U_min, dt, **kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -184,7 +207,7 @@ def run(n_days: int = 3, dt_s: float = 1800.0):
     theta_init_arr = jnp.asarray([c[7] for c in CASES])
     theta_init_profile = jnp.broadcast_to(
         theta_init_arr[:, None], state.theta_soil.shape)
-    psi_init_profile = psi_from_theta(theta_init_profile, cfg.multilayer.hydraulics)
+    psi_init_profile = psi_from_theta(theta_init_profile, cfg.hydraulics)
     state = state._replace(
         theta_soil=theta_init_profile,
         psi_soil=psi_init_profile,
@@ -222,13 +245,33 @@ def run(n_days: int = 3, dt_s: float = 1800.0):
                      "co2_flux", "q_surface", "z0"]
     response_arr = {k: zcol() for k in response_keys}
 
-    diag_keys = ["Rn_ext", "Rn_int", "SW_net", "LW_net",
-                 "LE_tot", "H_tot", "G",
-                 "LE_canopy", "LE_soil", "H_canopy", "H_soil",
-                 "Rn_canopy", "Rn_soil",
-                 "residual_int", "residual_ext",
-                 "GPP", "fSun", "n_iters",
-                 "Tf_Sun", "Tf_Sh", "Ts_solve", "T_surface"]
+    # Phase 3: diag now reads from a SurfaceFluxOutput.  Map output → field names.
+    # Old name (key in diag_arr / netCDF)  ->  attribute name on SurfaceFluxOutput
+    diag_keymap = {
+        "Rn_ext":       "Rn_ext",
+        "Rn_int":       "Rn_int",
+        "SW_net":       "sw_net",
+        "LW_net":       "lw_net",
+        "LE_tot":       "lhflx",
+        "H_tot":        "shflx",
+        "G":            "G_soil",
+        "LE_canopy":    "LE_canopy",
+        "LE_soil":      "LE_soil",
+        "H_canopy":     "H_canopy",
+        "H_soil":       "H_soil",
+        "Rn_canopy":    "Rn_canopy",
+        "Rn_soil":      "Rn_soil",
+        "residual_int": "residual_int",
+        "residual_ext": "residual_ext",
+        "GPP":          "gpp",
+        "fSun":         "fSun",
+        "n_iters":      "n_iters",
+        "Tf_Sun":       "Tf_Sun",
+        "Tf_Sh":        "Tf_Sh",
+        "Ts_solve":     "Ts_solve",
+        "T_surface":    "T_surface",
+    }
+    diag_keys = list(diag_keymap.keys())
     diag_arr = {k: zcol() for k in diag_keys}
 
     state_keys  = ["snow_depth", "snow_age",
@@ -257,7 +300,8 @@ def run(n_days: int = 3, dt_s: float = 1800.0):
         response_arr["z0"       ][k] = np.asarray(response.z0)
 
         for key in diag_keys:
-            diag_arr[key][k] = np.asarray(getattr(diag, key))
+            attr_name = diag_keymap[key]
+            diag_arr[key][k] = np.asarray(getattr(diag, attr_name))
 
         state_arr["snow_depth"       ][k] = np.asarray(state.snow_depth)
         state_arr["snow_age"         ][k] = np.asarray(state.snow_age)

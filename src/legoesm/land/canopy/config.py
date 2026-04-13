@@ -1,6 +1,11 @@
-"""Configuration for the canopy energy balance + photosynthesis land model.
+"""Configuration for the canopy energy balance + photosynthesis biophysics.
 
-Implements the DifferBESS-style two-leaf canopy model as a legoESM land option.
+Implements the DifferBESS-style two-leaf canopy model as a legoESM land
+surface scheme.  ``CanopyConfig`` holds the solver-level scalars
+(max_iters, LE_module, stomatal_model, ...) and is re-exported from
+``legoesm.land.surface_scheme`` as ``TwoLeafCanopyConfig`` — both names
+refer to the same NamedTuple type.
+
 PFT Vcmax25 values from Jiang & Ryu (2016) Table A1.
 Aerodynamic parameters from Ryu et al. (2011) / DifferBESS defaults.
 """
@@ -11,9 +16,6 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
-
-from legoesm.land.config import MultiLayerLandConfig
-from legoesm.surface_albedo import LandAlbedoConfig
 
 
 # ---------------------------------------------------------------------------
@@ -162,17 +164,10 @@ class CanopyLandParams(NamedTuple):
     rd: jax.Array               # Displacement height / hc ratio
 
 
-# ---------------------------------------------------------------------------
-# CanopyLandConfig — top-level config wrapping MultiLayerLandConfig + CanopyConfig
-# Type-distinct from MultiLayerLandConfig so component_factory.py can dispatch
-# with isinstance().
-# ---------------------------------------------------------------------------
-class CanopyLandConfig(NamedTuple):
-    """Configuration for the canopy energy balance land model.
-
-    Wraps MultiLayerLandConfig (for below-ground soil physics) and CanopyConfig
-    (for above-ground canopy physics).  The soil thermal and hydraulic solvers
-    from multilayer_land.py are reused without modification.
-    """
-    multilayer: MultiLayerLandConfig = MultiLayerLandConfig()
-    canopy: CanopyConfig = CanopyConfig()
+# NOTE: ``CanopyLandConfig`` has been removed.  Canopy is now a surface
+# scheme of ``MultiLayerLandConfig`` (and, in Phase 3b, ``LandConfig``):
+#
+#     cfg = MultiLayerLandConfig(surface_scheme=TwoLeafCanopyConfig(...))
+#
+# Dispatch happens inside ``step_multilayer_land`` / ``step_land`` via
+# ``isinstance`` on the ``surface_scheme`` field.
