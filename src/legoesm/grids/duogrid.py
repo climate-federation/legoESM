@@ -1078,17 +1078,17 @@ def pad_halo_dgrid(
         nbr_f, nbr_e, rev = CONNECTIVITY[face][SOUTH]
         # The neighbor's edge-adjacent u_d strip
         if nbr_e == NORTH:
-            src = u_east_ud[nbr_f, :, -1]  # (n,) geographic
-            src_v = v_north_ud[nbr_f, :, -1]
+            src = u_east_ud[nbr_f, :, -2]  # one inside neighbor's boundary
+            src_v = v_north_ud[nbr_f, :, -2]
         elif nbr_e == SOUTH:
-            src = u_east_ud[nbr_f, :, 0]
-            src_v = v_north_ud[nbr_f, :, 0]
+            src = u_east_ud[nbr_f, :, 1]
+            src_v = v_north_ud[nbr_f, :, 1]
         elif nbr_e == EAST:
-            src = u_east_vd[nbr_f, -1, :]
-            src_v = v_north_vd[nbr_f, -1, :]
+            src = u_east_vd[nbr_f, -2, :]
+            src_v = v_north_vd[nbr_f, -2, :]
         else:  # WEST
-            src = u_east_vd[nbr_f, 0, :]
-            src_v = v_north_vd[nbr_f, 0, :]
+            src = u_east_vd[nbr_f, 1, :]
+            src_v = v_north_vd[nbr_f, 1, :]
         if rev:
             src = src[::-1]
             src_v = src_v[::-1]
@@ -1101,17 +1101,17 @@ def pad_halo_dgrid(
         # North: j=n+1 comes from NORTH neighbor
         nbr_f, nbr_e, rev = CONNECTIVITY[face][NORTH]
         if nbr_e == SOUTH:
-            src = u_east_ud[nbr_f, :, 0]
-            src_v = v_north_ud[nbr_f, :, 0]
+            src = u_east_ud[nbr_f, :, 1]
+            src_v = v_north_ud[nbr_f, :, 1]
         elif nbr_e == NORTH:
             src = u_east_ud[nbr_f, :, -1]
-            src_v = v_north_ud[nbr_f, :, -1]
+            src_v = v_north_ud[nbr_f, :, -2]
         elif nbr_e == WEST:
-            src = u_east_vd[nbr_f, 0, :]
-            src_v = v_north_vd[nbr_f, 0, :]
+            src = u_east_vd[nbr_f, 1, :]
+            src_v = v_north_vd[nbr_f, 1, :]
         else:  # EAST
-            src = u_east_vd[nbr_f, -1, :]
-            src_v = v_north_vd[nbr_f, -1, :]
+            src = u_east_vd[nbr_f, -2, :]
+            src_v = v_north_vd[nbr_f, -2, :]
         if rev:
             src = src[::-1]
             src_v = src_v[::-1]
@@ -1123,17 +1123,17 @@ def pad_halo_dgrid(
         # v_d i-halo: need v_d at i=-1 (west) and i=n+1 (east)
         nbr_f, nbr_e, rev = CONNECTIVITY[face][WEST]
         if nbr_e == EAST:
-            src = u_east_vd[nbr_f, -1, :]
-            src_v = v_north_vd[nbr_f, -1, :]
+            src = u_east_vd[nbr_f, -2, :]
+            src_v = v_north_vd[nbr_f, -2, :]
         elif nbr_e == WEST:
-            src = u_east_vd[nbr_f, 0, :]
-            src_v = v_north_vd[nbr_f, 0, :]
+            src = u_east_vd[nbr_f, 1, :]
+            src_v = v_north_vd[nbr_f, 1, :]
         elif nbr_e == NORTH:
             src = u_east_ud[nbr_f, :, -1]
-            src_v = v_north_ud[nbr_f, :, -1]
+            src_v = v_north_ud[nbr_f, :, -2]
         else:  # SOUTH
-            src = u_east_ud[nbr_f, :, 0]
-            src_v = v_north_ud[nbr_f, :, 0]
+            src = u_east_ud[nbr_f, :, 1]
+            src_v = v_north_ud[nbr_f, :, 1]
         if rev:
             src = src[::-1]
             src_v = src_v[::-1]
@@ -1144,17 +1144,17 @@ def pad_halo_dgrid(
 
         nbr_f, nbr_e, rev = CONNECTIVITY[face][EAST]
         if nbr_e == WEST:
-            src = u_east_vd[nbr_f, 0, :]
-            src_v = v_north_vd[nbr_f, 0, :]
+            src = u_east_vd[nbr_f, 1, :]
+            src_v = v_north_vd[nbr_f, 1, :]
         elif nbr_e == EAST:
-            src = u_east_vd[nbr_f, -1, :]
-            src_v = v_north_vd[nbr_f, -1, :]
+            src = u_east_vd[nbr_f, -2, :]
+            src_v = v_north_vd[nbr_f, -2, :]
         elif nbr_e == SOUTH:
-            src = u_east_ud[nbr_f, :, 0]
-            src_v = v_north_ud[nbr_f, :, 0]
+            src = u_east_ud[nbr_f, :, 1]
+            src_v = v_north_ud[nbr_f, :, 1]
         else:  # NORTH
             src = u_east_ud[nbr_f, :, -1]
-            src_v = v_north_ud[nbr_f, :, -1]
+            src_v = v_north_ud[nbr_f, :, -2]
         if rev:
             src = src[::-1]
             src_v = src_v[::-1]
