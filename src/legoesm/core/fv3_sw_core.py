@@ -107,16 +107,27 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
         vtmp = vtmp.at[:, :, :].set(v4)
 
     # ---- Step 2: Halo-exchange covariant utmp/vtmp ----
-    # pad_halo_vector: rotates to geographic → exchanges with cube_rmp +
-    # corner fill → rotates back. This matches FV3's ext_vector flow.
+    # FV3 ext_vector converts covariant → lat/lon → remap → grid-aligned.
+    # The critical step is covariant→contravariant BEFORE geographic rotation,
+    # which accounts for non-orthogonality (cosa_s, rsin2).
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
-    utmp_pad, vtmp_pad = pad_halo_vector(
-        utmp, vtmp,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        halo=h, duogrid=dg,
-    )  # each (6, n+4, n+4)
+
+    # Covariant → contravariant (FV3 c2l_ord2 step 1)
+    ua = (utmp - vtmp * cos_sg5) * rsin2
+    va = (vtmp - utmp * cos_sg5) * rsin2
+    # Contravariant → geographic (FV3 c2l_ord2 step 2)
+    u_east = grid.cos_angle * ua - grid.sin_angle * va
+    v_north = grid.sin_angle * ua + grid.cos_angle * va
+    # Halo-exchange geographic components as scalars (with duogrid remap)
+    from legoesm.grids.halo import pad_halo
+    u_east_pad = pad_halo(u_east, halo=h, duogrid=dg)
+    v_north_pad = pad_halo(v_north, halo=h, duogrid=dg)
+    # Geographic → grid-aligned on padded domain
+    cap = grid.cos_angle_padded_h2
+    sap = grid.sin_angle_padded_h2
+    utmp_pad = cap * u_east_pad + sap * v_north_pad
+    vtmp_pad = -sap * u_east_pad + cap * v_north_pad
 
     # ---- Step 3: Contravariant at cell centres over FULL padded domain ----
     # FV3 ref: sw_core.F90:3449-3454 — compute ua/va for isd:ied, jsd:jed
