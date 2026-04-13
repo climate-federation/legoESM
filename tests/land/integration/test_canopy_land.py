@@ -225,3 +225,209 @@ def test_simple_seb_default_still_runs():
         assert jnp.all(jnp.isfinite(f)), f"SimpleSEB non-finite {name}"
     assert jnp.all(jnp.isfinite(new_state.T_soil))
     assert jnp.all(jnp.isfinite(new_state.theta_soil))
+
+
+# ---------------------------------------------------------------------------
+# Slab + canopy (Phase 3b)
+# ---------------------------------------------------------------------------
+
+def _make_slab_state(shape):
+    from legoesm.core.field import Field
+    from legoesm.land.state import LandState
+    dims = ("x",) if len(shape) == 1 else ("face", "x", "y")
+    return LandState(
+        T_soil=Field(data=jnp.full(shape, 290.0),
+                     name="T_soil", dims=dims, units="K"),
+        W_bucket=Field(data=jnp.full(shape, 100.0),
+                       name="W_bucket", dims=dims, units="kg/m2"),
+        snow_depth=Field(data=jnp.zeros(shape),
+                         name="snow_depth", dims=dims, units="kg/m2"),
+        snow_age=Field(data=jnp.zeros(shape),
+                       name="snow_age", dims=dims, units="s"),
+    )
+
+
+def _make_slab_forcing(shape, sw_down, cos_zenith):
+    return AtmToSurface(
+        sw_down=jnp.full(shape, sw_down),
+        lw_down=jnp.full(shape, 380.0),
+        precip_total=jnp.zeros(shape),
+        precip_snow=jnp.zeros(shape),
+        T_lowest=jnp.full(shape, 295.0),
+        q_lowest=jnp.full(shape, 0.012),
+        u_lowest=jnp.full(shape, 3.0),
+        v_lowest=jnp.full(shape, 0.5),
+        p_lowest=jnp.full(shape, 98000.0),
+        p_surface=jnp.full(shape, 101325.0),
+        rho_lowest=jnp.full(shape, 1.18),
+        cos_zenith=jnp.full(shape, cos_zenith),
+        co2_ppmv=jnp.full(shape, 420.0),
+        has_radiation=True,
+        has_precipitation=False,
+    )
+
+
+def test_slab_plus_canopy_1d_runs():
+    """Slab + TwoLeafCanopy on a 1D pseudo-columnar shape must produce
+    finite, physically reasonable midday fluxes.
+    """
+    from legoesm.land.config import LandConfig
+    from legoesm.land.slab_land import step_land
+
+    shape = (4,)
+    cfg = LandConfig(
+        surface_scheme=TwoLeafCanopyConfig(max_iters=30))
+    state = _make_slab_state(shape)
+    forcing = _make_slab_forcing(shape, sw_down=700.0, cos_zenith=0.8)
+
+    new_state, response, _ = step_land(
+        state, forcing, cfg, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(shape), doy=180.0)
+
+    assert response.T_surface.shape == shape
+    for name, f in (("T_surface", response.T_surface),
+                    ("lhflx", response.lhflx),
+                    ("shflx", response.shflx),
+                    ("lw_up", response.lw_up)):
+        assert jnp.all(jnp.isfinite(f)), f"slab+canopy 1D non-finite {name}"
+    # Midday: surface should transpire.
+    assert float(response.lhflx[0]) > 0.0
+    # Skin T close to forcing T (within ±20 K).
+    assert 275.0 < float(response.T_surface[0]) < 315.0
+    assert jnp.all(jnp.isfinite(new_state.T_soil.data))
+    assert jnp.all(jnp.isfinite(new_state.W_bucket.data))
+
+
+def test_slab_plus_canopy_3d_runs():
+    """Slab + TwoLeafCanopy on a (6, n, n) cubed-sphere shape must produce
+    output with the original spatial shape (canopy flatten/unflatten).
+    """
+    from legoesm.land.config import LandConfig
+    from legoesm.land.slab_land import step_land
+
+    shape = (6, 4, 4)
+    cfg = LandConfig(
+        surface_scheme=TwoLeafCanopyConfig(max_iters=30))
+    state = _make_slab_state(shape)
+    forcing = _make_slab_forcing(shape, sw_down=700.0, cos_zenith=0.8)
+
+    new_state, response, _ = step_land(
+        state, forcing, cfg, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(shape), doy=180.0)
+
+    # Shape preserved.
+    assert response.T_surface.shape == shape
+    assert response.lhflx.shape == shape
+    assert new_state.T_soil.data.shape == shape
+    assert new_state.W_bucket.data.shape == shape
+    # All-uniform forcing → all columns should give the same result.
+    for f in (response.T_surface, response.lhflx, response.shflx):
+        assert jnp.allclose(f, f[0, 0, 0]), "non-uniform output for uniform forcing"
+    # Finite and physically reasonable.
+    assert float(response.lhflx[0, 0, 0]) > 0.0
+    assert 275.0 < float(response.T_surface[0, 0, 0]) < 315.0
+
+
+def test_slab_simple_seb_default_unchanged():
+    """``LandConfig()`` (default SimpleSEB) regression — must still run."""
+    from legoesm.land.config import LandConfig
+    from legoesm.land.slab_land import step_land
+
+    shape = (4,)
+    cfg = LandConfig()  # SimpleSEB default
+    state = _make_slab_state(shape)
+    forcing = _make_slab_forcing(shape, sw_down=400.0, cos_zenith=0.6)
+
+    new_state, response, _ = step_land(
+        state, forcing, cfg, U_min=1.0, dt=1800.0)
+
+    assert jnp.all(jnp.isfinite(response.T_surface))
+    assert jnp.all(jnp.isfinite(response.lhflx))
+    assert jnp.all(jnp.isfinite(new_state.T_soil.data))
+
+
+# ---------------------------------------------------------------------------
+# TgC 30-day exponential moving average (Phase 3b)
+# ---------------------------------------------------------------------------
+
+def test_TgC_ema_advances_toward_T_air():
+    """Multilayer + canopy with state-carried TgC: after enough steps the
+    EMA should approach the prescribed forcing air temperature.
+    """
+    ncol = 2
+    cfg = MultiLayerLandConfig(
+        surface_scheme=TwoLeafCanopyConfig(max_iters=20))
+    # Initialise TgC = 5 °C; force T_air = 25 °C; check the EMA drifts up.
+    state = init_multilayer_land_state(
+        ncol, cfg, T_init=290.0, TgC_init=5.0)
+    assert state.TgC is not None
+    assert jnp.allclose(state.TgC, 5.0)
+
+    forcing = _make_forcing(ncol, sw_down=300.0, cos_zenith=0.6)
+    # Forcing T_lowest = 295 K (≈ 21.85 °C) → TgC must move from 5 toward ~22.
+
+    dt = 3600.0  # 1 h step
+    n_steps = 24 * 30  # 30 days
+
+    # JIT the step so the 720-iter loop is fast.
+    @jax.jit
+    def _step(s):
+        return step_multilayer_land(
+            s, forcing, cfg, U_min=1.0, dt=dt,
+            lat=jnp.zeros(ncol), doy=180.0)
+
+    for _ in range(n_steps):
+        state, _, _ = _step(state)
+
+    # After 30 days at dt=3600 s the EMA should reach ~1 - 1/e of the gap
+    # (~63%): TgC ≈ 5 + 0.63 * (21.85 - 5) ≈ 15.6.  Allow ±1 K slack.
+    expected = 5.0 + (1.0 - jnp.exp(-1.0)) * (21.85 - 5.0)
+    assert jnp.all(jnp.isfinite(state.TgC))
+    assert jnp.allclose(state.TgC, expected, atol=1.0), (
+        f"TgC after 30 days = {float(state.TgC[0]):.2f}, "
+        f"expected ~{float(expected):.2f}")
+
+
+def test_TgC_ema_helper_one_step():
+    """Direct unit test for ``advance_TgC_ema``."""
+    from legoesm.land.surface_scheme.two_leaf_canopy import (
+        TGC_EMA_TAU_S, advance_TgC_ema,
+    )
+
+    TgC = jnp.array(10.0)
+    T_air = jnp.array(298.15)  # 25 C
+    dt = 1800.0  # 30 min
+    TgC_new = advance_TgC_ema(TgC, T_air, dt)
+    expected = 10.0 + (dt / TGC_EMA_TAU_S) * (25.0 - 10.0)
+    assert jnp.allclose(TgC_new, expected, rtol=1e-12)
+    # Should still be very close to TgC_old after a single 30 min step
+    # (alpha = dt/tau ≈ 6.94e-4 → ΔTgC ≈ 0.0104 K for ΔT_air = 15 K).
+    assert float(TgC_new) - 10.0 < 0.05
+
+
+def test_canopy_uses_state_TgC_when_present():
+    """When ``state.TgC`` is set, the canopy must use it instead of the
+    fallback ``forcing.T_lowest - 273.15``.  Two runs with different
+    ``TgC_init`` should produce different fluxes.
+    """
+    ncol = 2
+    cfg = MultiLayerLandConfig(
+        surface_scheme=TwoLeafCanopyConfig(max_iters=20))
+    state_cool = init_multilayer_land_state(
+        ncol, cfg, T_init=290.0, TgC_init=5.0)
+    state_warm = init_multilayer_land_state(
+        ncol, cfg, T_init=290.0, TgC_init=30.0)
+    forcing = _make_forcing(ncol, sw_down=700.0, cos_zenith=0.8)
+
+    _, resp_cool, _ = step_multilayer_land(
+        state_cool, forcing, cfg, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), doy=180.0)
+    _, resp_warm, _ = step_multilayer_land(
+        state_warm, forcing, cfg, U_min=1.0, dt=1800.0,
+        lat=jnp.zeros(ncol), doy=180.0)
+
+    # Vcmax acclimation: cool TgC reduces Vcmax → less GPP, less LE.
+    # We can't test GPP directly because carbon=none, but lhflx differs.
+    assert not jnp.allclose(resp_cool.lhflx, resp_warm.lhflx, atol=1e-4), (
+        "TgC override has no effect on canopy fluxes — likely state.TgC "
+        "is being ignored")

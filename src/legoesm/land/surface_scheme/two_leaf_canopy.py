@@ -61,6 +61,33 @@ TwoLeafCanopyConfig = CanopyConfig
 _DEFAULT_N_PICARD = 6
 _DEFAULT_PICARD_OMEGA = 0.15
 
+# Time constant of the growth-temperature exponential moving average [s].
+# 30 days * 86400 s/day = 2.592e6 s.  At dt = 1800 s, ~76 days reach 95 %
+# of the equilibrium.  Used by the caller (``step_*_land``) to advance
+# the state-carried ``TgC`` field; this module exposes the constant so
+# callers can stay consistent.
+TGC_EMA_TAU_S: float = 30.0 * 86400.0
+
+
+def advance_TgC_ema(
+    TgC_old: jnp.ndarray,
+    T_air_K: jnp.ndarray,
+    dt: float,
+) -> jnp.ndarray:
+    """One step of the 30-day exponential moving average on T_air [°C].
+
+    ``TgC_new = TgC_old + (dt / tau) * (T_air_C - TgC_old)``
+
+    Parameters
+    ----------
+    TgC_old : current 30-day mean growth temperature [°C]
+    T_air_K : instantaneous near-surface air temperature [K]
+    dt      : time step [s]
+    """
+    T_air_C = T_air_K - 273.15
+    alpha = dt / TGC_EMA_TAU_S
+    return TgC_old + alpha * (T_air_C - TgC_old)
+
 
 def _get(lp, name: str, fallback):
     """Read from per-column params if available; else return fallback."""
@@ -76,14 +103,13 @@ def compute_two_leaf_canopy_fluxes(
     canopy_config: TwoLeafCanopyConfig,
     land_config,                      # MultiLayerLandConfig or LandConfig (for z_ref, beta_min)
     canopy_params,                    # CanopyLandParams | None
-    root_frac: jnp.ndarray,           # (ncol, n_layers) or (n_layers,)
-    beta_root: jnp.ndarray,           # (ncol, n_layers) root-zone moisture stress
-    w_frac_rz: jnp.ndarray,           # (ncol,) root-zone-weighted beta
+    w_frac_rz: jnp.ndarray,           # (ncol,) root-zone-weighted soil moisture beta
     wind_speed: jnp.ndarray,          # (ncol,)
     wind_dir_x: jnp.ndarray,          # (ncol,)
     wind_dir_y: jnp.ndarray,          # (ncol,)
     soil_thermal_fn: Callable[[jnp.ndarray, float], jnp.ndarray],
     dt: float,
+    TgC_override: jnp.ndarray | None = None,
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -99,11 +125,13 @@ def compute_two_leaf_canopy_fluxes(
                   responsibility via ``soil_thermal_fn``).
     canopy_params : optional per-column ``CanopyLandParams``.  When
                     ``None``, scalar defaults are used.
-    root_frac, beta_root, w_frac_rz : pre-computed root-zone stress
-                    fields from the caller.  ``w_frac_rz`` is used for
-                    soil evaporation stress and Vcmax down-regulation;
-                    ``beta_root`` feeds the Richards root sink downstream
-                    (via the caller, not here).
+    w_frac_rz   : root-zone-weighted soil moisture availability,
+                    shape ``(ncol,)``.  Used as both ``fStress_soil``
+                    (soil evaporation stress) and ``fStress_vcmax``
+                    (photosynthesis down-regulation).  Provided by the
+                    caller from its own soil model — multilayer computes
+                    ``sum(root_frac * beta_root)`` over the soil column;
+                    slab uses the bucket fraction ``W / W_max``.
     wind_speed, wind_dir_x, wind_dir_y : pre-computed wind magnitude and
                     unit direction.
     soil_thermal_fn : ``(G [W/m^2], dt [s]) -> Ts_new [K]`` callback.
@@ -139,13 +167,26 @@ def compute_two_leaf_canopy_fluxes(
     b0_C3      = _get(lp, "b0_C3",    jnp.full(ncol, 0.01))
     b0_C4      = _get(lp, "b0_C4",    jnp.full(ncol, 0.04))
     alf        = _get(lp, "alf",      jnp.full(ncol, 0.3))
-    TgC        = _get(lp, "TgC",      forcing.T_lowest - 273.15)
+    # TgC is handled below — the priority order (state EMA > lp > forcing)
+    # is set after all the other per-column params are resolved.
     ALB_VIS    = _get(lp, "ALB_VIS",  jnp.full(ncol, 0.1))
     ALB_NIR    = _get(lp, "ALB_NIR",  jnp.full(ncol, 0.2))
     rz0m       = _get(lp, "rz0m",     jnp.full(ncol, 0.055))
     rd         = _get(lp, "rd",       jnp.full(ncol, 0.67))
     emissivity_per_col = _get(
         lp, "emissivity", jnp.full(ncol, land_config.emissivity_land))
+
+    # ``TgC`` priority:
+    #   1. Caller-supplied ``TgC_override`` (state-carried 30-day EMA from
+    #      ``advance_TgC_ema``, threaded by ``step_*_land``).
+    #   2. Per-column ``CanopyLandParams.TgC`` (externally prescribed).
+    #   3. Instantaneous ``forcing.T_lowest - 273.15`` (degraded fallback;
+    #      not a true 30-day mean — emits sensible but biased Vcmax
+    #      acclimation outside any coupled / standalone driver).
+    if TgC_override is not None:
+        TgC = TgC_override
+    else:
+        TgC = _get(lp, "TgC", forcing.T_lowest - 273.15)
 
     # ---- Soil moisture stress (canopy reuses the shared root-zone beta) ----
     fStress_soil  = w_frac_rz         # soil evaporation stress

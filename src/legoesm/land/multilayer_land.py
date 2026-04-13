@@ -48,6 +48,7 @@ from legoesm.land.surface_scheme import (
     compute_simple_seb_fluxes,
     compute_two_leaf_canopy_fluxes,
 )
+from legoesm.land.surface_scheme.two_leaf_canopy import advance_TgC_ema
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
@@ -202,20 +203,24 @@ def _step_multilayer_land_impl(
             )
             return T_tent[:, 0]
 
+        # State-carried 30-day TgC EMA takes precedence over any
+        # ``CanopyLandParams.TgC`` override (which the canopy uses if
+        # ``TgC_override`` is None).
+        TgC_override = state.TgC
+
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
             canopy_config=config.surface_scheme,
             land_config=config,
             canopy_params=lp,
-            root_frac=root_frac,
-            beta_root=beta_root,
             w_frac_rz=w_frac_rz,
             wind_speed=wind_speed,
             wind_dir_x=wind_dir_x,
             wind_dir_y=wind_dir_y,
             soil_thermal_fn=_soil_thermal_cb,
             dt=dt,
+            TgC_override=TgC_override,
         )
     else:
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
@@ -314,6 +319,12 @@ def _step_multilayer_land_impl(
         G_surface, dt,
     )
 
+    # --- Advance the 30-day TgC EMA (only when state carries it) ---
+    if state.TgC is not None:
+        TgC_new = advance_TgC_ema(state.TgC, forcing.T_lowest, dt)
+    else:
+        TgC_new = None
+
     # --- Build new state ---
     new_state = MultiLayerLandState(
         T_soil=T_soil_new,
@@ -323,6 +334,7 @@ def _step_multilayer_land_impl(
         runoff_subsurface=richards_out.runoff_subsurface,
         snow_depth=snow_new,
         snow_age=snow_age_new,
+        TgC=TgC_new,
     )
 
     # --- Post-step surface state for coupler ---
@@ -411,6 +423,7 @@ def init_multilayer_land_state(
     config: MultiLayerLandConfig,
     T_init: float = 280.0,
     theta_init: float | None = None,
+    TgC_init: float | None = None,
 ) -> MultiLayerLandState:
     """Create initial multi-layer land state.
 
@@ -425,6 +438,14 @@ def init_multilayer_land_state(
     theta_init : float or None
         Initial uniform volumetric water content [m3/m3].
         If None, uses 0.5 * theta_sat.
+    TgC_init : float or None
+        Initial value of the 30-day air-temperature EMA in [°C].  Only
+        consumed by the two-leaf canopy surface scheme.  When ``None``,
+        the state's ``TgC`` field is left as ``None`` and the canopy
+        falls back to per-column ``CanopyLandParams.TgC`` (or to the
+        instantaneous ``forcing.T_lowest - 273.15``).  Pass a numerical
+        value (typically ``T_init - 273.15``) to enable the in-state
+        EMA accumulator.
 
     Returns
     -------
@@ -442,6 +463,11 @@ def init_multilayer_land_state(
     theta_soil = jnp.full((ncol, nlayers), theta_init)
     psi_soil = psi_from_theta(theta_soil, config.hydraulics)
 
+    if TgC_init is not None:
+        TgC = jnp.full(ncol, TgC_init)
+    else:
+        TgC = None
+
     return MultiLayerLandState(
         T_soil=T_soil,
         psi_soil=psi_soil,
@@ -450,4 +476,5 @@ def init_multilayer_land_state(
         runoff_subsurface=jnp.zeros(ncol),
         snow_depth=jnp.zeros(ncol),
         snow_age=jnp.zeros(ncol),
+        TgC=TgC,
     )

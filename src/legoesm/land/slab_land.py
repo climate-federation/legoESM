@@ -13,10 +13,16 @@ Snow:
     Meltwater enters the soil water bucket.
     Sublimation/deposition uses L_s (not L_v) and draws from/adds to
     the snowpack — not the liquid soil bucket.
+
+Phase 3b: surface scheme dispatch.  ``LandConfig.surface_scheme`` may be
+either ``SimpleSEBConfig`` (default — bulk flux on slab T as the skin
+temperature) or ``TwoLeafCanopyConfig`` (DifferBESS-style two-leaf
+canopy Newton + Picard with an explicit single-layer thermal callback).
 """
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -30,12 +36,19 @@ from legoesm.land.config import LandConfig
 from legoesm.land.snow_budget import update_snow
 from legoesm.land.state import LandState
 from legoesm.land.stomata_utils import compute_effective_beta
+from legoesm.land.surface_scheme import (
+    TwoLeafCanopyConfig,
+    compute_two_leaf_canopy_fluxes,
+)
+from legoesm.land.surface_scheme.two_leaf_canopy import advance_TgC_ema
 from legoesm.surface_albedo import land_albedo as compute_land_albedo
 
 
 def _get(lp, name: str, fallback):
-    """Read from spatial LandSurfaceParams if available, else config scalar."""
-    return getattr(lp, name) if lp is not None else fallback
+    """Read a per-column field from ``lp`` if present, else ``fallback``."""
+    if lp is None:
+        return fallback
+    return getattr(lp, name, fallback)
 
 
 def step_land(
@@ -51,27 +64,17 @@ def step_land(
 ) -> tuple[LandState, TileResponse, CarbonState | None]:
     """Step the slab land model forward by dt seconds.
 
-    Parameters
-    ----------
-    state : LandState
-        Current land state.
-    forcing : AtmToSurface
-        Atmospheric forcing fields.
-    config : LandConfig
-        Land model parameters.
-    U_min : float
-        Minimum wind speed floor [m/s].
-    dt : float
-        Time step [s].
-    lat : jnp.ndarray or None
-        Latitude in radians, same shape as T_soil. Required when
-        snow_albedo_feedback is True.
-
-    Returns
-    -------
-    (LandState, TileResponse, CarbonState | None)
-        Updated state, surface response, and updated carbon state.
+    Dispatches between ``SimpleSEBConfig`` (default — bulk flux on the
+    slab T) and ``TwoLeafCanopyConfig`` (two-leaf canopy with explicit
+    single-layer thermal Picard callback) via
+    ``isinstance(config.surface_scheme, TwoLeafCanopyConfig)``.
     """
+    if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
+        return _step_land_canopy(
+            state, forcing, config, U_min, dt,
+            lat=lat, carbon_state=carbon_state, doy=doy,
+            land_params=land_params)
+
     lp = land_params
     T_soil = state.T_soil.data
     W = state.W_bucket.data
@@ -221,12 +224,21 @@ def step_land(
     # Correct soil temperature: energy that couldn't drive evaporation heats soil
     T_soil_new = T_soil_new + dt * evap_excess_energy / heat_cap
 
+    # Advance the optional 30-day TgC EMA on the SimpleSEB path too —
+    # if the user later switches surface_scheme to TwoLeafCanopy mid-run
+    # the accumulated value is already warm.
+    if state.TgC is not None:
+        TgC_new = advance_TgC_ema(state.TgC, forcing.T_lowest, dt)
+    else:
+        TgC_new = None
+
     new_state = LandState(
         T_soil=state.T_soil.replace(data=T_soil_new),
         W_bucket=state.W_bucket.replace(data=W_new),
         snow_depth=state.snow_depth.replace(data=snow_new),
         snow_age=state.snow_age.replace(data=snow_age_new),
         runoff=runoff,
+        TgC=TgC_new,
     )
 
     # Post-step albedo: reflects updated snow state for the next atmosphere step
@@ -288,6 +300,239 @@ def step_land(
         lw_up=lw_up_new,
         u_ocean_sfc=jnp.zeros_like(T_soil),
         v_ocean_sfc=jnp.zeros_like(T_soil),
+        co2_flux=co2_flux,
+    )
+
+    return new_state, response, carbon_state_new
+
+
+# ---------------------------------------------------------------------------
+# Slab + Two-leaf canopy surface scheme
+# ---------------------------------------------------------------------------
+
+def _step_land_canopy(
+    state: LandState,
+    forcing: AtmToSurface,
+    config: LandConfig,
+    U_min: float,
+    dt: float,
+    lat: jnp.ndarray | None,
+    carbon_state: CarbonState | None,
+    doy: float,
+    land_params,
+) -> tuple[LandState, TileResponse, CarbonState | None]:
+    """Slab land step with the two-leaf canopy surface scheme.
+
+    The slab model has a single-layer explicit soil thermal update
+    (no Richards, no multi-layer thermal solver), so the canopy Picard
+    loop receives a closure that computes
+    ``Ts_new = Ts_old + dt * G / (C_soil * d_soil)`` for each tentative
+    G.  Root-zone moisture stress is the bucket fraction
+    ``W / W_max`` (clipped), since there is no per-layer ``theta``
+    profile to integrate over.
+
+    The slab cubed-sphere shape ``(6, n, n)`` is flattened to a
+    pseudo-columnar ``(6*n*n,)`` axis for the duration of the canopy
+    closure (which uses ``jax.vmap`` over the leading axis) and
+    reshaped back on return.  1D slab states pass through unchanged.
+    """
+    lp = land_params
+    T_soil = state.T_soil.data
+    W = state.W_bucket.data
+    snow = state.snow_depth.data
+    snow_age = state.snow_age.data
+
+    original_shape = T_soil.shape
+    is_flat = (T_soil.ndim == 1)
+
+    # --- Spatial parameters (for slab post-flux pipeline) ---
+    emissivity = _get(lp, "emissivity", config.emissivity_land)
+    W_max  = _get(lp, "W_max", config.W_max)
+    C_soil = _get(lp, "C_soil", config.C_soil)
+    d_soil = _get(lp, "d_soil", config.d_soil)
+
+    # --- Flatten state for the canopy vmap ---
+    def _flat(x):
+        return x if is_flat else x.reshape(-1)
+
+    T_soil_flat   = _flat(T_soil)
+    W_flat        = _flat(W)
+    snow_flat     = _flat(snow)
+    snow_age_flat = _flat(snow_age)
+
+    # Forcing fields are typically the same shape as T_soil.  Flatten them.
+    forcing_flat = jax.tree.map(
+        lambda x: _flat(x) if hasattr(x, "shape") and x.ndim >= 1 else x,
+        forcing,
+    )
+
+    # --- Bucket-derived soil moisture stress (slab analogue of root-zone β) ---
+    w_frac = jnp.clip(W_flat / W_max, 0.0, 1.0)
+    # ``w_frac_rz`` here is the unclamped bucket fraction — the canopy
+    # uses it as fStress_soil / fStress_vcmax directly.  No beta_min
+    # floor applied (the canopy module has its own thresholds).
+    w_frac_rz = w_frac
+
+    # --- Wind speed and direction (flattened) ---
+    wind_speed = jnp.sqrt(
+        forcing_flat.u_lowest ** 2
+        + forcing_flat.v_lowest ** 2
+        + U_min ** 2)
+    wind_dir_x = forcing_flat.u_lowest / jnp.maximum(wind_speed, 1e-6)
+    wind_dir_y = forcing_flat.v_lowest / jnp.maximum(wind_speed, 1e-6)
+
+    # --- Slab thermal callback for the canopy Picard loop ---
+    # Captures the start-of-step T_soil and slab heat capacity so each
+    # Picard iteration can compute a fresh tentative end-of-step T_soil
+    # from the candidate G value.
+    heat_cap_total = C_soil * d_soil  # J / m^2 / K
+
+    def _slab_thermal_cb(G, dt_):
+        return T_soil_flat + dt_ * G / heat_cap_total
+
+    # State-carried TgC EMA (flattened) takes precedence over any
+    # ``CanopyLandParams.TgC`` override (which the canopy uses if
+    # ``TgC_override`` is None).
+    TgC_override = _flat(state.TgC) if state.TgC is not None else None
+
+    # --- Canopy surface flux closure ---
+    surface_out = compute_two_leaf_canopy_fluxes(
+        T_soil_top=T_soil_flat,
+        forcing=forcing_flat,
+        canopy_config=config.surface_scheme,
+        land_config=config,
+        canopy_params=lp,
+        w_frac_rz=w_frac_rz,
+        wind_speed=wind_speed,
+        wind_dir_x=wind_dir_x,
+        wind_dir_y=wind_dir_y,
+        soil_thermal_fn=_slab_thermal_cb,
+        dt=dt,
+        TgC_override=TgC_override,
+    )
+
+    # --- Slab post-flux: snow, bucket, T_soil dT/dt (flattened) ---
+    has_snow = snow_flat > 1e-6
+    G_surface = surface_out.G_soil  # canopy-converged ground heat flux
+
+    snow_new, snow_age_new, snow_melt = update_snow(
+        snow_flat, snow_age_flat, T_soil_flat, _flat(forcing.precip_snow), dt,
+        Q_net=G_surface,
+        snow_melt_rate=config.snow_melt_rate,
+        T_snow_melt=config.T_snow_melt,
+    )
+    melt_energy = snow_melt * constants.L_f / dt
+
+    # Slab energy balance: net energy into soil = G - melt_energy.
+    # NOTE: the canopy already accounts for SW/LW/SH/LE in G; melt is the
+    # only additional sink at this layer.
+    Q_net_slab = G_surface - melt_energy
+    T_soil_new = T_soil_flat + dt * Q_net_slab / heat_cap_total
+
+    # --- Latent mass partition ---
+    L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
+    evap_rate_demand = surface_out.lhflx / L_eff
+
+    snow_after_melt = snow_new
+    max_sublim = jnp.maximum(snow_after_melt / dt, 0.0)
+    sublim_demand = jnp.where(has_snow, evap_rate_demand, 0.0)
+    sublim_actual = jnp.minimum(sublim_demand, max_sublim)
+    sublim_actual = jnp.where(sublim_demand < 0.0, sublim_demand, sublim_actual)
+    snow_new = jnp.maximum(snow_new - sublim_actual * dt, 0.0)
+
+    precip_rain = _flat(forcing.precip_total) - _flat(forcing.precip_snow)
+    melt_rate = snow_melt / dt
+
+    soil_evap_demand = jnp.where(has_snow, 0.0, evap_rate_demand)
+    max_soil_evap = jnp.maximum(W_flat / dt + precip_rain + melt_rate, 0.0)
+    soil_evap_actual = jnp.minimum(soil_evap_demand, max_soil_evap)
+    evap_rate_actual = jnp.where(has_snow, sublim_actual, soil_evap_actual)
+    evap_excess_energy = (evap_rate_demand - evap_rate_actual) * L_eff
+    lhflx_actual = evap_rate_actual * L_eff
+
+    dW_dt = precip_rain + melt_rate - soil_evap_actual
+    W_unclamped = W_flat + dt * dW_dt
+    runoff = jnp.maximum(W_unclamped - W_max, 0.0) / dt
+    W_new = jnp.clip(W_unclamped, 0.0, W_max)
+
+    # Excess (unrealised) latent flux warms the slab.
+    T_soil_new = T_soil_new + dt * evap_excess_energy / heat_cap_total
+
+    # --- Reshape back to original (cubed-sphere or columnar) shape ---
+    def _unflat(x):
+        if x is None:
+            return None
+        if is_flat:
+            return x
+        return x.reshape(original_shape)
+
+    T_soil_new   = _unflat(T_soil_new)
+    W_new        = _unflat(W_new)
+    snow_new     = _unflat(snow_new)
+    snow_age_new = _unflat(snow_age_new)
+    runoff       = _unflat(runoff)
+    lhflx_actual_full = _unflat(lhflx_actual)
+
+    # Advance state-carried TgC EMA if present.
+    if state.TgC is not None:
+        TgC_new = advance_TgC_ema(state.TgC, forcing.T_lowest, dt)
+    else:
+        TgC_new = None
+
+    new_state = LandState(
+        T_soil=state.T_soil.replace(data=T_soil_new),
+        W_bucket=state.W_bucket.replace(data=W_new),
+        snow_depth=state.snow_depth.replace(data=snow_new),
+        snow_age=state.snow_age.replace(data=snow_age_new),
+        runoff=runoff,
+        TgC=TgC_new,
+    )
+
+    # Post-step coupler-facing surface state (re-uses canopy-derived
+    # albedo and emissivity from surface_out).
+    response_T_surface     = _unflat(T_soil_new) if False else T_soil_new
+    response_albedo        = _unflat(surface_out.albedo)
+    response_emissivity    = _unflat(surface_out.emissivity)
+    response_z0            = _unflat(surface_out.z0)
+    response_q_surface     = _unflat(surface_out.q_surface)
+    response_shflx         = _unflat(surface_out.shflx)
+    response_tau_x         = _unflat(surface_out.tau_x)
+    response_tau_y         = _unflat(surface_out.tau_y)
+    response_lw_up         = _unflat(surface_out.lw_up)
+
+    # --- Carbon cycle ---
+    if config.carbon.scheme != "none":
+        lat_arr = lat if lat is not None else jnp.zeros_like(T_soil)
+        if surface_out.gpp is not None:
+            gpp_override = _unflat(surface_out.gpp)
+        else:
+            gpp_override = None
+        # Slab carbon path: pass start-of-step bucket beta as the
+        # moisture forcing (consistent with the existing SimpleSEB path).
+        beta_soil_new = config.beta_min + (1.0 - config.beta_min) * jnp.clip(
+            W_new / W_max, 0.0, 1.0)
+        carbon_state_new, co2_flux = step_carbon(
+            carbon_state, forcing.sw_down, T_soil_new, forcing.co2_ppmv,
+            beta_soil_new, lat_arr, doy, forcing.precip_total,
+            config.carbon, dt, gpp_override=gpp_override,
+        )
+    else:
+        carbon_state_new = carbon_state
+        co2_flux = jnp.zeros_like(T_soil_new)
+
+    response = TileResponse(
+        T_surface=response_T_surface,
+        albedo=response_albedo,
+        emissivity=response_emissivity,
+        z0=response_z0,
+        q_surface=response_q_surface,
+        shflx=response_shflx,
+        lhflx=lhflx_actual_full,
+        tau_x=response_tau_x,
+        tau_y=response_tau_y,
+        lw_up=response_lw_up,
+        u_ocean_sfc=jnp.zeros_like(T_soil_new),
+        v_ocean_sfc=jnp.zeros_like(T_soil_new),
         co2_flux=co2_flux,
     )
 

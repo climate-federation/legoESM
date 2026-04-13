@@ -19,6 +19,13 @@ class LandState(NamedTuple):
     snow_depth: Field      # Snow water equivalent [kg/m2]
     snow_age: Field        # Time since last snowfall [s]
     runoff: jax.Array | None = None  # Surface runoff [kg/m2/s]
+    # 30-day exponential moving average of near-surface air temperature
+    # in [°C] — feeds the Leuning Vcmax growth-temperature acclimation
+    # term when the two-leaf canopy surface scheme is active.  ``None``
+    # by default; populated by ``init_*_land_state`` and advanced each
+    # step.  Independent of any externally prescribed
+    # ``CanopyLandParams.TgC`` (which takes precedence when both are set).
+    TgC: jax.Array | None = None
 
 
 class MultiLayerLandState(NamedTuple):
@@ -34,3 +41,6 @@ class MultiLayerLandState(NamedTuple):
     runoff_subsurface: jax.Array  # Subsurface runoff [kg/m2/s], (ncol,)
     snow_depth: jax.Array      # Snow water equivalent [kg/m2], (ncol,)
     snow_age: jax.Array        # Time since last snowfall [s], (ncol,)
+    # 30-day exponential moving average of near-surface air temperature
+    # in [°C] — see ``LandState.TgC``.  Optional; ``None`` by default.
+    TgC: jax.Array | None = None
