@@ -1080,15 +1080,24 @@ Ran slopbuster and modularity audits on all recently changed files. Fixed 10 of 
 
 ## Issues and PRs (updated 2026-04-13)
 
-### Open issues
-- #148 — Refactor ocean test matrix: use experiment modules, split monolith, adopt xarray/xgcm
-- #146 — Generic state checkpoint/restart system for all model components
-- #137 — MPAS/Voronoi unstructured grid 9× slower than latlon (partially addressed by batched 3D TRiSK)
-- #113 — MPAS physics pipeline duplicates
-- #112 — Vector Laplacian Python for-loop hurts JIT performance
+### Open issues — numerics & physics
+- #155 — Add CFL monitoring and adaptive barotropic substep warning
+- #154 — Latlon: hardcoded S_ref=35.0 in virtual salt flux
+- #153 — Latlon: missing relative vorticity flux in momentum equation
+- #152 — MPAS: missing vertical advection of momentum (w * du/dz)
+- #151 — Latlon: missing freshwater in barotropic solver (+ MPAS double-counting)
+- #150 — Latlon: vertical tracer diffusion skipped when physics pipeline active
+- #149 — MPAS barotropic returns instantaneous eta instead of time-averaged
+- #113 — MPAS physics pipeline limited (only prescribed wind + linear drag)
 - #109 — A-grid/cubed-sphere baroclinic pressure double-counts free-surface
 - #106 — Surface forcing cannot combine wind + thermal restoring
 - #100 — Cubed-sphere ocean face-boundary instability
+
+### Open issues — infrastructure
+- #148 — Refactor ocean test matrix: use experiment modules, split monolith, adopt xarray/xgcm
+- #146 — Generic state checkpoint/restart system for all model components
+- #137 — MPAS/Voronoi unstructured grid 9× slower than latlon (partially addressed)
+- #112 — Vector Laplacian Python for-loop hurts JIT performance
 
 ### Recently closed
 - #145 — MPAS vertical tracer advection (resolved: full flux-form transport in step())
