@@ -109,6 +109,36 @@ def make_mpas_ocean_physics(config) -> Callable:
                 tau_x = -cfg.tau_max * jnp.cos(
                     2.0 * jnp.pi * (lat - lat_s) / basin_width)
                 tau_y = jnp.zeros_like(tau_x)
+            elif cfg.wind_profile == "double_gyre_sin2":
+                buf = cfg.wind_buffer_deg * jnp.pi / 180.0
+                lat_s = cfg.lat_south_deg * jnp.pi / 180.0 + buf
+                lat_n = cfg.lat_north_deg * jnp.pi / 180.0 - buf
+                wind_width = lat_n - lat_s
+                y_norm = (lat - lat_s) / wind_width
+                tau_x = cfg.tau_max * jnp.sin(jnp.pi * y_norm) ** 2
+                tau_x = jnp.where(
+                    (lat >= lat_s) & (lat <= lat_n), tau_x, 0.0)
+                tau_y = jnp.zeros_like(tau_x)
+            elif cfg.wind_profile == "double_gyre_tapered":
+                # Cosine double-gyre with smooth taper to zero at walls.
+                # See prescribed.py for full documentation.
+                buf = cfg.wind_buffer_deg * jnp.pi / 180.0
+                lat_s = cfg.lat_south_deg * jnp.pi / 180.0
+                lat_n = cfg.lat_north_deg * jnp.pi / 180.0
+                basin_width = lat_n - lat_s
+                y_norm = (lat - lat_s) / basin_width
+                tau_base = -cfg.tau_max * jnp.cos(2.0 * jnp.pi * y_norm)
+                dist_south = (lat - lat_s) / buf
+                dist_north = (lat_n - lat) / buf
+                taper_south = jnp.where(dist_south < 1.0,
+                    jnp.sin(0.5 * jnp.pi * jnp.clip(dist_south, 0, 1))**2, 1.0)
+                taper_north = jnp.where(dist_north < 1.0,
+                    jnp.sin(0.5 * jnp.pi * jnp.clip(dist_north, 0, 1))**2, 1.0)
+                taper = taper_south * taper_north
+                tau_x = tau_base * taper
+                tau_x = jnp.where(
+                    (lat >= lat_s) & (lat <= lat_n), tau_x, 0.0)
+                tau_y = jnp.zeros_like(tau_x)
             elif cfg.wind_profile == "global_wind":
                 # Nikurashin & Vallis (2012) style 3-belt wind.
                 # See prescribed.py for full documentation.

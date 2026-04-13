@@ -75,6 +75,63 @@ def prescribed_surface_forcing(
         basin_width = lat_n - lat_s
         tau_x = -cfg.tau_max * jnp.cos(2.0 * jnp.pi * (lat - lat_s) / basin_width)
         tau_y = jnp.zeros_like(tau_x)
+    elif cfg.wind_profile == "double_gyre_sin2":
+        lat = grid.grid_lat
+        # Mid-latitude westerly jet with sin^2 profile.
+        # tau_x = +tau_max * sin^2(pi * (lat - lat_s') / (lat_n' - lat_s'))
+        # where lat_s', lat_n' are inset by wind_buffer_deg from the basin
+        # walls to ensure zero wind stress and zero Ekman transport at
+        # the boundaries.
+        #
+        # Properties:
+        #   - tau_x >= 0 everywhere (eastward, representing westerly jet)
+        #   - tau_x = 0 at lat_s' and lat_n' (and in buffer zones)
+        #   - Peak westerly at mid-basin
+        #   - Curl changes sign at mid-basin → double gyre
+        #   - Positive curl (Ekman suction) in southern half → subtropical gyre
+        #   - Negative curl (Ekman pumping) in northern half → subpolar gyre
+        buf = cfg.wind_buffer_deg * jnp.pi / 180.0
+        lat_s = cfg.lat_south_deg * jnp.pi / 180.0 + buf
+        lat_n = cfg.lat_north_deg * jnp.pi / 180.0 - buf
+        wind_width = lat_n - lat_s
+        y_norm = (lat - lat_s) / wind_width  # 0 at lat_s', 1 at lat_n'
+        tau_x = cfg.tau_max * jnp.sin(jnp.pi * y_norm) ** 2
+        # Zero outside the wind region
+        tau_x = jnp.where((lat >= lat_s) & (lat <= lat_n), tau_x, 0.0)
+        tau_y = jnp.zeros_like(tau_x)
+    elif cfg.wind_profile == "double_gyre_tapered":
+        lat = grid.grid_lat
+        # Cosine double-gyre wind with smooth taper to zero at walls.
+        # Base profile: -tau_max * cos(2*pi*(lat-lat_s)/(lat_n-lat_s))
+        # Taper: sin^2(pi/2 * distance_from_wall / buffer) in the buffer zone.
+        #
+        # Properties:
+        #   - tau_x = 0 at lat_s and lat_n (smooth zero at walls)
+        #   - Easterlies near walls, westerly jet at mid-basin (like cosine)
+        #   - Basin-integrated wind ≈ 0 (small O(buffer/basin)^2 bias)
+        #   - Curl changes sign at mid-basin → double gyre
+        #   - No spurious Ekman transport at coastal walls
+        buf = cfg.wind_buffer_deg * jnp.pi / 180.0
+        lat_s = cfg.lat_south_deg * jnp.pi / 180.0
+        lat_n = cfg.lat_north_deg * jnp.pi / 180.0
+        basin_width = lat_n - lat_s
+        y_norm = (lat - lat_s) / basin_width  # 0 at south wall, 1 at north wall
+        # Cosine base: easterlies at walls, westerlies at center
+        tau_base = -cfg.tau_max * jnp.cos(2.0 * jnp.pi * y_norm)
+        # Smooth taper: sin^2 ramp in buffer zones
+        dist_south = (lat - lat_s) / buf  # 0 at wall, 1 at buffer edge
+        dist_north = (lat_n - lat) / buf
+        taper_south = jnp.where(dist_south < 1.0,
+                                jnp.sin(0.5 * jnp.pi * jnp.clip(dist_south, 0, 1))**2,
+                                1.0)
+        taper_north = jnp.where(dist_north < 1.0,
+                                jnp.sin(0.5 * jnp.pi * jnp.clip(dist_north, 0, 1))**2,
+                                1.0)
+        taper = taper_south * taper_north
+        tau_x = tau_base * taper
+        # Zero outside basin
+        tau_x = jnp.where((lat >= lat_s) & (lat <= lat_n), tau_x, 0.0)
+        tau_y = jnp.zeros_like(tau_x)
     elif cfg.wind_profile == "global_wind":
         lat = grid.grid_lat
         # Realistic 3-belt zonal wind stress following

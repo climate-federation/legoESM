@@ -67,6 +67,10 @@ def barotropic_substeps_mpas(
     -------
     eta_new : jax.Array, shape (nCells,)
     u_bar_new : jax.Array, shape (nEdges,)
+    Hu_avg : jax.Array, shape (nEdges,)
+        Time-averaged depth-integrated edge transport [m²/s].
+        Accumulated over substeps for transport-consistent tracer advection
+        (Hallberg 1997, issue #102).
     """
     g = config.g
     mask = state.land_mask.data  # (nCells,)
@@ -137,12 +141,17 @@ def barotropic_substeps_mpas(
     min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
     eta_floor = (min_water_col - H_bathy) * mask
 
+    # Accumulator for time-averaged barotropic transport (issue #145, #102).
+    # Accumulates depth-integrated edge mass flux H*u_bar at each substep
+    # so tracer advection can use transport consistent with barotropic continuity.
+    Hu_sum = jnp.zeros_like(u_bar)
+
     # Forward-backward substeps via scan
     _eta_dtype = eta.dtype
     _ubar_dtype = u_bar.dtype
 
     def _substep(carry, _):
-        eta_c, u_bar_c = carry
+        eta_c, u_bar_c, Hu_sum_c = carry
 
         # Total depth at edges (updated with current eta)
         H_c = jnp.maximum(eta_c + H_bathy, config.min_water_column_m)
@@ -150,6 +159,10 @@ def barotropic_substeps_mpas(
 
         # Forward: update eta (continuity + freshwater mass source)
         transport = H_e_c * u_bar_c * edge_mask
+
+        # Accumulate transport for time-averaged tracer advection
+        Hu_sum_new = Hu_sum_c + transport.astype(_eta_dtype)
+
         eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask + dt_baro * F_slow_eta * mask
         eta_next = jnp.maximum(eta_next, eta_floor) * mask
 
@@ -196,13 +209,17 @@ def barotropic_substeps_mpas(
             eta_next = jnp.maximum(eta_next, eta_floor) * mask
 
         # Cast back to input dtype (mesh ops may promote to float64)
-        return (eta_next.astype(_eta_dtype), u_bar_next.astype(_ubar_dtype)), None
+        return (eta_next.astype(_eta_dtype), u_bar_next.astype(_ubar_dtype),
+                Hu_sum_new.astype(_eta_dtype)), None
 
-    (eta_new, u_bar_new), _ = jax.lax.scan(
-        _substep, (eta, u_bar), None, length=n_substeps,
+    (eta_new, u_bar_new, Hu_sum_f), _ = jax.lax.scan(
+        _substep, (eta, u_bar, Hu_sum), None, length=n_substeps,
     )
 
-    return eta_new, u_bar_new
+    # Time-averaged barotropic transport
+    Hu_avg = Hu_sum_f / n_substeps
+
+    return eta_new, u_bar_new, Hu_avg
 
 
 def reconcile_3d_velocity(u_3d, u_bar_old, u_bar_new, mesh, mask):

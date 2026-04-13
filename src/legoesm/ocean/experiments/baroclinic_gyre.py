@@ -22,7 +22,7 @@ Domain Configuration:
 - Meridional surface temperature gradient with restoring
 
 Physical Setup:
-- Double-gyre wind stress: Holland & Lin (1975) pattern
+- Double-gyre wind stress: sin^2 westerly jet with 5° buffer at walls
 - Background stratification: exponential T profile with 1000m e-folding depth
 - Surface temperature restoring: τ_restore = 30 days
 - Meridional SST gradient: warm equatorward, cool poleward
@@ -90,7 +90,9 @@ class BaroclinicGyreConfig:
     T_mid_lat: float = 45.0        # Reference latitude for gradient [degrees]
 
     # Wind forcing parameters — same as barotropic case
-    wind_stress_max: float = 0.1   # Maximum wind stress [Pa]
+    wind_stress_max: float = 0.3   # Maximum wind stress [Pa]
+    wind_profile: str = "double_gyre_sin2"  # "double_gyre" (cosine) or "double_gyre_sin2"
+    wind_buffer_deg: float = 5.0   # Buffer zone width [degrees] for sin² profile
 
     # Physics parameters — same as barotropic case for comparison
     A_h: float = 5e5               # Horizontal viscosity [m²/s]
@@ -245,13 +247,16 @@ def create_forcings(grid_type: str, grid, config: BaroclinicGyreConfig = None):
     )
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 
-    # Surface forcing: wind stress only (restoring not supported with wind)
-    # TODO: Extend surface forcing architecture to support combined schemes
+    # Surface forcing: sin^2 westerly jet profile.
+    # Wind goes to zero 5° inside the basin walls to avoid spurious
+    # coastal upwelling/downwelling from Ekman transport hitting the
+    # solid boundaries at coarse resolution.
     restoring_config = PrescribedForcingConfig(
-        wind_profile="double_gyre", 
+        wind_profile=config.wind_profile,
         tau_max=config.wind_stress_max,
         lat_south_deg=config.lat_south,
         lat_north_deg=config.lat_north,
+        wind_buffer_deg=config.wind_buffer_deg,
     )
     
     surface_forcing = SurfaceForcingConfig(

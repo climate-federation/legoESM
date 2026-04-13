@@ -16,7 +16,13 @@ from legoesm.core.precision import cast_pytree
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.mpas_config import MPASOceanConfig
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    compute_layer_thickness,
+    diagnose_w_from_flux_div,
+    flux_form_vertical_tracer_advection,
+)
+from legoesm.core.operators_voronoi import divergence_cell_3d
 from legoesm.ocean.dynamics.ocean_pe_mpas import mpas_ocean_baroclinic_tendencies
 from legoesm.ocean.dynamics.barotropic_mpas import (
     barotropic_substeps_mpas,
@@ -227,52 +233,20 @@ class MPASOceanModel:
         if freshwater is not None and config.freshwater_closure != "none":
             F_slow_eta = freshwater_eta_tendency(freshwater, config.rho_0) * mask
 
-        eta_new, u_bar_new = barotropic_substeps_mpas(
+        eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
             state_for_baro, mesh, z_coord, config, dt_baro, n_sub,
             F_slow_eta=F_slow_eta,
         )
 
-        # 5. Thickness-weighted tracer correction (split-explicit coupling)
-        #
-        # The tracer Euler step used the OLD layer thickness h_old:
-        #     T_new = T_old + dt * dT_dt   where dT_dt = (1/h_old) * flux_terms
-        # so:  h_old * T_new = h_old * T_old + dt * flux_terms
-        #
-        # But the barotropic solver changed eta → h_new != h_old.
-        # Conservation requires:  h_new * T_corrected = h_old * T_new
-        # Therefore:              T_corrected = T_new * (h_old / h_new)
-        #
-        # This is the standard split-explicit corrector used in MPAS-Ocean,
-        # MOM6, and POP (Higdon 2005, Hallberg 1997).  It ensures that the
-        # thickness-weighted tracer content h*T is exactly conserved through
-        # the barotropic-baroclinic splitting.  The correction is O(dt * deta/dt)
-        # and vanishes when eta is stationary (e.g., rest state).
-        #
-        # Freshwater forcing: F_slow_eta changes eta in the barotropic solver,
-        # so h_new reflects mass added by precipitation/evaporation.  The
-        # rescaling h_old/h_new correctly dilutes/concentrates tracers in
-        # proportion to the added/removed volume.  The virtual salt flux
-        # (already included in dS_dt) is a source term that gets diluted by
-        # the same factor, which is physically correct.
+        # 5. Layer thicknesses before and after barotropic
         h_k_old = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, z_coord,
             min_water_column_m=config.min_water_column_m,
-        )
+        )  # (nCells, nlev)
         h_k_new = compute_layer_thickness(
             eta_new, state.H_bathy.data, z_coord,
             min_water_column_m=config.min_water_column_m,
-        )
-        # Ratio h_old / h_new, with safe denominator for dry cells.
-        # On ocean cells where h_k > min_water_column_m, this is well-defined.
-        h_ratio = h_k_old / jnp.maximum(h_k_new, 1e-10)
-        mask_e = mask[:, jnp.newaxis]
-        T_new = jnp.where(mask_e > 0.5, T_new * h_ratio, T_new)
-        S_new = jnp.where(mask_e > 0.5, S_new * h_ratio, S_new)
-
-        # Explicit land cell masking: ensure land cells are set to 0.0°C
-        # This is the critical fix for MPAS regional grid land cell masking
-        T_new = jnp.where(mask_e > 0.5, T_new, 0.0)
-        S_new = jnp.where(mask_e > 0.5, S_new, 0.0)
+        )  # (nCells, nlev)
 
         # 6. Reconcile 3D velocity
         # Compute u_bar_old from the UPDATED state (state_for_baro),
@@ -287,11 +261,81 @@ class MPASOceanModel:
             u_baro, u_bar_old, u_bar_new, mesh, mask,
         )
 
+        # 7. Barotropic correction for transport-consistent tracer advection
+        #
+        # Correct the reconciled 3D velocity so that depth-integrated
+        # transport matches the time-averaged barotropic transport Hu_avg
+        # exactly.  This ensures mass flux consistency between the
+        # barotropic continuity equation (which produced eta_new) and
+        # the tracer transport (Hallberg & Adcroft 2009, issue #145).
+        #
+        # The correction is a uniform (depth-independent) velocity shift:
+        #   delta_u = (Hu_avg - sum_k(u_3d * h_e)) / H_e
+        # This preserves baroclinic shear while matching Hu_avg.
+        edge_mask = mask[c1] * mask[c2]
+        H_e_old = jnp.sum(h_e_k, axis=1)  # (nEdges,)
+        Hu_3d = jnp.sum(u_3d_new * h_e_k, axis=1)  # (nEdges,)
+        delta_u = (Hu_avg - Hu_3d) / jnp.maximum(H_e_old, 1e-10)
+        u_transport = u_3d_new + delta_u[:, jnp.newaxis]  # (nEdges, nlev)
+
+        # Per-layer mass fluxes with full 3D velocity structure.
+        # Preserves baroclinic shear and produces non-zero w from
+        # Ekman pumping/suction (unlike uniform barotropic distribution
+        # which gives w ≡ 0).
+        mass_flux = h_e_k * u_transport * edge_mask[:, jnp.newaxis]
+
+        # 8. Diagnose vertical velocity from per-layer flux divergence
+        #
+        # From continuity: dh_k/dt + div_h(h_k * u_k) + w_{k-1/2} - w_{k+1/2} = 0
+        # We accumulate div_h(h_k * u_k) bottom-up to get w at interfaces.
+        flux_div_3d = divergence_cell_3d(mass_flux, mesh)  # (nCells, nlev)
+
+        w = diagnose_w_from_flux_div(
+            flux_div_3d, z_coord, thickness_weighted=True,
+        )  # (nCells, nlev+1)
+
+        # 9. Flux-form tracer transport (horizontal + vertical)
+        #
+        # Both horizontal and vertical transport use the barotropic-averaged
+        # per-layer mass fluxes for consistency:
+        #   h_new * T_new = h_old * T_mid
+        #     - dt * div_h(mass_flux * T_face_h)   [horizontal flux]
+        #     - dt * (w * T_face_v)                 [vertical flux]
+        #
+        # T_mid contains diffusion+physics from the Euler step (step 2).
+        # Advection (horizontal + vertical) is applied here.
+        # This matches the latlon C-grid algorithm (ocean_model_latlon_cgrid.py).
+        mask_3d = mask[:, jnp.newaxis]  # (nCells, 1)
+
+        for tr_name in ['T', 'S']:
+            tr = T_new if tr_name == 'T' else S_new
+
+            # Horizontal flux: upwind interpolation to edges
+            # MPAS convention: u > 0 means flow from c1 to c2 (edge normal).
+            # Upwind: use tracer from the upstream cell.
+            tr_c1 = tr[c1]  # (nEdges, nlev)
+            tr_c2 = tr[c2]  # (nEdges, nlev)
+            tr_upwind = jnp.where(mass_flux > 0, tr_c1, tr_c2)
+            tracer_flux = mass_flux * tr_upwind  # (nEdges, nlev)
+            div_hut = divergence_cell_3d(tracer_flux, mesh)  # (nCells, nlev)
+
+            # Vertical flux divergence (upwind, zero at surface/bottom)
+            vert_flux_div = flux_form_vertical_tracer_advection(tr, w)
+
+            # Full flux-form tracer update:
+            # h_new * T_new = h_old * T_mid - dt * vert - dt * horiz
+            hT_new = h_k_old * tr - dt * vert_flux_div - dt * div_hut
+            tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
+            tr_new = jnp.where(mask_3d > 0.5, tr_new, 0.0)
+
+            if tr_name == 'T':
+                T_corrected = tr_new
+            else:
+                S_corrected = tr_new
+
         # Final state construction with explicit land masking
-        # Ensure all fields respect land mask in the final state
-        mask_e = mask[:, jnp.newaxis]
-        T_final = jnp.where(mask_e > 0.5, T_new, 0.0)
-        S_final = jnp.where(mask_e > 0.5, S_new, 0.0)
+        T_final = T_corrected
+        S_final = S_corrected
         
         state_new = MPASOceanState(
             u=state.u.replace(data=u_3d_new),

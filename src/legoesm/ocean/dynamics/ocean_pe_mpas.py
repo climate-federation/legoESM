@@ -29,7 +29,6 @@ from legoesm.core.operators_voronoi import (
     kinetic_energy_cell_3d,
     pv_flux_energy_conserving_3d,
     pv_flux_enstrophy_conserving_3d,
-    cell_to_edge_avg_3d,
     vector_laplacian_del2_3d,
     vertex_thickness_3d,
 )
@@ -189,25 +188,17 @@ def mpas_ocean_baroclinic_tendencies(
     # Continuity: dh_k/dt = -div(u * h_e)
     div_flux = divergence_cell_3d(thickness_flux, mesh)  # (nCells, nlev)
 
-    # ---- Tracer tendencies (flux form) ----
-    T_e = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
-    S_e = cell_to_edge_avg_3d(S_3d, mesh)
-
-    T_flux = thickness_flux * T_e
-    S_flux = thickness_flux * S_e
-
-    div_T_flux = divergence_cell_3d(T_flux, mesh)
-    div_S_flux = divergence_cell_3d(S_flux, mesh)
-
+    # ---- Tracer tendencies (diffusion + physics only) ----
+    # Horizontal AND vertical tracer advection are handled in the step()
+    # function using barotropic-averaged transport (Hallberg 1997, #102, #145).
+    # This matches the latlon C-grid pattern (ocean_pe_latlon_cgrid.py).
     h_safe = jnp.maximum(h_k, 1e-10)  # (nCells, nlev)
-    dT_dt_3d = (-div_T_flux + T_3d * div_flux) / h_safe
-    dS_dt_3d = (-div_S_flux + S_3d * div_flux) / h_safe
 
     # Horizontal tracer diffusion: K_h * lap(T)
     grad_T = gradient_edge_3d(T_3d, mesh) * edge_mask[:, jnp.newaxis]
-    dT_dt_3d = dT_dt_3d + config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
+    dT_dt_3d = config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
     grad_S = gradient_edge_3d(S_3d, mesh) * edge_mask[:, jnp.newaxis]
-    dS_dt_3d = dS_dt_3d + config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
+    dS_dt_3d = config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
 
     # Mask land cells
     dT_dt_3d = dT_dt_3d * mask[:, jnp.newaxis]

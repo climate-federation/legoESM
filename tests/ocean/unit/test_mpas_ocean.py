@@ -270,25 +270,27 @@ class TestBarotropicSubsteps:
     def test_barotropic_shapes(self, state, mesh, z_coord, config):
         """Barotropic substeps return correct shapes."""
         dt_baro = 10.0
-        eta_new, u_bar_new = barotropic_substeps_mpas(
+        eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
             state, mesh, z_coord, config, dt_baro, 3,
         )
         assert eta_new.shape == state.eta.data.shape
         assert u_bar_new.shape == (mesh.nEdges,)
+        assert Hu_avg.shape == (mesh.nEdges,)
 
     def test_barotropic_finite(self, state, mesh, z_coord, config):
         """Barotropic output is finite."""
         dt_baro = 10.0
-        eta_new, u_bar_new = barotropic_substeps_mpas(
+        eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
             state, mesh, z_coord, config, dt_baro, 3,
         )
         assert jnp.all(jnp.isfinite(eta_new))
         assert jnp.all(jnp.isfinite(u_bar_new))
+        assert jnp.all(jnp.isfinite(Hu_avg))
 
     def test_rest_state_barotropic_stable(self, state, mesh, z_coord, config):
         """Rest state remains at rest through barotropic substeps."""
         dt_baro = 10.0
-        eta_new, u_bar_new = barotropic_substeps_mpas(
+        eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
             state, mesh, z_coord, config, dt_baro, 5,
         )
         assert jnp.max(jnp.abs(eta_new - state.eta.data)) < 1e-10

@@ -145,7 +145,17 @@ FIELD_RANGES = {
         "speed_sfc": (0, 0.15),     # m/s - surface speeds
         "SST": (9.5, 10.5),        # °C - uniform 10°C (barotropic)
     },
+    "barotropic_double_gyre_sin2": {
+        "eta": (-0.02, 0.02),      # meters - gyre SSH (sin² wind, slight E-W tilt)
+        "speed_sfc": (0, 0.15),     # m/s - surface speeds
+        "SST": (9.5, 10.5),        # °C - uniform 10°C (barotropic)
+    },
     "baroclinic_gyre": {
+        "eta": (-0.05, 0.05),      # meters - larger SSH with baroclinic dynamics
+        "speed_sfc": (0, 0.5),      # m/s - higher speeds with thermal wind
+        "SST": (None, None),        # °C - adaptive range for circulation-driven T patterns
+    },
+    "baroclinic_gyre_cos": {
         "eta": (-0.05, 0.05),      # meters - larger SSH with baroclinic dynamics
         "speed_sfc": (0, 0.5),      # m/s - higher speeds with thermal wind
         "SST": (None, None),        # °C - adaptive range for circulation-driven T patterns
@@ -192,18 +202,39 @@ class TestCase:
     quick_days: float
     run_kwargs: dict = field(default_factory=dict)
 
-    # Rest-state variants are grouped under a single rest_state/ folder
-    _REST_STATE_GROUP = {
-        "rest_state_stratified_with_land",
-        "rest_state_uniform_with_land",
-        "rest_state_stratified_no_land",
-        "rest_state_uniform_no_land",
+    # Variant groups: cases that share a parent folder in the output tree.
+    # Each key is a parent folder name; values are the case names nested under it.
+    _VARIANT_GROUPS = {
+        "rest_state": {
+            "rest_state_stratified_with_land",
+            "rest_state_uniform_with_land",
+            "rest_state_stratified_no_land",
+            "rest_state_uniform_no_land",
+        },
+        "barotropic_double_gyre": {
+            "barotropic_double_gyre",
+            "barotropic_double_gyre_sin2",
+        },
+        "baroclinic_gyre": {
+            "baroclinic_gyre",
+            "baroclinic_gyre_cos",
+        },
     }
+
+    # Flat lookup: case_name -> parent folder (built from _VARIANT_GROUPS)
+    _CASE_TO_GROUP = {}
+    for _group, _cases in _VARIANT_GROUPS.items():
+        for _c in _cases:
+            _CASE_TO_GROUP[_c] = _group
+
+    # Backward compat alias
+    _REST_STATE_GROUP = _VARIANT_GROUPS["rest_state"]
 
     @property
     def output_path(self) -> str:
-        if self.case in self._REST_STATE_GROUP:
-            return f"rest_state/{self.case}/{self.grid_type}/{self.resolution}"
+        group = self._CASE_TO_GROUP.get(self.case)
+        if group is not None:
+            return f"{group}/{self.case}/{self.grid_type}/{self.resolution}"
         return f"{self.case}/{self.grid_type}/{self.resolution}"
 
 
@@ -251,15 +282,21 @@ def _build_test_matrix() -> list[TestCase]:
 
     # --- Wind-driven regional barotropic double gyre: regional grids ---
     # cs_regional excluded: ocean init assumes 6-face arrays (TODO: adapt)
+    # Two wind profiles: cosine (zero net wind) and sin² (net eastward wind)
     for g in ["mpas_regional", "latlon_regional"]:
         matrix.append(TestCase(
             "barotropic_double_gyre", g, res[g], 30.0, 2.0))
+        matrix.append(TestCase(
+            "barotropic_double_gyre_sin2", g, res[g], 30.0, 2.0))
 
     # --- Wind-driven regional baroclinic gyre: regional grids ---
     # Tests Coriolis double-counting fix (#103) with realistic stratification
+    # Two wind profiles: sin² (default, net eastward) and cosine (zero net wind)
     for g in ["mpas_regional", "latlon_regional"]:
         matrix.append(TestCase(
             "baroclinic_gyre", g, res[g], 60.0, 5.0))
+        matrix.append(TestCase(
+            "baroclinic_gyre_cos", g, res[g], 60.0, 5.0))
 
     # --- Global barotropic wind-driven: latlon, mpas ---
     # (cubed_sphere excluded — face-boundary instability produces unphysical speeds)
@@ -1029,6 +1066,12 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                     finite = ocean_vals[np.isfinite(ocean_vals)]
                     vmin = float(finite.min()) if finite.size else None
                     vmax = float(finite.max()) if finite.size else None
+                # Force symmetric colorscale centered at 0 for velocity
+                # and w fields (diverging quantities)
+                _sym = ("w_" in field_key or field_key in ("u_sfc", "v_sfc"))
+                if vmin is not None and vmax is not None and _sym:
+                    vlim = max(abs(vmin), abs(vmax))
+                    vmin, vmax = -vlim, vlim
                 im = _plot_voronoi_field(
                     ax, mesh, raw, land_mask=lm, cmap=cmap,
                     vmin=vmin, vmax=vmax)
@@ -1079,6 +1122,12 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                         vmin, vmax = float(panel_finite.min()), float(panel_finite.max())
                     else:
                         vmin, vmax = None, None
+                # Force symmetric colorscale centered at 0 for velocity
+                # and w fields (diverging quantities)
+                _sym = ("w_" in field_key or field_key in ("u_sfc", "v_sfc"))
+                if vmin is not None and vmax is not None and _sym:
+                    vlim = max(abs(vmin), abs(vmax))
+                    vmin, vmax = -vlim, vlim
 
                 # Compute extent from actual coordinates.
                 # When domain_extent is given (regional experiments), use it
@@ -1330,12 +1379,14 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             im = ax.pcolormesh(
                 X, Y, section.T, cmap="RdBu_r", shading='flat',
                 vmin=cs_vmin, vmax=cs_vmax)
-            
+
             day = step * dt / 86400.0
             ax.set_title(f"t={day:.2f} d", fontsize=9)
             ax.set_xlabel(xlabel)
-            ax.invert_yaxis()  # Depth increases downward
 
+        # Invert y-axis ONCE after loop (calling inside loop with sharey=True
+        # toggles inversion, leaving even-panel counts non-inverted).
+        axes_arr[0].invert_yaxis()  # Surface (depth=0) at top
         axes_arr[0].set_ylabel(level_label)
         if im is not None:
             fig.colorbar(
@@ -2058,6 +2109,9 @@ def _extract_fv_ocean(state, grid_type: str, include_velocity_3d: bool = False):
             u_final = u_cc[:ny_min, :nx_min]
             v_final = v_cc[:ny_min, :nx_min]
             result["speed_sfc"] = np.sqrt(u_final**2 + v_final**2)
+            # Replace staggered u/v with cell-center values for quiver plots
+            result["u_sfc"] = u_final
+            result["v_sfc"] = v_final
     return result
 
 
@@ -2879,13 +2933,17 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
 # Runner: Wind-Driven Gyre
 # ===========================================================================
 
-def _make_gyre_physics(wind_profile: str = "single_gyre"):
+def _make_gyre_physics(wind_profile: str = "single_gyre",
+                       wind_buffer_deg: float = 0.0):
     """Create OceanPhysicsConfig with prescribed gyre wind forcing.
 
     Parameters
     ----------
     wind_profile : str
-        "single_gyre" or "double_gyre".
+        "single_gyre", "double_gyre", "double_gyre_sin2", etc.
+    wind_buffer_deg : float
+        Buffer zone width [degrees] where wind tapers to zero at basin edges.
+        Needed for "double_gyre_sin2" (use 5.0).
 
     Notes
     -----
@@ -2919,6 +2977,7 @@ def _make_gyre_physics(wind_profile: str = "single_gyre"):
                 tau_max=0.1,
                 lat_south_deg=15.0,
                 lat_north_deg=75.0,
+                wind_buffer_deg=wind_buffer_deg,
             ),
         ),
         vertical_mixing=VerticalMixingConfig(scheme="none"),
@@ -3021,6 +3080,7 @@ def _create_simplified_continent_mask(lon_deg, lat_deg,
 
 def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
                          wind_profile: str, label: str,
+                         wind_buffer_deg: float = 0.0,
                          ) -> tuple[str, float, str]:
     """Shared runner for barotropic gyre experiments."""
     _supported = ("cubed_sphere", "latlon", "mpas", "mpas_regional",
@@ -3030,7 +3090,7 @@ def _run_gyre_experiment(tc: TestCase, output_dir: Path, days: float,
             f"{label} not implemented for {tc.grid_type} grid "
             f"(no surface forcing support)")
 
-    physics = _make_gyre_physics(wind_profile)
+    physics = _make_gyre_physics(wind_profile, wind_buffer_deg=wind_buffer_deg)
     # A_h = 5e5 m^2/s: Munk layer delta_M ~ 300 km, needed to
     # stabilise long integrations at ~5-degree resolution.
     # Default A_v = 1e-3 (higher values destabilise latlon).
@@ -3114,10 +3174,19 @@ def run_barotropic_gyre(tc: TestCase, output_dir: Path, days: float
 
 def run_barotropic_double_gyre(tc: TestCase, output_dir: Path, days: float
                                ) -> tuple[str, float, str]:
-    """Wind-driven barotropic double gyre (Holland & Lin 1975)."""
+    """Wind-driven barotropic double gyre (Holland & Lin 1975) — cosine wind."""
     return _run_gyre_experiment(tc, output_dir, days,
                                 wind_profile="double_gyre",
                                 label="Barotropic Double Gyre")
+
+
+def run_barotropic_double_gyre_sin2(tc: TestCase, output_dir: Path, days: float
+                                    ) -> tuple[str, float, str]:
+    """Wind-driven barotropic double gyre with sin² wind profile."""
+    return _run_gyre_experiment(tc, output_dir, days,
+                                wind_profile="double_gyre_sin2",
+                                wind_buffer_deg=5.0,
+                                label="Barotropic Double Gyre sin2")
 
 
 def _make_baroclinic_scalar_fn(grid_type: str, grid=None, z_coord=None, config=None):
@@ -3229,41 +3298,43 @@ def _make_baroclinic_scalar_fn(grid_type: str, grid=None, z_coord=None, config=N
         return base_scalar_fn
 
 
-def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
-                       ) -> tuple[str, float, str]:
-    """Regional wind-driven baroclinic gyre with surface restoring."""
+def _run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float,
+                         gyre_config=None, label: str = "Baroclinic Gyre",
+                         ) -> tuple[str, float, str]:
+    """Shared runner for baroclinic gyre experiments with different wind profiles."""
     if tc.grid_type not in ("mpas_regional", "latlon_regional"):
         raise NotImplementedError(
             f"Baroclinic gyre only implemented for regional grids, not {tc.grid_type}")
-    
+
     from legoesm.ocean.experiments.baroclinic_gyre import (
         BaroclinicGyreConfig, create_initial_conditions, create_forcings)
-    
-    config = BaroclinicGyreConfig()
-    physics = create_forcings(tc.grid_type, None, config)
-    
+
+    if gyre_config is None:
+        gyre_config = BaroclinicGyreConfig()
+    physics = create_forcings(tc.grid_type, None, gyre_config)
+
     grid, z_coord, ocean_config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, physics=physics, A_h=config.A_h))
-    
-    state = create_initial_conditions(tc.grid_type, grid, z_coord, config)
-    
+        _create_ocean_setup(tc, physics=physics, A_h=gyre_config.A_h))
+
+    state = create_initial_conditions(tc.grid_type, grid, z_coord, gyre_config)
+
     dt = DEFAULT_DT
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 40)
-    
+
     check_fn = _make_check_fn(tc.grid_type)
-    scalar_fn = _make_baroclinic_scalar_fn(tc.grid_type, grid, z_coord, config)
+    scalar_fn = _make_baroclinic_scalar_fn(tc.grid_type, grid, z_coord, gyre_config)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
                                   include_velocity_3d=True)
-    
+
     def step_fn(s, dt_):
         return model.step(s, dt_)
-    
+
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
         diag_every, lambda s: _key_array_fn(s, tc.grid_type),
-        label=f"Baroclinic Gyre ({tc.grid_type})", total_days=days)
-    
+        label=f"{label} ({tc.grid_type})", total_days=days)
+
     max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
     eta_list = diag.get("mean_eta", [])
     eta_drift = (abs(eta_list[-1] - eta_list[0])
@@ -3271,18 +3342,18 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
     T_list = diag.get("mean_T", [])
     T_drift = (abs(T_list[-1] - T_list[0])
                if len(T_list) >= 2 else 0.0)
-    
+
     # Extract baroclinic diagnostics
     dT_ns_surface = diag.get("dT_ns_surface", [0])[-1] if diag.get("dT_ns_surface") else 0
     dT_ns_thermocline = diag.get("dT_ns_thermocline", [0])[-1] if diag.get("dT_ns_thermocline") else 0
     T_spatial_std_surface = diag.get("T_spatial_std_surface", [0])[-1] if diag.get("T_spatial_std_surface") else 0
     T_spatial_std_thermocline = diag.get("T_spatial_std_thermocline", [0])[-1] if diag.get("T_spatial_std_thermocline") else 0
-    
+
     notes = (f"max_speed={max_speed:.4f}m/s, eta_drift={eta_drift:.2e}, "
              f"T_drift={T_drift:.3f}degC, dT_NS_sfc={dT_ns_surface:.6f}degC, "
              f"dT_NS_thermo={dT_ns_thermocline:.6f}degC")
-    
-    # Save results  
+
+    # Save results
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
     _write_results_txt(output_dir, {
@@ -3291,15 +3362,18 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
         "max_speed": max_speed, "eta_drift": eta_drift, "T_drift": T_drift,
         "depth": depth.tolist(), "notes": notes,
     })
-    
+
     # Regional extent for proper plotting
-    extent = (config.lon_west, config.lon_east, config.lat_south, config.lat_north)
+    extent = (gyre_config.lon_west, gyre_config.lon_east,
+              gyre_config.lat_south, gyre_config.lat_north)
     _save_case_diagnostics(
-        output_dir, f"Baroclinic Gyre {tc.grid_type} {tc.resolution}",
+        output_dir, f"{label} {tc.grid_type} {tc.resolution}",
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=[
             ("eta", "SSH (m)", "RdBu_r"),
             ("speed_sfc", "Surface speed (m/s)", "magma"),
+            ("u_sfc", "Zonal velocity (m/s)", "RdBu_r"),
+            ("v_sfc", "Meridional velocity (m/s)", "RdBu_r"),
             ("SST", "SST (degC)", "RdYlBu_r"),
             ("w_133m", "Vertical velocity at 134m (m/s)", "RdBu_r"),
         ],
@@ -3314,8 +3388,25 @@ def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
                       "T_spatial_std_surface": "degC", "T_spatial_std_thermocline": "degC"},
         domain_extent=extent,
         mesh=grid if coord_kind == "mpas" else None)
-    
+
     return "PASS" if ok else "FAIL", wall, notes
+
+
+def run_baroclinic_gyre(tc: TestCase, output_dir: Path, days: float
+                       ) -> tuple[str, float, str]:
+    """Regional baroclinic gyre with sin² wind profile (default)."""
+    return _run_baroclinic_gyre(tc, output_dir, days,
+                                label="Baroclinic Gyre")
+
+
+def run_baroclinic_gyre_cos(tc: TestCase, output_dir: Path, days: float
+                            ) -> tuple[str, float, str]:
+    """Regional baroclinic gyre with cosine wind profile (no taper)."""
+    from legoesm.ocean.experiments.baroclinic_gyre import BaroclinicGyreConfig
+    config = BaroclinicGyreConfig(wind_profile="double_gyre", wind_buffer_deg=0.0)
+    return _run_baroclinic_gyre(tc, output_dir, days,
+                                gyre_config=config,
+                                label="Baroclinic Gyre cos")
 
 # ===========================================================================
 # Runner: Global Wind-Driven Circulation
@@ -4447,7 +4538,9 @@ RUNNERS: dict[str, Callable] = {
     "barotropic_wave": run_barotropic_wave,
     "barotropic_gyre": run_barotropic_gyre,
     "barotropic_double_gyre": run_barotropic_double_gyre,
+    "barotropic_double_gyre_sin2": run_barotropic_double_gyre_sin2,
     "baroclinic_gyre": run_baroclinic_gyre,
+    "baroclinic_gyre_cos": run_baroclinic_gyre_cos,
     "global_barotropic_wind": run_global_barotropic_wind,
     "global_barotropic_wind_1lev": run_global_barotropic_wind,
     "geostrophic_adjustment": run_geostrophic_adjustment,
@@ -5551,14 +5644,15 @@ def _check_and_generate_comparisons(output_base: Path, test_case_name: str, all_
     if len(grid_types) < 2:
         return  # Need different grids, not just multiple resolutions
         
-    # Rest-state variants are grouped under rest_state/
-    if test_case_name in TestCase._REST_STATE_GROUP:
-        test_case_dir = output_base / "rest_state" / test_case_name
+    # Grouped variants are nested under their parent folder
+    group = TestCase._CASE_TO_GROUP.get(test_case_name)
+    if group is not None:
+        test_case_dir = output_base / group / test_case_name
     else:
         test_case_dir = output_base / test_case_name
     if not test_case_dir.exists():
         return
-    
+
     # Try to collect grid results
     grid_results = _collect_grid_results(test_case_dir)
     if len(grid_results) > 1:
@@ -5616,6 +5710,10 @@ def _replot_case_snapshots(case_dir: Path) -> None:
         field_specs_2d.append(("SST", "SST (degC)", "RdYlBu_r"))
     if "speed_sfc" in data.files:
         field_specs_2d.append(("speed_sfc", "Surface speed (m/s)", "magma"))
+    if "u_sfc" in data.files:
+        field_specs_2d.append(("u_sfc", "Zonal velocity (m/s)", "RdBu_r"))
+    if "v_sfc" in data.files:
+        field_specs_2d.append(("v_sfc", "Meridional velocity (m/s)", "RdBu_r"))
     if "w_133m" in data.files:
         field_specs_2d.append(("w_133m", "w at 134m (m/s)", "RdBu_r"))
 
@@ -5952,8 +6050,9 @@ def main():
         for test_name in remaining_test_cases:
             results = test_cases[test_name]
             if len(results) > 1:  # Only create comparisons if multiple grids were run
-                if test_name in TestCase._REST_STATE_GROUP:
-                    test_case_dir = output_base / "rest_state" / test_name
+                group = TestCase._CASE_TO_GROUP.get(test_name)
+                if group is not None:
+                    test_case_dir = output_base / group / test_name
                 else:
                     test_case_dir = output_base / test_name
                 if test_case_dir.exists():
