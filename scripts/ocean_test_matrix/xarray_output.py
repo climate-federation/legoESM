@@ -35,117 +35,86 @@ _FIELD_ATTRS = {
 }
 
 
-def _is_3d_field(key: str, arr: np.ndarray, n_spatial_dims: int) -> bool:
-    """Check if a field has a vertical dimension beyond the spatial dims."""
-    # 3D fields have one extra trailing dimension (depth levels)
-    return arr.ndim > n_spatial_dims
+def _depth_coord(n_depth: int, depth: np.ndarray | None) -> tuple:
+    """Build a depth coordinate tuple for xarray, reusing real depth values when available."""
+    if depth is not None and len(depth) == n_depth:
+        return ("depth", depth, {"units": "m", "positive": "down"})
+    return ("depth", np.arange(n_depth, dtype=np.float64), {"units": "level_index"})
 
 
-def snapshots_to_dataset(
-    snapshots: dict[int, dict[str, np.ndarray]],
-    dt: float,
+def stacked_arrays_to_dataset(
+    arrays: dict[str, np.ndarray],
     coord_kind: str,
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
-    z_coord=None,
+    depth: np.ndarray | None = None,
     attrs: dict | None = None,
 ) -> xr.Dataset:
-    """Convert snapshots dict to an xr.Dataset with proper coordinates.
+    """Convert pre-stacked arrays dict to an xr.Dataset with proper coordinates.
 
     Parameters
     ----------
-    snapshots : dict[int, dict[str, np.ndarray]]
-        Mapping step_number → {field_name: array}.
-    dt : float
-        Time step in seconds.
+    arrays : dict[str, np.ndarray]
+        Mapping field_name → array with shape (n_times, ...).
+        Must also contain "times_days" (1D float array).
     coord_kind : str
         Grid type: "latlon", "cube", "mpas", "gaussian".
     lon_deg, lat_deg : np.ndarray
         Cell-center coordinates in degrees.
-    z_coord : OceanZCoordinate, optional
-        Vertical coordinate for depth levels.
+    depth : np.ndarray, optional
+        Depth values in meters (positive down). If None, uses level indices.
     attrs : dict, optional
-        Global attributes (experiment name, grid type, etc.).
+        Global attributes.
 
     Returns
     -------
     xr.Dataset
-        Dataset with time, spatial, and optionally depth coordinates.
     """
-    if not snapshots:
-        return xr.Dataset()
-
-    sorted_steps = sorted(snapshots.keys())
-    times_days = np.array([s * dt / 86400.0 for s in sorted_steps],
-                          dtype=np.float64)
-
-    # Depth coordinate
-    depth = None
-    if z_coord is not None:
-        depth = -np.asarray(z_coord.z_full_ref, dtype=np.float64)  # positive down
-
-    # Collect fields that exist at all timesteps
-    all_keys = set()
-    for step_data in snapshots.values():
-        all_keys.update(step_data.keys())
+    times_days = arrays.get("times_days", np.array([]))
+    meta_keys = {"steps", "times_days"}
 
     data_vars = {}
-    for key in sorted(all_keys):
-        timestep_arrays = []
-        for step in sorted_steps:
-            if key not in snapshots[step]:
-                break
-            timestep_arrays.append(
-                np.asarray(snapshots[step][key], dtype=np.float64))
-        else:
-            # All timesteps present — stack along time axis
-            stacked = np.stack(timestep_arrays, axis=0)
-            dims, coords = _dims_and_coords_for_field(
-                key, stacked, coord_kind, lon_deg, lat_deg, depth, times_days)
-            field_attrs = _FIELD_ATTRS.get(key, {})
-            data_vars[key] = xr.DataArray(
-                data=stacked, dims=dims, coords=coords, attrs=field_attrs)
+    for field_key, arr in arrays.items():
+        if field_key in meta_keys:
+            continue
+        arr = np.asarray(arr, dtype=np.float64)
+        if arr.ndim < 2:
+            continue
+        field_shape = arr.shape[1:]
+        dims, coords = _dims_and_coords_for_field(
+            field_shape, coord_kind, lon_deg, lat_deg, depth, times_days)
+        data_vars[field_key] = xr.DataArray(
+            data=arr, dims=dims, coords=coords,
+            attrs=_FIELD_ATTRS.get(field_key, {}))
 
     ds_attrs = {"coord_kind": coord_kind}
     if attrs:
         ds_attrs.update(attrs)
-
     return xr.Dataset(data_vars, attrs=ds_attrs)
 
 
 def _dims_and_coords_for_field(
-    key: str,
-    stacked: np.ndarray,
+    field_shape: tuple,
     coord_kind: str,
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
     depth: np.ndarray | None,
     times_days: np.ndarray,
 ) -> tuple[list[str], dict]:
-    """Determine dimension names and coordinates for a field array.
-
-    Returns (dims, coords) appropriate for the grid type and field shape.
-    """
-    n_times = stacked.shape[0]
-    field_shape = stacked.shape[1:]  # spatial shape of a single timestep
-
+    """Determine dimension names and coordinates for a field array."""
     if coord_kind in ("latlon", "gaussian"):
-        return _latlon_dims_coords(
-            key, field_shape, lon_deg, lat_deg, depth, times_days)
+        return _latlon_dims_coords(field_shape, lon_deg, lat_deg, depth, times_days)
     elif coord_kind == "cube":
-        return _cube_dims_coords(
-            key, field_shape, lon_deg, lat_deg, depth, times_days)
+        return _cube_dims_coords(field_shape, lon_deg, lat_deg, depth, times_days)
     elif coord_kind in ("mpas", "mpas_regional"):
-        return _mpas_dims_coords(
-            key, field_shape, lon_deg, lat_deg, depth, times_days)
+        return _mpas_dims_coords(field_shape, lon_deg, lat_deg, depth, times_days)
     else:
-        # Fallback: generic numbered dimensions
         dims = ["time"] + [f"dim_{i}" for i in range(len(field_shape))]
         coords = {"time": ("time", times_days, {"units": "days"})}
         return dims, coords
 
 
-def _latlon_dims_coords(key, field_shape, lon_deg, lat_deg, depth, times_days):
+def _latlon_dims_coords(field_shape, lon_deg, lat_deg, depth, times_days):
     """Dims/coords for lat-lon grid fields."""
     lon_1d = np.asarray(lon_deg, dtype=np.float64).ravel()
     lat_1d = np.asarray(lat_deg, dtype=np.float64).ravel()
@@ -157,24 +126,16 @@ def _latlon_dims_coords(key, field_shape, lon_deg, lat_deg, depth, times_days):
     }
 
     if len(field_shape) == 2:
-        # 2D field: (lat, lon)
         dims = ["time", "lat", "lon"]
     elif len(field_shape) == 3:
-        # 3D field: (lat, lon, depth)
-        n_depth = field_shape[2]
-        if depth is not None and len(depth) == n_depth:
-            coords["depth"] = ("depth", depth, {"units": "m", "positive": "down"})
-        else:
-            coords["depth"] = ("depth", np.arange(n_depth, dtype=np.float64),
-                               {"units": "level_index"})
+        coords["depth"] = _depth_coord(field_shape[2], depth)
         dims = ["time", "lat", "lon", "depth"]
     else:
         dims = ["time"] + [f"dim_{i}" for i in range(len(field_shape))]
-
     return dims, coords
 
 
-def _cube_dims_coords(key, field_shape, lon_deg, lat_deg, depth, times_days):
+def _cube_dims_coords(field_shape, lon_deg, lat_deg, depth, times_days):
     """Dims/coords for cubed-sphere grid fields."""
     coords = {
         "time": ("time", times_days, {"units": "days"}),
@@ -185,24 +146,16 @@ def _cube_dims_coords(key, field_shape, lon_deg, lat_deg, depth, times_days):
     }
 
     if len(field_shape) == 3:
-        # 2D field: (face, y, x) — e.g., (6, 24, 24)
         dims = ["time", "face", "y", "x"]
     elif len(field_shape) == 4:
-        # 3D field: (face, y, x, depth)
-        n_depth = field_shape[3]
-        if depth is not None and len(depth) == n_depth:
-            coords["depth"] = ("depth", depth, {"units": "m", "positive": "down"})
-        else:
-            coords["depth"] = ("depth", np.arange(n_depth, dtype=np.float64),
-                               {"units": "level_index"})
+        coords["depth"] = _depth_coord(field_shape[3], depth)
         dims = ["time", "face", "y", "x", "depth"]
     else:
         dims = ["time"] + [f"dim_{i}" for i in range(len(field_shape))]
-
     return dims, coords
 
 
-def _mpas_dims_coords(key, field_shape, lon_deg, lat_deg, depth, times_days):
+def _mpas_dims_coords(field_shape, lon_deg, lat_deg, depth, times_days):
     """Dims/coords for MPAS unstructured grid fields."""
     coords = {
         "time": ("time", times_days, {"units": "days"}),
@@ -213,20 +166,12 @@ def _mpas_dims_coords(key, field_shape, lon_deg, lat_deg, depth, times_days):
     }
 
     if len(field_shape) == 1:
-        # 2D field: (nCells,)
         dims = ["time", "nCells"]
     elif len(field_shape) == 2:
-        # 3D field: (nCells, depth)
-        n_depth = field_shape[1]
-        if depth is not None and len(depth) == n_depth:
-            coords["depth"] = ("depth", depth, {"units": "m", "positive": "down"})
-        else:
-            coords["depth"] = ("depth", np.arange(n_depth, dtype=np.float64),
-                               {"units": "level_index"})
+        coords["depth"] = _depth_coord(field_shape[1], depth)
         dims = ["time", "nCells", "depth"]
     else:
         dims = ["time"] + [f"dim_{i}" for i in range(len(field_shape))]
-
     return dims, coords
 
 
@@ -262,15 +207,22 @@ def timeseries_to_dataset(diag: dict, dt: float,
     ds_attrs = {}
     if attrs:
         ds_attrs.update(attrs)
-
     return xr.Dataset(data_vars, attrs=ds_attrs)
 
 
-def _arrays_to_latlon_dataset(latlon_arrays: dict) -> xr.Dataset:
-    """Convert the regridded latlon_arrays dict (from _save_snapshot_data) to xr.Dataset.
+def _arrays_to_latlon_dataset(
+    latlon_arrays: dict,
+    depth: np.ndarray | None = None,
+) -> xr.Dataset:
+    """Convert regridded latlon_arrays dict to xr.Dataset.
 
-    The dict has keys: "steps", "times_days", "lat", "lon", and field arrays
-    with shape (n_times, n_lat, n_lon) or (n_times, n_lat, n_lon, n_depth).
+    Parameters
+    ----------
+    latlon_arrays : dict
+        Keys: "steps", "times_days", "lat", "lon", and field arrays
+        with shape (n_times, n_lat, n_lon) or (n_times, n_lat, n_lon, n_depth).
+    depth : np.ndarray, optional
+        Depth values in meters (positive down) for 3D fields.
     """
     times = latlon_arrays.get("times_days", np.array([]))
     lat = latlon_arrays.get("lat", np.array([]))
@@ -291,16 +243,12 @@ def _arrays_to_latlon_dataset(latlon_arrays: dict) -> xr.Dataset:
             continue
         arr = np.asarray(arr, dtype=np.float64)
         if arr.ndim == 3:
-            # (time, lat, lon)
             data_vars[key] = xr.DataArray(
                 data=arr, dims=["time", "lat", "lon"],
                 coords=coords, attrs=_FIELD_ATTRS.get(key, {}))
         elif arr.ndim == 4:
-            # (time, lat, lon, depth)
             depth_coords = dict(coords)
-            n_depth = arr.shape[3]
-            depth_coords["depth"] = ("depth", np.arange(n_depth, dtype=np.float64),
-                                     {"units": "level_index"})
+            depth_coords["depth"] = _depth_coord(arr.shape[3], depth)
             data_vars[key] = xr.DataArray(
                 data=arr, dims=["time", "lat", "lon", "depth"],
                 coords=depth_coords, attrs=_FIELD_ATTRS.get(key, {}))
@@ -310,7 +258,6 @@ def _arrays_to_latlon_dataset(latlon_arrays: dict) -> xr.Dataset:
         ds_attrs["source_lon_range"] = str(latlon_arrays["source_lon_range"])
     if "source_lat_range" in latlon_arrays:
         ds_attrs["source_lat_range"] = str(latlon_arrays["source_lat_range"])
-
     return xr.Dataset(data_vars, attrs=ds_attrs)
 
 

@@ -822,32 +822,21 @@ def _save_snapshot_data(
             native_arrays[field_key] = np.stack(field_timesteps, axis=0)
             latlon_arrays[field_key] = np.stack(latlon_timesteps, axis=0)
 
-    if config.OUTPUT_FORMAT == "npz":
-        # Legacy NPZ format
-        np.savez_compressed(output_dir / "snapshots_native.npz", **native_arrays)
-        np.savez_compressed(output_dir / "snapshots_latlon.npz", **latlon_arrays)
-    else:
-        # Always save NPZ for backward compat with plotting code
-        np.savez_compressed(output_dir / "snapshots_native.npz", **native_arrays)
-        np.savez_compressed(output_dir / "snapshots_latlon.npz", **latlon_arrays)
-        # Also save xarray Dataset as NetCDF or Zarr
+    # TODO: once postprocessing fully supports NetCDF, skip NPZ when format != "npz"
+    np.savez_compressed(output_dir / "snapshots_native.npz", **native_arrays)
+    np.savez_compressed(output_dir / "snapshots_latlon.npz", **latlon_arrays)
+
+    if config.OUTPUT_FORMAT in ("netcdf", "zarr"):
         from ocean_test_matrix.xarray_output import (
-            snapshots_to_dataset, _arrays_to_latlon_dataset, save_dataset,
+            stacked_arrays_to_dataset, _arrays_to_latlon_dataset, save_dataset,
         )
-        # Native grid dataset — build from raw snapshots
-        # Create a simple z_coord-like object for depth if depth_values provided
-        _zc = None
-        if depth_values is not None:
-            class _ZProxy:
-                def __init__(self, d): self.z_full_ref = -d  # negative = depth
-            _zc = _ZProxy(depth_values)
-        ds_native = snapshots_to_dataset(
-            snapshots, dt, coord_kind, lon_deg, lat_deg, z_coord=_zc,
+        ds_native = stacked_arrays_to_dataset(
+            native_arrays, coord_kind, lon_deg, lat_deg,
+            depth=depth_values,
             attrs={"description": "Native grid snapshots"})
         save_dataset(ds_native, output_dir / "snapshots_native",
                      fmt=config.OUTPUT_FORMAT)
-        # Regridded lat-lon dataset — build from already-regridded arrays
-        ds_latlon = _arrays_to_latlon_dataset(latlon_arrays)
+        ds_latlon = _arrays_to_latlon_dataset(latlon_arrays, depth=depth_values)
         save_dataset(ds_latlon, output_dir / "snapshots_latlon",
                      fmt=config.OUTPUT_FORMAT)
 

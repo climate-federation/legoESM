@@ -48,6 +48,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     laplacian_cgrid,
     vector_laplacian_cgrid,
     interp_cell_to_uface,
+    curl_vertex_cgrid,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
@@ -337,6 +338,35 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     du_dt = -dKE_dx - dp_dx / rho_0
     dv_dt = -dKE_dy - dp_dy / rho_0
+
+    # --- 7b. Relative vorticity flux (issue #153) ---
+    # Vector-invariant advection: (u·∇)u = ∇(KE) + ζ × u.
+    # Coriolis (f × u) is handled in the step function; here we add
+    # the relative vorticity flux ζ × u' using the enstrophy-conserving
+    # Sadourny (1975) averaging.
+    zeta = curl_vertex_cgrid(u_prime, v_prime, grid)  # (n_lat+1, n_lon+1, nlev)
+
+    # Average ζ from vertices to velocity points
+    zeta_at_u = 0.5 * (zeta[:-1, :, :] + zeta[1:, :, :])  # (n_lat, n_lon+1, nlev)
+    zeta_at_v = 0.5 * (zeta[:, :-1, :] + zeta[:, 1:, :])  # (n_lat+1, n_lon, nlev)
+
+    # Average v' to u-points (4-point Sadourny average, periodic in lon)
+    v_west = jnp.roll(v_prime, 1, axis=1)  # v'[:, (j-1)%n_lon, :]
+    v_at_u_core = 0.25 * (v_prime[:-1] + v_prime[1:]
+                          + v_west[:-1] + v_west[1:])  # (n_lat, n_lon, nlev)
+    v_at_u = jnp.concatenate(
+        [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1)  # (n_lat, n_lon+1, nlev)
+
+    # Average u' to v-points (4-point average, zero-padded at poles)
+    n_lon_loc = u_prime.shape[1]  # n_lon+1
+    nlev_loc = u_prime.shape[2]
+    zero_u = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u_prime.dtype)
+    u_ext = jnp.concatenate([zero_u, u_prime, zero_u], axis=0)  # (n_lat+2, n_lon+1, nlev)
+    u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
+                      + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
+
+    du_dt = du_dt + zeta_at_u * v_at_u
+    dv_dt = dv_dt - zeta_at_v * u_at_v
 
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
     w_u = interp_cell_to_uface(w)
