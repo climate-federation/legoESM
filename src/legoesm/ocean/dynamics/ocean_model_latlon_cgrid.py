@@ -482,7 +482,7 @@ class LatLonCGridOceanModel:
             # Virtual salt flux into the top layer
             dz_0 = h_k_new[..., 0]
             dS_fw = virtual_salt_flux(
-                freshwater, S_ref=35.0, dz_0=dz_0, rho_0=self.config.rho_0,
+                freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
             )
             S_fw = state_new.S.data.at[..., 0].add(dt * dS_fw * mask)
             state_new = state_new._replace(

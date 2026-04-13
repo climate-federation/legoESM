@@ -360,23 +360,26 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
         if config.K_h > 0:
             dtr_dt = dtr_dt + config.K_h * laplacian_cgrid(tr, grid, mask=mask)
-        if physics_fn is None:
-            if config.K_v > 0 and tr.shape[-1] >= 2:
-                jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
-                dz_actual_loc = z_coord.dz_ref * jac_v
-                dtr_dz_half = jnp.diff(tr, axis=-1) / (
-                    z_coord.dz_half_ref * jac_v
-                )
-                flux = config.K_v * dtr_dz_half
-                zeros_face = jnp.zeros(
-                    (*tr.shape[:-1], 1), dtype=tr.dtype,
-                )
-                flux_full = jnp.concatenate(
-                    [zeros_face, flux, zeros_face], axis=-1,
-                )
-                dtr_dt = dtr_dt + (
-                    flux_full[..., :-1] - flux_full[..., 1:]
-                ) / dz_actual_loc
+        # Vertical tracer diffusion: always applied regardless of physics
+        # pipeline state. The physics pipeline's vertical_mixing module is
+        # a separate concept (e.g., KPP). Baseline K_v diffusion should
+        # always be active when K_v > 0. (Fixes #150.)
+        if config.K_v > 0 and tr.shape[-1] >= 2:
+            jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
+            dz_actual_loc = z_coord.dz_ref * jac_v
+            dtr_dz_half = jnp.diff(tr, axis=-1) / (
+                z_coord.dz_half_ref * jac_v
+            )
+            flux = config.K_v * dtr_dz_half
+            zeros_face = jnp.zeros(
+                (*tr.shape[:-1], 1), dtype=tr.dtype,
+            )
+            flux_full = jnp.concatenate(
+                [zeros_face, flux, zeros_face], axis=-1,
+            )
+            dtr_dt = dtr_dt + (
+                flux_full[..., :-1] - flux_full[..., 1:]
+            ) / dz_actual_loc
         return dtr_dt
 
     tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)
