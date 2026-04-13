@@ -195,6 +195,7 @@ class LatLonCGridOceanModel:
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
+        self._cfl_checked = False
 
         if self.config.physics is not None:
             from legoesm.ocean.physics.combined import make_ocean_physics
@@ -249,6 +250,44 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"salinity_min_psu ({config.salinity_min_psu}) must be "
                 f"< salinity_max_psu ({config.salinity_max_psu})")
+
+    def check_barotropic_cfl(self, dt: float) -> float:
+        """Check barotropic CFL and warn if marginal or unstable.
+
+        Parameters
+        ----------
+        dt : float
+            Baroclinic timestep [s].
+
+        Returns
+        -------
+        cfl : float
+            Barotropic CFL number.
+        """
+        import math
+        import warnings
+
+        g = self.config.g
+        H_max = self.z_coord.H_max
+        n_sub = self.config.n_barotropic_substeps
+        # grid.dx and grid.dy are "distance over 2 cells", so cell width = dx/2
+        dx_min = min(float(jnp.min(self.grid.dx)) / 2.0, self.grid.dy / 2.0)
+
+        c_baro = math.sqrt(g * H_max)
+        dt_baro = dt / n_sub
+        cfl = c_baro * dt_baro / dx_min
+
+        if cfl > 0.8:
+            n_min = math.ceil(c_baro * dt / (0.8 * dx_min))
+            warnings.warn(
+                f"Barotropic CFL = {cfl:.2f} (> 0.8) — may be unstable. "
+                f"c_baro={c_baro:.1f} m/s, dx_min={dx_min:.0f} m, "
+                f"dt_baro={dt_baro:.1f} s. "
+                f"Suggest n_barotropic_substeps >= {n_min} "
+                f"(currently {n_sub}).",
+                stacklevel=2,
+            )
+        return cfl
 
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None):
         """Compute baroclinic tendencies."""
@@ -507,6 +546,9 @@ class LatLonCGridOceanModel:
         surface_forcing=None,
     ) -> LatLonCGridOceanState:
         """Advance one timestep with host-side runtime validation."""
+        if not self._cfl_checked:
+            self.check_barotropic_cfl(dt)
+            self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
                               surface_forcing=surface_forcing)
         if self.config.enable_runtime_checks:

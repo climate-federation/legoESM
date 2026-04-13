@@ -121,12 +121,50 @@ class MPASOceanModel:
         self.mesh = mesh
         self.z_coord = z_coord
         self.config = config or MPASOceanConfig()
+        self._cfl_checked = False
 
         if self.config.physics is not None:
             from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
             self._physics_fn = make_mpas_ocean_physics(self.config.physics)
         else:
             self._physics_fn = None
+
+    def check_barotropic_cfl(self, dt: float) -> float:
+        """Check barotropic CFL and warn if marginal or unstable.
+
+        Parameters
+        ----------
+        dt : float
+            Baroclinic timestep [s].
+
+        Returns
+        -------
+        cfl : float
+            Barotropic CFL number.
+        """
+        import math
+        import warnings
+
+        g = self.config.g
+        H_max = self.z_coord.H_max
+        n_sub = self.config.n_barotropic_substeps
+        dx_min = float(jnp.min(self.mesh.dcEdge))
+
+        c_baro = math.sqrt(g * H_max)
+        dt_baro = dt / n_sub
+        cfl = c_baro * dt_baro / dx_min
+
+        if cfl > 0.8:
+            n_min = math.ceil(c_baro * dt / (0.8 * dx_min))
+            warnings.warn(
+                f"Barotropic CFL = {cfl:.2f} (> 0.8) — may be unstable. "
+                f"c_baro={c_baro:.1f} m/s, dx_min={dx_min:.0f} m, "
+                f"dt_baro={dt_baro:.1f} s. "
+                f"Suggest n_barotropic_substeps >= {n_min} "
+                f"(currently {n_sub}).",
+                stacklevel=2,
+            )
+        return cfl
 
     def tendencies(
         self,
@@ -356,6 +394,9 @@ class MPASOceanModel:
         Unlike the previous implementation which silently clipped tracers,
         this raises on out-of-bounds values so the caller sees the failure.
         """
+        if not self._cfl_checked:
+            self.check_barotropic_cfl(dt)
+            self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
                               surface_forcing=surface_forcing)
         if self.config.enable_runtime_checks:
