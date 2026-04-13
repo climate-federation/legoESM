@@ -21,16 +21,16 @@ import functools
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+from legoesm.thermo import saturation_vapor_pressure
 from legoesm.land.canopy.stomatal import ball_berry_gs, medlyn_gs
 
 # Module-local constants.
-# NOTE: Stefan-Boltzmann and other canonical physical constants are imported
-# from ``legoesm.constants`` — do not redefine them here.
-_T0    = 273.15      # [K]  (kept local: used inside Tetens-form literals)
+# NOTE: Stefan-Boltzmann, freezing point, latent heat of vaporisation, etc.
+# are imported from ``legoesm.constants`` — do not redefine them here.
 _Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
                      # unit conversion factor 0.446; distinct from
                      # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
-_Lv    = 2.501e6     # latent heat of vaporisation at 0°C [J kg-1]
 
 
 # ---------------------------------------------------------------------------
@@ -39,9 +39,17 @@ _Lv    = 2.501e6     # latent heat of vaporisation at 0°C [J kg-1]
 
 @jax.jit
 def saturation_specific_humidity(T: jax.Array, p: jax.Array) -> jax.Array:
-    """Saturation specific humidity [kg kg-1] from T [K] and p [Pa]."""
-    e_s = 611.2 * jnp.exp(17.67 * (T - _T0) / ((T - _T0) + 243.5))
-    return 0.622 * e_s / (p - (1.0 - 0.622) * e_s)
+    """Saturation specific humidity [kg kg-1] from T [K] and p [Pa].
+
+    Uses ``legoesm.thermo.saturation_vapor_pressure`` for the Tetens
+    formula (CLAUDE.md: never inline Tetens).  The specific-humidity
+    denominator ``p - (1 - ε) e_s`` differs from the mixing-ratio
+    denominator in ``thermo.saturation_mixing_ratio`` — this function
+    returns **specific** humidity, which is what the canopy air and
+    leaf boundary layers carry throughout the two-leaf closure.
+    """
+    e_s = saturation_vapor_pressure(T)
+    return constants.epsilon * e_s / (p - (1.0 - constants.epsilon) * e_s)
 
 
 @jax.jit
@@ -64,15 +72,17 @@ def canopy_met_variables(
       All in Pa (or Pa K-1 for derivatives; Pa K-2 for second derivative).
     """
     # Vapour pressure from specific humidity
-    e_c  = q_c * Ps / (0.622 + (1.0 - 0.622) * q_c)
-    # Saturation vapour pressure (Clausius-Clapeyron)
-    TcC  = Tc - _T0
-    es_c = 611.2 * jnp.exp(17.67 * TcC / (TcC + 243.5))
+    e_c  = q_c * Ps / (constants.epsilon + (1.0 - constants.epsilon) * q_c)
+    # Saturation vapour pressure (Tetens — shared helper).
+    TcC  = Tc - constants.T_freeze
+    es_c = saturation_vapor_pressure(Tc)
 
     VPD_c = es_c - e_c
     RH_c  = jnp.clip(e_c / jnp.maximum(es_c, 1e-6), 0.0, 1.0)
 
-    # First derivative des/dT [Pa K-1]
+    # First derivative des/dT [Pa K-1] — analytical derivative of the
+    # Tetens formula ``e_s = 611.2 * exp(17.67 * T_c / (T_c + 243.5))``.
+    # Kept local because ``legoesm.thermo`` does not expose des/dT.
     desTc  = es_c * 4098.0 * (TcC + 237.3) ** (-2)
     # Second derivative d²es/dT² [Pa K-2]
     ddesTc = 4098.0 * (
@@ -80,9 +90,9 @@ def canopy_met_variables(
         + (-2.0) * e_c * (TcC + 237.3) ** (-3)
     )
 
-    # Latent heat and psychrometric constant
-    lam   = _Lv - 2.361e3 * TcC
-    gamma = 1004.0 / 0.622 * Ps / lam   # [Pa K-1]
+    # Latent heat (temperature-corrected) and psychrometric constant
+    lam   = constants.L_v - 2.361e3 * TcC
+    gamma = constants.c_pd / constants.epsilon * Ps / lam   # [Pa K-1]
 
     return e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma
 
@@ -141,8 +151,10 @@ def _compute_gs_and_ci(
     # fraction, so the C4 bounds are not needed here.
     Ci = jnp.clip(Ci, 0.5 * Ca, 0.9 * Ca)
 
-    # Unit conversion: mol m-2 s-1 → m s-1
-    cf = 0.446 * (_T0 / Tf) * (Ps / _Ps0)
+    # Unit conversion: mol m-2 s-1 → m s-1 at IUPAC STP reference
+    # (T_std = 273.15 K, P_std = 101325 Pa, V_molar = 22.4 L/mol → 0.0224 m^3).
+    # The factor 0.446 encodes the reference molar volume; leave as-is.
+    cf = 0.446 * (constants.T_freeze / Tf) * (Ps / _Ps0)
     rs = 1.0 / (gs_mol / cf * 1e-2)   # [s m-1]
     gs = 1.0 / rs                      # [m s-1]
     return rs, gs, Ci

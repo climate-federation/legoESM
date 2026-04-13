@@ -489,8 +489,9 @@ def _step_land_canopy(
     )
 
     # Post-step coupler-facing surface state (re-uses canopy-derived
-    # albedo and emissivity from surface_out).
-    response_T_surface     = _unflat(T_soil_new) if False else T_soil_new
+    # albedo and emissivity from surface_out).  T_soil_new is already
+    # unflattened above; surface_out fields are still flat.
+    response_T_surface     = T_soil_new
     response_albedo        = _unflat(surface_out.albedo)
     response_emissivity    = _unflat(surface_out.emissivity)
     response_z0            = _unflat(surface_out.z0)
