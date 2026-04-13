@@ -1016,14 +1016,17 @@ def ext_vector_dgrid(
     duogrid: 'DuoGridData',
     cos_angle: jax.Array,
     sin_angle: jax.Array,
+    cosa_s: jax.Array,
+    rsin2: jax.Array,
     halo: int = 2,
 ) -> tuple[jax.Array, jax.Array]:
     """FV3-faithful D-grid vector halo exchange via lat/lon intermediary.
 
     Following FV3 ext_vector for DGRID case (fv_duogrid.F90:741-826).
     The flow is:
-    1. Convert covariant A-grid (utmp, vtmp) to lat/lon using grid angle
-       (approximation of FV3's c2l_ord2 which uses a11/a12/a21/a22 matrices)
+    1. Convert covariant A-grid (utmp, vtmp) to lat/lon using the
+       non-orthogonal decomposition (cosa_s, rsin2) then grid angle
+       rotation — equivalent to FV3's c2l_ord2 (a11/a12/a21/a22)
     2. Halo-exchange the lat/lon winds as scalars (with cube_rmp + corner fill)
     3. Convert A-grid lat/lon back to D-grid via cubed_a2d_halo
     4. Return padded D-grid winds
@@ -1033,6 +1036,8 @@ def ext_vector_dgrid(
     utmp, vtmp : (6, n, n) — covariant A-grid winds (from D→A averaging)
     duogrid : DuoGridData
     cos_angle, sin_angle : (6, n, n) — grid rotation angle at A-grid
+    cosa_s : (6, n, n) — cos(angle) between grid axes (non-orthogonality)
+    rsin2 : (6, n, n) — 1/sin²(angle) for covariant→contravariant
     halo : int — halo width (default 2)
 
     Returns
@@ -1045,12 +1050,14 @@ def ext_vector_dgrid(
     n = duogrid.n
     h = halo
 
-    # Step 1: Convert to geographic (lat/lon) at A-grid centers.
-    # This matches FV3's c2l_ord2 which transforms grid-aligned winds to
-    # zonal/meridional components via the a11/a12/a21/a22 rotation.
-    # Using grid angle rotation: equivalent for equidistant gnomonic.
-    u_east = cos_angle * utmp - sin_angle * vtmp
-    v_north = sin_angle * utmp + cos_angle * vtmp
+    # Step 1: Convert covariant → contravariant → geographic (lat/lon).
+    # FV3's c2l_ord2 combines these steps via a11/a12/a21/a22 matrices.
+    # Here we decompose: first covariant→contravariant using cosa_s/rsin2,
+    # then contravariant→geographic using grid angle rotation.
+    ua = (utmp - vtmp * cosa_s) * rsin2
+    va = (vtmp - utmp * cosa_s) * rsin2
+    u_east = cos_angle * ua - sin_angle * va
+    v_north = sin_angle * ua + cos_angle * va
 
     # Step 2: Halo-exchange lat/lon winds as SCALARS with Duo-Grid remap.
     # This applies cube_rmp (kinked→extended) + fill_corner_region.

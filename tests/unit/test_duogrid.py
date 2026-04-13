@@ -536,14 +536,18 @@ class TestExtVector:
         """ext_vector_dgrid should produce padded D-grid shapes."""
         from legoesm.grids.duogrid import ext_vector_dgrid
         from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         n = 8
         grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
         dg = grid.duogrid
         h = 2
         utmp = jnp.ones((6, n, n))
         vtmp = jnp.zeros((6, n, n))
+        cosa_s = cdgrid.cos_sg[:, :, :, 4]
+        rsin2 = cdgrid.rsin2_cell
         ud, vd = ext_vector_dgrid(utmp, vtmp, dg, grid.cos_angle,
-                                   grid.sin_angle, halo=h)
+                                   grid.sin_angle, cosa_s, rsin2, halo=h)
         n_p = n + 2 * h
         assert ud.shape == (6, n_p, n_p - 1)
         assert vd.shape == (6, n_p - 1, n_p)
