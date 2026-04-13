@@ -1053,6 +1053,31 @@ Added `wind_profile` and `wind_buffer_deg` fields to `BaroclinicGyreConfig` for 
 
 ---
 
+## 2026-04-13: Code quality cleanup (slopbuster + modularity audit)
+
+Ran slopbuster and modularity audits on all recently changed files. Fixed 10 of 12 flagged issues:
+
+**Modularity fixes:**
+- **Shared wind profiles**: Extracted all 7 wind stress profile computations from `prescribed.py` (100+ lines) and `mpas_physics.py` (60+ lines) into shared `surface_forcing/wind_profiles.py`. Both callers now use `compute_wind_stress(lat, cfg)`. Net 82 lines deleted.
+- **Inline land fill**: Replaced 15-line inline Neumann fill in `ocean_model_mpas.py` with existing `fill_land_cells_mpas()` helper.
+- **Global wind helper**: `_make_global_wind_physics()` now delegates to `_make_gyre_physics("global_wind")`.
+- **Hardcoded depths**: `_add_stratification()` in `baroclinic_gyre.py` now uses `z_coord.z_full_ref` instead of a hardcoded 10-level depth array.
+
+**Slopbuster fixes:**
+- Removed duplicate `FIELD_RANGES["baroclinic_gyre"]` dict key (silent overwrite)
+- Removed dead `_REST_STATE_GROUP` backward-compat alias
+- Removed unused imports (`g`, `Path`) and dead variable (`T_uniform`) in `baroclinic_gyre.py`
+- Fixed `_add_stratification` signature to accept `z_coord` parameter
+- Fixed misnumbered step comment (#7 → #10) in `ocean_model_mpas.py`
+- Fixed misleading `CubedSphereGrid` type annotation in `prescribed.py` (works with any grid)
+
+**Remaining architectural items** (deferred to #148):
+- Barotropic solver return type inconsistency across grids
+- Flux-form tracer transport duplication between latlon and MPAS step()
+- Cubed-sphere barotropic solver lacks Hu_avg for transport-consistent advection
+
+---
+
 ## Issues and PRs (updated 2026-04-13)
 
 ### Open issues
