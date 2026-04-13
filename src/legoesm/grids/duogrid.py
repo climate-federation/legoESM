@@ -969,17 +969,20 @@ def cubed_a2d_halo(
     """Convert A-grid lat/lon winds to D-grid using 3D Cartesian projection.
 
     Following FV3 fv_duogrid.F90 cubed_a2d_halo (lines 2676-2763).
+    FV3 loops j=jsd+1:jed for ud and i=isd+1:ied for vd, so the output
+    covers interior stagger edges only (not the outermost boundary edge).
 
     Parameters
     ----------
-    ull, vll : (6, n+2h, n+2h) — lat/lon wind components on padded A-grid
+    ull, vll : (6, n_p, n_p) — lat/lon wind components on padded A-grid
+        where n_p = n + 2*halo
     duogrid : DuoGridData with vlon_ext, vlat_ext, ew_ext, es_ext
     halo : int — halo width of the padded arrays
 
     Returns
     -------
-    ud : (6, n+2h, n+2h+1) — D-grid u (at j-edges)
-    vd : (6, n+2h+1, n+2h) — D-grid v (at i-edges)
+    ud : (6, n_p, n_p-1) — D-grid u at interior j-edges (j=1..n_p-2)
+    vd : (6, n_p-1, n_p) — D-grid v at interior i-edges (i=1..n_p-2)
     """
     n = duogrid.n
     h = halo
