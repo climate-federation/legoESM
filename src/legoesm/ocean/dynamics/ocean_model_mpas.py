@@ -184,22 +184,11 @@ class MPASOceanModel:
         # Fill land cells with ocean-neighbor average (Neumann BC) so that
         # subsequent operators see smooth values at coastlines instead of
         # the sharp ocean-to-zero discontinuity that `* mask` would create.
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
         c1_m = mesh.cellsOnEdge[0]
         c2_m = mesh.cellsOnEdge[1]
-        m1 = mask[c1_m, jnp.newaxis]
-        m2 = mask[c2_m, jnp.newaxis]
-        nbr_sum = jnp.zeros_like(T_new).at[c1_m].add(T_new[c2_m] * m2)
-        nbr_sum = nbr_sum.at[c2_m].add(T_new[c1_m] * m1)
-        nbr_cnt = jnp.zeros_like(T_new).at[c1_m].add(m2)
-        nbr_cnt = nbr_cnt.at[c2_m].add(m1)
-        nbr_avg_T = nbr_sum / jnp.maximum(nbr_cnt, 1.0)
-        mask_e = mask[:, jnp.newaxis]
-        T_new = jnp.where(mask_e > 0.5, T_new, nbr_avg_T)
-
-        nbr_sum_S = jnp.zeros_like(S_new).at[c1_m].add(S_new[c2_m] * m2)
-        nbr_sum_S = nbr_sum_S.at[c2_m].add(S_new[c1_m] * m1)
-        nbr_avg_S = nbr_sum_S / jnp.maximum(nbr_cnt, 1.0)
-        S_new = jnp.where(mask_e > 0.5, S_new, nbr_avg_S)
+        T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
+        S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
 
         # 3. Update 3D velocity with baroclinic tendency (non-Coriolis)
         u_baro = state.u.data + dt * tend.du_dt.data

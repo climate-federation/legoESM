@@ -90,67 +90,8 @@ def make_mpas_ocean_physics(config) -> Callable:
             dz_0_cell = z_coord.dz_ref[0] * jacobian  # (nCells,)
 
             # Compute cell-centered wind stress from latitude
-            lat = mesh.grid_lat  # (nCells,) radians
-            if cfg.wind_profile == "cosine_latitude":
-                lat_range = jnp.pi / 2.0
-                tau_x = -cfg.tau_max * jnp.cos(jnp.pi * lat / lat_range)
-                tau_y = jnp.zeros_like(tau_x)
-            elif cfg.wind_profile == "single_gyre":
-                lat_s = cfg.lat_south_deg * jnp.pi / 180.0
-                lat_n = cfg.lat_north_deg * jnp.pi / 180.0
-                basin_width = lat_n - lat_s
-                tau_x = -cfg.tau_max * jnp.cos(
-                    jnp.pi * (lat - lat_s) / basin_width)
-                tau_y = jnp.zeros_like(tau_x)
-            elif cfg.wind_profile == "double_gyre":
-                lat_s = cfg.lat_south_deg * jnp.pi / 180.0
-                lat_n = cfg.lat_north_deg * jnp.pi / 180.0
-                basin_width = lat_n - lat_s
-                tau_x = -cfg.tau_max * jnp.cos(
-                    2.0 * jnp.pi * (lat - lat_s) / basin_width)
-                tau_y = jnp.zeros_like(tau_x)
-            elif cfg.wind_profile == "double_gyre_sin2":
-                buf = cfg.wind_buffer_deg * jnp.pi / 180.0
-                lat_s = cfg.lat_south_deg * jnp.pi / 180.0 + buf
-                lat_n = cfg.lat_north_deg * jnp.pi / 180.0 - buf
-                wind_width = lat_n - lat_s
-                y_norm = (lat - lat_s) / wind_width
-                tau_x = cfg.tau_max * jnp.sin(jnp.pi * y_norm) ** 2
-                tau_x = jnp.where(
-                    (lat >= lat_s) & (lat <= lat_n), tau_x, 0.0)
-                tau_y = jnp.zeros_like(tau_x)
-            elif cfg.wind_profile == "double_gyre_tapered":
-                # Cosine double-gyre with smooth taper to zero at walls.
-                # See prescribed.py for full documentation.
-                buf = cfg.wind_buffer_deg * jnp.pi / 180.0
-                lat_s = cfg.lat_south_deg * jnp.pi / 180.0
-                lat_n = cfg.lat_north_deg * jnp.pi / 180.0
-                basin_width = lat_n - lat_s
-                y_norm = (lat - lat_s) / basin_width
-                tau_base = -cfg.tau_max * jnp.cos(2.0 * jnp.pi * y_norm)
-                dist_south = (lat - lat_s) / buf
-                dist_north = (lat_n - lat) / buf
-                taper_south = jnp.where(dist_south < 1.0,
-                    jnp.sin(0.5 * jnp.pi * jnp.clip(dist_south, 0, 1))**2, 1.0)
-                taper_north = jnp.where(dist_north < 1.0,
-                    jnp.sin(0.5 * jnp.pi * jnp.clip(dist_north, 0, 1))**2, 1.0)
-                taper = taper_south * taper_north
-                tau_x = tau_base * taper
-                tau_x = jnp.where(
-                    (lat >= lat_s) & (lat <= lat_n), tau_x, 0.0)
-                tau_y = jnp.zeros_like(tau_x)
-            elif cfg.wind_profile == "global_wind":
-                # Nikurashin & Vallis (2012) style 3-belt wind.
-                # See prescribed.py for full documentation.
-                s2 = jnp.sin(lat) ** 2
-                scale = cfg.tau_max / 0.1
-                tau_x = scale * (
-                    -0.08 - 0.0397 * s2 + 1.9487 * s2**2 - 2.0397 * s2**3
-                ) * jnp.cos(lat)
-                tau_y = jnp.zeros_like(tau_x)
-            else:  # "constant"
-                tau_x = jnp.full(mesh.nCells, cfg.tau_x, dtype=dtype)
-                tau_y = jnp.full(mesh.nCells, cfg.tau_y, dtype=dtype)
+            from legoesm.ocean.physics.surface_forcing.wind_profiles import compute_wind_stress
+            tau_x, tau_y = compute_wind_stress(mesh.grid_lat, cfg)
 
             # Project cell-centered wind stress onto edge normals.
             # Average tau from the two cells sharing each edge, then dot

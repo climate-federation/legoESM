@@ -172,25 +172,11 @@ def _add_stratification(state, config: BaroclinicGyreConfig):
     # Get current uniform temperature
     T_uniform = float(np.mean(state.T.data))
     
-    # FIXED: Use actual model level depths instead of rough linear spacing
-    # Extract actual level depths from model coordinate (these are the depths
-    # from the results files: [26.2, 133.9, 352.1, 681.0, 1120.4, ...])
-    n_levels = state.T.data.shape[-1]  # number of levels
-    
-    # Use realistic model level depths (approximately matching z* coordinate)
-    # These depths are based on typical ocean model vertical grids
-    if n_levels == 10:
-        # Standard 10-level configuration depths [m]
-        actual_depths = np.array([26.2, 133.9, 352.1, 681.0, 1120.4, 
-                                 1670.4, 2331.0, 3102.1, 3983.9, 4976.2])
-    else:
-        # Fallback: generate similar non-linear spacing
-        # Surface-concentrated levels typical of ocean models
-        sigma = np.linspace(0, 1, n_levels)
-        actual_depths = 26.0 + (5500.0 - 26.0) * sigma**1.5
-    
+    # Use actual model level depths from the z-coordinate object
+    actual_depths = -np.asarray(z_coord.z_full_ref)  # positive-down depth [m]
+    n_levels = len(actual_depths)
+
     # Create exponential profile: T(z) = T_deep + (T_surface - T_deep) * exp(-z/scale_depth)
-    # where z is depth (positive), so exp(-z/scale_depth) decreases with depth
     z_coord_depths = -actual_depths  # Negative for depth coordinate
     
     # Exponential decay with depth

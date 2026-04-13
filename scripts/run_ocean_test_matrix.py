@@ -2993,34 +2993,7 @@ def _make_gyre_physics(wind_profile: str = "single_gyre",
 
 def _make_global_wind_physics():
     """Create OceanPhysicsConfig with global 3-belt wind forcing."""
-    from legoesm.ocean.physics.combined import OceanPhysicsConfig
-    from legoesm.ocean.physics.surface_forcing.config import (
-        PrescribedForcingConfig, SurfaceForcingConfig,
-    )
-    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
-    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
-    from legoesm.ocean.physics.bottom_drag.config import (
-        BottomDragConfig, LinearDragConfig,
-    )
-    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
-
-    return OceanPhysicsConfig(
-        surface_forcing=SurfaceForcingConfig(
-            scheme="prescribed",
-            prescribed=PrescribedForcingConfig(
-                wind_profile="global_wind",
-                tau_max=0.1,
-            ),
-        ),
-        vertical_mixing=VerticalMixingConfig(scheme="none"),
-        lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(
-            scheme="linear",
-            linear=LinearDragConfig(r=1e-4),
-        ),
-        convection=OceanConvectionConfig(scheme="none"),
-        shortwave_penetration=None,
-    )
+    return _make_gyre_physics("global_wind")
 
 
 def _create_simplified_continent_mask(lon_deg, lat_deg,
