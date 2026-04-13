@@ -53,8 +53,6 @@ from legoesm.land.canopy.solver import (
 )
 from legoesm.land.canopy.energy_balance import saturation_specific_humidity
 
-_SIGMA = 5.670373e-8  # Stefan-Boltzmann [W m-2 K-4]
-
 
 class CanopyDiagnostics(NamedTuple):
     """Per-column surface energy budget diagnostics (all [W m-2] unless noted).
@@ -257,7 +255,7 @@ def _step_canopy_land_full(
         return solve_canopy_closure(x0, bun, cc)
 
     def _fwd_one_col(xf, bun):
-        return _canopy_forward(xf, bun, cc.coupling_scheme, cc.LE_module,
+        return _canopy_forward(xf, bun, cc.LE_module,
                                cc.use_ta_for_photosynthesis)
 
     # ---- Outer Picard loop: canopy closure ↔ soil thermal solver ----
@@ -354,11 +352,11 @@ def _step_canopy_land_full(
     a_soil = jnp.exp(-0.78 * LAI)  # diffuse transmittance to soil
     a_sun  = fSun * (1.0 - a_soil)
     a_sh   = (1.0 - fSun) * (1.0 - a_soil)
-    Lw_up = (a_sun  * cc.epsf * _SIGMA * Tf_Sun**4
-           + a_sh   * cc.epsf * _SIGMA * Tf_Sh**4
-           + a_soil * cc.epss * _SIGMA * Ts_cvg**4)
+    Lw_up = (a_sun  * cc.epsf * constants.sigma_sb * Tf_Sun**4
+           + a_sh   * cc.epsf * constants.sigma_sb * Tf_Sh**4
+           + a_soil * cc.epss * constants.sigma_sb * Ts_cvg**4)
     eps_eff = a_sun * cc.epsf + a_sh * cc.epsf + a_soil * cc.epss
-    T_surface = (Lw_up / jnp.maximum(eps_eff * _SIGMA, 1e-12))**0.25
+    T_surface = (Lw_up / jnp.maximum(eps_eff * constants.sigma_sb, 1e-12))**0.25
 
     # Physical safety clamp on G passed downstream: a single non-converged
     # Newton step at a stiff transition can return |G| ≫ 1000 W/m², which
@@ -450,7 +448,7 @@ def _step_canopy_land_full(
         alpha_new = alpha_canopy
 
     # Updated upwelling LW
-    lw_up_new = eps_eff * _SIGMA * T_surface_new**4
+    lw_up_new = eps_eff * constants.sigma_sb * T_surface_new**4
 
     # ---- Surface specific humidity for coupler ----
     q_sat_liq_new = saturation_mixing_ratio(T_surface_new, forcing.p_surface)
@@ -516,7 +514,7 @@ def _step_canopy_land_full(
     # forcing + canopy-mean surface temperature used for LW emission.
     eps_eff_ext = eps_eff
     SW_net_d = (1.0 - alpha_canopy) * forcing.sw_down
-    LW_net_d = eps_eff_ext * forcing.lw_down - eps_eff_ext * _SIGMA * T_surface**4
+    LW_net_d = eps_eff_ext * forcing.lw_down - eps_eff_ext * constants.sigma_sb * T_surface**4
     Rn_ext_d = SW_net_d + LW_net_d
 
     residual_int_d = Rn_int_d - (LE_tot + H_tot + G)

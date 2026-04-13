@@ -76,7 +76,12 @@ def rd_temperature_response(Tf: jax.Array, TgC: jax.Array) -> jax.Array:
     """
     TgC_clip = jnp.clip(TgC, 11.0, 35.0)
     TaC = Tf - 273.15
-    Q10 = jnp.maximum(3.22 - 0.046 * TaC, 1e-3)
+    # Floor Q10 at 1.2 (not 1e-3): at Tf ≳ 43°C the linear formula
+    # gives Q10 < 1.2, and Q10^((Tf-25)/10) then contaminates the
+    # Jacobian with near-singular derivatives when combined with the
+    # acclimation factor. 1.2 is still physically reasonable for
+    # dark-respiration Q10 at the upper end of the vegetated range.
+    Q10 = jnp.maximum(3.22 - 0.046 * TaC, 1.2)
     item = (Tf - 298.15) / 10.0
     return (10.0 ** (-0.00794 * (TgC_clip - 25.0))) * (Q10 ** item)
 

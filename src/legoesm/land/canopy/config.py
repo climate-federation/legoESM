@@ -84,9 +84,11 @@ class CanopyConfig(NamedTuple):
     # normally ample.
     max_iters: int = 50
     tol: float = 1e-2
-    # coupling_scheme and LE_module are static Python strings captured in
-    # functools.partial closures — they are never traced by JAX.
-    coupling_scheme: str = "FULLY_COUPLED"  # "FULLY_COUPLED" | "VEG_ONLY" | "LEAVES_ATMO"
+    # Only the DifferBESS FULLY_COUPLED scheme is implemented (leaves and
+    # soil share the canopy air space Tc, q_c via clumping-weighted
+    # below-canopy resistance).  The VEG_ONLY / LEAVES_ATMO variants were
+    # removed to keep the Newton residual minimal — re-introduce them via
+    # a new static config string if a multi-scheme comparison is needed.
     LE_module: str = "BT"                   # "BT" (Bulk Transfer, default) | "PM" (Penman-Monteith)
     use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
 

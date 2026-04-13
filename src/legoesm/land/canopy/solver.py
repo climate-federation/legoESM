@@ -25,9 +25,17 @@ Newton step control (CLM5-inspired, section 2.5.3.2):
   * sunlit-leaf degeneracy anchor when ``fSun < 0.05``
 
 Uses jax.lax.scan for JIT-compatible fixed-point iteration with a
-forward-mode autodiff Jacobian (jax.jacfwd).  The coupling_scheme and
-LE_module are captured as static Python strings in a functools.partial
-closure — they are never traced.
+forward-mode autodiff Jacobian (jax.jacfwd).  The LE_module is captured
+as a static Python string in a functools.partial closure — it is never
+traced.
+
+**Coupling scheme**: only the DifferBESS FULLY_COUPLED formulation is
+implemented — leaves and soil share the same canopy air space (Tc, q_c)
+with a clumping-index-weighted below-canopy resistance (see
+``compute_below_canopy_resistance``).  The ``VEG_ONLY`` and
+``LEAVES_ATMO`` variants from DifferBESS were removed to keep the
+Newton residual shape minimal; they can be added back later if a
+multi-scheme comparison study needs them.
 
 Source: adapted from DifferBESS/algo/newton_root.py;
         coupling architecture rewritten for legoESM's multilayer soil
@@ -125,16 +133,17 @@ class CanopyForcingBundle(NamedTuple):
 def _canopy_residual(
     x: jax.Array,
     bundle: CanopyForcingBundle,
-    coupling_scheme: str,
     LE_module: str,
     use_ta_for_photosynthesis: bool,
 ) -> jax.Array:
-    """Compute the residual vector F(x) for the canopy closure.
+    """Compute the residual vector F(x) for the FULLY_COUPLED canopy closure.
 
     x = [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c]
 
-    ``Ts`` is read from ``bundle.Ts_bc`` (prescribed; updated by the
-    outer Picard loop between passes).
+    Leaves and soil share the canopy air space (Tc, q_c); soil communicates
+    with Tc/q_c via the clumping-weighted below-canopy resistance.  ``Ts``
+    is read from ``bundle.Ts_bc`` (prescribed; updated by the outer Picard
+    loop between passes).
 
     Returns F such that F(x*) = 0 at the solution.
     """
@@ -172,16 +181,9 @@ def _canopy_residual(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
 
-    # ---- Leaf microclimate (scheme-dependent) ----
-    if coupling_scheme == "LEAVES_ATMO":
-        Tc_leaf = b.Ta
-        q_c_leaf = b.q_atm
-    else:
-        Tc_leaf = Tc
-        q_c_leaf = q_c
-
+    # ---- Leaf microclimate (FULLY_COUPLED: leaves use canopy air space) ----
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
-        b.Ps, Tc_leaf, q_c_leaf)
+        b.Ps, Tc, q_c)
 
     # ---- Leaf energy balance ----
     if LE_module == "BT":
@@ -189,52 +191,38 @@ def _canopy_residual(
         q_f_Sh  = saturation_specific_humidity(Tf_Sh,  b.Ps)
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_bt(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
-            Tc_leaf, q_f_Sun, q_c_leaf, RH_c,
+            Tc, q_f_Sun, q_c, RH_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
-            Tc_leaf, q_f_Sh, q_c_leaf, RH_c,
+            Tc, q_f_Sh, q_c, RH_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0)
     else:  # PM
         _, LE_Sun, H_Sun, Tf_Sun_new, gs_Sun, Ci_Sun_new = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
-            Tc_leaf, VPD_c, RH_c, desTc, ddesTc, gamma_c,
+            Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0)
         _, LE_Sh, H_Sh, Tf_Sh_new, gs_Sh, Ci_Sh_new = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
-            Tc_leaf, VPD_c, RH_c, desTc, ddesTc, gamma_c,
+            Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0)
 
     # ---- Soil energy balance (prescribed Ts; G diagnosed as residual) ----
-    if coupling_scheme == "VEG_ONLY":
-        Tc_soil   = b.Ta
-        q_c_soil  = b.q_atm
-        rah_s     = rah_above + 1.0 / jnp.maximum(
-            0.13 / 0.4 * (b.z0m * uav / 1.5e-5)**0.45 * uav, 1e-9)
-        raw_s     = rah_s
-        Rsoil_veg = raw_s * (1.0 / jnp.maximum(b.fStress_soil, 1e-6) - 1.0)
-    else:
-        Tc_soil   = Tc
-        q_c_soil  = q_c
-        rah_s     = rah_below
-        raw_s     = raw_below
-        Rsoil_veg = Rsoil
-
     q_s = saturation_specific_humidity(Ts, b.Ps)
     if LE_module == "BT":
         _, LE_Soil, H_Soil, _G = soil_energy_balance_bt(
-            Ts, Tc_soil, q_s, q_c_soil,
+            Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_s, raw_s, Rsoil_veg,
+            rah_below, raw_below, Rsoil,
             b.ASW_Soil, ALW_Soil)
     else:
         _, LE_Soil, H_Soil, _G = soil_energy_balance_pm(
-            Ts, Tc_soil, q_s, q_c_soil,
+            Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_s, raw_s, Rsoil_veg,
+            rah_below, raw_below, Rsoil,
             b.ASW_Soil, ALW_Soil)
 
-    # ---- Canopy air update ----
+    # ---- Canopy air update (FULLY_COUPLED: soil included) ----
     Tc_new, q_c_new = canopy_air_update(
         b.Ta, b.q_atm,
         Tf_Sun_new, Tf_Sh_new, Ts,
@@ -242,7 +230,7 @@ def _canopy_residual(
         Rb_Sun, Rb_Sh,
         rah_above, raw_above,
         rah_below, raw_below,
-        Rsoil_veg, b.Ps, coupling_scheme)
+        Rsoil, b.Ps)
 
     # ---- Sunlit-leaf anchor when fSun is too small for two-leaf split ----
     # When ``fSun`` is small, ``Rb_Sun = rb / (LAI · fSun)`` is large, the
@@ -281,16 +269,15 @@ def _canopy_residual(
 def _canopy_forward(
     x: jax.Array,
     bundle: CanopyForcingBundle,
-    coupling_scheme: str,
     LE_module: str,
     use_ta_for_photosynthesis: bool,
 ) -> dict:
-    """Evaluate the canopy state and return all fluxes (no residual).
+    """Evaluate the FULLY_COUPLED canopy state and return all fluxes.
 
-    Used after the solver has converged to extract final diagnostics.  The
-    returned ``G`` is the surface-energy-budget residual ``Rn_soil - LE_soil
-    - H_soil`` (not a G_alpha parameterisation), intended to be passed as
-    the top BC to ``solve_soil_thermal`` in the caller.
+    Used after the Newton solver has converged to extract final diagnostics.
+    The returned ``G`` is the surface-energy-budget residual
+    ``Rn_soil - LE_soil - H_soil``, intended to be passed as the top BC to
+    ``solve_soil_thermal`` in the caller.
     """
     Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c = (
         x[0], x[1], x[2], x[3], x[4], x[5])
@@ -321,59 +308,43 @@ def _canopy_forward(
         T_phot_sh,  Ci_Sh,  b.APAR_Sh,
         b.Vcmax25_Sh, b.Vcmax25_C4Sh, b.fC4, b.Ps, b.alf, b.TgC)
 
-    if coupling_scheme == "LEAVES_ATMO":
-        Tc_leaf, q_c_leaf = b.Ta, b.q_atm
-    else:
-        Tc_leaf, q_c_leaf = Tc, q_c
-
+    # FULLY_COUPLED: leaves and soil share the canopy air space (Tc, q_c).
     e_c, es_c, VPD_c, RH_c, desTc, ddesTc, gamma_c = canopy_met_variables(
-        b.Ps, Tc_leaf, q_c_leaf)
+        b.Ps, Tc, q_c)
 
     if LE_module == "BT":
         q_f_Sun = saturation_specific_humidity(Tf_Sun, b.Ps)
         q_f_Sh  = saturation_specific_humidity(Tf_Sh,  b.Ps)
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_bt(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
-            Tc_leaf, q_f_Sun, q_c_leaf, RH_c,
+            Tc, q_f_Sun, q_c, RH_c,
             b.lam, b.Cp, b.rhoa, Rb_Sun, b.m, b.b0)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh, _  = leaf_energy_balance_bt(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
-            Tc_leaf, q_f_Sh, q_c_leaf, RH_c,
+            Tc, q_f_Sh, q_c, RH_c,
             b.lam, b.Cp, b.rhoa, Rb_Sh, b.m, b.b0)
     else:
         Rn_Sun, LE_Sun, H_Sun, _, gs_Sun, _ = leaf_energy_balance_pm(
             An_Sun, b.ASW_Sun, ALW_Sun, Tf_Sun, b.Ps, b.Ca,
-            Tc_leaf, VPD_c, RH_c, desTc, ddesTc, gamma_c,
+            Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sun, b.m, b.b0)
         Rn_Sh,  LE_Sh,  H_Sh,  _, gs_Sh,  _ = leaf_energy_balance_pm(
             An_Sh, b.ASW_Sh, ALW_Sh, Tf_Sh, b.Ps, b.Ca,
-            Tc_leaf, VPD_c, RH_c, desTc, ddesTc, gamma_c,
+            Tc, VPD_c, RH_c, desTc, ddesTc, gamma_c,
             b.Cp, b.rhoa, Rb_Sh, b.m, b.b0)
-
-    if coupling_scheme == "VEG_ONLY":
-        Tc_soil, q_c_soil = b.Ta, b.q_atm
-        nu       = 1.5e-5
-        Csbare   = 0.4 / 0.13 * (b.z0m * jnp.maximum(uav, 1e-3) / nu)**(-0.45)
-        rah_s    = rah_above + 1.0 / jnp.maximum(Csbare * uav, 1e-9)
-        raw_s    = rah_s
-        Rsoil_s  = raw_s * (1.0 / jnp.maximum(b.fStress_soil, 1e-6) - 1.0)
-    else:
-        Tc_soil, q_c_soil = Tc, q_c
-        rah_s, raw_s = rah_below, raw_below
-        Rsoil_s = Rsoil
 
     q_s = saturation_specific_humidity(Ts, b.Ps)
     if LE_module == "BT":
         Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_bt(
-            Ts, Tc_soil, q_s, q_c_soil,
+            Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_s, raw_s, Rsoil_s,
+            rah_below, raw_below, Rsoil,
             b.ASW_Soil, ALW_Soil)
     else:
         Rn_Soil, LE_Soil, H_Soil, G = soil_energy_balance_pm(
-            Ts, Tc_soil, q_s, q_c_soil,
+            Ts, Tc, q_s, q_c,
             b.lam, b.rhoa, b.Cp,
-            rah_s, raw_s, Rsoil_s,
+            rah_below, raw_below, Rsoil,
             b.ASW_Soil, ALW_Soil)
 
     return dict(
@@ -410,7 +381,7 @@ def solve_canopy_closure(
     bundle : CanopyForcingBundle
         All per-column forcing inputs (including ``Ts_bc``).
     config : CanopyConfig
-        Solver settings (max_iters, tol, coupling_scheme, LE_module).
+        Solver settings (max_iters, tol, LE_module).
 
     Returns
     -------
@@ -418,7 +389,6 @@ def solve_canopy_closure(
     n_iters : scalar int  — iteration count when convergence was first reached
     """
     solver = _make_implicit_newton_solver(
-        coupling_scheme=config.coupling_scheme,
         LE_module=config.LE_module,
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
         max_iters=config.max_iters,
@@ -432,7 +402,6 @@ def solve_canopy_closure(
 # ---------------------------------------------------------------------------
 
 def _make_implicit_newton_solver(
-    coupling_scheme: str,
     LE_module: str,
     use_ta_for_photosynthesis: bool,
     max_iters: int,
@@ -468,7 +437,6 @@ def _make_implicit_newton_solver(
     def _F(x, bundle):
         return _canopy_residual(
             x, bundle,
-            coupling_scheme=coupling_scheme,
             LE_module=LE_module,
             use_ta_for_photosynthesis=use_ta_for_photosynthesis,
         )

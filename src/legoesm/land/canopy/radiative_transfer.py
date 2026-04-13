@@ -18,9 +18,9 @@ import jax
 import jax.numpy as jnp
 from typing import NamedTuple
 
-# Physical constants (local; do not import from legoesm.constants to keep
-# this module self-contained for potential standalone use)
-_STEFAN_BOLTZMANN = 5.670373e-8   # [W m-2 K-4]
+from legoesm import constants
+
+# Module-local conversion factor (not a physical constant per se).
 _APAR_CONVERSION = 4.56           # [W m-2] → [μmol m-2 s-1] for PAR
 
 
@@ -370,10 +370,10 @@ def canopy_longwave_rt(
     kd = 0.78
 
     # Stefan-Boltzmann emitted fluxes
-    Ls    = epss * _STEFAN_BOLTZMANN * Ts**4
-    Lf_Sun = epsf * _STEFAN_BOLTZMANN * Tf_Sun**4
-    Lf_Sh  = epsf * _STEFAN_BOLTZMANN * Tf_Sh**4
-    Lf     = epsf * _STEFAN_BOLTZMANN * Tf_mean**4
+    Ls    = epss * constants.sigma_sb * Ts**4
+    Lf_Sun = epsf * constants.sigma_sb * Tf_Sun**4
+    Lf_Sh  = epsf * constants.sigma_sb * Tf_Sh**4
+    Lf     = epsf * constants.sigma_sb * Tf_mean**4
 
     kd_LAI = kd * LAI
 

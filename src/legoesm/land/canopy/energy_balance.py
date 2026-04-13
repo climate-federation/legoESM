@@ -21,11 +21,14 @@ import functools
 import jax
 import jax.numpy as jnp
 
-# Physical constants
-_T0    = 273.15      # [K]
-_Ps0   = 101325.0    # standard pressure [Pa]
+# Module-local constants.
+# NOTE: Stefan-Boltzmann and other canonical physical constants are imported
+# from ``legoesm.constants`` — do not redefine them here.
+_T0    = 273.15      # [K]  (kept local: used inside Tetens-form literals)
+_Ps0   = 101325.0    # IUPAC STP pressure [Pa] used in the mol → m/s
+                     # unit conversion factor 0.446; distinct from
+                     # ``constants.p_ref`` (1e5 Pa hydrostatic reference).
 _Lv    = 2.501e6     # latent heat of vaporisation at 0°C [J kg-1]
-_sigma = 5.670373e-8  # Stefan-Boltzmann [W m-2 K-4]
 
 
 # ---------------------------------------------------------------------------
@@ -339,7 +342,7 @@ def soil_energy_balance_pm(
 # Canopy air temperature and humidity update
 # ---------------------------------------------------------------------------
 
-@functools.partial(jax.jit, static_argnames=("coupling_scheme",))
+@jax.jit
 def canopy_air_update(
     Ta: jax.Array,
     q_atm: jax.Array,
@@ -356,16 +359,12 @@ def canopy_air_update(
     raw_below: jax.Array,
     Rsoil: jax.Array,
     Ps: jax.Array,
-    coupling_scheme: str,
 ) -> tuple[jax.Array, jax.Array]:
     """Update canopy air temperature Tc and specific humidity q_c.
 
-    Uses conductance-weighted mixing (DifferBESS CarbonWaterFluxes.py).
-
-    Parameters
-    ----------
-    coupling_scheme : "FULLY_COUPLED" | "VEG_ONLY" | "LEAVES_ATMO"
-      (static Python string — not traced)
+    Conductance-weighted mixing of above-canopy air, sunlit and shaded
+    leaves, and soil — DifferBESS FULLY_COUPLED formulation.  Leaves and
+    soil both communicate with the canopy air space (Tc, q_c).
 
     Returns
     -------
@@ -374,30 +373,22 @@ def canopy_air_update(
     ch_a   = 1.0 / jnp.maximum(rah_above, 1e-9)
     ch_sun = 1.0 / jnp.maximum(Rb_Sun,    1e-9)
     ch_sh  = 1.0 / jnp.maximum(Rb_Sh,     1e-9)
+    ch_g   = 1.0 / jnp.maximum(rah_below, 1e-9)
 
     gs_Sun_safe = jnp.maximum(gs_Sun, 1e-9)
     gs_Sh_safe  = jnp.maximum(gs_Sh,  1e-9)
     cw_a   = 1.0 / jnp.maximum(raw_above, 1e-9)
     cw_sun = 1.0 / (Rb_Sun + 1.0 / gs_Sun_safe)
     cw_sh  = 1.0 / (Rb_Sh  + 1.0 / gs_Sh_safe)
+    cw_g   = 1.0 / jnp.maximum(raw_below + Rsoil, 1e-9)
 
     q_f_Sun = saturation_specific_humidity(Tf_Sun, Ps)
     q_f_Sh  = saturation_specific_humidity(Tf_Sh,  Ps)
     q_s     = saturation_specific_humidity(Ts,     Ps)
 
-    if coupling_scheme == "VEG_ONLY":
-        # Canopy air excludes soil contribution
-        Tc_new = (ch_a * Ta + ch_sun * Tf_Sun + ch_sh * Tf_Sh) / (
-            ch_a + ch_sun + ch_sh)
-        q_c_new = (cw_a * q_atm + cw_sun * q_f_Sun + cw_sh * q_f_Sh) / (
-            cw_a + cw_sun + cw_sh)
-    else:
-        # FULLY_COUPLED or LEAVES_ATMO: soil included
-        ch_g  = 1.0 / jnp.maximum(rah_below, 1e-9)
-        cw_g  = 1.0 / jnp.maximum(raw_below + Rsoil, 1e-9)
-        Tc_new = (ch_a * Ta + ch_sun * Tf_Sun + ch_sh * Tf_Sh + ch_g * Ts) / (
-            ch_a + ch_sun + ch_sh + ch_g)
-        q_c_new = (cw_a * q_atm + cw_sun * q_f_Sun + cw_sh * q_f_Sh + cw_g * q_s) / (
-            cw_a + cw_sun + cw_sh + cw_g)
+    Tc_new = (ch_a * Ta + ch_sun * Tf_Sun + ch_sh * Tf_Sh + ch_g * Ts) / (
+        ch_a + ch_sun + ch_sh + ch_g)
+    q_c_new = (cw_a * q_atm + cw_sun * q_f_Sun + cw_sh * q_f_Sh + cw_g * q_s) / (
+        cw_a + cw_sun + cw_sh + cw_g)
 
     return Tc_new, q_c_new

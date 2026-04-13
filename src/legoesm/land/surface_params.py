@@ -120,7 +120,7 @@ def default_land_surface_params(ncol: int, config) -> LandSurfaceParams:
         root_depth=_bc(root_depth),
         theta_wp=_bc(theta_wp),
         theta_fc=_bc(theta_fc),
-        Vc_max25=_bc(config.stomata.Vc_max25),
+        Vc_max25=_bc(config.stomata.Vcmax25_C3),
         LCMA=_bc(config.carbon.LCMA),
         g1=_bc(config.stomata.g1_bb),
     )

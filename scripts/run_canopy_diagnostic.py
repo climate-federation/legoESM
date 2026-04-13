@@ -376,7 +376,7 @@ def to_dataset(result: dict) -> xr.Dataset:
         "n_days": 3,
         "dt_s": 1800.0,
         "LE_module": result["cfg"].canopy.LE_module,
-        "coupling_scheme": result["cfg"].canopy.coupling_scheme,
+        "coupling_scheme": "FULLY_COUPLED",
     })
     return ds
 

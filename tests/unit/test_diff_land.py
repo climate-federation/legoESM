@@ -192,7 +192,8 @@ class TestCarbonGPPGrad:
 class TestStomataGrad:
 
     def test_jarvis_grad_wrt_T(self):
-        from legoesm.land.carbon.stomata import jarvis_gs, StomataConfig
+        from legoesm.land.canopy.stomatal import jarvis_gs
+        from legoesm.land.carbon.config import StomataConfig
 
         config = StomataConfig(enabled=True)
         ncol = 32

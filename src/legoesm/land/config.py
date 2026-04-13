@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from legoesm.land.carbon.config import CarbonConfig
-from legoesm.land.carbon.stomata import StomataConfig
+from legoesm.land.carbon.config import CarbonConfig, StomataConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig
 from legoesm.land.soil_thermal import SoilThermalConfig

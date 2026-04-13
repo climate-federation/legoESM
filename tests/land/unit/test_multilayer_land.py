@@ -822,7 +822,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         )
         from legoesm.coupler.coupling_fields import AtmToSurface
         from legoesm.thermo import saturation_mixing_ratio
-        from legoesm.land.carbon.stomata import StomataConfig
+        from legoesm.land.carbon.config import StomataConfig
 
         # Enable stomata with Jarvis model (simple conductance reduction)
         config = MultiLayerLandConfig(stomata=StomataConfig(enabled=True))
