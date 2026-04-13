@@ -77,8 +77,11 @@ class DuoGridData(NamedTuple):
     # Shape: (6, n+2*ng, n+2*ng, 3) — 3D Cartesian
     vlon_ext: jax.Array | None
     vlat_ext: jax.Array | None
-    # ew_ext: east-west edge vector, es_ext: north-south edge vector
-    # Shape: (6, n+2*ng+1, n+2*ng, 3) and (6, n+2*ng, n+2*ng+1, 3)
+    # ew_ext: east-west edge-normal vectors (2 variants per FV3 a2stag_metrics)
+    # Shape: (6, n+2*ng+1, n+2*ng, 3, 2) — last dim: variant 0=A-grid, 1=B-grid
+    # es_ext: south-north edge-normal vectors
+    # Shape: (6, n+2*ng, n+2*ng+1, 3, 2)
+    # cubed_a2d_halo uses: ud <- es[:,:,:,0], vd <- ew[:,:,:,1]
     ew_ext: jax.Array | None
     es_ext: jax.Array | None
 
@@ -665,34 +668,81 @@ def _compute_ext_vectors(n: int, ng: int, ext_lon, ext_lat):
         norms = np.linalg.norm(v, axis=-1, keepdims=True)
         return v / np.maximum(norms, 1e-30)
 
-    # ew_ext[i, j]: edge-normal at i-edge (between A-grid i-1 and i)
-    # Shape: (6, n_ext+1, n_ext, 3)
-    ew_ext = np.zeros((6, n_ext + 1, n_ext, 3))
+    # Approximate B-grid Cartesian positions from A-grid midpoints.
+    # FV3 has actual B-grid from the supergrid; we approximate as the
+    # midpoint of 4 surrounding A-cells, normalized to the sphere.
+    # B-grid at (i, j) is between A-cells (i-1,j-1), (i,j-1), (i-1,j), (i,j).
+    # Shape: (6, n_ext+1, n_ext+1, 3)
+    bgrid = np.zeros((6, n_ext + 1, n_ext + 1, 3))
     for face in range(6):
-        # For interior i-edges (i=1..n_ext-1):
-        p1 = cart[face, 1:, :, :]    # A-grid (i, j)
-        p3 = cart[face, :-1, :, :]   # A-grid (i-1, j)
-        # pp = midpoint of adjacent A-grid cells (approximation; FV3
-        # uses B-grid midpoints but we don't have B-grid on extended)
-        pp = _normalize(0.5 * (p1 + p3))
-        p2 = _cross(p3, p1)          # normal to great circle
-        ew_raw = _cross(p2, pp)       # edge-normal at pp
-        ew_ext[face, 1:-1, :, :] = _normalize(ew_raw)
-        ew_ext[face, 0, :, :] = ew_ext[face, 1, :, :]
-        ew_ext[face, -1, :, :] = ew_ext[face, -2, :, :]
+        # Interior B-grid points (i=1..n_ext-1, j=1..n_ext-1)
+        bgrid[face, 1:-1, 1:-1, :] = _normalize(
+            0.25 * (cart[face, :-1, :-1, :] + cart[face, 1:, :-1, :]
+                    + cart[face, :-1, 1:, :] + cart[face, 1:, 1:, :]))
+        # Boundary: extrapolate from interior
+        bgrid[face, 0, :, :] = bgrid[face, 1, :, :]
+        bgrid[face, -1, :, :] = bgrid[face, -2, :, :]
+        bgrid[face, :, 0, :] = bgrid[face, :, 1, :]
+        bgrid[face, :, -1, :] = bgrid[face, :, -2, :]
 
-    # es_ext[i, j]: edge-normal at j-edge (between A-grid j-1 and j)
-    # Shape: (6, n_ext, n_ext+1, 3)
-    es_ext = np.zeros((6, n_ext, n_ext + 1, 3))
+    # FV3 computes TWO variants for each edge vector:
+    # ew variant 1: cross(cross(A(i-1,j), A(i,j)), midpoint(B(i,j), B(i,j+1)))
+    # ew variant 2: cross(cross(B(i,j), B(i,j+1)), midpoint(B(i,j), B(i,j+1)))
+    # cubed_a2d_halo uses: ud <- es(:,:,1), vd <- ew(:,:,2)
+    # cubed_a2c_halo uses: uc <- ew(:,:,1), vc <- es(:,:,2)
+
+    # ew_ext: shape (6, n_ext+1, n_ext, 3, 2) — last dim = variant
+    # FV3 loops i=isd+1:ied → n_ext-1 interior i-edges. We store n_ext+1
+    # total with boundary copies.
+    ew_ext = np.zeros((6, n_ext + 1, n_ext, 3, 2))
     for face in range(6):
-        p1 = cart[face, :, 1:, :]    # A-grid (i, j)
-        p3 = cart[face, :, :-1, :]   # A-grid (i, j-1)
-        pp = _normalize(0.5 * (p1 + p3))
-        p2 = _cross(p3, p1)
-        es_raw = _cross(p2, pp)
-        es_ext[face, :, 1:-1, :] = _normalize(es_raw)
-        es_ext[face, :, 0, :] = es_ext[face, :, 1, :]
-        es_ext[face, :, -1, :] = es_ext[face, :, -2, :]
+        # Interior i-edges (i=1..n_ext-1): between A(i-1,j) and A(i,j)
+        # Shapes: cart[1:,:,:] → (n_ext-1, n_ext, 3)
+        p1_a = cart[face, 1:, :, :]     # A(i, j) — (n_ext-1, n_ext, 3)
+        p3_a = cart[face, :-1, :, :]    # A(i-1, j)
+        # pp = midpoint of B(i,j) and B(i,j+1) — B has (n_ext+1) points
+        # B at i ranges 0..n_ext, j ranges 0..n_ext
+        # For i-edge at i (1..n_ext-1): use B(i, 0..n_ext-1) and B(i, 1..n_ext)
+        pp = _normalize(0.5 * (bgrid[face, 1:-1, :-1, :] + bgrid[face, 1:-1, 1:, :]))
+        # pp: (n_ext-1, n_ext, 3) — matches p1_a shape
+
+        # Variant 1: from A-grid normals
+        p2 = _cross(p3_a, p1_a)
+        ew_ext[face, 1:-1, :, :, 0] = _normalize(_cross(p2, pp))
+
+        # Variant 2: from B-grid normals
+        b1 = bgrid[face, 1:-1, :-1, :]  # B(i, j)
+        b2 = bgrid[face, 1:-1, 1:, :]   # B(i, j+1)
+        p1_b = _cross(b1, b2)
+        ew_ext[face, 1:-1, :, :, 1] = _normalize(_cross(p1_b, pp))
+
+        for v in range(2):
+            ew_ext[face, 0, :, :, v] = ew_ext[face, 1, :, :, v]
+            ew_ext[face, -1, :, :, v] = ew_ext[face, -2, :, :, v]
+
+    # es_ext: shape (6, n_ext, n_ext+1, 3, 2) — last dim = variant
+    es_ext = np.zeros((6, n_ext, n_ext + 1, 3, 2))
+    for face in range(6):
+        # Interior j-edges (j=1..n_ext-1): between A(i,j-1) and A(i,j)
+        p1_a = cart[face, :, 1:, :]     # A(i, j) — (n_ext, n_ext-1, 3)
+        p3_a = cart[face, :, :-1, :]    # A(i, j-1)
+        # pp = midpoint of B(i,j) and B(i+1,j)
+        pp = _normalize(0.5 * (bgrid[face, :-1, 1:-1, :] + bgrid[face, 1:, 1:-1, :]))
+        # pp: (n_ext, n_ext-1, 3)
+
+        # Variant 1: from B-grid normals
+        b1 = bgrid[face, :-1, 1:-1, :]  # B(i, j)
+        b2 = bgrid[face, 1:, 1:-1, :]   # B(i+1, j)
+        p3_b = _cross(b1, b2)
+        es_ext[face, :, 1:-1, :, 0] = _normalize(_cross(p3_b, pp))
+
+        # Variant 2: from A-grid normals
+        p2 = _cross(p3_a, p1_a)
+        es_ext[face, :, 1:-1, :, 1] = _normalize(_cross(p2, pp))
+
+        for v in range(2):
+            es_ext[face, :, 0, :, v] = es_ext[face, :, 1, :, v]
+            es_ext[face, :, -1, :, v] = es_ext[face, :, -2, :, v]
 
     return vlon_ext, vlat_ext, ew_ext, es_ext
 
@@ -1048,8 +1098,8 @@ def cubed_a2d_halo(
     # Get extended-grid vectors, sliced to the padded domain
     vlon = duogrid.vlon_ext  # (6, n_ext, n_ext, 3)
     vlat = duogrid.vlat_ext
-    ew = duogrid.ew_ext      # (6, n_ext+1, n_ext, 3)
-    es = duogrid.es_ext      # (6, n_ext, n_ext+1, 3)
+    ew = duogrid.ew_ext      # (6, n_ext+1, n_ext, 3, 2)
+    es = duogrid.es_ext      # (6, n_ext, n_ext+1, 3, 2)
 
     # Cast to field dtype
     dtype = ull.dtype
@@ -1075,15 +1125,15 @@ def cubed_a2d_halo(
     ve = 0.5 * (v3[:, :-1, :, :] + v3[:, 1:, :, :])  # (6, n_p-1, n_p, 3)
 
     # Step 3: Project onto edge vectors
-    # ud = ue . es_ext (south-north edge tangent for u/D-grid)
-    es_p = es[:, offset:offset + n_p, offset:offset + n_p - 1 + 2, :]
-    # We need es at (i, j+1/2) for j = 0..n_p-2 in padded coords
-    # es has j from 0..n_ext (n_ext+1 values). Slice to match ue shape.
-    es_slice = es[:, offset:offset + n_p, offset + 1:offset + n_p, :]  # (6, n_p, n_p-1, 3)
+    # FV3 cubed_a2d_halo (fv_duogrid.F90:2746-2757):
+    #   ud(i,j,k) = ue . es(i,j,1)  — es variant 0 (B-grid normals)
+    #   vd(i,j,k) = ve . ew(i,j,2)  — ew variant 1 (B-grid normals)
+    # NOTE: FV3's es(:,:,1) is stored in our index 0, ew(:,:,2) in index 1
+    es_slice = es[:, offset:offset + n_p, offset + 1:offset + n_p, :, 1]  # (6, n_p, n_p-1, 3)
     ud = jnp.sum(ue * es_slice, axis=-1)  # (6, n_p, n_p-1)
 
-    # vd = ve . ew_ext (east-west edge tangent for v/D-grid)
-    ew_slice = ew[:, offset + 1:offset + n_p, offset:offset + n_p, :]  # (6, n_p-1, n_p, 3)
+    # vd = ve . ew_ext (A-grid normal variant)
+    ew_slice = ew[:, offset + 1:offset + n_p, offset:offset + n_p, :, 0]  # (6, n_p-1, n_p, 3)
     vd = jnp.sum(ve * ew_slice, axis=-1)  # (6, n_p-1, n_p)
 
     return ud, vd
