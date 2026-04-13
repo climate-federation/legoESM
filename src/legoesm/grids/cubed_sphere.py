@@ -271,13 +271,16 @@ def create_cubed_sphere(
     sin_angle_padded_h2_val = jnp.sin(angle_padded_h2)
     halo_offsets_h2 = compute_halo_interp_offsets_h2(n)
 
-    # Optional: Duo-Grid kinked-to-extended remapping data
+    # Optional: Duo-Grid kinked-to-extended remapping data.
+    # Duo-Grid requires n >= 2 (at least 2 cells per face edge for a
+    # meaningful halo stencil).  For n=1, silently skip — a single cell
+    # per face has no interior/halo distinction.
     duogrid = None
-    if use_duogrid:
+    if use_duogrid and n >= 2:
         from legoesm.grids.duogrid import create_duogrid_data
         # Default ng: min(3, n//2) — FV3 uses 3 at production resolutions,
         # but small test grids need a smaller halo to fit the stencil.
-        ng = duogrid_ng if duogrid_ng is not None else min(3, max(n // 2, 1))
+        ng = duogrid_ng if duogrid_ng is not None else min(3, n // 2)
         duogrid = create_duogrid_data(n, radius=radius, ng=ng,
                                        k2e_nord=k2e_nord)
 
