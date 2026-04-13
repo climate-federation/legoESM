@@ -65,12 +65,99 @@ _C3 = 5.0 / 14.0
 # d2a2c_vect: D-grid → A-grid → C-grid (FV3 covariant convention)
 # ==============================================================================
 
+def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
+    """FV3 D→A→C with Duo-Grid: 4th-order everywhere, no edge specials.
+
+    When the Duo-Grid is active, halo data has been remapped to the
+    extended grid, so stencils are smooth across face boundaries.  This
+    matches the ``gridstruct%dg%is_initialized`` branch in FV3
+    ``sw_core.F90:3419-3704``:
+    - 4th-order D→A for the full domain except outermost halo rows
+    - 4th-order A→C for all C-grid positions
+    - ALL corner fixes and edge specials SKIPPED
+    - NO ``sin_sg`` upwinding at face boundaries
+    """
+    n = cdgrid.n
+    h = 2  # halo depth for smooth 4th-order stencil coverage
+    grid = cdgrid.base
+    dg = grid.duogrid
+
+    # ---- Step 1: D-grid → covariant cell centres (utmp, vtmp) ----
+    # 2nd-order base
+    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
+    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
+    # 4th-order interior: covers all cells except the outermost 1 on each
+    # side (FV3 uses 4th-order for jsd+1:jed-1 with ng=4 halo).
+    if n >= 4:
+        u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
+              + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
+        utmp = utmp.at[:, :, 1:n - 1].set(u4)
+        v4 = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
+              + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
+        vtmp = vtmp.at[:, 1:n - 1, :].set(v4)
+
+    # ---- Step 2: Halo-exchange with halo=2 + Duo-Grid remap ----
+    offsets_h2 = None if dg is not None else grid.halo_interp_offsets_h2
+    utmp_pad, vtmp_pad = pad_halo_vector(
+        utmp, vtmp,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+        interp_offsets=offsets_h2,
+        halo=h,
+        duogrid=dg,
+    )  # each (6, n+4, n+4)
+
+    # ---- Step 3: Contravariant at cell centres over FULL padded domain ----
+    # FV3 ref: sw_core.F90:3449-3454 — compute ua/va for isd:ied, jsd:jed
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+
+    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
+    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
+
+    ua = ua_pad[:, h:-h, h:-h]  # (6, n, n)
+    va = va_pad[:, h:-h, h:-h]
+
+    # ---- Step 4a: A→C x-direction — 4th-order EVERYWHERE ----
+    # FV3 ref: sw_core.F90:3557-3563 with ifirst=is-1, ilast=ie+2
+    # (no clamping because dg%is_initialized)
+    # With halo=2: utmp_pad indices 0..n+3, 4th-order uc needs utmp at
+    # [i, i+1, i+2, i+3] → covers uc indices 0..n (all n+1 C-grid positions)
+    uc_4th = (_A2 * (utmp_pad[:, :-3, h:-h] + utmp_pad[:, 3:, h:-h])
+              + _A1 * (utmp_pad[:, 1:-2, h:-h] + utmp_pad[:, 2:-1, h:-h]))
+    # uc_4th has shape (6, n+1, n) — exactly the C-grid u-positions
+    uc = uc_4th
+
+    # Contravariant ut from covariant uc
+    cosa_u = cdgrid.cosa_u
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
+    ut = (uc - v_d * cosa_u) / jnp.maximum(sina_u, _EPS)
+
+    # ---- Step 4b: A→C y-direction — 4th-order EVERYWHERE ----
+    vc_4th = (_A2 * (vtmp_pad[:, h:-h, :-3] + vtmp_pad[:, h:-h, 3:])
+              + _A1 * (vtmp_pad[:, h:-h, 1:-2] + vtmp_pad[:, h:-h, 2:-1]))
+    vc = vc_4th
+
+    cosa_v = cdgrid.cosa_v
+    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
+    vt = (vc - u_d * cosa_v) / jnp.maximum(sina_v, _EPS)
+
+    return ua, va, uc, vc, ut, vt
+
+
 def _d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid vector conversion.
 
     Adapted from GFDL sw_core.F90 d2a2c_vect.  Returns C-grid
     velocities in FV3's COVARIANT convention (uc = interpolated covariant
     utmp, NOT the physical face-normal velocity).
+
+    When the Duo-Grid is active on the base grid, dispatches to the
+    FV3-faithful Duo-Grid path (``_d2a2c_vect_duogrid``) which uses
+    4th-order interpolation everywhere and skips all edge/corner specials.
+    This matches the ``dg%is_initialized`` branch in FV3 sw_core.F90.
 
     Parameters
     ----------
@@ -86,6 +173,10 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     ut : (6, n+1, n) C-grid contravariant u (transport)
     vt : (6, n, n+1) C-grid contravariant v (transport)
     """
+    # Dispatch to Duo-Grid path when active (FV3 sw_core.F90:3419)
+    if cdgrid.base.duogrid is not None:
+        return _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
     n = cdgrid.n
     npt = min(4, n // 2)
 

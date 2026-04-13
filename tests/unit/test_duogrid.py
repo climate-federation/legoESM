@@ -378,3 +378,143 @@ class TestFactory:
         flat, treedef = jax.tree_util.tree_flatten(dg)
         restored = treedef.unflatten(flat)
         assert restored.n == dg.n
+
+    def test_create_duogrid_data_ng4(self):
+        """Factory should accept ng=4 (FV3 default Duo-Grid halo width)."""
+        dg = create_duogrid_data(8, ng=4, k2e_nord=2)
+        assert dg.ng == 4
+        assert dg.k2e_coef.shape == (6, 4, 4, 8, 4)
+        assert dg.ext_lon.shape == (6, 16, 16)
+
+    def test_corner_lagrange_coefs_present(self):
+        """Factory should produce corner Lagrange coefficients."""
+        dg = create_duogrid_data(8, ng=3, k2e_nord=2)
+        assert dg.corner_xp is not None
+        assert dg.corner_xm is not None
+        assert dg.corner_yp is not None
+        assert dg.corner_ym is not None
+        n_ext = 8 + 2 * 3
+        assert dg.corner_xp.shape == (6, 4, n_ext, n_ext)
+
+
+# =========================================================================
+# T6: FV3-faithful d2a2c_vect Duo-Grid branch
+# =========================================================================
+
+class TestD2A2CVectDuoGrid:
+    """Tests for the d2a2c_vect Duo-Grid branch (Phase 1 of FV3 faithfulness)."""
+
+    def _make_grid(self, n, use_duogrid):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        grid = create_cubed_sphere(n, use_duogrid=use_duogrid, k2e_nord=2,
+                                    duogrid_ng=3)
+        return create_cubed_sphere_cdgrid(grid)
+
+    def test_duogrid_branch_dispatches(self):
+        """When duogrid is active, _d2a2c_vect should use the duogrid path."""
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        n = 8
+        cdgrid = self._make_grid(n, use_duogrid=True)
+        assert cdgrid.base.duogrid is not None
+
+        u_d = jnp.ones((6, n, n + 1))
+        v_d = jnp.ones((6, n + 1, n))
+        ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        assert ua.shape == (6, n, n)
+        assert uc.shape == (6, n + 1, n)
+        assert vc.shape == (6, n, n + 1)
+        assert jnp.all(jnp.isfinite(ua))
+        assert jnp.all(jnp.isfinite(uc))
+        assert jnp.all(jnp.isfinite(vc))
+
+    def test_uniform_field_zero_divergence(self):
+        """Uniform D-grid winds should produce near-zero divergence."""
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        n = 8
+        cdgrid = self._make_grid(n, use_duogrid=True)
+
+        u_d = jnp.zeros((6, n, n + 1))
+        v_d = jnp.zeros((6, n + 1, n))
+        ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        np.testing.assert_allclose(ua, 0.0, atol=1e-12)
+        np.testing.assert_allclose(va, 0.0, atol=1e-12)
+        np.testing.assert_allclose(uc, 0.0, atol=1e-12)
+        np.testing.assert_allclose(vc, 0.0, atol=1e-12)
+
+    def test_non_duogrid_unchanged(self):
+        """Without duogrid, _d2a2c_vect should use the legacy edge-special path."""
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+        n = 8
+        cdgrid = self._make_grid(n, use_duogrid=False)
+        assert cdgrid.base.duogrid is None
+
+        u_d = jnp.ones((6, n, n + 1))
+        v_d = jnp.ones((6, n + 1, n))
+        ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        assert ua.shape == (6, n, n)
+        assert jnp.all(jnp.isfinite(ua))
+
+
+# =========================================================================
+# T7: Lagrange corner fill correctness
+# =========================================================================
+
+class TestLagrangeCornerFill:
+    """Tests for the FV3-faithful Lagrange corner fill."""
+
+    def test_constant_preserved(self):
+        """Constant field should be exactly preserved by Lagrange corner fill."""
+        dg = create_duogrid_data(8, ng=3, k2e_nord=2)
+        halo = 3
+        n_p = 8 + 2 * halo
+        padded = jnp.full((6, n_p, n_p), 7.0)
+        result = fill_corner_region(padded, dg, halo)
+        np.testing.assert_allclose(result, 7.0, atol=1e-10)
+
+    def test_corners_filled_nonzero(self):
+        """After Lagrange fill, all corner cells should be populated."""
+        dg = create_duogrid_data(8, ng=3, k2e_nord=2)
+        halo = 3
+        n_p = 8 + 2 * halo
+        # Set interior and edges to 1.0, corners to 0.0
+        padded = jnp.zeros((6, n_p, n_p))
+        padded = padded.at[:, halo:n_p - halo, :].set(1.0)
+        padded = padded.at[:, :, halo:n_p - halo].set(1.0)
+        result = fill_corner_region(padded, dg, halo)
+        for f in range(6):
+            for ci in range(halo):
+                for cj in range(halo):
+                    assert result[f, ci, cj] != 0.0, \
+                        f"SW corner ({ci},{cj}) face {f} not filled"
+                    assert result[f, n_p - 1 - ci, cj] != 0.0
+                    assert result[f, ci, n_p - 1 - cj] != 0.0
+                    assert result[f, n_p - 1 - ci, n_p - 1 - cj] != 0.0
+
+    def test_ng4_works(self):
+        """ng=4 should work for both k2e and corner fill."""
+        dg = create_duogrid_data(8, ng=4, k2e_nord=2)
+        halo = 4
+        n_p = 8 + 2 * halo
+        padded = jnp.full((6, n_p, n_p), 3.0)
+        result = fill_corner_region(padded, dg, halo)
+        np.testing.assert_allclose(result, 3.0, atol=1e-10)
+
+    def test_halo_less_than_ng(self):
+        """Lagrange corner fill must work when halo < ng (runtime common case)."""
+        dg = create_duogrid_data(8, ng=3, k2e_nord=2)
+        # Runtime: pad_halo uses halo=2, but ng=3
+        halo = 2
+        n_p = 8 + 2 * halo
+        padded = jnp.full((6, n_p, n_p), 5.0)
+        result = fill_corner_region(padded, dg, halo)
+        np.testing.assert_allclose(result, 5.0, atol=1e-10)
+
+    def test_halo_1_with_ng3(self):
+        """halo=1, ng=3: smallest halo with non-trivial ng offset."""
+        dg = create_duogrid_data(8, ng=3, k2e_nord=2)
+        halo = 1
+        n_p = 8 + 2 * halo
+        padded = jnp.full((6, n_p, n_p), 2.0)
+        result = fill_corner_region(padded, dg, halo)
+        np.testing.assert_allclose(result, 2.0, atol=1e-10)

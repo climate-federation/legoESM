@@ -58,6 +58,19 @@ class DuoGridData(NamedTuple):
     ext_lon: jax.Array   # float64
     ext_lat: jax.Array   # float64
 
+    # --- Lagrange corner interpolation coefficients ---
+    # Precomputed 4th-order Lagrange polynomials for fill_corner_region.
+    # Following FV3 fv_duogrid.F90 compute_lagrange_coeff.
+    # xp: coefficients for X+ direction (east edge → NE/SE corners)
+    # xm: coefficients for X- direction (west edge → NW/SW corners)
+    # yp: coefficients for Y+ direction (north edge → NE/NW corners)
+    # ym: coefficients for Y- direction (south edge → SE/SW corners)
+    # Each: (6, interp_order+1, n_target, n_source_range) or None
+    corner_xp: jax.Array | None  # (6, 4, ng, n) or None
+    corner_xm: jax.Array | None
+    corner_yp: jax.Array | None
+    corner_ym: jax.Array | None
+
 
 # ============================================================================
 # Precompute: supergrid, kinked grid, coordinates, coefficients
@@ -337,6 +350,157 @@ def _compute_k2e_coefficients(n: int, ng: int, k2e_nord: int,
     return k2e_coef, k2e_lo
 
 
+def _great_circle_dist(lon1, lat1, lon2, lat2):
+    """Great-circle angular distance between two points."""
+    dlon = lon2 - lon1
+    sin_lat1, cos_lat1 = np.sin(lat1), np.cos(lat1)
+    sin_lat2, cos_lat2 = np.sin(lat2), np.cos(lat2)
+    tmp1 = (cos_lat2 * np.sin(dlon))**2 + (
+        cos_lat1 * sin_lat2 - sin_lat1 * cos_lat2 * np.cos(dlon))**2
+    tmp2 = sin_lat1 * sin_lat2 + cos_lat1 * cos_lat2 * np.cos(dlon)
+    return np.arctan2(np.sqrt(np.maximum(tmp1, 0.0)), tmp2)
+
+
+def _compute_corner_lagrange_coeff(n: int, ng: int, ext_lon, ext_lat):
+    """Compute 4th-order Lagrange corner interpolation coefficients.
+
+    Following FV3 fv_duogrid.F90 compute_lagrange_coeff and
+    lagrange_poly_interp_2d. Uses great-circle distance as the
+    interpolation metric (matching FV3).
+
+    For each corner cell (i, j) in the ng×ng corner region, precompute
+    Lagrange polynomial weights for X+, X-, Y+, Y- directions using the
+    last ``interporder+1`` interior cells along the corresponding edge.
+
+    Returns
+    -------
+    xp, xm, yp, ym : np.ndarray, shape (6, 4, ng_target, n_total)
+        Lagrange weights. For a given target halo cell and source point,
+        xp[face, src_idx, target_idx, :] gives the weight.
+        Actually stored as (6, interporder+1, ng_ext, n_padded) where
+        ng_ext covers the target positions and n_padded = n_source.
+
+    For simplicity and JAX compatibility, we store per-face coefficients as:
+        corner_xp[face, k, i_target] = Lagrange weight for source k at target i
+    Shape: (6, interp_order+1, ng) per edge-parallel strip position.
+    """
+    interp_order = 3  # FV3 default: interporder=3 → 4 stencil points
+    n_stencil = interp_order + 1  # 4
+
+    n_ext = n + 2 * ng
+
+    # For each face, compute weights for each direction and target position.
+    # FV3 uses great_circle_dist for the interpolation abscissae.
+    #
+    # X+ direction: interpolate from the last `n_stencil` interior cells
+    # along the east (high-i) edge into the halo at i > ng+n-1.
+    # X- direction: from the first cells along the west (low-i) edge.
+    # Y+ direction: from the last cells along the north (high-j) edge.
+    # Y- direction: from the first cells along the south (low-j) edge.
+
+    # Shapes: (6, n_stencil, ng, n_ext) — one weight per target position
+    # in the halo, for each source cell in the stencil, for each j along
+    # the edge, for each face.
+    # But since corner fill only needs ng×ng corner cells, and the j-index
+    # within the corner is either in the edge-halo or interior, we compute
+    # for all j positions that fill_corner_region will need.
+
+    # Simplified storage: for each face and direction, store (n_stencil, n_ext, n_ext)
+    # where only corner cells are populated. For JAX efficiency, store
+    # compact arrays: xp[face, stencil_k, target_j] for each target i in halo.
+    # FV3 stores xp(interporder+1, ie-interporder:ied+1, jsd:jed+1, 4_stagger)
+    # For istag=0, jstag=0 (A-grid): stagger index = 0*2 + 0 + 1 = 1
+
+    # We'll compute for A-grid stagger (istag=0, jstag=0) which is the
+    # primary case used by fill_corner_region in ext_scalar.
+
+    # For each direction, the source cells are the last/first n_stencil
+    # cells of the interior.  The target is each halo cell.
+
+    xp = np.zeros((6, n_stencil, n_ext, n_ext))
+    xm = np.zeros((6, n_stencil, n_ext, n_ext))
+    yp = np.zeros((6, n_stencil, n_ext, n_ext))
+    ym = np.zeros((6, n_stencil, n_ext, n_ext))
+
+    for face in range(6):
+        # Interior bounds in extended-grid coords
+        i_lo = ng           # first interior i
+        i_hi = ng + n - 1   # last interior i
+        j_lo = ng
+        j_hi = ng + n - 1
+
+        # ---- X+ direction (east side → NE/SE corners) ----
+        # Source cells: i = i_hi - interp_order .. i_hi (= ng+n-4 .. ng+n-1)
+        src_i_xp = list(range(i_hi - interp_order, i_hi + 1))
+        for j_tgt in range(n_ext):
+            # Reference point for distance: the target cell
+            for i_tgt in range(i_hi + 1, n_ext):
+                tgt_lon = ext_lon[face, i_tgt, j_tgt]
+                tgt_lat = ext_lat[face, i_tgt, j_tgt]
+                # Compute signed distances from each source to target
+                dists = np.zeros(n_stencil)
+                for k, si in enumerate(src_i_xp):
+                    dists[k] = _great_circle_dist(
+                        ext_lon[face, si, j_tgt], ext_lat[face, si, j_tgt],
+                        tgt_lon, tgt_lat)
+                    # Sign: positive if si < i_tgt (source is to the left)
+                    if si > i_tgt:
+                        dists[k] = -dists[k]
+                # Lagrange weights with signed distances
+                weights = _lagrange_coef(0.0, -dists)  # target at dist=0
+                xp[face, :, i_tgt, j_tgt] = weights
+
+        # ---- X- direction (west side → NW/SW corners) ----
+        src_i_xm = list(range(i_lo, i_lo + n_stencil))  # ng..ng+3
+        for j_tgt in range(n_ext):
+            for i_tgt in range(0, i_lo):
+                tgt_lon = ext_lon[face, i_tgt, j_tgt]
+                tgt_lat = ext_lat[face, i_tgt, j_tgt]
+                dists = np.zeros(n_stencil)
+                for k, si in enumerate(src_i_xm):
+                    dists[k] = _great_circle_dist(
+                        ext_lon[face, si, j_tgt], ext_lat[face, si, j_tgt],
+                        tgt_lon, tgt_lat)
+                    if si < i_tgt:
+                        dists[k] = -dists[k]
+                weights = _lagrange_coef(0.0, -dists)
+                xm[face, :, i_tgt, j_tgt] = weights
+
+        # ---- Y+ direction (north side → NE/NW corners) ----
+        src_j_yp = list(range(j_hi - interp_order, j_hi + 1))
+        for i_tgt in range(n_ext):
+            for j_tgt in range(j_hi + 1, n_ext):
+                tgt_lon = ext_lon[face, i_tgt, j_tgt]
+                tgt_lat = ext_lat[face, i_tgt, j_tgt]
+                dists = np.zeros(n_stencil)
+                for k, sj in enumerate(src_j_yp):
+                    dists[k] = _great_circle_dist(
+                        ext_lon[face, i_tgt, sj], ext_lat[face, i_tgt, sj],
+                        tgt_lon, tgt_lat)
+                    if sj > j_tgt:
+                        dists[k] = -dists[k]
+                weights = _lagrange_coef(0.0, -dists)
+                yp[face, :, i_tgt, j_tgt] = weights
+
+        # ---- Y- direction (south side → SE/SW corners) ----
+        src_j_ym = list(range(j_lo, j_lo + n_stencil))
+        for i_tgt in range(n_ext):
+            for j_tgt in range(0, j_lo):
+                tgt_lon = ext_lon[face, i_tgt, j_tgt]
+                tgt_lat = ext_lat[face, i_tgt, j_tgt]
+                dists = np.zeros(n_stencil)
+                for k, sj in enumerate(src_j_ym):
+                    dists[k] = _great_circle_dist(
+                        ext_lon[face, i_tgt, sj], ext_lat[face, i_tgt, sj],
+                        tgt_lon, tgt_lat)
+                    if sj < j_tgt:
+                        dists[k] = -dists[k]
+                weights = _lagrange_coef(0.0, -dists)
+                ym[face, :, i_tgt, j_tgt] = weights
+
+    return xp, xm, yp, ym
+
+
 # ============================================================================
 # Factory
 # ============================================================================
@@ -365,8 +529,8 @@ def create_duogrid_data(
     """
     if k2e_nord > MAX_K2E_NORD:
         raise ValueError(f"k2e_nord={k2e_nord} exceeds MAX_K2E_NORD={MAX_K2E_NORD}")
-    if ng not in (1, 2, 3):
-        raise ValueError(f"ng={ng} not supported, must be 1, 2, or 3")
+    if ng not in (1, 2, 3, 4):
+        raise ValueError(f"ng={ng} not supported, must be 1, 2, 3, or 4")
 
     # Step P1: Build extended grid
     ext_lon, ext_lat = _build_extended_grid(n, ng)
@@ -380,6 +544,9 @@ def create_duogrid_data(
     # Step P4: Compute k2e coefficients
     k2e_coef, k2e_lo = _compute_k2e_coefficients(n, ng, k2e_nord, ext_1d, kik_1d)
 
+    # Step P5: Compute Lagrange corner coefficients
+    xp, xm, yp, ym = _compute_corner_lagrange_coeff(n, ng, ext_lon, ext_lat)
+
     return DuoGridData(
         n=n,
         ng=ng,
@@ -388,6 +555,10 @@ def create_duogrid_data(
         k2e_lo=jnp.array(k2e_lo, dtype=jnp.int32),
         ext_lon=jnp.array(ext_lon, dtype=jnp.float64),
         ext_lat=jnp.array(ext_lat, dtype=jnp.float64),
+        corner_xp=jnp.array(xp, dtype=jnp.float64),
+        corner_xm=jnp.array(xm, dtype=jnp.float64),
+        corner_yp=jnp.array(yp, dtype=jnp.float64),
+        corner_ym=jnp.array(ym, dtype=jnp.float64),
     )
 
 
@@ -414,15 +585,16 @@ def cube_rmp_vectorized(
     # Cast coefficients to field dtype to avoid mixed-precision scatter warnings
     k2e_coef = duogrid.k2e_coef.astype(padded.dtype)  # (6, 4, ng, n, MAX_K2E_NORD)
     dst_idx = h + jnp.arange(n)
+    max_idx = n + 2 * h - 1  # maximum valid padded index
 
     for d in range(min(halo, duogrid.ng)):
         # South edge (edge=2): interpolate along axis 1 at fixed axis-2 row
         j_rc = h - 1 - d
         lo_s = k2e_lo[:, SOUTH, d, :]       # (6, n)
         coef_s = k2e_coef[:, SOUTH, d, :, :]  # (6, n, MAX)
-        src_s = h + jnp.clip(
-            lo_s[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :],
-            0, n - 1)  # (6, n, MAX)
+        src_s = jnp.clip(h + (
+            lo_s[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :]),
+            0, max_idx)  # (6, n, MAX)
         for f in range(6):
             vals = padded[f, src_s[f], j_rc]  # (n, MAX)
             remapped = jnp.sum(vals * coef_s[f], axis=-1)
@@ -432,9 +604,9 @@ def cube_rmp_vectorized(
         j_rc = h + n + d
         lo_n = k2e_lo[:, NORTH, d, :]
         coef_n = k2e_coef[:, NORTH, d, :, :]
-        src_n = h + jnp.clip(
-            lo_n[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :],
-            0, n - 1)
+        src_n = jnp.clip(h + (
+            lo_n[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :]),
+            0, max_idx)
         for f in range(6):
             vals = padded[f, src_n[f], j_rc]
             remapped = jnp.sum(vals * coef_n[f], axis=-1)
@@ -444,9 +616,9 @@ def cube_rmp_vectorized(
         i_rc = h - 1 - d
         lo_w = k2e_lo[:, WEST, d, :]
         coef_w = k2e_coef[:, WEST, d, :, :]
-        src_w = h + jnp.clip(
-            lo_w[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :],
-            0, n - 1)
+        src_w = jnp.clip(h + (
+            lo_w[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :]),
+            0, max_idx)
         for f in range(6):
             vals = padded[f, i_rc, src_w[f]]
             remapped = jnp.sum(vals * coef_w[f], axis=-1)
@@ -456,9 +628,9 @@ def cube_rmp_vectorized(
         i_rc = h + n + d
         lo_e = k2e_lo[:, EAST, d, :]
         coef_e = k2e_coef[:, EAST, d, :, :]
-        src_e = h + jnp.clip(
-            lo_e[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :],
-            0, n - 1)
+        src_e = jnp.clip(h + (
+            lo_e[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :]),
+            0, max_idx)
         for f in range(6):
             vals = padded[f, i_rc, src_e[f]]
             remapped = jnp.sum(vals * coef_e[f], axis=-1)
@@ -467,72 +639,207 @@ def cube_rmp_vectorized(
     return padded
 
 
+def _lagrange_interp_x_plus(padded, xp_coefs, i_e, j_e, j_p, n, h):
+    """Lagrange interpolation in the X+ direction (from east interior).
+
+    Source stencil: last 4 interior cells along i in padded coordinates.
+    Coefficient lookup uses extended-grid indices (i_e, j_e).
+    Padded array access uses padded index j_p.
+    """
+    i_hi_pad = h + n - 1  # last interior index in PADDED coords
+    src_i = jnp.arange(i_hi_pad - 3, i_hi_pad + 1)  # 4 source cells
+    vals = padded[:, src_i, j_p]  # (6, 4)
+    weights = xp_coefs[:, :, i_e, j_e]  # (6, 4) — lookup in extended coords
+    return jnp.sum(vals * weights, axis=1)  # (6,)
+
+
+def _lagrange_interp_x_minus(padded, xm_coefs, i_e, j_e, j_p, n, h):
+    """Lagrange interpolation in the X- direction (from west interior)."""
+    i_lo_pad = h  # first interior index in PADDED coords
+    src_i = jnp.arange(i_lo_pad, i_lo_pad + 4)
+    vals = padded[:, src_i, j_p]  # (6, 4)
+    weights = xm_coefs[:, :, i_e, j_e]
+    return jnp.sum(vals * weights, axis=1)
+
+
+def _lagrange_interp_y_plus(padded, yp_coefs, i_e, j_e, i_p, n, h):
+    """Lagrange interpolation in the Y+ direction (from north interior)."""
+    j_hi_pad = h + n - 1
+    src_j = jnp.arange(j_hi_pad - 3, j_hi_pad + 1)
+    vals = padded[:, i_p, src_j]  # (6, 4)
+    weights = yp_coefs[:, :, i_e, j_e]
+    return jnp.sum(vals * weights, axis=1)
+
+
+def _lagrange_interp_y_minus(padded, ym_coefs, i_e, j_e, i_p, n, h):
+    """Lagrange interpolation in the Y- direction (from south interior)."""
+    j_lo_pad = h
+    src_j = jnp.arange(j_lo_pad, j_lo_pad + 4)
+    vals = padded[:, i_p, src_j]  # (6, 4)
+    weights = ym_coefs[:, :, i_e, j_e]
+    return jnp.sum(vals * weights, axis=1)
+
+
 def fill_corner_region(
     padded: jax.Array,
     duogrid: DuoGridData,
     halo: int,
 ) -> jax.Array:
-    """Fill h×h corner blocks by averaging adjacent edge halo values.
+    """Fill corner blocks using FV3 Lagrange polynomial interpolation.
 
-    Each corner cell is the average of its two neighbors one step closer
-    to the interior (one from the i-direction edge strip, one from the
-    j-direction edge strip or a previously filled corner cell).
+    Following FV3 fv_duogrid.F90 fill_corner_region_2d:
+    - Non-diagonal corner cells are filled first via single-direction
+      Lagrange interpolation (X+ or Y+ or X- or Y-)
+    - Diagonal corner cells are filled as the average of X-direction and
+      Y-direction Lagrange interpolations
 
-    Fills inside-out along anti-diagonals: cells with the largest sum of
-    relative coordinates (closest to interior) are filled first, ensuring
-    each cell's dependencies are satisfied before it is computed.
-
-    This matches the existing _fill_corners_h1/_fill_corners_h2 behavior
-    and generalizes to arbitrary halo width.
+    Falls back to simple averaging when Lagrange coefficients are not
+    available (corner_xp is None).
     """
     n = duogrid.n
+    ng = duogrid.ng
     h = halo
-    n_p = n + 2 * h
 
     if h == 0:
         return padded
 
-    # Process anti-diagonals from interior outward.
-    # For relative corner coordinates (ci, cj) ∈ [0, h-1]², the inner
-    # diagonal has ci + cj = 2*(h-1), the outer corner has ci + cj = 0.
+    # Fall back to averaging if no corner coefficients
+    if getattr(duogrid, 'corner_xp', None) is None:
+        return _fill_corner_region_averaging(padded, duogrid, halo)
+
+    xp = duogrid.corner_xp.astype(padded.dtype)
+    xm = duogrid.corner_xm.astype(padded.dtype)
+    yp = duogrid.corner_yp.astype(padded.dtype)
+    ym = duogrid.corner_ym.astype(padded.dtype)
+
+    # Map from padded coordinates to extended-grid coordinates.
+    # padded has shape (6, n+2*halo, n+2*halo).
+    # If halo == ng, padded indices map 1:1 to extended grid indices.
+    # If halo < ng, we need to offset. The halo cells in padded correspond
+    # to the inner ng-halo..ng-1 halo cells of the extended grid.
+    offset = ng - h  # extended_idx = padded_idx + offset
+
+    # Interior bounds in padded coords
+    ie = h + n - 1  # last interior i in padded
+    je = h + n - 1  # last interior j in padded
+
+    # Following FV3 fill_corner_region_2d pattern for each corner.
+    # NE corner: cells at (ie+1..ie+h, je+1..je+h)
+    for d1 in range(1, h + 1):
+        for d2 in range(1, h + 1):
+            i_p = ie + d1  # padded i
+            j_p = je + d2  # padded j
+            i_e = i_p + offset  # extended grid i
+            j_e = j_p + offset
+
+            if d1 == d2:
+                # Diagonal: average of X+ and Y+
+                val_x = _lagrange_interp_x_plus(padded, xp, i_e, j_e, j_p, n, h)
+                val_y = _lagrange_interp_y_plus(padded, yp, i_e, j_e, i_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
+            elif d2 > d1:
+                # Above diagonal: use X+ (interpolate from east edge)
+                val = _lagrange_interp_x_plus(padded, xp, i_e, j_e, j_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(val)
+            else:
+                # Below diagonal: use Y+ (interpolate from north edge)
+                val = _lagrange_interp_y_plus(padded, yp, i_e, j_e, i_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(val)
+
+    # NW corner: cells at (0..h-1, je+1..je+h)
+    for d1 in range(1, h + 1):
+        for d2 in range(1, h + 1):
+            i_p = h - d1  # padded i (from west edge)
+            j_p = je + d2
+            i_e = i_p + offset
+            j_e = j_p + offset
+
+            if d1 == d2:
+                val_x = _lagrange_interp_x_minus(padded, xm, i_e, j_e, j_p, n, h)
+                val_y = _lagrange_interp_y_plus(padded, yp, i_e, j_e, i_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
+            elif d2 > d1:
+                val = _lagrange_interp_x_minus(padded, xm, i_e, j_e, j_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(val)
+            else:
+                val = _lagrange_interp_y_plus(padded, yp, i_e, j_e, i_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(val)
+
+    # SE corner: cells at (ie+1..ie+h, 0..h-1)
+    for d1 in range(1, h + 1):
+        for d2 in range(1, h + 1):
+            i_p = ie + d1
+            j_p = h - d2  # from south edge
+            i_e = i_p + offset
+            j_e = j_p + offset
+
+            if d1 == d2:
+                val_x = _lagrange_interp_x_plus(padded, xp, i_e, j_e, j_p, n, h)
+                val_y = _lagrange_interp_y_minus(padded, ym, i_e, j_e, i_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
+            elif d2 > d1:
+                val = _lagrange_interp_x_plus(padded, xp, i_e, j_e, j_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(val)
+            else:
+                val = _lagrange_interp_y_minus(padded, ym, i_e, j_e, i_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(val)
+
+    # SW corner: cells at (0..h-1, 0..h-1)
+    for d1 in range(1, h + 1):
+        for d2 in range(1, h + 1):
+            i_p = h - d1
+            j_p = h - d2
+            i_e = i_p + offset
+            j_e = j_p + offset
+
+            if d1 == d2:
+                val_x = _lagrange_interp_x_minus(padded, xm, i_e, j_e, j_p, n, h)
+                val_y = _lagrange_interp_y_minus(padded, ym, i_e, j_e, i_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
+            elif d2 > d1:
+                val = _lagrange_interp_x_minus(padded, xm, i_e, j_e, j_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(val)
+            else:
+                val = _lagrange_interp_y_minus(padded, ym, i_e, j_e, i_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(val)
+
+    return padded
+
+
+def _fill_corner_region_averaging(
+    padded: jax.Array,
+    duogrid: DuoGridData,
+    halo: int,
+) -> jax.Array:
+    """Fill corner blocks by averaging adjacent edge halo values (fallback)."""
+    n = duogrid.n
+    h = halo
+    n_p = n + 2 * h
+
     for s in range(2 * (h - 1), -1, -1):
         for ci in range(h):
             cj = s - ci
             if cj < 0 or cj >= h:
                 continue
-
-            # --- SW corner (low-i, low-j) ---
-            # Neighbor toward interior: (ci+1, cj) and (ci, cj+1)
-            # When ci+1 == h or cj+1 == h, the neighbor is an edge cell.
             ni_sw = min(ci + 1, h)
             nj_sw = min(cj + 1, h)
             padded = padded.at[:, ci, cj].set(
-                0.5 * (padded[:, ni_sw, cj] + padded[:, ci, nj_sw])
-            )
-
-            # --- SE corner (high-i, low-j) ---
+                0.5 * (padded[:, ni_sw, cj] + padded[:, ci, nj_sw]))
             i_se = n_p - 1 - ci
-            ni_se = n_p - 1 - min(ci + 1, h)  # toward interior = i - 1
+            ni_se = n_p - 1 - min(ci + 1, h)
             nj_se = min(cj + 1, h)
             padded = padded.at[:, i_se, cj].set(
-                0.5 * (padded[:, ni_se, cj] + padded[:, i_se, nj_se])
-            )
-
-            # --- NW corner (low-i, high-j) ---
+                0.5 * (padded[:, ni_se, cj] + padded[:, i_se, nj_se]))
             j_nw = n_p - 1 - cj
             ni_nw = min(ci + 1, h)
-            nj_nw = n_p - 1 - min(cj + 1, h)  # toward interior = j - 1
+            nj_nw = n_p - 1 - min(cj + 1, h)
             padded = padded.at[:, ci, j_nw].set(
-                0.5 * (padded[:, ni_nw, j_nw] + padded[:, ci, nj_nw])
-            )
-
-            # --- NE corner (high-i, high-j) ---
+                0.5 * (padded[:, ni_nw, j_nw] + padded[:, ci, nj_nw]))
             i_ne = n_p - 1 - ci
             j_ne = n_p - 1 - cj
             ni_ne = n_p - 1 - min(ci + 1, h)
             nj_ne = n_p - 1 - min(cj + 1, h)
             padded = padded.at[:, i_ne, j_ne].set(
-                0.5 * (padded[:, ni_ne, j_ne] + padded[:, i_ne, nj_ne])
-            )
+                0.5 * (padded[:, ni_ne, j_ne] + padded[:, i_ne, nj_ne]))
 
     return padded
