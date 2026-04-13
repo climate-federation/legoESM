@@ -212,9 +212,9 @@ def _step_multilayer_land_impl(
         TgC_override = state.TgC
 
         # Phase 6 / Stage 2b: prognostic LAI feedback.  When
-        # ``use_prognostic_lai`` (default) and differland carbon is
-        # active, LAI = C_fol / LCMA takes precedence over any
-        # prescribed ``CanopyLandParams.LAI``.
+        # ``use_prognostic_lai`` (opt-in; off by default) and
+        # differland carbon is active, LAI = C_fol / LCMA takes
+        # precedence over any prescribed ``CanopyLandParams.LAI``.
         LAI_override = compute_prognostic_lai(
             carbon_state, config, config.surface_scheme)
 

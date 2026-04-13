@@ -99,13 +99,17 @@ class CanopyConfig(NamedTuple):
     # Python string via functools.partial — never traced.
     stomatal_model: str = "ball_berry"      # "ball_berry" | "medlyn"
     use_ta_for_photosynthesis: bool = False  # use Ta (True) or Tf (False) for photosynthesis
-    # Prognostic LAI feedback (Phase 6 / Stage 2b).  When True (default)
-    # and the carbon cycle is active with ``scheme="differland"``, the
-    # canopy's LAI is recomputed each step from ``C_fol / LCMA``,
-    # bypassing any prescribed ``CanopyLandParams.LAI``.  Set to False
-    # to freeze LAI at its prescribed value (useful for validation
-    # studies against external LAI observations).
-    use_prognostic_lai: bool = True
+    # Prognostic LAI feedback (Phase 6 / Stage 2b).  When True and the
+    # carbon cycle is active with ``scheme="differland"``, the canopy's
+    # LAI is recomputed each step from ``C_fol / LCMA``, bypassing any
+    # prescribed ``CanopyLandParams.LAI``.  **Defaults to False** until
+    # the reverse-mode ``jax.grad`` NaN through the ``C_fol → LAI →
+    # canopy Newton`` feedback loop is resolved (see ``monin_obukhov_
+    # stability`` custom-VJP follow-up).  Forward pass and non-feedback
+    # gradient paths are unaffected by this default — enable explicitly
+    # for coupled carbon ↔ canopy runs that do not require ``jax.grad``
+    # through the feedback loop.
+    use_prognostic_lai: bool = False
 
     # NOTE: The former ``G_alpha`` tunable (G = G_alpha · Rn_soil) has been
     # removed.  Ground heat flux is now diagnosed as the surface energy

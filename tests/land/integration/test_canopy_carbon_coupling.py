@@ -87,8 +87,12 @@ def _canopy_params(ncol: int, Vc3: float = 60.0) -> CanopyLandParams:
 
 
 def _make_canopy_carbon_cfg() -> MultiLayerLandConfig:
+    # use_prognostic_lai defaults to False (jax.grad through the
+    # feedback loop is NaN-prone until the MOST custom-VJP lands);
+    # the tests in this file exercise the prognostic path on purpose.
     return MultiLayerLandConfig(
-        surface_scheme=TwoLeafCanopyConfig(max_iters=30),
+        surface_scheme=TwoLeafCanopyConfig(
+            max_iters=30, use_prognostic_lai=True),
         carbon=CarbonConfig(scheme="differland"),
     )
 
@@ -443,11 +447,13 @@ def test_prognostic_lai_responds_to_c_fol_changes():
     ncol = 2
     forcing = _make_forcing(ncol, sw_down=700.0, cos_zenith=0.8)
     cfg_low = MultiLayerLandConfig(
-        surface_scheme=TwoLeafCanopyConfig(max_iters=30),
+        surface_scheme=TwoLeafCanopyConfig(
+            max_iters=30, use_prognostic_lai=True),
         carbon=CarbonConfig(scheme="differland", C_fol_init=100.0),
     )
     cfg_high = MultiLayerLandConfig(
-        surface_scheme=TwoLeafCanopyConfig(max_iters=30),
+        surface_scheme=TwoLeafCanopyConfig(
+            max_iters=30, use_prognostic_lai=True),
         carbon=CarbonConfig(scheme="differland", C_fol_init=400.0),
     )
 
@@ -513,7 +519,7 @@ def test_prognostic_lai_preserves_grad_wrt_vcmax():
     generic canopy gradient path.
     """
     ncol = 2
-    cfg = _make_canopy_carbon_cfg()  # prognostic LAI is on by default
+    cfg = _make_canopy_carbon_cfg()  # fixture enables prognostic LAI
     state = init_multilayer_land_state(ncol, cfg, T_init=290.0, TgC_init=20.0)
     carbon = init_carbon_state((ncol,), cfg.carbon)
     forcing = _make_forcing(ncol, sw_down=700.0, cos_zenith=0.8)

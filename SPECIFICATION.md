@@ -1260,6 +1260,7 @@ Both soil models include the snow budget and dynamic albedo via `surface_albedo.
 | **Carbon cycle** | `"none"` (default) \| `"differland"` \| `"seasonal"` | `CarbonConfig.scheme` | `"differland"` requires a `CarbonState` passed into the step function; `"seasonal"` returns a prescribed sinusoid; `"none"` returns `co2_flux = 0` |
 | **GPP source for carbon cycle** | canopy Farquhar (via `gpp_override`) \| SimpleSEB coupled Newton Farquhar \| LUE fallback | Automatic: `surface_out.gpp` when populated, else `compute_effective_beta` re-derives on post-step state | Coupled canopy path always wins when both the canopy surface scheme AND carbon are enabled |
 | **TgC growth temperature** | state-carried 30-day EMA \| `CanopyLandParams.TgC` (prescribed) \| instantaneous fallback | `state.TgC` > `land_params.TgC` > `forcing.T_lowest - 273.15` | EMA opt-in via `init_*_land_state(..., TgC_init=value)`; advances each step via `advance_TgC_ema(TgC, T_air, dt)` in `surface_scheme/two_leaf_canopy.py` |
+| **LAI feedback** (canopy only) | prescribed (default) \| prognostic `C_fol / LCMA` (opt-in) | `TwoLeafCanopyConfig.use_prognostic_lai: bool = False` | When `True` **and** `CarbonConfig.scheme == "differland"`, `compute_prognostic_lai` overrides `CanopyLandParams.LAI` with the foliar carbon pool divided by leaf carbon mass per area. Forward pass is fully differentiable; `jax.grad` through the full `C_fol → LAI → canopy Newton` loop currently NaNs in the MOST scan (xfail tracked in `test_prognostic_lai_jax_grad_through_feedback`), which is why the flag defaults to off until the `monin_obukhov_stability` custom-VJP follow-up lands |
 | **Soil retention curve** (multilayer only) | van Genuchten (default) \| Clapp-Hornberger \| Brooks-Corey \| Campbell \| PDI \| Lu | `SoilHydraulicsConfig.retention_curve` | Six options, all analytically differentiable |
 | **Bulk flux scheme** (SimpleSEB only) | `"constant"` (default) \| `"most"` \| `"coare3"` \| `"large_yeager"` | `LandConfig.bulk_scheme` / `MultiLayerLandConfig.bulk_scheme` | Constant-coefficient is fastest; MOST iterates stability internally |
 | **Snow-albedo feedback** | on \| off | `config.snow_albedo_feedback: bool` | Requires `lat` argument when enabled |
@@ -1398,7 +1399,7 @@ All three models live in a single module and are used by both the canopy and the
 #### 4.3.9 Future Phases
 
 **Remaining:**
-- Prognostic LAI from `C_fol / LCMA` feedback into the canopy (Phase 6 / Stage 2b)
+- Reverse-mode `jax.grad` through the prognostic LAI feedback loop — implemented (`TwoLeafCanopyConfig.use_prognostic_lai`, Phase 6 / Stage 2b) and forward-pass-differentiable, but `jax.grad` through the full `C_fol → LAI → canopy Newton → surface fluxes` chain NaNs in the MOST stability scan. The flag defaults to `False` until a `monin_obukhov_stability` custom-VJP follow-up routes reverse mode through forward-mode JVPs.
 - Fire / `burned_area` module (port from DifferLand DALEC993)
 - SIF / VOD diagnostic outputs
 - Per-biome `T_ref` climatology for heterotrophic Q10 baseline

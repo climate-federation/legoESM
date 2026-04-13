@@ -78,7 +78,9 @@ def compute_prognostic_lai(
 
     Returns ``carbon_state.C_fol / LCMA`` when all three conditions hold:
 
-    1. ``canopy_config.use_prognostic_lai`` is True (default).
+    1. ``canopy_config.use_prognostic_lai`` is True (opt-in; defaults
+       to False until the reverse-mode NaN through the MOST scan is
+       resolved — see ``monin_obukhov_stability`` follow-up).
     2. ``land_config.carbon.scheme == "differland"``.
     3. ``carbon_state is not None``.
 
@@ -96,9 +98,12 @@ def compute_prognostic_lai(
       simple allometric mapping from the wood pool to canopy height,
       and the canopy closure is much less sensitive to ``hc`` than
       to ``LAI``.
-    - The feedback is fully differentiable: ``dLAI / dC_fol = 1 / LCMA``.
+    - The forward pass is fully differentiable wrt ``C_fol`` (``dLAI /
+      dC_fol = 1 / LCMA``); however ``jax.grad`` through the full
+      ``C_fol → LAI → canopy Newton`` loop currently NaNs in the MOST
+      scan (tracked in the Phase 6 xfail).
     """
-    if not getattr(canopy_config, "use_prognostic_lai", True):
+    if not getattr(canopy_config, "use_prognostic_lai", False):
         return None
     if carbon_state is None:
         return None
