@@ -204,7 +204,7 @@ def create_cubed_sphere(
     dtype=None,
     use_duogrid: bool = False,
     k2e_nord: int = 2,
-    duogrid_ng: int = 3,
+    duogrid_ng: int | None = None,
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -275,7 +275,10 @@ def create_cubed_sphere(
     duogrid = None
     if use_duogrid:
         from legoesm.grids.duogrid import create_duogrid_data
-        duogrid = create_duogrid_data(n, radius=radius, ng=duogrid_ng,
+        # Default ng: min(3, n//2) — FV3 uses 3 at production resolutions,
+        # but small test grids need a smaller halo to fit the stencil.
+        ng = duogrid_ng if duogrid_ng is not None else min(3, max(n // 2, 1))
+        duogrid = create_duogrid_data(n, radius=radius, ng=ng,
                                        k2e_nord=k2e_nord)
 
     # Grid arrays use the storage dtype from the precision policy.
