@@ -1104,7 +1104,7 @@ def pad_halo_dgrid(
             src = u_east_ud[nbr_f, :, 1]
             src_v = v_north_ud[nbr_f, :, 1]
         elif nbr_e == NORTH:
-            src = u_east_ud[nbr_f, :, -1]
+            src = u_east_ud[nbr_f, :, -2]
             src_v = v_north_ud[nbr_f, :, -2]
         elif nbr_e == WEST:
             src = u_east_vd[nbr_f, 1, :]
@@ -1129,7 +1129,7 @@ def pad_halo_dgrid(
             src = u_east_vd[nbr_f, 1, :]
             src_v = v_north_vd[nbr_f, 1, :]
         elif nbr_e == NORTH:
-            src = u_east_ud[nbr_f, :, -1]
+            src = u_east_ud[nbr_f, :, -2]
             src_v = v_north_ud[nbr_f, :, -2]
         else:  # SOUTH
             src = u_east_ud[nbr_f, :, 1]
@@ -1153,7 +1153,7 @@ def pad_halo_dgrid(
             src = u_east_ud[nbr_f, :, 1]
             src_v = v_north_ud[nbr_f, :, 1]
         else:  # NORTH
-            src = u_east_ud[nbr_f, :, -1]
+            src = u_east_ud[nbr_f, :, -2]
             src_v = v_north_ud[nbr_f, :, -2]
         if rev:
             src = src[::-1]

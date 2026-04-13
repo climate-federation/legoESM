@@ -106,44 +106,17 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
               + _A1 * (v_d_ext[:, 1:-2, :] + v_d_ext[:, 2:-1, :]))
         vtmp = vtmp.at[:, :, :].set(v4)
 
-    # ---- Step 2: Halo-exchange via ext_vector pipeline ----
-    # FV3 exchanges D-grid winds via ext_vector BEFORE d2a2c_vect.
-    # We use ext_vector_dgrid: metric-aware c2l → scalar remap with
-    # cube_rmp + corner fill → cubed_a2d_halo back to D-grid.
-    # Then pad_halo_vector for the A-grid fallback to get full padded shape.
-    from legoesm.grids.duogrid import ext_vector_dgrid
+    # ---- Step 2: Halo-exchange covariant utmp/vtmp ----
+    # pad_halo_vector: rotates to geographic → exchanges with cube_rmp +
+    # corner fill → rotates back. This matches FV3's ext_vector flow.
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
-    _ud_ext, _vd_ext = ext_vector_dgrid(
-        utmp, vtmp, dg, grid.cos_angle, grid.sin_angle,
-        cos_sg5, rsin2, halo=h)
-    # ext_vector returns D-grid: (6, n+4, n+3) and (6, n+3, n+4).
-    # Re-average to get A-grid values at the halo positions.
-    # Interior: keep the direct utmp/vtmp (higher quality from D-grid).
-    # Start with pad_halo_vector for the full padded shape, then
-    # overwrite halo cells with ext_vector-derived values.
     utmp_pad, vtmp_pad = pad_halo_vector(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
         halo=h, duogrid=dg,
-    )  # each (6, n+4, n+4) — base with duogrid scalar remap
-
-    # Overwrite halo rows with ext_vector D-grid-derived A-grid values.
-    # ud_ext (n_p, n_p-1): re-average adjacent j-edges → A-grid j-centers
-    # This gives n_p-2 interior j-values for each of n_p i-positions.
-    if _ud_ext.shape[2] >= 2:
-        utmp_from_ext = 0.5 * (_ud_ext[:, :, :-1] + _ud_ext[:, :, 1:])
-        # Place ext_vector halo in the 1-cell-inward halo region
-        # (the outermost halo cell has no D-grid pair from ext_vector)
-        utmp_pad = utmp_pad.at[:, :, 1].set(utmp_from_ext[:, :, 0])
-        utmp_pad = utmp_pad.at[:, :, n + 2 * h - 2].set(
-            utmp_from_ext[:, :, -1])
-    if _vd_ext.shape[1] >= 2:
-        vtmp_from_ext = 0.5 * (_vd_ext[:, :-1, :] + _vd_ext[:, 1:, :])
-        vtmp_pad = vtmp_pad.at[:, 1, :].set(vtmp_from_ext[:, 0, :])
-        vtmp_pad = vtmp_pad.at[:, n + 2 * h - 2, :].set(
-            vtmp_from_ext[:, -1, :])
+    )  # each (6, n+4, n+4)
 
     # ---- Step 3: Contravariant at cell centres over FULL padded domain ----
     # FV3 ref: sw_core.F90:3449-3454 — compute ua/va for isd:ied, jsd:jed
