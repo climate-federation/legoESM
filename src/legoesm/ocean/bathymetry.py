@@ -983,12 +983,15 @@ def _rest_state_mpas(mesh, z_coord, H_bathy, ocean_mask,
     u_data = jnp.zeros((nEdges, nlev))
     eta_data = jnp.zeros(nCells)
 
+    w_data = jnp.zeros((nCells, nlev + 1))
+
     return MPASOceanState(
         u=Field(data=u_data, name="u", dims=("nEdges", "nlev"), units="m/s",
                 staggering="edge"),
         T=Field(data=T_data, name="T", dims=("nCells", "nlev"), units="degC"),
         S=Field(data=S_data, name="S", dims=("nCells", "nlev"), units="PSU"),
         eta=Field(data=eta_data, name="eta", dims=("nCells",), units="m"),
+        w=Field(data=w_data, name="w", dims=("nCells", "nlev+1"), units="m/s"),
         H_bathy=Field(data=H_bathy, name="H_bathy", dims=("nCells",), units="m"),
         land_mask=Field(data=ocean_mask, name="land_mask", dims=("nCells",), units="1"),
     )

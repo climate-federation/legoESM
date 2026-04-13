@@ -5,7 +5,7 @@ on MPAS Voronoi (C-grid) meshes. Uses the TRiSK discretization from
 Ringler et al. (2010).
 
 Equations (per layer k):
-    du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) + A_h·del2(u) + A_v·d²u/dz²
+    du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) - w·du'/dz + A_h·del2(u) + A_v·d²u/dz²
     d(h·T)/dt = -div(h·u·T) + K_h·h·lap(T) + K_v·d²T/dz²
     d(h·S)/dt = -div(h·u·S) + K_h·h·lap(S) + K_v·d²S/dz²
     dη/dt = -Σ_k div(h_k · u_k)
@@ -38,6 +38,8 @@ from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
+    diagnose_w_from_flux_div,
+    vertical_advection_ocean,
 )
 from legoesm.ocean.freshwater import (
     FreshwaterForcing,
@@ -151,6 +153,18 @@ def mpas_ocean_baroclinic_tendencies(
     u_bar = u_bar * edge_mask  # (nEdges,)
     u_prime_3d = u_3d - u_bar[:, jnp.newaxis]  # (nEdges, nlev)
 
+    # ---- Thickness flux and vertical velocity ----
+    # Compute flux divergence BEFORE momentum tendencies because we need
+    # w for vertical advection of momentum (issue #152).
+    thickness_flux = u_3d * h_e_3d * edge_mask[:, jnp.newaxis]  # (nEdges, nlev)
+    div_flux = divergence_cell_3d(thickness_flux, mesh)  # (nCells, nlev)
+
+    # Diagnose w from full-velocity flux divergence (matching latlon pattern:
+    # ocean_pe_latlon_cgrid.py:302-305)
+    w = diagnose_w_from_flux_div(
+        div_flux, z_coord, thickness_weighted=True,
+    )  # (nCells, nlev+1)
+
     # ---- Momentum and tracer tendencies (batched 3D) ----
     # Uses 3D operators that gather connectivity arrays once for all
     # levels, instead of per-level scan with repeated 1D gathers.
@@ -180,13 +194,15 @@ def mpas_ocean_baroclinic_tendencies(
     # Horizontal viscosity on perturbation velocity
     visc = config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
 
-    du_dt_3d = (-grad_B + pv_flux + visc) * edge_mask[:, jnp.newaxis]
+    # Vertical advection of perturbation momentum: -w * du'/dz
+    # Interpolate w and Jacobian from cells to edges (same averaging as
+    # _vertical_diffusion uses for edge Jacobian).
+    # Matches latlon C-grid: ocean_pe_latlon_cgrid.py:342-347.
+    w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
+    J_e = 0.5 * (jacobian[c1] + jacobian[c2])  # (nEdges,)
+    vert_adv_u = vertical_advection_ocean(u_prime_3d, w_e, z_coord, J_e)
 
-    # ---- Thickness flux for continuity ----
-    thickness_flux = u_3d * h_e_3d * edge_mask[:, jnp.newaxis]  # (nEdges, nlev)
-
-    # Continuity: dh_k/dt = -div(u * h_e)
-    div_flux = divergence_cell_3d(thickness_flux, mesh)  # (nCells, nlev)
+    du_dt_3d = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask[:, jnp.newaxis]
 
     # ---- Tracer tendencies (diffusion + physics only) ----
     # Horizontal AND vertical tracer advection are handled in the step()

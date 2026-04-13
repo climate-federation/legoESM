@@ -331,6 +331,7 @@ class MPASOceanModel:
             T=state.T.replace(data=T_final),
             S=state.S.replace(data=S_final),
             eta=state.eta.replace(data=eta_new * mask),
+            w=state.w.replace(data=w),
             H_bathy=state.H_bathy,
             land_mask=state.land_mask,
         )

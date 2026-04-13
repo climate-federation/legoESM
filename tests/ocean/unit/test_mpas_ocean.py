@@ -103,12 +103,14 @@ class TestStateConstruction:
             T=Field(jnp.ones((nCells, nlev)) * 15.0, "T", ("nCells", "nlev"), "degC"),
             S=Field(jnp.ones((nCells, nlev)) * 35.0, "S", ("nCells", "nlev"), "PSU"),
             eta=Field(jnp.zeros(nCells), "eta", ("nCells",), "m"),
+            w=Field(jnp.zeros((nCells, nlev + 1)), "w", ("nCells", "nlev+1"), "m/s"),
             H_bathy=Field(jnp.full(nCells, 5000.0), "H_bathy", ("nCells",), "m"),
             land_mask=Field(jnp.ones(nCells), "land_mask", ("nCells",), "1"),
         )
         assert state.u.data.shape == (nEdges, nlev)
         assert state.T.data.shape == (nCells, nlev)
         assert state.eta.data.shape == (nCells,)
+        assert state.w.data.shape == (nCells, nlev + 1)
 
     def test_mpas_ocean_tendencies_fields(self):
         """MPASOceanTendencies has expected fields."""
