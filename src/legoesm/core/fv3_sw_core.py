@@ -145,20 +145,15 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
           + _A1 * (utmp_pad[:, 1:-2, h:-h] + utmp_pad[:, 2:-1, h:-h]))
     # shape (6, n+1, n) — all C-grid u-positions
 
-    # Transport velocity ut: consistent with c_sw convention where
-    # ut * sin_sg * dy = physical edge-normal flux.
-    # Formula: ut = (uc - v_d*cosa_u) / sina_u  (same as non-duogrid path)
-    cosa_u = cdgrid.cosa_u
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
-    ut = (uc - v_d * cosa_u) / jnp.maximum(sina_u, _EPS)
+    # Transport velocity ut: FV3 contravariant via stored rsin_u (1/sin²).
+    # Combined with sin_sg upwinding downstream: xfx = ut * dy * sin_sg.
+    ut = (uc - v_d * cdgrid.cosa_u) * cdgrid.rsin_u
 
     # ---- Step 4: A→C y-direction — 4th-order on physical vtmp ----
     vc = (_A2 * (vtmp_pad[:, h:-h, :-3] + vtmp_pad[:, h:-h, 3:])
           + _A1 * (vtmp_pad[:, h:-h, 1:-2] + vtmp_pad[:, h:-h, 2:-1]))
 
-    cosa_v = cdgrid.cosa_v
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
-    vt = (vc - u_d * cosa_v) / jnp.maximum(sina_v, _EPS)
+    vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
 
     return ua, va, uc, vc, ut, vt
 
@@ -280,10 +275,8 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
         uc_bdy = jnp.where(ut_bdy > 0, ut_bdy * sin_left, ut_bdy * sin_right)
         uc = uc.at[:, i_bdy, :].set(uc_bdy)
 
-    # Contravariant ut from covariant uc
-    cosa_u = cdgrid.cosa_u
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
-    ut = (uc - v_d * cosa_u) / jnp.maximum(sina_u, _EPS)
+    # Contravariant ut from covariant uc (FV3 rsin_u = 1/sin²)
+    ut = (uc - v_d * cdgrid.cosa_u) * cdgrid.rsin_u
 
     # At face boundaries: ut = uc / sin_sg_upwind (not the cosa/sina formula)
     for i_bdy in [0, 1, n - 1, n]:
@@ -333,9 +326,7 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
         vc_bdy = jnp.where(vt_bdy > 0, vt_bdy * sin_below, vt_bdy * sin_above)
         vc = vc.at[:, :, j_bdy].set(vc_bdy)
 
-    cosa_v = cdgrid.cosa_v
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
-    vt = (vc - u_d * cosa_v) / jnp.maximum(sina_v, _EPS)
+    vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
 
     for j_bdy in [0, 1, n - 1, n]:
         j_below = max(j_bdy - 1, 0)
@@ -459,9 +450,8 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     # FV3 sw_core.F90:622-726: when duogrid is active, use simple formula
     # everywhere (no face-boundary overrides). When not active, override
     # fy1 at face boundaries with dt2 * v_d.
-    cosa_u = cdgrid.cosa_u
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
-    fy1 = dt2 * (v_d - uc * cosa_u) / jnp.maximum(sina_u, _EPS)
+    # FV3: fy1 = dt2*(v - uc*cosa_u)*rsin_u  (rsin_u = 1/sin²)
+    fy1 = dt2 * (v_d - uc * cdgrid.cosa_u) * cdgrid.rsin_u
     if not use_duogrid:
         # At face edges: sin_sg cancellation → fy1 = dt2 * v_d
         fy1 = fy1.at[:, 0, :].set(dt2 * v_d[:, 0, :])
@@ -471,10 +461,8 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
 
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
-    # y-face: cross-velocity in i-direction
-    cosa_v = cdgrid.cosa_v
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
-    fx1 = dt2 * (u_d - vc * cosa_v) / jnp.maximum(sina_v, _EPS)
+    # y-face: FV3 fx1 = dt2*(u - vc*cosa_v)*rsin_v
+    fx1 = dt2 * (u_d - vc * cdgrid.cosa_v) * cdgrid.rsin_v
     if not use_duogrid:
         fx1 = fx1.at[:, :, 0].set(dt2 * u_d[:, :, 0])
         fx1 = fx1.at[:, :, 1].set(dt2 * u_d[:, :, 1])
@@ -576,9 +564,8 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
 
     # 6. Vorticity flux at C-grid face positions
     # FV3 sw_core.F90:622: when duogrid active, use uniform formula
-    cosa_u = cdgrid.cosa_u
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
-    fy1 = (v_d - uc * cosa_u) / jnp.maximum(sina_u, _EPS)
+    # FV3: fy1 = (v - uc*cosa_u)*rsin_u  (rsin_u = 1/sin²)
+    fy1 = (v_d - uc * cdgrid.cosa_u) * cdgrid.rsin_u
     if not use_duogrid:
         fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
         fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
@@ -586,9 +573,8 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
         fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
-    cosa_v = cdgrid.cosa_v
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
-    fx1 = (u_d - vc * cosa_v) / jnp.maximum(sina_v, _EPS)
+    # FV3: fx1 = (u - vc*cosa_v)*rsin_v
+    fx1 = (u_d - vc * cdgrid.cosa_v) * cdgrid.rsin_v
     if not use_duogrid:
         fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
         fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])
@@ -659,14 +645,13 @@ def _d_sw(h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
 
     # 1. Convert updated covariant uc/vc to physical face-normal velocities.
     # cgrid_mass_flux_divergence builds fluxes as h_face * u_c * dy, so u_c
-    # must be the physical face-normal velocity, not the covariant projection.
-    # Physical face-normal: uc_phys = (uc_cov - v_at_u * cosa_u) * rsin_u
-    # We approximate v_at_u from the D-grid v_d (same time level as uc_new
-    # was derived from) via simple averaging to the u-face position.
+    # must be the PHYSICAL face-normal velocity = (uc - v*cosa)/sin, NOT
+    # the contravariant velocity (rsin_u = 1/sin²).
+    # This is a hybrid (non-FV3) path — the FV3 c_sw path uses ut*sin_sg*dy.
     cosa_u = cdgrid.cosa_u     # (6, n+1, n)
-    rsin_u = cdgrid.rsin_u     # (6, n+1, n)
     cosa_v = cdgrid.cosa_v     # (6, n, n+1)
-    rsin_v = cdgrid.rsin_v     # (6, n, n+1)
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
+    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
 
     # v_d (6, n+1, n) is co-located with cosa_u — use directly as the
     # cross-velocity at u-face positions (same approximation as _uc_to_ut).
@@ -675,8 +660,8 @@ def _d_sw(h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
     # u_d (6, n, n+1) is co-located with cosa_v — use directly.
     u_at_v = u_d  # (6, n, n+1)
 
-    uc_phys = (uc_new - v_at_u * cosa_u) * rsin_u
-    vc_phys = (vc_new - u_at_v * cosa_v) * rsin_v
+    uc_phys = (uc_new - v_at_u * cosa_u) / jnp.maximum(sina_u, _EPS)
+    vc_phys = (vc_new - u_at_v * cosa_v) / jnp.maximum(sina_v, _EPS)
 
     # 2. Mass transport (PPM) with physical face-normal velocities (dt/2 half-step).
     dh = cgrid_mass_flux_divergence(h_star, uc_phys, vc_phys, cdgrid)

@@ -79,8 +79,8 @@ class CubedSphereCDGrid(NamedTuple):
     rsin2_corner: jax.Array  # (6, n+1, n+1) 1/sin²(angle) for gradient correction
     cosa_u: jax.Array        # (6, n+1, n) non-orthogonality at u-interfaces
     cosa_v: jax.Array        # (6, n, n+1) non-orthogonality at v-interfaces
-    rsin_u: jax.Array        # (6, n+1, n) 1/sin at u-interfaces
-    rsin_v: jax.Array        # (6, n, n+1) 1/sin at v-interfaces
+    rsin_u: jax.Array        # (6, n+1, n) 1/sin² interior, 1/sin at panel edges
+    rsin_v: jax.Array        # (6, n, n+1) 1/sin² interior, 1/sin at panel edges
     # --- FV3 edge-midpoint D-grid metrics ---
     # Edge-midpoint positions
     lon_edge_x: jax.Array    # (6, n, n+1) lon at x-edge midpoints
@@ -663,19 +663,66 @@ def create_cubed_sphere_cdgrid(
     sina_corner = jnp.sqrt(jnp.maximum(1.0 - cosa_corner**2, _EPS))
     rsin2_corner = 1.0 / jnp.maximum(sina_corner**2, _EPS)
 
-    # Average to C-grid positions from corner values.
-    # FV3 uses sin_sg at cell face midpoints (fv_grid_utils.F90 L504-515)
-    # but our corner D-grid operators use cosa_corner, so C-grid face
-    # metrics must be derived from the SAME corners for consistency.
-    cosa_u = 0.5 * (cosa_corner[:, :, :-1] + cosa_corner[:, :, 1:])  # (6, n+1, n)
-    cosa_v = 0.5 * (cosa_corner[:, :-1, :] + cosa_corner[:, 1:, :])  # (6, n, n+1)
-    # Derive sina from cosa (not averaged sina_corner) so that
-    # rsin_u = 1/sqrt(1 - cosa_u**2) is consistent with what operators
-    # compute on the fly.  avg(sin) != sqrt(1 - avg(cos)^2) in general.
-    sina_u_from_cosa = jnp.sqrt(jnp.maximum(1.0 - cosa_u**2, _EPS))
-    sina_v_from_cosa = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
-    rsin_u = 1.0 / jnp.maximum(sina_u_from_cosa, _EPS)
-    rsin_v = 1.0 / jnp.maximum(sina_v_from_cosa, _EPS)
+    # ------------------------------------------------------------------
+    # Duo-Grid sub-grid metrics (sin_sg, cos_sg) at 9 positions per cell.
+    # Computed BEFORE C-grid face metrics so cosa_u/rsin_u can be derived
+    # from sin_sg/cos_sg following FV3 fv_grid_utils.F90:505-518.
+    # 0-indexed: 0=W, 1=S, 2=E, 3=N (edge midpoints); 4=center;
+    #            5=SW, 6=SE, 7=NE, 8=NW (corners)
+    # ------------------------------------------------------------------
+    sin_sg, cos_sg = _compute_sin_cos_sg(n, _face_gnomonic_to_lonlat)
+
+    # ------------------------------------------------------------------
+    # C-grid face metrics from sin_sg/cos_sg (FV3 fv_grid_utils.F90:505-518)
+    #
+    # FV3 convention:
+    #   cosa_u(i,j) = 0.5*(cos_sg(i-1,j,E) + cos_sg(i,j,W))
+    #   sina_u(i,j) = 0.5*(sin_sg(i-1,j,E) + sin_sg(i,j,W))
+    #   rsin_u = 1/sin² (interior), 1/sin (panel edges)
+    # ------------------------------------------------------------------
+    cos_sg_W = cos_sg[:, :, :, 0]  # (6, n, n)
+    cos_sg_E = cos_sg[:, :, :, 2]
+    cos_sg_S = cos_sg[:, :, :, 1]
+    cos_sg_N = cos_sg[:, :, :, 3]
+    sin_sg_W = sin_sg[:, :, :, 0]
+    sin_sg_E = sin_sg[:, :, :, 2]
+    sin_sg_S = sin_sg[:, :, :, 1]
+    sin_sg_N = sin_sg[:, :, :, 3]
+
+    # u-faces (6, n+1, n): average E-edge of left cell + W-edge of right cell
+    cosa_u_int = 0.5 * (cos_sg_E[:, :-1, :] + cos_sg_W[:, 1:, :])  # (6, n-1, n)
+    sina_u_int = 0.5 * (sin_sg_E[:, :-1, :] + sin_sg_W[:, 1:, :])
+    # Boundary u-faces: local cell edge value (geometrically exact at face edge)
+    cosa_u = jnp.concatenate([
+        cos_sg_W[:, :1, :], cosa_u_int, cos_sg_E[:, -1:, :]
+    ], axis=1)  # (6, n+1, n)
+    sina_u = jnp.concatenate([
+        sin_sg_W[:, :1, :], sina_u_int, sin_sg_E[:, -1:, :]
+    ], axis=1)
+
+    # v-faces (6, n, n+1): average N-edge of bottom cell + S-edge of top cell
+    cosa_v_int = 0.5 * (cos_sg_N[:, :, :-1] + cos_sg_S[:, :, 1:])  # (6, n, n-1)
+    sina_v_int = 0.5 * (sin_sg_N[:, :, :-1] + sin_sg_S[:, :, 1:])
+    cosa_v = jnp.concatenate([
+        cos_sg_S[:, :, :1], cosa_v_int, cos_sg_N[:, :, -1:]
+    ], axis=2)  # (6, n, n+1)
+    sina_v = jnp.concatenate([
+        sin_sg_S[:, :, :1], sina_v_int, sin_sg_N[:, :, -1:]
+    ], axis=2)
+
+    # rsin_u/rsin_v: 1/sin² everywhere, then override panel edges with 1/sin
+    # (FV3 fv_grid_utils.F90:509-510 interior, 548-554 edges)
+    rsin_u = 1.0 / jnp.maximum(sina_u**2, _EPS)
+    rsin_u = rsin_u.at[:, 0, :].set(
+        1.0 / jnp.maximum(sina_u[:, 0, :], _EPS))
+    rsin_u = rsin_u.at[:, -1, :].set(
+        1.0 / jnp.maximum(sina_u[:, -1, :], _EPS))
+
+    rsin_v = 1.0 / jnp.maximum(sina_v**2, _EPS)
+    rsin_v = rsin_v.at[:, :, 0].set(
+        1.0 / jnp.maximum(sina_v[:, :, 0], _EPS))
+    rsin_v = rsin_v.at[:, :, -1].set(
+        1.0 / jnp.maximum(sina_v[:, :, -1], _EPS))
 
     # ------------------------------------------------------------------
     # FV3 edge-midpoint D-grid metrics
@@ -715,7 +762,6 @@ def create_cubed_sphere_cdgrid(
     # for y-edges at (n+1, n) positions.
     all_angle_ex = []
     all_angle_ey = []
-    all_cosa_cell_list = []
     dalpha_e = jnp.pi / (2 * n)
     # Extended grid: n+4 points gives n+2 after centred diff, which is
     # enough to slice both (n, n+1) and (n+1, n) sub-grids.
@@ -824,18 +870,6 @@ def create_cubed_sphere_cdgrid(
         angle_ey = jnp.arctan2(ti_dot_north_ey, ti_dot_east_ey)
         all_angle_ey.append(angle_ey)
 
-        # --- cosa at cell centres (n, n) ---
-        # i-tangent and j-tangent at cell centres from extended gnomonic
-        # Cell centre (i+0.5, j+0.5) → average of 4 surrounding corners
-        # in extended grid indices.  Use average of diffs at (i,j+0.5)
-        # and (i+1, j+0.5) for i-tangent, similarly for j-tangent.
-        # Simpler: average cosa_corner at 4 surrounding corners.
-        cc = cosa_corner[face]  # (n+1, n+1)
-        cosa_cell_f = 0.25 * (
-            cc[:-1, :-1] + cc[1:, :-1] + cc[:-1, 1:] + cc[1:, 1:]
-        )  # (n, n)
-        all_cosa_cell_list.append(cosa_cell_f)
-
     angle_edge_x = jnp.stack(all_angle_ex, axis=0)   # (6, n, n+1)
     angle_edge_y = jnp.stack(all_angle_ey, axis=0)   # (6, n+1, n)
     cos_angle_edge_x = jnp.cos(angle_edge_x)
@@ -847,28 +881,10 @@ def create_cubed_sphere_cdgrid(
     f_edge_x = 2.0 * omega * jnp.sin(lat_edge_x)  # (6, n, n+1)
     f_edge_y = 2.0 * omega * jnp.sin(lat_edge_y)  # (6, n+1, n)
 
-    # Cell-centre non-orthogonality metrics
-    cosa_cell = jnp.stack(all_cosa_cell_list, axis=0)  # (6, n, n)
-    sina_cell = jnp.sqrt(jnp.maximum(1.0 - cosa_cell**2, _EPS))
+    # Cell-centre non-orthogonality from sin_sg centre (FV3 cosa_s/rsin2)
+    cosa_cell = cos_sg[:, :, :, 4]   # (6, n, n) — cell centre angle
+    sina_cell = sin_sg[:, :, :, 4]
     rsin2_cell = 1.0 / jnp.maximum(sina_cell**2, _EPS)
-
-    # ------------------------------------------------------------------
-    # Duo-Grid sub-grid metrics (sin_sg, cos_sg) at 9 positions per cell.
-    #
-    # The 9-point supergrid per cell uses the GFDL convention:
-    #      9---4---8
-    #      |       |        0-indexed: 0=W, 1=S, 2=E, 3=N (edge midpoints)
-    #      1   5   3                   4=center
-    #      |       |                   5=SW, 6=SE, 7=NE, 8=NW (corners)
-    #      6---2---7
-    #
-    # At each position we compute the angle between the face-local
-    # i-tangent and j-tangent.  At face boundaries, neighbouring cells
-    # on different faces have DIFFERENT angle measurements at their
-    # shared edge — using the upstream cell's measurement (upwind
-    # selection) is the core of the Duo-Grid fix for edge artefacts.
-    # ------------------------------------------------------------------
-    sin_sg, cos_sg = _compute_sin_cos_sg(n, _face_gnomonic_to_lonlat)
 
     # ------------------------------------------------------------------
     # Precompute Arakawa-Lamb gradient transformation matrix.
