@@ -679,9 +679,13 @@ def create_cubed_sphere_cdgrid(
     sin_sg_N = sin_sg[:, :, :, 3]
 
     # u-faces (6, n+1, n): average E-edge of left cell + W-edge of right cell
+    # FV3 fv_grid_utils.F90:507-508: cosa_u(i,j) = 0.5*(cos_sg(i-1,j,3)+cos_sg(i,j,1))
+    # Interior: both cells on same face → direct average.
+    # Boundary: cos_sg sub-grid positions are face-local, so cross-face halo
+    # gives wrong sub-grid values. Use local cell edge value (geometrically
+    # exact: both sides of the face boundary measure the same angle).
     cosa_u_int = 0.5 * (cos_sg_E[:, :-1, :] + cos_sg_W[:, 1:, :])  # (6, n-1, n)
     sina_u_int = 0.5 * (sin_sg_E[:, :-1, :] + sin_sg_W[:, 1:, :])
-    # Boundary u-faces: local cell edge value (geometrically exact at face edge)
     cosa_u = jnp.concatenate([
         cos_sg_W[:, :1, :], cosa_u_int, cos_sg_E[:, -1:, :]
     ], axis=1)  # (6, n+1, n)

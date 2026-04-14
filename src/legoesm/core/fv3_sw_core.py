@@ -26,7 +26,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.grids.halo import pad_halo_vector
+from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.core.operators_cdgrid import (
     _pad_halo_auto,
     cgrid_mass_flux_divergence,
@@ -223,6 +223,8 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     )  # each (6, n+2, n+2)
 
     # ---- Step 3: Contravariant at cell centres (including halo) ----
+    # cos_sg5/rsin2 are face-local non-orthogonality metrics — edge-padding
+    # is correct because the neighboring face has a different coordinate system.
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
     cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (1, 1), (1, 1)], mode='edge')
