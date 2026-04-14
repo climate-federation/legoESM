@@ -66,6 +66,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
+    flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
 )
 
 
@@ -397,12 +398,24 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dv_dt = dv_dt - zeta_at_v * u_at_v
 
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
+    # Issue #171 Level-1 fix: use interface-upwind flux-form momentum
+    # advection instead of the cell-centered upwind gradient form.
+    # The flux-form helper returns -(F_top - F_bot) / h_u with
+    # F = w_half * u_upwind_at_interface and F = 0 at top/bottom by
+    # construction, eliminating the hard-zero gradient pathology at
+    # k=0 / k=nlev-1 and matching the tracer-path interface upwind.
+    # Full flux-form momentum update (Level 2) still requires step-
+    # function restructuring; tracked on #171.
+    J_u = interp_cell_to_uface(J)
+    J_v = _interp_to_v_points(J)
+    h_u_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_u[..., jnp.newaxis]
+    h_v_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_v[..., jnp.newaxis]
     w_u = interp_cell_to_uface(w)
     w_v = _interp_to_v_points(w)
-    du_dt = du_dt + _vertical_advection_ocean(
-        u_prime, w_u, z_coord, interp_cell_to_uface(J))
-    dv_dt = dv_dt + _vertical_advection_ocean(
-        v_prime, w_v, z_coord, _interp_to_v_points(J))
+    du_dt = du_dt + _flux_form_vertical_momentum_advection(
+        u_prime, w_u, h_u_old)
+    dv_dt = dv_dt + _flux_form_vertical_momentum_advection(
+        v_prime, w_v, h_v_old)
 
     # --- 9. Tracer tendencies (diffusion + physics only) ---
     # Horizontal AND vertical tracer advection are handled in the step()

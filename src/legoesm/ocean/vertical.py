@@ -324,6 +324,70 @@ def vertical_advection_ocean(field, w_half, z_coord, jacobian):
     return -w_full * grad
 
 
+def flux_form_vertical_momentum_advection(
+    u: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """Flux-form vertical momentum advection as a per-thickness tendency.
+
+    Computes the interface-upwind vertical momentum flux
+    ``F[k] = w_half[k] * u_face[k]`` with
+
+    - ``F[0] = F[nlev] = 0``  (rigid-lid / no-flux boundary)
+    - ``u_face[k] = u[k]``     when ``w_half[k] > 0``  (upward, from below)
+    - ``u_face[k] = u[k-1]``   when ``w_half[k] <= 0`` (downward, from above)
+
+    and returns ``-(F_top - F_bot) / h_u`` at each level.  This is the
+    tracer-path pattern (``flux_form_vertical_tracer_advection``)
+    converted back to a per-thickness advective tendency so that
+    callers can add it directly to ``du/dt``.
+
+    Properties
+    ----------
+    1. Interior interface-upwind (consistent with the tracer path).
+    2. Rigid-lid boundary by construction: ``F[0] = F[nlev] = 0``.
+       No artificial momentum injection from the boundary via the
+       "hard zero at k=0 and k=nlev-1" pathology that the old
+       ``vertical_advection_ocean`` cell-upwind gradient has.
+    3. Column momentum flux identity: for any ``w_half`` with
+       ``w_half[0] = w_half[nlev] = 0`` (closed column), the sum of
+       ``(tendency * h_u)`` over the column is exactly zero.
+
+    Partial-fix status (issue #171)
+    -------------------------------
+    This is a **Level-1** fix.  Dividing by ``h_u_old`` instead of
+    doing a full ``(h·u)_new = (h·u)_old - dt * flux_div`` / ``u_new =
+    (h·u)_new / h_u_new`` update leaves a residual
+    ``O(dt · u · dh_u/dt / h_u)`` error under dynamic z-star.  A full
+    flux-form momentum update requires restructuring the model step
+    function (Level 2 in the #171 discussion) and is still open.
+
+    Parameters
+    ----------
+    u : array, shape (..., nlev)
+        Velocity at full levels at the momentum points (u-face, v-face,
+        or edge — caller's choice, as long as ``w_half`` and ``h_u``
+        are interpolated to the same points).
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half (interface) levels, at the same
+        momentum points as ``u``.  Positive = upward.  Must be zero
+        at the surface and bottom interfaces.
+    h_u : array, shape (..., nlev)
+        Layer thickness at the momentum points.  Used only as the
+        advective-form denominator.
+
+    Returns
+    -------
+    tendency : array, shape (..., nlev)
+        ``-(F_top - F_bot) / h_u`` — a per-thickness momentum tendency
+        ready to add to ``du/dt``.
+    """
+    vert_flux_div = flux_form_vertical_tracer_advection(u, w_half)
+    h_u_safe = jnp.maximum(h_u, 1.0e-10)
+    return -vert_flux_div / h_u_safe
+
+
 def flux_form_vertical_tracer_advection(
     field: jnp.ndarray,
     w_half: jnp.ndarray,

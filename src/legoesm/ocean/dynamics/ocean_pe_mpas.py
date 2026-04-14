@@ -56,6 +56,7 @@ from legoesm.ocean.vertical import (
     compute_ocean_jacobian,
     diagnose_w_from_flux_div,
     vertical_advection_ocean,
+    flux_form_vertical_momentum_advection,
 )
 from legoesm.ocean.freshwater import (
     FreshwaterForcing,
@@ -217,13 +218,21 @@ def mpas_ocean_baroclinic_tendencies(
     # Horizontal viscosity on perturbation velocity
     visc = config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
 
-    # Vertical advection of perturbation momentum: -w * du'/dz
-    # Interpolate w and Jacobian from cells to edges (same averaging as
-    # _vertical_diffusion uses for edge Jacobian).
-    # Matches latlon C-grid: ocean_pe_latlon_cgrid.py:342-347.
+    # Vertical advection of perturbation momentum.
+    # Issue #171 Level-1 fix: interface-upwind flux-form momentum
+    # advection instead of cell-centered upwind gradient. The
+    # flux-form helper returns -(F_top - F_bot) / h_e with
+    # F = w_half * u_upwind_at_interface and F = 0 at top/bottom by
+    # construction, eliminating the hard-zero-gradient pathology at
+    # k=0 / k=nlev-1 and matching the tracer-path interface upwind.
+    # h_e_3d (edge-centered layer thickness) was already computed
+    # above at line 165 for the u_bar reduction; reuse it here.
+    # Full flux-form momentum update (Level 2) still requires step-
+    # function restructuring; tracked on #171.
     w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
-    J_e = 0.5 * (jacobian[c1] + jacobian[c2])  # (nEdges,)
-    vert_adv_u = vertical_advection_ocean(u_prime_3d, w_e, z_coord, J_e)
+    vert_adv_u = flux_form_vertical_momentum_advection(
+        u_prime_3d, w_e, h_e_3d,
+    )
 
     du_dt_3d = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask[:, jnp.newaxis]
 
