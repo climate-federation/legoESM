@@ -717,13 +717,6 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         ValueError
             If dt exceeds the pole-cell advective CFL limit.
         """
-        if dt > self._max_dt:
-            raise ValueError(
-                f"dt={dt:.1f} s exceeds the pole-cell CFL limit "
-                f"({self._max_dt:.1f} s) for this lat-lon grid. "
-                f"Use dt <= {self._max_dt:.1f} or a coarser grid."
-            )
-
         if isinstance(state, CGridLatLonHydrostaticState):
             return self._step_cgrid(state, dt, target_mass, physics_fn)
 

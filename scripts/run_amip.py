@@ -98,6 +98,8 @@ def main():
     parser.add_argument("--solar-source", type=str, default="constant",
                         choices=["constant", "file", "spectral_file"])
     parser.add_argument("--solar-file", type=str, default="")
+    parser.add_argument("--solar-tsi-var", type=str, default="tsi",
+                        help="Variable name for TSI in solar forcing file (e.g. 'TSI' for CMIP6 files)")
     parser.add_argument("--solar-spectral-var", type=str,
                         default="solar_fraction_by_gpt")
 
@@ -231,6 +233,7 @@ def main():
         ghg_file=args.ghg_file,
         solar_source=args.solar_source,
         solar_file=args.solar_file,
+        solar_tsi_var=args.solar_tsi_var,
         solar_spectral_var=args.solar_spectral_var,
         aerosol_forcing=args.aerosol_forcing,
         aerosol_file=args.aerosol_file,
