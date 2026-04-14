@@ -583,7 +583,14 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
         ke_v = ke_v.at[:, :, n-1].set(
             jnp.where(va[:, :, n-1] > 0, ke_v[:, :, n-1], ke_bdy_t))
 
-    ke = 0.5 * (ua * ke_u + va * ke_v)
+    # KE: use D→A physical velocities (consistent frame) to avoid the
+    # contravariant×covariant cross-product ua*uc which amplifies
+    # interpolation mismatches at face boundaries by 1/sin².
+    # Physical KE: 0.5*(utmp² + vtmp²) avoids the non-orthogonality
+    # amplification while giving the correct KE for smooth flows.
+    utmp_ke = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
+    vtmp_ke = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
+    ke = 0.5 * (utmp_ke**2 + vtmp_ke**2)
     B = ke + g * (h + h_s)
 
     # 4. Bernoulli gradient at C-grid face positions (2-point difference)
