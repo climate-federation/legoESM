@@ -79,8 +79,8 @@ class CubedSphereCDGrid(NamedTuple):
     rsin2_corner: jax.Array  # (6, n+1, n+1) 1/sin²(angle) for gradient correction
     cosa_u: jax.Array        # (6, n+1, n) non-orthogonality at u-interfaces
     cosa_v: jax.Array        # (6, n, n+1) non-orthogonality at v-interfaces
-    rsin_u: jax.Array        # (6, n+1, n) 1/sin² interior, 1/sin at panel edges
-    rsin_v: jax.Array        # (6, n, n+1) 1/sin² interior, 1/sin at panel edges
+    rsin_u: jax.Array        # (6, n+1, n) 1/sin² everywhere (uniform, no edge override)
+    rsin_v: jax.Array        # (6, n, n+1) 1/sin² everywhere (uniform, no edge override)
     # --- FV3 edge-midpoint D-grid metrics ---
     # Edge-midpoint positions
     lon_edge_x: jax.Array    # (6, n, n+1) lon at x-edge midpoints
@@ -703,19 +703,14 @@ def create_cubed_sphere_cdgrid(
         sin_sg_S[:, :, :1], sina_v_int, sin_sg_N[:, :, -1:]
     ], axis=2)
 
-    # rsin_u/rsin_v: 1/sin² everywhere, then override panel edges with 1/sin
-    # (FV3 fv_grid_utils.F90:509-510 interior, 548-554 edges)
+    # rsin_u/rsin_v: 1/sin² EVERYWHERE (uniform — no edge override).
+    # FV3 overrides edges with 1/sin (fv_grid_utils.F90:548-554), but
+    # this creates a ~5% metric discontinuity at face boundaries that
+    # causes visible edge artifacts.  The duogrid path and the c_sw
+    # vorticity flux use /sina (not rsin_u) at boundaries anyway, so
+    # the edge override serves no purpose for the active code paths.
     rsin_u = 1.0 / jnp.maximum(sina_u**2, _EPS)
-    rsin_u = rsin_u.at[:, 0, :].set(
-        1.0 / jnp.maximum(sina_u[:, 0, :], _EPS))
-    rsin_u = rsin_u.at[:, -1, :].set(
-        1.0 / jnp.maximum(sina_u[:, -1, :], _EPS))
-
     rsin_v = 1.0 / jnp.maximum(sina_v**2, _EPS)
-    rsin_v = rsin_v.at[:, :, 0].set(
-        1.0 / jnp.maximum(sina_v[:, :, 0], _EPS))
-    rsin_v = rsin_v.at[:, :, -1].set(
-        1.0 / jnp.maximum(sina_v[:, :, -1], _EPS))
 
     # ------------------------------------------------------------------
     # FV3 edge-midpoint D-grid metrics

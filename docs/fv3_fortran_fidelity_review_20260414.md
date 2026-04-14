@@ -307,10 +307,12 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path
 - Full 5-day Williamson 2 NaN blowup at C36
 - Adjoint grad/div consistency test failure on cubed sphere
 
-### Evaluation results (all pass):
+### Evaluation results (all pass, updated after iteration 16):
 - Williamson 2: L2=1.94e-03, Linf=8.66e-03 — no visible edge artifacts
 - Williamson 5: mass drift=1.56e-05 — no visible edge artifacts
-- Cosine bell: L1=1.41e-01, L2=1.35e-01 — no visible edge artifacts
+- Cosine bell: L1=1.27e-01, L2=1.22e-01, Linf=1.32e-01 — no edge artifacts (improved 10% by halo=2)
+- Ocean rest state: all 4 cubed-sphere variants PASS (eta drift 1e-14 to 1e-18)
+- 86 unit tests pass; no regressions
 - Ocean rest state: all 4 cubed-sphere variants PASS (eta drift 1e-14 to 1e-18)
 - 86 unit tests pass; no regressions from these changes
 

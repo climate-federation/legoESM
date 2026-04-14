@@ -194,73 +194,37 @@ class TestFv3SwTendenciesBalancedResidual(unittest.TestCase):
 
 
 class TestMetricConsistency(unittest.TestCase):
-    """Test that rsin_u/rsin_v follow FV3 convention: 1/sin² interior, 1/sin edges."""
+    """Test that rsin_u/rsin_v = 1/sin² everywhere (uniform, no edge override)."""
 
-    def test_rsin_u_fv3_convention(self):
-        """rsin_u: 1/sin² for interior u-faces, 1/sin at panel edges."""
+    def test_rsin_u_uniform(self):
+        """rsin_u should be 1/sin² everywhere including face boundaries."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 
         grid = create_cubed_sphere(16)
         cdgrid = create_cubed_sphere_cdgrid(grid)
-        n = cdgrid.n
         _EPS = float(jnp.finfo(jnp.float32).eps)
 
-        # Recompute sina_u from sin_sg (FV3 fv_grid_utils.F90:507-508)
-        sin_E = cdgrid.sin_sg[:, :, :, 2]
-        sin_W = cdgrid.sin_sg[:, :, :, 0]
-
-        # Interior (i=1..n-1): avg of E-edge and W-edge → rsin = 1/sin²
-        sina_int = 0.5 * (sin_E[:, :-1, :] + sin_W[:, 1:, :])
-        expected_int = 1.0 / jnp.maximum(sina_int**2, _EPS)
-        max_diff = float(jnp.max(jnp.abs(cdgrid.rsin_u[:, 1:-1, :] - expected_int)))
+        sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, _EPS))
+        expected = 1.0 / jnp.maximum(sina_u**2, _EPS)
+        max_diff = float(jnp.max(jnp.abs(cdgrid.rsin_u - expected)))
         self.assertLess(max_diff, 1e-6,
-                        f"interior rsin_u not 1/sin²: max diff = {max_diff:.2e}")
+                        f"rsin_u not uniform 1/sin²: max diff = {max_diff:.2e}")
 
-        # Panel edges (i=0, i=n): rsin = 1/sin (FV3 fv_grid_utils.F90:551-552)
-        sina_left = sin_W[:, :1, :]
-        expected_left = 1.0 / jnp.maximum(sina_left, _EPS)
-        max_diff_l = float(jnp.max(jnp.abs(cdgrid.rsin_u[:, :1, :] - expected_left)))
-        self.assertLess(max_diff_l, 1e-6,
-                        f"left-edge rsin_u not 1/sin: max diff = {max_diff_l:.2e}")
-
-        sina_right = sin_E[:, -1:, :]
-        expected_right = 1.0 / jnp.maximum(sina_right, _EPS)
-        max_diff_r = float(jnp.max(jnp.abs(cdgrid.rsin_u[:, -1:, :] - expected_right)))
-        self.assertLess(max_diff_r, 1e-6,
-                        f"right-edge rsin_u not 1/sin: max diff = {max_diff_r:.2e}")
-
-    def test_rsin_v_fv3_convention(self):
-        """rsin_v: 1/sin² for interior v-faces, 1/sin at panel edges."""
+    def test_rsin_v_uniform(self):
+        """rsin_v should be 1/sin² everywhere including face boundaries."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 
         grid = create_cubed_sphere(16)
         cdgrid = create_cubed_sphere_cdgrid(grid)
-        n = cdgrid.n
         _EPS = float(jnp.finfo(jnp.float32).eps)
 
-        sin_N = cdgrid.sin_sg[:, :, :, 3]
-        sin_S = cdgrid.sin_sg[:, :, :, 1]
-
-        # Interior (j=1..n-1): avg of N-edge and S-edge → rsin = 1/sin²
-        sina_int = 0.5 * (sin_N[:, :, :-1] + sin_S[:, :, 1:])
-        expected_int = 1.0 / jnp.maximum(sina_int**2, _EPS)
-        max_diff = float(jnp.max(jnp.abs(cdgrid.rsin_v[:, :, 1:-1] - expected_int)))
+        sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
+        expected = 1.0 / jnp.maximum(sina_v**2, _EPS)
+        max_diff = float(jnp.max(jnp.abs(cdgrid.rsin_v - expected)))
         self.assertLess(max_diff, 1e-6,
-                        f"interior rsin_v not 1/sin²: max diff = {max_diff:.2e}")
-
-        sina_bot = sin_S[:, :, :1]
-        expected_bot = 1.0 / jnp.maximum(sina_bot, _EPS)
-        max_diff_b = float(jnp.max(jnp.abs(cdgrid.rsin_v[:, :, :1] - expected_bot)))
-        self.assertLess(max_diff_b, 1e-6,
-                        f"bottom-edge rsin_v not 1/sin: max diff = {max_diff_b:.2e}")
-
-        sina_top = sin_N[:, :, -1:]
-        expected_top = 1.0 / jnp.maximum(sina_top, _EPS)
-        max_diff_t = float(jnp.max(jnp.abs(cdgrid.rsin_v[:, :, -1:] - expected_top)))
-        self.assertLess(max_diff_t, 1e-6,
-                        f"top-edge rsin_v not 1/sin: max diff = {max_diff_t:.2e}")
+                        f"rsin_v not uniform 1/sin²: max diff = {max_diff:.2e}")
 
     def test_rarea_c_positive(self):
         """rarea_c should be positive everywhere."""
