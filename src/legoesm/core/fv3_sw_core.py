@@ -459,11 +459,12 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     vort_abs = vort + cdgrid.f_corner
 
     # 6. Vorticity flux at C-grid face positions
-    # FV3 sw_core.F90:622-726: when duogrid is active, use simple formula
-    # everywhere (no face-boundary overrides). When not active, override
-    # fy1 at face boundaries with dt2 * v_d.
-    # FV3: fy1 = dt2*(v - uc*cosa_u)*rsin_u  (rsin_u = 1/sin²)
-    fy1 = dt2 * (v_d - uc * cdgrid.cosa_u) * cdgrid.rsin_u
+    # FV3 sw_core.F90:416-423: c_sw vorticity flux uses /sina (1/sin),
+    # NOT *rsin_u (1/sin²). The FV3 comment says: "we only divide by
+    # sin instead of sin**2 in the interior". rsin_u is for d2a2c_vect only.
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, _EPS))
+    sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
+    fy1 = dt2 * (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
     if not use_duogrid:
         # At face edges: sin_sg cancellation → fy1 = dt2 * v_d
         fy1 = fy1.at[:, 0, :].set(dt2 * v_d[:, 0, :])
@@ -473,8 +474,8 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
 
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
-    # y-face: FV3 fx1 = dt2*(u - vc*cosa_v)*rsin_v
-    fx1 = dt2 * (u_d - vc * cdgrid.cosa_v) * cdgrid.rsin_v
+    # y-face: FV3 fx1 = dt2*(u - vc*cosa_v)/sina_v  (1/sin, not 1/sin²)
+    fx1 = dt2 * (u_d - vc * cdgrid.cosa_v) / jnp.maximum(sina_v, _EPS)
     if not use_duogrid:
         fx1 = fx1.at[:, :, 0].set(dt2 * u_d[:, :, 0])
         fx1 = fx1.at[:, :, 1].set(dt2 * u_d[:, :, 1])
@@ -575,9 +576,10 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     vort_abs = circ * cdgrid.rarea_c + cdgrid.f_corner
 
     # 6. Vorticity flux at C-grid face positions
-    # FV3 sw_core.F90:622: when duogrid active, use uniform formula
-    # FV3: fy1 = (v - uc*cosa_u)*rsin_u  (rsin_u = 1/sin²)
-    fy1 = (v_d - uc * cdgrid.cosa_u) * cdgrid.rsin_u
+    # FV3 sw_core.F90:416-423: c_sw uses /sina (1/sin), NOT *rsin_u (1/sin²)
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, _EPS))
+    sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
+    fy1 = (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
     if not use_duogrid:
         fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
         fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
@@ -585,8 +587,8 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
         fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
-    # FV3: fx1 = (u - vc*cosa_v)*rsin_v
-    fx1 = (u_d - vc * cdgrid.cosa_v) * cdgrid.rsin_v
+    # FV3: fx1 = (u - vc*cosa_v)/sina_v
+    fx1 = (u_d - vc * cdgrid.cosa_v) / jnp.maximum(sina_v, _EPS)
     if not use_duogrid:
         fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
         fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])

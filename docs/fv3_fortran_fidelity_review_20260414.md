@@ -294,6 +294,14 @@ Commands:
 - `JAX_ENABLE_X64=1 scripts/run_atmosphere_test_matrix.py --only sw --grid cubed_sphere --quick` → 3 PASS
   - Williamson 2: L2=1.94e-03, Linf=8.66e-03
   - Williamson 5: mass drift=1.56e-05
-  - Cosine bell: L1=1.41e-01, L2=1.35e-01, Linf=1.49e-01
+  - Cosine bell: L1=1.42e-01, L2=1.35e-01, Linf=1.49e-01
 - Ocean rest state: all 4 cubed-sphere variants PASS (eta drift 1e-14 to 1e-18)
 - No visible edge artifacts in v-wind, wind speed, or cosine bell snapshots
+
+### Critical: 1/sin vs 1/sin² distinction ✅ (Iteration 5)
+FV3 uses TWO different metric factors:
+- `d2a2c_vect` contravariant velocity: `ut = (uc - v*cosa)*rsin_u` → `rsin_u = 1/sin²`
+- `c_sw` vorticity flux: `fy1 = dt2*(v - uc*cosa)/sina` → `1/sin` (NOT `1/sin²`)
+The FV3 comment at sw_core.F90:417 says: "we only divide by sin instead of sin²".
+The c_sw and fv3_csw_tendencies vorticity flux now correctly uses `/sina` (1/sin).
+Note: the full 5-day Williamson 2 test has a pre-existing NaN blowup unrelated to these changes.
