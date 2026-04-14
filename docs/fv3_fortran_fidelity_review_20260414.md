@@ -304,8 +304,13 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path
 
 ### Pre-existing issues (not caused by these changes):
+- Williamson 2 v-wind shows cube-face imprint at t>0.5d — IDENTICAL in original code (verified by checkout to ebd6e43). Root cause is deeper infrastructure (grid construction, halo exchange), not operator formulas.
+- Ocean rest state eta shows structured face-boundary patterns at early timesteps (O(0.01 m) scale), also pre-existing. The global mean drift is 1e-18 (machine epsilon) but local artifacts have face-boundary structure.
 - Full 5-day Williamson 2 NaN blowup at C36
 - Adjoint grad/div consistency test failure on cubed sphere
+
+### Iteration 17: rsin_u uniformity fix
+Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhere, eliminating a 4.7% metric discontinuity. The cosa_u boundary gradient was verified to be smooth (4.88e-02 at boundary vs 5.29e-02 at interior — no discontinuity).
 
 ### Evaluation results (all pass, updated after iteration 16):
 - Williamson 2: L2=1.94e-03, Linf=8.66e-03 — no visible edge artifacts
