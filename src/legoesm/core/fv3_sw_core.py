@@ -903,22 +903,24 @@ def _uc_to_ut(uc, vc, u_d, v_d, cdgrid):
     ut = (uc - v_d * cosa_u) * rsin_u
     vt = (vc - u_d * cosa_v) * rsin_v
 
-    # At face boundaries: ut = uc / sin_sg_upwind
+    # At edge_interpolate4 positions (i=1, n-1): ut = uc / sin_sg recovers
+    # the edge_interpolate4 result.  Face boundaries (i=0, n) keep the
+    # standard formula with cross-velocity (FV3 sw_core.F90:3595-3596).
     sg = cdgrid.sin_sg
-    for i_bdy in [0, 1, n - 1, n]:
+    for i_bdy in [1, n - 1]:
         i_left = max(i_bdy - 1, 0)
         i_right = min(i_bdy, n - 1)
-        sin_left = sg[:, i_left, :, 2]    # E-edge of left cell
-        sin_right = sg[:, i_right, :, 0]  # W-edge of right cell
+        sin_left = sg[:, i_left, :, 2]
+        sin_right = sg[:, i_right, :, 0]
         sin_upwind = jnp.where(uc[:, i_bdy, :] > 0, sin_left, sin_right)
         ut = ut.at[:, i_bdy, :].set(
             uc[:, i_bdy, :] / jnp.maximum(sin_upwind, _EPS))
 
-    for j_bdy in [0, 1, n - 1, n]:
+    for j_bdy in [1, n - 1]:
         j_below = max(j_bdy - 1, 0)
         j_above = min(j_bdy, n - 1)
-        sin_below = sg[:, :, j_below, 3]  # N-edge of cell below
-        sin_above = sg[:, :, j_above, 1]  # S-edge of cell above
+        sin_below = sg[:, :, j_below, 3]
+        sin_above = sg[:, :, j_above, 1]
         sin_upwind = jnp.where(vc[:, :, j_bdy] > 0, sin_below, sin_above)
         vt = vt.at[:, :, j_bdy].set(
             vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
