@@ -260,17 +260,6 @@ def _supergrid_quad_area(px, py, pz, i0, j0, i1, j1, i2, j2, i3, j3, radius):
 def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
     """Compute area_c and dxc/dyc from the FV3 supergrid.
 
-    **DEAD CODE — not called by any live path.**
-
-    Superseded by the halo-exchange-aware metric computation in
-    ``create_cubed_sphere_cdgrid`` (lines ~592-925), which computes
-    dxc/dyc and area_corner from halo-exchanged cell-centre positions
-    and areas. The halo-aware path ensures consistency with the haloed
-    field values used by operators at runtime.
-
-    Retained as reference infrastructure for potential future
-    supergrid-based cross-validation of the halo-aware metrics.
-
     Uses the SAME 2x-refined supergrid as sin_sg/cos_sg to ensure all
     metrics are mutually consistent (discrete Stokes theorem).
 
@@ -419,6 +408,11 @@ def create_cubed_sphere_cdgrid(
             metric_dtype = jnp.float32
     n = base.n
     radius = base.radius
+
+    # FV3 supergrid metrics: area_c, dxc, dyc from 2x-refined grid
+    # (same supergrid as sin_sg/cos_sg → mutual consistency)
+    area_c_sg, dxc_sg, dyc_sg = _compute_supergrid_metrics(
+        n, _face_gnomonic_to_lonlat, radius)
 
     # Cell corner positions (gnomonic grid edges: n+1 per side)
     alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
@@ -593,14 +587,9 @@ def create_cubed_sphere_cdgrid(
             else:
                 lat_corner = arr
 
-    # --- area_corner from halo-exchanged cell areas (cross-face aware) ---
+    # --- area_corner from FV3 supergrid (sum of 4 supergrid quadrilaterals) ---
     from legoesm.grids.halo import pad_halo, _fill_corners_h1
-    area_halo = pad_halo(base.area)            # (6, n+2, n+2)
-    area_halo = _fill_corners_h1(area_halo)    # fill corner ghost cells
-    area_corner = 0.25 * (
-        area_halo[:, :-1, :-1] + area_halo[:, 1:, :-1]
-        + area_halo[:, :-1, 1:] + area_halo[:, 1:, 1:]
-    )  # (6, n+1, n+1)
+    area_corner = area_c_sg  # (6, n+1, n+1)
 
     f_corner = 2.0 * omega * jnp.sin(lat_corner)
     cos_angle_corner = jnp.cos(angle_corner)
@@ -922,23 +911,10 @@ def create_cubed_sphere_cdgrid(
     z_pad = _fill_corners_h1(z_pad)
 
     # ------------------------------------------------------------------
-    # FV3 c_sw metrics: center-to-center distances across C-grid faces.
-    # Computed from the SAME halo-exchanged cell-centre positions as the
-    # Arakawa-Lamb gradient, ensuring consistency between dxc/rdxc and
-    # the haloed field values used in gradient/vorticity operators.
+    # FV3 c_sw metrics: center-to-center distances from supergrid.
     # ------------------------------------------------------------------
-    chord_xc = jnp.sqrt(
-        (x_pad[:, :-1, 1:-1] - x_pad[:, 1:, 1:-1]) ** 2
-        + (y_pad[:, :-1, 1:-1] - y_pad[:, 1:, 1:-1]) ** 2
-        + (z_pad[:, :-1, 1:-1] - z_pad[:, 1:, 1:-1]) ** 2
-    )  # (6, n+1, n)
-    dxc = radius * 2.0 * jnp.arcsin(jnp.clip(chord_xc / 2.0, 0.0, 1.0))
-    chord_yc = jnp.sqrt(
-        (x_pad[:, 1:-1, :-1] - x_pad[:, 1:-1, 1:]) ** 2
-        + (y_pad[:, 1:-1, :-1] - y_pad[:, 1:-1, 1:]) ** 2
-        + (z_pad[:, 1:-1, :-1] - z_pad[:, 1:-1, 1:]) ** 2
-    )  # (6, n, n+1)
-    dyc = radius * 2.0 * jnp.arcsin(jnp.clip(chord_yc / 2.0, 0.0, 1.0))
+    dxc = dxc_sg   # (6, n+1, n) from supergrid
+    dyc = dyc_sg   # (6, n, n+1) from supergrid
 
     rdxc = 1.0 / jnp.maximum(dxc, _TINY)
     rdyc = 1.0 / jnp.maximum(dyc, _TINY)

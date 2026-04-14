@@ -162,11 +162,8 @@ Correction:
 
 ## Remaining fidelity issues
 
-### 2. area_corner/dxc/dyc still non-supergrid approximation
-Python: halo-averaged cell areas and centre-to-centre distances.
-Fortran: precomputed `area_c_64/dxc_64/dyc_64` from supergrid.
-Measured on C16: `area_corner` mean rel diff 2.57e-1, max 3.01e+0; `dxc/dyc` mean 1.19e-1, max 1.03e+0.
-Correction: use `_compute_supergrid_metrics()` (currently dead code).
+### 2. area_corner/dxc/dyc now from FV3 supergrid ✅ (Iteration 2)
+Activated `_compute_supergrid_metrics()`: area_corner = sum of 4 supergrid quadrilateral areas, dxc/dyc = supergrid center-to-center distances. Matches FV3 `fv_grid_tools.F90` convention.
 
 ### 3. `_d2a2c_vect_duogrid` is an adaptation, not a faithful port
 Routes through geographic east/north convention rather than FV3's native metric conventions.
