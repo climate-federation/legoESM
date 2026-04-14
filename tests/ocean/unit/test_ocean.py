@@ -164,21 +164,41 @@ class TestWrightEOS:
         assert jnp.isfinite(g)
         assert float(g) != 0.0
 
-    def test_grad_zero_outside_valid_range(self):
-        """Gradient should be zero outside the clipped range [-2, 40] degC.
+    def test_grad_finite_nonzero_outside_valid_range(self):
+        """Gradient must be finite and nonzero outside [-2, 40] degC.
 
-        This documents the piecewise-differentiable behavior: the Wright
-        polynomial is not valid outside its range, so inputs are clipped
-        and the gradient is exactly zero at the boundaries.
+        Wright (1997) extrapolates smoothly outside its nominal validity
+        box. The EOS must not clip inputs — silent clipping zeros grads at
+        the boundary and masks upstream state bugs. See issue #165.
         """
         def rho_of_T(T):
             return wright_eos(T, jnp.array(35.0), jnp.array(0.0))
-        # Well above the valid range
+        # Well above the nominal valid range
         g_hot = jax.grad(rho_of_T)(jnp.array(45.0))
-        assert float(g_hot) == 0.0, f"Expected zero grad at T=45C, got {float(g_hot)}"
-        # Well below the valid range
+        assert jnp.isfinite(g_hot)
+        assert float(g_hot) != 0.0, f"Expected nonzero grad at T=45C, got {float(g_hot)}"
+        # Well below the nominal valid range
         g_cold = jax.grad(rho_of_T)(jnp.array(-5.0))
-        assert float(g_cold) == 0.0, f"Expected zero grad at T=-5C, got {float(g_cold)}"
+        assert jnp.isfinite(g_cold)
+        assert float(g_cold) != 0.0, f"Expected nonzero grad at T=-5C, got {float(g_cold)}"
+
+        # And same story for S outside [0, 42] PSU.
+        def rho_of_S(S):
+            return wright_eos(jnp.array(10.0), S, jnp.array(0.0))
+        g_fresh = jax.grad(rho_of_S)(jnp.array(-1.0))
+        assert jnp.isfinite(g_fresh) and float(g_fresh) != 0.0
+        g_brine = jax.grad(rho_of_S)(jnp.array(45.0))
+        assert jnp.isfinite(g_brine) and float(g_brine) != 0.0
+
+    def test_density_finite_outside_valid_range(self):
+        """Density itself must also be finite outside the nominal box."""
+        # Mild overshoot (advection / diffusion style)
+        rho_mild = wright_eos(jnp.array(-3.0), jnp.array(43.0), jnp.array(0.0))
+        assert jnp.isfinite(rho_mild)
+        assert 900.0 < float(rho_mild) < 1100.0
+        # Larger excursion — should still be finite, may be unphysical.
+        rho_wild = wright_eos(jnp.array(50.0), jnp.array(-2.0), jnp.array(0.0))
+        assert jnp.isfinite(rho_wild)
 
 
 class TestLinearEOS:

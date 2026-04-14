@@ -89,6 +89,12 @@ def wright_eos(
     If ``JAX_ENABLE_X64=1`` is not set, the astype calls are no-ops
     (safe but no precision improvement).  ``jnp.astype`` is
     differentiable in JAX.
+
+    The Wright (1997) polynomial is nominally valid for T in [-2, 40] degC
+    and S in [0, 42] PSU, but extrapolates smoothly outside that box.
+    Inputs are not clipped: silent clipping would zero gradients at the
+    boundary and mask unphysical state from advection overshoots or
+    coupler bugs. See issue #165.
     """
     orig_dtype = T.dtype
 
@@ -99,10 +105,6 @@ def wright_eos(
     T = T.astype(hi)
     S = S.astype(hi)
     p = p.astype(hi)
-
-    # Clip inputs to Wright EOS valid range [-2, 40] degC, [0, 42] PSU
-    T = jnp.clip(T, -2.0, 40.0)
-    S = jnp.clip(S, 0.0, 42.0)
 
     # Specific volume parameter
     al0 = _a0 + _a1 * T + _a2 * S
@@ -121,7 +123,7 @@ def wright_eos(
 
 
 def _wright_eos_scalar(T: float, S: float, p: float) -> float:
-    """Scalar Wright EOS for JAX grad (no clipping or dtype promotion).
+    """Scalar Wright EOS for JAX grad (no dtype promotion).
 
     Used internally by ``thermal_expansion_coeff`` and
     ``haline_contraction_coeff`` via ``jax.grad``.
@@ -160,10 +162,8 @@ def thermal_expansion_coeff(
     T64 = T.astype(hi)
     S64 = S.astype(hi)
     p64 = p.astype(hi)
-    T_c = jnp.clip(T64, -2.0, 40.0)
-    S_c = jnp.clip(S64, 0.0, 42.0)
-    flat_T = T_c.ravel()
-    flat_S = S_c.ravel()
+    flat_T = T64.ravel()
+    flat_S = S64.ravel()
     flat_p = p64.ravel()
     drho_dT = jax.vmap(_drho_dT_scalar)(flat_T, flat_S, flat_p).reshape(T.shape)
     rho = wright_eos(T, S, p)
@@ -191,10 +191,8 @@ def haline_contraction_coeff(
     T64 = T.astype(hi)
     S64 = S.astype(hi)
     p64 = p.astype(hi)
-    T_c = jnp.clip(T64, -2.0, 40.0)
-    S_c = jnp.clip(S64, 0.0, 42.0)
-    flat_T = T_c.ravel()
-    flat_S = S_c.ravel()
+    flat_T = T64.ravel()
+    flat_S = S64.ravel()
     flat_p = p64.ravel()
     drho_dS = jax.vmap(_drho_dS_scalar)(flat_T, flat_S, flat_p).reshape(T.shape)
     rho = wright_eos(T, S, p)
