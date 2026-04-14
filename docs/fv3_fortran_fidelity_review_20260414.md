@@ -296,8 +296,10 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 - Linear extrapolation for circulation boundary halo ✅ (iter 13) 
 - halo=2 for d2a2c_vect edge_interpolate4 at face boundaries ✅ (iter 14) — cosine bell L1 improved 10%
 
+### Resolved in iteration 15:
+- d2a2c_vect_duogrid rewrite: D-grid halo via pad_halo_dgrid + FV3 cosa_s/rsin2 ✅
+
 ### Remaining structural items:
-3b. `_d2a2c_vect_duogrid` geographic rotation — needs covariant vector halo exchange
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
 F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path
 
