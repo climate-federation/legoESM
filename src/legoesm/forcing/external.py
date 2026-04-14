@@ -866,6 +866,14 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
         tsi_val = _interp_1d(times, tsi_series, day) if tsi_series is not None else float(config.S_0)
         spec = _interp_2d_time(times, spec_series, day)
         spec = np.clip(spec, 0.0, None)
+        # CMIP6 solar files store one fraction per RRTMG-SW band (14 bands).
+        # The RRTMG solver expects one fraction per g-point (112 g-points).
+        # When the loaded spectral dimension is n_bands, expand to n_gpts.
+        if spec_series.shape[1] < 50:  # n_bands (14) << n_gpts (112/224)
+            from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+                _DEFAULT_SW_GAS,
+            )
+            spec = _expand_bands_to_gpoints(spec, _DEFAULT_SW_GAS)
         if config.normalize_spectral:
             denom = float(np.sum(spec))
             if denom <= 0.0:
@@ -876,6 +884,39 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
         return {"tsi": tsi_val, "solar_fraction_by_gpt": jnp.array(spec)}
 
     raise ValueError(f"Unknown solar source: {config.source!r}")
+
+
+def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.ndarray:
+    """Expand per-band spectral fractions to per-g-point fractions.
+
+    CMIP6 solar files (e.g. ``SSI_frac``) store one value per RRTMG-SW
+    band (14 bands), but the RRTMG solver expects one value per g-point
+    (112 g-points for the standard g112 table).  Each band's fraction is
+    repeated uniformly across all g-points that belong to that band.
+
+    Parameters
+    ----------
+    spec_bands : np.ndarray, shape (n_bands,)
+        Per-band solar fractions.
+    rrtmg_sw_path : str
+        Path to the RRTMG-SW lookup table NetCDF/Zarr (for ``bnd_limits_gpt``).
+
+    Returns
+    -------
+    np.ndarray, shape (n_gpt,)
+        Per-g-point fractions.
+    """
+    import xarray as xr
+    ds = xr.open_dataset(rrtmg_sw_path) if not rrtmg_sw_path.endswith(".zarr") \
+        else xr.open_zarr(rrtmg_sw_path)
+    # bnd_limits_gpt: (n_bands, 2) with 1-based [start, end] gpt indices
+    bnd_lims = ds["bnd_limits_gpt"].values.astype(int)  # 1-indexed
+    ds.close()
+    n_gpt = int(bnd_lims[:, 1].max())
+    out = np.zeros(n_gpt, dtype=np.float64)
+    for i, (lo, hi) in enumerate(bnd_lims):
+        out[lo - 1 : hi] = spec_bands[i]   # convert to 0-indexed slice
+    return out
 
 
 def get_tsi_at_time(config: SolarConfig, day: float) -> float:
