@@ -1096,6 +1096,8 @@ def pad_halo_vector(
     interp_offsets: jax.Array | None = None,
     halo: int = 1,
     duogrid=None,
+    cos_theta: jax.Array | None = None,
+    sin_theta: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Pad vector field components with proper rotation at face boundaries.
 
@@ -1107,9 +1109,11 @@ def pad_halo_vector(
     2. Pad u_east, v_north as scalars (geographic components are continuous)
     3. Convert back to grid-aligned using the padded grid angle
 
-    When the MPI backend is active, the scalar padding step dispatches
-    to :func:`legoesm.parallel.halo_exchange.pad_halo_mpi` via
-    :func:`pad_halo`.
+    When cos_theta/sin_theta are provided (from cdgrid non-orthogonality
+    metrics), the rotation accounts for the non-perpendicular grid axes
+    on the cubed sphere.  This eliminates the O(cos_theta) error in the
+    standard orthogonal rotation at face boundaries where non-orthogonality
+    is largest.
 
     Parameters
     ----------
@@ -1130,6 +1134,9 @@ def pad_halo_vector(
         halo=1: shape (6, 4, n). halo=2: shape (6, 4, 2, n).
     halo : int
         Halo width (1 or 2).
+    cos_theta, sin_theta : jax.Array or None, shape (6, n, n)
+        Non-orthogonality metrics: cos/sin of the angle between grid axes.
+        When None (default), uses the orthogonal rotation.
 
     Returns
     -------
@@ -1138,9 +1145,19 @@ def pad_halo_vector(
     v_padded : jax.Array, shape (6, n+2*halo, n+2*halo)
         Padded grid-aligned y-velocity.
     """
-    # Step 1: Convert to geographic (east, north)
-    u_east = cos_angle * u_data - sin_angle * v_data
-    v_north = sin_angle * u_data + cos_angle * v_data
+    _EPS = float(jnp.finfo(jnp.float32).eps)
+
+    if cos_theta is not None and sin_theta is not None:
+        # Non-orthogonal rotation (exact for cubed-sphere grids).
+        # utmp = V·x_hat, vtmp = V·y_hat, angle(y_hat, x_hat) = theta
+        ca, sa = cos_angle, sin_angle
+        ct, st = cos_theta, jnp.maximum(sin_theta, _EPS)
+        u_east = ca * u_data + sa * (u_data * ct - v_data) / st
+        v_north = sa * u_data + ca * (v_data - u_data * ct) / st
+    else:
+        # Orthogonal rotation (backward compatible)
+        u_east = cos_angle * u_data - sin_angle * v_data
+        v_north = sin_angle * u_data + cos_angle * v_data
 
     # Step 2: Pad geographic components as scalars (auto-dispatches to MPI)
     u_east_padded = pad_halo(u_east, halo=halo, interp_offsets=interp_offsets,
@@ -1149,8 +1166,18 @@ def pad_halo_vector(
                                duogrid=duogrid)
 
     # Step 3: Convert back to grid-aligned using padded angle
-    u_padded = cos_angle_padded * u_east_padded + sin_angle_padded * v_north_padded
-    v_padded = -sin_angle_padded * u_east_padded + cos_angle_padded * v_north_padded
+    cap, sap = cos_angle_padded, sin_angle_padded
+    if cos_theta is not None and sin_theta is not None:
+        # Non-orthogonal back-rotation: vtmp = cos_beta*u_east + sin_beta*v_north
+        ct_pad = jnp.pad(cos_theta, [(0, 0), (halo, halo), (halo, halo)], mode='edge')
+        st_pad = jnp.pad(sin_theta, [(0, 0), (halo, halo), (halo, halo)], mode='edge')
+        cos_beta = cap * ct_pad - sap * st_pad
+        sin_beta = sap * ct_pad + cap * st_pad
+        u_padded = cap * u_east_padded + sap * v_north_padded
+        v_padded = cos_beta * u_east_padded + sin_beta * v_north_padded
+    else:
+        u_padded = cap * u_east_padded + sap * v_north_padded
+        v_padded = -sap * u_east_padded + cap * v_north_padded
 
     return u_padded, v_padded
 

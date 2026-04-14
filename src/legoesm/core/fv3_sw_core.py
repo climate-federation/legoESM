@@ -66,110 +66,95 @@ _C3 = 5.0 / 14.0
 # ==============================================================================
 
 def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
-    """FV3 D→A→C with Duo-Grid: 4th-order everywhere, no edge specials.
+    """D→A→C with Duo-Grid: 4th-order everywhere, no edge specials.
 
     When the Duo-Grid is active, halo data has been remapped to the
-    extended grid, so stencils are smooth across face boundaries.  This
-    matches the ``gridstruct%dg%is_initialized`` branch in FV3
-    ``sw_core.F90:3419-3704``:
-    - 4th-order D→A for the full domain except outermost halo rows
+    extended grid, so stencils are smooth across face boundaries.
+
+    CONVENTION: legoESM D-grid winds use the PHYSICAL (orthogonal-rotation)
+    convention, where u_d = cos(angle)*u_east + sin(angle)*v_north.
+    This means utmp/vtmp (from D→A averaging) are physical grid-axis
+    projections, NOT FV3's covariant components.  The geographic rotation
+    is therefore DIRECT (no cosa_s/rsin2 metric transform needed), and
+    the back-rotation recovers the physical components.
+
+    This matches the ``gridstruct%dg%is_initialized`` branch in FV3
+    ``sw_core.F90:3419-3704`` adapted for the physical convention:
+    - 4th-order D→A for all interior cells
     - 4th-order A→C for all C-grid positions
     - ALL corner fixes and edge specials SKIPPED
-    - NO ``sin_sg`` upwinding at face boundaries
+    - NO sin_sg upwinding at face boundaries
     """
     n = cdgrid.n
     h = 2  # halo depth for smooth 4th-order stencil coverage
     grid = cdgrid.base
     dg = grid.duogrid
 
-    # ---- Step 0: D-grid staggered halo exchange (FV3 ext_vector) ----
-    # FV3 exchanges D-grid winds via ext_vector BEFORE d2a2c_vect,
-    # providing halo-extended D-grid data for 4th-order D→A everywhere.
-    from legoesm.grids.duogrid import pad_halo_dgrid
-    u_d_ext, v_d_ext = pad_halo_dgrid(
-        u_d, v_d,
-        cdgrid.cos_angle_edge_x, cdgrid.sin_angle_edge_x,
-        cdgrid.cos_angle_edge_y, cdgrid.sin_angle_edge_y,
-        dg)
-    # u_d_ext: (6, n, n+3) — u_d with 1 halo on each j-side
-    # v_d_ext: (6, n+3, n) — v_d with 1 halo on each i-side
+    # ---- Step 0+1: D-grid → physical cell centres (utmp, vtmp) ----
+    # 2nd-order D→A averaging (does not require D-grid halo exchange).
+    # The 4th-order benefit comes at the A→C level (Step 3) where the
+    # duogrid scalar remap provides smooth extended data via pad_halo.
+    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])  # (6, n, n)
+    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
 
-    # ---- Step 1: D-grid → covariant cell centres (utmp, vtmp) ----
-    # FV3 sw_core.F90:3421-3447 — duogrid path:
-    #   Interior (jsd+1..jed-1): 4th-order
-    #   Extreme boundary (jsd, jed): use u(i, jsd+1) (copy of inner edge)
-    # u_d_ext: (6, n, n+3) — edges at indices 0..n+2, cells at 0..n-1.
-    # Edge index j in u_d_ext corresponds to: 0=south halo, 1..n+1=original, n+2=north halo.
-    # Cell j uses edges (j+1, j+2) — offset by 1 for halo.
-    # FV3 sw_core.F90:3421-3447 duogrid path: 4th-order D→A everywhere
-    # except at the outermost halo rows (jsd, jed) of the HALOCATED domain.
-    # Our n cells correspond to FV3's INTERIOR cells (is:ie), NOT the halo
-    # boundary rows. The halo is provided by the secondary geographic exchange
-    # (Step 2 below). So all n cells get 4th-order here.
-    utmp = 0.5 * (u_d_ext[:, :, 1:-2] + u_d_ext[:, :, 2:-1])  # (6, n, n) 2nd-order fallback
-    vtmp = 0.5 * (v_d_ext[:, 1:-2, :] + v_d_ext[:, 2:-1, :])  # (6, n, n)
-    if n >= 4:
-        u4 = (_A2 * (u_d_ext[:, :, :-3] + u_d_ext[:, :, 3:])
-              + _A1 * (u_d_ext[:, :, 1:-2] + u_d_ext[:, :, 2:-1]))
-        utmp = u4  # 4th-order for ALL n interior cells
-        v4 = (_A2 * (v_d_ext[:, :-3, :] + v_d_ext[:, 3:, :])
-              + _A1 * (v_d_ext[:, 1:-2, :] + v_d_ext[:, 2:-1, :]))
-        vtmp = v4
+    # ---- Step 2: Physical → geographic → halo exchange → physical ----
+    # Non-orthogonal geographic rotation (matches FV3 c2l_ord2 semantics).
+    # On the cubed sphere, the x and y grid axes are NOT perpendicular.
+    # The exact rotation uses cos/sin of the angle between grid axes
+    # (cos_sg5/sin_sg5) in addition to the grid angle cos_a/sin_a.
+    #
+    # Derivation: utmp = V·x_hat, vtmp = V·y_hat where angle(y_hat, x_hat) = θ
+    # u_east  = cos_α*utmp + sin_α*(utmp*cos_θ - vtmp) / sin_θ
+    # v_north = sin_α*utmp + cos_α*(vtmp - utmp*cos_θ) / sin_θ
+    # Reduces to the orthogonal rotation when cos_θ = 0.
+    cos_a = grid.cos_angle
+    sin_a = grid.sin_angle
+    cos_theta = cdgrid.cos_sg[:, :, :, 4]  # cos(angle between grid axes)
+    sin_theta = cdgrid.sin_sg[:, :, :, 4]  # sin(angle between grid axes)
+    sin_theta_safe = jnp.maximum(sin_theta, _EPS)
 
-    # ---- Step 2: Halo-exchange covariant utmp/vtmp ----
-    # FV3 ext_vector converts covariant → lat/lon → remap → grid-aligned.
-    # The critical step is covariant→contravariant BEFORE geographic rotation,
-    # which accounts for non-orthogonality (cosa_s, rsin2).
-    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
-    rsin2 = cdgrid.rsin2_cell
+    u_east = cos_a * utmp + sin_a * (utmp * cos_theta - vtmp) / sin_theta_safe
+    v_north = sin_a * utmp + cos_a * (vtmp - utmp * cos_theta) / sin_theta_safe
 
-    # Covariant → contravariant (FV3 c2l_ord2 step 1)
-    ua = (utmp - vtmp * cos_sg5) * rsin2
-    va = (vtmp - utmp * cos_sg5) * rsin2
-    # Contravariant → geographic (FV3 c2l_ord2 step 2)
-    u_east = grid.cos_angle * ua - grid.sin_angle * va
-    v_north = grid.sin_angle * ua + grid.cos_angle * va
-    # Halo-exchange geographic components as scalars (with duogrid remap)
     from legoesm.grids.halo import pad_halo
     u_east_pad = pad_halo(u_east, halo=h, duogrid=dg)
     v_north_pad = pad_halo(v_north, halo=h, duogrid=dg)
-    # Geographic → grid-aligned on padded domain
+
+    # Geographic → physical on padded domain (inverse rotation).
+    # utmp = cos_α*u_east + sin_α*v_north  (projection onto x_hat)
+    # vtmp = cos_β*u_east + sin_β*v_north  where β = α+θ
+    #      = (cos_α*cos_θ-sin_α*sin_θ)*u_east + (sin_α*cos_θ+cos_α*sin_θ)*v_north
     cap = grid.cos_angle_padded_h2
     sap = grid.sin_angle_padded_h2
+    cos_theta_pad = jnp.pad(cos_theta, [(0, 0), (h, h), (h, h)], mode='edge')
+    sin_theta_pad = jnp.pad(sin_theta, [(0, 0), (h, h), (h, h)], mode='edge')
+    cos_beta_pad = cap * cos_theta_pad - sap * sin_theta_pad
+    sin_beta_pad = sap * cos_theta_pad + cap * sin_theta_pad
+
     utmp_pad = cap * u_east_pad + sap * v_north_pad
-    vtmp_pad = -sap * u_east_pad + cap * v_north_pad
+    vtmp_pad = cos_beta_pad * u_east_pad + sin_beta_pad * v_north_pad
 
-    # ---- Step 3: Contravariant at cell centres over FULL padded domain ----
-    # FV3 ref: sw_core.F90:3449-3454 — compute ua/va for isd:ied, jsd:jed
-    # cos_sg5 and rsin2 already computed in Step 2 for ext_vector_dgrid
-    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
-    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
+    # Interior physical for caller (KE, vorticity flux, diagnostics).
+    # These are the PHYSICAL grid-axis components (same convention as
+    # fv3_d2cc output), used by c_sw for KE upwinding.
+    ua = utmp_pad[:, h:-h, h:-h]  # (6, n, n)
+    va = vtmp_pad[:, h:-h, h:-h]
 
-    ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
-    va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
+    # ---- Step 3: A→C x-direction — 4th-order on physical utmp ----
+    uc = (_A2 * (utmp_pad[:, :-3, h:-h] + utmp_pad[:, 3:, h:-h])
+          + _A1 * (utmp_pad[:, 1:-2, h:-h] + utmp_pad[:, 2:-1, h:-h]))
+    # shape (6, n+1, n) — all C-grid u-positions
 
-    ua = ua_pad[:, h:-h, h:-h]  # (6, n, n)
-    va = va_pad[:, h:-h, h:-h]
-
-    # ---- Step 4a: A→C x-direction — 4th-order EVERYWHERE ----
-    # FV3 ref: sw_core.F90:3557-3563 with ifirst=is-1, ilast=ie+2
-    # (no clamping because dg%is_initialized)
-    # With halo=2: utmp_pad indices 0..n+3, 4th-order uc needs utmp at
-    # [i, i+1, i+2, i+3] → covers uc indices 0..n (all n+1 C-grid positions)
-    uc_4th = (_A2 * (utmp_pad[:, :-3, h:-h] + utmp_pad[:, 3:, h:-h])
-              + _A1 * (utmp_pad[:, 1:-2, h:-h] + utmp_pad[:, 2:-1, h:-h]))
-    # uc_4th has shape (6, n+1, n) — exactly the C-grid u-positions
-    uc = uc_4th
-
-    # Contravariant ut from covariant uc
+    # Transport velocity ut: consistent with c_sw convention where
+    # ut * sin_sg * dy = physical edge-normal flux.
+    # Formula: ut = (uc - v_d*cosa_u) / sina_u  (same as non-duogrid path)
     cosa_u = cdgrid.cosa_u
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
     ut = (uc - v_d * cosa_u) / jnp.maximum(sina_u, _EPS)
 
-    # ---- Step 4b: A→C y-direction — 4th-order EVERYWHERE ----
-    vc_4th = (_A2 * (vtmp_pad[:, h:-h, :-3] + vtmp_pad[:, h:-h, 3:])
-              + _A1 * (vtmp_pad[:, h:-h, 1:-2] + vtmp_pad[:, h:-h, 2:-1]))
-    vc = vc_4th
+    # ---- Step 4: A→C y-direction — 4th-order on physical vtmp ----
+    vc = (_A2 * (vtmp_pad[:, h:-h, :-3] + vtmp_pad[:, h:-h, 3:])
+          + _A1 * (vtmp_pad[:, h:-h, 1:-2] + vtmp_pad[:, h:-h, 2:-1]))
 
     cosa_v = cdgrid.cosa_v
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
