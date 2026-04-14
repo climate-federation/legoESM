@@ -165,9 +165,9 @@ Correction:
 ### 2. area_corner/dxc/dyc now from FV3 supergrid ✅ (Iteration 2)
 Activated `_compute_supergrid_metrics()`: area_corner = sum of 4 supergrid quadrilateral areas, dxc/dyc = supergrid center-to-center distances. Matches FV3 `fv_grid_tools.F90` convention.
 
-### 3. `_d2a2c_vect_duogrid` is an adaptation, not a faithful port
-Routes through geographic east/north convention rather than FV3's native metric conventions.
-Correction: port the Fortran duogrid branch of `d2a2c_vect` directly.
+### 3. `_d2a2c_vect_duogrid` is an adaptation, not a faithful port (partially resolved)
+~~Uses `1/sin`, not FV3's `rsin_u/rsin_v`~~ → fixed in iter 1 (now uses stored rsin_u).
+Remaining: routes through geographic east/north convention rather than FV3's native covariant convention. Requires covariant vector halo exchange to fix fully.
 
 ### 4. `_c_sw` missing boundary KE/vorticity special cases
 Python uses uniform upwind rule at face edges. FV3 uses `uc*sin_sg + v*cos_sg` and `vc*sin_sg + u*cos_sg` at face boundaries (`sw_core.F90:325-364`).
