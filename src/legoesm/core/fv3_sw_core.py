@@ -222,68 +222,72 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
         vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
 
     # ---- Step 2: Halo-exchange COVARIANT utmp/vtmp ----
-    # pad_halo_vector rotates wind components across face boundaries —
-    # correct for covariant (grid-aligned) winds.
+    # halo=2 for edge_interpolate4 at face boundaries (FV3 sw_core.F90:3587).
     grid = cdgrid.base
+    h = 2
     utmp_pad, vtmp_pad = pad_halo_vector(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded, grid.sin_angle_padded,
+        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
         interp_offsets=grid.halo_interp_offsets,
-    )  # each (6, n+2, n+2)
+        halo=h,
+    )  # each (6, n+4, n+4)
 
     # ---- Step 3: Contravariant at cell centres (including halo) ----
-    # cos_sg5/rsin2 are face-local non-orthogonality metrics — edge-padding
-    # is correct because the neighboring face has a different coordinate system.
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
-    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (1, 1), (1, 1)], mode='edge')
-    rsin2_pad = jnp.pad(rsin2, [(0, 0), (1, 1), (1, 1)], mode='edge')
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
 
     ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
     va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
 
-    ua = ua_pad[:, 1:-1, 1:-1]  # (6, n, n)
-    va = va_pad[:, 1:-1, 1:-1]
+    ua = ua_pad[:, h:-h, h:-h]  # (6, n, n)
+    va = va_pad[:, h:-h, h:-h]
 
     # ---- Step 4a: A→C x-direction (covariant utmp → uc) ----
-    # Interior: 4th-order interpolation of COVARIANT utmp
-    uc = 0.5 * (utmp_pad[:, :-1, 1:-1] + utmp_pad[:, 1:, 1:-1])  # (6, n+1, n)
+    # With halo=2: padded cell k → utmp_pad[:, k+h, ...]
+    # u-face i sits between cells i-1 and i → padded indices i+h-1 and i+h
+    uc = 0.5 * (utmp_pad[:, h-1:n+h, h:-h]
+                + utmp_pad[:, h:n+h+1, h:-h])  # (6, n+1, n)
 
     if n > 2 * npt + 2:
-        uc_4th = (_A2 * (utmp_pad[:, :-3, 1:-1] + utmp_pad[:, 3:, 1:-1])
-                  + _A1 * (utmp_pad[:, 1:-2, 1:-1] + utmp_pad[:, 2:-1, 1:-1]))
+        uc_4th = (_A2 * (utmp_pad[:, h-2:n+h-1, h:-h]
+                         + utmp_pad[:, h+1:n+h+2, h:-h])
+                  + _A1 * (utmp_pad[:, h-1:n+h, h:-h]
+                           + utmp_pad[:, h:n+h+1, h:-h]))
         i_lo = npt + 1
         i_hi = n - npt
         uc = uc.at[:, i_lo:i_hi, :].set(uc_4th[:, i_lo - 1:i_hi - 1, :])
 
-    # Near-boundary one-sided stencils (i=2, i=n-2 only — NOT at face edge itself)
+    # One-sided c1/c2/c3 stencil at i=1, n-1 (FV3 sw_core.F90:3586,3594)
     if n > 3:
-        uc = uc.at[:, 2, :].set(
-            _C1 * utmp_pad[:, 5, 1:-1] + _C2 * utmp_pad[:, 4, 1:-1]
-            + _C3 * utmp_pad[:, 3, 1:-1])
-        uc = uc.at[:, n - 2, :].set(
-            _C1 * utmp_pad[:, n - 3, 1:-1] + _C2 * utmp_pad[:, n - 2, 1:-1]
-            + _C3 * utmp_pad[:, n - 1, 1:-1])
+        uc = uc.at[:, 1, :].set(
+            _C1 * utmp_pad[:, h + 2, h:-h] + _C2 * utmp_pad[:, h + 1, h:-h]
+            + _C3 * utmp_pad[:, h, h:-h])
+        uc = uc.at[:, n - 1, :].set(
+            _C1 * utmp_pad[:, n + h - 3, h:-h] + _C2 * utmp_pad[:, n + h - 2, h:-h]
+            + _C3 * utmp_pad[:, n + h - 1, h:-h])
 
-    # AT face boundary (i=1, i=n-1): edge_interpolate4 on CONTRAVARIANT ua
-    # then uc = ut * sin_sg_upwind (covariant from contravariant).
-    # Requires n >= 2 for the 4-point edge stencil to have valid indices.
-    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    for i_bdy in ([1, n - 1] if n >= 2 else []):
-        i_p = i_bdy  # padded offset
-        ua4 = jnp.stack([ua_pad[:, i_p - 1, 1:-1], ua_pad[:, i_p, 1:-1],
-                         ua_pad[:, i_p + 1, 1:-1], ua_pad[:, i_p + 2, 1:-1]],
+    # AT face boundary (i=0, i=n): edge_interpolate4 on CONTRAVARIANT ua
+    # (FV3 sw_core.F90:3587,3603). With halo=2 the 4-point stencil
+    # straddles the face boundary correctly.
+    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    for i_bdy in ([0, n] if n >= 2 else []):
+        i_p = i_bdy + h  # padded offset: cell i → padded index i+h
+        # ua_pad stencil: 4 cells centred on u-face i_bdy
+        ua4 = jnp.stack([ua_pad[:, i_p - 1, h:-h], ua_pad[:, i_p, h:-h],
+                         ua_pad[:, i_p + 1, h:-h], ua_pad[:, i_p + 2, h:-h]],
                         axis=-1)
         dxa4 = jnp.stack([dxc_pad_x[:, i_p - 1, :], dxc_pad_x[:, i_p, :],
                           dxc_pad_x[:, i_p + 1, :], dxc_pad_x[:, i_p + 2, :]],
                          axis=-1)
-        ut_bdy = _edge_interpolate4(ua4, dxa4)  # contravariant
+        ut_bdy = _edge_interpolate4(ua4, dxa4)
 
         i_left = max(i_bdy - 1, 0)
         i_right = min(i_bdy, n - 1)
-        sin_left = cdgrid.sin_sg[:, i_left, :, 2]   # E-edge of left cell
-        sin_right = cdgrid.sin_sg[:, i_right, :, 0]  # W-edge of right cell
+        sin_left = cdgrid.sin_sg[:, i_left, :, 2]
+        sin_right = cdgrid.sin_sg[:, i_right, :, 0]
         uc_bdy = jnp.where(ut_bdy > 0, ut_bdy * sin_left, ut_bdy * sin_right)
         uc = uc.at[:, i_bdy, :].set(uc_bdy)
 
@@ -304,30 +308,33 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
             uc[:, i_bdy, :] / jnp.maximum(sin_upwind, _EPS))
 
     # ---- Step 4b: A→C y-direction (covariant vtmp → vc) ----
-    vc = 0.5 * (vtmp_pad[:, 1:-1, :-1] + vtmp_pad[:, 1:-1, 1:])  # (6, n, n+1)
+    # vtmp_pad axis 2 has n+2h elements.  v-face j → padded j+h-1 and j+h.
+    vc = 0.5 * (vtmp_pad[:, h:-h, h-1:n+h] + vtmp_pad[:, h:-h, h:n+h+1])  # (6, n, n+1)
 
     if n > 2 * npt + 2:
-        vc_4th = (_A2 * (vtmp_pad[:, 1:-1, :-3] + vtmp_pad[:, 1:-1, 3:])
-                  + _A1 * (vtmp_pad[:, 1:-1, 1:-2] + vtmp_pad[:, 1:-1, 2:-1]))
+        vc_4th = (_A2 * (vtmp_pad[:, h:-h, h-2:n+h-1]
+                         + vtmp_pad[:, h:-h, h+1:n+h+2])
+                  + _A1 * (vtmp_pad[:, h:-h, h-1:n+h]
+                           + vtmp_pad[:, h:-h, h:n+h+1]))
         j_lo = npt + 1
         j_hi = n - npt
         vc = vc.at[:, :, j_lo:j_hi].set(vc_4th[:, :, j_lo - 1:j_hi - 1])
 
+    # One-sided c1/c2/c3 stencil at j=1, n-1
     if n > 3:
-        vc = vc.at[:, :, 2].set(
-            _C1 * vtmp_pad[:, 1:-1, 5] + _C2 * vtmp_pad[:, 1:-1, 4]
-            + _C3 * vtmp_pad[:, 1:-1, 3])
-        vc = vc.at[:, :, n - 2].set(
-            _C1 * vtmp_pad[:, 1:-1, n - 3] + _C2 * vtmp_pad[:, 1:-1, n - 2]
-            + _C3 * vtmp_pad[:, 1:-1, n - 1])
+        vc = vc.at[:, :, 1].set(
+            _C1 * vtmp_pad[:, h:-h, h + 2] + _C2 * vtmp_pad[:, h:-h, h + 1]
+            + _C3 * vtmp_pad[:, h:-h, h])
+        vc = vc.at[:, :, n - 1].set(
+            _C1 * vtmp_pad[:, h:-h, n + h - 3] + _C2 * vtmp_pad[:, h:-h, n + h - 2]
+            + _C3 * vtmp_pad[:, h:-h, n + h - 1])
 
-    # AT face boundary (j=1, j=n-1): edge_interpolate4 on va.
-    # Requires n >= 2 for the 4-point edge stencil.
-    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    for j_bdy in ([1, n - 1] if n >= 2 else []):
-        j_p = j_bdy
-        va4 = jnp.stack([va_pad[:, 1:-1, j_p - 1], va_pad[:, 1:-1, j_p],
-                         va_pad[:, 1:-1, j_p + 1], va_pad[:, 1:-1, j_p + 2]],
+    # AT face boundary (j=0, j=n): edge_interpolate4 on va (halo=2 straddles boundary)
+    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
+    for j_bdy in ([0, n] if n >= 2 else []):
+        j_p = j_bdy + h
+        va4 = jnp.stack([va_pad[:, h:-h, j_p - 1], va_pad[:, h:-h, j_p],
+                         va_pad[:, h:-h, j_p + 1], va_pad[:, h:-h, j_p + 2]],
                         axis=-1)
         dya4 = jnp.stack([dyc_pad_y[:, :, j_p - 1], dyc_pad_y[:, :, j_p],
                           dyc_pad_y[:, :, j_p + 1], dyc_pad_y[:, :, j_p + 2]],
@@ -343,9 +350,9 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
 
     vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
 
-    # Same pattern as ut: override only at edge_interpolate4 positions (j=1, n-1).
-    # Face boundaries (j=0, n) keep the standard (vc-u*cos)*rsin_v formula.
-    for j_bdy in [1, n - 1]:
+    # Override only at edge_interpolate4 positions (j=0, n) to recover
+    # edge_interpolate4 result: ut = uc/sin_sg.
+    for j_bdy in [0, n]:
         j_below = max(j_bdy - 1, 0)
         j_above = min(j_bdy, n - 1)
         sin_below = cdgrid.sin_sg[:, :, j_below, 3]
