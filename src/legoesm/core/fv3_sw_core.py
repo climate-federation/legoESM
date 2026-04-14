@@ -375,20 +375,30 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
 
     # 2. Scale transport velocities with dt/2 * edge_length * sin_sg_upwind
+    # Use proper halo exchange for sin_sg (not mode='edge') so cross-face
+    # upwinding is correct at panel boundaries (FV3 fv_grid_utils.F90:570).
+    from legoesm.grids.halo import pad_halo
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
     sg = cdgrid.sin_sg
+    grid = cdgrid.base
 
-    # x-direction: ut → scaled flux
-    sin_sg_left_x = jnp.pad(sg[:, :, :, 2], [(0, 0), (1, 0), (0, 0)], mode='edge')
-    sin_sg_right_x = jnp.pad(sg[:, :, :, 0], [(0, 0), (0, 1), (0, 0)], mode='edge')
-    sin_upwind_x = jnp.where(ut > 0, sin_sg_left_x, sin_sg_right_x)
+    # x-direction: ut → scaled flux (same pattern as compute_transport_quantities)
+    sin_east = sg[:, :, :, 2]   # E-edge of each cell
+    sin_west = sg[:, :, :, 0]   # W-edge of each cell
+    se_pad = pad_halo(sin_east, interp_offsets=grid.halo_interp_offsets)
+    sw_pad = pad_halo(sin_west, interp_offsets=grid.halo_interp_offsets)
+    sin_upwind_x = jnp.where(ut > 0, se_pad[:, :n+1, 1:-1],
+                                      sw_pad[:, 1:n+2, 1:-1])
     ut_scaled = dt2 * ut * dy * sin_upwind_x
 
     # y-direction: vt → scaled flux
-    sin_sg_below_y = jnp.pad(sg[:, :, :, 3], [(0, 0), (0, 0), (1, 0)], mode='edge')
-    sin_sg_above_y = jnp.pad(sg[:, :, :, 1], [(0, 0), (0, 0), (0, 1)], mode='edge')
-    sin_upwind_y = jnp.where(vt > 0, sin_sg_below_y, sin_sg_above_y)
+    sin_north = sg[:, :, :, 3]  # N-edge of each cell
+    sin_south = sg[:, :, :, 1]  # S-edge of each cell
+    sn_pad = pad_halo(sin_north, interp_offsets=grid.halo_interp_offsets)
+    ss_pad = pad_halo(sin_south, interp_offsets=grid.halo_interp_offsets)
+    sin_upwind_y = jnp.where(vt > 0, sn_pad[:, 1:-1, :n+1],
+                                      ss_pad[:, 1:-1, 1:n+2])
     vt_scaled = dt2 * vt * dx * sin_upwind_y
 
     # 3. First-order upwind mass transport

@@ -175,8 +175,8 @@ Python uses uniform upwind rule at face edges. FV3 uses `uc*sin_sg + v*cos_sg` a
 ### 5. Production and forward-backward paths not FV3-equivalent
 `_fv3_forward_backward_step` is a hybrid experiment (not FV3). `_d_sw_native` partially ports `d_sw` but not the full `d_sw1`…`d_sw6` chain.
 
-### 7. Python lacks haloed sin_sg/cos_sg transport metrics
-FV3 fills ghosts and patches tile-corner `sin_sg/cos_sg` entries in `fv_grid_utils.F90:570`. Python uses `mode='edge'` padding at face boundaries, missing the cross-face upwind selection that FV3 provides.
+### 7. sin_sg transport metrics now properly haloed ✅ (Iteration 3)
+`_c_sw` now uses `pad_halo()` with `interp_offsets` for sin_sg upwind selection at face boundaries, matching the `compute_transport_quantities` pattern in `fv_tp_2d.py`. Replaces incorrect `mode='edge'` padding.
 
 ### 8. Boundary ut/vt override drops cross-velocity term
 `_d2a2c_vect` boundary override `ut = uc / sin_sg_upwind` omits the `v*cosa` cross-velocity term that FV3 retains: `ut = (uc - v*cosa)*rsin_u` even at boundaries.
