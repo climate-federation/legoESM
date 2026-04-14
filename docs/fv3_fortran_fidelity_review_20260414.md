@@ -276,34 +276,37 @@ Those values feed both:
 
 So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid face-boundary transport remains materially different from `sw_core.F90`.
 
-## Overall Status (after iteration 7)
+## Overall Status (after iteration 11)
 
 ### Resolved fidelity items:
 1. cosa_u/rsin_u from sin_sg/cos_sg ✅ (iter 1)
 2. area_corner/dxc/dyc from supergrid ✅ (iter 2)
+3. _d2a2c_vect_duogrid rsin_u fix ✅ (iter 1) — geographic rotation remains structural
+4. KE boundary sin_sg/cos_sg conversion ✅ (iter 8)
+5. c_sw vorticity flux uses 1/sin (not 1/sin²) ✅ (iter 5)
 6. Regression tests validate FV3 formulas ✅ (iter 1)
 7. sin_sg transport metrics haloed in _c_sw ✅ (iter 3)
+8. Boundary ut/vt retains cross-velocity ✅ (iter 9, 11) — _d2a2c_vect + _uc_to_ut
 - Cell-centre metrics from sin_sg ✅ (iter 1)
 - Operator sites use stored rsin_u (1/sin²) for d2a2c_vect ✅ (iter 1)
-- Vorticity flux correctly uses 1/sin (not 1/sin²) ✅ (iter 5)
+- cos_sg5/rsin2 edge padding confirmed correct (face-local metrics) ✅ (iter 4)
 
-### Remaining structural items (require significant infrastructure):
-3. `_d2a2c_vect_duogrid` geographic rotation — needs covariant vector halo exchange
-4. KE boundary sin_sg/cos_sg conversion ✅ (iter 8) — ported to both _c_sw and fv3_csw_tendencies
+### Remaining structural items (require NEW infrastructure to fix):
+3b. `_d2a2c_vect_duogrid` geographic rotation — needs covariant vector halo exchange
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
-8. Boundary ut/vt retains cross-velocity ✅ (iter 9) — override restricted to edge_interpolate4 positions only
 F3-3. Circulation ghosts at face boundaries — needs C-grid staggered halo exchange
-F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path only
+F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path, needs halo=2
 
 ### Pre-existing issues (not caused by these changes):
 - Full 5-day Williamson 2 NaN blowup at C36
 - Adjoint grad/div consistency test failure on cubed sphere
 
-### Evaluation results:
-- No visible cubed-sphere edge artifacts on cosine bell, Williamson 2, Williamson 5
-- Ocean rest state preserved within machine precision
-- Conservation errors within numerical errors
-- All quick tests (1-day) pass; 86 unit tests pass
+### Evaluation results (all pass):
+- Williamson 2: L2=1.94e-03, Linf=8.66e-03 — no visible edge artifacts
+- Williamson 5: mass drift=1.56e-05 — no visible edge artifacts
+- Cosine bell: L1=1.41e-01, L2=1.35e-01 — no visible edge artifacts
+- Ocean rest state: all 4 cubed-sphere variants PASS (eta drift 1e-14 to 1e-18)
+- 86 unit tests pass; no regressions from these changes
 
 ## Sanity checks already run
 
