@@ -427,9 +427,17 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         sst = float(np.mean(T[..., 0][wet]))
         sss = float(np.mean(S[..., 0][wet]))
         ssh = float(np.mean(eta[wet]))
-        u = np.asarray(state.u.data)
-        v = np.asarray(state.v.data) if hasattr(state, 'v') else np.zeros_like(u)
-        max_u = float(np.max(np.sqrt(u**2 + v**2)))
+        u_raw = np.asarray(state.u.data)
+        v_raw = np.asarray(state.v.data) if hasattr(state, 'v') else np.zeros_like(u_raw)
+        # C-grid lat-lon: u is (nlat, nlon+1, nlev), v is (nlat+1, nlon, nlev).
+        # Interpolate staggered velocities to cell centers before computing speed.
+        if grid_type == "latlon" and u_raw.shape[1] != T.shape[1]:
+            u_c = 0.5 * (u_raw[:, :-1] + u_raw[:, 1:])
+            v_c = 0.5 * (v_raw[:-1, :] + v_raw[1:, :])
+        else:
+            u_c = u_raw
+            v_c = v_raw
+        max_u = float(np.max(np.sqrt(u_c**2 + v_c**2)))
 
     return {"SST": sst, "SSS": sss, "SSH": ssh, "max_speed": max_u if grid_type != "spectral" else 0.0}
 
