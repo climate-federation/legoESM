@@ -8,17 +8,30 @@ C-grid staggering:
 Key advantages over the A-grid formulation (ocean_pe_latlon.py):
 - Pressure gradient uses compact 1-cell stencil -> no 2*dx null space
 - Divergence sums actual face fluxes -> no checkerboard mode
-- Coriolis coupling is exact at face points with Sadourny averaging
+- Coriolis coupling is on face-averaged velocities (forward-backward
+  Matsuno step in the step function, not in this tendency)
 
 Boundary conditions:
 - Longitude: periodic (u wraps at j=0 and j=n_lon)
 - Latitude: solid wall at poles (v=0 at i=0 and i=n_lat)
 
+Vector-invariant status (see issue #160)
+----------------------------------------
+The momentum equation is split into baroclinic (this file) and
+barotropic (barotropic_latlon_cgrid.py) parts. The baroclinic step
+computes the vorticity flux ζ×u using the *perturbation* velocity u'
+(see section 7b below) and the barotropic solver is purely linear in
+U_bar. The cross terms ζ(u')·V_bar and ζ(U_bar)·v' are therefore
+missing from the total momentum budget. This is not equivalent to
+integrating (f+ζ_total)·u_total and has no known conservation
+property — despite the historical "Sadourny" label, the 2-point ζ /
+4-point raw-v' stencil at section 7b is not Sadourny EC, Sadourny EN,
+Arakawa-Hsu, or Arakawa-Lamb. Fixing this requires a MOM6-style
+slow-forcing coupling; tracked in issue #160.
+
 References
 ----------
 - Griffies (2004): Fundamentals of Ocean Climate Models (MOM framework)
-- Sadourny (1975): The Dynamics of Finite-Difference Models of the
-  Shallow-Water Equations
 - Arakawa & Lamb (1977): Computational Design of the Basic Dynamical
   Processes of the UCLA GCM
 """
@@ -339,18 +352,33 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     du_dt = -dKE_dx - dp_dx / rho_0
     dv_dt = -dKE_dy - dp_dy / rho_0
 
-    # --- 7b. Relative vorticity flux (issue #153) ---
+    # --- 7b. Relative vorticity flux (issue #153, revisited in #160) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + ζ × u.
-    # Coriolis (f × u) is handled in the step function; here we add
-    # the relative vorticity flux ζ × u' using the enstrophy-conserving
-    # Sadourny (1975) averaging.
+    # Coriolis (f × u) is handled in the step function.
+    #
+    # NOTE (#160): This stencil is NOT a standard Sadourny/Arakawa-Hsu/
+    # Arakawa-Lamb vorticity-flux scheme, despite the original commit
+    # message. Specifically:
+    #   (1) ζ is computed from the *perturbation* velocity u', not the
+    #       total velocity, so the cross terms ζ(u')·V_bar and
+    #       ζ(U_bar)·v' are missing.
+    #   (2) zeta_at_u below is a 2-point meridional average (Sadourny
+    #       uses a 4-point PV stencil on corner-centred q = (f+ζ)/h).
+    #   (3) v_at_u uses raw v' rather than the thickness-weighted mass
+    #       flux h·v' required for discrete energy consistency with
+    #       the continuity equation.
+    # Net effect: the term is O(Δx²)-consistent but conserves neither
+    # energy nor enstrophy on the perturbation subsystem. Replacing it
+    # cleanly requires the MOM6-style slow-forcing refactor tracked
+    # in #160.
     zeta = curl_vertex_cgrid(u_prime, v_prime, grid)  # (n_lat+1, n_lon+1, nlev)
 
     # Average ζ from vertices to velocity points
     zeta_at_u = 0.5 * (zeta[:-1, :, :] + zeta[1:, :, :])  # (n_lat, n_lon+1, nlev)
     zeta_at_v = 0.5 * (zeta[:, :-1, :] + zeta[:, 1:, :])  # (n_lat+1, n_lon, nlev)
 
-    # Average v' to u-points (4-point Sadourny average, periodic in lon)
+    # Average v' to u-points (4-point arithmetic mean, periodic in lon).
+    # NOT thickness-weighted — see NOTE above for the consequences.
     v_west = jnp.roll(v_prime, 1, axis=1)  # v'[:, (j-1)%n_lon, :]
     v_at_u_core = 0.25 * (v_prime[:-1] + v_prime[1:]
                           + v_west[:-1] + v_west[1:])  # (n_lat, n_lon, nlev)

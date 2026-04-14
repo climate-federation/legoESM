@@ -10,6 +10,22 @@ Equations (per layer k):
     d(h·S)/dt = -div(h·u·S) + K_h·h·lap(S) + K_v·d²S/dz²
     dη/dt = -Σ_k div(h_k · u_k)
 
+TRiSK split status (see issue #160)
+-----------------------------------
+The PV-flux term below uses q = ζ_rel / h (relative vorticity of the
+perturbation velocity only), NOT the full PV q = (f+ζ_total)/h_total
+required by the Ringler-Thuburn-Skamarock-Klemp energy-conserving
+identity. The planetary Coriolis force f × u is applied separately as
+a forward-backward (Matsuno) step in the step function. This split
+was introduced when closing #103 (MPAS ocean depth-mean Coriolis
+double-counting), and it trades one inconsistency for another: the
+TRiSK energy-conservation property is preserved only for the
+perturbation subsystem, the Rossby-wave β coupling on the barotropic
+mode is underrepresented, and the transport paired with q inside
+pv_flux_*_conserving_3d is h·u' rather than the continuity-equation
+flux h·u_total. Fixing this cleanly requires the MOM6-style
+slow-forcing refactor tracked in issue #160.
+
 References
 ----------
 - Ringler, T. D., et al. (2010). J. Comput. Phys., 229(9), 3065-3090.
@@ -180,11 +196,19 @@ def mpas_ocean_baroclinic_tendencies(
     # Pressure gradient + Bernoulli
     grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
 
-    # PV flux: RELATIVE VORTICITY from perturbation velocity ONLY.
+    # PV flux: relative vorticity from perturbation velocity ONLY.
+    # NOTE (#160): This is NOT the TRiSK potential vorticity. Real
+    # TRiSK requires q = (f + ζ_total) / h_total with transport
+    # F = h_total · u_total. Here f is handled in the Matsuno
+    # Coriolis step and u_prime is used in place of u_total, so the
+    # Ringler et al. (2010) energy-conservation identity holds only
+    # for the perturbation subsystem. See the module docstring and
+    # `potential_vorticity_vertex_3d` in core/operators_voronoi.py
+    # for the correct full-PV helper.
     zeta_v = curl_vertex_3d(u_prime_3d, mesh)  # (nVertices, nlev)
     h_v = vertex_thickness_3d(h_k, mesh)  # (nVertices, nlev)
     h_v_safe = jnp.maximum(h_v, 1e-10)
-    q_vort = zeta_v / h_v_safe  # PV without f
+    q_vort = zeta_v / h_v_safe  # PV without f — see NOTE above
     if config.pv_scheme == "energy":
         pv_flux = pv_flux_energy_conserving_3d(u_prime_3d, h_k, q_vort, mesh)
     else:
