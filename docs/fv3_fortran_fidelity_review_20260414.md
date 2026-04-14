@@ -291,11 +291,15 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 - Operator sites use stored rsin_u (1/sin²) for d2a2c_vect ✅ (iter 1)
 - cos_sg5/rsin2 edge padding confirmed correct (face-local metrics) ✅ (iter 4)
 
-### Remaining structural items (require NEW infrastructure to fix):
+### Resolved in iteration 13-14:
+- Edge-padded 4th-order D→A for duogrid boundary cells ✅ (iter 13)
+- Linear extrapolation for circulation boundary halo ✅ (iter 13) 
+- halo=2 for d2a2c_vect edge_interpolate4 at face boundaries ✅ (iter 14) — cosine bell L1 improved 10%
+
+### Remaining structural items:
 3b. `_d2a2c_vect_duogrid` geographic rotation — needs covariant vector halo exchange
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
-F3-3. Circulation ghosts at face boundaries — needs C-grid staggered halo exchange
-F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path, needs halo=2
+F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path
 
 ### Pre-existing issues (not caused by these changes):
 - Full 5-day Williamson 2 NaN blowup at C36
