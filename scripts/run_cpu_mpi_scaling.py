@@ -414,20 +414,10 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     physics_fn = _build_physics_fn(physics_level, "latlon")
 
     if n_ranks > 1:
-        from legoesm.parallel.latlon_mpi import (
-            make_latlon_band_layout,
-            scatter_state_latlon,
-            make_latlon_mpi_step,
-        )
-        layout = make_latlon_band_layout(rank, n_ranks, n_lat, n_lon)
-        state = scatter_state_latlon(state, layout)
-        _mpi_step = make_latlon_mpi_step(model, grid, layout, sigma, config)
-        # Wrap physics into the step call.
-        if physics_fn is not None:
-            _phys = physics_fn
-            step_fn = lambda s, dt: _mpi_step(s, dt, physics_fn=_phys)
-        else:
-            step_fn = lambda s, dt: _mpi_step(s, dt)
+        from legoesm.parallel.latlon_mpi import make_latlon_mpi_step
+        # make_latlon_mpi_step raises NotImplementedError — lat-lon
+        # MPI local-compute requires operator adaptation not yet done.
+        make_latlon_mpi_step(model, grid, None, sigma, config)
     else:
         if physics_fn is not None:
             _phys = physics_fn

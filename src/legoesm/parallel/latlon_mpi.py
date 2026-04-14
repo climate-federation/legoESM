@@ -412,86 +412,27 @@ def make_latlon_mpi_step(
 ) -> Callable:
     """Create an MPI-aware step function for the lat-lon C-grid dycore.
 
-    Uses the **gather-compute-scatter** pattern: each rank gathers
-    the full global state, calls ``model.step`` on it (using the
-    original global grid with correct polar BCs, conservation fixers,
-    polar filter, etc.), then extracts its local band from the result.
+    Not yet implemented.  True lat-lon MPI scaling requires adapting
+    the C-grid operators (gradient, divergence, Coriolis, polar filter)
+    to work on latitude sub-domains with halo exchange, which is a
+    significant refactor.  The infrastructure for domain decomposition
+    (``LatLonBandLayout``, ``scatter_state_latlon``,
+    ``gather_state_latlon``, ``_exchange_halo_latlon``) is in place;
+    what remains is wiring halo exchange into each operator's boundary
+    treatment and the model's conservation/polar-filter logic.
 
-    This preserves the model's complete behaviour — RK integration,
-    physics coupling, polar filter, mass fixer, precision casting —
-    exactly as in the serial case.  The trade-off is O(N) memory per
-    rank instead of O(N/P), which is acceptable for moderate
-    resolutions.  A halo-exchange-based local-compute approach would
-    save memory but requires adapting every operator for subdomain
-    boundaries; that is left as a future optimisation.
-
-    Parameters
-    ----------
-    model : CGridLatLonPrimitiveEquationModel
-        The original model built on the global grid.
-    grid : LatLonGrid
-        Global grid.
-    layout : LatLonBandLayout
-    sigma : SigmaCoordinate or HybridSigmaPressureCoordinate
-    config : CGridLatLonPrimitiveEquationConfig
-
-    Returns
-    -------
-    step_fn : callable
-        ``step_fn(state, dt) -> state`` accepting and returning
-        rank-local (interior-only) state.
+    Raises
+    ------
+    NotImplementedError
+        Always.  Use single-rank execution for lat-lon benchmarks,
+        or cubed-sphere / icosahedral grids for MPI scaling.
     """
-    try:
-        from mpi4py import MPI
-        comm = MPI.COMM_WORLD
-    except ImportError:
-        comm = None
-
-    def _allgather_field(local_field):
-        """Gather local latitude bands into a global array on all ranks."""
-        if comm is None or comm.Get_size() == 1:
-            return local_field
-        gathered = comm.allgather(local_field)
-        return jnp.concatenate(gathered, axis=0)
-
-    def _allgather_state(local_state):
-        """Reconstruct the global state on every rank."""
-        T_global = _allgather_field(local_state.T)
-        p_s_global = _allgather_field(local_state.p_s)
-        phis_global = _allgather_field(local_state.phis)
-        u_global = _allgather_field(local_state.u)
-        # v: each rank has (n_lat_local+1) rows; send interior rows
-        # [0:n_lat_local], last rank sends all (n_lat_local+1) rows.
-        if layout.north_rank is not None:
-            v_to_send = local_state.v[:-1]
-        else:
-            v_to_send = local_state.v
-        v_global = _allgather_field(v_to_send)
-
-        tracers_global = {}
-        if hasattr(local_state, 'tracers') and local_state.tracers:
-            for name, tr in local_state.tracers.items():
-                tracers_global[name] = _allgather_field(tr)
-
-        return local_state._replace(
-            u=u_global, v=v_global, T=T_global,
-            p_s=p_s_global, phis=phis_global,
-            tracers=tracers_global if tracers_global else local_state.tracers,
-        )
-
-    def step_fn(state_local, dt, physics_fn=None):
-        """One timestep: gather → model.step → scatter."""
-        # 1. Reconstruct global state on every rank.
-        state_global = _allgather_state(state_local)
-
-        # 2. Full model step on the global domain.
-        #    This uses the original model with correct polar BCs,
-        #    conservation fixers, polar filter, physics, etc.
-        result_global = model.step(
-            state_global, dt, physics_fn=physics_fn,
-        )
-
-        # 3. Extract this rank's local band from the result.
-        return scatter_state_latlon(result_global, layout)
-
-    return step_fn
+    raise NotImplementedError(
+        "Lat-lon MPI local-compute stepping is not yet implemented. "
+        "The domain decomposition infrastructure (LatLonBandLayout, "
+        "scatter/gather, halo exchange) exists, but the C-grid "
+        "operators and model internals (polar filter, mass fixer) "
+        "require adaptation for latitude sub-domains.  Run lat-lon "
+        "benchmarks with a single rank, or use cubed-sphere or "
+        "icosahedral grids for MPI scaling tests."
+    )
