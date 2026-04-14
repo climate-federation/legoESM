@@ -112,9 +112,15 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     ua = (utmp - vtmp * cos_sg5) * rsin2
     va = (vtmp - utmp * cos_sg5) * rsin2
 
-    # ---- Step 4: Scalar halo exchange for A→C ----
-    utmp_pad = pad_halo(utmp, halo=h, duogrid=dg)  # (6, n+4, n+4)
-    vtmp_pad = pad_halo(vtmp, halo=h, duogrid=dg)
+    # ---- Step 4: VECTOR halo exchange for A→C ----
+    # utmp/vtmp are covariant grid-axis projections that change meaning
+    # across face boundaries — must use vector rotation (not scalar exchange).
+    utmp_pad, vtmp_pad = pad_halo_vector(
+        utmp, vtmp,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+        halo=h, duogrid=dg,
+    )  # each (6, n+4, n+4)
 
     # ---- Step 5: A→C interpolation — 4th-order ----
     uc = (_A2 * (utmp_pad[:, :-3, h:-h] + utmp_pad[:, 3:, h:-h])
