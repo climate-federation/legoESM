@@ -446,6 +446,71 @@ class TestConservation:
         assert jnp.all(jnp.isfinite(state_fixed.eta.data))
         assert jnp.all(jnp.isfinite(state_fixed.T.data))
 
+    def test_fixer_runs_under_fp32_policy(
+        self, state, mesh, z_coord, config,
+    ):
+        """Regression for issue #167.
+
+        The previous implementation hard-coded float64 upcasts in every
+        reduction, which crashed on backends without x64 support (notably
+        Apple Metal). The fix routes all accumulations through the
+        ``ocean_diagnostics`` precision policy. Under a pure fp32 policy
+        with no module overrides — simulating the Metal backend on an
+        x64-capable host — the fixer must run and return finite, fp32
+        output instead of silently upcasting back to fp64.
+        """
+        from legoesm.core.precision import (
+            PrecisionPolicy,
+            get_policy,
+            set_policy,
+            clear_module_overrides,
+            get_module_overrides,
+            set_module_override,
+        )
+
+        prev_policy = get_policy()
+        prev_overrides = get_module_overrides()
+
+        try:
+            set_policy(PrecisionPolicy.fp32())
+            clear_module_overrides()
+
+            # Cast the fixture state down to fp32 to match the policy.
+            def _to_fp32(leaf):
+                if (
+                    isinstance(leaf, jax.Array)
+                    and jnp.issubdtype(leaf.dtype, jnp.floating)
+                ):
+                    return leaf.astype(jnp.float32)
+                return leaf
+
+            state_fp32 = jax.tree.map(_to_fp32, state)
+
+            state_new = state_fp32._replace(
+                eta=state_fp32.eta.replace(
+                    data=state_fp32.eta.data
+                    + jnp.float32(0.01) * state_fp32.land_mask.data,
+                ),
+            )
+
+            state_fixed = mpas_ocean_conservation_fixer(
+                state_new, state_fp32, mesh, z_coord, config,
+            )
+
+            assert jnp.all(jnp.isfinite(state_fixed.eta.data))
+            assert jnp.all(jnp.isfinite(state_fixed.T.data))
+            assert jnp.all(jnp.isfinite(state_fixed.S.data))
+            # No silent upcast — outputs must stay in fp32.
+            assert state_fixed.eta.data.dtype == jnp.float32
+            assert state_fixed.T.data.dtype == jnp.float32
+            assert state_fixed.S.data.dtype == jnp.float32
+        finally:
+            set_policy(prev_policy)
+            clear_module_overrides()
+            for module, roles in prev_overrides.items():
+                if roles:
+                    set_module_override(module, **roles)
+
 
 # ============================================================================
 # Test: Simple Ocean
