@@ -716,11 +716,21 @@ def pad_halo_vector_4d(
     # Step 1: convert to geographic
     u_east = ca * u_data - sa * v_data
     v_north = sa * u_data + ca * v_data
-    # Step 2: pad as scalars (one communication per component)
-    u_east_padded = pad_halo_4d(u_east, halo=halo, interp_offsets=interp_offsets,
-                                 duogrid=duogrid)
-    v_north_padded = pad_halo_4d(v_north, halo=halo, interp_offsets=interp_offsets,
-                                  duogrid=duogrid)
+    # Step 2: pad as scalars.
+    # When MPI is active, pack both components along the level axis and
+    # do one exchange instead of two, halving MPI message count.
+    if _halo_backend == "mpi":
+        from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
+        packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
+        packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+        nlev = u_data.shape[-1]
+        u_east_padded = packed_padded[..., :nlev]
+        v_north_padded = packed_padded[..., nlev:]
+    else:
+        u_east_padded = pad_halo_4d(u_east, halo=halo, interp_offsets=interp_offsets,
+                                     duogrid=duogrid)
+        v_north_padded = pad_halo_4d(v_north, halo=halo, interp_offsets=interp_offsets,
+                                      duogrid=duogrid)
     # Step 3: convert back using padded angles
     cap = cos_angle_padded[..., None]
     sap = sin_angle_padded[..., None]
@@ -1159,11 +1169,20 @@ def pad_halo_vector(
         u_east = cos_angle * u_data - sin_angle * v_data
         v_north = sin_angle * u_data + cos_angle * v_data
 
-    # Step 2: Pad geographic components as scalars (auto-dispatches to MPI)
-    u_east_padded = pad_halo(u_east, halo=halo, interp_offsets=interp_offsets,
-                              duogrid=duogrid)
-    v_north_padded = pad_halo(v_north, halo=halo, interp_offsets=interp_offsets,
-                               duogrid=duogrid)
+    # Step 2: Pad geographic components as scalars.
+    # When MPI is active, pack both into a single 4D exchange to halve
+    # the MPI message count (one exchange instead of two).
+    if _halo_backend == "mpi":
+        from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
+        packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
+        packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+        u_east_padded = packed_padded[..., 0]
+        v_north_padded = packed_padded[..., 1]
+    else:
+        u_east_padded = pad_halo(u_east, halo=halo, interp_offsets=interp_offsets,
+                                  duogrid=duogrid)
+        v_north_padded = pad_halo(v_north, halo=halo, interp_offsets=interp_offsets,
+                                   duogrid=duogrid)
 
     # Step 3: Convert back to grid-aligned using padded angle
     cap, sap = cos_angle_padded, sin_angle_padded

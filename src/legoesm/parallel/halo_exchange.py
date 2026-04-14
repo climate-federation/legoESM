@@ -285,9 +285,17 @@ def _pad_halo_mpi_face_only(
         by_nbr_rank[entry[5]].append(entry)
 
     for nbr_rank, entries in by_nbr_rank.items():
+        # Canonical ordering fix: the sender packs strips sorted by
+        # (nbr_face, nbr_edge) which equals the receiver's (face, edge).
+        # The receiver unpacks sorted by (face, edge) which equals the
+        # sender's (nbr_face, nbr_edge).  This ensures both sides agree
+        # on the strip order within the packed buffer.
+        send_order = sorted(entries, key=lambda e: (e[2], e[3]))
+        recv_order = sorted(entries, key=lambda e: (e[0], e[1]))
+
         # Pack all edge strips destined for this neighbor.
         send_parts = []
-        for face, edge, nbr_face, nbr_edge, is_reversed, _ in entries:
+        for face, edge, nbr_face, nbr_edge, is_reversed, _ in send_order:
             if halo == 1:
                 send_parts.append(_extract_edge_strip(data, face, edge))
             else:
@@ -307,9 +315,9 @@ def _pad_halo_mpi_face_only(
             send_tag, recv_tag, comm,
         )
 
-        # Unpack received strips.
+        # Unpack received strips in canonical recv_order.
         offset = 0
-        for face, edge, nbr_face, nbr_edge, is_reversed, _ in entries:
+        for face, edge, nbr_face, nbr_edge, is_reversed, _ in recv_order:
             if halo == 1:
                 strip = recv_buf[offset:offset + n]
                 offset += n
@@ -399,9 +407,15 @@ def _pad_halo_mpi_tiled(
 
     # --- Phase 2: pack all send buffers, then exchange per neighbor ---
     for nbr_rank, entries in by_nbr_rank.items():
+        # Canonical ordering: send sorted by nbr_edge (receiver's local
+        # edge), recv sorted by edge (sender's nbr_edge).
+        # entry = (edge, nbr_rank, nbr_edge, is_reversed, is_tile_nbr)
+        send_order = sorted(entries, key=lambda e: e[2])
+        recv_order = sorted(entries, key=lambda e: e[0])
+
         # Pack all edges for this neighbor into one contiguous buffer.
         send_parts = []
-        for edge, _, _, _, _ in entries:
+        for edge, _, _, _, _ in send_order:
             if halo == 1:
                 send_parts.append(_extract_edge_strip(data, face, edge))
             else:
@@ -412,9 +426,8 @@ def _pad_halo_mpi_tiled(
         send_buf = jnp.concatenate(send_parts)
 
         # Single sendrecv for all edges to this neighbor.
-        # Tag encodes our rank + a batch identifier.
-        send_tag = rank  # unique per source rank
-        recv_tag = nbr_rank  # expect the neighbor's rank as their tag
+        send_tag = rank
+        recv_tag = nbr_rank
         sendrecv = _get_sendrecv_vjp(mpi4jax)
         recv_buf = sendrecv(
             send_buf, jnp.zeros_like(send_buf),
@@ -424,7 +437,7 @@ def _pad_halo_mpi_tiled(
 
         # --- Phase 3: unpack received strips into padded array ---
         offset = 0
-        for edge, _, nbr_edge, is_reversed, is_tile_nbr in entries:
+        for edge, _, nbr_edge, is_reversed, is_tile_nbr in recv_order:
             if halo == 1:
                 recv_strip = recv_buf[offset:offset + n]
                 offset += n
@@ -529,9 +542,12 @@ def pad_halo_vector_mpi(
     u_east = cos_angle * u_data - sin_angle * v_data
     v_north = sin_angle * u_data + cos_angle * v_data
 
-    # Pad geographic components as scalars via MPI.
-    u_east_padded = pad_halo_mpi(u_east, topology, halo=halo)
-    v_north_padded = pad_halo_mpi(v_north, topology, halo=halo)
+    # Pack both components into a single 4D field and do ONE exchange
+    # instead of two, halving the MPI message count.
+    packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
+    packed_padded = pad_halo_mpi_4d(packed, topology, halo=halo)
+    u_east_padded = packed_padded[..., 0]
+    v_north_padded = packed_padded[..., 1]
 
     # Rotate back to grid-aligned.
     u_padded = (
@@ -676,8 +692,13 @@ def _pad_halo_mpi_face_only_4d(
         by_nbr_rank[entry[5]].append(entry)
 
     for nbr_rank, entries in by_nbr_rank.items():
+        # Canonical ordering: send sorted by (nbr_face, nbr_edge),
+        # recv sorted by (face, edge). See _pad_halo_mpi_face_only.
+        send_order = sorted(entries, key=lambda e: (e[2], e[3]))
+        recv_order = sorted(entries, key=lambda e: (e[0], e[1]))
+
         send_parts = []
-        for face, edge, nbr_face, nbr_edge, is_reversed, _ in entries:
+        for face, edge, nbr_face, nbr_edge, is_reversed, _ in send_order:
             if halo == 1:
                 # shape (n, nlev) → flatten to (n * nlev,)
                 send_parts.append(
@@ -703,7 +724,7 @@ def _pad_halo_mpi_face_only_4d(
 
         offset = 0
         chunk = n * nlev
-        for face, edge, nbr_face, nbr_edge, is_reversed, _ in entries:
+        for face, edge, nbr_face, nbr_edge, is_reversed, _ in recv_order:
             if halo == 1:
                 strip = recv_buf[offset:offset + chunk].reshape(n, nlev)
                 offset += chunk
@@ -770,8 +791,13 @@ def _pad_halo_mpi_tiled_4d(
         by_nbr_rank[entry[1]].append(entry)
 
     for nbr_rank, entries in by_nbr_rank.items():
+        # Canonical ordering: same pattern as face-only mode.
+        # entry = (edge, nbr_rank, nbr_edge, is_reversed, is_tile_nbr)
+        send_order = sorted(entries, key=lambda e: e[2])
+        recv_order = sorted(entries, key=lambda e: e[0])
+
         send_parts = []
-        for edge, _, _, _, _ in entries:
+        for edge, _, _, _, _ in send_order:
             if halo == 1:
                 send_parts.append(
                     _extract_edge_strip_4d(data, face, edge).reshape(-1)
@@ -795,7 +821,7 @@ def _pad_halo_mpi_tiled_4d(
         )
 
         offset = 0
-        for edge, _, nbr_edge, is_reversed, is_tile_nbr in entries:
+        for edge, _, nbr_edge, is_reversed, is_tile_nbr in recv_order:
             if halo == 1:
                 recv_strip = recv_buf[offset:offset + chunk].reshape(n, nlev)
                 offset += chunk
@@ -890,4 +916,6 @@ def packed_pad_halo_mpi_4d(
     splits = [f.shape[-1] for f in fields]
     stacked = jnp.concatenate(fields, axis=-1)
     padded = pad_halo_mpi_4d(stacked, topology, halo)
-    return list(jnp.split(padded, jnp.cumsum(jnp.array(splits[:-1])), axis=-1))
+    import numpy as _np
+    split_indices = list(_np.cumsum(splits[:-1]))
+    return list(jnp.split(padded, split_indices, axis=-1))

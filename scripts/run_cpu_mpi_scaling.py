@@ -414,11 +414,19 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     physics_fn = _build_physics_fn(physics_level, "latlon")
 
     if n_ranks > 1:
-        from legoesm.parallel.latlon_mpi import (
-            make_latlon_band_layout,
-            scatter_state_latlon,
-            make_latlon_mpi_step,
-        )
+        try:
+            from legoesm.parallel.latlon_mpi import (
+                make_latlon_band_layout,
+                scatter_state_latlon,
+                make_latlon_mpi_step,
+            )
+        except ImportError:
+            raise NotImplementedError(
+                "Lat-lon MPI decomposition (legoesm.parallel.latlon_mpi) "
+                "is not yet implemented.  Run lat-lon benchmarks with "
+                "a single rank, or use cubed-sphere or icosahedral grids "
+                "for MPI scaling tests."
+            )
         layout = make_latlon_band_layout(rank, n_ranks, n_lat, n_lon)
         state = scatter_state_latlon(state, layout)
         # MPI step already integrates physics inside tendency_fn when
