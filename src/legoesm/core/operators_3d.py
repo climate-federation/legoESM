@@ -153,27 +153,29 @@ def divergence_3d(
 
 def hyperdiffusion_3d(
     field_3d: jax.Array, grid: CubedSphereGrid, coeff: float,
+    padded: jax.Array | None = None,
 ) -> jax.Array:
     """Compute hyperdiffusion at all levels using native 4D halo.
 
     -coeff * nabla^4(field) where the inner Laplacian is the compact
     stencil and the outer is the standard div(grad) form.
 
-    Total halo exchanges: 5 (regardless of nlev), down from 5*nlev.
-
     Parameters
     ----------
     field_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
     coeff : float
+    padded : jax.Array or None
+        Pre-padded field, shape (6, n+2, n+2, nlev).  When provided,
+        the inner Laplacian skips its own halo exchange (saves 1 msg).
 
     Returns
     -------
     jax.Array : Hyperdiffusion tendency, shape (6, n, n, nlev).
     """
-    # Inner ∇² (compact): 1 halo exchange
-    lap1 = laplacian_compact_3d(field_3d, grid)
-    # Outer ∇² = div(grad): gradient_x + gradient_y + divergence = 1+1+2 = 4 halo exchanges
+    # Inner ∇² (compact): uses pre-padded if available
+    lap1 = laplacian_compact_3d(field_3d, grid, padded=padded)
+    # Outer ∇² = div(grad)
     gx = gradient_x_3d(lap1, grid)
     gy = gradient_y_3d(lap1, grid)
     lap2 = divergence_3d(gx, gy, grid)
@@ -182,6 +184,7 @@ def hyperdiffusion_3d(
 
 def laplacian_compact_3d(
     field_3d: jax.Array, grid: CubedSphereGrid,
+    padded: jax.Array | None = None,
 ) -> jax.Array:
     """Compact-stencil Laplacian at all levels using native 4D halo.
 
@@ -192,14 +195,18 @@ def laplacian_compact_3d(
     ----------
     field_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
+    padded : jax.Array or None
+        Pre-padded field, shape (6, n+2, n+2, nlev).  When provided,
+        the internal halo exchange is skipped (saves 1 MPI message).
 
     Returns
     -------
     jax.Array : ∇²f, shape (6, n, n, nlev)
     """
-    dg = getattr(grid, 'duogrid', None)
-    offsets = None if dg is not None else grid.halo_interp_offsets
-    padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
+    if padded is None:
+        dg = getattr(grid, 'duogrid', None)
+        offsets = None if dg is not None else grid.halo_interp_offsets
+        padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
     interior = padded[:, 1:-1, 1:-1, :]
     hx_sq = (grid.dx / 2.0) ** 2
     hy_sq = (grid.dy / 2.0) ** 2

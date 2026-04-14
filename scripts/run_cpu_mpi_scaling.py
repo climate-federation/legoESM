@@ -414,29 +414,20 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     physics_fn = _build_physics_fn(physics_level, "latlon")
 
     if n_ranks > 1:
-        try:
-            from legoesm.parallel.latlon_mpi import (
-                make_latlon_band_layout,
-                scatter_state_latlon,
-                make_latlon_mpi_step,
-            )
-        except ImportError:
-            raise NotImplementedError(
-                "Lat-lon MPI decomposition (legoesm.parallel.latlon_mpi) "
-                "is not yet implemented.  Run lat-lon benchmarks with "
-                "a single rank, or use cubed-sphere or icosahedral grids "
-                "for MPI scaling tests."
-            )
+        from legoesm.parallel.latlon_mpi import (
+            make_latlon_band_layout,
+            scatter_state_latlon,
+            make_latlon_mpi_step,
+        )
         layout = make_latlon_band_layout(rank, n_ranks, n_lat, n_lon)
         state = scatter_state_latlon(state, layout)
-        # MPI step already integrates physics inside tendency_fn when
-        # model.step is called with physics_fn.  For held_suarez, wrap
-        # the model so the MPI stepper sees physics in each RK stage.
+        _mpi_step = make_latlon_mpi_step(model, grid, layout, sigma, config)
+        # Wrap physics into the step call.
         if physics_fn is not None:
             _phys = physics_fn
-            _orig_step = model.step
-            model.step = lambda s, dt, physics_fn=None: _orig_step(s, dt, physics_fn=_phys)
-        step_fn = make_latlon_mpi_step(model, grid, layout, sigma, config)
+            step_fn = lambda s, dt: _mpi_step(s, dt, physics_fn=_phys)
+        else:
+            step_fn = lambda s, dt: _mpi_step(s, dt)
     else:
         if physics_fn is not None:
             _phys = physics_fn

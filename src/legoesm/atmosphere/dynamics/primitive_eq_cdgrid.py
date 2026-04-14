@@ -347,9 +347,25 @@ def fv3_hydrostatic_tendencies(
     # --- 11. Thermodynamic equation ---
     # Horizontal advection: centred advection using cell-centre velocities
     # === Stage-level packed halo exchange #2 ===
-    # Pad T once, reuse for both x- and y-gradient (saves 1 exchange).
+    # Batch {T, u_cell, v_cell} into one packed exchange (MPI) or
+    # individual exchanges (local).  Pre-padded arrays reused by
+    # gradient, Laplacian, and hyperdiffusion operators downstream.
+    _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
-    _T_pad = _pad_halo_4d(T, interp_offsets=grid.halo_interp_offsets)
+    if _halo_backend == "mpi" and _needs_uv_pad:
+        from legoesm.grids.halo import _mpi_topology
+        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+        _T_pad, _u_cc_pad, _v_cc_pad = packed_pad_halo_mpi_4d(
+            T, u_cell, v_cell, topology=_mpi_topology,
+        )
+    else:
+        _T_pad = _pad_halo_4d(T, interp_offsets=grid.halo_interp_offsets)
+        if _needs_uv_pad:
+            _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=grid.halo_interp_offsets)
+            _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=grid.halo_interp_offsets)
+        else:
+            _u_cc_pad = _v_cc_pad = None
+
     dT_dx = _gradient_x_3d(T, grid, padded=_T_pad)
     dT_dy = _gradient_y_3d(T, grid, padded=_T_pad)
     horiz_adv_T = -(u_cell * dT_dx + v_cell * dT_dy)
@@ -376,7 +392,7 @@ def fv3_hydrostatic_tendencies(
         wind_speed = jnp.sqrt(u_cell**2 + v_cell**2)
         dx_local = grid.dx[..., None]
         nu_T = config.T_diss_coeff * wind_speed * dx_local
-        lap_T = _laplacian_compact_3d(T, grid)
+        lap_T = _laplacian_compact_3d(T, grid, padded=_T_pad)
         dT_dt_data = dT_dt_data + nu_T * lap_T
 
     # --- 12. Diffusion ---
@@ -386,36 +402,33 @@ def fv3_hydrostatic_tendencies(
     # on all modes) and interpolate the tendency back to D-grid corners.
     # This avoids the corner-centre-corner round-trip of _laplacian_dgrid
     # which attenuates the grid-scale mode to near zero.
+    # Pre-padded {T, u_cell, v_cell} from exchange #2 eliminate
+    # redundant halo exchanges in the Laplacian calls.
     if config.A_h > 0:
-        lap_u_cc = _laplacian_compact_3d(u_cell, grid)
-        lap_v_cc = _laplacian_compact_3d(v_cell, grid)
+        lap_u_cc = _laplacian_compact_3d(u_cell, grid, padded=_u_cc_pad)
+        lap_v_cc = _laplacian_compact_3d(v_cell, grid, padded=_v_cc_pad)
         du_d_dt = du_d_dt + config.A_h * _interp_center_to_corner(lap_u_cc, cdgrid)
         dv_d_dt = dv_d_dt + config.A_h * _interp_center_to_corner(lap_v_cc, cdgrid)
-        # Temperature: cell-centre Laplacian (proper halo exchange)
-        lap_T = _laplacian_compact_3d(T, grid)
+        # Temperature: reuse _T_pad (no redundant exchange)
+        lap_T = _laplacian_compact_3d(T, grid, padded=_T_pad)
         dT_dt_data = dT_dt_data + config.A_h * lap_T
 
     # 12b. Hyperdiffusion on D-grid winds (biharmonic)
     #
     # Apply the biharmonic at cell centres (where the compact Laplacian
     # works at full strength) and interpolate the tendency back to
-    # D-grid corners.  The previous approach
-    #   -nu4 * lap_dgrid(lap_dgrid(u_d))
-    # performed TWO centre-corner round-trips, each of which attenuates
-    # the grid-scale mode by ~cos(kh/2)^2.  At the highest resolved
-    # wavenumber the effective damping was near zero, leaving the
-    # cubed-sphere systematically over-energetic.  The cell-centre
-    # path uses only ONE round-trip (centre -> corner) for the final
-    # tendency projection, giving full-strength biharmonic damping on
-    # the wind field — the same as for temperature.
+    # D-grid corners.  Pre-padded arrays eliminate the inner Laplacian's
+    # halo exchange (saves 3 MPI messages: one per field).
     if config.hyperdiff_coeff > 0:
-        # Cell-centre winds are already computed: u_cell, v_cell (6,n,n,nlev)
-        hyperdiff_u_cc = _hyperdiffusion_3d(u_cell, grid, config.hyperdiff_coeff)
-        hyperdiff_v_cc = _hyperdiffusion_3d(v_cell, grid, config.hyperdiff_coeff)
+        hyperdiff_u_cc = _hyperdiffusion_3d(u_cell, grid, config.hyperdiff_coeff,
+                                             padded=_u_cc_pad)
+        hyperdiff_v_cc = _hyperdiffusion_3d(v_cell, grid, config.hyperdiff_coeff,
+                                             padded=_v_cc_pad)
         du_d_dt = du_d_dt + _interp_center_to_corner(hyperdiff_u_cc, cdgrid)
         dv_d_dt = dv_d_dt + _interp_center_to_corner(hyperdiff_v_cc, cdgrid)
-        # Temperature: cell-centre hyperdiffusion (proper halo exchange)
-        dT_dt_data = dT_dt_data + _hyperdiffusion_3d(T, grid, config.hyperdiff_coeff)
+        # Temperature: reuse _T_pad for inner Laplacian
+        dT_dt_data = dT_dt_data + _hyperdiffusion_3d(T, grid, config.hyperdiff_coeff,
+                                                      padded=_T_pad)
 
     # Surface pressure hyperdiffusion (cell-centre)
     if config.hyperdiff_ps_coeff > 0:
