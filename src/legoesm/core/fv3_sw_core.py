@@ -280,8 +280,11 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     # Contravariant ut from covariant uc (FV3 rsin_u = 1/sin²)
     ut = (uc - v_d * cdgrid.cosa_u) * cdgrid.rsin_u
 
-    # At face boundaries: ut = uc / sin_sg_upwind (not the cosa/sina formula)
-    for i_bdy in [0, 1, n - 1, n]:
+    # At edge_interpolate4 positions (i=1, n-1): ut = uc / sin_sg recovers
+    # the edge_interpolate4 result (since uc was set to ut_edge*sin_sg above).
+    # At face boundaries (i=0, n): keep the standard (uc-v*cos)*rsin_u formula
+    # which retains the cross-velocity term (FV3 sw_core.F90:3595-3596).
+    for i_bdy in [1, n - 1]:
         i_left = max(i_bdy - 1, 0)
         i_right = min(i_bdy, n - 1)
         sin_left = cdgrid.sin_sg[:, i_left, :, 2]
@@ -330,7 +333,9 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
 
     vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
 
-    for j_bdy in [0, 1, n - 1, n]:
+    # Same pattern as ut: override only at edge_interpolate4 positions (j=1, n-1).
+    # Face boundaries (j=0, n) keep the standard (vc-u*cos)*rsin_v formula.
+    for j_bdy in [1, n - 1]:
         j_below = max(j_bdy - 1, 0)
         j_above = min(j_bdy, n - 1)
         sin_below = cdgrid.sin_sg[:, :, j_below, 3]
