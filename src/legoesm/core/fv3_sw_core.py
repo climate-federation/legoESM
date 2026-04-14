@@ -372,6 +372,8 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     """
     n = cdgrid.n
     dt2 = 0.5 * dt  # half-step
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
 
     # 1. d2a2c_vect
     ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
@@ -418,7 +420,10 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     rarea = 1.0 / cdgrid.base.area
     h_star = h + (fx[:, :-1, :] - fx[:, 1:, :] + fy[:, :, :-1] - fy[:, :, 1:]) * rarea
 
-    # 4. KE at cell centres
+    # 4. KE at cell centres (FV3 sw_core.F90:303-372)
+    # Duogrid/bounded: simple upwind uc/vc at all cells.
+    # Non-duogrid: face-boundary cells use sin_sg/cos_sg conversion
+    # to get the coordinate-parallel wind (sw_core.F90:323-365).
     uc_left = uc[:, :-1, :]   # (6, n, n)
     uc_right = uc[:, 1:, :]
     ke_u = jnp.where(ua > 0, uc_left, uc_right)
@@ -426,6 +431,30 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     vc_bot = vc[:, :, :-1]    # (6, n, n)
     vc_top = vc[:, :, 1:]
     ke_v = jnp.where(va > 0, vc_bot, vc_top)
+
+    if not use_duogrid:
+        sg = cdgrid.sin_sg
+        cg = cdgrid.cos_sg
+        # x-direction face-boundary KE conversion
+        # Left edge (cell 0, ua > 0): uc*sin_sg(W) + v*cos_sg(W)
+        ke_bdy_left = uc[:, 0, :] * sg[:, 0, :, 0] + v_d[:, 0, :] * cg[:, 0, :, 0]
+        ke_u = ke_u.at[:, 0, :].set(
+            jnp.where(ua[:, 0, :] > 0, ke_bdy_left, ke_u[:, 0, :]))
+        # Right edge (cell n-1, ua <= 0): uc*sin_sg(E) + v*cos_sg(E)
+        ke_bdy_right = (uc[:, n, :] * sg[:, n - 1, :, 2]
+                        + v_d[:, n, :] * cg[:, n - 1, :, 2])
+        ke_u = ke_u.at[:, n - 1, :].set(
+            jnp.where(ua[:, n - 1, :] > 0, ke_u[:, n - 1, :], ke_bdy_right))
+        # y-direction face-boundary KE conversion
+        # Bottom edge (cell j=0, va > 0): vc*sin_sg(S) + u*cos_sg(S)
+        ke_bdy_bot = vc[:, :, 0] * sg[:, :, 0, 1] + u_d[:, :, 0] * cg[:, :, 0, 1]
+        ke_v = ke_v.at[:, :, 0].set(
+            jnp.where(va[:, :, 0] > 0, ke_bdy_bot, ke_v[:, :, 0]))
+        # Top edge (cell j=n-1, va <= 0): vc*sin_sg(N) + u*cos_sg(N)
+        ke_bdy_top = (vc[:, :, n] * sg[:, :, n - 1, 3]
+                      + u_d[:, :, n] * cg[:, :, n - 1, 3])
+        ke_v = ke_v.at[:, :, n - 1].set(
+            jnp.where(va[:, :, n - 1] > 0, ke_v[:, :, n - 1], ke_bdy_top))
 
     # ke = dt/4 * (ua * uc_upwind + va * vc_upwind)
     # NOTE: c_sw uses ONLY kinetic energy for the C-grid gradient, NOT
@@ -447,8 +476,6 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
 
     # Cube vertex corrections — FV3 sw_core.F90:395-401:
     # SKIPPED when duogrid is active (.not. flagstruct%duogrid).
-    dg = cdgrid.base.duogrid
-    use_duogrid = dg is not None and dg.ng >= 2
     if not use_duogrid:
         circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
         circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
@@ -538,7 +565,9 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     uc_mass, vc_mass = fv3_cc2c(u_cc, v_cc, cdgrid)
     dh_dt = cgrid_mass_flux_divergence(h, uc_mass, vc_mass, cdgrid)
 
-    # 3. KE at cell centres (FV3 upwind formula)
+    # 3. KE at cell centres (FV3 upwind formula, sw_core.F90:303-372)
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
     uc_left = uc[:, :-1, :]
     uc_right = uc[:, 1:, :]
     ke_u = jnp.where(ua > 0, uc_left, uc_right)
@@ -546,6 +575,22 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     vc_bot = vc[:, :, :-1]
     vc_top = vc[:, :, 1:]
     ke_v = jnp.where(va > 0, vc_bot, vc_top)
+
+    if not use_duogrid:
+        sg = cdgrid.sin_sg
+        cg = cdgrid.cos_sg
+        ke_bdy_l = uc[:, 0, :] * sg[:, 0, :, 0] + v_d[:, 0, :] * cg[:, 0, :, 0]
+        ke_u = ke_u.at[:, 0, :].set(
+            jnp.where(ua[:, 0, :] > 0, ke_bdy_l, ke_u[:, 0, :]))
+        ke_bdy_r = uc[:, n, :] * sg[:, n-1, :, 2] + v_d[:, n, :] * cg[:, n-1, :, 2]
+        ke_u = ke_u.at[:, n-1, :].set(
+            jnp.where(ua[:, n-1, :] > 0, ke_u[:, n-1, :], ke_bdy_r))
+        ke_bdy_b = vc[:, :, 0] * sg[:, :, 0, 1] + u_d[:, :, 0] * cg[:, :, 0, 1]
+        ke_v = ke_v.at[:, :, 0].set(
+            jnp.where(va[:, :, 0] > 0, ke_bdy_b, ke_v[:, :, 0]))
+        ke_bdy_t = vc[:, :, n] * sg[:, :, n-1, 3] + u_d[:, :, n] * cg[:, :, n-1, 3]
+        ke_v = ke_v.at[:, :, n-1].set(
+            jnp.where(va[:, :, n-1] > 0, ke_v[:, :, n-1], ke_bdy_t))
 
     ke = 0.5 * (ua * ke_u + va * ke_v)
     B = ke + g * (h + h_s)

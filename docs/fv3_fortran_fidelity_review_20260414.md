@@ -289,7 +289,7 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 
 ### Remaining structural items (require significant infrastructure):
 3. `_d2a2c_vect_duogrid` geographic rotation — needs covariant vector halo exchange
-4. KE boundary sin_sg/cos_sg conversion — non-duogrid path only
+4. KE boundary sin_sg/cos_sg conversion ✅ (iter 8) — ported to both _c_sw and fv3_csw_tendencies
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
 8. Boundary ut/vt cross-velocity — non-duogrid path only
 F3-3. Circulation ghosts at face boundaries — needs C-grid staggered halo exchange
