@@ -1374,7 +1374,9 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
     """Cell-centre velocities to C-grid edge-normal velocities.
 
     Uses halo exchange of cell-centre velocities followed by 2nd-order
-    interpolation to edge midpoints.
+    interpolation to edge midpoints.  When duogrid is active, the vector
+    halo exchange uses the duogrid scalar remap for smoother cross-face
+    data.
 
     Parameters
     ----------
