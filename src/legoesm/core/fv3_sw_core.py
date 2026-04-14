@@ -91,20 +91,21 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     dg = grid.duogrid
 
     # ---- Step 0+1: D-grid → physical cell centres (utmp, vtmp) ----
-    # FV3 sw_core.F90:3421-3447: 4th-order interior, 2nd-order at
-    # halo boundaries.  We use 4th-order for cells 1..n-2 (where the
-    # stencil doesn't reach beyond the D-grid array) and 2nd-order
-    # at boundary cells 0 and n-1.
-    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])  # (6, n, n) — 2nd-order base
-    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
+    # FV3 sw_core.F90:3421-3447: 4th-order everywhere on haloed domain.
+    # FV3 has haloed D-grid from duogrid remap; we lack D-grid halos,
+    # so pad with edge values to extend the 4th-order stencil to all cells.
+    # This matches FV3's edge-cell treatment (lines 3428-3433) where
+    # boundary halo cells use `u(j+1)` — equivalent to edge-padding.
     if n > 3:
-        # 4th-order override for interior cells
-        utmp_4th = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
-                    + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))  # (6, n, n-2)
-        utmp = utmp.at[:, :, 1:-1].set(utmp_4th)
-        vtmp_4th = (_A2 * (v_d[:, :-3, :] + v_d[:, 3:, :])
-                    + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))  # (6, n-2, n)
-        vtmp = vtmp.at[:, 1:-1, :].set(vtmp_4th)
+        u_d_jp = jnp.pad(u_d, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n, n+3)
+        utmp = (_A2 * (u_d_jp[:, :, :-3] + u_d_jp[:, :, 3:])
+                + _A1 * (u_d_jp[:, :, 1:-2] + u_d_jp[:, :, 2:-1]))  # (6, n, n)
+        v_d_ip = jnp.pad(v_d, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+3, n)
+        vtmp = (_A2 * (v_d_ip[:, :-3, :] + v_d_ip[:, 3:, :])
+                + _A1 * (v_d_ip[:, 1:-2, :] + v_d_ip[:, 2:-1, :]))  # (6, n, n)
+    else:
+        utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])  # (6, n, n)
+        vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
 
     # ---- Step 2: Physical → geographic → halo exchange → physical ----
     # Non-orthogonal geographic rotation (matches FV3 c2l_ord2 semantics).
