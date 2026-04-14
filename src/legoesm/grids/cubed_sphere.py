@@ -204,7 +204,7 @@ def create_cubed_sphere(
     dtype=None,
     use_duogrid: bool = False,
     k2e_nord: int = 2,
-    duogrid_ng: int = 3,
+    duogrid_ng: int | None = None,
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -271,11 +271,18 @@ def create_cubed_sphere(
     sin_angle_padded_h2_val = jnp.sin(angle_padded_h2)
     halo_offsets_h2 = compute_halo_interp_offsets_h2(n)
 
-    # Optional: Duo-Grid kinked-to-extended remapping data
+    # Optional: Duo-Grid kinked-to-extended remapping data.
+    # Duo-Grid requires ng >= 2 so both halo depths used by the FV3
+    # d2a2c_vect and PPM transport paths are remapped. Since ng <= n//2,
+    # this means n >= 4. For n < 4, silently skip — these toy grids are
+    # too small for face-boundary artifacts to be meaningful.
     duogrid = None
-    if use_duogrid:
+    if use_duogrid and n >= 4:
         from legoesm.grids.duogrid import create_duogrid_data
-        duogrid = create_duogrid_data(n, radius=radius, ng=duogrid_ng,
+        # Default ng: min(3, n//2) — FV3 uses 3 at production resolutions,
+        # but small test grids need a smaller halo to fit the stencil.
+        ng = duogrid_ng if duogrid_ng is not None else min(3, n // 2)
+        duogrid = create_duogrid_data(n, radius=radius, ng=ng,
                                        k2e_nord=k2e_nord)
 
     # Grid arrays use the storage dtype from the precision policy.

@@ -207,17 +207,17 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
 
     elif grid_type == "latlon":
         from legoesm.grids.latlon import create_latlon_grid
-        from legoesm.ocean.dynamics.ocean_model_latlon import LatLonOceanModel
-        from legoesm.ocean.state import LatLonOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+        from legoesm.ocean.state import LatLonCGridOceanConfig
 
         grid = create_latlon_grid(params["n_lat"], params["n_lon"])
-        config = LatLonOceanConfig(
+        config = LatLonCGridOceanConfig(
             A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
             n_barotropic_substeps=30,
             use_conservation_fixer=True,
             physics=None,
         )
-        model = LatLonOceanModel(grid, z_coord, config)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "latlon"
 
     elif grid_type == "mpas":
@@ -271,8 +271,8 @@ def _init_rest_state(grid_type, grid, z_coord, H_max):
         from legoesm.ocean.init import rest_state_ocean
         return rest_state_ocean(grid, z_coord, H_max=H_max)
     elif grid_type == "latlon":
-        from legoesm.ocean.init_latlon import rest_state_latlon_ocean
-        return rest_state_latlon_ocean(grid, z_coord, H_max=H_max)
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        return rest_state_latlon_cgrid_ocean(grid, z_coord, H_max=H_max)
     elif grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
@@ -427,9 +427,17 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         sst = float(np.mean(T[..., 0][wet]))
         sss = float(np.mean(S[..., 0][wet]))
         ssh = float(np.mean(eta[wet]))
-        u = np.asarray(state.u.data)
-        v = np.asarray(state.v.data) if hasattr(state, 'v') else np.zeros_like(u)
-        max_u = float(np.max(np.sqrt(u**2 + v**2)))
+        u_raw = np.asarray(state.u.data)
+        v_raw = np.asarray(state.v.data) if hasattr(state, 'v') else np.zeros_like(u_raw)
+        # C-grid lat-lon: u is (nlat, nlon+1, nlev), v is (nlat+1, nlon, nlev).
+        # Interpolate staggered velocities to cell centers before computing speed.
+        if grid_type == "latlon" and u_raw.shape[1] != T.shape[1]:
+            u_c = 0.5 * (u_raw[:, :-1] + u_raw[:, 1:])
+            v_c = 0.5 * (v_raw[:-1, :] + v_raw[1:, :])
+        else:
+            u_c = u_raw
+            v_c = v_raw
+        max_u = float(np.max(np.sqrt(u_c**2 + v_c**2)))
 
     return {"SST": sst, "SSS": sss, "SSH": ssh, "max_speed": max_u if grid_type != "spectral" else 0.0}
 

@@ -58,6 +58,33 @@ class DuoGridData(NamedTuple):
     ext_lon: jax.Array   # float64
     ext_lat: jax.Array   # float64
 
+    # --- Lagrange corner interpolation coefficients ---
+    # Precomputed 4th-order Lagrange polynomials for fill_corner_region.
+    # Following FV3 fv_duogrid.F90 compute_lagrange_coeff.
+    # xp: coefficients for X+ direction (east edge → NE/SE corners)
+    # xm: coefficients for X- direction (west edge → NW/SW corners)
+    # yp: coefficients for Y+ direction (north edge → NE/NW corners)
+    # ym: coefficients for Y- direction (south edge → SE/SW corners)
+    # Each: (6, interp_order+1, n_target, n_source_range) or None
+    corner_xp: jax.Array | None  # (6, 4, ng, n) or None
+    corner_xm: jax.Array | None
+    corner_yp: jax.Array | None
+    corner_ym: jax.Array | None
+
+    # --- Extended-grid unit vectors for ext_vector (a2stag_metrics) ---
+    # vlon_ext: unit vector in longitude direction at A-grid positions
+    # vlat_ext: unit vector in latitude direction at A-grid positions
+    # Shape: (6, n+2*ng, n+2*ng, 3) — 3D Cartesian
+    vlon_ext: jax.Array | None
+    vlat_ext: jax.Array | None
+    # ew_ext: east-west edge-normal vectors (2 variants per FV3 a2stag_metrics)
+    # Shape: (6, n+2*ng+1, n+2*ng, 3, 2) — last dim: variant 0=A-grid, 1=B-grid
+    # es_ext: south-north edge-normal vectors
+    # Shape: (6, n+2*ng, n+2*ng+1, 3, 2)
+    # cubed_a2d_halo uses: ud <- es[:,:,:,0], vd <- ew[:,:,:,1]
+    ew_ext: jax.Array | None
+    es_ext: jax.Array | None
+
 
 # ============================================================================
 # Precompute: supergrid, kinked grid, coordinates, coefficients
@@ -337,6 +364,161 @@ def _compute_k2e_coefficients(n: int, ng: int, k2e_nord: int,
     return k2e_coef, k2e_lo
 
 
+def _great_circle_dist(lon1, lat1, lon2, lat2):
+    """Great-circle angular distance between two points."""
+    dlon = lon2 - lon1
+    sin_lat1, cos_lat1 = np.sin(lat1), np.cos(lat1)
+    sin_lat2, cos_lat2 = np.sin(lat2), np.cos(lat2)
+    tmp1 = (cos_lat2 * np.sin(dlon))**2 + (
+        cos_lat1 * sin_lat2 - sin_lat1 * cos_lat2 * np.cos(dlon))**2
+    tmp2 = sin_lat1 * sin_lat2 + cos_lat1 * cos_lat2 * np.cos(dlon)
+    return np.arctan2(np.sqrt(np.maximum(tmp1, 0.0)), tmp2)
+
+
+def _compute_corner_lagrange_coeff(n: int, ng: int, ext_lon, ext_lat):
+    """Compute 4th-order Lagrange corner interpolation coefficients.
+
+    Following FV3 fv_duogrid.F90 compute_lagrange_coeff and
+    lagrange_poly_interp_2d. Uses great-circle distance as the
+    interpolation metric (matching FV3).
+
+    For each corner cell (i, j) in the ng×ng corner region, precompute
+    Lagrange polynomial weights for X+, X-, Y+, Y- directions using the
+    last ``interporder+1`` interior cells along the corresponding edge.
+
+    Returns
+    -------
+    xp, xm, yp, ym : np.ndarray, shape (6, 4, ng_target, n_total)
+        Lagrange weights. For a given target halo cell and source point,
+        xp[face, src_idx, target_idx, :] gives the weight.
+        Actually stored as (6, interporder+1, ng_ext, n_padded) where
+        ng_ext covers the target positions and n_padded = n_source.
+
+    For simplicity and JAX compatibility, we store per-face coefficients as:
+        corner_xp[face, k, i_target] = Lagrange weight for source k at target i
+    Shape: (6, interp_order+1, ng) per edge-parallel strip position.
+    """
+    interp_order = 3  # FV3 default: interporder=3 → 4 stencil points
+    n_stencil = interp_order + 1  # 4
+
+    # 4-point Lagrange stencil requires n >= 4; fall back to averaging
+    if n < n_stencil:
+        return None, None, None, None
+
+    n_ext = n + 2 * ng
+
+    # For each face, compute weights for each direction and target position.
+    # FV3 uses great_circle_dist for the interpolation abscissae.
+    #
+    # X+ direction: interpolate from the last `n_stencil` interior cells
+    # along the east (high-i) edge into the halo at i > ng+n-1.
+    # X- direction: from the first cells along the west (low-i) edge.
+    # Y+ direction: from the last cells along the north (high-j) edge.
+    # Y- direction: from the first cells along the south (low-j) edge.
+
+    # Shapes: (6, n_stencil, ng, n_ext) — one weight per target position
+    # in the halo, for each source cell in the stencil, for each j along
+    # the edge, for each face.
+    # But since corner fill only needs ng×ng corner cells, and the j-index
+    # within the corner is either in the edge-halo or interior, we compute
+    # for all j positions that fill_corner_region will need.
+
+    # Simplified storage: for each face and direction, store (n_stencil, n_ext, n_ext)
+    # where only corner cells are populated. For JAX efficiency, store
+    # compact arrays: xp[face, stencil_k, target_j] for each target i in halo.
+    # FV3 stores xp(interporder+1, ie-interporder:ied+1, jsd:jed+1, 4_stagger)
+    # For istag=0, jstag=0 (A-grid): stagger index = 0*2 + 0 + 1 = 1
+
+    # We'll compute for A-grid stagger (istag=0, jstag=0) which is the
+    # primary case used by fill_corner_region in ext_scalar.
+
+    # For each direction, the source cells are the last/first n_stencil
+    # cells of the interior.  The target is each halo cell.
+
+    xp = np.zeros((6, n_stencil, n_ext, n_ext))
+    xm = np.zeros((6, n_stencil, n_ext, n_ext))
+    yp = np.zeros((6, n_stencil, n_ext, n_ext))
+    ym = np.zeros((6, n_stencil, n_ext, n_ext))
+
+    for face in range(6):
+        # Interior bounds in extended-grid coords
+        i_lo = ng           # first interior i
+        i_hi = ng + n - 1   # last interior i
+        j_lo = ng
+        j_hi = ng + n - 1
+
+        # ---- X+ direction (east side → NE/SE corners) ----
+        # Source cells: i = i_hi - interp_order .. i_hi (= ng+n-4 .. ng+n-1)
+        src_i_xp = list(range(i_hi - interp_order, i_hi + 1))
+        for j_tgt in range(n_ext):
+            # Reference point for distance: the target cell
+            for i_tgt in range(i_hi + 1, n_ext):
+                tgt_lon = ext_lon[face, i_tgt, j_tgt]
+                tgt_lat = ext_lat[face, i_tgt, j_tgt]
+                # Compute signed distances from each source to target
+                dists = np.zeros(n_stencil)
+                for k, si in enumerate(src_i_xp):
+                    dists[k] = _great_circle_dist(
+                        ext_lon[face, si, j_tgt], ext_lat[face, si, j_tgt],
+                        tgt_lon, tgt_lat)
+                    # Sign: positive if si < i_tgt (source is to the left)
+                    if si > i_tgt:
+                        dists[k] = -dists[k]
+                # Lagrange weights with signed distances
+                weights = _lagrange_coef(0.0, -dists)  # target at dist=0
+                xp[face, :, i_tgt, j_tgt] = weights
+
+        # ---- X- direction (west side → NW/SW corners) ----
+        src_i_xm = list(range(i_lo, i_lo + n_stencil))  # ng..ng+3
+        for j_tgt in range(n_ext):
+            for i_tgt in range(0, i_lo):
+                tgt_lon = ext_lon[face, i_tgt, j_tgt]
+                tgt_lat = ext_lat[face, i_tgt, j_tgt]
+                dists = np.zeros(n_stencil)
+                for k, si in enumerate(src_i_xm):
+                    dists[k] = _great_circle_dist(
+                        ext_lon[face, si, j_tgt], ext_lat[face, si, j_tgt],
+                        tgt_lon, tgt_lat)
+                    if si < i_tgt:
+                        dists[k] = -dists[k]
+                weights = _lagrange_coef(0.0, -dists)
+                xm[face, :, i_tgt, j_tgt] = weights
+
+        # ---- Y+ direction (north side → NE/NW corners) ----
+        src_j_yp = list(range(j_hi - interp_order, j_hi + 1))
+        for i_tgt in range(n_ext):
+            for j_tgt in range(j_hi + 1, n_ext):
+                tgt_lon = ext_lon[face, i_tgt, j_tgt]
+                tgt_lat = ext_lat[face, i_tgt, j_tgt]
+                dists = np.zeros(n_stencil)
+                for k, sj in enumerate(src_j_yp):
+                    dists[k] = _great_circle_dist(
+                        ext_lon[face, i_tgt, sj], ext_lat[face, i_tgt, sj],
+                        tgt_lon, tgt_lat)
+                    if sj > j_tgt:
+                        dists[k] = -dists[k]
+                weights = _lagrange_coef(0.0, -dists)
+                yp[face, :, i_tgt, j_tgt] = weights
+
+        # ---- Y- direction (south side → SE/SW corners) ----
+        src_j_ym = list(range(j_lo, j_lo + n_stencil))
+        for i_tgt in range(n_ext):
+            for j_tgt in range(0, j_lo):
+                tgt_lon = ext_lon[face, i_tgt, j_tgt]
+                tgt_lat = ext_lat[face, i_tgt, j_tgt]
+                dists = np.zeros(n_stencil)
+                for k, sj in enumerate(src_j_ym):
+                    dists[k] = _great_circle_dist(
+                        ext_lon[face, i_tgt, sj], ext_lat[face, i_tgt, sj],
+                        tgt_lon, tgt_lat)
+                    if sj < j_tgt:
+                        dists[k] = -dists[k]
+                weights = _lagrange_coef(0.0, -dists)
+                ym[face, :, i_tgt, j_tgt] = weights
+
+    return xp, xm, yp, ym
+
+
 # ============================================================================
 # Factory
 # ============================================================================
@@ -365,8 +547,12 @@ def create_duogrid_data(
     """
     if k2e_nord > MAX_K2E_NORD:
         raise ValueError(f"k2e_nord={k2e_nord} exceeds MAX_K2E_NORD={MAX_K2E_NORD}")
-    if ng not in (1, 2, 3):
-        raise ValueError(f"ng={ng} not supported, must be 1, 2, or 3")
+    if ng not in (1, 2, 3, 4):
+        raise ValueError(f"ng={ng} not supported, must be 1, 2, 3, or 4")
+    if ng > n // 2:
+        raise ValueError(
+            f"ng={ng} too large for n={n}: need ng <= n//2 for valid "
+            f"Lagrange stencils (got n//2={n//2})")
 
     # Step P1: Build extended grid
     ext_lon, ext_lat = _build_extended_grid(n, ng)
@@ -380,6 +566,16 @@ def create_duogrid_data(
     # Step P4: Compute k2e coefficients
     k2e_coef, k2e_lo = _compute_k2e_coefficients(n, ng, k2e_nord, ext_1d, kik_1d)
 
+    # Step P5: Compute Lagrange corner coefficients
+    xp, xm, yp, ym = _compute_corner_lagrange_coeff(n, ng, ext_lon, ext_lat)
+
+    # Step P6: Compute extended-grid unit vectors (FV3 a2stag_metrics)
+    vlon_ext, vlat_ext, ew_ext, es_ext = _compute_ext_vectors(
+        n, ng, ext_lon, ext_lat)
+
+    def _maybe_jnp(arr):
+        return jnp.array(arr, dtype=jnp.float64) if arr is not None else None
+
     return DuoGridData(
         n=n,
         ng=ng,
@@ -388,7 +584,167 @@ def create_duogrid_data(
         k2e_lo=jnp.array(k2e_lo, dtype=jnp.int32),
         ext_lon=jnp.array(ext_lon, dtype=jnp.float64),
         ext_lat=jnp.array(ext_lat, dtype=jnp.float64),
+        corner_xp=_maybe_jnp(xp),
+        corner_xm=_maybe_jnp(xm),
+        corner_yp=_maybe_jnp(yp),
+        corner_ym=_maybe_jnp(ym),
+        vlon_ext=jnp.array(vlon_ext, dtype=jnp.float64),
+        vlat_ext=jnp.array(vlat_ext, dtype=jnp.float64),
+        ew_ext=jnp.array(ew_ext, dtype=jnp.float64),
+        es_ext=jnp.array(es_ext, dtype=jnp.float64),
     )
+
+
+def _compute_ext_vectors(n: int, ng: int, ext_lon, ext_lat):
+    """Compute extended-grid unit vectors for ext_vector (a2stag_metrics).
+
+    Following FV3 fv_duogrid.F90 unit_vect_latlon_ext (lines 2846-2868)
+    and a2stag_metrics (lines 2871-2992).
+
+    Returns
+    -------
+    vlon_ext : (6, n_ext, n_ext, 3) — longitude unit vector at A-grid
+    vlat_ext : (6, n_ext, n_ext, 3) — latitude unit vector at A-grid
+    ew_ext : (6, n_ext+1, n_ext, 3) — east-west edge vector
+    es_ext : (6, n_ext, n_ext+1, 3) — north-south edge vector
+    """
+    n_ext = n + 2 * ng
+
+    # --- vlon_ext, vlat_ext: unit vectors in lon/lat directions ---
+    # FV3 unit_vect_latlon_ext:
+    # elon = [-sin(lon), cos(lon), 0]
+    # elat = [-sin(lat)*cos(lon), -sin(lat)*sin(lon), cos(lat)]
+    vlon_ext = np.zeros((6, n_ext, n_ext, 3))
+    vlat_ext = np.zeros((6, n_ext, n_ext, 3))
+
+    for face in range(6):
+        lon = ext_lon[face]
+        lat = ext_lat[face]
+        sin_lon = np.sin(lon)
+        cos_lon = np.cos(lon)
+        sin_lat = np.sin(lat)
+        cos_lat = np.cos(lat)
+
+        vlon_ext[face, :, :, 0] = -sin_lon
+        vlon_ext[face, :, :, 1] = cos_lon
+        vlon_ext[face, :, :, 2] = 0.0
+
+        vlat_ext[face, :, :, 0] = -sin_lat * cos_lon
+        vlat_ext[face, :, :, 1] = -sin_lat * sin_lon
+        vlat_ext[face, :, :, 2] = cos_lat
+
+    # --- ew_ext, es_ext: edge vectors ---
+    # Following FV3 a2stag_metrics (fv_duogrid.F90:2925-2951).
+    # These are edge-NORMAL vectors (perpendicular to the line connecting
+    # adjacent A-grid centers, lying on the sphere surface).
+    #
+    # FV3 algorithm (double cross product):
+    # For ew at (i, j) (i-edge between cells i-1 and i):
+    #   pp = midpoint of B-grid (i,j) and (i,j+1) [on sphere]
+    #   p1 = A-grid (i, j) in Cartesian
+    #   p3 = A-grid (i-1, j) in Cartesian
+    #   p2 = cross(p3, p1) — normal to great circle connecting A-grids
+    #   ew = normalize(cross(p2, pp)) — tangent at pp, perpendicular to p2
+
+    # Convert A-grid positions to Cartesian
+    cart = np.zeros((6, n_ext, n_ext, 3))
+    for face in range(6):
+        lon = ext_lon[face]
+        lat = ext_lat[face]
+        cart[face, :, :, 0] = np.cos(lat) * np.cos(lon)
+        cart[face, :, :, 1] = np.cos(lat) * np.sin(lon)
+        cart[face, :, :, 2] = np.sin(lat)
+
+    def _cross(a, b):
+        """Vectorized cross product of (..., 3) arrays."""
+        return np.stack([
+            a[..., 1] * b[..., 2] - a[..., 2] * b[..., 1],
+            a[..., 2] * b[..., 0] - a[..., 0] * b[..., 2],
+            a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0],
+        ], axis=-1)
+
+    def _normalize(v):
+        """Normalize (..., 3) vectors."""
+        norms = np.linalg.norm(v, axis=-1, keepdims=True)
+        return v / np.maximum(norms, 1e-30)
+
+    # Approximate B-grid Cartesian positions from A-grid midpoints.
+    # FV3 has actual B-grid from the supergrid; we approximate as the
+    # midpoint of 4 surrounding A-cells, normalized to the sphere.
+    # B-grid at (i, j) is between A-cells (i-1,j-1), (i,j-1), (i-1,j), (i,j).
+    # Shape: (6, n_ext+1, n_ext+1, 3)
+    bgrid = np.zeros((6, n_ext + 1, n_ext + 1, 3))
+    for face in range(6):
+        # Interior B-grid points (i=1..n_ext-1, j=1..n_ext-1)
+        bgrid[face, 1:-1, 1:-1, :] = _normalize(
+            0.25 * (cart[face, :-1, :-1, :] + cart[face, 1:, :-1, :]
+                    + cart[face, :-1, 1:, :] + cart[face, 1:, 1:, :]))
+        # Boundary: extrapolate from interior
+        bgrid[face, 0, :, :] = bgrid[face, 1, :, :]
+        bgrid[face, -1, :, :] = bgrid[face, -2, :, :]
+        bgrid[face, :, 0, :] = bgrid[face, :, 1, :]
+        bgrid[face, :, -1, :] = bgrid[face, :, -2, :]
+
+    # FV3 computes TWO variants for each edge vector:
+    # ew variant 1: cross(cross(A(i-1,j), A(i,j)), midpoint(B(i,j), B(i,j+1)))
+    # ew variant 2: cross(cross(B(i,j), B(i,j+1)), midpoint(B(i,j), B(i,j+1)))
+    # cubed_a2d_halo uses: ud <- es(:,:,1), vd <- ew(:,:,2)
+    # cubed_a2c_halo uses: uc <- ew(:,:,1), vc <- es(:,:,2)
+
+    # ew_ext: shape (6, n_ext+1, n_ext, 3, 2) — last dim = variant
+    # FV3 loops i=isd+1:ied → n_ext-1 interior i-edges. We store n_ext+1
+    # total with boundary copies.
+    ew_ext = np.zeros((6, n_ext + 1, n_ext, 3, 2))
+    for face in range(6):
+        # Interior i-edges (i=1..n_ext-1): between A(i-1,j) and A(i,j)
+        # Shapes: cart[1:,:,:] → (n_ext-1, n_ext, 3)
+        p1_a = cart[face, 1:, :, :]     # A(i, j) — (n_ext-1, n_ext, 3)
+        p3_a = cart[face, :-1, :, :]    # A(i-1, j)
+        # pp = midpoint of B(i,j) and B(i,j+1) — B has (n_ext+1) points
+        # B at i ranges 0..n_ext, j ranges 0..n_ext
+        # For i-edge at i (1..n_ext-1): use B(i, 0..n_ext-1) and B(i, 1..n_ext)
+        pp = _normalize(0.5 * (bgrid[face, 1:-1, :-1, :] + bgrid[face, 1:-1, 1:, :]))
+        # pp: (n_ext-1, n_ext, 3) — matches p1_a shape
+
+        # Variant 1: from A-grid normals
+        p2 = _cross(p3_a, p1_a)
+        ew_ext[face, 1:-1, :, :, 0] = _normalize(_cross(p2, pp))
+
+        # Variant 2: from B-grid normals
+        b1 = bgrid[face, 1:-1, :-1, :]  # B(i, j)
+        b2 = bgrid[face, 1:-1, 1:, :]   # B(i, j+1)
+        p1_b = _cross(b1, b2)
+        ew_ext[face, 1:-1, :, :, 1] = _normalize(_cross(p1_b, pp))
+
+        for v in range(2):
+            ew_ext[face, 0, :, :, v] = ew_ext[face, 1, :, :, v]
+            ew_ext[face, -1, :, :, v] = ew_ext[face, -2, :, :, v]
+
+    # es_ext: shape (6, n_ext, n_ext+1, 3, 2) — last dim = variant
+    es_ext = np.zeros((6, n_ext, n_ext + 1, 3, 2))
+    for face in range(6):
+        # Interior j-edges (j=1..n_ext-1): between A(i,j-1) and A(i,j)
+        p1_a = cart[face, :, 1:, :]     # A(i, j) — (n_ext, n_ext-1, 3)
+        p3_a = cart[face, :, :-1, :]    # A(i, j-1)
+        # pp = midpoint of B(i,j) and B(i+1,j)
+        pp = _normalize(0.5 * (bgrid[face, :-1, 1:-1, :] + bgrid[face, 1:, 1:-1, :]))
+        # pp: (n_ext, n_ext-1, 3)
+
+        # Variant 1: from B-grid normals
+        b1 = bgrid[face, :-1, 1:-1, :]  # B(i, j)
+        b2 = bgrid[face, 1:, 1:-1, :]   # B(i+1, j)
+        p3_b = _cross(b1, b2)
+        es_ext[face, :, 1:-1, :, 0] = _normalize(_cross(p3_b, pp))
+
+        # Variant 2: from A-grid normals
+        p2 = _cross(p3_a, p1_a)
+        es_ext[face, :, 1:-1, :, 1] = _normalize(_cross(p2, pp))
+
+        for v in range(2):
+            es_ext[face, :, 0, :, v] = es_ext[face, :, 1, :, v]
+            es_ext[face, :, -1, :, v] = es_ext[face, :, -2, :, v]
+
+    return vlon_ext, vlat_ext, ew_ext, es_ext
 
 
 # ============================================================================
@@ -414,15 +770,16 @@ def cube_rmp_vectorized(
     # Cast coefficients to field dtype to avoid mixed-precision scatter warnings
     k2e_coef = duogrid.k2e_coef.astype(padded.dtype)  # (6, 4, ng, n, MAX_K2E_NORD)
     dst_idx = h + jnp.arange(n)
+    max_idx = n + 2 * h - 1  # maximum valid padded index
 
     for d in range(min(halo, duogrid.ng)):
         # South edge (edge=2): interpolate along axis 1 at fixed axis-2 row
         j_rc = h - 1 - d
         lo_s = k2e_lo[:, SOUTH, d, :]       # (6, n)
         coef_s = k2e_coef[:, SOUTH, d, :, :]  # (6, n, MAX)
-        src_s = h + jnp.clip(
-            lo_s[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :],
-            0, n - 1)  # (6, n, MAX)
+        src_s = jnp.clip(h + (
+            lo_s[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :]),
+            0, max_idx)  # (6, n, MAX)
         for f in range(6):
             vals = padded[f, src_s[f], j_rc]  # (n, MAX)
             remapped = jnp.sum(vals * coef_s[f], axis=-1)
@@ -432,9 +789,9 @@ def cube_rmp_vectorized(
         j_rc = h + n + d
         lo_n = k2e_lo[:, NORTH, d, :]
         coef_n = k2e_coef[:, NORTH, d, :, :]
-        src_n = h + jnp.clip(
-            lo_n[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :],
-            0, n - 1)
+        src_n = jnp.clip(h + (
+            lo_n[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :]),
+            0, max_idx)
         for f in range(6):
             vals = padded[f, src_n[f], j_rc]
             remapped = jnp.sum(vals * coef_n[f], axis=-1)
@@ -444,9 +801,9 @@ def cube_rmp_vectorized(
         i_rc = h - 1 - d
         lo_w = k2e_lo[:, WEST, d, :]
         coef_w = k2e_coef[:, WEST, d, :, :]
-        src_w = h + jnp.clip(
-            lo_w[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :],
-            0, n - 1)
+        src_w = jnp.clip(h + (
+            lo_w[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :]),
+            0, max_idx)
         for f in range(6):
             vals = padded[f, i_rc, src_w[f]]
             remapped = jnp.sum(vals * coef_w[f], axis=-1)
@@ -456,9 +813,9 @@ def cube_rmp_vectorized(
         i_rc = h + n + d
         lo_e = k2e_lo[:, EAST, d, :]
         coef_e = k2e_coef[:, EAST, d, :, :]
-        src_e = h + jnp.clip(
-            lo_e[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :],
-            0, n - 1)
+        src_e = jnp.clip(h + (
+            lo_e[:, :, None] + jnp.arange(MAX_K2E_NORD)[None, None, :]),
+            0, max_idx)
         for f in range(6):
             vals = padded[f, i_rc, src_e[f]]
             remapped = jnp.sum(vals * coef_e[f], axis=-1)
@@ -467,72 +824,475 @@ def cube_rmp_vectorized(
     return padded
 
 
+def _lagrange_interp_x_plus(padded, xp_coefs, i_e, j_e, j_p, n, h):
+    """Lagrange interpolation in the X+ direction (from east interior).
+
+    Source stencil: last 4 interior cells along i in padded coordinates.
+    Coefficient lookup uses extended-grid indices (i_e, j_e).
+    Padded array access uses padded index j_p.
+    """
+    i_hi_pad = h + n - 1  # last interior index in PADDED coords
+    src_i = jnp.arange(i_hi_pad - 3, i_hi_pad + 1)  # 4 source cells
+    vals = padded[:, src_i, j_p]  # (6, 4)
+    weights = xp_coefs[:, :, i_e, j_e]  # (6, 4) — lookup in extended coords
+    return jnp.sum(vals * weights, axis=1)  # (6,)
+
+
+def _lagrange_interp_x_minus(padded, xm_coefs, i_e, j_e, j_p, n, h):
+    """Lagrange interpolation in the X- direction (from west interior)."""
+    i_lo_pad = h  # first interior index in PADDED coords
+    src_i = jnp.arange(i_lo_pad, i_lo_pad + 4)
+    vals = padded[:, src_i, j_p]  # (6, 4)
+    weights = xm_coefs[:, :, i_e, j_e]
+    return jnp.sum(vals * weights, axis=1)
+
+
+def _lagrange_interp_y_plus(padded, yp_coefs, i_e, j_e, i_p, n, h):
+    """Lagrange interpolation in the Y+ direction (from north interior)."""
+    j_hi_pad = h + n - 1
+    src_j = jnp.arange(j_hi_pad - 3, j_hi_pad + 1)
+    vals = padded[:, i_p, src_j]  # (6, 4)
+    weights = yp_coefs[:, :, i_e, j_e]
+    return jnp.sum(vals * weights, axis=1)
+
+
+def _lagrange_interp_y_minus(padded, ym_coefs, i_e, j_e, i_p, n, h):
+    """Lagrange interpolation in the Y- direction (from south interior)."""
+    j_lo_pad = h
+    src_j = jnp.arange(j_lo_pad, j_lo_pad + 4)
+    vals = padded[:, i_p, src_j]  # (6, 4)
+    weights = ym_coefs[:, :, i_e, j_e]
+    return jnp.sum(vals * weights, axis=1)
+
+
 def fill_corner_region(
     padded: jax.Array,
     duogrid: DuoGridData,
     halo: int,
 ) -> jax.Array:
-    """Fill h×h corner blocks by averaging adjacent edge halo values.
+    """Fill corner blocks using FV3 Lagrange polynomial interpolation.
 
-    Each corner cell is the average of its two neighbors one step closer
-    to the interior (one from the i-direction edge strip, one from the
-    j-direction edge strip or a previously filled corner cell).
+    Following FV3 fv_duogrid.F90 fill_corner_region_2d:
+    - Non-diagonal corner cells are filled first via single-direction
+      Lagrange interpolation (X+ or Y+ or X- or Y-)
+    - Diagonal corner cells are filled as the average of X-direction and
+      Y-direction Lagrange interpolations
 
-    Fills inside-out along anti-diagonals: cells with the largest sum of
-    relative coordinates (closest to interior) are filled first, ensuring
-    each cell's dependencies are satisfied before it is computed.
-
-    This matches the existing _fill_corners_h1/_fill_corners_h2 behavior
-    and generalizes to arbitrary halo width.
+    Falls back to simple averaging when Lagrange coefficients are not
+    available (corner_xp is None).
     """
     n = duogrid.n
+    ng = duogrid.ng
     h = halo
-    n_p = n + 2 * h
 
     if h == 0:
         return padded
 
-    # Process anti-diagonals from interior outward.
-    # For relative corner coordinates (ci, cj) ∈ [0, h-1]², the inner
-    # diagonal has ci + cj = 2*(h-1), the outer corner has ci + cj = 0.
+    # Fall back to averaging if no corner coefficients or if halo > ng
+    # (offset = ng - h would go negative, making Lagrange lookup invalid)
+    if getattr(duogrid, 'corner_xp', None) is None or h > ng:
+        return _fill_corner_region_averaging(padded, duogrid, halo)
+
+    xp = duogrid.corner_xp.astype(padded.dtype)
+    xm = duogrid.corner_xm.astype(padded.dtype)
+    yp = duogrid.corner_yp.astype(padded.dtype)
+    ym = duogrid.corner_ym.astype(padded.dtype)
+
+    # Map from padded coordinates to extended-grid coordinates.
+    # padded has shape (6, n+2*halo, n+2*halo).
+    # If halo == ng, padded indices map 1:1 to extended grid indices.
+    # If halo < ng, we need to offset. The halo cells in padded correspond
+    # to the inner ng-halo..ng-1 halo cells of the extended grid.
+    offset = ng - h  # extended_idx = padded_idx + offset (always >= 0)
+
+    # Interior bounds in padded coords
+    ie = h + n - 1  # last interior i in padded
+    je = h + n - 1  # last interior j in padded
+
+    # Following FV3 fill_corner_region_2d (fv_duogrid.F90:1719-1903).
+    # FV3 fill order: (1) non-diagonal cells first, (2) then diagonal
+    # cells as average of X and Y interpolations on a COPY of padded.
+
+    def _fill_one_corner(padded, x_interp, y_interp, x_coefs, y_coefs,
+                         get_ip, get_jp):
+        """Fill one h×h corner block with FV3 ordering."""
+        # Pass 1: non-diagonal cells (d1 != d2)
+        for d1 in range(1, h + 1):
+            for d2 in range(1, h + 1):
+                if d1 == d2:
+                    continue
+                i_p = get_ip(d1)
+                j_p = get_jp(d2)
+                i_e = i_p + offset
+                j_e = j_p + offset
+                if d2 > d1:
+                    val = x_interp(padded, x_coefs, i_e, j_e, j_p, n, h)
+                else:
+                    val = y_interp(padded, y_coefs, i_e, j_e, i_p, n, h)
+                padded = padded.at[:, i_p, j_p].set(val)
+
+        # Pass 2: diagonal cells (d1 == d2), averaged from X and Y
+        # on separate copies (FV3 uses veltemp/veltempp)
+        for d in range(1, h + 1):
+            i_p = get_ip(d)
+            j_p = get_jp(d)
+            i_e = i_p + offset
+            j_e = j_p + offset
+            val_x = x_interp(padded, x_coefs, i_e, j_e, j_p, n, h)
+            val_y = y_interp(padded, y_coefs, i_e, j_e, i_p, n, h)
+            padded = padded.at[:, i_p, j_p].set(0.5 * (val_x + val_y))
+
+        return padded
+
+    # NE corner
+    padded = _fill_one_corner(
+        padded, _lagrange_interp_x_plus, _lagrange_interp_y_plus, xp, yp,
+        lambda d: ie + d, lambda d: je + d)
+
+    # NW corner
+    padded = _fill_one_corner(
+        padded, _lagrange_interp_x_minus, _lagrange_interp_y_plus, xm, yp,
+        lambda d: h - d, lambda d: je + d)
+
+    # SE corner
+    padded = _fill_one_corner(
+        padded, _lagrange_interp_x_plus, _lagrange_interp_y_minus, xp, ym,
+        lambda d: ie + d, lambda d: h - d)
+
+    # SW corner
+    padded = _fill_one_corner(
+        padded, _lagrange_interp_x_minus, _lagrange_interp_y_minus, xm, ym,
+        lambda d: h - d, lambda d: h - d)
+
+    return padded
+
+
+def _fill_corner_region_averaging(
+    padded: jax.Array,
+    duogrid: DuoGridData,
+    halo: int,
+) -> jax.Array:
+    """Fill corner blocks by averaging adjacent edge halo values (fallback)."""
+    n = duogrid.n
+    h = halo
+    n_p = n + 2 * h
+
     for s in range(2 * (h - 1), -1, -1):
         for ci in range(h):
             cj = s - ci
             if cj < 0 or cj >= h:
                 continue
-
-            # --- SW corner (low-i, low-j) ---
-            # Neighbor toward interior: (ci+1, cj) and (ci, cj+1)
-            # When ci+1 == h or cj+1 == h, the neighbor is an edge cell.
             ni_sw = min(ci + 1, h)
             nj_sw = min(cj + 1, h)
             padded = padded.at[:, ci, cj].set(
-                0.5 * (padded[:, ni_sw, cj] + padded[:, ci, nj_sw])
-            )
-
-            # --- SE corner (high-i, low-j) ---
+                0.5 * (padded[:, ni_sw, cj] + padded[:, ci, nj_sw]))
             i_se = n_p - 1 - ci
-            ni_se = n_p - 1 - min(ci + 1, h)  # toward interior = i - 1
+            ni_se = n_p - 1 - min(ci + 1, h)
             nj_se = min(cj + 1, h)
             padded = padded.at[:, i_se, cj].set(
-                0.5 * (padded[:, ni_se, cj] + padded[:, i_se, nj_se])
-            )
-
-            # --- NW corner (low-i, high-j) ---
+                0.5 * (padded[:, ni_se, cj] + padded[:, i_se, nj_se]))
             j_nw = n_p - 1 - cj
             ni_nw = min(ci + 1, h)
-            nj_nw = n_p - 1 - min(cj + 1, h)  # toward interior = j - 1
+            nj_nw = n_p - 1 - min(cj + 1, h)
             padded = padded.at[:, ci, j_nw].set(
-                0.5 * (padded[:, ni_nw, j_nw] + padded[:, ci, nj_nw])
-            )
-
-            # --- NE corner (high-i, high-j) ---
+                0.5 * (padded[:, ni_nw, j_nw] + padded[:, ci, nj_nw]))
             i_ne = n_p - 1 - ci
             j_ne = n_p - 1 - cj
             ni_ne = n_p - 1 - min(ci + 1, h)
             nj_ne = n_p - 1 - min(cj + 1, h)
             padded = padded.at[:, i_ne, j_ne].set(
-                0.5 * (padded[:, ni_ne, j_ne] + padded[:, i_ne, nj_ne])
-            )
+                0.5 * (padded[:, ni_ne, j_ne] + padded[:, i_ne, nj_ne]))
 
     return padded
+
+
+# ============================================================================
+# D-grid staggered halo exchange
+# ============================================================================
+
+def pad_halo_dgrid(
+    u_d: jax.Array,
+    v_d: jax.Array,
+    cos_angle_edge_x: jax.Array,
+    sin_angle_edge_x: jax.Array,
+    cos_angle_edge_y: jax.Array,
+    sin_angle_edge_y: jax.Array,
+    duogrid: 'DuoGridData | None' = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Pad D-grid staggered fields with halo=1 from neighbor faces.
+
+    FV3 exchanges D-grid winds via mpp_update_domains with DGRID_NE
+    gridtype before d2a2c_vect. This provides the boundary D-grid
+    values needed for 4th-order D→A averaging at face edges.
+
+    Uses exact D-grid edge angles from CubedSphereCDGrid (not averaged
+    A-grid angles) for precise geographic rotation at stagger positions.
+
+    Parameters
+    ----------
+    u_d : (6, n, n+1) D-grid x-velocity at j-edges
+    v_d : (6, n+1, n) D-grid y-velocity at i-edges
+    cos_angle_edge_x, sin_angle_edge_x : (6, n, n+1) exact edge angles
+    cos_angle_edge_y, sin_angle_edge_y : (6, n+1, n) exact edge angles
+
+    Returns
+    -------
+    u_d_pad : (6, n, n+3) D-grid u padded with 1 halo on each j-side
+    v_d_pad : (6, n+3, n) D-grid v padded with 1 halo on each i-side
+    """
+    from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
+
+    n = u_d.shape[1]
+
+    # Convert D-grid to geographic using EXACT edge angles.
+    ca_j = cos_angle_edge_x   # (6, n, n+1)
+    sa_j = sin_angle_edge_x
+    u_east_ud = ca_j * u_d
+    v_north_ud = sa_j * u_d
+
+    ca_i = cos_angle_edge_y   # (6, n+1, n)
+    sa_i = sin_angle_edge_y
+    u_east_vd = -sa_i * v_d
+    v_north_vd = ca_i * v_d
+
+    # Pad u_d along j (axis 2): add 1 halo on each side → (6, n, n+3)
+    u_d_pad = jnp.zeros((6, n, n + 3), dtype=u_d.dtype)
+    u_d_pad = u_d_pad.at[:, :, 1:-1].set(u_d)
+
+    # Pad v_d along i (axis 1): add 1 halo on each side → (6, n+3, n)
+    v_d_pad = jnp.zeros((6, n + 3, n), dtype=v_d.dtype)
+    v_d_pad = v_d_pad.at[:, 1:-1, :].set(v_d)
+
+    # Fill halo from neighbor faces using CONNECTIVITY
+    for face in range(6):
+        # u_d j-halo: need u_d at j=-1 (south) and j=n+1 (north)
+        # South: j=0 is the first j-edge. j=-1 comes from SOUTH neighbor.
+        nbr_f, nbr_e, rev = CONNECTIVITY[face][SOUTH]
+        # The neighbor's edge-adjacent u_d strip
+        if nbr_e == NORTH:
+            src = u_east_ud[nbr_f, :, -2]  # one inside neighbor's boundary
+            src_v = v_north_ud[nbr_f, :, -2]
+        elif nbr_e == SOUTH:
+            src = u_east_ud[nbr_f, :, 1]
+            src_v = v_north_ud[nbr_f, :, 1]
+        elif nbr_e == EAST:
+            src = u_east_vd[nbr_f, -2, :]
+            src_v = v_north_vd[nbr_f, -2, :]
+        else:  # WEST
+            src = u_east_vd[nbr_f, 1, :]
+            src_v = v_north_vd[nbr_f, 1, :]
+        if rev:
+            src = src[::-1]
+            src_v = src_v[::-1]
+        # Convert back to this face's grid-aligned at boundary
+        ca_bdy = ca_j[face, :, 0]  # angle at first j-edge
+        sa_bdy = sa_j[face, :, 0]
+        u_local = ca_bdy * src + sa_bdy * src_v
+        u_d_pad = u_d_pad.at[face, :, 0].set(u_local)
+
+        # North: j=n+1 comes from NORTH neighbor
+        nbr_f, nbr_e, rev = CONNECTIVITY[face][NORTH]
+        if nbr_e == SOUTH:
+            src = u_east_ud[nbr_f, :, 1]
+            src_v = v_north_ud[nbr_f, :, 1]
+        elif nbr_e == NORTH:
+            src = u_east_ud[nbr_f, :, -2]
+            src_v = v_north_ud[nbr_f, :, -2]
+        elif nbr_e == WEST:
+            src = u_east_vd[nbr_f, 1, :]
+            src_v = v_north_vd[nbr_f, 1, :]
+        else:  # EAST
+            src = u_east_vd[nbr_f, -2, :]
+            src_v = v_north_vd[nbr_f, -2, :]
+        if rev:
+            src = src[::-1]
+            src_v = src_v[::-1]
+        ca_bdy = ca_j[face, :, -1]
+        sa_bdy = sa_j[face, :, -1]
+        u_local = ca_bdy * src + sa_bdy * src_v
+        u_d_pad = u_d_pad.at[face, :, -1].set(u_local)
+
+        # v_d i-halo: need v_d at i=-1 (west) and i=n+1 (east)
+        nbr_f, nbr_e, rev = CONNECTIVITY[face][WEST]
+        if nbr_e == EAST:
+            src = u_east_vd[nbr_f, -2, :]
+            src_v = v_north_vd[nbr_f, -2, :]
+        elif nbr_e == WEST:
+            src = u_east_vd[nbr_f, 1, :]
+            src_v = v_north_vd[nbr_f, 1, :]
+        elif nbr_e == NORTH:
+            src = u_east_ud[nbr_f, :, -2]
+            src_v = v_north_ud[nbr_f, :, -2]
+        else:  # SOUTH
+            src = u_east_ud[nbr_f, :, 1]
+            src_v = v_north_ud[nbr_f, :, 1]
+        if rev:
+            src = src[::-1]
+            src_v = src_v[::-1]
+        ca_bdy = ca_i[face, 0, :]
+        sa_bdy = sa_i[face, 0, :]
+        v_local = -sa_bdy * src + ca_bdy * src_v
+        v_d_pad = v_d_pad.at[face, 0, :].set(v_local)
+
+        nbr_f, nbr_e, rev = CONNECTIVITY[face][EAST]
+        if nbr_e == WEST:
+            src = u_east_vd[nbr_f, 1, :]
+            src_v = v_north_vd[nbr_f, 1, :]
+        elif nbr_e == EAST:
+            src = u_east_vd[nbr_f, -2, :]
+            src_v = v_north_vd[nbr_f, -2, :]
+        elif nbr_e == SOUTH:
+            src = u_east_ud[nbr_f, :, 1]
+            src_v = v_north_ud[nbr_f, :, 1]
+        else:  # NORTH
+            src = u_east_ud[nbr_f, :, -2]
+            src_v = v_north_ud[nbr_f, :, -2]
+        if rev:
+            src = src[::-1]
+            src_v = src_v[::-1]
+        ca_bdy = ca_i[face, -1, :]
+        sa_bdy = sa_i[face, -1, :]
+        v_local = -sa_bdy * src + ca_bdy * src_v
+        v_d_pad = v_d_pad.at[face, -1, :].set(v_local)
+
+    return u_d_pad, v_d_pad
+
+
+# ============================================================================
+# ext_vector: FV3-faithful vector halo exchange
+# ============================================================================
+
+def ext_vector_dgrid(
+    utmp: jax.Array,
+    vtmp: jax.Array,
+    duogrid: 'DuoGridData',
+    cos_angle: jax.Array,
+    sin_angle: jax.Array,
+    cosa_s: jax.Array,
+    rsin2: jax.Array,
+    halo: int = 2,
+) -> tuple[jax.Array, jax.Array]:
+    """FV3-faithful D-grid vector halo exchange via lat/lon intermediary.
+
+    Following FV3 ext_vector for DGRID case (fv_duogrid.F90:741-826).
+    The flow is:
+    1. Convert covariant A-grid (utmp, vtmp) to lat/lon using the
+       non-orthogonal decomposition (cosa_s, rsin2) then grid angle
+       rotation — equivalent to FV3's c2l_ord2 (a11/a12/a21/a22)
+    2. Halo-exchange the lat/lon winds as scalars (with cube_rmp + corner fill)
+    3. Convert A-grid lat/lon back to D-grid via cubed_a2d_halo
+    4. Return padded D-grid winds
+
+    Parameters
+    ----------
+    utmp, vtmp : (6, n, n) — covariant A-grid winds (from D→A averaging)
+    duogrid : DuoGridData
+    cos_angle, sin_angle : (6, n, n) — grid rotation angle at A-grid
+    cosa_s : (6, n, n) — cos(angle) between grid axes (non-orthogonality)
+    rsin2 : (6, n, n) — 1/sin²(angle) for covariant→contravariant
+    halo : int — halo width (default 2)
+
+    Returns
+    -------
+    ud_pad : (6, n+2h, n+2h-1) — D-grid u in padded domain
+    vd_pad : (6, n+2h-1, n+2h) — D-grid v in padded domain
+    """
+    from legoesm.grids.halo import pad_halo
+
+    n = duogrid.n
+    h = halo
+
+    # Step 1: Convert covariant → contravariant → geographic (lat/lon).
+    # FV3's c2l_ord2 combines these steps via a11/a12/a21/a22 matrices.
+    # Here we decompose: first covariant→contravariant using cosa_s/rsin2,
+    # then contravariant→geographic using grid angle rotation.
+    ua = (utmp - vtmp * cosa_s) * rsin2
+    va = (vtmp - utmp * cosa_s) * rsin2
+    u_east = cos_angle * ua - sin_angle * va
+    v_north = sin_angle * ua + cos_angle * va
+
+    # Step 2: Halo-exchange lat/lon winds as SCALARS with Duo-Grid remap.
+    # This applies cube_rmp (kinked→extended) + fill_corner_region.
+    u_east_pad = pad_halo(u_east, halo=h, duogrid=duogrid)   # (6, n+2h, n+2h)
+    v_north_pad = pad_halo(v_north, halo=h, duogrid=duogrid)  # (6, n+2h, n+2h)
+
+    # Step 3: Convert A-grid lat/lon back to D-grid via 3D Cartesian.
+    # This is FV3's cubed_a2d_halo (fv_duogrid.F90:2676-2763).
+    ud_pad, vd_pad = cubed_a2d_halo(u_east_pad, v_north_pad, duogrid, h)
+
+    return ud_pad, vd_pad
+
+
+def cubed_a2d_halo(
+    ull: jax.Array,
+    vll: jax.Array,
+    duogrid: DuoGridData,
+    halo: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Convert A-grid lat/lon winds to D-grid using 3D Cartesian projection.
+
+    Following FV3 fv_duogrid.F90 cubed_a2d_halo (lines 2676-2763).
+    FV3 loops j=jsd+1:jed for ud and i=isd+1:ied for vd, so the output
+    covers interior stagger edges only (not the outermost boundary edge).
+
+    Parameters
+    ----------
+    ull, vll : (6, n_p, n_p) — lat/lon wind components on padded A-grid
+        where n_p = n + 2*halo
+    duogrid : DuoGridData with vlon_ext, vlat_ext, ew_ext, es_ext
+    halo : int — halo width of the padded arrays
+
+    Returns
+    -------
+    ud : (6, n_p, n_p-1) — D-grid u at j-edges between adjacent A-cells
+        (n_p-1 edges at j+1/2 for j=0..n_p-2)
+    vd : (6, n_p-1, n_p) — D-grid v at i-edges between adjacent A-cells
+        (n_p-1 edges at i+1/2 for i=0..n_p-2)
+    """
+    n = duogrid.n
+    h = halo
+    n_p = n + 2 * h
+    offset = duogrid.ng - h  # extended-grid index = padded index + offset
+
+    # Get extended-grid vectors, sliced to the padded domain
+    vlon = duogrid.vlon_ext  # (6, n_ext, n_ext, 3)
+    vlat = duogrid.vlat_ext
+    ew = duogrid.ew_ext      # (6, n_ext+1, n_ext, 3, 2)
+    es = duogrid.es_ext      # (6, n_ext, n_ext+1, 3, 2)
+
+    # Cast to field dtype
+    dtype = ull.dtype
+    vlon = vlon.astype(dtype)
+    vlat = vlat.astype(dtype)
+    ew = ew.astype(dtype)
+    es = es.astype(dtype)
+
+    # Step 1: Convert lat/lon to 3D Cartesian on A-grid
+    # v3 = u_ll * vlon + v_ll * vlat  — shape (6, n_p, n_p, 3)
+    # Index into the extended-grid vectors at the padded positions
+    i_slice = slice(offset, offset + n_p)
+    j_slice = slice(offset, offset + n_p)
+    vlon_p = vlon[:, i_slice, j_slice, :]  # (6, n_p, n_p, 3)
+    vlat_p = vlat[:, i_slice, j_slice, :]
+
+    v3 = ull[..., None] * vlon_p + vll[..., None] * vlat_p  # (6, n_p, n_p, 3)
+
+    # Step 2: Interpolate to D-grid edges (simple 2-point average)
+    # ud at (i, j+1/2): average of v3(i, j-1) and v3(i, j)
+    ue = 0.5 * (v3[:, :, :-1, :] + v3[:, :, 1:, :])  # (6, n_p, n_p-1, 3)
+    # vd at (i+1/2, j): average of v3(i-1, j) and v3(i, j)
+    ve = 0.5 * (v3[:, :-1, :, :] + v3[:, 1:, :, :])  # (6, n_p-1, n_p, 3)
+
+    # Step 3: Project onto edge vectors
+    # FV3 cubed_a2d_halo (fv_duogrid.F90:2746-2757):
+    #   ud(i,j,k) = ue . es(i,j,1)  — es variant 0 (B-grid normals)
+    #   vd(i,j,k) = ve . ew(i,j,2)  — ew variant 1 (B-grid normals)
+    # NOTE: FV3's es(:,:,1) is stored in our index 0, ew(:,:,2) in index 1
+    es_slice = es[:, offset:offset + n_p, offset + 1:offset + n_p, :, 0]  # (6, n_p, n_p-1, 3) — B-grid variant
+    ud = jnp.sum(ue * es_slice, axis=-1)  # (6, n_p, n_p-1)
+
+    # vd = ve . ew_ext (B-grid normal variant)
+    ew_slice = ew[:, offset + 1:offset + n_p, offset:offset + n_p, :, 1]  # (6, n_p-1, n_p, 3)
+    vd = jnp.sum(ve * ew_slice, axis=-1)  # (6, n_p-1, n_p)
+
+    return ud, vd

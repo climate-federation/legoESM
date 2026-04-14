@@ -65,12 +65,115 @@ _C3 = 5.0 / 14.0
 # d2a2c_vect: D-grid → A-grid → C-grid (FV3 covariant convention)
 # ==============================================================================
 
+def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
+    """D→A→C with Duo-Grid: 4th-order everywhere, no edge specials.
+
+    When the Duo-Grid is active, halo data has been remapped to the
+    extended grid, so stencils are smooth across face boundaries.
+
+    CONVENTION: legoESM D-grid winds use the PHYSICAL (orthogonal-rotation)
+    convention, where u_d = cos(angle)*u_east + sin(angle)*v_north.
+    This means utmp/vtmp (from D→A averaging) are physical grid-axis
+    projections, NOT FV3's covariant components.  The geographic rotation
+    is therefore DIRECT (no cosa_s/rsin2 metric transform needed), and
+    the back-rotation recovers the physical components.
+
+    This matches the ``gridstruct%dg%is_initialized`` branch in FV3
+    ``sw_core.F90:3419-3704`` adapted for the physical convention:
+    - 4th-order D→A for all interior cells
+    - 4th-order A→C for all C-grid positions
+    - ALL corner fixes and edge specials SKIPPED
+    - NO sin_sg upwinding at face boundaries
+    """
+    n = cdgrid.n
+    h = 2  # halo depth for smooth 4th-order stencil coverage
+    grid = cdgrid.base
+    dg = grid.duogrid
+
+    # ---- Step 0+1: D-grid → physical cell centres (utmp, vtmp) ----
+    # 2nd-order D→A averaging (does not require D-grid halo exchange).
+    # The 4th-order benefit comes at the A→C level (Step 3) where the
+    # duogrid scalar remap provides smooth extended data via pad_halo.
+    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])  # (6, n, n)
+    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
+
+    # ---- Step 2: Physical → geographic → halo exchange → physical ----
+    # Non-orthogonal geographic rotation (matches FV3 c2l_ord2 semantics).
+    # On the cubed sphere, the x and y grid axes are NOT perpendicular.
+    # The exact rotation uses cos/sin of the angle between grid axes
+    # (cos_sg5/sin_sg5) in addition to the grid angle cos_a/sin_a.
+    #
+    # Derivation: utmp = V·x_hat, vtmp = V·y_hat where angle(y_hat, x_hat) = θ
+    # u_east  = cos_α*utmp + sin_α*(utmp*cos_θ - vtmp) / sin_θ
+    # v_north = sin_α*utmp + cos_α*(vtmp - utmp*cos_θ) / sin_θ
+    # Reduces to the orthogonal rotation when cos_θ = 0.
+    cos_a = grid.cos_angle
+    sin_a = grid.sin_angle
+    cos_theta = cdgrid.cos_sg[:, :, :, 4]  # cos(angle between grid axes)
+    sin_theta = cdgrid.sin_sg[:, :, :, 4]  # sin(angle between grid axes)
+    sin_theta_safe = jnp.maximum(sin_theta, _EPS)
+
+    u_east = cos_a * utmp + sin_a * (utmp * cos_theta - vtmp) / sin_theta_safe
+    v_north = sin_a * utmp + cos_a * (vtmp - utmp * cos_theta) / sin_theta_safe
+
+    from legoesm.grids.halo import pad_halo
+    u_east_pad = pad_halo(u_east, halo=h, duogrid=dg)
+    v_north_pad = pad_halo(v_north, halo=h, duogrid=dg)
+
+    # Geographic → physical on padded domain (inverse rotation).
+    # utmp = cos_α*u_east + sin_α*v_north  (projection onto x_hat)
+    # vtmp = cos_β*u_east + sin_β*v_north  where β = α+θ
+    #      = (cos_α*cos_θ-sin_α*sin_θ)*u_east + (sin_α*cos_θ+cos_α*sin_θ)*v_north
+    cap = grid.cos_angle_padded_h2
+    sap = grid.sin_angle_padded_h2
+    cos_theta_pad = jnp.pad(cos_theta, [(0, 0), (h, h), (h, h)], mode='edge')
+    sin_theta_pad = jnp.pad(sin_theta, [(0, 0), (h, h), (h, h)], mode='edge')
+    cos_beta_pad = cap * cos_theta_pad - sap * sin_theta_pad
+    sin_beta_pad = sap * cos_theta_pad + cap * sin_theta_pad
+
+    utmp_pad = cap * u_east_pad + sap * v_north_pad
+    vtmp_pad = cos_beta_pad * u_east_pad + sin_beta_pad * v_north_pad
+
+    # Interior physical for caller (KE, vorticity flux, diagnostics).
+    # These are the PHYSICAL grid-axis components (same convention as
+    # fv3_d2cc output), used by c_sw for KE upwinding.
+    ua = utmp_pad[:, h:-h, h:-h]  # (6, n, n)
+    va = vtmp_pad[:, h:-h, h:-h]
+
+    # ---- Step 3: A→C x-direction — 4th-order on physical utmp ----
+    uc = (_A2 * (utmp_pad[:, :-3, h:-h] + utmp_pad[:, 3:, h:-h])
+          + _A1 * (utmp_pad[:, 1:-2, h:-h] + utmp_pad[:, 2:-1, h:-h]))
+    # shape (6, n+1, n) — all C-grid u-positions
+
+    # Transport velocity ut: consistent with c_sw convention where
+    # ut * sin_sg * dy = physical edge-normal flux.
+    # Formula: ut = (uc - v_d*cosa_u) / sina_u  (same as non-duogrid path)
+    cosa_u = cdgrid.cosa_u
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
+    ut = (uc - v_d * cosa_u) / jnp.maximum(sina_u, _EPS)
+
+    # ---- Step 4: A→C y-direction — 4th-order on physical vtmp ----
+    vc = (_A2 * (vtmp_pad[:, h:-h, :-3] + vtmp_pad[:, h:-h, 3:])
+          + _A1 * (vtmp_pad[:, h:-h, 1:-2] + vtmp_pad[:, h:-h, 2:-1]))
+
+    cosa_v = cdgrid.cosa_v
+    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
+    vt = (vc - u_d * cosa_v) / jnp.maximum(sina_v, _EPS)
+
+    return ua, va, uc, vc, ut, vt
+
+
 def _d2a2c_vect(u_d, v_d, cdgrid):
     """FV3 D-grid → A-grid → C-grid vector conversion.
 
     Adapted from GFDL sw_core.F90 d2a2c_vect.  Returns C-grid
     velocities in FV3's COVARIANT convention (uc = interpolated covariant
     utmp, NOT the physical face-normal velocity).
+
+    When the Duo-Grid is active on the base grid, dispatches to the
+    FV3-faithful Duo-Grid path (``_d2a2c_vect_duogrid``) which uses
+    4th-order interpolation everywhere and skips all edge/corner specials.
+    This matches the ``dg%is_initialized`` branch in FV3 sw_core.F90.
 
     Parameters
     ----------
@@ -86,6 +189,16 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     ut : (6, n+1, n) C-grid contravariant u (transport)
     vt : (6, n, n+1) C-grid contravariant v (transport)
     """
+    # Dispatch to Duo-Grid path when active (FV3 sw_core.F90:3419).
+    # FV3 gates on `dg%is_initialized` which is true when the duogrid
+    # structure is fully allocated with sufficient halo. Here the `ng >= 2`
+    # guard ensures the k2e-remapped halo covers both depths needed by the
+    # 4th-order A→C stencil (halo=2). For tiny grids (n<4) where
+    # ng = n//2 < 2, fall through to the legacy path.
+    dg = cdgrid.base.duogrid
+    if dg is not None and dg.ng >= 2:
+        return _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
     n = cdgrid.n
     npt = min(4, n // 2)
 
@@ -93,8 +206,9 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
 
-    # 4th-order interior (at least npt cells from each edge)
-    if n > 2 * npt:
+    # 4th-order interior (at least npt cells from each edge).
+    # Guard: needs n > 2*npt AND npt > 0 (i.e., n >= 2).
+    if n > 2 * npt and npt > 0:
         u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
               + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
         utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
@@ -146,9 +260,10 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
             + _C3 * utmp_pad[:, n - 1, 1:-1])
 
     # AT face boundary (i=1, i=n-1): edge_interpolate4 on CONTRAVARIANT ua
-    # then uc = ut * sin_sg_upwind (covariant from contravariant)
+    # then uc = ut * sin_sg_upwind (covariant from contravariant).
+    # Requires n >= 2 for the 4-point edge stencil to have valid indices.
     dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    for i_bdy in [1, n - 1]:
+    for i_bdy in ([1, n - 1] if n >= 2 else []):
         i_p = i_bdy  # padded offset
         ua4 = jnp.stack([ua_pad[:, i_p - 1, 1:-1], ua_pad[:, i_p, 1:-1],
                          ua_pad[:, i_p + 1, 1:-1], ua_pad[:, i_p + 2, 1:-1]],
@@ -198,9 +313,10 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
             _C1 * vtmp_pad[:, 1:-1, n - 3] + _C2 * vtmp_pad[:, 1:-1, n - 2]
             + _C3 * vtmp_pad[:, 1:-1, n - 1])
 
-    # AT face boundary (j=1, j=n-1): edge_interpolate4 on va
+    # AT face boundary (j=1, j=n-1): edge_interpolate4 on va.
+    # Requires n >= 2 for the 4-point edge stencil.
     dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    for j_bdy in [1, n - 1]:
+    for j_bdy in ([1, n - 1] if n >= 2 else []):
         j_p = j_bdy
         va4 = jnp.stack([va_pad[:, 1:-1, j_p - 1], va_pad[:, 1:-1, j_p],
                          va_pad[:, 1:-1, j_p + 1], va_pad[:, 1:-1, j_p + 2]],
@@ -326,25 +442,32 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     circ = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
             + fy_pad[:, 1:, :] - fy_pad[:, :-1, :])
 
-    # Cube vertex corrections
-    circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
-    circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-    circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
-    circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
+    # Cube vertex corrections — FV3 sw_core.F90:395-401:
+    # SKIPPED when duogrid is active (.not. flagstruct%duogrid).
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+    if not use_duogrid:
+        circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
+        circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+        circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
+        circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
 
     vort = circ * cdgrid.rarea_c
     vort_abs = vort + cdgrid.f_corner
 
     # 6. Vorticity flux at C-grid face positions
-    # x-face: cross-velocity in j-direction transports vorticity
+    # FV3 sw_core.F90:622-726: when duogrid is active, use simple formula
+    # everywhere (no face-boundary overrides). When not active, override
+    # fy1 at face boundaries with dt2 * v_d.
     cosa_u = cdgrid.cosa_u
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
     fy1 = dt2 * (v_d - uc * cosa_u) / jnp.maximum(sina_u, _EPS)
-    # At face edges: sin_sg cancellation → fy1 = dt2 * v_d
-    fy1 = fy1.at[:, 0, :].set(dt2 * v_d[:, 0, :])
-    fy1 = fy1.at[:, 1, :].set(dt2 * v_d[:, 1, :])
-    fy1 = fy1.at[:, n - 1, :].set(dt2 * v_d[:, n - 1, :])
-    fy1 = fy1.at[:, n, :].set(dt2 * v_d[:, n, :])
+    if not use_duogrid:
+        # At face edges: sin_sg cancellation → fy1 = dt2 * v_d
+        fy1 = fy1.at[:, 0, :].set(dt2 * v_d[:, 0, :])
+        fy1 = fy1.at[:, 1, :].set(dt2 * v_d[:, 1, :])
+        fy1 = fy1.at[:, n - 1, :].set(dt2 * v_d[:, n - 1, :])
+        fy1 = fy1.at[:, n, :].set(dt2 * v_d[:, n, :])
 
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
@@ -352,10 +475,11 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     cosa_v = cdgrid.cosa_v
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
     fx1 = dt2 * (u_d - vc * cosa_v) / jnp.maximum(sina_v, _EPS)
-    fx1 = fx1.at[:, :, 0].set(dt2 * u_d[:, :, 0])
-    fx1 = fx1.at[:, :, 1].set(dt2 * u_d[:, :, 1])
-    fx1 = fx1.at[:, :, n - 1].set(dt2 * u_d[:, :, n - 1])
-    fx1 = fx1.at[:, :, n].set(dt2 * u_d[:, :, n])
+    if not use_duogrid:
+        fx1 = fx1.at[:, :, 0].set(dt2 * u_d[:, :, 0])
+        fx1 = fx1.at[:, :, 1].set(dt2 * u_d[:, :, 1])
+        fx1 = fx1.at[:, :, n - 1].set(dt2 * u_d[:, :, n - 1])
+        fx1 = fx1.at[:, :, n].set(dt2 * u_d[:, :, n])
 
     vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
 
@@ -439,30 +563,37 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
 
     circ = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
             + fy_pad[:, 1:, :] - fy_pad[:, :-1, :])
-    circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
-    circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-    circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
-    circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
+    # FV3 sw_core.F90:395-401: corner corrections skipped with duogrid
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+    if not use_duogrid:
+        circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
+        circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+        circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
+        circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
 
     vort_abs = circ * cdgrid.rarea_c + cdgrid.f_corner
 
     # 6. Vorticity flux at C-grid face positions
+    # FV3 sw_core.F90:622: when duogrid active, use uniform formula
     cosa_u = cdgrid.cosa_u
     sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
     fy1 = (v_d - uc * cosa_u) / jnp.maximum(sina_u, _EPS)
-    fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
-    fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
-    fy1 = fy1.at[:, n - 1, :].set(v_d[:, n - 1, :])
-    fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
+    if not use_duogrid:
+        fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
+        fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
+        fy1 = fy1.at[:, n - 1, :].set(v_d[:, n - 1, :])
+        fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
     cosa_v = cdgrid.cosa_v
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
     fx1 = (u_d - vc * cosa_v) / jnp.maximum(sina_v, _EPS)
-    fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
-    fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])
-    fx1 = fx1.at[:, :, n - 1].set(u_d[:, :, n - 1])
-    fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
+    if not use_duogrid:
+        fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
+        fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])
+        fx1 = fx1.at[:, :, n - 1].set(u_d[:, :, n - 1])
+        fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
     vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
 
     # 7. TOTAL C-grid tendency = vorticity flux + Bernoulli gradient
