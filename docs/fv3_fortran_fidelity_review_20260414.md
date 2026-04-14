@@ -296,12 +296,16 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 - Linear extrapolation for circulation boundary halo ✅ (iter 13) 
 - halo=2 for d2a2c_vect edge_interpolate4 at face boundaries ✅ (iter 14) — cosine bell L1 improved 10%
 
-### Resolved in iteration 15:
-- d2a2c_vect_duogrid rewrite: D-grid halo via pad_halo_dgrid + FV3 cosa_s/rsin2 ✅
+### Resolved in iteration 15-24:
+- d2a2c_vect_duogrid rewrite: D-grid halo via pad_halo_dgrid + FV3 cosa_s/rsin2 ✅ (iter 15)
+- rsin_u uniform 1/sin² — removed 4.7% edge discontinuity ✅ (iter 17)
+- Physical-frame KE for duogrid — 24% boundary residual reduction ✅ (iter 18, conditioned iter 20)
+- Vector halo for covariant A→C — 27x uc boundary smoothness improvement ✅ (iter 23)
 
 ### Remaining structural items:
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
 F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path
+- Full d_sw B-grid KE transport — required to fully eliminate boundary artifacts
 
 ### Pre-existing issues (not caused by these changes):
 - Williamson 2 v-wind shows cube-face imprint at t>0.5d — IDENTICAL in original code (verified by checkout to ebd6e43). Root cause is deeper infrastructure (grid construction, halo exchange), not operator formulas.
