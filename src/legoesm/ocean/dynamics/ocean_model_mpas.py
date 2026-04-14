@@ -353,7 +353,13 @@ class MPASOceanModel:
             # h_new * T_new = h_old * T_mid - dt * vert - dt * horiz
             hT_new = h_k_old * tr - dt * vert_flux_div - dt * div_hut
             tr_new = hT_new / jnp.maximum(h_k_new, 1e-10)
-            tr_new = jnp.where(mask_3d > 0.5, tr_new, 0.0)
+            # Preserve pre-step land values instead of zeroing them.
+            # Zeroing T, S on land each step and then averaging those
+            # zeros into coastal cells via the Neumann fill produced a
+            # cold/fresh front that propagated into the interior
+            # one-cell-per-step. See issue #164. Matches the lat-lon
+            # pattern in ocean_model_latlon_cgrid.py:493.
+            tr_new = jnp.where(mask_3d > 0.5, tr_new, tr)
 
             if tr_name == 'T':
                 T_corrected = tr_new

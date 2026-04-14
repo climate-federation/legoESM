@@ -369,6 +369,164 @@ class TestMPASOceanModel:
         assert jnp.all(jnp.isfinite(state_new.S.data))
         assert jnp.all(jnp.isfinite(state_new.eta.data))
 
+    def test_step_preserves_land_tracer_values(
+        self, mesh, z_coord, config, state,
+    ):
+        """Regression for issue #164 bug 1.
+
+        The old code zeroed T and S on land cells at the end of every
+        flux-form tracer update (``jnp.where(mask > 0.5, tr_new, 0.0)``
+        in ``ocean_model_mpas.py``). Combined with the single-iteration
+        Neumann fill, that produced a cold/fresh front that propagated
+        one cell per step along coastlines. The fix preserves the
+        pre-step tracer value on land, matching the lat-lon pattern.
+        """
+        mask_1d = state.land_mask.data
+        is_land = mask_1d < 0.5
+        # Sanity check: the default rest state has at least one land cell.
+        assert int(jnp.sum(is_land)) > 0, (
+            "rest_state_mpas_ocean fixture has no land cells; test cannot "
+            "discriminate the #164 fix."
+        )
+        T_land_before = state.T.data[is_land]
+        S_land_before = state.S.data[is_land]
+        # Rest state is non-trivially warm and salty.
+        assert float(jnp.min(T_land_before)) > 1.0
+        assert float(jnp.min(S_land_before)) > 10.0
+
+        model = MPASOceanModel(mesh, z_coord, config)
+        state_new = model.step(state, 60.0)
+
+        T_land_after = state_new.T.data[is_land]
+        S_land_after = state_new.S.data[is_land]
+        # The old bug would make these exactly zero.
+        assert float(jnp.min(T_land_after)) > 1.0, (
+            f"Land T zeroed after step — bug #164 is back. "
+            f"min={float(jnp.min(T_land_after))}"
+        )
+        assert float(jnp.min(S_land_after)) > 10.0, (
+            f"Land S zeroed after step — bug #164 is back. "
+            f"min={float(jnp.min(S_land_after))}"
+        )
+        # And the land values should track the pre-step values closely
+        # (preservation, not arbitrary drift). Tolerance accommodates
+        # fp32 round-off accumulated through the fill average and the
+        # h_k_old / h_k_new ratio in the flux-form tracer update —
+        # orders of magnitude below the ~20 K delta the old bug
+        # would produce.
+        assert float(jnp.max(jnp.abs(T_land_after - T_land_before))) < 1e-3
+        assert float(jnp.max(jnp.abs(S_land_after - S_land_before))) < 1e-3
+
+
+# ============================================================================
+# Test: Land-cell Neumann fill
+# ============================================================================
+
+class TestMPASLandFill:
+    """Regression tests for ``fill_land_cells_mpas`` (issue #164 bug 2)."""
+
+    @staticmethod
+    def _chain_connectivity(n):
+        """Build c1, c2 arrays for a linear chain of n cells."""
+        c1 = jnp.arange(n - 1)
+        c2 = jnp.arange(1, n)
+        return c1, c2
+
+    def test_single_iter_reaches_only_one_ring(self):
+        """With n_iter=1, only land cells adjacent to ocean get filled.
+
+        Documents the old (single-iteration) behaviour as a regression
+        guard: n_iter=1 fills the first ring but leaves deeper interior
+        land cells at their stale value. This is what the MPAS ocean
+        had before issue #164 — any land cell two or more edges from
+        ocean stayed zero.
+        """
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        # Chain: ocean ocean ocean land land land
+        field = jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+        mask = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+        c1, c2 = self._chain_connectivity(6)
+
+        filled = fill_land_cells_mpas(field, mask, c1, c2, n_iter=1)
+        # Cell 3 (1 edge from ocean) → filled with cell-2 value.
+        assert float(filled[3]) == 3.0
+        # Cells 4, 5 (2-3 edges from ocean) → unfilled.
+        assert float(filled[4]) == 0.0
+        assert float(filled[5]) == 0.0
+
+    def test_three_iter_reaches_three_rings(self):
+        """With n_iter=3 (new default), land cells up to 3 edges from
+        ocean get filled. This matches the lat-lon
+        ``_neumann_fill_cgrid`` 3-pass behaviour.
+        """
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        field = jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+        mask = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+        c1, c2 = self._chain_connectivity(6)
+
+        filled = fill_land_cells_mpas(field, mask, c1, c2)  # default n_iter=3
+        # Every land cell in the chain is reachable within 3 edges.
+        assert float(filled[3]) == 3.0
+        assert float(filled[4]) == 3.0
+        assert float(filled[5]) == 3.0
+        # Ocean cells untouched.
+        assert float(filled[0]) == 1.0
+        assert float(filled[1]) == 2.0
+        assert float(filled[2]) == 3.0
+
+    def test_fill_preserves_ocean_values_2d(self):
+        """2D (per-level) field: fill must not mutate ocean cells or
+        collapse across levels.
+        """
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        nlev = 3
+        field = jnp.stack(
+            [
+                jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0]),
+                jnp.array([4.0, 5.0, 6.0, 0.0, 0.0, 0.0]),
+                jnp.array([7.0, 8.0, 9.0, 0.0, 0.0, 0.0]),
+            ],
+            axis=-1,
+        )  # (6, 3)
+        mask = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+        c1, c2 = self._chain_connectivity(6)
+
+        filled = fill_land_cells_mpas(field, mask, c1, c2)  # n_iter=3
+        # Ocean cells preserved per-level.
+        assert jnp.allclose(filled[0], jnp.array([1.0, 4.0, 7.0]))
+        assert jnp.allclose(filled[2], jnp.array([3.0, 6.0, 9.0]))
+        # Land cells get the last-ocean-cell value per level.
+        assert jnp.allclose(filled[3], jnp.array([3.0, 6.0, 9.0]))
+        assert jnp.allclose(filled[5], jnp.array([3.0, 6.0, 9.0]))
+
+    def test_deep_land_beyond_n_iter_unchanged(self):
+        """Land cells deeper than n_iter edges from ocean stay at
+        their stale value. Documents the known limitation of the
+        iterative fill — the 'proper' fix (precomputed nearest-ocean
+        lookup) is still future work per issue #164's suggested fix.
+        """
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        # 6 ocean + 5 land; land cells 4..8 are 1..5 edges from ocean.
+        n = 11
+        field = jnp.array(
+            [1.0] * 6 + [-99.0] * 5, dtype=jnp.float32,
+        )
+        mask = jnp.array([1.0] * 6 + [0.0] * 5, dtype=jnp.float32)
+        c1, c2 = self._chain_connectivity(n)
+
+        filled = fill_land_cells_mpas(field, mask, c1, c2, n_iter=3)
+        # Cells 6, 7, 8 are 1, 2, 3 edges from ocean → filled.
+        assert float(filled[6]) == 1.0
+        assert float(filled[7]) == 1.0
+        assert float(filled[8]) == 1.0
+        # Cells 9, 10 are 4, 5 edges from ocean → unchanged.
+        assert float(filled[9]) == -99.0
+        assert float(filled[10]) == -99.0
+
 
 # ============================================================================
 # Test: Conservation
