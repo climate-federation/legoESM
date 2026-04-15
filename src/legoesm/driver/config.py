@@ -71,9 +71,12 @@ class ExperimentConfig(NamedTuple):
     # Forcing
     dataset: str = "analytical"
     forcing_path: str = ""
-    sic_path: str = ""             # separate SIC file (ICON format)
+    sic_path: str = ""             # optional separate SIC file
     sst_var: str = ""
     sic_var: str = ""
+    time_var: str = ""
+    lat_var: str = ""
+    lon_var: str = ""
     sst_offset: float = 0.0
     sic_scale: float = 1.0
 
@@ -143,12 +146,21 @@ class ExperimentConfig(NamedTuple):
     tau_pole: float = 1.8
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
+    sbm_cape_threshold: float = 70.0
     sigma_b: float = 0.7
     k_BL_max_per_day: float = 1.0
     k_free_per_day: float = 0.1
 
     # Held-Suarez forcing
     held_suarez_forcing: bool = False  # add HS Newtonian relaxation + Rayleigh drag
+
+    # Joint ML physics parameterization
+    physics_parameterization: str = "none"  # none, ml
+    physics_parameterization_checkpoint: str = ""
+    physics_parameterization_stats: str = ""
+    physics_parameterization_hidden_dim: int = 128
+    physics_parameterization_layers: int = 3
+    physics_parameterization_seed: int = 0
 
     # Performance
     precision: str = "fp32"           # fp32, fp64, mixed, or mixed_fp64_storage
@@ -188,6 +200,25 @@ class ExperimentConfig(NamedTuple):
             )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
+        if self.sbm_cape_threshold < 0:
+            errors.append(
+                f"sbm_cape_threshold must be >= 0, got {self.sbm_cape_threshold}"
+            )
+        if self.physics_parameterization not in ("none", "ml"):
+            errors.append(
+                "physics_parameterization must be 'none' or 'ml', "
+                f"got {self.physics_parameterization!r}"
+            )
+        if self.physics_parameterization_hidden_dim <= 0:
+            errors.append(
+                "physics_parameterization_hidden_dim must be > 0, "
+                f"got {self.physics_parameterization_hidden_dim}"
+            )
+        if self.physics_parameterization_layers <= 0:
+            errors.append(
+                "physics_parameterization_layers must be > 0, "
+                f"got {self.physics_parameterization_layers}"
+            )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
             errors.append(
@@ -234,6 +265,20 @@ class ExperimentConfig(NamedTuple):
                 "cmip_output=True; perf mode will be disabled at runtime "
                 "to ensure CMIP accumulation is not skipped"
             )
+        if self.physics_parameterization == "ml":
+            if self.convection != "mass_flux" or self.turbulence != "louis":
+                warns.append(
+                    "physics_parameterization='ml' currently expects "
+                    "convection='mass_flux' and turbulence='louis'"
+                )
+            has_ckpt = bool(self.physics_parameterization_checkpoint)
+            has_stats = bool(self.physics_parameterization_stats)
+            if has_ckpt != has_stats:
+                warns.append(
+                    "physics_parameterization='ml' expects both "
+                    "physics_parameterization_checkpoint and "
+                    "physics_parameterization_stats"
+                )
         return warns
 
     # ------------------------------------------------------------------
@@ -274,8 +319,12 @@ class ExperimentConfig(NamedTuple):
             start_day=amip_cfg.start_day,
             dataset=amip_cfg.dataset,
             forcing_path=amip_cfg.forcing_path,
+            sic_path=getattr(amip_cfg, 'sic_path', ''),
             sst_var=amip_cfg.sst_var,
             sic_var=amip_cfg.sic_var,
+            time_var=getattr(amip_cfg, 'time_var', ''),
+            lat_var=getattr(amip_cfg, 'lat_var', ''),
+            lon_var=getattr(amip_cfg, 'lon_var', ''),
             sst_offset=amip_cfg.sst_offset,
             sic_scale=amip_cfg.sic_scale,
             radiation=amip_cfg.radiation,
@@ -288,6 +337,8 @@ class ExperimentConfig(NamedTuple):
             ozone_source=amip_cfg.ozone_source,
             ozone_forcing=getattr(amip_cfg, 'ozone_forcing', 'inline'),
             ozone_file=getattr(amip_cfg, 'ozone_file', ''),
+            ghg_forcing=getattr(amip_cfg, 'ghg_forcing', 'constant'),
+            ghg_file=getattr(amip_cfg, 'ghg_file', ''),
             solar_source=getattr(amip_cfg, 'solar_source', 'constant'),
             solar_file=getattr(amip_cfg, 'solar_file', ''),
             solar_tsi_var=getattr(amip_cfg, 'solar_tsi_var', 'tsi'),
@@ -299,6 +350,10 @@ class ExperimentConfig(NamedTuple):
             volcanic_aerosol_scale=getattr(amip_cfg, 'volcanic_aerosol_scale', 1.0),
             cloud_scheme=amip_cfg.cloud_scheme,
             microphysics=amip_cfg.microphysics,
+            convection=getattr(amip_cfg, 'convection', 'sbm'),
+            turbulence=getattr(amip_cfg, 'turbulence', 'none'),
+            gravity_wave_drag=getattr(amip_cfg, 'gravity_wave_drag', 'none'),
+            fix_moisture=getattr(amip_cfg, 'fix_moisture', False),
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
@@ -319,9 +374,29 @@ class ExperimentConfig(NamedTuple):
             tau_pole=amip_cfg.tau_pole,
             sbm_tau_c=amip_cfg.sbm_tau_c,
             sbm_RH_ref=amip_cfg.sbm_RH_ref,
+            sbm_cape_threshold=getattr(amip_cfg, 'sbm_cape_threshold', 70.0),
             sigma_b=amip_cfg.sigma_b,
             k_BL_max_per_day=amip_cfg.k_BL_max_per_day,
             k_free_per_day=amip_cfg.k_free_per_day,
+            held_suarez_forcing=getattr(amip_cfg, 'held_suarez_forcing', False),
+            physics_parameterization=getattr(
+                amip_cfg, 'physics_parameterization', 'none',
+            ),
+            physics_parameterization_checkpoint=getattr(
+                amip_cfg, 'physics_parameterization_checkpoint', '',
+            ),
+            physics_parameterization_stats=getattr(
+                amip_cfg, 'physics_parameterization_stats', '',
+            ),
+            physics_parameterization_hidden_dim=getattr(
+                amip_cfg, 'physics_parameterization_hidden_dim', 128,
+            ),
+            physics_parameterization_layers=getattr(
+                amip_cfg, 'physics_parameterization_layers', 3,
+            ),
+            physics_parameterization_seed=getattr(
+                amip_cfg, 'physics_parameterization_seed', 0,
+            ),
             distributed=amip_cfg.distributed,
             ensemble_size=amip_cfg.ensemble_size,
         )
@@ -346,8 +421,12 @@ class ExperimentConfig(NamedTuple):
             checkpoint_days=self.output.checkpoint_days,
             dataset=self.dataset,
             forcing_path=self.forcing_path,
+            sic_path=self.sic_path,
             sst_var=self.sst_var,
             sic_var=self.sic_var,
+            time_var=self.time_var,
+            lat_var=self.lat_var,
+            lon_var=self.lon_var,
             sst_offset=self.sst_offset,
             sic_scale=self.sic_scale,
             radiation=self.radiation,
@@ -360,6 +439,8 @@ class ExperimentConfig(NamedTuple):
             ozone_source=self.ozone_source,
             ozone_forcing=self.ozone_forcing,
             ozone_file=self.ozone_file,
+            ghg_forcing=self.ghg_forcing,
+            ghg_file=self.ghg_file,
             solar_source=self.solar_source,
             solar_file=self.solar_file,
             solar_tsi_var=self.solar_tsi_var,
@@ -371,6 +452,10 @@ class ExperimentConfig(NamedTuple):
             volcanic_aerosol_scale=self.volcanic_aerosol_scale,
             cloud_scheme=self.cloud_scheme,
             microphysics=self.microphysics,
+            convection=self.convection,
+            turbulence=self.turbulence,
+            gravity_wave_drag=self.gravity_wave_drag,
+            fix_moisture=self.fix_moisture,
             topography=self.topography,
             topo_smoothing=self.topo_smoothing,
             topo_edge_blend=self.topo_edge_blend,
@@ -391,9 +476,17 @@ class ExperimentConfig(NamedTuple):
             tau_pole=self.tau_pole,
             sbm_tau_c=self.sbm_tau_c,
             sbm_RH_ref=self.sbm_RH_ref,
+            sbm_cape_threshold=self.sbm_cape_threshold,
             sigma_b=self.sigma_b,
             k_BL_max_per_day=self.k_BL_max_per_day,
             k_free_per_day=self.k_free_per_day,
+            held_suarez_forcing=self.held_suarez_forcing,
+            physics_parameterization=self.physics_parameterization,
+            physics_parameterization_checkpoint=self.physics_parameterization_checkpoint,
+            physics_parameterization_stats=self.physics_parameterization_stats,
+            physics_parameterization_hidden_dim=self.physics_parameterization_hidden_dim,
+            physics_parameterization_layers=self.physics_parameterization_layers,
+            physics_parameterization_seed=self.physics_parameterization_seed,
             monthly_means=self.output.monthly_means,
             cmip_output=self.output.cmip_output,
             clear_sky_diag=self.output.clear_sky_diag,

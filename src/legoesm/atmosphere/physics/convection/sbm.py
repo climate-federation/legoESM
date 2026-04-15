@@ -72,6 +72,12 @@ def sbm_convection(
     """
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev) layer thickness
+    tau_c = jnp.broadcast_to(jnp.asarray(config.tau_c, dtype=T.dtype), (ncol,))
+    RH_ref = jnp.broadcast_to(jnp.asarray(config.RH_ref, dtype=T.dtype), (ncol,))
+    CAPE_threshold = jnp.broadcast_to(
+        jnp.asarray(config.CAPE_threshold, dtype=T.dtype),
+        (ncol,),
+    )
 
     # 1. Surface temperature as parcel starting point
     T_base = T[:, -1]  # (ncol,)
@@ -91,7 +97,7 @@ def sbm_convection(
     # 5. Enthalpy-conserving correction (Newton iteration)
     #    Only over the cloud layer (masked levels).
     def _newton_step(T_trial):
-        q_trial = config.RH_ref * saturation_mixing_ratio(T_trial, p_full)
+        q_trial = RH_ref[:, None] * saturation_mixing_ratio(T_trial, p_full)
         residual = jnp.sum(
             cloud_mask * (constants.c_pd * (T_trial - T)
                           + constants.L_v * (q_trial - q_v)) * dp,
@@ -101,7 +107,7 @@ def sbm_convection(
         dqsat_dT = constants.L_v * q_sat_trial / (constants.R_v * T_trial ** 2)
         jacobian = jnp.sum(
             cloud_mask * (constants.c_pd
-                          + constants.L_v * config.RH_ref * dqsat_dT) * dp,
+                          + constants.L_v * RH_ref[:, None] * dqsat_dT) * dp,
             axis=1,
         )  # (ncol,)
         dT = -residual / jnp.clip(jacobian, 1.0, None)
@@ -111,17 +117,16 @@ def sbm_convection(
     T_ref = _newton_step(T_ref)    # second iteration
 
     # Reference moisture at converged temperature
-    q_ref = config.RH_ref * saturation_mixing_ratio(T_ref, p_full)
+    q_ref = RH_ref[:, None] * saturation_mixing_ratio(T_ref, p_full)
 
     # 6. Smooth trigger: sigmoid(sharpness * (CAPE - threshold))
     trigger = jax.nn.sigmoid(
-        config.smooth_trigger_sharpness * (cape - config.CAPE_threshold)
+        config.smooth_trigger_sharpness * (cape - CAPE_threshold)
     )  # (ncol,)
 
     # 7. Relaxation tendencies — only within the convective (cloud) layer
-    tau_c = config.tau_c
-    dT_dt = trigger[:, None] * cloud_mask * (T_ref - T) / tau_c
-    dq_v_dt = trigger[:, None] * cloud_mask * (q_ref - q_v) / tau_c
+    dT_dt = trigger[:, None] * cloud_mask * (T_ref - T) / tau_c[:, None]
+    dq_v_dt = trigger[:, None] * cloud_mask * (q_ref - q_v) / tau_c[:, None]
 
     # 7. Precipitation: column-integrated moisture sink
     # precip = -sum(dq_v_dt * dp) / g, clipped >= 0

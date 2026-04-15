@@ -40,8 +40,12 @@ class AMIPExperimentConfig(NamedTuple):
     # Forcing
     dataset: str = "cobe"
     forcing_path: str = ""
+    sic_path: str = ""
     sst_var: str = ""     # empty = use preset
     sic_var: str = ""
+    time_var: str = ""
+    lat_var: str = ""
+    lon_var: str = ""
     sst_offset: float = 0.0  # only used if sst_var is set (custom)
     sic_scale: float = 1.0
 
@@ -64,6 +68,7 @@ class AMIPExperimentConfig(NamedTuple):
     S_0: float = 1360.0
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
+    sbm_cape_threshold: float = 70.0
     C_H: float = 1.5e-3
     C_E: float = 1.5e-3
     k_free_per_day: float = 0.1
@@ -77,6 +82,8 @@ class AMIPExperimentConfig(NamedTuple):
     ozone_source: str = "standard"  # "standard", "analytical", or "none"
     ozone_forcing: str = "inline"  # "inline", "external", or "off"
     ozone_file: str = ""
+    ghg_forcing: str = "constant"  # "constant" or "external"
+    ghg_file: str = ""
     aerosol_forcing: str = "off"  # "off" or "external"
     aerosol_file: str = ""
     aerosol_reference_aod: float = 0.03
@@ -88,6 +95,12 @@ class AMIPExperimentConfig(NamedTuple):
 
     # Microphysics
     microphysics: str = "none"  # "none", "kessler", "sundqvist"
+
+    # Subgrid physics selection
+    convection: str = "sbm"
+    turbulence: str = "none"
+    gravity_wave_drag: str = "none"
+    fix_moisture: bool = False
 
     # Topography
     topography: str = "flat"  # "flat", "gaussian", or path to NetCDF file
@@ -120,6 +133,17 @@ class AMIPExperimentConfig(NamedTuple):
 
     # Output
     output_dir: str = ""
+
+    # Held-Suarez forcing
+    held_suarez_forcing: bool = False
+
+    # Joint ML physics parameterization
+    physics_parameterization: str = "none"
+    physics_parameterization_checkpoint: str = ""
+    physics_parameterization_stats: str = ""
+    physics_parameterization_hidden_dim: int = 128
+    physics_parameterization_layers: int = 3
+    physics_parameterization_seed: int = 0
 
 
 def config_to_dict(config) -> dict:

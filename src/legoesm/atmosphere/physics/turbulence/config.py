@@ -270,35 +270,6 @@ class EDMFConfig(NamedTuple):
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
-class MLTurbulenceEmulatorConfig(NamedTuple):
-    """Configuration for ML turbulence emulator (Equinox MLP).
-
-    Fields
-    ------
-    n_input : int
-        Number of input features per level (default 8).
-    n_hidden : int
-        Hidden layer width (default 128).
-    n_layers : int
-        Number of MLP layers (default 3).
-    n_output : int
-        Number of output features per level (default 9).
-    seed : int
-        Random seed for model initialization (default 0).
-    use_residual : bool
-        Apply residual scaling for near-zero untrained output (default True).
-    surface : SurfaceLayerConfig
-        Surface layer parameters.
-    """
-    n_input: int = 8
-    n_hidden: int = 128
-    n_layers: int = 3
-    n_output: int = 9
-    seed: int = 0
-    use_residual: bool = True
-    surface: SurfaceLayerConfig = SurfaceLayerConfig()
-
-
 class TurbulenceConfig(NamedTuple):
     """Top-level turbulence configuration.
 
@@ -308,8 +279,7 @@ class TurbulenceConfig(NamedTuple):
     ------
     scheme : str
         Active turbulence scheme: "smagorinsky", "louis", "tke",
-        "clubb_lite", "holtslag_boville", "ysu", "edmf",
-        "ml_emulator", or "none".
+        "clubb_lite", "holtslag_boville", "ysu", "edmf", or "none".
     smagorinsky : SmagorinskyConfig
         Configuration for Smagorinsky scheme.
     louis : LouisConfig
@@ -324,8 +294,6 @@ class TurbulenceConfig(NamedTuple):
         Configuration for YSU scheme.
     edmf : EDMFConfig
         Configuration for EDMF scheme.
-    ml_emulator : MLTurbulenceEmulatorConfig
-        Configuration for ML emulator scheme.
     update_interval_steps : int
         Recompute turbulence every N time steps (1 = every step).
     """
@@ -337,5 +305,4 @@ class TurbulenceConfig(NamedTuple):
     holtslag_boville: HoltslagBovilleConfig = HoltslagBovilleConfig()
     ysu: YSUConfig = YSUConfig()
     edmf: EDMFConfig = EDMFConfig()
-    ml_emulator: MLTurbulenceEmulatorConfig = MLTurbulenceEmulatorConfig()
     update_interval_steps: int = 1

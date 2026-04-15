@@ -1,6 +1,6 @@
 """Tests for ExperimentConfig.validate() cross-checking."""
 
-from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig
+from legoesm.driver.config import DycoreConfig, ExperimentConfig, GridConfig
 
 
 class TestConfigValidate:
@@ -33,3 +33,25 @@ class TestConfigValidate:
         )
         warns = cfg.validate()
         assert not any("CFL" in w for w in warns)
+
+    def test_joint_parameterization_warns_on_wrong_physical_stack(self):
+        cfg = ExperimentConfig(
+            convection="sbm",
+            turbulence="none",
+            physics_parameterization="ml",
+            physics_parameterization_checkpoint="model.eqx",
+            physics_parameterization_stats="stats.npz",
+        )
+        warns = cfg.validate()
+        assert any("convection='mass_flux'" in w for w in warns)
+
+    def test_joint_parameterization_warns_on_partial_assets(self):
+        cfg = ExperimentConfig(
+            convection="mass_flux",
+            turbulence="louis",
+            physics_parameterization="ml",
+            physics_parameterization_checkpoint="model.eqx",
+            physics_parameterization_stats="",
+        )
+        warns = cfg.validate()
+        assert any("physics_parameterization='ml'" in w for w in warns)
