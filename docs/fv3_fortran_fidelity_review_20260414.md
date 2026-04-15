@@ -319,6 +319,14 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
   - This matches the Fortran's `bounded_domain .or. flagstruct%duogrid` pattern
   - No `bounded_domain` flag needed in Python — `use_duogrid` flag serves the identical purpose
 
+### Resolved in iteration 29 (2026-04-15):
+- **Direct-corner vorticity in _c_sw and fv3_csw_tendencies**: ported FV3 sw_core.F90:378-408 ✅
+  - Replaces cell-centre vorticity + interpolation with direct corner computation from C-grid circulation
+  - Uses `vort(i,j) = fx(i,j-1) - fx(i,j) - fy(i-1,j) + fy(i,j)` at (n+1, n+1) corner positions
+  - Linear extrapolation for boundary padding (avoids edge-copy instability)
+  - Includes FV3 corner corrections for non-duogrid (sw_core.F90:396-400)
+- **fv3_cc2c v_c non-orthogonality correction**: investigated — adding v_c correction WORSENS divergence 20x. Current asymmetric correction (u_c only) is empirically optimal. Closed as not-a-bug.
+
 ### Remaining structural items:
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
 F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vect)
