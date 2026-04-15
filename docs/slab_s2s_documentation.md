@@ -49,6 +49,36 @@ The staged checkpoint family used by the slab-coupled campaign workflow lives un
 - `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/stage3_rollout5`
 - `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/stage3_rollout7`
 
+The staged SFNO recipe currently used by those checkpoints is:
+
+- training years `1979-2021`
+- atmospheric targets `z,q,t,u,v` on the default 10 ChaosBench pressure levels
+- ocean/auxiliary forcing `sosstsst` plus `land_sea_mask`
+- ocean source `arco_sst`
+- target grid `gaussian_n_max=79`
+- one-day lead time with autoregressive training horizon matched to each stage's `n_steps`
+- SFNO architecture `embed_dim=32`, `n_blocks=4`, `mlp_expansion=4`
+- residual prediction enabled and tendency prediction disabled
+- stochastic AFCRPS training with `ensemble_members=4`, `noise_channels=1`, `noise_lat=8`, `noise_lon=16`, `use_time_signal=true`, `afcrps_alpha=0.95`
+- batch size `2`, weight decay `1e-5`, validation batches `512`
+
+The warm-start chain is explicit in the checkpoint metadata:
+
+- `stage1_rollout1`: trained from scratch with `train_rollout_steps=1`, `n_steps=1`, `total_steps=20000`, `lr=5e-4`, `warmup_steps=500`
+- `stage2_rollout2`: warm-started from `stage1_rollout1/.../best.eqx` with `train_rollout_steps=2`, `n_steps=2`, `total_steps=4000`, `lr=5e-5`, `warmup_steps=200`
+- `stage3_rollout3`: warm-started from `stage2_rollout2/.../best.eqx` with `train_rollout_steps=3`, `n_steps=3`, `total_steps=1000`, `lr=1e-5`, `warmup_steps=100`
+- `stage3_rollout5`: warm-started from `stage3_rollout3/.../best.eqx` with `train_rollout_steps=5`, `n_steps=5`, `total_steps=1000`, `lr=1e-5`, `warmup_steps=100`
+- `stage3_rollout7`: warm-started from `stage3_rollout5/.../best.eqx` with `train_rollout_steps=7`, `n_steps=7`, `total_steps=1000`, `lr=5e-6`, `warmup_steps=100`
+
+For campaign evaluation, the canonical path is:
+
+- generate per-init-date case outputs with `python scripts/s2s/sfno_slab.py ensemble-inference ...`
+- refresh case metrics and representative plots with `python scripts/s2s/sfno_slab.py postprocess-ensemble ...`
+- aggregate semimonthly campaigns with `python scripts/s2s/run_sfno_campaign.py --aggregate-only ...`
+- compare against external centers with `python scripts/s2s/sfno_slab.py postprocess-center-crps ...`
+
+The center-level comparison currently uses the aggregated `case_ensemble_daily_metrics.csv` CRPS series for the coupled and uncoupled SFNO runs, then compares those windows against the ChaosBench center baselines fetched from the LEAP/ChaosBench Hugging Face CSVs for `ECMWF`, `UKMO`, `NCEP`, and `CMA`.
+
 ## NeuralGCM Slab Workflow
 
 The NeuralGCM slab implementation lives under `legoesm.ml.s2s.neuralgcm_slab` and mirrors the SFNO campaign structure where practical:
