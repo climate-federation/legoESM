@@ -1349,6 +1349,89 @@ def run_eady_instability(tc: TestCase, output_dir: Path, days: float
 
 
 # ===========================================================================
+# Runner: Classical Eady (uniform N², linear shear)
+# ===========================================================================
+
+def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
+                     ) -> tuple[str, float, str]:
+    """Classical Eady instability: uniform N², linear shear, linear EOS."""
+    if tc.grid_type not in ("mpas_channel", "latlon_channel"):
+        raise NotImplementedError(
+            f"eady_uniform only for channel grids, not {tc.grid_type}")
+
+    from legoesm.ocean.experiments.eady_uniform import (
+        EadyUniformConfig, create_initial_conditions as eu_ic,
+        create_forcings as eu_forcings)
+    from legoesm.ocean.eos import LinearEOSConfig
+
+    eu_config = EadyUniformConfig()
+    physics = eu_forcings(tc.grid_type, None, eu_config)
+
+    grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
+        _create_ocean_setup(
+            tc, physics=physics, A_h=eu_config.A_h,
+            eos="linear",
+            eos_linear=LinearEOSConfig(
+                alpha_T=eu_config.alpha_T,
+                rho_ref=eu_config.rho_0,
+                T_ref=eu_config.T_ref,
+                S_ref=eu_config.S_uniform,
+            ),
+            barotropic_diffusion_alpha=eu_config.barotropic_diffusion_alpha,
+        ))
+
+    state = eu_ic(tc.grid_type, grid, z_coord, eu_config)
+
+    dt = config.DEFAULT_DT
+    n_steps = int(days * 86400 / dt)
+    diag_every = max(1, n_steps // 40)
+
+    check_fn = _make_check_fn(tc.grid_type)
+    scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+
+    def step_fn(s, dt_):
+        return model.step(s, dt_)
+
+    state, snapshots, diag, wall, ok = _run_timeloop(
+        step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
+        diag_every, lambda s: _key_array_fn(s, tc.grid_type),
+        label=f"Eady Uniform ({tc.grid_type})", total_days=days)
+
+    max_speed = diag["max_speed"][-1] if diag.get("max_speed") else 0
+    T_vals = diag.get("mean_T", [])
+    T_drift = abs(T_vals[-1] - T_vals[0]) if len(T_vals) >= 2 else 0
+    notes = (f"max_speed={max_speed:.4f}m/s, T_drift={T_drift:.2e}, "
+             f"Ld={eu_config.Ld_km:.0f}km, tau={eu_config.efolding_days:.0f}d")
+
+    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
+    depth = -z_full
+
+    _write_results_txt(output_dir, {
+        "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
+        "days": days, "dt": dt, "levels": z_coord.n_levels,
+        "status": "PASS" if ok else "FAIL", "notes": notes,
+        "wall_time": f"{wall:.1f}s"})
+
+    _save_case_diagnostics(
+        output_dir, f"Eady Uniform {tc.grid_type} {tc.resolution}",
+        dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
+        field_specs_2d=[
+            ("eta", "SSH (m)", "RdBu_r"),
+            ("speed_sfc", "Surface Speed (m/s)", "plasma"),
+            ("SST", "SST (degC)", "RdYlBu_r"),
+        ],
+        field_3d_key="T_3d", level_values=depth,
+        level_label="Depth (m)",
+        vol_key="mean_eta", heat_key="mean_T", salt_key="mean_S",
+        scalar_units={"mean_eta": "m", "max_speed": "m/s",
+                      "mean_T": "degC", "mean_S": "PSU"},
+        mesh=grid if coord_kind == "mpas" else None)
+
+    return "PASS" if ok else "FAIL", wall, notes
+
+
+# ===========================================================================
 # Runner dispatch
 # ===========================================================================
 
@@ -1372,4 +1455,5 @@ RUNNERS: dict[str, Callable] = {
     "overflow": run_overflow,
     "stommel_gyre_tracer": run_stommel_gyre_tracer,
     "eady_instability": run_eady_instability,
+    "eady_uniform": run_eady_uniform,
 }

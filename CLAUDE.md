@@ -111,6 +111,12 @@ These are recurring mistakes caught by slopbuster. Check for them before submitt
 - When accessing NamedTuple fields, **verify the actual field name** — not what you think it should be. Example: `PhysicsOutput` has `precip`, not `precipitation`. A `hasattr` guard silently degrades to a fallback instead of catching the typo.
 - When adding fields to a NamedTuple (e.g., `SegmentCarry`), **update every call site** that constructs the NamedTuple. Search with `grep -rn "SegmentCarry(" --include="*.py"` for all constructors. Missing a field causes a runtime error, but tests in other files may not run until CI catches it.
 
+### Land mask and face masks (latlon C-grid)
+- **Never use `state._replace(land_mask=...)` on `LatLonCGridOceanState`** without also updating `u_mask` and `v_mask`. Stale face masks allow mass flux through walls, causing silent mass leaks.
+- **Preferred**: pass the correct `land_mask_override` to `rest_state_latlon_cgrid_ocean()` at construction time.
+- **If post-construction replacement is needed**: use `replace_land_mask(state, new_mask)` from `init_latlon_cgrid.py` — it atomically updates all three masks.
+- The runtime check in `_assert_runtime_invariants` (gated by `enable_runtime_checks`) will catch inconsistencies.
+
 ### Reuse before writing
 - **Column integrals**: use `diagnostics.column_integrals.column_water_vapor()` — do not inline `jnp.sum(q * p_s * dsigma) / g`.
 - **Loss functions**: import from `ml/loss.py` (`area_weighted_mse`, `spectral_loss`, `per_variable_mse`) — do not reimplement.

@@ -36,7 +36,10 @@ def _parse_resolution(tc):
 def _create_ocean_setup(tc, nlev: int | None = None,
                         H_max: float | None = None, physics=None,
                         A_h: float | None = None,
-                        A_v: float | None = None):
+                        A_v: float | None = None,
+                        eos: str | None = None,
+                        eos_linear=None,
+                        barotropic_diffusion_alpha: float | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -180,6 +183,12 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
         cfg = LatLonCGridOceanConfig(**kw)
         model = LatLonCGridOceanModel(grid, z_coord, cfg)
         coord_kind = "latlon"
@@ -203,6 +212,12 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["A_h"] = A_h
         if A_v is not None:
             kw["A_v"] = A_v
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
         cfg = MPASOceanConfig(**kw)
         model = MPASOceanModel(mesh, z_coord, cfg)
         coord_kind = "mpas"

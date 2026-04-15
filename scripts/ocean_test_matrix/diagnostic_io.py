@@ -776,8 +776,14 @@ def _save_snapshot_data(
         latlon_arrays["source_lat_range"] = np.array(
             [domain_extent[2], domain_extent[3]])
     else:
+        src_lon_min, src_lon_max = float(src_lon.min()), float(src_lon.max())
+        if src_lon_min < 0:
+            src_lon_min = src_lon_min % 360
+            src_lon_max = src_lon_max % 360
+            if src_lon_max <= src_lon_min:
+                src_lon_min, src_lon_max = 0.0, 360.0
         latlon_arrays["source_lon_range"] = np.array(
-            [float(src_lon.min()), float(src_lon.max())])
+            [src_lon_min, src_lon_max])
         latlon_arrays["source_lat_range"] = np.array(
             [float(src_lat.min()), float(src_lat.max())])
 

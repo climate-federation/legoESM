@@ -555,6 +555,16 @@ class LatLonCGridOceanModel:
         wet = mask > 0.5
         land = ~wet
 
+        # Face mask consistency: u_mask/v_mask must match land_mask
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
+        u_expected, v_expected = compute_face_masks(mask)
+        if not (bool(jnp.all(state.u_mask.data == u_expected))
+                and bool(jnp.all(state.v_mask.data == v_expected))):
+            raise ValueError(
+                "C-grid ocean: u_mask/v_mask inconsistent with land_mask. "
+                "Use replace_land_mask() or land_mask_override instead of "
+                "raw state._replace(land_mask=...).")
+
         # Finiteness of all prognostic fields
         finite_ok = bool(
             jnp.all(jnp.isfinite(state.u.data))

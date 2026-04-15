@@ -163,6 +163,12 @@ def _build_test_matrix() -> list[TestCase]:
         matrix.append(TestCase(
             "eady_instability", g, res[g], 60.0, 5.0))
 
+    # --- Classical Eady (uniform N², linear shear): higher-res channel ---
+    eady_u_res = {"latlon_channel": "60x180", "mpas_channel": "200km"}
+    for g in ["latlon_channel", "mpas_channel"]:
+        matrix.append(TestCase(
+            "eady_uniform", g, eady_u_res[g], 120.0, 10.0))
+
     return matrix
 
 

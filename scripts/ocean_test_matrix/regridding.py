@@ -11,6 +11,21 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 
+def _shift_to_0_360(arr: np.ndarray, lon_cent: np.ndarray) -> np.ndarray:
+    """Roll a regridded array from [-180, 180] to [0, 360] longitude convention.
+
+    Auto-detects whether a shift is needed by checking whether the source
+    longitude grid contains negative values.  Works for 2-D (n_lat, n_lon)
+    and 3-D (n_lat, n_lon, n_lev) arrays.
+    """
+    if lon_cent[0] >= 0:
+        return arr
+    n_lon = len(lon_cent)
+    shift = int(np.searchsorted(lon_cent, 0.0))
+    lon_axis = 1  # (n_lat, n_lon, ...)
+    return np.roll(arr, -shift, axis=lon_axis)
+
+
 def _build_latlon_weights(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
@@ -341,7 +356,8 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
             n = int(round(np.sqrt(arr.size / 6)))
             arr = arr.reshape(6, n, n)
         w = get_cubedsphere_to_latlon_weights(n)
-        return apply_cubedsphere_to_latlon(arr, w)
+        result = apply_cubedsphere_to_latlon(arr, w)
+        return _shift_to_0_360(result, w.lon_cent)
     return _bin_to_latlon(field_arr.ravel(), lon_deg.ravel(), lat_deg.ravel(),
                           target_lat=target_lat, target_lon=target_lon,
                           ocean_mask=ocean_mask)
@@ -369,7 +385,8 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
             n = int(round(np.sqrt(arr.size / (6 * nlev))))
             arr = arr.reshape(6, n, n, nlev)
         w = get_cubedsphere_to_latlon_weights(n)
-        return apply_cubedsphere_to_latlon_3d(arr, w)
+        result = apply_cubedsphere_to_latlon_3d(arr, w)
+        return _shift_to_0_360(result, w.lon_cent)
     if arr.ndim == 1:
         arr = arr[:, None]
     nlev = arr.shape[-1]
