@@ -15,6 +15,7 @@ import pytest
 
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
+from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
 
@@ -22,6 +23,16 @@ N = 4
 NLEV = 3
 _GRID = create_cubed_sphere(N)
 _SIGMA = create_sigma_coordinate(NLEV)
+_OPTIONAL_3D_OUTPUT_FIELDS = (
+    "du_dt",
+    "dv_dt",
+    "dq_i_dt",
+    "dq_s_dt",
+    "dq_g_dt",
+    "dN_c_dt",
+    "dN_r_dt",
+    "dN_i_dt",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +48,67 @@ def _make_state(T_val=280.0):
         p_s=Field(jnp.full(s2, 101325.0), name="p_s", dims=("f","x","y"), units="Pa"),
         phis=Field(jnp.zeros(s2), name="phis", dims=("f","x","y"), units="m2/s2"),
     )
+
+
+def _zero_physics_output(T, p_s, *, conv_prog=None):
+    kwargs = dict(
+        dT_dt=jnp.zeros(T.shape),
+        dq_v_dt=jnp.zeros(T.shape),
+        dq_c_dt=jnp.zeros(T.shape),
+        dq_r_dt=jnp.zeros(T.shape),
+        precip=jnp.zeros(p_s.shape),
+        sw_net_sfc=jnp.zeros(p_s.shape),
+        lw_net_sfc=jnp.zeros(p_s.shape),
+        sw_up_toa=jnp.zeros(p_s.shape),
+        lw_up_toa=jnp.zeros(p_s.shape),
+        sw_down_toa=jnp.zeros(p_s.shape),
+    )
+    for field_name in _OPTIONAL_3D_OUTPUT_FIELDS:
+        if field_name in PhysicsOutput._fields:
+            kwargs[field_name] = jnp.zeros(T.shape)
+    if "conv_prog" in PhysicsOutput._fields:
+        if conv_prog is None:
+            conv_prog = jnp.asarray(0.0, dtype=T.dtype)
+        kwargs["conv_prog"] = conv_prog
+    return kwargs
+
+
+def _step_unified_args(*, include_conv_prog=False):
+    state = _make_state()
+    shape_3d = state.T.data.shape
+    shape_2d = state.p_s.data.shape
+    args = [
+        jnp.bool_(True),
+        state.T.data,
+        state.p_s.data,
+        jnp.zeros(shape_3d),
+        jnp.zeros(shape_3d),
+        jnp.zeros(shape_3d),
+    ]
+    if include_conv_prog:
+        args.append(jnp.zeros((6 * N * N,), dtype=jnp.float32))
+    args.extend([
+        state.u.data,
+        state.v.data,
+        jnp.full(shape_2d, 300.0),
+        jnp.zeros(shape_2d),
+        _GRID.lat,
+        _GRID.lon,
+        1.0,
+        0.0,
+        600.0,
+        jnp.ones(14),
+        1361.0,
+        jnp.zeros(shape_3d),
+        jnp.zeros(shape_2d),
+        jnp.zeros(shape_3d),
+        jnp.zeros(shape_2d),
+        jnp.zeros(shape_2d),
+        jnp.zeros(shape_2d),
+        jnp.zeros(shape_2d),
+        jnp.zeros(shape_2d),
+    ])
+    return tuple(args)
 
 
 # ---------------------------------------------------------------------------
@@ -220,13 +292,7 @@ class TestTrainingDriver:
                 return s
 
         def mock_step(need_rad, T, p_s, *a, **kw):
-            p = PhysicsOutput(
-                dT_dt=jnp.zeros(T.shape), dq_v_dt=jnp.zeros(T.shape),
-                dq_c_dt=jnp.zeros(T.shape), dq_r_dt=jnp.zeros(T.shape),
-                precip=jnp.zeros(p_s.shape), sw_net_sfc=jnp.zeros(p_s.shape),
-                lw_net_sfc=jnp.zeros(p_s.shape), sw_up_toa=jnp.zeros(p_s.shape),
-                lw_up_toa=jnp.zeros(p_s.shape), sw_down_toa=jnp.zeros(p_s.shape),
-            )
+            p = PhysicsOutput(**_zero_physics_output(T, p_s))
             return p, (a[16], a[17], a[18], a[19], a[20], a[21])
 
         fn = _build_training_segment(
@@ -285,6 +351,36 @@ class TestTrainingAPISignatures:
         sig = inspect.signature(train_sfno_coupled)
         # physics_pipeline should default to None
         assert sig.parameters["physics_pipeline"].default is None
+
+    def test_neural_step_unified_accepts_optional_conv_prog_slot(self):
+        from legoesm.atmosphere.physics.neural_physics import (
+            NeuralPhysics,
+            make_neural_step_unified,
+        )
+        from legoesm.driver.grid_adapters import make_adapter
+
+        neural = NeuralPhysics(nlev=NLEV, key=jax.random.PRNGKey(0))
+        step = make_neural_step_unified(neural, make_adapter(_GRID))
+
+        phys_out, held = step(*_step_unified_args(include_conv_prog=True))
+
+        assert phys_out.du_dt.shape == _make_state().T.data.shape
+        assert len(held) == 6
+
+    def test_sfno_step_unified_accepts_optional_conv_prog_slot(self):
+        from legoesm.training.sfno_dycore_coupling import make_sfno_step_unified
+
+        class MockSFNOPhysics:
+            def __call__(self, T, u, v, q_v, p_s, phis, dt):
+                del u, v, q_v, phis, dt
+                return PhysicsOutput(**_zero_physics_output(T, p_s))
+
+        step = make_sfno_step_unified(MockSFNOPhysics(), mode="replacement")
+
+        phys_out, held = step(*_step_unified_args(include_conv_prog=True))
+
+        assert phys_out.du_dt.shape == _make_state().T.data.shape
+        assert len(held) == 6
 
 
 # ---------------------------------------------------------------------------
