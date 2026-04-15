@@ -324,6 +324,32 @@ def vertical_advection_ocean(field, w_half, z_coord, jacobian):
     return -w_full * grad
 
 
+def compute_depth_mean(
+    u: jnp.ndarray,
+    h: jnp.ndarray,
+    mask: jnp.ndarray | None = None,
+    min_h: float = 1e-10,
+) -> jnp.ndarray:
+    """Thickness-weighted depth-mean of a 3D field (#172).
+
+    Parameters
+    ----------
+    u : (..., nlev)
+    h : (..., nlev)
+    mask : (...) or None
+    min_h : float
+
+    Returns
+    -------
+    u_bar : (...)
+    """
+    H = jnp.maximum(jnp.sum(h, axis=-1), min_h)
+    u_bar = jnp.sum(u * h, axis=-1) / H
+    if mask is not None:
+        u_bar = u_bar * mask
+    return u_bar
+
+
 def flux_form_vertical_momentum_advection(
     u: jnp.ndarray,
     w_half: jnp.ndarray,

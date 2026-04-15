@@ -396,6 +396,8 @@ class LatLonCGridOceanModel:
             _interp_to_v_points,
             _upwind_to_u_points,
             _upwind_to_v_points,
+            _tvd_to_u_points,
+            _tvd_to_v_points,
         )
         from legoesm.ocean.dynamics.latlon_cgrid_operators import (
             divergence_cgrid, interp_cell_to_uface,
@@ -475,8 +477,12 @@ class LatLonCGridOceanModel:
             # First-order upwind interpolation prevents new extrema near
             # sharp gradients (monotonicity-preserving).  The upwind cell
             # is selected based on the sign of the mass flux.
-            tr_u = _upwind_to_u_points(tr, mass_flux_u)
-            tr_v = _upwind_to_v_points(tr, mass_flux_v)
+            if self.config.tracer_advection == "tvd":
+                tr_u = _tvd_to_u_points(tr, mass_flux_u)
+                tr_v = _tvd_to_v_points(tr, mass_flux_v)
+            else:
+                tr_u = _upwind_to_u_points(tr, mass_flux_u)
+                tr_v = _upwind_to_v_points(tr, mass_flux_v)
             tracer_flux_u = mass_flux_u * tr_u
             tracer_flux_v = mass_flux_v * tr_v
             div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, self.grid)
