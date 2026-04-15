@@ -1481,11 +1481,24 @@ def fv3_sw_tendencies(
     # (d) Arakawa-Lamb gradient at D-grid corners
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
-    # (e) Corner winds from edge midpoints for vorticity
-    u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    u_corner = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])
-    v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    v_corner = 0.5 * (v_d_pad[:, :, :-1] + v_d_pad[:, :, 1:])
+    # (e) Corner winds from halo-exchanged cell-centre velocities.
+    # Previous: edge-padding D-grid winds gave incorrect boundary corners.
+    # Now: vector halo exchange rotates cell-centre winds across faces,
+    # then 4-point average to corners gives correct boundary values.
+    from legoesm.grids.halo import pad_halo_vector
+    grid = cdgrid.base
+    dg = grid.duogrid
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    u_cc_pad, v_cc_pad = pad_halo_vector(
+        u_cc, v_cc,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=offsets, duogrid=dg,
+    )
+    u_corner = 0.25 * (u_cc_pad[:, :-1, :-1] + u_cc_pad[:, 1:, :-1]
+                        + u_cc_pad[:, :-1, 1:] + u_cc_pad[:, 1:, 1:])
+    v_corner = 0.25 * (v_cc_pad[:, :-1, :-1] + v_cc_pad[:, 1:, :-1]
+                        + v_cc_pad[:, :-1, 1:] + v_cc_pad[:, 1:, 1:])
 
     # (f) Vorticity at cell centres → interpolated to corners
     zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
