@@ -307,11 +307,26 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 - c_sw vorticity flux fy1/fx1: reduced boundary override from {0,1,n-1,n} to {0,n} only, matching FV3 sw_core.F90:445-449 ✅
 - fv3_csw_tendencies: same vorticity flux fix ✅
 
+### Resolved in iteration 28 (2026-04-15):
+- **CGRID flux synchronization (P0 expert constraint)**: implemented `synchronize_cgrid_fluxes()` in `halo.py` ✅
+  - Averages boundary fluxes at all 12 shared face edges (same-axis + cross-axis with index reversal)
+  - Applied in `cgrid_mass_flux_divergence` (production path), `fv_tp_2d` (transport), and `_c_sw` (FB path)
+  - Gated on `duogrid is not None and dg.ng >= 2` — matches Fortran `if (duogrid)` gate in dyn_core.F90:853-900
+  - Conservation improvement verified: W5 mass drift 1.42e-05 → 1.09e-06 (13x improvement with duogrid)
+  - Ocean rest state with duogrid: h_err=0.00, u_err=1.16e-14, v_err=1.35e-14 (machine precision)
+- **Legacy edge handling verification (P0 expert constraint)**: systematically verified ✅
+  - All 15 `if not use_duogrid:` / `dg is not None` guards in fv3_sw_core.py and operators_cdgrid.py correctly bypass legacy edge handling when duogrid is active
+  - This matches the Fortran's `bounded_domain .or. flagstruct%duogrid` pattern
+  - No `bounded_domain` flag needed in Python — `use_duogrid` flag serves the identical purpose
+
 ### Remaining structural items:
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
 F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vect)
 - Full d_sw B-grid KE transport — required to fully eliminate boundary artifacts
 - Production path (fv3_sw_tendencies) uses Arakawa-Lamb gradient, NOT FV3's c_sw/d_sw operators — pre-existing artifacts originate here, not in fv3_sw_core.py
+- **Duogrid + production path instability**: W2 with duogrid has 370x larger corner tendencies (max |dh/dt|=0.158 vs 4.3e-4 without duogrid), causing NaN blowup. Root cause: `fv3_sw_tendencies` Arakawa-Lamb gradient at cube vertices with duogrid halo exchange gives worse corner accuracy. NOT a flux sync issue — exists independently.
+- **d_sw3 KE flux synchronization**: Fortran averages B-grid KE transport at face boundaries after d_sw3 (dyn_core.F90:969-1011). Our code does not have d_sw3 B-grid KE transport at all. Blocked on porting d_sw3.
+- **d_sw5 vorticity flux synchronization**: COMMENTED OUT in the Fortran oracle (dyn_core.F90:1128-1165), noted as "should be applied to have consistent logic". Not implemented.
 
 ### Pre-existing issues (not caused by these changes):
 - Williamson 2 v-wind shows cube-face imprint at t>0.5d — IDENTICAL in original code (verified by checkout to ebd6e43). Root cause is deeper infrastructure (grid construction, halo exchange), not operator formulas.
@@ -322,11 +337,11 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
 ### Iteration 17: rsin_u uniformity fix
 Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhere, eliminating a 4.7% metric discontinuity. The cosa_u boundary gradient was verified to be smooth (4.88e-02 at boundary vs 5.29e-02 at interior — no discontinuity).
 
-### Evaluation results (all pass, updated after iteration 27, 2026-04-15):
-- Williamson 2: L2=1.54e-03, Linf=4.04e-03 ← 21% L2 / 53% Linf improvement vs session start (1.94e-3, 8.66e-3)
-- Williamson 5: mass drift=1.52e-05
-- Cosine bell: L1=1.27e-01, L2=1.22e-01, Linf=1.32e-01
-- Ocean rest state: all cubed-sphere variants PASS
+### Evaluation results (all pass, updated after iteration 28, 2026-04-15):
+- Williamson 2: L2=1.53e-03, Linf=4.07e-03 (non-duogrid production path, unchanged)
+- Williamson 5: mass drift=1.42e-05 (non-duogrid); 1.09e-06 (with duogrid + flux sync, 13x improvement)
+- Cosine bell: L1=1.27e-01, L2=1.22e-01, Linf=1.32e-01 (unchanged)
+- Ocean rest state: all cubed-sphere variants PASS; duogrid path gives machine-precision preservation (h_err=0, u/v_err=1e-14)
 - 86 unit tests pass; no regressions
 
 ### Session summary (2026-04-15): 10 commits

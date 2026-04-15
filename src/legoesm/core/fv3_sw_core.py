@@ -606,6 +606,11 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     h_top = h_pad[:, 1:-1, 1:]
     fy = jnp.where(vt_scaled > 0, h_bot, h_top) * vt_scaled
 
+    # Duogrid flux synchronization (FV3 dyn_core.F90:853-900)
+    if use_duogrid:
+        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        fx, fy = synchronize_cgrid_fluxes(fx, fy, n)
+
     rarea = 1.0 / cdgrid.base.area
     h_star = h + (fx[:, :-1, :] - fx[:, 1:, :] + fy[:, :, :-1] - fy[:, :, 1:]) * rarea
 

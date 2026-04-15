@@ -1389,3 +1389,78 @@ def compute_padded_half_metrics(
     hy_ext = jnp.stack(all_hy, axis=0)
 
     return hx_ext, hy_ext
+
+
+# ==============================================================================
+# CGRID flux synchronization (duogrid face-boundary averaging)
+# ==============================================================================
+
+def synchronize_cgrid_fluxes(fx, fy, n):
+    """Average C-grid fluxes at shared face boundaries (duogrid conservation fix).
+
+    Implements the duogrid flux averaging from FV3 dyn_core.F90:853-900.
+    Each shared face boundary flux is replaced by the average of both
+    faces' independently computed boundary fluxes, ensuring that the mass
+    flux leaving face A exactly equals the mass flux entering face B.
+
+    This is required for conservation when using duogrid halo exchange,
+    because each face computes boundary fluxes independently using its own
+    extended grid, producing slightly different values at shared edges.
+
+    Parameters
+    ----------
+    fx : jax.Array, shape (6, n+1, n)
+        x-direction flux at cell x-interfaces.
+    fy : jax.Array, shape (6, n, n+1)
+        y-direction flux at cell y-interfaces.
+    n : int
+        Number of cells per face edge.
+
+    Returns
+    -------
+    fx_sync, fy_sync : jax.Array
+        Fluxes with averaged boundary values.
+    """
+    # Pre-compute all boundary averages from the ORIGINAL (unsynchronized)
+    # fluxes so that we read before writing.
+    avgs = {}
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+            local_bdy = _extract_cgrid_boundary(fx, fy, face, edge, n)
+            nbr_bdy = _extract_cgrid_boundary(fx, fy, nbr_face, nbr_edge, n)
+            if rev:
+                nbr_bdy = nbr_bdy[::-1]
+            avgs[(face, edge)] = 0.5 * (local_bdy + nbr_bdy)
+
+    # Write all averaged values back.
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            avg = avgs[(face, edge)]
+            if edge == WEST:
+                fx = fx.at[face, 0, :].set(avg)
+            elif edge == EAST:
+                fx = fx.at[face, n, :].set(avg)
+            elif edge == SOUTH:
+                fy = fy.at[face, :, 0].set(avg)
+            else:  # NORTH
+                fy = fy.at[face, :, n].set(avg)
+
+    return fx, fy
+
+
+def _extract_cgrid_boundary(fx, fy, face, edge, n):
+    """Extract boundary flux from the appropriate array and position.
+
+    WEST/EAST boundaries extract from fx (x-direction fluxes).
+    SOUTH/NORTH boundaries extract from fy (y-direction fluxes).
+    Returns shape (n,).
+    """
+    if edge == WEST:
+        return fx[face, 0, :]
+    elif edge == EAST:
+        return fx[face, n, :]
+    elif edge == SOUTH:
+        return fy[face, :, 0]
+    else:  # NORTH
+        return fy[face, :, n]

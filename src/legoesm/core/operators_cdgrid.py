@@ -551,6 +551,15 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     flux_x = h_face_x * u_c * dy
     flux_y = h_face_y * v_c * dx
 
+    # Duogrid flux synchronization: average boundary fluxes between adjacent
+    # faces so that mass leaving face A = mass entering face B.  Required for
+    # conservation when each face independently computes boundary fluxes from
+    # duogrid-extended halo data.  Matches FV3 dyn_core.F90:853-900.
+    dg = cdgrid.base.duogrid
+    if dg is not None and dg.ng >= 2:
+        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        flux_x, flux_y = synchronize_cgrid_fluxes(flux_x, flux_y, n)
+
     net_x = flux_x[:, 1:] - flux_x[:, :-1]
     net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
 

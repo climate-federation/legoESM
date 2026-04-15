@@ -288,6 +288,15 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid):
 
     fx = 0.5 * (fx1 + fx2) * xfx
     fy = 0.5 * (fy1 + fy2) * yfx
+
+    # Duogrid flux synchronization: average boundary fluxes between adjacent
+    # faces so that mass leaving face A = mass entering face B.
+    # Matches FV3 dyn_core.F90:853-900.
+    dg = cdgrid.base.duogrid
+    if dg is not None and dg.ng >= 2:
+        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        fx, fy = synchronize_cgrid_fluxes(fx, fy, n)
+
     return fx, fy
 
 
