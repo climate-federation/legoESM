@@ -1061,7 +1061,7 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
     # Phase 3: D-grid half-step using FV3-native transport operators
     # (NOT Arakawa-Lamb — uses PPM mass transport + KE/vort transport)
     h_new, u_d_new, v_d_new = _d_sw_native(
-        h, u_d, v_d, uc_new, vc_new, ua, va, cdgrid, dt, g,
+        h, u_d, v_d, h_s, uc_new, vc_new, ua, va, cdgrid, dt, g,
         div_damp=div_damp)
 
     return h_new, u_d_new, v_d_new
@@ -1154,7 +1154,7 @@ def _uc_to_ut(uc, vc, u_d, v_d, cdgrid):
     return ut, vt
 
 
-def _d_sw_native(h, u_d, v_d, uc, vc, ua, va, cdgrid, dt, g,
+def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
                  div_damp=0.0):
     """D-grid full-step without Arakawa-Lamb gradient.
 
@@ -1216,24 +1216,28 @@ def _d_sw_native(h, u_d, v_d, uc, vc, ua, va, cdgrid, dt, g,
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])  # (6, n, n)
     ke_cell = 0.5 * (ua * utmp + va * vtmp)  # (6, n, n)
 
-    # === 5-7. KE gradient is NOT added here ===
-    # c_sw already applied KE gradient at C-grid (dt/4 scaling).
-    # p_grad_c added g*h gradient (backward pressure).
-    # FV3's d_sw3 uses B-grid KE TRANSPORT (ytp_v/xtp_u), NOT a gradient.
-    # For now, only vorticity transport is applied in d_sw.
+    # === 5. KE at corners (NO g*h — pressure gradient already in uc/vc via p_grad_c) ===
+    # NOTE: This is a GRADIENT, not FV3's d_sw3 B-grid KE TRANSPORT.
+    # Full FV3 fidelity requires porting ytp_v/xtp_u staggered transport.
+    B_corner = _interp_center_to_corner(ke_cell, cdgrid)  # (6, n+1, n+1)
 
-    # Divergence damping at D-grid edges (optional)
-    ke_diff_u_scaled = jnp.zeros_like(u_d)
-    ke_diff_v_scaled = jnp.zeros_like(v_d)
+    # === 6. Divergence damping at corners (optional) ===
     if div_damp > 0:
         div_field = cgrid_divergence(uc, vc, cdgrid)
-        div_pad = _pad_halo_auto(div_field, cdgrid)
-        ddiv_u = cdgrid.rdxc * (div_pad[:, :-1, 1:-1] - div_pad[:, 1:, 1:-1])
-        ddiv_v = cdgrid.rdyc * (div_pad[:, 1:-1, :-1] - div_pad[:, 1:-1, 1:])
         area_min = float(jnp.min(cdgrid.base.area))
-        damp = div_damp / area_min * area_min * dt
-        ke_diff_u_scaled = damp * ddiv_u  # repurpose name for div_damp contribution
-        ke_diff_v_scaled = damp * ddiv_v
+        d2_bg = div_damp / area_min
+        dddmp = 0.2
+        div_abs_corner = _interp_center_to_corner(jnp.abs(div_field), cdgrid)
+        damp_coeff = area_min * jnp.maximum(
+            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
+        div_corner = _interp_center_to_corner(div_field, cdgrid)
+        B_corner = B_corner + damp_coeff * div_corner
+
+    # === 7. Bernoulli gradient at D-grid edges ===
+    ke_diff_u = B_corner[:, :-1, :] - B_corner[:, 1:, :]  # (6, n, n+1)
+    ke_diff_v = B_corner[:, :, :-1] - B_corner[:, :, 1:]  # (6, n+1, n)
+    ke_diff_u_scaled = dt * ke_diff_u
+    ke_diff_v_scaled = dt * ke_diff_v
 
     # === 8. Vorticity transport to D-grid edges via fv_tp_2d ===
     crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
@@ -1243,9 +1247,10 @@ def _d_sw_native(h, u_d, v_d, uc, vc, ua, va, cdgrid, dt, g,
     # fx_vort: (6, n+1, n) — vorticity flux at x-interfaces (v_d positions)
     # fy_vort: (6, n, n+1) — vorticity flux at y-interfaces (u_d positions)
 
-    # === 9. D-grid wind update ===
-    # Circulation form: u_new * dx = u_old * dx + ke_diff + fy_vort
-    #                   v_new * dy = v_old * dy + ke_diff - fx_vort
+    # === 9. D-grid wind update (incremental) ===
+    # FV3's d_sw6 uses a REPLACEMENT formula (u = vt + ke + fy) but that
+    # requires covariant convention. Our D-grid winds are in the geographic
+    # rotation convention, so we use incremental updates.
     rdx_u = 1.0 / jnp.maximum(dx_u, _EPS)  # (6, n, n+1)
     rdy_v = 1.0 / jnp.maximum(dy_v, _EPS)  # (6, n+1, n)
 
@@ -1307,7 +1312,7 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
 
     # Phase 3: d_sw — full-step D-grid update (no A-L gradient)
     h_new, u_d_new, v_d_new = _d_sw_native(
-        h, u_d, v_d, uc_new, vc_new, ua, va, cdgrid, dt, g,
+        h, u_d, v_d, h_s, uc_new, vc_new, ua, va, cdgrid, dt, g,
         div_damp=div_damp)
 
     return h_new, u_d_new, v_d_new
