@@ -816,8 +816,14 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
             aod_v = _interp_monthly_cyclic(mid_days_v, data_v, day) * config.volcanic_scale
             if lat_grid is not None:
                 volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
+                # Sum trailing dims for multi-dimensional volcanic files
+                while volc.ndim > lat_grid.ndim:
+                    volc = jnp.sum(volc, axis=-1)
             else:
-                volc = {"lat": lat_v, "aod": aod_v}
+                aod_v_flat = aod_v
+                while aod_v_flat.ndim > 1:
+                    aod_v_flat = np.sum(aod_v_flat, axis=-1)
+                volc = {"lat": lat_v, "aod": aod_v_flat}
         elif config.use_reference_if_missing:
             volc = (
                 jnp.zeros_like(base_aod)
