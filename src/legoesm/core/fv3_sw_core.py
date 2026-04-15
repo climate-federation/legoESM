@@ -262,11 +262,12 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     # Contravariant ut from covariant uc (FV3 rsin_u = 1/sin²)
     ut = (uc - v_d * cdgrid.cosa_u) * cdgrid.rsin_u
 
-    # At edge_interpolate4 positions (i=1, n-1): ut = uc / sin_sg recovers
-    # the edge_interpolate4 result (since uc was set to ut_edge*sin_sg above).
-    # At face boundaries (i=0, n): keep the standard (uc-v*cos)*rsin_u formula
-    # which retains the cross-velocity term (FV3 sw_core.F90:3595-3596).
-    for i_bdy in [1, n - 1]:
+    # At face boundaries (i=0, n): FV3 sets ut = edge_interpolate4(ua) DIRECTLY
+    # (sw_core.F90:3587,3603), not via (uc - v*cos)*rsin_u.
+    # Since uc = ut_ei4*sin_sg, dividing by the same sin_sg recovers ut_ei4.
+    # Positions 1 and n-1 (C1/C2/C3 stencil) use the standard formula
+    # (sw_core.F90:3596,3610): ut = (uc - v*cosa)*rsin_u. No override needed.
+    for i_bdy in ([0, n] if n >= 2 else []):
         i_left = max(i_bdy - 1, 0)
         i_right = min(i_bdy, n - 1)
         sin_left = cdgrid.sin_sg[:, i_left, :, 2]
@@ -485,10 +486,10 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
     fy1 = dt2 * (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
     if not use_duogrid:
-        # At face edges: sin_sg cancellation → fy1 = dt2 * v_d
+        # At face boundaries only (i=1,npx in FV3 → Python 0,n):
+        # sin_sg cancellation → fy1 = dt2 * v_d (sw_core.F90:445-449).
+        # Adjacent cells (1, n-1) use the standard formula.
         fy1 = fy1.at[:, 0, :].set(dt2 * v_d[:, 0, :])
-        fy1 = fy1.at[:, 1, :].set(dt2 * v_d[:, 1, :])
-        fy1 = fy1.at[:, n - 1, :].set(dt2 * v_d[:, n - 1, :])
         fy1 = fy1.at[:, n, :].set(dt2 * v_d[:, n, :])
 
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
@@ -496,9 +497,8 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     # y-face: FV3 fx1 = dt2*(u - vc*cosa_v)/sina_v  (1/sin, not 1/sin²)
     fx1 = dt2 * (u_d - vc * cdgrid.cosa_v) / jnp.maximum(sina_v, _EPS)
     if not use_duogrid:
+        # FV3 sw_core.F90:458-460: only at face boundaries (j=1, npy → Python 0, n).
         fx1 = fx1.at[:, :, 0].set(dt2 * u_d[:, :, 0])
-        fx1 = fx1.at[:, :, 1].set(dt2 * u_d[:, :, 1])
-        fx1 = fx1.at[:, :, n - 1].set(dt2 * u_d[:, :, n - 1])
         fx1 = fx1.at[:, :, n].set(dt2 * u_d[:, :, n])
 
     vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
@@ -628,18 +628,16 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
     fy1 = (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
     if not use_duogrid:
+        # FV3 sw_core.F90:445-449: override only at face boundaries (0, n).
         fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
-        fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
-        fy1 = fy1.at[:, n - 1, :].set(v_d[:, n - 1, :])
         fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
 
     # FV3: fx1 = (u - vc*cosa_v)/sina_v
     fx1 = (u_d - vc * cdgrid.cosa_v) / jnp.maximum(sina_v, _EPS)
     if not use_duogrid:
+        # FV3 sw_core.F90:458-460: only at face boundaries (0, n).
         fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
-        fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])
-        fx1 = fx1.at[:, :, n - 1].set(u_d[:, :, n - 1])
         fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
     vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
 
