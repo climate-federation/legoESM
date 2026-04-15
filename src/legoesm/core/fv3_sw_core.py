@@ -1218,28 +1218,23 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])  # (6, n, n)
     ke_cell = 0.5 * (ua * utmp + va * vtmp)  # (6, n, n)
 
-    # === 5. KE at corners (NO g*h — pressure gradient already in uc/vc via p_grad_c) ===
-    # NOTE: This is a GRADIENT, not FV3's d_sw3 B-grid KE TRANSPORT.
-    # Full FV3 fidelity requires porting ytp_v/xtp_u staggered transport.
-    B_corner = _interp_center_to_corner(ke_cell, cdgrid)  # (6, n+1, n+1)
+    # === 5-7. KE gradient OMITTED ===
+    # c_sw already applied KE gradient at C-grid (dt/4 scaling) which
+    # propagates through the updated uc/vc → ut/vt → transport.
+    # FV3's d_sw3 adds KE via B-grid TRANSPORT (ytp_v/xtp_u), not gradient.
+    # Adding a KE gradient here double-counts and creates instability.
+    # TODO: port d_sw3 B-grid KE transport for full FV3 fidelity.
+    ke_diff_u_scaled = jnp.zeros_like(u_d)
+    ke_diff_v_scaled = jnp.zeros_like(v_d)
 
-    # === 6. Divergence damping at corners (optional) ===
+    # Divergence damping at C-grid (optional)
     if div_damp > 0:
         div_field = cgrid_divergence(uc, vc, cdgrid)
-        area_min = float(jnp.min(cdgrid.base.area))
-        d2_bg = div_damp / area_min
-        dddmp = 0.2
-        div_abs_corner = _interp_center_to_corner(jnp.abs(div_field), cdgrid)
-        damp_coeff = area_min * jnp.maximum(
-            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
-        div_corner = _interp_center_to_corner(div_field, cdgrid)
-        B_corner = B_corner + damp_coeff * div_corner
-
-    # === 7. Bernoulli gradient at D-grid edges ===
-    ke_diff_u = B_corner[:, :-1, :] - B_corner[:, 1:, :]  # (6, n, n+1)
-    ke_diff_v = B_corner[:, :, :-1] - B_corner[:, :, 1:]  # (6, n+1, n)
-    ke_diff_u_scaled = dt * ke_diff_u
-    ke_diff_v_scaled = dt * ke_diff_v
+        div_pad = _pad_halo_auto(div_field, cdgrid)
+        ddiv_u = dt * div_damp * cdgrid.rdxc * (div_pad[:, :-1, 1:-1] - div_pad[:, 1:, 1:-1])
+        ddiv_v = dt * div_damp * cdgrid.rdyc * (div_pad[:, 1:-1, :-1] - div_pad[:, 1:-1, 1:])
+        ke_diff_u_scaled = ddiv_u  # reuse variable for div_damp at C-grid stagger
+        ke_diff_v_scaled = ddiv_v
 
     # === 8. Vorticity transport to D-grid edges via fv_tp_2d ===
     crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
