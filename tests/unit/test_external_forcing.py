@@ -347,6 +347,65 @@ class TestAerosol:
         out = get_aerosol_at_time(cfg, day=40.0)
         np.testing.assert_allclose(out["aod"], 0.02 + 0.5 * 0.04, atol=1.0e-6)
 
+    def test_3d_aerosol_file_summed_to_column(self, tmp_path):
+        """3D Kinne-style (lat, lev, band) AOD is summed to column AOD (#178)."""
+        import netCDF4
+        nc_path = str(tmp_path / "aod_3d.nc")
+        lat = np.linspace(-90, 90, 9)
+        nlev, nband = 3, 14
+        # AOD = 0.01 per (lev, band) cell → total = nlev * nband * 0.01
+        data_3d = np.full((12, 9, nlev, nband), 0.01)
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+        with netCDF4.Dataset(nc_path, "w") as ds:
+            ds.createDimension("time", 12)
+            ds.createDimension("lat", 9)
+            ds.createDimension("lev", nlev)
+            ds.createDimension("band", nband)
+            ds.createVariable("time", "f8", ("time",))[:] = mid_days
+            ds.createVariable("lat", "f8", ("lat",))[:] = lat
+            ds.createVariable("aod", "f8", ("time", "lat", "lev", "band"))[:] = data_3d
+
+        cfg = AerosolConfig(enabled=True, path=nc_path)
+        lat_grid = jnp.linspace(-np.pi / 2, np.pi / 2, 5)
+        result = get_aerosol_at_time(cfg, day=100.0, lat_grid=lat_grid)
+        # Should be 1D (ncol,) total column AOD
+        assert result.shape == lat_grid.shape, f"Expected {lat_grid.shape}, got {result.shape}"
+        expected_total = nlev * nband * 0.01
+        np.testing.assert_allclose(result, expected_total, atol=1e-6)
+
+    def test_3d_volcanic_file_summed_to_column(self, tmp_path):
+        """3D volcanic AOD file is also summed to column AOD (#178)."""
+        import netCDF4
+        lat = np.linspace(-90, 90, 9)
+        nlev, nband = 2, 3
+
+        # Base: simple 2D
+        nc_base = str(tmp_path / "aod_base.nc")
+        _make_monthly_zonal_nc(nc_base, "aod", lat, np.full((12, 9), 0.02))
+
+        # Volcanic: 3D
+        nc_volc = str(tmp_path / "aod_volc.nc")
+        data_volc = np.full((12, 9, nlev, nband), 0.01)
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+        with netCDF4.Dataset(nc_volc, "w") as ds:
+            ds.createDimension("time", 12)
+            ds.createDimension("lat", 9)
+            ds.createDimension("lev", nlev)
+            ds.createDimension("band", nband)
+            ds.createVariable("time", "f8", ("time",))[:] = mid_days
+            ds.createVariable("lat", "f8", ("lat",))[:] = lat
+            ds.createVariable("aod", "f8", ("time", "lat", "lev", "band"))[:] = data_volc
+
+        cfg = AerosolConfig(
+            enabled=True, path=nc_base,
+            volcanic_enabled=True, volcanic_path=nc_volc, volcanic_scale=1.0,
+        )
+        lat_grid = jnp.linspace(-np.pi / 2, np.pi / 2, 5)
+        result = get_aerosol_at_time(cfg, day=100.0, lat_grid=lat_grid)
+        assert result.shape == lat_grid.shape
+        expected = 0.02 + nlev * nband * 0.01
+        np.testing.assert_allclose(result, expected, atol=1e-6)
+
 
 # ==============================================================================
 # ExternalForcingConfig integration
