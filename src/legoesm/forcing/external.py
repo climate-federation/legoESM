@@ -38,6 +38,39 @@ def _open_forcing_dataset(path: str):
     return xr.open_dataset(path)
 
 
+def _to_days_float(time_values) -> np.ndarray:
+    """Convert xarray time values to float days since the first record.
+
+    Handles three cases that arise in practice:
+
+    * ``numpy.datetime64`` arrays — standard CF time within the
+      ``datetime64[ns]`` representable range (~year 100–2262).
+    * ``cftime.datetime`` object arrays — xarray falls back to cftime
+      when dates exceed the ``datetime64[ns]`` range (e.g. 1850–2299
+      CMIP6 solar files).  Converted via :class:`datetime.timedelta`
+      arithmetic.
+    * Already-numeric arrays (float/int) — returned as-is after a
+      simple ``float64`` cast (e.g. "year as %Y.%f" GHG files).
+    """
+    arr = np.asarray(time_values)
+    if arr.dtype == object and arr.size > 0:
+        # cftime path
+        try:
+            import cftime  # noqa: F401 — just to confirm it's available
+            ref = arr.flat[0]
+            days = np.array(
+                [(t - ref).days + (t - ref).seconds / 86400.0 for t in arr.ravel()],
+                dtype=np.float64,
+            ).reshape(arr.shape)
+            return days
+        except (ImportError, AttributeError):
+            pass
+    if np.issubdtype(arr.dtype, np.datetime64):
+        t0 = arr.flat[0]
+        return ((arr - t0) / np.timedelta64(1, "D")).astype(np.float64)
+    return arr.astype(np.float64)
+
+
 @lru_cache(maxsize=16)
 def _load_timeseries(path: str, varnames: tuple[str, ...]) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Load 1-D time series variables from a Zarr store or NetCDF file.
@@ -59,17 +92,21 @@ def _load_timeseries(path: str, varnames: tuple[str, ...]) -> tuple[np.ndarray, 
     if "time" not in ds.dims:
         ds.close()
         raise ValueError(f"Forcing file {path!r} has no 'time' dimension")
-    times = np.asarray(ds["time"].values, dtype=np.float64)
+    times = _to_days_float(ds["time"].values)
+    # Build a case-insensitive lookup for variable names to handle files where
+    # conventions differ (e.g., "TSI" in CMIP6 solar files vs. "tsi" default).
+    varname_map = {name.lower(): name for name in ds.data_vars}
     data = {}
     for v in varnames:
-        if v not in ds.data_vars:
+        actual = v if v in ds.data_vars else varname_map.get(v.lower())
+        if actual is None:
             ds.close()
             raise ValueError(f"Variable {v!r} not found in {path!r}")
-        arr = np.asarray(ds[v].values, dtype=np.float64)
+        arr = np.asarray(ds[actual].values, dtype=np.float64)
         if arr.ndim != 1 or arr.shape[0] != times.shape[0]:
             ds.close()
             raise ValueError(
-                f"Variable {v!r} must be 1-D with length matching 'time' "
+                f"Variable {actual!r} must be 1-D with length matching 'time' "
                 f"(got shape {arr.shape}, expected ({times.shape[0]},))"
             )
         data[v] = arr
@@ -121,7 +158,7 @@ def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray
         ds.close()
         raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
     if "time" in ds:
-        mid_days = np.asarray(ds["time"].values, dtype=np.float64)
+        mid_days = _to_days_float(ds["time"].values)
     else:
         # Assume 12 months, mid-month day of year
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
@@ -153,7 +190,7 @@ def _load_monthly_zonal_with_levels(path: str, varname: str):
         ds.close()
         raise ValueError(f"No 'lat'/'latitude' variable in {path!r}")
     if "time" in ds:
-        mid_days = np.asarray(ds["time"].values, dtype=np.float64)
+        mid_days = _to_days_float(ds["time"].values)
     else:
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
 
@@ -213,7 +250,7 @@ def _load_time_gpt(
     if "time" not in ds:
         ds.close()
         raise ValueError(f"No 'time' variable in spectral solar file {path!r}")
-    times = np.asarray(ds["time"].values, dtype=np.float64)
+    times = _to_days_float(ds["time"].values)
     if spectral_var not in ds.data_vars:
         ds.close()
         raise ValueError(
@@ -829,6 +866,14 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
         tsi_val = _interp_1d(times, tsi_series, day) if tsi_series is not None else float(config.S_0)
         spec = _interp_2d_time(times, spec_series, day)
         spec = np.clip(spec, 0.0, None)
+        # CMIP6 solar files store one fraction per RRTMG-SW band (14 bands).
+        # The RRTMG solver expects one fraction per g-point (112 g-points).
+        # When the loaded spectral dimension is n_bands, expand to n_gpts.
+        if spec_series.shape[1] < 50:  # n_bands (14) << n_gpts (112/224)
+            from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+                _DEFAULT_SW_GAS,
+            )
+            spec = _expand_bands_to_gpoints(spec, _DEFAULT_SW_GAS)
         if config.normalize_spectral:
             denom = float(np.sum(spec))
             if denom <= 0.0:
@@ -839,6 +884,39 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
         return {"tsi": tsi_val, "solar_fraction_by_gpt": jnp.array(spec)}
 
     raise ValueError(f"Unknown solar source: {config.source!r}")
+
+
+def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.ndarray:
+    """Expand per-band spectral fractions to per-g-point fractions.
+
+    CMIP6 solar files (e.g. ``SSI_frac``) store one value per RRTMG-SW
+    band (14 bands), but the RRTMG solver expects one value per g-point
+    (112 g-points for the standard g112 table).  Each band's fraction is
+    repeated uniformly across all g-points that belong to that band.
+
+    Parameters
+    ----------
+    spec_bands : np.ndarray, shape (n_bands,)
+        Per-band solar fractions.
+    rrtmg_sw_path : str
+        Path to the RRTMG-SW lookup table NetCDF/Zarr (for ``bnd_limits_gpt``).
+
+    Returns
+    -------
+    np.ndarray, shape (n_gpt,)
+        Per-g-point fractions.
+    """
+    import xarray as xr
+    ds = xr.open_dataset(rrtmg_sw_path) if not rrtmg_sw_path.endswith(".zarr") \
+        else xr.open_zarr(rrtmg_sw_path)
+    # bnd_limits_gpt: (n_bands, 2) with 1-based [start, end] gpt indices
+    bnd_lims = ds["bnd_limits_gpt"].values.astype(int)  # 1-indexed
+    ds.close()
+    n_gpt = int(bnd_lims[:, 1].max())
+    out = np.zeros(n_gpt, dtype=np.float64)
+    for i, (lo, hi) in enumerate(bnd_lims):
+        out[lo - 1 : hi] = spec_bands[i]   # convert to 0-indexed slice
+    return out
 
 
 def get_tsi_at_time(config: SolarConfig, day: float) -> float:
