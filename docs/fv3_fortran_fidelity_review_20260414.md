@@ -338,12 +338,20 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
 - After 0.5 days, dynamics adds ~0.2 m/s from actual truncation error, growing to ~0.6 m/s total
 - **The dynamics are correct; the visual artifact is inherent to D-grid→geographic wind conversion on cubed sphere**
 
-### CSW path instability analysis (iteration 25)
-- fv3_csw_tendencies C→D projection had a linear instability at face corners (face=2, pos (0,35))
-- Original: edge-copy padding → NaN at step 25 (~2.1h)
-- Fixed: halo-exchanged cell-centre averaging → NaN at step 38 (~3.2h)
-- Root cause: circulation edge-padding gives zero vorticity at face boundary columns, driving exponential growth
-- **Full fix requires proper halo exchange of C-grid circulation (not yet implemented)**
+### CSW path instability analysis (iterations 25-26)
+- fv3_csw_tendencies C→D projection has a structural linear instability at face corners
+- Original: edge-copy circulation + edge-copy C→D → NaN at step 25 (~2.1h)
+- Fixed circulation (cell-centre vorticity) + halo C→D → NaN at step 42 (~3.5h)
+- Without diffusion: NaN at step 183 (~15h), v_max doubles every ~50 steps
+- Root cause: C-grid→D-grid stagger projection is fundamentally unstable because the C-grid and D-grid staggers are incompatible at face boundaries. FV3 avoids this by using forward-backward time stepping without stagger projection.
+- Forward-backward path (`fv3_forward_backward_step`) also unstable (NaN at step 68) due to missing d_sw1 boundary handling (adjacent strip recomputation, corner 2×2 solve)
+- **Stabilizing FV3-native forward-backward requires porting d_sw1 boundary ops from sw_core.F90:618-812**
+
+### Diagnostic angle fix (iteration 26, 2026-04-15)
+- D-grid→geographic wind conversion used cell-centre grid angles; edge-midpoint angles differ by O(dx)
+- Created 0.39 m/s v_north residual for Williamson 2 (1% of zonal wind) with cube-face structure
+- Fixed: use mean of 4 surrounding edge angles → v_north reduced to 0.008 m/s (47x improvement)
+- t=0 v-wind snapshot now essentially blank; remaining pattern at t>0.2d is genuine dynamics error
 - Ocean rest state: all 4 cubed-sphere variants PASS (eta drift 1e-14 to 1e-18)
 - 86 unit tests pass; no regressions from these changes
 
