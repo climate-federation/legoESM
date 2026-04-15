@@ -30,12 +30,19 @@ import numpy as np
 # ==============================================================================
 
 def _open_forcing_dataset(path: str):
-    """Open a forcing file as xarray Dataset (Zarr or NetCDF)."""
+    """Open a forcing file as xarray Dataset (Zarr or NetCDF).
+
+    Always opens with ``decode_times=False`` so that time coordinates are
+    returned as raw numeric values (float/int) that can be safely cast to
+    ``np.float64``.  Files whose dates extend beyond numpy's datetime64[ns]
+    range (~2262) would otherwise cause xarray to fall back to
+    ``cftime.datetime`` objects, which cannot be cast to float64.
+    """
     import os
     import xarray as xr
     if os.path.isdir(path) or path.endswith(".zarr"):
-        return xr.open_zarr(path)
-    return xr.open_dataset(path)
+        return xr.open_zarr(path, decode_times=False)
+    return xr.open_dataset(path, decode_times=False)
 
 
 def _to_days_float(time_values) -> np.ndarray:
@@ -136,20 +143,23 @@ def _interp_2d_time(times: np.ndarray, values: np.ndarray, day: float) -> np.nda
 def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Load a monthly zonal-mean field from a Zarr store or NetCDF file.
 
-    Expected dimensions: ``(time=12, lat, [level])``.
-    An optional ``level`` or ``plev`` variable provides pressure levels [Pa].
+    Handles files with full lat/lon grids (e.g. Kinne aerosol files with
+    dims ``(time, band, lat, lon)``) by averaging over lon and any extra
+    non-(time, lat) dimensions to produce a ``(ntime, nlat)`` array.
 
     Returns
     -------
-    (mid_days, lat, data) where mid_days is shape (12,) giving
-    mid-month days, lat is shape (nlat,), and data is shape
-    (12, nlat) or (12, nlat, nlev).
+    (mid_days, lat, data) where mid_days is shape (ntime,), lat is shape
+    (nlat,), and data is shape (ntime, nlat).
     """
     ds = _open_forcing_dataset(path)
     if varname not in ds.data_vars:
         ds.close()
         raise ValueError(f"Variable {varname!r} not found in {path!r}")
-    data = np.asarray(ds[varname].values, dtype=np.float64)
+    var = ds[varname]
+    data = np.asarray(var.values, dtype=np.float64)
+    dims = list(var.dims)
+
     if "lat" in ds:
         lat = np.asarray(ds["lat"].values, dtype=np.float64)
     elif "latitude" in ds:
@@ -160,9 +170,29 @@ def _load_monthly_zonal(path: str, varname: str) -> tuple[np.ndarray, np.ndarray
     if "time" in ds:
         mid_days = _to_days_float(ds["time"].values)
     else:
-        # Assume 12 months, mid-month day of year
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
     ds.close()
+
+    # Average over longitude to produce a zonal mean.
+    for lname in ("lon", "longitude"):
+        if lname in dims:
+            ax = dims.index(lname)
+            data = np.nanmean(data, axis=ax)
+            dims.pop(ax)
+            break
+
+    # Average over any remaining non-(time, lat) dimensions (e.g. spectral
+    # bands in Kinne aerosol files: (time, lnwl, lat) → (time, lat)).
+    lat_name = "lat" if "lat" in dims else "latitude"
+    time_name = "time" if "time" in dims else None
+    keep = {lat_name}
+    if time_name:
+        keep.add(time_name)
+    extra_axes = [i for i, d in enumerate(dims) if d not in keep]
+    for ax in sorted(extra_axes, reverse=True):
+        data = np.nanmean(data, axis=ax)
+        dims.pop(ax)
+
     return mid_days, lat, data
 
 
@@ -827,6 +857,10 @@ class SolarConfig(NamedTuple):
         Variable name for per-g-point solar fractions when source="spectral_file".
     normalize_spectral : bool
         If True, normalize interpolated spectral fractions to sum to one.
+    start_year : int
+        Simulation start year.  Used to convert simulation day (days since
+        start) to the absolute day count used in file-based solar records
+        whose time axis is expressed as "days since 1850-01-01".
     """
     S_0: float = 1360.0
     source: str = "constant"
@@ -834,6 +868,7 @@ class SolarConfig(NamedTuple):
     tsi_var: str = "tsi"
     spectral_var: str = "solar_fraction_by_gpt"
     normalize_spectral: bool = True
+    start_year: int = 1979
 
 
 def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
@@ -849,11 +884,16 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
     if config.source == "constant":
         return {"tsi": float(config.S_0), "solar_fraction_by_gpt": None}
 
+    # CMIP6 solar files store time as "days since 1850-01-01".
+    # Convert simulation day (days since start_year-01-01) to the same reference.
+    _REF_YEAR = 1850
+    abs_day = (config.start_year - _REF_YEAR) * 365.25 + day
+
     if config.source == "file":
         if not config.path:
             raise ValueError("SolarConfig.path must be set when source='file'")
         times, data = _load_timeseries(config.path, (config.tsi_var,))
-        return {"tsi": _interp_1d(times, data[config.tsi_var], day), "solar_fraction_by_gpt": None}
+        return {"tsi": _interp_1d(times, data[config.tsi_var], abs_day), "solar_fraction_by_gpt": None}
 
     if config.source == "spectral_file":
         if not config.path:
@@ -863,8 +903,8 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
             config.tsi_var,
             config.spectral_var,
         )
-        tsi_val = _interp_1d(times, tsi_series, day) if tsi_series is not None else float(config.S_0)
-        spec = _interp_2d_time(times, spec_series, day)
+        tsi_val = _interp_1d(times, tsi_series, abs_day) if tsi_series is not None else float(config.S_0)
+        spec = _interp_2d_time(times, spec_series, abs_day)
         spec = np.clip(spec, 0.0, None)
         # CMIP6 solar files store one fraction per RRTMG-SW band (14 bands).
         # The RRTMG solver expects one fraction per g-point (112 g-points).

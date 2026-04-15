@@ -94,6 +94,7 @@ class ExperimentConfig(NamedTuple):
     # Solar
     solar_source: str = "constant"      # constant, file, spectral_file
     solar_file: str = ""
+    solar_tsi_var: str = "tsi"
     solar_spectral_var: str = "solar_fraction_by_gpt"
 
     # Aerosol
@@ -289,6 +290,7 @@ class ExperimentConfig(NamedTuple):
             ozone_file=getattr(amip_cfg, 'ozone_file', ''),
             solar_source=getattr(amip_cfg, 'solar_source', 'constant'),
             solar_file=getattr(amip_cfg, 'solar_file', ''),
+            solar_tsi_var=getattr(amip_cfg, 'solar_tsi_var', 'tsi'),
             solar_spectral_var=getattr(amip_cfg, 'solar_spectral_var', 'solar_fraction_by_gpt'),
             aerosol_forcing=getattr(amip_cfg, 'aerosol_forcing', 'off'),
             aerosol_file=getattr(amip_cfg, 'aerosol_file', ''),
@@ -360,6 +362,7 @@ class ExperimentConfig(NamedTuple):
             ozone_file=self.ozone_file,
             solar_source=self.solar_source,
             solar_file=self.solar_file,
+            solar_tsi_var=self.solar_tsi_var,
             solar_spectral_var=self.solar_spectral_var,
             aerosol_forcing=self.aerosol_forcing,
             aerosol_file=self.aerosol_file,
