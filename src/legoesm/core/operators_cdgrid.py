@@ -1557,7 +1557,7 @@ def fv3_sw_tendencies(
     # cells (rows 0 and n-1) is 7.7x larger than interior due to halo
     # interpolation error in corner winds and gradient. Blending with the
     # adjacent interior reduces this without affecting balanced flows.
-    if n > 2:
+    if boundary_fix and n > 2:
         du_cc = du_cc.at[:, 0, :].set(0.5 * (du_cc[:, 0, :] + du_cc[:, 1, :]))
         du_cc = du_cc.at[:, n-1, :].set(0.5 * (du_cc[:, n-1, :] + du_cc[:, n-2, :]))
         du_cc = du_cc.at[:, :, 0].set(0.5 * (du_cc[:, :, 0] + du_cc[:, :, 1]))
