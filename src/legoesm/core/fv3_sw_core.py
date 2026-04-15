@@ -1048,14 +1048,21 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
     u_d_new : (6, n, n+1)
     v_d_new : (6, n+1, n)
     """
-    # C-grid half: mass transport + C-grid velocity update
+    # Phase 1: C-grid half-step (c_sw) — mass transport + velocity update
     h_star, uc_new, vc_new, ua, va = _c_sw(
         h, u_d, v_d, h_s, cdgrid, dt, g)
 
-    # D-grid half: PPM mass transport + D-grid velocity update
-    h_new, u_d_new, v_d_new = _d_sw(
-        h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
-        div_damp=div_damp, hyperdiff_coeff=hyperdiff_coeff)
+    # Phase 2: Backward pressure gradient at C-grid (p_grad_c)
+    dt2 = 0.5 * dt
+    dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid, dt2, g)
+    uc_new = uc_new + dp_x
+    vc_new = vc_new + dp_y
+
+    # Phase 3: D-grid half-step using FV3-native transport operators
+    # (NOT Arakawa-Lamb — uses PPM mass transport + KE/vort transport)
+    h_new, u_d_new, v_d_new = _d_sw_native(
+        h, u_d, v_d, uc_new, vc_new, ua, va, cdgrid, dt, g,
+        div_damp=div_damp)
 
     return h_new, u_d_new, v_d_new
 
@@ -1209,35 +1216,24 @@ def _d_sw_native(h, u_d, v_d, uc, vc, ua, va, cdgrid, dt, g,
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])  # (6, n, n)
     ke_cell = 0.5 * (ua * utmp + va * vtmp)  # (6, n, n)
 
-    # === 5. KE at corners via 4-point average with halo ===
-    ke_corner = _interp_center_to_corner(ke_cell, cdgrid)  # (6, n+1, n+1)
+    # === 5-7. KE gradient is NOT added here ===
+    # c_sw already applied KE gradient at C-grid (dt/4 scaling).
+    # p_grad_c added g*h gradient (backward pressure).
+    # FV3's d_sw3 uses B-grid KE TRANSPORT (ytp_v/xtp_u), NOT a gradient.
+    # For now, only vorticity transport is applied in d_sw.
 
-    # === 6. Divergence damping at corners (optional) ===
+    # Divergence damping at D-grid edges (optional)
+    ke_diff_u_scaled = jnp.zeros_like(u_d)
+    ke_diff_v_scaled = jnp.zeros_like(v_d)
     if div_damp > 0:
         div_field = cgrid_divergence(uc, vc, cdgrid)
+        div_pad = _pad_halo_auto(div_field, cdgrid)
+        ddiv_u = cdgrid.rdxc * (div_pad[:, :-1, 1:-1] - div_pad[:, 1:, 1:-1])
+        ddiv_v = cdgrid.rdyc * (div_pad[:, 1:-1, :-1] - div_pad[:, 1:-1, 1:])
         area_min = float(jnp.min(cdgrid.base.area))
-        d2_bg = div_damp / area_min
-        dddmp = 0.2
-        div_abs = jnp.abs(div_field)
-        div_abs_corner = _interp_center_to_corner(div_abs, cdgrid)
-        damp_coeff = area_min * jnp.maximum(
-            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
-        div_corner = _interp_center_to_corner(div_field, cdgrid)
-        ke_corner = ke_corner + damp_coeff * div_corner
-
-    # === 7. KE gradient at D-grid edges (2-point corner difference) ===
-    # u_d[i, j] sits between corners (i, j) and (i+1, j) in the i-direction
-    ke_diff_u = ke_corner[:, :-1, :] - ke_corner[:, 1:, :]  # (6, n, n+1)
-    # But ke_diff has wrong shape for u_d: (6, n+1+1-1=n+1, n+1) → need to
-    # trim j to match u_d's n+1 j-values... Actually ke_corner is (n+1, n+1)
-    # and :-1 / 1: in dim1 gives (n, n+1) ← matches u_d!
-
-    # v_d[i, j] sits between corners (i, j) and (i, j+1) in the j-direction
-    ke_diff_v = ke_corner[:, :, :-1] - ke_corner[:, :, 1:]  # (6, n+1, n)
-
-    # Scale to circulation: dt * ke_diff has units s × m²/s² = m²/s
-    ke_diff_u_scaled = dt * ke_diff_u
-    ke_diff_v_scaled = dt * ke_diff_v
+        damp = div_damp / area_min * area_min * dt
+        ke_diff_u_scaled = damp * ddiv_u  # repurpose name for div_damp contribution
+        ke_diff_v_scaled = damp * ddiv_v
 
     # === 8. Vorticity transport to D-grid edges via fv_tp_2d ===
     crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
