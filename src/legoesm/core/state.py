@@ -402,9 +402,12 @@ class MPASOceanState(NamedTuple):
 class MPASOceanTendencies(NamedTuple):
     """Tendencies for MPAS ocean primitive equations.
 
-    Only prognostic fields have tendencies.
+    F_slow_u is the depth-mean of the full nonlinear momentum tendency
+    (Coriolis via PV flux + PGF + KE).  Passed to the barotropic solver
+    as slow forcing (MOM6 pattern, Hallberg & Adcroft 2009).  Issue #160.
     """
     du_dt: Field
     dT_dt: Field
     dS_dt: Field
     deta_dt: Field
+    F_slow_u: Field | None = None

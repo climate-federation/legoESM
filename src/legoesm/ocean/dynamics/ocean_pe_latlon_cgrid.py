@@ -92,6 +92,52 @@ def _interp_to_v_points(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([zero, f_interior, zero], axis=0)
 
 
+def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
+    """Van Leer flux limiter: phi(r) = (r + |r|) / (1 + |r|). Differentiable, TVD."""
+    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
+
+
+def _tvd_to_u_points(f: jnp.ndarray, mass_flux_u: jnp.ndarray) -> jnp.ndarray:
+    """Van Leer TVD interpolation to u-points. Second-order, monotonic (#170)."""
+    eps = 1e-30
+    f_left = jnp.roll(f, 1, axis=1)
+    f_right = f
+    f_left2 = jnp.roll(f, 2, axis=1)
+    f_right2 = jnp.roll(f, -1, axis=1)
+    delta_pos = f_right - f_left
+    r_pos = (f_left - f_left2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    delta_neg = f_left - f_right
+    r_neg = (f_right2 - f_right) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    f_pos = f_left + 0.5 * _van_leer_limiter(r_pos) * delta_pos
+    f_neg = f_right + 0.5 * _van_leer_limiter(r_neg) * delta_neg
+    n_lon = f.shape[1]
+    mf = mass_flux_u[:, :n_lon]
+    f_tvd = jnp.where(mf > 0, f_pos, f_neg)
+    if f.ndim >= 3:
+        return jnp.concatenate([f_tvd, f_tvd[:, 0:1, :]], axis=1)
+    return jnp.concatenate([f_tvd, f_tvd[:, 0:1]], axis=1)
+
+
+def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray) -> jnp.ndarray:
+    """Van Leer TVD interpolation to v-points. Solid wall at poles (#170)."""
+    eps = 1e-30
+    f_south = f[:-1]; f_north = f[1:]
+    f_south2 = jnp.concatenate([f[:1], f[:-2]], axis=0)
+    f_north2 = jnp.concatenate([f[2:], f[-1:]], axis=0)
+    delta_pos = f_north - f_south
+    r_pos = (f_south - f_south2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    delta_neg = f_south - f_north
+    r_neg = (f_north2 - f_north) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    f_pos = f_south + 0.5 * _van_leer_limiter(r_pos) * delta_pos
+    f_neg = f_north + 0.5 * _van_leer_limiter(r_neg) * delta_neg
+    f_tvd = jnp.where(mass_flux_v[1:-1] > 0, f_pos, f_neg)
+    if f.ndim >= 3:
+        zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
+    else:
+        zero = jnp.zeros((1, f.shape[1]), dtype=f.dtype)
+    return jnp.concatenate([zero, f_tvd, zero], axis=0)
+
+
 def _upwind_to_u_points(
     f: jnp.ndarray,
     mass_flux_u: jnp.ndarray,
