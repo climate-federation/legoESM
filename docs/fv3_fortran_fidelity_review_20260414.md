@@ -351,8 +351,8 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
 - Fixed circulation (cell-centre vorticity) + halo C→D → NaN at step 42 (~3.5h)
 - Without diffusion: NaN at step 183 (~15h), v_max doubles every ~50 steps
 - Root cause: C-grid→D-grid stagger projection is fundamentally unstable because the C-grid and D-grid staggers are incompatible at face boundaries. FV3 avoids this by using forward-backward time stepping without stagger projection.
-- Forward-backward path (`fv3_forward_backward_step`) also unstable (NaN at step 68) due to missing d_sw1 boundary handling (adjacent strip recomputation, corner 2×2 solve)
-- **Stabilizing FV3-native forward-backward requires porting d_sw1 boundary ops from sw_core.F90:618-812**
+- Forward-backward path: d_sw1 boundary handling ported ✅ (adjacent strips + corner 2×2 solve from sw_core.F90:618-812). FB now achieves 1.7x boundary ratio but has exponential growth from missing d_sw3 B-grid KE transport (ytp_v/xtp_u)
+- **Stabilizing FV3-native forward-backward requires porting d_sw3 B-grid KE transport from sw_core.F90:1260-1380**
 
 ### Diagnostic angle fix (iteration 26, 2026-04-15)
 - D-grid→geographic wind conversion used cell-centre grid angles; edge-midpoint angles differ by O(dx)
