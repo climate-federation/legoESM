@@ -786,8 +786,16 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
         aod_interp = _interp_monthly_cyclic(mid_days, data, day)
         if lat_grid is not None:
             base_aod = _interp_zonal_to_grid(lat, aod_interp, lat_grid)
+            # Kinne aerosol files may have extra dimensions (level, band).
+            # Sum over all trailing dims to get total column AOD (issue #178).
+            while base_aod.ndim > lat_grid.ndim:
+                base_aod = jnp.sum(base_aod, axis=-1)
         else:
-            base_aod = {"lat": lat, "aod": aod_interp}
+            # Sum trailing dims for dict-mode too
+            aod_flat = aod_interp
+            while aod_flat.ndim > 1:
+                aod_flat = np.sum(aod_flat, axis=-1)
+            base_aod = {"lat": lat, "aod": aod_flat}
     elif config.use_reference_if_missing:
         if lat_grid is None:
             lat = np.linspace(-90.0, 90.0, 181)
