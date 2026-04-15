@@ -40,6 +40,216 @@ from legoesm.core.operators_cdgrid import (
 _EPS = float(jnp.finfo(jnp.float32).eps)
 
 
+def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt):
+    """FV3 d_sw1 transport velocity recomputation with boundary handling.
+
+    Recomputes contravariant transport velocities (ut, vt) from covariant
+    C-grid velocities (uc, vc) using FV3's 4-cell cross-velocity average,
+    face-boundary overrides (sin_sg upwind), adjacent strip recomputation,
+    and corner 2×2 solve. Matches sw_core.F90:618-812.
+
+    This replaces the ut/vt from d2a2c_vect with more accurate transport
+    velocities that have cross-face consistent boundary handling.
+
+    Parameters
+    ----------
+    uc : (6, n+1, n) covariant C-grid u
+    vc : (6, n, n+1) covariant C-grid v
+    cdgrid : CubedSphereCDGrid
+    dt : float — time step (for upwind sign test)
+
+    Returns
+    -------
+    ut : (6, n+1, n) contravariant transport u
+    vt : (6, n, n+1) contravariant transport v
+    """
+    n = cdgrid.n
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+
+    cosa_u = cdgrid.cosa_u  # (6, n+1, n)
+    cosa_v = cdgrid.cosa_v  # (6, n, n+1)
+    rsin_u = cdgrid.rsin_u  # (6, n+1, n)
+    rsin_v = cdgrid.rsin_v  # (6, n, n+1)
+    sg = cdgrid.sin_sg
+
+    # === Part 1: Interior ut/vt from 4-cell vc/uc average ===
+    # ut(I,j) = (uc(I,j) - 0.25*cosa_u*(vc(I-1,j)+vc(I,j)+vc(I-1,j+1)+vc(I,j+1)))*rsin_u
+    # Need vc padded in axis 1 (rows) for the I-1 stencil
+    vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n+1)
+    # vc_pad[:, I, :] = vc at padded row I → original row I-1
+    # 4-cell average at each u-face (I, j): vc(I-1,j)+vc(I,j)+vc(I-1,j+1)+vc(I,j+1)
+    vc_avg = (vc_pad[:, :-1, :-1] + vc_pad[:, 1:, :-1]
+              + vc_pad[:, :-1, 1:] + vc_pad[:, 1:, 1:])  # (6, n+1, n)
+    ut = (uc - 0.25 * cosa_u * vc_avg) * rsin_u
+
+    # vt(i,J) = (vc(i,J) - 0.25*cosa_v*(uc(i,J-1)+uc(i+1,J-1)+uc(i,J)+uc(i+1,J)))*rsin_v
+    uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n+1, n+2)
+    uc_avg = (uc_pad[:, :-1, :-1] + uc_pad[:, 1:, :-1]
+              + uc_pad[:, :-1, 1:] + uc_pad[:, 1:, 1:])  # (6, n, n+1)
+    vt = (vc - 0.25 * cosa_v * uc_avg) * rsin_v
+
+    if use_duogrid:
+        return ut, vt
+
+    # === Part 2: Non-duogrid face-boundary overrides ===
+    # West face (I=0): ut = uc / sin_sg(upwind)
+    sin_w_left = sg[:, :, :, 2]   # E-edge of cell to the left
+    sin_w_right = sg[:, :, :, 0]  # W-edge of cell to the right
+    # Pad sin_sg for cross-face upwind selection
+    from legoesm.grids.halo import pad_halo
+    grid = cdgrid.base
+    offsets = grid.halo_interp_offsets
+    se_pad = pad_halo(sin_w_left, interp_offsets=offsets)
+    sw_pad = pad_halo(sin_w_right, interp_offsets=offsets)
+
+    # Face boundary at I=0 (Python) = Fortran I=1
+    sin_upwind_w = jnp.where(uc[:, 0, :] * dt > 0,
+                             se_pad[:, :n+1, 1:-1][:, 0, :],
+                             sw_pad[:, 1:n+2, 1:-1][:, 0, :])
+    ut = ut.at[:, 0, :].set(uc[:, 0, :] / jnp.maximum(jnp.abs(sin_upwind_w), _EPS))
+
+    # East face (I=n)
+    sin_upwind_e = jnp.where(uc[:, n, :] * dt > 0,
+                             se_pad[:, :n+1, 1:-1][:, n, :],
+                             sw_pad[:, 1:n+2, 1:-1][:, n, :])
+    ut = ut.at[:, n, :].set(uc[:, n, :] / jnp.maximum(jnp.abs(sin_upwind_e), _EPS))
+
+    # South face (J=0): vt = vc / sin_sg(upwind)
+    sin_s_below = sg[:, :, :, 3]  # N-edge of cell below
+    sin_s_above = sg[:, :, :, 1]  # S-edge of cell above
+    sn_pad = pad_halo(sin_s_below, interp_offsets=offsets)
+    ss_pad = pad_halo(sin_s_above, interp_offsets=offsets)
+
+    sin_upwind_s = jnp.where(vc[:, :, 0] * dt > 0,
+                             sn_pad[:, 1:-1, :n+1][:, :, 0],
+                             ss_pad[:, 1:-1, 1:n+2][:, :, 0])
+    vt = vt.at[:, :, 0].set(vc[:, :, 0] / jnp.maximum(jnp.abs(sin_upwind_s), _EPS))
+
+    # North face (J=n)
+    sin_upwind_n = jnp.where(vc[:, :, n] * dt > 0,
+                             sn_pad[:, 1:-1, :n+1][:, :, n],
+                             ss_pad[:, 1:-1, 1:n+2][:, :, n])
+    vt = vt.at[:, :, n].set(vc[:, :, n] / jnp.maximum(jnp.abs(sin_upwind_n), _EPS))
+
+    # === Part 3: Adjacent strip recomputation ===
+    # After overriding boundary ut, recompute vt at the 2 rows nearest
+    # each face boundary using the corrected ut values.
+    # FV3 sw_core.F90:666-726.
+    # West edge: vt at rows 0 and 1, for interior j range
+    # vt(row,J) = vc(row,J) - 0.25*cosa_v(row,J)*(ut(row,J-1)+ut(row+1,J-1)+ut(row,J)+ut(row+1,J))
+    if n > 4:
+        jlo = 2         # Fortran max(3,js) → Python 2
+        jhi = n - 1     # Fortran min(npy-2,je+1) → Python n-1
+
+        # West: rows 0, 1
+        for row in [0, 1]:
+            # ut at rows row and row+1, cols J-1 and J
+            ut_left = ut[:, row, :-1] + ut[:, row + 1, :-1]   # (6, n-1)  J=0..n-2
+            ut_right = ut[:, row, 1:] + ut[:, row + 1, 1:]    # (6, n-1)  J=1..n-1
+            # 4-cell average at J positions 1..n-1 (interior v-face positions)
+            ut4 = ut_left[:, :-1] + ut_right[:, 1:]  # wait, need J-1 and J
+            # Actually: for v-face J, ut(row, J-1) + ut(row+1, J-1) + ut(row, J) + ut(row+1, J)
+            # J ranges 0..n. ut has n columns (0..n-1). So J-1 valid for J>=1, J valid for J<=n-1.
+            # Interior range: J = jlo..jhi = 2..n-1
+            for J in range(jlo, jhi + 1):
+                if J - 1 >= 0 and J - 1 < n and J < n:
+                    avg = ut[:, row, J-1] + ut[:, row+1, J-1] + ut[:, row, J] + ut[:, row+1, J]
+                    vt = vt.at[:, row, J].set(vc[:, row, J] - 0.25 * cosa_v[:, row, J] * avg)
+
+        # East: rows n-2, n-1
+        for row in [n-2, n-1]:
+            if row >= 0 and row < n and row + 1 <= n:
+                for J in range(jlo, jhi + 1):
+                    if J - 1 >= 0 and J - 1 < n and J < n:
+                        avg = ut[:, row, J-1] + ut[:, row+1, J-1] + ut[:, row, J] + ut[:, row+1, J]
+                        vt = vt.at[:, row, J].set(vc[:, row, J] - 0.25 * cosa_v[:, row, J] * avg)
+
+        # South: cols 0, 1 — recompute ut using corrected vt
+        ilo = 2; ihi = n - 1
+        for col in [0, 1]:
+            if col + 1 <= n:
+                for I in range(ilo, ihi + 1):
+                    if I - 1 >= 0 and I - 1 < n and I < n:
+                        avg = vt[:, I-1, col] + vt[:, I, col] + vt[:, I-1, col+1] + vt[:, I, col+1]
+                        ut = ut.at[:, I, col].set(uc[:, I, col] - 0.25 * cosa_u[:, I, col] * avg)
+
+        # North: cols n-1, n
+        for col in [n-1, n]:
+            if col - 1 >= 0 and col < n + 1:
+                for I in range(ilo, ihi + 1):
+                    if I - 1 >= 0 and I - 1 < n and I < n and col - 1 >= 0:
+                        avg = vt[:, I-1, col-1] + vt[:, I, col-1] + vt[:, I-1, col] + vt[:, I, col]
+                        ut = ut.at[:, I, col].set(uc[:, I, col] - 0.25 * cosa_u[:, I, col] * avg)
+
+    # === Part 4: Corner 2×2 solve ===
+    # At each cube vertex, solve a coupled system for the ut/vt values
+    # near the corner. FV3 sw_core.F90:739-811.
+    # For the SW corner:
+    #   damp = 1/(1 - 0.0625*cosa_u(2,1)*cosa_v(1,2))
+    #   ut(2,1) = (uc(2,1) - 0.25*cosa_u(2,1)*(vt(1,1)+vt(2,1)+vt(2,2)+vc(1,2)
+    #              - 0.25*cosa_v(1,2)*(ut(1,1)+ut(1,2)+ut(2,2)))) * damp
+    # In Python 0-based: Fortran (2,1) → Python (1,0)
+
+    # SW corner: Fortran (2,1) → Python ut(1, 0), vt(0, 1)
+    cu = cosa_u  # (6, n+1, n)
+    cv = cosa_v  # (6, n, n+1)
+
+    # Interior solve: Fortran ut(2,1) → Python ut[:, 1, 0]
+    damp = 1.0 / (1.0 - 0.0625 * cu[:, 1, 0] * cv[:, 0, 1])
+    ut = ut.at[:, 1, 0].set(
+        (uc[:, 1, 0] - 0.25 * cu[:, 1, 0] * (
+            vt[:, 0, 0] + vt[:, 1, 0] + vt[:, 1, 1] + vc[:, 0, 1]
+            - 0.25 * cv[:, 0, 1] * (ut[:, 0, 0] + ut[:, 0, 1] + ut[:, 1, 1])
+        )) * damp)
+    vt = vt.at[:, 0, 1].set(
+        (vc[:, 0, 1] - 0.25 * cv[:, 0, 1] * (
+            ut[:, 0, 0] + ut[:, 0, 1] + ut[:, 1, 1] + uc[:, 1, 0]
+            - 0.25 * cu[:, 1, 0] * (vt[:, 0, 0] + vt[:, 1, 0] + vt[:, 1, 1])
+        )) * damp)
+
+    # SE corner: Fortran ut(npx-1,1) → Python ut[:, n-1, 0], vt(npx-1,2) → vt[:, n-2, 1]
+    damp = 1.0 / (1.0 - 0.0625 * cu[:, n-1, 0] * cv[:, n-2, 1])
+    ut = ut.at[:, n-1, 0].set(
+        (uc[:, n-1, 0] - 0.25 * cu[:, n-1, 0] * (
+            vt[:, n-2, 0] + vt[:, n-3, 0] + vt[:, n-3, 1] + vc[:, n-2, 1]
+            - 0.25 * cv[:, n-2, 1] * (ut[:, n, 0] + ut[:, n, 1] + ut[:, n-1, 1])
+        )) * damp)
+    vt = vt.at[:, n-2, 1].set(
+        (vc[:, n-2, 1] - 0.25 * cv[:, n-2, 1] * (
+            ut[:, n, 0] + ut[:, n, 1] + ut[:, n-1, 1] + uc[:, n-1, 0]
+            - 0.25 * cu[:, n-1, 0] * (vt[:, n-2, 0] + vt[:, n-3, 0] + vt[:, n-3, 1])
+        )) * damp)
+
+    # NE corner: Fortran ut(npx-1,npy-1) → Python ut[:, n-1, n-1], vt(npx-1,npy-1) → vt[:, n-2, n-1]
+    damp = 1.0 / (1.0 - 0.0625 * cu[:, n-1, n-1] * cv[:, n-2, n-1])
+    ut = ut.at[:, n-1, n-1].set(
+        (uc[:, n-1, n-1] - 0.25 * cu[:, n-1, n-1] * (
+            vt[:, n-2, n] + vt[:, n-3, n] + vt[:, n-3, n-1] + vc[:, n-2, n-1]
+            - 0.25 * cv[:, n-2, n-1] * (ut[:, n, n-1] + ut[:, n, n-2] + ut[:, n-1, n-2])
+        )) * damp)
+    vt = vt.at[:, n-2, n-1].set(
+        (vc[:, n-2, n-1] - 0.25 * cv[:, n-2, n-1] * (
+            ut[:, n, n-1] + ut[:, n, n-2] + ut[:, n-1, n-2] + uc[:, n-1, n-1]
+            - 0.25 * cu[:, n-1, n-1] * (vt[:, n-2, n] + vt[:, n-3, n] + vt[:, n-3, n-1])
+        )) * damp)
+
+    # NW corner: Fortran ut(2,npy-1) → Python ut[:, 1, n-1], vt(1,npy-1) → vt[:, 0, n-1]
+    damp = 1.0 / (1.0 - 0.0625 * cu[:, 1, n-1] * cv[:, 0, n-1])
+    ut = ut.at[:, 1, n-1].set(
+        (uc[:, 1, n-1] - 0.25 * cu[:, 1, n-1] * (
+            vt[:, 0, n] + vt[:, 1, n] + vt[:, 1, n-1] + vc[:, 0, n-1]
+            - 0.25 * cv[:, 0, n-1] * (ut[:, 0, n-1] + ut[:, 0, n-2] + ut[:, 1, n-2])
+        )) * damp)
+    vt = vt.at[:, 0, n-1].set(
+        (vc[:, 0, n-1] - 0.25 * cv[:, 0, n-1] * (
+            ut[:, 0, n-1] + ut[:, 0, n-2] + ut[:, 1, n-2] + uc[:, 1, n-1]
+            - 0.25 * cu[:, 1, n-1] * (vt[:, 0, n] + vt[:, 1, n] + vt[:, 1, n-1])
+        )) * damp)
+
+    return ut, vt
+
+
 def _edge_interpolate4(ua4, dxa4):
     """FV3 non-uniform 4-point interpolation to the interface between cells 2 and 3.
 
