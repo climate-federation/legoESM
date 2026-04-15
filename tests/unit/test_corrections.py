@@ -553,6 +553,80 @@ class TestKPP:
         assert out.K_v.shape == (6, 4, 4, 19)
         assert out.A_v.shape == (6, 4, 4, 19)
 
+    def test_lmo_sign_preserved_near_zero_bf(self):
+        """L_MO sign is preserved for small negative B_f (issue #168 bug 1).
+
+        Before the fix, jnp.where(abs(B_f) > eps, B_f, eps) would
+        substitute +eps for small-negative B_f, flipping the stability
+        classification.
+        """
+        from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+        from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+        u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
+        cfg = KPPConfig()
+
+        # Small negative B_f (barely stable): should NOT be classified as unstable
+        B_f_neg = -1e-12 * jnp.ones((6, 4, 4))
+        out_neg = kpp_vertical_mixing(u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f_neg)
+
+        # Small positive B_f (barely unstable): should have nonlocal active
+        B_f_pos = 1e-12 * jnp.ones((6, 4, 4))
+        out_pos = kpp_vertical_mixing(u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f_pos)
+
+        # Both must be finite
+        assert jnp.all(jnp.isfinite(out_neg.dT_dt))
+        assert jnp.all(jnp.isfinite(out_pos.dT_dt))
+
+        # The tendencies should differ (nonlocal active for unstable, not stable)
+        diff = float(jnp.max(jnp.abs(out_pos.dT_dt - out_neg.dT_dt)))
+        assert diff > 0, "B_f sign flip: stable and unstable produced identical output"
+
+    def test_imposed_surface_flux_used(self):
+        """Non-local flux uses Q_sfc_T when provided (issue #168 bug 2)."""
+        from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+        from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+        u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
+        cfg = KPPConfig()
+        B_f = 1e-7 * jnp.ones((6, 4, 4))
+
+        # Without Q_sfc_T (diagnosed proxy)
+        out_diag = kpp_vertical_mixing(u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f)
+
+        # With Q_sfc_T imposed (much larger than proxy)
+        Q_sfc_T = jnp.ones((6, 4, 4)) * 0.01  # 0.01 K*m/s
+        out_imposed = kpp_vertical_mixing(
+            u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f, Q_sfc_T=Q_sfc_T,
+        )
+
+        # Tendencies should differ when imposed flux is used
+        diff = float(jnp.max(jnp.abs(out_imposed.dT_dt - out_diag.dT_dt)))
+        assert diff > 1e-15, "Q_sfc_T had no effect on KPP output"
+
+    def test_h_bl_prev_changes_bl_depth(self):
+        """h_bl_prev breaks the V_t-h_bl coupling (issue #168 bug 3)."""
+        from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+        from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+        u, v, T, S, rho, eta, z_coord, J = self._make_kpp_inputs()
+        cfg = KPPConfig()
+        B_f = 1e-7 * jnp.ones((6, 4, 4))
+
+        # Without h_bl_prev (uses max_depth estimate)
+        out_default = kpp_vertical_mixing(
+            u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f,
+        )
+
+        # With h_bl_prev = shallow (20m)
+        h_bl_prev = jnp.ones((6, 4, 4)) * 20.0
+        out_shallow = kpp_vertical_mixing(
+            u, v, T, S, rho, eta, z_coord, J, cfg, B_f=B_f,
+            h_bl_prev=h_bl_prev,
+        )
+
+        # BL depth estimate should differ
+        # (K_v profile changes because V_t changes with h_bl_prev)
+        diff = float(jnp.max(jnp.abs(out_shallow.K_v - out_default.K_v)))
+        assert diff > 1e-15, "h_bl_prev had no effect on K_v profile"
+
 
 # ===========================================================================
 # P0: Large-Yeager bulk flux
