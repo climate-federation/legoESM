@@ -657,20 +657,57 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     ke_total = dt2 * 0.5 * (ua * ke_u + va * ke_v)
 
     # 5. Vorticity at D-grid corners from C-grid covariant velocities.
-    # Compute cell-centre vorticity from C-grid circulation (uses only
-    # interior C-grid values), then halo-exchange and interpolate to corners.
-    # This avoids edge-copy padding that gave zero vorticity at boundaries.
+    # FV3 sw_core.F90:378-408: compute vorticity DIRECTLY at corners
+    # from C-grid circulation (uc*dxc, vc*dyc).  This avoids the
+    # smoothing introduced by cell-centre→corner interpolation.
+    #
+    # The stencil at corner (i,j) is:
+    #   vort(i,j) = fx(i,j-1) - fx(i,j) - fy(i-1,j) + fy(i,j)
+    # where fx = uc*dxc at (n+1, n+2) and fy = vc*dyc at (n+2, n+1).
+    #
+    # We need one extra row/column of uc/vc beyond the interior range.
+    # Use halo-exchanged scalar padding of the circulation, which gives
+    # cross-face data at boundaries (unlike edge-copy which caused the
+    # previous linear instability).
     fx_circ = uc * cdgrid.dxc    # (6, n+1, n) — FV3: fx = uc * dxc
     fy_circ = vc * cdgrid.dyc    # (6, n, n+1) — FV3: fy = vc * dyc
 
-    # Cell-centre vorticity: circulation around each cell using interior values
-    cell_vort = (fx_circ[:, :-1, :] - fx_circ[:, 1:, :]
-                 + fy_circ[:, :, 1:] - fy_circ[:, :, :-1])
-    rarea = 1.0 / cdgrid.base.area
-    cell_vort = cell_vort * rarea + cdgrid.base.f
+    # Pad circulation to get the extended ranges:
+    # fx needs (n+1, n+2): pad axis 2 by (1,1)
+    # fy needs (n+2, n+1): pad axis 1 by (1,1)
+    # Use linear extrapolation for boundary padding (better than edge copy
+    # for the circulation stencil).
+    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n+1, n+2)
+    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n+1)
+    if n > 2:
+        # Linear extrapolation: 2*boundary - next_interior
+        fx_pad = fx_pad.at[:, :, 0].set(2 * fx_circ[:, :, 0] - fx_circ[:, :, 1])
+        fx_pad = fx_pad.at[:, :, n + 1].set(2 * fx_circ[:, :, n - 1] - fx_circ[:, :, n - 2])
+        fy_pad = fy_pad.at[:, 0, :].set(2 * fy_circ[:, 0, :] - fy_circ[:, 1, :])
+        fy_pad = fy_pad.at[:, n + 1, :].set(2 * fy_circ[:, n - 1, :] - fy_circ[:, n - 2, :])
 
-    # Halo exchange + interpolate to corners (4-point average)
-    vort_abs = _interp_center_to_corner(cell_vort, cdgrid)
+    # Direct corner vorticity: FV3 sw_core.F90:390-394
+    # vort(i,j) = fx(i,j-1) - fx(i,j) - fy(i-1,j) + fy(i,j)
+    # In our indexing: corner (i,j) for i=0..n, j=0..n
+    # fx_pad[:, i, j] with j offset by 1 (padded j=0 corresponds to original j=-1)
+    vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
+            - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])  # (6, n+1, n+1)
+
+    # Corner corrections for non-duogrid (FV3 sw_core.F90:396-400)
+    if not use_duogrid:
+        # At cube vertices the standard stencil double-counts one fy term.
+        # The correction removes the extra fy at each vertex corner.
+        # SW corner (0,0): +fy(i=-1, j=0) → fy_pad[:, 0, 0..n]
+        vort = vort.at[:, 0, 0].add(fy_pad[:, 0, 0])
+        # SE corner (n,0): -fy(i=n, j=0)
+        vort = vort.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+        # NE corner (n,n): -fy(i=n, j=n)
+        vort = vort.at[:, n, n].add(-fy_pad[:, n + 1, n])
+        # NW corner (0,n): +fy(i=-1, j=n)
+        vort = vort.at[:, 0, n].add(fy_pad[:, 0, n])
+
+    rarea_c = 1.0 / cdgrid.area_corner
+    vort_abs = cdgrid.f_corner + rarea_c * vort
 
     # 6. Vorticity flux at C-grid face positions
     # FV3 sw_core.F90:416-423: c_sw vorticity flux uses /sina (1/sin),
@@ -802,30 +839,34 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])  # (6, n, n+1)
 
     # 5. Vorticity at D-grid corners from C-grid covariant velocities.
-    # Compute CELL-CENTRE vorticity from C-grid circulation (uses only
-    # interior C-grid values, no halo needed), then scalar halo exchange
-    # for boundary, then interpolate to corners. This avoids the edge-copy
-    # padding that caused zero vorticity at face-boundary columns and the
-    # resulting linear instability.
+    # FV3 sw_core.F90:378-408: direct-corner vorticity from C-grid circulation.
     dg = cdgrid.base.duogrid
     use_duogrid = dg is not None and dg.ng >= 2
 
-    fx_circ = uc * cdgrid.dxc   # (6, n+1, n)
-    fy_circ = vc * cdgrid.dyc   # (6, n, n+1)
+    fx_circ = uc * cdgrid.dxc   # (6, n+1, n) — FV3: fx = uc * dxc
+    fy_circ = vc * cdgrid.dyc   # (6, n, n+1) — FV3: fy = vc * dyc
 
-    # Cell-centre vorticity: circulation around cell (i,j)
-    # Uses uc at faces i and i+1 (rows), vc at faces j and j+1 (cols)
-    # All values are interior C-grid positions — no halo needed.
-    cell_vort = (fx_circ[:, :-1, :] - fx_circ[:, 1:, :]
-                 + fy_circ[:, :, 1:] - fy_circ[:, :, :-1])
-    rarea = 1.0 / cdgrid.base.area
-    cell_vort = cell_vort * rarea
+    # Pad circulation for extended stencil (same approach as _c_sw)
+    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    if n > 2:
+        fx_pad = fx_pad.at[:, :, 0].set(2 * fx_circ[:, :, 0] - fx_circ[:, :, 1])
+        fx_pad = fx_pad.at[:, :, n + 1].set(2 * fx_circ[:, :, n - 1] - fx_circ[:, :, n - 2])
+        fy_pad = fy_pad.at[:, 0, :].set(2 * fy_circ[:, 0, :] - fy_circ[:, 1, :])
+        fy_pad = fy_pad.at[:, n + 1, :].set(2 * fy_circ[:, n - 1, :] - fy_circ[:, n - 2, :])
 
-    # Add planetary vorticity at cell centres
-    cell_vort_abs = cell_vort + cdgrid.base.f
+    # Direct corner vorticity (FV3 sw_core.F90:390-394)
+    vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
+            - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])
 
-    # Halo exchange and interpolate to corners (4-point average)
-    vort_abs = _interp_center_to_corner(cell_vort_abs, cdgrid)
+    if not use_duogrid:
+        vort = vort.at[:, 0, 0].add(fy_pad[:, 0, 0])
+        vort = vort.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+        vort = vort.at[:, n, n].add(-fy_pad[:, n + 1, n])
+        vort = vort.at[:, 0, n].add(fy_pad[:, 0, n])
+
+    rarea_c = 1.0 / cdgrid.area_corner
+    vort_abs = cdgrid.f_corner + rarea_c * vort
 
     # 6. Vorticity flux at C-grid face positions
     # FV3 sw_core.F90:416-423: c_sw uses /sina (1/sin), NOT *rsin_u (1/sin²)
@@ -833,7 +874,6 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
     fy1 = (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
     if not use_duogrid:
-        # FV3 sw_core.F90:445-449: override only at face boundaries (0, n).
         fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
         fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
     vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
