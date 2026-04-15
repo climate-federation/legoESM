@@ -453,30 +453,21 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     # FV3 sw_core.F90 where ke has dt4 = 0.25*dt scaling.
     ke_total = dt2 * 0.5 * (ua * ke_u + va * ke_v)
 
-    # 5. Vorticity at D-grid corners from C-grid covariant velocities
-    # FV3 c_sw uses dxc/dyc (center-to-center distances), NOT edge lengths.
-    # uc is covariant along x → uc*dxc = line integral along that path.
+    # 5. Vorticity at D-grid corners from C-grid covariant velocities.
+    # Compute cell-centre vorticity from C-grid circulation (uses only
+    # interior C-grid values), then halo-exchange and interpolate to corners.
+    # This avoids edge-copy padding that gave zero vorticity at boundaries.
     fx_circ = uc * cdgrid.dxc    # (6, n+1, n) — FV3: fx = uc * dxc
     fy_circ = vc * cdgrid.dyc    # (6, n, n+1) — FV3: fy = vc * dyc
 
-    # Edge-copy padding: tested better than linear extrapolation for boundary
-    # vorticity accuracy (2.0e-04 vs 4.0e-04 at C16).
-    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    # Cell-centre vorticity: circulation around each cell using interior values
+    cell_vort = (fx_circ[:, :-1, :] - fx_circ[:, 1:, :]
+                 + fy_circ[:, :, 1:] - fy_circ[:, :, :-1])
+    rarea = 1.0 / cdgrid.base.area
+    cell_vort = cell_vort * rarea + cdgrid.base.f
 
-    circ = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
-            + fy_pad[:, 1:, :] - fy_pad[:, :-1, :])
-
-    # Cube vertex corrections — FV3 sw_core.F90:395-401:
-    # SKIPPED when duogrid is active (.not. flagstruct%duogrid).
-    if not use_duogrid:
-        circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
-        circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-        circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
-        circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
-
-    vort = circ * cdgrid.rarea_c
-    vort_abs = vort + cdgrid.f_corner
+    # Halo exchange + interpolate to corners (4-point average)
+    vort_abs = _interp_center_to_corner(cell_vort, cdgrid)
 
     # 6. Vorticity flux at C-grid face positions
     # FV3 sw_core.F90:416-423: c_sw vorticity flux uses /sina (1/sin),
