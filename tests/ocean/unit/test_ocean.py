@@ -164,21 +164,41 @@ class TestWrightEOS:
         assert jnp.isfinite(g)
         assert float(g) != 0.0
 
-    def test_grad_zero_outside_valid_range(self):
-        """Gradient should be zero outside the clipped range [-2, 40] degC.
+    def test_grad_finite_nonzero_outside_valid_range(self):
+        """Gradient must be finite and nonzero outside [-2, 40] degC.
 
-        This documents the piecewise-differentiable behavior: the Wright
-        polynomial is not valid outside its range, so inputs are clipped
-        and the gradient is exactly zero at the boundaries.
+        Wright (1997) extrapolates smoothly outside its nominal validity
+        box. The EOS must not clip inputs — silent clipping zeros grads at
+        the boundary and masks upstream state bugs. See issue #165.
         """
         def rho_of_T(T):
             return wright_eos(T, jnp.array(35.0), jnp.array(0.0))
-        # Well above the valid range
+        # Well above the nominal valid range
         g_hot = jax.grad(rho_of_T)(jnp.array(45.0))
-        assert float(g_hot) == 0.0, f"Expected zero grad at T=45C, got {float(g_hot)}"
-        # Well below the valid range
+        assert jnp.isfinite(g_hot)
+        assert float(g_hot) != 0.0, f"Expected nonzero grad at T=45C, got {float(g_hot)}"
+        # Well below the nominal valid range
         g_cold = jax.grad(rho_of_T)(jnp.array(-5.0))
-        assert float(g_cold) == 0.0, f"Expected zero grad at T=-5C, got {float(g_cold)}"
+        assert jnp.isfinite(g_cold)
+        assert float(g_cold) != 0.0, f"Expected nonzero grad at T=-5C, got {float(g_cold)}"
+
+        # And same story for S outside [0, 42] PSU.
+        def rho_of_S(S):
+            return wright_eos(jnp.array(10.0), S, jnp.array(0.0))
+        g_fresh = jax.grad(rho_of_S)(jnp.array(-1.0))
+        assert jnp.isfinite(g_fresh) and float(g_fresh) != 0.0
+        g_brine = jax.grad(rho_of_S)(jnp.array(45.0))
+        assert jnp.isfinite(g_brine) and float(g_brine) != 0.0
+
+    def test_density_finite_outside_valid_range(self):
+        """Density itself must also be finite outside the nominal box."""
+        # Mild overshoot (advection / diffusion style)
+        rho_mild = wright_eos(jnp.array(-3.0), jnp.array(43.0), jnp.array(0.0))
+        assert jnp.isfinite(rho_mild)
+        assert 900.0 < float(rho_mild) < 1100.0
+        # Larger excursion — should still be finite, may be unphysical.
+        rho_wild = wright_eos(jnp.array(50.0), jnp.array(-2.0), jnp.array(0.0))
+        assert jnp.isfinite(rho_wild)
 
 
 class TestLinearEOS:
@@ -576,6 +596,148 @@ class TestVerticalAdvection:
         adv = _vertical_advection_ocean(field, w_half, ocean_z_coord, jac)
         assert jnp.allclose(adv[..., :-1], -1.0, atol=1e-6)
         assert float(adv[0, 0, 0, -1]) == pytest.approx(0.0, abs=1e-8)
+
+
+class TestFluxFormVerticalMomentumAdvection:
+    """Tests for ``flux_form_vertical_momentum_advection`` (issue #171)."""
+
+    def _helper(self):
+        from legoesm.ocean.vertical import (
+            flux_form_vertical_momentum_advection,
+            flux_form_vertical_tracer_advection,
+        )
+        return flux_form_vertical_momentum_advection, flux_form_vertical_tracer_advection
+
+    def test_rest_state_zero(self):
+        """u=0 gives zero tendency trivially."""
+        helper, _ = self._helper()
+        nlev = 5
+        u = jnp.zeros(nlev)
+        w_half = jnp.concatenate([jnp.array([0.0]), jnp.array([0.1, -0.2, 0.05, -0.1]), jnp.array([0.0])])
+        h_u = jnp.full((nlev,), 100.0)
+
+        tendency = helper(u, w_half, h_u)
+        assert jnp.allclose(tendency, 0.0, atol=1e-15)
+
+    def test_zero_w_zero_tendency(self):
+        """w_half = 0 gives zero tendency for any u."""
+        helper, _ = self._helper()
+        nlev = 5
+        u = jnp.array([1.0, 2.0, -0.5, 0.3, -1.2])
+        w_half = jnp.zeros(nlev + 1)
+        h_u = jnp.full((nlev,), 50.0)
+
+        tendency = helper(u, w_half, h_u)
+        assert jnp.allclose(tendency, 0.0, atol=1e-15)
+
+    def test_column_momentum_conserved_in_closed_column(self):
+        """h-weighted column integral of tendency is zero to round-off.
+
+        For any u and any w_half with w_half[0] = w_half[nlev] = 0
+        (closed column), the flux-form tendency must satisfy
+            sum_k(tendency[k] * h_u[k]) == 0
+        exactly. This is the column momentum flux balance property
+        that the old cell-upwind form did not have.
+        """
+        helper, _ = self._helper()
+        nlev = 6
+        u = jnp.array([0.5, 1.2, -0.3, 0.8, -0.4, 0.1])
+        # Non-trivial w profile with zero boundary values.
+        w_half = jnp.array([0.0, 0.15, -0.05, 0.1, -0.08, 0.02, 0.0])
+        h_u = jnp.array([10.0, 20.0, 30.0, 40.0, 30.0, 20.0])
+
+        tendency = helper(u, w_half, h_u)
+        column_integral = float(jnp.sum(tendency * h_u))
+        assert abs(column_integral) < 1e-12, (
+            f"Column momentum flux balance violated: sum(tend*h) = {column_integral}"
+        )
+
+    def test_matches_tracer_flux_form_divided_by_h(self):
+        """Identity: tendency = -flux_form_tracer(u, w) / h_u."""
+        helper, tracer_helper = self._helper()
+        nlev = 5
+        u = jnp.array([1.0, 2.0, 3.0, 2.5, 1.5])
+        w_half = jnp.array([0.0, 0.1, -0.05, 0.08, -0.02, 0.0])
+        h_u = jnp.array([15.0, 25.0, 35.0, 25.0, 15.0])
+
+        tendency = helper(u, w_half, h_u)
+        tracer_flux_div = tracer_helper(u, w_half)
+        expected = -tracer_flux_div / h_u
+        assert jnp.allclose(tendency, expected, atol=1e-14)
+
+    def test_interface_upwind_upward_picks_below(self):
+        """Upward flow at an interior interface picks the below cell."""
+        helper, _ = self._helper()
+        # 3 levels: u = [10, 20, 30]. All boundaries closed except
+        # interface 1 is upward (w_half[1] = +1 m/s). h_u = 1 everywhere.
+        u = jnp.array([10.0, 20.0, 30.0])
+        w_half = jnp.array([0.0, 1.0, 0.0, 0.0])
+        h_u = jnp.array([1.0, 1.0, 1.0])
+
+        tendency = helper(u, w_half, h_u)
+        # F[0]=0, F[1] = w[1] * u_below = 1 * 20 = 20 (upward → from below = u[1])
+        # F[2] = 0, F[3] = 0
+        # vert_flux_div = [F[0]-F[1], F[1]-F[2], F[2]-F[3]] = [-20, 20, 0]
+        # tendency = -vert_flux_div / h_u = [20, -20, 0]
+        assert float(tendency[0]) == pytest.approx(20.0, abs=1e-10)
+        assert float(tendency[1]) == pytest.approx(-20.0, abs=1e-10)
+        assert float(tendency[2]) == pytest.approx(0.0, abs=1e-10)
+
+    def test_interface_upwind_downward_picks_above(self):
+        """Downward flow at an interior interface picks the above cell."""
+        helper, _ = self._helper()
+        # 3 levels: u = [10, 20, 30]. Interface 2 is downward (w_half[2] = -1).
+        u = jnp.array([10.0, 20.0, 30.0])
+        w_half = jnp.array([0.0, 0.0, -1.0, 0.0])
+        h_u = jnp.array([1.0, 1.0, 1.0])
+
+        tendency = helper(u, w_half, h_u)
+        # F[0]=0, F[1]=0, F[2] = w[2] * u_above = -1 * 20 = -20
+        # F[3]=0. vert_flux_div = [0, -(-20), -20] = [0, 20, -20]
+        # tendency = [0, -20, 20]
+        assert float(tendency[0]) == pytest.approx(0.0, abs=1e-10)
+        assert float(tendency[1]) == pytest.approx(-20.0, abs=1e-10)
+        assert float(tendency[2]) == pytest.approx(20.0, abs=1e-10)
+
+    def test_constant_u_column_integral_zero(self):
+        """For spatially-constant u, column momentum flux balance is zero
+        even though per-layer tendencies are not.
+
+        Flux-form under dynamic h preserves ``sum(h*u)`` exactly when the
+        boundary fluxes vanish — per-layer u values can shift, but the
+        vertically integrated momentum is conserved.
+        """
+        helper, _ = self._helper()
+        nlev = 5
+        u = jnp.full((nlev,), 1.5)  # constant
+        w_half = jnp.array([0.0, 0.3, -0.1, 0.2, -0.05, 0.0])
+        h_u = jnp.array([10.0, 20.0, 30.0, 20.0, 10.0])
+
+        tendency = helper(u, w_half, h_u)
+        column_integral = float(jnp.sum(tendency * h_u))
+        assert abs(column_integral) < 1e-12
+
+    def test_boundary_not_hard_zeroed(self):
+        """Top and bottom levels receive nonzero tendency from adjacent
+        interface flux, unlike the cell-upwind gradient form which
+        forced ``grad = 0`` at k=0 and k=nlev-1.
+
+        With interior upward w at interface 1 only, the surface level
+        (k=0) and level k=1 both see the flux; other levels don't.
+        """
+        helper, _ = self._helper()
+        u = jnp.array([1.0, 2.0, 3.0, 4.0])
+        w_half = jnp.array([0.0, 0.5, 0.0, 0.0, 0.0])
+        h_u = jnp.full((4,), 1.0)
+
+        tendency = helper(u, w_half, h_u)
+        # F[1] = 0.5 * u[1] = 1 (upward → below). All other F = 0.
+        # vert_flux_div = [0-1, 1-0, 0-0, 0-0] = [-1, 1, 0, 0]
+        # tendency = [1, -1, 0, 0]
+        assert float(tendency[0]) == pytest.approx(1.0, abs=1e-10)
+        assert float(tendency[1]) == pytest.approx(-1.0, abs=1e-10)
+        # The surface cell's tendency is NOT forced to zero.
+        assert float(tendency[0]) != 0.0
 
 
 class TestVerticalMixing:

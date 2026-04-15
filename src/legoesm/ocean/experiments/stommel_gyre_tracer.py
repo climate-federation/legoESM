@@ -20,7 +20,7 @@ Domain Configuration:
 - Tracer blob initialization in gyre interior
 
 Physical Setup:
-- Wind-driven double-gyre circulation (inherited from wind_gyre experiment)
+- Wind-driven double-gyre circulation (inherited from regional_gyre experiment)
 - Passive salinity tracer blob superimposed on background circulation
 - Tracer blob: Gaussian shape, centered at (30°N, 30°W), 10° width
 - Background salinity: 35 PSU, tracer amplitude: ±2 PSU
@@ -65,7 +65,7 @@ class StommelGyreTracerConfig:
     
     Combines wind-driven gyre circulation with passive tracer transport.
     """
-    # Background circulation (inherits from wind_gyre)
+    # Background circulation (inherits from regional_gyre)
     T_surface: float = 20.0        # Surface temperature [°C]
     T_deep: float = 2.0            # Deep ocean temperature [°C] 
     scale_depth: float = 1000.0    # Temperature e-folding depth [m]
@@ -173,7 +173,7 @@ def _add_wind_gyre_circulation(state, grid_type: str, grid, z_coord,
                              config: StommelGyreTracerConfig):
     """Add wind-driven gyre circulation to the state.
     
-    Uses the same logic as wind_gyre experiment to establish circulation.
+    Uses the same logic as regional_gyre experiment to establish circulation.
     """
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import wind_driven_gyre_init

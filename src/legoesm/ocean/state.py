@@ -404,6 +404,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     salinity_max_psu: float = 50.0
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
+    S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None

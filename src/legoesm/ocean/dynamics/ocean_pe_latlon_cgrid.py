@@ -8,17 +8,30 @@ C-grid staggering:
 Key advantages over the A-grid formulation (ocean_pe_latlon.py):
 - Pressure gradient uses compact 1-cell stencil -> no 2*dx null space
 - Divergence sums actual face fluxes -> no checkerboard mode
-- Coriolis coupling is exact at face points with Sadourny averaging
+- Coriolis coupling is on face-averaged velocities (forward-backward
+  Matsuno step in the step function, not in this tendency)
 
 Boundary conditions:
 - Longitude: periodic (u wraps at j=0 and j=n_lon)
 - Latitude: solid wall at poles (v=0 at i=0 and i=n_lat)
 
+Vector-invariant status (see issue #160)
+----------------------------------------
+The momentum equation is split into baroclinic (this file) and
+barotropic (barotropic_latlon_cgrid.py) parts. The baroclinic step
+computes the vorticity flux ζ×u using the *perturbation* velocity u'
+(see section 7b below) and the barotropic solver is purely linear in
+U_bar. The cross terms ζ(u')·V_bar and ζ(U_bar)·v' are therefore
+missing from the total momentum budget. This is not equivalent to
+integrating (f+ζ_total)·u_total and has no known conservation
+property — despite the historical "Sadourny" label, the 2-point ζ /
+4-point raw-v' stencil at section 7b is not Sadourny EC, Sadourny EN,
+Arakawa-Hsu, or Arakawa-Lamb. Fixing this requires a MOM6-style
+slow-forcing coupling; tracked in issue #160.
+
 References
 ----------
 - Griffies (2004): Fundamentals of Ocean Climate Models (MOM framework)
-- Sadourny (1975): The Dynamics of Finite-Difference Models of the
-  Shallow-Water Equations
 - Arakawa & Lamb (1977): Computational Design of the Basic Dynamical
   Processes of the UCLA GCM
 """
@@ -48,10 +61,12 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     laplacian_cgrid,
     vector_laplacian_cgrid,
     interp_cell_to_uface,
+    curl_vertex_cgrid,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
     vertical_advection_ocean as _vertical_advection_ocean,
+    flux_form_vertical_momentum_advection as _flux_form_vertical_momentum_advection,
 )
 
 
@@ -338,13 +353,69 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     du_dt = -dKE_dx - dp_dx / rho_0
     dv_dt = -dKE_dy - dp_dy / rho_0
 
+    # --- 7b. Relative vorticity flux (issue #153, revisited in #160) ---
+    # Vector-invariant advection: (u·∇)u = ∇(KE) + ζ × u.
+    # Coriolis (f × u) is handled in the step function.
+    #
+    # NOTE (#160): This stencil is NOT a standard Sadourny/Arakawa-Hsu/
+    # Arakawa-Lamb vorticity-flux scheme, despite the original commit
+    # message. Specifically:
+    #   (1) ζ is computed from the *perturbation* velocity u', not the
+    #       total velocity, so the cross terms ζ(u')·V_bar and
+    #       ζ(U_bar)·v' are missing.
+    #   (2) zeta_at_u below is a 2-point meridional average (Sadourny
+    #       uses a 4-point PV stencil on corner-centred q = (f+ζ)/h).
+    #   (3) v_at_u uses raw v' rather than the thickness-weighted mass
+    #       flux h·v' required for discrete energy consistency with
+    #       the continuity equation.
+    # Net effect: the term is O(Δx²)-consistent but conserves neither
+    # energy nor enstrophy on the perturbation subsystem. Replacing it
+    # cleanly requires the MOM6-style slow-forcing refactor tracked
+    # in #160.
+    zeta = curl_vertex_cgrid(u_prime, v_prime, grid)  # (n_lat+1, n_lon+1, nlev)
+
+    # Average ζ from vertices to velocity points
+    zeta_at_u = 0.5 * (zeta[:-1, :, :] + zeta[1:, :, :])  # (n_lat, n_lon+1, nlev)
+    zeta_at_v = 0.5 * (zeta[:, :-1, :] + zeta[:, 1:, :])  # (n_lat+1, n_lon, nlev)
+
+    # Average v' to u-points (4-point arithmetic mean, periodic in lon).
+    # NOT thickness-weighted — see NOTE above for the consequences.
+    v_west = jnp.roll(v_prime, 1, axis=1)  # v'[:, (j-1)%n_lon, :]
+    v_at_u_core = 0.25 * (v_prime[:-1] + v_prime[1:]
+                          + v_west[:-1] + v_west[1:])  # (n_lat, n_lon, nlev)
+    v_at_u = jnp.concatenate(
+        [v_at_u_core, v_at_u_core[:, 0:1, :]], axis=1)  # (n_lat, n_lon+1, nlev)
+
+    # Average u' to v-points (4-point average, zero-padded at poles)
+    n_lon_loc = u_prime.shape[1]  # n_lon+1
+    nlev_loc = u_prime.shape[2]
+    zero_u = jnp.zeros((1, n_lon_loc, nlev_loc), dtype=u_prime.dtype)
+    u_ext = jnp.concatenate([zero_u, u_prime, zero_u], axis=0)  # (n_lat+2, n_lon+1, nlev)
+    u_at_v = 0.25 * (u_ext[:-1, :-1, :] + u_ext[:-1, 1:, :]
+                      + u_ext[1:, :-1, :] + u_ext[1:, 1:, :])  # (n_lat+1, n_lon, nlev)
+
+    du_dt = du_dt + zeta_at_u * v_at_u
+    dv_dt = dv_dt - zeta_at_v * u_at_v
+
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
+    # Issue #171 Level-1 fix: use interface-upwind flux-form momentum
+    # advection instead of the cell-centered upwind gradient form.
+    # The flux-form helper returns -(F_top - F_bot) / h_u with
+    # F = w_half * u_upwind_at_interface and F = 0 at top/bottom by
+    # construction, eliminating the hard-zero gradient pathology at
+    # k=0 / k=nlev-1 and matching the tracer-path interface upwind.
+    # Full flux-form momentum update (Level 2) still requires step-
+    # function restructuring; tracked on #171.
+    J_u = interp_cell_to_uface(J)
+    J_v = _interp_to_v_points(J)
+    h_u_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_u[..., jnp.newaxis]
+    h_v_old = z_coord.dz_ref[jnp.newaxis, jnp.newaxis, :] * J_v[..., jnp.newaxis]
     w_u = interp_cell_to_uface(w)
     w_v = _interp_to_v_points(w)
-    du_dt = du_dt + _vertical_advection_ocean(
-        u_prime, w_u, z_coord, interp_cell_to_uface(J))
-    dv_dt = dv_dt + _vertical_advection_ocean(
-        v_prime, w_v, z_coord, _interp_to_v_points(J))
+    du_dt = du_dt + _flux_form_vertical_momentum_advection(
+        u_prime, w_u, h_u_old)
+    dv_dt = dv_dt + _flux_form_vertical_momentum_advection(
+        v_prime, w_v, h_v_old)
 
     # --- 9. Tracer tendencies (diffusion + physics only) ---
     # Horizontal AND vertical tracer advection are handled in the step()
@@ -360,23 +431,26 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
 
         if config.K_h > 0:
             dtr_dt = dtr_dt + config.K_h * laplacian_cgrid(tr, grid, mask=mask)
-        if physics_fn is None:
-            if config.K_v > 0 and tr.shape[-1] >= 2:
-                jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
-                dz_actual_loc = z_coord.dz_ref * jac_v
-                dtr_dz_half = jnp.diff(tr, axis=-1) / (
-                    z_coord.dz_half_ref * jac_v
-                )
-                flux = config.K_v * dtr_dz_half
-                zeros_face = jnp.zeros(
-                    (*tr.shape[:-1], 1), dtype=tr.dtype,
-                )
-                flux_full = jnp.concatenate(
-                    [zeros_face, flux, zeros_face], axis=-1,
-                )
-                dtr_dt = dtr_dt + (
-                    flux_full[..., :-1] - flux_full[..., 1:]
-                ) / dz_actual_loc
+        # Vertical tracer diffusion: always applied regardless of physics
+        # pipeline state. The physics pipeline's vertical_mixing module is
+        # a separate concept (e.g., KPP). Baseline K_v diffusion should
+        # always be active when K_v > 0. (Fixes #150.)
+        if config.K_v > 0 and tr.shape[-1] >= 2:
+            jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
+            dz_actual_loc = z_coord.dz_ref * jac_v
+            dtr_dz_half = jnp.diff(tr, axis=-1) / (
+                z_coord.dz_half_ref * jac_v
+            )
+            flux = config.K_v * dtr_dz_half
+            zeros_face = jnp.zeros(
+                (*tr.shape[:-1], 1), dtype=tr.dtype,
+            )
+            flux_full = jnp.concatenate(
+                [zeros_face, flux, zeros_face], axis=-1,
+            )
+            dtr_dt = dtr_dt + (
+                flux_full[..., :-1] - flux_full[..., 1:]
+            ) / dz_actual_loc
         return dtr_dt
 
     tracer_tend = jax.vmap(tracer_tendency, in_axes=0, out_axes=0)(tracers)

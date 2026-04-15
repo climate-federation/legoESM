@@ -25,6 +25,10 @@ from legoesm.ocean.vertical import create_ocean_z_star, compute_layer_thickness
 from legoesm.ocean.init_mpas import rest_state_mpas_ocean
 from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
 from legoesm.grids.voronoi import create_voronoi_mesh
+from legoesm.grids.latlon import create_latlon_grid
+from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 
 
 # ============================================================================
@@ -577,6 +581,192 @@ class TestOceanModelWithFreshwater:
         state_no = model.step(state0, 60.0)
 
         # With closure="none", freshwater should be completely ignored
+        assert jnp.allclose(state_fw.eta.data, state_no.eta.data, atol=1e-15)
+        assert jnp.allclose(state_fw.S.data, state_no.S.data, atol=1e-15)
+
+
+# ============================================================================
+# Integration with latlon C-grid ocean model
+# ============================================================================
+
+@pytest.fixture
+def ll_grid():
+    return create_latlon_grid(n_lat=18, n_lon=36)
+
+
+@pytest.fixture
+def ll_z_coord():
+    return create_ocean_z_star(
+        n_levels=5, H_max=500.0, dz_surface=20.0, dz_deep=200.0,
+    )
+
+
+@pytest.fixture
+def ll_state0(ll_grid, ll_z_coord):
+    return rest_state_latlon_cgrid_ocean(
+        ll_grid, ll_z_coord,
+        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        H_max=500.0, land_lat_threshold=85.0,
+    )
+
+
+class TestLatLonCGridOceanModelWithFreshwater:
+
+    def test_step_no_freshwater(self, ll_grid, ll_z_coord, ll_state0):
+        """Model step without freshwater should work as before."""
+        config = LatLonCGridOceanConfig(
+            A_h=1e3, n_barotropic_substeps=5,
+            use_conservation_fixer=False,
+            freshwater_closure="none",
+        )
+        model = LatLonCGridOceanModel(ll_grid, ll_z_coord, config)
+        state1 = model.step(ll_state0, 60.0)
+        assert jnp.all(jnp.isfinite(state1.eta.data))
+        assert jnp.all(jnp.isfinite(state1.S.data))
+
+    def test_step_with_zero_freshwater(self, ll_grid, ll_z_coord, ll_state0):
+        """Step with zero freshwater = step without freshwater."""
+        config = LatLonCGridOceanConfig(
+            A_h=1e3, n_barotropic_substeps=5,
+            use_conservation_fixer=False,
+        )
+        model = LatLonCGridOceanModel(ll_grid, ll_z_coord, config)
+        n_lat, n_lon = ll_grid.n_lat, ll_grid.n_lon
+        fw = FreshwaterForcing(
+            precip=jnp.zeros((n_lat, n_lon)),
+            evap=jnp.zeros((n_lat, n_lon)),
+            runoff=jnp.zeros((n_lat, n_lon)),
+            ice_fw=jnp.zeros((n_lat, n_lon)),
+        )
+        state_fw = model.step(ll_state0, 60.0, freshwater=fw)
+        state_no = model.step(ll_state0, 60.0)
+        assert jnp.allclose(state_fw.eta.data, state_no.eta.data, atol=1e-15)
+        assert jnp.allclose(state_fw.S.data, state_no.S.data, atol=1e-15)
+
+    def test_step_with_precip_raises_eta(self, ll_grid, ll_z_coord, ll_state0):
+        """Precipitation should raise the free surface."""
+        config = LatLonCGridOceanConfig(
+            A_h=1e3, n_barotropic_substeps=5,
+            use_conservation_fixer=False,
+        )
+        model = LatLonCGridOceanModel(ll_grid, ll_z_coord, config)
+        mask = ll_state0.land_mask.data
+        n_lat, n_lon = ll_grid.n_lat, ll_grid.n_lon
+
+        fw = FreshwaterForcing(
+            precip=jnp.ones((n_lat, n_lon)) * 1e-3 * mask,
+            evap=jnp.zeros((n_lat, n_lon)),
+            runoff=jnp.zeros((n_lat, n_lon)),
+            ice_fw=jnp.zeros((n_lat, n_lon)),
+        )
+
+        state_no = model.step(ll_state0, 60.0)
+        state_fw = model.step(ll_state0, 60.0, freshwater=fw)
+
+        ocean_cells = mask > 0.5
+        eta_mean_no = jnp.mean(state_no.eta.data[ocean_cells])
+        eta_mean_fw = jnp.mean(state_fw.eta.data[ocean_cells])
+        assert eta_mean_fw > eta_mean_no
+
+    def test_step_with_precip_decreases_S(self, ll_grid, ll_z_coord, ll_state0):
+        """Precipitation should decrease top-layer salinity via virtual salt flux."""
+        config = LatLonCGridOceanConfig(
+            A_h=1e3, n_barotropic_substeps=5,
+            use_conservation_fixer=False,
+        )
+        model = LatLonCGridOceanModel(ll_grid, ll_z_coord, config)
+        mask = ll_state0.land_mask.data
+        n_lat, n_lon = ll_grid.n_lat, ll_grid.n_lon
+
+        fw = FreshwaterForcing(
+            precip=jnp.ones((n_lat, n_lon)) * 1e-3 * mask,
+            evap=jnp.zeros((n_lat, n_lon)),
+            runoff=jnp.zeros((n_lat, n_lon)),
+            ice_fw=jnp.zeros((n_lat, n_lon)),
+        )
+
+        state_no = model.step(ll_state0, 60.0)
+        state_fw = model.step(ll_state0, 60.0, freshwater=fw)
+
+        ocean_cells = mask > 0.5
+        S_top_no = jnp.mean(state_no.S.data[ocean_cells, 0])
+        S_top_fw = jnp.mean(state_fw.S.data[ocean_cells, 0])
+        assert S_top_fw < S_top_no
+
+    def test_step_with_evap_increases_S(self, ll_grid, ll_z_coord, ll_state0):
+        """Evaporation should increase top-layer salinity."""
+        config = LatLonCGridOceanConfig(
+            A_h=1e3, n_barotropic_substeps=5,
+            use_conservation_fixer=False,
+        )
+        model = LatLonCGridOceanModel(ll_grid, ll_z_coord, config)
+        mask = ll_state0.land_mask.data
+        n_lat, n_lon = ll_grid.n_lat, ll_grid.n_lon
+
+        fw = FreshwaterForcing(
+            precip=jnp.zeros((n_lat, n_lon)),
+            evap=jnp.ones((n_lat, n_lon)) * 1e-3 * mask,
+            runoff=jnp.zeros((n_lat, n_lon)),
+            ice_fw=jnp.zeros((n_lat, n_lon)),
+        )
+
+        state_no = model.step(ll_state0, 60.0)
+        state_fw = model.step(ll_state0, 60.0, freshwater=fw)
+
+        ocean_cells = mask > 0.5
+        S_top_no = jnp.mean(state_no.S.data[ocean_cells, 0])
+        S_top_fw = jnp.mean(state_fw.S.data[ocean_cells, 0])
+        assert S_top_fw > S_top_no
+
+    def test_multi_step_stability(self, ll_grid, ll_z_coord, ll_state0):
+        """10 steps with moderate freshwater should remain stable."""
+        config = LatLonCGridOceanConfig(
+            A_h=1e3, n_barotropic_substeps=5,
+            use_conservation_fixer=True,
+        )
+        model = LatLonCGridOceanModel(ll_grid, ll_z_coord, config)
+        mask = ll_state0.land_mask.data
+        n_lat, n_lon = ll_grid.n_lat, ll_grid.n_lon
+
+        fw = FreshwaterForcing(
+            precip=jnp.ones((n_lat, n_lon)) * 3.5e-8 * mask,
+            evap=jnp.ones((n_lat, n_lon)) * 2.0e-8 * mask,
+            runoff=jnp.ones((n_lat, n_lon)) * 0.5e-8 * mask,
+            ice_fw=jnp.zeros((n_lat, n_lon)),
+        )
+
+        state = ll_state0
+        for _ in range(10):
+            state = model.step(state, 60.0, freshwater=fw)
+
+        assert jnp.all(jnp.isfinite(state.eta.data))
+        assert jnp.all(jnp.isfinite(state.T.data))
+        assert jnp.all(jnp.isfinite(state.S.data))
+        assert jnp.all(jnp.isfinite(state.u.data))
+
+    def test_freshwater_none_closure_ignores_forcing(
+        self, ll_grid, ll_z_coord, ll_state0,
+    ):
+        """With freshwater_closure='none', forcing should be ignored."""
+        config_none = LatLonCGridOceanConfig(
+            A_h=1e3, n_barotropic_substeps=5,
+            use_conservation_fixer=False,
+            freshwater_closure="none",
+        )
+        model = LatLonCGridOceanModel(ll_grid, ll_z_coord, config_none)
+        mask = ll_state0.land_mask.data
+        n_lat, n_lon = ll_grid.n_lat, ll_grid.n_lon
+
+        fw = FreshwaterForcing(
+            precip=jnp.ones((n_lat, n_lon)) * 1e-2 * mask,
+            evap=jnp.zeros((n_lat, n_lon)),
+            runoff=jnp.zeros((n_lat, n_lon)),
+            ice_fw=jnp.zeros((n_lat, n_lon)),
+        )
+
+        state_fw = model.step(ll_state0, 60.0, freshwater=fw)
+        state_no = model.step(ll_state0, 60.0)
+
         assert jnp.allclose(state_fw.eta.data, state_no.eta.data, atol=1e-15)
         assert jnp.allclose(state_fw.S.data, state_no.S.data, atol=1e-15)
 

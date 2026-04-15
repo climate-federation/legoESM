@@ -381,6 +381,10 @@ class MPASOceanState(NamedTuple):
         Salinity [PSU]. Shape (nCells, nlev). Prognostic.
     eta : Field
         Sea surface height [m]. Shape (nCells,). Prognostic.
+    w : Field
+        Vertical velocity [m/s]. Shape (nCells, nlev+1). Diagnostic field
+        computed from flux divergence on half levels (surface first,
+        bottom = 0).
     H_bathy : Field
         Bathymetry depth [m]. Shape (nCells,). Positive downward. Static.
     land_mask : Field
@@ -390,6 +394,7 @@ class MPASOceanState(NamedTuple):
     T: Field
     S: Field
     eta: Field
+    w: Field
     H_bathy: Field
     land_mask: Field
 

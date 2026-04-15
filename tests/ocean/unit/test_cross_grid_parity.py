@@ -308,10 +308,24 @@ class TestOceanMatrixAlignment:
         assert runners_keys is not None, "RUNNERS dict not found in canonical runner"
 
         expected = {
-            "rest_state", "rest_state_no_land",
-            "barotropic_wave", "barotropic_gyre", "barotropic_double_gyre",
-            "baroclinic", "phillips_two_layer", "inertia_gravity_wave",
-            "lock_exchange", "overflow", "stommel_gyre_tracer",
+            "rest_state_stratified_with_land",
+            "rest_state_uniform_with_land",
+            "rest_state_stratified_no_land",
+            "rest_state_uniform_no_land",
+            "barotropic_wave",
+            "barotropic_gyre",
+            "barotropic_double_gyre",
+            "barotropic_double_gyre_sin2",
+            "baroclinic_gyre",
+            "baroclinic_gyre_cos",
+            "global_barotropic_wind",
+            "global_barotropic_wind_1lev",
+            "geostrophic_adjustment",
+            "phillips_two_layer",
+            "inertia_gravity_wave",
+            "lock_exchange",
+            "overflow",
+            "stommel_gyre_tracer",
         }
         assert runners_keys == expected, (
             f"RUNNERS keys mismatch.\n"

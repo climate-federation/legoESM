@@ -41,24 +41,49 @@ from legoesm.constants import g
 @dataclass
 class RestStateConfig:
     """Configuration parameters for rest state experiment.
-    
+
     All parameters have physically meaningful defaults that work across
     different grid types and resolutions.
+
+    Variant flags:
+        include_land=False  → no land (land_lat_threshold forced to 90°)
+        uniform_ts=True     → uniform T/S with no stratification
     """
     # Temperature stratification
     T_surface: float = 20.0        # Surface temperature [°C]
-    T_deep: float = 2.0            # Deep ocean temperature [°C] 
+    T_deep: float = 2.0            # Deep ocean temperature [°C]
     scale_depth: float = 1000.0    # Temperature e-folding depth [m]
-    
+
     # Salinity (uniform)
     S_uniform: float = 35.0        # Salinity [PSU]
-    
-    # Domain configuration  
+
+    # Domain configuration
     H_max: float = 5500.0          # Maximum ocean depth [m]
     land_lat_threshold: float = 80.0  # Latitude threshold for land [degrees]
-    
+
     # Spectral grid: same land threshold as other grids; tanh taper mitigates Gibbs
     spectral_land_lat_threshold: float = 80.0
+
+    # Variant flags
+    include_land: bool = True      # Include land at high latitudes
+    uniform_ts: bool = False       # Use uniform T/S (no stratification)
+    uniform_T: float = 10.0        # Temperature when uniform_ts=True [°C]
+
+    @property
+    def effective_T_surface(self) -> float:
+        return self.uniform_T if self.uniform_ts else self.T_surface
+
+    @property
+    def effective_T_deep(self) -> float:
+        return self.uniform_T if self.uniform_ts else self.T_deep
+
+    @property
+    def effective_land_lat(self) -> float:
+        return 90.0 if not self.include_land else self.land_lat_threshold
+
+    @property
+    def effective_spectral_land_lat(self) -> float:
+        return 90.0 if not self.include_land else self.spectral_land_lat_threshold
 
 
 def create_initial_conditions(grid_type: str, grid, z_coord, 
@@ -95,51 +120,50 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
     if config is None:
         config = RestStateConfig()
     
+    T_sfc = config.effective_T_surface
+    T_deep = config.effective_T_deep
+    land_lat = config.effective_land_lat
+
     if grid_type == "cubed_sphere":
         from legoesm.ocean.init import rest_state_ocean
         return rest_state_ocean(
-            grid, z_coord, 
-            T_surface=config.T_surface,
-            T_deep=config.T_deep,
+            grid, z_coord,
+            T_surface=T_sfc, T_deep=T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
-            land_lat_threshold=config.land_lat_threshold
+            land_lat_threshold=land_lat,
         )
-        
+
     elif grid_type == "latlon":
         from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
         return rest_state_latlon_cgrid_ocean(
             grid, z_coord,
-            T_surface=config.T_surface,
-            T_deep=config.T_deep,
+            T_surface=T_sfc, T_deep=T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
-            land_lat_threshold=config.land_lat_threshold
+            land_lat_threshold=land_lat,
         )
-        
+
     elif grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
         return rest_state_mpas_ocean(
             grid, z_coord,
-            T_surface=config.T_surface,
-            T_deep=config.T_deep, 
+            T_surface=T_sfc, T_deep=T_deep,
             S_uniform=config.S_uniform,
             H_max=config.H_max,
-            land_lat_threshold=config.land_lat_threshold
+            land_lat_threshold=land_lat,
         )
-        
+
     elif grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
-        # Use pure global ocean for spectral to avoid Gibbs ringing
         return rest_state_spectral_ocean(
             grid, z_coord,
-            T_surface=config.T_surface,
-            T_deep=config.T_deep,
-            S_uniform=config.S_uniform, 
+            T_surface=T_sfc, T_deep=T_deep,
+            S_uniform=config.S_uniform,
             H_max=config.H_max,
-            land_lat_threshold=config.spectral_land_lat_threshold
+            land_lat_threshold=config.effective_spectral_land_lat,
         )
-        
+
     else:
         raise ValueError(f"Unknown grid type: {grid_type}")
 

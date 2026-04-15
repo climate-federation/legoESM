@@ -1,9 +1,9 @@
-"""Wind-Driven Double-Gyre Ocean Experiment.
+"""Regional Gyre Ocean Experiment.
 
-A fundamental test case for wind-driven ocean circulation that verifies the
-development of gyres driven by symmetric wind stress forcing. This experiment
-tests momentum transfer, circulation patterns, and the numerical properties of
-the ocean model under realistic forcing scenarios.
+Base experiment for wind-driven gyre circulation in a rectangular ocean basin.
+This serves as the foundation for barotropic gyre, baroclinic gyre, and
+tracer transport experiments. It verifies momentum transfer, circulation
+patterns, and numerical properties under wind stress forcing.
 
 Scientific Purpose:
 - Validate wind stress momentum transfer to the ocean
@@ -59,7 +59,7 @@ from legoesm.constants import g
 
 
 @dataclass
-class WindGyreConfig:
+class RegionalGyreConfig:
     """Configuration parameters for wind-driven gyre experiment.
 
     All parameters have physically meaningful defaults that work across
@@ -80,10 +80,16 @@ class WindGyreConfig:
 
     # Wind forcing parameters
     wind_stress_max: float = 0.1   # Maximum wind stress [Pa]
+    wind_profile: str = "single_gyre"  # "single_gyre", "double_gyre", "double_gyre_sin2"
+    wind_buffer_deg: float = 0.0   # Buffer zone at basin edges [degrees]
+
+    # Physics
+    A_h: float = 5e5               # Horizontal viscosity [m²/s]
+    bottom_drag_coeff: float = 1e-4  # Linear bottom drag [s⁻¹]
 
 
 def create_initial_conditions(grid_type: str, grid, z_coord, 
-                            config: WindGyreConfig = None):
+                            config: RegionalGyreConfig = None):
     """Create wind-driven gyre initial conditions for any supported grid type.
 
     Creates a rectangular ocean basin with rest-state stratification.
@@ -98,7 +104,7 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         Grid object.
     z_coord : OceanZCoordinate
         Vertical coordinate system.
-    config : WindGyreConfig, optional
+    config : RegionalGyreConfig, optional
         Configuration parameters. Uses defaults if None.
 
     Returns
@@ -107,9 +113,9 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
         Initial state with basin land mask for double-gyre experiment.
     """
     if config is None:
-        config = WindGyreConfig()
+        config = RegionalGyreConfig()
     
-    if grid_type == "cubed_sphere":
+    if grid_type in ("cubed_sphere", "cs_regional"):
         from legoesm.ocean.init import wind_driven_gyre_init
         return wind_driven_gyre_init(
             grid, z_coord, H_max=config.H_max,
@@ -117,53 +123,83 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
             lat_south=config.lat_south, lat_north=config.lat_north,
         )
 
-    elif grid_type == "latlon":
+    elif grid_type in ("latlon", "latlon_regional"):
         from legoesm.ocean.init_latlon_cgrid import wind_driven_gyre_latlon_cgrid
         return wind_driven_gyre_latlon_cgrid(
             grid, z_coord, H_max=config.H_max,
             lon_west=config.lon_west, lon_east=config.lon_east,
             lat_south=config.lat_south, lat_north=config.lat_north,
         )
-        
+
+    elif grid_type in ("mpas", "mpas_regional"):
+        from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
+        return wind_driven_gyre_mpas(
+            grid, z_coord, H_max=config.H_max,
+            lon_west=config.lon_west, lon_east=config.lon_east,
+            lat_south=config.lat_south, lat_north=config.lat_north,
+        )
+
     else:
-        raise ValueError(f"Unknown grid type: {grid_type}")
+        raise ValueError(f"Grid type {grid_type} not supported for regional_gyre")
 
 
-def create_forcings(grid_type: str, grid, config: WindGyreConfig = None):
-    """Create forcing functions for wind-driven gyre experiment.
-    
-    The wind forcing is typically handled by the ocean model's surface forcing
-    infrastructure rather than as explicit initial conditions. This function
-    would return wind stress patterns if custom forcing is needed.
-    
+def create_forcings(grid_type: str, grid, config: RegionalGyreConfig = None):
+    """Create OceanPhysicsConfig with prescribed gyre wind forcing.
+
+    Returns a physics config with wind stress, linear bottom drag, and
+    no vertical/lateral mixing (A_h is handled by the ocean dynamics config).
+
     Parameters
     ----------
     grid_type : str
         Grid type
     grid : Grid
         Grid object
-    config : WindGyreConfig, optional
+    config : RegionalGyreConfig, optional
         Configuration parameters
-        
+
     Returns
     -------
-    None or dict
-        Wind forcing configuration (implementation-dependent)
-        
-    Notes
-    -----
-    Currently returns None as wind forcing is handled by the model's
-    built-in surface forcing mechanisms during time integration.
+    OceanPhysicsConfig
+        Physics configuration for gyre experiment
     """
     if config is None:
-        config = WindGyreConfig()
-        
-    # Wind forcing is typically handled by model's surface forcing
-    # infrastructure during time stepping, not as explicit forcings
-    return None
+        config = RegionalGyreConfig()
+
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.surface_forcing.config import (
+        PrescribedForcingConfig, SurfaceForcingConfig,
+    )
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.physics.bottom_drag.config import (
+        BottomDragConfig, LinearDragConfig,
+    )
+    from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+
+    return OceanPhysicsConfig(
+        surface_forcing=SurfaceForcingConfig(
+            scheme="prescribed",
+            prescribed=PrescribedForcingConfig(
+                wind_profile=config.wind_profile,
+                tau_max=config.wind_stress_max,
+                lat_south_deg=config.lat_south,
+                lat_north_deg=config.lat_north,
+                wind_buffer_deg=config.wind_buffer_deg,
+            ),
+        ),
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        bottom_drag=BottomDragConfig(
+            scheme="linear",
+            linear=LinearDragConfig(r=config.bottom_drag_coeff),
+        ),
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=None,
+    )
 
 
-def create_domain_config(config: WindGyreConfig = None) -> Dict[str, Any]:
+def create_domain_config(config: RegionalGyreConfig = None) -> Dict[str, Any]:
     """Create domain configuration parameters.
     
     Returns
@@ -172,7 +208,7 @@ def create_domain_config(config: WindGyreConfig = None) -> Dict[str, Any]:
         Domain configuration parameters for this experiment
     """
     if config is None:
-        config = WindGyreConfig()
+        config = RegionalGyreConfig()
         
     return {
         "H_max": config.H_max,
@@ -186,14 +222,14 @@ def create_domain_config(config: WindGyreConfig = None) -> Dict[str, Any]:
 
 
 def compute_circulation_metrics(diagnostics: Dict[str, list], 
-                              config: WindGyreConfig) -> Dict[str, float]:
+                              config: RegionalGyreConfig) -> Dict[str, float]:
     """Compute circulation metrics specific to wind-driven gyre validation.
     
     Parameters
     ---------- 
     diagnostics : Dict[str, list]
         Time series diagnostics from simulation
-    config : WindGyreConfig
+    config : RegionalGyreConfig
         Configuration parameters
         
     Returns
@@ -227,7 +263,7 @@ def compute_circulation_metrics(diagnostics: Dict[str, list],
 
 
 def validate_results(final_state, diagnostics: Dict[str, list], 
-                   config: WindGyreConfig = None) -> Tuple[bool, str]:
+                   config: RegionalGyreConfig = None) -> Tuple[bool, str]:
     """Validate wind-driven gyre experiment results.
     
     Success criteria:
@@ -242,7 +278,7 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         Final model state
     diagnostics : Dict[str, list] 
         Time series diagnostics
-    config : WindGyreConfig, optional
+    config : RegionalGyreConfig, optional
         Configuration parameters
         
     Returns
@@ -253,7 +289,7 @@ def validate_results(final_state, diagnostics: Dict[str, list],
         Descriptive notes about the validation
     """
     if config is None:
-        config = WindGyreConfig()
+        config = RegionalGyreConfig()
     
     # Compute circulation metrics
     metrics = compute_circulation_metrics(diagnostics, config)
@@ -340,11 +376,11 @@ def get_scalar_units() -> Dict[str, str]:
 
 # Standard experiment configuration for test matrix integration
 EXPERIMENT_CONFIG = {
-    "name": "wind_gyre",
-    "description": "Wind-driven double-gyre circulation development",
+    "name": "regional_gyre",
+    "description": "Regional wind-driven gyre circulation in rectangular basin",
     "scientific_purpose": "Validates wind stress forcing and circulation patterns",
     "reference": "Munk (1950), Stommel (1948) - classical wind-driven circulation theory",
-    "config_class": WindGyreConfig,
+    "config_class": RegionalGyreConfig,
     "create_initial_conditions": create_initial_conditions,
     "create_forcings": create_forcings,
     "create_domain": create_domain_config,
@@ -361,7 +397,10 @@ EXPERIMENT_CONFIG = {
     "grid_support": {
         "cubed_sphere": True,
         "latlon": True,
-        "mpas": False,      # No surface forcing support yet
-        "spectral": False,  # Not implemented
+        "mpas": True,
+        "mpas_regional": True,
+        "latlon_regional": True,
+        "cs_regional": True,
+        "spectral": False,
     },
 }

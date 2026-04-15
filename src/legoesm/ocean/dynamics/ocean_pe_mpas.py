@@ -5,10 +5,26 @@ on MPAS Voronoi (C-grid) meshes. Uses the TRiSK discretization from
 Ringler et al. (2010).
 
 Equations (per layer k):
-    du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) + A_h·del2(u) + A_v·d²u/dz²
+    du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) - w·du'/dz + A_h·del2(u) + A_v·d²u/dz²
     d(h·T)/dt = -div(h·u·T) + K_h·h·lap(T) + K_v·d²T/dz²
     d(h·S)/dt = -div(h·u·S) + K_h·h·lap(S) + K_v·d²S/dz²
     dη/dt = -Σ_k div(h_k · u_k)
+
+TRiSK split status (see issue #160)
+-----------------------------------
+The PV-flux term below uses q = ζ_rel / h (relative vorticity of the
+perturbation velocity only), NOT the full PV q = (f+ζ_total)/h_total
+required by the Ringler-Thuburn-Skamarock-Klemp energy-conserving
+identity. The planetary Coriolis force f × u is applied separately as
+a forward-backward (Matsuno) step in the step function. This split
+was introduced when closing #103 (MPAS ocean depth-mean Coriolis
+double-counting), and it trades one inconsistency for another: the
+TRiSK energy-conservation property is preserved only for the
+perturbation subsystem, the Rossby-wave β coupling on the barotropic
+mode is underrepresented, and the transport paired with q inside
+pv_flux_*_conserving_3d is h·u' rather than the continuity-equation
+flux h·u_total. Fixing this cleanly requires the MOM6-style
+slow-forcing refactor tracked in issue #160.
 
 References
 ----------
@@ -29,7 +45,6 @@ from legoesm.core.operators_voronoi import (
     kinetic_energy_cell_3d,
     pv_flux_energy_conserving_3d,
     pv_flux_enstrophy_conserving_3d,
-    cell_to_edge_avg_3d,
     vector_laplacian_del2_3d,
     vertex_thickness_3d,
 )
@@ -39,10 +54,12 @@ from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
     compute_ocean_jacobian,
+    diagnose_w_from_flux_div,
+    vertical_advection_ocean,
+    flux_form_vertical_momentum_advection,
 )
 from legoesm.ocean.freshwater import (
     FreshwaterForcing,
-    freshwater_eta_tendency,
     virtual_salt_flux,
 )
 
@@ -152,6 +169,18 @@ def mpas_ocean_baroclinic_tendencies(
     u_bar = u_bar * edge_mask  # (nEdges,)
     u_prime_3d = u_3d - u_bar[:, jnp.newaxis]  # (nEdges, nlev)
 
+    # ---- Thickness flux and vertical velocity ----
+    # Compute flux divergence BEFORE momentum tendencies because we need
+    # w for vertical advection of momentum (issue #152).
+    thickness_flux = u_3d * h_e_3d * edge_mask[:, jnp.newaxis]  # (nEdges, nlev)
+    div_flux = divergence_cell_3d(thickness_flux, mesh)  # (nCells, nlev)
+
+    # Diagnose w from full-velocity flux divergence (matching latlon pattern:
+    # ocean_pe_latlon_cgrid.py:302-305)
+    w = diagnose_w_from_flux_div(
+        div_flux, z_coord, thickness_weighted=True,
+    )  # (nCells, nlev+1)
+
     # ---- Momentum and tracer tendencies (batched 3D) ----
     # Uses 3D operators that gather connectivity arrays once for all
     # levels, instead of per-level scan with repeated 1D gathers.
@@ -168,11 +197,19 @@ def mpas_ocean_baroclinic_tendencies(
     # Pressure gradient + Bernoulli
     grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
 
-    # PV flux: RELATIVE VORTICITY from perturbation velocity ONLY.
+    # PV flux: relative vorticity from perturbation velocity ONLY.
+    # NOTE (#160): This is NOT the TRiSK potential vorticity. Real
+    # TRiSK requires q = (f + ζ_total) / h_total with transport
+    # F = h_total · u_total. Here f is handled in the Matsuno
+    # Coriolis step and u_prime is used in place of u_total, so the
+    # Ringler et al. (2010) energy-conservation identity holds only
+    # for the perturbation subsystem. See the module docstring and
+    # `potential_vorticity_vertex_3d` in core/operators_voronoi.py
+    # for the correct full-PV helper.
     zeta_v = curl_vertex_3d(u_prime_3d, mesh)  # (nVertices, nlev)
     h_v = vertex_thickness_3d(h_k, mesh)  # (nVertices, nlev)
     h_v_safe = jnp.maximum(h_v, 1e-10)
-    q_vort = zeta_v / h_v_safe  # PV without f
+    q_vort = zeta_v / h_v_safe  # PV without f — see NOTE above
     if config.pv_scheme == "energy":
         pv_flux = pv_flux_energy_conserving_3d(u_prime_3d, h_k, q_vort, mesh)
     else:
@@ -181,33 +218,35 @@ def mpas_ocean_baroclinic_tendencies(
     # Horizontal viscosity on perturbation velocity
     visc = config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
 
-    du_dt_3d = (-grad_B + pv_flux + visc) * edge_mask[:, jnp.newaxis]
+    # Vertical advection of perturbation momentum.
+    # Issue #171 Level-1 fix: interface-upwind flux-form momentum
+    # advection instead of cell-centered upwind gradient. The
+    # flux-form helper returns -(F_top - F_bot) / h_e with
+    # F = w_half * u_upwind_at_interface and F = 0 at top/bottom by
+    # construction, eliminating the hard-zero-gradient pathology at
+    # k=0 / k=nlev-1 and matching the tracer-path interface upwind.
+    # h_e_3d (edge-centered layer thickness) was already computed
+    # above at line 165 for the u_bar reduction; reuse it here.
+    # Full flux-form momentum update (Level 2) still requires step-
+    # function restructuring; tracked on #171.
+    w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
+    vert_adv_u = flux_form_vertical_momentum_advection(
+        u_prime_3d, w_e, h_e_3d,
+    )
 
-    # ---- Thickness flux for continuity ----
-    thickness_flux = u_3d * h_e_3d * edge_mask[:, jnp.newaxis]  # (nEdges, nlev)
+    du_dt_3d = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask[:, jnp.newaxis]
 
-    # Continuity: dh_k/dt = -div(u * h_e)
-    div_flux = divergence_cell_3d(thickness_flux, mesh)  # (nCells, nlev)
-
-    # ---- Tracer tendencies (flux form) ----
-    T_e = cell_to_edge_avg_3d(T_3d, mesh)  # (nEdges, nlev)
-    S_e = cell_to_edge_avg_3d(S_3d, mesh)
-
-    T_flux = thickness_flux * T_e
-    S_flux = thickness_flux * S_e
-
-    div_T_flux = divergence_cell_3d(T_flux, mesh)
-    div_S_flux = divergence_cell_3d(S_flux, mesh)
-
+    # ---- Tracer tendencies (diffusion + physics only) ----
+    # Horizontal AND vertical tracer advection are handled in the step()
+    # function using barotropic-averaged transport (Hallberg 1997, #102, #145).
+    # This matches the latlon C-grid pattern (ocean_pe_latlon_cgrid.py).
     h_safe = jnp.maximum(h_k, 1e-10)  # (nCells, nlev)
-    dT_dt_3d = (-div_T_flux + T_3d * div_flux) / h_safe
-    dS_dt_3d = (-div_S_flux + S_3d * div_flux) / h_safe
 
     # Horizontal tracer diffusion: K_h * lap(T)
     grad_T = gradient_edge_3d(T_3d, mesh) * edge_mask[:, jnp.newaxis]
-    dT_dt_3d = dT_dt_3d + config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
+    dT_dt_3d = config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
     grad_S = gradient_edge_3d(S_3d, mesh) * edge_mask[:, jnp.newaxis]
-    dS_dt_3d = dS_dt_3d + config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
+    dS_dt_3d = config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
 
     # Mask land cells
     dT_dt_3d = dT_dt_3d * mask[:, jnp.newaxis]
@@ -245,10 +284,12 @@ def mpas_ocean_baroclinic_tendencies(
     deta_dt = -jnp.sum(div_flux, axis=1) * mask  # (nCells,)
 
     # ---- Freshwater forcing ----
+    # Note: freshwater_eta_tendency is NOT applied to deta_dt here because
+    # deta_dt is not used for state update — the barotropic solver handles
+    # the free-surface equation (including freshwater via F_slow_eta passed
+    # from ocean_model_mpas.py:step()).  Only the virtual salt flux is
+    # applied here as a tracer tendency.
     if freshwater is not None and config.freshwater_closure != "none":
-        # Free-surface mass flux: deta/dt += F_fw / rho_0
-        deta_dt = deta_dt + freshwater_eta_tendency(freshwater, config.rho_0) * mask
-
         # Virtual salt flux: dS/dt = -S_ref * F_fw / (rho_0 * dz_0)
         dz_0 = h_k[:, 0]  # top layer thickness (nCells,)
         dS_fw = virtual_salt_flux(freshwater, config.S_ref, dz_0, config.rho_0)

@@ -941,66 +941,86 @@ def _stereo_project(xyz, pole):
     return np.stack([x_proj, y_proj], axis=1)
 
 
-def _seed_regional_generators(lon_range, lat_range, resolution_km, radius):
+def _seed_regional_generators(lon_range, lat_range, resolution_km, radius,
+                               periodic_x=False):
     """Seed quasi-uniform hex generators on the sphere in a regional domain.
 
     Uses uniform angular dlon spacing (same cell count per row) to avoid
     degenerate Voronoi edges at row boundaries. A buffer ring of ~1.5x
     resolution is added around the domain.
 
+    When ``periodic_x=True``, longitude spans the full 360° with no
+    buffer or duplicate generators at the seam.  Only latitude gets
+    a buffer ring.  This creates a channel-like mesh that is naturally
+    periodic on the sphere.
+
     Parameters
     ----------
     lon_range : tuple[float, float]
         Longitude range in degrees [lon_min, lon_max].
+        Ignored when ``periodic_x=True``.
     lat_range : tuple[float, float]
         Latitude range in degrees [lat_min, lat_max].
     resolution_km : float
         Target cell spacing in km.
     radius : float
         Sphere radius in m.
+    periodic_x : bool
+        If True, seed generators around the full 360° longitude.
 
     Returns
     -------
     cell_xyz : ndarray, shape (nCells, 3)
         Generator points on the unit sphere.
     """
-    lon_min = np.radians(lon_range[0])
-    lon_max = np.radians(lon_range[1])
     lat_min = np.radians(lat_range[0])
     lat_max = np.radians(lat_range[1])
 
     d_rad = resolution_km * 1000.0 / radius
 
-    # Buffer of 3x resolution around domain (≈2 cell rows) to ensure
-    # interior edges have full two-sided connectivity for TRiSK stencils.
+    # Latitude buffer (both periodic and closed cases)
     buffer = 3.0 * d_rad
     lat_min_buf = max(lat_min - buffer, -np.pi / 2 + 0.01)
     lat_max_buf = min(lat_max + buffer, np.pi / 2 - 0.01)
-    lon_min_buf = lon_min - buffer
-    lon_max_buf = lon_max + buffer
 
-    # Uniform dlon at center latitude (same cell count per row).
-    # dlat = d_rad gives tighter row spacing than dlon, producing a hex
-    # grid with good Voronoi edge quality (dvEdge/dcEdge ≈ 0.2+).
-    # Using dlat = d_rad*sqrt(3)/2 (geometric hex packing) mixes physical
-    # and angular spacing, creating sparse rows with degenerate Voronoi
-    # edges at the domain center.
     lat_center = 0.5 * (lat_min_buf + lat_max_buf)
     dlon = d_rad / max(np.cos(lat_center), 0.1)
     dlat = d_rad
 
     lats = np.arange(lat_min_buf, lat_max_buf + 0.5 * dlat, dlat)
-    n_lon = max(1, int(np.ceil((lon_max_buf - lon_min_buf) / dlon)))
 
-    generators = []
-    for i_row, lat in enumerate(lats):
-        offset = 0.5 * dlon if (i_row % 2 == 1) else 0.0
-        lons = lon_min_buf + offset + np.arange(n_lon) * dlon
-        for lon in lons:
-            x = np.cos(lat) * np.cos(lon)
-            y = np.cos(lat) * np.sin(lon)
-            z = np.sin(lat)
-            generators.append([x, y, z])
+    if periodic_x:
+        # Full 360° longitude: exact integer number of cells, no buffer.
+        # Use dlon spacing, rounded so n_lon * dlon = 2π exactly.
+        n_lon = max(1, int(np.round(2.0 * np.pi / dlon)))
+        dlon_exact = 2.0 * np.pi / n_lon
+
+        generators = []
+        for i_row, lat in enumerate(lats):
+            offset = 0.5 * dlon_exact if (i_row % 2 == 1) else 0.0
+            lons = offset + np.arange(n_lon) * dlon_exact
+            for lon in lons:
+                x = np.cos(lat) * np.cos(lon)
+                y = np.cos(lat) * np.sin(lon)
+                z = np.sin(lat)
+                generators.append([x, y, z])
+    else:
+        # Closed basin: longitude buffer on both sides
+        lon_min = np.radians(lon_range[0])
+        lon_max = np.radians(lon_range[1])
+        lon_min_buf = lon_min - buffer
+        lon_max_buf = lon_max + buffer
+        n_lon = max(1, int(np.ceil((lon_max_buf - lon_min_buf) / dlon)))
+
+        generators = []
+        for i_row, lat in enumerate(lats):
+            offset = 0.5 * dlon if (i_row % 2 == 1) else 0.0
+            lons = lon_min_buf + offset + np.arange(n_lon) * dlon
+            for lon in lons:
+                x = np.cos(lat) * np.cos(lon)
+                y = np.cos(lat) * np.sin(lon)
+                z = np.sin(lat)
+                generators.append([x, y, z])
 
     cell_xyz = np.array(generators, dtype=np.float64)
     norms = np.linalg.norm(cell_xyz, axis=1, keepdims=True)
@@ -1008,11 +1028,15 @@ def _seed_regional_generators(lon_range, lat_range, resolution_km, radius):
     return cell_xyz
 
 
-def _regional_delaunay(cell_xyz, resolution_km, radius):
-    """Compute Delaunay triangulation for regional points via stereographic projection.
+def _regional_delaunay(cell_xyz, resolution_km, radius, periodic_x=False):
+    """Compute Delaunay triangulation for regional points.
 
-    Uses stereographic projection from the centroid of the point cloud,
-    then filters degenerate boundary triangles (edge length > 3x resolution).
+    For closed basins (``periodic_x=False``), uses stereographic projection
+    from the centroid + 2D Delaunay.
+
+    For zonal bands (``periodic_x=True``), uses 3D ConvexHull on the
+    sphere, which naturally handles the east-west wrap.  This works
+    because a latitude band spanning < 180° is convex in 3D.
 
     Parameters
     ----------
@@ -1022,27 +1046,41 @@ def _regional_delaunay(cell_xyz, resolution_km, radius):
         Target resolution in km (used for degenerate-triangle filter).
     radius : float
         Sphere radius in m.
+    periodic_x : bool
+        If True, use 3D ConvexHull for zonal periodicity.
 
     Returns
     -------
     triangles : ndarray, shape (M, 3)
         Filtered triangle vertex indices.
     """
-    centroid = cell_xyz.mean(axis=0)
-    centroid /= np.linalg.norm(centroid)
-    # _stereo_project uses denom = 1 + dot(xyz, pole), which effectively
-    # projects from -pole.  Setting pole = +centroid means the projection
-    # is from -centroid (the true antipodal point), so data near +centroid
-    # gets denom ≈ 2 and well-behaved projected coordinates.
-    # Bug: pole = -centroid gave denom ≈ 0 for the data, projecting to
-    # near-infinity and destroying Delaunay triangulation quality
-    # (dvEdge/dcEdge as low as 0.007 → barotropic solver blowup).
-    pole = centroid
+    if periodic_x:
+        # Full zonal band: stereographic from the z-axis antipode.
+        # For a 360° band, the centroid is at (0, 0, sin(lat_center))
+        # by symmetry (x,y average to zero).  Projecting from (0, 0, -z)
+        # maps the band to an annulus in the xy-plane.  The 2D Delaunay
+        # on this annulus naturally connects the east-west seam because
+        # lon=0° and lon=360° map to the same azimuthal position.
+        centroid = cell_xyz.mean(axis=0)
+        centroid /= np.linalg.norm(centroid)
+        pole = centroid  # project FROM -centroid (antipodal)
 
-    xy = _stereo_project(cell_xyz, pole)
+        xy = _stereo_project(cell_xyz, pole)
+        tri = Delaunay(xy)
+        triangles = tri.simplices.copy()
+    else:
+        centroid = cell_xyz.mean(axis=0)
+        centroid /= np.linalg.norm(centroid)
+        # _stereo_project uses denom = 1 + dot(xyz, pole), which effectively
+        # projects from -pole.  Setting pole = +centroid means the projection
+        # is from -centroid (the true antipodal point), so data near +centroid
+        # gets denom ≈ 2 and well-behaved projected coordinates.
+        pole = centroid
 
-    tri = Delaunay(xy)
-    triangles = tri.simplices.copy()
+        xy = _stereo_project(cell_xyz, pole)
+
+        tri = Delaunay(xy)
+        triangles = tri.simplices.copy()
 
     # Filter degenerate triangles: any edge > 3x angular resolution
     d_rad = resolution_km * 1000.0 / radius
@@ -1072,6 +1110,7 @@ def create_regional_voronoi_mesh(
     resolution_km: float = 300.0,
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
+    periodic_x: bool = False,
 ) -> VoronoiMesh:
     """Create a regional spherical Voronoi mesh for ocean dynamics testing.
 
@@ -1080,6 +1119,12 @@ def create_regional_voronoi_mesh(
     constructs the full MPAS-compatible ``VoronoiMesh``. Boundary cells
     (outside the target domain) serve as buffer/land cells via the
     existing lat/lon land-mask mechanism.
+
+    When ``periodic_x=True``, generators span the full 360° longitude
+    (no east/west buffer or duplicates).  The spherical geometry
+    naturally provides zonal periodicity.  Only latitude has buffer
+    cells.  Use this for channel-like experiments (e.g. Eady
+    baroclinic instability).
 
     Unlike the global ``create_voronoi_mesh``, this function:
 
@@ -1096,6 +1141,7 @@ def create_regional_voronoi_mesh(
     ----------
     lon_range : tuple[float, float]
         Longitude range in degrees [lon_min, lon_max].
+        Ignored when ``periodic_x=True``.
     lat_range : tuple[float, float]
         Latitude range in degrees [lat_min, lat_max].
     resolution_km : float
@@ -1104,6 +1150,8 @@ def create_regional_voronoi_mesh(
         Sphere radius [m]. Default: Earth radius.
     omega : float
         Rotation rate [rad/s]. Default: Earth rotation.
+    periodic_x : bool
+        If True, generators span 360° longitude for channel geometry.
 
     Returns
     -------
@@ -1124,10 +1172,12 @@ def create_regional_voronoi_mesh(
     """
     # Step 1: Seed generators in the target region + buffer
     cell_xyz = _seed_regional_generators(lon_range, lat_range,
-                                         resolution_km, radius)
+                                         resolution_km, radius,
+                                         periodic_x=periodic_x)
 
-    # Step 2: Delaunay triangulation via stereographic projection
-    triangles = _regional_delaunay(cell_xyz, resolution_km, radius)
+    # Step 2: Delaunay triangulation (stereographic for closed, ConvexHull for periodic)
+    triangles = _regional_delaunay(cell_xyz, resolution_km, radius,
+                                    periodic_x=periodic_x)
 
     # Step 3: Build complete mesh using pre-computed triangles
     mesh = _build_mesh_from_generators(cell_xyz, radius, omega,

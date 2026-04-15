@@ -39,6 +39,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
 )
+from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 
 
 def _forward_backward_coriolis_3d(
@@ -195,6 +196,7 @@ class LatLonCGridOceanModel:
         self.z_coord = z_coord
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
+        self._cfl_checked = False
 
         if self.config.physics is not None:
             from legoesm.ocean.physics.combined import make_ocean_physics
@@ -249,6 +251,44 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"salinity_min_psu ({config.salinity_min_psu}) must be "
                 f"< salinity_max_psu ({config.salinity_max_psu})")
+
+    def check_barotropic_cfl(self, dt: float) -> float:
+        """Check barotropic CFL and warn if marginal or unstable.
+
+        Parameters
+        ----------
+        dt : float
+            Baroclinic timestep [s].
+
+        Returns
+        -------
+        cfl : float
+            Barotropic CFL number.
+        """
+        import math
+        import warnings
+
+        g = self.config.g
+        H_max = self.z_coord.H_max
+        n_sub = self.config.n_barotropic_substeps
+        # grid.dx and grid.dy are "distance over 2 cells", so cell width = dx/2
+        dx_min = min(float(jnp.min(self.grid.dx)) / 2.0, self.grid.dy / 2.0)
+
+        c_baro = math.sqrt(g * H_max)
+        dt_baro = dt / n_sub
+        cfl = c_baro * dt_baro / dx_min
+
+        if cfl > 0.8:
+            n_min = math.ceil(c_baro * dt / (0.8 * dx_min))
+            warnings.warn(
+                f"Barotropic CFL = {cfl:.2f} (> 0.8) — may be unstable. "
+                f"c_baro={c_baro:.1f} m/s, dx_min={dx_min:.0f} m, "
+                f"dt_baro={dt_baro:.1f} s. "
+                f"Suggest n_barotropic_substeps >= {n_min} "
+                f"(currently {n_sub}).",
+                stacklevel=2,
+            )
+        return cfl
 
     def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None):
         """Compute baroclinic tendencies."""
@@ -323,9 +363,18 @@ class LatLonCGridOceanModel:
 
         # 6. Barotropic substeps (returns averaged transport for tracer update)
         dt_s = dt / self.config.n_barotropic_substeps
+
+        # Freshwater mass flux for barotropic continuity equation
+        F_slow_eta = None
+        if freshwater is not None and self.config.freshwater_closure != "none":
+            F_slow_eta = freshwater_eta_tendency(
+                freshwater, self.config.rho_0,
+            ) * state.land_mask.data
+
         state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
             state_mid, dt_s, self.config.n_barotropic_substeps,
             self.grid, self.z_coord, self.config,
+            F_slow_eta=F_slow_eta,
         )
 
         # 7. Flux-form tracer update using full 3D velocity
@@ -458,35 +507,19 @@ class LatLonCGridOceanModel:
             w=w_field,
         )
 
-        # 8. Freshwater forcing (virtual salt flux closure)
+        # 8. Freshwater forcing (virtual salt flux only)
         #
-        # Applied AFTER the tracer remap so that eta and h_k are
-        # consistent with the barotropic solver.  The virtual salt
-        # flux approximation adjusts salinity without changing volume,
-        # and a small eta tendency accounts for net mass addition.
-        # The conservation fixer (step 9) then corrects any residual
-        # drift in eta, T, and S.
+        # The freshwater eta tendency (F_fw_eta) is now applied inside
+        # the barotropic continuity equation (via F_slow_eta), so no
+        # post-hoc eta correction is needed.  Only the virtual salt
+        # flux remains here, applied to the top layer of S.
         if freshwater is not None and self.config.freshwater_closure != "none":
-            from legoesm.ocean.freshwater import (
-                freshwater_eta_tendency, virtual_salt_flux,
-            )
-            F_fw_eta = freshwater_eta_tendency(freshwater, self.config.rho_0)
-            eta_fw = state_new.eta.data + dt * F_fw_eta * mask
-            # Enforce minimum water column after freshwater
-            eta_floor = (
-                jnp.asarray(self.config.min_water_column_m,
-                            dtype=eta_fw.dtype)
-                - state_new.H_bathy.data
-            )
-            eta_fw = jnp.maximum(eta_fw, eta_floor) * mask
-            # Virtual salt flux into the top layer
             dz_0 = h_k_new[..., 0]
             dS_fw = virtual_salt_flux(
-                freshwater, S_ref=35.0, dz_0=dz_0, rho_0=self.config.rho_0,
+                freshwater, S_ref=self.config.S_ref, dz_0=dz_0, rho_0=self.config.rho_0,
             )
             S_fw = state_new.S.data.at[..., 0].add(dt * dS_fw * mask)
             state_new = state_new._replace(
-                eta=state_new.eta.replace(data=eta_fw),
                 S=state_new.S.replace(data=S_fw),
             )
 
@@ -507,6 +540,9 @@ class LatLonCGridOceanModel:
         surface_forcing=None,
     ) -> LatLonCGridOceanState:
         """Advance one timestep with host-side runtime validation."""
+        if not self._cfl_checked:
+            self.check_barotropic_cfl(dt)
+            self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
                               surface_forcing=surface_forcing)
         if self.config.enable_runtime_checks:
