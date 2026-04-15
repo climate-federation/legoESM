@@ -327,6 +327,11 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
   - Includes FV3 corner corrections for non-duogrid (sw_core.F90:396-400)
 - **fv3_cc2c v_c non-orthogonality correction**: investigated — adding v_c correction WORSENS divergence 20x. Current asymmetric correction (u_c only) is empirically optimal. Closed as not-a-bug.
 
+### Investigated in iteration 31 (2026-04-16):
+- **Unconditional flux sync tested and rejected**: applying sync to non-duogrid path causes 110x W2 regression (L2 1.53e-03→1.68e-01). PPM boundary asymmetry carries directional accuracy that averaging destroys. Fortran is correct to gate on duogrid only.
+- **Boundary vs interior error analysis**: W2 boundary error is at most 1.38x interior error (face 0, 2). Faces 4, 5 have LOWER boundary than interior error. Production path is at Arakawa-Lamb accuracy limit — no severe face-boundary artifacts.
+- **C36 rest state perfect**: h_err=0.00, u/v_err=5e-15 (machine precision). C16 h_err=3.37e-03 at cube vertex corners (0,0) — symmetric, converges with resolution.
+
 ### Remaining structural items:
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
 F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vect)
