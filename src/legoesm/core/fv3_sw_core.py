@@ -602,25 +602,31 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])  # (6, n+1, n)
     dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])  # (6, n, n+1)
 
-    # 5. Vorticity at D-grid corners from C-grid covariant velocities
-    # FV3: fx = uc * dxc, fy = vc * dyc (center-to-center distances)
-    fx_circ = uc * cdgrid.dxc
-    fy_circ = vc * cdgrid.dyc
-    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
-
-    circ = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
-            + fy_pad[:, 1:, :] - fy_pad[:, :-1, :])
-    # FV3 sw_core.F90:395-401: corner corrections skipped with duogrid
+    # 5. Vorticity at D-grid corners from C-grid covariant velocities.
+    # Compute CELL-CENTRE vorticity from C-grid circulation (uses only
+    # interior C-grid values, no halo needed), then scalar halo exchange
+    # for boundary, then interpolate to corners. This avoids the edge-copy
+    # padding that caused zero vorticity at face-boundary columns and the
+    # resulting linear instability.
     dg = cdgrid.base.duogrid
     use_duogrid = dg is not None and dg.ng >= 2
-    if not use_duogrid:
-        circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
-        circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-        circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
-        circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
 
-    vort_abs = circ * cdgrid.rarea_c + cdgrid.f_corner
+    fx_circ = uc * cdgrid.dxc   # (6, n+1, n)
+    fy_circ = vc * cdgrid.dyc   # (6, n, n+1)
+
+    # Cell-centre vorticity: circulation around cell (i,j)
+    # Uses uc at faces i and i+1 (rows), vc at faces j and j+1 (cols)
+    # All values are interior C-grid positions — no halo needed.
+    cell_vort = (fx_circ[:, :-1, :] - fx_circ[:, 1:, :]
+                 + fy_circ[:, :, 1:] - fy_circ[:, :, :-1])
+    rarea = 1.0 / cdgrid.base.area
+    cell_vort = cell_vort * rarea
+
+    # Add planetary vorticity at cell centres
+    cell_vort_abs = cell_vort + cdgrid.base.f
+
+    # Halo exchange and interpolate to corners (4-point average)
+    vort_abs = _interp_center_to_corner(cell_vort_abs, cdgrid)
 
     # 6. Vorticity flux at C-grid face positions
     # FV3 sw_core.F90:416-423: c_sw uses /sina (1/sin), NOT *rsin_u (1/sin²)
