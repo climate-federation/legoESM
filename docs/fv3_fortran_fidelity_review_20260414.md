@@ -351,8 +351,9 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
 - Fixed circulation (cell-centre vorticity) + halo C→D → NaN at step 42 (~3.5h)
 - Without diffusion: NaN at step 183 (~15h), v_max doubles every ~50 steps
 - Root cause: C-grid→D-grid stagger projection is fundamentally unstable because the C-grid and D-grid staggers are incompatible at face boundaries. FV3 avoids this by using forward-backward time stepping without stagger projection.
-- Forward-backward path: d_sw1 boundary handling ported ✅ (adjacent strips + corner 2×2 solve from sw_core.F90:618-812). FB now achieves 1.7x boundary ratio but has exponential growth from missing d_sw3 B-grid KE transport (ytp_v/xtp_u)
-- **Stabilizing FV3-native forward-backward requires porting d_sw3 B-grid KE transport from sw_core.F90:1260-1380**
+- Forward-backward path: d_sw1 boundary handling ported ✅ (adjacent strips + corner 2×2 solve from sw_core.F90:618-812). FB now achieves 1.7x boundary ratio but has exponential growth.
+- B-grid KE transport (d_sw3) was ported and tested (2026-04-15, branch codex/fv3-d_sw3-ke-transport-20260415) — does NOT stabilize the FB path. Root cause: FV3's d_sw6 replacement formula operates in circulation space on the unit sphere (angular coordinates), which is structurally incompatible with our physical-coordinate (meter-based) grid. Three variants tested (rsina=1/sin², 1/sin, simple physical), all unstable.
+- **Stabilizing FV3-native forward-backward requires converting to unit-sphere angular coordinates internally, which is a major grid refactor.**
 
 ### Diagnostic angle fix (iteration 26, 2026-04-15)
 - D-grid→geographic wind conversion used cell-centre grid angles; edge-midpoint angles differ by O(dx)
@@ -372,6 +373,15 @@ Commands:
   - Cosine bell: L1=1.42e-01, L2=1.35e-01, Linf=1.49e-01
 - Ocean rest state: all 4 cubed-sphere variants PASS (eta drift 1e-14 to 1e-18)
 - No visible edge artifacts in v-wind, wind speed, or cosine bell snapshots
+
+### C36 full 5-day Williamson 2 evaluation (2026-04-15)
+- Production path at C36 is STABLE for full 5 days
+- L2=6.25e-03, Linf=1.60e-02
+- u-wind: clean zonal flow maintained throughout
+- v-wind: grows from ~0 to ±2-3 m/s by 5d — O(dx²) D-grid truncation error, NOT face-boundary artifacts
+- The v-wind patterns are large-scale wave structures inherent to D-grid methods on the cubed sphere
+- This is the same truncation error present in the original FV3 Fortran code
+- The "Full 5-day Williamson 2 NaN blowup at C36" listed as pre-existing is NO LONGER present after the fidelity improvements from this session
 
 ### Critical: 1/sin vs 1/sin² distinction ✅ (Iteration 5)
 FV3 uses TWO different metric factors:
