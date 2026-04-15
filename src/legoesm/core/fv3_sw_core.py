@@ -132,55 +132,43 @@ def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt):
                              ss_pad[:, 1:-1, 1:n+2][:, :, n])
     vt = vt.at[:, :, n].set(vc[:, :, n] / jnp.maximum(jnp.abs(sin_upwind_n), _EPS))
 
-    # === Part 3: Adjacent strip recomputation ===
-    # After overriding boundary ut, recompute vt at the 2 rows nearest
-    # each face boundary using the corrected ut values.
-    # FV3 sw_core.F90:666-726.
-    # West edge: vt at rows 0 and 1, for interior j range
-    # vt(row,J) = vc(row,J) - 0.25*cosa_v(row,J)*(ut(row,J-1)+ut(row+1,J-1)+ut(row,J)+ut(row+1,J))
+    # === Part 3: Adjacent strip recomputation (vectorized) ===
+    # FV3 sw_core.F90:666-726. Recompute vt/ut near face boundaries
+    # using corrected boundary ut/vt values.
     if n > 4:
-        jlo = 2         # Fortran max(3,js) → Python 2
-        jhi = n - 1     # Fortran min(npy-2,je+1) → Python n-1
+        jlo = 2; jhi = n - 1  # interior J range for vt recomputation
 
-        # West: rows 0, 1
+        # West: vt at rows 0, 1 for J=jlo..jhi
         for row in [0, 1]:
-            # ut at rows row and row+1, cols J-1 and J
-            ut_left = ut[:, row, :-1] + ut[:, row + 1, :-1]   # (6, n-1)  J=0..n-2
-            ut_right = ut[:, row, 1:] + ut[:, row + 1, 1:]    # (6, n-1)  J=1..n-1
-            # 4-cell average at J positions 1..n-1 (interior v-face positions)
-            ut4 = ut_left[:, :-1] + ut_right[:, 1:]  # wait, need J-1 and J
-            # Actually: for v-face J, ut(row, J-1) + ut(row+1, J-1) + ut(row, J) + ut(row+1, J)
-            # J ranges 0..n. ut has n columns (0..n-1). So J-1 valid for J>=1, J valid for J<=n-1.
-            # Interior range: J = jlo..jhi = 2..n-1
-            for J in range(jlo, jhi + 1):
-                if J - 1 >= 0 and J - 1 < n and J < n:
-                    avg = ut[:, row, J-1] + ut[:, row+1, J-1] + ut[:, row, J] + ut[:, row+1, J]
-                    vt = vt.at[:, row, J].set(vc[:, row, J] - 0.25 * cosa_v[:, row, J] * avg)
+            # ut 4-cell average at each v-face J: ut(row,J-1)+ut(row+1,J-1)+ut(row,J)+ut(row+1,J)
+            avg = (ut[:, row, jlo-1:jhi] + ut[:, row+1, jlo-1:jhi]
+                   + ut[:, row, jlo:jhi+1] + ut[:, row+1, jlo:jhi+1])  # (6, jhi-jlo+1)
+            vt = vt.at[:, row, jlo:jhi+1].set(
+                vc[:, row, jlo:jhi+1] - 0.25 * cosa_v[:, row, jlo:jhi+1] * avg)
 
-        # East: rows n-2, n-1
+        # East: vt at rows n-2, n-1
         for row in [n-2, n-1]:
-            if row >= 0 and row < n and row + 1 <= n:
-                for J in range(jlo, jhi + 1):
-                    if J - 1 >= 0 and J - 1 < n and J < n:
-                        avg = ut[:, row, J-1] + ut[:, row+1, J-1] + ut[:, row, J] + ut[:, row+1, J]
-                        vt = vt.at[:, row, J].set(vc[:, row, J] - 0.25 * cosa_v[:, row, J] * avg)
+            if row >= 0 and row + 1 <= n:
+                avg = (ut[:, row, jlo-1:jhi] + ut[:, row+1, jlo-1:jhi]
+                       + ut[:, row, jlo:jhi+1] + ut[:, row+1, jlo:jhi+1])
+                vt = vt.at[:, row, jlo:jhi+1].set(
+                    vc[:, row, jlo:jhi+1] - 0.25 * cosa_v[:, row, jlo:jhi+1] * avg)
 
-        # South: cols 0, 1 — recompute ut using corrected vt
+        # South: ut at cols 0, 1 for I=ilo..ihi
         ilo = 2; ihi = n - 1
         for col in [0, 1]:
-            if col + 1 <= n:
-                for I in range(ilo, ihi + 1):
-                    if I - 1 >= 0 and I - 1 < n and I < n:
-                        avg = vt[:, I-1, col] + vt[:, I, col] + vt[:, I-1, col+1] + vt[:, I, col+1]
-                        ut = ut.at[:, I, col].set(uc[:, I, col] - 0.25 * cosa_u[:, I, col] * avg)
+            avg = (vt[:, ilo-1:ihi, col] + vt[:, ilo:ihi+1, col]
+                   + vt[:, ilo-1:ihi, col+1] + vt[:, ilo:ihi+1, col+1])
+            ut = ut.at[:, ilo:ihi+1, col].set(
+                uc[:, ilo:ihi+1, col] - 0.25 * cosa_u[:, ilo:ihi+1, col] * avg)
 
-        # North: cols n-1, n
+        # North: ut at cols n-1, n
         for col in [n-1, n]:
-            if col - 1 >= 0 and col < n + 1:
-                for I in range(ilo, ihi + 1):
-                    if I - 1 >= 0 and I - 1 < n and I < n and col - 1 >= 0:
-                        avg = vt[:, I-1, col-1] + vt[:, I, col-1] + vt[:, I-1, col] + vt[:, I, col]
-                        ut = ut.at[:, I, col].set(uc[:, I, col] - 0.25 * cosa_u[:, I, col] * avg)
+            if col - 1 >= 0 and col <= n:
+                avg = (vt[:, ilo-1:ihi, col-1] + vt[:, ilo:ihi+1, col-1]
+                       + vt[:, ilo-1:ihi, col] + vt[:, ilo:ihi+1, col])
+                ut = ut.at[:, ilo:ihi+1, col].set(
+                    uc[:, ilo:ihi+1, col] - 0.25 * cosa_u[:, ilo:ihi+1, col] * avg)
 
     # === Part 4: Corner 2×2 solve ===
     # At each cube vertex, solve a coupled system for the ut/vt values
