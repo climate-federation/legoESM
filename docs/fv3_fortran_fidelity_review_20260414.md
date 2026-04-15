@@ -169,8 +169,8 @@ Activated `_compute_supergrid_metrics()`: area_corner = sum of 4 supergrid quadr
 ~~Uses `1/sin`, not FV3's `rsin_u/rsin_v`~~ → fixed in iter 1 (now uses stored rsin_u).
 Remaining: routes through geographic east/north convention rather than FV3's native covariant convention. Requires covariant vector halo exchange to fix fully.
 
-### 4. `_c_sw` missing boundary KE/vorticity special cases
-Python uses uniform upwind rule at face edges. FV3 uses `uc*sin_sg + v*cos_sg` and `vc*sin_sg + u*cos_sg` at face boundaries (`sw_core.F90:325-364`).
+### 4. `_c_sw` boundary KE/vorticity special cases ✅ (Iteration 8, 25)
+~~Python uses uniform upwind rule at face edges.~~ Fixed: non-duogrid path now uses `uc*sin_sg + v*cos_sg` at face boundaries (matching `sw_core.F90:325-364`). Vorticity flux boundary overrides narrowed to face boundaries only (sw_core.F90:445-449).
 
 ### 5. Production and forward-backward paths not FV3-equivalent
 `_fv3_forward_backward_step` is a hybrid experiment (not FV3). `_d_sw_native` partially ports `d_sw` but not the full `d_sw1`…`d_sw6` chain.
@@ -178,8 +178,8 @@ Python uses uniform upwind rule at face edges. FV3 uses `uc*sin_sg + v*cos_sg` a
 ### 7. sin_sg transport metrics now properly haloed ✅ (Iteration 3)
 `_c_sw` now uses `pad_halo()` with `interp_offsets` for sin_sg upwind selection at face boundaries, matching the `compute_transport_quantities` pattern in `fv_tp_2d.py`. Replaces incorrect `mode='edge'` padding.
 
-### 8. Boundary ut/vt override drops cross-velocity term
-`_d2a2c_vect` boundary override `ut = uc / sin_sg_upwind` omits the `v*cosa` cross-velocity term that FV3 retains: `ut = (uc - v*cosa)*rsin_u` even at boundaries.
+### 8. Boundary ut/vt override cross-velocity term ✅ (Iteration 9, 11, 25)
+~~`_d2a2c_vect` boundary override `ut = uc / sin_sg_upwind` omits the `v*cosa` cross-velocity term.~~ Fixed: face boundary ut at positions 0 and n now uses `ut = uc/sin_sg_upwind` (matching FV3 sw_core.F90:3587,3603 where ut = edge_interpolate4 directly). Positions 1 and n-1 use standard `(uc-v*cos)*rsin_u` (matching sw_core.F90:3596,3610).
 
 ## Iteration 4 Notes (2026-04-14)
 
