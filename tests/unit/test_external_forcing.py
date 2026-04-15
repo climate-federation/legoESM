@@ -347,92 +347,80 @@ class TestAerosol:
         out = get_aerosol_at_time(cfg, day=40.0)
         np.testing.assert_allclose(out["aod"], 0.02 + 0.5 * 0.04, atol=1.0e-6)
 
-    def test_3d_aerosol_file_summed_to_column(self, tmp_path):
-        """3D Kinne-style (lat, lev, band) AOD is summed to column AOD (#178).
+    def test_3d_aerosol_file_averaged_to_zonal(self, tmp_path):
+        """3D Kinne-style (time, band, lat) AOD is averaged to zonal mean (#178).
 
-        Uses a latitude-varying profile so that interpolation is non-trivial.
+        The loader averages over non-(time, lat) dimensions before
+        interpolation. Uses off-grid latitudes for real interpolation.
         """
         import netCDF4
         nc_path = str(tmp_path / "aod_3d.nc")
         lat_src = np.linspace(-90, 90, 19)
-        nlev, nband = 3, 14
+        nband = 14
         # AOD varies linearly with latitude: 0.0 at south pole, 0.1 at north
         aod_lat = np.linspace(0.0, 0.1, 19)  # (19,)
-        # Broadcast to (12, 19, nlev, nband), same per month/lev/band
+        # Shape (12, nband, 19) — the loader averages over band
         data_3d = np.broadcast_to(
-            aod_lat[None, :, None, None], (12, 19, nlev, nband),
+            aod_lat[None, None, :], (12, nband, 19),
         ).copy()
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
         with netCDF4.Dataset(nc_path, "w") as ds:
             ds.createDimension("time", 12)
             ds.createDimension("lat", 19)
-            ds.createDimension("lev", nlev)
-            ds.createDimension("band", nband)
+            ds.createDimension("lnwl", nband)
             ds.createVariable("time", "f8", ("time",))[:] = mid_days
             ds.createVariable("lat", "f8", ("lat",))[:] = lat_src
-            ds.createVariable("aod", "f8", ("time", "lat", "lev", "band"))[:] = data_3d
+            ds.createVariable("aod", "f8", ("time", "lnwl", "lat"))[:] = data_3d
 
         cfg = AerosolConfig(enabled=True, path=nc_path)
-        # Use off-grid latitudes that fall BETWEEN source points to force
-        # actual interpolation (not just exact lookups).
-        # Source lats are at -90, -80, ..., 80, 90 (step=10°).
-        # -45° is between src[-90] and src[-40]; 25° between src[20] and src[30].
+        # Off-grid latitudes to force actual interpolation
         lat_grid = jnp.radians(jnp.array([-45.0, 25.0]))
         result = get_aerosol_at_time(cfg, day=100.0, lat_grid=lat_grid)
         assert result.shape == lat_grid.shape, f"Expected {lat_grid.shape}, got {result.shape}"
-        # AOD varies linearly 0..0.1 over -90..90°.
-        # At -45°: aod_per_cell = 0.1 * (90-45)/180 = 0.025
-        # At +25°: aod_per_cell = 0.1 * (90+25)/180 ≈ 0.0639
-        # Total = aod_per_cell * nlev * nband
-        expected = np.array([0.025, 0.1 * 115 / 180]) * nlev * nband
+        # Loader averages over band → same as per-cell AOD
+        expected = np.array([0.025, 0.1 * 115 / 180])
         np.testing.assert_allclose(result, expected, atol=1e-3)
 
-    def test_3d_volcanic_file_summed_to_column(self, tmp_path):
-        """3D volcanic AOD file is also summed to column AOD (#178).
-
-        Uses latitude-varying volcanic AOD to exercise interpolation.
-        """
+    def test_3d_volcanic_file_averaged_to_zonal(self, tmp_path):
+        """3D volcanic file is also averaged to zonal mean (#178)."""
         import netCDF4
         lat_src = np.linspace(-90, 90, 19)
-        nlev, nband = 2, 3
+        nband = 3
 
-        # Base: latitude-varying 2D
+        # Base: simple 2D
         nc_base = str(tmp_path / "aod_base.nc")
-        base_lat = np.linspace(0.01, 0.03, 19)  # varies with lat
+        base_lat = np.linspace(0.01, 0.03, 19)
         _make_monthly_zonal_nc(
             nc_base, "aod", lat_src,
             np.broadcast_to(base_lat[None, :], (12, 19)).copy(),
         )
 
-        # Volcanic: 3D, latitude-varying
+        # Volcanic: 3D (time, band, lat)
         nc_volc = str(tmp_path / "aod_volc.nc")
         volc_lat = np.linspace(0.0, 0.06, 19)
         data_volc = np.broadcast_to(
-            volc_lat[None, :, None, None], (12, 19, nlev, nband),
+            volc_lat[None, None, :], (12, nband, 19),
         ).copy()
         mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
         with netCDF4.Dataset(nc_volc, "w") as ds:
             ds.createDimension("time", 12)
             ds.createDimension("lat", 19)
-            ds.createDimension("lev", nlev)
-            ds.createDimension("band", nband)
+            ds.createDimension("lnwl", nband)
             ds.createVariable("time", "f8", ("time",))[:] = mid_days
             ds.createVariable("lat", "f8", ("lat",))[:] = lat_src
-            ds.createVariable("aod", "f8", ("time", "lat", "lev", "band"))[:] = data_volc
+            ds.createVariable("aod", "f8", ("time", "lnwl", "lat"))[:] = data_volc
 
         cfg = AerosolConfig(
             enabled=True, path=nc_base,
             volcanic_enabled=True, volcanic_path=nc_volc, volcanic_scale=1.0,
         )
-        # Test at off-grid latitude (+35°) to force interpolation
         lat_grid = jnp.radians(jnp.array([35.0]))
         result = get_aerosol_at_time(cfg, day=100.0, lat_grid=lat_grid)
         assert result.shape == lat_grid.shape
-        # base varies 0.01..0.03 over -90..90; at 35°: interp ≈ 0.01 + 0.02*(125/180) ≈ 0.0239
-        # volcanic varies 0.0..0.06 over -90..90; at 35°: ≈ 0.06*(125/180) ≈ 0.0417 per cell
-        # volcanic total = 0.0417 * nlev * nband
+        # base at 35°: interp ≈ 0.01 + 0.02*(125/180)
+        # volcanic at 35°: averaged over band → 0.06*(125/180)
         expected_base = 0.01 + 0.02 * (125.0 / 180.0)
-        expected_volc = 0.06 * (125.0 / 180.0) * nlev * nband
+        expected_volc = 0.06 * (125.0 / 180.0)
         np.testing.assert_allclose(result, expected_base + expected_volc, atol=1e-2)
 
 
