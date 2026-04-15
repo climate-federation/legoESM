@@ -322,12 +322,19 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
 ### Iteration 17: rsin_u uniformity fix
 Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhere, eliminating a 4.7% metric discontinuity. The cosa_u boundary gradient was verified to be smooth (4.88e-02 at boundary vs 5.29e-02 at interior — no discontinuity).
 
-### Evaluation results (all pass, updated after iteration 25):
-- Williamson 2: L2=1.57e-03, Linf=4.16e-03 ← 19% L2 / 52% Linf improvement from halo-exchanged corner winds
+### Evaluation results (all pass, updated after iteration 27, 2026-04-15):
+- Williamson 2: L2=1.54e-03, Linf=4.04e-03 ← 21% L2 / 53% Linf improvement vs session start (1.94e-3, 8.66e-3)
 - Williamson 5: mass drift=1.52e-05
 - Cosine bell: L1=1.27e-01, L2=1.22e-01, Linf=1.32e-01
 - Ocean rest state: all cubed-sphere variants PASS
 - 86 unit tests pass; no regressions
+
+### Session summary (2026-04-15): 10 commits
+1. FV3 operator fidelity: d2a2c_vect ut positions, vorticity flux boundaries, cell-centre vorticity in c_sw/csw, physical KE
+2. Production path: halo-exchanged corner winds, cell-centre tendency cancellation (2.6x better balance)
+3. Diagnostic: 4-edge mean angle for D-grid→geographic conversion (47x v_north reduction at t=0)
+4. W2 Linf improved 53% overall; initial v_north reduced from 0.39 to 0.008 m/s
+5. Remaining v_north after 1d (0.577 m/s) is O(dx²) D-grid truncation error, NOT a fidelity gap. Eliminating it requires FV3's C-grid forward-backward architecture (CSW path unstable due to C→D stagger projection).
 
 ### Analysis of remaining Williamson 2 v-wind visual artifacts (iteration 25, 2026-04-15)
 **Root cause identified**: the visible cube-face imprint in v-wind is 65% from a DIAGNOSTIC REPRESENTATION ERROR, not from dynamics.
