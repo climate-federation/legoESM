@@ -37,7 +37,7 @@ variables used by the existing physical solvers.
 
 The user-facing entrypoint is:
 
-- [ml_physics_parameterization.py](/burg-archive/glab/users/jn2808/legoESM/scripts/ml_physics_parameterization.py)
+- `scripts/ml_physics_parameterization.py`
 
 It performs one linear workflow:
 
@@ -52,7 +52,7 @@ It performs one linear workflow:
 
 The default output root is:
 
-- [ml_physics_parameterization](/burg-archive/glab/users/jn2808/legoESM/results/ml_physics_parameterization)
+- `results/ml_physics_parameterization`
 
 It contains:
 
@@ -64,11 +64,11 @@ It contains:
 
 Key comparison products:
 
-- [timeseries_compare.png](/burg-archive/glab/users/jn2808/legoESM/results/ml_physics_parameterization/comparison/timeseries_compare.png)
-- [final_profiles_compare.png](/burg-archive/glab/users/jn2808/legoESM/results/ml_physics_parameterization/comparison/final_profiles_compare.png)
-- [maps_final.png](/burg-archive/glab/users/jn2808/legoESM/results/ml_physics_parameterization/comparison/maps_final.png)
-- [difference_maps_final.png](/burg-archive/glab/users/jn2808/legoESM/results/ml_physics_parameterization/comparison/difference_maps_final.png)
-- [summary.json](/burg-archive/glab/users/jn2808/legoESM/results/ml_physics_parameterization/comparison/summary.json)
+- `results/ml_physics_parameterization/comparison/timeseries_compare.png`
+- `results/ml_physics_parameterization/comparison/final_profiles_compare.png`
+- `results/ml_physics_parameterization/comparison/maps_final.png`
+- `results/ml_physics_parameterization/comparison/difference_maps_final.png`
+- `results/ml_physics_parameterization/comparison/summary.json`
 
 ## Current Result
 
@@ -78,7 +78,7 @@ The current trained workflow used `4224` sampled columns from days:
 
 Saved training metrics are in:
 
-- [metrics.json](/burg-archive/glab/users/jn2808/legoESM/results/ml_physics_parameterization/training/metrics.json)
+- `results/ml_physics_parameterization/training/metrics.json`
 
 Final analytical full-ML minus default differences are small:
 
