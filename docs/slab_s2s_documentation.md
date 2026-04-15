@@ -33,11 +33,21 @@ Canonical results roots now live under:
 
 `src/legoesm/ml/s2s/plotting.py` contains shared map-plot and GIF frame helpers used by both SFNO and NeuralGCM postprocessing. The shared utilities intentionally cover the common plotting surface while leaving model-specific metric assembly and center-comparison logic inside each model package.
 
+The emulator wrappers used by the dycore-coupling path are also kept compatible with the current driver-facing `PhysicsOutput` contract and with both legacy and `conv_prog`-extended `step_unified(...)` tail layouts. That compatibility layer is plumbing-only: it preserves existing traditional tendencies and zero-fills emulator-only gaps rather than changing the slab workflow semantics.
+
 ## SFNO Slab Workflow
 
 The SFNO slab implementation remains the training and ensemble-rollout path built around ChaosBench-style daily subseasonal forecasting. The canonical CLI is `scripts/s2s/sfno_slab.py` and the canonical package is `legoesm.ml.s2s.sfno_slab`.
 
 Typical outputs per case or stage live under `results/ml/s2s/sfno_slab/...` and include checkpoints, rollout member outputs, campaign metrics, center comparisons, snapshot figures, and daily GIFs.
+
+The staged checkpoint family used by the slab-coupled campaign workflow lives under:
+
+- `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/stage1_rollout1`
+- `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/stage2_rollout2`
+- `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/stage3_rollout3`
+- `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/stage3_rollout5`
+- `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/stage3_rollout7`
 
 ## NeuralGCM Slab Workflow
 
@@ -82,16 +92,49 @@ Campaign postprocessing is split into:
 - campaign-level aggregation across valid initialization dates
 - center-level CRPS comparison using the aggregated case metrics
 
+## Refresh Workflow
+
+Existing campaign artifacts can be refreshed under the latest slab workflow without rerunning the expensive coupled forecasts themselves.
+
+For NeuralGCM:
+
+- rerun case-level metrics and representative plots with `python scripts/s2s/neuralgcm_slab.py postprocess-case ...`
+- rebuild campaign aggregates with `python scripts/s2s/neuralgcm_slab.py postprocess-campaign ...`
+- rebuild cross-campaign CRPS comparisons with `python scripts/s2s/neuralgcm_slab.py postprocess-center-crps ...`
+- regenerate proof-of-coupling figures with `python scripts/s2s/plot_coupling_diagnostics.py ...`
+
+For SFNO:
+
+- rerun case-level metrics and representative plots with `python scripts/s2s/sfno_slab.py postprocess-ensemble ...`
+- rebuild campaign aggregates with `python scripts/s2s/run_sfno_campaign.py --aggregate-only ...`
+- rebuild cross-campaign CRPS comparisons with `python scripts/s2s/sfno_slab.py postprocess-center-crps ...`
+
 ## Current NeuralGCM Status
 
-The NeuralGCM slab path has been validated on a single `2022-01-01` case after the namespace refactor and slab-grid alignment fix. The corrected one-case output exists under:
+The NeuralGCM slab path has been rerun through the full 2022 and 2023 semimonthly campaign surface under the shared `legoesm.ml.s2s` workflow. The refreshed campaign outputs live under:
 
-- `results/ml/s2s/neuralgcm_slab` for campaign-scale runs
-- single-case interactive validation outputs can also be created under ad hoc directories beneath `results/ml/s2s`
+- `results/ml/s2s/neuralgcm_slab/campaign_2022_days1_15_rollout42_fixedsst`
+- `results/ml/s2s/neuralgcm_slab/campaign_2023_days1_15_rollout42_fixedsst`
+- `results/ml/s2s/neuralgcm_slab/campaign_center_compare_2022_2023_rollout42_fixedsst`
+- `results/ml/s2s/neuralgcm_slab/diagnostics`
+
+The refreshed campaign-level metrics and center-comparison CSVs reproduce the prior artifacts exactly, and representative proof-of-coupling diagnostics are retained under `results/ml/s2s/neuralgcm_slab/diagnostics`.
+
+## Current SFNO Status
+
+The SFNO slab path has been rerun through the full 2022 and 2023 semimonthly case-postprocessing surface using the staged `stage3_rollout7` checkpoint family and the shared `legoesm.ml.s2s.sfno_slab` entry points. The refreshed outputs live under:
+
+- `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/campaign_2022_days1_15_rollout7_fixedsst`
+- `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/campaign_2023_days1_15_rollout7_fixedsst`
+- `results/ml/s2s/sfno_slab/staged_afcrps_arco_lsm_state_full_1979_2021/campaign_center_compare_2022_2023_rollout7_fixedsst`
+
+The refreshed SFNO campaign artifacts reproduce the prior results up to small floating-point roundoff introduced by the current postprocessing environment, with campaign-level deltas remaining at negligible tolerance.
 
 ## Recommended Entry Points
 
 - Training or rollout work for SFNO: `python scripts/s2s/sfno_slab.py ...`
+- SFNO campaign aggregation from existing case directories: `python scripts/s2s/run_sfno_campaign.py --aggregate-only ...`
 - Interactive NeuralGCM slab case run: `python scripts/s2s/neuralgcm_slab.py ensemble-inference ...`
+- NeuralGCM campaign aggregation from existing case directories: `python scripts/s2s/neuralgcm_slab.py postprocess-campaign ...`
 - Sequential NeuralGCM campaign run: `python scripts/s2s/run_neuralgcm_campaign.py ...`
 - Slurm NeuralGCM campaign submission: `python scripts/s2s/submit_neuralgcm_campaign.py ...`
