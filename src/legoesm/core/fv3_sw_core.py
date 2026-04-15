@@ -1193,7 +1193,9 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     n = cdgrid.n
 
     # === 1. Contravariant transport velocity from updated C-grid ===
-    ut, vt = _uc_to_ut(uc, vc, u_d, v_d, cdgrid)
+    # Use FV3 d_sw1 boundary handling (adjacent strips + corner 2×2 solve)
+    # for cross-face consistent transport at panel boundaries.
+    ut, vt = _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt)
 
     # === 2. PPM mass transport using ORIGINAL h ===
     h_new = transport_step(h, ut, vt, dt, cdgrid)
