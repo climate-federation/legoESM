@@ -553,8 +553,11 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
 
     # Duogrid flux synchronization: average boundary fluxes between adjacent
     # faces so that mass leaving face A = mass entering face B.  Required for
-    # conservation when each face independently computes boundary fluxes from
-    # duogrid-extended halo data.  Matches FV3 dyn_core.F90:853-900.
+    # duogrid where each face independently computes boundary fluxes from its
+    # own extended grid.  Matches FV3 dyn_core.F90:853-900.
+    # NOT applied for non-duogrid: PPM boundary asymmetry is a feature of
+    # the higher-order reconstruction, and averaging reduces accuracy (tested:
+    # unconditional sync causes 110x W2 regression).
     dg = cdgrid.base.duogrid
     if dg is not None and dg.ng >= 2:
         from legoesm.grids.halo import synchronize_cgrid_fluxes
