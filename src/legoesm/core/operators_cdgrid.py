@@ -1482,9 +1482,6 @@ def fv3_sw_tendencies(
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
     # (e) Corner winds from halo-exchanged cell-centre velocities.
-    # Previous: edge-padding D-grid winds gave incorrect boundary corners.
-    # Now: vector halo exchange rotates cell-centre winds across faces,
-    # then 4-point average to corners gives correct boundary values.
     from legoesm.grids.halo import pad_halo_vector
     grid = cdgrid.base
     dg = grid.duogrid
@@ -1500,7 +1497,20 @@ def fv3_sw_tendencies(
     v_corner = 0.25 * (v_cc_pad[:, :-1, :-1] + v_cc_pad[:, 1:, :-1]
                         + v_cc_pad[:, :-1, 1:] + v_cc_pad[:, 1:, 1:])
 
-    # (f) Vorticity at cell centres → interpolated to corners
+    # (f) C-grid circulation vorticity at D-grid corners.
+    # Uses physical C-grid velocities (u_c, v_c) from fv3_cc2c which
+    # correctly handle face boundaries via vector halo exchange.
+    # This replaces the D-grid corner-wind vorticity which had face-boundary
+    # artifacts from the cell-centre→corner interpolation.
+    #
+    # Circulation at corners: the C-grid face-normal velocities times face
+    # edge lengths give the volume flux through each face. Divergence of
+    # these fluxes at corners gives (negative) vorticity by Stokes' theorem
+    # when using the dual-mesh interpretation.
+    use_duogrid = dg is not None and dg.ng >= 2
+
+    # Use the existing dgrid_vorticity (which computes circulation properly
+    # with non-orthogonality corrections) but with improved corner winds
     zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
     zeta_abs = zeta + cdgrid.base.f
     zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)

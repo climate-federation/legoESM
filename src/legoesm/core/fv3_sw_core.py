@@ -654,15 +654,27 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
         duc = duc + div_damp * ddiv_x
         dvc = dvc + div_damp * ddiv_y
 
-    # 9. Project TOTAL C-grid tendency → D-grid edge midpoints (4-point avg)
-    # Projecting the SUM (near zero for balanced flow) preserves balance.
-    duc_pad = jnp.pad(duc, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    du_dt = 0.25 * (duc_pad[:, :-1, :-1] + duc_pad[:, 1:, :-1]
-                     + duc_pad[:, :-1, 1:] + duc_pad[:, 1:, 1:])
-
-    dvc_pad = jnp.pad(dvc, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    dv_dt = 0.25 * (dvc_pad[:, :-1, :-1] + dvc_pad[:, 1:, :-1]
-                     + dvc_pad[:, :-1, 1:] + dvc_pad[:, 1:, 1:])
+    # 9. Project TOTAL C-grid tendency → D-grid edge midpoints via
+    # halo-exchanged cell-centre averaging. The previous edge-copy padding
+    # created a linear instability at face corners (blowup at ~2h).
+    # Now: C-grid → cell-centre average → vector halo exchange → D-grid.
+    from legoesm.grids.halo import pad_halo_vector
+    grid = cdgrid.base
+    dg = grid.duogrid
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    # Step 1: average C-grid to cell centres
+    duc_cc = 0.5 * (duc[:, :-1, :] + duc[:, 1:, :])   # (6, n, n)
+    dvc_cc = 0.5 * (dvc[:, :, :-1] + dvc[:, :, 1:])   # (6, n, n)
+    # Step 2: vector halo exchange (rotates tendencies across face boundaries)
+    duc_pad, dvc_pad = pad_halo_vector(
+        duc_cc, dvc_cc,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=offsets, duogrid=dg,
+    )
+    # Step 3: average haloed cell centres to D-grid edge midpoints
+    du_dt = 0.5 * (duc_pad[:, 1:-1, :-1] + duc_pad[:, 1:-1, 1:])   # (6, n, n+1)
+    dv_dt = 0.5 * (dvc_pad[:, :-1, 1:-1] + dvc_pad[:, 1:, 1:-1])   # (6, n+1, n)
 
     return dh_dt, du_dt, dv_dt
 

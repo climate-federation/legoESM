@@ -276,7 +276,7 @@ Those values feed both:
 
 So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid face-boundary transport remains materially different from `sw_core.F90`.
 
-## Overall Status (after iteration 21)
+## Overall Status (after iteration 25)
 
 ### Resolved fidelity items:
 1. cosa_u/rsin_u from sin_sg/cos_sg ✅ (iter 1)
@@ -302,10 +302,16 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 - Physical-frame KE for duogrid — 24% boundary residual reduction ✅ (iter 18, conditioned iter 20)
 - Vector halo for covariant A→C — 27x uc boundary smoothness improvement ✅ (iter 23)
 
+### Resolved in iteration 25 (2026-04-15):
+- d2a2c_vect ut override: moved from positions {1,n-1} to {0,n} matching FV3 sw_core.F90:3587,3603. Positions 1,n-1 now correctly use standard (uc-v*cos)*rsin_u (sw_core.F90:3596,3610) ✅
+- c_sw vorticity flux fy1/fx1: reduced boundary override from {0,1,n-1,n} to {0,n} only, matching FV3 sw_core.F90:445-449 ✅
+- fv3_csw_tendencies: same vorticity flux fix ✅
+
 ### Remaining structural items:
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
-F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path
+F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vect)
 - Full d_sw B-grid KE transport — required to fully eliminate boundary artifacts
+- Production path (fv3_sw_tendencies) uses Arakawa-Lamb gradient, NOT FV3's c_sw/d_sw operators — pre-existing artifacts originate here, not in fv3_sw_core.py
 
 ### Pre-existing issues (not caused by these changes):
 - Williamson 2 v-wind shows cube-face imprint at t>0.5d — IDENTICAL in original code (verified by checkout to ebd6e43). Root cause is deeper infrastructure (grid construction, halo exchange), not operator formulas.
