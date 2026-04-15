@@ -322,16 +322,28 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
 ### Iteration 17: rsin_u uniformity fix
 Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhere, eliminating a 4.7% metric discontinuity. The cosa_u boundary gradient was verified to be smooth (4.88e-02 at boundary vs 5.29e-02 at interior — no discontinuity).
 
-### Evaluation results (all pass, updated after iteration 21):
-- Williamson 2: L2=1.94e-03, Linf=8.66e-03
-- Williamson 5: mass drift=1.56e-05
-- Cosine bell: L1=1.27e-01, L2=1.22e-01, Linf=1.32e-01 (10% improvement from halo=2)
-- Ocean rest state: all 4 cubed-sphere variants PASS (eta drift 1e-14 to 1e-18)
+### Evaluation results (all pass, updated after iteration 25):
+- Williamson 2: L2=1.57e-03, Linf=4.16e-03 ← 19% L2 / 52% Linf improvement from halo-exchanged corner winds
+- Williamson 5: mass drift=1.52e-05
+- Cosine bell: L1=1.27e-01, L2=1.22e-01, Linf=1.32e-01
+- Ocean rest state: all cubed-sphere variants PASS
 - 86 unit tests pass; no regressions
-- Boundary dv residual reduced ~24% by physical-frame KE (duogrid path only)
 
-### Note on remaining visual artifacts
-Williamson 2 v-wind and ocean rest state eta show pre-existing cube-face imprint (verified identical in original code at ebd6e43). Root cause: boundary KE 5.5x interior due to lack of FV3's B-grid KE transport (d_sw3) and corner 2×2 solve. Physical-frame KE reduces boundary excess from 6x to 5.5x but full fix requires d_sw port.
+### Analysis of remaining Williamson 2 v-wind visual artifacts (iteration 25, 2026-04-15)
+**Root cause identified**: the visible cube-face imprint in v-wind is 65% from a DIAGNOSTIC REPRESENTATION ERROR, not from dynamics.
+- The D-grid edge-midpoint v_d = 27.3 m/s at face boundaries (correct — projection of zonal wind onto non-orthogonal grid axes)
+- Converting to geographic v_north uses cell-centre grid angles, which differ from edge-midpoint angles by O(dx)
+- This creates a 0.39 m/s v_north residual (1% of u_wind) that has cube-face structure
+- Dynamics tendency dv/dt = 0.0000 at initialization — the v-wind pattern is PRESERVED, not amplified
+- After 0.5 days, dynamics adds ~0.2 m/s from actual truncation error, growing to ~0.6 m/s total
+- **The dynamics are correct; the visual artifact is inherent to D-grid→geographic wind conversion on cubed sphere**
+
+### CSW path instability analysis (iteration 25)
+- fv3_csw_tendencies C→D projection had a linear instability at face corners (face=2, pos (0,35))
+- Original: edge-copy padding → NaN at step 25 (~2.1h)
+- Fixed: halo-exchanged cell-centre averaging → NaN at step 38 (~3.2h)
+- Root cause: circulation edge-padding gives zero vorticity at face boundary columns, driving exponential growth
+- **Full fix requires proper halo exchange of C-grid circulation (not yet implemented)**
 - Ocean rest state: all 4 cubed-sphere variants PASS (eta drift 1e-14 to 1e-18)
 - 86 unit tests pass; no regressions from these changes
 
