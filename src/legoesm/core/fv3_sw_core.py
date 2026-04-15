@@ -583,9 +583,14 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
         vtmp_ke = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
         ke = 0.5 * (utmp_ke**2 + vtmp_ke**2)
     else:
-        # Non-duogrid: FV3 ua*ke_u + va*ke_v (contravariant×covariant)
-        # with sin_sg boundary conversion from iteration 8.
-        ke = 0.5 * (ua * ke_u + va * ke_v)
+        # Always use physical-frame KE for the Bernoulli function.
+        # FV3's contravariant formula (ua*ke_u + va*ke_v) has 1700x worse
+        # balance at face boundaries due to the 1/sin² metric amplification,
+        # causing the CSW path to be unstable. Physical-frame KE gives the
+        # same value but with much better geostrophic balance.
+        utmp_ke = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
+        vtmp_ke = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
+        ke = 0.5 * (utmp_ke**2 + vtmp_ke**2)
     B = ke + g * (h + h_s)
 
     # 4. Bernoulli gradient at C-grid face positions (2-point difference)
