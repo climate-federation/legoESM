@@ -573,7 +573,7 @@ Remaining gaps are infrastructure-level (halo width ng=1 vs ng=3) and 3D-only (d
 Four items found, all resolved as non-bugs or documented limitations:
 1. **d_sw1 duogrid early return**: NOT a bug. Codex cited non-duogrid lines (sw_core.F90:625-813); duogrid path is at 3419+ where boundary overrides are gated on `.not. dg%is_initialized`. Our early return matches.
 2. **d_sw3 C-grid padding**: Infrastructure halo gap (no C-grid exchange available). Documented.
-3. **PPM edge-repair formulas**: Documented intentional simplification. Fortran also skips most edge-repair for duogrid.
+3. **PPM edge-repair formulas**: NOT a simplification — exact Fortran behavior. ALL xppm/yppm edge-repair, copy_corners, and boundary formulas are gated on `(.not. (bounded_domain .or. duogrid))` (tp_core.F90:333,357,612). For duogrid, the Fortran uses the standard interior PPM formula everywhere, exactly as our code does. Codex was incorrect.
 4. **d_sw5 edge-padded halos**: Infrastructure limitation masked by face-boundary zeroing (`divg_d=0` at boundaries, sw_core.F90:2431-2434). No practical impact.
 
 **No remaining formula-level fidelity issues found by adversarial review.**
