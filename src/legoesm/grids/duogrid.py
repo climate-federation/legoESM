@@ -92,7 +92,7 @@ class DuoGridData(NamedTuple):
 
 def _cart2lonlat(x: np.ndarray, y: np.ndarray, z: np.ndarray):
     """Cartesian (x, y, z) on unit sphere → (lon, lat) in radians."""
-    lon = np.arctan2(y, x)
+    lon = np.mod(np.arctan2(y, x), 2.0 * np.pi)  # [0, 2π)
     lat = np.arctan2(z, np.sqrt(x**2 + y**2))
     return lon, lat
 

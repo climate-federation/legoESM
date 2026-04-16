@@ -368,7 +368,7 @@ def _compute_gnomonic_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
         r = jnp.sqrt(x**2 + y**2 + z**2)
         x, y, z = x / r, y / r, z / r
 
-        face_lon = jnp.arctan2(y, x)
+        face_lon = jnp.mod(jnp.arctan2(y, x), 2.0 * jnp.pi)  # [0, 2π)
         face_lat = jnp.arcsin(jnp.clip(z, -1.0, 1.0))
 
         all_lon.append(face_lon)
