@@ -1109,7 +1109,7 @@ def _uc_to_ut(uc, vc, u_d, v_d, cdgrid):
     return ut, vt
 
 
-def _ppm_transport_1d(field, courant, axis):
+def _ppm_transport_1d(field, courant, rdelta, axis):
     """PPM hord=9 transport of a staggered field along one axis.
 
     Implements the Fortran ytp_v / xtp_u (sw_core.F90:2897-3353,
@@ -1127,20 +1127,25 @@ def _ppm_transport_1d(field, courant, axis):
     Parameters
     ----------
     field : (6, ..., N, ...) — field to transport.
-    courant : (6, ..., N+1, ...) — Courant number at interfaces.
+    courant : (6, ..., N+1, ...) — Courant number at interfaces (units of distance).
+    rdelta : (6, ..., N, ...) — 1/cell_width at field positions (1/dy or 1/dx).
+        Used to convert the distance-based courant to dimensionless CFL fraction:
+        ``cfl = |courant| * rdelta`` (FV3 sw_core.F90:3342).
     axis : int (1 or 2) — sweep axis.
 
     Returns
     -------
     flux : (6, ..., N+1, ...) — transported field at interfaces.
     """
-    # Transpose so sweep axis is last for uniform indexing
+    # Transpose so sweep axis is axis 1 for uniform indexing
     if axis == 1:
-        v = field   # (6, N, M) → sweep along axis 1
+        v = field    # (6, N, M)
         c = courant  # (6, N+1, M)
+        rd = rdelta  # (6, N, M)
     else:
-        v = jnp.swapaxes(field, 1, 2)    # (6, M, N) → (6, N, M)
-        c = jnp.swapaxes(courant, 1, 2)  # (6, M, N+1) → (6, N+1, M)
+        v = jnp.swapaxes(field, 1, 2)     # (6, N, M)
+        c = jnp.swapaxes(courant, 1, 2)   # (6, N+1, M)
+        rd = jnp.swapaxes(rdelta, 1, 2)   # (6, N, M)
 
     nn = v.shape[1]  # N cells in sweep direction
 
@@ -1218,7 +1223,13 @@ def _ppm_transport_1d(field, courant, axis):
     # bl, br: (6, nc, M) for cells -1..N (index 0..nc-1)
 
     # --- Flux evaluation (FV3 sw_core.F90:3339-3349) ---
-    # Interface j (0..N): use cell j-1 (bl/br index j) for c>0, cell j (index j+1) for c<0
+    # cfl = c * rdy[j-1] (positive) or c * rdy[j] (negative)
+    # Pad rdelta to get rdy at interface-adjacent cells
+    rd_pad = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, N+2, M)
+    # Interface j: upwind cell j-1 → rd_pad[:, j, :], downwind cell j → rd_pad[:, j+1, :]
+    rdy_pos = rd_pad[:, :nn+1, :]   # rdy[j-1] for j=0..N
+    rdy_neg = rd_pad[:, 1:nn+2, :]  # rdy[j] for j=0..N
+
     v_pos = vp[:, h3-1:h3-1+nn+1, :]  # v[j-1] for j=0..N
     v_neg = vp[:, h3:h3+nn+1, :]      # v[j] for j=0..N
     bl_pos = bl[:, :nn+1, :]           # bl[j-1]
@@ -1226,10 +1237,12 @@ def _ppm_transport_1d(field, courant, axis):
     bl_neg = bl[:, 1:nn+2, :]          # bl[j]
     br_neg = br[:, 1:nn+2, :]          # br[j]
 
-    cfl = jnp.minimum(jnp.abs(c), 1.0)
+    # Fortran: cfl = c * rdy (dimensionless CFL fraction)
+    cfl_pos = jnp.minimum(jnp.abs(c) * rdy_pos, 1.0)
+    cfl_neg = jnp.minimum(jnp.abs(c) * rdy_neg, 1.0)
 
-    flux_pos = v_pos + (1.0 - cfl) * (br_pos - cfl * (bl_pos + br_pos))
-    flux_neg = v_neg + (1.0 + (-cfl)) * (bl_neg + (-cfl) * (bl_neg + br_neg))
+    flux_pos = v_pos + (1.0 - cfl_pos) * (br_pos - cfl_pos * (bl_pos + br_pos))
+    flux_neg = v_neg + (1.0 - cfl_neg) * (bl_neg - cfl_neg * (bl_neg + br_neg))
 
     flux = jnp.where(c > 0, flux_pos, flux_neg)
 
@@ -1283,7 +1296,10 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # --- Step 2: transport v_d in y-direction using vb (PPM hord=9) ---
     # FV3 sw_core.F90:1315 calls ytp_v with hord_mt=9 (default).
     # v_d: (6, n+1, n) transported along axis 2 by Courant vb: (6, n+1, n+1).
-    transported_y = _ppm_transport_1d(v_d, vb, axis=2)
+    # rdy: 1/dy at v_d positions. Fortran uses gridstruct%rdy at (isd:ied+1, jsd:jed).
+    # Our dy_edge_x is at u-face positions (6, n+1, n) = same shape as v_d.
+    rdy = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n)
+    transported_y = _ppm_transport_1d(v_d, vb, rdy, axis=2)
 
     # --- Step 3: B-grid contravariant u-velocity (Courant number) ---
     ub = dt5 * (uc_sum - vc_sum * cosa) * rsina  # (6, n+1, n+1)
@@ -1291,7 +1307,10 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # --- Step 4: transport u_d in x-direction using ub (PPM hord=9) ---
     # FV3 sw_core.F90:1373 calls xtp_u with hord_mt=9.
     # u_d: (6, n, n+1) transported along axis 1 by Courant ub: (6, n+1, n+1).
-    transported_x = _ppm_transport_1d(u_d, ub, axis=1)
+    # rdx: 1/dx at u_d positions. Fortran uses gridstruct%rdx at (isd:ied, jsd:jed+1).
+    # Our dx_edge_y is at v-face positions (6, n, n+1) = same shape as u_d.
+    rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1)
+    transported_x = _ppm_transport_1d(u_d, ub, rdx, axis=1)
 
     # --- Step 5: BGRID_NE component sync (FV3 dyn_core.F90:969-1011) ---
     # FV3 syncs the transport COMPONENTS at face boundaries before
