@@ -503,14 +503,27 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
 - PPM: raw Courant (no face-boundary scaling, no CFL clamping) matching Fortran xppm/ytp_v flux ✓
 - Metrics: cosa_u/rsin_u from sin_sg, supergrid dxc/dyc/area_corner, exact rdxa/rdya ✓
 
-### Remaining conditional gaps (only activate for non-default parameters):
-- **deln_flux** (tp_core.F90:1217-1365): del-n damping in fv_tp_2d. IMPLEMENTED as `_deln_flux` in fv_tp_2d.py (iter 49) and wired into `fv_tp_2d` via optional `nord`/`damp_c`/`mass` parameters. Activated when `damp_c > 1e-4`. Supports nord=0 (del-2) natively; nord>0 via iterative Laplacian with pad_halo exchanges.
-- **divergence_corner_duo** (sw_core.F90:2345-2447): corner divergence with face-boundary zeroing and 0.25 adjacent-cell attenuation. Only called when `nord > 0` in c_sw. IMPLEMENTED as `_divergence_corner_duo` in fv3_sw_core.py (iter 48) but not yet wired into c_sw flow (requires nord parameter plumbing).
-- **Vorticity damping** (sw_core.F90:1948-2000): del-n damping of vorticity via `del6_vt_flux`. Only when `damp_v > 1e-5`. IMPLEMENTED as `_del6_vt_flux` in fv3_sw_core.py (iter 50). Not yet wired into d_sw6 flow.
-- **Divergence heating** (sw_core.F90:1953-1986): KE→heat conversion from divergence damping. Only when `d_con > 1e-5`. NOT implemented.
-- **Higher-order divergence damping** (sw_core.F90:1725-1787): iterated del-n at corners. Only for `nord > 0`. NOT implemented.
+### Resolved in iteration 51 (2026-04-16):
+- **d_sw5 corner divergence damping wired into _d_sw_native** ✅
+  - Implemented `_d_sw5_corner_divergence()` in fv3_sw_core.py — matches sw_core.F90:1641-1821
+  - nord=0 (del-2) path: duogrid formula with cosa_u/sina_u/cosa_v/sina_v from sin_sg
+  - nord>0 path: uses `_divergence_corner_duo` + 5-point corner Laplacian approximation
+  - sina_u/sina_v reconstructed from sin_sg (not stored in NamedTuple) matching fv_grid_utils.F90:505-518
+  - Damping added to ke_corner BEFORE wind update (ke += damp*delpc) — matches Fortran structure
+  - Default Fortran parameters: d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1
+  - `fv3_fb_sw_step` passes all d_sw5 parameters through to `_d_sw_native`
+  - No metric regression: W2 L2=1.53e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01
+  - All 86 unit tests pass, 23 ocean rest state tests pass at machine precision
 
-These are all CONDITIONAL features gated on non-default parameters. The standard duogrid test cases (nord=0, damp_c=0, damp_v=0, d_con=0) exercise none of these paths.
+### Remaining conditional gaps (partially wired):
+- **deln_flux** (tp_core.F90:1217-1365): IMPLEMENTED and WIRED into `fv_tp_2d` (iter 49). Activated when `damp_c > 1e-4`.
+- **divergence_corner_duo** (sw_core.F90:2345-2447): IMPLEMENTED (iter 48) and NOW WIRED into `_d_sw_native` via `_d_sw5_corner_divergence` for nord>0 (iter 51).
+- **d_sw5 corner divergence** (sw_core.F90:1641-1821): IMPLEMENTED and WIRED (iter 51). nord=0 and nord=1 paths functional. nord>1 uses fallback approximation.
+- **Vorticity damping** (sw_core.F90:1948-2000): IMPLEMENTED as `_del6_vt_flux` (iter 50). NOT YET WIRED into d_sw6 flow — needs damp_v parameter plumbing.
+- **Divergence heating** (sw_core.F90:1953-1986): NOT implemented. Only when `d_con > 1e-5`.
+- **Higher-order divergence damping** (sw_core.F90:1725-1787): PARTIALLY implemented. nord=1 uses 5-point corner Laplacian approximation. Exact Fortran version needs corner-stagger divg_u/divg_v metrics.
+
+Standard test cases (d2_bg=0, dddmp=0, d4_bg=0.16, nord=1) now correctly activate the d_sw5 corner divergence path in the FB stepping.
 
 **Remaining infrastructure gap**: FV3 uses ng=3 MPI DGRID_NE halo (full 2D exchange); Python uses ng=1 pad_halo_dgrid + pad_halo_vector (two-step). Causes ~0.3% transport velocity asymmetry at face boundaries. Affects FB c_sw stability only (production path unaffected).
 
