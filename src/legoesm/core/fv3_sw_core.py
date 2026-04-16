@@ -438,7 +438,17 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     # AT face boundary (i=0, i=n): edge_interpolate4 on CONTRAVARIANT ua
     # (FV3 sw_core.F90:3587,3603). With halo=2 the 4-point stencil
     # straddles the face boundary correctly.
+    #
+    # The Fortran uses sin_sg from the HALO cell for the upwind conversion:
+    #   ut>0 → sin_sg(i-1,j,3) where i-1 is in the halo for i=is (face boundary)
+    #   ut≤0 → sin_sg(i,j,1) where i is the first interior cell
+    # We use pad_halo to get the correct sin_sg at halo positions.
     dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    sin_east = cdgrid.sin_sg[:, :, :, 2]   # E-edge
+    sin_west = cdgrid.sin_sg[:, :, :, 0]   # W-edge
+    offsets = grid.halo_interp_offsets
+    se_pad_x = pad_halo(sin_east, interp_offsets=offsets)  # (6, n+2, n+2)
+    sw_pad_x = pad_halo(sin_west, interp_offsets=offsets)
     for i_bdy in ([0, n] if n >= 2 else []):
         i_p = i_bdy + h  # padded offset: cell i → padded index i+h
         # ua_pad stencil: 4 cells centred on u-face i_bdy
@@ -450,10 +460,12 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
                          axis=-1)
         ut_bdy = _edge_interpolate4(ua4, dxa4)
 
-        i_left = max(i_bdy - 1, 0)
-        i_right = min(i_bdy, n - 1)
-        sin_left = cdgrid.sin_sg[:, i_left, :, 2]
-        sin_right = cdgrid.sin_sg[:, i_right, :, 0]
+        # FV3 sw_core.F90:3589-3592: sin_sg at halo cell for upwind
+        # se_pad has halo=1: se_pad[:, i, j+1] = sin_east at cell (i-1, j)
+        # For i_bdy=0: left cell is halo(-1) → se_pad[:, 0, 1:-1]
+        # For i_bdy=n: left cell is n-1 → se_pad[:, n, 1:-1]
+        sin_left = se_pad_x[:, i_bdy, 1:-1]   # E-edge of cell to LEFT of face i_bdy
+        sin_right = sw_pad_x[:, i_bdy + 1, 1:-1]  # W-edge of cell to RIGHT of face i_bdy
         uc_bdy = jnp.where(ut_bdy > 0, ut_bdy * sin_left, ut_bdy * sin_right)
         uc = uc.at[:, i_bdy, :].set(uc_bdy)
 
@@ -463,13 +475,10 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     # At face boundaries (i=0, n): FV3 sets ut = edge_interpolate4(ua) DIRECTLY
     # (sw_core.F90:3587,3603), not via (uc - v*cos)*rsin_u.
     # Since uc = ut_ei4*sin_sg, dividing by the same sin_sg recovers ut_ei4.
-    # Positions 1 and n-1 (C1/C2/C3 stencil) use the standard formula
-    # (sw_core.F90:3596,3610): ut = (uc - v*cosa)*rsin_u. No override needed.
+    # Use haloed sin_sg (same as for uc above) for consistent upwind.
     for i_bdy in ([0, n] if n >= 2 else []):
-        i_left = max(i_bdy - 1, 0)
-        i_right = min(i_bdy, n - 1)
-        sin_left = cdgrid.sin_sg[:, i_left, :, 2]
-        sin_right = cdgrid.sin_sg[:, i_right, :, 0]
+        sin_left = se_pad_x[:, i_bdy, 1:-1]
+        sin_right = sw_pad_x[:, i_bdy + 1, 1:-1]
         sin_upwind = jnp.where(uc[:, i_bdy, :] > 0, sin_left, sin_right)
         ut = ut.at[:, i_bdy, :].set(
             uc[:, i_bdy, :] / jnp.maximum(sin_upwind, _EPS))
@@ -497,7 +506,12 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
             + _C3 * vtmp_pad[:, h:-h, n + h - 1])
 
     # AT face boundary (j=0, j=n): edge_interpolate4 on va (halo=2 straddles boundary)
+    # Use haloed sin_sg for correct upwind at face boundaries (same logic as x-dir).
     dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
+    sin_north = cdgrid.sin_sg[:, :, :, 3]  # N-edge
+    sin_south = cdgrid.sin_sg[:, :, :, 1]  # S-edge
+    sn_pad_y = pad_halo(sin_north, interp_offsets=offsets)
+    ss_pad_y = pad_halo(sin_south, interp_offsets=offsets)
     for j_bdy in ([0, n] if n >= 2 else []):
         j_p = j_bdy + h
         va4 = jnp.stack([va_pad[:, h:-h, j_p - 1], va_pad[:, h:-h, j_p],
@@ -508,22 +522,19 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
                          axis=-1)
         vt_bdy = _edge_interpolate4(va4, dya4)
 
-        j_below = max(j_bdy - 1, 0)
-        j_above = min(j_bdy, n - 1)
-        sin_below = cdgrid.sin_sg[:, :, j_below, 3]
-        sin_above = cdgrid.sin_sg[:, :, j_above, 1]
+        # FV3: sin_sg from halo cell for upwind at face boundary
+        sin_below = sn_pad_y[:, 1:-1, j_bdy]     # N-edge of cell BELOW face j_bdy
+        sin_above = ss_pad_y[:, 1:-1, j_bdy + 1]  # S-edge of cell ABOVE face j_bdy
         vc_bdy = jnp.where(vt_bdy > 0, vt_bdy * sin_below, vt_bdy * sin_above)
         vc = vc.at[:, :, j_bdy].set(vc_bdy)
 
     vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
 
     # Override only at edge_interpolate4 positions (j=0, n) to recover
-    # edge_interpolate4 result: ut = uc/sin_sg.
+    # edge_interpolate4 result: vt = vc/sin_sg. Use haloed sin_sg.
     for j_bdy in [0, n]:
-        j_below = max(j_bdy - 1, 0)
-        j_above = min(j_bdy, n - 1)
-        sin_below = cdgrid.sin_sg[:, :, j_below, 3]
-        sin_above = cdgrid.sin_sg[:, :, j_above, 1]
+        sin_below = sn_pad_y[:, 1:-1, j_bdy]
+        sin_above = ss_pad_y[:, 1:-1, j_bdy + 1]
         sin_upwind = jnp.where(vc[:, :, j_bdy] > 0, sin_below, sin_above)
         vt = vt.at[:, :, j_bdy].set(
             vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
