@@ -547,12 +547,27 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
 - **divergence_corner_duo** (sw_core.F90:2345-2447): IMPLEMENTED (iter 48) and NOW WIRED into `_d_sw_native` via `_d_sw5_corner_divergence` for nord>0 (iter 51).
 - **d_sw5 corner divergence** (sw_core.F90:1641-1821): IMPLEMENTED and WIRED (iter 51). All nord values functional. nord>0 uses proper divg_u/divg_v metrics (iter 53).
 - **Vorticity damping** (sw_core.F90:1948-2000): IMPLEMENTED as `_del6_vt_flux` (iter 50) and NOW WIRED into d_sw6 flow (iter 52). `damp_v` and `nord_v` parameters plumbed through `fv3_fb_sw_step` → `_d_sw_native`. Activated when `damp_v > 1e-5`. Matches Fortran: `damp4 = (damp_v * da_min_c)^(nord_v+1)`, `u += fy2`, `v -= fx2`.
-- **Divergence heating** (sw_core.F90:1953-1986): NOT implemented. Only when `d_con > 1e-5`.
+- **Divergence heating** (sw_core.F90:1953-1986): NOT implemented. Only for 3D (`#ifndef SW_DYNAMICS`, sw_core.F90:2002-2003). Not applicable for shallow water — Fortran's SW_DYNAMICS mode skips this entirely.
 - **Higher-order divergence damping** (sw_core.F90:1725-1787): IMPLEMENTED with proper divg_u/divg_v metrics (iter 53). Uses metric-weighted divergence-of-gradient matching Fortran exactly. Corner-stagger halo uses edge-padding (no cross-face corner exchange available), which matches Fortran duogrid behavior (fill_corners skipped when duogrid active).
 
 Standard test cases (d2_bg=0, dddmp=0, d4_bg=0.16, nord=1) now correctly activate the d_sw5 corner divergence path in the FB stepping.
 
 **Remaining infrastructure gap**: FV3 uses ng=3 MPI DGRID_NE halo (full 2D exchange); Python uses ng=1 pad_halo_dgrid + pad_halo_vector (two-step). Causes ~0.3% transport velocity asymmetry at face boundaries. Affects FB c_sw stability only (production path unaffected).
+
+### SW fidelity completeness (iteration 54, 2026-04-16):
+**All SW-relevant FV3 operator formulas are now verified matching the Fortran oracle for the duogrid path.** The Fortran's `SW_DYNAMICS` compile-time gate (sw_core.F90:2002-2003) means divergence heating is NOT part of the SW code path. Every operator that executes in the Fortran SW_DYNAMICS mode is implemented:
+- d2a2c_vect: D→A 4th-order, A→C 4th-order, covariant→contravariant ✓
+- c_sw: transport scaling, KE upwind, corner vorticity, vorticity flux ✓
+- d_sw1: transport velocity recomputation (duogrid: interior-only; non-duogrid: boundary overrides + corner solve) ✓
+- d_sw3: PPM hord=9 B-grid KE transport with scalar corner sync ✓
+- d_sw5: corner divergence damping with proper divg_u/divg_v metrics, all nord values ✓
+- d_sw5: vorticity transport via fv_tp_2d ✓
+- d_sw6: D-grid wind update + vorticity damping (damp_v/nord_v, duogrid-aware halo) ✓
+- fv_tp_2d: Lin-Rood operator-split with CGRID flux sync + hord=9 pert_ppm(iv=0) + deln_flux ✓
+- PPM: raw Courant matching Fortran xppm/ytp_v flux ✓
+- Metrics: sin_sg-based cosa_u/rsin_u, supergrid dxc/dyc/area_corner, exact rdxa/rdya, divg_u/divg_v ✓
+
+Remaining gaps are infrastructure-level (halo width ng=1 vs ng=3) and 3D-only (divergence heating).
 
 ### Session summary (2026-04-15): 10 commits
 1. FV3 operator fidelity: d2a2c_vect ut positions, vorticity flux boundaries, cell-centre vorticity in c_sw/csw, physical KE
