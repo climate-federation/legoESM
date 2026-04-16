@@ -1216,9 +1216,9 @@ def _ppm_transport_1d(field, courant, rdelta, axis):
     bl_neg = bl[:, 1:nn+2, :]          # bl[j]
     br_neg = br[:, 1:nn+2, :]          # br[j]
 
-    # Fortran: cfl = c * rdy (dimensionless CFL fraction)
-    cfl_pos = jnp.minimum(jnp.abs(c) * rdy_pos, 1.0)
-    cfl_neg = jnp.minimum(jnp.abs(c) * rdy_neg, 1.0)
+    # Fortran ytp_v (sw_core.F90:3342): cfl = c * rdy (no clamping)
+    cfl_pos = jnp.abs(c) * rdy_pos
+    cfl_neg = jnp.abs(c) * rdy_neg
 
     flux_pos = v_pos + (1.0 - cfl_pos) * (br_pos - cfl_pos * (bl_pos + br_pos))
     flux_neg = v_neg + (1.0 - cfl_neg) * (bl_neg - cfl_neg * (bl_neg + br_neg))
