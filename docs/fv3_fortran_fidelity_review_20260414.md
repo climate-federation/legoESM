@@ -373,6 +373,35 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
   - Eliminated ~120 lines of duplicated code
   - Also removed dead branch: `fv3_csw_tendencies` had identical KE computation in both if/else arms
 
+### Verified in iteration 38 (2026-04-16) — line-by-line Fortran trace:
+**d2a2c_vect duogrid branch (sw_core.F90:3419-3706)**:
+- D→A 4th-order stencil: `a2*(u[j-1]+u[j+2]) + a1*(u[j]+u[j+1])` with a1=0.5625, a2=-0.0625 ✓
+- D→A boundary handling: Fortran uses one-sided (`u[j+1]`) at outermost halo (jsd/jed); Python doesn't compute at these positions (interior-only) — no discrepancy ✓
+- Covariant→contravariant: `ua = (utmp - vtmp*cosa_s)*rsin2` ✓
+- A→C stencil: `a2*(utmp[i-2]+utmp[i+1]) + a1*(utmp[i-1]+utmp[i])` ✓
+- A→C boundary/corner overrides: ALL gated on `(.not. dg%is_initialized)` — correctly skipped for duogrid ✓
+- A→C range: Fortran computes uc at is-1..ie+2 (3 extra positions); Python at 0..n. Interior positions match. Extra positions are halo — handled by pad_halo_vector in Python.
+
+**c_sw transport scaling (sw_core.F90:163-180)**:
+- `ut = dt2 * ut * dy * sin_sg(upwind)` ✓
+- sin_sg upwind selection: ut>0 → E-edge of cell to left, ut≤0 → W-edge of cell to right ✓
+- Edge length metrics: `dy` at u-face = our `dy_edge_x`, `dx` at v-face = our `dx_edge_y` ✓
+
+**c_sw KE/vorticity (sw_core.F90:303-490)**: all interior formulas verified against shared helpers `_ke_upwind`, `_corner_vorticity`, `_vorticity_flux` ✓
+
+**d_sw5 vorticity (sw_core.F90:1582-1862)**:
+- Cell-centre vorticity: `rarea * (u*dx[j] - u*dx[j+1] - v*dy[i] + v*dy[i+1])` ✓
+- Absolute vorticity: `wk + f0` ✓
+- fv_tp_2d transport: called identically ✓
+- Divergence damping: Fortran adds `damp*delpc` to `ke` at corners (d_sw5); Python applies at C-grid separately. Difference only matters when div_damp > 0 (not in standard tests).
+
+**d_sw6 wind update (sw_core.F90:1935-1944)**:
+- Fortran: `u_new = vt + ke(i,j) - ke(i+1,j) + fy` (REPLACEMENT from vt)
+- Python: `u_d_new = u_d + (ke_diff + fy_vort) / dx` (INCREMENTAL from u_d)
+- Per iteration 35 analysis, these are algebraically equivalent when vt ≈ u_old*dx, which holds for covariant↔geographic conversion.
+
+**Remaining infrastructure-level gap**: FV3 uses ng=3 MPI DGRID_NE halo for d2a2c_vect, giving high-quality transport velocities at face boundaries. Python uses ng=1 `pad_halo_dgrid` → `pad_halo_vector` (two-step exchange), which produces ~0.3% transport velocity asymmetry at face boundaries. This causes the FB c_sw first-order upwind mass error (13.78 m/step on W2 at C16). Cannot be fixed at the operator formula level — requires deeper D-grid halo exchange infrastructure.
+
 ### Investigated in iteration 37 (2026-04-16):
 - **Duogrid + production path NOW STABLE**: W2 C16 survives 1 full day (288 steps, dt=300s, RK3). Previously blew up with NaN due to 370x corner tendency amplification. The tendency magnitude dropped from max|dh/dt|=0.158 to 1.2e-3 (130x improvement) due to cumulative fixes from prior iterations. h_err=40m at 1 day — comparable to non-duogrid path (identical metrics).
 - **FB path instability root cause confirmed**: c_sw first-order upwind mass transport with W2's non-uniform h field and non-zero transport velocity divergence creates 13.78 m h_err per step. Fundamental to first-order upwind on cubed sphere, not fixable by flux sync alone. FV3 achieves stability from higher-quality MPI halos (ng=3+).
