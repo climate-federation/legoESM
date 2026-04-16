@@ -1492,6 +1492,15 @@ def synchronize_corner_scalar(field, n):
         else:
             return field[f, :, n]
 
+    # --- Save original vertex values before any modification ---
+    # Each cube vertex connects 3 faces. We need the ORIGINAL (unaveraged)
+    # values to compute the true 3-face mean, not edge-averaged intermediates.
+    orig_corners = {}
+    for face in range(6):
+        for ci in (0, n):
+            for cj in (0, n):
+                orig_corners[(face, ci, cj)] = field[face, ci, cj]
+
     # --- Pass 1: edge-pairwise averaging (read all before write) ---
     avgs = {}
     for face in range(6):
@@ -1556,8 +1565,10 @@ def synchronize_corner_scalar(field, n):
                     continue
                 visited.add(key)
 
-                avg3 = (field[face_a, ci, cj] + field[fb, bi, bj]
-                        + field[fc, ci_c, cj_c]) / 3.0
+                # Use ORIGINAL (pre-edge-averaged) values for unbiased 3-face mean
+                avg3 = (orig_corners[(face_a, ci, cj)]
+                        + orig_corners[(fb, bi, bj)]
+                        + orig_corners[(fc, ci_c, cj_c)]) / 3.0
                 field = field.at[face_a, ci, cj].set(avg3)
                 field = field.at[fb, bi, bj].set(avg3)
                 field = field.at[fc, ci_c, cj_c].set(avg3)
