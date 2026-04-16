@@ -353,7 +353,7 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vect)
 - ~~Full d_sw B-grid KE transport~~ → ported (iter 32), first-order upwind. PPM upgrade to match xtp_u/ytp_v iord=1 would improve accuracy.
 - Production path (fv3_sw_tendencies) uses Arakawa-Lamb gradient, NOT FV3's c_sw/d_sw operators — pre-existing artifacts originate here, not in fv3_sw_core.py
-- **Duogrid + production path instability**: W2 with duogrid has 370x larger corner tendencies (max |dh/dt|=0.158 vs 4.3e-4 without duogrid), causing NaN blowup. Root cause: `fv3_sw_tendencies` Arakawa-Lamb gradient at cube vertices with duogrid halo exchange gives worse corner accuracy. NOT a flux sync issue — exists independently.
+- ~~**Duogrid + production path instability**~~: RESOLVED (iter 37). Was 370x corner tendency amplification, now 130x improved (max|dh/dt|=1.2e-3) and stable for 1+ day. The cumulative fixes from prior iterations resolved this.
 - **d_sw3 KE flux synchronization** ✅ (iter 36): `synchronize_bgrid_ne()` in halo.py implements FV3's BGRID_NE vector boundary exchange. Syncs ubb (x-Courant) at W/E boundaries and vbbtemp (y-Courant) at S/N boundaries before computing KE. Matches dyn_core.F90:969-1011 exactly. Replaces the previous scalar KE sync approximation. Gated on duogrid (matching Fortran). Also verified: Fortran's KE scalar sync (dyn_core.F90:1029-1055) is COMMENTED OUT in the oracle.
 - **d_sw5 vorticity flux synchronization**: COMMENTED OUT in the Fortran oracle (dyn_core.F90:1128-1165), noted as "should be applied to have consistent logic". Not implemented.
 
@@ -372,6 +372,14 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
   - `_vorticity_flux()`: vorticity transport flux with 1/sin and boundary overrides (sw_core.F90:416-480)
   - Eliminated ~120 lines of duplicated code
   - Also removed dead branch: `fv3_csw_tendencies` had identical KE computation in both if/else arms
+
+### Resolved in iteration 39 (2026-04-16):
+- **d2a2c_vect face-boundary sin_sg halo fix** ✅
+  - Fortran sw_core.F90:3589-3607 uses sin_sg from the HALO cell for upwind at face boundaries
+  - Python was clamping to nearest interior cell via `max(i_bdy-1, 0)` instead of using cross-face halo values
+  - Now uses `pad_halo(sin_sg)` for correct cross-face sin_sg at boundaries
+  - Fixed for both x-direction (uc/ut at i=0,n) and y-direction (vc/vt at j=0,n)
+  - All rest states remain machine-precision; 86 unit tests pass
 
 ### Verified in iteration 38 (2026-04-16) — line-by-line Fortran trace:
 **d2a2c_vect duogrid branch (sw_core.F90:3419-3706)**:
