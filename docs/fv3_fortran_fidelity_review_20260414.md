@@ -327,6 +327,16 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
   - Includes FV3 corner corrections for non-duogrid (sw_core.F90:396-400)
 - **fv3_cc2c v_c non-orthogonality correction**: investigated — adding v_c correction WORSENS divergence 20x. Current asymmetric correction (u_c only) is empirically optimal. Closed as not-a-bug.
 
+### Resolved in iteration 32 (2026-04-16):
+- **d_sw3 B-grid KE transport ported**: `_bgrid_ke_transport()` in fv3_sw_core.py ✅
+  - B-grid contravariant velocities from cosa_corner/rsin2_corner
+  - Operator-split 1D transport (first-order upwind) of D-grid winds
+  - KE = 0.5*(transported_y * vb + ub * transported_x) (Lin-Rood average)
+  - KE gradient at D-grid edges: ke(i,j)-ke(i+1,j) for u, ke(i,j)-ke(i,j+1) for v
+  - Matches FV3 sw_core.F90:1201-1388 (duogrid branch) and d_sw6:1935-1944
+  - Fixed pre-existing shape mismatch in divergence damping code
+- **d_sw4 analyzed**: for duogrid, d_sw4 is a no-op (corner KE fix is gated on `(.not. duogrid)`)
+
 ### Investigated in iteration 31 (2026-04-16):
 - **Unconditional flux sync tested and rejected**: applying sync to non-duogrid path causes 110x W2 regression (L2 1.53e-03→1.68e-01). PPM boundary asymmetry carries directional accuracy that averaging destroys. Fortran is correct to gate on duogrid only.
 - **Boundary vs interior error analysis**: W2 boundary error is at most 1.38x interior error (face 0, 2). Faces 4, 5 have LOWER boundary than interior error. Production path is at Arakawa-Lamb accuracy limit — no severe face-boundary artifacts.
@@ -335,7 +345,7 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 ### Remaining structural items:
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
 F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vect)
-- Full d_sw B-grid KE transport — required to fully eliminate boundary artifacts
+- ~~Full d_sw B-grid KE transport~~ → ported (iter 32), first-order upwind. PPM upgrade to match xtp_u/ytp_v iord=1 would improve accuracy.
 - Production path (fv3_sw_tendencies) uses Arakawa-Lamb gradient, NOT FV3's c_sw/d_sw operators — pre-existing artifacts originate here, not in fv3_sw_core.py
 - **Duogrid + production path instability**: W2 with duogrid has 370x larger corner tendencies (max |dh/dt|=0.158 vs 4.3e-4 without duogrid), causing NaN blowup. Root cause: `fv3_sw_tendencies` Arakawa-Lamb gradient at cube vertices with duogrid halo exchange gives worse corner accuracy. NOT a flux sync issue — exists independently.
 - **d_sw3 KE flux synchronization**: Fortran averages B-grid KE transport at face boundaries after d_sw3 (dyn_core.F90:969-1011). Our code does not have d_sw3 B-grid KE transport at all. Blocked on porting d_sw3.
