@@ -288,11 +288,9 @@ def compute_transport_quantities(ut, vt, dt, cdgrid):
     yfx_raw = dt * vt   # (6, n, n+1)
 
     # --- x-direction Courant number (FV3 sw_core.F90:849-853) ---
-    # crx = (dt*ut) * rdxa(upwind_cell)  where rdxa is 1/cell_width at cell centres.
-    # Approximate rdxa from face-to-face distances: rdxa(i) ≈ mean(rdxc(i), rdxc(i+1)).
-    rdxc = cdgrid.rdxc  # (6, n+1, n) at u-face positions
-    rdxa_cc = 0.5 * (rdxc[:, :-1, :] + rdxc[:, 1:, :])  # (6, n, n) at cell centres
-    rdxa_pad = pad_halo(rdxa_cc, interp_offsets=grid.halo_interp_offsets)
+    # crx = (dt*ut) * rdxa(upwind_cell)  where rdxa = 1/cell_width.
+    # FV3 computes rdxa from exact face-to-face distance (fv_grid_tools.F90).
+    rdxa_pad = pad_halo(cdgrid.rdxa, interp_offsets=grid.halo_interp_offsets)
     rdxa_upwind = jnp.where(ut > 0,
                             rdxa_pad[:, :n+1, 1:-1],    # cell i-1
                             rdxa_pad[:, 1:n+2, 1:-1])   # cell i
@@ -307,9 +305,7 @@ def compute_transport_quantities(ut, vt, dt, cdgrid):
     xfx = xfx_raw * dy * sin_x
 
     # --- y-direction Courant number ---
-    rdyc = cdgrid.rdyc  # (6, n, n+1) at v-face positions
-    rdya_cc = 0.5 * (rdyc[:, :, :-1] + rdyc[:, :, 1:])  # (6, n, n) at cell centres
-    rdya_pad = pad_halo(rdya_cc, interp_offsets=grid.halo_interp_offsets)
+    rdya_pad = pad_halo(cdgrid.rdya, interp_offsets=grid.halo_interp_offsets)
     rdya_upwind = jnp.where(vt > 0,
                             rdya_pad[:, 1:-1, :n+1],
                             rdya_pad[:, 1:-1, 1:n+2])

@@ -129,6 +129,11 @@ class CubedSphereCDGrid(NamedTuple):
     rdxc: jax.Array        # (6, n+1, n) 1/dxc
     rdyc: jax.Array        # (6, n, n+1) 1/dyc
     rarea_c: jax.Array     # (6, n+1, n+1) 1/area_corner
+    # FV3 cell-width metrics (fv_grid_tools.F90): dxa = x-width of cell (i,j)
+    # = distance between u-face midpoints i and i+1 along row j.
+    # Used for Courant number: crx = dt*ut*rdxa(upwind_cell) (sw_core.F90:850).
+    rdxa: jax.Array        # (6, n, n) 1/dxa at cell centres
+    rdya: jax.Array        # (6, n, n) 1/dya at cell centres
 
     @property
     def n(self) -> int:
@@ -274,6 +279,8 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
     area_c_all : (6, n+1, n+1) dual cell areas
     dxc_all : (6, n+1, n) center-to-center distances in x
     dyc_all : (6, n, n+1) center-to-center distances in y
+    dxa_all : (6, n, n) cell widths in x (face-to-face)
+    dya_all : (6, n, n) cell widths in y (face-to-face)
     """
     import numpy as np
 
@@ -285,6 +292,8 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
     all_area_c = []
     all_dxc = []
     all_dyc = []
+    all_dxa = []
+    all_dya = []
 
     for face in range(6):
         lon_sg, lat_sg = face_gnomonic_to_lonlat(face,
@@ -373,10 +382,40 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
                 dyc[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
         all_dyc.append(dyc)
 
+        # --- dxa: cell width in x = face-to-face distance (FV3 fv_grid_tools.F90) ---
+        # dxa(i,j) = dist from u-face i to u-face i+1 at cell centre row j
+        # On supergrid: u-face i at column 2i, cell-centre row j at row 2j+1
+        dxa = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                si0 = 2 * i        # u-face i
+                si1 = 2 * (i + 1)  # u-face i+1
+                sj = 2 * j + 1     # cell-centre row j
+                chord = np.sqrt((px[si0, sj] - px[si1, sj])**2
+                                + (py[si0, sj] - py[si1, sj])**2
+                                + (pz[si0, sj] - pz[si1, sj])**2)
+                dxa[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+        all_dxa.append(dxa)
+
+        # --- dya: cell width in y = face-to-face distance ---
+        dya = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                si = 2 * i + 1     # cell-centre column i
+                sj0 = 2 * j        # v-face j
+                sj1 = 2 * (j + 1)  # v-face j+1
+                chord = np.sqrt((px[si, sj0] - px[si, sj1])**2
+                                + (py[si, sj0] - py[si, sj1])**2
+                                + (pz[si, sj0] - pz[si, sj1])**2)
+                dya[i, j] = radius * 2.0 * np.arcsin(min(chord / 2.0, 1.0))
+        all_dya.append(dya)
+
     area_c_all = jnp.array(np.stack(all_area_c, axis=0))
     dxc_all = jnp.array(np.stack(all_dxc, axis=0))
     dyc_all = jnp.array(np.stack(all_dyc, axis=0))
-    return area_c_all, dxc_all, dyc_all
+    dxa_all = jnp.array(np.stack(all_dxa, axis=0))
+    dya_all = jnp.array(np.stack(all_dya, axis=0))
+    return area_c_all, dxc_all, dyc_all, dxa_all, dya_all
 
 
 def create_cubed_sphere_cdgrid(
@@ -411,7 +450,7 @@ def create_cubed_sphere_cdgrid(
 
     # FV3 supergrid metrics: area_c, dxc, dyc from 2x-refined grid
     # (same supergrid as sin_sg/cos_sg → mutual consistency)
-    area_c_sg, dxc_sg, dyc_sg = _compute_supergrid_metrics(
+    area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
         n, _face_gnomonic_to_lonlat, radius)
 
     # Cell corner positions (gnomonic grid edges: n+1 per side)
@@ -919,6 +958,10 @@ def create_cubed_sphere_cdgrid(
     rdyc = 1.0 / jnp.maximum(dyc, _TINY)
     rarea_c = 1.0 / jnp.maximum(area_corner, _TINY)
 
+    # FV3 cell-width metrics: exact face-to-face distances from supergrid
+    rdxa = 1.0 / jnp.maximum(dxa_sg, _TINY)  # (6, n, n)
+    rdya = 1.0 / jnp.maximum(dya_sg, _TINY)  # (6, n, n)
+
     # 4-point stencil cell positions at each corner
     x_sw, x_se = x_pad[:, :-1, :-1], x_pad[:, 1:, :-1]
     x_nw, x_ne = x_pad[:, :-1, 1:], x_pad[:, 1:, 1:]
@@ -1017,4 +1060,6 @@ def create_cubed_sphere_cdgrid(
         rdxc=rdxc.astype(_prec),
         rdyc=rdyc.astype(_prec),
         rarea_c=rarea_c.astype(_prec),
+        rdxa=rdxa.astype(_prec),
+        rdya=rdya.astype(_prec),
     )
