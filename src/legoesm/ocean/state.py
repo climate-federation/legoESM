@@ -124,6 +124,7 @@ class OceanConfig(NamedTuple):
     physics: object = None  # OceanPhysicsConfig or None (legacy mode)
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
+    barotropic_staggering: str = "a_grid"  # "a_grid" or "c_grid" (#182)
 
 
 # ==============================================================================
