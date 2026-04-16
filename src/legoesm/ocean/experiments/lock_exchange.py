@@ -195,22 +195,24 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
     else:  # cubed_sphere
         lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
         lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
-        lon = ((lon + 180.0) % 360.0) - 180.0  # normalize to [-180, 180]
-    
+
     T_cold = config.T_cold
     T_warm = config.T_warm
     front_lon = config.front_longitude
-    
+
+    # Wrapping-aware "west of front" test: works for any lon convention
+    west_of_front = ((lon - front_lon + 180.0) % 360.0 - 180.0) < 0.0
+
     if grid_type == "spectral":
         # Spectral grid
         from legoesm.grids.gaussian import sh_analysis_3d, sh_synthesis_3d
-        
+
         T_hat = state.T_hat.data
         T_grid = np.array(sh_synthesis_3d(grid, T_hat), dtype=np.float64)
         mask = np.asarray(state.land_mask_grid.data, dtype=np.float64)
-        
-        # Create temperature front at prime meridian
-        T_field = np.where(lon < front_lon, T_cold, T_warm)
+
+        # Create temperature front at front_longitude
+        T_field = np.where(west_of_front, T_cold, T_warm)
         
         # Apply to all levels with land mask
         nlev = T_grid.shape[-1]
@@ -231,7 +233,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
         nlev = T_data.shape[-1]
         
         # Apply temperature front to all levels
-        T_front = np.where(lon < front_lon, T_cold, T_warm)
+        T_front = np.where(west_of_front, T_cold, T_warm)
         for k in range(nlev):
             T_data[..., k] = T_front * mask
         
