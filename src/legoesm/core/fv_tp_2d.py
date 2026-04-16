@@ -153,14 +153,34 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
                               jnp.maximum(q_hn, q_hnp1))
             al = al.at[:, n + 2, :].set(al_R1)
 
-    # hord=8 fast monotone limiter
-    dm_c = dm[:, 1:-1, :]
-    q_c = qe[:, 2:-2, :]
-    al_L = al[:, :-1, :]
-    al_R = al[:, 1:, :]
-    two_dm = 2.0 * dm_c
-    bl = -jnp.sign(two_dm) * jnp.minimum(jnp.abs(two_dm), jnp.abs(al_L - q_c))
-    br = jnp.sign(two_dm) * jnp.minimum(jnp.abs(two_dm), jnp.abs(al_R - q_c))
+    # hord=9 pmp/lac limiter (FV3 default: hord_dp=9, hord_vt=9)
+    # Less restrictive than hord=8, preserving more sub-grid detail.
+    # FV3 sw_core.F90 xppm lines for iord=9.
+    q_c = qe[:, 2:-2, :]       # (6, n+2, M) — cells at padded indices 2..n+3
+    al_L = al[:, :-1, :]        # al at left edge of each cell
+    al_R = al[:, 1:, :]         # al at right edge of each cell
+
+    # dq[k] = q[k+1] - q[k] for the padded cells
+    dq = qe[:, 1:, :] - qe[:, :-1, :]   # (6, n+5, M) — at padded transitions
+
+    # For bl at cell k (padded index k+2): needs dq at k+2 and k+3
+    # For br at cell k: needs dq at k+1 and k+0
+    # Cell range: padded 2..n+3 → dq indices 2..n+3 for bl, 1..n+2 for br
+    nc = q_c.shape[1]  # n+2 cells
+    pmp_1 = -2.0 * dq[:, 2:2+nc, :]           # -2*dq[j]
+    lac_1 = pmp_1 + 1.5 * dq[:, 3:3+nc, :]    # pmp_1 + 1.5*dq[j+1]
+    pmp_2 = 2.0 * dq[:, 1:1+nc, :]            # 2*dq[j-1]
+    lac_2 = pmp_2 - 1.5 * dq[:, 0:nc, :]      # pmp_2 - 1.5*dq[j-2]
+
+    z = jnp.zeros_like(pmp_1)
+    bl = jnp.minimum(
+        jnp.maximum(jnp.maximum(z, pmp_1), lac_1),
+        jnp.maximum(al_L - q_c,
+                     jnp.minimum(jnp.minimum(z, pmp_1), lac_1)))
+    br = jnp.minimum(
+        jnp.maximum(jnp.maximum(z, pmp_2), lac_2),
+        jnp.maximum(al_R - q_c,
+                     jnp.minimum(jnp.minimum(z, pmp_2), lac_2)))
 
     # pert_ppm at boundary cells
     for k in [0, 1, 2, -3, -2, -1]:
