@@ -327,6 +327,12 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
   - Includes FV3 corner corrections for non-duogrid (sw_core.F90:396-400)
 - **fv3_cc2c v_c non-orthogonality correction**: investigated — adding v_c correction WORSENS divergence 20x. Current asymmetric correction (u_c only) is empirically optimal. Closed as not-a-bug.
 
+### Diagnosed in iteration 35 (2026-04-16):
+- **Root cause of FB instability identified**: c_sw first-order upwind mass transport redistributes height because d2a2c_vect produces transport velocities with non-zero face-boundary divergence. The divergence comes from halo exchange quality in pad_halo at cube vertex corners. Confirmed by running c_sw mass transport alone (no momentum update): h_max grows 5 m/step at C16 for balanced W2. FV3 avoids this with higher-quality MPI halo (ng=3+) and explicit face/corner handling in d2a2c_vect.
+- **d_sw6 replacement formula verified**: u_new = u_old*dx + ke_diff + fy_vort. Dividing by dx gives exactly the incremental formula u_d + (ke_diff + fy_vort)/dx. The replacement vs incremental distinction is NOT the instability source.
+- **Operator-level audit**: all 5 checked items match Fortran exactly (KE scaling, KE gradient sign, duogrid 4th-order stencil, cosa_corner usage, edge_interpolate4).
+- **D-grid vorticity in production path tested and rejected**: breaks geostrophic cancellation (3x W2 regression) despite 4x W5 conservation improvement. Consistent halo errors cancel in balance; mixed sources don't.
+
 ### Resolved in iteration 32 (2026-04-16):
 - **d_sw3 B-grid KE transport ported**: `_bgrid_ke_transport()` in fv3_sw_core.py ✅
   - B-grid contravariant velocities from cosa_corner/rsin2_corner
