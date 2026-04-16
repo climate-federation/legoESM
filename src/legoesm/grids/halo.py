@@ -1299,7 +1299,7 @@ def _face_gnomonic_to_lonlat(
     r = jnp.sqrt(x**2 + y**2 + z**2)
     x, y, z = x / r, y / r, z / r
 
-    lon = jnp.arctan2(y, x)
+    lon = jnp.mod(jnp.arctan2(y, x), 2.0 * jnp.pi)  # [0, 2π)
     lat = jnp.arcsin(jnp.clip(z, -1.0, 1.0))
 
     return lon, lat

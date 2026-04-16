@@ -195,6 +195,7 @@ def _add_temperature_front(state, grid_type: str, grid, z_coord,
     else:  # cubed_sphere
         lat = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
         lon = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lon = ((lon + 180.0) % 360.0) - 180.0  # normalize to [-180, 180]
     
     T_cold = config.T_cold
     T_warm = config.T_warm
