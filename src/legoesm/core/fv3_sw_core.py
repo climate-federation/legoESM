@@ -579,12 +579,18 @@ def _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid):
     return ke_u, ke_v
 
 
-def _del6_vt_flux(nord, damp, q, cdgrid):
+def _del6_vt_flux(nord, damp, q, cdgrid, use_duogrid=False):
     """FV3 del6_vt_flux: del-n damping for relative vorticity (sw_core.F90:2008-2121).
 
     Same Laplacian operator as ``_deln_flux`` but returns raw diffusive fluxes
     instead of adding them to transport fluxes.  Used in d_sw6 for vorticity
     damping when ``damp_v > 1e-5``.
+
+    Halo path: uses ``pad_halo`` for cell-centre scalar exchange (equivalent
+    to Fortran's MPI ``mpp_update_domains``).  For duogrid, the Fortran skips
+    ``copy_corners`` (gated on ``bounded_domain``, sw_core.F90:2060-2061);
+    ``pad_halo`` already includes corner-safe cross-face exchange, so no
+    special duogrid gating is needed in the halo exchange itself.
 
     Parameters
     ----------
@@ -592,6 +598,8 @@ def _del6_vt_flux(nord, damp, q, cdgrid):
     damp : float — pre-scaled coefficient: (damp_v * da_min_c)^(nord+1)
     q : (6, n, n) — relative vorticity at cell centres
     cdgrid : CubedSphereCDGrid
+    use_duogrid : bool — True when duogrid is active (matches Fortran
+        ``bounded_domain`` gating: copy_corners skipped for duogrid)
 
     Returns
     -------
@@ -1759,7 +1767,10 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     if damp_v > 1e-5:
         da_min_c = jnp.min(cdgrid.area_corner)
         damp4 = (damp_v * da_min_c) ** (nord_v + 1)
-        fx2, fy2 = _del6_vt_flux(nord_v, damp4, zeta, cdgrid)
+        dg = cdgrid.base.duogrid
+        _use_dg = dg is not None and dg.ng >= 2
+        fx2, fy2 = _del6_vt_flux(nord_v, damp4, zeta, cdgrid,
+                                  use_duogrid=_use_dg)
         u_d_new = u_d_new + fy2 * rdx_u
         v_d_new = v_d_new - fx2 * rdy_v
 

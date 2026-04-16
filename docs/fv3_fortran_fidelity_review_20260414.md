@@ -527,7 +527,12 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
   - All 86 unit tests + 6 ocean rest state tests pass
   - Visual inspection: cosine bell clean, W2/W5 height/wind_speed/v clean, no new artifacts
 
-### Resolved in iteration 53 (2026-04-16):
+### Resolved in iteration 53-54 (2026-04-16):
+- **_del6_vt_flux duogrid-aware halo path** ✅ (iter 54)
+  - Added `use_duogrid` parameter matching Fortran `bounded_domain` gating (sw_core.F90:2060-2061)
+  - For duogrid, Fortran skips `copy_corners`; our `pad_halo` already provides corner-safe cross-face exchange
+  - Calling site in `_d_sw_native` now passes `use_duogrid` derived from `cdgrid.base.duogrid`
+  - Documented that `pad_halo` is equivalent to Fortran's MPI scalar exchange for duogrid path
 - **Higher-order divergence damping: proper divg_u/divg_v metrics** ✅
   - Replaced 5-point Laplacian approximation with Fortran's metric-weighted divergence-of-gradient
   - `divg_u = sina_v * dyc / dx` at (6, n, n+1) — matches fv_grid_utils.F90:717
