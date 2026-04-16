@@ -440,10 +440,16 @@ F3-5. ~~d2a2c_vect corner 2×2 solve~~ — present in `_d_sw1_recompute_ut_vt` (
 ### Iteration 17: rsin_u uniformity fix
 Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhere, eliminating a 4.7% metric discontinuity. The cosa_u boundary gradient was verified to be smooth (4.88e-02 at boundary vs 5.29e-02 at interior — no discontinuity).
 
-### Evaluation results (all pass, updated after iteration 40, 2026-04-16):
+### Resolved in iteration 42 (2026-04-16):
+- **fv_tp_2d PPM limiting upgraded to hord=9** ✅
+  - Fortran defaults hord_dp=9, hord_vt=9 (fv_arrays.F90:339,343); our _ppm_1d used hord=8
+  - hord=9 pmp/lac limiting is less restrictive than hord=8's 2*dm monotone bound
+  - Cosine bell improved 5-7%: L1 1.26e-01→1.20e-01, Linf 1.32e-01→1.23e-01
+
+### Evaluation results (all pass, updated after iteration 42, 2026-04-16):
 - Williamson 2: L2=1.53e-03, Linf=4.07e-03 (production path)
 - Williamson 5: mass drift=1.42e-05
-- Cosine bell: L1=1.26e-01, L2=1.22e-01, Linf=1.32e-01 (improved 0.8% from rdxa Courant fix)
+- Cosine bell: L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01 (improved 5-7% from hord=9 PPM fix)
 - Ocean rest state: all 4 paths (production/FB × no-DG/DG) PASS at machine precision (h_err=0)
 - 86 unit tests pass; no regressions
 - Visual inspection: cosine bell clean, W2 height/wind_speed clean, W5 height/v clean
