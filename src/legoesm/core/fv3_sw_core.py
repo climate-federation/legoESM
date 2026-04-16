@@ -1109,6 +1109,137 @@ def _uc_to_ut(uc, vc, u_d, v_d, cdgrid):
     return ut, vt
 
 
+def _ppm_transport_1d(field, courant, axis):
+    """PPM hord=9 transport of a staggered field along one axis.
+
+    Implements the Fortran ytp_v / xtp_u (sw_core.F90:2897-3353,
+    2540-2894) for the jord>=8 branch with jord=9 limiting.
+    Used for B-grid KE transport in d_sw3.
+
+    The field has N cells in the sweep direction. The Courant number
+    has N+1 interfaces (corners). Transport produces N+1 output values
+    at the interface positions.
+
+    For the duogrid path, boundary handling is skipped — the interior
+    PPM stencil is applied everywhere, using edge-copy padding where
+    the stencil reaches beyond the domain.
+
+    Parameters
+    ----------
+    field : (6, ..., N, ...) — field to transport.
+    courant : (6, ..., N+1, ...) — Courant number at interfaces.
+    axis : int (1 or 2) — sweep axis.
+
+    Returns
+    -------
+    flux : (6, ..., N+1, ...) — transported field at interfaces.
+    """
+    # Transpose so sweep axis is last for uniform indexing
+    if axis == 1:
+        v = field   # (6, N, M) → sweep along axis 1
+        c = courant  # (6, N+1, M)
+    else:
+        v = jnp.swapaxes(field, 1, 2)    # (6, M, N) → (6, N, M)
+        c = jnp.swapaxes(courant, 1, 2)  # (6, M, N+1) → (6, N+1, M)
+
+    nn = v.shape[1]  # N cells in sweep direction
+
+    # Pad field with halo=4 for PPM hord=9 stencil (dm needs j±1, al needs dm±1,
+    # bl/br need dq at j-2..j+1, flux needs bl/br at j-1 and j)
+    h3 = 4
+    vp = jnp.pad(v, [(0, 0), (h3, h3), (0, 0)], mode='edge')  # (6, N+8, M)
+
+    # --- Monotone slopes (FV3 sw_core.F90:3165-3171) ---
+    # dm[j] at each padded cell. We compute for padded cells 1..N+4 (need j±1).
+    xt = 0.25 * (vp[:, 2:, :] - vp[:, :-2, :])  # (6, N+4, M), at padded cells 1..N+4
+    vm = vp[:, 1:-1, :]  # (6, N+4, M)
+    vhi = jnp.maximum(jnp.maximum(vp[:, :-2, :], vm), vp[:, 2:, :])
+    vlo = jnp.minimum(jnp.minimum(vp[:, :-2, :], vm), vp[:, 2:, :])
+    dm = jnp.sign(xt) * jnp.minimum(
+        jnp.abs(xt), jnp.minimum(vhi - vm, vm - vlo))
+    # dm[k] = slope at padded cell k+1 (k=0..N+3)
+
+    # --- Cell differences (FV3 sw_core.F90:3173-3177) ---
+    dq = vp[:, 1:, :] - vp[:, :-1, :]  # (6, N+5, M), dq[k] = v[k+1]-v[k] at padded k
+
+    # --- Edge values (FV3 sw_core.F90:3180-3183) ---
+    # al at interface between padded cells k and k+1:
+    #   al = 0.5*(v[k]+v[k+1]) + r3*(dm_at_k - dm_at_k+1)
+    # dm_at_k = dm[k-1] (dm starts at padded cell 1, so dm index = padded cell - 1)
+    r3 = 1.0 / 3.0
+    al = (0.5 * (vp[:, 1:-2, :] + vp[:, 2:-1, :])
+          + r3 * (dm[:, :-1, :] - dm[:, 1:, :]))
+    # al[k] = interface between padded cells k+1 and k+2, k=0..N+2
+    # al shape: (6, N+3, M)
+
+    # --- PPM reconstruction hord=9 (sw_core.F90:3194-3204) ---
+    # For cell j (original 0-based), padded index = j+3:
+    #   al_left  = al at interface j (left of cell)  = al[j+1]  (al index = padded_cell-1 = j+3-1-1 = j+1)
+    #   al_right = al at interface j+1 (right of cell) = al[j+2]
+    #   dq at j = dq[j+2]  (dq at padded j+2 to j+3)
+    #
+    # Need bl/br for cells -1..N (for flux at interfaces 0..N).
+    nc = nn + 2  # cells -1..N
+
+    # Indices in padded coordinates for cells -1..N:
+    # padded cell = original + 3, so cells -1..N = padded 2..N+3
+    # al_left for cell j = al[padded_cell-2] = al[j+1]
+    # al_right for cell j = al[padded_cell-1] = al[j+2]
+    al_l = al[:, 1:1+nc, :]    # al_left for cells -1..N
+    al_r = al[:, 2:2+nc, :]    # al_right for cells -1..N
+    v_c = vp[:, h3:h3+nc, :]   # v at cells -1..N (padded 2..N+3)
+
+    # dq for cells: dq[padded_cell-1] since dq[k] = v[k+1]-v[k]
+    # For cell j (padded j+3): dq_at_j = dq[j+2], dq_at_j+1 = dq[j+3], etc.
+    dq_c = dq[:, 1:1+nc, :]      # dq[j] for cells -1..N (dq at padded j+2 → index j+2-1=j+1... hmm)
+
+    # Let me use explicit padded indexing for clarity:
+    # For cell at padded index p (p=2..N+3):
+    #   pmp_1 = -2 * dq[p-1]  (dq between padded p-1 and p = dq at index p-1)
+    #   lac_1 = pmp_1 + 1.5 * dq[p]  (dq between padded p and p+1)
+    #   pmp_2 = 2 * dq[p-2]
+    #   lac_2 = pmp_2 - 1.5 * dq[p-3]
+    p_start = h3 - 1  # padded start for cells we need = 2
+    pmp_1 = -2.0 * dq[:, p_start:p_start+nc, :]
+    lac_1 = pmp_1 + 1.5 * dq[:, p_start+1:p_start+1+nc, :]
+    pmp_2 = 2.0 * dq[:, p_start-1:p_start-1+nc, :]
+    lac_2 = pmp_2 - 1.5 * dq[:, p_start-2:p_start-2+nc, :]
+
+    z = jnp.zeros_like(pmp_1)
+    bl = jnp.minimum(
+        jnp.maximum(jnp.maximum(z, pmp_1), lac_1),
+        jnp.maximum(al_l - v_c,
+                     jnp.minimum(jnp.minimum(z, pmp_1), lac_1)))
+    z2 = jnp.zeros_like(pmp_2)
+    br = jnp.minimum(
+        jnp.maximum(jnp.maximum(z2, pmp_2), lac_2),
+        jnp.maximum(al_r - v_c,
+                     jnp.minimum(jnp.minimum(z2, pmp_2), lac_2)))
+    # bl, br: (6, nc, M) for cells -1..N (index 0..nc-1)
+
+    # --- Flux evaluation (FV3 sw_core.F90:3339-3349) ---
+    # Interface j (0..N): use cell j-1 (bl/br index j) for c>0, cell j (index j+1) for c<0
+    v_pos = vp[:, h3-1:h3-1+nn+1, :]  # v[j-1] for j=0..N
+    v_neg = vp[:, h3:h3+nn+1, :]      # v[j] for j=0..N
+    bl_pos = bl[:, :nn+1, :]           # bl[j-1]
+    br_pos = br[:, :nn+1, :]           # br[j-1]
+    bl_neg = bl[:, 1:nn+2, :]          # bl[j]
+    br_neg = br[:, 1:nn+2, :]          # br[j]
+
+    cfl = jnp.minimum(jnp.abs(c), 1.0)
+
+    flux_pos = v_pos + (1.0 - cfl) * (br_pos - cfl * (bl_pos + br_pos))
+    flux_neg = v_neg + (1.0 + (-cfl)) * (bl_neg + (-cfl) * (bl_neg + br_neg))
+
+    flux = jnp.where(c > 0, flux_pos, flux_neg)
+
+    # Transpose back
+    if axis == 2:
+        flux = jnp.swapaxes(flux, 1, 2)
+
+    return flux
+
+
 def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     """FV3 d_sw3: B-grid KE transport at D-grid corners.
 
@@ -1149,29 +1280,18 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
 
     vb = dt5 * (vc_sum - uc_sum * cosa) * rsina  # (6, n+1, n+1)
 
-    # --- Step 2: transport v_d in y-direction using vb ---
-    # v_d: (6, n+1, n) at corner rows (n+1) and cell columns (n).
-    # Transport along axis 2 (columns) using vb as Courant number.
-    # vb is at corners (n+1, n+1); we need the Courant at each v_d position.
-    # v_d(i, j) sits between corners (i, j) and (i, j+1) — use vb average.
-    # For simplified PPM: use first-order upwind along y.
-    # Pad v_d in y-direction (axis 2): (6, n+1, n) → (6, n+1, n+2)
-    v_d_pad_y = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    # Upwind face value at corner j (between v_d cells j-1 and j):
-    v_left_y = v_d_pad_y[:, :, :-1]   # (6, n+1, n+1)
-    v_right_y = v_d_pad_y[:, :, 1:]   # (6, n+1, n+1)
-    transported_y = jnp.where(vb > 0, v_left_y, v_right_y)  # (6, n+1, n+1)
+    # --- Step 2: transport v_d in y-direction using vb (PPM hord=9) ---
+    # FV3 sw_core.F90:1315 calls ytp_v with hord_mt=9 (default).
+    # v_d: (6, n+1, n) transported along axis 2 by Courant vb: (6, n+1, n+1).
+    transported_y = _ppm_transport_1d(v_d, vb, axis=2)
 
     # --- Step 3: B-grid contravariant u-velocity (Courant number) ---
     ub = dt5 * (uc_sum - vc_sum * cosa) * rsina  # (6, n+1, n+1)
 
-    # --- Step 4: transport u_d in x-direction using ub ---
-    # u_d: (6, n, n+1) at cell rows (n) and corner columns (n+1).
-    # Transport along axis 1 (rows) using ub as Courant number.
-    u_d_pad_x = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    u_left_x = u_d_pad_x[:, :-1, :]   # (6, n+1, n+1)
-    u_right_x = u_d_pad_x[:, 1:, :]   # (6, n+1, n+1)
-    transported_x = jnp.where(ub > 0, u_left_x, u_right_x)  # (6, n+1, n+1)
+    # --- Step 4: transport u_d in x-direction using ub (PPM hord=9) ---
+    # FV3 sw_core.F90:1373 calls xtp_u with hord_mt=9.
+    # u_d: (6, n, n+1) transported along axis 1 by Courant ub: (6, n+1, n+1).
+    transported_x = _ppm_transport_1d(u_d, ub, axis=1)
 
     # --- Step 5: BGRID_NE component sync (FV3 dyn_core.F90:969-1011) ---
     # FV3 syncs the transport COMPONENTS at face boundaries before
