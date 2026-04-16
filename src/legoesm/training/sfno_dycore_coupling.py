@@ -25,6 +25,77 @@ from legoesm.ml.channel_packing import PE3DChannelSpec
 from legoesm.driver.physics_pipeline import PhysicsOutput
 
 
+_OPTIONAL_3D_OUTPUT_FIELDS = (
+    "du_dt",
+    "dv_dt",
+    "dq_i_dt",
+    "dq_s_dt",
+    "dq_g_dt",
+    "dN_c_dt",
+    "dN_r_dt",
+    "dN_i_dt",
+)
+_PHYSICS_OUTPUT_FIELDS = set(getattr(PhysicsOutput, "_fields", ()))
+
+
+def _parse_step_unified_tail(args):
+    """Support both legacy and conv_prog-extended step_unified signatures."""
+    if len(args) == 19:
+        return None, args
+    if len(args) == 20:
+        return args[0], args[1:]
+    raise TypeError(
+        "step_unified expected 19 positional tail arguments "
+        "(legacy) or 20 (with conv_prog)"
+    )
+
+
+def _physics_output_kwargs(
+    *,
+    dT_dt,
+    dq_v_dt,
+    dq_c_dt,
+    dq_r_dt,
+    precip,
+    sw_net_sfc,
+    lw_net_sfc,
+    sw_up_toa,
+    lw_up_toa,
+    sw_down_toa,
+    reference_3d,
+    template=None,
+    conv_prog=None,
+):
+    kwargs = dict(
+        dT_dt=dT_dt,
+        dq_v_dt=dq_v_dt,
+        dq_c_dt=dq_c_dt,
+        dq_r_dt=dq_r_dt,
+        precip=precip,
+        sw_net_sfc=sw_net_sfc,
+        lw_net_sfc=lw_net_sfc,
+        sw_up_toa=sw_up_toa,
+        lw_up_toa=lw_up_toa,
+        sw_down_toa=sw_down_toa,
+    )
+    zeros_3d = jnp.zeros_like(reference_3d)
+    for field_name in _OPTIONAL_3D_OUTPUT_FIELDS:
+        if field_name in _PHYSICS_OUTPUT_FIELDS:
+            kwargs[field_name] = (
+                getattr(template, field_name, zeros_3d)
+                if template is not None else zeros_3d
+            )
+    if "conv_prog" in _PHYSICS_OUTPUT_FIELDS:
+        conv_prog_value = (
+            getattr(template, "conv_prog", conv_prog)
+            if template is not None else conv_prog
+        )
+        if conv_prog_value is None:
+            conv_prog_value = jnp.asarray(0.0, dtype=reference_3d.dtype)
+        kwargs["conv_prog"] = conv_prog_value
+    return kwargs
+
+
 class SFNOPhysics(eqx.Module):
     """SFNO wrapper producing PhysicsOutput from grid-space fields.
 
@@ -71,16 +142,19 @@ class SFNOPhysics(eqx.Module):
         zeros_2d = jnp.zeros(p_s.shape, dtype=p_s.dtype)
 
         return PhysicsOutput(
-            dT_dt=dT_dt,
-            dq_v_dt=dq_v_dt,
-            dq_c_dt=zeros_3d,
-            dq_r_dt=zeros_3d,
-            precip=zeros_2d,
-            sw_net_sfc=zeros_2d,
-            lw_net_sfc=zeros_2d,
-            sw_up_toa=zeros_2d,
-            lw_up_toa=zeros_2d,
-            sw_down_toa=zeros_2d,
+            **_physics_output_kwargs(
+                dT_dt=dT_dt,
+                dq_v_dt=dq_v_dt,
+                dq_c_dt=zeros_3d,
+                dq_r_dt=zeros_3d,
+                precip=zeros_2d,
+                sw_net_sfc=zeros_2d,
+                lw_net_sfc=zeros_2d,
+                sw_up_toa=zeros_2d,
+                lw_up_toa=zeros_2d,
+                sw_down_toa=zeros_2d,
+                reference_3d=T,
+            )
         )
 
 
@@ -131,19 +205,34 @@ def make_sfno_step_unified(
             "traditional_step_unified is required for mode='correction'"
         )
 
-    def step_unified(
-        need_rad, T, p_s, q_v, q_c, q_r, u, v,
-        sst, sic, lat, lon,
-        day_of_year, seconds_of_day, dt,
-        solar_weights, s_0,
-        o3_vmr, aerosol_od,
-        held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-        **kwargs,
-    ):
+    def step_unified(need_rad, T, p_s, q_v, q_c, q_r, *args, **kwargs):
+        conv_prog, tail = _parse_step_unified_tail(args)
+        (
+            u,
+            v,
+            sst,
+            sic,
+            lat,
+            lon,
+            day_of_year,
+            seconds_of_day,
+            dt,
+            solar_weights,
+            s_0,
+            o3_vmr,
+            aerosol_od,
+            held_dT_rad,
+            held_sw_net_sfc,
+            held_lw_net_sfc,
+            held_sw_up_toa,
+            held_lw_up_toa,
+            held_sw_down_toa,
+        ) = tail
         # SFNO tendency prediction from prognostic fields
         phis = kwargs.get("phis", jnp.zeros_like(p_s))
         sfno_out = sfno_physics(T, u, v, q_v, p_s, phis, dt)
+        if "conv_prog" in _PHYSICS_OUTPUT_FIELDS and conv_prog is not None:
+            sfno_out = sfno_out._replace(conv_prog=conv_prog)
 
         if mode == "replacement":
             held_new = (
@@ -153,28 +242,35 @@ def make_sfno_step_unified(
             return sfno_out, held_new
 
         # mode == "correction": traditional physics + SFNO correction
-        trad_out, held_new = traditional_step_unified(
-            need_rad, T, p_s, q_v, q_c, q_r, u, v,
-            sst, sic, lat, lon,
+        trad_args = [need_rad, T, p_s, q_v, q_c, q_r]
+        if conv_prog is not None:
+            trad_args.append(conv_prog)
+        trad_args.extend([
+            u, v, sst, sic, lat, lon,
             day_of_year, seconds_of_day, dt,
             solar_weights, s_0,
             o3_vmr, aerosol_od,
             held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
             held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-            **kwargs,
-        )
+        ])
+        trad_out, held_new = traditional_step_unified(*trad_args, **kwargs)
 
         corrected = PhysicsOutput(
-            dT_dt=trad_out.dT_dt + sfno_out.dT_dt,
-            dq_v_dt=trad_out.dq_v_dt + sfno_out.dq_v_dt,
-            dq_c_dt=trad_out.dq_c_dt + sfno_out.dq_c_dt,
-            dq_r_dt=trad_out.dq_r_dt + sfno_out.dq_r_dt,
-            precip=trad_out.precip,
-            sw_net_sfc=trad_out.sw_net_sfc,
-            lw_net_sfc=trad_out.lw_net_sfc,
-            sw_up_toa=trad_out.sw_up_toa,
-            lw_up_toa=trad_out.lw_up_toa,
-            sw_down_toa=trad_out.sw_down_toa,
+            **_physics_output_kwargs(
+                dT_dt=trad_out.dT_dt + sfno_out.dT_dt,
+                dq_v_dt=trad_out.dq_v_dt + sfno_out.dq_v_dt,
+                dq_c_dt=trad_out.dq_c_dt + sfno_out.dq_c_dt,
+                dq_r_dt=trad_out.dq_r_dt + sfno_out.dq_r_dt,
+                precip=trad_out.precip,
+                sw_net_sfc=trad_out.sw_net_sfc,
+                lw_net_sfc=trad_out.lw_net_sfc,
+                sw_up_toa=trad_out.sw_up_toa,
+                lw_up_toa=trad_out.lw_up_toa,
+                sw_down_toa=trad_out.sw_down_toa,
+                reference_3d=trad_out.dT_dt,
+                template=trad_out,
+                conv_prog=conv_prog,
+            )
         )
         return corrected, held_new
 
