@@ -329,7 +329,86 @@ def compute_transport_quantities(ut, vt, dt, cdgrid):
 # fv_tp_2d: Lin-Rood 2D transport
 # =========================================================================
 
-def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid):
+def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
+    """FV3 deln_flux: del-n damping for cell-mean values (tp_core.F90:1217-1365).
+
+    Adds diffusive fluxes to the transport fluxes ``fx``/``fy`` to provide
+    del-2 (nord=0), del-4 (nord=1), or del-6 (nord=2) damping.
+
+    Currently implements nord=0 (del-2).  Higher orders require iterative
+    Laplacian application with intermediate halo exchanges.
+
+    Parameters
+    ----------
+    nord : int — damping order (0=del-2, 1=del-4, ...)
+    damp : float — damping coefficient (pre-scaled: (damp_c * da_min)^(nord+1))
+    q : (6, n, n) — transported field (cell-mean values)
+    fx : (6, n+1, n) — x-direction transport flux (modified in-place)
+    fy : (6, n, n+1) — y-direction transport flux (modified in-place)
+    cdgrid : CubedSphereCDGrid
+    mass : (6, n, n) or None — mass field for mass-weighted damping
+
+    Returns
+    -------
+    fx, fy : modified fluxes with diffusive contribution added
+    """
+    n = cdgrid.n
+    grid = cdgrid.base
+    sg = cdgrid.sin_sg
+    dy = cdgrid.dy_edge_x   # (6, n+1, n) — edge length at u-faces
+    dx = cdgrid.dx_edge_y   # (6, n, n+1) — edge length at v-faces
+    rdxc = cdgrid.rdxc       # (6, n+1, n)
+    rdyc = cdgrid.rdyc       # (6, n, n+1)
+    rarea = 1.0 / grid.area  # (6, n, n)
+
+    # Step 1: initialize d2 (tp_core.F90:1253-1265)
+    if mass is None:
+        d2 = damp * q
+    else:
+        d2 = q
+
+    # Step 2: Laplacian diffusive fluxes (tp_core.F90:1270-1290, USE_SG path)
+    # fx2 = 0.5*(sin_sg(i-1,j,E)+sin_sg(i,j,W)) * dy * (d2[i-1]-d2[i]) * rdxc
+    d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+    sin_E = sg[:, :, :, 2]   # E-edge
+    sin_W = sg[:, :, :, 0]   # W-edge
+    sin_E_pad = pad_halo(sin_E, interp_offsets=grid.halo_interp_offsets)
+    sin_W_pad = pad_halo(sin_W, interp_offsets=grid.halo_interp_offsets)
+    sin_uv_x = 0.5 * (sin_E_pad[:, :n+1, 1:-1] + sin_W_pad[:, 1:n+2, 1:-1])
+    fx2 = sin_uv_x * dy * (d2_pad[:, :-1, 1:-1] - d2_pad[:, 1:, 1:-1]) * rdxc
+
+    sin_N = sg[:, :, :, 3]   # N-edge
+    sin_S = sg[:, :, :, 1]   # S-edge
+    sin_N_pad = pad_halo(sin_N, interp_offsets=grid.halo_interp_offsets)
+    sin_S_pad = pad_halo(sin_S, interp_offsets=grid.halo_interp_offsets)
+    sin_uv_y = 0.5 * (sin_N_pad[:, 1:-1, :n+1] + sin_S_pad[:, 1:-1, 1:n+2])
+    fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, :-1] - d2_pad[:, 1:-1, 1:]) * rdyc
+
+    # Step 3: Higher-order iteration (nord > 0, tp_core.F90:1298-1331)
+    for _it in range(nord):
+        # Compute divergence of diffusive fluxes
+        d2 = (fx2[:, :-1, :] - fx2[:, 1:, :] + fy2[:, :, :-1] - fy2[:, :, 1:]) * rarea
+        # Re-exchange and recompute fluxes with sign flip (d2[i]-d2[i-1])
+        d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+        fx2 = sin_uv_x * dy * (d2_pad[:, 1:, 1:-1] - d2_pad[:, :-1, 1:-1]) * rdxc
+        fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, 1:] - d2_pad[:, 1:-1, :-1]) * rdyc
+
+    # Step 4: Add diffusive fluxes to transport fluxes (tp_core.F90:1339-1363)
+    if mass is not None:
+        mass_pad = pad_halo(mass, interp_offsets=grid.halo_interp_offsets)
+        mass_u = 0.5 * (mass_pad[:, :-1, 1:-1] + mass_pad[:, 1:, 1:-1])  # (6, n+1, n)
+        mass_v = 0.5 * (mass_pad[:, 1:-1, :-1] + mass_pad[:, 1:-1, 1:])  # (6, n, n+1)
+        fx = fx + 0.5 * damp * mass_u * fx2
+        fy = fy + 0.5 * damp * mass_v * fy2
+    else:
+        fx = fx + fx2
+        fy = fy + fy2
+
+    return fx, fy
+
+
+def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
+             nord=None, damp_c=None, mass=None):
     """Lin-Rood operator-split 2D transport (Putman & Lin 2007)."""
     n = cdgrid.n
     grid = cdgrid.base
@@ -368,8 +447,21 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid):
     q_j_pad = pad_halo(q_j, halo=2, interp_offsets=offsets_h2)
     fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1)
 
-    fx = 0.5 * (fx1 + fx2) * xfx
-    fy = 0.5 * (fy1 + fy2) * yfx
+    if mass is not None:
+        # With mass: fx = 0.5*(fx1+fx2)*mfx, fy = 0.5*(fy1+fy2)*mfy
+        # (tp_core.F90:188-196).  Here mfx/mfy are the mass fluxes = xfx/yfx.
+        fx = 0.5 * (fx1 + fx2) * xfx
+        fy = 0.5 * (fy1 + fy2) * yfx
+    else:
+        # Without mass: fx = 0.5*(fx1+fx2)*xfx, fy = 0.5*(fy1+fy2)*yfx
+        # (tp_core.F90:207-216)
+        fx = 0.5 * (fx1 + fx2) * xfx
+        fy = 0.5 * (fy1 + fy2) * yfx
+
+    # Del-n damping (tp_core.F90:197-201 and 217-222)
+    if nord is not None and damp_c is not None and damp_c > 1e-4:
+        damp = (damp_c * jnp.min(cdgrid.base.area)) ** (nord + 1)
+        fx, fy = _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=mass)
 
     # Duogrid flux synchronization (see cgrid_mass_flux_divergence for rationale).
     dg = cdgrid.base.duogrid

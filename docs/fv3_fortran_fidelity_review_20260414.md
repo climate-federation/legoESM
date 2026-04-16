@@ -504,7 +504,7 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
 - Metrics: cosa_u/rsin_u from sin_sg, supergrid dxc/dyc/area_corner, exact rdxa/rdya ✓
 
 ### Remaining conditional gaps (only activate for non-default parameters):
-- **deln_flux** (tp_core.F90:200): del-n damping in fv_tp_2d. Only called when `damp_c > 1e-4` + `nord >= 0`. NOT implemented in Python. Irrelevant when damp_c=0 (our default).
+- **deln_flux** (tp_core.F90:1217-1365): del-n damping in fv_tp_2d. IMPLEMENTED as `_deln_flux` in fv_tp_2d.py (iter 49) and wired into `fv_tp_2d` via optional `nord`/`damp_c`/`mass` parameters. Activated when `damp_c > 1e-4`. Supports nord=0 (del-2) natively; nord>0 via iterative Laplacian with pad_halo exchanges.
 - **divergence_corner_duo** (sw_core.F90:2345-2447): corner divergence with face-boundary zeroing and 0.25 adjacent-cell attenuation. Only called when `nord > 0` in c_sw. IMPLEMENTED as `_divergence_corner_duo` in fv3_sw_core.py (iter 48) but not yet wired into c_sw flow (requires nord parameter plumbing).
 - **Vorticity damping** (sw_core.F90:1948-2000): del-n damping of vorticity via `del6_vt_flux`. Only when `damp_v > 1e-5`. NOT implemented.
 - **Divergence heating** (sw_core.F90:1953-1986): KE→heat conversion from divergence damping. Only when `d_con > 1e-5`. NOT implemented.
