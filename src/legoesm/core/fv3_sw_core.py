@@ -828,18 +828,16 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
 
     else:
         # --- Higher-order divergence damping (sw_core.F90:1725-1821) ---
-        # For nord > 0, use _divergence_corner_duo for the iterative part
-        # and add del-2 + del-(2*nord+2) composite damping.
-        #
-        # Simplified: for the initial FB path, use the _divergence_corner_duo
-        # formulation which already handles nord > 0 structure.
+        # Matches Fortran structure: _divergence_corner_duo for initial divg_d,
+        # then nord iterations of metric-weighted Laplacian using divg_u/divg_v,
+        # plus del-2 + del-(2*nord+2) composite damping.
         divg_d = _divergence_corner_duo(u_d, v_d, ua, va, cdgrid)
         delpc = divg_d  # save for del-2 part
 
-        # del-(2*nord+2) coefficient
+        # del-(2*nord+2) coefficient (sw_core.F90:1811)
         dd8 = (da_min_c * d4_bg) ** (nord + 1)
 
-        # del-2 part (from Smagorinsky)
+        # del-2 part (from Smagorinsky, sw_core.F90:1790-1805)
         if dddmp > 1e-5:
             # Interpolate relative vorticity to corners for Smagorinsky
             rarea = 1.0 / cdgrid.base.area
@@ -857,24 +855,48 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         else:
             damp2 = da_min_c * d2_bg
 
-        # Iterated Laplacian: apply (nord) iterations to divg_d.
-        # Fortran sw_core.F90:1737-1787 iterates the discrete Laplacian
-        # nord times using divg_u/divg_v metrics with fill_corner calls.
-        # For single-process with ng=1, we approximate by using rarea_c-scaled
-        # finite differences on the corner grid.  Proper implementation needs
-        # corner-stagger divg_u/divg_v metrics and intermediate halo exchanges.
+        # --- Iterated Laplacian using divg_u/divg_v metrics ---
+        # Fortran sw_core.F90:1737-1787: nord iterations of the discrete
+        # divergence-of-gradient operator on the corner grid.
         #
-        # For nord=1: one Laplacian iteration of divg_d at corners.
-        # divg_d: (6, n+1, n+1) corner stagger
-        # Laplacian at corner (i,j) = sum of differences to 4 neighbours / area
-        divg_d_pad = jnp.pad(divg_d, [(0, 0), (1, 1), (1, 1)], mode='edge')
-        lap_divg = (divg_d_pad[:, 2:, 1:-1] + divg_d_pad[:, :-2, 1:-1]
-                    + divg_d_pad[:, 1:-1, 2:] + divg_d_pad[:, 1:-1, :-2]
-                    - 4.0 * divg_d)
-        # Scale by area: on uniform grid, this gives the standard 5-point Laplacian.
-        # On stretched grid, FV3 uses divg_u/divg_v metrics. This approximation
-        # is faithful to O(dx^2) for quasi-uniform cubed sphere.
-        ke_damping = damp2 * delpc + dd8 * lap_divg
+        # divg_u(i,j) = sina_v * dyc / dx  at (6, n, n+1) positions
+        # divg_v(i,j) = sina_u * dxc / dy  at (6, n+1, n) positions
+        # (fv_grid_utils.F90:709-735)
+        dx = cdgrid.dx_edge_y   # (6, n, n+1)
+        dy = cdgrid.dy_edge_x   # (6, n+1, n)
+        divg_u_met = sina_v * dyc / jnp.maximum(dx, _EPS)  # (6, n, n+1)
+        divg_v_met = sina_u * dxc / jnp.maximum(dy, _EPS)  # (6, n+1, n)
+
+        for _it in range(nord):
+            # Pad divg_d at corner stagger (n+1, n+1) → (n+3, n+3)
+            divg_d_pad = jnp.pad(divg_d, [(0, 0), (1, 1), (1, 1)],
+                                 mode='edge')
+            # Pad metrics for extended gradient stencil
+            divg_u_pad = jnp.pad(divg_u_met, [(0, 0), (1, 1), (0, 0)],
+                                 mode='edge')  # (6, n+2, n+1)
+            divg_v_pad = jnp.pad(divg_v_met, [(0, 0), (0, 0), (1, 1)],
+                                 mode='edge')  # (6, n+1, n+2)
+
+            # x-gradient: vc(i,j) = (divg_d(i+1,j)-divg_d(i,j)) * divg_u(i,j)
+            # At (6, n+2, n+1) positions (sw_core.F90:1748-1752)
+            vc_lap = ((divg_d_pad[:, 1:n+3, 1:n+2]
+                       - divg_d_pad[:, 0:n+2, 1:n+2]) * divg_u_pad)
+
+            # y-gradient: uc(i,j) = (divg_d(i,j+1)-divg_d(i,j)) * divg_v(i,j)
+            # At (6, n+1, n+2) positions (sw_core.F90:1756-1760)
+            uc_lap = ((divg_d_pad[:, 1:n+2, 1:n+3]
+                       - divg_d_pad[:, 1:n+2, 0:n+2]) * divg_v_pad)
+
+            # Convergence at corners (6, n+1, n+1) (sw_core.F90:1765-1769)
+            # divg_d(i,j) = uc(i,j-1) - uc(i,j) + vc(i-1,j) - vc(i,j)
+            divg_d = (uc_lap[:, :, :-1] - uc_lap[:, :, 1:]
+                      + vc_lap[:, :-1, :] - vc_lap[:, 1:, :])
+
+            # Scale by rarea_c (sw_core.F90:1780-1784)
+            divg_d = divg_d * rarea_c
+
+        # Composite damping: del-2 + del-(2*nord+2) (sw_core.F90:1814-1820)
+        ke_damping = damp2 * delpc + dd8 * divg_d
 
     return ke_damping
 

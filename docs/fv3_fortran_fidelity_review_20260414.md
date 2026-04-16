@@ -527,13 +527,23 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
   - All 86 unit tests + 6 ocean rest state tests pass
   - Visual inspection: cosine bell clean, W2/W5 height/wind_speed/v clean, no new artifacts
 
-### Remaining conditional gaps (partially wired):
+### Resolved in iteration 53 (2026-04-16):
+- **Higher-order divergence damping: proper divg_u/divg_v metrics** ✅
+  - Replaced 5-point Laplacian approximation with Fortran's metric-weighted divergence-of-gradient
+  - `divg_u = sina_v * dyc / dx` at (6, n, n+1) — matches fv_grid_utils.F90:717
+  - `divg_v = sina_u * dxc / dy` at (6, n+1, n) — matches fv_grid_utils.F90:724
+  - Iterative Laplacian: x-gradient via divg_u, y-gradient via divg_v, convergence at corners
+  - Matches sw_core.F90:1737-1787 exactly for duogrid (fill_corners skipped)
+  - Edge-padding for corner stagger consistent with Fortran duogrid behavior
+  - All metrics unchanged: W2 L2=1.53e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01
+
+### Remaining conditional gaps (all implemented and wired):
 - **deln_flux** (tp_core.F90:1217-1365): IMPLEMENTED and WIRED into `fv_tp_2d` (iter 49). Activated when `damp_c > 1e-4`.
 - **divergence_corner_duo** (sw_core.F90:2345-2447): IMPLEMENTED (iter 48) and NOW WIRED into `_d_sw_native` via `_d_sw5_corner_divergence` for nord>0 (iter 51).
 - **d_sw5 corner divergence** (sw_core.F90:1641-1821): IMPLEMENTED and WIRED (iter 51). nord=0 and nord=1 paths functional. nord>1 uses fallback approximation.
 - **Vorticity damping** (sw_core.F90:1948-2000): IMPLEMENTED as `_del6_vt_flux` (iter 50) and NOW WIRED into d_sw6 flow (iter 52). `damp_v` and `nord_v` parameters plumbed through `fv3_fb_sw_step` → `_d_sw_native`. Activated when `damp_v > 1e-5`. Matches Fortran: `damp4 = (damp_v * da_min_c)^(nord_v+1)`, `u += fy2`, `v -= fx2`.
 - **Divergence heating** (sw_core.F90:1953-1986): NOT implemented. Only when `d_con > 1e-5`.
-- **Higher-order divergence damping** (sw_core.F90:1725-1787): PARTIALLY implemented. nord=1 uses 5-point corner Laplacian approximation. Exact Fortran version needs corner-stagger divg_u/divg_v metrics.
+- **Higher-order divergence damping** (sw_core.F90:1725-1787): IMPLEMENTED with proper divg_u/divg_v metrics (iter 53). Uses metric-weighted divergence-of-gradient matching Fortran exactly. Corner-stagger halo uses edge-padding (no cross-face corner exchange available), which matches Fortran duogrid behavior (fill_corners skipped when duogrid active).
 
 Standard test cases (d2_bg=0, dddmp=0, d4_bg=0.16, nord=1) now correctly activate the d_sw5 corner divergence path in the FB stepping.
 
