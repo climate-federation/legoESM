@@ -1312,25 +1312,25 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1)
     transported_x = _ppm_transport_1d(u_d, ub, rdx, axis=1)
 
-    # --- Step 5: BGRID_NE component sync (FV3 dyn_core.F90:969-1011) ---
-    # FV3 syncs the transport COMPONENTS at face boundaries before
-    # computing KE.  ubb (x-Courant) is averaged at W/E boundaries,
-    # vbbtemp (y-Courant = vb) is averaged at S/N boundaries.
-    # ubbtemp (y-transported) and vbb (x-transported) are NOT synced.
+    # --- Step 5: KE at corners (Lin-Rood average of two sweeps) ---
+    # FV3 dyn_core.F90:1013-1020:
+    #   kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)
+    ke_corner = 0.5 * (transported_y * vb + ub * transported_x)
+
+    # --- Step 6: Boundary KE sync for duogrid ---
+    # FV3 syncs the transport COMPONENTS (ubb, vbbtemp) via BGRID_NE vector
+    # exchange (dyn_core.F90:969-1011) BEFORE computing KE.  The MPI BGRID_NE
+    # exchange handles the full vector rotation at cross-axis face boundaries.
+    # Our single-process 6-face representation lacks this rotation infrastructure,
+    # so component-level sync at cross-axis boundaries would corrupt the values.
+    # Instead, sync the SCALAR KE directly at face boundaries.  The Fortran has
+    # this as a commented-out alternative (dyn_core.F90:1029-1055) which achieves
+    # the same conservation goal: KE_A = KE_B = 0.5*(KE_A+KE_B) at shared corners.
     dg = cdgrid.base.duogrid
     use_duogrid = dg is not None and dg.ng >= 2
     if use_duogrid:
-        from legoesm.grids.halo import synchronize_bgrid_ne
-        ub, vb = synchronize_bgrid_ne(ub, vb, n)
-
-    # --- Step 6: KE at corners (Lin-Rood average of two sweeps) ---
-    # FV3 dyn_core.F90:1013-1020:
-    #   kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)
-    # ubbtemp = transported_y (v transported by vb)
-    # vbbtemp = vb (synced at S/N)
-    # ubb = ub (synced at W/E)
-    # vbb = transported_x (u transported by ub)
-    ke_corner = 0.5 * (transported_y * vb + ub * transported_x)
+        from legoesm.grids.halo import synchronize_corner_scalar
+        ke_corner = synchronize_corner_scalar(ke_corner, n)
 
     return ke_corner
 
