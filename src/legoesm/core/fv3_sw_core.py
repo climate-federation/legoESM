@@ -1177,9 +1177,12 @@ def _ppm_transport_1d(field, courant, rdelta, axis):
     # al[k] = interface between padded cells k+1 and k+2, k=0..N+2
     # al shape: (6, N+3, M)
 
-    # --- PPM reconstruction hord=9 (FV3 default: fv_arrays.F90:334) ---
-    # hord=9: simple bl/br = al - q with pert_ppm(iv=0) positive-definite
-    # constraint.  FV3 tp_core.F90 xppm lines 603-610.
+    # --- PPM reconstruction jord=9 from ytp_v (sw_core.F90:3194-3204) ---
+    # IMPORTANT: ytp_v/xtp_u (B-grid wind transport) uses pmp/lac limiter
+    # for jord=9, NOT pert_ppm(iv=0).  The transported fields (D-grid winds)
+    # are SIGNED, so the positive-definite constraint would incorrectly zero
+    # the reconstruction for negative wind cells.  Only tp_core.F90 xppm/yppm
+    # (mass/vorticity transport via fv_tp_2d) uses pert_ppm(iv=0) for iord=9.
     #
     # Need bl/br for cells -1..N (for flux at interfaces 0..N).
     nc = nn + 2  # cells -1..N
@@ -1193,12 +1196,27 @@ def _ppm_transport_1d(field, courant, rdelta, axis):
     al_r = al[:, 2:2+nc, :]    # al_right for cells -1..N
     v_c = vp[:, h3-1:h3-1+nc, :]   # v at cells -1..N
 
-    bl = al_l - v_c
-    br = al_r - v_c
+    # pmp/lac coefficients (sw_core.F90:3197-3202):
+    #   pmp_1 = -2*dq[j],  lac_1 = pmp_1 + 1.5*dq[j+1]  (bl direction)
+    #   pmp_2 = 2*dq[j-1], lac_2 = pmp_2 - 1.5*dq[j-2]  (br direction)
+    # where dq[j] = v[j+1]-v[j] (single difference).
+    # dq_at_cell(j) = dq[j+h3] in padded indexing (dq[k]=vp[k+1]-vp[k]).
+    # For cells -1..N: dq starts at index h3-1.
+    p_off = h3 - 1  # dq at cell j is at dq index j + p_off
+    pmp_1 = -2.0 * dq[:, p_off:p_off+nc, :]           # -2*dq[j] for j=-1..N
+    lac_1 = pmp_1 + 1.5 * dq[:, p_off+1:p_off+1+nc, :]  # + 1.5*dq[j+1]
+    pmp_2 = 2.0 * dq[:, p_off-1:p_off-1+nc, :]        # 2*dq[j-1]
+    lac_2 = pmp_2 - 1.5 * dq[:, p_off-2:p_off-2+nc, :]  # - 1.5*dq[j-2]
 
-    # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
-    from legoesm.core.fv_tp_2d import _pert_ppm_iv0
-    bl, br = _pert_ppm_iv0(v_c, bl, br)
+    z = jnp.zeros_like(pmp_1)
+    bl = jnp.minimum(
+        jnp.maximum(jnp.maximum(z, pmp_1), lac_1),
+        jnp.maximum(al_l - v_c,
+                     jnp.minimum(jnp.minimum(z, pmp_1), lac_1)))
+    br = jnp.minimum(
+        jnp.maximum(jnp.maximum(z, pmp_2), lac_2),
+        jnp.maximum(al_r - v_c,
+                     jnp.minimum(jnp.minimum(z, pmp_2), lac_2)))
     # bl, br: (6, nc, M) for cells -1..N (index 0..nc-1)
 
     # --- Flux evaluation (FV3 sw_core.F90:3339-3349) ---

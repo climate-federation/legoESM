@@ -470,6 +470,17 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
   - Added rdxa/rdya fields to CubedSphereCDGrid NamedTuple
   - Metrics unchanged at C36 (approximation was already O(dx²))
 
+### Resolved in iteration 46 (2026-04-16):
+- **Fix _ppm_transport_1d: restore pmp/lac limiter for signed wind transport** ✅
+  - Codex adversarial review caught: pert_ppm(iv=0) was incorrectly applied to B-grid KE transport of signed D-grid winds
+  - The Fortran has DIFFERENT hord=9 behavior in two routines:
+    - `tp_core.F90 xppm` (fv_tp_2d mass/vorticity): pert_ppm(iv=0) positive-definite ← correct for _ppm_1d
+    - `sw_core.F90 ytp_v` jord=9 (B-grid wind transport): pmp/lac limiter (lines 3194-3204) ← correct for _ppm_transport_1d
+  - pert_ppm(iv=0) zeroes reconstruction for q≤0, which destroys negative wind values
+  - Restored pmp/lac limiter in `_ppm_transport_1d` with corrected v_c and dq indexing (h3-1 for cells -1..N)
+  - _ppm_1d correctly keeps pert_ppm(iv=0) for fv_tp_2d (mass transport is positive-definite; vorticity transport matches Fortran xppm behavior)
+  - All metrics unchanged; 86 unit tests + 4 ocean rest state pass
+
 ### Evaluation results (all pass, updated after iteration 44, 2026-04-16):
 - Williamson 2: L2=1.53e-03, Linf=4.07e-03 (production path)
 - Williamson 5: mass drift=1.42e-05
