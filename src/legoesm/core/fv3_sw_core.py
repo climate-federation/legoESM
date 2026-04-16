@@ -579,6 +579,104 @@ def _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid):
     return ke_u, ke_v
 
 
+def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
+    """FV3 divergence_corner_duo (sw_core.F90:2345-2447).
+
+    Computes corner divergence for hyperviscosity (nord > 0) on the duogrid
+    path.  Uses cross-velocity correction via cos_sg/sin_sg at cell edges
+    and applies face-boundary zeroing + 0.25 attenuation at adjacent cells.
+
+    Parameters
+    ----------
+    u_d : (6, n, n+1) D-grid x-velocity at x-edge midpoints
+    v_d : (6, n+1, n) D-grid y-velocity at y-edge midpoints
+    ua : (6, n, n) A-grid contravariant u (from d2a2c_vect)
+    va : (6, n, n) A-grid contravariant v
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    divg_d : (6, n+1, n+1) corner divergence
+    """
+    n = cdgrid.n
+    sg = cdgrid.sin_sg
+    cg = cdgrid.cos_sg
+    dxc = cdgrid.dxc   # (6, n+1, n) centre-to-centre in x
+    dyc = cdgrid.dyc   # (6, n, n+1) centre-to-centre in y
+    rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
+
+    # Pad ua, va for cross-velocity averages at boundaries
+    ua_pad = jnp.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n)
+    va_pad = jnp.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n, n+2)
+
+    # --- uf: u-direction flux at v-face positions (sw_core.F90:2413-2418) ---
+    # uf(i,j) = (u(i,j) - 0.25*(va(i,j-1)+va(i,j))*(cos_sg(i,j-1,N)+cos_sg(i,j,S)))
+    #           * dyc(i,j) * 0.5*(sin_sg(i,j-1,N)+sin_sg(i,j,S))
+    # u_d: (6, n, n+1), va: (6, n, n), sin/cos_sg: (6, n, n, 9)
+    # va at (i,j-1) and (i,j): need j from 1..n (Fortran jsd+1..jed → Python 1..n)
+    # But in Python, u_d[:, :, j] for j=0..n, va[:, :, j] for j=0..n-1
+    # For uf at j=1..n: va(i,j-1) and va(i,j)
+    va_below = va_pad[:, :, :-1]   # (6, n, n+1) — va at j-1
+    va_above = va_pad[:, :, 1:]    # (6, n, n+1) — va at j
+
+    # cos_sg N-edge (index 3) at cell (i,j-1) and S-edge (index 1) at cell (i,j)
+    cos_N = cg[:, :, :, 3]  # (6, n, n)
+    cos_S = cg[:, :, :, 1]  # (6, n, n)
+    sin_N = sg[:, :, :, 3]  # (6, n, n)
+    sin_S = sg[:, :, :, 1]  # (6, n, n)
+    cos_N_pad = jnp.pad(cos_N, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    cos_S_pad = jnp.pad(cos_S, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    sin_N_pad = jnp.pad(sin_N, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    sin_S_pad = jnp.pad(sin_S, [(0, 0), (0, 0), (1, 1)], mode='edge')
+
+    cos_sum_u = cos_N_pad[:, :, :-1] + cos_S_pad[:, :, 1:]  # (6, n, n+1)
+    sin_sum_u = sin_N_pad[:, :, :-1] + sin_S_pad[:, :, 1:]
+    uf = (u_d - 0.25 * (va_below + va_above) * cos_sum_u) * dyc * 0.5 * sin_sum_u
+
+    # --- vf: v-direction flux at u-face positions (sw_core.F90:2420-2425) ---
+    # vf(i,j) = (v(i,j) - 0.25*(ua(i-1,j)+ua(i,j))*(cos_sg(i-1,j,E)+cos_sg(i,j,W)))
+    #           * dxc(i,j) * 0.5*(sin_sg(i-1,j,E)+sin_sg(i,j,W))
+    ua_left = ua_pad[:, :-1, :]    # (6, n+1, n) — ua at i-1
+    ua_right = ua_pad[:, 1:, :]    # (6, n+1, n) — ua at i
+
+    cos_E = cg[:, :, :, 2]  # (6, n, n) E-edge
+    cos_W = cg[:, :, :, 0]  # (6, n, n) W-edge
+    sin_E = sg[:, :, :, 2]
+    sin_W = sg[:, :, :, 0]
+    cos_E_pad = jnp.pad(cos_E, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    cos_W_pad = jnp.pad(cos_W, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    sin_E_pad = jnp.pad(sin_E, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    sin_W_pad = jnp.pad(sin_W, [(0, 0), (1, 1), (0, 0)], mode='edge')
+
+    cos_sum_v = cos_E_pad[:, :-1, :] + cos_W_pad[:, 1:, :]  # (6, n+1, n)
+    sin_sum_v = sin_E_pad[:, :-1, :] + sin_W_pad[:, 1:, :]
+    vf = (v_d - 0.25 * (ua_left + ua_right) * cos_sum_v) * dxc * 0.5 * sin_sum_v
+
+    # --- divg_d: corner divergence (sw_core.F90:2427-2442) ---
+    # divg_d(i,j) = (vf(i,j-1) - vf(i,j) + uf(i-1,j) - uf(i,j)) * rarea_c(i,j)
+    # vf: (6, n+1, n), uf: (6, n, n+1)
+    # Need padded vf/uf for the stencil at corner (i,j) ranging 0..n
+    vf_pad = jnp.pad(vf, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n+1, n+2)
+    uf_pad = jnp.pad(uf, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n+1)
+
+    divg_d = (vf_pad[:, :, :-1] - vf_pad[:, :, 1:]
+              + uf_pad[:, :-1, :] - uf_pad[:, 1:, :]) * rarea_c
+
+    # Face-boundary zeroing (sw_core.F90:2431-2434)
+    divg_d = divg_d.at[:, 0, :].set(0.0)
+    divg_d = divg_d.at[:, n, :].set(0.0)
+    divg_d = divg_d.at[:, :, 0].set(0.0)
+    divg_d = divg_d.at[:, :, n].set(0.0)
+
+    # 0.25× attenuation at face-adjacent cells (sw_core.F90:2437-2440)
+    divg_d = divg_d.at[:, 1, :].multiply(0.25)
+    divg_d = divg_d.at[:, n - 1, :].multiply(0.25)
+    divg_d = divg_d.at[:, :, 1].multiply(0.25)
+    divg_d = divg_d.at[:, :, n - 1].multiply(0.25)
+
+    return divg_d
+
+
 def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
     """FV3 c_sw corner vorticity from C-grid circulation (sw_core.F90:378-408).
 
