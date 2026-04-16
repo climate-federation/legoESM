@@ -1260,23 +1260,12 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # vbb = transported_x (u transported by ub)
     ke_corner = 0.5 * (transported_y * vb + ub * transported_x)
 
-    # --- Step 6: Zero face-boundary KE (FV3 divergence_corner_duo pattern) ---
-    # The uc/vc padding used edge-copy (not cross-face halo), making the
-    # B-grid Courant numbers and KE at face-boundary corners incorrect.
-    # FV3 handles this via duogrid flux sync (dyn_core.F90:969-1011) and
-    # divergence_corner_duo's boundary zeroing (sw_core.F90:2431-2440).
-    # We zero KE at face-boundary positions and reduce adjacent to 25%
-    # to prevent the incorrect edge-copy values from contaminating the
-    # KE gradient used in the D-grid wind update.
-    ke_corner = ke_corner.at[:, 0, :].set(0.0)
-    ke_corner = ke_corner.at[:, n, :].set(0.0)
-    ke_corner = ke_corner.at[:, :, 0].set(0.0)
-    ke_corner = ke_corner.at[:, :, n].set(0.0)
-    if n > 2:
-        ke_corner = ke_corner.at[:, 1, :].multiply(0.25)
-        ke_corner = ke_corner.at[:, n - 1, :].multiply(0.25)
-        ke_corner = ke_corner.at[:, :, 1].multiply(0.25)
-        ke_corner = ke_corner.at[:, :, n - 1].multiply(0.25)
+    # Note: the uc/vc padding uses edge-copy (not cross-face halo), so
+    # face-boundary KE has O(dx) error.  FV3 handles this via duogrid
+    # flux sync of the KE B-grid components (dyn_core.F90:969-1011).
+    # d_sw4 fixes only the 4 cube-vertex corners (and skips for duogrid).
+    # We leave the edge-copy approximation as-is — zeroing would create
+    # O(1) artificial KE gradients at boundaries, which is far worse.
 
     return ke_corner
 
