@@ -24,7 +24,13 @@ _R3 = 1.0 / 3.0
 
 
 def _pert_ppm(bl, br):
-    """FV3 pert_ppm iv=1: monotonicity at face boundaries."""
+    """FV3 pert_ppm iv=1: standard PPM constraint (tp_core.F90:1193-1212).
+
+    Prevents new extrema in the reconstruction.  When bl and br have
+    opposite signs (parabola crosses cell value), clips the overshoot.
+    When both have the same sign (cell value is already an extremum),
+    zeros both to flatten the reconstruction.
+    """
     is_ext = bl * br >= 0.0
     da1 = bl - br
     da2 = da1 ** 2
@@ -33,6 +39,48 @@ def _pert_ppm(bl, br):
     br_out = jnp.where(a6da > da2, -2.0 * bl, br)
     bl_out = jnp.where(is_ext, 0.0, bl_out)
     br_out = jnp.where(is_ext, 0.0, br_out)
+    return bl_out, br_out
+
+
+def _pert_ppm_iv0(q, bl, br):
+    """FV3 pert_ppm iv=0: positive definite constraint (tp_core.F90:1169-1192).
+
+    Ensures the PPM parabola does not produce negative values when the
+    cell mean ``q`` is positive.  When ``q <= 0``, zeroes the reconstruction.
+    When ``q > 0`` and the parabola minimum is negative, clips bl/br.
+
+    This is the limiter used by hord=9 (FV3 default for mass, vorticity,
+    and momentum transport).
+    """
+    r12 = 1.0 / 12.0
+    zero = jnp.zeros_like(bl)
+
+    # Parabola coefficients: a4 = -3*(bl+br), da1 = br-bl
+    a4 = -3.0 * (br + bl)
+    da1 = br - bl
+
+    # Condition: parabola has an extremum in [0,1] ↔ |da1| < -a4
+    has_extremum = jnp.abs(da1) < -a4
+
+    # Minimum of parabola: q + 0.25/a4 * da1² + a4/12
+    # Guard against a4=0 (flat parabola — no extremum anyway)
+    a4_safe = jnp.where(jnp.abs(a4) < 1e-30, -1e-30, a4)
+    fmin = q + 0.25 / a4_safe * da1 ** 2 + a4_safe * r12
+    is_negative = fmin < 0.0
+
+    # When both conditions met and q>0: apply fix
+    needs_fix = has_extremum & is_negative & (q > 0.0)
+    both_positive = (br > 0.0) & (bl > 0.0)
+    da1_positive = da1 > 0.0
+
+    bl_fix = jnp.where(both_positive, zero,
+                       jnp.where(da1_positive, bl, -2.0 * br))
+    br_fix = jnp.where(both_positive, zero,
+                       jnp.where(da1_positive, -2.0 * bl, br))
+
+    bl_out = jnp.where(q <= 0.0, zero, jnp.where(needs_fix, bl_fix, bl))
+    br_out = jnp.where(q <= 0.0, zero, jnp.where(needs_fix, br_fix, br))
+
     return bl_out, br_out
 
 
@@ -153,36 +201,27 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
                               jnp.maximum(q_hn, q_hnp1))
             al = al.at[:, n + 2, :].set(al_R1)
 
-    # hord=9 pmp/lac limiter (FV3 default: hord_dp=9, hord_vt=9)
-    # Less restrictive than hord=8, preserving more sub-grid detail.
-    # FV3 sw_core.F90 xppm lines for iord=9.
+    # hord=9: FV3 default (fv_arrays.F90:339,343: hord_dp=9, hord_vt=9).
+    # Simple PPM reconstruction (bl = al - q, br = al - q) with positive-
+    # definite constraint via pert_ppm(iv=0).  This is LESS restrictive
+    # than hord=8 (2*dm monotone) or hord=10 (pmp/lac), preserving more
+    # sub-grid structure.  FV3 tp_core.F90 xppm lines 603-610.
     q_c = qe[:, 2:-2, :]       # (6, n+2, M) — cells at padded indices 2..n+3
     al_L = al[:, :-1, :]        # al at left edge of each cell
     al_R = al[:, 1:, :]         # al at right edge of each cell
 
-    # dq[k] = q[k+1] - q[k] for the padded cells
-    dq = qe[:, 1:, :] - qe[:, :-1, :]   # (6, n+5, M) — at padded transitions
+    bl = al_L - q_c
+    br = al_R - q_c
 
-    # For bl at cell k (padded index k+2): needs dq at k+2 and k+3
-    # For br at cell k: needs dq at k+1 and k+0
-    # Cell range: padded 2..n+3 → dq indices 2..n+3 for bl, 1..n+2 for br
-    nc = q_c.shape[1]  # n+2 cells
-    pmp_1 = -2.0 * dq[:, 2:2+nc, :]           # -2*dq[j]
-    lac_1 = pmp_1 + 1.5 * dq[:, 3:3+nc, :]    # pmp_1 + 1.5*dq[j+1]
-    pmp_2 = 2.0 * dq[:, 1:1+nc, :]            # 2*dq[j-1]
-    lac_2 = pmp_2 - 1.5 * dq[:, 0:nc, :]      # pmp_2 - 1.5*dq[j-2]
+    # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
+    bl, br = _pert_ppm_iv0(q_c, bl, br)
 
-    z = jnp.zeros_like(pmp_1)
-    bl = jnp.minimum(
-        jnp.maximum(jnp.maximum(z, pmp_1), lac_1),
-        jnp.maximum(al_L - q_c,
-                     jnp.minimum(jnp.minimum(z, pmp_1), lac_1)))
-    br = jnp.minimum(
-        jnp.maximum(jnp.maximum(z, pmp_2), lac_2),
-        jnp.maximum(al_R - q_c,
-                     jnp.minimum(jnp.minimum(z, pmp_2), lac_2)))
-
-    # pert_ppm at boundary cells
+    # pert_ppm(iv=1) at face-boundary cells: extra monotonicity for cells
+    # whose PPM stencil crosses a face boundary (halo-quality guard).
+    # Fortran gates these on (.not. bounded_domain .and. .not. duogrid)
+    # (tp_core.F90:612), but for our Python path the halo offsets provide
+    # the equivalent gating (when offsets are None, this code is never
+    # reached because all offsets are None for duogrid).
     for k in [0, 1, 2, -3, -2, -1]:
         bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
         bl = bl.at[:, k, :].set(bl_k)

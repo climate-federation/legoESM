@@ -446,11 +446,22 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
   - hord=9 pmp/lac limiting is less restrictive than hord=8's 2*dm monotone bound
   - Cosine bell improved 5-7%: L1 1.26e-01→1.20e-01, Linf 1.32e-01→1.23e-01
 
-### Evaluation results (all pass, updated after iteration 42, 2026-04-16):
+### Resolved in iteration 43 (2026-04-16):
+- **PPM limiter corrected from hord=10 (pmp/lac) to true hord=9 (pert_ppm iv=0)** ✅
+  - The Fortran hord=9 uses `pert_ppm(iv=0)` positive-definite constraint (tp_core.F90:610), NOT the pmp/lac limiter (which is hord=10, tp_core.F90:554-572)
+  - Iter 42 accidentally implemented hord=10's pmp/lac limiter while labeling it hord=9
+  - Now correctly implements: `bl = al - q, br = al - q` followed by `pert_ppm(iv=0)` (tp_core.F90:603-610)
+  - Added `_pert_ppm_iv0(q, bl, br)` to `fv_tp_2d.py` — matches Fortran tp_core.F90:1169-1192
+  - Fixed in both `_ppm_1d` (fv_tp_2d.py) and `_ppm_transport_1d` (fv3_sw_core.py)
+  - Also fixed v_c indexing bug in `_ppm_transport_1d`: was using padded offset h3 (cell 0) instead of h3-1 (cell -1) for bl/br alignment with al_l/al_r
+  - All metrics unchanged (pert_ppm iv=0 and pmp/lac produce identical results on these well-resolved positive fields)
+  - 86 unit tests pass; 4 ocean rest state tests pass at machine precision
+
+### Evaluation results (all pass, updated after iteration 43, 2026-04-16):
 - Williamson 2: L2=1.53e-03, Linf=4.07e-03 (production path)
 - Williamson 5: mass drift=1.42e-05
-- Cosine bell: L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01 (improved 5-7% from hord=9 PPM fix)
-- Ocean rest state: all 4 paths (production/FB × no-DG/DG) PASS at machine precision (h_err=0)
+- Cosine bell: L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01
+- Ocean rest state: all 4 cubed-sphere variants PASS at machine precision (eta drift ≤2e-14)
 - 86 unit tests pass; no regressions
 - Visual inspection: cosine bell clean, W2 height/wind_speed clean, W5 height/v clean
 - W2 v-wind: cube-face imprint at t>0.1d (architectural — production D-grid pressure gradient)
@@ -464,7 +475,7 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
 - d_sw4: no-op for duogrid ✓
 - d_sw5: cell-centre vorticity + fv_tp_2d transport (vorticity sync commented out in oracle) ✓
 - d_sw6: D-grid wind replacement formula ✓
-- fv_tp_2d: Lin-Rood operator-split with CGRID flux sync ✓
+- fv_tp_2d: Lin-Rood operator-split with CGRID flux sync + true hord=9 pert_ppm(iv=0) ✓
 - Metrics: cosa_u/rsin_u from sin_sg, supergrid dxc/dyc/area_corner ✓
 
 **Remaining infrastructure gap**: FV3 uses ng=3 MPI DGRID_NE halo (full 2D exchange); Python uses ng=1 pad_halo_dgrid + pad_halo_vector (two-step). Causes ~0.3% transport velocity asymmetry at face boundaries. Affects FB c_sw stability only (production path unaffected).

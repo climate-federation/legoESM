@@ -1177,49 +1177,28 @@ def _ppm_transport_1d(field, courant, rdelta, axis):
     # al[k] = interface between padded cells k+1 and k+2, k=0..N+2
     # al shape: (6, N+3, M)
 
-    # --- PPM reconstruction hord=9 (sw_core.F90:3194-3204) ---
-    # For cell j (original 0-based), padded index = j+3:
-    #   al_left  = al at interface j (left of cell)  = al[j+1]  (al index = padded_cell-1 = j+3-1-1 = j+1)
-    #   al_right = al at interface j+1 (right of cell) = al[j+2]
-    #   dq at j = dq[j+2]  (dq at padded j+2 to j+3)
+    # --- PPM reconstruction hord=9 (FV3 default: fv_arrays.F90:334) ---
+    # hord=9: simple bl/br = al - q with pert_ppm(iv=0) positive-definite
+    # constraint.  FV3 tp_core.F90 xppm lines 603-610.
     #
     # Need bl/br for cells -1..N (for flux at interfaces 0..N).
     nc = nn + 2  # cells -1..N
 
     # Indices in padded coordinates for cells -1..N:
-    # padded cell = original + 3, so cells -1..N = padded 2..N+3
-    # al_left for cell j = al[padded_cell-2] = al[j+1]
-    # al_right for cell j = al[padded_cell-1] = al[j+2]
+    # Cell j (original 0-based) sits at padded index j+h3.
+    # Cell -1 → padded h3-1=3; cell N → padded h3+N=nn+4.
+    # al[k] = edge between padded cells k+1 and k+2.
+    # Left edge of cell j: al[j+h3-2]. Right edge: al[j+h3-1].
     al_l = al[:, 1:1+nc, :]    # al_left for cells -1..N
     al_r = al[:, 2:2+nc, :]    # al_right for cells -1..N
-    v_c = vp[:, h3:h3+nc, :]   # v at cells -1..N (padded 2..N+3)
+    v_c = vp[:, h3-1:h3-1+nc, :]   # v at cells -1..N
 
-    # dq for cells: dq[padded_cell-1] since dq[k] = v[k+1]-v[k]
-    # For cell j (padded j+3): dq_at_j = dq[j+2], dq_at_j+1 = dq[j+3], etc.
-    dq_c = dq[:, 1:1+nc, :]      # dq[j] for cells -1..N (dq at padded j+2 → index j+2-1=j+1... hmm)
+    bl = al_l - v_c
+    br = al_r - v_c
 
-    # Let me use explicit padded indexing for clarity:
-    # For cell at padded index p (p=2..N+3):
-    #   pmp_1 = -2 * dq[p-1]  (dq between padded p-1 and p = dq at index p-1)
-    #   lac_1 = pmp_1 + 1.5 * dq[p]  (dq between padded p and p+1)
-    #   pmp_2 = 2 * dq[p-2]
-    #   lac_2 = pmp_2 - 1.5 * dq[p-3]
-    p_start = h3 - 1  # padded start for cells we need = 2
-    pmp_1 = -2.0 * dq[:, p_start:p_start+nc, :]
-    lac_1 = pmp_1 + 1.5 * dq[:, p_start+1:p_start+1+nc, :]
-    pmp_2 = 2.0 * dq[:, p_start-1:p_start-1+nc, :]
-    lac_2 = pmp_2 - 1.5 * dq[:, p_start-2:p_start-2+nc, :]
-
-    z = jnp.zeros_like(pmp_1)
-    bl = jnp.minimum(
-        jnp.maximum(jnp.maximum(z, pmp_1), lac_1),
-        jnp.maximum(al_l - v_c,
-                     jnp.minimum(jnp.minimum(z, pmp_1), lac_1)))
-    z2 = jnp.zeros_like(pmp_2)
-    br = jnp.minimum(
-        jnp.maximum(jnp.maximum(z2, pmp_2), lac_2),
-        jnp.maximum(al_r - v_c,
-                     jnp.minimum(jnp.minimum(z2, pmp_2), lac_2)))
+    # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
+    from legoesm.core.fv_tp_2d import _pert_ppm_iv0
+    bl, br = _pert_ppm_iv0(v_c, bl, br)
     # bl, br: (6, nc, M) for cells -1..N (index 0..nc-1)
 
     # --- Flux evaluation (FV3 sw_core.F90:3339-3349) ---
