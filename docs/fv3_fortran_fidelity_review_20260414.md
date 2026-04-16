@@ -373,6 +373,19 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
   - Eliminated ~120 lines of duplicated code
   - Also removed dead branch: `fv3_csw_tendencies` had identical KE computation in both if/else arms
 
+### Resolved in iteration 40 (2026-04-16):
+- **Courant number: upwind-selected rdxa** ✅
+  - Fortran sw_core.F90:849-862 uses `crx = (dt*ut) * rdxa(upwind_cell)` where rdxa is 1/cell_width at cell centres
+  - Python was using face-centre rdxc (up to 35% different on cubed sphere)
+  - Now uses upwind-selected rdxa approximated from mean of adjacent rdxc, with pad_halo
+  - Cosine bell L1 improved 0.8% (1.27e-01 → 1.26e-01)
+- **PPM hord=9 B-grid KE transport** ✅ (iter 39)
+  - `_ppm_transport_1d()` matches Fortran ytp_v/xtp_u jord>=8 (sw_core.F90:3162-3349)
+  - Monotone slopes + edge values + hord=9 pmp/lac limiting + CFL-weighted flux
+  - CFL correctly computed using rdy/rdx (sw_core.F90:3342)
+- **d_sw4 corner KE fix verified**: correctly skipped for duogrid (sw_core.F90:1441)
+- **xppm/yppm verified**: for hord>=8, dxa metric is NOT used in edge values (only in face-boundary specials which are skipped for duogrid)
+
 ### Resolved in iteration 39 (2026-04-16):
 - **d2a2c_vect face-boundary sin_sg halo fix** ✅
   - Fortran sw_core.F90:3589-3607 uses sin_sg from the HALO cell for upwind at face boundaries
