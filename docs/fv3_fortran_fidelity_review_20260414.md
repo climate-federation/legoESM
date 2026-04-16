@@ -348,7 +348,7 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
 - ~~Full d_sw B-grid KE transport~~ → ported (iter 32), first-order upwind. PPM upgrade to match xtp_u/ytp_v iord=1 would improve accuracy.
 - Production path (fv3_sw_tendencies) uses Arakawa-Lamb gradient, NOT FV3's c_sw/d_sw operators — pre-existing artifacts originate here, not in fv3_sw_core.py
 - **Duogrid + production path instability**: W2 with duogrid has 370x larger corner tendencies (max |dh/dt|=0.158 vs 4.3e-4 without duogrid), causing NaN blowup. Root cause: `fv3_sw_tendencies` Arakawa-Lamb gradient at cube vertices with duogrid halo exchange gives worse corner accuracy. NOT a flux sync issue — exists independently.
-- **d_sw3 KE flux synchronization**: Fortran averages B-grid KE transport at face boundaries after d_sw3 (dyn_core.F90:969-1011). Our code does not have d_sw3 B-grid KE transport at all. Blocked on porting d_sw3.
+- **d_sw3 KE flux synchronization**: Fortran averages B-grid KE transport COMPONENTS (ubb, vbbtemp) at face boundaries after d_sw3 (dyn_core.F90:969-1011) using BGRID_NE vector boundary exchange. d_sw3 now ported (iter 32) but sync requires B-grid vector halo infrastructure (not yet implemented). Edge-copy approximation used instead.
 - **d_sw5 vorticity flux synchronization**: COMMENTED OUT in the Fortran oracle (dyn_core.F90:1128-1165), noted as "should be applied to have consistent logic". Not implemented.
 
 ### Pre-existing issues (not caused by these changes):
