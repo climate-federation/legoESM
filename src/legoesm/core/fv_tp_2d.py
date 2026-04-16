@@ -87,8 +87,7 @@ def _pert_ppm_iv0(q, bl, br):
 
 
 def _ppm_1d(q, n, off_left=None, off_right=None,
-            off_left_d1=None, off_right_d1=None,
-            use_duogrid=False):
+            off_left_d1=None, off_right_d1=None):
     """PPM bl/br along axis=1 with hord=9 + position-aware boundaries.
 
     Parameters
@@ -99,8 +98,6 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     off_right : (6, M) or None — halo interp offset at right boundary (depth=0)
     off_left_d1 : (6, M) or None — depth=1 offset (outer halo)
     off_right_d1 : (6, M) or None — depth=1 offset (outer halo)
-    use_duogrid : bool — when True, skip pert_ppm(iv=1) at face boundaries
-        (Fortran gates this on .not. (bounded_domain .or. duogrid), tp_core.F90:612)
 
     Returns
     -------
@@ -223,19 +220,22 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
 
     # pert_ppm(iv=1) at face-boundary cells: extra monotonicity for cells
     # whose PPM stencil crosses a face boundary (halo-quality guard).
-    # Fortran gates on (.not. (bounded_domain .or. duogrid)) at tp_core.F90:612.
-    # For duogrid, boundary halo quality is sufficient — skip extra constraint.
-    if not use_duogrid:
-        for k in [0, 1, 2, -3, -2, -1]:
-            bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
-            bl = bl.at[:, k, :].set(bl_k)
-            br = br.at[:, k, :].set(br_k)
+    # Fortran gates on (.not. (bounded_domain .or. duogrid)) at tp_core.F90:612,
+    # but the Fortran has ng=3 MPI halo (proper cross-face at 3rd cell).
+    # We keep this unconditionally because _ppm_1d uses mode='edge' for the
+    # 3rd halo cell (line ~105), which is less accurate than the Fortran's
+    # MPI exchange.  The iv=1 constraint acts as a safety net against this
+    # edge-copied value affecting PPM reconstruction at face boundaries.
+    for k in [0, 1, 2, -3, -2, -1]:
+        bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
+        bl = bl.at[:, k, :].set(bl_k)
+        br = br.at[:, k, :].set(br_k)
 
     return bl, br, q_c
 
 
 def _xppm(q_h2, crx, n, off_left=None, off_right=None,
-          off_left_d1=None, off_right_d1=None, use_duogrid=False):
+          off_left_d1=None, off_right_d1=None):
     """PPM in x with hord=9 Courant-number integration.
 
     FV3 tp_core.F90 xppm lines 670-677: uses raw Courant number ``crx``
@@ -244,8 +244,7 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
     (the Fortran does not adjust the Courant number at face boundaries).
     """
     bl, br, q_c = _ppm_1d(q_h2, n, off_left, off_right,
-                           off_left_d1, off_right_d1,
-                           use_duogrid=use_duogrid)
+                           off_left_d1, off_right_d1)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
 
@@ -255,13 +254,12 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
 
 
 def _yppm(q_h2, cry, n, off_left=None, off_right=None,
-          off_left_d1=None, off_right_d1=None, use_duogrid=False):
+          off_left_d1=None, off_right_d1=None):
     """PPM in y with hord=9 Courant-number integration."""
     q_t = jnp.swapaxes(q_h2, 1, 2)
     c_t = jnp.swapaxes(cry, 1, 2)
     bl, br, q_c = _ppm_1d(q_t, n, off_left, off_right,
-                           off_left_d1, off_right_d1,
-                           use_duogrid=use_duogrid)
+                           off_left_d1, off_right_d1)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
     fy_pos = q_L + (1.0 - c_t) * (br_L - c_t * (bl_L + br_L))
@@ -433,32 +431,25 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     oy_L1 = offsets_h2[:, 2, 1, :]   # SOUTH depth=1
     oy_R1 = offsets_h2[:, 3, 1, :]   # NORTH depth=1
 
-    dg = cdgrid.base.duogrid
-    _use_dg = dg is not None and dg.ng >= 2
-
     q_full = pad_halo(q, halo=2, interp_offsets=offsets_h2)
 
     # Pass 1: Y-sweep on q, X-sweep on cross-corrected q_i
-    fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
-                use_duogrid=_use_dg)
+    fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1)
     fyy = yfx * fy2
     q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
 
     # Proper halo exchange for q_i (required for mass conservation)
     q_i_pad = pad_halo(q_i, halo=2, interp_offsets=offsets_h2)
-    fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
-                use_duogrid=_use_dg)
+    fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1)
 
     # Pass 2: X-sweep on q, Y-sweep on cross-corrected q_j
-    fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
-                use_duogrid=_use_dg)
+    fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1)
     fxx = xfx * fx2
     q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
 
     # Proper halo exchange for q_j (required for mass conservation)
     q_j_pad = pad_halo(q_j, halo=2, interp_offsets=offsets_h2)
-    fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
-                use_duogrid=_use_dg)
+    fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1)
 
     if mass is not None:
         # With mass: fx = 0.5*(fx1+fx2)*mfx, fy = 0.5*(fy1+fy2)*mfy

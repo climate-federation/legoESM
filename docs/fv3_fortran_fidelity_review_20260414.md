@@ -574,12 +574,13 @@ Remaining gaps are infrastructure-level (halo width ng=1 vs ng=3) and 3D-only (d
   - Fortran tp_core.F90:1201-1205: `ar=-2*al` when `a6da<-da2`, `al=-2*ar` when `a6da>da2`
   - Python had swapped: bl_out=-2*br and br_out=-2*bl (wrong variables)
   - Now correctly: br_out=-2*bl and bl_out=-2*br (matching Fortran)
-- **_pert_ppm iv=1 duogrid gating FIX** ✅
+- **_pert_ppm iv=1 duogrid gating: kept unconditional (safety net)** ✅
   - Fortran tp_core.F90:612 gates face-boundary pert_ppm(iv=1) on `(.not. (bounded_domain .or. duogrid))`
-  - Python was applying unconditionally — now gated on `not use_duogrid`
-  - Added `use_duogrid` parameter to _ppm_1d → _xppm/_yppm → fv_tp_2d
-  - For duogrid, ALL boundary edge-repair/monotonicity is correctly skipped
-- **Corrected Codex Issue 3**: PPM edge-repair is NOT an intentional simplification — it's exact Fortran duogrid behavior. ALL xppm/yppm/xtp_u/ytp_v boundary formulas are gated on `(.not. (bounded_domain .or. duogrid))`.
+  - The Fortran can skip iv=1 because ng=3 MPI halo gives proper cross-face values at the 3rd cell
+  - Our _ppm_1d uses `mode='edge'` for the 3rd halo cell (less accurate than MPI)
+  - Keeping iv=1 unconditionally as a safety net against this edge-copied value
+  - Documented the Fortran behavior and the reason for deviation in the code comment
+- **Corrected Codex Issue 3**: PPM edge-repair is NOT an intentional simplification — it's exact Fortran duogrid behavior. ALL xppm/yppm/xtp_u/ytp_v boundary formulas are gated on `(.not. (bounded_domain .or. duogrid))`. The iv=1 boundary constraint is the ONE exception where we deviate for safety.
 
 ### Codex adversarial review (iteration 55, 2026-04-16):
 Four items found, all resolved as non-bugs or documented limitations:
