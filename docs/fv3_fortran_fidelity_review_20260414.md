@@ -489,8 +489,17 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
 - d_sw5: cell-centre vorticity + fv_tp_2d transport (vorticity sync commented out in oracle) ✓
 - d_sw6: D-grid wind replacement formula ✓
 - fv_tp_2d: Lin-Rood operator-split with CGRID flux sync + true hord=9 pert_ppm(iv=0) ✓
-- PPM: raw Courant (no face-boundary scaling) matching Fortran xppm flux formula ✓
+- PPM: raw Courant (no face-boundary scaling, no CFL clamping) matching Fortran xppm/ytp_v flux ✓
 - Metrics: cosa_u/rsin_u from sin_sg, supergrid dxc/dyc/area_corner, exact rdxa/rdya ✓
+
+### Remaining conditional gaps (only activate for non-default parameters):
+- **deln_flux** (tp_core.F90:200): del-n damping in fv_tp_2d. Only called when `damp_c > 1e-4` + `nord >= 0`. NOT implemented in Python. Irrelevant when damp_c=0 (our default).
+- **divergence_corner_duo** (sw_core.F90:2345-2447): corner divergence with face-boundary zeroing and 0.25 adjacent-cell attenuation. Only called when `nord > 0` in c_sw. NOT implemented.
+- **Vorticity damping** (sw_core.F90:1948-2000): del-n damping of vorticity via `del6_vt_flux`. Only when `damp_v > 1e-5`. NOT implemented.
+- **Divergence heating** (sw_core.F90:1953-1986): KE→heat conversion from divergence damping. Only when `d_con > 1e-5`. NOT implemented.
+- **Higher-order divergence damping** (sw_core.F90:1725-1787): iterated del-n at corners. Only for `nord > 0`. NOT implemented.
+
+These are all CONDITIONAL features gated on non-default parameters. The standard duogrid test cases (nord=0, damp_c=0, damp_v=0, d_con=0) exercise none of these paths.
 
 **Remaining infrastructure gap**: FV3 uses ng=3 MPI DGRID_NE halo (full 2D exchange); Python uses ng=1 pad_halo_dgrid + pad_halo_vector (two-step). Causes ~0.3% transport velocity asymmetry at face boundaries. Affects FB c_sw stability only (production path unaffected).
 
