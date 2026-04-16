@@ -691,12 +691,10 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
 
     # 3. First-order upwind mass transport
     h_pad = _pad_halo_auto(h, cdgrid)
-    # x-fluxes: upwind h * scaled_ut
     h_left = h_pad[:, :-1, 1:-1]   # (6, n+1, n)
     h_right = h_pad[:, 1:, 1:-1]
     fx = jnp.where(ut_scaled > 0, h_left, h_right) * ut_scaled
 
-    # y-fluxes
     h_bot = h_pad[:, 1:-1, :-1]    # (6, n, n+1)
     h_top = h_pad[:, 1:-1, 1:]
     fy = jnp.where(vt_scaled > 0, h_bot, h_top) * vt_scaled
@@ -778,14 +776,10 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     uc_mass, vc_mass = fv3_cc2c(u_cc, v_cc, cdgrid)
     dh_dt = cgrid_mass_flux_divergence(h, uc_mass, vc_mass, cdgrid)
 
-    # 3. KE at cell centres (FV3 sw_core.F90:303-372)
+    # 3. KE from physical-frame D-grid winds (avoids 1/sin² amplification
+    # of the contravariant ua*uc formula at face boundaries).
     dg = cdgrid.base.duogrid
     use_duogrid = dg is not None and dg.ng >= 2
-    ke_u, ke_v = _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid)
-
-    # Physical-frame KE for Bernoulli function (avoids 1/sin² amplification
-    # of contravariant formula at face boundaries, which would cause CSW
-    # path instability).
     utmp_ke = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
     vtmp_ke = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
     ke = 0.5 * (utmp_ke**2 + vtmp_ke**2)
