@@ -1467,14 +1467,11 @@ def _extract_cgrid_boundary(fx, fy, face, edge, n):
 
 
 def synchronize_corner_scalar(field, n):
-    """Average a scalar corner field at shared face boundaries.
+    """Average a scalar corner field at shared face boundaries and cube vertices.
 
-    For a field at D-grid corner positions (6, n+1, n+1), averages the
-    boundary values between adjacent faces.
-
-    NOTE: For vector quantities (e.g. B-grid KE transport components),
-    use ``synchronize_bgrid_ne`` instead — it matches FV3's BGRID_NE
-    exchange which syncs x-components at W/E and y-components at S/N.
+    For a field at D-grid corner positions (6, n+1, n+1):
+    1. Average boundary edges between adjacent face pairs.
+    2. Average cube-vertex corners where 3 faces meet (8 vertices).
 
     Parameters
     ----------
@@ -1495,6 +1492,7 @@ def synchronize_corner_scalar(field, n):
         else:
             return field[f, :, n]
 
+    # --- Pass 1: edge-pairwise averaging (read all before write) ---
     avgs = {}
     for face in range(6):
         for edge in (WEST, EAST, SOUTH, NORTH):
@@ -1516,5 +1514,52 @@ def synchronize_corner_scalar(field, n):
                 field = field.at[face, :, 0].set(avg)
             else:
                 field = field.at[face, :, n].set(avg)
+
+    # --- Pass 2: cube-vertex averaging (3 faces share each vertex) ---
+    # Each face has 4 corners at (i,j) ∈ {0,n}×{0,n}. Each corner is a
+    # cube vertex shared by exactly 3 faces. After edge averaging, the 3
+    # face values may be inconsistent because each was averaged from a
+    # different edge pair. Replace with the 3-face mean.
+
+    def _neighbor_corner(face_a, ci, cj, edge):
+        """Find the neighbor face corner reached via the given edge."""
+        nbr_f, nbr_e, rev = CONNECTIVITY[face_a][edge]
+        # Position along face_a's edge
+        if edge in (WEST, EAST):
+            pos = cj  # position along vertical edge
+        else:
+            pos = ci  # position along horizontal edge
+        if rev:
+            pos = n - pos
+        # Map to neighbor face corner
+        if nbr_e == WEST:
+            return nbr_f, 0, pos
+        elif nbr_e == EAST:
+            return nbr_f, n, pos
+        elif nbr_e == SOUTH:
+            return nbr_f, pos, 0
+        else:  # NORTH
+            return nbr_f, pos, n
+
+    _edge_for_i = {0: WEST, n: EAST}
+    _edge_for_j = {0: SOUTH, n: NORTH}
+
+    visited = set()
+    for face_a in range(6):
+        for ci in (0, n):
+            for cj in (0, n):
+                fb, bi, bj = _neighbor_corner(face_a, ci, cj, _edge_for_i[ci])
+                fc, ci_c, cj_c = _neighbor_corner(face_a, ci, cj, _edge_for_j[cj])
+
+                key = tuple(sorted([(face_a, ci, cj), (fb, bi, bj), (fc, ci_c, cj_c)]))
+                if key in visited:
+                    continue
+                visited.add(key)
+
+                avg3 = (field[face_a, ci, cj] + field[fb, bi, bj]
+                        + field[fc, ci_c, cj_c]) / 3.0
+                field = field.at[face_a, ci, cj].set(avg3)
+                field = field.at[fb, bi, bj].set(avg3)
+                field = field.at[fc, ci_c, cj_c].set(avg3)
 
     return field
