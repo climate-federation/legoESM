@@ -569,6 +569,15 @@ Standard test cases (d2_bg=0, dddmp=0, d4_bg=0.16, nord=1) now correctly activat
 
 Remaining gaps are infrastructure-level (halo width ng=1 vs ng=3) and 3D-only (divergence heating).
 
+### Codex adversarial review (iteration 55, 2026-04-16):
+Four items found, all resolved as non-bugs or documented limitations:
+1. **d_sw1 duogrid early return**: NOT a bug. Codex cited non-duogrid lines (sw_core.F90:625-813); duogrid path is at 3419+ where boundary overrides are gated on `.not. dg%is_initialized`. Our early return matches.
+2. **d_sw3 C-grid padding**: Infrastructure halo gap (no C-grid exchange available). Documented.
+3. **PPM edge-repair formulas**: Documented intentional simplification. Fortran also skips most edge-repair for duogrid.
+4. **d_sw5 edge-padded halos**: Infrastructure limitation masked by face-boundary zeroing (`divg_d=0` at boundaries, sw_core.F90:2431-2434). No practical impact.
+
+**No remaining formula-level fidelity issues found by adversarial review.**
+
 ### Session summary (2026-04-15): 10 commits
 1. FV3 operator fidelity: d2a2c_vect ut positions, vorticity flux boundaries, cell-centre vorticity in c_sw/csw, physical KE
 2. Production path: halo-exchanged corner winds, cell-centre tendency cancellation (2.6x better balance)
