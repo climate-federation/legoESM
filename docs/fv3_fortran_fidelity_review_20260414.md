@@ -373,8 +373,16 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
   - Eliminated ~120 lines of duplicated code
   - Also removed dead branch: `fv3_csw_tendencies` had identical KE computation in both if/else arms
 
+### Investigated in iteration 37 (2026-04-16):
+- **Duogrid + production path NOW STABLE**: W2 C16 survives 1 full day (288 steps, dt=300s, RK3). Previously blew up with NaN due to 370x corner tendency amplification. The tendency magnitude dropped from max|dh/dt|=0.158 to 1.2e-3 (130x improvement) due to cumulative fixes from prior iterations. h_err=40m at 1 day — comparable to non-duogrid path (identical metrics).
+- **FB path instability root cause confirmed**: c_sw first-order upwind mass transport with W2's non-uniform h field and non-zero transport velocity divergence creates 13.78 m h_err per step. Fundamental to first-order upwind on cubed sphere, not fixable by flux sync alone. FV3 achieves stability from higher-quality MPI halos (ng=3+).
+- **Transport velocity sync tested and rejected**: syncing ut_scaled/vt_scaled at face boundaries before upwind step gives modest FB improvement (75 vs 50 steps survival) but doesn't solve fundamental issue. Reverted — not in Fortran oracle.
+- **FV3 c_sw divergence_corner_duo verified**: Fortran computes corner divergence for hyperviscosity with boundary zeroing (divg_d=0 at face boundaries) and 0.25 damping at adjacent cells (sw_core.F90:2431-2440). Our code doesn't have this boundary treatment — only relevant when div_damp > 0 (not in standard tests).
+- **Code cleanup**: removed unused ke_upwind() call in fv3_csw_tendencies (dead code — physical-frame KE used instead of contravariant upwind formula).
+- **All 6 rest state paths verified**: production/CSW/FB × no-DG/DG all give machine-precision (≤2.7e-17) rest state preservation.
+
 ### Pre-existing issues (not caused by these changes):
-- Williamson 2 v-wind shows cube-face imprint at t>0.5d — IDENTICAL in original code (verified by checkout to ebd6e43). Root cause is deeper infrastructure (grid construction, halo exchange), not operator formulas.
+- Williamson 2 v-wind shows cube-face imprint at t>0.5d — IDENTICAL in original code (verified by checkout to ebd6e43). Root cause is ARCHITECTURAL: production path computes pressure gradient at D-grid corners with haloed data, while Fortran FV3 uses FB stepping where pressure gradient is at C-grid (well-conditioned 2-point stencil). Eliminating this requires stabilizing the FB c_sw path, which is blocked by the first-order upwind mass transport + cubed sphere non-zero transport velocity divergence issue.
 - Ocean rest state eta shows structured face-boundary patterns at early timesteps (O(0.01 m) scale), also pre-existing. The global mean drift is 1e-18 (machine epsilon) but local artifacts have face-boundary structure.
 - Full 5-day Williamson 2 NaN blowup at C36
 - Adjoint grad/div consistency test failure on cubed sphere
