@@ -86,7 +86,7 @@ def _pert_ppm_iv0(q, bl, br):
 
 def _ppm_1d(q, n, off_left=None, off_right=None,
             off_left_d1=None, off_right_d1=None):
-    """PPM bl/br along axis=1 with hord=8 + position-aware boundaries.
+    """PPM bl/br along axis=1 with hord=9 + position-aware boundaries.
 
     Parameters
     ----------
@@ -251,7 +251,7 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
 
 def _yppm(q_h2, cry, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None):
-    """PPM in y with hord=8 Courant-number integration."""
+    """PPM in y with hord=9 Courant-number integration."""
     q_t = jnp.swapaxes(q_h2, 1, 2)
     c_t = jnp.swapaxes(cry, 1, 2)
     bl, br, q_c = _ppm_1d(q_t, n, off_left, off_right,
