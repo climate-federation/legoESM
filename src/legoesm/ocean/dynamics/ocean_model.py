@@ -34,6 +34,7 @@ from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.core.precision import cast_pytree
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
+from legoesm.ocean.dynamics.barotropic_cgrid import barotropic_substeps_cgrid
 
 OCEAN_DISCRETIZATIONS = ["cdgrid"]
 
@@ -166,6 +167,11 @@ class OceanModel:
             raise ValueError(
                 "salinity_min_psu must be <= salinity_max_psu, got "
                 f"{config.salinity_min_psu!r} > {config.salinity_max_psu!r}",
+            )
+        if config.barotropic_staggering not in ("a_grid", "c_grid"):
+            raise ValueError(
+                "barotropic_staggering must be 'a_grid' or 'c_grid', got "
+                f"{config.barotropic_staggering!r}",
             )
 
     def _assert_runtime_invariants(self, state: OceanState) -> None:
@@ -307,11 +313,18 @@ class OceanModel:
         # double-count the eta tendency.
         # Slow u/v tendency is already included in state_mid.
         dt_s = dt / self.config.n_barotropic_substeps
-        state_new = barotropic_substeps(
-            state_mid,
-            dt_s, self.config.n_barotropic_substeps,
-            self.grid, self.z_coord, self.config,
-        )
+        if self.config.barotropic_staggering == "c_grid":
+            state_new = barotropic_substeps_cgrid(
+                state_mid,
+                dt_s, self.config.n_barotropic_substeps,
+                self.grid, self._cdgrid, self.z_coord, self.config,
+            )
+        else:
+            state_new = barotropic_substeps(
+                state_mid,
+                dt_s, self.config.n_barotropic_substeps,
+                self.grid, self.z_coord, self.config,
+            )
 
         # --- 5. Conservation fixers ---
         if self.config.use_conservation_fixer:

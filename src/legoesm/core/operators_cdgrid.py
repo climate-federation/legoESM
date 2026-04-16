@@ -468,6 +468,42 @@ def cgrid_divergence(u_c, v_c, cdgrid):
 
 
 # ==============================================================================
+# C-grid compact gradient (cell centre → edge midpoints)
+# ==============================================================================
+
+def cgrid_gradient_2d(eta, cdgrid):
+    """Compact C-grid gradient of a cell-centre scalar to edge midpoints.
+
+    Uses single-cell differences scaled by centre-to-centre distances
+    (``dxc``, ``dyc``), matching the FV3 Bernoulli gradient stencil.
+
+    Parameters
+    ----------
+    eta : jax.Array, shape (6, n, n)
+        Cell-centre scalar (e.g. free-surface height).
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    deta_dx : jax.Array, shape (6, n+1, n)
+        Gradient at x-edge (u) midpoints.
+    deta_dy : jax.Array, shape (6, n, n+1)
+        Gradient at y-edge (v) midpoints.
+    """
+    eta_pad = _pad_halo_auto(eta, cdgrid)
+    # eta_pad shape: (6, n+2, n+2)  (1-cell halo on each side)
+
+    # x-gradient at u-points: (eta[i,j] - eta[i-1,j]) / dxc
+    # In padded coords: interior is [1:-1, 1:-1], so u-faces run 0..n
+    deta_dx = (eta_pad[:, 1:, 1:-1] - eta_pad[:, :-1, 1:-1]) * cdgrid.rdxc
+
+    # y-gradient at v-points: (eta[i,j] - eta[i,j-1]) / dyc
+    deta_dy = (eta_pad[:, 1:-1, 1:] - eta_pad[:, 1:-1, :-1]) * cdgrid.rdyc
+
+    return deta_dx, deta_dy
+
+
+# ==============================================================================
 # C-grid mass flux with PPM transport
 # ==============================================================================
 
