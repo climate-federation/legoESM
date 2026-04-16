@@ -232,24 +232,21 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
 
 def _xppm(q_h2, crx, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None):
-    """PPM in x with hord=8 Courant-number integration."""
+    """PPM in x with hord=9 Courant-number integration.
+
+    FV3 tp_core.F90 xppm lines 670-677: uses raw Courant number ``crx``
+    in the standard PPM flux formula.  Boundary non-uniformity is handled
+    entirely through bl/br corrections in ``_ppm_1d``, NOT by scaling crx
+    (the Fortran does not adjust the Courant number at face boundaries).
+    """
     bl, br, q_c = _ppm_1d(q_h2, n, off_left, off_right,
                            off_left_d1, off_right_d1)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
 
-    # Correct Courant number at face boundaries
-    crx_adj = crx
-    if off_left is not None:
-        crx_adj = crx_adj.at[:, 0, :].set(
-            crx[:, 0, :] / jnp.maximum(1.0 - off_left, 0.3))
-    if off_right is not None:
-        crx_adj = crx_adj.at[:, n, :].set(
-            crx[:, n, :] / jnp.maximum(1.0 + off_right, 0.3))
-
-    fx_pos = q_L + (1.0 - crx_adj) * (br_L - crx_adj * (bl_L + br_L))
-    fx_neg = q_R + (1.0 + crx_adj) * (bl_R + crx_adj * (bl_R + br_R))
-    return jnp.where(crx_adj > 0, fx_pos, fx_neg)
+    fx_pos = q_L + (1.0 - crx) * (br_L - crx * (bl_L + br_L))
+    fx_neg = q_R + (1.0 + crx) * (bl_R + crx * (bl_R + br_R))
+    return jnp.where(crx > 0, fx_pos, fx_neg)
 
 
 def _yppm(q_h2, cry, n, off_left=None, off_right=None,
