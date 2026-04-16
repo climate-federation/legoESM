@@ -209,6 +209,7 @@ class LatLonCGridOceanModel:
         """Validate configuration ranges."""
         nonnegative = {
             "A_h": config.A_h,
+            "B_h": config.B_h,
             "K_h": config.K_h,
             "A_v": config.A_v,
             "K_v": config.K_v,

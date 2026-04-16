@@ -53,7 +53,7 @@ class MPASOceanConfig(NamedTuple):
     g: float = 9.80616           # = constants.g
     rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4
-    K_h: float = 1.0e3
+    K_h: float = 0.0
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
     n_barotropic_substeps: int = 30

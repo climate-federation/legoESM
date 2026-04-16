@@ -55,10 +55,12 @@ from legoesm.ocean.state import (
     LatLonCGridOceanConfig,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    biharmonic_scaling_factor,
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,
     laplacian_cgrid,
+    vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     interp_cell_to_uface,
     curl_vertex_cgrid,
@@ -467,6 +469,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         du_dt = du_dt + config.A_h * vlap_u
         dv_dt = dv_dt + config.A_h * vlap_v
+
+    if config.B_h > 0:
+        bilap_u, bilap_v = vector_bilaplacian_cgrid(
+            u_prime, v_prime, grid,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        du_dt = du_dt - config.B_h * bilap_u
+        dv_dt = dv_dt - config.B_h * bilap_v
 
     if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)

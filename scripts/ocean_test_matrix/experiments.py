@@ -1369,7 +1369,8 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
 
     grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(
-            tc, physics=physics, A_h=eu_config.A_h,
+            tc, nlev=20, physics=physics,
+            A_h=eu_config.A_h, B_h=eu_config.B_h,
             eos="linear",
             eos_linear=LinearEOSConfig(
                 alpha_T=eu_config.alpha_T,

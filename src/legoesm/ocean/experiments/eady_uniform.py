@@ -37,12 +37,12 @@ class EadyUniformConfig:
     """Configuration for the classical Eady experiment."""
     # Domain
     H_max: float = 5500.0
-    lat_south: float = 25.0
-    lat_north: float = 65.0
+    lat_south: float = 10.0
+    lat_north: float = 80.0
     lat_center: float = 45.0
 
     # Stratification: uniform N² via linear T(z)
-    N: float = 6.24e-3
+    N: float = 3e-3
     T_ref: float = 10.0
     S_uniform: float = 35.0
 
@@ -51,18 +51,27 @@ class EadyUniformConfig:
     rho_0: float = 1025.0
 
     # Shear: U = Λz (zero at bottom, U_surface at top)
-    U_surface: float = 0.5
+    U_surface: float = 0.1
+
+    # Jet envelope: Gaussian half-width in degrees. The jet and dT/dy
+    # are localized around lat_center; the ocean outside the envelope
+    # is a quiescent resting stratified state.
+    jet_width_deg: float = 10.0
 
     # Perturbation
     eta_perturbation_m: float = 0.01
+    T_perturbation_K: float = 0.1
     perturbation_wavenumber: int = 3
 
-    # Physics
-    A_h: float = 5e5
-    bottom_drag_coeff: float = 1e-4
+    # Physics — kept minimal so the instability can develop.
+    # Classical Eady has no bottom drag or lateral diffusion.
+    # Biharmonic viscosity damps the 2Δy grid mode without
+    # affecting the physical Eady mode (~2600 km wavelength).
+    A_h: float = 1e4
+    B_h: float = 1e15
+    bottom_drag_coeff: float = 0.0
 
-    # Barotropic damping — high alpha to damp the adjustment transient
-    barotropic_diffusion_alpha: float = 0.05
+    barotropic_diffusion_alpha: float = 0.005
 
     @property
     def Lambda(self) -> float:
@@ -150,48 +159,75 @@ def _rest_state_mpas(mesh, z_coord, config):
 # Uniform stratification + uniform dT/dy
 # ---------------------------------------------------------------------------
 
+def _jet_envelope(lat_deg, config):
+    """Gaussian envelope centered on the jet: 1 at center, ~0 far away."""
+    return np.exp(-((lat_deg - config.lat_center) / config.jet_width_deg) ** 2)
+
+
 def _set_uniform_stratification(state, z_coord, config, grid):
-    """Set T(y, z) = T_ref + dTdz * z + dTdy * (y - y_center)."""
-    z_full = np.asarray(z_coord.z_full_ref)  # negative, surface-first
+    """Set T = background stratification + localized meridional gradient.
+
+    T(y,z) = T_ref + dTdz*z + dTdy * y_integrated_envelope(y)
+
+    The meridional gradient is localized by the jet envelope so that
+    far from the jet center, T depends only on z (resting stratified state).
+    """
+    z_full = np.asarray(z_coord.z_full_ref)
     nlev = len(z_full)
     T_data = np.array(state.T.data, dtype=np.float64)
     n_lat, n_lon = T_data.shape[0], T_data.shape[1]
 
-    lat_rad = np.asarray(grid.lat)  # (n_lat,) radians
+    lat_rad = np.asarray(grid.lat)
+    lat_deg = np.degrees(lat_rad)
     lat_center_rad = np.radians(config.lat_center)
     R = 6.371e6
-    y_offset = (lat_rad - lat_center_rad) * R  # meters from center
+    y = (lat_rad - lat_center_rad) * R
 
-    for k in range(nlev):
-        T_zk = config.T_ref + config.dTdz * z_full[k]
-        T_data[:, :, k] = T_zk + config.dTdy * y_offset[:, np.newaxis]
+    envelope = _jet_envelope(lat_deg, config)
+    # Integrate envelope * dy to get the cumulative T anomaly:
+    # T_anomaly(y) = dTdy * integral_0^y envelope(y') dy'
+    T_anomaly = np.zeros(n_lat, dtype=np.float64)
+    for i in range(1, n_lat):
+        dy = y[i] - y[i - 1]
+        T_anomaly[i] = T_anomaly[i - 1] + config.dTdy * 0.5 * (envelope[i] + envelope[i - 1]) * dy
 
     mask = np.asarray(state.land_mask.data)
     for k in range(nlev):
-        T_data[:, :, k] *= mask
+        T_zk = config.T_ref + config.dTdz * z_full[k]
+        T_data[:, :, k] = (T_zk + T_anomaly[:, np.newaxis]) * mask
 
     return state._replace(T=Field(jnp.array(T_data), name="T",
                                   dims=state.T.dims, units=state.T.units))
 
 
 def _set_uniform_stratification_mpas(state, z_coord, config, mesh):
-    """Set T(y, z) for MPAS cells."""
+    """Set T(y, z) for MPAS cells with localized jet envelope."""
     z_full = np.asarray(z_coord.z_full_ref)
     nlev = len(z_full)
     T_data = np.array(state.T.data, dtype=np.float64)
 
-    lat_cell = np.asarray(mesh.latCell)  # radians
+    lat_cell = np.asarray(mesh.latCell)
+    lat_deg = np.degrees(lat_cell)
     lat_center_rad = np.radians(config.lat_center)
     R = 6.371e6
-    y_offset = (lat_cell - lat_center_rad) * R
+    y = (lat_cell - lat_center_rad) * R
 
-    for k in range(nlev):
-        T_zk = config.T_ref + config.dTdz * z_full[k]
-        T_data[:, k] = T_zk + config.dTdy * y_offset
+    envelope = _jet_envelope(lat_deg, config)
+    # For MPAS: approximate the integral by sorting cells by latitude
+    sort_idx = np.argsort(lat_deg)
+    y_sorted = y[sort_idx]
+    env_sorted = envelope[sort_idx]
+    T_anom_sorted = np.zeros(len(y), dtype=np.float64)
+    for i in range(1, len(y)):
+        dy = y_sorted[i] - y_sorted[i - 1]
+        T_anom_sorted[i] = T_anom_sorted[i - 1] + config.dTdy * 0.5 * (env_sorted[i] + env_sorted[i - 1]) * dy
+    T_anomaly = np.zeros(len(y), dtype=np.float64)
+    T_anomaly[sort_idx] = T_anom_sorted
 
     mask = np.asarray(state.land_mask.data)
     for k in range(nlev):
-        T_data[:, k] *= mask
+        T_zk = config.T_ref + config.dTdz * z_full[k]
+        T_data[:, k] = (T_zk + T_anomaly) * mask
 
     return state._replace(T=Field(jnp.array(T_data), name="T",
                                   dims=state.T.dims, units=state.T.units))
@@ -202,20 +238,24 @@ def _set_uniform_stratification_mpas(state, z_coord, config, mesh):
 # ---------------------------------------------------------------------------
 
 def _set_linear_shear_latlon(state, grid, z_coord, config):
-    """Set u = Λz at all latitudes, remove depth mean, balance η."""
+    """Set u = Λz * envelope(y), remove depth mean, balance η."""
     z_full = np.asarray(z_coord.z_full_ref)
     dz = np.asarray(z_coord.dz_ref)
     nlev = len(z_full)
 
-    U_profile = config.Lambda * z_full  # (nlev,), negative z → negative U at depth
+    U_profile = config.Lambda * z_full
     H_col = np.sum(dz)
     U_bar = np.sum(U_profile * dz) / H_col
-    U_baroclinic = U_profile - U_bar  # remove depth mean
+    U_baroclinic = U_profile - U_bar
+
+    lat_rad = np.asarray(grid.lat)
+    lat_deg = np.degrees(lat_rad)
+    envelope = _jet_envelope(lat_deg, config)
 
     u_data = np.zeros_like(state.u.data, dtype=np.float64)
     n_lat = u_data.shape[0]
     for i in range(n_lat):
-        u_data[i, :, :] = U_baroclinic[np.newaxis, :]
+        u_data[i, :, :] = U_baroclinic[np.newaxis, :] * envelope[i]
 
     mask = np.asarray(state.land_mask.data)
     if hasattr(state, 'u_mask') and state.u_mask is not None:
@@ -224,17 +264,19 @@ def _set_linear_shear_latlon(state, grid, z_coord, config):
         u_mask = np.ones(u_data.shape[:2], dtype=np.float64)
     u_data *= u_mask[:, :, np.newaxis]
 
-    # Geostrophic SSH: f0 * U_bar = -g * deta/dy
-    # η(y) = -(f0/g) * U_bar * (y - y_center)
-    lat_rad = np.asarray(grid.lat)
+    # Geostrophic SSH: f0 * U_bar_envelope(y) = -g * deta/dy
     lat_center_rad = np.radians(config.lat_center)
     R = 6.371e6
-    y_offset = (lat_rad - lat_center_rad) * R  # (n_lat,)
-    eta_data = -(config.f0 / g) * U_bar * y_offset[:, np.newaxis] * np.ones((1, grid.n_lon))
+    y = (lat_rad - lat_center_rad) * R
+    U_bar_env = U_bar * envelope
+    eta_1d = np.zeros(n_lat, dtype=np.float64)
+    for i in range(1, n_lat):
+        dy = y[i] - y[i - 1]
+        eta_1d[i] = eta_1d[i - 1] - (config.f0 / g) * 0.5 * (U_bar_env[i] + U_bar_env[i - 1]) * dy
     ocean = mask > 0.5
-    if np.any(ocean):
-        eta_data -= np.mean(eta_data[ocean])
-    eta_data *= mask
+    eta_1d_ocean = eta_1d[ocean[:, 0]] if ocean.any() else eta_1d
+    eta_1d -= np.mean(eta_1d_ocean)
+    eta_data = eta_1d[:, np.newaxis] * np.ones((1, grid.n_lon)) * mask
 
     return state._replace(
         u=Field(jnp.array(u_data), name="u",
@@ -244,7 +286,7 @@ def _set_linear_shear_latlon(state, grid, z_coord, config):
 
 
 def _set_linear_shear_mpas(state, mesh, z_coord, config):
-    """Set edge-normal velocity from zonal U = Λz, balance η."""
+    """Set edge-normal velocity from zonal U = Λz * envelope(y), balance η."""
     z_full = np.asarray(z_coord.z_full_ref)
     dz = np.asarray(z_coord.dz_ref)
     nlev = len(z_full)
@@ -254,15 +296,19 @@ def _set_linear_shear_mpas(state, mesh, z_coord, config):
     U_bar_val = np.sum(U_profile * dz) / H_col
     U_baroclinic = U_profile - U_bar_val
 
-    angle = np.asarray(mesh.angleEdge)  # (nEdges,)
+    angle = np.asarray(mesh.angleEdge)
     c1 = np.asarray(mesh.cellsOnEdge[0])
     c2 = np.asarray(mesh.cellsOnEdge[1])
     mask = np.asarray(state.land_mask.data)
     edge_mask = mask[c1] * mask[c2]
 
+    lat_edge_deg = np.degrees(0.5 * (np.asarray(mesh.latCell)[c1]
+                                      + np.asarray(mesh.latCell)[c2]))
+    envelope_edge = _jet_envelope(lat_edge_deg, config)
+
     u_data = np.zeros_like(state.u.data, dtype=np.float64)
     for k in range(nlev):
-        u_data[:, k] = U_baroclinic[k] * np.cos(angle) * edge_mask
+        u_data[:, k] = U_baroclinic[k] * np.cos(angle) * edge_mask * envelope_edge
 
     # Geostrophic SSH
     lat_cell = np.asarray(mesh.latCell)
@@ -287,6 +333,7 @@ def _set_linear_shear_mpas(state, mesh, z_coord, config):
 # ---------------------------------------------------------------------------
 
 def _add_perturbation_latlon(state, grid, config):
+    """Add SSH + temperature perturbation to seed the baroclinic Eady mode."""
     lon_rad = np.asarray(grid.lon)
     lat_rad = np.asarray(grid.lat)
     k = config.perturbation_wavenumber
@@ -294,31 +341,51 @@ def _add_perturbation_latlon(state, grid, config):
     lat_center_rad = np.radians(config.lat_center)
     lat_width_rad = np.radians(10.0)
     envelope = np.exp(-((lat_2d - lat_center_rad) / lat_width_rad) ** 2)
-    eta_pert = config.eta_perturbation_m * np.sin(k * lon_2d) * envelope
+    zonal = np.sin(k * lon_2d)
 
-    eta_data = np.asarray(state.eta.data) + eta_pert
+    eta_data = np.array(state.eta.data, dtype=np.float64)
+    eta_data += config.eta_perturbation_m * zonal * envelope
     mask = np.asarray(state.land_mask.data)
     eta_data *= mask
 
-    return state._replace(eta=Field(jnp.array(eta_data), name="eta",
-                                    dims=state.eta.dims, units=state.eta.units))
+    T_data = np.array(state.T.data, dtype=np.float64)
+    nlev = T_data.shape[2]
+    T_pert_2d = config.T_perturbation_K * zonal * envelope
+    T_data[:, :, 0] += T_pert_2d * mask
+    T_data[:, :, -1] -= T_pert_2d * mask
+
+    return state._replace(
+        eta=Field(jnp.array(eta_data), name="eta",
+                  dims=state.eta.dims, units=state.eta.units),
+        T=Field(jnp.array(T_data), name="T",
+                dims=state.T.dims, units=state.T.units))
 
 
 def _add_perturbation_mpas(state, mesh, config):
+    """Add SSH + temperature perturbation to seed the baroclinic Eady mode."""
     lon_cell = np.asarray(mesh.lonCell)
     lat_cell = np.asarray(mesh.latCell)
     k = config.perturbation_wavenumber
     lat_center_rad = np.radians(config.lat_center)
     lat_width_rad = np.radians(10.0)
     envelope = np.exp(-((lat_cell - lat_center_rad) / lat_width_rad) ** 2)
-    eta_pert = config.eta_perturbation_m * np.sin(k * lon_cell) * envelope
+    zonal = np.sin(k * lon_cell)
 
-    eta_data = np.asarray(state.eta.data) + eta_pert
+    eta_data = np.array(state.eta.data, dtype=np.float64)
+    eta_data += config.eta_perturbation_m * zonal * envelope
     mask = np.asarray(state.land_mask.data)
     eta_data *= mask
 
-    return state._replace(eta=Field(jnp.array(eta_data), name="eta",
-                                    dims=state.eta.dims, units=state.eta.units))
+    T_data = np.array(state.T.data, dtype=np.float64)
+    T_pert_1d = config.T_perturbation_K * zonal * envelope
+    T_data[:, 0] += T_pert_1d * mask
+    T_data[:, -1] -= T_pert_1d * mask
+
+    return state._replace(
+        eta=Field(jnp.array(eta_data), name="eta",
+                  dims=state.eta.dims, units=state.eta.units),
+        T=Field(jnp.array(T_data), name="T",
+                dims=state.T.dims, units=state.T.units))
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +415,7 @@ def create_forcings(grid_type: str, grid, config: EadyUniformConfig = None):
         ),
         lateral_mixing=LateralMixingConfig(scheme="none"),
         bottom_drag=BottomDragConfig(
-            scheme="linear",
+            scheme="linear" if config.bottom_drag_coeff > 0 else "none",
             linear=LinearDragConfig(r=config.bottom_drag_coeff),
         ),
         convection=OceanConvectionConfig(scheme="none"),
@@ -415,12 +482,12 @@ EXPERIMENT_CONFIG = {
     "validate": validate_results,
     "get_field_specs": get_diagnostic_field_specs,
     "get_scalar_units": get_scalar_units,
-    "default_duration": 120.0,
-    "quick_duration": 10.0,
+    "default_duration": 200.0,
+    "quick_duration": 60.0,
     "expected_metrics": {
-        "growth_rate": "σ ≈ 0.31 f₀ Λ/N ≈ 4.7e-7 s⁻¹",
-        "efolding_time": "≈ 25 days",
-        "most_unstable_wavelength": "≈ 1330 km",
+        "growth_rate": "σ ≈ 2.3e-7 s⁻¹ (exact Eady dispersion)",
+        "efolding_time": "≈ 50 days",
+        "most_unstable_wavelength": "≈ 2600 km",
     },
     "grid_support": {
         "cubed_sphere": False,

@@ -723,6 +723,96 @@ def vector_laplacian_cgrid(
     return vlap_u, vlap_v
 
 
+def vector_bilaplacian_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Biharmonic (∇⁴) vector operator on the C-grid.
+
+    Computes ∇²(∇²(u, v)) by applying ``vector_laplacian_cgrid`` twice.
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
+    v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
+    grid : LatLonGrid
+    mask : (n_lat, n_lon) cell-center land mask, optional
+    u_mask : (n_lat, n_lon+1) u-face mask, optional
+    v_mask : (n_lat+1, n_lon) v-face mask, optional
+
+    Returns
+    -------
+    bilap_u : same shape as u
+        ∇⁴u component (biharmonic tendency for du/dt).
+    bilap_v : same shape as v
+        ∇⁴v component (biharmonic tendency for dv/dt).
+    """
+    vlap_u, vlap_v = vector_laplacian_cgrid(
+        u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    bilap_u, bilap_v = vector_laplacian_cgrid(
+        vlap_u, vlap_v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+    return bilap_u, bilap_v
+
+
+def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Grid-dependent scaling for biharmonic viscosity on a lat-lon grid.
+
+    On a latitude-longitude grid the zonal grid spacing shrinks as
+    ``cos(lat)`` near the poles.  Because the biharmonic CFL scales
+    as ``B_h * dt / dx^4``, a constant ``B_h`` violates CFL near the
+    poles while under-diffusing at the equator.
+
+    Following the MOM6 convention (Griffies & Hallberg 2000), the
+    biharmonic coefficient should be multiplied by
+    ``(dx_local / dx_ref)^4`` where ``dx_ref`` is a reference spacing
+    (typically the maximum or equatorial value).  This function returns
+    the pre-computed scaling arrays for u-face and v-face points.
+
+    Usage in the tendency function::
+
+        scale_u, scale_v = biharmonic_scaling_factor(grid)
+        bilap_u, bilap_v = vector_bilaplacian_cgrid(u, v, grid, ...)
+        du_dt -= B_h * scale_u * bilap_u
+        dv_dt -= B_h * scale_v * bilap_v
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+
+    Returns
+    -------
+    scale_u : (n_lat,)
+        Scaling factor at u-face latitudes.  Callers should reshape
+        to ``[:, None]`` for 2D fields or ``[:, None, None]`` for 3D.
+    scale_v : (n_lat+1,)
+        Scaling factor at v-face latitudes.
+    """
+    cos_lat = grid.cos_lat  # (n_lat,)
+
+    # Reference: equatorial (maximum) spacing
+    cos_max = 1.0
+
+    # u-face points sit at cell-center latitudes
+    scale_u = (cos_lat / cos_max) ** 4  # (n_lat,)
+
+    # v-face points sit at latitude interfaces between cells;
+    # interpolate cos_lat to v-face positions.
+    cos_v_interior = 0.5 * (cos_lat[:-1] + cos_lat[1:])  # (n_lat-1,)
+    cos_v = jnp.concatenate([
+        cos_lat[:1],         # south boundary ≈ cos(lat[0])
+        cos_v_interior,
+        cos_lat[-1:],        # north boundary ≈ cos(lat[-1])
+    ])  # (n_lat+1,)
+    scale_v = (cos_v / cos_max) ** 4  # (n_lat+1,)
+
+    return scale_u, scale_v
+
+
 def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
     """Compute vertex mask: wet only if all four surrounding cells are wet.
 

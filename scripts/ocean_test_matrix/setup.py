@@ -36,6 +36,7 @@ def _parse_resolution(tc):
 def _create_ocean_setup(tc, nlev: int | None = None,
                         H_max: float | None = None, physics=None,
                         A_h: float | None = None,
+                        B_h: float | None = None,
                         A_v: float | None = None,
                         eos: str | None = None,
                         eos_linear=None,
@@ -181,6 +182,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
         if A_v is not None:
             kw["A_v"] = A_v
         if eos is not None:

@@ -243,10 +243,14 @@ def mpas_ocean_baroclinic_tendencies(
     h_safe = jnp.maximum(h_k, 1e-10)  # (nCells, nlev)
 
     # Horizontal tracer diffusion: K_h * lap(T)
-    grad_T = gradient_edge_3d(T_3d, mesh) * edge_mask[:, jnp.newaxis]
-    dT_dt_3d = config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
-    grad_S = gradient_edge_3d(S_3d, mesh) * edge_mask[:, jnp.newaxis]
-    dS_dt_3d = config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
+    if config.K_h > 0:
+        grad_T = gradient_edge_3d(T_3d, mesh) * edge_mask[:, jnp.newaxis]
+        dT_dt_3d = config.K_h * divergence_cell_3d(grad_T, mesh) / h_safe * h_k
+        grad_S = gradient_edge_3d(S_3d, mesh) * edge_mask[:, jnp.newaxis]
+        dS_dt_3d = config.K_h * divergence_cell_3d(grad_S, mesh) / h_safe * h_k
+    else:
+        dT_dt_3d = jnp.zeros_like(T_3d)
+        dS_dt_3d = jnp.zeros_like(S_3d)
 
     # Mask land cells
     dT_dt_3d = dT_dt_3d * mask[:, jnp.newaxis]
