@@ -1464,3 +1464,54 @@ def _extract_cgrid_boundary(fx, fy, face, edge, n):
         return fy[face, :, 0]
     else:  # NORTH
         return fy[face, :, n]
+
+
+def synchronize_corner_scalar(field, n):
+    """Average a scalar corner field at shared face boundaries.
+
+    For a field at D-grid corner positions (6, n+1, n+1), averages the
+    boundary values between adjacent faces.  Approximates FV3's B-grid
+    boundary exchange (dyn_core.F90:969-1011) for scalar quantities.
+
+    Parameters
+    ----------
+    field : jax.Array, shape (6, n+1, n+1)
+    n : int — number of cells per face edge
+
+    Returns
+    -------
+    jax.Array, shape (6, n+1, n+1) — with averaged boundary values
+    """
+    def _bdy(f, edge):
+        if edge == WEST:
+            return field[f, 0, :]      # (n+1,)
+        elif edge == EAST:
+            return field[f, n, :]
+        elif edge == SOUTH:
+            return field[f, :, 0]
+        else:
+            return field[f, :, n]
+
+    avgs = {}
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+            local = _bdy(face, edge)
+            nbr = _bdy(nbr_face, nbr_edge)
+            if rev:
+                nbr = nbr[::-1]
+            avgs[(face, edge)] = 0.5 * (local + nbr)
+
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            avg = avgs[(face, edge)]
+            if edge == WEST:
+                field = field.at[face, 0, :].set(avg)
+            elif edge == EAST:
+                field = field.at[face, n, :].set(avg)
+            elif edge == SOUTH:
+                field = field.at[face, :, 0].set(avg)
+            else:
+                field = field.at[face, :, n].set(avg)
+
+    return field

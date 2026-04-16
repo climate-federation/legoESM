@@ -1260,12 +1260,15 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     # vbb = transported_x (u transported by ub)
     ke_corner = 0.5 * (transported_y * vb + ub * transported_x)
 
-    # Note: the uc/vc padding uses edge-copy (not cross-face halo), so
-    # face-boundary KE has O(dx) error.  FV3 handles this via duogrid
-    # flux sync of the KE B-grid components (dyn_core.F90:969-1011).
-    # d_sw4 fixes only the 4 cube-vertex corners (and skips for duogrid).
-    # We leave the edge-copy approximation as-is — zeroing would create
-    # O(1) artificial KE gradients at boundaries, which is far worse.
+    # Face-boundary KE sync: the uc/vc padding uses edge-copy (not
+    # cross-face halo), so face-boundary KE has O(dx) error.  FV3
+    # handles this via BGRID_NE flux sync of the transport components
+    # (dyn_core.F90:969-1011).  We approximate this by synchronizing
+    # the scalar KE at face boundaries, which ensures the KE gradient
+    # is consistent across adjacent faces even though individual
+    # component sync is not implemented.
+    from legoesm.grids.halo import synchronize_corner_scalar
+    ke_corner = synchronize_corner_scalar(ke_corner, n)
 
     return ke_corner
 
