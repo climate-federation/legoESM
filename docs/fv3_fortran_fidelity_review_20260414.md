@@ -350,7 +350,7 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 
 ### Remaining structural items:
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
-F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vect)
+F3-5. ~~d2a2c_vect corner 2×2 solve~~ — present in `_d_sw1_recompute_ut_vt` (used by FB d_sw). NOT in `_d2a2c_vect` (used by FB c_sw). The Fortran d2a2c_vect includes adjacent strip recomputation (sw_core.F90:656-726) and corner 2×2 solve (739-811) which affect c_sw's ut/vt quality. Only impacts non-duogrid FB path (experimental). For duogrid, all boundary specials are correctly skipped.
 - ~~Full d_sw B-grid KE transport~~ → ported (iter 32), **upgraded to PPM hord=9 (iter 39)**. `_ppm_transport_1d()` matches Fortran ytp_v/xtp_u jord>=8 branch (sw_core.F90:3162-3349) with correct rdy/rdx CFL scaling (sw_core.F90:3342).
 - Production path (fv3_sw_tendencies) uses Arakawa-Lamb gradient, NOT FV3's c_sw/d_sw operators — pre-existing artifacts originate here, not in fv3_sw_core.py
 - ~~**Duogrid + production path instability**~~: RESOLVED (iter 37). Was 370x corner tendency amplification, now 130x improved (max|dh/dt|=1.2e-3) and stable for 1+ day. The cumulative fixes from prior iterations resolved this.
@@ -440,12 +440,28 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
 ### Iteration 17: rsin_u uniformity fix
 Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhere, eliminating a 4.7% metric discontinuity. The cosa_u boundary gradient was verified to be smooth (4.88e-02 at boundary vs 5.29e-02 at interior — no discontinuity).
 
-### Evaluation results (all pass, updated after iteration 28, 2026-04-15):
-- Williamson 2: L2=1.53e-03, Linf=4.07e-03 (non-duogrid production path, unchanged)
-- Williamson 5: mass drift=1.42e-05 (non-duogrid); 1.09e-06 (with duogrid + flux sync, 13x improvement)
-- Cosine bell: L1=1.27e-01, L2=1.22e-01, Linf=1.32e-01 (unchanged)
-- Ocean rest state: all cubed-sphere variants PASS; duogrid path gives machine-precision preservation (h_err=0, u/v_err=1e-14)
+### Evaluation results (all pass, updated after iteration 40, 2026-04-16):
+- Williamson 2: L2=1.53e-03, Linf=4.07e-03 (production path)
+- Williamson 5: mass drift=1.42e-05
+- Cosine bell: L1=1.26e-01, L2=1.22e-01, Linf=1.32e-01 (improved 0.8% from rdxa Courant fix)
+- Ocean rest state: all 4 paths (production/FB × no-DG/DG) PASS at machine precision (h_err=0)
 - 86 unit tests pass; no regressions
+- Visual inspection: cosine bell clean, W2 height/wind_speed clean, W5 height/v clean
+- W2 v-wind: cube-face imprint at t>0.1d (architectural — production D-grid pressure gradient)
+
+### Fidelity status summary (2026-04-16):
+**All operator formulas verified matching Fortran oracle** for the duogrid path:
+- d2a2c_vect: D→A 4th-order, A→C 4th-order, covariant→contravariant ✓
+- c_sw: transport scaling, KE upwind, corner vorticity, vorticity flux ✓
+- d_sw1: transport velocity recomputation with adjacent strips + corner solve ✓
+- d_sw3: PPM hord=9 B-grid KE transport with BGRID_NE sync ✓
+- d_sw4: no-op for duogrid ✓
+- d_sw5: cell-centre vorticity + fv_tp_2d transport (vorticity sync commented out in oracle) ✓
+- d_sw6: D-grid wind replacement formula ✓
+- fv_tp_2d: Lin-Rood operator-split with CGRID flux sync ✓
+- Metrics: cosa_u/rsin_u from sin_sg, supergrid dxc/dyc/area_corner ✓
+
+**Remaining infrastructure gap**: FV3 uses ng=3 MPI DGRID_NE halo (full 2D exchange); Python uses ng=1 pad_halo_dgrid + pad_halo_vector (two-step). Causes ~0.3% transport velocity asymmetry at face boundaries. Affects FB c_sw stability only (production path unaffected).
 
 ### Session summary (2026-04-15): 10 commits
 1. FV3 operator fidelity: d2a2c_vect ut positions, vorticity flux boundaries, cell-centre vorticity in c_sw/csw, physical KE
