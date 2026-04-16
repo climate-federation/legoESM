@@ -569,6 +569,18 @@ Standard test cases (d2_bg=0, dddmp=0, d4_bg=0.16, nord=1) now correctly activat
 
 Remaining gaps are infrastructure-level (halo width ng=1 vs ng=3) and 3D-only (divergence heating).
 
+### Resolved in iteration 56 (2026-04-16):
+- **_pert_ppm iv=1 swapped bl/br FIX** ✅
+  - Fortran tp_core.F90:1201-1205: `ar=-2*al` when `a6da<-da2`, `al=-2*ar` when `a6da>da2`
+  - Python had swapped: bl_out=-2*br and br_out=-2*bl (wrong variables)
+  - Now correctly: br_out=-2*bl and bl_out=-2*br (matching Fortran)
+- **_pert_ppm iv=1 duogrid gating FIX** ✅
+  - Fortran tp_core.F90:612 gates face-boundary pert_ppm(iv=1) on `(.not. (bounded_domain .or. duogrid))`
+  - Python was applying unconditionally — now gated on `not use_duogrid`
+  - Added `use_duogrid` parameter to _ppm_1d → _xppm/_yppm → fv_tp_2d
+  - For duogrid, ALL boundary edge-repair/monotonicity is correctly skipped
+- **Corrected Codex Issue 3**: PPM edge-repair is NOT an intentional simplification — it's exact Fortran duogrid behavior. ALL xppm/yppm/xtp_u/ytp_v boundary formulas are gated on `(.not. (bounded_domain .or. duogrid))`.
+
 ### Codex adversarial review (iteration 55, 2026-04-16):
 Four items found, all resolved as non-bugs or documented limitations:
 1. **d_sw1 duogrid early return**: NOT a bug. Codex cited non-duogrid lines (sw_core.F90:625-813); duogrid path is at 3419+ where boundary overrides are gated on `.not. dg%is_initialized`. Our early return matches.
