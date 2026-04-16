@@ -457,7 +457,20 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
   - All metrics unchanged (pert_ppm iv=0 and pmp/lac produce identical results on these well-resolved positive fields)
   - 86 unit tests pass; 4 ocean rest state tests pass at machine precision
 
-### Evaluation results (all pass, updated after iteration 43, 2026-04-16):
+### Resolved in iteration 44 (2026-04-16):
+- **Remove non-Fortran Courant scaling in _xppm** ✅
+  - FV3 xppm (tp_core.F90:670-677) uses raw Courant number, does NOT scale at face boundaries
+  - Python _xppm had `crx/(1-offset)` at face boundaries that was not in the Fortran
+  - Also was asymmetric (_yppm had no such adjustment)
+  - Removed for fidelity
+- **Exact rdxa/rdya from supergrid** ✅
+  - FV3 uses rdxa = 1/dxa where dxa = face-to-face cell width (fv_grid_tools.F90)
+  - Previously approximated as 0.5*(rdxc[i]+rdxc[i+1])
+  - Now computed exactly from supergrid: dxa(i,j) = dist(supergrid(2i,2j+1), supergrid(2i+2,2j+1))
+  - Added rdxa/rdya fields to CubedSphereCDGrid NamedTuple
+  - Metrics unchanged at C36 (approximation was already O(dx²))
+
+### Evaluation results (all pass, updated after iteration 44, 2026-04-16):
 - Williamson 2: L2=1.53e-03, Linf=4.07e-03 (production path)
 - Williamson 5: mass drift=1.42e-05
 - Cosine bell: L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01
@@ -476,7 +489,8 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
 - d_sw5: cell-centre vorticity + fv_tp_2d transport (vorticity sync commented out in oracle) ✓
 - d_sw6: D-grid wind replacement formula ✓
 - fv_tp_2d: Lin-Rood operator-split with CGRID flux sync + true hord=9 pert_ppm(iv=0) ✓
-- Metrics: cosa_u/rsin_u from sin_sg, supergrid dxc/dyc/area_corner ✓
+- PPM: raw Courant (no face-boundary scaling) matching Fortran xppm flux formula ✓
+- Metrics: cosa_u/rsin_u from sin_sg, supergrid dxc/dyc/area_corner, exact rdxa/rdya ✓
 
 **Remaining infrastructure gap**: FV3 uses ng=3 MPI DGRID_NE halo (full 2D exchange); Python uses ng=1 pad_halo_dgrid + pad_halo_vector (two-step). Causes ~0.3% transport velocity asymmetry at face boundaries. Affects FB c_sw stability only (production path unaffected).
 
