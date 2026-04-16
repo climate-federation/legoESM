@@ -192,6 +192,12 @@ These are patterns the first audit revealed that should be checked in future pas
 6. **`ocean/physics/mixing.py` is a foundation module,** not a legacy monolith. The `vertical_mixing/` package builds ON TOP of it (imports `vertical_diffusion`, `laplacian_viscosity_3d`, etc.). Do not flag it for removal.
 7. **Orphaned tests for deleted scripts.** When scripts are removed, their test files may survive. Always run Pass 5 (orphaned tests) after any script cleanup.
 
+## Script unification and test placement rules
+
+8. **Scripts should be unified as much as possible.** When multiple scripts do similar things (e.g., `run_amip.py` vs `run_amip_spectral.py`, multiple benchmark runners), flag them for consolidation. Look for shared setup, shared CLI arg parsing, shared output logic. Prefer one script with config-driven dispatch over N near-identical scripts. During `audit all`, scan `scripts/` for scripts sharing >50% structural similarity and recommend merging.
+9. **Test code belongs in `tests/` or `scripts/`, not `src/legoesm/`.** In review mode, flag diffs that add `import pytest`, `import unittest`, or `from pytest` to any file under `src/legoesm/`. In audit mode, scan for these imports — currently the repo has none, so any appearance is new slop. Everything else (`assert` statements, `if __name__` blocks, `argparse` CLIs) is fine in source and should not be flagged.
+10. **Minimize redundancy across the codebase.** This extends beyond Pass 3 duplicates: also flag redundant helper functions, repeated constant definitions, copy-pasted boilerplate across scripts/tests, and near-identical initialization sequences. The bar: if two pieces of code share >70% logic, one should call the other or both should call a shared function.
+
 ## Resolved items (2026-03-27)
 
 | Item | Action | Lines removed |
