@@ -1466,12 +1466,116 @@ def _extract_cgrid_boundary(fx, fy, face, edge, n):
         return fy[face, :, n]
 
 
+def synchronize_bgrid_ne(x_comp, y_comp, n):
+    """BGRID_NE vector boundary exchange: sync x-component at W/E, y-component at S/N.
+
+    Implements FV3's ``mpp_get_boundary(..., gridtype=BGRID_NE)`` followed by
+    boundary averaging, as used in dyn_core.F90:969-1011 for d_sw3 KE transport
+    component synchronization.
+
+    For a B-grid (corner-staggered) vector field ``(x_comp, y_comp)`` at
+    positions ``(6, n+1, n+1)``:
+    - ``x_comp`` is averaged at WEST (i=0) and EAST (i=n) boundaries
+    - ``y_comp`` is averaged at SOUTH (j=0) and NORTH (j=n) boundaries
+
+    This matches the Fortran where ``ubb`` (x-Courant) is synced at W/E and
+    ``vbbtemp`` (y-Courant) is synced at S/N.
+
+    Parameters
+    ----------
+    x_comp : jax.Array, shape (6, n+1, n+1)
+        B-grid x-component (e.g. ubb = x-direction Courant number).
+    y_comp : jax.Array, shape (6, n+1, n+1)
+        B-grid y-component (e.g. vbbtemp = y-direction Courant number).
+    n : int
+        Number of cells per face edge.
+
+    Returns
+    -------
+    x_comp_sync, y_comp_sync : jax.Array, shape (6, n+1, n+1)
+        Components with averaged boundary values.
+    """
+    # Compute all averages from ORIGINAL data before writing.
+    x_avgs = {}  # averages for x_comp at W/E
+    y_avgs = {}  # averages for y_comp at S/N
+
+    for face in range(6):
+        # x_comp sync at WEST (i=0) and EAST (i=n)
+        for edge in (WEST, EAST):
+            nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+            # Local boundary
+            if edge == WEST:
+                local = x_comp[face, 0, :]  # (n+1,)
+            else:
+                local = x_comp[face, n, :]
+
+            # Neighbor's matching boundary x_comp
+            if nbr_edge == WEST:
+                nbr = x_comp[nbr_face, 0, :]
+            elif nbr_edge == EAST:
+                nbr = x_comp[nbr_face, n, :]
+            elif nbr_edge == SOUTH:
+                # Cross-axis: neighbor's S boundary → their y_comp becomes our x_comp
+                nbr = y_comp[nbr_face, :, 0]
+            else:  # NORTH
+                nbr = y_comp[nbr_face, :, n]
+
+            if rev:
+                nbr = nbr[::-1]
+            x_avgs[(face, edge)] = 0.5 * (local + nbr)
+
+        # y_comp sync at SOUTH (j=0) and NORTH (j=n)
+        for edge in (SOUTH, NORTH):
+            nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+            # Local boundary
+            if edge == SOUTH:
+                local = y_comp[face, :, 0]  # (n+1,)
+            else:
+                local = y_comp[face, :, n]
+
+            # Neighbor's matching boundary y_comp
+            if nbr_edge == SOUTH:
+                nbr = y_comp[nbr_face, :, 0]
+            elif nbr_edge == NORTH:
+                nbr = y_comp[nbr_face, :, n]
+            elif nbr_edge == WEST:
+                # Cross-axis: neighbor's W boundary → their x_comp becomes our y_comp
+                nbr = x_comp[nbr_face, 0, :]
+            else:  # EAST
+                nbr = x_comp[nbr_face, n, :]
+
+            if rev:
+                nbr = nbr[::-1]
+            y_avgs[(face, edge)] = 0.5 * (local + nbr)
+
+    # Write averaged values.
+    for face in range(6):
+        for edge in (WEST, EAST):
+            avg = x_avgs[(face, edge)]
+            if edge == WEST:
+                x_comp = x_comp.at[face, 0, :].set(avg)
+            else:
+                x_comp = x_comp.at[face, n, :].set(avg)
+
+        for edge in (SOUTH, NORTH):
+            avg = y_avgs[(face, edge)]
+            if edge == SOUTH:
+                y_comp = y_comp.at[face, :, 0].set(avg)
+            else:
+                y_comp = y_comp.at[face, :, n].set(avg)
+
+    return x_comp, y_comp
+
+
 def synchronize_corner_scalar(field, n):
     """Average a scalar corner field at shared face boundaries.
 
     For a field at D-grid corner positions (6, n+1, n+1), averages the
-    boundary values between adjacent faces.  Approximates FV3's B-grid
-    boundary exchange (dyn_core.F90:969-1011) for scalar quantities.
+    boundary values between adjacent faces.
+
+    NOTE: For vector quantities (e.g. B-grid KE transport components),
+    use ``synchronize_bgrid_ne`` instead — it matches FV3's BGRID_NE
+    exchange which syncs x-components at W/E and y-components at S/N.
 
     Parameters
     ----------

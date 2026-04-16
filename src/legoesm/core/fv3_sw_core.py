@@ -532,6 +532,101 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
 
 
 # ==============================================================================
+# Shared FV3 c_sw helpers (used by both _c_sw and fv3_csw_tendencies)
+# ==============================================================================
+
+def _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid):
+    """FV3 c_sw KE upwind selection (sw_core.F90:303-365).
+
+    Returns ke_u, ke_v — the upwind-selected covariant velocities for KE.
+    Non-duogrid path applies sin_sg/cos_sg conversion at face boundaries.
+    """
+    n = cdgrid.n
+    ke_u = jnp.where(ua > 0, uc[:, :-1, :], uc[:, 1:, :])
+    ke_v = jnp.where(va > 0, vc[:, :, :-1], vc[:, :, 1:])
+
+    if not use_duogrid:
+        sg = cdgrid.sin_sg
+        cg = cdgrid.cos_sg
+        # West edge (cell 0, ua > 0): uc*sin_sg(W) + v*cos_sg(W)
+        ke_bdy_l = uc[:, 0, :] * sg[:, 0, :, 0] + v_d[:, 0, :] * cg[:, 0, :, 0]
+        ke_u = ke_u.at[:, 0, :].set(
+            jnp.where(ua[:, 0, :] > 0, ke_bdy_l, ke_u[:, 0, :]))
+        # East edge (cell n-1, ua <= 0): uc*sin_sg(E) + v*cos_sg(E)
+        ke_bdy_r = uc[:, n, :] * sg[:, n-1, :, 2] + v_d[:, n, :] * cg[:, n-1, :, 2]
+        ke_u = ke_u.at[:, n-1, :].set(
+            jnp.where(ua[:, n-1, :] > 0, ke_u[:, n-1, :], ke_bdy_r))
+        # South edge (cell j=0, va > 0): vc*sin_sg(S) + u*cos_sg(S)
+        ke_bdy_b = vc[:, :, 0] * sg[:, :, 0, 1] + u_d[:, :, 0] * cg[:, :, 0, 1]
+        ke_v = ke_v.at[:, :, 0].set(
+            jnp.where(va[:, :, 0] > 0, ke_bdy_b, ke_v[:, :, 0]))
+        # North edge (cell j=n-1, va <= 0): vc*sin_sg(N) + u*cos_sg(N)
+        ke_bdy_t = vc[:, :, n] * sg[:, :, n-1, 3] + u_d[:, :, n] * cg[:, :, n-1, 3]
+        ke_v = ke_v.at[:, :, n-1].set(
+            jnp.where(va[:, :, n-1] > 0, ke_v[:, :, n-1], ke_bdy_t))
+
+    return ke_u, ke_v
+
+
+def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
+    """FV3 c_sw corner vorticity from C-grid circulation (sw_core.F90:378-408).
+
+    Returns vort_abs at D-grid corners (6, n+1, n+1).
+    """
+    n = cdgrid.n
+    fx_circ = uc * cdgrid.dxc    # (6, n+1, n)
+    fy_circ = vc * cdgrid.dyc    # (6, n, n+1)
+
+    # Linear extrapolation padding for boundary cells
+    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    if n > 2:
+        fx_pad = fx_pad.at[:, :, 0].set(2 * fx_circ[:, :, 0] - fx_circ[:, :, 1])
+        fx_pad = fx_pad.at[:, :, n + 1].set(2 * fx_circ[:, :, n - 1] - fx_circ[:, :, n - 2])
+        fy_pad = fy_pad.at[:, 0, :].set(2 * fy_circ[:, 0, :] - fy_circ[:, 1, :])
+        fy_pad = fy_pad.at[:, n + 1, :].set(2 * fy_circ[:, n - 1, :] - fy_circ[:, n - 2, :])
+
+    # Direct corner vorticity: vort(i,j) = fx(i,j-1) - fx(i,j) - fy(i-1,j) + fy(i,j)
+    vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
+            - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])
+
+    # Corner corrections for non-duogrid (FV3 sw_core.F90:396-400)
+    if not use_duogrid:
+        vort = vort.at[:, 0, 0].add(fy_pad[:, 0, 0])
+        vort = vort.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+        vort = vort.at[:, n, n].add(-fy_pad[:, n + 1, n])
+        vort = vort.at[:, 0, n].add(fy_pad[:, 0, n])
+
+    rarea_c = 1.0 / cdgrid.area_corner
+    return cdgrid.f_corner + rarea_c * vort
+
+
+def _vorticity_flux(v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid):
+    """FV3 c_sw vorticity transport flux (sw_core.F90:416-480).
+
+    Returns fy1, vort_x (x-face) and fx1, vort_y (y-face).
+    Uses 1/sin (NOT 1/sin²) per FV3 comment at sw_core.F90:417.
+    """
+    n = cdgrid.n
+    sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, _EPS))
+    sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
+
+    fy1 = (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
+    if not use_duogrid:
+        fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
+        fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
+    vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
+
+    fx1 = (u_d - vc * cdgrid.cosa_v) / jnp.maximum(sina_v, _EPS)
+    if not use_duogrid:
+        fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
+        fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
+    vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
+
+    return fy1, vort_x, fx1, vort_y
+
+
+# ==============================================================================
 # c_sw: C-grid half-step
 # ==============================================================================
 
@@ -615,124 +710,19 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
     h_star = h + (fx[:, :-1, :] - fx[:, 1:, :] + fy[:, :, :-1] - fy[:, :, 1:]) * rarea
 
     # 4. KE at cell centres (FV3 sw_core.F90:303-372)
-    # Duogrid/bounded: simple upwind uc/vc at all cells.
-    # Non-duogrid: face-boundary cells use sin_sg/cos_sg conversion
-    # to get the coordinate-parallel wind (sw_core.F90:323-365).
-    uc_left = uc[:, :-1, :]   # (6, n, n)
-    uc_right = uc[:, 1:, :]
-    ke_u = jnp.where(ua > 0, uc_left, uc_right)
-
-    vc_bot = vc[:, :, :-1]    # (6, n, n)
-    vc_top = vc[:, :, 1:]
-    ke_v = jnp.where(va > 0, vc_bot, vc_top)
-
-    if not use_duogrid:
-        sg = cdgrid.sin_sg
-        cg = cdgrid.cos_sg
-        # x-direction face-boundary KE conversion
-        # Left edge (cell 0, ua > 0): uc*sin_sg(W) + v*cos_sg(W)
-        ke_bdy_left = uc[:, 0, :] * sg[:, 0, :, 0] + v_d[:, 0, :] * cg[:, 0, :, 0]
-        ke_u = ke_u.at[:, 0, :].set(
-            jnp.where(ua[:, 0, :] > 0, ke_bdy_left, ke_u[:, 0, :]))
-        # Right edge (cell n-1, ua <= 0): uc*sin_sg(E) + v*cos_sg(E)
-        ke_bdy_right = (uc[:, n, :] * sg[:, n - 1, :, 2]
-                        + v_d[:, n, :] * cg[:, n - 1, :, 2])
-        ke_u = ke_u.at[:, n - 1, :].set(
-            jnp.where(ua[:, n - 1, :] > 0, ke_u[:, n - 1, :], ke_bdy_right))
-        # y-direction face-boundary KE conversion
-        # Bottom edge (cell j=0, va > 0): vc*sin_sg(S) + u*cos_sg(S)
-        ke_bdy_bot = vc[:, :, 0] * sg[:, :, 0, 1] + u_d[:, :, 0] * cg[:, :, 0, 1]
-        ke_v = ke_v.at[:, :, 0].set(
-            jnp.where(va[:, :, 0] > 0, ke_bdy_bot, ke_v[:, :, 0]))
-        # Top edge (cell j=n-1, va <= 0): vc*sin_sg(N) + u*cos_sg(N)
-        ke_bdy_top = (vc[:, :, n] * sg[:, :, n - 1, 3]
-                      + u_d[:, :, n] * cg[:, :, n - 1, 3])
-        ke_v = ke_v.at[:, :, n - 1].set(
-            jnp.where(va[:, :, n - 1] > 0, ke_v[:, :, n - 1], ke_bdy_top))
-
-    # ke = dt/4 * (ua * uc_upwind + va * vc_upwind)
-    # NOTE: c_sw uses ONLY kinetic energy for the C-grid gradient, NOT
-    # the full Bernoulli function (g*h is in d_sw only).  This is per
-    # FV3 sw_core.F90 where ke has dt4 = 0.25*dt scaling.
+    ke_u, ke_v = _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid)
+    # c_sw uses ONLY kinetic energy (no g*h) — per FV3 dt4 = 0.25*dt scaling
     ke_total = dt2 * 0.5 * (ua * ke_u + va * ke_v)
 
-    # 5. Vorticity at D-grid corners from C-grid covariant velocities.
-    # FV3 sw_core.F90:378-408: compute vorticity DIRECTLY at corners
-    # from C-grid circulation (uc*dxc, vc*dyc).  This avoids the
-    # smoothing introduced by cell-centre→corner interpolation.
-    #
-    # The stencil at corner (i,j) is:
-    #   vort(i,j) = fx(i,j-1) - fx(i,j) - fy(i-1,j) + fy(i,j)
-    # where fx = uc*dxc at (n+1, n+2) and fy = vc*dyc at (n+2, n+1).
-    #
-    # We need one extra row/column of uc/vc beyond the interior range.
-    # Use halo-exchanged scalar padding of the circulation, which gives
-    # cross-face data at boundaries (unlike edge-copy which caused the
-    # previous linear instability).
-    fx_circ = uc * cdgrid.dxc    # (6, n+1, n) — FV3: fx = uc * dxc
-    fy_circ = vc * cdgrid.dyc    # (6, n, n+1) — FV3: fy = vc * dyc
+    # 5. Vorticity at D-grid corners (FV3 sw_core.F90:378-408)
+    vort_abs = _corner_vorticity(uc, vc, cdgrid, use_duogrid)
 
-    # Pad circulation to get the extended ranges:
-    # fx needs (n+1, n+2): pad axis 2 by (1,1)
-    # fy needs (n+2, n+1): pad axis 1 by (1,1)
-    # Use linear extrapolation for boundary padding (better than edge copy
-    # for the circulation stencil).
-    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n+1, n+2)
-    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n+1)
-    if n > 2:
-        # Linear extrapolation: 2*boundary - next_interior
-        fx_pad = fx_pad.at[:, :, 0].set(2 * fx_circ[:, :, 0] - fx_circ[:, :, 1])
-        fx_pad = fx_pad.at[:, :, n + 1].set(2 * fx_circ[:, :, n - 1] - fx_circ[:, :, n - 2])
-        fy_pad = fy_pad.at[:, 0, :].set(2 * fy_circ[:, 0, :] - fy_circ[:, 1, :])
-        fy_pad = fy_pad.at[:, n + 1, :].set(2 * fy_circ[:, n - 1, :] - fy_circ[:, n - 2, :])
-
-    # Direct corner vorticity: FV3 sw_core.F90:390-394
-    # vort(i,j) = fx(i,j-1) - fx(i,j) - fy(i-1,j) + fy(i,j)
-    # In our indexing: corner (i,j) for i=0..n, j=0..n
-    # fx_pad[:, i, j] with j offset by 1 (padded j=0 corresponds to original j=-1)
-    vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
-            - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])  # (6, n+1, n+1)
-
-    # Corner corrections for non-duogrid (FV3 sw_core.F90:396-400)
-    if not use_duogrid:
-        # At cube vertices the standard stencil double-counts one fy term.
-        # The correction removes the extra fy at each vertex corner.
-        # SW corner (0,0): +fy(i=-1, j=0) → fy_pad[:, 0, 0..n]
-        vort = vort.at[:, 0, 0].add(fy_pad[:, 0, 0])
-        # SE corner (n,0): -fy(i=n, j=0)
-        vort = vort.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-        # NE corner (n,n): -fy(i=n, j=n)
-        vort = vort.at[:, n, n].add(-fy_pad[:, n + 1, n])
-        # NW corner (0,n): +fy(i=-1, j=n)
-        vort = vort.at[:, 0, n].add(fy_pad[:, 0, n])
-
-    rarea_c = 1.0 / cdgrid.area_corner
-    vort_abs = cdgrid.f_corner + rarea_c * vort
-
-    # 6. Vorticity flux at C-grid face positions
-    # FV3 sw_core.F90:416-423: c_sw vorticity flux uses /sina (1/sin),
-    # NOT *rsin_u (1/sin²). The FV3 comment says: "we only divide by
-    # sin instead of sin**2 in the interior". rsin_u is for d2a2c_vect only.
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, _EPS))
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
-    fy1 = dt2 * (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
-    if not use_duogrid:
-        # At face boundaries only (i=1,npx in FV3 → Python 0,n):
-        # sin_sg cancellation → fy1 = dt2 * v_d (sw_core.F90:445-449).
-        # Adjacent cells (1, n-1) use the standard formula.
-        fy1 = fy1.at[:, 0, :].set(dt2 * v_d[:, 0, :])
-        fy1 = fy1.at[:, n, :].set(dt2 * v_d[:, n, :])
-
-    vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
-
-    # y-face: FV3 fx1 = dt2*(u - vc*cosa_v)/sina_v  (1/sin, not 1/sin²)
-    fx1 = dt2 * (u_d - vc * cdgrid.cosa_v) / jnp.maximum(sina_v, _EPS)
-    if not use_duogrid:
-        # FV3 sw_core.F90:458-460: only at face boundaries (j=1, npy → Python 0, n).
-        fx1 = fx1.at[:, :, 0].set(dt2 * u_d[:, :, 0])
-        fx1 = fx1.at[:, :, n].set(dt2 * u_d[:, :, n])
-
-    vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
+    # 6. Vorticity flux at C-grid face positions (FV3 sw_core.F90:416-480)
+    fy1, vort_x, fx1, vort_y = _vorticity_flux(
+        v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid)
+    # Scale by dt/2 (c_sw half-step)
+    fy1 = dt2 * fy1
+    fx1 = dt2 * fx1
 
     # 7. KE gradient at C-grid face positions (2-point difference)
     ke_pad = _pad_halo_auto(ke_total, cdgrid)
@@ -788,49 +778,17 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     uc_mass, vc_mass = fv3_cc2c(u_cc, v_cc, cdgrid)
     dh_dt = cgrid_mass_flux_divergence(h, uc_mass, vc_mass, cdgrid)
 
-    # 3. KE at cell centres (FV3 upwind formula, sw_core.F90:303-372)
+    # 3. KE at cell centres (FV3 sw_core.F90:303-372)
     dg = cdgrid.base.duogrid
     use_duogrid = dg is not None and dg.ng >= 2
-    uc_left = uc[:, :-1, :]
-    uc_right = uc[:, 1:, :]
-    ke_u = jnp.where(ua > 0, uc_left, uc_right)
+    ke_u, ke_v = _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid)
 
-    vc_bot = vc[:, :, :-1]
-    vc_top = vc[:, :, 1:]
-    ke_v = jnp.where(va > 0, vc_bot, vc_top)
-
-    if not use_duogrid:
-        sg = cdgrid.sin_sg
-        cg = cdgrid.cos_sg
-        ke_bdy_l = uc[:, 0, :] * sg[:, 0, :, 0] + v_d[:, 0, :] * cg[:, 0, :, 0]
-        ke_u = ke_u.at[:, 0, :].set(
-            jnp.where(ua[:, 0, :] > 0, ke_bdy_l, ke_u[:, 0, :]))
-        ke_bdy_r = uc[:, n, :] * sg[:, n-1, :, 2] + v_d[:, n, :] * cg[:, n-1, :, 2]
-        ke_u = ke_u.at[:, n-1, :].set(
-            jnp.where(ua[:, n-1, :] > 0, ke_u[:, n-1, :], ke_bdy_r))
-        ke_bdy_b = vc[:, :, 0] * sg[:, :, 0, 1] + u_d[:, :, 0] * cg[:, :, 0, 1]
-        ke_v = ke_v.at[:, :, 0].set(
-            jnp.where(va[:, :, 0] > 0, ke_bdy_b, ke_v[:, :, 0]))
-        ke_bdy_t = vc[:, :, n] * sg[:, :, n-1, 3] + u_d[:, :, n] * cg[:, :, n-1, 3]
-        ke_v = ke_v.at[:, :, n-1].set(
-            jnp.where(va[:, :, n-1] > 0, ke_v[:, :, n-1], ke_bdy_t))
-
-    if use_duogrid:
-        # Duogrid: use D→A physical velocities (consistent frame) to avoid
-        # the contravariant×covariant cross-product ua*uc which amplifies
-        # interpolation mismatches at face boundaries by 1/sin².
-        utmp_ke = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
-        vtmp_ke = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
-        ke = 0.5 * (utmp_ke**2 + vtmp_ke**2)
-    else:
-        # Always use physical-frame KE for the Bernoulli function.
-        # FV3's contravariant formula (ua*ke_u + va*ke_v) has 1700x worse
-        # balance at face boundaries due to the 1/sin² metric amplification,
-        # causing the CSW path to be unstable. Physical-frame KE gives the
-        # same value but with much better geostrophic balance.
-        utmp_ke = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
-        vtmp_ke = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
-        ke = 0.5 * (utmp_ke**2 + vtmp_ke**2)
+    # Physical-frame KE for Bernoulli function (avoids 1/sin² amplification
+    # of contravariant formula at face boundaries, which would cause CSW
+    # path instability).
+    utmp_ke = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
+    vtmp_ke = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
+    ke = 0.5 * (utmp_ke**2 + vtmp_ke**2)
     B = ke + g * (h + h_s)
 
     # 4. Bernoulli gradient at C-grid face positions (2-point difference)
@@ -838,53 +796,12 @@ def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
     dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])  # (6, n+1, n)
     dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])  # (6, n, n+1)
 
-    # 5. Vorticity at D-grid corners from C-grid covariant velocities.
-    # FV3 sw_core.F90:378-408: direct-corner vorticity from C-grid circulation.
-    dg = cdgrid.base.duogrid
-    use_duogrid = dg is not None and dg.ng >= 2
+    # 5. Vorticity at D-grid corners (FV3 sw_core.F90:378-408)
+    vort_abs = _corner_vorticity(uc, vc, cdgrid, use_duogrid)
 
-    fx_circ = uc * cdgrid.dxc   # (6, n+1, n) — FV3: fx = uc * dxc
-    fy_circ = vc * cdgrid.dyc   # (6, n, n+1) — FV3: fy = vc * dyc
-
-    # Pad circulation for extended stencil (same approach as _c_sw)
-    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    if n > 2:
-        fx_pad = fx_pad.at[:, :, 0].set(2 * fx_circ[:, :, 0] - fx_circ[:, :, 1])
-        fx_pad = fx_pad.at[:, :, n + 1].set(2 * fx_circ[:, :, n - 1] - fx_circ[:, :, n - 2])
-        fy_pad = fy_pad.at[:, 0, :].set(2 * fy_circ[:, 0, :] - fy_circ[:, 1, :])
-        fy_pad = fy_pad.at[:, n + 1, :].set(2 * fy_circ[:, n - 1, :] - fy_circ[:, n - 2, :])
-
-    # Direct corner vorticity (FV3 sw_core.F90:390-394)
-    vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
-            - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])
-
-    if not use_duogrid:
-        vort = vort.at[:, 0, 0].add(fy_pad[:, 0, 0])
-        vort = vort.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-        vort = vort.at[:, n, n].add(-fy_pad[:, n + 1, n])
-        vort = vort.at[:, 0, n].add(fy_pad[:, 0, n])
-
-    rarea_c = 1.0 / cdgrid.area_corner
-    vort_abs = cdgrid.f_corner + rarea_c * vort
-
-    # 6. Vorticity flux at C-grid face positions
-    # FV3 sw_core.F90:416-423: c_sw uses /sina (1/sin), NOT *rsin_u (1/sin²)
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, _EPS))
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
-    fy1 = (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
-    if not use_duogrid:
-        fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
-        fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
-    vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
-
-    # FV3: fx1 = (u - vc*cosa_v)/sina_v
-    fx1 = (u_d - vc * cdgrid.cosa_v) / jnp.maximum(sina_v, _EPS)
-    if not use_duogrid:
-        # FV3 sw_core.F90:458-460: only at face boundaries (0, n).
-        fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
-        fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
-    vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
+    # 6. Vorticity flux at C-grid face positions (FV3 sw_core.F90:416-480)
+    fy1, vort_x, fx1, vort_y = _vorticity_flux(
+        v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid)
 
     # 7. TOTAL C-grid tendency = vorticity flux + Bernoulli gradient
     duc = fy1 * vort_x + dB_x    # (6, n+1, n)
@@ -1251,24 +1168,25 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     u_right_x = u_d_pad_x[:, 1:, :]   # (6, n+1, n+1)
     transported_x = jnp.where(ub > 0, u_left_x, u_right_x)  # (6, n+1, n+1)
 
-    # --- Step 5: KE at corners (Lin-Rood average of two sweeps) ---
+    # --- Step 5: BGRID_NE component sync (FV3 dyn_core.F90:969-1011) ---
+    # FV3 syncs the transport COMPONENTS at face boundaries before
+    # computing KE.  ubb (x-Courant) is averaged at W/E boundaries,
+    # vbbtemp (y-Courant = vb) is averaged at S/N boundaries.
+    # ubbtemp (y-transported) and vbb (x-transported) are NOT synced.
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+    if use_duogrid:
+        from legoesm.grids.halo import synchronize_bgrid_ne
+        ub, vb = synchronize_bgrid_ne(ub, vb, n)
+
+    # --- Step 6: KE at corners (Lin-Rood average of two sweeps) ---
     # FV3 dyn_core.F90:1013-1020:
     #   kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)
     # ubbtemp = transported_y (v transported by vb)
-    # vbbtemp = vb
-    # ubb = ub
+    # vbbtemp = vb (synced at S/N)
+    # ubb = ub (synced at W/E)
     # vbb = transported_x (u transported by ub)
     ke_corner = 0.5 * (transported_y * vb + ub * transported_x)
-
-    # Face-boundary KE sync: the uc/vc padding uses edge-copy (not
-    # cross-face halo), so face-boundary KE has O(dx) error.  FV3
-    # handles this via BGRID_NE flux sync of the transport components
-    # (dyn_core.F90:969-1011).  We approximate this by synchronizing
-    # the scalar KE at face boundaries, which ensures the KE gradient
-    # is consistent across adjacent faces even though individual
-    # component sync is not implemented.
-    from legoesm.grids.halo import synchronize_corner_scalar
-    ke_corner = synchronize_corner_scalar(ke_corner, n)
 
     return ke_corner
 

@@ -354,8 +354,24 @@ F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vec
 - ~~Full d_sw B-grid KE transport~~ → ported (iter 32), first-order upwind. PPM upgrade to match xtp_u/ytp_v iord=1 would improve accuracy.
 - Production path (fv3_sw_tendencies) uses Arakawa-Lamb gradient, NOT FV3's c_sw/d_sw operators — pre-existing artifacts originate here, not in fv3_sw_core.py
 - **Duogrid + production path instability**: W2 with duogrid has 370x larger corner tendencies (max |dh/dt|=0.158 vs 4.3e-4 without duogrid), causing NaN blowup. Root cause: `fv3_sw_tendencies` Arakawa-Lamb gradient at cube vertices with duogrid halo exchange gives worse corner accuracy. NOT a flux sync issue — exists independently.
-- **d_sw3 KE flux synchronization**: Fortran averages B-grid KE transport COMPONENTS (ubb, vbbtemp) at face boundaries after d_sw3 (dyn_core.F90:969-1011) using BGRID_NE vector boundary exchange. d_sw3 now ported (iter 32) but sync requires B-grid vector halo infrastructure (not yet implemented). Edge-copy approximation used instead.
+- **d_sw3 KE flux synchronization** ✅ (iter 36): `synchronize_bgrid_ne()` in halo.py implements FV3's BGRID_NE vector boundary exchange. Syncs ubb (x-Courant) at W/E boundaries and vbbtemp (y-Courant) at S/N boundaries before computing KE. Matches dyn_core.F90:969-1011 exactly. Replaces the previous scalar KE sync approximation. Gated on duogrid (matching Fortran). Also verified: Fortran's KE scalar sync (dyn_core.F90:1029-1055) is COMMENTED OUT in the oracle.
 - **d_sw5 vorticity flux synchronization**: COMMENTED OUT in the Fortran oracle (dyn_core.F90:1128-1165), noted as "should be applied to have consistent logic". Not implemented.
+
+### Resolved in iteration 36 (2026-04-16):
+- **BGRID_NE vector component sync for d_sw3**: implemented `synchronize_bgrid_ne()` in halo.py ✅
+  - Syncs x-component (ubb = B-grid u-Courant) at WEST/EAST face boundaries
+  - Syncs y-component (vbbtemp = B-grid v-Courant) at SOUTH/NORTH face boundaries
+  - KE then computed from synced components: kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)
+  - Matches FV3 dyn_core.F90:969-1011 exactly (BGRID_NE gridtype, not scalar sync)
+  - Replaces previous `synchronize_corner_scalar` (scalar KE sync) which was an approximation
+  - Verified: Fortran's alternate scalar KE sync (dyn_core.F90:1029-1055) is COMMENTED OUT
+  - FB rest state: h_err=0, u/v_err=1.35e-16 (machine precision)
+- **Code deduplication**: extracted 3 shared helpers from duplicated _c_sw/fv3_csw_tendencies code:
+  - `_ke_upwind()`: KE upwind selection + face-boundary sin_sg/cos_sg conversion (sw_core.F90:303-365)
+  - `_corner_vorticity()`: direct corner vorticity from C-grid circulation (sw_core.F90:378-408)
+  - `_vorticity_flux()`: vorticity transport flux with 1/sin and boundary overrides (sw_core.F90:416-480)
+  - Eliminated ~120 lines of duplicated code
+  - Also removed dead branch: `fv3_csw_tendencies` had identical KE computation in both if/else arms
 
 ### Pre-existing issues (not caused by these changes):
 - Williamson 2 v-wind shows cube-face imprint at t>0.5d — IDENTICAL in original code (verified by checkout to ebd6e43). Root cause is deeper infrastructure (grid construction, halo exchange), not operator formulas.
