@@ -351,7 +351,7 @@ So even after the `rsin_u` update and the `sin_sg` halo fix, the non-Duo-Grid fa
 ### Remaining structural items:
 5. Forward-backward/d_sw paths — by design, labeled as non-FV3
 F3-5. d2a2c_vect corner 2×2 solve — non-duogrid path (in d_sw1, not d2a2c_vect)
-- ~~Full d_sw B-grid KE transport~~ → ported (iter 32), first-order upwind. PPM upgrade to match xtp_u/ytp_v iord=1 would improve accuracy.
+- ~~Full d_sw B-grid KE transport~~ → ported (iter 32), **upgraded to PPM hord=9 (iter 39)**. `_ppm_transport_1d()` matches Fortran ytp_v/xtp_u jord>=8 branch (sw_core.F90:3162-3349) with correct rdy/rdx CFL scaling (sw_core.F90:3342).
 - Production path (fv3_sw_tendencies) uses Arakawa-Lamb gradient, NOT FV3's c_sw/d_sw operators — pre-existing artifacts originate here, not in fv3_sw_core.py
 - ~~**Duogrid + production path instability**~~: RESOLVED (iter 37). Was 370x corner tendency amplification, now 130x improved (max|dh/dt|=1.2e-3) and stable for 1+ day. The cumulative fixes from prior iterations resolved this.
 - **d_sw3 KE flux synchronization** ✅ (iter 36): `synchronize_bgrid_ne()` in halo.py implements FV3's BGRID_NE vector boundary exchange. Syncs ubb (x-Courant) at W/E boundaries and vbbtemp (y-Courant) at S/N boundaries before computing KE. Matches dyn_core.F90:969-1011 exactly. Replaces the previous scalar KE sync approximation. Gated on duogrid (matching Fortran). Also verified: Fortran's KE scalar sync (dyn_core.F90:1029-1055) is COMMENTED OUT in the oracle.
