@@ -579,6 +579,63 @@ def _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid):
     return ke_u, ke_v
 
 
+def _del6_vt_flux(nord, damp, q, cdgrid):
+    """FV3 del6_vt_flux: del-n damping for relative vorticity (sw_core.F90:2008-2121).
+
+    Same Laplacian operator as ``_deln_flux`` but returns raw diffusive fluxes
+    instead of adding them to transport fluxes.  Used in d_sw6 for vorticity
+    damping when ``damp_v > 1e-5``.
+
+    Parameters
+    ----------
+    nord : int — damping order (0=del-2, 1=del-4, 2=del-6)
+    damp : float — pre-scaled coefficient: (damp_v * da_min_c)^(nord+1)
+    q : (6, n, n) — relative vorticity at cell centres
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    fx2 : (6, n+1, n) — x-direction diffusive vorticity flux
+    fy2 : (6, n, n+1) — y-direction diffusive vorticity flux
+    """
+    n = cdgrid.n
+    grid = cdgrid.base
+    sg = cdgrid.sin_sg
+    dy = cdgrid.dy_edge_x
+    dx = cdgrid.dx_edge_y
+    rdxc = cdgrid.rdxc
+    rdyc = cdgrid.rdyc
+    rarea = 1.0 / grid.area
+
+    d2 = damp * q
+
+    # Laplacian diffusive fluxes (USE_SG path, sw_core.F90:2064-2082)
+    d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+    sin_E = sg[:, :, :, 2]
+    sin_W = sg[:, :, :, 0]
+    sin_N = sg[:, :, :, 3]
+    sin_S = sg[:, :, :, 1]
+    se_pad = pad_halo(sin_E, interp_offsets=grid.halo_interp_offsets)
+    sw_pad = pad_halo(sin_W, interp_offsets=grid.halo_interp_offsets)
+    sn_pad = pad_halo(sin_N, interp_offsets=grid.halo_interp_offsets)
+    ss_pad = pad_halo(sin_S, interp_offsets=grid.halo_interp_offsets)
+
+    sin_uv_x = 0.5 * (se_pad[:, :n+1, 1:-1] + sw_pad[:, 1:n+2, 1:-1])
+    sin_uv_y = 0.5 * (sn_pad[:, 1:-1, :n+1] + ss_pad[:, 1:-1, 1:n+2])
+
+    fx2 = sin_uv_x * dy * (d2_pad[:, :-1, 1:-1] - d2_pad[:, 1:, 1:-1]) * rdxc
+    fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, :-1] - d2_pad[:, 1:-1, 1:]) * rdyc
+
+    # Higher-order iteration (sw_core.F90:2084-2119)
+    for _it in range(nord):
+        d2 = (fx2[:, :-1, :] - fx2[:, 1:, :] + fy2[:, :, :-1] - fy2[:, :, 1:]) * rarea
+        d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+        fx2 = sin_uv_x * dy * (d2_pad[:, 1:, 1:-1] - d2_pad[:, :-1, 1:-1]) * rdxc
+        fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, 1:] - d2_pad[:, 1:-1, :-1]) * rdyc
+
+    return fx2, fy2
+
+
 def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
     """FV3 divergence_corner_duo (sw_core.F90:2345-2447).
 
