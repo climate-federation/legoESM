@@ -515,11 +515,23 @@ Removed the 1/sin override at face boundaries — rsin_u is now 1/sin² everywhe
   - No metric regression: W2 L2=1.53e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01
   - All 86 unit tests pass, 23 ocean rest state tests pass at machine precision
 
+### Resolved in iteration 52 (2026-04-16):
+- **Vorticity damping wired into d_sw6** ✅
+  - `_del6_vt_flux` (sw_core.F90:2008-2121) now called from `_d_sw_native` after wind update
+  - Added `damp_v` (FV3 vtdm4) and `nord_v` parameters to `_d_sw_native` and `fv3_fb_sw_step`
+  - Matches Fortran d_sw6 (sw_core.F90:1948-2000): `damp4 = (damp_v * da_min_c)^(nord_v+1)`
+  - `da_min_c = min(area_corner)` matching FV3 `gridstruct%da_min_c`
+  - Fluxes applied: `u += fy2/dx`, `v -= fx2/dy` (physical velocity form of Fortran's covariant `u += vt, v -= ut`)
+  - Default `damp_v=0.0` (off) matches Fortran `vtdm4=0.0, do_vort_damp=.false.`
+  - No metric regression: W2 L2=1.53e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01
+  - All 86 unit tests + 6 ocean rest state tests pass
+  - Visual inspection: cosine bell clean, W2/W5 height/wind_speed/v clean, no new artifacts
+
 ### Remaining conditional gaps (partially wired):
 - **deln_flux** (tp_core.F90:1217-1365): IMPLEMENTED and WIRED into `fv_tp_2d` (iter 49). Activated when `damp_c > 1e-4`.
 - **divergence_corner_duo** (sw_core.F90:2345-2447): IMPLEMENTED (iter 48) and NOW WIRED into `_d_sw_native` via `_d_sw5_corner_divergence` for nord>0 (iter 51).
 - **d_sw5 corner divergence** (sw_core.F90:1641-1821): IMPLEMENTED and WIRED (iter 51). nord=0 and nord=1 paths functional. nord>1 uses fallback approximation.
-- **Vorticity damping** (sw_core.F90:1948-2000): IMPLEMENTED as `_del6_vt_flux` (iter 50). NOT YET WIRED into d_sw6 flow — needs damp_v parameter plumbing.
+- **Vorticity damping** (sw_core.F90:1948-2000): IMPLEMENTED as `_del6_vt_flux` (iter 50) and NOW WIRED into d_sw6 flow (iter 52). `damp_v` and `nord_v` parameters plumbed through `fv3_fb_sw_step` → `_d_sw_native`. Activated when `damp_v > 1e-5`. Matches Fortran: `damp4 = (damp_v * da_min_c)^(nord_v+1)`, `u += fy2`, `v -= fx2`.
 - **Divergence heating** (sw_core.F90:1953-1986): NOT implemented. Only when `d_con > 1e-5`.
 - **Higher-order divergence damping** (sw_core.F90:1725-1787): PARTIALLY implemented. nord=1 uses 5-point corner Laplacian approximation. Exact Fortran version needs corner-stagger divg_u/divg_v metrics.
 

@@ -1633,14 +1633,15 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
 
 
 def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
-                 div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1):
+                 div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
+                 damp_v=0.0, nord_v=0):
     """D-grid full-step (FV3 d_sw1..d_sw6).
 
     Matches the FV3 dyn_core.F90 d_sw sequence:
     - d_sw1: transport velocity recomputation + PPM mass/tracer transport
     - d_sw3: B-grid KE transport at corners
     - d_sw5: corner divergence damping added to KE + vorticity transport
-    - d_sw6: D-grid wind replacement formula
+    - d_sw6: D-grid wind replacement formula + vorticity damping
 
     Parameters
     ----------
@@ -1658,6 +1659,8 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     dddmp : float — FV3 d_sw5 adaptive Smagorinsky coefficient (default 0.0)
     d4_bg : float — FV3 d_sw5 background del-4+ coefficient (default 0.16)
     nord : int — damping order: 0=del-2, 1=del-4, 2=del-6 (default 1)
+    damp_v : float — vorticity damping coefficient (FV3 vtdm4, default 0.0 = off)
+    nord_v : int — vorticity damping order (default 0 = del-2)
 
     Returns
     -------
@@ -1725,11 +1728,25 @@ def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
     u_d_new = u_d + (ke_diff_u_scaled + fy_vort) * rdx_u
     v_d_new = v_d + (ke_diff_v_scaled - fx_vort) * rdy_v
 
+    # === 9. Vorticity damping (FV3 d_sw6, sw_core.F90:1948-2000) ===
+    # Fortran: if (damp_v > 1e-5) then
+    #   damp4 = (damp_v * da_min_c)**(nord_v+1)
+    #   call del6_vt_flux(nord_v, ..., damp4, wk, ...)
+    #   u = u + vt   (vt = fy2 from del6_vt_flux)
+    #   v = v - ut   (ut = fx2 from del6_vt_flux)
+    if damp_v > 1e-5:
+        da_min_c = jnp.min(cdgrid.area_corner)
+        damp4 = (damp_v * da_min_c) ** (nord_v + 1)
+        fx2, fy2 = _del6_vt_flux(nord_v, damp4, zeta, cdgrid)
+        u_d_new = u_d_new + fy2 * rdx_u
+        v_d_new = v_d_new - fx2 * rdy_v
+
     return h_new, u_d_new, v_d_new
 
 
 def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
-                   div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1):
+                   div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
+                   damp_v=0.0, nord_v=0):
     """EXPERIMENTAL: Complete FV3 forward-backward shallow water time step.
 
     Known unstable at C16 (halo quality limitation).
@@ -1739,7 +1756,8 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
     1. c_sw (forward, dt/2): d2a2c_vect + mass transport + KE/vorticity
     2. p_grad_c (backward, dt/2): pressure gradient at C-grid
     3. d_sw (full dt): d_sw1-d_sw6 chain (PPM transport + B-grid KE +
-       corner divergence damping + vorticity transport + wind update)
+       corner divergence damping + vorticity transport + vorticity damping
+       + wind update)
 
     Parameters
     ----------
@@ -1751,6 +1769,8 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
     dddmp : float — FV3 adaptive Smagorinsky coefficient (default 0.0)
     d4_bg : float — FV3 background del-4+ coefficient (default 0.16)
     nord : int — damping order (default 1 = del-4)
+    damp_v : float — vorticity damping coefficient (FV3 vtdm4, default 0.0 = off)
+    nord_v : int — vorticity damping order (default 0 = del-2)
     """
     dt2 = 0.5 * dt
 
@@ -1766,6 +1786,7 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
     # Phase 3: d_sw — full-step D-grid update
     h_new, u_d_new, v_d_new = _d_sw_native(
         h, u_d, v_d, h_s, uc_new, vc_new, ua, va, cdgrid, dt, g,
-        div_damp=div_damp, d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord)
+        div_damp=div_damp, d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord,
+        damp_v=damp_v, nord_v=nord_v)
 
     return h_new, u_d_new, v_d_new
