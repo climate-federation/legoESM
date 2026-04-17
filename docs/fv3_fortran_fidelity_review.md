@@ -1,10 +1,38 @@
-# FV3 Fortran Fidelity Review (2026-04-14)
+# FV3 Fortran Fidelity Review (baselined 2026-04-14, updated through Ralph iter 67 on 2026-04-17)
+
+## CURRENT STATE (post iter-67)
 
 Scope:
-- Python side: `src/legoesm/grids/cubed_sphere_cdgrid.py`, `src/legoesm/core/fv3_sw_core.py`, `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py`
-- Fortran reference: `../atmos_cubed_sphere-symmetryclean/model/fv_grid_utils.F90`, `../atmos_cubed_sphere-symmetryclean/model/sw_core.F90`
+- Python: `src/legoesm/grids/cubed_sphere_cdgrid.py`, `src/legoesm/core/fv3_sw_core.py`, `src/legoesm/core/fv_tp_2d.py`, `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py`, `src/legoesm/core/operators_cdgrid.py`
+- Fortran oracle (read-only): `../atmos_cubed_sphere-symmetryclean/model/{sw_core,dyn_core,tp_core,fv_grid_utils,fv_arrays}.F90`
 
-Bottom line:
+### Fidelity status
+All FV3 duogrid-branch operator formulas are implemented and verified against the oracle:
+- metrics: `cosa_u/rsin_u` from `sin_sg` (iter 1); supergrid `area_corner/dxc/dyc/rdxa/rdya/divg_u/divg_v` (iter 2, 44, 53); `rsin_u/rsin_v` mixed 1/sin² interior + 1/sin at non-duogrid panel edges (iter 66); bounded_domain gating covers duogrid AND single-face-panel regional path (iter 66 follow-up #3).
+- `c_sw`: D→A→C 4th-order + face-boundary `sin_sg/cos_sg` conversion (iter 8), corner vorticity (iter 29), vorticity flux (iter 5/25).
+- `d2a2c_vect` duogrid: cross-axis D-grid halo via `ext_vector_dgrid`, length-weighted c2l_ord2 (iter 60).
+- `d_sw1`-`d_sw6`: adjacent-strip + corner 2x2 solve (iter 17–28); PPM hord=9 B-grid KE transport (iter 32/39); `d_sw5` corner divergence damping with `divg_u/divg_v` metrics (iter 51/53); `d_sw6` vorticity damping via `_del6_vt_flux` (iter 52).
+- `fv_tp_2d`: Lin-Rood operator split + CGRID flux sync + `pert_ppm(iv=0)` + `pert_ppm(iv=1)` at Fortran interior cells gated on non-duogrid (iter 42/62/63); offset-based dm rescaling and al edge corrections gated on non-duogrid (iter 64); duogrid halo actually routed to `pad_halo` when available (iter 63 follow-up).
+- Plumbing: FB wrapper forwards `d2_bg/dddmp/d4_bg/nord/damp_v` and auto-derives `nord_v = min(2, nord)` at step time (iter 62/62 follow-up).
+
+### Unresolved (stopping-condition blockers)
+1. **W2 v-wind cube-face imprint at C36** — architectural. Production path `fv3_sw_tendencies` uses Arakawa-Lamb gradient, not FV3's `c_sw/p_grad_c/d_sw` chain. Forward-backward (FB) path IS FV3-faithful but unstable at C36 (first-order upwind in `c_sw` amplifies halo-induced face-boundary divergence).
+2. **FB path C36 stability** — requires ng=3-equivalent halo. Iter 58 extended `pad_halo_dgrid` to `halo=2`; further widening requires implementing halo=3 in pad_halo + all downstream stencils. Not a formula fix.
+3. **d_sw3 scalar KE sync vs Fortran BGRID_NE component sync** — the Fortran syncs x/y components before forming KE via MPI BGRID_NE vector exchange with cross-axis rotation. Python's scalar KE sync matches the Fortran commented-out alternative. Proper fix requires cross-axis vector rotation infrastructure (naive swap-without-sign attempted iter 36, reverted as rotation-unsafe).
+4. **Non-duogrid `_d2a2c_vect` 4-point vt adjacent-strip + corner 2x2 solve** — Fortran sw_core.F90:670-811 extra recomputation at west/east/south/north edges + 4 corner solves; Python implements only the single-point face-boundary override (iter 65 test confirms). Affects non-duogrid FB path (experimental, unstable anyway); not implemented.
+
+### Evaluation metrics (post iter-66 follow-up #3)
+- Williamson 2: L2=1.53e-03, Linf=4.07e-03 (C36, 1 day)
+- Williamson 5: mass drift=1.42e-05 (C36, 1 day)
+- Cosine bell: L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01
+- Ocean rest state: all cubed-sphere variants machine-precision
+- 124 regression + audit-harness tests pass
+
+---
+
+## Historical record (baseline 2026-04-14)
+
+Bottom line at baseline:
 - The repo contains useful FV3-inspired pieces, but it is **not currently a faithful port** of the original Fortran `c_sw/d2a2c_vect/d_sw` path.
 - The largest fidelity gaps are in metric construction, transport/contravariant factors, boundary handling in `c_sw`, and the overall time-stepping architecture.
 
