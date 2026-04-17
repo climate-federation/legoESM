@@ -75,13 +75,40 @@ def split_dataset_indices(
     return train_idx, val_idx, test_idx
 
 
-def build_physics_training_features(columns) -> jax.Array:
+def build_physics_training_features(
+    columns,
+    *,
+    microphysics_scheme: str = "none",
+) -> jax.Array:
     """Build per-column input features for joint training."""
-    return jax.vmap(pack_physics_parameterization_features)(
+    return jax.vmap(
+        lambda T, u, v, q_v, q_c, q_r, p_full, z_full, p_s, T_sfc, q_sfc, lat, cape, M_c, dt: (
+            pack_physics_parameterization_features(
+                T=T,
+                u=u,
+                v=v,
+                q_v=q_v,
+                q_c=q_c,
+                q_r=q_r,
+                p_full=p_full,
+                z_full=z_full,
+                p_s=p_s,
+                T_sfc=T_sfc,
+                q_sfc=q_sfc,
+                lat=lat,
+                cape=cape,
+                M_c=M_c,
+                dt=dt,
+                microphysics_scheme=microphysics_scheme,
+            )
+        ),
+    )(
         columns.T,
         columns.u,
         columns.v,
         columns.q_v,
+        columns.q_c,
+        columns.q_r,
         columns.p_full,
         columns.z_full,
         columns.p_s,
@@ -96,7 +123,17 @@ def build_physics_training_features(columns) -> jax.Array:
 
 def build_physics_training_targets(dataset) -> jax.Array:
     """Build flat direct teacher targets for joint training."""
-    return pack_physics_parameterization_targets(dataset.Km, dataset.Kh, dataset.M_eq)
+    return pack_physics_parameterization_targets(
+        dataset.Km,
+        dataset.Kh,
+        dataset.M_eq,
+        rain_survival_fraction=dataset.rain_survival_fraction,
+        dq_v_dt_micro=dataset.dq_v_dt_micro,
+        dq_c_dt_micro=dataset.dq_c_dt_micro,
+        dq_r_dt_micro=dataset.dq_r_dt_micro,
+        precip_micro=dataset.precip_micro,
+        microphysics_scheme=dataset.microphysics_scheme,
+    )
 
 
 def compute_stats_bundle(
@@ -124,7 +161,10 @@ def train_physics_parameterization(
     model_config = model_config or PhysicsModelConfig()
     training_config = training_config or PhysicsTrainingConfig()
 
-    features = build_physics_training_features(dataset.columns)
+    features = build_physics_training_features(
+        dataset.columns,
+        microphysics_scheme=dataset.microphysics_scheme,
+    )
     targets = build_physics_training_targets(dataset)
 
     train_idx, val_idx, test_idx = split_dataset_indices(
@@ -149,6 +189,7 @@ def train_physics_parameterization(
         nlev=dataset.columns.T.shape[1],
         hidden_dim=model_config.hidden_dim,
         n_layers=model_config.n_layers,
+        microphysics_scheme=dataset.microphysics_scheme,
         key=jax.random.PRNGKey(model_config.seed),
     )
     optimizer = optax.chain(
@@ -203,6 +244,11 @@ def train_physics_parameterization(
         Km=dataset.Km[test_idx],
         Kh=dataset.Kh[test_idx],
         M_eq=dataset.M_eq[test_idx],
+        dq_v_dt_micro=dataset.dq_v_dt_micro[test_idx],
+        dq_c_dt_micro=dataset.dq_c_dt_micro[test_idx],
+        dq_r_dt_micro=dataset.dq_r_dt_micro[test_idx],
+        precip_micro=dataset.precip_micro[test_idx],
+        rain_survival_fraction=dataset.rain_survival_fraction[test_idx],
     )
     metrics = evaluate_physics_parameterization(best_model, stats_bundle, test_dataset)
     return PhysicsTrainingResult(

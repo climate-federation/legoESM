@@ -13,6 +13,8 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = REPO_ROOT / "src"
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
@@ -68,6 +70,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--microphysics",
+        choices=("none", "kessler", "sundqvist"),
+        default="none",
+    )
+    parser.add_argument("--rad-update-steps", type=int, default=3)
     return parser
 
 
@@ -76,7 +84,7 @@ def _sample_days_from_args(args: argparse.Namespace) -> tuple[float, ...]:
 
 
 def _generate_standard_run_plots(run_dir: Path) -> None:
-    plot_amip_path = REPO_ROOT / "scripts" / "plot_amip.py"
+    plot_amip_path = REPO_ROOT / "scripts" / "diagnostic" / "plot_amip.py"
     spec = importlib.util.spec_from_file_location("plot_amip_module", plot_amip_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"unable to load plot_amip from {plot_amip_path}")
@@ -90,6 +98,18 @@ def _load_npz(path: Path) -> dict[str, np.ndarray]:
         return {name: bundle[name] for name in bundle.files}
 
 
+def _is_moist_microphysics(microphysics: str) -> bool:
+    return microphysics != "none"
+
+
+def _resolve_cloud_scheme(microphysics: str) -> str:
+    if microphysics == "kessler":
+        return "xu_randall"
+    if microphysics == "sundqvist":
+        return "sundqvist"
+    return "none"
+
+
 def _extract_final_snapshot_fields(
     snapshots: dict[str, np.ndarray],
 ) -> tuple[str, dict[str, np.ndarray]]:
@@ -101,10 +121,15 @@ def _extract_final_snapshot_fields(
         "precip": snapshots[f"day{day_label}_precip"],
         "wind": snapshots[f"day{day_label}_wind"],
     }
+    for optional_name in ("q_c_low", "q_r_low"):
+        key = f"day{day_label}_{optional_name}"
+        if key in snapshots:
+            fields[optional_name] = snapshots[key]
     return day_label, fields
 
 
 def _make_base_config(args: argparse.Namespace, output_dir: Path) -> ExperimentConfig:
+    use_moist_microphysics = _is_moist_microphysics(args.microphysics)
     return ExperimentConfig(
         grid=GridConfig(
             grid_type="cubed_sphere",
@@ -122,7 +147,11 @@ def _make_base_config(args: argparse.Namespace, output_dir: Path) -> ExperimentC
         ),
         days=args.days,
         dataset="analytical",
-        radiation="gray",
+        radiation="rrtmgp" if use_moist_microphysics else "gray",
+        rad_update_steps=args.rad_update_steps if use_moist_microphysics else 1,
+        ozone_source="analytical" if use_moist_microphysics else "standard",
+        cloud_scheme=_resolve_cloud_scheme(args.microphysics),
+        microphysics=args.microphysics,
         convection="mass_flux",
         turbulence="louis",
     )
@@ -238,6 +267,12 @@ def _train_joint_model(args: argparse.Namespace, dataset, training_dir: Path) ->
         "rmse_Km": result.metrics.rmse_Km,
         "rmse_Kh": result.metrics.rmse_Kh,
         "rmse_M_eq": result.metrics.rmse_M_eq,
+        "rmse_rain_survival_fraction": result.metrics.rmse_rain_survival_fraction,
+        "rmse_dq_v_dt_micro": result.metrics.rmse_dq_v_dt_micro,
+        "rmse_dq_c_dt_micro": result.metrics.rmse_dq_c_dt_micro,
+        "rmse_dq_r_dt_micro": result.metrics.rmse_dq_r_dt_micro,
+        "rmse_precip_micro": result.metrics.rmse_precip_micro,
+        "microphysics_scheme": dataset.microphysics_scheme,
         "n_columns": int(dataset.columns.T.shape[0]),
         "sample_days": list(dataset.sample_days),
     }
@@ -323,25 +358,26 @@ def _build_comparison(output_root: Path) -> dict[str, float]:
         ml_label=FULL_ML_LABEL,
     )
 
-    summary = {
-        "final_T_atm_default": float(default_ts["T_atm"][-1]),
-        "final_T_atm_full_ml": float(full_ml_ts["T_atm"][-1]),
-        "final_T_low_default": float(default_ts["T_low"][-1]),
-        "final_T_low_full_ml": float(full_ml_ts["T_low"][-1]),
-        "final_CWV_default": float(default_ts["CWV"][-1]),
-        "final_CWV_full_ml": float(full_ml_ts["CWV"][-1]),
-        "final_precip_default": float(default_ts["precip"][-1]),
-        "final_precip_full_ml": float(full_ml_ts["precip"][-1]),
-        "final_max_wind_default": float(default_ts["max_wind"][-1]),
-        "final_max_wind_full_ml": float(full_ml_ts["max_wind"][-1]),
-        "delta_T_atm_full_ml_minus_default": float(full_ml_ts["T_atm"][-1] - default_ts["T_atm"][-1]),
-        "delta_T_low_full_ml_minus_default": float(full_ml_ts["T_low"][-1] - default_ts["T_low"][-1]),
-        "delta_CWV_full_ml_minus_default": float(full_ml_ts["CWV"][-1] - default_ts["CWV"][-1]),
-        "delta_precip_full_ml_minus_default": float(full_ml_ts["precip"][-1] - default_ts["precip"][-1]),
-        "delta_max_wind_full_ml_minus_default": float(
-            full_ml_ts["max_wind"][-1] - default_ts["max_wind"][-1]
-        ),
-    }
+    summary: dict[str, float] = {}
+    summary_keys = (
+        "T_atm",
+        "T_low",
+        "CWV",
+        "precip",
+        "max_wind",
+        "sw_up_toa",
+        "lw_up_toa",
+        "sw_net_sfc",
+        "lw_net_sfc",
+    )
+    for key in summary_keys:
+        if key not in default_ts or key not in full_ml_ts:
+            continue
+        summary[f"final_{key}_default"] = float(default_ts[key][-1])
+        summary[f"final_{key}_full_ml"] = float(full_ml_ts[key][-1])
+        summary[f"delta_{key}_full_ml_minus_default"] = float(
+            full_ml_ts[key][-1] - default_ts[key][-1]
+        )
     (compare_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
 

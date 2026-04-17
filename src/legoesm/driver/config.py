@@ -271,6 +271,11 @@ class ExperimentConfig(NamedTuple):
                     "physics_parameterization='ml' currently expects "
                     "convection='mass_flux' and turbulence='louis'"
                 )
+            if self.microphysics not in ("none", "kessler", "sundqvist"):
+                warns.append(
+                    "physics_parameterization='ml' currently supports "
+                    "microphysics='none', 'kessler', or 'sundqvist'"
+                )
             has_ckpt = bool(self.physics_parameterization_checkpoint)
             has_stats = bool(self.physics_parameterization_stats)
             if has_ckpt != has_stats:

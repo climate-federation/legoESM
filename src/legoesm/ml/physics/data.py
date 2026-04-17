@@ -12,6 +12,15 @@ from legoesm import constants
 from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
 from legoesm.atmosphere.physics.convection.config import MassFluxConfig
 from legoesm.atmosphere.physics.convection.mass_flux import diagnose_mass_flux_closure
+from legoesm.atmosphere.physics.microphysics.config import (
+    KesslerConfig,
+    SundqvistConfig,
+)
+from legoesm.atmosphere.physics.microphysics.kessler import kessler_microphysics
+from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
+from legoesm.atmosphere.physics.microphysics.sundqvist import (
+    diagnose_sundqvist_process_rates,
+)
 from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
 from legoesm.forcing.surface_utils import blend_surface_temperature
@@ -30,6 +39,8 @@ class PhysicsColumnBatch(NamedTuple):
     u: jax.Array
     v: jax.Array
     q_v: jax.Array
+    q_c: jax.Array
+    q_r: jax.Array
     p_full: jax.Array
     p_half: jax.Array
     z_full: jax.Array
@@ -51,7 +62,13 @@ class PhysicsTeacherDataset(NamedTuple):
     Km: jax.Array
     Kh: jax.Array
     M_eq: jax.Array
+    dq_v_dt_micro: jax.Array
+    dq_c_dt_micro: jax.Array
+    dq_r_dt_micro: jax.Array
+    precip_micro: jax.Array
+    rain_survival_fraction: jax.Array
     sample_days: tuple[float, ...]
+    microphysics_scheme: str = "none"
 
 
 def _copy_array(arr: jax.Array) -> jax.Array:
@@ -72,7 +89,13 @@ def take_teacher_dataset(dataset: PhysicsTeacherDataset, idx) -> PhysicsTeacherD
         Km=dataset.Km[idx],
         Kh=dataset.Kh[idx],
         M_eq=dataset.M_eq[idx],
+        dq_v_dt_micro=dataset.dq_v_dt_micro[idx],
+        dq_c_dt_micro=dataset.dq_c_dt_micro[idx],
+        dq_r_dt_micro=dataset.dq_r_dt_micro[idx],
+        precip_micro=dataset.precip_micro[idx],
+        rain_survival_fraction=dataset.rain_survival_fraction[idx],
         sample_days=dataset.sample_days,
+        microphysics_scheme=dataset.microphysics_scheme,
     )
 
 
@@ -91,6 +114,8 @@ def capture_physics_teacher_snapshot(
     v = driver.state.v.data
     p_s = driver.state.p_s.data
     q_v = driver.q_v
+    q_c = driver.q_c
+    q_r = driver.q_r
     nlev = driver.config.grid.nlev
     p_full = p_s[..., None] * driver.sigma.sigma_full
     p_half = p_s[..., None] * driver.sigma.sigma_half
@@ -98,6 +123,8 @@ def capture_physics_teacher_snapshot(
     u_col = ad.flatten_3d(u)
     v_col = ad.flatten_3d(v)
     q_v_col = ad.flatten_3d(q_v)
+    q_c_col = ad.flatten_3d(jnp.zeros_like(q_v) if q_c is None else q_c)
+    q_r_col = ad.flatten_3d(jnp.zeros_like(q_v) if q_r is None else q_r)
     p_full_col = ad.flatten_3d(p_full)
     p_half_col = p_half.reshape(ad.ncol, nlev + 1)
     z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col)
@@ -147,12 +174,84 @@ def capture_physics_teacher_snapshot(
         dt=dt,
         config=louis_config,
     )
+    zeros_3d = jnp.zeros_like(T_col)
+    zeros_2d = jnp.zeros((ad.ncol,), dtype=T.dtype)
+    micro_scheme = getattr(driver.config, "microphysics", "none")
+    dq_v_dt_micro = zeros_3d
+    dq_c_dt_micro = zeros_3d
+    dq_r_dt_micro = zeros_3d
+    precip_micro = zeros_2d
+    rain_survival_fraction = jnp.ones((ad.ncol,), dtype=T.dtype)
+    if micro_scheme in ("kessler", "sundqvist"):
+        micro_config = getattr(driver.physics, "micro_config", None)
+        hydrometeors = HydrometeorState(
+            q_c=q_c_col,
+            q_r=q_r_col,
+            q_i=zeros_3d,
+            q_s=zeros_3d,
+            q_g=zeros_3d,
+            N_c=zeros_3d,
+            N_r=zeros_3d,
+            N_i=zeros_3d,
+        )
+        dz_col = (p_half_col[:, 1:] - p_half_col[:, :-1]) / (rho_col * constants.g)
+        if micro_scheme == "kessler":
+            if micro_config is None or not hasattr(micro_config, "autoconversion_rate"):
+                micro_config = KesslerConfig()
+            micro_out = kessler_microphysics(
+                T=T_col,
+                q_v=q_v_col,
+                hydrometeors=hydrometeors,
+                p_full=p_full_col,
+                p_half=p_half_col,
+                rho=rho_col,
+                dz=dz_col,
+                dt=dt,
+                config=micro_config,
+            )
+            dq_v_dt_micro = _copy_array(micro_out.dq_v_dt)
+            dq_c_dt_micro = _copy_array(micro_out.dq_c_dt)
+            dq_r_dt_micro = _copy_array(micro_out.dq_r_dt)
+            precip_micro = _copy_array(micro_out.precipitation)
+        else:
+            if micro_config is None or not hasattr(micro_config, "RH_crit"):
+                micro_config = SundqvistConfig()
+            rates = diagnose_sundqvist_process_rates(
+                T=T_col,
+                q_v=q_v_col,
+                hydrometeors=hydrometeors,
+                p_full=p_full_col,
+                p_half=p_half_col,
+                rho=rho_col,
+                dz=dz_col,
+                dt=dt,
+                config=micro_config,
+            )
+            generated_rain_flux = jnp.sum(rates.autoconversion * rho_col * dz_col, axis=1)
+            rain_survival_fraction = _copy_array(
+                jnp.where(
+                    generated_rain_flux > 1.0e-12,
+                    jnp.clip(rates.precipitation / generated_rain_flux, 0.0, 1.0),
+                    1.0,
+                )
+            )
+            dq_v_dt_micro = _copy_array(-rates.condensation + rates.evaporation)
+            dq_c_dt_micro = _copy_array(rates.condensation - rates.autoconversion)
+            dq_r_dt_micro = _copy_array(rates.autoconversion - rates.evaporation)
+            precip_micro = _copy_array(rates.precipitation)
+    elif micro_scheme != "none":
+        raise ValueError(
+            "capture_physics_teacher_snapshot currently supports "
+            "microphysics='none', 'kessler', or 'sundqvist'",
+        )
 
     columns = PhysicsColumnBatch(
         T=_copy_array(T_col),
         u=_copy_array(u_col),
         v=_copy_array(v_col),
         q_v=_copy_array(q_v_col),
+        q_c=_copy_array(q_c_col),
+        q_r=_copy_array(q_r_col),
         p_full=_copy_array(p_full_col),
         p_half=_copy_array(p_half_col),
         z_full=_copy_array(z_full_col),
@@ -171,7 +270,13 @@ def capture_physics_teacher_snapshot(
         Km=_copy_array(turb_out.Km),
         Kh=_copy_array(turb_out.Kh),
         M_eq=_copy_array(closure.M_eq),
+        dq_v_dt_micro=dq_v_dt_micro,
+        dq_c_dt_micro=dq_c_dt_micro,
+        dq_r_dt_micro=dq_r_dt_micro,
+        precip_micro=precip_micro,
+        rain_survival_fraction=rain_survival_fraction,
         sample_days=(float(day_tag),),
+        microphysics_scheme=micro_scheme,
     )
 
 
@@ -189,14 +294,38 @@ def concatenate_physics_teacher_datasets(
         },
     )
     sample_days: list[float] = []
+    microphysics_scheme = datasets[0].microphysics_scheme
     for dataset in datasets:
+        if dataset.microphysics_scheme != microphysics_scheme:
+            raise ValueError("Cannot concatenate teacher datasets with mixed microphysics schemes")
         sample_days.extend(dataset.sample_days)
     return PhysicsTeacherDataset(
         columns=columns,
         Km=jnp.concatenate([dataset.Km for dataset in datasets], axis=0),
         Kh=jnp.concatenate([dataset.Kh for dataset in datasets], axis=0),
         M_eq=jnp.concatenate([dataset.M_eq for dataset in datasets], axis=0),
+        dq_v_dt_micro=jnp.concatenate(
+            [dataset.dq_v_dt_micro for dataset in datasets],
+            axis=0,
+        ),
+        dq_c_dt_micro=jnp.concatenate(
+            [dataset.dq_c_dt_micro for dataset in datasets],
+            axis=0,
+        ),
+        dq_r_dt_micro=jnp.concatenate(
+            [dataset.dq_r_dt_micro for dataset in datasets],
+            axis=0,
+        ),
+        precip_micro=jnp.concatenate(
+            [dataset.precip_micro for dataset in datasets],
+            axis=0,
+        ),
+        rain_survival_fraction=jnp.concatenate(
+            [dataset.rain_survival_fraction for dataset in datasets],
+            axis=0,
+        ),
         sample_days=tuple(sample_days),
+        microphysics_scheme=microphysics_scheme,
     )
 
 
@@ -217,6 +346,11 @@ def generate_amip_physics_teacher_dataset(
     if experiment_config.turbulence != "louis":
         raise ValueError(
             "generate_amip_physics_teacher_dataset expects turbulence='louis'",
+        )
+    if experiment_config.microphysics not in ("none", "kessler", "sundqvist"):
+        raise ValueError(
+            "generate_amip_physics_teacher_dataset currently supports "
+            "microphysics='none', 'kessler', or 'sundqvist'",
         )
 
     dt = float(experiment_config.dycore.dt)

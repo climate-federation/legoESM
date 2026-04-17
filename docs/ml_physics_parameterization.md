@@ -8,30 +8,57 @@ AMIP experiments.
 The workflow is intentionally narrow:
 
 - analytical AMIP only
-- one joint model for turbulence and convection
-- physical baseline: `louis + mass_flux`
-- ML runtime: same physical path plus `physics_parameterization="ml"`
+- one joint model for `louis + mass_flux`
+- optional moist extension for `sundqvist` microphysics
+- runtime stays hybrid: the ML model augments the existing physical solvers
 
 There are no separate public turbulence-only, convection-only, or SBM-based ML
 workflows in this path.
 
 ## Runtime Contract
 
-The joint model predicts one flat output vector per atmospheric column:
+In the default dry path, the joint model predicts one flat output vector per
+atmospheric column:
 
 - `Km[nlev]`
 - `Kh[nlev]`
 - `M_eq`
 
-The runtime remains hybrid:
+Those outputs are injected back into the physical Louis and mass-flux schemes:
 
-- `Km/Kh` are injected into the Louis vertical diffusion machinery
-- `M_eq` is injected into the mass-flux closure
+- `Km/Kh` drive the Louis vertical diffusion closure
+- `M_eq` drives the mass-flux closure
 - `M_c` remains a prognostic physical state input
 - `tau_adj` remains fixed in the physical mass-flux scheme
 
-So the ML model does not predict tendencies directly. It predicts closure
-variables used by the existing physical solvers.
+So the ML model does not replace the full tendency machinery. It predicts
+closure variables that are consumed by the existing physics.
+
+## Moist Sundqvist Extension
+
+When `microphysics="sundqvist"` is enabled, the same column model also ingests
+`q_c[nlev]` and predicts one additional scalar per column:
+
+- `rain_survival_fraction`
+
+This is defined from the physical Sundqvist teacher as:
+
+- `precip / sum(P_auto * rho * dz)`
+
+At runtime, the workflow keeps physical Sundqvist condensation and
+autoconversion, and only uses the learned scalar to rescale how much generated
+rain survives to the surface. The physical Sundqvist algebra then rebuilds:
+
+- evaporation
+- latent heating
+- `dq_v_dt`
+- `dq_c_dt`
+- `dq_r_dt`
+- surface precipitation
+
+That is the current supported moist target. Earlier experiments with direct
+`dq_v_dt`, condensation, `P_auto`, and evaporation targets were not kept as the
+final path.
 
 ## Workflow Script
 
@@ -41,16 +68,30 @@ The user-facing entrypoint is:
 
 It performs one linear workflow:
 
-1. run a 28-day analytical AMIP baseline with physical `louis + mass_flux`
+1. run an analytical AMIP baseline with physical `louis + mass_flux`
 2. sample atmospheric columns from that run
-3. compute joint teacher targets `Km/Kh + M_eq`
+3. compute joint teacher targets
 4. train one joint model
-5. run a 28-day analytical AMIP full-ML case
+5. run an analytical AMIP full-ML case
 6. write a comparison package
+
+When `--microphysics sundqvist` is selected, step 1 switches to:
+
+- `rrtmgp + sundqvist clouds + sundqvist microphysics + louis + mass_flux`
+
+and step 3 captures:
+
+- `Km`
+- `Kh`
+- `M_eq`
+- `rain_survival_fraction`
+
+The script defaults still reflect the original dry workflow. The current moist
+canonical run is specified explicitly through CLI flags.
 
 ## Output Layout
 
-The default output root is:
+The canonical output root is:
 
 - `results/ml_physics_parameterization`
 
@@ -70,41 +111,67 @@ Key comparison products:
 - `results/ml_physics_parameterization/comparison/difference_maps_final.png`
 - `results/ml_physics_parameterization/comparison/summary.json`
 
-## Current Result
+The comparison maps now show only:
 
-The current trained workflow used `4224` sampled columns from days:
+- `T_low`
+- `q_v_low`
+- `precip`
+- `wind`
 
-- `0, 1, 2, 3, 4, 5, 6, 7, 14, 21, 28`
+For very coarse cubed-sphere runs (`C8` and lower), those maps use native point
+rendering instead of interpolated filled lat-lon fields to avoid fake
+polar/seam artifacts.
+
+## Current Canonical Result
+
+The current canonical moist run is:
+
+- `resolution=16`
+- `nlev=8`
+- `dt=180 s`
+- `days=7`
+- `sample_days=0,1,2,3,4,5,6,7`
+- `radiation=rrtmgp`
+- `cloud_scheme=sundqvist`
+- `microphysics=sundqvist`
+- `convection=mass_flux`
+- `turbulence=louis`
 
 Saved training metrics are in:
 
 - `results/ml_physics_parameterization/training/metrics.json`
 
-Final analytical full-ML minus default differences are small:
+That run used `12288` sampled columns and trained a stable online-coupled moist
+workflow. Final analytical full-ML minus default differences are small:
 
-- `dT_atm = -0.0138 K`
-- `dT_low = +0.0426 K`
-- `dCWV = +0.0920 kg/m²`
-- `dprecip = 0.0 mm/day`
-- `dmax_wind = +0.00248 m/s`
+- `dT_atm = 0.0 K`
+- `dT_low = +0.00119 K`
+- `dCWV = +4.58e-05 kg/m²`
+- `dprecip = -1.40e-04 mm/day`
+- `dmax_wind = -5.54e-05 m/s`
+
+Radiative differences also remain small:
+
+- `dSW_up_TOA = -0.128 W/m²`
+- `dLW_up_TOA = -0.0115 W/m²`
+- `dSW_net_sfc = +0.144 W/m²`
+- `dLW_net_sfc = +0.00446 W/m²`
 
 ## Validation
 
 Focused validation for the active path currently passes:
 
-- `tests/unit/test_run_amip_cli.py`
-- `tests/unit/test_config_validation.py`
-- `tests/unit/test_config_roundtrip.py`
 - `tests/unit/test_ml_physics_parameterization.py`
 - `tests/unit/test_ml_physics_workflow.py`
 
-One unrelated broader turbulence-suite assertion in `YSU` can fail, but it is
-outside the joint ML physics path implemented here.
+The broader AMIP round-trip issue in `tests/unit/test_config_roundtrip.py` is
+still unrelated to this workflow.
 
-## Note On Precipitation
+## Notes
 
-The analytical `gray + louis + mass_flux` setup is extremely dry. Precipitation
-is not missing from diagnostics, but it is very small, peaks early, and decays
-toward zero by the end of the 28-day run. That behavior comes from the physical
-mass-flux baseline in this analytical forcing setup, not from the plotting
-pipeline.
+The dry `gray + louis + mass_flux` workflow is still supported and remains the
+fastest baseline path for debugging.
+
+The current moist extension is supported at the canonical `C16/L8, dt=180 s,
+days=7` scale. Larger or longer moist configurations should still be treated as
+new stability experiments, not assumed to work automatically.

@@ -13,6 +13,10 @@ from legoesm.atmosphere.physics.convection.mass_flux import (
     MassFluxClosureDiagnostics,
     mass_flux_convection_from_closure,
 )
+from legoesm.atmosphere.physics.microphysics.output import MicrophysicsOutput
+from legoesm.atmosphere.physics.microphysics.sundqvist import (
+    diagnose_sundqvist_process_rates,
+)
 from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -130,6 +134,7 @@ def load_physics_parameterization_assets(
     seed: int,
     checkpoint_path: str,
     stats_path: str,
+    microphysics_scheme: str = "none",
 ) -> PhysicsParameterizationAssets:
     """Load the strict joint ML checkpoint and stats bundle."""
     if not checkpoint_path or not stats_path:
@@ -140,6 +145,7 @@ def load_physics_parameterization_assets(
         nlev=nlev,
         hidden_dim=hidden_dim,
         n_layers=n_layers,
+        microphysics_scheme=microphysics_scheme,
         key=jax.random.PRNGKey(seed),
     )
     model = load_physics_checkpoint(model, checkpoint_path)
@@ -154,6 +160,8 @@ def predict_physics_parameterization(
     u: jax.Array,
     v: jax.Array,
     q_v: jax.Array,
+    q_c: jax.Array,
+    q_r: jax.Array,
     p_full: jax.Array,
     z_full: jax.Array,
     p_s: jax.Array,
@@ -166,11 +174,35 @@ def predict_physics_parameterization(
 ) -> dict[str, jax.Array]:
     """Predict joint ML outputs for a batch of columns."""
     dt_batch = jnp.full_like(p_s, dt)
-    features = jax.vmap(pack_physics_parameterization_features)(
+    microphysics_scheme = assets.model.microphysics_scheme
+    features = jax.vmap(
+        lambda T_col, u_col, v_col, q_v_col, q_c_col, q_r_col, p_full_col, z_full_col, p_s_col, T_sfc_col, q_sfc_col, lat_col, cape_col, M_c_col, dt_col: (
+            pack_physics_parameterization_features(
+                T=T_col,
+                u=u_col,
+                v=v_col,
+                q_v=q_v_col,
+                q_c=q_c_col,
+                q_r=q_r_col,
+                p_full=p_full_col,
+                z_full=z_full_col,
+                p_s=p_s_col,
+                T_sfc=T_sfc_col,
+                q_sfc=q_sfc_col,
+                lat=lat_col,
+                cape=cape_col,
+                M_c=M_c_col,
+                dt=dt_col,
+                microphysics_scheme=microphysics_scheme,
+            )
+        ),
+    )(
         T,
         u,
         v,
         q_v,
+        q_c,
+        q_r,
         p_full,
         z_full,
         p_s,
@@ -184,12 +216,137 @@ def predict_physics_parameterization(
     features_norm = normalize(features, assets.stats_bundle.input_stats)
     targets_norm = jax.vmap(assets.model)(features_norm)
     targets = denormalize(targets_norm, assets.stats_bundle.output_stats)
-    unpacked = unpack_physics_parameterization_targets(targets, T.shape[1])
-    return {
+    unpacked = unpack_physics_parameterization_targets(
+        targets,
+        T.shape[1],
+        microphysics_scheme=microphysics_scheme,
+    )
+    predicted = {
         "Km": jnp.clip(unpacked["Km"], 0.0, assets.max_diffusivity),
         "Kh": jnp.clip(unpacked["Kh"], 0.0, assets.max_diffusivity),
         "M_eq": jnp.clip(unpacked["M_eq"], 0.0, None),
     }
+    if microphysics_scheme == "kessler":
+        predicted.update(
+            {
+                "dq_v_dt_micro": unpacked["dq_v_dt_micro"],
+                "dq_c_dt_micro": unpacked["dq_c_dt_micro"],
+                "dq_r_dt_micro": unpacked["dq_r_dt_micro"],
+                "precip_micro": jnp.clip(unpacked["precip_micro"], 0.0, None),
+            },
+        )
+    elif microphysics_scheme == "sundqvist":
+        predicted["rain_survival_fraction"] = jnp.clip(
+            unpacked["rain_survival_fraction"],
+            0.0,
+            1.0,
+        )
+    return predicted
+
+
+def _apply_predicted_kessler_microphysics(
+    predicted: dict[str, jax.Array],
+    dtype,
+) -> MicrophysicsOutput:
+    """Convert direct ML microphysics outputs into the common backend interface."""
+    dq_v_dt = predicted["dq_v_dt_micro"]
+    zeros = jnp.zeros_like(dq_v_dt, dtype=dtype)
+    return MicrophysicsOutput(
+        dT_dt=-constants.L_v * dq_v_dt / constants.c_pd,
+        dq_v_dt=dq_v_dt,
+        dq_c_dt=predicted["dq_c_dt_micro"],
+        dq_r_dt=predicted["dq_r_dt_micro"],
+        dq_i_dt=zeros,
+        dq_s_dt=zeros,
+        dq_g_dt=zeros,
+        dN_c_dt=zeros,
+        dN_r_dt=zeros,
+        dN_i_dt=zeros,
+        precipitation=predicted["precip_micro"],
+    )
+
+
+def _limit_predicted_kessler_microphysics_tendencies(
+    predicted: dict[str, jax.Array],
+    *,
+    q_v: jax.Array,
+    q_c: jax.Array,
+    q_r: jax.Array,
+    dt: float,
+) -> dict[str, jax.Array]:
+    """Enforce one-step non-negativity for the learned warm-rain tracers."""
+    dt_safe = jnp.maximum(jnp.asarray(dt, dtype=q_v.dtype), 1.0e-6)
+    limited = dict(predicted)
+    limited["dq_v_dt_micro"] = jnp.maximum(
+        predicted["dq_v_dt_micro"],
+        -jnp.maximum(q_v, 0.0) / dt_safe,
+    )
+    limited["dq_c_dt_micro"] = jnp.maximum(
+        predicted["dq_c_dt_micro"],
+        -jnp.maximum(q_c, 0.0) / dt_safe,
+    )
+    limited["dq_r_dt_micro"] = jnp.maximum(
+        predicted["dq_r_dt_micro"],
+        -jnp.maximum(q_r, 0.0) / dt_safe,
+    )
+    limited["precip_micro"] = jnp.clip(predicted["precip_micro"], 0.0, None)
+    return limited
+
+
+def apply_predicted_sundqvist_rain_survival_fraction(
+    predicted_rain_survival_fraction: jax.Array,
+    *,
+    T: jax.Array,
+    q_v: jax.Array,
+    hydrometeors,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    rho: jax.Array,
+    dz: jax.Array,
+    dt: float,
+    config,
+) -> MicrophysicsOutput:
+    """Rebuild Sundqvist microphysics from a learned column rain-survival fraction."""
+    rates = diagnose_sundqvist_process_rates(
+        T=T,
+        q_v=q_v,
+        hydrometeors=hydrometeors,
+        p_full=p_full,
+        p_half=p_half,
+        rho=rho,
+        dz=dz,
+        dt=dt,
+        config=config,
+    )
+    generated_rain_flux = jnp.sum(rates.autoconversion * rho * dz, axis=1)
+    base_evap_flux = jnp.sum(rates.evaporation * rho * dz, axis=1)
+    target_precip = jnp.clip(predicted_rain_survival_fraction, 0.0, 1.0) * generated_rain_flux
+    target_evap_flux = jnp.clip(generated_rain_flux - target_precip, 0.0, generated_rain_flux)
+    scale = jnp.where(
+        base_evap_flux > 1.0e-12,
+        target_evap_flux / base_evap_flux,
+        1.0,
+    )
+    evaporation = rates.evaporation * scale[:, None]
+    precipitation = jnp.clip(
+        generated_rain_flux - jnp.sum(evaporation * rho * dz, axis=1),
+        0.0,
+        None,
+    )
+    zeros = jnp.zeros_like(T)
+    return MicrophysicsOutput(
+        dT_dt=constants.L_v * (rates.condensation - evaporation) / constants.c_pd,
+        dq_v_dt=-rates.condensation + evaporation,
+        dq_c_dt=rates.condensation - rates.autoconversion,
+        dq_r_dt=rates.autoconversion - evaporation,
+        dq_i_dt=zeros,
+        dq_s_dt=zeros,
+        dq_g_dt=zeros,
+        dN_c_dt=zeros,
+        dN_r_dt=zeros,
+        dN_i_dt=zeros,
+        precipitation=precipitation,
+    )
 
 
 def apply_physics_parameterization(
@@ -200,6 +357,8 @@ def apply_physics_parameterization(
     u: jax.Array,
     v: jax.Array,
     q_v: jax.Array,
+    q_c: jax.Array,
+    q_r: jax.Array,
     p_full: jax.Array,
     p_half: jax.Array,
     p_s: jax.Array,
@@ -213,7 +372,7 @@ def apply_physics_parameterization(
     dt: float,
     mass_flux_config: MassFluxConfig,
     louis_config: LouisConfig,
-) -> tuple[object, jax.Array, object, dict[str, jax.Array]]:
+) -> tuple[object, jax.Array, object, MicrophysicsOutput | None, dict[str, jax.Array]]:
     """Run the joint ML parameterization through the physical closures."""
     predicted = predict_physics_parameterization(
         assets,
@@ -221,6 +380,8 @@ def apply_physics_parameterization(
         u=u,
         v=v,
         q_v=q_v,
+        q_c=q_c,
+        q_r=q_r,
         p_full=p_full,
         z_full=z_full,
         p_s=p_s,
@@ -231,6 +392,14 @@ def apply_physics_parameterization(
         M_c=M_c,
         dt=dt,
     )
+    if assets.model.microphysics_scheme == "kessler":
+        predicted = _limit_predicted_kessler_microphysics_tendencies(
+            predicted,
+            q_v=q_v,
+            q_c=q_c,
+            q_r=q_r,
+            dt=dt,
+        )
     M_c_new = jnp.maximum(
         M_c + dt * (predicted["M_eq"] - M_c) / mass_flux_config.tau_adj,
         0.0,
@@ -260,4 +429,7 @@ def apply_physics_parameterization(
         max_diffusivity=assets.max_diffusivity,
         surface_config=louis_config.surface,
     )
-    return conv_out, M_c_new, turb_out, predicted
+    micro_out = None
+    if assets.model.microphysics_scheme == "kessler":
+        micro_out = _apply_predicted_kessler_microphysics(predicted, T.dtype)
+    return conv_out, M_c_new, turb_out, micro_out, predicted

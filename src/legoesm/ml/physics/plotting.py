@@ -24,6 +24,22 @@ def _get_cartopy():
     return ccrs
 
 
+def _map_field_specs(field_names: Iterable[str]) -> list[tuple[str, str, str]]:
+    spec_map = {
+        "T_low": ("T_low", "coolwarm"),
+        "q_v_low": ("q_v_low", "viridis"),
+        "q_c_low": ("q_c_low", "Blues"),
+        "q_r_low": ("q_r_low", "Purples"),
+        "precip": ("Precip", "Blues"),
+        "wind": ("Wind", "magma"),
+    }
+    ordered_names = [
+        name for name in ("T_low", "q_v_low", "precip", "wind")
+        if name in field_names
+    ]
+    return [(name, *spec_map[name]) for name in ordered_names]
+
+
 def plot_training_history(
     train_loss_history: Iterable[float],
     val_loss_history: Iterable[float],
@@ -159,14 +175,28 @@ def plot_rollout_timeseries(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    metric_labels = {
+        "T_atm": "T_atm",
+        "T_low": "T_low",
+        "CWV": "CWV",
+        "precip": "Precip",
+        "max_wind": "Wind",
+        "sw_up_toa": "SW up TOA",
+        "lw_up_toa": "LW up TOA",
+        "sw_net_sfc": "SW net sfc",
+        "lw_net_sfc": "LW net sfc",
+    }
     metrics = [
-        ("T_atm", "T_atm"),
-        ("T_low", "T_low"),
-        ("CWV", "CWV"),
-        ("precip", "Precip"),
-        ("max_wind", "Wind"),
+        (key, label)
+        for key, label in metric_labels.items()
+        if key in baseline and key in ml
     ]
-    fig, axes = plt.subplots(len(metrics), 1, figsize=(8.2, 11.0), constrained_layout=True)
+    fig, axes = plt.subplots(
+        len(metrics),
+        1,
+        figsize=(8.2, max(6.0, 2.1 * len(metrics))),
+        constrained_layout=True,
+    )
     days = np.asarray(baseline["days"], dtype=float)
     for ax, (key, label) in zip(np.atleast_1d(axes).ravel(), metrics, strict=True):
         ax.plot(days, np.asarray(baseline[key], dtype=float), lw=2.0, label=baseline_label)
@@ -253,6 +283,16 @@ def _interpolate_to_latlon(
     return lon_grid, lat_grid, field
 
 
+def _use_native_scatter(field: np.ndarray) -> bool:
+    """Prefer point rendering for very coarse cubed-sphere fields.
+
+    Scattered lat-lon interpolation on C4/C8 creates obvious polar/seam artifacts
+    that are more misleading than the native point cloud.
+    """
+    arr = np.asarray(field)
+    return arr.ndim == 3 and arr.shape[0] == 6 and arr.shape[1] <= 8 and arr.shape[2] <= 8
+
+
 def plot_rollout_map_fields(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
@@ -271,16 +311,11 @@ def plot_rollout_map_fields(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    field_specs = [
-        ("T_low", "T_low", "coolwarm"),
-        ("q_v_low", "q_v_low", "viridis"),
-        ("precip", "Precip", "Blues"),
-        ("wind", "Wind", "magma"),
-    ]
+    field_specs = _map_field_specs(baseline_fields.keys())
     fig, axes = plt.subplots(
         2,
         len(field_specs),
-        figsize=(16.0, 7.0),
+        figsize=(4.0 * len(field_specs), 7.0),
         constrained_layout=True,
         subplot_kw={"projection": ccrs.PlateCarree()},
     )
@@ -290,25 +325,42 @@ def plot_rollout_map_fields(
         ml = np.asarray(ml_fields[name], dtype=float)
         vmin = float(min(np.nanmin(baseline), np.nanmin(ml)))
         vmax = float(max(np.nanmax(baseline), np.nanmax(ml)))
-        lon_grid, lat_grid, baseline_ll = _interpolate_to_latlon(lon_deg, lat_deg, baseline)
-        _, _, ml_ll = _interpolate_to_latlon(lon_deg, lat_deg, ml)
-        lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid)
+        use_scatter = _use_native_scatter(baseline)
+        if not use_scatter:
+            lon_grid, lat_grid, baseline_ll = _interpolate_to_latlon(lon_deg, lat_deg, baseline)
+            _, _, ml_ll = _interpolate_to_latlon(lon_deg, lat_deg, ml)
+            lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid)
 
         for row, (title, field_ll) in enumerate((
-            (baseline_label, baseline_ll),
-            (ml_label, ml_ll),
+            (baseline_label, baseline),
+            (ml_label, ml),
         )):
             ax = axes[row, col]
-            im = ax.pcolormesh(
-                lon_mesh,
-                lat_mesh,
-                field_ll,
-                shading="auto",
-                transform=ccrs.PlateCarree(),
-                cmap=cmap,
-                vmin=vmin,
-                vmax=vmax,
-            )
+            if use_scatter:
+                point_size = max(8.0, 320.0 / float(field_ll.shape[1]))
+                im = ax.scatter(
+                    np.asarray(lon_deg, dtype=float).ravel(),
+                    np.asarray(lat_deg, dtype=float).ravel(),
+                    c=np.asarray(field_ll, dtype=float).ravel(),
+                    s=point_size,
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                    transform=ccrs.PlateCarree(),
+                    edgecolors="none",
+                    alpha=0.9,
+                )
+            else:
+                im = ax.pcolormesh(
+                    lon_mesh,
+                    lat_mesh,
+                    baseline_ll if row == 0 else ml_ll,
+                    shading="auto",
+                    transform=ccrs.PlateCarree(),
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                )
             ax.coastlines(linewidth=0.5, color="gray")
             ax.set_global()
             ax.set_title(name)
@@ -350,35 +402,58 @@ def plot_rollout_difference_maps(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    delta_labels = {
+        "T_low": "dT_low",
+        "q_v_low": "dq_v_low",
+        "q_c_low": "dq_c_low",
+        "q_r_low": "dq_r_low",
+        "precip": "dPrecip",
+        "wind": "dWind",
+    }
     field_specs = [
-        ("T_low", "dT_low"),
-        ("q_v_low", "dq_v_low"),
-        ("precip", "dPrecip"),
-        ("wind", "dWind"),
+        (name, delta_labels[name])
+        for name, _, _ in _map_field_specs(baseline_fields.keys())
     ]
     fig, axes = plt.subplots(
         1,
         len(field_specs),
-        figsize=(16.0, 4.2),
+        figsize=(4.0 * len(field_specs), 4.2),
         constrained_layout=True,
         subplot_kw={"projection": ccrs.PlateCarree()},
     )
 
     for ax, (name, label) in zip(np.atleast_1d(axes).ravel(), field_specs, strict=True):
         delta = np.asarray(ml_fields[name], dtype=float) - np.asarray(baseline_fields[name], dtype=float)
-        lon_grid, lat_grid, delta_ll = _interpolate_to_latlon(lon_deg, lat_deg, delta)
-        lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid)
-        vmax = float(np.nanmax(np.abs(delta_ll)))
-        im = ax.pcolormesh(
-            lon_mesh,
-            lat_mesh,
-            delta_ll,
-            shading="auto",
-            transform=ccrs.PlateCarree(),
-            cmap="RdBu_r",
-            vmin=-vmax,
-            vmax=vmax,
-        )
+        use_scatter = _use_native_scatter(delta)
+        if use_scatter:
+            vmax = float(np.nanmax(np.abs(delta)))
+            point_size = max(8.0, 320.0 / float(delta.shape[1]))
+            im = ax.scatter(
+                np.asarray(lon_deg, dtype=float).ravel(),
+                np.asarray(lat_deg, dtype=float).ravel(),
+                c=delta.ravel(),
+                s=point_size,
+                transform=ccrs.PlateCarree(),
+                cmap="RdBu_r",
+                vmin=-vmax,
+                vmax=vmax,
+                edgecolors="none",
+                alpha=0.9,
+            )
+        else:
+            lon_grid, lat_grid, delta_ll = _interpolate_to_latlon(lon_deg, lat_deg, delta)
+            lon_mesh, lat_mesh = np.meshgrid(lon_grid, lat_grid)
+            vmax = float(np.nanmax(np.abs(delta_ll)))
+            im = ax.pcolormesh(
+                lon_mesh,
+                lat_mesh,
+                delta_ll,
+                shading="auto",
+                transform=ccrs.PlateCarree(),
+                cmap="RdBu_r",
+                vmin=-vmax,
+                vmax=vmax,
+            )
         ax.coastlines(linewidth=0.5, color="gray")
         ax.set_global()
         ax.set_title(name)

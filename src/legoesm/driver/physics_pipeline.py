@@ -209,6 +209,8 @@ class PhysicsPipeline:
         conv_prog_out = conv_prog
 
         turb_out = None
+        micro_out_ml = None
+        predicted_micro = {}
         if self.physics_parameterization is not None:
             if _conv_cfg is None or not hasattr(_conv_cfg, 'M_c_init'):
                 raise ValueError(
@@ -237,13 +239,15 @@ class PhysicsPipeline:
                 dt=dt,
                 config=_conv_cfg,
             )
-            conv_out, conv_prog_out, turb_out, _ = apply_physics_parameterization(
+            conv_out, conv_prog_out, turb_out, micro_out_ml, predicted_micro = apply_physics_parameterization(
                 self.physics_parameterization,
                 closure=closure,
                 T=T_col,
                 u=ad.flatten_3d(u),
                 v=ad.flatten_3d(v),
                 q_v=q_v_col,
+                q_c=ad.flatten_3d(q_c) if q_c is not None else jnp.zeros_like(T_col),
+                q_r=ad.flatten_3d(q_r) if q_r is not None else jnp.zeros_like(T_col),
                 p_full=p_full_col,
                 p_half=p_half_col,
                 p_s=p_s_col,
@@ -292,7 +296,19 @@ class PhysicsPipeline:
         dN_i_dt = jnp.zeros(shape_3d, dtype=_sd)
         precip_micro = jnp.zeros(shape_2d, dtype=_sd)
 
-        if self.micro_fn is not None:
+        if micro_out_ml is not None:
+            dT_dt_micro = ad.unflatten_3d(micro_out_ml.dT_dt)
+            dq_v_dt_micro = ad.unflatten_3d(micro_out_ml.dq_v_dt)
+            dq_c_dt = ad.unflatten_3d(micro_out_ml.dq_c_dt)
+            dq_r_dt = ad.unflatten_3d(micro_out_ml.dq_r_dt)
+            precip_micro = ad.unflatten_2d(micro_out_ml.precipitation)
+            dq_i_dt = ad.unflatten_3d(micro_out_ml.dq_i_dt)
+            dq_s_dt = ad.unflatten_3d(micro_out_ml.dq_s_dt)
+            dq_g_dt = ad.unflatten_3d(micro_out_ml.dq_g_dt)
+            dN_c_dt = ad.unflatten_3d(micro_out_ml.dN_c_dt)
+            dN_r_dt = ad.unflatten_3d(micro_out_ml.dN_r_dt)
+            dN_i_dt = ad.unflatten_3d(micro_out_ml.dN_i_dt)
+        elif self.micro_fn is not None:
             from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
             q_c_col = ad.flatten_3d(q_c)
             q_r_col = ad.flatten_3d(q_r)
@@ -309,12 +325,34 @@ class PhysicsPipeline:
                 N_r=ad.flatten_3d(N_r) if N_r is not None else _z,
                 N_i=ad.flatten_3d(N_i) if N_i is not None else _z,
             )
-            micro_out = self.micro_fn(
-                T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
-                p_full=p_full_col, p_half=p_half_col,
-                rho=rho_col, dz=dz_col, dt=dt,
-                config=self.micro_config,
-            )
+            if (
+                self.physics_parameterization is not None
+                and getattr(self.physics_parameterization.model, "microphysics_scheme", "none")
+                == "sundqvist"
+                and "rain_survival_fraction" in predicted_micro
+            ):
+                from legoesm.atmosphere.physics.ml_parameterization import (
+                    apply_predicted_sundqvist_rain_survival_fraction,
+                )
+                micro_out = apply_predicted_sundqvist_rain_survival_fraction(
+                    predicted_micro["rain_survival_fraction"],
+                    T=T_col,
+                    q_v=q_v_col,
+                    hydrometeors=hydrometeors,
+                    p_full=p_full_col,
+                    p_half=p_half_col,
+                    rho=rho_col,
+                    dz=dz_col,
+                    dt=dt,
+                    config=self.micro_config,
+                )
+            else:
+                micro_out = self.micro_fn(
+                    T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
+                    p_full=p_full_col, p_half=p_half_col,
+                    rho=rho_col, dz=dz_col, dt=dt,
+                    config=self.micro_config,
+                )
             dT_dt_micro = ad.unflatten_3d(micro_out.dT_dt)
             dq_v_dt_micro = ad.unflatten_3d(micro_out.dq_v_dt)
             dq_c_dt = ad.unflatten_3d(micro_out.dq_c_dt)
@@ -907,6 +945,12 @@ def _resolve_physics_parameterization(config, nlev: int):
         raise ValueError(
             "physics_parameterization='ml' requires turbulence='louis'",
         )
+    microphysics_scheme = getattr(config, 'microphysics', 'none')
+    if microphysics_scheme not in ("none", "kessler", "sundqvist"):
+        raise ValueError(
+            "physics_parameterization='ml' currently supports "
+            "microphysics='none', 'kessler', or 'sundqvist'",
+        )
     from legoesm.atmosphere.physics.ml_parameterization import (
         load_physics_parameterization_assets,
     )
@@ -917,6 +961,7 @@ def _resolve_physics_parameterization(config, nlev: int):
         seed=getattr(config, 'physics_parameterization_seed', 0),
         checkpoint_path=getattr(config, 'physics_parameterization_checkpoint', ''),
         stats_path=getattr(config, 'physics_parameterization_stats', ''),
+        microphysics_scheme=microphysics_scheme,
     )
 
 

@@ -20,6 +20,11 @@ class PhysicsEvaluationMetrics(NamedTuple):
     rmse_Km: float
     rmse_Kh: float
     rmse_M_eq: float
+    rmse_rain_survival_fraction: float = 0.0
+    rmse_dq_v_dt_micro: float = 0.0
+    rmse_dq_c_dt_micro: float = 0.0
+    rmse_dq_r_dt_micro: float = 0.0
+    rmse_precip_micro: float = 0.0
 
 
 def predict_physics_parameterization_targets(
@@ -28,11 +33,35 @@ def predict_physics_parameterization_targets(
     columns,
 ) -> dict[str, jax.Array]:
     """Predict denormalized ``Km``, ``Kh``, and ``M_eq`` for a dataset."""
-    features = jax.vmap(pack_physics_parameterization_features)(
+    microphysics_scheme = getattr(model, "microphysics_scheme", "none")
+    features = jax.vmap(
+        lambda T, u, v, q_v, q_c, q_r, p_full, z_full, p_s, T_sfc, q_sfc, lat, cape, M_c, dt: (
+            pack_physics_parameterization_features(
+                T=T,
+                u=u,
+                v=v,
+                q_v=q_v,
+                q_c=q_c,
+                q_r=q_r,
+                p_full=p_full,
+                z_full=z_full,
+                p_s=p_s,
+                T_sfc=T_sfc,
+                q_sfc=q_sfc,
+                lat=lat,
+                cape=cape,
+                M_c=M_c,
+                dt=dt,
+                microphysics_scheme=microphysics_scheme,
+            )
+        ),
+    )(
         columns.T,
         columns.u,
         columns.v,
         columns.q_v,
+        columns.q_c,
+        columns.q_r,
         columns.p_full,
         columns.z_full,
         columns.p_s,
@@ -46,7 +75,11 @@ def predict_physics_parameterization_targets(
     features_norm = normalize(features, stats_bundle.input_stats)
     targets_norm = jax.vmap(model)(features_norm)
     targets = denormalize(targets_norm, stats_bundle.output_stats)
-    return unpack_physics_parameterization_targets(targets, columns.T.shape[1])
+    return unpack_physics_parameterization_targets(
+        targets,
+        columns.T.shape[1],
+        microphysics_scheme=microphysics_scheme,
+    )
 
 
 def evaluate_physics_parameterization(
@@ -60,8 +93,37 @@ def evaluate_physics_parameterization(
         stats_bundle=stats_bundle,
         columns=dataset.columns,
     )
-    return PhysicsEvaluationMetrics(
+    metrics = PhysicsEvaluationMetrics(
         rmse_Km=float(jnp.sqrt(jnp.mean((predicted["Km"] - dataset.Km) ** 2))),
         rmse_Kh=float(jnp.sqrt(jnp.mean((predicted["Kh"] - dataset.Kh) ** 2))),
         rmse_M_eq=float(jnp.sqrt(jnp.mean((predicted["M_eq"] - dataset.M_eq) ** 2))),
     )
+    if dataset.microphysics_scheme == "kessler":
+        metrics = metrics._replace(
+            rmse_dq_v_dt_micro=float(
+                jnp.sqrt(jnp.mean((predicted["dq_v_dt_micro"] - dataset.dq_v_dt_micro) ** 2))
+            ),
+            rmse_dq_c_dt_micro=float(
+                jnp.sqrt(jnp.mean((predicted["dq_c_dt_micro"] - dataset.dq_c_dt_micro) ** 2))
+            ),
+            rmse_dq_r_dt_micro=float(
+                jnp.sqrt(jnp.mean((predicted["dq_r_dt_micro"] - dataset.dq_r_dt_micro) ** 2))
+            ),
+            rmse_precip_micro=float(
+                jnp.sqrt(jnp.mean((predicted["precip_micro"] - dataset.precip_micro) ** 2))
+            ),
+        )
+    elif dataset.microphysics_scheme == "sundqvist":
+        metrics = metrics._replace(
+            rmse_rain_survival_fraction=float(
+                jnp.sqrt(
+                    jnp.mean(
+                        (
+                            predicted["rain_survival_fraction"]
+                            - dataset.rain_survival_fraction
+                        ) ** 2
+                    )
+                )
+            ),
+        )
+    return metrics
