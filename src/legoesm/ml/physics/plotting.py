@@ -10,6 +10,7 @@ from scipy.interpolate import griddata
 
 
 def _get_pyplot():
+    """Import pyplot with a non-interactive backend for batch figure generation."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -19,12 +20,14 @@ def _get_pyplot():
 
 
 def _get_cartopy():
+    """Import cartopy lazily so non-plotting code paths stay lightweight."""
     import cartopy.crs as ccrs
 
     return ccrs
 
 
 def _map_field_specs(field_names: Iterable[str]) -> list[tuple[str, str, str]]:
+    """Return the ordered field names, labels, and colormaps for map panels."""
     spec_map = {
         "T_low": ("T_low", "coolwarm"),
         "q_v_low": ("q_v_low", "viridis"),

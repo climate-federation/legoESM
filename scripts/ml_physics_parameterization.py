@@ -48,6 +48,7 @@ FULL_ML_LABEL = "Full ML"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI for the analytical ML physics workflow."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output-root",
@@ -80,10 +81,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def _sample_days_from_args(args: argparse.Namespace) -> tuple[float, ...]:
+    """Parse the comma-separated sample-day list from the CLI."""
     return tuple(float(chunk.strip()) for chunk in args.sample_days.split(",") if chunk.strip())
 
 
 def _generate_standard_run_plots(run_dir: Path) -> None:
+    """Regenerate the standard AMIP diagnostic plots for one run directory."""
     plot_amip_path = REPO_ROOT / "scripts" / "diagnostic" / "plot_amip.py"
     spec = importlib.util.spec_from_file_location("plot_amip_module", plot_amip_path)
     if spec is None or spec.loader is None:
@@ -94,15 +97,18 @@ def _generate_standard_run_plots(run_dir: Path) -> None:
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
+    """Load a NumPy ``.npz`` bundle into a plain mapping."""
     with np.load(path) as bundle:
         return {name: bundle[name] for name in bundle.files}
 
 
 def _is_moist_microphysics(microphysics: str) -> bool:
+    """Return whether the selected workflow path uses moist physics."""
     return microphysics != "none"
 
 
 def _resolve_cloud_scheme(microphysics: str) -> str:
+    """Choose the cloud-fraction scheme paired with the selected microphysics."""
     if microphysics == "kessler":
         return "xu_randall"
     if microphysics == "sundqvist":
@@ -113,6 +119,7 @@ def _resolve_cloud_scheme(microphysics: str) -> str:
 def _extract_final_snapshot_fields(
     snapshots: dict[str, np.ndarray],
 ) -> tuple[str, dict[str, np.ndarray]]:
+    """Extract the last saved map fields used in the comparison plots."""
     final_day = int(np.asarray(snapshots["snapshot_days"], dtype=int)[-1])
     day_label = f"{final_day:03d}"
     fields = {
@@ -129,6 +136,7 @@ def _extract_final_snapshot_fields(
 
 
 def _make_base_config(args: argparse.Namespace, output_dir: Path) -> ExperimentConfig:
+    """Build the physical configuration shared by the workflow stages."""
     use_moist_microphysics = _is_moist_microphysics(args.microphysics)
     return ExperimentConfig(
         grid=GridConfig(
@@ -161,6 +169,7 @@ def _run_default_and_capture_dataset(
     args: argparse.Namespace,
     output_dir: Path,
 ) -> object:
+    """Run the physical baseline and capture teacher columns on sampled days."""
     config = _make_base_config(args, output_dir)
     sample_days = _sample_days_from_args(args)
     driver = ModelDriver(config, output_dir=output_dir)
@@ -201,6 +210,7 @@ def _run_default_and_capture_dataset(
 
 
 def _train_joint_model(args: argparse.Namespace, dataset, training_dir: Path) -> tuple[Path, Path, object]:
+    """Train the joint model and write its checkpoint, stats, and diagnostics."""
     training_dir.mkdir(parents=True, exist_ok=True)
     result = train_physics_parameterization(
         dataset,
@@ -286,6 +296,7 @@ def _run_full_ml(
     checkpoint_path: Path,
     stats_path: Path,
 ) -> None:
+    """Run the online-coupled ML rollout using saved model assets."""
     config = _make_base_config(args, output_dir)._replace(
         physics_parameterization="ml",
         physics_parameterization_checkpoint=str(checkpoint_path),
@@ -303,6 +314,7 @@ def _run_full_ml(
 
 
 def _build_comparison(output_root: Path) -> dict[str, float]:
+    """Build the baseline-vs-ML comparison package for a completed workflow."""
     compare_dir = output_root / "comparison"
     compare_dir.mkdir(parents=True, exist_ok=True)
     default_dir = output_root / "default_run"
@@ -383,6 +395,7 @@ def _build_comparison(output_root: Path) -> dict[str, float]:
 
 
 def run_workflow(args: argparse.Namespace) -> int:
+    """Execute the full baseline-train-rollout comparison workflow."""
     output_root = args.output_root
     training_dir = output_root / "training"
     default_run_dir = output_root / "default_run"
@@ -413,6 +426,7 @@ def run_workflow(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """CLI entrypoint for the analytical ML physics workflow."""
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     return run_workflow(args)

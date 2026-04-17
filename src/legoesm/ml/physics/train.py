@@ -148,6 +148,7 @@ def compute_stats_bundle(
 
 
 def _mse_loss(model, features: jax.Array, targets: jax.Array) -> jax.Array:
+    """Compute mean-squared error for one normalized training batch."""
     pred = jax.vmap(model)(features)
     return jnp.mean((pred - targets) ** 2)
 

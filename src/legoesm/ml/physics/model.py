@@ -55,6 +55,7 @@ class PhysicsParameterizationModel(eqx.Module):
 
 
 def _validate_microphysics_scheme(microphysics_scheme: str) -> str:
+    """Validate and normalize the supported microphysics scheme label."""
     if microphysics_scheme not in ("none", "kessler", "sundqvist"):
         raise ValueError(
             f"Unsupported microphysics_scheme={microphysics_scheme!r}; "
@@ -64,6 +65,7 @@ def _validate_microphysics_scheme(microphysics_scheme: str) -> str:
 
 
 def _microphysics_feature_levels(microphysics_scheme: str) -> int:
+    """Return how many hydrometeor feature profiles are appended per column."""
     scheme = _validate_microphysics_scheme(microphysics_scheme)
     if scheme == "none":
         return 0
