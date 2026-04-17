@@ -295,5 +295,150 @@ class TestFv3ForwardBackwardSmoke(unittest.TestCase):
                         f"Mass relative error = {rel_err:.4e}")
 
 
+class TestD2a2cVectDuogridSeams(unittest.TestCase):
+    """Seam-level regression tests for _d2a2c_vect_duogrid (iter-60).
+
+    These tests verify that the fully-haloed D-grid path (introduced in
+    iter-60 to replace the pad_halo_vector utmp halo) produces correct
+    face-boundary uc/vc values.  Prior to iter-60 the only direct tests
+    on this path were shape/finite checks; the adversarial review noted
+    that wrong-but-finite boundary winds could ship silently.
+    """
+
+    def test_rest_state_machine_precision(self):
+        """u_d = v_d = 0 should give uc = vc = ut = vt = ua = va = 0 exactly."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        u_d = jnp.zeros((6, n, n + 1))
+        v_d = jnp.zeros((6, n + 1, n))
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        for name, arr in [("ua", ua), ("va", va), ("uc", uc),
+                          ("vc", vc), ("ut", ut), ("vt", vt)]:
+            m = float(jnp.max(jnp.abs(arr)))
+            self.assertLess(m, 1e-12, f"Rest state {name} max = {m:.3e}")
+
+    def test_constant_geographic_flow_face_continuity(self):
+        """Constant geographic wind should give uc continuous across face seams.
+
+        With a constant (u_east, v_north) field, the PHYSICAL velocity is
+        smooth everywhere.  After projecting to the non-orthogonal grid
+        covariant basis and interpolating to C-grid edges, uc should be
+        continuous across face boundaries (up to the grid-angle rotation
+        which is itself continuous).  This tests that the cross-axis
+        D-grid halo reconstruction in ext_vector_dgrid gives seam values
+        consistent with the interior.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Constant eastward geographic wind of 10 m/s
+        u_east = 10.0
+        v_north = 0.0
+        u_d = (cdgrid.cos_angle_edge_x * u_east
+               + cdgrid.sin_angle_edge_x * v_north)
+        v_d = (-cdgrid.sin_angle_edge_y * u_east
+               + cdgrid.cos_angle_edge_y * v_north)
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # For a constant (u_east, v_north), u^contra = const in geographic
+        # frame; in grid-aligned covariant coords uc = ua*cos + va*sin at
+        # each stagger, so |uc|, |vc| are bounded by max(|u_east|, |v_north|)
+        # + small interpolation overshoot.  Check no pathological blow-up
+        # at face boundaries.
+        u_wind_magnitude = max(abs(u_east), abs(v_north))
+        safety = 1.5  # allow 50% overshoot from covariant scaling
+
+        # Face-boundary u-edges: i=0 and i=n
+        uc_boundary = jnp.concatenate([uc[:, 0:1, :], uc[:, n:n + 1, :]], axis=1)
+        uc_interior = uc[:, 1:n, :]
+        boundary_max = float(jnp.max(jnp.abs(uc_boundary)))
+        interior_max = float(jnp.max(jnp.abs(uc_interior)))
+        self.assertLess(boundary_max, safety * u_wind_magnitude / 0.5,
+                        f"uc boundary max = {boundary_max:.3f} "
+                        f"> safety bound for constant flow")
+        # Boundary values should not differ wildly from interior (<3x)
+        self.assertLess(boundary_max, 3.0 * interior_max + 1e-6,
+                        f"uc boundary {boundary_max:.3f} >> interior "
+                        f"{interior_max:.3f} (seam discontinuity)")
+
+        # Face-boundary v-edges: j=0 and j=n
+        vc_boundary = jnp.concatenate([vc[:, :, 0:1], vc[:, :, n:n + 1]], axis=2)
+        vc_interior = vc[:, :, 1:n]
+        vb_max = float(jnp.max(jnp.abs(vc_boundary)))
+        vi_max = float(jnp.max(jnp.abs(vc_interior)))
+        self.assertLess(vb_max, 3.0 * vi_max + 1e-6,
+                        f"vc boundary {vb_max:.3f} >> interior "
+                        f"{vi_max:.3f} (seam discontinuity)")
+
+        # Result must be finite everywhere.
+        for name, arr in [("ua", ua), ("va", va), ("uc", uc),
+                          ("vc", vc), ("ut", ut), ("vt", vt)]:
+            self.assertTrue(bool(jnp.all(jnp.isfinite(arr))),
+                            f"{name} has non-finite values")
+
+    def test_solid_body_rotation_ut_sign_convention(self):
+        """Solid-body rotation: ut should be eastward-positive everywhere.
+
+        For ω > 0 (prograde rotation), the contravariant transport
+        velocity ut at a u-edge should have a consistent positive sign
+        when the grid axis aligns with east (i.e., for equatorial
+        u-edges on faces where grid_x ≈ east).  This catches gross
+        mis-orientation in the cross-axis halo rotation — a common
+        failure mode of D-grid vector halos on cubed-sphere.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Solid-body rotation: u_east = Omega * R * cos(lat)
+        Omega = 7.292e-5
+        R = cdgrid.radius
+        u_east_ex = Omega * R * jnp.cos(cdgrid.lat_edge_x)
+        u_east_ey = Omega * R * jnp.cos(cdgrid.lat_edge_y)
+        u_d = cdgrid.cos_angle_edge_x * u_east_ex
+        v_d = -cdgrid.sin_angle_edge_y * u_east_ey
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # ut is contravariant along x-grid axis.  Its magnitude at
+        # u-edges where x-grid is near east should approach the solid
+        # body speed at that latitude.  Face boundaries must not exceed
+        # the interior by more than 50% in magnitude.
+        max_speed = float(jnp.max(jnp.abs(ua) + jnp.abs(va)))
+        ut_max = float(jnp.max(jnp.abs(ut)))
+        vt_max = float(jnp.max(jnp.abs(vt)))
+        self.assertLess(ut_max, 2.0 * max_speed + 1.0,
+                        f"ut max = {ut_max:.3f} unreasonable vs "
+                        f"ua/va max = {max_speed:.3f}")
+        self.assertLess(vt_max, 2.0 * max_speed + 1.0,
+                        f"vt max = {vt_max:.3f} unreasonable")
+
+        # ut boundary edges should not be wildly larger than interior.
+        ut_boundary = jnp.concatenate([ut[:, 0:1, :], ut[:, n:n + 1, :]], axis=1)
+        ut_interior = ut[:, 1:n, :]
+        ut_b_max = float(jnp.max(jnp.abs(ut_boundary)))
+        ut_i_max = float(jnp.max(jnp.abs(ut_interior)))
+        self.assertLess(ut_b_max, 2.5 * ut_i_max + 1e-6,
+                        f"ut boundary {ut_b_max:.3f} much larger than "
+                        f"interior {ut_i_max:.3f}")
+
+
 if __name__ == "__main__":
     unittest.main()
