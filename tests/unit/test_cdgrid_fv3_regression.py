@@ -615,5 +615,73 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
                         f"interior {ut_i_max:.3f}")
 
 
+class TestD2a2cVectNonDuogridBoundary(unittest.TestCase):
+    """Lock in Fortran-faithful face-boundary overrides in the non-duogrid
+    _d2a2c_vect branch (sw_core.F90:660-668, 677-684, 696-703, 714-721).
+
+    The Fortran overrides ut at face-boundary u-edges (i=is, i=ie+1) and
+    vt at face-boundary v-edges (j=js, j=je+1) by dividing uc/vc by
+    sin_sg at the upwind neighbour (cell-edge-local metric), using the
+    HALO cell's E/N edge for positive flow and the local cell's W/S edge
+    for negative flow.  Python replicates this via pad_halo'd sin_sg
+    followed by jnp.where upwind selection.
+    """
+
+    def test_face_boundary_ut_divides_uc_by_upwind_sin_sg(self):
+        """ut at i=0 and i=n equals uc / sin_sg(upwind) to machine
+        precision on a solid-body rotation state (non-duogrid path).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.grids.halo import pad_halo
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+
+        n = 12
+        # Non-duogrid path
+        grid = create_cubed_sphere(n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        u_d, v_d = _make_solid_body_edge(cdgrid)
+        _, _, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+
+        # Haloed sin_sg so the upwind cell index at i=0 reads from the
+        # neighbouring face (matches Fortran sin_sg(0,j,3) / sin_sg(1,j,1)
+        # pattern at the west face; analogous at the east face).
+        sin_east = cdgrid.sin_sg[:, :, :, 2]
+        sin_west = cdgrid.sin_sg[:, :, :, 0]
+        offsets = cdgrid.base.halo_interp_offsets
+        se_pad = pad_halo(sin_east, interp_offsets=offsets)
+        sw_pad = pad_halo(sin_west, interp_offsets=offsets)
+        eps = 1e-20
+
+        for i_bdy in (0, n):
+            sin_left = se_pad[:, i_bdy, 1:-1]
+            sin_right = sw_pad[:, i_bdy + 1, 1:-1]
+            sin_upwind = jnp.where(uc[:, i_bdy, :] > 0, sin_left, sin_right)
+            ut_expected = uc[:, i_bdy, :] / jnp.maximum(sin_upwind, eps)
+            rel = float(jnp.max(jnp.abs(ut[:, i_bdy, :] - ut_expected))
+                        / (jnp.max(jnp.abs(ut_expected)) + 1e-30))
+            self.assertLess(rel, 1e-12,
+                            f"ut[i={i_bdy}] deviates from uc/sin_sg(upwind) "
+                            f"by rel={rel:.2e} — Fortran sw_core.F90 "
+                            f"{'660-663' if i_bdy == 0 else '677-684'} override")
+
+        # Same check in the y-direction for vt.
+        sin_north = cdgrid.sin_sg[:, :, :, 3]
+        sin_south = cdgrid.sin_sg[:, :, :, 1]
+        sn_pad = pad_halo(sin_north, interp_offsets=offsets)
+        ss_pad = pad_halo(sin_south, interp_offsets=offsets)
+        for j_bdy in (0, n):
+            sin_below = sn_pad[:, 1:-1, j_bdy]
+            sin_above = ss_pad[:, 1:-1, j_bdy + 1]
+            sin_upwind = jnp.where(vc[:, :, j_bdy] > 0, sin_below, sin_above)
+            vt_expected = vc[:, :, j_bdy] / jnp.maximum(sin_upwind, eps)
+            rel = float(jnp.max(jnp.abs(vt[:, :, j_bdy] - vt_expected))
+                        / (jnp.max(jnp.abs(vt_expected)) + 1e-30))
+            self.assertLess(rel, 1e-12,
+                            f"vt[j={j_bdy}] deviates from vc/sin_sg(upwind) "
+                            f"by rel={rel:.2e} — Fortran sw_core.F90 "
+                            f"{'696-703' if j_bdy == 0 else '714-721'} override")
+
+
 if __name__ == "__main__":
     unittest.main()

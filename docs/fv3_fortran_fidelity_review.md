@@ -766,6 +766,21 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
   - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged).
   - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
 
+### Resolved in iteration 65 (2026-04-17): Ralph loop iteration 7
+- **Non-duogrid `_d2a2c_vect` face-boundary ut/vt override regression test added** ✅
+  - Verified by Codex that Python `src/legoesm/core/fv3_sw_core.py:534-539,590-595` already implements the Fortran sw_core.F90:660-668 (west), 677-684 (east), 696-703 (south), 714-721 (north) ut/vt sin_sg upwind override formula at face boundaries.
+  - New test `TestD2a2cVectNonDuogridBoundary.test_face_boundary_ut_divides_uc_by_upwind_sin_sg` locks in this correspondence at machine precision (rel<1e-12).
+  - No Python code change needed; adds a regression guard against future refactors drifting away from the Fortran formula.
+- **Validation**:
+  - 93 regression tests pass (92 baseline + 1 new).
+  - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged).
+
+### Remaining unresolved (updated 2026-04-17, iter 65):
+1. **W2 v-wind visual artifact** (Ralph prompt blocker): unchanged — architectural.
+2. **FB path stability on W2 C36**: unchanged — infrastructure.
+3. **d_sw3 scalar KE sync vs Fortran BGRID_NE component sync**: infrastructure (vector rotation across cube cross-axis seams).
+4. **Non-duogrid `_d2a2c_vect` 4-point vt adjacent-strip + corner 2x2 solve** (NEW formal item): Fortran sw_core.F90:670-725 recomputes vt at (0,j), (1,j), (npx-1,j), (npx,j) using a 4-point ut-average formula, and sw_core.F90:739-811 solves four 2x2 corner systems for ut/vt.  Python implements the SINGLE-point face-boundary override (ut(i=0,n) = uc/sin_sg_upwind) but NOT the adjacent-strip or corner-2x2 logic.  Affects the non-duogrid FB path only (experimental; production uses A-L and does not call _d2a2c_vect).  Not implemented this iteration — sizeable port, limited ROI given the FB path instability.
+
 ### Deferred from Codex iter-64 review:
 - **Finding #2 (d_sw3 `_ppm_transport_1d` non-duogrid edge repair)**: the Fortran ytp_v/xtp_u jord>=8 branch has explicit boundary `bl/br` rewrites, corner-state zeroing, and `pert_ppm(iv=-1)` at face-adjacent cells (sw_core.F90:3240-3317), but this block is gated on `(.not. bounded_domain .or. .not. duogrid_initialized)` — SKIPPED for duogrid.  Python's `_ppm_transport_1d` is only used inside `_bgrid_ke_transport` (d_sw3) which is itself only active via the FB path; for duogrid the Fortran edge repair is bypassed anyway.  Non-duogrid FB path is experimental and unstable regardless (see remaining item #2).  Documenting without implementation.
 - **Finding #3 (`cos_sg` midpoint geometry)**: Fortran `fv_grid_utils.F90:324-353` uses `mid_pt3_cart` for edges and `inner_prod(ec1,ec2)` at the A-grid centre; Python evaluates a centred-difference tangent field on a uniformly-spaced gnomonic supergrid.  Both approaches produce valid `cos_sg` metrics at the correct locations; empirically consistent at machine precision for rest states.  Not pursued — structural choice, not a formula bug.
