@@ -1331,7 +1331,7 @@ def _d_sw(h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
     sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v**2, _EPS))
 
     # v_d (6, n+1, n) is co-located with cosa_u — use directly as the
-    # cross-velocity at u-face positions (same approximation as _uc_to_ut).
+    # cross-velocity at u-face positions.
     v_at_u = v_d  # (6, n+1, n)
 
     # u_d (6, n, n+1) is co-located with cosa_v — use directly.
@@ -1491,61 +1491,6 @@ def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
     dp_x = dt2 * cdgrid.rdxc * (p_pad[:, :-1, 1:-1] - p_pad[:, 1:, 1:-1])
     dp_y = dt2 * cdgrid.rdyc * (p_pad[:, 1:-1, :-1] - p_pad[:, 1:-1, 1:])
     return dp_x, dp_y
-
-
-def _uc_to_ut(uc, vc, u_d, v_d, cdgrid):
-    """Convert updated C-grid covariant (uc, vc) to contravariant (ut, vt).
-
-    Uses metric correction at interior and sin_sg upwinding at face boundaries.
-
-    Parameters
-    ----------
-    uc : (6, n+1, n) — updated covariant C-grid u
-    vc : (6, n, n+1) — updated covariant C-grid v
-    u_d : (6, n, n+1) — D-grid x-wind (for metric correction)
-    v_d : (6, n+1, n) — D-grid y-wind (for metric correction)
-    cdgrid : CubedSphereCDGrid
-
-    Returns
-    -------
-    ut : (6, n+1, n) — contravariant transport u at C-grid x-faces
-    vt : (6, n, n+1) — contravariant transport v at C-grid y-faces
-    """
-    n = cdgrid.n
-    cosa_u = cdgrid.cosa_u     # (6, n+1, n)
-    rsin_u = cdgrid.rsin_u     # (6, n+1, n)
-    cosa_v = cdgrid.cosa_v     # (6, n, n+1)
-    rsin_v = cdgrid.rsin_v     # (6, n, n+1)
-
-    # v_d (6, n+1, n) has the same shape as cosa_u — use directly as
-    # the cross-velocity at u-face positions (co-located approximation,
-    # same as _d2a2c_vect line 167).  Similarly u_d (6, n, n+1) matches cosa_v.
-    ut = (uc - v_d * cosa_u) * rsin_u
-    vt = (vc - u_d * cosa_v) * rsin_v
-
-    # At edge_interpolate4 positions (i=1, n-1): ut = uc / sin_sg recovers
-    # the edge_interpolate4 result.  Face boundaries (i=0, n) keep the
-    # standard formula with cross-velocity (FV3 sw_core.F90:3595-3596).
-    sg = cdgrid.sin_sg
-    for i_bdy in [1, n - 1]:
-        i_left = max(i_bdy - 1, 0)
-        i_right = min(i_bdy, n - 1)
-        sin_left = sg[:, i_left, :, 2]
-        sin_right = sg[:, i_right, :, 0]
-        sin_upwind = jnp.where(uc[:, i_bdy, :] > 0, sin_left, sin_right)
-        ut = ut.at[:, i_bdy, :].set(
-            uc[:, i_bdy, :] / jnp.maximum(sin_upwind, _EPS))
-
-    for j_bdy in [1, n - 1]:
-        j_below = max(j_bdy - 1, 0)
-        j_above = min(j_bdy, n - 1)
-        sin_below = sg[:, :, j_below, 3]
-        sin_above = sg[:, :, j_above, 1]
-        sin_upwind = jnp.where(vc[:, :, j_bdy] > 0, sin_below, sin_above)
-        vt = vt.at[:, :, j_bdy].set(
-            vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
-
-    return ut, vt
 
 
 def _ppm_transport_1d(field, courant, rdelta, axis):
