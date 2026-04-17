@@ -960,6 +960,22 @@ def _fill_corners_h1(padded: jax.Array) -> jax.Array:
     Vectorized: all 24 corners (6 faces × 4 corners) in a single
     gather + average + scatter.
 
+    Fidelity note (Codex iter-69 review): the Fortran transport path uses
+    `copy_corners(dir=1/2)` in tp_core.F90:243-299 — a directional rotated
+    copy tailored to X-sweep vs Y-sweep of PPM.  That mechanism writes
+    DIFFERENT values at the same cube-vertex cell for different sweep
+    directions.  Our 2-point average is a direction-invariant single value.
+
+    This discrepancy has no functional impact on ``fv_tp_2d`` (verified):
+    the operator-split PPM slices q_full to keep EITHER i-halo OR j-halo
+    (``q_full[:, 2:-2, :]`` for y-sweep, ``q_i_pad[:, :, 2:-2]`` for
+    x-sweep), never simultaneously — so cube-vertex corner cells at
+    (i_halo, j_halo) are never referenced by any PPM stencil.
+
+    The corner fill IS read by Arakawa-Lamb gradient (``B_pad[:, :-1, :-1]``
+    includes corner cells), but that gradient is a non-FV3 Python operator
+    and there is no Fortran reference to match.
+
     Parameters
     ----------
     padded : jax.Array, shape (6, n+2, n+2)

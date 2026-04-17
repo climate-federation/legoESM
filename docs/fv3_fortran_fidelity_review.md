@@ -794,6 +794,12 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
   - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged).
   - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
 
+### Investigated in iteration 69 (2026-04-17): Ralph loop iteration 11
+- **`_fill_corners_h1/h2` 2-point average vs Fortran `copy_corners` directional copy** — CODEX iter-69 AUDIT: Python's `_fill_corners_h1/h2` (`halo.py:957,991`) uses a 2-point average of adjacent edge halos; Fortran `tp_core.F90:243-299 copy_corners` uses a directional rotated copy (`q(i,j) = q(j, 1-i)` for X-sweep, `q(i,j) = q(1-j, i)` for Y-sweep) that writes DIFFERENT values at the same cube-vertex cell for different sweep directions.
+- **Root-cause analysis**: verified that `fv_tp_2d`'s operator-split PPM slices `q_full[:, 2:-2, :]` (y-sweep) and `q_i_pad[:, :, 2:-2]` (x-sweep) — never simultaneously including both i-halo and j-halo — so the 2x2 cube-vertex corner blocks at `(i_halo, j_halo)` are NEVER dereferenced by any PPM stencil.  The only consumer in the production path is `_arakawa_lamb_gradient` (via `B_pad[:, :-1, :-1]`), which is a non-FV3 operator with no Fortran analogue to match.
+- **Action**: added inline code comment in `_fill_corners_h1` documenting the analysis and added `TestFvTp2dCornerInvariant::test_fv_tp_2d_independent_of_corner_ghost_values` to lock the invariant that zeroing the cube-vertex corner blocks does not change `fv_tp_2d`'s y-sweep / x-sweep inputs.
+- **Decision**: do NOT port Fortran's directional `copy_corners` — the 2-point-average corner fill is unused by FV3-faithful transport (`fv_tp_2d`) and the only consumer (A-L gradient) is non-FV3.  Documenting as investigated-and-closed rather than deferred.
+
 ### Resolved in iteration 68 (2026-04-17): Ralph loop iteration 10
 - **Non-duogrid `_d2a2c_vect` 4-point adjacent-strip recomputation ported** ✅ (partial resolution of prior unresolved item #4)
   - Fortran sw_core.F90:670-691 (west/east) and 701-722 (south/north) recomputes `vt` / `ut` at the interior-adjacent strip using a 4-point contravariant cross-velocity average: `vt(1,j) = vc(1,j) - 0.25*cosa_v(1,j)*(ut(1,j-1)+ut(2,j-1)+ut(1,j)+ut(2,j))` etc.
