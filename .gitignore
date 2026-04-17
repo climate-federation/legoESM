@@ -32,3 +32,4 @@ wandb/
 .claude/worktrees/agent-a5afdce4/
 ralph-claude-code/
 ralph/
+.claude/ralph-loop.local.md

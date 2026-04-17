@@ -123,7 +123,64 @@ For each file in `ml/`, `sfno_s2s/`, and any `*_emulator.py`:
 
 ---
 
-## PASS 8: Import hygiene
+## PASS 8: Naming consistency
+
+Check that the same physical or configuration concept uses the **same name everywhere** — configs, model drivers, physics modules, diagnostics, and tests.
+
+1. **Config ↔ driver ↔ physics name alignment:** For each config NamedTuple field (e.g., `dt`, `nu_del4`, `n_levels`, `radiation_scheme`), grep for all places that concept is referenced. Flag cases where the same quantity has different names in different files (e.g., `nlev` vs `n_levels` vs `nz`, or `dt` vs `timestep` vs `delta_t`, or `c_d` vs `drag_coeff` vs `C_D`).
+2. **Function/class name consistency:** If two modules provide the same operation, they should use the same function name (e.g., `compute_tendency` everywhere, not `compute_tendency` in one and `get_tendency` in another).
+3. **NamedTuple field naming:** Check that fields referring to the same quantity across different NamedTuples use the same name (e.g., surface temperature should always be `t_sfc` or always `T_surface`, not both).
+4. **Unit/convention consistency in names:** Flag names that imply different units or conventions for the same quantity (e.g., `height_m` in one place and `height_km` in another, or `lon_deg` vs `lon_rad`).
+
+**Output:** Table with columns: `Concept | Name Variant 1 (file) | Name Variant 2 (file) | Recommended Name | Verdict`
+
+---
+
+## PASS 9: Constant hygiene
+
+Verify that **all physical constants** come from the canonical source (`constants.py`, `ocean/eos.py`) and are never redefined locally.
+
+1. Scan all `.py` files under `src/legoesm/` for hardcoded values matching known constants:
+   - `9.80616` or `9.81` (gravity)
+   - `287.04` or `287.0` (R_d)
+   - `461.5` (R_v)
+   - `1004.64` or `1004.0` or `1005.0` (c_pd)
+   - `2.5e6` or `2.501e6` (L_v)
+   - `273.15` (T_freeze, but NOT in `ocean/eos.py` where 271.35 is intentional)
+   - `7.292e-5` (Omega)
+   - `6.371e6` or `6.371229e6` (R_earth)
+   - `5.67e-8` (sigma_sb)
+   - Any other value defined in `constants.py`
+2. For each match, check whether it imports from `constants.py` or redefines the value locally.
+3. Flag any local redefinition as **DUPLICATE CONSTANT** — these must import from the canonical source.
+4. Check default parameter values in function signatures: `def foo(g=9.81)` should be `def foo(g=constants.g)`.
+5. Exception: NamedTuple config defaults may use literal floats with a comment referencing the canonical name (e.g., `# = constants.c_pd`). Verify the comment exists and the value matches.
+
+**Output:** Table with columns: `File:Line | Hardcoded Value | Canonical Name | Source | Verdict`
+
+---
+
+## PASS 10: Parameter modifiability
+
+Check that **all model parameters** (physics tuning knobs, numerical coefficients, thresholds) are exposed as configurable fields, not buried as magic numbers in function bodies.
+
+1. Scan physics modules (`atmosphere/physics/`, `ocean/physics/`, `land/`, `sea_ice/`) for hardcoded numerical coefficients inside function bodies:
+   - Tuning parameters (e.g., `0.1`, `0.5`, `1e-6` used as thresholds, relaxation times, mixing lengths, drag coefficients)
+   - Timescales (e.g., `3600.0`, `86400.0` used as relaxation or damping timescales)
+   - Dimensionless coefficients (e.g., von Kármán constant, critical Richardson number, Prandtl number)
+   - Clipping bounds (e.g., `jnp.clip(x, 0.0, 1.0)` where 0.0/1.0 are tunable)
+2. For each hardcoded parameter found, check whether:
+   a. It is a **universal constant** (π, gravity, etc.) → OK, should import from `constants.py`
+   b. It is a **tunable model parameter** → should be a field in the module's config NamedTuple with a default value
+   c. It is a **numerical safety guard** (e.g., `eps=1e-30` for division) → OK to hardcode
+3. Flag tunable parameters that are hardcoded in function bodies as **HARDCODED PARAM** — these should be lifted to config fields so they can be modified without editing source code.
+4. Check that existing config fields actually flow through to where they're used (not shadowed by a local hardcoded value).
+
+**Output:** Table with columns: `File:Line | Value | Purpose | Currently Configurable | Verdict`
+
+---
+
+## PASS 11: Import hygiene (was Pass 8)
 
 1. `python3.14 -c "import legoesm"` — check for circular import errors.
 2. Scan for `from X import *` (star imports) — these must be eliminated.
@@ -196,7 +253,7 @@ These are patterns the first audit revealed that should be checked in future pas
 
 8. **Flag script clusters that duplicate the same experiment.** During audit, look for groups of scripts that run the same experiment with near-identical setup logic (e.g., the `run_held_suarez_rrtmgp_*.py` cluster). Recommend consolidating into one script with CLI flags. Judge by reading the code, not by name similarity — a wrapper that delegates to another script is not a duplicate. Scripts that target different components, serve different roles (test matrix vs production vs benchmark), or are one-off diagnostics are not duplicates.
 9. **No test framework imports in library code.** In review mode, flag diffs that add `import pytest`, `from pytest`, `import unittest`, or `from unittest` to any file under `src/legoesm/`. In audit mode, scan for these patterns — currently the repo has zero matches, so any appearance is new slop. Do NOT flag: `assert` statements (legitimate preconditions), `if __name__` blocks (legitimate entrypoints), `argparse`, or `doctest` (lightweight and self-contained).
-10. **Minimize redundancy across the codebase.** This extends beyond Pass 3 duplicates: also flag redundant helper functions, repeated constant definitions, copy-pasted boilerplate across scripts/tests, and near-identical initialization sequences. The bar: if two pieces of code share >70% logic, one should call the other or both should call a shared function.
+10. **Minimize redundancy across the codebase.** (See also Pass 9 for constants specifically.) This extends beyond Pass 3 duplicates: also flag redundant helper functions, repeated constant definitions, copy-pasted boilerplate across scripts/tests, and near-identical initialization sequences. The bar: if two pieces of code share >70% logic, one should call the other or both should call a shared function.
 
 ## Resolved items (2026-03-27)
 

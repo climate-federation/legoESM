@@ -387,6 +387,88 @@ For each:
 
 ---
 
+# CATEGORY 11: Physics Parameter Accessibility — All Tunable Parameters Reachable by AD
+**File:** `tests/unit/test_diff_physics_params.py`
+
+Every physics parameterization has tunable parameters (drag coefficients, mixing lengths, relaxation timescales, critical thresholds, etc.). For parameter estimation and online learning, `jax.grad` must be able to reach all of them. This category verifies that.
+
+**Methodology:** For each parameterization, extract all config fields that are `float`-valued (these are the tunable parameters). Wrap the parameterization so that each parameter is a traced JAX value, not a static Python float. Compute `jax.grad` of a scalar loss w.r.t. each parameter individually. Assert the gradient is finite and non-zero.
+
+**11a) Held-Suarez parameters**
+- Parameters: `T_eq_pole`, `T_eq_equator`, `delta_T_y`, `delta_theta_z`, `k_a`, `k_s`, `k_f`, `sigma_b`, `p_ref`.
+- `loss(param) = sum(held_suarez_forcing(state, grid, sigma, **{name: param}).T.data**2)`.
+- Assert each parameter has non-zero gradient (each one affects the tendency).
+
+**11b) Gray radiation parameters**
+- Parameters: optical depth coefficients, emissivity, any tunable albedo.
+- Assert gradient w.r.t. each is finite and non-zero.
+
+**11c) Convection scheme parameters**
+- For each scheme (SBM, DCA, Kuo): extract config float fields.
+- Common: entrainment rate, detrainment rate, CAPE relaxation timescale, precipitation efficiency.
+- Assert gradient flows through each.
+
+**11d) Turbulence scheme parameters**
+- For Smagorinsky: `c_s` (Smagorinsky coefficient).
+- For Louis: stability function coefficients, mixing length parameters.
+- Assert gradient w.r.t. each is finite.
+
+**11e) Microphysics parameters**
+- For Kessler: autoconversion threshold (`q_c_crit`), collection efficiency, evaporation rate.
+- For Sundqvist: cloud-to-rain conversion timescale, critical humidity.
+- Assert gradient w.r.t. each is finite.
+
+**11f) Land model parameters**
+- Slab: heat capacity, albedo, bucket capacity, roughness length.
+- Multi-layer: hydraulic conductivity, thermal conductivity per layer, root distribution parameters.
+- Carbon/stomata: Vcmax25, g1 (stomatal slope), Q10 for respiration.
+- Assert gradient w.r.t. each is finite.
+
+**11g) Sea ice parameters**
+- Thermodynamic: ice conductivity, albedo (cold/warm), snow conductivity, ocean heat flux.
+- Dynamic: P_star (ice strength), e (yield curve eccentricity), C_d_ocean, C_d_atm.
+- Assert gradient w.r.t. each is finite.
+
+**11h) Coupler / bulk flux parameters**
+- COARE3: Charnock coefficient, gustiness parameter, roughness length limits.
+- Large-Yeager: transfer coefficient tables (if parametric).
+- Assert gradient w.r.t. each is finite.
+
+**11i) Ocean physics parameters**
+- Vertical mixing: background diffusivity, critical Richardson number, TKE parameters.
+- EOS: not tunable (physical), skip.
+- Bottom drag coefficient.
+- Assert gradient w.r.t. each is finite.
+
+**11j) RRTMGP parameters** (if applicable)
+- Gas absorption coefficients are table-based and typically non-differentiable.
+- Flag which radiation parameters are NOT reachable by AD — this is important for users to know.
+- If any parameters are differentiable (e.g., surface emissivity, aerosol optical depth scaling), verify them.
+
+**Pattern for testing:**
+```python
+def test_param_gradient(param_name, param_value, build_and_run_fn):
+    """Verify that jax.grad reaches a specific physics parameter."""
+    def loss(p):
+        result = build_and_run_fn(**{param_name: p})
+        return jnp.sum(result**2)
+    grad = jax.grad(loss)(jnp.array(param_value))
+    assert jnp.isfinite(grad), f"Gradient w.r.t. {param_name} is not finite"
+    assert grad != 0.0, f"Gradient w.r.t. {param_name} is zero — parameter is unreachable by AD"
+```
+
+**Key failure modes to watch for:**
+- Parameter used inside a Python `if` (not traced by JAX) → zero gradient. Fix: use `jnp.where` or pass as a traced argument.
+- Parameter used only in a non-differentiable op (`jnp.argmax`, integer indexing) → zero gradient. Flag as non-differentiable.
+- Parameter captured in closure but shadowed by a local hardcoded value → zero gradient. This is a bug.
+- Parameter flows through `lax.cond` but only on one branch → gradient is zero when the other branch is taken. Test both branches.
+
+**Output for each parameterization:** Table with columns: `Param Name | Default Value | Gradient | Finite | Non-Zero | Notes`
+
+If a parameter has zero gradient, investigate whether it's a genuine limitation (non-differentiable op) or a bug (shadowed, wrong branch, Python control flow). Mark genuine limitations with `# NON-DIFFERENTIABLE:` and bugs with `# BUG:`.
+
+---
+
 # Implementation Notes
 
 - **Helper function pattern**: Create a reusable `assert_gradient_ok(loss_fn, x0, name="")` that checks finiteness, non-zero fraction, and optionally prints stats.

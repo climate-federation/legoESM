@@ -35,8 +35,10 @@ def _pert_ppm(bl, br):
     da1 = bl - br
     da2 = da1 ** 2
     a6da = 3.0 * (bl + br) * da1
-    bl_out = jnp.where(a6da < -da2, -2.0 * br, bl)
-    br_out = jnp.where(a6da > da2, -2.0 * bl, br)
+    # Fortran: if a6da < -da2: ar = -2*al → br = -2*bl
+    #          if a6da >  da2: al = -2*ar → bl = -2*br
+    br_out = jnp.where(a6da < -da2, -2.0 * bl, br)
+    bl_out = jnp.where(a6da > da2, -2.0 * br, bl)
     bl_out = jnp.where(is_ext, 0.0, bl_out)
     br_out = jnp.where(is_ext, 0.0, br_out)
     return bl_out, br_out
@@ -218,10 +220,12 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
 
     # pert_ppm(iv=1) at face-boundary cells: extra monotonicity for cells
     # whose PPM stencil crosses a face boundary (halo-quality guard).
-    # Fortran gates these on (.not. bounded_domain .and. .not. duogrid)
-    # (tp_core.F90:612), but for our Python path the halo offsets provide
-    # the equivalent gating (when offsets are None, this code is never
-    # reached because all offsets are None for duogrid).
+    # Fortran gates on (.not. (bounded_domain .or. duogrid)) at tp_core.F90:612,
+    # but the Fortran has ng=3 MPI halo (proper cross-face at 3rd cell).
+    # We keep this unconditionally because _ppm_1d uses mode='edge' for the
+    # 3rd halo cell (line ~105), which is less accurate than the Fortran's
+    # MPI exchange.  The iv=1 constraint acts as a safety net against this
+    # edge-copied value affecting PPM reconstruction at face boundaries.
     for k in [0, 1, 2, -3, -2, -1]:
         bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
         bl = bl.at[:, k, :].set(bl_k)
