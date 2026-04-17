@@ -112,18 +112,26 @@ class TestMetricIdentities(unittest.TestCase):
         self.assertLess(max_err, 2e-7, f"cosa^2+sina^2 at corners: max err = {max_err:.2e}")
 
     def test_cosa_sina_identity_at_u_edges(self):
-        """cosa_u^2 + sina_u^2 ≈ 1 where sina_u = 1/rsin_u."""
+        """cosa_u^2 + sina_u^2 ≈ 1 where sina_u^2 = 1/rsin_u (FV3 convention).
+
+        Per Fortran fv_grid_utils.F90:509-518, FV3 stores `rsin_u = 1/sin^2`
+        at u-edges, so `sina_u^2 = 1/rsin_u` (NOT `sina_u = 1/rsin_u`).
+        Iter 1 switched legoESM to this FV3 convention.
+        """
         _, cdgrid = _make_grid_and_cdgrid(16)
-        sina_u = 1.0 / cdgrid.rsin_u
-        identity = cdgrid.cosa_u**2 + sina_u**2
+        sina_u_sq = 1.0 / cdgrid.rsin_u
+        identity = cdgrid.cosa_u**2 + sina_u_sq
         max_err = float(jnp.max(jnp.abs(identity - 1.0)))
         self.assertLess(max_err, 1e-6, f"cosa^2+sina^2 at u-edges: max err = {max_err:.2e}")
 
     def test_cosa_sina_identity_at_v_edges(self):
-        """cosa_v^2 + sina_v^2 ≈ 1 where sina_v = 1/rsin_v."""
+        """cosa_v^2 + sina_v^2 ≈ 1 where sina_v^2 = 1/rsin_v (FV3 convention).
+
+        See :meth:`test_cosa_sina_identity_at_u_edges` — same 1/sin^2 rule.
+        """
         _, cdgrid = _make_grid_and_cdgrid(16)
-        sina_v = 1.0 / cdgrid.rsin_v
-        identity = cdgrid.cosa_v**2 + sina_v**2
+        sina_v_sq = 1.0 / cdgrid.rsin_v
+        identity = cdgrid.cosa_v**2 + sina_v_sq
         max_err = float(jnp.max(jnp.abs(identity - 1.0)))
         self.assertLess(max_err, 1e-6, f"cosa^2+sina^2 at v-edges: max err = {max_err:.2e}")
 

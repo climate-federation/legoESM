@@ -766,6 +766,13 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
   - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged).
   - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
 
+### Resolved in iteration 66 (2026-04-17): Ralph loop iteration 8
+- **FV3 metric identity tests fixed** ✅
+  - `tests/unit/test_fv3_audit_harness.py::TestMetricIdentities::test_cosa_sina_identity_at_u_edges` and its `v_edges` counterpart asserted `cosa_u^2 + (1/rsin_u)^2 ≈ 1` — i.e. they assumed `sina_u = 1/rsin_u`.
+  - Iter-1 changed `rsin_u` / `rsin_v` to the FV3 `1/sin^2` convention (fv_grid_utils.F90:509-518), so `1/rsin_u = sina_u^2`, not `sina_u`.  The tests were never updated and had been silently failing.
+  - Updated both tests to use `sina_u_sq = 1/rsin_u` and assert `cosa_u^2 + sina_u_sq ≈ 1`, matching the FV3 convention.
+  - All 29 `test_fv3_audit_harness.py` tests now pass.
+
 ### Resolved in iteration 65 (2026-04-17): Ralph loop iteration 7
 - **Non-duogrid `_d2a2c_vect` face-boundary ut/vt override regression test added** ✅
   - Verified by Codex that Python `src/legoesm/core/fv3_sw_core.py:534-539,590-595` already implements the Fortran sw_core.F90:660-668 (west), 677-684 (east), 696-703 (south), 714-721 (north) ut/vt sin_sg upwind override formula at face boundaries.
