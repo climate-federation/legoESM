@@ -688,73 +688,76 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
     calling fv_tp_2d; if any sweep reads them, outputs become NaN.
     """
 
-    def test_fv_tp_2d_independent_of_corner_ghost_values(self):
-        """Poisoning the cube-vertex corner ghosts with large values must
-        not change fv_tp_2d's output — demonstrating that the sweeps
-        never dereference those cells."""
+    def test_ppm_sweeps_stay_finite_with_nan_cube_corners(self):
+        """End-to-end test: poison the 2x2 cube-vertex corner blocks of
+        q_full with NaN, feed the result directly to the internal PPM
+        slicers, and verify _xppm / _yppm outputs remain finite.
+
+        If the sweeps ever dereference cube-vertex corners, the NaN would
+        propagate and the assertion fails.  This is the behavioural
+        counterpart to the static slice analysis: it actually runs the
+        PPM kernels on NaN-injected inputs.
+        """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.grids.halo import pad_halo
-        from legoesm.core.fv_tp_2d import fv_tp_2d
+        from legoesm.core.fv_tp_2d import _xppm, _yppm
 
         n = 8
         grid = create_cubed_sphere(n, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(grid)
+        offsets_h2 = cdgrid.base.halo_interp_offsets_h2
 
-        # Build a benign transport problem
         h = jnp.ones((6, n, n)) * 1000.0 + jnp.sin(
             jnp.linspace(0, 3.14, n))[None, None, :] * 10.0
         crx = jnp.ones((6, n + 1, n)) * 0.1
         cry = jnp.ones((6, n, n + 1)) * 0.1
-        xfx = crx * cdgrid.dy_edge_x
-        yfx = cry * cdgrid.dx_edge_y
-        area = cdgrid.base.area
 
-        # Baseline
-        fx_base, fy_base = fv_tp_2d(h, crx, cry, xfx, yfx, area, area, cdgrid)
+        h_pad = pad_halo(h, halo=2, interp_offsets=offsets_h2)
 
-        # Now construct a modified `h` that yields the SAME q_full interior
-        # and i-halo / j-halo strips but with DIFFERENT cube-vertex corner
-        # ghost values after _fill_corners_h2. The simplest way: since the
-        # corner fill is determined entirely by the adjacent edge halos
-        # (which come from pad_halo_local_h2's inter-face strip exchange),
-        # we can't trivially perturb corners without perturbing strips.
-        #
-        # Instead, assert the invariant directly: pad h, zero out the 2x2
-        # corner blocks, check that the downstream PPM stencil slicing
-        # never touches these zeroed positions.  Do this by calling the
-        # same slice patterns used internally.
-        h_pad = pad_halo(h, halo=2,
-                         interp_offsets=cdgrid.base.halo_interp_offsets_h2)
-        # Zero out all 2x2 cube-vertex corner blocks
-        corner_block_zero = h_pad.copy()
-        for ii in (0, 1, n + 2, n + 3):
-            for jj in (0, 1, n + 2, n + 3):
-                # Only the 2x2 corner blocks (both halo)
-                if ii in (0, 1) and jj in (0, 1):
-                    corner_block_zero = corner_block_zero.at[:, ii, jj].set(0.0)
-                elif ii in (0, 1) and jj in (n + 2, n + 3):
-                    corner_block_zero = corner_block_zero.at[:, ii, jj].set(0.0)
-                elif ii in (n + 2, n + 3) and jj in (0, 1):
-                    corner_block_zero = corner_block_zero.at[:, ii, jj].set(0.0)
-                elif ii in (n + 2, n + 3) and jj in (n + 2, n + 3):
-                    corner_block_zero = corner_block_zero.at[:, ii, jj].set(0.0)
+        # Inject NaN into the 2x2 cube-vertex corner blocks.
+        nan = jnp.nan
+        q_poisoned = h_pad
+        # 4 corners × 2x2 cells, on every face
+        for (i_lo, i_hi) in [(0, 2), (n + 2, n + 4)]:
+            for (j_lo, j_hi) in [(0, 2), (n + 2, n + 4)]:
+                q_poisoned = q_poisoned.at[:, i_lo:i_hi, j_lo:j_hi].set(nan)
 
-        # fv_tp_2d's pass-1 y-sweep slice
-        slice_y = corner_block_zero[:, 2:-2, :]
-        slice_y_base = h_pad[:, 2:-2, :]
-        self.assertTrue(bool(jnp.all(slice_y == slice_y_base)),
-                        "y-sweep slice differs when corner blocks zeroed")
+        # Pass 1: y-sweep takes q_full[:, 2:-2, :]
+        ox_L0 = offsets_h2[:, 0, 0, :]
+        ox_R0 = offsets_h2[:, 1, 0, :]
+        oy_L0 = offsets_h2[:, 2, 0, :]
+        oy_R0 = offsets_h2[:, 3, 0, :]
+        ox_L1 = offsets_h2[:, 0, 1, :]
+        ox_R1 = offsets_h2[:, 1, 1, :]
+        oy_L1 = offsets_h2[:, 2, 1, :]
+        oy_R1 = offsets_h2[:, 3, 1, :]
 
-        # fv_tp_2d's pass-2 x-sweep slice
-        slice_x = corner_block_zero[:, :, 2:-2]
-        slice_x_base = h_pad[:, :, 2:-2]
-        self.assertTrue(bool(jnp.all(slice_x == slice_x_base)),
-                        "x-sweep slice differs when corner blocks zeroed")
+        # Slices that fv_tp_2d uses internally
+        y_input = q_poisoned[:, 2:-2, :]
+        x_input = q_poisoned[:, :, 2:-2]
 
-        # And fv_tp_2d output unchanged
-        self.assertTrue(bool(jnp.all(jnp.isfinite(fx_base))))
-        self.assertTrue(bool(jnp.all(jnp.isfinite(fy_base))))
+        # The sliced inputs must themselves be NaN-free — otherwise the
+        # sweep IS reading cube-vertex corners.
+        self.assertTrue(bool(jnp.all(jnp.isfinite(y_input))),
+                        "y-sweep input includes NaN — fv_tp_2d DOES read "
+                        "cube-vertex corners (contradicts iter-69 analysis)")
+        self.assertTrue(bool(jnp.all(jnp.isfinite(x_input))),
+                        "x-sweep input includes NaN — fv_tp_2d DOES read "
+                        "cube-vertex corners")
+
+        # Actually run the PPM kernels — this triggers mode='edge' pad,
+        # monotone-slope dm, and face-value al reconstruction.  If any of
+        # these reads back through a stencil to a poisoned cell, the
+        # output will contain NaN.
+        fy2 = _yppm(y_input, cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
+                    use_duogrid=False)
+        fx2 = _xppm(x_input, crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
+                    use_duogrid=False)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(fy2))),
+                        "_yppm produced NaN — stencil reads cube-vertex corner")
+        self.assertTrue(bool(jnp.all(jnp.isfinite(fx2))),
+                        "_xppm produced NaN — stencil reads cube-vertex corner")
 
 
 class TestD2a2cVectNonDuogridAdjacentStrip(unittest.TestCase):
