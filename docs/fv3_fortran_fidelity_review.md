@@ -736,11 +736,12 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
   - `_xppm`, `_yppm`, and `fv_tp_2d` propagate the flag.  `fv_tp_2d` determines it from `cdgrid.base.duogrid` the same way every other duogrid gate in `fv3_sw_core.py` does (`dg is not None and dg.ng >= 2`).
   - Prior iter-62 iv=1 "safety net" justification evaluated earlier applied to the OLD positions `[0, 1, 2, -3, -2, -1]` which included halo cells (index 0 = halo-1).  The corrected Fortran positions `[1, 2, 3, -4, -3, -2]` are all INTERIOR cells with real duogrid halo data, so the safety-net argument collapses; gating on duogrid is both faithful and safe.
   - Numerical impact at non-duogrid defaults: zero (gate bypassed).  Duogrid path now matches Fortran exactly.
-- **Validation**:
+- **Codex stop-time follow-up fix** ✅: the initial iter-63 commit disabled iv=1 based on `cdgrid.base.duogrid`, but `fv_tp_2d` was still calling `pad_halo(..., interp_offsets=offsets_h2)` WITHOUT the duogrid halo — i.e. the gate flipped on a flag that did not reflect actual halo quality. Follow-up commit switches `fv_tp_2d`'s three `pad_halo` calls to the canonical `operators_cdgrid._pad_halo_auto_h2` pattern: `interp_offsets=None, duogrid=dg` when duogrid active; `interp_offsets=offsets_h2, duogrid=None` otherwise. Now the iv=1 gate and the halo used line up — skipping iv=1 happens only when the full duogrid kinked-to-extended halo + corner fill is actually in effect.
+- **Validation (post-follow-up)**:
   - 92 regression tests pass.
-  - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged — test matrix uses non-duogrid production path).
+  - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged — test matrix uses non-duogrid production path, and the non-duogrid branch remains `interp_offsets=offsets_h2` as before).
   - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
-  - Direct duogrid-path invocation of `fv_tp_2d` verified to produce non-zero difference from non-duogrid path (confirms gate is live).
+  - Direct duogrid-path invocation of `fv_tp_2d` verified to produce non-zero difference from non-duogrid path.
 
 ### Investigated in iteration 62 but NOT implemented:
 - **Codex finding #2 (d_sw3 BGRID_NE component sync)**: the Fortran dyn_core.F90:969-1011 performs `mpp_get_boundary(..., gridtype=BGRID_NE)` on `ubb` (x-component) and `vbbtemp` (y-component) BEFORE forming KE.  Python currently syncs the scalar KE AFTER computation (matches Fortran's commented-out alternative at dyn_core.F90:1029-1055).  Prior iter-36 attempt to implement BGRID_NE vector sync was REMOVED because it was not rotation-safe at cross-axis seams.  Full implementation would require replicating FMS `mpp_get_boundary` vector rotation semantics at cross-panel seams — infrastructure-level work.  Current scalar KE sync matches conservation goal.

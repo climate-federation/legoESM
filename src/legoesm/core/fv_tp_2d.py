@@ -434,8 +434,15 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     # Matches Fortran bounded_domain = (regional .or. nested .or. duogrid)
     # (fv_arrays.F90:1512).  The flag gates face-boundary specials in
     # tp_core.F90 and sw_core.F90 away from duogrid/bounded-domain paths.
+    #
+    # When duogrid is active we also switch `pad_halo` from interp_offsets
+    # mode to full duogrid mode so the halo quality that justifies the iv=1
+    # gate is actually delivered (mirrors the _pad_halo_auto_h2 pattern in
+    # operators_cdgrid.py).  pad_halo rejects both kwargs simultaneously.
     dg = grid.duogrid
     use_duogrid = dg is not None and dg.ng >= 2
+    halo_offsets = None if use_duogrid else offsets_h2
+    halo_dg = dg if use_duogrid else None
 
     # Extract boundary offsets for sweep directions
     # offsets_h2: (6, 4, 2, n) — [face, edge, depth, cell_along_edge]
@@ -449,7 +456,7 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     oy_L1 = offsets_h2[:, 2, 1, :]   # SOUTH depth=1
     oy_R1 = offsets_h2[:, 3, 1, :]   # NORTH depth=1
 
-    q_full = pad_halo(q, halo=2, interp_offsets=offsets_h2)
+    q_full = pad_halo(q, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
 
     # Pass 1: Y-sweep on q, X-sweep on cross-corrected q_i
     fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
@@ -458,7 +465,7 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
 
     # Proper halo exchange for q_i (required for mass conservation)
-    q_i_pad = pad_halo(q_i, halo=2, interp_offsets=offsets_h2)
+    q_i_pad = pad_halo(q_i, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
     fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
                 use_duogrid=use_duogrid)
 
@@ -469,7 +476,7 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
 
     # Proper halo exchange for q_j (required for mass conservation)
-    q_j_pad = pad_halo(q_j, halo=2, interp_offsets=offsets_h2)
+    q_j_pad = pad_halo(q_j, halo=2, interp_offsets=halo_offsets, duogrid=halo_dg)
     fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
                 use_duogrid=use_duogrid)
 
