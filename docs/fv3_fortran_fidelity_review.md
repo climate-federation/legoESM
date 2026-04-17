@@ -767,11 +767,18 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
   - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
 
 ### Resolved in iteration 66 (2026-04-17): Ralph loop iteration 8
-- **FV3 metric identity tests fixed** ✅
-  - `tests/unit/test_fv3_audit_harness.py::TestMetricIdentities::test_cosa_sina_identity_at_u_edges` and its `v_edges` counterpart asserted `cosa_u^2 + (1/rsin_u)^2 ≈ 1` — i.e. they assumed `sina_u = 1/rsin_u`.
-  - Iter-1 changed `rsin_u` / `rsin_v` to the FV3 `1/sin^2` convention (fv_grid_utils.F90:509-518), so `1/rsin_u = sina_u^2`, not `sina_u`.  The tests were never updated and had been silently failing.
-  - Updated both tests to use `sina_u_sq = 1/rsin_u` and assert `cosa_u^2 + sina_u_sq ≈ 1`, matching the FV3 convention.
-  - All 29 `test_fv3_audit_harness.py` tests now pass.
+- **rsin_u/rsin_v restored to Fortran-faithful mixed convention** ✅
+  - Codex stop-time review flagged that the iter-66 test fix encoded Python's repo-specific "1/sin² everywhere" behavior as if it were FV3.  In reality, Fortran `fv_grid_utils.F90:509,548-554` uses a MIXED convention:
+    - Interior u/v faces: `rsin_u = 1/sina_u²`
+    - Panel edges (i=1 or i=npx for rsin_u; j=1 or j=npy for rsin_v): `rsin_u = 1/sina_u` — ONLY when `.not. bounded_domain`
+  - Iter-17 had deliberately flattened this to `1/sin² everywhere` as a numerical-smoothness choice, but that is NOT Fortran-faithful.
+  - Restored the Fortran convention in `cubed_sphere_cdgrid.py:745-762`: apply the `1/sin` panel-edge override ONLY when `base.duogrid is None` (non-duogrid cubed sphere).  Matches Fortran `bounded_domain = (regional .or. nested .or. duogrid)` gating at fv_arrays.F90:1512.
+  - Metric regression tests updated to match the mixed convention (interior 1/sin², edges 1/sin) for non-duogrid, uniform 1/sin² for duogrid.
+- **All 29 `test_fv3_audit_harness.py` tests now pass** against the Fortran-faithful formulation.
+- **Validation after the restore**:
+  - 94 regression tests pass.
+  - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged — production path uses precomputed `grad_c00..c11` matrix, not `rsin_u` at face boundaries).
+  - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
 
 ### Resolved in iteration 65 (2026-04-17): Ralph loop iteration 7
 - **Non-duogrid `_d2a2c_vect` face-boundary ut/vt override regression test added** ✅

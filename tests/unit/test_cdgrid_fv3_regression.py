@@ -194,14 +194,69 @@ class TestFv3SwTendenciesBalancedResidual(unittest.TestCase):
 
 
 class TestMetricConsistency(unittest.TestCase):
-    """Test that rsin_u/rsin_v = 1/sin² everywhere (uniform, no edge override)."""
+    """Test rsin_u/rsin_v follow the FV3 mixed convention.
 
-    def test_rsin_u_uniform(self):
-        """rsin_u should be 1/sin² everywhere including face boundaries."""
+    Per Fortran fv_grid_utils.F90:509,548-554 (non-duogrid cubed sphere):
+      - Interior u/v faces: rsin_u = 1/sina_u²
+      - Panel edges (i=0/i=n for rsin_u, j=0/j=n for rsin_v):
+        rsin_u = 1/sina_u (override gated on .not. bounded_domain).
+    Duogrid/bounded-domain grids use 1/sin² everywhere (no edge override).
+    """
+
+    def test_rsin_u_nonduogrid_fv3_mixed(self):
+        """rsin_u: 1/sin² interior; 1/sin at i=0, i=n (non-duogrid)."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 
-        grid = create_cubed_sphere(16)
+        grid = create_cubed_sphere(16, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        n = cdgrid.n
+        _EPS = float(jnp.finfo(jnp.float32).eps)
+
+        sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, _EPS))
+        # Interior: 1/sin²
+        rsin_int_expected = 1.0 / jnp.maximum(sina_u[:, 1:n, :]**2, _EPS)
+        diff_int = float(jnp.max(jnp.abs(
+            cdgrid.rsin_u[:, 1:n, :] - rsin_int_expected)))
+        self.assertLess(diff_int, 1e-6,
+                        f"rsin_u interior not 1/sin²: max diff = {diff_int:.2e}")
+        # Panel edges: 1/sin
+        for i in (0, n):
+            rsin_edge_expected = 1.0 / jnp.maximum(jnp.abs(sina_u[:, i, :]), _EPS)
+            diff_edge = float(jnp.max(jnp.abs(
+                cdgrid.rsin_u[:, i, :] - rsin_edge_expected)))
+            self.assertLess(diff_edge, 1e-6,
+                            f"rsin_u i={i} not 1/sin: max diff = {diff_edge:.2e}")
+
+    def test_rsin_v_nonduogrid_fv3_mixed(self):
+        """rsin_v: 1/sin² interior; 1/sin at j=0, j=n (non-duogrid)."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        grid = create_cubed_sphere(16, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        n = cdgrid.n
+        _EPS = float(jnp.finfo(jnp.float32).eps)
+
+        sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
+        rsin_int_expected = 1.0 / jnp.maximum(sina_v[:, :, 1:n]**2, _EPS)
+        diff_int = float(jnp.max(jnp.abs(
+            cdgrid.rsin_v[:, :, 1:n] - rsin_int_expected)))
+        self.assertLess(diff_int, 1e-6,
+                        f"rsin_v interior not 1/sin²: max diff = {diff_int:.2e}")
+        for j in (0, n):
+            rsin_edge_expected = 1.0 / jnp.maximum(jnp.abs(sina_v[:, :, j]), _EPS)
+            diff_edge = float(jnp.max(jnp.abs(
+                cdgrid.rsin_v[:, :, j] - rsin_edge_expected)))
+            self.assertLess(diff_edge, 1e-6,
+                            f"rsin_v j={j} not 1/sin: max diff = {diff_edge:.2e}")
+
+    def test_rsin_u_duogrid_uniform_1_over_sin2(self):
+        """Duogrid: rsin_u = 1/sin² everywhere (no panel-edge override)."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        grid = create_cubed_sphere(16, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         _EPS = float(jnp.finfo(jnp.float32).eps)
 
@@ -209,22 +264,7 @@ class TestMetricConsistency(unittest.TestCase):
         expected = 1.0 / jnp.maximum(sina_u**2, _EPS)
         max_diff = float(jnp.max(jnp.abs(cdgrid.rsin_u - expected)))
         self.assertLess(max_diff, 1e-6,
-                        f"rsin_u not uniform 1/sin²: max diff = {max_diff:.2e}")
-
-    def test_rsin_v_uniform(self):
-        """rsin_v should be 1/sin² everywhere including face boundaries."""
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-
-        grid = create_cubed_sphere(16)
-        cdgrid = create_cubed_sphere_cdgrid(grid)
-        _EPS = float(jnp.finfo(jnp.float32).eps)
-
-        sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
-        expected = 1.0 / jnp.maximum(sina_v**2, _EPS)
-        max_diff = float(jnp.max(jnp.abs(cdgrid.rsin_v - expected)))
-        self.assertLess(max_diff, 1e-6,
-                        f"rsin_v not uniform 1/sin²: max diff = {max_diff:.2e}")
+                        f"duogrid rsin_u not uniform 1/sin²: max diff = {max_diff:.2e}")
 
     def test_rarea_c_positive(self):
         """rarea_c should be positive everywhere."""

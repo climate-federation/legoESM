@@ -79,8 +79,8 @@ class CubedSphereCDGrid(NamedTuple):
     rsin2_corner: jax.Array  # (6, n+1, n+1) 1/sin²(angle) for gradient correction
     cosa_u: jax.Array        # (6, n+1, n) non-orthogonality at u-interfaces
     cosa_v: jax.Array        # (6, n, n+1) non-orthogonality at v-interfaces
-    rsin_u: jax.Array        # (6, n+1, n) 1/sin² everywhere (uniform, no edge override)
-    rsin_v: jax.Array        # (6, n, n+1) 1/sin² everywhere (uniform, no edge override)
+    rsin_u: jax.Array        # (6, n+1, n) 1/sin² interior; 1/sin at panel edges (non-duogrid)
+    rsin_v: jax.Array        # (6, n, n+1) 1/sin² interior; 1/sin at panel edges (non-duogrid)
     # --- FV3 edge-midpoint D-grid metrics ---
     # Edge-midpoint positions
     lon_edge_x: jax.Array    # (6, n, n+1) lon at x-edge midpoints
@@ -742,14 +742,25 @@ def create_cubed_sphere_cdgrid(
         sin_sg_S[:, :, :1], sina_v_int, sin_sg_N[:, :, -1:]
     ], axis=2)
 
-    # rsin_u/rsin_v: 1/sin² EVERYWHERE (uniform — no edge override).
-    # FV3 overrides edges with 1/sin (fv_grid_utils.F90:548-554), but
-    # this creates a ~5% metric discontinuity at face boundaries that
-    # causes visible edge artifacts.  The duogrid path and the c_sw
-    # vorticity flux use /sina (not rsin_u) at boundaries anyway, so
-    # the edge override serves no purpose for the active code paths.
+    # rsin_u/rsin_v follow FV3 fv_grid_utils.F90:509-561:
+    #   - Interior u/v faces: rsin_u = 1/sina_u² (line 509, 517)
+    #   - Panel edges (i=1 or i=npx for rsin_u; j=1 or j=npy for rsin_v):
+    #     rsin_u = 1/sina_u (lines 548-561) — ONLY when .not. bounded_domain
+    #     (i.e. non-duogrid; for duogrid/bounded_domain the interior 1/sin²
+    #     formula applies everywhere).
+    # Gating matches Fortran bounded_domain = (regional .or. nested .or.
+    # duogrid) at fv_arrays.F90:1512.
     rsin_u = 1.0 / jnp.maximum(sina_u**2, _EPS)
     rsin_v = 1.0 / jnp.maximum(sina_v**2, _EPS)
+    if base.duogrid is None:
+        # Panel-edge override: replace 1/sin² with 1/sin at i==0 and i==n
+        # for rsin_u, and j==0 and j==n for rsin_v.
+        rsin_u_edge = 1.0 / jnp.sign(sina_u) / jnp.maximum(jnp.abs(sina_u), _EPS)
+        rsin_u = rsin_u.at[:, 0, :].set(rsin_u_edge[:, 0, :])
+        rsin_u = rsin_u.at[:, -1, :].set(rsin_u_edge[:, -1, :])
+        rsin_v_edge = 1.0 / jnp.sign(sina_v) / jnp.maximum(jnp.abs(sina_v), _EPS)
+        rsin_v = rsin_v.at[:, :, 0].set(rsin_v_edge[:, :, 0])
+        rsin_v = rsin_v.at[:, :, -1].set(rsin_v_edge[:, :, -1])
 
     # ------------------------------------------------------------------
     # FV3 edge-midpoint D-grid metrics
