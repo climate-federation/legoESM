@@ -893,6 +893,94 @@ class TestSupergridMetrics(unittest.TestCase):
             msg=f"rdxa/rdya at face 0 centre = {ratio:.4f}, "
                 f"expected ≈ 1.0")
 
+    def test_rdxa_is_i_direction_and_rdya_is_j_direction(self):
+        """Distinguish x vs y: catch a swap where rdxa accidentally
+        encodes the j-direction width.
+
+        On face 4 (+z, north-pole face), the cubed-sphere gnomonic
+        projection distorts dxa and dya asymmetrically when we look at
+        cells far from face 4's centre.  Compute the true physical cell
+        width in the i-direction (from adjacent cell centres in i) and
+        the j-direction (from adjacent cell centres in j); verify that
+        rdxa matches the i-direction reciprocal (NOT j) and rdya matches
+        the j-direction reciprocal (NOT i).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        n = 16
+        R = 6.371229e6
+        grid = create_cubed_sphere(n, radius=R, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Pick a cell with known-large asymmetry: face 5 (-z) near i=14 has
+        # ~20% difference between dxa and dya, enough to distinguish a swap.
+        f, ic, jc = 5, 14, 8
+        # Cell centre 3D positions from grid.{lon,lat}
+        x_cc = jnp.cos(grid.lat) * jnp.cos(grid.lon)
+        y_cc = jnp.cos(grid.lat) * jnp.sin(grid.lon)
+        z_cc = jnp.sin(grid.lat)
+
+        def great_circle(p0, p1):
+            dot = jnp.clip(p0[0]*p1[0] + p0[1]*p1[1] + p0[2]*p1[2],
+                           -1.0, 1.0)
+            return R * jnp.arccos(dot)
+
+        # i-direction width: half-distance between cells (ic-1, jc) and (ic+1, jc)
+        p_im1 = jnp.array([x_cc[f, ic-1, jc], y_cc[f, ic-1, jc],
+                           z_cc[f, ic-1, jc]])
+        p_ip1 = jnp.array([x_cc[f, ic+1, jc], y_cc[f, ic+1, jc],
+                           z_cc[f, ic+1, jc]])
+        dxa_physical = float(great_circle(p_im1, p_ip1) / 2.0)
+
+        # j-direction width: half-distance between cells (ic, jc-1) and (ic, jc+1)
+        p_jm1 = jnp.array([x_cc[f, ic, jc-1], y_cc[f, ic, jc-1],
+                           z_cc[f, ic, jc-1]])
+        p_jp1 = jnp.array([x_cc[f, ic, jc+1], y_cc[f, ic, jc+1],
+                           z_cc[f, ic, jc+1]])
+        dya_physical = float(great_circle(p_jm1, p_jp1) / 2.0)
+
+        dxa_stored = float(1.0 / cdgrid.rdxa[f, ic, jc])
+        dya_stored = float(1.0 / cdgrid.rdya[f, ic, jc])
+
+        # rdxa should encode i-direction width (within 15% — supergrid
+        # construction is not a pure centre-to-centre great-circle
+        # distance but the two agree to within this tolerance at off-
+        # centre cells).
+        ratio_ix = dxa_stored / dxa_physical
+        ratio_jy = dya_stored / dya_physical
+        # Cross ratios: if x/y were swapped
+        ratio_iy = dxa_stored / dya_physical
+        ratio_jx = dya_stored / dxa_physical
+
+        self.assertAlmostEqual(
+            ratio_ix, 1.0, delta=0.15,
+            msg=f"rdxa does not encode i-direction width at "
+                f"face {f} cell ({ic},{jc}): dxa_stored/dxa_physical = "
+                f"{ratio_ix:.4f}, expected ≈ 1.0")
+        self.assertAlmostEqual(
+            ratio_jy, 1.0, delta=0.15,
+            msg=f"rdya does not encode j-direction width: "
+                f"dya_stored/dya_physical = {ratio_jy:.4f}")
+
+        # Sanity: to catch a swap, dxa_physical and dya_physical must
+        # themselves DIFFER here.  If they happened to coincide, a
+        # swap would not be detectable.  Assert they differ by >5%.
+        asymmetry = abs(dxa_physical - dya_physical) / max(
+            dxa_physical, dya_physical)
+        self.assertGreater(
+            asymmetry, 0.05,
+            f"Test picked a symmetric cell (dxa≈dya phys, asym="
+            f"{asymmetry:.4f}); x/y swap would not be detectable.")
+
+        # And the wrong mapping must clearly fail the 15% bound.
+        swap_failure_x = abs(ratio_iy - 1.0)
+        swap_failure_y = abs(ratio_jx - 1.0)
+        self.assertGreater(
+            max(swap_failure_x, swap_failure_y), 0.15,
+            "x/y swap would still be within tolerance at this cell — "
+            "test does not meaningfully distinguish x from y here.")
+
 
 class TestD2a2cVectNonDuogridAdjacentStrip(unittest.TestCase):
     """Verify iter-68 4-point adjacent-strip recomputation.
