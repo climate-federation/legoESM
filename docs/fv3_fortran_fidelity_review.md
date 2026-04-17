@@ -634,9 +634,45 @@ Four items found, all resolved as non-bugs or documented limitations:
 - **W2 visual artifact at C36 persists** ⚠️: snapshots_v.png shows cube-face imprint with amplitude ~±0.5 m/s at t=1d. Production path A-L gradient architecture (non-FV3) is the structural root cause; FV3 oracle uses c_sw/d_sw chain (FB path) which is unstable here. Numerical norms pass: L2=1.53e-03, Linf=4.07e-03.
 - **Regressions**: 86 regression tests pass; 15 ocean rest state tests pass at machine precision.
 
-### Remaining unresolved (updated 2026-04-17, iter 59):
-1. **Cross-axis D-grid halo** (iter-58 deferred, confirmed necessary iter-59): implement i-axis halo for u_d (currently only j-axis via same-axis) and j-axis halo for v_d (currently only i-axis). This provides utmp with i-axis halo (for `uc`'s 4th-order A→C) and vtmp with j-axis halo (for `vc`). Options: (a) extend pad_halo_dgrid to cross-axis, (b) halo-exchange geographic u_east/v_north at staggered positions with per-edge rotation, or (c) leverage existing `ext_vector_dgrid` scaffolding. Expected benefit per iter-57 analysis: ~0.3% transport-velocity boundary asymmetry reduction. Does NOT fix W2 v-wind by itself (production path uses A-L, not FV3 c_sw/d_sw).
-2. **W2 v-wind visual artifact** (Ralph prompt blocker): architectural. Production path (A-L gradient) is not FV3-faithful. FB path IS FV3-faithful but unstable. No formula-level fix found in iter-57's exhaustive analysis. The fundamental options are (a) fix FB stability beyond halo widening, or (b) rewrite the production path around FV3's c_sw/d_sw chain.
+### Remaining unresolved (updated 2026-04-17, iter 60):
+1. **W2 v-wind visual artifact** (Ralph prompt blocker): architectural. Production path (A-L gradient) is not FV3-faithful. FB path IS FV3-faithful but unstable. No formula-level fix found in iter-57's exhaustive analysis. The fundamental options are (a) fix FB stability beyond halo widening, or (b) rewrite the production path around FV3's c_sw/d_sw chain.
+
+### Resolved in iteration 60 (2026-04-17): Ralph loop iteration 3
+- **Cross-axis D-grid halo implemented** ✅ (iter-59 deferred item 1)
+  - `_d2a2c_vect_duogrid` in `src/legoesm/core/fv3_sw_core.py:266-368` rewired to use `ext_vector_dgrid` (fv_duogrid.F90:741-826 equivalent) as the single halo source
+  - Produces u_d_full (6, n+2h, n+2h-1) and v_d_full (6, n+2h-1, n+2h) with halos in BOTH axes via c2l_ord2 + scalar lat/lon halo + cubed_a2d_halo
+  - Interior overwritten with exact original u_d/v_d (mirrors FV3 mpp_update_domains which only fills halos, leaving interior untouched)
+  - 4th-order D→A applied uniformly over the full-halo field → utmp_full at (full i-halo, j-interior) and vtmp_full at (i-interior, full j-halo)
+  - Single halo path replaces the prior hybrid of pad_halo_dgrid (same-axis) + pad_halo_vector (scalar A-grid halo on utmp/vtmp) — codex adversarial review flagged the hybrid as "no-ship" (stitching across metric-rich seams)
+- **Length-weighted c2l_ord2 formula** ✅
+  - 2-point D→A uses length-weighted average: `utmp = (u_j*dx_j + u_{j+1}*dx_{j+1}) / (dx_j + dx_{j+1})`
+  - `dx` at u_d stagger is `cdgrid.dx_edge_y` (shape matches u_d exactly); `dy` at v_d is `cdgrid.dy_edge_x`
+  - Drops FV3's leading factor of 2 (which Fortran compensates via a11/a22 with built-in 0.5 — our ext_vector_dgrid uses uncompensated convention)
+  - Constant-state preservation: for u_d=const, utmp = const (verified by `test_constant_covariant_input_preserved`)
+- **Seam regression tests added** ✅ (5 tests in `TestD2a2cVectDuogridSeams`):
+  1. `test_rest_state_machine_precision`: u_d=v_d=0 → all outputs ≤ 1e-12.
+  2. `test_constant_geographic_flow_face_continuity`: u_east=10 → boundary uc/vc bounded by 3x interior.
+  3. `test_constant_covariant_input_preserved`: u_d=v_d=5 uniform → ua, uc, vc, ut, vt bounded by (2.5-5)*c1 at face boundaries, catching factor-of-2 normalization bugs.
+  4. `test_solid_body_rotation_ut_sign_convention`: ut/vt magnitudes bounded by ua/va scale.
+  5. `test_seam_halo_consistent_jit_stable`: eager vs JIT parity at FP precision.
+- **Metric regressions (production path)**: UNCHANGED — `fv3_sw_tendencies` uses A-L gradient, not d2a2c_vect.
+  - Williamson 2: L2=1.53e-03, Linf=4.07e-03
+  - Williamson 5: mass drift=1.42e-05
+  - Cosine bell: L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01
+- **Ocean rest state**: all cubed-sphere variants machine precision.
+- **Tests**: 91 pass (86 baseline + 5 new seam tests).
+- **FB path W2 C36**: still unstable (architectural, c_sw first-order upwind mass error; iter-35 diagnosis).
+- **W2 v-wind snapshot**: cube-face imprint persists at C36 t=1d (architectural; production uses A-L, not FV3 c_sw/d_sw).
+
+### Codex adversarial review rounds (iter 60):
+Round 1: flagged stitched halo paths mixing pad_halo_dgrid + pad_halo_vector at seams. Fixed by unifying to single ext_vector_dgrid path.
+Round 2: flagged plain 0.5*(u+u) seed for ext_vector_dgrid as only matching c2l_ord2 in uniform-dx/dy limit. Fixed by adding length-weighted formula.
+Round 3: caught factor-of-2 doubling bug (`2*(...)/(...)` gives 2x for constant fields; FV3's factor compensated by a11=0.5, but our pipeline has no such compensation). Fixed by dropping leading 2.
+Round 4: noted test_constant_covariant sliced uc[:, 1:n, :] avoiding seams. Fixed by adding explicit face-boundary uc/vc/ut/vt assertions.
+
+### Remaining unresolved (updated 2026-04-17, iter 60):
+1. **W2 v-wind visual artifact** (Ralph prompt blocker): architectural. Production path (A-L gradient, `fv3_sw_tendencies`) is not FV3-faithful. FB path IS FV3-faithful but unstable for W2 at C36. No formula-level fix found in iter-57's exhaustive analysis. The fundamental options are (a) fix FB stability beyond halo widening, or (b) rewrite the production path around FV3's c_sw/d_sw chain.
+2. **FB path stability on W2 C36**: iter-35 identified c_sw first-order upwind mass redistribution as root cause (13.78 m/step at C16). Not fixable by halo improvements alone; would require a higher-order (PPM) transport in c_sw, which Fortran also has. Deferred — no adversarial findings remain at the operator formula level for duogrid d2a2c_vect.
 
 ### Session summary (2026-04-15): 10 commits
 1. FV3 operator fidelity: d2a2c_vect ut positions, vorticity flux boundaries, cell-centre vorticity in c_sw/csw, physical KE
