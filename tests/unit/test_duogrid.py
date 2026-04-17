@@ -617,3 +617,97 @@ class TestLagrangeCornerFill:
         padded = jnp.full((6, n_p, n_p), 2.0)
         result = fill_corner_region(padded, dg, halo)
         np.testing.assert_allclose(result, 2.0, atol=1e-10)
+
+
+# =========================================================================
+# T8: synchronize_cgrid_fluxes (Ralph-prompt critical duogrid constraint)
+# =========================================================================
+
+class TestSynchronizeCgridFluxes:
+    """Verify the duogrid CGRID flux sync:
+      sync'd boundary flux = 0.5 * (flux_from_face_A + flux_from_face_B)
+
+    Matches FV3 dyn_core.F90:853-900 mpp_get_boundary(..., gridtype=CGRID_NE)
+    followed by 0.5*(local + buffer) averaging at all 12 shared cube edges.
+    Ralph-prompt critical constraint #1.
+    """
+
+    def test_post_sync_all_12_edges_agree(self):
+        """After sync, every shared face boundary shows matching fx/fy
+        on both sides of each seam (with index reversal where required).
+        Covers all 24 (face, edge) pairs = 12 cube edges read both ways.
+        """
+        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        n = 8
+        # Random asymmetric fluxes so that initial boundaries disagree
+        rng = np.random.default_rng(42)
+        fx = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        fy = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+
+        fx_sync, fy_sync = synchronize_cgrid_fluxes(fx, fy, n)
+
+        for face in range(6):
+            for edge in (WEST, EAST, SOUTH, NORTH):
+                nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+                # Local boundary from the sync'd arrays
+                if edge == WEST:
+                    local = fx_sync[face, 0, :]
+                elif edge == EAST:
+                    local = fx_sync[face, n, :]
+                elif edge == SOUTH:
+                    local = fy_sync[face, :, 0]
+                else:
+                    local = fy_sync[face, :, n]
+                # Neighbour boundary (possibly from a cross-axis flux array)
+                if nbr_edge == WEST:
+                    nbr = fx_sync[nbr_face, 0, :]
+                elif nbr_edge == EAST:
+                    nbr = fx_sync[nbr_face, n, :]
+                elif nbr_edge == SOUTH:
+                    nbr = fy_sync[nbr_face, :, 0]
+                else:
+                    nbr = fy_sync[nbr_face, :, n]
+                if rev:
+                    nbr = nbr[::-1]
+                diff = float(jnp.max(jnp.abs(local - nbr)))
+                assert diff < 1e-12, (
+                    f"Post-sync disagreement at face={face} edge={edge} "
+                    f"(nbr face={nbr_face} edge={nbr_edge} rev={rev}): "
+                    f"max |local - nbr| = {diff:.2e}"
+                )
+
+    def test_sync_is_average_of_pre_sync(self):
+        """Verify the sync formula: sync'd = 0.5*(fx_A + fy_B_rotated) at
+        each shared seam, matching the FV3 mpp_get_boundary + 0.5*(A+B)
+        pattern.  Checked explicitly at face 0 WEST ↔ face 3 EAST
+        (same-axis) and face 1 SOUTH ↔ face 5 EAST (cross-axis + reversed).
+        """
+        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        n = 6
+        rng = np.random.default_rng(7)
+        fx = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        fy = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+
+        # Record pre-sync boundaries
+        pre_f0_W = fx[0, 0, :]
+        pre_f3_E = fx[3, n, :]
+        pre_f1_S = fy[1, :, 0]
+        pre_f5_E_rev = fx[5, n, :][::-1]
+
+        fx_sync, fy_sync = synchronize_cgrid_fluxes(fx, fy, n)
+
+        # Same-axis seam (face 0 WEST ↔ face 3 EAST, no reversal)
+        expect_f0_W = 0.5 * (pre_f0_W + pre_f3_E)
+        np.testing.assert_allclose(
+            fx_sync[0, 0, :], expect_f0_W, atol=1e-14)
+        np.testing.assert_allclose(
+            fx_sync[3, n, :], expect_f0_W, atol=1e-14)
+
+        # Cross-axis seam (face 1 SOUTH ↔ face 5 EAST, reversed).
+        # sync'd at face 1 S = 0.5*(fy[1,:,0] + fx[5,n,:][::-1])
+        expect_f1_S = 0.5 * (pre_f1_S + pre_f5_E_rev)
+        np.testing.assert_allclose(
+            fy_sync[1, :, 0], expect_f1_S, atol=1e-14)
+        # And the corresponding f5 E is the same sequence reversed
+        np.testing.assert_allclose(
+            fx_sync[5, n, :], expect_f1_S[::-1], atol=1e-14)
