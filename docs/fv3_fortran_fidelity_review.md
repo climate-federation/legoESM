@@ -723,7 +723,7 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
     - `d4_bg=0.16` (fv_arrays.F90:362)
     - `nord=1` (fv_arrays.F90:363)
     - `damp_v=0.0` (fv_arrays.F90:365, `vtdm4`)
-    - `nord_v=1` (derived at runtime in dyn_core.F90:757 as `min(2, nord)`)
+    - `nord_v=-1` (sentinel; `FV3FBShallowWaterModel.step` substitutes `min(2, nord)` at step time, honouring the Fortran runtime derivation in `dyn_core.F90:757,1258` rather than locking a fixed default)
   - `FV3FBShallowWaterModel.step` now forwards all 6 controls to `fv3_fb_sw_step` (previously forwarded only `div_damp`).
   - No numeric change at default settings (damp_v=0 → vorticity damping skipped; d2_bg=0 dddmp=0 → the `d4_bg` + `nord` path activates exactly as before).
 - **Stale Fortran line references updated** (Codex noted `:631/:651` should be `:629/:648`).

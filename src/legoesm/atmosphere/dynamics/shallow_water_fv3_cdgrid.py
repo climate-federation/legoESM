@@ -84,8 +84,10 @@ class CDGridShallowWaterConfig(NamedTuple):
     # FV3 d_sw6 vorticity damping (vtdm4, do_vort_damp in Fortran).
     damp_v: float = 0.0        # Vorticity damping coefficient
     # FV3 derives nord_v(k) = min(2, flagstruct%nord) at runtime
-    # (dyn_core.F90:757,1258).  With default nord=1 this is 1.
-    nord_v: int = 1            # Vorticity damping order
+    # (dyn_core.F90:757,1258).  Sentinel -1 means "auto-derive from nord";
+    # the FB wrapper substitutes min(2, nord) at step time to honour the
+    # Fortran convention instead of locking nord_v to a fixed default.
+    nord_v: int = -1           # Vorticity damping order (-1 = derive)
 
 
 # ==============================================================================
@@ -336,6 +338,12 @@ class FV3FBShallowWaterModel:
 
         state_c = cast_pytree(state, None, "compute")
 
+        # FV3 dyn_core.F90:757,1258 derives nord_v(k) = min(2, nord) at
+        # runtime when vorticity damping is active.  Honour that convention
+        # by substituting when the user left nord_v at sentinel -1.
+        nord_v = (min(2, self.config.nord) if self.config.nord_v < 0
+                  else self.config.nord_v)
+
         h_new, u_new, v_new = fv3_fb_sw_step(
             state_c.h, state_c.u_d, state_c.v_d, state_c.h_s,
             self.cdgrid, dt, g=self.config.g,
@@ -345,7 +353,7 @@ class FV3FBShallowWaterModel:
             d4_bg=self.config.d4_bg,
             nord=self.config.nord,
             damp_v=self.config.damp_v,
-            nord_v=self.config.nord_v,
+            nord_v=nord_v,
         )
 
         state_new = FV3EdgeShallowWaterState(
