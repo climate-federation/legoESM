@@ -442,6 +442,10 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
         average (u_d*dx_j + u_d*dx_{j+1}) / (dx_j + dx_{j+1}) reduces to
         c1 exactly.  The resulting contravariant ua then depends on
         non-orthogonality but is bounded by the covariant value.
+
+        This test also checks FACE-BOUNDARY uc/vc/ut/vt values, since
+        the halo seed affects seam outputs specifically (interior is
+        overwritten with exact u_d/v_d post-halo).
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -460,10 +464,10 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
 
         # utmp at interior cells equals c1 by length-weighted average.
         # Contravariant ua = (utmp - vtmp * cos_theta) * rsin2 =
-        # c1 * (1 - cos_theta) * rsin2 = c1 * (1 - cos_theta) / sin²θ
-        # = c1 / (1 + cos_theta).  Bounded by c1 / min(1 + cos_theta).
-        # For reasonable cubed-sphere angles, cos_theta in [-0.5, 0.5],
-        # so ua bounded by c1 * 2 = 10.
+        # c1 * (1 - cos_theta) / sin²θ = c1 / (1 + cos_theta).  For
+        # cubed-sphere interior |cos_theta| < 0.5, so ua in [c1/1.5, c1/0.5]
+        # = [3.33, 10] for c1=5.  Loose upper bound 3*c1=15 catches the
+        # factor-of-2 bug (which gave ua up to 2*c1/min(1+cos)=~20).
         ua_max = float(jnp.max(jnp.abs(ua)))
         self.assertLess(ua_max, 3.0 * abs(c1),
                         f"ua max {ua_max:.3f} >> 3*c1 ({3*abs(c1):.3f}) "
@@ -478,6 +482,38 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
                         f"uc interior {uc_max_int:.3f} deviates from "
                         f"expected ~{abs(c1):.3f} by > 50% "
                         f"— constant-state not preserved")
+
+        # FACE-BOUNDARY outputs: uc at i=0 and i=n (the u-edges that sit
+        # exactly on face seams).  For constant u_d=c1, uc at face
+        # boundary should be close to c1 (4th-order Lagrange reproduces
+        # constants IF the halo is correctly populated).
+        uc_bdy_w = uc[:, 0, :]      # west face u-edge
+        uc_bdy_e = uc[:, n, :]      # east face u-edge
+        for name, arr in [("uc_west", uc_bdy_w), ("uc_east", uc_bdy_e)]:
+            a_max = float(jnp.max(jnp.abs(arr)))
+            # Should be bounded by ~c1 × (1 + overshoot from halo projection
+            # through non-orthogonal metrics).  2*c1 is generous; fails if
+            # halo seed is doubled.
+            self.assertLess(a_max, 2.5 * abs(c1),
+                            f"{name} max {a_max:.3f} > 2.5*c1 "
+                            f"({2.5*abs(c1):.3f}) — halo doubling?")
+
+        vc_bdy_s = vc[:, :, 0]
+        vc_bdy_n = vc[:, :, n]
+        for name, arr in [("vc_south", vc_bdy_s), ("vc_north", vc_bdy_n)]:
+            a_max = float(jnp.max(jnp.abs(arr)))
+            self.assertLess(a_max, 2.5 * abs(c1),
+                            f"{name} max {a_max:.3f} > 2.5*c1 "
+                            f"({2.5*abs(c1):.3f}) — halo doubling?")
+
+        # Contravariant transport: ut, vt bounded similarly (they are
+        # post-rotation of uc/vc with rsin_u, rsin_v factors).
+        ut_bdy = jnp.concatenate([ut[:, 0:1, :], ut[:, n:n + 1, :]], axis=1)
+        vt_bdy = jnp.concatenate([vt[:, :, 0:1], vt[:, :, n:n + 1]], axis=2)
+        self.assertLess(float(jnp.max(jnp.abs(ut_bdy))), 5.0 * abs(c1),
+                        "ut boundary unreasonably large")
+        self.assertLess(float(jnp.max(jnp.abs(vt_bdy))), 5.0 * abs(c1),
+                        "vt boundary unreasonably large")
 
     def test_solid_body_rotation_ut_sign_convention(self):
         """Solid-body rotation: ut should be eastward-positive everywhere.
