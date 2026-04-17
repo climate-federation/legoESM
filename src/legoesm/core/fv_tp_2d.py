@@ -218,15 +218,20 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
     bl, br = _pert_ppm_iv0(q_c, bl, br)
 
-    # pert_ppm(iv=1) at face-boundary cells: extra monotonicity for cells
-    # whose PPM stencil crosses a face boundary (halo-quality guard).
-    # Fortran gates on (.not. (bounded_domain .or. duogrid)) at tp_core.F90:612,
+    # pert_ppm(iv=1) at face-boundary INTERIOR cells: extra monotonicity for
+    # the three cells whose PPM stencil crosses a face boundary.
+    # Fortran tp_core.F90:629 calls pert_ppm iv=1 at interior cells 0,1,2 on
+    # the left side and tp_core.F90:648 at npx-3,npx-2,npx-1 on the right
+    # (NOT halo cells).
+    # Fortran gates this on (.not. (bounded_domain .or. duogrid)) at line 612,
     # but the Fortran has ng=3 MPI halo (proper cross-face at 3rd cell).
-    # We keep this unconditionally because _ppm_1d uses mode='edge' for the
-    # 3rd halo cell (line ~105), which is less accurate than the Fortran's
-    # MPI exchange.  The iv=1 constraint acts as a safety net against this
-    # edge-copied value affecting PPM reconstruction at face boundaries.
-    for k in [0, 1, 2, -3, -2, -1]:
+    # We keep the iv=1 constraint unconditionally as a safety net because
+    # _ppm_1d uses mode='edge' for the 3rd halo cell (line ~107), which is
+    # less accurate than the Fortran's MPI exchange at ng=3.
+    # q_c shape is (n+2) with q_c[0] = halo-1, q_c[1..n] = interior 0..n-1,
+    # q_c[n+1] = halo n.  Fortran interior cells 0,1,2 → q_c indices 1,2,3;
+    # Fortran interior n-3,n-2,n-1 → q_c indices n-2,n-1,n.
+    for k in [1, 2, 3, -4, -3, -2]:
         bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
         bl = bl.at[:, k, :].set(bl_k)
         br = br.at[:, k, :].set(br_k)

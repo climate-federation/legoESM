@@ -75,6 +75,18 @@ class CDGridShallowWaterConfig(NamedTuple):
     use_experimental_csw: bool = False  # EXPERIMENTAL: C-grid tendencies via RK3 (NOT the FV3 forward-backward scheme). Known unstable.
     boundary_fix: bool = True  # Replace boundary corner tendencies with interior
 
+    # FV3 d_sw5 corner divergence damping knobs (fv_arrays.F90 defaults).
+    d2_bg: float = 0.0         # Background del-2 coefficient
+    dddmp: float = 0.0         # Adaptive Smagorinsky coefficient
+    d4_bg: float = 0.16        # Background del-4+ coefficient
+    nord: int = 1              # Damping order: 0=del-2, 1=del-4, 2=del-6
+
+    # FV3 d_sw6 vorticity damping (vtdm4, do_vort_damp in Fortran).
+    damp_v: float = 0.0        # Vorticity damping coefficient
+    # FV3 derives nord_v(k) = min(2, flagstruct%nord) at runtime
+    # (dyn_core.F90:757,1258).  With default nord=1 this is 1.
+    nord_v: int = 1            # Vorticity damping order
+
 
 # ==============================================================================
 # Tendencies
@@ -328,6 +340,12 @@ class FV3FBShallowWaterModel:
             state_c.h, state_c.u_d, state_c.v_d, state_c.h_s,
             self.cdgrid, dt, g=self.config.g,
             div_damp=self.config.div_damp,
+            d2_bg=self.config.d2_bg,
+            dddmp=self.config.dddmp,
+            d4_bg=self.config.d4_bg,
+            nord=self.config.nord,
+            damp_v=self.config.damp_v,
+            nord_v=self.config.nord_v,
         )
 
         state_new = FV3EdgeShallowWaterState(
