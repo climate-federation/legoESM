@@ -795,15 +795,14 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
   - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
 
 ### Resolved in iteration 74 (2026-04-17): Ralph loop iteration 16
-- **Planetary vorticity now added at corners via `f_corner`** ✅
+- **Planetary vorticity at corners via `f_corner` in `cdgrid_momentum_tendencies`** ✅ (one call path)
   - Prior code (`operators_cdgrid.py:1148`) computed `zeta_abs = zeta + cdgrid.base.f` at cell centres, then interpolated the SUM to corners: `zeta_corner = _interp_center_to_corner(zeta + f_cc)`.
   - Due to linearity of the 4-point interpolator this equals `interp(zeta) + interp(f_cc)`, and `interp(f_cc) ≠ f_corner` because `f = 2Ω sin(lat)` is nonlinear — the 4-point corner average of `sin(lat_cc)` deviates from `sin(lat_corner)` by an O(dx²) interpolation error.
   - FV3 stores `f0` directly at B-grid corners and computes absolute vorticity at corners as `vort + f0` (no interpolation of f).
-  - Updated (shallow-water branch only; 3D path unchanged): interpolate only ζ to corners, then add `cdgrid.f_corner = 2Ω sin(lat_corner)` directly.  Removes the sin(lat) interpolation error from Coriolis term.
-  - Numerical impact at test-matrix resolutions: W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 — all unchanged at reported precision (the fix is a correctness improvement of order O(dx²) in f, dominated by the A-L gradient architectural error).
-- **Validation**:
-  - 136 regression + audit tests pass.
-  - Ocean cross-grid rest state at machine precision.
+  - Updated `cdgrid_momentum_tendencies` (SW branch; callers: `CDGridShallowWaterModel`, `primitive_eq_cdgrid`): interpolate only ζ to corners, then add `cdgrid.f_corner = 2Ω sin(lat_corner)` directly.  Removes the sin(lat) interpolation error from Coriolis term.
+- **Codex stop-time follow-up** — the `FV3EdgeShallowWaterModel` production path actually calls `fv3_sw_tendencies`, NOT `cdgrid_momentum_tendencies`.  Investigated `fv3_sw_tendencies` at `operators_cdgrid.py:1458`: it uses `zeta_abs * v_cc` and `-zeta_abs * u_cc` with `zeta` and `v_cc` BOTH at cell centres — so the Coriolis and vorticity are already at the SAME stagger and `cdgrid.base.f` (cell-centre f) is the correct choice.  No interpolation of f happens there; an initial attempt to apply the iter-74 fix to this path was reverted because it introduced stagger inconsistency.  Added an inline comment explaining why the cell-centre f is correct here.
+- **Numerical impact**: W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 — unchanged at reported precision.  The iter-74 fix applies where f was being interpolated (corner-stagger tendency path); the production cell-centre tendency path never had the error.
+- **Validation**: 136 regression + audit tests pass; ocean cross-grid rest state at machine precision.
 
 ### Investigated in iteration 70 (2026-04-17): Ralph loop iteration 12
 - **`_deln_flux` missing direction-specific `copy_corners`** — CODEX iter-70 AUDIT: Fortran `tp_core.F90:1267,1280` calls `copy_corners(d2, npx, npy, 1, ...)` before `fx2` and `copy_corners(d2, npx, npy, 2, ...)` before `fy2` (with further calls inside the higher-order iteration at lines 1308, 1320).  Gated on `nord > 0`.  Python `_deln_flux` (`fv_tp_2d.py:402,412`) uses one generic `pad_halo(d2, ...)` for both directions.

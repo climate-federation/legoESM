@@ -1520,10 +1520,14 @@ def fv3_sw_tendencies(
     v_corner = 0.25 * (v_cc_pad[:, :-1, :-1] + v_cc_pad[:, 1:, :-1]
                         + v_cc_pad[:, :-1, 1:] + v_cc_pad[:, 1:, 1:])
 
-    # (f) Cell-centre vorticity from corner winds (consistent with gradient).
+    # (f) Absolute vorticity at CELL CENTRES (same stagger as the
+    # momentum tendency below — no f interpolation).  Uses f at cell
+    # centres directly.  Note: iter-74's cdgrid_momentum_tendencies fix
+    # (corner-based tendency) switched to cdgrid.f_corner precisely to
+    # avoid sin(lat) interp; here we stay at cell centres throughout so
+    # no interp of f is needed and cdgrid.base.f is the right choice.
     zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
     zeta_abs = zeta + cdgrid.base.f
-    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
 
     # (g) Momentum tendencies at CELL CENTRES (better geostrophic balance).
     # Computing both gradient and vorticity at the same stagger (cell centres)
