@@ -433,6 +433,55 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
                             f"{name} eager vs jit differ by {d:.3e} "
                             f"(scale {scale:.3e})")
 
+    def test_uniform_east_wind_ut_positive(self):
+        """Uniform eastward geographic wind should give ut > 0 on
+        face-0 equatorial u-edges (where x-grid axis is aligned with
+        east).  Catches sign-flip / orientation bugs at face boundaries
+        that a magnitude-only test would miss.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # u_east = +10 m/s (constant, physical east wind).  Project to
+        # D-grid via local edge angles.
+        u_east = 10.0
+        u_d = cdgrid.cos_angle_edge_x * u_east
+        v_d = -cdgrid.sin_angle_edge_y * u_east
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # On face 0 (equator-centred face in FV3 convention), the
+        # x-grid axis points approximately east at equatorial cells.
+        # u_east=+10 should give positive ut on face 0.
+        ut_face0_equator = ut[0, :, n // 2]  # (n+1,) u-edges on face 0, equator row
+        # Expect at least 80% of u-edges on face 0 equator to have
+        # ut > 0 (allowing some edge positions near face corners to
+        # rotate out of east alignment).
+        n_positive = int(jnp.sum(ut_face0_equator > 0))
+        self.assertGreater(n_positive, int(0.8 * (n + 1)),
+                           f"Only {n_positive}/{n + 1} ut values on "
+                           f"face 0 equator are positive — expected "
+                           f"most to be +east for u_east=+10. "
+                           f"(sign/orientation bug?)")
+
+        # Full cross-face seam: ut at face-0 east u-edge (i=n) and
+        # face-0+east-neighbor west u-edge should have the same sign
+        # (both positive for eastward flow).  On face 0, east neighbor
+        # is face 1 (FV3 standard connectivity).
+        ut_f0_east = float(jnp.mean(ut[0, n, :]))
+        ut_f1_west = float(jnp.mean(ut[1, 0, :]))
+        self.assertGreater(ut_f0_east, 0.0,
+                           f"ut face-0 east edge = {ut_f0_east:.3f} "
+                           f"should be positive (east wind)")
+        self.assertGreater(ut_f1_west, 0.0,
+                           f"ut face-1 west edge = {ut_f1_west:.3f} "
+                           f"should be positive (east wind, cross-face)")
+
     def test_constant_covariant_input_preserved(self):
         """Constant u_d, v_d fields should give utmp equal to that
         constant (after 2-point length-weighted D→A).  This catches
