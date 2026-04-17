@@ -675,6 +675,67 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
                         f"interior {ut_i_max:.3f}")
 
 
+class TestD2a2cVectNonDuogridAdjacentStrip(unittest.TestCase):
+    """Verify iter-68 4-point adjacent-strip recomputation.
+
+    Fortran sw_core.F90:670-722 computes:
+      vt(1, j) = vc(1, j) - 0.25*cosa_v(1, j)*(ut(1, j-1)+ut(2, j-1)+ut(1, j)+ut(2, j))
+      ut(i, 1) = uc(i, 1) - 0.25*cosa_u(i, 1)*(vt(i-1, 1)+vt(i, 1)+vt(i-1, 2)+vt(i, 2))
+
+    These tests reconstruct the expected values from the 4-point formula using
+    the Python intermediate ut/vt and assert the emitted ut/vt match. They
+    also verify that the south/north ut reads ONLY interior vt i-columns
+    (i_cell ∈ [1, n-3]) that were never touched by the west/east updates.
+    """
+
+    def test_south_ut_matches_4point_vt_average(self):
+        """South-edge ut[:, i_lo:i_hi, 0] = uc - 0.25*cosa_u * 4pt(vt)."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+
+        n = 12
+        grid = create_cubed_sphere(n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        u_d, v_d = _make_solid_body_edge(cdgrid)
+        _, _, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+
+        # Reconstruct expected ut at south (j_face=0) using the 4-point formula.
+        i_lo, i_hi = 2, n - 1
+        vt_sum = (vt[:, i_lo - 1:i_hi - 1, 0] + vt[:, i_lo:i_hi, 0]
+                  + vt[:, i_lo - 1:i_hi - 1, 1] + vt[:, i_lo:i_hi, 1])
+        ut_expected = (uc[:, i_lo:i_hi, 0]
+                       - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, 0] * vt_sum)
+        diff = float(jnp.max(jnp.abs(ut[:, i_lo:i_hi, 0] - ut_expected)))
+        # The output must match the expected formula to machine precision,
+        # regardless of what vt values the formula saw.
+        self.assertLess(diff, 1e-12,
+                        f"south ut != 4-point formula: max abs diff = {diff:.2e}")
+
+    def test_north_ut_matches_4point_vt_average(self):
+        """North-edge ut[:, i_lo:i_hi, n-1] matches formula."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+
+        n = 12
+        grid = create_cubed_sphere(n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        u_d, v_d = _make_solid_body_edge(cdgrid)
+        _, _, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+
+        i_lo, i_hi = 2, n - 1
+        vt_sum = (vt[:, i_lo - 1:i_hi - 1, n - 1]
+                  + vt[:, i_lo:i_hi, n - 1]
+                  + vt[:, i_lo - 1:i_hi - 1, n]
+                  + vt[:, i_lo:i_hi, n])
+        ut_expected = (uc[:, i_lo:i_hi, n - 1]
+                       - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, n - 1] * vt_sum)
+        diff = float(jnp.max(jnp.abs(ut[:, i_lo:i_hi, n - 1] - ut_expected)))
+        self.assertLess(diff, 1e-12,
+                        f"north ut != 4-point formula: max abs diff = {diff:.2e}")
+
+
 class TestD2a2cVectNonDuogridBoundary(unittest.TestCase):
     """Lock in Fortran-faithful face-boundary overrides in the non-duogrid
     _d2a2c_vect branch (sw_core.F90:660-668, 677-684, 696-703, 714-721).

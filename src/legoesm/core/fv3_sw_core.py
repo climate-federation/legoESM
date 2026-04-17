@@ -621,6 +621,16 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     # FV3 non-duogrid adjacent-strip ut recomputation (sw_core.F90:701-707,
     # 716-722). South (j=0) and north (j=n-1) boundary cells: recompute ut
     # using a 4-point vt average. Restricted to i_face in [2, n-2].
+    #
+    # Dependency-ordering note: the south block reads vt at i_cell ∈ [1, n-3]
+    # (matching Fortran's i_fortran-1 ∈ [2, npx-3]).  The WEST 4-point block
+    # above only writes vt at i_cell=0; the EAST block only writes vt at
+    # i_cell=n-1.  Neither overlaps the i_cell range read here, so the
+    # south/north blocks read interior (vc - u*cosa)*rsin_v values for
+    # j_face=1 and the j_bdy sin_sg-overridden values for j_face=0 — exactly
+    # what Fortran does.  The Fortran halo-column updates vt(0, j), vt(npx, j)
+    # have no functional impact on the south/north reads because those halo
+    # i-cells are not referenced by the south/north 4-point formula.
     if n >= 4:
         i_lo, i_hi = 2, n - 1
         # South: Fortran ut(i, 1) → Python ut[:, i_lo:i_hi, 0]
