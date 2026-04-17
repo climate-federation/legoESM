@@ -298,12 +298,26 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
     #   cubed_a2d_halo back to D-grid at full 2D halo domain.
     #
     # ``ext_vector_dgrid`` takes A-grid COVARIANT utmp/vtmp as input.
-    # We use a simple 2-point D→A average (matches c2l_ord2 in the
-    # uniform dx/dy limit).  The resulting u_d_full / v_d_full have
-    # halos in both axes, matching what Fortran's mpp_update_domains
-    # DGRID_NE provides before d2a2c_vect for the duogrid branch.
-    utmp_2nd = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])  # (6, n, n)
-    vtmp_2nd = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])  # (6, n, n)
+    # Use FV3's length-weighted 2-point D→A (c2l_ord2 formula,
+    # fv_grid_utils.F90:2605-2611):
+    #   u1(i) = 2*(u(i,j)*dx(i,j) + u(i,j+1)*dx(i,j+1)) /
+    #           (dx(i,j) + dx(i,j+1))
+    # This is the VORTICITY-CONSERVING length-weighted interpolation
+    # used by FV3 ext_vector inside the duogrid halo exchange.  The
+    # resulting u_d_full / v_d_full have halos in both axes, matching
+    # what Fortran's mpp_update_domains DGRID_NE provides before
+    # d2a2c_vect for the duogrid branch.
+    #
+    # Length at u_d stagger (i-cell, j-edge) is dx_edge_y (shape matches
+    # u_d exactly).  Length at v_d stagger (i-edge, j-cell) is dy_edge_x.
+    dx_u = cdgrid.dx_edge_y  # (6, n, n+1) — x-length at u_d positions
+    dy_v = cdgrid.dy_edge_x  # (6, n+1, n) — y-length at v_d positions
+    wu = u_d * dx_u
+    wv = v_d * dy_v
+    utmp_2nd = 2.0 * (wu[:, :, :-1] + wu[:, :, 1:]) / (
+        dx_u[:, :, :-1] + dx_u[:, :, 1:])  # (6, n, n)
+    vtmp_2nd = 2.0 * (wv[:, :-1, :] + wv[:, 1:, :]) / (
+        dy_v[:, :-1, :] + dy_v[:, 1:, :])  # (6, n, n)
     u_d_full, v_d_full = ext_vector_dgrid(
         utmp_2nd, vtmp_2nd, dg,
         grid.cos_angle, grid.sin_angle,

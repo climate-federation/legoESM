@@ -389,6 +389,50 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
             self.assertTrue(bool(jnp.all(jnp.isfinite(arr))),
                             f"{name} has non-finite values")
 
+    def test_seam_halo_consistent_jit_stable(self):
+        """Same input should give identical output when the function is
+        JIT-compiled — catches stale closure / halo-table races.
+
+        This test catches a subtle class of bugs where halo lookups
+        use stale state (e.g., when the JAX trace captures different
+        array identities between eager and JIT paths).  The seam
+        computation in ``_d2a2c_vect_duogrid`` goes through
+        ``ext_vector_dgrid`` which reads ``duogrid.vlon_ext`` etc. —
+        any trace-time-only lookup would fail under JIT.
+        """
+        import jax
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        Omega = 7.292e-5
+        R = cdgrid.radius
+        u_east_ex = Omega * R * jnp.cos(cdgrid.lat_edge_x)
+        u_east_ey = Omega * R * jnp.cos(cdgrid.lat_edge_y)
+        u_d = cdgrid.cos_angle_edge_x * u_east_ex
+        v_d = -cdgrid.sin_angle_edge_y * u_east_ey
+
+        # Eager
+        out_eager = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # JIT-compiled
+        fn = jax.jit(lambda ud, vd: _d2a2c_vect_duogrid(ud, vd, cdgrid))
+        out_jit = fn(u_d, v_d)
+
+        # Eager and JIT may differ at floating-point precision; tolerance
+        # is relative to typical magnitudes.  Bug would cause O(1) drift.
+        for name, e, j in zip(("ua", "va", "uc", "vc", "ut", "vt"),
+                               out_eager, out_jit):
+            d = float(jnp.max(jnp.abs(e - j)))
+            scale = max(float(jnp.max(jnp.abs(e))), 1.0)
+            self.assertLess(d, 1e-4 * scale,
+                            f"{name} eager vs jit differ by {d:.3e} "
+                            f"(scale {scale:.3e})")
+
     def test_solid_body_rotation_ut_sign_convention(self):
         """Solid-body rotation: ut should be eastward-positive everywhere.
 
