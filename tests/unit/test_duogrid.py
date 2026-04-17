@@ -733,15 +733,18 @@ class TestSynchronizeCgridFluxes:
         assert bool(jnp.array_equal(fx1, fx2)), "Second sync changed fx"
         assert bool(jnp.array_equal(fy1, fy2)), "Second sync changed fy"
 
-    def test_sync_hardcoded_oracle_seams(self):
-        """Independent-oracle check: the sync formula is verified against
-        HARDCODED seam pairings derived from first principles of the
-        canonical cubed-sphere face layout (not from the CONNECTIVITY
-        table that synchronize_cgrid_fluxes itself consumes).
+    def test_sync_hardcoded_oracle_all_12_seams(self):
+        """Independent-oracle check covering ALL 12 cube edges with
+        first-principles seam pairings, NOT derived from the
+        CONNECTIVITY table that ``synchronize_cgrid_fluxes`` itself
+        consumes.
 
-        If CONNECTIVITY is regressed to point face 0 WEST at the wrong
-        neighbor, this test catches it — unlike a test that reads the
-        same CONNECTIVITY table on both sides of the comparison.
+        If CONNECTIVITY is regressed to point any edge at the wrong
+        neighbor (or to flip a reversal flag), this test catches it:
+        the hardcoded ``exp`` encodes the specific (face, boundary
+        slice, rev-flag) pairing from the cubed-sphere geometry, and
+        the sync's output must equal ``exp`` bit-for-bit regardless
+        of the table.
 
         Canonical layout (cubed_sphere.py:40-46):
           Face 0 (+x) — equatorial front
@@ -750,10 +753,10 @@ class TestSynchronizeCgridFluxes:
           Face 3 (-y) — equatorial left
           Face 4 (+z) — north pole
           Face 5 (-z) — south pole
-        Standard same-axis equatorial ring: 0→1→2→3→0 (E neighbours).
-        Vertical seams: face 0 N ↔ face 4 S; face 0 S ↔ face 5 N.
-        Cross-axis with reversal: face 1 S ↔ face 5 E (rev); face 2 S ↔
-        face 5 S (rev); face 4 N ↔ face 2 N (rev).
+
+        12 cube edges (4 same-axis equatorial, 2 vertical polar-to-face-0,
+        4 cross-axis polar-to-equatorial, 2 same-axis polar-to-equatorial
+        back-face):
         """
         from legoesm.grids.halo import synchronize_cgrid_fluxes
         n = 6
@@ -762,41 +765,70 @@ class TestSynchronizeCgridFluxes:
         fy = jnp.asarray(rng.standard_normal((6, n, n + 1)))
         fx_sync, fy_sync = synchronize_cgrid_fluxes(fx, fy, n)
 
-        # --- Equatorial same-axis ring (no reversal) ---
-        # Face 0 WEST  ↔ Face 3 EAST
+        def _chk(label, actual, expected):
+            assert bool(jnp.array_equal(actual, expected)), (
+                f"{label}: max diff "
+                f"{float(jnp.max(jnp.abs(actual - expected))):.2e}")
+
+        # --- 4 equatorial same-axis seams (no reversal) ---
+        # f0 W ↔ f3 E
         exp = 0.5 * (fx[0, 0, :] + fx[3, n, :])
-        assert bool(jnp.array_equal(fx_sync[0, 0, :], exp)), "f0 W"
-        assert bool(jnp.array_equal(fx_sync[3, n, :], exp)), "f3 E"
-        # Face 0 EAST  ↔ Face 1 WEST
+        _chk("f0 W", fx_sync[0, 0, :], exp)
+        _chk("f3 E", fx_sync[3, n, :], exp)
+        # f0 E ↔ f1 W
         exp = 0.5 * (fx[0, n, :] + fx[1, 0, :])
-        assert bool(jnp.array_equal(fx_sync[0, n, :], exp)), "f0 E"
-        assert bool(jnp.array_equal(fx_sync[1, 0, :], exp)), "f1 W"
-        # Face 1 EAST  ↔ Face 2 WEST
+        _chk("f0 E", fx_sync[0, n, :], exp)
+        _chk("f1 W", fx_sync[1, 0, :], exp)
+        # f1 E ↔ f2 W
         exp = 0.5 * (fx[1, n, :] + fx[2, 0, :])
-        assert bool(jnp.array_equal(fx_sync[1, n, :], exp)), "f1 E"
-        assert bool(jnp.array_equal(fx_sync[2, 0, :], exp)), "f2 W"
-        # Face 2 EAST  ↔ Face 3 WEST
+        _chk("f1 E", fx_sync[1, n, :], exp)
+        _chk("f2 W", fx_sync[2, 0, :], exp)
+        # f2 E ↔ f3 W
         exp = 0.5 * (fx[2, n, :] + fx[3, 0, :])
-        assert bool(jnp.array_equal(fx_sync[2, n, :], exp)), "f2 E"
-        assert bool(jnp.array_equal(fx_sync[3, 0, :], exp)), "f3 W"
+        _chk("f2 E", fx_sync[2, n, :], exp)
+        _chk("f3 W", fx_sync[3, 0, :], exp)
 
-        # --- Vertical same-axis (no reversal): face 0 ↔ 4 and 0 ↔ 5 ---
-        # Face 0 NORTH ↔ Face 4 SOUTH
+        # --- 2 polar seams to face 0 (same-axis, no reversal) ---
+        # f0 N ↔ f4 S
         exp = 0.5 * (fy[0, :, n] + fy[4, :, 0])
-        assert bool(jnp.array_equal(fy_sync[0, :, n], exp)), "f0 N"
-        assert bool(jnp.array_equal(fy_sync[4, :, 0], exp)), "f4 S"
-        # Face 0 SOUTH ↔ Face 5 NORTH
+        _chk("f0 N", fy_sync[0, :, n], exp)
+        _chk("f4 S", fy_sync[4, :, 0], exp)
+        # f0 S ↔ f5 N
         exp = 0.5 * (fy[0, :, 0] + fy[5, :, n])
-        assert bool(jnp.array_equal(fy_sync[0, :, 0], exp)), "f0 S"
-        assert bool(jnp.array_equal(fy_sync[5, :, n], exp)), "f5 N"
+        _chk("f0 S", fy_sync[0, :, 0], exp)
+        _chk("f5 N", fy_sync[5, :, n], exp)
 
-        # --- Cross-axis with reversal: face 1 SOUTH ↔ face 5 EAST (rev=T)
-        exp = 0.5 * (fy[1, :, 0] + fx[5, n, :][::-1])
-        assert bool(jnp.array_equal(fy_sync[1, :, 0], exp)), "f1 S"
-        assert bool(jnp.array_equal(fx_sync[5, n, :], exp[::-1])), "f5 E"
-        # face 3 SOUTH ↔ face 5 WEST (rev=F per CONNECTIVITY;
-        # derive from geometry: -y face's south meets -z face's west
+        # --- 2 polar seams to face 3 (cross-axis ±reversal) ---
+        # f3 N ↔ f4 W (rev=True: going +y along f3's north edge maps
+        # to going -y along f4's west edge)
+        exp = 0.5 * (fy[3, :, n] + fx[4, 0, :][::-1])
+        _chk("f3 N", fy_sync[3, :, n], exp)
+        _chk("f4 W", fx_sync[4, 0, :], exp[::-1])
+        # f3 S ↔ f5 W (no reversal: -y face's south meets -z face's west
         # with consistent index direction)
         exp = 0.5 * (fy[3, :, 0] + fx[5, 0, :])
-        assert bool(jnp.array_equal(fy_sync[3, :, 0], exp)), "f3 S"
-        assert bool(jnp.array_equal(fx_sync[5, 0, :], exp)), "f5 W"
+        _chk("f3 S", fy_sync[3, :, 0], exp)
+        _chk("f5 W", fx_sync[5, 0, :], exp)
+
+        # --- 2 polar seams to face 1 (cross-axis) ---
+        # f1 N ↔ f4 E (rev=False: +y face's north meets +z face's east,
+        # same index direction)
+        exp = 0.5 * (fy[1, :, n] + fx[4, n, :])
+        _chk("f1 N", fy_sync[1, :, n], exp)
+        _chk("f4 E", fx_sync[4, n, :], exp)
+        # f1 S ↔ f5 E (rev=True: +y face's south meets -z face's east,
+        # opposite index direction)
+        exp = 0.5 * (fy[1, :, 0] + fx[5, n, :][::-1])
+        _chk("f1 S", fy_sync[1, :, 0], exp)
+        _chk("f5 E", fx_sync[5, n, :], exp[::-1])
+
+        # --- 2 polar seams to face 2 (same-axis S/N with reversal) ---
+        # f2 N ↔ f4 N (rev=True: -x face's north meets +z face's north
+        # going opposite longitudinal directions)
+        exp = 0.5 * (fy[2, :, n] + fy[4, :, n][::-1])
+        _chk("f2 N", fy_sync[2, :, n], exp)
+        _chk("f4 N", fy_sync[4, :, n], exp[::-1])
+        # f2 S ↔ f5 S (rev=True)
+        exp = 0.5 * (fy[2, :, 0] + fy[5, :, 0][::-1])
+        _chk("f2 S", fy_sync[2, :, 0], exp)
+        _chk("f5 S", fy_sync[5, :, 0], exp[::-1])
