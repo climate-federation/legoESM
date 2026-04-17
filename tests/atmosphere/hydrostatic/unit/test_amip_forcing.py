@@ -70,6 +70,38 @@ def _write_synthetic_forcing(path, n_time=4, sst_celsius=True, sic_percent=True,
     return ds
 
 
+def _write_split_custom_forcing(sst_path, sic_path):
+    """Create separate SST/SIC files with custom coord names and cftime."""
+    import cftime
+    import xarray as xr
+
+    n_lat, n_lon, n_time = 18, 36, 4
+    lat = np.linspace(-85, 85, n_lat)
+    lon = np.linspace(5, 355, n_lon)
+    times = [cftime.DatetimeNoLeap(2000, month, 1) for month in range(1, n_time + 1)]
+
+    sst = np.full((n_time, n_lat, n_lon), 20.0, dtype=np.float32)
+    sic = np.full((n_time, n_lat, n_lon), 0.1, dtype=np.float32)
+    sst += lat[None, :, None] * 0.1
+    sst += np.arange(n_time, dtype=np.float32)[:, None, None] * 0.5
+    sic[:, :2, :] = 0.8
+    sic[:, -2:, :] = 0.6
+
+    coords = {
+        "time": times,
+        "ylat": lat,
+        "xlon": lon,
+    }
+    xr.Dataset(
+        {"SST": (("time", "ylat", "xlon"), sst)},
+        coords=coords,
+    ).to_netcdf(sst_path)
+    xr.Dataset(
+        {"iceFrac": (("time", "ylat", "xlon"), sic)},
+        coords=coords,
+    ).to_netcdf(sic_path)
+
+
 @pytest.fixture(scope="module")
 def grid():
     return create_cubed_sphere(4)
@@ -87,6 +119,15 @@ def forcing_path_nans(tmp_path_factory):
     path = tmp_path_factory.mktemp("amip_nans") / "forcing_nans.nc"
     _write_synthetic_forcing(str(path), sst_celsius=True, sic_percent=True, add_nans=True)
     return str(path)
+
+
+@pytest.fixture(scope="module")
+def split_custom_forcing_paths(tmp_path_factory):
+    root = tmp_path_factory.mktemp("amip_split")
+    sst_path = root / "sst.nc"
+    sic_path = root / "sic.nc"
+    _write_split_custom_forcing(str(sst_path), str(sic_path))
+    return str(sst_path), str(sic_path)
 
 
 class TestAMIPPresets:
@@ -171,6 +212,29 @@ class TestLoadForcing:
         )
         with pytest.raises(KeyError, match="Missing variables"):
             load_amip_forcing(config, grid)
+
+    def test_load_split_custom_with_cftime(self, grid, split_custom_forcing_paths):
+        """Custom forcing should support separate SIC files and cftime axes."""
+        sst_path, sic_path = split_custom_forcing_paths
+        config = AMIPForcingConfig(
+            dataset="custom",
+            path=sst_path,
+            sic_path=sic_path,
+            sst_var="SST",
+            sic_var="iceFrac",
+            time_var="time",
+            lat_var="ylat",
+            lon_var="xlon",
+            sst_offset=273.15,
+            sic_scale=1.0,
+        )
+        forcing = load_amip_forcing(config, grid)
+        assert forcing.sst.shape[0] == 4
+        assert forcing.sic.shape == forcing.sst.shape
+        assert float(forcing.times[0]) == 0.0
+        assert float(forcing.times[1]) > 0.0
+        assert jnp.all(jnp.isfinite(forcing.sst))
+        assert jnp.all(jnp.isfinite(forcing.sic))
 
 
 class TestTimeInterpolation:

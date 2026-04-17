@@ -317,7 +317,7 @@ def _run_physics_step(grid, nlev=NLEV, dt=600.0):
     sw_down_toa = jnp.zeros(shape_2d, dtype=jnp.float32)
 
     out = pipeline.physics_step_no_rad(
-        T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
+        T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,), dtype=T.dtype), u, v, sst, sic, lat, dt,
         dT_dt_rad, sw_net_sfc, lw_net_sfc,
         sw_up_toa, lw_up_toa, sw_down_toa,
     )
@@ -429,7 +429,7 @@ class TestCrossGridEquivalence:
             held_zero_2d = jnp.zeros(shape_2d, dtype=jnp.float32)
 
             out = pipeline.physics_step_no_rad(
-                T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
+                T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,), dtype=T.dtype), u, v, sst, sic, lat, dt,
                 held_zero_3d, held_zero_2d, held_zero_2d,
                 held_zero_2d, held_zero_2d, held_zero_2d,
             )
@@ -504,7 +504,7 @@ class TestStepUnified:
 
         phys_out, new_held = step_fn(
             jnp.bool_(True),
-            T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+            T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,), dtype=T.dtype), u, v, sst, sic, lat, lon,
             100.0, 43200.0, 600.0,
             solar_w, 1361.0,
             o3, aerosol,
@@ -547,7 +547,7 @@ class TestStepUnified:
 
         phys_out, new_held = step_fn(
             jnp.bool_(True),
-            T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+            T, p_s, q_v, q_c, q_r, jnp.zeros((ad.ncol,), dtype=T.dtype), u, v, sst, sic, lat, lon,
             100.0, 43200.0, 600.0,
             solar_w, 1361.0,
             o3, aerosol,
@@ -557,6 +557,50 @@ class TestStepUnified:
 
         assert phys_out.dT_dt.shape == shape_3d
         assert jnp.all(jnp.isfinite(phys_out.dT_dt))
+
+    def test_unified_step_mass_flux_threads_conv_prog(self, sc_grid):
+        sigma = _make_sigma(NLEV)
+        config = _make_config(convection="mass_flux")
+        pipeline = build_physics_pipeline(sc_grid, sigma, config)
+        step_fn = pipeline.build_step_unified()
+
+        ad = pipeline.adapter
+        shape_2d = ad.shape_2d
+        shape_3d = (*shape_2d, NLEV)
+
+        T = jnp.linspace(300.0, 240.0, NLEV, dtype=jnp.float32)[None, :]
+        p_s = jnp.full(shape_2d, 1e5, dtype=jnp.float32)
+        q_v = jnp.full(shape_3d, 0.018, dtype=jnp.float32)
+        q_c = jnp.zeros(shape_3d, dtype=jnp.float32)
+        q_r = jnp.zeros(shape_3d, dtype=jnp.float32)
+        conv_prog = jnp.zeros((ad.ncol,), dtype=jnp.float32)
+        u = jnp.full(shape_3d, 5.0, dtype=jnp.float32)
+        v = jnp.zeros(shape_3d, dtype=jnp.float32)
+        sst = jnp.full(shape_2d, 302.0, dtype=jnp.float32)
+        sic = jnp.zeros(shape_2d, dtype=jnp.float32)
+        lat = jnp.full(shape_2d, 0.3, dtype=jnp.float32)
+        lon = jnp.full(shape_2d, 1.0, dtype=jnp.float32)
+
+        held_3d = jnp.zeros(shape_3d, dtype=jnp.float32)
+        held_2d = jnp.zeros(shape_2d, dtype=jnp.float32)
+        solar_w = jnp.array([], dtype=jnp.float32)
+        o3 = jnp.zeros((ad.ncol, NLEV), dtype=jnp.float32)
+        aerosol = jnp.zeros((ad.ncol, NLEV), dtype=jnp.float32)
+
+        phys_out, _ = step_fn(
+            jnp.bool_(True),
+            T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
+            100.0, 43200.0, 300.0,
+            solar_w, 1361.0,
+            o3, aerosol,
+            held_3d, held_2d, held_2d,
+            held_2d, held_2d, held_2d,
+        )
+
+        assert phys_out.conv_prog.shape == (ad.ncol,)
+        assert jnp.all(jnp.isfinite(phys_out.conv_prog))
+        assert jnp.any(phys_out.conv_prog > conv_prog)
+
 
 
 # ===================================================================

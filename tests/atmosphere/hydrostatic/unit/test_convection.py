@@ -32,7 +32,11 @@ from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection
 from legoesm.atmosphere.physics.convection.dca import dca_convection
 from legoesm.atmosphere.physics.convection.kuo import kuo_convection
-from legoesm.atmosphere.physics.convection.mass_flux import mass_flux_convection
+from legoesm.atmosphere.physics.convection.mass_flux import (
+    diagnose_mass_flux_closure,
+    mass_flux_convection,
+    mass_flux_convection_from_closure,
+)
 from legoesm.atmosphere.physics.convection.edmf import edmf_convection
 from legoesm.atmosphere.physics.convection.integration import (
     make_convection_physics,
@@ -278,6 +282,23 @@ class TestSBM:
         grad_T = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad_T))
         assert grad_T.shape == T.shape
+
+    def test_accepts_columnwise_parameters(self):
+        """SBM should support per-column traced control parameters."""
+        ncol, nlev = 3, 8
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = SBMConfig(
+            tau_c=jnp.array([3600.0, 7200.0, 14400.0]),
+            RH_ref=jnp.array([0.65, 0.75, 0.85]),
+            CAPE_threshold=jnp.array([10.0, 70.0, 150.0]),
+        )
+
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        assert jnp.all(jnp.isfinite(out.dT_dt))
+        assert jnp.all(jnp.isfinite(out.dq_v_dt))
+        assert out.dT_dt.shape == (ncol, nlev)
+        assert float(jnp.max(jnp.abs(out.dT_dt[0]))) >= float(jnp.max(jnp.abs(out.dT_dt[-1])))
 
 
 # ===========================================================================
@@ -769,6 +790,39 @@ class TestMassFlux:
             T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
         )
         assert float(jnp.max(jnp.abs(out.dT_dt))) > 1e-10
+
+    def test_precipitation_is_nonzero_for_moist_unstable_columns(self):
+        """Moist unstable columns should produce at least some precipitation."""
+        T, q_v, p_full, p_half = _make_unstable_columns()
+        q_v = saturation_mixing_ratio(T, p_full)
+        ncol = T.shape[0]
+        config = MassFluxConfig()
+        M_c = jnp.full(ncol, config.M_c_init)
+        out, _ = mass_flux_convection(
+            T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
+        )
+        assert float(jnp.max(out.precipitation)) > 0.0
+
+    def test_closure_split_matches_full_kernel(self):
+        """The split closure+tendency path should match the full kernel."""
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol=3, nlev=12)
+        config = MassFluxConfig()
+        M_c = jnp.full((T.shape[0],), config.M_c_init)
+
+        out_full, M_c_new_full = mass_flux_convection(
+            T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
+        )
+        closure = diagnose_mass_flux_closure(
+            T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
+        )
+        out_split = mass_flux_convection_from_closure(
+            T, q_v, p_full, p_half, closure, config=config,
+        )
+
+        assert jnp.allclose(closure.M_c_new, M_c_new_full)
+        assert jnp.allclose(out_split.dT_dt, out_full.dT_dt)
+        assert jnp.allclose(out_split.dq_v_dt, out_full.dq_v_dt)
+        assert jnp.allclose(out_split.precipitation, out_full.precipitation)
 
     def test_differentiable(self):
         """jax.grad should work through Mass-Flux convection."""

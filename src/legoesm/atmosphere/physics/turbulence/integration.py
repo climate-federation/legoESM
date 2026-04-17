@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -46,10 +45,6 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
-from legoesm.atmosphere.physics.turbulence.ml_emulator import (
-    ml_turbulence,
-    TurbulenceEmulator,
-)
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
@@ -74,8 +69,6 @@ def _get_turbulence_fn(config: TurbulenceConfig):
         return "ysu", ysu_turbulence, config.ysu
     elif config.scheme == "edmf":
         return "edmf", edmf_turbulence, config.edmf
-    elif config.scheme == "ml_emulator":
-        return "ml_emulator", ml_turbulence, config.ml_emulator
     elif config.scheme == "none":
         return "none", None, None
     else:
@@ -144,10 +137,6 @@ def _make_hydrostatic_turbulence(
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
-    is_ml = scheme_name == "ml_emulator"
-    # ML model weights are static (initialized once, deterministic from seed).
-    # They stay in a closure because they are not simulation state.
-    _ml_model_cache = [None]
 
     def physics_fn(
         state: HydrostaticState,
@@ -221,20 +210,6 @@ def _make_hydrostatic_turbulence(
                 T_sfc, q_sfc, rho, dt, scheme_config,
             )
             tke_out = tke_new
-        elif is_ml:
-            if _ml_model_cache[0] is None:
-                key = jax.random.PRNGKey(scheme_config.seed)
-                _ml_model_cache[0] = TurbulenceEmulator(
-                    scheme_config.n_input, scheme_config.n_hidden,
-                    scheme_config.n_layers, scheme_config.n_output,
-                    key=key,
-                )
-            turb_out = turb_fn(
-                u_col, v_col, T_col, q_v_col,
-                p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
-                _ml_model_cache[0],
-            )
         else:
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
@@ -266,7 +241,7 @@ def _make_hydrostatic_turbulence(
         return tendencies, tke_out
 
     def reset_state():
-        _ml_model_cache[0] = None
+        return None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -291,8 +266,6 @@ def _make_nonhydrostatic_turbulence(
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
-    is_ml = scheme_name == "ml_emulator"
-    _ml_model_cache = [None]
 
     def physics_fn(
         state: NonHydrostaticState,
@@ -382,20 +355,6 @@ def _make_nonhydrostatic_turbulence(
                 T_sfc, q_sfc, rho_col, dt, scheme_config,
             )
             tke_out = tke_new
-        elif is_ml:
-            if _ml_model_cache[0] is None:
-                key = jax.random.PRNGKey(scheme_config.seed)
-                _ml_model_cache[0] = TurbulenceEmulator(
-                    scheme_config.n_input, scheme_config.n_hidden,
-                    scheme_config.n_layers, scheme_config.n_output,
-                    key=key,
-                )
-            turb_out = turb_fn(
-                u_col, v_col, T_col, q_v_col,
-                p_full_col, p_half, z_full, z_half,
-                T_sfc, q_sfc, rho_col, dt, scheme_config,
-                _ml_model_cache[0],
-            )
         else:
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
@@ -425,7 +384,7 @@ def _make_nonhydrostatic_turbulence(
         return tendencies, tke_out
 
     def reset_state():
-        _ml_model_cache[0] = None
+        return None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -450,8 +409,6 @@ def _make_spectral_pe_turbulence(
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
-    is_ml = scheme_name == "ml_emulator"
-    _ml_model_cache = [None]
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
         from legoesm.atmosphere.dynamics.spectral_pe import (
@@ -525,20 +482,6 @@ def _make_spectral_pe_turbulence(
                 T_sfc, q_sfc, rho, dt, scheme_config,
             )
             tke_out = tke_new
-        elif is_ml:
-            if _ml_model_cache[0] is None:
-                key = jax.random.PRNGKey(scheme_config.seed)
-                _ml_model_cache[0] = TurbulenceEmulator(
-                    scheme_config.n_input, scheme_config.n_hidden,
-                    scheme_config.n_layers, scheme_config.n_output,
-                    key=key,
-                )
-            turb_out = turb_fn(
-                u_col, v_col, T_col, q_v_col,
-                p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
-                _ml_model_cache[0],
-            )
         else:
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
@@ -586,7 +529,7 @@ def _make_spectral_pe_turbulence(
         return tendencies, tke_out
 
     def reset_state():
-        _ml_model_cache[0] = None
+        return None
 
     physics_fn.reset_state = reset_state
     return physics_fn

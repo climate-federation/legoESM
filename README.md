@@ -156,6 +156,7 @@ python -c "import jax; print(jax.default_backend())"
 - [docs/implementation_summary.md](docs/implementation_summary.md) — Comprehensive summary of all implementations and tests
 - [docs/cmip_readiness.md](docs/cmip_readiness.md) — CMIP production readiness checklist
 - [docs/amip.md](docs/amip.md) — AMIP experiment guide
+- [docs/ml_physics_parameterization.md](docs/ml_physics_parameterization.md) — Joint ML physics workflow and canonical moist run
 - [docs/slab_s2s_documentation.md](docs/slab_s2s_documentation.md) — Shared NeuralGCM/SFNO slab-coupled S2S workflow and results layout
 - [docs/REAL_HARDWARE_SCALING.md](docs/REAL_HARDWARE_SCALING.md) — Multi-GPU/MPI scaling guide
 
