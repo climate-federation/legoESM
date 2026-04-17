@@ -87,7 +87,8 @@ def _pert_ppm_iv0(q, bl, br):
 
 
 def _ppm_1d(q, n, off_left=None, off_right=None,
-            off_left_d1=None, off_right_d1=None):
+            off_left_d1=None, off_right_d1=None,
+            use_duogrid=False):
     """PPM bl/br along axis=1 with hord=9 + position-aware boundaries.
 
     Parameters
@@ -98,6 +99,12 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     off_right : (6, M) or None — halo interp offset at right boundary (depth=0)
     off_left_d1 : (6, M) or None — depth=1 offset (outer halo)
     off_right_d1 : (6, M) or None — depth=1 offset (outer halo)
+    use_duogrid : bool
+        If True, skip the ``pert_ppm(iv=1)`` face-boundary monotonicity
+        constraint.  Matches the Fortran gate
+        ``.not. (bounded_domain .or. duogrid)`` at tp_core.F90:612: when
+        duogrid provides real cross-face halo data, the extra limiter is
+        not required.
 
     Returns
     -------
@@ -222,25 +229,23 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     # the three cells whose PPM stencil crosses a face boundary.
     # Fortran tp_core.F90:629 calls pert_ppm iv=1 at interior cells 0,1,2 on
     # the left side and tp_core.F90:648 at npx-3,npx-2,npx-1 on the right
-    # (NOT halo cells).
-    # Fortran gates this on (.not. (bounded_domain .or. duogrid)) at line 612,
-    # but the Fortran has ng=3 MPI halo (proper cross-face at 3rd cell).
-    # We keep the iv=1 constraint unconditionally as a safety net because
-    # _ppm_1d uses mode='edge' for the 3rd halo cell (line ~107), which is
-    # less accurate than the Fortran's MPI exchange at ng=3.
+    # (NOT halo cells).  Fortran gates on (.not. (bounded_domain .or. duogrid))
+    # at line 612: duogrid provides real cross-face halo data so the extra
+    # iv=1 limiter is unnecessary.
     # q_c shape is (n+2) with q_c[0] = halo-1, q_c[1..n] = interior 0..n-1,
     # q_c[n+1] = halo n.  Fortran interior cells 0,1,2 → q_c indices 1,2,3;
     # Fortran interior n-3,n-2,n-1 → q_c indices n-2,n-1,n.
-    for k in [1, 2, 3, -4, -3, -2]:
-        bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
-        bl = bl.at[:, k, :].set(bl_k)
-        br = br.at[:, k, :].set(br_k)
+    if not use_duogrid:
+        for k in [1, 2, 3, -4, -3, -2]:
+            bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
+            bl = bl.at[:, k, :].set(bl_k)
+            br = br.at[:, k, :].set(br_k)
 
     return bl, br, q_c
 
 
 def _xppm(q_h2, crx, n, off_left=None, off_right=None,
-          off_left_d1=None, off_right_d1=None):
+          off_left_d1=None, off_right_d1=None, use_duogrid=False):
     """PPM in x with hord=9 Courant-number integration.
 
     FV3 tp_core.F90 xppm lines 670-677: uses raw Courant number ``crx``
@@ -249,7 +254,8 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
     (the Fortran does not adjust the Courant number at face boundaries).
     """
     bl, br, q_c = _ppm_1d(q_h2, n, off_left, off_right,
-                           off_left_d1, off_right_d1)
+                           off_left_d1, off_right_d1,
+                           use_duogrid=use_duogrid)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
 
@@ -259,12 +265,13 @@ def _xppm(q_h2, crx, n, off_left=None, off_right=None,
 
 
 def _yppm(q_h2, cry, n, off_left=None, off_right=None,
-          off_left_d1=None, off_right_d1=None):
+          off_left_d1=None, off_right_d1=None, use_duogrid=False):
     """PPM in y with hord=9 Courant-number integration."""
     q_t = jnp.swapaxes(q_h2, 1, 2)
     c_t = jnp.swapaxes(cry, 1, 2)
     bl, br, q_c = _ppm_1d(q_t, n, off_left, off_right,
-                           off_left_d1, off_right_d1)
+                           off_left_d1, off_right_d1,
+                           use_duogrid=use_duogrid)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
     fy_pos = q_L + (1.0 - c_t) * (br_L - c_t * (bl_L + br_L))
@@ -424,6 +431,12 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     area = grid.area
     offsets_h2 = grid.halo_interp_offsets_h2
 
+    # Matches Fortran bounded_domain = (regional .or. nested .or. duogrid)
+    # (fv_arrays.F90:1512).  The flag gates face-boundary specials in
+    # tp_core.F90 and sw_core.F90 away from duogrid/bounded-domain paths.
+    dg = grid.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+
     # Extract boundary offsets for sweep directions
     # offsets_h2: (6, 4, 2, n) — [face, edge, depth, cell_along_edge]
     # WEST=0, EAST=1, SOUTH=2, NORTH=3; depth 0 = adjacent to interior
@@ -439,22 +452,26 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
     q_full = pad_halo(q, halo=2, interp_offsets=offsets_h2)
 
     # Pass 1: Y-sweep on q, X-sweep on cross-corrected q_i
-    fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1)
+    fy2 = _yppm(q_full[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
+                use_duogrid=use_duogrid)
     fyy = yfx * fy2
     q_i = (q * area + fyy[:, :, :-1] - fyy[:, :, 1:]) / ra_y
 
     # Proper halo exchange for q_i (required for mass conservation)
     q_i_pad = pad_halo(q_i, halo=2, interp_offsets=offsets_h2)
-    fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1)
+    fx1 = _xppm(q_i_pad[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
+                use_duogrid=use_duogrid)
 
     # Pass 2: X-sweep on q, Y-sweep on cross-corrected q_j
-    fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1)
+    fx2 = _xppm(q_full[:, :, 2:-2], crx, n, ox_L0, ox_R0, ox_L1, ox_R1,
+                use_duogrid=use_duogrid)
     fxx = xfx * fx2
     q_j = (q * area + fxx[:, :-1, :] - fxx[:, 1:, :]) / ra_x
 
     # Proper halo exchange for q_j (required for mass conservation)
     q_j_pad = pad_halo(q_j, halo=2, interp_offsets=offsets_h2)
-    fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1)
+    fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1,
+                use_duogrid=use_duogrid)
 
     if mass is not None:
         # With mass: fx = 0.5*(fx1+fx2)*mfx, fy = 0.5*(fy1+fy2)*mfy

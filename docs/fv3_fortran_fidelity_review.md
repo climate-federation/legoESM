@@ -729,17 +729,30 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
 - **Stale Fortran line references updated** (Codex noted `:631/:651` should be `:629/:648`).
 - **Tests**: 92/92 regression tests pass.  Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
 
+### Resolved in iteration 63 (2026-04-17): Ralph loop iteration 5
+- **pert_ppm iv=1 gate wired through to duogrid flag** ✅ (addresses remaining unresolved item #4)
+  - Fortran tp_core.F90:612 gates the face-boundary pert_ppm(iv=1) block on `.not. (bounded_domain .or. duogrid)`.
+  - Python `_ppm_1d` now accepts `use_duogrid` and skips the iv=1 loop when set.
+  - `_xppm`, `_yppm`, and `fv_tp_2d` propagate the flag.  `fv_tp_2d` determines it from `cdgrid.base.duogrid` the same way every other duogrid gate in `fv3_sw_core.py` does (`dg is not None and dg.ng >= 2`).
+  - Prior iter-62 iv=1 "safety net" justification evaluated earlier applied to the OLD positions `[0, 1, 2, -3, -2, -1]` which included halo cells (index 0 = halo-1).  The corrected Fortran positions `[1, 2, 3, -4, -3, -2]` are all INTERIOR cells with real duogrid halo data, so the safety-net argument collapses; gating on duogrid is both faithful and safe.
+  - Numerical impact at non-duogrid defaults: zero (gate bypassed).  Duogrid path now matches Fortran exactly.
+- **Validation**:
+  - 92 regression tests pass.
+  - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged — test matrix uses non-duogrid production path).
+  - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
+  - Direct duogrid-path invocation of `fv_tp_2d` verified to produce non-zero difference from non-duogrid path (confirms gate is live).
+
 ### Investigated in iteration 62 but NOT implemented:
 - **Codex finding #2 (d_sw3 BGRID_NE component sync)**: the Fortran dyn_core.F90:969-1011 performs `mpp_get_boundary(..., gridtype=BGRID_NE)` on `ubb` (x-component) and `vbbtemp` (y-component) BEFORE forming KE.  Python currently syncs the scalar KE AFTER computation (matches Fortran's commented-out alternative at dyn_core.F90:1029-1055).  Prior iter-36 attempt to implement BGRID_NE vector sync was REMOVED because it was not rotation-safe at cross-axis seams.  Full implementation would require replicating FMS `mpp_get_boundary` vector rotation semantics at cross-panel seams — infrastructure-level work.  Current scalar KE sync matches conservation goal.
 - **Codex finding #3 (pert_ppm iv=1 unconditional vs gated)**: the gate (`.not.(bounded_domain .or. duogrid)`) is deliberately skipped because our outer `jnp.pad(q, mode='edge')` at `_ppm_1d` makes the 3rd halo ring edge-copied (less accurate than Fortran ng=3 MPI exchange).  Keeping iv=1 as unconditional safety net.  Cell position corrected (see "Resolved").
 - **Codex finding #1 (production path uses A-L/RK3, not FB)**: architectural.  Current FV3EdgeShallowWaterModel uses Arakawa-Lamb gradient with RK3; FV3-faithful path is FV3FBShallowWaterModel with forward-backward c_sw+p_grad_c+d_sw.  FB path is unstable at W2 C36 due to halo-quality gap (see item 2 in "Remaining unresolved").
 - **Codex finding #4 (D-grid vector halo halo=2 vs ng=3)**: infrastructure-level; iter-58 extended `pad_halo_dgrid` to halo=2 but full ng=3 equivalence requires broader halo-exchange rework.
 
-### Remaining unresolved (updated 2026-04-17, iter 62):
+### Remaining unresolved (updated 2026-04-17, iter 63):
 1. **W2 v-wind visual artifact** (Ralph prompt blocker): unchanged — architectural. Production path uses A-L gradient, FB path uses c_sw/d_sw but unstable at C36.  Root cause: halo quality at cube-face boundaries is not ng=3 equivalent.
 2. **FB path stability on W2 C36**: unchanged — c_sw first-order upwind amplifies halo-induced face-boundary divergence.  Only fixable by infrastructure improvements.
-3. **d_sw3 scalar KE sync vs Fortran BGRID_NE component sync**: fidelity deviation, but current approach matches Fortran's commented-out alternative path.  Full fix requires cross-axis vector rotation infrastructure.
-4. **pert_ppm iv=1 unconditional vs gated**: deliberate deviation for halo-safety.  Cell positions now match Fortran interior-cell convention (iter 62).
+3. **d_sw3 scalar KE sync vs Fortran BGRID_NE component sync**: fidelity deviation, but current approach matches Fortran's commented-out alternative path.  Full fix requires cross-axis vector rotation infrastructure (BGRID_NE vector at cube cross-axis seams requires 90° rotation with sign conventions our 6-face representation does not encode; naive swap without sign was tried in iter-36, found rotation-unsafe and reverted).
+4. ~~**pert_ppm iv=1 unconditional vs gated**~~ **RESOLVED (iter 63)** — `_ppm_1d` now honours Fortran's `.not. (bounded_domain .or. duogrid)` gate via `use_duogrid` flag propagated from `fv_tp_2d`.
 
 ### Session summary (2026-04-15): 10 commits
 1. FV3 operator fidelity: d2a2c_vect ut positions, vorticity flux boundaries, cell-centre vorticity in c_sw/csw, physical KE
