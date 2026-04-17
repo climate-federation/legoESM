@@ -594,6 +594,50 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
         vt = vt.at[:, :, j_bdy].set(
             vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
 
+    # FV3 non-duogrid adjacent-strip vt recomputation (sw_core.F90:670-691).
+    # On west (i=0) and east (i=n-1) boundary cells, recompute vt using a
+    # 4-point ut average instead of the standard (vc - u*cosa)*rsin_v.
+    # Restricted to j_face in [2, n-2] per Fortran `max(3,js), min(npy-2,je+1)`.
+    # Same-face ut indices are (i_cell=0,1) for west; (i_cell=n-2,n-1) for east.
+    # Fortran halo vt(0,j), vt(npx,j) columns are not addressable in Python's
+    # interior-only layout — only vt(1,j) / vt(npx-1,j) are ported.
+    if n >= 4:
+        j_lo, j_hi = 2, n - 1  # j_face range [j_lo, j_hi) → [2, n-2]
+        # West: Fortran vt(1, j) → Python vt[:, 0, j_lo:j_hi]
+        ut_w = (ut[:, 0, j_lo - 1:j_hi - 1] + ut[:, 1, j_lo - 1:j_hi - 1]
+                + ut[:, 0, j_lo:j_hi] + ut[:, 1, j_lo:j_hi])
+        vt_w_new = (vc[:, 0, j_lo:j_hi]
+                    - 0.25 * cdgrid.cosa_v[:, 0, j_lo:j_hi] * ut_w)
+        vt = vt.at[:, 0, j_lo:j_hi].set(vt_w_new)
+        # East: Fortran vt(npx-1, j) → Python vt[:, n-1, j_lo:j_hi]
+        ut_e = (ut[:, n - 1, j_lo - 1:j_hi - 1]
+                + ut[:, n, j_lo - 1:j_hi - 1]
+                + ut[:, n - 1, j_lo:j_hi]
+                + ut[:, n, j_lo:j_hi])
+        vt_e_new = (vc[:, n - 1, j_lo:j_hi]
+                    - 0.25 * cdgrid.cosa_v[:, n - 1, j_lo:j_hi] * ut_e)
+        vt = vt.at[:, n - 1, j_lo:j_hi].set(vt_e_new)
+
+    # FV3 non-duogrid adjacent-strip ut recomputation (sw_core.F90:701-707,
+    # 716-722). South (j=0) and north (j=n-1) boundary cells: recompute ut
+    # using a 4-point vt average. Restricted to i_face in [2, n-2].
+    if n >= 4:
+        i_lo, i_hi = 2, n - 1
+        # South: Fortran ut(i, 1) → Python ut[:, i_lo:i_hi, 0]
+        vt_s = (vt[:, i_lo - 1:i_hi - 1, 0] + vt[:, i_lo:i_hi, 0]
+                + vt[:, i_lo - 1:i_hi - 1, 1] + vt[:, i_lo:i_hi, 1])
+        ut_s_new = (uc[:, i_lo:i_hi, 0]
+                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, 0] * vt_s)
+        ut = ut.at[:, i_lo:i_hi, 0].set(ut_s_new)
+        # North: Fortran ut(i, npy-1) → Python ut[:, i_lo:i_hi, n-1]
+        vt_n = (vt[:, i_lo - 1:i_hi - 1, n - 1]
+                + vt[:, i_lo:i_hi, n - 1]
+                + vt[:, i_lo - 1:i_hi - 1, n]
+                + vt[:, i_lo:i_hi, n])
+        ut_n_new = (uc[:, i_lo:i_hi, n - 1]
+                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, n - 1] * vt_n)
+        ut = ut.at[:, i_lo:i_hi, n - 1].set(ut_n_new)
+
     return ua, va, uc, vc, ut, vt
 
 

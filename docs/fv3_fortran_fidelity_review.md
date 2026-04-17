@@ -19,7 +19,7 @@ All FV3 duogrid-branch operator formulas are implemented and verified against th
 1. **W2 v-wind cube-face imprint at C36** — architectural. Production path `fv3_sw_tendencies` uses Arakawa-Lamb gradient, not FV3's `c_sw/p_grad_c/d_sw` chain. Forward-backward (FB) path IS FV3-faithful but unstable at C36 (first-order upwind in `c_sw` amplifies halo-induced face-boundary divergence).
 2. **FB path C36 stability** — requires ng=3-equivalent halo. Iter 58 extended `pad_halo_dgrid` to `halo=2`; further widening requires implementing halo=3 in pad_halo + all downstream stencils. Not a formula fix.
 3. **d_sw3 scalar KE sync vs Fortran BGRID_NE component sync** — the Fortran syncs x/y components before forming KE via MPI BGRID_NE vector exchange with cross-axis rotation. Python's scalar KE sync matches the Fortran commented-out alternative. Proper fix requires cross-axis vector rotation infrastructure (naive swap-without-sign attempted iter 36, reverted as rotation-unsafe).
-4. **Non-duogrid `_d2a2c_vect` 4-point vt adjacent-strip + corner 2x2 solve** — Fortran sw_core.F90:670-811 extra recomputation at west/east/south/north edges + 4 corner solves; Python implements only the single-point face-boundary override (iter 65 test confirms). Affects non-duogrid FB path (experimental, unstable anyway); not implemented.
+4. **Non-duogrid `_d2a2c_vect` corner 2x2 solve** — ~~4-point adjacent-strip~~ PORTED (iter 68).  Fortran sw_core.F90:739-811 four corner systems remain unimplemented; they require halo i-columns / j-rows (vt(0,j), ut(i,0) etc.) that Python's interior-only layout does not expose. Affects non-duogrid FB path (experimental, unstable anyway).
 
 ### Evaluation metrics (post iter-66 follow-up #3)
 - Williamson 2: L2=1.53e-03, Linf=4.07e-03 (C36, 1 day)
@@ -791,6 +791,18 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
   - Numerical impact at non-duogrid defaults: zero (gate keeps the offset corrections active).
 - **Validation**:
   - 92 regression tests pass.
+  - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged).
+  - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
+
+### Resolved in iteration 68 (2026-04-17): Ralph loop iteration 10
+- **Non-duogrid `_d2a2c_vect` 4-point adjacent-strip recomputation ported** ✅ (partial resolution of prior unresolved item #4)
+  - Fortran sw_core.F90:670-691 (west/east) and 701-722 (south/north) recomputes `vt` / `ut` at the interior-adjacent strip using a 4-point contravariant cross-velocity average: `vt(1,j) = vc(1,j) - 0.25*cosa_v(1,j)*(ut(1,j-1)+ut(2,j-1)+ut(1,j)+ut(2,j))` etc.
+  - Python `_d2a2c_vect` now applies the analogous formula at `vt[:, 0, j]`, `vt[:, n-1, j]`, `ut[:, i, 0]`, `ut[:, i, n-1]` for `j_face ∈ [2, n-2]` and `i_face ∈ [2, n-2]`, matching the Fortran restriction `max(3,js), min(npy-2,je+1)`.
+  - Halo columns `vt(0,j)`, `vt(npx,j)`, `ut(i,0)`, `ut(i,npy)` remain unreachable in Python's interior-only layout — that part plus the four corner 2x2 solves (sw_core.F90:739-811) stay deferred.
+  - Gated on `n >= 4` to guarantee the stencil fits (matches Fortran `max(3,js), min(npy-2,je+1)` giving no work for small npy).
+  - Affects only the non-duogrid FB path (`_c_sw` and `fv3_csw_tendencies`); production path uses A-L gradient and does not exercise `_d2a2c_vect`, so test-matrix metrics are unchanged.
+- **Validation**:
+  - 124 regression + audit-harness tests pass.
   - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged).
   - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
 
