@@ -755,6 +755,21 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
 3. **d_sw3 scalar KE sync vs Fortran BGRID_NE component sync**: fidelity deviation, but current approach matches Fortran's commented-out alternative path.  Full fix requires cross-axis vector rotation infrastructure (BGRID_NE vector at cube cross-axis seams requires 90° rotation with sign conventions our 6-face representation does not encode; naive swap without sign was tried in iter-36, found rotation-unsafe and reverted).
 4. ~~**pert_ppm iv=1 unconditional vs gated**~~ **RESOLVED (iter 63)** — `_ppm_1d` now honours Fortran's `.not. (bounded_domain .or. duogrid)` gate via `use_duogrid` flag propagated from `fv_tp_2d`.
 
+### Resolved in iteration 64 (2026-04-17): Ralph loop iteration 6
+- **`_ppm_1d` boundary dm-rescaling and al edge-correction gated on non-duogrid** ✅ (Codex new finding iter-64 #1)
+  - Fortran tp_core.F90:539-545 uses a single uniform-spacing `dm` formula at every cell and relies on MPI halo being at uniform spacing.  Non-uniform boundary geometry is handled later via explicit `bl/br/xt` rewrites (line 613+) — which are gated on `.not. (bounded_domain .or. duogrid)`.
+  - Python previously applied offset-derived `dm` rescaling and position-aware `al` edge corrections at boundary cells UNCONDITIONALLY.  For duogrid halo (kinked-to-extended remap places halo cells at correct physical positions) these corrections are redundant and not Fortran-faithful.
+  - Now gated on `not use_duogrid` alongside the iv=1 gate introduced in iter-63.  For duogrid the standard monotone `dm` + standard `al` reconstruction apply (matches Fortran uniform-spacing path); for non-duogrid the offset corrections continue to compensate for `interp_offsets` halo semantics.
+  - Numerical impact at non-duogrid defaults: zero (gate keeps the offset corrections active).
+- **Validation**:
+  - 92 regression tests pass.
+  - W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01 (unchanged).
+  - Ocean cross-grid rest state: 3 rest_state tests pass at machine precision.
+
+### Deferred from Codex iter-64 review:
+- **Finding #2 (d_sw3 `_ppm_transport_1d` non-duogrid edge repair)**: the Fortran ytp_v/xtp_u jord>=8 branch has explicit boundary `bl/br` rewrites, corner-state zeroing, and `pert_ppm(iv=-1)` at face-adjacent cells (sw_core.F90:3240-3317), but this block is gated on `(.not. bounded_domain .or. .not. duogrid_initialized)` — SKIPPED for duogrid.  Python's `_ppm_transport_1d` is only used inside `_bgrid_ke_transport` (d_sw3) which is itself only active via the FB path; for duogrid the Fortran edge repair is bypassed anyway.  Non-duogrid FB path is experimental and unstable regardless (see remaining item #2).  Documenting without implementation.
+- **Finding #3 (`cos_sg` midpoint geometry)**: Fortran `fv_grid_utils.F90:324-353` uses `mid_pt3_cart` for edges and `inner_prod(ec1,ec2)` at the A-grid centre; Python evaluates a centred-difference tangent field on a uniformly-spaced gnomonic supergrid.  Both approaches produce valid `cos_sg` metrics at the correct locations; empirically consistent at machine precision for rest states.  Not pursued — structural choice, not a formula bug.
+
 ### Session summary (2026-04-15): 10 commits
 1. FV3 operator fidelity: d2a2c_vect ut positions, vorticity flux boundaries, cell-centre vorticity in c_sw/csw, physical KE
 2. Production path: halo-exchanged corner winds, cell-centre tendency cancellation (2.6x better balance)

@@ -100,11 +100,18 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     off_left_d1 : (6, M) or None — depth=1 offset (outer halo)
     off_right_d1 : (6, M) or None — depth=1 offset (outer halo)
     use_duogrid : bool
-        If True, skip the ``pert_ppm(iv=1)`` face-boundary monotonicity
-        constraint.  Matches the Fortran gate
-        ``.not. (bounded_domain .or. duogrid)`` at tp_core.F90:612: when
-        duogrid provides real cross-face halo data, the extra limiter is
-        not required.
+        If True:
+          * skip the ``pert_ppm(iv=1)`` face-boundary monotonicity
+            constraint (matches Fortran ``.not. (bounded_domain .or.
+            duogrid)`` gate at tp_core.F90:612); and
+          * skip the offset-based dm rescaling and position-aware ``al``
+            edge corrections — when the duogrid kinked-to-extended remap
+            is in effect, halo cells already sit at the correct physical
+            positions so the standard uniform-spacing PPM formula is
+            Fortran-faithful.  Fortran keeps the standard dm formula at
+            all cells and instead handles any residual non-uniformity via
+            explicit ``bl/br`` rewrites (which we also skip for duogrid,
+            matching the Fortran gate).
 
     Returns
     -------
@@ -134,7 +141,13 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
             jnp.abs(dm_scaled), jnp.minimum(pmp, pmm))
         return dm_arr.at[:, idx, :].set(dm_lim)
 
-    if off_left is not None:
+    # Only apply dm-rescaling for non-uniform halo spacing when the halo is
+    # delivered via interp_offsets (non-duogrid).  In duogrid mode the
+    # kinked-to-extended remap already places halo cells at their correct
+    # positions, so the standard monotone dm is Fortran-faithful
+    # (tp_core.F90:539-545 uses a single uniform-spacing formula for all
+    # cells and relies on uniform halo spacing from MPI).
+    if not use_duogrid and off_left is not None:
         # dm at halo cell -1 (dm index 1): spans from halo(-2) to interior(0)
         if off_left_d1 is not None:
             span_halo = 2.0 - off_left_d1 + off_left
@@ -146,7 +159,7 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
         dm = _correct_dm(dm, 2, q_hi, q_lo, qm,
                          2.0 / jnp.maximum(span_int0, 0.5))
 
-    if off_right is not None:
+    if not use_duogrid and off_right is not None:
         # dm at halo cell n (dm index n+2): spans from interior(n-1) to halo(n+1)
         if off_right_d1 is not None:
             span_halo_r = 2.0 + off_right - off_right_d1
@@ -166,7 +179,8 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
     # The halo cell is at position (-1 + offset), not -1.
     # The face boundary edge is at position -0.5.
     # Correct edge value using actual distances to the boundary.
-    if off_left is not None:
+    # Skipped for duogrid (kinked-extended remap already aligns halo cells).
+    if not use_duogrid and off_left is not None:
         # Left face-boundary edge: al[:, 1, :] between halo(-1) and interior(0)
         q_hm1 = qe[:, 2, :]   # halo -1 at position (-1 + off0)
         q_i0 = qe[:, 3, :]    # interior 0 at position 0
@@ -188,7 +202,7 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
                               jnp.maximum(q_hm2, q_hm1))
             al = al.at[:, 0, :].set(al_L1)
 
-    if off_right is not None:
+    if not use_duogrid and off_right is not None:
         # Right face-boundary edge: al[:, n+1, :] between interior(n-1) and halo(n)
         q_inm1 = qe[:, n + 2, :]  # interior n-1
         q_hn = qe[:, n + 3, :]    # halo n at position (n + off0)
