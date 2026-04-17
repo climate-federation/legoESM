@@ -676,38 +676,59 @@ class TestSynchronizeCgridFluxes:
                     f"max |local - nbr| = {diff:.2e}"
                 )
 
-    def test_sync_is_average_of_pre_sync(self):
-        """Verify the sync formula: sync'd = 0.5*(fx_A + fy_B_rotated) at
-        each shared seam, matching the FV3 mpp_get_boundary + 0.5*(A+B)
-        pattern.  Checked explicitly at face 0 WEST ↔ face 3 EAST
-        (same-axis) and face 1 SOUTH ↔ face 5 EAST (cross-axis + reversed).
+    def test_sync_is_exact_average_at_every_seam(self):
+        """Bit-identical: sync'd boundary = 0.5*(pre_A + pre_B_rotated) for
+        EVERY one of the 24 (face, edge) pairs.  Matches FV3 dyn_core.F90
+        mpp_get_boundary(..., gridtype=CGRID_NE) + 0.5*(local + buffer).
+
+        This is tighter than test_post_sync_all_12_edges_agree, which only
+        checks that the two post-sync sides agree: here we check the
+        post-sync value matches the exact 0.5*(pre_A + pre_B_rotated)
+        formula with zero tolerance.
         """
         from legoesm.grids.halo import synchronize_cgrid_fluxes
         n = 6
         rng = np.random.default_rng(7)
+        fx_pre = jnp.asarray(rng.standard_normal((6, n + 1, n)))
+        fy_pre = jnp.asarray(rng.standard_normal((6, n, n + 1)))
+
+        fx_sync, fy_sync = synchronize_cgrid_fluxes(fx_pre, fy_pre, n)
+
+        def _boundary(fx_arr, fy_arr, face, edge):
+            if edge == WEST:
+                return fx_arr[face, 0, :]
+            if edge == EAST:
+                return fx_arr[face, n, :]
+            if edge == SOUTH:
+                return fy_arr[face, :, 0]
+            return fy_arr[face, :, n]
+
+        for face in range(6):
+            for edge in (WEST, EAST, SOUTH, NORTH):
+                nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+                local_pre = _boundary(fx_pre, fy_pre, face, edge)
+                nbr_pre = _boundary(fx_pre, fy_pre, nbr_face, nbr_edge)
+                if rev:
+                    nbr_pre = nbr_pre[::-1]
+                expected = 0.5 * (local_pre + nbr_pre)
+                actual = _boundary(fx_sync, fy_sync, face, edge)
+                # Bit-identical (atol=0) — the sync is implemented as a
+                # pure 0.5 * (a + b) JAX primitive, no rounding needed.
+                assert bool(jnp.array_equal(actual, expected)), (
+                    f"Sync value at face={face} edge={edge} differs from "
+                    f"0.5*(pre_local + pre_nbr_rotated). max diff = "
+                    f"{float(jnp.max(jnp.abs(actual - expected))):.2e}"
+                )
+
+    def test_sync_idempotent(self):
+        """A second sync on already-synced fluxes must be a no-op."""
+        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        n = 8
+        rng = np.random.default_rng(11)
         fx = jnp.asarray(rng.standard_normal((6, n + 1, n)))
         fy = jnp.asarray(rng.standard_normal((6, n, n + 1)))
 
-        # Record pre-sync boundaries
-        pre_f0_W = fx[0, 0, :]
-        pre_f3_E = fx[3, n, :]
-        pre_f1_S = fy[1, :, 0]
-        pre_f5_E_rev = fx[5, n, :][::-1]
-
-        fx_sync, fy_sync = synchronize_cgrid_fluxes(fx, fy, n)
-
-        # Same-axis seam (face 0 WEST ↔ face 3 EAST, no reversal)
-        expect_f0_W = 0.5 * (pre_f0_W + pre_f3_E)
-        np.testing.assert_allclose(
-            fx_sync[0, 0, :], expect_f0_W, atol=1e-14)
-        np.testing.assert_allclose(
-            fx_sync[3, n, :], expect_f0_W, atol=1e-14)
-
-        # Cross-axis seam (face 1 SOUTH ↔ face 5 EAST, reversed).
-        # sync'd at face 1 S = 0.5*(fy[1,:,0] + fx[5,n,:][::-1])
-        expect_f1_S = 0.5 * (pre_f1_S + pre_f5_E_rev)
-        np.testing.assert_allclose(
-            fy_sync[1, :, 0], expect_f1_S, atol=1e-14)
-        # And the corresponding f5 E is the same sequence reversed
-        np.testing.assert_allclose(
-            fx_sync[5, n, :], expect_f1_S[::-1], atol=1e-14)
+        fx1, fy1 = synchronize_cgrid_fluxes(fx, fy, n)
+        fx2, fy2 = synchronize_cgrid_fluxes(fx1, fy1, n)
+        assert bool(jnp.array_equal(fx1, fx2)), "Second sync changed fx"
+        assert bool(jnp.array_equal(fy1, fy2)), "Second sync changed fy"
