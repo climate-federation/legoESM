@@ -433,6 +433,52 @@ class TestD2a2cVectDuogridSeams(unittest.TestCase):
                             f"{name} eager vs jit differ by {d:.3e} "
                             f"(scale {scale:.3e})")
 
+    def test_constant_covariant_input_preserved(self):
+        """Constant u_d, v_d fields should give utmp equal to that
+        constant (after 2-point length-weighted D→A).  This catches
+        normalization bugs in the c2l_ord2-equivalent halo seed.
+
+        For u_d = c1 everywhere (c1 is a constant), the length-weighted
+        average (u_d*dx_j + u_d*dx_{j+1}) / (dx_j + dx_{j+1}) reduces to
+        c1 exactly.  The resulting contravariant ua then depends on
+        non-orthogonality but is bounded by the covariant value.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Uniform constant D-grid covariant wind
+        c1 = 5.0
+        u_d = jnp.full((6, n, n + 1), c1)
+        v_d = jnp.full((6, n + 1, n), c1)
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # utmp at interior cells equals c1 by length-weighted average.
+        # Contravariant ua = (utmp - vtmp * cos_theta) * rsin2 =
+        # c1 * (1 - cos_theta) * rsin2 = c1 * (1 - cos_theta) / sin²θ
+        # = c1 / (1 + cos_theta).  Bounded by c1 / min(1 + cos_theta).
+        # For reasonable cubed-sphere angles, cos_theta in [-0.5, 0.5],
+        # so ua bounded by c1 * 2 = 10.
+        ua_max = float(jnp.max(jnp.abs(ua)))
+        self.assertLess(ua_max, 3.0 * abs(c1),
+                        f"ua max {ua_max:.3f} >> 3*c1 ({3*abs(c1):.3f}) "
+                        f"— normalization bug (factor-of-2)?")
+
+        # uc should be similarly bounded.  The 4th-order A→C applied to
+        # a constant utmp field gives back utmp exactly (Lagrange
+        # polynomial reproduces constants).
+        uc_interior = uc[:, 1:n, :]  # avoid face boundaries
+        uc_max_int = float(jnp.max(jnp.abs(uc_interior)))
+        self.assertLess(abs(uc_max_int - abs(c1)), 0.5 * abs(c1),
+                        f"uc interior {uc_max_int:.3f} deviates from "
+                        f"expected ~{abs(c1):.3f} by > 50% "
+                        f"— constant-state not preserved")
+
     def test_solid_body_rotation_ut_sign_convention(self):
         """Solid-body rotation: ut should be eastward-positive everywhere.
 
