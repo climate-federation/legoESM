@@ -724,6 +724,7 @@ def create_cubed_sphere_panel(
         hx_ext_h2=_repad(_s(full.hx_ext_h2), halo=2),
         hy_ext_h2=_repad(_s(full.hy_ext_h2), halo=2),
         halo_interp_offsets_h2=None,  # not needed — wall BC
+        duogrid=None,  # regional panel: no cross-face duogrid data
     )
 
     if not return_cdgrid:
@@ -744,4 +745,24 @@ def create_cubed_sphere_panel(
     cdgrid_panel = jax.tree.map(_extract_face, full_cdgrid)
     # Replace the base grid with the panel (base is index 0 of the NamedTuple)
     cdgrid_panel = cdgrid_panel._replace(base=panel)
+
+    # Restore the FV3 bounded_domain rsin_u/rsin_v convention for the panel.
+    # The full-grid build applies the 1/sin panel-edge override only when
+    # bounded_domain is False (fv_arrays.F90:1512).  A single-face panel is
+    # a bounded_domain case (regional) and must use 1/sin² everywhere —
+    # matching fv_grid_utils.F90:509.  Undo the override that was inherited
+    # from the 6-face build.
+    import jax.numpy as _jnp
+    _EPS = float(_jnp.finfo(_jnp.float32).eps)
+    # cosa_u_panel was already extracted; recompute rsin_u = 1/sin² there.
+    sina_u_sq_panel = _jnp.maximum(
+        1.0 - cdgrid_panel.cosa_u**2, _EPS)
+    rsin_u_panel = 1.0 / _jnp.maximum(sina_u_sq_panel, _EPS)
+    sina_v_sq_panel = _jnp.maximum(
+        1.0 - cdgrid_panel.cosa_v**2, _EPS)
+    rsin_v_panel = 1.0 / _jnp.maximum(sina_v_sq_panel, _EPS)
+    cdgrid_panel = cdgrid_panel._replace(
+        rsin_u=rsin_u_panel.astype(cdgrid_panel.rsin_u.dtype),
+        rsin_v=rsin_v_panel.astype(cdgrid_panel.rsin_v.dtype),
+    )
     return panel, cdgrid_panel

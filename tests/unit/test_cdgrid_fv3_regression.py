@@ -266,6 +266,26 @@ class TestMetricConsistency(unittest.TestCase):
         self.assertLess(max_diff, 1e-6,
                         f"duogrid rsin_u not uniform 1/sin²: max diff = {max_diff:.2e}")
 
+    def test_rsin_u_single_face_panel_uniform_1_over_sin2(self):
+        """Single-face panel (regional / nested): bounded_domain=True, so
+        rsin_u = 1/sin² everywhere (no panel-edge 1/sin override)."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere_panel
+
+        panel, cdgrid_panel = create_cubed_sphere_panel(16, return_cdgrid=True)
+        _EPS = float(jnp.finfo(jnp.float32).eps)
+
+        sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid_panel.cosa_u**2, _EPS))
+        expected = 1.0 / jnp.maximum(sina_u**2, _EPS)
+        max_diff = float(jnp.max(jnp.abs(cdgrid_panel.rsin_u - expected)))
+        self.assertLess(max_diff, 1e-6,
+                        f"panel rsin_u not uniform 1/sin²: max diff = {max_diff:.2e}")
+        # Same check for rsin_v
+        sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid_panel.cosa_v**2, _EPS))
+        expected_v = 1.0 / jnp.maximum(sina_v**2, _EPS)
+        max_diff_v = float(jnp.max(jnp.abs(cdgrid_panel.rsin_v - expected_v)))
+        self.assertLess(max_diff_v, 1e-6,
+                        f"panel rsin_v not uniform 1/sin²: max diff = {max_diff_v:.2e}")
+
     def test_rarea_c_positive(self):
         """rarea_c should be positive everywhere."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere

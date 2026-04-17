@@ -778,6 +778,10 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
   - Codex stop-time review flagged that the initial gate reduced `bounded_domain` to `base.duogrid is None`, missing the `regional / nested` branch of `fv_arrays.F90:1512`.
   - In legoESM, `regional / nested` maps to a single-face cubed-sphere panel (`create_cubed_sphere_panel`, detected via `base.lat.shape[0] == 1` and by the `data.shape[0] == 1` branch in `pad_halo`).
   - Updated `cubed_sphere_cdgrid.py` to compute `bounded_domain = (base.duogrid is not None) or (base.lat.shape[0] == 1)` and skip the panel-edge `1/sin` override for either case.
+- **Follow-up #2: panel CD-grid extraction also honours bounded_domain** ✅
+  - Codex noted that `create_cubed_sphere_panel(return_cdgrid=True)` builds the full 6-face CD-grid first (where the non-duogrid override IS applied) and only then extracts face `f`.  The panel CD-grid therefore inherited the 1/sin edge override that Fortran would NOT apply for a regional panel.
+  - `create_cubed_sphere_panel` now post-processes the extracted cdgrid to recompute `rsin_u = rsin_v = 1/sin²` everywhere (bounded_domain convention).  Also fixed a pre-existing bug: the panel build was missing the required `duogrid=None` NamedTuple field.
+  - Added `test_rsin_u_single_face_panel_uniform_1_over_sin2` to lock this in.
 - **All 29 `test_fv3_audit_harness.py` tests now pass** against the Fortran-faithful formulation.
 - **Validation after the restore**:
   - 94 regression tests pass.
