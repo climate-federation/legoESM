@@ -670,9 +670,43 @@ Round 2: flagged plain 0.5*(u+u) seed for ext_vector_dgrid as only matching c2l_
 Round 3: caught factor-of-2 doubling bug (`2*(...)/(...)` gives 2x for constant fields; FV3's factor compensated by a11=0.5, but our pipeline has no such compensation). Fixed by dropping leading 2.
 Round 4: noted test_constant_covariant sliced uc[:, 1:n, :] avoiding seams. Fixed by adding explicit face-boundary uc/vc/ut/vt assertions.
 
-### Remaining unresolved (updated 2026-04-17, iter 60):
-1. **W2 v-wind visual artifact** (Ralph prompt blocker): architectural. Production path (A-L gradient, `fv3_sw_tendencies`) is not FV3-faithful. FB path IS FV3-faithful but unstable for W2 at C36. No formula-level fix found in iter-57's exhaustive analysis. The fundamental options are (a) fix FB stability beyond halo widening, or (b) rewrite the production path around FV3's c_sw/d_sw chain.
-2. **FB path stability on W2 C36**: iter-35 identified c_sw first-order upwind mass redistribution as root cause (13.78 m/step at C16). Not fixable by halo improvements alone; would require a higher-order (PPM) transport in c_sw, which Fortran also has. Deferred — no adversarial findings remain at the operator formula level for duogrid d2a2c_vect.
+### Iteration 61 (2026-04-17): c_sw/d_sw audit + FB stability diagnosis
+
+**User request**: "implement FV3 c_sw/d_sw (check we don't have existing code already)".
+
+**Code audit findings**: full c_sw/d_sw chain ALREADY IMPLEMENTED:
+- `_c_sw` (fv3_sw_core.py:1029) — C-grid half-step: d2a2c_vect + first-order upwind mass + KE + vorticity flux + KE gradient.
+- `_p_grad_c` — backward pressure gradient half-step.
+- `_d_sw_native` (fv3_sw_core.py:1720) — D-grid full-step: d_sw1 (ut/vt recompute) + d_sw3 (B-grid KE transport via PPM) + d_sw5 (corner divergence damping) + d_sw6 (wind update + vorticity damping).
+- `_d_sw1_recompute_ut_vt` (fv3_sw_core.py:43) — contravariant transport + boundary handling.
+- `_bgrid_ke_transport` (fv3_sw_core.py:1638) — B-grid KE at corners via PPM transport.
+- `_d_sw5_corner_divergence` (fv3_sw_core.py:800) — corner divergence damping.
+- `_del6_vt_flux` — vorticity damping.
+- `fv3_fb_sw_step` (fv3_sw_core.py:1835) — wires c_sw + p_grad_c + d_sw_native.
+
+**FB path audited line-by-line against Fortran** (sw_core.F90 c_sw, d_sw1-d_sw6). All operator formulas match the duogrid branch.  Iter-60's unified ext_vector halo path in d2a2c_vect_duogrid is FV3-equivalent.
+
+**c_sw mass error diagnostic** (1 step dt=300 on W2 balanced state):
+| Grid | max\|dh\| per step |
+|------|-------------------|
+| C8   | 16.0 m |
+| C16  | 40.0 m |
+| C24  | 64.6 m |
+| C36  | 102.0 m |
+
+The max per-step mass error GROWS with resolution (16 → 102), concentrated at face boundaries.  This is a halo-quality issue: the contravariant ut/vt from d2a2c_vect have residual divergence at face boundaries, and first-order upwind amplifies this.  FV3's ng=3 MPI halo gives better quality at face boundaries.
+
+**Why FV3 is stable where ours is not**: FV3's own c_sw uses the same first-order upwind, but has stronger halo quality (3-deep MPI with full vector exchange at staggered positions).  Our cross-axis ext_vector halo (iter-60) is a step closer but not equivalent.
+
+**Cosine bell FB path test** (dt=300, no damping, C16 alpha=0): h drops 17 m/step from 1000 → 827 over 10 steps.  Stable (no exponential growth) but mass drifts due to first-order upwind.  At dt=1800 with damping it blows up catastrophically by step 10 — too-large dt.
+
+**W2 FB path C36** (dt=300, default damping): still blows up after ~99 steps regardless of damping variant tested (vtdm4=0.06 nord_v=1/2, d4_bg=0.32).  Confirms the root cause is NOT divergence damping shortage.
+
+### Remaining unresolved (updated 2026-04-17, iter 61):
+1. **W2 v-wind visual artifact** (Ralph prompt blocker): architectural. Production path (A-L gradient, `fv3_sw_tendencies`) is not FV3-faithful. FB path IS FV3-faithful but unstable for W2 at C36. The fundamental path forward is to close the halo quality gap: ng=3-equivalent MPI halo beyond ext_vector's cross-axis handling.  Would require either (a) implementing FV3's 3-deep MPI DGRID_NE exchange in Python (significant infrastructure work), or (b) using shock-capturing limiters in c_sw's first-order upwind to suppress halo-induced noise.
+2. **FB path stability on W2 C36**: c_sw first-order upwind amplifies O(resolution)-scaling halo error at face boundaries.  Iter-60 improved halo via cross-axis ext_vector but insufficient for ng=3 quality.  Not fixable by pure operator-level fidelity — requires infrastructure improvements to halo width / quality.
+
+**No remaining formula-level fidelity issues** for c_sw, d_sw1-d_sw6, d2a2c_vect_duogrid at the duogrid branch level.  All operators verified against Fortran oracle.
 
 ### Session summary (2026-04-15): 10 commits
 1. FV3 operator fidelity: d2a2c_vect ut positions, vorticity flux boundaries, cell-centre vorticity in c_sw/csw, physical KE
