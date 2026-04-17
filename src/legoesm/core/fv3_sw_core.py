@@ -268,21 +268,29 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
 
     Matches the ``gridstruct%dg%is_initialized`` branch in FV3
     ``sw_core.F90:3419-3454``:
-    1. D-grid staggered halo exchange (pad_halo_dgrid)
-    2. 4th-order D→A averaging on haloed domain
-    3. Covariant→contravariant via cosa_s/rsin2 (FV3 line 3451-3452)
-    4. Scalar halo exchange of utmp/vtmp for A→C
-    5. 4th-order A→C interpolation
+    1. D-grid staggered halo exchange via ``ext_vector`` pipeline
+       (c2l_ord2 + scalar lat/lon halo + ``cubed_a2d_halo``).  This
+       provides u_d halo in BOTH axes (same-axis j-halo AND cross-axis
+       i-halo — the latter is iter-59's deferred "cross-axis D-grid halo"
+       piece required by the 4th-order A→C stencil).  Same for v_d.
+    2. 4th-order D→A averaging on haloed domain (full halo range).
+    3. Covariant→contravariant via cosa_s/rsin2 (FV3 line 3451-3452).
+    4. 4th-order A→C interpolation directly on utmp/vtmp halos computed
+       by 4th-order D→A on the fully-haloed u_d/v_d.  The separate
+       ``pad_halo_vector`` scalar exchange is eliminated because utmp
+       halos now match what Fortran's d2a2c_vect computes internally.
     """
-    from legoesm.grids.duogrid import pad_halo_dgrid
+    from legoesm.grids.duogrid import pad_halo_dgrid, ext_vector_dgrid
 
     n = cdgrid.n
     h = 2  # halo depth for 4th-order A→C stencil
     grid = cdgrid.base
     dg = grid.duogrid
 
-    # ---- Step 1: D-grid staggered halo exchange ----
-    # FV3 uses mpp_update_domains(DGRID_NE) before d2a2c_vect.
+    # ---- Step 1a: same-axis D-grid halo for the INTERIOR 4th-order D→A ----
+    # Needed j-halo=1 for u_d (edges j=-1..n+1), i-halo=1 for v_d.  This
+    # matches FV3's mpp_update_domains(DGRID_NE) before d2a2c_vect for
+    # cells within the interior loop range j=jsd+1..jed-1, i=isd..ied.
     u_d_pad, v_d_pad = pad_halo_dgrid(
         u_d, v_d,
         cdgrid.cos_angle_edge_x, cdgrid.sin_angle_edge_x,
@@ -290,44 +298,98 @@ def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
         duogrid=dg,
     )  # u_d_pad: (6, n, n+3), v_d_pad: (6, n+3, n)
 
-    # ---- Step 2: 4th-order D→A on haloed domain (FV3 sw_core.F90:3421-3435) ----
-    if n > 3:
-        utmp = (_A2 * (u_d_pad[:, :, :-3] + u_d_pad[:, :, 3:])
-                + _A1 * (u_d_pad[:, :, 1:-2] + u_d_pad[:, :, 2:-1]))  # (6, n, n)
-        vtmp = (_A2 * (v_d_pad[:, :-3, :] + v_d_pad[:, 3:, :])
-                + _A1 * (v_d_pad[:, 1:-2, :] + v_d_pad[:, 2:-1, :]))  # (6, n, n)
-    else:
-        utmp = 0.5 * (u_d_pad[:, :, 1:-1][:, :, :-1]
-                       + u_d_pad[:, :, 1:-1][:, :, 1:])
-        vtmp = 0.5 * (v_d_pad[:, 1:-1, :][:, :-1, :]
-                       + v_d_pad[:, 1:-1, :][:, 1:, :])
-
-    # ---- Step 3: Covariant→contravariant at cell centres ----
-    # FV3 sw_core.F90:3451-3452:
-    #   ua(i,j) = (utmp(i,j)-vtmp(i,j)*cosa_s(i,j)) * rsin2(i,j)
+    # ---- Step 1b: cross-axis D-grid halo via ext_vector pipeline ----
+    # FV3 relies on MPI's DGRID_NE exchange to fill u_d in BOTH axes before
+    # d2a2c_vect.  For duogrid the equivalent is ext_vector_dgrid:
+    #   c2l_ord2 (2nd-order D→A) → lat/lon halo (pad_halo with cube_rmp)
+    #   → cubed_a2d_halo (project A-grid lat/lon back to D-grid staggers)
+    # This populates u_d cross-axis (i-axis) halo and v_d cross-axis
+    # (j-axis) halo that same-axis pad_halo_dgrid cannot produce.
+    # Iter-59 identified this as the missing "cross-axis D-grid halo"
+    # required by the 4th-order A→C stencil.
+    #
+    # ext_vector_dgrid takes A-grid COVARIANT utmp/vtmp input (matching
+    # FV3's c2l_ord2 step which converts D-grid u/v to A-grid lat/lon
+    # then halos).  We use a simple 2-point D→A average here, matching
+    # FV3 c2l_ord2's length-weighted form in the limit of uniform dx/dy.
+    utmp_2nd = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])  # (6, n, n)
+    vtmp_2nd = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])  # (6, n, n)
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
-    ua = (utmp - vtmp * cos_sg5) * rsin2
-    va = (vtmp - utmp * cos_sg5) * rsin2
-
-    # ---- Step 4: VECTOR halo exchange for A→C ----
-    # utmp/vtmp are covariant grid-axis projections that change meaning
-    # across face boundaries — must use vector rotation (not scalar exchange).
-    utmp_pad, vtmp_pad = pad_halo_vector(
-        utmp, vtmp,
+    u_d_xa, v_d_xa = ext_vector_dgrid(
+        utmp_2nd, vtmp_2nd, dg,
         grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-        halo=h, duogrid=dg,
-    )  # each (6, n+4, n+4)
+        cos_sg5, rsin2,
+        halo=h,
+    )  # u_d_xa: (6, n+2h, n+2h-1), v_d_xa: (6, n+2h-1, n+2h)
 
-    # ---- Step 5: A→C interpolation — 4th-order ----
-    uc = (_A2 * (utmp_pad[:, :-3, h:-h] + utmp_pad[:, 3:, h:-h])
-          + _A1 * (utmp_pad[:, 1:-2, h:-h] + utmp_pad[:, 2:-1, h:-h]))
+    # Overwrite interior with EXACT original u_d/v_d — preserves bit-exact
+    # interior values (lat/lon-roundtrip introduces small error that is
+    # only correct at the halo cells we actually need).
+    # Index map: u_d_xa[:, i_pad, j_pad] has i_pad=i_cdgrid+h,
+    # j_pad=j_edge_cdgrid+h-1.  So u_d (i=0..n-1, j=0..n) maps to
+    # u_d_xa[:, h:h+n, h-1:h+n].
+    u_d_xa = u_d_xa.at[:, h:h + n, h - 1:h + n].set(u_d)
+    v_d_xa = v_d_xa.at[:, h - 1:h + n, h:h + n].set(v_d)
+
+    # ---- Step 2: 4th-order D→A on haloed domain (FV3 sw_core.F90:3421-3435) ----
+    # utmp(i_cell, j_cell) = a2*(u_d(i,j-1)+u_d(i,j+2)) + a1*(u_d(i,j)+u_d(i,j+1))
+    # Computed at ALL i (including i-halo cells -h..n+h-1) for j interior.
+    # From u_d_xa (shape (6, n+2h, n+2h-1), j-edge padded indices 0..n+2h-2
+    # corresponding to cdgrid edges -h+1..n+h-1).  For j_cell=0..n-1 the
+    # stencil reads j-edges -1..n+1 → padded indices h-2..h+n (for h=2:
+    # indices 0..n+2 out of 0..n+2, using n+3 edges).
+    if n > 3:
+        utmp_pad_i = (
+            _A2 * (u_d_xa[:, :, 0:n] + u_d_xa[:, :, 3:3 + n])
+            + _A1 * (u_d_xa[:, :, 1:1 + n] + u_d_xa[:, :, 2:2 + n])
+        )  # (6, n+2h, n) — i-halo full, j-interior only
+        vtmp_pad_j = (
+            _A2 * (v_d_xa[:, 0:n, :] + v_d_xa[:, 3:3 + n, :])
+            + _A1 * (v_d_xa[:, 1:1 + n, :] + v_d_xa[:, 2:2 + n, :])
+        )  # (6, n, n+2h) — j-halo full, i-interior only
+    else:
+        # Tiny grid fallback: 2-point average without 4th-order stencil
+        utmp_pad_i = 0.5 * (u_d_xa[:, :, 1:1 + n] + u_d_xa[:, :, 2:2 + n])
+        vtmp_pad_j = 0.5 * (v_d_xa[:, 1:1 + n, :] + v_d_xa[:, 2:2 + n, :])
+
+    # Interior utmp/vtmp: use same-axis-halo-based computation (preserves
+    # exact interior u_d/v_d in the 4th-order stencil — cross-axis path's
+    # interior is lat/lon-roundtripped from 2nd-order utmp_2nd).
+    if n > 3:
+        utmp_int = (_A2 * (u_d_pad[:, :, :-3] + u_d_pad[:, :, 3:])
+                    + _A1 * (u_d_pad[:, :, 1:-2] + u_d_pad[:, :, 2:-1]))  # (6, n, n)
+        vtmp_int = (_A2 * (v_d_pad[:, :-3, :] + v_d_pad[:, 3:, :])
+                    + _A1 * (v_d_pad[:, 1:-2, :] + v_d_pad[:, 2:-1, :]))  # (6, n, n)
+    else:
+        utmp_int = 0.5 * (u_d_pad[:, :, 1:-1][:, :, :-1]
+                          + u_d_pad[:, :, 1:-1][:, :, 1:])
+        vtmp_int = 0.5 * (v_d_pad[:, 1:-1, :][:, :-1, :]
+                          + v_d_pad[:, 1:-1, :][:, 1:, :])
+
+    # Overwrite interior i (cells 0..n-1) of utmp_pad_i with utmp_int.
+    # This ensures interior uc values are bit-for-bit identical to the
+    # pre-iter-60 behaviour — the cross-axis halo only affects uc at
+    # face-boundary u-edges where utmp's i-halo cells are read.
+    utmp_pad_i = utmp_pad_i.at[:, h:h + n, :].set(utmp_int)
+    vtmp_pad_j = vtmp_pad_j.at[:, :, h:h + n].set(vtmp_int)
+
+    # ---- Step 3: Covariant→contravariant at cell centres (interior only) ----
+    # FV3 sw_core.F90:3451-3452:
+    #   ua(i,j) = (utmp(i,j)-vtmp(i,j)*cosa_s(i,j)) * rsin2(i,j)
+    ua = (utmp_int - vtmp_int * cos_sg5) * rsin2
+    va = (vtmp_int - utmp_int * cos_sg5) * rsin2
+
+    # ---- Step 4: 4th-order A→C interpolation ----
+    # uc reads utmp_pad_i at i=[-h, -h+1, ..., n, n+h-1] (full i-halo) and
+    # j-interior only — utmp_pad_i already has the right shape.
+    uc = (_A2 * (utmp_pad_i[:, :-3, :] + utmp_pad_i[:, 3:, :])
+          + _A1 * (utmp_pad_i[:, 1:-2, :] + utmp_pad_i[:, 2:-1, :]))  # (6, n+1, n)
 
     ut = (uc - v_d * cdgrid.cosa_u) * cdgrid.rsin_u
 
-    vc = (_A2 * (vtmp_pad[:, h:-h, :-3] + vtmp_pad[:, h:-h, 3:])
-          + _A1 * (vtmp_pad[:, h:-h, 1:-2] + vtmp_pad[:, h:-h, 2:-1]))
+    vc = (_A2 * (vtmp_pad_j[:, :, :-3] + vtmp_pad_j[:, :, 3:])
+          + _A1 * (vtmp_pad_j[:, :, 1:-2] + vtmp_pad_j[:, :, 2:-1]))  # (6, n, n+1)
 
     vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
 
