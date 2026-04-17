@@ -774,6 +774,10 @@ The max per-step mass error GROWS with resolution (16 → 102), concentrated at 
   - Iter-17 had deliberately flattened this to `1/sin² everywhere` as a numerical-smoothness choice, but that is NOT Fortran-faithful.
   - Restored the Fortran convention in `cubed_sphere_cdgrid.py:745-762`: apply the `1/sin` panel-edge override ONLY when `base.duogrid is None` (non-duogrid cubed sphere).  Matches Fortran `bounded_domain = (regional .or. nested .or. duogrid)` gating at fv_arrays.F90:1512.
   - Metric regression tests updated to match the mixed convention (interior 1/sin², edges 1/sin) for non-duogrid, uniform 1/sin² for duogrid.
+- **Follow-up: `bounded_domain` gate extended to include single-face panels** ✅
+  - Codex stop-time review flagged that the initial gate reduced `bounded_domain` to `base.duogrid is None`, missing the `regional / nested` branch of `fv_arrays.F90:1512`.
+  - In legoESM, `regional / nested` maps to a single-face cubed-sphere panel (`create_cubed_sphere_panel`, detected via `base.lat.shape[0] == 1` and by the `data.shape[0] == 1` branch in `pad_halo`).
+  - Updated `cubed_sphere_cdgrid.py` to compute `bounded_domain = (base.duogrid is not None) or (base.lat.shape[0] == 1)` and skip the panel-edge `1/sin` override for either case.
 - **All 29 `test_fv3_audit_harness.py` tests now pass** against the Fortran-faithful formulation.
 - **Validation after the restore**:
   - 94 regression tests pass.

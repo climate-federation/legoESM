@@ -746,13 +746,18 @@ def create_cubed_sphere_cdgrid(
     #   - Interior u/v faces: rsin_u = 1/sina_u² (line 509, 517)
     #   - Panel edges (i=1 or i=npx for rsin_u; j=1 or j=npy for rsin_v):
     #     rsin_u = 1/sina_u (lines 548-561) — ONLY when .not. bounded_domain
-    #     (i.e. non-duogrid; for duogrid/bounded_domain the interior 1/sin²
-    #     formula applies everywhere).
     # Gating matches Fortran bounded_domain = (regional .or. nested .or.
-    # duogrid) at fv_arrays.F90:1512.
+    # duogrid) at fv_arrays.F90:1512.  In legoESM:
+    #   - duogrid → base.duogrid is not None
+    #   - regional/nested → single-face panel (base.lat.shape[0] == 1; see
+    #     create_cubed_sphere_panel and the `data.shape[0] == 1` branch in
+    #     pad_halo).  For a single-face panel the outer perimeter is a
+    #     physical wall, not a cube seam, and panel-edge rsin is not used.
     rsin_u = 1.0 / jnp.maximum(sina_u**2, _EPS)
     rsin_v = 1.0 / jnp.maximum(sina_v**2, _EPS)
-    if base.duogrid is None:
+    _is_single_face = base.lat.shape[0] == 1
+    _bounded_domain = (base.duogrid is not None) or _is_single_face
+    if not _bounded_domain:
         # Panel-edge override: replace 1/sin² with 1/sin at i==0 and i==n
         # for rsin_u, and j==0 and j==n for rsin_v.
         rsin_u_edge = 1.0 / jnp.sign(sina_u) / jnp.maximum(jnp.abs(sina_u), _EPS)
