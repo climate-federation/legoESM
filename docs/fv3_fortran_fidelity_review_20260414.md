@@ -431,8 +431,27 @@ F3-5. ~~d2a2c_vect corner 2×2 solve~~ — present in `_d_sw1_recompute_ut_vt` (
 - **Code cleanup**: removed unused ke_upwind() call in fv3_csw_tendencies (dead code — physical-frame KE used instead of contravariant upwind formula).
 - **All 6 rest state paths verified**: production/CSW/FB × no-DG/DG all give machine-precision (≤2.7e-17) rest state preservation.
 
+### W2 v-wind investigation (iteration 57, 2026-04-17) — BLOCKING ON INFRASTRUCTURE:
+**Root cause**: Production path A-L gradient amplifies halo error at face boundaries (±0.55 m/s at C36 after 1 day). FV3 oracle uses FB stepping with C-grid gradient that avoids this. FB path requires ng≥2 D-grid halo exchange (currently ng=1).
+
+**Exhaustive analysis** — all formula-level approaches tested and failed:
+| Approach | Result | Why |
+|----------|--------|-----|
+| 2-pt gradient, no correction | ±125 m/s, blows up | Missing non-orthogonality |
+| 2-pt gradient + correction | NaN | Cross-stagger interp reintroduces halo error |
+| Boundary gradient extrapolation | ±1.5 m/s (3x worse) | First-order truncation larger than halo error |
+| Cross-face vector tendency sync | ±0.8 m/s (worse) | Errors not antisymmetric |
+| Corner gradient scalar sync | No change | Cross-axis coord rotation corrupts gradient |
+| Cell-centre gradient + matrix | ±0.8 m/s (worse) | Breaks gradient-vorticity consistency |
+| 4x stronger damping | 2% improvement | Structural error, not a dampable mode |
+| FB path + duogrid | h_err=17047/day | c_sw mass transport accumulates 58 m/step |
+| FB path + vorticity damping | 17% improvement | Insufficient to control mode |
+| FB path + dt=60 (5x smaller) | WORSE (57607/day) | More steps = more accumulated error |
+| FB path + d4_bg=1.0 | NaN (damping CFL) | del-4 damping itself destabilizes |
+
+**Required infrastructure fix**: Extend `pad_halo_dgrid` to support ng≥2 using existing duogrid k2e coefficients (which already support ng=3). This would give the FB path's d2a2c_vect sufficient halo quality to match FV3's ng=3 MPI exchange, stabilizing the mass transport at face boundaries.
+
 ### Pre-existing issues (not caused by these changes):
-- Williamson 2 v-wind shows cube-face imprint at t>0.5d — IDENTICAL in original code (verified by checkout to ebd6e43). Root cause is ARCHITECTURAL: production path computes pressure gradient at D-grid corners with haloed data, while Fortran FV3 uses FB stepping where pressure gradient is at C-grid (well-conditioned 2-point stencil). Eliminating this requires stabilizing the FB c_sw path, which is blocked by the first-order upwind mass transport + cubed sphere non-zero transport velocity divergence issue.
 - Ocean rest state eta shows structured face-boundary patterns at early timesteps (O(0.01 m) scale), also pre-existing. The global mean drift is 1e-18 (machine epsilon) but local artifacts have face-boundary structure.
 - Full 5-day Williamson 2 NaN blowup at C36
 - Adjoint grad/div consistency test failure on cubed sphere
