@@ -761,6 +761,62 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         "fy with corner NaN differs from baseline — corner "
                         "ghosts are being read somewhere in the pipeline")
 
+    def test_deln_flux_output_unchanged_when_corner_ghosts_nan(self):
+        """Iter-70: Codex flagged _deln_flux for missing Fortran
+        direction-specific copy_corners (tp_core.F90:1267, 1280).
+        Same end-to-end mock-patch test: poison cube-vertex corners in
+        pad_halo and verify _deln_flux output is bit-identical to the
+        unpatched baseline.  Proves the Python stencil does not
+        dereference cube-vertex corners (same invariant as fv_tp_2d).
+        """
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core import fv_tp_2d as fv_tp_2d_mod
+
+        n = 8
+        grid = create_cubed_sphere(n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        q = jnp.ones((6, n, n)) * 10.0 + jnp.sin(
+            jnp.linspace(0, 3.14, n))[None, None, :]
+        fx = jnp.zeros((6, n + 1, n))
+        fy = jnp.zeros((6, n, n + 1))
+
+        # Baseline: _deln_flux at nord=1 (del-4) — the case where Fortran
+        # actually calls copy_corners.
+        fx_base, fy_base = fv_tp_2d_mod._deln_flux(
+            1, 0.001, q, fx, fy, cdgrid)
+
+        real_pad_halo = fv_tp_2d_mod.pad_halo
+
+        def poisoned(q, halo=1, interp_offsets=None, duogrid=None):
+            res = real_pad_halo(q, halo=halo, interp_offsets=interp_offsets,
+                                duogrid=duogrid)
+            if res.ndim == 3 and res.shape[0] == 6:
+                size = res.shape[1]
+                n_int = size - 2 * halo
+                h = halo
+                for (i_lo, i_hi) in [(0, h), (n_int + h, n_int + 2 * h)]:
+                    for (j_lo, j_hi) in [(0, h), (n_int + h, n_int + 2 * h)]:
+                        res = res.at[:, i_lo:i_hi, j_lo:j_hi].set(jnp.nan)
+            return res
+
+        with mock.patch.object(fv_tp_2d_mod, 'pad_halo', poisoned):
+            fx_poison, fy_poison = fv_tp_2d_mod._deln_flux(
+                1, 0.001, q, fx, fy, cdgrid)
+
+        self.assertTrue(bool(jnp.all(jnp.isfinite(fx_poison))),
+                        "_deln_flux fx has NaN — stencil reads corner cells")
+        self.assertTrue(bool(jnp.all(jnp.isfinite(fy_poison))),
+                        "_deln_flux fy has NaN — stencil reads corner cells")
+        self.assertTrue(bool(jnp.array_equal(fx_poison, fx_base)),
+                        "_deln_flux fx differs from baseline when corner "
+                        "blocks poisoned — corner ghosts used somewhere")
+        self.assertTrue(bool(jnp.array_equal(fy_poison, fy_base)),
+                        "_deln_flux fy differs from baseline when corner "
+                        "blocks poisoned — corner ghosts used somewhere")
+
 
 class TestD2a2cVectNonDuogridAdjacentStrip(unittest.TestCase):
     """Verify iter-68 4-point adjacent-strip recomputation.
