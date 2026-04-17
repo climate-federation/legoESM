@@ -818,6 +818,82 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         "blocks poisoned — corner ghosts used somewhere")
 
 
+class TestSupergridMetrics(unittest.TestCase):
+    """Iter-44 added rdxa/rdya from supergrid as FV3-faithful metrics.
+    Verify they are consistent with the supergrid construction and have
+    the expected numerical properties.
+
+    Fortran fv_grid_tools.F90 defines dxa as face-to-face cell widths in
+    the i-direction (cell width at the A-grid cell centre).
+    rdxa = 1/dxa.  Used in sw_core.F90:850 for Courant number:
+    crx = dt*ut*rdxa(upwind_cell).
+    """
+
+    def test_rdxa_rdya_positive_finite(self):
+        """rdxa and rdya must be strictly positive and finite."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        grid = create_cubed_sphere(16, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        self.assertTrue(bool(jnp.all(cdgrid.rdxa > 0)),
+                        "rdxa has non-positive values")
+        self.assertTrue(bool(jnp.all(cdgrid.rdya > 0)),
+                        "rdya has non-positive values")
+        self.assertTrue(bool(jnp.all(jnp.isfinite(cdgrid.rdxa))),
+                        "rdxa has non-finite values")
+        self.assertTrue(bool(jnp.all(jnp.isfinite(cdgrid.rdya))),
+                        "rdya has non-finite values")
+
+    def test_rdxa_sphere_average_matches_radius(self):
+        """On a unit-sphere cubed-sphere grid, the mean 1/rdxa should be
+        approximately R/n per cell.  A C16 grid has ~6*(2*pi*R)/24 cells
+        spanning each equatorial edge; the average dxa (= 1/rdxa) should
+        be near R*pi/(2*n) for the equatorial latitudes."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        n = 16
+        R = 6.371229e6
+        grid = create_cubed_sphere(n, radius=R, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # dxa at equatorial row of face 0 (equator-centred face)
+        dxa_equator = 1.0 / cdgrid.rdxa[0, :, n // 2]
+        mean_dxa = float(jnp.mean(dxa_equator))
+        # Expected: each face edge spans 90° of great circle ≈ R*pi/2,
+        # divided into n cells → R*pi/(2n).
+        expected = R * jnp.pi / (2 * n)
+        # Allow 10% tolerance because face edge is not exactly a great
+        # circle (gnomonic projection distorts).
+        self.assertAlmostEqual(
+            mean_dxa / expected, 1.0, delta=0.1,
+            msg=f"dxa mean at equator = {mean_dxa:.2e}, "
+                f"expected ~{float(expected):.2e}")
+
+    def test_rdxa_rdya_near_equality_on_equatorial_face(self):
+        """Face 0 is centred on the equator; away from its corners,
+        dxa ≈ dya (both are close to the local grid spacing).  At the
+        centre cell, rdxa and rdya should match to within 1%.  At corner
+        cells they diverge because of cubed-sphere face-corner geometry,
+        which is allowed."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Centre cell of face 0
+        ic, jc = n // 2, n // 2
+        ratio = float(cdgrid.rdxa[0, ic, jc] / cdgrid.rdya[0, ic, jc])
+        self.assertAlmostEqual(
+            ratio, 1.0, delta=0.01,
+            msg=f"rdxa/rdya at face 0 centre = {ratio:.4f}, "
+                f"expected ≈ 1.0")
+
+
 class TestD2a2cVectNonDuogridAdjacentStrip(unittest.TestCase):
     """Verify iter-68 4-point adjacent-strip recomputation.
 
