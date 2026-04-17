@@ -1140,12 +1140,8 @@ def cdgrid_momentum_tendencies(
     """
     is_3d = u_d.ndim == 4
 
-    # 1. Vorticity at cell centres
+    # 1. Relative vorticity at cell centres (just ζ, no f yet)
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)
-    if is_3d:
-        zeta_abs = zeta
-    else:
-        zeta_abs = zeta + cdgrid.base.f
 
     # 2. KE at cell centres from D-grid corners (orthogonal basis)
     u_cc, v_cc = dgrid_to_center_vector(u_d, v_d)
@@ -1162,8 +1158,19 @@ def cdgrid_momentum_tendencies(
         B = KE + g * (h_or_p + h_s_or_p_prime)
         dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
-    # 4. Vorticity at corners
-    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
+    # 4. Absolute vorticity at corners.  Interpolate only the RELATIVE
+    # part ζ from cell centres to corners; add the planetary part f
+    # DIRECTLY at corners via cdgrid.f_corner (= 2Ω sin(lat_corner))
+    # instead of interp(cdgrid.base.f) = interp(2Ω sin(lat_cc)).  The
+    # latter adds an O(dx²) interpolation error from sin(lat)
+    # non-linearity; the former uses the exact f at corner positions.
+    # Matches FV3 convention where f0 is stored at B-grid corners
+    # (sw_core.F90 — absolute vorticity wk = vort + f0 at corners).
+    if is_3d:
+        zeta_corner = _interp_center_to_corner(zeta, cdgrid)
+    else:
+        zeta_corner = (_interp_center_to_corner(zeta, cdgrid)
+                       + cdgrid.f_corner)
 
     # 5. Tendencies (gradient already in physical e_x / e_perp coordinates)
     if is_3d:
