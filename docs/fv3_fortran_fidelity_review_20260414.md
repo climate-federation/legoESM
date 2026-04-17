@@ -610,6 +610,21 @@ Four items found, all resolved as non-bugs or documented limitations:
 
 **No remaining formula-level fidelity issues found by adversarial review.**
 
+### Resolved in iteration 58 (2026-04-17): Ralph loop iteration 1
+- **`pad_halo_dgrid` extended to support halo=2** ✅
+  - Added `halo` parameter to `pad_halo_dgrid` in `src/legoesm/grids/duogrid.py:1013`
+  - Supports `halo=1` (default, original behavior) and `halo=2` (new infrastructure)
+  - For halo=2, neighbor edges at both depth=1 (`nbr[..., -2]`) and depth=2 (`nbr[..., -3]`) are pulled per-edge, rotated via the exact edge angles, and written to the outer and inner halo layers respectively
+  - Verified: halo=1 output is bitwise-identical to the halo=2 inner layer (shape n+3 vs n+5 padding); neighbor connectivity and index reversal preserved
+  - Completes the first half of the iteration-57 "required infrastructure fix" (ng≥2 D-grid halo)
+  - All 86 regression tests pass; W2/W5/cosine-bell metrics unchanged (L2=1.53e-03, drift=1.42e-05, L1=1.20e-01)
+  - Note: wiring this into `_d2a2c_vect_duogrid` requires also padding u_d in the i-axis (and v_d in the j-axis) for the 4th-order A→C stencil; that half of the infrastructure is deferred until a cross-axis D-grid halo is added
+
+### Observed regression outside the fidelity path (iteration 58 investigation):
+- Enabling `use_duogrid=True` on the production path (`FV3EdgeShallowWaterModel` → `fv3_sw_tendencies`) DESTABILIZES Williamson 2 at C36: `max|v_north|=347 m/s` vs `0.557 m/s` for the default non-duogrid path. Root cause isolated to `synchronize_cgrid_fluxes` interacting with PPM boundary reconstruction: the sync replaces the boundary flux with `0.5*(local + neighbor)` while the adjacent interior flux is left untouched, which breaks local mass balance in the A-L gradient path. Disabling flux sync on the duogrid production path gives `max|v_north|=3.14 m/s` (stable but worse than non-duogrid).
+- The production path A-L gradient is NOT FV3-faithful (FV3 uses c_sw + d_sw chain). The test matrix's default non-duogrid configuration is currently the best-performing path available for Williamson 2 v-wind artifacts at 0.557 m/s.
+- Not a regression introduced this iteration; pre-existing behaviour. Documented here to explain why `use_duogrid=True` is not simply switched on in the production test matrix.
+
 ### Session summary (2026-04-15): 10 commits
 1. FV3 operator fidelity: d2a2c_vect ut positions, vorticity flux boundaries, cell-centre vorticity in c_sw/csw, physical KE
 2. Production path: halo-exchanged corner winds, cell-centre tendency cancellation (2.6x better balance)
