@@ -1149,71 +1149,88 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         self.assertEqual(uc.shape, (6, n + 1, n))
         self.assertEqual(vc.shape, (6, n, n + 1))
 
-    def test_d2a2c_vect_reachability_gated_behind_experimental_flag(self):
-        """Iter-128 addendum: pin the reachability story to configuration.
+    def test_d2a2c_vect_unreached_by_default_fv3edge_step(self):
+        """Iter-129 followup (Priority 3): END-TO-END runtime proof
+        that the DEFAULT production path never reaches `_d2a2c_vect`.
 
-        The claim in the priority-3 architectural note is that the
-        default production config does NOT reach `_d2a2c_vect`.  That
-        rests on two invariants: (1) the default
-        `CDGridShallowWaterConfig.use_experimental_csw` is False, so
-        `FV3EdgeShallowWaterModel.step` does NOT dispatch to
-        `fv3_csw_tendencies`; and (2) `_d2a2c_vect` is only called
-        from `_c_sw` and `fv3_csw_tendencies` inside
-        `legoesm.core.fv3_sw_core`.
+        The iter-128 claim in docs/fv3_fortran_fidelity_review.md is
+        that the default `FV3EdgeShallowWaterModel` + default
+        `CDGridShallowWaterConfig` never calls `_d2a2c_vect` and
+        therefore does not expose the non-duogrid cube-vertex gap.
+        An earlier AST-only test proved which functions STATICALLY
+        name `_d2a2c_vect`, but did not prove that the DEFAULT step
+        avoids all of them at RUNTIME.
 
-        If either invariant is silently flipped — e.g., the default
-        becomes `use_experimental_csw=True`, or a new caller of
-        `_d2a2c_vect` appears — the "default production is unaffected"
-        claim in docs/fv3_fortran_fidelity_review.md no longer holds.
-        This test fails in that case, prompting re-evaluation of the
-        gap.
+        This test installs a call-counting tripwire on
+        `legoesm.core.fv3_sw_core._d2a2c_vect`, runs one step of
+        `FV3EdgeShallowWaterModel.step` under the default config, and
+        asserts the tripwire count is zero.  If anyone adds a new
+        caller of `_d2a2c_vect` (direct or transitive) to the default
+        step — e.g. by flipping `use_experimental_csw` to True by
+        default, or by wiring FB-chain helpers into the default
+        tendency function — the tripwire fires and the test fails
+        with a pointer to re-evaluate the priority-3 claim.
         """
-        import ast
-        import inspect
-        import pathlib
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            FV3EdgeShallowWaterModel,
+            FV3EdgeShallowWaterState,
             CDGridShallowWaterConfig,
         )
+        import legoesm.core.fv3_sw_core as sw_mod
 
-        # Invariant 1: default use_experimental_csw is False.
+        n = 8
+        grid = create_cubed_sphere(n)
+        config = CDGridShallowWaterConfig()  # DEFAULT config
+
+        # Guard: the claim rests on the default being
+        # use_experimental_csw=False.  If the default flips to True,
+        # fail explicitly BEFORE the tripwire fires, so the error
+        # message is actionable.
         self.assertFalse(
-            CDGridShallowWaterConfig().use_experimental_csw,
+            config.use_experimental_csw,
             "CDGridShallowWaterConfig.use_experimental_csw default "
-            "flipped to True.  This routes production calls through "
-            "fv3_csw_tendencies → _d2a2c_vect, which exposes the "
-            "non-duogrid cube-vertex gap (priority 3).  Either revert "
-            "the default or fully port the Fortran overrides at "
-            "sw_core.F90:3527-3545 and 3620-3640.",
+            "flipped to True.  The iter-128 priority-3 claim assumes "
+            "False; either revert the default or fully port Fortran "
+            "sw_core.F90:3527-3545 and 3620-3640 overrides.",
         )
 
-        # Invariant 2: `_d2a2c_vect` (not duogrid variant) is only
-        # called from `_c_sw` and `fv3_csw_tendencies`.  Parse the
-        # module AST and collect all Call nodes whose target is the
-        # bare name `_d2a2c_vect`; then look up which enclosing
-        # function contains each call.
-        repo_root = pathlib.Path(__file__).resolve().parents[2]
-        sw_core_path = repo_root / "src" / "legoesm" / "core" / "fv3_sw_core.py"
-        self.assertTrue(sw_core_path.exists(),
-                        f"expected fv3_sw_core.py at {sw_core_path}")
-        src = sw_core_path.read_text()
-        tree = ast.parse(src)
-        callers: set[str] = set()
-        for func in ast.walk(tree):
-            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for node in ast.walk(func):
-                if (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id == "_d2a2c_vect"):
-                    callers.add(func.name)
-        expected_callers = {"_c_sw", "fv3_csw_tendencies"}
+        model = FV3EdgeShallowWaterModel(grid, config)
+        state = FV3EdgeShallowWaterState(
+            h=jnp.full((6, n, n), 1000.0),
+            u_d=jnp.zeros((6, n, n + 1)),
+            v_d=jnp.zeros((6, n + 1, n)),
+            h_s=jnp.zeros((6, n, n)),
+        )
+        model.set_initial_mass(state)
+
+        tripwire_count = {"n": 0}
+        orig_d2a2c = sw_mod._d2a2c_vect
+
+        def tripwire(*args, **kwargs):
+            tripwire_count["n"] += 1
+            return orig_d2a2c(*args, **kwargs)
+
+        # Monkeypatch at module level so anyone importing from
+        # `legoesm.core.fv3_sw_core` sees the tripwire.  End-to-end
+        # call to `model.step` JIT-traces the whole tendency + time
+        # step; if any path through the default config calls
+        # `_d2a2c_vect`, the tripwire fires during tracing.
+        with mock.patch.object(sw_mod, "_d2a2c_vect", tripwire):
+            new_state = model.step(state, 1.0)
+            # Force evaluation — JIT traces on first call.
+            new_state.h.block_until_ready()
+
         self.assertEqual(
-            callers, expected_callers,
-            f"Callers of `_d2a2c_vect` in fv3_sw_core.py changed: "
-            f"expected {sorted(expected_callers)}, found {sorted(callers)}.  "
-            f"The priority-3 reachability claim in "
-            f"docs/fv3_fortran_fidelity_review.md names these specific "
-            f"callers; update both the claim and this test together.",
+            tripwire_count["n"], 0,
+            f"Default FV3EdgeShallowWaterModel.step called "
+            f"`_d2a2c_vect` {tripwire_count['n']} times.  The "
+            f"priority-3 claim in docs/fv3_fortran_fidelity_review.md "
+            f"that the default production path does not reach "
+            f"`_d2a2c_vect` is FALSE.  Either revert the change that "
+            f"added the call, or fully port the Fortran cube-vertex "
+            f"overrides at sw_core.F90:3527-3545 and 3620-3640.",
         )
 
     def test_rsin2_corner_matches_fortran_at_interior(self):
