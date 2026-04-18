@@ -77,6 +77,10 @@ These require infrastructure-level rework beyond the priority list.
     3. Cell-centre-to-D-grid projection — final step `du_d_dt = 0.5*(du_cc_pad[1:-1,:-1] + du_cc_pad[1:-1,1:])` is symmetric in i but potentially asymmetric under N/S face rotation.
 
     Concrete actionable target for future architectural work on item #1.
+  - **Root cause narrowed further (iter-121)**: computed tendency fields (`dh_dt`, `du_d_dt`, `dv_d_dt`) directly on the W2 balanced initial state via `fv3_sw_tendencies` — no time integration.  Results:
+    - **Momentum tendencies are N-S SYMMETRIC at t=0**: `du_d_dt` max 1.32e-5 on both face 4 and face 5 (identical); `dv_d_dt` means opposite sign but equal magnitude (±9.8e-12).
+    - **Mass tendency `dh_dt` has a 16% N-S ASYMMETRY**: face 4 max 3.67e-4, face 5 max 4.26e-4.  Equatorial faces 0-3 are identical (3.31e-4 each).
+  - **Conclusion**: the asymmetry originates in the **mass flux divergence path** (`cgrid_mass_flux_divergence` inside `fv3_sw_tendencies`), NOT in the momentum tendency path.  Since `cgrid_mass_flux_divergence` uses PPM reconstruction (`_ppm_reconstruct_1d`) on cell-centred h, the N-S asymmetry most likely comes from either (a) the PPM boundary handling at polar-face halo edges, or (b) the `fv3_cc2c` cell-centre-to-C-grid projection which uses different halo neighbours on face 4 vs face 5.  The 16% asymmetry in dh_dt accumulates over time to drive h asymmetry → pressure-gradient asymmetry → momentum asymmetry.
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
