@@ -1143,6 +1143,17 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                     v_reg = _regrid_2d(v_raw, lon_deg, lat_deg, coord_kind,
                                        ocean_mask=_lm)
 
+                    # For C-grid sources (latlon ocean), u and v sit at
+                    # different stagger positions with different shapes
+                    # (e.g. u at u-faces, v at v-faces).  Crop both to
+                    # the common min-shape for the quiver overlay so
+                    # downstream meshgrid / mask broadcasting matches.
+                    if u_reg.shape != v_reg.shape:
+                        min_r = min(u_reg.shape[0], v_reg.shape[0])
+                        min_c = min(u_reg.shape[1], v_reg.shape[1])
+                        u_reg = u_reg[:min_r, :min_c]
+                        v_reg = v_reg[:min_r, :min_c]
+
                     if domain_extent is not None and coord_kind not in ("latlon", "gaussian"):
                         lat_1d = np.linspace(-90, 90, u_reg.shape[0])
                         lon_1d = np.linspace(0, 360, u_reg.shape[1])
