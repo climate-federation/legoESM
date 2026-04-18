@@ -319,15 +319,18 @@ def mpas_ocean_baroclinic_tendencies(
         dS_dt_3d = dS_dt_3d.at[:, 0].add(dS_fw * mask)
 
     # ---- Sponge layer relaxation ----
+    # Cast sponge arrays to state dtype to prevent float64 promotion when
+    # the precision policy stores state in float32 (crashes barotropic scan).
     if sponge is not None:
-        gamma_3d = sponge.gamma[:, jnp.newaxis]  # (nCells, 1)
-        dT_dt_3d = dT_dt_3d + gamma_3d * (sponge.T_ref - T_3d) * mask[:, jnp.newaxis]
-        dS_dt_3d = dS_dt_3d + gamma_3d * (sponge.S_ref - S_3d) * mask[:, jnp.newaxis]
+        _dt = T_3d.dtype
+        gamma_3d = sponge.gamma.astype(_dt)[:, jnp.newaxis]  # (nCells, 1)
+        dT_dt_3d = dT_dt_3d + gamma_3d * (sponge.T_ref.astype(_dt) - T_3d) * mask[:, jnp.newaxis]
+        dS_dt_3d = dS_dt_3d + gamma_3d * (sponge.S_ref.astype(_dt) - S_3d) * mask[:, jnp.newaxis]
         # Edge velocity sponge (if reference velocity provided)
         if sponge.u_ref is not None:
-            gamma_edge = 0.5 * (sponge.gamma[c1] + sponge.gamma[c2])
+            gamma_edge = 0.5 * (sponge.gamma.astype(_dt)[c1] + sponge.gamma.astype(_dt)[c2])
             gamma_edge_3d = gamma_edge[:, jnp.newaxis]
-            du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref - u_3d) * edge_mask[:, jnp.newaxis]
+            du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref.astype(_dt) - u_3d) * edge_mask[:, jnp.newaxis]
 
     return MPASOceanTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",

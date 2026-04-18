@@ -534,16 +534,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dS_dt = dS_dt + phys.dS_dt.data
 
     # --- 10c. Sponge layer relaxation ---
+    # Cast sponge arrays to state dtype to prevent float64 promotion when
+    # the precision policy stores state in float32 (crashes barotropic scan).
     if sponge is not None:
-        gamma_3d = sponge.gamma[..., jnp.newaxis]  # (n_lat, n_lon, 1)
-        dT_dt = dT_dt + gamma_3d * (sponge.T_ref - T)
-        dS_dt = dS_dt + gamma_3d * (sponge.S_ref - S)
+        _dt = T.dtype
+        gamma_3d = sponge.gamma.astype(_dt)[..., jnp.newaxis]
+        dT_dt = dT_dt + gamma_3d * (sponge.T_ref.astype(_dt) - T)
+        dS_dt = dS_dt + gamma_3d * (sponge.S_ref.astype(_dt) - S)
         if sponge.u_ref is not None:
-            gamma_u = interp_cell_to_uface(sponge.gamma)[..., jnp.newaxis]
-            du_dt = du_dt + gamma_u * (sponge.u_ref - u)
+            gamma_u = interp_cell_to_uface(sponge.gamma.astype(_dt))[..., jnp.newaxis]
+            du_dt = du_dt + gamma_u * (sponge.u_ref.astype(_dt) - u)
         if sponge.v_ref is not None:
-            gamma_v = _interp_to_v_points(sponge.gamma)[..., jnp.newaxis]
-            dv_dt = dv_dt + gamma_v * (sponge.v_ref - v)
+            gamma_v = _interp_to_v_points(sponge.gamma.astype(_dt))[..., jnp.newaxis]
+            dv_dt = dv_dt + gamma_v * (sponge.v_ref.astype(_dt) - v)
 
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d
