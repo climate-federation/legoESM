@@ -214,6 +214,19 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-167 (2026-04-19)**: observed that two FB-chain entry
+  points co-exist — `fv3_forward_backward_step` (fv3_sw_core.py:
+  1381) and `fv3_fb_sw_step` (fv3_sw_core.py:1818).  Only
+  `fv3_fb_sw_step` is used by the production `FV3FBShallowWaterModel`
+  (shallow_water_fv3_cdgrid.py:336).  `fv3_forward_backward_step`
+  is called only by two smoke tests in
+  tests/unit/test_cdgrid_fv3_regression.py.  Candidate for
+  consolidation in a dedicated refactor session; left in place for
+  now since the function exercises a different (simpler) d_sw
+  parameter set and the smoke tests provide independent coverage
+  of the c_sw + p_grad_c + d_sw_native composition pattern.
+  No code changes.
+
 - **iter-166 (2026-04-19)**: final cross-check of the
   `_edge_interpolate4` stencil at face boundaries in
   `_d2a2c_vect` (fv3_sw_core.py:527).  `grid.dx` is padded with
