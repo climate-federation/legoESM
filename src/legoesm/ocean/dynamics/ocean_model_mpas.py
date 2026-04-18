@@ -398,6 +398,7 @@ class MPASOceanModel:
         dt: float,
         freshwater=None,
         surface_forcing=None,
+        sponge=None,
     ) -> MPASOceanState:
         """Advance one timestep with host-side runtime validation.
 
@@ -408,7 +409,8 @@ class MPASOceanModel:
             self.check_barotropic_cfl(dt)
             self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
-                              surface_forcing=surface_forcing)
+                              surface_forcing=surface_forcing,
+                              sponge=sponge)
         if self.config.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new

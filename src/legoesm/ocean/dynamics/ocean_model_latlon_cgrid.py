@@ -548,13 +548,15 @@ class LatLonCGridOceanModel:
         dt: float,
         freshwater=None,
         surface_forcing=None,
+        sponge=None,
     ) -> LatLonCGridOceanState:
         """Advance one timestep with host-side runtime validation."""
         if not self._cfl_checked:
             self.check_barotropic_cfl(dt)
             self._cfl_checked = True
         state_new = self.step(state, dt, freshwater=freshwater,
-                              surface_forcing=surface_forcing)
+                              surface_forcing=surface_forcing,
+                              sponge=sponge)
         if self.config.enable_runtime_checks:
             self._assert_runtime_invariants(state_new)
         return state_new

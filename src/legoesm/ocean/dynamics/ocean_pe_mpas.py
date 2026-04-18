@@ -325,7 +325,6 @@ def mpas_ocean_baroclinic_tendencies(
         dS_dt_3d = dS_dt_3d + gamma_3d * (sponge.S_ref - S_3d) * mask[:, jnp.newaxis]
         # Edge velocity sponge (if reference velocity provided)
         if sponge.u_ref is not None:
-            c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
             gamma_edge = 0.5 * (sponge.gamma[c1] + sponge.gamma[c2])
             gamma_edge_3d = gamma_edge[:, jnp.newaxis]
             du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref - u_3d) * edge_mask[:, jnp.newaxis]

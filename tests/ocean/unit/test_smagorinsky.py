@@ -189,7 +189,6 @@ class TestSmagorinskyLatLon:
         """3D tendency (stacked levels) matches independent 2D calls."""
         grid, mask, u_mask, v_mask = latlon_grid
         nlev = 5
-        rng = np.random.RandomState(123)
 
         # Create 3D fields with different values per level
         u_3d = jnp.zeros((grid.n_lat, grid.n_lon + 1, nlev), dtype=jnp.float64)
