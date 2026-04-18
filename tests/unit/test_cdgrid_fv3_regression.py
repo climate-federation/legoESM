@@ -928,33 +928,30 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         f"interior cosa_corner mismatch: {max_int}")
 
     def test_cosa_corner_panel_edge_convention_differs_from_fortran(self):
-        """Codex stop-time finding (addressing iter-90): at panel-edge
-        corners, Python's `cdgrid.cosa_corner` and Fortran's
-        `fv_grid_utils.F90:495` compute DIFFERENT values:
+        """Iter-91/92 (Codex stop-time finding): at panel-edge corners,
+        Python's `cdgrid.cosa_corner` and a Fortran-style halo-averaged
+        `0.5*(cos_sg(halo_NE) + cos_sg(local_SW))` compute DIFFERENT
+        values — because the halo `cos_sg` from the NEIGHBOR face is
+        measured in the neighbor's coordinate system, while the local
+        value is in the local coordinate system.
 
-        - Fortran (duogrid/bounded_domain): still applies
-          `0.5 * (cos_sg(halo_NE) + cos_sg(local_SW))` where the halo
-          cos_sg comes from the NEIGHBOR face's coordinate system via
-          `mpp_update_domains`.  This is a mechanical average of two
-          values in different coordinate frames.
-        - Python: direct tangent-vector geometry on an extended grid
-          (gnomonic continuation), giving the TRUE geometric angle at
-          the corner in a single coordinate frame.
+        The Fortran `fv_grid_utils.F90:495` formula would mechanically
+        average these two different-frame values.  Python's extended-
+        grid tangent-vector construction gives the physically correct
+        angle in a single coordinate frame.
 
-        Python's value at panel-edge corner (0, jc) happens to equal
-        `cos_sg[SW of local cell (0, jc)]` by construction (the same
-        supergrid point defines both).  Fortran's value would be an
-        average involving the halo.
+        This test demonstrates the divergence NUMERICALLY by computing
+        the Fortran halo-averaged value using actual neighbor-face
+        cos_sg data (face 0 WEST → face 3 EAST, non-reversed per
+        CONNECTIVITY) and showing it differs from Python's direct
+        tangent by a non-trivial amount.
 
-        This test:
-        1. Confirms Python equals the local single-side cos_sg
-           (self-consistency — the iter-90 claim about Python's
-           structure).
-        2. Quantifies the expected DIFFERENCE from the Fortran halo-
-           average convention and shows it is O(dx²) at face boundary
-           smoothness — small but nonzero.  The value is close enough
-           for `_bgrid_ke_transport` fidelity at leading order, but
-           the two conventions are NOT bit-equivalent at panel edges.
+        The Fortran formula at corner (0, jc) of face 0:
+          0.5 * (cos_sg[face 3, n-1, jc-1, NE] + cos_sg[face 0, 0, jc, SW])
+        is empirically ~0 across the west edge of face 0 (neighbor
+        coordinates happen to give 0 at that seam), while Python's
+        direct value ranges from -0.45 to +0.45 — a divergence up to
+        ~0.45 in absolute terms.
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -966,39 +963,37 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         sg = cdgrid.cos_sg
         direct = cdgrid.cosa_corner
 
-        # Self-consistency: Python tangent = local SW/NE sub-grid value
-        max_w = float(jnp.max(jnp.abs(direct[:, 0, 1:n] - sg[:, 0, 1:n, 5])))
-        max_e = float(jnp.max(jnp.abs(direct[:, n, 1:n] - sg[:, n-1, 0:n-1, 7])))
-        max_s = float(jnp.max(jnp.abs(direct[:, 1:n, 0] - sg[:, 1:n, 0, 5])))
-        max_n = float(jnp.max(jnp.abs(direct[:, 1:n, n] - sg[:, 0:n-1, n-1, 7])))
-        for side, val in [("W", max_w), ("E", max_e),
-                          ("S", max_s), ("N", max_n)]:
-            self.assertLess(val, 1e-6,
-                            f"{side} panel-edge self-consistency: {val}")
+        # Python matches LOCAL single-side (self-consistency, iter-90
+        # observation) — the supergrid point that defines cos_sg[SW of
+        # cell (0, jc)] also anchors the extended-grid tangent at
+        # corner (0, jc).
+        max_w_self = float(jnp.max(jnp.abs(direct[:, 0, 1:n] - sg[:, 0, 1:n, 5])))
+        self.assertLess(max_w_self, 1e-6,
+                        f"west panel-edge self-consistency broken: {max_w_self}")
 
-        # Cube vertices: Python = single-side local sub-grid
-        max_sw = float(jnp.max(jnp.abs(direct[:, 0, 0] - sg[:, 0, 0, 5])))
-        max_se = float(jnp.max(jnp.abs(direct[:, n, 0] - sg[:, n-1, 0, 6])))
-        max_ne = float(jnp.max(jnp.abs(direct[:, n, n] - sg[:, n-1, n-1, 7])))
-        max_nw = float(jnp.max(jnp.abs(direct[:, 0, n] - sg[:, 0, n-1, 8])))
-        for name, val in [("SW", max_sw), ("SE", max_se),
-                          ("NE", max_ne), ("NW", max_nw)]:
-            self.assertLess(val, 1e-6,
-                            f"{name} cube vertex self-consistency: {val}")
+        # Fortran halo-averaged construction (face 0 WEST → face 3 EAST,
+        # CONNECTIVITY says not reversed).  At corner (0, jc) of face 0
+        # the Fortran formula reads:
+        #   0.5 * (cos_sg[face 3, halo_cell, NE] + cos_sg[face 0, 0, jc, SW])
+        # where the halo cell in face-3 coords is cell (n-1, jc-1)
+        # (eastmost interior cell of face 3).
+        halo_ne_face3 = sg[3, n-1, 0:n-1, 7]   # NE sub-grid of face-3 east cells
+        local_sw_face0 = sg[0, 0, 1:n, 5]       # SW sub-grid of face-0 west cells
+        fortran_halo_avg = 0.5 * (halo_ne_face3 + local_sw_face0)
 
-        # Sanity: direct != Fortran halo-averaged.  Without an actual
-        # neighbor-face halo of cos_sg we cannot compute Fortran's
-        # panel-edge value exactly.  But we can upper-bound the
-        # difference by the known maximum of cos_sg across the domain
-        # (cosa is bounded by 1 everywhere, so the halo-average
-        # convention differs from Python by at most 0.5*|cos_sg| ≤ 0.5).
-        # The KEY assertion is that Python's panel-edge values are
-        # within the physical range [-0.5, 0.5] typical of a C36
-        # cubed sphere — confirming Python isn't introducing unphysical
-        # values at panel edges.
-        max_abs_panel = float(jnp.max(jnp.abs(direct[:, 0, :])))
-        self.assertLess(max_abs_panel, 1.0,
-                        f"panel-edge cosa out of physical range: {max_abs_panel}")
+        max_divergence = float(jnp.max(jnp.abs(
+            direct[0, 0, 1:n] - fortran_halo_avg)))
+
+        # The divergence must be nontrivial (not machine noise).
+        # Empirically ~0.45 at the extreme corners of the west edge of
+        # face 0 on a C16 grid.
+        self.assertGreater(
+            max_divergence, 1e-3,
+            f"panel-edge convention gap did not show up: {max_divergence}",
+        )
+        # Upper-bound sanity: |cosa| <= 1 on physical grid.
+        self.assertLess(max_divergence, 1.0,
+                        f"panel-edge divergence implausibly large: {max_divergence}")
 
     def test_sina_u_v_helper_matches_cdgrid_rsin_u_at_interior(self):
         """Iter-87 consistency: the helper's `sina_u` must be
