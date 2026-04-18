@@ -60,6 +60,23 @@ These require infrastructure-level rework beyond the priority list.
     - **Longitude-rotated equatorial faces 1, 3**: max|v| = 0.48054 vs 0.48063 — symmetric.
     - **Polar faces 4 (north) and 5 (south)**: max|v| = 0.5504 vs 0.5574 (1.3% diff), **RMS|v| = 0.2621 vs 0.2853 (8.3% asymmetry)**, mean v = -1.6e-3 vs +3.15e-2 (20× asymmetry).
   - Concrete evidence that the polar-face treatment has a **N-S asymmetric numerical error pattern** despite N-S symmetric initial conditions.  Actionable root-cause for future work: either the polar-face supergrid construction, the face-4-to-face-5 halo connectivity, or a subtle sign convention in the vorticity / Coriolis handling at polar faces.
+  - **Temporal evolution (iter-120)**: the asymmetry is NOT present in the initial condition — it GROWS DURING INTEGRATION.
+
+    ```
+    t (d)   f4 RMS      f5 RMS      ratio   f4 mean       f5 mean
+    0.000   1.5818e-3   1.5818e-3   1.0000  +6.4e-18      +2.2e-18   ← identical
+    0.097   3.3524e-2   3.4706e-2   0.9659  -2.32e-2      +2.37e-2   ← 3.4% asym
+    0.500   1.4060e-1   1.4221e-1   0.9887  +9.5e-3       +5.6e-3
+    1.000   2.6210e-1   2.8525e-1   0.9188  -1.6e-3       +3.15e-2   ← 8.3% asym
+    ```
+
+    At t=0 the polar RMS is identical to machine precision, and the means are ~1e-18 on both faces — the grid metrics and initial state ARE symmetric.  By the first output snapshot (t=0.097d, ~28 steps at dt=300s) the asymmetry already reaches 3.4%.  The asymmetry-generating mechanism is therefore NOT in the grid construction but in the **momentum tendency operator** or the **time integrator**.  Candidates:
+
+    1. `fv3_sw_tendencies` (operators_cdgrid.py:1458) — specifically the `pad_halo_vector` calls for cell-centre winds and tendencies.  Polar-face halo ordering may introduce N/S bias.
+    2. Biharmonic hyperdiffusion — if `laplacian_compact` is applied to a rotated wind field, the rotation angles at polar faces may have different numerical properties.
+    3. Cell-centre-to-D-grid projection — final step `du_d_dt = 0.5*(du_cc_pad[1:-1,:-1] + du_cc_pad[1:-1,1:])` is symmetric in i but potentially asymmetric under N/S face rotation.
+
+    Concrete actionable target for future architectural work on item #1.
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
