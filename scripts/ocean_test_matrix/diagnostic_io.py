@@ -214,9 +214,9 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                     finite = ocean_vals[np.isfinite(ocean_vals)]
                     vmin = float(finite.min()) if finite.size else None
                     vmax = float(finite.max()) if finite.size else None
-                # Force symmetric colorscale centered at 0 for velocity
-                # and w fields (diverging quantities)
-                _sym = ("w_" in field_key or field_key in ("u_sfc", "v_sfc"))
+                # Force symmetric colorscale centered at 0 for diverging fields
+                _sym = ("w_" in field_key
+                        or field_key in ("u_sfc", "v_sfc", "eta"))
                 if vmin is not None and vmax is not None and _sym:
                     vlim = max(abs(vmin), abs(vmax))
                     vmin, vmax = -vlim, vlim
@@ -270,9 +270,9 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                         vmin, vmax = float(panel_finite.min()), float(panel_finite.max())
                     else:
                         vmin, vmax = None, None
-                # Force symmetric colorscale centered at 0 for velocity
-                # and w fields (diverging quantities)
-                _sym = ("w_" in field_key or field_key in ("u_sfc", "v_sfc"))
+                # Force symmetric colorscale centered at 0 for diverging fields
+                _sym = ("w_" in field_key
+                        or field_key in ("u_sfc", "v_sfc", "eta"))
                 if vmin is not None and vmax is not None and _sym:
                     vlim = max(abs(vmin), abs(vmax))
                     vmin, vmax = -vlim, vlim
@@ -446,15 +446,27 @@ def _bin_cross_section(
         ll = _regrid_3d_level(f3d, lon_deg, lat_deg, coord_kind)
 
     section = np.nanmean(ll, axis=mean_axis)
+    # Use actual coordinate ranges from the data, not global defaults
+    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
     if mean_axis == 0:
-        return section, np.linspace(0, 360, section.shape[0])
-    return section, np.linspace(-90, 90, section.shape[0])
+        # Averaged over lat → lon-vertical section
+        if coord_kind in ("latlon", "gaussian"):
+            return section, np.unique(lon_flat)[:section.shape[0]]
+        return section, np.linspace(lon_flat.min(), lon_flat.max(),
+                                    section.shape[0])
+    # Averaged over lon → lat-vertical section
+    if coord_kind in ("latlon", "gaussian"):
+        return section, np.unique(lat_flat)[:section.shape[0]]
+    return section, np.linspace(lat_flat.min(), lat_flat.max(),
+                                section.shape[0])
 
 
 def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
                          dt: float, field_3d_key: str, coord_kind: str,
                          lon_deg: np.ndarray, lat_deg: np.ndarray,
-                         levels: np.ndarray, level_label: str):
+                         levels: np.ndarray, level_label: str,
+                         cmap: str = "RdBu_r"):
     """Save latitude-vertical and longitude-vertical cross-sections."""
     valid_steps = sorted(
         s for s in snapshots if field_3d_key in snapshots[s])
@@ -466,9 +478,10 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    fld_tag = field_3d_key.replace("_3d", "")
     for fname, mean_axis, xlabel in [
-        ("latitude_vertical_cross_sections.png", 1, "Latitude"),
-        ("longitude_vertical_cross_sections.png", 0, "Longitude"),
+        (f"{fld_tag}_latitude_vertical_cross_sections.png", 1, "Latitude"),
+        (f"{fld_tag}_longitude_vertical_cross_sections.png", 0, "Longitude"),
     ]:
         nc = len(valid_steps)
         fig, axes_arr = plt.subplots(
@@ -500,6 +513,11 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             cs_vmin, cs_vmax = float(np.nanmin(all_finite)), float(np.nanmax(all_finite))
         else:
             cs_vmin, cs_vmax = None, None
+        # Symmetric color limits for diverging fields (zero = white)
+        _is_diverging = any(k in field_3d_key for k in ("u", "v", "w", "eta"))
+        if _is_diverging and cs_vmin is not None and cs_vmax is not None:
+            vlim = max(abs(cs_vmin), abs(cs_vmax))
+            cs_vmin, cs_vmax = -vlim, vlim
 
         # Compute level interfaces for pcolormesh (accurate vertical grid representation)
         def compute_level_interfaces(level_centers):
@@ -525,7 +543,7 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
                                        len(bin_centers) + 1)
             X, Y = np.meshgrid(bin_interfaces, level_interfaces)
             im = ax.pcolormesh(
-                X, Y, section.T, cmap="RdBu_r", shading='flat',
+                X, Y, section.T, cmap=cmap, shading='flat',
                 vmin=cs_vmin, vmax=cs_vmax)
 
             day = step * dt / 86400.0
@@ -904,9 +922,11 @@ def _save_case_diagnostics(
         domain_extent=domain_extent, depth_values=level_values)
 
     if field_3d_key and level_values is not None:
+        _cs_cmap = "RdYlBu_r" if "T" in field_3d_key else "RdBu_r"
         _save_cross_sections(
             output_dir, case_name, snapshots, dt, field_3d_key,
-            coord_kind, lon_deg, lat_deg, level_values, level_label)
+            coord_kind, lon_deg, lat_deg, level_values, level_label,
+            cmap=_cs_cmap)
         _save_profiles(
             output_dir, case_name, snapshots, dt, field_3d_key,
             level_values, level_label)

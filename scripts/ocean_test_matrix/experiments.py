@@ -21,6 +21,7 @@ from ocean_test_matrix.extraction import (
 )
 from ocean_test_matrix.diagnostic_io import (
     _write_results_txt, _save_case_diagnostics, _save_velocity_profiles,
+    _save_cross_sections,
 )
 from ocean_test_matrix.testcase import TestCase
 
@@ -1352,7 +1353,8 @@ def run_eady_instability(tc: TestCase, output_dir: Path, days: float
 # Runner: Classical Eady (uniform N², linear shear)
 # ===========================================================================
 
-def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
+def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
+                     eu_config=None,
                      ) -> tuple[str, float, str]:
     """Classical Eady instability: uniform N², linear shear, linear EOS."""
     if tc.grid_type not in ("mpas_channel", "latlon_channel"):
@@ -1364,13 +1366,22 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
         create_forcings as eu_forcings)
     from legoesm.ocean.eos import LinearEOSConfig
 
-    eu_config = EadyUniformConfig()
+    if eu_config is None:
+        eu_config = EadyUniformConfig()
     physics = eu_forcings(tc.grid_type, None, eu_config)
+
+    # Pass domain bounds from experiment config into run_kwargs
+    tc.run_kwargs.setdefault("lat_south", eu_config.lat_south)
+    tc.run_kwargs.setdefault("lat_north", eu_config.lat_north)
+    tc.run_kwargs.setdefault("lon_west", eu_config.lon_west)
+    tc.run_kwargs.setdefault("lon_east", eu_config.lon_east)
 
     grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
         _create_ocean_setup(
             tc, nlev=20, physics=physics,
             A_h=eu_config.A_h, B_h=eu_config.B_h,
+            C_smag=eu_config.C_smag,
+            bottom_drag_r=eu_config.bottom_drag_coeff,
             eos="linear",
             eos_linear=LinearEOSConfig(
                 alpha_T=eu_config.alpha_T,
@@ -1389,7 +1400,8 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
 
     check_fn = _make_check_fn(tc.grid_type)
     scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
-    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg)
+    extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
+                                  include_velocity_3d=True)
 
     def step_fn(s, dt_):
         return model.step(s, dt_)
@@ -1407,6 +1419,7 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
 
     z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
     depth = -z_full
+    case_label = f"Eady Uniform {tc.grid_type} {tc.resolution}"
 
     _write_results_txt(output_dir, {
         "test": tc.case, "grid": tc.grid_type, "resolution": tc.resolution,
@@ -1415,7 +1428,7 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
         "wall_time": f"{wall:.1f}s"})
 
     _save_case_diagnostics(
-        output_dir, f"Eady Uniform {tc.grid_type} {tc.resolution}",
+        output_dir, case_label,
         dt, diag, snapshots, coord_kind, lon_deg, lat_deg,
         field_specs_2d=[
             ("eta", "SSH (m)", "RdBu_r"),
@@ -1428,6 +1441,14 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float
         scalar_units={"mean_eta": "m", "max_speed": "m/s",
                       "mean_T": "degC", "mean_S": "PSU"},
         mesh=grid if coord_kind == "mpas" else None)
+
+    # Velocity cross-sections (u, speed lat-depth evolution)
+    for fkey in ("u_3d", "speed_3d"):
+        _save_cross_sections(
+            output_dir, case_label, snapshots, dt, fkey,
+            coord_kind, lon_deg, lat_deg, depth, "Depth (m)")
+    _save_velocity_profiles(output_dir, case_label, snapshots, dt,
+                            depth, "Depth (m)")
 
     return "PASS" if ok else "FAIL", wall, notes
 

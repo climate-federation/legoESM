@@ -37,12 +37,18 @@ class EadyUniformConfig:
     """Configuration for the classical Eady experiment."""
     # Domain
     H_max: float = 5500.0
-    lat_south: float = 10.0
-    lat_north: float = 80.0
-    lat_center: float = 45.0
+    lat_south: float = 16.0
+    lat_north: float = 34.0
+    lat_center: float = 25.0
+
+    # Zonal extent (degrees). At 25°N, 1° ≈ 100.7 km, so 10° ≈ 1000 km.
+    lon_west: float = 0.0
+    lon_east: float = 10.0
 
     # Stratification: uniform N² via linear T(z)
-    N: float = 3e-3
+    # N=1.2e-3 chosen so L_d=107km (11 grid cells at 10km),
+    # λ_max≈428km (k=2 fits in 1000km domain).
+    N: float = 1.2e-3
     T_ref: float = 10.0
     S_uniform: float = 35.0
 
@@ -51,31 +57,42 @@ class EadyUniformConfig:
     rho_0: float = 1025.0
 
     # Shear: U = Λz (zero at bottom, U_surface at top)
-    U_surface: float = 0.1
+    # U_surface=0.2 gives τ≈20 days (fast enough to see instability).
+    U_surface: float = 0.2
 
     # Jet envelope: Gaussian half-width in degrees. The jet and dT/dy
     # are localized around lat_center; the ocean outside the envelope
     # is a quiescent resting stratified state.
-    jet_width_deg: float = 10.0
+    jet_width_deg: float = 5.0
 
-    # Perturbation
-    eta_perturbation_m: float = 0.01
-    T_perturbation_K: float = 0.1
-    perturbation_wavenumber: int = 3
+    # Depth scale for dT/dy: the meridional gradient decays as
+    # exp(z / jet_depth_scale) so it is surface-intensified.
+    # Set to H_max for depth-uniform (classical Eady, zero interior PV).
+    jet_depth_scale: float = 5500.0
 
-    # Physics — kept minimal so the instability can develop.
-    # Classical Eady has no bottom drag or lateral diffusion.
-    # Biharmonic viscosity damps the 2Δy grid mode without
-    # affecting the physical Eady mode (~2600 km wavelength).
-    A_h: float = 1e4
-    B_h: float = 1e15
-    bottom_drag_coeff: float = 0.0
+    # Perturbation: zonal wavenumber k seeds the most-unstable Eady
+    # mode (l=0, k≠0). k=2 gives λ=500km, k×L_d≈1.9 — near maximum.
+    T_perturbation_K: float = 0.01
+    perturbation_wavenumber: int = 2
 
-    barotropic_diffusion_alpha: float = 0.005
+    # Physics
+    A_h: float = 500.0
+    B_h: float = 1e12
+    C_smag: float = 0.0
+    bottom_drag_coeff: float = 1e-4
+
+    # Sponge layer: absorbs eddy energy near walls to prevent
+    # Kelvin wave trapping and nonlinear steepening at boundaries.
+    # Standard in MITgcm/MOM6 channel experiments (RBCS package).
+    sponge_width_deg: float = 2.0
+    sponge_timescale_days: float = 1.0
+
+    barotropic_diffusion_alpha: float = 0.05
 
     @property
     def Lambda(self) -> float:
-        return self.U_surface / self.H_max
+        """Effective shear scale using jet depth, not full ocean depth."""
+        return self.U_surface / self.jet_depth_scale
 
     @property
     def dTdz(self) -> float:
@@ -83,8 +100,9 @@ class EadyUniformConfig:
 
     @property
     def dTdy(self) -> float:
+        """Thermal wind: f ∂u/∂z = -g α_T ∂T/∂y  →  ∂T/∂y = -f₀Λ/(gα_T) < 0."""
         f0 = 2.0 * Omega * np.sin(np.radians(self.lat_center))
-        return f0 * self.Lambda / (g * self.alpha_T)
+        return -f0 * self.Lambda / (g * self.alpha_T)
 
     @property
     def f0(self) -> float:
@@ -92,12 +110,38 @@ class EadyUniformConfig:
 
     @property
     def Ld_km(self) -> float:
-        return self.N * self.H_max / self.f0 / 1e3
+        """Deformation radius using jet depth scale."""
+        return self.N * self.jet_depth_scale / self.f0 / 1e3
 
     @property
     def efolding_days(self) -> float:
         sigma = 0.31 * self.f0 * self.Lambda / self.N
         return 1.0 / sigma / 86400.0
+
+
+def compute_sponge_mask(grid, config: EadyUniformConfig):
+    """Compute sponge relaxation coefficient gamma(y) [1/s].
+
+    Quadratic ramp from 0 in the interior to 1/tau at the walls.
+    Returns gamma at cell centers, shape (n_lat, n_lon).
+    """
+    lat_deg = np.degrees(np.asarray(grid.lat))
+    tau = config.sponge_timescale_days * 86400.0
+    gamma = np.zeros((grid.n_lat, grid.n_lon), dtype=np.float64)
+
+    south_edge = config.lat_south
+    north_edge = config.lat_north
+    w = config.sponge_width_deg
+
+    for i, lat in enumerate(lat_deg):
+        dist_south = lat - south_edge
+        dist_north = north_edge - lat
+        if dist_south < w:
+            gamma[i, :] = (1.0 - dist_south / w) ** 2 / tau
+        elif dist_north < w:
+            gamma[i, :] = (1.0 - dist_north / w) ** 2 / tau
+
+    return gamma
 
 
 def create_initial_conditions(grid_type: str, grid, z_coord,
@@ -108,7 +152,6 @@ def create_initial_conditions(grid_type: str, grid, z_coord,
     if grid_type == "latlon_channel":
         state = _rest_state_latlon(grid, z_coord, config)
         state = _set_uniform_stratification(state, z_coord, config, grid)
-        state = _set_linear_shear_latlon(state, grid, z_coord, config)
         state = _add_perturbation_latlon(state, grid, config)
         return state
 
@@ -165,10 +208,11 @@ def _jet_envelope(lat_deg, config):
 
 
 def _set_uniform_stratification(state, z_coord, config, grid):
-    """Set T = background stratification + localized meridional gradient.
+    """Set T = background stratification + surface-intensified meridional gradient.
 
-    T(y,z) = T_ref + dTdz*z + dTdy * y_integrated_envelope(y)
+    T(y,z) = T_ref + dTdz*z + dTdy * y_integrated_envelope(y) * exp(z/D)
 
+    where D = jet_depth_scale concentrates dT/dy near the surface.
     The meridional gradient is localized by the jet envelope so that
     far from the jet center, T depends only on z (resting stratified state).
     """
@@ -184,17 +228,18 @@ def _set_uniform_stratification(state, z_coord, config, grid):
     y = (lat_rad - lat_center_rad) * R
 
     envelope = _jet_envelope(lat_deg, config)
-    # Integrate envelope * dy to get the cumulative T anomaly:
-    # T_anomaly(y) = dTdy * integral_0^y envelope(y') dy'
     T_anomaly = np.zeros(n_lat, dtype=np.float64)
     for i in range(1, n_lat):
         dy = y[i] - y[i - 1]
         T_anomaly[i] = T_anomaly[i - 1] + config.dTdy * 0.5 * (envelope[i] + envelope[i - 1]) * dy
 
+    D = config.jet_depth_scale
+    depth_weight = np.exp(z_full / D)
+
     mask = np.asarray(state.land_mask.data)
     for k in range(nlev):
         T_zk = config.T_ref + config.dTdz * z_full[k]
-        T_data[:, :, k] = (T_zk + T_anomaly[:, np.newaxis]) * mask
+        T_data[:, :, k] = (T_zk + T_anomaly[:, np.newaxis] * depth_weight[k]) * mask
 
     return state._replace(T=Field(jnp.array(T_data), name="T",
                                   dims=state.T.dims, units=state.T.units))
@@ -224,10 +269,13 @@ def _set_uniform_stratification_mpas(state, z_coord, config, mesh):
     T_anomaly = np.zeros(len(y), dtype=np.float64)
     T_anomaly[sort_idx] = T_anom_sorted
 
+    D = config.jet_depth_scale
+    depth_weight = np.exp(z_full / D)
+
     mask = np.asarray(state.land_mask.data)
     for k in range(nlev):
         T_zk = config.T_ref + config.dTdz * z_full[k]
-        T_data[:, k] = (T_zk + T_anomaly) * mask
+        T_data[:, k] = (T_zk + T_anomaly * depth_weight[k]) * mask
 
     return state._replace(T=Field(jnp.array(T_data), name="T",
                                   dims=state.T.dims, units=state.T.units))
@@ -264,15 +312,18 @@ def _set_linear_shear_latlon(state, grid, z_coord, config):
         u_mask = np.ones(u_data.shape[:2], dtype=np.float64)
     u_data *= u_mask[:, :, np.newaxis]
 
-    # Geostrophic SSH: f0 * U_bar_envelope(y) = -g * deta/dy
+    # Geostrophic SSH: f(lat) * U_bar_envelope(y) = -g * deta/dy
     lat_center_rad = np.radians(config.lat_center)
     R = 6.371e6
     y = (lat_rad - lat_center_rad) * R
+    f_lat = 2.0 * Omega * np.sin(lat_rad)
     U_bar_env = U_bar * envelope
     eta_1d = np.zeros(n_lat, dtype=np.float64)
     for i in range(1, n_lat):
         dy = y[i] - y[i - 1]
-        eta_1d[i] = eta_1d[i - 1] - (config.f0 / g) * 0.5 * (U_bar_env[i] + U_bar_env[i - 1]) * dy
+        f_mid = 0.5 * (f_lat[i] + f_lat[i - 1])
+        U_mid = 0.5 * (U_bar_env[i] + U_bar_env[i - 1])
+        eta_1d[i] = eta_1d[i - 1] - (f_mid / g) * U_mid * dy
     ocean = mask > 0.5
     eta_1d_ocean = eta_1d[ocean[:, 0]] if ocean.any() else eta_1d
     eta_1d -= np.mean(eta_1d_ocean)
@@ -333,57 +384,48 @@ def _set_linear_shear_mpas(state, mesh, z_coord, config):
 # ---------------------------------------------------------------------------
 
 def _add_perturbation_latlon(state, grid, config):
-    """Add SSH + temperature perturbation to seed the baroclinic Eady mode."""
+    """Add zonal wavenumber T perturbation to seed the Eady mode (l=0, k≠0)."""
+    if config.T_perturbation_K == 0:
+        return state
+
+    mask = np.asarray(state.land_mask.data)
+    T_data = np.array(state.T.data, dtype=np.float64)
+
     lon_rad = np.asarray(grid.lon)
     lat_rad = np.asarray(grid.lat)
-    k = config.perturbation_wavenumber
-    lon_2d, lat_2d = np.meshgrid(lon_rad, lat_rad)
     lat_center_rad = np.radians(config.lat_center)
-    lat_width_rad = np.radians(10.0)
-    envelope = np.exp(-((lat_2d - lat_center_rad) / lat_width_rad) ** 2)
-    zonal = np.sin(k * lon_2d)
+    lat_width_rad = np.radians(config.jet_width_deg)
+    envelope = np.exp(-((lat_rad - lat_center_rad) / lat_width_rad) ** 2)
 
-    eta_data = np.array(state.eta.data, dtype=np.float64)
-    eta_data += config.eta_perturbation_m * zonal * envelope
-    mask = np.asarray(state.land_mask.data)
-    eta_data *= mask
-
-    T_data = np.array(state.T.data, dtype=np.float64)
-    nlev = T_data.shape[2]
-    T_pert_2d = config.T_perturbation_K * zonal * envelope
-    T_data[:, :, 0] += T_pert_2d * mask
-    T_data[:, :, -1] -= T_pert_2d * mask
+    k = config.perturbation_wavenumber
+    zonal = np.sin(k * lon_rad)
+    pert = config.T_perturbation_K * envelope[:, np.newaxis] * zonal[np.newaxis, :] * mask
+    T_data[:, :, 0] += pert
 
     return state._replace(
-        eta=Field(jnp.array(eta_data), name="eta",
-                  dims=state.eta.dims, units=state.eta.units),
         T=Field(jnp.array(T_data), name="T",
                 dims=state.T.dims, units=state.T.units))
 
 
 def _add_perturbation_mpas(state, mesh, config):
-    """Add SSH + temperature perturbation to seed the baroclinic Eady mode."""
-    lon_cell = np.asarray(mesh.lonCell)
+    """Add zonal wavenumber T perturbation to seed the Eady mode."""
+    if config.T_perturbation_K == 0:
+        return state
+
     lat_cell = np.asarray(mesh.latCell)
-    k = config.perturbation_wavenumber
+    lon_cell = np.asarray(mesh.lonCell)
     lat_center_rad = np.radians(config.lat_center)
-    lat_width_rad = np.radians(10.0)
+    lat_width_rad = np.radians(config.jet_width_deg)
     envelope = np.exp(-((lat_cell - lat_center_rad) / lat_width_rad) ** 2)
-    zonal = np.sin(k * lon_cell)
 
-    eta_data = np.array(state.eta.data, dtype=np.float64)
-    eta_data += config.eta_perturbation_m * zonal * envelope
+    k = config.perturbation_wavenumber
     mask = np.asarray(state.land_mask.data)
-    eta_data *= mask
-
     T_data = np.array(state.T.data, dtype=np.float64)
-    T_pert_1d = config.T_perturbation_K * zonal * envelope
-    T_data[:, 0] += T_pert_1d * mask
-    T_data[:, -1] -= T_pert_1d * mask
+
+    pert = config.T_perturbation_K * np.sin(k * lon_cell) * envelope * mask
+    T_data[:, 0] += pert
 
     return state._replace(
-        eta=Field(jnp.array(eta_data), name="eta",
-                  dims=state.eta.dims, units=state.eta.units),
         T=Field(jnp.array(T_data), name="T",
                 dims=state.T.dims, units=state.T.units))
 
@@ -407,17 +449,14 @@ def create_forcings(grid_type: str, grid, config: EadyUniformConfig = None):
     )
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 
+    # Bottom drag is applied via the lightweight config-level bottom_drag_r
+    # (directly in the tendency function) to avoid the heavy physics pipeline
+    # trace. All physics schemes set to "none" here.
     return OceanPhysicsConfig(
         surface_forcing=SurfaceForcingConfig(scheme="none"),
-        vertical_mixing=VerticalMixingConfig(
-            scheme="constant",
-            constant=ConstantVerticalMixingConfig(A_v=1e-3, K_v=1e-4),
-        ),
+        vertical_mixing=VerticalMixingConfig(scheme="none"),
         lateral_mixing=LateralMixingConfig(scheme="none"),
-        bottom_drag=BottomDragConfig(
-            scheme="linear" if config.bottom_drag_coeff > 0 else "none",
-            linear=LinearDragConfig(r=config.bottom_drag_coeff),
-        ),
+        bottom_drag=BottomDragConfig(scheme="none"),
         convection=OceanConvectionConfig(scheme="none"),
     )
 
