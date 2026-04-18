@@ -214,6 +214,19 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-162/163 (2026-04-19)**: fixed a pre-existing test failure
+  that had been broken since at least the branch baseline
+  (a3a1d54).  `test_legacy_unsupported_f64_constant` asserted
+  `"METAL"` (uppercase) was in `_UNSUPPORTED_F64_BACKENDS`, but the
+  constant is defined as `frozenset({"metal"})` (lowercase), and all
+  call sites compare via `backend.lower() not in _UNSUPPORTED_
+  F64_BACKENDS`.  Verified via `git stash && pytest && git stash
+  pop` that the failure pre-dates the session.
+  Fixed the assertion to lowercase; added inline comment documenting
+  the convention.  47/47 test_runtime_bootstrap.py tests pass
+  (up from 46/47).  Full runtime/backend/device_config test suite:
+  125/125 pass (1 skipped, 0 failed).
+
 - **iter-161 (2026-04-19)**: cleanup cycle convergence — `src/legoesm/`
   now has ZERO unused public-name imports (per AST scan of the
   entire source tree at 120 commits on branch).  Only the
