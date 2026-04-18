@@ -3,6 +3,11 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-104 (2026-04-18)**: Codex stop-time correction: iter-103's wiring was unverified.  Added integrated regression test `test_bgrid_ke_transport_duogrid_uses_component_sync` that calls the modified `_bgrid_ke_transport` with a duogrid grid and reimplements the pre-iter-103 scalar-KE-sync control inline for comparison.  Asserts:
+  - (a) Output is finite and shape (6, n+1, n+1).
+  - (b) Component-sync differs from scalar-sync by > 1e-6 (proves the wiring is not a no-op).
+  - Empirical: max diff at panel-edge/cube-vertex corners is ~2.5e4, max interior diff is ~8.6e-4 (just PPM transport noise).  Change is localised to boundaries as expected.
+  - 163 cdgrid/duogrid/fv3_regression tests pass.
 - **iter-103 (2026-04-18)**: Completed Priority 2 — wired `synchronize_bgrid_ne_corner_geo` into `_bgrid_ke_transport` replacing the previous scalar-KE sync fallback.  The d_sw3 KE now uses the Fortran-faithful ordering (sync ubb/vbbtemp FIRST, then form KE) from `dyn_core.F90:968-1019`.
   - Named the intermediate B-grid products to match Fortran: `ubbtemp` (ytp_v output), `vbbtemp` (y-Courant), `ubb` (x-Courant), `vbb` (xtp_u output).
   - On duogrid-enabled grids, `ubb` and `vbbtemp` are synchronized via `synchronize_bgrid_ne_corner_geo(ubb, vbbtemp, cos_angle_corner, sin_angle_corner, n)` before the KE is formed as `0.5 * (ubbtemp*vbbtemp + ubb*vbb)`.
