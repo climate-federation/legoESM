@@ -108,6 +108,16 @@ These require infrastructure-level rework beyond the priority list.
     ```
 
     The polar diff is EXACTLY INVARIANT under ZMC (both snapshots show +2.03e+08).  With ZMC the polar ratio becomes 0.535 (more visible because the baseline is smaller).  **The polar bias is a fundamental per-face-sum asymmetry that cannot be corrected by a uniform shift — only by fixing the mass-flux divergence operator's polar-face behaviour.**
+  - **Boundary-flux bisection (iter-127)**: integrated mass flux at each panel-edge boundary on W2-balanced state:
+
+    ```
+    Face 0 NORTH edge (j=n, toward face 4 south): +1.6384e+04
+    Face 0 SOUTH edge (j=0, toward face 5 north): -1.6384e+04   ← N-S SYMMETRIC
+    Face 4 W inflow: +1.8908e+09, E outflow: -1.8910e+09
+    Face 5 W inflow: +1.7895e+09, E outflow: -1.7894e+09
+    ```
+
+    Face 0's own N/S boundaries are N-S symmetric to 4 digits — equatorial-face flux computation is clean.  But face 4 W inflow (+1.89e9) vs face 5 W inflow (+1.79e9) differ by **5.4%** — this is the asymmetry source.  Face 4's WEST boundary connects to face 3's NORTH (reversed) and face 5's WEST boundary connects to face 3's SOUTH (not reversed) — different seam types, different halo treatments.  **The polar bias is localized to the seams between polar faces (4/5) and equatorial faces, not to equatorial-face internal computation.**
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
