@@ -200,6 +200,47 @@ Latest iteration work:
     Fortran overrides will fail the architectural-bound test with a
     direct pointer to sw_core.F90:3527-3545 / 3620-3640.
 
+- **iter-140..147 (2026-04-18)**: codebase hygiene — removed dead code and
+  deprecation warnings surfaced during the FV3-fidelity-audit cycle.
+  - **iter-140** (`cb5d2bb`): removed legacy `synchronize_bgrid_ne_corner`
+    (12-seam) and 4 self-tests (−233 lines).  Production uses the
+    24-seam `..._geo` version.
+  - **iter-141** (`aad5add`): updated iter-102 section reference to
+    point at the iter-140 removal commit.
+  - **iter-142** (`8ad34b4`): fixed JAX `shard_map` DeprecationWarning
+    in `parallel/cubesphere_exchange.py` and `parallel/sharded_dynamics.
+    py` — the prior `from jax.shard_map import shard_map` hit
+    `ModuleNotFoundError` (shard_map is a top-level function, not a
+    submodule), silently falling through to the deprecated
+    `jax.experimental.shard_map`.  Corrected to `from jax import
+    shard_map`.
+  - **iter-143** (`c9dc6ed`): removed unused `cgrid_to_dgrid` import.
+  - **iter-144** (`c8a9bad`): removed unused `_face_to_cartesian`
+    import.
+  - **iter-145** (`91a85b8`): removed unused public
+    `extrapolate_to_halo` wrapper (−24 lines).
+  - **iter-146** (`a00a522`): removed unused public `cgrid_scalar_
+    advection` (misleading 1-line wrapper around
+    `cgrid_mass_flux_divergence`) and unused `fv3_d2cc2c` composition
+    wrapper (−30 lines).
+  - **iter-147** (`e328502`): removed unused private `_ppm_flux_1d`
+    (63-line PPM flux integrator superseded by inline PPM in
+    `cgrid_mass_flux_divergence`) and `_divergence_damping`
+    (63-line del-2/del-4 routine superseded by
+    `_d_sw5_corner_divergence` and inline `fv3_sw_tendencies`
+    damping).  Net −128 lines.
+  - **Cumulative iter-140..147**: −417 lines of dead code across 5
+    files.  All atmosphere required evaluations unchanged (W2
+    L2=1.53e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01).
+    166/166 regression tests pass.
+  - **iter-148 followup note**: a broader codebase-wide scan (80
+    unused public functions total) found most of them in
+    ml/, physics/, radiation/rrtmgp/, ocean/experiments/ — all
+    outside FV3 cubed-sphere scope and potentially part of an
+    external-user public API (notebooks, examples).  Those are
+    out-of-scope for the Ralph FV3-fidelity loop and deferred to a
+    dedicated cleanup session.
+
 - **iter-139 (2026-04-18)**: verified `results/validation_report.md`
   is STALE for the 11 claimed "latlon atmosphere ERRORs".  The report
   attributes them to "A-grid module removal (commits 851b301 /
