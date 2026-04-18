@@ -972,23 +972,28 @@ class TestBgridNeCornerSync:
         assert max_dv < 1e-6, f"uniform-geo round-trip v diff = {max_dv}"
 
     def test_bgrid_ke_transport_duogrid_uses_component_sync(self):
-        """Iter-104 (Codex stop-time): the iter-103 wiring replaced the
-        scalar-KE sync in `_bgrid_ke_transport` with a component-level
-        BGRID_NE sync.  This test exercises the ACTUAL integrated
+        """Iter-104/105 (Codex stop-time): the iter-103 wiring replaced
+        the scalar-KE sync in `_bgrid_ke_transport` with a component-
+        level BGRID_NE sync.  This test exercises the ACTUAL integrated
         duogrid path and asserts:
 
-        (a) The function still returns finite, physically-plausible
-            KE with a duogrid-enabled grid.
-        (b) The KE is different from the output of a "scalar-KE sync
-            control" (proving the wiring changed behavior, not a
-            silent no-op).
-        (c) The function's output is stable for balanced-state inputs.
+        (a) Output is finite and (6, n+1, n+1)-shaped.
+        (b) Output DIFFERS from a scalar-KE-sync control in SEAM
+            REGIONS (panel-edge rows/cols and cube vertices) — where
+            the two sync strategies are mathematically distinct.
+        (c) Output AGREES with the scalar-KE-sync control at INTERIOR
+            corners (1 <= i, j <= n-1) — both paths produce identical
+            pre-sync KE there, so the divergence is localized.
+
+        Failing (c) would indicate the wiring has a side effect in
+        the interior that was not intended.  Failing (b) would mean
+        the wiring is a silent no-op.
         """
         import jax.numpy as jnp
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.fv3_sw_core import _bgrid_ke_transport
+        from legoesm.core.fv3_sw_core import _bgrid_ke_transport, _ppm_transport_1d
         from legoesm.grids.halo import synchronize_corner_scalar
 
         n = 8
@@ -996,7 +1001,6 @@ class TestBgridNeCornerSync:
         cdgrid = create_cubed_sphere_cdgrid(grid)
         assert cdgrid.base.duogrid is not None
 
-        # Synthetic D-grid/C-grid inputs: smooth geostrophic-like field
         rng = np.random.default_rng(0)
         u_d = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 10.0)
         v_d = jnp.asarray(rng.standard_normal((6, n + 1, n)) * 10.0)
@@ -1004,18 +1008,12 @@ class TestBgridNeCornerSync:
         vc = jnp.asarray(rng.standard_normal((6, n, n + 1)) * 5.0)
         dt = 300.0
 
-        # (a) Integrated call returns finite values
+        # (a) Integrated call
         ke_component_sync = _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt)
         assert ke_component_sync.shape == (6, n + 1, n + 1)
-        assert bool(jnp.all(jnp.isfinite(ke_component_sync))), \
-            "ke_corner has NaN or Inf"
+        assert bool(jnp.all(jnp.isfinite(ke_component_sync)))
 
-        # (b) Control: reimplement the pre-iter-103 scalar-KE-sync
-        # path locally and compare.  If the new path is a silent no-op
-        # (e.g. component sync happens to match scalar sync), this
-        # test still gives useful diagnostic; we only assert the
-        # magnitudes are plausible and a non-zero difference exists
-        # somewhere at the seams.
+        # Scalar-sync control (the pre-iter-103 path)
         dt5 = 0.5 * dt
         cosa = cdgrid.cosa_corner
         rsina = cdgrid.rsin2_corner
@@ -1025,23 +1023,58 @@ class TestBgridNeCornerSync:
         uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]
         vb_ctrl = dt5 * (vc_sum - uc_sum * cosa) * rsina
         ub_ctrl = dt5 * (uc_sum - vc_sum * cosa) * rsina
-        from legoesm.core.fv3_sw_core import _ppm_transport_1d
         rdy = 1.0 / jnp.maximum(cdgrid.dy_edge_x, 1e-30)
         rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, 1e-30)
-        trans_y_ctrl = _ppm_transport_1d(v_d, vb_ctrl, rdy, axis=2)
-        trans_x_ctrl = _ppm_transport_1d(u_d, ub_ctrl, rdx, axis=1)
-        ke_scalar_sync = 0.5 * (trans_y_ctrl * vb_ctrl
-                                + ub_ctrl * trans_x_ctrl)
+        ty_ctrl = _ppm_transport_1d(v_d, vb_ctrl, rdy, axis=2)
+        tx_ctrl = _ppm_transport_1d(u_d, ub_ctrl, rdx, axis=1)
+        ke_scalar_sync = 0.5 * (ty_ctrl * vb_ctrl + ub_ctrl * tx_ctrl)
         ke_scalar_sync = synchronize_corner_scalar(ke_scalar_sync, n)
 
-        # The two paths should differ (component sync is not a no-op)
-        diff = float(jnp.max(jnp.abs(ke_component_sync - ke_scalar_sync)))
-        # Non-trivial difference expected at panel-edge/cube-vertex
-        # corners because the component-sync preserves physical
-        # vector components while the scalar-KE sync averages products.
-        assert diff > 1e-6, (
-            f"component-sync and scalar-sync produced identical KE "
-            f"(max diff = {diff:.2e}). Iter-103 wiring may be a no-op."
+        diff = jnp.abs(ke_component_sync - ke_scalar_sync)
+        max_diff = float(jnp.max(diff))
+
+        # Build interior and boundary masks for the (n+1, n+1) corner
+        # grid.  Interior corners = (ic, jc) with 1 <= ic, jc <= n-1.
+        # Boundary = the remainder (panel edges + cube vertices).
+        interior_max = float(jnp.max(diff[:, 1:-1, 1:-1]))
+        # Boundary slice: the 4 edge strips including the 4 corners
+        boundary_max = float(jnp.maximum(
+            jnp.maximum(jnp.max(diff[:, 0, :]), jnp.max(diff[:, -1, :])),
+            jnp.maximum(jnp.max(diff[:, :, 0]), jnp.max(diff[:, :, -1])),
+        ))
+
+        # (c) Interior should be nearly identical — both sync paths
+        # leave interior corners untouched.  Allow a small tolerance
+        # for PPM transport noise propagated by the two paths (which
+        # is bit-identical at interior corners, modulo reduction order).
+        # Scale tolerance to the magnitude of ke_scalar_sync at
+        # interior to be robust across randomized inputs.
+        ke_interior_scale = float(jnp.max(jnp.abs(
+            ke_scalar_sync[:, 1:-1, 1:-1])))
+        interior_tol = 1e-6 * ke_interior_scale
+        assert interior_max <= interior_tol, (
+            f"component-sync altered interior KE unexpectedly: "
+            f"max interior diff = {interior_max:.3e}, "
+            f"tolerance = {interior_tol:.3e} "
+            f"(= 1e-6 * scale {ke_interior_scale:.3e})"
+        )
+
+        # (b) Boundary diff must be non-trivial relative to the KE
+        # magnitude.  We expect seam rearrangement to produce at
+        # least a few percent change on random input.
+        ke_boundary_scale = float(jnp.max(jnp.abs(ke_scalar_sync)))
+        assert boundary_max > 1e-3 * ke_boundary_scale, (
+            f"boundary diff {boundary_max:.3e} is not > 1e-3 * "
+            f"KE scale {ke_boundary_scale:.3e} — iter-103 wiring "
+            f"appears ineffective."
+        )
+
+        # Sanity: max diff equals boundary diff (not interior diff)
+        assert max_diff == boundary_max, (
+            f"max diff ({max_diff:.3e}) is not at a boundary "
+            f"(boundary max {boundary_max:.3e}, interior max "
+            f"{interior_max:.3e}) — this contradicts the "
+            f"boundary-localized claim."
         )
 
     def test_geo_frame_sync_averages_discontinuity(self):

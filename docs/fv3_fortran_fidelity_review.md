@@ -3,6 +3,13 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-105 (2026-04-18)**: Codex stop-time correction: iter-104's regression test only asserted "different somewhere", not the seam-localized behavior it claimed.  Strengthened the test with three separate assertions:
+  - **(a)** output finite and (6, n+1, n+1)-shaped.
+  - **(b)** boundary diff > 1e-3 × KE scale — proves iter-103 wiring is effective.
+  - **(c)** interior diff ≤ 1e-6 × KE scale (scaled to KE magnitude) — proves the change is boundary-localized and doesn't silently perturb interior corners.
+  - Sanity: `max_diff == boundary_max` explicitly confirms the largest change is at a boundary, not interior.
+  - Empirical on C8 ng=3 random input: interior_max ≈ 8.6e-4, boundary_max ≈ 2.5e4, KE magnitude ~4e5 — all three assertions pass with comfortable margin.  If future refactors leak side effects into the interior, the test fails.
+  - 163 cdgrid/duogrid/fv3_regression tests pass.
 - **iter-104 (2026-04-18)**: Codex stop-time correction: iter-103's wiring was unverified.  Added integrated regression test `test_bgrid_ke_transport_duogrid_uses_component_sync` that calls the modified `_bgrid_ke_transport` with a duogrid grid and reimplements the pre-iter-103 scalar-KE-sync control inline for comparison.  Asserts:
   - (a) Output is finite and shape (6, n+1, n+1).
   - (b) Component-sync differs from scalar-sync by > 1e-6 (proves the wiring is not a no-op).
