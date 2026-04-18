@@ -200,6 +200,38 @@ Latest iteration work:
     Fortran overrides will fail the architectural-bound test with a
     direct pointer to sw_core.F90:3527-3545 / 3620-3640.
 
+- **iter-132 through iter-133 (2026-04-18)**: separate FB-path fidelity gap
+  identification and documentation (no production-path impact).
+  - **iter-132** (`8b3ea4b`): identified a second Fortran-fidelity gap in
+    `_d_sw5_corner_divergence` nord-iteration Laplacian loop at
+    fv3_sw_core.py:1044-1067.  The loop uses `jnp.pad(..., mode='edge')`
+    for `divg_d`, `divg_u_met`, `divg_v_met` halos, whereas Fortran
+    sw_core.F90:1737-1785 reads halo values populated by MPI
+    `mpp_update_domains` + the duogrid kinked-extended remap.  The
+    `mode='edge'` approximation agrees with Fortran only for
+    boundary-parallel gradients; at cube vertices and for cross-face
+    gradients it is an O(1) deviation.  Added inline fidelity note at
+    the loop citing the Fortran line range and the duogrid gate
+    (`fill_c=False` at sw_core.F90:1740-1742).  Impact scope: FB chain
+    only (experimental).
+  - **iter-132 followup/followup-2** (`3dcbc5d`, `c7e6513`): attempted to
+    bind source structure (loop identity, pad count, absence of
+    proper halo calls inside loop) to the note via AST checks.  Codex
+    stop-time review successively flagged the structural checks as
+    "does not enforce no-halfway-fix invariant" → "permits malformed
+    halfway fix" → "structurally brittle and still bypassable".
+  - **iter-133** (`54d6fbf`): accepted Codex's feedback and reverted to
+    a minimal documentation marker — assert the source cites Fortran
+    `sw_core.F90:1737-1785`.  Stable literal anchor, not structural.
+    Net diff from iter-132-followup-2: −175/+39 lines.  The test is
+    now a code-review-visible marker for removal of the fidelity note;
+    it does not attempt to mechanically enforce code↔note coherence,
+    which is infeasible without running the Fortran oracle at test time.
+  - **Net FB-halo-gap state after iter-133**: documented in source +
+    minimal test marker + this doc section.  Future port of proper
+    corner-staggered halo exchange for the Laplacian iteration should
+    update the source note, this test, and this doc section together.
+
 
 - **iter-112 (2026-04-18)**: Required-evaluation verification snapshot after the iter-77..iter-111 priority work (all 4 user priorities addressed).  Ran the full set:
   - **Williamson 2** (C36, 1 day): L2=1.53e-03, Linf=4.07e-03.  UNCHANGED from iter-77 baseline — production path uses A-L gradient and does not exercise the iter-103 component-sync change.  Visible v-wind cube-face imprint at t>0.5d still present — architectural, see unresolved item #1.
