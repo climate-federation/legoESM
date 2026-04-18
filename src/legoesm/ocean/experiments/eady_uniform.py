@@ -76,9 +76,10 @@ class EadyUniformConfig:
     perturbation_wavenumber: int = 2
 
     # Physics
-    A_h: float = 500.0
-    B_h: float = 1e12
-    C_smag: float = 0.0
+    A_h: float = 0.0
+    B_h: float = 1e10
+    C_smag: float = 0.1
+    K_h: float = 10.0
     bottom_drag_coeff: float = 1e-4
 
     # Sponge layer: absorbs eddy energy near walls to prevent

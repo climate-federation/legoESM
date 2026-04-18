@@ -39,6 +39,7 @@ def _create_ocean_setup(tc, nlev: int | None = None,
                         B_h: float | None = None,
                         C_smag: float | None = None,
                         A_v: float | None = None,
+                        K_h: float | None = None,
                         bottom_drag_r: float | None = None,
                         eos: str | None = None,
                         eos_linear=None,
@@ -193,6 +194,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["C_smag"] = C_smag
         if A_v is not None:
             kw["A_v"] = A_v
+        if K_h is not None:
+            kw["K_h"] = K_h
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
         if eos is not None:
@@ -228,6 +231,8 @@ def _create_ocean_setup(tc, nlev: int | None = None,
             kw["C_smag"] = C_smag
         if A_v is not None:
             kw["A_v"] = A_v
+        if K_h is not None:
+            kw["K_h"] = K_h
         if bottom_drag_r is not None:
             kw["bottom_drag_r"] = bottom_drag_r
         if eos is not None:

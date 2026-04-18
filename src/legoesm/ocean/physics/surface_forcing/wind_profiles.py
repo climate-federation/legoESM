@@ -111,6 +111,18 @@ def compute_wind_stress(
         tau_x = tau_base * taper
         tau_x = jnp.where((lat >= lat_s) & (lat <= lat_n), tau_x, 0.0)
         tau_y = jnp.zeros_like(tau_x)
+    elif cfg.wind_profile == "channel_sine":
+        # Half-sine zonal wind for channel experiments (Zhang et al. 2024).
+        # tau_x = tau_max * sin(pi * (lat - lat_s) / (lat_n - lat_s))
+        # Zero at both walls, peak westerly at channel center.
+        # Positive everywhere (eastward) — drives ACC-like flow.
+        lat_s = cfg.lat_south_deg * jnp.pi / 180.0
+        lat_n = cfg.lat_north_deg * jnp.pi / 180.0
+        width = lat_n - lat_s
+        y_frac = (lat - lat_s) / width
+        tau_x = cfg.tau_max * jnp.sin(jnp.pi * y_frac)
+        tau_x = jnp.where((lat >= lat_s) & (lat <= lat_n), tau_x, 0.0)
+        tau_y = jnp.zeros_like(tau_x)
     elif cfg.wind_profile == "global_wind":
         # Realistic 3-belt zonal wind stress following
         # Nikurashin & Vallis (2012, JPO) style profile.

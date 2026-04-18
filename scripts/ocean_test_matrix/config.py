@@ -106,6 +106,11 @@ FIELD_RANGES = {
         "SST": (1.5, 21.0),        # °C
         "SSS": (33, 37),            # PSU - tracer salinity range
     },
+    "acc_channel": {
+        "eta": (-0.1, 0.1),        # meters - wind-driven SSH response
+        "speed_sfc": (0, 0.2),      # m/s - zonal flow over ridge
+        "SST": (0, 9),              # °C - Abernathey profile range
+    },
 }
 
 # ===========================================================================

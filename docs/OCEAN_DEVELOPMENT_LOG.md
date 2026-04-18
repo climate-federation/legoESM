@@ -4,6 +4,72 @@ Running log of ocean dynamics work — what we tried, what worked, what didn't, 
 
 ---
 
+## 2026-04-18: ACC Channel Experiment with Gaussian Ridge
+
+### Motivation
+
+The ocean test matrix had no experiment with spatially varying bathymetry
+interacting with dynamics. The "with land" experiments use flat bottoms;
+the overflow test has variable bathymetry but only on cubed_sphere/latlon
+(not channels). We needed a test case that exercises the z-star coordinate's
+Jacobian with a realistic topographic feature.
+
+### What we built
+
+An ACC-like channel experiment inspired by Zhang et al. (2024, JPO),
+featuring a meridional Gaussian ridge on the sphere. Design decisions
+were made through an interview process (see spec in
+`docs/ocean_experiments/zhang2024_acc_channel_spec.md`).
+
+**Key parameters:**
+- Spherical channel centered at 40S (configurable), zonally periodic
+- H_max = 3000 m, Gaussian ridge h0 = 1000 m, sigma = 150 km
+- Abernathey et al. (2011) exponential stratification (delta_T = 8 degC)
+- Linear EOS (alpha_T = 2e-4, salinity passive)
+- Half-sine zonal wind stress (tau0 = 0.1 N/m^2)
+- Northern-only sponge (200 km, 7-day restoring to initial Tstar(z))
+- Linear bottom drag r = 1.1e-3
+
+**Resolution tiers:** quick ~100 km, default ~50 km, research 10-25 km (configurable).
+
+### New code
+
+- `src/legoesm/ocean/experiments/acc_channel.py` — ACCChannelConfig, IC
+  (stratification + ridge bathymetry + perturbation), forcings, sponge
+- `src/legoesm/ocean/physics/surface_forcing/wind_profiles.py` — added
+  `"channel_sine"` wind profile (half-sine, zero at walls, peak at center)
+- `docs/ocean_experiments/zhang2024_acc_channel_spec.md` — full MITgcm
+  reference spec for the Zhang et al. setup
+
+### Test matrix wiring
+
+- Runner: `run_acc_channel()` in `experiments.py`
+- Test cases: latlon_channel (20x36) and mpas_channel (50km) at 30/2 day durations
+- First experiment to actually pass `sponge=` to `model.step()` (Eady computed sponge gamma but never wired it through)
+
+### Results (quick mode, 2 days)
+
+| Grid | Status | max_speed | eta_drift | T_drift | Wall |
+|------|--------|-----------|-----------|---------|------|
+| latlon_channel 20x36 | PASS | 0.137 m/s | 1e-19 m | 4e-6 degC | 6.5s |
+| mpas_channel 50km | PASS | 0.162 m/s | 5e-19 m | 3e-6 degC | 191s |
+
+Volume conservation at machine precision. Small T drift from sponge restoring (expected).
+
+### Issue opened
+
+- #202: Linear bottom drag units are wrong — should divide by dz_bottom (m/s units) like quadratic drag, not use Rayleigh damping (1/s units). All existing experiments need r values audited after fix.
+
+### Follow-up items
+
+- Surface heat flux (sinusoidal Q_net) — deferred
+- Fix bottom drag units (#202)
+- Topographic form stress diagnostic
+- Longer runs (weeks-months) to validate wind-TFS equilibration
+- Homogeneous (barotropic-only) variant
+
+---
+
 ## 2026-04-18: Issue #198 — Bottom Drag and Sponge Layers (Closed)
 
 ### Bottom drag fixes
