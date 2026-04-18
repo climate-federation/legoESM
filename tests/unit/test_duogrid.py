@@ -1109,27 +1109,28 @@ class TestBgridNeCornerSync:
             f"Iter-103 wiring is NOT active."
         )
 
-    def test_fb_path_diagnostic_seam_quality_component_vs_scalar(self):
-        """Iter-110 (Priority 4): FB-path diagnostic comparing the
-        iter-103 component-KE-sync path against the pre-iter-103
-        scalar-KE-sync path on a one-step `fv3_fb_sw_step`.
+    def test_fb_path_component_vs_scalar_sync_propagates_to_wind(self):
+        """Iter-111 (Priority 4, honest version): FB-path diagnostic
+        comparing the iter-103 component-KE-sync path against the
+        pre-iter-103 scalar-KE-sync path on a one-step `fv3_fb_sw_step`.
 
-        Iter-109's original version mistakenly compared component-sync
-        against a NO-SYNC mock, which doesn't match the pre-iter-103
-        Fortran commented-out alternative.  Corrected here: inject a
-        genuine scalar-KE-sync variant by monkey-patching
-        `synchronize_bgrid_ne_corner_geo` to a NO-OP AND
-        `_bgrid_ke_transport`'s call to it is followed by a scalar
-        sync via `synchronize_corner_scalar` applied to the output KE.
+        **What this test proves**: the iter-103 component-vs-scalar
+        sync choice changes u_d/v_d after one full FB step by a
+        specific, deterministic amount.  It does NOT claim that
+        component sync is "better" or "closer to Fortran" — that
+        would require a live Fortran reference run.
 
-        To implement this correctly, the test patches the
-        `_bgrid_ke_transport` function itself with a scalar-sync
-        variant, runs the FB step, and compares the resulting
-        u_d/v_d against the iter-103 default path.
+        **Isolation**: the scalar-sync control is constructed from
+        the EXACT same Courant/PPM transport code (imported from
+        `_ppm_transport_1d`) as the production `_bgrid_ke_transport`,
+        with the only difference being (a) no component sync on
+        (ubb, vbbtemp), (b) `synchronize_corner_scalar` applied on
+        the final KE.  Any measured diff is strictly attributable to
+        the sync-location/type choice.
 
-        Claim: the two paths produce DIFFERENT u_d/v_d, proving the
-        iter-103 wiring change has an observable effect end-to-end
-        beyond simply "presence of some sync".
+        **Expected-value assertion**: to catch silent regressions in
+        either path, the test asserts the diff magnitudes match
+        specific values (u_d ≈ 5.58e-2, v_d ≈ 5.65e-2 on seed 2026).
         """
         import jax.numpy as jnp
         import numpy as np
@@ -1199,17 +1200,34 @@ class TestBgridNeCornerSync:
             assert rel < 1e-2, \
                 f"{label}-sync FB h drifted: rel {rel:.3e}"
 
-        # The two variants' u_d/v_d should differ — proves the
-        # component-vs-scalar KE sync change propagates through the
-        # full FB step (not just in `_bgrid_ke_transport` as iter-105
-        # already established).
+        # The two variants' u_d/v_d should differ by specific amounts
+        # that isolate the component-vs-scalar KE-sync choice.
         u_diff = float(jnp.max(jnp.abs(u_d_comp - u_d_scal)))
         v_diff = float(jnp.max(jnp.abs(v_d_comp - v_d_scal)))
-        assert u_diff > 1e-10 or v_diff > 1e-10, (
-            f"FB-path u_d/v_d identical between component-sync and "
-            f"scalar-sync variants: u={u_diff:.3e} v={v_diff:.3e}. "
-            f"The iter-103 change doesn't propagate through the full "
-            f"FB step."
+
+        # Expected values on C8 ng=3 seed 2026 — locks in the
+        # iter-103 wiring's specific end-to-end impact.  If the
+        # Courant formulas, sync helpers, or FB flow change in a way
+        # that alters the quantitative propagation, this test fires.
+        expected_u_diff = 5.58e-2
+        expected_v_diff = 5.65e-2
+        tol = 2e-3  # covers float32 metric precision
+
+        assert abs(u_diff - expected_u_diff) < tol, (
+            f"u_d diff = {u_diff:.4e}, expected {expected_u_diff:.4e} "
+            f"± {tol:.2e}.  Either the iter-103 wiring or the scalar-"
+            f"sync control drifted numerically."
+        )
+        assert abs(v_diff - expected_v_diff) < tol, (
+            f"v_d diff = {v_diff:.4e}, expected {expected_v_diff:.4e} "
+            f"± {tol:.2e}."
+        )
+
+        # h should be identical: it's updated before KE comes into play.
+        h_diff = float(jnp.max(jnp.abs(h_comp - h_scal)))
+        assert h_diff == 0.0, (
+            f"h_diff = {h_diff:.3e} expected exactly 0 — KE sync does "
+            f"not affect mass transport."
         )
 
     def test_geo_frame_sync_averages_discontinuity(self):

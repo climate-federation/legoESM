@@ -3,6 +3,12 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-111 (2026-04-18)**: Codex stop-time correction: iter-110's test still didn't isolate component-vs-scalar sync cleanly enough because it only asserted `diff > 1e-10` — any sync change would trigger that.  Renamed the test to `test_fb_path_component_vs_scalar_sync_propagates_to_wind` and:
+  - Rewrote the docstring to honestly state what the test proves (wiring propagation, NOT "Fortran improvement" — that would require a live Fortran reference).
+  - Documented the ISOLATION: scalar-sync control uses the EXACT same Courant/PPM transport imports as production `_bgrid_ke_transport`; only the sync differs.
+  - Replaced `diff > 1e-10` with an EXPECTED-VALUE assertion at ±2e-3 of the measured diffs (u_d ≈ 5.58e-2, v_d ≈ 5.65e-2 on seed 2026).  Locks in the specific quantitative propagation; catches regressions in either path.
+  - Added an `h_diff == 0` assertion to document that KE sync does not affect mass transport (h is updated before KE comes into play).
+  - 165 cdgrid/duogrid/fv3_regression tests pass.
 - **iter-110 (2026-04-18)**: Codex stop-time correction: iter-109's FB-path test compared component-sync against a NO-OP mock, not the pre-iter-103 SCALAR-KE-sync path it claimed in the test name.  Rewrote the test to actually compare component-sync (iter-103 default) against a genuine scalar-sync variant by monkey-patching `_bgrid_ke_transport` with a scalar-sync reimplementation.
   - Empirical on C8 ng=3 seed 2026: component-sync vs scalar-sync FB step gives h_diff=0, u_d_diff=0.056, v_d_diff=0.057 (0.17% of max u_d magnitude 32).  Confirms the iter-103 change (component-vs-scalar sync ordering) propagates end-to-end through the full FB step (c_sw → p_grad_c → d_sw_native → d_sw6 wind update) — not just inside `_bgrid_ke_transport` as iter-106 proved.
   - 165 cdgrid/duogrid/fv3_regression tests pass.
