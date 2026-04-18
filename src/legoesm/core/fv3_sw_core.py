@@ -424,6 +424,25 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     n = cdgrid.n
     npt = min(4, n // 2)
 
+    # --- Fortran parity note (iter-107, Priority 3 audit) --------------
+    # sw_core.F90:3527-3545 and 3620-3640 apply cube-vertex corner
+    # OVERRIDES on utmp/vtmp and ua/va at the 4 cube corners (sw/se/ne/
+    # nw), gated on `.not. dg%is_initialized`.  The overrides write
+    # halo cells of utmp/vtmp with sign-flipped copies of the other
+    # component, e.g.:
+    #   utmp(i=-2..0, j=0) = -vtmp(0, 1-i)   # SW corner
+    #   vtmp(0, j=-2..0)   = -utmp(1-j, 0)   # SW corner
+    # These require direct halo-cell writes on utmp_pad/vtmp_pad near
+    # cube vertices.  NOT PORTED in Python's non-duogrid path: the
+    # halo data already comes from `pad_halo_vector` (which provides
+    # proper cross-face interpolation), so the Fortran-style sign-
+    # flip copy is redundant for the common case.  The gap may cause
+    # O(dx) divergence from Fortran at the 24 cube-vertex cells (4
+    # per corner × 6 faces / 2 faces per vertex pair) in the non-
+    # duogrid FB path only.  Duogrid path (which skips the overrides
+    # per Fortran's own gate) is unaffected.
+    # ------------------------------------------------------------------
+
     # ---- Step 1: D-grid → covariant cell centres (utmp, vtmp) ----
     utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
