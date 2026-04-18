@@ -283,3 +283,77 @@ def test_tests_shim_works_from_raw_repo_checkout():
         "install):\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+def test_tests_shim_recovers_from_stale_legoesm_install():
+    """Shim must self-bootstrap even when a stale ``legoesm`` package is
+    already importable but *lacks* the ``atmosphere.held_suarez``
+    submodule — e.g. an older wheel/editable install from before the
+    #188 move.
+
+    Reproduction: inject a dummy ``legoesm`` namespace package into a
+    throwaway staging directory (with no ``atmosphere`` submodule),
+    prepend that directory to ``sys.path`` so ``import legoesm``
+    succeeds but ``import legoesm.atmosphere.held_suarez`` would fail,
+    and then import the shim. The shim is expected to notice the
+    missing submodule via ``importlib.util.find_spec`` and prepend
+    ``<repo>/src`` so the delegating import resolves to the checkout
+    copy rather than the stale stand-in.
+    """
+    import tempfile
+    import textwrap
+
+    with tempfile.TemporaryDirectory() as stale_root:
+        stale_pkg = pathlib.Path(stale_root) / "legoesm"
+        stale_pkg.mkdir()
+        (stale_pkg / "__init__.py").write_text(
+            textwrap.dedent(
+                """
+                # Deliberately stale: no ``atmosphere`` submodule.
+                STALE_SENTINEL = True
+                """
+            ).lstrip()
+        )
+
+        env = dict(os.environ)
+        # Put the stale package directory *ahead* of the repo root so
+        # ``import legoesm`` resolves to the stale stand-in first.
+        env["PYTHONPATH"] = os.pathsep.join([str(stale_root), str(REPO_ROOT)])
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                # Scrub editable-install src/ so the stale stand-in wins.
+                "import sys, os\n"
+                "repo_src = os.path.join(os.environ['PYTHONPATH'].split(os.pathsep)[-1], 'src')\n"
+                "sys.path = [p for p in sys.path if os.path.abspath(p) != os.path.abspath(repo_src)]\n"
+                "for mod in [m for m in list(sys.modules) if m == 'legoesm' or m.startswith('legoesm.')]:\n"
+                "    del sys.modules[mod]\n"
+                # Prime the stale install: top-level import must succeed,\n"
+                # but the submodule must not be reachable yet.\n"
+                "import legoesm\n"
+                "assert getattr(legoesm, 'STALE_SENTINEL', False), 'stale stand-in not active'\n"
+                "import importlib.util\n"
+                "assert importlib.util.find_spec('legoesm.atmosphere') is None, "
+                "    'stale stand-in unexpectedly exposes atmosphere/'\n"
+                # Now import the shim; it must detect the missing\n"
+                # submodule, prepend <repo>/src, evict the stale\n"
+                # top-level module, and resolve against the checkout.\n"
+                "import tests.test_cases.held_suarez as shim\n"
+                "assert callable(shim.held_suarez_init)\n"
+                "assert shim.SIGMA_B == 0.7\n"
+                "# After the shim runs, the canonical module must come\n"
+                "# from the checkout, not the stale stand-in.\n"
+                "import legoesm.atmosphere.held_suarez as canonical\n"
+                "assert shim.held_suarez_init is canonical.held_suarez_init\n",
+            ],
+            cwd=str(REPO_ROOT.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    assert result.returncode == 0, (
+        "tests/ shim failed to recover from a stale legoesm install:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
