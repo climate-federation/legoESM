@@ -1409,6 +1409,43 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         mode_edge_pads = _count_mode_edge_pads(laplacian_loops[0])
 
         expected_pads_when_gap_open = 3  # divg_d, divg_u_met, divg_v_met
+
+        # Detect OTHER halo-exchange calls inside the loop — e.g.,
+        # `pad_halo(...)`, `pad_halo_vector(...)`, `synchronize_corner_*(...)`,
+        # `synchronize_bgrid_*(...)`, `pad_halo_*_4d(...)`, etc.  If any
+        # such call appears INSIDE the loop while the fidelity note is
+        # also present, that is a MALFORMED HALFWAY FIX: part of the
+        # halo gap has been closed with a proper exchange but the note
+        # still claims the gap is open.  Force the author to either
+        # finish the port (remove ALL mode='edge' pads AND the note)
+        # or revert the partial exchange.
+        def _count_proper_halo_calls(node):
+            """Count non-mode='edge' halo / sync calls in subtree.
+
+            Matches any Name Call whose id starts with `pad_halo`,
+            `synchronize_`, or `ext_vector` — covers the codebase's
+            cross-face halo exchange primitives (grids/halo.py,
+            grids/duogrid.py).
+            """
+            n = 0
+            for sub in ast.walk(node):
+                if not isinstance(sub, ast.Call):
+                    continue
+                fname = None
+                if isinstance(sub.func, ast.Name):
+                    fname = sub.func.id
+                elif isinstance(sub.func, ast.Attribute):
+                    fname = sub.func.attr
+                if fname is None:
+                    continue
+                if (fname.startswith("pad_halo")
+                        or fname.startswith("synchronize_")
+                        or fname.startswith("ext_vector")):
+                    n += 1
+            return n
+
+        proper_halo_calls = _count_proper_halo_calls(laplacian_loops[0])
+
         if note_present:
             self.assertEqual(
                 mode_edge_pads, expected_pads_when_gap_open,
@@ -1421,6 +1458,26 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 f"fidelity note (the three phrases: "
                 f"{note_phrases}) to indicate completion.",
             )
+            # Additional guard: if the note claims the gap is open
+            # (all mode='edge'), NO proper halo exchange may appear
+            # inside the loop.  A mix of mode='edge' + halo_call is a
+            # malformed halfway fix — proper halo AND legacy
+            # mode='edge' co-exist, making the code path unclear.
+            self.assertEqual(
+                proper_halo_calls, 0,
+                f"Fidelity note is PRESENT (claim: halo gap open) "
+                f"and 3 `mode='edge'` pads remain, but "
+                f"{proper_halo_calls} proper halo-exchange call(s) "
+                f"(pad_halo/synchronize_*/ext_vector_*) also appear "
+                f"inside the nord-iteration loop.  That is a "
+                f"MALFORMED HALFWAY FIX: the legacy pads coexist "
+                f"with new exchange calls, leaving it ambiguous "
+                f"which actually controls the halo values.  Either "
+                f"(a) revert the proper-halo additions and keep the "
+                f"note, or (b) remove all three mode='edge' pads "
+                f"AND the note, and rely solely on the proper halo "
+                f"exchange.",
+            )
         else:
             # Note absent → the gap is claimed closed; ZERO mode='edge'
             # pads must remain in the Laplacian section of the function.
@@ -1431,6 +1488,21 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 f"A proper port must replace ALL `mode='edge'` pads "
                 f"with cross-face halo exchange.  Either finish the "
                 f"port or restore the fidelity note.",
+            )
+            # If the note is absent (gap claimed closed), at least
+            # ONE proper halo call must exist in the loop — otherwise
+            # the Laplacian has NO cross-face halo at all, which would
+            # be worse than the mode='edge' state.
+            self.assertGreater(
+                proper_halo_calls, 0,
+                f"Fidelity note is ABSENT and no `mode='edge'` pads "
+                f"remain, but ZERO proper halo calls "
+                f"(pad_halo/synchronize_*/ext_vector_*) appear inside "
+                f"the loop.  A gap-closed state requires at least one "
+                f"proper cross-face halo call to replace what the "
+                f"mode='edge' pads provided.  Either restore the note "
+                f"(documenting that the gap remains open) or add "
+                f"proper halo exchange.",
             )
 
     def test_rsin2_corner_matches_fortran_at_interior(self):
