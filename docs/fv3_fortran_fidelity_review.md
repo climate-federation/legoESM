@@ -3,6 +3,12 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-88 (2026-04-18)**: Codex stop-time review claimed iter-87's fidelity fix was "not supported by the repo's own grid construction".  Disproven with a new regression test.  The grid construction at `cubed_sphere_cdgrid.py:750-757` computes `sina_u` exactly the same way the iter-87 helper does:
+  ```python
+  sina_u_int = 0.5 * (sin_sg_E[:, :-1, :] + sin_sg_W[:, 1:, :])
+  sina_u = concatenate([sin_sg_W[:, :1, :], sina_u_int, sin_sg_E[:, -1:, :]], axis=1)
+  ```
+  and uses it to compute `rsin_u = 1/sina_u²` which IS stored on the cdgrid.  Added `test_sina_u_v_helper_matches_cdgrid_rsin_u_at_interior` which reconstructs `sina_u` from `cdgrid.rsin_u` (via `1/sqrt(rsin_u)`, duogrid uniform convention) and asserts the iter-87 helper matches to float-precision (<1e-6).  Test passes: the iter-87 helper IS consistent with what the grid construction itself uses.  The old `sqrt(1 - cosa_u**2)` path was inconsistent because it built `sina` from `cos` averaging — a different functional form.
 - **iter-87 (2026-04-18)**: Fixed `_vorticity_flux` to use sin_sg-based `sina_u/sina_v` instead of `sqrt(1 - cosa_u**2)`.
   - Fortran `fv_grid_utils.F90:505-518` defines `sina_u = 0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))` — a halo-average of sub-grid sine values.  The Python `_vorticity_flux` was reconstructing sina via `sqrt(1 - cosa_u**2)` where `cosa_u = 0.5*(cos_sg(i-1,E) + cos_sg(i,W))` is itself a halo-average.  The trig identity `cos²+sin²=1` does NOT hold on halo-averaged quantities, so the two formulations diverge.
   - Fix: factored a shared helper `_sina_u_v_from_sin_sg(cdgrid)` placed alongside `_ke_upwind`; `_vorticity_flux` and `_d_sw5_corner_divergence` now both use it.  The helper reproduces the interior 0.5-average + panel-edge single-side convention identically to the original cubed-sphere cdgrid build and Fortran.

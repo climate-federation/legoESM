@@ -899,6 +899,38 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 f"compute_transport_quantities halo used {kw} "
                 f"instead of duogrid remap on duogrid-active grid")
 
+    def test_sina_u_v_helper_matches_cdgrid_rsin_u_at_interior(self):
+        """Iter-87 consistency: the helper's `sina_u` must be
+        self-consistent with the grid-build `rsin_u = 1/sina_u²`
+        (stored on `cdgrid` for duogrid mode).  If the helper diverges
+        from the grid build, the fidelity claim is unsupported —
+        Codex flagged this as an unguarded assumption.  Verifying here
+        at interior cells where the mixed-convention panel-edge
+        override does not apply.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+
+        n = 16
+        # Duogrid mode → rsin_u = 1/sin² everywhere (including panel edges)
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        sina_u_helper, sina_v_helper = _sina_u_v_from_sin_sg(cdgrid)
+
+        # Reconstruct sina_u from stored rsin_u.  Under duogrid,
+        # rsin_u = 1/sina_u² uniformly, so sina_u = 1/sqrt(rsin_u).
+        sina_u_from_rsin = 1.0 / jnp.sqrt(cdgrid.rsin_u)
+        sina_v_from_rsin = 1.0 / jnp.sqrt(cdgrid.rsin_v)
+
+        max_u_diff = float(jnp.max(jnp.abs(sina_u_helper - sina_u_from_rsin)))
+        max_v_diff = float(jnp.max(jnp.abs(sina_v_helper - sina_v_from_rsin)))
+        # Float32 round-trip precision — use 1e-6 tolerance
+        self.assertLess(max_u_diff, 1e-6,
+                        f"sina_u helper diverges from cdgrid.rsin_u: {max_u_diff}")
+        self.assertLess(max_v_diff, 1e-6,
+                        f"sina_v helper diverges from cdgrid.rsin_v: {max_v_diff}")
+
     def test_sina_u_v_from_sin_sg_matches_fortran_convention(self):
         """Iter-87: `_sina_u_v_from_sin_sg` constructs sina_u/sina_v from
         the sin_sg sub-grid per fv_grid_utils.F90:505-518.  Verify:
