@@ -842,6 +842,32 @@ Iteration-3 change (1) is still incomplete at panel edges.
 ### F3-2. Non-`sin_sg` boundary stencils still use `mode='edge'` where FV3 uses cross-face halo data
 Severity: **high**
 
+> **iter-157 (2026-04-19) update**: the specific line-number
+> references in the F3-2/F3-3/F3-4 iteration-4 sections below are
+> STALE.  Direct inspection of the current source shows:
+>
+>   - **F3-2** specific pads (lines `129-130` `cos_theta_pad`,
+>     `228-229` `cos_sg5_pad`) have been refactored away.  Current
+>     `cos_sg5_pad`/`rsin2_pad` at lines 486-487 is gated under the
+>     non-duogrid `_d2a2c_vect` branch (unreachable from the default
+>     production path per iter-129 runtime tripwire test); the
+>     `cos_theta_pad` references no longer exist.
+>   - **F3-3** `fx_circ = uc*dxc` / `fy_circ = vc*dyc` `mode='edge'`
+>     pattern referenced at lines `440-441` / `559-560` no longer
+>     exists in the current code.  The c_sw corner vorticity path
+>     (resolved in iter-29 per the Resolved list below) replaced it.
+>   - **F3-4** KE upwind `sin_sg/cos_sg` conversion at face
+>     boundaries is IMPLEMENTED in `_ke_upwind` at fv3_sw_core.py:
+>     721-751, exactly matching the Fortran `sw_core.F90:323-365`
+>     west/east/south/north boundary specials — e.g., west edge
+>     `uc[0]*sin_sg[0,W] + v[0]*cos_sg[0,W]` at line 735.  This
+>     was the iter-8/25 "boundary KE/vorticity special cases"
+>     resolution.  The F3-4 section below should be treated as
+>     historical baseline.
+>
+> Keeping the original F3-x text in place for the audit trail; the
+> iter-157 update above supersedes the line-number claims.
+
 Remaining copy-padding in `fv3_sw_core.py`:
 - `cos_theta_pad/sin_theta_pad` at `129-130`
 - `cos_sg5_pad/rsin2_pad` at `228-229`
