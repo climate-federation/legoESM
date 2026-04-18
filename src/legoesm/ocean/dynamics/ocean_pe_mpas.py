@@ -5,7 +5,7 @@ on MPAS Voronoi (C-grid) meshes. Uses the TRiSK discretization from
 Ringler et al. (2010).
 
 Equations (per layer k):
-    du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) - w·du'/dz + A_h·del2(u) + A_v·d²u/dz²
+    du/dt = q_e * F_q - grad(KE + p'/ρ₀ + g·η) - w·du'/dz + A_h·del2(u) + B_h·del4(u) - del2(A_smag·del2(u)) + A_v·d²u/dz²
     d(h·T)/dt = -div(h·u·T) + K_h·h·lap(T) + K_v·d²T/dz²
     d(h·S)/dt = -div(h·u·S) + K_h·h·lap(S) + K_v·d²S/dz²
     dη/dt = -Σ_k div(h_k · u_k)
@@ -45,7 +45,9 @@ from legoesm.core.operators_voronoi import (
     kinetic_energy_cell_3d,
     pv_flux_energy_conserving_3d,
     pv_flux_enstrophy_conserving_3d,
+    smagorinsky_biharmonic_3d,
     vector_laplacian_del2_3d,
+    vector_laplacian_del4_3d,
     vertex_thickness_3d,
 )
 from legoesm.ocean.mpas_config import MPASOceanConfig
@@ -217,6 +219,14 @@ def mpas_ocean_baroclinic_tendencies(
 
     # Horizontal viscosity on perturbation velocity
     visc = config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
+
+    # Constant biharmonic viscosity
+    if config.B_h > 0:
+        visc = visc + config.B_h * vector_laplacian_del4_3d(u_prime_3d, mesh)
+
+    # Flow-dependent Smagorinsky biharmonic viscosity
+    if config.C_smag > 0:
+        visc = visc + smagorinsky_biharmonic_3d(u_prime_3d, mesh, config.C_smag)
 
     # Vertical advection of perturbation momentum.
     # Issue #171 Level-1 fix: interface-upwind flux-form momentum

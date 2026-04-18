@@ -349,6 +349,12 @@ class LatLonCGridOceanModel:
             state.eta.data, state.H_bathy.data,
         )
 
+        # Enforce periodic wrap column: u[:,n_lon] must equal u[:,0].
+        # Prevents floating-point drift across all operators, not just
+        # the strain rate stencil.  Belt-and-suspenders with the structural
+        # fix inside strain_rate_cgrid.
+        u_star = u_star.at[:, -1].set(u_star[:, 0])
+
         state_mid = state._replace(
             u=state.u.replace(data=u_star * u_mask_3d),
             v=state.v.replace(data=v_star * v_mask_3d),

@@ -4,6 +4,273 @@ Running log of ocean dynamics work — what we tried, what worked, what didn't, 
 
 ---
 
+## 2026-04-18: Issue #189 — Biharmonic Smagorinsky Viscosity (Closed)
+
+### Summary
+
+Completed and tested flow-dependent biharmonic Smagorinsky viscosity on both lat-lon C-grid and MPAS Voronoi grids. This is the single highest-impact dissipation improvement — it's the default scheme in MOM6 and the standard recommendation for eddy-resolving ocean models.
+
+### Lat-lon C-grid fixes
+
+1. **Wrap-column periodicity bug fixed**: `strain_rate_cgrid` used `.at[:,-1].set(u[:,0])` (JAX scatter op, complicates gradients). Replaced with structural periodicity: `jnp.concatenate([u[:, :n_lon], u[:, 0:1]])` so the wrap column always references column 0. Also added post-step enforcement `u[:,-1] = u[:,0]` in `ocean_model_latlon_cgrid.py` as belt-and-suspenders.
+
+2. **Biharmonic scaling factor wired**: `biharmonic_scaling_factor(grid)` was implemented but never used. Now applied to constant-coefficient biharmonic (`B_h`) in `ocean_pe_latlon_cgrid.py`. Scales as `(cos(lat)/cos_max)^4` to prevent CFL violation near poles (MOM6 convention). Not needed for Smagorinsky path since `A_smag` already includes area-dependent Delta.
+
+3. **AD-safe sqrt**: Added `1e-30` epsilon to `sqrt(D_T² + D_S²)` in both `smagorinsky_viscosity_cgrid` and `smagorinsky_viscosity_q_cgrid` to prevent NaN gradients at masked points where the deformation rate is zero.
+
+### MPAS Voronoi implementation
+
+Added `smagorinsky_biharmonic_3d()` to `core/operators_voronoi.py` using the MPAS-Ocean/ICON-O approach (NOT the stress-tensor two-pass used on lat-lon). The approach:
+
+```
+1. Strain rate: div(u) at cells + curl(u) at vertices
+2. Average to edges: D_T_edge = avg(div), D_S_edge = avg(curl)
+3. Deformation: |D| = sqrt(D_T² + D_S²) at edges
+4. Coefficient: A_smag = (C_smag × sqrt(dcEdge × dvEdge))² × |D|
+5. Two-pass: -del2(A_smag × del2(u))
+```
+
+Key design choice per ocean-expert recommendation: the stress-tensor approach doesn't fit TRiSK's mimetic framework. The `del2(A × del2(u))` approach composes naturally with existing TRiSK operators and is what operational Voronoi-mesh ocean models use.
+
+Also added constant-coefficient biharmonic (`B_h × del4(u)`) to MPAS using existing `vector_laplacian_del4_3d`.
+
+### Config changes
+
+- `MPASOceanConfig`: added `B_h: float = 0.0` and `C_smag: float = 0.0`
+- Both default to zero (harmonic-only, backward compatible)
+
+### CI Test Suite (22 tests, ~16 seconds)
+
+New `tests/ocean/unit/test_smagorinsky.py` covering both grids:
+
+**Lat-lon (12 tests):** energy dissipation, monotone dissipation, uniform flow invariance, 3D=2D consistency, masked regions zero, antisymmetry under velocity reversal, wrap-column periodicity, JAX autodiff, JIT compilation, checkerboard scale-selectivity, strain wrap-column consistency, coefficient magnitude
+
+**MPAS (10 tests):** monotone dissipation, uniform flow invariance, solid body rotation invariance, antisymmetry, masked edge handling, JAX autodiff, JIT compilation, multi-level consistency, checkerboard scale-selectivity, strain rate shape verification
+
+### Files changed
+
+- `src/legoesm/ocean/dynamics/latlon_cgrid_operators.py` — wrap-column stencil fix, AD-safe sqrt
+- `src/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py` — biharmonic scaling factor wired
+- `src/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` — post-step periodicity enforcement
+- `src/legoesm/core/operators_voronoi.py` — new `smagorinsky_biharmonic_3d()`
+- `src/legoesm/ocean/mpas_config.py` — `B_h` and `C_smag` fields added
+- `src/legoesm/ocean/dynamics/ocean_pe_mpas.py` — biharmonic/Smagorinsky wired into momentum tendency
+- `tests/ocean/unit/test_smagorinsky.py` — new CI test suite (22 tests)
+
+---
+
+## 2026-04-18: Classical Eady — 500 Days Stable
+
+### Breakthrough
+
+Achieved 500-day stable Eady baroclinic instability with correct exponential growth of the most-unstable mode. The key was switching to **depth-uniform dT/dy** (classical Eady with short-wave cutoff) combined with proper boundary treatment.
+
+### Configuration that works
+
+- N=1.2e-3, U_surface=0.2 (later 0.8 for faster growth), H=5500m, 25°N
+- L_d=107km, λ_max=428km, k=2 perturbation
+- **Depth-uniform dT/dy** (jet_depth_scale=H_max) → zero interior PV → Eady short-wave cutoff at 280km → no grid-scale Charney modes
+- A_h=100, B_h=1e12, bottom drag r=1e-4, sponge layers 2° at walls
+- Zonal wavenumber perturbation (not broadband noise)
+
+### Why surface-intensified dT/dy failed
+
+The earlier setup (jet_depth_scale=2000m) created a surface PV gradient that supports **Charney-type instability** with no short-wave cutoff. Grid-scale modes grew faster than any viscosity could damp them. On a β-plane, β also provides interior PV gradient, but this is much weaker than the surface-concentrated gradient.
+
+### Wall instability diagnosis
+
+Spatial tracking revealed blowup always originated at the **north wall** (33°N). Cause: Eliassen-Palm flux from an unstable eastward jet on β-plane is poleward — eddy energy accumulates at the north wall. Free-slip BC allows unbounded tangential velocity. Fix: **sponge layers** (2° width, 1-day relaxation) near N/S walls, standard in MITgcm/MOM6 channel experiments.
+
+### Vertical diffusion sign bug found
+
+Audit of all dissipation schemes revealed A_v and K_v were **anti-diffusive** on the lat-lon C-grid: `jnp.diff(f, axis=-1)` gives `f[k+1]-f[k]` instead of `f[k]-f[k+1]`. Fixed to `f[..., :-1] - f[..., 1:]`. MPAS and physics pipeline versions were correct.
+
+### Ocean checkpoint utility
+
+Added `scripts/ocean_test_matrix/checkpoint.py` with `save_ocean_checkpoint` / `load_ocean_checkpoint` for saving/restoring ocean state to NPZ. Avoids re-running spinup during parameter tuning.
+
+---
+
+## 2026-04-17: Smagorinsky Biharmonic — Resolved
+
+### Problem (original)
+
+Biharmonic Smagorinsky viscosity destabilized simulations — more C_smag = earlier blowup (opposite of expected). Tested with 7 formulations: post-multiplier, sandwich, stress-tensor variants.
+
+### Resolution
+
+The correct formulation is the **MOM6-style two-pass stress-tensor**:
+
+```
+Pass 1: u* = stress_divergence(strain(u), 1, 1, normalize=False)  # unnormalized
+Pass 2: tend = stress_divergence(strain(u*), A_smag_h, A_smag_q, normalize=True)
+```
+
+Key: first pass UNNORMALIZED (returns m/s), second pass uses A_smag (m²/s, NOT B_smag m⁴/s).
+
+### Bugs found during investigation
+
+1. **Post-multiplier `B(x) × ∇⁴(u)` is anti-dissipative** for spatially varying B — cross-terms from grad(B) inject energy. More C_smag → earlier blowup.
+2. **B_smag in second pass violates Laplacian CFL** — B × dt / dx² >> 0.5.
+3. **Normalized first pass gives wrong units** — 1/(ms²) instead of m/s².
+4. The "day 69 blowup" that appeared identical across formulations was actually from the surface-intensified dT/dy (Charney modes at grid scale), NOT the Smagorinsky operator.
+
+### Validation
+
+Monotonicity test passes: all C_smag values are dissipative, KE dissipation scales as C_smag². Currently testing C_smag=0.1 in the classical Eady experiment (depth-uniform dT/dy).
+
+### Remaining
+
+- MPAS implementation
+- Full test suite integration
+- JAX autodiff verification
+
+---
+
+## 2026-04-16: Eady Baroclinic Instability — From Blowup to Eddies
+
+### Goal
+
+Develop a classical Eady baroclinic instability test case that produces physically correct mesoscale eddies. This validates the ocean model's ability to simulate baroclinic instability, the primary mechanism for mesoscale eddy generation in the real ocean.
+
+### Domain and Parameters
+
+- 1000×2000 km zonally periodic channel at 25°N
+- Surface-intensified dT/dy (jet_depth_scale=2000m), warm south / cold north
+- Linear EOS, starting from rest
+- L_d ≈ 97 km, most-unstable wavelength λ_max ≈ 390 km, e-folding ≈ 36 days
+- Tested at 20 km (100×50) and 10 km (200×100) resolution, 20 vertical levels
+
+### Thermal Wind Sign Error
+
+The initial implementation had `dTdy = +f₀Λ/(gα_T)` which gives warm north / cold north → westward surface jet. The correct thermal wind relation `f ∂u/∂z = -g α_T ∂T/∂y` requires `dTdy = -f₀Λ/(gα_T)` for an eastward surface-intensified jet. Fixed by adding the minus sign.
+
+### Why Depth-Uniform dT/dy Creates Wrong Jet Direction
+
+Starting from rest with η≈0, the horizontal pressure gradient at depth z is:
+
+    ∂p/∂y(z) = ρ₀ g ∂η/∂y + ρ₀ g α_T (∂T/∂y) z
+
+With η≈0, the surface (z=0) has no pressure gradient while the bottom (z=-H) has the full hydrostatic integral. This creates strong bottom flow and weak surface flow — the opposite of the expected thermal wind jet. The fix: make dT/dy surface-intensified using `exp(z/D)` depth weighting with D=2000m.
+
+### The Great Blowup Mystery: Constant Viscosity Fails
+
+Every run blew up at day 73-87 during the nonlinear cascade, regardless of viscosity:
+
+| Config | Blowup day |
+|--------|-----------|
+| B_h=1e10, A_h=0 | ~26 |
+| B_h=1e10, A_h=100 | ~35 |
+| B_h=1e11, A_h=0 | ~73 |
+| B_h=1e11, A_h=100 | ~81 |
+| B_h=5e11, A_h=100 | ~82 |
+| B_h=1e12, A_h=100 | ~87 |
+
+The blowup pattern was always the same: baroclinic instability grows at the correct Eady rate from day 40-75, then SSH suddenly explodes from ~1m to ~6m in 3 days (much faster than the Eady growth rate), followed by NaN.
+
+**Key observation**: Increasing B_h by 100× (1e10→1e12) only delayed blowup by ~17 days. The viscosity wasn't addressing the root cause.
+
+### Root Cause: Missing Barotropic Energy Sink
+
+Analysis with ocean-expert agent revealed:
+
+1. **Biharmonic viscosity only acts on the baroclinic perturbation velocity** (u_prime in the tendency code). It does NOT remove energy from the barotropic mode.
+
+2. **The barotropic solver has NO momentum dissipation** — only Laplacian diffusion on η (the free surface), which damps SSH signals but not barotropic velocity.
+
+3. **During nonlinear saturation, baroclinic instability cascades energy to the barotropic mode** via Reynolds stress rectification (eddy-eddy interactions driving a mean barotropic flow).
+
+4. **Without bottom drag, barotropic KE accumulates without bound** → SSH explodes.
+
+This is consistent with standard practice: MOM6 and MITgcm **always** include linear bottom drag (r=1e-4) for Eady tests. It is not optional.
+
+### Smagorinsky Biharmonic: Implemented but Not the Solution
+
+We implemented flow-dependent Smagorinsky biharmonic viscosity:
+- `strain_rate_cgrid()` — D_T at cell centers, D_S at vertices
+- `smagorinsky_viscosity_cgrid()` — A_smag = (C_s×Δ)² × |D|
+- `smagorinsky_biharmonic_tendency_cgrid()` — ∇²(B_smag × ∇²(u,v)) sandwich form
+
+Two formulations were tested:
+1. **Post-multiplier**: B_smag(x,y) × ∇⁴(u,v) — dimensionally correct but creates instabilities at coefficient boundaries
+2. **Sandwich form**: ∇²(B_smag × ∇²(u,v)) — requires B_smag = A_smag × Δ² for correct units
+
+Both failed at the same day as constant viscosity — because the root cause was the missing barotropic energy sink, not insufficient horizontal viscosity. Smagorinsky is still valuable for flow-dependent grid-scale control but is not a substitute for bottom drag.
+
+**Dimensional pitfall**: The naive ∇²(A_smag × ∇²(u,v)) has units 1/(m·s²), not m/s². Must use B_smag = A_smag × Δ² (m⁴/s) to get the correct acceleration units.
+
+### The Fix: Linear Bottom Drag
+
+Adding linear bottom drag r=1e-4 m/s (applied at the bottom vertical level) immediately stabilized the simulation:
+
+    du/dt[..., -1] += -r × u[..., -1]
+
+**Results with B_h=1e11 + bottom drag r=1e-4:**
+- Day 0-30: geostrophic adjustment (max_speed ~0.06 m/s)
+- Day 30-60: baroclinic instability growing (speed 0.1→0.65 m/s)
+- Day 60-85: nonlinear saturation (SSH peaks at 1.4m, then decreases)
+- Day 85-120: equilibration (speed ~0.15-0.19 m/s, SSH ~0.06m)
+- Day 120-200: stable equilibrium (speed 0.2-0.3 m/s)
+
+The instability saturates because bottom drag removes barotropic KE at the rate it's generated by eddy rectification.
+
+### Missing Zonal Variability: Need Perturbation Seeding
+
+The initial stable runs showed only meridional (zonally banded) structures — no eddies. Cause: the initial condition was perfectly zonally symmetric (perturbation had been set to zero). Baroclinic instability requires k>0 modes which must grow from numerical round-off (~1e-16). At the 36-day Eady growth rate, this takes ~1160 days to reach visible amplitude.
+
+**Fix**: Add broadband white-noise temperature perturbation (0.01 K, standard in MOM6/MITgcm) at the surface level, localized by the jet envelope. This seeds all unstable modes and lets the most-unstable wavelength emerge naturally.
+
+### XLA Compilation Time Issue
+
+Adding new fields to `LatLonCGridOceanConfig` (a NamedTuple) forces complete recompilation of `model.step` (decorated with `@jax.jit(static_argnums=(0,))`). At 200×100×20, this takes 30+ minutes — too slow for iterative development.
+
+**Workaround**: Apply bottom drag as a post-step velocity correction outside the JIT boundary, avoiding NamedTuple changes. The Smagorinsky C_smag field was removed from the config for the same reason; the operator code remains in `latlon_cgrid_operators.py` but is not wired into the tendency.
+
+**Future fix**: Use JAX persistent compilation cache (`jax_compilation_cache_dir`) or refactor the config to avoid NamedTuple type changes triggering retrace.
+
+### Dissipation Scheme Survey (GitHub #194)
+
+A comprehensive survey of dissipation in MOM6, MITgcm, NEMO, POP, MPAS-Ocean, HYCOM, and FESOM2 led to a prioritized implementation plan:
+
+1. **P1**: Biharmonic Smagorinsky (#189) — implemented, needs wiring
+2. **P2**: Higher-order tracer advection (#190) — first-order upwind is the dominant spurious diffusion source
+3. **P3**: Leith viscosity (#191)
+4. **P4**: Adaptive GM (Visbeck) (#192)
+5. **P5**: Energy backscatter (#193)
+
+### Lessons Learned
+
+1. **Bottom drag is not optional for nonlinear ocean simulations.** Without a barotropic energy sink, any baroclinic instability experiment will blow up during nonlinear saturation — no amount of horizontal viscosity can fix this.
+
+2. **Constant biharmonic viscosity cannot handle the enstrophy cascade.** The coefficient that controls grid noise kills the physical instability, and vice versa. Flow-dependent (Smagorinsky) viscosity is needed for eddy-resolving simulations.
+
+3. **Think about energy pathways, not just dissipation coefficients.** The root cause was not "too little dissipation" but "dissipation in the wrong mode." The baroclinic mode had plenty of viscosity; the barotropic mode had none.
+
+4. **Zonally symmetric initial conditions cannot produce eddies.** Always seed with broadband noise. The amplitude (0.01 K) is physically negligible but computationally essential.
+
+5. **NamedTuple config changes are expensive in JAX.** Adding a field forces full recompilation. Plan config structure changes carefully or use persistent compilation caches.
+
+### Files Changed
+
+- `src/legoesm/ocean/experiments/eady_uniform.py` — new experiment (IC, forcing, validation)
+- `src/legoesm/ocean/dynamics/latlon_cgrid_operators.py` — Smagorinsky operators (strain_rate, viscosity, biharmonic)
+- `src/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py` — Smagorinsky tendency (import only, not wired)
+- `scripts/ocean_test_matrix/experiments.py` — runner with eu_config parameter, velocity cross-sections
+- `scripts/ocean_test_matrix/diagnostic_io.py` — symmetric colorbars, field-tagged cross-section filenames, cmap parameter
+- `scripts/ocean_test_matrix/timeloop.py` — max_speed monitoring and early termination (#187)
+- `scripts/ocean_test_matrix/setup.py` — domain bounds and C_smag/bottom_drag_r passthrough
+- `scripts/ocean_test_matrix/testcase.py` — eady_uniform grid resolution
+
+### Related Issues
+
+- #189 — Biharmonic Smagorinsky (implemented, not wired)
+- #190 — Higher-order tracer advection (planned)
+- #191 — Leith viscosity (planned)
+- #194 — Dissipation roadmap (tracking)
+- #187 — Runtime CFL monitoring (closed)
+
+---
+
 ## 2026-04-07: Lat-lon barotropic instability diagnosis
 
 **Problem**: Lat-lon barotropic wave test blows up to max|eta| = 75 m by day 10 (initial perturbation 1 m). Instability originates at land-ocean boundaries near +/-80 deg latitude.
@@ -571,6 +838,7 @@ Diagnosed w from barotropic-averaged per-layer divergence. Vertical tracer advec
 - #81 — Rest-state stability (diagnostic artifact fix in #98)
 
 ### Closed issues
+- #189 — Biharmonic Smagorinsky viscosity (resolved: lat-lon stress-tensor + MPAS TRiSK two-pass, 22 CI tests)
 - #105 — Vector Laplacian and barotropic diffusion fixes for latlon C-grid (resolved: proper grad(div)-curl×grad(curl) + disabled excessive SSH diffusion)
 - #103 — MPAS Coriolis double-counting in split-explicit stepping (resolved: perturbation velocity + semi-implicit Coriolis)
 - #101 — Conservation strategy (resolved: conservative diffusion, h_old/h_new, fixer disabled, budget diagnostic)

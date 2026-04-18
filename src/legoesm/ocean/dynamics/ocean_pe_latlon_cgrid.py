@@ -64,6 +64,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_laplacian_cgrid,
     interp_cell_to_uface,
     curl_vertex_cgrid,
+    smagorinsky_biharmonic_tendency_cgrid,
 )
 from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div as _diagnose_w_from_flux_div,
@@ -440,7 +441,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         if config.K_v > 0 and tr.shape[-1] >= 2:
             jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)
             dz_actual_loc = z_coord.dz_ref * jac_v
-            dtr_dz_half = jnp.diff(tr, axis=-1) / (
+            dtr_dz_half = (tr[..., :-1] - tr[..., 1:]) / (
                 z_coord.dz_half_ref * jac_v
             )
             flux = config.K_v * dtr_dz_half
@@ -474,14 +475,28 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         bilap_u, bilap_v = vector_bilaplacian_cgrid(
             u_prime, v_prime, grid,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
-        du_dt = du_dt - config.B_h * bilap_u
-        dv_dt = dv_dt - config.B_h * bilap_v
+        # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
+        # CFL violation near poles where dx shrinks (MOM6 convention).
+        scale_u, scale_v = biharmonic_scaling_factor(grid)
+        du_dt = du_dt - config.B_h * scale_u[:, None, None] * bilap_u
+        dv_dt = dv_dt - config.B_h * scale_v[:, None, None] * bilap_v
+
+    if config.C_smag > 0:
+        smag_u, smag_v = smagorinsky_biharmonic_tendency_cgrid(
+            u_prime, v_prime, grid, config.C_smag,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
+        du_dt = du_dt - smag_u
+        dv_dt = dv_dt - smag_v
+
+    if config.bottom_drag_r > 0:
+        du_dt = du_dt.at[..., -1].add(-config.bottom_drag_r * u_prime[..., -1])
+        dv_dt = dv_dt.at[..., -1].add(-config.bottom_drag_r * v_prime[..., -1])
 
     if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)
         jac_v_v = jnp.maximum(_interp_to_v_points(J)[..., jnp.newaxis], 1e-10)
         for vel, jac, is_u in [(u_prime, jac_v_u, True), (v_prime, jac_v_v, False)]:
-            dv_dz_half = jnp.diff(vel, axis=-1) / (
+            dv_dz_half = (vel[..., :-1] - vel[..., 1:]) / (
                 z_coord.dz_half_ref * jac
             )
             flux = config.A_v * dv_dz_half

@@ -19,7 +19,14 @@ class MPASOceanConfig(NamedTuple):
     rho_0 : float
         Reference seawater density [kg/m³].
     A_h : float
-        Horizontal viscosity [m²/s].
+        Horizontal (harmonic) viscosity [m²/s].
+    B_h : float
+        Horizontal biharmonic viscosity [m⁴/s].  Applied as a constant-
+        coefficient ``B_h * del4(u)`` operator.
+    C_smag : float
+        Smagorinsky coefficient (dimensionless, typical 0.01-0.15).
+        When > 0, enables flow-dependent biharmonic Smagorinsky viscosity
+        ``-del2(A_smag * del2(u))`` where ``A_smag = (C_smag * Δ)² |D|``.
     K_h : float
         Horizontal tracer diffusivity [m²/s].
     A_v : float
@@ -53,6 +60,8 @@ class MPASOceanConfig(NamedTuple):
     g: float = 9.80616           # = constants.g
     rho_0: float = 1025.0        # = eos.rho_0
     A_h: float = 1.0e4
+    B_h: float = 0.0
+    C_smag: float = 0.0
     K_h: float = 0.0
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4

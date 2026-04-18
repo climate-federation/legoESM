@@ -813,6 +813,660 @@ def biharmonic_scaling_factor(grid: LatLonGrid) -> tuple[jnp.ndarray, jnp.ndarra
     return scale_u, scale_v
 
 
+def strain_rate_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Strain rate components on the C-grid.
+
+    Returns tension D_T at cell centers and shearing strain D_S at vertices.
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
+    v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
+
+    Returns
+    -------
+    D_T : (n_lat, n_lon, ...) at h-points — du/dx - dv/dy
+    D_S : (n_lat+1, n_lon+1, ...) at q-points — dv/dx + du/dy
+    """
+    is_3d = u.ndim == 3
+    if is_3d:
+        u_t = jnp.moveaxis(u, -1, 0)
+        v_t = jnp.moveaxis(v, -1, 0)
+
+        def _sr_2d(u_k, v_k):
+            return strain_rate_cgrid(u_k, v_k, grid,
+                                     mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+        dt_t, ds_t = jax.vmap(_sr_2d)(u_t, v_t)
+        return jnp.moveaxis(dt_t, 0, -1), jnp.moveaxis(ds_t, 0, -1)
+
+    R = grid.radius
+    dlon = grid.dlon
+    dlat = grid.dlat
+    lat = grid.lat
+    cos_lat = grid.cos_lat
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+
+    u_eff = u if u_mask is None else u * u_mask
+    v_eff = v if v_mask is None else v * v_mask
+
+    # Structural periodicity: build u with wrap column always referencing
+    # column 0.  This avoids the JAX .at[].set() scatter (which complicates
+    # gradients) and guarantees D_S consistency at the wrap vertex even when
+    # the caller hasn't enforced u[:,n_lon]==u[:,0].
+    u_eff = jnp.concatenate([u_eff[:, :n_lon], u_eff[:, 0:1]], axis=1)
+
+    # --- D_T at h-points: du/dx - dv/dy ---
+    face_dy = R * dlat
+    u_east = u_eff[:, 1:]
+    u_west = u_eff[:, :-1]
+    du_dx = (u_east - u_west) * face_dy
+
+    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
+    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    lat_interior = 0.5 * (lat[:-1] + lat[1:])
+    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
+    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)
+    face_dx = R * cos_lat_v * dlon
+
+    v_north = v_eff[1:]
+    v_south = v_eff[:-1]
+    dv_dy = v_north * face_dx[1:, jnp.newaxis] - v_south * face_dx[:-1, jnp.newaxis]
+
+    area = grid.area
+    D_T = (du_dx - dv_dy) / area
+    if mask is not None:
+        D_T = D_T * mask
+
+    # --- D_S at q-points: dv/dx + du/dy ---
+    # Same vertex stencil as curl, but u-contribution sign is flipped.
+    sin_lat = jnp.sin(lat)
+    sin_ext = jnp.concatenate([
+        jnp.array([-1.0], dtype=lat.dtype),
+        sin_lat,
+        jnp.array([1.0], dtype=lat.dtype),
+    ])
+    A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+    A_vertex = jnp.maximum(A_vertex, 1e-30)
+
+    dx_cell = R * cos_lat * dlon
+    dy_edge = R * dlat
+
+    # dv/dx at vertex: (v_east - v_west) * dy / A_vertex
+    v_east = v_eff
+    v_west = jnp.roll(v_eff, 1, axis=1)
+    dv_circ = (v_east - v_west) * dy_edge
+    dv_circ_full = jnp.concatenate([dv_circ, dv_circ[:, 0:1]], axis=1)
+
+    # du/dy at vertex: sign FLIPPED vs curl
+    # curl uses: u_south*dx_south - u_north*dx_north
+    # shear uses: u_north*dx_north - u_south*dx_south
+    zero_u = jnp.zeros((1, n_lon + 1), dtype=u.dtype)
+    u_ext = jnp.concatenate([zero_u, u_eff, zero_u], axis=0)
+    dx_ext = jnp.concatenate([
+        jnp.zeros(1, dtype=lat.dtype), dx_cell, jnp.zeros(1, dtype=lat.dtype),
+    ])
+    u_south = u_ext[:-1, :]
+    u_north = u_ext[1:, :]
+    dx_south = dx_ext[:-1]
+    dx_north = dx_ext[1:]
+    du_circ = (u_north * dx_north[:, jnp.newaxis]
+               - u_south * dx_south[:, jnp.newaxis])
+
+    D_S = (dv_circ_full + du_circ) / A_vertex[:, jnp.newaxis]
+    D_S = D_S.at[0, :].set(0.0)
+    D_S = D_S.at[-1, :].set(0.0)
+
+    if mask is not None:
+        vmask = _compute_vertex_mask(mask)
+        D_S = D_S * vmask
+
+    return D_T, D_S
+
+
+def smagorinsky_viscosity_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+    C_smag: float,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Smagorinsky viscosity coefficient at cell centers.
+
+    A_smag = (C_smag * Delta)^2 * |D|
+
+    where |D| = sqrt(D_T^2 + D_S^2) and Delta = sqrt(cell area).
+
+    Returns
+    -------
+    A_smag : (n_lat, n_lon, ...) at h-points [m^2/s]
+    """
+    D_T, D_S = strain_rate_cgrid(u, v, grid,
+                                  mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+    # Interpolate D_S from vertices to cell centers
+    if D_S.ndim == 2:
+        D_S_h = 0.25 * (D_S[:-1, :-1] + D_S[1:, :-1]
+                         + D_S[:-1, 1:] + D_S[1:, 1:])
+    else:
+        D_S_h = 0.25 * (D_S[:-1, :-1, :] + D_S[1:, :-1, :]
+                         + D_S[:-1, 1:, :] + D_S[1:, 1:, :])
+
+    # Small epsilon prevents NaN gradient of sqrt at zero (masked points).
+    deformation = jnp.sqrt(D_T**2 + D_S_h**2 + 1e-30)
+
+    Delta = jnp.sqrt(grid.area)
+    if D_T.ndim == 3:
+        Delta = Delta[..., jnp.newaxis]
+
+    A_smag = (C_smag * Delta)**2 * deformation
+
+    if mask is not None:
+        m = mask[..., jnp.newaxis] if D_T.ndim == 3 else mask
+        A_smag = A_smag * m
+
+    return A_smag
+
+
+def stress_divergence_cgrid(
+    stress_h: jnp.ndarray,
+    stress_q: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    normalize: bool = True,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Stress divergence on the C-grid (exact discrete adjoint of strain).
+
+    Given pre-formed stresses:
+        stress_h = A_h * D_T   at h-points (cell centers)
+        stress_q = A_q * D_S   at q-points (vertices)
+
+    Returns the momentum tendency at face points, constructed as the
+    EXACT discrete adjoint of ``strain_rate_cgrid``.  The area-weighted
+    energy identity
+
+        sum_faces (u · tend_u + v · tend_v) · area_face_dual
+            = -sum_h stress_h · D_T · area_h
+              - sum_q stress_q · D_S · A_vertex_q
+
+    holds to machine precision (the area_face_dual factors cancel
+    with the internal normalization), guaranteeing energy stability
+    for any non-negative A_h, A_q.
+
+    The stencils are derived by transposing the exact weights used
+    in ``strain_rate_cgrid``:
+
+    For D_T_num[i,j] = (u[i,j+1] - u[i,j]) * dy
+                       - (v[i+1,j]*dx_v[i+1] - v[i,j]*dx_v[i]):
+
+        tend_u[i,k] += dy * (sh[i,k] - sh[i,k-1])
+        tend_v[m,j] += -(dx_v[m] * sh[m,j] - dx_v[m-1] * sh[m-1,j])
+
+    For D_S_num[m,j] = (v[m,j] - v[m,(j-1)%n]) * dy_edge
+                       + u[m,j]*dx_cell[m] - u[m-1,j]*dx_cell[m-1]:
+
+        tend_u[i,k] += dx_cell[i] * (sq[i+1,k] - sq[i,k])
+        tend_v[m,j] += dy_edge * (sq[m,j+1] - sq[m,j])
+
+    Because we want the NEGATIVE adjoint (dissipative when added):
+    tend = -S^T(stress), all signs above are negated.
+
+    Parameters
+    ----------
+    stress_h : (n_lat, n_lon) or (n_lat, n_lon, nlev)
+        A_h * D_T at cell centers.
+    stress_q : (n_lat+1, n_lon+1) or (n_lat+1, n_lon+1, nlev)
+        A_q * D_S at vertices.
+    grid : LatLonGrid
+    u_mask, v_mask : optional face masks.
+
+    Returns
+    -------
+    tend_u : (n_lat, n_lon+1, ...) at u-faces
+    tend_v : (n_lat+1, n_lon, ...) at v-faces
+    """
+    R = grid.radius
+    dlon = grid.dlon
+    dlat = grid.dlat
+    lat = grid.lat
+    cos_lat = grid.cos_lat
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+
+    dy = R * dlat       # face_dy: meridional edge length
+    dy_edge = R * dlat  # same as dy (edge length for vertex circulation)
+    dx_cell = R * cos_lat * dlon  # (n_lat,) zonal edge at cell-center latitude
+
+    # v-face latitudes and zonal edge lengths
+    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
+    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
+    lat_interior = 0.5 * (lat[:-1] + lat[1:])
+    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
+    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)
+    dx_v = R * cos_lat_v * dlon  # (n_lat+1,) face_dx at v-face latitudes
+
+    is_3d = stress_h.ndim == 3
+
+    # =====================================================================
+    # tend_u: contribution from D_T adjoint
+    # =====================================================================
+    # u[i,k] in D_T_num[i,j]:  coeff +dy at j=k-1, coeff -dy at j=k
+    # Adjoint: -[+dy * sh[i,k-1] + (-dy) * sh[i,k]] = dy * (sh[i,k] - sh[i,k-1])
+    #
+    # sh[i,k] - sh[i,k-1] with periodic wrap:
+    sh_west = jnp.roll(stress_h, 1, axis=1)  # sh[:, (k-1)%n_lon]
+    dsh = stress_h - sh_west   # (n_lat, n_lon, ...)
+    # Append periodic wrap (face n_lon = face 0)
+    dsh_full = jnp.concatenate(
+        [dsh, dsh[:, 0:1] if not is_3d else dsh[:, 0:1, :]], axis=1)
+    tend_u_DT = dy * dsh_full  # (n_lat, n_lon+1, ...)
+
+    # =====================================================================
+    # tend_u: contribution from D_S adjoint
+    # =====================================================================
+    # D_S_num[m,j] uses u_north[m,j] * dx_north[m] - u_south[m,j] * dx_south[m]
+    # where u_north at vertex m = u[m,j], u_south = u[m-1,j],
+    #       dx_north[m] = dx_cell[m], dx_south[m] = dx_cell[m-1].
+    #
+    # u[i,k] appears at vertex (m=i, k) as u_north: coeff +dx_cell[i]
+    # u[i,k] appears at vertex (m=i+1, k) as u_south: coeff -dx_cell[i]
+    #
+    # Adjoint: -[+dx_cell[i]*sq[i,k] + (-dx_cell[i])*sq[i+1,k]]
+    #        = dx_cell[i] * (sq[i+1,k] - sq[i,k])
+    dsq_meridional = stress_q[1:, :] - stress_q[:-1, :]  # (n_lat, n_lon+1, ...)
+    if is_3d:
+        tend_u_DS = dx_cell[:, jnp.newaxis, jnp.newaxis] * dsq_meridional
+    else:
+        tend_u_DS = dx_cell[:, jnp.newaxis] * dsq_meridional
+
+    tend_u = tend_u_DT + tend_u_DS
+
+    # =====================================================================
+    # tend_v: contribution from D_T adjoint
+    # =====================================================================
+    # v[m,j] in D_T_num[i,j]:
+    #   v[i+1,j] at D_T[i,j]: coeff -dx_v[i+1]
+    #   v[i,j] at D_T[i,j]:   coeff +dx_v[i]
+    #
+    # So v[m,j] appears in:
+    #   D_T[m-1,j] as v_north: coeff -dx_v[m]
+    #   D_T[m,j] as v_south:   coeff +dx_v[m]
+    #
+    # Adjoint: -[-dx_v[m]*sh[m-1,j] + dx_v[m]*sh[m,j]]
+    #        = dx_v[m] * (sh[m-1,j] - sh[m,j])
+    #
+    # For interior v-faces (m=1..n_lat-1):
+    dsh_merid = stress_h[:-1, :] - stress_h[1:, :]  # sh[m-1,j]-sh[m,j] for m=1..n_lat-1
+    if is_3d:
+        zero_row = jnp.zeros((1, stress_h.shape[1], stress_h.shape[2]),
+                             dtype=stress_h.dtype)
+        tend_v_DT_interior = dx_v[1:-1, jnp.newaxis, jnp.newaxis] * dsh_merid
+    else:
+        zero_row = jnp.zeros((1, stress_h.shape[1]), dtype=stress_h.dtype)
+        tend_v_DT_interior = dx_v[1:-1, jnp.newaxis] * dsh_merid
+    # Pole boundaries: zero (wall BC)
+    tend_v_DT = jnp.concatenate([zero_row, tend_v_DT_interior, zero_row], axis=0)
+
+    # =====================================================================
+    # tend_v: contribution from D_S adjoint
+    # =====================================================================
+    # v[m,j] in D_S_num[m',j']:
+    #   v[m,j] appears at vertex (m, j) as v_east: coeff +dy_edge
+    #   v[m,j] appears at vertex (m, (j+1)%n) as v_west: coeff -dy_edge
+    #
+    # Wait: D_S_num uses v_east = v[i,j] and v_west = v[i,(j-1)%n],
+    # so at vertex (m, j'): v_east = v[m,j'], v_west = v[m,(j'-1)%n]
+    #
+    # v[m,j] appears at vertex (m, j) as v_east: coeff +dy_edge
+    # v[m,j] appears at vertex (m, j+1) as v_west (since (j+1-1)%n = j): coeff -dy_edge
+    #
+    # Adjoint: -[+dy_edge*sq[m,j] + (-dy_edge)*sq[m,j+1]]
+    #        = dy_edge * (sq[m,j+1] - sq[m,j])
+    dsq_zonal = stress_q[:, 1:] - stress_q[:, :-1]  # (n_lat+1, n_lon, ...)
+    # stress_q[:, n_lon] is the periodic wrap = stress_q[:, 0], so
+    # dsq_zonal[:, j] = sq[:, j+1] - sq[:, j] for j=0..n_lon-1
+    tend_v_DS = dy_edge * dsq_zonal
+
+    tend_v = tend_v_DT + tend_v_DS
+
+    # --- Area normalization ---
+    # The raw adjoint gives "sum of edge fluxes" around the face dual cell.
+    # Dividing by the dual cell area converts to a proper acceleration
+    # (m/s²), consistent with vector_laplacian_cgrid units.
+    #
+    # u-face dual cell area: dy * dx_cell[i] = R²*dlat*dlon*cos(lat[i])
+    # v-face dual cell area: dy_edge * dx_v[m] = R²*dlat*dlon*cos(lat_v[m])
+    #
+    # These are the products of the SAME edge lengths used in the stencil,
+    # ensuring the adjoint identity:
+    #   sum u * tend * area_u_dual = sum u * tend_raw = -sum A*D²*area_h - ...
+    # holds exactly (area_u_dual cancels in the energy diagnostic).
+    area_u_dual = dy * dx_cell  # (n_lat,)
+    area_v_dual = dy_edge * dx_v  # (n_lat+1,)
+    # Floor to avoid division by zero at poles
+    area_u_dual = jnp.maximum(area_u_dual, 1e-30)
+    area_v_dual = jnp.maximum(area_v_dual, 1e-30)
+
+    if normalize:
+        if is_3d:
+            tend_u = tend_u / area_u_dual[:, jnp.newaxis, jnp.newaxis]
+            tend_v = tend_v / area_v_dual[:, jnp.newaxis, jnp.newaxis]
+        else:
+            tend_u = tend_u / area_u_dual[:, jnp.newaxis]
+            tend_v = tend_v / area_v_dual[:, jnp.newaxis]
+
+    if u_mask is not None:
+        um = u_mask[..., jnp.newaxis] if is_3d and u_mask.ndim == 2 else u_mask
+        tend_u = tend_u * um
+    if v_mask is not None:
+        vm = v_mask[..., jnp.newaxis] if is_3d and v_mask.ndim == 2 else v_mask
+        tend_v = tend_v * vm
+
+    return tend_u, tend_v
+
+
+def viscous_tendency_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    A_h: jnp.ndarray | float,
+    A_q: jnp.ndarray | float,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    normalize: bool = True,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Viscous tendency via stress-tensor formulation on the C-grid.
+
+    Computes:
+        1. Strain: D_T, D_S = strain_rate(u, v)
+        2. Stress: stress_h = A_h * D_T,  stress_q = A_q * D_S
+        3. Tendency: stress_divergence(stress_h, stress_q)
+
+    This operator differs from ``vector_laplacian_cgrid`` (grad-div minus
+    curl-curl) by spherical metric terms.  On the discrete C-grid the
+    stress-tensor form is the EXACT adjoint of the strain-rate operator,
+    guaranteeing the energy identity:
+
+        sum (u·tend_u·area_u + v·tend_v·area_v)
+            = -sum A_h·D_T²·area_h - sum A_q·D_S²·A_vert
+
+    to machine precision. This holds for both uniform and spatially
+    varying A_h, A_q, making it the correct choice for Smagorinsky-type
+    viscosity where the coefficient varies in space.
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
+    v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
+    grid : LatLonGrid
+    A_h : scalar or (n_lat, n_lon, ...) viscosity at h-points
+    A_q : scalar or (n_lat+1, n_lon+1, ...) viscosity at q-points
+    mask, u_mask, v_mask : optional masks
+
+    Returns
+    -------
+    tend_u, tend_v : dissipative when ADDED to du/dt, dv/dt
+    """
+    is_3d = u.ndim == 3
+    if is_3d:
+        u_t = jnp.moveaxis(u, -1, 0)
+        v_t = jnp.moveaxis(v, -1, 0)
+
+        # Handle coefficient broadcasting for vmap
+        if isinstance(A_h, jnp.ndarray) and A_h.ndim == 3:
+            A_h_t = jnp.moveaxis(A_h, -1, 0)
+        else:
+            A_h_t = A_h
+        if isinstance(A_q, jnp.ndarray) and A_q.ndim == 3:
+            A_q_t = jnp.moveaxis(A_q, -1, 0)
+        else:
+            A_q_t = A_q
+
+        if isinstance(A_h_t, jnp.ndarray) and A_h_t.ndim == 3:
+            def _vt_2d(u_k, v_k, ah_k, aq_k):
+                return viscous_tendency_cgrid(
+                    u_k, v_k, grid, ah_k, aq_k,
+                    mask=mask, u_mask=u_mask, v_mask=v_mask,
+                    normalize=normalize)
+            tu_t, tv_t = jax.vmap(_vt_2d)(u_t, v_t, A_h_t, A_q_t)
+        else:
+            def _vt_2d(u_k, v_k):
+                return viscous_tendency_cgrid(
+                    u_k, v_k, grid, A_h, A_q,
+                    mask=mask, u_mask=u_mask, v_mask=v_mask,
+                    normalize=normalize)
+            tu_t, tv_t = jax.vmap(_vt_2d)(u_t, v_t)
+        return jnp.moveaxis(tu_t, 0, -1), jnp.moveaxis(tv_t, 0, -1)
+
+    # --- 2D case ---
+
+    # Apply face masks to input velocities
+    u_eff = u if u_mask is None else u * u_mask
+    v_eff = v if v_mask is None else v * v_mask
+
+    # 1. Strain rate
+    D_T, D_S = strain_rate_cgrid(u_eff, v_eff, grid, mask=mask)
+
+    # 2. Form stresses
+    stress_h = A_h * D_T
+    stress_q = A_q * D_S
+
+    # 3. Stress divergence (normalize controls area normalization)
+    tend_u, tend_v = stress_divergence_cgrid(
+        stress_h, stress_q, grid,
+        u_mask=u_mask, v_mask=v_mask, normalize=normalize)
+
+    return tend_u, tend_v
+
+
+def _vertex_area(grid: LatLonGrid) -> jnp.ndarray:
+    """Dual-cell area at vertex (corner) points.
+
+    Returns
+    -------
+    A_vertex : (n_lat+1,)
+        Area of each vertex dual cell.  Pole rows are set to a small
+        positive floor (1e-30) to avoid division by zero.
+    """
+    R = grid.radius
+    dlon = grid.dlon
+    lat = grid.lat
+    sin_lat = jnp.sin(lat)
+    sin_ext = jnp.concatenate([
+        jnp.array([-1.0], dtype=lat.dtype),
+        sin_lat,
+        jnp.array([1.0], dtype=lat.dtype),
+    ])
+    A_v = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
+    return jnp.maximum(A_v, 1e-30)
+
+
+def smagorinsky_viscosity_q_cgrid(
+    D_T: jnp.ndarray,
+    D_S: jnp.ndarray,
+    grid: LatLonGrid,
+    C_smag: float,
+    *,
+    mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Smagorinsky viscosity coefficient computed DIRECTLY at q-points.
+
+    Unlike interpolating A_smag from h-points to q-points, this computes
+    the coefficient at vertex locations using D_S (native at q-points)
+    and D_T interpolated from h-points to q-points.
+
+        A_smag_q = (C_s * Delta_q)^2 * |D|_q
+
+    where Delta_q = sqrt(A_vertex) is the vertex dual cell length scale
+    and |D|_q = sqrt(D_T_q^2 + D_S^2).
+
+    Parameters
+    ----------
+    D_T : (n_lat, n_lon) or (n_lat, n_lon, nlev) at h-points
+    D_S : (n_lat+1, n_lon+1) or (n_lat+1, n_lon+1, nlev) at q-points
+    grid : LatLonGrid
+    C_smag : Smagorinsky coefficient
+    mask : cell-center land mask, optional
+
+    Returns
+    -------
+    A_smag_q : (n_lat+1, n_lon+1, ...) at q-points [m^2/s]
+    """
+    is_3d = D_T.ndim == 3
+
+    # Interpolate D_T from h-points to q-points (4-point average)
+    if is_3d:
+        D_T_q = 0.25 * (D_T[:-1, :, :] + D_T[1:, :, :]
+                         + jnp.roll(D_T, 1, axis=1)[:-1, :, :]
+                         + jnp.roll(D_T, 1, axis=1)[1:, :, :])
+    else:
+        D_T_q = 0.25 * (D_T[:-1, :] + D_T[1:, :]
+                         + jnp.roll(D_T, 1, axis=1)[:-1, :]
+                         + jnp.roll(D_T, 1, axis=1)[1:, :])
+
+    # D_T_q shape: (n_lat-1, n_lon, ...). Need (n_lat+1, n_lon+1, ...).
+    # Pad pole rows with zero (degenerate vertices)
+    if is_3d:
+        zero_row = jnp.zeros((1, D_T.shape[1], D_T.shape[2]), dtype=D_T.dtype)
+    else:
+        zero_row = jnp.zeros((1, D_T.shape[1]), dtype=D_T.dtype)
+    D_T_q = jnp.concatenate([zero_row, D_T_q, zero_row], axis=0)
+    # Append periodic wrap column
+    D_T_q = jnp.concatenate(
+        [D_T_q, D_T_q[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1, ...)
+
+    # Small epsilon prevents NaN gradient of sqrt at zero (masked points).
+    deformation_q = jnp.sqrt(D_T_q**2 + D_S**2 + 1e-30)
+
+    # Vertex dual cell area
+    A_vert = _vertex_area(grid)  # (n_lat+1,)
+    Delta_q = jnp.sqrt(A_vert)  # (n_lat+1,)
+    if is_3d:
+        Delta_q = Delta_q[:, jnp.newaxis, jnp.newaxis]
+    else:
+        Delta_q = Delta_q[:, jnp.newaxis]
+
+    A_smag_q = (C_smag * Delta_q)**2 * deformation_q
+
+    # Zero at pole vertices and land-adjacent vertices
+    A_smag_q = A_smag_q.at[0].set(0.0)
+    A_smag_q = A_smag_q.at[-1].set(0.0)
+
+    if mask is not None:
+        vmask = _compute_vertex_mask(mask)
+        if is_3d:
+            vmask = vmask[..., jnp.newaxis]
+        A_smag_q = A_smag_q * vmask
+
+    return A_smag_q
+
+
+def smagorinsky_biharmonic_tendency_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid,
+    C_smag: float,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Biharmonic Smagorinsky viscosity via stress-tensor formulation.
+
+    Uses the MOM6-style stress-tensor approach where the strain and
+    stress-divergence operators are discrete adjoints on the C-grid.
+    This guarantees energy stability by construction:
+
+        dE/dt = -sum_h B_h * D_T[L(u)]^2 * area_h
+                -sum_q B_q * D_S[L(u)]^2 * area_q  <= 0
+
+    where L(u) is the (unit-coefficient) vector Laplacian and B is the
+    biharmonic Smagorinsky coefficient B = C_s^2 * Delta^4 * |D|.
+
+    Algorithm:
+        1. Compute strain D_T, D_S of the input velocity
+        2. Compute B_smag at h-points and q-points INDEPENDENTLY
+           (no interpolation of coefficient between grids)
+        3. First pass: unit-coefficient stress-divergence = vector Laplacian
+           (u*, v*) = L_1(u, v)
+        4. Second pass: B-weighted stress-divergence of (u*, v*)
+           tend = L_B(u*, v*)
+
+    The result is subtracted by the caller:  du/dt -= tend_u.
+
+    Previous implementation used a sandwich form nabla^2(B nabla^2 u)
+    which is NOT energy-stable on the discrete C-grid because the
+    vector Laplacian (grad-div minus curl-curl) does not satisfy
+    discrete integration-by-parts with spatially-varying B.
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
+    v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
+    grid : LatLonGrid
+    C_smag : Smagorinsky coefficient (dimensionless)
+    mask : (n_lat, n_lon) cell-center land mask, optional
+    u_mask : (n_lat, n_lon+1) u-face mask, optional
+    v_mask : (n_lat+1, n_lon) v-face mask, optional
+
+    Returns
+    -------
+    tend_u, tend_v : same shapes as u, v
+        Biharmonic dissipative tendencies.  Caller subtracts these:
+        du/dt -= tend_u, dv/dt -= tend_v.
+    """
+    is_3d = u.ndim == 3
+
+    # --- 1. Compute strain of the INPUT velocity ---
+    D_T, D_S = strain_rate_cgrid(
+        u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+    # --- 2. Smagorinsky coefficient at h-points and q-points ---
+    # A_smag [m^2/s] at h-points (cell centers)
+    A_smag_h = smagorinsky_viscosity_cgrid(
+        u, v, grid, C_smag,
+        mask=mask, u_mask=u_mask, v_mask=v_mask)
+
+    # A_smag at q-points computed DIRECTLY (not interpolated from h)
+    A_smag_q = smagorinsky_viscosity_q_cgrid(
+        D_T, D_S, grid, C_smag, mask=mask)
+
+    # --- 3. First pass: UNNORMALIZED unit-coefficient stress-divergence ---
+    # Returns raw flux sums with units m/s (same as velocity), NOT 1/(ms).
+    # MOM6 approach: inner div(strain(u)) is NOT divided by cell area,
+    # producing a velocity-like intermediate for the second pass.
+    u_star, v_star = viscous_tendency_cgrid(
+        u, v, grid, 1.0, 1.0,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+        normalize=False)
+
+    # --- 4. Second pass: A_smag-weighted NORMALIZED stress-divergence ---
+    # Uses A_smag (m²/s). Two passes give biharmonic scaling: A*u/dx⁴.
+    # CFL: A_smag × dt / dx² = C_s² × |D| × dt ≈ 0.003. Safe.
+    tend_u, tend_v = viscous_tendency_cgrid(
+        u_star, v_star, grid, A_smag_h, A_smag_q,
+        mask=mask, u_mask=u_mask, v_mask=v_mask,
+        normalize=True)
+
+    return tend_u, tend_v
+
+
 def _compute_vertex_mask(land_mask: jnp.ndarray) -> jnp.ndarray:
     """Compute vertex mask: wet only if all four surrounding cells are wet.
 
