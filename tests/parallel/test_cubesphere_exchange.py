@@ -136,6 +136,52 @@ class TestPackedExchange:
         np.testing.assert_allclose(r2, ref2, rtol=1e-6, atol=1e-10)
         np.testing.assert_allclose(r3, ref3, rtol=1e-6, atol=1e-10)
 
+    def test_packed_with_duogrid_matches_unpacked_with_duogrid(self, mesh_6):
+        """Iter-84: packed SPMD halo with `duogrid=dg` must produce the
+        same output as unpacked `pad_halo_4d(duogrid=dg)`. Before iter-84
+        the packed path silently skipped the kinked-to-extended remap,
+        so this test would have failed (first output would miss the
+        duogrid correction while the reference applied it).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import pad_halo_4d
+        from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d
+
+        n, nlev = 8, 5
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        dg = grid.duogrid
+        assert dg is not None, "duogrid not active on grid"
+
+        f1 = jax.random.normal(jax.random.PRNGKey(0), (6, n, n, nlev))
+        f2 = jax.random.normal(jax.random.PRNGKey(1), (6, n, n, nlev))
+        f1s, f2s = [_shard_on_face(f, mesh_6) for f in (f1, f2)]
+
+        # Reference: unpacked pad_halo_4d with duogrid
+        ref1 = np.array(pad_halo_4d(f1, duogrid=dg))
+        ref2 = np.array(pad_halo_4d(f2, duogrid=dg))
+
+        # Under test: packed SPMD halo with duogrid kwarg
+        r1_s, r2_s = packed_pad_halo_4d(f1s, f2s, mesh=mesh_6, duogrid=dg)
+        r1 = np.array(r1_s)
+        r2 = np.array(r2_s)
+
+        np.testing.assert_allclose(r1, ref1, rtol=1e-6, atol=1e-10)
+        np.testing.assert_allclose(r2, ref2, rtol=1e-6, atol=1e-10)
+
+    def test_packed_without_duogrid_unchanged(self, mesh_6):
+        """Iter-84 safety: packed SPMD without duogrid kwarg must be
+        bit-identical to the pre-iter-84 behaviour.
+        """
+        from legoesm.parallel.cubesphere_exchange import (
+            explicit_pad_halo_4d, packed_pad_halo_4d,
+        )
+        n, nlev = 8, 5
+        f = jax.random.normal(jax.random.PRNGKey(42), (6, n, n, nlev))
+        fs = _shard_on_face(f, mesh_6)
+        ref = np.array(explicit_pad_halo_4d(fs, mesh_6))
+        (r,) = packed_pad_halo_4d(fs, mesh=mesh_6)
+        np.testing.assert_array_equal(r, ref)
+
 
 # =======================================================================
 # Vector (u, v) exchange

@@ -832,3 +832,79 @@ class TestSynchronizeCgridFluxes:
         exp = 0.5 * (fy[2, :, 0] + fy[5, :, 0][::-1])
         _chk("f2 S", fy_sync[2, :, 0], exp)
         _chk("f5 S", fy_sync[5, :, 0], exp[::-1])
+
+
+# =========================================================================
+# T9: Packed halo duogrid post-processing (iter-84)
+# =========================================================================
+
+class TestPackedHaloDuogrid:
+    """Verify iter-84 packed MPI/SPMD halo functions apply the duogrid
+    kinked-to-extended remap when `duogrid=dg` is passed.
+
+    Before iter-84 the packed MPI/SPMD paths silently skipped the
+    duogrid post-processing, diverging from unpacked
+    `pad_halo_4d(duogrid=dg)`.  Iter-84 added a `_apply_duogrid_4d`
+    helper inside each packed function.  These tests call the helpers
+    directly (backend-agnostic) to lock in the behaviour without
+    requiring a 6-device SPMD mesh or MPI comm.
+    """
+
+    def test_apply_duogrid_4d_matches_pad_halo_4d_with_duogrid(self):
+        """The MPI packed `_apply_duogrid_4d` helper followed by its
+        caller's halo exchange must produce the same result as
+        unpacked `pad_halo_4d(duogrid=dg)`.  Here we build the exact
+        intermediate (post-MPI, pre-remap) padded field by calling
+        `pad_halo_4d(duogrid=None)` on non-duogrid halo, then apply
+        the helper and compare against the canonical duogrid pad.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import pad_halo_4d
+        from legoesm.parallel.halo_exchange import _apply_duogrid_4d as apply_mpi
+        from legoesm.parallel.cubesphere_exchange import _apply_duogrid_4d as apply_spmd
+
+        n, nlev = 8, 3
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        dg = grid.duogrid
+        assert dg is not None
+
+        rng = np.random.default_rng(0)
+        f = jnp.asarray(rng.standard_normal((6, n, n, nlev)))
+
+        # Canonical reference: full duogrid halo via unpacked pad_halo_4d
+        ref = np.array(pad_halo_4d(f, duogrid=dg))
+
+        # Pre-duogrid padded state (what the MPI/SPMD exchange produces
+        # before the remap): unpacked pad_halo_4d WITHOUT duogrid kwarg.
+        pre = pad_halo_4d(f)
+
+        got_mpi = np.array(apply_mpi(pre, dg, halo=1))
+        got_spmd = np.array(apply_spmd(pre, dg, halo=1))
+
+        np.testing.assert_allclose(got_mpi, ref, rtol=1e-6, atol=1e-10)
+        np.testing.assert_allclose(got_spmd, ref, rtol=1e-6, atol=1e-10)
+
+    def test_apply_duogrid_4d_changes_face_boundary_values(self):
+        """Sanity: the duogrid remap is not an identity.  Applied to a
+        non-trivial field, `_apply_duogrid_4d` should change at least
+        the face-boundary cells of the padded array.  Catches regressions
+        that accidentally no-op the helper.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import pad_halo_4d
+        from legoesm.parallel.halo_exchange import _apply_duogrid_4d
+
+        n, nlev = 8, 2
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        dg = grid.duogrid
+        rng = np.random.default_rng(1)
+        f = jnp.asarray(rng.standard_normal((6, n, n, nlev)))
+        pre = pad_halo_4d(f)
+        post = _apply_duogrid_4d(pre, dg, halo=1)
+        # The interior is preserved
+        np.testing.assert_array_equal(pre[:, 1:-1, 1:-1, :], post[:, 1:-1, 1:-1, :])
+        # Halo cells must have changed somewhere
+        halo_diff = jnp.max(jnp.abs(
+            post - pre
+        ))
+        assert float(halo_diff) > 1e-10, "duogrid remap is a no-op on random input"

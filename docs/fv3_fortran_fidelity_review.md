@@ -3,6 +3,12 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-85 (2026-04-18)**: Codex stop-time review flagged that iter-84's packed duogrid halo fix was unguarded.  Added 3 regression tests:
+  - `TestPackedHaloDuogrid::test_apply_duogrid_4d_matches_pad_halo_4d_with_duogrid` (backend-agnostic): verifies both the MPI and SPMD `_apply_duogrid_4d` helpers produce the same result as the canonical unpacked `pad_halo_4d(duogrid=dg)` when fed the pre-remap padded state.  Would have failed under the pre-iter-84 code because the packed paths skipped the helper entirely.
+  - `TestPackedHaloDuogrid::test_apply_duogrid_4d_changes_face_boundary_values`: sanity that `_apply_duogrid_4d` is not an accidental no-op — interior cells unchanged, halo cells modified.
+  - `TestPackedExchange::test_packed_with_duogrid_matches_unpacked_with_duogrid` (SPMD, 6-device, auto-skip when unavailable): end-to-end that `packed_pad_halo_4d(duogrid=dg)` matches `pad_halo_4d(duogrid=dg)` per field.
+  - `TestPackedExchange::test_packed_without_duogrid_unchanged`: non-duogrid code path bit-identical to pre-iter-84.
+  - 83 duogrid + 40 PE + 145 core/cdgrid tests pass.
 - **iter-84 (2026-04-18)**: Made packed halo functions themselves duogrid-aware instead of requiring callers to skip them.  Codex's iter-83 finding pointed at an infrastructure-level gap, not just a PE-caller bug.  This iteration closes that gap at the source:
   - `packed_pad_halo_mpi_4d` (halo_exchange.py:885): added `duogrid=None` kwarg. When provided, applies the kinked-to-extended remap + corner fill level-by-level via `jax.vmap` after the MPI exchange, mirroring the post-processing loop inside `halo.pad_halo_4d:559-573`.
   - `packed_pad_halo_4d` (cubesphere_exchange.py:446, SPMD): same `duogrid=None` kwarg with the same post-processing helper.
