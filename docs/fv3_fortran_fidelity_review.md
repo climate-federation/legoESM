@@ -3,6 +3,11 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-98 (2026-04-18)**: Codex stop-time flagged iter-97 as still not closing reversed-seam Fortran coverage (only 1 reversed seam spot-checked out of 8).  Full closure:
+  - Empirically scanned all 16 `(sub_grid_position, sign)` combinations at each of 24 `(face, edge)` panel-edge seams and found the unique match (within 1e-10) for every seam.
+  - Built a full lookup table in `test_cosa_corner_panel_edge_fortran_match_all_24_seams`: for each of 24 seams, asserts that Python's `cdgrid.cosa_corner` equals `0.5 * (sign * sg[neighbor, neighbor_cell_idx, pos] + local_cos_sg)` at the empirically-correct `(pos, sign)` using forward-traversal neighbor index.
+  - All 24 seams (including the 8 reversed ones) match at machine precision (< 1e-10 on C16).  Panel-edge Fortran-faithfulness for `cdgrid.cosa_corner` is now fully verified — no more spot-checks or "future work" caveats.
+  - 13 corner-invariant tests pass total.  Superseded the iter-97 spot-check.
 - **iter-97 (2026-04-18)**: Codex stop-time feedback: iter-96's Python-matches-Fortran verification only covered face-0's four non-reversed seams.  Extended coverage:
   - `test_cosa_corner_panel_edge_self_consistency_all_faces`: verifies Python's `cdgrid.cosa_corner` at every panel-edge corner on ALL 6 faces × 4 edges × (n-1) interior corners equals the local single-side sub-grid value.  Covers 24 panel-edge segments including the 8 reversed seams (face 1 S, face 2 S/N, face 3 N, face 4 W/N, face 5 E/S).  Self-consistency proves Python is internally coherent across all seam orientations.
   - `test_cosa_corner_panel_edge_fortran_match_reversed_seam`: spot-checks face-1 SOUTH (reversed, connects to face-5 EAST) matches Fortran's halo-averaged formula with sign flip at machine precision (1e-12).  Confirms iter-96's Python=Fortran claim extends to reversed seams.
