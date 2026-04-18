@@ -214,6 +214,15 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-169 (2026-04-19)**: stability-of-evaluations re-check.
+  Core-test status across iter-128..168: 152/152 pass on the
+  combined {test_cdgrid_fv3_regression (43), test_device_config
+  (63), test_runtime_bootstrap (47)} suites (includes iter-154 CPU
+  bootstrap regression test, iter-151 TPU bootstrap test,
+  iter-162 lowercase-metal fix, and the iter-129/130 `_d2a2c_vect`
+  reachability tripwires).  Iter-128..168 has NOT introduced any
+  core-test regression.
+
 - **iter-167 (2026-04-19)**: observed that two FB-chain entry
   points co-exist — `fv3_forward_backward_step` (fv3_sw_core.py:
   1381) and `fv3_fb_sw_step` (fv3_sw_core.py:1818).  Only
