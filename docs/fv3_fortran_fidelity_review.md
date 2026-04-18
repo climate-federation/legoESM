@@ -3,6 +3,13 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-112 (2026-04-18)**: Required-evaluation verification snapshot after the iter-77..iter-111 priority work (all 4 user priorities addressed).  Ran the full set:
+  - **Williamson 2** (C36, 1 day): L2=1.53e-03, Linf=4.07e-03.  UNCHANGED from iter-77 baseline — production path uses A-L gradient and does not exercise the iter-103 component-sync change.  Visible v-wind cube-face imprint at t>0.5d still present — architectural, see unresolved item #1.
+  - **Williamson 5** (C36, 1 day): mass drift = 1.42e-05.  UNCHANGED.
+  - **Cosine bell** (C36, 1 day): L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01.  UNCHANGED.
+  - **Ocean rest state** (cube / MPAS / spectral cross-grid parity): 3 rest_state tests pass at machine precision (1e-14 to 1e-18 eta drift per iter-26 baseline).
+  - 165 cdgrid/duogrid/fv3_regression tests pass; full session covered 35 iterations (77-111).
+  - **Stopping condition status**: W2 v-wind visible artifact remains (unresolved item #1, architectural) + FB-path C36 instability (item #2).  These require infrastructure work beyond the current priority list.
 - **iter-111 (2026-04-18)**: Codex stop-time correction: iter-110's test still didn't isolate component-vs-scalar sync cleanly enough because it only asserted `diff > 1e-10` — any sync change would trigger that.  Renamed the test to `test_fb_path_component_vs_scalar_sync_propagates_to_wind` and:
   - Rewrote the docstring to honestly state what the test proves (wiring propagation, NOT "Fortran improvement" — that would require a live Fortran reference).
   - Documented the ISOLATION: scalar-sync control uses the EXACT same Courant/PPM transport imports as production `_bgrid_ke_transport`; only the sync differs.
