@@ -38,19 +38,28 @@ def _ensure_legoesm_importable() -> None:
         spec = None
     if spec is None:
         src_dir = _Path(__file__).resolve().parents[2] / "src"
-        if src_dir.is_dir() and str(src_dir) not in _sys.path:
-            _sys.path.insert(0, str(src_dir))
-            # Invalidate importlib caches so the newly exposed path is
-            # honored when ``legoesm`` was already partially imported
-            # from a stale install earlier in this process.
-            importlib.invalidate_caches()
-            # Evict any cached ``legoesm`` module that resolved to the
-            # stale install so the next import picks up the checkout.
-            for mod in [
-                m for m in list(_sys.modules)
-                if m == "legoesm" or m.startswith("legoesm.")
-            ]:
-                del _sys.modules[mod]
+        if not src_dir.is_dir():
+            return
+        src_str = str(src_dir)
+        # Remove any existing copies of src_dir from sys.path (including
+        # equivalently-normalized paths) and prepend a fresh entry so
+        # the checkout package always wins against a stale ``legoesm``
+        # that is already earlier on ``sys.path`` or cached in
+        # ``sys.modules``. This covers the mixed case where the
+        # editable-install entry is on the path but shadowed by a
+        # stale package resolved earlier in the process.
+        src_resolved = _Path(src_str).resolve()
+        _sys.path = [
+            p for p in _sys.path
+            if p and _Path(p).resolve() != src_resolved
+        ]
+        _sys.path.insert(0, src_str)
+        importlib.invalidate_caches()
+        for mod in [
+            m for m in list(_sys.modules)
+            if m == "legoesm" or m.startswith("legoesm.")
+        ]:
+            del _sys.modules[mod]
 
 
 _ensure_legoesm_importable()

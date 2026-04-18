@@ -357,3 +357,86 @@ def test_tests_shim_recovers_from_stale_legoesm_install():
         "tests/ shim failed to recover from a stale legoesm install:\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+def test_tests_shim_recovers_when_src_is_on_path_but_shadowed():
+    """Mixed case: checkout ``<repo>/src`` is already on ``sys.path``,
+    but a stale ``legoesm`` package appears *earlier* on the path and
+    wins the initial ``import legoesm``. The shim must still recover
+    and resolve the delegating import against the checkout.
+
+    This is the realistic editable-install scenario that round-4
+    Codex review flagged: pip install -e already put ``src/`` on the
+    path, yet the developer's environment also has a different
+    ``legoesm`` earlier (e.g. a site-packages wheel or a leftover
+    staging directory). If the shim only inserts ``src/`` when
+    missing, it leaves the stale package in control and crashes on
+    the star-import of ``legoesm.atmosphere.held_suarez``.
+    """
+    import tempfile
+    import textwrap
+
+    with tempfile.TemporaryDirectory() as stale_root:
+        stale_pkg = pathlib.Path(stale_root) / "legoesm"
+        stale_pkg.mkdir()
+        (stale_pkg / "__init__.py").write_text(
+            textwrap.dedent(
+                """
+                # Deliberately stale: no ``atmosphere`` submodule.
+                STALE_SENTINEL = True
+                """
+            ).lstrip()
+        )
+
+        env = dict(os.environ)
+        # Put the stale stand-in *earlier* than any ``src/`` hint; we
+        # rely on the in-process ``sys.path`` manipulation to emulate
+        # the editable install having ``src/`` already discoverable.
+        env["PYTHONPATH"] = os.pathsep.join([str(stale_root), str(REPO_ROOT)])
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                # Emulate a mixed editable-install state: keep
+                # ``<repo>/src`` on sys.path, but *after* the stale
+                # stand-in so ``import legoesm`` resolves there first.
+                "import sys, os\n"
+                "repo_root = os.environ['PYTHONPATH'].split(os.pathsep)[-1]\n"
+                "repo_src = os.path.join(repo_root, 'src')\n"
+                "if repo_src not in sys.path:\n"
+                "    sys.path.append(repo_src)\n"
+                # Clear any cached legoesm modules and prime the stale\n"
+                # stand-in so its incomplete top-level __init__ wins.\n"
+                "for mod in [m for m in list(sys.modules) if m == 'legoesm' or m.startswith('legoesm.')]:\n"
+                "    del sys.modules[mod]\n"
+                "import legoesm\n"
+                "assert getattr(legoesm, 'STALE_SENTINEL', False), "
+                "    'stale stand-in is not active'\n"
+                "import importlib.util\n"
+                "try:\n"
+                "    sub = importlib.util.find_spec('legoesm.atmosphere.held_suarez')\n"
+                "except ModuleNotFoundError:\n"
+                "    sub = None\n"
+                "assert sub is None, 'precondition failed: submodule already reachable'\n"
+                # Now import the shim. The fix must: move <repo>/src to\n"
+                # the front, evict stale legoesm from sys.modules, and\n"
+                # re-resolve the delegating import against the checkout.\n"
+                "import tests.test_cases.held_suarez as shim\n"
+                "assert callable(shim.held_suarez_init)\n"
+                "import legoesm.atmosphere.held_suarez as canonical\n"
+                "assert shim.held_suarez_init is canonical.held_suarez_init\n"
+                "import legoesm as reloaded\n"
+                "assert not getattr(reloaded, 'STALE_SENTINEL', False), "
+                "    'shim did not evict the stale top-level package'\n",
+            ],
+            cwd=str(REPO_ROOT.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    assert result.returncode == 0, (
+        "tests/ shim failed to recover from a stale install shadowing "
+        "an already-on-path src/:\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
