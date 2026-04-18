@@ -1233,9 +1233,15 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             v_north = sa * u_cc + ca * v_cc
             u_ll = _regrid_2d(u_east, lon_deg, lat_deg, coord_kind)
             v_ll = _regrid_2d(v_north, lon_deg, lat_deg, coord_kind)
+            # Expose face-native cell-centre geographic winds for
+            # face-resolved diagnostics (iter-119).  These bypass the
+            # lat-lon regridding so per-face symmetry / seam jumps
+            # can be inspected directly.  Shape: (6, n, n).
             return {"u": u_ll, "v": v_ll,
                     "wind_speed": np.sqrt(u_ll ** 2 + v_ll ** 2),
-                    "height": np.asarray(s.h, dtype=np.float64)}
+                    "height": np.asarray(s.h, dtype=np.float64),
+                    "u_cc_east": np.asarray(u_east, dtype=np.float64),
+                    "v_cc_north": np.asarray(v_north, dtype=np.float64)}
 
         key_array_fn = lambda s: s.h
         coord_kind = "cube"

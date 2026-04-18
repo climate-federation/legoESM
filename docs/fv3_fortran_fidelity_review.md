@@ -55,6 +55,11 @@ These require infrastructure-level rework beyond the priority list.
     - **h is essentially N-S symmetric to 7e-05 relative precision.**
     - BUT v-wind shows 30% relative N-S asymmetry in mode-4 FFT (lat=-30 → 49 vs lat=+30 → 35).
   - **Implication**: the cubed sphere grid itself produces near-symmetric h, so the large v-wind asymmetry is generated DURING momentum integration — in the tendency computation (Coriolis, gradient, or the cell-centre-to-D-grid projection).  Candidate mechanisms: biharmonic hyperdiffusion asymmetry, face-boundary corner interpolation, or projection from cell-centre tendencies to D-grid edges in `fv3_sw_tendencies`.  Concrete future-work direction.  (Iter-117's original claim that "both files contain lat-lon interpolated data" was wrong — only wind fields are interpolated; height is face-native.)
+  - **Face-native wind diagnostic enabled (iter-119)**: `run_atmosphere_test_matrix.py:1236-1241` now also saves `u_cc_east` and `v_cc_north` face-native (shape `(11, 6, 36, 36)`) alongside the lat-lon-interpolated `u`, `v`.  Direct face-level analysis at t=1d on C36 W2:
+    - **Equatorial faces 0, 2** (both aligned with equator): max|v| = 0.45045 vs 0.45044 — N-S symmetric to 4 digits.
+    - **Longitude-rotated equatorial faces 1, 3**: max|v| = 0.48054 vs 0.48063 — symmetric.
+    - **Polar faces 4 (north) and 5 (south)**: max|v| = 0.5504 vs 0.5574 (1.3% diff), **RMS|v| = 0.2621 vs 0.2853 (8.3% asymmetry)**, mean v = -1.6e-3 vs +3.15e-2 (20× asymmetry).
+  - Concrete evidence that the polar-face treatment has a **N-S asymmetric numerical error pattern** despite N-S symmetric initial conditions.  Actionable root-cause for future work: either the polar-face supergrid construction, the face-4-to-face-5 halo connectivity, or a subtle sign convention in the vorticity / Coriolis handling at polar faces.
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
