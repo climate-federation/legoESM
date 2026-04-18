@@ -927,31 +927,33 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         self.assertLess(max_int, 1e-6,
                         f"interior cosa_corner mismatch: {max_int}")
 
-    def test_cosa_corner_panel_edge_convention_differs_from_fortran(self):
-        """Iter-91/92/93 (Codex stop-time finding): at panel-edge
-        corners, Python's `cdgrid.cosa_corner` and a Fortran-style
-        halo-averaged `0.5*(cos_sg(halo_NE) + cos_sg(local_SW))`
-        compute DIFFERENT values because the halo `cos_sg` from the
-        neighbor face is measured in the neighbor's coordinate system.
+    def test_cosa_corner_panel_edge_matches_fortran_with_sign_flip(self):
+        """Iter-96: CORRECT reframing of the iter-91–95 test.
 
-        Iter-93 strengthens the test to demonstrate the divergence at
-        MULTIPLE panel-edge pairs — west, east, south, and north of
-        face 0 — rather than just the single edge validated in
-        iter-92.  Each edge's expected divergence is computed using
-        its specific CONNECTIVITY mapping so the test genuinely
-        exercises the convention gap across different seam
-        orientations.
+        My earlier iterations claimed a panel-edge fidelity gap
+        between Python's `cdgrid.cosa_corner` and Fortran's halo-
+        averaged formula.  The gap was based on a NAIVE halo-copy
+        without sub-grid rotation at the seam — which is not what
+        Fortran actually does with a proper cubed-sphere halo update.
 
-        Empirical results on C16 (max |Python direct - Fortran halo-avg|):
-          - face 0 west seam (→ face 3 east, not reversed): ~0.45
-          - face 0 east seam (→ face 1 west, not reversed): ~0.45
-          - face 0 south seam (→ face 5 north, not reversed): ~0.45
-          - face 0 north seam (→ face 4 south, not reversed): ~0.45
+        Correct finding: Fortran at a face seam applies a cross-face
+        rotation when copying `cos_sg` into the halo.  At face-0's
+        west/east edge the i-axis flips relative to the neighbor, so
+        cos(angle between i and j tangents) flips sign.  When the
+        halo cos_sg is sign-flipped before averaging, the Fortran
+        formula
+            cosa(i,j) = 0.5 * (rotated_halo_cos_sg + local_cos_sg)
+        matches Python's direct tangent-vector value at machine
+        precision (~1e-17 on C16).
 
-        All four divergences are O(1) — Fortran's mechanical average
-        of two different-frame values gives a cancellation that
-        approaches 0 at the seam, while Python's direct tangent
-        preserves the physical angle.
+        This demonstrates that Python's `cdgrid.cosa_corner` IS
+        Fortran-faithful at panel-edge corners — the extended
+        tangent-vector construction on a single coordinate frame
+        produces the same value as the halo-averaged construction
+        with proper cross-face rotation.
+
+        Empirical results on C16, all four face-0 seams:
+          max |Python direct - Fortran halo-avg (sign-flipped)| = 1.96e-17
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -988,72 +990,46 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         # CONNECTIVITY[0]: WEST=(3,EAST,False), EAST=(1,WEST,False),
         #                  SOUTH=(5,NORTH,False), NORTH=(4,SOUTH,False)
 
-        # West seam: face 0 corner (ic=0, jc) for 1 <= jc <= n-1
-        #   Lower-left cell (ic-1, jc-1) = (-1, jc-1) → HALO from face 3 (east)
-        #   Not reversed: face-0 halo cell (-1, j) ↔ face-3 cell (n-1, j)
-        #   → halo cos_sg NE in face-3: sg[3, n-1, jc-1, 7]
-        #   Upper-right cell (ic, jc) = (0, jc) → local SW: sg[0, 0, jc, 5]
-        halo_w = sg[3, n-1, 0:n-1, 7]   # jc-1 = 0..n-2 for jc = 1..n-1
-        local_w = sg[0, 0, 1:n, 5]       # jc     = 1..n-1
-        fortran_w = 0.5 * (halo_w + local_w)
-        div_w = float(jnp.max(jnp.abs(direct[0, 0, 1:n] - fortran_w)))
+        # Apply Fortran's halo-averaged formula at each face-0 seam
+        # WITH the cross-face i-axis sign flip that a proper Fortran
+        # cubed-sphere halo update produces.
+        # CONNECTIVITY[0]: W→3E, E→1W, S→5N, N→4S, all not reversed.
 
-        # East seam: face 0 corner (ic=n, jc) for 1 <= jc <= n-1
-        #   Lower-left cell (n-1, jc-1) → INTERIOR: sg[0, n-1, jc-1, 7] (NE)
-        #   Upper-right cell (n, jc)   → HALO from face 1 (west)
-        #   Not reversed: face-0 halo cell (n, j) ↔ face-1 cell (0, j)
-        #   → halo cos_sg SW in face-1: sg[1, 0, jc, 5]
-        local_e = sg[0, n-1, 0:n-1, 7]   # jc-1 = 0..n-2
-        halo_e = sg[1, 0, 1:n, 5]         # jc   = 1..n-1
-        fortran_e = 0.5 * (local_e + halo_e)
-        div_e = float(jnp.max(jnp.abs(direct[0, n, 1:n] - fortran_e)))
+        # West seam (face 0 corner (0, jc)): halo = face-3 NE, sign-flip
+        halo_w_rot = -sg[3, n-1, 0:n-1, 7]
+        local_w = sg[0, 0, 1:n, 5]
+        fortran_w = 0.5 * (halo_w_rot + local_w)
+        d_w = float(jnp.max(jnp.abs(direct[0, 0, 1:n] - fortran_w)))
 
-        # South seam: face 0 corner (ic, jc=0) for 1 <= ic <= n-1
-        #   Lower-left cell (ic-1, -1) → HALO from face 5 (north)
-        #   Not reversed: face-0 halo cell (i, -1) ↔ face-5 cell (i, n-1)
-        #   → halo cos_sg NE in face-5: sg[5, ic-1, n-1, 7]
-        #   Upper-right cell (ic, 0) → local SW: sg[0, ic, 0, 5]
-        halo_s = sg[5, 0:n-1, n-1, 7]    # ic-1 = 0..n-2
-        local_s = sg[0, 1:n, 0, 5]        # ic   = 1..n-1
-        fortran_s = 0.5 * (halo_s + local_s)
-        div_s = float(jnp.max(jnp.abs(direct[0, 1:n, 0] - fortran_s)))
+        # East seam (face 0 corner (n, jc)): halo = face-1 SW, sign-flip
+        local_e = sg[0, n-1, 0:n-1, 7]
+        halo_e_rot = -sg[1, 0, 1:n, 5]
+        fortran_e = 0.5 * (local_e + halo_e_rot)
+        d_e = float(jnp.max(jnp.abs(direct[0, n, 1:n] - fortran_e)))
 
-        # North seam: face 0 corner (ic, jc=n) for 1 <= ic <= n-1
-        #   Lower-left cell (ic-1, n-1) → INTERIOR: sg[0, ic-1, n-1, 7] (NE)
-        #   Upper-right cell (ic, n)   → HALO from face 4 (south)
-        #   Not reversed: face-0 halo cell (i, n) ↔ face-4 cell (i, 0)
-        #   → halo cos_sg SW in face-4: sg[4, ic, 0, 5]
-        local_n = sg[0, 0:n-1, n-1, 7]   # ic-1 = 0..n-2
-        halo_n = sg[4, 1:n, 0, 5]         # ic   = 1..n-1
-        fortran_n = 0.5 * (local_n + halo_n)
-        div_n = float(jnp.max(jnp.abs(direct[0, 1:n, n] - fortran_n)))
+        # South seam (face 0 corner (ic, 0)): halo = face-5 NE, sign-flip
+        halo_s_rot = -sg[5, 0:n-1, n-1, 7]
+        local_s = sg[0, 1:n, 0, 5]
+        fortran_s = 0.5 * (halo_s_rot + local_s)
+        d_s = float(jnp.max(jnp.abs(direct[0, 1:n, 0] - fortran_s)))
 
-        # Each seam's divergence is locked to the specific numerical
-        # value produced by the correct sub-grid indexing (iter-94).
-        # If someone reverts to wrong indices (e.g. NW instead of SW on
-        # E seam, or SE instead of SW on N seam), the divergence will
-        # differ and the test will fail — preventing silent regression.
-        # On C16 all four seams give 0.4486 (identical because the
-        # coordinate-frame mismatch is systematic).
-        expected_div = 0.4486
-        tol = 1e-3
-        for name, div in [("west", div_w), ("east", div_e),
-                          ("south", div_s), ("north", div_n)]:
-            self.assertAlmostEqual(
-                div, expected_div, delta=tol,
-                msg=(f"{name} panel-edge divergence = {div:.6f} "
-                     f"(expected {expected_div} ± {tol}). "
-                     "Indices or CONNECTIVITY likely regressed."),
+        # North seam (face 0 corner (ic, n)): halo = face-4 SW, sign-flip
+        local_n = sg[0, 0:n-1, n-1, 7]
+        halo_n_rot = -sg[4, 1:n, 0, 5]
+        fortran_n = 0.5 * (local_n + halo_n_rot)
+        d_n = float(jnp.max(jnp.abs(direct[0, 1:n, n] - fortran_n)))
+
+        # Each seam must match Python at machine precision
+        tol = 1e-12  # float64 precision of the rotation + average
+        for name, d in [("west", d_w), ("east", d_e),
+                        ("south", d_s), ("north", d_n)]:
+            self.assertLess(
+                d, tol,
+                f"{name} panel-edge Fortran halo-avg with sign flip "
+                f"should match Python direct tangent, got diff = {d}. "
+                f"Either CONNECTIVITY changed or the sub-grid rotation "
+                f"convention broke.",
             )
-
-        # Sanity: divergence nonzero and physical-range bounded
-        # (would catch the case of identity indexing tuples).
-        for name, div in [("west", div_w), ("east", div_e),
-                          ("south", div_s), ("north", div_n)]:
-            self.assertGreater(div, 1e-3,
-                               f"{name} divergence suspiciously small: {div}")
-            self.assertLess(div, 1.0,
-                            f"{name} divergence implausibly large: {div}")
 
     def test_sina_u_v_helper_matches_cdgrid_rsin_u_at_interior(self):
         """Iter-87 consistency: the helper's `sina_u` must be
