@@ -1,4 +1,17 @@
-# FV3 Fortran Fidelity Review (baselined 2026-04-14, updated through Ralph iter 169 on 2026-04-19)
+# FV3 Fortran Fidelity Review
+
+Baselined 2026-04-14.  Live audit log (per-iteration entries) in
+"Latest iteration work" section further down; earlier frozen
+snapshots at iter-67 and iter-112.
+
+> **Metadata convention (iter-174)**: the earlier "updated through
+> Ralph iter N" dateline in this title was removed because each
+> iteration bumping it triggered a Codex-flagged inconsistency
+> (the number would lag by 1-4 iterations as soon as the NEXT
+> stop-hook committed anything).  The authoritative current
+> iteration count is the commit count on branch plus the HEAD
+> commit message's iter-N tag; there is no need to duplicate that
+> metadata in the title.
 
 ## ITER-112 HISTORICAL SNAPSHOT (post iter-112)
 
