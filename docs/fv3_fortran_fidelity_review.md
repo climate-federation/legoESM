@@ -1,6 +1,13 @@
 # FV3 Fortran Fidelity Review (baselined 2026-04-14, updated through Ralph iter 169 on 2026-04-19)
 
-## CURRENT STATE (post iter-170 — 130 commits on branch)
+## CURRENT STATE (post iter-112 — historical snapshot)
+
+> **iter-172 note**: the content below reflects the iter-112 era
+> state when the "Reconciliation of user's recurring priority list"
+> was written (iter-115).  Later iter-128..171 work is summarised
+> in bullet entries in the "Latest iteration work" section below,
+> not recapped here.  Do not edit the iter-112 content; it is a
+> frozen snapshot for audit purposes.
 
 **Reconciliation of user's recurring priority list (iter-115)**:
 
