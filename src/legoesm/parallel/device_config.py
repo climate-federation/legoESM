@@ -240,9 +240,11 @@ def _configure_tpu(config: HardwareConfig) -> None:
     # to allow XLA to choose bf16 for non-critical ops.
     jax.config.update("jax_default_matmul_precision", "bfloat16")
 
-    # For multi-host TPU pods, ensure SPMD partitioning is enabled.
-    if config.num_hosts > 1:
-        jax.config.update("jax_spmd_mode", "allow_all")
+    # NOTE: the legacy `jax_spmd_mode='allow_all'` toggle was removed
+    # in modern JAX (0.9+) — `jax.config.update("jax_spmd_mode", ...)`
+    # raises AttributeError.  Under the unified sharding model SPMD
+    # partitioning is the default for sharded arrays, so no explicit
+    # toggle is required for multi-host TPU pods.
 
 
 def _configure_gpu(config: HardwareConfig) -> None:
