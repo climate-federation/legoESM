@@ -200,6 +200,37 @@ Latest iteration work:
     Fortran overrides will fail the architectural-bound test with a
     direct pointer to sw_core.F90:3527-3545 / 3620-3640.
 
+- **iter-154 (2026-04-19)**: fixed canonical CPU bootstrap crash on
+  current XLA.  All three call sites —
+  `runtime.backend.configure_backend('cpu')`,
+  `parallel.device_config._configure_cpu`, and
+  `parallel.device_config._configure_metal` — emitted
+  `XLA_FLAGS=--intra_op_parallelism_threads=<N>` when the user had
+  not pre-set `XLA_FLAGS` (i.e., the default).  Current XLA rejects
+  this flag with a FATAL `Unknown flag in XLA_FLAGS` error at first
+  JAX use, which crashes every CPU-only run on a fresh environment.
+  Removed from all three sites; kept the valid
+  `xla_cpu_multi_thread_eigen=true`.  Regression test
+  `test_cpu_backend_does_not_set_invalid_intra_op_flag`
+  line-scans both files and catches re-introduction.  (`36d2a6e`)
+
+- **iter-155 (2026-04-19)**: audited the static TPU/GPU XLA flag
+  dicts in `runtime.backend` and `parallel.device_config` as a
+  followup to iter-154.  On a CPU-only test machine, several legacy
+  TPU flags
+  (`xla_tpu_enable_async_collective_fusion`,
+  `xla_tpu_enable_data_parallel_all_reduce_opt`,
+  `xla_tpu_enable_latency_hiding_scheduler`) and GPU flags
+  (`xla_gpu_enable_async_all_reduce`,
+  `xla_gpu_enable_async_collectives`) are reported as Unknown by
+  the CPU XLA binary — but this only indicates they are not
+  compiled into the CPU-only build, not that they are removed on
+  actual TPU/GPU backends.  The flag dicts are only emitted when
+  `backend == 'tpu'` or `'gpu'` respectively, so they do not
+  affect CPU users.  Left as-is pending verification on real
+  accelerator hardware.  229/229 core unit tests pass; W2/W5/
+  cosine bell evaluations unchanged from iter-112 baseline.
+
 - **iter-153 (2026-04-18)**: broader JAX 0.9 config audit — no additional
   dead `jax.config.update(...)` calls.  Exercised every remaining key
   with `warnings.simplefilter("error", DeprecationWarning)`:
