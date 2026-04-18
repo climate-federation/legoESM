@@ -229,3 +229,57 @@ def test_held_suarez_resolves_without_tests_on_path():
         f"Canonical Held-Suarez import failed:\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+def test_tests_shim_works_from_raw_repo_checkout():
+    """``from tests.test_cases.held_suarez import ...`` must resolve when
+    the package has not been pip-installed in editable mode — i.e. only
+    the repo root is on ``sys.path`` and ``legoesm`` is not yet
+    importable. The shim is expected to bootstrap itself by locating
+    ``<repo>/src`` on disk and prepending it to ``sys.path`` before
+    delegating to the canonical module.
+
+    Reproducing this exactly requires a venv in which ``legoesm`` is
+    *not* installed; since our CI venv uses ``pip install -e .``, we
+    simulate the raw-checkout layout in a subprocess by:
+
+    1. Setting ``PYTHONPATH`` to the repo root only.
+    2. Removing every editable-install hook (``.pth``-injected entries
+       pointing at ``src/``) from ``sys.path`` and deleting any cached
+       ``legoesm`` entries from ``sys.modules`` *before* the shim
+       imports. At that point, ``import legoesm`` raises
+       ``ModuleNotFoundError`` and the shim's fallback path fires.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            # Strip src/ from sys.path so legoesm is not importable via
+            # the editable install, forcing the shim to self-bootstrap.
+            "import sys, os\n"
+            "repo_src = os.path.join(os.environ['PYTHONPATH'], 'src')\n"
+            "sys.path = [p for p in sys.path if os.path.abspath(p) != os.path.abspath(repo_src)]\n"
+            "for mod in [m for m in list(sys.modules) if m == 'legoesm' or m.startswith('legoesm.')]:\n"
+            "    del sys.modules[mod]\n"
+            "# Sanity check: legoesm must be unresolvable *before* the shim runs.\n"
+            "import importlib.util\n"
+            "assert importlib.util.find_spec('legoesm') is None, "
+            "    'precondition failed: legoesm is already on path'\n"
+            "# Now import the shim; it must self-bootstrap src/ onto sys.path.\n"
+            "import tests.test_cases.held_suarez as shim\n"
+            "assert callable(shim.held_suarez_init)\n"
+            "assert shim.SIGMA_B == 0.7\n",
+        ],
+        cwd=str(REPO_ROOT.parent),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, (
+        "tests/ shim failed from raw repo checkout (no editable "
+        "install):\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
