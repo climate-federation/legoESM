@@ -89,10 +89,12 @@ class ACCChannelConfig:
     T_perturbation_K: float = 1e-3
 
     # Physics / dissipation
-    A_h: float = 100.0              # Laplacian viscosity [m^2/s]
+    # A_h = 1e4 keeps grid Reynolds number ~1 at 50 km / 0.1 m/s.
+    # C_smag adds flow-dependent biharmonic dissipation for sharper features.
+    A_h: float = 1e4                # Laplacian viscosity [m^2/s]
     B_h: float = 0.0                # biharmonic viscosity
-    C_smag: float = 0.0             # Smagorinsky coefficient
-    K_h: float = 100.0              # tracer diffusivity [m^2/s]
+    C_smag: float = 0.1             # Smagorinsky coefficient
+    K_h: float = 1e3                # tracer diffusivity [m^2/s]
 
     barotropic_diffusion_alpha: float = 0.05
 

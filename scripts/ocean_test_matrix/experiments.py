@@ -1398,13 +1398,51 @@ def run_eady_uniform(tc: TestCase, output_dir: Path, days: float,
     n_steps = int(days * 86400 / dt)
     diag_every = max(1, n_steps // 40)
 
+    # Sponge layer: relax T toward IC and u,v toward zero near walls
+    from legoesm.ocean.experiments.eady_uniform import compute_sponge_mask
+    from legoesm.core.field import Field
+    gamma = compute_sponge_mask(grid, eu_config)
+    T_init = np.array(state.T.data)
+    r_drag = eu_config.bottom_drag_coeff
+
+    if tc.grid_type == "latlon_channel":
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_cell_to_uface, interp_cell_to_vface)
+        decay_T = jnp.array(np.exp(-dt * gamma)[..., np.newaxis])
+        T_init_jnp = jnp.array(T_init)
+        decay_u = jnp.array(np.exp(-dt * np.array(
+            interp_cell_to_uface(jnp.array(gamma))))[..., np.newaxis])
+        decay_v = jnp.array(np.exp(-dt * np.array(
+            interp_cell_to_vface(jnp.array(gamma))))[..., np.newaxis])
+    else:
+        # MPAS: gamma is 1D (nCells), T is (nCells, nlev)
+        decay_T = jnp.array(np.exp(-dt * gamma)[:, np.newaxis])
+        T_init_jnp = jnp.array(T_init)
+        # For u on edges: average gamma from adjacent cells
+        c1 = np.asarray(grid.cellsOnEdge[0])
+        c2 = np.asarray(grid.cellsOnEdge[1])
+        gamma_edge = 0.5 * (gamma[c1] + gamma[c2])
+        decay_u = jnp.array(np.exp(-dt * gamma_edge)[:, np.newaxis])
+        decay_v = None  # MPAS has no separate v
+
     check_fn = _make_check_fn(tc.grid_type)
     scalar_fn = _make_scalar_fn(tc.grid_type, grid, z_coord)
     extract_fn = _make_extract_fn(tc.grid_type, grid, lon_deg, lat_deg,
                                   include_velocity_3d=True)
 
     def step_fn(s, dt_):
-        return model.step(s, dt_)
+        s_new = model.step(s, dt_)
+        # Sponge: relax T toward initial, damp u/v
+        T_new = s_new.T.data * decay_T + T_init_jnp * (1.0 - decay_T)
+        u_new = s_new.u.data * decay_u
+        s_new = s_new._replace(
+            u=Field(u_new, name="u", dims=s_new.u.dims, units=s_new.u.units),
+            T=Field(T_new, name="T", dims=s_new.T.dims, units=s_new.T.units))
+        if hasattr(s_new, 'v') and decay_v is not None:
+            v_new = s_new.v.data * decay_v
+            s_new = s_new._replace(
+                v=Field(v_new, name="v", dims=s_new.v.dims, units=s_new.v.units))
+        return s_new
 
     state, snapshots, diag, wall, ok = _run_timeloop(
         step_fn, state, dt, n_steps, check_fn, scalar_fn, extract_fn,
@@ -1488,7 +1526,7 @@ def run_acc_channel(tc: TestCase, output_dir: Path, days: float
             tc, nlev=20, H_max=acc_config.H_max,
             physics=physics,
             A_h=acc_config.A_h, B_h=acc_config.B_h,
-            C_smag=acc_config.C_smag,
+            C_smag=acc_config.C_smag, K_h=acc_config.K_h,
             bottom_drag_r=acc_config.bottom_drag_coeff,
             eos="linear",
             eos_linear=LinearEOSConfig(
