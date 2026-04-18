@@ -200,6 +200,17 @@ Latest iteration work:
     Fortran overrides will fail the architectural-bound test with a
     direct pointer to sw_core.F90:3527-3545 / 3620-3640.
 
+- **iter-153 (2026-04-18)**: broader JAX 0.9 config audit — no additional
+  dead `jax.config.update(...)` calls.  Exercised every remaining key
+  with `warnings.simplefilter("error", DeprecationWarning)`:
+    - `jax_default_matmul_precision` (bfloat16, tensorfloat32): ok
+    - `jax_default_device` (cpu): ok
+    - `jax_enable_x64`: ok
+  Wide import scan of legoesm.runtime.backend, parallel.device_config,
+  core.field, grids.cubed_sphere also ran clean with DeprecationWarning
+  as error.  No further canonical-bootstrap crashes expected on
+  JAX 0.9.x.
+
 - **iter-149..151 (2026-04-18)**: fixed canonical TPU bootstrap crash on
   JAX 0.9.x.  Not FV3-scope, but a latent runtime bug surfaced during
   the audit of `jax.config.update(...)` call sites.
