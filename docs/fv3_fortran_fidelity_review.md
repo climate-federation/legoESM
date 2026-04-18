@@ -200,6 +200,34 @@ Latest iteration work:
     Fortran overrides will fail the architectural-bound test with a
     direct pointer to sw_core.F90:3527-3545 / 3620-3640.
 
+- **iter-136..138 (2026-04-18)**: ocean rest-state fixes (out-of-scope
+  of FV3 Fortran fidelity, but closes part of the Ralph required-
+  evaluations "ocean rest state preserved within numerical error").
+  - **iter-136** (`459b304`): fixed ocean rest-state latlon quiver
+    overlay shape-broadcast bug (4 ERROR → PASS).  Initial fix
+    truncated staggered C-grid u/v to common shape.
+  - **iter-137** (`9d87800`): Codex flagged truncation as wrong
+    (zeros boundary arrows, mis-associates face values with cell
+    centres).  Replaced with proper C-grid → A-grid colocation by
+    averaging adjacent face values: `u_cc = 0.5*(u[:,:-1] + u[:,1:])`
+    and `v_cc = 0.5*(v[:-1,:] + v[1:,:])`.  All 12 ocean rest-state
+    tests pass (eta drift 0 for latlon, <1e-8 for cubed-sphere,
+    0 for MPAS).
+  - **iter-138**: attempted to fix phillips_two_layer/latlon and
+    inertia_gravity_wave/latlon ERROR states (same `(36,72) into
+    (36,73)` shape-broadcast pattern at `u_data[..., 0] = u_jet`
+    and `u_data[..., 0] = u_pert`).  The initial-condition fix
+    worked but exposed a DEEPER bug in the latlon C-grid ocean
+    model dynamics path: the model then fails with
+    `mul got incompatible shapes for broadcasting: (36, 73, 2),
+    (36, 72, 1)` during the step.  Reverted the IC fix since it
+    merely moved the error rather than closing it.  **Followup
+    needed** (outside Ralph FV3-fidelity scope): the latlon
+    `barotropic_latlon_cgrid` dynamics has a cell-centred-to-
+    C-grid stagger mismatch in its update step that surfaces only
+    when non-zero u is prescribed in the IC.  Rest-state variants
+    (u=0 everywhere) do not exercise the mismatch.
+
 - **iter-135 (2026-04-18)**: plateau checkpoint.  Ralph-loop iterations
   128-134 focused on test infrastructure around two FB-path fidelity
   gaps (Priority-3 cube-vertex overrides; `_d_sw5_corner_divergence`
