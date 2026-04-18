@@ -216,9 +216,12 @@ def test_run_amip_help_starts_without_tests_on_path():
 
 def test_held_suarez_resolves_without_tests_on_path():
     """Canonical Held-Suarez module must resolve in an installed env."""
+    # NOTE: do not assert ``find_spec('tests') is None`` here — an
+    # unrelated site-packages ``tests`` package (which some CI images
+    # ship) would make that precondition flaky. The real contract is
+    # that the *canonical* Held-Suarez resolves without relying on
+    # this repo's tests tree, which the import below verifies directly.
     result = _run_subprocess_without_repo_root(
-        "import importlib.util\n"
-        "assert importlib.util.find_spec('tests') is None\n"
         "from legoesm.atmosphere.held_suarez import (\n"
         "    held_suarez_init, held_suarez_init_latlon,\n"
         "    held_suarez_init_mpas, held_suarez_forcing_mpas,\n"
