@@ -400,7 +400,12 @@ class TestLegacyCompat:
 
     def test_legacy_unsupported_f64_constant(self):
         from legoesm.core.hardware import _UNSUPPORTED_F64_BACKENDS
-        assert "METAL" in _UNSUPPORTED_F64_BACKENDS
+        # The canonical constant stores backend names in lowercase
+        # (matching `runtime.backend._NO_F64_BACKENDS`).  Call sites
+        # always compare with `backend.lower()` before membership
+        # (see hardware.py line 86).  Earlier version of this test
+        # asserted `"METAL"` (uppercase), which is stale.
+        assert "metal" in _UNSUPPORTED_F64_BACKENDS
 
     def test_legacy_parse_precision_dtype(self):
         from legoesm.core.hardware import _parse_precision_dtype
