@@ -446,22 +446,22 @@ def _build_physics_fn(physics_level: str, grid_type: str):
         return None
 
     if grid_type == "spectral":
-        from tests.test_cases.held_suarez import (
+        from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing_spectral,
         )
         return held_suarez_forcing_spectral
     elif grid_type == "latlon":
-        from tests.test_cases.held_suarez import (
+        from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing_latlon,
         )
         return held_suarez_forcing_latlon
     elif grid_type == "icosahedral":
-        from tests.test_cases.held_suarez import (
+        from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing_mpas,
         )
         return held_suarez_forcing_mpas
     else:  # cubed-sphere
-        from tests.test_cases.held_suarez import (
+        from legoesm.atmosphere.held_suarez import (
             held_suarez_forcing,
         )
         return held_suarez_forcing
