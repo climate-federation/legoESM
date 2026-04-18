@@ -65,63 +65,66 @@ class TestCDGridConstruction(unittest.TestCase):
             self.assertLess(max_f, 2e-5)
 
     def test_w2_balanced_state_polar_mass_tendency_asymmetry_baseline(self):
-        """Iter-125 (Priority 4 diagnostic baseline): codify the
-        W2-balanced polar-face mass-tendency asymmetry measurement
-        from iter-121-124 as a regression baseline.
+        """Iter-126 (Priority 4 diagnostic baseline, Codex-corrected):
+        codify the W2-balanced polar-face mass-tendency asymmetry
+        measurement from iter-121-124 as a regression baseline.
 
-        On the FV3-style balanced W2 initial condition (alpha=0 zonal
-        flow + geostrophic h), compute `fv3_sw_tendencies` directly
-        on the initial state and measure the area-weighted mass-rate
-        per face.  This test asserts specific expected values:
-        - Equatorial faces 0-3: IDENTICAL to 5 digits (~4.18e9).
-        - Polar faces 4, 5: DIFFER by ~5-6% (the bug we want to fix).
+        Uses the REPO'S CANONICAL `williamson_test2(grid)` for the h
+        field and the test-matrix runner's exact D-grid wind
+        construction (`run_atmosphere_test_matrix.py:1187-1192`).
+        This ensures the baseline matches the production-path
+        measurement, not a slightly-different hand-rolled state.
 
-        If a future refactor REDUCES the polar asymmetry (good), or
-        breaks the equatorial symmetry (regression), this test
-        flags it.  Current values serve as the baseline against
-        which item-#1 architectural work can be measured.
+        Asserts on canonical-state C36:
+        - Equatorial faces 0-3: area-weighted mass-rate symmetric
+          to 1e-5 relative.
+        - Polar mass-rate ratio face 4 / face 5 = 1.0567 ± 0.01
+          (baseline for future architectural work on item #1).
+
+        A fix reducing the ratio toward 1.000 TRIGGERS the test to
+        signal progress; a regression increasing it also flags.
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+        from tests.atmosphere.shallow_water.test_cases.williamson import (
+            williamson_test2,
+        )
 
         n = 36
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
+        sw = williamson_test2(grid)
 
+        # Reproduce the test-matrix runner's exact D-grid wind
+        # construction (run_atmosphere_test_matrix.py:1187-1192).
         U0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
         u_east_x = U0 * jnp.cos(cdgrid.lat_edge_x)
         u_d = cdgrid.cos_angle_edge_x * u_east_x
         u_east_y = U0 * jnp.cos(cdgrid.lat_edge_y)
         v_d = -cdgrid.sin_angle_edge_y * u_east_y
-        omega = 2.0 * np.pi / 86400.0
-        lat = cdgrid.base.lat
-        h = 3000.0 - (omega * float(grid.radius) * U0 + U0**2/2) \
-            * jnp.sin(lat)**2 / 9.80616
-        h_s = jnp.zeros((6, n, n))
 
-        dh_dt, _, _ = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid)
+        # Canonical h, h_s from williamson_test2
+        dh_dt, _, _ = fv3_sw_tendencies(sw.h.data, u_d, v_d,
+                                         sw.h_s.data, cdgrid)
         area = cdgrid.base.area
         mass_rates = [float(jnp.sum(dh_dt[f] * area[f])) for f in range(6)]
 
-        # Equatorial faces 0-3 must remain symmetric to 5 digits
-        # (they already are — this protects against regression).
+        # Equatorial faces 0-3 remain symmetric to 1e-5 relative
         eq_max = max(abs(mass_rates[i] - mass_rates[0]) for i in range(4))
         self.assertLess(
             eq_max / abs(mass_rates[0]), 1e-5,
             f"Equatorial face symmetry broke: max diff "
             f"{eq_max:.3e} vs face-0 {mass_rates[0]:.3e}")
 
-        # Polar asymmetry: currently ~5.7%.  Tight tolerance on the
-        # ratio so a future fix that REDUCES asymmetry will trigger
-        # the test (intentionally — to signal progress).
-        # Loose upper bound 10% guards against regression.
+        # Polar asymmetry on canonical state: 1.0567.
         polar_ratio = mass_rates[4] / mass_rates[5]
         self.assertAlmostEqual(
-            polar_ratio, 1.057, delta=0.01,
+            polar_ratio, 1.0567, delta=0.01,
             msg=(f"Polar mass-rate ratio = {polar_ratio:.4f}, "
-                 f"baseline expects 1.057 ± 0.01.  If the value "
+                 f"baseline expects 1.0567 ± 0.01 on the CANONICAL "
+                 f"`williamson_test2(grid)` state.  If the value "
                  f"dropped toward 1.000, that is a FIX — update the "
                  f"expected value. If it rose away from 1, that is "
                  f"a regression."))
