@@ -33,6 +33,16 @@ The user's Ralph prompt has repeatedly cited three "live fidelity gaps":
    4 cube-corner halo regions.  Explicit guard comment + regression
    test locking in 5 required phrases added iter-107/108.
    **STATUS: GAP ISOLATED AND DOCUMENTED.**
+   **Iter-128 architectural bound**: Fortran writes 3 halo cells per
+   corner-axis (depths 1..3); Python h=2 can represent 2 per axis
+   (portable fraction 2/3).  The deepest override cell (i=-2 / j=-2)
+   is architecturally blocked — it requires extending the halo to
+   h=3 for `utmp/vtmp`.  Since the non-duogrid path is never
+   executed in production (duogrid is always active with ng>=2 and
+   `_d2a2c_vect` dispatches to `_d2a2c_vect_duogrid` matching the
+   Fortran `dg%is_initialized` gate), this has zero production
+   impact.  Locked in by
+   `test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound`.
 
 The remaining true blockers are the two ARCHITECTURAL items below
 (production uses A-L, not FV3 FB; FB path itself unstable at C36).

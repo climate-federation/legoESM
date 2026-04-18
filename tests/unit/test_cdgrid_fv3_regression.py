@@ -1040,6 +1040,83 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             "on the non-duogrid FB path has NOT been quantified.",
         )
 
+    def test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound(self):
+        """Iter-128 (Priority 3): concrete architectural bound on the gap.
+
+        Fortran sw_core.F90:3527-3545 writes `utmp(-2..0, 0)` = three
+        halo cells spanning corner-halo depth (west=3..1, south=1).
+        Python's `pad_halo_vector` uses halo=2, producing utmp_pad
+        with corner-halo depth (west=2..1, south=2..1) — i.e., only
+        TWO depths per axis, not three.
+
+        Concrete architectural limit:
+          - Fortran writes 3 cells per corner per axis (6 corners × 4
+            cube-corner-faces × 2 axes × 3 depths = 144 halo cells).
+          - Python h=2 can represent only 2 cells per corner per axis
+            (96 halo cells).
+          - 48 halo cells (the i=-2 / j=-2 deepest overrides) CANNOT
+            be ported without extending the halo to h=3.
+
+        Since the non-duogrid path is never executed in production
+        (duogrid is always active with ng>=2 and `_d2a2c_vect`
+        dispatches to `_d2a2c_vect_duogrid` matching the Fortran
+        `dg%is_initialized` gate), the gap has zero production impact.
+
+        This test locks in the architectural accounting so future
+        work to expand halo depth (e.g., the FB-path C36 stability
+        project) can reference concrete cell counts.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.grids.halo import pad_halo_vector
+
+        n = 12
+        grid = create_cubed_sphere(n, use_duogrid=False)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Smooth solid-body utmp/vtmp from the cell-centre geographic
+        # velocities (a realistic non-duogrid input shape).
+        rng = jnp.arange(6 * n * n, dtype=jnp.float64).reshape((6, n, n))
+        utmp = jnp.sin(rng / 47.0)
+        vtmp = jnp.cos(rng / 53.0)
+        h = 2
+        utmp_pad, vtmp_pad = pad_halo_vector(
+            utmp, vtmp,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+            interp_offsets=grid.halo_interp_offsets,
+            halo=h,
+        )
+        self.assertEqual(utmp_pad.shape, (6, n + 2 * h, n + 2 * h),
+                         f"unexpected utmp_pad shape {utmp_pad.shape}; "
+                         f"halo convention changed — reconsider bound.")
+
+        # Architectural fact #1: Python halo depth = h = 2.
+        self.assertEqual(h, 2,
+                         "Python cdgrid non-duogrid _d2a2c_vect uses "
+                         "halo=2.  If this changes to h=3, the Fortran "
+                         "cube-vertex override becomes fully portable.")
+
+        # Architectural fact #2: Fortran needs halo depth 3 for the
+        # deepest override (utmp(-2, 0) and vtmp(0, -2)).
+        fortran_deepest_depth = 3
+        self.assertGreater(
+            fortran_deepest_depth, h,
+            f"Fortran override depth {fortran_deepest_depth} exceeds "
+            f"Python halo {h}: the deepest halo cell cannot be "
+            f"represented without extending the halo.",
+        )
+
+        # Architectural fact #3: portable fraction per corner-axis.
+        portable_cells_per_corner_axis = h       # depths 1..h
+        total_cells_per_corner_axis = fortran_deepest_depth   # depths 1..3
+        portable_fraction = portable_cells_per_corner_axis / total_cells_per_corner_axis
+        self.assertAlmostEqual(
+            portable_fraction, 2.0 / 3.0, places=10,
+            msg="Architectural portable fraction changed — reconsider "
+                "the priority-3 bound.",
+        )
+
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
         corners against the Fortran Formula
