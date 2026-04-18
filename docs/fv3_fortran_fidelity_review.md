@@ -3,6 +3,11 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-94 (2026-04-18)**: Codex stop-time feedback: iter-93's E and N seam regressions used the wrong local/halo sub-grid indices.  Auditing the Fortran formula `cosa(i,j) = 0.5*(cos_sg(i-1,j-1,NE) + cos_sg(i,j,SW))` and applying it consistently to all four seams:
+  - E seam: local = NE of cell (n-1, jc-1) on face 0 (previously correct); halo = SW of face-1 cell (0, jc) — NOT NW as I previously had (sub-grid 5, not 8; cell index 1:n, not 0:n-1).
+  - N seam: halo = SW of face-4 cell (ic, 0) — NOT SE (sub-grid 5, not 6; cell index 1:n, not 0:n-1); local = NE of cell (ic-1, n-1) — cell index 0:n-1, not 1:n.
+  - W and S seams were already correct.  The previous N-seam divergence of 0.477 vs W/E/S 0.449 was symptomatic of the wrong index usage.  After fix, all four seams show IDENTICAL divergence of 0.4486, consistent with the O(1) coordinate-frame mismatch hypothesis.
+  - 153 tests pass.
 - **iter-93 (2026-04-18)**: Codex stop-time feedback: iter-92's rewritten test was still too weak because it only verified one seam (face 0 west → face 3 east).  Extended the test to all four panel-edge seams of face 0, each using the CONNECTIVITY-specific halo-cell indexing:
   - West seam (→ face 3 EAST, not reversed): halo = `sg[3, n-1, 0:n-1, NE]`, divergence 0.449.
   - East seam (→ face 1 WEST, not reversed): halo = `sg[1, 0, 0:n-1, NW]`, divergence 0.449.

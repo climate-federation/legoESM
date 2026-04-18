@@ -980,35 +980,52 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             1e-6, "north self-consistency broken")
 
         # --- Fortran halo-averaged construction across four seams ---
+        # Fortran `fv_grid_utils.F90:495`:
+        #   cosa(i, j) = 0.5 * (cos_sg(i-1, j-1, NE) + cos_sg(i, j, SW))
+        # In Python 0-indexed:
+        #   At Python corner (ic, jc), use
+        #     0.5 * (sg[cell (ic-1, jc-1), NE=7] + sg[cell (ic, jc), SW=5])
         # CONNECTIVITY[0]: WEST=(3,EAST,False), EAST=(1,WEST,False),
         #                  SOUTH=(5,NORTH,False), NORTH=(4,SOUTH,False)
 
-        # West seam (face 0 corner (0, jc), 1<=jc<=n-1):
-        #   halo cell in face-3 east (not reversed) = cell (n-1, jc-1); NE sub-grid
-        halo_w = sg[3, n-1, 0:n-1, 7]
-        local_w = sg[0, 0, 1:n, 5]
+        # West seam: face 0 corner (ic=0, jc) for 1 <= jc <= n-1
+        #   Lower-left cell (ic-1, jc-1) = (-1, jc-1) → HALO from face 3 (east)
+        #   Not reversed: face-0 halo cell (-1, j) ↔ face-3 cell (n-1, j)
+        #   → halo cos_sg NE in face-3: sg[3, n-1, jc-1, 7]
+        #   Upper-right cell (ic, jc) = (0, jc) → local SW: sg[0, 0, jc, 5]
+        halo_w = sg[3, n-1, 0:n-1, 7]   # jc-1 = 0..n-2 for jc = 1..n-1
+        local_w = sg[0, 0, 1:n, 5]       # jc     = 1..n-1
         fortran_w = 0.5 * (halo_w + local_w)
         div_w = float(jnp.max(jnp.abs(direct[0, 0, 1:n] - fortran_w)))
 
-        # East seam (face 0 corner (n, jc), 1<=jc<=n-1):
-        #   halo cell in face-1 west (not reversed) = cell (0, jc-1); NW sub-grid (8)
-        halo_e = sg[1, 0, 0:n-1, 8]
-        local_e = sg[0, n-1, 0:n-1, 7]
-        fortran_e = 0.5 * (halo_e + local_e)
+        # East seam: face 0 corner (ic=n, jc) for 1 <= jc <= n-1
+        #   Lower-left cell (n-1, jc-1) → INTERIOR: sg[0, n-1, jc-1, 7] (NE)
+        #   Upper-right cell (n, jc)   → HALO from face 1 (west)
+        #   Not reversed: face-0 halo cell (n, j) ↔ face-1 cell (0, j)
+        #   → halo cos_sg SW in face-1: sg[1, 0, jc, 5]
+        local_e = sg[0, n-1, 0:n-1, 7]   # jc-1 = 0..n-2
+        halo_e = sg[1, 0, 1:n, 5]         # jc   = 1..n-1
+        fortran_e = 0.5 * (local_e + halo_e)
         div_e = float(jnp.max(jnp.abs(direct[0, n, 1:n] - fortran_e)))
 
-        # South seam (face 0 corner (ic, 0), 1<=ic<=n-1):
-        #   halo cell in face-5 north (not reversed) = cell (ic-1, n-1); NE sub-grid
-        halo_s = sg[5, 0:n-1, n-1, 7]
-        local_s = sg[0, 1:n, 0, 5]
+        # South seam: face 0 corner (ic, jc=0) for 1 <= ic <= n-1
+        #   Lower-left cell (ic-1, -1) → HALO from face 5 (north)
+        #   Not reversed: face-0 halo cell (i, -1) ↔ face-5 cell (i, n-1)
+        #   → halo cos_sg NE in face-5: sg[5, ic-1, n-1, 7]
+        #   Upper-right cell (ic, 0) → local SW: sg[0, ic, 0, 5]
+        halo_s = sg[5, 0:n-1, n-1, 7]    # ic-1 = 0..n-2
+        local_s = sg[0, 1:n, 0, 5]        # ic   = 1..n-1
         fortran_s = 0.5 * (halo_s + local_s)
         div_s = float(jnp.max(jnp.abs(direct[0, 1:n, 0] - fortran_s)))
 
-        # North seam (face 0 corner (ic, n), 1<=ic<=n-1):
-        #   halo cell in face-4 south (not reversed) = cell (ic-1, 0); SE sub-grid
-        halo_n = sg[4, 0:n-1, 0, 6]
-        local_n = sg[0, 1:n, n-1, 7]
-        fortran_n = 0.5 * (halo_n + local_n)
+        # North seam: face 0 corner (ic, jc=n) for 1 <= ic <= n-1
+        #   Lower-left cell (ic-1, n-1) → INTERIOR: sg[0, ic-1, n-1, 7] (NE)
+        #   Upper-right cell (ic, n)   → HALO from face 4 (south)
+        #   Not reversed: face-0 halo cell (i, n) ↔ face-4 cell (i, 0)
+        #   → halo cos_sg SW in face-4: sg[4, ic, 0, 5]
+        local_n = sg[0, 0:n-1, n-1, 7]   # ic-1 = 0..n-2
+        halo_n = sg[4, 1:n, 0, 5]         # ic   = 1..n-1
+        fortran_n = 0.5 * (local_n + halo_n)
         div_n = float(jnp.max(jnp.abs(direct[0, 1:n, n] - fortran_n)))
 
         # Each seam must show a non-trivial divergence (not machine noise)
