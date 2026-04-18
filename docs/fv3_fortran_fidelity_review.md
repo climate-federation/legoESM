@@ -81,6 +81,13 @@ These require infrastructure-level rework beyond the priority list.
     - **Momentum tendencies are N-S SYMMETRIC at t=0**: `du_d_dt` max 1.32e-5 on both face 4 and face 5 (identical); `dv_d_dt` means opposite sign but equal magnitude (±9.8e-12).
     - **Mass tendency `dh_dt` has a 16% N-S ASYMMETRY**: face 4 max 3.67e-4, face 5 max 4.26e-4.  Equatorial faces 0-3 are identical (3.31e-4 each).
   - **Conclusion**: the asymmetry originates in the **mass flux divergence path** (`cgrid_mass_flux_divergence` inside `fv3_sw_tendencies`), NOT in the momentum tendency path.  Since `cgrid_mass_flux_divergence` uses PPM reconstruction (`_ppm_reconstruct_1d`) on cell-centred h, the N-S asymmetry most likely comes from either (a) the PPM boundary handling at polar-face halo edges, or (b) the `fv3_cc2c` cell-centre-to-C-grid projection which uses different halo neighbours on face 4 vs face 5.  The 16% asymmetry in dh_dt accumulates over time to drive h asymmetry → pressure-gradient asymmetry → momentum asymmetry.
+  - **Further bisection (iter-122)**: traced each step within `fv3_sw_tendencies`:
+    - `fv3_d2cc` (D-grid → cell centre): u_cc, v_cc have |max| IDENTICAL between face 4 and face 5 (means ±7.54e-7 — correct reflection).
+    - `fv3_cc2c` (cell centre → C-grid): u_c, v_c have |max| IDENTICAL between faces.
+    - `_pad_halo_auto_h2(h)`: `h_pad[4]` and `h_pad[5]` are **BIT-IDENTICAL** (diff = 0).
+    - `dy_edge_x`, `dx_edge_y` metrics: identical at machine precision between faces 4 and 5.
+    - **`cgrid_mass_flux_divergence`**: produces max|dh_dt| = 3.67e-4 on face 4 vs 4.26e-4 on face 5 (16% diff).
+  - **Localized source**: with identical h_pad, identical u_c/v_c magnitude, and identical metrics, the asymmetry must emerge from the INTERACTION between `u_c` sign and `q_R_x`/`q_L_x` upwind selection: `h_face_x = jnp.where(u_c > 0, q_R_left, q_L_right)`.  The upwind choice picks different reconstruction branches on face 4 vs face 5 (because u_c signs differ under N-S reflection), and q_R ≠ q_L in general for non-uniform h.  Fortran may apply this same upwind but has different halo treatment at polar faces that compensates.  Detailed fix requires either reflection-aware audit of `_ppm_reconstruct_1d` or comparison against Fortran `tp_core.F90` PPM at polar-face halo cells.
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
