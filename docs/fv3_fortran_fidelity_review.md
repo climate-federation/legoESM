@@ -214,6 +214,23 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-159 (2026-04-19)**: end-of-session required-evaluations
+  snapshot.  All four Ralph stopping-condition inputs run cleanly:
+    - Williamson 2 (C36 cubed-sphere, 1 day): L2=1.53e-03,
+      Linf=4.07e-03.  UNCHANGED from iter-112 baseline.
+    - Williamson 5 (C36 cubed-sphere, 1 day): mass drift=1.42e-05.
+      UNCHANGED.
+    - Cosine bell (C36 cubed-sphere, 1 day): L1=1.20e-01,
+      L2=1.17e-01, Linf=1.23e-01.  UNCHANGED.
+    - Ocean rest state (full test matrix across cubed_sphere /
+      latlon / mpas / C24 / 36x72 / ico3 variants): 12/12 PASS.
+      Up from 8/12 at session start (iter-136/137 closed the
+      4 latlon-ERROR cases).
+  Stopping condition requires "no visible edge artifacts" — W2
+  v-wind cube-face imprint remains (architectural, production
+  uses A-L not FV3 FB chain).  Not resolvable in the iter-128..159
+  scope without replacing the production tendency path.
+
 - **iter-158 (2026-04-19)**: session summary of iter-128..157 —
   117 commits on branch `codex/fv3-fortran-fidelity-ralph-loop-20260417`.
   Two categories of real improvements, plus test/doc hardening:
