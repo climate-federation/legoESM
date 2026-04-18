@@ -100,6 +100,14 @@ These require infrastructure-level rework beyond the priority list.
     ```
 
     Equatorial faces identical to 5 digits.  Polar faces differ by ~5.7% (3.78/3.58) — smaller than the raw |max| asymmetry (16%) but still non-trivial.  Total mass rate 2.41e10 is non-zero (a known property of the PPM production path without `zero_mean_correction`), so the 5.7% polar asymmetry rides on top of a larger non-physical drift that `zero_mean_correction=True` would remove.
+  - **ZMC does NOT fix the polar bias (iter-124)**: tested `zero_mean_correction=True` in `fv3_sw_tendencies`.  ZMC subtracts a UNIFORM constant to zero the global mass-rate mean — it does NOT address the polar bias.  Numerical evidence:
+
+    ```
+    no ZMC:   total = +2.41e+10;  polar diff (f4 - f5) = +2.03e+08
+    with ZMC: total = -4.48e+04;  polar diff (f4 - f5) = +2.03e+08  ← INVARIANT
+    ```
+
+    The polar diff is EXACTLY INVARIANT under ZMC (both snapshots show +2.03e+08).  With ZMC the polar ratio becomes 0.535 (more visible because the baseline is smaller).  **The polar bias is a fundamental per-face-sum asymmetry that cannot be corrected by a uniform shift — only by fixing the mass-flux divergence operator's polar-face behaviour.**
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
