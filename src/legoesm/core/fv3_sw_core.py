@@ -424,23 +424,34 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     n = cdgrid.n
     npt = min(4, n // 2)
 
-    # --- Fortran parity note (iter-107, Priority 3 audit) --------------
+    # --- Fortran parity note (iter-108, Priority 3 audit) --------------
     # sw_core.F90:3527-3545 and 3620-3640 apply cube-vertex corner
     # OVERRIDES on utmp/vtmp and ua/va at the 4 cube corners (sw/se/ne/
-    # nw), gated on `.not. dg%is_initialized`.  The overrides write
-    # halo cells of utmp/vtmp with sign-flipped copies of the other
-    # component, e.g.:
-    #   utmp(i=-2..0, j=0) = -vtmp(0, 1-i)   # SW corner
-    #   vtmp(0, j=-2..0)   = -utmp(1-j, 0)   # SW corner
-    # These require direct halo-cell writes on utmp_pad/vtmp_pad near
-    # cube vertices.  NOT PORTED in Python's non-duogrid path: the
-    # halo data already comes from `pad_halo_vector` (which provides
-    # proper cross-face interpolation), so the Fortran-style sign-
-    # flip copy is redundant for the common case.  The gap may cause
-    # O(dx) divergence from Fortran at the 24 cube-vertex cells (4
-    # per corner × 6 faces / 2 faces per vertex pair) in the non-
-    # duogrid FB path only.  Duogrid path (which skips the overrides
-    # per Fortran's own gate) is unaffected.
+    # nw), gated on `.not. dg%is_initialized`.  Each override writes
+    # HALO cells of utmp/vtmp (not interior cells) with sign-flipped
+    # copies of the OTHER component on the adjacent face, e.g.:
+    #   utmp(i=-2..0, j=0)   = -vtmp(0, 1-i)       ! SW corner halo row
+    #   vtmp(i=0, j=-2..0)   = -utmp(1-j, 0)       ! SW corner halo col
+    # The intent is to give utmp/vtmp sensible values in the 3-face
+    # cube-vertex halo region, where ordinary 2-face halo exchange
+    # (copy/interpolate from a single neighbor) is ambiguous.
+    #
+    # NOT PORTED in Python's non-duogrid path.  Python relies on:
+    #   - `pad_halo_vector` for 2-face cross-face halo interpolation
+    #     along panel edges (works cleanly away from cube vertices), and
+    #   - `_fill_corners_h1` / `_fill_corners_h2` inside the halo layer
+    #     for the cube-vertex 2x2 blocks (2-point AVERAGES of adjacent
+    #     edge halos, NOT the Fortran sign-flip copy from the other
+    #     component).
+    #
+    # These two approaches give DIFFERENT values at the cube-vertex
+    # cells in the non-duogrid path — the delta is O(1) on random
+    # input but typically O(dx²) on smooth fields.  The impact on the
+    # non-duogrid FB path has NOT been quantified (the FB path is
+    # already experimental/unstable at C36 for independent reasons).
+    #
+    # Duogrid path (via `_d2a2c_vect_duogrid`, which Fortran also
+    # skips via `dg%is_initialized`) is unaffected by this gap.
     # ------------------------------------------------------------------
 
     # ---- Step 1: D-grid → covariant cell centres (utmp, vtmp) ----

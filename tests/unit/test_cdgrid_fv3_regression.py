@@ -985,41 +985,59 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                             f"face {f} NORTH self-consistency: {d}")
 
     def test_d2a2c_vect_non_duogrid_cube_vertex_gap_documented(self):
-        """Iter-107 (Priority 3): `_d2a2c_vect` non-duogrid path does
-        not implement Fortran's cube-vertex corner overrides for
-        utmp/vtmp and ua/va (sw_core.F90:3527-3545 and 3620-3640).
+        """Iter-108 (Priority 3, corrected from iter-107):
+        `_d2a2c_vect` non-duogrid path does not implement Fortran's
+        cube-vertex corner overrides for utmp/vtmp and ua/va
+        (sw_core.F90:3527-3545 and 3620-3640).
 
-        These overrides write halo cells at the 4 cube-corner
-        regions with sign-flipped copies of the other component.
-        Python relies on `pad_halo_vector`'s cross-face halo instead.
+        Correct characterization of the gap: Fortran writes halo
+        cells near cube vertices with sign-flipped copies of the
+        OTHER component on the adjacent face.  Python does NOT do
+        this.  Instead Python uses `_fill_corners_h1` / `_fill_corners_h2`
+        which averages adjacent edge halos — a DIFFERENT convention.
+        The two give different numerical values at cube-vertex cells
+        (O(1) on random input, O(dx²) on smooth fields).
 
-        This test documents that the duogrid path is unaffected
-        (Fortran gates these overrides on `.not. dg%is_initialized`
-        which Python matches by dispatching to `_d2a2c_vect_duogrid`
-        when duogrid is active).
+        Iter-107 framed this as "Fortran-style is redundant for the
+        common case", which overclaimed the equivalence.  The corrected
+        iter-108 note in `_d2a2c_vect` honestly states the two
+        approaches differ and the impact has not been quantified.
+
+        Duogrid path (via `_d2a2c_vect_duogrid`, which Fortran also
+        skips via `dg%is_initialized`) is unaffected.
         """
         import inspect
         from legoesm.core.fv3_sw_core import _d2a2c_vect
 
         src = inspect.getsource(_d2a2c_vect)
-        # The docstring comment must name the Fortran lines and explain
-        # why the gap is acceptable.  If a future refactor removes
-        # this note without porting the overrides, the test fails.
+        # The note must name the Fortran lines, the two fill mechanisms
+        # Python uses, and state the values differ.
         self.assertIn(
             "sw_core.F90:3527-3545 and 3620-3640", src,
-            "The iter-107 Priority 3 gap note for cube-vertex corner "
+            "The Priority 3 gap note for cube-vertex corner "
             "overrides was removed from `_d2a2c_vect`.  Either port the "
             "overrides or restore the note.",
         )
         self.assertIn(
             "NOT PORTED", src,
-            "The iter-107 Priority 3 gap note was weakened — it "
-            "should explicitly state that the overrides are NOT PORTED.",
+            "The Priority 3 gap note should explicitly state NOT PORTED.",
         )
         self.assertIn(
-            "Duogrid path", src,
-            "The iter-107 note should document that duogrid mode is "
-            "unaffected (Fortran skips these overrides for duogrid).",
+            "_fill_corners_h", src,
+            "The note must acknowledge Python uses _fill_corners_h* "
+            "for the cube-vertex halo blocks — a DIFFERENT convention "
+            "from Fortran's sign-flip override.",
+        )
+        self.assertIn(
+            "DIFFERENT", src,
+            "The note must state that Python and Fortran give "
+            "DIFFERENT values at cube-vertex cells in the non-duogrid "
+            "path — do not weaken this to 'equivalent' or 'redundant'.",
+        )
+        self.assertIn(
+            "NOT been quantified", src,
+            "The note must state honestly that the numerical impact "
+            "on the non-duogrid FB path has NOT been quantified.",
         )
 
     def test_rsin2_corner_matches_fortran_at_interior(self):
