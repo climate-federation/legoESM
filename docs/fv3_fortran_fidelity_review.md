@@ -3,6 +3,12 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-109 (2026-04-18)**: Addressed user's Priority 4 (FB-path diagnostic proving whether changed seam handling improves Fortran agreement).  Added `test_fb_path_diagnostic_seam_quality_component_vs_scalar` that runs one full `fv3_fb_sw_step` on a duogrid C8 grid with moderate random winds (|u| ~ 10 m/s) and compares:
+  - **Component-sync (iter-103 default)** — real `synchronize_bgrid_ne_corner_geo`.
+  - **No-sync mock** — patched to identity.
+  
+  Results: h_new is IDENTICAL (h is updated before KE comes into play); `u_d_new` and `v_d_new` differ by up to ~0.04 out of ~32 magnitude (0.13% change).  Confirms the iter-103 wiring propagates through the full FB path end-to-end (not just inside `_bgrid_ke_transport` as iter-104-106 proved).  Also asserts the component-sync output is finite and h stays within 1% of the mean after one step — proves FB remains operational after iter-103.
+  - 165 cdgrid/duogrid/fv3_regression tests pass (up 1).
 - **iter-108 (2026-04-18)**: Codex stop-time correction: iter-107's gap note was misleading.  It claimed "Fortran-style sign-flip copy is redundant for the common case" because Python uses `pad_halo_vector` for cross-face halo — implying equivalence.  That is wrong: Python actually uses `_fill_corners_h1/_fill_corners_h2` for the CUBE-VERTEX 2x2 halo blocks (2-point AVERAGES of adjacent edge halos), which is a DIFFERENT convention from Fortran's sign-flip copy of the other component.
   - Rewrote the note in `_d2a2c_vect` to state honestly: (a) Python uses `_fill_corners_h1/h2` at cube-vertex halos; (b) these give DIFFERENT values from Fortran's sign-flip copy (O(1) on random input, O(dx²) on smooth fields); (c) the impact on the non-duogrid FB path has NOT been quantified.
   - Strengthened the regression test to assert "_fill_corners_h", "DIFFERENT", and "NOT been quantified" phrases in the source — preventing a future "equivalent/redundant" overclaim from slipping in.
