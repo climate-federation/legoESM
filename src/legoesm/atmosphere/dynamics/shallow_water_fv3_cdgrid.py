@@ -29,7 +29,6 @@ import jax.numpy as jnp
 
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
-    cgrid_to_dgrid,
     cgrid_mass_flux_divergence,
     cdgrid_momentum_tendencies,
     _extrapolate_boundary_corners,
