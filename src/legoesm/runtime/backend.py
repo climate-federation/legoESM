@@ -256,9 +256,12 @@ def configure_backend(backend: str | None = None) -> str:
     if backend == "tpu":
         _set_xla_flags(_TPU_XLA_FLAGS)
         jax.config.update("jax_default_matmul_precision", "bfloat16")
-        num_hosts = jax.process_count()
-        if num_hosts > 1:
-            jax.config.update("jax_spmd_mode", "allow_all")
+        # NOTE: the legacy `jax_spmd_mode='allow_all'` toggle was removed
+        # in modern JAX (0.9+) — `jax.config.update("jax_spmd_mode", ...)`
+        # raises `AttributeError: Unrecognized config option: jax_spmd_mode`,
+        # which would crash the canonical TPU bootstrap on multi-host pods.
+        # Under the unified sharding model SPMD partitioning is automatic
+        # for sharded arrays, so no explicit toggle is required.
 
     elif backend == "gpu":
         devices = jax.devices()
