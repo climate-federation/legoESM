@@ -3,6 +3,10 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-89 (2026-04-18)**: Verified that Python's `cdgrid.cosa_corner` (built from direct tangent-vector geometry on an extended grid) agrees with the Fortran `fv_grid_utils.F90:495` sub-grid averaging convention `0.5*(cos_sg(i-1,j-1,8) + cos_sg(i,j,6))` to machine precision (~1e-15 under float64) at interior corners.  Both sub-grid corner values come from the same supergrid point at each shared corner, so Fortran's averaging is trivially equal to either operand.
+  - Added `test_cosa_corner_matches_fortran_sub_grid_average` to lock this in at <1e-6 (float32 accumulation tolerance).
+  - Implication: the `_bgrid_ke_transport` formula `vb = dt5*(vc_sum - uc_sum*cosa)*rsina` using `cdgrid.cosa_corner` and `cdgrid.rsin2_corner` IS Fortran-faithful, since Python's `cosa_corner` matches Fortran's averaged construction.
+  - 152 cdgrid/duogrid/fv3_regression tests pass.
 - **iter-88 (2026-04-18)**: Codex stop-time review claimed iter-87's fidelity fix was "not supported by the repo's own grid construction".  Disproven with a new regression test.  The grid construction at `cubed_sphere_cdgrid.py:750-757` computes `sina_u` exactly the same way the iter-87 helper does:
   ```python
   sina_u_int = 0.5 * (sin_sg_E[:, :-1, :] + sin_sg_W[:, 1:, :])

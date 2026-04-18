@@ -899,6 +899,36 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 f"compute_transport_quantities halo used {kw} "
                 f"instead of duogrid remap on duogrid-active grid")
 
+    def test_cosa_corner_matches_fortran_sub_grid_average(self):
+        """Fortran `fv_grid_utils.F90:495`:
+          cosa(i,j) = 0.5*(cos_sg(i-1,j-1,8) + cos_sg(i,j,6))
+        averages the NE sub-grid corner of the lower-left cell with the
+        SW sub-grid corner of the upper-right cell.  Python builds
+        `cdgrid.cosa_corner` by direct tangent-vector geometry on an
+        extended grid — a different construction.  Verify they agree
+        at interior corners (where both sub-grid corner values come
+        from the same supergrid point).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        n = 16
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        sg = cdgrid.cos_sg
+        # Python 0-indexed sub-grid: 5=SW corner, 7=NE corner
+        # At Python corner (ic, jc) with 1 <= ic, jc <= n-1:
+        #   Fortran NE of cell (ic-1, jc-1) = Python sg[:, ic-1, jc-1, 7]
+        #   Fortran SW of cell (ic, jc)     = Python sg[:, ic, jc, 5]
+        sg_avg_int = 0.5 * (sg[:, 0:n-1, 0:n-1, 7] + sg[:, 1:n, 1:n, 5])
+        direct_int = cdgrid.cosa_corner[:, 1:n, 1:n]
+
+        max_abs = float(jnp.max(jnp.abs(direct_int - sg_avg_int)))
+        # 1e-6 covers float32 accumulation; actual diff is ~1e-15 in float64
+        self.assertLess(max_abs, 1e-6,
+                        f"cosa_corner not consistent with sub-grid average: {max_abs}")
+
     def test_sina_u_v_helper_matches_cdgrid_rsin_u_at_interior(self):
         """Iter-87 consistency: the helper's `sina_u` must be
         self-consistent with the grid-build `rsin_u = 1/sina_u²`
