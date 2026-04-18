@@ -30,10 +30,7 @@ import jax.numpy as jnp
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 _EPS = float(jnp.finfo(jnp.float32).eps)    # Float32 machine epsilon (~1.19e-7)
 
-from legoesm.grids.cubed_sphere import (
-    CubedSphereGrid,
-    _face_to_cartesian,
-)
+from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import _face_gnomonic_to_lonlat
 
 
