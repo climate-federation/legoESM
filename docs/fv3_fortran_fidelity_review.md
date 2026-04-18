@@ -365,7 +365,7 @@ Latest iteration work:
   - Added 2 new regression tests:
     - `test_geo_frame_sync_preserves_uniform_geographic_vector`: a uniform geo-frame vector (converted to face-local) round-trips through the sync with diff < 1e-6.  Proves correctness at ALL seams simultaneously.
     - `test_geo_frame_sync_averages_discontinuity`: introducing a 2x geo-frame jump on face-0 west averages to 1.5 at the seam as expected.
-  - The legacy `synchronize_bgrid_ne_corner` (iter-100/101 same-axis-only version) is retained for reference; `..._geo` is the recommended path for new code.
+  - The legacy `synchronize_bgrid_ne_corner` (iter-100/101 same-axis-only version) was initially retained for reference; REMOVED in iter-140 (`cb5d2bb`) as dead code (zero production callers, only self-tests).  `..._geo` is the sole path going forward.
   - 162 cdgrid/duogrid/fv3_regression tests pass.
 - **iter-101 (2026-04-18)**: Codex stop-time correction: iter-100 overclaimed the helper's scope.  Actual count of handled seams is **12 of 24**, not 16.  Corrected docstring and added a regression test `test_cross_axis_non_reversed_seam_also_skipped` that pins down the skip of 4 non-reversed cross-axis seams (W/E ↔ S/N pattern: face 1 N ↔ face 4 E; face 3 S ↔ face 5 W; plus 2 symmetric counterparts).
   - Handled (12): face 0 W/E/S/N (4); face 1/2/3 W/E (6); face 4 S; face 5 N.
