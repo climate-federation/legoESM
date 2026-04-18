@@ -88,6 +88,18 @@ These require infrastructure-level rework beyond the priority list.
     - `dy_edge_x`, `dx_edge_y` metrics: identical at machine precision between faces 4 and 5.
     - **`cgrid_mass_flux_divergence`**: produces max|dh_dt| = 3.67e-4 on face 4 vs 4.26e-4 on face 5 (16% diff).
   - **Localized source**: with identical h_pad, identical u_c/v_c magnitude, and identical metrics, the asymmetry must emerge from the INTERACTION between `u_c` sign and `q_R_x`/`q_L_x` upwind selection: `h_face_x = jnp.where(u_c > 0, q_R_left, q_L_right)`.  The upwind choice picks different reconstruction branches on face 4 vs face 5 (because u_c signs differ under N-S reflection), and q_R ≠ q_L in general for non-uniform h.  Fortran may apply this same upwind but has different halo treatment at polar faces that compensates.  Detailed fix requires either reflection-aware audit of `_ppm_reconstruct_1d` or comparison against Fortran `tp_core.F90` PPM at polar-face halo cells.
+  - **Area-weighted mass-rate balance (iter-123)** per-face on W2 balanced IC, C36:
+
+    ```
+    face 0: +4.1823e+09   (equatorial)
+    face 1: +4.1823e+09   (equatorial)
+    face 2: +4.1823e+09   (equatorial)
+    face 3: +4.1823e+09   (equatorial)
+    face 4: +3.7818e+09   (north pole cap)
+    face 5: +3.5789e+09   (south pole cap)
+    ```
+
+    Equatorial faces identical to 5 digits.  Polar faces differ by ~5.7% (3.78/3.58) — smaller than the raw |max| asymmetry (16%) but still non-trivial.  Total mass rate 2.41e10 is non-zero (a known property of the PPM production path without `zero_mean_correction`), so the 5.7% polar asymmetry rides on top of a larger non-physical drift that `zero_mean_correction=True` would remove.
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
