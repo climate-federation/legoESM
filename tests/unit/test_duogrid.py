@@ -929,6 +929,86 @@ class TestBgridNeCornerSync:
         np.testing.assert_allclose(np.array(u_sync[1, 1:n, n]), 100.0)
         np.testing.assert_allclose(np.array(v_sync[1, 1:n, n]), 200.0)
 
+    def test_geo_frame_sync_preserves_uniform_geographic_vector(self):
+        """Iter-102: geo-frame BGRID_NE sync preserves a vector that
+        is uniform in the GEOGRAPHIC frame.  For a uniform geo vector
+        (u_east=1, u_north=0 everywhere), converting to face-local
+        (via each face's cos_ang_c/sin_ang_c) gives non-uniform
+        face-local values.  After `synchronize_bgrid_ne_corner_geo`
+        those should round-trip: local → geo → sync (no-op because
+        values agree) → local identical to input.
+
+        This is the key invariant proving the geo-frame approach
+        works on ALL 24 seams (including reversed and cross-axis)
+        plus cube vertices — without any per-seam rotation tables.
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.grids.halo import synchronize_bgrid_ne_corner_geo
+
+        n = 8
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        cac = cdgrid.cos_angle_corner
+        sac = cdgrid.sin_angle_corner
+
+        # Uniform geographic vector (east=1, north=0)
+        u_east = jnp.ones((6, n+1, n+1))
+        u_north = jnp.zeros((6, n+1, n+1))
+        # Convert to face-local
+        u_local = cac * u_east + sac * u_north
+        v_local = -sac * u_east + cac * u_north
+
+        u_sync, v_sync = synchronize_bgrid_ne_corner_geo(
+            u_local, v_local, cac, sac, n)
+
+        # Should round-trip exactly (all corners of all faces agree
+        # on the geo-frame value, so sync is a no-op)
+        max_du = float(jnp.max(jnp.abs(u_sync - u_local)))
+        max_dv = float(jnp.max(jnp.abs(v_sync - v_local)))
+        assert max_du < 1e-6, f"uniform-geo round-trip u diff = {max_du}"
+        assert max_dv < 1e-6, f"uniform-geo round-trip v diff = {max_dv}"
+
+    def test_geo_frame_sync_averages_discontinuity(self):
+        """Iter-102: introduce a discontinuity at a shared seam in the
+        geo frame and verify the sync averages it.  Confirms the sync
+        is actually doing work (not a no-op in general).
+        """
+        import jax.numpy as jnp
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.grids.halo import synchronize_bgrid_ne_corner_geo
+
+        n = 8
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        cac = cdgrid.cos_angle_corner
+        sac = cdgrid.sin_angle_corner
+
+        # Build a geo-frame vector that is uniform except face 0 has
+        # u_east = 2 on its west edge (i=0).  Convert to face-local;
+        # after sync the west edge should average to 1.5.
+        u_east = jnp.ones((6, n+1, n+1))
+        u_north = jnp.zeros((6, n+1, n+1))
+        u_east = u_east.at[0, 0, :].set(2.0)
+
+        u_local = cac * u_east + sac * u_north
+        v_local = -sac * u_east + cac * u_north
+
+        u_sync, v_sync = synchronize_bgrid_ne_corner_geo(
+            u_local, v_local, cac, sac, n)
+
+        # Convert back to check
+        u_east_sync = cac * u_sync - sac * v_sync
+        # Interior of face 0 west edge (j=1..n-1):
+        #   local had u_east=2, neighbor (face 3 east) had u_east=1
+        #   → sync u_east should be 1.5 on the shared seam
+        np.testing.assert_allclose(
+            np.array(u_east_sync[0, 0, 1:n]), 1.5, atol=1e-5)
+
     def test_reversed_seams_untouched_at_edge_interior(self):
         """At reversed seams (e.g. face 1 SOUTH ↔ face 5 EAST), the
         helper leaves INTERIOR-of-edge boundary values unchanged

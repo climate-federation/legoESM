@@ -1592,6 +1592,58 @@ def synchronize_corner_scalar(field, n):
     return field
 
 
+def synchronize_bgrid_ne_corner_geo(u, v, cos_ang_c, sin_ang_c, n):
+    """BGRID_NE vector corner sync via the geographic frame.
+
+    For every one of the 24 panel-edge seams (including reversed and
+    cross-axis) and for the 8 cube-vertex corners (3 faces meeting),
+    averages the vector (u, v) at corner-stagger positions in the
+    INVARIANT geographic frame.  The rotation-free averaging uses the
+    observation that a physical vector at a shared point has the same
+    (east, north) components regardless of which face we measure it
+    on — so conversion to geo frame sidesteps the per-seam rotation
+    tables that the same-axis-only helper required.
+
+    Algorithm:
+      1. Convert face-local (u, v) to geographic (u_east, u_north)
+         per corner using:
+           u_east  = cos_ang_c * u - sin_ang_c * v
+           u_north = sin_ang_c * u + cos_ang_c * v
+      2. For each seam, average boundaries:
+           geo_sync = 0.5 * (local_geo + nbr_geo[rev_slice])
+      3. For each of 8 cube vertices, 3-face average (orig pre-sync
+         values) — mirrors `synchronize_corner_scalar` Pass 2.
+      4. Convert synced geo back to face-local:
+           u =  cos_ang_c * u_east + sin_ang_c * u_north
+           v = -sin_ang_c * u_east + cos_ang_c * u_north
+
+    Parameters
+    ----------
+    u, v : jax.Array, shape (6, n+1, n+1)
+        Face-local corner-stagger vector components.
+    cos_ang_c, sin_ang_c : jax.Array, shape (6, n+1, n+1)
+        cdgrid.cos_angle_corner / sin_angle_corner.
+    n : int
+
+    Returns
+    -------
+    u_sync, v_sync : jax.Array, shape (6, n+1, n+1)
+    """
+    # Convert to geographic frame
+    u_east = cos_ang_c * u - sin_ang_c * v
+    u_north = sin_ang_c * u + cos_ang_c * v
+
+    # Sync geo components independently (each is a scalar field)
+    u_east = synchronize_corner_scalar(u_east, n)
+    u_north = synchronize_corner_scalar(u_north, n)
+
+    # Rotate back to face-local
+    u_sync = cos_ang_c * u_east + sin_ang_c * u_north
+    v_sync = -sin_ang_c * u_east + cos_ang_c * u_north
+
+    return u_sync, v_sync
+
+
 def synchronize_bgrid_ne_corner(u, v, n):
     """Average (u, v) vector components at cube-face seams with BGRID_NE
     cross-axis rotation.  Matches the Fortran `mpp_get_boundary(...,

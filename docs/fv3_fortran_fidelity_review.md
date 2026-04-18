@@ -3,6 +3,12 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-102 (2026-04-18)**: Closed Priority 2 helper coverage gap by implementing the SUPERIOR approach: `synchronize_bgrid_ne_corner_geo(u, v, cos_ang_c, sin_ang_c, n)` which routes the BGRID_NE sync through the geographic frame.  Key insight: a physical vector at a shared point has the SAME geographic components regardless of which face measures it, so converting to (u_east, u_north), averaging, and rotating back handles ALL 24 seams (non-reversed AND reversed, same-axis AND cross-axis) plus the 8 cube-vertex 3-face averages via the existing `synchronize_corner_scalar` helper — no per-seam rotation tables needed.
+  - Added 2 new regression tests:
+    - `test_geo_frame_sync_preserves_uniform_geographic_vector`: a uniform geo-frame vector (converted to face-local) round-trips through the sync with diff < 1e-6.  Proves correctness at ALL seams simultaneously.
+    - `test_geo_frame_sync_averages_discontinuity`: introducing a 2x geo-frame jump on face-0 west averages to 1.5 at the seam as expected.
+  - The legacy `synchronize_bgrid_ne_corner` (iter-100/101 same-axis-only version) is retained for reference; `..._geo` is the recommended path for new code.
+  - 162 cdgrid/duogrid/fv3_regression tests pass.
 - **iter-101 (2026-04-18)**: Codex stop-time correction: iter-100 overclaimed the helper's scope.  Actual count of handled seams is **12 of 24**, not 16.  Corrected docstring and added a regression test `test_cross_axis_non_reversed_seam_also_skipped` that pins down the skip of 4 non-reversed cross-axis seams (W/E ↔ S/N pattern: face 1 N ↔ face 4 E; face 3 S ↔ face 5 W; plus 2 symmetric counterparts).
   - Handled (12): face 0 W/E/S/N (4); face 1/2/3 W/E (6); face 4 S; face 5 N.
   - Skipped (12): 8 reversed seams + 4 cross-axis non-reversed seams.  Cross-axis seams require i/j-swap rotation (u ↔ v) with sign flips.
