@@ -270,6 +270,43 @@ class TestXLAFlags:
         config = detect_devices()
         configure_jax_for_device(config)
 
+    def test_cpu_backend_does_not_set_invalid_intra_op_flag(self):
+        """Iter-154 regression: the legacy
+        `intra_op_parallelism_threads=N` XLA_FLAGS entry is not
+        recognized by current XLA and crashes JAX at first use with:
+
+            F parse_flags_from_env.cc:234]
+              Unknown flag in XLA_FLAGS:
+              --intra_op_parallelism_threads=N
+
+        `runtime.backend.configure_backend('cpu')` previously wrote
+        this flag unconditionally (when XLA_FLAGS was unset), making
+        the canonical CPU bootstrap crash at first `jnp.zeros(...)`.
+
+        This test line-scans `runtime/backend.py` and the sibling
+        `parallel/device_config.py` for executable (non-comment)
+        emission of the `intra_op_parallelism_threads` XLA flag so
+        a future refactor can't silently re-introduce the crash.
+        """
+        import pathlib
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        for rel_path in (
+            "src/legoesm/runtime/backend.py",
+            "src/legoesm/parallel/device_config.py",
+        ):
+            src = (repo_root / rel_path).read_text()
+            for lineno, line in enumerate(src.splitlines(), 1):
+                code_part = line.split("#", 1)[0]
+                if "intra_op_parallelism_threads" in code_part:
+                    raise AssertionError(
+                        f"{rel_path}:{lineno} reintroduced the XLA "
+                        f"flag `intra_op_parallelism_threads`, which "
+                        f"current XLA rejects with an `Unknown flag` "
+                        f"fatal error at first JAX use.  Remove it; "
+                        f"XLA auto-scales CPU thread-pool size from "
+                        f"`os.cpu_count()`."
+                    )
+
     def test_configure_tpu_multihost_does_not_crash_on_jax_0_9(self):
         """Iter-149/150 regression: the canonical TPU bootstrap must NOT
         call `jax.config.update("jax_spmd_mode", "allow_all")`.

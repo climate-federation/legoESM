@@ -288,10 +288,16 @@ def configure_backend(backend: str | None = None) -> str:
     else:  # cpu
         if "XLA_FLAGS" not in os.environ:
             try:
-                n_cores = os.cpu_count() or 4
+                # NOTE: the legacy `intra_op_parallelism_threads` flag is
+                # NOT recognized by the current XLA parse_flags_from_env
+                # and crashes at first JAX use with:
+                #   F parse_flags_from_env.cc:234]
+                #     Unknown flag in XLA_FLAGS: --intra_op_parallelism_threads=N
+                # Drop it; rely on the default XLA thread-pool autoscaling
+                # driven by `os.cpu_count()`.  `xla_cpu_multi_thread_eigen`
+                # remains valid and meaningful for multi-core CPUs.
                 _set_xla_flags({
                     "xla_cpu_multi_thread_eigen": "true",
-                    "intra_op_parallelism_threads": str(n_cores),
                 })
             except Exception:
                 pass
