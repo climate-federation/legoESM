@@ -52,7 +52,6 @@ from legoesm.core.operators_cdgrid import (
     _arakawa_lamb_gradient,
     _interp_center_to_corner,
     _interp_corner_to_center,
-    _laplacian_dgrid,
 )
 from legoesm.core.operators_3d import (
     gradient_x_3d as _gradient_x_3d,
