@@ -1149,6 +1149,73 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         self.assertEqual(uc.shape, (6, n + 1, n))
         self.assertEqual(vc.shape, (6, n, n + 1))
 
+    def test_d2a2c_vect_reachability_gated_behind_experimental_flag(self):
+        """Iter-128 addendum: pin the reachability story to configuration.
+
+        The claim in the priority-3 architectural note is that the
+        default production config does NOT reach `_d2a2c_vect`.  That
+        rests on two invariants: (1) the default
+        `CDGridShallowWaterConfig.use_experimental_csw` is False, so
+        `FV3EdgeShallowWaterModel.step` does NOT dispatch to
+        `fv3_csw_tendencies`; and (2) `_d2a2c_vect` is only called
+        from `_c_sw` and `fv3_csw_tendencies` inside
+        `legoesm.core.fv3_sw_core`.
+
+        If either invariant is silently flipped — e.g., the default
+        becomes `use_experimental_csw=True`, or a new caller of
+        `_d2a2c_vect` appears — the "default production is unaffected"
+        claim in docs/fv3_fortran_fidelity_review.md no longer holds.
+        This test fails in that case, prompting re-evaluation of the
+        gap.
+        """
+        import ast
+        import inspect
+        import pathlib
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+        )
+
+        # Invariant 1: default use_experimental_csw is False.
+        self.assertFalse(
+            CDGridShallowWaterConfig().use_experimental_csw,
+            "CDGridShallowWaterConfig.use_experimental_csw default "
+            "flipped to True.  This routes production calls through "
+            "fv3_csw_tendencies → _d2a2c_vect, which exposes the "
+            "non-duogrid cube-vertex gap (priority 3).  Either revert "
+            "the default or fully port the Fortran overrides at "
+            "sw_core.F90:3527-3545 and 3620-3640.",
+        )
+
+        # Invariant 2: `_d2a2c_vect` (not duogrid variant) is only
+        # called from `_c_sw` and `fv3_csw_tendencies`.  Parse the
+        # module AST and collect all Call nodes whose target is the
+        # bare name `_d2a2c_vect`; then look up which enclosing
+        # function contains each call.
+        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        sw_core_path = repo_root / "src" / "legoesm" / "core" / "fv3_sw_core.py"
+        self.assertTrue(sw_core_path.exists(),
+                        f"expected fv3_sw_core.py at {sw_core_path}")
+        src = sw_core_path.read_text()
+        tree = ast.parse(src)
+        callers: set[str] = set()
+        for func in ast.walk(tree):
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(func):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "_d2a2c_vect"):
+                    callers.add(func.name)
+        expected_callers = {"_c_sw", "fv3_csw_tendencies"}
+        self.assertEqual(
+            callers, expected_callers,
+            f"Callers of `_d2a2c_vect` in fv3_sw_core.py changed: "
+            f"expected {sorted(expected_callers)}, found {sorted(callers)}.  "
+            f"The priority-3 reachability claim in "
+            f"docs/fv3_fortran_fidelity_review.md names these specific "
+            f"callers; update both the claim and this test together.",
+        )
+
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
         corners against the Fortran Formula

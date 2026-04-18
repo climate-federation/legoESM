@@ -37,17 +37,25 @@ The user's Ralph prompt has repeatedly cited three "live fidelity gaps":
    corner-axis (depths 1..3); Python h=2 can represent 2 per axis
    (portable fraction 2/3).  The deepest override cell (i=-2 / j=-2)
    is architecturally blocked — it requires extending the halo to
-   h=3 for `utmp/vtmp`.  Non-impact verified: `_d2a2c_vect` is called
-   only from `_c_sw` (fv3_sw_core.py:1176) and `fv3_csw_tendencies`
-   (fv3_sw_core.py:1290), both of which live inside the FV3 FB chain
-   (`fv3_forward_backward_step`, `fv3_fb_sw_step`) that is EXPERIMENTAL
-   and unstable at C36 for independent reasons (item #1 below).
-   The PRODUCTION shallow-water path (`fv3_sw_tendencies` in
-   operators_cdgrid.py:1458, used by `FV3EdgeShallowWaterModel` in
-   the Williamson test matrix) uses the Arakawa-Lamb gradient +
-   RK3 and does NOT call `_d2a2c_vect` at all.  Hence the
-   cube-vertex gap has zero production-path impact, independent
-   of whether duogrid is enabled.  Locked in by
+   h=3 for `utmp/vtmp`.  Reachability audit: `_d2a2c_vect` is called
+   from (a) `_c_sw` (fv3_sw_core.py:1176) which enters only via the
+   FB chain (`fv3_forward_backward_step` at fv3_sw_core.py:1393;
+   `fv3_fb_sw_step` at fv3_sw_core.py:1828) — that chain is gated
+   behind `config.use_experimental_csw` / FB entry points and is
+   experimental / unstable at C36; and (b) `fv3_csw_tendencies`
+   (fv3_sw_core.py:1290), which `FV3EdgeShallowWaterModel.step`
+   calls only when `CDGridShallowWaterConfig.use_experimental_csw=
+   True` (shallow_water_fv3_cdgrid.py:429-446).  The DEFAULT
+   production config (`use_experimental_csw=False`,
+   `boundary_fix=True`, used by the Williamson test matrix) uses
+   `fv3_sw_tendencies` (operators_cdgrid.py:1458) which follows the
+   Arakawa-Lamb + RK3 path and does NOT call `_d2a2c_vect`.
+   The gap therefore affects only explicitly-opted-in experimental
+   paths (FB chain or `use_experimental_csw=True`), not the default
+   Williamson/production configuration.  Not an absolute
+   unreachability guarantee — it depends on the call graph of the
+   FB entry points and the default `use_experimental_csw=False`.
+   Locked in by
    `test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound`.
 
 The remaining true blockers are the two ARCHITECTURAL items below
