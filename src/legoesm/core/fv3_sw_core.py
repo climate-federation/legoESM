@@ -22,7 +22,6 @@ References
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
@@ -30,10 +29,7 @@ from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.core.operators_cdgrid import (
     _pad_halo_auto,
     cgrid_mass_flux_divergence,
-    dgrid_vorticity,
     _interp_center_to_corner,
-    _arakawa_lamb_gradient,
-    _extrapolate_boundary_corners,
     cgrid_divergence,
 )
 
