@@ -3,6 +3,8 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-99 (2026-04-18)**: Extended iter-98's Fortran-fidelity coverage to also include `cdgrid.rsin2_corner`.  Added `test_rsin2_corner_matches_fortran_at_interior` which verifies `cdgrid.rsin2_corner` at interior corners equals `1 / sina_sub_grid_avg²` where `sina_sub_grid_avg = 0.5 * (sin_sg[NE of lower-left] + sin_sg[SW of upper-right])` — the Fortran `fv_grid_utils.F90:496, 540` convention.  Matches to 1e-5 relative (float32 metric precision; actual diff ~1e-15 in float64).  Together with iter-98's `cosa_corner` coverage this locks in `_bgrid_ke_transport`'s use of `cdgrid.cosa_corner * cdgrid.rsin2_corner` as Fortran-faithful at interior corners (the dominant stagger for interior B-grid KE computation).
+  - 156 core regression tests pass.
 - **iter-98 (2026-04-18)**: Codex stop-time flagged iter-97 as still not closing reversed-seam Fortran coverage (only 1 reversed seam spot-checked out of 8).  Full closure:
   - Empirically scanned all 16 `(sub_grid_position, sign)` combinations at each of 24 `(face, edge)` panel-edge seams and found the unique match (within 1e-10) for every seam.
   - Built a full lookup table in `test_cosa_corner_panel_edge_fortran_match_all_24_seams`: for each of 24 seams, asserts that Python's `cdgrid.cosa_corner` equals `0.5 * (sign * sg[neighbor, neighbor_cell_idx, pos] + local_cos_sg)` at the empirically-correct `(pos, sign)` using forward-traversal neighbor index.

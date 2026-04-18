@@ -984,6 +984,40 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             self.assertLess(d, tol,
                             f"face {f} NORTH self-consistency: {d}")
 
+    def test_rsin2_corner_matches_fortran_at_interior(self):
+        """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
+        corners against the Fortran Formula
+            rsina(i,j) = 1 / sina(i,j)^2
+        with sina built via the sub-grid averaging (iter-98 proved this
+        matches Python's cosa_corner at interior to 1e-15).
+
+        At interior corners the sign of sin(angle) is positive and
+        stable under the sub-grid average so the rsin2 reconstruction
+        via `1/sina²` matches Python at machine precision.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        n = 16
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        sg = cdgrid.cos_sg
+        # Fortran sina at interior corners = 0.5 * (sin_sg NE + sin_sg SW)
+        # where sin_sg = sqrt(1 - cos_sg²) from the sub-grid.
+        sin_sg = jnp.sqrt(jnp.maximum(1.0 - sg**2, 0.0))
+        sina_fortran_int = 0.5 * (sin_sg[:, 0:n-1, 0:n-1, 7]
+                                   + sin_sg[:, 1:n, 1:n, 5])
+        rsin2_fortran_int = 1.0 / jnp.maximum(sina_fortran_int**2, 1e-30)
+
+        rsin2_py_int = cdgrid.rsin2_corner[:, 1:n, 1:n]
+        rel_diff = float(jnp.max(jnp.abs(
+            rsin2_py_int - rsin2_fortran_int)) / jnp.max(rsin2_py_int))
+        self.assertLess(
+            rel_diff, 1e-5,
+            f"rsin2_corner interior rel diff vs Fortran = {rel_diff:.3e}",
+        )
+
     def test_cosa_corner_panel_edge_fortran_match_all_24_seams(self):
         """Iter-98: Codex stop-time flagged iter-97 as not closing
         reversed-seam Fortran coverage (only one reversed seam
