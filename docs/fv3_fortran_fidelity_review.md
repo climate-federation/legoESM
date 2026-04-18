@@ -3,6 +3,13 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-93 (2026-04-18)**: Codex stop-time feedback: iter-92's rewritten test was still too weak because it only verified one seam (face 0 west → face 3 east).  Extended the test to all four panel-edge seams of face 0, each using the CONNECTIVITY-specific halo-cell indexing:
+  - West seam (→ face 3 EAST, not reversed): halo = `sg[3, n-1, 0:n-1, NE]`, divergence 0.449.
+  - East seam (→ face 1 WEST, not reversed): halo = `sg[1, 0, 0:n-1, NW]`, divergence 0.449.
+  - South seam (→ face 5 NORTH, not reversed): halo = `sg[5, 0:n-1, n-1, NE]`, divergence 0.449.
+  - North seam (→ face 4 SOUTH, not reversed): halo = `sg[4, 0:n-1, 0, SE]`, divergence 0.477.
+  All four seams show consistent O(1) divergence (~0.45-0.48) — confirming the gap is not an edge-specific artifact but a genuine coordinate-frame mismatch that the Fortran halo-averaged formula produces at every panel-edge seam.
+  - 153 core tests pass.
 - **iter-92 (2026-04-18)**: Codex stop-time feedback: iter-91's "convention gap" test only asserted Python self-consistency + physical-range bound — it did NOT numerically demonstrate the divergence from Fortran.  Rewrote the test to ACTUALLY compute the Fortran halo-averaged value using real neighbor-face `cos_sg` data (face 0 WEST → face 3 EAST per CONNECTIVITY, not reversed) and assert divergence.
   - Empirical result on C16: along the face-0 west edge, Python's `cdgrid.cosa_corner` ranges from -0.45 to +0.45, while the Fortran halo-averaged formula `0.5*(cos_sg[face 3, n-1, jc-1, NE] + cos_sg[face 0, 0, jc, SW])` evaluates to ~0 across the entire west edge.  Max divergence: 0.448585 (not O(dx²) as I claimed in iter-91 — it's O(1) because the two coordinate frames give opposite-signed angles at the seam).
   - Corrected review-doc entry #5 accordingly: panel-edge convention gap is O(1) at face-boundary corners, not O(dx²).  Python's value is the physically correct single-coordinate-frame angle; Fortran's is a mechanical average that mixes incompatible frames.  For strict Fortran bit-fidelity, Python would need to implement halo exchange of `cos_sg` with cross-face rotation — substantial infrastructure work; flagged as future work.

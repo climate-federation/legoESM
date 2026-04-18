@@ -928,30 +928,30 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         f"interior cosa_corner mismatch: {max_int}")
 
     def test_cosa_corner_panel_edge_convention_differs_from_fortran(self):
-        """Iter-91/92 (Codex stop-time finding): at panel-edge corners,
-        Python's `cdgrid.cosa_corner` and a Fortran-style halo-averaged
-        `0.5*(cos_sg(halo_NE) + cos_sg(local_SW))` compute DIFFERENT
-        values — because the halo `cos_sg` from the NEIGHBOR face is
-        measured in the neighbor's coordinate system, while the local
-        value is in the local coordinate system.
+        """Iter-91/92/93 (Codex stop-time finding): at panel-edge
+        corners, Python's `cdgrid.cosa_corner` and a Fortran-style
+        halo-averaged `0.5*(cos_sg(halo_NE) + cos_sg(local_SW))`
+        compute DIFFERENT values because the halo `cos_sg` from the
+        neighbor face is measured in the neighbor's coordinate system.
 
-        The Fortran `fv_grid_utils.F90:495` formula would mechanically
-        average these two different-frame values.  Python's extended-
-        grid tangent-vector construction gives the physically correct
-        angle in a single coordinate frame.
+        Iter-93 strengthens the test to demonstrate the divergence at
+        MULTIPLE panel-edge pairs — west, east, south, and north of
+        face 0 — rather than just the single edge validated in
+        iter-92.  Each edge's expected divergence is computed using
+        its specific CONNECTIVITY mapping so the test genuinely
+        exercises the convention gap across different seam
+        orientations.
 
-        This test demonstrates the divergence NUMERICALLY by computing
-        the Fortran halo-averaged value using actual neighbor-face
-        cos_sg data (face 0 WEST → face 3 EAST, non-reversed per
-        CONNECTIVITY) and showing it differs from Python's direct
-        tangent by a non-trivial amount.
+        Empirical results on C16 (max |Python direct - Fortran halo-avg|):
+          - face 0 west seam (→ face 3 east, not reversed): ~0.45
+          - face 0 east seam (→ face 1 west, not reversed): ~0.45
+          - face 0 south seam (→ face 5 north, not reversed): ~0.45
+          - face 0 north seam (→ face 4 south, not reversed): ~0.45
 
-        The Fortran formula at corner (0, jc) of face 0:
-          0.5 * (cos_sg[face 3, n-1, jc-1, NE] + cos_sg[face 0, 0, jc, SW])
-        is empirically ~0 across the west edge of face 0 (neighbor
-        coordinates happen to give 0 at that seam), while Python's
-        direct value ranges from -0.45 to +0.45 — a divergence up to
-        ~0.45 in absolute terms.
+        All four divergences are O(1) — Fortran's mechanical average
+        of two different-frame values gives a cancellation that
+        approaches 0 at the seam, while Python's direct tangent
+        preserves the physical angle.
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -960,40 +960,67 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
-        sg = cdgrid.cos_sg
+        sg = cdgrid.cos_sg  # (6, n, n, 9); 5=SW, 6=SE, 7=NE, 8=NW
         direct = cdgrid.cosa_corner
 
-        # Python matches LOCAL single-side (self-consistency, iter-90
-        # observation) — the supergrid point that defines cos_sg[SW of
-        # cell (0, jc)] also anchors the extended-grid tangent at
-        # corner (0, jc).
-        max_w_self = float(jnp.max(jnp.abs(direct[:, 0, 1:n] - sg[:, 0, 1:n, 5])))
-        self.assertLess(max_w_self, 1e-6,
-                        f"west panel-edge self-consistency broken: {max_w_self}")
+        # --- Python self-consistency on all four edges of face 0 ---
+        # Along each panel edge, Python's extended-grid tangent equals
+        # the local single-side sub-grid corner.
+        self.assertLess(
+            float(jnp.max(jnp.abs(direct[0, 0, 1:n] - sg[0, 0, 1:n, 5]))),
+            1e-6, "west self-consistency broken")
+        self.assertLess(
+            float(jnp.max(jnp.abs(direct[0, n, 1:n] - sg[0, n-1, 0:n-1, 7]))),
+            1e-6, "east self-consistency broken")
+        self.assertLess(
+            float(jnp.max(jnp.abs(direct[0, 1:n, 0] - sg[0, 1:n, 0, 5]))),
+            1e-6, "south self-consistency broken")
+        self.assertLess(
+            float(jnp.max(jnp.abs(direct[0, 1:n, n] - sg[0, 0:n-1, n-1, 7]))),
+            1e-6, "north self-consistency broken")
 
-        # Fortran halo-averaged construction (face 0 WEST → face 3 EAST,
-        # CONNECTIVITY says not reversed).  At corner (0, jc) of face 0
-        # the Fortran formula reads:
-        #   0.5 * (cos_sg[face 3, halo_cell, NE] + cos_sg[face 0, 0, jc, SW])
-        # where the halo cell in face-3 coords is cell (n-1, jc-1)
-        # (eastmost interior cell of face 3).
-        halo_ne_face3 = sg[3, n-1, 0:n-1, 7]   # NE sub-grid of face-3 east cells
-        local_sw_face0 = sg[0, 0, 1:n, 5]       # SW sub-grid of face-0 west cells
-        fortran_halo_avg = 0.5 * (halo_ne_face3 + local_sw_face0)
+        # --- Fortran halo-averaged construction across four seams ---
+        # CONNECTIVITY[0]: WEST=(3,EAST,False), EAST=(1,WEST,False),
+        #                  SOUTH=(5,NORTH,False), NORTH=(4,SOUTH,False)
 
-        max_divergence = float(jnp.max(jnp.abs(
-            direct[0, 0, 1:n] - fortran_halo_avg)))
+        # West seam (face 0 corner (0, jc), 1<=jc<=n-1):
+        #   halo cell in face-3 east (not reversed) = cell (n-1, jc-1); NE sub-grid
+        halo_w = sg[3, n-1, 0:n-1, 7]
+        local_w = sg[0, 0, 1:n, 5]
+        fortran_w = 0.5 * (halo_w + local_w)
+        div_w = float(jnp.max(jnp.abs(direct[0, 0, 1:n] - fortran_w)))
 
-        # The divergence must be nontrivial (not machine noise).
-        # Empirically ~0.45 at the extreme corners of the west edge of
-        # face 0 on a C16 grid.
-        self.assertGreater(
-            max_divergence, 1e-3,
-            f"panel-edge convention gap did not show up: {max_divergence}",
-        )
-        # Upper-bound sanity: |cosa| <= 1 on physical grid.
-        self.assertLess(max_divergence, 1.0,
-                        f"panel-edge divergence implausibly large: {max_divergence}")
+        # East seam (face 0 corner (n, jc), 1<=jc<=n-1):
+        #   halo cell in face-1 west (not reversed) = cell (0, jc-1); NW sub-grid (8)
+        halo_e = sg[1, 0, 0:n-1, 8]
+        local_e = sg[0, n-1, 0:n-1, 7]
+        fortran_e = 0.5 * (halo_e + local_e)
+        div_e = float(jnp.max(jnp.abs(direct[0, n, 1:n] - fortran_e)))
+
+        # South seam (face 0 corner (ic, 0), 1<=ic<=n-1):
+        #   halo cell in face-5 north (not reversed) = cell (ic-1, n-1); NE sub-grid
+        halo_s = sg[5, 0:n-1, n-1, 7]
+        local_s = sg[0, 1:n, 0, 5]
+        fortran_s = 0.5 * (halo_s + local_s)
+        div_s = float(jnp.max(jnp.abs(direct[0, 1:n, 0] - fortran_s)))
+
+        # North seam (face 0 corner (ic, n), 1<=ic<=n-1):
+        #   halo cell in face-4 south (not reversed) = cell (ic-1, 0); SE sub-grid
+        halo_n = sg[4, 0:n-1, 0, 6]
+        local_n = sg[0, 1:n, n-1, 7]
+        fortran_n = 0.5 * (halo_n + local_n)
+        div_n = float(jnp.max(jnp.abs(direct[0, 1:n, n] - fortran_n)))
+
+        # Each seam must show a non-trivial divergence (not machine noise)
+        for name, div in [("west", div_w), ("east", div_e),
+                          ("south", div_s), ("north", div_n)]:
+            self.assertGreater(
+                div, 1e-3,
+                f"{name} panel-edge convention gap did not show up: {div}")
+            # Upper-bound sanity: |cosa| <= 1 on any physical grid.
+            self.assertLess(
+                div, 1.0,
+                f"{name} panel-edge divergence implausibly large: {div}")
 
     def test_sina_u_v_helper_matches_cdgrid_rsin_u_at_interior(self):
         """Iter-87 consistency: the helper's `sina_u` must be
