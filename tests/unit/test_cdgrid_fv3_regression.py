@@ -899,6 +899,57 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 f"compute_transport_quantities halo used {kw} "
                 f"instead of duogrid remap on duogrid-active grid")
 
+    def test_c_sw_sin_sg_halos_route_through_duogrid_when_active(self):
+        """Iter-79: `_c_sw` internally pads sin_sg E/W/N/S for the
+        upwind transport-velocity scaling.  Previously these 4 halo
+        exchanges were pinned to `interp_offsets=grid.halo_interp_offsets`.
+        After the iter-79 fix, they must route through the duogrid
+        remap when duogrid is active on the grid.
+
+        `_c_sw` re-imports `pad_halo` from `legoesm.grids.halo` locally,
+        so we patch the source module rather than a module-level symbol.
+        """
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core import fv3_sw_core as fv3_sw_core_mod
+        from legoesm.grids import halo as halo_mod
+
+        n = 8
+        grid_dg = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid_dg = create_cubed_sphere_cdgrid(grid_dg)
+
+        h = jnp.ones((6, n, n)) * 1000.0
+        u_d = jnp.zeros((6, n, n + 1))
+        v_d = jnp.zeros((6, n + 1, n))
+        h_s = jnp.zeros((6, n, n))
+
+        # Record only the sin_sg-shaped halo calls; _c_sw also calls into
+        # _d2a2c_vect_duogrid which uses its own halo paths (ext_vector).
+        sin_sg_calls = []
+        real_pad_halo = halo_mod.pad_halo
+
+        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+            # sin_sg fields are (6, n, n) cell-centre scalars
+            if (hasattr(q, 'shape') and q.shape == (6, n, n) and halo == 1):
+                sin_sg_calls.append(
+                    ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
+                     'duogrid_none' if duogrid is None else 'duogrid_set'))
+            return real_pad_halo(q, halo=halo,
+                                 interp_offsets=interp_offsets,
+                                 duogrid=duogrid)
+
+        with mock.patch.object(halo_mod, 'pad_halo', recording):
+            fv3_sw_core_mod._c_sw(h, u_d, v_d, h_s, cdgrid_dg, dt=300.0, g=9.81)
+
+        # Expect at least the 4 sin_sg E/W/N/S halos that iter-79 fixed.
+        self.assertTrue(len(sin_sg_calls) >= 4,
+                        f"_c_sw made too few sin_sg halo calls: {len(sin_sg_calls)}")
+        for kw in sin_sg_calls:
+            self.assertEqual(
+                kw, ('interp_offsets_none', 'duogrid_set'),
+                f"_c_sw sin_sg halo used {kw} instead of duogrid remap")
+
     def test_deln_flux_routes_halo_through_duogrid_when_active(self):
         """Iter-78: `_deln_flux` previously pinned its internal halo to
         `interp_offsets=grid.halo_interp_offsets` even when duogrid was
