@@ -886,6 +886,7 @@ def packed_pad_halo_mpi_4d(
     *fields: jax.Array,
     topology: CommTopology,
     halo: int = 1,
+    duogrid=None,
 ) -> list[jax.Array]:
     """Exchange halos for multiple 4D fields in a single MPI round.
 
@@ -896,12 +897,21 @@ def packed_pad_halo_mpi_4d(
     All fields must share the same ``(6, n, n)`` spatial prefix.
     The trailing axis (levels/channels) can differ.
 
+    When ``duogrid`` is provided, applies the duogrid kinked-to-extended
+    remap to each output field after the packed MPI exchange, matching
+    the behaviour of unpacked ``pad_halo_4d(duogrid=dg)``.  This closes
+    the silent non-duogrid halo gap that the Codex stop-time review
+    flagged in iter-83.
+
     Parameters
     ----------
     *fields : jax.Array
         4D arrays of shape ``(6, n, n, C_i)``.
     topology : CommTopology
     halo : int
+    duogrid : DuoGridData or None
+        Duo-Grid remapping data. When provided, the post-exchange
+        kinked-to-extended remap + corner fill is applied per field.
 
     Returns
     -------
@@ -911,11 +921,35 @@ def packed_pad_halo_mpi_4d(
     if not fields:
         return []
     if len(fields) == 1:
-        return [pad_halo_mpi_4d(fields[0], topology, halo)]
+        padded = pad_halo_mpi_4d(fields[0], topology, halo)
+        if duogrid is not None:
+            padded = _apply_duogrid_4d(padded, duogrid, halo)
+        return [padded]
 
     splits = [f.shape[-1] for f in fields]
     stacked = jnp.concatenate(fields, axis=-1)
     padded = pad_halo_mpi_4d(stacked, topology, halo)
     import numpy as _np
     split_indices = list(_np.cumsum(splits[:-1]))
-    return list(jnp.split(padded, split_indices, axis=-1))
+    pieces = list(jnp.split(padded, split_indices, axis=-1))
+    if duogrid is not None:
+        pieces = [_apply_duogrid_4d(p, duogrid, halo) for p in pieces]
+    return pieces
+
+
+def _apply_duogrid_4d(padded, duogrid, halo):
+    """Apply the duogrid kinked-to-extended remap + corner fill to a 4D
+    padded field, level-by-level via ``jax.vmap``.  Mirrors the
+    post-processing loop inside ``halo.pad_halo_4d``.
+    """
+    from legoesm.grids.duogrid import cube_rmp_vectorized, fill_corner_region
+    import jax
+
+    def _remap_level(level_slice):
+        level_slice = cube_rmp_vectorized(level_slice, duogrid, halo)
+        level_slice = fill_corner_region(level_slice, duogrid, halo)
+        return level_slice
+
+    padded_t = jnp.transpose(padded, (3, 0, 1, 2))  # (nlev, 6, ...)
+    padded_t = jax.vmap(_remap_level)(padded_t)
+    return jnp.transpose(padded_t, (1, 2, 3, 0))

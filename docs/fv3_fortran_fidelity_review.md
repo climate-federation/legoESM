@@ -3,6 +3,12 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-84 (2026-04-18)**: Made packed halo functions themselves duogrid-aware instead of requiring callers to skip them.  Codex's iter-83 finding pointed at an infrastructure-level gap, not just a PE-caller bug.  This iteration closes that gap at the source:
+  - `packed_pad_halo_mpi_4d` (halo_exchange.py:885): added `duogrid=None` kwarg. When provided, applies the kinked-to-extended remap + corner fill level-by-level via `jax.vmap` after the MPI exchange, mirroring the post-processing loop inside `halo.pad_halo_4d:559-573`.
+  - `packed_pad_halo_4d` (cubesphere_exchange.py:446, SPMD): same `duogrid=None` kwarg with the same post-processing helper.
+  - PE caller now passes `duogrid=_pe_dg` through both packed call sites, removing the iter-83 workaround where duogrid mode fell out of the packed path.
+  - Result: the packed MPI/SPMD path is now equivalent to unpacked `pad_halo_4d(duogrid=dg)` while retaining the one-collective optimisation.  Non-duogrid runs are unchanged.
+  - 40 PE + 145 core/cdgrid/duogrid tests pass. SW matrix metrics unchanged.
 - **iter-83 (2026-04-18)**: Codex stop-time review flagged that iter-82 still bypassed duogrid in the MPI packed halo path.  Root cause: `packed_pad_halo_mpi_4d` (and `packed_pad_halo_4d` for SPMD) does NOT apply the duogrid kinked-to-extended remap — it only does basic MPI/SPMD halo exchange.  Only the unpacked `pad_halo_4d` path applies duogrid post-processing (halo.py:559-573 for 4D, 495-499 for 2D).
   - Fix: both packed-halo call sites (ζ/B/inv_T pack at line 233, T/u_cell/v_cell pack at line 362) now skip the packed MPI/SPMD path when `grid.duogrid is not None` and fall through to either per-field `pad_halo_4d(duogrid=dg)` or `None` pre-pads (operators do their own duogrid-aware halo).
   - Trade-off: 3 messages/stage instead of 1 when duogrid+MPI distributed runs.  Acceptable because duogrid distributed runs are not yet performance-critical.  Non-duogrid MPI remains fully optimised.
