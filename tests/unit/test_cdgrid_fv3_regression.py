@@ -1041,81 +1041,113 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         )
 
     def test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound(self):
-        """Iter-128 (Priority 3): concrete architectural bound on the gap.
+        """Iter-128 (Priority 3): guard the halo-depth invariant that
+        locks out the deepest Fortran cube-vertex override.
 
-        Fortran sw_core.F90:3527-3545 writes `utmp(-2..0, 0)` = three
-        halo cells spanning corner-halo depth (west=3..1, south=1).
-        Python's `pad_halo_vector` uses halo=2, producing utmp_pad
-        with corner-halo depth (west=2..1, south=2..1) — i.e., only
-        TWO depths per axis, not three.
+        Fortran sw_core.F90:3527-3545 writes `utmp(-2..0, 0)` at three
+        halo cells (depths 1, 2, 3 west of interior).  Porting the
+        deepest cell (i=-2, depth 3) requires Python's `_d2a2c_vect`
+        non-duogrid path to allocate at least halo=3 when calling
+        `pad_halo_vector` on utmp/vtmp.
 
-        Concrete architectural limit:
-          - Fortran writes 3 cells per corner per axis (6 corners × 4
-            cube-corner-faces × 2 axes × 3 depths = 144 halo cells).
-          - Python h=2 can represent only 2 cells per corner per axis
-            (96 halo cells).
-          - 48 halo cells (the i=-2 / j=-2 deepest overrides) CANNOT
-            be ported without extending the halo to h=3.
-
-        Since the non-duogrid path is never executed in production
-        (duogrid is always active with ng>=2 and `_d2a2c_vect`
-        dispatches to `_d2a2c_vect_duogrid` matching the Fortran
-        `dg%is_initialized` gate), the gap has zero production impact.
-
-        This test locks in the architectural accounting so future
-        work to expand halo depth (e.g., the FB-path C36 stability
-        project) can reference concrete cell counts.
+        This test PROBES the actual halo depth used by `_d2a2c_vect`
+        — by inspecting the source for the `halo=` keyword passed to
+        `pad_halo_vector`, and by calling `_d2a2c_vect` itself on a
+        small-n grid and checking the output halo shape indirectly via
+        the cdgrid metric shapes.  If someone bumps the halo to >=3,
+        this test FAILS, prompting the author to port the deepest
+        Fortran cube-vertex overrides rather than silently leaving
+        them unported with newly-available halo depth.
         """
+        import ast
+        import inspect
+        from legoesm.core import fv3_sw_core
+        from legoesm.core.fv3_sw_core import _d2a2c_vect
+
+        # Probe the actual halo depth used by `_d2a2c_vect` by parsing
+        # its source.  Accept either `halo=<int>` directly or
+        # `halo=<name>` with `<name> = <int>` assigned earlier in
+        # the function body.
+        src = inspect.getsource(_d2a2c_vect)
+        tree = ast.parse(src).body[0]  # FunctionDef
+        # First, build a map of simple int assignments `name = <int>`.
+        int_locals: dict[str, int] = {}
+        for stmt in ast.walk(tree):
+            if (isinstance(stmt, ast.Assign)
+                    and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Name)
+                    and isinstance(stmt.value, ast.Constant)
+                    and isinstance(stmt.value.value, int)):
+                int_locals[stmt.targets[0].id] = int(stmt.value.value)
+        halo_values: list[int] = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "pad_halo_vector"):
+                for kw in node.keywords:
+                    if kw.arg != "halo":
+                        continue
+                    if isinstance(kw.value, ast.Constant):
+                        halo_values.append(int(kw.value.value))
+                    elif (isinstance(kw.value, ast.Name)
+                          and kw.value.id in int_locals):
+                        halo_values.append(int_locals[kw.value.id])
+        self.assertGreaterEqual(
+            len(halo_values), 1,
+            "Could not resolve `pad_halo_vector(..., halo=...)` to an "
+            "integer literal inside `_d2a2c_vect`.  The priority-3 "
+            "architectural guard cannot probe the halo depth — update "
+            "the test to match the current implementation.",
+        )
+        actual_halo = halo_values[0]
+
+        # The Fortran deepest override cell sits at depth 3 west of
+        # interior (utmp(i=-2, j=0) reads `vtmp(0, 3)` and writes a
+        # halo cell three deep).  See sw_core.F90:3528-3530 and the
+        # analogous y-direction write at sw_core.F90:3620-3622.
+        fortran_deepest_depth = 3
+
+        # PRIMARY INVARIANT: the actual halo depth in Python is
+        # strictly less than Fortran's deepest override depth.  This
+        # is what MAKES the deepest cell unrepresentable.
+        self.assertLess(
+            actual_halo, fortran_deepest_depth,
+            f"`_d2a2c_vect` now uses halo={actual_halo} >= Fortran's "
+            f"deepest override depth {fortran_deepest_depth}.  The "
+            f"architectural limitation no longer applies — port the "
+            f"Fortran cube-vertex overrides (sw_core.F90:3527-3545, "
+            f"3620-3640) and update this test.",
+        )
+
+        # SECONDARY invariant: halo must be at least 1 for edge_interpolate4
+        # at face boundaries to work at all (sw_core.F90:3587).  If this
+        # drops below 1, non-duogrid _d2a2c_vect is broken entirely.
+        self.assertGreaterEqual(
+            actual_halo, 1,
+            f"`_d2a2c_vect` halo={actual_halo} < 1: edge_interpolate4 "
+            f"at face boundaries cannot operate without at least "
+            f"halo=1.",
+        )
+
+        # Verify by direct call that _d2a2c_vect produces outputs with
+        # shapes consistent with the probed halo depth.  The cdgrid
+        # uses halo=2 metrics (cos/sin_angle_padded_h2) regardless of
+        # the `halo=` arg, so the ua/va output shape is (6, n, n),
+        # NOT (6, n+2h, n+2h).  Calling _d2a2c_vect exercises the
+        # pad_halo_vector call and fails at graph-trace time if the
+        # halo arg is inconsistent with the metric shape, giving us
+        # end-to-end verification of the probed constant.
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.grids.halo import pad_halo_vector
-
         n = 12
         grid = create_cubed_sphere(n, use_duogrid=False)
         cdgrid = create_cubed_sphere_cdgrid(grid)
-
-        # Smooth solid-body utmp/vtmp from the cell-centre geographic
-        # velocities (a realistic non-duogrid input shape).
-        rng = jnp.arange(6 * n * n, dtype=jnp.float64).reshape((6, n, n))
-        utmp = jnp.sin(rng / 47.0)
-        vtmp = jnp.cos(rng / 53.0)
-        h = 2
-        utmp_pad, vtmp_pad = pad_halo_vector(
-            utmp, vtmp,
-            grid.cos_angle, grid.sin_angle,
-            grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
-            interp_offsets=grid.halo_interp_offsets,
-            halo=h,
-        )
-        self.assertEqual(utmp_pad.shape, (6, n + 2 * h, n + 2 * h),
-                         f"unexpected utmp_pad shape {utmp_pad.shape}; "
-                         f"halo convention changed — reconsider bound.")
-
-        # Architectural fact #1: Python halo depth = h = 2.
-        self.assertEqual(h, 2,
-                         "Python cdgrid non-duogrid _d2a2c_vect uses "
-                         "halo=2.  If this changes to h=3, the Fortran "
-                         "cube-vertex override becomes fully portable.")
-
-        # Architectural fact #2: Fortran needs halo depth 3 for the
-        # deepest override (utmp(-2, 0) and vtmp(0, -2)).
-        fortran_deepest_depth = 3
-        self.assertGreater(
-            fortran_deepest_depth, h,
-            f"Fortran override depth {fortran_deepest_depth} exceeds "
-            f"Python halo {h}: the deepest halo cell cannot be "
-            f"represented without extending the halo.",
-        )
-
-        # Architectural fact #3: portable fraction per corner-axis.
-        portable_cells_per_corner_axis = h       # depths 1..h
-        total_cells_per_corner_axis = fortran_deepest_depth   # depths 1..3
-        portable_fraction = portable_cells_per_corner_axis / total_cells_per_corner_axis
-        self.assertAlmostEqual(
-            portable_fraction, 2.0 / 3.0, places=10,
-            msg="Architectural portable fraction changed — reconsider "
-                "the priority-3 bound.",
-        )
+        u_d = jnp.zeros((6, n, n + 1))
+        v_d = jnp.zeros((6, n + 1, n))
+        ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
+        self.assertEqual(ua.shape, (6, n, n))
+        self.assertEqual(uc.shape, (6, n + 1, n))
+        self.assertEqual(vc.shape, (6, n, n + 1))
 
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
