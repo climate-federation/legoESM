@@ -902,6 +902,33 @@ class TestBgridNeCornerSync:
         np.testing.assert_allclose(np.array(u_sync[5, 1:n, n]), 20.0)
         np.testing.assert_allclose(np.array(v_sync[5, 1:n, n]), 10.0)
 
+    def test_cross_axis_non_reversed_seam_also_skipped(self):
+        """Iter-101 (Codex correction): the helper also skips the 4
+        non-reversed CROSS-AXIS seams (W/E ↔ S/N type), not just
+        reversed seams.  These are face 1 NORTH ↔ face 4 EAST,
+        face 3 SOUTH ↔ face 5 WEST, and their symmetric counterparts.
+
+        Lock this in so future code doesn't silently treat these as
+        "handled" without an i/j-swap rotation.
+        """
+        import jax.numpy as jnp
+        from legoesm.grids.halo import synchronize_bgrid_ne_corner
+
+        n = 8
+        u = jnp.zeros((6, n+1, n+1))
+        v = jnp.zeros((6, n+1, n+1))
+
+        # face 1 NORTH edge (jc = n): cross-axis with face 4 EAST (ic=n)
+        u = u.at[1, :, n].set(100.0)
+        v = v.at[1, :, n].set(200.0)
+
+        u_sync, v_sync = synchronize_bgrid_ne_corner(u, v, n)
+
+        import numpy as np
+        # Interior of face 1 NORTH (ic=1..n-1) should be untouched
+        np.testing.assert_allclose(np.array(u_sync[1, 1:n, n]), 100.0)
+        np.testing.assert_allclose(np.array(v_sync[1, 1:n, n]), 200.0)
+
     def test_reversed_seams_untouched_at_edge_interior(self):
         """At reversed seams (e.g. face 1 SOUTH ↔ face 5 EAST), the
         helper leaves INTERIOR-of-edge boundary values unchanged

@@ -1598,23 +1598,30 @@ def synchronize_bgrid_ne_corner(u, v, n):
     gridtype=BGRID_NE)` exchange used in `dyn_core.F90:984-1006` (d_sw3
     pre-KE sync).
 
-    Convention for non-reversed seams (the common case on a cubed-
-    sphere):
-      - W ↔ E: i-axis of neighbor points OPPOSITE to local i-axis at
-        the seam, so the `u` component (x in face-local) flips sign
-        when copied across.  `v` (y in face-local) is preserved.
-      - S ↔ N: j-axis flips, so `v` flips sign.  `u` preserved.
-      - Cross-axis seams (W↔N, W↔S, E↔N, E↔S, S↔S, N↔N): i/j swap
-        with possible sign flips.  Currently handled conservatively:
-        the average is left as-is (no rotation) for reversed seams;
-        the resulting error is localized to the 8 reversed-seam edges
-        and is O(1) at face-corner metric mismatch but does not affect
-        interior-dominated diagnostics.
+    Scope (12 of 24 panel-edge seams handled; 12 skipped — see below):
+      - W ↔ E (non-reversed, same-axis): i-axis of neighbor points
+        OPPOSITE to local i-axis at the seam, so `u` (x in face-local)
+        flips sign when copied across.  `v` (y) is preserved.
+        Handles: face 0 W/E, face 1 W/E, face 2 W/E, face 3 W/E (8).
+      - S ↔ N (non-reversed, same-axis): j-axis flips, so `v` flips
+        sign.  `u` preserved.
+        Handles: face 0 S/N, face 4 S, face 5 N (4).
 
-    The cube-vertex corners (3 faces meeting) are NOT averaged here —
-    those would require a separate 3-face average and are typically
-    handled by downstream operators (e.g., vorticity flux corrections
-    in `_corner_vorticity`).
+    Documented limitations (12 seams skipped):
+      - 8 reversed seams per CONNECTIVITY (face 1 S ↔ face 5 E rev;
+        face 2 S ↔ face 5 S rev; face 2 N ↔ face 4 N rev; face 3 N ↔
+        face 4 W rev; and the 4 symmetric counterparts on faces 4, 5).
+      - 4 non-reversed cross-axis seams (W ↔ S/N or E ↔ S/N type)
+        that require i/j-swap rotation plus sign flips:
+        face 1 N ↔ face 4 E; face 3 S ↔ face 5 W; face 4 E ↔ face 1 N
+        (same seam, opposite face); face 5 W ↔ face 3 S.
+
+    Implementing the skipped seams requires per-seam i/j-swap lookup
+    tables.  The current helper handles the common "axis-preserving"
+    seams that dominate the d_sw3 KE sync on most of the cubed sphere.
+    Cube-vertex corners (where 3 faces meet) are also skipped — those
+    require a separate 3-face average pass analogous to
+    `synchronize_corner_scalar`'s Pass 2.
 
     Parameters
     ----------
@@ -1627,7 +1634,8 @@ def synchronize_bgrid_ne_corner(u, v, n):
     Returns
     -------
     u_sync, v_sync : jax.Array, shape (6, n+1, n+1)
-        Fields with BGRID_NE-synced boundary values.
+        Fields with BGRID_NE-synced boundary values at the 12 handled
+        seams; other seams / cube vertices unchanged.
     """
     # Compute all boundary averages from the ORIGINAL (pre-sync)
     # values to avoid read-after-write ordering effects.

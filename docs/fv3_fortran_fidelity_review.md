@@ -3,11 +3,11 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
-- **iter-100 (2026-04-18)**: Started on user's Priority 2 (d_sw3 BGRID_NE component sync).  Added `synchronize_bgrid_ne_corner(u, v, n)` helper in `halo.py` that implements the vector-component averaging at corner-stagger cube-face seams matching Fortran `mpp_get_boundary(..., gridtype=BGRID_NE)` used in `dyn_core.F90:984-1006`.
-  - Scope for this iteration: non-reversed W↔E and S↔N seams with proper sign-flip rotation (u-flip at W/E, v-flip at S/N).  Reversed seams (8 of 24) and cube-vertex corners remain documented limitations — they require either a 3-face cube-vertex average pass or per-seam i/j-swap rotation tables similar to the iter-98 cos_sg analysis.
-  - Added 3 regression tests in `TestBgridNeCornerSync`: verify sign-flip semantics on W↔E seam, on S↔N seam, and that reversed-seam interior values remain unchanged.  All pass.
-  - Not yet wired into `_bgrid_ke_transport` — the helper is ready for future integration, but scalar KE sync remains the default (documented commented-out-alternative from Fortran `dyn_core.F90:1029-1055`).
-  - 159 cdgrid/duogrid/fv3_regression tests pass.
+- **iter-101 (2026-04-18)**: Codex stop-time correction: iter-100 overclaimed the helper's scope.  Actual count of handled seams is **12 of 24**, not 16.  Corrected docstring and added a regression test `test_cross_axis_non_reversed_seam_also_skipped` that pins down the skip of 4 non-reversed cross-axis seams (W/E ↔ S/N pattern: face 1 N ↔ face 4 E; face 3 S ↔ face 5 W; plus 2 symmetric counterparts).
+  - Handled (12): face 0 W/E/S/N (4); face 1/2/3 W/E (6); face 4 S; face 5 N.
+  - Skipped (12): 8 reversed seams + 4 cross-axis non-reversed seams.  Cross-axis seams require i/j-swap rotation (u ↔ v) with sign flips.
+  - 4 BGRID_NE tests now pass (up from 3).
+- **iter-100 (2026-04-18)**: Started on user's Priority 2 (d_sw3 BGRID_NE component sync).  Added `synchronize_bgrid_ne_corner(u, v, n)` helper in `halo.py`.  *(Iter-101 corrects the 16→12 scope overclaim in the iter-100 docstring and review doc.)*
 - **iter-99 (2026-04-18)**: Extended iter-98's Fortran-fidelity coverage to also include `cdgrid.rsin2_corner`.  Added `test_rsin2_corner_matches_fortran_at_interior` which verifies `cdgrid.rsin2_corner` at interior corners equals `1 / sina_sub_grid_avg²` where `sina_sub_grid_avg = 0.5 * (sin_sg[NE of lower-left] + sin_sg[SW of upper-right])` — the Fortran `fv_grid_utils.F90:496, 540` convention.  Matches to 1e-5 relative (float32 metric precision; actual diff ~1e-15 in float64).  Together with iter-98's `cosa_corner` coverage this locks in `_bgrid_ke_transport`'s use of `cdgrid.cosa_corner * cdgrid.rsin2_corner` as Fortran-faithful at interior corners (the dominant stagger for interior B-grid KE computation).
   - 156 core regression tests pass.
 - **iter-98 (2026-04-18)**: Codex stop-time flagged iter-97 as still not closing reversed-seam Fortran coverage (only 1 reversed seam spot-checked out of 8).  Full closure:
