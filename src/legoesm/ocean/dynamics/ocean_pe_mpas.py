@@ -233,18 +233,19 @@ def mpas_ocean_baroclinic_tendencies(
     # Full nonlinear momentum tendency
     du_dt_full = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask[:, jnp.newaxis]
 
+    # Bottom drag on full velocity (not perturbation) — the ocean floor
+    # sees the total flow.  Applied before F_slow_u computation so the
+    # depth-averaged drag enters the barotropic solver via slow forcing.
+    if config.bottom_drag_r > 0:
+        du_dt_full = du_dt_full.at[:, -1].add(
+            -config.bottom_drag_r * u_3d[:, -1] * edge_mask)
+
     # Depth-mean → slow forcing for barotropic solver
     F_slow_u = jnp.sum(du_dt_full * h_e_3d, axis=1) / jnp.maximum(H_e, 1e-10)
     F_slow_u = F_slow_u * edge_mask  # (nEdges,)
 
     # Baroclinic perturbation = full minus depth-mean
     du_dt_3d = (du_dt_full - F_slow_u[:, jnp.newaxis]) * edge_mask[:, jnp.newaxis]
-
-    # Bottom drag on full velocity (not perturbation) — the ocean floor
-    # sees the total flow.  Consistent with lat-lon C-grid and MOM6.
-    if config.bottom_drag_r > 0:
-        du_dt_3d = du_dt_3d.at[:, -1].add(
-            -config.bottom_drag_r * u_3d[:, -1] * edge_mask)
 
     # ---- Tracer tendencies (diffusion + physics only) ----
     # Horizontal AND vertical tracer advection are handled in the step()
