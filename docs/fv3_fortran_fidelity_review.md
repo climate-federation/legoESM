@@ -214,6 +214,19 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-166 (2026-04-19)**: final cross-check of the
+  `_edge_interpolate4` stencil at face boundaries in
+  `_d2a2c_vect` (fv3_sw_core.py:527).  `grid.dx` is padded with
+  `mode='edge'` before being used as `dxa4` in the 4-point stencil.
+  Fortran uses actual halo `dxa` from the adjacent face
+  (sw_core.F90:3587).  On a smooth cubed-sphere metric the
+  difference is O(Δα²), well below the O(Δα⁴) truncation error of
+  the 4-point stencil itself.  The pad is inside the non-duogrid
+  `_d2a2c_vect` branch (iter-129 tripwire test confirms the
+  default production path does not reach this code), so even this
+  small deviation has no production impact.  Not fixed; recorded
+  here for the audit trail.
+
 - **iter-165 (2026-04-19)**: end of iter-128..164 Ralph session.
   Final session summary: 42 commits across iter-128 through
   iter-164 (including followup / addendum commits); net diff
