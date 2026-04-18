@@ -1610,25 +1610,41 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1)
     transported_x = _ppm_transport_1d(u_d, ub, rdx, axis=1)
 
-    # --- Step 5: KE at corners (Lin-Rood average of two sweeps) ---
-    # FV3 dyn_core.F90:1013-1020:
-    #   kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)
-    ke_corner = 0.5 * (transported_y * vb + ub * transported_x)
-
-    # --- Step 6: Boundary KE sync for duogrid ---
-    # FV3 syncs the transport COMPONENTS (ubb, vbbtemp) via BGRID_NE vector
-    # exchange (dyn_core.F90:969-1011) BEFORE computing KE.  The MPI BGRID_NE
-    # exchange handles the full vector rotation at cross-axis face boundaries.
-    # Our single-process 6-face representation lacks this rotation infrastructure,
-    # so component-level sync at cross-axis boundaries would corrupt the values.
-    # Instead, sync the SCALAR KE directly at face boundaries.  The Fortran has
-    # this as a commented-out alternative (dyn_core.F90:1029-1055) which achieves
-    # the same conservation goal: KE_A = KE_B = 0.5*(KE_A+KE_B) at shared corners.
+    # --- Step 5: Fortran-faithful BGRID_NE component sync (dyn_core.F90:968-1019) ---
+    # Fortran syncs ubb (x-component) and vbbtemp (y-component) via
+    # `mpp_get_boundary(..., gridtype=BGRID_NE)` BEFORE computing KE so that
+    # shared cube-face corners agree on the transported vector values.
+    #
+    # Python realises the same sync via `synchronize_bgrid_ne_corner_geo`
+    # (iter-102), which routes the vector average through the geographic
+    # frame — this avoids having to encode per-seam rotation tables for the
+    # 8 reversed seams, 4 cross-axis non-reversed seams, and the 8 cube
+    # vertices.  On duogrid-enabled grids this replaces the previous
+    # scalar-KE sync (Fortran commented-out alternative, dyn_core.F90:1029-1055).
     dg = cdgrid.base.duogrid
     use_duogrid = dg is not None and dg.ng >= 2
+    # Name the intermediates to match Fortran convention:
+    #   ubbtemp = ytp_v output = transported_y
+    #   vbbtemp = y-Courant scalar = vb
+    #   ubb     = x-Courant scalar = ub
+    #   vbb     = xtp_u output = transported_x
+    ubbtemp = transported_y
+    vbbtemp = vb
+    ubb = ub
+    vbb = transported_x
     if use_duogrid:
-        from legoesm.grids.halo import synchronize_corner_scalar
-        ke_corner = synchronize_corner_scalar(ke_corner, n)
+        from legoesm.grids.halo import synchronize_bgrid_ne_corner_geo
+        cac = cdgrid.cos_angle_corner
+        sac = cdgrid.sin_angle_corner
+        # Fortran BGRID_NE call syncs (tempfx1=ubb, tempfy1=vbbtemp) as a
+        # single vector exchange.  Route through the geographic frame.
+        ubb, vbbtemp = synchronize_bgrid_ne_corner_geo(
+            ubb, vbbtemp, cac, sac, n)
+
+    # --- Step 6: KE at corners (Lin-Rood average of two sweeps) ---
+    # FV3 dyn_core.F90:1013-1020:
+    #   kee = 0.5*(ubbtemp*vbbtemp + ubb*vbb)
+    ke_corner = 0.5 * (ubbtemp * vbbtemp + ubb * vbb)
 
     return ke_corner
 
