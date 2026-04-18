@@ -420,7 +420,7 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
 
 def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
-    omega: float = 7.292e-5,
+    omega: float | None = None,
     metric_dtype=None,
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
@@ -429,8 +429,11 @@ def create_cubed_sphere_cdgrid(
     ----------
     base : CubedSphereGrid
         cell-centre cubed-sphere with cell-center metrics.
-    omega : float
-        Planetary rotation rate [rad/s].
+    omega : float or None
+        Planetary rotation rate [rad/s].  If ``None`` (default), the
+        effective omega is inferred from ``base.f`` and ``base.sin_lat``
+        so that `cdgrid.f_corner` is consistent with `base.f` under
+        small-earth scaling (see ``scale_cubed_sphere_metrics``).
     metric_dtype : dtype or None
         Dtype for corner-critical metrics (gradient matrix, rsin, rarea,
         cosa, sin_sg, dxc/dyc).  Defaults to float32.
@@ -630,6 +633,16 @@ def create_cubed_sphere_cdgrid(
     from legoesm.grids.halo import pad_halo, _fill_corners_h1
     area_corner = area_c_sg  # (6, n+1, n+1)
 
+    # Infer omega from base.f when not explicitly provided so that
+    # `cdgrid.f_corner` remains consistent with `base.f` under any
+    # rescaling (e.g. `small_earth_factor` in NH model tests).  Use
+    # the cell with the largest |sin(lat)| for numerical stability.
+    if omega is None:
+        flat_abs_sl = jnp.abs(base.sin_lat).reshape(-1)
+        idx = int(jnp.argmax(flat_abs_sl))
+        f_probe = base.f.reshape(-1)[idx]
+        sl_probe = base.sin_lat.reshape(-1)[idx]
+        omega = float(f_probe / (2.0 * sl_probe))
     f_corner = 2.0 * omega * jnp.sin(lat_corner)
     cos_angle_corner = jnp.cos(angle_corner)
     sin_angle_corner = jnp.sin(angle_corner)

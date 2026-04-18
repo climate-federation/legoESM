@@ -64,6 +64,31 @@ class TestCDGridConstruction(unittest.TestCase):
             max_f = float(jnp.max(f_equator))
             self.assertLess(max_f, 2e-5)
 
+    def test_f_corner_matches_base_f_under_small_earth_scaling(self):
+        """f_corner must track base.f when omega is scaled (e.g. small-earth).
+
+        Regression test for the iter-77 fix that infers omega from base.f
+        rather than hardcoding Earth's value.  Without this fix, a
+        small-earth-scaled grid would have ``base.f`` scaled by `factor`
+        but ``cdgrid.f_corner`` still at Earth's omega, leading to
+        inconsistent Coriolis at cell centres vs corners.
+        """
+        from legoesm.grids.cubed_sphere import apply_small_earth_scaling
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+        factor = 120.0
+        grid_scaled = apply_small_earth_scaling(self.grid, factor)
+        cdgrid_scaled = create_cubed_sphere_cdgrid(grid_scaled)
+
+        ratio_base = (float(jnp.max(jnp.abs(grid_scaled.f)))
+                      / float(jnp.max(jnp.abs(self.grid.f))))
+        ratio_corner = (float(jnp.max(jnp.abs(cdgrid_scaled.f_corner)))
+                        / float(jnp.max(jnp.abs(self.cdgrid.f_corner))))
+        self.assertAlmostEqual(ratio_base, factor, places=2)
+        self.assertAlmostEqual(ratio_corner, factor, places=2)
+        # The two ratios must agree exactly (both derived from same omega)
+        self.assertAlmostEqual(ratio_base, ratio_corner, places=4)
+
     def test_n_and_radius_properties(self):
         self.assertEqual(self.cdgrid.n, self.n)
         self.assertEqual(self.cdgrid.radius, self.grid.radius)
