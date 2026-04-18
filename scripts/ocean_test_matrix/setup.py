@@ -222,8 +222,14 @@ def _create_ocean_setup(tc, nlev: int | None = None,
         kw = dict(n_barotropic_substeps=30, physics=physics)
         if A_h is not None:
             kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
         if A_v is not None:
             kw["A_v"] = A_v
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
         if eos is not None:
             kw["eos"] = eos
         if eos_linear is not None:
