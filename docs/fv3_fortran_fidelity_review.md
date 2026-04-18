@@ -200,6 +200,33 @@ Latest iteration work:
     Fortran overrides will fail the architectural-bound test with a
     direct pointer to sw_core.F90:3527-3545 / 3620-3640.
 
+- **iter-149..151 (2026-04-18)**: fixed canonical TPU bootstrap crash on
+  JAX 0.9.x.  Not FV3-scope, but a latent runtime bug surfaced during
+  the audit of `jax.config.update(...)` call sites.
+  - **iter-149** (`6c56630`): removed the
+    `jax.config.update("jax_spmd_mode", "allow_all")` update in
+    `parallel/device_config._configure_tpu` multi-host branch.
+    The legacy `jax_spmd_mode='allow_all'` toggle was removed in the
+    JAX 0.9 unified-sharding migration and the update now raises
+    `AttributeError: Unrecognized config option: jax_spmd_mode`.
+  - **iter-150** (`9828a1d`): Codex stop-time review caught a second
+    copy of the same update in `runtime/backend.configure_backend('tpu')`
+    — the canonical runtime entry point.  Removed that too; replaced
+    with an explanatory NOTE comment.  Both multi-host bootstrap
+    paths now run clean on JAX 0.9.x.
+  - **iter-151** (`4da6dbf`): Codex stop-time review requested a
+    regression test.  Added
+    `test_configure_tpu_multihost_does_not_crash_on_jax_0_9` which
+    mocks `jax.process_count() → 2` and asserts both
+    `runtime.backend.configure_backend("tpu")` and
+    `parallel.device_config.configure_jax_for_device(
+    HardwareConfig(num_hosts=2, ...))` do not raise.  Also
+    line-scans both source files for executable (non-comment)
+    `jax.config.update(..., 'jax_spmd_mode', ...)` references to
+    catch re-introduction via copy-paste, letting explanatory NOTE
+    comments remain.  Verified effective by local injection
+    experiment.
+
 - **iter-140..147 (2026-04-18)**: codebase hygiene — removed dead code and
   deprecation warnings surfaced during the FV3-fidelity-audit cycle.
   - **iter-140** (`cb5d2bb`): removed legacy `synchronize_bgrid_ne_corner`
