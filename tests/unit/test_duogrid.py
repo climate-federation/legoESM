@@ -1077,6 +1077,38 @@ class TestBgridNeCornerSync:
             f"boundary-localized claim."
         )
 
+        # (d) CONCLUSIVE ACTIVITY CHECK: mock the component-sync helper
+        # to a no-op and verify the output changes.  This directly
+        # proves iter-103's wiring is active, distinct from the
+        # (b) comparison against the scalar-sync control above which
+        # could also be satisfied by a NO-SYNC path.
+        from unittest import mock
+        from legoesm.core import fv3_sw_core as fv3_sw_core_mod
+
+        def _no_op_sync(u, v, cos_ang_c, sin_ang_c, n):
+            # Return inputs unchanged — pretend the sync is absent.
+            return u, v
+
+        # `_bgrid_ke_transport` imports `synchronize_bgrid_ne_corner_geo`
+        # INSIDE the function body, so we patch the source module.
+        import legoesm.grids.halo as halo_mod
+        real_sync = halo_mod.synchronize_bgrid_ne_corner_geo
+        try:
+            halo_mod.synchronize_bgrid_ne_corner_geo = _no_op_sync
+            ke_no_sync = _bgrid_ke_transport(
+                u_d, v_d, uc, vc, cdgrid, dt)
+        finally:
+            halo_mod.synchronize_bgrid_ne_corner_geo = real_sync
+
+        diff_vs_no_sync = float(jnp.max(jnp.abs(
+            ke_component_sync - ke_no_sync)))
+        assert diff_vs_no_sync > 1e-6 * ke_boundary_scale, (
+            f"`_bgrid_ke_transport` output with real component sync "
+            f"matches output with mocked no-op sync "
+            f"(max diff {diff_vs_no_sync:.3e}). "
+            f"Iter-103 wiring is NOT active."
+        )
+
     def test_geo_frame_sync_averages_discontinuity(self):
         """Iter-102: introduce a discontinuity at a shared seam in the
         geo frame and verify the sync averages it.  Confirms the sync

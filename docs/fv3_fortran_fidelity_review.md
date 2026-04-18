@@ -3,6 +3,10 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-106 (2026-04-18)**: Codex stop-time correction: iter-105's strengthened test still didn't CONCLUSIVELY prove the component-sync wiring is active — comparison against a scalar-sync control could also be satisfied by a NO-sync path.  Added assertion (d) "mock-and-diff": monkey-patch `synchronize_bgrid_ne_corner_geo` in `legoesm.grids.halo` to a no-op, call `_bgrid_ke_transport` again, and assert the output differs from the real-sync output by > 1e-6 × KE scale.
+  - Empirical on C8 ng=3: mocked-no-op diff vs real-sync = **2.17e4 = 65% of KE magnitude** (3.32e4).  Massive, unambiguous signature that the iter-103 wiring is active.
+  - Iter-103's Priority 2 closure is now definitively verified: (a) finite output, (b) differs from scalar-sync control, (c) change boundary-localized, (d) wiring active per mock-and-diff.
+  - 163 cdgrid/duogrid/fv3_regression tests pass.
 - **iter-105 (2026-04-18)**: Codex stop-time correction: iter-104's regression test only asserted "different somewhere", not the seam-localized behavior it claimed.  Strengthened the test with three separate assertions:
   - **(a)** output finite and (6, n+1, n+1)-shaped.
   - **(b)** boundary diff > 1e-3 × KE scale — proves iter-103 wiring is effective.
