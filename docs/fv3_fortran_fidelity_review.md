@@ -10,7 +10,7 @@
 - **Required evaluation metrics** (post iter-112 verification): W2 L2=1.53e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01, ocean rest state machine-precision.  All unchanged from iter-77 baseline — the iter-103 d_sw3 change is correctly localized to the FB path (production uses A-L gradient).
 
 **Stopping condition not met** due to two architectural items (see "Unresolved" list):
-- **Item #1**: W2 v-wind visible cube-face imprint at t>0.5d.  Production path uses A-L gradient; FV3 FB chain is Fortran-faithful (iter-103-111) but unstable at C36.  Fundamental fix is either (a) replace production with FB chain + stabilize C36, or (b) port FV3's architectural RK3+FB timestepping.
+- **Item #1**: W2 v-wind visible cube-face imprint at t>0.5d.  Production path uses A-L gradient; FV3 FB chain is Fortran-faithful (iter-103-111) but unstable at C36.  Fundamental fix is either (a) replace production with FB chain + stabilize C36, or (b) port FV3's architectural RK3+FB timestepping.  Diagnostic data (iter-114, t=1d, C36): FFT mode-4 amplitude in v-wind by latitude (mode-4 = cube-face imprint signature) — peaks at ±30° to ±45° (35-49) and is asymmetric: lat=-30 gives 49 but lat=+30 gives 35.  Mode-2 dominates at ±60° (68-74) suggesting hemispheric asymmetry from the W2 alpha angle.  Useful as a future-work benchmark.
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
