@@ -200,6 +200,35 @@ Latest iteration work:
     Fortran overrides will fail the architectural-bound test with a
     direct pointer to sw_core.F90:3527-3545 / 3620-3640.
 
+- **iter-135 (2026-04-18)**: plateau checkpoint.  Ralph-loop iterations
+  128-134 focused on test infrastructure around two FB-path fidelity
+  gaps (Priority-3 cube-vertex overrides; `_d_sw5_corner_divergence`
+  halo-mode='edge' gap).  Each iteration that attempted to tighten a
+  test triggered Codex stop-time review with a "brittle/bypassable/
+  tautological" finding, driving 4-5 rounds of rework per gap.  Net
+  status after iter-134:
+  - **Required evaluations unchanged from iter-112 baseline**: W2
+    L2=1.53e-03, Linf=4.07e-03; W5 drift=1.42e-05; cosine bell
+    L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01.
+  - **Test coverage**: 170/170 pass across
+    test_cdgrid_fv3_regression.py (42), test_duogrid.py (93),
+    test_cdgrid.py (35).
+  - **Remaining architectural blockers (unchanged from iter-112)**:
+    (1) W2 v-wind cube-face imprint in production path — production
+    uses A-L + RK3, not Fortran FB chain; fix requires either
+    replacing production with FB + stabilizing at C36, or porting
+    FV3's RK3+FB timestepping.  (2) FB path C36 instability —
+    requires ng=3 halo infrastructure for the duogrid remap.  Both
+    are infrastructure-level rework beyond the per-iteration scope.
+  - **Iteration productivity analysis**: each of iter-128..134
+    produced 1-2 commits of test/documentation tightening, but no
+    production-path numerics changes.  The stop-condition test
+    (no visible edge artifacts on W2/W5/cosine bell + ocean rest
+    state preserved) requires architectural work, not per-
+    iteration micro-improvements.  Future sessions should either
+    commit to the architectural work (multi-iteration project) or
+    mark this Ralph loop as "architecturally blocked" and end.
+
 - **iter-132 through iter-133 (2026-04-18)**: separate FB-path fidelity gap
   identification and documentation (no production-path impact).
   - **iter-132** (`8b3ea4b`): identified a second Fortran-fidelity gap in
