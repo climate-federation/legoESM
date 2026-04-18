@@ -28,6 +28,7 @@ from legoesm.core.operators_voronoi import (
     edge_thickness as _edge_avg,
 )
 from legoesm.ocean.vertical import compute_layer_thickness
+from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
 
 
 def barotropic_substeps_mpas(
@@ -38,6 +39,7 @@ def barotropic_substeps_mpas(
     dt_baro,
     n_substeps,
     F_slow_eta=None,
+    F_slow_u=None,
 ):
     """Run barotropic substeps on MPAS Voronoi mesh.
 
@@ -106,6 +108,10 @@ def barotropic_substeps_mpas(
 
     if F_slow_eta is None:
         F_slow_eta = jnp.zeros_like(eta)
+    # When F_slow_u carries Coriolis via PV flux, suppress standalone f*v_t (#160)
+    _has_slow_u = F_slow_u is not None
+    if F_slow_u is None:
+        F_slow_u = jnp.zeros_like(u_bar)
 
     # --- Fix 1: Neumann fill for eta before gradient ---
     # Fill land-cell eta with nearest-ocean-neighbor average so that
@@ -142,6 +148,7 @@ def barotropic_substeps_mpas(
     # Matches cubed-sphere and lat-lon barotropic solvers.
     min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
     eta_floor = (min_water_col - H_bathy) * mask
+    _area_cell = mesh.areaCell  # for mass-conserving floor clamp (#176)
 
     # Accumulators for time-averaged barotropic fields (issues #145, #149, #102).
     # Hu_sum: depth-integrated edge transport for tracer advection consistency.
@@ -169,30 +176,31 @@ def barotropic_substeps_mpas(
         Hu_sum_new = Hu_sum_c + transport.astype(_eta_dtype)
 
         eta_next = eta_c - dt_baro * divergence_cell(transport, mesh) * mask + dt_baro * F_slow_eta * mask
-        eta_next = jnp.maximum(eta_next, eta_floor) * mask
+        eta_next = _clamp_redistribute(eta_next, eta_floor, mask, _area_cell)
 
         # Backward: update u_bar using new eta
         # Fill land cells before gradient to prevent spurious PGF
         eta_filled = _fill_land_cells_mpas(eta_next, mask)
         grad_eta = gradient_edge(eta_filled, mesh)
 
-        # Coriolis + PGF
-        v_t_old = tangential_velocity(u_bar_c, mesh)
-
-        if use_semi_implicit:
-            # Trapezoidal predictor-corrector:
-            # 1. Predict with old Coriolis
+        # PGF + slow forcing (+ standalone Coriolis only in legacy mode)
+        if _has_slow_u:
+            # MOM6-style: Coriolis enters through F_slow_u only (#160)
+            u_bar_next = u_bar_c + dt_baro * (
+                -g * grad_eta + F_slow_u
+            ) * edge_mask
+        elif use_semi_implicit:
+            # Legacy: Heun predictor-corrector (#172 docs fix)
+            v_t_old = tangential_velocity(u_bar_c, mesh)
             u_star = u_bar_c + dt_baro * (
                 -g * grad_eta + mesh.fEdge * v_t_old
             ) * edge_mask
-            # 2. Recompute tangential velocity from predicted u
             v_t_star = tangential_velocity(u_star, mesh)
-            # 3. Correct with averaged Coriolis
             u_bar_next = u_bar_c + dt_baro * (
                 -g * grad_eta + mesh.fEdge * 0.5 * (v_t_old + v_t_star)
             ) * edge_mask
         else:
-            # Explicit Coriolis (original)
+            v_t_old = tangential_velocity(u_bar_c, mesh)
             u_bar_next = u_bar_c + dt_baro * (
                 -g * grad_eta + mesh.fEdge * v_t_old
             ) * edge_mask
@@ -217,7 +225,7 @@ def barotropic_substeps_mpas(
             eta_next = (
                 eta_next + divergence_cell(diff_flux, mesh)
             ) * mask
-            eta_next = jnp.maximum(eta_next, eta_floor) * mask
+            eta_next = _clamp_redistribute(eta_next, eta_floor, mask, _area_cell)
 
         # Accumulate eta and u_bar AFTER diffusion for time-averaging
         eta_sum_new = eta_sum_c + eta_next.astype(_eta_dtype)

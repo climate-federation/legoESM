@@ -26,6 +26,40 @@ from legoesm.driver.compiled_segments import (
 )
 from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig, OutputConfig
 from legoesm.driver.model_driver import ModelDriver
+from legoesm.driver.physics_pipeline import PhysicsOutput
+
+
+_OPTIONAL_3D_OUTPUT_FIELDS = (
+    "du_dt",
+    "dv_dt",
+    "dq_i_dt",
+    "dq_s_dt",
+    "dq_g_dt",
+    "dN_c_dt",
+    "dN_r_dt",
+    "dN_i_dt",
+)
+
+
+def _zero_physics_output(T, p_s):
+    kwargs = dict(
+        dT_dt=jnp.zeros(T.shape),
+        dq_v_dt=jnp.zeros(T.shape),
+        dq_c_dt=jnp.zeros(T.shape),
+        dq_r_dt=jnp.zeros(T.shape),
+        precip=jnp.zeros(p_s.shape),
+        sw_net_sfc=jnp.zeros(p_s.shape),
+        lw_net_sfc=jnp.zeros(p_s.shape),
+        sw_up_toa=jnp.zeros(p_s.shape),
+        lw_up_toa=jnp.zeros(p_s.shape),
+        sw_down_toa=jnp.zeros(p_s.shape),
+    )
+    for field_name in _OPTIONAL_3D_OUTPUT_FIELDS:
+        if field_name in PhysicsOutput._fields:
+            kwargs[field_name] = jnp.zeros(T.shape)
+    if "conv_prog" in PhysicsOutput._fields:
+        kwargs["conv_prog"] = jnp.asarray(0.0, dtype=T.dtype)
+    return kwargs
 
 
 class TestScalingReadiness:
@@ -124,7 +158,6 @@ class TestScalingReadiness:
         """build_segment_fn returns function with .raw attribute for training."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.core.state import HydrostaticState
-        from legoesm.driver.physics_pipeline import PhysicsOutput
 
         grid = create_cubed_sphere(4)
 
@@ -134,13 +167,7 @@ class TestScalingReadiness:
                 return s
 
         def mock(need_rad, T, p_s, *a, **kw):
-            p = PhysicsOutput(
-                dT_dt=jnp.zeros(T.shape), dq_v_dt=jnp.zeros(T.shape),
-                dq_c_dt=jnp.zeros(T.shape), dq_r_dt=jnp.zeros(T.shape),
-                precip=jnp.zeros(p_s.shape), sw_net_sfc=jnp.zeros(p_s.shape),
-                lw_net_sfc=jnp.zeros(p_s.shape), sw_up_toa=jnp.zeros(p_s.shape),
-                lw_up_toa=jnp.zeros(p_s.shape), sw_down_toa=jnp.zeros(p_s.shape),
-            )
+            p = PhysicsOutput(**_zero_physics_output(T, p_s))
             return p, (a[16], a[17], a[18], a[19], a[20], a[21])
 
         fn = build_segment_fn(

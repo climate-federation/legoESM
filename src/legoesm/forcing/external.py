@@ -334,28 +334,31 @@ def _interp_zonal_to_grid(lat_src: np.ndarray, field: np.ndarray,
     ----------
     lat_src : (nlat_src,)
         Source latitudes [degrees].
-    field : (nlat_src,) or (nlat_src, nlev)
-        Zonal-mean field at source latitudes.
+    field : (nlat_src,) or (nlat_src, nlev) or (nlat_src, nlev, nband)
+        Zonal-mean field at source latitudes.  Handles arbitrary trailing
+        dimensions (e.g., 3D Kinne aerosol files with a band axis, #178).
     lat_grid : jax array, any shape
         Model grid latitudes [radians]. Will be converted to degrees.
 
     Returns
     -------
-    jax array with shape (*lat_grid.shape,) or (*lat_grid.shape, nlev)
+    jax array with shape (*lat_grid.shape,) or (*lat_grid.shape, *trailing)
     """
     lat_deg = np.asarray(jnp.degrees(lat_grid)).ravel()
 
     if field.ndim == 1:
         result = np.interp(lat_deg, lat_src, field)
         return jnp.array(result).reshape(lat_grid.shape)
-    elif field.ndim == 2:
-        nlev = field.shape[1]
-        result = np.zeros((len(lat_deg), nlev))
-        for k in range(nlev):
-            result[:, k] = np.interp(lat_deg, lat_src, field[:, k])
-        return jnp.array(result).reshape((*lat_grid.shape, nlev))
     else:
-        raise ValueError(f"Expected 1D or 2D field, got {field.ndim}D")
+        # Handle 2D, 3D, ... by flattening trailing dims, interpolating
+        # each column independently, and reshaping back (issue #178).
+        trailing_shape = field.shape[1:]
+        n_cols = int(np.prod(trailing_shape))
+        field_flat = field.reshape(field.shape[0], n_cols)
+        result = np.zeros((len(lat_deg), n_cols))
+        for k in range(n_cols):
+            result[:, k] = np.interp(lat_deg, lat_src, field_flat[:, k])
+        return jnp.array(result).reshape((*lat_grid.shape, *trailing_shape))
 
 
 def _interp_vertical(field_plev: jnp.ndarray, plev_src: np.ndarray,
@@ -783,8 +786,16 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
         aod_interp = _interp_monthly_cyclic(mid_days, data, day)
         if lat_grid is not None:
             base_aod = _interp_zonal_to_grid(lat, aod_interp, lat_grid)
+            # Kinne aerosol files may have extra dimensions (level, band).
+            # Sum over all trailing dims to get total column AOD (issue #178).
+            while base_aod.ndim > lat_grid.ndim:
+                base_aod = jnp.sum(base_aod, axis=-1)
         else:
-            base_aod = {"lat": lat, "aod": aod_interp}
+            # Sum trailing dims for dict-mode too
+            aod_flat = aod_interp
+            while aod_flat.ndim > 1:
+                aod_flat = np.sum(aod_flat, axis=-1)
+            base_aod = {"lat": lat, "aod": aod_flat}
     elif config.use_reference_if_missing:
         if lat_grid is None:
             lat = np.linspace(-90.0, 90.0, 181)
@@ -805,8 +816,14 @@ def get_aerosol_at_time(config: AerosolConfig, day: float,
             aod_v = _interp_monthly_cyclic(mid_days_v, data_v, day) * config.volcanic_scale
             if lat_grid is not None:
                 volc = _interp_zonal_to_grid(lat_v, aod_v, lat_grid)
+                # Sum trailing dims for multi-dimensional volcanic files
+                while volc.ndim > lat_grid.ndim:
+                    volc = jnp.sum(volc, axis=-1)
             else:
-                volc = {"lat": lat_v, "aod": aod_v}
+                aod_v_flat = aod_v
+                while aod_v_flat.ndim > 1:
+                    aod_v_flat = np.sum(aod_v_flat, axis=-1)
+                volc = {"lat": lat_v, "aod": aod_v_flat}
         elif config.use_reference_if_missing:
             volc = (
                 jnp.zeros_like(base_aod)

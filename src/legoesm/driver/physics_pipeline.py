@@ -41,6 +41,7 @@ class PhysicsOutput(NamedTuple):
     dN_c_dt: jax.Array
     dN_r_dt: jax.Array
     dN_i_dt: jax.Array
+    conv_prog: jax.Array
     shflx: jax.Array | None = None   # surface sensible heat flux [W/m2]
     lhflx: jax.Array | None = None   # surface latent heat flux [W/m2]
 
@@ -127,6 +128,7 @@ class PhysicsPipeline:
         turbulence_config=None,
         gwd_fn=None,
         gwd_config=None,
+        physics_parameterization=None,
     ):
         self.adapter = adapter
         self.sigma_full = sigma_full
@@ -149,9 +151,10 @@ class PhysicsPipeline:
         self.turbulence_config = turbulence_config
         self.gwd_fn = gwd_fn
         self.gwd_config = gwd_config
+        self.physics_parameterization = physics_parameterization
         self._cloud_scheme = "none"  # set by build_physics_pipeline
 
-    def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, u, v, sst, sic,
+    def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
                             lat, dt, dT_dt_rad, sw_net_sfc, lw_net_sfc,
                             sw_up_toa, lw_up_toa, sw_down_toa,
                             sbm_tau_c=None, sbm_RH_ref=None,
@@ -177,21 +180,104 @@ class PhysicsPipeline:
         p_full_col = ad.flatten_3d(p_full)
         p_half_col = p_half.reshape(ad.ncol, nlev + 1)
         q_v_col = ad.flatten_3d(q_v)
+        p_s_col = ad.flatten_2d(p_s)
+        lat_col = ad.flatten_2d(lat)
 
-        # Override convection config with traced values when provided.
-        # Only SBMConfig has tau_c/RH_ref — guard with hasattr to prevent
-        # crashes when a different convection scheme is active.
+        z_full_col = None
+        z_half_col = None
+        if (self.physics_parameterization is not None
+                or self.turbulence_fn is not None
+                or self.gwd_fn is not None):
+            from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+
+            z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col)
+
         _conv_cfg = self.convection_config
+
         if sbm_tau_c is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'tau_c'):
             _conv_cfg = _conv_cfg._replace(tau_c=sbm_tau_c)
         if sbm_RH_ref is not None and _conv_cfg is not None and hasattr(_conv_cfg, 'RH_ref'):
             _conv_cfg = _conv_cfg._replace(RH_ref=sbm_RH_ref)
 
+        if conv_prog is None:
+            if _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
+                conv_prog = jnp.full((ad.ncol,), _conv_cfg.M_c_init, dtype=T_col.dtype)
+            elif _conv_cfg is not None and hasattr(_conv_cfg, 'a_u_init'):
+                conv_prog = jnp.full((ad.ncol,), _conv_cfg.a_u_init, dtype=T_col.dtype)
+            else:
+                conv_prog = jnp.zeros((ad.ncol,), dtype=T_col.dtype)
+        conv_prog_out = conv_prog
+
+        turb_out = None
+        micro_out_ml = None
+        predicted_micro = {}
+        if self.physics_parameterization is not None:
+            if _conv_cfg is None or not hasattr(_conv_cfg, 'M_c_init'):
+                raise ValueError(
+                    "physics_parameterization requires physical mass_flux convection",
+                )
+            if self.turbulence_config is None:
+                raise ValueError(
+                    "physics_parameterization requires physical louis turbulence",
+                )
+            from legoesm.atmosphere.physics.convection.mass_flux import (
+                diagnose_mass_flux_closure,
+            )
+            from legoesm.atmosphere.physics.ml_parameterization import (
+                apply_physics_parameterization,
+            )
+
+            T_sfc_col = ad.flatten_2d(T_sfc)
+            q_sat_sfc_col = ad.flatten_2d(saturation_specific_humidity(T_sfc, p_s))
+            rho_col_phys = p_full_col / (constants.R_d * T_col)
+            closure = diagnose_mass_flux_closure(
+                T=T_col,
+                q_v=q_v_col,
+                p_full=p_full_col,
+                p_half=p_half_col,
+                M_c=conv_prog,
+                dt=dt,
+                config=_conv_cfg,
+            )
+            conv_out, conv_prog_out, turb_out, micro_out_ml, predicted_micro = apply_physics_parameterization(
+                self.physics_parameterization,
+                closure=closure,
+                T=T_col,
+                u=ad.flatten_3d(u),
+                v=ad.flatten_3d(v),
+                q_v=q_v_col,
+                q_c=ad.flatten_3d(q_c) if q_c is not None else jnp.zeros_like(T_col),
+                q_r=ad.flatten_3d(q_r) if q_r is not None else jnp.zeros_like(T_col),
+                p_full=p_full_col,
+                p_half=p_half_col,
+                p_s=p_s_col,
+                z_full=z_full_col,
+                z_half=z_half_col,
+                T_sfc=T_sfc_col,
+                q_sfc=q_sat_sfc_col,
+                lat=lat_col,
+                rho=rho_col_phys,
+                M_c=conv_prog,
+                dt=dt,
+                mass_flux_config=_conv_cfg,
+                louis_config=self.turbulence_config,
+            )
         # Convection (resolved kernel — no dispatch here)
-        conv_out = self.convection_fn(
-            T=T_col, q_v=q_v_col, p_full=p_full_col, p_half=p_half_col,
-            dt=dt, config=_conv_cfg,
-        )
+        elif _conv_cfg is not None and hasattr(_conv_cfg, 'M_c_init'):
+            conv_out, conv_prog_out = self.convection_fn(
+                T=T_col, q_v=q_v_col, p_full=p_full_col, p_half=p_half_col,
+                M_c=conv_prog, dt=dt, config=_conv_cfg,
+            )
+        elif _conv_cfg is not None and hasattr(_conv_cfg, 'a_u_init'):
+            conv_out, conv_prog_out = self.convection_fn(
+                T=T_col, q_v=q_v_col, p_full=p_full_col, p_half=p_half_col,
+                a_u=conv_prog, dt=dt, config=_conv_cfg,
+            )
+        else:
+            conv_out = self.convection_fn(
+                T=T_col, q_v=q_v_col, p_full=p_full_col, p_half=p_half_col,
+                dt=dt, config=_conv_cfg,
+            )
         dT_dt_conv = ad.unflatten_3d(conv_out.dT_dt)
         dq_v_dt_conv = ad.unflatten_3d(conv_out.dq_v_dt)
         precip = ad.unflatten_2d(conv_out.precipitation)
@@ -210,7 +296,19 @@ class PhysicsPipeline:
         dN_i_dt = jnp.zeros(shape_3d, dtype=_sd)
         precip_micro = jnp.zeros(shape_2d, dtype=_sd)
 
-        if self.micro_fn is not None:
+        if micro_out_ml is not None:
+            dT_dt_micro = ad.unflatten_3d(micro_out_ml.dT_dt)
+            dq_v_dt_micro = ad.unflatten_3d(micro_out_ml.dq_v_dt)
+            dq_c_dt = ad.unflatten_3d(micro_out_ml.dq_c_dt)
+            dq_r_dt = ad.unflatten_3d(micro_out_ml.dq_r_dt)
+            precip_micro = ad.unflatten_2d(micro_out_ml.precipitation)
+            dq_i_dt = ad.unflatten_3d(micro_out_ml.dq_i_dt)
+            dq_s_dt = ad.unflatten_3d(micro_out_ml.dq_s_dt)
+            dq_g_dt = ad.unflatten_3d(micro_out_ml.dq_g_dt)
+            dN_c_dt = ad.unflatten_3d(micro_out_ml.dN_c_dt)
+            dN_r_dt = ad.unflatten_3d(micro_out_ml.dN_r_dt)
+            dN_i_dt = ad.unflatten_3d(micro_out_ml.dN_i_dt)
+        elif self.micro_fn is not None:
             from legoesm.atmosphere.physics.microphysics.output import HydrometeorState
             q_c_col = ad.flatten_3d(q_c)
             q_r_col = ad.flatten_3d(q_r)
@@ -227,12 +325,34 @@ class PhysicsPipeline:
                 N_r=ad.flatten_3d(N_r) if N_r is not None else _z,
                 N_i=ad.flatten_3d(N_i) if N_i is not None else _z,
             )
-            micro_out = self.micro_fn(
-                T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
-                p_full=p_full_col, p_half=p_half_col,
-                rho=rho_col, dz=dz_col, dt=dt,
-                config=self.micro_config,
-            )
+            if (
+                self.physics_parameterization is not None
+                and getattr(self.physics_parameterization.model, "microphysics_scheme", "none")
+                == "sundqvist"
+                and "rain_survival_fraction" in predicted_micro
+            ):
+                from legoesm.atmosphere.physics.ml_parameterization import (
+                    apply_predicted_sundqvist_rain_survival_fraction,
+                )
+                micro_out = apply_predicted_sundqvist_rain_survival_fraction(
+                    predicted_micro["rain_survival_fraction"],
+                    T=T_col,
+                    q_v=q_v_col,
+                    hydrometeors=hydrometeors,
+                    p_full=p_full_col,
+                    p_half=p_half_col,
+                    rho=rho_col,
+                    dz=dz_col,
+                    dt=dt,
+                    config=self.micro_config,
+                )
+            else:
+                micro_out = self.micro_fn(
+                    T=T_col, q_v=q_v_col, hydrometeors=hydrometeors,
+                    p_full=p_full_col, p_half=p_half_col,
+                    rho=rho_col, dz=dz_col, dt=dt,
+                    config=self.micro_config,
+                )
             dT_dt_micro = ad.unflatten_3d(micro_out.dT_dt)
             dq_v_dt_micro = ad.unflatten_3d(micro_out.dq_v_dt)
             dq_c_dt = ad.unflatten_3d(micro_out.dq_c_dt)
@@ -268,14 +388,20 @@ class PhysicsPipeline:
         du_dt = jnp.zeros(shape_3d, dtype=_sd)
         dv_dt = jnp.zeros(shape_3d, dtype=_sd)
 
-        if self.turbulence_fn is not None or self.gwd_fn is not None:
-            from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+        if (self.turbulence_fn is not None and turb_out is None) or self.gwd_fn is not None:
             u_col = ad.flatten_3d(u)
             v_col = ad.flatten_3d(v)
             rho_col_phys = p_full_col / (constants.R_d * T_col)
-            z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col)
+            if z_full_col is None or z_half_col is None:
+                from legoesm.atmosphere.physics._shared import compute_heights_from_sigma
+                z_full_col, z_half_col = compute_heights_from_sigma(T_col, p_half_col)
 
-        if self.turbulence_fn is not None:
+        if turb_out is not None:
+            du_dt = du_dt + ad.unflatten_3d(turb_out.du_dt)
+            dv_dt = dv_dt + ad.unflatten_3d(turb_out.dv_dt)
+            dT_dt = dT_dt + ad.unflatten_3d(turb_out.dT_dt)
+            dq_v_dt = dq_v_dt + ad.unflatten_3d(turb_out.dq_v_dt)
+        elif self.turbulence_fn is not None:
             T_sfc_col = ad.flatten_2d(T_sfc)
             q_sat_sfc_col = ad.flatten_2d(
                 saturation_specific_humidity(T_sfc, p_s)
@@ -324,6 +450,7 @@ class PhysicsPipeline:
             dN_c_dt=dN_c_dt,
             dN_r_dt=dN_r_dt,
             dN_i_dt=dN_i_dt,
+            conv_prog=conv_prog_out,
             shflx=shflx,
             lhflx=lhflx,
         )
@@ -421,14 +548,14 @@ class PhysicsPipeline:
         """Build a JIT-compiled unified physics step with radiation sub-cycling.
 
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
-        u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+        conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
         solar_weights, s_0, o3_vmr, aerosol_od, held) -> (PhysicsOutput,
         HeldRadiation)``.
         """
         pipeline = self
 
         @jax.jit
-        def step_unified(need_rad, T, p_s, q_v, q_c, q_r, u, v,
+        def step_unified(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
                          sst, sic, lat, lon,
                          day_of_year, seconds_of_day, dt,
                          solar_weights, s_0,
@@ -443,7 +570,7 @@ class PhysicsPipeline:
                          ghg_vmr_override=None):
 
             def _rad_branch(args):
-                (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+                (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                  day_of_year, seconds_of_day, dt,
                  solar_weights, s_0, o3_vmr, aerosol_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
@@ -466,7 +593,7 @@ class PhysicsPipeline:
                     )
 
                 physics_out = pipeline.physics_step_no_rad(
-                    T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
+                    T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
                     dT_dt_rad, sw_net_sfc, lw_net_sfc,
                     sw_up_toa, lw_up_toa, sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
@@ -485,7 +612,7 @@ class PhysicsPipeline:
                 return physics_out, new_held
 
             def _no_rad_branch(args):
-                (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+                (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                  day_of_year, seconds_of_day, dt,
                  solar_weights, s_0, o3_vmr, aerosol_od,
                  held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
@@ -495,7 +622,7 @@ class PhysicsPipeline:
                  ghg_vmr_override) = args
 
                 physics_out = pipeline.physics_step_no_rad(
-                    T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, dt,
+                    T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     sbm_tau_c=sbm_tau_c, sbm_RH_ref=sbm_RH_ref,
@@ -513,7 +640,7 @@ class PhysicsPipeline:
                 physics_out = jax.tree.map(_cast, physics_out)
                 return physics_out, new_held
 
-            args = (T, p_s, q_v, q_c, q_r, u, v, sst, sic, lat, lon,
+            args = (T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, lon,
                     day_of_year, seconds_of_day, dt,
                     solar_weights, s_0, o3_vmr, aerosol_od,
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
@@ -686,11 +813,15 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 def _resolve_convection(config):
     """Resolve convection kernel and config from ExperimentConfig.
 
-    Returns (kernel_fn, kernel_config).  Stateful schemes (mass_flux,
-    edmf) are wrapped in a closure that manages the prognostic state
-    internally, presenting the same stateless signature as SBM/Kuo/DCA.
+    Returns (kernel_fn, kernel_config).
+
+    Prognostic schemes (mass_flux, edmf) are returned directly and their
+    prognostic variable is threaded explicitly through the unified driver.
     """
-    from legoesm.atmosphere.physics.convection.config import SBMConfig
+    from legoesm.atmosphere.physics.convection.config import (
+        ConvectionConfig,
+        SBMConfig,
+    )
     from legoesm.driver.kernel_registry import (
         CONVECTION_REGISTRY, resolve_kernel,
     )
@@ -703,45 +834,14 @@ def _resolve_convection(config):
 
     # Build the per-scheme config
     if scheme == "sbm":
-        conv_config = SBMConfig(tau_c=config.sbm_tau_c, RH_ref=config.sbm_RH_ref)
+        conv_config = SBMConfig(
+            tau_c=config.sbm_tau_c,
+            RH_ref=config.sbm_RH_ref,
+            CAPE_threshold=getattr(config, 'sbm_cape_threshold', 70.0),
+        )
     else:
-        from legoesm.atmosphere.physics.convection.config import ConvectionConfig
         cc = ConvectionConfig(scheme=scheme)
         conv_config = getattr(cc, scheme)
-
-    # Wrap stateful convection schemes (mass_flux, edmf) in a closure
-    # that manages the prognostic variable internally.
-    if scheme == "mass_flux":
-        _state = {"M_c": None}
-
-        def _wrapped(T, q_v, p_full, p_half, dt, config):
-            ncol = T.shape[0]
-            if _state["M_c"] is None:
-                _state["M_c"] = jnp.full((ncol,), config.M_c_init, dtype=T.dtype)
-            conv_out, M_c_new = conv_fn(
-                T=T, q_v=q_v, p_full=p_full, p_half=p_half,
-                M_c=_state["M_c"], dt=dt, config=config,
-            )
-            _state["M_c"] = M_c_new
-            return conv_out
-
-        return _wrapped, conv_config
-
-    if scheme == "edmf":
-        _state = {"a_u": None}
-
-        def _wrapped(T, q_v, p_full, p_half, dt, config):
-            ncol = T.shape[0]
-            if _state["a_u"] is None:
-                _state["a_u"] = jnp.full((ncol,), config.a_u_init, dtype=T.dtype)
-            conv_out, a_u_new = conv_fn(
-                T=T, q_v=q_v, p_full=p_full, p_half=p_half,
-                a_u=_state["a_u"], dt=dt, config=config,
-            )
-            _state["a_u"] = a_u_new
-            return conv_out
-
-        return _wrapped, conv_config
 
     return conv_fn, conv_config
 
@@ -828,6 +928,43 @@ def _resolve_gwd(config):
     return gwd_fn, gwd_config
 
 
+def _resolve_physics_parameterization(config, nlev: int):
+    """Resolve the optional joint ML physics parameterization."""
+    scheme = getattr(config, 'physics_parameterization', 'none')
+    if scheme == "none":
+        return None
+    if scheme != "ml":
+        raise ValueError(
+            f"Unknown physics_parameterization={scheme!r}. Supported: 'none', 'ml'.",
+        )
+    if getattr(config, 'convection', 'none') != "mass_flux":
+        raise ValueError(
+            "physics_parameterization='ml' requires convection='mass_flux'",
+        )
+    if getattr(config, 'turbulence', 'none') != "louis":
+        raise ValueError(
+            "physics_parameterization='ml' requires turbulence='louis'",
+        )
+    microphysics_scheme = getattr(config, 'microphysics', 'none')
+    if microphysics_scheme not in ("none", "kessler", "sundqvist"):
+        raise ValueError(
+            "physics_parameterization='ml' currently supports "
+            "microphysics='none', 'kessler', or 'sundqvist'",
+        )
+    from legoesm.atmosphere.physics.ml_parameterization import (
+        load_physics_parameterization_assets,
+    )
+    return load_physics_parameterization_assets(
+        nlev=nlev,
+        hidden_dim=getattr(config, 'physics_parameterization_hidden_dim', 128),
+        n_layers=getattr(config, 'physics_parameterization_layers', 3),
+        seed=getattr(config, 'physics_parameterization_seed', 0),
+        checkpoint_path=getattr(config, 'physics_parameterization_checkpoint', ''),
+        stats_path=getattr(config, 'physics_parameterization_stats', ''),
+        microphysics_scheme=microphysics_scheme,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level builder
 # ---------------------------------------------------------------------------
@@ -872,6 +1009,12 @@ def build_physics_pipeline(grid, sigma, config):
     # Resolve gravity wave drag
     gwd_fn, gwd_config = _resolve_gwd(config)
 
+    # Resolve optional joint ML physics parameterization
+    physics_parameterization = _resolve_physics_parameterization(
+        config,
+        nlev=int(sigma.sigma_full.shape[0]),
+    )
+
     pipeline = PhysicsPipeline(
         adapter=adapter,
         sigma_full=sigma.sigma_full,
@@ -894,6 +1037,7 @@ def build_physics_pipeline(grid, sigma, config):
         turbulence_config=turb_config,
         gwd_fn=gwd_fn,
         gwd_config=gwd_config,
+        physics_parameterization=physics_parameterization,
     )
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
     return pipeline

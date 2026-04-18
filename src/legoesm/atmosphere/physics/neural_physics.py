@@ -38,6 +38,77 @@ from legoesm.driver.physics_pipeline import PhysicsOutput
 from legoesm.driver.grid_adapters import ColumnAdapter
 
 
+_OPTIONAL_3D_OUTPUT_FIELDS = (
+    "du_dt",
+    "dv_dt",
+    "dq_i_dt",
+    "dq_s_dt",
+    "dq_g_dt",
+    "dN_c_dt",
+    "dN_r_dt",
+    "dN_i_dt",
+)
+_PHYSICS_OUTPUT_FIELDS = set(getattr(PhysicsOutput, "_fields", ()))
+
+
+def _parse_step_unified_tail(args):
+    """Support both legacy and conv_prog-extended step_unified signatures."""
+    if len(args) == 19:
+        return None, args
+    if len(args) == 20:
+        return args[0], args[1:]
+    raise TypeError(
+        "step_unified expected 19 positional tail arguments "
+        "(legacy) or 20 (with conv_prog)"
+    )
+
+
+def _physics_output_kwargs(
+    *,
+    dT_dt,
+    dq_v_dt,
+    dq_c_dt,
+    dq_r_dt,
+    precip,
+    sw_net_sfc,
+    lw_net_sfc,
+    sw_up_toa,
+    lw_up_toa,
+    sw_down_toa,
+    reference_3d,
+    template=None,
+    conv_prog=None,
+):
+    kwargs = dict(
+        dT_dt=dT_dt,
+        dq_v_dt=dq_v_dt,
+        dq_c_dt=dq_c_dt,
+        dq_r_dt=dq_r_dt,
+        precip=precip,
+        sw_net_sfc=sw_net_sfc,
+        lw_net_sfc=lw_net_sfc,
+        sw_up_toa=sw_up_toa,
+        lw_up_toa=lw_up_toa,
+        sw_down_toa=sw_down_toa,
+    )
+    zeros_3d = jnp.zeros_like(reference_3d)
+    for field_name in _OPTIONAL_3D_OUTPUT_FIELDS:
+        if field_name in _PHYSICS_OUTPUT_FIELDS:
+            kwargs[field_name] = (
+                getattr(template, field_name, zeros_3d)
+                if template is not None else zeros_3d
+            )
+    if "conv_prog" in _PHYSICS_OUTPUT_FIELDS:
+        conv_prog_value = (
+            getattr(template, "conv_prog", conv_prog)
+            if template is not None else conv_prog
+        )
+        if conv_prog_value is None:
+            conv_prog_value = jnp.asarray(0.0, dtype=reference_3d.dtype)
+        kwargs["conv_prog"] = conv_prog_value
+    return kwargs
+
+
 # ======================================================================
 # Neural network module
 # ======================================================================
@@ -163,16 +234,19 @@ def _unpack_column_output(
     dq_r_dt = y[3 * nlev:4 * nlev]
     sfc = y[4 * nlev:]
     return PhysicsOutput(
-        dT_dt=dT_dt,
-        dq_v_dt=dq_v_dt,
-        dq_c_dt=dq_c_dt,
-        dq_r_dt=dq_r_dt,
-        precip=sfc[0],
-        sw_net_sfc=sfc[1],
-        lw_net_sfc=sfc[2],
-        sw_up_toa=sfc[3],
-        lw_up_toa=sfc[4],
-        sw_down_toa=sfc[5],
+        **_physics_output_kwargs(
+            dT_dt=dT_dt,
+            dq_v_dt=dq_v_dt,
+            dq_c_dt=dq_c_dt,
+            dq_r_dt=dq_r_dt,
+            precip=sfc[0],
+            sw_net_sfc=sfc[1],
+            lw_net_sfc=sfc[2],
+            sw_up_toa=sfc[3],
+            lw_up_toa=sfc[4],
+            sw_down_toa=sfc[5],
+            reference_3d=dT_dt,
+        )
     )
 
 
@@ -200,25 +274,37 @@ def make_neural_step_unified(
     Returns
     -------
     callable
-        ``step_unified(need_rad, T, p_s, q_v, q_c, q_r, u, v,
-        sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
-        solar_weights, s_0, o3_vmr, aerosol_od,
-        held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-        **kwargs) -> (PhysicsOutput, held_tuple)``
+        Supports both the legacy signature
+        ``step_unified(..., q_r, u, v, ...)`` and the newer
+        ``step_unified(..., q_r, conv_prog, u, v, ...)`` layout.
     """
     nlev = neural_physics.nlev
 
-    def step_unified(
-        need_rad, T, p_s, q_v, q_c, q_r, u, v,
-        sst, sic, lat, lon,
-        day_of_year, seconds_of_day, dt,
-        solar_weights, s_0,
-        o3_vmr, aerosol_od,
-        held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-        **kwargs,
-    ):
+    def step_unified(need_rad, T, p_s, q_v, q_c, q_r, *args, **kwargs):
+        conv_prog, tail = _parse_step_unified_tail(args)
+        (
+            u,
+            v,
+            sst,
+            sic,
+            lat,
+            lon,
+            day_of_year,
+            seconds_of_day,
+            dt,
+            solar_weights,
+            s_0,
+            o3_vmr,
+            aerosol_od,
+            held_dT_rad,
+            held_sw_net_sfc,
+            held_lw_net_sfc,
+            held_sw_up_toa,
+            held_lw_up_toa,
+            held_sw_down_toa,
+        ) = tail
+        del need_rad, sst, sic, lon, day_of_year, seconds_of_day, dt
+        del solar_weights, o3_vmr, aerosol_od, kwargs
         # Flatten to columns
         T_col = adapter.flatten_3d(T)           # (ncol, nlev)
         u_col = adapter.flatten_3d(u)           # (ncol, nlev)
@@ -241,16 +327,20 @@ def make_neural_step_unified(
         col_out = jax.vmap(lambda yi: _unpack_column_output(yi, nlev))(y)
 
         phys_out = PhysicsOutput(
-            dT_dt=adapter.unflatten_3d(col_out.dT_dt),
-            dq_v_dt=adapter.unflatten_3d(col_out.dq_v_dt),
-            dq_c_dt=adapter.unflatten_3d(col_out.dq_c_dt),
-            dq_r_dt=adapter.unflatten_3d(col_out.dq_r_dt),
-            precip=adapter.unflatten_2d(col_out.precip),
-            sw_net_sfc=adapter.unflatten_2d(col_out.sw_net_sfc),
-            lw_net_sfc=adapter.unflatten_2d(col_out.lw_net_sfc),
-            sw_up_toa=adapter.unflatten_2d(col_out.sw_up_toa),
-            lw_up_toa=adapter.unflatten_2d(col_out.lw_up_toa),
-            sw_down_toa=adapter.unflatten_2d(col_out.sw_down_toa),
+            **_physics_output_kwargs(
+                dT_dt=adapter.unflatten_3d(col_out.dT_dt),
+                dq_v_dt=adapter.unflatten_3d(col_out.dq_v_dt),
+                dq_c_dt=adapter.unflatten_3d(col_out.dq_c_dt),
+                dq_r_dt=adapter.unflatten_3d(col_out.dq_r_dt),
+                precip=adapter.unflatten_2d(col_out.precip),
+                sw_net_sfc=adapter.unflatten_2d(col_out.sw_net_sfc),
+                lw_net_sfc=adapter.unflatten_2d(col_out.lw_net_sfc),
+                sw_up_toa=adapter.unflatten_2d(col_out.sw_up_toa),
+                lw_up_toa=adapter.unflatten_2d(col_out.lw_up_toa),
+                sw_down_toa=adapter.unflatten_2d(col_out.sw_down_toa),
+                reference_3d=T,
+                conv_prog=conv_prog,
+            )
         )
 
         # Pass held radiation through unchanged (neural net subsumes rad)
@@ -301,52 +391,64 @@ def make_hybrid_step_unified(
     """
     neural_step = make_neural_step_unified(neural_physics, adapter)
 
-    def step_unified(
-        need_rad, T, p_s, q_v, q_c, q_r, u, v,
-        sst, sic, lat, lon,
-        day_of_year, seconds_of_day, dt,
-        solar_weights, s_0,
-        o3_vmr, aerosol_od,
-        held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-        **kwargs,
-    ):
+    def step_unified(need_rad, T, p_s, q_v, q_c, q_r, *args, **kwargs):
+        conv_prog, tail = _parse_step_unified_tail(args)
+        (
+            u,
+            v,
+            sst,
+            sic,
+            lat,
+            lon,
+            day_of_year,
+            seconds_of_day,
+            dt,
+            solar_weights,
+            s_0,
+            o3_vmr,
+            aerosol_od,
+            held_dT_rad,
+            held_sw_net_sfc,
+            held_lw_net_sfc,
+            held_sw_up_toa,
+            held_lw_up_toa,
+            held_sw_down_toa,
+        ) = tail
         # Traditional physics (with full radiation sub-cycling)
-        trad_out, held_new = traditional_step_unified(
-            need_rad, T, p_s, q_v, q_c, q_r, u, v,
-            sst, sic, lat, lon,
+        trad_args = [need_rad, T, p_s, q_v, q_c, q_r]
+        if conv_prog is not None:
+            trad_args.append(conv_prog)
+        trad_args.extend([
+            u, v, sst, sic, lat, lon,
             day_of_year, seconds_of_day, dt,
             solar_weights, s_0,
             o3_vmr, aerosol_od,
             held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
             held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-            **kwargs,
-        )
+        ])
+        trad_out, held_new = traditional_step_unified(*trad_args, **kwargs)
 
         # Neural correction
-        neural_out, _ = neural_step(
-            need_rad, T, p_s, q_v, q_c, q_r, u, v,
-            sst, sic, lat, lon,
-            day_of_year, seconds_of_day, dt,
-            solar_weights, s_0,
-            o3_vmr, aerosol_od,
-            held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-            held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-        )
+        neural_out, _ = neural_step(*trad_args)
 
         # Blend: traditional + alpha * neural correction
         _alpha = jnp.asarray(alpha)
         blended = PhysicsOutput(
-            dT_dt=trad_out.dT_dt + _alpha * neural_out.dT_dt,
-            dq_v_dt=trad_out.dq_v_dt + _alpha * neural_out.dq_v_dt,
-            dq_c_dt=trad_out.dq_c_dt + _alpha * neural_out.dq_c_dt,
-            dq_r_dt=trad_out.dq_r_dt + _alpha * neural_out.dq_r_dt,
-            precip=trad_out.precip + _alpha * neural_out.precip,
-            sw_net_sfc=trad_out.sw_net_sfc + _alpha * neural_out.sw_net_sfc,
-            lw_net_sfc=trad_out.lw_net_sfc + _alpha * neural_out.lw_net_sfc,
-            sw_up_toa=trad_out.sw_up_toa + _alpha * neural_out.sw_up_toa,
-            lw_up_toa=trad_out.lw_up_toa + _alpha * neural_out.lw_up_toa,
-            sw_down_toa=trad_out.sw_down_toa + _alpha * neural_out.sw_down_toa,
+            **_physics_output_kwargs(
+                dT_dt=trad_out.dT_dt + _alpha * neural_out.dT_dt,
+                dq_v_dt=trad_out.dq_v_dt + _alpha * neural_out.dq_v_dt,
+                dq_c_dt=trad_out.dq_c_dt + _alpha * neural_out.dq_c_dt,
+                dq_r_dt=trad_out.dq_r_dt + _alpha * neural_out.dq_r_dt,
+                precip=trad_out.precip + _alpha * neural_out.precip,
+                sw_net_sfc=trad_out.sw_net_sfc + _alpha * neural_out.sw_net_sfc,
+                lw_net_sfc=trad_out.lw_net_sfc + _alpha * neural_out.lw_net_sfc,
+                sw_up_toa=trad_out.sw_up_toa + _alpha * neural_out.sw_up_toa,
+                lw_up_toa=trad_out.lw_up_toa + _alpha * neural_out.lw_up_toa,
+                sw_down_toa=trad_out.sw_down_toa + _alpha * neural_out.sw_down_toa,
+                reference_3d=trad_out.dT_dt,
+                template=trad_out,
+                conv_prog=conv_prog,
+            )
         )
 
         # Held radiation comes from the traditional branch

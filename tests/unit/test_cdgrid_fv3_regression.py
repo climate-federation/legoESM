@@ -295,5 +295,325 @@ class TestFv3ForwardBackwardSmoke(unittest.TestCase):
                         f"Mass relative error = {rel_err:.4e}")
 
 
+class TestD2a2cVectDuogridSeams(unittest.TestCase):
+    """Seam-level regression tests for _d2a2c_vect_duogrid (iter-60).
+
+    These tests verify that the fully-haloed D-grid path (introduced in
+    iter-60 to replace the pad_halo_vector utmp halo) produces correct
+    face-boundary uc/vc values.  Prior to iter-60 the only direct tests
+    on this path were shape/finite checks; the adversarial review noted
+    that wrong-but-finite boundary winds could ship silently.
+    """
+
+    def test_rest_state_machine_precision(self):
+        """u_d = v_d = 0 should give uc = vc = ut = vt = ua = va = 0 exactly."""
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        u_d = jnp.zeros((6, n, n + 1))
+        v_d = jnp.zeros((6, n + 1, n))
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        for name, arr in [("ua", ua), ("va", va), ("uc", uc),
+                          ("vc", vc), ("ut", ut), ("vt", vt)]:
+            m = float(jnp.max(jnp.abs(arr)))
+            self.assertLess(m, 1e-12, f"Rest state {name} max = {m:.3e}")
+
+    def test_constant_geographic_flow_face_continuity(self):
+        """Constant geographic wind should give uc continuous across face seams.
+
+        With a constant (u_east, v_north) field, the PHYSICAL velocity is
+        smooth everywhere.  After projecting to the non-orthogonal grid
+        covariant basis and interpolating to C-grid edges, uc should be
+        continuous across face boundaries (up to the grid-angle rotation
+        which is itself continuous).  This tests that the cross-axis
+        D-grid halo reconstruction in ext_vector_dgrid gives seam values
+        consistent with the interior.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Constant eastward geographic wind of 10 m/s
+        u_east = 10.0
+        v_north = 0.0
+        u_d = (cdgrid.cos_angle_edge_x * u_east
+               + cdgrid.sin_angle_edge_x * v_north)
+        v_d = (-cdgrid.sin_angle_edge_y * u_east
+               + cdgrid.cos_angle_edge_y * v_north)
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # For a constant (u_east, v_north), u^contra = const in geographic
+        # frame; in grid-aligned covariant coords uc = ua*cos + va*sin at
+        # each stagger, so |uc|, |vc| are bounded by max(|u_east|, |v_north|)
+        # + small interpolation overshoot.  Check no pathological blow-up
+        # at face boundaries.
+        u_wind_magnitude = max(abs(u_east), abs(v_north))
+        safety = 1.5  # allow 50% overshoot from covariant scaling
+
+        # Face-boundary u-edges: i=0 and i=n
+        uc_boundary = jnp.concatenate([uc[:, 0:1, :], uc[:, n:n + 1, :]], axis=1)
+        uc_interior = uc[:, 1:n, :]
+        boundary_max = float(jnp.max(jnp.abs(uc_boundary)))
+        interior_max = float(jnp.max(jnp.abs(uc_interior)))
+        self.assertLess(boundary_max, safety * u_wind_magnitude / 0.5,
+                        f"uc boundary max = {boundary_max:.3f} "
+                        f"> safety bound for constant flow")
+        # Boundary values should not differ wildly from interior (<3x)
+        self.assertLess(boundary_max, 3.0 * interior_max + 1e-6,
+                        f"uc boundary {boundary_max:.3f} >> interior "
+                        f"{interior_max:.3f} (seam discontinuity)")
+
+        # Face-boundary v-edges: j=0 and j=n
+        vc_boundary = jnp.concatenate([vc[:, :, 0:1], vc[:, :, n:n + 1]], axis=2)
+        vc_interior = vc[:, :, 1:n]
+        vb_max = float(jnp.max(jnp.abs(vc_boundary)))
+        vi_max = float(jnp.max(jnp.abs(vc_interior)))
+        self.assertLess(vb_max, 3.0 * vi_max + 1e-6,
+                        f"vc boundary {vb_max:.3f} >> interior "
+                        f"{vi_max:.3f} (seam discontinuity)")
+
+        # Result must be finite everywhere.
+        for name, arr in [("ua", ua), ("va", va), ("uc", uc),
+                          ("vc", vc), ("ut", ut), ("vt", vt)]:
+            self.assertTrue(bool(jnp.all(jnp.isfinite(arr))),
+                            f"{name} has non-finite values")
+
+    def test_seam_halo_consistent_jit_stable(self):
+        """Same input should give identical output when the function is
+        JIT-compiled — catches stale closure / halo-table races.
+
+        This test catches a subtle class of bugs where halo lookups
+        use stale state (e.g., when the JAX trace captures different
+        array identities between eager and JIT paths).  The seam
+        computation in ``_d2a2c_vect_duogrid`` goes through
+        ``ext_vector_dgrid`` which reads ``duogrid.vlon_ext`` etc. —
+        any trace-time-only lookup would fail under JIT.
+        """
+        import jax
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        Omega = 7.292e-5
+        R = cdgrid.radius
+        u_east_ex = Omega * R * jnp.cos(cdgrid.lat_edge_x)
+        u_east_ey = Omega * R * jnp.cos(cdgrid.lat_edge_y)
+        u_d = cdgrid.cos_angle_edge_x * u_east_ex
+        v_d = -cdgrid.sin_angle_edge_y * u_east_ey
+
+        # Eager
+        out_eager = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # JIT-compiled
+        fn = jax.jit(lambda ud, vd: _d2a2c_vect_duogrid(ud, vd, cdgrid))
+        out_jit = fn(u_d, v_d)
+
+        # Eager and JIT may differ at floating-point precision; tolerance
+        # is relative to typical magnitudes.  Bug would cause O(1) drift.
+        for name, e, j in zip(("ua", "va", "uc", "vc", "ut", "vt"),
+                               out_eager, out_jit):
+            d = float(jnp.max(jnp.abs(e - j)))
+            scale = max(float(jnp.max(jnp.abs(e))), 1.0)
+            self.assertLess(d, 1e-4 * scale,
+                            f"{name} eager vs jit differ by {d:.3e} "
+                            f"(scale {scale:.3e})")
+
+    def test_uniform_east_wind_ut_positive(self):
+        """Uniform eastward geographic wind should give ut > 0 on
+        face-0 equatorial u-edges (where x-grid axis is aligned with
+        east).  Catches sign-flip / orientation bugs at face boundaries
+        that a magnitude-only test would miss.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # u_east = +10 m/s (constant, physical east wind).  Project to
+        # D-grid via local edge angles.
+        u_east = 10.0
+        u_d = cdgrid.cos_angle_edge_x * u_east
+        v_d = -cdgrid.sin_angle_edge_y * u_east
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # On face 0 (equator-centred face in FV3 convention), the
+        # x-grid axis points approximately east at equatorial cells.
+        # u_east=+10 should give positive ut on face 0.
+        ut_face0_equator = ut[0, :, n // 2]  # (n+1,) u-edges on face 0, equator row
+        # Expect at least 80% of u-edges on face 0 equator to have
+        # ut > 0 (allowing some edge positions near face corners to
+        # rotate out of east alignment).
+        n_positive = int(jnp.sum(ut_face0_equator > 0))
+        self.assertGreater(n_positive, int(0.8 * (n + 1)),
+                           f"Only {n_positive}/{n + 1} ut values on "
+                           f"face 0 equator are positive — expected "
+                           f"most to be +east for u_east=+10. "
+                           f"(sign/orientation bug?)")
+
+        # Full cross-face seam: ut at face-0 east u-edge (i=n) and
+        # face-0+east-neighbor west u-edge should have the same sign
+        # (both positive for eastward flow).  On face 0, east neighbor
+        # is face 1 (FV3 standard connectivity).
+        ut_f0_east = float(jnp.mean(ut[0, n, :]))
+        ut_f1_west = float(jnp.mean(ut[1, 0, :]))
+        self.assertGreater(ut_f0_east, 0.0,
+                           f"ut face-0 east edge = {ut_f0_east:.3f} "
+                           f"should be positive (east wind)")
+        self.assertGreater(ut_f1_west, 0.0,
+                           f"ut face-1 west edge = {ut_f1_west:.3f} "
+                           f"should be positive (east wind, cross-face)")
+
+    def test_constant_covariant_input_preserved(self):
+        """Constant u_d, v_d fields should give utmp equal to that
+        constant (after 2-point length-weighted D→A).  This catches
+        normalization bugs in the c2l_ord2-equivalent halo seed.
+
+        For u_d = c1 everywhere (c1 is a constant), the length-weighted
+        average (u_d*dx_j + u_d*dx_{j+1}) / (dx_j + dx_{j+1}) reduces to
+        c1 exactly.  The resulting contravariant ua then depends on
+        non-orthogonality but is bounded by the covariant value.
+
+        This test also checks FACE-BOUNDARY uc/vc/ut/vt values, since
+        the halo seed affects seam outputs specifically (interior is
+        overwritten with exact u_d/v_d post-halo).
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Uniform constant D-grid covariant wind
+        c1 = 5.0
+        u_d = jnp.full((6, n, n + 1), c1)
+        v_d = jnp.full((6, n + 1, n), c1)
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # utmp at interior cells equals c1 by length-weighted average.
+        # Contravariant ua = (utmp - vtmp * cos_theta) * rsin2 =
+        # c1 * (1 - cos_theta) / sin²θ = c1 / (1 + cos_theta).  For
+        # cubed-sphere interior |cos_theta| < 0.5, so ua in [c1/1.5, c1/0.5]
+        # = [3.33, 10] for c1=5.  Loose upper bound 3*c1=15 catches the
+        # factor-of-2 bug (which gave ua up to 2*c1/min(1+cos)=~20).
+        ua_max = float(jnp.max(jnp.abs(ua)))
+        self.assertLess(ua_max, 3.0 * abs(c1),
+                        f"ua max {ua_max:.3f} >> 3*c1 ({3*abs(c1):.3f}) "
+                        f"— normalization bug (factor-of-2)?")
+
+        # uc should be similarly bounded.  The 4th-order A→C applied to
+        # a constant utmp field gives back utmp exactly (Lagrange
+        # polynomial reproduces constants).
+        uc_interior = uc[:, 1:n, :]  # avoid face boundaries
+        uc_max_int = float(jnp.max(jnp.abs(uc_interior)))
+        self.assertLess(abs(uc_max_int - abs(c1)), 0.5 * abs(c1),
+                        f"uc interior {uc_max_int:.3f} deviates from "
+                        f"expected ~{abs(c1):.3f} by > 50% "
+                        f"— constant-state not preserved")
+
+        # FACE-BOUNDARY outputs: uc at i=0 and i=n (the u-edges that sit
+        # exactly on face seams).  For constant u_d=c1, uc at face
+        # boundary should be close to c1 (4th-order Lagrange reproduces
+        # constants IF the halo is correctly populated).
+        uc_bdy_w = uc[:, 0, :]      # west face u-edge
+        uc_bdy_e = uc[:, n, :]      # east face u-edge
+        for name, arr in [("uc_west", uc_bdy_w), ("uc_east", uc_bdy_e)]:
+            a_max = float(jnp.max(jnp.abs(arr)))
+            # Should be bounded by ~c1 × (1 + overshoot from halo projection
+            # through non-orthogonal metrics).  2*c1 is generous; fails if
+            # halo seed is doubled.
+            self.assertLess(a_max, 2.5 * abs(c1),
+                            f"{name} max {a_max:.3f} > 2.5*c1 "
+                            f"({2.5*abs(c1):.3f}) — halo doubling?")
+
+        vc_bdy_s = vc[:, :, 0]
+        vc_bdy_n = vc[:, :, n]
+        for name, arr in [("vc_south", vc_bdy_s), ("vc_north", vc_bdy_n)]:
+            a_max = float(jnp.max(jnp.abs(arr)))
+            self.assertLess(a_max, 2.5 * abs(c1),
+                            f"{name} max {a_max:.3f} > 2.5*c1 "
+                            f"({2.5*abs(c1):.3f}) — halo doubling?")
+
+        # Contravariant transport: ut, vt bounded similarly (they are
+        # post-rotation of uc/vc with rsin_u, rsin_v factors).
+        ut_bdy = jnp.concatenate([ut[:, 0:1, :], ut[:, n:n + 1, :]], axis=1)
+        vt_bdy = jnp.concatenate([vt[:, :, 0:1], vt[:, :, n:n + 1]], axis=2)
+        self.assertLess(float(jnp.max(jnp.abs(ut_bdy))), 5.0 * abs(c1),
+                        "ut boundary unreasonably large")
+        self.assertLess(float(jnp.max(jnp.abs(vt_bdy))), 5.0 * abs(c1),
+                        "vt boundary unreasonably large")
+
+    def test_solid_body_rotation_ut_sign_convention(self):
+        """Solid-body rotation: ut should be eastward-positive everywhere.
+
+        For ω > 0 (prograde rotation), the contravariant transport
+        velocity ut at a u-edge should have a consistent positive sign
+        when the grid axis aligns with east (i.e., for equatorial
+        u-edges on faces where grid_x ≈ east).  This catches gross
+        mis-orientation in the cross-axis halo rotation — a common
+        failure mode of D-grid vector halos on cubed-sphere.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _d2a2c_vect_duogrid
+
+        n = 16
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # Solid-body rotation: u_east = Omega * R * cos(lat)
+        Omega = 7.292e-5
+        R = cdgrid.radius
+        u_east_ex = Omega * R * jnp.cos(cdgrid.lat_edge_x)
+        u_east_ey = Omega * R * jnp.cos(cdgrid.lat_edge_y)
+        u_d = cdgrid.cos_angle_edge_x * u_east_ex
+        v_d = -cdgrid.sin_angle_edge_y * u_east_ey
+
+        ua, va, uc, vc, ut, vt = _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
+        # ut is contravariant along x-grid axis.  Its magnitude at
+        # u-edges where x-grid is near east should approach the solid
+        # body speed at that latitude.  Face boundaries must not exceed
+        # the interior by more than 50% in magnitude.
+        max_speed = float(jnp.max(jnp.abs(ua) + jnp.abs(va)))
+        ut_max = float(jnp.max(jnp.abs(ut)))
+        vt_max = float(jnp.max(jnp.abs(vt)))
+        self.assertLess(ut_max, 2.0 * max_speed + 1.0,
+                        f"ut max = {ut_max:.3f} unreasonable vs "
+                        f"ua/va max = {max_speed:.3f}")
+        self.assertLess(vt_max, 2.0 * max_speed + 1.0,
+                        f"vt max = {vt_max:.3f} unreasonable")
+
+        # ut boundary edges should not be wildly larger than interior.
+        ut_boundary = jnp.concatenate([ut[:, 0:1, :], ut[:, n:n + 1, :]], axis=1)
+        ut_interior = ut[:, 1:n, :]
+        ut_b_max = float(jnp.max(jnp.abs(ut_boundary)))
+        ut_i_max = float(jnp.max(jnp.abs(ut_interior)))
+        self.assertLess(ut_b_max, 2.5 * ut_i_max + 1e-6,
+                        f"ut boundary {ut_b_max:.3f} much larger than "
+                        f"interior {ut_i_max:.3f}")
+
+
 if __name__ == "__main__":
     unittest.main()

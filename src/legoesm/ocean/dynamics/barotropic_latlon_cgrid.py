@@ -26,6 +26,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_x_cgrid,
     gradient_y_cgrid,
 )
+from legoesm.ocean.dynamics.eta_floor import clamp_and_redistribute as _clamp_redistribute
 
 
 def _depth_average_to_faces(
@@ -120,6 +121,7 @@ def barotropic_substeps_latlon_cgrid(
     g = g.astype(eta_raw.dtype)
     eta_floor = min_water_col - H_bathy
     eta = jnp.maximum(eta_raw, eta_floor) * mask
+    _area = grid.area  # for mass-conserving floor clamp (#176)
 
     if F_slow_eta is None:
         F_slow_eta = jnp.zeros_like(eta)
@@ -214,10 +216,8 @@ def barotropic_substeps_latlon_cgrid(
         div_flux = divergence_cgrid(
             flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
         ).astype(eta.dtype)
-        eta_new = jnp.maximum(
-            eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask,
-            eta_floor,
-        ) * mask
+        eta_unfloored = (eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask) * mask
+        eta_new = _clamp_redistribute(eta_unfloored, eta_floor, mask, _area)
 
         # Backward: update velocity with UPDATED eta (compact gradient)
         deta_dx = gradient_x_cgrid(eta_new, grid).astype(eta.dtype)
@@ -272,7 +272,7 @@ def barotropic_substeps_latlon_cgrid(
             eta_new = (
                 eta_new + divergence_cgrid(flux_x, flux_y, grid).astype(eta.dtype)
             ) * mask
-            eta_new = jnp.maximum(eta_new, eta_floor) * mask
+            eta_new = _clamp_redistribute(eta_new, eta_floor, mask, _area)
 
         # Accumulate eta, U_bar, V_bar AFTER diffusion for time-averaging
         eta_sum_new = eta_sum_c + eta_new

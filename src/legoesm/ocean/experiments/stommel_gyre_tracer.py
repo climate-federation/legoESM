@@ -215,7 +215,9 @@ def _add_tracer_blob(state, grid_type: str, grid, z_coord,
     
     # Compute Gaussian blob on sphere
     # Use spherical distance for proper shape
-    r2 = (lat - lat_c)**2 + (np.cos(lat_c) * (lon - lon_c))**2
+    # Periodic longitude wrapping to [-π, π] for correct distance
+    dlon = np.mod(lon - lon_c + np.pi, 2.0 * np.pi) - np.pi
+    r2 = (lat - lat_c)**2 + (np.cos(lat_c) * dlon)**2
     S_blob = S_bg + S_amp * np.exp(-r2 / (2.0 * sigma**2))
     
     # Apply to salinity field

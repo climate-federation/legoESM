@@ -28,10 +28,11 @@
 - Read nearby implementation and tests before proposing or making changes.
 - If a request is ambiguous and could affect numerics, physics, APIs, or scientific conclusions, ask a clarifying question before editing.
 - Prefer minimal, local diffs. Do not refactor unrelated code during targeted bug fixes.
+- **Mandatory pre-implementation search**: BEFORE writing any new function, helper, class, operator, diagnostic, init/load path, loss, or numerical routine, you MUST first search the codebase for an existing implementation. Use Grep/Glob/Explore to look across `src/legoesm/` for: similar function names, similar docstrings, similar formulas, and existing modules in the relevant subpackage (e.g., `thermo.py`, `constants.py`, `eos.py`, `ml/loss.py`, `diagnostics/`, `core/`, `atmosphere/physics/_shared.py`). State explicitly in your response what you searched for and what you found before adding new code. If something similar exists, extend or factor it — do not duplicate.
 - Reuse existing shared functions, operators, diagnostics, initial-condition builders, and init/load paths whenever possible.
-- Before adding new helpers or new initialization logic, search for an existing implementation that can be extended or factored into a shared location.
-- Avoid duplicating numerics across dycores, physics packages, grids, or test setups when a common implementation is feasible.
+- Avoid duplicating numerics across dycores, physics packages, grids, or test setups when a common implementation is feasible. Copy-paste with only indexing or naming changes is forbidden.
 - Do not trade correctness for speed by skipping validation or making speculative edits.
+- **No laziness on hard problems or large code production**: when a task is challenging (numerical bug hunts, dycore ports, multi-file refactors, new parameterizations) or requires substantial code (>100 LOC, multi-component changes, full operator chains, large test matrices), you MUST do the full work. Do not stub functions with `pass` or `raise NotImplementedError`. Do not write a partial implementation and call it done. Do not skip the harder corner cases (edge cells, boundary halos, corner stencils, non-duogrid branches, MPI/sharded paths, AD/VJP support) and quietly leave them for later. Do not abbreviate test coverage to a single happy path. If the task is genuinely too large for one pass, say so explicitly, list every piece that remains, and quantify the residual risk — never imply completion you have not delivered.
 
 ## JAX Engineering Rules
 - Keep functions pure and pytree-friendly.

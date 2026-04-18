@@ -199,13 +199,6 @@ class TestTurbulenceSchemes:
         tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/edmf")
 
-    def test_ml_emulator(self):
-        state, grid, sigma = _make_hydrostatic_setup()
-        cfg = _none_config(turbulence=TurbulenceConfig(scheme="ml_emulator"))
-        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
-        _check_tendencies(tend, "turbulence/ml_emulator")
-
-
 # ============================================================
 # MICROPHYSICS
 # ============================================================

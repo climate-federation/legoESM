@@ -89,7 +89,7 @@ class _MockModel:
 
 def _mock_step_unified(
     need_rad,
-    T, p_s, q_v, q_c, q_r, u, v,
+    T, p_s, q_v, q_c, q_r, conv_prog, u, v,
     sst, sic, lat, lon,
     day_of_year, seconds_of_day, dt,
     solar_weights, s_0,
@@ -120,6 +120,7 @@ def _mock_step_unified(
         dN_c_dt=jnp.zeros(shape_3d),
         dN_r_dt=jnp.zeros(shape_3d),
         dN_i_dt=jnp.zeros(shape_3d),
+        conv_prog=conv_prog,
     )
     # Return held unchanged (no radiation update in mock)
     held_new = (
@@ -225,7 +226,7 @@ class TestSegmentCarryRoundtrip:
             step_index=42,
         )
 
-        (new_state, qv_out, qc_out, qr_out, held_tuple, step_idx, precip,
+        (new_state, qv_out, qc_out, qr_out, conv_prog_out, held_tuple, step_idx, precip,
          shflx_out, lhflx_out) = unpack_carry(carry, state)
 
         np.testing.assert_array_equal(np.asarray(new_state.T.data),
@@ -235,6 +236,7 @@ class TestSegmentCarryRoundtrip:
         np.testing.assert_array_equal(np.asarray(qv_out), np.asarray(q_v))
         np.testing.assert_array_equal(np.asarray(qc_out), np.asarray(q_c))
         np.testing.assert_array_equal(np.asarray(qr_out), np.asarray(q_r))
+        np.testing.assert_array_equal(np.asarray(conv_prog_out), np.zeros((shape_2d[0] * shape_2d[1] * shape_2d[2],)))
         assert step_idx == 42
 
     def test_unpack_preserves_field_metadata(self):
@@ -518,7 +520,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         phys_out, held_new = step_unified(
             need_rad,
             T_new, p_s_new,
-            carry.q_v, carry.q_c, carry.q_r,
+            carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
             u_new, v_new,
             forcing.sst, forcing.sic,
             args["lat"], args["lon"],
@@ -568,6 +570,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             u=u_upd, v=v_upd, T=T_upd,
             p_s=p_s_new, phis=carry.phis,
             q_v=q_v_upd, q_c=q_c_upd, q_r=q_r_upd,
+            conv_prog=phys_out.conv_prog,
             held_dT_rad=held_new[0],
             held_sw_net_sfc=held_new[1],
             held_lw_net_sfc=held_new[2],

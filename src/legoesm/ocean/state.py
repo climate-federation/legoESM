@@ -124,6 +124,7 @@ class OceanConfig(NamedTuple):
     physics: object = None  # OceanPhysicsConfig or None (legacy mode)
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
+    barotropic_staggering: str = "a_grid"  # "a_grid" or "c_grid" (#182)
 
 
 # ==============================================================================
@@ -408,6 +409,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
+    tracer_advection: str = "tvd"  # "upwind" or "tvd" (Van Leer, #170)
     physics: object = None
     eos: str = "wright"
     eos_linear: object = None

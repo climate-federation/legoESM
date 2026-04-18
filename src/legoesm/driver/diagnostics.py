@@ -473,12 +473,16 @@ class DiagnosticCollector:
         iday = int(round(elapsed_day))
         if iday in self.snapshot_days:
             T_sfc_snap = blend_surface_temperature(sst, sic, T_ice)
+            q_c_low = np.asarray(jnp.zeros_like(q_v[..., -1]) if q_c is None else q_c[..., -1]) * 1000.0
+            q_r_low = np.asarray(jnp.zeros_like(q_v[..., -1]) if q_r is None else q_r[..., -1]) * 1000.0
             self.snapshots[iday] = {
                 'SST': np.asarray(sst),
                 'SIC': np.asarray(sic),
                 'T_sfc': np.asarray(T_sfc_snap),
                 'T_low': np.asarray(state.T.data[..., -1]),
                 'q_v_low': np.asarray(q_v[..., -1]) * 1000.0,
+                'q_c_low': q_c_low,
+                'q_r_low': q_r_low,
                 'precip': np.asarray(precip_total) * 86400.0,
                 'wind': np.asarray(
                     jnp.sqrt(state.u.data[..., -1] ** 2 + state.v.data[..., -1] ** 2)

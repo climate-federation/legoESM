@@ -92,7 +92,7 @@ class DuoGridData(NamedTuple):
 
 def _cart2lonlat(x: np.ndarray, y: np.ndarray, z: np.ndarray):
     """Cartesian (x, y, z) on unit sphere → (lon, lat) in radians."""
-    lon = np.arctan2(y, x)
+    lon = np.mod(np.arctan2(y, x), 2.0 * np.pi)  # [0, 2π)
     lat = np.arctan2(z, np.sqrt(x**2 + y**2))
     return lon, lat
 
@@ -1018,8 +1018,9 @@ def pad_halo_dgrid(
     cos_angle_edge_y: jax.Array,
     sin_angle_edge_y: jax.Array,
     duogrid: 'DuoGridData | None' = None,
+    halo: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
-    """Pad D-grid staggered fields with halo=1 from neighbor faces.
+    """Pad D-grid staggered fields with halo from neighbor faces.
 
     FV3 exchanges D-grid winds via mpp_update_domains with DGRID_NE
     gridtype before d2a2c_vect. This provides the boundary D-grid
@@ -1034,15 +1035,23 @@ def pad_halo_dgrid(
     v_d : (6, n+1, n) D-grid y-velocity at i-edges
     cos_angle_edge_x, sin_angle_edge_x : (6, n, n+1) exact edge angles
     cos_angle_edge_y, sin_angle_edge_y : (6, n+1, n) exact edge angles
+    halo : int, default 1
+        Halo width.  FV3 uses ``ng=3`` but ``halo=2`` gives enough
+        additional stencil support for 4th-order A→C recomputation
+        directly on D-grid without a separate scalar exchange.
 
     Returns
     -------
-    u_d_pad : (6, n, n+3) D-grid u padded with 1 halo on each j-side
-    v_d_pad : (6, n+3, n) D-grid v padded with 1 halo on each i-side
+    u_d_pad : (6, n, n + 2*halo + 1) D-grid u padded in j direction
+    v_d_pad : (6, n + 2*halo + 1, n) D-grid v padded in i direction
     """
     from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 
+    if halo not in (1, 2):
+        raise NotImplementedError(f"Only halo=1 and halo=2 supported, got {halo}")
+
     n = u_d.shape[1]
+    h = halo
 
     # Convert D-grid to geographic using EXACT edge angles.
     ca_j = cos_angle_edge_x   # (6, n, n+1)
@@ -1055,105 +1064,87 @@ def pad_halo_dgrid(
     u_east_vd = -sa_i * v_d
     v_north_vd = ca_i * v_d
 
-    # Pad u_d along j (axis 2): add 1 halo on each side → (6, n, n+3)
-    u_d_pad = jnp.zeros((6, n, n + 3), dtype=u_d.dtype)
-    u_d_pad = u_d_pad.at[:, :, 1:-1].set(u_d)
+    # Pad u_d along j (axis 2): halo on each side → (6, n, n + 2h + 1)
+    u_d_pad = jnp.zeros((6, n, n + 2 * h + 1), dtype=u_d.dtype)
+    u_d_pad = u_d_pad.at[:, :, h:-h].set(u_d)
 
-    # Pad v_d along i (axis 1): add 1 halo on each side → (6, n+3, n)
-    v_d_pad = jnp.zeros((6, n + 3, n), dtype=v_d.dtype)
-    v_d_pad = v_d_pad.at[:, 1:-1, :].set(v_d)
+    # Pad v_d along i (axis 1): halo on each side → (6, n + 2h + 1, n)
+    v_d_pad = jnp.zeros((6, n + 2 * h + 1, n), dtype=v_d.dtype)
+    v_d_pad = v_d_pad.at[:, h:-h, :].set(v_d)
 
-    # Fill halo from neighbor faces using CONNECTIVITY
-    for face in range(6):
-        # u_d j-halo: need u_d at j=-1 (south) and j=n+1 (north)
-        # South: j=0 is the first j-edge. j=-1 comes from SOUTH neighbor.
-        nbr_f, nbr_e, rev = CONNECTIVITY[face][SOUTH]
-        # The neighbor's edge-adjacent u_d strip
+    def _select_src(arr_ud_e, arr_ud_n, arr_vd_e, arr_vd_n,
+                    nbr_f, nbr_e, rev, depth):
+        """Pick neighbor's edge strip at the given halo depth.
+
+        ``depth`` = 1 → edge adjacent to neighbor's boundary (index -2 / 1)
+        ``depth`` = 2 → edge 2 in from neighbor's boundary (index -3 / 2)
+        """
         if nbr_e == NORTH:
-            src = u_east_ud[nbr_f, :, -2]  # one inside neighbor's boundary
-            src_v = v_north_ud[nbr_f, :, -2]
+            src   = arr_ud_e[nbr_f, :, -(depth + 1)]
+            src_v = arr_ud_n[nbr_f, :, -(depth + 1)]
         elif nbr_e == SOUTH:
-            src = u_east_ud[nbr_f, :, 1]
-            src_v = v_north_ud[nbr_f, :, 1]
+            src   = arr_ud_e[nbr_f, :, depth]
+            src_v = arr_ud_n[nbr_f, :, depth]
         elif nbr_e == EAST:
-            src = u_east_vd[nbr_f, -2, :]
-            src_v = v_north_vd[nbr_f, -2, :]
+            src   = arr_vd_e[nbr_f, -(depth + 1), :]
+            src_v = arr_vd_n[nbr_f, -(depth + 1), :]
         else:  # WEST
-            src = u_east_vd[nbr_f, 1, :]
-            src_v = v_north_vd[nbr_f, 1, :]
+            src   = arr_vd_e[nbr_f, depth, :]
+            src_v = arr_vd_n[nbr_f, depth, :]
         if rev:
             src = src[::-1]
             src_v = src_v[::-1]
-        # Convert back to this face's grid-aligned at boundary
-        ca_bdy = ca_j[face, :, 0]  # angle at first j-edge
-        sa_bdy = sa_j[face, :, 0]
-        u_local = ca_bdy * src + sa_bdy * src_v
-        u_d_pad = u_d_pad.at[face, :, 0].set(u_local)
+        return src, src_v
 
-        # North: j=n+1 comes from NORTH neighbor
-        nbr_f, nbr_e, rev = CONNECTIVITY[face][NORTH]
-        if nbr_e == SOUTH:
-            src = u_east_ud[nbr_f, :, 1]
-            src_v = v_north_ud[nbr_f, :, 1]
-        elif nbr_e == NORTH:
-            src = u_east_ud[nbr_f, :, -2]
-            src_v = v_north_ud[nbr_f, :, -2]
-        elif nbr_e == WEST:
-            src = u_east_vd[nbr_f, 1, :]
-            src_v = v_north_vd[nbr_f, 1, :]
-        else:  # EAST
-            src = u_east_vd[nbr_f, -2, :]
-            src_v = v_north_vd[nbr_f, -2, :]
-        if rev:
-            src = src[::-1]
-            src_v = src_v[::-1]
-        ca_bdy = ca_j[face, :, -1]
-        sa_bdy = sa_j[face, :, -1]
-        u_local = ca_bdy * src + sa_bdy * src_v
-        u_d_pad = u_d_pad.at[face, :, -1].set(u_local)
+    # Fill halo from neighbor faces using CONNECTIVITY.
+    # For each face and each of the 4 edges, we fill ``halo`` layers
+    # deep using the neighbor's edges at increasing depth from their
+    # boundary (depth=1 closest, depth=h furthest).
+    for face in range(6):
+        # --- u_d j-halo ---
+        nbr_f_s, nbr_e_s, rev_s = CONNECTIVITY[face][SOUTH]
+        nbr_f_n, nbr_e_n, rev_n = CONNECTIVITY[face][NORTH]
+        # Boundary angles for rotation-back to local frame
+        ca_bdy_s = ca_j[face, :, 0]
+        sa_bdy_s = sa_j[face, :, 0]
+        ca_bdy_n = ca_j[face, :, -1]
+        sa_bdy_n = sa_j[face, :, -1]
+        for d in range(1, h + 1):
+            # South halo layer at padded j = h - d (d=1 → h-1, d=h → 0)
+            src, src_v = _select_src(u_east_ud, v_north_ud,
+                                      u_east_vd, v_north_vd,
+                                      nbr_f_s, nbr_e_s, rev_s, d)
+            u_local = ca_bdy_s * src + sa_bdy_s * src_v
+            u_d_pad = u_d_pad.at[face, :, h - d].set(u_local)
 
-        # v_d i-halo: need v_d at i=-1 (west) and i=n+1 (east)
-        nbr_f, nbr_e, rev = CONNECTIVITY[face][WEST]
-        if nbr_e == EAST:
-            src = u_east_vd[nbr_f, -2, :]
-            src_v = v_north_vd[nbr_f, -2, :]
-        elif nbr_e == WEST:
-            src = u_east_vd[nbr_f, 1, :]
-            src_v = v_north_vd[nbr_f, 1, :]
-        elif nbr_e == NORTH:
-            src = u_east_ud[nbr_f, :, -2]
-            src_v = v_north_ud[nbr_f, :, -2]
-        else:  # SOUTH
-            src = u_east_ud[nbr_f, :, 1]
-            src_v = v_north_ud[nbr_f, :, 1]
-        if rev:
-            src = src[::-1]
-            src_v = src_v[::-1]
-        ca_bdy = ca_i[face, 0, :]
-        sa_bdy = sa_i[face, 0, :]
-        v_local = -sa_bdy * src + ca_bdy * src_v
-        v_d_pad = v_d_pad.at[face, 0, :].set(v_local)
+            # North halo layer at padded j = h + n + (d-1) + 1 = h + n + d
+            src, src_v = _select_src(u_east_ud, v_north_ud,
+                                      u_east_vd, v_north_vd,
+                                      nbr_f_n, nbr_e_n, rev_n, d)
+            u_local = ca_bdy_n * src + sa_bdy_n * src_v
+            u_d_pad = u_d_pad.at[face, :, h + n + d].set(u_local)
 
-        nbr_f, nbr_e, rev = CONNECTIVITY[face][EAST]
-        if nbr_e == WEST:
-            src = u_east_vd[nbr_f, 1, :]
-            src_v = v_north_vd[nbr_f, 1, :]
-        elif nbr_e == EAST:
-            src = u_east_vd[nbr_f, -2, :]
-            src_v = v_north_vd[nbr_f, -2, :]
-        elif nbr_e == SOUTH:
-            src = u_east_ud[nbr_f, :, 1]
-            src_v = v_north_ud[nbr_f, :, 1]
-        else:  # NORTH
-            src = u_east_ud[nbr_f, :, -2]
-            src_v = v_north_ud[nbr_f, :, -2]
-        if rev:
-            src = src[::-1]
-            src_v = src_v[::-1]
-        ca_bdy = ca_i[face, -1, :]
-        sa_bdy = sa_i[face, -1, :]
-        v_local = -sa_bdy * src + ca_bdy * src_v
-        v_d_pad = v_d_pad.at[face, -1, :].set(v_local)
+        # --- v_d i-halo ---
+        nbr_f_w, nbr_e_w, rev_w = CONNECTIVITY[face][WEST]
+        nbr_f_e, nbr_e_e, rev_e = CONNECTIVITY[face][EAST]
+        ca_bdy_w = ca_i[face, 0, :]
+        sa_bdy_w = sa_i[face, 0, :]
+        ca_bdy_e = ca_i[face, -1, :]
+        sa_bdy_e = sa_i[face, -1, :]
+        for d in range(1, h + 1):
+            # West halo layer at padded i = h - d
+            src, src_v = _select_src(u_east_ud, v_north_ud,
+                                      u_east_vd, v_north_vd,
+                                      nbr_f_w, nbr_e_w, rev_w, d)
+            v_local = -sa_bdy_w * src + ca_bdy_w * src_v
+            v_d_pad = v_d_pad.at[face, h - d, :].set(v_local)
+
+            # East halo layer at padded i = h + n + d
+            src, src_v = _select_src(u_east_ud, v_north_ud,
+                                      u_east_vd, v_north_vd,
+                                      nbr_f_e, nbr_e_e, rev_e, d)
+            v_local = -sa_bdy_e * src + ca_bdy_e * src_v
+            v_d_pad = v_d_pad.at[face, h + n + d, :].set(v_local)
 
     return u_d_pad, v_d_pad
 

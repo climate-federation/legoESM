@@ -468,6 +468,42 @@ def cgrid_divergence(u_c, v_c, cdgrid):
 
 
 # ==============================================================================
+# C-grid compact gradient (cell centre → edge midpoints)
+# ==============================================================================
+
+def cgrid_gradient_2d(eta, cdgrid):
+    """Compact C-grid gradient of a cell-centre scalar to edge midpoints.
+
+    Uses single-cell differences scaled by centre-to-centre distances
+    (``dxc``, ``dyc``), matching the FV3 Bernoulli gradient stencil.
+
+    Parameters
+    ----------
+    eta : jax.Array, shape (6, n, n)
+        Cell-centre scalar (e.g. free-surface height).
+    cdgrid : CubedSphereCDGrid
+
+    Returns
+    -------
+    deta_dx : jax.Array, shape (6, n+1, n)
+        Gradient at x-edge (u) midpoints.
+    deta_dy : jax.Array, shape (6, n, n+1)
+        Gradient at y-edge (v) midpoints.
+    """
+    eta_pad = _pad_halo_auto(eta, cdgrid)
+    # eta_pad shape: (6, n+2, n+2)  (1-cell halo on each side)
+
+    # x-gradient at u-points: (eta[i,j] - eta[i-1,j]) / dxc
+    # In padded coords: interior is [1:-1, 1:-1], so u-faces run 0..n
+    deta_dx = (eta_pad[:, 1:, 1:-1] - eta_pad[:, :-1, 1:-1]) * cdgrid.rdxc
+
+    # y-gradient at v-points: (eta[i,j] - eta[i,j-1]) / dyc
+    deta_dy = (eta_pad[:, 1:-1, 1:] - eta_pad[:, 1:-1, :-1]) * cdgrid.rdyc
+
+    return deta_dx, deta_dy
+
+
+# ==============================================================================
 # C-grid mass flux with PPM transport
 # ==============================================================================
 
@@ -550,6 +586,18 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
     # --- Flux divergence ---
     flux_x = h_face_x * u_c * dy
     flux_y = h_face_y * v_c * dx
+
+    # Duogrid flux synchronization: average boundary fluxes between adjacent
+    # faces so that mass leaving face A = mass entering face B.  Required for
+    # duogrid where each face independently computes boundary fluxes from its
+    # own extended grid.  Matches FV3 dyn_core.F90:853-900.
+    # NOT applied for non-duogrid: PPM boundary asymmetry is a feature of
+    # the higher-order reconstruction, and averaging reduces accuracy (tested:
+    # unconditional sync causes 110x W2 regression).
+    dg = cdgrid.base.duogrid
+    if dg is not None and dg.ng >= 2:
+        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        flux_x, flux_y = synchronize_cgrid_fluxes(flux_x, flux_y, n)
 
     net_x = flux_x[:, 1:] - flux_x[:, :-1]
     net_y = flux_y[:, :, 1:] - flux_y[:, :, :-1]
@@ -1482,6 +1530,10 @@ def fv3_sw_tendencies(
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
 
     # (e) Corner winds from halo-exchanged cell-centre velocities.
+    # Both vorticity and gradient use haloed cell-centre data, giving
+    # CONSISTENT interpolation errors that cancel in geostrophic balance
+    # (tested: D-grid circulation vorticity breaks this cancellation,
+    # causing 3x W2 regression despite 4x W5 improvement).
     from legoesm.grids.halo import pad_halo_vector
     grid = cdgrid.base
     dg = grid.duogrid
@@ -1497,20 +1549,7 @@ def fv3_sw_tendencies(
     v_corner = 0.25 * (v_cc_pad[:, :-1, :-1] + v_cc_pad[:, 1:, :-1]
                         + v_cc_pad[:, :-1, 1:] + v_cc_pad[:, 1:, 1:])
 
-    # (f) C-grid circulation vorticity at D-grid corners.
-    # Uses physical C-grid velocities (u_c, v_c) from fv3_cc2c which
-    # correctly handle face boundaries via vector halo exchange.
-    # This replaces the D-grid corner-wind vorticity which had face-boundary
-    # artifacts from the cell-centre→corner interpolation.
-    #
-    # Circulation at corners: the C-grid face-normal velocities times face
-    # edge lengths give the volume flux through each face. Divergence of
-    # these fluxes at corners gives (negative) vorticity by Stokes' theorem
-    # when using the dual-mesh interpretation.
-    use_duogrid = dg is not None and dg.ng >= 2
-
-    # Use the existing dgrid_vorticity (which computes circulation properly
-    # with non-orthogonality corrections) but with improved corner winds
+    # (f) Cell-centre vorticity from corner winds (consistent with gradient).
     zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
     zeta_abs = zeta + cdgrid.base.f
     zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)

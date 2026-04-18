@@ -342,6 +342,9 @@ class ModelDriver:
                     dataset="custom", path=cfg.forcing_path,
                     sst_var=cfg.sst_var or "sst",
                     sic_var=cfg.sic_var or "sic",
+                    time_var=cfg.time_var or "time",
+                    lat_var=cfg.lat_var or "lat",
+                    lon_var=cfg.lon_var or "lon",
                     sst_offset=cfg.sst_offset, sic_scale=cfg.sic_scale,
                     sic_path=getattr(cfg, 'sic_path', ''),
                 )
@@ -1424,6 +1427,7 @@ class ModelDriver:
         if self._ensemble_size > 1:
             shape_2d = shape_2d[1:]
         shape_3d = (*shape_2d, cfg.grid.nlev)
+        conv_ncol = int(self.physics.adapter.ncol) if self.physics is not None else int(np.prod(shape_2d))
 
         # Solar forcing
         solar_init = get_solar_forcing_at_time(self._solar_config, START_DAY)
@@ -1448,6 +1452,20 @@ class ModelDriver:
         held_sw_up_toa = _aux.get("held_sw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_lw_up_toa = _aux.get("held_lw_up_toa", jnp.zeros(_ens_2d, dtype=_sd))
         held_sw_down_toa = _aux.get("held_sw_down_toa", jnp.zeros(_ens_2d, dtype=_sd))
+        conv_shape = (_ens, conv_ncol) if _ens > 1 else (conv_ncol,)
+        if cfg.convection in ("mass_flux", "edmf"):
+            from legoesm.atmosphere.physics.convection.config import ConvectionConfig
+            _conv_cfg = ConvectionConfig(scheme=cfg.convection)
+        else:
+            _conv_cfg = None
+
+        if cfg.convection == "mass_flux":
+            conv_prog_default = jnp.full(conv_shape, _conv_cfg.mass_flux.M_c_init, dtype=_sd)
+        elif cfg.convection == "edmf":
+            conv_prog_default = jnp.full(conv_shape, _conv_cfg.edmf.a_u_init, dtype=_sd)
+        else:
+            conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
+        conv_prog = _aux.get("conv_prog", conv_prog_default)
 
         # External forcing (rank-local p_s and lat for MPI)
         _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
@@ -1473,6 +1491,7 @@ class ModelDriver:
             "held_sw_up_toa": held_sw_up_toa,
             "held_lw_up_toa": held_lw_up_toa,
             "held_sw_down_toa": held_sw_down_toa,
+            "conv_prog": conv_prog,
             "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
             "lat_deg_grid": lat_deg_grid,
             "_sd": _sd,
@@ -1535,6 +1554,7 @@ class ModelDriver:
         held_sw_up_toa = ctx["held_sw_up_toa"]
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
+        conv_prog = ctx["conv_prog"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -1662,9 +1682,14 @@ class ModelDriver:
             # Pack state into carry
             carry = pack_carry(
                 self.state, self.q_v, self.q_c, self.q_r,
-                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
-                current_step,
+                conv_prog=conv_prog,
+                held_dT_rad=held_dT_rad,
+                held_sw_net_sfc=held_sw_net_sfc,
+                held_lw_net_sfc=held_lw_net_sfc,
+                held_sw_up_toa=held_sw_up_toa,
+                held_lw_up_toa=held_lw_up_toa,
+                held_sw_down_toa=held_sw_down_toa,
+                step_index=current_step,
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
@@ -1698,11 +1723,11 @@ class ModelDriver:
             if self._ensemble_size > 1:
                 from legoesm.parallel.ensemble import ensemble_mean
                 mean_carry = ensemble_mean(carry)
-                (self.state, self.q_v, self.q_c, self.q_r,
+                (self.state, self.q_v, self.q_c, self.q_r, conv_prog,
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(mean_carry, self._state_template)
             else:
-                (self.state, self.q_v, self.q_c, self.q_r,
+                (self.state, self.q_v, self.q_c, self.q_r, conv_prog,
                  held_tuple, _, seg_precip,
                  seg_shflx, seg_lhflx) = unpack_carry(carry, self.state)
             (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
@@ -1716,6 +1741,7 @@ class ModelDriver:
                 "held_sw_up_toa": held_sw_up_toa,
                 "held_lw_up_toa": held_lw_up_toa,
                 "held_sw_down_toa": held_sw_down_toa,
+                "conv_prog": conv_prog,
                 "target_moisture": _target_moisture,
                 "target_mass": _target_mass,
                 "seg_precip": seg_precip,
@@ -1908,6 +1934,7 @@ class ModelDriver:
         held_sw_up_toa = ctx["held_sw_up_toa"]
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
+        conv_prog = ctx["conv_prog"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -1937,7 +1964,7 @@ class ModelDriver:
             step_unified(
                 jnp.bool_(True),
                 self.state.T.data, self.state.p_s.data,
-                self.q_v, self.q_c, self.q_r,
+                self.q_v, self.q_c, self.q_r, conv_prog,
                 self.state.u.data, self.state.v.data,
                 sst, sic, self._grid_lat, self._grid_lon,
                 day_of_year, seconds_of_day, DT,
@@ -1947,6 +1974,7 @@ class ModelDriver:
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
             )
+        conv_prog = phys_out.conv_prog
 
         # Apply warmup tendencies
         new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -2020,7 +2048,7 @@ class ModelDriver:
                 step_unified(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
-                    self.q_v, self.q_c, self.q_r,
+                    self.q_v, self.q_c, self.q_r, conv_prog,
                     self.state.u.data, self.state.v.data,
                     sst, sic, self._grid_lat, self._grid_lon,
                     day_of_year, seconds_of_day, DT,
@@ -2030,6 +2058,7 @@ class ModelDriver:
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
                 )
+            conv_prog = phys_out.conv_prog
 
             # (c) Update state
             new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -2140,6 +2169,7 @@ class ModelDriver:
                 self._carry_aux = {
                     "held_sw_net_sfc": phys_out.sw_net_sfc,
                     "held_lw_net_sfc": phys_out.lw_net_sfc,
+                    "conv_prog": conv_prog,
                     "seg_precip": phys_out.precip,
                 }
 

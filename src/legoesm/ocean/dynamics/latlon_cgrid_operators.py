@@ -266,7 +266,10 @@ def divergence_cgrid(
     lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
     lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
     lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)  # (n_lat+1,)
+    # Use actual cos(lat_v) — no clamp needed because v=0 at pole faces
+    # (solid wall BC), so face_dx * v = 0 regardless. Avoiding the clamp
+    # gives clean adjoints through jax.grad (issue #173).
+    cos_lat_v = jnp.cos(lat_v)  # (n_lat+1,); zero at poles
 
     face_dx = R * cos_lat_v * dlon  # (n_lat+1,)
 
@@ -510,8 +513,11 @@ def curl_vertex_cgrid(
         sin_lat,
         jnp.array([1.0], dtype=lat.dtype),     # sin(+pi/2)
     ])
-    A_vertex = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])  # (n_lat+1,)
-    A_vertex = jnp.maximum(A_vertex, 1e-30)  # avoid division by zero at poles
+    A_vertex_all = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])  # (n_lat+1,)
+    # Interior vertex areas only (rows 1..n_lat-1); pole rows are zero
+    # by construction and excluded from the division to avoid 1e30
+    # intermediates and brittle adjoints (issue #173).
+    A_vertex_interior = A_vertex_all[1:-1]  # (n_lat-1,)
 
     # Circulation around vertex (i, j), CCW:
     #   south edge (eastward): +u[i-1, j] * R*cos(lat[i-1])*dlon
@@ -558,11 +564,15 @@ def curl_vertex_cgrid(
         [dv_circ, dv_circ[:, 0:1]], axis=1)  # (n_lat+1, n_lon+1)
 
     circ = du_circ + dv_circ_full
-    zeta = circ / A_vertex[:, jnp.newaxis]
 
-    # Zero at poles (degenerate vertex area, undefined vorticity)
-    zeta = zeta.at[0, :].set(0.0)
-    zeta = zeta.at[-1, :].set(0.0)
+    # Compute vorticity only on interior rows (1..n_lat-1) where vertex
+    # area is nonzero.  Pad pole rows with zeros directly to avoid the
+    # 1/0 division that created 1e30 intermediates and brittle adjoints
+    # under jax.grad (issue #173).
+    circ_interior = circ[1:-1, :]  # (n_lat-1, n_lon+1)
+    zeta_interior = circ_interior / A_vertex_interior[:, jnp.newaxis]
+    zero_row = jnp.zeros((1, circ.shape[1]), dtype=circ.dtype)
+    zeta = jnp.concatenate([zero_row, zeta_interior, zero_row], axis=0)
 
     return zeta
 
@@ -611,23 +621,23 @@ def _gradient_curl_to_v(
     dlon = grid.dlon
     lat = grid.lat
 
-    # v-face latitudes (same as in divergence_cgrid)
-    lat_south_pole = jnp.array([-jnp.pi / 2], dtype=lat.dtype)
-    lat_north_pole = jnp.array([jnp.pi / 2], dtype=lat.dtype)
-    lat_interior = 0.5 * (lat[:-1] + lat[1:])
-    lat_v = jnp.concatenate([lat_south_pole, lat_interior, lat_north_pole])
-    cos_lat_v = jnp.maximum(jnp.cos(lat_v), 1e-10)
-
-    dx_v = R * cos_lat_v * dlon  # (n_lat+1,)
+    # v-face latitudes — interior only (issue #173: avoid pole division)
+    lat_interior = 0.5 * (lat[:-1] + lat[1:])  # (n_lat-1,)
+    cos_lat_v_int = jnp.cos(lat_interior)  # nonzero for interior rows
+    dx_v_int = R * cos_lat_v_int * dlon  # (n_lat-1,)
 
     # zeta[:, j+1] - zeta[:, j] for j=0..n_lon-1
-    # Column n_lon of zeta is the periodic wrap of column 0
-    dzeta = zeta[:, 1:] - zeta[:, :-1]  # (n_lat+1, n_lon)
+    dzeta = zeta[:, 1:] - zeta[:, :-1]  # (n_lat+1, n_lon [, nlev])
 
+    # Compute gradient only on interior rows (1..n_lat-1), pad poles with 0
+    dzeta_int = dzeta[1:-1]  # (n_lat-1, n_lon [, nlev])
     if zeta.ndim == 2:
-        return dzeta / dx_v[:, jnp.newaxis]
+        grad_int = dzeta_int / dx_v_int[:, jnp.newaxis]
+        zero_row = jnp.zeros((1, dzeta.shape[1]), dtype=zeta.dtype)
     else:
-        return dzeta / dx_v[:, jnp.newaxis, jnp.newaxis]
+        grad_int = dzeta_int / dx_v_int[:, jnp.newaxis, jnp.newaxis]
+        zero_row = jnp.zeros((1, dzeta.shape[1], dzeta.shape[2]), dtype=zeta.dtype)
+    return jnp.concatenate([zero_row, grad_int, zero_row], axis=0)
 
 
 def vector_laplacian_cgrid(

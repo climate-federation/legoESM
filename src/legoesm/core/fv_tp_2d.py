@@ -24,21 +24,71 @@ _R3 = 1.0 / 3.0
 
 
 def _pert_ppm(bl, br):
-    """FV3 pert_ppm iv=1: monotonicity at face boundaries."""
+    """FV3 pert_ppm iv=1: standard PPM constraint (tp_core.F90:1193-1212).
+
+    Prevents new extrema in the reconstruction.  When bl and br have
+    opposite signs (parabola crosses cell value), clips the overshoot.
+    When both have the same sign (cell value is already an extremum),
+    zeros both to flatten the reconstruction.
+    """
     is_ext = bl * br >= 0.0
     da1 = bl - br
     da2 = da1 ** 2
     a6da = 3.0 * (bl + br) * da1
-    bl_out = jnp.where(a6da < -da2, -2.0 * br, bl)
-    br_out = jnp.where(a6da > da2, -2.0 * bl, br)
+    # Fortran: if a6da < -da2: ar = -2*al → br = -2*bl
+    #          if a6da >  da2: al = -2*ar → bl = -2*br
+    br_out = jnp.where(a6da < -da2, -2.0 * bl, br)
+    bl_out = jnp.where(a6da > da2, -2.0 * br, bl)
     bl_out = jnp.where(is_ext, 0.0, bl_out)
     br_out = jnp.where(is_ext, 0.0, br_out)
     return bl_out, br_out
 
 
+def _pert_ppm_iv0(q, bl, br):
+    """FV3 pert_ppm iv=0: positive definite constraint (tp_core.F90:1169-1192).
+
+    Ensures the PPM parabola does not produce negative values when the
+    cell mean ``q`` is positive.  When ``q <= 0``, zeroes the reconstruction.
+    When ``q > 0`` and the parabola minimum is negative, clips bl/br.
+
+    This is the limiter used by hord=9 (FV3 default for mass, vorticity,
+    and momentum transport).
+    """
+    r12 = 1.0 / 12.0
+    zero = jnp.zeros_like(bl)
+
+    # Parabola coefficients: a4 = -3*(bl+br), da1 = br-bl
+    a4 = -3.0 * (br + bl)
+    da1 = br - bl
+
+    # Condition: parabola has an extremum in [0,1] ↔ |da1| < -a4
+    has_extremum = jnp.abs(da1) < -a4
+
+    # Minimum of parabola: q + 0.25/a4 * da1² + a4/12
+    # Guard against a4=0 (flat parabola — no extremum anyway)
+    a4_safe = jnp.where(jnp.abs(a4) < 1e-30, -1e-30, a4)
+    fmin = q + 0.25 / a4_safe * da1 ** 2 + a4_safe * r12
+    is_negative = fmin < 0.0
+
+    # When both conditions met and q>0: apply fix
+    needs_fix = has_extremum & is_negative & (q > 0.0)
+    both_positive = (br > 0.0) & (bl > 0.0)
+    da1_positive = da1 > 0.0
+
+    bl_fix = jnp.where(both_positive, zero,
+                       jnp.where(da1_positive, bl, -2.0 * br))
+    br_fix = jnp.where(both_positive, zero,
+                       jnp.where(da1_positive, -2.0 * bl, br))
+
+    bl_out = jnp.where(q <= 0.0, zero, jnp.where(needs_fix, bl_fix, bl))
+    br_out = jnp.where(q <= 0.0, zero, jnp.where(needs_fix, br_fix, br))
+
+    return bl_out, br_out
+
+
 def _ppm_1d(q, n, off_left=None, off_right=None,
             off_left_d1=None, off_right_d1=None):
-    """PPM bl/br along axis=1 with hord=8 + position-aware boundaries.
+    """PPM bl/br along axis=1 with hord=9 + position-aware boundaries.
 
     Parameters
     ----------
@@ -153,16 +203,29 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
                               jnp.maximum(q_hn, q_hnp1))
             al = al.at[:, n + 2, :].set(al_R1)
 
-    # hord=8 fast monotone limiter
-    dm_c = dm[:, 1:-1, :]
-    q_c = qe[:, 2:-2, :]
-    al_L = al[:, :-1, :]
-    al_R = al[:, 1:, :]
-    two_dm = 2.0 * dm_c
-    bl = -jnp.sign(two_dm) * jnp.minimum(jnp.abs(two_dm), jnp.abs(al_L - q_c))
-    br = jnp.sign(two_dm) * jnp.minimum(jnp.abs(two_dm), jnp.abs(al_R - q_c))
+    # hord=9: FV3 default (fv_arrays.F90:339,343: hord_dp=9, hord_vt=9).
+    # Simple PPM reconstruction (bl = al - q, br = al - q) with positive-
+    # definite constraint via pert_ppm(iv=0).  This is LESS restrictive
+    # than hord=8 (2*dm monotone) or hord=10 (pmp/lac), preserving more
+    # sub-grid structure.  FV3 tp_core.F90 xppm lines 603-610.
+    q_c = qe[:, 2:-2, :]       # (6, n+2, M) — cells at padded indices 2..n+3
+    al_L = al[:, :-1, :]        # al at left edge of each cell
+    al_R = al[:, 1:, :]         # al at right edge of each cell
 
-    # pert_ppm at boundary cells
+    bl = al_L - q_c
+    br = al_R - q_c
+
+    # pert_ppm(iv=0): positive definite constraint (tp_core.F90:610)
+    bl, br = _pert_ppm_iv0(q_c, bl, br)
+
+    # pert_ppm(iv=1) at face-boundary cells: extra monotonicity for cells
+    # whose PPM stencil crosses a face boundary (halo-quality guard).
+    # Fortran gates on (.not. (bounded_domain .or. duogrid)) at tp_core.F90:612,
+    # but the Fortran has ng=3 MPI halo (proper cross-face at 3rd cell).
+    # We keep this unconditionally because _ppm_1d uses mode='edge' for the
+    # 3rd halo cell (line ~105), which is less accurate than the Fortran's
+    # MPI exchange.  The iv=1 constraint acts as a safety net against this
+    # edge-copied value affecting PPM reconstruction at face boundaries.
     for k in [0, 1, 2, -3, -2, -1]:
         bl_k, br_k = _pert_ppm(bl[:, k, :], br[:, k, :])
         bl = bl.at[:, k, :].set(bl_k)
@@ -173,29 +236,26 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
 
 def _xppm(q_h2, crx, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None):
-    """PPM in x with hord=8 Courant-number integration."""
+    """PPM in x with hord=9 Courant-number integration.
+
+    FV3 tp_core.F90 xppm lines 670-677: uses raw Courant number ``crx``
+    in the standard PPM flux formula.  Boundary non-uniformity is handled
+    entirely through bl/br corrections in ``_ppm_1d``, NOT by scaling crx
+    (the Fortran does not adjust the Courant number at face boundaries).
+    """
     bl, br, q_c = _ppm_1d(q_h2, n, off_left, off_right,
                            off_left_d1, off_right_d1)
     bl_L, br_L, q_L = bl[:, :n+1, :], br[:, :n+1, :], q_c[:, :n+1, :]
     bl_R, br_R, q_R = bl[:, 1:n+2, :], br[:, 1:n+2, :], q_c[:, 1:n+2, :]
 
-    # Correct Courant number at face boundaries
-    crx_adj = crx
-    if off_left is not None:
-        crx_adj = crx_adj.at[:, 0, :].set(
-            crx[:, 0, :] / jnp.maximum(1.0 - off_left, 0.3))
-    if off_right is not None:
-        crx_adj = crx_adj.at[:, n, :].set(
-            crx[:, n, :] / jnp.maximum(1.0 + off_right, 0.3))
-
-    fx_pos = q_L + (1.0 - crx_adj) * (br_L - crx_adj * (bl_L + br_L))
-    fx_neg = q_R + (1.0 + crx_adj) * (bl_R + crx_adj * (bl_R + br_R))
-    return jnp.where(crx_adj > 0, fx_pos, fx_neg)
+    fx_pos = q_L + (1.0 - crx) * (br_L - crx * (bl_L + br_L))
+    fx_neg = q_R + (1.0 + crx) * (bl_R + crx * (bl_R + br_R))
+    return jnp.where(crx > 0, fx_pos, fx_neg)
 
 
 def _yppm(q_h2, cry, n, off_left=None, off_right=None,
           off_left_d1=None, off_right_d1=None):
-    """PPM in y with hord=8 Courant-number integration."""
+    """PPM in y with hord=9 Courant-number integration."""
     q_t = jnp.swapaxes(q_h2, 1, 2)
     c_t = jnp.swapaxes(cry, 1, 2)
     bl, br, q_c = _ppm_1d(q_t, n, off_left, off_right,
@@ -212,30 +272,56 @@ def _yppm(q_h2, cry, n, off_left=None, off_right=None,
 # =========================================================================
 
 def compute_transport_quantities(ut, vt, dt, cdgrid):
-    """Compute Courant numbers, area fluxes, swept areas."""
+    """Compute Courant numbers, area fluxes, swept areas.
+
+    Follows FV3 sw_core.F90:830-862:
+    - xfx = dt * ut * dy * sin_sg(upwind)
+    - crx = xfx * rdxa(upwind_cell)  (NOT rdxc at face!)
+    The Fortran uses upwind-selected cell-centre rdxa for the Courant
+    number, which gives the CFL as a fraction of the upwind CELL WIDTH.
+    """
     n = cdgrid.n
     grid = cdgrid.base
     sin_sg = cdgrid.sin_sg
 
-    crx = dt * ut * cdgrid.rdxc
-    cry = dt * vt * cdgrid.rdyc
-
     dy = cdgrid.dy_edge_x
     dx = cdgrid.dx_edge_y
 
+    # --- Transport distance (Fortran: xfx_adv = dt*ut before dy*sin scaling) ---
+    xfx_raw = dt * ut   # (6, n+1, n) distance in contravariant coords
+    yfx_raw = dt * vt   # (6, n, n+1)
+
+    # --- x-direction Courant number (FV3 sw_core.F90:849-853) ---
+    # crx = (dt*ut) * rdxa(upwind_cell)  where rdxa = 1/cell_width.
+    # FV3 computes rdxa from exact face-to-face distance (fv_grid_tools.F90).
+    rdxa_pad = pad_halo(cdgrid.rdxa, interp_offsets=grid.halo_interp_offsets)
+    rdxa_upwind = jnp.where(ut > 0,
+                            rdxa_pad[:, :n+1, 1:-1],    # cell i-1
+                            rdxa_pad[:, 1:n+2, 1:-1])   # cell i
+    crx = xfx_raw * rdxa_upwind
+
+    # --- x-direction area flux (xfx = dt*ut*dy*sin_sg_upwind) ---
     sin_east = sin_sg[:, :, :, 2]
     sin_west = sin_sg[:, :, :, 0]
     se_pad = pad_halo(sin_east, interp_offsets=grid.halo_interp_offsets)
     sw_pad = pad_halo(sin_west, interp_offsets=grid.halo_interp_offsets)
     sin_x = jnp.where(ut > 0, se_pad[:, :n+1, 1:-1], sw_pad[:, 1:n+2, 1:-1])
-    xfx = dt * ut * dy * sin_x
+    xfx = xfx_raw * dy * sin_x
 
+    # --- y-direction Courant number ---
+    rdya_pad = pad_halo(cdgrid.rdya, interp_offsets=grid.halo_interp_offsets)
+    rdya_upwind = jnp.where(vt > 0,
+                            rdya_pad[:, 1:-1, :n+1],
+                            rdya_pad[:, 1:-1, 1:n+2])
+    cry = yfx_raw * rdya_upwind
+
+    # --- y-direction area flux ---
     sin_north = sin_sg[:, :, :, 3]
     sin_south = sin_sg[:, :, :, 1]
     sn_pad = pad_halo(sin_north, interp_offsets=grid.halo_interp_offsets)
     ss_pad = pad_halo(sin_south, interp_offsets=grid.halo_interp_offsets)
     sin_y = jnp.where(vt > 0, sn_pad[:, 1:-1, :n+1], ss_pad[:, 1:-1, 1:n+2])
-    yfx = dt * vt * dx * sin_y
+    yfx = yfx_raw * dx * sin_y
 
     area = grid.area
     ra_x = area + xfx[:, :-1, :] - xfx[:, 1:, :]
@@ -247,7 +333,86 @@ def compute_transport_quantities(ut, vt, dt, cdgrid):
 # fv_tp_2d: Lin-Rood 2D transport
 # =========================================================================
 
-def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid):
+def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
+    """FV3 deln_flux: del-n damping for cell-mean values (tp_core.F90:1217-1365).
+
+    Adds diffusive fluxes to the transport fluxes ``fx``/``fy`` to provide
+    del-2 (nord=0), del-4 (nord=1), or del-6 (nord=2) damping.
+
+    Currently implements nord=0 (del-2).  Higher orders require iterative
+    Laplacian application with intermediate halo exchanges.
+
+    Parameters
+    ----------
+    nord : int — damping order (0=del-2, 1=del-4, ...)
+    damp : float — damping coefficient (pre-scaled: (damp_c * da_min)^(nord+1))
+    q : (6, n, n) — transported field (cell-mean values)
+    fx : (6, n+1, n) — x-direction transport flux (modified in-place)
+    fy : (6, n, n+1) — y-direction transport flux (modified in-place)
+    cdgrid : CubedSphereCDGrid
+    mass : (6, n, n) or None — mass field for mass-weighted damping
+
+    Returns
+    -------
+    fx, fy : modified fluxes with diffusive contribution added
+    """
+    n = cdgrid.n
+    grid = cdgrid.base
+    sg = cdgrid.sin_sg
+    dy = cdgrid.dy_edge_x   # (6, n+1, n) — edge length at u-faces
+    dx = cdgrid.dx_edge_y   # (6, n, n+1) — edge length at v-faces
+    rdxc = cdgrid.rdxc       # (6, n+1, n)
+    rdyc = cdgrid.rdyc       # (6, n, n+1)
+    rarea = 1.0 / grid.area  # (6, n, n)
+
+    # Step 1: initialize d2 (tp_core.F90:1253-1265)
+    if mass is None:
+        d2 = damp * q
+    else:
+        d2 = q
+
+    # Step 2: Laplacian diffusive fluxes (tp_core.F90:1270-1290, USE_SG path)
+    # fx2 = 0.5*(sin_sg(i-1,j,E)+sin_sg(i,j,W)) * dy * (d2[i-1]-d2[i]) * rdxc
+    d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+    sin_E = sg[:, :, :, 2]   # E-edge
+    sin_W = sg[:, :, :, 0]   # W-edge
+    sin_E_pad = pad_halo(sin_E, interp_offsets=grid.halo_interp_offsets)
+    sin_W_pad = pad_halo(sin_W, interp_offsets=grid.halo_interp_offsets)
+    sin_uv_x = 0.5 * (sin_E_pad[:, :n+1, 1:-1] + sin_W_pad[:, 1:n+2, 1:-1])
+    fx2 = sin_uv_x * dy * (d2_pad[:, :-1, 1:-1] - d2_pad[:, 1:, 1:-1]) * rdxc
+
+    sin_N = sg[:, :, :, 3]   # N-edge
+    sin_S = sg[:, :, :, 1]   # S-edge
+    sin_N_pad = pad_halo(sin_N, interp_offsets=grid.halo_interp_offsets)
+    sin_S_pad = pad_halo(sin_S, interp_offsets=grid.halo_interp_offsets)
+    sin_uv_y = 0.5 * (sin_N_pad[:, 1:-1, :n+1] + sin_S_pad[:, 1:-1, 1:n+2])
+    fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, :-1] - d2_pad[:, 1:-1, 1:]) * rdyc
+
+    # Step 3: Higher-order iteration (nord > 0, tp_core.F90:1298-1331)
+    for _it in range(nord):
+        # Compute divergence of diffusive fluxes
+        d2 = (fx2[:, :-1, :] - fx2[:, 1:, :] + fy2[:, :, :-1] - fy2[:, :, 1:]) * rarea
+        # Re-exchange and recompute fluxes with sign flip (d2[i]-d2[i-1])
+        d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+        fx2 = sin_uv_x * dy * (d2_pad[:, 1:, 1:-1] - d2_pad[:, :-1, 1:-1]) * rdxc
+        fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, 1:] - d2_pad[:, 1:-1, :-1]) * rdyc
+
+    # Step 4: Add diffusive fluxes to transport fluxes (tp_core.F90:1339-1363)
+    if mass is not None:
+        mass_pad = pad_halo(mass, interp_offsets=grid.halo_interp_offsets)
+        mass_u = 0.5 * (mass_pad[:, :-1, 1:-1] + mass_pad[:, 1:, 1:-1])  # (6, n+1, n)
+        mass_v = 0.5 * (mass_pad[:, 1:-1, :-1] + mass_pad[:, 1:-1, 1:])  # (6, n, n+1)
+        fx = fx + 0.5 * damp * mass_u * fx2
+        fy = fy + 0.5 * damp * mass_v * fy2
+    else:
+        fx = fx + fx2
+        fy = fy + fy2
+
+    return fx, fy
+
+
+def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
+             nord=None, damp_c=None, mass=None):
     """Lin-Rood operator-split 2D transport (Putman & Lin 2007)."""
     n = cdgrid.n
     grid = cdgrid.base
@@ -286,8 +451,28 @@ def fv_tp_2d(q, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid):
     q_j_pad = pad_halo(q_j, halo=2, interp_offsets=offsets_h2)
     fy1 = _yppm(q_j_pad[:, 2:-2, :], cry, n, oy_L0, oy_R0, oy_L1, oy_R1)
 
-    fx = 0.5 * (fx1 + fx2) * xfx
-    fy = 0.5 * (fy1 + fy2) * yfx
+    if mass is not None:
+        # With mass: fx = 0.5*(fx1+fx2)*mfx, fy = 0.5*(fy1+fy2)*mfy
+        # (tp_core.F90:188-196).  Here mfx/mfy are the mass fluxes = xfx/yfx.
+        fx = 0.5 * (fx1 + fx2) * xfx
+        fy = 0.5 * (fy1 + fy2) * yfx
+    else:
+        # Without mass: fx = 0.5*(fx1+fx2)*xfx, fy = 0.5*(fy1+fy2)*yfx
+        # (tp_core.F90:207-216)
+        fx = 0.5 * (fx1 + fx2) * xfx
+        fy = 0.5 * (fy1 + fy2) * yfx
+
+    # Del-n damping (tp_core.F90:197-201 and 217-222)
+    if nord is not None and damp_c is not None and damp_c > 1e-4:
+        damp = (damp_c * jnp.min(cdgrid.base.area)) ** (nord + 1)
+        fx, fy = _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=mass)
+
+    # Duogrid flux synchronization (see cgrid_mass_flux_divergence for rationale).
+    dg = cdgrid.base.duogrid
+    if dg is not None and dg.ng >= 2:
+        from legoesm.grids.halo import synchronize_cgrid_fluxes
+        fx, fy = synchronize_cgrid_fluxes(fx, fy, n)
+
     return fx, fy
 
 

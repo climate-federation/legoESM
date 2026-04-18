@@ -232,17 +232,9 @@ class MPASOceanModel:
         T_new = fill_land_cells_mpas(T_new, mask, c1_m, c2_m)
         S_new = fill_land_cells_mpas(S_new, mask, c1_m, c2_m)
 
-        # 3. Update 3D velocity with baroclinic tendency (non-Coriolis)
+        # 3. Update 3D velocity with baroclinic perturbation tendency.
+        # Coriolis is now in the PV flux (full (f+ζ)/h, #160).
         u_baro = state.u.data + dt * tend.du_dt.data
-
-        # 3b. Forward-backward Coriolis on perturbation velocity
-        # Coriolis is excluded from the baroclinic tendencies (issue #103)
-        # and applied here to the perturbation velocity u' = u - u_bar only.
-        # The barotropic solver handles depth-mean Coriolis separately.
-        u_baro = _forward_backward_coriolis_mpas_3d(
-            u_baro, dt, mesh, z_coord, config, mask,
-            state.eta.data, state.H_bathy.data,
-        )
 
         # 4. Barotropic substeps
         # The baroclinic tendency is already applied to u_baro, so the
@@ -264,9 +256,12 @@ class MPASOceanModel:
         if freshwater is not None and config.freshwater_closure != "none":
             F_slow_eta = freshwater_eta_tendency(freshwater, config.rho_0) * mask
 
+        F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
+
         eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
             state_for_baro, mesh, z_coord, config, dt_baro, n_sub,
             F_slow_eta=F_slow_eta,
+            F_slow_u=F_slow_u_data,
         )
 
         # 5. Layer thicknesses before and after barotropic
@@ -384,10 +379,21 @@ class MPASOceanModel:
             land_mask=state.land_mask,
         )
 
-        # 10. Conservation fixers
+        # 10. Conservation fixers (#166: pass expected forcing so fixer
+        # only removes numerical drift, not the forcing itself)
         if config.use_conservation_fixer:
+            _f64 = jnp.float64
+            wa = mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
+            expected_dHeat = jnp.sum(
+                tend.dT_dt.data.astype(_f64) * h_k_old.astype(_f64) * wa
+            ) * dt
+            expected_dSalt = jnp.sum(
+                tend.dS_dt.data.astype(_f64) * h_k_old.astype(_f64) * wa
+            ) * dt
             state_new = mpas_ocean_conservation_fixer(
                 state_new, state, mesh, z_coord, config,
+                expected_dHeat=expected_dHeat,
+                expected_dSalt=expected_dSalt,
             )
 
         return cast_pytree(state_new, None, "storage")

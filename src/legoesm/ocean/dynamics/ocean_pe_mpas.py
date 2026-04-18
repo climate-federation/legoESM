@@ -43,6 +43,7 @@ from legoesm.core.operators_voronoi import (
     gradient_edge_3d,
     curl_vertex_3d,
     kinetic_energy_cell_3d,
+    potential_vorticity_vertex_3d,
     pv_flux_energy_conserving_3d,
     pv_flux_enstrophy_conserving_3d,
     smagorinsky_biharmonic_3d,
@@ -186,41 +187,33 @@ def mpas_ocean_baroclinic_tendencies(
         div_flux, z_coord, thickness_weighted=True,
     )  # (nCells, nlev+1)
 
-    # ---- Momentum and tracer tendencies (batched 3D) ----
-    # Uses 3D operators that gather connectivity arrays once for all
-    # levels, instead of per-level scan with repeated 1D gathers.
-    # Coriolis is EXCLUDED — applied separately as forward-backward
-    # (Matsuno) step in the model step function.
-    # h_e_3d already computed above for u_bar; reuse it here.
+    # ---- Momentum tendencies (batched 3D) ----
+    # MOM6-style split (#160): compute the FULL nonlinear tendency with
+    # TOTAL velocity and TOTAL PV = (f + ζ) / h.  Coriolis enters
+    # exclusively through the PV flux — no separate substep needed.
+    # The depth-mean → F_slow_u for the barotropic solver; the
+    # baroclinic perturbation gets the deviation.
 
-    # Kinetic energy from perturbation velocity
-    ke = kinetic_energy_cell_3d(u_prime_3d, mesh)  # (nCells, nlev)
+    # Kinetic energy from TOTAL velocity
+    ke = kinetic_energy_cell_3d(u_3d, mesh)  # (nCells, nlev)
 
-    # Bernoulli function: KE(u') + p'/rho_0
+    # Bernoulli function: KE(u) + p'/rho_0
     bernoulli = ke + p_prime / rho_0  # (nCells, nlev)
 
     # Pressure gradient + Bernoulli
     grad_B = gradient_edge_3d(bernoulli, mesh)  # (nEdges, nlev)
 
-    # PV flux: relative vorticity from perturbation velocity ONLY.
-    # NOTE (#160): This is NOT the TRiSK potential vorticity. Real
-    # TRiSK requires q = (f + ζ_total) / h_total with transport
-    # F = h_total · u_total. Here f is handled in the Matsuno
-    # Coriolis step and u_prime is used in place of u_total, so the
-    # Ringler et al. (2010) energy-conservation identity holds only
-    # for the perturbation subsystem. See the module docstring and
-    # `potential_vorticity_vertex_3d` in core/operators_voronoi.py
-    # for the correct full-PV helper.
-    zeta_v = curl_vertex_3d(u_prime_3d, mesh)  # (nVertices, nlev)
-    h_v = vertex_thickness_3d(h_k, mesh)  # (nVertices, nlev)
-    h_v_safe = jnp.maximum(h_v, 1e-10)
-    q_vort = zeta_v / h_v_safe  # PV without f — see NOTE above
+    # PV flux: TOTAL PV = (f + ζ(u_total)) / h using the TRiSK helper.
+    # Restores Ringler et al. (2010) energy-conservation identity (#160).
+    q_total = potential_vorticity_vertex_3d(
+        u_3d, h_k, mesh.fVertex, mesh,
+    )  # (nVertices, nlev)
     if config.pv_scheme == "energy":
-        pv_flux = pv_flux_energy_conserving_3d(u_prime_3d, h_k, q_vort, mesh)
+        pv_flux = pv_flux_energy_conserving_3d(u_3d, h_k, q_total, mesh)
     else:
-        pv_flux = pv_flux_enstrophy_conserving_3d(u_prime_3d, h_k, q_vort, mesh)
+        pv_flux = pv_flux_enstrophy_conserving_3d(u_3d, h_k, q_total, mesh)
 
-    # Horizontal viscosity on perturbation velocity
+    # Horizontal viscosity on perturbation velocity (shear, not depth-mean)
     visc = config.A_h * vector_laplacian_del2_3d(u_prime_3d, mesh)
 
     # Constant biharmonic viscosity
@@ -231,23 +224,21 @@ def mpas_ocean_baroclinic_tendencies(
     if config.C_smag > 0:
         visc = visc + smagorinsky_biharmonic_3d(u_prime_3d, mesh, config.C_smag)
 
-    # Vertical advection of perturbation momentum.
-    # Issue #171 Level-1 fix: interface-upwind flux-form momentum
-    # advection instead of cell-centered upwind gradient. The
-    # flux-form helper returns -(F_top - F_bot) / h_e with
-    # F = w_half * u_upwind_at_interface and F = 0 at top/bottom by
-    # construction, eliminating the hard-zero-gradient pathology at
-    # k=0 / k=nlev-1 and matching the tracer-path interface upwind.
-    # h_e_3d (edge-centered layer thickness) was already computed
-    # above at line 165 for the u_bar reduction; reuse it here.
-    # Full flux-form momentum update (Level 2) still requires step-
-    # function restructuring; tracked on #171.
+    # Vertical advection of perturbation momentum (#171 Level-1).
     w_e = 0.5 * (w[c1] + w[c2])  # (nEdges, nlev+1)
     vert_adv_u = flux_form_vertical_momentum_advection(
         u_prime_3d, w_e, h_e_3d,
     )
 
-    du_dt_3d = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask[:, jnp.newaxis]
+    # Full nonlinear momentum tendency
+    du_dt_full = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask[:, jnp.newaxis]
+
+    # Depth-mean → slow forcing for barotropic solver
+    F_slow_u = jnp.sum(du_dt_full * h_e_3d, axis=1) / jnp.maximum(H_e, 1e-10)
+    F_slow_u = F_slow_u * edge_mask  # (nEdges,)
+
+    # Baroclinic perturbation = full minus depth-mean
+    du_dt_3d = (du_dt_full - F_slow_u[:, jnp.newaxis]) * edge_mask[:, jnp.newaxis]
 
     # Bottom drag on full velocity (not perturbation) — the ocean floor
     # sees the total flow.  Consistent with lat-lon C-grid and MOM6.
@@ -341,6 +332,8 @@ def mpas_ocean_baroclinic_tendencies(
                     dims=("nCells", "nlev"), units="PSU/s"),
         deta_dt=Field(data=deta_dt, name="deta_dt",
                       dims=("nCells",), units="m/s"),
+        F_slow_u=Field(data=F_slow_u, name="F_slow_u",
+                       dims=("nEdges",), units="m/s²"),
     )
 
 

@@ -1299,7 +1299,7 @@ def _face_gnomonic_to_lonlat(
     r = jnp.sqrt(x**2 + y**2 + z**2)
     x, y, z = x / r, y / r, z / r
 
-    lon = jnp.arctan2(y, x)
+    lon = jnp.mod(jnp.arctan2(y, x), 2.0 * jnp.pi)  # [0, 2π)
     lat = jnp.arcsin(jnp.clip(z, -1.0, 1.0))
 
     return lon, lat
@@ -1389,3 +1389,188 @@ def compute_padded_half_metrics(
     hy_ext = jnp.stack(all_hy, axis=0)
 
     return hx_ext, hy_ext
+
+
+# ==============================================================================
+# CGRID flux synchronization (duogrid face-boundary averaging)
+# ==============================================================================
+
+def synchronize_cgrid_fluxes(fx, fy, n):
+    """Average C-grid fluxes at shared face boundaries (duogrid conservation fix).
+
+    Implements the duogrid flux averaging from FV3 dyn_core.F90:853-900.
+    Each shared face boundary flux is replaced by the average of both
+    faces' independently computed boundary fluxes, ensuring that the mass
+    flux leaving face A exactly equals the mass flux entering face B.
+
+    This is required for conservation when using duogrid halo exchange,
+    because each face computes boundary fluxes independently using its own
+    extended grid, producing slightly different values at shared edges.
+
+    Parameters
+    ----------
+    fx : jax.Array, shape (6, n+1, n)
+        x-direction flux at cell x-interfaces.
+    fy : jax.Array, shape (6, n, n+1)
+        y-direction flux at cell y-interfaces.
+    n : int
+        Number of cells per face edge.
+
+    Returns
+    -------
+    fx_sync, fy_sync : jax.Array
+        Fluxes with averaged boundary values.
+    """
+    # Pre-compute all boundary averages from the ORIGINAL (unsynchronized)
+    # fluxes so that we read before writing.
+    avgs = {}
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+            local_bdy = _extract_cgrid_boundary(fx, fy, face, edge, n)
+            nbr_bdy = _extract_cgrid_boundary(fx, fy, nbr_face, nbr_edge, n)
+            if rev:
+                nbr_bdy = nbr_bdy[::-1]
+            avgs[(face, edge)] = 0.5 * (local_bdy + nbr_bdy)
+
+    # Write all averaged values back.
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            avg = avgs[(face, edge)]
+            if edge == WEST:
+                fx = fx.at[face, 0, :].set(avg)
+            elif edge == EAST:
+                fx = fx.at[face, n, :].set(avg)
+            elif edge == SOUTH:
+                fy = fy.at[face, :, 0].set(avg)
+            else:  # NORTH
+                fy = fy.at[face, :, n].set(avg)
+
+    return fx, fy
+
+
+def _extract_cgrid_boundary(fx, fy, face, edge, n):
+    """Extract boundary flux from the appropriate array and position.
+
+    WEST/EAST boundaries extract from fx (x-direction fluxes).
+    SOUTH/NORTH boundaries extract from fy (y-direction fluxes).
+    Returns shape (n,).
+    """
+    if edge == WEST:
+        return fx[face, 0, :]
+    elif edge == EAST:
+        return fx[face, n, :]
+    elif edge == SOUTH:
+        return fy[face, :, 0]
+    else:  # NORTH
+        return fy[face, :, n]
+
+
+def synchronize_corner_scalar(field, n):
+    """Average a scalar corner field at shared face boundaries and cube vertices.
+
+    For a field at D-grid corner positions (6, n+1, n+1):
+    1. Average boundary edges between adjacent face pairs.
+    2. Average cube-vertex corners where 3 faces meet (8 vertices).
+
+    Parameters
+    ----------
+    field : jax.Array, shape (6, n+1, n+1)
+    n : int — number of cells per face edge
+
+    Returns
+    -------
+    jax.Array, shape (6, n+1, n+1) — with averaged boundary values
+    """
+    def _bdy(f, edge):
+        if edge == WEST:
+            return field[f, 0, :]      # (n+1,)
+        elif edge == EAST:
+            return field[f, n, :]
+        elif edge == SOUTH:
+            return field[f, :, 0]
+        else:
+            return field[f, :, n]
+
+    # --- Save original vertex values before any modification ---
+    # Each cube vertex connects 3 faces. We need the ORIGINAL (unaveraged)
+    # values to compute the true 3-face mean, not edge-averaged intermediates.
+    orig_corners = {}
+    for face in range(6):
+        for ci in (0, n):
+            for cj in (0, n):
+                orig_corners[(face, ci, cj)] = field[face, ci, cj]
+
+    # --- Pass 1: edge-pairwise averaging (read all before write) ---
+    avgs = {}
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+            local = _bdy(face, edge)
+            nbr = _bdy(nbr_face, nbr_edge)
+            if rev:
+                nbr = nbr[::-1]
+            avgs[(face, edge)] = 0.5 * (local + nbr)
+
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            avg = avgs[(face, edge)]
+            if edge == WEST:
+                field = field.at[face, 0, :].set(avg)
+            elif edge == EAST:
+                field = field.at[face, n, :].set(avg)
+            elif edge == SOUTH:
+                field = field.at[face, :, 0].set(avg)
+            else:
+                field = field.at[face, :, n].set(avg)
+
+    # --- Pass 2: cube-vertex averaging (3 faces share each vertex) ---
+    # Each face has 4 corners at (i,j) ∈ {0,n}×{0,n}. Each corner is a
+    # cube vertex shared by exactly 3 faces. After edge averaging, the 3
+    # face values may be inconsistent because each was averaged from a
+    # different edge pair. Replace with the 3-face mean.
+
+    def _neighbor_corner(face_a, ci, cj, edge):
+        """Find the neighbor face corner reached via the given edge."""
+        nbr_f, nbr_e, rev = CONNECTIVITY[face_a][edge]
+        # Position along face_a's edge
+        if edge in (WEST, EAST):
+            pos = cj  # position along vertical edge
+        else:
+            pos = ci  # position along horizontal edge
+        if rev:
+            pos = n - pos
+        # Map to neighbor face corner
+        if nbr_e == WEST:
+            return nbr_f, 0, pos
+        elif nbr_e == EAST:
+            return nbr_f, n, pos
+        elif nbr_e == SOUTH:
+            return nbr_f, pos, 0
+        else:  # NORTH
+            return nbr_f, pos, n
+
+    _edge_for_i = {0: WEST, n: EAST}
+    _edge_for_j = {0: SOUTH, n: NORTH}
+
+    visited = set()
+    for face_a in range(6):
+        for ci in (0, n):
+            for cj in (0, n):
+                fb, bi, bj = _neighbor_corner(face_a, ci, cj, _edge_for_i[ci])
+                fc, ci_c, cj_c = _neighbor_corner(face_a, ci, cj, _edge_for_j[cj])
+
+                key = tuple(sorted([(face_a, ci, cj), (fb, bi, bj), (fc, ci_c, cj_c)]))
+                if key in visited:
+                    continue
+                visited.add(key)
+
+                # Use ORIGINAL (pre-edge-averaged) values for unbiased 3-face mean
+                avg3 = (orig_corners[(face_a, ci, cj)]
+                        + orig_corners[(fb, bi, bj)]
+                        + orig_corners[(fc, ci_c, cj_c)]) / 3.0
+                field = field.at[face_a, ci, cj].set(avg3)
+                field = field.at[fb, bi, bj].set(avg3)
+                field = field.at[fc, ci_c, cj_c].set(avg3)
+
+    return field

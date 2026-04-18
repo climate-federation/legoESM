@@ -337,7 +337,7 @@ def _build_cubedsphere(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         CDGridPrimitiveEquationConfig,
         hydrostatic_to_fv3,
     )
-    from legoesm.atmosphere.baroclinic_wave import baroclinic_wave_init
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
     grid = create_cubed_sphere(resolution)
     cdgrid = create_cubed_sphere_cdgrid(grid)
@@ -403,7 +403,7 @@ def _build_latlon(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
     model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
 
     # Baroclinic wave init for lat-lon
-    from legoesm.atmosphere.baroclinic_wave import (
+    from tests.test_cases.baroclinic_wave import (
         baroclinic_wave_init_latlon,
     )
     state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
@@ -439,7 +439,7 @@ def _build_icosahedral(resolution, nlev, sigma, dt, dtype, rank, n_ranks,
         MPASPrimitiveEquationModel,
         MPASPrimitiveEquationConfig,
     )
-    from legoesm.atmosphere.baroclinic_wave import baroclinic_wave_init_mpas
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
     mesh = create_voronoi_mesh(subdivision_level=resolution)
     config = MPASPrimitiveEquationConfig(
@@ -485,7 +485,7 @@ def _build_spectral(resolution, nlev, sigma, dt, dtype, physics_level, cast_fn):
         SpectralPrimitiveEquationModel,
         SpectralPEConfig,
     )
-    from legoesm.atmosphere.baroclinic_wave import baroclinic_wave_init_spectral
+    from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
     grid = create_gaussian_grid(resolution)
     config = SpectralPEConfig(

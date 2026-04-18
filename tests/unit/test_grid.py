@@ -16,9 +16,9 @@ class TestCubedSphereGrid:
         assert small_grid.n_cells == 6 * 8 * 8
 
     def test_lon_lat_ranges(self, small_grid):
-        """Longitude should be in [-pi, pi], latitude in [-pi/2, pi/2]."""
-        assert jnp.all(small_grid.lon >= -jnp.pi - 0.01)
-        assert jnp.all(small_grid.lon <= jnp.pi + 0.01)
+        """Longitude should be in [0, 2*pi), latitude in [-pi/2, pi/2]."""
+        assert jnp.all(small_grid.lon >= -0.01)
+        assert jnp.all(small_grid.lon <= 2.0 * jnp.pi + 0.01)
         assert jnp.all(small_grid.lat >= -jnp.pi / 2 - 0.01)
         assert jnp.all(small_grid.lat <= jnp.pi / 2 + 0.01)
 
