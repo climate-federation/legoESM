@@ -1144,15 +1144,42 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                                        ocean_mask=_lm)
 
                     # For C-grid sources (latlon ocean), u and v sit at
-                    # different stagger positions with different shapes
-                    # (e.g. u at u-faces, v at v-faces).  Crop both to
-                    # the common min-shape for the quiver overlay so
-                    # downstream meshgrid / mask broadcasting matches.
+                    # different stagger positions: u at u-faces (west/
+                    # east-of-cell, shape (nlat, nlon+1) for periodic
+                    # or (nlat, nlon+1) for open) and v at v-faces
+                    # (south/north-of-cell, shape (nlat+1, nlon) etc.).
+                    # For a faithful quiver overlay, COLOCATE both to
+                    # cell centres by averaging the two adjacent face
+                    # values.  This preserves the cell-centred flow
+                    # direction (truncating instead would zero the
+                    # east/north boundary arrows and mis-associate the
+                    # remaining ones with the wrong cell centres).
                     if u_reg.shape != v_reg.shape:
-                        min_r = min(u_reg.shape[0], v_reg.shape[0])
-                        min_c = min(u_reg.shape[1], v_reg.shape[1])
-                        u_reg = u_reg[:min_r, :min_c]
-                        v_reg = v_reg[:min_r, :min_c]
+                        # Target cell-centre shape: min across both
+                        # (u collapses the nlon+1 axis, v collapses the
+                        # nlat+1 axis) — with both collapsed we land at
+                        # the common cell-centre grid.
+                        nlat_cc = min(u_reg.shape[0], v_reg.shape[0] - 1) \
+                            if v_reg.shape[0] > u_reg.shape[0] \
+                            else min(u_reg.shape[0] - 1, v_reg.shape[0])
+                        nlat_cc = min(u_reg.shape[0], v_reg.shape[0])
+                        nlon_cc = min(u_reg.shape[1], v_reg.shape[1])
+                        # Collapse u's extra columns (u-faces → cell
+                        # centres by averaging east+west faces).
+                        if u_reg.shape[1] > nlon_cc:
+                            u_reg = 0.5 * (u_reg[:, :-1] + u_reg[:, 1:])
+                        if u_reg.shape[1] > nlon_cc:
+                            u_reg = u_reg[:, :nlon_cc]
+                        if u_reg.shape[0] > nlat_cc:
+                            u_reg = u_reg[:nlat_cc, :]
+                        # Collapse v's extra rows (v-faces → cell
+                        # centres by averaging south+north faces).
+                        if v_reg.shape[0] > nlat_cc:
+                            v_reg = 0.5 * (v_reg[:-1, :] + v_reg[1:, :])
+                        if v_reg.shape[0] > nlat_cc:
+                            v_reg = v_reg[:nlat_cc, :]
+                        if v_reg.shape[1] > nlon_cc:
+                            v_reg = v_reg[:, :nlon_cc]
 
                     if domain_extent is not None and coord_kind not in ("latlon", "gaussian"):
                         lat_1d = np.linspace(-90, 90, u_reg.shape[0])
