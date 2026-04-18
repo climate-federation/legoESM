@@ -313,6 +313,15 @@ def compute_transport_quantities(ut, vt, dt, cdgrid):
     dy = cdgrid.dy_edge_x
     dx = cdgrid.dx_edge_y
 
+    # Route halo exchanges through the duogrid kinked-to-extended remap
+    # when duogrid is active, so that sin_sg / rdxa / rdya at cross-face
+    # halo cells have duogrid quality (matches the Fortran `bounded_domain`
+    # path in sw_core.F90:830-862 which skips `copy_corners`).
+    dg = grid.duogrid
+    _use_dg = dg is not None and dg.ng >= 2
+    _offs = None if _use_dg else grid.halo_interp_offsets
+    _dg = dg if _use_dg else None
+
     # --- Transport distance (Fortran: xfx_adv = dt*ut before dy*sin scaling) ---
     xfx_raw = dt * ut   # (6, n+1, n) distance in contravariant coords
     yfx_raw = dt * vt   # (6, n, n+1)
@@ -320,7 +329,7 @@ def compute_transport_quantities(ut, vt, dt, cdgrid):
     # --- x-direction Courant number (FV3 sw_core.F90:849-853) ---
     # crx = (dt*ut) * rdxa(upwind_cell)  where rdxa = 1/cell_width.
     # FV3 computes rdxa from exact face-to-face distance (fv_grid_tools.F90).
-    rdxa_pad = pad_halo(cdgrid.rdxa, interp_offsets=grid.halo_interp_offsets)
+    rdxa_pad = pad_halo(cdgrid.rdxa, interp_offsets=_offs, duogrid=_dg)
     rdxa_upwind = jnp.where(ut > 0,
                             rdxa_pad[:, :n+1, 1:-1],    # cell i-1
                             rdxa_pad[:, 1:n+2, 1:-1])   # cell i
@@ -329,13 +338,13 @@ def compute_transport_quantities(ut, vt, dt, cdgrid):
     # --- x-direction area flux (xfx = dt*ut*dy*sin_sg_upwind) ---
     sin_east = sin_sg[:, :, :, 2]
     sin_west = sin_sg[:, :, :, 0]
-    se_pad = pad_halo(sin_east, interp_offsets=grid.halo_interp_offsets)
-    sw_pad = pad_halo(sin_west, interp_offsets=grid.halo_interp_offsets)
+    se_pad = pad_halo(sin_east, interp_offsets=_offs, duogrid=_dg)
+    sw_pad = pad_halo(sin_west, interp_offsets=_offs, duogrid=_dg)
     sin_x = jnp.where(ut > 0, se_pad[:, :n+1, 1:-1], sw_pad[:, 1:n+2, 1:-1])
     xfx = xfx_raw * dy * sin_x
 
     # --- y-direction Courant number ---
-    rdya_pad = pad_halo(cdgrid.rdya, interp_offsets=grid.halo_interp_offsets)
+    rdya_pad = pad_halo(cdgrid.rdya, interp_offsets=_offs, duogrid=_dg)
     rdya_upwind = jnp.where(vt > 0,
                             rdya_pad[:, 1:-1, :n+1],
                             rdya_pad[:, 1:-1, 1:n+2])
@@ -344,8 +353,8 @@ def compute_transport_quantities(ut, vt, dt, cdgrid):
     # --- y-direction area flux ---
     sin_north = sin_sg[:, :, :, 3]
     sin_south = sin_sg[:, :, :, 1]
-    sn_pad = pad_halo(sin_north, interp_offsets=grid.halo_interp_offsets)
-    ss_pad = pad_halo(sin_south, interp_offsets=grid.halo_interp_offsets)
+    sn_pad = pad_halo(sin_north, interp_offsets=_offs, duogrid=_dg)
+    ss_pad = pad_halo(sin_south, interp_offsets=_offs, duogrid=_dg)
     sin_y = jnp.where(vt > 0, sn_pad[:, 1:-1, :n+1], ss_pad[:, 1:-1, 1:n+2])
     yfx = yfx_raw * dx * sin_y
 

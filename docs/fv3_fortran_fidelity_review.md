@@ -3,6 +3,12 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-79 (2026-04-18)**: Found and fixed more silent non-duogrid halo pins:
+  - `compute_transport_quantities` (fv_tp_2d.py:300) — `rdxa_pad`, `rdya_pad`, `se_pad`, `sw_pad`, `sn_pad`, `ss_pad` all used `interp_offsets=grid.halo_interp_offsets` unconditionally. Fixed to route through duogrid remap when duogrid is active, matching Fortran sw_core.F90:830-862 which uses the `bounded_domain` path (skip copy_corners) for duogrid.
+  - `_c_sw` (fv3_sw_core.py:1131-1141) — `se_pad`, `sw_pad`, `sn_pad`, `ss_pad` sin_sg halos had the same silent non-duogrid pin.  Fixed to route through duogrid when `use_duogrid=True`, consistent with the rest of `_c_sw` (e.g. `_pad_halo_auto(h, ...)` at line 1147 and the `use_duogrid` checks in `_ke_upwind`, `_corner_vorticity`, `_vorticity_flux`).
+  - Added regression test `test_compute_transport_quantities_routes_halo_through_duogrid` that mock-patches `pad_halo` and asserts every halo call uses `(interp_offsets=None, duogrid=dg)` when duogrid is active.
+  - Production SW path (Arakawa-Lamb) metrics unchanged: W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01. Duogrid FB path now has better halo quality for all transport-velocity scaling and Courant-number computation.
+  - 143 cdgrid/duogrid/fv3_regression + 73 NH/PE tests pass.
 - **iter-78 (2026-04-18)**: Fixed duogrid halo routing in two del-n damping helpers:
   - `_del6_vt_flux` (fv3_sw_core.py:687) — used by d_sw6 vorticity damping (`damp_v > 1e-5`). Accepted a `use_duogrid` parameter but **never used it**: halo exchange always went through `pad_halo(..., interp_offsets=grid.halo_interp_offsets)` (non-duogrid path).  Fixed: now routes through `pad_halo(..., duogrid=dg)` when `use_duogrid=True`, matching the Fortran `bounded_domain` branch of `del6_vt_flux` in sw_core.F90:2008-2121 which skips `copy_corners` and relies on duogrid MPI halo update.
   - `_deln_flux` (fv_tp_2d.py:362) — used by `fv_tp_2d` for del-n damping of tracer/mass transport and by d_sw3 implicitly through `fv_tp_2d`. Same silent bug: internal `d2_pad`, `sin_E_pad`, `sin_W_pad`, `sin_N_pad`, `sin_S_pad`, `mass_pad` all pinned to `interp_offsets` path, ignoring duogrid. Fixed: routes through duogrid halo when duogrid is active on the grid, matching the Fortran `bounded_domain` branch of `deln_flux` in tp_core.F90:1217-1365.

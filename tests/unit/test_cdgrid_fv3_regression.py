@@ -856,6 +856,49 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 f"_del6_vt_flux halo exchange used {kw} instead of "
                 f"duogrid remap when use_duogrid=True")
 
+    def test_compute_transport_quantities_routes_halo_through_duogrid(self):
+        """Iter-79: `compute_transport_quantities` had 4 `pad_halo` calls
+        (rdxa, rdya, sin_sg variants) pinned to `interp_offsets` even when
+        duogrid was active on the grid.  After the iter-79 fix, every
+        halo call must route through duogrid when duogrid is available.
+        """
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core import fv_tp_2d as fv_tp_2d_mod
+
+        n = 8
+        grid_dg = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid_dg = create_cubed_sphere_cdgrid(grid_dg)
+
+        ut = jnp.ones((6, n + 1, n)) * 10.0
+        vt = jnp.ones((6, n, n + 1)) * 5.0
+        dt = 100.0
+
+        calls = []
+        real_pad_halo = fv_tp_2d_mod.pad_halo
+
+        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+            calls.append(
+                ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
+                 'duogrid_none' if duogrid is None else 'duogrid_set'))
+            return real_pad_halo(q, halo=halo,
+                                 interp_offsets=interp_offsets,
+                                 duogrid=duogrid)
+
+        with mock.patch.object(fv_tp_2d_mod, 'pad_halo', recording):
+            fv_tp_2d_mod.compute_transport_quantities(ut, vt, dt, cdgrid_dg)
+
+        # Expect 4 halo calls (rdxa, sin_E/W, rdya, sin_N/S — 6 actually:
+        # 1 rdxa + 2 sin_sg pair + 1 rdya + 2 sin_sg pair = 6)
+        self.assertTrue(len(calls) >= 4,
+                        f"too few halo calls: {len(calls)}")
+        for kw in calls:
+            self.assertEqual(
+                kw, ('interp_offsets_none', 'duogrid_set'),
+                f"compute_transport_quantities halo used {kw} "
+                f"instead of duogrid remap on duogrid-active grid")
+
     def test_deln_flux_routes_halo_through_duogrid_when_active(self):
         """Iter-78: `_deln_flux` previously pinned its internal halo to
         `interp_offsets=grid.halo_interp_offsets` even when duogrid was
