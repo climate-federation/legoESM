@@ -1,6 +1,17 @@
-# FV3 Fortran Fidelity Review (baselined 2026-04-14, updated through Ralph iter 77 on 2026-04-18)
+# FV3 Fortran Fidelity Review (baselined 2026-04-14, updated through Ralph iter 112 on 2026-04-18)
 
-## CURRENT STATE (post iter-77)
+## CURRENT STATE (post iter-112)
+
+**Session summary (iter 77-112, 36 iterations)**:
+- **Priority 1 (panel-edge corner metrics)** — full Fortran-fidelity verified (iter-98: 24-seam exact-match table; iter-99: rsin2_corner interior; iter-96: panel-edge with sign-flip rotation).
+- **Priority 2 (d_sw3 BGRID_NE component sync)** — wired into `_bgrid_ke_transport` via geo-frame helper `synchronize_bgrid_ne_corner_geo` (iter-102, iter-103); 4-assertion regression coverage (iter-106).
+- **Priority 3 (non-duogrid `_d2a2c_vect` cube-vertex gap)** — explicit documented guard + 5-phrase regression test (iter-107/108).
+- **Priority 4 (FB-path diagnostic)** — honest component-vs-scalar-sync end-to-end propagation test with expected-value assertion (iter-111).
+- **Required evaluation metrics** (post iter-112 verification): W2 L2=1.53e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01, ocean rest state machine-precision.  All unchanged from iter-77 baseline — the iter-103 d_sw3 change is correctly localized to the FB path (production uses A-L gradient).
+
+**Stopping condition not met** due to two architectural items (see "Unresolved" list):
+- **Item #1**: W2 v-wind visible cube-face imprint at t>0.5d.  Production path uses A-L gradient; FV3 FB chain is Fortran-faithful (iter-103-111) but unstable at C36.  Fundamental fix is either (a) replace production with FB chain + stabilize C36, or (b) port FV3's architectural RK3+FB timestepping.
+- **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
 - **iter-112 (2026-04-18)**: Required-evaluation verification snapshot after the iter-77..iter-111 priority work (all 4 user priorities addressed).  Ran the full set:
