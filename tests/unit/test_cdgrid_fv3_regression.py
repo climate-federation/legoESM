@@ -1322,6 +1322,56 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             "was rewired (update this test) or the dispatch is broken.",
         )
 
+    def test_d_sw5_iterated_laplacian_uses_mode_edge_halo_gap_documented(self):
+        """Iter-132 (FB-path fidelity gap documentation): lock in the
+        known `_d_sw5_corner_divergence` halo gap.
+
+        In the FV3 oracle at sw_core.F90:1737-1785, the nord-iteration
+        Laplacian loop accesses `divg_d(i+1,j)` etc. at halo indices
+        populated by MPI `mpp_update_domains` before `d_sw5` is called.
+        The duogrid branch (`fill_c=False` at sw_core.F90:1740-1742)
+        relies solely on that MPI halo + the kinked-extended remap.
+
+        Python's single-process implementation uses
+        `jnp.pad(..., mode='edge')` for the `divg_d`, `divg_u_met`,
+        `divg_v_met` halo in the loop.  This agrees with Fortran ONLY
+        for boundary-parallel gradients; at cube vertices and for
+        cross-face gradients it is an O(1) deviation from the Fortran
+        halo values.
+
+        Impact is limited to the FB chain (fv3_forward_backward_step,
+        fv3_fb_sw_step), which is experimental/unstable at C36.
+        Production A-L path uses a different divergence damping at
+        operators_cdgrid.py:1542-1552 and does not reach this loop.
+
+        This test asserts the fidelity note is present in the source
+        so a future port of proper cubed-sphere corner-staggered halo
+        exchange must update both the code and the note together.
+        """
+        import inspect
+        from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
+
+        src = inspect.getsource(_d_sw5_corner_divergence)
+        self.assertIn(
+            "mpp_update_domains", src,
+            "The `_d_sw5_corner_divergence` iterated-Laplacian "
+            "mode='edge' halo gap note was removed.  Either port "
+            "proper cubed-sphere corner-staggered halo exchange for "
+            "`divg_d` OR restore the note.",
+        )
+        self.assertIn(
+            "fill_c=False", src,
+            "The fidelity note must cite the Fortran duogrid-branch "
+            "gate (sw_core.F90:1740-1742) that makes Python's "
+            "mode='edge' approximation's inadequacy duogrid-specific.",
+        )
+        self.assertIn(
+            "experimental", src,
+            "The note must document that the gap only affects the "
+            "experimental FB path (production A-L path uses a "
+            "different divergence damping).",
+        )
+
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
         corners against the Fortran Formula

@@ -1042,7 +1042,28 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
         divg_v_met = sina_u * dxc / jnp.maximum(dy, _EPS)  # (6, n+1, n)
 
         for _it in range(nord):
-            # Pad divg_d at corner stagger (n+1, n+1) → (n+3, n+3)
+            # Iter-132 Fortran-fidelity note: in the FV3 oracle,
+            # sw_core.F90:1737-1785 accesses `divg_d(i+1,j)` etc. at
+            # halo indices that were populated by the model-level MPI
+            # `mpp_update_domains` before `d_sw5` was called.  The
+            # duogrid branch (fill_c=False when `gridstruct%duogrid`,
+            # lines 1740-1742) relies purely on that MPI halo + the
+            # kinked-extended remap for the cross-face values.
+            #
+            # Python's single-process `mode='edge'` replicates the
+            # boundary value — which agrees with Fortran ONLY for
+            # boundary-parallel gradients at panel edges.  At CUBE
+            # VERTICES and for gradients with non-zero cross-face
+            # component, it is an O(1) approximation relative to the
+            # Fortran MPI/duogrid halo.
+            #
+            # Impact: only the `_d_sw5_corner_divergence` path in the
+            # FB chain (`fv3_forward_backward_step`, `fv3_fb_sw_step`),
+            # which is experimental and unstable at C36 for
+            # independent reasons (see docs/fv3_fortran_fidelity_
+            # review.md item #2).  Production (A-L + RK3) uses a
+            # different divergence damping at operators_cdgrid.py:
+            # 1542-1552 and does not reach this path.
             divg_d_pad = jnp.pad(divg_d, [(0, 0), (1, 1), (1, 1)],
                                  mode='edge')
             # Pad metrics for extended gradient stencil
