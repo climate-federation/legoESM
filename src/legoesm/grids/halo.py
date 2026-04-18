@@ -1084,30 +1084,6 @@ def _fill_corners_h2(padded: jax.Array) -> jax.Array:
     return padded
 
 
-def extrapolate_to_halo(data: jax.Array) -> jax.Array:
-    """Extrapolate a field to halo cells using boundary values.
-
-    Unlike pad_halo (which gets neighbor data), this copies each face's
-    own boundary values to its halo cells. This is appropriate for
-    grid metric terms (dx, dy, area) that are defined in the local
-    face coordinate system and should NOT be exchanged between faces
-    with different axis orientations.
-
-    Parameters
-    ----------
-    data : jax.Array, shape (6, n, n)
-        Field to extrapolate.
-
-    Returns
-    -------
-    padded : jax.Array, shape (6, n+2, n+2)
-    """
-    # jnp.pad with mode='edge' replicates boundary values — equivalent to
-    # the previous 9 sequential .at[].set() scatter operations but compiled
-    # as a single XLA pad op.
-    return jnp.pad(data, ((0, 0), (1, 1), (1, 1)), mode='edge')
-
-
 # ==============================================================================
 # Vector halo exchange
 # ==============================================================================
