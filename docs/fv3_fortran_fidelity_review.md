@@ -214,6 +214,20 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-161 (2026-04-19)**: cleanup cycle convergence — `src/legoesm/`
+  now has ZERO unused public-name imports (per AST scan of the
+  entire source tree at 120 commits on branch).  Only the
+  `typing.NamedTuple / Callable` etc. and `CubedSphereCDGrid` type-
+  hint imports remain, which are intentional for docstring type
+  references.  A broader scan of `tests/` shows ~30 unused imports
+  but most are `from __future__ import annotations` (not runtime-
+  visible) or `pytest` (used via fixtures/pytest.raises) — those
+  are not dead code in the CLAUDE.md sense.  The few genuine dead
+  imports in tests (e.g., `test_mpas_conservation.py`,
+  `test_land_stability.py`) are in non-FV3 test files and deferred
+  to a test-hygiene session.  No code changes this iteration; net
+  source-tree hygiene state recorded.
+
 - **iter-159 (2026-04-19)**: end-of-session required-evaluations
   snapshot.  All four Ralph stopping-condition inputs run cleanly:
     - Williamson 2 (C36 cubed-sphere, 1 day): L2=1.53e-03,
