@@ -221,29 +221,33 @@ def fv3_hydrostatic_tendencies(
 
     # --- 6. D-grid vorticity at cell centres via circulation ---
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)  # (6, n, n, nlev)
-    zeta_abs = zeta + grid.f[..., None]
 
     # === Stage-level packed halo exchange #1 ===
-    # Pack {zeta_abs, B, 1/T} into one collective instead of 3 separate.
+    # Pack {ζ, B, 1/T} into one collective instead of 3 separate.
+    # Note: we pack ζ (relative vorticity) rather than ζ+f, since f is stored
+    # directly at corners as `cdgrid.f_corner` and adding it after the corner
+    # interpolation avoids the sin(lat) nonlinear-interpolation error.
+    # Matches iter-74 fix pattern in cdgrid_momentum_tendencies.
     ln_ps = jnp.log(p_s)
     inv_T = 1.0 / T
     from legoesm.grids.halo import _halo_backend
     if _halo_backend == "spmd":
         from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
-            zeta_abs, B, inv_T, mesh=_spmd_mesh,
+            zeta, B, inv_T, mesh=_spmd_mesh,
         )
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
-            zeta_abs, B, inv_T, topology=_mpi_topology,
+            zeta, B, inv_T, topology=_mpi_topology,
         )
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
 
-    # Vorticity interpolated to D-grid corners
-    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid, padded=_zeta_pad)
+    # Vorticity interpolated to D-grid corners, absolute vorticity = ζ_corner + f_corner
+    zeta_corner = (_interp_center_to_corner(zeta, cdgrid, padded=_zeta_pad)
+                   + cdgrid.f_corner[..., None])
 
     # --- 7. Bernoulli gradient at D-grid corners (Arakawa-Lamb) ---
     dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid, padded=_B_pad)

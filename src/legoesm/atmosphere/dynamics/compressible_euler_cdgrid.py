@@ -149,12 +149,8 @@ def cdgrid_compressible_euler_slow_tendencies(
     # --- 3. C-grid velocities ---
     u_c, v_c = dgrid_to_cgrid(u_d, v_d, cdgrid)
 
-    # --- 4. Vorticity and Coriolis ---
+    # --- 4. Vorticity (cell centres) ---
     zeta = dgrid_vorticity(u_d, v_d, cdgrid)
-    if config.use_coriolis:
-        abs_vor = zeta + cdgrid.base.f[..., None]
-    else:
-        abs_vor = zeta
 
     # --- 5. KE at cell centres from D-grid (orthogonal basis) ---
     u_cc, v_cc = dgrid_to_center_vector(u_d, v_d)
@@ -165,7 +161,16 @@ def cdgrid_compressible_euler_slow_tendencies(
     dpi_dx, dpi_dy_perp = _arakawa_lamb_gradient(pi_prime, cdgrid)
 
     # --- 7. D-grid momentum tendencies ---
-    abs_vor_corner = _interp_center_to_corner(abs_vor, cdgrid)
+    # Interpolate ζ only; add f_corner directly (FV3 stores f at corners).
+    # Previously abs_vor = ζ + f was interpolated as a single field; because
+    # the 4-point interpolator is linear but sin(lat) is not,
+    # interp(f_cc) ≠ f_corner introduced an O(dx²) Coriolis error at corners.
+    # Matches iter-74 fix in cdgrid_momentum_tendencies.
+    zeta_corner = _interp_center_to_corner(zeta, cdgrid)
+    if config.use_coriolis:
+        abs_vor_corner = zeta_corner + cdgrid.f_corner[..., None]
+    else:
+        abs_vor_corner = zeta_corner
     theta_corner = _interp_center_to_corner(theta_total, cdgrid)
 
     du_d_dt = abs_vor_corner * v_d - dK_dx - c_p * theta_corner * dpi_dx

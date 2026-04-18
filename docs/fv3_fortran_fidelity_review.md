@@ -1,4 +1,13 @@
-# FV3 Fortran Fidelity Review (baselined 2026-04-14, updated through Ralph iter 67 on 2026-04-17)
+# FV3 Fortran Fidelity Review (baselined 2026-04-14, updated through Ralph iter 77 on 2026-04-18)
+
+## CURRENT STATE (post iter-77)
+
+Latest iteration work:
+- **iter-77 (2026-04-18)**: Applied iter-74-style f-interpolation fix to two additional call paths that were missed:
+  - `compressible_euler_cdgrid.py:155+168`: was adding `cdgrid.base.f` (cell centre) to ζ then interpolating the sum to corners via `_interp_center_to_corner`.  Fixed: interpolate ζ only, then add `cdgrid.f_corner` directly at corners.  Removes O(dx²) sin(lat) non-linear interpolation error from Coriolis at corners.
+  - `primitive_eq_cdgrid.py:224-246` (`fv3_hydrostatic_tendencies`): same bug — `zeta_abs = zeta + grid.f` was packed with B and 1/T for a 3-field halo exchange, then interpolated to corners.  Fixed: pack ζ (not ζ+f), then add `cdgrid.f_corner[..., None]` after the corner interpolation.
+  - **Diagnostic**: FFT of W2 v-wind at lat=30° after 1 day shows dominant mode-4 amplitude 35.35 (longitudinal cube-face imprint signature); mode-8 harmonic 10.80; mean offset (mode-0) 9.54.  Production SW path still shows this pattern — architectural (unchanged by this fix because SW model does not use the NH/PE code path).
+  - Validation: 60 NH tests + 40/41 PE tests + 140 cdgrid/duogrid regression tests pass.  SW metrics unchanged: W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01.  Ocean rest state: cube variants machine-precision.  Pre-existing failures (not caused by this iteration): `test_anchor_mass_to_initial` (8.62e-08 vs 1e-08 threshold, present before change), `test_canonical_runner_cases_exist` (ocean RUNNERS naming mismatch, unrelated).
 
 ## CURRENT STATE (post iter-67)
 
