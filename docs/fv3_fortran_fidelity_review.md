@@ -145,6 +145,62 @@ These require infrastructure-level rework beyond the priority list.
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
+
+- **iter-128 through iter-131 (2026-04-18)**: Priority-3 audit hardening cycle.
+  Each iteration tightened a previously-loose claim about the non-duogrid
+  `_d2a2c_vect` cube-vertex gap, in response to Codex stop-time review
+  feedback.  No production-path numerical changes; W2/W5/cosine-bell norms
+  unchanged from iter-112.
+  - **iter-128** (`6d3192a`): added
+    `test_d2a2c_vect_non_duogrid_cube_vertex_gap_architectural_bound` —
+    initial version asserted hardcoded h=2 / Fortran-depth=3 / 2/3 fraction.
+    Codex flagged: tautological (all values set within the test).
+  - **iter-128 followup** (`5e7c35f`): rewrote test to PROBE `_d2a2c_vect`
+    source via AST, resolving `pad_halo_vector(..., halo=...)` to a
+    concrete integer literal.  Asserts actual halo < Fortran deepest
+    depth (3).  If the code is bumped to halo=3, the test fires with
+    a clear message prompting the port of the Fortran cube-vertex
+    overrides.
+  - **iter-128 addendum** (`8d6ec79`): corrected the "zero production
+    impact" reasoning — the original claim "production always uses
+    duogrid" was factually wrong (`create_cubed_sphere` defaults to
+    `use_duogrid=False`).  The correct reasoning: `_d2a2c_vect` is not
+    called by `fv3_sw_tendencies` (the A-L production tendency), only
+    by `_c_sw` and `fv3_csw_tendencies` inside the experimental FB
+    chain.
+  - **iter-129** (`29a0903`): added AST reachability guard test that
+    parses `fv3_sw_core.py` and asserts callers of `_d2a2c_vect` are
+    exactly `{_c_sw, fv3_csw_tendencies}`, plus the default
+    `CDGridShallowWaterConfig.use_experimental_csw=False`.  Codex
+    flagged: AST-only check does not prove default-path reachability
+    at runtime (could miss a new transitive caller).
+  - **iter-129 followup** (`2e84e83`): replaced AST check with a
+    runtime tripwire — `test_d2a2c_vect_unreached_by_default_fv3edge_step`
+    monkey-patches `legoesm.core.fv3_sw_core._d2a2c_vect` with a call
+    counter, runs one `FV3EdgeShallowWaterModel.step(state, 1.0)` under
+    the default config, forces JIT trace + evaluation, and asserts the
+    counter is 0.  Verified by hand: default → 0 hits; switching
+    `use_experimental_csw=True` → 3 hits per RK3 step (would fail).
+  - **iter-130** (`78aad84`): added complementary POSITIVE-case
+    `test_d2a2c_vect_reached_by_experimental_csw_and_fb_model` that
+    asserts the two opt-in experimental paths DO reach `_d2a2c_vect`
+    (>0 hits) — `FV3EdgeShallowWaterModel(use_experimental_csw=True)`
+    via `fv3_csw_tendencies`, and `FV3FBShallowWaterModel(default)` via
+    `fv3_fb_sw_step` → `_c_sw`.  Together with iter-129's negative
+    test, the pair pins down the full call graph.  Catches the
+    "silent rewire" regression class where a refactor could make the
+    negative test pass trivially by breaking dispatch on all paths.
+  - **Net Priority-3 state after iter-131**: the gap is (a) code-locked
+    (iter-128: AST-probing architectural bound), (b) call-graph-locked
+    (iter-129 + iter-130: negative + positive runtime tripwires with
+    verified failure modes), and (c) non-impact-precisely-scoped
+    (iter-128 addendum + iter-129 doc edit: default FV3EdgeShallowWaterModel
+    config is unaffected; opt-in experimental paths intentionally
+    exercise the gap).  Future work to extend halo to h=3 and port the
+    Fortran overrides will fail the architectural-bound test with a
+    direct pointer to sw_core.F90:3527-3545 / 3620-3640.
+
+
 - **iter-112 (2026-04-18)**: Required-evaluation verification snapshot after the iter-77..iter-111 priority work (all 4 user priorities addressed).  Ran the full set:
   - **Williamson 2** (C36, 1 day): L2=1.53e-03, Linf=4.07e-03.  UNCHANGED from iter-77 baseline — production path uses A-L gradient and does not exercise the iter-103 component-sync change.  Visible v-wind cube-face imprint at t>0.5d still present — architectural, see unresolved item #1.
   - **Williamson 5** (C36, 1 day): mass drift = 1.42e-05.  UNCHANGED.
