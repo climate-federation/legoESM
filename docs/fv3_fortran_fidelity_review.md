@@ -3,6 +3,12 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-81 (2026-04-18)**: Fixed grid-build halo inconsistency for `_arakawa_lamb_gradient` metric matrix:
+  - `cubed_sphere_cdgrid.py:984-986`: the 3D Cartesian positions (`x_cc`, `y_cc`, `z_cc`) used to precompute the `grad_c00..c11` transformation matrix were padded via `pad_halo(interp_offsets=base.halo_interp_offsets)` unconditionally.
+  - At runtime, `_arakawa_lamb_gradient` pads the transported field `B` via `_pad_halo_auto(B, cdgrid)` which routes through the duogrid remap when duogrid is active. The metric matrix is then applied to duogrid-routed raw differences — but the matrix itself was built from non-duogrid positions.
+  - This silent inconsistency meant the gradient transformation was slightly off in duogrid mode: matrix computed for interp_offsets halo positions, but applied to duogrid halo raw differences.
+  - Fixed: grid-build now routes through duogrid when `base.duogrid is not None`, matching runtime halo routing. Production SW metrics unchanged (test matrix uses non-duogrid grids). 145 cdgrid + 81 duogrid tests pass.
+- **iter-80 (2026-04-18)**: Added regression test for iter-79's `_c_sw` sin_sg halo routing fix (`test_c_sw_sin_sg_halos_route_through_duogrid_when_active`). Patches `legoesm.grids.halo.pad_halo` at the source module since `_c_sw` re-imports locally, filters to sin_sg-shaped calls to avoid noise from `_d2a2c_vect_duogrid`'s internal halos.
 - **iter-79 (2026-04-18)**: Found and fixed more silent non-duogrid halo pins:
   - `compute_transport_quantities` (fv_tp_2d.py:300) — `rdxa_pad`, `rdya_pad`, `se_pad`, `sw_pad`, `sn_pad`, `ss_pad` all used `interp_offsets=grid.halo_interp_offsets` unconditionally. Fixed to route through duogrid remap when duogrid is active, matching Fortran sw_core.F90:830-862 which uses the `bounded_domain` path (skip copy_corners) for duogrid.
   - `_c_sw` (fv3_sw_core.py:1131-1141) — `se_pad`, `sw_pad`, `sn_pad`, `ss_pad` sin_sg halos had the same silent non-duogrid pin.  Fixed to route through duogrid when `use_duogrid=True`, consistent with the rest of `_c_sw` (e.g. `_pad_halo_auto(h, ...)` at line 1147 and the `use_duogrid` checks in `_ke_upwind`, `_corner_vorticity`, `_vorticity_flux`).

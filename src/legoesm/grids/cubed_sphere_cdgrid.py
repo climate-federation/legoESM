@@ -981,9 +981,17 @@ def create_cubed_sphere_cdgrid(
     # Interpolation of positions is required: without it, the nearest-
     # neighbor positional mismatch (up to 0.5 cells near cube vertices)
     # creates O(1) errors in the gradient transformation matrix.
-    x_pad = pad_halo(x_cc, interp_offsets=base.halo_interp_offsets)
-    y_pad = pad_halo(y_cc, interp_offsets=base.halo_interp_offsets)
-    z_pad = pad_halo(z_cc, interp_offsets=base.halo_interp_offsets)
+    # When duogrid is active on the base grid, route through the duogrid
+    # kinked-to-extended remap so the precomputed `grad_c00..c11` matrix
+    # is consistent with `_pad_halo_auto`-routed field halos used by the
+    # runtime `_arakawa_lamb_gradient` operator.  Previously these
+    # positions were pinned to `interp_offsets` even in duogrid mode,
+    # creating a silent inconsistency between grid-build and runtime halos.
+    _base_dg = base.duogrid
+    _pos_offs = None if _base_dg is not None else base.halo_interp_offsets
+    x_pad = pad_halo(x_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
+    y_pad = pad_halo(y_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
+    z_pad = pad_halo(z_cc, interp_offsets=_pos_offs, duogrid=_base_dg)
     x_pad = _fill_corners_h1(x_pad)
     y_pad = _fill_corners_h1(y_pad)
     z_pad = _fill_corners_h1(z_pad)
