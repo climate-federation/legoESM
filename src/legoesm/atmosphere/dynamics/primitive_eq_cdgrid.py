@@ -231,12 +231,17 @@ def fv3_hydrostatic_tendencies(
     ln_ps = jnp.log(p_s)
     inv_T = 1.0 / T
     from legoesm.grids.halo import _halo_backend
-    if _halo_backend == "spmd":
+    # When duogrid is active, the packed MPI/SPMD halo exchanges do NOT
+    # apply the kinked-to-extended remap.  Skip the pack and let the
+    # downstream operators do their own duogrid-aware halo via
+    # `_pad_halo_auto`, matching the runtime halo quality elsewhere.
+    _pe_dg = grid.duogrid
+    if _halo_backend == "spmd" and _pe_dg is None:
         from legoesm.parallel.cubesphere_exchange import packed_pad_halo_4d, _spmd_mesh
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
             zeta, B, inv_T, mesh=_spmd_mesh,
         )
-    elif _halo_backend == "mpi":
+    elif _halo_backend == "mpi" and _pe_dg is None:
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
@@ -356,7 +361,15 @@ def fv3_hydrostatic_tendencies(
     # gradient, Laplacian, and hyperdiffusion operators downstream.
     _needs_uv_pad = config.A_h > 0 or config.hyperdiff_coeff > 0
     from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
-    if _halo_backend == "mpi" and _needs_uv_pad:
+    # When duogrid is active, the MPI `packed_pad_halo_mpi_4d` does NOT
+    # apply the kinked-to-extended remap (only basic MPI halo exchange).
+    # Fall back to per-field `pad_halo_4d` calls which apply the duogrid
+    # remap AFTER MPI halo exchange (see halo.py::pad_halo_4d lines 559-573).
+    # This preserves duogrid halo quality at the cost of 3 messages instead
+    # of 1 per stage — but duogrid distributed runs are not yet a
+    # performance-critical path.
+    _pe_dg = grid.duogrid
+    if _halo_backend == "mpi" and _needs_uv_pad and _pe_dg is None:
         from legoesm.grids.halo import _mpi_topology
         from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
         _T_pad, _u_cc_pad, _v_cc_pad = packed_pad_halo_mpi_4d(
@@ -369,7 +382,6 @@ def fv3_hydrostatic_tendencies(
         # silently fell back to the non-duogrid interp_offsets path even
         # on duogrid-enabled grids, introducing a halo quality mismatch
         # between the pre-padded fields and the gradient operators.
-        _pe_dg = grid.duogrid
         _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         if _needs_uv_pad:

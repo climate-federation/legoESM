@@ -3,6 +3,10 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-83 (2026-04-18)**: Codex stop-time review flagged that iter-82 still bypassed duogrid in the MPI packed halo path.  Root cause: `packed_pad_halo_mpi_4d` (and `packed_pad_halo_4d` for SPMD) does NOT apply the duogrid kinked-to-extended remap — it only does basic MPI/SPMD halo exchange.  Only the unpacked `pad_halo_4d` path applies duogrid post-processing (halo.py:559-573 for 4D, 495-499 for 2D).
+  - Fix: both packed-halo call sites (ζ/B/inv_T pack at line 233, T/u_cell/v_cell pack at line 362) now skip the packed MPI/SPMD path when `grid.duogrid is not None` and fall through to either per-field `pad_halo_4d(duogrid=dg)` or `None` pre-pads (operators do their own duogrid-aware halo).
+  - Trade-off: 3 messages/stage instead of 1 when duogrid+MPI distributed runs.  Acceptable because duogrid distributed runs are not yet performance-critical.  Non-duogrid MPI remains fully optimised.
+  - 40 PE tests + 145 core tests pass.  SW matrix unchanged.
 - **iter-82 (2026-04-18)**: Fixed silent non-duogrid halo pin in `primitive_eq_cdgrid.py::fv3_hydrostatic_tendencies`:
   - The non-MPI fallback branch at line 366-369 called `_pad_halo_4d(T, interp_offsets=grid.halo_interp_offsets)` unconditionally for T, u_cell, v_cell pre-padded buffers.
   - These buffers are then consumed by `_gradient_x_3d/_gradient_y_3d` and `_arakawa_lamb_gradient` downstream. The latter uses `_pad_halo_auto` internally which routes through duogrid; mixing pre-pads (non-duogrid) with runtime pads (duogrid) silently inconsistent in duogrid mode.
