@@ -651,6 +651,43 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
 # Shared FV3 c_sw helpers (used by both _c_sw and fv3_csw_tendencies)
 # ==============================================================================
 
+
+def _sina_u_v_from_sin_sg(cdgrid):
+    """Return `sina_u` (6, n+1, n) and `sina_v` (6, n, n+1) constructed
+    from FV3 sub-grid `sin_sg` per ``fv_grid_utils.F90:505-518``.
+
+    Interior faces:
+      sina_u(i,j) = 0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))
+      sina_v(i,j) = 0.5*(sin_sg(i,j-1,4) + sin_sg(i,j,2))
+
+    Panel-edge faces: use the single-side sin_sg at the outermost cell,
+    matching the sina_u/sina_v construction in `cubed_sphere_cdgrid.py`
+    and `_d_sw5_corner_divergence`.
+
+    Using this formulation instead of ``sqrt(1 - cosa_u**2)`` is the
+    Fortran-faithful convention — the two are only identical when
+    ``cosa**2 + sina**2 = 1`` exactly, which is NOT the case for
+    halo-averaged ``cosa_u = 0.5*(cos_sg(E) + cos_sg(W))``.
+    """
+    sg = cdgrid.sin_sg  # (6, n, n, 9): 0=W, 1=S, 2=E, 3=N, 4=center, ...
+    sin_E = sg[:, :, :, 2]
+    sin_W = sg[:, :, :, 0]
+    sin_N = sg[:, :, :, 3]
+    sin_S = sg[:, :, :, 1]
+
+    sina_u_int = 0.5 * (sin_E[:, :-1, :] + sin_W[:, 1:, :])  # (6, n-1, n)
+    sina_u = jnp.concatenate(
+        [sin_W[:, :1, :], sina_u_int, sin_E[:, -1:, :]], axis=1,
+    )  # (6, n+1, n)
+
+    sina_v_int = 0.5 * (sin_N[:, :, :-1] + sin_S[:, :, 1:])  # (6, n, n-1)
+    sina_v = jnp.concatenate(
+        [sin_S[:, :, :1], sina_v_int, sin_N[:, :, -1:]], axis=2,
+    )  # (6, n, n+1)
+
+    return sina_u, sina_v
+
+
 def _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid):
     """FV3 c_sw KE upwind selection (sw_core.F90:303-365).
 
@@ -887,24 +924,10 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     n = cdgrid.n
     cosa_u = cdgrid.cosa_u    # (6, n+1, n)
     cosa_v = cdgrid.cosa_v    # (6, n, n+1)
-    # sina_u/v: reconstruct from sin_sg, matching fv_grid_utils.F90:505-518
-    # sina_u(i,j) = 0.5*(sin_sg(i-1,j,E) + sin_sg(i,j,W))
-    # sina_v(i,j) = 0.5*(sin_sg(i,j-1,N) + sin_sg(i,j,S))
-    sg = cdgrid.sin_sg  # (6, n, n, 9): 0=W, 1=S, 2=E, 3=N
-    sin_E = sg[:, :, :, 2]  # E-edge
-    sin_W = sg[:, :, :, 0]  # W-edge
-    sin_N = sg[:, :, :, 3]  # N-edge
-    sin_S = sg[:, :, :, 1]  # S-edge
-    # Interior: i from 1..n-1
-    sina_u_int = 0.5 * (sin_E[:, :-1, :] + sin_W[:, 1:, :])  # (6, n-1, n)
-    # Boundaries: use local edge values
-    sina_u = jnp.concatenate([
-        sin_W[:, :1, :], sina_u_int, sin_E[:, -1:, :]
-    ], axis=1)  # (6, n+1, n)
-    sina_v_int = 0.5 * (sin_N[:, :, :-1] + sin_S[:, :, 1:])  # (6, n, n-1)
-    sina_v = jnp.concatenate([
-        sin_S[:, :, :1], sina_v_int, sin_N[:, :, -1:]
-    ], axis=2)  # (6, n, n+1)
+    # sina_u/v from sin_sg sub-grid — factored into a shared helper
+    # (iter-87) so `_vorticity_flux` uses the same Fortran-faithful
+    # convention instead of `sqrt(1 - cosa**2)`.
+    sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
 
     dxc = cdgrid.dxc          # (6, n+1, n)
     dyc = cdgrid.dyc          # (6, n, n+1)
@@ -1060,10 +1083,16 @@ def _vorticity_flux(v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid):
 
     Returns fy1, vort_x (x-face) and fx1, vort_y (y-face).
     Uses 1/sin (NOT 1/sin²) per FV3 comment at sw_core.F90:417.
+
+    `sina_u` / `sina_v` come from the sin_sg sub-grid as
+    ``0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))`` (matching
+    `fv_grid_utils.F90:505-518`) rather than ``sqrt(1 - cosa**2)``.
+    The two are not identical because `cosa_u` is a halo-averaged
+    value of `cos_sg` and the trigonometric identity does not hold
+    on averaged quantities.
     """
     n = cdgrid.n
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, _EPS))
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_v**2, _EPS))
+    sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
 
     fy1 = (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
     if not use_duogrid:

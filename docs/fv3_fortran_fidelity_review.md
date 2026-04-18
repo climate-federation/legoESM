@@ -3,6 +3,11 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-87 (2026-04-18)**: Fixed `_vorticity_flux` to use sin_sg-based `sina_u/sina_v` instead of `sqrt(1 - cosa_u**2)`.
+  - Fortran `fv_grid_utils.F90:505-518` defines `sina_u = 0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))` — a halo-average of sub-grid sine values.  The Python `_vorticity_flux` was reconstructing sina via `sqrt(1 - cosa_u**2)` where `cosa_u = 0.5*(cos_sg(i-1,E) + cos_sg(i,W))` is itself a halo-average.  The trig identity `cos²+sin²=1` does NOT hold on halo-averaged quantities, so the two formulations diverge.
+  - Fix: factored a shared helper `_sina_u_v_from_sin_sg(cdgrid)` placed alongside `_ke_upwind`; `_vorticity_flux` and `_d_sw5_corner_divergence` now both use it.  The helper reproduces the interior 0.5-average + panel-edge single-side convention identically to the original cubed-sphere cdgrid build and Fortran.
+  - Added regression test `test_sina_u_v_from_sin_sg_matches_fortran_convention` verifying (a) shape, (b) interior formula at machine precision, (c) panel-edge single-side values, (d) sensitivity that naive sqrt and FV3 averaging are numerically distinct.
+  - 149 cdgrid/duogrid/fv3_regression tests pass. SW matrix unchanged (W2 L2=1.53e-03).  The fix mostly affects the FB path `_c_sw/_vorticity_flux` which is exercised by `fv3_fb_sw_step` and `fv3_csw_tendencies`.
 - **iter-86 (2026-04-18)**: Codex stop-time review flagged that iter-85's tests still left the MPI packed production path unguarded (the unit-level tests hit `_apply_duogrid_4d` in isolation; the SPMD end-to-end auto-skips without 6 devices).  Added two mock-patch end-to-end tests for the MPI path:
   - `test_packed_mpi_4d_applies_duogrid_end_to_end`: mock-patches `pad_halo_mpi_4d` (the MPI call that `packed_pad_halo_mpi_4d` dispatches through) to return the non-duogrid unpacked halo.  Calls `packed_pad_halo_mpi_4d(duogrid=dg)` and asserts the output matches canonical `pad_halo_4d(duogrid=dg)`.  Empirically verified: pre-iter-84 diff = 6.25, post-iter-84 diff = 0.0.
   - `test_packed_mpi_4d_without_duogrid_skips_remap`: safety that non-duogrid call path is bit-identical.

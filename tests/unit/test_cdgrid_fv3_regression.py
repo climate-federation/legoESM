@@ -899,6 +899,56 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                 f"compute_transport_quantities halo used {kw} "
                 f"instead of duogrid remap on duogrid-active grid")
 
+    def test_sina_u_v_from_sin_sg_matches_fortran_convention(self):
+        """Iter-87: `_sina_u_v_from_sin_sg` constructs sina_u/sina_v from
+        the sin_sg sub-grid per fv_grid_utils.F90:505-518.  Verify:
+        1. interior: sina_u(i,j) = 0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))
+        2. panel edges: single-side sin_sg
+        3. differs from `sqrt(1 - cosa_u**2)` on the halo-averaged cosa.
+        """
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.fv3_sw_core import _sina_u_v_from_sin_sg
+
+        n = 16
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+
+        # Shape
+        self.assertEqual(sina_u.shape, (6, n + 1, n))
+        self.assertEqual(sina_v.shape, (6, n, n + 1))
+
+        # Interior values match the averaging formula
+        sg = cdgrid.sin_sg
+        sin_E = sg[:, :, :, 2]
+        sin_W = sg[:, :, :, 0]
+        expected_u_int = 0.5 * (sin_E[:, :-1, :] + sin_W[:, 1:, :])
+        max_int_diff = float(jnp.max(jnp.abs(
+            sina_u[:, 1:-1, :] - expected_u_int)))
+        self.assertLess(max_int_diff, 1e-12,
+                        f"interior sina_u mismatch: {max_int_diff}")
+
+        # Panel-edge cells: single-side sin_sg
+        self.assertTrue(bool(jnp.all(sina_u[:, 0, :] == sin_W[:, 0, :])))
+        self.assertTrue(bool(jnp.all(sina_u[:, -1, :] == sin_E[:, -1, :])))
+
+        # Verify that this differs from the naive sqrt(1 - cosa**2)
+        # formulation at face boundaries (where cos_sg averaging makes
+        # the trig identity fail).
+        sina_u_naive = jnp.sqrt(jnp.maximum(1.0 - cdgrid.cosa_u**2, 1e-30))
+        naive_vs_fv3 = float(jnp.max(jnp.abs(sina_u - sina_u_naive)))
+        # For a smooth sphere sin_sg and cosa are both exact trig
+        # values of the same angle at panel edges, so naive=fv3 there;
+        # the difference is concentrated in the interior where the
+        # two halo-average formulations diverge.  Either way, the
+        # formulas are different functions; assert they produce a
+        # detectable difference.
+        self.assertGreater(naive_vs_fv3, 0.0,
+                           "naive sqrt and FV3 sin_sg averaging are "
+                           "identical — test is not sensitive")
+
     def test_c_sw_sin_sg_halos_route_through_duogrid_when_active(self):
         """Iter-79: `_c_sw` internally pads sin_sg E/W/N/S for the
         upwind transport-velocity scaling.  Previously these 4 halo
