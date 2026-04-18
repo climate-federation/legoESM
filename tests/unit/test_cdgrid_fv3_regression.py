@@ -1028,16 +1028,32 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         fortran_n = 0.5 * (local_n + halo_n)
         div_n = float(jnp.max(jnp.abs(direct[0, 1:n, n] - fortran_n)))
 
-        # Each seam must show a non-trivial divergence (not machine noise)
+        # Each seam's divergence is locked to the specific numerical
+        # value produced by the correct sub-grid indexing (iter-94).
+        # If someone reverts to wrong indices (e.g. NW instead of SW on
+        # E seam, or SE instead of SW on N seam), the divergence will
+        # differ and the test will fail — preventing silent regression.
+        # On C16 all four seams give 0.4486 (identical because the
+        # coordinate-frame mismatch is systematic).
+        expected_div = 0.4486
+        tol = 1e-3
         for name, div in [("west", div_w), ("east", div_e),
                           ("south", div_s), ("north", div_n)]:
-            self.assertGreater(
-                div, 1e-3,
-                f"{name} panel-edge convention gap did not show up: {div}")
-            # Upper-bound sanity: |cosa| <= 1 on any physical grid.
-            self.assertLess(
-                div, 1.0,
-                f"{name} panel-edge divergence implausibly large: {div}")
+            self.assertAlmostEqual(
+                div, expected_div, delta=tol,
+                msg=(f"{name} panel-edge divergence = {div:.6f} "
+                     f"(expected {expected_div} ± {tol}). "
+                     "Indices or CONNECTIVITY likely regressed."),
+            )
+
+        # Sanity: divergence nonzero and physical-range bounded
+        # (would catch the case of identity indexing tuples).
+        for name, div in [("west", div_w), ("east", div_e),
+                          ("south", div_s), ("north", div_n)]:
+            self.assertGreater(div, 1e-3,
+                               f"{name} divergence suspiciously small: {div}")
+            self.assertLess(div, 1.0,
+                            f"{name} divergence implausibly large: {div}")
 
     def test_sina_u_v_helper_matches_cdgrid_rsin_u_at_interior(self):
         """Iter-87 consistency: the helper's `sina_u` must be
