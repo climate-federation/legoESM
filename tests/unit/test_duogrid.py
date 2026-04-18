@@ -1110,38 +1110,40 @@ class TestBgridNeCornerSync:
         )
 
     def test_fb_path_diagnostic_seam_quality_component_vs_scalar(self):
-        """Iter-109 (Priority 4): short FB-path diagnostic proving
-        that component-level BGRID_NE sync (iter-103 default) produces
-        strictly NON-LARGER seam artifacts than the pre-iter-103
-        scalar-KE sync, for the integrated `fv3_fb_sw_step` path.
+        """Iter-110 (Priority 4): FB-path diagnostic comparing the
+        iter-103 component-KE-sync path against the pre-iter-103
+        scalar-KE-sync path on a one-step `fv3_fb_sw_step`.
 
-        Diagnostic: run one FB step on a duogrid C8 grid with a
-        balanced-like initial state, measure the max absolute jump
-        between `h_new` at a shared panel-edge corner on two adjacent
-        faces.  For a physically-consistent step, this jump should be
-        ≤ numerical tolerance (ideally zero because h is a scalar
-        cell-centered quantity and no seam rotation applies to h).
-        The KE sync strategy affects u_d/v_d at corners, which feeds
-        back into h via subsequent iterations.
+        Iter-109's original version mistakenly compared component-sync
+        against a NO-SYNC mock, which doesn't match the pre-iter-103
+        Fortran commented-out alternative.  Corrected here: inject a
+        genuine scalar-KE-sync variant by monkey-patching
+        `synchronize_bgrid_ne_corner_geo` to a NO-OP AND
+        `_bgrid_ke_transport`'s call to it is followed by a scalar
+        sync via `synchronize_corner_scalar` applied to the output KE.
 
-        Minimal claim: the component-sync variant produces a finite,
-        plausibly-small `h` field after one step — demonstrating the
-        FB path remains operational after iter-103's wiring change.
+        To implement this correctly, the test patches the
+        `_bgrid_ke_transport` function itself with a scalar-sync
+        variant, runs the FB step, and compares the resulting
+        u_d/v_d against the iter-103 default path.
+
+        Claim: the two paths produce DIFFERENT u_d/v_d, proving the
+        iter-103 wiring change has an observable effect end-to-end
+        beyond simply "presence of some sync".
         """
         import jax.numpy as jnp
         import numpy as np
         from unittest import mock
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
-        from legoesm.core.fv3_sw_core import fv3_fb_sw_step
-        import legoesm.grids.halo as halo_mod
+        from legoesm.core import fv3_sw_core as fv3_sw_core_mod
+        from legoesm.core.fv3_sw_core import fv3_fb_sw_step, _ppm_transport_1d
+        from legoesm.grids.halo import synchronize_corner_scalar
 
         n = 8
         grid = create_cubed_sphere(n, use_duogrid=True)
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
-        # Non-trivial initial winds to make the KE sync effect visible
-        # (KE ~ u² so changes scale quadratically with wind magnitude).
         h_mean = 8000.0
         rng = np.random.default_rng(2026)
         h = jnp.asarray(h_mean + rng.standard_normal((6, n, n)) * 1.0)
@@ -1150,45 +1152,64 @@ class TestBgridNeCornerSync:
         h_s = jnp.zeros((6, n, n))
         dt = 300.0
 
-        # Run one FB step with the iter-103 default (component sync)
-        h_new_comp, u_d_new_comp, v_d_new_comp = fv3_fb_sw_step(
+        # --- Path 1: iter-103 default (component-KE sync) ---
+        h_comp, u_d_comp, v_d_comp = fv3_fb_sw_step(
             h, u_d, v_d, h_s, cdgrid, dt)
+        assert bool(jnp.all(jnp.isfinite(h_comp))), \
+            "iter-103 FB step produced NaN/Inf"
 
-        # Sanity: output is finite and near the mean
-        assert bool(jnp.all(jnp.isfinite(h_new_comp))), \
-            "FB step with component sync produced NaN/Inf"
-        h_rel_change = float(jnp.max(jnp.abs(h_new_comp - h_mean)) / h_mean)
-        assert h_rel_change < 1e-2, (
-            f"FB step with component sync caused large h drift: "
-            f"max|h-mean|/mean = {h_rel_change:.3e}"
-        )
+        # --- Path 2: genuine scalar-KE-sync control ---
+        # Replace `_bgrid_ke_transport` with a scalar-sync variant
+        # that (a) does the same Courant/PPM transport, (b) forms KE
+        # WITHOUT calling `synchronize_bgrid_ne_corner_geo` on the
+        # components, (c) syncs the final KE scalar via
+        # `synchronize_corner_scalar` — the pre-iter-103 behavior.
+        def _bgrid_ke_transport_scalar(u_d, v_d, uc, vc, cdgrid_local, dt):
+            dt5 = 0.5 * dt
+            cosa = cdgrid_local.cosa_corner
+            rsina = cdgrid_local.rsin2_corner
+            vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+            vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]
+            uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
+            uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]
+            vb = dt5 * (vc_sum - uc_sum * cosa) * rsina
+            ub = dt5 * (uc_sum - vc_sum * cosa) * rsina
+            rdy = 1.0 / jnp.maximum(cdgrid_local.dy_edge_x, 1e-30)
+            rdx = 1.0 / jnp.maximum(cdgrid_local.dx_edge_y, 1e-30)
+            ty = _ppm_transport_1d(v_d, vb, rdy, axis=2)
+            tx = _ppm_transport_1d(u_d, ub, rdx, axis=1)
+            ke = 0.5 * (ty * vb + ub * tx)
+            nn = cdgrid_local.n
+            ke = synchronize_corner_scalar(ke, nn)
+            return ke
 
-        # Mock the component sync to a no-op to approximate the
-        # pre-iter-103 path (the scalar KE sync would be applied by
-        # a separate helper; here the point is just to show the two
-        # variants give different answers).
-        real_sync = halo_mod.synchronize_bgrid_ne_corner_geo
-
-        def _noop(u, v, cc, sc, n):
-            return u, v
-
-        halo_mod.synchronize_bgrid_ne_corner_geo = _noop
-        try:
-            _h_nosync, _u_d_new_nosync, _v_d_new_nosync = fv3_fb_sw_step(
+        with mock.patch.object(
+            fv3_sw_core_mod,
+            '_bgrid_ke_transport',
+            _bgrid_ke_transport_scalar,
+        ):
+            h_scal, u_d_scal, v_d_scal = fv3_fb_sw_step(
                 h, u_d, v_d, h_s, cdgrid, dt)
-        finally:
-            halo_mod.synchronize_bgrid_ne_corner_geo = real_sync
+        assert bool(jnp.all(jnp.isfinite(h_scal))), \
+            "scalar-sync FB step produced NaN/Inf"
 
-        # The two variants should differ in u_d / v_d (the KE sync
-        # affects `_bgrid_ke_transport`'s ke_corner which feeds into
-        # d_sw6's wind update). h_new is computed before KE comes into
-        # play, so it may be identical between variants.
-        u_diff = float(jnp.max(jnp.abs(u_d_new_comp - _u_d_new_nosync)))
-        v_diff = float(jnp.max(jnp.abs(v_d_new_comp - _v_d_new_nosync)))
+        # Both paths should give finite, near-rest-state h drift
+        for label, h_out in [("component", h_comp), ("scalar", h_scal)]:
+            rel = float(jnp.max(jnp.abs(h_out - h_mean)) / h_mean)
+            assert rel < 1e-2, \
+                f"{label}-sync FB h drifted: rel {rel:.3e}"
+
+        # The two variants' u_d/v_d should differ — proves the
+        # component-vs-scalar KE sync change propagates through the
+        # full FB step (not just in `_bgrid_ke_transport` as iter-105
+        # already established).
+        u_diff = float(jnp.max(jnp.abs(u_d_comp - u_d_scal)))
+        v_diff = float(jnp.max(jnp.abs(v_d_comp - v_d_scal)))
         assert u_diff > 1e-10 or v_diff > 1e-10, (
-            f"FB-path u_d/v_d with and without iter-103 sync are "
-            f"identical (max diffs u={u_diff:.3e} v={v_diff:.3e}) — "
-            f"iter-103 wiring doesn't propagate through fv3_fb_sw_step."
+            f"FB-path u_d/v_d identical between component-sync and "
+            f"scalar-sync variants: u={u_diff:.3e} v={v_diff:.3e}. "
+            f"The iter-103 change doesn't propagate through the full "
+            f"FB step."
         )
 
     def test_geo_frame_sync_averages_discontinuity(self):

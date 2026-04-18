@@ -3,6 +3,9 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-110 (2026-04-18)**: Codex stop-time correction: iter-109's FB-path test compared component-sync against a NO-OP mock, not the pre-iter-103 SCALAR-KE-sync path it claimed in the test name.  Rewrote the test to actually compare component-sync (iter-103 default) against a genuine scalar-sync variant by monkey-patching `_bgrid_ke_transport` with a scalar-sync reimplementation.
+  - Empirical on C8 ng=3 seed 2026: component-sync vs scalar-sync FB step gives h_diff=0, u_d_diff=0.056, v_d_diff=0.057 (0.17% of max u_d magnitude 32).  Confirms the iter-103 change (component-vs-scalar sync ordering) propagates end-to-end through the full FB step (c_sw → p_grad_c → d_sw_native → d_sw6 wind update) — not just inside `_bgrid_ke_transport` as iter-106 proved.
+  - 165 cdgrid/duogrid/fv3_regression tests pass.
 - **iter-109 (2026-04-18)**: Addressed user's Priority 4 (FB-path diagnostic proving whether changed seam handling improves Fortran agreement).  Added `test_fb_path_diagnostic_seam_quality_component_vs_scalar` that runs one full `fv3_fb_sw_step` on a duogrid C8 grid with moderate random winds (|u| ~ 10 m/s) and compares:
   - **Component-sync (iter-103 default)** — real `synchronize_bgrid_ne_corner_geo`.
   - **No-sync mock** — patched to identity.
