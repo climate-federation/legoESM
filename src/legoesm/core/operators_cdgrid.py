@@ -573,14 +573,6 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid):
 # Scalar advection on C-grid (PPM)
 # ==============================================================================
 
-def cgrid_scalar_advection(q, u_c, v_c, cdgrid):
-    """Advective transport of scalar q by C-grid velocities (PPM).
-
-    Works for both 2D and 3D inputs.
-    """
-    return cgrid_mass_flux_divergence(q, u_c, v_c, cdgrid)
-
-
 # ==============================================================================
 # Flux-corrected transport (FCT) for monotone tracer advection
 # ==============================================================================
@@ -1431,28 +1423,6 @@ def fv3_cc2c(u_cc, v_cc, cdgrid):
     v_c = 0.5 * (v_pad[:, 1:-1, :-1] + v_pad[:, 1:-1, 1:])  # (6, n, n+1)
 
     return u_c, v_c
-
-
-def fv3_d2cc2c(u_d, v_d, cdgrid):
-    """Edge-midpoint D-grid winds to both cell-centre and C-grid velocities.
-
-    Combines :func:`fv3_d2cc` and :func:`fv3_cc2c`.
-
-    Parameters
-    ----------
-    u_d : jax.Array, shape (6, n, n+1)
-    v_d : jax.Array, shape (6, n+1, n)
-    cdgrid : CubedSphereCDGrid
-
-    Returns
-    -------
-    u_cc, v_cc : jax.Array, shape (6, n, n)
-    u_c : jax.Array, shape (6, n+1, n)
-    v_c : jax.Array, shape (6, n, n+1)
-    """
-    u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
-    u_c, v_c = fv3_cc2c(u_cc, v_cc, cdgrid)
-    return u_cc, v_cc, u_c, v_c
 
 
 def fv3_sw_tendencies(
