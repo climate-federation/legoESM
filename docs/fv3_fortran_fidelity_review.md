@@ -214,6 +214,46 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-158 (2026-04-19)**: session summary of iter-128..157 —
+  117 commits on branch `codex/fv3-fortran-fidelity-ralph-loop-20260417`.
+  Two categories of real improvements, plus test/doc hardening:
+
+  **Real bug fixes** (would have crashed real deployments):
+    - **iter-136/137**: ocean rest-state latlon quiver-overlay
+      shape-broadcast crash — 4 ocean tests now PASS (8/12 → 12/12).
+    - **iter-149/150/151**: two separate `jax.config.update(
+      "jax_spmd_mode", "allow_all")` calls that crash multi-host
+      TPU bootstrap on JAX 0.9+.  Regression-test pinned.
+    - **iter-154**: `XLA_FLAGS=--intra_op_parallelism_threads=<N>`
+      injection in all three CPU-path call sites.  Current XLA
+      rejects this with a FATAL `Unknown flag` error, crashing
+      EVERY CPU-only run on a fresh environment (including default
+      dev machines).  Regression-test pinned.
+    - **iter-142**: `jax.shard_map` DeprecationWarning via silent
+      fallback to the deprecated `jax.experimental.shard_map`.
+
+  **Dead code removal** (−475+ lines):
+    - iter-140: legacy `synchronize_bgrid_ne_corner` 12-seam
+      (−233 lines).
+    - iter-143/144/145/146/147: unused imports, public wrappers,
+      private helpers in operators_cdgrid / fv3_sw_core / halo
+      (−195 lines cumulative).
+
+  **Test/documentation hardening** (FV3 scope):
+    - iter-128/129/130/131: Priority-3 non-duogrid `_d2a2c_vect`
+      architectural bound + runtime negative + positive tripwires.
+    - iter-132/133: FB-path `_d_sw5_corner_divergence` halo-
+      mode='edge' fidelity note + minimal documentation-marker test.
+    - iter-141/148/152/155/156/157: review-doc updates reflecting
+      completed work; stale section markers.
+
+  **Net W2/W5/cosine bell evaluations**: unchanged from iter-112
+  baseline.  229/229 core unit tests pass.  Stopping condition not
+  met (the two architectural blockers remain).  The iter-128..157
+  work is substantively non-architectural but closes many real
+  runtime/codebase-hygiene issues that would have surfaced on
+  downstream deployments.
+
 - **iter-156 (2026-04-19)**: end-to-end smoke test of the canonical
   CPU runtime after iter-154 fix.  With `XLA_FLAGS` unset and
   `JAX_PLATFORMS=cpu`, calling
