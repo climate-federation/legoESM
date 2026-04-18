@@ -39,9 +39,9 @@ from legoesm.grids.halo import CONNECTIVITY, WEST, EAST, SOUTH, NORTH
 logger = logging.getLogger("legoesm.parallel.cubesphere_exchange")
 
 try:
-    from jax.shard_map import shard_map  # JAX >= 0.8
-except (ImportError, ModuleNotFoundError):
-    from jax.experimental.shard_map import shard_map
+    from jax import shard_map  # JAX >= 0.8 exposes it at top level
+except ImportError:
+    from jax.experimental.shard_map import shard_map  # older JAX fallback
 
 # ---------------------------------------------------------------------------
 # Static connectivity tables (built once at import).
