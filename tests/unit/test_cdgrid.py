@@ -64,6 +64,68 @@ class TestCDGridConstruction(unittest.TestCase):
             max_f = float(jnp.max(f_equator))
             self.assertLess(max_f, 2e-5)
 
+    def test_w2_balanced_state_polar_mass_tendency_asymmetry_baseline(self):
+        """Iter-125 (Priority 4 diagnostic baseline): codify the
+        W2-balanced polar-face mass-tendency asymmetry measurement
+        from iter-121-124 as a regression baseline.
+
+        On the FV3-style balanced W2 initial condition (alpha=0 zonal
+        flow + geostrophic h), compute `fv3_sw_tendencies` directly
+        on the initial state and measure the area-weighted mass-rate
+        per face.  This test asserts specific expected values:
+        - Equatorial faces 0-3: IDENTICAL to 5 digits (~4.18e9).
+        - Polar faces 4, 5: DIFFER by ~5-6% (the bug we want to fix).
+
+        If a future refactor REDUCES the polar asymmetry (good), or
+        breaks the equatorial symmetry (regression), this test
+        flags it.  Current values serve as the baseline against
+        which item-#1 architectural work can be measured.
+        """
+        import numpy as np
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core.operators_cdgrid import fv3_sw_tendencies
+
+        n = 36
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        U0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
+        u_east_x = U0 * jnp.cos(cdgrid.lat_edge_x)
+        u_d = cdgrid.cos_angle_edge_x * u_east_x
+        u_east_y = U0 * jnp.cos(cdgrid.lat_edge_y)
+        v_d = -cdgrid.sin_angle_edge_y * u_east_y
+        omega = 2.0 * np.pi / 86400.0
+        lat = cdgrid.base.lat
+        h = 3000.0 - (omega * float(grid.radius) * U0 + U0**2/2) \
+            * jnp.sin(lat)**2 / 9.80616
+        h_s = jnp.zeros((6, n, n))
+
+        dh_dt, _, _ = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid)
+        area = cdgrid.base.area
+        mass_rates = [float(jnp.sum(dh_dt[f] * area[f])) for f in range(6)]
+
+        # Equatorial faces 0-3 must remain symmetric to 5 digits
+        # (they already are — this protects against regression).
+        eq_max = max(abs(mass_rates[i] - mass_rates[0]) for i in range(4))
+        self.assertLess(
+            eq_max / abs(mass_rates[0]), 1e-5,
+            f"Equatorial face symmetry broke: max diff "
+            f"{eq_max:.3e} vs face-0 {mass_rates[0]:.3e}")
+
+        # Polar asymmetry: currently ~5.7%.  Tight tolerance on the
+        # ratio so a future fix that REDUCES asymmetry will trigger
+        # the test (intentionally — to signal progress).
+        # Loose upper bound 10% guards against regression.
+        polar_ratio = mass_rates[4] / mass_rates[5]
+        self.assertAlmostEqual(
+            polar_ratio, 1.057, delta=0.01,
+            msg=(f"Polar mass-rate ratio = {polar_ratio:.4f}, "
+                 f"baseline expects 1.057 ± 0.01.  If the value "
+                 f"dropped toward 1.000, that is a FIX — update the "
+                 f"expected value. If it rose away from 1, that is "
+                 f"a regression."))
+
     def test_f_corner_matches_base_f_under_small_earth_scaling(self):
         """f_corner must track base.f when omega is scaled (e.g. small-earth).
 
