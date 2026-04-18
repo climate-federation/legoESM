@@ -905,9 +905,21 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         averages the NE sub-grid corner of the lower-left cell with the
         SW sub-grid corner of the upper-right cell.  Python builds
         `cdgrid.cosa_corner` by direct tangent-vector geometry on an
-        extended grid — a different construction.  Verify they agree
-        at interior corners (where both sub-grid corner values come
-        from the same supergrid point).
+        extended grid — a different construction.
+
+        Verify consistency in THREE regions (Codex stop-time flagged
+        iter-89 as only covering interior):
+        1. Interior: both sub-grid corner values come from the same
+           supergrid point → Fortran average = direct tangent.
+        2. Panel-edge corners: only the locally-adjacent cell's
+           sub-grid corner is available (no halo cos_sg). Python's
+           direct tangent must equal `cos_sg[SW or NE of locally
+           adjacent cell]` since the extended-grid tangent uses the
+           same supergrid point.
+        3. Cube-vertex corners: analogous single-side sub-grid value.
+
+        These together cover every corner position used by
+        `_bgrid_ke_transport` via `cdgrid.cosa_corner`.
         """
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -917,17 +929,53 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         cdgrid = create_cubed_sphere_cdgrid(grid)
 
         sg = cdgrid.cos_sg
-        # Python 0-indexed sub-grid: 5=SW corner, 7=NE corner
-        # At Python corner (ic, jc) with 1 <= ic, jc <= n-1:
-        #   Fortran NE of cell (ic-1, jc-1) = Python sg[:, ic-1, jc-1, 7]
-        #   Fortran SW of cell (ic, jc)     = Python sg[:, ic, jc, 5]
-        sg_avg_int = 0.5 * (sg[:, 0:n-1, 0:n-1, 7] + sg[:, 1:n, 1:n, 5])
-        direct_int = cdgrid.cosa_corner[:, 1:n, 1:n]
+        direct = cdgrid.cosa_corner  # (6, n+1, n+1)
 
-        max_abs = float(jnp.max(jnp.abs(direct_int - sg_avg_int)))
-        # 1e-6 covers float32 accumulation; actual diff is ~1e-15 in float64
-        self.assertLess(max_abs, 1e-6,
-                        f"cosa_corner not consistent with sub-grid average: {max_abs}")
+        # Python 0-indexed sub-grid: 5=SW corner, 6=SE, 7=NE, 8=NW
+
+        # --- (1) Interior corners (ic, jc) with 1 <= ic, jc <= n-1 ---
+        sg_avg_int = 0.5 * (sg[:, 0:n-1, 0:n-1, 7] + sg[:, 1:n, 1:n, 5])
+        max_int = float(jnp.max(jnp.abs(direct[:, 1:n, 1:n] - sg_avg_int)))
+        self.assertLess(max_int, 1e-6,
+                        f"interior cosa_corner mismatch: {max_int}")
+
+        # --- (2a) West panel-edge corners (ic=0, 1 <= jc <= n-1) ---
+        # Python tangent geometry = sg[SW of cell (0, jc)] (no cell i=-1)
+        max_w = float(jnp.max(jnp.abs(direct[:, 0, 1:n] - sg[:, 0, 1:n, 5])))
+        self.assertLess(max_w, 1e-6,
+                        f"west panel-edge cosa_corner mismatch: {max_w}")
+
+        # --- (2b) East panel-edge corners (ic=n, 1 <= jc <= n-1) ---
+        # direct = sg[NE of cell (n-1, jc-1)] (no cell i=n)
+        max_e = float(jnp.max(jnp.abs(direct[:, n, 1:n] - sg[:, n-1, 0:n-1, 7])))
+        self.assertLess(max_e, 1e-6,
+                        f"east panel-edge cosa_corner mismatch: {max_e}")
+
+        # --- (2c) South panel-edge corners (jc=0, 1 <= ic <= n-1) ---
+        # direct = sg[SW of cell (ic, 0)]
+        max_s = float(jnp.max(jnp.abs(direct[:, 1:n, 0] - sg[:, 1:n, 0, 5])))
+        self.assertLess(max_s, 1e-6,
+                        f"south panel-edge cosa_corner mismatch: {max_s}")
+
+        # --- (2d) North panel-edge corners (jc=n, 1 <= ic <= n-1) ---
+        # direct = sg[NE of cell (ic-1, n-1)]
+        max_n = float(jnp.max(jnp.abs(direct[:, 1:n, n] - sg[:, 0:n-1, n-1, 7])))
+        self.assertLess(max_n, 1e-6,
+                        f"north panel-edge cosa_corner mismatch: {max_n}")
+
+        # --- (3) Cube-vertex corners: 4 per face × 6 faces ---
+        # SW vertex (0,0) → sg[0,0,5]
+        # SE vertex (n,0) → sg[n-1,0,6]
+        # NE vertex (n,n) → sg[n-1,n-1,7]
+        # NW vertex (0,n) → sg[0,n-1,8]
+        max_sw = float(jnp.max(jnp.abs(direct[:, 0, 0] - sg[:, 0, 0, 5])))
+        max_se = float(jnp.max(jnp.abs(direct[:, n, 0] - sg[:, n-1, 0, 6])))
+        max_ne = float(jnp.max(jnp.abs(direct[:, n, n] - sg[:, n-1, n-1, 7])))
+        max_nw = float(jnp.max(jnp.abs(direct[:, 0, n] - sg[:, 0, n-1, 8])))
+        self.assertLess(max_sw, 1e-6, f"SW cube vertex mismatch: {max_sw}")
+        self.assertLess(max_se, 1e-6, f"SE cube vertex mismatch: {max_se}")
+        self.assertLess(max_ne, 1e-6, f"NE cube vertex mismatch: {max_ne}")
+        self.assertLess(max_nw, 1e-6, f"NW cube vertex mismatch: {max_nw}")
 
     def test_sina_u_v_helper_matches_cdgrid_rsin_u_at_interior(self):
         """Iter-87 consistency: the helper's `sina_u` must be

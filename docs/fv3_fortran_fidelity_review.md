@@ -3,6 +3,16 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-90 (2026-04-18)**: Codex stop-time review flagged iter-89's test as interior-only, leaving panel-edge and cube-vertex corners unverified for the `_bgrid_ke_transport` fidelity claim.  Extended `test_cosa_corner_matches_fortran_sub_grid_average` to cover:
+  1. Interior (9 cases via broadcast): Fortran average = Python tangent.
+  2. West panel-edge: Python tangent = `cos_sg[SW of cell (0, jc)]` (single-side, no halo cell i=-1).
+  3. East panel-edge: Python tangent = `cos_sg[NE of cell (n-1, jc-1)]`.
+  4. South panel-edge: Python tangent = `cos_sg[SW of cell (ic, 0)]`.
+  5. North panel-edge: Python tangent = `cos_sg[NE of cell (ic-1, n-1)]`.
+  6. Four cube-vertex types (SW/SE/NE/NW) at (0,0), (n,0), (n,n), (0,n).
+  Every corner position used by `_bgrid_ke_transport` is now verified at <1e-6 precision.
+  - Implication extended: Python's `cdgrid.cosa_corner` is geometrically equivalent to Fortran's sub-grid averaging EVERYWHERE — interior via the trivial identity (both sub-grid values coincide at shared supergrid points), panel edges via the single-side sub-grid value (which is the only one Fortran would have before halo exchange).
+  - 152 cdgrid/duogrid/fv3_regression tests pass.
 - **iter-89 (2026-04-18)**: Verified that Python's `cdgrid.cosa_corner` (built from direct tangent-vector geometry on an extended grid) agrees with the Fortran `fv_grid_utils.F90:495` sub-grid averaging convention `0.5*(cos_sg(i-1,j-1,8) + cos_sg(i,j,6))` to machine precision (~1e-15 under float64) at interior corners.  Both sub-grid corner values come from the same supergrid point at each shared corner, so Fortran's averaging is trivially equal to either operand.
   - Added `test_cosa_corner_matches_fortran_sub_grid_average` to lock this in at <1e-6 (float32 accumulation tolerance).
   - Implication: the `_bgrid_ke_transport` formula `vb = dt5*(vc_sum - uc_sum*cosa)*rsina` using `cdgrid.cosa_corner` and `cdgrid.rsin2_corner` IS Fortran-faithful, since Python's `cosa_corner` matches Fortran's averaged construction.
