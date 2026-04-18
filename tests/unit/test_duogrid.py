@@ -908,3 +908,79 @@ class TestPackedHaloDuogrid:
             post - pre
         ))
         assert float(halo_diff) > 1e-10, "duogrid remap is a no-op on random input"
+
+    def test_packed_mpi_4d_applies_duogrid_end_to_end(self):
+        """End-to-end regression for iter-84's MPI packed duogrid fix
+        that does NOT require a live MPI comm.  Mock-patches
+        `pad_halo_mpi_4d` (the underlying MPI-exchange call that
+        `packed_pad_halo_mpi_4d` dispatches through) to return the
+        identical result of a non-MPI unpacked halo.  Then verifies
+        that passing `duogrid=dg` to `packed_pad_halo_mpi_4d` produces
+        the same result as the canonical `pad_halo_4d(duogrid=dg)`.
+
+        Pre-iter-84: the packed MPI path ignored `duogrid`, so this
+        test would have failed (output would equal the non-duogrid
+        halo, not the duogrid halo).
+        """
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.halo import pad_halo_4d
+        from legoesm.parallel import halo_exchange as mpi_halo_mod
+
+        n, nlev = 8, 2
+        grid = create_cubed_sphere(n, use_duogrid=True)
+        dg = grid.duogrid
+        assert dg is not None
+
+        rng = np.random.default_rng(2)
+        f1 = jnp.asarray(rng.standard_normal((6, n, n, nlev)))
+        f2 = jnp.asarray(rng.standard_normal((6, n, n, nlev + 1)))
+
+        ref1 = np.array(pad_halo_4d(f1, duogrid=dg))
+        ref2 = np.array(pad_halo_4d(f2, duogrid=dg))
+
+        # Mock: `pad_halo_mpi_4d` is the single underlying MPI call that
+        # `packed_pad_halo_mpi_4d` stacks fields through.  Replace it
+        # with `pad_halo_4d(duogrid=None)` which produces the
+        # pre-remap padded state a real MPI exchange would deliver.
+        def mock_pad_halo_mpi_4d(data, topology, halo=1):
+            return pad_halo_4d(data, halo=halo, duogrid=None)
+
+        with mock.patch.object(
+            mpi_halo_mod, 'pad_halo_mpi_4d', mock_pad_halo_mpi_4d,
+        ):
+            r1, r2 = mpi_halo_mod.packed_pad_halo_mpi_4d(
+                f1, f2, topology=None, halo=1, duogrid=dg,
+            )
+
+        np.testing.assert_allclose(np.array(r1), ref1,
+                                   rtol=1e-6, atol=1e-10)
+        np.testing.assert_allclose(np.array(r2), ref2,
+                                   rtol=1e-6, atol=1e-10)
+
+    def test_packed_mpi_4d_without_duogrid_skips_remap(self):
+        """Iter-84 safety: when `duogrid` is not passed, the packed MPI
+        path must be bit-identical to the pre-iter-84 behaviour (plain
+        MPI exchange, no remap).
+        """
+        from unittest import mock
+        from legoesm.grids.halo import pad_halo_4d
+        from legoesm.parallel import halo_exchange as mpi_halo_mod
+
+        n, nlev = 8, 2
+        rng = np.random.default_rng(3)
+        f = jnp.asarray(rng.standard_normal((6, n, n, nlev)))
+
+        def mock_pad_halo_mpi_4d(data, topology, halo=1):
+            return pad_halo_4d(data, halo=halo, duogrid=None)
+
+        ref = np.array(mock_pad_halo_mpi_4d(f, None, 1))
+
+        with mock.patch.object(
+            mpi_halo_mod, 'pad_halo_mpi_4d', mock_pad_halo_mpi_4d,
+        ):
+            (r,) = mpi_halo_mod.packed_pad_halo_mpi_4d(
+                f, topology=None, halo=1,
+            )
+
+        np.testing.assert_array_equal(np.array(r), ref)

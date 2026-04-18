@@ -3,6 +3,10 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-86 (2026-04-18)**: Codex stop-time review flagged that iter-85's tests still left the MPI packed production path unguarded (the unit-level tests hit `_apply_duogrid_4d` in isolation; the SPMD end-to-end auto-skips without 6 devices).  Added two mock-patch end-to-end tests for the MPI path:
+  - `test_packed_mpi_4d_applies_duogrid_end_to_end`: mock-patches `pad_halo_mpi_4d` (the MPI call that `packed_pad_halo_mpi_4d` dispatches through) to return the non-duogrid unpacked halo.  Calls `packed_pad_halo_mpi_4d(duogrid=dg)` and asserts the output matches canonical `pad_halo_4d(duogrid=dg)`.  Empirically verified: pre-iter-84 diff = 6.25, post-iter-84 diff = 0.0.
+  - `test_packed_mpi_4d_without_duogrid_skips_remap`: safety that non-duogrid call path is bit-identical.
+  - 189 tests pass (duogrid + PE + cdgrid + fv3_regression).
 - **iter-85 (2026-04-18)**: Codex stop-time review flagged that iter-84's packed duogrid halo fix was unguarded.  Added 3 regression tests:
   - `TestPackedHaloDuogrid::test_apply_duogrid_4d_matches_pad_halo_4d_with_duogrid` (backend-agnostic): verifies both the MPI and SPMD `_apply_duogrid_4d` helpers produce the same result as the canonical unpacked `pad_halo_4d(duogrid=dg)` when fed the pre-remap padded state.  Would have failed under the pre-iter-84 code because the packed paths skipped the helper entirely.
   - `TestPackedHaloDuogrid::test_apply_duogrid_4d_changes_face_boundary_values`: sanity that `_apply_duogrid_4d` is not an accidental no-op — interior cells unchanged, halo cells modified.
