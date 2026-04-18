@@ -8,6 +8,7 @@ Tests:
 """
 
 import unittest
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -1231,6 +1232,94 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             f"`_d2a2c_vect` is FALSE.  Either revert the change that "
             f"added the call, or fully port the Fortran cube-vertex "
             f"overrides at sw_core.F90:3527-3545 and 3620-3640.",
+        )
+
+    def test_d2a2c_vect_reached_by_experimental_csw_and_fb_model(self):
+        """Iter-130 (Priority 3 complement): positive-case runtime
+        tripwire proving the EXPERIMENTAL paths DO reach `_d2a2c_vect`.
+
+        The iter-129 negative-case test proves the default
+        `FV3EdgeShallowWaterModel` path does NOT reach `_d2a2c_vect`.
+        This test is the complement: it proves the two opt-in
+        experimental paths DO reach it.  Without this positive
+        assertion, one could satisfy the negative test by accidentally
+        breaking `_d2a2c_vect` dispatch on BOTH paths, silently
+        leaving the experimental paths unreachable to their own
+        FB/csw logic — a different kind of regression.
+
+        Paths checked:
+          1. `FV3EdgeShallowWaterModel(config with use_experimental_csw=True)`
+             → `fv3_csw_tendencies` → `_d2a2c_vect` (N=3 hits per RK3 step).
+          2. `FV3FBShallowWaterModel(default config)` → `fv3_fb_sw_step`
+             → `_c_sw` → `_d2a2c_vect` (N>=1 hit per step).
+
+        Together with the iter-129 negative test these pin down the
+        call graph: default → no reach; experimental → reach.
+        """
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            FV3EdgeShallowWaterModel,
+            FV3FBShallowWaterModel,
+            FV3EdgeShallowWaterState,
+            CDGridShallowWaterConfig,
+        )
+        import legoesm.core.fv3_sw_core as sw_mod
+
+        n = 8
+        grid = create_cubed_sphere(n)
+        state = FV3EdgeShallowWaterState(
+            h=jnp.full((6, n, n), 1000.0),
+            u_d=jnp.zeros((6, n, n + 1)),
+            v_d=jnp.zeros((6, n + 1, n)),
+            h_s=jnp.zeros((6, n, n)),
+        )
+
+        orig_d2a2c = sw_mod._d2a2c_vect
+
+        # Path 1: experimental CSW via FV3EdgeShallowWaterModel
+        csw_config = CDGridShallowWaterConfig(use_experimental_csw=True)
+        csw_model = FV3EdgeShallowWaterModel(grid, csw_config)
+        csw_model.set_initial_mass(state)
+        csw_hits = {"n": 0}
+
+        def csw_trip(*a, **kw):
+            csw_hits["n"] += 1
+            return orig_d2a2c(*a, **kw)
+
+        with mock.patch.object(sw_mod, "_d2a2c_vect", csw_trip), \
+             warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # suppress experimental warning
+            s1 = csw_model.step(state, 1.0)
+            s1.h.block_until_ready()
+        self.assertGreater(
+            csw_hits["n"], 0,
+            "use_experimental_csw=True path made ZERO `_d2a2c_vect` "
+            "calls at runtime.  Either fv3_csw_tendencies was rewired "
+            "(update this test) or the dispatch is broken.  The "
+            "experimental CSW path is REQUIRED to go through "
+            "`_d2a2c_vect` for its FV3-faithful C-grid tendency "
+            "computation.",
+        )
+
+        # Path 2: FV3FBShallowWaterModel (forward-backward experimental model)
+        fb_model = FV3FBShallowWaterModel(grid)
+        fb_model.set_initial_mass(state)
+        fb_hits = {"n": 0}
+
+        def fb_trip(*a, **kw):
+            fb_hits["n"] += 1
+            return orig_d2a2c(*a, **kw)
+
+        with mock.patch.object(sw_mod, "_d2a2c_vect", fb_trip):
+            s2 = fb_model.step(state, 1.0)
+            s2.h.block_until_ready()
+        self.assertGreater(
+            fb_hits["n"], 0,
+            "FV3FBShallowWaterModel.step made ZERO `_d2a2c_vect` "
+            "calls at runtime.  The FB path is required to go "
+            "through `_d2a2c_vect` via `_c_sw` — either fv3_fb_sw_step "
+            "was rewired (update this test) or the dispatch is broken.",
         )
 
     def test_rsin2_corner_matches_fortran_at_interior(self):
