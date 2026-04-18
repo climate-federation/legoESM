@@ -443,3 +443,100 @@ def test_tests_shim_recovers_when_src_is_on_path_but_shadowed():
         "an already-on-path src/:\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+def test_tests_shim_rejects_stale_install_that_includes_submodule():
+    """Stop-gate regression: a stale install that *does* ship
+    ``legoesm.atmosphere.held_suarez`` must still not silently bind
+    the shim to it.
+
+    Previous shim logic bootstrapped ``<repo>/src`` only when the
+    target submodule was unreachable. If a user had an older
+    ``legoesm`` earlier on ``sys.path`` that *included* the submodule
+    (e.g. a wheel published between two versions of this fix), the
+    shim would detect a valid spec, skip the bootstrap, and re-export
+    the stale copy — silently running tests against the wrong code.
+
+    The hardened shim must compare the resolved submodule origin
+    against ``<repo>/src`` and force the checkout to win whenever the
+    two disagree.
+    """
+    import tempfile
+    import textwrap
+
+    with tempfile.TemporaryDirectory() as stale_root:
+        stale_pkg = pathlib.Path(stale_root) / "legoesm"
+        atmosphere_pkg = stale_pkg / "atmosphere"
+        atmosphere_pkg.mkdir(parents=True)
+        (stale_pkg / "__init__.py").write_text("STALE_SENTINEL = True\n")
+        (atmosphere_pkg / "__init__.py").write_text("")
+        # Stale submodule exposes a marker attribute and a sentinel
+        # function object. If the shim binds to this copy, the test
+        # will see the sentinels instead of the checkout symbols.
+        (atmosphere_pkg / "held_suarez.py").write_text(
+            textwrap.dedent(
+                """
+                STALE_HELD_SUAREZ = True
+
+                def held_suarez_init(*args, **kwargs):
+                    return 'stale-init'
+
+                SIGMA_B = -1.0
+                K_A = -1.0
+                K_S = -1.0
+                K_F = -1.0
+                """
+            ).lstrip()
+        )
+
+        env = dict(os.environ)
+        # Put the stale install *earlier* than the repo root so that
+        # ``import legoesm`` and ``import legoesm.atmosphere.held_suarez``
+        # both resolve to it before the shim runs.
+        env["PYTHONPATH"] = os.pathsep.join([str(stale_root), str(REPO_ROOT)])
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys, os\n"
+                "repo_root = os.environ['PYTHONPATH'].split(os.pathsep)[-1]\n"
+                "repo_src = os.path.join(repo_root, 'src')\n"
+                "if repo_src not in sys.path:\n"
+                "    sys.path.append(repo_src)\n"
+                "for mod in [m for m in list(sys.modules) if m == 'legoesm' or m.startswith('legoesm.')]:\n"
+                "    del sys.modules[mod]\n"
+                # Precondition: the stale submodule is fully reachable\n"
+                # before the shim runs — the critical difference from\n"
+                # the earlier stale-install test.\n"
+                "import legoesm.atmosphere.held_suarez as pre\n"
+                "assert getattr(pre, 'STALE_HELD_SUAREZ', False), "
+                "    'precondition failed: stale submodule not active'\n"
+                "assert pre.held_suarez_init() == 'stale-init'\n"
+                # Now import the shim. It must detect that the found\n"
+                # submodule lives outside <repo>/src, prepend the\n"
+                # checkout, evict cached modules, and re-resolve.\n"
+                "import tests.test_cases.held_suarez as shim\n"
+                "assert not getattr(shim, 'STALE_HELD_SUAREZ', False), "
+                "    'shim silently bound to the stale installed module'\n"
+                "assert shim.SIGMA_B == 0.7, "
+                "    f'SIGMA_B came from stale module: {shim.SIGMA_B!r}'\n"
+                # After the shim runs, a fresh import of the canonical\n"
+                # name must also resolve to the checkout, not the stale\n"
+                # copy — confirming sys.path + sys.modules were both\n"
+                # repaired, not just the shim's own references.\n"
+                "import legoesm.atmosphere.held_suarez as canonical\n"
+                "assert not getattr(canonical, 'STALE_HELD_SUAREZ', False), "
+                "    'canonical re-import still returned the stale module'\n"
+                "assert shim.held_suarez_init is canonical.held_suarez_init\n",
+            ],
+            cwd=str(REPO_ROOT.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    assert result.returncode == 0, (
+        "tests/ shim silently bound to a stale installed Held-Suarez "
+        "module that happened to ship the submodule (#188 stop-gate):\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
