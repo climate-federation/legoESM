@@ -363,10 +363,18 @@ def fv3_hydrostatic_tendencies(
             T, u_cell, v_cell, topology=_mpi_topology,
         )
     else:
-        _T_pad = _pad_halo_4d(T, interp_offsets=grid.halo_interp_offsets)
+        # Route through duogrid remap when duogrid is active on the grid,
+        # matching the pattern used by _arakawa_lamb_gradient via
+        # `_pad_halo_auto`.  Without this, T / u_cell / v_cell halos
+        # silently fell back to the non-duogrid interp_offsets path even
+        # on duogrid-enabled grids, introducing a halo quality mismatch
+        # between the pre-padded fields and the gradient operators.
+        _pe_dg = grid.duogrid
+        _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+        _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         if _needs_uv_pad:
-            _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=grid.halo_interp_offsets)
-            _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=grid.halo_interp_offsets)
+            _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
+            _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
         else:
             _u_cc_pad = _v_cc_pad = None
 

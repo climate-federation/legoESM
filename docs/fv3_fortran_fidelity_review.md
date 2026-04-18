@@ -3,6 +3,10 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-82 (2026-04-18)**: Fixed silent non-duogrid halo pin in `primitive_eq_cdgrid.py::fv3_hydrostatic_tendencies`:
+  - The non-MPI fallback branch at line 366-369 called `_pad_halo_4d(T, interp_offsets=grid.halo_interp_offsets)` unconditionally for T, u_cell, v_cell pre-padded buffers.
+  - These buffers are then consumed by `_gradient_x_3d/_gradient_y_3d` and `_arakawa_lamb_gradient` downstream. The latter uses `_pad_halo_auto` internally which routes through duogrid; mixing pre-pads (non-duogrid) with runtime pads (duogrid) silently inconsistent in duogrid mode.
+  - Fixed: route through duogrid when `grid.duogrid is not None`, mirroring the iter-78/79/81 pattern. MPI packed-halo path already uses proper duogrid routing internally. 40 PE tests + SW matrix unchanged.
 - **iter-81 (2026-04-18)**: Fixed grid-build halo inconsistency for `_arakawa_lamb_gradient` metric matrix:
   - `cubed_sphere_cdgrid.py:984-986`: the 3D Cartesian positions (`x_cc`, `y_cc`, `z_cc`) used to precompute the `grad_c00..c11` transformation matrix were padded via `pad_halo(interp_offsets=base.halo_interp_offsets)` unconditionally.
   - At runtime, `_arakawa_lamb_gradient` pads the transported field `B` via `_pad_halo_auto(B, cdgrid)` which routes through the duogrid remap when duogrid is active. The metric matrix is then applied to duogrid-routed raw differences — but the matrix itself was built from non-duogrid positions.
