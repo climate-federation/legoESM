@@ -720,18 +720,26 @@ def _del6_vt_flux(nord, damp, q, cdgrid, use_duogrid=False):
     rdyc = cdgrid.rdyc
     rarea = 1.0 / grid.area
 
+    # Route halo exchanges through the duogrid remap when `use_duogrid`,
+    # matching the Fortran `bounded_domain` path in `del6_vt_flux` which
+    # skips `copy_corners` and relies on the duogrid MPI update.  Without
+    # this the function silently fell back to the non-duogrid `interp_offsets`
+    # path even when called from the d_sw6 duogrid branch.
+    dg = grid.duogrid if use_duogrid else None
+    _offs = None if use_duogrid else grid.halo_interp_offsets
+
     d2 = damp * q
 
     # Laplacian diffusive fluxes (USE_SG path, sw_core.F90:2064-2082)
-    d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+    d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=dg)
     sin_E = sg[:, :, :, 2]
     sin_W = sg[:, :, :, 0]
     sin_N = sg[:, :, :, 3]
     sin_S = sg[:, :, :, 1]
-    se_pad = pad_halo(sin_E, interp_offsets=grid.halo_interp_offsets)
-    sw_pad = pad_halo(sin_W, interp_offsets=grid.halo_interp_offsets)
-    sn_pad = pad_halo(sin_N, interp_offsets=grid.halo_interp_offsets)
-    ss_pad = pad_halo(sin_S, interp_offsets=grid.halo_interp_offsets)
+    se_pad = pad_halo(sin_E, interp_offsets=_offs, duogrid=dg)
+    sw_pad = pad_halo(sin_W, interp_offsets=_offs, duogrid=dg)
+    sn_pad = pad_halo(sin_N, interp_offsets=_offs, duogrid=dg)
+    ss_pad = pad_halo(sin_S, interp_offsets=_offs, duogrid=dg)
 
     sin_uv_x = 0.5 * (se_pad[:, :n+1, 1:-1] + sw_pad[:, 1:n+2, 1:-1])
     sin_uv_y = 0.5 * (sn_pad[:, 1:-1, :n+1] + ss_pad[:, 1:-1, 1:n+2])
@@ -742,7 +750,7 @@ def _del6_vt_flux(nord, damp, q, cdgrid, use_duogrid=False):
     # Higher-order iteration (sw_core.F90:2084-2119)
     for _it in range(nord):
         d2 = (fx2[:, :-1, :] - fx2[:, 1:, :] + fy2[:, :, :-1] - fy2[:, :, 1:]) * rarea
-        d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+        d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=dg)
         fx2 = sin_uv_x * dy * (d2_pad[:, 1:, 1:-1] - d2_pad[:, :-1, 1:-1]) * rdxc
         fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, 1:] - d2_pad[:, 1:-1, :-1]) * rdyc
 

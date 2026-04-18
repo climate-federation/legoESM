@@ -391,6 +391,16 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
     rdyc = cdgrid.rdyc       # (6, n, n+1)
     rarea = 1.0 / grid.area  # (6, n, n)
 
+    # Route halo exchanges through the duogrid kinked-to-extended remap
+    # when duogrid is active, so that face-boundary values used by the
+    # Laplacian stencil have duogrid quality (matches the bounded_domain
+    # path in the Fortran `deln_flux`, which skips `copy_corners` and
+    # relies on duogrid MPI halo exchange).
+    dg = grid.duogrid
+    _use_dg = dg is not None and dg.ng >= 2
+    _offs = None if _use_dg else grid.halo_interp_offsets
+    _dg_arg = dg if _use_dg else None
+
     # Step 1: initialize d2 (tp_core.F90:1253-1265)
     if mass is None:
         d2 = damp * q
@@ -399,18 +409,18 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
 
     # Step 2: Laplacian diffusive fluxes (tp_core.F90:1270-1290, USE_SG path)
     # fx2 = 0.5*(sin_sg(i-1,j,E)+sin_sg(i,j,W)) * dy * (d2[i-1]-d2[i]) * rdxc
-    d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+    d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=_dg_arg)
     sin_E = sg[:, :, :, 2]   # E-edge
     sin_W = sg[:, :, :, 0]   # W-edge
-    sin_E_pad = pad_halo(sin_E, interp_offsets=grid.halo_interp_offsets)
-    sin_W_pad = pad_halo(sin_W, interp_offsets=grid.halo_interp_offsets)
+    sin_E_pad = pad_halo(sin_E, interp_offsets=_offs, duogrid=_dg_arg)
+    sin_W_pad = pad_halo(sin_W, interp_offsets=_offs, duogrid=_dg_arg)
     sin_uv_x = 0.5 * (sin_E_pad[:, :n+1, 1:-1] + sin_W_pad[:, 1:n+2, 1:-1])
     fx2 = sin_uv_x * dy * (d2_pad[:, :-1, 1:-1] - d2_pad[:, 1:, 1:-1]) * rdxc
 
     sin_N = sg[:, :, :, 3]   # N-edge
     sin_S = sg[:, :, :, 1]   # S-edge
-    sin_N_pad = pad_halo(sin_N, interp_offsets=grid.halo_interp_offsets)
-    sin_S_pad = pad_halo(sin_S, interp_offsets=grid.halo_interp_offsets)
+    sin_N_pad = pad_halo(sin_N, interp_offsets=_offs, duogrid=_dg_arg)
+    sin_S_pad = pad_halo(sin_S, interp_offsets=_offs, duogrid=_dg_arg)
     sin_uv_y = 0.5 * (sin_N_pad[:, 1:-1, :n+1] + sin_S_pad[:, 1:-1, 1:n+2])
     fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, :-1] - d2_pad[:, 1:-1, 1:]) * rdyc
 
@@ -419,13 +429,13 @@ def _deln_flux(nord, damp, q, fx, fy, cdgrid, mass=None):
         # Compute divergence of diffusive fluxes
         d2 = (fx2[:, :-1, :] - fx2[:, 1:, :] + fy2[:, :, :-1] - fy2[:, :, 1:]) * rarea
         # Re-exchange and recompute fluxes with sign flip (d2[i]-d2[i-1])
-        d2_pad = pad_halo(d2, interp_offsets=grid.halo_interp_offsets)
+        d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=_dg_arg)
         fx2 = sin_uv_x * dy * (d2_pad[:, 1:, 1:-1] - d2_pad[:, :-1, 1:-1]) * rdxc
         fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, 1:] - d2_pad[:, 1:-1, :-1]) * rdyc
 
     # Step 4: Add diffusive fluxes to transport fluxes (tp_core.F90:1339-1363)
     if mass is not None:
-        mass_pad = pad_halo(mass, interp_offsets=grid.halo_interp_offsets)
+        mass_pad = pad_halo(mass, interp_offsets=_offs, duogrid=_dg_arg)
         mass_u = 0.5 * (mass_pad[:, :-1, 1:-1] + mass_pad[:, 1:, 1:-1])  # (6, n+1, n)
         mass_v = 0.5 * (mass_pad[:, 1:-1, :-1] + mass_pad[:, 1:-1, 1:])  # (6, n, n+1)
         fx = fx + 0.5 * damp * mass_u * fx2

@@ -3,6 +3,10 @@
 ## CURRENT STATE (post iter-77)
 
 Latest iteration work:
+- **iter-78 (2026-04-18)**: Fixed duogrid halo routing in two del-n damping helpers:
+  - `_del6_vt_flux` (fv3_sw_core.py:687) — used by d_sw6 vorticity damping (`damp_v > 1e-5`). Accepted a `use_duogrid` parameter but **never used it**: halo exchange always went through `pad_halo(..., interp_offsets=grid.halo_interp_offsets)` (non-duogrid path).  Fixed: now routes through `pad_halo(..., duogrid=dg)` when `use_duogrid=True`, matching the Fortran `bounded_domain` branch of `del6_vt_flux` in sw_core.F90:2008-2121 which skips `copy_corners` and relies on duogrid MPI halo update.
+  - `_deln_flux` (fv_tp_2d.py:362) — used by `fv_tp_2d` for del-n damping of tracer/mass transport and by d_sw3 implicitly through `fv_tp_2d`. Same silent bug: internal `d2_pad`, `sin_E_pad`, `sin_W_pad`, `sin_N_pad`, `sin_S_pad`, `mass_pad` all pinned to `interp_offsets` path, ignoring duogrid. Fixed: routes through duogrid halo when duogrid is active on the grid, matching the Fortran `bounded_domain` branch of `deln_flux` in tp_core.F90:1217-1365.
+  - Both fixes are formula-preserving but improve halo quality at face boundaries in the duogrid FB path. SW production path (Arakawa-Lamb) is unaffected — metrics unchanged. Validation: 141 cdgrid/duogrid/fv3_regression tests pass; SW matrix unchanged.
 - **iter-77 (2026-04-18)**: Applied iter-74-style f-interpolation fix to two additional call paths that were missed:
   - `compressible_euler_cdgrid.py:155+168`: was adding `cdgrid.base.f` (cell centre) to ζ then interpolating the sum to corners via `_interp_center_to_corner`.  Fixed: interpolate ζ only, then add `cdgrid.f_corner` directly at corners.  Removes O(dx²) sin(lat) non-linear interpolation error from Coriolis at corners.
   - `primitive_eq_cdgrid.py:224-246` (`fv3_hydrostatic_tendencies`): same bug — `zeta_abs = zeta + grid.f` was packed with B and 1/T for a 3-field halo exchange, then interpolated to corners.  Fixed: pack ζ (not ζ+f), then add `cdgrid.f_corner[..., None]` after the corner interpolation.
