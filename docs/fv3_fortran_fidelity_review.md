@@ -2,6 +2,42 @@
 
 ## CURRENT STATE (post iter-112)
 
+**Reconciliation of user's recurring priority list (iter-115)**:
+
+The user's Ralph prompt has repeatedly cited three "live fidelity gaps":
+
+1. **Panel-edge corner metric mismatch** — cites test name
+   `test_cosa_corner_panel_edge_convention_differs_from_fortran`.
+   That test NO LONGER EXISTS: iter-96 found the "convention
+   differs" framing was wrong (I was comparing against a naive
+   halo-copy without the cross-face sign-flip rotation that a
+   proper cubed-sphere halo update applies).  With the sign flip,
+   Python's `cdgrid.cosa_corner` MATCHES Fortran's halo-averaged
+   formula at ALL 24 seams to 1e-10 precision, locked in by
+   `test_cosa_corner_panel_edge_fortran_match_all_24_seams`
+   (iter-98).  **STATUS: RESOLVED.**
+
+2. **d_sw3 seam sync mismatch** — "replace scalar fallback with
+   a true component sync if possible".  DONE iter-102/103: the
+   geographic-frame helper `synchronize_bgrid_ne_corner_geo`
+   handles all 24 seams + 8 cube vertices via a single scalar-
+   sync pass through the geographic frame.  Wired into
+   `_bgrid_ke_transport` replacing the scalar-KE-after-formation
+   fallback.  Verified active end-to-end through `fv3_fb_sw_step`
+   (iter-111).  **STATUS: RESOLVED.**
+
+3. **Non-duogrid `_d2a2c_vect` full port** — cube-vertex
+   sign-flip overrides at sw_core.F90:3527-3545 and 3620-3640
+   are NOT PORTED in Python's non-duogrid path.  Python uses
+   `_fill_corners_h1/h2` which gives DIFFERENT values at the
+   4 cube-corner halo regions.  Explicit guard comment + regression
+   test locking in 5 required phrases added iter-107/108.
+   **STATUS: GAP ISOLATED AND DOCUMENTED.**
+
+The remaining true blockers are the two ARCHITECTURAL items below
+(production uses A-L, not FV3 FB; FB path itself unstable at C36).
+These require infrastructure-level rework beyond the priority list.
+
 **Session summary (iter 77-112, 36 iterations)**:
 - **Priority 1 (panel-edge corner metrics)** — full Fortran-fidelity verified (iter-98: 24-seam exact-match table; iter-99: rsin2_corner interior; iter-96: panel-edge with sign-flip rotation).
 - **Priority 2 (d_sw3 BGRID_NE component sync)** — wired into `_bgrid_ke_transport` via geo-frame helper `synchronize_bgrid_ne_corner_geo` (iter-102, iter-103); 4-assertion regression coverage (iter-106).
@@ -10,7 +46,7 @@
 - **Required evaluation metrics** (post iter-112 verification): W2 L2=1.53e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01, ocean rest state machine-precision.  All unchanged from iter-77 baseline — the iter-103 d_sw3 change is correctly localized to the FB path (production uses A-L gradient).
 
 **Stopping condition not met** due to two architectural items (see "Unresolved" list):
-- **Item #1**: W2 v-wind visible cube-face imprint at t>0.5d.  Production path uses A-L gradient; FV3 FB chain is Fortran-faithful (iter-103-111) but unstable at C36.  Fundamental fix is either (a) replace production with FB chain + stabilize C36, or (b) port FV3's architectural RK3+FB timestepping.  Diagnostic data (iter-114, t=1d, C36): FFT mode-4 amplitude in v-wind by latitude (mode-4 = cube-face imprint signature) — peaks at ±30° to ±45° (35-49) and is asymmetric: lat=-30 gives 49 but lat=+30 gives 35.  Mode-2 dominates at ±60° (68-74) suggesting hemispheric asymmetry from the W2 alpha angle.  Useful as a future-work benchmark.
+- **Item #1**: W2 v-wind visible cube-face imprint at t>0.5d.  Production path uses A-L gradient; FV3 FB chain is Fortran-faithful (iter-103-111) but unstable at C36.  Fundamental fix is either (a) replace production with FB chain + stabilize C36, or (b) port FV3's architectural RK3+FB timestepping.  Diagnostic data (iter-114/115, t=1d, C36, production A-L path): FFT mode-4 amplitude in v-wind by latitude (mode-4 = cube-face 4-panel signature) — peaks at ±30° to ±45° (35-49); mode-2 (hemispheric) peaks at ±60° (68-74).  Numerical asymmetry between lat=-30 (mode-4=49) and lat=+30 (mode-4=35) is observed but its cause is NOT confirmed (would require ablation: run W2 with alpha=0 vs alpha=π/4 to see if the asymmetry follows the initial-condition tilt or is a grid/numerical artifact).  Used as a regression-target reference for future architectural work.
 - **Item #2**: FB-path C36 instability from ng=3 halo requirement.  Requires infrastructure work beyond the priority list.
 
 Latest iteration work:
