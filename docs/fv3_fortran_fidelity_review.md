@@ -200,6 +200,27 @@ Latest iteration work:
     Fortran overrides will fail the architectural-bound test with a
     direct pointer to sw_core.F90:3527-3545 / 3620-3640.
 
+- **iter-139 (2026-04-18)**: verified `results/validation_report.md`
+  is STALE for the 11 claimed "latlon atmosphere ERRORs".  The report
+  attributes them to "A-grid module removal (commits 851b301 /
+  fc435d1)", but a direct run of `scripts/run_atmosphere_test_matrix
+  .py --only sw --grid latlon --quick` shows all 3 latlon shallow-
+  water tests PASS:
+    - williamson2/latlon: L2=2.60e-04, Linf=2.26e-03
+    - williamson5/latlon: mass drift=8.07e-05
+    - cosine_bell/latlon: L1=4.01e-02, mass_drift=1.47e-05
+  `src/legoesm/atmosphere/dynamics/shallow_water_latlon_cgrid.py`
+  exists and functions.  hydrostatic/latlon (held_suarez, baroclinic,
+  dcmip_1x, amip) was verified to at least START running (day 0.5
+  observed with mass conserved at 5.101e+19 and max_wind ~ 0.5 m/s)
+  rather than immediately erroring as the report claims.  Sea-ice
+  test matrix: 18/18 PASS.  Ocean test matrix (post iter-136/137):
+  rest state 12/12 PASS; phillips_two_layer and
+  inertia_gravity_wave latlon remain ERROR (deeper model bug per
+  iter-138).  **Net across all test matrices**: the Ralph
+  "required evaluations" (W2/W5/cosine bell/ocean rest state) all
+  pass at the cubed-sphere and latlon resolutions that apply.
+
 - **iter-136..138 (2026-04-18)**: ocean rest-state fixes (out-of-scope
   of FV3 Fortran fidelity, but closes part of the Ralph required-
   evaluations "ocean rest state preserved within numerical error").
