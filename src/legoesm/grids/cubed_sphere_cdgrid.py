@@ -637,12 +637,23 @@ def create_cubed_sphere_cdgrid(
     # `cdgrid.f_corner` remains consistent with `base.f` under any
     # rescaling (e.g. `small_earth_factor` in NH model tests).  Use
     # the cell with the largest |sin(lat)| for numerical stability.
+    # Falls back to Earth's default if the inference is not reliable
+    # (e.g. base.f/sin_lat cannot be reduced to a concrete scalar,
+    # or the base grid has sin_lat effectively zero everywhere).
     if omega is None:
-        flat_abs_sl = jnp.abs(base.sin_lat).reshape(-1)
-        idx = int(jnp.argmax(flat_abs_sl))
-        f_probe = base.f.reshape(-1)[idx]
-        sl_probe = base.sin_lat.reshape(-1)[idx]
-        omega = float(f_probe / (2.0 * sl_probe))
+        try:
+            flat_abs_sl = jnp.abs(base.sin_lat).reshape(-1)
+            idx = int(jnp.argmax(flat_abs_sl))
+            sl_probe = float(base.sin_lat.reshape(-1)[idx])
+            f_probe = float(base.f.reshape(-1)[idx])
+            if abs(sl_probe) > 1e-6:
+                omega = f_probe / (2.0 * sl_probe)
+            else:
+                omega = 7.292e-5  # fallback: sin_lat ~ 0 everywhere
+        except (TypeError, jax.errors.ConcretizationTypeError):
+            # base.f or base.sin_lat is a JAX tracer (e.g. JIT-time
+            # grid construction). Fall back to the Earth default.
+            omega = 7.292e-5
     f_corner = 2.0 * omega * jnp.sin(lat_corner)
     cos_angle_corner = jnp.cos(angle_corner)
     sin_angle_corner = jnp.sin(angle_corner)
