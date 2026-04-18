@@ -1,13 +1,15 @@
 # FV3 Fortran Fidelity Review (baselined 2026-04-14, updated through Ralph iter 169 on 2026-04-19)
 
-## CURRENT STATE (post iter-112 — historical snapshot)
+## ITER-112 HISTORICAL SNAPSHOT (post iter-112)
 
-> **iter-172 note**: the content below reflects the iter-112 era
-> state when the "Reconciliation of user's recurring priority list"
-> was written (iter-115).  Later iter-128..171 work is summarised
-> in bullet entries in the "Latest iteration work" section below,
-> not recapped here.  Do not edit the iter-112 content; it is a
-> frozen snapshot for audit purposes.
+> **iter-173 note**: this section is a FROZEN audit artifact from
+> iter-115 — the "Reconciliation of user's recurring priority list"
+> that was current at iter-112.  Do NOT edit the content below;
+> live state after iter-112 is captured incrementally in the
+> "Latest iteration work" section further down.  The word "CURRENT"
+> was removed from this heading in iter-173 to resolve the iter-171/
+> 172 naming inconsistency (Codex stop-time review flagged the doc
+> as internally inconsistent when this was titled "CURRENT STATE").
 
 **Reconciliation of user's recurring priority list (iter-115)**:
 
@@ -764,7 +766,12 @@ Latest iteration work:
   - **Diagnostic**: FFT of W2 v-wind at lat=30° after 1 day shows dominant mode-4 amplitude 35.35 (longitudinal cube-face imprint signature); mode-8 harmonic 10.80; mean offset (mode-0) 9.54.  Production SW path still shows this pattern — architectural (unchanged by this fix because SW model does not use the NH/PE code path).
   - Validation: 240 regression tests pass (cdgrid + duogrid + fv3_regression + NH unit/integration + PE minus pre-existing failures).  SW metrics unchanged: W2 L2=1.53e-03 Linf=4.07e-03, W5 drift=1.42e-05, cosine bell L1=1.20e-01.  Ocean rest state: cube variants machine-precision.  Pre-existing failures (not caused by this iteration): `test_anchor_mass_to_initial` (8.62e-08 vs 1e-08 threshold, present before change), `test_canonical_runner_cases_exist` (ocean RUNNERS naming mismatch, unrelated).
 
-## CURRENT STATE (post iter-67)
+## ITER-67 HISTORICAL SNAPSHOT (post iter-67)
+
+> **iter-173 note**: like the iter-112 snapshot above, this is a
+> frozen audit artifact.  "CURRENT STATE" was renamed to "ITER-67
+> HISTORICAL SNAPSHOT" in iter-173 for the same inconsistency
+> reason.  Live state beyond iter-67 is in "Latest iteration work".
 
 Scope:
 - Python: `src/legoesm/grids/cubed_sphere_cdgrid.py`, `src/legoesm/core/fv3_sw_core.py`, `src/legoesm/core/fv_tp_2d.py`, `src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py`, `src/legoesm/core/operators_cdgrid.py`
