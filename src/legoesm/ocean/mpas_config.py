@@ -28,9 +28,10 @@ class MPASOceanConfig(NamedTuple):
         When > 0, enables flow-dependent biharmonic Smagorinsky viscosity
         ``-del2(A_smag * del2(u))`` where ``A_smag = (C_smag * Δ)² |D|``.
     bottom_drag_r : float
-        Linear bottom drag coefficient [1/s].  Applied as ``-r * u``
+        Linear bottom drag coefficient [m/s].  Applied as ``-r * u / dz_bot``
         at the bottom level in the baroclinic tendency and as
-        ``-r * U_bar * dz_bot/H`` in the barotropic substeps.
+        ``-r * U_bar / H`` in the barotropic substeps.  Matches MITgcm's
+        ``bottomDragLinear`` convention.
     K_h : float
         Horizontal tracer diffusivity [m²/s].
     A_v : float

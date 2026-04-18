@@ -236,9 +236,11 @@ def mpas_ocean_baroclinic_tendencies(
     # Bottom drag on full velocity (not perturbation) — the ocean floor
     # sees the total flow.  Applied before F_slow_u computation so the
     # depth-averaged drag enters the barotropic solver via slow forcing.
+    # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
     if config.bottom_drag_r > 0:
+        dz_bot_e = jnp.maximum(h_e_3d[:, -1], 1e-10)
         du_dt_full = du_dt_full.at[:, -1].add(
-            -config.bottom_drag_r * u_3d[:, -1] * edge_mask)
+            -config.bottom_drag_r * u_3d[:, -1] / dz_bot_e * edge_mask)
 
     # Depth-mean → slow forcing for barotropic solver
     F_slow_u = jnp.sum(du_dt_full * h_e_3d, axis=1) / jnp.maximum(H_e, 1e-10)

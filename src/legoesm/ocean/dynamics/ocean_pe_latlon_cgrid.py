@@ -540,8 +540,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     if config.bottom_drag_r > 0:
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
-        du_dt = du_dt.at[..., -1].add(-config.bottom_drag_r * u[..., -1])
-        dv_dt = dv_dt.at[..., -1].add(-config.bottom_drag_r * v[..., -1])
+        # r is in [m/s]: du/dt = -r * u / dz_bottom  (resolution-independent stress).
+        dz_bot_u = z_coord.dz_ref[-1] * jnp.maximum(interp_cell_to_uface(J), 1e-10)
+        dz_bot_v = z_coord.dz_ref[-1] * jnp.maximum(_interp_to_v_points(J), 1e-10)
+        du_dt = du_dt.at[..., -1].add(-config.bottom_drag_r * u[..., -1] / dz_bot_u)
+        dv_dt = dv_dt.at[..., -1].add(-config.bottom_drag_r * v[..., -1] / dz_bot_v)
 
     if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)

@@ -209,10 +209,10 @@ def barotropic_substeps_mpas(
         if config.barotropic_damping > 0:
             u_bar_next = u_bar_next * (1.0 - dt_baro * config.barotropic_damping)
 
-        # Bottom drag on barotropic velocity: -r * U_bar * dz_bot / H_total.
+        # Bottom drag on barotropic velocity: -r * U_bar / H_total.
+        # r is in [m/s] — resolution-independent bottom stress.
         if config.bottom_drag_r > 0:
-            dz_bot = z_coord.dz_ref[-1]
-            drag = 1.0 - dt_baro * config.bottom_drag_r * dz_bot / jnp.maximum(H_e_c, 1e-10)
+            drag = 1.0 - dt_baro * config.bottom_drag_r / jnp.maximum(H_e_c, 1e-10)
             u_bar_next = u_bar_next * drag
 
         # Barotropic Laplacian diffusion on eta (flux-form: conservative).

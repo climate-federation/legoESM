@@ -80,7 +80,7 @@ class EadyUniformConfig:
     B_h: float = 1e10
     C_smag: float = 0.1
     K_h: float = 10.0
-    bottom_drag_coeff: float = 1e-4
+    bottom_drag_coeff: float = 1.1e-3  # Linear bottom drag [m/s]
 
     # Sponge layer: absorbs eddy energy near walls to prevent
     # Kelvin wave trapping and nonlinear steepening at boundaries.

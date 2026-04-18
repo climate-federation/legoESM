@@ -6,8 +6,14 @@ from typing import NamedTuple
 
 
 class LinearDragConfig(NamedTuple):
-    """Linear bottom drag: tau = -r * u."""
-    r: float = 1e-4   # Linear drag coefficient [1/s]
+    """Linear bottom drag: du/dt = -r * u / dz_bottom.
+
+    The coefficient r has units [m/s] so that the bottom stress
+    tau = rho_0 * r * u [N/m^2] is independent of vertical resolution.
+    Thinner bottom layers feel more deceleration from the same stress.
+    This matches MITgcm's ``bottomDragLinear`` convention.
+    """
+    r: float = 1.1e-3   # Linear drag coefficient [m/s]
 
 
 class QuadraticDragConfig(NamedTuple):
