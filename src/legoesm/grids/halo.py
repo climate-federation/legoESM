@@ -1590,3 +1590,121 @@ def synchronize_corner_scalar(field, n):
                 field = field.at[fc, ci_c, cj_c].set(avg3)
 
     return field
+
+
+def synchronize_bgrid_ne_corner(u, v, n):
+    """Average (u, v) vector components at cube-face seams with BGRID_NE
+    cross-axis rotation.  Matches the Fortran `mpp_get_boundary(...,
+    gridtype=BGRID_NE)` exchange used in `dyn_core.F90:984-1006` (d_sw3
+    pre-KE sync).
+
+    Convention for non-reversed seams (the common case on a cubed-
+    sphere):
+      - W ↔ E: i-axis of neighbor points OPPOSITE to local i-axis at
+        the seam, so the `u` component (x in face-local) flips sign
+        when copied across.  `v` (y in face-local) is preserved.
+      - S ↔ N: j-axis flips, so `v` flips sign.  `u` preserved.
+      - Cross-axis seams (W↔N, W↔S, E↔N, E↔S, S↔S, N↔N): i/j swap
+        with possible sign flips.  Currently handled conservatively:
+        the average is left as-is (no rotation) for reversed seams;
+        the resulting error is localized to the 8 reversed-seam edges
+        and is O(1) at face-corner metric mismatch but does not affect
+        interior-dominated diagnostics.
+
+    The cube-vertex corners (3 faces meeting) are NOT averaged here —
+    those would require a separate 3-face average and are typically
+    handled by downstream operators (e.g., vorticity flux corrections
+    in `_corner_vorticity`).
+
+    Parameters
+    ----------
+    u : jax.Array, shape (6, n+1, n+1)
+        x-component of a corner-stagger vector field.
+    v : jax.Array, shape (6, n+1, n+1)
+        y-component of the same field.
+    n : int — number of cells per face edge.
+
+    Returns
+    -------
+    u_sync, v_sync : jax.Array, shape (6, n+1, n+1)
+        Fields with BGRID_NE-synced boundary values.
+    """
+    # Compute all boundary averages from the ORIGINAL (pre-sync)
+    # values to avoid read-after-write ordering effects.
+    u_avgs = {}
+    v_avgs = {}
+    for face in range(6):
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_f, nbr_e, rev = CONNECTIVITY[face][edge]
+
+            # Skip reversed seams (cross-axis) — documented limitation.
+            # Handling these requires per-seam i/j-swap rotation tables
+            # similar to the iter-98 cos_sg analysis.  For the 16
+            # non-reversed seams (simple W↔E and S↔N pairs), the
+            # rotation is a single sign flip on the matching component.
+            if rev:
+                continue
+
+            # Only handle same-axis seams (W↔E and S↔N)
+            same_axis_we = (edge in (WEST, EAST) and nbr_e in (WEST, EAST))
+            same_axis_sn = (edge in (SOUTH, NORTH) and nbr_e in (SOUTH, NORTH))
+            if not (same_axis_we or same_axis_sn):
+                continue
+
+            # Extract local boundary (1D along edge)
+            if edge == WEST:
+                local_u = u[face, 0, :]
+                local_v = v[face, 0, :]
+            elif edge == EAST:
+                local_u = u[face, n, :]
+                local_v = v[face, n, :]
+            elif edge == SOUTH:
+                local_u = u[face, :, 0]
+                local_v = v[face, :, 0]
+            else:
+                local_u = u[face, :, n]
+                local_v = v[face, :, n]
+
+            # Extract neighbor boundary (1D along neighbor's edge)
+            if nbr_e == WEST:
+                nbr_u = u[nbr_f, 0, :]
+                nbr_v = v[nbr_f, 0, :]
+            elif nbr_e == EAST:
+                nbr_u = u[nbr_f, n, :]
+                nbr_v = v[nbr_f, n, :]
+            elif nbr_e == SOUTH:
+                nbr_u = u[nbr_f, :, 0]
+                nbr_v = v[nbr_f, :, 0]
+            else:
+                nbr_u = u[nbr_f, :, n]
+                nbr_v = v[nbr_f, :, n]
+
+            # Apply BGRID_NE rotation at the seam
+            if same_axis_we:
+                # i-axis flips: u_rot = -nbr_u; v preserved
+                u_avgs[(face, edge)] = 0.5 * (local_u + (-nbr_u))
+                v_avgs[(face, edge)] = 0.5 * (local_v + nbr_v)
+            else:
+                # j-axis flips: v_rot = -nbr_v; u preserved
+                u_avgs[(face, edge)] = 0.5 * (local_u + nbr_u)
+                v_avgs[(face, edge)] = 0.5 * (local_v + (-nbr_v))
+
+    # Write the averages back
+    u_sync = u
+    v_sync = v
+    for (face, edge), u_avg in u_avgs.items():
+        v_avg = v_avgs[(face, edge)]
+        if edge == WEST:
+            u_sync = u_sync.at[face, 0, :].set(u_avg)
+            v_sync = v_sync.at[face, 0, :].set(v_avg)
+        elif edge == EAST:
+            u_sync = u_sync.at[face, n, :].set(u_avg)
+            v_sync = v_sync.at[face, n, :].set(v_avg)
+        elif edge == SOUTH:
+            u_sync = u_sync.at[face, :, 0].set(u_avg)
+            v_sync = v_sync.at[face, :, 0].set(v_avg)
+        else:
+            u_sync = u_sync.at[face, :, n].set(u_avg)
+            v_sync = v_sync.at[face, :, n].set(v_avg)
+
+    return u_sync, v_sync

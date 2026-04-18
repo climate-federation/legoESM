@@ -835,6 +835,99 @@ class TestSynchronizeCgridFluxes:
 
 
 # =========================================================================
+# T9: BGRID_NE vector corner sync (iter-100, Priority 2 scaffold)
+# =========================================================================
+
+class TestBgridNeCornerSync:
+    """Tests for `synchronize_bgrid_ne_corner` — the vector corner sync
+    used by d_sw3 pre-KE component averaging.
+
+    Scope: the 16 non-reversed seams (W↔E and S↔N pairs).  Reversed
+    seams are a documented limitation; the helper leaves them
+    untouched and downstream tests verify this.
+    """
+
+    def test_non_reversed_we_seam_applies_u_sign_flip_interior(self):
+        """At a W↔E non-reversed seam (face 0 W ↔ face 3 E), the
+        u-component flips sign; v is preserved.  After sync the
+        INTERIOR-of-edge values (indices 1..n-1) should equal
+        0.5*(local_u + -nbr_u) and 0.5*(local_v + nbr_v).
+
+        Cube-vertex corners (indices 0 and n) are overwritten by
+        adjacent S/N edge syncs in the current implementation — a
+        documented limitation that requires a separate 3-face cube-
+        vertex pass (similar to `synchronize_corner_scalar`).
+        """
+        import jax.numpy as jnp
+        from legoesm.grids.halo import synchronize_bgrid_ne_corner
+
+        n = 8
+        u = jnp.zeros((6, n+1, n+1))
+        v = jnp.zeros((6, n+1, n+1))
+        u = u.at[0, 0, :].set(1.0)
+        v = v.at[0, 0, :].set(2.0)
+        u = u.at[3, n, :].set(3.0)
+        v = v.at[3, n, :].set(4.0)
+
+        u_sync, v_sync = synchronize_bgrid_ne_corner(u, v, n)
+
+        import numpy as np
+        # Interior of edge (j = 1..n-1) matches the paired-sync formula
+        np.testing.assert_allclose(np.array(u_sync[0, 0, 1:n]), -1.0)
+        np.testing.assert_allclose(np.array(v_sync[0, 0, 1:n]), 3.0)
+        np.testing.assert_allclose(np.array(u_sync[3, n, 1:n]), 1.0)
+        np.testing.assert_allclose(np.array(v_sync[3, n, 1:n]), 3.0)
+
+    def test_non_reversed_sn_seam_applies_v_sign_flip_interior(self):
+        """At a S↔N non-reversed seam (face 0 S ↔ face 5 N), the
+        v-component flips sign; u is preserved.  Interior values only
+        (cube-vertex corners are overwritten by adjacent W/E syncs).
+        """
+        import jax.numpy as jnp
+        from legoesm.grids.halo import synchronize_bgrid_ne_corner
+
+        n = 8
+        u = jnp.zeros((6, n+1, n+1))
+        v = jnp.zeros((6, n+1, n+1))
+        u = u.at[0, :, 0].set(10.0)
+        v = v.at[0, :, 0].set(20.0)
+        u = u.at[5, :, n].set(30.0)
+        v = v.at[5, :, n].set(40.0)
+
+        u_sync, v_sync = synchronize_bgrid_ne_corner(u, v, n)
+
+        import numpy as np
+        np.testing.assert_allclose(np.array(u_sync[0, 1:n, 0]), 20.0)
+        np.testing.assert_allclose(np.array(v_sync[0, 1:n, 0]), -10.0)
+        np.testing.assert_allclose(np.array(u_sync[5, 1:n, n]), 20.0)
+        np.testing.assert_allclose(np.array(v_sync[5, 1:n, n]), 10.0)
+
+    def test_reversed_seams_untouched_at_edge_interior(self):
+        """At reversed seams (e.g. face 1 SOUTH ↔ face 5 EAST), the
+        helper leaves INTERIOR-of-edge boundary values unchanged
+        (documented limitation).  Cube-vertex corners at the endpoints
+        of reversed edges can still be modified by adjacent non-
+        reversed edges that include those corners — that is expected
+        behaviour and is tested separately.
+        """
+        import jax.numpy as jnp
+        from legoesm.grids.halo import synchronize_bgrid_ne_corner
+
+        n = 8
+        u = jnp.zeros((6, n+1, n+1))
+        v = jnp.zeros((6, n+1, n+1))
+        u = u.at[1, :, 0].set(100.0)  # face 1 south (reversed to face 5 east)
+        v = v.at[1, :, 0].set(200.0)
+
+        u_sync, v_sync = synchronize_bgrid_ne_corner(u, v, n)
+
+        import numpy as np
+        # Interior of face 1 SOUTH (indices 1..n-1) should be unchanged
+        np.testing.assert_allclose(np.array(u_sync[1, 1:n, 0]), 100.0)
+        np.testing.assert_allclose(np.array(v_sync[1, 1:n, 0]), 200.0)
+
+
+# =========================================================================
 # T9: Packed halo duogrid post-processing (iter-84)
 # =========================================================================
 
