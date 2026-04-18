@@ -1322,55 +1322,116 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
             "was rewired (update this test) or the dispatch is broken.",
         )
 
-    def test_d_sw5_iterated_laplacian_uses_mode_edge_halo_gap_documented(self):
-        """Iter-132 (FB-path fidelity gap documentation): lock in the
-        known `_d_sw5_corner_divergence` halo gap.
+    def test_d_sw5_iterated_laplacian_halo_gap_code_and_note_consistency(self):
+        """Iter-132 followup (FB-path fidelity gap): bind the source
+        code to the fidelity note so no partial fix can slip through.
 
-        In the FV3 oracle at sw_core.F90:1737-1785, the nord-iteration
-        Laplacian loop accesses `divg_d(i+1,j)` etc. at halo indices
-        populated by MPI `mpp_update_domains` before `d_sw5` is called.
-        The duogrid branch (`fill_c=False` at sw_core.F90:1740-1742)
-        relies solely on that MPI halo + the kinked-extended remap.
+        Gap: `_d_sw5_corner_divergence` nord-iteration Laplacian loop
+        at fv3_sw_core.py uses three `jnp.pad(..., mode='edge')` calls
+        on (divg_d, divg_u_met, divg_v_met) where Fortran sw_core.F90:
+        1737-1785 relies on MPI halo + duogrid remap.
 
-        Python's single-process implementation uses
-        `jnp.pad(..., mode='edge')` for the `divg_d`, `divg_u_met`,
-        `divg_v_met` halo in the loop.  This agrees with Fortran ONLY
-        for boundary-parallel gradients; at cube vertices and for
-        cross-face gradients it is an O(1) deviation from the Fortran
-        halo values.
+        A proper port must replace ALL THREE pads with cross-face halo
+        exchange.  A halfway fix — e.g., replacing only one pad, or
+        replacing all three while leaving the fidelity note — would
+        leave the gap partially open and the documentation
+        inconsistent with the code.
 
-        Impact is limited to the FB chain (fv3_forward_backward_step,
-        fv3_fb_sw_step), which is experimental/unstable at C36.
-        Production A-L path uses a different divergence damping at
-        operators_cdgrid.py:1542-1552 and does not reach this loop.
-
-        This test asserts the fidelity note is present in the source
-        so a future port of proper cubed-sphere corner-staggered halo
-        exchange must update both the code and the note together.
+        This test enforces a bidirectional binding:
+          - If the fidelity note (three required phrases) IS present,
+            there MUST be exactly 3 `mode='edge'` pads inside the
+            nord-iteration loop.
+          - If the note is REMOVED (claiming the gap is closed), there
+            MUST be ZERO `mode='edge'` pads in the Laplacian loop
+            (the Fortran-faithful replacement uses proper halo exchange).
+          - Mixing the two states (some pads removed but others
+            remain; note removed but pads remain; pads replaced but
+            note remains) FAILS, forcing the author to finish the
+            port atomically.
         """
+        import ast
         import inspect
         from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
 
         src = inspect.getsource(_d_sw5_corner_divergence)
-        self.assertIn(
-            "mpp_update_domains", src,
-            "The `_d_sw5_corner_divergence` iterated-Laplacian "
-            "mode='edge' halo gap note was removed.  Either port "
-            "proper cubed-sphere corner-staggered halo exchange for "
-            "`divg_d` OR restore the note.",
+
+        # Detect note presence via the three required phrases.
+        note_phrases = ("mpp_update_domains", "fill_c=False", "experimental")
+        note_phrases_present = sum(1 for p in note_phrases if p in src)
+        note_present = note_phrases_present == len(note_phrases)
+        note_partial = 0 < note_phrases_present < len(note_phrases)
+
+        self.assertFalse(
+            note_partial,
+            f"Fidelity note is partially removed: "
+            f"{note_phrases_present}/{len(note_phrases)} phrases "
+            f"({', '.join(p for p in note_phrases if p not in src)} "
+            f"missing).  Either restore the full note OR remove it "
+            f"entirely along with all three mode='edge' pads.",
         )
-        self.assertIn(
-            "fill_c=False", src,
-            "The fidelity note must cite the Fortran duogrid-branch "
-            "gate (sw_core.F90:1740-1742) that makes Python's "
-            "mode='edge' approximation's inadequacy duogrid-specific.",
+
+        # Count `mode='edge'` pads inside the NORD-ITERATION LOOP
+        # specifically — not the whole function.  There are other
+        # mode='edge' pads in the nord==0 branch and at the top of
+        # the function that are independent from this gap.
+        tree = ast.parse(src).body[0]  # FunctionDef
+
+        def _count_mode_edge_pads(node):
+            """Count `jnp.pad(..., mode='edge')` calls in subtree."""
+            n = 0
+            for sub in ast.walk(node):
+                if not (isinstance(sub, ast.Call)
+                        and isinstance(sub.func, ast.Attribute)
+                        and sub.func.attr == "pad"):
+                    continue
+                for kw in sub.keywords:
+                    if (kw.arg == "mode"
+                            and isinstance(kw.value, ast.Constant)
+                            and kw.value.value == "edge"):
+                        n += 1
+                        break
+            return n
+
+        # Find the `for _it in range(nord):` loop.
+        laplacian_loops = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.For)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_it"
+        ]
+        self.assertEqual(
+            len(laplacian_loops), 1,
+            f"Expected exactly one `for _it in range(nord):` loop in "
+            f"`_d_sw5_corner_divergence`, found {len(laplacian_loops)}. "
+            f"If the loop was refactored, update this test to locate "
+            f"the iterated-Laplacian section by its new name.",
         )
-        self.assertIn(
-            "experimental", src,
-            "The note must document that the gap only affects the "
-            "experimental FB path (production A-L path uses a "
-            "different divergence damping).",
-        )
+        mode_edge_pads = _count_mode_edge_pads(laplacian_loops[0])
+
+        expected_pads_when_gap_open = 3  # divg_d, divg_u_met, divg_v_met
+        if note_present:
+            self.assertEqual(
+                mode_edge_pads, expected_pads_when_gap_open,
+                f"Fidelity note is PRESENT but "
+                f"`mode='edge'` pad count = {mode_edge_pads} ≠ "
+                f"{expected_pads_when_gap_open}.  Either (a) restore "
+                f"the missing pads if someone partially removed them, "
+                f"or (b) if the halo gap has been closed by porting "
+                f"proper corner-staggered halo exchange, REMOVE the "
+                f"fidelity note (the three phrases: "
+                f"{note_phrases}) to indicate completion.",
+            )
+        else:
+            # Note absent → the gap is claimed closed; ZERO mode='edge'
+            # pads must remain in the Laplacian section of the function.
+            self.assertEqual(
+                mode_edge_pads, 0,
+                f"Fidelity note is ABSENT (claim: halo gap closed), "
+                f"but {mode_edge_pads} `mode='edge'` pad(s) remain.  "
+                f"A proper port must replace ALL `mode='edge'` pads "
+                f"with cross-face halo exchange.  Either finish the "
+                f"port or restore the fidelity note.",
+            )
 
     def test_rsin2_corner_matches_fortran_at_interior(self):
         """Iter-99: lock in `cdgrid.rsin2_corner` fidelity at interior
