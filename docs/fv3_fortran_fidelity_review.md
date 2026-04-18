@@ -214,6 +214,18 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-164 (2026-04-19)**: session pause checkpoint at 123 commits.
+  Required evaluations snapshot (rerun):
+    - W2 (C36 1d): L2=1.53e-03, Linf=4.07e-03
+    - W5 (C36 1d): mass drift=1.42e-05
+    - Cosine bell (C36 1d): L1=1.20e-01, L2=1.17e-01, Linf=1.23e-01
+    - Ocean rest state (full matrix): 12/12 PASS
+  Total:3 atmosphere SW tests PASS, 0 FAIL.  No numeric regression
+  from iter-112 baseline after 123 commits.  Stopping condition
+  remains unmet due to architectural W2 cube-face imprint and
+  FB C36 stability — infrastructure-level items beyond iteration
+  scope.
+
 - **iter-162/163 (2026-04-19)**: fixed a pre-existing test failure
   that had been broken since at least the branch baseline
   (a3a1d54).  `test_legacy_unsupported_f64_constant` asserted
