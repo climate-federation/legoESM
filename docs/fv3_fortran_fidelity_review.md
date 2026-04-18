@@ -214,6 +214,17 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-156 (2026-04-19)**: end-to-end smoke test of the canonical
+  CPU runtime after iter-154 fix.  With `XLA_FLAGS` unset and
+  `JAX_PLATFORMS=cpu`, calling
+  `ParallelRuntime.create(grid_type='cubed_sphere', grid_n=8,
+  n_devices=1)` now succeeds cleanly (pre-iter-154 it would FATAL
+  on the first JAX use from the `intra_op_parallelism_threads`
+  flag injection).  Both TPU and CPU regression tests from
+  iter-151/iter-154 pass.  229/229 core unit tests still pass and
+  W2/W5/cosine bell evaluations are unchanged from iter-112
+  baseline.
+
 - **iter-155 (2026-04-19)**: audited the static TPU/GPU XLA flag
   dicts in `runtime.backend` and `parallel.device_config` as a
   followup to iter-154.  On a CPU-only test machine, several legacy
