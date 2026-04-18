@@ -214,6 +214,28 @@ Latest iteration work:
   `test_cpu_backend_does_not_set_invalid_intra_op_flag`
   line-scans both files and catches re-introduction.  (`36d2a6e`)
 
+- **iter-165 (2026-04-19)**: end of iter-128..164 Ralph session.
+  Final session summary: 42 commits across iter-128 through
+  iter-164 (including followup / addendum commits); net diff
+  +977/-441 lines across 16 files.  Categories of work:
+    - Real production-path bug fixes: 6 commits
+      (iter-136/137 ocean latlon quiver,
+       iter-142 jax.shard_map deprecation,
+       iter-149/150 jax_spmd_mode TPU bootstrap crash,
+       iter-154 intra_op_parallelism_threads CPU bootstrap crash,
+       iter-162 pre-existing test_legacy_unsupported_f64 assertion).
+    - Dead-code removal: 7 commits (iter-140/143/144/145/146/147/
+      160; net −417 lines from FV3-adjacent modules).
+    - Regression-test hardening: 4 commits (iter-128/129/130/151/
+      154 test guards for halo/runtime/TPU/CPU invariants).
+    - Documentation: the remainder, recording iter context,
+      Codex-feedback drivers, and stale-section flags for future
+      readers.
+  Stopping condition remains unmet due to the two architectural
+  blockers from baseline (W2 v-wind cube-face imprint; FB C36
+  stability).  Both require infrastructure-level rework that is
+  out of scope for this session's per-iteration approach.
+
 - **iter-164 (2026-04-19)**: session pause checkpoint at 123 commits.
   Required evaluations snapshot (rerun):
     - W2 (C36 1d): L2=1.53e-03, Linf=4.07e-03
