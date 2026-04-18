@@ -817,6 +817,89 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                         "_deln_flux fy differs from baseline when corner "
                         "blocks poisoned — corner ghosts used somewhere")
 
+    def test_del6_vt_flux_routes_halo_through_duogrid_when_active(self):
+        """Iter-78: `_del6_vt_flux` accepted a `use_duogrid` parameter
+        but never used it — its halo was pinned to `interp_offsets`.
+        After the iter-78 fix, `use_duogrid=True` must actually route
+        through the duogrid remap.
+        """
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core import fv3_sw_core as fv3_sw_core_mod
+
+        n = 8
+        grid_dg = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid_dg = create_cubed_sphere_cdgrid(grid_dg)
+
+        q = jnp.sin(jnp.linspace(0, 3.14, n))[None, None, :] * jnp.ones((6, n, n))
+
+        calls = []
+        real_pad_halo = fv3_sw_core_mod.pad_halo
+
+        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+            calls.append(
+                ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
+                 'duogrid_none' if duogrid is None else 'duogrid_set'))
+            return real_pad_halo(q, halo=halo,
+                                 interp_offsets=interp_offsets,
+                                 duogrid=duogrid)
+
+        with mock.patch.object(fv3_sw_core_mod, 'pad_halo', recording):
+            fv3_sw_core_mod._del6_vt_flux(
+                1, 1e-6, q, cdgrid_dg, use_duogrid=True)
+
+        self.assertTrue(len(calls) > 0, "_del6_vt_flux made no halo exchanges")
+        for kw in calls:
+            self.assertEqual(
+                kw, ('interp_offsets_none', 'duogrid_set'),
+                f"_del6_vt_flux halo exchange used {kw} instead of "
+                f"duogrid remap when use_duogrid=True")
+
+    def test_deln_flux_routes_halo_through_duogrid_when_active(self):
+        """Iter-78: `_deln_flux` previously pinned its internal halo to
+        `interp_offsets=grid.halo_interp_offsets` even when duogrid was
+        active on the grid.  After the iter-78 fix, the halo should route
+        through duogrid when available.  Verify by mock-patching
+        `pad_halo` and recording which kwarg combinations are used.
+        """
+        from unittest import mock
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.core import fv_tp_2d as fv_tp_2d_mod
+
+        n = 8
+        grid_dg = create_cubed_sphere(n, use_duogrid=True)
+        cdgrid_dg = create_cubed_sphere_cdgrid(grid_dg)
+
+        q = jnp.ones((6, n, n)) * 10.0
+        fx = jnp.zeros((6, n + 1, n))
+        fy = jnp.zeros((6, n, n + 1))
+
+        calls = []
+        real_pad_halo = fv_tp_2d_mod.pad_halo
+
+        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+            calls.append(
+                ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
+                 'duogrid_none' if duogrid is None else 'duogrid_set'))
+            return real_pad_halo(q, halo=halo,
+                                 interp_offsets=interp_offsets,
+                                 duogrid=duogrid)
+
+        with mock.patch.object(fv_tp_2d_mod, 'pad_halo', recording):
+            fv_tp_2d_mod._deln_flux(1, 0.001, q, fx, fy, cdgrid_dg)
+
+        # When duogrid is active, every halo exchange inside _deln_flux
+        # must use the duogrid remap (duogrid=dg, interp_offsets=None).
+        # Pre-iter-78 code would have used (interp_offsets=set, duogrid=None).
+        self.assertTrue(len(calls) > 0, "_deln_flux made no halo exchanges")
+        for kw in calls:
+            self.assertEqual(
+                kw, ('interp_offsets_none', 'duogrid_set'),
+                f"_deln_flux halo exchange used {kw} instead of "
+                f"duogrid remap on a duogrid-active grid")
+
 
 class TestSupergridMetrics(unittest.TestCase):
     """Iter-44 added rdxa/rdya from supergrid as FV3-faithful metrics.
