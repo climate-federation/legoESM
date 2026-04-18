@@ -291,17 +291,20 @@ class LatLonCGridOceanModel:
             )
         return cfl
 
-    def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None):
+    def tendencies(self, state: LatLonCGridOceanState, surface_forcing=None,
+                   sponge=None):
         """Compute baroclinic tendencies."""
         return latlon_cgrid_ocean_baroclinic_tendencies(
             state, self.grid, self.z_coord, self.config,
             physics_fn=self._physics_fn,
             surface_forcing=surface_forcing,
+            sponge=sponge,
         )
 
     @partial(jax.jit, static_argnums=(0,))
     def step(self, state: LatLonCGridOceanState, dt: float,
-             freshwater=None, surface_forcing=None) -> LatLonCGridOceanState:
+             freshwater=None, surface_forcing=None,
+             sponge=None) -> LatLonCGridOceanState:
         """Advance one time step using split-explicit stepping.
 
         Parameters
@@ -325,7 +328,7 @@ class LatLonCGridOceanModel:
         mask_3d = state.land_mask.data[..., jnp.newaxis]
 
         # 1. Baroclinic tendencies (non-Coriolis)
-        tend = self.tendencies(state, surface_forcing)
+        tend = self.tendencies(state, surface_forcing, sponge=sponge)
 
         # 2. Update tracers
         T_new = state.T.data + dt * tend.dT_dt.data

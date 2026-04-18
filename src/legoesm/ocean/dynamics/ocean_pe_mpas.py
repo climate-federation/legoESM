@@ -74,6 +74,7 @@ def mpas_ocean_baroclinic_tendencies(
     freshwater: FreshwaterForcing | None = None,
     physics_fn=None,
     surface_forcing=None,
+    sponge=None,
 ) -> MPASOceanTendencies:
     """Compute baroclinic (slow) tendencies for MPAS ocean.
 
@@ -85,6 +86,8 @@ def mpas_ocean_baroclinic_tendencies(
     config : MPASOceanConfig
     freshwater : FreshwaterForcing or None
         Freshwater forcing. If None, no freshwater terms are applied.
+    sponge : SpongeForcing, optional
+        Sponge layer relaxation fields.
 
     Returns
     -------
@@ -246,6 +249,12 @@ def mpas_ocean_baroclinic_tendencies(
 
     du_dt_3d = (-grad_B + pv_flux + visc + vert_adv_u) * edge_mask[:, jnp.newaxis]
 
+    # Bottom drag on full velocity (not perturbation) — the ocean floor
+    # sees the total flow.  Consistent with lat-lon C-grid and MOM6.
+    if config.bottom_drag_r > 0:
+        du_dt_3d = du_dt_3d.at[:, -1].add(
+            -config.bottom_drag_r * u_3d[:, -1] * edge_mask)
+
     # ---- Tracer tendencies (diffusion + physics only) ----
     # Horizontal AND vertical tracer advection are handled in the step()
     # function using barotropic-averaged transport (Hallberg 1997, #102, #145).
@@ -308,6 +317,18 @@ def mpas_ocean_baroclinic_tendencies(
         dz_0 = h_k[:, 0]  # top layer thickness (nCells,)
         dS_fw = virtual_salt_flux(freshwater, config.S_ref, dz_0, config.rho_0)
         dS_dt_3d = dS_dt_3d.at[:, 0].add(dS_fw * mask)
+
+    # ---- Sponge layer relaxation ----
+    if sponge is not None:
+        gamma_3d = sponge.gamma[:, jnp.newaxis]  # (nCells, 1)
+        dT_dt_3d = dT_dt_3d + gamma_3d * (sponge.T_ref - T_3d) * mask[:, jnp.newaxis]
+        dS_dt_3d = dS_dt_3d + gamma_3d * (sponge.S_ref - S_3d) * mask[:, jnp.newaxis]
+        # Edge velocity sponge (if reference velocity provided)
+        if sponge.u_ref is not None:
+            c1, c2 = mesh.cellsOnEdge[0], mesh.cellsOnEdge[1]
+            gamma_edge = 0.5 * (sponge.gamma[c1] + sponge.gamma[c2])
+            gamma_edge_3d = gamma_edge[:, jnp.newaxis]
+            du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref - u_3d) * edge_mask[:, jnp.newaxis]
 
     return MPASOceanTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",

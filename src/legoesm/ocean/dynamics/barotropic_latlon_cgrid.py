@@ -252,6 +252,17 @@ def barotropic_substeps_latlon_cgrid(
         )
         V_bar_new = (V_bar_c + dt_s * (-f_v * U_new_at_v - g * deta_dy)) * v_mask
 
+        # Bottom drag on barotropic velocity: -r * U_bar * dz_bot / H_total.
+        # The ocean floor friction acts on the total flow; the barotropic
+        # component must be damped during substeps, not just once per
+        # baroclinic step.
+        if config.bottom_drag_r > 0:
+            dz_bot = z_coord.dz_ref[-1]
+            drag_u = 1.0 - dt_s * config.bottom_drag_r * dz_bot / jnp.maximum(H_u, 1e-10)
+            drag_v = 1.0 - dt_s * config.bottom_drag_r * dz_bot / jnp.maximum(H_v, 1e-10)
+            U_bar_new = U_bar_new * drag_u
+            V_bar_new = V_bar_new * drag_v
+
         # Optional Laplacian damping on eta (flux-form: conservative)
         if config.barotropic_diffusion_alpha > 0.0:
             grad_x = gradient_x_cgrid(eta_new * mask, grid)

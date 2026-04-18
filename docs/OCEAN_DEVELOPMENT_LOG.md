@@ -4,6 +4,45 @@ Running log of ocean dynamics work — what we tried, what worked, what didn't, 
 
 ---
 
+## 2026-04-18: Issue #198 — Bottom Drag and Sponge Layers (Closed)
+
+### Bottom drag fixes
+
+1. **Baroclinic tendency: u_prime → u (lat-lon)**: Bottom drag was applying to perturbation velocity `u_prime`, but the ocean floor sees the total flow. Changed to `u` (full velocity), consistent with MPAS physics pipeline and MOM6.
+
+2. **Barotropic substep drag (both grids)**: Added `-r * U_bar * dz_bot / H_total` inside the barotropic substep loop. This continuously damps the barotropic mode during substeps, rather than relying on a single drag application per baroclinic step. Uses explicit treatment (MOM6 uses implicit `Cg_u`, acceptable for deep-ocean experiments).
+
+3. **MPAS config**: Added `bottom_drag_r` to `MPASOceanConfig` for consistency with lat-lon. Applied as direct tendency on full velocity in `ocean_pe_mpas.py`.
+
+### Sponge layer implementation
+
+Created `src/legoesm/ocean/sponge.py` with:
+- `SpongeForcing` NamedTuple: `gamma`, `T_ref`, `S_ref`, optional `u_ref`/`v_ref`
+- `compute_sponge_gamma_latlon()`: quadratic ramp from 0 to 1/tau near walls
+- `compute_sponge_gamma_mpas()`: same for Voronoi meshes
+
+Sponge applied as a tendency in the baroclinic step (no barotropic sponge — matches MOM6 ALE_sponge):
+```
+dT/dt += gamma * (T_ref - T)
+du/dt += gamma_face * (u_ref - u)
+```
+
+Threaded `sponge` parameter through `step()` → `tendencies()` → PE functions on both grids.
+
+### Files changed
+
+- `ocean_pe_latlon_cgrid.py` — u_prime → u for drag; sponge application
+- `ocean_pe_mpas.py` — bottom_drag_r + sponge wired
+- `barotropic_latlon_cgrid.py` — bottom drag in substep loop
+- `barotropic_mpas.py` — bottom drag in substep loop
+- `ocean_model_latlon_cgrid.py` — sponge threaded through step/tendencies
+- `ocean_model_mpas.py` — sponge threaded through step/tendencies
+- `mpas_config.py` — bottom_drag_r field added
+- `src/legoesm/ocean/sponge.py` — new module
+- `tests/ocean/unit/test_bottom_drag_sponge.py` — 9 CI tests
+
+---
+
 ## 2026-04-18: Issue #189 — Biharmonic Smagorinsky Viscosity (Closed)
 
 ### Summary

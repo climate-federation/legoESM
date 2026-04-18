@@ -220,6 +220,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     config: LatLonCGridOceanConfig = LatLonCGridOceanConfig(),
     physics_fn=None,
     surface_forcing=None,
+    sponge=None,
 ) -> LatLonCGridOceanTendencies:
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -231,6 +232,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     config : LatLonCGridOceanConfig
     physics_fn : callable, optional
     surface_forcing : optional
+    sponge : SpongeForcing, optional
+        Sponge layer relaxation fields (gamma, T_ref, S_ref, u_ref, v_ref).
 
     Returns
     -------
@@ -489,8 +492,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_dt = dv_dt - smag_v
 
     if config.bottom_drag_r > 0:
-        du_dt = du_dt.at[..., -1].add(-config.bottom_drag_r * u_prime[..., -1])
-        dv_dt = dv_dt.at[..., -1].add(-config.bottom_drag_r * v_prime[..., -1])
+        # Drag acts on the full velocity (not perturbation) — the ocean
+        # floor sees the total flow.  Consistent with MPAS and MOM6.
+        du_dt = du_dt.at[..., -1].add(-config.bottom_drag_r * u[..., -1])
+        dv_dt = dv_dt.at[..., -1].add(-config.bottom_drag_r * v[..., -1])
 
     if config.A_v > 0 and u.shape[-1] >= 2:
         jac_v_u = jnp.maximum(interp_cell_to_uface(J)[..., jnp.newaxis], 1e-10)
@@ -527,6 +532,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dv_dt = dv_dt + _interp_to_v_points(phys.dv_dt.data)
         dT_dt = dT_dt + phys.dT_dt.data
         dS_dt = dS_dt + phys.dS_dt.data
+
+    # --- 10c. Sponge layer relaxation ---
+    if sponge is not None:
+        gamma_3d = sponge.gamma[..., jnp.newaxis]  # (n_lat, n_lon, 1)
+        dT_dt = dT_dt + gamma_3d * (sponge.T_ref - T)
+        dS_dt = dS_dt + gamma_3d * (sponge.S_ref - S)
+        if sponge.u_ref is not None:
+            gamma_u = interp_cell_to_uface(sponge.gamma)[..., jnp.newaxis]
+            du_dt = du_dt + gamma_u * (sponge.u_ref - u)
+        if sponge.v_ref is not None:
+            gamma_v = _interp_to_v_points(sponge.gamma)[..., jnp.newaxis]
+            dv_dt = dv_dt + gamma_v * (sponge.v_ref - v)
 
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d

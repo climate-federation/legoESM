@@ -171,6 +171,7 @@ class MPASOceanModel:
         state: MPASOceanState,
         freshwater: FreshwaterForcing | None = None,
         surface_forcing=None,
+        sponge=None,
     ) -> MPASOceanTendencies:
         """Compute baroclinic tendencies."""
         return mpas_ocean_baroclinic_tendencies(
@@ -178,6 +179,7 @@ class MPASOceanModel:
             freshwater=freshwater,
             physics_fn=self._physics_fn,
             surface_forcing=surface_forcing,
+            sponge=sponge,
         )
 
     @partial(jax.jit, static_argnums=(0,))
@@ -187,6 +189,7 @@ class MPASOceanModel:
         dt: float,
         freshwater: FreshwaterForcing | None = None,
         surface_forcing=None,
+        sponge=None,
     ) -> MPASOceanState:
         """Advance one full timestep (baroclinic + barotropic).
 
@@ -213,7 +216,8 @@ class MPASOceanModel:
 
         # 1. Compute baroclinic tendencies
         tend = self.tendencies(state, freshwater=freshwater,
-                               surface_forcing=surface_forcing)
+                               surface_forcing=surface_forcing,
+                               sponge=sponge)
 
         # 2. Update tracers (forward Euler)
         T_new = state.T.data + dt * tend.dT_dt.data
